@@ -37,6 +37,63 @@ Companion living doc: **`Docs/Stride_GS_App_Build_Status.md`** — current sessi
 
 ---
 
+## Repository Structure
+
+After the session 59 cleanup there are **exactly two git repositories** in this workspace, each with one clear job. If you see a third, something is wrong.
+
+```
+C:/Users/expre/Dropbox/Apps/GS Inventory/        ← PARENT REPO (source of truth)
+├── .git/                                         ← git init (local-only, no remote yet)
+├── .gitignore                                    ← excludes dist/, node_modules/, secrets,
+│                                                    stride-client-inventory/ rollout tooling,
+│                                                    *.tsbuildinfo, *.tmp.*, *.backup.*
+├── CLAUDE.md                                     ← this file
+├── Docs/                                         ← hot + cold docs, archive, build plans
+├── AppScripts/
+│   ├── stride-api/StrideAPI.gs                   ← TRACKED by parent (main backend)
+│   ├── Consolidated Billing Sheet/               ← TRACKED
+│   ├── stax-auto-pay/                            ← TRACKED
+│   ├── QR Scanner/                               ← TRACKED
+│   ├── stride-client-inventory/                  ← IGNORED by parent (see note below)
+│   └── ...                                       ← other backend projects tracked
+└── stride-gs-app/                                ← React app source, fully tracked by parent
+    ├── src/                                      ← tracked (~140 files after cleanup)
+    ├── public/                                   ← tracked (CNAME, favicon, icons)
+    ├── scripts/                                  ← tracked (build orchestrator + entry guard)
+    ├── supabase/migrations/                      ← tracked (DT Phase 1a+ migrations)
+    ├── index.html                                ← tracked (VITE ENTRY — don't corrupt)
+    ├── package.json                              ← tracked
+    ├── tsconfig*.json, vite.config.ts            ← tracked
+    └── dist/                                     ← NESTED REPO #2 (see below), parent IGNORES
+        └── .git/                                 ← SEPARATE git repo, subtree deploy target
+```
+
+### The only nested repo that should exist
+
+**`stride-gs-app/dist/.git`** is a standalone git repository used as a GitHub Pages deploy target:
+
+- **Remote:** `https://github.com/Stride-dotcom/Stride-GS-app.git`
+- **Branch:** `main`
+- **Content:** built vite output (`index.html` + `assets/*.js` + `assets/*.css` + `CNAME`)
+- **Lifecycle:** overwritten on every React deploy. No feature branches, no PRs, no source code.
+- **Why separate:** GitHub Pages serves whatever is on the `main` branch at the repo root. Rather than maintain a `gh-pages` branch in the source repo with subtree push gymnastics, the built output lives in its own standalone repo and gets force-pushed as a flat commit. Clean, simple, audit trail via "Deploy:" commit messages.
+
+**Do not** `git init` inside `stride-gs-app/` or `AppScripts/stride-client-inventory/`. If you see a `.git/` directory appear in either location, it's a regression — delete it.
+
+### Important: `AppScripts/stride-client-inventory/` is intentionally ignored by the parent repo
+
+The rollout tooling directory is a **local master** for `npm run rollout`. The source of truth for each client's bound script lives in the client spreadsheet itself (pushed there via `clasp push`/`push-cb` equivalents). Editing a file under `stride-client-inventory/src/` and running rollout overwrites all 6 clients with that content — the local copy is ephemeral tooling input, not authoritative source.
+
+If you want that directory version-controlled in the future, that's a separate decision. For now it's excluded via `.gitignore` at the parent repo root, which is why `Emails.gs` edits don't show up in `git status` even though they reach production via rollout.
+
+### Historical note — why this structure exists
+
+Before session 59 there were **four** git repos stacked (parent, `stride-gs-app/`, `stride-gs-app/dist/`, `AppScripts/stride-client-inventory/`). The nested `stride-gs-app/.git` had a **sparse** HEAD tracking ~18 files while the working tree had ~200+ real source files that were orphaned from any git history. This caused the session-58 silent-build-failure regression (see `Docs/Archive/Session_History.md` session 59) where three weeks of React source changes never actually reached production.
+
+The session-59 cleanup deleted the two junk nested repos (`stride-gs-app/.git`, `AppScripts/stride-client-inventory/.git`), unified everything under the parent repo, added the build safeguards (see below), and left `stride-gs-app/dist/.git` as the only nested repo because it serves a well-defined single purpose. The `feat/dt-phase1a` branch on `github.com/Stride-dotcom/Stride-GS-app` contains the full history of the old nested repo for forensics — commits `d384e48` (DT Phase 1b), `1cd8034` (build safeguards), `6f36457` (orphaned src/ restoration).
+
+---
+
 ## Rules for Claude
 
 ### Must-do
@@ -80,7 +137,7 @@ All commands run from: `AppScripts/stride-client-inventory/` (except React, whic
 | Task Board | `npm run push-taskboard` | — |
 | Stax Auto Pay | `npm run push-stax` | — |
 | Email templates | `npm run push-templates` | `npm run refresh-caches` |
-| React app | (from `stride-gs-app/`) `npx tsc --noEmit && npm run build` then `cd dist && git add -A && git commit -m "Deploy: ..." && git push origin main --force` | GitHub Pages auto (CDN 1-5 min; hard-refresh to verify) |
+| React app | (from `stride-gs-app/`) `npm run build` (orchestrator: verify-entry → tsc → vite → sanity checks) then `cd dist && git add -A && git commit -m "Deploy: ..." && git push origin main --force` | GitHub Pages auto (CDN 1-5 min; hard-refresh to verify) |
 | Supabase migrations | Apply via MCP tool (see below) — no manual SQL editor needed | MCP `apply_migration` is the deploy |
 
 **All-at-once after a big session:**
@@ -115,6 +172,34 @@ Supabase schema changes go through the MCP tool — NOT the Supabase SQL Editor 
 ### How to spot a stale deployment bug
 If a remote admin or API call returns `ok: true` but the expected side-effect is missing (new column not added, new payload field ignored, new response field missing), **first check: did I run `deploy-*` after the last `push-*`?** 95% of the time that's the answer.
 
+### React build safeguards (session 59)
+
+`npm run build` in `stride-gs-app/` now routes through `scripts/build.js` — a wrapper that replaces the raw `tsc -b && vite build` chain with four phases and two sanity checks. It exists because session 58 shipped three sessions worth of React changes into production as **stale echo bundles** (see `Docs/Archive/Session_History.md` session 59 for the forensics). The safeguards make that exact failure mode impossible to recur silently.
+
+**Phases:**
+
+1. **verify-entry** (`scripts/verify-entry.js`) — reads `stride-gs-app/index.html` and rejects the build if it contains any `<script src="/assets/...">` tag (a built bundle reference written back into the source entry) OR if it's missing `<script type="module" src="/src/main.tsx">` (the React source entry). The session-58 regression was a built asset written into source `index.html` by some checkout operation — vite then treated the built asset as the entry, transformed 6 modules instead of ~1,875, and echoed the previous bundle.
+2. **tsc -b** — TypeScript project check. Exits non-zero on type errors.
+3. **vite build** — actual bundle, captured stdout so the orchestrator can parse it.
+4. **post-build sanity checks:**
+   - **Module-count floor (500)** — parses "N modules transformed" from vite's output. Real build ~1,875. Session-58 echo = 6. Anything under 500 fails the build.
+   - **Bundle-size floor (500 KB)** — stats the biggest `.js` file in `dist/assets/`. Real bundle ~1.4 MB. Catches stub/empty outputs.
+
+**Escape hatch:** `npm run build:raw` runs the original `tsc -b && vite build` without the safeguards. Only use it if you're absolutely sure the guards are a false positive — the normal path is `npm run build`. Any use of `build:raw` re-opens the session-58 vulnerability, so don't make it a habit.
+
+**Testing the safeguards** (all three tested in session 59 and verified):
+```bash
+# Happy path — clean build should pass
+npm run build                            # exit 0, 1,875 modules, 1.4 MB
+
+# Failure path — break index.html with a built-asset reference
+# (the verify-entry script will reject it with a clear banner)
+npm run build                            # exit 1
+
+# Recovery — restore index.html
+npm run build                            # exit 0 again
+```
+
 ---
 
 ## Architecture
@@ -138,29 +223,82 @@ Supabase  →  read cache mirror of 6 entity types + failure tracking
 
 ## File Structure (compact)
 
-All scripts under `AppScripts/`:
+Top-level layout, all under the parent repo except `stride-gs-app/dist/` which is the separate subtree deploy repo (see Repository Structure above):
 
 ```
-AppScripts/
-├── stride-client-inventory/src/    — 13 .gs modular client files (deploy: npm run rollout)
-│   ├── Code.gs AutocompleteDB.gs Billing.gs Emails.gs Import.gs
-│   ├── RemoteAdmin.gs Repairs.gs Shipments.gs Tasks.gs Transfer.gs
-│   ├── Triggers.gs Utils.gs WillCalls.gs
-│   └── admin/                      — rollout tools (Node.js): rollout.mjs, sync-clients.mjs,
-│                                     verify-triggers.mjs, run-remote.mjs, setup-auth.mjs,
-│                                     update-deployments.mjs, .credentials.json, clients.json
-├── stride-api/StrideAPI.gs         — standalone API for React (deploy: push-api + deploy-api)
-├── Consolidated Billing Sheet/     — 11 .js files (deploy: push-cb)
-├── Master Price list script.txt    — (deploy: push-master)
-├── task board script.txt           — (deploy: push-taskboard)
-├── QR Scanner/                     — 5 files (deploy: push-scanner)
-├── stax-auto-pay/StaxAutoPay.gs    — (deploy: push-stax)
-└── Email Campaign App/             — stridecampaignv2.5.gs, separate project
+GS Inventory/
+├── AppScripts/                             ← all Google Apps Script backends
+│   ├── stride-api/StrideAPI.gs             — main API, backs React app (push-api + deploy-api)
+│   ├── stride-client-inventory/src/        — rollout master (IGNORED by parent repo)
+│   │   ├── Code.gs AutocompleteDB.gs Billing.gs Emails.gs Import.gs
+│   │   ├── RemoteAdmin.gs Repairs.gs Shipments.gs Tasks.gs Transfer.gs
+│   │   ├── Triggers.gs Utils.gs WillCalls.gs
+│   │   └── admin/                          — rollout Node scripts: rollout.mjs, sync-clients.mjs,
+│   │                                         verify-triggers.mjs, run-remote.mjs, setup-auth.mjs,
+│   │                                         update-deployments.mjs, .credentials.json, clients.json
+│   ├── Consolidated Billing Sheet/         — 11 .js files (push-cb + deploy-cb)
+│   ├── Master Price list script.txt        — (push-master)
+│   ├── task board script.txt               — (push-taskboard)
+│   ├── QR Scanner/                         — 5 files (push-scanner + deploy-cb)
+│   ├── stax-auto-pay/StaxAutoPay.gs        — (push-stax)
+│   └── Email Campaign App/                 — stridecampaignv2.5.gs, separate project
+│
+├── Docs/                                   ← active docs + archive
+│   ├── Stride_GS_App_Build_Status.md       — hot doc, replaced every session
+│   ├── DT_Integration_Build_Plan.md        — DispatchTrack phases + locked decisions
+│   └── Archive/                            — Session_History, Architectural_Decisions, etc.
+│
+├── Doc Templates/  EMAIL TEMPLATES/  INSTRUCTION GUIDES/  ← legacy static reference content
+│
+├── CLAUDE.md                               ← this file (root project reference)
+├── .gitignore                              ← parent-repo ignore list
+│
+└── stride-gs-app/                          ← React app (Vite + React 19 + TypeScript + TanStack Table + HashRouter)
+    ├── index.html                          ← VITE ENTRY — must reference /src/main.tsx (verify-entry.js enforces)
+    ├── package.json                        ← build → scripts/build.js orchestrator
+    ├── vite.config.ts                      ← vite config
+    ├── tsconfig*.json                      ← TypeScript project refs
+    ├── .env.example                        ← template (real .env is gitignored)
+    ├── README.md
+    ├── supabase/migrations/                ← Supabase schema migrations (YYYYMMDDHHMMSS_*.sql)
+    ├── scripts/
+    │   ├── build.js                        — orchestrator: verify-entry → tsc → vite → sanity checks
+    │   └── verify-entry.js                 — pre-build guard against corrupted index.html
+    ├── public/                             — CNAME, favicon.svg, icons.svg, stride-logo.png (vite copies to dist/)
+    ├── src/
+    │   ├── main.tsx                        — React entry point
+    │   ├── App.tsx                         — HashRouter + routes
+    │   ├── pages/                          — Dashboard, Inventory, Receiving, Tasks, Repairs, WillCalls,
+    │   │                                     Shipments, Billing, Payments, Claims, Marketing, Orders, Settings,
+    │   │                                     Login, Scanner, Labels, TaskJobPage, AccessDenied
+    │   ├── components/
+    │   │   ├── layout/                     — Sidebar, AppLayout, TopBar, FloatingActionBar
+    │   │   ├── shared/                     — WriteButton, BatchGuard, ProcessingOverlay, detail panels,
+    │   │   │                                 action modals, TemplateEditor, OnboardClientModal, etc.
+    │   │   ├── settings/                   — Settings-page subcomponents
+    │   │   ├── billing/                    — Billing-page subcomponents
+    │   │   └── ui/                         — base UI primitives
+    │   ├── hooks/                          — useClients, useInventory, useTasks, useRepairs, useWillCalls,
+    │   │                                     useBilling, useOrders, useApiData, useTablePreferences, etc.
+    │   ├── lib/
+    │   │   ├── api.ts                      — typed fetch wrapper, all backend call bindings
+    │   │   ├── supabaseQueries.ts          — Supabase read-cache queries
+    │   │   ├── supabase.ts                 — supabase client init
+    │   │   ├── types.ts                    — app-level TS types
+    │   │   ├── apiCache.ts                 — in-memory + localStorage API cache
+    │   │   ├── constants.ts                — shared formatters (fmtDate, fmtDateTime)
+    │   │   └── entityEvents.ts             — cross-hook refetch bus
+    │   ├── contexts/                       — React contexts (BatchData, etc.)
+    │   ├── styles/                         — theme.ts
+    │   └── data/                           — static seed data
+    │
+    └── dist/                               ← BUILT OUTPUT, served by GitHub Pages (own subtree repo)
+        ├── .git/                           — standalone repo, remote: github.com/Stride-dotcom/Stride-GS-app
+        ├── index.html                      — built by vite
+        ├── assets/index-*.js               — bundled React + deps (~1.4 MB)
+        ├── assets/index-*.css              — ~1 KB
+        └── CNAME                           — copied from public/ by vite
 ```
-
-Other folders: `Doc Templates/`, `EMAIL TEMPLATES/`, `INSTRUCTION GUIDES/`, `Docs/`, `Docs/Archive/`.
-
-**React app source:** `stride-gs-app/src/` (Vite + React + TypeScript + TanStack Table + Lucide icons + HashRouter).
 
 ---
 
@@ -322,6 +460,127 @@ Client inventory scripts are NOT edited via direct URLs — use `npm run rollout
 - Autocomplete dropdowns in React: Room + Sidemark data mixed together
 - Receiving page uses hardcoded table (no TanStack Table / no column reorder)
 - **GitHub Pages CDN caching gotcha:** hard-refresh (Ctrl+Shift+R) after `git push` to verify deployed bundle hash
+
+---
+
+## Tools Reference
+
+Quick index of every command, script, and MCP tool available in this workspace. Grouped by purpose. Run from the indicated directory.
+
+### npm scripts — `AppScripts/stride-client-inventory/`
+
+Backend rollout tooling. Push source to Google Apps Script projects and refresh their Web App deployments.
+
+| Command | What it does |
+|---|---|
+| `npm run rollout` | Push all 13 `.gs` files to every client's bound script (6 clients currently). Runs `admin/rollout.mjs --execute`. Use after editing anything under `stride-client-inventory/src/`. |
+| `npm run rollout:dry` | Same as rollout but dry-run. Prints the target list without writing. |
+| `npm run rollout:pilot` | Rollout to pilot group only (subset defined in `admin/clients.json`). |
+| `npm run sync` | Pull files FROM one reference client back to `stride-client-inventory/src/`. Useful when a client's bound editor has drift you want to capture. |
+| `npm run sync-web-urls` | Re-scan each client's Apps Script project and write the current Web App URL back to CB Clients tab. |
+| `npm run verify` | Run `StrideRemoteVerifyTriggers_` on every client. Reports missing or broken onEdit triggers. |
+| `npm run update-headers` | Remote-run `StrideRemoteUpdateHeaders_` on all clients to refresh missing sheet headers. |
+| `npm run install-triggers` | Remote-run `StrideRemoteInstallTriggers_` on all clients (reinstall onEdit triggers). |
+| `npm run refresh-caches` | Remote-run `StrideRemoteRefreshCaches_` on all clients (reload Price_Cache, Class_Cache, Email_Template_Cache from Master). |
+| `npm run sync-caches` | Alias via `StrideRemoteSyncCaches_` — pushes Master template + price + class data to all clients at once. |
+| `npm run sync-status` | Remote health check, returns sync state per client. |
+| `npm run remote` | Generic `admin/run-remote.mjs` wrapper. Run any `StrideRemote*` function by name: `npm run remote -- --fn=FunctionName`. |
+| `npm run push-api` | Push `AppScripts/stride-api/StrideAPI.gs` to its standalone Apps Script project. **Does NOT create a new Web App deployment** — must follow with `deploy-api`. |
+| `npm run push-cb` | Push Consolidated Billing scripts (`AppScripts/Consolidated Billing Sheet/`) to the CB Apps Script project. |
+| `npm run push-master` | Push Master Price List script. |
+| `npm run push-taskboard` | Push Task Board script. |
+| `npm run push-stax` | Push Stax Auto Pay script. |
+| `npm run push-scanner` | Push QR Scanner scripts. |
+| `npm run push-templates` | Push email templates from local source to Master Price List Email_Templates tab. |
+| `npm run health-check` | Remote-run `StrideRemoteHealthCheck_` across all clients. |
+| `npm run deploy-clients` | Create new Web App deployment versions on every client (required after changes that affect their `doPost`). |
+| `npm run deploy-api` | Create a new Web App deployment version on the standalone Stride API project. **Mandatory after `push-api`** — without it, the live Web App still serves the previous deployment. |
+| `npm run deploy-cb` | Create new Web App deployment version on CB script. |
+| `npm run deploy-all` | Clients + API + CB in one shot. Safe + idempotent. Use after a big session when in doubt. |
+
+### npm scripts — `stride-gs-app/`
+
+React app build + dev.
+
+| Command | What it does |
+|---|---|
+| `npm run dev` | Vite dev server (`http://localhost:5173`). Hot module reload. |
+| `npm run build` | **Session 59 orchestrator.** Runs `scripts/build.js`: verify-entry → tsc -b → vite build (captured) → module-count floor → bundle-size floor. Aborts non-zero on any check. Use this for all production builds. |
+| `npm run build:raw` | Escape hatch — raw `tsc -b && vite build` without safeguards. **Only use if you are certain the guards are a false positive.** Every use re-opens the session-58 vulnerability. |
+| `npm run lint` | ESLint across all `src/`. |
+| `npm run preview` | Serve `dist/` locally to verify the built bundle renders before deploying. |
+
+### Deploy the React app to GitHub Pages
+
+```bash
+cd stride-gs-app/
+npm run build                                        # exits non-zero on any check failure
+cd dist/
+git add -A
+git commit -m "Deploy: <what changed>"
+git push origin main --force                        # GitHub Pages auto-serves within 1-5 min
+# Hard-refresh mystridehub.com (Ctrl+Shift+R) and confirm the bundle hash in DevTools
+```
+
+**Never `git push` from `stride-gs-app/` parent directory** — that's the parent repo with no remote. The dist subdirectory has its own standalone `.git/` targeting the GitHub Pages repo.
+
+### MCP tools available in Claude Code
+
+Reference for calling external services without leaving the chat. Tool name prefixes are shortened here — in actual invocations use the full `mcp__{uuid}__{tool}` name.
+
+**Supabase (`mcp__94cd3688-d1f9-4417-a61a-6e38b1d2b097__*`)** — project `uqplppugeickmamycpuz`:
+| Tool | Purpose |
+|---|---|
+| `apply_migration(project_id, name, query)` | Apply a new migration. Write the SQL to `stride-gs-app/supabase/migrations/YYYYMMDDHHMMSS_name.sql` first so it's tracked in git. |
+| `execute_sql(project_id, query)` | Run ad-hoc SQL for debugging + data forensics (e.g., session 58 used this to confirm Supabase had stale `release_date` values). |
+| `list_migrations(project_id)` | Verify what's been applied. |
+| `list_tables(project_id, schemas)` | Schema inspection — useful before migration. Defaults `schemas=["public"]`. |
+| `get_advisors(project_id, type)` | Security + performance advisors. Run after any DDL change to catch missing RLS. |
+| `get_logs(project_id, service)` | Service logs (api, postgres, edge-function, auth, storage, realtime) — last 24 h. |
+| `generate_typescript_types(project_id)` | Regenerate `src/lib/supabase.types.ts` after schema changes. |
+| `deploy_edge_function(project_id, name, files)` | Deploy a Deno edge function. |
+| `list_branches` / `create_branch` / `merge_branch` | Supabase dev branches (not currently used in this project). |
+
+**Scheduled tasks (`mcp__scheduled-tasks__*`)** — cron-scheduled Claude runs:
+| Tool | Purpose |
+|---|---|
+| `create_scheduled_task(taskId, prompt, description, cronExpression?)` | Schedule a recurring prompt to fire automatically. Cron is evaluated in local time. |
+| `list_scheduled_tasks()` | See all scheduled tasks + their next run time. |
+| `update_scheduled_task(taskId, ...)` | Update cron, prompt, enabled state, notification preference. |
+
+### Claude Code built-in scheduling
+
+In-session scheduling (doesn't persist across sessions unless `durable: true`):
+
+| Tool | Purpose |
+|---|---|
+| `CronCreate(cron, prompt, recurring?, durable?)` | Enqueue a prompt to fire at a cron time. Recurring tasks auto-expire after 7 days. |
+| `CronList()` | List session cron jobs. |
+| `CronDelete(id)` | Cancel a scheduled prompt. |
+
+### Build safeguards in stride-gs-app
+
+| File | Purpose |
+|---|---|
+| `stride-gs-app/scripts/verify-entry.js` | Pre-build check — rejects corrupted `index.html` (must reference `/src/main.tsx`, never `/assets/*.js`). |
+| `stride-gs-app/scripts/build.js` | Build orchestrator — runs verify-entry, tsc, vite, parses vite stdout for module count, validates bundle size. Aborts non-zero on any check. |
+
+### TodoWrite / Task tracking
+
+Use `TodoWrite` for any multi-step task (3+ steps) or when the user provides multiple tasks. See the tool description for full usage rules. Keep exactly one task `in_progress` at a time.
+
+### Sub-agents
+
+Use `Agent` with specialized `subagent_type`:
+
+| Agent | When to use |
+|---|---|
+| `Explore` (quick / medium / very thorough) | Finding files, searching code, answering questions about the codebase. Read-only — safe to run in parallel. |
+| `Plan` | Designing an implementation strategy before writing code. Returns step-by-step plans + identifies critical files. |
+| `general-purpose` | Multi-step research tasks that don't fit Explore or Plan. |
+| `claude-code-guide` | Questions about Claude Code itself (hooks, skills, MCP servers, settings). |
+
+**Dropbox sync warning:** Sub-agents in this project must be **READ-ONLY**. Main chat does all file writes. Never pass `isolation: "worktree"` because Dropbox sync conflicts with concurrent writes.
 
 ---
 
