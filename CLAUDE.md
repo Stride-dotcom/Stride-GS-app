@@ -39,11 +39,14 @@ Companion living doc: **`Docs/Stride_GS_App_Build_Status.md`** — current sessi
 
 ## Repository Structure
 
-After the session 59 cleanup there are **exactly two git repositories** in this workspace, each with one clear job. If you see a third, something is wrong.
+**Canonical reference:** `Docs/REPO_STRUCTURE.md` — read that for the full branch model, deployment flow, parallel development stream rules, and health checks. This section is the compact summary.
+
+After the session 59 cleanup and session 60 remote wiring, there are **exactly two git repositories** in this workspace, each with one clear job. If you see a third, something is wrong.
 
 ```
 C:/Users/expre/Dropbox/Apps/GS Inventory/        ← PARENT REPO (source of truth)
-├── .git/                                         ← git init (local-only, no remote yet)
+├── .git/                                         ← remote: github.com/Stride-dotcom/Stride-GS-app
+│                                                    tracks origin/source as default branch
 ├── .gitignore                                    ← excludes dist/, node_modules/, secrets,
 │                                                    stride-client-inventory/ rollout tooling,
 │                                                    *.tsbuildinfo, *.tmp.*, *.backup.*
@@ -68,15 +71,31 @@ C:/Users/expre/Dropbox/Apps/GS Inventory/        ← PARENT REPO (source of trut
         └── .git/                                 ← SEPARATE git repo, subtree deploy target
 ```
 
-### The only nested repo that should exist
+### Branch model on the single GitHub remote
+
+Both local `.git` directories push to the same GitHub repo but target **different branches** with distinct responsibilities:
+
+| Branch | Role | Who writes |
+|---|---|---|
+| `origin/source` | **Default branch.** Full parent workspace source of truth — backend, React, docs, tooling. All feature branches PR to this. | Parent repo (`GS Inventory/.git`) |
+| `origin/main` | Built React bundle served by GitHub Pages. Force-pushed on every deploy. | Dist subtree (`stride-gs-app/dist/.git`) |
+| `origin/feat/warehouse/*` | Warehouse / WMS feature branches | Parent repo |
+| `origin/feat/delivery/*` | Delivery / DispatchTrack feature branches | Parent repo |
+| `origin/feat/fix/*` | Hotfixes and small cleanups | Parent repo |
+
+Legacy branches (`feat/dt-phase1a`, `feat/dt-integration-phase1a-migration`) are preserved for session-58/59 forensics but no longer receive new commits.
+
+**Never merge `source` into `main` or vice versa.** `main` is compiled artifacts; `source` is human-readable source. They intentionally share no commit history.
+
+### The dist subtree — separate `.git` with one job
 
 **`stride-gs-app/dist/.git`** is a standalone git repository used as a GitHub Pages deploy target:
 
 - **Remote:** `https://github.com/Stride-dotcom/Stride-GS-app.git`
-- **Branch:** `main`
+- **Branch:** `main` (only)
 - **Content:** built vite output (`index.html` + `assets/*.js` + `assets/*.css` + `CNAME`)
-- **Lifecycle:** overwritten on every React deploy. No feature branches, no PRs, no source code.
-- **Why separate:** GitHub Pages serves whatever is on the `main` branch at the repo root. Rather than maintain a `gh-pages` branch in the source repo with subtree push gymnastics, the built output lives in its own standalone repo and gets force-pushed as a flat commit. Clean, simple, audit trail via "Deploy:" commit messages.
+- **Lifecycle:** overwritten on every React deploy via `git push origin main --force`. No feature branches, no PRs, no source code.
+- **Why separate:** GitHub Pages serves whatever is on `main`. Rather than juggle a `gh-pages` branch with subtree push gymnastics, the built output lives in its own standalone repo and gets force-pushed as a flat commit. Clean, simple, audit trail via "Deploy:" commit messages.
 
 **Do not** `git init` inside `stride-gs-app/` or `AppScripts/stride-client-inventory/`. If you see a `.git/` directory appear in either location, it's a regression — delete it.
 
