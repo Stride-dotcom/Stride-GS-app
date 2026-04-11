@@ -1,0 +1,574 @@
+import { useState, useMemo } from 'react';
+import { X, Truck, Package, Calendar, Phone, User, DollarSign, CheckCircle2, CreditCard, FileText, Loader2, AlertTriangle, FolderOpen, Info } from 'lucide-react';
+import { FolderButton } from './FolderButton';
+import { theme } from '../../styles/theme';
+import { fmtDate } from '../../lib/constants';
+import { WriteButton } from './WriteButton';
+import { ProcessingOverlay } from './ProcessingOverlay';
+import { getPanelContainerStyle, panelBackdropStyle } from './panelStyles';
+import { useIsMobile } from '../../hooks/useIsMobile';
+import { useResizablePanel } from '../../hooks/useResizablePanel';
+import { postProcessWcRelease, postCancelWillCall, postRemoveItemsFromWillCall, fetchWcDocUrl, isApiConfigured } from '../../lib/api';
+import { useClients } from '../../hooks/useClients';
+import { writeSyncFailed } from '../../lib/syncEvents';
+import { useAuth } from '../../contexts/AuthContext';
+import type { ProcessWcReleaseResponse, CancelWillCallResponse, RemoveItemsFromWillCallResponse } from '../../lib/api';
+
+import type { WillCall, InventoryItem } from '../../lib/types';
+interface Props {
+  wc: any;
+  onClose: () => void;
+  onWcUpdated?: () => void;
+  onNavigateToWc?: (wcNumber: string) => void;
+  // Phase 2C — optimistic patch functions (optional)
+  applyWcPatch?: (wcNumber: string, patch: Partial<WillCall>) => void;
+  mergeWcPatch?: (wcNumber: string, patch: Partial<WillCall>) => void;
+  clearWcPatch?: (wcNumber: string) => void;
+  addOptimisticWc?: (wc: WillCall) => void;
+  removeOptimisticWc?: (tempWcNumber: string) => void;
+  // Cross-entity: WC release patches inventory item statuses
+  applyItemPatch?: (itemId: string, patch: Partial<InventoryItem>) => void;
+}
+
+const STATUS_CFG: Record<string, { bg: string; color: string }> = {
+  Pending: { bg: '#FEF3C7', color: '#B45309' }, Scheduled: { bg: '#EFF6FF', color: '#1D4ED8' },
+  Released: { bg: '#F0FDF4', color: '#15803D' }, Partial: { bg: '#EDE9FE', color: '#7C3AED' },
+  Cancelled: { bg: '#F3F4F6', color: '#6B7280' },
+};
+
+function Badge({ t, bg, color }: { t: string; bg: string; color: string }) { return <span style={{ display: 'inline-block', padding: '2px 10px', borderRadius: 12, fontSize: 11, fontWeight: 600, background: bg, color, whiteSpace: 'nowrap' }}>{t}</span>; }
+function Field({ label, value, icon: Icon }: { label: string; value?: string | number | null; icon?: any }) {
+  return <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginBottom: 10 }}>
+    {Icon && <Icon size={14} color={theme.colors.textMuted} style={{ marginTop: 2 }} />}
+    <div><div style={{ fontSize: 10, fontWeight: 500, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 1 }}>{label}</div><div style={{ fontSize: 13, color: value ? theme.colors.text : theme.colors.textMuted }}>{String(value ?? '\u2014')}</div></div>
+  </div>;
+}
+
+export function WillCallDetailPanel({ wc, onClose, onWcUpdated, onNavigateToWc, applyWcPatch, clearWcPatch, applyItemPatch }: Props) {
+  const { user } = useAuth();
+  const { isMobile } = useIsMobile();
+  const { width: panelWidth, handleMouseDown: handleResizeMouseDown } = useResizablePanel(440, 'willcall', isMobile);
+  // Release state
+  const apiConfigured = isApiConfigured();
+  const { apiClients } = useClients(apiConfigured);
+  const clientSheetId = useMemo(() => apiClients.find(c => c.name === wc.clientName)?.spreadsheetId || '', [apiClients, wc.clientName]);
+
+  const [effectiveStatus, setEffectiveStatus] = useState<string>(wc.status);
+  const sc = STATUS_CFG[effectiveStatus] || STATUS_CFG.Pending;
+  const isActive = ['Pending', 'Scheduled', 'Partial'].includes(effectiveStatus);
+
+  // Parse split WC number from notes (format: "[Split → WC-XXXXX]")
+  const splitWcNumber = useMemo(() => {
+    const notes = String(wc.notes || '');
+    const m = notes.match(/\[Split → (WC-\S+)\]/);
+    return m ? m[1] : null;
+  }, [wc.notes]);
+
+  const [releaseMode, setReleaseMode] = useState<'none' | 'partial'>('none');
+  const [partialSelected, setPartialSelected] = useState<Set<string>>(new Set());
+  const [releasing, setReleasing] = useState(false);
+  const [releaseError, setReleaseError] = useState<string | null>(null);
+  const [releaseResult, setReleaseResult] = useState<ProcessWcReleaseResponse | null>(null);
+
+  const [paid, setPaid] = useState(false);
+
+  // Cancel WC state
+  const [cancelling, setCancelling] = useState(false);
+  const [cancelError, setCancelError] = useState<string | null>(null);
+  const [cancelResult, setCancelResult] = useState<CancelWillCallResponse | null>(null);
+
+  // Remove items state
+  const [removeMode, setRemoveMode] = useState(false);
+  const [removeSelected, setRemoveSelected] = useState<Set<string>>(new Set());
+  const [removing, setRemoving] = useState(false);
+  const [removeError, setRemoveError] = useState<string | null>(null);
+  const [removeResult, setRemoveResult] = useState<RemoveItemsFromWillCallResponse | null>(null);
+
+  const toggleRemoveItem = (id: string) => {
+    setRemoveSelected(prev => {
+      const n = new Set(prev);
+      if (n.has(id)) n.delete(id); else n.add(id);
+      return n;
+    });
+  };
+
+  const handleRemoveItems = async () => {
+    if (removeSelected.size === 0) return;
+    setRemoveError(null);
+    if (!apiConfigured || !clientSheetId) {
+      setRemoveResult({ success: true, removedCount: removeSelected.size, remainingItems: allItemIds.length - removeSelected.size, cancelled: removeSelected.size >= allItemIds.length });
+      if (removeSelected.size >= allItemIds.length) setEffectiveStatus('Cancelled');
+      setRemoveMode(false);
+      onWcUpdated?.();
+      return;
+    }
+
+    // Phase 2C: optimistic patch
+    // - If removing all items → WC becomes Cancelled
+    // - Affected inventory items revert from On Hold → Active
+    const removingAll = removeSelected.size >= allItemIds.length;
+    const removedItemIds = [...removeSelected];
+    if (removingAll) {
+      applyWcPatch?.(wc.wcNumber, { status: 'Cancelled' });
+    }
+    removedItemIds.forEach(id => applyItemPatch?.(id, { status: 'Active' }));
+
+    setRemoving(true);
+    try {
+      const resp = await postRemoveItemsFromWillCall({ wcNumber: wc.wcNumber, itemIds: removedItemIds }, clientSheetId);
+      if (!resp.ok || !resp.data?.success) {
+        // Rollback optimistic patches
+        if (removingAll) clearWcPatch?.(wc.wcNumber);
+        // Note: item patches will expire naturally via 120s TTL, or be corrected by next refetch
+        setRemoveError(resp.error || resp.data?.error || 'Failed to remove items');
+      } else {
+        setRemoveResult(resp.data);
+        if (resp.data.cancelled) setEffectiveStatus('Cancelled');
+        setRemoveMode(false);
+        if (removingAll) clearWcPatch?.(wc.wcNumber); // server confirmed
+        onWcUpdated?.();
+      }
+    } catch (err) {
+      if (removingAll) clearWcPatch?.(wc.wcNumber); // rollback
+      setRemoveError(err instanceof Error ? err.message : 'Network error');
+    } finally {
+      setRemoving(false);
+    }
+  };
+
+  // Print Release Doc state
+  const [printLoading, setPrintLoading] = useState(false);
+  const [printError, setPrintError] = useState<string | null>(null);
+  const [printPdfUrl, setPrintPdfUrl] = useState<string | null>(null);
+
+  const handlePrintRelease = async () => {
+    setPrintError(null);
+    setPrintPdfUrl(null);
+    if (!apiConfigured || !clientSheetId) {
+      setPrintError('API not configured');
+      return;
+    }
+    setPrintLoading(true);
+    try {
+      const resp = await fetchWcDocUrl(wc.wcNumber, clientSheetId);
+      if (!resp.ok || !resp.data) {
+        setPrintError(resp.error || 'Failed to fetch document URL');
+        return;
+      }
+      if (resp.data.error && !resp.data.pdfUrl) {
+        setPrintError(resp.data.error);
+        return;
+      }
+      if (!resp.data.pdfUrl) {
+        setPrintError('No PDF found in will call folder');
+        return;
+      }
+      setPrintPdfUrl(resp.data.pdfUrl);
+      const win = window.open(resp.data.pdfUrl, '_blank');
+      if (!win) {
+        setPrintError('Popup blocked — use the link below to open the PDF');
+      } else {
+        // Trigger print dialog once PDF loads in the new tab
+        win.addEventListener('load', () => { try { win.print(); } catch (_) {} });
+        // Fallback: some PDF viewers don't fire load — try after delay
+        setTimeout(() => { try { win.print(); } catch (_) {} }, 2000);
+      }
+    } catch (err) {
+      setPrintError(err instanceof Error ? err.message : 'Network error');
+    } finally {
+      setPrintLoading(false);
+    }
+  };
+
+  const handleCancelWC = async () => {
+    setCancelError(null);
+    // Phase 2C: patch table row immediately
+    applyWcPatch?.(wc.wcNumber, { status: 'Cancelled' });
+    if (!apiConfigured || !clientSheetId) {
+      setCancelResult({ success: true, wcNumber: wc.wcNumber, emailSent: false, warnings: ['Demo mode — no API configured'] });
+      setEffectiveStatus('Cancelled');
+      return;
+    }
+    setCancelling(true);
+    try {
+      const resp = await postCancelWillCall({ wcNumber: wc.wcNumber }, clientSheetId);
+      if (!resp.ok || !resp.data?.success) {
+        clearWcPatch?.(wc.wcNumber); // rollback
+        const errMsg = resp.error || resp.data?.error || 'Failed to cancel will call';
+        setCancelError(errMsg);
+        void writeSyncFailed({ tenant_id: clientSheetId, entity_type: 'will_call', entity_id: wc.wcNumber, action_type: 'cancel_will_call', requested_by: user?.email ?? '', request_id: resp.requestId, payload: { wcNumber: wc.wcNumber, clientName: wc.clientName }, error_message: errMsg });
+      } else {
+        clearWcPatch?.(wc.wcNumber); // server confirmed
+        setCancelResult(resp.data);
+        setEffectiveStatus('Cancelled');
+        onWcUpdated?.();
+      }
+    } catch (err) {
+      clearWcPatch?.(wc.wcNumber); // rollback
+      setCancelError(err instanceof Error ? err.message : 'Network error');
+    } finally {
+      setCancelling(false);
+    }
+  };
+
+  const allItemIds: string[] = useMemo(() =>
+    (wc.items || []).map((i: any) => String(i.itemId || '')).filter(Boolean),
+    [wc.items]
+  );
+
+  const togglePartialItem = (id: string) => {
+    setPartialSelected(prev => {
+      const n = new Set(prev);
+      if (n.has(id)) n.delete(id); else n.add(id);
+      return n;
+    });
+  };
+
+  const handleRelease = async (itemIds: string[]) => {
+    setReleaseError(null);
+    if (!itemIds.length) return;
+
+    const isPartialRelease = itemIds.length < allItemIds.length;
+    const newWcStatus = isPartialRelease ? 'Partial' : 'Released';
+    const releaseDate = new Date().toISOString().slice(0, 10);
+
+    // Phase 2C: patch WC row + all released inventory items immediately
+    applyWcPatch?.(wc.wcNumber, { status: newWcStatus });
+    itemIds.forEach(id => applyItemPatch?.(id, { status: 'Released', releaseDate }));
+
+    if (!apiConfigured || !clientSheetId) {
+      // Demo mode
+      setReleaseResult({ success: true, releasedCount: itemIds.length, isPartial: isPartialRelease, emailSent: false, warnings: ['Demo mode — no API configured'] });
+      setEffectiveStatus(newWcStatus);
+      setReleaseMode('none');
+      return;
+    }
+
+    setReleasing(true);
+    try {
+      const resp = await postProcessWcRelease({ wcNumber: wc.wcNumber, releaseItemIds: itemIds }, clientSheetId);
+      if (!resp.ok || !resp.data?.success) {
+        clearWcPatch?.(wc.wcNumber); // rollback WC patch
+        const errMsg = resp.error || resp.data?.error || 'Failed to process release. Please try again.';
+        setReleaseError(errMsg);
+        void writeSyncFailed({ tenant_id: clientSheetId, entity_type: 'will_call', entity_id: wc.wcNumber, action_type: 'process_wc_release', requested_by: user?.email ?? '', request_id: resp.requestId, payload: { wcNumber: wc.wcNumber, releaseItemIds: itemIds, clientName: wc.clientName }, error_message: errMsg });
+      } else {
+        clearWcPatch?.(wc.wcNumber); // server confirmed
+        setReleaseResult(resp.data);
+        setEffectiveStatus(resp.data.isPartial ? 'Partial' : 'Released');
+        setReleaseMode('none');
+        onWcUpdated?.();
+      }
+    } catch (err) {
+      clearWcPatch?.(wc.wcNumber); // rollback WC patch
+      setReleaseError(err instanceof Error ? err.message : 'Network error. Please try again.');
+    } finally {
+      setReleasing(false);
+    }
+  };
+
+  return (
+    <>
+      {!isMobile && <div onClick={() => { if (!releasing && !cancelling) onClose(); }} style={panelBackdropStyle} />}
+      <div style={getPanelContainerStyle(panelWidth, isMobile)}>
+        {!isMobile && <div onMouseDown={handleResizeMouseDown} style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: 6, cursor: 'col-resize', zIndex: 101 }} />}
+
+        <ProcessingOverlay visible={releasing || cancelling || removing} message={removing ? 'Removing items...' : cancelling ? 'Cancelling Will Call...' : 'Processing Release...'} />
+
+        {/* Header */}
+        <div style={{ padding: '16px 20px', borderBottom: `1px solid ${theme.colors.border}`, flexShrink: 0 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+            <div>
+              <div style={{ fontSize: 18, fontWeight: 700 }}>{wc.wcNumber}</div>
+              <div style={{ fontSize: 12, color: theme.colors.textSecondary, marginTop: 2 }}>{wc.clientName}</div>
+            </div>
+            <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4, color: theme.colors.textMuted }}><X size={18} /></button>
+          </div>
+          <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
+            <Badge t={wc.status} bg={sc.bg} color={sc.color} />
+            {wc.cod && <span style={{ fontSize: 11, padding: '2px 10px', borderRadius: 10, fontWeight: 600, background: '#FEF3C7', color: '#B45309' }}>COD{wc.codAmount ? `: $${wc.codAmount}` : ''}</span>}
+            {paid && <Badge t="Paid" bg="#F0FDF4" color="#15803D" />}
+          </div>
+        </div>
+
+        {/* Content */}
+        <div style={{ flex: 1, overflowY: 'auto', padding: 20 }}>
+
+          {/* Pickup Details */}
+          <div style={{ background: theme.colors.bgSubtle, border: `1px solid ${theme.colors.border}`, borderRadius: 10, padding: 14, marginBottom: 16 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}><Truck size={14} color={theme.colors.orange} /><span style={{ fontSize: 12, fontWeight: 600 }}>Pickup Details</span></div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 14px' }}>
+              <Field label="Pickup Party" value={wc.pickupParty} icon={User} />
+              <Field label="Phone" value={wc.pickupPartyPhone} icon={Phone} />
+              <Field label="Scheduled Date" value={fmtDate(wc.scheduledDate)} icon={Calendar} />
+              <Field label="Items" value={`${wc.itemCount} items`} icon={Package} />
+            </div>
+            {wc.notes && <div style={{ marginTop: 4, fontSize: 12, color: theme.colors.textSecondary }}><strong>Notes:</strong> {wc.notes}</div>}
+            {/* Drive Folder Buttons */}
+            <div style={{ display: 'flex', gap: 6, marginTop: 10, flexWrap: 'wrap' }}>
+              <FolderButton label="Will Call Folder" url={wc.wcFolderUrl || undefined} disabledTooltip="Folder link missing — use Fix Missing Folders on Inventory page" icon={FolderOpen} />
+              <FolderButton label="Shipment Folder" url={wc.shipmentFolderUrl || undefined} disabledTooltip="Folder link missing — use Fix Missing Folders on Inventory page" icon={Truck} />
+            </div>
+          </div>
+
+          {/* Partial Release Banner */}
+          {(effectiveStatus === 'Partial' || splitWcNumber) && (
+            <div style={{ padding: '10px 12px', background: '#EDE9FE', border: '1px solid #C4B5FD', borderRadius: 10, marginBottom: 16, display: 'flex', alignItems: 'flex-start', gap: 8 }}>
+              <Info size={14} color="#7C3AED" style={{ flexShrink: 0, marginTop: 1 }} />
+              <div style={{ fontSize: 12, color: '#5B21B6' }}>
+                This will call was partially released. {splitWcNumber ? (
+                  <>Remaining items were moved to{' '}
+                    <span
+                      onClick={() => onNavigateToWc?.(splitWcNumber)}
+                      style={{ fontWeight: 700, textDecoration: 'underline', cursor: onNavigateToWc ? 'pointer' : 'default', color: '#7C3AED' }}
+                    >{splitWcNumber}</span>.
+                  </>
+                ) : 'Remaining items were moved to a new will call.'}
+              </div>
+            </div>
+          )}
+
+          {/* COD Payment */}
+          {wc.cod && (
+            <div style={{ background: paid ? '#F0FDF4' : '#FFFBF5', border: `1px solid ${paid ? '#A7F3D0' : '#FED7AA'}`, borderRadius: 10, padding: 14, marginBottom: 16 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}><DollarSign size={14} color={paid ? '#15803D' : '#B45309'} /><span style={{ fontSize: 12, fontWeight: 600, color: paid ? '#15803D' : '#92400E' }}>{paid ? 'Payment Collected' : 'COD Payment Required'}</span></div>
+              {!paid ? (
+                <>
+                  <div style={{ fontSize: 20, fontWeight: 700, marginBottom: 10 }}>${wc.codAmount || '0.00'}</div>
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    <button onClick={() => window.open('https://pay.fattmerchant.com', '_blank')} style={{ flex: 1, padding: '9px', fontSize: 12, fontWeight: 600, border: 'none', borderRadius: 8, background: theme.colors.orange, color: '#fff', cursor: 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}><CreditCard size={14} /> Collect via Stax</button>
+                    <WriteButton label="Mark Paid" variant="secondary" onClick={async () => { setPaid(true); /* Phase 7B: wire to API */ }} />
+                  </div>
+                  <div style={{ fontSize: 10, color: theme.colors.textMuted, marginTop: 8 }}>Opens Stax payment page in new tab. After collecting payment, tap "Mark Paid" to record it.</div>
+                </>
+              ) : (
+                <div style={{ fontSize: 13, color: '#15803D' }}>Payment of ${wc.codAmount || '0.00'} collected and recorded.</div>
+              )}
+            </div>
+          )}
+
+          {/* Items */}
+          <div style={{ marginBottom: 16 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}><Package size={14} color={theme.colors.orange} /><span style={{ fontSize: 12, fontWeight: 600 }}>Items ({wc.items?.length || wc.itemCount || 0})</span></div>
+            {wc.items && wc.items.length > 0 ? (
+              <div style={{ border: `1px solid ${theme.colors.border}`, borderRadius: 10, overflow: 'hidden' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                  <thead><tr style={{ background: theme.colors.bgSubtle }}>
+                    {removeMode && <th style={{ padding: '6px 6px', width: 28 }} />}
+                    <th style={{ padding: '6px 10px', textAlign: 'left', fontSize: 10, color: theme.colors.textMuted, textTransform: 'uppercase' }}>Item</th>
+                    <th style={{ padding: '6px 10px', textAlign: 'left', fontSize: 10, color: theme.colors.textMuted, textTransform: 'uppercase' }}>Description</th>
+                    <th style={{ padding: '6px 10px', textAlign: 'left', fontSize: 10, color: theme.colors.textMuted, textTransform: 'uppercase' }}>Vendor</th>
+                    <th style={{ padding: '6px 10px', textAlign: 'left', fontSize: 10, color: theme.colors.textMuted, textTransform: 'uppercase' }}>Location</th>
+                    <th style={{ padding: '6px 10px', textAlign: 'center', fontSize: 10, color: theme.colors.textMuted, textTransform: 'uppercase' }}>Qty</th>
+                    <th style={{ padding: '6px 10px', textAlign: 'center', fontSize: 10, color: theme.colors.textMuted, textTransform: 'uppercase' }}>Released</th>
+                  </tr></thead>
+                  <tbody>{wc.items.map((item: any, i: number) => {
+                    const isRemoveChecked = removeSelected.has(item.itemId);
+                    const isReleased = !!item.released;
+                    return (
+                      <tr key={i} onClick={removeMode && !isReleased ? () => toggleRemoveItem(item.itemId) : undefined} style={{ borderBottom: `1px solid ${theme.colors.borderLight}`, cursor: removeMode && !isReleased ? 'pointer' : 'default', background: isRemoveChecked ? '#FEF2F2' : isReleased ? '#F9FAFB' : 'transparent', opacity: isReleased ? 0.55 : 1 }}>
+                        {removeMode && (
+                          <td style={{ padding: '6px 6px', textAlign: 'center' }}>
+                            {isReleased ? <span style={{ color: theme.colors.textMuted, fontSize: 10 }}>{'\u2014'}</span> : (
+                              <input type="checkbox" checked={isRemoveChecked} readOnly style={{ accentColor: '#DC2626', pointerEvents: 'none' }} />
+                            )}
+                          </td>
+                        )}
+                        <td style={{ padding: '6px 10px', fontWeight: 600 }}>
+                          <a
+                            href={`#/inventory?open=${encodeURIComponent(item.itemId)}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            onClick={e => e.stopPropagation()}
+                            style={{ color: theme.colors.orange, textDecoration: 'underline', textDecorationColor: 'transparent', transition: 'text-decoration-color 0.15s' }}
+                            onMouseEnter={e => (e.currentTarget.style.textDecorationColor = theme.colors.orange)}
+                            onMouseLeave={e => (e.currentTarget.style.textDecorationColor = 'transparent')}
+                          >{item.itemId}</a>
+                        </td>
+                        <td style={{ padding: '6px 10px', color: theme.colors.textSecondary, maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.description}</td>
+                        <td style={{ padding: '6px 10px', color: theme.colors.textSecondary, maxWidth: 80, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.vendor || '\u2014'}</td>
+                        <td style={{ padding: '6px 10px', fontFamily: 'monospace', fontSize: 11, color: theme.colors.textSecondary }}>{item.location || '\u2014'}</td>
+                        <td style={{ padding: '6px 10px', textAlign: 'center' }}>{item.qty}</td>
+                        <td style={{ padding: '6px 10px', textAlign: 'center' }}>{isReleased ? <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 10, fontWeight: 600, color: '#15803D', background: '#F0FDF4', padding: '1px 7px', borderRadius: 8 }}><CheckCircle2 size={11} /> Released</span> : <span style={{ color: theme.colors.textMuted }}>{'\u2014'}</span>}</td>
+                      </tr>
+                    );
+                  })}</tbody>
+                </table>
+              </div>
+            ) : (
+              <div style={{ fontSize: 12, color: theme.colors.textMuted }}>No item details available</div>
+            )}
+          </div>
+
+          {/* Partial Release Selector */}
+          {releaseMode === 'partial' && allItemIds.length > 0 && (
+            <div style={{ border: `1px solid ${theme.colors.orange}`, borderRadius: 10, padding: 14, marginBottom: 14, background: '#FFFBF5' }}>
+              <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 8 }}>Select items to release:</div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 10 }}>
+                {allItemIds.map(id => {
+                  const item = (wc.items || []).find((i: any) => i.itemId === id);
+                  const checked = partialSelected.has(id);
+                  return (
+                    <label key={id} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, cursor: 'pointer', padding: '4px 6px', borderRadius: 6, background: checked ? '#F0FDF4' : 'transparent' }}>
+                      <input type="checkbox" checked={checked} onChange={() => togglePartialItem(id)} style={{ accentColor: '#15803D' }} />
+                      <span style={{ fontWeight: 600 }}>{id}</span>
+                      {item?.description && <span style={{ color: theme.colors.textMuted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.description}</span>}
+                    </label>
+                  );
+                })}
+              </div>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button onClick={() => { setReleaseMode('none'); setPartialSelected(new Set()); }} style={{ flex: 1, padding: '8px', fontSize: 12, fontWeight: 500, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', fontFamily: 'inherit' }}>Cancel</button>
+                <WriteButton
+                  label={releasing ? 'Releasing...' : `Release ${partialSelected.size} Item${partialSelected.size !== 1 ? 's' : ''}`}
+                  variant="primary"
+                  icon={releasing ? <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} /> : <CheckCircle2 size={13} />}
+                  disabled={partialSelected.size === 0 || releasing}
+                  style={{ flex: 2, background: '#15803D', opacity: (partialSelected.size === 0 || releasing) ? 0.6 : 1 }}
+                  onClick={() => handleRelease([...partialSelected])}
+                />
+              </div>
+            </div>
+          )}
+
+          {/* Release Result Card */}
+          {releaseResult && releaseResult.success && (
+            <div style={{ padding: '10px 12px', background: '#F0FDF4', border: '1px solid #86EFAC', borderRadius: 10, marginBottom: 12 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+                <CheckCircle2 size={14} color="#15803D" />
+                <span style={{ fontSize: 12, fontWeight: 600, color: '#15803D' }}>
+                  {releaseResult.releasedCount} item{releaseResult.releasedCount !== 1 ? 's' : ''} released
+                  {releaseResult.isPartial && releaseResult.newWcNumber ? (
+                    <> · Remaining →{' '}
+                      <span
+                        onClick={() => onNavigateToWc?.(releaseResult.newWcNumber!)}
+                        style={{ textDecoration: 'underline', cursor: onNavigateToWc ? 'pointer' : 'default', color: theme.colors.orange, fontWeight: 700 }}
+                      >{releaseResult.newWcNumber}</span>
+                    </>
+                  ) : ''}
+                </span>
+              </div>
+              <div style={{ fontSize: 11, color: '#166534' }}>Email: {releaseResult.emailSent ? '✓ Sent' : '✗ Not sent'}</div>
+              {releaseResult.warnings && releaseResult.warnings.length > 0 && (
+                <div style={{ marginTop: 6 }}>{releaseResult.warnings.map((w, i) => <div key={i} style={{ fontSize: 11, color: '#92400E' }}>⚠ {w}</div>)}</div>
+              )}
+            </div>
+          )}
+
+          {/* Remove Result Card */}
+          {removeResult && removeResult.success && (
+            <div style={{ padding: '10px 12px', background: removeResult.cancelled ? '#FEF2F2' : '#FEF3C7', border: `1px solid ${removeResult.cancelled ? '#FECACA' : '#FDE68A'}`, borderRadius: 10, marginBottom: 12 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+                {removeResult.cancelled ? <X size={14} color="#DC2626" /> : <CheckCircle2 size={14} color="#B45309" />}
+                <span style={{ fontSize: 12, fontWeight: 600, color: removeResult.cancelled ? '#DC2626' : '#92400E' }}>
+                  {removeResult.removedCount} item{removeResult.removedCount !== 1 ? 's' : ''} removed
+                  {removeResult.cancelled ? ' — Will call cancelled (no items remaining)' : ` — ${removeResult.remainingItems} remaining`}
+                </span>
+              </div>
+              {removeResult.skippedReleased && removeResult.skippedReleased.length > 0 && (
+                <div style={{ fontSize: 11, color: '#92400E', marginTop: 4 }}>Skipped (already released): {removeResult.skippedReleased.join(', ')}</div>
+              )}
+            </div>
+          )}
+
+          {/* Remove error */}
+          {removeError && (
+            <div style={{ padding: '8px 12px', background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: 8, marginBottom: 12, display: 'flex', alignItems: 'center', gap: 6 }}>
+              <AlertTriangle size={13} color="#DC2626" />
+              <span style={{ fontSize: 12, color: '#991B1B' }}>{removeError}</span>
+            </div>
+          )}
+
+          {/* Quick Actions */}
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+            {isActive && !releaseResult && !removeResult && releaseMode === 'none' && allItemIds.length > 1 && (
+              <WriteButton label="Release Some..." variant="secondary" size="sm" onClick={() => { setPartialSelected(new Set(allItemIds)); setReleaseMode('partial'); }} />
+            )}
+            {isActive && !releaseResult && !removeResult && !removeMode && (
+              <WriteButton label="Remove Items..." variant="secondary" size="sm" onClick={() => { setRemoveMode(true); setRemoveSelected(new Set()); setRemoveError(null); }} />
+            )}
+            {removeMode && (
+              <>
+                <WriteButton label="Cancel" variant="secondary" size="sm" onClick={() => { setRemoveMode(false); setRemoveSelected(new Set()); }} />
+                {removeSelected.size > 0 && (
+                  <WriteButton
+                    label={removing ? 'Removing...' : `Remove ${removeSelected.size} Item${removeSelected.size !== 1 ? 's' : ''}`}
+                    variant="danger" size="sm" disabled={removing}
+                    onClick={handleRemoveItems}
+                  />
+                )}
+              </>
+            )}
+            {isActive && !cancelResult && !removeMode && <WriteButton label={cancelling ? 'Cancelling...' : 'Cancel WC'} variant="danger" size="sm" disabled={cancelling} onClick={handleCancelWC} />}
+            {!removeMode && <WriteButton label={printLoading ? 'Loading...' : 'Print Release Doc'} variant="secondary" size="sm" icon={printLoading ? <Loader2 size={11} className="animate-spin" /> : <FileText size={11} />} disabled={printLoading} onClick={handlePrintRelease} />}
+          </div>
+          {printPdfUrl && !printError && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 10px', background: '#F0FDF4', border: '1px solid #BBF7D0', borderRadius: 8, marginTop: 6 }}>
+              <FileText size={13} color="#15803D" />
+              <a href={printPdfUrl} target="_blank" rel="noreferrer" style={{ fontSize: 12, color: '#15803D', fontWeight: 500 }}>Open Release Document</a>
+            </div>
+          )}
+          {printError && (
+            <div style={{ padding: '6px 10px', background: '#FEF3C7', border: '1px solid #FDE68A', borderRadius: 8, marginTop: 6 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <AlertTriangle size={13} color="#B45309" />
+                <span style={{ fontSize: 12, color: '#92400E' }}>{printError}</span>
+              </div>
+              {printPdfUrl && (
+                <a href={printPdfUrl} target="_blank" rel="noreferrer" style={{ fontSize: 12, color: '#B45309', fontWeight: 500, marginTop: 4, display: 'inline-block' }}>Open PDF directly</a>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Cancel result card */}
+        {cancelResult && cancelResult.success && (
+          <div style={{ padding: '14px 20px', borderTop: `1px solid ${theme.colors.border}`, flexShrink: 0 }}>
+            <div style={{ padding: '12px 14px', background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: 10, marginBottom: 10 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+                <X size={16} color="#DC2626" />
+                <span style={{ fontSize: 13, fontWeight: 600, color: '#DC2626' }}>{cancelResult.skipped ? 'Already cancelled' : 'Will call cancelled'}</span>
+              </div>
+              <div style={{ fontSize: 12, color: '#991B1B' }}>
+                {cancelResult.itemsCancelled != null && <div>{cancelResult.itemsCancelled} item(s) cancelled</div>}
+                <div>Email: {cancelResult.emailSent ? '✓ Sent' : '✗ Not sent'}</div>
+              </div>
+              {cancelResult.warnings && cancelResult.warnings.length > 0 && (
+                <div style={{ marginTop: 6, padding: '4px 8px', background: '#FEF3C7', borderRadius: 6 }}>
+                  {cancelResult.warnings.map((w, i) => <div key={i} style={{ fontSize: 11, color: '#92400E' }}>⚠ {w}</div>)}
+                </div>
+              )}
+            </div>
+            <button onClick={onClose} style={{ width: '100%', padding: '10px', fontSize: 13, fontWeight: 600, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', fontFamily: 'inherit', color: theme.colors.textSecondary }}>Close</button>
+          </div>
+        )}
+
+        {/* Footer */}
+        {!cancelResult && <div style={{ padding: '14px 20px', borderTop: `1px solid ${theme.colors.border}`, flexShrink: 0 }}>
+          {/* Error banner */}
+          {(releaseError || cancelError) && (
+            <div style={{ marginBottom: 10, padding: '8px 12px', background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: 8, fontSize: 12, color: '#DC2626', display: 'flex', alignItems: 'flex-start', gap: 6 }}>
+              <AlertTriangle size={13} style={{ flexShrink: 0, marginTop: 1 }} />
+              <span>{releaseError || cancelError}</span>
+            </div>
+          )}
+          {isActive && !releaseResult ? (
+            <WriteButton
+              label={releasing ? 'Releasing...' : 'Release All Items'}
+              variant="primary"
+              icon={releasing ? <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} /> : <CheckCircle2 size={16} />}
+              disabled={releasing}
+              style={{ width: '100%', padding: '10px', fontSize: 13, background: '#15803D', opacity: releasing ? 0.7 : 1 }}
+              onClick={() => handleRelease(allItemIds)}
+            />
+          ) : (
+            <button onClick={onClose} style={{ width: '100%', padding: '10px', fontSize: 13, fontWeight: 600, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', fontFamily: 'inherit', color: theme.colors.textSecondary }}>
+              {releaseResult ? 'Done' : 'Close'}
+            </button>
+          )}
+        </div>}
+      </div>
+      <style>{`@keyframes slideIn { from { transform: translateX(100%); } to { transform: translateX(0); } }`}</style>
+    </>
+  );
+}

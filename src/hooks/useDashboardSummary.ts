@@ -1,0 +1,94 @@
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { fetchBatchSummary, setNextFetchNoCache } from '../lib/api';
+import type { SummaryTask, SummaryRepair, SummaryWillCall } from '../lib/api';
+import { fetchDashboardSummaryFromSupabase, isSupabaseCacheAvailable } from '../lib/supabaseQueries';
+import type { ClientNameMap } from '../lib/supabaseQueries';
+import { useClients } from './useClients';
+
+export type { SummaryTask, SummaryRepair, SummaryWillCall };
+
+export interface UseDashboardSummaryResult {
+  tasks: SummaryTask[];
+  repairs: SummaryRepair[];
+  willCalls: SummaryWillCall[];
+  loading: boolean;
+  error: string | null;
+  refetch: (noCache?: boolean) => void;
+  lastFetched: Date | null;
+}
+
+export function useDashboardSummary(autoFetch = true): UseDashboardSummaryResult {
+  const [tasks, setTasks] = useState<SummaryTask[]>([]);
+  const [repairs, setRepairs] = useState<SummaryRepair[]>([]);
+  const [willCalls, setWillCalls] = useState<SummaryWillCall[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [lastFetched, setLastFetched] = useState<Date | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  const hasFetched = useRef(false);
+  const { clients } = useClients();
+
+  const clientNameMap = useMemo<ClientNameMap>(() => {
+    const map: ClientNameMap = {};
+    for (const c of clients) { map[c.id] = c.name; }
+    return map;
+  }, [clients]);
+
+  const doFetch = useCallback(async (noCache = false) => {
+    // Abort any in-flight request
+    abortRef.current?.abort();
+    const ctrl = new AbortController();
+    abortRef.current = ctrl;
+
+    if (!hasFetched.current) setLoading(true);
+    setError(null);
+
+    try {
+      // Try Supabase read cache first (50-100ms vs 3-44s)
+      if (await isSupabaseCacheAvailable()) {
+        const sbResult = await fetchDashboardSummaryFromSupabase(clientNameMap);
+        if (sbResult && !ctrl.signal.aborted) {
+          setTasks(sbResult.tasks || []);
+          setRepairs(sbResult.repairs || []);
+          setWillCalls(sbResult.willCalls || []);
+          setLastFetched(new Date());
+          hasFetched.current = true;
+          setLoading(false);
+          return;
+        }
+      }
+
+      // Fall back to GAS API
+      const resp = await fetchBatchSummary(ctrl.signal, noCache);
+      if (ctrl.signal.aborted) return;
+      if (resp.ok && resp.data) {
+        setTasks(resp.data.tasks || []);
+        setRepairs(resp.data.repairs || []);
+        setWillCalls(resp.data.willCalls || []);
+        setLastFetched(new Date());
+        hasFetched.current = true;
+      } else if (!resp.ok) {
+        setError(resp.error || 'Failed to load dashboard data');
+      }
+    } catch (err) {
+      if ((err as Error).name === 'AbortError') return;
+      setError(err instanceof Error ? err.message : 'Network error');
+    } finally {
+      if (!ctrl.signal.aborted) setLoading(false);
+    }
+  }, [clientNameMap]);
+
+  // Initial fetch
+  useEffect(() => {
+    if (!autoFetch) return;
+    doFetch(false);
+    return () => { abortRef.current?.abort(); };
+  }, [autoFetch, doFetch]);
+
+  const refetch = useCallback((noCache = false) => {
+    if (noCache) setNextFetchNoCache();
+    doFetch(noCache);
+  }, [doFetch]);
+
+  return { tasks, repairs, willCalls, loading, error, refetch, lastFetched };
+}
