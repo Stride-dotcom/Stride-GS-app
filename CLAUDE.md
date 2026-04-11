@@ -417,7 +417,10 @@ These are the top decisions that affect code generation on every task. For the f
 
 ## Current Versions
 
-- **StrideAPI.gs:** v38.40.0 (Web App v228)
+- **StrideAPI.gs:** v38.44.1 (Web App v234)
+- **Import.gs (client):** v4.2.1 (rolled out to all 6 clients, Web Apps v6–v22)
+- **Emails.gs (client):** v4.2.0 (rolled out to all 6 clients)
+- **Code.gs (client):** v4.6.0 (rolled out to all 6 clients)
 - **StaxAutoPay.gs:** v4.5.0
 - See `Docs/Stride_GS_App_Build_Status.md` for the full per-script version matrix and session history.
 
