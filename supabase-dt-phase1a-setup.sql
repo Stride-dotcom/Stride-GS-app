@@ -39,8 +39,11 @@
 --
 -- PREREQUISITE:
 -- ─────────────────────────────────────────────────────────────
--- Requires public.set_updated_at() trigger function created in
--- supabase-phase1-setup.sql. Run Phase 1 before this script.
+-- Requires both Phase 1 AND Phase 3 setup to have been applied first.
+-- Phase 1 (supabase-phase1-setup.sql) creates the public.set_updated_at()
+-- trigger function used by this script.
+-- Phase 3 (supabase-phase3-setup.sql) creates the public.inventory table
+-- referenced by dt_order_items.inventory_id.
 -- ============================================================
 
 
@@ -343,6 +346,10 @@ CREATE TABLE IF NOT EXISTS public.audit_log (
 
 -- ── 12. Indexes ───────────────────────────────────────────────
 
+-- dt_substatuses
+CREATE INDEX IF NOT EXISTS idx_dt_substatuses_parent_status_id
+  ON public.dt_substatuses (parent_status_id);
+
 -- dt_orders: the core query paths
 CREATE INDEX IF NOT EXISTS idx_dt_orders_tenant
   ON public.dt_orders (tenant_id);
@@ -354,6 +361,10 @@ CREATE INDEX IF NOT EXISTS idx_dt_orders_search
   ON public.dt_orders USING GIN (search_vector);
 CREATE INDEX IF NOT EXISTS idx_dt_orders_pickup_addr
   ON public.dt_orders USING GIN (pickup_address_json jsonb_path_ops);
+CREATE INDEX IF NOT EXISTS idx_dt_orders_dispatch_id
+  ON public.dt_orders (dt_dispatch_id);
+CREATE INDEX IF NOT EXISTS idx_dt_orders_linked_order_id
+  ON public.dt_orders (linked_order_id) WHERE linked_order_id IS NOT NULL;
 
 -- dt_order_items
 CREATE INDEX IF NOT EXISTS idx_dt_order_items_order
@@ -381,9 +392,15 @@ CREATE INDEX IF NOT EXISTS idx_dt_webhook_processed
 CREATE INDEX IF NOT EXISTS idx_dt_webhook_retention
   ON public.dt_webhook_events (retention_until);
 
+-- dt_credentials
+CREATE UNIQUE INDEX IF NOT EXISTS idx_dt_credentials_singleton
+  ON public.dt_credentials ((true));
+
 -- dt_orders_quarantine
 CREATE INDEX IF NOT EXISTS idx_dt_quarantine_status
   ON public.dt_orders_quarantine (status);
+CREATE INDEX IF NOT EXISTS idx_dt_orders_quarantine_promoted_to_order_id
+  ON public.dt_orders_quarantine (promoted_to_order_id) WHERE promoted_to_order_id IS NOT NULL;
 
 -- audit_log
 CREATE INDEX IF NOT EXISTS idx_audit_log_entity
@@ -416,7 +433,11 @@ CREATE OR REPLACE TRIGGER dt_credentials_updated_at
 -- Staff/internal notes do NOT update the preview.
 
 CREATE OR REPLACE FUNCTION public.dt_update_order_note_preview()
-RETURNS TRIGGER AS $$
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path = public, pg_temp
+AS $$
 BEGIN
   IF NEW.visibility = 'public' THEN
     UPDATE public.dt_orders
@@ -426,7 +447,7 @@ BEGIN
   END IF;
   RETURN NEW;
 END;
-$$ LANGUAGE plpgsql;
+$$;
 
 CREATE OR REPLACE TRIGGER dt_order_notes_preview
   AFTER INSERT ON public.dt_order_notes
@@ -454,36 +475,45 @@ ALTER TABLE public.audit_log            ENABLE ROW LEVEL SECURITY;
 -- Public reference data; any authenticated user may read.
 -- service_role manages inserts/updates (new DT API versions).
 
+DROP POLICY IF EXISTS "dt_statuses_select_all" ON public.dt_statuses;
 CREATE POLICY "dt_statuses_select_all" ON public.dt_statuses
   FOR SELECT TO authenticated USING (true);
 
+DROP POLICY IF EXISTS "dt_statuses_service_all" ON public.dt_statuses;
 CREATE POLICY "dt_statuses_service_all" ON public.dt_statuses
   FOR ALL TO service_role USING (true) WITH CHECK (true);
 
+DROP POLICY IF EXISTS "dt_substatuses_select_all" ON public.dt_substatuses;
 CREATE POLICY "dt_substatuses_select_all" ON public.dt_substatuses
   FOR SELECT TO authenticated USING (true);
 
+DROP POLICY IF EXISTS "dt_substatuses_service_all" ON public.dt_substatuses;
 CREATE POLICY "dt_substatuses_service_all" ON public.dt_substatuses
   FOR ALL TO service_role USING (true) WITH CHECK (true);
 
 -- DT_ORDERS
+DROP POLICY IF EXISTS "dt_orders_select_staff" ON public.dt_orders;
 CREATE POLICY "dt_orders_select_staff" ON public.dt_orders
   FOR SELECT TO authenticated
   USING ((auth.jwt()->'user_metadata'->>'role') IN ('admin', 'staff'));
 
+DROP POLICY IF EXISTS "dt_orders_select_client" ON public.dt_orders;
 CREATE POLICY "dt_orders_select_client" ON public.dt_orders
   FOR SELECT TO authenticated
   USING (tenant_id = (auth.jwt()->'user_metadata'->>'clientSheetId'));
 
+DROP POLICY IF EXISTS "dt_orders_service_all" ON public.dt_orders;
 CREATE POLICY "dt_orders_service_all" ON public.dt_orders
   FOR ALL TO service_role USING (true) WITH CHECK (true);
 
 -- DT_ORDER_ITEMS
 -- No tenant_id column; client access joins back to dt_orders.
+DROP POLICY IF EXISTS "dt_order_items_select_staff" ON public.dt_order_items;
 CREATE POLICY "dt_order_items_select_staff" ON public.dt_order_items
   FOR SELECT TO authenticated
   USING ((auth.jwt()->'user_metadata'->>'role') IN ('admin', 'staff'));
 
+DROP POLICY IF EXISTS "dt_order_items_select_client" ON public.dt_order_items;
 CREATE POLICY "dt_order_items_select_client" ON public.dt_order_items
   FOR SELECT TO authenticated
   USING (EXISTS (
@@ -492,14 +522,17 @@ CREATE POLICY "dt_order_items_select_client" ON public.dt_order_items
       AND  o.tenant_id = (auth.jwt()->'user_metadata'->>'clientSheetId')
   ));
 
+DROP POLICY IF EXISTS "dt_order_items_service_all" ON public.dt_order_items;
 CREATE POLICY "dt_order_items_service_all" ON public.dt_order_items
   FOR ALL TO service_role USING (true) WITH CHECK (true);
 
 -- DT_ORDER_HISTORY
+DROP POLICY IF EXISTS "dt_order_history_select_staff" ON public.dt_order_history;
 CREATE POLICY "dt_order_history_select_staff" ON public.dt_order_history
   FOR SELECT TO authenticated
   USING ((auth.jwt()->'user_metadata'->>'role') IN ('admin', 'staff'));
 
+DROP POLICY IF EXISTS "dt_order_history_select_client" ON public.dt_order_history;
 CREATE POLICY "dt_order_history_select_client" ON public.dt_order_history
   FOR SELECT TO authenticated
   USING (EXISTS (
@@ -508,15 +541,18 @@ CREATE POLICY "dt_order_history_select_client" ON public.dt_order_history
       AND  o.tenant_id = (auth.jwt()->'user_metadata'->>'clientSheetId')
   ));
 
+DROP POLICY IF EXISTS "dt_order_history_service_all" ON public.dt_order_history;
 CREATE POLICY "dt_order_history_service_all" ON public.dt_order_history
   FOR ALL TO service_role USING (true) WITH CHECK (true);
 
 -- DT_ORDER_PHOTOS
 -- Clients only see photos marked visible_in_portal = true.
+DROP POLICY IF EXISTS "dt_order_photos_select_staff" ON public.dt_order_photos;
 CREATE POLICY "dt_order_photos_select_staff" ON public.dt_order_photos
   FOR SELECT TO authenticated
   USING ((auth.jwt()->'user_metadata'->>'role') IN ('admin', 'staff'));
 
+DROP POLICY IF EXISTS "dt_order_photos_select_client" ON public.dt_order_photos;
 CREATE POLICY "dt_order_photos_select_client" ON public.dt_order_photos
   FOR SELECT TO authenticated
   USING (
@@ -528,15 +564,18 @@ CREATE POLICY "dt_order_photos_select_client" ON public.dt_order_photos
     )
   );
 
+DROP POLICY IF EXISTS "dt_order_photos_service_all" ON public.dt_order_photos;
 CREATE POLICY "dt_order_photos_service_all" ON public.dt_order_photos
   FOR ALL TO service_role USING (true) WITH CHECK (true);
 
 -- DT_ORDER_NOTES
 -- Clients only see visibility='public' notes.
+DROP POLICY IF EXISTS "dt_order_notes_select_staff" ON public.dt_order_notes;
 CREATE POLICY "dt_order_notes_select_staff" ON public.dt_order_notes
   FOR SELECT TO authenticated
   USING ((auth.jwt()->'user_metadata'->>'role') IN ('admin', 'staff'));
 
+DROP POLICY IF EXISTS "dt_order_notes_select_client" ON public.dt_order_notes;
 CREATE POLICY "dt_order_notes_select_client" ON public.dt_order_notes
   FOR SELECT TO authenticated
   USING (
@@ -548,38 +587,47 @@ CREATE POLICY "dt_order_notes_select_client" ON public.dt_order_notes
     )
   );
 
+DROP POLICY IF EXISTS "dt_order_notes_service_all" ON public.dt_order_notes;
 CREATE POLICY "dt_order_notes_service_all" ON public.dt_order_notes
   FOR ALL TO service_role USING (true) WITH CHECK (true);
 
 -- DT_WEBHOOK_EVENTS — staff/admin only; clients never see raw webhooks
+DROP POLICY IF EXISTS "dt_webhook_events_select_staff" ON public.dt_webhook_events;
 CREATE POLICY "dt_webhook_events_select_staff" ON public.dt_webhook_events
   FOR SELECT TO authenticated
   USING ((auth.jwt()->'user_metadata'->>'role') IN ('admin', 'staff'));
 
+DROP POLICY IF EXISTS "dt_webhook_events_service_all" ON public.dt_webhook_events;
 CREATE POLICY "dt_webhook_events_service_all" ON public.dt_webhook_events
   FOR ALL TO service_role USING (true) WITH CHECK (true);
 
 -- DT_CREDENTIALS — admin only (contains encrypted API token + webhook secret)
+DROP POLICY IF EXISTS "dt_credentials_select_admin" ON public.dt_credentials;
 CREATE POLICY "dt_credentials_select_admin" ON public.dt_credentials
   FOR SELECT TO authenticated
   USING ((auth.jwt()->'user_metadata'->>'role') = 'admin');
 
+DROP POLICY IF EXISTS "dt_credentials_service_all" ON public.dt_credentials;
 CREATE POLICY "dt_credentials_service_all" ON public.dt_credentials
   FOR ALL TO service_role USING (true) WITH CHECK (true);
 
 -- DT_ORDERS_QUARANTINE — admin/staff only (unmapped orders; ops review)
+DROP POLICY IF EXISTS "dt_quarantine_select_staff" ON public.dt_orders_quarantine;
 CREATE POLICY "dt_quarantine_select_staff" ON public.dt_orders_quarantine
   FOR SELECT TO authenticated
   USING ((auth.jwt()->'user_metadata'->>'role') IN ('admin', 'staff'));
 
+DROP POLICY IF EXISTS "dt_quarantine_service_all" ON public.dt_orders_quarantine;
 CREATE POLICY "dt_quarantine_service_all" ON public.dt_orders_quarantine
   FOR ALL TO service_role USING (true) WITH CHECK (true);
 
 -- AUDIT_LOG — admin/staff read-only
+DROP POLICY IF EXISTS "audit_log_select_staff" ON public.audit_log;
 CREATE POLICY "audit_log_select_staff" ON public.audit_log
   FOR SELECT TO authenticated
   USING ((auth.jwt()->'user_metadata'->>'role') IN ('admin', 'staff'));
 
+DROP POLICY IF EXISTS "audit_log_service_all" ON public.audit_log;
 CREATE POLICY "audit_log_service_all" ON public.audit_log
   FOR ALL TO service_role USING (true) WITH CHECK (true);
 
@@ -609,6 +657,7 @@ VALUES (
 )
 ON CONFLICT (id) DO NOTHING;
 
+DROP POLICY IF EXISTS "dt_pod_photos_select_staff" ON storage.objects;
 CREATE POLICY "dt_pod_photos_select_staff"
   ON storage.objects FOR SELECT TO authenticated
   USING (
@@ -616,6 +665,7 @@ CREATE POLICY "dt_pod_photos_select_staff"
     AND (auth.jwt()->'user_metadata'->>'role') IN ('admin', 'staff')
   );
 
+DROP POLICY IF EXISTS "dt_pod_photos_select_client" ON storage.objects;
 CREATE POLICY "dt_pod_photos_select_client"
   ON storage.objects FOR SELECT TO authenticated
   USING (
@@ -623,6 +673,7 @@ CREATE POLICY "dt_pod_photos_select_client"
     AND (storage.foldername(name))[1] = (auth.jwt()->'user_metadata'->>'clientSheetId')
   );
 
+DROP POLICY IF EXISTS "dt_pod_photos_service_all" ON storage.objects;
 CREATE POLICY "dt_pod_photos_service_all"
   ON storage.objects FOR ALL TO service_role
   USING (bucket_id = 'dt-pod-photos')
