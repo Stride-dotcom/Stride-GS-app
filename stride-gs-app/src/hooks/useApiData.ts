@@ -79,7 +79,26 @@ export function useApiData<T>(
             cacheSet(resolvedKey, result.data);
           }
         } else {
-          setError(result.error || 'Unknown error');
+          const errMsg = result.error || 'Unknown error';
+          setError(errMsg);
+          // Defense in depth (session 60): if the backend rejects the request
+          // as an auth/permission failure, clear the displayed data AND the
+          // cache entry so stale data from a previous user can never leak
+          // through. Transient non-auth errors don't clear — we want the user
+          // to keep seeing their last-good data during a flaky-network blip.
+          const lower = errMsg.toLowerCase();
+          const isAuthFailure =
+            lower.includes('insufficient permissions') ||
+            lower.includes('access denied') ||
+            lower.includes('auth_error') ||
+            lower.includes('unauthorized') ||
+            lower.includes('not authenticated') ||
+            lower.includes('user not found') ||
+            lower.includes('deactivated');
+          if (isAuthFailure) {
+            setData(null);
+            if (resolvedKey) cacheDelete(resolvedKey);
+          }
         }
       })
       .catch((err) => {

@@ -31,6 +31,7 @@ import type { Session, AuthError } from '@supabase/supabase-js';
 import { supabase } from '../lib/supabase';
 import { fetchUserByEmail, setCallerEmail } from '../lib/api';
 import { setSupabaseImpersonating } from '../lib/supabaseQueries';
+import { cacheClearAll } from '../lib/apiCache';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -195,6 +196,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const { user, error } = await resolveUserFromApi(email, loginSource, fullName);
 
       if (error || !user) {
+        // Clear stride_cache_* too so any previous user's cached data can't leak.
+        cacheClearAll();
         clearCache();
         setCallerEmail('');
         setLoginPhase('idle');
@@ -202,6 +205,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setAuthState({ status: 'denied', reason: error || 'Access denied.' });
         return;
       }
+
+      // CRITICAL: clear the API response cache on every successful sign-in so
+      // the previous user's cached clients/inventory/tasks/etc. can never leak
+      // into this session. The cache was keyed globally by action name, NOT by
+      // callerEmail, so without this clear a client-role user inherited the
+      // previous admin's cached data from localStorage on first page paint.
+      // Session 60 fix. See AuthContext write-up in Docs/Archive/Session_History.md.
+      cacheClearAll();
 
       // Cache resolved user for fast subsequent loads (display-only bootstrap)
       localStorage.setItem(AUTH_CACHE_KEY, JSON.stringify(user));
@@ -343,12 +354,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   );
 
   const signOut = useCallback(async () => {
+    // Clear API response cache FIRST so the next user can't inherit data from
+    // this session via localStorage. Session 60 isolation fix.
+    cacheClearAll();
     clearCache();
     setCallerEmail('');
     setImpersonatedUser(null);
     setSupabaseImpersonating(false);
     await supabase.auth.signOut();
     setAuthState({ status: 'unauthenticated' });
+    // Session 60 follow-up — reset the HashRouter URL to root so the Login
+    // screen isn't rendered under a stale #/inventory (or whatever the user
+    // was on) deep link. Without this, logging back in would deep-link the
+    // user into the previous route, which looks to the user like logout
+    // didn't actually take them to the login page. Using replace() so the
+    // back button doesn't restore the logged-in route.
+    try {
+      window.history.replaceState(null, '', '#/');
+    } catch { /* non-browser env (tests) — ignore */ }
   }, [clearCache]);
 
   // ─── Impersonation ─────────────────────────────────────────────────────────
@@ -368,6 +391,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         return { error: error || 'User not found.' };
       }
 
+      // Clear API response cache so the impersonation starts with a clean
+      // slate — the admin's cached data must not leak into the impersonated
+      // client's view. Session 60 isolation fix.
+      cacheClearAll();
       setImpersonatedUser(targetUser);
       setCallerEmail(targetUser.email);
       setSupabaseImpersonating(true);
@@ -378,6 +405,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const exitImpersonation = useCallback(() => {
     const realUser = authState.status === 'authenticated' ? authState.user : null;
+    // Clear API response cache so the impersonated user's data can't leak
+    // back to the real admin's view. Session 60 isolation fix.
+    cacheClearAll();
     setImpersonatedUser(null);
     setSupabaseImpersonating(false);
     if (realUser) {

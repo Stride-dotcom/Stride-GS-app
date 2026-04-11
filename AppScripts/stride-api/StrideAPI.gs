@@ -1,5 +1,18 @@
 /* ===================================================
-   StrideAPI.gs — v38.43.0 — 2026-04-11 02:30 PM PST — Welcome email: auto-send on activation + resend batch + test-send fix + sync fix
+   StrideAPI.gs — v38.44.0 — 2026-04-11 04:45 PM PST — Standalone-client getClients null-scope fix
+   v38.44.0: Fixes handleGetClientsAuthed_ for standalone client users. Their
+   client-selector dropdowns went blank after session 60 deployed useApiData's
+   auth-error cleanup, which correctly honored the error this endpoint was
+   incorrectly returning. Root cause: getAccessibleClientScope_ returns null
+   for standalone single-client users (per its own doc comment: "standalone /
+   child client — single ID handled elsewhere"), but handleGetClientsAuthed_
+   was treating that null as "no access" and returning an AUTH_ERROR. Fix:
+   when the helper returns null, fall back to user.clientSheetId as a
+   single-element scope via parseCSV_ (handles both single and CSV values).
+   Multi-client / parent users still take the helper's multi-id scope path.
+   Symptoms this fixes: dropdown empty on Receiving / CreateWillCallModal /
+   Inventory client picker when logged in as a standalone client. Full-client
+   leakage bug from session 60 is already fixed at the frontend cache layer.
    v38.43.0: Five related changes to the welcome-email path.
    (1) handleTestSendClientTemplates_ CLIENT_TEMPLATES list now includes
    WELCOME_EMAIL + ONBOARDING_EMAIL. Previously the React Email Template Editor
@@ -2921,10 +2934,28 @@ function handleGetClientsAuthed_(callerEmail) {
 
   if (lookup.user.role === "client") {
     var scope = getAccessibleClientScope_(lookup.user);
-    if (!scope || scope.length === 0) {
-      return errorResponse_("Insufficient permissions — parent account required to list clients", "AUTH_ERROR");
+    // v38.44.0 (session 60) — getAccessibleClientScope_ returns null for
+    // STANDALONE single-client users (per its own doc comment: "Returns null
+    // ... or a standalone/child client (single ID handled elsewhere)"). The
+    // old code treated that null as "no access" and errored out, which broke
+    // every client-selector dropdown in the React app for client users and
+    // silently left the dropdown blank after session 60's useApiData auth-error
+    // cleanup. Fix: when scope is null, fall back to the user's own
+    // clientSheetId as a single-element scope so the dropdown shows exactly
+    // one entry (their own client). Multi-client / parent users still go
+    // through the multi-id scope path returned by the helper.
+    if (scope && scope.length > 0) {
+      return handleGetClients_(scope);
     }
-    return handleGetClients_(scope);
+    // Standalone client — use their own clientSheetId
+    var ownId = String(lookup.user.clientSheetId || "").trim();
+    if (!ownId) {
+      return errorResponse_("Client user has no Client Spreadsheet ID configured", "CONFIG_ERROR");
+    }
+    // clientSheetId field can be a comma-separated list for multi-client users
+    // (even though this branch usually means "single"). parseCSV_ handles both.
+    var ownIds = parseCSV_(ownId);
+    return handleGetClients_(ownIds);
   }
 
   return errorResponse_("Insufficient permissions", "AUTH_ERROR");
