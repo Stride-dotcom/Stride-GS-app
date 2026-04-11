@@ -1,0 +1,619 @@
+import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
+import {
+  useReactTable, getCoreRowModel, getSortedRowModel, getFilteredRowModel,
+  flexRender, createColumnHelper,
+  type SortingState,
+} from '@tanstack/react-table';
+import {
+  ClipboardList, Wrench, Truck, RefreshCw, Settings2, X,
+  ChevronUp, ChevronDown, ArrowUpDown,
+} from 'lucide-react';
+import { useVirtualRows } from '../hooks/useVirtualRows';
+import { Card } from '../components/ui/Card';
+import { theme } from '../styles/theme';
+import { isApiConfigured } from '../lib/api';
+import { useDashboardSummary } from '../hooks/useDashboardSummary';
+import type { SummaryTask, SummaryRepair, SummaryWillCall } from '../hooks/useDashboardSummary';
+import { useTablePreferences } from '../hooks/useTablePreferences';
+import { fmtDate } from '../lib/constants';
+import { useIsMobile } from '../hooks/useIsMobile';
+
+// ─── Types ───────────────────────────────────────────────────────────────────
+
+type DashTab = 'tasks' | 'repairs' | 'willcalls';
+
+// ─── Constants ───────────────────────────────────────────────────────────────
+
+const POLL_INTERVAL_MS = 10_000;
+
+const DEFAULT_TASK_STATUSES = ['Open', 'In Progress'];
+const DEFAULT_REPAIR_STATUSES = ['Pending Quote', 'Quote Sent', 'Approved', 'In Progress'];
+const DEFAULT_WC_STATUSES = ['Pending', 'Scheduled', 'Partial'];
+
+const STATUS_CFG: Record<string, { bg: string; text: string }> = {
+  Open: { bg: '#EFF6FF', text: '#1D4ED8' },
+  Completed: { bg: '#F0FDF4', text: '#15803D' },
+  Cancelled: { bg: '#F3F4F6', text: '#6B7280' },
+  'Pending Quote': { bg: '#FEF3C7', text: '#B45309' },
+  'Quote Sent': { bg: '#FEF3EE', text: '#E85D2D' },
+  Approved: { bg: '#F0FDF4', text: '#15803D' },
+  Declined: { bg: '#FEF2F2', text: '#991B1B' },
+  'In Progress': { bg: '#EDE9FE', text: '#7C3AED' },
+  Complete: { bg: '#F0FDF4', text: '#15803D' },
+  Pending: { bg: '#FEF3C7', text: '#B45309' },
+  Scheduled: { bg: '#EFF6FF', text: '#1D4ED8' },
+  Released: { bg: '#F0FDF4', text: '#15803D' },
+  Partial: { bg: '#FEF3EE', text: '#E85D2D' },
+};
+
+const TASK_TYPE_LABELS: Record<string, string> = {
+  INSP: 'Inspection', ASM: 'Assembly', REPAIR: 'Repair', DLVR: 'Delivery',
+  RCVG: 'Receiving', STOR: 'Storage', WCPU: 'Will Call', WC: 'Will Call',
+  MNRTU: 'Touch-Up', OTHER: 'Other',
+};
+
+// ─── Small helpers ────────────────────────────────────────────────────────────
+
+function StatusBadge({ status }: { status: string }) {
+  const c = STATUS_CFG[status] || { bg: '#F3F4F6', text: '#6B7280' };
+  return (
+    <span style={{ display: 'inline-block', padding: '2px 10px', borderRadius: 12, fontSize: 11, fontWeight: 600, background: c.bg, color: c.text, whiteSpace: 'nowrap' }}>
+      {status}
+    </span>
+  );
+}
+
+// ─── StatCard ─────────────────────────────────────────────────────────────────
+
+function StatCard({ icon, label, value, sub, color, onClick }: {
+  icon: React.ReactNode; label: string; value: number; sub?: string; color: string; onClick?: () => void;
+}) {
+  return (
+    <Card onClick={onClick} style={{ display: 'flex', flexDirection: 'column', gap: 10, flex: '1 1 0', minWidth: 140, cursor: onClick ? 'pointer' : undefined, transition: 'box-shadow 0.15s' }}>
+      <div style={{ width: 34, height: 34, borderRadius: 10, background: color + '1A', display: 'flex', alignItems: 'center', justifyContent: 'center', color }}>{icon}</div>
+      <div>
+        <div style={{ fontSize: 28, fontWeight: 700, color: theme.colors.textPrimary, lineHeight: 1 }}>{value}</div>
+        <div style={{ fontSize: 12, color: theme.colors.textSecondary, marginTop: 3 }}>{label}</div>
+        {sub && <div style={{ fontSize: 11, color: theme.colors.textMuted, marginTop: 1 }}>{sub}</div>}
+      </div>
+    </Card>
+  );
+}
+
+// ─── Shared table styles ──────────────────────────────────────────────────────
+
+const thStyle: React.CSSProperties = {
+  padding: '10px 12px', textAlign: 'left', fontWeight: 500, fontSize: 11,
+  color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.05em',
+  borderBottom: `1px solid ${theme.colors.borderLight}`, position: 'sticky', top: 0,
+  background: '#fff', zIndex: 2, cursor: 'pointer', userSelect: 'none', whiteSpace: 'nowrap',
+};
+const tdStyle: React.CSSProperties = {
+  padding: '9px 12px', borderBottom: `1px solid ${theme.colors.borderLight}`, fontSize: 12, whiteSpace: 'nowrap',
+};
+
+function chip(active: boolean): React.CSSProperties {
+  return {
+    padding: '4px 12px', borderRadius: 20, fontSize: 11, fontWeight: 600, cursor: 'pointer',
+    border: `1px solid ${active ? theme.colors.orange : theme.colors.border}`,
+    background: active ? theme.colors.orangeLight : 'transparent',
+    color: active ? theme.colors.orange : theme.colors.textSecondary,
+    transition: 'all 0.15s', whiteSpace: 'nowrap',
+  };
+}
+
+function DragHeader({ h, dragColId, dragOverColId, onDragStart, onDragOver, onDragEnd, sorted }: {
+  h: any; dragColId: string | null; dragOverColId: string | null;
+  onDragStart: () => void; onDragOver: () => void; onDragEnd: () => void; sorted: false | 'asc' | 'desc';
+}) {
+  const isDragTarget = dragOverColId === h.id && dragColId !== h.id;
+  return (
+    <th
+      key={h.id} draggable
+      onDragStart={onDragStart} onDragOver={e => { e.preventDefault(); onDragOver(); }} onDragEnd={onDragEnd}
+      onClick={h.column.getCanSort() ? (e: React.MouseEvent) => h.column.toggleSorting(undefined, e.shiftKey) : undefined}
+      style={{ ...thStyle, width: h.getSize(), color: sorted ? theme.colors.orange : theme.colors.textMuted, cursor: 'grab', background: isDragTarget ? theme.colors.orangeLight : '#fff', borderLeft: isDragTarget ? `2px solid ${theme.colors.orange}` : undefined }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+        {h.isPlaceholder ? null : flexRender(h.column.columnDef.header, h.getContext())}
+        {h.column.getCanSort() && (sorted === 'asc' ? <ChevronUp size={13} color={theme.colors.orange} /> : sorted === 'desc' ? <ChevronDown size={13} color={theme.colors.orange} /> : <ArrowUpDown size={13} color={theme.colors.textMuted} />)}
+      </div>
+    </th>
+  );
+}
+
+// ─── Tasks Tab ───────────────────────────────────────────────────────────────
+
+const TASK_DEFAULT_ORDER = ['taskId', 'taskType', 'taskStatus', 'taskItem', 'taskDesc', 'taskLocation', 'taskVendor', 'taskAssigned', 'taskClient', 'taskSidemark', 'taskCreated'];
+const TASK_COL_LABELS: Record<string, string> = { taskId: 'Task ID', taskType: 'Type', taskStatus: 'Status', taskItem: 'Item', taskDesc: 'Description', taskLocation: 'Location', taskVendor: 'Vendor', taskAssigned: 'Assigned', taskClient: 'Client', taskSidemark: 'Sidemark', taskCreated: 'Created' };
+
+function TasksTab({ tasks, onNavigate }: { tasks: SummaryTask[]; onNavigate: (task: SummaryTask) => void }) {
+  const colT = createColumnHelper<SummaryTask>();
+  const { sorting, setSorting, colVis, setColVis, columnOrder, setColumnOrder } = useTablePreferences('dashboard-tasks', [{ id: 'taskCreated', desc: true }], {}, TASK_DEFAULT_ORDER);
+  const [statusFilters, setStatusFilters] = useState<string[]>(DEFAULT_TASK_STATUSES);
+  const [showCols, setShowCols] = useState(false);
+  const [dragColId, setDragColId] = useState<string | null>(null);
+  const [dragOverColId, setDragOverColId] = useState<string | null>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  useEffect(() => { const h = (e: MouseEvent) => { if (menuRef.current && !menuRef.current.contains(e.target as Node)) setShowCols(false); }; document.addEventListener('mousedown', h); return () => document.removeEventListener('mousedown', h); }, []);
+
+  const allStatuses = useMemo(() => [...new Set(tasks.map(t => t.status))].sort(), [tasks]);
+
+  const filtered = useMemo(() => statusFilters.length === 0 ? tasks : tasks.filter(t => statusFilters.includes(t.status)), [tasks, statusFilters]);
+
+  const columns = useMemo(() => [
+    colT.accessor('taskId', { id: 'taskId', header: 'Task ID', size: 110, cell: i => <span style={{ fontWeight: 600, fontSize: 12, fontFamily: 'monospace', color: theme.colors.orange }}>{i.getValue()}</span> }),
+    colT.accessor('taskType', { id: 'taskType', header: 'Type', size: 100, cell: i => <span style={{ fontSize: 12 }}>{TASK_TYPE_LABELS[i.getValue()] || i.getValue() || '—'}</span> }),
+    colT.accessor('status', { id: 'taskStatus', header: 'Status', size: 115, cell: i => <StatusBadge status={i.getValue()} /> }),
+    colT.accessor('itemId', { id: 'taskItem', header: 'Item', size: 90, cell: i => <span style={{ fontSize: 12, color: theme.colors.textSecondary }}>{i.getValue() || '—'}</span> }),
+    colT.accessor('description', { id: 'taskDesc', header: 'Description', size: 200, cell: i => <span style={{ fontSize: 12, maxWidth: 190, overflow: 'hidden', textOverflow: 'ellipsis', display: 'block', color: theme.colors.textSecondary }}>{i.getValue() || '—'}</span> }),
+    colT.accessor('location', { id: 'taskLocation', header: 'Location', size: 90, cell: i => <span style={{ fontSize: 12, fontFamily: 'monospace', color: theme.colors.textSecondary }}>{i.getValue() || '—'}</span> }),
+    colT.accessor('vendor', { id: 'taskVendor', header: 'Vendor', size: 120, cell: i => <span style={{ fontSize: 12, color: theme.colors.textSecondary }}>{i.getValue() || '—'}</span> }),
+    colT.accessor('assignedTo', { id: 'taskAssigned', header: 'Assigned', size: 110, cell: i => <span style={{ fontSize: 12, color: i.getValue() ? theme.colors.text : theme.colors.textMuted }}>{i.getValue() || '—'}</span> }),
+    colT.accessor('clientName', { id: 'taskClient', header: 'Client', size: 140, cell: i => <span style={{ fontSize: 12, fontWeight: 500 }}>{i.getValue()}</span> }),
+    colT.accessor('sidemark', { id: 'taskSidemark', header: 'Sidemark', size: 120, cell: i => <span style={{ fontSize: 12, color: theme.colors.textSecondary }}>{i.getValue() || '—'}</span> }),
+    colT.accessor('created', { id: 'taskCreated', header: 'Created', size: 90, cell: i => <span style={{ fontSize: 12, color: theme.colors.textSecondary }}>{fmtDate(i.getValue())}</span> }),
+  ], [colT]);
+
+  const table = useReactTable({
+    data: filtered, columns,
+    state: { sorting, columnVisibility: colVis, columnOrder: columnOrder.length ? columnOrder : TASK_DEFAULT_ORDER },
+    onSortingChange: setSorting, onColumnVisibilityChange: setColVis,
+    onColumnOrderChange: (upd: React.SetStateAction<SortingState> | any) => setColumnOrder(typeof upd === 'function' ? upd(columnOrder.length ? columnOrder : TASK_DEFAULT_ORDER) : upd),
+    getCoreRowModel: getCoreRowModel(), getSortedRowModel: getSortedRowModel(), getFilteredRowModel: getFilteredRowModel(),
+    enableMultiSort: true,
+  });
+
+  const { containerRef, virtualRows, rows: allRows, totalHeight } = useVirtualRows(table);
+
+  const toggleStatus = (s: string) => setStatusFilters(prev => prev.includes(s) ? prev.filter(x => x !== s) : [...prev, s]);
+
+  return (
+    <div>
+      {/* Toolbar */}
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 10 }}>
+        <div style={{ fontSize: 12, color: theme.colors.textMuted, fontWeight: 500 }}>Status:</div>
+        {allStatuses.map(s => (
+          <button key={s} onClick={() => toggleStatus(s)} style={chip(statusFilters.includes(s))}>{s}</button>
+        ))}
+        {statusFilters.length > 0 && (
+          <button onClick={() => setStatusFilters([])} style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '4px 10px', borderRadius: 20, fontSize: 11, fontWeight: 500, border: `1px solid ${theme.colors.border}`, background: 'transparent', cursor: 'pointer', color: theme.colors.textMuted }}>
+            <X size={11} /> Clear
+          </button>
+        )}
+        <div style={{ flex: 1 }} />
+        <span style={{ fontSize: 12, color: theme.colors.textMuted }}>{filtered.length} task{filtered.length !== 1 ? 's' : ''}</span>
+        <div style={{ position: 'relative' }} ref={menuRef}>
+          <button onClick={() => setShowCols(v => !v)} style={{ padding: '6px 10px', fontSize: 12, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4, fontFamily: 'inherit', color: theme.colors.textSecondary }}>
+            <Settings2 size={13} /> Columns
+          </button>
+          {showCols && (
+            <div style={{ position: 'absolute', top: '100%', right: 0, marginTop: 4, background: '#fff', border: `1px solid ${theme.colors.border}`, borderRadius: 10, padding: 8, zIndex: 50, boxShadow: '0 4px 20px rgba(0,0,0,0.1)', minWidth: 170 }}>
+              {TASK_DEFAULT_ORDER.map(id => (
+                <label key={id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '5px 8px', fontSize: 12, cursor: 'pointer' }}>
+                  <input type="checkbox" checked={colVis[id] !== false} onChange={() => setColVis(v => ({ ...v, [id]: v[id] === false }))} style={{ accentColor: theme.colors.orange }} />
+                  {TASK_COL_LABELS[id]}
+                </label>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Table */}
+      <div style={{ border: `1px solid ${theme.colors.border}`, borderRadius: 10, overflow: 'hidden', background: '#fff' }}>
+        <div ref={containerRef} style={{ overflowY: 'auto', overflowX: 'auto', maxHeight: 'calc(100dvh - 380px)', WebkitOverflowScrolling: 'touch' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+            <thead>
+              {table.getHeaderGroups().map(hg => (
+                <tr key={hg.id}>
+                  {hg.headers.map(h => (
+                    <DragHeader key={h.id} h={h} dragColId={dragColId} dragOverColId={dragOverColId}
+                      onDragStart={() => setDragColId(h.id)} onDragOver={() => setDragOverColId(h.id)}
+                      onDragEnd={() => {
+                        if (dragColId && dragOverColId && dragColId !== dragOverColId) {
+                          const cur = columnOrder.length ? [...columnOrder] : [...TASK_DEFAULT_ORDER];
+                          const from = cur.indexOf(dragColId); const to = cur.indexOf(dragOverColId);
+                          if (from !== -1 && to !== -1) { cur.splice(from, 1); cur.splice(to, 0, dragColId); setColumnOrder(cur); }
+                        }
+                        setDragColId(null); setDragOverColId(null);
+                      }}
+                      sorted={h.column.getIsSorted()}
+                    />
+                  ))}
+                </tr>
+              ))}
+            </thead>
+            <tbody>
+              {virtualRows.length > 0 && <tr style={{ height: virtualRows[0].start }}><td colSpan={table.getVisibleFlatColumns().length} /></tr>}
+              {virtualRows.map(vRow => {
+                const row = allRows[vRow.index];
+                return (
+                  <tr key={row.id} onClick={() => onNavigate(row.original)}
+                    style={{ cursor: 'pointer', transition: 'background 0.1s' }}
+                    onMouseEnter={e => { e.currentTarget.style.background = theme.colors.bgSubtle; }}
+                    onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}
+                  >
+                    {row.getVisibleCells().map(cell => <td key={cell.id} style={tdStyle}>{flexRender(cell.column.columnDef.cell, cell.getContext())}</td>)}
+                  </tr>
+                );
+              })}
+              {virtualRows.length > 0 && <tr style={{ height: totalHeight - (virtualRows[virtualRows.length - 1]?.end ?? 0) }}><td colSpan={table.getVisibleFlatColumns().length} /></tr>}
+            </tbody>
+          </table>
+          {filtered.length === 0 && (
+            <div style={{ padding: 32, textAlign: 'center', color: theme.colors.textMuted, fontSize: 13 }}>
+              {tasks.length === 0 ? 'No tasks found' : 'No tasks match the selected status filters'}
+            </div>
+          )}
+        </div>
+        <div style={{ padding: '6px 16px', borderTop: `1px solid ${theme.colors.borderLight}`, fontSize: 12, color: theme.colors.textMuted }}>
+          {allRows.length} row{allRows.length !== 1 ? 's' : ''}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Repairs Tab ──────────────────────────────────────────────────────────────
+
+const REPAIR_DEFAULT_ORDER = ['repairId', 'repairStatus', 'repairItem', 'repairDesc', 'repairVendor', 'repairQuote', 'repairClient', 'repairCreated'];
+const REPAIR_COL_LABELS: Record<string, string> = { repairId: 'Repair ID', repairStatus: 'Status', repairItem: 'Item', repairDesc: 'Description', repairVendor: 'Repair Vendor', repairQuote: 'Quote', repairClient: 'Client', repairCreated: 'Created' };
+
+function RepairsTab({ repairs, onNavigate }: { repairs: SummaryRepair[]; onNavigate: (repair: SummaryRepair) => void }) {
+  const colR = createColumnHelper<SummaryRepair>();
+  const { sorting, setSorting, colVis, setColVis, columnOrder, setColumnOrder } = useTablePreferences('dashboard-repairs', [{ id: 'repairCreated', desc: true }], {}, REPAIR_DEFAULT_ORDER);
+  const [statusFilters, setStatusFilters] = useState<string[]>(DEFAULT_REPAIR_STATUSES);
+  const [showCols, setShowCols] = useState(false);
+  const [dragColId, setDragColId] = useState<string | null>(null);
+  const [dragOverColId, setDragOverColId] = useState<string | null>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  useEffect(() => { const h = (e: MouseEvent) => { if (menuRef.current && !menuRef.current.contains(e.target as Node)) setShowCols(false); }; document.addEventListener('mousedown', h); return () => document.removeEventListener('mousedown', h); }, []);
+
+  const allStatuses = useMemo(() => [...new Set(repairs.map(r => r.status))].sort(), [repairs]);
+  const filtered = useMemo(() => statusFilters.length === 0 ? repairs : repairs.filter(r => statusFilters.includes(r.status)), [repairs, statusFilters]);
+
+  const columns = useMemo(() => [
+    colR.accessor('repairId', { id: 'repairId', header: 'Repair ID', size: 120, cell: i => <span style={{ fontWeight: 600, fontSize: 12, fontFamily: 'monospace', color: theme.colors.orange }}>{i.getValue()}</span> }),
+    colR.accessor('status', { id: 'repairStatus', header: 'Status', size: 130, cell: i => <StatusBadge status={i.getValue()} /> }),
+    colR.accessor('itemId', { id: 'repairItem', header: 'Item', size: 90, cell: i => <span style={{ fontSize: 12, color: theme.colors.textSecondary }}>{i.getValue() || '—'}</span> }),
+    colR.accessor('description', { id: 'repairDesc', header: 'Description', size: 200, cell: i => <span style={{ fontSize: 12, maxWidth: 190, overflow: 'hidden', textOverflow: 'ellipsis', display: 'block', color: theme.colors.textSecondary }}>{i.getValue() || '—'}</span> }),
+    colR.accessor('vendor', { id: 'repairVendor', header: 'Repair Vendor', size: 130, cell: i => <span style={{ fontSize: 12, color: theme.colors.textSecondary }}>{i.getValue() || '—'}</span> }),
+    colR.accessor('quoteAmount', { id: 'repairQuote', header: 'Quote', size: 80, cell: i => <span style={{ fontSize: 12 }}>{i.getValue() != null ? `$${Number(i.getValue()).toFixed(2)}` : '—'}</span> }),
+    colR.accessor('clientName', { id: 'repairClient', header: 'Client', size: 140, cell: i => <span style={{ fontSize: 12, fontWeight: 500 }}>{i.getValue()}</span> }),
+    colR.accessor('createdDate', { id: 'repairCreated', header: 'Created', size: 90, cell: i => <span style={{ fontSize: 12, color: theme.colors.textSecondary }}>{fmtDate(i.getValue())}</span> }),
+  ], [colR]);
+
+  const table = useReactTable({
+    data: filtered, columns,
+    state: { sorting, columnVisibility: colVis, columnOrder: columnOrder.length ? columnOrder : REPAIR_DEFAULT_ORDER },
+    onSortingChange: setSorting, onColumnVisibilityChange: setColVis,
+    onColumnOrderChange: (upd: any) => setColumnOrder(typeof upd === 'function' ? upd(columnOrder.length ? columnOrder : REPAIR_DEFAULT_ORDER) : upd),
+    getCoreRowModel: getCoreRowModel(), getSortedRowModel: getSortedRowModel(), getFilteredRowModel: getFilteredRowModel(),
+    enableMultiSort: true,
+  });
+
+  const { containerRef, virtualRows, rows: allRows, totalHeight } = useVirtualRows(table);
+  const toggleStatus = (s: string) => setStatusFilters(prev => prev.includes(s) ? prev.filter(x => x !== s) : [...prev, s]);
+
+  return (
+    <div>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 10 }}>
+        <div style={{ fontSize: 12, color: theme.colors.textMuted, fontWeight: 500 }}>Status:</div>
+        {allStatuses.map(s => <button key={s} onClick={() => toggleStatus(s)} style={chip(statusFilters.includes(s))}>{s}</button>)}
+        {statusFilters.length > 0 && (
+          <button onClick={() => setStatusFilters([])} style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '4px 10px', borderRadius: 20, fontSize: 11, fontWeight: 500, border: `1px solid ${theme.colors.border}`, background: 'transparent', cursor: 'pointer', color: theme.colors.textMuted }}>
+            <X size={11} /> Clear
+          </button>
+        )}
+        <div style={{ flex: 1 }} />
+        <span style={{ fontSize: 12, color: theme.colors.textMuted }}>{filtered.length} repair{filtered.length !== 1 ? 's' : ''}</span>
+        <div style={{ position: 'relative' }} ref={menuRef}>
+          <button onClick={() => setShowCols(v => !v)} style={{ padding: '6px 10px', fontSize: 12, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4, fontFamily: 'inherit', color: theme.colors.textSecondary }}>
+            <Settings2 size={13} /> Columns
+          </button>
+          {showCols && (
+            <div style={{ position: 'absolute', top: '100%', right: 0, marginTop: 4, background: '#fff', border: `1px solid ${theme.colors.border}`, borderRadius: 10, padding: 8, zIndex: 50, boxShadow: '0 4px 20px rgba(0,0,0,0.1)', minWidth: 170 }}>
+              {REPAIR_DEFAULT_ORDER.map(id => (
+                <label key={id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '5px 8px', fontSize: 12, cursor: 'pointer' }}>
+                  <input type="checkbox" checked={colVis[id] !== false} onChange={() => setColVis(v => ({ ...v, [id]: v[id] === false }))} style={{ accentColor: theme.colors.orange }} />
+                  {REPAIR_COL_LABELS[id]}
+                </label>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+      <div style={{ border: `1px solid ${theme.colors.border}`, borderRadius: 10, overflow: 'hidden', background: '#fff' }}>
+        <div ref={containerRef} style={{ overflowY: 'auto', overflowX: 'auto', maxHeight: 'calc(100dvh - 380px)', WebkitOverflowScrolling: 'touch' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+            <thead>{table.getHeaderGroups().map(hg => <tr key={hg.id}>{hg.headers.map(h => <DragHeader key={h.id} h={h} dragColId={dragColId} dragOverColId={dragOverColId} onDragStart={() => setDragColId(h.id)} onDragOver={() => setDragOverColId(h.id)} onDragEnd={() => { if (dragColId && dragOverColId && dragColId !== dragOverColId) { const cur = columnOrder.length ? [...columnOrder] : [...REPAIR_DEFAULT_ORDER]; const from = cur.indexOf(dragColId); const to = cur.indexOf(dragOverColId); if (from !== -1 && to !== -1) { cur.splice(from, 1); cur.splice(to, 0, dragColId); setColumnOrder(cur); } } setDragColId(null); setDragOverColId(null); }} sorted={h.column.getIsSorted()} />)}</tr>)}</thead>
+            <tbody>
+              {virtualRows.length > 0 && <tr style={{ height: virtualRows[0].start }}><td colSpan={table.getVisibleFlatColumns().length} /></tr>}
+              {virtualRows.map(vRow => { const row = allRows[vRow.index]; return (<tr key={row.id} onClick={() => onNavigate(row.original)} style={{ cursor: 'pointer', transition: 'background 0.1s' }} onMouseEnter={e => { e.currentTarget.style.background = theme.colors.bgSubtle; }} onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}>{row.getVisibleCells().map(cell => <td key={cell.id} style={tdStyle}>{flexRender(cell.column.columnDef.cell, cell.getContext())}</td>)}</tr>); })}
+              {virtualRows.length > 0 && <tr style={{ height: totalHeight - (virtualRows[virtualRows.length - 1]?.end ?? 0) }}><td colSpan={table.getVisibleFlatColumns().length} /></tr>}
+            </tbody>
+          </table>
+          {filtered.length === 0 && <div style={{ padding: 32, textAlign: 'center', color: theme.colors.textMuted, fontSize: 13 }}>{repairs.length === 0 ? 'No repairs found' : 'No repairs match the selected status filters'}</div>}
+        </div>
+        <div style={{ padding: '6px 16px', borderTop: `1px solid ${theme.colors.borderLight}`, fontSize: 12, color: theme.colors.textMuted }}>{allRows.length} row{allRows.length !== 1 ? 's' : ''}</div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Will Calls Tab ───────────────────────────────────────────────────────────
+
+const WC_DEFAULT_ORDER = ['wcNumber', 'wcStatus', 'wcContact', 'wcItems', 'wcClient', 'wcScheduled', 'wcCreated'];
+const WC_COL_LABELS: Record<string, string> = { wcNumber: 'WC #', wcStatus: 'Status', wcContact: 'Contact', wcItems: 'Items', wcClient: 'Client', wcScheduled: 'Scheduled', wcCreated: 'Created' };
+
+function WillCallsTab({ willCalls, onNavigate }: { willCalls: SummaryWillCall[]; onNavigate: (wc: SummaryWillCall) => void }) {
+  const colW = createColumnHelper<SummaryWillCall>();
+  const { sorting, setSorting, colVis, setColVis, columnOrder, setColumnOrder } = useTablePreferences('dashboard-willcalls', [{ id: 'wcScheduled', desc: false }], {}, WC_DEFAULT_ORDER);
+  const [statusFilters, setStatusFilters] = useState<string[]>(DEFAULT_WC_STATUSES);
+  const [showCols, setShowCols] = useState(false);
+  const [dragColId, setDragColId] = useState<string | null>(null);
+  const [dragOverColId, setDragOverColId] = useState<string | null>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  useEffect(() => { const h = (e: MouseEvent) => { if (menuRef.current && !menuRef.current.contains(e.target as Node)) setShowCols(false); }; document.addEventListener('mousedown', h); return () => document.removeEventListener('mousedown', h); }, []);
+
+  const allStatuses = useMemo(() => [...new Set(willCalls.map(w => w.status))].sort(), [willCalls]);
+  const filtered = useMemo(() => statusFilters.length === 0 ? willCalls : willCalls.filter(w => statusFilters.includes(w.status)), [willCalls, statusFilters]);
+
+  const columns = useMemo(() => [
+    colW.accessor('wcNumber', { id: 'wcNumber', header: 'WC #', size: 110, cell: i => <span style={{ fontWeight: 600, fontSize: 12, fontFamily: 'monospace', color: theme.colors.orange }}>{i.getValue()}</span> }),
+    colW.accessor('status', { id: 'wcStatus', header: 'Status', size: 110, cell: i => <StatusBadge status={i.getValue()} /> }),
+    colW.accessor('pickupParty', { id: 'wcContact', header: 'Contact', size: 140, cell: i => <span style={{ fontSize: 12, fontWeight: 500 }}>{i.getValue() || '—'}</span> }),
+    colW.accessor('itemCount', { id: 'wcItems', header: 'Items', size: 70, cell: i => <span style={{ fontSize: 12 }}>{i.getValue() ?? '—'}</span> }),
+    colW.accessor('clientName', { id: 'wcClient', header: 'Client', size: 140, cell: i => <span style={{ fontSize: 12, fontWeight: 500 }}>{i.getValue()}</span> }),
+    colW.accessor('estPickupDate', { id: 'wcScheduled', header: 'Scheduled', size: 100, cell: i => <span style={{ fontSize: 12, color: theme.colors.textSecondary }}>{fmtDate(i.getValue())}</span> }),
+    colW.accessor('createdDate', { id: 'wcCreated', header: 'Created', size: 90, cell: i => <span style={{ fontSize: 12, color: theme.colors.textSecondary }}>{fmtDate(i.getValue())}</span> }),
+  ], [colW]);
+
+  const table = useReactTable({
+    data: filtered, columns,
+    state: { sorting, columnVisibility: colVis, columnOrder: columnOrder.length ? columnOrder : WC_DEFAULT_ORDER },
+    onSortingChange: setSorting, onColumnVisibilityChange: setColVis,
+    onColumnOrderChange: (upd: any) => setColumnOrder(typeof upd === 'function' ? upd(columnOrder.length ? columnOrder : WC_DEFAULT_ORDER) : upd),
+    getCoreRowModel: getCoreRowModel(), getSortedRowModel: getSortedRowModel(), getFilteredRowModel: getFilteredRowModel(),
+    enableMultiSort: true,
+  });
+
+  const { containerRef, virtualRows, rows: allRows, totalHeight } = useVirtualRows(table);
+  const toggleStatus = (s: string) => setStatusFilters(prev => prev.includes(s) ? prev.filter(x => x !== s) : [...prev, s]);
+
+  return (
+    <div>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 10 }}>
+        <div style={{ fontSize: 12, color: theme.colors.textMuted, fontWeight: 500 }}>Status:</div>
+        {allStatuses.map(s => <button key={s} onClick={() => toggleStatus(s)} style={chip(statusFilters.includes(s))}>{s}</button>)}
+        {statusFilters.length > 0 && (
+          <button onClick={() => setStatusFilters([])} style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '4px 10px', borderRadius: 20, fontSize: 11, fontWeight: 500, border: `1px solid ${theme.colors.border}`, background: 'transparent', cursor: 'pointer', color: theme.colors.textMuted }}>
+            <X size={11} /> Clear
+          </button>
+        )}
+        <div style={{ flex: 1 }} />
+        <span style={{ fontSize: 12, color: theme.colors.textMuted }}>{filtered.length} will call{filtered.length !== 1 ? 's' : ''}</span>
+        <div style={{ position: 'relative' }} ref={menuRef}>
+          <button onClick={() => setShowCols(v => !v)} style={{ padding: '6px 10px', fontSize: 12, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4, fontFamily: 'inherit', color: theme.colors.textSecondary }}>
+            <Settings2 size={13} /> Columns
+          </button>
+          {showCols && (
+            <div style={{ position: 'absolute', top: '100%', right: 0, marginTop: 4, background: '#fff', border: `1px solid ${theme.colors.border}`, borderRadius: 10, padding: 8, zIndex: 50, boxShadow: '0 4px 20px rgba(0,0,0,0.1)', minWidth: 160 }}>
+              {WC_DEFAULT_ORDER.map(id => (
+                <label key={id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '5px 8px', fontSize: 12, cursor: 'pointer' }}>
+                  <input type="checkbox" checked={colVis[id] !== false} onChange={() => setColVis(v => ({ ...v, [id]: v[id] === false }))} style={{ accentColor: theme.colors.orange }} />
+                  {WC_COL_LABELS[id]}
+                </label>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+      <div style={{ border: `1px solid ${theme.colors.border}`, borderRadius: 10, overflow: 'hidden', background: '#fff' }}>
+        <div ref={containerRef} style={{ overflowY: 'auto', overflowX: 'auto', maxHeight: 'calc(100dvh - 380px)', WebkitOverflowScrolling: 'touch' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+            <thead>{table.getHeaderGroups().map(hg => <tr key={hg.id}>{hg.headers.map(h => <DragHeader key={h.id} h={h} dragColId={dragColId} dragOverColId={dragOverColId} onDragStart={() => setDragColId(h.id)} onDragOver={() => setDragOverColId(h.id)} onDragEnd={() => { if (dragColId && dragOverColId && dragColId !== dragOverColId) { const cur = columnOrder.length ? [...columnOrder] : [...WC_DEFAULT_ORDER]; const from = cur.indexOf(dragColId); const to = cur.indexOf(dragOverColId); if (from !== -1 && to !== -1) { cur.splice(from, 1); cur.splice(to, 0, dragColId); setColumnOrder(cur); } } setDragColId(null); setDragOverColId(null); }} sorted={h.column.getIsSorted()} />)}</tr>)}</thead>
+            <tbody>
+              {virtualRows.length > 0 && <tr style={{ height: virtualRows[0].start }}><td colSpan={table.getVisibleFlatColumns().length} /></tr>}
+              {virtualRows.map(vRow => { const row = allRows[vRow.index]; return (<tr key={row.id} onClick={() => onNavigate(row.original)} style={{ cursor: 'pointer', transition: 'background 0.1s' }} onMouseEnter={e => { e.currentTarget.style.background = theme.colors.bgSubtle; }} onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}>{row.getVisibleCells().map(cell => <td key={cell.id} style={tdStyle}>{flexRender(cell.column.columnDef.cell, cell.getContext())}</td>)}</tr>); })}
+              {virtualRows.length > 0 && <tr style={{ height: totalHeight - (virtualRows[virtualRows.length - 1]?.end ?? 0) }}><td colSpan={table.getVisibleFlatColumns().length} /></tr>}
+            </tbody>
+          </table>
+          {filtered.length === 0 && <div style={{ padding: 32, textAlign: 'center', color: theme.colors.textMuted, fontSize: 13 }}>{willCalls.length === 0 ? 'No will calls found' : 'No will calls match the selected status filters'}</div>}
+        </div>
+        <div style={{ padding: '6px 16px', borderTop: `1px solid ${theme.colors.borderLight}`, fontSize: 12, color: theme.colors.textMuted }}>{allRows.length} row{allRows.length !== 1 ? 's' : ''}</div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Dashboard ────────────────────────────────────────────────────────────────
+
+export function Dashboard() {
+  const { isMobile, isExtraSmall } = useIsMobile();
+  const navigate = useNavigate();
+  const apiConfigured = isApiConfigured();
+
+  // Active tab — sessionStorage, default 'tasks' on fresh login
+  const [activeTab, setActiveTab] = useState<DashTab>(() => {
+    const saved = sessionStorage.getItem('dash_active_tab');
+    return (saved as DashTab) || 'tasks';
+  });
+
+  // Lazy-load: only fetch data for tabs that have been visited
+  const [tabsLoaded, setTabsLoaded] = useState<Record<DashTab, boolean>>({
+    tasks: true, repairs: false, willcalls: false,
+  });
+
+  const handleTabChange = useCallback((tab: DashTab) => {
+    setActiveTab(tab);
+    setTabsLoaded(prev => ({ ...prev, [tab]: true }));
+    sessionStorage.setItem('dash_active_tab', tab);
+  }, []);
+
+  // Single hook fetches all three tab datasets
+  const { tasks, repairs, willCalls, loading, error, refetch, lastFetched } = useDashboardSummary(apiConfigured);
+
+  // ── 10-second polling ────────────────────────────────────────────────────────
+  const [refreshing, setRefreshing] = useState(false);
+
+  useEffect(() => {
+    if (!apiConfigured) return;
+    const poll = setInterval(() => {
+      if (document.hidden) return; // skip background tabs
+      refetch(false); // hits server cache when warm (~2–4s)
+    }, POLL_INTERVAL_MS);
+    return () => clearInterval(poll);
+  }, [apiConfigured, refetch]);
+
+  // Resume polling when tab becomes visible again
+  useEffect(() => {
+    const handleVisible = () => {
+      if (!document.hidden && apiConfigured) refetch(false);
+    };
+    document.addEventListener('visibilitychange', handleVisible);
+    return () => document.removeEventListener('visibilitychange', handleVisible);
+  }, [apiConfigured, refetch]);
+
+  // Manual sync — bypasses server cache
+  const handleManualSync = useCallback(() => {
+    setRefreshing(true);
+    refetch(true); // noCache=true → bypasses 60s server-side CacheService
+    setTimeout(() => setRefreshing(false), 3000);
+  }, [refetch]);
+
+  // Relative time display
+  const [_tick, setTick] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => setTick(n => n + 1), 30_000);
+    return () => clearInterval(t);
+  }, []);
+
+  const lastSyncedLabel = useMemo(() => {
+    if (!lastFetched) return null;
+    const sec = Math.round((Date.now() - lastFetched.getTime()) / 1000);
+    if (sec < 60) return `${sec}s ago`;
+    return `${Math.round(sec / 60)}m ago`;
+  }, [lastFetched, _tick]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Stat cards ───────────────────────────────────────────────────────────────
+  const stats = useMemo(() => ({
+    openTasks: tasks.filter(t => t.status === 'Open' || t.status === 'In Progress').length,
+    openRepairs: repairs.filter(r => !['Complete', 'Cancelled', 'Declined'].includes(r.status)).length,
+    pendingWCs: willCalls.filter(w => ['Pending', 'Scheduled', 'Partial'].includes(w.status)).length,
+  }), [tasks, repairs, willCalls]);
+
+  // ── Row click navigation ──────────────────────────────────────────────────────
+  const handleTaskNav = useCallback((task: SummaryTask) => {
+    navigate('/tasks', { state: { openTaskId: task.taskId, clientSheetId: task.clientSheetId } });
+  }, [navigate]);
+
+  const handleRepairNav = useCallback((repair: SummaryRepair) => {
+    navigate('/repairs', { state: { openRepairId: repair.repairId, clientSheetId: repair.clientSheetId } });
+  }, [navigate]);
+
+  const handleWcNav = useCallback((wc: SummaryWillCall) => {
+    navigate('/will-calls', { state: { openWcId: wc.wcNumber, clientSheetId: wc.clientSheetId } });
+  }, [navigate]);
+
+  // ── Loading / error states ────────────────────────────────────────────────────
+  if (loading && tasks.length === 0 && repairs.length === 0 && willCalls.length === 0) {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '60vh', gap: 14 }}>
+        <div style={{ width: 32, height: 32, border: `3px solid #E5E7EB`, borderTopColor: theme.colors.orange, borderRadius: '50%', animation: 'spin 0.8s linear infinite' }} />
+        <div style={{ textAlign: 'center' }}>
+          <div style={{ fontSize: 14, fontWeight: 600, color: theme.colors.textPrimary }}>Loading Dashboard</div>
+          <div style={{ fontSize: 12, color: theme.colors.textMuted, marginTop: 4 }}>Fetching open jobs across all clients…</div>
+        </div>
+        <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+      </div>
+    );
+  }
+
+  const TAB_DEFS: { id: DashTab; label: string; icon: React.ReactNode; count: number }[] = [
+    { id: 'tasks', label: 'Tasks', icon: <ClipboardList size={14} />, count: tasks.filter(t => t.status === 'Open' || t.status === 'In Progress').length },
+    { id: 'repairs', label: 'Repairs', icon: <Wrench size={14} />, count: repairs.filter(r => !['Complete', 'Cancelled', 'Declined'].includes(r.status)).length },
+    { id: 'willcalls', label: 'Will Calls', icon: <Truck size={14} />, count: willCalls.filter(w => ['Pending', 'Scheduled', 'Partial'].includes(w.status)).length },
+  ];
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+      <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+
+      {/* Header */}
+      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }}>
+        <div>
+          <h1 style={{ fontSize: 22, fontWeight: 700, letterSpacing: '-0.3px', margin: 0 }}>Dashboard</h1>
+          <p style={{ fontSize: 13, color: theme.colors.textMuted, marginTop: 2, marginBottom: 0 }}>Open jobs across all clients</p>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          {lastSyncedLabel && <span style={{ fontSize: 11, color: theme.colors.textMuted }}>Updated {lastSyncedLabel}</span>}
+          <button onClick={handleManualSync} title="Force refresh (bypass cache)" style={{ padding: '6px 10px', fontSize: 12, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6, fontFamily: 'inherit', color: refreshing ? theme.colors.orange : theme.colors.textSecondary }}>
+            <RefreshCw size={13} style={refreshing ? { animation: 'spin 1s linear infinite' } : undefined} />
+            {!isMobile && 'Sync'}
+          </button>
+        </div>
+      </div>
+
+      {/* Error banner */}
+      {error && (
+        <div style={{ background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: 8, padding: '10px 14px', fontSize: 13, color: '#DC2626' }}>
+          {error}
+        </div>
+      )}
+
+      {/* Stat Cards */}
+      <div style={{ display: 'grid', gap: 14, gridTemplateColumns: isExtraSmall ? '1fr' : isMobile ? '1fr 1fr' : 'repeat(3, 1fr)' }}>
+        <StatCard icon={<ClipboardList size={18} />} label="Open Tasks" value={stats.openTasks} sub="Open + In Progress" color={theme.colors.orange} onClick={() => handleTabChange('tasks')} />
+        <StatCard icon={<Wrench size={18} />} label="Active Repairs" value={stats.openRepairs} sub="Pending quote or approved" color="#7C3AED" onClick={() => handleTabChange('repairs')} />
+        <StatCard icon={<Truck size={18} />} label="Pending Will Calls" value={stats.pendingWCs} sub="Pending · Scheduled · Partial" color="#1D4ED8" onClick={() => handleTabChange('willcalls')} />
+      </div>
+
+      {/* Tabs */}
+      <div>
+        {/* Tab bar */}
+        <div style={{ display: 'flex', gap: 0, borderBottom: `2px solid ${theme.colors.border}`, marginBottom: 16 }}>
+          {TAB_DEFS.map(tab => {
+            const active = activeTab === tab.id;
+            return (
+              <button key={tab.id} onClick={() => handleTabChange(tab.id)} style={{
+                display: 'flex', alignItems: 'center', gap: 6, padding: '10px 18px',
+                fontSize: 13, fontWeight: active ? 600 : 400, fontFamily: 'inherit',
+                background: 'none', border: 'none', cursor: 'pointer',
+                borderBottom: active ? `2px solid ${theme.colors.orange}` : '2px solid transparent',
+                marginBottom: -2,
+                color: active ? theme.colors.orange : theme.colors.textSecondary,
+                transition: 'color 0.15s',
+              }}>
+                {tab.icon}
+                {tab.label}
+                <span style={{
+                  fontSize: 11, fontWeight: 600, padding: '1px 7px', borderRadius: 10,
+                  background: active ? theme.colors.orangeLight : theme.colors.bgSubtle,
+                  color: active ? theme.colors.orange : theme.colors.textMuted,
+                }}>
+                  {tab.count}
+                </span>
+              </button>
+            );
+          })}
+          <div style={{ flex: 1 }} />
+          {loading && <div style={{ display: 'flex', alignItems: 'center', paddingRight: 8 }}><div style={{ width: 14, height: 14, border: `2px solid #E5E7EB`, borderTopColor: theme.colors.orange, borderRadius: '50%', animation: 'spin 0.8s linear infinite' }} /></div>}
+        </div>
+
+        {/* Tab content — render all but hide inactive (preserves scroll/filter state) */}
+        <div style={{ display: activeTab === 'tasks' ? 'block' : 'none' }}>
+          {tabsLoaded.tasks && <TasksTab tasks={tasks} onNavigate={handleTaskNav} />}
+        </div>
+        <div style={{ display: activeTab === 'repairs' ? 'block' : 'none' }}>
+          {tabsLoaded.repairs && <RepairsTab repairs={repairs} onNavigate={handleRepairNav} />}
+        </div>
+        <div style={{ display: activeTab === 'willcalls' ? 'block' : 'none' }}>
+          {tabsLoaded.willcalls && <WillCallsTab willCalls={willCalls} onNavigate={handleWcNav} />}
+        </div>
+      </div>
+    </div>
+  );
+}

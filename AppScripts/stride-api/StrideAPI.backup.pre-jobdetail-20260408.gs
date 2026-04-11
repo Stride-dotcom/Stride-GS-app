@@ -1,0 +1,19358 @@
+/* ===================================================
+   StrideAPI.gs — v38.13.0 — 2026-04-07 4:00 PM PST
+   v38.13.0: Billing report builder — handleGetBilling_ accepts server-side
+            filter params: statusFilter, svcFilter, sidemarkFilter, endDate,
+            clientFilter. Filtered queries bypass CacheService. When no
+            filters passed, behavior unchanged (cached, returns all rows).
+   v38.12.0: Fix campaign update fieldMap key mismatch; add Type+Active to templates
+            from CB Settings and returns file metadata. importIIFFromDrive
+            accepts a Drive file ID, reads the file content, and runs the
+            same stax_parseIIF_ logic as handleImportIIF_. Payments Import
+            tab now shows a file picker from the QB export folder.
+   v38.10.0: Payments Redesign Phase 1 — Invoice management endpoints.
+            handleUpdateStaxInvoice_ — edit due date, amount, customer,
+            notes on PENDING/CREATED invoice rows (admin-only).
+            handleDeleteStaxInvoice_ — mark PENDING rows as DELETED
+            (admin-only, refuses non-PENDING).
+            handleCreateStaxInvoices_ now accepts optional invoiceNos[]
+            array for selective push (only listed invoices get pushed).
+            handleGetStaxInvoices_ returns paymentMethodStatus per
+            customer (cached lookup via stax_getDefaultPaymentMethod_).
+   v38.9.2: Payments Test Mode — Dry Run + Test Invoices.
+            handleCreateTestInvoice_ (admin-only, LockService): inserts a
+            controlled test invoice row ($0.01-$100 cap) into the Invoices
+            tab with Is Test=TRUE and TEST-{timestamp} QB#.
+            handleRunStaxCharges_ + handleChargeSingleInvoice_ accept
+            testMode param — runs full pre-flight validation (Stax API
+            status check, payment method lookup, balance_due) but SKIPS
+            the actual stax_chargeInvoice_() call. No invoice state
+            mutation in dry run. Charge Log gets [DRY RUN] audit entry.
+            handleGetStaxInvoices_ returns isTest field.
+   v38.9.1: Fix Dashboard task Type column — api_appendSummaryTasks_ read
+            r["Task Type"] but actual header is "Type". GAS fallback path
+            (admin impersonation / Supabase unavailable) returned empty.
+   v38.9.0: Bulk action toolbar batch endpoints —
+            batchCancelTasks, batchCancelRepairs, batchCancelWillCalls,
+            batchReassignTasks. Standardized BatchMutationResult response shape
+            across all four (success, processed, succeeded, failed, skipped[],
+            errors[], message). Lightweight status/assignment writes only;
+            heavy side-effect ops (Mark Complete, Send Quote, Schedule, Release)
+            continue to loop existing single-entity endpoints client-side.
+            Bulk WC cancel does NOT send cancellation emails (intentional — a
+            loop of email sends would blow the 6-min execution limit).
+   v38.8.0: PDF generation retry-with-backoff. api_createGoogleDocFromHtml_
+            and api_exportDocAsPdfBlob_ now retry on Drive 403/429/5xx errors
+            with 1s/2s/4s/8s backoff. Fixes the "User rate limit exceeded"
+            warnings on receiving + WC + repair + task PDFs caused by
+            Drive's aggressive burst throttling on files.copy. New helper
+            api_fetchWithRetry_ wraps UrlFetchApp.fetch for any call that
+            needs to survive transient Drive/Docs quota errors.
+   v38.7.0: Discount/surcharge range widened from ±10 to ±100 in
+            api_applyDiscount_ and handleTransferItems_ back-calc. Previously
+            values outside ±10 were silently ignored, so legitimate surcharges
+            like +50% (premium clients) had no effect on billing. New range
+            allows -100% (free) to +100% (2x markup). Existing unbilled ledger
+            rows are NOT retroactively recalculated — only new writes.
+   v38.6.0: Billing rows now carry sidemark. handleGetBilling_ and
+            handleGetBatch_ billing section resolve Item ID → Sidemark from
+            Inventory (Billing_Ledger has no Sidemark column). sbBillingRow_
+            forwards sidemark to Supabase mirror (Postgres ignores until
+            column exists). api_buildInvFieldsByItemMap_ extended with
+            sidemark map.
+   v38.5.0: Inventory-field fallback expanded to Vendor + Description in
+            addition to Shipment #. handleGetTasks_, handleGetRepairs_, and
+            handleGetBatch_ (tasks + repairs loops) backfill all three when
+            the entity row has them blank. New helper
+            api_buildInvFieldsByItemMap_ does it in one sheet read.
+   v38.4.0: Shipment # fallback — handleGetTasks_ and handleGetBatch_ backfill
+            the Tasks shipmentNumber from the linked Inventory row when the
+            Tasks sheet cell is blank (api_buildInvShipmentByItemMap_ helper).
+            customPriceDebug removed (confirmed working).
+   v38.2.0: formatDateTime_ helper. Tasks GET endpoints (handleGetTasks_,
+            handleGetBatch_) + handleStartTask_ now return startedAt /
+            completedAt / cancelledAt as "yyyy-MM-dd HH:mm:ss" so the UI
+            can render date + time.
+   v38.1.0: handleCompleteTask_ accepts inline customPrice in payload —
+            atomically writes the override to Tasks sheet before billing read,
+            so staff don't have to save Custom Price separately first.
+   =================================================== */
+/**
+ * v37.0.0 changes:
+ *   - Deep link email CTAs: api_sendTemplateEmail_ now auto-injects entity-specific
+ *     deep link tokens based on entity IDs present in the token map:
+ *     {{TASK_DEEP_LINK}} = APP_URL/tasks?open=TASK_ID
+ *     {{REPAIR_DEEP_LINK}} = APP_URL/repairs?open=REPAIR_ID
+ *     {{WC_DEEP_LINK}} = APP_URL/will-calls?open=WC_NUMBER
+ *     {{SHIPMENT_DEEP_LINK}} = APP_URL/shipments?open=SHIPMENT_NO
+ *     {{ITEM_DEEP_LINK}} = APP_URL/inventory?open=ITEM_ID
+ *   - Parent transfer access: getClients now allows parent users (returns only their
+ *     accessible clients). New handleGetClientsAuthed_() guard function.
+ *     handleGetClients_() accepts optional scopeIds filter param.
+ *   - Supabase Phase 4 prep: realtime subscription support confirmed working
+ *     (write-through already in place from Phase 3; React subscribes directly
+ *     to cache tables via useSupabaseRealtime hook)
+ */
+/**
+ * v34.0.0 changes:
+ *   - New GET endpoint: getBatchSummary — lightweight cross-client summary for Dashboard
+ *     handleGetBatchSummary_: reads Tasks, Repairs, Will_Calls tabs only; skips
+ *     RichTextValue/folder URL reads entirely; 60s CacheService TTL (vs 600s for full batch).
+ *     Uses summary_version counter (Script Properties) for cache invalidation on any write:
+ *     all write handlers that mutate Tasks/Repairs/Will_Calls now call
+ *     api_bumpSummaryVersion_() to bust the summary cache for all users simultaneously.
+ *   - Returns: { tasks[], repairs[], willCalls[], counts{}, fetchedAt }
+ *   - Columns: only those needed for Dashboard table view (no folder URLs, no notes, no billing)
+ *   - New helpers: handleGetBatchSummary_, api_appendSummaryTasks_,
+ *     api_appendSummaryRepairs_, api_appendSummaryWillCalls_, api_bumpSummaryVersion_,
+ *     api_getSummaryCacheKey_
+ */
+/**
+ * Stride API — Centralized API for the Stride GS App (React UI).
+ *
+ * v21.0.0 changes:
+ *   - Phase 7B: startTask write endpoint (POST) — parity with startTask_() in Tasks.gs + TB
+ *   - handleStartTask_: finds task row by Task ID, creates Drive folder inside shipment
+ *     folder, generates Task Work Order PDF (HTML→Doc→PDF via UrlFetchApp), hyperlinks
+ *     Task ID + Shipment # cells, stamps Started At, writes Assigned To if provided.
+ *   - Idempotent: if Started At set AND Task ID has folder hyperlink → noOp=true.
+ *   - Partial recovery: reuses existing folder URL from Task ID hyperlink if present.
+ *   - New helpers: api_createItemFolder_, api_createGoogleDocFromHtml_,
+ *     api_exportDocAsPdfBlob_, api_getDocTemplateHtml_, api_resolveDocTokens_,
+ *     api_esc_, api_generateTaskWorkOrderPdf_
+ *   - Updated handleGetTasks_: returns startedAt field
+ *
+ * v20.0.0 changes:
+ *   - Phase 8A: In-app maintenance endpoints (staff-only)
+ *   - New endpoint: refreshCaches (POST) — reads Price_List, Class_Map, Email_Templates
+ *     from Master Price List + Locations from CB → writes to each active client's
+ *     Price_Cache, Class_Cache, Email_Template_Cache, Location_Cache tabs directly
+ *     via SpreadsheetApp. No script IDs required.
+ *   - New endpoint: runOnClients (POST) — generic Execution API caller for
+ *     StrideClientUpdateHeadersAndValidations and StrideClientInstallTriggers.
+ *     Reads Script ID from "Script ID" column of CB Clients tab. Uses
+ *     ScriptApp.getOAuthToken() + UrlFetchApp to call each client's bound script.
+ *   - New helpers: api_sheetValues_, api_writeCache_
+ *
+ * v19.0.0 changes:
+ *   - handleOnboardClient_: now auto-creates a client user row in CB Users tab (Active=TRUE)
+ *     after creating the spreadsheet. Skips if user with that email already exists.
+ *   - handleUpdateClient_: now upserts the matching Users row — finds by clientSheetId,
+ *     updates email + clientName if they changed. Creates new row if none found.
+ *   - New helper: api_upsertClientUser_(cbSS, email, clientName, clientSheetId)
+ *
+ * v18.0.0 changes:
+ *   - Sixteenth write endpoint: batchCreateTasks (POST) — mirrors batchCreateTasks_ from Tasks.gs
+ *     handleBatchCreateTasks_: takes items[] + svcCodes[], creates lightweight task rows,
+ *     batch-writes with lock, updates Inventory Task Notes. Client-isolated.
+ *     Idempotency: skips if open task already exists for itemId+svcCode pair.
+ *   - New helpers: api_buildOpenTaskMap_, api_updateInvTaskNotes_simple_
+ *
+ * v17.0.0 changes:
+ *   - Thirteenth write endpoint: onboardClient (POST) — mirrors onboardNewClient_ from Client_Onboarding.js
+ *     handleOnboardClient_: creates Drive folders (client/Photos/Invoices), copies inventory template,
+ *     writes settings to new sheet, appends row to CB Clients tab. Staff-only.
+ *   - Fourteenth write endpoint: updateClient (POST) — updates CB Clients row + optionally syncs to sheet
+ *     handleUpdateClient_: finds row by spreadsheetId, updates all fields, optional syncToSheet.
+ *   - Fifteenth write endpoint: syncSettings (POST) — mirrors StrideSyncSettingsToClient
+ *     handleSyncSettings_: pushes CB Clients row settings → client sheet Settings tab.
+ *     Supports syncAll or specific clientSheetIds[].
+ *   - handleGetClients_ updated: now also returns contactName and phone fields
+ *   - New helpers: api_writeClientSettings_, api_appendClientRow_, api_updateClientRow_
+ *
+ * v16.0.0 changes:
+ *   - Eleventh write endpoint: createInvoice (POST) — mirrors CB13_commitInvoice
+ *     handleCreateInvoice_: Google Doc template → PDF → Drive → Consolidated_Ledger → client Billing_Ledger → email
+ *     Staff-only (withStaffGuard_). Per-client (one invoice per call). Idempotency via ledgerRowId scan.
+ *   - Twelfth write endpoint: resendInvoiceEmail (POST) — mirrors CB13_resendInvoiceEmail
+ *     handleResendInvoiceEmail_: looks up invoice in Consolidated_Ledger, re-sends PDF by Drive file ID
+ *   - New helpers: api_nextInvoiceNo_, api_money_, api_buildInvoiceLineItems_,
+ *     api_getOrCreateClientInvoiceFolder_, api_writeConsolidatedLedgerRow_,
+ *     api_markClientLedgerInvoiced_, api_emailInvoice_
+ *
+ * v15.0.0 changes:
+ *   - Tenth write endpoint: generateUnbilledReport (POST) — mirrors CB13_generateUnbilledReport
+ *   - handleGenerateUnbilledReport_: reads all active client Billing_Ledgers, returns unbilled rows as JSON
+ *   - Staff-only (withStaffGuard_). Filters: endDate (required), clientFilter, svcFilter, includeStorage
+ *   - Returns { rows, stats } — React app displays inline + offers CSV download (no CB sheet write needed)
+ *   - Sidemark fallback: reads from Inventory if Billing_Ledger row has no sidemark value
+ *
+ * v14.0.0 changes:
+ *   - Ninth write endpoint: generateStorageCharges (POST) — mirrors StrideGenerateStorageCharges
+ *   - handleGenerateStorageCharges_: runs across ALL active CB clients (staff-only)
+ *   - Per client: deletes existing Unbilled STOR rows in range, regenerates with correct rates
+ *   - Rate = Price_Cache base rate × Class_Cache cubic volume × client discount
+ *   - Dedup: skips STOR Task IDs already in Invoiced/Billed/Void rows
+ *   - New date math helpers: api_normalizeDateToMidnight_, api_addDays_, api_maxDate_,
+ *     api_dateDiffDaysInclusive_, api_formatYMD_, api_formatMMDDYY_, api_buildStorTaskId_,
+ *     api_loadClassVolumes_
+ *
+ * v13.0.0 changes:
+ *   - Eighth write endpoint: transferItems (POST) — mirrors TR_executeTransfer
+ *   - handleTransferItems_: transfers Inventory + Billing + Tasks + Repairs across client sheets
+ *   - Validates destination is a known active client via CB Clients tab
+ *   - Duplicate item check (blocks if items already Active/On Hold in destination)
+ *   - Billing rows: re-applies destination discount (reverses source, applies dest)
+ *   - Tasks: transfers active (non-Completed/Cancelled); cancels source
+ *   - Repairs: transfers non-Complete; closes source
+ *   - Email: TRANSFER_RECEIVED to destination client (non-critical)
+ *   - Drive folder copy deferred (requires DriveApp in bound script context)
+ *   - New helper: api_projectRow_ (maps a row from one header schema to another)
+ *
+ * v12.0.0 changes:
+ *   - Seventh write endpoint: processWcRelease (POST) — mirrors StrideProcessReleaseCallback
+ *   - handleProcessWcRelease_: marks items Released on Inventory + WC_Items, billing if not COD
+ *   - Supports full and partial release (partial → creates new WC for remaining items)
+ *   - Idempotency: re-checks WC_Items status inside lock; skips already-released items
+ *   - Email: WILL_CALL_RELEASE to notifEmails + clientEmail (non-critical, no PDF in API)
+ *
+ * v11.0.0 changes:
+ *   - Sixth write endpoint: createWillCall (POST) — mirrors StrideCreateWillCallCallback
+ *   - handleCreateWillCall_: generates WC#, writes Will_Calls + WC_Items, sends WILL_CALL_CREATED email
+ *   - Duplicate-item-on-active-WC check (inside lock)
+ *   - WC fee: api_lookupRate_(WC, itemClass) + api_applyDiscount_ per item
+ *   - COD: isCod flag + codAmount (falls back to totalFee if blank)
+ *   - Total WC Fee: COD override if codAmount ≠ totalFee, else totalFee
+ *   - Drive folder creation deferred (server-side only)
+ *
+ * v10.0.0 changes:
+ *   - Fifth write endpoint: completeRepair (POST) — mirrors processRepairCompletionById_
+ *   - handleCompleteRepair_: Status=Complete, Completed Date, Billing_Ledger REPAIR row
+ *   - Uses finalAmount (payload override) else sheet Final Amount else Quote Amount for billing
+ *   - billingAmount=0 → "Missing Rate" billing exception flag on repair row
+ *   - Email: REPAIR_COMPLETE to CLIENT_EMAIL (non-critical, skipped if ENABLE_NOTIFICATIONS off)
+ *   - Idempotency via "Completion Processed At" column
+ *
+ * v9.0.0 changes:
+ *   - Fourth write endpoint: respondToRepairQuote (POST) — handles both Approve and Decline
+ *   - handleRespondToRepairQuote_: mirrors processRepairApprovalById_ + processRepairDeclinedById_
+ *   - Approve: Status=Approved, Approval Processed At (idempotency), REPAIR_APPROVED email to NOTIFICATION_EMAILS
+ *   - Decline: Status=Declined, Approved=Declined, REPAIR_DECLINED email to NOTIFICATION_EMAILS
+ *   - Drive folder + PDF creation deferred (server-side only — not available in standalone API project)
+ *
+ * v8.0.0 changes:
+ *   - Third write endpoint: sendRepairQuote (POST)
+ *   - New helper: api_sendTemplateEmail_ (reusable — reads template from Master Email_Templates tab)
+ *   - handleSendRepairQuote_: mirrors processRepairQuoteById_ (status update, quote amount, email)
+ *   - Idempotency via "Quote Sent At" column (checked + re-checked inside lock)
+ *   - Email non-critical: warnings returned if template missing or send fails
+ *
+ * v7.0.0 changes:
+ *   - Second write endpoint: completeTask (POST)
+ *   - api_lookupRate_ extended with billIfPass + billIfFail flags
+ *   - New helpers: api_findRowById_, api_findInventoryItem_
+ *   - handleCompleteTask_: mirrors processTaskCompletionById_ (billing, repair creation, disposal release)
+ *   - Email notification deferred (requires sendTemplateEmail_ infrastructure — future phase)
+ *
+ * v6.0.0 changes:
+ *   - First write endpoint: completeShipment (POST)
+ *   - Added doPost handler for write operations
+ *   - Write helpers: api_getHeaderMap_, api_buildRow_, api_getLastDataRow_, api_readSettings_
+ *   - Idempotency via idempotencyKey in Shipment Notes
+ *   - Duplicate Item ID check inside LockService
+ *   - Structured partial failure response
+ *
+ * v5.0.0 changes:
+ *   - User management endpoints: getUserByEmail, getUsers, createUser, updateUser
+ *   - Server-side client isolation: all data endpoints require callerEmail param
+ *     Client users are FORCED to their own clientSheetId (cannot see other clients)
+ *     Staff/admin can optionally filter by clientSheetId or see all
+ *   - Active=FALSE users are blocked from all data endpoints
+ *
+ * Deployment: Web App → Execute as: Me → Who has access: Anyone
+ * Token stored in Script Properties (key: API_TOKEN)
+ *
+ * Architecture:
+ *   - Separate Apps Script project (not bound to any sheet)
+ *   - Reads from CB, Master Price List, and client sheets
+ *   - All responses are JSON via ContentService
+ *   - Token validated on every request except health check
+ *
+ * Endpoints:
+ *   action=health           — health check (no token required)
+ *   action=getClients       — all active clients from CB Clients tab (staff/admin only)
+ *   action=getPricing       — price list + class map from Master Price List (any active user)
+ *   action=getLocations     — warehouse locations from CB Locations tab (any active user)
+ *   action=getInventory     — inventory (server-side client isolation)
+ *   action=getTasks         — tasks (server-side client isolation)
+ *   action=getRepairs       — repairs (server-side client isolation)
+ *   action=getWillCalls     — will calls + items (server-side client isolation)
+ *   action=getShipments     — shipments (server-side client isolation)
+ *   action=getBilling       — billing ledger (server-side client isolation)
+ *   action=getClaims        — claims from CB Claims tab (staff/admin only)
+ *   action=getUserByEmail   — lookup user by email (stamps last login)
+ *   action=getUsers         — list all users (staff/admin only)
+ *   action=createUser       — create a new user (staff/admin only)
+ *   action=updateUser       — update user fields (staff/admin only)
+ *
+ * WRITE ENDPOINTS (POST):
+ *   action=completeShipment        — process shipment: write Shipments+Inventory+Tasks+Billing (client isolation)
+ *   action=completeTask            — complete a task: Status+billing+repair auto-create (client isolation)
+ *   action=sendRepairQuote         — set quote amount + Status=Quote Sent + send REPAIR_QUOTE email (client isolation)
+ *   action=respondToRepairQuote    — Approve or Decline a repair quote: Status update + email (client isolation)
+ *   action=completeRepair          — complete a repair: Status=Complete + billing + REPAIR_COMPLETE email (client isolation)
+ *   action=createWillCall          — create a will call: Will_Calls + WC_Items rows + WILL_CALL_CREATED email (client isolation)
+ *   action=processWcRelease        — release items on a will call: Inventory Released + billing + WILL_CALL_RELEASE email (client isolation)
+ *   action=transferItems           — transfer items between clients: Inventory+Billing+Tasks+Repairs (client isolation)
+ *   action=generateStorageCharges  — generate STOR billing rows for all active clients (staff-only)
+ *   action=generateUnbilledReport  — read all client Billing_Ledgers, return unbilled rows as JSON (staff-only)
+ *
+ * Query format:
+ *   GET  ?token=xxx&action=getInventory&callerEmail=user@example.com
+ *   GET  ?token=xxx&action=getInventory&callerEmail=user@example.com&clientSheetId=abc123
+ *   POST ?token=xxx&action=completeShipment&callerEmail=user@example.com&clientSheetId=abc123
+ *        Body: JSON payload (Content-Type: text/plain)
+ *
+ * Script Properties required:
+ *   API_TOKEN                        — shared secret for auth
+ *   CB_SPREADSHEET_ID                — Consolidated Billing spreadsheet ID
+ *   MASTER_PRICE_LIST_SPREADSHEET_ID — Master Price List spreadsheet ID
+ */
+
+// ─── Configuration ───────────────────────────────────────────────────────────
+
+function prop_(key) {
+  return (PropertiesService.getScriptProperties().getProperty(key) || "").trim();
+}
+
+/**
+ * Rate limiter using CacheService.
+ * Limits a given key to maxPerMinute calls per 60-second window.
+ * Throws on excess — caller should catch and return error response.
+ */
+function rateLimit_(key, maxPerMinute) {
+  var cache = CacheService.getScriptCache();
+  var cacheKey = "rl_" + String(key || "anon");
+  var count = Number(cache.get(cacheKey) || 0);
+  if (count >= (maxPerMinute || 20)) {
+    throw new Error("Rate limit exceeded. Please wait a moment and try again.");
+  }
+  cache.put(cacheKey, String(count + 1), 60);
+}
+
+function jsonResponse_(obj) {
+  return ContentService
+    .createTextOutput(JSON.stringify(obj))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
+function errorResponse_(message, code) {
+  return jsonResponse_({ error: message, code: code || "ERROR" });
+}
+
+// ─── Supabase Auth Helpers ───────────────────────────────────────────────────
+
+/**
+ * Create a Supabase Auth user via Admin API.
+ * Requires Script Properties: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
+ * Returns { success: true, id } or { success: false, error }.
+ * Idempotent: 422 "already registered" is treated as success.
+ */
+function createSupabaseAuthUser_(email) {
+  var supabaseUrl = prop_("SUPABASE_URL");
+  var serviceKey  = prop_("SUPABASE_SERVICE_ROLE_KEY");
+  if (!supabaseUrl || !serviceKey) {
+    Logger.log("createSupabaseAuthUser_: SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY not set — skipping");
+    return { success: false, error: "Supabase not configured" };
+  }
+
+  // Random 32-char password (user will reset via Forgot Password)
+  var tempPassword = Utilities.getUuid().replace(/-/g, "") + "Aa1!";
+
+  var url = supabaseUrl + "/auth/v1/admin/users";
+  var resp = UrlFetchApp.fetch(url, {
+    method: "POST",
+    headers: {
+      "Authorization": "Bearer " + serviceKey,
+      "apikey": serviceKey,
+      "Content-Type": "application/json"
+    },
+    muteHttpExceptions: true,
+    payload: JSON.stringify({
+      email: email.toLowerCase(),
+      password: tempPassword,
+      email_confirm: true
+    })
+  });
+
+  var code = resp.getResponseCode();
+  var body = resp.getContentText();
+
+  if (code === 200 || code === 201) {
+    var result = JSON.parse(body);
+    Logger.log("createSupabaseAuthUser_: created " + email + " (id=" + result.id + ")");
+    return { success: true, id: result.id };
+  }
+
+  // 422 = "User already registered" — treat as success
+  if (code === 422) {
+    Logger.log("createSupabaseAuthUser_: " + email + " already exists in Supabase — OK");
+    return { success: true, id: null, alreadyExists: true };
+  }
+
+  Logger.log("createSupabaseAuthUser_: failed (" + code + ") — " + body);
+  return { success: false, error: "Supabase " + code + ": " + body };
+}
+
+// ─── Supabase Phase 2 Notification Helpers ───────────────────────────────────
+
+/**
+ * Run this function ONCE from the Apps Script editor to set credentials.
+ * Then delete or comment out.
+ */
+function setupSupabaseProperties_() {
+  var props = PropertiesService.getScriptProperties();
+  props.setProperty("SUPABASE_URL",        "https://uqplppugeickmamycpuz.supabase.co");
+  props.setProperty("SUPABASE_SERVICE_ROLE_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVxcGxwcHVnZWlja21hbXljcHV6Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3NDY0MjgxMSwiZXhwIjoyMDkwMjE4ODExfQ.EquOT9vS84saPvd8dfgH4Minff12HAL_EEMqQNH8Rmw");
+  Logger.log("Supabase Script Properties set successfully.");
+}
+
+/**
+ * Insert a confirmed event into gs_sync_events. Best-effort — never throws.
+ * Called after every successful write handler.
+ */
+function notifySupabaseConfirmed_(params) {
+  try {
+    var url = prop_("SUPABASE_URL");
+    var key = prop_("SUPABASE_SERVICE_ROLE_KEY");
+    if (!url || !key) return;
+    var now = new Date().toISOString();
+    UrlFetchApp.fetch(url + "/rest/v1/gs_sync_events", {
+      method: "POST",
+      headers: {
+        "Authorization": "Bearer " + key,
+        "apikey":        key,
+        "Content-Type":  "application/json",
+        "Prefer":        "return=minimal"
+      },
+      payload: JSON.stringify({
+        tenant_id:    params.tenant_id    || "",
+        entity_type:  params.entity_type  || "",
+        entity_id:    params.entity_id    || "",
+        action_type:  params.action_type  || "",
+        sync_status:  "confirmed",
+        requested_by: params.requested_by || "",
+        request_id:   params.request_id   || Utilities.getUuid(),
+        payload:      params.payload      || {},
+        confirmed_at: now,
+        updated_at:   now
+      }),
+      muteHttpExceptions: true
+    });
+  } catch (e) {
+    Logger.log("notifySupabaseConfirmed_ error (non-fatal): " + e);
+  }
+}
+
+/**
+ * Insert a sync_failed event into gs_sync_events. Best-effort — never throws.
+ * Available for GAS-internal failures that React cannot observe (e.g. trigger failures).
+ * NOTE: Do NOT call from synchronous doPost handlers — React's Phase 1 writeSyncFailed()
+ * already handles those cases. Calling from both would create duplicate drawer entries.
+ */
+function notifySupabaseFailed_(params) {
+  try {
+    var url = prop_("SUPABASE_URL");
+    var key = prop_("SUPABASE_SERVICE_ROLE_KEY");
+    if (!url || !key) return;
+    var now = new Date().toISOString();
+    UrlFetchApp.fetch(url + "/rest/v1/gs_sync_events", {
+      method: "POST",
+      headers: {
+        "Authorization": "Bearer " + key,
+        "apikey":        key,
+        "Content-Type":  "application/json",
+        "Prefer":        "return=minimal"
+      },
+      payload: JSON.stringify({
+        tenant_id:     params.tenant_id     || "",
+        entity_type:   params.entity_type   || "",
+        entity_id:     params.entity_id     || "",
+        action_type:   params.action_type   || "",
+        sync_status:   "sync_failed",
+        requested_by:  params.requested_by  || "",
+        request_id:    params.request_id    || Utilities.getUuid(),
+        payload:       params.payload       || {},
+        error_message: params.error_message || "Unknown error",
+        updated_at:    now
+      }),
+      muteHttpExceptions: true
+    });
+  } catch (e) {
+    Logger.log("notifySupabaseFailed_ error (non-fatal): " + e);
+  }
+}
+
+/**
+ * Parse a handler's ContentService response and fire notifySupabaseConfirmed_()
+ * if the operation succeeded. Skips idempotency skips (json.skipped = true).
+ * Called from doPost after each write handler + invalidateClientCache_.
+ *
+ * entity_id falls back to response fields (wcNumber, taskId, repairId) when
+ * the ID is generated inside the handler (e.g. createWillCall).
+ */
+function api_notifySupabase_(response, context) {
+  try {
+    var json = JSON.parse(response.getContent());
+    if (!json || !json.success || json.skipped) return;
+    var ctx = {
+      tenant_id:    context.tenant_id    || "",
+      entity_type:  context.entity_type  || "",
+      entity_id:    context.entity_id    || json.wcNumber || json.taskId || json.repairId || "",
+      action_type:  context.action_type  || "",
+      requested_by: context.requested_by || "",
+      request_id:   context.request_id   || ""
+    };
+    notifySupabaseConfirmed_(ctx);
+  } catch (e) {
+    Logger.log("api_notifySupabase_ error (non-fatal): " + e);
+  }
+}
+
+// ─── Supabase Phase 3 — Read Cache Write-Through ─────────────────────────────
+
+/**
+ * Upsert a single row to a Supabase table. Best-effort, never throws.
+ * Uses UPSERT via Prefer: resolution=merge-duplicates on the table's unique constraint.
+ * @param {string} table - Supabase table name (e.g. "inventory", "tasks")
+ * @param {Object} data - Row data matching the table schema
+ */
+function supabaseUpsert_(table, data) {
+  try {
+    var url = prop_("SUPABASE_URL");
+    var key = prop_("SUPABASE_SERVICE_ROLE_KEY");
+    if (!url || !key) return;
+    var conflictCol = { inventory: "tenant_id,item_id", tasks: "tenant_id,task_id", repairs: "tenant_id,repair_id",
+                        will_calls: "tenant_id,wc_number", shipments: "tenant_id,shipment_number", billing: "tenant_id,ledger_row_id" }[table] || "";
+    var postUrl = url + "/rest/v1/" + table;
+    if (conflictCol) postUrl += "?on_conflict=" + conflictCol;
+    var resp = UrlFetchApp.fetch(postUrl, {
+      method: "POST",
+      headers: {
+        "Authorization": "Bearer " + key,
+        "apikey":        key,
+        "Content-Type":  "application/json",
+        "Prefer":        "resolution=merge-duplicates,return=minimal"
+      },
+      payload: JSON.stringify(data),
+      muteHttpExceptions: true
+    });
+    var code = resp.getResponseCode();
+    if (code < 200 || code >= 300) {
+      Logger.log("supabaseUpsert_ " + table + " HTTP " + code + ": " + resp.getContentText().substring(0, 300));
+    }
+  } catch (e) {
+    Logger.log("supabaseUpsert_ " + table + " error (non-fatal): " + e);
+  }
+}
+
+/**
+ * Batch upsert rows to a Supabase table. Best-effort, never throws.
+ * Sends array of rows in a single POST.
+ * @param {string} table - Supabase table name
+ * @param {Object[]} rows - Array of row objects
+ */
+function supabaseBatchUpsert_(table, rows) {
+  if (!rows || rows.length === 0) return;
+  try {
+    var url = prop_("SUPABASE_URL");
+    var key = prop_("SUPABASE_SERVICE_ROLE_KEY");
+    if (!url || !key) return;
+
+    // Deduplicate rows by unique key (tenant_id + entity_id) — last occurrence wins.
+    // Supabase PostgREST rejects entire batch if duplicates exist for the same unique constraint.
+    var idCol = { inventory: "item_id", tasks: "task_id", repairs: "repair_id",
+                  will_calls: "wc_number", shipments: "shipment_number", billing: "ledger_row_id" }[table];
+    if (idCol) {
+      var seen = {};
+      var deduped = [];
+      for (var d = rows.length - 1; d >= 0; d--) {
+        var dk = rows[d].tenant_id + "|" + rows[d][idCol];
+        if (!seen[dk]) { seen[dk] = true; deduped.unshift(rows[d]); }
+      }
+      rows = deduped;
+    }
+
+    // Unique constraint column per table (for on_conflict parameter)
+    var conflictCol = { inventory: "tenant_id,item_id", tasks: "tenant_id,task_id", repairs: "tenant_id,repair_id",
+                        will_calls: "tenant_id,wc_number", shipments: "tenant_id,shipment_number", billing: "tenant_id,ledger_row_id" }[table] || "";
+
+    // Supabase REST API handles arrays up to ~1000 rows; chunk at 50 for reliability
+    var CHUNK = 50;
+    for (var i = 0; i < rows.length; i += CHUNK) {
+      var chunk = rows.slice(i, i + CHUNK);
+      var postUrl = url + "/rest/v1/" + table;
+      if (conflictCol) postUrl += "?on_conflict=" + conflictCol;
+      var resp = UrlFetchApp.fetch(postUrl, {
+        method: "POST",
+        headers: {
+          "Authorization": "Bearer " + key,
+          "apikey":        key,
+          "Content-Type":  "application/json",
+          "Prefer":        "resolution=merge-duplicates,return=minimal"
+        },
+        payload: JSON.stringify(chunk),
+        muteHttpExceptions: true
+      });
+      var code = resp.getResponseCode();
+      if (code < 200 || code >= 300) {
+        Logger.log("supabaseBatchUpsert_ " + table + " chunk " + i + " HTTP " + code + ": " + resp.getContentText().substring(0, 500));
+        // Retry failed chunk row-by-row to isolate bad rows
+        for (var ri = 0; ri < chunk.length; ri++) {
+          try {
+            var singleResp = UrlFetchApp.fetch(postUrl, {
+              method: "POST",
+              headers: {
+                "Authorization": "Bearer " + key,
+                "apikey":        key,
+                "Content-Type":  "application/json",
+                "Prefer":        "resolution=merge-duplicates,return=minimal"
+              },
+              payload: JSON.stringify([chunk[ri]]),
+              muteHttpExceptions: true
+            });
+            var sc = singleResp.getResponseCode();
+            if (sc < 200 || sc >= 300) {
+              Logger.log("supabaseBatchUpsert_ " + table + " row " + (i + ri) + " HTTP " + sc + ": " + singleResp.getContentText().substring(0, 300));
+            }
+          } catch (rowErr) { /* skip bad row */ }
+        }
+      }
+    }
+  } catch (e) {
+    Logger.log("supabaseBatchUpsert_ " + table + " error (non-fatal): " + e);
+  }
+}
+
+/**
+ * Delete rows from a Supabase table matching a filter. Best-effort, never throws.
+ * @param {string} table - Supabase table name
+ * @param {string} filter - PostgREST filter string (e.g. "tenant_id=eq.xxx&item_id=eq.yyy")
+ */
+function supabaseDelete_(table, filter) {
+  try {
+    var url = prop_("SUPABASE_URL");
+    var key = prop_("SUPABASE_SERVICE_ROLE_KEY");
+    if (!url || !key) return;
+    UrlFetchApp.fetch(url + "/rest/v1/" + table + "?" + filter, {
+      method: "DELETE",
+      headers: {
+        "Authorization": "Bearer " + key,
+        "apikey":        key,
+        "Prefer":        "return=minimal"
+      },
+      muteHttpExceptions: true
+    });
+  } catch (e) {
+    Logger.log("supabaseDelete_ " + table + " error (non-fatal): " + e);
+  }
+}
+
+/**
+ * Build a Supabase inventory row from API response fields.
+ * @param {string} tenantId - clientSheetId
+ * @param {Object} item - inventory item object (API format)
+ */
+function sbInventoryRow_(tenantId, item) {
+  return {
+    tenant_id:       tenantId,
+    item_id:         String(item.itemId || ""),
+    description:     String(item.description || ""),
+    vendor:          String(item.vendor || ""),
+    sidemark:        String(item.sidemark || ""),
+    room:            String(item.room || ""),
+    item_class:      String(item.itemClass || ""),
+    qty:             Number(item.qty) || 1,
+    location:        String(item.location || ""),
+    status:          String(item.status || "Active"),
+    receive_date:    String(item.receiveDate || ""),
+    release_date:    String(item.releaseDate || ""),
+    shipment_number: String(item.shipmentNumber || ""),
+    carrier:         String(item.carrier || ""),
+    tracking_number: String(item.trackingNumber || ""),
+    item_notes:      String(item.itemNotes || ""),
+    reference:       String(item.reference || ""),
+    task_notes:      String(item.taskNotes || ""),
+    item_folder_url: String(item.itemFolderUrl || ""),
+    updated_at:      new Date().toISOString()
+  };
+}
+
+/**
+ * Build a Supabase task row from API response fields.
+ */
+function sbTaskRow_(tenantId, task) {
+  return {
+    tenant_id:          tenantId,
+    task_id:            String(task.taskId || ""),
+    item_id:            String(task.itemId || ""),
+    type:               String(task.svcCode || task.type || ""),
+    status:             String(task.status || "Open"),
+    result:             String(task.result || ""),
+    description:        String(task.description || ""),
+    task_notes:         String(task.taskNotes || ""),
+    item_notes:         String(task.itemNotes || ""),
+    custom_price:       task.customPrice != null ? Number(task.customPrice) : null,
+    created:            String(task.created || ""),
+    completed_at:       String(task.completedAt || ""),
+    assigned_to:        String(task.assignedTo || ""),
+    location:           String(task.location || ""),
+    task_folder_url:    String(task.taskFolderUrl || ""),
+    shipment_folder_url: String(task.shipmentFolderUrl || ""),
+    updated_at:         new Date().toISOString()
+  };
+}
+
+/**
+ * Build a Supabase repair row from API response fields.
+ */
+function sbRepairRow_(tenantId, repair) {
+  return {
+    tenant_id:          tenantId,
+    repair_id:          String(repair.repairId || ""),
+    item_id:            String(repair.itemId || ""),
+    status:             String(repair.status || ""),
+    repair_result:      String(repair.repairResult || ""),
+    quote_amount:       repair.quoteAmount != null ? Number(repair.quoteAmount) : null,
+    final_amount:       repair.finalAmount != null ? Number(repair.finalAmount) : null,
+    repair_vendor:      String(repair.repairVendor || ""),
+    repair_notes:       String(repair.repairNotes || ""),
+    task_notes:         String(repair.taskNotes || ""),
+    item_notes:         String(repair.itemNotes || ""),
+    completed_date:     String(repair.completedDate || ""),
+    repair_folder_url:  String(repair.repairFolderUrl || ""),
+    shipment_folder_url: String(repair.shipmentFolderUrl || ""),
+    task_folder_url:    String(repair.taskFolderUrl || ""),
+    updated_at:         new Date().toISOString()
+  };
+}
+
+/**
+ * Build a Supabase will_call row from API response fields.
+ */
+function sbWillCallRow_(tenantId, wc) {
+  return {
+    tenant_id:             tenantId,
+    wc_number:             String(wc.wcNumber || ""),
+    status:                String(wc.status || "Pending"),
+    carrier:               String(wc.carrier || wc.pickupParty || ""),
+    pickup_party:          String(wc.pickupParty || ""),
+    estimated_pickup_date: String(wc.estimatedPickupDate || ""),
+    notes:                 String(wc.notes || ""),
+    item_count:            Number(wc.itemsCount || wc.itemCount || 0),
+    wc_folder_url:         String(wc.wcFolderUrl || ""),
+    shipment_folder_url:   String(wc.shipmentFolderUrl || ""),
+    updated_at:            new Date().toISOString()
+  };
+}
+
+/**
+ * Build a Supabase shipment row from API response fields.
+ */
+function sbShipmentRow_(tenantId, ship) {
+  return {
+    tenant_id:       tenantId,
+    shipment_number: String(ship.shipmentNumber || ""),
+    receive_date:    String(ship.receiveDate || ""),
+    item_count:      Number(ship.itemCount || 0),
+    carrier:         String(ship.carrier || ""),
+    tracking_number: String(ship.trackingNumber || ""),
+    notes:           String(ship.notes || ""),
+    folder_url:      String(ship.folderUrl || ""),
+    updated_at:      new Date().toISOString()
+  };
+}
+
+/**
+ * Build a Supabase billing row from API response fields.
+ */
+function sbBillingRow_(tenantId, row) {
+  return {
+    tenant_id:       tenantId,
+    ledger_row_id:   String(row.ledgerRowId || ""),
+    status:          String(row.status || "Unbilled"),
+    invoice_no:      String(row.invoiceNo || ""),
+    client_name:     String(row.clientName || row.client || ""),
+    date:            String(row.date || ""),
+    svc_code:        String(row.svcCode || ""),
+    svc_name:        String(row.svcName || ""),
+    category:        String(row.category || ""),
+    item_id:         String(row.itemId || ""),
+    description:     String(row.description || ""),
+    item_class:      String(row.itemClass || ""),
+    qty:             row.qty != null ? Number(row.qty) : null,
+    rate:            row.rate != null ? Number(row.rate) : null,
+    total:           row.total != null ? Number(row.total) : null,
+    task_id:         String(row.taskId || ""),
+    repair_id:       String(row.repairId || ""),
+    shipment_number: String(row.shipmentNo || row.shipmentNumber || ""),
+    item_notes:      String(row.itemNotes || ""),
+    invoice_date:    String(row.invoiceDate || ""),
+    invoice_url:     String(row.invoiceUrl || ""),
+    sidemark:        String(row.sidemark || ""),
+    updated_at:      new Date().toISOString()
+  };
+}
+
+/**
+ * After a write handler succeeds, sync the affected entity to Supabase.
+ * Best-effort — wraps supabaseUpsert_ with entity-specific builders.
+ * @param {string} entityType - "inventory"|"task"|"repair"|"will_call"|"shipment"|"billing"
+ * @param {string} tenantId - clientSheetId
+ * @param {Object} data - entity data in API response format
+ */
+function syncEntityToSupabase_(entityType, tenantId, data) {
+  try {
+    switch (entityType) {
+      case "inventory":
+        supabaseUpsert_("inventory", sbInventoryRow_(tenantId, data));
+        break;
+      case "task":
+        supabaseUpsert_("tasks", sbTaskRow_(tenantId, data));
+        break;
+      case "repair":
+        supabaseUpsert_("repairs", sbRepairRow_(tenantId, data));
+        break;
+      case "will_call":
+        supabaseUpsert_("will_calls", sbWillCallRow_(tenantId, data));
+        break;
+      case "shipment":
+        supabaseUpsert_("shipments", sbShipmentRow_(tenantId, data));
+        break;
+      case "billing":
+        supabaseUpsert_("billing", sbBillingRow_(tenantId, data));
+        break;
+    }
+  } catch (e) {
+    Logger.log("syncEntityToSupabase_ error (non-fatal): " + e);
+  }
+}
+
+/**
+ * Re-read a single entity row from the sheet and sync to Supabase.
+ * Use when the handler modifies data in place and we need to read the final state.
+ * @param {string} entityType - "inventory"|"task"|"repair"|"will_call"|"shipment"|"billing"
+ * @param {string} tenantId - clientSheetId
+ * @param {string} entityId - the entity's ID (Item ID, Task ID, etc.)
+ */
+function resyncEntityToSupabase_(entityType, tenantId, entityId) {
+  try {
+    if (!entityId || !tenantId) return;
+    SpreadsheetApp.flush();
+    var ss = SpreadsheetApp.openById(tenantId);
+    var tabName, idCol;
+    switch (entityType) {
+      case "inventory": tabName = "Inventory"; idCol = "Item ID"; break;
+      case "task":      tabName = "Tasks";     idCol = "Task ID"; break;
+      case "repair":    tabName = "Repairs";   idCol = "Repair ID"; break;
+      case "will_call": tabName = "Will_Calls"; idCol = "WC Number"; break;
+      case "shipment":  tabName = "Shipments"; idCol = "Shipment #"; break;
+      case "billing":   tabName = "Billing_Ledger"; idCol = "Ledger Row ID"; break;
+      default: return;
+    }
+    var sheet = ss.getSheetByName(tabName);
+    if (!sheet) return;
+    var rows = sheetToObjects_(sheet);
+    for (var i = 0; i < rows.length; i++) {
+      if (String(rows[i][idCol] || "").trim() === entityId) {
+        var row = rows[i];
+        switch (entityType) {
+          case "inventory":
+            supabaseUpsert_("inventory", sbInventoryRow_(tenantId, {
+              itemId: entityId, description: row["Description"], vendor: row["Vendor"],
+              sidemark: row["Sidemark"], room: row["Room"], itemClass: row["Class"],
+              qty: row["Qty"], location: row["Location"], status: row["Status"],
+              receiveDate: formatDate_(row["Receive Date"]), releaseDate: formatDate_(row["Release Date"]),
+              shipmentNumber: row["Shipment #"], carrier: row["Carrier"],
+              trackingNumber: row["Tracking #"], itemNotes: row["Item Notes"],
+              reference: row["Reference"], taskNotes: row["Task Notes"]
+            }));
+            break;
+          case "task":
+            supabaseUpsert_("tasks", sbTaskRow_(tenantId, {
+              taskId: entityId, itemId: row["Item ID"], svcCode: row["Svc Code"] || row["Type"],
+              status: row["Status"], result: row["Result"], description: row["Description"],
+              taskNotes: row["Task Notes"], itemNotes: row["Item Notes"],
+              customPrice: row["Custom Price"], created: formatDate_(row["Created"]),
+              completedAt: formatDate_(row["Completed At"]), assignedTo: row["Assigned To"],
+              location: row["Location"]
+            }));
+            break;
+          case "repair":
+            supabaseUpsert_("repairs", sbRepairRow_(tenantId, {
+              repairId: entityId, itemId: row["Item ID"], status: row["Status"],
+              repairResult: row["Repair Result"], quoteAmount: row["Quote Amount"],
+              finalAmount: row["Final Amount"], repairVendor: row["Repair Vendor"],
+              repairNotes: row["Repair Notes"], taskNotes: row["Task Notes"],
+              itemNotes: row["Item Notes"], completedDate: formatDate_(row["Completed Date"])
+            }));
+            break;
+          case "will_call":
+            supabaseUpsert_("will_calls", sbWillCallRow_(tenantId, {
+              wcNumber: entityId, status: row["Status"], pickupParty: row["Pickup Party"],
+              estimatedPickupDate: formatDate_(row["Estimated Pickup Date"]),
+              notes: row["Notes"], itemsCount: row["Items Count"]
+            }));
+            break;
+          case "shipment":
+            supabaseUpsert_("shipments", sbShipmentRow_(tenantId, {
+              shipmentNumber: entityId, receiveDate: formatDate_(row["Receive Date"]),
+              itemCount: row["Item Count"], carrier: row["Carrier"],
+              trackingNumber: row["Tracking #"], notes: row["Shipment Notes"]
+            }));
+            break;
+          case "billing":
+            supabaseUpsert_("billing", sbBillingRow_(tenantId, {
+              ledgerRowId: entityId, status: row["Status"], invoiceNo: row["Invoice #"],
+              clientName: row["Client"], date: formatDate_(row["Date"]),
+              svcCode: row["Svc Code"], svcName: row["Svc Name"], category: row["Category"],
+              itemId: row["Item ID"], description: row["Description"], itemClass: row["Class"],
+              qty: row["Qty"], rate: row["Rate"], total: row["Total"],
+              taskId: row["Task ID"], repairId: row["Repair ID"],
+              shipmentNumber: row["Shipment #"], itemNotes: row["Item Notes"],
+              invoiceDate: formatDate_(row["Invoice Date"]), invoiceUrl: row["Invoice URL"]
+            }));
+            break;
+        }
+        return;
+      }
+    }
+  } catch (e) {
+    Logger.log("resyncEntityToSupabase_ error (non-fatal): " + e);
+  }
+}
+
+/**
+ * Parse a handler's ContentService response; if successful, resync the entity
+ * from the sheet to Supabase. Best-effort, never blocks the response.
+ * @param {Object} r - ContentService response from a write handler
+ * @param {string} entityType - "inventory"|"task"|"repair"|"will_call"|"shipment"|"billing"
+ * @param {string} tenantId - clientSheetId
+ * @param {string|string[]} entityId - single ID or array of IDs to resync
+ */
+function api_writeThrough_(r, entityType, tenantId, entityId) {
+  try {
+    var json = JSON.parse(r.getContent());
+    if (!json || !json.success || json.skipped) return;
+    if (Array.isArray(entityId)) {
+      for (var i = 0; i < entityId.length; i++) {
+        if (entityId[i]) resyncEntityToSupabase_(entityType, tenantId, String(entityId[i]));
+      }
+    } else if (entityId) {
+      resyncEntityToSupabase_(entityType, tenantId, String(entityId));
+    }
+  } catch (e) {
+    Logger.log("api_writeThrough_ error (non-fatal): " + e);
+  }
+}
+
+/**
+ * Full client resync: reads ALL rows for a given entity type from the sheet
+ * and batch-upserts them to Supabase. Used after complex operations that
+ * affect many rows (completeShipment, generateStorageCharges, etc.).
+ * Best-effort, never blocks.
+ */
+function api_fullClientSync_(tenantId, entityTypes) {
+  try {
+    var url = prop_("SUPABASE_URL");
+    var key = prop_("SUPABASE_SERVICE_ROLE_KEY");
+    if (!url || !key) return;
+    var ss = SpreadsheetApp.openById(tenantId);
+
+    for (var t = 0; t < entityTypes.length; t++) {
+      var type = entityTypes[t];
+      switch (type) {
+        case "inventory":
+          var invSheet = ss.getSheetByName("Inventory");
+          if (invSheet) {
+            var invRows = sheetToObjects_(invSheet);
+            var invSb = [];
+            for (var i = 0; i < invRows.length; i++) {
+              var iid = String(invRows[i]["Item ID"] || "").trim();
+              if (!iid) continue;
+              invSb.push(sbInventoryRow_(tenantId, {
+                itemId: iid, description: invRows[i]["Description"], vendor: invRows[i]["Vendor"],
+                sidemark: invRows[i]["Sidemark"], room: invRows[i]["Room"], itemClass: invRows[i]["Class"],
+                qty: invRows[i]["Qty"], location: invRows[i]["Location"], status: invRows[i]["Status"],
+                receiveDate: formatDate_(invRows[i]["Receive Date"]), releaseDate: formatDate_(invRows[i]["Release Date"]),
+                shipmentNumber: invRows[i]["Shipment #"], carrier: invRows[i]["Carrier"],
+                trackingNumber: invRows[i]["Tracking #"], itemNotes: invRows[i]["Item Notes"],
+                reference: invRows[i]["Reference"], taskNotes: invRows[i]["Task Notes"]
+              }));
+            }
+            supabaseBatchUpsert_("inventory", invSb);
+          }
+          break;
+        case "task":
+          var taskSheet = ss.getSheetByName("Tasks");
+          if (taskSheet) {
+            var taskRows = sheetToObjects_(taskSheet);
+            var taskSb = [];
+            for (var j = 0; j < taskRows.length; j++) {
+              var tid = String(taskRows[j]["Task ID"] || "").trim();
+              if (!tid) continue;
+              taskSb.push(sbTaskRow_(tenantId, {
+                taskId: tid, itemId: taskRows[j]["Item ID"], svcCode: taskRows[j]["Svc Code"] || taskRows[j]["Type"],
+                status: taskRows[j]["Status"], result: taskRows[j]["Result"], description: taskRows[j]["Description"],
+                taskNotes: taskRows[j]["Task Notes"], itemNotes: taskRows[j]["Item Notes"],
+                customPrice: taskRows[j]["Custom Price"], created: formatDate_(taskRows[j]["Created"]),
+                completedAt: formatDate_(taskRows[j]["Completed At"]), assignedTo: taskRows[j]["Assigned To"],
+                location: taskRows[j]["Location"]
+              }));
+            }
+            supabaseBatchUpsert_("tasks", taskSb);
+          }
+          break;
+        case "shipment":
+          var shipSheet = ss.getSheetByName("Shipments");
+          if (shipSheet) {
+            var shipRows = sheetToObjects_(shipSheet);
+            var shipSb = [];
+            for (var k = 0; k < shipRows.length; k++) {
+              var sn = String(shipRows[k]["Shipment #"] || "").trim();
+              if (!sn) continue;
+              shipSb.push(sbShipmentRow_(tenantId, {
+                shipmentNumber: sn, receiveDate: formatDate_(shipRows[k]["Receive Date"]),
+                itemCount: shipRows[k]["Item Count"], carrier: shipRows[k]["Carrier"],
+                trackingNumber: shipRows[k]["Tracking #"], notes: shipRows[k]["Shipment Notes"]
+              }));
+            }
+            supabaseBatchUpsert_("shipments", shipSb);
+          }
+          break;
+        case "billing":
+          var billSheet = ss.getSheetByName("Billing_Ledger");
+          if (billSheet) {
+            var billRows = sheetToObjects_(billSheet);
+            var billSb = [];
+            for (var l = 0; l < billRows.length; l++) {
+              var lid = String(billRows[l]["Ledger Row ID"] || "").trim();
+              if (!lid) continue;
+              billSb.push(sbBillingRow_(tenantId, {
+                ledgerRowId: lid, status: billRows[l]["Status"], invoiceNo: billRows[l]["Invoice #"],
+                clientName: billRows[l]["Client"], date: formatDate_(billRows[l]["Date"]),
+                svcCode: billRows[l]["Svc Code"], svcName: billRows[l]["Svc Name"], category: billRows[l]["Category"],
+                itemId: billRows[l]["Item ID"], description: billRows[l]["Description"],
+                itemClass: billRows[l]["Class"], qty: billRows[l]["Qty"], rate: billRows[l]["Rate"],
+                total: billRows[l]["Total"], taskId: billRows[l]["Task ID"], repairId: billRows[l]["Repair ID"],
+                shipmentNumber: billRows[l]["Shipment #"], itemNotes: billRows[l]["Item Notes"],
+                invoiceDate: formatDate_(billRows[l]["Invoice Date"]), invoiceUrl: billRows[l]["Invoice URL"]
+              }));
+            }
+            supabaseBatchUpsert_("billing", billSb);
+          }
+          break;
+        case "will_call":
+          var wcSheet = ss.getSheetByName("Will_Calls");
+          if (wcSheet) {
+            var wcRows = sheetToObjects_(wcSheet);
+            var wcSb = [];
+            for (var m = 0; m < wcRows.length; m++) {
+              var wcn = String(wcRows[m]["WC Number"] || "").trim();
+              if (!wcn) continue;
+              wcSb.push(sbWillCallRow_(tenantId, {
+                wcNumber: wcn, status: wcRows[m]["Status"], pickupParty: wcRows[m]["Pickup Party"],
+                estimatedPickupDate: formatDate_(wcRows[m]["Estimated Pickup Date"]),
+                notes: wcRows[m]["Notes"], itemsCount: wcRows[m]["Items Count"]
+              }));
+            }
+            supabaseBatchUpsert_("will_calls", wcSb);
+          }
+          break;
+        case "repair":
+          var repSheet = ss.getSheetByName("Repairs");
+          if (repSheet) {
+            var repRows = sheetToObjects_(repSheet);
+            var repSb = [];
+            for (var n = 0; n < repRows.length; n++) {
+              var rid = String(repRows[n]["Repair ID"] || "").trim();
+              if (!rid) continue;
+              repSb.push(sbRepairRow_(tenantId, {
+                repairId: rid, itemId: repRows[n]["Item ID"], status: repRows[n]["Status"],
+                repairResult: repRows[n]["Repair Result"], quoteAmount: repRows[n]["Quote Amount"],
+                finalAmount: repRows[n]["Final Amount"], repairVendor: repRows[n]["Repair Vendor"],
+                repairNotes: repRows[n]["Repair Notes"], taskNotes: repRows[n]["Task Notes"],
+                itemNotes: repRows[n]["Item Notes"], completedDate: formatDate_(repRows[n]["Completed Date"])
+              }));
+            }
+            supabaseBatchUpsert_("repairs", repSb);
+          }
+          break;
+      }
+    }
+  } catch (e) {
+    Logger.log("api_fullClientSync_ error (non-fatal): " + e);
+  }
+}
+
+// ─── Entry Point ─────────────────────────────────────────────────────────────
+
+function doGet(e) {
+  try {
+    var params = (e && e.parameter) ? e.parameter : {};
+    var action = String(params.action || "").trim();
+    var token  = String(params.token || "").trim();
+
+    // Health check — no token required
+    if (action === "health") {
+      return jsonResponse_({
+        status: "ok",
+        timestamp: new Date().toISOString(),
+        version: "7.0.0",
+        message: "Stride API is running"
+      });
+    }
+
+    // All other endpoints require token
+    var expectedToken = prop_("API_TOKEN");
+    if (!expectedToken) {
+      return errorResponse_("API_TOKEN not configured in Script Properties", "CONFIG_ERROR");
+    }
+    if (!token || token !== expectedToken) {
+      return errorResponse_("Invalid or missing token", "AUTH_ERROR");
+    }
+
+    // Caller identification
+    var callerEmail = String(params.callerEmail || "").trim().toLowerCase();
+    var clientSheetId = String(params.clientSheetId || "").trim();
+    var noCache = params.noCache === "1";
+
+    // Route to handler
+    switch (action) {
+      // ─── User management (no callerEmail validation needed for getUserByEmail) ───
+      case "getUserByEmail":  return handleGetUserByEmail_(params);
+      case "getUsers":        return handleGetUsers_(callerEmail);
+      case "createUser":      return handleCreateUser_(params, callerEmail);
+      case "updateUser":      return handleUpdateUser_(params, callerEmail);
+      case "deleteUser":      return handleDeleteUser_(params, callerEmail);
+
+      // ─── Config data (staff/admin only for getClients; others open to all authed) ───
+      case "getClients":      return handleGetClientsAuthed_(callerEmail);
+      case "getPricing":      return withActiveUserGuard_(callerEmail, function() { return handleGetPricing_(); });
+      case "getLocations":    return withActiveUserGuard_(callerEmail, function() { return handleGetLocations_(); });
+
+      // ─── Client operational data (server-side isolation + caching) ───
+      case "getInventory":    return withClientIsolation_(callerEmail, clientSheetId, function(eid) { return cachedHandler_("inv:" + eid, function() { return handleGetInventory_(eid); }, noCache); });
+      case "getTasks":        return withClientIsolation_(callerEmail, clientSheetId, function(eid) { return cachedHandler_("tasks:" + eid, function() { return handleGetTasks_(eid); }, noCache); });
+      case "getRepairs":      return withClientIsolation_(callerEmail, clientSheetId, function(eid) { return cachedHandler_("repairs:" + eid, function() { return handleGetRepairs_(eid); }, noCache); });
+      case "getWillCalls":    return withClientIsolation_(callerEmail, clientSheetId, function(eid) { return cachedHandler_("wc:" + eid, function() { return handleGetWillCalls_(eid); }, noCache); });
+      case "getShipments":    return withClientIsolation_(callerEmail, clientSheetId, function(eid) { return cachedHandler_("ship:" + eid, function() { return handleGetShipments_(eid); }, noCache); });
+      case "getShipmentItems": return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
+        return handleGetShipmentItems_(effectiveId, params);
+      });
+      case "getBilling": {
+        // v38.13.0: Server-side filter params for report builder
+        var billingFilters = {
+          statusFilter: params.statusFilter ? String(params.statusFilter).split(",") : null,
+          svcFilter: params.svcFilter ? String(params.svcFilter).split(",") : null,
+          sidemarkFilter: params.sidemarkFilter ? String(params.sidemarkFilter).split(",") : null,
+          endDate: params.endDate ? String(params.endDate).trim() : null,
+          clientFilter: params.clientFilter ? String(params.clientFilter).split(",") : null
+        };
+        var hasFilters = billingFilters.statusFilter || billingFilters.svcFilter || billingFilters.sidemarkFilter || billingFilters.endDate || billingFilters.clientFilter;
+        if (hasFilters) {
+          // Filtered query — skip cache, pass filters to handler
+          return withClientIsolation_(callerEmail, clientSheetId, function(eid) { return handleGetBilling_(eid, billingFilters); });
+        }
+        return withClientIsolation_(callerEmail, clientSheetId, function(eid) { return cachedHandler_("bill:" + eid, function() { return handleGetBilling_(eid); }, noCache); });
+      }
+      case "getBatch":        return withClientIsolation_(callerEmail, clientSheetId, function(eid) { return cachedHandler_("batch:" + eid, function() { return handleGetBatch_(eid); }, noCache); });
+      case "getBatchSummary": return withActiveUserGuard_(callerEmail, function() { return handleGetBatchSummary_(callerEmail, noCache); });
+      case "getAutocomplete": return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
+        return handleGetAutocomplete_(effectiveId, params);
+      });
+      case "getWcDocUrl":     return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
+                                return handleGetWcDocUrl_(effectiveId, params);
+                              });
+
+      // ─── Unbilled Report (staff-only, reads CB Unbilled_Report sheet) ───
+      case "getUnbilledReport": return withStaffGuard_(callerEmail, function() { return handleGetUnbilledReport_(); });
+
+      // ─── Claims (admin: all, client: own only, staff: blocked) ───
+      case "getClaims":       return withClaimsReadGuard_(callerEmail, function(role, clientName) { return handleGetClaims_(role, clientName); });
+      case "getClaimDetail":  return withClaimsReadGuard_(callerEmail, function(role, clientName) { return handleGetClaimDetail_(params, callerEmail, role, clientName); });
+
+      // ─── Move History ───
+      case "getItemMoveHistory": return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
+        return handleGetItemMoveHistory_(effectiveId, params);
+      });
+
+      // ─── Auto-Generated Item IDs ───
+      case "getNextItemId":     return withStaffGuard_(callerEmail, function() { return handleGetNextItemId_(); });
+      case "getAutoIdSetting":  return withStaffGuard_(callerEmail, function() { return handleGetAutoIdSetting_(); });
+
+      // ─── Stax Payments (admin-only reads) ───
+      case "getStaxInvoices":   return withAdminGuard_(callerEmail, function() { return handleGetStaxInvoices_(); });
+      case "getStaxChargeLog":  return withAdminGuard_(callerEmail, function() { return handleGetStaxChargeLog_(); });
+      case "getStaxExceptions": return withAdminGuard_(callerEmail, function() { return handleGetStaxExceptions_(); });
+      case "getStaxCustomers":  return withAdminGuard_(callerEmail, function() { return handleGetStaxCustomers_(); });
+      case "getStaxRunLog":     return withAdminGuard_(callerEmail, function() { return handleGetStaxRunLog_(); });
+      case "getStaxConfig":     return withAdminGuard_(callerEmail, function() { return handleGetStaxConfig_(); });
+      case "listIIFFiles":      return withAdminGuard_(callerEmail, function() { return handleListIIFFiles_(); });
+
+      // ─── Template management (staff+ reads) ───
+      case "getEmailTemplates":         return withStaffGuard_(callerEmail, function() { return handleGetEmailTemplates_(); });
+
+      // ─── Marketing Campaign Manager (admin-only reads) ───
+      case "getMarketingDashboard":     return withAdminGuard_(callerEmail, function() { return handleGetMarketingDashboard_(); });
+      case "getMarketingCampaigns":     return withAdminGuard_(callerEmail, function() { return handleGetMarketingCampaigns_(params); });
+      case "getMarketingCampaignDetail":return withAdminGuard_(callerEmail, function() { return handleGetMarketingCampaignDetail_(params); });
+      case "getMarketingContacts":      return withAdminGuard_(callerEmail, function() { return handleGetMarketingContacts_(params); });
+      case "getMarketingContactDetail": return withAdminGuard_(callerEmail, function() { return handleGetMarketingContactDetail_(params); });
+      case "getMarketingTemplates":     return withAdminGuard_(callerEmail, function() { return handleGetMarketingTemplates_(); });
+      case "getMarketingLogs":          return withAdminGuard_(callerEmail, function() { return handleGetMarketingLogs_(params); });
+      case "getMarketingSettings":      return withAdminGuard_(callerEmail, function() { return handleGetMarketingSettings_(); });
+
+      default:
+        return errorResponse_("Unknown action: " + action, "INVALID_ACTION");
+    }
+
+  } catch (err) {
+    return errorResponse_(String(err), "SERVER_ERROR");
+  }
+}
+
+// ─── POST Entry Point (Write Operations) ────────────────────────────────────
+
+function doPost(e) {
+  try {
+    var params = (e && e.parameter) ? e.parameter : {};
+    var action = String(params.action || "").trim();
+    var token  = String(params.token || "").trim();
+
+    // Token validation (same as doGet)
+    var expectedToken = prop_("API_TOKEN");
+    if (!expectedToken) return errorResponse_("API_TOKEN not configured", "CONFIG_ERROR");
+    if (!token || token !== expectedToken) return errorResponse_("Invalid or missing token", "AUTH_ERROR");
+
+    // Parse JSON body
+    var payload = {};
+    try {
+      if (e && e.postData && e.postData.contents) {
+        payload = JSON.parse(e.postData.contents);
+      }
+    } catch (parseErr) {
+      return errorResponse_("Invalid JSON body: " + parseErr.message, "INVALID_BODY");
+    }
+
+    var callerEmail = String(params.callerEmail || "").trim().toLowerCase();
+    var clientSheetId = String(params.clientSheetId || "").trim();
+
+    switch (action) {
+      case "completeShipment":
+        return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
+          var r = handleCompleteShipment_(effectiveId, payload);
+          invalidateClientCache_(effectiveId);
+          api_fullClientSync_(effectiveId, ["inventory", "shipment", "billing"]);
+          return r;
+        });
+
+      case "completeTask":
+        return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
+          var r = handleCompleteTask_(effectiveId, payload);
+          invalidateClientCache_(effectiveId);
+          api_notifySupabase_(r, { tenant_id: effectiveId, entity_type: "task", entity_id: String(payload.taskId || ""), action_type: "complete_task", requested_by: callerEmail, request_id: String(payload.requestId || "") });
+          api_writeThrough_(r, "task", effectiveId, String(payload.taskId || ""));
+          api_writeThrough_(r, "inventory", effectiveId, String(payload.itemId || ""));
+          return r;
+        });
+
+      case "requestRepairQuote":
+        return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
+          var r = handleRequestRepairQuote_(effectiveId, payload, callerEmail);
+          invalidateClientCache_(effectiveId);
+          api_fullClientSync_(effectiveId, ["repair"]);
+          return r;
+        });
+      case "sendRepairQuote":
+        return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
+          var r = handleSendRepairQuote_(effectiveId, payload);
+          invalidateClientCache_(effectiveId);
+          api_notifySupabase_(r, { tenant_id: effectiveId, entity_type: "repair", entity_id: String(payload.repairId || ""), action_type: "send_repair_quote", requested_by: callerEmail, request_id: String(payload.requestId || "") });
+          api_writeThrough_(r, "repair", effectiveId, String(payload.repairId || ""));
+          return r;
+        });
+
+      case "respondToRepairQuote":
+        return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
+          var r = handleRespondToRepairQuote_(effectiveId, payload);
+          invalidateClientCache_(effectiveId);
+          api_notifySupabase_(r, { tenant_id: effectiveId, entity_type: "repair", entity_id: String(payload.repairId || ""), action_type: "respond_repair_quote", requested_by: callerEmail, request_id: String(payload.requestId || "") });
+          api_writeThrough_(r, "repair", effectiveId, String(payload.repairId || ""));
+          return r;
+        });
+
+      case "completeRepair":
+        return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
+          var r = handleCompleteRepair_(effectiveId, payload);
+          invalidateClientCache_(effectiveId);
+          api_notifySupabase_(r, { tenant_id: effectiveId, entity_type: "repair", entity_id: String(payload.repairId || ""), action_type: "complete_repair", requested_by: callerEmail, request_id: String(payload.requestId || "") });
+          api_writeThrough_(r, "repair", effectiveId, String(payload.repairId || ""));
+          return r;
+        });
+
+      case "startRepair":
+        return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
+          var r = handleStartRepair_(effectiveId, payload);
+          invalidateClientCache_(effectiveId);
+          api_notifySupabase_(r, { tenant_id: effectiveId, entity_type: "repair", entity_id: String(payload.repairId || ""), action_type: "start_repair", requested_by: callerEmail, request_id: String(payload.requestId || "") });
+          api_writeThrough_(r, "repair", effectiveId, String(payload.repairId || ""));
+          return r;
+        });
+
+      case "cancelTask":
+        return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
+          var r = handleCancelTask_(effectiveId, payload);
+          invalidateClientCache_(effectiveId);
+          api_notifySupabase_(r, { tenant_id: effectiveId, entity_type: "task", entity_id: String(payload.taskId || ""), action_type: "cancel_task", requested_by: callerEmail, request_id: String(payload.requestId || "") });
+          api_writeThrough_(r, "task", effectiveId, String(payload.taskId || ""));
+          return r;
+        });
+
+      case "generateTaskWorkOrder":
+        return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
+          return handleGenerateTaskWorkOrder_(effectiveId, payload);
+        });
+
+      case "cancelRepair":
+        return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
+          var r = handleCancelRepair_(effectiveId, payload);
+          invalidateClientCache_(effectiveId);
+          api_notifySupabase_(r, { tenant_id: effectiveId, entity_type: "repair", entity_id: String(payload.repairId || ""), action_type: "cancel_repair", requested_by: callerEmail, request_id: String(payload.requestId || "") });
+          api_writeThrough_(r, "repair", effectiveId, String(payload.repairId || ""));
+          return r;
+        });
+
+      // v38.6.0: Bulk action toolbar batch endpoints. Handlers do their own
+      // cache invalidation + write-through per succeeded row internally.
+      case "batchCancelTasks":
+        return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
+          return handleBatchCancelTasks_(effectiveId, payload);
+        });
+
+      case "batchCancelRepairs":
+        return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
+          return handleBatchCancelRepairs_(effectiveId, payload);
+        });
+
+      case "batchCancelWillCalls":
+        return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
+          return handleBatchCancelWillCalls_(effectiveId, payload);
+        });
+
+      case "batchReassignTasks":
+        return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
+          return handleBatchReassignTasks_(effectiveId, payload);
+        });
+
+      case "createWillCall":
+        return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
+          var r = handleCreateWillCall_(effectiveId, payload);
+          invalidateClientCache_(effectiveId);
+          api_notifySupabase_(r, { tenant_id: effectiveId, entity_type: "will_call", entity_id: "", action_type: "create_will_call", requested_by: callerEmail, request_id: String(payload.requestId || "") });
+          api_fullClientSync_(effectiveId, ["will_call"]);
+          return r;
+        });
+
+      case "processWcRelease":
+        return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
+          var r = handleProcessWcRelease_(effectiveId, payload);
+          invalidateClientCache_(effectiveId);
+          api_notifySupabase_(r, { tenant_id: effectiveId, entity_type: "will_call", entity_id: String(payload.wcNumber || ""), action_type: "process_wc_release", requested_by: callerEmail, request_id: String(payload.requestId || "") });
+          api_fullClientSync_(effectiveId, ["will_call", "inventory", "billing"]);
+          return r;
+        });
+
+      case "cancelWillCall":
+        return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
+          var r = handleCancelWillCall_(effectiveId, payload);
+          invalidateClientCache_(effectiveId);
+          api_notifySupabase_(r, { tenant_id: effectiveId, entity_type: "will_call", entity_id: String(payload.wcNumber || ""), action_type: "cancel_will_call", requested_by: callerEmail, request_id: String(payload.requestId || "") });
+          api_writeThrough_(r, "will_call", effectiveId, String(payload.wcNumber || ""));
+          return r;
+        });
+
+      case "updateWillCall":
+        return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
+          var r = handleUpdateWillCall_(effectiveId, payload);
+          invalidateClientCache_(effectiveId);
+          api_writeThrough_(r, "will_call", effectiveId, String(payload.wcNumber || ""));
+          return r;
+        });
+
+      case "addItemsToWillCall":
+        return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
+          var r = handleAddItemsToWillCall_(effectiveId, payload);
+          invalidateClientCache_(effectiveId);
+          api_notifySupabase_(r, { tenant_id: effectiveId, entity_type: "will_call", entity_id: String(payload.wcNumber || ""), action_type: "add_items_to_will_call", requested_by: callerEmail, request_id: String(payload.requestId || "") });
+          api_writeThrough_(r, "will_call", effectiveId, String(payload.wcNumber || ""));
+          return r;
+        });
+
+      case "removeItemsFromWillCall":
+        return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
+          var r = handleRemoveItemsFromWillCall_(effectiveId, payload);
+          invalidateClientCache_(effectiveId);
+          api_notifySupabase_(r, { tenant_id: effectiveId, entity_type: "will_call", entity_id: String(payload.wcNumber || ""), action_type: "remove_items_from_will_call", requested_by: callerEmail, request_id: String(payload.requestId || "") });
+          api_writeThrough_(r, "will_call", effectiveId, String(payload.wcNumber || ""));
+          return r;
+        });
+
+      case "releaseItems":
+        return withStaffGuard_(callerEmail, function() {
+          var r = handleReleaseItems_(clientSheetId, payload, callerEmail);
+          invalidateClientCache_(clientSheetId);
+          api_fullClientSync_(clientSheetId, ["inventory"]);
+          return r;
+        });
+
+      case "transferItems":
+        return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
+          // Parent users: verify destination is also in their accessible scope
+          var destId = String(payload.destinationClientSheetId || "").trim();
+          if (_parentScope_ && destId && _parentScope_.indexOf(destId) < 0) {
+            return errorResponse_("Access denied: destination client not in your account scope", "AUTH_ERROR");
+          }
+          var r = handleTransferItems_(effectiveId, payload);
+          invalidateClientCache_(effectiveId);
+          api_notifySupabase_(r, { tenant_id: effectiveId, entity_type: "inventory", entity_id: "", action_type: "transfer_items", requested_by: callerEmail, request_id: String(payload.requestId || "") });
+          api_fullClientSync_(effectiveId, ["inventory", "billing"]);
+          if (destId) api_fullClientSync_(destId, ["inventory", "billing"]);
+          return r;
+        });
+
+      case "generateStorageCharges":
+        return withStaffGuard_(callerEmail, function() {
+          var r = handleGenerateStorageCharges_(payload);
+          if (payload.clientSheetId) api_fullClientSync_(String(payload.clientSheetId), ["billing"]);
+          return r;
+        });
+
+      case "previewStorageCharges":
+        return withStaffGuard_(callerEmail, function() {
+          return handlePreviewStorageCharges_(payload);
+        });
+
+      case "qbExport":
+        return withStaffGuard_(callerEmail, function() {
+          return handleQbExport_(payload);
+        });
+
+      case "generateUnbilledReport":
+        return withStaffGuard_(callerEmail, function() {
+          return handleGenerateUnbilledReport_(payload);
+        });
+
+      case "createInvoice":
+        return withStaffGuard_(callerEmail, function() {
+          var r = handleCreateInvoice_(payload);
+          if (payload.clientSheetId) api_fullClientSync_(String(payload.clientSheetId), ["billing"]);
+          return r;
+        });
+
+      case "resendInvoiceEmail":
+        return withStaffGuard_(callerEmail, function() {
+          return handleResendInvoiceEmail_(payload);
+        });
+
+      case "updateBillingRow":
+        return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
+          return handleUpdateBillingRow_(effectiveId, payload);
+        });
+
+      case "batchCreateTasks":
+        return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
+          var r = handleBatchCreateTasks_(effectiveId, payload);
+          invalidateClientCache_(effectiveId);
+          api_fullClientSync_(effectiveId, ["task"]);
+          return r;
+        });
+
+      case "startTask":
+        return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
+          var r = handleStartTask_(effectiveId, payload);
+          invalidateClientCache_(effectiveId);
+          api_notifySupabase_(r, { tenant_id: effectiveId, entity_type: "task", entity_id: String(payload.taskId || ""), action_type: "start_task", requested_by: callerEmail, request_id: String(payload.requestId || "") });
+          api_writeThrough_(r, "task", effectiveId, String(payload.taskId || ""));
+          return r;
+        });
+
+      case "updateTaskNotes":
+        return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
+          var r = handleUpdateTaskNotes_(effectiveId, payload);
+          invalidateClientCache_(effectiveId);
+          api_writeThrough_(r, "task", effectiveId, String(payload.taskId || ""));
+          return r;
+        });
+      case "updateTaskCustomPrice":
+        return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
+          var r = handleUpdateTaskCustomPrice_(effectiveId, payload);
+          invalidateClientCache_(effectiveId);
+          api_writeThrough_(r, "task", effectiveId, String(payload.taskId || ""));
+          return r;
+        });
+
+      case "updateInventoryItem":
+        return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
+          var r = handleUpdateInventoryItem_(effectiveId, payload);
+          invalidateClientCache_(effectiveId);
+          api_notifySupabase_(r, { tenant_id: effectiveId, entity_type: "inventory", entity_id: String(payload.itemId || ""), action_type: "update_inventory_item", requested_by: callerEmail, request_id: String(payload.requestId || "") });
+          api_writeThrough_(r, "inventory", effectiveId, String(payload.itemId || ""));
+          return r;
+        });
+
+      case "refreshCaches":
+        return withStaffGuard_(callerEmail, function() {
+          return handleRefreshCaches_(payload);
+        });
+
+      case "runOnClients":
+        return withStaffGuard_(callerEmail, function() {
+          return handleRunOnClients_(payload);
+        });
+
+      case "syncAutocompleteDb":
+        return withAdminGuard_(callerEmail, function() {
+          return handleSyncAutocompleteDb_(payload);
+        });
+      case "healthCheck":
+        return withAdminGuard_(callerEmail, function() {
+          return handleHealthCheck_();
+        });
+      case "updateHeaders":
+        return withAdminGuard_(callerEmail, function() {
+          return handleRemoteAction_(payload, "update_headers");
+        });
+      case "installTriggers":
+        return withAdminGuard_(callerEmail, function() {
+          return handleRemoteAction_(payload, "install_triggers");
+        });
+      case "fixMissingFolders":
+        return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
+          payload.clientSheetId = effectiveId;
+          var r = handleFixMissingFolders_(payload);
+          invalidateClientCache_(effectiveId);
+          return r;
+        });
+
+      case "onboardClient":
+        return withStaffGuard_(callerEmail, function() {
+          return handleOnboardClient_(payload);
+        });
+
+      case "resolveOnboardUser":
+        return withStaffGuard_(callerEmail, function() {
+          return handleResolveOnboardUser_(payload);
+        });
+
+      case "updateClient":
+        return withStaffGuard_(callerEmail, function() {
+          return handleUpdateClient_(payload);
+        });
+
+      case "syncSettings":
+        return withStaffGuard_(callerEmail, function() {
+          return handleSyncSettings_(payload);
+        });
+
+      // ─── Claims (admin-only) ───────────────────────────────────────────────
+      case "createClaim":
+        return withAdminGuard_(callerEmail, function() {
+          return handleCreateClaim_(callerEmail, payload);
+        });
+      case "addClaimItems":
+        return withAdminGuard_(callerEmail, function() {
+          return handleAddClaimItems_(callerEmail, payload);
+        });
+      case "addClaimNote":
+        return withAdminGuard_(callerEmail, function() {
+          return handleAddClaimNote_(callerEmail, payload);
+        });
+      case "requestMoreInfo":
+        return withAdminGuard_(callerEmail, function() {
+          return handleRequestMoreInfo_(callerEmail, payload);
+        });
+      case "sendClaimDenial":
+        return withAdminGuard_(callerEmail, function() {
+          return handleSendClaimDenial_(callerEmail, payload);
+        });
+      case "generateClaimSettlement":
+        return withAdminGuard_(callerEmail, function() {
+          return handleGenerateClaimSettlement_(callerEmail, payload);
+        });
+      case "uploadSignedSettlement":
+        return withAdminGuard_(callerEmail, function() {
+          return handleUploadSignedSettlement_(callerEmail, payload);
+        });
+      case "closeClaim":
+        return withAdminGuard_(callerEmail, function() {
+          return handleCloseClaim_(callerEmail, payload);
+        });
+      case "voidClaim":
+        return withAdminGuard_(callerEmail, function() {
+          return handleVoidClaim_(callerEmail, payload);
+        });
+      case "reopenClaim":
+        return withAdminGuard_(callerEmail, function() {
+          return handleReopenClaim_(callerEmail, payload);
+        });
+      case "firstReviewClaim":
+        return withAdminGuard_(callerEmail, function() {
+          return handleFirstReviewClaim_(callerEmail, payload);
+        });
+      case "updateClaim":
+        return withAdminGuard_(callerEmail, function() {
+          return handleUpdateClaim_(callerEmail, payload);
+        });
+
+      // ─── Stax Payments (admin-only writes) ─────────────────────────────────
+      case "importIIF":
+        return withAdminGuard_(callerEmail, function() {
+          return handleImportIIF_(payload);
+        });
+      case "resolveStaxException":
+        return withAdminGuard_(callerEmail, function() {
+          return handleResolveStaxException_(payload);
+        });
+      case "updateStaxConfig":
+        return withAdminGuard_(callerEmail, function() {
+          return handleUpdateStaxConfig_(payload);
+        });
+      case "saveStaxCustomerMapping":
+        return withAdminGuard_(callerEmail, function() {
+          return handleSaveStaxCustomerMapping_(payload);
+        });
+      case "autoMatchStaxCustomers":
+        return withAdminGuard_(callerEmail, function() {
+          return handleAutoMatchStaxCustomers_();
+        });
+      case "pullStaxCustomers":
+        return withAdminGuard_(callerEmail, function() {
+          return handlePullStaxCustomers_();
+        });
+      case "syncStaxCustomers":
+        return withAdminGuard_(callerEmail, function() {
+          return handleSyncStaxCustomers_();
+        });
+      case "createTestInvoice":
+        return withAdminGuard_(callerEmail, function() {
+          return handleCreateTestInvoice_(payload);
+        });
+      case "importIIFFromDrive":
+        return withAdminGuard_(callerEmail, function() {
+          return handleImportIIFFromDrive_(payload);
+        });
+      case "updateStaxInvoice":
+        return withAdminGuard_(callerEmail, function() {
+          return handleUpdateStaxInvoice_(payload);
+        });
+      case "deleteStaxInvoice":
+        return withAdminGuard_(callerEmail, function() {
+          return handleDeleteStaxInvoice_(payload);
+        });
+      case "createStaxInvoices":
+        return withAdminGuard_(callerEmail, function() {
+          return handleCreateStaxInvoices_(payload);
+        });
+      case "runStaxCharges":
+        return withAdminGuard_(callerEmail, function() {
+          return handleRunStaxCharges_(payload);
+        });
+      case "chargeSingleInvoice":
+        return withAdminGuard_(callerEmail, function() {
+          return handleChargeSingleInvoice_(payload);
+        });
+      case "sendStaxPayLinks":
+        return withAdminGuard_(callerEmail, function() {
+          return handleSendStaxPayLinks_();
+        });
+      case "voidStaxInvoice":
+        return withAdminGuard_(callerEmail, function() {
+          return handleVoidStaxInvoice_(payload);
+        });
+      case "toggleAutoCharge":
+        return withAdminGuard_(callerEmail, function() {
+          return handleToggleAutoCharge_(payload);
+        });
+      case "resetStaxInvoiceStatus":
+        return withAdminGuard_(callerEmail, function() {
+          return handleResetStaxInvoiceStatus_(payload);
+        });
+      case "sendStaxPayLink":
+        return withAdminGuard_(callerEmail, function() {
+          return handleSendStaxPayLink_(payload);
+        });
+
+      // ─── Auto-Generated Item IDs (admin-only) ────────────────────────────
+      case "updateAutoIdSetting":
+        return withAdminGuard_(callerEmail, function() {
+          return handleUpdateAutoIdSetting_(payload);
+        });
+
+      // ─── Supabase Phase 3 — Bulk Sync & Reconciliation (admin-only) ───────
+      case "bulkSyncToSupabase":
+        return withAdminGuard_(callerEmail, function() {
+          return handleBulkSyncToSupabase_(payload);
+        });
+      case "reconcileSupabase":
+        return withAdminGuard_(callerEmail, function() {
+          return handleReconcileSupabase_(payload);
+        });
+
+      // ─── Test Send (staff-only) ───────────────────────────────────────────
+      case "sendWelcomeEmail":
+        return withAdminGuard_(callerEmail, function() {
+          return handleSendWelcomeEmail_(payload);
+        });
+      case "testSendClientTemplates":
+        return withStaffGuard_(callerEmail, function() {
+          return handleTestSendClientTemplates_(callerEmail, payload);
+        });
+      case "testSendClaimEmails":
+        return withStaffGuard_(callerEmail, function() {
+          return handleTestSendClaimEmails_(callerEmail, payload);
+        });
+
+      // ─── Template management (admin-only) ─────────────────────────────────
+      case "getEmailTemplates":
+        return withStaffGuard_(callerEmail, function() {
+          return handleGetEmailTemplates_();
+        });
+      case "updateEmailTemplate":
+        return withStaffGuard_(callerEmail, function() {
+          return handleUpdateEmailTemplate_(payload);
+        });
+      case "syncTemplatesToClients":
+        return withAdminGuard_(callerEmail, function() {
+          return handleSyncTemplatesToClients_();
+        });
+      case "sendOnboardingEmail":
+        return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
+          return handleSendOnboardingEmail_(effectiveId, payload);
+        });
+
+      // ─── Marketing Campaign Manager (admin-only writes) ───
+      case "createMarketingCampaign":
+        return withAdminGuard_(callerEmail, function() { return handleCreateMarketingCampaign_(payload); });
+      case "updateMarketingCampaign":
+        return withAdminGuard_(callerEmail, function() { return handleUpdateMarketingCampaign_(payload); });
+      case "activateCampaign":
+        return withAdminGuard_(callerEmail, function() { return handleActivateCampaign_(payload); });
+      case "pauseCampaign":
+        return withAdminGuard_(callerEmail, function() { return handlePauseCampaign_(payload); });
+      case "completeCampaign":
+        return withAdminGuard_(callerEmail, function() { return handleCompleteCampaign_(payload); });
+      case "runCampaignNow":
+        return withAdminGuard_(callerEmail, function() { return handleRunCampaignNow_(payload); });
+      case "deleteCampaign":
+        return withAdminGuard_(callerEmail, function() { return handleDeleteCampaign_(payload); });
+      case "createMarketingContact":
+        return withAdminGuard_(callerEmail, function() { return handleCreateMarketingContact_(payload); });
+      case "importMarketingContacts":
+        return withAdminGuard_(callerEmail, function() { return handleImportMarketingContacts_(payload); });
+      case "updateMarketingContact":
+        return withAdminGuard_(callerEmail, function() { return handleUpdateMarketingContact_(payload); });
+      case "suppressContact":
+        return withAdminGuard_(callerEmail, function() { return handleSuppressContact_(payload); });
+      case "unsuppressContact":
+        return withAdminGuard_(callerEmail, function() { return handleUnsuppressContact_(payload); });
+      case "createMarketingTemplate":
+        return withAdminGuard_(callerEmail, function() { return handleCreateMarketingTemplate_(payload); });
+      case "updateMarketingTemplate":
+        return withAdminGuard_(callerEmail, function() { return handleUpdateMarketingTemplate_(payload); });
+      case "updateMarketingSettings":
+        return withAdminGuard_(callerEmail, function() { return handleUpdateMarketingSettings_(payload); });
+      case "sendTestEmail":
+        return withAdminGuard_(callerEmail, function() { return handleSendTestEmail_(payload); });
+      case "previewTemplate":
+        return withAdminGuard_(callerEmail, function() { return handlePreviewTemplate_(payload); });
+      case "checkMarketingInbox":
+        return withAdminGuard_(callerEmail, function() { return handleCheckMarketingInbox_(); });
+
+      default:
+        return errorResponse_("Unknown POST action: " + action, "INVALID_ACTION");
+    }
+
+  } catch (err) {
+    return errorResponse_(String(err), "SERVER_ERROR");
+  }
+}
+
+// ─── Auth Helpers ────────────────────────────────────────────────────────────
+
+/**
+ * Look up a user in the CB Users tab by email (case-insensitive).
+ * Returns { user: {...}, rowIndex: N } or { user: null }.
+ * Does NOT check active status — caller must do that.
+ */
+function lookupUser_(email) {
+  if (!email) return { user: null };
+
+  var cbId = prop_("CB_SPREADSHEET_ID");
+  if (!cbId) return { user: null };
+
+  var ss = SpreadsheetApp.openById(cbId);
+  var sheet = ss.getSheetByName("Users");
+  if (!sheet) return { user: null };
+
+  var data = sheet.getDataRange().getValues();
+  if (data.length < 2) return { user: null, sheet: sheet, data: data };
+
+  var headers = data[0].map(function(h) { return String(h).trim(); });
+  var emailIdx = headers.indexOf("Email");
+  if (emailIdx < 0) return { user: null };
+
+  var lowerEmail = email.toLowerCase();
+  for (var i = 1; i < data.length; i++) {
+    var rowEmail = String(data[i][emailIdx] || "").trim().toLowerCase();
+    if (rowEmail === lowerEmail) {
+      var obj = {};
+      for (var j = 0; j < headers.length; j++) {
+        if (headers[j]) obj[headers[j]] = data[i][j];
+      }
+      return {
+        user: {
+          email: String(obj["Email"] || "").trim(),
+          role: String(obj["Role"] || "").trim().toLowerCase(),
+          clientName: String(obj["Client Name"] || "").trim(),
+          clientSheetId: String(obj["Client Spreadsheet ID"] || "").trim(),
+          active: toBool_(obj["Active"]),
+          created: formatDate_(obj["Created"]),
+          lastLogin: formatDate_(obj["Last Login"]),
+          lastLoginSource: String(obj["Last Login Source"] || "").trim(),
+          updatedBy: String(obj["Updated By"] || "").trim(),
+          updatedAt: formatDate_(obj["Updated At"])
+        },
+        rowIndex: i + 1,  // 1-based sheet row
+        sheet: sheet,
+        headers: headers
+      };
+    }
+  }
+
+  return { user: null, sheet: sheet, headers: headers, data: data };
+}
+
+/**
+ * Guard: require caller to exist in Users tab and be active (any role).
+ * Used for endpoints that are not role-restricted but should not be
+ * accessible to anonymous callers or deactivated users.
+ */
+function withActiveUserGuard_(callerEmail, handler) {
+  if (!callerEmail) return errorResponse_("callerEmail is required", "AUTH_ERROR");
+  var lookup = lookupUser_(callerEmail);
+  if (!lookup.user) return errorResponse_("User not found: " + callerEmail, "AUTH_ERROR");
+  if (!lookup.user.active) return errorResponse_("User account is deactivated", "AUTH_ERROR");
+  return handler();
+}
+
+/**
+ * Guard: require caller to be active admin or staff.
+ * Returns error response if not authorized, otherwise calls handler().
+ */
+function withStaffGuard_(callerEmail, handler) {
+  if (!callerEmail) return errorResponse_("callerEmail is required", "AUTH_ERROR");
+
+  var lookup = lookupUser_(callerEmail);
+  if (!lookup.user) return errorResponse_("User not found: " + callerEmail, "AUTH_ERROR");
+  if (!lookup.user.active) return errorResponse_("User account is deactivated", "AUTH_ERROR");
+  if (lookup.user.role !== "admin" && lookup.user.role !== "staff") {
+    return errorResponse_("Insufficient permissions — staff or admin required", "AUTH_ERROR");
+  }
+  return handler();
+}
+
+/**
+ * Claims read access: admin sees all, client sees only their own claims. Staff blocked.
+ * Returns handler(userRole, clientName) so the handler can filter.
+ */
+function withClaimsReadGuard_(callerEmail, handler) {
+  if (!callerEmail) return errorResponse_("callerEmail is required", "AUTH_ERROR");
+  var lookup = lookupUser_(callerEmail);
+  if (!lookup.user) return errorResponse_("User not found: " + callerEmail, "AUTH_ERROR");
+  if (!lookup.user.active) return errorResponse_("User account is deactivated", "AUTH_ERROR");
+  var role = String(lookup.user.role || "").trim().toLowerCase();
+  if (role !== "admin" && role !== "client") {
+    return errorResponse_("Claims access requires admin or client role", "AUTH_ERROR");
+  }
+  var clientName = role === "client" ? String(lookup.user.clientName || "").trim() : null;
+  return handler(role, clientName);
+}
+
+/**
+ * Admin-only guard. Used by Claims + Stax Payments endpoints.
+ */
+function withAdminGuard_(callerEmail, handler) {
+  if (!callerEmail) return errorResponse_("callerEmail is required", "AUTH_ERROR");
+  var lookup = lookupUser_(callerEmail);
+  if (!lookup.user) return errorResponse_("User not found: " + callerEmail, "AUTH_ERROR");
+  if (!lookup.user.active) return errorResponse_("User account is deactivated", "AUTH_ERROR");
+  if (lookup.user.role !== "admin") {
+    return errorResponse_("Admin access required", "AUTH_ERROR");
+  }
+  return handler();
+}
+
+/**
+ * Server-side client isolation for data endpoints.
+ *
+ * RULES:
+ *   - callerEmail is required
+ *   - Caller must exist in Users tab and be active
+ *   - If caller role = client (standalone / child):
+ *       → FORCE clientSheetId to caller's own clientSheetId (ignore request param)
+ *   - If caller role = client (parent — has children in CB PARENT_CLIENT column):
+ *       → If requestedClientSheetId is in allowed scope → pass it through (single-client view)
+ *       → If no filter → pass empty string (like staff), getTargetClients_ filters by scope
+ *   - If caller role = admin/staff:
+ *       → Allow optional clientSheetId filter from request
+ *       → If no filter, return all clients (current behavior)
+ */
+
+// Script-level scope variable — set by withClientIsolation_, read by getTargetClients_.
+// null = no restriction (staff/admin). string[] = allowed spreadsheet IDs (parent client).
+var _parentScope_ = null;
+
+/**
+ * getAccessibleClientScope_ — returns allowed spreadsheet IDs for a parent client user.
+ * Returns null if user is staff/admin (no restriction) or a standalone/child client (single ID handled elsewhere).
+ * Returns string[] of [ownId, child1Id, child2Id, ...] if user is a parent with children.
+ * Uses CacheService to avoid re-reading CB Clients on every endpoint call (60s TTL).
+ */
+/**
+ * getAccessibleClientScope_ — Resolve which client sheet IDs a user can access.
+ *
+ * v33.0.0: Multi-client access model.
+ * 1. Parse user's "Client Spreadsheet ID" (may be comma-separated) — this is the explicit access list
+ * 2. If user has only one client, also check parent/child fallback (find children where
+ *    Parent Client matches user's client name — preserves backward compat)
+ * 3. For multi-client users, also augment with parent/child children for each listed client
+ * 4. Dedupe final scope by sheet ID
+ *
+ * Returns: string[] of accessible sheet IDs (always includes own), or null if single-client with no children.
+ */
+function getAccessibleClientScope_(user) {
+  if (user.role !== "client" || !user.clientSheetId || !user.clientName) return null;
+
+  // Parse CSV fields — source of truth is clientSheetId
+  var explicitIds = parseCSV_(user.clientSheetId);
+  var explicitNames = parseCSV_(user.clientName);
+
+  // If user has multiple explicit clients, that's already a multi-scope user
+  var isMultiClient = explicitIds.length > 1;
+
+  // Build cache key from sorted IDs (deterministic)
+  var sortedIds = explicitIds.slice().sort();
+  var cache = CacheService.getScriptCache();
+  var cacheKey = "client_scope:" + sortedIds.join("|");
+  var cached = cache.get(cacheKey);
+  if (cached) {
+    try {
+      var parsed = JSON.parse(cached);
+      if (parsed === "none") return null;
+      return parsed;
+    } catch (_) {}
+  }
+
+  // Start scope with explicit IDs
+  var scopeSet = {};
+  for (var e = 0; e < explicitIds.length; e++) {
+    scopeSet[explicitIds[e]] = true;
+  }
+
+  // Read CB Clients tab to check for parent/child relationships
+  var cbId = prop_("CB_SPREADSHEET_ID");
+  if (!cbId) {
+    if (isMultiClient) return explicitIds;
+    try { cache.put(cacheKey, JSON.stringify("none"), 60); } catch (_) {}
+    return null;
+  }
+
+  var ss, sheet;
+  try {
+    ss = SpreadsheetApp.openById(cbId);
+    sheet = ss.getSheetByName("Clients");
+  } catch (_) {
+    if (isMultiClient) return explicitIds;
+    return null;
+  }
+  if (!sheet) {
+    if (isMultiClient) return explicitIds;
+    return null;
+  }
+
+  var data = sheet.getDataRange().getValues();
+  if (data.length < 2) {
+    if (isMultiClient) return explicitIds;
+    try { cache.put(cacheKey, JSON.stringify("none"), 60); } catch (_) {}
+    return null;
+  }
+
+  var headers = data[0].map(function(h) { return String(h).trim(); });
+  var parentIdx = headers.indexOf("Parent Client");
+  var nameIdx = headers.indexOf("Client Name");
+  var idIdx   = headers.indexOf("Client Spreadsheet ID");
+  var actIdx  = headers.indexOf("Active");
+
+  if (nameIdx < 0 || idIdx < 0) {
+    if (isMultiClient) return explicitIds;
+    return null;
+  }
+
+  // Parent/child fallback: for each explicit client name, find children
+  if (parentIdx >= 0) {
+    var lowerNames = {};
+    for (var n = 0; n < explicitNames.length; n++) {
+      lowerNames[explicitNames[n].toLowerCase()] = true;
+    }
+
+    for (var i = 1; i < data.length; i++) {
+      var parentVal = String(data[i][parentIdx] || "").trim();
+      if (!parentVal) continue;
+      if (!lowerNames[parentVal.toLowerCase()]) continue;
+
+      var childSid = String(data[i][idIdx] || "").trim();
+      if (!childSid) continue;
+
+      // Check active
+      if (actIdx >= 0) {
+        var act = data[i][actIdx];
+        if (act === false || act === "FALSE" || act === "No") continue;
+      }
+
+      scopeSet[childSid] = true;
+    }
+  }
+
+  // Build final deduped scope array
+  var scope = [];
+  for (var sid in scopeSet) {
+    if (scopeSet.hasOwnProperty(sid)) scope.push(sid);
+  }
+
+  if (scope.length <= 1 && !isMultiClient) {
+    // Single client, no children — standalone
+    try { cache.put(cacheKey, JSON.stringify("none"), 60); } catch (_) {}
+    return null;
+  }
+
+  try { cache.put(cacheKey, JSON.stringify(scope), 60); } catch (_) {}
+  return scope;
+}
+
+function withClientIsolation_(callerEmail, requestedClientSheetId, handler) {
+  if (!callerEmail) return errorResponse_("callerEmail is required", "AUTH_ERROR");
+
+  var lookup = lookupUser_(callerEmail);
+  if (!lookup.user) return errorResponse_("User not found: " + callerEmail, "AUTH_ERROR");
+  if (!lookup.user.active) return errorResponse_("User account is deactivated", "AUTH_ERROR");
+
+  var effectiveClientSheetId;
+  _parentScope_ = null; // Reset each call
+
+  if (lookup.user.role === "client") {
+    var scope = getAccessibleClientScope_(lookup.user);
+
+    if (scope) {
+      // Multi-client or parent user — has access to multiple accounts
+      if (requestedClientSheetId) {
+        // Specific client requested — must be in allowed scope
+        if (scope.indexOf(requestedClientSheetId) < 0) {
+          return errorResponse_("Access denied: client not in your account scope", "AUTH_ERROR");
+        }
+        effectiveClientSheetId = requestedClientSheetId;
+      } else {
+        // No filter — load all allowed clients (like staff, but scoped)
+        effectiveClientSheetId = "";
+        _parentScope_ = scope;
+      }
+    } else {
+      // Standalone or child client — force to own sheet (existing behavior)
+      effectiveClientSheetId = lookup.user.clientSheetId;
+      if (!effectiveClientSheetId) {
+        return errorResponse_("Client user has no Client Spreadsheet ID configured", "CONFIG_ERROR");
+      }
+    }
+  } else {
+    // Staff/admin: allow optional filter
+    effectiveClientSheetId = requestedClientSheetId || "";
+  }
+
+  return handler(effectiveClientSheetId);
+}
+
+// ─── User Management Endpoints ──────────────────────────────────────────────
+
+/**
+ * getUserByEmail — Lookup user by email, return role + client info.
+ * Stamps Last Login + Last Login Source ONLY if user is active.
+ * Does NOT require callerEmail (this IS the login lookup).
+ */
+function handleGetUserByEmail_(params) {
+  var email = String(params.email || "").trim().toLowerCase();
+  if (!email) return errorResponse_("email parameter is required", "INVALID_PARAMS");
+
+  // Rate limit: max 10 login lookups per email per minute
+  try { rateLimit_(email, 10); } catch(e) { return errorResponse_(String(e.message), "RATE_LIMIT"); }
+
+  var lookup = lookupUser_(email);
+  if (!lookup.user) return jsonResponse_({ user: null });
+
+  // Stamp Last Login only if active
+  if (lookup.user.active && lookup.sheet && lookup.rowIndex) {
+    var loginSource = String(params.loginSource || "").trim() || "password";
+    var headers = lookup.headers;
+    var lastLoginIdx = headers.indexOf("Last Login");
+    var lastLoginSourceIdx = headers.indexOf("Last Login Source");
+    if (lastLoginIdx >= 0) {
+      lookup.sheet.getRange(lookup.rowIndex, lastLoginIdx + 1).setValue(new Date());
+    }
+    if (lastLoginSourceIdx >= 0) {
+      lookup.sheet.getRange(lookup.rowIndex, lastLoginSourceIdx + 1).setValue(loginSource);
+    }
+  }
+
+  // Enrich with multi-client scope info for client users (v33.0.0)
+  var userResponse = lookup.user;
+  if (userResponse.role === "client" && userResponse.active) {
+    var scope = getAccessibleClientScope_(userResponse);
+
+    // Parse explicit access list from CSV fields
+    var explicitIds = parseCSV_(userResponse.clientSheetId);
+    var explicitNames = parseCSV_(userResponse.clientName);
+
+    if (scope) {
+      // Multi-client or parent user — has access to multiple accounts
+      userResponse.isParent = true;
+      // childClientSheetIds = all scope IDs except the user's explicit IDs (backward compat)
+      var childIds = [];
+      for (var c = 0; c < scope.length; c++) {
+        if (explicitIds.indexOf(scope[c]) < 0) childIds.push(scope[c]);
+      }
+      userResponse.childClientSheetIds = childIds;
+      // Full accessible lists (new v33.0.0 fields)
+      userResponse.accessibleClientSheetIds = scope;
+
+      // Build name list from CB Clients for full scope
+      try {
+        var clientsMap = api_getClientNameMap_();
+        var accNames = [];
+        for (var s = 0; s < scope.length; s++) {
+          accNames.push(clientsMap[scope[s]] || "(unknown)");
+        }
+        userResponse.accessibleClientNames = accNames;
+      } catch (_) {
+        userResponse.accessibleClientNames = explicitNames;
+      }
+    } else {
+      userResponse.isParent = false;
+      userResponse.childClientSheetIds = [];
+      userResponse.accessibleClientSheetIds = explicitIds;
+      userResponse.accessibleClientNames = explicitNames;
+    }
+  }
+
+  return jsonResponse_({ user: userResponse });
+}
+
+/**
+ * getUsers — List all users. Staff/admin only.
+ */
+function handleGetUsers_(callerEmail) {
+  if (!callerEmail) return errorResponse_("callerEmail is required", "AUTH_ERROR");
+  try { rateLimit_("getUsers_" + callerEmail, 30); } catch(e) { return errorResponse_(String(e.message), "RATE_LIMIT"); }
+
+  // Verify caller is staff/admin
+  var callerLookup = lookupUser_(callerEmail);
+  if (!callerLookup.user) return errorResponse_("Caller not found: " + callerEmail, "AUTH_ERROR");
+  if (!callerLookup.user.active) return errorResponse_("Caller account is deactivated", "AUTH_ERROR");
+  if (callerLookup.user.role !== "admin" && callerLookup.user.role !== "staff") {
+    return errorResponse_("Insufficient permissions — staff or admin required", "AUTH_ERROR");
+  }
+
+  // Read all users
+  var cbId = prop_("CB_SPREADSHEET_ID");
+  var ss = SpreadsheetApp.openById(cbId);
+  var sheet = ss.getSheetByName("Users");
+  if (!sheet) return jsonResponse_({ users: [], count: 0 });
+
+  var data = sheet.getDataRange().getValues();
+  if (data.length < 2) return jsonResponse_({ users: [], count: 0 });
+
+  var headers = data[0].map(function(h) { return String(h).trim(); });
+  var users = [];
+
+  for (var i = 1; i < data.length; i++) {
+    var row = data[i];
+    var email = String(row[headers.indexOf("Email")] || "").trim();
+    if (!email) continue;
+
+    users.push({
+      email: email,
+      role: String(row[headers.indexOf("Role")] || "").trim().toLowerCase(),
+      clientName: String(row[headers.indexOf("Client Name")] || "").trim(),
+      clientSheetId: String(row[headers.indexOf("Client Spreadsheet ID")] || "").trim(),
+      active: toBool_(row[headers.indexOf("Active")]),
+      created: formatDate_(row[headers.indexOf("Created")]),
+      lastLogin: formatDate_(row[headers.indexOf("Last Login")]),
+      lastLoginSource: String(row[headers.indexOf("Last Login Source")] || "").trim(),
+      updatedBy: String(row[headers.indexOf("Updated By")] || "").trim(),
+      updatedAt: formatDate_(row[headers.indexOf("Updated At")])
+    });
+  }
+
+  return jsonResponse_({ users: users, count: users.length });
+}
+
+/**
+ * createUser — Create a new user row. Staff/admin only.
+ * Active defaults to FALSE (manual activation required).
+ */
+function handleCreateUser_(params, callerEmail) {
+  if (!callerEmail) return errorResponse_("callerEmail is required", "AUTH_ERROR");
+  try { rateLimit_("createUser_" + callerEmail, 10); } catch(e) { return errorResponse_(String(e.message), "RATE_LIMIT"); }
+
+  // Verify caller is staff/admin
+  var callerLookup = lookupUser_(callerEmail);
+  if (!callerLookup.user) return errorResponse_("Caller not found: " + callerEmail, "AUTH_ERROR");
+  if (!callerLookup.user.active) return errorResponse_("Caller account is deactivated", "AUTH_ERROR");
+  if (callerLookup.user.role !== "admin" && callerLookup.user.role !== "staff") {
+    return errorResponse_("Insufficient permissions — staff or admin required", "AUTH_ERROR");
+  }
+
+  var email = String(params.email || "").trim().toLowerCase();
+  var role = String(params.role || "").trim().toLowerCase();
+  var clientName = String(params.clientName || "").trim();
+  var clientSheetId = String(params.clientSheetId || "").trim();
+  var forceActive = String(params.active || "").trim().toUpperCase();
+
+  if (!email) return errorResponse_("email is required", "INVALID_PARAMS");
+  if (!role || ["admin", "staff", "client"].indexOf(role) < 0) {
+    return errorResponse_("role must be admin, staff, or client", "INVALID_PARAMS");
+  }
+
+  // Check duplicate
+  var existing = lookupUser_(email);
+  if (existing.user) return errorResponse_("User already exists: " + email, "DUPLICATE");
+
+  // Open Users sheet
+  var cbId = prop_("CB_SPREADSHEET_ID");
+  var ss = SpreadsheetApp.openById(cbId);
+  var sheet = ss.getSheetByName("Users");
+  if (!sheet) return errorResponse_("Users tab not found in CB", "NOT_FOUND");
+
+  var now = new Date();
+  // Active defaults to FALSE unless explicitly overridden
+  var active = (forceActive === "TRUE") ? "TRUE" : "FALSE";
+
+  var newRow = [
+    email,          // Email
+    role,           // Role
+    clientName,     // Client Name
+    clientSheetId,  // Client Spreadsheet ID
+    active,         // Active (default FALSE)
+    now,            // Created
+    "",             // Last Login
+    "",             // Last Login Source
+    callerEmail,    // Updated By
+    now             // Updated At
+  ];
+
+  sheet.appendRow(newRow);
+
+  // Create Supabase Auth user so they can use Forgot Password to set up login
+  var sbResult = createSupabaseAuthUser_(email);
+  var supabaseWarning = "";
+  if (!sbResult.success) {
+    supabaseWarning = "User row created but Supabase auth failed: " + sbResult.error;
+    Logger.log("handleCreateUser_: " + supabaseWarning);
+  }
+
+  var user = {
+    email: email,
+    role: role,
+    clientName: clientName,
+    clientSheetId: clientSheetId,
+    active: active === "TRUE",
+    created: formatDate_(now),
+    lastLogin: "",
+    lastLoginSource: "",
+    updatedBy: callerEmail,
+    updatedAt: formatDate_(now)
+  };
+
+  var resp = { success: true, user: user };
+  if (supabaseWarning) resp.supabaseWarning = supabaseWarning;
+  return jsonResponse_(resp);
+}
+
+/**
+ * updateUser — Update user fields. Staff/admin only.
+ * v33.0.0: Supports active, role, clientName, clientSheetId (full overwrite for access list).
+ * Email rename deferred — not supported in this version.
+ * Sets Updated By and Updated At audit fields.
+ *
+ * Validation:
+ * - clientName and clientSheetId must have matching item counts (parallel CSV arrays)
+ * - client-role users must have at least one client ID
+ * - staff/admin users: client fields can be empty
+ */
+function handleUpdateUser_(params, callerEmail) {
+  if (!callerEmail) return errorResponse_("callerEmail is required", "AUTH_ERROR");
+  try { rateLimit_("updateUser_" + callerEmail, 10); } catch(e) { return errorResponse_(String(e.message), "RATE_LIMIT"); }
+
+  // Verify caller is staff/admin
+  var callerLookup = lookupUser_(callerEmail);
+  if (!callerLookup.user) return errorResponse_("Caller not found: " + callerEmail, "AUTH_ERROR");
+  if (!callerLookup.user.active) return errorResponse_("Caller account is deactivated", "AUTH_ERROR");
+  if (callerLookup.user.role !== "admin" && callerLookup.user.role !== "staff") {
+    return errorResponse_("Insufficient permissions — staff or admin required", "AUTH_ERROR");
+  }
+
+  var targetEmail = String(params.email || "").trim().toLowerCase();
+  if (!targetEmail) return errorResponse_("email is required", "INVALID_PARAMS");
+
+  var lookup = lookupUser_(targetEmail);
+  if (!lookup.user) return errorResponse_("User not found: " + targetEmail, "NOT_FOUND");
+
+  var sheet = lookup.sheet;
+  var rowIdx = lookup.rowIndex;
+  var headers = lookup.headers;
+  var now = new Date();
+  var changed = false;
+
+  // Determine effective role (may change below)
+  var effectiveRole = lookup.user.role;
+
+  // Update Email (v38.13.0 — allows fixing typos in user emails)
+  var newEmail = params.newEmail ? String(params.newEmail).trim().toLowerCase() : null;
+  if (newEmail && newEmail !== targetEmail) {
+    var emailIdx2 = headers.indexOf("Email");
+    if (emailIdx2 >= 0) {
+      // Check for duplicate
+      for (var de = 1; de < data.length; de++) {
+        if (de === rowIdx - 1) continue; // skip current row
+        if (String(data[de][emailIdx2] || "").trim().toLowerCase() === newEmail) {
+          return errorResponse_("Email '" + newEmail + "' is already in use by another user", "DUPLICATE");
+        }
+      }
+      sheet.getRange(rowIdx, emailIdx2 + 1).setValue(newEmail);
+      lookup.user.email = newEmail;
+      changed = true;
+    }
+  }
+
+  // Update Active
+  var newActive = String(params.active || "").trim().toUpperCase();
+  if (newActive === "TRUE" || newActive === "FALSE") {
+    var activeIdx = headers.indexOf("Active");
+    if (activeIdx >= 0) {
+      sheet.getRange(rowIdx, activeIdx + 1).setValue(newActive === "TRUE");
+      lookup.user.active = newActive === "TRUE";
+      changed = true;
+    }
+  }
+
+  // Update Role
+  var newRole = String(params.role || "").trim().toLowerCase();
+  if (newRole && ["admin", "staff", "client"].indexOf(newRole) >= 0) {
+    var roleIdx = headers.indexOf("Role");
+    if (roleIdx >= 0) {
+      sheet.getRange(rowIdx, roleIdx + 1).setValue(newRole);
+      lookup.user.role = newRole;
+      effectiveRole = newRole;
+      changed = true;
+    }
+  }
+
+  // Update Client Name + Client Spreadsheet ID (v33.0.0 — full overwrite for access list)
+  if (params.clientName !== undefined || params.clientSheetId !== undefined) {
+    var newClientName = (params.clientName !== undefined) ? String(params.clientName || "").trim() : null;
+    var newClientSheetId = (params.clientSheetId !== undefined) ? String(params.clientSheetId || "").trim() : null;
+
+    // If both are provided, validate parallel array length
+    if (newClientName !== null && newClientSheetId !== null) {
+      var parsedNames = parseCSV_(newClientName);
+      var parsedIds = parseCSV_(newClientSheetId);
+
+      // Validate: counts must match
+      if (parsedNames.length !== parsedIds.length) {
+        return errorResponse_(
+          "Client Name count (" + parsedNames.length + ") does not match Client Spreadsheet ID count (" + parsedIds.length + "). Both must have the same number of entries.",
+          "VALIDATION_ERROR"
+        );
+      }
+
+      // Validate: client-role users must have at least one client
+      if (effectiveRole === "client" && parsedIds.length === 0) {
+        return errorResponse_("Client-role users must have at least one client account.", "VALIDATION_ERROR");
+      }
+
+      // Validate: no blank IDs
+      for (var v = 0; v < parsedIds.length; v++) {
+        if (!parsedIds[v]) {
+          return errorResponse_("Client Spreadsheet ID list contains blank entries.", "VALIDATION_ERROR");
+        }
+      }
+
+      // Dedupe by sheet ID (keep first occurrence of each)
+      var seenIds = {};
+      var dedupedNames = [];
+      var dedupedIds = [];
+      for (var d = 0; d < parsedIds.length; d++) {
+        if (!seenIds[parsedIds[d]]) {
+          seenIds[parsedIds[d]] = true;
+          dedupedIds.push(parsedIds[d]);
+          dedupedNames.push(parsedNames[d] || "");
+        }
+      }
+
+      newClientName = dedupedNames.join(", ");
+      newClientSheetId = dedupedIds.join(", ");
+    }
+
+    if (newClientName !== null) {
+      var nameIdx = headers.indexOf("Client Name");
+      if (nameIdx >= 0) {
+        sheet.getRange(rowIdx, nameIdx + 1).setValue(newClientName);
+        lookup.user.clientName = newClientName;
+        changed = true;
+      }
+    }
+
+    if (newClientSheetId !== null) {
+      var ssIdIdx = headers.indexOf("Client Spreadsheet ID");
+      if (ssIdIdx >= 0) {
+        sheet.getRange(rowIdx, ssIdIdx + 1).setValue(newClientSheetId);
+        lookup.user.clientSheetId = newClientSheetId;
+        changed = true;
+      }
+    }
+  }
+
+  // Stamp audit fields
+  if (changed) {
+    var updatedByIdx = headers.indexOf("Updated By");
+    var updatedAtIdx = headers.indexOf("Updated At");
+    if (updatedByIdx >= 0) sheet.getRange(rowIdx, updatedByIdx + 1).setValue(callerEmail);
+    if (updatedAtIdx >= 0) sheet.getRange(rowIdx, updatedAtIdx + 1).setValue(now);
+    lookup.user.updatedBy = callerEmail;
+    lookup.user.updatedAt = formatDate_(now);
+
+    // Invalidate scope cache for this user
+    try {
+      var cache = CacheService.getScriptCache();
+      cache.remove("client_scope:" + parseCSV_(lookup.user.clientSheetId).sort().join("|"));
+    } catch (_) {}
+  }
+
+  return jsonResponse_({ success: true, user: lookup.user });
+}
+
+/**
+ * POST deleteUser — Remove a user row from CB Users tab. Admin-only.
+ * Does NOT delete the Supabase auth account (must be done separately).
+ */
+function handleDeleteUser_(params, callerEmail) {
+  if (!callerEmail) return errorResponse_("callerEmail is required", "AUTH_ERROR");
+  var callerLookup = lookupUser_(callerEmail);
+  if (!callerLookup.user) return errorResponse_("Caller not found", "AUTH_ERROR");
+  if (callerLookup.user.role !== "admin") return errorResponse_("Admin only", "AUTH_ERROR");
+
+  var targetEmail = String(params.email || "").trim().toLowerCase();
+  if (!targetEmail) return errorResponse_("email is required", "INVALID_PARAMS");
+  if (targetEmail === callerEmail.toLowerCase()) return errorResponse_("Cannot delete your own account", "INVALID_PARAMS");
+
+  var lookup = lookupUser_(targetEmail);
+  if (!lookup.user) return errorResponse_("User not found: " + targetEmail, "NOT_FOUND");
+
+  lookup.sheet.deleteRow(lookup.rowIndex);
+  try { CacheService.getScriptCache().remove("api_users"); } catch (_) {}
+
+  return jsonResponse_({ success: true, deletedEmail: targetEmail });
+}
+
+// ─── Batch 1 Handlers ───────────────────────────────────────────────────────
+
+/**
+ * Auth-aware wrapper for getClients.
+ * - Staff/admin: returns all active clients (unchanged)
+ * - Parent client: returns only their accessible clients (scoped by PARENT_CLIENT column)
+ * - Regular client: error (they have no business calling this)
+ */
+function handleGetClientsAuthed_(callerEmail) {
+  if (!callerEmail) return errorResponse_("callerEmail is required", "AUTH_ERROR");
+  var lookup = lookupUser_(callerEmail);
+  if (!lookup.user) return errorResponse_("User not found: " + callerEmail, "AUTH_ERROR");
+  if (!lookup.user.active) return errorResponse_("User account is deactivated", "AUTH_ERROR");
+
+  if (lookup.user.role === "admin" || lookup.user.role === "staff") {
+    return handleGetClients_(null); // all clients
+  }
+
+  if (lookup.user.role === "client") {
+    var scope = getAccessibleClientScope_(lookup.user);
+    if (!scope || scope.length === 0) {
+      return errorResponse_("Insufficient permissions — parent account required to list clients", "AUTH_ERROR");
+    }
+    return handleGetClients_(scope);
+  }
+
+  return errorResponse_("Insufficient permissions", "AUTH_ERROR");
+}
+
+function handleGetClients_(scopeIds) {
+  var cbId = prop_("CB_SPREADSHEET_ID");
+  if (!cbId) return errorResponse_("CB_SPREADSHEET_ID not configured", "CONFIG_ERROR");
+
+  var ss = SpreadsheetApp.openById(cbId);
+  var sheet = ss.getSheetByName("Clients");
+  if (!sheet) return errorResponse_("Clients sheet not found in CB", "NOT_FOUND");
+
+  var data = sheet.getDataRange().getValues();
+  if (data.length < 2) return jsonResponse_({ clients: [], count: 0 });
+
+  var headers = data[0].map(function(h) { return String(h).trim(); });
+  var clients = [];
+
+  for (var i = 1; i < data.length; i++) {
+    var row = data[i];
+    var obj = {};
+    for (var j = 0; j < headers.length; j++) {
+      obj[headers[j]] = row[j];
+    }
+
+    var name = String(obj["Client Name"] || "").trim();
+    var sheetId = String(obj["Client Spreadsheet ID"] || "").trim();
+    if (!name || !sheetId) continue;
+
+    var active = obj["Active"];
+    if (active === false || active === "FALSE" || active === "No") continue;
+
+    clients.push({
+      name: name,
+      spreadsheetId: sheetId,
+      email: String(obj["Client Email"] || "").trim(),
+      contactName: String(obj["Contact Name"] || "").trim(),
+      phone: String(obj["Phone"] || "").trim(),
+      folderId: String(obj["Client Folder ID"] || "").trim(),
+      photosFolderId: String(obj["Photos Folder ID"] || "").trim(),
+      invoiceFolderId: String(obj["Invoice Folder ID"] || "").trim(),
+      freeStorageDays: Number(obj["Free Storage Days"]) || 0,
+      discountStoragePct: Number(obj["Discount Storage %"]) || 0,
+      discountServicesPct: Number(obj["Discount Services %"]) || 0,
+      paymentTerms: String(obj["Payment Terms"] || "NET 30").trim(),
+      enableReceivingBilling: toBool_(obj["Enable Receiving Billing"]),
+      enableShipmentEmail: toBool_(obj["Enable Shipment Email"]),
+      enableNotifications: toBool_(obj["Enable Notifications"]),
+      autoInspection: toBool_(obj["Auto Inspection"]),
+      separateBySidemark: toBool_(obj["Separate By Sidemark"]),
+      qbCustomerName: String(obj["QB_CUSTOMER_NAME"] || "").trim(),
+      staxCustomerId: String(obj["Stax Customer ID"] || "").trim(),
+      parentClient: String(obj["Parent Client"] || "").trim(),
+      autoCharge: obj["Auto Charge"] === true || String(obj["Auto Charge"] || "").toUpperCase() === "TRUE",
+      webAppUrl: String(obj["Web App URL"] || "").trim(),
+      notes: String(obj["Notes"] || "").trim(),
+      active: true
+    });
+  }
+
+  // Filter to accessible scope if provided (parent user transfers)
+  if (scopeIds && scopeIds.length > 0) {
+    clients = clients.filter(function(c) { return scopeIds.indexOf(c.spreadsheetId) >= 0; });
+  }
+
+  return jsonResponse_({ clients: clients, count: clients.length });
+}
+
+function handleGetPricing_() {
+  // Cache pricing for 30 minutes — rarely changes
+  var cache = CacheService.getScriptCache();
+  var cached = cache.get("api_pricing");
+  if (cached) {
+    try { return jsonResponse_(JSON.parse(cached)); } catch (_) {}
+  }
+
+  var mplId = prop_("MASTER_PRICE_LIST_SPREADSHEET_ID");
+  if (!mplId) return errorResponse_("MASTER_PRICE_LIST_SPREADSHEET_ID not configured", "CONFIG_ERROR");
+
+  var ss = SpreadsheetApp.openById(mplId);
+  var priceSheet = ss.getSheetByName("Price_List");
+  var priceList = priceSheet ? sheetToObjects_(priceSheet) : [];
+  var classSheet = ss.getSheetByName("Class_Map");
+  var classMap = classSheet ? sheetToObjects_(classSheet) : [];
+
+  var result = {
+    priceList: priceList,
+    classMap: classMap,
+    priceCount: priceList.length,
+    classCount: classMap.length
+  };
+
+  // CacheService max value size is 100KB — pricing data is small enough
+  try { cache.put("api_pricing", JSON.stringify(result), 1800); } catch (_) {}
+
+  return jsonResponse_(result);
+}
+
+function handleGetLocations_() {
+  var cbId = prop_("CB_SPREADSHEET_ID");
+  if (!cbId) return errorResponse_("CB_SPREADSHEET_ID not configured", "CONFIG_ERROR");
+
+  var ss = SpreadsheetApp.openById(cbId);
+  var sheet = ss.getSheetByName("Locations");
+  if (!sheet) return errorResponse_("Locations sheet not found in CB", "NOT_FOUND");
+
+  var data = sheet.getDataRange().getValues();
+  if (data.length < 2) return jsonResponse_({ locations: [], count: 0 });
+
+  var locations = [];
+  for (var i = 1; i < data.length; i++) {
+    var loc = String(data[i][0] || "").trim();
+    var notes = String(data[i][1] || "").trim();
+    if (!loc) continue;
+    locations.push({ location: loc, notes: notes });
+  }
+
+  return jsonResponse_({ locations: locations, count: locations.length });
+}
+
+// ─── Batch 2 Handlers ───────────────────────────────────────────────────────
+
+function handleGetInventory_(clientSheetId) {
+  var clients = getTargetClients_(clientSheetId);
+  if (clients.error) return errorResponse_(clients.error, clients.code);
+
+  var readFolderUrls = true; // v26.7.0: always read folder URLs (was: clients.list.length === 1)
+
+  var allItems = [];
+  var errors = [];
+
+  for (var c = 0; c < clients.list.length; c++) {
+    var client = clients.list[c];
+    try {
+      var ss = SpreadsheetApp.openById(client.spreadsheetId);
+      var sheet = ss.getSheetByName("Inventory");
+      if (!sheet) continue;
+
+      // Build shipment folder URL lookup — only for single-client requests
+      var shipFolderMap = readFolderUrls ? api_buildShipmentFolderMap_(ss) : {};
+
+      var rows = sheetToObjects_(sheet);
+      for (var r = 0; r < rows.length; r++) {
+        var row = rows[r];
+        var itemId = String(row["Item ID"] || "").trim();
+        if (!itemId) continue;
+        var shipNo = String(row["Shipment #"] || "").trim();
+
+        allItems.push({
+          itemId: itemId,
+          clientName: client.name,
+          clientSheetId: client.spreadsheetId,
+          reference: String(row["Reference"] || "").trim(),
+          qty: Number(row["Qty"]) || 1,
+          vendor: String(row["Vendor"] || "").trim(),
+          description: String(row["Description"] || "").trim(),
+          itemClass: String(row["Class"] || "").trim(),
+          location: String(row["Location"] || "").trim(),
+          sidemark: String(row["Sidemark"] || "").trim(),
+          room: String(row["Room"] || "").trim(),
+          itemNotes: String(row["Item Notes"] || "").trim(),
+          taskNotes: String(row["Task Notes"] || "").trim(),
+          needsInspection: toBool_(row["Needs Inspection"]),
+          needsAssembly: toBool_(row["Needs Assembly"]),
+          carrier: String(row["Carrier"] || "").trim(),
+          trackingNumber: String(row["Tracking #"] || "").trim(),
+          shipmentNumber: shipNo,
+          receiveDate: formatDate_(row["Receive Date"]),
+          releaseDate: formatDate_(row["Release Date"]),
+          status: String(row["Status"] || "Active").trim(),
+          invoiceUrl: String(row["Invoice URL"] || "").trim(),
+          shipmentFolderUrl: shipFolderMap[shipNo] || ""
+        });
+      }
+    } catch (err) {
+      errors.push({ client: client.name, error: String(err) });
+    }
+  }
+
+  return jsonResponse_({
+    items: allItems,
+    count: allItems.length,
+    clientsQueried: clients.list.length,
+    errors: errors.length > 0 ? errors : undefined
+  });
+}
+
+function handleGetTasks_(clientSheetId) {
+  var clients = getTargetClients_(clientSheetId);
+  if (clients.error) return errorResponse_(clients.error, clients.code);
+
+  // Only do expensive RichTextValue reads for single-client requests (detail panel use)
+  var readFolderUrls = true; // v26.7.0: always read folder URLs (was: clients.list.length === 1)
+
+  var allTasks = [];
+  var errors = [];
+
+  for (var c = 0; c < clients.list.length; c++) {
+    var client = clients.list[c];
+    try {
+      var ss = SpreadsheetApp.openById(client.spreadsheetId);
+      var sheet = ss.getSheetByName("Tasks");
+      if (!sheet) continue;
+
+      var rows = sheetToObjects_(sheet);
+
+      // Folder URL lookups — only for single-client requests
+      var taskFolderUrls = {};
+      var shipFolderMap = {};
+      if (readFolderUrls) {
+        taskFolderUrls = api_readIdFolderUrls_(sheet, "Task ID");
+        shipFolderMap = api_buildShipmentFolderMap_(ss);
+      }
+
+      // v38.5.0: Build itemId → {ship, vendor, description} fallback maps from
+      // the Inventory sheet. Legacy/early tasks created before the React
+      // CreateTaskModal passed these fields have blanks on the Tasks row;
+      // this backfills the API response at read time.
+      var invFields = api_buildInvFieldsByItemMap_(ss);
+
+      for (var r = 0; r < rows.length; r++) {
+        var row = rows[r];
+        var taskId = String(row["Task ID"] || "").trim();
+        if (!taskId) continue;
+        var taskItemId = String(row["Item ID"] || "").trim();
+        var shipNo = String(row["Shipment #"] || "").trim();
+        var vendor = String(row["Vendor"] || "").trim();
+        var description = String(row["Description"] || "").trim();
+        if (taskItemId) {
+          if (!shipNo && invFields.ship[taskItemId]) shipNo = invFields.ship[taskItemId];
+          if (!vendor && invFields.vendor[taskItemId]) vendor = invFields.vendor[taskItemId];
+          if (!description && invFields.description[taskItemId]) description = invFields.description[taskItemId];
+        }
+
+        allTasks.push({
+          taskId: taskId,
+          clientName: client.name,
+          clientSheetId: client.spreadsheetId,
+          type: String(row["Type"] || "").trim(),
+          status: String(row["Status"] || "Open").trim(),
+          itemId: taskItemId,
+          vendor: vendor,
+          description: description,
+          location: String(row["Location"] || "").trim(),
+          sidemark: String(row["Sidemark"] || "").trim(),
+          shipmentNumber: shipNo,
+          created: formatDate_(row["Created"]),
+          itemNotes: String(row["Item Notes"] || "").trim(),
+          completedAt: formatDateTime_(row["Completed At"]),
+          cancelledAt: formatDateTime_(row["Cancelled At"]),
+          result: String(row["Result"] || "").trim(),
+          taskNotes: String(row["Task Notes"] || "").trim(),
+          svcCode: String(row["Svc Code"] || "").trim(),
+          billed: toBool_(row["Billed"]),
+          assignedTo: String(row["Assigned To"] || "").trim(),
+          startedAt: formatDateTime_(row["Started At"]),
+          customPrice: toNum_(row["Custom Price"]) || undefined,
+          taskFolderUrl: taskFolderUrls[taskId] || "",
+          shipmentFolderUrl: shipFolderMap[shipNo] || ""
+        });
+      }
+    } catch (err) {
+      errors.push({ client: client.name, error: String(err) });
+    }
+  }
+
+  return jsonResponse_({
+    tasks: allTasks,
+    count: allTasks.length,
+    clientsQueried: clients.list.length,
+    errors: errors.length > 0 ? errors : undefined
+  });
+}
+
+function handleGetRepairs_(clientSheetId) {
+  var clients = getTargetClients_(clientSheetId);
+  if (clients.error) return errorResponse_(clients.error, clients.code);
+
+  var readFolderUrls = true; // v26.7.0: always read folder URLs (was: clients.list.length === 1)
+
+  var allRepairs = [];
+  var errors = [];
+
+  for (var c = 0; c < clients.list.length; c++) {
+    var client = clients.list[c];
+    try {
+      var ss = SpreadsheetApp.openById(client.spreadsheetId);
+      var sheet = ss.getSheetByName("Repairs");
+      if (!sheet) continue;
+
+      var rows = sheetToObjects_(sheet);
+
+      var repairFolderUrls = {};
+      var shipFolderMap = {};
+      var taskFolderUrls = {};
+      if (readFolderUrls) {
+        repairFolderUrls = api_readIdFolderUrls_(sheet, "Repair ID");
+        shipFolderMap = api_buildShipmentFolderMap_(ss);
+        var taskSheet = ss.getSheetByName("Tasks");
+        if (taskSheet) taskFolderUrls = api_readIdFolderUrls_(taskSheet, "Task ID");
+      }
+
+      // Build item→(shipment, vendor, description) maps for cross-referencing
+      // shipment folders AND for falling back to Inventory fields when the
+      // Repairs row has them blank (legacy/imported data).
+      var itemToShipNo = {};
+      var itemToVendor = {};
+      var itemToDesc = {};
+      var invSheet = ss.getSheetByName("Inventory");
+      if (invSheet) {
+        var invRows = sheetToObjects_(invSheet);
+        for (var iv = 0; iv < invRows.length; iv++) {
+          var iid = String(invRows[iv]["Item ID"] || "").trim();
+          if (!iid) continue;
+          var isn = String(invRows[iv]["Shipment #"] || "").trim();
+          var ivend = String(invRows[iv]["Vendor"] || "").trim();
+          var idesc = String(invRows[iv]["Description"] || "").trim();
+          if (isn && !itemToShipNo[iid]) itemToShipNo[iid] = isn;
+          if (ivend && !itemToVendor[iid]) itemToVendor[iid] = ivend;
+          if (idesc && !itemToDesc[iid]) itemToDesc[iid] = idesc;
+        }
+      }
+
+      for (var r = 0; r < rows.length; r++) {
+        var row = rows[r];
+        var repairId = String(row["Repair ID"] || "").trim();
+        if (!repairId) continue;
+        var repairItemId = String(row["Item ID"] || "").trim();
+        var sourceTaskId = String(row["Source Task ID"] || "").trim();
+        var repShipNo = String(row["Shipment #"] || "").trim() || itemToShipNo[repairItemId] || "";
+
+        var rowVendor = String(row["Vendor"] || "").trim();
+        var rowDesc = String(row["Description"] || "").trim();
+        if (!rowVendor && repairItemId && itemToVendor[repairItemId]) rowVendor = itemToVendor[repairItemId];
+        if (!rowDesc && repairItemId && itemToDesc[repairItemId]) rowDesc = itemToDesc[repairItemId];
+        allRepairs.push({
+          repairId: repairId,
+          clientName: client.name,
+          clientSheetId: client.spreadsheetId,
+          sourceTaskId: sourceTaskId,
+          itemId: repairItemId,
+          description: rowDesc,
+          itemClass: String(row["Class"] || "").trim(),
+          vendor: rowVendor,
+          location: String(row["Location"] || "").trim(),
+          sidemark: String(row["Sidemark"] || "").trim(),
+          taskNotes: String(row["Task Notes"] || "").trim(),
+          createdBy: String(row["Created By"] || "").trim(),
+          createdDate: formatDate_(row["Created Date"]),
+          quoteAmount: toNum_(row["Quote Amount"]),
+          quoteSentDate: formatDate_(row["Quote Sent Date"]),
+          status: String(row["Status"] || "").trim(),
+          approved: toBool_(row["Approved"]),
+          scheduledDate: formatDate_(row["Scheduled Date"]),
+          startDate: formatDate_(row["Start Date"]),
+          repairVendor: String(row["Repair Vendor"] || "").trim(),
+          partsCost: toNum_(row["Parts Cost"]),
+          laborHours: toNum_(row["Labor Hours"]),
+          repairResult: String(row["Repair Result"] || "").trim(),
+          finalAmount: toNum_(row["Final Amount"]),
+          invoiceId: String(row["Invoice ID"] || "").trim(),
+          itemNotes: String(row["Item Notes"] || "").trim(),
+          repairNotes: String(row["Repair Notes"] || "").trim(),
+          completedDate: formatDate_(row["Completed Date"]),
+          billed: toBool_(row["Billed"]),
+          repairFolderUrl: repairFolderUrls[repairId] || "",
+          taskFolderUrl: taskFolderUrls[sourceTaskId] || "",
+          shipmentFolderUrl: shipFolderMap[repShipNo] || ""
+        });
+      }
+    } catch (err) {
+      errors.push({ client: client.name, error: String(err) });
+    }
+  }
+
+  return jsonResponse_({
+    repairs: allRepairs,
+    count: allRepairs.length,
+    clientsQueried: clients.list.length,
+    errors: errors.length > 0 ? errors : undefined
+  });
+}
+
+function handleGetWillCalls_(clientSheetId) {
+  var clients = getTargetClients_(clientSheetId);
+  if (clients.error) return errorResponse_(clients.error, clients.code);
+
+  var readFolderUrls = true; // v26.7.0: always read folder URLs (was: clients.list.length === 1)
+
+  var allWCs = [];
+  var errors = [];
+
+  for (var c = 0; c < clients.list.length; c++) {
+    var client = clients.list[c];
+    try {
+      var ss = SpreadsheetApp.openById(client.spreadsheetId);
+
+      var wcSheet = ss.getSheetByName("Will_Calls");
+      if (!wcSheet) continue;
+
+      var wcRows = sheetToObjects_(wcSheet);
+
+      // Folder URL lookups — only for single-client requests
+      var wcFolderUrls = {};
+      var wcShipFolderMap = {};
+      if (readFolderUrls) {
+        wcFolderUrls = api_readIdFolderUrls_(wcSheet, "WC Number");
+        wcShipFolderMap = api_buildShipmentFolderMap_(ss);
+      }
+
+      var wciSheet = ss.getSheetByName("WC_Items");
+      var wciRows = wciSheet ? sheetToObjects_(wciSheet) : [];
+
+      // Build inventory lookup for filling blank WC_Items fields (older WCs lack vendor/location)
+      var invLookup = {};
+      try {
+        var invSh = ss.getSheetByName("Inventory");
+        if (invSh && invSh.getLastRow() >= 2) {
+          var invObjs = sheetToObjects_(invSh);
+          for (var iv = 0; iv < invObjs.length; iv++) {
+            var iid = String(invObjs[iv]["Item ID"] || "").trim();
+            if (iid) invLookup[iid] = invObjs[iv];
+          }
+        }
+      } catch (_) {}
+
+      var itemsByWC = {};
+      for (var i = 0; i < wciRows.length; i++) {
+        var wci = wciRows[i];
+        var wcNum = String(wci["WC Number"] || "").trim();
+        if (!wcNum) continue;
+        if (!itemsByWC[wcNum]) itemsByWC[wcNum] = [];
+        var wciItemId = String(wci["Item ID"] || "").trim();
+        var wciVendor = String(wci["Vendor"] || "").trim();
+        var wciLocation = String(wci["Location"] || "").trim();
+        var wciDesc = String(wci["Description"] || "").trim();
+        // Fall back to Inventory data if WC_Items fields are blank
+        if ((!wciVendor || !wciLocation || !wciDesc) && invLookup[wciItemId]) {
+          var inv = invLookup[wciItemId];
+          if (!wciVendor) wciVendor = String(inv["Vendor"] || "").trim();
+          if (!wciLocation) wciLocation = String(inv["Location"] || "").trim();
+          if (!wciDesc) wciDesc = String(inv["Description"] || "").trim();
+        }
+        itemsByWC[wcNum].push({
+          wcNumber: wcNum,
+          itemId: wciItemId,
+          qty: Number(wci["Qty"]) || 1,
+          vendor: wciVendor,
+          description: wciDesc,
+          itemClass: String(wci["Class"] || "").trim(),
+          location: wciLocation,
+          sidemark: String(wci["Sidemark"] || "").trim(),
+          room: String(wci["Room"] || "").trim(),
+          wcFee: toNum_(wci["WC Fee"]),
+          released: String(wci["Status"] || "").trim() === "Released" || toBool_(wci["Released"]),
+          status: String(wci["Status"] || "").trim()
+        });
+      }
+
+      for (var r = 0; r < wcRows.length; r++) {
+        var row = wcRows[r];
+        var wcNumber = String(row["WC Number"] || "").trim();
+        if (!wcNumber) continue;
+
+        allWCs.push({
+          wcNumber: wcNumber,
+          clientName: client.name,
+          clientSheetId: client.spreadsheetId,
+          status: String(row["Status"] || "Pending").trim(),
+          createdDate: formatDate_(row["Created Date"]),
+          createdBy: String(row["Created By"] || "").trim(),
+          pickupParty: String(row["Pickup Party"] || "").trim(),
+          pickupPhone: String(row["Pickup Phone"] || "").trim(),
+          requestedBy: String(row["Requested By"] || "").trim(),
+          estimatedPickupDate: formatDate_(row["Estimated Pickup Date"]),
+          actualPickupDate: formatDate_(row["Actual Pickup Date"]),
+          notes: String(row["Notes"] || "").trim(),
+          cod: toBool_(row["COD"]),
+          codAmount: toNum_(row["COD Amount"]),
+          itemsCount: Number(row["Items Count"]) || 0,
+          totalWcFee: toNum_(row["Total WC Fee"]),
+          items: itemsByWC[wcNumber] || [],
+          wcFolderUrl: wcFolderUrls[wcNumber] || "",
+          shipmentFolderUrl: "" // set below via item → inventory → shipment lookup
+        });
+      }
+
+      // Cross-reference: WCs get shipment folder via their first item's shipment number
+      if (readFolderUrls) {
+        var invSheet = ss.getSheetByName("Inventory");
+        if (invSheet) {
+          var invRows = sheetToObjects_(invSheet);
+          var invItemToShip = {};
+          for (var iv = 0; iv < invRows.length; iv++) {
+            var invItemId = String(invRows[iv]["Item ID"] || "").trim();
+            var invShipNo = String(invRows[iv]["Shipment #"] || "").trim();
+            if (invItemId && invShipNo) invItemToShip[invItemId] = invShipNo;
+          }
+          for (var wj = allWCs.length - wcRows.length; wj < allWCs.length; wj++) {
+            var wcItems = allWCs[wj].items || [];
+            for (var wi = 0; wi < wcItems.length; wi++) {
+              var wcItemShip = invItemToShip[wcItems[wi].itemId] || "";
+              if (wcItemShip && wcShipFolderMap[wcItemShip]) {
+                allWCs[wj].shipmentFolderUrl = wcShipFolderMap[wcItemShip];
+                break;
+              }
+            }
+          }
+        }
+      }
+    } catch (err) {
+      errors.push({ client: client.name, error: String(err) });
+    }
+  }
+
+  return jsonResponse_({
+    willCalls: allWCs,
+    count: allWCs.length,
+    clientsQueried: clients.list.length,
+    errors: errors.length > 0 ? errors : undefined
+  });
+}
+
+function handleGetShipments_(clientSheetId) {
+  var clients = getTargetClients_(clientSheetId);
+  if (clients.error) return errorResponse_(clients.error, clients.code);
+
+  var readFolderUrls = true; // v26.7.0: always read folder URLs (was: clients.list.length === 1)
+
+  var allShipments = [];
+  var errors = [];
+
+  for (var c = 0; c < clients.list.length; c++) {
+    var client = clients.list[c];
+    try {
+      var ss = SpreadsheetApp.openById(client.spreadsheetId);
+      var sheet = ss.getSheetByName("Shipments");
+      if (!sheet) continue;
+
+      var rows = sheetToObjects_(sheet);
+
+      // Folder URL lookup — only for single-client requests
+      var folderUrls = readFolderUrls ? api_readIdFolderUrls_(sheet, "Shipment #") : {};
+
+      for (var r = 0; r < rows.length; r++) {
+        var row = rows[r];
+        var shipNum = String(row["Shipment #"] || "").trim();
+        if (!shipNum) continue;
+
+        allShipments.push({
+          shipmentNumber: shipNum,
+          clientName: client.name,
+          clientSheetId: client.spreadsheetId,
+          receiveDate: formatDate_(row["Receive Date"]),
+          itemCount: Number(row["Item Count"]) || 0,
+          carrier: String(row["Carrier"] || "").trim(),
+          trackingNumber: String(row["Tracking #"] || "").trim(),
+          photosUrl: String(row["Shipment Photos URL"] || "").trim(),
+          notes: String(row["Shipment Notes"] || "").trim().replace(/^\[IK:[^\]]*\]\s*/, ''),
+          invoiceUrl: String(row["Invoice URL"] || "").trim(),
+          folderUrl: folderUrls[shipNum] || String(row["Shipment Photos URL"] || "").trim()
+        });
+      }
+    } catch (err) {
+      errors.push({ client: client.name, error: String(err) });
+    }
+  }
+
+  return jsonResponse_({
+    shipments: allShipments,
+    count: allShipments.length,
+    clientsQueried: clients.list.length,
+    errors: errors.length > 0 ? errors : undefined
+  });
+}
+
+function handleGetShipmentItems_(clientSheetId, params) {
+  var shipmentNo = String(params.shipmentNo || "").trim();
+  if (!shipmentNo) return errorResponse_("shipmentNo parameter is required", 400);
+  if (!clientSheetId) return errorResponse_("clientSheetId parameter is required", 400);
+
+  try {
+    var ss = SpreadsheetApp.openById(clientSheetId);
+    var invSheet = ss.getSheetByName("Inventory");
+    if (!invSheet || invSheet.getLastRow() <= 1) {
+      return jsonResponse_({ items: [], count: 0 });
+    }
+
+    var invRows = sheetToObjects_(invSheet);
+    var items = [];
+    for (var i = 0; i < invRows.length; i++) {
+      var inv = invRows[i];
+      var sn = String(inv["Shipment #"] || "").trim();
+      if (sn !== shipmentNo) continue;
+      var iid = String(inv["Item ID"] || "").trim();
+      if (!iid) continue;
+      items.push({
+        itemId: iid,
+        description: String(inv["Description"] || "").trim(),
+        itemClass: String(inv["Class"] || "").trim(),
+        qty: Number(inv["Qty"]) || 1,
+        location: String(inv["Location"] || "").trim()
+      });
+    }
+
+    return jsonResponse_({ items: items, count: items.length });
+  } catch (err) {
+    return errorResponse_("Failed to load shipment items: " + String(err), 500);
+  }
+}
+
+// ─── Batch 3 Handlers ───────────────────────────────────────────────────────
+
+/**
+ * v38.13.0: Accepts optional `filters` object for server-side filtering (report builder).
+ * @param {string} clientSheetId
+ * @param {Object} [filters] - { statusFilter: string[], svcFilter: string[], sidemarkFilter: string[], endDate: string, clientFilter: string[] }
+ */
+function handleGetBilling_(clientSheetId, filters) {
+  var clients = getTargetClients_(clientSheetId);
+  if (clients.error) return errorResponse_(clients.error, clients.code);
+
+  // Build filter sets for fast lookup (lowercased for case-insensitive match)
+  var fStatus = filters && filters.statusFilter ? filters.statusFilter.map(function(s) { return s.trim(); }) : null;
+  var fSvc = filters && filters.svcFilter ? filters.svcFilter.map(function(s) { return s.trim().toUpperCase(); }) : null;
+  var fSidemark = filters && filters.sidemarkFilter ? filters.sidemarkFilter.map(function(s) { return s.trim(); }) : null;
+  var fEndDate = filters && filters.endDate ? filters.endDate : null;
+  var fClient = filters && filters.clientFilter ? filters.clientFilter.map(function(s) { return s.trim(); }) : null;
+
+  var allRows = [];
+  var errors = [];
+  var summary = { unbilled: 0, invoiced: 0, billed: 0, void_count: 0, totalUnbilled: 0 };
+
+  // v38.14.0: Build clientSheetId → staxCustomerId map from CB Clients tab
+  var staxBySheet = {};
+  var autoChargeBySheet = {};
+  try {
+    var cbId = prop_("CB_SPREADSHEET_ID");
+    if (cbId) {
+      var cbSS = SpreadsheetApp.openById(cbId);
+      var cbClients = cbSS.getSheetByName("Clients");
+      if (cbClients && cbClients.getLastRow() >= 2) {
+        var cbData = cbClients.getDataRange().getValues();
+        var cbH = {};
+        cbData[0].forEach(function(h, i) { cbH[String(h || "").trim().toUpperCase()] = i; });
+        var ssIdIdx = cbH["CLIENT SPREADSHEET ID"];
+        var staxIdx = cbH["STAX CUSTOMER ID"];
+        var autoChargeIdx = cbH["AUTO CHARGE"];
+        if (ssIdIdx !== undefined) {
+          for (var ci = 1; ci < cbData.length; ci++) {
+            var cSsId = String(cbData[ci][ssIdIdx] || "").trim();
+            if (!cSsId) continue;
+            if (staxIdx !== undefined) {
+              var cStax = String(cbData[ci][staxIdx] || "").trim();
+              if (cStax) staxBySheet[cSsId] = cStax;
+            }
+            if (autoChargeIdx !== undefined) {
+              var acVal = cbData[ci][autoChargeIdx];
+              autoChargeBySheet[cSsId] = (acVal === true || String(acVal).toUpperCase() === "TRUE");
+            }
+          }
+        }
+      }
+    }
+  } catch (_) { /* non-critical */ }
+
+  for (var c = 0; c < clients.list.length; c++) {
+    var client = clients.list[c];
+
+    // v38.13.0: Client name filter (skip entire client if not in filter list)
+    if (fClient && fClient.indexOf(client.name) === -1) continue;
+
+    try {
+      var ss = SpreadsheetApp.openById(client.spreadsheetId);
+      var sheet = ss.getSheetByName("Billing_Ledger");
+      if (!sheet) continue;
+
+      // v38.6.0: Build Item ID → Sidemark map from Inventory (Billing_Ledger has no Sidemark column)
+      var sidemarkByItemId = {};
+      try {
+        var invFields = api_buildInvFieldsByItemMap_(ss);
+        sidemarkByItemId = invFields.sidemark || {};
+      } catch (eSm) { /* non-critical */ }
+
+      var rows = sheetToObjects_(sheet);
+      for (var r = 0; r < rows.length; r++) {
+        var row = rows[r];
+        var ledgerRowId = String(row["Ledger Row ID"] || "").trim();
+        if (!ledgerRowId) continue;
+
+        var status = String(row["Status"] || "Unbilled").trim();
+        var total = toNum_(row["Total"]);
+        var svcCode = String(row["Svc Code"] || "").trim().toUpperCase();
+        var dateVal = formatDate_(row["Date"]);
+        var itemIdVal = String(row["Item ID"] || "").trim();
+        var sidemarkVal = String(row["Sidemark"] || "").trim();
+        if (!sidemarkVal && itemIdVal && sidemarkByItemId[itemIdVal]) {
+          sidemarkVal = sidemarkByItemId[itemIdVal];
+        }
+
+        // v38.13.0: Server-side filters
+        if (fStatus && fStatus.indexOf(status) === -1) continue;
+        if (fSvc && fSvc.indexOf(svcCode) === -1) continue;
+        if (fSidemark && fSidemark.indexOf(sidemarkVal) === -1) continue;
+        if (fEndDate && dateVal && dateVal > fEndDate) continue;
+
+        // Summary counts (after filters — reflects what the user sees)
+        if (status === "Unbilled") { summary.unbilled++; summary.totalUnbilled += (total || 0); }
+        else if (status === "Invoiced") { summary.invoiced++; }
+        else if (status === "Billed") { summary.billed++; }
+        else if (status === "Void") { summary.void_count++; }
+
+        allRows.push({
+          ledgerRowId: ledgerRowId,
+          clientName: client.name,
+          clientSheetId: client.spreadsheetId,
+          status: status,
+          invoiceNo: String(row["Invoice #"] || "").trim(),
+          client: String(row["Client"] || client.name).trim(),
+          date: dateVal,
+          svcCode: String(row["Svc Code"] || "").trim(),
+          svcName: String(row["Svc Name"] || "").trim(),
+          category: String(row["Category"] || "").trim(),
+          itemId: itemIdVal,
+          description: String(row["Description"] || "").trim(),
+          itemClass: String(row["Class"] || "").trim(),
+          qty: Number(row["Qty"]) || 0,
+          rate: toNum_(row["Rate"]),
+          total: total,
+          taskId: String(row["Task ID"] || "").trim(),
+          repairId: String(row["Repair ID"] || "").trim(),
+          shipmentNo: String(row["Shipment #"] || "").trim(),
+          itemNotes: String(row["Item Notes"] || "").trim(),
+          invoiceDate: formatDate_(row["Invoice Date"]),
+          invoiceUrl: String(row["Invoice URL"] || "").trim(),
+          sidemark: sidemarkVal,
+          staxCustomerId: staxBySheet[client.spreadsheetId] || null,
+          autoCharge: autoChargeBySheet[client.spreadsheetId] === true
+        });
+      }
+    } catch (err) {
+      errors.push({ client: client.name, error: String(err) });
+    }
+  }
+
+  return jsonResponse_({
+    rows: allRows,
+    count: allRows.length,
+    clientsQueried: clients.list.length,
+    summary: summary,
+    errors: errors.length > 0 ? errors : undefined
+  });
+}
+
+// ─── updateBillingRow — inline edit from React Billing page (v38.14.0) ──────
+// Payload: { ledgerRowId, sidemark?, description?, rate?, qty?, notes? }
+// Only Unbilled rows can be edited. Recalculates Total = Rate × Qty when
+// either field changes. Returns the full updated row values.
+
+function handleUpdateBillingRow_(clientSheetId, payload) {
+  var ledgerRowId = String((payload || {}).ledgerRowId || "").trim();
+  if (!ledgerRowId) return errorResponse_("ledgerRowId is required", "INVALID_PARAMS");
+
+  try {
+    var ss = SpreadsheetApp.openById(clientSheetId);
+    var sheet = ss.getSheetByName("Billing_Ledger");
+    if (!sheet) return errorResponse_("Billing_Ledger sheet not found", "SHEET_NOT_FOUND");
+
+    var hMap = api_getHeaderMap_(sheet);
+    var idCol = hMap["Ledger Row ID"];
+    if (!idCol) return errorResponse_("Ledger Row ID column not found", "SCHEMA_ERROR");
+
+    // Find the row by Ledger Row ID — require exactly one match
+    var matchRow = -1;
+    var lastRow = api_getLastDataRow_(sheet);
+    if (lastRow < 2) return errorResponse_("No data rows in Billing_Ledger", "NOT_FOUND");
+    var idData = sheet.getRange(2, idCol, lastRow - 1, 1).getValues();
+    for (var i = 0; i < idData.length; i++) {
+      if (String(idData[i][0] || "").trim() === ledgerRowId) {
+        if (matchRow !== -1) return errorResponse_("Duplicate Ledger Row ID: " + ledgerRowId, "DATA_ERROR");
+        matchRow = i + 2;
+      }
+    }
+    if (matchRow < 2) return errorResponse_("Billing row not found: " + ledgerRowId, "NOT_FOUND");
+
+    // Verify status is Unbilled
+    var statusCol = hMap["Status"];
+    if (statusCol) {
+      var currentStatus = String(sheet.getRange(matchRow, statusCol).getValue() || "").trim();
+      if (currentStatus !== "Unbilled") {
+        return errorResponse_("Cannot edit — row status is " + currentStatus + " (only Unbilled rows are editable)", "INVALID_STATUS");
+      }
+    }
+
+    // Apply updates
+    var updated = {};
+    if (payload.sidemark !== undefined && hMap["Sidemark"]) {
+      sheet.getRange(matchRow, hMap["Sidemark"]).setValue(String(payload.sidemark));
+      updated.sidemark = String(payload.sidemark);
+    }
+    if (payload.description !== undefined && hMap["Description"]) {
+      sheet.getRange(matchRow, hMap["Description"]).setValue(String(payload.description));
+      updated.description = String(payload.description);
+    }
+    if (payload.notes !== undefined && hMap["Item Notes"]) {
+      sheet.getRange(matchRow, hMap["Item Notes"]).setValue(String(payload.notes));
+      updated.notes = String(payload.notes);
+    }
+
+    // Rate/Qty: recalculate Total = Rate × Qty
+    var rateChanged = (payload.rate !== undefined);
+    var qtyChanged = (payload.qty !== undefined);
+    if (rateChanged || qtyChanged) {
+      var rateCol = hMap["Rate"];
+      var qtyCol = hMap["Qty"];
+      var totalCol = hMap["Total"];
+
+      var currentRate = rateCol ? Number(sheet.getRange(matchRow, rateCol).getValue()) || 0 : 0;
+      var currentQty = qtyCol ? Number(sheet.getRange(matchRow, qtyCol).getValue()) || 1 : 1;
+
+      if (rateChanged && rateCol) {
+        currentRate = Number(payload.rate) || 0;
+        sheet.getRange(matchRow, rateCol).setValue(currentRate);
+        updated.rate = currentRate;
+      }
+      if (qtyChanged && qtyCol) {
+        currentQty = Number(payload.qty) || 1;
+        sheet.getRange(matchRow, qtyCol).setValue(currentQty);
+        updated.qty = currentQty;
+      }
+
+      var newTotal = Math.round(currentRate * currentQty * 100) / 100;
+      if (totalCol) {
+        sheet.getRange(matchRow, totalCol).setValue(newTotal);
+        updated.total = newTotal;
+      }
+    }
+
+    return jsonResponse_({
+      success: true,
+      ledgerRowId: ledgerRowId,
+      updatedRow: updated,
+      message: "Billing row updated"
+    });
+  } catch (err) {
+    return errorResponse_("Failed to update billing row: " + String(err), "SERVER_ERROR");
+  }
+}
+
+// ─── getWcDocUrl ────────────────────────────────────────────────────────────
+
+function handleGetWcDocUrl_(clientSheetId, params) {
+  if (!clientSheetId) return errorResponse_("clientSheetId is required", "MISSING_PARAM");
+
+  var wcNumber = String(params.wcNumber || "").trim();
+  if (!wcNumber) return errorResponse_("wcNumber is required", "MISSING_PARAM");
+
+  var ss;
+  try { ss = SpreadsheetApp.openById(clientSheetId); }
+  catch (e) { return errorResponse_("Cannot open client spreadsheet: " + e.message, "OPEN_FAILED"); }
+
+  var wcSh = ss.getSheetByName("Will_Calls");
+  if (!wcSh || wcSh.getLastRow() < 2) return errorResponse_("Will_Calls sheet not found or empty", "NOT_FOUND");
+
+  var wcMap = api_getHeaderMap_(wcSh);
+  var wcNumCol = wcMap["WC Number"];
+  if (!wcNumCol) return errorResponse_("WC Number column not found", "SCHEMA_ERROR");
+
+  // Find the WC row
+  var wcData = wcSh.getDataRange().getValues();
+  var wcRow = -1;
+  for (var r = 1; r < wcData.length; r++) {
+    if (String(wcData[r][wcNumCol - 1] || "").trim() === wcNumber) { wcRow = r + 1; break; }
+  }
+  if (wcRow < 2) return errorResponse_("Will call not found: " + wcNumber, "NOT_FOUND");
+
+  // Read the RichTextValue on WC Number cell to get folder URL
+  var rtv = wcSh.getRange(wcRow, wcNumCol).getRichTextValue();
+  var folderUrl = rtv ? rtv.getLinkUrl() : null;
+  if (!folderUrl) {
+    return jsonResponse_({ wcNumber: wcNumber, folderUrl: null, pdfUrl: null, error: "No folder link on WC Number cell" });
+  }
+
+  // Extract folder ID from URL (formats: /folders/ID or id=ID)
+  var folderId = null;
+  var folderMatch = folderUrl.match(/\/folders\/([a-zA-Z0-9_-]+)/);
+  if (folderMatch) {
+    folderId = folderMatch[1];
+  } else {
+    var idMatch = folderUrl.match(/[?&]id=([a-zA-Z0-9_-]+)/);
+    if (idMatch) folderId = idMatch[1];
+  }
+
+  if (!folderId) {
+    return jsonResponse_({ wcNumber: wcNumber, folderUrl: folderUrl, pdfUrl: null, error: "Could not extract folder ID from URL" });
+  }
+
+  // Find PDF in the folder
+  var pdfUrl = null;
+  var pdfName = null;
+  try {
+    var folder = DriveApp.getFolderById(folderId);
+    var pdfs = folder.getFilesByType(MimeType.PDF);
+    if (pdfs.hasNext()) {
+      var pdf = pdfs.next();
+      pdfUrl = pdf.getUrl();
+      pdfName = pdf.getName();
+    }
+  } catch (e) {
+    return jsonResponse_({ wcNumber: wcNumber, folderUrl: folderUrl, pdfUrl: null, error: "Cannot access folder: " + e.message });
+  }
+
+  return jsonResponse_({
+    wcNumber: wcNumber,
+    folderUrl: folderUrl,
+    pdfUrl: pdfUrl,
+    pdfName: pdfName || null
+  });
+}
+
+// ─── Shared Helpers ─────────────────────────────────────────────────────────
+
+function getTargetClients_(clientSheetId) {
+  if (clientSheetId) {
+    return { list: [{ name: "(single)", spreadsheetId: clientSheetId }] };
+  }
+
+  // Check server-side cache (avoids re-opening CB spreadsheet on every request)
+  var cache = CacheService.getScriptCache();
+  var cacheKey = "api_active_clients";
+  var cached = cache.get(cacheKey);
+  var allClients;
+  if (cached) {
+    try { allClients = JSON.parse(cached); } catch (_) {}
+  }
+
+  if (!allClients) {
+    var cbId = prop_("CB_SPREADSHEET_ID");
+    if (!cbId) return { error: "CB_SPREADSHEET_ID not configured", code: "CONFIG_ERROR" };
+
+    var ss = SpreadsheetApp.openById(cbId);
+    var sheet = ss.getSheetByName("Clients");
+    if (!sheet) return { error: "Clients sheet not found", code: "NOT_FOUND" };
+
+    var data = sheet.getDataRange().getValues();
+    if (data.length < 2) return { list: [] };
+
+    var headers = data[0].map(function(h) { return String(h).trim(); });
+    var nameIdx = headers.indexOf("Client Name");
+    var idIdx   = headers.indexOf("Client Spreadsheet ID");
+    var actIdx  = headers.indexOf("Active");
+
+    if (nameIdx < 0 || idIdx < 0) return { error: "Clients tab missing required headers", code: "SCHEMA_ERROR" };
+
+    var list = [];
+    for (var i = 1; i < data.length; i++) {
+      var name = String(data[i][nameIdx] || "").trim();
+      var sid  = String(data[i][idIdx] || "").trim();
+      if (!name || !sid) continue;
+
+      if (actIdx >= 0) {
+        var act = data[i][actIdx];
+        if (act === false || act === "FALSE" || act === "No") continue;
+      }
+
+      list.push({ name: name, spreadsheetId: sid });
+    }
+
+    allClients = { list: list };
+    // Cache for 10 minutes — client list rarely changes
+    try { cache.put(cacheKey, JSON.stringify(allClients), 600); } catch (_) {}
+  }
+
+  // Parent-scope filtering: if _parentScope_ is set, only return clients in the allowed set
+  if (_parentScope_ && Array.isArray(_parentScope_)) {
+    var filtered = [];
+    for (var f = 0; f < allClients.list.length; f++) {
+      if (_parentScope_.indexOf(allClients.list[f].spreadsheetId) >= 0) {
+        filtered.push(allClients.list[f]);
+      }
+    }
+    return { list: filtered };
+  }
+
+  return allClients;
+}
+
+// ─── Batch 4 Handlers ───────────────────────────────────────────────────────
+
+function handleGetClaims_(callerRole, callerClientName) {
+  var cbId = prop_("CB_SPREADSHEET_ID");
+  if (!cbId) return errorResponse_("CB_SPREADSHEET_ID not configured", "CONFIG_ERROR");
+
+  var ss = SpreadsheetApp.openById(cbId);
+  var sheet = ss.getSheetByName("Claims");
+  if (!sheet) return jsonResponse_({ claims: [], count: 0, message: "Claims schema not set up — run Claims_SetupSchema from the Stride Billing menu." });
+
+  var rows = sheetToObjects_(sheet);
+  var claims = [];
+
+  for (var r = 0; r < rows.length; r++) {
+    var row = rows[r];
+    var claimId = String(row["Claim ID"] || "").trim();
+    if (!claimId) continue;
+
+    // Support both new schema names and legacy names during migration
+    claims.push({
+      claimId:                    claimId,
+      claimType:                  String(row["Claim Type"]                   || "").trim(),
+      status:                     String(row["Status"]                        || "Under Review").trim(),
+      outcomeType:                String(row["Outcome Type"]                  || "").trim(),
+      resolutionType:             String(row["Resolution Type"]               || "").trim(),
+      dateOpened:                 formatDate_(row["Date Opened"]              || row["Filed Date"]),
+      incidentDate:               formatDate_(row["Incident Date"]),
+      dateClosed:                 formatDate_(row["Date Closed"]              || row["Resolved Date"]),
+      dateSettlementSent:         formatDate_(row["Date Settlement Sent"]),
+      dateSignedSettlementReceived: formatDate_(row["Date Signed Settlement Received"]),
+      createdBy:                  String(row["Created By"]                   || row["Filed By"]   || "").trim(),
+      firstReviewedBy:            String(row["First Reviewed By"]             || "").trim(),
+      primaryContactName:         String(row["Primary Contact Name"]          || "").trim(),
+      companyClientName:          String(row["Company / Client Name"]         || row["Client"]    || "").trim(),
+      email:                      String(row["Email"]                         || "").trim(),
+      phone:                      String(row["Phone"]                         || "").trim(),
+      requestedAmount:            toNum_(row["Requested Amount"]              || row["Settlement Amount"]),
+      approvedAmount:             toNum_(row["Approved Amount"]),
+      coverageType:               String(row["Coverage Type"]                 || "").trim(),
+      clientSelectedCoverage:     String(row["Client Selected Coverage"]      || "").trim(),
+      propertyIncidentReference:  String(row["Property / Incident Reference"] || "").trim(),
+      incidentLocation:           String(row["Incident Location"]             || row["Location"]  || "").trim(),
+      issueDescription:           String(row["Issue Description"]             || row["Description"] || "").trim(),
+      decisionExplanation:        String(row["Decision Explanation"]          || "").trim(),
+      claimFolderUrl:             String(row["Claim Folder URL"]              || row["Photos URL"] || "").trim(),
+      currentSettlementFileUrl:   String(row["Current Settlement File URL"]   || "").trim(),
+      currentSettlementVersion:   String(row["Current Settlement Version"]    || "").trim(),
+      lastUpdated:                formatDate_(row["Last Updated"]),
+      // Legacy: single item fields kept for backward compat
+      itemId:                     String(row["Item ID"]                       || "").trim(),
+      itemDescription:            String(row["Item Description"]              || "").trim()
+    });
+  }
+
+  // Client users: filter to only their own claims
+  if (callerRole === "client" && callerClientName) {
+    claims = claims.filter(function(c) {
+      return c.companyClientName.toLowerCase() === callerClientName.toLowerCase();
+    });
+  }
+
+  return jsonResponse_({ claims: claims, count: claims.length });
+}
+
+// ─── Utility Functions ───────────────────────────────────────────────────────
+
+function sheetToObjects_(sheet) {
+  var data = sheet.getDataRange().getValues();
+  if (data.length < 2) return [];
+
+  var headers = data[0].map(function(h) { return String(h).trim(); });
+  var results = [];
+
+  for (var i = 1; i < data.length; i++) {
+    var row = data[i];
+    var hasValue = false;
+    for (var k = 0; k < row.length; k++) {
+      if (row[k] !== "" && row[k] !== null && row[k] !== undefined) {
+        hasValue = true;
+        break;
+      }
+    }
+    if (!hasValue) continue;
+
+    var obj = {};
+    for (var j = 0; j < headers.length; j++) {
+      if (headers[j]) obj[headers[j]] = row[j];
+    }
+    results.push(obj);
+  }
+
+  return results;
+}
+
+function toBool_(val) {
+  if (val === true || val === "TRUE" || val === "Yes" || val === "yes") return true;
+  if (val === false || val === "FALSE" || val === "No" || val === "no" || val === "" || val === undefined || val === null) return false;
+  return !!val;
+}
+
+function toNum_(val) {
+  if (val === "" || val === null || val === undefined) return null;
+  var n = Number(val);
+  return isNaN(n) ? null : n;
+}
+
+function formatDate_(val) {
+  if (!val) return "";
+  if (val instanceof Date) {
+    if (isNaN(val.getTime())) return "";
+    return Utilities.formatDate(val, Session.getScriptTimeZone(), "yyyy-MM-dd");
+  }
+  return String(val).trim();
+}
+
+/** v38.2.0: Full datetime formatter — used for Started At / Completed At where
+ *  the UI needs mm/dd/yyyy hh:mm display. Returns "yyyy-MM-dd HH:mm:ss" in the
+ *  script's local timezone. Falls back to raw string if input is already text. */
+function formatDateTime_(val) {
+  if (!val) return "";
+  if (val instanceof Date) {
+    if (isNaN(val.getTime())) return "";
+    return Utilities.formatDate(val, Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm:ss");
+  }
+  return String(val).trim();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// WRITE ENDPOINT: completeShipment (v6.0.0)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ─── Write Helpers ───────────────────────────────────────────────────────────
+
+/** Returns { "Header Name": 1-based-col-index } from row 1 of sheet. */
+function api_getHeaderMap_(sheet) {
+  var headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  var map = {};
+  for (var i = 0; i < headers.length; i++) {
+    var h = String(headers[i] || "").trim();
+    if (h) map[h] = i + 1; // 1-based
+  }
+  return map;
+}
+
+// ─── Server-side response caching (CacheService) ────────────────────────────
+// Caches JSON responses for 600s (10 min). Eliminates repeated sheet reads
+// when React fires multiple requests or user navigates between pages.
+// All write endpoints invalidate relevant caches, so stale reads are unlikely.
+// CacheService has a 100KB per-key limit; large responses are chunked.
+
+var CACHE_TTL_SECONDS_ = 600;
+var APP_BASE_URL_ = "https://www.mystridehub.com/#";
+
+function cachedHandler_(cacheKey, handlerFn, skipCache) {
+  var cache = CacheService.getScriptCache();
+  if (skipCache) {
+    // Bypass cache — execute handler, then store fresh result
+    var freshResult = handlerFn();
+    try {
+      var freshJson = freshResult.getContent();
+      if (freshJson.length < 90000) {
+        cache.put(cacheKey, freshJson, CACHE_TTL_SECONDS_);
+      } else {
+        var cs = 80000, nc = Math.ceil(freshJson.length / cs), cm = {};
+        for (var ci = 0; ci < nc; ci++) cm[cacheKey + ":c" + ci] = freshJson.substring(ci * cs, (ci + 1) * cs);
+        cm[cacheKey] = JSON.stringify({ __chunks__: nc });
+        cache.putAll(cm, CACHE_TTL_SECONDS_);
+      }
+    } catch (_) {}
+    return freshResult;
+  }
+  try {
+    // Try to read from cache (handle chunked responses)
+    var raw = cache.get(cacheKey);
+    if (raw) {
+      // Check for chunked response
+      if (raw.indexOf('"__chunks__":') === 0 || raw.charAt(0) === '{') {
+        var parsed = JSON.parse(raw);
+        if (parsed.__chunks__) {
+          // Reassemble chunks
+          var keys = [];
+          for (var ci = 0; ci < parsed.__chunks__; ci++) keys.push(cacheKey + ":c" + ci);
+          var chunks = cache.getAll(keys);
+          var full = "";
+          for (var ci2 = 0; ci2 < parsed.__chunks__; ci2++) {
+            var chunk = chunks[cacheKey + ":c" + ci2];
+            if (!chunk) { full = ""; break; } // missing chunk, re-fetch
+            full += chunk;
+          }
+          if (full) {
+            return ContentService.createTextOutput(full).setMimeType(ContentService.MimeType.JSON);
+          }
+        } else {
+          // Non-chunked cached response
+          return ContentService.createTextOutput(raw).setMimeType(ContentService.MimeType.JSON);
+        }
+      }
+    }
+  } catch (_) {} // cache miss or parse error — fall through to live fetch
+
+  // Execute the real handler
+  var result = handlerFn();
+
+  // Cache the response (result is a ContentService TextOutput)
+  try {
+    var json = result.getContent();
+    if (json.length < 90000) {
+      // Fits in one cache entry (100KB limit with safety margin)
+      cache.put(cacheKey, json, CACHE_TTL_SECONDS_);
+    } else {
+      // Chunk into ~80KB pieces
+      var chunkSize = 80000;
+      var numChunks = Math.ceil(json.length / chunkSize);
+      var chunkMap = {};
+      for (var i = 0; i < numChunks; i++) {
+        chunkMap[cacheKey + ":c" + i] = json.substring(i * chunkSize, (i + 1) * chunkSize);
+      }
+      chunkMap[cacheKey] = JSON.stringify({ __chunks__: numChunks });
+      cache.putAll(chunkMap, CACHE_TTL_SECONDS_);
+    }
+  } catch (_) {} // caching failure shouldn't break the response
+
+  return result;
+}
+
+/** Invalidate cached data for a client (called after writes) */
+function invalidateClientCache_(clientSheetId) {
+  if (!clientSheetId) return;
+  var cache = CacheService.getScriptCache();
+  var prefixes = ["inv:", "tasks:", "repairs:", "wc:", "ship:", "bill:", "batch:"];
+  var keys = [];
+  for (var i = 0; i < prefixes.length; i++) {
+    keys.push(prefixes[i] + clientSheetId);
+    // Also clear chunks (up to 10)
+    for (var c = 0; c < 10; c++) keys.push(prefixes[i] + clientSheetId + ":c" + c);
+  }
+  // Also clear the staff/admin aggregate batch key ("batch:" with empty clientSheetId).
+  // This key is never covered by the per-client loop above but goes stale after writes.
+  keys.push("batch:");
+  for (var cc = 0; cc < 10; cc++) keys.push("batch::c" + cc);
+  try { cache.removeAll(keys); } catch (_) {}
+}
+
+// ─── Batch endpoint: all entity data in ONE call ────────────────────────────
+
+function handleGetBatch_(clientSheetId) {
+  var startTime = new Date().getTime();
+  var clients = getTargetClients_(clientSheetId);
+  if (clients.error) return errorResponse_(clients.error, clients.code);
+  if (!clients.list || !clients.list.length) return errorResponse_("No active clients found", "NOT_FOUND");
+
+  var isMultiClient = clients.list.length > 1;
+  var result = { inventory: [], tasks: [], repairs: [], willCalls: [], shipments: [], billing: [] };
+  var billSummary = { unbilled: 0, invoiced: 0, billed: 0, void_count: 0, totalUnbilled: 0 };
+  var batchErrors = [];
+
+  // ─── Loop through each client spreadsheet ───
+  for (var c = 0; c < clients.list.length; c++) {
+    var client = clients.list[c];
+    var cid = client.spreadsheetId;
+    var cname = client.name;
+
+    var ss;
+    var t_clientStart = new Date().getTime();
+    try { ss = SpreadsheetApp.openById(cid); }
+    catch (openErr) {
+      batchErrors.push({ client: cname, spreadsheetId: cid, stage: "open", error: openErr.message });
+      continue; // Skip this client, continue with others
+    }
+    var t_afterOpen = new Date().getTime();
+
+    try {
+      // For single-client, resolve name from Settings tab if it was "(single)"
+      if (!isMultiClient && cname === "(single)") {
+        try {
+          var stTab = ss.getSheetByName("Settings");
+          if (stTab) {
+            var stData = stTab.getDataRange().getValues();
+            for (var si = 0; si < stData.length; si++) {
+              if (String(stData[si][0] || "").trim() === "CLIENT_NAME") { cname = String(stData[si][1] || "").trim(); break; }
+            }
+          }
+        } catch (_) {}
+      }
+
+      var invSheet = ss.getSheetByName("Inventory");
+      var taskSheet = ss.getSheetByName("Tasks");
+      var repairSheet = ss.getSheetByName("Repairs");
+      var wcSheet = ss.getSheetByName("Will_Calls");
+      var shipSheet = ss.getSheetByName("Shipments");
+      var billSheet = ss.getSheetByName("Billing_Ledger");
+
+      // Folder URL reads — always-on (v26.7.0 / v33.0.0: RichTextValue reads for all views)
+      var t_beforeRichText = new Date().getTime();
+      var taskFolderMap = taskSheet ? api_readIdFolderUrls_(taskSheet, "Task ID") : {};
+      var repairFolderMap = repairSheet ? api_readIdFolderUrls_(repairSheet, "Repair ID") : {};
+      var wcFolderMap = wcSheet ? api_readIdFolderUrls_(wcSheet, "WC Number") : {};
+      var shipFolderMap = api_buildShipmentFolderMap_(ss);
+      var t_afterRichText = new Date().getTime();
+
+      // v38.5.0: build itemId → {ship, vendor, description} fallback maps for
+      // Tasks/Repairs that may have blanks on their own rows. Piggybacked on
+      // the Inventory loop — zero extra cost.
+      // v38.6.0: added sidemark map, used by Billing section below.
+      var invFieldsByItem = { ship: {}, vendor: {}, description: {}, sidemark: {} };
+
+      // ── Inventory ──
+      if (invSheet) {
+        var invRows = sheetToObjects_(invSheet);
+        for (var i = 0; i < invRows.length; i++) {
+          var ir = invRows[i];
+          var iid = String(ir["Item ID"] || "").trim();
+          if (!iid) continue;
+          var invShipNo = String(ir["Shipment #"] || "").trim();
+          var invVendor = String(ir["Vendor"] || "").trim();
+          var invDesc = String(ir["Description"] || "").trim();
+          var invSidemark = String(ir["Sidemark"] || "").trim();
+          if (invShipNo && !invFieldsByItem.ship[iid]) invFieldsByItem.ship[iid] = invShipNo;
+          if (invVendor && !invFieldsByItem.vendor[iid]) invFieldsByItem.vendor[iid] = invVendor;
+          if (invDesc && !invFieldsByItem.description[iid]) invFieldsByItem.description[iid] = invDesc;
+          if (invSidemark) invFieldsByItem.sidemark[iid] = invSidemark; // overwrite ok, last row wins
+          result.inventory.push({
+            itemId: iid, clientName: cname, clientSheetId: cid,
+            qty: Number(ir["Qty"]) || 1, vendor: String(ir["Vendor"] || "").trim(),
+            description: String(ir["Description"] || "").trim(), itemClass: String(ir["Class"] || "").trim(),
+            location: String(ir["Location"] || "").trim(), sidemark: String(ir["Sidemark"] || "").trim(),
+            room: String(ir["Room"] || "").trim(), shipmentNumber: invShipNo,
+            receiveDate: formatDate_(ir["Receive Date"]), releaseDate: formatDate_(ir["Release Date"]),
+            status: String(ir["Status"] || "Active").trim(),
+            shipmentFolderUrl: shipFolderMap[invShipNo] || ""
+          });
+        }
+      }
+
+      // ── Tasks ──
+      if (taskSheet) {
+        var taskRows = sheetToObjects_(taskSheet);
+        for (var t = 0; t < taskRows.length; t++) {
+          var tr = taskRows[t];
+          var tid = String(tr["Task ID"] || "").trim();
+          if (!tid) continue;
+          var trItemId = String(tr["Item ID"] || "").trim();
+          var taskShipNo = String(tr["Shipment #"] || "").trim();
+          var taskVendor = String(tr["Vendor"] || "").trim();
+          var taskDesc = String(tr["Description"] || "").trim();
+          if (trItemId) {
+            if (!taskShipNo && invFieldsByItem.ship[trItemId]) taskShipNo = invFieldsByItem.ship[trItemId];
+            if (!taskVendor && invFieldsByItem.vendor[trItemId]) taskVendor = invFieldsByItem.vendor[trItemId];
+            if (!taskDesc && invFieldsByItem.description[trItemId]) taskDesc = invFieldsByItem.description[trItemId];
+          }
+          result.tasks.push({
+            taskId: tid, clientName: cname, clientSheetId: cid,
+            type: String(tr["Type"] || "").trim(), status: String(tr["Status"] || "Open").trim(),
+            itemId: trItemId, vendor: taskVendor,
+            description: taskDesc, location: String(tr["Location"] || "").trim(),
+            sidemark: String(tr["Sidemark"] || "").trim(), shipmentNumber: taskShipNo,
+            created: formatDate_(tr["Created"]), completedAt: formatDateTime_(tr["Completed At"]),
+            result: String(tr["Result"] || "").trim(), svcCode: String(tr["Svc Code"] || "").trim(),
+            billed: toBool_(tr["Billed"]), assignedTo: String(tr["Assigned To"] || "").trim(),
+            startedAt: formatDateTime_(tr["Started At"]), customPrice: toNum_(tr["Custom Price"]) || undefined,
+            taskFolderUrl: taskFolderMap[tid] || "", shipmentFolderUrl: shipFolderMap[taskShipNo] || ""
+          });
+        }
+      }
+
+      // ── Repairs ──
+      if (repairSheet) {
+        var repStartIdx = result.repairs.length; // track start for cross-ref
+        var repRows = sheetToObjects_(repairSheet);
+        for (var r = 0; r < repRows.length; r++) {
+          var rr = repRows[r];
+          var rid = String(rr["Repair ID"] || "").trim();
+          if (!rid) continue;
+          var repSrcTask = String(rr["Source Task ID"] || "").trim();
+          var repItemId = String(rr["Item ID"] || "").trim();
+          var repVendor = String(rr["Vendor"] || "").trim();
+          var repDesc = String(rr["Description"] || "").trim();
+          if (repItemId) {
+            if (!repVendor && invFieldsByItem.vendor[repItemId]) repVendor = invFieldsByItem.vendor[repItemId];
+            if (!repDesc && invFieldsByItem.description[repItemId]) repDesc = invFieldsByItem.description[repItemId];
+          }
+          result.repairs.push({
+            repairId: rid, clientName: cname, clientSheetId: cid,
+            sourceTaskId: repSrcTask, itemId: repItemId,
+            description: repDesc, vendor: repVendor,
+            status: String(rr["Status"] || "").trim(), quoteAmount: toNum_(rr["Quote Amount"]),
+            createdDate: formatDate_(rr["Created Date"]), completedDate: formatDate_(rr["Completed Date"]),
+            repairVendor: String(rr["Repair Vendor"] || "").trim(), billed: toBool_(rr["Billed"]),
+            repairFolderUrl: repairFolderMap[rid] || "", shipmentFolderUrl: "",
+            taskFolderUrl: taskFolderMap[repSrcTask] || ""
+          });
+        }
+        // Cross-ref: repairs get shipment folder via item → shipment number
+        if (invSheet && !isMultiClient) {
+          var invItemToShip = {};
+          for (var ii = 0; ii < result.inventory.length; ii++) {
+            invItemToShip[result.inventory[ii].itemId] = result.inventory[ii].shipmentNumber;
+          }
+          for (var ri = repStartIdx; ri < result.repairs.length; ri++) {
+            var repItemShip = invItemToShip[result.repairs[ri].itemId] || "";
+            if (repItemShip) result.repairs[ri].shipmentFolderUrl = shipFolderMap[repItemShip] || "";
+          }
+        }
+      }
+
+      // ── Will Calls ──
+      if (wcSheet) {
+        var wcRows = sheetToObjects_(wcSheet);
+        for (var w = 0; w < wcRows.length; w++) {
+          var wr = wcRows[w];
+          var wn = String(wr["WC Number"] || "").trim();
+          if (!wn) continue;
+          result.willCalls.push({
+            wcNumber: wn, clientName: cname, clientSheetId: cid,
+            status: String(wr["Status"] || "Pending").trim(),
+            pickupParty: String(wr["Pickup Party"] || "").trim(),
+            estimatedPickupDate: formatDate_(wr["Estimated Pickup Date"]),
+            createdDate: formatDate_(wr["Created Date"]),
+            itemsCount: Number(wr["Items Count"]) || 0,
+            cod: toBool_(wr["COD"]), codAmount: toNum_(wr["COD Amount"]),
+            wcFolderUrl: wcFolderMap[wn] || "", shipmentFolderUrl: ""
+          });
+        }
+      }
+
+      // ── Shipments ──
+      if (shipSheet) {
+        var shipRows = sheetToObjects_(shipSheet);
+        for (var s = 0; s < shipRows.length; s++) {
+          var sr = shipRows[s];
+          var sn = String(sr["Shipment #"] || "").trim();
+          if (!sn) continue;
+          result.shipments.push({
+            shipmentNumber: sn, clientName: cname, clientSheetId: cid,
+            receiveDate: formatDate_(sr["Receive Date"]),
+            itemCount: Number(sr["Item Count"]) || 0,
+            carrier: String(sr["Carrier"] || "").trim(),
+            trackingNumber: String(sr["Tracking #"] || "").trim(),
+            notes: String(sr["Shipment Notes"] || "").trim().replace(/^\[IK:[^\]]*\]\s*/, ''),
+            folderUrl: shipFolderMap[sn] || ""
+          });
+        }
+      }
+
+      // ── Billing ──
+      if (billSheet) {
+        var billRows = sheetToObjects_(billSheet);
+        for (var b = 0; b < billRows.length; b++) {
+          var br = billRows[b];
+          var blid = String(br["Ledger Row ID"] || "").trim();
+          if (!blid) continue;
+          var bstatus = String(br["Status"] || "Unbilled").trim();
+          var btotal = toNum_(br["Total"]);
+          if (bstatus === "Unbilled") { billSummary.unbilled++; billSummary.totalUnbilled += (btotal || 0); }
+          else if (bstatus === "Invoiced") { billSummary.invoiced++; }
+          else if (bstatus === "Billed") { billSummary.billed++; }
+          else if (bstatus === "Void") { billSummary.void_count++; }
+          var bItemId = String(br["Item ID"] || "").trim();
+          // v38.6.0: sidemark from Billing_Ledger row first (future-proof), fallback to Inventory map
+          var bSidemark = String(br["Sidemark"] || "").trim();
+          if (!bSidemark && bItemId && invFieldsByItem.sidemark[bItemId]) {
+            bSidemark = invFieldsByItem.sidemark[bItemId];
+          }
+          result.billing.push({
+            ledgerRowId: blid, clientName: cname, clientSheetId: cid,
+            status: bstatus, invoiceNo: String(br["Invoice #"] || "").trim(),
+            date: formatDate_(br["Date"]), svcCode: String(br["Svc Code"] || "").trim(),
+            svcName: String(br["Svc Name"] || "").trim(), itemId: bItemId,
+            description: String(br["Description"] || "").trim(),
+            qty: toNum_(br["Qty"]), rate: toNum_(br["Rate"]), total: btotal,
+            sidemark: bSidemark
+          });
+        }
+      }
+
+      // Per-client timing log
+      var t_clientEnd = new Date().getTime();
+      Logger.log("  [batch] " + cname + ": open=" + (t_afterOpen - t_clientStart) + "ms" +
+        " richtext=" + (t_afterRichText - t_beforeRichText) + "ms" +
+        " total=" + (t_clientEnd - t_clientStart) + "ms");
+
+    } catch (clientErr) {
+      batchErrors.push({ client: cname, spreadsheetId: cid, stage: "read", error: clientErr.message });
+      // Continue with next client — partial success
+    }
+  }
+
+  // ── Finalize counts ──
+  var counts = {
+    inventory: result.inventory.length, tasks: result.tasks.length,
+    repairs: result.repairs.length, willCalls: result.willCalls.length,
+    shipments: result.shipments.length, billing: result.billing.length
+  };
+
+  // ── Sort each dataset for consistent ordering (multi-client merge can be unordered) ──
+  if (isMultiClient) {
+    var byDateDesc = function(field) { return function(a, b) { return (b[field] || "").localeCompare(a[field] || ""); }; };
+    result.inventory.sort(byDateDesc("receiveDate"));
+    result.tasks.sort(byDateDesc("created"));
+    result.repairs.sort(byDateDesc("createdDate"));
+    result.willCalls.sort(byDateDesc("createdDate"));
+    result.shipments.sort(byDateDesc("receiveDate"));
+    result.billing.sort(byDateDesc("date"));
+  }
+
+  // ── Instrumentation ──
+  var elapsed = new Date().getTime() - startTime;
+  Logger.log("getBatch: " + clients.list.length + " client(s), " +
+    counts.inventory + " inv, " + counts.tasks + " tasks, " + counts.repairs + " repairs, " +
+    counts.willCalls + " wcs, " + counts.shipments + " ships, " + counts.billing + " bill — " + elapsed + "ms" +
+    (batchErrors.length ? " (" + batchErrors.length + " errors)" : ""));
+
+  return jsonResponse_({
+    inventory: result.inventory, tasks: result.tasks, repairs: result.repairs,
+    willCalls: result.willCalls, shipments: result.shipments, billing: result.billing,
+    billingSummary: billSummary, counts: counts,
+    errors: batchErrors.length ? batchErrors : undefined
+  });
+}
+
+// ─── getBatchSummary: Lightweight cross-client summary for Dashboard ─────────
+//
+// Reads ONLY Tasks, Repairs, Will_Calls tabs. Skips Inventory/Shipments/Billing.
+// NO RichTextValue reads — folder URLs intentionally omitted for speed.
+// 60s CacheService TTL with version-based key for instant write invalidation.
+// api_bumpSummaryVersion_() called by all write handlers that mutate these tabs.
+
+/**
+ * Returns current summary_version integer (CacheService → ScriptProperties fallback).
+ */
+function api_getSummaryVersion_() {
+  try {
+    var cached = CacheService.getScriptCache().get("summary_version");
+    if (cached && !isNaN(Number(cached))) return Number(cached);
+    var propVal = PropertiesService.getScriptProperties().getProperty("summary_version");
+    if (propVal && !isNaN(Number(propVal))) return Number(propVal);
+  } catch (_) {}
+  return 1;
+}
+
+/**
+ * Increments summary_version (Script Properties + CacheService 1-hr warm-up).
+ * Orphans all existing summary cache entries — next poll by any user gets fresh data.
+ */
+function api_bumpSummaryVersion_() {
+  try {
+    var props = PropertiesService.getScriptProperties();
+    var cur  = Number(props.getProperty("summary_version") || "1");
+    var next = cur + 1;
+    props.setProperty("summary_version", String(next));
+    CacheService.getScriptCache().put("summary_version", String(next), 3600);
+  } catch (_) {}
+}
+
+/** Append lightweight task rows (no folder URLs) to out[]. */
+function api_appendSummaryTasks_(sheet, clientName, clientSheetId, out) {
+  var rows = sheetToObjects_(sheet);
+  for (var i = 0; i < rows.length; i++) {
+    var r = rows[i];
+    var status = String(r["Status"] || "").trim();
+    if (!status || status === "Void") continue;
+    out.push({
+      taskId:        String(r["Task ID"]      || "").trim(),
+      clientName:    clientName,
+      clientSheetId: clientSheetId,
+      itemId:        String(r["Item ID"]      || "").trim(),
+      taskType:      String(r["Type"]         || "").trim(),
+      status:        status,
+      assignedTo:    String(r["Assigned To"]  || "").trim(),
+      created:       formatDate_(r["Created Date"] || r["Created"] || ""),
+      dueDate:       formatDate_(r["Due Date"]     || ""),
+      startedAt:     formatDate_(r["Start Date"]   || r["Started At"] || ""),
+      description:   String(r["Description"]  || "").trim(),
+      vendor:        String(r["Vendor"]       || "").trim(),
+      sidemark:      String(r["Sidemark"]     || "").trim(),
+      location:      String(r["Location"]     || "").trim()
+    });
+  }
+}
+
+/** Append lightweight repair rows (no folder URLs) to out[]. */
+function api_appendSummaryRepairs_(sheet, clientName, clientSheetId, out) {
+  var rows = sheetToObjects_(sheet);
+  for (var i = 0; i < rows.length; i++) {
+    var r = rows[i];
+    var status = String(r["Status"] || "").trim();
+    if (!status || status === "Void" || status === "Declined") continue;
+    out.push({
+      repairId:      String(r["Repair ID"]    || "").trim(),
+      clientName:    clientName,
+      clientSheetId: clientSheetId,
+      itemId:        String(r["Item ID"]      || "").trim(),
+      vendor:        String(r["Vendor"]       || "").trim(),
+      status:        status,
+      createdDate:   formatDate_(r["Created Date"] || ""),
+      quoteAmount:   toNum_(r["Quote Amount"]),
+      description:   String(r["Description"]  || "").trim(),
+      sidemark:      String(r["Sidemark"]     || "").trim(),
+      location:      String(r["Location"]     || "").trim()
+    });
+  }
+}
+
+/** Append lightweight will-call rows (no folder URLs) to out[]. */
+function api_appendSummaryWillCalls_(sheet, clientName, clientSheetId, out) {
+  var rows = sheetToObjects_(sheet);
+  for (var i = 0; i < rows.length; i++) {
+    var r = rows[i];
+    var status = String(r["Status"] || "").trim();
+    if (!status || status === "Cancelled") continue;
+    out.push({
+      wcNumber:      String(r["WC Number"]       || "").trim(),
+      clientName:    clientName,
+      clientSheetId: clientSheetId,
+      status:        status,
+      pickupParty:   String(r["Pickup Party"]    || "").trim(),
+      createdDate:   formatDate_(r["Created Date"]    || ""),
+      estPickupDate: formatDate_(r["Est. Pickup Date"] || r["Estimated Pickup Date"] || ""),
+      itemCount:     toNum_(r["Item Count"] || r["Items"]),
+      notes:         String(r["Notes"] || "").trim()
+    });
+  }
+}
+
+/**
+ * handleGetBatchSummary_ — lightweight cross-client summary for Dashboard.
+ *
+ * Scope mirrors withClientIsolation_: staff/admin = all clients, parent = own + children,
+ * single client = own sheet only.
+ *
+ * Version-keyed cache ("summary:v{N}:{scope}") busts automatically when any write
+ * handler calls api_bumpSummaryVersion_().
+ */
+function handleGetBatchSummary_(callerEmail, noCache) {
+  // Resolve user
+  var lookup = lookupUser_(callerEmail);
+  if (!lookup.user) return errorResponse_("User not found: " + callerEmail, "AUTH_ERROR");
+  if (!lookup.user.active) return errorResponse_("User account is deactivated", "AUTH_ERROR");
+  var user = lookup.user;
+
+  // Determine effective scope (mirrors withClientIsolation_ logic)
+  var effectiveClientSheetId = "";
+  _parentScope_ = null;
+  if (user.role === "client") {
+    var scope = getAccessibleClientScope_(user);
+    if (scope) {
+      // Parent / multi-client: pass "" but restrict via _parentScope_
+      effectiveClientSheetId = "";
+      _parentScope_ = scope;
+    } else {
+      // Standalone client: lock to own sheet
+      effectiveClientSheetId = user.clientSheetId;
+      if (!effectiveClientSheetId) return errorResponse_("Client user has no Client Spreadsheet ID configured", "CONFIG_ERROR");
+    }
+  }
+  // staff / admin: effectiveClientSheetId stays "" → all clients via getTargetClients_
+
+  var clients = getTargetClients_(effectiveClientSheetId);
+  if (clients.error) return errorResponse_(clients.error, clients.code);
+  if (!clients.list || !clients.list.length) {
+    return jsonResponse_({ tasks: [], repairs: [], willCalls: [], counts: { tasks: 0, repairs: 0, willCalls: 0 }, summaryVersion: api_getSummaryVersion_() });
+  }
+
+  // Version-keyed cache (60s TTL — separate from the 600s full-batch TTL)
+  var summaryVersion = api_getSummaryVersion_();
+  var cacheScope = effectiveClientSheetId || "all";
+  var cacheKey = "summary:v" + summaryVersion + ":" + cacheScope;
+  var SUMMARY_TTL = 60;
+
+  if (!noCache) {
+    try {
+      var cache = CacheService.getScriptCache();
+      var raw = cache.get(cacheKey);
+      if (raw) {
+        try {
+          var meta = JSON.parse(raw);
+          if (meta && meta.__chunks__) {
+            var ckeys = [];
+            for (var ci = 0; ci < meta.__chunks__; ci++) ckeys.push(cacheKey + ":c" + ci);
+            var chunks = cache.getAll(ckeys);
+            var full = "";
+            for (var ci2 = 0; ci2 < meta.__chunks__; ci2++) {
+              var ch = chunks[cacheKey + ":c" + ci2];
+              if (!ch) { full = ""; break; }
+              full += ch;
+            }
+            if (full) return ContentService.createTextOutput(full).setMimeType(ContentService.MimeType.JSON);
+          } else {
+            return ContentService.createTextOutput(raw).setMimeType(ContentService.MimeType.JSON);
+          }
+        } catch (_) {}
+      }
+    } catch (_) {}
+  }
+
+  // Fetch from sheets — Tasks, Repairs, Will_Calls only
+  var startTime = new Date().getTime();
+  var result = { tasks: [], repairs: [], willCalls: [] };
+  var summaryErrors = [];
+
+  for (var c = 0; c < clients.list.length; c++) {
+    var client = clients.list[c];
+    var cid    = client.spreadsheetId;
+    var cname  = client.name;
+
+    var ss;
+    try { ss = SpreadsheetApp.openById(cid); }
+    catch (openErr) {
+      summaryErrors.push({ client: cname, spreadsheetId: cid, error: openErr.message });
+      continue;
+    }
+
+    try {
+      // Resolve client name from Settings if needed (single-client path)
+      if (cname === "(single)") {
+        try {
+          var stTab = ss.getSheetByName("Settings");
+          if (stTab) {
+            var stData = stTab.getDataRange().getValues();
+            for (var si = 0; si < stData.length; si++) {
+              if (String(stData[si][0] || "").trim() === "CLIENT_NAME") { cname = String(stData[si][1] || "").trim(); break; }
+            }
+          }
+        } catch (_) {}
+      }
+
+      var taskSheet   = ss.getSheetByName("Tasks");
+      var repairSheet = ss.getSheetByName("Repairs");
+      var wcSheet     = ss.getSheetByName("Will_Calls");
+
+      if (taskSheet)   api_appendSummaryTasks_(taskSheet, cname, cid, result.tasks);
+      if (repairSheet) api_appendSummaryRepairs_(repairSheet, cname, cid, result.repairs);
+      if (wcSheet)     api_appendSummaryWillCalls_(wcSheet, cname, cid, result.willCalls);
+
+    } catch (clientErr) {
+      summaryErrors.push({ client: cname, spreadsheetId: cid, error: clientErr.message });
+    }
+  }
+
+  var elapsed = new Date().getTime() - startTime;
+  Logger.log("getBatchSummary: " + clients.list.length + " client(s), " +
+    result.tasks.length + " tasks, " + result.repairs.length + " repairs, " +
+    result.willCalls.length + " wcs — " + elapsed + "ms");
+
+  var responseData = {
+    tasks:          result.tasks,
+    repairs:        result.repairs,
+    willCalls:      result.willCalls,
+    counts:         { tasks: result.tasks.length, repairs: result.repairs.length, willCalls: result.willCalls.length },
+    summaryVersion: summaryVersion,
+    errors:         summaryErrors.length ? summaryErrors : undefined
+  };
+  var responseJson = JSON.stringify(responseData);
+
+  // Store in 60s cache
+  try {
+    var cache2 = CacheService.getScriptCache();
+    if (responseJson.length < 90000) {
+      cache2.put(cacheKey, responseJson, SUMMARY_TTL);
+    } else {
+      var chunkSize = 80000;
+      var numChunks = Math.ceil(responseJson.length / chunkSize);
+      var chunkMap = {};
+      for (var i = 0; i < numChunks; i++) {
+        chunkMap[cacheKey + ":c" + i] = responseJson.substring(i * chunkSize, (i + 1) * chunkSize);
+      }
+      chunkMap[cacheKey] = JSON.stringify({ __chunks__: numChunks });
+      cache2.putAll(chunkMap, SUMMARY_TTL);
+    }
+  } catch (_) {}
+
+  return ContentService.createTextOutput(responseJson).setMimeType(ContentService.MimeType.JSON);
+}
+
+/**
+ * Reads RichTextValues from a named ID column and returns a map of ID → hyperlink URL.
+ * Used for Task ID, Repair ID, WC Number folder hyperlinks.
+ */
+function api_readIdFolderUrls_(sheet, columnName) {
+  var map = {};
+  try {
+    var hMap = api_getHeaderMap_(sheet);
+    var col = hMap[columnName];
+    if (!col) return map;
+    var lastRow = api_getLastDataRow_(sheet);
+    if (lastRow < 2) return map;
+    var numRows = lastRow - 1;
+    var vals = sheet.getRange(2, col, numRows, 1).getValues();
+    var rtVals = sheet.getRange(2, col, numRows, 1).getRichTextValues();
+    for (var i = 0; i < rtVals.length; i++) {
+      var rt = rtVals[i][0];
+      if (!rt) continue;
+      var id = String(vals[i][0] || "").trim();
+      if (!id) continue;
+      // v26.7.0: Check whole-cell link first, then fall back to individual text runs
+      var url = rt.getLinkUrl();
+      if (!url) {
+        // Partial rich text: hyperlink may be on a run, not the whole cell
+        var runs = rt.getRuns();
+        for (var j = 0; j < runs.length; j++) {
+          var runUrl = runs[j].getLinkUrl();
+          if (runUrl) { url = runUrl; break; }
+        }
+      }
+      if (url) map[id] = url;
+    }
+  } catch (_) {}
+  return map;
+}
+
+/**
+ * v38.4.0: Builds a map of Item ID → Shipment # from the Inventory sheet.
+ * Used as fallback when Tasks/Repairs/Will Call rows have a blank Shipment #.
+ */
+function api_buildInvShipmentByItemMap_(ss) {
+  var map = {};
+  var inv = ss.getSheetByName("Inventory");
+  if (!inv || inv.getLastRow() < 2) return map;
+  var hMap = api_getHeaderMap_(inv);
+  var idCol = hMap["Item ID"], shipCol = hMap["Shipment #"];
+  if (!idCol || !shipCol) return map;
+  var data = inv.getRange(2, 1, inv.getLastRow() - 1, inv.getLastColumn()).getValues();
+  for (var i = 0; i < data.length; i++) {
+    var iid = String(data[i][idCol - 1] || "").trim();
+    var sh = String(data[i][shipCol - 1] || "").trim();
+    if (iid && sh && !map[iid]) map[iid] = sh;
+  }
+  return map;
+}
+
+/**
+ * v38.5.0: Builds maps of Item ID → { shipmentNo, vendor, description } from
+ * the Inventory sheet in a single pass. Used as fallback for Tasks/Repairs
+ * rows whose own Vendor/Description/Shipment # cells are blank (legacy or
+ * imported data). Single sheet read, cheaper than 3 separate helper calls.
+ */
+function api_buildInvFieldsByItemMap_(ss) {
+  var out = { ship: {}, vendor: {}, description: {}, sidemark: {} };
+  var inv = ss.getSheetByName("Inventory");
+  if (!inv || inv.getLastRow() < 2) return out;
+  var hMap = api_getHeaderMap_(inv);
+  var idCol = hMap["Item ID"];
+  if (!idCol) return out;
+  var shipCol = hMap["Shipment #"];
+  var vendorCol = hMap["Vendor"];
+  var descCol = hMap["Description"];
+  var sidemarkCol = hMap["Sidemark"];
+  var data = inv.getRange(2, 1, inv.getLastRow() - 1, inv.getLastColumn()).getValues();
+  for (var i = 0; i < data.length; i++) {
+    var iid = String(data[i][idCol - 1] || "").trim();
+    if (!iid) continue;
+    if (shipCol) {
+      var sh = String(data[i][shipCol - 1] || "").trim();
+      if (sh && !out.ship[iid]) out.ship[iid] = sh;
+    }
+    if (vendorCol) {
+      var vn = String(data[i][vendorCol - 1] || "").trim();
+      if (vn && !out.vendor[iid]) out.vendor[iid] = vn;
+    }
+    if (descCol) {
+      var dc = String(data[i][descCol - 1] || "").trim();
+      if (dc && !out.description[iid]) out.description[iid] = dc;
+    }
+    if (sidemarkCol) {
+      var sm = String(data[i][sidemarkCol - 1] || "").trim();
+      // Note: overwrite allowed — last row wins (fine since sidemarks are per-item stable)
+      if (sm) out.sidemark[iid] = sm;
+    }
+  }
+  return out;
+}
+
+/**
+ * Builds a map of Shipment # → folder URL from the Shipments sheet.
+ * v26.4.0: Reads "Shipment Photos URL" column first (plain text), then
+ * enriches with RichTextValue hyperlinks from "Shipment #" cells.
+ * This ensures both old shipments (URL in column) and new ones (hyperlink) work.
+ */
+function api_buildShipmentFolderMap_(ss) {
+  var map = {};
+  try {
+    var shipSheet = ss.getSheetByName("Shipments");
+    if (!shipSheet) return map;
+    var shipMap = api_getHeaderMap_(shipSheet);
+    var shipNoCol = shipMap["Shipment #"];
+    var shipLastRow = api_getLastDataRow_(shipSheet);
+    if (!shipNoCol || shipLastRow < 2) return map;
+    var numRows = shipLastRow - 1;
+
+    // Read plain-text "Shipment Photos URL" column (primary source)
+    var photosUrlCol = shipMap["Shipment Photos URL"];
+    if (photosUrlCol) {
+      var shipNums = shipSheet.getRange(2, shipNoCol, numRows, 1).getValues();
+      var photosUrls = shipSheet.getRange(2, photosUrlCol, numRows, 1).getValues();
+      for (var i = 0; i < shipNums.length; i++) {
+        var sn = String(shipNums[i][0] || "").trim();
+        var url = String(photosUrls[i][0] || "").trim();
+        if (sn && url) map[sn] = url;
+      }
+    }
+
+    // Enrich/override with RichTextValue hyperlinks from Shipment # cells
+    var shipVals = shipSheet.getRange(2, shipNoCol, numRows, 1).getValues();
+    var shipRtVals = shipSheet.getRange(2, shipNoCol, numRows, 1).getRichTextValues();
+    for (var i = 0; i < shipRtVals.length; i++) {
+      var srt = shipRtVals[i][0];
+      if (srt && srt.getLinkUrl()) {
+        var sn = String(shipVals[i][0] || "").trim();
+        if (sn) map[sn] = srt.getLinkUrl();
+      }
+    }
+  } catch (_) {}
+  return map;
+}
+
+/** Builds a 1D array for setValues from header map + field object. */
+function api_buildRow_(headerMap, obj) {
+  var maxCol = 0;
+  for (var k in headerMap) { if (headerMap[k] > maxCol) maxCol = headerMap[k]; }
+  var row = [];
+  for (var c = 0; c < maxCol; c++) row.push("");
+  for (var key in obj) {
+    if (headerMap[key]) row[headerMap[key] - 1] = obj[key];
+  }
+  return row;
+}
+
+/** Finds last row with data (skips empty rows from validations). */
+function api_getLastDataRow_(sheet) {
+  var data = sheet.getDataRange().getValues();
+  for (var i = data.length - 1; i >= 0; i--) {
+    for (var j = 0; j < data[i].length; j++) {
+      if (data[i][j] !== "" && data[i][j] !== null && data[i][j] !== undefined) return i + 1;
+    }
+  }
+  return 1; // header only
+}
+
+/** Reads Settings tab as { KEY: VALUE } map. */
+function api_readSettings_(ss) {
+  var sheet = ss.getSheetByName("Settings");
+  if (!sheet) return {};
+  var data = sheet.getDataRange().getValues();
+  var map = {};
+  for (var i = 0; i < data.length; i++) {
+    var key = String(data[i][0] || "").trim();
+    if (key) map[key] = data[i][1];
+  }
+  return map;
+}
+
+/** Calls Master RPC for next Shipment #. */
+function api_nextShipmentNo_(rpcUrl, rpcToken) {
+  var resp = UrlFetchApp.fetch(rpcUrl, {
+    method: "post",
+    contentType: "application/json",
+    payload: JSON.stringify({ token: rpcToken, action: "getNextShipmentId" }),
+    muteHttpExceptions: true
+  });
+  var json = JSON.parse(resp.getContentText());
+  if (json && json.success && json.shipmentNo) return json.shipmentNo;
+  return null;
+}
+
+/**
+ * Looks up rate for svcCode + class from Price_Cache tab.
+ * Returns { rate, svcName, category, billIfPass, billIfFail }.
+ * billIfPass/billIfFail default: billIfPass=true, billIfFail=false (matches GS behavior for most svc codes).
+ */
+function api_lookupRate_(ss, svcCode, itemClass) {
+  var defaults = { rate: 0, svcName: svcCode || "", category: "", billIfPass: true, billIfFail: false };
+  if (!svcCode) return defaults;
+  try {
+    var cache = ss.getSheetByName("Price_Cache");
+    if (!cache || cache.getLastRow() < 2) return defaults;
+    var map = api_getHeaderMap_(cache);
+    var data = cache.getRange(2, 1, cache.getLastRow() - 1, cache.getLastColumn()).getValues();
+    for (var i = 0; i < data.length; i++) {
+      var code = map["Service Code"] ? String(data[i][map["Service Code"] - 1] || "").trim().toUpperCase() : "";
+      if (code === String(svcCode).toUpperCase()) {
+        var rateCol = itemClass ? (String(itemClass).toUpperCase() + " Rate") : "";
+        var rate = (rateCol && map[rateCol]) ? (Number(data[i][map[rateCol] - 1]) || 0) : 0;
+        return {
+          rate: rate,
+          svcName: map["Service Name"] ? String(data[i][map["Service Name"] - 1] || svcCode) : svcCode,
+          category: map["Category"] ? String(data[i][map["Category"] - 1] || "") : "",
+          billIfPass: map["BillIfPASS"] ? toBool_(data[i][map["BillIfPASS"] - 1]) : true,
+          billIfFail: map["BillIfFAIL"] ? toBool_(data[i][map["BillIfFAIL"] - 1]) : false
+        };
+      }
+    }
+  } catch (err) { Logger.log("api_lookupRate_ error: " + err); }
+  return defaults;
+}
+
+/** Applies client discount (negative=discount, positive=surcharge).
+ *  v38.7.0: range widened from ±10 to ±100. Values outside ±100 are still
+ *  ignored as a typo safety rail (e.g. 999 → no-op, preserves base rate). */
+function api_applyDiscount_(settings, rate, category) {
+  if (!category || rate <= 0) return rate;
+  var cat = String(category).trim().toLowerCase();
+  var pctKey = (cat === "storage charges" || cat === "storage") ? "DISCOUNT_STORAGE_PCT" : "DISCOUNT_SERVICES_PCT";
+  var pct = Number(settings[pctKey]) || 0;
+  if (pct === 0 || pct < -100 || pct > 100) return rate;
+  return Math.round(rate * (1 + pct / 100) * 100) / 100;
+}
+
+/** Scans Tasks sheet for max counter per type+itemId. Returns next integer. */
+function api_nextTaskCounter_(taskSheet, type, itemId, pendingIds) {
+  var prefix = type + "-" + itemId + "-";
+  var max = 0;
+  // Check sheet
+  if (taskSheet && taskSheet.getLastRow() >= 2) {
+    var map = api_getHeaderMap_(taskSheet);
+    var tidCol = map["Task ID"];
+    if (tidCol) {
+      var tids = taskSheet.getRange(2, tidCol, taskSheet.getLastRow() - 1, 1).getValues();
+      for (var i = 0; i < tids.length; i++) {
+        var tid = String(tids[i][0] || "").trim();
+        if (tid.indexOf(prefix) === 0) {
+          var n = parseInt(tid.substring(prefix.length), 10);
+          if (n > max) max = n;
+        }
+      }
+    }
+  }
+  // Check pending (not yet written)
+  if (pendingIds) {
+    for (var p = 0; p < pendingIds.length; p++) {
+      if (pendingIds[p].indexOf(prefix) === 0) {
+        var pn = parseInt(pendingIds[p].substring(prefix.length), 10);
+        if (pn > max) max = pn;
+      }
+    }
+  }
+  return max + 1;
+}
+
+/** Looks up Service Name by code from Price_Cache. */
+function api_lookupSvcName_(ss, svcCode) {
+  if (!svcCode) return svcCode;
+  try {
+    var cache = ss.getSheetByName("Price_Cache");
+    if (!cache || cache.getLastRow() < 2) return svcCode;
+    var map = api_getHeaderMap_(cache);
+    var data = cache.getRange(2, 1, cache.getLastRow() - 1, cache.getLastColumn()).getValues();
+    for (var i = 0; i < data.length; i++) {
+      var code = map["Service Code"] ? String(data[i][map["Service Code"] - 1] || "").trim().toUpperCase() : "";
+      if (code === String(svcCode).toUpperCase()) {
+        return map["Service Name"] ? String(data[i][map["Service Name"] - 1] || svcCode) : svcCode;
+      }
+    }
+  } catch (e) {}
+  return svcCode;
+}
+
+// ─── Storage Charges Date Math Helpers ──────────────────────────────────────
+
+/** Normalize any date value to midnight local time. Returns null for invalid input. */
+function api_normalizeDateToMidnight_(v) {
+  var d;
+  if (v instanceof Date) {
+    d = v;
+  } else {
+    var s = String(v || "").trim();
+    if (!s) return null;
+    // Parse ISO date (YYYY-MM-DD) without timezone shift
+    var iso = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+    if (iso) return new Date(parseInt(iso[1]), parseInt(iso[2]) - 1, parseInt(iso[3]), 0, 0, 0, 0);
+    d = new Date(s);
+  }
+  if (isNaN(d.getTime())) return null;
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0, 0);
+}
+
+/** Add N days to a date. Returns new midnight Date. */
+function api_addDays_(d, days) {
+  var x = new Date(d.getTime());
+  x.setDate(x.getDate() + (Number(days) || 0));
+  return api_normalizeDateToMidnight_(x);
+}
+
+/** Return the later of two dates. */
+function api_maxDate_(a, b) {
+  if (!a) return b;
+  if (!b) return a;
+  return (a.getTime() >= b.getTime()) ? a : b;
+}
+
+/** Inclusive day count between two dates (both endpoints count). */
+function api_dateDiffDaysInclusive_(start, end) {
+  if (!start || !end) return 0;
+  var s = api_normalizeDateToMidnight_(start);
+  var e = api_normalizeDateToMidnight_(end);
+  if (!s || !e) return 0;
+  return Math.floor((e.getTime() - s.getTime()) / (24 * 60 * 60 * 1000)) + 1;
+}
+
+/** Format date as YYYYMMDD for Task ID dedup keys. */
+function api_formatYMD_(d) {
+  if (!(d instanceof Date) || isNaN(d.getTime())) return "";
+  return "" + d.getFullYear() +
+    String(d.getMonth() + 1).padStart(2, "0") +
+    String(d.getDate()).padStart(2, "0");
+}
+
+/** Format date as MM/DD/YY for human-readable billing notes. */
+function api_formatMMDDYY_(d) {
+  if (!(d instanceof Date) || isNaN(d.getTime())) return "";
+  return String(d.getMonth() + 1).padStart(2, "0") + "/" +
+    String(d.getDate()).padStart(2, "0") + "/" +
+    String(d.getFullYear()).slice(-2);
+}
+
+/** Build canonical STOR dedup Task ID: STOR-{itemId}-{startYMD}-{endYMD}. */
+function api_buildStorTaskId_(itemId, startDate, endDate) {
+  return "STOR-" + itemId + "-" + api_formatYMD_(startDate) + "-" + api_formatYMD_(endDate);
+}
+
+/**
+ * Load class → cubic-foot volume map from Class_Cache tab.
+ * Returns e.g. { "XS": 10, "S": 25, "M": 50, "L": 75, "XL": 110 }
+ */
+// v24.0.1: Header-based lookup (was positional) — supports "Cubic Volume" or "Storage Size"
+function api_loadClassVolumes_(ss) {
+  var out = {};
+  var ccSh = ss.getSheetByName("Class_Cache") || ss.getSheetByName("CLASSCACHE");
+  if (!ccSh || ccSh.getLastRow() < 2) return out;
+  var data = ccSh.getRange(1, 1, ccSh.getLastRow(), ccSh.getLastColumn()).getValues();
+  var hdr = {};
+  for (var c = 0; c < data[0].length; c++) hdr[String(data[0][c]).trim().toUpperCase()] = c;
+  var cClass = hdr["CLASS"];
+  var cVol = hdr["CUBIC VOLUME"] !== undefined ? hdr["CUBIC VOLUME"] : hdr["STORAGE SIZE"];
+  if (cClass === undefined || cVol === undefined) return out;
+  for (var r = 1; r < data.length; r++) {
+    var cls = String(data[r][cClass] || "").trim().toUpperCase();
+    var vol = Number(data[r][cVol] || 0) || 0;
+    if (cls && vol > 0) out[cls] = vol;
+  }
+  return out;
+}
+
+// ─── Complete Shipment Handler ───────────────────────────────────────────────
+
+function handleCompleteShipment_(clientSheetId, payload) {
+  if (!clientSheetId) return errorResponse_("clientSheetId is required", "INVALID_PARAMS");
+  if (!payload || !payload.items || !payload.items.length) return errorResponse_("No items provided", "INVALID_PARAMS");
+
+  var items = payload.items;
+  var carrier = String(payload.carrier || "").trim();
+  var trackingNumber = String(payload.trackingNumber || "").trim();
+  var notes = String(payload.notes || "").trim();
+  var idempotencyKey = String(payload.idempotencyKey || "").trim();
+  var receiveDateStr = String(payload.receiveDate || "").trim();
+
+  // Parse receive date (default to today)
+  var receiveDate;
+  if (receiveDateStr) {
+    receiveDate = new Date(receiveDateStr + "T12:00:00");
+    if (isNaN(receiveDate.getTime())) receiveDate = new Date();
+  } else {
+    receiveDate = new Date();
+  }
+
+  // Validate required fields per item
+  var missing = [];
+  for (var vi = 0; vi < items.length; vi++) {
+    var it = items[vi];
+    if (!it.itemId) missing.push("Item " + (vi + 1) + ": missing itemId");
+    if (!it.description) missing.push("Item " + (vi + 1) + ": missing description");
+    if (!it.class) missing.push("Item " + (vi + 1) + ": missing class");
+  }
+  if (missing.length) return errorResponse_("Validation failed: " + missing.slice(0, 10).join("; "), "VALIDATION_ERROR");
+
+  // Open client spreadsheet
+  var ss;
+  try { ss = SpreadsheetApp.openById(clientSheetId); }
+  catch (e) { return errorResponse_("Cannot open client spreadsheet: " + e.message, "NOT_FOUND"); }
+
+  var invSheet = ss.getSheetByName("Inventory");
+  var shipSheet = ss.getSheetByName("Shipments");
+  var taskSheet = ss.getSheetByName("Tasks");
+  var billingSheet = ss.getSheetByName("Billing_Ledger");
+  if (!invSheet || !shipSheet) return errorResponse_("Client spreadsheet missing Inventory or Shipments sheet", "SCHEMA_ERROR");
+
+  // Read settings BEFORE lock (Fix 6)
+  var settings = api_readSettings_(ss);
+  var rpcUrl = String(settings["MASTER_RPC_URL"] || "").trim();
+  var rpcToken = String(settings["MASTER_RPC_TOKEN"] || "").trim();
+  var clientName = String(settings["CLIENT_NAME"] || "").trim();
+  var billingEnabled = toBool_(settings["ENABLE_RECEIVING_BILLING"]);
+  var skipReceivingBilling = payload.skipReceivingBilling === true;
+
+  if (!rpcUrl) return errorResponse_("Client missing MASTER_RPC_URL setting", "CONFIG_ERROR");
+  if (!rpcToken) return errorResponse_("Client missing MASTER_RPC_TOKEN setting", "CONFIG_ERROR");
+
+  // Generate Shipment # via Master RPC (before lock — idempotent counter)
+  var shipmentNo;
+  try { shipmentNo = api_nextShipmentNo_(rpcUrl, rpcToken); }
+  catch (e) { return errorResponse_("Failed to generate Shipment #: " + e.message, "RPC_ERROR"); }
+  if (!shipmentNo) return errorResponse_("Master RPC returned no Shipment #", "RPC_ERROR");
+
+  // Prepare notes with idempotency key tag
+  var shipNotes = notes;
+  if (idempotencyKey) shipNotes = "[IK:" + idempotencyKey + "] " + notes;
+
+  // ─── ACQUIRE LOCK ──────────────────────────────────────────────────────────
+  var lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(15000); // 15 second timeout
+  } catch (lockErr) {
+    return errorResponse_("Could not acquire lock — another operation in progress. Try again.", "LOCK_ERROR");
+  }
+
+  var partialState = { shipmentsWritten: false, inventoryWritten: false, tasksWritten: false, billingWritten: false };
+  var warnings = [];
+  var tasksCreated = 0;
+  var billingRows = 0;
+
+  try {
+    // ─── FIX 1: Idempotency check (inside lock) ─────────────────────────────
+    if (idempotencyKey) {
+      var shipMap_ik = api_getHeaderMap_(shipSheet);
+      var notesCol_ik = shipMap_ik["Shipment Notes"];
+      if (notesCol_ik) {
+        var shipLastRow_ik = api_getLastDataRow_(shipSheet);
+        if (shipLastRow_ik >= 2) {
+          var shipNotes_ik = shipSheet.getRange(2, notesCol_ik, shipLastRow_ik - 1, 1).getValues();
+          var ikTag = "[IK:" + idempotencyKey + "]";
+          var shipNoCol_ik = shipMap_ik["Shipment #"];
+          for (var iki = 0; iki < shipNotes_ik.length; iki++) {
+            if (String(shipNotes_ik[iki][0] || "").indexOf(ikTag) >= 0) {
+              var existingNo = "";
+              if (shipNoCol_ik) {
+                existingNo = String(shipSheet.getRange(2 + iki, shipNoCol_ik).getValue() || "").trim();
+              }
+              lock.releaseLock();
+              return jsonResponse_({
+                success: true,
+                alreadyProcessed: true,
+                shipmentNo: existingNo,
+                message: "Shipment already processed with this idempotency key"
+              });
+            }
+          }
+        }
+      }
+    }
+
+    // ─── FIX 2: Duplicate Item ID check INSIDE lock ─────────────────────────
+    var invMap = api_getHeaderMap_(invSheet);
+    var invItemIdCol = invMap["Item ID"];
+    var invStatusCol = invMap["Status"];
+    if (invItemIdCol) {
+      var invLastRow = api_getLastDataRow_(invSheet);
+      if (invLastRow >= 2) {
+        var invData = invSheet.getRange(2, 1, invLastRow - 1, invSheet.getLastColumn()).getValues();
+        var activeIds = {};
+        for (var di = 0; di < invData.length; di++) {
+          var dStatus = invStatusCol ? String(invData[di][invStatusCol - 1] || "").trim().toLowerCase() : "active";
+          if (dStatus === "active" || dStatus === "on hold") {
+            var dId = String(invData[di][invItemIdCol - 1] || "").trim();
+            if (dId) activeIds[dId] = true;
+          }
+        }
+        var dupes = [];
+        for (var ci = 0; ci < items.length; ci++) {
+          var checkId = String(items[ci].itemId || "").trim();
+          if (checkId && activeIds[checkId]) dupes.push(checkId);
+        }
+        if (dupes.length) {
+          lock.releaseLock();
+          return errorResponse_(
+            "BLOCKED: " + dupes.length + " item(s) already exist in Active inventory: " + dupes.slice(0, 10).join(", "),
+            "DUPLICATE_ITEMS"
+          );
+        }
+      }
+    }
+
+    // ─── WRITE SHIPMENTS ROW ─────────────────────────────────────────────────
+    var shipMap = api_getHeaderMap_(shipSheet);
+    var shipRow = api_buildRow_(shipMap, {
+      "Shipment #": shipmentNo,
+      "Receive Date": receiveDate,
+      "Item Count": items.length,
+      "Carrier": carrier,
+      "Tracking #": trackingNumber,
+      "Shipment Photos URL": "",
+      "Shipment Notes": shipNotes,
+      "Invoice URL": ""
+    });
+    var shipInsertRow = api_getLastDataRow_(shipSheet) + 1;
+    shipSheet.getRange(shipInsertRow, 1, 1, shipRow.length).setValues([shipRow]);
+    partialState.shipmentsWritten = true;
+
+    // ─── WRITE INVENTORY ROWS ────────────────────────────────────────────────
+    var invPhotosHeader = invMap["Shipment Photos URL"] ? "Shipment Photos URL" : (invMap["Photos URL"] ? "Photos URL" : "Shipment Photos URL");
+    var invInsertRows = [];
+    for (var ii = 0; ii < items.length; ii++) {
+      var item = items[ii];
+      var invObj = {
+        "Item ID": String(item.itemId || "").trim(),
+        "Qty": Number(item.qty) || 1,
+        "Vendor": String(item.vendor || "").trim(),
+        "Description": String(item.description || "").trim(),
+        "Class": String(item.class || "").trim(),
+        "Location": String(item.location || "").trim(),
+        "Sidemark": String(item.sidemark || "").trim(),
+        "Room": "",
+        "Item Notes": String(item.itemNotes || "").trim(),
+        "Carrier": carrier,
+        "Tracking #": trackingNumber,
+        "Shipment #": shipmentNo,
+        "Receive Date": receiveDate,
+        "Release Date": "",
+        "Status": "Active",
+        "Invoice URL": ""
+      };
+      invObj[invPhotosHeader] = "";
+      invInsertRows.push(api_buildRow_(invMap, invObj));
+    }
+    var invInsertStart = api_getLastDataRow_(invSheet) + 1;
+    if (invInsertRows.length) {
+      invSheet.getRange(invInsertStart, 1, invInsertRows.length, invInsertRows[0].length).setValues(invInsertRows);
+    }
+    partialState.inventoryWritten = true;
+
+    // ─── WRITE TASK ROWS (non-critical — FIX 3 + 4: inside lock, try/catch) ─
+    try {
+      if (taskSheet) {
+        var taskMap = api_getHeaderMap_(taskSheet);
+        var taskBatch = [];
+        var pendingTaskIds = [];
+        var now = new Date();
+
+        for (var ti = 0; ti < items.length; ti++) {
+          var tItem = items[ti];
+          var tItemId = String(tItem.itemId || "").trim();
+          if (!tItemId) continue;
+
+          if (tItem.needsInspection) {
+            var inspN = api_nextTaskCounter_(taskSheet, "INSP", tItemId, pendingTaskIds);
+            var inspTaskId = "INSP-" + tItemId + "-" + inspN;
+            pendingTaskIds.push(inspTaskId);
+            taskBatch.push(api_buildRow_(taskMap, {
+              "Task ID": inspTaskId,
+              "Type": api_lookupSvcName_(ss, "INSP"),
+              "Status": "Open",
+              "Item ID": tItemId,
+              "Vendor": String(tItem.vendor || "").trim(),
+              "Description": String(tItem.description || "").trim(),
+              "Location": String(tItem.location || "").trim(),
+              "Sidemark": String(tItem.sidemark || "").trim(),
+              "Shipment #": shipmentNo,
+              "Created": now,
+              "Item Notes": String(tItem.itemNotes || "").trim(),
+              "Completed At": "", "Cancelled At": "", "Result": "",
+              "Task Notes": "", "Svc Code": "INSP", "Billed": false,
+              "Assigned To": "", "Start Task": false, "Started At": ""
+            }));
+          }
+          if (tItem.needsAssembly) {
+            var asmN = api_nextTaskCounter_(taskSheet, "ASM", tItemId, pendingTaskIds);
+            var asmTaskId = "ASM-" + tItemId + "-" + asmN;
+            pendingTaskIds.push(asmTaskId);
+            taskBatch.push(api_buildRow_(taskMap, {
+              "Task ID": asmTaskId,
+              "Type": api_lookupSvcName_(ss, "ASM"),
+              "Status": "Open",
+              "Item ID": tItemId,
+              "Vendor": String(tItem.vendor || "").trim(),
+              "Description": String(tItem.description || "").trim(),
+              "Location": String(tItem.location || "").trim(),
+              "Sidemark": String(tItem.sidemark || "").trim(),
+              "Shipment #": shipmentNo,
+              "Created": now,
+              "Item Notes": String(tItem.itemNotes || "").trim(),
+              "Completed At": "", "Cancelled At": "", "Result": "",
+              "Task Notes": "", "Svc Code": "ASM", "Billed": false,
+              "Assigned To": "", "Start Task": false, "Started At": ""
+            }));
+          }
+        }
+
+        if (taskBatch.length) {
+          var taskInsertRow = api_getLastDataRow_(taskSheet) + 1;
+          taskSheet.getRange(taskInsertRow, 1, taskBatch.length, taskBatch[0].length).setValues(taskBatch);
+          tasksCreated = taskBatch.length;
+        }
+        partialState.tasksWritten = true;
+      }
+    } catch (taskErr) {
+      warnings.push("Task creation failed: " + taskErr.message);
+    }
+
+    // ─── WRITE BILLING ROWS (non-critical — FIX 3 + 5: inside lock, try/catch) ─
+    try {
+      if (billingEnabled && billingSheet && !skipReceivingBilling) {
+        var billMap = api_getHeaderMap_(billingSheet);
+        var billBatch = [];
+
+        for (var bi = 0; bi < items.length; bi++) {
+          var bItem = items[bi];
+          var bItemId = String(bItem.itemId || "").trim();
+          if (!bItemId) continue;
+          var bClass = String(bItem.class || "").trim();
+          var priceInfo = api_lookupRate_(ss, "RCVG", bClass);
+          var rate = priceInfo.rate;
+          if (rate > 0 && priceInfo.category) {
+            rate = api_applyDiscount_(settings, rate, priceInfo.category);
+          }
+          var total = rate > 0 ? rate : "Missing Rate";
+          if (rate <= 0) {
+            warnings.push("Missing RCVG rate for class " + bClass + " on item " + bItemId + " — billing row created with Missing Rate flag");
+          }
+          billBatch.push(api_buildRow_(billMap, {
+            "Status": "Unbilled",
+            "Invoice #": "",
+            "Client": clientName,
+            "Date": receiveDate,
+            "Svc Code": "RCVG",
+            "Svc Name": priceInfo.svcName || "Receiving",
+            "Category": priceInfo.category || "",
+            "Item ID": bItemId,
+            "Description": String(bItem.description || "").trim(),
+            "Class": bClass,
+            "Qty": 1,
+            "Rate": rate > 0 ? rate : 0,
+            "Total": total,
+            "Task ID": "",
+            "Repair ID": "",
+            "Shipment #": shipmentNo,
+            "Item Notes": "Receiving",
+            "Ledger Row ID": "RCVG-" + bItemId + "-" + shipmentNo
+          }));
+        }
+
+        if (billBatch.length) {
+          var billInsertRow = api_getLastDataRow_(billingSheet) + 1;
+          billingSheet.getRange(billInsertRow, 1, billBatch.length, billBatch[0].length).setValues(billBatch);
+          billingRows = billBatch.length;
+        }
+        partialState.billingWritten = true;
+      }
+    } catch (billErr) {
+      warnings.push("Billing row creation failed: " + billErr.message);
+    }
+
+  } catch (writeErr) {
+    // Critical failure during Shipments or Inventory write
+    try { lock.releaseLock(); } catch (_) {}
+    return jsonResponse_({
+      success: false,
+      error: "Write failed: " + writeErr.message,
+      partialState: partialState
+    });
+  }
+
+  // ─── RELEASE LOCK ──────────────────────────────────────────────────────────
+  try { lock.releaseLock(); } catch (_) {}
+
+  // ─── EMAIL + PDF (non-critical — outside lock, v24.0.0) ────────────────────
+  var emailSent = false;
+  try {
+    if (toBool_(settings["ENABLE_SHIPMENT_EMAIL"])) {
+      var clientEmail = String(settings["CLIENT_EMAIL"] || "").trim();
+      var notifEmails = String(settings["NOTIFICATION_EMAILS"] || "").trim();
+      var allRecip = api_mergeEmails_(notifEmails, clientEmail);
+      if (allRecip) {
+        var logoUrl = String(settings["LOGO_URL"] || "").trim()
+                      || "https://static.wixstatic.com/media/a38fbc_a8c7a368447f4723b782c4dbd765ca0e~mv2.png";
+        var itemsTable = api_buildItemsHtmlTable_(items);
+        // v26.3.0: Create shipment folder in Shipments/ subfolder (flat structure)
+        var shipFolderUrl = "";
+        try {
+          var shipSub = api_getOrCreateEntitySubfolder_(ss, "Shipments");
+          if (shipSub.folder) {
+            var newFolder = shipSub.folder.createFolder(shipmentNo);
+            shipFolderUrl = "https://drive.google.com/drive/folders/" + newFolder.getId();
+            // Hyperlink Shipment # on Shipments sheet
+            try {
+              var shipMap2 = api_getHeaderMap_(shipSheet);
+              var snCol = shipMap2["Shipment #"];
+              if (snCol) {
+                var shipLastRow2 = api_getLastDataRow_(shipSheet);
+                for (var ssi = shipLastRow2; ssi >= 2; ssi--) {
+                  if (String(shipSheet.getRange(ssi, snCol).getValue() || "").trim() === shipmentNo) {
+                    shipSheet.getRange(ssi, snCol).setRichTextValue(
+                      SpreadsheetApp.newRichTextValue().setText(shipmentNo).setLinkUrl(shipFolderUrl).build()
+                    );
+                    break;
+                  }
+                }
+              }
+            } catch (_) {}
+          }
+        } catch (folderErr) {
+          warnings.push("Shipment folder creation failed (non-fatal): " + folderErr.message);
+        }
+
+        var emailTokens = {
+          "{{SHIPMENT_NO}}":    shipmentNo,
+          "{{CLIENT_NAME}}":    clientName || "Client",
+          "{{CARRIER}}":        carrier || "",
+          "{{TRACKING}}":       trackingNumber || "",
+          "{{ITEM_COUNT}}":     String(items.length),
+          "{{RECEIVED_DATE}}":  receiveDate ? Utilities.formatDate(receiveDate, "America/Los_Angeles", "yyyy-MM-dd") : "",
+          "{{SHIPMENT_NOTES}}": notes || "",
+          "{{ITEMS_TABLE}}":    itemsTable,
+          "{{PHOTOS_URL}}":     shipFolderUrl,
+          "{{LOGO_URL}}":       logoUrl,
+          "{{INVENTORY_URL}}":  ss.getUrl()
+        };
+
+        // Generate DOC_RECEIVING PDF
+        var pdfBlob = null;
+        try {
+          var pdfTokens = {};
+          for (var tk in emailTokens) pdfTokens[tk] = emailTokens[tk];
+
+          // v38.11.0: Doc-template-specific tokens that differ from email tokens.
+          // The DOC_RECEIVING template has its own table with headers already in
+          // the HTML, so {{ITEMS_TABLE_ROWS}} is just <tr> rows (no <table> wrapper).
+          var e = api_esc_;
+          var docRows = "";
+          for (var di = 0; di < items.length; di++) {
+            var it = items[di];
+            var rowBg = (di % 2 === 0) ? "#fff" : "#F8FAFC";
+            docRows += '<tr style="background:' + rowBg + ';">' +
+              '<td style="padding:5px 6px;font-size:10px;border-bottom:1px solid #E2E8F0;text-align:center;">' + (di + 1) + '</td>' +
+              '<td style="padding:5px 6px;font-size:10px;border-bottom:1px solid #E2E8F0;font-weight:bold;">' + e(it.itemId || "") + '</td>' +
+              '<td style="padding:5px 6px;font-size:10px;border-bottom:1px solid #E2E8F0;text-align:center;">' + (it.qty || 1) + '</td>' +
+              '<td style="padding:5px 6px;font-size:10px;border-bottom:1px solid #E2E8F0;">' + e(it.vendor || "") + '</td>' +
+              '<td style="padding:5px 6px;font-size:10px;border-bottom:1px solid #E2E8F0;">' + e(it.description || "") + '</td>' +
+              '<td style="padding:5px 6px;font-size:10px;border-bottom:1px solid #E2E8F0;text-align:center;">' + e(it.class || "") + '</td>' +
+              '<td style="padding:5px 6px;font-size:10px;border-bottom:1px solid #E2E8F0;">' + e(it.location || "") + '</td>' +
+              '<td style="padding:5px 6px;font-size:10px;border-bottom:1px solid #E2E8F0;">' + e(it.sidemark || "") + '</td>' +
+              '<td style="padding:5px 6px;font-size:10px;border-bottom:1px solid #E2E8F0;">' + e(it.notes || "") + '</td>' +
+              '</tr>';
+          }
+          pdfTokens["{{ITEMS_TABLE_ROWS}}"] = docRows;
+          pdfTokens["{{TOTAL_ITEMS}}"]      = String(items.length);
+          pdfTokens["{{CLIENT_EMAIL_HTML}}"] = clientEmail
+            ? '<div style="font-size:11px;color:#64748B;">' + e(clientEmail) + '</div>'
+            : "";
+          pdfTokens["{{SHIPMENT_NOTES_HTML}}"] = notes
+            ? '<div style="background:#FEF3C7;border:1px solid #FCD34D;padding:8px 12px;margin-bottom:14px;font-size:11px;">' +
+              '<span style="font-weight:bold;color:#92400E;">Notes:</span> ' + e(notes) + '</div>'
+            : "";
+
+          var pdfResult = api_generateDocPdf_(ss, "DOC_RECEIVING", "Receiving_" + shipmentNo + "_" + (clientName || "Client"), shipFolderUrl, pdfTokens);
+          if (pdfResult.blob) pdfBlob = pdfResult.blob;
+          if (pdfResult.warning) warnings.push(pdfResult.warning);
+        } catch (pdfErr) {
+          warnings.push("Receiving PDF failed (non-fatal): " + pdfErr.message);
+        }
+
+        var emailResult = api_sendTemplateEmail_(settings, "SHIPMENT_RECEIVED", allRecip,
+          "Shipment Received — " + clientName + " — " + shipmentNo, emailTokens, pdfBlob);
+        if (emailResult.success) emailSent = true;
+        else warnings.push("Email not sent: " + emailResult.error);
+      }
+    }
+  } catch (emailErr) {
+    warnings.push("Email error (non-fatal): " + emailErr.message);
+  }
+
+  return jsonResponse_({
+    success: true,
+    shipmentNo: shipmentNo,
+    itemCount: items.length,
+    tasksCreated: tasksCreated,
+    billingRows: billingRows,
+    emailSent: emailSent,
+    warnings: warnings.length > 0 ? warnings : undefined,
+    partialState: partialState
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// WRITE ENDPOINT: completeTask (v7.0.0)
+// Mirrors processTaskCompletionById_ (Triggers.gs) — billing, repair creation, disposal release.
+// Email notification deferred (requires sendTemplateEmail_ infrastructure — future phase).
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Finds a row in a sheet by matching a value in a given 1-based column index.
+ * Returns the 1-based row number, or -1 if not found.
+ */
+function api_findRowById_(sheet, colIndex, id) {
+  if (!sheet || !colIndex || !id) return -1;
+  var last = sheet.getLastRow();
+  if (last < 2) return -1;
+  var vals = sheet.getRange(2, colIndex, last - 1, 1).getValues();
+  var normId = String(id).trim();
+  for (var i = 0; i < vals.length; i++) {
+    if (String(vals[i][0] || "").trim() === normId) return i + 2; // 1-based
+  }
+  return -1;
+}
+
+/**
+ * Looks up an inventory item by Item ID.
+ * Returns { itemId, vendor, description, itemClass, location, sidemark, row } or null.
+ * row is the 1-based row index on the Inventory sheet.
+ */
+function api_findInventoryItem_(ss, itemId) {
+  if (!itemId) return null;
+  try {
+    var invSheet = ss.getSheetByName("Inventory");
+    if (!invSheet || invSheet.getLastRow() < 2) return null;
+    var map = api_getHeaderMap_(invSheet);
+    var idCol = map["Item ID"];
+    if (!idCol) return null;
+    var rowNum = api_findRowById_(invSheet, idCol, itemId);
+    if (rowNum < 2) return null;
+    var rowData = invSheet.getRange(rowNum, 1, 1, invSheet.getLastColumn()).getValues()[0];
+    function getF(h) { return map[h] ? String(rowData[map[h] - 1] || "").trim() : ""; }
+    var qtyRaw = map["Qty"] ? rowData[map["Qty"] - 1] : 1;
+    return {
+      itemId:      getF("Item ID"),
+      vendor:      getF("Vendor"),
+      description: getF("Description"),
+      itemClass:   getF("Class"),
+      location:    getF("Location"),
+      sidemark:    getF("Sidemark"),
+      room:        getF("Room"),
+      status:      getF("Status"),
+      qty:         (qtyRaw !== "" && qtyRaw !== null) ? (Number(qtyRaw) || 1) : 1,
+      row:         rowNum,
+      _map:        map,
+      _sheet:      invSheet
+    };
+  } catch (e) {
+    Logger.log("api_findInventoryItem_ error: " + e);
+    return null;
+  }
+}
+
+// ─── Complete Task Handler ─────────────────────────────────────────────────────
+
+function handleCompleteTask_(clientSheetId, payload) {
+  if (!clientSheetId) return errorResponse_("clientSheetId is required", "INVALID_PARAMS");
+  if (!payload || !payload.taskId) return errorResponse_("taskId is required in payload", "INVALID_PARAMS");
+
+  var taskId   = String(payload.taskId || "").trim();
+  var result   = String(payload.result || "Pass").trim(); // "Pass" or "Fail"
+  var taskNotes = String(payload.taskNotes || "").trim();
+
+  // v32.x: Optional inline Custom Price override — lets the frontend set the
+  // price atomically at completion time so the billing row always uses the
+  // override, even if the admin never clicked Save on the Custom Price field.
+  // Rules: number = set override; "" / null = clear override; undefined = no change.
+  var hasInlineCustomPrice = (payload.customPrice !== undefined);
+  var inlineCustomPrice = null; // null => clear, Number => set
+  if (hasInlineCustomPrice) {
+    if (payload.customPrice === null || payload.customPrice === "") {
+      inlineCustomPrice = null;
+    } else {
+      var cpNum = Number(payload.customPrice);
+      if (isNaN(cpNum)) return errorResponse_("customPrice must be a number or null", "INVALID_PARAMS");
+      inlineCustomPrice = cpNum;
+    }
+  }
+
+  if (!taskId) return errorResponse_("taskId must not be empty", "INVALID_PARAMS");
+  if (result !== "Pass" && result !== "Fail") return errorResponse_("result must be Pass or Fail", "INVALID_PARAMS");
+
+  // Open spreadsheet
+  var ss;
+  try { ss = SpreadsheetApp.openById(clientSheetId); }
+  catch (e) { return errorResponse_("Cannot open client spreadsheet: " + e.message, "NOT_FOUND"); }
+
+  var taskSheet = ss.getSheetByName("Tasks");
+  if (!taskSheet) return errorResponse_("Tasks sheet not found in client spreadsheet", "SCHEMA_ERROR");
+
+  var taskMap = api_getHeaderMap_(taskSheet);
+  var idCol = taskMap["Task ID"];
+  if (!idCol) return errorResponse_("Task ID column not found in Tasks sheet", "SCHEMA_ERROR");
+
+  // Find task row (outside lock — read-only pre-check)
+  var taskRow = api_findRowById_(taskSheet, idCol, taskId);
+  if (taskRow < 2) return errorResponse_("Task not found: " + taskId, "NOT_FOUND");
+
+  // Read task row data
+  var rowData = taskSheet.getRange(taskRow, 1, 1, taskSheet.getLastColumn()).getValues()[0];
+  function getVal(h) { return taskMap[h] ? String(rowData[taskMap[h] - 1] || "").trim() : ""; }
+
+  // Idempotency check (read-only, safe outside lock)
+  var processedAt = getVal("Completion Processed At");
+  if (processedAt) {
+    return jsonResponse_({ success: true, skipped: true, taskId: taskId, message: "Task already completed (idempotency guard)" });
+  }
+
+  // Status pre-check (optimistic — re-checked inside lock)
+  var currentStatus = getVal("Status");
+  if (currentStatus === "Completed" || currentStatus === "Cancelled") {
+    return jsonResponse_({ success: true, skipped: true, taskId: taskId, message: "Task status is already " + currentStatus });
+  }
+
+  // Read settings before lock
+  var settings = api_readSettings_(ss);
+  var clientName = String(settings["CLIENT_NAME"] || "").trim();
+
+  var svcCode  = getVal("Svc Code") || getVal("Type");
+  var itemId   = getVal("Item ID");
+  var shipNo   = getVal("Shipment #");
+  var taskType = getVal("Type");
+  var taskTypeLower = taskType ? taskType.toLowerCase() : "";
+
+  // ─── ACQUIRE LOCK ───────────────────────────────────────────────────────────
+  var lock = LockService.getScriptLock();
+  try { lock.waitLock(15000); }
+  catch (lockErr) { return errorResponse_("Could not acquire lock — another operation in progress. Try again.", "LOCK_ERROR"); }
+
+  var warnings = [];
+  var billingCreated = false;
+  var repairCreated = false;
+
+  try {
+    // Re-check idempotency INSIDE lock (concurrent request guard)
+    var freshRowData = taskSheet.getRange(taskRow, 1, 1, taskSheet.getLastColumn()).getValues()[0];
+    function getFresh(h) { return taskMap[h] ? String(freshRowData[taskMap[h] - 1] || "").trim() : ""; }
+    if (getFresh("Completion Processed At")) {
+      lock.releaseLock();
+      return jsonResponse_({ success: true, skipped: true, taskId: taskId, message: "Task already completed (concurrent request)" });
+    }
+    var freshStatus = getFresh("Status");
+    if (freshStatus === "Completed" || freshStatus === "Cancelled") {
+      lock.releaseLock();
+      return jsonResponse_({ success: true, skipped: true, taskId: taskId, message: "Task status is already " + freshStatus });
+    }
+
+    var now = new Date();
+    var tz  = Session.getScriptTimeZone();
+    var nowFmt = Utilities.formatDate(now, tz, "MM/dd/yyyy HH:mm:ss");
+
+    // ─── WRITE: Status, Completed At, Result, Task Notes ─────────────────────
+    if (taskMap["Status"])      taskSheet.getRange(taskRow, taskMap["Status"]).setValue("Completed");
+    if (taskMap["Completed At"]) taskSheet.getRange(taskRow, taskMap["Completed At"]).setValue(now);
+    if (result && taskMap["Result"]) taskSheet.getRange(taskRow, taskMap["Result"]).setValue(result);
+    if (taskNotes && taskMap["Task Notes"]) taskSheet.getRange(taskRow, taskMap["Task Notes"]).setValue(taskNotes);
+
+    // v32.x: Inline Custom Price override — write to Tasks sheet AND rowData
+    // array so the downstream billing read picks it up in the same request.
+    if (hasInlineCustomPrice) {
+      if (!taskMap["Custom Price"]) {
+        warnings.push("Custom Price override ignored — Custom Price column missing on Tasks sheet. Run Update Headers on this client.");
+      } else {
+        var cpCellValue = (inlineCustomPrice === null) ? "" : inlineCustomPrice;
+        taskSheet.getRange(taskRow, taskMap["Custom Price"]).setValue(cpCellValue);
+        rowData[taskMap["Custom Price"] - 1] = cpCellValue;
+        SpreadsheetApp.flush();
+      }
+    }
+
+    // ─── BILLING ─────────────────────────────────────────────────────────────
+    if (!itemId) {
+      warnings.push("Item ID is empty on task row — billing skipped");
+    } else {
+      var invItem = api_findInventoryItem_(ss, itemId);
+      if (!invItem) {
+        warnings.push("Inventory item not found for " + itemId + " — billing skipped");
+      } else {
+        var rateData = api_lookupRate_(ss, svcCode, invItem.itemClass);
+        var isPASS = (result === "Pass");
+        var isFAIL = (result === "Fail");
+        var shouldBill = (isPASS && rateData.billIfPass) || (isFAIL && rateData.billIfFail);
+
+        if (shouldBill) {
+          try {
+            var billSheet = ss.getSheetByName("Billing_Ledger");
+            if (!billSheet) {
+              warnings.push("Billing_Ledger sheet not found — billing skipped");
+            } else {
+              // Custom Price override: admin can set a fixed price on the Tasks sheet
+              var customPriceRaw = getVal("Custom Price");
+              var customPriceNum = customPriceRaw ? Number(customPriceRaw) : NaN;
+              var hasCustomPrice = !isNaN(customPriceNum) && customPriceRaw !== "";
+
+              var appliedRate = rateData.rate;
+              if (hasCustomPrice) {
+                appliedRate = customPriceNum;
+              } else if (appliedRate > 0 && rateData.category) {
+                appliedRate = api_applyDiscount_(settings, appliedRate, rateData.category);
+              }
+              var missingRate = (!hasCustomPrice && appliedRate <= 0);
+              var total = missingRate ? "Missing Rate" : appliedRate;
+              var billMap = api_getHeaderMap_(billSheet);
+              var billRow = api_buildRow_(billMap, {
+                "Status":       "Unbilled",
+                "Invoice #":    "",
+                "Client":       clientName,
+                "Date":         now,
+                "Svc Code":     svcCode,
+                "Svc Name":     rateData.svcName || svcCode,
+                "Category":     rateData.category || "",
+                "Item ID":      itemId,
+                "Description":  invItem.description,
+                "Class":        invItem.itemClass,
+                "Qty":          1,
+                "Rate":         missingRate ? 0 : appliedRate,
+                "Total":        total,
+                "Task ID":      taskId,
+                "Repair ID":    "",
+                "Shipment #":   shipNo,
+                "Item Notes":   (missingRate ? "MISSING RATE - " : "") + result + (taskNotes ? " - " + taskNotes : ""),
+                "Ledger Row ID": svcCode + "-TASK-" + taskId
+              });
+              var billInsertRow = api_getLastDataRow_(billSheet) + 1;
+              billSheet.getRange(billInsertRow, 1, 1, billRow.length).setValues([billRow]);
+              billingCreated = true;
+
+              if (!missingRate) {
+                if (taskMap["Billed"]) taskSheet.getRange(taskRow, taskMap["Billed"]).setValue(true);
+              } else {
+                warnings.push("Missing rate for " + svcCode + "/" + invItem.itemClass + " — billing row created with Missing Rate flag");
+                if (taskMap["Billing Exception"]) {
+                  taskSheet.getRange(taskRow, taskMap["Billing Exception"]).setValue(
+                    "Missing Rate for " + svcCode + "/" + invItem.itemClass
+                  );
+                }
+              }
+            }
+          } catch (billErr) {
+            warnings.push("Billing write failed (non-fatal): " + billErr.message);
+          }
+        }
+
+        // ─── DISPOSAL → Release Date + Status = Released (non-critical) ─────
+        if (taskTypeLower === "disposal" || taskTypeLower === "disp") {
+          try {
+            if (invItem._sheet && invItem._map) {
+              if (invItem._map["Release Date"]) invItem._sheet.getRange(invItem.row, invItem._map["Release Date"]).setValue(now);
+              if (invItem._map["Status"])       invItem._sheet.getRange(invItem.row, invItem._map["Status"]).setValue("Released");
+            }
+          } catch (dispErr) {
+            warnings.push("Disposal auto-release failed (non-fatal): " + dispErr.message);
+          }
+        }
+      }
+    }
+
+    // ─── Update Inventory "Task Notes" aggregation (v28.6.0) ─────────────
+    try { api_updateInvTaskNotes_simple_(ss, itemId); } catch (_) {}
+
+    // ─── STAMP idempotency marker (always last) ────────────────────────────
+    if (taskMap["Completion Processed At"]) {
+      taskSheet.getRange(taskRow, taskMap["Completion Processed At"]).setValue(nowFmt);
+    }
+
+  } catch (writeErr) {
+    try { lock.releaseLock(); } catch (_) {}
+    return jsonResponse_({ success: false, taskId: taskId, error: "Write failed: " + writeErr.message });
+  }
+
+  try { lock.releaseLock(); } catch (_) {}
+
+  // ─── EMAIL (non-critical — outside lock, v24.0.0) ──────────────────────────
+  var emailSent = false;
+  try {
+    if (toBool_(settings["ENABLE_NOTIFICATIONS"])) {
+      var clientEmail = String(settings["CLIENT_EMAIL"] || "").trim();
+      var notifEmails = String(settings["NOTIFICATION_EMAILS"] || "").trim();
+      var allRecip = api_mergeEmails_(notifEmails, clientEmail);
+      if (allRecip) {
+        var svcCodeLower = (svcCode || "").toLowerCase();
+        var templateKey = (svcCodeLower === "insp" || taskType.toLowerCase().indexOf("insp") >= 0) ? "INSP_EMAIL" : "TASK_COMPLETE";
+        var resultColor = result === "Pass" ? "#16A34A" : "#DC2626";
+        var svcName = api_lookupSvcName_(ss, svcCode) || taskType;
+        var invItem = api_findInventoryItem_(ss, itemId);
+        var desc     = invItem ? invItem.description : getVal("Description");
+        var vendor   = invItem ? invItem.vendor      : getVal("Vendor");
+        var location = invItem ? invItem.location    : getVal("Location");
+        var sidemark = invItem ? invItem.sidemark    : getVal("Sidemark");
+        var qty = invItem ? invItem.qty : (getVal("Qty") || 1);
+        var room = invItem ? invItem.room : "";
+        var itemTableHtml = api_buildSingleItemTableHtml_(itemId, desc, vendor, "", location, sidemark, qty, room);
+
+        var taskFolderUrl = "";
+        try {
+          var taskRt = taskSheet.getRange(taskRow, idCol).getRichTextValue();
+          if (taskRt && taskRt.getLinkUrl()) taskFolderUrl = taskRt.getLinkUrl();
+        } catch (_) {}
+
+        var emailTokens = {
+          "{{ITEM_ID}}":          itemId || "",
+          "{{CLIENT_NAME}}":      clientName || "Client",
+          "{{RESULT}}":           result,
+          "{{TASK_TYPE}}":        taskType || svcCode || "",
+          "{{SVC_NAME}}":         svcName || "",
+          "{{TASK_NOTES}}":       taskNotes || getVal("Task Notes") || "",
+          "{{DESCRIPTION}}":      desc || "",
+          "{{SHIPMENT_NO}}":      shipNo || "-",
+          "{{RESULT_COLOR}}":     resultColor,
+          "{{ITEM_TABLE_HTML}}":  itemTableHtml,
+          "{{PHOTOS_URL}}":       taskFolderUrl,
+          "{{TASK_ID}}":          taskId,
+          "{{REPAIR_NOTE}}":      "",
+          "{{LOGO_URL}}":         String(settings["LOGO_URL"] || "").trim() || "https://static.wixstatic.com/media/a38fbc_a8c7a368447f4723b782c4dbd765ca0e~mv2.png",
+          "{{INVENTORY_URL}}":    ss.getUrl()
+        };
+
+        // Try to find existing Work Order PDF in task folder
+        var pdfBlob = null;
+        if (taskFolderUrl) {
+          pdfBlob = api_findPdfInFolder_(taskFolderUrl, "Work_Order_");
+        }
+
+        var emailResult = api_sendTemplateEmail_(settings, templateKey, allRecip,
+          (templateKey === "INSP_EMAIL" ? "Inspection Report " : "Task Completed ") + clientName + " — " + itemId,
+          emailTokens, pdfBlob);
+        if (emailResult.success) emailSent = true;
+        else warnings.push("Email not sent: " + emailResult.error);
+      }
+    }
+  } catch (emailErr) {
+    warnings.push("Email error (non-fatal): " + emailErr.message);
+  }
+
+  api_bumpSummaryVersion_();
+  return jsonResponse_({
+    success:        true,
+    taskId:         taskId,
+    result:         result,
+    billingCreated: billingCreated,
+    repairCreated:  repairCreated,
+    emailSent:      emailSent,
+    warnings:       warnings.length > 0 ? warnings : undefined
+  });
+}
+
+// ─── Email Helper ──────────────────────────────────────────────────────────────
+
+
+
+/**
+ * api_sendTemplateEmail_
+ * Sends an email using a named template from the Master Price List's Email_Templates tab.
+ * Mirrors SH_sendTemplateEmail_ from the client inventory scripts.
+ *
+ * @param {Object} settings - Result of api_readSettings_(ss) for the client sheet
+ * @param {string} templateKey - Template key (e.g. "REPAIR_QUOTE")
+ * @param {string} toEmail - Recipient email address
+ * @param {string} fallbackSubject - Subject to use if template has no subject
+ * @param {Object} tokens - Token map: { "{{TOKEN}}": "value", ... }
+ * @param {Blob=} pdfBlob - Optional PDF blob to attach
+ * @returns {{ success: boolean, error?: string }}
+ */
+function api_sendTemplateEmail_(settings, templateKey, toEmail, fallbackSubject, tokens, pdfBlob) {
+  if (!toEmail) return { success: false, error: "No recipient email address" };
+  try {
+    var masterId = String(settings["MASTER_SPREADSHEET_ID"] || "").trim();
+    var eSubj = fallbackSubject || templateKey;
+    var eBody = "";
+
+    // Look up template from Master Price List Email_Templates tab
+    if (masterId) {
+      try {
+        var mSS = SpreadsheetApp.openById(masterId);
+        var tplSh = mSS.getSheetByName("Email_Templates");
+        if (tplSh && tplSh.getLastRow() >= 2) {
+          var tplData = tplSh.getDataRange().getValues();
+          var tplHdr = {};
+          tplData[0].forEach(function(h, i) { tplHdr[String(h || "").trim()] = i; });
+          var keyCol  = tplHdr["Template Key"] !== undefined ? tplHdr["Template Key"] : 0;
+          var subjCol = tplHdr["Subject"]       !== undefined ? tplHdr["Subject"]       : 1;
+          var bodyCol = tplHdr["HTML Body"]      !== undefined ? tplHdr["HTML Body"]      : 2;
+          for (var ti = 1; ti < tplData.length; ti++) {
+            if (String(tplData[ti][keyCol] || "").trim() === templateKey) {
+              eSubj = String(tplData[ti][subjCol] || "").trim() || eSubj;
+              eBody = String(tplData[ti][bodyCol] || "").trim();
+              break;
+            }
+          }
+        }
+      } catch (tplErr) {
+        return { success: false, error: "Template lookup failed: " + tplErr.message };
+      }
+    }
+
+    if (!eBody) {
+      return { success: false, error: "No template found for key '" + templateKey + "' — email skipped" };
+    }
+
+    // Auto-inject APP_URL if not already in tokens
+    if (!tokens["{{APP_URL}}"]) tokens["{{APP_URL}}"] = APP_BASE_URL_;
+
+    // Auto-inject entity deep link tokens (v37.0.0) — email CTAs open to specific entity panels
+    var _appUrl = tokens["{{APP_URL}}"] || APP_BASE_URL_;
+    if (tokens["{{TASK_ID}}"] && !tokens["{{TASK_DEEP_LINK}}"])
+      tokens["{{TASK_DEEP_LINK}}"] = _appUrl + "/tasks?open=" + encodeURIComponent(String(tokens["{{TASK_ID}}"]));
+    if (tokens["{{REPAIR_ID}}"] && !tokens["{{REPAIR_DEEP_LINK}}"])
+      tokens["{{REPAIR_DEEP_LINK}}"] = _appUrl + "/repairs?open=" + encodeURIComponent(String(tokens["{{REPAIR_ID}}"]));
+    if (tokens["{{WC_NUMBER}}"] && !tokens["{{WC_DEEP_LINK}}"])
+      tokens["{{WC_DEEP_LINK}}"] = _appUrl + "/will-calls?open=" + encodeURIComponent(String(tokens["{{WC_NUMBER}}"]));
+    if (tokens["{{SHIPMENT_NO}}"] && !tokens["{{SHIPMENT_DEEP_LINK}}"])
+      tokens["{{SHIPMENT_DEEP_LINK}}"] = _appUrl + "/shipments?open=" + encodeURIComponent(String(tokens["{{SHIPMENT_NO}}"]));
+    if (tokens["{{ITEM_ID}}"] && !tokens["{{ITEM_DEEP_LINK}}"])
+      tokens["{{ITEM_DEEP_LINK}}"] = _appUrl + "/inventory?open=" + encodeURIComponent(String(tokens["{{ITEM_ID}}"]));
+
+    // Replace tokens in subject + body
+    for (var tk in tokens) {
+      var val = String(tokens[tk] == null ? "" : tokens[tk]);
+      eSubj = eSubj.split(tk).join(val);
+      eBody = eBody.split(tk).join(val);
+    }
+
+    // Send
+    var mailOpts = { htmlBody: eBody, from: "whse@stridenw.com" };
+    if (pdfBlob) mailOpts.attachments = [pdfBlob];
+    GmailApp.sendEmail(toEmail, eSubj, "", mailOpts);
+    return { success: true };
+
+  } catch (err) {
+    return { success: false, error: String(err) };
+  }
+}
+
+// ─── Email / PDF Helpers (v24.0.0) ────────────────────────────────────────────
+
+/** Builds HTML table of shipment items for SHIPMENT_RECEIVED email. */
+function api_buildItemsHtmlTable_(items) {
+  var h = '<table style="border-collapse:collapse;width:100%;font-size:13px;">' +
+    '<tr style="background:#f3f4f6;"><th style="padding:6px 10px;border:1px solid #e5e7eb;text-align:left;">Item ID</th>' +
+    '<th style="padding:6px 10px;border:1px solid #e5e7eb;text-align:left;">Vendor</th>' +
+    '<th style="padding:6px 10px;border:1px solid #e5e7eb;text-align:left;">Description</th>' +
+    '<th style="padding:6px 10px;border:1px solid #e5e7eb;text-align:left;">Class</th>' +
+    '<th style="padding:6px 10px;border:1px solid #e5e7eb;text-align:center;">Qty</th>' +
+    '<th style="padding:6px 10px;border:1px solid #e5e7eb;text-align:left;">Location</th></tr>';
+  for (var i = 0; i < items.length; i++) {
+    var it = items[i];
+    h += '<tr><td style="padding:6px 10px;border:1px solid #e5e7eb;">' + api_esc_(it.itemId) + '</td>' +
+      '<td style="padding:6px 10px;border:1px solid #e5e7eb;">' + api_esc_(it.vendor || "") + '</td>' +
+      '<td style="padding:6px 10px;border:1px solid #e5e7eb;">' + api_esc_(it.description || "") + '</td>' +
+      '<td style="padding:6px 10px;border:1px solid #e5e7eb;">' + api_esc_(it.class || "") + '</td>' +
+      '<td style="padding:6px 10px;border:1px solid #e5e7eb;text-align:center;">' + (it.qty || 1) + '</td>' +
+      '<td style="padding:6px 10px;border:1px solid #e5e7eb;">' + api_esc_(it.location || "") + '</td></tr>';
+  }
+  return h + '</table>';
+}
+
+/** Builds single-item HTML table for task/repair emails. Matches SH_buildItemTableHtml_ format. */
+function api_buildSingleItemTableHtml_(itemId, description, vendor, itemClass, location, sidemark, qty, room) {
+  return '<table style="border-collapse:collapse;width:100%;font-size:13px;margin:8px 0;">' +
+    '<tr style="background:#f3f4f6;">' +
+    '<th style="padding:6px 10px;border:1px solid #e5e7eb;text-align:left;">Item ID</th>' +
+    '<th style="padding:6px 10px;border:1px solid #e5e7eb;text-align:center;">Qty</th>' +
+    '<th style="padding:6px 10px;border:1px solid #e5e7eb;text-align:left;">Vendor</th>' +
+    '<th style="padding:6px 10px;border:1px solid #e5e7eb;text-align:left;">Description</th>' +
+    '<th style="padding:6px 10px;border:1px solid #e5e7eb;text-align:left;">Sidemark</th>' +
+    '<th style="padding:6px 10px;border:1px solid #e5e7eb;text-align:left;">Room</th></tr>' +
+    '<tr>' +
+    '<td style="padding:6px 10px;border:1px solid #e5e7eb;">' + api_esc_(itemId || "") + '</td>' +
+    '<td style="padding:6px 10px;border:1px solid #e5e7eb;text-align:center;">' + (qty || 1) + '</td>' +
+    '<td style="padding:6px 10px;border:1px solid #e5e7eb;">' + api_esc_(vendor || "") + '</td>' +
+    '<td style="padding:6px 10px;border:1px solid #e5e7eb;">' + api_esc_(description || "") + '</td>' +
+    '<td style="padding:6px 10px;border:1px solid #e5e7eb;">' + api_esc_(sidemark || "") + '</td>' +
+    '<td style="padding:6px 10px;border:1px solid #e5e7eb;">' + api_esc_(room || "") + '</td></tr></table>';
+}
+
+/** Builds WC items HTML table for will call emails. */
+function api_buildWcItemsTable_(wcItems) {
+  var h = '<table style="border-collapse:collapse;width:100%;font-size:13px;">' +
+    '<tr style="background:#f3f4f6;"><th style="padding:6px 10px;border:1px solid #e5e7eb;text-align:left;">Item ID</th>' +
+    '<th style="padding:6px 10px;border:1px solid #e5e7eb;text-align:left;">Description</th>' +
+    '<th style="padding:6px 10px;border:1px solid #e5e7eb;text-align:left;">Class</th>' +
+    '<th style="padding:6px 10px;border:1px solid #e5e7eb;text-align:left;">Location</th>' +
+    '<th style="padding:6px 10px;border:1px solid #e5e7eb;text-align:right;">WC Fee</th></tr>';
+  for (var i = 0; i < wcItems.length; i++) {
+    var w = wcItems[i];
+    h += '<tr><td style="padding:6px 10px;border:1px solid #e5e7eb;">' + api_esc_(w.itemId || "") + '</td>' +
+      '<td style="padding:6px 10px;border:1px solid #e5e7eb;">' + api_esc_(w.description || "") + '</td>' +
+      '<td style="padding:6px 10px;border:1px solid #e5e7eb;">' + api_esc_(w.itemClass || w.class || "") + '</td>' +
+      '<td style="padding:6px 10px;border:1px solid #e5e7eb;">' + api_esc_(w.location || "") + '</td>' +
+      '<td style="padding:6px 10px;border:1px solid #e5e7eb;text-align:right;">$' + Number(w.wcFee || 0).toFixed(2) + '</td></tr>';
+  }
+  return h + '</table>';
+}
+
+/** Finds existing PDF in a Drive folder by filename prefix. Returns blob or null. */
+function api_findPdfInFolder_(folderUrl, prefix) {
+  try {
+    var match = String(folderUrl).match(/[-\w]{25,}/);
+    if (!match) return null;
+    var folder = DriveApp.getFolderById(match[0]);
+    var files = folder.getFilesByType(MimeType.PDF);
+    while (files.hasNext()) {
+      var f = files.next();
+      if (f.getName().indexOf(prefix) === 0) return f.getBlob();
+    }
+  } catch (_) {}
+  return null;
+}
+
+/** Generates a PDF from a doc template key, saves to folder, returns blob. Non-fatal. */
+function api_generateDocPdf_(ss, docTemplateKey, pdfFileName, folderUrl, tokens) {
+  try {
+    var tmpl = api_getDocTemplateHtml_(ss, docTemplateKey);
+    if (!tmpl || !tmpl.html) return { blob: null, warning: "No template found for " + docTemplateKey };
+    var html = api_resolveDocTokens_(tmpl.html, tokens);
+    var docId = api_createGoogleDocFromHtml_(pdfFileName, html);
+    var pdfBlob = api_exportDocAsPdfBlob_(docId, pdfFileName + ".pdf", 0.25);
+    // Save to folder
+    if (folderUrl) {
+      try {
+        var fMatch = String(folderUrl).match(/[-\w]{25,}/);
+        if (fMatch) DriveApp.getFolderById(fMatch[0]).createFile(pdfBlob);
+      } catch (saveErr) { Logger.log("api_generateDocPdf_ save error: " + saveErr); }
+    }
+    // Cleanup temp doc
+    try { DriveApp.getFileById(docId).setTrashed(true); } catch (_) {}
+    return { blob: pdfBlob, warning: null };
+  } catch (e) {
+    Logger.log("api_generateDocPdf_ error: " + e);
+    return { blob: null, warning: "PDF generation failed: " + e.message };
+  }
+}
+
+/** Merges two comma-separated email strings, deduplicates. */
+function api_mergeEmails_(a, b) {
+  var all = (String(a || "") + "," + String(b || "")).split(",").map(function(e) { return e.trim().toLowerCase(); }).filter(function(e) { return e && e.indexOf("@") > 0; });
+  var seen = {};
+  return all.filter(function(e) { if (seen[e]) return false; seen[e] = true; return true; }).join(",");
+}
+
+// ─── Request Repair Quote — creates a new Repair row from an inventory item ───
+
+function handleRequestRepairQuote_(clientSheetId, payload, callerEmail) {
+  if (!clientSheetId) return errorResponse_("clientSheetId is required", "INVALID_PARAMS");
+  var itemId = String((payload || {}).itemId || "").trim();
+  if (!itemId) return errorResponse_("itemId is required", "INVALID_PARAMS");
+  var sourceTaskId = String((payload || {}).sourceTaskId || "").trim();
+  var notes = String((payload || {}).notes || "").trim();
+
+  try {
+    var ss = SpreadsheetApp.openById(clientSheetId);
+
+    // Look up inventory item
+    var invItem = api_findInventoryItem_(ss, itemId);
+    if (!invItem) return errorResponse_("Inventory item not found: " + itemId, "NOT_FOUND");
+
+    var repairSheet = ss.getSheetByName("Repairs");
+    if (!repairSheet) return errorResponse_("Repairs sheet not found", "SCHEMA_ERROR");
+
+    var repMap = api_getHeaderMap_(repairSheet);
+    var now = new Date();
+    var repairId = "RPR-" + itemId + "-" + now.getTime();
+
+    var repRow = api_buildRow_(repMap, {
+      "Repair ID":      repairId,
+      "Source Task ID":  sourceTaskId,
+      "Item ID":         itemId,
+      "Description":     invItem.description || "",
+      "Class":           invItem.itemClass || "",
+      "Vendor":          invItem.vendor || "",
+      "Location":        invItem.location || "",
+      "Sidemark":        invItem.sidemark || "",
+      "Task Notes":      notes,
+      "Created By":      callerEmail || "API",
+      "Created Date":    now,
+      "Status":          "Pending Quote"
+    });
+
+    var insertRow = api_getLastDataRow_(repairSheet) + 1;
+    repairSheet.getRange(insertRow, 1, 1, repRow.length).setValues([repRow]);
+
+    // Send notification email to client
+    var emailSent = false;
+    var warnings = [];
+    try {
+      var settings = api_readSettings_(ss);
+      var clientEmail = String(settings["CLIENT_EMAIL"] || "").trim();
+      var clientName  = String(settings["CLIENT_NAME"] || "").trim();
+      var enableNotif = String(settings["ENABLE_NOTIFICATIONS"] || "true").trim().toLowerCase();
+
+      if (enableNotif !== "false" && clientEmail) {
+        var notifEmails = String(settings["NOTIFICATION_EMAILS"] || "").trim();
+        var allRecip = api_mergeEmails_(clientEmail, notifEmails);
+        var itemTableHtml = api_buildSingleItemTableHtml_(
+          itemId, invItem.description || "", invItem.vendor || "",
+          invItem.itemClass || "", invItem.location || "", invItem.sidemark || "",
+          invItem.qty || 1, invItem.room || ""
+        );
+        // Try to get photos folder URL from inventory Item ID hyperlink
+        var photosUrl = "";
+        try {
+          var invSheet = ss.getSheetByName("Inventory");
+          var invMap = api_getHeaderMap_(invSheet);
+          var invIdCol = invMap["Item ID"];
+          if (invIdCol) {
+            var invRow = api_findRowById_(invSheet, invIdCol, itemId);
+            if (invRow > 0) {
+              var rt = invSheet.getRange(invRow, invIdCol).getRichTextValue();
+              if (rt && rt.getLinkUrl()) photosUrl = rt.getLinkUrl();
+            }
+          }
+        } catch (_) {}
+
+        var emailTokens = {
+          "{{CLIENT_NAME}}":    clientName,
+          "{{ITEM_ID}}":        itemId,
+          "{{DESCRIPTION}}":    invItem.description || "",
+          "{{REPAIR_ID}}":      repairId,
+          "{{VENDOR}}":         invItem.vendor || "",
+          "{{LOCATION}}":       invItem.location || "",
+          "{{SIDEMARK}}":       invItem.sidemark || "",
+          "{{NOTES}}":          notes || "",
+          "{{ITEM_TABLE_HTML}}": itemTableHtml,
+          "{{PHOTOS_URL}}":     photosUrl
+        };
+        var emailResult = api_sendTemplateEmail_(settings, "REPAIR_QUOTE_REQUEST", allRecip,
+          "Repair Quote Requested — " + clientName + " — " + itemId, emailTokens, null);
+        if (emailResult.success) emailSent = true;
+        else warnings.push("Email not sent: " + emailResult.error);
+      } else {
+        if (!clientEmail) warnings.push("Email skipped: no CLIENT_EMAIL configured");
+        if (enableNotif === "false") warnings.push("Email skipped: ENABLE_NOTIFICATIONS is off");
+      }
+    } catch (emailErr) {
+      warnings.push("Email failed (non-fatal): " + String(emailErr));
+    }
+
+    api_bumpSummaryVersion_();
+    return jsonResponse_({
+      success: true,
+      repairId: repairId,
+      itemId: itemId,
+      emailSent: emailSent,
+      warnings: warnings.length > 0 ? warnings : undefined,
+      message: "Repair quote requested — status: Pending Quote"
+    });
+  } catch (err) {
+    return errorResponse_("Failed to create repair: " + String(err), "SERVER_ERROR");
+  }
+}
+
+// ─── Send Repair Quote Handler ────────────────────────────────────────────────
+
+function handleSendRepairQuote_(clientSheetId, payload) {
+  if (!clientSheetId) return errorResponse_("clientSheetId is required", "INVALID_PARAMS");
+  if (!payload || !payload.repairId) return errorResponse_("repairId is required in payload", "INVALID_PARAMS");
+  if (payload.quoteAmount === undefined || payload.quoteAmount === null) {
+    return errorResponse_("quoteAmount is required in payload", "INVALID_PARAMS");
+  }
+
+  var repairId    = String(payload.repairId || "").trim();
+  var quoteAmount = Number(payload.quoteAmount);
+  if (!repairId) return errorResponse_("repairId must not be empty", "INVALID_PARAMS");
+  if (isNaN(quoteAmount) || quoteAmount < 0) return errorResponse_("quoteAmount must be a non-negative number", "INVALID_PARAMS");
+
+  // Open spreadsheet
+  var ss;
+  try { ss = SpreadsheetApp.openById(clientSheetId); }
+  catch (e) { return errorResponse_("Cannot open client spreadsheet: " + e.message, "NOT_FOUND"); }
+
+  var repSheet = ss.getSheetByName("Repairs");
+  if (!repSheet) return errorResponse_("Repairs sheet not found in client spreadsheet", "SCHEMA_ERROR");
+
+  var repMap = api_getHeaderMap_(repSheet);
+  var idCol  = repMap["Repair ID"];
+  if (!idCol) return errorResponse_("Repair ID column not found in Repairs sheet", "SCHEMA_ERROR");
+
+  // Find repair row (outside lock — read-only pre-check)
+  var repRow = api_findRowById_(repSheet, idCol, repairId);
+  if (repRow < 2) return errorResponse_("Repair not found: " + repairId, "NOT_FOUND");
+
+  // Read row data
+  var rowData = repSheet.getRange(repRow, 1, 1, repSheet.getLastColumn()).getValues()[0];
+  function getVal(h) { return repMap[h] ? String(rowData[repMap[h] - 1] || "").trim() : ""; }
+
+  // Idempotency check (outside lock — optimistic)
+  var quoteSentAt  = getVal("Quote Sent At");
+  var existingAmt  = getVal("Quote Amount");
+  if (quoteSentAt && String(existingAmt) === String(quoteAmount)) {
+    return jsonResponse_({ success: true, skipped: true, repairId: repairId, message: "Repair quote already sent (idempotency guard)" });
+  }
+
+  // Read settings before lock
+  var settings   = api_readSettings_(ss);
+  var clientName = String(settings["CLIENT_NAME"]  || "").trim();
+  var clientEmail = String(settings["CLIENT_EMAIL"] || "").trim();
+  var notifOn    = toBool_(settings["ENABLE_NOTIFICATIONS"]);
+
+  // ─── ACQUIRE LOCK ───────────────────────────────────────────────────────────
+  var lock = LockService.getScriptLock();
+  try { lock.waitLock(15000); }
+  catch (lockErr) { return errorResponse_("Could not acquire lock — another operation in progress. Try again.", "LOCK_ERROR"); }
+
+  var warnings = [];
+
+  try {
+    // Re-check idempotency INSIDE lock (concurrent request guard)
+    var freshData = repSheet.getRange(repRow, 1, 1, repSheet.getLastColumn()).getValues()[0];
+    function getFresh(h) { return repMap[h] ? String(freshData[repMap[h] - 1] || "").trim() : ""; }
+    var freshQSA = getFresh("Quote Sent At");
+    if (freshQSA && String(getFresh("Quote Amount")) === String(quoteAmount)) {
+      lock.releaseLock();
+      return jsonResponse_({ success: true, skipped: true, repairId: repairId, message: "Repair quote already sent (concurrent request)" });
+    }
+
+    var now    = new Date();
+    var tz     = Session.getScriptTimeZone();
+    var nowFmt = Utilities.formatDate(now, tz, "MM/dd/yyyy HH:mm:ss");
+
+    // ─── WRITE: Quote Amount ──────────────────────────────────────────────────
+    if (repMap["Quote Amount"]) {
+      repSheet.getRange(repRow, repMap["Quote Amount"]).setValue(quoteAmount);
+    }
+
+    // ─── WRITE: Status → "Quote Sent" (only if was Pending Quote or empty) ────
+    var currentStatus = getFresh("Status");
+    if (currentStatus === "Pending Quote" || currentStatus === "") {
+      if (repMap["Status"]) repSheet.getRange(repRow, repMap["Status"]).setValue("Quote Sent");
+    }
+
+    // ─── WRITE: Quote Sent Date (if not already set) ─────────────────────────
+    if (repMap["Quote Sent Date"] && !getFresh("Quote Sent Date")) {
+      repSheet.getRange(repRow, repMap["Quote Sent Date"]).setValue(now);
+    }
+
+    // ─── STAMP idempotency marker (always last, ensures we don't double-send) ─
+    if (repMap["Quote Sent At"]) {
+      repSheet.getRange(repRow, repMap["Quote Sent At"]).setValue(nowFmt);
+    }
+
+  } catch (writeErr) {
+    try { lock.releaseLock(); } catch (_) {}
+    return jsonResponse_({ success: false, repairId: repairId, error: "Write failed: " + writeErr.message });
+  }
+
+  try { lock.releaseLock(); } catch (_) {}
+
+  // ─── EMAIL (non-critical — outside lock) ──────────────────────────────────
+  var emailSent = false;
+  if (notifOn && clientEmail) {
+    try {
+      var itemId      = getVal("Item ID");
+      var desc        = getVal("Description");
+      var vendor      = getVal("Repair Vendor") || getVal("Vendor");
+      var repairNotes = getVal("Repair Notes");
+      var taskNotes   = getVal("Task Notes");
+      var quoteAmtFmt = quoteAmount.toFixed(2);
+
+      // Build item table HTML for the email template
+      var itemClass   = getVal("Class");
+      var location    = getVal("Location");
+      var sidemark    = getVal("Sidemark");
+      var invItem     = api_findInventoryItem_(ss, itemId);
+      var qty         = invItem ? (invItem.qty || 1) : 1;
+      var room        = invItem ? (invItem.room || "") : "";
+      var itemTableHtml = api_buildSingleItemTableHtml_(itemId, desc, vendor, itemClass, location, sidemark, qty, room);
+
+      var emailResult = api_sendTemplateEmail_(settings, "REPAIR_QUOTE", clientEmail,
+        "Repair Quote Ready: " + itemId + " $" + quoteAmtFmt,
+        {
+          "{{ITEM_ID}}":          itemId       || "",
+          "{{CLIENT_NAME}}":      clientName   || "Client",
+          "{{DESCRIPTION}}":      desc         || "-",
+          "{{QUOTE_AMOUNT}}":     quoteAmtFmt,
+          "{{REPAIR_ID}}":        repairId,
+          "{{REPAIR_VENDOR}}":    vendor       || "-",
+          "{{NOTES}}":            repairNotes  || "-",
+          "{{TASK_NOTES}}":       taskNotes    || "-",
+          "{{ITEM_TABLE_HTML}}":  itemTableHtml,
+          "{{PHOTOS_URL}}":       "#",
+          "{{PHOTOS_BUTTON}}":    ""
+        }
+      );
+      if (emailResult.success) {
+        emailSent = true;
+      } else {
+        warnings.push("Email not sent: " + emailResult.error);
+      }
+    } catch (emailErr) {
+      warnings.push("Email error (non-fatal): " + emailErr.message);
+    }
+  } else if (!notifOn) {
+    warnings.push("Email skipped: ENABLE_NOTIFICATIONS is off for this client");
+  } else if (!clientEmail) {
+    warnings.push("Email skipped: no CLIENT_EMAIL configured");
+  }
+
+  return jsonResponse_({
+    success:     true,
+    repairId:    repairId,
+    quoteAmount: quoteAmount,
+    emailSent:   emailSent,
+    warnings:    warnings.length > 0 ? warnings : undefined
+  });
+}
+
+// ─── Respond To Repair Quote Handler (Approve / Decline) ──────────────────────
+
+function handleRespondToRepairQuote_(clientSheetId, payload) {
+  if (!clientSheetId) return errorResponse_("clientSheetId is required", "INVALID_PARAMS");
+  if (!payload || !payload.repairId) return errorResponse_("repairId is required in payload", "INVALID_PARAMS");
+  if (!payload.decision) return errorResponse_("decision is required in payload (Approve or Decline)", "INVALID_PARAMS");
+
+  var repairId = String(payload.repairId || "").trim();
+  var decision = String(payload.decision || "").trim(); // "Approve" or "Decline"
+  if (!repairId) return errorResponse_("repairId must not be empty", "INVALID_PARAMS");
+  if (decision !== "Approve" && decision !== "Decline") {
+    return errorResponse_("decision must be 'Approve' or 'Decline'", "INVALID_PARAMS");
+  }
+
+  // Open spreadsheet
+  var ss;
+  try { ss = SpreadsheetApp.openById(clientSheetId); }
+  catch (e) { return errorResponse_("Cannot open client spreadsheet: " + e.message, "NOT_FOUND"); }
+
+  var repSheet = ss.getSheetByName("Repairs");
+  if (!repSheet) return errorResponse_("Repairs sheet not found in client spreadsheet", "SCHEMA_ERROR");
+
+  var repMap = api_getHeaderMap_(repSheet);
+  var idCol  = repMap["Repair ID"];
+  if (!idCol) return errorResponse_("Repair ID column not found in Repairs sheet", "SCHEMA_ERROR");
+
+  // Find repair row (outside lock — read-only pre-check)
+  var repRow = api_findRowById_(repSheet, idCol, repairId);
+  if (repRow < 2) return errorResponse_("Repair not found: " + repairId, "NOT_FOUND");
+
+  // Read row data
+  var rowData = repSheet.getRange(repRow, 1, 1, repSheet.getLastColumn()).getValues()[0];
+  function getVal(h) { return repMap[h] ? String(rowData[repMap[h] - 1] || "").trim() : ""; }
+
+  var currentStatus = getVal("Status");
+
+  // Idempotency checks (outside lock — optimistic)
+  if (decision === "Approve") {
+    var approvalProcessedAt = getVal("Approval Processed At");
+    if (approvalProcessedAt) {
+      return jsonResponse_({ success: true, skipped: true, repairId: repairId, decision: decision, message: "Repair already approved (idempotency guard)" });
+    }
+  } else {
+    // Decline: idempotency = status already Declined
+    if (currentStatus === "Declined") {
+      return jsonResponse_({ success: true, skipped: true, repairId: repairId, decision: decision, message: "Repair already declined" });
+    }
+  }
+
+  // Read settings before lock
+  var settings        = api_readSettings_(ss);
+  var clientName      = String(settings["CLIENT_NAME"]         || "").trim();
+  var notifEmails     = String(settings["NOTIFICATION_EMAILS"] || "").trim();
+
+  // ─── ACQUIRE LOCK ───────────────────────────────────────────────────────────
+  var lock = LockService.getScriptLock();
+  try { lock.waitLock(15000); }
+  catch (lockErr) { return errorResponse_("Could not acquire lock — another operation in progress. Try again.", "LOCK_ERROR"); }
+
+  var warnings = [];
+
+  try {
+    // Re-check idempotency INSIDE lock
+    var freshData = repSheet.getRange(repRow, 1, 1, repSheet.getLastColumn()).getValues()[0];
+    function getFresh(h) { return repMap[h] ? String(freshData[repMap[h] - 1] || "").trim() : ""; }
+
+    if (decision === "Approve") {
+      if (getFresh("Approval Processed At")) {
+        lock.releaseLock();
+        return jsonResponse_({ success: true, skipped: true, repairId: repairId, decision: decision, message: "Repair already approved (concurrent request)" });
+      }
+    } else {
+      if (getFresh("Status") === "Declined") {
+        lock.releaseLock();
+        return jsonResponse_({ success: true, skipped: true, repairId: repairId, decision: decision, message: "Repair already declined (concurrent request)" });
+      }
+    }
+
+    var now    = new Date();
+    var tz     = Session.getScriptTimeZone();
+    var nowFmt = Utilities.formatDate(now, tz, "MM/dd/yyyy HH:mm:ss");
+
+    if (decision === "Approve") {
+      // ─── WRITE: Status = Approved ──────────────────────────────────────────
+      if (repMap["Status"]) repSheet.getRange(repRow, repMap["Status"]).setValue("Approved");
+
+      // ─── STAMP idempotency marker (always last for Approve) ────────────────
+      if (repMap["Approval Processed At"]) {
+        repSheet.getRange(repRow, repMap["Approval Processed At"]).setValue(nowFmt);
+      }
+
+      warnings.push("Drive folder and Work Order PDF not created — deferred to server-side trigger or manual Start");
+
+    } else {
+      // ─── WRITE: Status = Declined, Approved = "Declined" ──────────────────
+      if (repMap["Status"])   repSheet.getRange(repRow, repMap["Status"]).setValue("Declined");
+      if (repMap["Approved"]) repSheet.getRange(repRow, repMap["Approved"]).setValue("Declined");
+    }
+
+  } catch (writeErr) {
+    try { lock.releaseLock(); } catch (_) {}
+    return jsonResponse_({ success: false, repairId: repairId, decision: decision, error: "Write failed: " + writeErr.message });
+  }
+
+  try { lock.releaseLock(); } catch (_) {}
+
+  // ─── EMAIL (non-critical — outside lock) ──────────────────────────────────
+  var emailSent = false;
+  var templateKey = decision === "Approve" ? "REPAIR_APPROVED" : "REPAIR_DECLINED";
+  if (notifEmails) {
+    try {
+      var itemId   = getVal("Item ID");
+      var quoteAmt = getVal("Quote Amount");
+      var invItem  = api_findInventoryItem_(ss, itemId);
+      var itemLoc      = invItem ? invItem.location  : "";
+      var itemSidemark = invItem ? invItem.sidemark  : "";
+      var itemDesc     = invItem ? invItem.description : "";
+
+      var emailTokens = {
+          "{{ITEM_ID}}":          itemId       || "",
+          "{{CLIENT_NAME}}":      clientName   || "Client",
+          "{{REPAIR_ID}}":        repairId,
+          "{{QUOTE_AMOUNT}}":     quoteAmt     || "0",
+          "{{LOCATION}}":         itemLoc      || "",
+          "{{SIDEMARK}}":         itemSidemark || "",
+          "{{DESCRIPTION}}":      itemDesc     || "",
+          "{{ITEM_TABLE_HTML}}":  api_buildSingleItemTableHtml_(itemId, itemDesc, invItem ? invItem.vendor : "", invItem ? invItem.itemClass : "", itemLoc, itemSidemark, invItem ? invItem.qty : 1, invItem ? invItem.room : ""),
+          "{{LOGO_URL}}":         String(settings["LOGO_URL"] || "").trim() || "https://static.wixstatic.com/media/a38fbc_a8c7a368447f4723b782c4dbd765ca0e~mv2.png",
+          "{{REPAIR_VENDOR}}":    getVal("Repair Vendor") || "",
+          "{{NOTES}}":            getVal("Repair Notes") || ""
+      };
+
+      // Generate DOC_REPAIR_WORK_ORDER PDF for Approved (v24.0.0)
+      var pdfBlob = null;
+      if (decision === "Approve") {
+        try {
+          var repairFolderUrl = "";
+          var parentFolderId = String(settings["DRIVE_PARENT_FOLDER_ID"] || settings["PHOTOS_FOLDER_ID"] || "").trim();
+          if (parentFolderId) {
+            repairFolderUrl = api_createItemFolder_("https://drive.google.com/drive/folders/" + parentFolderId, "REPAIR-" + repairId);
+          }
+          var pdfResult = api_generateDocPdf_(ss, "DOC_REPAIR_WORK_ORDER", "Work_Order_" + repairId, repairFolderUrl, emailTokens);
+          if (pdfResult.blob) pdfBlob = pdfResult.blob;
+          if (pdfResult.warning) warnings.push(pdfResult.warning);
+        } catch (pdfErr) {
+          warnings.push("Repair Work Order PDF failed (non-fatal): " + pdfErr.message);
+        }
+      }
+
+      var emailResult = api_sendTemplateEmail_(settings, templateKey, notifEmails,
+        (decision === "Approve" ? "Repair Approved: " : "Repair Declined: ") + itemId + " - " + clientName,
+        emailTokens, pdfBlob
+      );
+      if (emailResult.success) {
+        emailSent = true;
+      } else {
+        warnings.push("Email not sent: " + emailResult.error);
+      }
+    } catch (emailErr) {
+      warnings.push("Email error (non-fatal): " + emailErr.message);
+    }
+  } else {
+    warnings.push("Email skipped: no NOTIFICATION_EMAILS configured");
+  }
+
+  api_bumpSummaryVersion_();
+  return jsonResponse_({
+    success:   true,
+    repairId:  repairId,
+    decision:  decision,
+    emailSent: emailSent,
+    warnings:  warnings.length > 0 ? warnings : undefined
+  });
+}
+
+// ─── Complete Repair Handler ───────────────────────────────────────────────────
+
+function handleCompleteRepair_(clientSheetId, payload) {
+  if (!clientSheetId) return errorResponse_("clientSheetId is required", "INVALID_PARAMS");
+  if (!payload || !payload.repairId) return errorResponse_("repairId is required in payload", "INVALID_PARAMS");
+  if (!payload.resultValue) return errorResponse_("resultValue is required in payload (Pass or Fail)", "INVALID_PARAMS");
+
+  var repairId     = String(payload.repairId    || "").trim();
+  var resultValue  = String(payload.resultValue || "").trim(); // "Pass" or "Fail"
+  var repairNotes  = payload.repairNotes !== undefined ? String(payload.repairNotes || "").trim() : null;
+  var payloadFinalAmt = (payload.finalAmount !== undefined && payload.finalAmount !== null) ? Number(payload.finalAmount) : null;
+
+  if (!repairId) return errorResponse_("repairId must not be empty", "INVALID_PARAMS");
+  if (resultValue !== "Pass" && resultValue !== "Fail") return errorResponse_("resultValue must be Pass or Fail", "INVALID_PARAMS");
+  if (payloadFinalAmt !== null && isNaN(payloadFinalAmt)) return errorResponse_("finalAmount must be a number", "INVALID_PARAMS");
+
+  // Open spreadsheet
+  var ss;
+  try { ss = SpreadsheetApp.openById(clientSheetId); }
+  catch (e) { return errorResponse_("Cannot open client spreadsheet: " + e.message, "NOT_FOUND"); }
+
+  var repSheet = ss.getSheetByName("Repairs");
+  if (!repSheet) return errorResponse_("Repairs sheet not found in client spreadsheet", "SCHEMA_ERROR");
+
+  var repMap = api_getHeaderMap_(repSheet);
+  var idCol  = repMap["Repair ID"];
+  if (!idCol) return errorResponse_("Repair ID column not found in Repairs sheet", "SCHEMA_ERROR");
+
+  // Find repair row (outside lock — read-only pre-check)
+  var repRow = api_findRowById_(repSheet, idCol, repairId);
+  if (repRow < 2) return errorResponse_("Repair not found: " + repairId, "NOT_FOUND");
+
+  // Read row data
+  var rowData = repSheet.getRange(repRow, 1, 1, repSheet.getLastColumn()).getValues()[0];
+  function getVal(h) { return repMap[h] ? String(rowData[repMap[h] - 1] || "").trim() : ""; }
+  function getRaw(h) { return repMap[h] ? rowData[repMap[h] - 1] : ""; }
+
+  // Idempotency check (outside lock — optimistic)
+  var completionProcessedAt = getVal("Completion Processed At");
+  if (completionProcessedAt) {
+    return jsonResponse_({ success: true, skipped: true, repairId: repairId, message: "Repair already completed (idempotency guard)" });
+  }
+
+  // Status pre-check
+  var currentStatus = getVal("Status");
+  if (currentStatus === "Complete" || currentStatus === "Cancelled") {
+    return jsonResponse_({ success: true, skipped: true, repairId: repairId, message: "Repair status is already " + currentStatus });
+  }
+
+  // Read settings before lock
+  var settings    = api_readSettings_(ss);
+  var clientName  = String(settings["CLIENT_NAME"]  || "").trim();
+  var clientEmail = String(settings["CLIENT_EMAIL"] || "").trim();
+  var notifOn     = toBool_(settings["ENABLE_NOTIFICATIONS"]);
+
+  // Compute billing amount: payload override > sheet Final Amount > Quote Amount
+  var sheetFinalAmt = getRaw("Final Amount");
+  var sheetQuoteAmt = getRaw("Quote Amount");
+  var itemId    = getVal("Item ID");
+  var desc      = getVal("Description");
+  var itemClass = getVal("Class");
+  var vendor    = getVal("Repair Vendor") || getVal("Vendor");
+  var notes     = (repairNotes !== null) ? repairNotes : getVal("Repair Notes");
+
+  var billingAmt;
+  if (payloadFinalAmt !== null && payloadFinalAmt > 0) {
+    billingAmt = payloadFinalAmt;
+  } else if (sheetFinalAmt !== "" && sheetFinalAmt !== null && Number(sheetFinalAmt) > 0) {
+    billingAmt = Number(sheetFinalAmt);
+  } else {
+    billingAmt = Number(sheetQuoteAmt || 0);
+  }
+
+  // ─── ACQUIRE LOCK ───────────────────────────────────────────────────────────
+  var lock = LockService.getScriptLock();
+  try { lock.waitLock(15000); }
+  catch (lockErr) { return errorResponse_("Could not acquire lock — another operation in progress. Try again.", "LOCK_ERROR"); }
+
+  var warnings      = [];
+  var billingCreated = false;
+
+  try {
+    // Re-check idempotency INSIDE lock (concurrent request guard)
+    var freshData = repSheet.getRange(repRow, 1, 1, repSheet.getLastColumn()).getValues()[0];
+    function getFresh(h) { return repMap[h] ? String(freshData[repMap[h] - 1] || "").trim() : ""; }
+    if (getFresh("Completion Processed At")) {
+      lock.releaseLock();
+      return jsonResponse_({ success: true, skipped: true, repairId: repairId, message: "Repair already completed (concurrent request)" });
+    }
+    var freshStatus = getFresh("Status");
+    if (freshStatus === "Complete" || freshStatus === "Cancelled") {
+      lock.releaseLock();
+      return jsonResponse_({ success: true, skipped: true, repairId: repairId, message: "Repair status is already " + freshStatus });
+    }
+
+    var now    = new Date();
+    var tz     = Session.getScriptTimeZone();
+    var nowFmt = Utilities.formatDate(now, tz, "MM/dd/yyyy HH:mm:ss");
+
+    // ─── WRITE: Status, Completed Date, Notes, Final Amount override ─────────
+    if (repMap["Status"])         repSheet.getRange(repRow, repMap["Status"]).setValue("Complete");
+    if (repMap["Completed Date"] && !getFresh("Completed Date")) {
+      repSheet.getRange(repRow, repMap["Completed Date"]).setValue(now);
+    }
+    if (repairNotes !== null && repairNotes !== "" && repMap["Repair Notes"]) {
+      repSheet.getRange(repRow, repMap["Repair Notes"]).setValue(repairNotes);
+    }
+    if (payloadFinalAmt !== null && repMap["Final Amount"]) {
+      repSheet.getRange(repRow, repMap["Final Amount"]).setValue(payloadFinalAmt);
+    }
+
+    // ─── BILLING (non-critical) ───────────────────────────────────────────────
+    try {
+      var billSheet = ss.getSheetByName("Billing_Ledger");
+      if (!billSheet) {
+        warnings.push("Billing_Ledger sheet not found — billing skipped");
+      } else {
+        var missingRate = (billingAmt <= 0);
+        var billMap = api_getHeaderMap_(billSheet);
+        var billRow = api_buildRow_(billMap, {
+          "Status":       "Unbilled",
+          "Invoice #":    "",
+          "Client":       clientName,
+          "Date":         now,
+          "Svc Code":     "REPAIR",
+          "Svc Name":     "Repair",
+          "Category":     "Services",
+          "Item ID":      itemId,
+          "Description":  desc,
+          "Class":        itemClass,
+          "Qty":          1,
+          "Rate":         missingRate ? 0 : billingAmt,
+          "Total":        missingRate ? "Missing Rate" : billingAmt,
+          "Task ID":      "",
+          "Repair ID":    repairId,
+          "Shipment #":   "",
+          "Item Notes":   (missingRate ? "MISSING RATE - " : "") + "Result: " + resultValue + (notes ? " | " + notes : ""),
+          "Ledger Row ID": "REPAIR-" + repairId
+        });
+        var billInsertRow = api_getLastDataRow_(billSheet) + 1;
+        billSheet.getRange(billInsertRow, 1, 1, billRow.length).setValues([billRow]);
+        billingCreated = true;
+
+        if (!missingRate) {
+          if (repMap["Billed"]) repSheet.getRange(repRow, repMap["Billed"]).setValue(true);
+        } else {
+          warnings.push("Billing amount is 0 — billing row created with Missing Rate flag (update Final Amount manually)");
+          if (repMap["Billing Exception"]) {
+            repSheet.getRange(repRow, repMap["Billing Exception"]).setValue("Missing Rate — amount needs update");
+          }
+        }
+      }
+    } catch (billErr) {
+      warnings.push("Billing write failed (non-fatal): " + billErr.message);
+    }
+
+    // ─── STAMP idempotency marker (always last) ────────────────────────────
+    if (repMap["Completion Processed At"]) {
+      repSheet.getRange(repRow, repMap["Completion Processed At"]).setValue(nowFmt);
+    }
+
+  } catch (writeErr) {
+    try { lock.releaseLock(); } catch (_) {}
+    return jsonResponse_({ success: false, repairId: repairId, error: "Write failed: " + writeErr.message });
+  }
+
+  try { lock.releaseLock(); } catch (_) {}
+
+  // ─── EMAIL (non-critical — outside lock) ──────────────────────────────────
+  var emailSent = false;
+  if (notifOn && clientEmail) {
+    try {
+      var completedDate = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "MM/dd/yyyy");
+      var billingAmtFmt = billingAmt > 0 ? billingAmt.toFixed(2) : "0.00";
+      var quoteAmtFmt   = (sheetQuoteAmt !== "" && sheetQuoteAmt !== null) ? Number(sheetQuoteAmt || 0).toFixed(2) : "0.00";
+
+      var invItem2 = api_findInventoryItem_(ss, itemId);
+      var location2  = invItem2 ? invItem2.location  : getVal("Location");
+      var sidemark2  = invItem2 ? invItem2.sidemark  : getVal("Sidemark");
+      var qty2       = invItem2 ? (invItem2.qty || 1) : 1;
+      var room2      = invItem2 ? (invItem2.room || "") : "";
+      var repairItemTable = api_buildSingleItemTableHtml_(itemId, desc, vendor, itemClass, location2, sidemark2, qty2, room2);
+
+      // Try to get repair folder URL from Repair ID hyperlink
+      var repairPhotosUrl = "#";
+      try {
+        var repRt = repSheet.getRange(repRow, idCol).getRichTextValue();
+        if (repRt && repRt.getLinkUrl()) repairPhotosUrl = repRt.getLinkUrl();
+      } catch (_) {}
+
+      var emailResult = api_sendTemplateEmail_(settings, "REPAIR_COMPLETE", clientEmail,
+        "Repair Complete: " + itemId + " " + resultValue,
+        {
+          "{{ITEM_ID}}":           itemId        || "",
+          "{{CLIENT_NAME}}":       clientName    || "Client",
+          "{{DESCRIPTION}}":       desc          || "-",
+          "{{REPAIR_RESULT}}":     resultValue,
+          "{{REPAIR_RESULT_COLOR}}": resultValue === "Pass" ? "#16A34A" : "#DC2626",
+          "{{COMPLETED_DATE}}":    completedDate,
+          "{{QUOTE_AMOUNT}}":      quoteAmtFmt,
+          "{{FINAL_AMOUNT}}":      billingAmtFmt,
+          "{{REPAIR_VENDOR}}":     vendor        || "-",
+          "{{PARTS_COST}}":        "-",
+          "{{LABOR_HOURS}}":       "-",
+          "{{REPAIR_PHOTOS_URL}}": repairPhotosUrl,
+          "{{REPAIR_ID}}":         repairId,
+          "{{NOTES}}":             notes         || "-",
+          "{{ITEM_TABLE_HTML}}":   repairItemTable
+        }
+      );
+      if (emailResult.success) {
+        emailSent = true;
+        if (repMap["Email Sent At"]) {
+          repSheet.getRange(repRow, repMap["Email Sent At"]).setValue(
+            Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "MM/dd/yyyy HH:mm:ss")
+          );
+        }
+      } else {
+        warnings.push("Email not sent: " + emailResult.error);
+      }
+    } catch (emailErr) {
+      warnings.push("Email error (non-fatal): " + emailErr.message);
+    }
+  } else if (!notifOn) {
+    warnings.push("Email skipped: ENABLE_NOTIFICATIONS is off for this client");
+  } else if (!clientEmail) {
+    warnings.push("Email skipped: no CLIENT_EMAIL configured");
+  }
+
+  api_bumpSummaryVersion_();
+  return jsonResponse_({
+    success:        true,
+    repairId:       repairId,
+    resultValue:    resultValue,
+    billingCreated: billingCreated,
+    billingAmount:  billingAmt,
+    emailSent:      emailSent,
+    warnings:       warnings.length > 0 ? warnings : undefined
+  });
+}
+
+// ─── v26.3.0: Start Repair ──────────────────────────────────────────────────
+
+/**
+ * handleStartRepair_ — sets Start Date and Status = "In Progress" on a repair.
+ * Payload: { repairId: string }
+ */
+function handleStartRepair_(clientSheetId, payload) {
+  var repairId = String(payload.repairId || "").trim();
+  if (!repairId) return errorResponse_("repairId is required", "INVALID_PARAMS");
+
+  var ss = SpreadsheetApp.openById(clientSheetId);
+  var repSheet = ss.getSheetByName("Repairs");
+  if (!repSheet) return errorResponse_("Repairs sheet not found", "NOT_FOUND");
+
+  var repMap = api_getHeaderMap_(repSheet);
+  var cRepId  = repMap["Repair ID"];
+  var cStatus = repMap["Status"];
+  var cStart  = repMap["Start Date"];
+  if (!cRepId) return errorResponse_("Repairs sheet missing Repair ID column", "CONFIG_ERROR");
+
+  var lastRow = api_getLastDataRow_(repSheet);
+  if (lastRow < 2) return errorResponse_("Repair not found: " + repairId, "NOT_FOUND");
+
+  var data = repSheet.getRange(2, 1, lastRow - 1, repSheet.getLastColumn()).getValues();
+  var repRow = -1;
+  for (var i = 0; i < data.length; i++) {
+    if (String(data[i][cRepId - 1] || "").trim() === repairId) {
+      repRow = i + 2;
+      break;
+    }
+  }
+  if (repRow < 0) return errorResponse_("Repair not found: " + repairId, "NOT_FOUND");
+
+  var currentStatus = cStatus ? String(data[repRow - 2][cStatus - 1] || "").trim() : "";
+  if (currentStatus === "In Progress") {
+    return jsonResponse_({ success: true, repairId: repairId, skipped: true,
+      startDate: cStart ? String(data[repRow - 2][cStart - 1] || "") : "",
+      message: "Repair already in progress" });
+  }
+  if (currentStatus !== "Approved") {
+    return errorResponse_("Repair must be in Approved status to start (current: " + currentStatus + ")", "INVALID_STATUS");
+  }
+
+  var now = new Date();
+  if (cStatus) repSheet.getRange(repRow, cStatus).setValue("In Progress");
+  if (cStart)  repSheet.getRange(repRow, cStart).setValue(now);
+
+  // v26.3.0: Create repair folder in Repairs/ subfolder (flat structure)
+  var repairFolderUrl = "";
+  var warnings = [];
+  try {
+    var repSub = api_getOrCreateEntitySubfolder_(ss, "Repairs");
+    if (repSub.folder) {
+      var rIt = repSub.folder.getFoldersByName(repairId);
+      var rFolder = rIt.hasNext() ? rIt.next() : repSub.folder.createFolder(repairId);
+      repairFolderUrl = "https://drive.google.com/drive/folders/" + rFolder.getId();
+      // Hyperlink Repair ID cell
+      if (cRepId) {
+        var repRt = SpreadsheetApp.newRichTextValue().setText(repairId).setLinkUrl(repairFolderUrl).build();
+        repSheet.getRange(repRow, cRepId).setRichTextValue(repRt);
+      }
+    } else {
+      warnings.push("No DRIVE_PARENT_FOLDER_ID — repair folder not created");
+    }
+  } catch (folderErr) {
+    Logger.log("handleStartRepair_ folder error: " + folderErr);
+    warnings.push("Folder creation failed: " + folderErr);
+  }
+
+  var startDateStr = Utilities.formatDate(now, Session.getScriptTimeZone(), "yyyy-MM-dd");
+  api_bumpSummaryVersion_();
+  return jsonResponse_({
+    success: true, repairId: repairId, startDate: startDateStr,
+    folderUrl: repairFolderUrl || undefined,
+    warnings: warnings.length > 0 ? warnings : undefined
+  });
+}
+
+// ─── Phase 7B #6: Create Will Call ──────────────────────────────────────────
+
+/**
+ * handleCreateWillCall_ — mirrors StrideCreateWillCallCallback
+ *
+ * Payload: {
+ *   items:       string[]  — itemIds (required, non-empty)
+ *   pickupParty: string    — required
+ *   pickupPhone?: string
+ *   requestedBy?: string
+ *   estDate?:    string    — ISO date
+ *   notes?:      string
+ *   cod:         boolean
+ *   codAmount?:  number    — if blank + isCod → falls back to totalFee
+ *   createdBy?:  string
+ * }
+ *
+ * Returns: { success, wcNumber, itemCount, totalFee, emailSent, warnings[] }
+ */
+function handleCreateWillCall_(clientSheetId, payload) {
+  // ─── 1. Validate params ────────────────────────────────────────────────────
+  if (!clientSheetId) {
+    return jsonResponse_({ success: false, error: "clientSheetId is required" });
+  }
+  var itemIds = payload.items;
+  if (!itemIds || !Array.isArray(itemIds) || itemIds.length === 0) {
+    return jsonResponse_({ success: false, error: "items array is required and must be non-empty" });
+  }
+  var pickupParty = String(payload.pickupParty || "").trim();
+  if (!pickupParty) {
+    return jsonResponse_({ success: false, error: "pickupParty is required" });
+  }
+
+  var warnings = [];
+
+  // ─── 2. Open spreadsheet + read settings ──────────────────────────────────
+  var ss;
+  try {
+    ss = SpreadsheetApp.openById(clientSheetId);
+  } catch (openErr) {
+    return jsonResponse_({ success: false, error: "Cannot open client spreadsheet: " + openErr.message });
+  }
+
+  var settings = api_readSettings_(ss);
+  var clientName   = String(settings["CLIENT_NAME"]        || "Client").trim();
+  var clientEmail  = String(settings["CLIENT_EMAIL"]        || "").trim();
+  var notifEmails  = String(settings["NOTIFICATION_EMAILS"] || "").trim();
+  var notifOn      = (String(settings["ENABLE_NOTIFICATIONS"] || "true").trim().toLowerCase() !== "false");
+
+  // ─── 3. Look up each item + compute WC fees ────────────────────────────────
+  var enrichedItems = [];
+  var totalFee = 0;
+
+  for (var ii = 0; ii < itemIds.length; ii++) {
+    var itemId = String(itemIds[ii] || "").trim();
+    if (!itemId) continue;
+
+    var invItem = api_findInventoryItem_(ss, itemId);
+    if (!invItem) {
+      return jsonResponse_({ success: false, error: "Item not found in Inventory: " + itemId });
+    }
+    if (invItem.status === "Released") {
+      return jsonResponse_({ success: false, error: "Item " + itemId + " is already Released" });
+    }
+
+    var rateData = api_lookupRate_(ss, "WC", invItem.itemClass);
+    var wcFee = 0;
+    if (rateData && rateData.rate > 0) {
+      wcFee = api_applyDiscount_(settings, rateData.rate, rateData.category || "Whse Services");
+    } else {
+      warnings.push("WC rate not found for class " + (invItem.itemClass || "(unknown)") + " — item " + itemId + " fee set to 0");
+    }
+    totalFee += wcFee;
+
+    enrichedItems.push({
+      itemId:      itemId,
+      qty:         invItem.qty         || 1,
+      vendor:      invItem.vendor      || "",
+      description: invItem.description || "",
+      itemClass:   invItem.itemClass   || "",
+      location:    invItem.location    || "",
+      sidemark:    invItem.sidemark    || "",
+      room:        invItem.room        || "",
+      wcFee:       wcFee
+    });
+  }
+
+  if (!enrichedItems.length) {
+    return jsonResponse_({ success: false, error: "No valid items to create will call" });
+  }
+
+  // ─── 4. WC number + status ─────────────────────────────────────────────────
+  var now = new Date();
+  var tz  = Session.getScriptTimeZone();
+  var wcNumber = "WC-" + Utilities.formatDate(now, tz, "MMddyyHHmmss");
+  var status   = payload.estDate ? "Scheduled" : "Pending";
+
+  // ─── 5. COD handling ───────────────────────────────────────────────────────
+  var isCod    = (payload.cod === true || payload.cod === "true");
+  var codAmtRaw = payload.codAmount;
+  var codAmount = isCod
+    ? (codAmtRaw !== null && codAmtRaw !== undefined && codAmtRaw !== ""
+        ? Number(codAmtRaw) : totalFee)
+    : 0;
+  // Total WC Fee: if COD with custom amount, use COD amount; else use totalFee
+  var totalWcFee = (isCod && codAmount !== totalFee) ? codAmount : totalFee;
+
+  // ─── 6. LOCK + write ───────────────────────────────────────────────────────
+  var lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(20000);
+  } catch (lockErr) {
+    return jsonResponse_({ success: false, error: "Server busy — please retry" });
+  }
+
+  try {
+    // Check: none of these items already on active WC (inside lock)
+    var wcSh   = ss.getSheetByName("Will_Calls");
+    var wciSh  = ss.getSheetByName("WC_Items");
+
+    if (wcSh && wciSh && wcSh.getLastRow() >= 2 && wciSh.getLastRow() >= 2) {
+      var wcData   = wcSh.getDataRange().getValues();
+      var wcHdrMap = api_getHeaderMap_(wcSh);
+      var activeWcNums = {};
+      for (var w = 1; w < wcData.length; w++) {
+        var wSt = String(wcData[w][(wcHdrMap["Status"] || 1) - 1] || "").trim();
+        var wNum = String(wcData[w][(wcHdrMap["WC Number"] || 1) - 1] || "").trim();
+        if (wSt === "Pending" || wSt === "Scheduled" || wSt === "Partial") {
+          activeWcNums[wNum] = true;
+        }
+      }
+      var wciData   = wciSh.getDataRange().getValues();
+      var wciHdrMap = api_getHeaderMap_(wciSh);
+      for (var wi = 1; wi < wciData.length; wi++) {
+        var wiWcNum  = String(wciData[wi][(wciHdrMap["WC Number"] || 1) - 1] || "").trim();
+        var wiItemId = String(wciData[wi][(wciHdrMap["Item ID"]   || 2) - 1] || "").trim();
+        if (activeWcNums[wiWcNum]) {
+          for (var si = 0; si < enrichedItems.length; si++) {
+            if (enrichedItems[si].itemId === wiItemId) {
+              try { lock.releaseLock(); } catch (_) {}
+              return jsonResponse_({
+                success: false,
+                error: "Item " + wiItemId + " is already on active will call " + wiWcNum
+              });
+            }
+          }
+        }
+      }
+    }
+
+    // Write Will_Calls row
+    if (!wcSh) {
+      try { lock.releaseLock(); } catch (_) {}
+      return jsonResponse_({ success: false, error: "Will_Calls sheet not found" });
+    }
+    var wcMap2 = api_getHeaderMap_(wcSh);
+    var wcRowObj = {
+      "WC Number":            wcNumber,
+      "Status":               status,
+      "Created Date":         now,
+      "Created By":           String(payload.createdBy || "").trim(),
+      "Pickup Party":         pickupParty,
+      "Pickup Phone":         String(payload.pickupPhone  || "").trim(),
+      "Requested By":         String(payload.requestedBy  || "").trim(),
+      "Estimated Pickup Date": String(payload.estDate     || "").trim(),
+      "Actual Pickup Date":   "",
+      "Notes":                String(payload.notes        || "").trim(),
+      "COD":                  isCod,
+      "COD Amount":           isCod ? codAmount : "",
+      "Items Count":          enrichedItems.length,
+      "Total WC Fee":         totalWcFee
+    };
+    var wcInsertRow = api_getLastDataRow_(wcSh) + 1;
+    wcSh.getRange(wcInsertRow, 1, 1, api_buildRow_(wcMap2, wcRowObj).length)
+        .setValues([api_buildRow_(wcMap2, wcRowObj)]);
+
+    // Write WC_Items rows
+    if (!wciSh) {
+      try { lock.releaseLock(); } catch (_) {}
+      return jsonResponse_({ success: false, error: "WC_Items sheet not found" });
+    }
+    var wciMap2 = api_getHeaderMap_(wciSh);
+    for (var bi = 0; bi < enrichedItems.length; bi++) {
+      var bItem = enrichedItems[bi];
+      var wciRowObj = {
+        "WC Number":   wcNumber,
+        "Item ID":     bItem.itemId,
+        "Qty":         bItem.qty,
+        "Vendor":      bItem.vendor,
+        "Description": bItem.description,
+        "Class":       bItem.itemClass,
+        "Location":    bItem.location,
+        "Sidemark":    bItem.sidemark,
+        "Room":        bItem.room,
+        "WC Fee":      bItem.wcFee,
+        "Status":      "Pending"
+      };
+      var wciInsertRow = api_getLastDataRow_(wciSh) + 1;
+      wciSh.getRange(wciInsertRow, 1, 1, api_buildRow_(wciMap2, wciRowObj).length)
+           .setValues([api_buildRow_(wciMap2, wciRowObj)]);
+    }
+
+  } catch (writeErr) {
+    try { lock.releaseLock(); } catch (_) {}
+    return jsonResponse_({ success: false, error: "Write failed: " + writeErr.message });
+  }
+
+  try { lock.releaseLock(); } catch (_) {}
+
+  // ─── 7. Email WILL_CALL_CREATED (non-critical — outside lock) ─────────────
+  var emailSent = false;
+  if (notifOn) {
+    // Merge notif + client emails
+    var allRecip = (notifEmails && clientEmail)
+      ? notifEmails + "," + clientEmail
+      : (notifEmails || clientEmail);
+    if (allRecip) {
+      try {
+        var itemsTableRows = enrichedItems.map(function(it) {
+          return { itemId: it.itemId, description: it.description, itemClass: it.itemClass };
+        });
+        // Build simple HTML table for items
+        var itemTableHtml = '<table style="border-collapse:collapse;width:100%"><tr>' +
+          '<th style="border:1px solid #ddd;padding:4px 8px;">Item ID</th>' +
+          '<th style="border:1px solid #ddd;padding:4px 8px;">Description</th>' +
+          '<th style="border:1px solid #ddd;padding:4px 8px;">Class</th></tr>';
+        for (var et = 0; et < itemsTableRows.length; et++) {
+          var row = itemsTableRows[et];
+          itemTableHtml += '<tr>' +
+            '<td style="border:1px solid #ddd;padding:4px 8px;">' + (row.itemId      || "") + '</td>' +
+            '<td style="border:1px solid #ddd;padding:4px 8px;">' + (row.description || "") + '</td>' +
+            '<td style="border:1px solid #ddd;padding:4px 8px;">' + (row.itemClass   || "") + '</td></tr>';
+        }
+        itemTableHtml += '</table>';
+
+        var wcEmailTokens = {
+            "{{WC_NUMBER}}":       wcNumber,
+            "{{CLIENT_NAME}}":     clientName,
+            "{{PICKUP_PARTY}}":    pickupParty,
+            "{{PICKUP_PHONE}}":    String(payload.pickupPhone  || ""),
+            "{{REQUESTED_BY}}":    String(payload.requestedBy  || ""),
+            "{{EST_PICKUP_DATE}}": String(payload.estDate      || "Not scheduled"),
+            "{{NOTES}}":           String(payload.notes        || ""),
+            "{{ITEMS_TABLE}}":     itemTableHtml,
+            "{{ITEMS_COUNT}}":     String(enrichedItems.length),
+            "{{TOTAL_WC_FEE}}":    "$" + totalWcFee.toFixed(2),
+            "{{STATUS}}":          status,
+            "{{COD}}":             isCod ? ("Yes — $" + codAmount.toFixed(2)) : "No",
+            "{{CREATED_DATE}}":    Utilities.formatDate(now, tz, "MM/dd/yyyy"),
+            "{{CREATED_BY}}":      String(payload.createdBy || ""),
+            "{{PHOTOS_URL}}":      "",
+            "{{LOGO_URL}}":        String(settings["LOGO_URL"] || "").trim()
+        };
+
+        // Create WC Drive folder + hyperlink (PDF deferred to release time v29.5.0)
+        try {
+          // v26.3.0: Flat folder structure — WC folders in Will Calls/ subfolder
+          var wcFolderUrl = "";
+          var wcSub = api_getOrCreateEntitySubfolder_(ss, "Will Calls");
+          if (wcSub.folder) {
+            var wcIt = wcSub.folder.getFoldersByName(wcNumber);
+            var wcFolder = wcIt.hasNext() ? wcIt.next() : wcSub.folder.createFolder(wcNumber);
+            wcFolderUrl = "https://drive.google.com/drive/folders/" + wcFolder.getId();
+            // Hyperlink WC Number cell → folder
+            if (wcFolderUrl) {
+              try {
+                var wcSheet = ss.getSheetByName("Will_Calls");
+                var wcMap2 = api_getHeaderMap_(wcSheet);
+                var wcNumCol = wcMap2["WC Number"];
+                if (wcNumCol) {
+                  var wcLastRow = api_getLastDataRow_(wcSheet);
+                  for (var wri = wcLastRow; wri >= 2; wri--) {
+                    if (String(wcSheet.getRange(wri, wcNumCol).getValue() || "").trim() === wcNumber) {
+                      wcSheet.getRange(wri, wcNumCol).setRichTextValue(
+                        SpreadsheetApp.newRichTextValue().setText(wcNumber).setLinkUrl(wcFolderUrl).build()
+                      );
+                      break;
+                    }
+                  }
+                }
+              } catch (_) {}
+              wcEmailTokens["{{PHOTOS_URL}}"] = wcFolderUrl;
+            }
+          }
+          // PDF generation deferred to release time (v29.5.0) — items may change before release
+        } catch (wcFolderErr) {
+          warnings.push("Will Call folder creation failed (non-fatal): " + wcFolderErr.message);
+        }
+
+        var emailResult = api_sendTemplateEmail_(settings, "WILL_CALL_CREATED", allRecip,
+          "Will Call Created: " + wcNumber,
+          wcEmailTokens, null
+        );
+        if (emailResult.success) {
+          emailSent = true;
+        } else {
+          warnings.push("Email not sent: " + emailResult.error);
+        }
+      } catch (emailErr) {
+        warnings.push("Email error (non-fatal): " + emailErr.message);
+      }
+    } else {
+      warnings.push("Email skipped: no CLIENT_EMAIL or NOTIFICATION_EMAILS configured");
+    }
+  } else {
+    warnings.push("Email skipped: ENABLE_NOTIFICATIONS is off for this client");
+  }
+
+  api_bumpSummaryVersion_();
+  return jsonResponse_({
+    success:   true,
+    wcNumber:  wcNumber,
+    itemCount: enrichedItems.length,
+    totalFee:  totalWcFee,
+    emailSent: emailSent,
+    warnings:  warnings.length > 0 ? warnings : undefined
+  });
+}
+
+// ─── Phase 7B #7: Process WC Release ────────────────────────────────────────
+
+/**
+ * handleProcessWcRelease_ — mirrors StrideProcessReleaseCallback
+ *
+ * Payload: {
+ *   wcNumber:      string    — required
+ *   releaseItemIds: string[] — itemIds to release (subset = partial; all = full)
+ * }
+ *
+ * Returns: {
+ *   success, releasedCount, isPartial, newWcNumber?, emailSent, warnings[]
+ * }
+ */
+function handleProcessWcRelease_(clientSheetId, payload) {
+  // ─── 1. Validate params ────────────────────────────────────────────────────
+  if (!clientSheetId) {
+    return jsonResponse_({ success: false, error: "clientSheetId is required" });
+  }
+  var wcNumber = String(payload.wcNumber || "").trim();
+  if (!wcNumber) {
+    return jsonResponse_({ success: false, error: "wcNumber is required" });
+  }
+  var releaseItemIds = payload.releaseItemIds;
+  if (!releaseItemIds || !Array.isArray(releaseItemIds) || releaseItemIds.length === 0) {
+    return jsonResponse_({ success: false, error: "releaseItemIds array is required and must be non-empty" });
+  }
+  var releaseSet = {};
+  for (var ri = 0; ri < releaseItemIds.length; ri++) {
+    releaseSet[String(releaseItemIds[ri]).trim()] = true;
+  }
+
+  var warnings = [];
+
+  // ─── 2. Open spreadsheet + read settings ──────────────────────────────────
+  var ss;
+  try {
+    ss = SpreadsheetApp.openById(clientSheetId);
+  } catch (openErr) {
+    return jsonResponse_({ success: false, error: "Cannot open client spreadsheet: " + openErr.message });
+  }
+
+  var settings  = api_readSettings_(ss);
+  var clientName  = String(settings["CLIENT_NAME"]        || "Client").trim();
+  var clientEmail = String(settings["CLIENT_EMAIL"]        || "").trim();
+  var notifEmails = String(settings["NOTIFICATION_EMAILS"] || "").trim();
+  var notifOn     = (String(settings["ENABLE_NOTIFICATIONS"] || "true").trim().toLowerCase() !== "false");
+
+  // ─── 3. Locate WC row ─────────────────────────────────────────────────────
+  var wcSh = ss.getSheetByName("Will_Calls");
+  if (!wcSh || wcSh.getLastRow() < 2) {
+    return jsonResponse_({ success: false, error: "Will_Calls sheet not found or empty" });
+  }
+  var wcMap  = api_getHeaderMap_(wcSh);
+  var wcData = wcSh.getDataRange().getValues();
+
+  var wcNumCol = wcMap["WC Number"];
+  if (!wcNumCol) {
+    return jsonResponse_({ success: false, error: "WC Number column not found in Will_Calls" });
+  }
+
+  var wcRow = -1;
+  for (var wr = 1; wr < wcData.length; wr++) {
+    if (String(wcData[wr][wcNumCol - 1] || "").trim() === wcNumber) {
+      wcRow = wr + 1;  // 1-based sheet row
+      break;
+    }
+  }
+  if (wcRow < 2) {
+    return jsonResponse_({ success: false, error: "Will call not found: " + wcNumber });
+  }
+
+  var wcRowData = wcData[wcRow - 1];
+  var currentStatus = wcMap["Status"] ? String(wcRowData[wcMap["Status"] - 1] || "").trim() : "";
+  if (currentStatus === "Released") {
+    return jsonResponse_({ success: false, error: "This will call is already fully released", skipped: true });
+  }
+  if (currentStatus === "Cancelled") {
+    return jsonResponse_({ success: false, error: "This will call has been cancelled" });
+  }
+
+  var isCod = (function() {
+    var v = wcMap["COD"] ? wcRowData[wcMap["COD"] - 1] : false;
+    return v === true || String(v).toLowerCase() === "true" || String(v) === "1";
+  })();
+
+  // ─── 4. Load WC_Items (unreleased only) ───────────────────────────────────
+  var wciSh = ss.getSheetByName("WC_Items");
+  if (!wciSh || wciSh.getLastRow() < 2) {
+    return jsonResponse_({ success: false, error: "WC_Items sheet not found or empty" });
+  }
+  var wciMap  = api_getHeaderMap_(wciSh);
+  var wciData = wciSh.getDataRange().getValues();
+
+  var allUnreleasedItems = [];
+  for (var wi = 1; wi < wciData.length; wi++) {
+    var wiWcNum  = String(wciData[wi][(wciMap["WC Number"] || 1) - 1] || "").trim();
+    var wiStatus = wciMap["Status"] ? String(wciData[wi][wciMap["Status"] - 1] || "").trim() : "";
+    if (wiWcNum !== wcNumber) continue;
+    if (wiStatus === "Released") continue;
+    allUnreleasedItems.push({
+      row:         wi + 1,  // 1-based sheet row
+      itemId:      String(wciData[wi][(wciMap["Item ID"]     || 2) - 1] || "").trim(),
+      wcFee:       Number(wciData[wi][(wciMap["WC Fee"]       || 0) - 1] || 0),
+      itemClass:   String(wciData[wi][(wciMap["Class"]        || 0) - 1] || "").trim(),
+      description: String(wciData[wi][(wciMap["Description"]  || 0) - 1] || "").trim(),
+      location:    String(wciData[wi][(wciMap["Location"]     || 0) - 1] || "").trim(),
+      vendor:      String(wciData[wi][(wciMap["Vendor"]       || 0) - 1] || "").trim()
+    });
+  }
+
+  if (!allUnreleasedItems.length) {
+    return jsonResponse_({ success: false, error: "No unreleased items found for " + wcNumber, skipped: true });
+  }
+
+  // ─── 5. Split releasing vs unchecked ──────────────────────────────────────
+  var releasingItems = [];
+  var uncheckedItems = [];
+  for (var si = 0; si < allUnreleasedItems.length; si++) {
+    if (releaseSet[allUnreleasedItems[si].itemId]) {
+      releasingItems.push(allUnreleasedItems[si]);
+    } else {
+      uncheckedItems.push(allUnreleasedItems[si]);
+    }
+  }
+
+  if (!releasingItems.length) {
+    return jsonResponse_({ success: false, error: "None of the specified releaseItemIds match unreleased items on this will call" });
+  }
+
+  var isPartial    = uncheckedItems.length > 0;
+  var now          = new Date();
+  var tz           = Session.getScriptTimeZone();
+  var newWcNumber  = "";
+
+  // ─── 6. LOCK + write ───────────────────────────────────────────────────────
+  var lock = LockService.getScriptLock();
+  try { lock.waitLock(20000); } catch (lockErr) {
+    return jsonResponse_({ success: false, error: "Server busy — please retry" });
+  }
+
+  try {
+    // Idempotency: re-check WC_Items status inside lock (skip already released)
+    var wciDataFresh = wciSh.getDataRange().getValues();
+    var stillReleasing = [];
+    for (var ir = 0; ir < releasingItems.length; ir++) {
+      var freshRow  = releasingItems[ir].row;
+      var freshStat = wciMap["Status"] ? String(wciDataFresh[freshRow - 1][wciMap["Status"] - 1] || "").trim() : "";
+      if (freshStat !== "Released") {
+        stillReleasing.push(releasingItems[ir]);
+      } else {
+        warnings.push("Item " + releasingItems[ir].itemId + " already released (skipped)");
+      }
+    }
+    releasingItems = stillReleasing;
+
+    if (!releasingItems.length) {
+      try { lock.releaseLock(); } catch (_) {}
+      return jsonResponse_({ success: true, releasedCount: 0, isPartial: isPartial, skipped: true, warnings: warnings });
+    }
+
+    // 6a. Set Inventory Status=Released + Release Date for each releasing item
+    var invSheet = ss.getSheetByName("Inventory");
+    if (invSheet && invSheet.getLastRow() >= 2) {
+      var invMap  = api_getHeaderMap_(invSheet);
+      var invData = invSheet.getRange(2, 1, invSheet.getLastRow() - 1, invSheet.getLastColumn()).getValues();
+      var invItemIdCol  = invMap["Item ID"];
+      var invStatusCol  = invMap["Status"];
+      var invRelDateCol = invMap["Release Date"];
+
+      for (var rr = 0; rr < releasingItems.length; rr++) {
+        var targetId = releasingItems[rr].itemId;
+        for (var ii2 = 0; ii2 < invData.length; ii2++) {
+          if (invItemIdCol && String(invData[ii2][invItemIdCol - 1] || "").trim() === targetId) {
+            if (invRelDateCol) invSheet.getRange(ii2 + 2, invRelDateCol).setValue(now);
+            if (invStatusCol)  invSheet.getRange(ii2 + 2, invStatusCol).setValue("Released");
+            break;
+          }
+        }
+      }
+    } else {
+      warnings.push("Inventory sheet not found — items not marked Released in Inventory");
+    }
+
+    // 6b. Billing (if not COD)
+    if (!isCod) {
+      var billingSheet = ss.getSheetByName("Billing_Ledger");
+      if (billingSheet) {
+        var bilMap = api_getHeaderMap_(billingSheet);
+        for (var bb = 0; bb < releasingItems.length; bb++) {
+          var bItem = releasingItems[bb];
+          var bilRow = api_buildRow_(bilMap, {
+            "Status":      "Unbilled",
+            "Invoice #":   "",
+            "Client":      clientName,
+            "Date":        now,
+            "Svc Code":    "WC",
+            "Svc Name":    "Will Call",
+            "Category":    "Whse Services",
+            "Item ID":     bItem.itemId,
+            "Description": bItem.description,
+            "Class":       bItem.itemClass,
+            "Qty":         1,
+            "Rate":        bItem.wcFee,
+            "Total":       bItem.wcFee,
+            "Task ID":     "",
+            "Repair ID":   "",
+            "Shipment #":  wcNumber,
+            "Item Notes":  ""
+          });
+          var bilInsRow = api_getLastDataRow_(billingSheet) + 1;
+          billingSheet.getRange(bilInsRow, 1, 1, bilRow.length).setValues([bilRow]);
+        }
+      } else {
+        warnings.push("Billing_Ledger sheet not found — WC billing rows not written");
+      }
+    }
+
+    // 6c. Set WC_Items Status=Released for releasing items
+    var wciStatusCol = wciMap["Status"];
+    if (wciStatusCol) {
+      for (var wr2 = 0; wr2 < releasingItems.length; wr2++) {
+        wciSh.getRange(releasingItems[wr2].row, wciStatusCol).setValue("Released");
+      }
+    }
+
+    // 6d. Update Will_Calls row
+    var actualDateCol = wcMap["Actual Pickup Date"];
+    if (actualDateCol) wcSh.getRange(wcRow, actualDateCol).setValue(now);
+
+    var wcStatusCol = wcMap["Status"];
+    if (isPartial) {
+      // Set original to Partial
+      if (wcStatusCol) wcSh.getRange(wcRow, wcStatusCol).setValue("Partial");
+
+      // Create new WC for remaining items
+      newWcNumber = "WC-" + Utilities.formatDate(now, tz, "MMddyyHHmmss");
+      var origPickupParty = wcMap["Pickup Party"] ? String(wcRowData[wcMap["Pickup Party"] - 1] || "") : "";
+      var origPickupPhone = wcMap["Pickup Phone"] ? String(wcRowData[wcMap["Pickup Phone"] - 1] || "") : "";
+      var origReqBy       = wcMap["Requested By"] ? String(wcRowData[wcMap["Requested By"] - 1] || "") : "";
+      var origNotes       = wcMap["Notes"]         ? String(wcRowData[wcMap["Notes"] - 1] || "")         : "";
+      var origEstDate     = wcMap["Estimated Pickup Date"] ? wcRowData[wcMap["Estimated Pickup Date"] - 1] : "";
+
+      var remainingFee = 0;
+      for (var uf = 0; uf < uncheckedItems.length; uf++) remainingFee += uncheckedItems[uf].wcFee;
+
+      var newWcRowObj = {
+        "WC Number":             newWcNumber,
+        "Status":                origEstDate ? "Scheduled" : "Pending",
+        "Created Date":          now,
+        "Pickup Party":          origPickupParty,
+        "Pickup Phone":          origPickupPhone,
+        "Requested By":          origReqBy,
+        "Estimated Pickup Date": origEstDate,
+        "Actual Pickup Date":    "",
+        "Notes":                 origNotes + (origNotes ? " | " : "") + "Remaining items from " + wcNumber,
+        "COD":                   isCod,
+        "COD Amount":            isCod ? remainingFee : "",
+        "Items Count":           uncheckedItems.length,
+        "Total WC Fee":          remainingFee
+      };
+      var newInsRow = api_getLastDataRow_(wcSh) + 1;
+      wcSh.getRange(newInsRow, 1, 1, api_buildRow_(wcMap, newWcRowObj).length)
+          .setValues([api_buildRow_(wcMap, newWcRowObj)]);
+
+      // Move unchecked WC_Items to new WC + reset status to Pending
+      for (var mi = 0; mi < uncheckedItems.length; mi++) {
+        if (wcNumCol) wciSh.getRange(uncheckedItems[mi].row, wcNumCol).setValue(newWcNumber);
+        if (wciStatusCol) wciSh.getRange(uncheckedItems[mi].row, wciStatusCol).setValue("Pending");
+      }
+
+      // Update items count on original WC
+      if (wcMap["Items Count"]) wcSh.getRange(wcRow, wcMap["Items Count"]).setValue(releasingItems.length);
+
+      // Append split note to original WC so UI can link to new WC
+      if (wcMap["Notes"]) {
+        var curNotes = String(wcRowData[wcMap["Notes"] - 1] || "");
+        var splitTag = "[Split → " + newWcNumber + "]";
+        wcSh.getRange(wcRow, wcMap["Notes"]).setValue(curNotes + (curNotes ? " | " : "") + splitTag);
+      }
+
+    } else {
+      if (wcStatusCol) wcSh.getRange(wcRow, wcStatusCol).setValue("Released");
+    }
+
+  } catch (writeErr) {
+    try { lock.releaseLock(); } catch (_) {}
+    return jsonResponse_({ success: false, error: "Write failed: " + writeErr.message });
+  }
+
+  try { lock.releaseLock(); } catch (_) {}
+
+  // ─── 7. Email WILL_CALL_RELEASE (non-critical — outside lock) ─────────────
+  var emailSent = false;
+  if (notifOn) {
+    var allRecip = (notifEmails && clientEmail)
+      ? notifEmails + "," + clientEmail
+      : (notifEmails || clientEmail);
+    if (allRecip) {
+      try {
+        // Build items table for email
+        var itemTableHtml = '<table style="border-collapse:collapse;width:100%"><tr>' +
+          '<th style="border:1px solid #ddd;padding:4px 8px;">Item ID</th>' +
+          '<th style="border:1px solid #ddd;padding:4px 8px;">Description</th>' +
+          '<th style="border:1px solid #ddd;padding:4px 8px;">Class</th></tr>';
+        for (var et = 0; et < releasingItems.length; et++) {
+          var row = releasingItems[et];
+          itemTableHtml += '<tr>' +
+            '<td style="border:1px solid #ddd;padding:4px 8px;font-weight:600;">' + (row.itemId      || "") + '</td>' +
+            '<td style="border:1px solid #ddd;padding:4px 8px;">'                 + (row.description || "") + '</td>' +
+            '<td style="border:1px solid #ddd;padding:4px 8px;">'                 + (row.itemClass   || "") + '</td></tr>';
+        }
+        itemTableHtml += '</table>';
+
+        var partialNote = isPartial
+          ? ('<div style="background:#FFF7ED;border:1px solid #FDBA74;border-radius:10px;padding:14px;margin-bottom:16px;font-size:13px;color:#9A3412;font-weight:600;">' +
+             uncheckedItems.length + ' item(s) remain on new will call ' + newWcNumber + '.</div>')
+          : "";
+
+        var releaseTokens = {
+            "{{WC_NUMBER}}":    wcNumber,
+            "{{CLIENT_NAME}}":  clientName,
+            "{{PICKUP_PARTY}}": wcMap["Pickup Party"] ? String(wcRowData[wcMap["Pickup Party"] - 1] || "") : "",
+            "{{PICKUP_DATE}}":  Utilities.formatDate(now, tz, "MM/dd/yyyy"),
+            "{{ITEMS_TABLE}}":  itemTableHtml,
+            "{{ITEMS_COUNT}}":  String(releasingItems.length),
+            "{{PHOTOS_URL}}":   "",
+            "{{PARTIAL_NOTE}}": partialNote,
+            "{{NOTES}}":        wcMap["Notes"] ? String(wcRowData[wcMap["Notes"] - 1] || "") : "",
+            "{{LOGO_URL}}":     String(settings["LOGO_URL"] || "").trim()
+        };
+
+        // Generate DOC_WILL_CALL_RELEASE PDF (v24.0.0)
+        var relPdfBlob = null;
+        try {
+          // Find WC folder URL from WC Number hyperlink
+          var wcFolderUrl2 = "";
+          var wcNumCol2 = wcMap["WC Number"];
+          if (wcNumCol2) {
+            var wcRt = wcSheet.getRange(wcRow, wcNumCol2).getRichTextValue();
+            if (wcRt && wcRt.getLinkUrl()) wcFolderUrl2 = wcRt.getLinkUrl();
+          }
+          // v26.3.0: Flat folder structure fallback — Will Calls/ subfolder
+          if (!wcFolderUrl2) {
+            var wcSub2 = api_getOrCreateEntitySubfolder_(ss, "Will Calls");
+            if (wcSub2.folder) {
+              var wcIt2 = wcSub2.folder.getFoldersByName(wcNumber);
+              var wcF2 = wcIt2.hasNext() ? wcIt2.next() : wcSub2.folder.createFolder(wcNumber);
+              wcFolderUrl2 = "https://drive.google.com/drive/folders/" + wcF2.getId();
+            }
+          }
+          releaseTokens["{{PHOTOS_URL}}"] = wcFolderUrl2;
+          var relPdfResult = api_generateDocPdf_(ss, "DOC_WILL_CALL_RELEASE", "Will_Call_" + wcNumber, wcFolderUrl2, releaseTokens);
+          if (relPdfResult.blob) relPdfBlob = relPdfResult.blob;
+          if (relPdfResult.warning) warnings.push(relPdfResult.warning);
+        } catch (relPdfErr) {
+          warnings.push("WC Release PDF failed (non-fatal): " + relPdfErr.message);
+        }
+
+        var emailResult = api_sendTemplateEmail_(settings, "WILL_CALL_RELEASE", allRecip,
+          "Will Call Released: " + wcNumber,
+          releaseTokens, relPdfBlob
+        );
+        if (emailResult.success) {
+          emailSent = true;
+        } else {
+          warnings.push("Email not sent: " + emailResult.error);
+        }
+      } catch (emailErr) {
+        warnings.push("Email error (non-fatal): " + emailErr.message);
+      }
+    } else {
+      warnings.push("Email skipped: no CLIENT_EMAIL or NOTIFICATION_EMAILS configured");
+    }
+  } else {
+    warnings.push("Email skipped: ENABLE_NOTIFICATIONS is off for this client");
+  }
+
+  api_bumpSummaryVersion_();
+  return jsonResponse_({
+    success:       true,
+    releasedCount: releasingItems.length,
+    isPartial:     isPartial,
+    newWcNumber:   isPartial ? newWcNumber : undefined,
+    emailSent:     emailSent,
+    warnings:      warnings.length > 0 ? warnings : undefined
+  });
+}
+
+// ─── Release Items (bulk set Release Date + Status=Released) ─────────────────
+
+/**
+ * handleReleaseItems_ — sets Release Date + Status=Released on selected inventory items.
+ * Staff/admin only. No billing rows created.
+ * Payload: { itemIds: string[], releaseDate: string (YYYY-MM-DD), notes?: string }
+ */
+function handleReleaseItems_(clientSheetId, payload, callerEmail) {
+  var itemIds = payload.itemIds;
+  var releaseDateStr = payload.releaseDate;
+  var notes = String(payload.notes || "").trim();
+  var releasedBy = callerEmail || "API";
+
+  if (!itemIds || !itemIds.length) return jsonResponse_({ success: false, error: "No items provided" });
+  if (!releaseDateStr) return jsonResponse_({ success: false, error: "No release date provided" });
+  if (!clientSheetId) return jsonResponse_({ success: false, error: "clientSheetId required" });
+
+  // Parse date
+  var parts = String(releaseDateStr).split("-");
+  var releaseDate = new Date(parseInt(parts[0], 10), parseInt(parts[1], 10) - 1, parseInt(parts[2], 10));
+  if (isNaN(releaseDate.getTime())) return jsonResponse_({ success: false, error: "Invalid date: " + releaseDateStr });
+
+  var ss;
+  try { ss = SpreadsheetApp.openById(clientSheetId); } catch (e) {
+    return jsonResponse_({ success: false, error: "Cannot open spreadsheet: " + e.message });
+  }
+
+  var inv = ss.getSheetByName("Inventory");
+  if (!inv) return jsonResponse_({ success: false, error: "Inventory sheet not found" });
+
+  var invMap = api_getHeaderMap_(inv);
+  var relDateCol = invMap["Release Date"];
+  var statusCol = invMap["Status"];
+  var itemIdCol = invMap["Item ID"];
+  var notesCol = invMap["Item Notes"];
+  if (!relDateCol || !statusCol || !itemIdCol) {
+    return jsonResponse_({ success: false, error: "Missing required columns (Release Date, Status, Item ID)" });
+  }
+
+  var lastRow = api_getLastDataRow_(inv);
+  if (lastRow < 2) return jsonResponse_({ success: false, error: "No inventory data" });
+
+  var data = inv.getRange(2, 1, lastRow - 1, inv.getLastColumn()).getValues();
+
+  var updated = 0;
+  var skipped = [];
+
+  // Build lookup: itemId → row number
+  for (var i = 0; i < data.length; i++) {
+    var rowItemId = String(data[i][itemIdCol - 1] || "").trim();
+    if (!rowItemId) continue;
+    if (itemIds.indexOf(rowItemId) === -1) continue;
+
+    var rowNum = i + 2;
+    var currentStatus = String(data[i][statusCol - 1] || "").trim();
+    if (currentStatus === "Released" || currentStatus === "Transferred") {
+      skipped.push(rowItemId + ": already " + currentStatus);
+      continue;
+    }
+
+    inv.getRange(rowNum, relDateCol).setValue(releaseDate);
+    inv.getRange(rowNum, statusCol).setValue("Released");
+
+    // Always record release event in Item Notes
+    if (notesCol) {
+      var existing = String(data[i][notesCol - 1] || "").trim();
+      var tz = ss.getSpreadsheetTimeZone() || "America/Los_Angeles";
+      var stamp = "Released " + Utilities.formatDate(releaseDate, tz, "MM/dd/yyyy") +
+                  " by " + releasedBy +
+                  " on " + Utilities.formatDate(new Date(), tz, "MM/dd/yyyy");
+      var entry = notes ? stamp + " — " + notes : stamp;
+      var newNotes = existing ? existing + " | " + entry : entry;
+      inv.getRange(rowNum, notesCol).setValue(newNotes);
+    }
+
+    updated++;
+  }
+
+  return jsonResponse_({
+    success: true,
+    releasedCount: updated,
+    skipped: skipped.length > 0 ? skipped : undefined,
+    totalRequested: itemIds.length
+  });
+}
+
+// ─── Phase 7B #8: Transfer Items ─────────────────────────────────────────────
+
+/**
+ * Map a source row to a destination row using header name matching (case-insensitive).
+ * Destination columns not present in source get "".
+ */
+function api_projectRow_(srcRow, srcHeaders, destHeaders) {
+  var srcUpper = {};
+  for (var i = 0; i < srcHeaders.length; i++) {
+    var k = String(srcHeaders[i] || "").trim().toUpperCase();
+    if (k) srcUpper[k] = srcRow[i];
+  }
+  return destHeaders.map(function(h) {
+    var k = String(h || "").trim().toUpperCase();
+    return srcUpper.hasOwnProperty(k) ? srcUpper[k] : "";
+  });
+}
+
+/**
+ * Cancel a will call.
+ * Mirrors onWillCallEdit_ cancellation logic from Triggers.gs:
+ *   1. Set WC Status to "Cancelled"
+ *   2. Set all WC_Items Status to "Cancelled"
+ *   3. Send WILL_CALL_CANCELLED email
+ *
+ * Payload: { wcNumber }
+ * Returns: { success, wcNumber, emailSent, warnings? }
+ */
+
+// ─── Update Will Call Fields (v28.6.0) ───────────────────────────────────────
+/**
+ * handleUpdateWillCall_ — Inline edit of Will Call fields.
+ * Mirrors onWillCallEdit_ from Triggers.gs:
+ *   - Estimated Pickup Date → auto-promote Status "Pending" → "Scheduled"
+ *   - Status changes sync to WC_Items rows
+ *
+ * Payload: { wcNumber, estimatedPickupDate?, pickupParty?, pickupPhone?,
+ *            requestedBy?, notes?, codAmount?, status? }
+ */
+function handleUpdateWillCall_(clientSheetId, payload) {
+  var wcNumber = String((payload || {}).wcNumber || "").trim();
+  if (!wcNumber) return errorResponse_("wcNumber is required", "INVALID_PARAMS");
+
+  var WC_FIELD_MAP = {
+    estimatedPickupDate: "Estimated Pickup Date",
+    pickupParty:         "Pickup Party",
+    pickupPhone:         "Pickup Phone",
+    requestedBy:         "Requested By",
+    notes:               "Notes",
+    codAmount:           "COD Amount",
+    status:              "Status"
+  };
+
+  var updates = {};
+  var updateCount = 0;
+  for (var key in WC_FIELD_MAP) {
+    if (payload.hasOwnProperty(key) && payload[key] !== undefined) {
+      updates[key] = payload[key];
+      updateCount++;
+    }
+  }
+  if (updateCount === 0) return errorResponse_("No editable fields provided", "INVALID_PARAMS");
+
+  try {
+    var ss = SpreadsheetApp.openById(clientSheetId);
+    var wcSheet = ss.getSheetByName("Will_Calls");
+    if (!wcSheet) return errorResponse_("Will_Calls sheet not found", "SHEET_NOT_FOUND");
+
+    var wcMap = api_getHeaderMap_(wcSheet);
+    var wcNumCol = wcMap["WC Number"];
+    if (!wcNumCol) return errorResponse_("WC Number column not found", "SCHEMA_ERROR");
+
+    var wcRow = api_findRowById_(wcSheet, wcNumCol, wcNumber);
+    if (wcRow < 2) return errorResponse_("Will Call not found: " + wcNumber, "NOT_FOUND");
+
+    // Write each updated field
+    for (var key2 in updates) {
+      var colName = WC_FIELD_MAP[key2];
+      var col = wcMap[colName];
+      if (col) wcSheet.getRange(wcRow, col).setValue(updates[key2]);
+    }
+
+    // Auto-promote: Estimated Pickup Date filled + Status was "Pending" → "Scheduled"
+    var statusPromoted = false;
+    if (updates.hasOwnProperty("estimatedPickupDate") && updates.estimatedPickupDate) {
+      var statusCol = wcMap["Status"];
+      if (statusCol) {
+        var currentStatus = String(wcSheet.getRange(wcRow, statusCol).getValue() || "").trim();
+        if (currentStatus === "Pending") {
+          wcSheet.getRange(wcRow, statusCol).setValue("Scheduled");
+          statusPromoted = true;
+        }
+      }
+    }
+
+    // Sync Status changes to WC_Items rows (mirrors onWillCallEdit_)
+    var newStatus = statusPromoted ? "Scheduled" : (updates.hasOwnProperty("status") ? updates.status : null);
+    if (newStatus) {
+      var wciSheet = ss.getSheetByName("WC_Items");
+      if (wciSheet) {
+        var wciMap = api_getHeaderMap_(wciSheet);
+        var wciWcCol = wciMap["WC Number"];
+        var wciStatusCol = wciMap["Status"];
+        if (wciWcCol && wciStatusCol) {
+          var wciLast = api_getLastDataRow_(wciSheet);
+          if (wciLast >= 2) {
+            var wciData = wciSheet.getRange(2, 1, wciLast - 1, wciSheet.getLastColumn()).getValues();
+            for (var wi = 0; wi < wciData.length; wi++) {
+              if (String(wciData[wi][wciWcCol - 1] || "").trim() === wcNumber) {
+                wciSheet.getRange(wi + 2, wciStatusCol).setValue(newStatus);
+              }
+            }
+          }
+        }
+      }
+    }
+
+    return jsonResponse_({ success: true, wcNumber: wcNumber, updated: updates, statusPromoted: statusPromoted });
+  } catch (err) {
+    return errorResponse_("Failed to update will call: " + String(err), "SERVER_ERROR");
+  }
+}
+
+function handleCancelWillCall_(clientSheetId, payload) {
+  if (!clientSheetId) return jsonResponse_({ success: false, error: "clientSheetId is required" });
+
+  var wcNumber = String(payload.wcNumber || "").trim();
+  if (!wcNumber) return jsonResponse_({ success: false, error: "wcNumber is required" });
+
+  var warnings = [];
+
+  // ─── 1. Open spreadsheet + read settings ──────────────────────────────────
+  var ss;
+  try { ss = SpreadsheetApp.openById(clientSheetId); }
+  catch (e) { return jsonResponse_({ success: false, error: "Cannot open client spreadsheet: " + e.message }); }
+
+  var settings   = api_readSettings_(ss);
+  var clientName  = String(settings["CLIENT_NAME"]          || "Client").trim();
+  var clientEmail = String(settings["CLIENT_EMAIL"]          || "").trim();
+  var notifEmails = String(settings["NOTIFICATION_EMAILS"]   || "").trim();
+  var notifOn     = (String(settings["ENABLE_NOTIFICATIONS"] || "true").trim().toLowerCase() !== "false");
+
+  // ─── 2. Locate WC row ─────────────────────────────────────────────────────
+  var wcSh = ss.getSheetByName("Will_Calls");
+  if (!wcSh || wcSh.getLastRow() < 2) return jsonResponse_({ success: false, error: "Will_Calls sheet not found or empty" });
+
+  var wcMap  = api_getHeaderMap_(wcSh);
+  var wcData = wcSh.getDataRange().getValues();
+  var wcNumCol = wcMap["WC Number"];
+  if (!wcNumCol) return jsonResponse_({ success: false, error: "WC Number column not found" });
+
+  var wcRow = -1;
+  for (var wr = 1; wr < wcData.length; wr++) {
+    if (String(wcData[wr][wcNumCol - 1] || "").trim() === wcNumber) { wcRow = wr + 1; break; }
+  }
+  if (wcRow < 2) return jsonResponse_({ success: false, error: "Will call not found: " + wcNumber });
+
+  var currentStatus = wcMap["Status"] ? String(wcData[wcRow - 1][wcMap["Status"] - 1] || "").trim() : "";
+  if (currentStatus === "Cancelled") return jsonResponse_({ success: true, wcNumber: wcNumber, skipped: true, emailSent: false, warnings: ["Already cancelled"] });
+  if (currentStatus === "Released") return jsonResponse_({ success: false, error: "Cannot cancel a fully released will call" });
+
+  // ─── 3. Set WC Status to Cancelled ────────────────────────────────────────
+  if (wcMap["Status"]) wcSh.getRange(wcRow, wcMap["Status"]).setValue("Cancelled");
+
+  // ─── 4. Set all WC_Items Status to Cancelled ──────────────────────────────
+  var wciSh = ss.getSheetByName("WC_Items");
+  var cancelledCount = 0;
+  if (wciSh && wciSh.getLastRow() >= 2) {
+    var wciMap  = api_getHeaderMap_(wciSh);
+    var wciData = wciSh.getDataRange().getValues();
+    var wciNumCol = wciMap["WC Number"];
+    var wciStatusCol = wciMap["Status"];
+    if (wciNumCol && wciStatusCol) {
+      for (var wi = 1; wi < wciData.length; wi++) {
+        if (String(wciData[wi][wciNumCol - 1] || "").trim() === wcNumber) {
+          wciSh.getRange(wi + 1, wciStatusCol).setValue("Cancelled");
+          cancelledCount++;
+        }
+      }
+    }
+  }
+
+  // ─── 5. Build items table for email ────────────────────────────────────────
+  var itemsTableHtml = "";
+  if (wciSh && wciSh.getLastRow() >= 2) {
+    var wciMap2 = api_getHeaderMap_(wciSh);
+    var wciData2 = wciSh.getDataRange().getValues();
+    var rows = [];
+    for (var j = 1; j < wciData2.length; j++) {
+      if (String(wciData2[j][(wciMap2["WC Number"] || 1) - 1] || "").trim() === wcNumber) {
+        rows.push("<tr><td>" + (wciData2[j][(wciMap2["Item ID"] || 1) - 1] || "") +
+          "</td><td>" + (wciData2[j][(wciMap2["Description"] || 1) - 1] || "") +
+          "</td><td>" + (wciData2[j][(wciMap2["Class"] || 1) - 1] || "") +
+          "</td><td>" + (wciData2[j][(wciMap2["Qty"] || 1) - 1] || 1) + "</td></tr>");
+      }
+    }
+    if (rows.length > 0) {
+      itemsTableHtml = "<table border='1' cellpadding='4' cellspacing='0' style='border-collapse:collapse;'>" +
+        "<tr><th>Item ID</th><th>Description</th><th>Class</th><th>Qty</th></tr>" +
+        rows.join("") + "</table>";
+    }
+  }
+
+  // ─── 6. Send cancellation email ────────────────────────────────────────────
+  var emailSent = false;
+  if (notifOn) {
+    var toList = [];
+    if (notifEmails) toList.push(notifEmails);
+    if (clientEmail) toList.push(clientEmail);
+    var to = toList.join(",");
+
+    if (to) {
+      var now = new Date();
+      var cancelDate = (now.getMonth() + 1) + "/" + now.getDate() + "/" + now.getFullYear();
+      var tokens = {
+        "{{WC_NUMBER}}": wcNumber,
+        "{{CLIENT_NAME}}": clientName,
+        "{{ITEMS_TABLE}}": itemsTableHtml || "<em>No items</em>",
+        "{{ITEMS_COUNT}}": String(cancelledCount),
+        "{{CANCEL_DATE}}": cancelDate
+      };
+      try {
+        var result = api_sendTemplateEmail_(settings, "WILL_CALL_CANCELLED", to,
+          "Will Call " + wcNumber + " — Cancelled", tokens);
+        emailSent = (result && result.sent);
+      } catch (emailErr) {
+        warnings.push("Email failed: " + emailErr.message);
+      }
+    } else {
+      warnings.push("No notification recipients configured");
+    }
+  }
+
+  api_bumpSummaryVersion_();
+  return jsonResponse_({
+    success: true,
+    wcNumber: wcNumber,
+    itemsCancelled: cancelledCount,
+    emailSent: emailSent,
+    warnings: warnings.length > 0 ? warnings : undefined
+  });
+}
+
+// ─── Add Items to Existing Will Call ─────────────────────────────────────────
+/**
+ * Add inventory items to an existing open Will Call.
+ * Payload: { wcNumber, items: string[] }  — items is array of itemIds
+ * Returns: { success, addedCount, totalItems, totalFee, skipped[], warnings[] }
+ */
+function handleAddItemsToWillCall_(clientSheetId, payload) {
+  if (!clientSheetId) return jsonResponse_({ success: false, error: "clientSheetId is required" });
+
+  var wcNumber = String((payload || {}).wcNumber || "").trim();
+  if (!wcNumber) return jsonResponse_({ success: false, error: "wcNumber is required" });
+
+  var itemIds = payload.items;
+  if (!itemIds || !Array.isArray(itemIds) || itemIds.length === 0) {
+    return jsonResponse_({ success: false, error: "items array is required and must be non-empty" });
+  }
+
+  var warnings = [];
+
+  // ─── 1. Open spreadsheet + read settings ──────────────────────────────────
+  var ss;
+  try { ss = SpreadsheetApp.openById(clientSheetId); }
+  catch (e) { return jsonResponse_({ success: false, error: "Cannot open client spreadsheet: " + e.message }); }
+
+  var settings = api_readSettings_(ss);
+
+  // ─── 2. Look up each item + compute WC fees ──────────────────────────────
+  var enrichedItems = [];
+  var addedFee = 0;
+
+  for (var ii = 0; ii < itemIds.length; ii++) {
+    var itemId = String(itemIds[ii] || "").trim();
+    if (!itemId) continue;
+
+    var invItem = api_findInventoryItem_(ss, itemId);
+    if (!invItem) {
+      return jsonResponse_({ success: false, error: "Item not found in Inventory: " + itemId });
+    }
+    if (invItem.status === "Released") {
+      return jsonResponse_({ success: false, error: "Item " + itemId + " is already Released" });
+    }
+
+    var rateData = api_lookupRate_(ss, "WC", invItem.itemClass);
+    var wcFee = 0;
+    if (rateData && rateData.rate > 0) {
+      wcFee = api_applyDiscount_(settings, rateData.rate, rateData.category || "Whse Services");
+    } else {
+      warnings.push("WC rate not found for class " + (invItem.itemClass || "(unknown)") + " — item " + itemId + " fee set to 0");
+    }
+    addedFee += wcFee;
+
+    enrichedItems.push({
+      itemId:      itemId,
+      qty:         invItem.qty         || 1,
+      vendor:      invItem.vendor      || "",
+      description: invItem.description || "",
+      itemClass:   invItem.itemClass   || "",
+      location:    invItem.location    || "",
+      sidemark:    invItem.sidemark    || "",
+      room:        invItem.room        || "",
+      wcFee:       wcFee
+    });
+  }
+
+  if (!enrichedItems.length) {
+    return jsonResponse_({ success: false, error: "No valid items to add" });
+  }
+
+  // ─── 3. LOCK + validate + write ───────────────────────────────────────────
+  var lock = LockService.getScriptLock();
+  try { lock.waitLock(20000); }
+  catch (lockErr) { return jsonResponse_({ success: false, error: "Server busy — please retry" }); }
+
+  try {
+    var wcSh  = ss.getSheetByName("Will_Calls");
+    var wciSh = ss.getSheetByName("WC_Items");
+    if (!wcSh) { try { lock.releaseLock(); } catch (_) {} return jsonResponse_({ success: false, error: "Will_Calls sheet not found" }); }
+    if (!wciSh) { try { lock.releaseLock(); } catch (_) {} return jsonResponse_({ success: false, error: "WC_Items sheet not found" }); }
+
+    // Find WC row + validate status
+    var wcMap = api_getHeaderMap_(wcSh);
+    var wcNumCol = wcMap["WC Number"];
+    if (!wcNumCol) { try { lock.releaseLock(); } catch (_) {} return jsonResponse_({ success: false, error: "WC Number column not found" }); }
+
+    var wcRow = api_findRowById_(wcSh, wcNumCol, wcNumber);
+    if (wcRow < 2) { try { lock.releaseLock(); } catch (_) {} return jsonResponse_({ success: false, error: "Will call not found: " + wcNumber }); }
+
+    var currentStatus = wcMap["Status"] ? String(wcSh.getRange(wcRow, wcMap["Status"]).getValue() || "").trim() : "";
+    if (currentStatus !== "Pending" && currentStatus !== "Scheduled") {
+      try { lock.releaseLock(); } catch (_) {}
+      return jsonResponse_({ success: false, error: "Cannot add items — will call status is " + currentStatus });
+    }
+
+    // Duplicate check: none of these items already on an active WC
+    if (wcSh.getLastRow() >= 2 && wciSh.getLastRow() >= 2) {
+      var wcData   = wcSh.getDataRange().getValues();
+      var activeWcNums = {};
+      for (var w = 1; w < wcData.length; w++) {
+        var wSt  = String(wcData[w][(wcMap["Status"]    || 1) - 1] || "").trim();
+        var wNum = String(wcData[w][(wcMap["WC Number"] || 1) - 1] || "").trim();
+        if (wSt === "Pending" || wSt === "Scheduled" || wSt === "Partial") {
+          activeWcNums[wNum] = true;
+        }
+      }
+      var wciHdrMap = api_getHeaderMap_(wciSh);
+      var wciData   = wciSh.getDataRange().getValues();
+      for (var wi = 1; wi < wciData.length; wi++) {
+        var wiWcNum  = String(wciData[wi][(wciHdrMap["WC Number"] || 1) - 1] || "").trim();
+        var wiItemId = String(wciData[wi][(wciHdrMap["Item ID"]   || 2) - 1] || "").trim();
+        if (activeWcNums[wiWcNum]) {
+          for (var si = 0; si < enrichedItems.length; si++) {
+            if (enrichedItems[si].itemId === wiItemId) {
+              try { lock.releaseLock(); } catch (_) {}
+              return jsonResponse_({ success: false, error: "Item " + wiItemId + " is already on active will call " + wiWcNum });
+            }
+          }
+        }
+      }
+    }
+
+    // Write new WC_Items rows
+    var wciMap = api_getHeaderMap_(wciSh);
+    for (var bi = 0; bi < enrichedItems.length; bi++) {
+      var bItem = enrichedItems[bi];
+      var wciRowObj = {
+        "WC Number":   wcNumber,
+        "Item ID":     bItem.itemId,
+        "Qty":         bItem.qty,
+        "Vendor":      bItem.vendor,
+        "Description": bItem.description,
+        "Class":       bItem.itemClass,
+        "Location":    bItem.location,
+        "Sidemark":    bItem.sidemark,
+        "Room":        bItem.room,
+        "WC Fee":      bItem.wcFee,
+        "Status":      "Pending"
+      };
+      var wciInsertRow = api_getLastDataRow_(wciSh) + 1;
+      wciSh.getRange(wciInsertRow, 1, 1, api_buildRow_(wciMap, wciRowObj).length)
+           .setValues([api_buildRow_(wciMap, wciRowObj)]);
+    }
+
+    // Update Will_Calls parent row: Items Count + Total WC Fee
+    var oldCount = wcMap["Items Count"] ? (Number(wcSh.getRange(wcRow, wcMap["Items Count"]).getValue()) || 0) : 0;
+    var oldFee   = wcMap["Total WC Fee"] ? (Number(wcSh.getRange(wcRow, wcMap["Total WC Fee"]).getValue()) || 0) : 0;
+    if (wcMap["Items Count"]) wcSh.getRange(wcRow, wcMap["Items Count"]).setValue(oldCount + enrichedItems.length);
+    if (wcMap["Total WC Fee"]) wcSh.getRange(wcRow, wcMap["Total WC Fee"]).setValue(Math.round((oldFee + addedFee) * 100) / 100);
+
+  } catch (writeErr) {
+    try { lock.releaseLock(); } catch (_) {}
+    return jsonResponse_({ success: false, error: "Write failed: " + writeErr.message });
+  }
+
+  try { lock.releaseLock(); } catch (_) {}
+
+  var newCount = (wcMap["Items Count"] ? (Number(wcSh.getRange(wcRow, wcMap["Items Count"]).getValue()) || 0) : enrichedItems.length);
+  var newFee   = (wcMap["Total WC Fee"] ? (Number(wcSh.getRange(wcRow, wcMap["Total WC Fee"]).getValue()) || 0) : addedFee);
+
+  api_bumpSummaryVersion_();
+  return jsonResponse_({
+    success: true,
+    addedCount: enrichedItems.length,
+    totalItems: newCount,
+    totalFee: newFee,
+    skipped: [],
+    warnings: warnings.length > 0 ? warnings : undefined
+  });
+}
+
+// ─── Remove Items from Existing Will Call ────────────────────────────────────
+/**
+ * Remove pending items from an existing Will Call.
+ * Payload: { wcNumber, itemIds: string[] }
+ * Returns: { success, removedCount, remainingItems, totalFee, cancelled, skippedReleased[] }
+ */
+function handleRemoveItemsFromWillCall_(clientSheetId, payload) {
+  if (!clientSheetId) return jsonResponse_({ success: false, error: "clientSheetId is required" });
+
+  var wcNumber = String((payload || {}).wcNumber || "").trim();
+  if (!wcNumber) return jsonResponse_({ success: false, error: "wcNumber is required" });
+
+  var itemIds = payload.itemIds;
+  if (!itemIds || !Array.isArray(itemIds) || itemIds.length === 0) {
+    return jsonResponse_({ success: false, error: "itemIds array is required and must be non-empty" });
+  }
+
+  // ─── 1. Open spreadsheet ──────────────────────────────────────────────────
+  var ss;
+  try { ss = SpreadsheetApp.openById(clientSheetId); }
+  catch (e) { return jsonResponse_({ success: false, error: "Cannot open client spreadsheet: " + e.message }); }
+
+  // ─── 2. LOCK + validate + delete ──────────────────────────────────────────
+  var lock = LockService.getScriptLock();
+  try { lock.waitLock(20000); }
+  catch (lockErr) { return jsonResponse_({ success: false, error: "Server busy — please retry" }); }
+
+  try {
+    var wcSh  = ss.getSheetByName("Will_Calls");
+    var wciSh = ss.getSheetByName("WC_Items");
+    if (!wcSh) { try { lock.releaseLock(); } catch (_) {} return jsonResponse_({ success: false, error: "Will_Calls sheet not found" }); }
+    if (!wciSh) { try { lock.releaseLock(); } catch (_) {} return jsonResponse_({ success: false, error: "WC_Items sheet not found" }); }
+
+    // Find WC row + validate status
+    var wcMap = api_getHeaderMap_(wcSh);
+    var wcNumCol = wcMap["WC Number"];
+    if (!wcNumCol) { try { lock.releaseLock(); } catch (_) {} return jsonResponse_({ success: false, error: "WC Number column not found" }); }
+
+    var wcRow = api_findRowById_(wcSh, wcNumCol, wcNumber);
+    if (wcRow < 2) { try { lock.releaseLock(); } catch (_) {} return jsonResponse_({ success: false, error: "Will call not found: " + wcNumber }); }
+
+    var currentStatus = wcMap["Status"] ? String(wcSh.getRange(wcRow, wcMap["Status"]).getValue() || "").trim() : "";
+    if (currentStatus !== "Pending" && currentStatus !== "Scheduled" && currentStatus !== "Partial") {
+      try { lock.releaseLock(); } catch (_) {}
+      return jsonResponse_({ success: false, error: "Cannot remove items — will call status is " + currentStatus });
+    }
+
+    // Build set of itemIds to remove
+    var removeSet = {};
+    for (var ri = 0; ri < itemIds.length; ri++) {
+      removeSet[String(itemIds[ri]).trim()] = true;
+    }
+
+    // Scan WC_Items for matching rows
+    var wciMap  = api_getHeaderMap_(wciSh);
+    var wciData = wciSh.getDataRange().getValues();
+    var wciWcCol     = wciMap["WC Number"];
+    var wciItemCol   = wciMap["Item ID"];
+    var wciStatusCol = wciMap["Status"];
+    var wciFeeCol    = wciMap["WC Fee"];
+
+    var rowsToDelete = []; // 1-based row numbers, will sort descending
+    var feeToSubtract = 0;
+    var skippedReleased = [];
+    var totalRemainingAfter = 0;
+
+    // Count all items on this WC and find rows to delete
+    for (var wi = 1; wi < wciData.length; wi++) {
+      var wiWcNum  = wciWcCol ? String(wciData[wi][wciWcCol - 1] || "").trim() : "";
+      if (wiWcNum !== wcNumber) continue;
+
+      var wiItemId = wciItemCol ? String(wciData[wi][wciItemCol - 1] || "").trim() : "";
+      var wiStatus = wciStatusCol ? String(wciData[wi][wciStatusCol - 1] || "").trim() : "";
+
+      if (removeSet[wiItemId]) {
+        if (wiStatus === "Released") {
+          skippedReleased.push(wiItemId);
+          totalRemainingAfter++;
+        } else {
+          rowsToDelete.push(wi + 1); // 1-based
+          var wiFee = wciFeeCol ? (Number(wciData[wi][wciFeeCol - 1]) || 0) : 0;
+          feeToSubtract += wiFee;
+        }
+      } else {
+        totalRemainingAfter++;
+      }
+    }
+
+    if (rowsToDelete.length === 0) {
+      try { lock.releaseLock(); } catch (_) {}
+      if (skippedReleased.length > 0) {
+        return jsonResponse_({ success: false, error: "Cannot remove released items", skippedReleased: skippedReleased });
+      }
+      return jsonResponse_({ success: false, error: "No matching items found on this will call" });
+    }
+
+    // Delete rows bottom-up to avoid index shifting
+    rowsToDelete.sort(function(a, b) { return b - a; });
+    for (var di = 0; di < rowsToDelete.length; di++) {
+      wciSh.deleteRow(rowsToDelete[di]);
+    }
+
+    // Update Will_Calls parent row: Items Count + Total WC Fee
+    var oldCount = wcMap["Items Count"] ? (Number(wcSh.getRange(wcRow, wcMap["Items Count"]).getValue()) || 0) : 0;
+    var oldFee   = wcMap["Total WC Fee"] ? (Number(wcSh.getRange(wcRow, wcMap["Total WC Fee"]).getValue()) || 0) : 0;
+    var newCount = Math.max(0, oldCount - rowsToDelete.length);
+    var newFee   = Math.max(0, Math.round((oldFee - feeToSubtract) * 100) / 100);
+    if (wcMap["Items Count"]) wcSh.getRange(wcRow, wcMap["Items Count"]).setValue(newCount);
+    if (wcMap["Total WC Fee"]) wcSh.getRange(wcRow, wcMap["Total WC Fee"]).setValue(newFee);
+
+    // Auto-cancel if no items remain
+    var cancelled = false;
+    if (totalRemainingAfter === 0) {
+      if (wcMap["Status"]) wcSh.getRange(wcRow, wcMap["Status"]).setValue("Cancelled");
+      cancelled = true;
+    }
+
+  } catch (err) {
+    try { lock.releaseLock(); } catch (_) {}
+    return jsonResponse_({ success: false, error: "Remove failed: " + err.message });
+  }
+
+  try { lock.releaseLock(); } catch (_) {}
+
+  api_bumpSummaryVersion_();
+  return jsonResponse_({
+    success: true,
+    removedCount: rowsToDelete.length,
+    remainingItems: totalRemainingAfter,
+    totalFee: newFee,
+    cancelled: cancelled,
+    skippedReleased: skippedReleased.length > 0 ? skippedReleased : undefined
+  });
+}
+
+/**
+ * Transfer items from source client sheet to destination client sheet.
+ * Mirrors TR_executeTransfer from Transfer.gs (Drive folder copy deferred).
+ *
+ * Payload: { destinationClientSheetId, itemIds[] }
+ * Returns: { success, copiedItems, voidedLedgerRows, createdLedgerRows, tasksTransferred, repairsTransferred, emailSent, warnings? }
+ */
+function handleTransferItems_(sourceClientSheetId, payload) {
+  var destId     = String(payload.destinationClientSheetId || "").trim();
+  var rawIds     = Array.isArray(payload.itemIds) ? payload.itemIds : [];
+  var itemIds    = rawIds.map(function(x) { return String(x || "").trim(); }).filter(Boolean);
+
+  if (!destId)         return jsonResponse_({ success: false, error: "Missing destinationClientSheetId" });
+  if (!itemIds.length) return jsonResponse_({ success: false, error: "No item IDs provided" });
+  if (destId === sourceClientSheetId) return jsonResponse_({ success: false, error: "Destination cannot be the same as source" });
+
+  var warnings = [];
+
+  // ── Validate destination is a known active client via CB ──────────────────
+  var sourceClientName = "";
+  var destClientName   = "";
+  var cbId = prop_("CB_SPREADSHEET_ID");
+  if (cbId) {
+    try {
+      var cbSS = SpreadsheetApp.openById(cbId);
+      var cbSheet = cbSS.getSheetByName("Clients");
+      if (cbSheet) {
+        var cbMap  = api_getHeaderMap_(cbSheet);
+        var cbData = cbSheet.getDataRange().getValues();
+        var cbNameCol   = cbMap["Client Name"];
+        var cbIdCol     = cbMap["Client Spreadsheet ID"];
+        var cbActiveCol = cbMap["Active"];
+        var destFound   = false;
+        for (var ci = 1; ci < cbData.length; ci++) {
+          var cbRow      = cbData[ci];
+          var cbSheetId  = cbIdCol   ? String(cbRow[cbIdCol - 1]   || "").trim() : "";
+          var cbName     = cbNameCol ? String(cbRow[cbNameCol - 1] || "").trim() : "";
+          var cbActive   = cbActiveCol ? cbRow[cbActiveCol - 1] : true;
+          if (cbSheetId === sourceClientSheetId) sourceClientName = cbName;
+          if (cbSheetId === destId && cbActive)  { destFound = true; destClientName = cbName; }
+        }
+        if (!destFound) return jsonResponse_({ success: false, error: "Destination is not a valid active client" });
+      }
+    } catch (cbErr) {
+      warnings.push("Could not validate destination via CB: " + cbErr);
+    }
+  }
+
+  // ── Open spreadsheets ─────────────────────────────────────────────────────
+  var srcSS, destSS;
+  try { srcSS  = SpreadsheetApp.openById(sourceClientSheetId); } catch (e) { return jsonResponse_({ success: false, error: "Cannot open source spreadsheet: " + e }); }
+  try { destSS = SpreadsheetApp.openById(destId); }             catch (e) { return jsonResponse_({ success: false, error: "Cannot open destination spreadsheet: " + e }); }
+
+  var srcSettings  = api_readSettings_(srcSS);
+  var destSettings = api_readSettings_(destSS);
+  if (!sourceClientName) sourceClientName = String(srcSettings["CLIENT_NAME"]  || "Source");
+  if (!destClientName)   destClientName   = String(destSettings["CLIENT_NAME"] || "Destination");
+
+  var now  = new Date();
+  var tz   = srcSS.getSpreadsheetTimeZone() || "America/Los_Angeles";
+  var transferNote = "Transferred from " + sourceClientName + " to " + destClientName +
+    " on " + Utilities.formatDate(now, tz, "yyyy-MM-dd HH:mm");
+
+  // ── 1. INVENTORY ──────────────────────────────────────────────────────────
+  var srcInv  = srcSS.getSheetByName("Inventory");
+  var destInv = destSS.getSheetByName("Inventory");
+  if (!srcInv)  return jsonResponse_({ success: false, error: "Source Inventory sheet not found" });
+  if (!destInv) return jsonResponse_({ success: false, error: "Destination Inventory sheet not found" });
+
+  var srcInvMap     = api_getHeaderMap_(srcInv);
+  var destInvMap    = api_getHeaderMap_(destInv);
+  var srcInvData    = srcInv.getDataRange().getValues();
+  var srcInvHeaders = srcInvData[0];
+  var destInvData   = destInv.getDataRange().getValues();
+  var destInvHeaders = destInvData[0];
+
+  var invItemIdCol = srcInvMap["Item ID"];
+  var invStatusCol = srcInvMap["Status"];
+  if (!invItemIdCol) return jsonResponse_({ success: false, error: "Source Inventory missing 'Item ID' header" });
+
+  // Duplicate item check against destination Active/On Hold
+  var destInvItemIdCol = destInvMap["Item ID"];
+  var destInvStatusCol = destInvMap["Status"];
+  var destActiveIds = {};
+  if (destInvItemIdCol) {
+    for (var di = 1; di < destInvData.length; di++) {
+      var dSt = destInvStatusCol ? String(destInvData[di][destInvStatusCol - 1] || "").toLowerCase() : "active";
+      if (dSt === "active" || dSt === "on hold") {
+        var dId = String(destInvData[di][destInvItemIdCol - 1] || "").trim();
+        if (dId) destActiveIds[dId] = true;
+      }
+    }
+  }
+  var conflicts = itemIds.filter(function(id) { return !!destActiveIds[id]; });
+  if (conflicts.length) {
+    return jsonResponse_({ success: false, error: "BLOCKED: " + conflicts.length + " item(s) already exist as Active/On Hold in " + destClientName + ": " + conflicts.slice(0, 10).join(", ") });
+  }
+
+  // Find source rows to copy
+  var rowsToCopy  = [];
+  var srcInvRows  = [];  // 1-based row numbers in source
+  for (var si = 1; si < srcInvData.length; si++) {
+    var srcRow    = srcInvData[si];
+    var srcItemId = String(srcRow[invItemIdCol - 1] || "").trim();
+    if (!srcItemId || itemIds.indexOf(srcItemId) === -1) continue;
+    var srcSt = invStatusCol ? String(srcRow[invStatusCol - 1] || "").trim() : "";
+    if (srcSt === "Transferred") continue;
+    rowsToCopy.push(srcRow);
+    srcInvRows.push(si + 1);
+  }
+  if (!rowsToCopy.length) return jsonResponse_({ success: false, error: "No matching Inventory rows found for the provided Item IDs" });
+
+  // Append to destination Inventory
+  var destInvAppend = rowsToCopy.map(function(row) { return api_projectRow_(row, srcInvHeaders, destInvHeaders); });
+  var destInvLast   = api_getLastDataRow_(destInv);
+  destInv.getRange(destInvLast + 1, 1, destInvAppend.length, destInvHeaders.length).setValues(destInvAppend);
+
+  // Mark source rows Transferred
+  if (invStatusCol) {
+    srcInvRows.forEach(function(rowNum) { srcInv.getRange(rowNum, invStatusCol).setValue("Transferred"); });
+  }
+
+  // ── 2. BILLING (Unbilled rows only) ───────────────────────────────────────
+  var srcBilling  = srcSS.getSheetByName("Billing_Ledger");
+  var destBilling = destSS.getSheetByName("Billing_Ledger");
+  var voidedLedgerRows   = 0;
+  var createdLedgerRows  = 0;
+
+  if (srcBilling && destBilling) {
+    var srcBillMap    = api_getHeaderMap_(srcBilling);
+    var destBillMap   = api_getHeaderMap_(destBilling);
+    var srcBillData   = srcBilling.getDataRange().getValues();
+    var srcBillHeaders  = srcBillData[0];
+    var destBillHeaders = destBilling.getRange(1, 1, 1, destBilling.getLastColumn()).getValues()[0];
+
+    var bItemIdCol   = srcBillMap["Item ID"];
+    var bStatusCol   = srcBillMap["Status"];
+    var bNotesCol    = srcBillMap["Item Notes"];
+    var bRateCol     = srcBillMap["Rate"];
+    var bTotalCol    = srcBillMap["Total"];
+    var bQtyCol      = srcBillMap["Qty"];
+    var bCategoryCol = srcBillMap["Category"];
+    var bSvcCodeCol  = srcBillMap["Svc Code"];
+
+    var destBillAppend = [];
+    var srcBillVoids   = [];
+
+    if (bItemIdCol && bStatusCol) {
+      for (var bi = 1; bi < srcBillData.length; bi++) {
+        var bRow    = srcBillData[bi];
+        var bItemId = String(bRow[bItemIdCol - 1] || "").trim();
+        if (!bItemId || itemIds.indexOf(bItemId) === -1) continue;
+        var bStatus = String(bRow[bStatusCol - 1] || "").trim();
+        if (bStatus !== "Unbilled") continue;
+
+        var destBRow = api_projectRow_(bRow, srcBillHeaders, destBillHeaders);
+
+        // Update Client column in dest row
+        var dClientCol = destBillMap["Client"];
+        if (dClientCol && destClientName) destBRow[dClientCol - 1] = destClientName;
+
+        // Re-apply destination discount (skip REPAIR/RPR — manually priced)
+        var svcCode  = bSvcCodeCol ? String(bRow[bSvcCodeCol - 1] || "").trim().toUpperCase() : "";
+        var skipDisc = (svcCode === "REPAIR" || svcCode === "RPR");
+        if (!skipDisc && bRateCol && bTotalCol) {
+          var origRate = Number(bRow[bRateCol - 1]) || 0;
+          var category = bCategoryCol ? String(bRow[bCategoryCol - 1] || "").trim() : "";
+          var qty      = bQtyCol ? (Number(bRow[bQtyCol - 1]) || 1) : 1;
+          if (origRate > 0 && category) {
+            var isStorage = category.toLowerCase().indexOf("storage") >= 0;
+            var srcPctKey = isStorage ? "DISCOUNT_STORAGE_PCT" : "DISCOUNT_SERVICES_PCT";
+            var srcPct    = Number(srcSettings[srcPctKey]) || 0;
+            // v38.7.0: widened from ±10 to ±100 to match api_applyDiscount_
+            var baseRate  = (srcPct !== 0 && srcPct >= -100 && srcPct <= 100)
+              ? Math.round(origRate / (1 + srcPct / 100) * 100) / 100
+              : origRate;
+            var newRate = api_applyDiscount_(destSettings, baseRate, category);
+            newRate = Math.round(newRate * 100) / 100;
+            var dRateCol  = destBillMap["Rate"];
+            var dTotalCol = destBillMap["Total"];
+            if (dRateCol)  destBRow[dRateCol - 1]  = newRate;
+            if (dTotalCol) destBRow[dTotalCol - 1] = Math.round(newRate * qty * 100) / 100;
+          }
+        }
+
+        // Append transfer note to Item Notes
+        var dBNotesCol = destBillMap["Item Notes"];
+        if (dBNotesCol) {
+          var existing = String(destBRow[dBNotesCol - 1] || "").trim();
+          destBRow[dBNotesCol - 1] = (existing ? existing + " | " : "") + transferNote;
+        }
+
+        destBillAppend.push(destBRow);
+        srcBillVoids.push(bi + 1);
+      }
+
+      if (destBillAppend.length) {
+        var destBillLast = api_getLastDataRow_(destBilling);
+        destBilling.getRange(destBillLast + 1, 1, destBillAppend.length, destBillHeaders.length).setValues(destBillAppend);
+        createdLedgerRows = destBillAppend.length;
+      }
+
+      // Void source billing rows
+      srcBillVoids.forEach(function(rowNum) {
+        srcBilling.getRange(rowNum, bStatusCol).setValue("Void");
+        if (bNotesCol) {
+          var cell = srcBilling.getRange(rowNum, bNotesCol);
+          var val  = String(cell.getValue() || "").trim();
+          cell.setValue((val ? val + " | " : "") + transferNote);
+        }
+      });
+      voidedLedgerRows = srcBillVoids.length;
+    }
+  } else {
+    warnings.push("Billing_Ledger sheets not found on source or destination — billing rows not transferred");
+  }
+
+  // ── 3. TASKS (Active only) ────────────────────────────────────────────────
+  var srcTasks  = srcSS.getSheetByName("Tasks");
+  var destTasks = destSS.getSheetByName("Tasks");
+  var tasksTransferred = 0;
+
+  if (srcTasks && destTasks) {
+    var srcTasksMap     = api_getHeaderMap_(srcTasks);
+    var destTasksMap    = api_getHeaderMap_(destTasks);
+    var srcTasksData    = srcTasks.getDataRange().getValues();
+    var srcTasksHeaders = srcTasksData[0];
+    var destTasksHeaders = destTasks.getRange(1, 1, 1, destTasks.getLastColumn()).getValues()[0];
+
+    var tItemIdCol = srcTasksMap["Item ID"];
+    var tStatusCol = srcTasksMap["Status"];
+    var tNotesCol  = srcTasksMap["Item Notes"];
+    var dTNotesCol = destTasksMap["Item Notes"];
+
+    if (tItemIdCol) {
+      var destTasksAppend = [];
+      var srcTasksVoids   = [];
+
+      for (var ti = 1; ti < srcTasksData.length; ti++) {
+        var tRow    = srcTasksData[ti];
+        var tItemId = String(tRow[tItemIdCol - 1] || "").trim();
+        if (!tItemId || itemIds.indexOf(tItemId) === -1) continue;
+        var tStatus = tStatusCol ? String(tRow[tStatusCol - 1] || "").trim() : "";
+        if (tStatus === "Completed" || tStatus === "Cancelled") continue;
+
+        var destTRow = api_projectRow_(tRow, srcTasksHeaders, destTasksHeaders);
+        if (dTNotesCol) {
+          var existingTNote = String(destTRow[dTNotesCol - 1] || "").trim();
+          destTRow[dTNotesCol - 1] = (existingTNote ? existingTNote + " | " : "") + transferNote;
+        }
+        destTasksAppend.push(destTRow);
+        srcTasksVoids.push(ti + 1);
+      }
+
+      if (destTasksAppend.length) {
+        var destTasksLast = api_getLastDataRow_(destTasks);
+        destTasks.getRange(destTasksLast + 1, 1, destTasksAppend.length, destTasksHeaders.length).setValues(destTasksAppend);
+        tasksTransferred = destTasksAppend.length;
+      }
+
+      srcTasksVoids.forEach(function(rowNum) {
+        if (tStatusCol) srcTasks.getRange(rowNum, tStatusCol).setValue("Cancelled");
+        if (tNotesCol) {
+          var cell = srcTasks.getRange(rowNum, tNotesCol);
+          var val  = String(cell.getValue() || "").trim();
+          cell.setValue((val ? val + " | " : "") + "Voided - " + transferNote);
+        }
+      });
+    }
+  }
+
+  // ── 4. REPAIRS (Non-Complete only) ────────────────────────────────────────
+  var srcRepairs  = srcSS.getSheetByName("Repairs");
+  var destRepairs = destSS.getSheetByName("Repairs");
+  var repairsTransferred = 0;
+
+  if (srcRepairs && destRepairs) {
+    var srcRepairsMap     = api_getHeaderMap_(srcRepairs);
+    var destRepairsMap    = api_getHeaderMap_(destRepairs);
+    var srcRepairsData    = srcRepairs.getDataRange().getValues();
+    var srcRepairsHeaders = srcRepairsData[0];
+    var destRepairsHeaders = destRepairs.getRange(1, 1, 1, destRepairs.getLastColumn()).getValues()[0];
+
+    var rItemIdCol = srcRepairsMap["Item ID"];
+    var rStatusCol = srcRepairsMap["Status"];
+    var rNotesCol  = srcRepairsMap["Item Notes"];
+    var dRNotesCol = destRepairsMap["Item Notes"];
+
+    if (rItemIdCol) {
+      var destRepairsAppend = [];
+      var srcRepairsVoids   = [];
+
+      for (var ri = 1; ri < srcRepairsData.length; ri++) {
+        var rRow    = srcRepairsData[ri];
+        var rItemId = String(rRow[rItemIdCol - 1] || "").trim();
+        if (!rItemId || itemIds.indexOf(rItemId) === -1) continue;
+        var rStatus = rStatusCol ? String(rRow[rStatusCol - 1] || "").trim() : "";
+        if (rStatus === "Complete") continue;
+
+        var destRRow = api_projectRow_(rRow, srcRepairsHeaders, destRepairsHeaders);
+        if (dRNotesCol) {
+          var existingRNote = String(destRRow[dRNotesCol - 1] || "").trim();
+          destRRow[dRNotesCol - 1] = (existingRNote ? existingRNote + " | " : "") + transferNote;
+        }
+        destRepairsAppend.push(destRRow);
+        srcRepairsVoids.push(ri + 1);
+      }
+
+      if (destRepairsAppend.length) {
+        var destRepairsLast = api_getLastDataRow_(destRepairs);
+        destRepairs.getRange(destRepairsLast + 1, 1, destRepairsAppend.length, destRepairsHeaders.length).setValues(destRepairsAppend);
+        repairsTransferred = destRepairsAppend.length;
+      }
+
+      srcRepairsVoids.forEach(function(rowNum) {
+        if (rStatusCol) srcRepairs.getRange(rowNum, rStatusCol).setValue("Complete");
+        if (rNotesCol) {
+          var cell = srcRepairs.getRange(rowNum, rNotesCol);
+          var val  = String(cell.getValue() || "").trim();
+          cell.setValue((val ? val + " | " : "") + "Voided - " + transferNote);
+        }
+      });
+    }
+  }
+
+  // ── 5. MOVE HISTORY (log transfer on both source and destination) ────────
+  try {
+    var callerEmail = Session.getActiveUser().getEmail() || "";
+    // Destination: "Transferred in from [Source]"
+    api_logTransferMoveHistory_(destSS, itemIds, callerEmail, sourceClientName, destClientName, "Transfer");
+    // Source: "Transferred out to [Dest]"
+    api_logTransferMoveHistory_(srcSS, itemIds, callerEmail, sourceClientName, "Transferred to: " + destClientName, "Transfer");
+  } catch (mhErr) {
+    warnings.push("Move History logging failed: " + mhErr);
+  }
+
+  // ── 6. EMAIL (TRANSFER_RECEIVED to destination — non-critical) ───────────
+  var emailSent = false;
+  try {
+    var destNotif = String(destSettings["ENABLE_NOTIFICATIONS"] || "").trim().toLowerCase();
+    if (destNotif === "true" || destNotif === "yes" || destNotif === "1") {
+      var trCols = ["Item ID", "Qty", "Vendor", "Description", "Sidemark", "Room", "Item Notes"];
+      var trHtml = '<table style="width:100%;border-collapse:collapse;margin-bottom:16px">';
+      trHtml += '<tr>' + trCols.map(function(c) {
+        return '<td style="padding:8px 12px;border:1px solid #e2e8f0;background:#f8fafc;font-weight:600;font-size:13px">' + c + '</td>';
+      }).join('') + '</tr>';
+      rowsToCopy.forEach(function(row) {
+        trHtml += '<tr>' + trCols.map(function(c) {
+          var col = srcInvMap[c];
+          return '<td style="padding:6px 12px;border:1px solid #e2e8f0;font-size:13px">' + (col ? String(row[col - 1] || "") : "") + '</td>';
+        }).join('') + '</tr>';
+      });
+      trHtml += '</table>';
+
+      var emailResult = api_sendTemplateEmail_(destSS, "TRANSFER_RECEIVED", "", {
+        "{{CLIENT_NAME}}":        destClientName,
+        "{{SOURCE_CLIENT_NAME}}": sourceClientName,
+        "{{ITEM_COUNT}}":         String(rowsToCopy.length),
+        "{{TRANSFER_DATE}}":      Utilities.formatDate(now, tz, "MM/dd/yyyy"),
+        "{{TRANSFER_NOTES}}":     transferNote,
+        "{{ITEMS_TABLE}}":        trHtml,
+        "{{INVENTORY_URL}}":      destSS.getUrl()
+      });
+      emailSent = !!(emailResult && emailResult.sent);
+    }
+  } catch (emailErr) {
+    warnings.push("Transfer email failed: " + emailErr);
+  }
+
+  return jsonResponse_({
+    success:           true,
+    copiedItems:       rowsToCopy.length,
+    voidedLedgerRows:  voidedLedgerRows,
+    createdLedgerRows: createdLedgerRows,
+    tasksTransferred:  tasksTransferred,
+    repairsTransferred: repairsTransferred,
+    emailSent:         emailSent,
+    warnings:          warnings.length > 0 ? warnings : undefined
+  });
+}
+
+// ─── Generate Storage Charges Handler ───────────────────────────────────────
+
+/**
+ * handleGenerateStorageCharges_ — mirrors StrideGenerateStorageCharges from CB Code.gs.
+ *
+ * Runs across ALL active CB clients. For each client:
+ *   1. Reads Inventory for Active items
+ *   2. Calculates billable days (receive date + free storage days offset)
+ *   3. Deduplicates against Invoiced/Billed/Void STOR Task IDs
+ *   4. Deletes existing Unbilled STOR rows in the date range (clean-slate regeneration)
+ *   5. Writes new Billing_Ledger STOR rows
+ *
+ * Rate formula: Price_Cache "XL Rate" (base per cuFt) × Class_Cache cuFt volume × client discount
+ *
+ * @param {Object} payload - { startDate: "YYYY-MM-DD", endDate: "YYYY-MM-DD" }
+ */
+function handleGenerateStorageCharges_(payload) {
+  var startDateStr = String(payload.startDate || "").trim();
+  var endDateStr   = String(payload.endDate   || "").trim();
+
+  if (!startDateStr || !endDateStr) {
+    return errorResponse_("startDate and endDate are required (YYYY-MM-DD)", "INVALID_PAYLOAD");
+  }
+
+  var startDate = api_normalizeDateToMidnight_(startDateStr);
+  var endDate   = api_normalizeDateToMidnight_(endDateStr);
+
+  if (!startDate) return errorResponse_("Invalid startDate: " + startDateStr, "INVALID_PAYLOAD");
+  if (!endDate)   return errorResponse_("Invalid endDate: "   + endDateStr,   "INVALID_PAYLOAD");
+  if (endDate.getTime() < startDate.getTime()) {
+    return errorResponse_("endDate must be on or after startDate", "INVALID_PAYLOAD");
+  }
+
+  var cbId = prop_("CB_SPREADSHEET_ID");
+  if (!cbId) return errorResponse_("CB_SPREADSHEET_ID not configured", "CONFIG_ERROR");
+
+  var cbSS     = SpreadsheetApp.openById(cbId);
+  var cbSheet  = cbSS.getSheetByName("Clients");
+  if (!cbSheet) return errorResponse_("CB Clients sheet not found", "NOT_FOUND");
+
+  // ── Read active clients from CB ──────────────────────────────────────────
+  var clientsData = cbSheet.getDataRange().getValues();
+  if (clientsData.length < 2) {
+    return jsonResponse_({ success: true, totalCreated: 0, clientsProcessed: 0, message: "No active clients found" });
+  }
+
+  var cbHdr     = clientsData[0].map(function(h) { return String(h).trim(); });
+  var nameCol   = cbHdr.indexOf("Client Name");
+  var idCol     = cbHdr.indexOf("Client Spreadsheet ID");
+  var activeCol = cbHdr.indexOf("Active");
+
+  if (nameCol < 0 || idCol < 0) {
+    return errorResponse_("CB Clients tab missing required columns (Client Name, Client Spreadsheet ID)", "CONFIG_ERROR");
+  }
+
+  var clients = [];
+  for (var ci = 1; ci < clientsData.length; ci++) {
+    var cName   = String(clientsData[ci][nameCol] || "").trim();
+    var cId     = String(clientsData[ci][idCol]   || "").trim();
+    var cActive = activeCol >= 0 ? clientsData[ci][activeCol] : true;
+    if (!cName || !cId) continue;
+    if (cActive === false || cActive === "FALSE" || cActive === "No") continue;
+    clients.push({ name: cName, id: cId });
+  }
+
+  if (!clients.length) {
+    return jsonResponse_({ success: true, totalCreated: 0, clientsProcessed: 0, message: "No active clients found" });
+  }
+
+  var totalCreated = 0;
+  var skipped = [];
+  var failed  = [];
+
+  clients.forEach(function(client) {
+    try {
+      var css        = SpreadsheetApp.openById(client.id);
+      var settingsSh = css.getSheetByName("Settings");
+      var invSh      = css.getSheetByName("Inventory");
+      var blSh       = css.getSheetByName("Billing_Ledger");
+
+      if (!settingsSh || !invSh || !blSh) {
+        failed.push(client.name + " (missing Settings/Inventory/Billing_Ledger)");
+        return;
+      }
+
+      var settings   = api_readSettings_(css);
+      var freeDays   = Number(settings["FREE_STORAGE_DAYS"] || 0) || 0;
+      var clientName = String(settings["CLIENT_NAME"] || "").trim() || client.name;
+      var classVols  = api_loadClassVolumes_(css);
+
+      // ── Inventory columns ────────────────────────────────────────────────
+      var invHdr  = api_getHeaderMap_(invSh);
+      var cItem   = invHdr["Item ID"];
+      var cDesc   = invHdr["Description"];
+      var cClass  = invHdr["Class"];
+      var cRecv   = invHdr["Receive Date"];
+      var cStatus = invHdr["Status"];
+      var cShip   = invHdr["Shipment #"];
+      var cRel    = invHdr["Release Date"];
+
+      if (!cItem || !cClass || !cRecv) {
+        failed.push(client.name + " (Inventory missing Item ID / Class / Receive Date)");
+        return;
+      }
+
+      var invVals = invSh.getDataRange().getValues();
+      if (invVals.length < 2) return; // no data rows
+
+      // ── Billing_Ledger columns ───────────────────────────────────────────
+      var blHdr = api_getHeaderMap_(blSh);
+      var blCols = {
+        status:     blHdr["Status"],
+        invoice:    blHdr["Invoice #"],
+        client:     blHdr["Client"],
+        date:       blHdr["Date"],
+        svcCode:    blHdr["Svc Code"],
+        svcName:    blHdr["Svc Name"],
+        itemId:     blHdr["Item ID"],
+        desc:       blHdr["Description"],
+        klass:      blHdr["Class"],
+        qty:        blHdr["Qty"],
+        rate:       blHdr["Rate"],
+        total:      blHdr["Total"],
+        taskId:     blHdr["Task ID"],
+        repairId:   blHdr["Repair ID"],
+        shipNo:     blHdr["Shipment #"],
+        notes:      blHdr["Item Notes"] !== undefined ? blHdr["Item Notes"] : blHdr["Notes"],
+        ledgerRowId: blHdr["Ledger Row ID"] !== undefined ? blHdr["Ledger Row ID"] : blHdr["Ledger Entry ID"]
+      };
+
+      if (!blCols.status || !blCols.date || !blCols.svcCode || !blCols.total) {
+        failed.push(client.name + " (Billing_Ledger missing required columns: Status/Date/Svc Code/Total)");
+        return;
+      }
+
+      // ── Read existing billing data for dedup ─────────────────────────────
+      var blLastRow = api_getLastDataRow_(blSh);
+      var blAllData = (blLastRow >= 2)
+        ? blSh.getRange(2, 1, blLastRow - 1, blSh.getLastColumn()).getValues()
+        : [];
+
+      // v38.13.0: Build per-item map of already-billed date ranges from finalized STOR rows.
+      // This prevents double-billing when storage periods overlap (e.g. early billing for
+      // one sidemark, then running the full month later).
+      // Map: itemId → [{ start: Date, end: Date }]
+      var billedRangesByItem = {};
+      for (var di = 0; di < blAllData.length; di++) {
+        var dStatus = String(blAllData[di][blCols.status - 1] || "").trim().toLowerCase();
+        if (dStatus !== "invoiced" && dStatus !== "billed" && dStatus !== "void") continue;
+        var dSvcCode = blCols.svcCode ? String(blAllData[di][blCols.svcCode - 1] || "").trim().toUpperCase() : "";
+        if (dSvcCode !== "STOR") continue;
+        var dItemId = blCols.itemId ? String(blAllData[di][blCols.itemId - 1] || "").trim() : "";
+        if (!dItemId) continue;
+
+        // Parse date range from Task ID (format: STOR-{itemId}-{startDate}-{endDate})
+        // or from Notes (format: "Storage MM/DD/YY to MM/DD/YY (N day(s))")
+        var dTaskId = blCols.taskId ? String(blAllData[di][blCols.taskId - 1] || "").trim() : "";
+        var rangeStart = null, rangeEnd = null;
+
+        // Try parsing from Task ID first (most reliable)
+        if (dTaskId) {
+          var taskParts = dTaskId.split("-");
+          // STOR-{itemId}-{yyyy}-{mm}-{dd}-{yyyy}-{mm}-{dd}
+          // After splitting: ["STOR", itemId, startY, startM, startD, endY, endM, endD]
+          // Or: STOR-{itemId}-{yyyy-mm-dd}-{yyyy-mm-dd}
+          var taskIdAfterItem = dTaskId.substring(("STOR-" + dItemId + "-").length);
+          var dateParts = taskIdAfterItem.split("-");
+          if (dateParts.length >= 6) {
+            rangeStart = api_normalizeDateToMidnight_(dateParts[0] + "-" + dateParts[1] + "-" + dateParts[2]);
+            rangeEnd = api_normalizeDateToMidnight_(dateParts[3] + "-" + dateParts[4] + "-" + dateParts[5]);
+          }
+        }
+
+        if (rangeStart && rangeEnd) {
+          if (!billedRangesByItem[dItemId]) billedRangesByItem[dItemId] = [];
+          billedRangesByItem[dItemId].push({ start: rangeStart, end: rangeEnd });
+        }
+      }
+
+      // ── BUILD new STOR billing rows FIRST (before any deletes) ──────────
+      // v29.1.0 fix: compute replacement rows before deleting old ones.
+      // Previous order (delete → build) caused data loss when rebuild produced
+      // fewer rows, leaving the unbilled report empty on re-run.
+      var blWidth      = blSh.getLastColumn();
+      var pendingRows  = [];
+      var newStorTaskIds = {};
+
+      for (var r = 1; r < invVals.length; r++) {
+        var itemId = String(invVals[r][cItem - 1] || "").trim();
+        if (!itemId) continue;
+
+        var invStatus = cStatus ? String(invVals[r][cStatus - 1] || "").trim() : "";
+        if (invStatus && invStatus.toLowerCase() !== "active") continue;
+
+        var recv = api_normalizeDateToMidnight_(invVals[r][cRecv - 1]);
+        if (!recv) continue;
+
+        // Effective end: item release date (if before range end) shifts end back one day
+        var rel         = cRel ? api_normalizeDateToMidnight_(invVals[r][cRel - 1]) : null;
+        var effectiveEnd = (rel && rel.getTime() <= endDate.getTime()) ? api_addDays_(rel, -1) : endDate;
+
+        var billableStart = api_addDays_(recv, freeDays);
+        var chargeStart   = api_maxDate_(billableStart, startDate);
+        var chargeEnd     = effectiveEnd;
+        var billableDays  = api_dateDiffDaysInclusive_(chargeStart, chargeEnd);
+        if (billableDays <= 0) continue;
+
+        var klass    = cClass ? String(invVals[r][cClass - 1] || "").trim().toUpperCase() : "";
+        var rateInfo = api_lookupRate_(css, "STOR", klass);
+        var baseRate = rateInfo.rate || 0;
+        var cubicVol = Number(classVols[klass] || 0) || 0;
+        var rawRate  = baseRate * cubicVol;
+
+        if (rawRate <= 0) {
+          skipped.push(client.name + " / " + itemId + " (no STOR rate for class " + (klass || "?") + ")");
+          continue;
+        }
+
+        var rate = api_applyDiscount_(settings, rawRate, "Storage Charges");
+
+        // v38.13.0: Subtract already-billed date ranges from the charge period.
+        // If Smith was billed 4/1-4/7 (Invoiced), and we now run 4/1-4/30,
+        // only charge 4/8-4/30 (the non-overlapping portion).
+        var chargePeriods = [{ start: chargeStart, end: chargeEnd }];
+        var itemBilledRanges = billedRangesByItem[itemId];
+        if (itemBilledRanges && itemBilledRanges.length > 0) {
+          for (var br = 0; br < itemBilledRanges.length; br++) {
+            var billed = itemBilledRanges[br];
+            var newPeriods = [];
+            for (var cp = 0; cp < chargePeriods.length; cp++) {
+              var p = chargePeriods[cp];
+              // No overlap — keep period as-is
+              if (billed.end.getTime() < p.start.getTime() || billed.start.getTime() > p.end.getTime()) {
+                newPeriods.push(p);
+              } else {
+                // Overlap — split into before and after portions
+                if (p.start.getTime() < billed.start.getTime()) {
+                  newPeriods.push({ start: p.start, end: api_addDays_(billed.start, -1) });
+                }
+                if (p.end.getTime() > billed.end.getTime()) {
+                  newPeriods.push({ start: api_addDays_(billed.end, 1), end: p.end });
+                }
+                // The overlapping portion is dropped (already billed)
+              }
+            }
+            chargePeriods = newPeriods;
+          }
+        }
+
+        // Generate one STOR row per remaining charge period (usually 1, but could be 2+ if
+        // a billed range splits the middle of the requested period)
+        if (chargePeriods.length === 0) continue; // fully billed already
+
+        var desc    = cDesc  ? String(invVals[r][cDesc - 1]  || "").trim() : "";
+        var shipNo  = cShip  ? String(invVals[r][cShip - 1]  || "").trim() : "";
+
+        for (var pi = 0; pi < chargePeriods.length; pi++) {
+          var period = chargePeriods[pi];
+          var pDays = api_dateDiffDaysInclusive_(period.start, period.end);
+          if (pDays <= 0) continue;
+
+          var storTaskId = api_buildStorTaskId_(itemId, period.start, period.end);
+          if (newStorTaskIds[storTaskId]) continue; // avoid dups within same run
+
+          var total   = rate * pDays;
+          var notesStr = "Storage " + api_formatMMDDYY_(period.start) +
+            " to " + api_formatMMDDYY_(period.end) + " (" + pDays + " day(s))";
+
+          var row = new Array(blWidth).fill("");
+          if (blCols.status)     row[blCols.status - 1]     = "Unbilled";
+          if (blCols.invoice)    row[blCols.invoice - 1]    = "";
+          if (blCols.client)     row[blCols.client - 1]     = clientName;
+          if (blCols.date)       row[blCols.date - 1]       = period.end;
+          if (blCols.svcCode)    row[blCols.svcCode - 1]    = "STOR";
+          if (blCols.svcName)    row[blCols.svcName - 1]    = "Storage";
+          if (blCols.itemId)     row[blCols.itemId - 1]     = itemId;
+          if (blCols.desc)       row[blCols.desc - 1]       = desc;
+          if (blCols.klass)      row[blCols.klass - 1]      = klass;
+          if (blCols.qty)        row[blCols.qty - 1]        = pDays;
+          if (blCols.rate)       row[blCols.rate - 1]       = rate;
+          if (blCols.total)      row[blCols.total - 1]      = total;
+          if (blCols.taskId)     row[blCols.taskId - 1]     = storTaskId;
+          if (blCols.repairId)   row[blCols.repairId - 1]   = "";
+          if (blCols.shipNo)     row[blCols.shipNo - 1]     = shipNo;
+          if (blCols.notes)      row[blCols.notes - 1]      = notesStr;
+          if (blCols.ledgerRowId) row[blCols.ledgerRowId - 1] = storTaskId;
+
+          pendingRows.push(row);
+          newStorTaskIds[storTaskId] = true;
+          totalCreated++;
+        } // end chargePeriods loop
+      }
+
+      // ── DELETE existing Unbilled STOR rows in date range (AFTER build) ───
+      // Re-read billing data fresh for accurate row numbers after any
+      // concurrent writes between our initial read and now.
+      var blLastRow2 = api_getLastDataRow_(blSh);
+      var blAllData2 = (blLastRow2 >= 2)
+        ? blSh.getRange(2, 1, blLastRow2 - 1, blSh.getLastColumn()).getValues()
+        : [];
+
+      if (blAllData2.length && blCols.svcCode) {
+        var rowsToDelete = [];
+        for (var ri = blAllData2.length - 1; ri >= 0; ri--) {
+          var rStatus2 = String(blAllData2[ri][blCols.status - 1] || "").trim().toLowerCase();
+          var rSvc2    = String(blAllData2[ri][blCols.svcCode - 1] || "").trim().toUpperCase();
+          if ((rStatus2 === "unbilled" || rStatus2 === "") && rSvc2 === "STOR") {
+            var rTaskId2 = blCols.taskId ? String(blAllData2[ri][blCols.taskId - 1] || "").trim() : "";
+            // Delete if Task ID is being replaced by a new row
+            if (newStorTaskIds[rTaskId2]) {
+              rowsToDelete.push(ri + 2);
+            } else {
+              // Also delete stale unbilled STOR rows in the date range
+              var rDate2 = api_normalizeDateToMidnight_(blAllData2[ri][blCols.date - 1]);
+              if (rDate2 && rDate2.getTime() >= startDate.getTime() && rDate2.getTime() <= endDate.getTime()) {
+                rowsToDelete.push(ri + 2);
+              }
+            }
+          }
+        }
+        // Delete bottom-up (rowsToDelete is already highest-first)
+        for (var dri = 0; dri < rowsToDelete.length; dri++) {
+          blSh.deleteRow(rowsToDelete[dri]);
+        }
+      }
+
+      // ── Flush new rows to Billing_Ledger ─────────────────────────────────
+      if (pendingRows.length) {
+        var insertAt = api_getLastDataRow_(blSh) + 1;
+        blSh.getRange(insertAt, 1, pendingRows.length, blWidth).setValues(pendingRows);
+      }
+
+      // Invalidate cache so subsequent reads (unbilled report) get fresh data
+      invalidateClientCache_(client.id);
+
+    } catch (err) {
+      failed.push(client.name + " (" + (err && err.message ? err.message : String(err)) + ")");
+      Logger.log("handleGenerateStorageCharges_ error for " + client.name + ": " + err);
+    }
+  });
+
+  return jsonResponse_({
+    success:          true,
+    totalCreated:     totalCreated,
+    clientsProcessed: clients.length,
+    skippedItems:     skipped.length > 0 ? skipped : undefined,
+    failedClients:    failed.length  > 0 ? failed  : undefined
+  });
+}
+
+// ─── Preview Storage Charges (read-only, no writes) ─────────────────────────
+
+/**
+ * handlePreviewStorageCharges_ — same calculation as generateStorageCharges but
+ * returns the computed rows WITHOUT writing to any Billing_Ledger.
+ * Used by the React UI "Preview Storage Charges" feature.
+ *
+ * @param {Object} payload - { startDate: "YYYY-MM-DD", endDate: "YYYY-MM-DD" }
+ * @returns {{ rows: Array, count: number, totalAmount: number }}
+ */
+function handlePreviewStorageCharges_(payload) {
+  var startDateStr = String(payload.startDate || "").trim();
+  var endDateStr   = String(payload.endDate   || "").trim();
+
+  if (!startDateStr || !endDateStr) {
+    return errorResponse_("startDate and endDate are required (YYYY-MM-DD)", "INVALID_PAYLOAD");
+  }
+
+  var startDate = api_normalizeDateToMidnight_(startDateStr);
+  var endDate   = api_normalizeDateToMidnight_(endDateStr);
+
+  if (!startDate) return errorResponse_("Invalid startDate: " + startDateStr, "INVALID_PAYLOAD");
+  if (!endDate)   return errorResponse_("Invalid endDate: "   + endDateStr,   "INVALID_PAYLOAD");
+  if (endDate.getTime() < startDate.getTime()) {
+    return errorResponse_("endDate must be on or after startDate", "INVALID_PAYLOAD");
+  }
+
+  // Parse optional client filter (comma-separated client names, case-insensitive)
+  var clientFilterRaw = String(payload.clientFilter || "").trim().toLowerCase();
+  var clientNames = clientFilterRaw ? clientFilterRaw.split(",").map(function(s) { return s.trim(); }).filter(Boolean) : [];
+
+  // Parse optional sidemark filter (comma-separated, case-insensitive)
+  var sidemarkFilterRaw = String(payload.sidemarkFilter || "").trim().toLowerCase();
+  var sidemarkNames = sidemarkFilterRaw ? sidemarkFilterRaw.split(",").map(function(s) { return s.trim(); }).filter(Boolean) : [];
+
+  var cbId = prop_("CB_SPREADSHEET_ID");
+  if (!cbId) return errorResponse_("CB_SPREADSHEET_ID not configured", "CONFIG_ERROR");
+
+  var cbSS     = SpreadsheetApp.openById(cbId);
+  var cbSheet  = cbSS.getSheetByName("Clients");
+  if (!cbSheet) return errorResponse_("CB Clients sheet not found", "NOT_FOUND");
+
+  var clientsData = cbSheet.getDataRange().getValues();
+  if (clientsData.length < 2) {
+    return jsonResponse_({ success: true, rows: [], count: 0, totalAmount: 0 });
+  }
+
+  var cbHdr     = clientsData[0].map(function(h) { return String(h).trim(); });
+  var nameCol   = cbHdr.indexOf("Client Name");
+  var idCol     = cbHdr.indexOf("Client Spreadsheet ID");
+  var activeCol = cbHdr.indexOf("Active");
+
+  if (nameCol < 0 || idCol < 0) {
+    return errorResponse_("CB Clients tab missing required columns", "CONFIG_ERROR");
+  }
+
+  var clients = [];
+  for (var ci = 1; ci < clientsData.length; ci++) {
+    var cName   = String(clientsData[ci][nameCol] || "").trim();
+    var cId     = String(clientsData[ci][idCol]   || "").trim();
+    var cActive = activeCol >= 0 ? clientsData[ci][activeCol] : true;
+    if (!cName || !cId) continue;
+    if (cActive === false || cActive === "FALSE" || cActive === "No") continue;
+    // Apply client filter if provided
+    if (clientNames.length && clientNames.indexOf(cName.toLowerCase()) < 0) continue;
+    clients.push({ name: cName, id: cId });
+  }
+
+  var outRows = [];
+  var totalAmount = 0;
+  var skipped = [];
+  var failed  = [];
+
+  clients.forEach(function(client) {
+    try {
+      var css        = SpreadsheetApp.openById(client.id);
+      var settingsSh = css.getSheetByName("Settings");
+      var invSh      = css.getSheetByName("Inventory");
+      var blSh       = css.getSheetByName("Billing_Ledger");
+
+      if (!settingsSh || !invSh || !blSh) {
+        failed.push(client.name + " (missing sheets)");
+        return;
+      }
+
+      var settings   = api_readSettings_(css);
+      var freeDays   = Number(settings["FREE_STORAGE_DAYS"] || 0) || 0;
+      var clientName = String(settings["CLIENT_NAME"] || "").trim() || client.name;
+      var classVols  = api_loadClassVolumes_(css);
+
+      var invHdr  = api_getHeaderMap_(invSh);
+      var cItem   = invHdr["Item ID"];
+      var cDesc   = invHdr["Description"];
+      var cClass  = invHdr["Class"];
+      var cRecv   = invHdr["Receive Date"];
+      var cStatus = invHdr["Status"];
+      var cShip   = invHdr["Shipment #"];
+      var cRel    = invHdr["Release Date"];
+      var cSidemark = invHdr["Sidemark"];
+
+      if (!cItem || !cClass || !cRecv) {
+        failed.push(client.name + " (missing Inventory columns)");
+        return;
+      }
+
+      var invVals = invSh.getDataRange().getValues();
+      if (invVals.length < 2) return;
+
+      // v38.13.0: Build per-item map of already-billed date ranges (same as handleGenerateStorageCharges_)
+      var blHdr = api_getHeaderMap_(blSh);
+      var blTaskIdCol = blHdr["Task ID"];
+      var blStatusCol = blHdr["Status"];
+      var blSvcCodeCol = blHdr["Svc Code"];
+      var blItemIdCol = blHdr["Item ID"];
+      var prevBilledRanges = {};
+      if (blTaskIdCol && blStatusCol) {
+        var blLastRow = api_getLastDataRow_(blSh);
+        if (blLastRow >= 2) {
+          var blData = blSh.getRange(2, 1, blLastRow - 1, blSh.getLastColumn()).getValues();
+          for (var di = 0; di < blData.length; di++) {
+            var dSt = String(blData[di][blStatusCol - 1] || "").trim().toLowerCase();
+            if (dSt !== "invoiced" && dSt !== "billed" && dSt !== "void") continue;
+            var dSvc = blSvcCodeCol ? String(blData[di][blSvcCodeCol - 1] || "").trim().toUpperCase() : "";
+            if (dSvc !== "STOR") continue;
+            var dItem = blItemIdCol ? String(blData[di][blItemIdCol - 1] || "").trim() : "";
+            if (!dItem) continue;
+            var dTid = String(blData[di][blTaskIdCol - 1] || "").trim();
+            if (!dTid) continue;
+            var tidAfterItem = dTid.substring(("STOR-" + dItem + "-").length);
+            var tdParts = tidAfterItem.split("-");
+            if (tdParts.length >= 6) {
+              var rs = api_normalizeDateToMidnight_(tdParts[0] + "-" + tdParts[1] + "-" + tdParts[2]);
+              var re = api_normalizeDateToMidnight_(tdParts[3] + "-" + tdParts[4] + "-" + tdParts[5]);
+              if (rs && re) {
+                if (!prevBilledRanges[dItem]) prevBilledRanges[dItem] = [];
+                prevBilledRanges[dItem].push({ start: rs, end: re });
+              }
+            }
+          }
+        }
+      }
+
+      for (var r = 1; r < invVals.length; r++) {
+        var itemId = String(invVals[r][cItem - 1] || "").trim();
+        if (!itemId) continue;
+
+        var invStatus = cStatus ? String(invVals[r][cStatus - 1] || "").trim() : "";
+        if (invStatus && invStatus.toLowerCase() !== "active") continue;
+
+        var recv = api_normalizeDateToMidnight_(invVals[r][cRecv - 1]);
+        if (!recv) continue;
+
+        var rel         = cRel ? api_normalizeDateToMidnight_(invVals[r][cRel - 1]) : null;
+        var effectiveEnd = (rel && rel.getTime() <= endDate.getTime()) ? api_addDays_(rel, -1) : endDate;
+
+        var billableStart = api_addDays_(recv, freeDays);
+        var chargeStart   = api_maxDate_(billableStart, startDate);
+        var chargeEnd     = effectiveEnd;
+        var billableDays  = api_dateDiffDaysInclusive_(chargeStart, chargeEnd);
+        if (billableDays <= 0) continue;
+
+        var klass    = cClass ? String(invVals[r][cClass - 1] || "").trim().toUpperCase() : "";
+        var rateInfo = api_lookupRate_(css, "STOR", klass);
+        var baseRate = rateInfo.rate || 0;
+        var cubicVol = Number(classVols[klass] || 0) || 0;
+        var rawRate  = baseRate * cubicVol;
+
+        if (rawRate <= 0) {
+          skipped.push(client.name + " / " + itemId + " (no STOR rate for class " + (klass || "?") + ")");
+          continue;
+        }
+
+        var rate = api_applyDiscount_(settings, rawRate, "Storage Charges");
+
+        var desc     = cDesc  ? String(invVals[r][cDesc - 1]  || "").trim() : "";
+        var shipNo   = cShip  ? String(invVals[r][cShip - 1]  || "").trim() : "";
+        var sidemark = cSidemark ? String(invVals[r][cSidemark - 1] || "").trim() : "";
+
+        // Apply sidemark filter if provided
+        if (sidemarkNames.length && sidemarkNames.indexOf(sidemark.toLowerCase()) < 0) continue;
+
+        // v38.13.0: Subtract already-billed date ranges (same logic as handleGenerateStorageCharges_)
+        var prevChargePeriods = [{ start: chargeStart, end: chargeEnd }];
+        var prevItemRanges = prevBilledRanges[itemId];
+        if (prevItemRanges && prevItemRanges.length > 0) {
+          for (var pbr = 0; pbr < prevItemRanges.length; pbr++) {
+            var pb = prevItemRanges[pbr];
+            var newP = [];
+            for (var pcp = 0; pcp < prevChargePeriods.length; pcp++) {
+              var pp = prevChargePeriods[pcp];
+              if (pb.end.getTime() < pp.start.getTime() || pb.start.getTime() > pp.end.getTime()) {
+                newP.push(pp);
+              } else {
+                if (pp.start.getTime() < pb.start.getTime()) newP.push({ start: pp.start, end: api_addDays_(pb.start, -1) });
+                if (pp.end.getTime() > pb.end.getTime()) newP.push({ start: api_addDays_(pb.end, 1), end: pp.end });
+              }
+            }
+            prevChargePeriods = newP;
+          }
+        }
+        if (prevChargePeriods.length === 0) continue;
+
+        for (var ppi = 0; ppi < prevChargePeriods.length; ppi++) {
+          var pp2 = prevChargePeriods[ppi];
+          var ppDays = api_dateDiffDaysInclusive_(pp2.start, pp2.end);
+          if (ppDays <= 0) continue;
+
+          var storTaskId = api_buildStorTaskId_(itemId, pp2.start, pp2.end);
+          var rowTotal = rate * ppDays;
+          var notesStr = "Storage " + api_formatMMDDYY_(pp2.start) +
+            " to " + api_formatMMDDYY_(pp2.end) + " (" + ppDays + " day(s))";
+
+          outRows.push({
+            client:      clientName,
+            itemId:      itemId,
+            description: desc,
+            itemClass:   klass,
+            sidemark:    sidemark,
+            qty:         ppDays,
+            rate:        rate,
+            total:       rowTotal,
+            date:        api_formatYMD_(pp2.end),
+            notes:       notesStr,
+            taskId:      storTaskId,
+            shipmentNo:  shipNo,
+            sourceSheetId: client.id
+          });
+          totalAmount += rowTotal;
+        }
+      }
+
+    } catch (err) {
+      failed.push(client.name + " (" + (err && err.message ? err.message : String(err)) + ")");
+    }
+  });
+
+  return jsonResponse_({
+    success:      true,
+    rows:         outRows,
+    count:        outRows.length,
+    totalAmount:  totalAmount,
+    skippedItems: skipped.length > 0 ? skipped : undefined,
+    failedClients: failed.length > 0 ? failed : undefined
+  });
+}
+
+// ─── QB IIF Export Handler ──────────────────────────────────────────────────
+
+/**
+ * handleQbExport_ — generates a QuickBooks IIF file from Invoiced rows on
+ * the Consolidated_Ledger and saves it to Drive. Returns the file URL.
+ *
+ * @param {Object} payload - { source: "invoiced"|"selected", ledgerRowIds?: string[] }
+ */
+function handleQbExport_(payload) {
+  var cbId = prop_("CB_SPREADSHEET_ID");
+  if (!cbId) return errorResponse_("CB_SPREADSHEET_ID not configured", "CONFIG_ERROR");
+
+  var cbSS = SpreadsheetApp.openById(cbId);
+
+  // Load QB mappings from QB_Service_Mapping sheet
+  var mappingSh = cbSS.getSheetByName("QB_Service_Mapping");
+  if (!mappingSh || mappingSh.getLastRow() < 2) {
+    return errorResponse_("QB_Service_Mapping sheet is empty or missing. Fill it with service code → QB account mappings first.", "CONFIG_ERROR");
+  }
+  var mappingData = mappingSh.getDataRange().getValues();
+  var mapHdr = {};
+  mappingData[0].forEach(function(h, i) { mapHdr[String(h).trim().toUpperCase()] = i; });
+  var mapping = {};
+  for (var mi = 1; mi < mappingData.length; mi++) {
+    var mCode = String(mappingData[mi][mapHdr["SVC CODE"]] || "").trim().toUpperCase();
+    if (!mCode) continue;
+    mapping[mCode] = {
+      qbAccount: String(mappingData[mi][mapHdr["QB INCOME ACCOUNT"] !== undefined ? mapHdr["QB INCOME ACCOUNT"] : -1] || "").trim(),
+      qbItemName: mapHdr["QB ITEM NAME"] !== undefined ? String(mappingData[mi][mapHdr["QB ITEM NAME"]] || "").trim() : "",
+      defaultTerms: mapHdr["DEFAULT PAYMENT TERMS"] !== undefined ? String(mappingData[mi][mapHdr["DEFAULT PAYMENT TERMS"]] || "").trim() : ""
+    };
+  }
+
+  // Load client info (QB Customer Name, Payment Terms)
+  var clientsSh = cbSS.getSheetByName("Clients");
+  var clientInfoMap = {};
+  if (clientsSh && clientsSh.getLastRow() >= 2) {
+    var clData = clientsSh.getDataRange().getValues();
+    var clHdr = {};
+    clData[0].forEach(function(h, i) { clHdr[String(h).trim().toUpperCase()] = i; });
+    var clNameIdx = clHdr["CLIENT NAME"];
+    var clTermsIdx = clHdr["PAYMENT TERMS"];
+    var clQbIdx = clHdr["QB_CUSTOMER_NAME"];
+    for (var cli = 1; cli < clData.length; cli++) {
+      var clName = String(clData[cli][clNameIdx] || "").trim();
+      if (!clName) continue;
+      clientInfoMap[clName.toUpperCase()] = {
+        terms: clTermsIdx !== undefined ? String(clData[cli][clTermsIdx] || "").trim() : "",
+        qbCustomerName: clQbIdx !== undefined ? String(clData[cli][clQbIdx] || "").trim() : ""
+      };
+    }
+  }
+
+  // Read Consolidated_Ledger
+  var consolSh = cbSS.getSheetByName("Consolidated_Ledger");
+  if (!consolSh) return errorResponse_("Consolidated_Ledger sheet not found", "NOT_FOUND");
+  var consolLR = consolSh.getLastRow();
+  if (consolLR < 2) return errorResponse_("No data in Consolidated_Ledger", "NOT_FOUND");
+
+  var consolVals = consolSh.getRange(1, 1, consolLR, consolSh.getLastColumn()).getValues();
+  var consolHdr = {};
+  consolVals[0].forEach(function(h, i) { consolHdr[String(h).trim().toUpperCase()] = i; });
+
+  var cStatus = consolHdr["STATUS"];
+  var cInvNo  = consolHdr["INVOICE #"];
+  var cClient = consolHdr["CLIENT"];
+  var cDate   = consolHdr["DATE"];
+  var cSvcCode = consolHdr["SVC CODE"];
+  var cSvcName = consolHdr["SVC NAME"];
+  var cItemId  = consolHdr["ITEM ID"];
+  var cQty     = consolHdr["QTY"];
+  var cRate    = consolHdr["RATE"];
+  var cTotal   = consolHdr["TOTAL"];
+  var cNotes   = consolHdr["ITEM NOTES"];
+  var cSidemark = consolHdr["SIDEMARK"];
+  var cLedgerRowId = consolHdr["LEDGER ROW ID"];
+
+  // Optional filter by specific ledger row IDs
+  var filterIds = null;
+  if (payload.ledgerRowIds && payload.ledgerRowIds.length) {
+    filterIds = {};
+    payload.ledgerRowIds.forEach(function(id) { filterIds[String(id).trim()] = true; });
+  }
+
+  // Collect invoiced rows
+  var invoiceMap = {};
+  var invoiceOrder = [];
+
+  for (var i = 1; i < consolVals.length; i++) {
+    var status = String(consolVals[i][cStatus] || "").trim().toUpperCase();
+    if (status !== "INVOICED") continue;
+
+    if (filterIds && cLedgerRowId !== undefined) {
+      var lrid = String(consolVals[i][cLedgerRowId] || "").trim();
+      if (lrid && !filterIds[lrid]) continue;
+    }
+
+    var invNo   = String(consolVals[i][cInvNo]   || "").trim();
+    var client  = String(consolVals[i][cClient]  || "").trim();
+    var svcCode = String(consolVals[i][cSvcCode] || "").trim().toUpperCase();
+    var svcName = cSvcName !== undefined ? String(consolVals[i][cSvcName] || "").trim() : svcCode;
+    var itemId  = cItemId !== undefined ? String(consolVals[i][cItemId] || "").trim() : "";
+    var qty     = cQty !== undefined ? (Number(consolVals[i][cQty]) || 1) : 1;
+    var rate    = cRate !== undefined ? Number(consolVals[i][cRate] || 0) : 0;
+    var total   = Number(consolVals[i][cTotal] || 0);
+    var notes   = cNotes !== undefined ? String(consolVals[i][cNotes] || "").trim() : "";
+    var sidemark = cSidemark !== undefined ? String(consolVals[i][cSidemark] || "").trim() : "";
+    var dateVal = consolVals[i][cDate];
+
+    if (!invNo || !client) continue;
+
+    if (!mapping[svcCode] || !mapping[svcCode].qbAccount) continue;
+
+    var clientInfo = clientInfoMap[client.toUpperCase()] || {};
+    var qbCustName = clientInfo.qbCustomerName || client;
+    if (sidemark) qbCustName = qbCustName + ":" + sidemark;
+    var payTerms = clientInfo.terms || mapping[svcCode].defaultTerms || "";
+
+    var memoParts = [];
+    if (svcName) memoParts.push(svcName);
+    if (itemId) memoParts.push(itemId);
+    if (notes) memoParts.push(notes);
+    var memo = memoParts.join(" - ");
+
+    var invDate = api_qbFmtDate_(dateVal);
+    var dueDate = api_qbCalcDueDate_(dateVal, payTerms);
+
+    if (!invoiceMap[invNo]) {
+      invoiceMap[invNo] = { qbName: qbCustName, terms: payTerms, invDate: invDate, dueDate: dueDate, lines: [] };
+      invoiceOrder.push(invNo);
+    }
+    invoiceMap[invNo].lines.push({
+      svcName: svcName, memo: memo, qty: qty, rate: rate, total: total,
+      qbAcct: mapping[svcCode].qbAccount, qbItemName: mapping[svcCode].qbItemName || "",
+      sidemark: sidemark, svcDate: invDate
+    });
+  }
+
+  if (!invoiceOrder.length) {
+    return errorResponse_("No Invoiced rows found to export", "NOT_FOUND");
+  }
+
+  // Build IIF
+  var iifLines = [];
+  iifLines.push("!TRNS\tTRNSTYPE\tDATE\tACCNT\tNAME\tAMOUNT\tDOCNUM\tMEMO\tTERMS\tDUEDATE\tCLEAR\tTOPRINT\tOTHER1");
+  iifLines.push("!SPL\tTRNSTYPE\tDATE\tACCNT\tNAME\tAMOUNT\tDOCNUM\tMEMO\tQNTY\tPRICE\tINVITEM\tCLEAR");
+  iifLines.push("!ENDTRNS");
+
+  var lineCount = 0;
+  for (var inv = 0; inv < invoiceOrder.length; inv++) {
+    var invNo2 = invoiceOrder[inv];
+    var invData = invoiceMap[invNo2];
+    var invTotal = 0;
+    for (var l = 0; l < invData.lines.length; l++) invTotal += Number(invData.lines[l].total || 0);
+
+    var invSidemark = invData.lines.length ? (invData.lines[0].sidemark || "") : "";
+    iifLines.push([
+      "TRNS", "INVOICE", invData.invDate, "Accounts Receivable",
+      api_qbEsc_(invData.qbName), invTotal.toFixed(2), api_qbEsc_(invNo2), "",
+      api_qbEsc_(invData.terms), invData.dueDate, "N", "Y", api_qbEsc_(invSidemark)
+    ].join("\t"));
+
+    for (var li = 0; li < invData.lines.length; li++) {
+      var line = invData.lines[li];
+      iifLines.push([
+        "SPL", "INVOICE", line.svcDate || invData.invDate,
+        api_qbEsc_(line.qbAcct), api_qbEsc_(invData.qbName),
+        (Number(line.total || 0) * -1).toFixed(2), api_qbEsc_(invNo2),
+        api_qbEsc_(line.memo), line.qty, line.rate.toFixed(2),
+        api_qbEsc_(line.qbItemName), "N"
+      ].join("\t"));
+      lineCount++;
+    }
+    iifLines.push("ENDTRNS");
+  }
+
+  var iifContent = iifLines.join("\r\n");
+  var timestamp = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyyMMdd-HHmmss");
+  var fileName = "Stride_QB_Export_" + timestamp + ".iif";
+  var file = DriveApp.createFile(fileName, iifContent, MimeType.PLAIN_TEXT);
+
+  // Move to IIF export folder if configured
+  var cbSettings = cbSS.getSheetByName("Settings");
+  if (cbSettings) {
+    var settingsData = cbSettings.getDataRange().getValues();
+    for (var si = 0; si < settingsData.length; si++) {
+      if (String(settingsData[si][0] || "").trim() === "IIF_EXPORT_FOLDER_ID") {
+        var folderId = String(settingsData[si][1] || "").trim();
+        if (folderId) {
+          try { DriveApp.getFolderById(folderId).addFile(file); DriveApp.getRootFolder().removeFile(file); } catch(_) {}
+        }
+        break;
+      }
+    }
+  }
+
+  return jsonResponse_({
+    success: true,
+    invoiceCount: invoiceOrder.length,
+    lineCount: lineCount,
+    fileName: fileName,
+    fileUrl: file.getUrl()
+  });
+}
+
+/** QB IIF date format helper (MM/DD/YYYY) */
+function api_qbFmtDate_(v) {
+  if (!v) return "";
+  var d = (Object.prototype.toString.call(v) === "[object Date]" && !isNaN(v.getTime())) ? v : new Date(v);
+  if (isNaN(d.getTime())) return String(v);
+  return Utilities.formatDate(d, Session.getScriptTimeZone(), "MM/dd/yyyy");
+}
+
+/** QB due date from payment terms */
+function api_qbCalcDueDate_(dateVal, terms) {
+  var d = (Object.prototype.toString.call(dateVal) === "[object Date]" && !isNaN(dateVal.getTime()))
+    ? new Date(dateVal.getTime()) : new Date(dateVal);
+  if (isNaN(d.getTime())) return api_qbFmtDate_(dateVal);
+  var match = String(terms || "").trim().toUpperCase().match(/NET\s*(\d+)/);
+  if (match) d.setDate(d.getDate() + parseInt(match[1], 10));
+  return api_qbFmtDate_(d);
+}
+
+/** QB IIF field escape (tabs, newlines, quotes) */
+function api_qbEsc_(v) {
+  var s = String(v == null ? "" : v).replace(/\t/g, " ").replace(/\r?\n/g, " ");
+  if (s.indexOf('"') !== -1) s = '"' + s.replace(/"/g, '""') + '"';
+  return s;
+}
+
+// ─── Read Existing Unbilled Report Handler ──────────────────────────────────
+
+/**
+ * handleGetUnbilledReport_ — reads the CB Unbilled_Report sheet and returns rows as JSON.
+ * This allows the React UI to show previously-generated report data on page load.
+ */
+function handleGetUnbilledReport_() {
+  var cbId = prop_("CB_SPREADSHEET_ID");
+  if (!cbId) return errorResponse_("CB_SPREADSHEET_ID not configured", "CONFIG_ERROR");
+
+  var cbSS = SpreadsheetApp.openById(cbId);
+  var reportSheet = cbSS.getSheetByName("Unbilled_Report");
+  if (!reportSheet) return jsonResponse_({ success: true, rows: [], count: 0, message: "No Unbilled_Report sheet found" });
+
+  var lastRow = reportSheet.getLastRow();
+  if (lastRow < 2) return jsonResponse_({ success: true, rows: [], count: 0 });
+
+  var data = reportSheet.getDataRange().getValues();
+  var headers = data[0].map(function(h) { return String(h || "").trim(); });
+
+  // Build header index (case-insensitive)
+  var hMap = {};
+  headers.forEach(function(h, i) { hMap[h.toUpperCase()] = i; });
+
+  var pick = function(names) {
+    for (var n = 0; n < names.length; n++) {
+      var idx = hMap[names[n].toUpperCase()];
+      if (idx !== undefined) return idx;
+    }
+    return -1;
+  };
+
+  var iStatus   = pick(["Status", "Billing Status"]);
+  var iClient   = pick(["Client"]);
+  var iSidemark = pick(["Sidemark"]);
+  var iDate     = pick(["Date", "Service Date"]);
+  var iSvcCode  = pick(["Svc Code", "Service Code"]);
+  var iSvcName  = pick(["Svc Name", "Service Name"]);
+  var iItemId   = pick(["Item ID"]);
+  var iDesc     = pick(["Description"]);
+  var iClass    = pick(["Class"]);
+  var iQty      = pick(["Qty"]);
+  var iRate     = pick(["Rate"]);
+  var iTotal    = pick(["Total"]);
+  var iNotes    = pick(["Item Notes", "Notes"]);
+  var iTaskId   = pick(["Task ID"]);
+  var iRepairId = pick(["Repair ID"]);
+  var iShipNo   = pick(["Shipment #"]);
+  var iCategory = pick(["Category"]);
+  var iLedgerId = pick(["Ledger Row ID", "Ledger Entry ID"]);
+  var iSourceId = pick(["Source Sheet ID", "Client Sheet ID"]);
+
+  var rows = [];
+  for (var r = 1; r < data.length; r++) {
+    var row = data[r];
+    // Skip empty rows
+    var client = iClient >= 0 ? String(row[iClient] || "").trim() : "";
+    if (!client) continue;
+
+    var dateVal = iDate >= 0 ? row[iDate] : "";
+    var parsedDate = api_normalizeDateToMidnight_(dateVal);
+    var dateStr = parsedDate ? api_formatYMD_(parsedDate) : String(dateVal || "");
+
+    rows.push({
+      client:       client,
+      sidemark:     iSidemark >= 0 ? String(row[iSidemark] || "").trim() : "",
+      date:         dateStr,
+      svcCode:      iSvcCode >= 0 ? String(row[iSvcCode] || "").trim().toUpperCase() : "",
+      svcName:      iSvcName >= 0 ? String(row[iSvcName] || "").trim() : "",
+      itemId:       iItemId >= 0 ? String(row[iItemId] || "").trim() : "",
+      description:  iDesc >= 0 ? String(row[iDesc] || "").trim() : "",
+      itemClass:    iClass >= 0 ? String(row[iClass] || "").trim() : "",
+      qty:          iQty >= 0 ? (Number(row[iQty]) || 0) : 0,
+      rate:         iRate >= 0 ? (Number(row[iRate]) || 0) : 0,
+      total:        iTotal >= 0 ? (Number(row[iTotal]) || 0) : 0,
+      notes:        iNotes >= 0 ? String(row[iNotes] || "").trim() : "",
+      taskId:       iTaskId >= 0 ? String(row[iTaskId] || "").trim() : "",
+      repairId:     iRepairId >= 0 ? String(row[iRepairId] || "").trim() : "",
+      shipmentNo:   iShipNo >= 0 ? String(row[iShipNo] || "").trim() : "",
+      category:     iCategory >= 0 ? String(row[iCategory] || "").trim() : "",
+      ledgerRowId:  iLedgerId >= 0 ? String(row[iLedgerId] || "").trim() : "",
+      sourceSheetId: iSourceId >= 0 ? String(row[iSourceId] || "").trim() : ""
+    });
+  }
+
+  return jsonResponse_({ success: true, rows: rows, count: rows.length });
+}
+
+// ─── Generate Unbilled Report Handler ────────────────────────────────────────
+
+/**
+ * handleGenerateUnbilledReport_ — mirrors CB13_generateUnbilledReport from CB Unbilled Reports.js
+ *
+ * Reads all active client Billing_Ledgers and returns unbilled rows as JSON.
+ * Also writes results to CB Unbilled_Report sheet (matching CB behavior) so
+ * the data is visible in Google Sheets and persists for the React UI to read.
+ *
+ * Filters:
+ *   endDate      (required) — only rows with Date <= endDate
+ *   clientFilter (optional) — exact client name match
+ *   svcFilter    (optional) — comma-separated service code(s), e.g. "RCVG,INSP"
+ *   includeStorage (optional, default true) — whether to include STOR rows
+ *
+ * @param {Object} payload - { endDate, clientFilter?, svcFilter?, includeStorage? }
+ */
+function handleGenerateUnbilledReport_(payload) {
+  var endDateStr     = String(payload.endDate || "").trim();
+  var clientFilterRaw = String(payload.clientFilter || "").trim().toLowerCase();
+  var svcFilterRaw    = String(payload.svcFilter || "").trim().toUpperCase();
+  var includeStorage = payload.includeStorage !== false; // default true
+
+  if (!endDateStr) return errorResponse_("endDate is required (YYYY-MM-DD)", "INVALID_PAYLOAD");
+
+  var endDate = api_normalizeDateToMidnight_(endDateStr);
+  if (!endDate) return errorResponse_("Invalid endDate: " + endDateStr, "INVALID_PAYLOAD");
+  endDate.setHours(23, 59, 59, 999);
+
+  // Parse service code filter (can be comma-separated)
+  var svcCodes = svcFilterRaw ? svcFilterRaw.split(",").map(function(s) { return s.trim(); }).filter(Boolean) : [];
+  // Parse client filter (can be comma-separated)
+  var clientNames = clientFilterRaw ? clientFilterRaw.split(",").map(function(s) { return s.trim(); }).filter(Boolean) : [];
+  // Parse sidemark filter (comma-separated, case-insensitive)
+  var sidemarkFilterRaw = String(payload.sidemarkFilter || "").trim().toLowerCase();
+  var sidemarkNames = sidemarkFilterRaw ? sidemarkFilterRaw.split(",").map(function(s) { return s.trim(); }).filter(Boolean) : [];
+
+  var cbId = prop_("CB_SPREADSHEET_ID");
+  if (!cbId) return errorResponse_("CB_SPREADSHEET_ID not configured", "CONFIG_ERROR");
+
+  var cbSS     = SpreadsheetApp.openById(cbId);
+  var cbSheet  = cbSS.getSheetByName("Clients");
+  if (!cbSheet) return errorResponse_("CB Clients sheet not found", "NOT_FOUND");
+
+  // ── Read active clients ───────────────────────────────────────────────────
+  var clientsData = cbSheet.getDataRange().getValues();
+  if (clientsData.length < 2) {
+    return jsonResponse_({ success: true, rows: [], stats: { matched: 0, scanned: 0, clientsOpened: 0 } });
+  }
+
+  var cbHdr     = clientsData[0].map(function(h) { return String(h).trim(); });
+  var nameCol   = cbHdr.indexOf("Client Name");
+  var idCol     = cbHdr.indexOf("Client Spreadsheet ID");
+  var activeCol = cbHdr.indexOf("Active");
+
+  if (nameCol < 0 || idCol < 0) return errorResponse_("CB Clients tab missing required columns", "CONFIG_ERROR");
+
+  var clients = [];
+  for (var ci = 1; ci < clientsData.length; ci++) {
+    var cName   = String(clientsData[ci][nameCol] || "").trim();
+    var cId     = String(clientsData[ci][idCol]   || "").trim();
+    var cActive = activeCol >= 0 ? clientsData[ci][activeCol] : true;
+    if (!cName || !cId) continue;
+    if (cActive === false || cActive === "FALSE" || cActive === "No") continue;
+    // Apply clientFilter if provided (supports comma-separated names)
+    if (clientNames.length && clientNames.indexOf(cName.toLowerCase()) < 0) continue;
+    clients.push({ name: cName, id: cId });
+  }
+
+  if (!clients.length) {
+    return jsonResponse_({ success: true, rows: [], stats: { matched: 0, scanned: 0, clientsOpened: 0 }, message: "No matching active clients" });
+  }
+
+  var outRows = [];
+  var stats = { matched: 0, scanned: 0, clientsOpened: 0, clientsFailed: 0 };
+
+  clients.forEach(function(client) {
+    try {
+      var css    = SpreadsheetApp.openById(client.id);
+      stats.clientsOpened++;
+
+      var ledger = css.getSheetByName("Billing_Ledger");
+      if (!ledger) return;
+
+      var data = ledger.getDataRange().getValues();
+      if (!data || data.length < 2) return;
+
+      var hdrMap = api_getHeaderMap_(ledger); // 1-based
+
+      // Dual-schema picks (mirrors CB13_pickHeader_ with "Billing Status"/"Status" duality)
+      var idxStatus  = hdrMap["Status"]  !== undefined ? hdrMap["Status"]  : hdrMap["Billing Status"];
+      var idxDate    = hdrMap["Date"]    !== undefined ? hdrMap["Date"]    : hdrMap["Service Date"];
+      var idxSvcCode = hdrMap["Svc Code"] !== undefined ? hdrMap["Svc Code"] :
+                       (hdrMap["Service Code"] !== undefined ? hdrMap["Service Code"] : undefined);
+      var idxTotal   = hdrMap["Total"];
+      var idxClient  = hdrMap["Client"];
+      var idxSvcName = hdrMap["Svc Name"] !== undefined ? hdrMap["Svc Name"] : hdrMap["Service Name"];
+      var idxItemId  = hdrMap["Item ID"];
+      var idxDesc    = hdrMap["Description"];
+      var idxClass   = hdrMap["Class"];
+      var idxQty     = hdrMap["Qty"];
+      var idxRate    = hdrMap["Rate"];
+      var idxNotes   = hdrMap["Item Notes"] !== undefined ? hdrMap["Item Notes"] : hdrMap["Notes"];
+      var idxTaskId  = hdrMap["Task ID"];
+      var idxRepairId = hdrMap["Repair ID"];
+      var idxShipNo  = hdrMap["Shipment #"];
+      var idxSidemark = hdrMap["Sidemark"];
+      var idxLedgerId = hdrMap["Ledger Row ID"] !== undefined ? hdrMap["Ledger Row ID"] : hdrMap["Ledger Entry ID"];
+      var idxCategory = hdrMap["Category"];
+
+      if (!idxStatus || !idxDate || !idxSvcCode || !idxTotal || !idxClient) return; // missing required cols
+
+      // Build sidemark lookup from Inventory (fallback when ledger row has no sidemark)
+      var sidemarkByItemId = {};
+      try {
+        var invSh = css.getSheetByName("Inventory");
+        if (invSh && invSh.getLastRow() > 1) {
+          var invMap = api_getHeaderMap_(invSh);
+          var invIdxId = invMap["Item ID"];
+          var invIdxSm = invMap["Sidemark"];
+          if (invIdxId && invIdxSm) {
+            var invData = invSh.getDataRange().getValues();
+            for (var ir = 1; ir < invData.length; ir++) {
+              var iid = String(invData[ir][invIdxId - 1] || "").trim();
+              var ism = String(invData[ir][invIdxSm - 1] || "").trim();
+              if (iid) sidemarkByItemId[iid] = ism;
+            }
+          }
+        }
+      } catch (eSm) { /* Sidemark lookup non-critical */ }
+
+      for (var r = 1; r < data.length; r++) {
+        stats.scanned++;
+        var row = data[r];
+
+        var statusRaw = String(row[idxStatus - 1] == null ? "" : row[idxStatus - 1]).trim().toLowerCase();
+        if (statusRaw && statusRaw !== "unbilled") continue;
+
+        var rowDate = api_normalizeDateToMidnight_(row[idxDate - 1]);
+        if (!rowDate) continue;
+        if (rowDate.getTime() > endDate.getTime()) continue;
+
+        var svcCode = String(row[idxSvcCode - 1] || "").trim().toUpperCase();
+
+        // Apply svc code filter
+        if (svcCodes.length > 0 && svcCodes.indexOf(svcCode) === -1) continue;
+
+        // Apply storage filter
+        if (!includeStorage && svcCode === "STOR") continue;
+
+        var itemId   = idxItemId  ? String(row[idxItemId  - 1] || "").trim() : "";
+        var sidemark = idxSidemark ? String(row[idxSidemark - 1] || "").trim() : "";
+        if (!sidemark && itemId) sidemark = sidemarkByItemId[itemId] || "";
+
+        // Apply sidemark filter if provided
+        if (sidemarkNames.length && sidemarkNames.indexOf(sidemark.toLowerCase()) < 0) continue;
+
+        outRows.push({
+          client:     String(row[idxClient - 1] || "").trim() || client.name,
+          sidemark:   sidemark,
+          date:       api_formatYMD_(rowDate),  // YYYYMMDD for sorting; UI formats for display
+          svcCode:    svcCode,
+          svcName:    idxSvcName   ? String(row[idxSvcName   - 1] || "") : "",
+          itemId:     itemId,
+          description: idxDesc    ? String(row[idxDesc    - 1] || "") : "",
+          itemClass:  idxClass     ? String(row[idxClass   - 1] || "") : "",
+          qty:        idxQty       ? (Number(row[idxQty    - 1]) || 0)  : 0,
+          rate:       idxRate      ? (Number(row[idxRate   - 1]) || 0)  : 0,
+          total:      Number(row[idxTotal - 1]) || 0,
+          notes:      idxNotes     ? String(row[idxNotes   - 1] || "") : "",
+          taskId:     idxTaskId    ? String(row[idxTaskId  - 1] || "") : "",
+          repairId:   idxRepairId  ? String(row[idxRepairId- 1] || "") : "",
+          shipmentNo: idxShipNo    ? String(row[idxShipNo  - 1] || "") : "",
+          category:   idxCategory  ? String(row[idxCategory- 1] || "") : "",
+          ledgerRowId: idxLedgerId ? String(row[idxLedgerId- 1] || "") : "",
+          sourceSheetId: client.id
+        });
+        stats.matched++;
+      }
+
+    } catch (err) {
+      stats.clientsFailed = (stats.clientsFailed || 0) + 1;
+      Logger.log("handleGenerateUnbilledReport_ error for " + client.name + ": " + err);
+    }
+  });
+
+  // Sort by client, then date descending
+  outRows.sort(function(a, b) {
+    if (a.client < b.client) return -1;
+    if (a.client > b.client) return 1;
+    return b.date.localeCompare(a.date);
+  });
+
+  // ── Write results to CB Unbilled_Report sheet (mirrors CB13 behavior) ──
+  // This keeps Google Sheets and React UI in sync.
+  try {
+    var reportHeaders = ["Status","Client","Sidemark","Date","Svc Code","Svc Name",
+      "Item ID","Description","Class","Qty","Rate","Total",
+      "Item Notes","Ledger Row ID","Source Sheet ID","Task ID","Repair ID","Shipment #","Category"];
+
+    var reportSheet = cbSS.getSheetByName("Unbilled_Report");
+    if (!reportSheet) {
+      reportSheet = cbSS.insertSheet("Unbilled_Report");
+    }
+
+    // Clear data rows (preserve header row and formatting)
+    if (reportSheet.getLastRow() > 1) {
+      reportSheet.getRange(2, 1, reportSheet.getLastRow() - 1, reportSheet.getLastColumn() || reportHeaders.length).clearContent();
+    }
+
+    // Ensure headers exist
+    var existingHeaders = reportSheet.getLastColumn() >= 1
+      ? reportSheet.getRange(1, 1, 1, reportSheet.getLastColumn()).getValues()[0].map(function(h) { return String(h || "").trim(); }).filter(Boolean)
+      : [];
+    if (existingHeaders.length < 3) {
+      reportSheet.getRange(1, 1, 1, reportHeaders.length).setValues([reportHeaders]).setFontWeight("bold");
+      existingHeaders = reportHeaders;
+    }
+
+    // Build sheet rows in header order
+    if (outRows.length > 0) {
+      var sheetRows = outRows.map(function(r) {
+        var hdrMap = {
+          "STATUS": "Unbilled", "CLIENT": r.client, "SIDEMARK": r.sidemark,
+          "DATE": r.date, "SVC CODE": r.svcCode, "SVC NAME": r.svcName,
+          "ITEM ID": r.itemId, "DESCRIPTION": r.description, "CLASS": r.itemClass,
+          "QTY": r.qty, "RATE": r.rate, "TOTAL": r.total,
+          "ITEM NOTES": r.notes, "LEDGER ROW ID": r.ledgerRowId,
+          "SOURCE SHEET ID": r.sourceSheetId, "TASK ID": r.taskId,
+          "REPAIR ID": r.repairId, "SHIPMENT #": r.shipmentNo, "CATEGORY": r.category
+        };
+        return existingHeaders.map(function(h) {
+          return hdrMap[h.toUpperCase()] !== undefined ? hdrMap[h.toUpperCase()] : "";
+        });
+      });
+      reportSheet.getRange(2, 1, sheetRows.length, existingHeaders.length).setValues(sheetRows);
+    }
+  } catch (writeErr) {
+    Logger.log("handleGenerateUnbilledReport_ sheet write warning: " + writeErr);
+    // Non-fatal — JSON response is still returned
+  }
+
+  return jsonResponse_({
+    success:  true,
+    rows:     outRows,
+    stats:    stats
+  });
+}
+
+// ─── Phase 7B #11/#12: Invoice Helpers ────────────────────────────────────────
+
+/**
+ * Get next invoice number from Master RPC (action=getNextInvoiceId).
+ */
+function api_nextInvoiceNo_(rpcUrl, rpcToken) {
+  var resp = UrlFetchApp.fetch(rpcUrl, {
+    method: "post",
+    contentType: "application/json",
+    payload: JSON.stringify({ action: "getNextInvoiceId", token: rpcToken }),
+    muteHttpExceptions: true,
+    followRedirects: true
+  });
+  var code = resp.getResponseCode();
+  if (code < 200 || code >= 300) throw new Error("Master RPC invoice id failed (" + code + ")");
+  var obj = JSON.parse(resp.getContentText());
+  return obj.shipmentNo || obj.id || obj.invoiceId || null;
+}
+
+/**
+ * Format a number as money string: "$1234.56"
+ */
+function api_money_(v) {
+  var n = Number(v);
+  return isNaN(n) ? "$0.00" : "$" + n.toFixed(2);
+}
+
+/**
+ * Build invoice line items from UnbilledReportRow array.
+ * Mirrors CB13_buildLineItemsData_: STOR rows grouped by sidemark, non-STOR rows individual.
+ * Returns { rows: Array<[7 cols]>, subtotal, storageSubtotal, servicesSubtotal }
+ * 7 cols: [Service Date, Service, Item ID, Notes, Qty, Rate, Total]
+ */
+function api_buildInvoiceLineItems_(rows) {
+  var subtotal = 0, storageSubtotal = 0, servicesSubtotal = 0;
+  var outRows = [];
+
+  function fmtDate(d) {
+    if (!d) return "";
+    var s = String(d);
+    if (/^\d{8}$/.test(s)) return s.substring(4,6) + "/" + s.substring(6,8) + "/" + s.substring(0,4);
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+      var p = s.split("-"); return p[1] + "/" + p[2] + "/" + p[0];
+    }
+    return s;
+  }
+
+  var storageByKey = {}, storageOrder = [], nonStorageRows = [];
+  for (var i = 0; i < rows.length; i++) {
+    var r = rows[i];
+    var svcCode = String(r.svcCode || "").trim().toUpperCase();
+    if (svcCode === "STOR") {
+      var sm = String(r.sidemark || "").trim() || "(No Sidemark)";
+      if (!storageByKey[sm]) {
+        storageByKey[sm] = { sidemark: sm, totalCuFt: 0, total: 0, minDate: null, maxDate: null, itemCount: 0 };
+        storageOrder.push(sm);
+      }
+      var grp = storageByKey[sm];
+      grp.total     += Number(r.total) || 0;
+      grp.totalCuFt += Number(r.qty)   || 0;
+      grp.itemCount++;
+      var dStr = String(r.date || "");
+      if (dStr) {
+        if (!grp.minDate || dStr < grp.minDate) grp.minDate = dStr;
+        if (!grp.maxDate || dStr > grp.maxDate) grp.maxDate = dStr;
+      }
+    } else {
+      nonStorageRows.push(r);
+    }
+  }
+
+  // Storage: one summary row per sidemark
+  for (var s = 0; s < storageOrder.length; s++) {
+    var grp = storageByKey[storageOrder[s]];
+    var period = "";
+    if (grp.minDate && grp.maxDate && grp.minDate !== grp.maxDate) {
+      period = fmtDate(grp.minDate) + " - " + fmtDate(grp.maxDate);
+    } else if (grp.minDate) {
+      period = fmtDate(grp.minDate);
+    }
+    var notes = grp.itemCount + " items" + (grp.totalCuFt ? ", " + grp.totalCuFt.toFixed(2) + " cuFt" : "");
+    subtotal += grp.total; storageSubtotal += grp.total;
+    outRows.push([period, "Storage - " + grp.sidemark, "", notes, "", "", api_money_(grp.total)]);
+  }
+
+  // Non-storage: individual rows
+  for (var j = 0; j < nonStorageRows.length; j++) {
+    var r = nonStorageRows[j];
+    var total = Number(r.total) || 0;
+    subtotal += total; servicesSubtotal += total;
+    outRows.push([
+      fmtDate(r.date || ""),
+      String(r.svcName || ""),
+      String(r.itemId || ""),
+      String(r.sidemark || r.notes || ""),
+      String(r.qty !== undefined && r.qty !== null ? r.qty : 1),
+      api_money_(r.rate),
+      api_money_(total)
+    ]);
+  }
+
+  return { rows: outRows, subtotal: subtotal, storageSubtotal: storageSubtotal, servicesSubtotal: servicesSubtotal };
+}
+
+/**
+ * Get or create "Invoices" subfolder in client's DRIVE_PARENT_FOLDER_ID.
+ * Falls back to CB parent folder → root.
+ */
+function api_getOrCreateClientInvoiceFolder_(clientSS, cbSS, clientName) {
+  try {
+    var clientSettings = api_readSettings_(clientSS);
+    var parentFolderId = String(clientSettings["DRIVE_PARENT_FOLDER_ID"] || "").trim();
+    if (parentFolderId) {
+      var parent = DriveApp.getFolderById(parentFolderId);
+      var it = parent.getFoldersByName("Invoices");
+      return it.hasNext() ? it.next() : parent.createFolder("Invoices");
+    }
+  } catch (_) {}
+  try {
+    var cbParents = DriveApp.getFileById(cbSS.getId()).getParents();
+    var cbParent  = cbParents.hasNext() ? cbParents.next() : DriveApp.getRootFolder();
+    var it2 = cbParent.getFoldersByName("Invoices");
+    return it2.hasNext() ? it2.next() : cbParent.createFolder("Invoices");
+  } catch (_) {
+    return DriveApp.getRootFolder();
+  }
+}
+
+/**
+ * Append one row to CB Consolidated_Ledger with header-mapped columns.
+ * Hyperlinks Invoice # and Invoice URL cells.
+ */
+function api_writeConsolidatedLedgerRow_(consolLedger, payload) {
+  var hdr   = api_getHeaderMap_(consolLedger);
+  var ncols = consolLedger.getLastColumn() || 1;
+  var row   = new Array(ncols).fill("");
+
+  function set(name, val) {
+    var col = hdr[name];
+    if (col !== undefined && col >= 1 && col <= ncols) {
+      row[col - 1] = (val !== undefined && val !== null) ? val : "";
+    }
+  }
+  set("Status",          payload.status         || "");
+  set("Invoice #",       payload.invoiceNo       || "");
+  set("Client",          payload.client          || "");
+  set("Client Sheet ID", payload.clientSheetId   || "");
+  set("Ledger Row ID",   payload.ledgerRowId      || "");
+  set("Date",            payload.date            || "");
+  set("Svc Code",        payload.svcCode         || "");
+  set("Svc Name",        payload.svcName         || "");
+  set("Item ID",         payload.itemId          || "");
+  set("Description",     payload.description     || "");
+  set("Class",           payload.klass           || "");
+  set("Qty",             payload.qty   !== undefined ? payload.qty   : "");
+  set("Rate",            payload.rate  !== undefined ? payload.rate  : "");
+  set("Total",           payload.total !== undefined ? payload.total : "");
+  set("Task ID",         payload.taskId          || "");
+  set("Repair ID",       payload.repairId        || "");
+  set("Shipment #",      payload.shipNo          || "");
+  set("Item Notes",      payload.notes           || "");
+  set("Email Status",    payload.emailStatus     || "");
+  set("Invoice URL",     payload.invoiceUrl      || "");
+
+  var insertRow = api_getLastDataRow_(consolLedger) + 1;
+  consolLedger.getRange(insertRow, 1, 1, ncols).setValues([row]);
+
+  var invUrl = String(payload.invoiceUrl || "").trim();
+  if (invUrl) {
+    var invNoCol  = hdr["Invoice #"];
+    var invUrlCol = hdr["Invoice URL"];
+    var invNo     = String(payload.invoiceNo || "").trim();
+    if (invNoCol && invNo) {
+      try {
+        consolLedger.getRange(insertRow, invNoCol).setRichTextValue(
+          SpreadsheetApp.newRichTextValue().setText(invNo).setLinkUrl(invUrl).build()
+        );
+      } catch (_) {}
+    }
+    if (invUrlCol) {
+      try {
+        consolLedger.getRange(insertRow, invUrlCol).setRichTextValue(
+          SpreadsheetApp.newRichTextValue().setText("View Invoice").setLinkUrl(invUrl).build()
+        );
+      } catch (_) {}
+    }
+  }
+}
+
+/**
+ * Mark rows in client Billing_Ledger as Invoiced.
+ * Writes Status=Invoiced, Invoice #, Invoice Date, Invoice URL.
+ */
+function api_markClientLedgerInvoiced_(clientSheetId, ledgerRowIds, invNo, invDate, invUrl) {
+  if (!ledgerRowIds || !ledgerRowIds.length) return 0;
+  var ss = SpreadsheetApp.openById(clientSheetId);
+  var sh = ss.getSheetByName("Billing_Ledger");
+  if (!sh) throw new Error("Client missing Billing_Ledger");
+
+  var hdr         = api_getHeaderMap_(sh);
+  var idxLedgerId = hdr["Ledger Row ID"];
+  var idxStatus   = hdr["Status"] || hdr["Billing Status"];
+  var idxInvNo    = hdr["Invoice #"];
+  var idxInvDate  = hdr["Invoice Date"];
+  var idxInvUrl   = hdr["Invoice URL"];
+
+  if (!idxLedgerId) throw new Error("Billing_Ledger missing Ledger Row ID column");
+  if (!idxStatus)   throw new Error("Billing_Ledger missing Status column");
+
+  var data = sh.getDataRange().getValues();
+  var rowByLedgerId = {};
+  for (var r = 1; r < data.length; r++) {
+    var lid = String(data[r][idxLedgerId - 1] || "").trim();
+    if (lid) rowByLedgerId[lid] = r + 1;
+  }
+
+  var touched = 0;
+  for (var i = 0; i < ledgerRowIds.length; i++) {
+    var rowNum = rowByLedgerId[String(ledgerRowIds[i]).trim()];
+    if (!rowNum) continue;
+    sh.getRange(rowNum, idxStatus).setValue("Invoiced");
+    if (idxInvNo)   sh.getRange(rowNum, idxInvNo).setValue(invNo);
+    if (idxInvDate) sh.getRange(rowNum, idxInvDate).setValue(invDate);
+    if (idxInvUrl)  sh.getRange(rowNum, idxInvUrl).setValue(invUrl);
+    touched++;
+  }
+  return touched;
+}
+
+/**
+ * Email invoice PDF to client + notification emails (mirrors emailInvoiceToClient_).
+ */
+function api_emailInvoice_(clientSheetId, invNo, pdfFile) {
+  var ss          = SpreadsheetApp.openById(clientSheetId);
+  var settings    = api_readSettings_(ss);
+  var clientEmail = String(settings["CLIENT_EMAIL"]          || "").trim();
+  var clientName  = String(settings["CLIENT_NAME"]           || "").trim() || "Client";
+  var staffEmails = String(settings["NOTIFICATION_EMAILS"]   || "").trim();
+  if (!clientEmail) throw new Error("Client has no CLIENT_EMAIL setting");
+
+  var allRecipients = clientEmail;
+  if (staffEmails) allRecipients += "," + staffEmails;
+
+  GmailApp.sendEmail(allRecipients,
+    "Invoice " + invNo + " \u2014 Stride Logistics",
+    "",
+    {
+      htmlBody:
+        "<p>Hi " + clientName + ",</p>" +
+        "<p>Your invoice <b>" + invNo + "</b> is attached.</p>" +
+        "<p>Thank you,<br/>Stride Logistics</p>",
+      attachments: [pdfFile.getBlob()],
+      from: "whse@stridenw.com"
+    }
+  );
+}
+
+// ─── Phase 7B #11: Create Invoice ─────────────────────────────────────────────
+
+/**
+ * handleCreateInvoice_ — Create, PDF, and email one invoice for one client.
+ * Mirrors CB13_commitInvoice. Called once per client group from the React app.
+ *
+ * Payload: {
+ *   idempotencyKey: string,         // UUID — guards against double-submit
+ *   rows: UnbilledReportRow[],      // from generateUnbilledReport, all same sourceSheetId
+ *   client: string,                 // client name
+ *   sidemark?: string,              // optional (for sidemark-grouped invoices)
+ *   sourceSheetId: string           // client spreadsheet ID
+ * }
+ */
+function handleCreateInvoice_(payload) {
+  var idempotencyKey = String(payload.idempotencyKey || "").trim();
+  var rows           = Array.isArray(payload.rows) ? payload.rows : [];
+  var client         = String(payload.client         || "").trim();
+  var sidemark       = String(payload.sidemark        || "").trim();
+  var sourceSheetId  = String(payload.sourceSheetId   || "").trim();
+
+  if (!rows.length)    return errorResponse_("No rows provided", "INVALID_PAYLOAD");
+  if (!client)         return errorResponse_("Missing client name", "INVALID_PAYLOAD");
+  if (!sourceSheetId)  return errorResponse_("Missing sourceSheetId", "INVALID_PAYLOAD");
+
+  // Validate all rows belong to the same client sheet
+  for (var i = 0; i < rows.length; i++) {
+    var rowSheetId = String(rows[i].sourceSheetId || "").trim();
+    if (rowSheetId && rowSheetId !== sourceSheetId) {
+      return errorResponse_(
+        "BLOCKED: rows from multiple clients detected — all rows must belong to the same sourceSheetId",
+        "MIXED_CLIENTS"
+      );
+    }
+  }
+
+  // Open CB sheet + read settings
+  var cbId = prop_("CB_SPREADSHEET_ID");
+  if (!cbId) return errorResponse_("CB_SPREADSHEET_ID not configured", "CONFIG_ERROR");
+  var cbSS       = SpreadsheetApp.openById(cbId);
+  var cbSettings = api_readSettings_(cbSS);
+
+  var masterRpcUrl        = String(cbSettings["MASTER_RPC_URL"]              || "").trim();
+  var masterRpcToken      = String(cbSettings["MASTER_RPC_TOKEN"]             || "").trim();
+  var masterFolderId      = String(cbSettings["MASTER_ACCOUNTING_FOLDER_ID"]  || "").trim();
+  var masterSpreadsheetId = String(cbSettings["MASTER_SPREADSHEET_ID"]        || "").trim();
+
+  if (!masterRpcUrl)        return errorResponse_("Missing MASTER_RPC_URL in CB Settings",              "CONFIG_ERROR");
+  if (!masterRpcToken)      return errorResponse_("Missing MASTER_RPC_TOKEN in CB Settings",            "CONFIG_ERROR");
+  if (!masterFolderId)      return errorResponse_("Missing MASTER_ACCOUNTING_FOLDER_ID in CB Settings", "CONFIG_ERROR");
+  if (!masterSpreadsheetId) return errorResponse_("Missing MASTER_SPREADSHEET_ID in CB Settings",       "CONFIG_ERROR");
+
+  // Idempotency: if all ledger row IDs already appear in Consolidated_Ledger with an invoice #, return that invoice
+  var ledgerRowIds = rows.map(function(r) { return String(r.ledgerRowId || "").trim(); }).filter(Boolean);
+  if (idempotencyKey && ledgerRowIds.length > 0) {
+    var cl0 = cbSS.getSheetByName("Consolidated_Ledger");
+    if (cl0 && cl0.getLastRow() > 1) {
+      var cData0  = cl0.getDataRange().getValues();
+      var cHdr0   = api_getHeaderMap_(cl0);
+      var cLidCol = cHdr0["Ledger Row ID"];
+      var cInvCol = cHdr0["Invoice #"];
+      if (cLidCol && cInvCol) {
+        var existingInvMap = {};
+        for (var r0 = 1; r0 < cData0.length; r0++) {
+          var eLid = String(cData0[r0][cLidCol - 1] || "").trim();
+          var eInv = String(cData0[r0][cInvCol  - 1] || "").trim();
+          if (eLid && eInv) existingInvMap[eLid] = eInv;
+        }
+        var matchedNos = {}, allMatched = true;
+        for (var k = 0; k < ledgerRowIds.length; k++) {
+          var ex = existingInvMap[ledgerRowIds[k]];
+          if (ex) matchedNos[ex] = true;
+          else { allMatched = false; break; }
+        }
+        if (allMatched) {
+          return jsonResponse_({ success: true, alreadyProcessed: true, invoiceNo: Object.keys(matchedNos)[0] });
+        }
+      }
+    }
+  }
+
+  // Get invoice number from Master RPC
+  var invNo = api_nextInvoiceNo_(masterRpcUrl, masterRpcToken);
+  if (!invNo) return errorResponse_("Master RPC returned no invoice number", "RPC_ERROR");
+
+  var invDate    = new Date();
+  var invDateStr = Utilities.formatDate(invDate, Session.getScriptTimeZone(), "MM/dd/yyyy");
+
+  // Get payment terms from client Settings
+  var paymentTerms = "Due upon receipt";
+  var clientSS;
+  try {
+    clientSS = SpreadsheetApp.openById(sourceSheetId);
+    var cst = api_readSettings_(clientSS);
+    if (cst["PAYMENT_TERMS"]) paymentTerms = String(cst["PAYMENT_TERMS"]).trim();
+  } catch (_) {}
+
+  // Build line items
+  var li         = api_buildInvoiceLineItems_(rows);
+  var grandTotal = li.subtotal;
+  var docTitle   = "Invoice " + invNo + " \u2014 " + client + (sidemark ? " \u2014 " + sidemark : "");
+
+  // Get invoice template Doc ID from Master Price List
+  var masterSS       = SpreadsheetApp.openById(masterSpreadsheetId);
+  var masterSettings = api_readSettings_(masterSS);
+  var templateDocId  = String(masterSettings["DOC_INVOICE_TEMPLATE_ID"] || "").trim();
+  if (!templateDocId) {
+    return errorResponse_(
+      "Missing DOC_INVOICE_TEMPLATE_ID in Master Price List Settings. Run 'Create Doc Templates' first.",
+      "CONFIG_ERROR"
+    );
+  }
+
+  // Copy template → populate → export PDF → save to Drive → trash temp Doc
+  var copyFile = DriveApp.getFileById(templateDocId).makeCopy(docTitle);
+  var pdfFile;
+
+  try {
+    var doc  = DocumentApp.openById(copyFile.getId());
+    var body = doc.getBody();
+    body.replaceText("\\{\\{INV_NO\\}\\}",       invNo);
+    body.replaceText("\\{\\{CLIENT_NAME\\}\\}",   client);
+    body.replaceText("\\{\\{INV_DATE\\}\\}",      invDateStr);
+    body.replaceText("\\{\\{PAYMENT_TERMS\\}\\}", paymentTerms);
+    body.replaceText("\\{\\{DUE_DATE\\}\\}",      invDateStr);
+    body.replaceText("\\{\\{SUBTOTAL\\}\\}",      api_money_(li.subtotal));
+    body.replaceText("\\{\\{GRAND_TOTAL\\}\\}",   api_money_(grandTotal));
+
+    // Populate line items table (find by "Service Date" header cell)
+    var tables = body.getTables();
+    var itemsTable = null;
+    for (var ti = 0; ti < tables.length; ti++) {
+      var firstRow = tables[ti].getRow(0);
+      if (firstRow && firstRow.getNumCells() >= 5) {
+        var cellText = firstRow.getCell(0).getText().trim();
+        if (cellText === "Service Date" || cellText === "{{LINE_ITEMS_HEADER}}") {
+          itemsTable = tables[ti]; break;
+        }
+      }
+    }
+    if (itemsTable) {
+      while (itemsTable.getNumRows() > 1) itemsTable.removeRow(1);
+      for (var ri = 0; ri < li.rows.length; ri++) {
+        var rowData = li.rows[ri];
+        var newRow  = itemsTable.appendTableRow();
+        for (var ci = 0; ci < rowData.length; ci++) {
+          var cell = newRow.appendTableCell(String(rowData[ci] || ""));
+          cell.setFontSize(10);
+          cell.setPaddingTop(4);  cell.setPaddingBottom(4);
+          cell.setPaddingLeft(6); cell.setPaddingRight(6);
+          if (ci >= 4) cell.getChild(0).asParagraph().setAlignment(DocumentApp.HorizontalAlignment.RIGHT);
+        }
+      }
+    }
+    body.replaceText("\\{\\{DISCOUNT_ROWS\\}\\}",       "");
+    body.replaceText("\\{\\{INVOICE_NOTES_BLOCK\\}\\}",  "");
+    doc.saveAndClose();
+
+    // Export PDF (0.25" margins)
+    var pdfUrl = "https://docs.google.com/document/d/" + copyFile.getId() +
+      "/export?format=pdf&size=letter&portrait=true&fitw=true&top=0.25&bottom=0.25&left=0.25&right=0.25";
+    var pdfResp = UrlFetchApp.fetch(pdfUrl, {
+      headers: { Authorization: "Bearer " + ScriptApp.getOAuthToken() },
+      muteHttpExceptions: true
+    });
+    if (pdfResp.getResponseCode() !== 200) {
+      throw new Error("PDF export failed (" + pdfResp.getResponseCode() + ")");
+    }
+    var pdfBlob = pdfResp.getBlob().setName(docTitle + ".pdf");
+
+    // Save to client Invoices folder
+    if (!clientSS) clientSS = SpreadsheetApp.openById(sourceSheetId);
+    pdfFile = api_getOrCreateClientInvoiceFolder_(clientSS, cbSS, client).createFile(pdfBlob);
+
+    // Copy to Master Accounting folder
+    DriveApp.getFolderById(masterFolderId).createFile(pdfBlob).setName(docTitle + ".pdf");
+
+  } finally {
+    try { copyFile.setTrashed(true); } catch (_) {}
+  }
+
+  var invoiceUrl = pdfFile ? pdfFile.getUrl() : "";
+  var warnings   = [];
+
+  // Write rows to CB Consolidated_Ledger (dedup by ledgerRowId)
+  var consolLedger = cbSS.getSheetByName("Consolidated_Ledger");
+  if (!consolLedger) consolLedger = cbSS.insertSheet("Consolidated_Ledger");
+
+  var existingIds = {};
+  if (consolLedger.getLastRow() > 1) {
+    var cData = consolLedger.getDataRange().getValues();
+    var cHdr  = api_getHeaderMap_(consolLedger);
+    var cLid  = cHdr["Ledger Row ID"];
+    if (cLid) {
+      for (var xi = 1; xi < cData.length; xi++) {
+        var xid = String(cData[xi][cLid - 1] || "").trim();
+        if (xid) existingIds[xid] = true;
+      }
+    }
+  }
+  for (var ri2 = 0; ri2 < rows.length; ri2++) {
+    var row2 = rows[ri2];
+    var lid2 = String(row2.ledgerRowId || "").trim();
+    if (lid2 && existingIds[lid2]) continue;
+    api_writeConsolidatedLedgerRow_(consolLedger, {
+      status:        "Invoiced",
+      invoiceNo:     invNo,
+      client:        row2.client      || client,
+      clientSheetId: sourceSheetId,
+      ledgerRowId:   lid2,
+      date:          row2.date        || "",
+      svcCode:       row2.svcCode     || "",
+      svcName:       row2.svcName     || "",
+      itemId:        row2.itemId      || "",
+      description:   row2.description || "",
+      klass:         row2.itemClass   || "",
+      qty:           row2.qty,
+      rate:          row2.rate,
+      total:         row2.total,
+      taskId:        row2.taskId      || "",
+      repairId:      row2.repairId    || "",
+      shipNo:        row2.shipmentNo  || "",
+      notes:         row2.sidemark    || row2.notes || "",
+      emailStatus:   "",
+      invoiceUrl:    invoiceUrl
+    });
+    if (lid2) existingIds[lid2] = true;
+  }
+
+  // Update client Billing_Ledger rows to Invoiced
+  try {
+    api_markClientLedgerInvoiced_(sourceSheetId, ledgerRowIds, invNo, invDate, invoiceUrl);
+  } catch (ledgerErr) {
+    warnings.push("Ledger update warning: " + ledgerErr.message);
+  }
+
+  // Email invoice to client
+  var emailStatus = "Not Sent";
+  try {
+    api_emailInvoice_(sourceSheetId, invNo, pdfFile);
+    emailStatus = "Sent";
+  } catch (emailErr) {
+    emailStatus = "Failed";
+    warnings.push("Email failed: " + emailErr.message);
+  }
+
+  // Update Email Status in Consolidated_Ledger
+  try {
+    var cVals = consolLedger.getDataRange().getValues();
+    var escIdx = cVals[0].map(String).indexOf("Email Status");
+    var einIdx = cVals[0].map(String).indexOf("Invoice #");
+    if (escIdx !== -1 && einIdx !== -1) {
+      for (var ei = 1; ei < cVals.length; ei++) {
+        if (String(cVals[ei][einIdx] || "").trim() === invNo) {
+          consolLedger.getRange(ei + 1, escIdx + 1).setValue(emailStatus);
+        }
+      }
+    }
+  } catch (_) {}
+
+  return jsonResponse_({
+    success:       true,
+    invoiceNo:     invNo,
+    invoiceUrl:    invoiceUrl,
+    emailStatus:   emailStatus,
+    grandTotal:    grandTotal,
+    lineItemCount: rows.length,
+    warnings:      warnings.length ? warnings : undefined
+  });
+}
+
+// ─── Phase 7B #12: Resend Invoice Email ───────────────────────────────────────
+
+/**
+ * handleResendInvoiceEmail_ — Re-send invoice PDF email for an existing invoice.
+ * Mirrors CB13_resendInvoiceEmail. Looks up PDF URL from Consolidated_Ledger.
+ *
+ * Payload: { invoiceNo: string, clientSheetId: string }
+ */
+function handleResendInvoiceEmail_(payload) {
+  var invoiceNo     = String(payload.invoiceNo     || "").trim();
+  var clientSheetId = String(payload.clientSheetId || "").trim();
+
+  if (!invoiceNo)     return errorResponse_("Missing invoiceNo",     "INVALID_PAYLOAD");
+  if (!clientSheetId) return errorResponse_("Missing clientSheetId", "INVALID_PAYLOAD");
+
+  var cbId = prop_("CB_SPREADSHEET_ID");
+  if (!cbId) return errorResponse_("CB_SPREADSHEET_ID not configured", "CONFIG_ERROR");
+  var cbSS         = SpreadsheetApp.openById(cbId);
+  var consolLedger = cbSS.getSheetByName("Consolidated_Ledger");
+  if (!consolLedger) return errorResponse_("Consolidated_Ledger not found", "NOT_FOUND");
+
+  var data = consolLedger.getDataRange().getValues();
+  var hdr  = api_getHeaderMap_(consolLedger);
+
+  var invNoCol       = hdr["Invoice #"];
+  var invUrlCol      = hdr["Invoice URL"];
+  var cSheetIdCol    = hdr["Client Sheet ID"];
+  var emailStatusCol = hdr["Email Status"];
+
+  if (!invNoCol) return errorResponse_("Consolidated_Ledger missing Invoice # column", "SCHEMA_ERROR");
+
+  // Scan for invoice — capture PDF URL and clientSheetId for validation
+  var invoiceUrl = "", foundClientSheetId = "";
+  for (var i = 1; i < data.length; i++) {
+    if (String(data[i][invNoCol - 1] || "").trim() !== invoiceNo) continue;
+    if (!foundClientSheetId && cSheetIdCol) {
+      foundClientSheetId = String(data[i][cSheetIdCol - 1] || "").trim();
+    }
+    if (!invoiceUrl && invUrlCol) {
+      try {
+        var rt = consolLedger.getRange(i + 1, invUrlCol).getRichTextValue();
+        if (rt) invoiceUrl = rt.getLinkUrl() || "";
+      } catch (_) {}
+      if (!invoiceUrl) invoiceUrl = String(data[i][invUrlCol - 1] || "").trim();
+    }
+    if (foundClientSheetId && invoiceUrl) break;
+  }
+
+  if (!invoiceUrl) {
+    return errorResponse_(
+      "No Invoice URL found for " + invoiceNo + ". Invoice may not have been created via the app.",
+      "NOT_FOUND"
+    );
+  }
+  if (foundClientSheetId && foundClientSheetId !== clientSheetId) {
+    return errorResponse_("Invoice " + invoiceNo + " does not belong to the provided clientSheetId", "AUTH_ERROR");
+  }
+
+  // Get PDF from Drive (parse file ID from URL)
+  var fileIdMatch = invoiceUrl.match(/[-\w]{25,}/);
+  if (!fileIdMatch) return errorResponse_("Cannot parse Drive file ID from Invoice URL", "INVALID_URL");
+
+  var pdfFile;
+  try {
+    pdfFile = DriveApp.getFileById(fileIdMatch[0]);
+  } catch (driveErr) {
+    return errorResponse_("Could not load PDF from Drive: " + driveErr.message, "DRIVE_ERROR");
+  }
+
+  // Email
+  try {
+    api_emailInvoice_(clientSheetId, invoiceNo, pdfFile);
+  } catch (emailErr) {
+    return errorResponse_("Email failed: " + emailErr.message, "EMAIL_ERROR");
+  }
+
+  // Update Email Status → "Re-sent"
+  if (emailStatusCol) {
+    try {
+      for (var j = 1; j < data.length; j++) {
+        if (String(data[j][invNoCol - 1] || "").trim() === invoiceNo) {
+          consolLedger.getRange(j + 1, emailStatusCol).setValue("Re-sent");
+        }
+      }
+    } catch (_) {}
+  }
+
+  return jsonResponse_({ success: true, invoiceNo: invoiceNo, emailStatus: "Re-sent" });
+}
+
+/* ================================================================
+   Helper: Upsert client user in CB Users tab
+   Called by handleOnboardClient_ and handleUpdateClient_.
+   Finds user by clientSheetId first (stable), falls back to email.
+   Creates new Active=TRUE client row if nothing found.
+   ================================================================ */
+
+/**
+ * api_upsertClientUser_ — Create or append-access for a client user.
+ *
+ * Multi-client access (v33.0.0): Users can access multiple client accounts.
+ * - "Client Spreadsheet ID" stores comma-separated IDs (source of truth for access)
+ * - "Client Name" stores comma-separated names (display metadata, kept in sync)
+ * - Finds existing users by EMAIL ONLY (one user can span multiple clients)
+ * - If user exists: appends new client to their access list (idempotent — skips if already listed)
+ * - If user is new: creates row with Active=TRUE + single client
+ *
+ * Returns: { existed: boolean, previousClientName?: string }
+ */
+function api_upsertClientUser_(cbSS, email, clientName, clientSheetId) {
+  var sheet = cbSS.getSheetByName("Users");
+  if (!sheet) { Logger.log("api_upsertClientUser_: Users tab not found"); return { existed: false }; }
+
+  var data = sheet.getDataRange().getValues();
+  if (data.length < 1) return { existed: false };
+
+  var hRow = data[0];
+  var hMap = {};
+  for (var h = 0; h < hRow.length; h++) {
+    var k = String(hRow[h] || "").trim().toUpperCase();
+    if (k) hMap[k] = h;
+  }
+
+  var emailIdx     = hMap["EMAIL"];
+  var roleIdx      = hMap["ROLE"];
+  var nameIdx      = hMap["CLIENT NAME"];
+  var ssIdIdx      = hMap["CLIENT SPREADSHEET ID"];
+  var activeIdx    = hMap["ACTIVE"];
+  var createdIdx   = hMap["CREATED"];
+  var updatedAtIdx = hMap["UPDATED AT"];
+
+  if (emailIdx === undefined || ssIdIdx === undefined) {
+    Logger.log("api_upsertClientUser_: required columns missing in Users tab");
+    return { existed: false };
+  }
+
+  var now = new Date();
+  var targetRow = -1;
+  var lowerEmail = email.toLowerCase();
+
+  // Find by email only — one user can span multiple clients
+  for (var r = 1; r < data.length; r++) {
+    if (String(data[r][emailIdx] || "").trim().toLowerCase() === lowerEmail) {
+      targetRow = r + 1; // 1-based
+      break;
+    }
+  }
+
+  if (targetRow !== -1) {
+    // Existing user — append new client access (idempotent)
+    var existingIds = parseCSV_(String(data[targetRow - 1][ssIdIdx] || ""));
+    var existingNames = parseCSV_(String(data[targetRow - 1][nameIdx] || ""));
+    var previousClientName = existingNames.join(", ");
+
+    // Check if this client is already in the access list
+    if (existingIds.indexOf(clientSheetId) >= 0) {
+      Logger.log("api_upsertClientUser_: " + email + " already has access to " + clientName + " — skipping");
+      return { existed: true, previousClientName: previousClientName };
+    }
+
+    // Append new client
+    existingIds.push(clientSheetId);
+    existingNames.push(clientName);
+
+    if (ssIdIdx !== undefined)      sheet.getRange(targetRow, ssIdIdx + 1).setValue(existingIds.join(", "));
+    if (nameIdx !== undefined)      sheet.getRange(targetRow, nameIdx + 1).setValue(existingNames.join(", "));
+    if (updatedAtIdx !== undefined) sheet.getRange(targetRow, updatedAtIdx + 1).setValue(now);
+    Logger.log("api_upsertClientUser_: appended " + clientName + " access for " + email);
+    return { existed: true, previousClientName: previousClientName };
+  } else {
+    // Create new row — Active=TRUE so they can log in immediately
+    var newRow = new Array(hRow.length).fill("");
+    if (emailIdx !== undefined)     newRow[emailIdx]     = email.toLowerCase();
+    if (roleIdx !== undefined)      newRow[roleIdx]      = "client";
+    if (nameIdx !== undefined)      newRow[nameIdx]      = clientName;
+    if (ssIdIdx !== undefined)      newRow[ssIdIdx]      = clientSheetId;
+    if (activeIdx !== undefined)    newRow[activeIdx]    = "TRUE";
+    if (createdIdx !== undefined)   newRow[createdIdx]   = now;
+    if (updatedAtIdx !== undefined) newRow[updatedAtIdx] = now;
+    sheet.appendRow(newRow);
+    Logger.log("api_upsertClientUser_: created user row for " + email);
+
+    // Create Supabase Auth user so client can use Forgot Password to set up login
+    var sbResult = createSupabaseAuthUser_(email);
+    if (!sbResult.success) {
+      Logger.log("api_upsertClientUser_: Supabase auth creation failed for " + email + ": " + sbResult.error);
+    }
+    return { existed: false };
+  }
+}
+
+/** Parse a comma-separated string into a trimmed, non-empty array. */
+function parseCSV_(str) {
+  return String(str || "").split(",").map(function(s) { return s.trim(); }).filter(function(s) { return s.length > 0; });
+}
+
+/** Build a map of spreadsheetId → clientName from CB Clients tab. Cached 10 min. */
+function api_getClientNameMap_() {
+  var cache = CacheService.getScriptCache();
+  var cached = cache.get("client_name_map");
+  if (cached) {
+    try { return JSON.parse(cached); } catch (_) {}
+  }
+
+  var cbId = prop_("CB_SPREADSHEET_ID");
+  if (!cbId) return {};
+  var ss = SpreadsheetApp.openById(cbId);
+  var sheet = ss.getSheetByName("Clients");
+  if (!sheet) return {};
+
+  var data = sheet.getDataRange().getValues();
+  if (data.length < 2) return {};
+
+  var headers = data[0].map(function(h) { return String(h).trim(); });
+  var nameIdx = headers.indexOf("Client Name");
+  var idIdx = headers.indexOf("Client Spreadsheet ID");
+  if (nameIdx < 0 || idIdx < 0) return {};
+
+  var map = {};
+  for (var i = 1; i < data.length; i++) {
+    var sid = String(data[i][idIdx] || "").trim();
+    var name = String(data[i][nameIdx] || "").trim();
+    if (sid && name) map[sid] = name;
+  }
+
+  try { cache.put("client_name_map", JSON.stringify(map), 600); } catch (_) {}
+  return map;
+}
+
+/* ================================================================
+   Phase 7B #13: Client Onboarding
+   Mirrors onboardNewClient_ from Client_Onboarding.js
+   ================================================================ */
+
+function handleOnboardClient_(payload) {
+  var clientName = String(payload.clientName || "").trim();
+  var clientEmail = String(payload.clientEmail || "").trim();
+  if (!clientName) return errorResponse_("clientName is required", "MISSING_PARAM");
+  if (!clientEmail) return errorResponse_("clientEmail is required", "MISSING_PARAM");
+
+  // Open CB spreadsheet
+  var cbSsId = prop_("CB_SPREADSHEET_ID");
+  if (!cbSsId) return errorResponse_("CB_SPREADSHEET_ID Script Property not set", "CONFIG_ERROR");
+
+  var cbSS;
+  try { cbSS = SpreadsheetApp.openById(cbSsId); }
+  catch (e) { return errorResponse_("Could not open CB spreadsheet: " + e.message, "CONFIG_ERROR"); }
+
+  // Read CB Settings tab for template/parent folder IDs
+  var cbSettingsSh = cbSS.getSheetByName("Settings");
+  if (!cbSettingsSh) return errorResponse_("CB Settings tab not found", "CONFIG_ERROR");
+
+  var cbSettings = {};
+  var cbSettingsData = cbSettingsSh.getDataRange().getValues();
+  for (var i = 0; i < cbSettingsData.length; i++) {
+    var k = String(cbSettingsData[i][0] || "").trim();
+    if (k) cbSettings[k] = String(cbSettingsData[i][1] || "").trim();
+  }
+
+  var templateId = cbSettings["CLIENT_INVENTORY_TEMPLATE_ID"] || "";
+  var parentFolderId = cbSettings["CLIENT_PARENT_FOLDER_ID"] || "";
+  if (!templateId) return errorResponse_("CLIENT_INVENTORY_TEMPLATE_ID not set in CB Settings", "CONFIG_ERROR");
+  if (!parentFolderId) return errorResponse_("CLIENT_PARENT_FOLDER_ID not set in CB Settings", "CONFIG_ERROR");
+
+  // Check for duplicate client name in CB Clients tab
+  var clientsSh = cbSS.getSheetByName("Clients");
+  if (!clientsSh) return errorResponse_("CB Clients tab not found", "CONFIG_ERROR");
+
+  var clientsData = clientsSh.getDataRange().getValues();
+  var clientsHMap = {};
+  var clientsHeader = clientsData[0];
+  for (var h = 0; h < clientsHeader.length; h++) {
+    var hk = String(clientsHeader[h] || "").trim().toUpperCase();
+    if (hk) clientsHMap[hk] = h;
+  }
+
+  var nameColIdx = clientsHMap["CLIENT NAME"];
+  for (var r = 1; r < clientsData.length; r++) {
+    if (nameColIdx !== undefined) {
+      var existingName = String(clientsData[r][nameColIdx] || "").trim();
+      if (existingName.toLowerCase() === clientName.toLowerCase()) {
+        return errorResponse_("Client '" + clientName + "' already exists in Clients tab", "DUPLICATE_CLIENT");
+      }
+    }
+  }
+
+  // Create Drive folders: client > Photos, Invoices
+  var clientFolderId, photosFolderId, invoicesFolderId;
+  try {
+    var parentFolder = DriveApp.getFolderById(parentFolderId);
+    var clientFolder = parentFolder.createFolder(clientName);
+    clientFolderId = clientFolder.getId();
+    photosFolderId = clientFolder.createFolder("Photos").getId();
+    invoicesFolderId = clientFolder.createFolder("Invoices").getId();
+  } catch (driveErr) {
+    return errorResponse_("Drive folder creation failed: " + driveErr.message, "DRIVE_ERROR");
+  }
+
+  // Copy inventory template spreadsheet into client folder
+  var newSpreadsheetId;
+  try {
+    var templateFile = DriveApp.getFileById(templateId);
+    var newFile = templateFile.makeCopy(clientName, DriveApp.getFolderById(clientFolderId));
+    newSpreadsheetId = newFile.getId();
+  } catch (copyErr) {
+    return errorResponse_("Template copy failed: " + copyErr.message, "DRIVE_ERROR");
+  }
+
+  // v38.13.0: Discover the bound script ID immediately after copy.
+  // When a Google Sheet is copied via makeCopy(), the bound Apps Script project
+  // is automatically duplicated. We find it via Drive API query for child scripts.
+  var newScriptId = "";
+  try {
+    var scriptFiles = DriveApp.searchFiles(
+      "'" + newSpreadsheetId + "' in parents and mimeType = 'application/vnd.google-apps.script'"
+    );
+    if (scriptFiles.hasNext()) {
+      newScriptId = scriptFiles.next().getId();
+      Logger.log("handleOnboardClient_: Discovered bound script ID: " + newScriptId);
+    } else {
+      Logger.log("handleOnboardClient_: No bound script found immediately after copy — will be discovered on first open via _SCRIPT_ID");
+    }
+  } catch (scriptErr) {
+    Logger.log("handleOnboardClient_: Script ID discovery failed (non-fatal): " + scriptErr);
+  }
+
+  // Write settings to new client sheet (mirrors writeSettingsToClientSheet_)
+  var settingsWarning = null;
+  try {
+    api_writeClientSettings_(newSpreadsheetId, clientName, payload, cbSsId,
+      clientFolderId, photosFolderId, invoicesFolderId);
+  } catch (settingsErr) {
+    settingsWarning = "Settings write warning: " + settingsErr.message;
+    Logger.log(settingsWarning);
+  }
+
+  // Append new row to CB Clients tab
+  var rowWarning = null;
+  try {
+    api_appendClientRow_(clientsSh, clientsHMap, clientsHeader.length, {
+      clientName:            clientName,
+      clientEmail:           clientEmail,
+      contactName:           String(payload.contactName || ""),
+      phone:                 String(payload.phone || ""),
+      qbCustomerName:        String(payload.qbCustomerName || clientName),
+      staxCustomerId:        String(payload.staxCustomerId || ""),
+      paymentTerms:          String(payload.paymentTerms || "Net 30"),
+      freeStorageDays:       Number(payload.freeStorageDays) || 30,
+      discountStoragePct:    Number(payload.discountStoragePct) || 0,
+      discountServicesPct:   Number(payload.discountServicesPct) || 0,
+      enableReceivingBilling: payload.enableReceivingBilling !== false,
+      enableShipmentEmail:   payload.enableShipmentEmail !== false,
+      enableNotifications:   payload.enableNotifications !== false,
+      autoInspection:        payload.autoInspection !== false,
+      separateBySidemark:    payload.separateBySidemark === true,
+      notes:                 String(payload.notes || ""),
+      parentClient:          String(payload.parentClient || ""),
+      spreadsheetId:         newSpreadsheetId,
+      clientFolderId:        clientFolderId,
+      photosFolderId:        photosFolderId,
+      invoicesFolderId:      invoicesFolderId,
+      scriptId:              newScriptId,
+      active:                true
+    });
+  } catch (rowErr) {
+    rowWarning = "CB Clients row write warning: " + rowErr.message;
+    Logger.log(rowWarning);
+  }
+
+  // User creation / conflict detection (v33.0.0)
+  // userAction: "add_access" = append client to existing user, "skip" = don't touch Users tab
+  var userAction = String(payload.userAction || "").trim().toLowerCase();
+  var userWarning = null;
+  var existingUser = null;
+
+  // Check if email already exists as a user
+  var existingLookup = lookupUser_(clientEmail);
+
+  if (existingLookup.user && !userAction) {
+    // Email exists but no action specified — return conflict info for React to prompt
+    existingUser = {
+      email: existingLookup.user.email,
+      clientName: existingLookup.user.clientName,
+      role: existingLookup.user.role
+    };
+    // Don't touch Users tab — let the frontend prompt and re-call with userAction
+    Logger.log("handleOnboardClient_: user conflict detected for " + clientEmail + " — waiting for userAction");
+  } else if (existingLookup.user && userAction === "skip") {
+    // User chose to skip — don't touch Users tab
+    Logger.log("handleOnboardClient_: user creation skipped for " + clientEmail + " per userAction=skip");
+  } else {
+    // Either new user (no conflict) or userAction="add_access" — proceed with upsert
+    // v38.13.0: Split comma-separated emails and create a user for each
+    try {
+      var emails = clientEmail.split(",").map(function(e) { return e.trim().toLowerCase(); }).filter(function(e) { return e && e.indexOf("@") > 0; });
+      for (var ei = 0; ei < emails.length; ei++) {
+        api_upsertClientUser_(cbSS, emails[ei], clientName, newSpreadsheetId);
+      }
+    } catch (userErr) {
+      userWarning = "User row write warning: " + userErr.message;
+      Logger.log(userWarning);
+    }
+  }
+
+  var warnings = [];
+  if (settingsWarning) warnings.push(settingsWarning);
+  if (rowWarning) warnings.push(rowWarning);
+  if (userWarning) warnings.push(userWarning);
+
+  var response = {
+    success: true,
+    clientName: clientName,
+    clientSheetId: newSpreadsheetId,
+    spreadsheetUrl: "https://docs.google.com/spreadsheets/d/" + newSpreadsheetId,
+    clientFolderId: clientFolderId,
+    clientFolderUrl: "https://drive.google.com/drive/folders/" + clientFolderId,
+    photosFolderId: photosFolderId,
+    invoicesFolderId: invoicesFolderId,
+    scriptId: newScriptId || null,
+    warnings: warnings
+  };
+
+  // v38.13.0: Auto-deploy Web App if script ID was found.
+  // Uses Apps Script API (script.googleapis.com) to create a version + deployment.
+  // Requires script.deployments scope + Apps Script API enabled on GCP project.
+  // Falls back gracefully if the API call fails (scope missing, API not enabled, etc.)
+  var newWebAppUrl = "";
+  if (newScriptId) {
+    try {
+      var token = ScriptApp.getOAuthToken();
+      var baseUrl = "https://script.googleapis.com/v1/projects/" + newScriptId;
+
+      // Step 1: Create a version
+      var versionRes = UrlFetchApp.fetch(baseUrl + "/versions", {
+        method: "post",
+        contentType: "application/json",
+        headers: { "Authorization": "Bearer " + token },
+        payload: JSON.stringify({ description: "Auto-deployed by onboarding" }),
+        muteHttpExceptions: true
+      });
+      var versionData = JSON.parse(versionRes.getContentText());
+      var versionNumber = versionData.versionNumber;
+
+      if (versionNumber) {
+        // Step 2: Create Web App deployment
+        // Access settings (ANYONE + USER_DEPLOYING) come from the appsscript.json
+        // manifest that's already in the template — no need to specify here.
+        var deployRes = UrlFetchApp.fetch(baseUrl + "/deployments", {
+          method: "post",
+          contentType: "application/json",
+          headers: { "Authorization": "Bearer " + token },
+          payload: JSON.stringify({
+            versionNumber: versionNumber,
+            description: "Client Web App — auto-deployed by onboarding"
+          }),
+          muteHttpExceptions: true
+        });
+        var deployData = JSON.parse(deployRes.getContentText());
+        if (deployData.entryPoints) {
+          for (var ep = 0; ep < deployData.entryPoints.length; ep++) {
+            if (deployData.entryPoints[ep].entryPointType === "WEB_APP") {
+              newWebAppUrl = deployData.entryPoints[ep].webApp.url || "";
+              break;
+            }
+          }
+        }
+        if (newWebAppUrl) {
+          Logger.log("handleOnboardClient_: Auto-deployed Web App: " + newWebAppUrl);
+          // Write Web App URL + Deployment ID to CB Clients tab
+          try {
+            var lastDataRow = api_getLastDataRow_(clientsSh);
+            var webAppUrlColIdx = clientsHMap["WEB APP URL"];
+            var deployIdColIdx = clientsHMap["DEPLOYMENT ID"];
+            if (webAppUrlColIdx !== undefined) {
+              clientsSh.getRange(lastDataRow, webAppUrlColIdx + 1).setValue(newWebAppUrl);
+            }
+            if (deployIdColIdx !== undefined && deployData.deploymentId) {
+              clientsSh.getRange(lastDataRow, deployIdColIdx + 1).setValue(deployData.deploymentId);
+            }
+          } catch (writeErr) {
+            Logger.log("handleOnboardClient_: Write Web App URL to CB failed (non-fatal): " + writeErr);
+          }
+
+          // Auto-install triggers via the new Web App URL
+          try {
+            var triggerRes = UrlFetchApp.fetch(newWebAppUrl, {
+              method: "post",
+              contentType: "application/json",
+              payload: JSON.stringify({ token: "stride-remote-exec-9f3a2", action: "install_triggers" }),
+              muteHttpExceptions: true,
+              followRedirects: false
+            });
+            // Handle Google's 302 redirect (standard for Web App POST)
+            var triggerCode = triggerRes.getResponseCode();
+            if (triggerCode === 302) {
+              var redirectUrl = triggerRes.getHeaders()["Location"] || "";
+              if (redirectUrl) {
+                var redirectRes = UrlFetchApp.fetch(redirectUrl, { muteHttpExceptions: true });
+                Logger.log("handleOnboardClient_: Trigger install via redirect: " + redirectRes.getResponseCode());
+              }
+            } else {
+              Logger.log("handleOnboardClient_: Trigger install response: " + triggerCode);
+            }
+          } catch (trigErr) {
+            Logger.log("handleOnboardClient_: Trigger install failed (non-fatal): " + trigErr);
+            warnings.push("Trigger install failed — run 'npm run install-triggers' manually");
+          }
+        } else {
+          Logger.log("handleOnboardClient_: Deployment created but no Web App URL in response");
+          warnings.push("Web App deployment created but URL not found in response — run 'npm run deploy-clients' to verify");
+        }
+      } else {
+        Logger.log("handleOnboardClient_: Version creation failed: " + versionRes.getContentText());
+        warnings.push("Auto-deploy failed (version creation) — run 'npm run sync && npm run deploy-clients' to deploy manually");
+      }
+    } catch (deployErr) {
+      Logger.log("handleOnboardClient_: Auto-deploy failed (non-fatal): " + deployErr);
+      warnings.push("Auto-deploy not available yet — run 'npm run sync && npm run deploy-clients' to create Web App deployment. Script ID: " + newScriptId.substring(0, 12) + "...");
+    }
+  } else {
+    warnings.push("Script ID not found immediately — open the client sheet once, then run 'npm run sync && npm run deploy-clients' to finish setup");
+  }
+
+  // Add Web App URL to response if auto-deployed
+  if (newWebAppUrl) {
+    response.webAppUrl = newWebAppUrl;
+  }
+
+  // Include conflict info so React can show prompt
+  if (existingUser) {
+    response.existingUser = existingUser;
+  }
+
+  return jsonResponse_(response);
+}
+
+/**
+ * resolveOnboardUser — Called after onboardClient returns existingUser conflict.
+ * Adds new client access to the existing user, or skips. Does NOT create sheets.
+ * Payload: { email, clientName, clientSheetId, userAction: "add_access"|"skip" }
+ */
+function handleResolveOnboardUser_(payload) {
+  var email = String(payload.email || "").trim().toLowerCase();
+  var clientName = String(payload.clientName || "").trim();
+  var clientSheetId = String(payload.clientSheetId || "").trim();
+  var userAction = String(payload.userAction || "").trim().toLowerCase();
+
+  if (!email) return errorResponse_("email is required", "MISSING_PARAM");
+  if (!clientSheetId) return errorResponse_("clientSheetId is required", "MISSING_PARAM");
+  if (userAction !== "add_access" && userAction !== "skip") {
+    return errorResponse_("userAction must be 'add_access' or 'skip'", "INVALID_PARAMS");
+  }
+
+  if (userAction === "skip") {
+    return jsonResponse_({ success: true, action: "skipped" });
+  }
+
+  // add_access — append new client to existing user
+  var cbSsId = prop_("CB_SPREADSHEET_ID");
+  if (!cbSsId) return errorResponse_("CB_SPREADSHEET_ID not configured", "CONFIG_ERROR");
+  var cbSS = SpreadsheetApp.openById(cbSsId);
+
+  try {
+    var result = api_upsertClientUser_(cbSS, email, clientName, clientSheetId);
+    return jsonResponse_({ success: true, action: "added", upsertResult: result });
+  } catch (err) {
+    return errorResponse_("Failed to update user access: " + err.message, "SERVER_ERROR");
+  }
+}
+
+/* ================================================================
+   Phase 7B #14: Update Client
+   Updates CB Clients tab row + optionally syncs to client sheet.
+   ================================================================ */
+
+function handleUpdateClient_(payload) {
+  var targetSheetId = String(payload.spreadsheetId || "").trim();
+  if (!targetSheetId) return errorResponse_("spreadsheetId is required to identify client", "MISSING_PARAM");
+
+  var cbSsId = prop_("CB_SPREADSHEET_ID");
+  if (!cbSsId) return errorResponse_("CB_SPREADSHEET_ID Script Property not set", "CONFIG_ERROR");
+
+  var cbSS;
+  try { cbSS = SpreadsheetApp.openById(cbSsId); }
+  catch (e) { return errorResponse_("Could not open CB spreadsheet: " + e.message, "CONFIG_ERROR"); }
+
+  var clientsSh = cbSS.getSheetByName("Clients");
+  if (!clientsSh) return errorResponse_("CB Clients tab not found", "CONFIG_ERROR");
+
+  var clientsData = clientsSh.getDataRange().getValues();
+  var hMap = {};
+  var headerRow = clientsData[0];
+  for (var h = 0; h < headerRow.length; h++) {
+    var hk = String(headerRow[h] || "").trim().toUpperCase();
+    if (hk) hMap[hk] = h;
+  }
+
+  var ssIdIdx = hMap["CLIENT SPREADSHEET ID"];
+  if (ssIdIdx === undefined) return errorResponse_("'Client Spreadsheet ID' column not found in CB Clients tab", "CONFIG_ERROR");
+
+  // Find the row
+  var targetRow = -1;
+  for (var r = 1; r < clientsData.length; r++) {
+    if (String(clientsData[r][ssIdIdx] || "").trim() === targetSheetId) {
+      targetRow = r + 1; // 1-based sheet row
+      break;
+    }
+  }
+  if (targetRow === -1) return errorResponse_("Client with spreadsheetId '" + targetSheetId + "' not found in Clients tab", "NOT_FOUND");
+
+  // Update the row
+  try {
+    api_updateClientRow_(clientsSh, hMap, targetRow, payload);
+  } catch (updateErr) {
+    return errorResponse_("Failed to update CB Clients row: " + updateErr.message, "WRITE_ERROR");
+  }
+
+  // Upsert the user row in CB Users tab — keeps email/clientName in sync
+  var userWarning = null;
+  var updatedEmail = String(payload.clientEmail || "").trim();
+  var updatedName  = String(payload.clientName  || "").trim();
+  if (updatedEmail && updatedName) {
+    try {
+      // v38.13.0: Split comma-separated emails and upsert each
+      var uEmails = updatedEmail.split(",").map(function(e) { return e.trim().toLowerCase(); }).filter(function(e) { return e && e.indexOf("@") > 0; });
+      for (var uei = 0; uei < uEmails.length; uei++) {
+        api_upsertClientUser_(cbSS, uEmails[uei], updatedName, targetSheetId);
+      }
+    } catch (userErr) {
+      userWarning = "User row sync warning: " + userErr.message;
+      Logger.log(userWarning);
+    }
+  }
+
+  // Optionally sync settings to the client sheet
+  var syncWarning = null;
+  if (payload.syncToSheet !== false) {
+    try {
+      var clientName = String(payload.clientName || "").trim();
+      var clientFolderId  = String(payload.folderId || "").trim();
+      var photosFolderId  = String(payload.photosFolderId || "").trim();
+      var invoicesFolderId = String(payload.invoiceFolderId || "").trim();
+      api_writeClientSettings_(targetSheetId, clientName, payload, cbSsId,
+        clientFolderId, photosFolderId, invoicesFolderId);
+    } catch (syncErr) {
+      syncWarning = "Settings sync warning: " + syncErr.message;
+      Logger.log(syncWarning);
+    }
+  }
+
+  var updateWarnings = [];
+  if (userWarning) updateWarnings.push(userWarning);
+  if (syncWarning) updateWarnings.push(syncWarning);
+
+  return jsonResponse_({
+    success: true,
+    clientName: String(payload.clientName || ""),
+    spreadsheetId: targetSheetId,
+    synced: payload.syncToSheet !== false && !syncWarning,
+    warnings: updateWarnings
+  });
+}
+
+/* ================================================================
+   Phase 7B #15: Sync Settings
+   Mirrors StrideSyncSettingsToClient from Client_Onboarding.js
+   ================================================================ */
+
+function handleSyncSettings_(payload) {
+  var targetIds = Array.isArray(payload.clientSheetIds) ? payload.clientSheetIds : [];
+  var syncAll = payload.syncAll === true || targetIds.length === 0;
+
+  var cbSsId = prop_("CB_SPREADSHEET_ID");
+  if (!cbSsId) return errorResponse_("CB_SPREADSHEET_ID Script Property not set", "CONFIG_ERROR");
+
+  var cbSS;
+  try { cbSS = SpreadsheetApp.openById(cbSsId); }
+  catch (e) { return errorResponse_("Could not open CB spreadsheet: " + e.message, "CONFIG_ERROR"); }
+
+  var clientsSh = cbSS.getSheetByName("Clients");
+  if (!clientsSh) return errorResponse_("CB Clients tab not found", "CONFIG_ERROR");
+
+  var data = clientsSh.getDataRange().getValues();
+  var hMap = {};
+  var headerRow = data[0];
+  for (var h = 0; h < headerRow.length; h++) {
+    var hk = String(headerRow[h] || "").trim().toUpperCase();
+    if (hk) hMap[hk] = h;
+  }
+
+  var nameIdx    = hMap["CLIENT NAME"];
+  var ssIdIdx    = hMap["CLIENT SPREADSHEET ID"];
+  var activeIdx  = hMap["ACTIVE"];
+  var folderIdx  = hMap["CLIENT FOLDER ID"];
+  var photosIdx  = hMap["PHOTOS FOLDER ID"];
+  var invoiceIdx = hMap["INVOICE FOLDER ID"];
+
+  if (nameIdx === undefined || ssIdIdx === undefined) {
+    return errorResponse_("Required columns not found in CB Clients tab", "CONFIG_ERROR");
+  }
+
+  var synced = [];
+  var failed = [];
+
+  for (var r = 1; r < data.length; r++) {
+    var row = data[r];
+    var clientName    = String(row[nameIdx] || "").trim();
+    var spreadsheetId = String(row[ssIdIdx] || "").trim();
+    if (!clientName || !spreadsheetId) continue;
+
+    var isActive = activeIdx !== undefined
+      ? (row[activeIdx] === true || String(row[activeIdx]).toUpperCase() === "TRUE")
+      : true;
+    if (!syncAll && !isActive) continue;
+    if (targetIds.length > 0 && targetIds.indexOf(spreadsheetId) === -1) continue;
+
+    var clientFolderId   = folderIdx  !== undefined ? String(row[folderIdx]  || "") : "";
+    var photosFolderId   = photosIdx  !== undefined ? String(row[photosIdx]  || "") : "";
+    var invoicesFolderId = invoiceIdx !== undefined ? String(row[invoiceIdx] || "") : "";
+
+    // Build a payload object from the CB Clients row values
+    var rowPayload = api_clientRowToPayload_(row, hMap);
+
+    try {
+      api_writeClientSettings_(spreadsheetId, clientName, rowPayload, cbSsId,
+        clientFolderId, photosFolderId, invoicesFolderId);
+      synced.push(clientName);
+    } catch (err) {
+      failed.push({ name: clientName, error: err.message });
+      Logger.log("Sync settings error for " + clientName + ": " + err.message);
+    }
+  }
+
+  return jsonResponse_({
+    success: true,
+    synced: synced,
+    failed: failed,
+    syncedCount: synced.length,
+    failedCount: failed.length
+  });
+}
+
+/* ================================================================
+   Shared Client Settings Helpers
+   ================================================================ */
+
+/**
+ * Converts a CB Clients tab data row + hMap into a payload object
+ * matching the field names used by api_writeClientSettings_.
+ */
+function api_clientRowToPayload_(row, hMap) {
+  function col_(name) {
+    var idx = hMap[name.toUpperCase()];
+    return idx !== undefined ? row[idx] : "";
+  }
+  return {
+    clientEmail:           String(col_("Client Email") || ""),
+    contactName:           String(col_("Contact Name") || ""),
+    phone:                 String(col_("Phone") || ""),
+    paymentTerms:          String(col_("Payment Terms") || "Net 30"),
+    freeStorageDays:       Number(col_("Free Storage Days")) || 0,
+    discountStoragePct:    Number(col_("Discount Storage %")) || 0,
+    discountServicesPct:   Number(col_("Discount Services %")) || 0,
+    enableReceivingBilling: col_("Enable Receiving Billing") === true || String(col_("Enable Receiving Billing")).toUpperCase() === "TRUE",
+    enableShipmentEmail:   col_("Enable Shipment Email") === true || String(col_("Enable Shipment Email")).toUpperCase() === "TRUE",
+    enableNotifications:   col_("Enable Notifications") === true || String(col_("Enable Notifications")).toUpperCase() === "TRUE",
+    autoInspection:        col_("Auto Inspection") === true || String(col_("Auto Inspection")).toUpperCase() === "TRUE",
+    separateBySidemark:    col_("Separate By Sidemark") === true || String(col_("Separate By Sidemark")).toUpperCase() === "TRUE",
+    qbCustomerName:        String(col_("QB_CUSTOMER_NAME") || ""),
+    staxCustomerId:        String(col_("Stax Customer ID") || ""),
+    notes:                 String(col_("Notes") || "")
+  };
+}
+
+/**
+ * Writes client billing/feature settings to the target spreadsheet's Settings tab.
+ * Mirrors writeSettingsToClientSheet_ from Client_Onboarding.js.
+ * @param {string} ssId - Target client spreadsheet ID
+ * @param {string} clientName
+ * @param {object} payload - Fields: clientEmail, paymentTerms, freeStorageDays, discountStoragePct,
+ *   discountServicesPct, enableReceivingBilling, enableShipmentEmail, enableNotifications,
+ *   autoInspection, separateBySidemark, qbCustomerName, staxCustomerId
+ * @param {string} cbSsId - Consolidated Billing spreadsheet ID (written as CONSOLIDATED_BILLING_SPREADSHEET_ID)
+ * @param {string} clientFolderId
+ * @param {string} photosFolderId
+ * @param {string} invoicesFolderId
+ */
+function api_writeClientSettings_(ssId, clientName, payload, cbSsId,
+    clientFolderId, photosFolderId, invoicesFolderId) {
+
+  var clientSS = SpreadsheetApp.openById(ssId);
+  var settingsSh = clientSS.getSheetByName("Settings");
+  if (!settingsSh) throw new Error("No Settings tab in client sheet " + ssId);
+
+  var settingsData = settingsSh.getDataRange().getValues();
+  var keyToRow = {};
+  for (var i = 0; i < settingsData.length; i++) {
+    var k = String(settingsData[i][0] || "").trim();
+    if (k) keyToRow[k] = i + 1; // 1-based row number
+  }
+
+  function writeOrAppend_(key, value) {
+    if (keyToRow[key]) {
+      settingsSh.getRange(keyToRow[key], 2).clearDataValidations().setValue(value);
+    } else {
+      var nr = settingsSh.getLastRow() + 1;
+      settingsSh.getRange(nr, 1).setValue(key);
+      settingsSh.getRange(nr, 2).setValue(value);
+      keyToRow[key] = nr;
+    }
+  }
+
+  // Drive folder IDs
+  if (clientFolderId)   writeOrAppend_("DRIVE_PARENT_FOLDER_ID",             clientFolderId);
+  if (photosFolderId)   writeOrAppend_("PHOTOS_FOLDER_ID",                   photosFolderId);
+  if (invoicesFolderId) writeOrAppend_("MASTER_ACCOUNTING_FOLDER_ID",        invoicesFolderId);
+  if (cbSsId)           writeOrAppend_("CONSOLIDATED_BILLING_SPREADSHEET_ID", cbSsId);
+
+  // Client identity
+  writeOrAppend_("CLIENT_NAME",  clientName);
+  writeOrAppend_("CLIENT_EMAIL", String(payload.clientEmail || ""));
+
+  // Billing settings
+  writeOrAppend_("PAYMENT_TERMS",          String(payload.paymentTerms || "Net 30"));
+  writeOrAppend_("FREE_STORAGE_DAYS",      Number(payload.freeStorageDays) || 0);
+  writeOrAppend_("DISCOUNT_STORAGE_PCT",   Number(payload.discountStoragePct) || 0);
+  writeOrAppend_("DISCOUNT_SERVICES_PCT",  Number(payload.discountServicesPct) || 0);
+
+  // Feature flags
+  writeOrAppend_("ENABLE_RECEIVING_BILLING", payload.enableReceivingBilling !== false ? "TRUE" : "FALSE");
+  writeOrAppend_("ENABLE_SHIPMENT_EMAIL",    payload.enableShipmentEmail    !== false ? "TRUE" : "FALSE");
+  writeOrAppend_("ENABLE_NOTIFICATIONS",     payload.enableNotifications    !== false ? "TRUE" : "FALSE");
+  writeOrAppend_("AUTO_INSPECTION",          payload.autoInspection         !== false ? "TRUE" : "FALSE");
+  writeOrAppend_("SEPARATE_BY_SIDEMARK",     payload.separateBySidemark     === true  ? "TRUE" : "FALSE");
+
+  // Integrations
+  if (payload.qbCustomerName)  writeOrAppend_("QB_CUSTOMER_NAME",  String(payload.qbCustomerName));
+  if (payload.staxCustomerId)  writeOrAppend_("STAX_CUSTOMER_ID",  String(payload.staxCustomerId));
+}
+
+/**
+ * Appends a new row to the CB Clients sheet using the existing header map.
+ * Column matching is case-insensitive UPPERCASE comparison.
+ */
+function api_appendClientRow_(clientsSh, hMap, totalCols, data) {
+  var newRow = new Array(totalCols).fill("");
+
+  var colValues = {
+    "CLIENT NAME":              data.clientName,
+    "CLIENT EMAIL":             data.clientEmail,
+    "CONTACT NAME":             data.contactName,
+    "PHONE":                    data.phone,
+    "QB_CUSTOMER_NAME":         data.qbCustomerName,
+    "STAX CUSTOMER ID":         data.staxCustomerId,
+    "PAYMENT TERMS":            data.paymentTerms,
+    "FREE STORAGE DAYS":        data.freeStorageDays,
+    "DISCOUNT STORAGE %":       data.discountStoragePct,
+    "DISCOUNT SERVICES %":      data.discountServicesPct,
+    "ENABLE RECEIVING BILLING": data.enableReceivingBilling,
+    "ENABLE SHIPMENT EMAIL":    data.enableShipmentEmail,
+    "ENABLE NOTIFICATIONS":     data.enableNotifications,
+    "AUTO INSPECTION":          data.autoInspection,
+    "SEPARATE BY SIDEMARK":     data.separateBySidemark,
+    "NOTES":                    data.notes,
+    "CLIENT SPREADSHEET ID":    data.spreadsheetId,
+    "CLIENT FOLDER ID":         data.clientFolderId,
+    "PHOTOS FOLDER ID":         data.photosFolderId,
+    "INVOICE FOLDER ID":        data.invoicesFolderId,
+    "SCRIPT ID":                data.scriptId || "",
+    "PARENT CLIENT":             data.parentClient || "",
+    "ACTIVE":                   data.active
+  };
+
+  for (var colName in colValues) {
+    var idx = hMap[colName];
+    if (idx !== undefined) newRow[idx] = colValues[colName];
+  }
+
+  var lastRow = api_getLastDataRow_(clientsSh);
+  clientsSh.getRange(lastRow + 1, 1, 1, totalCols).setValues([newRow]);
+}
+
+/**
+ * Updates an existing CB Clients row in-place by 1-based row number.
+ * Writes all provided fields using header map lookups.
+ */
+function api_updateClientRow_(clientsSh, hMap, rowNum, payload) {
+  function setCol_(colName, value) {
+    var idx = hMap[colName.toUpperCase()];
+    if (idx === undefined && value !== undefined && value !== null) {
+      // Auto-create missing column header (non-destructive append)
+      var lastCol = clientsSh.getLastColumn();
+      clientsSh.getRange(1, lastCol + 1).setValue(colName);
+      idx = lastCol; // 0-based
+      hMap[colName.toUpperCase()] = idx;
+    }
+    if (idx !== undefined && value !== undefined && value !== null) {
+      clientsSh.getRange(rowNum, idx + 1).setValue(value);
+    }
+  }
+
+  setCol_("CLIENT NAME",              payload.clientName);
+  setCol_("CLIENT EMAIL",             payload.clientEmail);
+  setCol_("CONTACT NAME",             payload.contactName);
+  setCol_("PHONE",                    payload.phone);
+  setCol_("QB_CUSTOMER_NAME",         payload.qbCustomerName);
+  setCol_("STAX CUSTOMER ID",         payload.staxCustomerId);
+  setCol_("PAYMENT TERMS",            payload.paymentTerms);
+  setCol_("FREE STORAGE DAYS",        payload.freeStorageDays !== undefined ? Number(payload.freeStorageDays) : undefined);
+  setCol_("DISCOUNT STORAGE %",       payload.discountStoragePct !== undefined ? Number(payload.discountStoragePct) : undefined);
+  setCol_("DISCOUNT SERVICES %",      payload.discountServicesPct !== undefined ? Number(payload.discountServicesPct) : undefined);
+  setCol_("ENABLE RECEIVING BILLING", payload.enableReceivingBilling !== undefined ? (payload.enableReceivingBilling ? true : false) : undefined);
+  setCol_("ENABLE SHIPMENT EMAIL",    payload.enableShipmentEmail !== undefined ? (payload.enableShipmentEmail ? true : false) : undefined);
+  setCol_("ENABLE NOTIFICATIONS",     payload.enableNotifications !== undefined ? (payload.enableNotifications ? true : false) : undefined);
+  setCol_("AUTO INSPECTION",          payload.autoInspection !== undefined ? (payload.autoInspection ? true : false) : undefined);
+  setCol_("SEPARATE BY SIDEMARK",     payload.separateBySidemark !== undefined ? (payload.separateBySidemark ? true : false) : undefined);
+  setCol_("AUTO CHARGE",             payload.autoCharge !== undefined ? (payload.autoCharge ? true : false) : undefined);
+  setCol_("WEB APP URL",             payload.webAppUrl);
+  setCol_("NOTES",                    payload.notes);
+  setCol_("PARENT CLIENT",            payload.parentClient !== undefined ? String(payload.parentClient || "") : undefined);
+  setCol_("ACTIVE",                   payload.active !== undefined ? payload.active : undefined);
+  // Folder IDs (editable in case they need correction)
+  setCol_("CLIENT FOLDER ID",         payload.folderId);
+  setCol_("PHOTOS FOLDER ID",         payload.photosFolderId);
+  setCol_("INVOICE FOLDER ID",        payload.invoiceFolderId);
+}
+
+/* ================================================================
+   Phase 7B #16: Batch Create Tasks
+   Mirrors batchCreateTasks_ from Tasks.gs (client inventory script).
+   Creates lightweight task rows for N items × M svcCodes.
+   No Drive folders, no PDFs — deferred to "Start Task" checkbox.
+   ================================================================ */
+
+function handleBatchCreateTasks_(clientSheetId, payload) {
+  var svcCodes = payload.svcCodes || [];
+  var items = payload.items || [];
+
+  if (!Array.isArray(svcCodes) || svcCodes.length === 0) {
+    return errorResponse_("svcCodes array is required and must not be empty", "MISSING_PARAM");
+  }
+  if (!Array.isArray(items) || items.length === 0) {
+    return errorResponse_("items array is required and must not be empty", "MISSING_PARAM");
+  }
+
+  var ss;
+  try { ss = SpreadsheetApp.openById(clientSheetId); }
+  catch (e) { return errorResponse_("Could not open client spreadsheet: " + e.message, "CONFIG_ERROR"); }
+
+  var taskSheet = ss.getSheetByName("Tasks");
+  if (!taskSheet) return errorResponse_("Tasks sheet not found in client spreadsheet", "NOT_FOUND");
+
+  var taskHMap = api_getHeaderMap_(taskSheet);
+
+  // Build idempotency map of open tasks (itemId|SVCCODE → true)
+  var openMap = api_buildOpenTaskMap_(taskSheet);
+
+  var batchRows = [];
+  var created = 0;
+  var skipped = [];
+  var taskIds = [];
+  var pendingIds = [];
+  var now = new Date();
+
+  for (var s = 0; s < svcCodes.length; s++) {
+    var svcCode = String(svcCodes[s] || "").trim().toUpperCase();
+    if (!svcCode) continue;
+
+    var svcName = api_lookupSvcName_(ss, svcCode);
+
+    for (var i = 0; i < items.length; i++) {
+      var item = items[i];
+      var itemId = String(item.itemId || "").trim();
+
+      if (!itemId) {
+        skipped.push({ itemId: itemId, svcCode: svcCode, reason: "blank itemId" });
+        continue;
+      }
+
+      // Idempotency: skip if an open task with this itemId+svcCode already exists
+      var key = itemId + "|" + svcCode;
+      if (openMap[key]) {
+        skipped.push({ itemId: itemId, svcCode: svcCode, reason: "open " + svcCode + " task already exists" });
+        continue;
+      }
+
+      // Generate task ID (counter scan + pending list for batch safety)
+      var counter = api_nextTaskCounter_(taskSheet, svcCode, itemId, pendingIds);
+      var taskId = svcCode + "-" + itemId + "-" + counter;
+      pendingIds.push(taskId);
+
+      // Build task row using existing api_buildRow_ helper
+      var rowValues = api_buildRow_(taskHMap, {
+        "Task ID":      taskId,
+        "Type":         svcName,
+        "Status":       "Open",
+        "Item ID":      itemId,
+        "Vendor":       String(item.vendor || ""),
+        "Description":  String(item.description || ""),
+        "Location":     String(item.location || ""),
+        "Sidemark":     String(item.sidemark || ""),
+        "Shipment #":   String(item.shipmentNo || ""),
+        "Created":      now,
+        "Item Notes":   String(item.itemNotes || ""),
+        "Completed At": "",
+        "Cancelled At": "",
+        "Result":       "",
+        "Task Notes":   "",
+        "Svc Code":     svcCode,
+        "Billed":       false,
+        "Assigned To":  "",
+        "Start Task":   false,
+        "Started At":   ""
+      });
+
+      batchRows.push(rowValues);
+      openMap[key] = true; // prevent intra-batch duplicates
+      taskIds.push(taskId);
+      created++;
+    }
+  }
+
+  // Batch write all task rows under lock
+  if (batchRows.length > 0) {
+    var lock = LockService.getScriptLock();
+    try {
+      lock.waitLock(20000);
+      var insertStart = api_getLastDataRow_(taskSheet) + 1;
+      taskSheet.getRange(insertStart, 1, batchRows.length, batchRows[0].length).setValues(batchRows);
+    } finally {
+      lock.releaseLock();
+    }
+
+    // Update Inventory Task Notes for each affected item (simplified, best-effort)
+    var uniqueItems = {};
+    for (var u = 0; u < items.length; u++) {
+      var uid = String(items[u].itemId || "").trim();
+      if (uid && !uniqueItems[uid]) {
+        uniqueItems[uid] = true;
+        try { api_updateInvTaskNotes_simple_(ss, uid); } catch (_) {}
+      }
+    }
+  }
+
+  api_bumpSummaryVersion_();
+  return jsonResponse_({
+    success: true,
+    created: created,
+    skipped: skipped,
+    taskIds: taskIds
+  });
+}
+
+/**
+ * Builds a normalized map of existing open tasks.
+ * Key: "ITEMID|SVCCODE" (trimmed, uppercase). Value: true.
+ * Mirrors buildOpenTaskMap_ from Tasks.gs.
+ */
+function api_buildOpenTaskMap_(taskSheet) {
+  var openMap = {};
+  if (!taskSheet || taskSheet.getLastRow() < 2) return openMap;
+  var hMap = api_getHeaderMap_(taskSheet);
+  var data = taskSheet.getRange(2, 1, taskSheet.getLastRow() - 1, taskSheet.getLastColumn()).getValues();
+  var svcIdx    = (hMap["Svc Code"] || 1) - 1;
+  var itemIdx   = (hMap["Item ID"]  || 1) - 1;
+  var statusIdx = (hMap["Status"]   || 1) - 1;
+  var CLOSED = { "completed": true, "cancelled": true, "closed": true };
+  for (var i = 0; i < data.length; i++) {
+    var st = String(data[i][statusIdx] || "").trim().toLowerCase();
+    if (CLOSED[st]) continue;
+    var itemId = String(data[i][itemIdx] || "").trim();
+    var svc    = String(data[i][svcIdx]  || "").trim().toUpperCase();
+    if (itemId && svc) openMap[itemId + "|" + svc] = true;
+  }
+  return openMap;
+}
+
+/**
+ * Updates the "Task Notes" column on the Inventory sheet for a given itemId.
+ * Simplified version (plain text) — no RichText hyperlinks since task folders
+ * haven't been created yet at batch-create time. Mirrors SH_updateInventoryTaskNotes_.
+ */
+function api_updateInvTaskNotes_simple_(ss, itemId) {
+  var inv = ss.getSheetByName("Inventory");
+  if (!inv || inv.getLastRow() < 2) return;
+  var invHMap = api_getHeaderMap_(inv);
+  var itemCol  = invHMap["Item ID"];
+  var notesCol = invHMap["Task Notes"];
+  if (!itemCol || !notesCol) return;
+
+  var taskSheet = ss.getSheetByName("Tasks");
+  if (!taskSheet || taskSheet.getLastRow() < 2) return;
+  var tHMap     = api_getHeaderMap_(taskSheet);
+  var tItemIdx  = (tHMap["Item ID"]  || 1) - 1;
+  var tIdIdx    = (tHMap["Task ID"]  || 1) - 1;
+  var tStatusIdx = (tHMap["Status"]  || 1) - 1;
+  var tResultIdx = tHMap["Result"] ? tHMap["Result"] - 1 : -1;
+
+  var tData = taskSheet.getRange(2, 1, taskSheet.getLastRow() - 1, taskSheet.getLastColumn()).getValues();
+  var lines = [];
+  // Newest first — reverse scan
+  for (var t = tData.length - 1; t >= 0; t--) {
+    if (String(tData[t][tItemIdx] || "").trim() !== itemId) continue;
+    var taskId = String(tData[t][tIdIdx] || "").trim();
+    if (!taskId) continue;
+    var status = String(tData[t][tStatusIdx] || "").trim();
+    var result = tResultIdx >= 0 ? String(tData[t][tResultIdx] || "").trim() : "";
+    lines.push(taskId + " (" + (result || status || "Open") + ")");
+  }
+
+  var notesText = lines.join("\n");
+  var invData = inv.getRange(2, 1, inv.getLastRow() - 1, inv.getLastColumn()).getValues();
+  for (var r = 0; r < invData.length; r++) {
+    if (String(invData[r][itemCol - 1] || "").trim() === itemId) {
+      inv.getRange(r + 2, notesCol).setValue(notesText);
+      break;
+    }
+  }
+}
+
+/* ================================================================
+   Phase 7B: Start Task — Drive folder + Work Order PDF parity
+   Mirrors startTask_() from Tasks.gs / task board script.
+   ================================================================ */
+
+/**
+ * handleStartTask_(clientSheetId, payload)
+ *
+ * Finds the task row by Task ID, creates a Drive folder inside the
+ * shipment folder, generates the Task Work Order PDF, hyperlinks the
+ * Task ID and Shipment # cells, stamps Started At, and writes Assigned To.
+ *
+ * Fully idempotent: if Started At is set AND Task ID has a folder hyperlink,
+ * returns { noOp: true } immediately without touching the sheet.
+ * Partial recovery: reuses existing folder URL from Task ID hyperlink.
+ *
+ * @param {string} clientSheetId
+ * @param {{ taskId: string, assignedTo?: string }} payload
+ */
+function handleStartTask_(clientSheetId, payload) {
+  var taskId     = String((payload || {}).taskId     || "").trim();
+  var assignedTo = String((payload || {}).assignedTo || "").trim();
+  var forceOverride = (payload || {}).forceOverride === true;
+  if (!taskId) return errorResponse_("taskId is required", "INVALID_PARAMS");
+
+  // Acquire a per-task lock to prevent concurrent Start Task requests
+  var lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(15000); // wait up to 15s
+  } catch (_) {
+    return errorResponse_("Another user is starting this task. Please wait and try again.", "LOCK_BUSY");
+  }
+
+  try {
+    var ss = SpreadsheetApp.openById(clientSheetId);
+    var tasksSheet = ss.getSheetByName("Tasks");
+    if (!tasksSheet) { lock.releaseLock(); return errorResponse_("Tasks sheet not found", "SHEET_NOT_FOUND"); }
+    var taskMap = api_getHeaderMap_(tasksSheet);
+
+    // Find task row by Task ID
+    var idCol = taskMap["Task ID"];
+    if (!idCol) { lock.releaseLock(); return errorResponse_("Task ID column not found", "SCHEMA_ERROR"); }
+    var lastRow = api_getLastDataRow_(tasksSheet);
+    if (lastRow < 2) { lock.releaseLock(); return errorResponse_("Task not found: " + taskId, "NOT_FOUND"); }
+
+    var idVals = tasksSheet.getRange(2, idCol, lastRow - 1, 1).getValues();
+    var taskRowNum = -1;
+    for (var i = 0; i < idVals.length; i++) {
+      if (String(idVals[i][0] || "").trim() === taskId) { taskRowNum = i + 2; break; }
+    }
+    if (taskRowNum < 2) { lock.releaseLock(); return errorResponse_("Task not found: " + taskId, "NOT_FOUND"); }
+
+    var rowData = tasksSheet.getRange(taskRowNum, 1, 1, tasksSheet.getLastColumn()).getValues()[0];
+    function getVal_(h) { return taskMap[h] ? String(rowData[taskMap[h] - 1] || "").trim() : ""; }
+
+    var shipNo  = getVal_("Shipment #");
+
+    // IDEMPOTENCY GUARD: fully started = Started At set + Task ID has folder hyperlink
+    var startedAtCol = taskMap["Started At"];
+    var startedAtVal = startedAtCol ? rowData[startedAtCol - 1] : null;
+    var existingRt   = tasksSheet.getRange(taskRowNum, idCol).getRichTextValue();
+    var existingFolderUrl = (existingRt && existingRt.getLinkUrl()) ? existingRt.getLinkUrl() : "";
+
+    // Check if already assigned to someone else
+    var assignedToCol = taskMap["Assigned To"];
+    var existingAssignee = assignedToCol ? String(rowData[assignedToCol - 1] || "").trim() : "";
+
+    if (startedAtVal && existingFolderUrl) {
+      // Task already fully started — return noOp but include who it's assigned to
+      lock.releaseLock();
+      return jsonResponse_({
+        success: true, noOp: true, started: false,
+        taskId: taskId, folderUrl: existingFolderUrl,
+        startedAt: formatDateTime_(startedAtVal),
+        assignedTo: existingAssignee,
+        message: "Task already started — folder and PDF exist"
+      });
+    }
+
+    // CONFLICT GUARD: if task is In Progress and assigned to someone else, block (unless force override)
+    var currentStatus = getVal_("Status");
+    if (currentStatus === "In Progress" && existingAssignee && assignedTo &&
+        existingAssignee.toLowerCase() !== assignedTo.toLowerCase() && !forceOverride) {
+      lock.releaseLock();
+      return jsonResponse_({
+        success: false, conflict: true,
+        taskId: taskId, assignedTo: existingAssignee,
+        message: "Task is already assigned to " + existingAssignee + ". Use forceOverride to reassign."
+      });
+    }
+
+    // v26.3.0: Flat folder structure — task folders in Tasks/ subfolder (no shipment dependency)
+    var taskFolderUrl = existingFolderUrl; // reuse if partial run created it
+    if (!taskFolderUrl) {
+      var taskSub = api_getOrCreateEntitySubfolder_(ss, "Tasks");
+      if (taskSub.folder) {
+        try {
+          var tIt = taskSub.folder.getFoldersByName(taskId);
+          var tFolder = tIt.hasNext() ? tIt.next() : taskSub.folder.createFolder(taskId);
+          taskFolderUrl = "https://drive.google.com/drive/folders/" + tFolder.getId();
+        } catch (tfErr) { Logger.log("handleStartTask_ folder error: " + tfErr); }
+      }
+    }
+
+    // Hyperlink Task ID cell → task folder URL
+    if (taskFolderUrl) {
+      var taskRt = SpreadsheetApp.newRichTextValue().setText(taskId).setLinkUrl(taskFolderUrl).build();
+      tasksSheet.getRange(taskRowNum, idCol).setRichTextValue(taskRt);
+    }
+
+    // Task Work Order PDF removed (v29.6.0) — only repairs generate work order docs
+    var pdfCreated = false;
+    var pdfWarning = "";
+
+    // v26.3.0: Shipment # hyperlink removed — task folder is now independent of shipment folder
+
+    // Stamp Started At
+    var startedAtNow = new Date();
+    if (startedAtCol) tasksSheet.getRange(taskRowNum, startedAtCol).setValue(startedAtNow);
+
+    // Set Status to "In Progress" — only if currently "Open"
+    var statusCol = taskMap["Status"];
+    if (statusCol != null) {
+      var currentStatus = String(rowData[statusCol - 1] || "").trim();
+      if (currentStatus === "Open") {
+        tasksSheet.getRange(taskRowNum, statusCol).setValue("In Progress");
+      }
+    }
+
+    // v26.8.0: Keep Start Task checkbox checked (TRUE) — don't reset to FALSE
+    var startTaskCol = taskMap["Start Task"];
+    if (startTaskCol) tasksSheet.getRange(taskRowNum, startTaskCol).setValue(true);
+
+    // Write Assigned To — if provided and (field empty OR forceOverride)
+    if (assignedToCol && assignedTo && (!existingAssignee || forceOverride)) {
+      tasksSheet.getRange(taskRowNum, assignedToCol).setValue(assignedTo);
+    }
+
+    var warnings = [];
+    if (pdfWarning) warnings.push(pdfWarning);
+    if (!taskFolderUrl) warnings.push("No shipment folder found and no PHOTOS_FOLDER_ID set — task folder could not be created");
+    if (forceOverride && existingAssignee && existingAssignee.toLowerCase() !== assignedTo.toLowerCase()) {
+      warnings.push("Reassigned from " + existingAssignee + " to " + assignedTo);
+    }
+
+    // Flush all sheet writes so resyncEntityToSupabase_ reads committed data
+    SpreadsheetApp.flush();
+    lock.releaseLock();
+    api_bumpSummaryVersion_();
+    return jsonResponse_({
+      success:    true,
+      noOp:       false,
+      started:    true,
+      taskId:     taskId,
+      folderUrl:  taskFolderUrl || "",
+      pdfCreated: pdfCreated,
+      startedAt:  formatDateTime_(startedAtNow),
+      assignedTo: assignedTo || existingAssignee,
+      warnings:   warnings.length > 0 ? warnings : undefined,
+      message:    "Task started successfully"
+    });
+
+  } catch (err) {
+    try { lock.releaseLock(); } catch (_) {}
+    Logger.log("handleStartTask_ error: " + err + " | " + (err.stack || ""));
+    return errorResponse_("Start Task failed: " + (err.message || err), "SERVER_ERROR");
+  }
+}
+
+/* ---- Start Task helpers ------------------------------------------------- */
+
+/**
+ * Find or create a subfolder named folderName inside the folder at parentUrl.
+ * Returns the folder URL or "" on failure.
+ * Mirrors createItemFolder_() from Utils.gs.
+ */
+/**
+ * v26.3.0: Gets or creates a top-level entity subfolder under DRIVE_PARENT_FOLDER_ID.
+ * entityType = "Shipments" | "Tasks" | "Repairs" | "Will Calls"
+ * Returns { folder: Folder, url: string } or { folder: null, url: "" }.
+ */
+function api_getOrCreateEntitySubfolder_(ss, entityType) {
+  try {
+    var parentId = api_readSettings_(ss)["DRIVE_PARENT_FOLDER_ID"] || "";
+    if (!parentId) return { folder: null, url: "" };
+    var parent = DriveApp.getFolderById(parentId);
+    var iter = parent.getFoldersByName(entityType);
+    var folder = iter.hasNext() ? iter.next() : parent.createFolder(entityType);
+    return { folder: folder, url: "https://drive.google.com/drive/folders/" + folder.getId() };
+  } catch (e) {
+    Logger.log("api_getOrCreateEntitySubfolder_ error (" + entityType + "): " + e);
+    return { folder: null, url: "" };
+  }
+}
+
+function api_createItemFolder_(parentUrl, folderName) {
+  if (!parentUrl || !folderName) return "";
+  try {
+    var match = String(parentUrl).match(/[-\w]{25,}/);
+    if (!match) return "";
+    var parent = DriveApp.getFolderById(match[0]);
+    var it = parent.getFoldersByName(folderName);
+    var folder = it.hasNext() ? it.next() : parent.createFolder(folderName);
+    return "https://drive.google.com/drive/folders/" + folder.getId();
+  } catch (e) {
+    Logger.log("api_createItemFolder_ error: " + e);
+    return "";
+  }
+}
+
+/**
+ * v38.8.0: UrlFetchApp.fetch with exponential backoff retry on transient
+ * Drive/Docs errors (403 rate limit, 429, 500, 502, 503). Up to 4 retries
+ * at 1s / 2s / 4s / 8s. Most Drive 403 "User rate limit exceeded" false
+ * positives clear on the first retry. Returns the successful HTTPResponse,
+ * or throws with the last error body if every attempt fails.
+ */
+function api_fetchWithRetry_(url, options, maxRetries) {
+  var attempts = (typeof maxRetries === "number" ? maxRetries : 4);
+  var delays = [1000, 2000, 4000, 8000];
+  var lastCode = 0;
+  var lastBody = "";
+  for (var i = 0; i <= attempts; i++) {
+    var resp;
+    try {
+      resp = UrlFetchApp.fetch(url, options);
+    } catch (netErr) {
+      // Network-level failure — retry
+      lastBody = String(netErr);
+      if (i === attempts) throw new Error("fetch failed after " + (attempts + 1) + " attempts: " + lastBody);
+      Utilities.sleep(delays[i] || 8000);
+      continue;
+    }
+    var code = resp.getResponseCode();
+    lastCode = code;
+    if (code >= 200 && code < 300) return resp;
+    lastBody = resp.getContentText();
+    // Retry on transient: 403 rate-limit (checked via body), 429, 5xx
+    var isRateLimit403 = (code === 403 && /rate ?limit|user rate|usageLimits|rateLimitExceeded|userRateLimitExceeded/i.test(lastBody));
+    var isRetryable = isRateLimit403 || code === 429 || (code >= 500 && code < 600);
+    if (!isRetryable || i === attempts) break;
+    Logger.log("api_fetchWithRetry_ " + code + " attempt " + (i + 1) + ", sleeping " + delays[i] + "ms");
+    Utilities.sleep(delays[i] || 8000);
+  }
+  throw new Error("fetch failed (" + lastCode + "): " + String(lastBody).slice(0, 300));
+}
+
+/**
+ * Creates a Google Doc from raw HTML via the Drive REST API (no Advanced Drive Service needed).
+ * Equivalent to createGoogleDocFromHtml_() in Emails.gs but uses UrlFetchApp instead of
+ * Drive.Files.copy() so it works from standalone Apps Script projects.
+ * v38.8.0: wrapped in api_fetchWithRetry_ to survive Drive burst throttling.
+ * Returns the new Doc ID.
+ */
+function api_createGoogleDocFromHtml_(title, html) {
+  var blob     = Utilities.newBlob(html, "text/html", title + ".html");
+  var tempFile = DriveApp.createFile(blob);
+  var token    = ScriptApp.getOAuthToken();
+  try {
+    var resp = api_fetchWithRetry_(
+      "https://www.googleapis.com/drive/v3/files/" + tempFile.getId() + "/copy",
+      {
+        method:          "post",
+        contentType:     "application/json",
+        headers:         { Authorization: "Bearer " + token },
+        payload:         JSON.stringify({ name: title, mimeType: "application/vnd.google-apps.document" }),
+        muteHttpExceptions: true
+      }
+    );
+    var result = JSON.parse(resp.getContentText());
+    if (!result.id) throw new Error("copy failed: " + resp.getContentText().slice(0, 200));
+    return result.id;
+  } finally {
+    try { tempFile.setTrashed(true); } catch (_) {}
+  }
+}
+
+/**
+ * Exports a Google Doc as a PDF blob.
+ * Mirrors exportDocAsPdfBlob_() from Emails.gs (margin control via Docs API).
+ */
+function api_exportDocAsPdfBlob_(docId, fileName, marginInches) {
+  var m     = marginInches || 0.25;
+  var token = ScriptApp.getOAuthToken();
+  // Set page margins via Docs API (non-fatal if fails)
+  try {
+    var pts = Math.round(m * 914400); // inches → EMU
+    var marginPayload = { requests: [{ updateDocumentStyle: {
+      documentStyle: {
+        marginTop:    { magnitude: pts, unit: "EMU" },
+        marginBottom: { magnitude: pts, unit: "EMU" },
+        marginLeft:   { magnitude: pts, unit: "EMU" },
+        marginRight:  { magnitude: pts, unit: "EMU" }
+      },
+      fields: "marginTop,marginBottom,marginLeft,marginRight"
+    }}]};
+    UrlFetchApp.fetch("https://docs.googleapis.com/v1/documents/" + docId + ":batchUpdate", {
+      method: "post", contentType: "application/json",
+      headers: { Authorization: "Bearer " + token },
+      payload: JSON.stringify(marginPayload),
+      muteHttpExceptions: true
+    });
+  } catch (_) {}
+  var exportUrl = "https://docs.google.com/document/d/" + docId +
+    "/export?format=pdf&size=letter&portrait=true&fitw=true" +
+    "&top=" + m + "&bottom=" + m + "&left=" + m + "&right=" + m;
+  // v38.8.0: retry export on transient throttling (same backoff as copy step)
+  var pdfResp = api_fetchWithRetry_(exportUrl, { headers: { Authorization: "Bearer " + token }, muteHttpExceptions: true });
+  if (pdfResp.getResponseCode() !== 200) throw new Error("PDF export failed (" + pdfResp.getResponseCode() + ")");
+  return pdfResp.getBlob().setName(fileName);
+}
+
+/**
+ * Fetches a document HTML template from the client sheet's Email_Template_Cache.
+ * Falls back to Master Price List Email_Templates if no local cache.
+ * Mirrors getDocTemplateHtml_() from Emails.gs.
+ */
+function api_getDocTemplateHtml_(ss, templateKey) {
+  try {
+    var tmplSh = ss.getSheetByName("Email_Template_Cache");
+    if (!tmplSh || tmplSh.getLastRow() < 2) {
+      var masterId = String((api_readSettings_(ss) || {})["MASTER_SPREADSHEET_ID"] || "").trim();
+      if (!masterId) return null;
+      var master = SpreadsheetApp.openById(masterId);
+      tmplSh = master.getSheetByName("Email_Templates");
+      if (!tmplSh || tmplSh.getLastRow() < 2) return null;
+    }
+    var data = tmplSh.getRange(2, 1, tmplSh.getLastRow() - 1, Math.max(tmplSh.getLastColumn(), 3)).getValues();
+    for (var i = 0; i < data.length; i++) {
+      if (String(data[i][0] || "").trim() === templateKey) {
+        var html = String(data[i][2] || "").trim();
+        return html ? { html: html } : null;
+      }
+    }
+  } catch (e) {
+    Logger.log("api_getDocTemplateHtml_ error: " + e);
+  }
+  return null;
+}
+
+/**
+ * Replaces {{TOKEN}} placeholders in an HTML string.
+ * Mirrors resolveDocTokens_() from Emails.gs.
+ */
+function api_resolveDocTokens_(html, tokens) {
+  var keys = Object.keys(tokens || {});
+  for (var j = 0; j < keys.length; j++) {
+    var val = tokens[keys[j]];
+    html = html.split(keys[j]).join(String(val !== undefined && val !== null ? val : ""));
+  }
+  return html;
+}
+
+/** HTML-escape helper. Mirrors esc_() from Utils.gs. */
+function api_esc_(s) {
+  return String(s || "").replace(/[&<>"]/g, function(c) {
+    return { "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;" }[c];
+  });
+}
+
+/**
+ * Generates a Task Work Order PDF and saves it to the task folder.
+ * Mirrors generateTaskWorkOrderPdf_() from Tasks.gs.
+ * Returns { pdfCreated: boolean, warning?: string }.
+ */
+// ─── generateTaskWorkOrder — manual PDF generation from React UI (v38.10.0) ────
+// Thin wrapper that reads the task row + folder URL, then calls the existing
+// api_generateTaskWorkOrderPdf_() function. Button is on TaskDetailPanel,
+// visible only for started tasks (staff/admin).
+
+function handleGenerateTaskWorkOrder_(clientSheetId, payload) {
+  var taskId = String((payload || {}).taskId || "").trim();
+  if (!taskId) return errorResponse_("taskId is required", "INVALID_PARAMS");
+
+  try {
+    var ss = SpreadsheetApp.openById(clientSheetId);
+    var sheet = ss.getSheetByName("Tasks");
+    if (!sheet) return errorResponse_("Tasks sheet not found", "SHEET_NOT_FOUND");
+
+    var taskMap = api_getHeaderMap_(sheet);
+    var idCol = taskMap["Task ID"];
+    if (!idCol) return errorResponse_("Task ID column not found", "SCHEMA_ERROR");
+
+    var taskRow = api_findRowById_(sheet, idCol, taskId);
+    if (taskRow < 2) return errorResponse_("Task not found: " + taskId, "NOT_FOUND");
+
+    var rowData = sheet.getRange(taskRow, 1, 1, sheet.getLastColumn()).getValues()[0];
+
+    // Read folder URL from Task ID cell's rich text hyperlink
+    var folderUrl = "";
+    try {
+      var rt = sheet.getRange(taskRow, idCol).getRichTextValue();
+      if (rt) folderUrl = rt.getLinkUrl() || "";
+    } catch (_) {}
+
+    if (!folderUrl) {
+      return errorResponse_("Task folder not found — start the task first to create a folder", "PRECONDITION_FAILED");
+    }
+
+    var settings = api_readSettings_(ss);
+    var result = api_generateTaskWorkOrderPdf_(ss, rowData, taskMap, settings, folderUrl);
+
+    if (result.pdfCreated) {
+      return jsonResponse_({
+        success: true,
+        taskId: taskId,
+        pdfCreated: true,
+        message: "Work Order PDF saved to task folder"
+      });
+    } else {
+      return jsonResponse_({
+        success: false,
+        taskId: taskId,
+        pdfCreated: false,
+        error: result.warning || "PDF generation failed"
+      });
+    }
+  } catch (err) {
+    return errorResponse_("Failed to generate work order: " + String(err), "SERVER_ERROR");
+  }
+}
+
+function api_generateTaskWorkOrderPdf_(ss, rowData, taskMap, settings, folderUrl) {
+  try {
+    var clientName = String(settings["CLIENT_NAME"] || "Client");
+    var logoUrl    = String(settings["LOGO_URL"] || "").trim()
+                     || "https://static.wixstatic.com/media/a38fbc_a8c7a368447f4723b782c4dbd765ca0e~mv2.png";
+
+    function getF_(h) { return taskMap[h] ? String(rowData[taskMap[h] - 1] || "").trim() : ""; }
+    var taskId    = getF_("Task ID");
+    var itemId    = getF_("Item ID");
+    var taskType  = getF_("Type");
+    var taskNotes = getF_("Task Notes");
+    var status    = getF_("Status") || "Open";
+    var photosUrl = folderUrl || "";
+    var createdRaw = taskMap["Created"] ? rowData[taskMap["Created"] - 1] : new Date();
+    var createdDate = (createdRaw instanceof Date) ? createdRaw : new Date(createdRaw || Date.now());
+    var dateStr;
+    try { dateStr = Utilities.formatDate(createdDate, Session.getScriptTimeZone(), "MM/dd/yyyy"); }
+    catch (_) { dateStr = String(createdRaw || ""); }
+
+    // Inventory item details
+    var inv        = api_findInventoryItem_(ss, itemId);
+    var sidemark   = inv ? (inv.sidemark   || "") : "";
+    var itemQty    = inv ? String(inv.qty  || "1") : "1";
+    var itemVendor = inv ? (inv.vendor     || "") : "";
+    var itemDesc   = inv ? (inv.description|| "") : "";
+    var itemRoom   = inv ? (inv.room       || "") : "";
+
+    var e = api_esc_;
+    var tokens = {
+      "{{LOGO_URL}}":     e(logoUrl),
+      "{{TASK_ID}}":      e(taskId),
+      "{{CLIENT_NAME}}":  e(clientName),
+      "{{DATE}}":         e(dateStr),
+      "{{SIDEMARK}}":     e(sidemark),
+      "{{SIDEMARK_ROW}}": sidemark
+        ? '<tr><td style="font-size:10px;color:#64748B;padding:2px 0;font-weight:700;">SIDEMARK</td><td style="font-size:12px;">' + e(sidemark) + '</td></tr>'
+        : "",
+      "{{STATUS}}":       e(status),
+      "{{TASK_TYPE}}":    e(taskType),
+      "{{NOTES_ROW}}":    taskNotes
+        ? '<tr><td style="font-size:10px;color:#64748B;padding:2px 0;font-weight:700;">Notes</td><td style="font-size:12px;">' + e(taskNotes) + '</td></tr>'
+        : "",
+      "{{PHOTOS_ROW}}":   photosUrl
+        ? '<tr><td style="font-size:10px;color:#64748B;padding:2px 0;font-weight:700;">Photos</td><td style="font-size:12px;"><a href="' + e(photosUrl) + '" style="color:#E85D2D;text-decoration:underline;">View Photos</a></td></tr>'
+        : "",
+      "{{ITEM_ID}}":       e(itemId),
+      "{{ITEM_QTY}}":      e(itemQty),
+      "{{ITEM_VENDOR}}":   e(itemVendor),
+      "{{ITEM_DESC}}":     e(itemDesc),
+      "{{ITEM_SIDEMARK}}": e(sidemark),
+      "{{ITEM_ROOM}}":     e(itemRoom),
+      "{{RESULT_OPTIONS_HTML}}":
+        '<span style="display:inline-block;margin-right:16px;font-size:11px;"><span style="display:inline-block;width:14px;height:14px;border:1.5px solid #94A3B8;border-radius:3px;vertical-align:middle;margin-right:4px;"></span> Pass</span>' +
+        '<span style="display:inline-block;margin-right:16px;font-size:11px;"><span style="display:inline-block;width:14px;height:14px;border:1.5px solid #94A3B8;border-radius:3px;vertical-align:middle;margin-right:4px;"></span> Fail</span>' +
+        '<span style="display:inline-block;margin-right:16px;font-size:11px;"><span style="display:inline-block;width:14px;height:14px;border:1.5px solid #94A3B8;border-radius:3px;vertical-align:middle;margin-right:4px;"></span> Needs Repair</span>' +
+        '<span style="display:inline-block;font-size:11px;"><span style="display:inline-block;width:14px;height:14px;border:1.5px solid #94A3B8;border-radius:3px;vertical-align:middle;margin-right:4px;"></span> Other</span>'
+    };
+
+    var templateResult = api_getDocTemplateHtml_(ss, "DOC_TASK_WORK_ORDER");
+    // Default WO HTML — hardcoded fallback used ONLY when the template sheet
+    // lookup returns null. Contains a "[FALLBACK]" indicator in the footer so
+    // Justin can tell which source generated the PDF.
+    var defaultHtml = '<html><head><style>body{font-family:Arial,Helvetica,sans-serif;color:#1E293B;margin:0;padding:0;}table{border-collapse:collapse;width:8in;}</style></head><body><div style="width:8in;margin:0;"><table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-bottom:6px;"><tr><td style="vertical-align:middle;"><table cellpadding="0" cellspacing="0" border="0"><tr><td style="vertical-align:middle;padding-right:10px;"><img src="{{LOGO_URL}}" alt="Logo" style="height:38px;width:38px;" /></td><td style="vertical-align:middle;"><span style="font-size:20px;font-weight:bold;color:#1E293B;">Stride Logistics </span><span style="font-size:20px;font-weight:bold;color:#E85D2D;">WMS</span><br><span style="font-size:10px;color:#64748B;">Kent, WA &middot; whse@stridenw.com &middot; 206-550-1848</span></td></tr></table></td><td style="text-align:right;vertical-align:middle;"><div style="font-size:20px;font-weight:bold;color:#1E293B;">Work Order</div><div style="font-size:15px;font-weight:bold;color:#E85D2D;margin-top:2px;">{{TASK_ID}}</div></td></tr></table><table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-top:14px;margin-bottom:14px;"><tr><td style="width:50%;vertical-align:top;"><table cellpadding="0" cellspacing="0" border="0" style="width:100%;"><tr><td style="font-size:10px;color:#64748B;padding:2px 0;width:80px;font-weight:bold;">CLIENT</td><td style="font-size:12px;font-weight:bold;">{{CLIENT_NAME}}</td></tr>{{SIDEMARK_ROW}}</table></td><td style="width:50%;vertical-align:top;"><table cellpadding="0" cellspacing="0" border="0" style="width:100%;"><tr><td style="font-size:10px;color:#64748B;padding:2px 0;text-align:right;width:65px;font-weight:bold;">DATE</td><td style="font-size:12px;font-weight:bold;text-align:right;">{{DATE}}</td></tr><tr><td style="font-size:10px;color:#64748B;padding:2px 0;text-align:right;font-weight:bold;">STATUS</td><td style="font-size:12px;font-weight:bold;text-align:right;">{{STATUS}}</td></tr></table></td></tr></table><div style="background:#F8FAFC;border:1px solid #E2E8F0;padding:10px 12px;margin-bottom:14px;"><div style="font-size:9px;color:#64748B;font-weight:bold;margin-bottom:6px;">TASK DETAILS</div><table cellpadding="0" cellspacing="0" border="0" style="width:100%;"><tr><td style="font-size:10px;color:#64748B;padding:2px 0;width:100px;font-weight:bold;">Task Type</td><td style="font-size:12px;font-weight:bold;">{{TASK_TYPE}}</td></tr>{{NOTES_ROW}}{{PHOTOS_ROW}}</table></div><div style="font-size:9px;color:#64748B;font-weight:bold;margin-bottom:4px;">ITEM DETAILS</div><table width="100%" cellpadding="0" cellspacing="0" border="0" style="border:1px solid #E2E8F0;margin-bottom:16px;"><tr style="background:#E85D2D;"><th style="padding:5px 6px;font-size:9px;color:#fff;font-weight:bold;text-align:left;">Item ID</th><th style="padding:5px 6px;font-size:9px;color:#fff;font-weight:bold;text-align:center;width:30px;">Qty</th><th style="padding:5px 6px;font-size:9px;color:#fff;font-weight:bold;text-align:left;">Vendor</th><th style="padding:5px 6px;font-size:9px;color:#fff;font-weight:bold;text-align:left;">Description</th><th style="padding:5px 6px;font-size:9px;color:#fff;font-weight:bold;text-align:left;">Sidemark</th><th style="padding:5px 6px;font-size:9px;color:#fff;font-weight:bold;text-align:left;">Room</th></tr><tr><td style="padding:6px;font-size:11px;border-bottom:1px solid #E2E8F0;font-weight:bold;">{{ITEM_ID}}</td><td style="padding:6px;font-size:11px;border-bottom:1px solid #E2E8F0;text-align:center;">{{ITEM_QTY}}</td><td style="padding:6px;font-size:11px;border-bottom:1px solid #E2E8F0;">{{ITEM_VENDOR}}</td><td style="padding:6px;font-size:11px;border-bottom:1px solid #E2E8F0;">{{ITEM_DESC}}</td><td style="padding:6px;font-size:11px;border-bottom:1px solid #E2E8F0;">{{ITEM_SIDEMARK}}</td><td style="padding:6px;font-size:11px;border-bottom:1px solid #E2E8F0;">{{ITEM_ROOM}}</td></tr></table><div style="border:2px solid #1E293B;padding:14px;margin-bottom:14px;"><div style="font-size:11px;font-weight:bold;color:#1E293B;margin-bottom:10px;border-bottom:2px solid #E2E8F0;padding-bottom:5px;">WAREHOUSE USE ONLY</div><table width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td style="width:50%;padding-bottom:14px;"><div style="font-size:10px;font-weight:bold;color:#64748B;margin-bottom:4px;">Completed By</div><div style="border-bottom:1.5px solid #CBD5E1;height:22px;width:90%;"></div></td><td style="width:50%;padding-bottom:14px;"><div style="font-size:10px;font-weight:bold;color:#64748B;margin-bottom:4px;text-align:right;">Date</div><div style="border-bottom:1.5px solid #CBD5E1;height:22px;width:90%;margin-left:auto;"></div></td></tr></table><div style="margin-bottom:14px;"><div style="font-size:10px;font-weight:bold;color:#64748B;margin-bottom:6px;">Result</div>{{RESULT_OPTIONS_HTML}}</div><div><div style="font-size:10px;font-weight:bold;color:#64748B;margin-bottom:6px;">Notes</div><div style="border-bottom:1px solid #E2E8F0;height:18px;margin-bottom:6px;">&nbsp;</div><div style="border-bottom:1px solid #E2E8F0;height:18px;margin-bottom:6px;">&nbsp;</div><div style="border-bottom:1px solid #E2E8F0;height:18px;">&nbsp;</div></div></div><div style="text-align:center;font-size:9px;color:#94A3B8;border-top:1px solid #E2E8F0;padding-top:6px;">Stride Logistics &middot; 206-550-1848 &middot; whse@stridenw.com</div></div></body></html>';
+    // v38.11.0: Source indicator — if using the template sheet, the footer is
+    // whatever the template has. If using the hardcoded fallback, the footer
+    // includes "[FALLBACK]" so Justin can tell at a glance which source was used.
+    var isFromTemplate = !!templateResult;
+    var sourceHtml = templateResult ? templateResult.html : defaultHtml;
+    if (!isFromTemplate) {
+      // Inject [FALLBACK] marker into the hardcoded footer
+      sourceHtml = sourceHtml.replace(
+        'Stride Logistics &middot; 206-550-1848 &middot; whse@stridenw.com</div></div></body></html>',
+        'Stride Logistics &middot; 206-550-1848 &middot; whse@stridenw.com &middot; <span style="color:#DC2626;font-weight:bold;">[FALLBACK TEMPLATE]</span></div></div></body></html>'
+      );
+    }
+    var html = api_resolveDocTokens_(sourceHtml, tokens);
+
+    var docTitle = "Work Order - " + taskId;
+    var docId    = api_createGoogleDocFromHtml_(docTitle, html);
+    var pdfBlob  = api_exportDocAsPdfBlob_(docId, "Work_Order_" + taskId + ".pdf", 0.25);
+
+    // Save to task folder, trash temp doc
+    var fIdMatch = String(folderUrl).match(/[-\w]{25,}/);
+    if (fIdMatch) DriveApp.getFolderById(fIdMatch[0]).createFile(pdfBlob);
+    try { DriveApp.getFileById(docId).setTrashed(true); } catch (_) {}
+
+    return { pdfCreated: true };
+  } catch (err) {
+    Logger.log("api_generateTaskWorkOrderPdf_ error: " + err);
+    return {
+      pdfCreated: false,
+      warning: "Work Order PDF generation failed: " + (err.message || err) +
+               " — folder was created, PDF can be regenerated manually."
+    };
+  }
+}
+
+// ─── cancelTask — set task status to Cancelled (v28.9.0) ─────────────────────
+
+function handleCancelTask_(clientSheetId, payload) {
+  var taskId = String((payload || {}).taskId || "").trim();
+  if (!taskId) return errorResponse_("taskId is required", "INVALID_PARAMS");
+
+  try {
+    var ss = SpreadsheetApp.openById(clientSheetId);
+    var sheet = ss.getSheetByName("Tasks");
+    if (!sheet) return errorResponse_("Tasks sheet not found", "SHEET_NOT_FOUND");
+
+    var taskMap = api_getHeaderMap_(sheet);
+    var idCol = taskMap["Task ID"];
+    if (!idCol) return errorResponse_("Task ID column not found", "SCHEMA_ERROR");
+
+    var taskRow = api_findRowById_(sheet, idCol, taskId);
+    if (taskRow < 2) return errorResponse_("Task not found: " + taskId, "NOT_FOUND");
+
+    // Read current status
+    var statusCol = taskMap["Status"];
+    var currentStatus = statusCol ? String(sheet.getRange(taskRow, statusCol).getValue() || "").trim() : "";
+    if (currentStatus === "Completed") return errorResponse_("Cannot cancel a completed task", "INVALID_STATUS");
+    if (currentStatus === "Cancelled") return jsonResponse_({ success: true, taskId: taskId, skipped: true, message: "Task already cancelled" });
+
+    // Set status + timestamp
+    if (statusCol) sheet.getRange(taskRow, statusCol).setValue("Cancelled");
+    if (taskMap["Cancelled At"]) sheet.getRange(taskRow, taskMap["Cancelled At"]).setValue(new Date());
+
+    return jsonResponse_({ success: true, taskId: taskId, message: "Task cancelled" });
+  } catch (err) {
+    return errorResponse_("Failed to cancel task: " + String(err), "SERVER_ERROR");
+  }
+}
+
+// ─── cancelRepair — set repair status to Cancelled (v28.9.0) ─────────────────
+
+function handleCancelRepair_(clientSheetId, payload) {
+  var repairId = String((payload || {}).repairId || "").trim();
+  if (!repairId) return errorResponse_("repairId is required", "INVALID_PARAMS");
+
+  try {
+    var ss = SpreadsheetApp.openById(clientSheetId);
+    var sheet = ss.getSheetByName("Repairs");
+    if (!sheet) return errorResponse_("Repairs sheet not found", "SHEET_NOT_FOUND");
+
+    var repairMap = api_getHeaderMap_(sheet);
+    var idCol = repairMap["Repair ID"];
+    if (!idCol) return errorResponse_("Repair ID column not found", "SCHEMA_ERROR");
+
+    var repairRow = api_findRowById_(sheet, idCol, repairId);
+    if (repairRow < 2) return errorResponse_("Repair not found: " + repairId, "NOT_FOUND");
+
+    // Read current status
+    var statusCol = repairMap["Status"];
+    var currentStatus = statusCol ? String(sheet.getRange(repairRow, statusCol).getValue() || "").trim() : "";
+    if (currentStatus === "Complete") return errorResponse_("Cannot cancel a completed repair", "INVALID_STATUS");
+    if (currentStatus === "Cancelled") return jsonResponse_({ success: true, repairId: repairId, skipped: true, message: "Repair already cancelled" });
+
+    // Set status
+    if (statusCol) sheet.getRange(repairRow, statusCol).setValue("Cancelled");
+
+    return jsonResponse_({ success: true, repairId: repairId, message: "Repair cancelled" });
+  } catch (err) {
+    return errorResponse_("Failed to cancel repair: " + String(err), "SERVER_ERROR");
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// v38.6.0: BULK ACTION TOOLBAR BATCH ENDPOINTS
+// ═══════════════════════════════════════════════════════════════════════════════
+// Four batch handlers for lightweight status/assignment mutations triggered from
+// the bulk action toolbars on the Tasks, Repairs, and Will Calls pages. Each
+// handler loops an id array, applies the action's status-eligibility rule, and
+// returns a standardized BatchMutationResult shape:
+//   {
+//     success, processed, succeeded, failed,
+//     skipped: [{ id, reason }], errors: [{ id, reason }], message
+//   }
+//
+// Parity notes (from single-entity cancel handler audit):
+//   - handleCancelTask_    writes Status + Cancelled At  (Tasks sheet has Cancelled At col)
+//   - handleCancelRepair_  writes Status only            (Repairs sheet has NO Cancelled At col)
+//   - handleCancelWillCall_ writes Status + cascades WC_Items, ALSO sends email
+//     → batch handler does NOT send emails (would blow 6-min quota at scale)
+//   - None of the three use LockService → batch handlers don't either
+//   - Write-through per succeeded row inside the handler (same helper used by
+//     the single-entity router wrappers)
+//
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Build an empty BatchMutationResult scaffold.
+ */
+function api_newBatchResult_() {
+  return {
+    success: true,
+    processed: 0,
+    succeeded: 0,
+    failed: 0,
+    skipped: [],
+    errors: [],
+    message: ""
+  };
+}
+
+/** Normalized skip helper */
+function api_batchSkip_(result, id, reason) {
+  result.skipped.push({ id: String(id), reason: String(reason) });
+}
+/** Normalized error helper */
+function api_batchError_(result, id, reason) {
+  result.errors.push({ id: String(id), reason: String(reason) });
+  result.failed++;
+}
+
+// ─── handleBatchCancelTasks_ ───────────────────────────────────────────────────
+// Payload: { taskIds: string[] }
+// Writes Status=Cancelled + Cancelled At=now on each eligible row.
+// Eligible statuses: Open, In Progress. Skip: Completed, Cancelled, not found.
+
+function handleBatchCancelTasks_(clientSheetId, payload) {
+  var taskIds = (payload || {}).taskIds;
+  if (!Array.isArray(taskIds) || taskIds.length === 0) {
+    return errorResponse_("taskIds array is required and must be non-empty", "INVALID_PARAMS");
+  }
+
+  var result = api_newBatchResult_();
+  result.processed = taskIds.length;
+
+  var ss;
+  try { ss = SpreadsheetApp.openById(clientSheetId); }
+  catch (e) {
+    result.success = false;
+    result.message = "Cannot open client spreadsheet: " + e.message;
+    return jsonResponse_(result);
+  }
+
+  var sheet = ss.getSheetByName("Tasks");
+  if (!sheet) {
+    result.success = false;
+    result.message = "Tasks sheet not found";
+    return jsonResponse_(result);
+  }
+
+  var map = api_getHeaderMap_(sheet);
+  var idCol = map["Task ID"];
+  var statusCol = map["Status"];
+  if (!idCol || !statusCol) {
+    result.success = false;
+    result.message = "Required columns missing on Tasks sheet (Task ID, Status)";
+    return jsonResponse_(result);
+  }
+  var cancelledAtCol = map["Cancelled At"]; // optional — Tasks has it per schema audit
+  var now = new Date();
+  var succeededIds = [];
+
+  for (var i = 0; i < taskIds.length; i++) {
+    var taskId = String(taskIds[i] || "").trim();
+    if (!taskId) { api_batchSkip_(result, taskIds[i], "blank taskId"); continue; }
+    try {
+      var taskRow = api_findRowById_(sheet, idCol, taskId);
+      if (taskRow < 2) { api_batchSkip_(result, taskId, "Not found"); continue; }
+
+      var currentStatus = String(sheet.getRange(taskRow, statusCol).getValue() || "").trim();
+      if (currentStatus === "Cancelled") {
+        api_batchSkip_(result, taskId, "Cannot cancel — status is Cancelled"); continue;
+      }
+      if (currentStatus === "Completed") {
+        api_batchSkip_(result, taskId, "Cannot cancel — status is Completed"); continue;
+      }
+
+      sheet.getRange(taskRow, statusCol).setValue("Cancelled");
+      if (cancelledAtCol) sheet.getRange(taskRow, cancelledAtCol).setValue(now);
+      result.succeeded++;
+      succeededIds.push(taskId);
+    } catch (rowErr) {
+      api_batchError_(result, taskId, String(rowErr));
+    }
+  }
+
+  try { SpreadsheetApp.flush(); } catch (_) {}
+  try { invalidateClientCache_(clientSheetId); } catch (_) {}
+  try { api_bumpSummaryVersion_(); } catch (_) {}
+
+  // Per-row write-through for succeeded rows
+  for (var w = 0; w < succeededIds.length; w++) {
+    try { api_writeThrough_(result, "task", clientSheetId, succeededIds[w]); } catch (_) {}
+  }
+
+  result.message = "Cancelled " + result.succeeded + " task(s)" +
+                   (result.skipped.length ? ", skipped " + result.skipped.length : "") +
+                   (result.failed ? ", failed " + result.failed : "");
+  return jsonResponse_(result);
+}
+
+// ─── handleBatchCancelRepairs_ ─────────────────────────────────────────────────
+// Payload: { repairIds: string[] }
+// Writes Status=Cancelled on each eligible row. (Repairs sheet has NO Cancelled At col
+// per schema audit — single-entity handler doesn't write one either.)
+// Eligible statuses: Pending Quote, Quote Sent, Approved, Declined, In Progress.
+// Skip: Completed (any "Complete" variant), Cancelled, Invoiced, not found.
+
+function handleBatchCancelRepairs_(clientSheetId, payload) {
+  var repairIds = (payload || {}).repairIds;
+  if (!Array.isArray(repairIds) || repairIds.length === 0) {
+    return errorResponse_("repairIds array is required and must be non-empty", "INVALID_PARAMS");
+  }
+
+  var result = api_newBatchResult_();
+  result.processed = repairIds.length;
+
+  var ss;
+  try { ss = SpreadsheetApp.openById(clientSheetId); }
+  catch (e) { result.success = false; result.message = "Cannot open client spreadsheet: " + e.message; return jsonResponse_(result); }
+
+  var sheet = ss.getSheetByName("Repairs");
+  if (!sheet) { result.success = false; result.message = "Repairs sheet not found"; return jsonResponse_(result); }
+
+  var map = api_getHeaderMap_(sheet);
+  var idCol = map["Repair ID"];
+  var statusCol = map["Status"];
+  if (!idCol || !statusCol) {
+    result.success = false;
+    result.message = "Required columns missing on Repairs sheet (Repair ID, Status)";
+    return jsonResponse_(result);
+  }
+  var succeededIds = [];
+
+  for (var i = 0; i < repairIds.length; i++) {
+    var repairId = String(repairIds[i] || "").trim();
+    if (!repairId) { api_batchSkip_(result, repairIds[i], "blank repairId"); continue; }
+    try {
+      var repairRow = api_findRowById_(sheet, idCol, repairId);
+      if (repairRow < 2) { api_batchSkip_(result, repairId, "Not found"); continue; }
+
+      var currentStatus = String(sheet.getRange(repairRow, statusCol).getValue() || "").trim();
+      var lower = currentStatus.toLowerCase();
+      if (lower === "cancelled") {
+        api_batchSkip_(result, repairId, "Cannot cancel — status is Cancelled"); continue;
+      }
+      if (lower === "complete" || lower === "completed") {
+        api_batchSkip_(result, repairId, "Cannot cancel — status is " + currentStatus); continue;
+      }
+      if (lower === "invoiced") {
+        api_batchSkip_(result, repairId, "Cannot cancel — status is Invoiced"); continue;
+      }
+
+      sheet.getRange(repairRow, statusCol).setValue("Cancelled");
+      result.succeeded++;
+      succeededIds.push(repairId);
+    } catch (rowErr) {
+      api_batchError_(result, repairId, String(rowErr));
+    }
+  }
+
+  try { SpreadsheetApp.flush(); } catch (_) {}
+  try { invalidateClientCache_(clientSheetId); } catch (_) {}
+  try { api_bumpSummaryVersion_(); } catch (_) {}
+
+  for (var w = 0; w < succeededIds.length; w++) {
+    try { api_writeThrough_(result, "repair", clientSheetId, succeededIds[w]); } catch (_) {}
+  }
+
+  result.message = "Cancelled " + result.succeeded + " repair(s)" +
+                   (result.skipped.length ? ", skipped " + result.skipped.length : "") +
+                   (result.failed ? ", failed " + result.failed : "");
+  return jsonResponse_(result);
+}
+
+// ─── handleBatchCancelWillCalls_ ───────────────────────────────────────────────
+// Payload: { wcNumbers: string[] }
+// Writes Status=Cancelled on each eligible WC header row AND cascades to WC_Items:
+//   - Released items stay Released (no write)
+//   - Cancelled items stay Cancelled (no write)
+//   - All other linked items become Cancelled
+// Skip: Released (fully released), Cancelled, not found.
+// NOTE: Unlike single-entity handleCancelWillCall_, this does NOT send cancellation
+// emails — loop of email sends would exceed Apps Script's 6-min execution limit.
+// This is an intentional deviation; document in the summary message.
+
+function handleBatchCancelWillCalls_(clientSheetId, payload) {
+  var wcNumbers = (payload || {}).wcNumbers;
+  if (!Array.isArray(wcNumbers) || wcNumbers.length === 0) {
+    return errorResponse_("wcNumbers array is required and must be non-empty", "INVALID_PARAMS");
+  }
+
+  var result = api_newBatchResult_();
+  result.processed = wcNumbers.length;
+
+  var ss;
+  try { ss = SpreadsheetApp.openById(clientSheetId); }
+  catch (e) { result.success = false; result.message = "Cannot open client spreadsheet: " + e.message; return jsonResponse_(result); }
+
+  var wcSh = ss.getSheetByName("Will_Calls");
+  if (!wcSh) { result.success = false; result.message = "Will_Calls sheet not found"; return jsonResponse_(result); }
+
+  var wcMap = api_getHeaderMap_(wcSh);
+  var wcNumCol = wcMap["WC Number"];
+  var wcStatusCol = wcMap["Status"];
+  if (!wcNumCol || !wcStatusCol) {
+    result.success = false;
+    result.message = "Required columns missing on Will_Calls sheet (WC Number, Status)";
+    return jsonResponse_(result);
+  }
+
+  // Pre-read WC_Items once for efficient cascade
+  var wciSh = ss.getSheetByName("WC_Items");
+  var wciMap = wciSh ? api_getHeaderMap_(wciSh) : null;
+  var wciNumCol = wciMap ? wciMap["WC Number"] : null;
+  var wciStatusCol = wciMap ? wciMap["Status"] : null;
+  var succeededIds = [];
+  var itemsCascaded = 0;
+
+  for (var i = 0; i < wcNumbers.length; i++) {
+    var wcNumber = String(wcNumbers[i] || "").trim();
+    if (!wcNumber) { api_batchSkip_(result, wcNumbers[i], "blank wcNumber"); continue; }
+    try {
+      // Find WC row
+      var wcRow = api_findRowById_(wcSh, wcNumCol, wcNumber);
+      if (wcRow < 2) { api_batchSkip_(result, wcNumber, "Not found"); continue; }
+
+      var currentStatus = String(wcSh.getRange(wcRow, wcStatusCol).getValue() || "").trim();
+      if (currentStatus === "Cancelled") {
+        api_batchSkip_(result, wcNumber, "Cannot cancel — status is Cancelled"); continue;
+      }
+      if (currentStatus === "Released") {
+        api_batchSkip_(result, wcNumber, "Cannot cancel — status is Released (fully released)"); continue;
+      }
+
+      // Write header status
+      wcSh.getRange(wcRow, wcStatusCol).setValue("Cancelled");
+
+      // Cascade to WC_Items: Released stays Released, Cancelled stays Cancelled, others → Cancelled
+      if (wciSh && wciNumCol && wciStatusCol && wciSh.getLastRow() >= 2) {
+        var wciData = wciSh.getRange(2, 1, wciSh.getLastRow() - 1, wciSh.getLastColumn()).getValues();
+        for (var j = 0; j < wciData.length; j++) {
+          var rowWcNum = String(wciData[j][wciNumCol - 1] || "").trim();
+          if (rowWcNum !== wcNumber) continue;
+          var itemStatus = String(wciData[j][wciStatusCol - 1] || "").trim();
+          if (itemStatus === "Released" || itemStatus === "Cancelled") continue;
+          wciSh.getRange(j + 2, wciStatusCol).setValue("Cancelled");
+          itemsCascaded++;
+        }
+      }
+
+      result.succeeded++;
+      succeededIds.push(wcNumber);
+    } catch (rowErr) {
+      api_batchError_(result, wcNumber, String(rowErr));
+    }
+  }
+
+  try { SpreadsheetApp.flush(); } catch (_) {}
+  try { invalidateClientCache_(clientSheetId); } catch (_) {}
+  try { api_bumpSummaryVersion_(); } catch (_) {}
+
+  for (var w = 0; w < succeededIds.length; w++) {
+    try { api_writeThrough_(result, "will_call", clientSheetId, succeededIds[w]); } catch (_) {}
+  }
+
+  result.message = "Cancelled " + result.succeeded + " will call(s)" +
+                   (itemsCascaded ? " (" + itemsCascaded + " items cascaded)" : "") +
+                   (result.skipped.length ? ", skipped " + result.skipped.length : "") +
+                   (result.failed ? ", failed " + result.failed : "") +
+                   ". Cancellation emails were NOT sent in bulk mode.";
+  return jsonResponse_(result);
+}
+
+// ─── handleBatchReassignTasks_ ─────────────────────────────────────────────────
+// Payload: { taskIds: string[], assignedTo: string }
+// Writes Assigned To = <assignedTo> on each eligible row. Only "Assigned To" is
+// written — no audit fields (no single-entity handler writes them either).
+// Eligible statuses: Open, In Progress. Skip: Completed, Cancelled, not found.
+// Idempotent same-value writes count as succeeded (not skipped).
+
+function handleBatchReassignTasks_(clientSheetId, payload) {
+  var taskIds = (payload || {}).taskIds;
+  var assignedTo = String((payload || {}).assignedTo || "").trim();
+
+  if (!Array.isArray(taskIds) || taskIds.length === 0) {
+    return errorResponse_("taskIds array is required and must be non-empty", "INVALID_PARAMS");
+  }
+  if (!assignedTo) {
+    return errorResponse_("assignedTo is required and must not be blank", "INVALID_PARAMS");
+  }
+
+  var result = api_newBatchResult_();
+  result.processed = taskIds.length;
+
+  var ss;
+  try { ss = SpreadsheetApp.openById(clientSheetId); }
+  catch (e) { result.success = false; result.message = "Cannot open client spreadsheet: " + e.message; return jsonResponse_(result); }
+
+  var sheet = ss.getSheetByName("Tasks");
+  if (!sheet) { result.success = false; result.message = "Tasks sheet not found"; return jsonResponse_(result); }
+
+  var map = api_getHeaderMap_(sheet);
+  var idCol = map["Task ID"];
+  var statusCol = map["Status"];
+  var assignedCol = map["Assigned To"];
+  if (!idCol || !statusCol || !assignedCol) {
+    result.success = false;
+    result.message = "Required columns missing on Tasks sheet (Task ID, Status, Assigned To)";
+    return jsonResponse_(result);
+  }
+  var succeededIds = [];
+
+  for (var i = 0; i < taskIds.length; i++) {
+    var taskId = String(taskIds[i] || "").trim();
+    if (!taskId) { api_batchSkip_(result, taskIds[i], "blank taskId"); continue; }
+    try {
+      var taskRow = api_findRowById_(sheet, idCol, taskId);
+      if (taskRow < 2) { api_batchSkip_(result, taskId, "Not found"); continue; }
+
+      var currentStatus = String(sheet.getRange(taskRow, statusCol).getValue() || "").trim();
+      if (currentStatus === "Cancelled") {
+        api_batchSkip_(result, taskId, "Cannot reassign — status is Cancelled"); continue;
+      }
+      if (currentStatus === "Completed") {
+        api_batchSkip_(result, taskId, "Cannot reassign — status is Completed"); continue;
+      }
+
+      // Idempotent same-value writes still count as succeeded
+      sheet.getRange(taskRow, assignedCol).setValue(assignedTo);
+      result.succeeded++;
+      succeededIds.push(taskId);
+    } catch (rowErr) {
+      api_batchError_(result, taskId, String(rowErr));
+    }
+  }
+
+  try { SpreadsheetApp.flush(); } catch (_) {}
+  try { invalidateClientCache_(clientSheetId); } catch (_) {}
+  try { api_bumpSummaryVersion_(); } catch (_) {}
+
+  for (var w = 0; w < succeededIds.length; w++) {
+    try { api_writeThrough_(result, "task", clientSheetId, succeededIds[w]); } catch (_) {}
+  }
+
+  result.message = "Reassigned " + result.succeeded + " task(s) to " + assignedTo +
+                   (result.skipped.length ? ", skipped " + result.skipped.length : "") +
+                   (result.failed ? ", failed " + result.failed : "");
+  return jsonResponse_(result);
+}
+
+// ─── updateTaskNotes — save task notes + location (blur/auto-save from React UI) ────────
+
+function handleUpdateTaskNotes_(clientSheetId, payload) {
+  var taskId    = String((payload || {}).taskId    || "").trim();
+  if (!taskId) return errorResponse_("taskId is required", "INVALID_PARAMS");
+
+  // Both fields are optional — save whichever is provided
+  var hasNotes    = payload.taskNotes != null;
+  var hasLocation = payload.location != null;
+  if (!hasNotes && !hasLocation) return errorResponse_("taskNotes or location is required", "INVALID_PARAMS");
+
+  try {
+    var ss = SpreadsheetApp.openById(clientSheetId);
+    var sheet = ss.getSheetByName("Tasks");
+    if (!sheet) return errorResponse_("Tasks sheet not found", "SHEET_NOT_FOUND");
+
+    var taskMap = api_getHeaderMap_(sheet);
+    var idCol = taskMap["Task ID"];
+    if (!idCol) return errorResponse_("Task ID column not found", "SCHEMA_ERROR");
+
+    var lastRow = api_getLastDataRow_(sheet);
+    if (lastRow < 2) return errorResponse_("Task not found: " + taskId, "NOT_FOUND");
+
+    var idVals = sheet.getRange(2, idCol, lastRow - 1, 1).getValues();
+    var taskRowNum = -1;
+    for (var i = 0; i < idVals.length; i++) {
+      if (String(idVals[i][0] || "").trim() === taskId) { taskRowNum = i + 2; break; }
+    }
+    if (taskRowNum < 2) return errorResponse_("Task not found: " + taskId, "NOT_FOUND");
+
+    var saved = [];
+    if (hasNotes && taskMap["Task Notes"]) {
+      sheet.getRange(taskRowNum, taskMap["Task Notes"]).setValue(String(payload.taskNotes));
+      saved.push("notes");
+    }
+    if (hasLocation && taskMap["Location"]) {
+      sheet.getRange(taskRowNum, taskMap["Location"]).setValue(String(payload.location));
+      saved.push("location");
+    }
+
+    return jsonResponse_({ success: true, taskId: taskId, message: "Saved: " + saved.join(", ") });
+  } catch (err) {
+    return errorResponse_("Failed to update task: " + String(err), "SERVER_ERROR");
+  }
+}
+
+// ─── updateTaskCustomPrice — admin sets price override on a task (save-on-blur) ──
+
+function handleUpdateTaskCustomPrice_(clientSheetId, payload) {
+  var taskId = String((payload || {}).taskId || "").trim();
+  if (!taskId) return errorResponse_("taskId is required", "INVALID_PARAMS");
+
+  // customPrice can be a number (set override) or empty/null (clear override)
+  var rawPrice = (payload || {}).customPrice;
+  var clearPrice = (rawPrice === "" || rawPrice === null || rawPrice === undefined);
+  var priceValue = clearPrice ? "" : Number(rawPrice);
+  if (!clearPrice && isNaN(priceValue)) return errorResponse_("customPrice must be a number", "INVALID_PARAMS");
+
+  try {
+    var ss = SpreadsheetApp.openById(clientSheetId);
+    var sheet = ss.getSheetByName("Tasks");
+    if (!sheet) return errorResponse_("Tasks sheet not found", "SHEET_NOT_FOUND");
+
+    var taskMap = api_getHeaderMap_(sheet);
+    var idCol = taskMap["Task ID"];
+    var priceCol = taskMap["Custom Price"];
+    if (!idCol) return errorResponse_("Task ID column not found", "SCHEMA_ERROR");
+    if (!priceCol) return errorResponse_("Custom Price column not found — run Update Headers first", "SCHEMA_ERROR");
+
+    var taskRowNum = api_findRowById_(sheet, idCol, taskId);
+    if (taskRowNum < 2) return errorResponse_("Task not found: " + taskId, "NOT_FOUND");
+
+    sheet.getRange(taskRowNum, priceCol).setValue(priceValue);
+
+    return jsonResponse_({ success: true, taskId: taskId, customPrice: priceValue === "" ? null : priceValue, message: clearPrice ? "Custom price cleared" : "Custom price saved" });
+  } catch (err) {
+    return errorResponse_("Failed to update custom price: " + String(err), "SERVER_ERROR");
+  }
+}
+
+/* ================================================================
+   updateInventoryItem — Inline edit of a single inventory row
+   Accepts any subset of editable fields; updates only those provided.
+   ================================================================ */
+
+function handleUpdateInventoryItem_(clientSheetId, payload) {
+  var itemId = String((payload || {}).itemId || "").trim();
+  if (!itemId) return errorResponse_("itemId is required", "INVALID_PARAMS");
+
+  // Editable field map: payload key → sheet header
+  var FIELD_MAP = {
+    vendor:    "Vendor",
+    description: "Description",
+    reference: "Reference",
+    sidemark:  "Sidemark",
+    room:      "Room",
+    location:  "Location",
+    itemClass: "Class",
+    qty:       "Qty",
+    status:    "Status",
+    itemNotes: "Item Notes"
+  };
+
+  // Collect only provided fields
+  var updates = {};
+  var updateCount = 0;
+  for (var key in FIELD_MAP) {
+    if (payload.hasOwnProperty(key) && payload[key] !== undefined) {
+      updates[key] = payload[key];
+      updateCount++;
+    }
+  }
+  if (updateCount === 0) return errorResponse_("No editable fields provided", "INVALID_PARAMS");
+
+  // Validate status if provided
+  if (updates.hasOwnProperty("status")) {
+    var validStatuses = ["Active", "On Hold", "Released", "Transferred"];
+    if (validStatuses.indexOf(String(updates.status)) === -1) {
+      return errorResponse_("Invalid status: " + updates.status, "INVALID_PARAMS");
+    }
+  }
+
+  // Validate qty if provided
+  if (updates.hasOwnProperty("qty")) {
+    var qtyVal = Number(updates.qty);
+    if (isNaN(qtyVal) || qtyVal < 0) {
+      return errorResponse_("Invalid qty: " + updates.qty, "INVALID_PARAMS");
+    }
+    updates.qty = qtyVal;
+  }
+
+  try {
+    var ss = SpreadsheetApp.openById(clientSheetId);
+    var sheet = ss.getSheetByName("Inventory");
+    if (!sheet) return errorResponse_("Inventory sheet not found", "SHEET_NOT_FOUND");
+
+    var hmap = api_getHeaderMap_(sheet);
+    var idCol = hmap["Item ID"];
+    if (!idCol) return errorResponse_("Item ID column not found", "SCHEMA_ERROR");
+
+    // Verify all target columns exist
+    for (var key2 in updates) {
+      var colName = FIELD_MAP[key2];
+      if (!hmap[colName]) return errorResponse_("Column not found: " + colName, "SCHEMA_ERROR");
+    }
+
+    var lastRow = api_getLastDataRow_(sheet);
+    if (lastRow < 2) return errorResponse_("Item not found: " + itemId, "NOT_FOUND");
+
+    var idVals = sheet.getRange(2, idCol, lastRow - 1, 1).getValues();
+    var itemRowNum = -1;
+    for (var i = 0; i < idVals.length; i++) {
+      if (String(idVals[i][0] || "").trim() === itemId) { itemRowNum = i + 2; break; }
+    }
+    if (itemRowNum < 2) return errorResponse_("Item not found: " + itemId, "NOT_FOUND");
+
+    // Write each updated field
+    for (var key3 in updates) {
+      var col = hmap[FIELD_MAP[key3]];
+      sheet.getRange(itemRowNum, col).setValue(updates[key3]);
+    }
+
+    // Propagate field changes to open Tasks and Repairs for this item
+    // Mirrors onClientEdit field sync from Triggers.gs
+    var SYNC_FIELDS = {
+      location:    "Location",
+      vendor:      "Vendor",
+      description: "Description",
+      itemNotes:   "Item Notes",
+      status:      "Status",
+      sidemark:    "Sidemark"
+    };
+
+    var fieldsToSync = {};
+    var hasSyncFields = false;
+    for (var sk in SYNC_FIELDS) {
+      if (updates.hasOwnProperty(sk)) {
+        fieldsToSync[SYNC_FIELDS[sk]] = updates[sk];
+        hasSyncFields = true;
+      }
+    }
+
+    if (hasSyncFields) {
+      var TASK_CLOSED = { "Completed": true, "Cancelled": true };
+      var REPAIR_CLOSED = { "Complete": true, "Cancelled": true, "Declined": true };
+
+      var taskSheet = ss.getSheetByName("Tasks");
+      if (taskSheet) {
+        var thmap = api_getHeaderMap_(taskSheet);
+        var tItemCol = thmap["Item ID"];
+        var tStatusCol = thmap["Status"];
+        if (tItemCol && tStatusCol) {
+          var tLast = api_getLastDataRow_(taskSheet);
+          if (tLast >= 2) {
+            var tRows = taskSheet.getRange(2, 1, tLast - 1, taskSheet.getLastColumn()).getValues();
+            for (var ti = 0; ti < tRows.length; ti++) {
+              var tStatus = String(tRows[ti][tStatusCol - 1] || "").trim();
+              var tItem = String(tRows[ti][tItemCol - 1] || "").trim();
+              if (tItem === itemId && !TASK_CLOSED[tStatus]) {
+                for (var syncHeader in fieldsToSync) {
+                  if (syncHeader === "Status") continue; // Don't sync Inventory Status to Tasks
+                  var tCol = thmap[syncHeader];
+                  if (tCol) taskSheet.getRange(ti + 2, tCol).setValue(fieldsToSync[syncHeader]);
+                }
+              }
+            }
+          }
+        }
+      }
+
+      var repairSheet = ss.getSheetByName("Repairs");
+      if (repairSheet) {
+        var rhmap = api_getHeaderMap_(repairSheet);
+        var rItemCol = rhmap["Item ID"];
+        var rStatusCol = rhmap["Status"];
+        if (rItemCol && rStatusCol) {
+          var rLast = api_getLastDataRow_(repairSheet);
+          if (rLast >= 2) {
+            var rRows = repairSheet.getRange(2, 1, rLast - 1, repairSheet.getLastColumn()).getValues();
+            for (var ri = 0; ri < rRows.length; ri++) {
+              var rStatus = String(rRows[ri][rStatusCol - 1] || "").trim();
+              var rItem = String(rRows[ri][rItemCol - 1] || "").trim();
+              if (rItem === itemId && !REPAIR_CLOSED[rStatus]) {
+                for (var syncHeader2 in fieldsToSync) {
+                  if (syncHeader2 === "Status") continue; // Don't sync Inventory Status to Repairs
+                  var rCol = rhmap[syncHeader2];
+                  if (rCol) repairSheet.getRange(ri + 2, rCol).setValue(fieldsToSync[syncHeader2]);
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+
+    return jsonResponse_({ success: true, itemId: itemId, updated: updates });
+  } catch (err) {
+    return errorResponse_("Failed to update inventory item: " + String(err), "SERVER_ERROR");
+  }
+}
+
+/* ================================================================
+   Phase 8A: Maintenance — Refresh Client Caches
+   Reads Price_List, Class_Map, Email_Templates from Master Price List
+   and Locations from CB → writes directly to each active client sheet.
+   No script IDs required — uses SpreadsheetApp directly.
+   ================================================================ */
+
+function handleRefreshCaches_(payload) {
+  var filterIds = Array.isArray(payload.clientSheetIds) ? payload.clientSheetIds : [];
+
+  var cbSsId = prop_("CB_SPREADSHEET_ID");
+  var mplId  = prop_("MASTER_PRICE_LIST_SPREADSHEET_ID");
+  if (!cbSsId) return errorResponse_("CB_SPREADSHEET_ID not set", "CONFIG_ERROR");
+  if (!mplId)  return errorResponse_("MASTER_PRICE_LIST_SPREADSHEET_ID not set", "CONFIG_ERROR");
+
+  // Open Master Price List and read all cache source data
+  var mplSS;
+  try { mplSS = SpreadsheetApp.openById(mplId); }
+  catch (e) { return errorResponse_("Cannot open Master Price List: " + e.message, "CONFIG_ERROR"); }
+
+  var priceData = api_sheetValues_(mplSS, "Price_List");
+  var classData = api_sheetValues_(mplSS, "Class_Map");
+  var emailData = api_sheetValues_(mplSS, "Email_Templates");
+
+  if (!priceData) return errorResponse_("Price_List tab not found in Master Price List", "CONFIG_ERROR");
+  if (!classData) return errorResponse_("Class_Map tab not found in Master Price List", "CONFIG_ERROR");
+
+  // Open CB and read Locations
+  var cbSS;
+  try { cbSS = SpreadsheetApp.openById(cbSsId); }
+  catch (e) { return errorResponse_("Cannot open CB spreadsheet: " + e.message, "CONFIG_ERROR"); }
+
+  var locationData = api_sheetValues_(cbSS, "Locations");
+
+  // Get active client list from CB Clients tab
+  var clientsSh = cbSS.getSheetByName("Clients");
+  if (!clientsSh) return errorResponse_("CB Clients tab not found", "CONFIG_ERROR");
+
+  var clientsRaw = clientsSh.getDataRange().getValues();
+  var chMap = {};
+  for (var h = 0; h < clientsRaw[0].length; h++) {
+    var hk = String(clientsRaw[0][h] || "").trim().toUpperCase();
+    if (hk) chMap[hk] = h;
+  }
+
+  var nameIdx   = chMap["CLIENT NAME"];
+  var ssIdIdx   = chMap["CLIENT SPREADSHEET ID"];
+  var activeIdx = chMap["ACTIVE"];
+
+  var synced = [];
+  var failed = [];
+
+  for (var r = 1; r < clientsRaw.length; r++) {
+    var row = clientsRaw[r];
+    var clientName = nameIdx !== undefined ? String(row[nameIdx] || "").trim() : "";
+    var sheetId    = ssIdIdx !== undefined ? String(row[ssIdIdx] || "").trim() : "";
+    if (!clientName || !sheetId) continue;
+
+    var isActive = activeIdx !== undefined
+      ? (row[activeIdx] === true || String(row[activeIdx]).toUpperCase() === "TRUE")
+      : true;
+    if (!isActive) continue;
+    if (filterIds.length > 0 && filterIds.indexOf(sheetId) === -1) continue;
+
+    try {
+      var clientSS = SpreadsheetApp.openById(sheetId);
+      api_writeCache_(clientSS, "Price_Cache",          priceData);
+      api_writeCache_(clientSS, "Class_Cache",          classData);
+      if (emailData)    api_writeCache_(clientSS, "Email_Template_Cache", emailData);
+      if (locationData) api_writeCache_(clientSS, "Location_Cache",       locationData);
+      synced.push({ name: clientName, sheetId: sheetId });
+    } catch (clientErr) {
+      failed.push({ name: clientName, sheetId: sheetId, error: clientErr.message });
+    }
+  }
+
+  return jsonResponse_({ success: true, synced: synced, failed: failed });
+}
+
+/* ================================================================
+   Phase 8A: Maintenance — Run Function On All Clients
+   Calls StrideClientUpdateHeadersAndValidations or
+   StrideClientInstallTriggers on each active client via the
+   Apps Script Execution API using ScriptApp.getOAuthToken().
+   Requires "Script ID" column on CB Clients tab.
+   ================================================================ */
+
+function handleRunOnClients_(payload) {
+  var functionAlias = String(payload.functionName || "").trim();
+  var filterIds = Array.isArray(payload.clientSheetIds) ? payload.clientSheetIds : [];
+
+  // Whitelist of allowed function aliases → actual GS function names
+  var ALLOWED = {
+    "updateHeaders":      "StrideClientUpdateHeadersAndValidations",
+    "installTriggers":    "StrideClientInstallTriggers",
+    // syncAutocompleteDB removed from scripts.run — use direct endpoint instead
+    // "syncAutocompleteDB": "StrideSyncAutocompleteDB",
+    "sendWelcomeEmail":   "StrideSendWelcomeEmail"
+  };
+
+  var targetFn = ALLOWED[functionAlias];
+  if (!targetFn) {
+    return errorResponse_(
+      "functionName must be one of: " + Object.keys(ALLOWED).join(", "),
+      "INVALID_PARAMS"
+    );
+  }
+
+  var cbSsId = prop_("CB_SPREADSHEET_ID");
+  if (!cbSsId) return errorResponse_("CB_SPREADSHEET_ID not set", "CONFIG_ERROR");
+
+  var cbSS;
+  try { cbSS = SpreadsheetApp.openById(cbSsId); }
+  catch (e) { return errorResponse_("Cannot open CB spreadsheet: " + e.message, "CONFIG_ERROR"); }
+
+  var clientsSh = cbSS.getSheetByName("Clients");
+  if (!clientsSh) return errorResponse_("CB Clients tab not found", "CONFIG_ERROR");
+
+  var clientsRaw = clientsSh.getDataRange().getValues();
+  var chMap = {};
+  for (var h = 0; h < clientsRaw[0].length; h++) {
+    var hk = String(clientsRaw[0][h] || "").trim().toUpperCase();
+    if (hk) chMap[hk] = h;
+  }
+
+  var nameIdx     = chMap["CLIENT NAME"];
+  var ssIdIdx     = chMap["CLIENT SPREADSHEET ID"];
+  var activeIdx   = chMap["ACTIVE"];
+  var scriptIdIdx = chMap["SCRIPT ID"]; // Optional column — gracefully absent
+
+  var token = ScriptApp.getOAuthToken();
+  var results = [];
+
+  for (var r = 1; r < clientsRaw.length; r++) {
+    var row = clientsRaw[r];
+    var clientName = nameIdx !== undefined ? String(row[nameIdx] || "").trim() : "";
+    var sheetId    = ssIdIdx !== undefined ? String(row[ssIdIdx] || "").trim() : "";
+    var scriptId   = scriptIdIdx !== undefined ? String(row[scriptIdIdx] || "").trim() : "";
+    if (!clientName || !sheetId) continue;
+
+    var isActive = activeIdx !== undefined
+      ? (row[activeIdx] === true || String(row[activeIdx]).toUpperCase() === "TRUE")
+      : true;
+    if (!isActive) continue;
+    if (filterIds.length > 0 && filterIds.indexOf(sheetId) === -1) continue;
+
+    if (!scriptId) {
+      results.push({
+        name: clientName, sheetId: sheetId, ok: false,
+        error: "Script ID not set — add a 'Script ID' column to CB Clients tab"
+      });
+      continue;
+    }
+
+    try {
+      var execUrl = "https://script.googleapis.com/v1/scripts/" + scriptId + ":run";
+      var resp = UrlFetchApp.fetch(execUrl, {
+        method:            "POST",
+        headers:           { Authorization: "Bearer " + token },
+        payload:           JSON.stringify({ function: targetFn, devMode: true }),
+        contentType:       "application/json",
+        muteHttpExceptions: true
+      });
+      var respCode = resp.getResponseCode();
+      var respJson;
+      try { respJson = JSON.parse(resp.getContentText()); } catch (_) { respJson = {}; }
+
+      if (respCode === 200 && !respJson.error) {
+        results.push({ name: clientName, sheetId: sheetId, ok: true });
+      } else {
+        var errMsg = (respJson.error && (respJson.error.message || respJson.error.status))
+          ? (respJson.error.message || respJson.error.status)
+          : ("HTTP " + respCode);
+        results.push({ name: clientName, sheetId: sheetId, ok: false, error: errMsg });
+      }
+      Utilities.sleep(400); // Avoid Execution API rate limits
+    } catch (fetchErr) {
+      results.push({ name: clientName, sheetId: sheetId, ok: false, error: String(fetchErr.message) });
+    }
+  }
+
+  var succeeded = results.filter(function(x) { return x.ok; }).length;
+  var failedCount = results.filter(function(x) { return !x.ok; }).length;
+
+  return jsonResponse_({
+    success: true,
+    functionName: functionAlias,
+    succeeded: succeeded,
+    failed: failedCount,
+    results: results
+  });
+}
+
+/* ================================================================
+   Phase 8A Helpers
+   ================================================================ */
+
+/**
+ * Read all values from a named sheet as a 2D array.
+ * Returns null if the sheet doesn't exist or is empty.
+ */
+function api_sheetValues_(ss, sheetName) {
+  var sh = ss.getSheetByName(sheetName);
+  if (!sh) return null;
+  var lastRow = sh.getLastRow();
+  var lastCol = sh.getLastColumn();
+  if (lastRow < 1 || lastCol < 1) return null;
+  return sh.getRange(1, 1, lastRow, lastCol).getValues();
+}
+
+/**
+ * Overwrite a named cache sheet with new values.
+ * Creates the sheet if it doesn't exist. Clears content + formats first.
+ */
+function api_writeCache_(ss, sheetName, values) {
+  if (!values || values.length === 0) return;
+  var sh = ss.getSheetByName(sheetName);
+  if (!sh) sh = ss.insertSheet(sheetName);
+  sh.clearContents();
+  sh.clearFormats();
+  sh.getRange(1, 1, values.length, values[0].length).setValues(values);
+}
+
+/* ================================================================
+   CLAIMS MODULE — v22.0.0
+   Admin-only. All operations go through withAdminGuard_.
+   Data lives in CB spreadsheet: Claims, Claim_Items, Claim_History,
+   Claim_Files, Claims_Config tabs.
+   ================================================================ */
+
+// ── DB Helper ─────────────────────────────────────────────────────────────────
+
+function claimsDb_(cbSs) {
+  return {
+    ss:           cbSs,
+    claims:       cbSs.getSheetByName("Claims"),
+    itemsSheet:   cbSs.getSheetByName("Claim_Items"),
+    historySheet: cbSs.getSheetByName("Claim_History"),
+    filesSheet:   cbSs.getSheetByName("Claim_Files"),
+    configSheet:  cbSs.getSheetByName("Claims_Config")
+  };
+}
+
+function api_claimsReady_(db) {
+  return !!(db.claims && db.itemsSheet && db.historySheet && db.filesSheet);
+}
+
+// ── Config Reader ─────────────────────────────────────────────────────────────
+
+function api_claimsConfig_(configSheet) {
+  var cfg = { parentFolderId: "", settlementTemplateDocId: "",
+              coverageValues: [], outcomeValues: [], resolutionValues: [], notificationEmails: "" };
+  if (!configSheet || configSheet.getLastRow() < 2) return cfg;
+  configSheet.getRange(2, 1, configSheet.getLastRow() - 1, 2).getValues().forEach(function(r) {
+    var k = String(r[0] || "").trim(), v = String(r[1] || "").trim();
+    if      (k === "CLAIMS_PARENT_FOLDER_ID")     cfg.parentFolderId          = v;
+    else if (k === "SETTLEMENT_TEMPLATE_DOC_ID")  cfg.settlementTemplateDocId = v;
+    else if (k === "COVERAGE_VALUES")             cfg.coverageValues          = v ? v.split("|") : [];
+    else if (k === "OUTCOME_VALUES")              cfg.outcomeValues           = v ? v.split("|") : [];
+    else if (k === "RESOLUTION_VALUES")           cfg.resolutionValues        = v ? v.split("|") : [];
+    else if (k === "NOTIFICATION_EMAILS")         cfg.notificationEmails      = v;
+  });
+  return cfg;
+}
+
+// ── Shared CB Opener ──────────────────────────────────────────────────────────
+
+function api_openCbSs_() {
+  var cbId = prop_("CB_SPREADSHEET_ID");
+  if (!cbId) return { error: errorResponse_("CB_SPREADSHEET_ID not configured", "CONFIG_ERROR") };
+  try { return SpreadsheetApp.openById(cbId); }
+  catch (e) { return { error: errorResponse_("Cannot open CB spreadsheet: " + e.message, "NOT_FOUND") }; }
+}
+
+// ── Claim Number (caller holds script lock) ───────────────────────────────────
+
+function api_nextClaimNumber_(claimsSheet) {
+  var last = api_getLastDataRow_(claimsSheet);
+  if (last < 2) return "CLM-0001";
+  var vals = claimsSheet.getRange(2, 1, last - 1, 1).getValues();
+  var maxNum = 0;
+  for (var i = 0; i < vals.length; i++) {
+    var m = String(vals[i][0] || "").trim().match(/^CLM-(\d+)$/i);
+    if (m) { var n = parseInt(m[1], 10); if (n > maxNum) maxNum = n; }
+  }
+  var s = String(maxNum + 1);
+  while (s.length < 4) s = "0" + s;
+  return "CLM-" + s;
+}
+
+// ── Drive Folder ──────────────────────────────────────────────────────────────
+
+function api_createClaimFolder_(parentFolderId, claimNo, claimantRef) {
+  if (!parentFolderId) return "";
+  try {
+    var parent = DriveApp.getFolderById(parentFolderId);
+    var name   = claimNo + " - " + claimantRef + " - Files";
+    var it     = parent.getFoldersByName(name);
+    var folder = it.hasNext() ? it.next() : parent.createFolder(name);
+    return folder.getUrl();
+  } catch (e) { Logger.log("api_createClaimFolder_ error: " + e); return ""; }
+}
+
+// ── History Logger ────────────────────────────────────────────────────────────
+
+function api_logClaimHistory_(historySheet, claimId, eventType, message, actor, isPublic, fileUrl) {
+  if (!historySheet) return;
+  var map = api_getHeaderMap_(historySheet);
+  var row = api_buildRow_(map, {
+    "Claim ID": claimId, "Event Timestamp": new Date(), "Event Type": eventType,
+    "Event Message": message, "Actor": actor, "Is Public": isPublic ? "Yes" : "No",
+    "Related File URL": fileUrl || ""
+  });
+  historySheet.getRange(api_getLastDataRow_(historySheet) + 1, 1, 1, row.length).setValues([row]);
+}
+
+// ── Row Helpers ───────────────────────────────────────────────────────────────
+
+function api_getClaimRow_(claimsSheet, claimId) {
+  var rows = sheetToObjects_(claimsSheet);
+  for (var i = 0; i < rows.length; i++) {
+    if (String(rows[i]["Claim ID"] || "").trim() === claimId) return rows[i];
+  }
+  return null;
+}
+
+function api_updateClaimRow_(claimsSheet, claimId, updates) {
+  var map   = api_getHeaderMap_(claimsSheet);
+  var idCol = map["Claim ID"];
+  if (!idCol) return false;
+  var last = api_getLastDataRow_(claimsSheet);
+  if (last < 2) return false;
+  var idVals = claimsSheet.getRange(2, idCol, last - 1, 1).getValues();
+  for (var i = 0; i < idVals.length; i++) {
+    if (String(idVals[i][0] || "").trim() !== claimId) continue;
+    var rowNum = i + 2;
+    for (var key in updates) { if (map[key]) claimsSheet.getRange(rowNum, map[key]).setValue(updates[key]); }
+    if (map["Last Updated"]) claimsSheet.getRange(rowNum, map["Last Updated"]).setValue(new Date());
+    return true;
+  }
+  return false;
+}
+
+// ── File Records ──────────────────────────────────────────────────────────────
+
+function api_writeClaimFile_(filesSheet, claimId, fileType, fileName, fileUrl, versionNo, isCurrent, createdBy) {
+  if (!filesSheet) return;
+  var map = api_getHeaderMap_(filesSheet);
+  var row = api_buildRow_(map, {
+    "Claim ID": claimId, "File Type": fileType, "File Name": fileName, "File URL": fileUrl,
+    "Version No": versionNo, "Is Current": isCurrent ? "Yes" : "No",
+    "Created At": new Date(), "Created By": createdBy
+  });
+  filesSheet.getRange(api_getLastDataRow_(filesSheet) + 1, 1, 1, row.length).setValues([row]);
+}
+
+function api_markPriorSettlementsNotCurrent_(filesSheet, claimId) {
+  if (!filesSheet || filesSheet.getLastRow() < 2) return 0;
+  var map = api_getHeaderMap_(filesSheet);
+  var idCol = map["Claim ID"], typeCol = map["File Type"], curCol = map["Is Current"], verCol = map["Version No"];
+  if (!idCol || !typeCol || !curCol) return 0;
+  var last = api_getLastDataRow_(filesSheet);
+  var data = filesSheet.getRange(2, 1, last - 1, filesSheet.getLastColumn()).getValues();
+  var maxVer = 0;
+  for (var i = 0; i < data.length; i++) {
+    if (String(data[i][idCol - 1] || "").trim() !== claimId) continue;
+    if (String(data[i][typeCol - 1] || "").trim() !== "Settlement") continue;
+    if (verCol) { var v = parseInt(String(data[i][verCol - 1] || "0"), 10); if (v > maxVer) maxVer = v; }
+    if (String(data[i][curCol - 1] || "").trim() === "Yes") filesSheet.getRange(i + 2, curCol).setValue("No");
+  }
+  return maxVer;
+}
+
+// ── Client / Inventory Lookup ─────────────────────────────────────────────────
+
+function api_lookupClientForClaims_(cbSs, clientName) {
+  var sh = cbSs.getSheetByName("Clients");
+  if (!sh || sh.getLastRow() < 2) return "";
+  var lc = clientName.toLowerCase().trim();
+  var rows = sheetToObjects_(sh);
+  for (var i = 0; i < rows.length; i++) {
+    if (String(rows[i]["Client Name"] || "").trim().toLowerCase() === lc)
+      return String(rows[i]["Client Spreadsheet ID"] || "").trim();
+  }
+  return "";
+}
+
+function api_snapshotInventoryItem_(clientSheetId, itemId) {
+  if (!clientSheetId || !itemId) return null;
+  try { return api_findInventoryItem_(SpreadsheetApp.openById(clientSheetId), itemId); }
+  catch (e) { Logger.log("api_snapshotInventoryItem_ error: " + e); return null; }
+}
+
+// ── Settlement PDF ────────────────────────────────────────────────────────────
+
+function api_generateSettlementPdf_(db, claim, linkedItems, config, settlementData) {
+  if (!config.settlementTemplateDocId)
+    return { success: false, error: "SETTLEMENT_TEMPLATE_DOC_ID not set in Claims_Config" };
+
+  var claimNo   = String(claim["Claim ID"] || "").trim();
+  var version   = settlementData.version || 1;
+  var docTitle  = claimNo + " - Settlement v" + version;
+
+  var itemRef = "";
+  if (linkedItems && linkedItems.length > 0) {
+    itemRef = linkedItems.length === 1
+      ? String(linkedItems[0]["Item ID"] || linkedItems[0]["Item Description Snapshot"] || "").trim()
+      : linkedItems.length + " linked items";
+  }
+  if (!itemRef) itemRef = String(claim["Property / Incident Reference"] || "").trim();
+
+  var resType = settlementData.resolutionType || "";
+  var legalTerms =
+    "By accepting this settlement, the claimant acknowledges full and final satisfaction of the " +
+    "above-described claim and releases Stride Logistics, its employees, and agents from any further " +
+    "liability, claims, or demands arising from this incident. " +
+    "This settlement is subject to the applicable warehouse agreement and coverage terms. " +
+    ((resType === "Repair" || resType === "Replace")
+      ? "Settlement reflects the lesser of reasonable repair cost or replacement value as permitted under the applicable coverage terms. "
+      : "") +
+    "This agreement constitutes the complete resolution of the matter.";
+
+  var tokens = {
+    "{{CLAIM_NO}}":            claimNo,
+    "{{CLAIMANT_NAME}}":       String(claim["Primary Contact Name"] || claim["Company / Client Name"] || "").trim(),
+    "{{COMPANY_NAME}}":        String(claim["Company / Client Name"] || "").trim(),
+    "{{INCIDENT_DATE}}":       formatDate_(claim["Incident Date"]) || "",
+    "{{DATE_OPENED}}":         formatDate_(claim["Date Opened"])   || "",
+    "{{CLAIM_TYPE}}":          String(claim["Claim Type"]          || "").trim(),
+    "{{ITEM_REFERENCE}}":      itemRef,
+    "{{ISSUE_DESCRIPTION}}":   String(claim["Issue Description"]   || "").trim(),
+    "{{COVERAGE_TYPE}}":       settlementData.coverageType         || "",
+    "{{REQUESTED_AMOUNT}}":    claim["Requested Amount"] ? "$" + Number(claim["Requested Amount"]).toFixed(2) : "N/A",
+    "{{APPROVED_AMOUNT}}":     settlementData.approvedAmount != null ? "$" + Number(settlementData.approvedAmount).toFixed(2) : "",
+    "{{OUTCOME_TYPE}}":        settlementData.outcomeType          || "",
+    "{{RESOLUTION_TYPE}}":     settlementData.resolutionType       || "",
+    "{{DECISION_EXPLANATION}}": settlementData.decisionExplanation || "",
+    "{{SETTLEMENT_DATE}}":     formatDate_(new Date()),
+    "{{SETTLEMENT_VERSION}}":  String(version),
+    "{{LEGAL_TERMS}}":         legalTerms
+  };
+
+  var copyFile;
+  try {
+    copyFile      = DriveApp.getFileById(config.settlementTemplateDocId).makeCopy(docTitle);
+    var doc       = DocumentApp.openById(copyFile.getId());
+    var body      = doc.getBody();
+    for (var token in tokens) {
+      body.replaceText(token.replace(/\{\{/g, "\\{\\{").replace(/\}\}/g, "\\}\\}"), String(tokens[token]));
+    }
+    doc.saveAndClose();
+
+    var pdfResp = UrlFetchApp.fetch(
+      "https://docs.google.com/document/d/" + copyFile.getId() +
+      "/export?format=pdf&size=letter&portrait=true&fitw=true&top=0.75&bottom=0.75&left=0.75&right=0.75",
+      { headers: { Authorization: "Bearer " + ScriptApp.getOAuthToken() }, muteHttpExceptions: true }
+    );
+    if (pdfResp.getResponseCode() !== 200) {
+      try { copyFile.setTrashed(true); } catch (_) {}
+      return { success: false, error: "PDF export HTTP " + pdfResp.getResponseCode() };
+    }
+
+    var pdfBlob    = pdfResp.getBlob().setName(docTitle + ".pdf");
+    var pdfFileUrl = "";
+    var fm         = String(claim["Claim Folder URL"] || "").match(/\/folders\/([a-zA-Z0-9_-]+)/);
+    if (fm) {
+      try {
+        var claimFolder = DriveApp.getFolderById(fm[1]);
+        var oldIt = claimFolder.getFilesByName(docTitle + ".pdf");
+        while (oldIt.hasNext()) { try { oldIt.next().setTrashed(true); } catch (_) {} }
+        pdfFileUrl = claimFolder.createFile(pdfBlob).getUrl();
+      } catch (_) {}
+    }
+    if (!pdfFileUrl) pdfFileUrl = DriveApp.createFile(pdfBlob).getUrl();
+
+    try { copyFile.setTrashed(true); } catch (_) {}
+    return { success: true, pdfBlob: pdfBlob, pdfFileUrl: pdfFileUrl, docTitle: docTitle };
+  } catch (e) {
+    try { if (copyFile) copyFile.setTrashed(true); } catch (_) {}
+    return { success: false, error: "Settlement PDF failed: " + e.message };
+  }
+}
+
+// ── Email Helpers ─────────────────────────────────────────────────────────────
+
+function api_claimEmailFallback_(templateKey, tokens) {
+  var t = function(k) { return String(tokens[k] || ""); };
+  var hdr = '<div style="background:#000;padding:14px 20px;"><span style="color:#fff;font-size:17px;font-weight:900;">Stride Logistics</span><span style="color:#E85D2D;font-size:17px;font-weight:900;"> WMS</span></div>';
+  var ftr = '<div style="color:#64748B;font-size:11px;border-top:1px solid #E2E8F0;margin-top:16px;padding-top:12px;">Stride Logistics · Kent, WA · whse@stridenw.com</div>';
+  var wrap = function(b) { return '<div style="background:#F8FAFC;padding:20px;font-family:Arial,sans-serif"><div style="max-width:600px;margin:0 auto;background:#fff;border-radius:10px;overflow:hidden;border:1px solid #E2E8F0">' + hdr + '<div style="padding:20px;color:#1E293B">' + b + ftr + '</div></div></div>'; };
+  if (templateKey === "CLAIM_RECEIVED")
+    return wrap('<p style="font-size:18px;font-weight:900;margin:0 0 6px">Claim ' + t("{{CLAIM_NO}}") + ' Received</p><p>Dear ' + t("{{CLAIMANT_NAME}}") + ', we have received your ' + t("{{CLAIM_TYPE}}") + '. Please reference <strong>' + t("{{CLAIM_NO}}") + '</strong> in future correspondence.</p><p style="color:#64748B;font-size:12px;">Submission does not guarantee approval. Review is subject to applicable agreement terms and coverage.</p>');
+  if (templateKey === "CLAIM_STAFF_NOTIFY")
+    return wrap('<p style="font-size:16px;font-weight:900;margin:0 0 10px">New Claim — ' + t("{{CLAIM_NO}}") + '</p><p><strong>Type:</strong> ' + t("{{CLAIM_TYPE}}") + '<br><strong>Client:</strong> ' + t("{{COMPANY_NAME}}") + '<br><strong>Contact:</strong> ' + t("{{CLAIMANT_NAME}}") + '<br><strong>By:</strong> ' + t("{{CREATED_BY}}") + '<br><strong>Requested:</strong> ' + t("{{REQUESTED_AMOUNT}}") + '</p><p>' + t("{{ISSUE_DESCRIPTION}}") + '</p>');
+  if (templateKey === "CLAIM_MORE_INFO")
+    return wrap('<p style="font-size:16px;font-weight:900;margin:0 0 10px">Information Needed — Claim ' + t("{{CLAIM_NO}}") + '</p><p>Dear ' + t("{{CLAIMANT_NAME}}") + ', to continue reviewing your claim we need the following:</p><p style="background:#F1F5F9;border-left:3px solid #E85D2D;padding:10px 14px;">' + t("{{INFO_REQUESTED}}") + '</p><p>Please reply with the requested information.</p>');
+  if (templateKey === "CLAIM_DENIAL")
+    return wrap('<p style="font-size:16px;font-weight:900;margin:0 0 10px">Claim ' + t("{{CLAIM_NO}}") + ' — Decision</p><p>Dear ' + t("{{CLAIMANT_NAME}}") + ', after careful review of your claim and applicable agreement terms and coverage, we are unable to approve this claim.</p><p><strong>Explanation:</strong><br>' + t("{{DECISION_EXPLANATION}}") + '</p><p>Please contact us with any questions, referencing claim ' + t("{{CLAIM_NO}}") + '.</p>');
+  if (templateKey === "CLAIM_SETTLEMENT")
+    return wrap('<p style="font-size:16px;font-weight:900;margin:0 0 10px">Settlement Offer — Claim ' + t("{{CLAIM_NO}}") + '</p><p>Dear ' + t("{{CLAIMANT_NAME}}") + ', a settlement has been prepared for your claim.</p><p><strong>Approved Amount:</strong> ' + t("{{APPROVED_AMOUNT}}") + '<br><strong>Resolution:</strong> ' + t("{{RESOLUTION_TYPE}}") + '</p><p>' + t("{{DECISION_EXPLANATION}}") + '</p><p>Please review the attached settlement document. To accept, sign and return it.</p>');
+  return null;
+}
+
+function api_sendClaimEmail_(masterSpreadsheetId, templateKey, toEmail, subject, tokens, pdfBlob) {
+  if (!toEmail) return { success: false, error: "No recipient" };
+  var result = api_sendTemplateEmail_({ "MASTER_SPREADSHEET_ID": masterSpreadsheetId || "" }, templateKey, toEmail, subject, tokens);
+  if (result.success) return result;
+  var fallback = api_claimEmailFallback_(templateKey, tokens);
+  if (!fallback) return { success: false, error: "No template for " + templateKey };
+  try {
+    var opts = { htmlBody: fallback, from: "whse@stridenw.com" };
+    if (pdfBlob) opts.attachments = [pdfBlob];
+    GmailApp.sendEmail(toEmail, subject, "", opts);
+    return { success: true, usedFallback: true };
+  } catch (e) { return { success: false, error: String(e) }; }
+}
+
+// ── GET: Claim Detail ─────────────────────────────────────────────────────────
+
+function handleGetClaimDetail_(params, callerEmail, callerRole, callerClientName) {
+  var claimId = String(params.claimId || "").trim();
+  if (!claimId) return errorResponse_("claimId is required", "INVALID_PARAMS");
+
+  var cbSs = api_openCbSs_();
+  if (cbSs.error) return cbSs.error;
+  var db = claimsDb_(cbSs);
+  if (!api_claimsReady_(db)) return errorResponse_("Claims schema not initialized. Run Claims_SetupSchema from the Stride Billing menu.", "SETUP_REQUIRED");
+
+  var claim = api_getClaimRow_(db.claims, claimId);
+  if (!claim) return errorResponse_("Claim not found: " + claimId, "NOT_FOUND");
+
+  // Client users: verify this claim belongs to them
+  if (callerRole === "client" && callerClientName) {
+    var claimClient = String(claim["Company / Client Name"] || claim["Client"] || "").trim();
+    if (claimClient.toLowerCase() !== callerClientName.toLowerCase()) {
+      return errorResponse_("Access denied — this claim does not belong to your account", "AUTH_ERROR");
+    }
+  }
+
+  // Auto-stamp first review if not yet set (admin only — clients viewing their own claims don't count)
+  if (!String(claim["First Reviewed By"] || "").trim() && callerEmail && callerRole === "admin") {
+    var now = new Date();
+    api_updateClaimRow_(db.claims, claimId, { "First Reviewed By": callerEmail, "First Reviewed At": now });
+    claim["First Reviewed By"] = callerEmail; claim["First Reviewed At"] = now;
+    api_logClaimHistory_(db.historySheet, claimId, "FIRST_REVIEW", "Claim first reviewed by " + callerEmail, callerEmail, false, "");
+  }
+
+  // Linked items
+  var linkedItems = [];
+  if (db.itemsSheet && db.itemsSheet.getLastRow() >= 2)
+    sheetToObjects_(db.itemsSheet).forEach(function(r) { if (String(r["Claim ID"] || "").trim() === claimId) linkedItems.push(r); });
+
+  // History (newest first)
+  var history = [];
+  if (db.historySheet && db.historySheet.getLastRow() >= 2) {
+    sheetToObjects_(db.historySheet).forEach(function(r) { if (String(r["Claim ID"] || "").trim() === claimId) history.push(r); });
+    history.sort(function(a, b) { return new Date(b["Event Timestamp"] || 0) - new Date(a["Event Timestamp"] || 0); });
+  }
+
+  // Files
+  var files = [];
+  if (db.filesSheet && db.filesSheet.getLastRow() >= 2)
+    sheetToObjects_(db.filesSheet).forEach(function(r) { if (String(r["Claim ID"] || "").trim() === claimId) files.push(r); });
+
+  return jsonResponse_({ success: true, claim: {
+    claimId:                      String(claim["Claim ID"]                      || "").trim(),
+    claimType:                    String(claim["Claim Type"]                    || "").trim(),
+    status:                       String(claim["Status"]                        || "Under Review").trim(),
+    outcomeType:                  String(claim["Outcome Type"]                  || "").trim(),
+    resolutionType:               String(claim["Resolution Type"]               || "").trim(),
+    dateOpened:                   formatDate_(claim["Date Opened"]),
+    incidentDate:                 formatDate_(claim["Incident Date"]),
+    dateClosed:                   formatDate_(claim["Date Closed"]),
+    dateSettlementSent:           formatDate_(claim["Date Settlement Sent"]),
+    dateSignedSettlementReceived: formatDate_(claim["Date Signed Settlement Received"]),
+    createdBy:                    String(claim["Created By"]                    || "").trim(),
+    firstReviewedBy:              String(claim["First Reviewed By"]             || "").trim(),
+    firstReviewedAt:              formatDate_(claim["First Reviewed At"]),
+    primaryContactName:           String(claim["Primary Contact Name"]          || "").trim(),
+    companyClientName:            String(claim["Company / Client Name"]         || "").trim(),
+    email:                        String(claim["Email"]                         || "").trim(),
+    phone:                        String(claim["Phone"]                         || "").trim(),
+    requestedAmount:              toNum_(claim["Requested Amount"]),
+    approvedAmount:               toNum_(claim["Approved Amount"]),
+    coverageType:                 String(claim["Coverage Type"]                 || "").trim(),
+    clientSelectedCoverage:       String(claim["Client Selected Coverage"]      || "").trim(),
+    propertyIncidentRef:          String(claim["Property / Incident Reference"] || "").trim(),
+    incidentLocation:             String(claim["Incident Location"]             || "").trim(),
+    issueDescription:             String(claim["Issue Description"]             || "").trim(),
+    decisionExplanation:          String(claim["Decision Explanation"]          || "").trim(),
+    internalNotesSummary:         String(claim["Internal Notes Summary"]        || "").trim(),
+    publicNotesSummary:           String(claim["Public Notes Summary"]          || "").trim(),
+    claimFolderUrl:               String(claim["Claim Folder URL"]              || "").trim(),
+    currentSettlementFileUrl:     String(claim["Current Settlement File URL"]   || "").trim(),
+    currentSettlementVersion:     String(claim["Current Settlement Version"]    || "").trim(),
+    voidReason:                   String(claim["Void Reason"]                   || "").trim(),
+    closeNote:                    String(claim["Close Note"]                    || "").trim(),
+    lastUpdated:                  formatDate_(claim["Last Updated"])
+  },
+  items: linkedItems.map(function(r) { return {
+    claimId: String(r["Claim ID"] || "").trim(),
+    itemId: String(r["Item ID"] || "").trim(),
+    itemDescriptionSnapshot: String(r["Item Description Snapshot"] || "").trim(),
+    vendorSnapshot: String(r["Vendor Snapshot"] || "").trim(), classSnapshot: String(r["Class Snapshot"] || "").trim(),
+    statusSnapshot: String(r["Status Snapshot"] || "").trim(), locationSnapshot: String(r["Location Snapshot"] || "").trim(),
+    sidemarkSnapshot: String(r["Sidemark Snapshot"] || "").trim(), roomSnapshot: String(r["Room Snapshot"] || "").trim(),
+    addedAt: formatDate_(r["Added At"]), addedBy: String(r["Added By"] || "").trim()
+  }; }),
+  history: history.map(function(r) { return {
+    claimId: String(r["Claim ID"] || "").trim(),
+    eventTimestamp: formatDate_(r["Event Timestamp"]), eventType: String(r["Event Type"] || "").trim(),
+    eventMessage: String(r["Event Message"] || "").trim(), actor: String(r["Actor"] || "").trim(),
+    isPublic: String(r["Is Public"] || "No").trim() === "Yes", relatedFileUrl: String(r["Related File URL"] || "").trim()
+  }; }),
+  files: files.map(function(r) { return {
+    claimId: String(r["Claim ID"] || "").trim(),
+    fileType: String(r["File Type"] || "").trim(), fileName: String(r["File Name"] || "").trim(),
+    fileUrl: String(r["File URL"] || "").trim(), versionNo: parseInt(String(r["Version No"] || "0"), 10) || null,
+    isCurrent: String(r["Is Current"] || "No").trim() === "Yes",
+    createdAt: formatDate_(r["Created At"]), createdBy: String(r["Created By"] || "").trim()
+  }; })
+  });
+}
+
+// ── POST: Create Claim ────────────────────────────────────────────────────────
+
+function handleCreateClaim_(callerEmail, payload) {
+  var claimType          = String(payload.claimType          || "").trim();
+  var primaryContactName = String(payload.primaryContactName || "").trim();
+  var companyClientName  = String(payload.companyClientName  || "").trim();
+  var email              = String(payload.email              || "").trim();
+  var issueDescription   = String(payload.issueDescription   || "").trim();
+
+  if (!claimType || (claimType !== "Item Claim" && claimType !== "Property Claim"))
+    return errorResponse_("claimType must be 'Item Claim' or 'Property Claim'", "INVALID_PARAMS");
+  if (!primaryContactName) return errorResponse_("primaryContactName required", "INVALID_PARAMS");
+  if (!companyClientName)  return errorResponse_("companyClientName required",  "INVALID_PARAMS");
+  if (!email)              return errorResponse_("email required",               "INVALID_PARAMS");
+  if (!issueDescription)   return errorResponse_("issueDescription required",   "INVALID_PARAMS");
+
+  // Items can be added later via addClaimItems — not required at creation time
+  // Accept both "propertyIncidentRef" and "propertyIncidentReference" (React sends the long form)
+  var propRef = String(payload.propertyIncidentRef || payload.propertyIncidentReference || "").trim();
+
+  var cbSs = api_openCbSs_();
+  if (cbSs.error) return cbSs.error;
+  var db = claimsDb_(cbSs);
+  if (!api_claimsReady_(db)) return errorResponse_("Claims schema not initialized. Run Claims_SetupSchema from the Stride Billing menu.", "SETUP_REQUIRED");
+
+  var config = api_claimsConfig_(db.configSheet);
+
+  var lock = LockService.getScriptLock();
+  lock.tryLock(15000);
+  var claimNo, folderUrl;
+  try {
+    claimNo   = api_nextClaimNumber_(db.claims);
+    folderUrl = config.parentFolderId
+      ? api_createClaimFolder_(config.parentFolderId, claimNo, primaryContactName || companyClientName)
+      : "";
+
+    var now      = new Date();
+    var claimMap = api_getHeaderMap_(db.claims);
+    var claimRow = api_buildRow_(claimMap, {
+      "Claim ID": claimNo, "Claim Type": claimType, "Status": "Under Review",
+      "Date Opened": now, "Incident Date": payload.incidentDate ? new Date(payload.incidentDate) : "",
+      "Created By": callerEmail, "Primary Contact Name": primaryContactName,
+      "Company / Client Name": companyClientName, "Email": email,
+      "Phone": String(payload.phone || "").trim(),
+      "Requested Amount": payload.requestedAmount != null ? Number(payload.requestedAmount) : "",
+      "Coverage Type": String(payload.coverageType || "").trim(),
+      "Client Selected Coverage": String(payload.clientSelectedCoverage || payload.coverageType || "").trim(),
+      "Issue Description": issueDescription,
+      "Property / Incident Reference": propRef,
+      "Incident Location": String(payload.incidentLocation || "").trim(),
+      "Claim Folder URL": folderUrl, "Last Updated": now
+    });
+    db.claims.getRange(api_getLastDataRow_(db.claims) + 1, 1, 1, claimRow.length).setValues([claimRow]);
+
+    if (claimType === "Item Claim" && (payload.items || []).length > 0) {
+      var clientSheetId = api_lookupClientForClaims_(cbSs, companyClientName);
+      var itemMap = api_getHeaderMap_(db.itemsSheet);
+      (payload.items || []).forEach(function(it) {
+        var itemId = String(it.itemId || "").trim(), itemDesc = String(it.itemDescription || "").trim();
+        if (!itemId && !itemDesc) return;
+        var snap = (itemId && clientSheetId) ? api_snapshotInventoryItem_(clientSheetId, itemId) : null;
+        var iRow = api_buildRow_(itemMap, {
+          "Claim ID": claimNo, "Item ID": itemId,
+          "Item Description Snapshot": snap ? snap.description : itemDesc,
+          "Vendor Snapshot": snap ? snap.vendor : "", "Class Snapshot": snap ? snap.itemClass : "",
+          "Status Snapshot": snap ? snap.status : "", "Location Snapshot": snap ? snap.location : "",
+          "Sidemark Snapshot": snap ? snap.sidemark : "", "Room Snapshot": snap ? snap.room : "",
+          "Added At": now, "Added By": callerEmail
+        });
+        db.itemsSheet.getRange(api_getLastDataRow_(db.itemsSheet) + 1, 1, 1, iRow.length).setValues([iRow]);
+      });
+    }
+  } finally { lock.releaseLock(); }
+
+  api_logClaimHistory_(db.historySheet, claimNo, "CREATED",
+    "Claim " + claimNo + " created by " + callerEmail + " (" + claimType + ")", callerEmail, false, "");
+
+  var masterId = prop_("MASTER_PRICE_LIST_SPREADSHEET_ID") || "";
+  var warnings = [];
+  var tokens = {
+    "{{CLAIM_NO}}": claimNo, "{{CLAIM_ID}}": claimNo,
+    "{{CLAIMANT_NAME}}": primaryContactName, "{{PRIMARY_CONTACT_NAME}}": primaryContactName,
+    "{{COMPANY_NAME}}": companyClientName, "{{COMPANY_CLIENT_NAME}}": companyClientName,
+    "{{CLAIM_TYPE}}": claimType,
+    "{{DATE_OPENED}}": formatDate_(new Date()), "{{ISSUE_DESCRIPTION}}": issueDescription,
+    "{{CREATED_BY}}": callerEmail,
+    "{{REQUESTED_AMOUNT}}": payload.requestedAmount != null ? "$" + Number(payload.requestedAmount).toFixed(2) : "Not specified"
+  };
+  try { api_sendClaimEmail_(masterId, "CLAIM_RECEIVED", email, "Claim " + claimNo + " — Received", tokens, null); }
+  catch (e) { warnings.push("CLAIM_RECEIVED email: " + e.message); }
+  if (config.notificationEmails) {
+    try { api_sendClaimEmail_(masterId, "CLAIM_STAFF_NOTIFY", config.notificationEmails, "New Claim " + claimNo + " — " + companyClientName, tokens, null); }
+    catch (e) { warnings.push("CLAIM_STAFF_NOTIFY email: " + e.message); }
+  }
+
+  return jsonResponse_({ success: true, claimId: claimNo, folderUrl: folderUrl, warnings: warnings });
+}
+
+// ── POST: Add Claim Items ─────────────────────────────────────────────────────
+
+function handleAddClaimItems_(callerEmail, payload) {
+  var claimId = String(payload.claimId || "").trim();
+  if (!claimId || !(payload.items || []).length) return errorResponse_("claimId and items[] required", "INVALID_PARAMS");
+
+  var cbSs = api_openCbSs_(); if (cbSs.error) return cbSs.error;
+  var db = claimsDb_(cbSs); if (!api_claimsReady_(db)) return errorResponse_("Claims schema not initialized", "SETUP_REQUIRED");
+  var claim = api_getClaimRow_(db.claims, claimId); if (!claim) return errorResponse_("Claim not found: " + claimId, "NOT_FOUND");
+
+  var clientSheetId = api_lookupClientForClaims_(cbSs, String(claim["Company / Client Name"] || "").trim());
+  var itemMap = api_getHeaderMap_(db.itemsSheet); var now = new Date(); var added = 0;
+  (payload.items || []).forEach(function(it) {
+    var itemId = String(it.itemId || "").trim(), itemDesc = String(it.itemDescription || "").trim();
+    if (!itemId && !itemDesc) return;
+    var snap = (itemId && clientSheetId) ? api_snapshotInventoryItem_(clientSheetId, itemId) : null;
+    var row = api_buildRow_(itemMap, {
+      "Claim ID": claimId, "Item ID": itemId, "Item Description Snapshot": snap ? snap.description : itemDesc,
+      "Vendor Snapshot": snap ? snap.vendor : "", "Class Snapshot": snap ? snap.itemClass : "",
+      "Status Snapshot": snap ? snap.status : "", "Location Snapshot": snap ? snap.location : "",
+      "Sidemark Snapshot": snap ? snap.sidemark : "", "Room Snapshot": snap ? snap.room : "",
+      "Added At": now, "Added By": callerEmail
+    });
+    db.itemsSheet.getRange(api_getLastDataRow_(db.itemsSheet) + 1, 1, 1, row.length).setValues([row]);
+    added++;
+  });
+  api_logClaimHistory_(db.historySheet, claimId, "ITEMS_ADDED", added + " item(s) linked by " + callerEmail, callerEmail, false, "");
+  api_updateClaimRow_(db.claims, claimId, {});
+  return jsonResponse_({ success: true, itemsAdded: added });
+}
+
+// ── POST: Add Claim Note ──────────────────────────────────────────────────────
+
+function handleAddClaimNote_(callerEmail, payload) {
+  var claimId  = String(payload.claimId  || "").trim();
+  var noteText = String(payload.noteText || "").trim();
+  var isPublic = payload.isPublic === true || payload.isPublic === "true";
+  if (!claimId || !noteText) return errorResponse_("claimId and noteText required", "INVALID_PARAMS");
+
+  var cbSs = api_openCbSs_(); if (cbSs.error) return cbSs.error;
+  var db = claimsDb_(cbSs); if (!api_claimsReady_(db)) return errorResponse_("Claims schema not initialized", "SETUP_REQUIRED");
+  var claim = api_getClaimRow_(db.claims, claimId); if (!claim) return errorResponse_("Claim not found: " + claimId, "NOT_FOUND");
+
+  var noteField = isPublic ? "Public Notes Summary" : "Internal Notes Summary";
+  var existing  = String(claim[noteField] || "").trim();
+  var stamp     = formatDate_(new Date()) + " [" + callerEmail + "]";
+  var updates   = {}; updates[noteField] = stamp + "\n" + noteText + (existing ? "\n\n" + existing : "");
+  api_updateClaimRow_(db.claims, claimId, updates);
+  api_logClaimHistory_(db.historySheet, claimId, isPublic ? "PUBLIC_NOTE" : "INTERNAL_NOTE",
+    (isPublic ? "Public" : "Internal") + " note added by " + callerEmail, callerEmail, isPublic, "");
+  return jsonResponse_({ success: true, noteField: noteField });
+}
+
+// ── POST: Request More Info ───────────────────────────────────────────────────
+
+function handleRequestMoreInfo_(callerEmail, payload) {
+  var claimId = String(payload.claimId || "").trim(), infoRequested = String(payload.infoRequested || "").trim();
+  if (!claimId) return errorResponse_("claimId required", "INVALID_PARAMS");
+
+  var cbSs = api_openCbSs_(); if (cbSs.error) return cbSs.error;
+  var db = claimsDb_(cbSs); if (!api_claimsReady_(db)) return errorResponse_("Claims schema not initialized", "SETUP_REQUIRED");
+  var claim = api_getClaimRow_(db.claims, claimId); if (!claim) return errorResponse_("Claim not found: " + claimId, "NOT_FOUND");
+
+  api_updateClaimRow_(db.claims, claimId, { "Status": "Waiting on Info" });
+  api_logClaimHistory_(db.historySheet, claimId, "MORE_INFO_REQUESTED",
+    "More info requested by " + callerEmail + ": " + infoRequested.substring(0, 100), callerEmail, false, "");
+
+  var warnings = [];
+  try {
+    api_sendClaimEmail_(prop_("MASTER_PRICE_LIST_SPREADSHEET_ID") || "", "CLAIM_MORE_INFO",
+      String(claim["Email"] || "").trim(),
+      "Additional Information Needed — Claim " + claimId,
+      { "{{CLAIM_NO}}": claimId, "{{CLAIM_ID}}": claimId, "{{CLAIMANT_NAME}}": String(claim["Primary Contact Name"] || claim["Company / Client Name"] || ""), "{{COMPANY_CLIENT_NAME}}": String(claim["Company / Client Name"] || ""), "{{INFO_REQUESTED}}": infoRequested }, null);
+  } catch (e) { warnings.push("CLAIM_MORE_INFO email: " + e.message); }
+
+  return jsonResponse_({ success: true, newStatus: "Waiting on Info", warnings: warnings });
+}
+
+// ── POST: Send Denial ─────────────────────────────────────────────────────────
+
+function handleSendClaimDenial_(callerEmail, payload) {
+  var claimId = String(payload.claimId || "").trim(), decisionExplanation = String(payload.decisionExplanation || "").trim();
+  if (!claimId || !decisionExplanation) return errorResponse_("claimId and decisionExplanation required", "INVALID_PARAMS");
+
+  var cbSs = api_openCbSs_(); if (cbSs.error) return cbSs.error;
+  var db = claimsDb_(cbSs); if (!api_claimsReady_(db)) return errorResponse_("Claims schema not initialized", "SETUP_REQUIRED");
+  var claim = api_getClaimRow_(db.claims, claimId); if (!claim) return errorResponse_("Claim not found: " + claimId, "NOT_FOUND");
+
+  api_updateClaimRow_(db.claims, claimId, { "Status": "Closed", "Outcome Type": "Denied", "Decision Explanation": decisionExplanation, "Date Closed": new Date() });
+  api_logClaimHistory_(db.historySheet, claimId, "DENIED", "Claim denied by " + callerEmail + ". Decision: " + decisionExplanation.substring(0, 120), callerEmail, false, "");
+
+  var warnings = [];
+  try {
+    api_sendClaimEmail_(prop_("MASTER_PRICE_LIST_SPREADSHEET_ID") || "", "CLAIM_DENIAL",
+      String(claim["Email"] || "").trim(), "Claim " + claimId + " — Decision",
+      { "{{CLAIM_NO}}": claimId, "{{CLAIM_ID}}": claimId, "{{CLAIMANT_NAME}}": String(claim["Primary Contact Name"] || claim["Company / Client Name"] || ""), "{{COMPANY_CLIENT_NAME}}": String(claim["Company / Client Name"] || ""), "{{DECISION_EXPLANATION}}": decisionExplanation }, null);
+  } catch (e) { warnings.push("CLAIM_DENIAL email: " + e.message); }
+
+  return jsonResponse_({ success: true, newStatus: "Closed", outcomeType: "Denied", warnings: warnings });
+}
+
+// ── POST: Generate Settlement ─────────────────────────────────────────────────
+
+function handleGenerateClaimSettlement_(callerEmail, payload) {
+  var claimId = String(payload.claimId || "").trim();
+  var coverageType = String(payload.coverageType || "").trim(), outcomeType = String(payload.outcomeType || "").trim();
+  var resolutionType = String(payload.resolutionType || "").trim();
+  var approvedAmount = payload.approvedAmount != null ? Number(payload.approvedAmount) : null;
+  var decisionExplanation = String(payload.decisionExplanation || "").trim();
+
+  if (!claimId || !coverageType || !outcomeType || !resolutionType || approvedAmount == null || !decisionExplanation)
+    return errorResponse_("claimId, coverageType, outcomeType, resolutionType, approvedAmount, decisionExplanation all required", "INVALID_PARAMS");
+
+  var cbSs = api_openCbSs_(); if (cbSs.error) return cbSs.error;
+  var db = claimsDb_(cbSs); if (!api_claimsReady_(db)) return errorResponse_("Claims schema not initialized", "SETUP_REQUIRED");
+  var claim = api_getClaimRow_(db.claims, claimId); if (!claim) return errorResponse_("Claim not found: " + claimId, "NOT_FOUND");
+
+  if (String(claim["Date Signed Settlement Received"] || "").trim() && !(payload.forceRegenerate === true))
+    return errorResponse_("Signed settlement already received. Pass forceRegenerate:true to override.", "SETTLEMENT_LOCKED");
+
+  var config = api_claimsConfig_(db.configSheet);
+  var linkedItems = [];
+  if (db.itemsSheet && db.itemsSheet.getLastRow() >= 2)
+    sheetToObjects_(db.itemsSheet).forEach(function(r) { if (String(r["Claim ID"] || "").trim() === claimId) linkedItems.push(r); });
+
+  var prevVersion = api_markPriorSettlementsNotCurrent_(db.filesSheet, claimId);
+  var newVersion  = prevVersion + 1;
+  var settlementData = { coverageType: coverageType, outcomeType: outcomeType, resolutionType: resolutionType, approvedAmount: approvedAmount, decisionExplanation: decisionExplanation, version: newVersion };
+
+  var pdfResult = api_generateSettlementPdf_(db, claim, linkedItems, config, settlementData);
+  if (!pdfResult.success) return errorResponse_(pdfResult.error, "PDF_ERROR");
+
+  api_writeClaimFile_(db.filesSheet, claimId, "Settlement", pdfResult.docTitle + ".pdf", pdfResult.pdfFileUrl, String(newVersion), true, callerEmail);
+
+  var now = new Date();
+  api_updateClaimRow_(db.claims, claimId, {
+    "Status": "Settlement Sent", "Outcome Type": outcomeType, "Resolution Type": resolutionType,
+    "Coverage Type": coverageType, "Approved Amount": approvedAmount, "Decision Explanation": decisionExplanation,
+    "Date Settlement Sent": now, "Current Settlement File URL": pdfResult.pdfFileUrl, "Current Settlement Version": String(newVersion)
+  });
+  api_logClaimHistory_(db.historySheet, claimId, "SETTLEMENT_GENERATED",
+    "Settlement v" + newVersion + " generated by " + callerEmail + " (" + outcomeType + ", " + resolutionType + ", $" + approvedAmount.toFixed(2) + ")",
+    callerEmail, false, pdfResult.pdfFileUrl);
+
+  var warnings = [];
+  try {
+    api_sendClaimEmail_(prop_("MASTER_PRICE_LIST_SPREADSHEET_ID") || "", "CLAIM_SETTLEMENT",
+      String(claim["Email"] || "").trim(), "Settlement Offer — Claim " + claimId,
+      { "{{CLAIM_NO}}": claimId, "{{CLAIM_ID}}": claimId, "{{CLAIMANT_NAME}}": String(claim["Primary Contact Name"] || claim["Company / Client Name"] || ""), "{{COMPANY_CLIENT_NAME}}": String(claim["Company / Client Name"] || ""),
+        "{{APPROVED_AMOUNT}}": "$" + approvedAmount.toFixed(2), "{{RESOLUTION_TYPE}}": resolutionType, "{{DECISION_EXPLANATION}}": decisionExplanation },
+      pdfResult.pdfBlob);
+  } catch (e) { warnings.push("CLAIM_SETTLEMENT email: " + e.message); }
+
+  return jsonResponse_({ success: true, fileUrl: pdfResult.pdfFileUrl, versionNo: newVersion, newStatus: "Settlement Sent", warnings: warnings });
+}
+
+// ── POST: Upload Signed Settlement ────────────────────────────────────────────
+
+function handleUploadSignedSettlement_(callerEmail, payload) {
+  var claimId = String(payload.claimId || "").trim();
+  if (!claimId) return errorResponse_("claimId required", "INVALID_PARAMS");
+
+  var cbSs = api_openCbSs_(); if (cbSs.error) return cbSs.error;
+  var db = claimsDb_(cbSs); if (!api_claimsReady_(db)) return errorResponse_("Claims schema not initialized", "SETUP_REQUIRED");
+  var claim = api_getClaimRow_(db.claims, claimId); if (!claim) return errorResponse_("Claim not found: " + claimId, "NOT_FOUND");
+
+  var driveFileId  = String(payload.driveFileId || "").trim();
+  // Accept driveFileUrl as a plain URL (no copy needed — just record the link)
+  var signedUrl    = String(payload.fileUrl || payload.driveFileUrl || "").trim();
+  var signedName   = claimId + " - Signed Settlement.pdf";
+
+  // Reject folder URLs — must be a direct file link
+  if (signedUrl && (signedUrl.indexOf("/folders/") !== -1 || signedUrl.indexOf("folderview") !== -1)) {
+    return errorResponse_("That looks like a folder URL. Please paste the direct link to the signed file (e.g. https://drive.google.com/file/d/...)", "INVALID_PARAMS");
+  }
+
+  if (driveFileId) {
+    try {
+      var sourceFile = DriveApp.getFileById(driveFileId);
+      var fm = String(claim["Claim Folder URL"] || "").match(/\/folders\/([a-zA-Z0-9_-]+)/);
+      var dest = fm ? DriveApp.getFolderById(fm[1]) : null;
+      var copy = dest ? sourceFile.makeCopy(signedName, dest) : sourceFile.makeCopy(signedName);
+      signedUrl = copy.getUrl();
+    } catch (e) { return errorResponse_("Could not copy Drive file: " + e.message, "DRIVE_ERROR"); }
+  }
+
+  api_writeClaimFile_(db.filesSheet, claimId, "Signed Settlement", signedName, signedUrl || "", "1", true, callerEmail);
+  api_updateClaimRow_(db.claims, claimId, { "Status": "Approved", "Date Signed Settlement Received": new Date() });
+  api_logClaimHistory_(db.historySheet, claimId, "SIGNED_SETTLEMENT_RECEIVED",
+    "Signed settlement uploaded by " + callerEmail, callerEmail, false, signedUrl || "");
+
+  return jsonResponse_({ success: true, newStatus: "Approved", signedFileUrl: signedUrl });
+}
+
+// ── POST: Close / Void / Reopen / First Review ────────────────────────────────
+
+function handleCloseClaim_(callerEmail, payload) {
+  var claimId = String(payload.claimId || "").trim(), closeNote = String(payload.closeNote || "").trim();
+  if (!claimId) return errorResponse_("claimId required", "INVALID_PARAMS");
+  var cbSs = api_openCbSs_(); if (cbSs.error) return cbSs.error;
+  var db = claimsDb_(cbSs); if (!api_claimsReady_(db)) return errorResponse_("Claims schema not initialized", "SETUP_REQUIRED");
+  if (!api_getClaimRow_(db.claims, claimId)) return errorResponse_("Claim not found: " + claimId, "NOT_FOUND");
+  api_updateClaimRow_(db.claims, claimId, { "Status": "Closed", "Date Closed": new Date(), "Close Note": closeNote });
+  api_logClaimHistory_(db.historySheet, claimId, "CLOSED", "Claim closed by " + callerEmail + ". Note: " + closeNote.substring(0, 100), callerEmail, false, "");
+  return jsonResponse_({ success: true, newStatus: "Closed" });
+}
+
+function handleVoidClaim_(callerEmail, payload) {
+  var claimId = String(payload.claimId || "").trim(), voidReason = String(payload.voidReason || "").trim();
+  if (!claimId || !voidReason) return errorResponse_("claimId and voidReason required", "INVALID_PARAMS");
+  var cbSs = api_openCbSs_(); if (cbSs.error) return cbSs.error;
+  var db = claimsDb_(cbSs); if (!api_claimsReady_(db)) return errorResponse_("Claims schema not initialized", "SETUP_REQUIRED");
+  if (!api_getClaimRow_(db.claims, claimId)) return errorResponse_("Claim not found: " + claimId, "NOT_FOUND");
+  api_updateClaimRow_(db.claims, claimId, { "Status": "Void", "Void Reason": voidReason });
+  api_logClaimHistory_(db.historySheet, claimId, "VOIDED", "Claim voided by " + callerEmail + ". Reason: " + voidReason.substring(0, 100), callerEmail, false, "");
+  return jsonResponse_({ success: true, newStatus: "Void" });
+}
+
+function handleReopenClaim_(callerEmail, payload) {
+  var claimId = String(payload.claimId || "").trim(), reopenReason = String(payload.reopenReason || "").trim();
+  if (!claimId) return errorResponse_("claimId required", "INVALID_PARAMS");
+  var cbSs = api_openCbSs_(); if (cbSs.error) return cbSs.error;
+  var db = claimsDb_(cbSs); if (!api_claimsReady_(db)) return errorResponse_("Claims schema not initialized", "SETUP_REQUIRED");
+  if (!api_getClaimRow_(db.claims, claimId)) return errorResponse_("Claim not found: " + claimId, "NOT_FOUND");
+  api_updateClaimRow_(db.claims, claimId, { "Status": "Under Review", "Date Closed": "", "Close Note": "" });
+  api_logClaimHistory_(db.historySheet, claimId, "REOPENED", "Claim reopened by " + callerEmail + ". Reason: " + reopenReason.substring(0, 100), callerEmail, false, "");
+  var db2 = claimsDb_(cbSs);
+  var config = api_claimsConfig_(db2.configSheet);
+  if (config.notificationEmails) {
+    var c = api_getClaimRow_(db.claims, claimId) || {};
+    try { api_sendClaimEmail_(prop_("MASTER_PRICE_LIST_SPREADSHEET_ID") || "", "CLAIM_STAFF_NOTIFY", config.notificationEmails, "Claim " + claimId + " Reopened", { "{{CLAIM_NO}}": claimId, "{{CLAIM_ID}}": claimId, "{{CLAIM_TYPE}}": "Reopen", "{{COMPANY_NAME}}": String(c["Company / Client Name"] || ""), "{{COMPANY_CLIENT_NAME}}": String(c["Company / Client Name"] || ""), "{{CLAIMANT_NAME}}": String(c["Primary Contact Name"] || ""), "{{CREATED_BY}}": callerEmail, "{{ISSUE_DESCRIPTION}}": reopenReason, "{{REQUESTED_AMOUNT}}": "", "{{DATE_OPENED}}": formatDate_(new Date()) }, null); } catch (_) {}
+  }
+  return jsonResponse_({ success: true, newStatus: "Under Review" });
+}
+
+function handleFirstReviewClaim_(callerEmail, payload) {
+  var claimId = String(payload.claimId || "").trim();
+  if (!claimId) return errorResponse_("claimId required", "INVALID_PARAMS");
+  var cbSs = api_openCbSs_(); if (cbSs.error) return cbSs.error;
+  var db = claimsDb_(cbSs); if (!api_claimsReady_(db)) return errorResponse_("Claims schema not initialized", "SETUP_REQUIRED");
+  var claim = api_getClaimRow_(db.claims, claimId); if (!claim) return errorResponse_("Claim not found: " + claimId, "NOT_FOUND");
+  if (String(claim["First Reviewed By"] || "").trim())
+    return jsonResponse_({ success: true, alreadyReviewed: true, firstReviewedBy: String(claim["First Reviewed By"] || "") });
+  var now = new Date();
+  api_updateClaimRow_(db.claims, claimId, { "First Reviewed By": callerEmail, "First Reviewed At": now });
+  api_logClaimHistory_(db.historySheet, claimId, "FIRST_REVIEW", "Claim first reviewed by " + callerEmail, callerEmail, false, "");
+  return jsonResponse_({ success: true, firstReviewedBy: callerEmail, firstReviewedAt: formatDate_(now) });
+}
+
+// ─── updateClaim — inline edit fields on claim detail panel (v29.0.0) ────────
+
+function handleUpdateClaim_(callerEmail, payload) {
+  var claimId = String(payload.claimId || "").trim();
+  if (!claimId) return errorResponse_("claimId required", "INVALID_PARAMS");
+
+  var cbSs = api_openCbSs_(); if (cbSs.error) return cbSs.error;
+  var db = claimsDb_(cbSs); if (!api_claimsReady_(db)) return errorResponse_("Claims schema not initialized", "SETUP_REQUIRED");
+  var claim = api_getClaimRow_(db.claims, claimId); if (!claim) return errorResponse_("Claim not found: " + claimId, "NOT_FOUND");
+
+  // Editable fields — only update provided fields
+  var updates = {};
+  var saved = [];
+  var editableFields = {
+    "requestedAmount":            "Requested Amount",
+    "approvedAmount":             "Approved Amount",
+    "coverageType":               "Coverage Type",
+    "clientSelectedCoverage":     "Client Selected Coverage",
+    "primaryContactName":         "Primary Contact Name",
+    "email":                      "Email",
+    "phone":                      "Phone",
+    "incidentDate":               "Incident Date",
+    "incidentLocation":           "Incident Location",
+    "propertyIncidentReference":  "Property / Incident Reference",
+    "issueDescription":           "Issue Description",
+    "decisionExplanation":        "Decision Explanation"
+  };
+
+  for (var key in editableFields) {
+    if (payload[key] !== undefined) {
+      var col = editableFields[key];
+      var val = payload[key];
+      // Numbers
+      if (key === "requestedAmount" || key === "approvedAmount") {
+        updates[col] = val === null || val === "" ? "" : Number(val);
+      }
+      // Dates
+      else if (key === "incidentDate") {
+        updates[col] = val ? new Date(val) : "";
+      }
+      // Strings
+      else {
+        updates[col] = String(val || "").trim();
+      }
+      saved.push(key);
+    }
+  }
+
+  if (saved.length === 0) return errorResponse_("No editable fields provided", "INVALID_PARAMS");
+
+  updates["Last Updated"] = new Date();
+  api_updateClaimRow_(db.claims, claimId, updates);
+
+  return jsonResponse_({ success: true, claimId: claimId, saved: saved, message: "Saved: " + saved.join(", ") });
+}
+
+// ─── Test Send: Client Email Templates ───────────────────────────────────────
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// v38.12.0: Template management endpoints — getEmailTemplates, updateEmailTemplate,
+// syncTemplatesToClients, sendOnboardingEmail
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * GET getEmailTemplates — Read all templates from Master Price List Email_Templates.
+ * Returns array with key, subject, bodyHtml, notes, recipients, attachDoc, category.
+ * Skips rows where key (col A) or bodyHtml (col C) is empty.
+ * Category derived: DOC_* → 'doc', WELCOME/ONBOARDING → 'system', else 'email'.
+ */
+function handleGetEmailTemplates_() {
+  var masterSsId = prop_("MASTER_PRICE_LIST_SPREADSHEET_ID");
+  if (!masterSsId) return errorResponse_("MASTER_PRICE_LIST_SPREADSHEET_ID not configured", "CONFIG_ERROR");
+
+  try {
+    var masterSS = SpreadsheetApp.openById(masterSsId);
+    var tmplSh = masterSS.getSheetByName("Email_Templates");
+    if (!tmplSh || tmplSh.getLastRow() < 2) return jsonResponse_({ success: true, templates: [] });
+
+    var data = tmplSh.getRange(2, 1, tmplSh.getLastRow() - 1, Math.max(tmplSh.getLastColumn(), 6)).getValues();
+    var templates = [];
+    for (var i = 0; i < data.length; i++) {
+      var key = String(data[i][0] || "").trim();
+      var bodyHtml = String(data[i][2] || "").trim();
+      if (!key || !bodyHtml) continue; // skip empty/malformed rows
+
+      var category = "email";
+      if (key.indexOf("DOC_") === 0) category = "doc";
+      else if (key === "WELCOME_EMAIL" || key === "ONBOARDING_EMAIL") category = "system";
+
+      templates.push({
+        key: key,
+        subject: String(data[i][1] || "").trim(),
+        bodyHtml: bodyHtml,
+        notes: String(data[i][3] || "").trim(),
+        recipients: String(data[i][4] || "").trim(),
+        attachDoc: String(data[i][5] || "").trim(),
+        category: category
+      });
+    }
+    return jsonResponse_({ success: true, templates: templates });
+  } catch (e) {
+    return errorResponse_("Failed to read templates: " + e.message, "SERVER_ERROR");
+  }
+}
+
+/**
+ * POST updateEmailTemplate — Update subject and/or bodyHtml on Master Price List.
+ * Payload: { templateKey, subject?, bodyHtml? }
+ * Scans by key, updates matched row columns B and/or C. Blank bodyHtml rejected.
+ */
+function handleUpdateEmailTemplate_(payload) {
+  var templateKey = String((payload || {}).templateKey || "").trim();
+  if (!templateKey) return errorResponse_("templateKey is required", "INVALID_PARAMS");
+
+  var hasSubject = (payload.subject !== undefined && payload.subject !== null);
+  var hasBody = (payload.bodyHtml !== undefined && payload.bodyHtml !== null);
+  if (!hasSubject && !hasBody) return errorResponse_("subject or bodyHtml is required", "INVALID_PARAMS");
+  if (hasBody && !String(payload.bodyHtml).trim()) return errorResponse_("bodyHtml cannot be blank", "INVALID_PARAMS");
+
+  var masterSsId = prop_("MASTER_PRICE_LIST_SPREADSHEET_ID");
+  if (!masterSsId) return errorResponse_("MASTER_PRICE_LIST_SPREADSHEET_ID not configured", "CONFIG_ERROR");
+
+  try {
+    var masterSS = SpreadsheetApp.openById(masterSsId);
+    var tmplSh = masterSS.getSheetByName("Email_Templates");
+    if (!tmplSh || tmplSh.getLastRow() < 2) return errorResponse_("Email_Templates sheet not found or empty", "NOT_FOUND");
+
+    var data = tmplSh.getRange(2, 1, tmplSh.getLastRow() - 1, 1).getValues();
+    var matchRow = -1;
+    for (var i = 0; i < data.length; i++) {
+      if (String(data[i][0] || "").trim() === templateKey) { matchRow = i + 2; break; }
+    }
+    if (matchRow < 2) return errorResponse_("Template not found: " + templateKey, "NOT_FOUND");
+
+    if (hasSubject) tmplSh.getRange(matchRow, 2).setValue(String(payload.subject));
+    if (hasBody)    tmplSh.getRange(matchRow, 3).setValue(String(payload.bodyHtml));
+
+    return jsonResponse_({ success: true, templateKey: templateKey, message: "Template updated" });
+  } catch (e) {
+    return errorResponse_("Failed to update template: " + e.message, "SERVER_ERROR");
+  }
+}
+
+/**
+ * POST syncTemplatesToClients — Push Email_Templates from Master to all client
+ * Email_Template_Cache tabs. Mirrors StrideMPL_SyncToAllClients from Master
+ * Price List script. Continues on per-client failure; aborts only if Master
+ * source is unreadable.
+ */
+function handleSyncTemplatesToClients_() {
+  var masterSsId = prop_("MASTER_PRICE_LIST_SPREADSHEET_ID");
+  var cbSsId = prop_("CB_SPREADSHEET_ID");
+  if (!masterSsId || !cbSsId) return errorResponse_("MASTER_PRICE_LIST_SPREADSHEET_ID or CB_SPREADSHEET_ID not configured", "CONFIG_ERROR");
+
+  // Read Master Email_Templates (source of truth)
+  var emailData;
+  try {
+    var masterSS = SpreadsheetApp.openById(masterSsId);
+    var emailSh = masterSS.getSheetByName("Email_Templates");
+    if (!emailSh || emailSh.getLastRow() < 1) return errorResponse_("Email_Templates sheet not found on Master", "NOT_FOUND");
+    emailData = emailSh.getDataRange().getValues();
+  } catch (e) {
+    return errorResponse_("Cannot read Master Email_Templates: " + e.message, "SOURCE_ERROR");
+  }
+
+  // Get active clients from CB Clients tab
+  var clients = [];
+  try {
+    var cbSS = SpreadsheetApp.openById(cbSsId);
+    var clientsSh = cbSS.getSheetByName("Clients");
+    if (!clientsSh || clientsSh.getLastRow() < 2) return errorResponse_("CB Clients tab not found or empty", "NOT_FOUND");
+    var cbData = clientsSh.getDataRange().getValues();
+    var cbHeaders = cbData[0].map(function(h) { return String(h || "").trim().toUpperCase(); });
+    var nameIdx = cbHeaders.indexOf("CLIENT NAME");
+    var ssIdIdx = cbHeaders.indexOf("SPREADSHEET ID");
+    var activeIdx = cbHeaders.indexOf("ACTIVE");
+    if (nameIdx === -1 || ssIdIdx === -1) return errorResponse_("CB Clients missing required columns", "SCHEMA_ERROR");
+
+    for (var c = 1; c < cbData.length; c++) {
+      var active = activeIdx !== -1 ? String(cbData[c][activeIdx] || "").trim().toUpperCase() : "TRUE";
+      if (active === "FALSE" || active === "NO") continue;
+      var cName = String(cbData[c][nameIdx] || "").trim();
+      var cSsId = String(cbData[c][ssIdIdx] || "").trim();
+      if (cName && cSsId) clients.push({ name: cName, spreadsheetId: cSsId });
+    }
+  } catch (e) {
+    return errorResponse_("Cannot read CB Clients: " + e.message, "SOURCE_ERROR");
+  }
+
+  // Sync to each client
+  var synced = 0, failed = 0, errors = [];
+  for (var i = 0; i < clients.length; i++) {
+    try {
+      var clientSS = SpreadsheetApp.openById(clients[i].spreadsheetId);
+      var cacheSh = clientSS.getSheetByName("Email_Template_Cache");
+      if (!cacheSh) {
+        cacheSh = clientSS.insertSheet("Email_Template_Cache");
+      }
+      cacheSh.clearContents();
+      if (emailData.length > 0) {
+        cacheSh.getRange(1, 1, emailData.length, emailData[0].length).setValues(emailData);
+        // Format header row
+        cacheSh.getRange(1, 1, 1, emailData[0].length).setFontWeight("bold").setBackground("#E85D2D").setFontColor("#ffffff");
+      }
+      synced++;
+    } catch (clientErr) {
+      failed++;
+      errors.push({ client: clients[i].name, error: String(clientErr) });
+    }
+  }
+
+  return jsonResponse_({
+    success: true,
+    synced: synced,
+    failed: failed,
+    total: clients.length,
+    errors: errors,
+    message: "Synced to " + synced + " of " + clients.length + " clients" + (failed > 0 ? " (" + failed + " failed)" : "")
+  });
+}
+
+/**
+ * POST sendOnboardingEmail — Send onboarding/getting-started email to a client.
+ * Mirrors handleSendWelcomeEmail_ but uses ONBOARDING_EMAIL template key.
+ */
+function handleSendOnboardingEmail_(clientSheetId, payload) {
+  if (!clientSheetId) return errorResponse_("clientSheetId is required", "MISSING_PARAM");
+
+  var ss;
+  try { ss = SpreadsheetApp.openById(clientSheetId); }
+  catch (e) { return errorResponse_("Cannot open client spreadsheet: " + e.message, "OPEN_FAILED"); }
+
+  var settings = api_readSettings_(ss);
+  var clientName = String(settings["CLIENT_NAME"] || "Valued Client").trim();
+  var clientEmail = String(settings["CLIENT_EMAIL"] || "").trim();
+  if (!clientEmail) return errorResponse_("No CLIENT_EMAIL configured for " + clientName, "MISSING_CONFIG");
+
+  var masterSsId = prop_("MASTER_PRICE_LIST_SPREADSHEET_ID");
+  var htmlBody = "", subject = "Getting Started with Stride WMS — " + clientName;
+
+  try {
+    if (masterSsId) {
+      var masterSS = SpreadsheetApp.openById(masterSsId);
+      var tmplSh = masterSS.getSheetByName("Email_Templates");
+      if (tmplSh && tmplSh.getLastRow() >= 2) {
+        var tmplData = tmplSh.getRange(2, 1, tmplSh.getLastRow() - 1, Math.max(tmplSh.getLastColumn(), 3)).getValues();
+        for (var t = 0; t < tmplData.length; t++) {
+          if (String(tmplData[t][0] || "").trim() === "ONBOARDING_EMAIL") {
+            htmlBody = String(tmplData[t][2] || "").trim();
+            var tmplSubject = String(tmplData[t][1] || "").trim();
+            if (tmplSubject) {
+              subject = tmplSubject.split("{{CLIENT_NAME}}").join(clientName);
+            }
+            break;
+          }
+        }
+      }
+    }
+  } catch (err) {
+    Logger.log("sendOnboardingEmail template lookup failed: " + err);
+  }
+
+  if (!htmlBody) return errorResponse_("ONBOARDING_EMAIL template not found in Master Price List", "NOT_FOUND");
+
+  var tokens = {
+    "{{CLIENT_NAME}}": clientName,
+    "{{SPREADSHEET_URL}}": ss.getUrl() || "#",
+    "{{CLIENT_EMAIL}}": clientEmail,
+    "{{APP_URL}}": "https://www.mystridehub.com/#"
+  };
+  var entries = Object.entries(tokens);
+  for (var j = 0; j < entries.length; j++) {
+    htmlBody = htmlBody.split(entries[j][0]).join(String(entries[j][1] || ""));
+  }
+
+  try {
+    GmailApp.sendEmail(clientEmail, subject, "", { htmlBody: htmlBody });
+    return jsonResponse_({ success: true, sentTo: clientEmail, clientName: clientName, subject: subject });
+  } catch (err) {
+    return errorResponse_("Failed to send onboarding email: " + err.message, "SEND_FAILED");
+  }
+}
+
+/**
+ * POST sendWelcomeEmail — Send welcome email to a client directly from StrideAPI.gs.
+ * Reads CLIENT_EMAIL from the client's Settings tab, loads WELCOME_EMAIL template
+ * from Master Price List, resolves tokens, sends via GmailApp.
+ * No scripts.run dependency — works in this Google Workspace environment.
+ */
+function handleSendWelcomeEmail_(payload) {
+  var clientSheetId = String(payload.clientSheetId || "").trim();
+  if (!clientSheetId) return errorResponse_("clientSheetId is required", "MISSING_PARAM");
+
+  var ss;
+  try { ss = SpreadsheetApp.openById(clientSheetId); }
+  catch (e) { return errorResponse_("Cannot open client spreadsheet: " + e.message, "OPEN_FAILED"); }
+
+  // Read client settings
+  var settings = api_readSettings_(ss);
+  var clientName = String(settings["CLIENT_NAME"] || "Valued Client").trim();
+  var clientEmail = String(settings["CLIENT_EMAIL"] || "").trim();
+  if (!clientEmail) return errorResponse_("No CLIENT_EMAIL configured for " + clientName, "MISSING_CONFIG");
+
+  // Load WELCOME_EMAIL template from Master Price List
+  var masterSsId = prop_("MASTER_PRICE_LIST_SPREADSHEET_ID");
+  var htmlBody = "";
+  var subject = "Welcome to Stride Warehouse Management — " + clientName;
+
+  try {
+    if (masterSsId) {
+      var masterSS = SpreadsheetApp.openById(masterSsId);
+      var tmplSh = masterSS.getSheetByName("Email_Templates");
+      if (tmplSh && tmplSh.getLastRow() >= 2) {
+        var tmplData = tmplSh.getRange(2, 1, tmplSh.getLastRow() - 1, Math.max(tmplSh.getLastColumn(), 3)).getValues();
+        for (var t = 0; t < tmplData.length; t++) {
+          if (String(tmplData[t][0] || "").trim() === "WELCOME_EMAIL") {
+            htmlBody = String(tmplData[t][2] || "").trim();
+            var tmplSubject = String(tmplData[t][1] || "").trim();
+            if (tmplSubject) subject = tmplSubject;
+            break;
+          }
+        }
+      }
+    }
+  } catch (err) {
+    Logger.log("sendWelcomeEmail template lookup failed: " + err);
+  }
+
+  if (!htmlBody) {
+    return errorResponse_("WELCOME_EMAIL template not found in Master Price List Email_Templates tab", "NOT_FOUND");
+  }
+
+  // Resolve tokens
+  var tokens = {
+    "{{CLIENT_NAME}}": clientName,
+    "{{SPREADSHEET_URL}}": ss.getUrl() || "#",
+    "{{CLIENT_EMAIL}}": clientEmail,
+    "{{APP_URL}}": "https://www.mystridehub.com/#"
+  };
+  var entries = Object.entries(tokens);
+  for (var j = 0; j < entries.length; j++) {
+    subject = subject.split(entries[j][0]).join(String(entries[j][1] || ""));
+    htmlBody = htmlBody.split(entries[j][0]).join(String(entries[j][1] || ""));
+  }
+
+  // Send
+  try {
+    GmailApp.sendEmail(clientEmail, subject, "", { htmlBody: htmlBody });
+    return jsonResponse_({ success: true, sentTo: clientEmail, clientName: clientName, subject: subject });
+  } catch (err) {
+    return errorResponse_("Failed to send email: " + err.message, "SEND_FAILED");
+  }
+}
+
+function handleTestSendClientTemplates_(callerEmail, payload) {
+  var toEmail = String(payload.toEmail || "").trim();
+  if (!toEmail) return errorResponse_("toEmail is required", "INVALID_PARAMS");
+  var templateKey = String(payload.templateKey || "").trim();
+  var masterSpreadsheetId = prop_("MASTER_PRICE_LIST_SPREADSHEET_ID") || "";
+
+  var CLIENT_TEMPLATES = [
+    { key: "SHIPMENT_RECEIVED",    subject: "Shipment Received — TEST" },
+    { key: "INSP_EMAIL",           subject: "Inspection Complete — TEST" },
+    { key: "TASK_COMPLETE",        subject: "Task Complete — TEST" },
+    { key: "REPAIR_QUOTE",         subject: "Repair Quote — TEST" },
+    { key: "REPAIR_QUOTE_REQUEST", subject: "Repair Quote Request — TEST" },
+    { key: "REPAIR_COMPLETE",      subject: "Repair Complete — TEST" },
+    { key: "REPAIR_APPROVED",      subject: "Repair Approved — TEST" },
+    { key: "REPAIR_DECLINED",      subject: "Repair Declined — TEST" },
+    { key: "WILL_CALL_CREATED",    subject: "Will Call Created — TEST" },
+    { key: "WILL_CALL_RELEASE",    subject: "Will Call Release — TEST" },
+    { key: "WILL_CALL_CANCELLED",  subject: "Will Call Cancelled — TEST" },
+    { key: "TRANSFER_RECEIVED",    subject: "Transfer Received — TEST" },
+  ];
+
+  var mockTokens = {
+    "{{CLIENT_NAME}}": "Test Client",
+    "{{SHIPMENT_NO}}": "SHP-TEST-001",
+    "{{RECEIVE_DATE}}": formatDate_(new Date()),
+    "{{ITEM_COUNT}}": "3",
+    "{{CARRIER}}": "UPS",
+    "{{TRACKING_NUMBER}}": "1Z999AA10123456784",
+    "{{NOTES}}": "Test shipment notes",
+    "{{TASK_ID}}": "INSP-TEST-001",
+    "{{TASK_TYPE}}": "Inspection",
+    "{{RESULT}}": "Pass",
+    "{{TASK_NOTES}}": "All items in good condition",
+    "{{TASK_RESULT}}": "Pass",
+    "{{ITEM_ID}}": "ITM-TEST-001",
+    "{{DESCRIPTION}}": "Test sofa — 3-seat",
+    "{{REPAIR_ID}}": "REP-TEST-001",
+    "{{QUOTE_AMOUNT}}": "$125.00",
+    "{{FINAL_AMOUNT}}": "$125.00",
+    "{{QUOTE_NOTES}}": "Minor touch-up required on left arm",
+    "{{WC_NO}}": "WC-TEST-001",
+    "{{PICKUP_DATE}}": formatDate_(new Date()),
+    "{{WC_ITEMS}}": "ITM-TEST-001 — Test sofa",
+    "{{COD_AMOUNT}}": "$0.00",
+    "{{IS_COD}}": "No",
+    "{{RELEASE_DATE}}": formatDate_(new Date()),
+    "{{RELEASED_ITEMS}}": "ITM-TEST-001",
+    "{{SOURCE_CLIENT}}": "Source Client",
+    "{{DEST_CLIENT}}": "Destination Client",
+    "{{TRANSFER_ITEMS}}": "ITM-TEST-001 — Test sofa",
+    "{{CANCEL_REASON}}": "Client request",
+  };
+
+  var toSend = templateKey
+    ? CLIENT_TEMPLATES.filter(function(t) { return t.key === templateKey; })
+    : CLIENT_TEMPLATES;
+  if (!toSend.length) return errorResponse_("Unknown templateKey: " + templateKey, "INVALID_PARAMS");
+
+  var settings = { "MASTER_SPREADSHEET_ID": masterSpreadsheetId };
+  var results = [];
+  toSend.forEach(function(tpl) {
+    var r = api_sendTemplateEmail_(settings, tpl.key, toEmail, "[TEST] " + tpl.subject, mockTokens);
+    results.push({ key: tpl.key, sent: !!r.success, error: r.error || null });
+  });
+
+  var sent = results.filter(function(r) { return r.sent; }).length;
+  return jsonResponse_({ success: true, sent: sent, total: results.length, results: results });
+}
+
+// ─── Test Send: Claim Email Templates ────────────────────────────────────────
+
+function handleTestSendClaimEmails_(callerEmail, payload) {
+  var toEmail = String(payload.toEmail || "").trim();
+  if (!toEmail) return errorResponse_("toEmail is required", "INVALID_PARAMS");
+  var templateKey = String(payload.templateKey || "").trim();
+  var masterSpreadsheetId = prop_("MASTER_PRICE_LIST_SPREADSHEET_ID") || "";
+
+  var CLAIM_TEMPLATES = [
+    { key: "CLAIM_RECEIVED",     subject: "[TEST] Claim CLM-TEST-001 — Received" },
+    { key: "CLAIM_STAFF_NOTIFY", subject: "[TEST] New Claim CLM-TEST-001 — Test Company LLC" },
+    { key: "CLAIM_MORE_INFO",    subject: "[TEST] Additional Information Needed — Claim CLM-TEST-001" },
+    { key: "CLAIM_DENIAL",       subject: "[TEST] Claim CLM-TEST-001 — Decision" },
+    { key: "CLAIM_SETTLEMENT",   subject: "[TEST] Settlement Offer — Claim CLM-TEST-001" },
+  ];
+
+  var mockTokens = {
+    "{{CLAIM_NO}}":              "CLM-TEST-001",
+    "{{CLAIMANT_NAME}}":         "Jane Smith",
+    "{{COMPANY_NAME}}":          "Test Company LLC",
+    "{{CLAIM_TYPE}}":            "Item Claim",
+    "{{DATE_OPENED}}":           formatDate_(new Date()),
+    "{{INCIDENT_DATE}}":         formatDate_(new Date()),
+    "{{CREATED_BY}}":            callerEmail || "test@stridenw.com",
+    "{{REQUESTED_AMOUNT}}":      "$500.00",
+    "{{ISSUE_DESCRIPTION}}":     "Test damage description — sofa arrived with torn fabric on the back cushion.",
+    "{{INFO_REQUESTED}}":        "Please provide photos of the damage and the original purchase receipt.",
+    "{{DECISION_EXPLANATION}}":  "After careful review, this item is not covered under the warehouse liability agreement for this type of damage.",
+    "{{APPROVED_AMOUNT}}":       "$350.00",
+    "{{RESOLUTION_TYPE}}":       "Cash Settlement",
+    "{{COVERAGE_TYPE}}":         "Standard",
+    "{{OUTCOME_TYPE}}":          "Partial Approval",
+    "{{SETTLEMENT_DATE}}":       formatDate_(new Date()),
+    "{{SETTLEMENT_VERSION}}":    "1",
+    "{{ITEM_REFERENCE}}":        "ITM-TEST-001 — Test Sofa (3-seat)",
+    "{{LEGAL_TERMS}}":           "By signing this agreement, the claimant agrees to release Stride Logistics from any further claims related to this incident.",
+  };
+
+  var toSend = templateKey
+    ? CLAIM_TEMPLATES.filter(function(t) { return t.key === templateKey; })
+    : CLAIM_TEMPLATES;
+  if (!toSend.length) return errorResponse_("Unknown templateKey: " + templateKey, "INVALID_PARAMS");
+
+  var results = [];
+  toSend.forEach(function(tpl) {
+    var r = api_sendClaimEmail_(masterSpreadsheetId, tpl.key, toEmail, tpl.subject, mockTokens, null);
+    results.push({ key: tpl.key, sent: !!r.success, usedFallback: !!r.usedFallback, error: r.error || null });
+  });
+
+  var sent = results.filter(function(r) { return r.sent; }).length;
+  return jsonResponse_({ success: true, sent: sent, total: results.length, results: results });
+}
+
+/* ─────────────────────────────────────────────────────
+   GET AUTOCOMPLETE — Per-client Autocomplete_DB values
+   ───────────────────────────────────────────────────── */
+function handleGetAutocomplete_(clientSheetId, params) {
+  var ss = SpreadsheetApp.openById(clientSheetId);
+  var dbSh = ss.getSheetByName("Autocomplete_DB");
+  if (!dbSh || dbSh.getLastRow() < 2) {
+    return jsonResponse_({ sidemarks: [], vendors: [], descriptions: [] });
+  }
+  var data = dbSh.getRange(2, 1, dbSh.getLastRow() - 1, 2).getValues();
+  var sidemarks = [], vendors = [], descriptions = [];
+  for (var i = 0; i < data.length; i++) {
+    var field = String(data[i][0] || "").trim();
+    var val = String(data[i][1] || "").trim();
+    if (!val) continue;
+    if (field === "Sidemark") sidemarks.push(val);
+    else if (field === "Vendor") vendors.push(val);
+    else if (field === "Description") descriptions.push(val);
+  }
+  return jsonResponse_({ sidemarks: sidemarks, vendors: vendors, descriptions: descriptions });
+}
+
+/* ================================================================
+   Fix Missing Folders & Links — v26.5.0
+   Scans Inventory, Tasks, Repairs, Shipments, Will_Calls for rows
+   without hyperlinked IDs and creates missing Drive folders.
+   Mirrors StrideFixMissingFolders() from Utils.gs but headless.
+   ================================================================ */
+
+/**
+ * POST syncAutocompleteDb — Scan Inventory for unique Sidemark/Vendor/Description
+ * values and add them to the Autocomplete_DB sheet on each client.
+ * Direct endpoint (no scripts.run). Admin-only.
+ */
+/**
+ * POST updateHeaders / installTriggers — Proxy to each client's Web App doPost.
+ * Same mechanism as `npm run update-headers` / `npm run install-triggers`.
+ * Uses UrlFetchApp to POST to each client's webAppUrl (no scripts.run).
+ * Reads clients.json-equivalent data from CB Clients tab (webAppUrl column).
+ */
+/**
+ * POST updateHeaders / installTriggers — Proxy to each client's Web App doPost.
+ * Reads client webAppUrls from CLIENT_WEB_APPS Script Property (JSON map).
+ * If not set, falls back to reading "Web App URL" column from CB Clients tab.
+ * Run setupClientWebApps_() once from the Apps Script editor to populate the
+ * Script Property from clients.json data.
+ */
+/**
+ * POST healthCheck — Runs system health checks across all active clients.
+ * Opens each client spreadsheet directly and verifies tabs, settings, caches.
+ * Returns per-client pass/fail with human-readable fix instructions.
+ */
+function handleHealthCheck_() {
+  var cbId = prop_("CB_SPREADSHEET_ID");
+  if (!cbId) return errorResponse_("CB_SPREADSHEET_ID not configured", "CONFIG_ERROR");
+
+  var cbSS = SpreadsheetApp.openById(cbId);
+  var clientsSh = cbSS.getSheetByName("Clients");
+  if (!clientsSh) return errorResponse_("CB Clients tab not found", "CONFIG_ERROR");
+
+  var clientsData = clientsSh.getDataRange().getValues();
+  var cbHdr = clientsData[0].map(function(h) { return String(h).trim().toUpperCase(); });
+  var nameCol = cbHdr.indexOf("CLIENT NAME");
+  var idCol = cbHdr.indexOf("CLIENT SPREADSHEET ID");
+  var activeCol = cbHdr.indexOf("ACTIVE");
+  var emailCol = cbHdr.indexOf("CLIENT EMAIL");
+  var webAppCol = cbHdr.indexOf("WEB APP URL");
+
+  var REQUIRED_TABS = ["Inventory", "Tasks", "Repairs", "Shipments", "Will_Calls", "WC_Items", "Billing_Ledger", "Settings"];
+  var CACHE_TABS = ["Price_Cache", "Class_Cache", "Email_Template_Cache", "Location_Cache"];
+  var OPTIONAL_TABS = ["Autocomplete_DB", "Move_History"];
+
+  var results = [];
+
+  for (var ci = 1; ci < clientsData.length; ci++) {
+    var cName = nameCol >= 0 ? String(clientsData[ci][nameCol] || "").trim() : "";
+    var cId = idCol >= 0 ? String(clientsData[ci][idCol] || "").trim() : "";
+    var cEmail = emailCol >= 0 ? String(clientsData[ci][emailCol] || "").trim() : "";
+    var cWebApp = webAppCol >= 0 ? String(clientsData[ci][webAppCol] || "").trim() : "";
+    if (!cName || !cId) continue;
+    var cActive = activeCol >= 0 ? clientsData[ci][activeCol] : true;
+    if (cActive === false || String(cActive).toUpperCase() === "FALSE") continue;
+
+    var issues = [];
+    var checks = { requiredTabs: true, cacheTabs: true, settings: true, webAppUrl: true, email: true };
+
+    try {
+      var css = SpreadsheetApp.openById(cId);
+
+      // Check required tabs
+      var missingRequired = [];
+      for (var t = 0; t < REQUIRED_TABS.length; t++) {
+        if (!css.getSheetByName(REQUIRED_TABS[t])) missingRequired.push(REQUIRED_TABS[t]);
+      }
+      if (missingRequired.length > 0) {
+        checks.requiredTabs = false;
+        issues.push({
+          type: "error",
+          title: "Missing required tab" + (missingRequired.length > 1 ? "s" : "") + ": " + missingRequired.join(", "),
+          fix: "Go to Settings → Maintenance → click 'Update Headers'. This will create any missing tabs and columns."
+        });
+      }
+
+      // Check cache tabs
+      var missingCache = [];
+      for (var c = 0; c < CACHE_TABS.length; c++) {
+        if (!css.getSheetByName(CACHE_TABS[c])) missingCache.push(CACHE_TABS[c]);
+      }
+      if (missingCache.length > 0) {
+        checks.cacheTabs = false;
+        issues.push({
+          type: "warning",
+          title: "Missing cache tab" + (missingCache.length > 1 ? "s" : "") + ": " + missingCache.join(", "),
+          fix: "Go to Settings → Maintenance → click 'Refresh All Caches'. This copies pricing, class, email template, and location data from the master sheets."
+        });
+      }
+
+      // Check Autocomplete_DB
+      if (!css.getSheetByName("Autocomplete_DB")) {
+        issues.push({
+          type: "info",
+          title: "Autocomplete_DB tab not created yet",
+          fix: "Go to Settings → Maintenance → click 'Sync Autocomplete DB'. This scans inventory and builds the sidemark/vendor/description autocomplete list."
+        });
+      }
+
+      // Check Settings tab has key values
+      var settingsSh = css.getSheetByName("Settings");
+      if (settingsSh) {
+        var settingsData = settingsSh.getDataRange().getValues();
+        var settingsMap = {};
+        for (var s = 0; s < settingsData.length; s++) {
+          settingsMap[String(settingsData[s][0] || "").trim()] = String(settingsData[s][1] || "").trim();
+        }
+
+        if (!settingsMap["CLIENT_NAME"]) {
+          checks.settings = false;
+          issues.push({
+            type: "error",
+            title: "CLIENT_NAME not set in Settings tab",
+            fix: "Go to Settings → Clients → click this client → verify the client name is filled in → click Save & Sync."
+          });
+        }
+        if (!settingsMap["MASTER_SPREADSHEET_ID"]) {
+          checks.settings = false;
+          issues.push({
+            type: "error",
+            title: "MASTER_SPREADSHEET_ID not set in Settings tab",
+            fix: "Go to Settings → Clients → click this client → click Save & Sync. The master spreadsheet ID is synced automatically from Consolidated Billing."
+          });
+        }
+        if (!settingsMap["DRIVE_PARENT_FOLDER_ID"]) {
+          checks.settings = false;
+          issues.push({
+            type: "error",
+            title: "DRIVE_PARENT_FOLDER_ID not set — no Drive folders will be created",
+            fix: "Go to Settings → Clients → click this client → verify the Client Folder ID is set → click Save & Sync. If missing, the client may need to be re-onboarded."
+          });
+        }
+      }
+
+      // Check email
+      if (!cEmail) {
+        checks.email = false;
+        issues.push({
+          type: "warning",
+          title: "No client email address configured",
+          fix: "Go to Settings → Clients → click this client → add their email address → Save & Sync. Without an email, the client won't receive shipment notifications, repair quotes, or will call documents."
+        });
+      }
+
+      // Check Web App URL
+      if (!cWebApp) {
+        checks.webAppUrl = false;
+        issues.push({
+          type: "warning",
+          title: "Web App URL not set — Update Headers and Install Triggers won't work from the app",
+          fix: "Run 'npm run deploy-clients' from the terminal. This automatically deploys the client's Web App and syncs the URL to this sheet. Or paste the URL manually in Settings → Clients → Edit → Web App URL field."
+        });
+      }
+
+      // Check inventory row count
+      var invSh = css.getSheetByName("Inventory");
+      var invCount = invSh ? Math.max(invSh.getLastRow() - 1, 0) : 0;
+
+      results.push({
+        name: cName,
+        spreadsheetId: cId,
+        passed: issues.filter(function(i) { return i.type === "error"; }).length === 0,
+        issueCount: issues.length,
+        errorCount: issues.filter(function(i) { return i.type === "error"; }).length,
+        warningCount: issues.filter(function(i) { return i.type === "warning"; }).length,
+        infoCount: issues.filter(function(i) { return i.type === "info"; }).length,
+        inventoryCount: invCount,
+        issues: issues
+      });
+
+    } catch (err) {
+      results.push({
+        name: cName,
+        spreadsheetId: cId,
+        passed: false,
+        issueCount: 1,
+        errorCount: 1,
+        warningCount: 0,
+        infoCount: 0,
+        inventoryCount: 0,
+        issues: [{
+          type: "error",
+          title: "Cannot open spreadsheet: " + String(err.message || err),
+          fix: "Check that the Client Spreadsheet ID in Consolidated Billing → Clients tab is correct and the spreadsheet hasn't been deleted or moved."
+        }]
+      });
+    }
+  }
+
+  var totalPassed = results.filter(function(r) { return r.passed; }).length;
+
+  return jsonResponse_({
+    success: true,
+    clientsChecked: results.length,
+    passed: totalPassed,
+    failed: results.length - totalPassed,
+    results: results
+  });
+}
+
+function handleRemoteAction_(payload, action) {
+  // Read webAppUrl map: first try Script Property, then CB Clients column
+  var webAppMap = {};
+  var rawMap = prop_("CLIENT_WEB_APPS");
+  if (rawMap) {
+    try { webAppMap = JSON.parse(rawMap); } catch (_) {}
+  }
+
+  var cbId = prop_("CB_SPREADSHEET_ID");
+  if (!cbId) return errorResponse_("CB_SPREADSHEET_ID not configured", "CONFIG_ERROR");
+
+  var cbSS = SpreadsheetApp.openById(cbId);
+  var clientsSh = cbSS.getSheetByName("Clients");
+  if (!clientsSh) return errorResponse_("CB Clients tab not found", "CONFIG_ERROR");
+
+  var clientsData = clientsSh.getDataRange().getValues();
+  var cbHdr = clientsData[0].map(function(h) { return String(h).trim().toUpperCase(); });
+  var nameCol = cbHdr.indexOf("CLIENT NAME");
+  var idCol = cbHdr.indexOf("CLIENT SPREADSHEET ID");
+  var activeCol = cbHdr.indexOf("ACTIVE");
+  var webAppCol = cbHdr.indexOf("WEB APP URL");
+
+  var filterIds = Array.isArray(payload.clientSheetIds) ? payload.clientSheetIds : [];
+  var token = prop_("API_TOKEN") || "";
+  var results = [];
+
+  for (var ci = 1; ci < clientsData.length; ci++) {
+    var cName = nameCol >= 0 ? String(clientsData[ci][nameCol] || "").trim() : "";
+    var cId = idCol >= 0 ? String(clientsData[ci][idCol] || "").trim() : "";
+    if (!cName || !cId) continue;
+    var cActive = activeCol >= 0 ? clientsData[ci][activeCol] : true;
+    if (cActive === false || String(cActive).toUpperCase() === "FALSE") continue;
+    if (filterIds.length > 0 && filterIds.indexOf(cId) === -1) continue;
+
+    // Look up webAppUrl: Script Property map (by spreadsheetId or name) → CB column → skip
+    var webAppUrl = webAppMap[cId] || webAppMap[cName] || "";
+    if (!webAppUrl && webAppCol >= 0) webAppUrl = String(clientsData[ci][webAppCol] || "").trim();
+
+    if (!webAppUrl) {
+      results.push({ name: cName, ok: false, error: "No Web App URL. Run setupClientWebApps_() from Apps Script editor or add 'Web App URL' column to CB Clients." });
+      continue;
+    }
+
+    try {
+      var resp = UrlFetchApp.fetch(webAppUrl, {
+        method: "post",
+        contentType: "application/json",
+        payload: JSON.stringify({ action: action, token: token }),
+        muteHttpExceptions: true,
+        followRedirects: true
+      });
+      var code = resp.getResponseCode();
+      if (code >= 200 && code < 400) {
+        var body;
+        try { body = JSON.parse(resp.getContentText()); } catch (_) { body = {}; }
+        results.push({ name: cName, ok: body.ok !== false, message: body.message || "OK" });
+      } else {
+        results.push({ name: cName, ok: false, error: "HTTP " + code + ": " + resp.getContentText().substring(0, 200) });
+      }
+      Utilities.sleep(500);
+    } catch (err) {
+      results.push({ name: cName, ok: false, error: String(err.message || err) });
+    }
+  }
+
+  var succeeded = results.filter(function(r) { return r.ok; }).length;
+  return jsonResponse_({
+    success: true,
+    action: action,
+    succeeded: succeeded,
+    failed: results.length - succeeded,
+    results: results
+  });
+}
+
+/**
+ * One-time setup: copies webAppUrls from clients.json into a Script Property.
+ * Run this from the Apps Script editor after npm run deploy-clients.
+ * Payload: { clients: [{ spreadsheetId: "...", webAppUrl: "..." }, ...] }
+ * Or run without payload to read from an existing CLIENT_WEB_APPS property.
+ */
+function setupClientWebApps_(payload) {
+  if (payload && payload.clients) {
+    var map = {};
+    for (var i = 0; i < payload.clients.length; i++) {
+      var c = payload.clients[i];
+      if (c.spreadsheetId && c.webAppUrl) map[c.spreadsheetId] = c.webAppUrl;
+    }
+    PropertiesService.getScriptProperties().setProperty("CLIENT_WEB_APPS", JSON.stringify(map));
+    return { ok: true, count: Object.keys(map).length };
+  }
+  var existing = PropertiesService.getScriptProperties().getProperty("CLIENT_WEB_APPS");
+  return { ok: true, existing: existing ? JSON.parse(existing) : {} };
+}
+
+function handleSyncAutocompleteDb_(payload) {
+  var cbId = prop_("CB_SPREADSHEET_ID");
+  if (!cbId) return errorResponse_("CB_SPREADSHEET_ID not configured", "CONFIG_ERROR");
+
+  var cbSS = SpreadsheetApp.openById(cbId);
+  var clientsSh = cbSS.getSheetByName("Clients");
+  if (!clientsSh) return errorResponse_("CB Clients tab not found", "CONFIG_ERROR");
+
+  var clientsData = clientsSh.getDataRange().getValues();
+  var cbHdr = clientsData[0].map(function(h) { return String(h).trim(); });
+  var nameCol = cbHdr.indexOf("Client Name");
+  var idCol = cbHdr.indexOf("Client Spreadsheet ID");
+  var activeCol = cbHdr.indexOf("Active");
+
+  var results = [];
+  var ACDB_FIELDS = ["Sidemark", "Vendor", "Description"];
+
+  for (var ci = 1; ci < clientsData.length; ci++) {
+    var cName = nameCol >= 0 ? String(clientsData[ci][nameCol] || "").trim() : "";
+    var cId = idCol >= 0 ? String(clientsData[ci][idCol] || "").trim() : "";
+    if (!cName || !cId) continue;
+    var cActive = activeCol >= 0 ? clientsData[ci][activeCol] : true;
+    if (cActive === false || cActive === "FALSE") continue;
+
+    // Filter by payload.clientSheetIds if provided
+    if (payload && payload.clientSheetIds && Array.isArray(payload.clientSheetIds) && payload.clientSheetIds.length > 0) {
+      if (payload.clientSheetIds.indexOf(cId) === -1) continue;
+    }
+
+    try {
+      var css = SpreadsheetApp.openById(cId);
+      var invSh = css.getSheetByName("Inventory");
+      if (!invSh || invSh.getLastRow() < 2) {
+        results.push({ name: cName, ok: true, added: 0, message: "No inventory data" });
+        continue;
+      }
+
+      var invMap = api_getHeaderMap_(invSh);
+      var invData = invSh.getRange(2, 1, invSh.getLastRow() - 1, invSh.getLastColumn()).getValues();
+
+      // Collect unique values
+      var newValues = {};
+      for (var f = 0; f < ACDB_FIELDS.length; f++) newValues[ACDB_FIELDS[f]] = {};
+      for (var i = 0; i < invData.length; i++) {
+        for (var f2 = 0; f2 < ACDB_FIELDS.length; f2++) {
+          var field = ACDB_FIELDS[f2];
+          var col = invMap[field];
+          if (!col) continue;
+          var val = String(invData[i][col - 1] || "").trim();
+          if (val) newValues[field][val] = true;
+        }
+      }
+
+      // Ensure Autocomplete_DB sheet exists
+      var dbSh = css.getSheetByName("Autocomplete_DB");
+      if (!dbSh) {
+        dbSh = css.insertSheet("Autocomplete_DB");
+        dbSh.getRange(1, 1, 1, 2).setValues([["Field", "Value"]]);
+      }
+
+      // Read existing DB
+      var dbData = dbSh.getLastRow() >= 2 ? dbSh.getRange(2, 1, dbSh.getLastRow() - 1, 2).getValues() : [];
+      var existing = {};
+      for (var d = 0; d < dbData.length; d++) {
+        var dk = String(dbData[d][0] || "").trim() + "|" + String(dbData[d][1] || "").trim();
+        existing[dk] = true;
+      }
+
+      // Add new values
+      var added = 0;
+      var newRows = [];
+      for (var f3 = 0; f3 < ACDB_FIELDS.length; f3++) {
+        var fld = ACDB_FIELDS[f3];
+        for (var v in newValues[fld]) {
+          var key = fld + "|" + v;
+          if (!existing[key]) {
+            newRows.push([fld, v]);
+            existing[key] = true;
+            added++;
+          }
+        }
+      }
+      if (newRows.length > 0) {
+        var startRow = dbSh.getLastRow() + 1;
+        dbSh.getRange(startRow, 1, newRows.length, 2).setValues(newRows);
+      }
+
+      results.push({ name: cName, ok: true, added: added });
+    } catch (err) {
+      results.push({ name: cName, ok: false, error: String(err.message || err) });
+    }
+  }
+
+  var succeeded = results.filter(function(r) { return r.ok; }).length;
+  var totalAdded = results.reduce(function(s, r) { return s + (r.added || 0); }, 0);
+
+  return jsonResponse_({
+    success: true,
+    succeeded: succeeded,
+    failed: results.length - succeeded,
+    totalAdded: totalAdded,
+    results: results
+  });
+}
+
+function handleFixMissingFolders_(payload) {
+  var clientSheetId = String(payload.clientSheetId || "").trim();
+  if (!clientSheetId) return errorResponse_("clientSheetId is required", "INVALID_PARAMS");
+
+  var ss;
+  try { ss = SpreadsheetApp.openById(clientSheetId); }
+  catch (e) { return errorResponse_("Cannot open spreadsheet: " + e.message, "NOT_FOUND"); }
+
+  var settings = api_readSettings_(ss);
+  var photosId = settings["PHOTOS_FOLDER_ID"] || settings["DRIVE_PARENT_FOLDER_ID"] || "";
+  if (!photosId) return errorResponse_("PHOTOS_FOLDER_ID is not set in client Settings", "CONFIG_ERROR");
+  var photosUrl = "https://drive.google.com/drive/folders/" + photosId;
+
+  var fixed = { inventory: 0, tasks: 0, repairs: 0, shipments: 0, willCalls: 0, wcItems: 0 };
+
+  // --- Fix Inventory: Item ID + Shipment # hyperlinks ---
+  var inv = ss.getSheetByName("Inventory");
+  if (inv && inv.getLastRow() >= 2) {
+    var invMap = api_getHeaderMap_(inv);
+    var shipCol = invMap["Shipment #"];
+    var itemIdCol = invMap["Item ID"];
+    if (shipCol && itemIdCol) {
+      var invLr = api_getLastDataRow_(inv);
+      for (var i = 2; i <= invLr; i++) {
+        try {
+          var itemIdVal = String(inv.getRange(i, itemIdCol).getValue() || "").trim();
+          if (!itemIdVal) continue;
+          var idRt = inv.getRange(i, itemIdCol).getRichTextValue();
+          if (!idRt || !idRt.getLinkUrl()) {
+            var itemFolderUrl = api_createItemFolder_(photosUrl, itemIdVal);
+            if (itemFolderUrl) {
+              inv.getRange(i, itemIdCol).setRichTextValue(
+                SpreadsheetApp.newRichTextValue().setText(itemIdVal).setLinkUrl(itemFolderUrl).build()
+              );
+              fixed.inventory++;
+            }
+          }
+          var shipRt = inv.getRange(i, shipCol).getRichTextValue();
+          if (!shipRt || !shipRt.getLinkUrl()) {
+            var shipVal = String(inv.getRange(i, shipCol).getValue() || "").trim();
+            if (shipVal) {
+              var shipFolderUrl = api_createItemFolder_(photosUrl, shipVal);
+              if (shipFolderUrl) {
+                inv.getRange(i, shipCol).setRichTextValue(
+                  SpreadsheetApp.newRichTextValue().setText(shipVal).setLinkUrl(shipFolderUrl).build()
+                );
+              }
+            }
+          }
+        } catch (_) {}
+      }
+    }
+  }
+
+  // --- Fix Tasks: Task ID + Item ID + Shipment # hyperlinks ---
+  var taskSh = ss.getSheetByName("Tasks");
+  if (taskSh && taskSh.getLastRow() >= 2) {
+    var taskMap = api_getHeaderMap_(taskSh);
+    var taskIdCol = taskMap["Task ID"];
+    var taskItemIdCol = taskMap["Item ID"];
+    var taskShipCol = taskMap["Shipment #"];
+    var taskLr = api_getLastDataRow_(taskSh);
+    for (var t = 2; t <= taskLr; t++) {
+      try {
+        if (taskIdCol) {
+          var tIdVal = String(taskSh.getRange(t, taskIdCol).getValue() || "").trim();
+          if (tIdVal) {
+            var tRt = taskSh.getRange(t, taskIdCol).getRichTextValue();
+            if (!tRt || !tRt.getLinkUrl()) {
+              var taskFolderUrl = api_createItemFolder_(photosUrl, "TASK-" + tIdVal);
+              if (taskFolderUrl) {
+                taskSh.getRange(t, taskIdCol).setRichTextValue(
+                  SpreadsheetApp.newRichTextValue().setText(tIdVal).setLinkUrl(taskFolderUrl).build()
+                );
+                fixed.tasks++;
+              }
+            }
+          }
+        }
+        if (taskItemIdCol) {
+          var tItemVal = String(taskSh.getRange(t, taskItemIdCol).getValue() || "").trim();
+          if (tItemVal) {
+            var tItemRt = taskSh.getRange(t, taskItemIdCol).getRichTextValue();
+            if (!tItemRt || !tItemRt.getLinkUrl()) {
+              var tItemUrl = api_createItemFolder_(photosUrl, tItemVal);
+              if (tItemUrl) {
+                taskSh.getRange(t, taskItemIdCol).setRichTextValue(
+                  SpreadsheetApp.newRichTextValue().setText(tItemVal).setLinkUrl(tItemUrl).build()
+                );
+              }
+            }
+          }
+        }
+        if (taskShipCol) {
+          var tShipVal = String(taskSh.getRange(t, taskShipCol).getValue() || "").trim();
+          if (tShipVal) {
+            var tShipRt = taskSh.getRange(t, taskShipCol).getRichTextValue();
+            if (!tShipRt || !tShipRt.getLinkUrl()) {
+              var tShipUrl = api_createItemFolder_(photosUrl, tShipVal);
+              if (tShipUrl) {
+                taskSh.getRange(t, taskShipCol).setRichTextValue(
+                  SpreadsheetApp.newRichTextValue().setText(tShipVal).setLinkUrl(tShipUrl).build()
+                );
+              }
+            }
+          }
+        }
+      } catch (_) {}
+    }
+  }
+
+  // --- Fix Repairs: Repair ID + Item ID + Shipment # hyperlinks ---
+  var repairSh = ss.getSheetByName("Repairs");
+  if (repairSh && repairSh.getLastRow() >= 2) {
+    var repairMap = api_getHeaderMap_(repairSh);
+    var repairIdCol = repairMap["Repair ID"];
+    var repairItemIdCol = repairMap["Item ID"];
+    var repairShipCol = repairMap["Shipment #"];
+    var repairLr = api_getLastDataRow_(repairSh);
+    for (var rr = 2; rr <= repairLr; rr++) {
+      try {
+        if (repairIdCol) {
+          var rIdVal = String(repairSh.getRange(rr, repairIdCol).getValue() || "").trim();
+          if (rIdVal) {
+            var rRt = repairSh.getRange(rr, repairIdCol).getRichTextValue();
+            if (!rRt || !rRt.getLinkUrl()) {
+              var repairFolderUrl = api_createItemFolder_(photosUrl, "REPAIR-" + rIdVal);
+              if (repairFolderUrl) {
+                repairSh.getRange(rr, repairIdCol).setRichTextValue(
+                  SpreadsheetApp.newRichTextValue().setText(rIdVal).setLinkUrl(repairFolderUrl).build()
+                );
+                fixed.repairs++;
+              }
+            }
+          }
+        }
+        if (repairItemIdCol) {
+          var rItemVal = String(repairSh.getRange(rr, repairItemIdCol).getValue() || "").trim();
+          if (rItemVal) {
+            var rItemRt = repairSh.getRange(rr, repairItemIdCol).getRichTextValue();
+            if (!rItemRt || !rItemRt.getLinkUrl()) {
+              var rItemUrl = api_createItemFolder_(photosUrl, rItemVal);
+              if (rItemUrl) {
+                repairSh.getRange(rr, repairItemIdCol).setRichTextValue(
+                  SpreadsheetApp.newRichTextValue().setText(rItemVal).setLinkUrl(rItemUrl).build()
+                );
+              }
+            }
+          }
+        }
+        if (repairShipCol) {
+          var rShipVal = String(repairSh.getRange(rr, repairShipCol).getValue() || "").trim();
+          if (rShipVal) {
+            var rShipRt = repairSh.getRange(rr, repairShipCol).getRichTextValue();
+            if (!rShipRt || !rShipRt.getLinkUrl()) {
+              var rShipUrl = api_createItemFolder_(photosUrl, rShipVal);
+              if (rShipUrl) {
+                repairSh.getRange(rr, repairShipCol).setRichTextValue(
+                  SpreadsheetApp.newRichTextValue().setText(rShipVal).setLinkUrl(rShipUrl).build()
+                );
+              }
+            }
+          }
+        }
+      } catch (_) {}
+    }
+  }
+
+  // --- Fix Shipments: Shipment # hyperlinks ---
+  var shipSh = ss.getSheetByName("Shipments");
+  if (shipSh && shipSh.getLastRow() >= 2) {
+    var shipMap = api_getHeaderMap_(shipSh);
+    var shipFixCol = shipMap["Shipment #"];
+    if (shipFixCol) {
+      var shipLr = api_getLastDataRow_(shipSh);
+      for (var sf = 2; sf <= shipLr; sf++) {
+        try {
+          var sfVal = String(shipSh.getRange(sf, shipFixCol).getValue() || "").trim();
+          if (!sfVal) continue;
+          var sfRt = shipSh.getRange(sf, shipFixCol).getRichTextValue();
+          if (sfRt && sfRt.getLinkUrl()) continue;
+          var sfUrl = api_createItemFolder_(photosUrl, sfVal);
+          if (sfUrl) {
+            shipSh.getRange(sf, shipFixCol).setRichTextValue(
+              SpreadsheetApp.newRichTextValue().setText(sfVal).setLinkUrl(sfUrl).build()
+            );
+            fixed.shipments++;
+          }
+        } catch (_) {}
+      }
+    }
+  }
+
+  // --- Fix Will Calls: WC Number hyperlinks ---
+  var wcSh = ss.getSheetByName("Will_Calls");
+  if (wcSh && wcSh.getLastRow() >= 2) {
+    var wcMap = api_getHeaderMap_(wcSh);
+    var wcNumCol = wcMap["WC Number"];
+    if (wcNumCol) {
+      var wcLr = api_getLastDataRow_(wcSh);
+      for (var wc = 2; wc <= wcLr; wc++) {
+        try {
+          var wcVal = String(wcSh.getRange(wc, wcNumCol).getValue() || "").trim();
+          if (!wcVal) continue;
+          var wcRt = wcSh.getRange(wc, wcNumCol).getRichTextValue();
+          if (wcRt && wcRt.getLinkUrl()) continue;
+          var wcFolderUrl = api_createItemFolder_(photosUrl, "WC-" + wcVal);
+          if (wcFolderUrl) {
+            wcSh.getRange(wc, wcNumCol).setRichTextValue(
+              SpreadsheetApp.newRichTextValue().setText(wcVal).setLinkUrl(wcFolderUrl).build()
+            );
+            fixed.willCalls++;
+          }
+        } catch (_) {}
+      }
+    }
+  }
+
+  // --- Fix WC_Items: WC Number hyperlinks (match Will_Calls) ---
+  var wciSh = ss.getSheetByName("WC_Items");
+  if (wciSh && wcSh && wciSh.getLastRow() >= 2) {
+    var wciMap = api_getHeaderMap_(wciSh);
+    var wciWcCol = wciMap["WC Number"];
+    if (wciWcCol) {
+      var wcFolderLookup = {};
+      var wcMap2 = api_getHeaderMap_(wcSh);
+      var wcNumCol2 = wcMap2["WC Number"];
+      if (wcNumCol2) {
+        var wcLr2 = api_getLastDataRow_(wcSh);
+        for (var wl = 2; wl <= wcLr2; wl++) {
+          var wcNum2 = String(wcSh.getRange(wl, wcNumCol2).getValue() || "").trim();
+          var wcRt2 = wcSh.getRange(wl, wcNumCol2).getRichTextValue();
+          if (wcNum2 && wcRt2 && wcRt2.getLinkUrl()) wcFolderLookup[wcNum2] = wcRt2.getLinkUrl();
+        }
+      }
+      var wciLr = api_getLastDataRow_(wciSh);
+      for (var wi = 2; wi <= wciLr; wi++) {
+        try {
+          var wciVal = String(wciSh.getRange(wi, wciWcCol).getValue() || "").trim();
+          if (!wciVal) continue;
+          var wciRt = wciSh.getRange(wi, wciWcCol).getRichTextValue();
+          if (wciRt && wciRt.getLinkUrl()) continue;
+          var wcUrl = wcFolderLookup[wciVal];
+          if (wcUrl) {
+            wciSh.getRange(wi, wciWcCol).setRichTextValue(
+              SpreadsheetApp.newRichTextValue().setText(wciVal).setLinkUrl(wcUrl).build()
+            );
+            fixed.wcItems++;
+          }
+        } catch (_) {}
+      }
+    }
+  }
+
+  var total = fixed.inventory + fixed.tasks + fixed.repairs + fixed.shipments + fixed.willCalls + fixed.wcItems;
+  return jsonResponse_({
+    success: true,
+    fixed: fixed,
+    total: total,
+    message: total > 0 ? ("Fixed " + total + " missing folder links") : "All folder links are already in place"
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// AUTO-GENERATED ITEM IDS  (v27.0.0)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ─── Move History ──────────────────────────────────────────────────────────────
+
+var MOVE_HISTORY_HEADERS_ = ["Timestamp", "User", "Item ID", "From Location", "To Location", "Type"];
+
+/**
+ * Ensure "Move History" tab exists on a spreadsheet. Auto-creates with headers
+ * if missing. Non-destructively adds "Type" column if tab exists but lacks it.
+ * @param {Spreadsheet} ss
+ * @returns {Sheet}
+ */
+function api_ensureMoveHistorySheet_(ss) {
+  var sh = ss.getSheetByName("Move History");
+  if (!sh) {
+    sh = ss.insertSheet("Move History");
+    sh.getRange(1, 1, 1, MOVE_HISTORY_HEADERS_.length).setValues([MOVE_HISTORY_HEADERS_]);
+    sh.setFrozenRows(1);
+    sh.getRange(1, 1, 1, MOVE_HISTORY_HEADERS_.length)
+      .setFontWeight("bold")
+      .setBackground("#f3f3f3");
+    return sh;
+  }
+  // Non-destructive: add "Type" column if missing
+  var hdrs = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
+  var hasType = false;
+  for (var h = 0; h < hdrs.length; h++) {
+    if (String(hdrs[h]).trim() === "Type") { hasType = true; break; }
+  }
+  if (!hasType) {
+    var typeCol = hdrs.length + 1;
+    sh.getRange(1, typeCol).setValue("Type").setFontWeight("bold").setBackground("#f3f3f3");
+  }
+  return sh;
+}
+
+/**
+ * Log transfer move history rows for a list of item IDs.
+ * @param {Spreadsheet} ss - The client spreadsheet to log into
+ * @param {string[]} itemIds - Item IDs to log
+ * @param {string} userEmail - Who performed the transfer
+ * @param {string} fromLabel - "From Location" value (source client name)
+ * @param {string} toLabel - "To Location" value (destination client name or "Transferred to: X")
+ * @param {string} moveType - "Transfer"
+ */
+function api_logTransferMoveHistory_(ss, itemIds, userEmail, fromLabel, toLabel, moveType) {
+  if (!itemIds || !itemIds.length) return;
+  var sh = api_ensureMoveHistorySheet_(ss);
+  var now = new Date();
+  var rows = [];
+  for (var i = 0; i < itemIds.length; i++) {
+    rows.push([now, userEmail || "", itemIds[i], fromLabel || "", toLabel || "", moveType || "Transfer"]);
+  }
+  var lastRow = sh.getLastRow();
+  sh.getRange(lastRow + 1, 1, rows.length, 6).setValues(rows);
+}
+
+/**
+ * GET handler: Read move history for a specific item from the client sheet's
+ * "Move History" tab. Returns type field (defaults to "Location" if missing).
+ * @param {string} clientSheetId
+ * @param {object} params - must include params.itemId
+ * @returns {ContentService.TextOutput}
+ */
+function handleGetItemMoveHistory_(clientSheetId, params) {
+  var itemId = String(params.itemId || "").trim();
+  if (!itemId) return errorResponse_("itemId is required", "VALIDATION_ERROR");
+
+  var ss = SpreadsheetApp.openById(clientSheetId);
+  var sh = ss.getSheetByName("Move History");
+  if (!sh || sh.getLastRow() < 2) {
+    return jsonResponse_({ moves: [] });
+  }
+
+  var numCols = Math.min(sh.getLastColumn(), 6);
+  var data = sh.getRange(2, 1, sh.getLastRow() - 1, numCols).getDisplayValues();
+  var moves = [];
+  for (var i = 0; i < data.length; i++) {
+    if (String(data[i][2]).trim() === itemId) {
+      moves.push({
+        timestamp:    data[i][0],
+        user:         data[i][1],
+        itemId:       data[i][2],
+        fromLocation: data[i][3],
+        toLocation:   data[i][4],
+        type:         (numCols >= 6 && data[i][5]) ? data[i][5] : "Location"
+      });
+    }
+  }
+  return jsonResponse_({ moves: moves });
+}
+
+// ─── Auto-Generated Item IDs ──────────────────────────────────────────────────
+
+/**
+ * Read the AUTO_GENERATE_ITEM_IDS setting from CB Settings tab.
+ * Returns { enabled: true/false }.
+ */
+function handleGetAutoIdSetting_() {
+  var cbId = prop_("CB_SPREADSHEET_ID");
+  if (!cbId) return errorResponse_("CB_SPREADSHEET_ID not configured", "CONFIG_ERROR");
+  var cbSS = SpreadsheetApp.openById(cbId);
+  var settings = api_readSettings_(cbSS);
+  var raw = String(settings["AUTO_GENERATE_ITEM_IDS"] || "FALSE").trim().toUpperCase();
+  return jsonResponse_({ enabled: raw === "TRUE" });
+}
+
+/**
+ * Atomically allocate the next Item ID from the CB Settings NEXT_ITEM_ID counter.
+ * Uses LockService to prevent duplicate IDs when two staff receive simultaneously.
+ *
+ * Accepts optional query param `count` (default 1) to reserve a batch of IDs at once.
+ * Returns { itemId: "80000" } for single, or { itemIds: ["80000","80001",...] } for batch.
+ */
+function handleGetNextItemId_() {
+  // Check auto-gen is enabled
+  var cbId = prop_("CB_SPREADSHEET_ID");
+  if (!cbId) return errorResponse_("CB_SPREADSHEET_ID not configured", "CONFIG_ERROR");
+
+  var lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(10000); // 10 second timeout
+  } catch (lockErr) {
+    return errorResponse_(
+      "Another user is processing a shipment, please try again shortly",
+      "LOCK_ERROR"
+    );
+  }
+
+  try {
+    var cbSS = SpreadsheetApp.openById(cbId);
+    var settingsSheet = cbSS.getSheetByName("Settings");
+    if (!settingsSheet) return errorResponse_("CB Settings tab not found", "CONFIG_ERROR");
+
+    // Find the NEXT_ITEM_ID row by scanning column A
+    var data = settingsSheet.getDataRange().getValues();
+    var targetRow = -1;
+    for (var i = 0; i < data.length; i++) {
+      if (String(data[i][0] || "").trim() === "NEXT_ITEM_ID") {
+        targetRow = i + 1; // 1-based row
+        break;
+      }
+    }
+    if (targetRow < 0) {
+      return errorResponse_(
+        "NEXT_ITEM_ID not found in CB Settings tab. Add a row with key NEXT_ITEM_ID and starting value (e.g. 80000).",
+        "CONFIG_ERROR"
+      );
+    }
+
+    var currentVal = parseInt(data[targetRow - 1][1], 10);
+    if (isNaN(currentVal) || currentVal < 1) {
+      return errorResponse_("NEXT_ITEM_ID has invalid value: " + data[targetRow - 1][1], "CONFIG_ERROR");
+    }
+
+    // Allocate the ID and increment
+    var allocatedId = String(currentVal);
+    settingsSheet.getRange(targetRow, 2).setValue(currentVal + 1);
+    SpreadsheetApp.flush(); // ensure write is committed before releasing lock
+
+    return jsonResponse_({ itemId: allocatedId });
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/**
+ * Update the AUTO_GENERATE_ITEM_IDS setting in CB Settings tab.
+ * Payload: { enabled: true/false }
+ * Admin-only (enforced by router guard).
+ */
+function handleUpdateAutoIdSetting_(payload) {
+  var enabled = payload.enabled;
+  if (typeof enabled !== "boolean") {
+    return errorResponse_("'enabled' must be a boolean", "INVALID_BODY");
+  }
+
+  var cbId = prop_("CB_SPREADSHEET_ID");
+  if (!cbId) return errorResponse_("CB_SPREADSHEET_ID not configured", "CONFIG_ERROR");
+  var cbSS = SpreadsheetApp.openById(cbId);
+  var settingsSheet = cbSS.getSheetByName("Settings");
+  if (!settingsSheet) return errorResponse_("CB Settings tab not found", "CONFIG_ERROR");
+
+  var data = settingsSheet.getDataRange().getValues();
+  var targetRow = -1;
+  for (var i = 0; i < data.length; i++) {
+    if (String(data[i][0] || "").trim() === "AUTO_GENERATE_ITEM_IDS") {
+      targetRow = i + 1;
+      break;
+    }
+  }
+
+  var newValue = enabled ? "TRUE" : "FALSE";
+
+  if (targetRow < 0) {
+    // Setting doesn't exist yet — append it
+    var lastRow = settingsSheet.getLastRow();
+    settingsSheet.getRange(lastRow + 1, 1).setValue("AUTO_GENERATE_ITEM_IDS");
+    settingsSheet.getRange(lastRow + 1, 2).setValue(newValue);
+  } else {
+    settingsSheet.getRange(targetRow, 2).setValue(newValue);
+  }
+
+  SpreadsheetApp.flush();
+  return jsonResponse_({ success: true, enabled: enabled });
+}
+
+// ─── Stax Payments — Read Endpoints (v29.8.0) ─────────────────────────────
+
+/**
+ * Open the Stax Auto-Pay spreadsheet using STAX_SPREADSHEET_ID from CB Settings.
+ * Returns the SpreadsheetApp object or throws a descriptive error.
+ */
+function getStaxSpreadsheet_() {
+  var cbId = prop_("CB_SPREADSHEET_ID");
+  if (!cbId) throw new Error("CB_SPREADSHEET_ID not configured in Script Properties");
+  var cbSS = SpreadsheetApp.openById(cbId);
+  var settings = api_readSettings_(cbSS);
+  var staxId = String(settings["STAX_SPREADSHEET_ID"] || "").trim();
+  if (!staxId) throw new Error("STAX_SPREADSHEET_ID not found in CB Settings tab. Add a row with key STAX_SPREADSHEET_ID and the Stax spreadsheet ID as value.");
+  return SpreadsheetApp.openById(staxId);
+}
+
+/**
+ * GET getStaxInvoices — Read all rows from the Invoices tab.
+ * Returns { invoices: [...], count: N }
+ */
+function handleGetStaxInvoices_() {
+  var ss = getStaxSpreadsheet_();
+  var sheet = ss.getSheetByName("Invoices");
+  if (!sheet) return jsonResponse_({ invoices: [], count: 0 });
+
+  // v38.10.0: Build payment method status map from Customers tab (no API calls)
+  var pmStatusMap = {}; // staxCustId → "has_pm" | "no_pm"
+  var custSheet = ss.getSheetByName("Customers");
+  if (custSheet) {
+    var custRows = sheetToObjects_(custSheet);
+    for (var ci = 0; ci < custRows.length; ci++) {
+      var cr = custRows[ci];
+      var cid = String(cr["Stax Customer ID"] || "").trim();
+      var pm = String(cr["Payment Method"] || "").trim();
+      if (cid) pmStatusMap[cid] = pm ? "has_pm" : "no_pm";
+    }
+  }
+
+  var rows = sheetToObjects_(sheet);
+  var invoices = rows.map(function(r, idx) {
+    var staxCustId = String(r["Stax Customer ID"] || "");
+    return {
+      rowIndex:     idx + 2, // 1-based sheet row (header is row 1)
+      qbInvoice:    String(r["QB Invoice #"] || ""),
+      customer:     String(r["QB Customer Name"] || ""),
+      staxCustomerId: staxCustId,
+      invoiceDate:  formatDate_(r["Invoice Date"]),
+      dueDate:      formatDate_(r["Due Date"]),
+      amount:       toNum_(r["Total Amount"]) || 0,
+      lineItemsJson: String(r["Line Items JSON"] || ""),
+      staxId:       String(r["Stax Invoice ID"] || ""),
+      status:       String(r["Status"] || ""),
+      createdAt:    formatDate_(r["Created At"]),
+      notes:        String(r["Notes"] || ""),
+      isTest:       String(r["Is Test"] || "").toUpperCase() === "TRUE",
+      autoCharge:   !(String(r["Auto Charge"] || "").toUpperCase() === "FALSE" || String(r["Auto Charge"] || "").toUpperCase() === "NO" || String(r["Auto Charge"] || "").toUpperCase() === "OFF"),
+      paymentMethodStatus: staxCustId ? (pmStatusMap[staxCustId] || "unknown") : "no_customer"
+    };
+  });
+  return jsonResponse_({ invoices: invoices, count: invoices.length });
+}
+
+/**
+ * GET getStaxChargeLog — Read all rows from the Charge Log tab.
+ * Returns { charges: [...], count: N }
+ */
+function handleGetStaxChargeLog_() {
+  var ss = getStaxSpreadsheet_();
+  var sheet = ss.getSheetByName("Charge Log");
+  if (!sheet) return jsonResponse_({ charges: [], count: 0 });
+  var rows = sheetToObjects_(sheet);
+  var charges = rows.map(function(r) {
+    return {
+      timestamp:    formatDate_(r["Timestamp"]),
+      qbInvoice:    String(r["QB Invoice #"] || ""),
+      staxInvoiceId: String(r["Stax Invoice ID"] || ""),
+      staxCustomerId: String(r["Stax Customer ID"] || ""),
+      customer:     String(r["Customer Name"] || ""),
+      amount:       toNum_(r["Amount"]) || 0,
+      status:       String(r["Status"] || ""),
+      txnId:        String(r["Stax Transaction ID"] || ""),
+      notes:        String(r["Notes"] || "")
+    };
+  });
+  return jsonResponse_({ charges: charges, count: charges.length });
+}
+
+/**
+ * GET getStaxExceptions — Read all rows from the Exceptions tab.
+ * Returns { exceptions: [...], count: N, unresolvedCount: N }
+ */
+function handleGetStaxExceptions_() {
+  var ss = getStaxSpreadsheet_();
+  var sheet = ss.getSheetByName("Exceptions");
+  if (!sheet) return jsonResponse_({ exceptions: [], count: 0, unresolvedCount: 0 });
+  var rows = sheetToObjects_(sheet);
+  var unresolved = 0;
+  var exceptions = rows.map(function(r) {
+    var resolvedRaw = r["Resolved"];
+    var resolved = !!(resolvedRaw && String(resolvedRaw).trim() !== "");
+    if (!resolved) unresolved++;
+    return {
+      timestamp:    formatDate_(r["Timestamp"]),
+      qbInvoice:    String(r["QB Invoice #"] || ""),
+      customer:     String(r["QB Customer Name"] || ""),
+      staxCustomerId: String(r["Stax Customer ID"] || ""),
+      amount:       toNum_(r["Amount"]) || 0,
+      dueDate:      formatDate_(r["Due Date"]),
+      reason:       String(r["Reason"] || ""),
+      payLink:      String(r["Stax Invoice Link"] || ""),
+      resolved:     resolved
+    };
+  });
+  return jsonResponse_({ exceptions: exceptions, count: exceptions.length, unresolvedCount: unresolved });
+}
+
+/**
+ * GET getStaxCustomers — Read all rows from the Customers tab.
+ * Returns { customers: [...], count: N }
+ */
+function handleGetStaxCustomers_() {
+  var ss = getStaxSpreadsheet_();
+  var sheet = ss.getSheetByName("Customers");
+  if (!sheet) return jsonResponse_({ customers: [], count: 0 });
+  var rows = sheetToObjects_(sheet);
+  var customers = rows.map(function(r) {
+    return {
+      qbName:       String(r["QB Customer Name"] || ""),
+      staxCompany:  String(r["Stax Company Name"] || ""),
+      staxName:     String(r["Stax Customer Name"] || ""),
+      staxId:       String(r["Stax Customer ID"] || ""),
+      email:        String(r["Stax Customer Email"] || ""),
+      payMethod:    String(r["Payment Method"] || ""),
+      notes:        String(r["Notes"] || "")
+    };
+  });
+  return jsonResponse_({ customers: customers, count: customers.length });
+}
+
+/**
+ * GET getStaxRunLog — Read all rows from the Run Log tab.
+ * Returns { entries: [...], count: N }
+ */
+function handleGetStaxRunLog_() {
+  var ss = getStaxSpreadsheet_();
+  var sheet = ss.getSheetByName("Run Log");
+  if (!sheet) return jsonResponse_({ entries: [], count: 0 });
+  var rows = sheetToObjects_(sheet);
+  var entries = rows.map(function(r) {
+    return {
+      timestamp:  formatDate_(r["Timestamp"]),
+      fn:         String(r["Function"] || ""),
+      summary:    String(r["Summary"] || ""),
+      details:    String(r["Details"] || "")
+    };
+  });
+  return jsonResponse_({ entries: entries, count: entries.length });
+}
+
+/**
+ * GET getStaxConfig — Read Config tab (key/value pairs).
+ * SECURITY: Filters out STAX_API_KEY and GOOGLE_PICKER_API_KEY — never sent to client.
+ * Returns { config: { AUTO_CHARGE_ENABLED: bool, ENVIRONMENT: string, STAX_INVOICE_PAY_URL: string } }
+ */
+function handleGetStaxConfig_() {
+  var ss = getStaxSpreadsheet_();
+  var sheet = ss.getSheetByName("Config");
+  if (!sheet) return jsonResponse_({ config: {} });
+  var data = sheet.getDataRange().getValues();
+  var config = {};
+  var MASKED_KEYS = ["STAX_API_KEY", "GOOGLE_PICKER_API_KEY"];
+  for (var i = 0; i < data.length; i++) {
+    var key = String(data[i][0] || "").trim();
+    if (!key || key === "Key") continue; // skip header row
+    if (MASKED_KEYS.indexOf(key) >= 0) {
+      // Return masked version so UI knows key exists but doesn't expose the full value
+      var raw = String(data[i][1] || "").trim();
+      config[key] = raw ? ("••••••" + raw.slice(-6)) : "";
+      continue;
+    }
+    var val = data[i][1];
+    // Convert known boolean keys
+    if (key === "AUTO_CHARGE_ENABLED" || key === "NOTIFY_ON_EXCEPTION") {
+      config[key] = toBool_(val);
+    } else {
+      config[key] = String(val || "");
+    }
+  }
+  return jsonResponse_({ config: config });
+}
+
+// ─── Stax Payments — Write Endpoints (v29.9.0) ─────────────────────────────
+
+/**
+ * Append a row to the Run Log tab in the Stax spreadsheet.
+ */
+function stax_appendRunLog_(ss, fnName, summary, details) {
+  var sheet = ss.getSheetByName("Run Log");
+  if (!sheet) return;
+  var now = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm:ss");
+  sheet.appendRow([now, fnName, summary, details || ""]);
+}
+
+/**
+ * Normalize a name: trim, lowercase, collapse whitespace.
+ * Mirrors StaxAutoPay.gs _normalizeName().
+ */
+function stax_normalizeName_(name) {
+  return String(name).trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+/**
+ * Build a dedup key for an invoice: docNum|normalizedName|amount|date.
+ * Mirrors StaxAutoPay.gs _invoiceKey().
+ */
+function stax_invoiceKey_(docNum, name, amount, date) {
+  return String(docNum).trim() + "|" + stax_normalizeName_(name) + "|" +
+         String(amount) + "|" + String(date).trim();
+}
+
+/**
+ * Build a column map from a header row (e.g. !TRNS line).
+ * Mirrors StaxAutoPay.gs _buildColumnMap().
+ */
+function stax_buildColumnMap_(headerParts) {
+  var map = {};
+  for (var i = 1; i < headerParts.length; i++) {
+    var col = headerParts[i].trim().toUpperCase();
+    if (col) map[col] = i;
+  }
+  return map;
+}
+
+/**
+ * Parse a TRNS line using a column map.
+ */
+function stax_parseTrnsFromMap_(parts, colMap) {
+  function get(key) { return colMap[key] !== undefined ? (parts[colMap[key]] || "") : ""; }
+  function getNum(key) { var n = parseFloat(get(key)); return isNaN(n) ? 0 : n; }
+  return {
+    trnsType: get("TRNSTYPE"), date: get("DATE"), accnt: get("ACCNT"),
+    name: get("NAME"), amount: getNum("AMOUNT"), docNum: get("DOCNUM"),
+    memo: get("MEMO"), terms: get("TERMS"), dueDate: get("DUEDATE"),
+    clear: get("CLEAR"), toPrint: get("TOPRINT"), lineItems: []
+  };
+}
+
+/**
+ * Parse a TRNS line using positional indices (fallback).
+ */
+function stax_parseTrnsPositional_(parts) {
+  return {
+    trnsType: parts[1] || "", date: parts[2] || "", accnt: parts[3] || "",
+    name: parts[4] || "", amount: parseFloat(parts[5]) || 0, docNum: parts[6] || "",
+    memo: parts[7] || "", terms: parts[8] || "", dueDate: parts[9] || "",
+    clear: parts[10] || "", toPrint: parts[11] || "", lineItems: []
+  };
+}
+
+/**
+ * Parse a SPL line using a column map.
+ */
+function stax_parseSplFromMap_(parts, colMap) {
+  function get(key) { return colMap[key] !== undefined ? (parts[colMap[key]] || "") : ""; }
+  function getNum(key) { var n = parseFloat(get(key)); return isNaN(n) ? 0 : n; }
+  return {
+    trnsType: get("TRNSTYPE"), date: get("DATE"), accnt: get("ACCNT"),
+    name: get("NAME"), amount: getNum("AMOUNT"), docNum: get("DOCNUM"),
+    memo: get("MEMO"), qty: getNum("QNTY") || 1, price: getNum("PRICE"),
+    invItem: get("INVITEM"), clear: get("CLEAR")
+  };
+}
+
+/**
+ * Parse a SPL line using positional indices (fallback).
+ */
+function stax_parseSplPositional_(parts) {
+  return {
+    trnsType: parts[1] || "", date: parts[2] || "", accnt: parts[3] || "",
+    name: parts[4] || "", amount: parseFloat(parts[5]) || 0, docNum: parts[6] || "",
+    memo: parts[7] || "", qty: parseFloat(parts[8]) || 1, price: parseFloat(parts[9]) || 0,
+    invItem: parts[10] || "", clear: parts[11] || ""
+  };
+}
+
+/**
+ * Route a parsed TRNS block: invoice goes to invoices array, exceptions for blanks.
+ * Mirrors StaxAutoPay.gs _routeParsedTransaction().
+ */
+function stax_routeParsedTransaction_(trns, invoices, exceptions) {
+  var type = trns.trnsType.toUpperCase();
+  if (type !== "INVOICE") return;
+
+  if (!trns.docNum || !trns.docNum.trim()) {
+    var now = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm:ss");
+    exceptions.push({
+      timestamp: now,
+      docNum:    "",
+      name:      trns.name,
+      staxId:    "",
+      amount:    trns.amount,
+      dueDate:   trns.dueDate,
+      reason:    "Blank QB Invoice # in IIF import",
+      link:      "",
+      resolved:  ""
+    });
+    return;
+  }
+
+  invoices.push(trns);
+}
+
+/**
+ * Parse IIF content into rows, invoices, and exceptions.
+ * Mirrors StaxAutoPay.gs parseIIF() faithfully.
+ */
+function stax_parseIIF_(content) {
+  var lines = content.replace(/\r\n/g, "\n").replace(/\r/g, "\n")
+    .split("\n").filter(function(l) { return l.replace(/[\t ]/g, "").length > 0; });
+
+  var rows       = [];
+  var invoices   = [];
+  var exceptions = [];
+  var current    = null;
+  var trnsColumns = null;
+  var splColumns  = null;
+
+  for (var idx = 0; idx < lines.length; idx++) {
+    var line = lines[idx].replace(/\s+$/, "");
+    var parts   = line.split("\t");
+    var rowType = parts[0].trim();
+
+    if (rowType === "!TRNS") { trnsColumns = stax_buildColumnMap_(parts); continue; }
+    if (rowType === "!SPL")  { splColumns  = stax_buildColumnMap_(parts); continue; }
+    if (rowType.charAt(0) === "!") continue;
+
+    if (rowType === "TRNS") {
+      current = trnsColumns
+        ? stax_parseTrnsFromMap_(parts, trnsColumns)
+        : stax_parseTrnsPositional_(parts);
+
+      var displayRow = parts.slice(0, 12);
+      while (displayRow.length < 12) displayRow.push("");
+      displayRow[0] = "TRNS";
+      rows.push(displayRow);
+
+    } else if (rowType === "SPL" && current) {
+      var lineItem = splColumns
+        ? stax_parseSplFromMap_(parts, splColumns)
+        : stax_parseSplPositional_(parts);
+      current.lineItems.push(lineItem);
+
+      var splDisplayRow = parts.slice(0, 12);
+      while (splDisplayRow.length < 12) splDisplayRow.push("");
+      splDisplayRow[0] = "SPL";
+      rows.push(splDisplayRow);
+
+    } else if (rowType === "ENDTRNS") {
+      if (current) {
+        stax_routeParsedTransaction_(current, invoices, exceptions);
+        current = null;
+      }
+    }
+  }
+
+  if (current) {
+    stax_routeParsedTransaction_(current, invoices, exceptions);
+  }
+
+  return { rows: rows, invoices: invoices, exceptions: exceptions };
+}
+
+/**
+ * POST importIIF — Parse base64-encoded IIF file, write to Import/Invoices/Exceptions tabs.
+ * Mirrors StaxAutoPay.gs parseIIF() + _writeInvoicesToTab() logic.
+ */
+function handleImportIIF_(payload) {
+  var fileContent = String(payload.fileContent || "").trim();
+  var fileName    = String(payload.fileName || "import.iif").trim();
+  if (!fileContent) return errorResponse_("fileContent is required", "MISSING_FIELD");
+
+  // Decode base64 to string
+  var decoded;
+  try {
+    decoded = Utilities.newBlob(Utilities.base64Decode(fileContent)).getDataAsString();
+  } catch (decodeErr) {
+    return errorResponse_("Failed to decode base64 fileContent: " + decodeErr.message, "DECODE_ERROR");
+  }
+
+  // Parse IIF
+  var parsed = stax_parseIIF_(decoded);
+
+  var ss = getStaxSpreadsheet_();
+
+  // ─── Write to Import tab (clear old data starting row 5, write raw rows) ───
+  var importSheet = ss.getSheetByName("Import");
+  if (importSheet) {
+    var lastImportRow = importSheet.getLastRow();
+    if (lastImportRow >= 5) {
+      importSheet.getRange(5, 1, lastImportRow - 4, importSheet.getMaxColumns()).clearContent();
+    }
+    if (parsed.rows.length > 0) {
+      importSheet.getRange(5, 1, parsed.rows.length, parsed.rows[0].length).setValues(parsed.rows);
+    }
+  }
+
+  // ─── Write invoices to Invoices tab (dedup by key) ───
+  var invSheet = ss.getSheetByName("Invoices");
+  var invoicesAdded = 0;
+  var duplicatesSkipped = 0;
+  if (invSheet) {
+    // Build set of existing keys
+    var existing = invSheet.getDataRange().getValues();
+    var existingSet = {};
+    for (var e = 1; e < existing.length; e++) {
+      var key = stax_invoiceKey_(
+        String(existing[e][0]), String(existing[e][1]),
+        existing[e][5], String(existing[e][3])
+      );
+      existingSet[key] = true;
+    }
+
+    var newRows = [];
+    for (var i = 0; i < parsed.invoices.length; i++) {
+      var inv = parsed.invoices[i];
+      var dedupKey = stax_invoiceKey_(inv.docNum, inv.name, inv.amount, inv.date);
+      if (existingSet[dedupKey]) { duplicatesSkipped++; continue; }
+      existingSet[dedupKey] = true;
+
+      var lineItemsJson = "";
+      try { lineItemsJson = JSON.stringify(inv.lineItems); } catch (e2) { lineItemsJson = "[]"; }
+
+      var now = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm:ss");
+      newRows.push([
+        inv.docNum, inv.name, "", inv.date, inv.dueDate, inv.amount,
+        lineItemsJson, "", "PENDING", now, ""
+      ]);
+    }
+
+    if (newRows.length > 0) {
+      invSheet.getRange(invSheet.getLastRow() + 1, 1, newRows.length, newRows[0].length)
+        .setValues(newRows);
+    }
+    invoicesAdded = newRows.length;
+  }
+
+  // ─── Write exceptions to Exceptions tab ───
+  var excSheet = ss.getSheetByName("Exceptions");
+  var exceptionsLogged = 0;
+  if (excSheet && parsed.exceptions.length > 0) {
+    var excRows = [];
+    for (var x = 0; x < parsed.exceptions.length; x++) {
+      var exc = parsed.exceptions[x];
+      excRows.push([
+        exc.timestamp, exc.docNum, exc.name, exc.staxId,
+        exc.amount, exc.dueDate, exc.reason, exc.link, exc.resolved
+      ]);
+    }
+    excSheet.getRange(excSheet.getLastRow() + 1, 1, excRows.length, excRows[0].length)
+      .setValues(excRows);
+    exceptionsLogged = excRows.length;
+  }
+
+  // ─── Run Log ───
+  var summary = "Imported " + fileName + ": " + invoicesAdded + " invoices added, " +
+                duplicatesSkipped + " duplicates skipped, " + exceptionsLogged + " exceptions";
+  stax_appendRunLog_(ss, "importIIF", summary, "File: " + fileName + ", Raw rows: " + parsed.rows.length);
+
+  return jsonResponse_({
+    success: true,
+    invoicesAdded: invoicesAdded,
+    duplicatesSkipped: duplicatesSkipped,
+    exceptionsLogged: exceptionsLogged,
+    summary: summary
+  });
+}
+
+/**
+ * POST resolveStaxException — Mark an exception as resolved by writing timestamp to Resolved column.
+ * Identifies row by qbInvoiceNo + timestamp combo.
+ */
+function handleResolveStaxException_(payload) {
+  var qbInvoiceNo = String(payload.qbInvoiceNo || "").trim();
+  var timestamp   = String(payload.timestamp || "").trim();
+  if (!qbInvoiceNo && !timestamp) return errorResponse_("qbInvoiceNo or timestamp is required to identify the exception row", "MISSING_FIELD");
+
+  var ss = getStaxSpreadsheet_();
+  var sheet = ss.getSheetByName("Exceptions");
+  if (!sheet) return errorResponse_("Exceptions tab not found", "NOT_FOUND");
+
+  var data = sheet.getDataRange().getValues();
+  // Headers row 1: Timestamp(0), QB Invoice #(1), QB Customer Name(2), Stax Customer ID(3),
+  //                Amount(4), Due Date(5), Reason(6), Stax Invoice Link(7), Resolved(8)
+  var targetRow = -1;
+
+  // Normalize timestamp for comparison (handles Date objects vs formatted strings)
+  var normalizeTs = function(val) {
+    if (!val) return "";
+    if (val instanceof Date) return Utilities.formatDate(val, Session.getScriptTimeZone(), "yyyy-MM-dd");
+    var s = String(val).trim();
+    // Try to parse and reformat for consistent comparison
+    var d = new Date(s);
+    if (!isNaN(d.getTime())) return Utilities.formatDate(d, Session.getScriptTimeZone(), "yyyy-MM-dd");
+    return s;
+  };
+
+  var normalizedInput = normalizeTs(timestamp);
+
+  for (var i = 1; i < data.length; i++) {
+    var rowQb = String(data[i][1] || "").trim();
+    var rowResolved = String(data[i][8] || "").trim();
+    if (rowResolved) continue; // Skip already resolved
+
+    // Primary match: QB Invoice # (most reliable)
+    if (qbInvoiceNo && rowQb === qbInvoiceNo) {
+      targetRow = i + 1;
+      break;
+    }
+    // Fallback: normalized timestamp match
+    if (!qbInvoiceNo && normalizedInput) {
+      var rowTs = normalizeTs(data[i][0]);
+      if (rowTs === normalizedInput) {
+        targetRow = i + 1;
+        break;
+      }
+    }
+  }
+
+  if (targetRow < 0) return errorResponse_("Exception row not found for " + (qbInvoiceNo || "timestamp=" + timestamp), "NOT_FOUND");
+
+  // Check if already resolved
+  var resolvedVal = String(data[targetRow - 1][8] || "").trim();
+  if (resolvedVal) return errorResponse_("Exception already resolved at " + resolvedVal, "ALREADY_RESOLVED");
+
+  // Write resolved timestamp
+  var now = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm:ss");
+  sheet.getRange(targetRow, 9).setValue(now); // Column I = 9
+
+  stax_appendRunLog_(ss, "resolveException", "Resolved exception: QB#" + qbInvoiceNo + " at " + timestamp, "");
+
+  return jsonResponse_({ success: true, resolvedAt: now });
+}
+
+/**
+ * POST updateStaxConfig — Update a single config key/value in the Config tab.
+ * Blocks updates to secret keys (STAX_API_KEY, GOOGLE_PICKER_API_KEY).
+ */
+function handleUpdateStaxConfig_(payload) {
+  var key   = String(payload.key || "").trim();
+  var value = String(payload.value || "").trim();
+  if (!key) return errorResponse_("key is required", "MISSING_FIELD");
+
+  var ALLOWED_KEYS = ["AUTO_CHARGE_ENABLED", "ENVIRONMENT", "STAX_INVOICE_PAY_URL", "CB_SPREADSHEET_ID", "NOTIFY_ON_EXCEPTION", "STAX_API_KEY", "IIF_FOLDER_ID"];
+  if (ALLOWED_KEYS.indexOf(key) < 0) return errorResponse_("Cannot update key: " + key + ". Allowed keys: " + ALLOWED_KEYS.join(", "), "BLOCKED_KEY");
+
+  var ss = getStaxSpreadsheet_();
+  var sheet = ss.getSheetByName("Config");
+  if (!sheet) return errorResponse_("Config tab not found", "NOT_FOUND");
+
+  var data = sheet.getDataRange().getValues();
+  var targetRow = -1;
+  for (var i = 0; i < data.length; i++) {
+    if (String(data[i][0] || "").trim() === key) {
+      targetRow = i + 1;
+      break;
+    }
+  }
+
+  if (targetRow < 0) {
+    // Key not found — append it
+    sheet.appendRow([key, value]);
+  } else {
+    sheet.getRange(targetRow, 2).setValue(value); // Column B
+  }
+
+  // Also sync STAX_API_KEY to Script Properties (StrideAPI reads it from there for API calls)
+  if (key === "STAX_API_KEY" && value) {
+    try { PropertiesService.getScriptProperties().setProperty("STAX_API_KEY", value); } catch (e) {}
+  }
+
+  stax_appendRunLog_(ss, "updateConfig", "Updated " + key + (key === "STAX_API_KEY" ? " (redacted)" : " = " + value), "");
+
+  return jsonResponse_({ success: true, key: key, value: key === "STAX_API_KEY" ? "(saved)" : value });
+}
+
+/**
+ * POST saveStaxCustomerMapping — Update or add QB↔Stax customer mappings.
+ * Accepts { mappings: [{ qbCustomerName, staxCustomerId }] }.
+ */
+function handleSaveStaxCustomerMapping_(payload) {
+  var mappings = payload.mappings;
+  if (!mappings || !Array.isArray(mappings) || mappings.length === 0) {
+    return errorResponse_("mappings array is required", "MISSING_FIELD");
+  }
+
+  var ss = getStaxSpreadsheet_();
+  var sheet = ss.getSheetByName("Customers");
+  if (!sheet) return errorResponse_("Customers tab not found", "NOT_FOUND");
+
+  var data = sheet.getDataRange().getValues();
+  // Build lookup: normalized QB name → row index (1-based)
+  var nameToRow = {};
+  for (var i = 1; i < data.length; i++) {
+    var n = stax_normalizeName_(data[i][0]);
+    if (n) nameToRow[n] = i + 1;
+  }
+
+  var updated = 0, added = 0;
+  for (var m = 0; m < mappings.length; m++) {
+    var qbName  = String(mappings[m].qbCustomerName || "").trim();
+    var staxId  = String(mappings[m].staxCustomerId || "").trim();
+    if (!qbName) continue;
+
+    var normalized = stax_normalizeName_(qbName);
+    var existingRow = nameToRow[normalized];
+
+    if (existingRow) {
+      // Update Stax Customer ID (column D = index 4, 1-based col 4)
+      sheet.getRange(existingRow, 4).setValue(staxId);
+      updated++;
+    } else {
+      // Append new row: QB Customer Name, Stax Company Name, Stax Customer Name, Stax Customer ID, Email, Payment Method, Notes
+      sheet.appendRow([qbName, "", "", staxId, "", "", ""]);
+      nameToRow[normalized] = sheet.getLastRow();
+      added++;
+    }
+  }
+
+  stax_appendRunLog_(ss, "saveCustomerMapping", "Updated " + updated + ", added " + added + " customer mapping(s)", "");
+
+  return jsonResponse_({ success: true, updated: updated, added: added });
+}
+
+/**
+ * POST autoMatchStaxCustomers — Extract unique QB Customer Names from Invoices tab,
+ * add any not already in Customers tab.
+ * Mirrors StaxAutoPay.gs autoPopulateCustomers() / autoFillCustomersFromInvoices().
+ */
+function handleAutoMatchStaxCustomers_() {
+  var ss = getStaxSpreadsheet_();
+  var invSheet = ss.getSheetByName("Invoices");
+  var custSheet = ss.getSheetByName("Customers");
+  if (!invSheet) return errorResponse_("Invoices tab not found", "NOT_FOUND");
+  if (!custSheet) return errorResponse_("Customers tab not found", "NOT_FOUND");
+
+  // Build set of existing normalized customer names
+  var custData = custSheet.getDataRange().getValues();
+  var existingNames = {};
+  for (var c = 1; c < custData.length; c++) {
+    var n = stax_normalizeName_(custData[c][0]);
+    if (n) existingNames[n] = true;
+  }
+
+  // Collect unique QB Customer Names from Invoices
+  var invData = invSheet.getDataRange().getValues();
+  var seen = {};
+  var newRows = [];
+  for (var i = 1; i < invData.length; i++) {
+    var qbName = String(invData[i][1]).trim();
+    if (!qbName) continue;
+    var normalized = stax_normalizeName_(qbName);
+    if (existingNames[normalized] || seen[normalized]) continue;
+    seen[normalized] = true;
+    newRows.push([qbName, "", "", "", "", "", ""]);
+  }
+
+  var alreadyExisted = Object.keys(existingNames).length;
+
+  if (newRows.length > 0) {
+    custSheet.getRange(custSheet.getLastRow() + 1, 1, newRows.length, 7).setValues(newRows);
+  }
+
+  stax_appendRunLog_(ss, "autoMatchCustomers", "Added " + newRows.length + " new customer(s), " + alreadyExisted + " already existed", "");
+
+  return jsonResponse_({ success: true, added: newRows.length, alreadyExisted: alreadyExisted });
+}
+
+// ─── Stax API Helpers (v30.0.0) ──────────────────────────────────────────────
+
+var STAX_RETRYABLE_STATUS_CODES_ = [429, 500, 502, 503, 504];
+
+/**
+ * Reusable Stax API request helper. Reads STAX_API_KEY from Stax Config tab.
+ * Mirrors StaxAutoPay.gs _staxApiRequest(): retry on 429/5xx with exponential backoff.
+ * @param {string} method - HTTP method (GET, POST, PUT, etc.)
+ * @param {string} path - API path (e.g. "/customer/abc-123")
+ * @param {Object|null} payload - JSON body for POST/PUT/PATCH
+ * @returns {{ success: boolean, status: number, data: Object|null, error: string|null }}
+ */
+function stax_apiRequest_(method, path, payload) {
+  var ss = getStaxSpreadsheet_();
+  var configSheet = ss.getSheetByName("Config");
+  if (!configSheet) throw new Error("Config tab not found in Stax spreadsheet");
+
+  var configData = configSheet.getDataRange().getValues();
+  var apiKey = "";
+  for (var ci = 0; ci < configData.length; ci++) {
+    if (String(configData[ci][0]).trim() === "STAX_API_KEY") {
+      apiKey = String(configData[ci][1]).trim();
+      break;
+    }
+  }
+  if (!apiKey) throw new Error("STAX_API_KEY not found in Stax Config tab");
+
+  var baseUrl = "https://apiprod.fattlabs.com";
+  var url = baseUrl + path;
+  var methodUpper = method.toUpperCase();
+  var methodLower = method.toLowerCase();
+
+  var options = {
+    method: methodLower,
+    headers: {
+      "Authorization": "Bearer " + apiKey,
+      "Accept": "application/json"
+    },
+    muteHttpExceptions: true,
+    contentType: "application/json"
+  };
+
+  if (payload && (methodUpper === "POST" || methodUpper === "PUT" || methodUpper === "PATCH")) {
+    options.payload = JSON.stringify(payload);
+  }
+
+  var maxRetries = 3;
+  var backoffMs = [2000, 4000, 8000];
+
+  for (var attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      var response = UrlFetchApp.fetch(url, options);
+      var status = response.getResponseCode();
+      var body = response.getContentText();
+
+      var data = null;
+      try { data = JSON.parse(body); } catch (e) { /* non-JSON */ }
+
+      if (status >= 200 && status < 300) {
+        return { success: true, status: status, data: data, error: null };
+      }
+
+      // Non-retryable error — return immediately
+      if (STAX_RETRYABLE_STATUS_CODES_.indexOf(status) === -1) {
+        var errMsg = "HTTP " + status;
+        if (data && data.message) errMsg += ": " + data.message;
+        else if (data && data.error) errMsg += ": " + data.error;
+        else if (body) errMsg += ": " + body.substring(0, 200);
+        return { success: false, status: status, data: data, error: errMsg };
+      }
+
+      // Retryable — backoff and retry
+      if (attempt < maxRetries - 1) {
+        Utilities.sleep(backoffMs[attempt]);
+      }
+    } catch (e) {
+      if (attempt < maxRetries - 1) {
+        Utilities.sleep(backoffMs[attempt]);
+      } else {
+        return { success: false, status: 0, data: null, error: "Network error: " + e.message };
+      }
+    }
+  }
+
+  return { success: false, status: 0, data: null, error: "Max retries exceeded" };
+}
+
+/**
+ * Parse Stax payment method response into human-readable label.
+ * Mirrors StaxAutoPay.gs _getPaymentMethodLabel().
+ * @param {Object} pmData - Stax API response from /customer/{id}/payment-method
+ * @returns {string} e.g. "CC", "Debit", "ACH", "CC, ACH", or "None"
+ */
+function stax_getPaymentMethodLabel_(pmData) {
+  var methods = stax_extractArray_(pmData);
+  var types = {};
+
+  for (var i = 0; i < methods.length; i++) {
+    var pm = methods[i];
+    if (pm.deleted_at || pm.purged_at) continue;
+
+    var method = (pm.method || "").toLowerCase();
+    var binType = (pm.bin_type || "").toLowerCase();
+
+    if (method === "bank") {
+      types["ACH"] = true;
+    } else if (method === "card" || method === "credit" || method === "debit") {
+      if (binType === "debit") {
+        types["Debit"] = true;
+      } else {
+        types["CC"] = true;
+      }
+    } else if (method) {
+      types[method.toUpperCase()] = true;
+    }
+  }
+
+  var labels = Object.keys(types);
+  if (labels.length === 0) return "None";
+  return labels.join(", ");
+}
+
+/**
+ * Extract array from Stax API response (may be raw array or { data: [...] }).
+ * Mirrors StaxAutoPay.gs _extractArrayFromResponse().
+ */
+function stax_extractArray_(responseData) {
+  if (Array.isArray(responseData)) return responseData;
+  if (responseData && responseData.data && Array.isArray(responseData.data)) return responseData.data;
+  return [];
+}
+
+// ─── Stax Phase 3: Customer Sync Endpoints (v30.0.0) ─────────────────────────
+
+/**
+ * POST pullStaxCustomers — Read active clients from CB Clients tab, fetch each
+ * from Stax API, and rebuild Customers tab in the Stax spreadsheet.
+ * Mirrors StaxAutoPay.gs pullStaxCustomers().
+ */
+function handlePullStaxCustomers_() {
+  var cbId = prop_("CB_SPREADSHEET_ID");
+  if (!cbId) return errorResponse_("CB_SPREADSHEET_ID not configured", "CONFIG_ERROR");
+
+  var cbSS, cbClients, cbData;
+  try {
+    cbSS = SpreadsheetApp.openById(cbId);
+    cbClients = cbSS.getSheetByName("Clients");
+    if (!cbClients) return errorResponse_("Clients tab not found in CB spreadsheet", "NOT_FOUND");
+    cbData = cbClients.getDataRange().getValues();
+  } catch (e) {
+    return errorResponse_("Failed to open CB spreadsheet: " + e.message, "CONFIG_ERROR");
+  }
+
+  // Build header map from CB Clients tab
+  var cbHeaders = {};
+  for (var h = 0; h < cbData[0].length; h++) {
+    cbHeaders[String(cbData[0][h]).trim().toUpperCase()] = h;
+  }
+
+  var clientNameIdx = cbHeaders["CLIENT NAME"];
+  var qbNameIdx     = cbHeaders["QB_CUSTOMER_NAME"];
+  var staxIdIdx     = cbHeaders["STAX CUSTOMER ID"];
+  var activeIdx     = cbHeaders["ACTIVE"];
+  var cbEmailIdx    = cbHeaders["CLIENT EMAIL"];
+  var payTermsIdx   = cbHeaders["PAYMENT TERMS"];
+
+  if (qbNameIdx === undefined && clientNameIdx === undefined) {
+    return errorResponse_("Neither QB_CUSTOMER_NAME nor CLIENT NAME column found in CB Clients tab", "SCHEMA_ERROR");
+  }
+
+  // Collect active clients
+  var clients = [];
+  for (var r = 1; r < cbData.length; r++) {
+    if (activeIdx !== undefined) {
+      var activeVal = String(cbData[r][activeIdx] || "").trim().toUpperCase();
+      if (activeVal !== "TRUE" && activeVal !== "YES") continue;
+    }
+
+    var qbName = qbNameIdx !== undefined ? String(cbData[r][qbNameIdx] || "").trim() : "";
+    var clientName = clientNameIdx !== undefined ? String(cbData[r][clientNameIdx] || "").trim() : "";
+    if (!qbName && !clientName) continue;
+
+    clients.push({
+      qbName:     qbName || clientName,
+      clientName: clientName,
+      staxId:     staxIdIdx !== undefined ? String(cbData[r][staxIdIdx] || "").trim() : "",
+      cbEmail:    cbEmailIdx !== undefined ? String(cbData[r][cbEmailIdx] || "").trim() : "",
+      payTerms:   payTermsIdx !== undefined ? String(cbData[r][payTermsIdx] || "").trim() : ""
+    });
+  }
+
+  if (clients.length === 0) {
+    return errorResponse_("No active clients found in CB Clients tab", "NOT_FOUND");
+  }
+
+  // Fetch Stax data for clients WITH a Stax ID
+  var stats = { total: clients.length, withStaxId: 0, missingStaxId: 0, apiErrors: 0 };
+  var newRows = [];
+
+  for (var i = 0; i < clients.length; i++) {
+    var cl = clients[i];
+
+    if (cl.staxId) {
+      stats.withStaxId++;
+      var custResult = stax_apiRequest_("GET", "/customer/" + cl.staxId, null);
+
+      if (custResult.success && custResult.data) {
+        var cust = custResult.data;
+        var personName = ((cust.firstname || "") + " " + (cust.lastname || "")).trim();
+        var companyName = cust.company_name || cl.clientName || "";
+        var email = cust.email || cl.cbEmail;
+
+        newRows.push([
+          cl.qbName,     // QB Customer Name (from CB)
+          companyName,   // Stax Company Name
+          personName,    // Stax Customer Name
+          cl.staxId,     // Stax Customer ID
+          email,         // Stax Customer Email
+          "",            // Payment Method — filled by Sync
+          cl.payTerms    // Notes — payment terms from CB
+        ]);
+      } else {
+        stats.apiErrors++;
+        newRows.push([
+          cl.qbName, "", "", cl.staxId, cl.cbEmail, "",
+          "API ERROR: Could not verify Stax ID"
+        ]);
+      }
+    } else {
+      stats.missingStaxId++;
+      newRows.push([
+        cl.qbName, "", "", "", cl.cbEmail, "", cl.payTerms
+      ]);
+    }
+  }
+
+  // Write to Stax spreadsheet Customers tab
+  var ss = getStaxSpreadsheet_();
+  var custSheet = ss.getSheetByName("Customers");
+  if (!custSheet) return errorResponse_("Customers tab not found in Stax spreadsheet", "NOT_FOUND");
+
+  // Clear existing data below header
+  var lastRow = custSheet.getLastRow();
+  if (lastRow > 1) {
+    custSheet.getRange(2, 1, lastRow - 1, custSheet.getLastColumn()).clearContent();
+  }
+
+  // Write fresh rows
+  if (newRows.length > 0) {
+    custSheet.getRange(2, 1, newRows.length, newRows[0].length).setValues(newRows);
+  }
+
+  var summary = stats.total + " active clients, " +
+    stats.withStaxId + " with Stax ID, " +
+    stats.missingStaxId + " missing Stax ID, " +
+    stats.apiErrors + " API errors";
+  stax_appendRunLog_(ss, "pullStaxCustomers", summary, JSON.stringify(stats));
+
+  // Invalidate Stax customers cache
+  try { CacheService.getScriptCache().remove("stax_customers"); } catch (e) {}
+
+  return jsonResponse_({
+    total: stats.total,
+    withStaxId: stats.withStaxId,
+    missingStaxId: stats.missingStaxId,
+    apiErrors: stats.apiErrors,
+    summary: summary
+  });
+}
+
+/**
+ * POST syncStaxCustomers — Verify/enrich each Customers tab row against Stax API.
+ * Branch A: has Stax ID → verify exists + fetch payment methods + optional company push
+ * Branch B: no Stax ID, has email → search Stax by email, auto-fill if exactly 1 match
+ * Mirrors StaxAutoPay.gs syncCustomers().
+ */
+function handleSyncStaxCustomers_() {
+  var ss = getStaxSpreadsheet_();
+  var custSheet = ss.getSheetByName("Customers");
+  if (!custSheet) return errorResponse_("Customers tab not found in Stax spreadsheet", "NOT_FOUND");
+
+  var custData = custSheet.getDataRange().getValues();
+  if (custData.length <= 1) {
+    return errorResponse_("No customers found in Customers tab. Run Pull Customers first.", "NOT_FOUND");
+  }
+
+  var stats = {
+    verified: 0,
+    hasPayment: 0,
+    noPayment: 0,
+    foundByEmail: 0,
+    notFound: 0,
+    ambiguous: 0,
+    noIdentifier: 0,
+    apiErrors: 0,
+    companyPushed: 0,
+    total: custData.length - 1
+  };
+
+  // Column layout: A=QB Name, B=Stax Company, C=Stax Name, D=Stax ID, E=Email, F=Payment Method, G=Notes
+  var numRows = custData.length - 1;
+  var colDRange = custSheet.getRange(2, 4, numRows, 1); // Stax Customer ID (col D)
+  var colFRange = custSheet.getRange(2, 6, numRows, 1); // Payment Method (col F)
+  var colDValues = colDRange.getValues();
+  var colFValues = colFRange.getValues();
+  var colDChanged = false;
+  var colFChanged = false;
+
+  for (var i = 0; i < numRows; i++) {
+    var qbName = String(custData[i + 1][0]).trim();
+    var staxId = String(colDValues[i][0]).trim();
+    var email  = String(custData[i + 1][4]).trim();
+
+    if (!qbName) continue;
+
+    if (staxId) {
+      // ── Branch A: Has Stax ID — verify + check payment methods ──
+      var custResult = stax_apiRequest_("GET", "/customer/" + staxId, null);
+
+      if (!custResult.success) {
+        if (custResult.status === 404) {
+          stats.notFound++;
+        } else {
+          stats.apiErrors++;
+        }
+        continue;
+      }
+
+      stats.verified++;
+
+      // Push company name to Stax if Stax has none and we have one locally
+      var localCompany = String(custData[i + 1][1]).trim();
+      var staxCompany = (custResult.data.company_name || "").trim();
+      if (localCompany && !staxCompany) {
+        var updateResult = stax_apiRequest_("PUT", "/customer/" + staxId, {
+          company_name: localCompany
+        });
+        if (updateResult.success) {
+          stats.companyPushed++;
+        }
+      }
+
+      // Check payment methods
+      var pmResult = stax_apiRequest_("GET", "/customer/" + staxId + "/payment-method", null);
+
+      if (pmResult.success) {
+        var pmLabel = stax_getPaymentMethodLabel_(pmResult.data);
+
+        if (String(colFValues[i][0]) !== pmLabel) {
+          colFValues[i][0] = pmLabel;
+          colFChanged = true;
+        }
+
+        if (pmLabel !== "None") {
+          stats.hasPayment++;
+        } else {
+          stats.noPayment++;
+        }
+      } else {
+        stats.apiErrors++;
+      }
+
+    } else if (email) {
+      // ── Branch B: No Stax ID, has email — search Stax by email ──
+      var searchResult = stax_apiRequest_("GET", "/customer?email=" + encodeURIComponent(email), null);
+
+      if (!searchResult.success) {
+        stats.apiErrors++;
+        continue;
+      }
+
+      var customers = stax_extractArray_(searchResult.data);
+
+      // Filter to exact email matches only
+      var exactMatches = [];
+      for (var j = 0; j < customers.length; j++) {
+        if (customers[j].email &&
+            customers[j].email.toLowerCase().trim() === email.toLowerCase()) {
+          exactMatches.push(customers[j]);
+        }
+      }
+
+      if (exactMatches.length === 0) {
+        stats.notFound++;
+      } else if (exactMatches.length === 1) {
+        colDValues[i][0] = exactMatches[0].id;
+        colDChanged = true;
+        stats.foundByEmail++;
+      } else {
+        stats.ambiguous++;
+      }
+
+    } else {
+      stats.noIdentifier++;
+    }
+  }
+
+  // Batch write updates
+  if (colDChanged) colDRange.setValues(colDValues);
+  if (colFChanged) colFRange.setValues(colFValues);
+
+  var summary = stats.verified + " verified, " +
+    stats.hasPayment + " with payment, " +
+    stats.noPayment + " without payment, " +
+    stats.foundByEmail + " found by email, " +
+    stats.notFound + " not found, " +
+    stats.ambiguous + " ambiguous, " +
+    stats.apiErrors + " API errors";
+
+  stax_appendRunLog_(ss, "syncCustomers", summary, JSON.stringify(stats));
+
+  // Invalidate Stax customers cache
+  try { CacheService.getScriptCache().remove("stax_customers"); } catch (e) {}
+
+  return jsonResponse_({
+    verified: stats.verified,
+    hasPayment: stats.hasPayment,
+    noPayment: stats.noPayment,
+    foundByEmail: stats.foundByEmail,
+    notFound: stats.notFound,
+    ambiguous: stats.ambiguous,
+    noIdentifier: stats.noIdentifier,
+    apiErrors: stats.apiErrors,
+    companyPushed: stats.companyPushed,
+    total: stats.total
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Stax Phase 4: Financial Operations (v31.0.0)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Append a row to the Exceptions tab in the Stax spreadsheet.
+ */
+function stax_appendException_(ss, docNum, custName, staxCustId, amount, dueDate, reason, payLink) {
+  var sheet = ss.getSheetByName("Exceptions");
+  if (!sheet) return;
+  var now = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm:ss");
+  sheet.appendRow([now, docNum, custName, staxCustId || "", amount || "", dueDate || "", reason, payLink || "", ""]);
+}
+
+/**
+ * Append a row to the Charge Log tab in the Stax spreadsheet.
+ */
+function stax_appendChargeLog_(ss, docNum, staxInvId, staxCustId, custName, amount, status, txnId, notes) {
+  var sheet = ss.getSheetByName("Charge Log");
+  if (!sheet) return;
+  var now = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm:ss");
+  sheet.appendRow([now, docNum, staxInvId, staxCustId, custName, amount, status, txnId || "", notes || ""]);
+}
+
+/**
+ * Parse a date value into yyyy-MM-dd format for Stax API.
+ * Handles MM/DD/YYYY, yyyy-MM-dd, Date objects, and generic date strings.
+ * Mirrors StaxAutoPay.gs _parseDateForStax().
+ */
+function stax_parseDateForStax_(dateStr) {
+  if (!dateStr) return null;
+  // Handle Date objects directly
+  if (dateStr instanceof Date && !isNaN(dateStr.getTime())) {
+    return Utilities.formatDate(dateStr, Session.getScriptTimeZone(), "yyyy-MM-dd");
+  }
+  dateStr = String(dateStr).trim();
+  if (!dateStr) return null;
+
+  // Try MM/DD/YYYY
+  var parts = dateStr.split("/");
+  if (parts.length === 3) {
+    var month = parseInt(parts[0], 10);
+    var day = parseInt(parts[1], 10);
+    var year = parseInt(parts[2], 10);
+    if (year < 100) year += 2000;
+    if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+      var d = new Date(year, month - 1, day);
+      if (!isNaN(d.getTime())) {
+        return Utilities.formatDate(d, Session.getScriptTimeZone(), "yyyy-MM-dd");
+      }
+    }
+  }
+
+  // Try yyyy-MM-dd
+  var isoParts = dateStr.split("-");
+  if (isoParts.length === 3 && isoParts[0].length === 4) {
+    var isoDate = new Date(parseInt(isoParts[0], 10), parseInt(isoParts[1], 10) - 1, parseInt(isoParts[2], 10));
+    if (!isNaN(isoDate.getTime())) {
+      return Utilities.formatDate(isoDate, Session.getScriptTimeZone(), "yyyy-MM-dd");
+    }
+  }
+
+  // Fallback generic parse
+  var fallback = new Date(dateStr);
+  if (!isNaN(fallback.getTime())) {
+    return Utilities.formatDate(fallback, Session.getScriptTimeZone(), "yyyy-MM-dd");
+  }
+  return null;
+}
+
+/**
+ * Build line items array from the Line Items JSON column.
+ * Mirrors StaxAutoPay.gs _buildStaxLineItems().
+ */
+function stax_buildLineItems_(lineItemsRaw, total, docNum) {
+  var items = [];
+  try {
+    var parsed = JSON.parse(lineItemsRaw);
+    if (Array.isArray(parsed) && parsed.length > 0) {
+      for (var i = 0; i < parsed.length; i++) {
+        var li = parsed[i];
+        // Skip Accounts Receivable lines
+        if (li.accnt && /accounts receivable/i.test(li.accnt)) continue;
+
+        var qty = li.qty || 1;
+        var price = li.price ? Math.abs(li.price) : 0;
+        if (!price && li.amount) {
+          price = Math.abs(li.amount) / qty;
+        }
+        if (price === 0) continue;
+
+        items.push({
+          item: li.invItem || li.memo || ("Line " + (i + 1)),
+          details: li.memo || li.accnt || "",
+          quantity: qty,
+          price: price
+        });
+      }
+    }
+  } catch (e) { /* not valid JSON — use fallback */ }
+
+  if (items.length === 0) {
+    items.push({
+      item: "QB Invoice #" + docNum,
+      details: "Invoice total",
+      quantity: 1,
+      price: total
+    });
+  }
+  return items;
+}
+
+/**
+ * Check Stax API for an existing invoice with the same reference key.
+ * Mirrors StaxAutoPay.gs _checkForDuplicateInvoice().
+ * @returns {{ found: boolean, invoiceId: string|null }}
+ */
+function stax_checkDuplicate_(refKey) {
+  var result = stax_apiRequest_("GET", "/invoice?memo=" + encodeURIComponent(refKey), null);
+  if (result.success && result.data) {
+    var invoices = stax_extractArray_(result.data);
+    for (var i = 0; i < invoices.length; i++) {
+      if (invoices[i].meta && invoices[i].meta.reference === refKey) {
+        return { found: true, invoiceId: invoices[i].id };
+      }
+    }
+  }
+  return { found: false, invoiceId: null };
+}
+
+/**
+ * Get the default (or first active) payment method for a Stax customer.
+ * Mirrors StaxAutoPay.gs _getDefaultPaymentMethod().
+ * @returns {{ found: boolean, methodId: string|null, methodType: string|null, error: string|null }}
+ */
+function stax_getDefaultPaymentMethod_(staxCustomerId) {
+  var result = stax_apiRequest_("GET", "/customer/" + staxCustomerId + "/payment-method", null);
+  if (!result.success) {
+    return { found: false, methodId: null, methodType: null, error: "API error fetching payment methods: " + (result.error || "Unknown") };
+  }
+
+  var methods = stax_extractArray_(result.data);
+  var active = [];
+  for (var i = 0; i < methods.length; i++) {
+    if (!methods[i].deleted_at && !methods[i].purged_at) {
+      active.push(methods[i]);
+    }
+  }
+
+  if (active.length === 0) {
+    return { found: false, methodId: null, methodType: null, error: "No active payment methods on file" };
+  }
+
+  // Prefer default
+  for (var j = 0; j < active.length; j++) {
+    if (active[j].is_default === true || active[j].is_default === 1) {
+      return { found: true, methodId: active[j].id, methodType: active[j].method || "unknown", error: null };
+    }
+  }
+
+  // Fallback to first active
+  return { found: true, methodId: active[0].id, methodType: active[0].method || "unknown", error: null };
+}
+
+/**
+ * Execute a charge on a single Stax invoice with a payment method.
+ * Mirrors StaxAutoPay.gs _chargeInvoice().
+ * @returns {{ success: boolean, transactionId: string, error: string|null, declined: boolean, partial: boolean }}
+ */
+function stax_chargeInvoice_(staxInvoiceId, paymentMethodId) {
+  var payload = {
+    payment_method_id: paymentMethodId,
+    email_receipt: "1"
+  };
+
+  var result = stax_apiRequest_("POST", "/invoice/" + staxInvoiceId + "/pay", payload);
+
+  if (result.success && result.data) {
+    var balanceDue = parseFloat(result.data.balance_due);
+    var invoiceStatus = String(result.data.status || "").toUpperCase();
+
+    // Extract transaction ID (fallback chain)
+    var transactionId = "";
+    if (result.data.transactions && result.data.transactions.length > 0) {
+      transactionId = result.data.transactions[result.data.transactions.length - 1].id || "";
+    } else if (result.data.transaction_id) {
+      transactionId = result.data.transaction_id;
+    } else if (result.data.id) {
+      transactionId = result.data.id;
+    }
+
+    // Check for partial payment
+    if (!isNaN(balanceDue) && balanceDue > 0 && invoiceStatus !== "PAID") {
+      return { success: false, transactionId: transactionId, error: "Remaining balance: " + balanceDue, declined: false, partial: true };
+    }
+
+    return { success: true, transactionId: transactionId, error: null, declined: false, partial: false };
+  }
+
+  // Failure
+  var errMsg = result.error || "Unknown error";
+  var isDeclined = false;
+  if (result.status === 422 || result.status === 400) {
+    var lower = errMsg.toLowerCase();
+    if (lower.indexOf("decline") >= 0 || lower.indexOf("insufficient") >= 0 ||
+        lower.indexOf("expired") >= 0 || lower.indexOf("card") >= 0 ||
+        lower.indexOf("do not honor") >= 0) {
+      isDeclined = true;
+    }
+  }
+
+  return { success: false, transactionId: "", error: errMsg, declined: isDeclined, partial: false };
+}
+
+/**
+ * Send invoice email (pay link) via Stax API.
+ * Mirrors StaxAutoPay.gs _sendInvoiceEmail().
+ * @returns {{ success: boolean, error: string|null }}
+ */
+function stax_sendInvoiceEmail_(staxInvoiceId) {
+  var result = stax_apiRequest_("PUT", "/invoice/" + staxInvoiceId + "/send/email", {});
+  if (result.success) {
+    return { success: true, error: null };
+  }
+  return { success: false, error: result.error || "Unknown error sending invoice email" };
+}
+
+/**
+ * Look up Stax Customer IDs from the Customers tab for invoices missing them.
+ * Mirrors StaxAutoPay.gs _lookupStaxCustomerIds().
+ * Mutates invData in place (sets Stax Customer ID column) and returns changed flag.
+ */
+function stax_lookupCustomerIds_(ss, invSheet, invData, numRows) {
+  // Build customer map from Customers tab
+  var custSheet = ss.getSheetByName("Customers");
+  var custMap = {};
+  if (custSheet) {
+    var custData = custSheet.getDataRange().getValues();
+    for (var c = 1; c < custData.length; c++) {
+      var qbName = String(custData[c][0] || "").trim();
+      var staxId = String(custData[c][3] || "").trim();
+      if (qbName && staxId) {
+        custMap[stax_normalizeName_(qbName)] = staxId;
+      }
+    }
+  }
+
+  // Fill in missing Stax Customer IDs on Invoices tab
+  var colCRange = invSheet.getRange(2, 3, numRows, 1);
+  var colCValues = colCRange.getValues();
+  var changed = false;
+
+  for (var i = 0; i < numRows; i++) {
+    if (!String(colCValues[i][0]).trim()) {
+      var qbCustName = stax_normalizeName_(invData[i + 1][1]);
+      if (custMap[qbCustName]) {
+        colCValues[i][0] = custMap[qbCustName];
+        invData[i + 1][2] = custMap[qbCustName]; // update in-memory too
+        changed = true;
+      }
+    }
+  }
+
+  if (changed) colCRange.setValues(colCValues);
+  return changed;
+}
+
+// ─── Endpoint: listIIFFiles (v38.11.0) ──────────────────────────────────────
+
+/**
+ * GET listIIFFiles — List IIF files from the QB export Drive folder.
+ * Reads IIF_EXPORT_FOLDER_ID from CB Settings. Returns file metadata.
+ * Admin-only.
+ */
+function handleListIIFFiles_() {
+  // Read IIF_EXPORT_FOLDER_ID from CB Settings
+  var cbId = PropertiesService.getScriptProperties().getProperty("CB_SPREADSHEET_ID");
+  if (!cbId) return errorResponse_("CB_SPREADSHEET_ID not configured", "CONFIG_ERROR");
+
+  var cbSS, folderId = "";
+  try {
+    cbSS = SpreadsheetApp.openById(cbId);
+    var settingsSheet = cbSS.getSheetByName("Settings");
+    if (settingsSheet) {
+      var settingsData = settingsSheet.getDataRange().getValues();
+      for (var s = 0; s < settingsData.length; s++) {
+        if (String(settingsData[s][0]).trim() === "IIF_EXPORT_FOLDER_ID") {
+          folderId = String(settingsData[s][1]).trim();
+          break;
+        }
+      }
+    }
+  } catch (e) {
+    return errorResponse_("Cannot read CB Settings: " + e.message, "OPEN_FAILED");
+  }
+
+  if (!folderId) return errorResponse_("IIF_EXPORT_FOLDER_ID not configured in CB Settings. Set this to the Google Drive folder ID where QB IIF exports are saved.", "CONFIG_ERROR");
+
+  var folder;
+  try { folder = DriveApp.getFolderById(folderId); }
+  catch (e) { return errorResponse_("Cannot access IIF folder: " + e.message + ". Check that the folder ID is correct and shared with the API account.", "DRIVE_ERROR"); }
+
+  var files = [];
+  var iter = folder.getFiles();
+  while (iter.hasNext()) {
+    var f = iter.next();
+    var name = f.getName();
+    // Only show .iif and .txt files
+    if (!/\.(iif|txt)$/i.test(name)) continue;
+    files.push({
+      id: f.getId(),
+      name: name,
+      size: f.getSize(),
+      lastUpdated: Utilities.formatDate(f.getLastUpdated(), Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm"),
+      url: f.getUrl()
+    });
+  }
+
+  // Sort newest first
+  files.sort(function(a, b) { return b.lastUpdated.localeCompare(a.lastUpdated); });
+
+  return jsonResponse_({
+    files: files,
+    count: files.length,
+    folderId: folderId,
+    folderName: folder.getName()
+  });
+}
+
+// ─── Endpoint: importIIFFromDrive (v38.11.0) ────────────────────────────────
+
+/**
+ * POST importIIFFromDrive — Import an IIF file from Google Drive by file ID.
+ * Same parsing logic as handleImportIIF_, just reads from Drive instead of base64 upload.
+ * Admin-only.
+ */
+function handleImportIIFFromDrive_(payload) {
+  var fileId = String(payload.fileId || "").trim();
+  if (!fileId) return errorResponse_("fileId is required", "MISSING_PARAM");
+
+  var file;
+  try { file = DriveApp.getFileById(fileId); }
+  catch (e) { return errorResponse_("Cannot access file: " + e.message, "DRIVE_ERROR"); }
+
+  var fileName = file.getName();
+  var content = file.getBlob().getDataAsString("UTF-8");
+
+  if (!content || content.length < 10) {
+    return errorResponse_("File is empty or too small: " + fileName, "INVALID_FILE");
+  }
+
+  // Encode as base64 and delegate to the existing import handler
+  var base64 = Utilities.base64Encode(Utilities.newBlob(content).getBytes());
+  return handleImportIIF_({ fileContent: base64, fileName: fileName });
+}
+
+// ─── Endpoint 0a: updateStaxInvoice (v38.10.0) ────────────────────────────────
+
+/**
+ * POST updateStaxInvoice — Edit fields on a PENDING or CREATED invoice row.
+ * Admin-only. Editable fields: dueDate, amount, customer (QB name), notes.
+ * For CREATED invoices, only dueDate and notes are editable (amount/customer
+ * are locked in Stax once the invoice is created).
+ */
+function handleUpdateStaxInvoice_(payload) {
+  var qbInvoiceNo = String(payload.qbInvoiceNo || "").trim();
+  if (!qbInvoiceNo) return errorResponse_("qbInvoiceNo is required", "MISSING_PARAM");
+
+  var ss = getStaxSpreadsheet_();
+  var invSheet = ss.getSheetByName("Invoices");
+  if (!invSheet) return errorResponse_("Invoices tab not found", "NOT_FOUND");
+
+  var invData = invSheet.getDataRange().getValues();
+  var foundRow = -1;
+  for (var i = 1; i < invData.length; i++) {
+    if (String(invData[i][0] || "").trim() === qbInvoiceNo) { foundRow = i; break; }
+  }
+  if (foundRow < 0) return errorResponse_("Invoice '" + qbInvoiceNo + "' not found", "NOT_FOUND");
+
+  var currentStatus = String(invData[foundRow][8] || "").trim().toUpperCase();
+  if (currentStatus !== "PENDING" && currentStatus !== "CREATED") {
+    return errorResponse_("Can only edit PENDING or CREATED invoices (current: " + currentStatus + ")", "INVALID_STATE");
+  }
+
+  var changed = [];
+
+  // Due Date (col 5) — always editable
+  if (payload.dueDate !== undefined) {
+    var dd = String(payload.dueDate).trim();
+    if (dd) {
+      invSheet.getRange(foundRow + 1, 5).setValue(dd);
+      changed.push("dueDate=" + dd);
+    }
+  }
+
+  // Notes (col 11) — always editable
+  if (payload.notes !== undefined) {
+    invSheet.getRange(foundRow + 1, 11).setValue(String(payload.notes));
+    changed.push("notes");
+  }
+
+  // Amount (col 6) — PENDING only (locked after push to Stax)
+  if (payload.amount !== undefined) {
+    if (currentStatus !== "PENDING") {
+      return errorResponse_("Cannot change amount on a CREATED invoice — it's already in Stax", "INVALID_STATE");
+    }
+    var amt = Number(payload.amount);
+    if (isNaN(amt) || amt <= 0) return errorResponse_("Amount must be > 0", "INVALID_PAYLOAD");
+    amt = Math.round(amt * 100) / 100;
+    invSheet.getRange(foundRow + 1, 6).setValue(amt);
+    changed.push("amount=" + amt);
+  }
+
+  // Customer (col 2) — PENDING only
+  if (payload.customer !== undefined) {
+    if (currentStatus !== "PENDING") {
+      return errorResponse_("Cannot change customer on a CREATED invoice — it's already in Stax", "INVALID_STATE");
+    }
+    var cust = String(payload.customer).trim();
+    if (!cust) return errorResponse_("Customer name cannot be empty", "INVALID_PAYLOAD");
+    invSheet.getRange(foundRow + 1, 2).setValue(cust);
+
+    // Also try to fill Stax Customer ID from Customers tab
+    var custSheet = ss.getSheetByName("Customers");
+    if (custSheet) {
+      var custData = custSheet.getDataRange().getValues();
+      for (var c = 1; c < custData.length; c++) {
+        if (stax_normalizeName_(String(custData[c][0] || "")) === stax_normalizeName_(cust)) {
+          var sid = String(custData[c][3] || "").trim();
+          if (sid) { invSheet.getRange(foundRow + 1, 3).setValue(sid); break; }
+        }
+      }
+    }
+    changed.push("customer=" + cust);
+  }
+
+  // Invalidate cache
+  try { CacheService.getScriptCache().remove("stax_invoices"); } catch (e) {}
+
+  return jsonResponse_({
+    success: true, qbInvoiceNo: qbInvoiceNo, status: currentStatus,
+    changed: changed, message: changed.length + " field(s) updated"
+  });
+}
+
+// ─── Endpoint 0b: deleteStaxInvoice (v38.10.0) ────────────────────────────────
+
+/**
+ * POST deleteStaxInvoice — Mark a PENDING invoice as DELETED.
+ * Admin-only. Only works on PENDING rows (not yet pushed to Stax).
+ * Row stays in sheet for audit — just status change.
+ */
+function handleDeleteStaxInvoice_(payload) {
+  var qbInvoiceNo = String(payload.qbInvoiceNo || "").trim();
+  var rowIndex = payload.rowIndex ? Number(payload.rowIndex) : 0;
+  if (!qbInvoiceNo && !rowIndex) return errorResponse_("qbInvoiceNo or rowIndex is required", "MISSING_PARAM");
+
+  var ss = getStaxSpreadsheet_();
+  var invSheet = ss.getSheetByName("Invoices");
+  if (!invSheet) return errorResponse_("Invoices tab not found", "NOT_FOUND");
+
+  var invData = invSheet.getDataRange().getValues();
+  var foundRow = -1;
+
+  // Prefer rowIndex (handles duplicates); fall back to QB# search
+  if (rowIndex >= 2 && rowIndex <= invData.length) {
+    foundRow = rowIndex - 1; // Convert to 0-based
+    qbInvoiceNo = qbInvoiceNo || String(invData[foundRow][0] || "").trim();
+  } else {
+    for (var i = 1; i < invData.length; i++) {
+      if (String(invData[i][0] || "").trim() === qbInvoiceNo) { foundRow = i; break; }
+    }
+  }
+  if (foundRow < 0) return errorResponse_("Invoice not found", "NOT_FOUND");
+
+  var currentStatus = String(invData[foundRow][8] || "").trim().toUpperCase();
+  if (currentStatus !== "PENDING") {
+    return errorResponse_("Can only delete PENDING invoices (current: " + currentStatus + "). Use Void for CREATED invoices.", "INVALID_STATE");
+  }
+
+  invSheet.getRange(foundRow + 1, 9).setValue("DELETED");
+  invSheet.getRange(foundRow + 1, 11).setValue("Deleted from Stride Hub");
+
+  try { CacheService.getScriptCache().remove("stax_invoices"); } catch (e) {}
+  stax_appendRunLog_(ss, "deleteStaxInvoice", "Deleted QB#" + qbInvoiceNo, "");
+
+  return jsonResponse_({ success: true, qbInvoiceNo: qbInvoiceNo, previousStatus: currentStatus });
+}
+
+// ─── Endpoint 0: createTestInvoice (v38.9.2) ─────────────────────────────────
+
+/**
+ * POST createTestInvoice — Insert a controlled test invoice row into the
+ * Invoices tab. Admin-only, LockService protected.
+ * Does NOT call the Stax API — the invoice stays PENDING until the user
+ * clicks "Create Stax Invoices" (which pushes it to Stax normally).
+ * Test invoices are machine-marked with Is Test=TRUE.
+ * @param {{ customer: string, amount: number, qbInvoiceNo?: string }}
+ */
+function handleCreateTestInvoice_(payload) {
+  var customer = String(payload.customer || "").trim();
+  if (!customer) return errorResponse_("Customer name is required", "MISSING_PARAM");
+
+  var amount = Number(payload.amount);
+  if (isNaN(amount) || amount <= 0 || amount > 100) {
+    return errorResponse_("Amount must be between $0.01 and $100.00", "INVALID_PAYLOAD");
+  }
+  amount = Math.round(amount * 100) / 100; // normalize to 2 decimals
+
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(5000)) {
+    return errorResponse_("Another operation is in progress. Please wait.", "LOCK_CONFLICT");
+  }
+
+  try {
+    var ss = getStaxSpreadsheet_();
+
+    // ── Look up Stax Customer ID from Customers tab ──
+    var custSheet = ss.getSheetByName("Customers");
+    var staxCustId = "";
+    if (custSheet) {
+      var custData = custSheet.getDataRange().getValues();
+      var matchCount = 0;
+      for (var c = 1; c < custData.length; c++) {
+        var qbName = String(custData[c][0] || "").trim();
+        if (stax_normalizeName_(qbName) === stax_normalizeName_(customer)) {
+          var candidateId = String(custData[c][3] || "").trim();
+          if (candidateId) {
+            staxCustId = candidateId;
+            matchCount++;
+          }
+        }
+      }
+      if (matchCount > 1) {
+        Logger.log("WARNING: handleCreateTestInvoice_ found " + matchCount +
+          " mapping rows for customer '" + customer + "'. Using first match: " + staxCustId);
+      }
+    }
+    if (!staxCustId) {
+      return errorResponse_("Customer '" + customer + "' not found in Stax mapping or has no Stax Customer ID", "NOT_FOUND");
+    }
+
+    // ── Generate or validate QB Invoice # ──
+    var qbInvoiceNo = String(payload.qbInvoiceNo || "").trim();
+    if (qbInvoiceNo) {
+      // Check for duplicates
+      var invSheet = ss.getSheetByName("Invoices");
+      if (invSheet) {
+        var invData = invSheet.getDataRange().getValues();
+        for (var d = 1; d < invData.length; d++) {
+          if (String(invData[d][0] || "").trim() === qbInvoiceNo) {
+            return errorResponse_("Invoice # '" + qbInvoiceNo + "' already exists", "DUPLICATE");
+          }
+        }
+      }
+    } else {
+      // Auto-generate: TEST-YYYYMMDD-HHmmss
+      qbInvoiceNo = "TEST-" + Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyyMMdd-HHmmss");
+    }
+
+    // ── Ensure Is Test column header exists on Invoices tab ──
+    var invSheet2 = ss.getSheetByName("Invoices");
+    if (!invSheet2) return errorResponse_("Invoices tab not found in Stax spreadsheet", "NOT_FOUND");
+
+    var headers = invSheet2.getRange(1, 1, 1, invSheet2.getLastColumn()).getValues()[0];
+    var isTestCol = -1;
+    for (var h = 0; h < headers.length; h++) {
+      if (String(headers[h]).trim() === "Is Test") { isTestCol = h; break; }
+    }
+    if (isTestCol < 0) {
+      // Add the header (non-destructive append)
+      isTestCol = headers.length;
+      invSheet2.getRange(1, isTestCol + 1).setValue("Is Test");
+    }
+
+    // ── Ensure Is Test column header exists on Charge Log tab ──
+    var clSheet = ss.getSheetByName("Charge Log");
+    if (clSheet) {
+      var clHeaders = clSheet.getRange(1, 1, 1, clSheet.getLastColumn()).getValues()[0];
+      var clTestCol = -1;
+      for (var ch = 0; ch < clHeaders.length; ch++) {
+        if (String(clHeaders[ch]).trim() === "Is Test") { clTestCol = ch; break; }
+      }
+      if (clTestCol < 0) {
+        clSheet.getRange(1, clHeaders.length + 1).setValue("Is Test");
+      }
+    }
+
+    // ── Build invoice row ──
+    // Columns: QB Invoice #, QB Customer Name, Stax Customer ID, Invoice Date,
+    //          Due Date, Total Amount, Line Items JSON, Stax Invoice ID, Status,
+    //          Created At, Notes, Is Test
+    var today = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd");
+    var dueDate = String(payload.dueDate || "").trim() || today;
+    var nowTs = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm:ss");
+    var row = [
+      qbInvoiceNo,       // QB Invoice #
+      customer,           // QB Customer Name
+      staxCustId,         // Stax Customer ID
+      today,              // Invoice Date
+      dueDate,            // Due Date (user-specified or today)
+      amount,             // Total Amount
+      "",                 // Line Items JSON (empty for test)
+      "",                 // Stax Invoice ID (empty — PENDING)
+      "PENDING",          // Status
+      nowTs,              // Created At
+      "Test invoice created from Stride Hub" // Notes
+    ];
+
+    // Pad row to match header count, then set Is Test + Auto Charge
+    while (row.length <= isTestCol) row.push("");
+    row[isTestCol] = "TRUE";
+
+    // Ensure Auto Charge column exists and set default TRUE
+    var acCol2 = -1;
+    for (var ac = 0; ac < headers.length; ac++) {
+      if (String(headers[ac]).trim() === "Auto Charge") { acCol2 = ac; break; }
+    }
+    if (acCol2 < 0) {
+      acCol2 = Math.max(headers.length, row.length);
+      invSheet2.getRange(1, acCol2 + 1).setValue("Auto Charge");
+    }
+    while (row.length <= acCol2) row.push("");
+    row[acCol2] = "TRUE";
+
+    invSheet2.appendRow(row);
+
+    // Invalidate cache
+    try { CacheService.getScriptCache().remove("stax_invoices"); } catch (e) {}
+
+    return jsonResponse_({
+      success: true,
+      qbInvoiceNo: qbInvoiceNo,
+      customer: customer,
+      amount: amount,
+      isTest: true
+    });
+
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// ─── Endpoint 1: createStaxInvoices ─────────────────────────────────────────
+
+/**
+ * POST createStaxInvoices — Create invoices in Stax from PENDING rows.
+ * Mirrors StaxAutoPay.gs createStaxInvoices().
+ * Admin-only. LockService protected.
+ */
+function handleCreateStaxInvoices_(payload) {
+  // v38.10.0: Optional selective push — only process listed invoice numbers
+  var selectiveNos = null;
+  if (payload && payload.invoiceNos && Array.isArray(payload.invoiceNos) && payload.invoiceNos.length > 0) {
+    selectiveNos = {};
+    for (var sn = 0; sn < payload.invoiceNos.length; sn++) {
+      selectiveNos[String(payload.invoiceNos[sn]).trim()] = true;
+    }
+  }
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(5000)) {
+    return errorResponse_("Another invoice creation is in progress. Please wait.", "LOCK_CONFLICT");
+  }
+
+  try {
+    var ss = getStaxSpreadsheet_();
+    var invSheet = ss.getSheetByName("Invoices");
+    if (!invSheet) return errorResponse_("Invoices tab not found in Stax spreadsheet", "NOT_FOUND");
+
+    var invData = invSheet.getDataRange().getValues();
+    if (invData.length <= 1) return jsonResponse_({ created: 0, skippedDupe: 0, skippedNoCustomer: 0, skippedInvalid: 0, apiErrors: 0, total: 0, summary: "No invoices to process" });
+
+    var numRows = invData.length - 1; // exclude header
+
+    // Lookup missing Stax Customer IDs
+    stax_lookupCustomerIds_(ss, invSheet, invData, numRows);
+
+    // Get STAX_INVOICE_PAY_URL from Config (for exception logging)
+    var payUrlBase = "";
+    var configSheet = ss.getSheetByName("Config");
+    if (configSheet) {
+      var cfgData = configSheet.getDataRange().getValues();
+      for (var ci = 0; ci < cfgData.length; ci++) {
+        if (String(cfgData[ci][0]).trim() === "STAX_INVOICE_PAY_URL") {
+          payUrlBase = String(cfgData[ci][1]).trim();
+          break;
+        }
+      }
+    }
+    if (!payUrlBase) payUrlBase = "https://app.staxpayments.com/#/bill/";
+
+    var stats = { total: 0, created: 0, skippedDupe: 0, skippedNoCustomer: 0, skippedInvalid: 0, apiErrors: 0 };
+    var errorDetails = []; // v38.11.0: collect detailed error messages for UI display
+
+    // Read columns for batch update
+    var colHRange = invSheet.getRange(2, 8, numRows, 1); // Stax Invoice ID
+    var colIRange = invSheet.getRange(2, 9, numRows, 1); // Status
+    var colKRange = invSheet.getRange(2, 11, numRows, 1); // Notes
+    var colHValues = colHRange.getValues();
+    var colIValues = colIRange.getValues();
+    var colKValues = colKRange.getValues();
+    var colHChanged = false, colIChanged = false, colKChanged = false;
+
+    for (var i = 0; i < numRows; i++) {
+      var status = String(colIValues[i][0]).trim().toUpperCase();
+      var existingStaxId = String(colHValues[i][0]).trim();
+
+      // Gate: only process PENDING without a Stax Invoice ID
+      if (status !== "PENDING") continue;
+      if (existingStaxId) continue;
+
+      var docNum     = String(invData[i + 1][0] || "").trim();
+
+      // v38.10.0: selective push — skip if not in the selected list
+      if (selectiveNos && !selectiveNos[docNum]) continue;
+
+      stats.total++;
+      var custName   = String(invData[i + 1][1] || "").trim();
+      var staxCustId = String(invData[i + 1][2] || "").trim();
+      var invDate    = invData[i + 1][3];
+      var dueDate    = invData[i + 1][4];
+      var totalRaw   = invData[i + 1][5];
+      var lineItemsRaw = String(invData[i + 1][6] || "");
+
+      // Validate customer
+      if (!staxCustId) {
+        stax_appendException_(ss, docNum, custName, "", totalRaw, dueDate, "NO_CUSTOMER", "");
+        stats.skippedNoCustomer++;
+        continue;
+      }
+
+      // Validate amount
+      var total = parseFloat(totalRaw);
+      if (isNaN(total) || total <= 0) {
+        stax_appendException_(ss, docNum, custName, staxCustId, totalRaw, dueDate, "INVALID_PAYLOAD", "");
+        stats.skippedInvalid++;
+        continue;
+      }
+
+      // Build due date
+      var dueDateFormatted = stax_parseDateForStax_(dueDate);
+      if (!dueDateFormatted) {
+        var invDateParsed = stax_parseDateForStax_(invDate);
+        if (invDateParsed) {
+          var d30 = new Date(invDateParsed);
+          d30.setDate(d30.getDate() + 30);
+          dueDateFormatted = Utilities.formatDate(d30, Session.getScriptTimeZone(), "yyyy-MM-dd");
+        }
+      }
+
+      // Build line items
+      var lineItems = stax_buildLineItems_(lineItemsRaw, total, docNum);
+
+      // Build dedup key and memo
+      var invDateStr = stax_parseDateForStax_(invDate) || String(invDate).trim();
+      var refKey = "QB#" + docNum + "|" + stax_normalizeName_(custName) + "|" + total + "|" + invDateStr;
+      var memo = "QB #" + docNum + " - " + custName;
+
+      // Calculate subtotal/tax
+      var subtotal = 0;
+      for (var li = 0; li < lineItems.length; li++) {
+        subtotal += (lineItems[li].quantity * lineItems[li].price);
+      }
+      var tax = total - subtotal;
+
+      // Build Stax API payload
+      // v38.11.0: Stax requires `url` field and `due_at` in "Y-m-d H:i:s" format
+      var apiPayload = {
+        customer_id: staxCustId,
+        total: total,
+        url: payUrlBase,
+        meta: {
+          subtotal: subtotal,
+          tax: tax,
+          memo: memo,
+          reference: refKey,
+          lineItems: lineItems
+        }
+      };
+      if (dueDateFormatted) apiPayload.due_at = dueDateFormatted + " 00:00:00";
+
+      // Duplicate check
+      var dupeCheck = stax_checkDuplicate_(refKey);
+      if (dupeCheck.found) {
+        colHValues[i][0] = dupeCheck.invoiceId;
+        colIValues[i][0] = "CREATED";
+        colKValues[i][0] = "Linked to existing Stax invoice (duplicate protection)";
+        colHChanged = true; colIChanged = true; colKChanged = true;
+        stats.skippedDupe++;
+        continue;
+      }
+
+      // Create invoice
+      var createResult = stax_apiRequest_("POST", "/invoice", apiPayload);
+      if (createResult.success && createResult.data && createResult.data.id) {
+        colHValues[i][0] = createResult.data.id;
+        colIValues[i][0] = "CREATED";
+        colHChanged = true; colIChanged = true;
+        stats.created++;
+      } else {
+        var errMsg = createResult.error || "Unknown API error";
+        Logger.log("createStaxInvoices API_ERROR for " + docNum + ": " + errMsg + " | status=" + createResult.status);
+        stax_appendException_(ss, docNum, custName, staxCustId, total, dueDate, "API_ERROR: " + String(errMsg).substring(0, 150), "");
+        colIValues[i][0] = "EXCEPTION";
+        colKValues[i][0] = "API error: " + String(errMsg).substring(0, 200);
+        colIChanged = true; colKChanged = true;
+        stats.apiErrors++;
+        errorDetails.push({ invoice: docNum, customer: custName, error: errMsg, httpStatus: createResult.status });
+      }
+    }
+
+    // Batch write updates
+    if (colHChanged) colHRange.setValues(colHValues);
+    if (colIChanged) colIRange.setValues(colIValues);
+    if (colKChanged) colKRange.setValues(colKValues);
+
+    var summary = stats.created + " created, " + stats.skippedDupe + " dupes, " +
+      stats.skippedNoCustomer + " no customer, " + stats.skippedInvalid + " invalid, " +
+      stats.apiErrors + " API errors (of " + stats.total + " pending)";
+
+    stax_appendRunLog_(ss, "createStaxInvoices", summary, JSON.stringify(stats));
+
+    // Invalidate caches
+    try {
+      var cache = CacheService.getScriptCache();
+      cache.remove("stax_invoices");
+      cache.remove("stax_exceptions");
+      cache.remove("stax_runlog");
+    } catch (e) {}
+
+    return jsonResponse_({
+      created: stats.created,
+      skippedDupe: stats.skippedDupe,
+      skippedNoCustomer: stats.skippedNoCustomer,
+      skippedInvalid: stats.skippedInvalid,
+      apiErrors: stats.apiErrors,
+      total: stats.total,
+      summary: summary,
+      errorDetails: errorDetails.length > 0 ? errorDetails : undefined
+    });
+
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// ─── Endpoint 2: runStaxCharges ─────────────────────────────────────────────
+
+/**
+ * POST runStaxCharges — Execute charges on all eligible CREATED invoices.
+ * Mirrors StaxAutoPay.gs _executeChargeRun().
+ * Admin-only. LockService protected. MAXIMUM CARE — real money operations.
+ */
+function handleRunStaxCharges_(payload) {
+  var testMode = (payload && payload.testMode === true);
+
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(5000)) {
+    return errorResponse_("Another charge run is in progress. Please wait.", "LOCK_CONFLICT");
+  }
+
+  try {
+    var ss = getStaxSpreadsheet_();
+    var invSheet = ss.getSheetByName("Invoices");
+    if (!invSheet) return errorResponse_("Invoices tab not found", "NOT_FOUND");
+
+    var invData = invSheet.getDataRange().getValues();
+    if (invData.length <= 1) return jsonResponse_({ eligible: 0, paid: 0, dryRunPassed: 0, declined: 0, noPaymentMethod: 0, alreadyPaid: 0, partial: 0, apiErrors: 0, testMode: testMode, summary: "No invoices" });
+
+    var numRows = invData.length - 1;
+    var today = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd");
+
+    var stats = { eligible: 0, paid: 0, dryRunPassed: 0, declined: 0, noPaymentMethod: 0, alreadyPaid: 0, partial: 0, apiErrors: 0, skippedClientAutoCharge: 0 };
+
+    // v38.13.0: Build client name → autoCharge map from CB Clients tab
+    var clientAutoChargeMap = {};
+    try {
+      var cbId = prop_("CB_SPREADSHEET_ID");
+      if (cbId) {
+        var cbSS = SpreadsheetApp.openById(cbId);
+        var cbSheet = cbSS.getSheetByName("Clients");
+        if (cbSheet) {
+          var cbData = cbSheet.getDataRange().getValues();
+          var cbHdr = cbData[0].map(function(h) { return String(h).trim().toUpperCase(); });
+          var cbNameIdx = cbHdr.indexOf("CLIENT NAME");
+          var cbAutoIdx = cbHdr.indexOf("AUTO CHARGE");
+          if (cbNameIdx >= 0 && cbAutoIdx >= 0) {
+            for (var ci = 1; ci < cbData.length; ci++) {
+              var cn = String(cbData[ci][cbNameIdx] || "").trim();
+              var ca = cbData[ci][cbAutoIdx];
+              if (cn) clientAutoChargeMap[cn.toLowerCase()] = (ca === true || String(ca).toUpperCase() === "TRUE");
+            }
+          }
+        }
+      }
+    } catch (e) { Logger.log("Auto Charge client lookup warning: " + e); }
+
+    // Read columns for batch update
+    var colHRange = invSheet.getRange(2, 8, numRows, 1); // Stax Invoice ID
+    var colIRange = invSheet.getRange(2, 9, numRows, 1); // Status
+    var colKRange = invSheet.getRange(2, 11, numRows, 1); // Notes
+    var colHValues = colHRange.getValues();
+    var colIValues = colIRange.getValues();
+    var colKValues = colKRange.getValues();
+    var colIChanged = false, colKChanged = false;
+
+    // Payment method cache per customer
+    var pmCache = {};
+
+    // Get pay URL base for exception logging
+    var payUrlBase = "";
+    var configSheet = ss.getSheetByName("Config");
+    if (configSheet) {
+      var cfgData = configSheet.getDataRange().getValues();
+      for (var ci = 0; ci < cfgData.length; ci++) {
+        if (String(cfgData[ci][0]).trim() === "STAX_INVOICE_PAY_URL") {
+          payUrlBase = String(cfgData[ci][1]).trim();
+          break;
+        }
+      }
+    }
+    if (!payUrlBase) payUrlBase = "https://app.staxpayments.com/#/bill/";
+
+    for (var i = 0; i < numRows; i++) {
+      var status     = String(colIValues[i][0]).trim().toUpperCase();
+      var staxInvId  = String(colHValues[i][0]).trim();
+      var staxCustId = String(invData[i + 1][2] || "").trim();
+      var dueDate    = invData[i + 1][4];
+      var totalRaw   = invData[i + 1][5];
+      var docNum     = String(invData[i + 1][0] || "").trim();
+      var custName   = String(invData[i + 1][1] || "").trim();
+
+      // Gate checks
+      if (status !== "CREATED") continue;
+      if (!staxInvId) continue;
+      if (!staxCustId) continue;
+
+      var dueDateFormatted = stax_parseDateForStax_(dueDate);
+      if (!dueDateFormatted || dueDateFormatted > today) continue;
+
+      // v38.11.0: Per-invoice Auto Charge gate — col 13 (index 12)
+      // Default TRUE if column is empty/missing (backward-compatible)
+      var autoChargeVal = invData[i + 1].length > 12 ? String(invData[i + 1][12] || "").trim().toUpperCase() : "";
+      if (!testMode && (autoChargeVal === "FALSE" || autoChargeVal === "NO" || autoChargeVal === "OFF")) continue;
+
+      // v38.13.0: Per-client Auto Charge gate — check CB Clients Auto Charge column
+      // Default TRUE if client not found in map or column missing (backward-compatible)
+      if (!testMode && custName) {
+        var clientAC = clientAutoChargeMap[custName.toLowerCase()];
+        if (clientAC === false) { stats.skippedClientAutoCharge++; continue; }
+      }
+
+      stats.eligible++;
+
+      // SAFEGUARD 1: Pre-charge status check
+      var invCheck = stax_apiRequest_("GET", "/invoice/" + staxInvId, null);
+      if (!invCheck.success) {
+        stax_appendChargeLog_(ss, docNum, staxInvId, staxCustId, custName, totalRaw, "API_ERROR", "", "Pre-charge check failed: " + (invCheck.error || ""));
+        stax_appendException_(ss, docNum, custName, staxCustId, totalRaw, dueDate, "API_ERROR - Could not verify invoice status", payUrlBase + staxInvId);
+        colIValues[i][0] = "CHARGE_FAILED";
+        colKValues[i][0] = "Pre-charge status check failed";
+        colIChanged = true; colKChanged = true;
+        stats.apiErrors++;
+        continue;
+      }
+
+      var staxStatus = String(invCheck.data.status || "").toUpperCase();
+      if (staxStatus === "PAID") {
+        colIValues[i][0] = "PAID";
+        colKValues[i][0] = "Already paid in Stax (detected during charge run)";
+        colIChanged = true; colKChanged = true;
+        stats.alreadyPaid++;
+        stax_appendChargeLog_(ss, docNum, staxInvId, staxCustId, custName, totalRaw, "ALREADY_PAID", "", "");
+        continue;
+      }
+
+      var balanceCheck = parseFloat(invCheck.data.balance_due);
+      if (!isNaN(balanceCheck) && balanceCheck <= 0) {
+        colIValues[i][0] = "PAID";
+        colKValues[i][0] = "Balance due is zero in Stax";
+        colIChanged = true; colKChanged = true;
+        stats.alreadyPaid++;
+        continue;
+      }
+
+      // SAFEGUARD 2: Get payment method (with cache)
+      var pm;
+      if (pmCache[staxCustId]) {
+        pm = pmCache[staxCustId];
+      } else {
+        pm = stax_getDefaultPaymentMethod_(staxCustId);
+        pmCache[staxCustId] = pm;
+      }
+
+      if (!pm.found) {
+        stax_appendChargeLog_(ss, docNum, staxInvId, staxCustId, custName, totalRaw, "NO_PAYMENT_METHOD", "", pm.error || "");
+        stax_appendException_(ss, docNum, custName, staxCustId, totalRaw, dueDate, "NO_PAYMENT_METHOD", payUrlBase + staxInvId);
+        colIValues[i][0] = "CHARGE_FAILED";
+        colKValues[i][0] = "No payment method on file";
+        colIChanged = true; colKChanged = true;
+        stats.noPaymentMethod++;
+        continue;
+      }
+
+      // ── DRY RUN GATE: skip charge + all state mutations ──
+      if (testMode) {
+        // Dry run: pre-flight passed — log audit entry only, DO NOT mutate invoice state
+        stax_appendChargeLog_(ss, docNum, staxInvId, staxCustId, custName, totalRaw,
+          "DRY_RUN_PASSED", "DRYRUN-" + staxInvId,
+          "[DRY RUN] Pre-flight passed — balance $" + balanceCheck + ", PM: " + pm.methodType + " (" + pm.methodId.substring(0, 8) + "...)");
+        stats.dryRunPassed++;
+        continue;
+      }
+
+      // SAFEGUARD 3: Write charge-attempt marker (flush immediately for crash safety)
+      var now = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm:ss");
+      colKValues[i][0] = "CHARGE_ATTEMPT|" + now;
+      colKRange.setValues(colKValues); // Flush immediately
+
+      // EXECUTE CHARGE
+      var chargeResult = stax_chargeInvoice_(staxInvId, pm.methodId);
+
+      if (chargeResult.success) {
+        colIValues[i][0] = "PAID";
+        colKValues[i][0] = "Paid via " + pm.methodId + " | txn: " + chargeResult.transactionId;
+        colIChanged = true; colKChanged = true;
+        stats.paid++;
+        stax_appendChargeLog_(ss, docNum, staxInvId, staxCustId, custName, totalRaw, "SUCCESS", chargeResult.transactionId, "");
+      } else if (chargeResult.partial) {
+        colIValues[i][0] = "CHARGE_FAILED";
+        colKValues[i][0] = "Partial payment: " + chargeResult.error;
+        colIChanged = true; colKChanged = true;
+        stats.partial++;
+        stax_appendChargeLog_(ss, docNum, staxInvId, staxCustId, custName, totalRaw, "PARTIAL", chargeResult.transactionId, chargeResult.error);
+        stax_appendException_(ss, docNum, custName, staxCustId, totalRaw, dueDate, "PARTIAL", payUrlBase + staxInvId);
+      } else {
+        var chargeStatus = chargeResult.declined ? "DECLINED" : "API_ERROR";
+        colIValues[i][0] = "CHARGE_FAILED";
+        colKValues[i][0] = chargeStatus + ": " + String(chargeResult.error || "").substring(0, 200);
+        colIChanged = true; colKChanged = true;
+        if (chargeResult.declined) stats.declined++;
+        else stats.apiErrors++;
+        stax_appendChargeLog_(ss, docNum, staxInvId, staxCustId, custName, totalRaw, chargeStatus, "", chargeResult.error);
+        stax_appendException_(ss, docNum, custName, staxCustId, totalRaw, dueDate, chargeStatus, payUrlBase + staxInvId);
+      }
+    }
+
+    // Batch write final updates (dry run: nothing changed, but safe to write anyway)
+    if (colIChanged) colIRange.setValues(colIValues);
+    if (colKChanged) colKRange.setValues(colKValues);
+
+    var summary = testMode
+      ? stats.dryRunPassed + " passed pre-flight (DRY RUN — no charges executed), " +
+        stats.noPaymentMethod + " no PM, " + stats.alreadyPaid + " already paid, " +
+        stats.apiErrors + " API errors (of " + stats.eligible + " eligible)"
+      : stats.paid + " paid, " + stats.declined + " declined, " +
+        stats.noPaymentMethod + " no PM, " + stats.alreadyPaid + " already paid, " +
+        stats.partial + " partial, " + stats.apiErrors + " API errors (of " + stats.eligible + " eligible)";
+
+    stax_appendRunLog_(ss, testMode ? "runStaxCharges [DRY RUN]" : "runStaxCharges", summary, JSON.stringify(stats));
+
+    // Invalidate caches
+    try {
+      var cache = CacheService.getScriptCache();
+      cache.remove("stax_invoices");
+      cache.remove("stax_chargelog");
+      cache.remove("stax_exceptions");
+      cache.remove("stax_runlog");
+    } catch (e) {}
+
+    return jsonResponse_({
+      eligible: stats.eligible,
+      paid: stats.paid,
+      dryRunPassed: stats.dryRunPassed,
+      declined: stats.declined,
+      noPaymentMethod: stats.noPaymentMethod,
+      alreadyPaid: stats.alreadyPaid,
+      partial: stats.partial,
+      apiErrors: stats.apiErrors,
+      testMode: testMode,
+      summary: summary
+    });
+
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// ─── Endpoint 3: chargeSingleInvoice ────────────────────────────────────────
+
+/**
+ * POST chargeSingleInvoice — Charge a single invoice by QB Invoice # or Stax Invoice ID.
+ * Same safety checks as runStaxCharges but for one invoice.
+ * Admin-only.
+ */
+function handleChargeSingleInvoice_(payload) {
+  var testMode = payload.testMode === true;
+  var qbInvoiceNo = String(payload.qbInvoiceNo || "").trim();
+  var staxInvoiceId = String(payload.staxInvoiceId || "").trim();
+
+  if (!qbInvoiceNo && !staxInvoiceId) {
+    return errorResponse_("Either qbInvoiceNo or staxInvoiceId is required", "INVALID_PAYLOAD");
+  }
+
+  var ss = getStaxSpreadsheet_();
+  var invSheet = ss.getSheetByName("Invoices");
+  if (!invSheet) return errorResponse_("Invoices tab not found", "NOT_FOUND");
+
+  var invData = invSheet.getDataRange().getValues();
+  var foundRow = -1;
+  var staxInvId = "";
+  var staxCustId = "";
+  var docNum = "";
+  var custName = "";
+  var totalRaw = 0;
+  var dueDate = "";
+
+  for (var i = 1; i < invData.length; i++) {
+    var rowDocNum = String(invData[i][0] || "").trim();
+    var rowStaxId = String(invData[i][7] || "").trim();
+
+    if ((qbInvoiceNo && rowDocNum === qbInvoiceNo) ||
+        (staxInvoiceId && rowStaxId === staxInvoiceId)) {
+      foundRow = i;
+      docNum     = rowDocNum;
+      custName   = String(invData[i][1] || "").trim();
+      staxCustId = String(invData[i][2] || "").trim();
+      dueDate    = invData[i][4];
+      totalRaw   = invData[i][5];
+      staxInvId  = rowStaxId;
+      break;
+    }
+  }
+
+  if (foundRow < 0) return errorResponse_("Invoice not found", "NOT_FOUND");
+  if (!staxInvId) return errorResponse_("Invoice has no Stax Invoice ID — create it first", "INVALID_STATE");
+  if (!staxCustId) return errorResponse_("Invoice has no Stax Customer ID", "INVALID_STATE");
+
+  // Get pay URL base
+  var payUrlBase = "https://app.staxpayments.com/#/bill/";
+  var configSheet = ss.getSheetByName("Config");
+  if (configSheet) {
+    var cfgData = configSheet.getDataRange().getValues();
+    for (var ci = 0; ci < cfgData.length; ci++) {
+      if (String(cfgData[ci][0]).trim() === "STAX_INVOICE_PAY_URL") {
+        payUrlBase = String(cfgData[ci][1]).trim();
+        break;
+      }
+    }
+  }
+
+  // SAFEGUARD 1: Pre-charge status check
+  var invCheck = stax_apiRequest_("GET", "/invoice/" + staxInvId, null);
+  if (!invCheck.success) {
+    stax_appendChargeLog_(ss, docNum, staxInvId, staxCustId, custName, totalRaw, "API_ERROR", "", "Pre-charge check failed");
+    return errorResponse_("Failed to verify invoice status in Stax: " + (invCheck.error || ""), "API_ERROR");
+  }
+
+  var staxStatus = String(invCheck.data.status || "").toUpperCase();
+  if (staxStatus === "PAID") {
+    // Update sheet to reflect
+    invSheet.getRange(foundRow + 1, 9).setValue("PAID");
+    invSheet.getRange(foundRow + 1, 11).setValue("Already paid in Stax");
+    try { CacheService.getScriptCache().remove("stax_invoices"); } catch (e) {}
+    return jsonResponse_({ success: true, status: "ALREADY_PAID", transactionId: "", message: "Invoice was already paid in Stax" });
+  }
+
+  var balanceCheck = parseFloat(invCheck.data.balance_due);
+  if (!isNaN(balanceCheck) && balanceCheck <= 0) {
+    invSheet.getRange(foundRow + 1, 9).setValue("PAID");
+    invSheet.getRange(foundRow + 1, 11).setValue("Balance due is zero in Stax");
+    try { CacheService.getScriptCache().remove("stax_invoices"); } catch (e) {}
+    return jsonResponse_({ success: true, status: "ALREADY_PAID", transactionId: "", message: "Invoice balance is zero" });
+  }
+
+  // SAFEGUARD 2: Get payment method
+  var pm = stax_getDefaultPaymentMethod_(staxCustId);
+  if (!pm.found) {
+    stax_appendChargeLog_(ss, docNum, staxInvId, staxCustId, custName, totalRaw, "NO_PAYMENT_METHOD", "", pm.error || "");
+    stax_appendException_(ss, docNum, custName, staxCustId, totalRaw, dueDate, "NO_PAYMENT_METHOD", payUrlBase + staxInvId);
+    invSheet.getRange(foundRow + 1, 9).setValue("CHARGE_FAILED");
+    invSheet.getRange(foundRow + 1, 11).setValue("No payment method on file");
+    try { CacheService.getScriptCache().remove("stax_invoices"); } catch (e) {}
+    return errorResponse_("No payment method on file for this customer", "NO_PAYMENT_METHOD");
+  }
+
+  // ── DRY RUN GATE: skip charge + all state mutations ──
+  if (testMode) {
+    stax_appendChargeLog_(ss, docNum, staxInvId, staxCustId, custName, totalRaw,
+      "DRY_RUN_PASSED", "DRYRUN-" + staxInvId,
+      "[DRY RUN] Pre-flight passed — balance $" + balanceCheck + ", PM: " + pm.methodType + " (" + pm.methodId.substring(0, 8) + "...)");
+    stax_appendRunLog_(ss, "chargeSingleInvoice [DRY RUN]", "QB#" + docNum + " — pre-flight passed, no charge executed", "");
+    try { CacheService.getScriptCache().remove("stax_chargelog"); CacheService.getScriptCache().remove("stax_runlog"); } catch (e) {}
+    return jsonResponse_({
+      success: true,
+      status: "DRY_RUN_PASSED",
+      transactionId: "DRYRUN-" + staxInvId,
+      testMode: true,
+      message: "Dry run passed — invoice was NOT charged. Balance: $" + balanceCheck + ", Payment method: " + pm.methodType,
+      error: null
+    });
+  }
+
+  // SAFEGUARD 3: Write charge-attempt marker
+  var now = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm:ss");
+  invSheet.getRange(foundRow + 1, 11).setValue("CHARGE_ATTEMPT|" + now);
+
+  // EXECUTE CHARGE
+  var chargeResult = stax_chargeInvoice_(staxInvId, pm.methodId);
+
+  if (chargeResult.success) {
+    invSheet.getRange(foundRow + 1, 9).setValue("PAID");
+    invSheet.getRange(foundRow + 1, 11).setValue("Paid via " + pm.methodId + " | txn: " + chargeResult.transactionId);
+    stax_appendChargeLog_(ss, docNum, staxInvId, staxCustId, custName, totalRaw, "SUCCESS", chargeResult.transactionId, "");
+    stax_appendRunLog_(ss, "chargeSingleInvoice", "Charged QB#" + docNum + " — txn: " + chargeResult.transactionId, "");
+  } else if (chargeResult.partial) {
+    invSheet.getRange(foundRow + 1, 9).setValue("CHARGE_FAILED");
+    invSheet.getRange(foundRow + 1, 11).setValue("Partial payment: " + chargeResult.error);
+    stax_appendChargeLog_(ss, docNum, staxInvId, staxCustId, custName, totalRaw, "PARTIAL", chargeResult.transactionId, chargeResult.error);
+    stax_appendException_(ss, docNum, custName, staxCustId, totalRaw, dueDate, "PARTIAL", payUrlBase + staxInvId);
+  } else {
+    var chargeStatus = chargeResult.declined ? "DECLINED" : "API_ERROR";
+    invSheet.getRange(foundRow + 1, 9).setValue("CHARGE_FAILED");
+    invSheet.getRange(foundRow + 1, 11).setValue(chargeStatus + ": " + String(chargeResult.error || "").substring(0, 200));
+    stax_appendChargeLog_(ss, docNum, staxInvId, staxCustId, custName, totalRaw, chargeStatus, "", chargeResult.error);
+    stax_appendException_(ss, docNum, custName, staxCustId, totalRaw, dueDate, chargeStatus, payUrlBase + staxInvId);
+  }
+
+  // Invalidate caches
+  try {
+    var cache = CacheService.getScriptCache();
+    cache.remove("stax_invoices");
+    cache.remove("stax_chargelog");
+    cache.remove("stax_exceptions");
+    cache.remove("stax_runlog");
+  } catch (e) {}
+
+  return jsonResponse_({
+    success: chargeResult.success,
+    status: chargeResult.success ? "PAID" : (chargeResult.partial ? "PARTIAL" : (chargeResult.declined ? "DECLINED" : "API_ERROR")),
+    transactionId: chargeResult.transactionId || "",
+    testMode: false,
+    message: chargeResult.success ? "Invoice charged successfully" : (chargeResult.error || "Charge failed"),
+    error: chargeResult.error || null
+  });
+}
+
+// ─── Endpoint 3b: voidStaxInvoice (v38.9.2) ────────────────────────────────
+
+/**
+ * POST voidStaxInvoice — Set an invoice row status to VOIDED.
+ * Does NOT call Stax API (Stax doesn't have a void endpoint for invoices).
+ * Just updates the local sheet status so the invoice disappears from the active view.
+ * Admin-only.
+ */
+function handleVoidStaxInvoice_(payload) {
+  var qbInvoiceNo = String(payload.qbInvoiceNo || "").trim();
+  var rowIndex = payload.rowIndex ? Number(payload.rowIndex) : 0;
+  if (!qbInvoiceNo && !rowIndex) return errorResponse_("qbInvoiceNo or rowIndex is required", "MISSING_PARAM");
+
+  var ss = getStaxSpreadsheet_();
+  var invSheet = ss.getSheetByName("Invoices");
+  if (!invSheet) return errorResponse_("Invoices tab not found", "NOT_FOUND");
+
+  var invData = invSheet.getDataRange().getValues();
+  var foundRow = -1;
+
+  if (rowIndex >= 2 && rowIndex <= invData.length) {
+    foundRow = rowIndex - 1;
+    qbInvoiceNo = qbInvoiceNo || String(invData[foundRow][0] || "").trim();
+  } else {
+    for (var i = 1; i < invData.length; i++) {
+      if (String(invData[i][0] || "").trim() === qbInvoiceNo) { foundRow = i; break; }
+    }
+  }
+  if (foundRow < 0) return errorResponse_("Invoice not found", "NOT_FOUND");
+
+  var currentStatus = String(invData[foundRow][8] || "").trim().toUpperCase();
+  if (currentStatus === "PAID") {
+    return errorResponse_("Cannot void a PAID invoice — refund in Stax dashboard first", "INVALID_STATE");
+  }
+
+  invSheet.getRange(foundRow + 1, 9).setValue("VOIDED");
+  invSheet.getRange(foundRow + 1, 11).setValue("Voided from Stride Hub");
+
+  // Invalidate cache
+  try { CacheService.getScriptCache().remove("stax_invoices"); } catch (e) {}
+
+  stax_appendRunLog_(ss, "voidStaxInvoice", "Voided QB#" + qbInvoiceNo + " (was " + currentStatus + ")", "");
+
+  return jsonResponse_({ success: true, qbInvoiceNo: qbInvoiceNo, previousStatus: currentStatus });
+}
+
+// ─── Endpoint 3d: toggleAutoCharge (v38.11.0) ──────────────────────────────
+
+/**
+ * POST toggleAutoCharge — Set Auto Charge = TRUE or FALSE on one or more invoices.
+ * Supports bulk via invoiceNos array. Admin-only.
+ * @param {{ invoiceNos: string[], autoCharge: boolean }}
+ */
+function handleToggleAutoCharge_(payload) {
+  var invoiceNos = payload.invoiceNos;
+  if (!invoiceNos || !Array.isArray(invoiceNos) || invoiceNos.length === 0) {
+    return errorResponse_("invoiceNos array is required", "MISSING_PARAM");
+  }
+  var newVal = payload.autoCharge === true ? "TRUE" : "FALSE";
+
+  var ss = getStaxSpreadsheet_();
+  var invSheet = ss.getSheetByName("Invoices");
+  if (!invSheet) return errorResponse_("Invoices tab not found", "NOT_FOUND");
+
+  // Find or create Auto Charge column
+  var headers = invSheet.getRange(1, 1, 1, invSheet.getLastColumn()).getValues()[0];
+  var acCol = -1;
+  for (var h = 0; h < headers.length; h++) {
+    if (String(headers[h]).trim() === "Auto Charge") { acCol = h + 1; break; }
+  }
+  if (acCol < 0) {
+    acCol = headers.length + 1;
+    invSheet.getRange(1, acCol).setValue("Auto Charge");
+  }
+
+  var invData = invSheet.getDataRange().getValues();
+  var targetSet = {};
+  for (var n = 0; n < invoiceNos.length; n++) targetSet[String(invoiceNos[n]).trim()] = true;
+
+  var updated = 0;
+  for (var i = 1; i < invData.length; i++) {
+    var qb = String(invData[i][0] || "").trim();
+    if (targetSet[qb]) {
+      invSheet.getRange(i + 1, acCol).setValue(newVal);
+      updated++;
+    }
+  }
+
+  try { CacheService.getScriptCache().remove("stax_invoices"); } catch (e) {}
+
+  return jsonResponse_({
+    success: true, updated: updated, autoCharge: payload.autoCharge === true,
+    message: updated + " invoice(s) set to Auto Charge = " + newVal
+  });
+}
+
+// ─── Endpoint 3c: resetStaxInvoiceStatus (v38.11.0) ─────────────────────────
+
+/**
+ * POST resetStaxInvoiceStatus — Reset an invoice from EXCEPTION/CHARGE_FAILED/VOIDED
+ * back to PENDING (if no Stax ID) or CREATED (if has Stax ID).
+ * This re-enters the invoice into the charge workflow.
+ * Admin-only.
+ */
+function handleResetStaxInvoiceStatus_(payload) {
+  var qbInvoiceNo = String(payload.qbInvoiceNo || "").trim();
+  if (!qbInvoiceNo) return errorResponse_("qbInvoiceNo is required", "MISSING_PARAM");
+
+  var ss = getStaxSpreadsheet_();
+  var invSheet = ss.getSheetByName("Invoices");
+  if (!invSheet) return errorResponse_("Invoices tab not found", "NOT_FOUND");
+
+  var invData = invSheet.getDataRange().getValues();
+  var foundRow = -1;
+  var hasStaxId = false;
+  for (var i = 1; i < invData.length; i++) {
+    if (String(invData[i][0] || "").trim() === qbInvoiceNo) {
+      foundRow = i;
+      hasStaxId = !!String(invData[i][7] || "").trim();
+      break;
+    }
+  }
+  if (foundRow < 0) return errorResponse_("Invoice '" + qbInvoiceNo + "' not found", "NOT_FOUND");
+
+  var currentStatus = String(invData[foundRow][8] || "").trim().toUpperCase();
+  if (currentStatus === "PAID") {
+    return errorResponse_("Cannot reset a PAID invoice", "INVALID_STATE");
+  }
+  if (currentStatus === "PENDING" || currentStatus === "CREATED") {
+    return errorResponse_("Invoice is already " + currentStatus + " — no reset needed", "INVALID_STATE");
+  }
+
+  // Reset to CREATED if it already has a Stax ID, PENDING otherwise
+  var newStatus = hasStaxId ? "CREATED" : "PENDING";
+  invSheet.getRange(foundRow + 1, 9).setValue(newStatus);
+  invSheet.getRange(foundRow + 1, 11).setValue("Reset from " + currentStatus + " to " + newStatus + " via Stride Hub");
+
+  try { CacheService.getScriptCache().remove("stax_invoices"); } catch (e) {}
+  stax_appendRunLog_(ss, "resetInvoiceStatus", "Reset QB#" + qbInvoiceNo + ": " + currentStatus + " → " + newStatus, "");
+
+  return jsonResponse_({ success: true, qbInvoiceNo: qbInvoiceNo, previousStatus: currentStatus, newStatus: newStatus });
+}
+
+// ─── Endpoint 4: sendStaxPayLinks ───────────────────────────────────────────
+
+/**
+ * POST sendStaxPayLinks — Send pay link emails for all CHARGE_FAILED invoices.
+ * Mirrors StaxAutoPay.gs sendPayLinks().
+ * Admin-only. LockService protected.
+ */
+function handleSendStaxPayLinks_() {
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(5000)) {
+    return errorResponse_("Another pay link operation is in progress. Please wait.", "LOCK_CONFLICT");
+  }
+
+  try {
+    var ss = getStaxSpreadsheet_();
+    var invSheet = ss.getSheetByName("Invoices");
+    if (!invSheet) return errorResponse_("Invoices tab not found", "NOT_FOUND");
+
+    var invData = invSheet.getDataRange().getValues();
+    if (invData.length <= 1) return jsonResponse_({ sent: 0, failed: 0, total: 0, summary: "No invoices" });
+
+    var numRows = invData.length - 1;
+
+    // Find eligible invoices (CHARGE_FAILED with Stax Invoice ID)
+    var eligible = [];
+    for (var i = 0; i < numRows; i++) {
+      var status = String(invData[i + 1][8] || "").trim().toUpperCase();
+      var staxInvId = String(invData[i + 1][7] || "").trim();
+      if (status === "CHARGE_FAILED" && staxInvId) {
+        eligible.push({
+          rowIndex: i,
+          docNum: String(invData[i + 1][0] || "").trim(),
+          custName: String(invData[i + 1][1] || "").trim(),
+          staxInvId: staxInvId,
+          amount: invData[i + 1][5]
+        });
+      }
+    }
+
+    if (eligible.length === 0) {
+      return jsonResponse_({ sent: 0, failed: 0, total: 0, summary: "No CHARGE_FAILED invoices to send pay links for" });
+    }
+
+    // Read columns for batch update
+    var colIRange = invSheet.getRange(2, 9, numRows, 1); // Status
+    var colKRange = invSheet.getRange(2, 11, numRows, 1); // Notes
+    var colIValues = colIRange.getValues();
+    var colKValues = colKRange.getValues();
+    var colIChanged = false, colKChanged = false;
+
+    var stats = { sent: 0, failed: 0, total: eligible.length };
+
+    for (var j = 0; j < eligible.length; j++) {
+      var inv = eligible[j];
+      var sendResult = stax_sendInvoiceEmail_(inv.staxInvId);
+
+      var now = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm:ss");
+
+      if (sendResult.success) {
+        colIValues[inv.rowIndex][0] = "SENT";
+        colKValues[inv.rowIndex][0] = "Pay link emailed " + now;
+        colIChanged = true; colKChanged = true;
+        stats.sent++;
+      } else {
+        colKValues[inv.rowIndex][0] = "Send failed: " + String(sendResult.error || "").substring(0, 200);
+        colKChanged = true;
+        stax_appendException_(ss, inv.docNum, inv.custName, "", inv.amount, "", "SEND_FAILED", "");
+        stats.failed++;
+      }
+    }
+
+    if (colIChanged) colIRange.setValues(colIValues);
+    if (colKChanged) colKRange.setValues(colKValues);
+
+    var summary = stats.sent + " sent, " + stats.failed + " failed (of " + stats.total + " total)";
+    stax_appendRunLog_(ss, "sendStaxPayLinks", summary, JSON.stringify(stats));
+
+    // Invalidate caches
+    try {
+      var cache = CacheService.getScriptCache();
+      cache.remove("stax_invoices");
+      cache.remove("stax_exceptions");
+      cache.remove("stax_runlog");
+    } catch (e) {}
+
+    return jsonResponse_({
+      sent: stats.sent,
+      failed: stats.failed,
+      total: stats.total,
+      summary: summary
+    });
+
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// ─── Endpoint 5: sendStaxPayLink ────────────────────────────────────────────
+
+/**
+ * POST sendStaxPayLink — Send a pay link for a single invoice.
+ * Mirrors StaxAutoPay.gs sendSinglePayLink().
+ * Admin-only.
+ */
+function handleSendStaxPayLink_(payload) {
+  var qbInvoiceNo = String(payload.qbInvoiceNo || "").trim();
+  var staxInvoiceId = String(payload.staxInvoiceId || "").trim();
+
+  if (!qbInvoiceNo && !staxInvoiceId) {
+    return errorResponse_("Either qbInvoiceNo or staxInvoiceId is required", "INVALID_PAYLOAD");
+  }
+
+  var ss = getStaxSpreadsheet_();
+  var invSheet = ss.getSheetByName("Invoices");
+  if (!invSheet) return errorResponse_("Invoices tab not found", "NOT_FOUND");
+
+  var invData = invSheet.getDataRange().getValues();
+  var foundRow = -1;
+  var staxInvId = "";
+  var docNum = "";
+  var custName = "";
+
+  for (var i = 1; i < invData.length; i++) {
+    var rowDocNum = String(invData[i][0] || "").trim();
+    var rowStaxId = String(invData[i][7] || "").trim();
+
+    if ((qbInvoiceNo && rowDocNum === qbInvoiceNo) ||
+        (staxInvoiceId && rowStaxId === staxInvoiceId)) {
+      foundRow = i;
+      docNum    = rowDocNum;
+      custName  = String(invData[i][1] || "").trim();
+      staxInvId = rowStaxId;
+      break;
+    }
+  }
+
+  if (foundRow < 0) return errorResponse_("Invoice not found", "NOT_FOUND");
+  if (!staxInvId) return errorResponse_("Invoice has no Stax Invoice ID", "INVALID_STATE");
+
+  var sendResult = stax_sendInvoiceEmail_(staxInvId);
+  var now = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm:ss");
+
+  if (sendResult.success) {
+    invSheet.getRange(foundRow + 1, 9).setValue("SENT");
+    invSheet.getRange(foundRow + 1, 11).setValue("Pay link emailed " + now);
+    stax_appendRunLog_(ss, "sendStaxPayLink", "Sent for QB#" + docNum + " (" + custName + ")", "");
+  } else {
+    stax_appendException_(ss, docNum, custName, "", "", "", "SEND_FAILED", "");
+  }
+
+  // Invalidate caches
+  try {
+    var cache = CacheService.getScriptCache();
+    cache.remove("stax_invoices");
+    cache.remove("stax_exceptions");
+    cache.remove("stax_runlog");
+  } catch (e) {}
+
+  return jsonResponse_({
+    success: sendResult.success,
+    error: sendResult.error || null
+  });
+}
+
+// ─── Supabase Phase 3 — Bulk Sync & Reconciliation ──────────────────────────
+
+/**
+ * One-time bulk import: reads all active clients' data and upserts to Supabase.
+ * Payload: { clientSheetId?: string } — if provided, sync only that client.
+ * Admin-only endpoint.
+ */
+function handleBulkSyncToSupabase_(payload) {
+  var targetClient = String(payload.clientSheetId || "").trim();
+  var clients;
+  if (targetClient) {
+    // Sync a single client
+    var cbId = prop_("CB_SPREADSHEET_ID");
+    var cbSs = SpreadsheetApp.openById(cbId);
+    var clientsSheet = cbSs.getSheetByName("Clients");
+    var clientRows = sheetToObjects_(clientsSheet);
+    var found = null;
+    for (var i = 0; i < clientRows.length; i++) {
+      var sid = String(clientRows[i]["Spreadsheet ID"] || "").trim();
+      if (sid === targetClient) {
+        found = { name: String(clientRows[i]["Client Name"] || "").trim(), spreadsheetId: sid };
+        break;
+      }
+    }
+    if (!found) return errorResponse_("Client not found: " + targetClient, "NOT_FOUND");
+    clients = [found];
+  } else {
+    // Sync all active clients
+    var allClients = getTargetClients_("");
+    if (allClients.error) return errorResponse_(allClients.error, allClients.code);
+    clients = allClients.list;
+  }
+
+  var results = [];
+  var totalRows = { inventory: 0, tasks: 0, repairs: 0, will_calls: 0, shipments: 0, billing: 0 };
+
+  for (var c = 0; c < clients.length; c++) {
+    var client = clients[c];
+    var clientResult = { client: client.name, spreadsheetId: client.spreadsheetId, counts: {}, errors: [] };
+
+    try {
+      var ss = SpreadsheetApp.openById(client.spreadsheetId);
+
+      // Inventory
+      try {
+        var invSheet = ss.getSheetByName("Inventory");
+        if (invSheet) {
+          var invRows = sheetToObjects_(invSheet);
+          var invSb = [];
+          for (var i = 0; i < invRows.length; i++) {
+            var iid = String(invRows[i]["Item ID"] || "").trim();
+            if (!iid) continue;
+            invSb.push(sbInventoryRow_(client.spreadsheetId, {
+              itemId: iid, description: invRows[i]["Description"], vendor: invRows[i]["Vendor"],
+              sidemark: invRows[i]["Sidemark"], room: invRows[i]["Room"], itemClass: invRows[i]["Class"],
+              qty: invRows[i]["Qty"], location: invRows[i]["Location"], status: invRows[i]["Status"],
+              receiveDate: formatDate_(invRows[i]["Receive Date"]), releaseDate: formatDate_(invRows[i]["Release Date"]),
+              shipmentNumber: invRows[i]["Shipment #"], carrier: invRows[i]["Carrier"],
+              trackingNumber: invRows[i]["Tracking #"], itemNotes: invRows[i]["Item Notes"],
+              reference: invRows[i]["Reference"], taskNotes: invRows[i]["Task Notes"]
+            }));
+          }
+          supabaseBatchUpsert_("inventory", invSb);
+          clientResult.counts.inventory = invSb.length;
+          totalRows.inventory += invSb.length;
+        }
+      } catch (invErr) { clientResult.errors.push("inventory: " + invErr); }
+
+      // Tasks
+      try {
+        var taskSheet = ss.getSheetByName("Tasks");
+        if (taskSheet) {
+          var taskRows = sheetToObjects_(taskSheet);
+          var taskSb = [];
+          for (var j = 0; j < taskRows.length; j++) {
+            var tid = String(taskRows[j]["Task ID"] || "").trim();
+            if (!tid) continue;
+            taskSb.push(sbTaskRow_(client.spreadsheetId, {
+              taskId: tid, itemId: taskRows[j]["Item ID"], svcCode: taskRows[j]["Svc Code"] || taskRows[j]["Type"],
+              status: taskRows[j]["Status"], result: taskRows[j]["Result"], description: taskRows[j]["Description"],
+              taskNotes: taskRows[j]["Task Notes"], itemNotes: taskRows[j]["Item Notes"],
+              customPrice: taskRows[j]["Custom Price"], created: formatDate_(taskRows[j]["Created"]),
+              completedAt: formatDate_(taskRows[j]["Completed At"]), assignedTo: taskRows[j]["Assigned To"],
+              location: taskRows[j]["Location"]
+            }));
+          }
+          supabaseBatchUpsert_("tasks", taskSb);
+          clientResult.counts.tasks = taskSb.length;
+          totalRows.tasks += taskSb.length;
+        }
+      } catch (taskErr) { clientResult.errors.push("tasks: " + taskErr); }
+
+      // Repairs
+      try {
+        var repSheet = ss.getSheetByName("Repairs");
+        if (repSheet) {
+          var repRows = sheetToObjects_(repSheet);
+          var repSb = [];
+          for (var k = 0; k < repRows.length; k++) {
+            var rid = String(repRows[k]["Repair ID"] || "").trim();
+            if (!rid) continue;
+            repSb.push(sbRepairRow_(client.spreadsheetId, {
+              repairId: rid, itemId: repRows[k]["Item ID"], status: repRows[k]["Status"],
+              repairResult: repRows[k]["Repair Result"], quoteAmount: repRows[k]["Quote Amount"],
+              finalAmount: repRows[k]["Final Amount"], repairVendor: repRows[k]["Repair Vendor"],
+              repairNotes: repRows[k]["Repair Notes"], taskNotes: repRows[k]["Task Notes"],
+              itemNotes: repRows[k]["Item Notes"], completedDate: formatDate_(repRows[k]["Completed Date"])
+            }));
+          }
+          supabaseBatchUpsert_("repairs", repSb);
+          clientResult.counts.repairs = repSb.length;
+          totalRows.repairs += repSb.length;
+        }
+      } catch (repErr) { clientResult.errors.push("repairs: " + repErr); }
+
+      // Will Calls
+      try {
+        var wcSheet = ss.getSheetByName("Will_Calls");
+        if (wcSheet) {
+          var wcRows = sheetToObjects_(wcSheet);
+          var wcSb = [];
+          for (var m = 0; m < wcRows.length; m++) {
+            var wcn = String(wcRows[m]["WC Number"] || "").trim();
+            if (!wcn) continue;
+            wcSb.push(sbWillCallRow_(client.spreadsheetId, {
+              wcNumber: wcn, status: wcRows[m]["Status"], pickupParty: wcRows[m]["Pickup Party"],
+              estimatedPickupDate: formatDate_(wcRows[m]["Estimated Pickup Date"]),
+              notes: wcRows[m]["Notes"], itemsCount: wcRows[m]["Items Count"]
+            }));
+          }
+          supabaseBatchUpsert_("will_calls", wcSb);
+          clientResult.counts.will_calls = wcSb.length;
+          totalRows.will_calls += wcSb.length;
+        }
+      } catch (wcErr) { clientResult.errors.push("will_calls: " + wcErr); }
+
+      // Shipments
+      try {
+        var shipSheet = ss.getSheetByName("Shipments");
+        if (shipSheet) {
+          var shipRows = sheetToObjects_(shipSheet);
+          var shipSb = [];
+          for (var n = 0; n < shipRows.length; n++) {
+            var sn = String(shipRows[n]["Shipment #"] || "").trim();
+            if (!sn) continue;
+            shipSb.push(sbShipmentRow_(client.spreadsheetId, {
+              shipmentNumber: sn, receiveDate: formatDate_(shipRows[n]["Receive Date"]),
+              itemCount: shipRows[n]["Item Count"], carrier: shipRows[n]["Carrier"],
+              trackingNumber: shipRows[n]["Tracking #"], notes: shipRows[n]["Shipment Notes"]
+            }));
+          }
+          supabaseBatchUpsert_("shipments", shipSb);
+          clientResult.counts.shipments = shipSb.length;
+          totalRows.shipments += shipSb.length;
+        }
+      } catch (shipErr) { clientResult.errors.push("shipments: " + shipErr); }
+
+      // Billing
+      try {
+        var billSheet = ss.getSheetByName("Billing_Ledger");
+        if (billSheet) {
+          var billRows = sheetToObjects_(billSheet);
+          var billSb = [];
+          for (var p = 0; p < billRows.length; p++) {
+            var lid = String(billRows[p]["Ledger Row ID"] || "").trim();
+            if (!lid) continue;
+            billSb.push(sbBillingRow_(client.spreadsheetId, {
+              ledgerRowId: lid, status: billRows[p]["Status"], invoiceNo: billRows[p]["Invoice #"],
+              clientName: billRows[p]["Client"], date: formatDate_(billRows[p]["Date"]),
+              svcCode: billRows[p]["Svc Code"], svcName: billRows[p]["Svc Name"], category: billRows[p]["Category"],
+              itemId: billRows[p]["Item ID"], description: billRows[p]["Description"],
+              itemClass: billRows[p]["Class"], qty: billRows[p]["Qty"], rate: billRows[p]["Rate"],
+              total: billRows[p]["Total"], taskId: billRows[p]["Task ID"], repairId: billRows[p]["Repair ID"],
+              shipmentNumber: billRows[p]["Shipment #"], itemNotes: billRows[p]["Item Notes"],
+              invoiceDate: formatDate_(billRows[p]["Invoice Date"]), invoiceUrl: billRows[p]["Invoice URL"]
+            }));
+          }
+          supabaseBatchUpsert_("billing", billSb);
+          clientResult.counts.billing = billSb.length;
+          totalRows.billing += billSb.length;
+        }
+      } catch (billErr) { clientResult.errors.push("billing: " + billErr); }
+
+    } catch (clientErr) {
+      clientResult.errors.push("open: " + clientErr);
+    }
+
+    results.push(clientResult);
+  }
+
+  return jsonResponse_({
+    success: true,
+    clientsSynced: results.length,
+    totalRows: totalRows,
+    clients: results
+  });
+}
+
+/**
+ * Reconciliation: compares row counts between sheets and Supabase.
+ * If drift detected, does a full re-sync for that client+table.
+ * Payload: { clientSheetId?: string, dryRun?: boolean }
+ * Admin-only endpoint.
+ */
+function handleReconcileSupabase_(payload) {
+  var targetClient = String(payload.clientSheetId || "").trim();
+  var dryRun = payload.dryRun === true;
+
+  var url = prop_("SUPABASE_URL");
+  var key = prop_("SUPABASE_SERVICE_ROLE_KEY");
+  if (!url || !key) return errorResponse_("Supabase credentials not configured", "CONFIG_ERROR");
+
+  // Get clients to reconcile
+  var clients;
+  if (targetClient) {
+    var cbId = prop_("CB_SPREADSHEET_ID");
+    var cbSs = SpreadsheetApp.openById(cbId);
+    var clientsSheet = cbSs.getSheetByName("Clients");
+    var clientRows = sheetToObjects_(clientsSheet);
+    var found = null;
+    for (var i = 0; i < clientRows.length; i++) {
+      var sid = String(clientRows[i]["Spreadsheet ID"] || "").trim();
+      if (sid === targetClient) {
+        found = { name: String(clientRows[i]["Client Name"] || "").trim(), spreadsheetId: sid };
+        break;
+      }
+    }
+    if (!found) return errorResponse_("Client not found: " + targetClient, "NOT_FOUND");
+    clients = [found];
+  } else {
+    var allClients = getTargetClients_("");
+    if (allClients.error) return errorResponse_(allClients.error, allClients.code);
+    clients = allClients.list;
+  }
+
+  var tables = ["inventory", "tasks", "repairs", "will_calls", "shipments", "billing"];
+  var tabMap = {
+    "inventory": { tab: "Inventory", idCol: "Item ID" },
+    "tasks":     { tab: "Tasks",     idCol: "Task ID" },
+    "repairs":   { tab: "Repairs",   idCol: "Repair ID" },
+    "will_calls":{ tab: "Will_Calls", idCol: "WC Number" },
+    "shipments": { tab: "Shipments", idCol: "Shipment #" },
+    "billing":   { tab: "Billing_Ledger", idCol: "Ledger Row ID" }
+  };
+
+  var results = [];
+  var resynced = 0;
+
+  for (var c = 0; c < clients.length; c++) {
+    var client = clients[c];
+    var clientResult = { client: client.name, spreadsheetId: client.spreadsheetId, tables: {} };
+
+    try {
+      var ss = SpreadsheetApp.openById(client.spreadsheetId);
+
+      for (var t = 0; t < tables.length; t++) {
+        var table = tables[t];
+        var meta = tabMap[table];
+        var tableResult = { sheetCount: 0, supabaseCount: 0, drift: false, resynced: false };
+
+        try {
+          // Count sheet rows
+          var sheet = ss.getSheetByName(meta.tab);
+          if (sheet) {
+            var rows = sheetToObjects_(sheet);
+            var validCount = 0;
+            for (var r = 0; r < rows.length; r++) {
+              if (String(rows[r][meta.idCol] || "").trim()) validCount++;
+            }
+            tableResult.sheetCount = validCount;
+          }
+
+          // Count Supabase rows
+          var countResp = UrlFetchApp.fetch(
+            url + "/rest/v1/" + table + "?tenant_id=eq." + encodeURIComponent(client.spreadsheetId) + "&select=id",
+            {
+              method: "GET",
+              headers: {
+                "Authorization": "Bearer " + key,
+                "apikey":        key,
+                "Prefer":        "count=exact",
+                "Range-Unit":    "items",
+                "Range":         "0-0"
+              },
+              muteHttpExceptions: true
+            }
+          );
+          // Parse count from Content-Range header: "0-0/123"
+          var contentRange = countResp.getHeaders()["content-range"] || countResp.getHeaders()["Content-Range"] || "";
+          var countMatch = contentRange.match(/\/(\d+)/);
+          tableResult.supabaseCount = countMatch ? parseInt(countMatch[1], 10) : 0;
+
+          tableResult.drift = (tableResult.sheetCount !== tableResult.supabaseCount);
+
+          // Re-sync if drift detected and not dry run
+          if (tableResult.drift && !dryRun) {
+            var entityType = table === "will_calls" ? "will_call" :
+                            table === "tasks" ? "task" :
+                            table === "repairs" ? "repair" :
+                            table === "shipments" ? "shipment" :
+                            table === "billing" ? "billing" : table;
+            api_fullClientSync_(client.spreadsheetId, [entityType]);
+            tableResult.resynced = true;
+            resynced++;
+          }
+        } catch (tableErr) {
+          tableResult.error = String(tableErr);
+        }
+
+        clientResult.tables[table] = tableResult;
+      }
+    } catch (clientErr) {
+      clientResult.error = String(clientErr);
+    }
+
+    results.push(clientResult);
+  }
+
+  return jsonResponse_({
+    success: true,
+    dryRun: dryRun,
+    clientsChecked: results.length,
+    tablesResynced: resynced,
+    clients: results
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ═══  MARKETING CAMPAIGN MANAGER — Phase 2 Backend (v38.0.0)  ═══════════════
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ─── Marketing Helpers ──────────────────────────────────────────────────────
+
+/**
+ * Open the Marketing Campaign spreadsheet by CAMPAIGN_SHEET_ID from Script Properties.
+ */
+function getCampaignSpreadsheet_() {
+  var id = prop_("CAMPAIGN_SHEET_ID");
+  if (!id) throw new Error("CAMPAIGN_SHEET_ID not configured in Script Properties");
+  return SpreadsheetApp.openById(id);
+}
+
+/**
+ * One-time setup: store CAMPAIGN_SHEET_ID in Script Properties.
+ * Run from Apps Script editor once.
+ */
+function setupCampaignSheetId_() {
+  PropertiesService.getScriptProperties().setProperty("CAMPAIGN_SHEET_ID", "1p7dmJlqij2KzwAFiXCUBbUTeF5JVvQF7TQlrofp9tcg");
+  Logger.log("CAMPAIGN_SHEET_ID stored.");
+}
+
+/** Read Settings tab from campaign spreadsheet as key→value object */
+function mkt_getSettings_(ss) {
+  var sheet = ss.getSheetByName("Settings");
+  if (!sheet) return {};
+  var data = sheet.getDataRange().getValues();
+  var settings = {};
+  for (var i = 1; i < data.length; i++) {
+    var key = String(data[i][0] || "").trim();
+    if (key) settings[key] = data[i][1];
+  }
+  return settings;
+}
+
+/** Normalize a campaign row object (from sheetToObjects_) to API response shape */
+function mkt_normalizeCampaign_(r) {
+  return {
+    campaignId:        String(r["Campaign ID"] || ""),
+    name:              String(r["Campaign Name"] || ""),
+    type:              String(r["Type"] || ""),
+    status:            String(r["Status"] || ""),
+    priority:          toNum_(r["Priority"]) || 0,
+    targetType:        String(r["Target Type"] || ""),
+    targetValue:       String(r["Target Value"] || ""),
+    enrollmentMode:    String(r["Enrollment Mode"] || ""),
+    initialTemplate:   String(r["Initial Template"] || ""),
+    followUp1Template: String(r["Follow-Up 1 Template"] || ""),
+    followUp2Template: String(r["Follow-Up 2 Template"] || ""),
+    followUp3Template: String(r["Follow-Up 3 Template"] || ""),
+    maxFollowUps:      toNum_(r["Max Follow-Ups"]) || 0,
+    followUpIntervalDays: toNum_(r["Follow-Up Interval Days"]) || 0,
+    dailySendLimit:    toNum_(r["Daily Send Limit"]) || 0,
+    sendWindowStart:   toNum_(r["Send Window Start"]) || 0,
+    sendWindowEnd:     toNum_(r["Send Window End"]) || 0,
+    startDate:         formatDate_(r["Start Date"]),
+    endDate:           formatDate_(r["End Date"]),
+    testMode:          String(r["Test Mode"] || "").toUpperCase() === "TRUE",
+    testRecipient:     String(r["Test Recipient"] || ""),
+    createdDate:       formatDate_(r["Created Date"]),
+    lastRunDate:       formatDate_(r["Last Run Date"]),
+    validationStatus:  String(r["Validation Status"] || ""),
+    validationNotes:   String(r["Validation Notes"] || ""),
+    lastError:         String(r["Last Error"] || ""),
+    totalSent:         toNum_(r["Total Sent"]) || 0,
+    totalReplied:      toNum_(r["Total Replied"]) || 0,
+    totalBounced:      toNum_(r["Total Bounced"]) || 0,
+    totalUnsubscribed: toNum_(r["Total Unsubscribed"]) || 0,
+    totalConverted:    toNum_(r["Total Converted"]) || 0,
+    notes:             String(r["Notes"] || ""),
+    custom1:           String(r["Custom 1"] || ""),
+    custom2:           String(r["Custom 2"] || ""),
+    custom3:           String(r["Custom 3"] || "")
+  };
+}
+
+/** Normalize a contact row object to API response shape */
+function mkt_normalizeContact_(r) {
+  return {
+    email:             String(r["Email"] || ""),
+    firstName:         String(r["First Name"] || ""),
+    lastName:          String(r["Last Name"] || ""),
+    company:           String(r["Company"] || ""),
+    status:            String(r["Status"] || ""),
+    existingClient:    String(r["Existing Client"] || "").toUpperCase() === "TRUE",
+    campaignTag:       String(r["Campaign Tag"] || ""),
+    dateAdded:         formatDate_(r["Date Added"]),
+    addedBy:           String(r["Added By"] || ""),
+    source:            String(r["Source"] || ""),
+    lastCampaignDate:  formatDate_(r["Last Campaign Sent Date"]),
+    replied:           String(r["Replied"] || "").toUpperCase() === "TRUE",
+    converted:         String(r["Converted"] || "").toUpperCase() === "TRUE",
+    bounced:           String(r["Bounced"] || "").toUpperCase() === "TRUE",
+    unsubscribed:      String(r["Unsubscribed"] || "").toUpperCase() === "TRUE",
+    suppressed:        String(r["Suppressed"] || "").toUpperCase() === "TRUE",
+    suppressionReason: String(r["Suppression Reason"] || ""),
+    suppressionDate:   formatDate_(r["Suppression Date"]),
+    manualReleaseNote: String(r["Manual Release Note"] || ""),
+    notes:             String(r["Notes"] || "")
+  };
+}
+
+/** Normalize a Campaign Contacts row to API response shape */
+function mkt_normalizeCC_(r) {
+  return {
+    campaignId:        String(r["Campaign ID"] || ""),
+    campaignName:      String(r["Campaign Name"] || ""),
+    email:             String(r["Contact Email"] || ""),
+    contactName:       String(r["Contact Name"] || ""),
+    campaignType:      String(r["Campaign Type"] || ""),
+    status:            String(r["Status"] || ""),
+    currentStep:       String(r["Current Step"] || ""),
+    followUpCount:     toNum_(r["Follow-Up Count"]) || 0,
+    lastContactDate:   formatDate_(r["Last Contact Date"]),
+    nextFollowUpDate:  formatDate_(r["Next Follow-Up Date"]),
+    lastAttemptDate:   formatDate_(r["Last Attempt Date"]),
+    replied:           String(r["Replied"] || "").toUpperCase() === "TRUE",
+    bounced:           String(r["Bounced"] || "").toUpperCase() === "TRUE",
+    unsubscribed:      String(r["Unsubscribed"] || "").toUpperCase() === "TRUE",
+    converted:         String(r["Converted"] || "").toUpperCase() === "TRUE",
+    suppressed:        String(r["Suppressed"] || "").toUpperCase() === "TRUE",
+    suppressionReason: String(r["Suppression Reason"] || ""),
+    dateEntered:       formatDate_(r["Date Entered"]),
+    dateCompleted:     formatDate_(r["Date Completed"]),
+    completedReason:   String(r["Completed Reason"] || "")
+  };
+}
+
+/** Find a campaign row index (1-based sheet row) by Campaign ID. Returns {row, hdrMap, data} or null */
+function mkt_findCampaignRow_(ss, campaignId) {
+  var sheet = ss.getSheetByName("Campaigns");
+  if (!sheet) return null;
+  var data = sheet.getDataRange().getValues();
+  if (data.length < 2) return null;
+  var hdrMap = {};
+  data[0].forEach(function(h, i) { hdrMap[String(h || "").trim()] = i; });
+  var idCol = hdrMap["Campaign ID"];
+  if (idCol === undefined) return null;
+  for (var i = 1; i < data.length; i++) {
+    if (String(data[i][idCol] || "").trim() === campaignId) {
+      return { sheetRow: i + 1, rowIdx: i, hdrMap: hdrMap, data: data, sheet: sheet };
+    }
+  }
+  return null;
+}
+
+/** Find a contact row by email (case-insensitive). Returns {sheetRow, rowIdx, hdrMap, data, sheet} or null */
+function mkt_findContactRow_(ss, email) {
+  var sheet = ss.getSheetByName("Contacts");
+  if (!sheet) return null;
+  var data = sheet.getDataRange().getValues();
+  if (data.length < 2) return null;
+  var hdrMap = {};
+  data[0].forEach(function(h, i) { hdrMap[String(h || "").trim()] = i; });
+  var emailCol = hdrMap["Email"];
+  if (emailCol === undefined) return null;
+  var lowerEmail = email.toLowerCase();
+  for (var i = 1; i < data.length; i++) {
+    if (String(data[i][emailCol] || "").trim().toLowerCase() === lowerEmail) {
+      return { sheetRow: i + 1, rowIdx: i, hdrMap: hdrMap, data: data, sheet: sheet };
+    }
+  }
+  return null;
+}
+
+/** Find a template row by name. Returns {sheetRow, rowIdx, hdrMap, data, sheet} or null */
+function mkt_findTemplateRow_(ss, name) {
+  var sheet = ss.getSheetByName("Templates");
+  if (!sheet) return null;
+  var data = sheet.getDataRange().getValues();
+  if (data.length < 2) return null;
+  var hdrMap = {};
+  data[0].forEach(function(h, i) { hdrMap[String(h || "").trim()] = i; });
+  var nameCol = hdrMap["Template Name"];
+  if (nameCol === undefined) return null;
+  for (var i = 1; i < data.length; i++) {
+    var val = String(data[i][nameCol] || "").trim();
+    if (val === "--- TOKEN REFERENCE ---") break;
+    if (val === name) {
+      return { sheetRow: i + 1, rowIdx: i, hdrMap: hdrMap, data: data, sheet: sheet };
+    }
+  }
+  return null;
+}
+
+/** Generate next campaign ID (CMP-XXXX) */
+function mkt_nextCampaignId_(ss) {
+  var sheet = ss.getSheetByName("Campaigns");
+  if (!sheet) return "CMP-0001";
+  var data = sheet.getDataRange().getValues();
+  var maxNum = 0;
+  for (var i = 1; i < data.length; i++) {
+    var id = String(data[i][0] || "").trim();
+    var match = id.match(/^CMP-(\d+)$/);
+    if (match) {
+      var num = parseInt(match[1], 10);
+      if (num > maxNum) maxNum = num;
+    }
+  }
+  var next = maxNum + 1;
+  var pad = String(next);
+  while (pad.length < 4) pad = "0" + pad;
+  return "CMP-" + pad;
+}
+
+/** Generate a simple unsub token */
+function mkt_generateUnsubToken_() {
+  var chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  var token = "";
+  for (var i = 0; i < 32; i++) {
+    token += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return token;
+}
+
+/** Generate tracking marker for Gmail thread lookup */
+function mkt_generateTrackingMarker_(campaignId, email, step) {
+  var raw = campaignId + "|" + email + "|" + step + "|" + new Date().getTime();
+  var hash = Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, raw);
+  var hex = "";
+  for (var i = 0; i < hash.length; i++) {
+    var b = hash[i];
+    if (b < 0) b += 256;
+    hex += (b < 16 ? "0" : "") + b.toString(16);
+  }
+  return "SID-" + hex;
+}
+
+/** Read all templates from Templates tab as { name: {subject, body, previewText, version} } */
+function mkt_getTemplates_(ss) {
+  var sheet = ss.getSheetByName("Templates");
+  if (!sheet) return {};
+  var data = sheet.getDataRange().getValues();
+  if (data.length < 2) return {};
+  var hdrMap = {};
+  data[0].forEach(function(h, i) { hdrMap[String(h || "").trim()] = i; });
+  var nameCol    = hdrMap["Template Name"] !== undefined ? hdrMap["Template Name"] : 0;
+  var subjCol    = hdrMap["Subject Line"]  !== undefined ? hdrMap["Subject Line"]  : 1;
+  var prevCol    = hdrMap["Preview Text"]  !== undefined ? hdrMap["Preview Text"]  : 2;
+  var bodyCol    = hdrMap["HTML Body"]     !== undefined ? hdrMap["HTML Body"]     : 3;
+  var verCol     = hdrMap["Version"]       !== undefined ? hdrMap["Version"]       : 4;
+  var typeCol    = hdrMap["Type"];
+  var activeCol  = hdrMap["Active"];
+  var templates = {};
+  for (var i = 1; i < data.length; i++) {
+    var name = String(data[i][nameCol] || "").trim();
+    if (!name || name === "--- TOKEN REFERENCE ---") break;
+    templates[name] = {
+      subject:     String(data[i][subjCol] || ""),
+      body:        String(data[i][bodyCol] || ""),
+      previewText: String(data[i][prevCol] || ""),
+      version:     String(data[i][verCol] || ""),
+      type:        typeCol !== undefined ? String(data[i][typeCol] || "") : "",
+      active:      activeCol !== undefined ? String(data[i][activeCol] || "TRUE").toUpperCase() !== "FALSE" : true
+    };
+  }
+  return templates;
+}
+
+/** Build email from template with token replacement (mirrors campaign script buildEmail) */
+function mkt_buildEmail_(templateObj, contact, settings, campaign, step, trackingMarker) {
+  var subject = templateObj.subject || "";
+  var body = templateObj.body || "";
+  var now = new Date();
+  var months = ["January","February","March","April","May","June",
+                "July","August","September","October","November","December"];
+
+  var fullName = ((contact.firstName || "") + " " + (contact.lastName || "")).trim();
+  var unsubBaseUrl = String(settings["Unsubscribe Base URL"] || "");
+  var unsubUrl = unsubBaseUrl;
+  if (unsubBaseUrl && unsubBaseUrl.indexOf("(paste") === -1) {
+    unsubUrl = unsubBaseUrl + "?token=" + (contact.unsubToken || "") + "&email=" + encodeURIComponent(contact.email || "");
+  }
+
+  var tokens = {
+    "{{First Name}}":    contact.firstName || "",
+    "{{Last Name}}":     contact.lastName || "",
+    "{{Full Name}}":     fullName,
+    "{{Company}}":       contact.company || "",
+    "{{Email}}":         contact.email || "",
+    "{{BookingURL}}":    String(settings["Booking URL"] || ""),
+    "{{UNSUB_URL}}":     unsubUrl,
+    "{{Campaign Name}}": campaign ? String(campaign.name || "") : "",
+    "{{Sender Name}}":   String(settings["Sender Name"] || ""),
+    "{{Sender Phone}}":  String(settings["Sender Phone"] || ""),
+    "{{Sender Email}}":  String(settings["Sender Email"] || ""),
+    "{{Website URL}}":   String(settings["Website URL"] || ""),
+    "{{Current Year}}":  String(now.getFullYear()),
+    "{{Current Month}}": months[now.getMonth()],
+    "{{Send Date}}":     Utilities.formatDate(now, Session.getScriptTimeZone(), "MM/dd/yyyy"),
+    "{{Custom 1}}":      campaign ? String(campaign.custom1 || "") : "",
+    "{{Custom 2}}":      campaign ? String(campaign.custom2 || "") : "",
+    "{{Custom 3}}":      campaign ? String(campaign.custom3 || "") : ""
+  };
+
+  var tokenKeys = Object.keys(tokens);
+  for (var t = 0; t < tokenKeys.length; t++) {
+    var key = tokenKeys[t];
+    var val = tokens[key];
+    subject = subject.split(key).join(val);
+    body = body.split(key).join(val);
+  }
+
+  // Embed tracking marker for Gmail thread lookup
+  if (trackingMarker) {
+    body += '<div style="font-size:1px;line-height:1px;color:#ffffff;overflow:hidden;max-height:1px;">' + trackingMarker + '</div>';
+  }
+
+  return { subject: subject, body: body };
+}
+
+/** Patch specific cells on a sheet row using header map. fields = { "Header Name": value, ... } */
+function mkt_patchRow_(sheet, sheetRow, hdrMap, fields) {
+  for (var hdr in fields) {
+    var col = hdrMap[hdr];
+    if (col !== undefined) {
+      sheet.getRange(sheetRow, col + 1).setValue(fields[hdr]);
+    }
+  }
+}
+
+/** Update campaign stats by counting Campaign Contacts rows */
+function mkt_updateCampaignStats_(ss, campaignId) {
+  var ccSheet = ss.getSheetByName("Campaign Contacts");
+  if (!ccSheet) return;
+  var ccRows = sheetToObjects_(ccSheet);
+  var sent = 0, replied = 0, bounced = 0, unsub = 0, converted = 0;
+  for (var i = 0; i < ccRows.length; i++) {
+    if (String(ccRows[i]["Campaign ID"] || "") !== campaignId) continue;
+    if (String(ccRows[i]["Replied"] || "").toUpperCase() === "TRUE") replied++;
+    if (String(ccRows[i]["Bounced"] || "").toUpperCase() === "TRUE") bounced++;
+    if (String(ccRows[i]["Unsubscribed"] || "").toUpperCase() === "TRUE") unsub++;
+    if (String(ccRows[i]["Converted"] || "").toUpperCase() === "TRUE") converted++;
+    var st = String(ccRows[i]["Status"] || "");
+    if (st === "Sent" || st === "Complete" || st === "Exhausted" || st === "Replied" || st === "Follow-Up Scheduled") sent++;
+  }
+  var found = mkt_findCampaignRow_(ss, campaignId);
+  if (found) {
+    mkt_patchRow_(found.sheet, found.sheetRow, found.hdrMap, {
+      "Total Sent": sent, "Total Replied": replied, "Total Bounced": bounced,
+      "Total Unsubscribed": unsub, "Total Converted": converted
+    });
+  }
+}
+
+// ─── Marketing READ Endpoints ───────────────────────────────────────────────
+
+/** 1. getMarketingDashboard — Dashboard stats computed in memory */
+function handleGetMarketingDashboard_() {
+  var ss = getCampaignSpreadsheet_();
+
+  // Read contacts
+  var conSheet = ss.getSheetByName("Contacts");
+  var contacts = conSheet ? sheetToObjects_(conSheet) : [];
+  var totalContacts = contacts.length;
+  var activeLeads = 0, existingClients = 0, suppressed = 0;
+  for (var i = 0; i < contacts.length; i++) {
+    var cStatus = String(contacts[i]["Status"] || "").trim();
+    if (cStatus === "Suppressed") { suppressed++; }
+    else if (String(contacts[i]["Existing Client"] || "").toUpperCase() === "TRUE") { existingClients++; }
+    else { activeLeads++; }
+  }
+
+  // Read campaigns
+  var cmpSheet = ss.getSheetByName("Campaigns");
+  var campaigns = cmpSheet ? sheetToObjects_(cmpSheet) : [];
+  var activeCampaigns = 0;
+  for (var j = 0; j < campaigns.length; j++) {
+    if (String(campaigns[j]["Status"] || "") === "Active") activeCampaigns++;
+  }
+
+  // Read campaign contacts for per-campaign stats
+  var ccSheet = ss.getSheetByName("Campaign Contacts");
+  var ccRows = ccSheet ? sheetToObjects_(ccSheet) : [];
+
+  // Build per-campaign stats
+  var ccByCampaign = {};
+  for (var k = 0; k < ccRows.length; k++) {
+    var cid = String(ccRows[k]["Campaign ID"] || "");
+    if (!ccByCampaign[cid]) ccByCampaign[cid] = { enrolled: 0, pending: 0, sent: 0, replied: 0, bounced: 0, unsubscribed: 0, exhausted: 0, converted: 0 };
+    var bucket = ccByCampaign[cid];
+    bucket.enrolled++;
+    var ccSt = String(ccRows[k]["Status"] || "");
+    if (ccSt === "Pending") bucket.pending++;
+    if (ccSt === "Sent" || ccSt === "Follow-Up Scheduled" || ccSt === "Complete") bucket.sent++;
+    if (ccSt === "Replied") { bucket.sent++; bucket.replied++; }
+    if (ccSt === "Bounced") bucket.bounced++;
+    if (ccSt === "Unsubscribed") bucket.unsubscribed++;
+    if (ccSt === "Exhausted") { bucket.sent++; bucket.exhausted++; }
+    if (String(ccRows[k]["Converted"] || "").toUpperCase() === "TRUE") bucket.converted++;
+  }
+
+  var campaignRows = [];
+  var globalSent = 0, globalReplied = 0, globalBounced = 0, globalUnsub = 0, globalConverted = 0;
+  for (var m = 0; m < campaigns.length; m++) {
+    var c = mkt_normalizeCampaign_(campaigns[m]);
+    var stats = ccByCampaign[c.campaignId] || { enrolled: 0, pending: 0, sent: 0, replied: 0, bounced: 0, unsubscribed: 0, exhausted: 0, converted: 0 };
+    campaignRows.push({
+      campaignId: c.campaignId, name: c.name, type: c.type, status: c.status,
+      priority: c.priority, enrolled: stats.enrolled, sent: stats.sent,
+      replied: stats.replied, bounced: stats.bounced, unsubscribed: stats.unsubscribed,
+      converted: stats.converted, pending: stats.pending, exhausted: stats.exhausted,
+      lastRunDate: c.lastRunDate
+    });
+    globalSent += stats.sent;
+    globalReplied += stats.replied;
+    globalBounced += stats.bounced;
+    globalUnsub += stats.unsubscribed;
+    globalConverted += stats.converted;
+  }
+
+  var quotaRemaining = 0;
+  try { quotaRemaining = MailApp.getRemainingDailyQuota(); } catch (e) {}
+
+  return jsonResponse_({
+    totalContacts: totalContacts,
+    activeLeads: activeLeads,
+    existingClients: existingClients,
+    suppressed: suppressed,
+    activeCampaigns: activeCampaigns,
+    gmailQuotaRemaining: quotaRemaining,
+    campaigns: campaignRows,
+    globalTotals: { sent: globalSent, replied: globalReplied, bounced: globalBounced, unsubscribed: globalUnsub, converted: globalConverted }
+  });
+}
+
+/** 2. getMarketingCampaigns — list all campaigns with optional status filter */
+function handleGetMarketingCampaigns_(params) {
+  var ss = getCampaignSpreadsheet_();
+  var sheet = ss.getSheetByName("Campaigns");
+  if (!sheet) return jsonResponse_({ campaigns: [] });
+  var rows = sheetToObjects_(sheet);
+  var statusFilter = String(params.status || "").trim();
+  var campaigns = [];
+  for (var i = 0; i < rows.length; i++) {
+    var c = mkt_normalizeCampaign_(rows[i]);
+    if (statusFilter && c.status !== statusFilter) continue;
+    campaigns.push(c);
+  }
+  return jsonResponse_({ campaigns: campaigns });
+}
+
+/** 3. getMarketingCampaignDetail — single campaign + its CC rows + stats */
+function handleGetMarketingCampaignDetail_(params) {
+  var campaignId = String(params.campaignId || "").trim();
+  if (!campaignId) return errorResponse_("campaignId is required", "INVALID_PAYLOAD");
+
+  var ss = getCampaignSpreadsheet_();
+  var found = mkt_findCampaignRow_(ss, campaignId);
+  if (!found) return errorResponse_("Campaign not found: " + campaignId, "NOT_FOUND");
+
+  // Build campaign object from found row
+  var rowObj = {};
+  for (var hdr in found.hdrMap) { rowObj[hdr] = found.data[found.rowIdx][found.hdrMap[hdr]]; }
+  var campaign = mkt_normalizeCampaign_(rowObj);
+
+  // Read campaign contacts for this campaign
+  var ccSheet = ss.getSheetByName("Campaign Contacts");
+  var ccRows = ccSheet ? sheetToObjects_(ccSheet) : [];
+  var contacts = [];
+  var stats = { enrolled: 0, pending: 0, sent: 0, replied: 0, bounced: 0, unsubscribed: 0, exhausted: 0, converted: 0 };
+  for (var i = 0; i < ccRows.length; i++) {
+    if (String(ccRows[i]["Campaign ID"] || "") !== campaignId) continue;
+    contacts.push(mkt_normalizeCC_(ccRows[i]));
+    stats.enrolled++;
+    var st = String(ccRows[i]["Status"] || "");
+    if (st === "Pending") stats.pending++;
+    if (st === "Sent" || st === "Follow-Up Scheduled" || st === "Complete") stats.sent++;
+    if (st === "Replied") { stats.sent++; stats.replied++; }
+    if (st === "Bounced") stats.bounced++;
+    if (st === "Unsubscribed") stats.unsubscribed++;
+    if (st === "Exhausted") { stats.sent++; stats.exhausted++; }
+    if (String(ccRows[i]["Converted"] || "").toUpperCase() === "TRUE") stats.converted++;
+  }
+
+  return jsonResponse_({ campaign: campaign, contacts: contacts, stats: stats });
+}
+
+/** 4. getMarketingContacts — paginated contact list with search/filter */
+function handleGetMarketingContacts_(params) {
+  var ss = getCampaignSpreadsheet_();
+  var sheet = ss.getSheetByName("Contacts");
+  if (!sheet) return jsonResponse_({ contacts: [], total: 0, page: 1, pageSize: 100 });
+  var rows = sheetToObjects_(sheet);
+
+  var statusFilter = String(params.status || "").trim();
+  var search = String(params.search || "").trim().toLowerCase();
+  var page = Math.max(1, toNum_(params.page) || 1);
+  var pageSize = Math.max(1, Math.min(500, toNum_(params.pageSize) || 100));
+
+  var filtered = [];
+  for (var i = 0; i < rows.length; i++) {
+    var c = mkt_normalizeContact_(rows[i]);
+    if (statusFilter && c.status !== statusFilter) continue;
+    if (search) {
+      var haystack = (c.email + " " + c.firstName + " " + c.lastName + " " + c.company).toLowerCase();
+      if (haystack.indexOf(search) < 0) continue;
+    }
+    filtered.push(c);
+  }
+
+  var total = filtered.length;
+  var start = (page - 1) * pageSize;
+  var paged = filtered.slice(start, start + pageSize);
+
+  return jsonResponse_({ contacts: paged, total: total, page: page, pageSize: pageSize });
+}
+
+/** 5. getMarketingContactDetail — single contact + campaign history */
+function handleGetMarketingContactDetail_(params) {
+  var email = String(params.email || "").trim();
+  if (!email) return errorResponse_("email is required", "INVALID_PAYLOAD");
+
+  var ss = getCampaignSpreadsheet_();
+  var found = mkt_findContactRow_(ss, email);
+  if (!found) return errorResponse_("Contact not found: " + email, "NOT_FOUND");
+
+  var rowObj = {};
+  for (var hdr in found.hdrMap) { rowObj[hdr] = found.data[found.rowIdx][found.hdrMap[hdr]]; }
+  var contact = mkt_normalizeContact_(rowObj);
+
+  // Campaign history
+  var ccSheet = ss.getSheetByName("Campaign Contacts");
+  var ccRows = ccSheet ? sheetToObjects_(ccSheet) : [];
+  var history = [];
+  var lowerEmail = email.toLowerCase();
+  for (var i = 0; i < ccRows.length; i++) {
+    if (String(ccRows[i]["Contact Email"] || "").trim().toLowerCase() === lowerEmail) {
+      history.push(mkt_normalizeCC_(ccRows[i]));
+    }
+  }
+
+  return jsonResponse_({ contact: contact, campaignHistory: history });
+}
+
+/** 6. getMarketingTemplates — all templates */
+function handleGetMarketingTemplates_() {
+  var ss = getCampaignSpreadsheet_();
+  var tplMap = mkt_getTemplates_(ss);
+  var templates = [];
+  for (var name in tplMap) {
+    templates.push({
+      name: name,
+      subject: tplMap[name].subject,
+      previewText: tplMap[name].previewText,
+      htmlBody: tplMap[name].body,
+      version: tplMap[name].version,
+      type: tplMap[name].type || "",
+      active: tplMap[name].active !== false
+    });
+  }
+  return jsonResponse_({ templates: templates });
+}
+
+/** 7. getMarketingLogs — campaign log or suppression log with filters + pagination */
+function handleGetMarketingLogs_(params) {
+  var logType = String(params.logType || "").trim();
+  if (logType !== "campaign" && logType !== "suppression") {
+    return errorResponse_("logType must be 'campaign' or 'suppression'", "INVALID_PAYLOAD");
+  }
+
+  var ss = getCampaignSpreadsheet_();
+  var page = Math.max(1, toNum_(params.page) || 1);
+  var pageSize = Math.max(1, Math.min(500, toNum_(params.pageSize) || 100));
+
+  if (logType === "campaign") {
+    var sheet = ss.getSheetByName("Campaign Log");
+    if (!sheet) return jsonResponse_({ logs: [], total: 0, page: page, pageSize: pageSize });
+    var rows = sheetToObjects_(sheet);
+
+    var campaignIdFilter = String(params.campaignId || "").trim();
+    var resultFilter = String(params.result || "").trim();
+    var startDate = params.startDate ? new Date(params.startDate) : null;
+    var endDate = params.endDate ? new Date(params.endDate) : null;
+
+    var filtered = [];
+    for (var i = rows.length - 1; i >= 0; i--) { // newest first
+      if (campaignIdFilter && String(rows[i]["Campaign ID"] || "") !== campaignIdFilter) continue;
+      if (resultFilter && String(rows[i]["Send Result"] || "") !== resultFilter) continue;
+      if (startDate || endDate) {
+        var ts = rows[i]["Timestamp"];
+        if (ts) {
+          var d = new Date(ts);
+          if (startDate && d < startDate) continue;
+          if (endDate && d > endDate) continue;
+        }
+      }
+      filtered.push({
+        timestamp:    formatDate_(rows[i]["Timestamp"]),
+        campaignId:   String(rows[i]["Campaign ID"] || ""),
+        campaignName: String(rows[i]["Campaign Name"] || ""),
+        email:        String(rows[i]["Email"] || ""),
+        contactName:  String(rows[i]["Contact Name"] || ""),
+        company:      String(rows[i]["Company"] || ""),
+        templateName: String(rows[i]["Template Name"] || ""),
+        emailStep:    String(rows[i]["Email Step"] || ""),
+        subject:      String(rows[i]["Subject"] || ""),
+        result:       String(rows[i]["Send Result"] || ""),
+        errorMessage: String(rows[i]["Error Message"] || ""),
+        testModeUsed: String(rows[i]["Test Mode Used"] || "").toUpperCase() === "TRUE"
+      });
+    }
+
+    var total = filtered.length;
+    var start = (page - 1) * pageSize;
+    var paged = filtered.slice(start, start + pageSize);
+    return jsonResponse_({ logs: paged, total: total, page: page, pageSize: pageSize });
+
+  } else {
+    // Suppression log
+    var sSheet = ss.getSheetByName("Suppression Log");
+    if (!sSheet) return jsonResponse_({ logs: [], total: 0, page: page, pageSize: pageSize });
+    var sRows = sheetToObjects_(sSheet);
+    var sFiltered = [];
+    for (var j = sRows.length - 1; j >= 0; j--) {
+      sFiltered.push({
+        timestamp:   formatDate_(sRows[j]["Timestamp"]),
+        email:       String(sRows[j]["Email"] || ""),
+        firstName:   String(sRows[j]["First Name"] || ""),
+        company:     String(sRows[j]["Company"] || ""),
+        reason:      String(sRows[j]["Reason"] || sRows[j]["Suppression Reason"] || ""),
+        triggeredBy: String(sRows[j]["Triggered By"] || "")
+      });
+    }
+    var sTotal = sFiltered.length;
+    var sStart = (page - 1) * pageSize;
+    var sPaged = sFiltered.slice(sStart, sStart + pageSize);
+    return jsonResponse_({ logs: sPaged, total: sTotal, page: page, pageSize: pageSize });
+  }
+}
+
+/** 8. getMarketingSettings — key/value settings */
+function handleGetMarketingSettings_() {
+  var ss = getCampaignSpreadsheet_();
+  var settings = mkt_getSettings_(ss);
+  return jsonResponse_({
+    dailyDigestEmail: String(settings["Daily Digest Email"] || ""),
+    bookingUrl:       String(settings["Booking URL"] || ""),
+    unsubscribeBaseUrl: String(settings["Unsubscribe Base URL"] || ""),
+    senderName:       String(settings["Sender Name"] || ""),
+    senderPhone:      String(settings["Sender Phone"] || ""),
+    senderEmail:      String(settings["Sender Email"] || ""),
+    sendFromEmail:    String(settings["Send From Email"] || ""),
+    websiteUrl:       String(settings["Website URL"] || "")
+  });
+}
+
+// ─── Marketing WRITE Endpoints ──────────────────────────────────────────────
+
+/** 9. createMarketingCampaign — create a new campaign row */
+function handleCreateMarketingCampaign_(payload) {
+  var name = String(payload.name || "").trim();
+  if (!name) return errorResponse_("name is required", "INVALID_PAYLOAD");
+
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(10000)) return errorResponse_("Could not acquire lock — try again", "LOCK_TIMEOUT");
+
+  try {
+    var ss = getCampaignSpreadsheet_();
+    var sheet = ss.getSheetByName("Campaigns");
+    if (!sheet) return errorResponse_("Campaigns tab not found", "NOT_FOUND");
+
+    var campaignId = mkt_nextCampaignId_(ss);
+    var now = new Date();
+    var nowStr = Utilities.formatDate(now, Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm:ss");
+
+    var hdrMap = api_getHeaderMap_(sheet);
+    var numCols = sheet.getLastColumn();
+    var row = new Array(numCols).join(",").split(",").map(function() { return ""; });
+
+    function setCol(header, val) {
+      var idx = hdrMap[header];
+      if (idx !== undefined) row[idx - 1] = val;
+    }
+
+    setCol("Campaign ID", campaignId);
+    setCol("Campaign Name", name);
+    setCol("Type", payload.type || "Sequence");
+    setCol("Status", "Draft");
+    setCol("Priority", payload.priority || 5);
+    setCol("Target Type", payload.targetType || "All Active Leads");
+    setCol("Target Value", payload.targetValue || "");
+    setCol("Enrollment Mode", payload.enrollment || "Dynamic");
+    setCol("Initial Template", payload.tplInitial || "");
+    setCol("Follow-Up 1 Template", payload.tplFU1 || "");
+    setCol("Follow-Up 2 Template", payload.tplFU2 || "");
+    setCol("Follow-Up 3 Template", payload.tplFU3 || "");
+    setCol("Max Follow-Ups", payload.maxFU || 0);
+    setCol("Follow-Up Interval Days", payload.interval || 7);
+    setCol("Daily Send Limit", payload.dailyLimit || 50);
+    setCol("Send Window Start", payload.sendStart || 8);
+    setCol("Send Window End", payload.sendEnd || 17);
+    setCol("Test Mode", payload.testMode ? "TRUE" : "FALSE");
+    setCol("Test Recipient", payload.testRecipient || "");
+    setCol("Created Date", nowStr);
+    setCol("Validation Status", "");
+    setCol("Notes", payload.notes || "");
+    setCol("Custom 1", payload.custom1 || "");
+    setCol("Custom 2", payload.custom2 || "");
+    setCol("Custom 3", payload.custom3 || "");
+
+    sheet.appendRow(row);
+
+    // Re-read the created campaign to return normalized
+    var found = mkt_findCampaignRow_(ss, campaignId);
+    var campaign = null;
+    if (found) {
+      var obj = {};
+      for (var h in found.hdrMap) obj[h] = found.data[found.rowIdx][found.hdrMap[h]];
+      campaign = mkt_normalizeCampaign_(obj);
+    }
+
+    return jsonResponse_({ campaignId: campaignId, campaign: campaign });
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/** 10. updateMarketingCampaign — patch campaign fields */
+function handleUpdateMarketingCampaign_(payload) {
+  var campaignId = String(payload.campaignId || "").trim();
+  if (!campaignId) return errorResponse_("campaignId is required", "INVALID_PAYLOAD");
+
+  var ss = getCampaignSpreadsheet_();
+  var found = mkt_findCampaignRow_(ss, campaignId);
+  if (!found) return errorResponse_("Campaign not found: " + campaignId, "NOT_FOUND");
+
+  var currentStatus = String(found.data[found.rowIdx][found.hdrMap["Status"]] || "");
+  if (currentStatus !== "Draft" && currentStatus !== "Paused") {
+    return errorResponse_("Can only update Draft or Paused campaigns (current: " + currentStatus + ")", "INVALID_STATE");
+  }
+
+  // Map payload keys to sheet headers (includes short aliases used by frontend)
+  var fieldMap = {
+    name: "Campaign Name", type: "Type", priority: "Priority",
+    targetType: "Target Type", targetValue: "Target Value",
+    enrollmentMode: "Enrollment Mode", enrollment: "Enrollment Mode",
+    initialTemplate: "Initial Template", tplInitial: "Initial Template",
+    followUp1Template: "Follow-Up 1 Template", tplFU1: "Follow-Up 1 Template",
+    followUp2Template: "Follow-Up 2 Template", tplFU2: "Follow-Up 2 Template",
+    followUp3Template: "Follow-Up 3 Template", tplFU3: "Follow-Up 3 Template",
+    maxFollowUps: "Max Follow-Ups", maxFU: "Max Follow-Ups",
+    followUpIntervalDays: "Follow-Up Interval Days", interval: "Follow-Up Interval Days",
+    dailySendLimit: "Daily Send Limit", dailyLimit: "Daily Send Limit",
+    sendWindowStart: "Send Window Start", sendStart: "Send Window Start",
+    sendWindowEnd: "Send Window End", sendEnd: "Send Window End",
+    startDate: "Start Date", endDate: "End Date",
+    testMode: "Test Mode", testRecipient: "Test Recipient", notes: "Notes",
+    custom1: "Custom 1", custom2: "Custom 2", custom3: "Custom 3"
+  };
+
+  var patches = {};
+  for (var key in fieldMap) {
+    if (payload[key] !== undefined) {
+      var val = payload[key];
+      if (key === "testMode") val = val ? "TRUE" : "FALSE";
+      patches[fieldMap[key]] = val;
+    }
+  }
+
+  mkt_patchRow_(found.sheet, found.sheetRow, found.hdrMap, patches);
+
+  // Re-read and return
+  var updated = mkt_findCampaignRow_(ss, campaignId);
+  var obj = {};
+  for (var h in updated.hdrMap) obj[h] = updated.data[updated.rowIdx][updated.hdrMap[h]];
+  return jsonResponse_({ campaign: mkt_normalizeCampaign_(obj) });
+}
+
+/** 11. activateCampaign — validate + set Active + enroll contacts */
+function handleActivateCampaign_(payload) {
+  var campaignId = String(payload.campaignId || "").trim();
+  if (!campaignId) return errorResponse_("campaignId is required", "INVALID_PAYLOAD");
+
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(10000)) return errorResponse_("Could not acquire lock — try again", "LOCK_TIMEOUT");
+
+  try {
+    var ss = getCampaignSpreadsheet_();
+    var found = mkt_findCampaignRow_(ss, campaignId);
+    if (!found) return errorResponse_("Campaign not found: " + campaignId, "NOT_FOUND");
+
+    var status = String(found.data[found.rowIdx][found.hdrMap["Status"]] || "");
+    if (status !== "Draft" && status !== "Paused") {
+      return errorResponse_("Can only activate Draft or Paused campaigns (current: " + status + ")", "INVALID_STATE");
+    }
+
+    // Build campaign object for validation
+    var cObj = {};
+    for (var h in found.hdrMap) cObj[h] = found.data[found.rowIdx][found.hdrMap[h]];
+    var campaign = mkt_normalizeCampaign_(cObj);
+
+    // Validate
+    var validationNotes = [];
+    var templates = mkt_getTemplates_(ss);
+    if (!campaign.initialTemplate) validationNotes.push("No initial template set");
+    else if (!templates[campaign.initialTemplate]) validationNotes.push("Initial template '" + campaign.initialTemplate + "' not found");
+    if (campaign.maxFollowUps > 0) {
+      if (campaign.followUp1Template && !templates[campaign.followUp1Template]) validationNotes.push("Follow-Up 1 template not found");
+      if (campaign.maxFollowUps > 1 && campaign.followUp2Template && !templates[campaign.followUp2Template]) validationNotes.push("Follow-Up 2 template not found");
+      if (campaign.maxFollowUps > 2 && campaign.followUp3Template && !templates[campaign.followUp3Template]) validationNotes.push("Follow-Up 3 template not found");
+    }
+
+    if (validationNotes.length > 0) {
+      mkt_patchRow_(found.sheet, found.sheetRow, found.hdrMap, {
+        "Validation Status": "Invalid", "Validation Notes": validationNotes.join("; ")
+      });
+      return errorResponse_("Validation failed: " + validationNotes.join("; "), "VALIDATION_FAILED");
+    }
+
+    // Enroll contacts
+    var enrolled = mkt_enrollContacts_(ss, campaign);
+
+    // Set Active
+    var now = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm:ss");
+    mkt_patchRow_(found.sheet, found.sheetRow, found.hdrMap, {
+      "Status": "Active", "Validation Status": "Valid", "Validation Notes": "",
+      "Start Date": campaign.startDate || now
+    });
+
+    // Re-read
+    var updated = mkt_findCampaignRow_(ss, campaignId);
+    var uObj = {};
+    for (var uh in updated.hdrMap) uObj[uh] = updated.data[updated.rowIdx][updated.hdrMap[uh]];
+    return jsonResponse_({ campaign: mkt_normalizeCampaign_(uObj), enrolled: enrolled, validationNotes: "" });
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/** Enroll matching contacts into a campaign. Returns count enrolled. */
+function mkt_enrollContacts_(ss, campaign) {
+  var conSheet = ss.getSheetByName("Contacts");
+  if (!conSheet) return 0;
+  var contacts = sheetToObjects_(conSheet);
+
+  // Build set of already-enrolled emails
+  var ccSheet = ss.getSheetByName("Campaign Contacts");
+  var existingEmails = {};
+  if (ccSheet) {
+    var ccRows = sheetToObjects_(ccSheet);
+    for (var i = 0; i < ccRows.length; i++) {
+      if (String(ccRows[i]["Campaign ID"] || "") === campaign.campaignId) {
+        existingEmails[String(ccRows[i]["Contact Email"] || "").toLowerCase()] = true;
+      }
+    }
+  } else {
+    ccSheet = ss.insertSheet("Campaign Contacts");
+    ccSheet.appendRow(["Campaign ID","Campaign Name","Contact Email","Contact Name","Campaign Type","Status","Current Step","Follow-Up Count","Last Contact Date","Next Follow-Up Date","Last Attempt Date","Replied","Bounced","Unsubscribed","Converted","Suppressed","Suppression Reason","Gmail Thread ID","Gmail Message ID","Date Entered","Date Completed","Completed Reason"]);
+  }
+
+  var now = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm:ss");
+  var enrolled = 0;
+  var newRows = [];
+
+  for (var j = 0; j < contacts.length; j++) {
+    var c = contacts[j];
+    var email = String(c["Email"] || "").trim().toLowerCase();
+    if (!email) continue;
+    if (existingEmails[email]) continue;
+    if (String(c["Suppressed"] || "").toUpperCase() === "TRUE") continue;
+    if (String(c["Status"] || "") === "Suppressed") continue;
+
+    // Target type filtering
+    var isClient = String(c["Existing Client"] || "").toUpperCase() === "TRUE";
+    var tag = String(c["Campaign Tag"] || "").trim();
+    switch (campaign.targetType) {
+      case "Existing Clients": if (!isClient) continue; break;
+      case "Non-Clients": if (isClient) continue; break;
+      case "Campaign Tag":
+      case "Manual List":
+        if (tag !== campaign.targetValue) continue; break;
+      case "All Active Leads": default: break;
+    }
+
+    var fullName = ((c["First Name"] || "") + " " + (c["Last Name"] || "")).trim();
+    newRows.push([
+      campaign.campaignId, campaign.name, email, fullName, campaign.type,
+      "Pending", "Initial", 0, "", "", "", "FALSE", "FALSE", "FALSE", "FALSE",
+      "FALSE", "", "", "", now, "", ""
+    ]);
+    enrolled++;
+  }
+
+  if (newRows.length > 0) {
+    ccSheet.getRange(ccSheet.getLastRow() + 1, 1, newRows.length, newRows[0].length).setValues(newRows);
+  }
+
+  return enrolled;
+}
+
+/** 12. pauseCampaign */
+function handlePauseCampaign_(payload) {
+  var campaignId = String(payload.campaignId || "").trim();
+  if (!campaignId) return errorResponse_("campaignId is required", "INVALID_PAYLOAD");
+
+  var ss = getCampaignSpreadsheet_();
+  var found = mkt_findCampaignRow_(ss, campaignId);
+  if (!found) return errorResponse_("Campaign not found: " + campaignId, "NOT_FOUND");
+
+  var status = String(found.data[found.rowIdx][found.hdrMap["Status"]] || "");
+  if (status !== "Active") return errorResponse_("Can only pause Active campaigns (current: " + status + ")", "INVALID_STATE");
+
+  mkt_patchRow_(found.sheet, found.sheetRow, found.hdrMap, { "Status": "Paused" });
+
+  var uObj = {};
+  for (var h in found.hdrMap) uObj[h] = found.data[found.rowIdx][found.hdrMap[h]];
+  uObj["Status"] = "Paused";
+  return jsonResponse_({ campaign: mkt_normalizeCampaign_(uObj) });
+}
+
+/** 13. completeCampaign */
+function handleCompleteCampaign_(payload) {
+  var campaignId = String(payload.campaignId || "").trim();
+  if (!campaignId) return errorResponse_("campaignId is required", "INVALID_PAYLOAD");
+
+  var ss = getCampaignSpreadsheet_();
+  var found = mkt_findCampaignRow_(ss, campaignId);
+  if (!found) return errorResponse_("Campaign not found: " + campaignId, "NOT_FOUND");
+
+  var status = String(found.data[found.rowIdx][found.hdrMap["Status"]] || "");
+  if (status !== "Active" && status !== "Paused") {
+    return errorResponse_("Can only complete Active or Paused campaigns (current: " + status + ")", "INVALID_STATE");
+  }
+
+  // Mark campaign as Complete
+  var now = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm:ss");
+  mkt_patchRow_(found.sheet, found.sheetRow, found.hdrMap, { "Status": "Complete", "End Date": now });
+
+  // Complete all pending/active CC rows
+  var ccSheet = ss.getSheetByName("Campaign Contacts");
+  var contactsCompleted = 0;
+  if (ccSheet) {
+    var ccData = ccSheet.getDataRange().getValues();
+    var ccHdr = {};
+    ccData[0].forEach(function(h, i) { ccHdr[String(h || "").trim()] = i; });
+    var ccIdCol = ccHdr["Campaign ID"];
+    var ccStCol = ccHdr["Status"];
+    var ccCompCol = ccHdr["Date Completed"];
+    var ccReasonCol = ccHdr["Completed Reason"];
+
+    for (var i = 1; i < ccData.length; i++) {
+      if (String(ccData[i][ccIdCol] || "") !== campaignId) continue;
+      var ccSt = String(ccData[i][ccStCol] || "");
+      if (ccSt === "Pending" || ccSt === "Sent" || ccSt === "Follow-Up Scheduled") {
+        ccSheet.getRange(i + 1, ccStCol + 1).setValue("Complete");
+        if (ccCompCol !== undefined) ccSheet.getRange(i + 1, ccCompCol + 1).setValue(now);
+        if (ccReasonCol !== undefined) ccSheet.getRange(i + 1, ccReasonCol + 1).setValue("Campaign Completed");
+        contactsCompleted++;
+      }
+    }
+  }
+
+  var uObj = {};
+  for (var h in found.hdrMap) uObj[h] = found.data[found.rowIdx][found.hdrMap[h]];
+  uObj["Status"] = "Complete";
+  return jsonResponse_({ campaign: mkt_normalizeCampaign_(uObj), contactsCompleted: contactsCompleted });
+}
+
+/** 14. runCampaignNow — execute a single campaign's send cycle */
+function handleRunCampaignNow_(payload) {
+  var campaignId = String(payload.campaignId || "").trim();
+  if (!campaignId) return errorResponse_("campaignId is required", "INVALID_PAYLOAD");
+
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(10000)) return errorResponse_("Could not acquire lock — try again", "LOCK_TIMEOUT");
+
+  try {
+    var ss = getCampaignSpreadsheet_();
+    var found = mkt_findCampaignRow_(ss, campaignId);
+    if (!found) return errorResponse_("Campaign not found: " + campaignId, "NOT_FOUND");
+
+    var status = String(found.data[found.rowIdx][found.hdrMap["Status"]] || "");
+    if (status !== "Active") return errorResponse_("Can only run Active campaigns (current: " + status + ")", "INVALID_STATE");
+
+    // Build campaign object
+    var cObj = {};
+    for (var h in found.hdrMap) cObj[h] = found.data[found.rowIdx][found.hdrMap[h]];
+    var campaign = mkt_normalizeCampaign_(cObj);
+
+    var settings = mkt_getSettings_(ss);
+    var templates = mkt_getTemplates_(ss);
+
+    // Dynamic enrollment if applicable
+    if (campaign.enrollmentMode === "Dynamic") {
+      mkt_enrollContacts_(ss, campaign);
+    }
+
+    // Read Campaign Contacts
+    var ccSheet = ss.getSheetByName("Campaign Contacts");
+    if (!ccSheet) return jsonResponse_({ sent: 0, skipped: 0, failed: 0, errors: [] });
+    var ccData = ccSheet.getDataRange().getValues();
+    var ccHdr = {};
+    ccData[0].forEach(function(hd, idx) { ccHdr[String(hd || "").trim()] = idx; });
+
+    // Read Contacts for suppression/24h checks
+    var conSheet = ss.getSheetByName("Contacts");
+    var contactsByEmail = {};
+    if (conSheet) {
+      var conRows = sheetToObjects_(conSheet);
+      for (var ci = 0; ci < conRows.length; ci++) {
+        var ce = String(conRows[ci]["Email"] || "").trim().toLowerCase();
+        if (ce) contactsByEmail[ce] = conRows[ci];
+      }
+    }
+
+    // Campaign Log sheet
+    var logSheet = ss.getSheetByName("Campaign Log");
+
+    var sent = 0, skipped = 0, failed = 0;
+    var errors = [];
+    var now = new Date();
+    var nowStr = Utilities.formatDate(now, Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm:ss");
+    var dailySent = 0;
+
+    for (var i = 1; i < ccData.length; i++) {
+      if (String(ccData[i][ccHdr["Campaign ID"]] || "") !== campaignId) continue;
+
+      var ccSt = String(ccData[i][ccHdr["Status"]] || "");
+      if (ccSt !== "Pending" && ccSt !== "Follow-Up Scheduled") continue;
+
+      // Check daily limit
+      var quota = 0;
+      try { quota = MailApp.getRemainingDailyQuota(); } catch (e) {}
+      if (quota <= 1) { skipped++; errors.push("Gmail daily quota exhausted"); break; }
+      if (campaign.dailySendLimit > 0 && dailySent >= campaign.dailySendLimit) { skipped++; continue; }
+
+      var email = String(ccData[i][ccHdr["Contact Email"]] || "").trim();
+      var contactName = String(ccData[i][ccHdr["Contact Name"]] || "");
+      var conRow = contactsByEmail[email.toLowerCase()];
+
+      // Suppression check
+      if (conRow && String(conRow["Suppressed"] || "").toUpperCase() === "TRUE") {
+        ccSheet.getRange(i + 1, ccHdr["Suppressed"] + 1).setValue("TRUE");
+        ccSheet.getRange(i + 1, ccHdr["Status"] + 1).setValue("Suppressed");
+        skipped++; continue;
+      }
+
+      // 24-hour rule
+      if (conRow) {
+        var lastSent = conRow["Last Campaign Sent Date"];
+        if (lastSent) {
+          var lastD = new Date(lastSent);
+          if (!isNaN(lastD.getTime()) && (now.getTime() - lastD.getTime()) < 86400000) {
+            skipped++; continue;
+          }
+        }
+      }
+
+      // Determine step + template
+      var step = String(ccData[i][ccHdr["Current Step"]] || "Initial");
+      var tplName = "";
+      if (step === "Initial") tplName = campaign.initialTemplate;
+      else if (step === "Follow-Up 1") tplName = campaign.followUp1Template;
+      else if (step === "Follow-Up 2") tplName = campaign.followUp2Template;
+      else if (step === "Follow-Up 3") tplName = campaign.followUp3Template;
+
+      if (!tplName || !templates[tplName]) { skipped++; continue; }
+
+      // Build contact object for email
+      var contactObj = {
+        firstName: conRow ? String(conRow["First Name"] || "") : "",
+        lastName: conRow ? String(conRow["Last Name"] || "") : "",
+        company: conRow ? String(conRow["Company"] || "") : "",
+        email: email,
+        unsubToken: conRow ? String(conRow["Unsub Token"] || "") : ""
+      };
+
+      // Build email
+      var trackingMarker = mkt_generateTrackingMarker_(campaignId, email, step);
+      var emailResult = mkt_buildEmail_(templates[tplName], contactObj, settings, campaign, step, trackingMarker);
+
+      // Handle test mode
+      var sendTo = email;
+      var subjectPrefix = "";
+      if (campaign.testMode) {
+        sendTo = campaign.testRecipient || String(settings["Daily Digest Email"] || "");
+        subjectPrefix = "[TEST] ";
+      }
+
+      // Send
+      try {
+        var sendFromEmail = String(settings["Send From Email"] || "");
+        var sendOpts = {
+          htmlBody: emailResult.body,
+          name: String(settings["Sender Name"] || ""),
+          replyTo: String(settings["Sender Email"] || "")
+        };
+        if (sendFromEmail && sendFromEmail.indexOf("@") > -1) {
+          sendOpts.from = sendFromEmail;
+        }
+        GmailApp.sendEmail(sendTo, subjectPrefix + emailResult.subject, "", sendOpts);
+
+        // Capture thread/message ID
+        Utilities.sleep(2500);
+        var threadId = "", messageId = "";
+        try {
+          var threads = GmailApp.search('to:"' + sendTo + '" newer_than:2d "' + trackingMarker + '"', 0, 1);
+          if (threads.length > 0) {
+            threadId = threads[0].getId();
+            var msgs = threads[0].getMessages();
+            if (msgs.length > 0) messageId = msgs[msgs.length - 1].getId();
+          }
+        } catch (searchErr) {}
+
+        // Apply Gmail labels
+        try {
+          if (threadId) {
+            var thread = GmailApp.getThreadById(threadId);
+            var sentLabel = GmailApp.getUserLabelByName("Stride/Campaign/Sent") || GmailApp.createLabel("Stride/Campaign/Sent");
+            sentLabel.addToThread(thread);
+            if (step !== "Initial") {
+              var fuLabel = GmailApp.getUserLabelByName("Stride/Campaign/Follow-Up") || GmailApp.createLabel("Stride/Campaign/Follow-Up");
+              fuLabel.addToThread(thread);
+            }
+          }
+        } catch (labelErr) {}
+
+        // Update CC row
+        var newStatus = (campaign.type === "Blast") ? "Complete" : "Sent";
+        var fuCount = toNum_(ccData[i][ccHdr["Follow-Up Count"]]) || 0;
+        if (step !== "Initial") fuCount++;
+        ccSheet.getRange(i + 1, ccHdr["Status"] + 1).setValue(newStatus);
+        ccSheet.getRange(i + 1, ccHdr["Last Contact Date"] + 1).setValue(nowStr);
+        ccSheet.getRange(i + 1, ccHdr["Last Attempt Date"] + 1).setValue(nowStr);
+        ccSheet.getRange(i + 1, ccHdr["Follow-Up Count"] + 1).setValue(fuCount);
+        if (ccHdr["Gmail Thread ID"] !== undefined) ccSheet.getRange(i + 1, ccHdr["Gmail Thread ID"] + 1).setValue(threadId);
+        if (ccHdr["Gmail Message ID"] !== undefined) ccSheet.getRange(i + 1, ccHdr["Gmail Message ID"] + 1).setValue(messageId);
+
+        // Schedule next follow-up for Sequence campaigns
+        if (campaign.type === "Sequence" && newStatus === "Sent") {
+          var nextStep = "";
+          if (step === "Initial" && campaign.maxFollowUps >= 1) nextStep = "Follow-Up 1";
+          else if (step === "Follow-Up 1" && campaign.maxFollowUps >= 2) nextStep = "Follow-Up 2";
+          else if (step === "Follow-Up 2" && campaign.maxFollowUps >= 3) nextStep = "Follow-Up 3";
+
+          if (nextStep) {
+            var nextDate = new Date(now.getTime() + campaign.followUpIntervalDays * 86400000);
+            var nextDateStr = Utilities.formatDate(nextDate, Session.getScriptTimeZone(), "yyyy-MM-dd");
+            ccSheet.getRange(i + 1, ccHdr["Current Step"] + 1).setValue(nextStep);
+            ccSheet.getRange(i + 1, ccHdr["Status"] + 1).setValue("Follow-Up Scheduled");
+            if (ccHdr["Next Follow-Up Date"] !== undefined) ccSheet.getRange(i + 1, ccHdr["Next Follow-Up Date"] + 1).setValue(nextDateStr);
+          } else {
+            // No more follow-ups — mark exhausted
+            ccSheet.getRange(i + 1, ccHdr["Status"] + 1).setValue("Exhausted");
+            if (ccHdr["Date Completed"] !== undefined) ccSheet.getRange(i + 1, ccHdr["Date Completed"] + 1).setValue(nowStr);
+            if (ccHdr["Completed Reason"] !== undefined) ccSheet.getRange(i + 1, ccHdr["Completed Reason"] + 1).setValue("All follow-ups sent");
+          }
+        }
+
+        // Update contact's Last Campaign Sent Date
+        if (conRow) {
+          var conFound = mkt_findContactRow_(ss, email);
+          if (conFound) {
+            mkt_patchRow_(conFound.sheet, conFound.sheetRow, conFound.hdrMap, { "Last Campaign Sent Date": nowStr });
+          }
+        }
+
+        // Log success
+        if (logSheet) {
+          logSheet.appendRow([nowStr, campaignId, campaign.name, email, contactName,
+            contactObj.company, tplName, step, emailResult.subject, "Success", "", campaign.testMode ? "TRUE" : "FALSE"]);
+        }
+
+        sent++;
+        dailySent++;
+
+      } catch (sendErr) {
+        failed++;
+        errors.push(email + ": " + sendErr.message);
+        if (logSheet) {
+          logSheet.appendRow([nowStr, campaignId, campaign.name, email, contactName,
+            contactObj.company, tplName || "", step, "", "Failed", String(sendErr), campaign.testMode ? "TRUE" : "FALSE"]);
+        }
+      }
+    }
+
+    // Update campaign stats + last run date
+    mkt_updateCampaignStats_(ss, campaignId);
+    mkt_patchRow_(found.sheet, found.sheetRow, found.hdrMap, { "Last Run Date": nowStr, "Last Error": errors.length > 0 ? errors[0] : "" });
+
+    return jsonResponse_({ sent: sent, skipped: skipped, failed: failed, errors: errors });
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/** 15. deleteCampaign — delete Draft campaign + CC rows */
+function handleDeleteCampaign_(payload) {
+  var campaignId = String(payload.campaignId || "").trim();
+  if (!campaignId) return errorResponse_("campaignId is required", "INVALID_PAYLOAD");
+
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(10000)) return errorResponse_("Could not acquire lock — try again", "LOCK_TIMEOUT");
+
+  try {
+    var ss = getCampaignSpreadsheet_();
+    var found = mkt_findCampaignRow_(ss, campaignId);
+    if (!found) return errorResponse_("Campaign not found: " + campaignId, "NOT_FOUND");
+
+    var status = String(found.data[found.rowIdx][found.hdrMap["Status"]] || "");
+    if (status !== "Draft") {
+      return errorResponse_("Can only delete Draft campaigns. Complete the campaign first (current: " + status + ")", "INVALID_STATE");
+    }
+
+    // Delete CC rows (bottom-up)
+    var ccSheet = ss.getSheetByName("Campaign Contacts");
+    var contactsRemoved = 0;
+    if (ccSheet) {
+      var ccData = ccSheet.getDataRange().getValues();
+      var ccIdCol = 0; // Campaign ID is column A
+      for (var h = 0; h < ccData[0].length; h++) {
+        if (String(ccData[0][h] || "").trim() === "Campaign ID") { ccIdCol = h; break; }
+      }
+      for (var i = ccData.length - 1; i >= 1; i--) {
+        if (String(ccData[i][ccIdCol] || "") === campaignId) {
+          ccSheet.deleteRow(i + 1);
+          contactsRemoved++;
+        }
+      }
+    }
+
+    // Delete campaign row
+    found.sheet.deleteRow(found.sheetRow);
+
+    return jsonResponse_({ deleted: true, contactsRemoved: contactsRemoved });
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/** 16. createMarketingContact */
+function handleCreateMarketingContact_(payload) {
+  var firstName = String(payload.firstName || "").trim();
+  var lastName = String(payload.lastName || "").trim();
+  var email = String(payload.email || "").trim();
+  if (!email) return errorResponse_("email is required", "INVALID_PAYLOAD");
+  if (!firstName) return errorResponse_("firstName is required", "INVALID_PAYLOAD");
+
+  var ss = getCampaignSpreadsheet_();
+
+  // Dedup check
+  var existing = mkt_findContactRow_(ss, email);
+  if (existing) return errorResponse_("Contact already exists: " + email, "DUPLICATE");
+
+  var sheet = ss.getSheetByName("Contacts");
+  if (!sheet) return errorResponse_("Contacts tab not found", "NOT_FOUND");
+
+  var now = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm:ss");
+  var unsubToken = mkt_generateUnsubToken_();
+  var isClient = payload.existingClient ? "TRUE" : "FALSE";
+  var status = payload.existingClient ? "Client" : "Pending";
+
+  var hdrMap = api_getHeaderMap_(sheet);
+  var numCols = sheet.getLastColumn();
+  var row = new Array(numCols).join(",").split(",").map(function() { return ""; });
+
+  function setCol(header, val) {
+    var idx = hdrMap[header];
+    if (idx !== undefined) row[idx - 1] = val;
+  }
+
+  setCol("Date Added", now);
+  setCol("Added By", "API");
+  setCol("Source", "API");
+  setCol("First Name", firstName);
+  setCol("Last Name", lastName);
+  setCol("Email", email);
+  setCol("Company", payload.company || "");
+  setCol("Status", status);
+  setCol("Existing Client", isClient);
+  setCol("Campaign Tag", payload.campaignTag || "");
+  setCol("Unsub Token", unsubToken);
+  setCol("Notes", payload.notes || "");
+
+  sheet.appendRow(row);
+
+  // Return normalized
+  var created = mkt_findContactRow_(ss, email);
+  var contact = null;
+  if (created) {
+    var obj = {};
+    for (var h in created.hdrMap) obj[h] = created.data[created.rowIdx][created.hdrMap[h]];
+    contact = mkt_normalizeContact_(obj);
+  }
+  return jsonResponse_({ contact: contact });
+}
+
+/** 17. importMarketingContacts — batch import from JSON array */
+function handleImportMarketingContacts_(payload) {
+  var contacts = payload.contacts;
+  if (!contacts || !contacts.length) return errorResponse_("contacts array is required", "INVALID_PAYLOAD");
+
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(10000)) return errorResponse_("Could not acquire lock — try again", "LOCK_TIMEOUT");
+
+  try {
+    var ss = getCampaignSpreadsheet_();
+    var sheet = ss.getSheetByName("Contacts");
+    if (!sheet) return errorResponse_("Contacts tab not found", "NOT_FOUND");
+
+    // Build existing email set
+    var existingEmails = {};
+    var conRows = sheetToObjects_(sheet);
+    for (var i = 0; i < conRows.length; i++) {
+      var e = String(conRows[i]["Email"] || "").trim().toLowerCase();
+      if (e) existingEmails[e] = true;
+    }
+
+    var hdrMap = api_getHeaderMap_(sheet);
+    var numCols = sheet.getLastColumn();
+    var now = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm:ss");
+
+    var imported = 0, skippedDuplicates = 0, skippedInvalid = 0;
+    var errs = [];
+    var newRows = [];
+
+    for (var j = 0; j < contacts.length; j++) {
+      var c = contacts[j];
+      var cEmail = String(c.email || "").trim().toLowerCase();
+      if (!cEmail || cEmail.indexOf("@") < 0) { skippedInvalid++; continue; }
+      if (existingEmails[cEmail]) { skippedDuplicates++; continue; }
+
+      var row = new Array(numCols).join(",").split(",").map(function() { return ""; });
+      function setC(header, val) {
+        var idx = hdrMap[header];
+        if (idx !== undefined) row[idx - 1] = val;
+      }
+      setC("Date Added", now);
+      setC("Added By", "API Import");
+      setC("Source", "API Import");
+      setC("First Name", c.firstName || "");
+      setC("Last Name", c.lastName || "");
+      setC("Email", cEmail);
+      setC("Company", c.company || "");
+      setC("Status", c.existingClient ? "Client" : "Pending");
+      setC("Existing Client", c.existingClient ? "TRUE" : "FALSE");
+      setC("Unsub Token", mkt_generateUnsubToken_());
+
+      newRows.push(row);
+      existingEmails[cEmail] = true;
+      imported++;
+    }
+
+    if (newRows.length > 0) {
+      sheet.getRange(sheet.getLastRow() + 1, 1, newRows.length, numCols).setValues(newRows);
+    }
+
+    return jsonResponse_({ imported: imported, skippedDuplicates: skippedDuplicates, skippedInvalid: skippedInvalid, errors: errs });
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/** 18. updateMarketingContact — patch contact fields by email */
+function handleUpdateMarketingContact_(payload) {
+  var email = String(payload.email || "").trim();
+  if (!email) return errorResponse_("email is required", "INVALID_PAYLOAD");
+
+  var ss = getCampaignSpreadsheet_();
+  var found = mkt_findContactRow_(ss, email);
+  if (!found) return errorResponse_("Contact not found: " + email, "NOT_FOUND");
+
+  var fieldMap = {
+    firstName: "First Name", lastName: "Last Name", company: "Company",
+    existingClient: "Existing Client", campaignTag: "Campaign Tag",
+    notes: "Notes", source: "Source"
+  };
+
+  var patches = {};
+  for (var key in fieldMap) {
+    if (payload[key] !== undefined) {
+      var val = payload[key];
+      if (key === "existingClient") val = val ? "TRUE" : "FALSE";
+      patches[fieldMap[key]] = val;
+    }
+  }
+
+  // Update status if existingClient changed
+  if (payload.existingClient !== undefined) {
+    var isSuppressed = String(found.data[found.rowIdx][found.hdrMap["Suppressed"]] || "").toUpperCase() === "TRUE";
+    if (!isSuppressed) {
+      patches["Status"] = payload.existingClient ? "Client" : "Pending";
+    }
+  }
+
+  mkt_patchRow_(found.sheet, found.sheetRow, found.hdrMap, patches);
+
+  // Re-read
+  var updated = mkt_findContactRow_(ss, email);
+  var obj = {};
+  for (var h in updated.hdrMap) obj[h] = updated.data[updated.rowIdx][updated.hdrMap[h]];
+  return jsonResponse_({ contact: mkt_normalizeContact_(obj) });
+}
+
+/** 19a. suppressContact */
+function handleSuppressContact_(payload) {
+  var email = String(payload.email || "").trim();
+  if (!email) return errorResponse_("email is required", "INVALID_PAYLOAD");
+  var reason = String(payload.reason || "Manual").trim();
+
+  var ss = getCampaignSpreadsheet_();
+  var found = mkt_findContactRow_(ss, email);
+  if (!found) return errorResponse_("Contact not found: " + email, "NOT_FOUND");
+
+  var now = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm:ss");
+
+  // Update contact row
+  mkt_patchRow_(found.sheet, found.sheetRow, found.hdrMap, {
+    "Suppressed": "TRUE", "Suppression Reason": reason, "Suppression Date": now, "Status": "Suppressed"
+  });
+  if (reason === "Unsubscribed") {
+    mkt_patchRow_(found.sheet, found.sheetRow, found.hdrMap, { "Unsubscribed": "TRUE" });
+  }
+
+  // Update all active Campaign Contacts rows for this email
+  var ccSheet = ss.getSheetByName("Campaign Contacts");
+  if (ccSheet) {
+    var ccData = ccSheet.getDataRange().getValues();
+    var ccHdr = {};
+    ccData[0].forEach(function(h, i) { ccHdr[String(h || "").trim()] = i; });
+    var lowerEmail = email.toLowerCase();
+    for (var i = 1; i < ccData.length; i++) {
+      if (String(ccData[i][ccHdr["Contact Email"]] || "").trim().toLowerCase() !== lowerEmail) continue;
+      var ccSt = String(ccData[i][ccHdr["Status"]] || "");
+      if (ccSt === "Pending" || ccSt === "Sent" || ccSt === "Follow-Up Scheduled") {
+        ccSheet.getRange(i + 1, ccHdr["Suppressed"] + 1).setValue("TRUE");
+        ccSheet.getRange(i + 1, ccHdr["Suppression Reason"] + 1).setValue(reason);
+        ccSheet.getRange(i + 1, ccHdr["Status"] + 1).setValue(reason === "Unsubscribed" ? "Unsubscribed" : "Complete");
+      }
+    }
+  }
+
+  // Append to Suppression Log
+  var slSheet = ss.getSheetByName("Suppression Log");
+  if (slSheet) {
+    var firstName = String(found.data[found.rowIdx][found.hdrMap["First Name"]] || "");
+    var company = String(found.data[found.rowIdx][found.hdrMap["Company"]] || "");
+    slSheet.appendRow([now, email, firstName, company, reason, "API"]);
+  }
+
+  // Re-read
+  var updated = mkt_findContactRow_(ss, email);
+  var obj = {};
+  for (var h in updated.hdrMap) obj[h] = updated.data[updated.rowIdx][updated.hdrMap[h]];
+  return jsonResponse_({ contact: mkt_normalizeContact_(obj) });
+}
+
+/** 19b. unsuppressContact */
+function handleUnsuppressContact_(payload) {
+  var email = String(payload.email || "").trim();
+  if (!email) return errorResponse_("email is required", "INVALID_PAYLOAD");
+  var releaseNote = String(payload.releaseNote || "").trim();
+
+  var ss = getCampaignSpreadsheet_();
+  var found = mkt_findContactRow_(ss, email);
+  if (!found) return errorResponse_("Contact not found: " + email, "NOT_FOUND");
+
+  var isClient = String(found.data[found.rowIdx][found.hdrMap["Existing Client"]] || "").toUpperCase() === "TRUE";
+  var now = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd");
+  var noteText = releaseNote ? (releaseNote + " (" + now + ")") : ("Unsuppressed via API " + now);
+
+  mkt_patchRow_(found.sheet, found.sheetRow, found.hdrMap, {
+    "Suppressed": "FALSE", "Suppression Reason": "", "Suppression Date": "",
+    "Status": isClient ? "Client" : "Pending",
+    "Manual Release Note": noteText, "Bounced": "FALSE"
+  });
+
+  var updated = mkt_findContactRow_(ss, email);
+  var obj = {};
+  for (var h in updated.hdrMap) obj[h] = updated.data[updated.rowIdx][updated.hdrMap[h]];
+  return jsonResponse_({ contact: mkt_normalizeContact_(obj) });
+}
+
+/** 20. createMarketingTemplate */
+function handleCreateMarketingTemplate_(payload) {
+  var name = String(payload.name || "").trim();
+  if (!name) return errorResponse_("name is required", "INVALID_PAYLOAD");
+  var subject = String(payload.subject || "").trim();
+  if (!subject) return errorResponse_("subject is required", "INVALID_PAYLOAD");
+  var htmlBody = String(payload.htmlBody || "").trim();
+  if (!htmlBody) return errorResponse_("htmlBody is required", "INVALID_PAYLOAD");
+
+  var ss = getCampaignSpreadsheet_();
+
+  // Dedup check
+  var existing = mkt_findTemplateRow_(ss, name);
+  if (existing) return errorResponse_("Template already exists: " + name, "DUPLICATE");
+
+  var sheet = ss.getSheetByName("Templates");
+  if (!sheet) return errorResponse_("Templates tab not found", "NOT_FOUND");
+
+  // Find insertion point (before TOKEN REFERENCE row)
+  var data = sheet.getDataRange().getValues();
+  var insertRow = data.length + 1; // default: after last row
+  for (var i = 1; i < data.length; i++) {
+    if (String(data[i][0] || "").trim() === "--- TOKEN REFERENCE ---") {
+      insertRow = i + 1; // insert before token reference
+      break;
+    }
+  }
+
+  var tplType = String(payload.type || "").trim();
+  var tplActive = payload.active === false ? "FALSE" : "TRUE";
+
+  // Write using header map for column safety
+  var hdrMap = {};
+  data[0].forEach(function(h, idx) { hdrMap[String(h || "").trim()] = idx; });
+  var numCols = sheet.getLastColumn();
+  var row = new Array(numCols).fill("");
+  function setCol(header, val) {
+    var idx = hdrMap[header];
+    if (idx !== undefined) row[idx] = val;
+  }
+  setCol("Template Name", name);
+  setCol("Subject Line", subject);
+  setCol("Preview Text", payload.previewText || "");
+  setCol("HTML Body", htmlBody);
+  setCol("Version", payload.version || "1.0");
+  setCol("Type", tplType);
+  setCol("Active", tplActive);
+
+  sheet.insertRowBefore(insertRow);
+  sheet.getRange(insertRow, 1, 1, numCols).setValues([row]);
+
+  return jsonResponse_({
+    template: { name: name, subject: subject, previewText: payload.previewText || "", htmlBody: htmlBody, version: payload.version || "1.0", type: tplType, active: tplActive !== "FALSE" }
+  });
+}
+
+/** 21. updateMarketingTemplate — patch template fields by name */
+function handleUpdateMarketingTemplate_(payload) {
+  var name = String(payload.name || "").trim();
+  if (!name) return errorResponse_("name is required", "INVALID_PAYLOAD");
+
+  var ss = getCampaignSpreadsheet_();
+  var found = mkt_findTemplateRow_(ss, name);
+  if (!found) return errorResponse_("Template not found: " + name, "NOT_FOUND");
+
+  var fieldMap = { subject: "Subject Line", previewText: "Preview Text", htmlBody: "HTML Body", version: "Version", type: "Type" };
+  var patches = {};
+  for (var key in fieldMap) {
+    if (payload[key] !== undefined) patches[fieldMap[key]] = payload[key];
+  }
+  if (payload.active !== undefined) {
+    patches["Active"] = payload.active ? "TRUE" : "FALSE";
+  }
+
+  mkt_patchRow_(found.sheet, found.sheetRow, found.hdrMap, patches);
+
+  // Re-read
+  var updated = mkt_findTemplateRow_(ss, name);
+  var obj = {};
+  for (var h in updated.hdrMap) obj[h] = updated.data[updated.rowIdx][updated.hdrMap[h]];
+  return jsonResponse_({
+    template: {
+      name: name,
+      subject: String(obj["Subject Line"] || ""),
+      previewText: String(obj["Preview Text"] || ""),
+      htmlBody: String(obj["HTML Body"] || ""),
+      version: String(obj["Version"] || ""),
+      type: String(obj["Type"] || ""),
+      active: String(obj["Active"] || "TRUE").toUpperCase() !== "FALSE"
+    }
+  });
+}
+
+/** 22. updateMarketingSettings — patch settings key/value pairs */
+function handleUpdateMarketingSettings_(payload) {
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(10000)) return errorResponse_("Could not acquire lock — try again", "LOCK_TIMEOUT");
+
+  try {
+    var ss = getCampaignSpreadsheet_();
+    var sheet = ss.getSheetByName("Settings");
+    if (!sheet) return errorResponse_("Settings tab not found", "NOT_FOUND");
+
+    var data = sheet.getDataRange().getValues();
+
+    // Map camelCase → Settings tab key names
+    var keyMap = {
+      dailyDigestEmail: "Daily Digest Email",
+      bookingUrl: "Booking URL",
+      unsubscribeBaseUrl: "Unsubscribe Base URL",
+      senderName: "Sender Name",
+      senderPhone: "Sender Phone",
+      senderEmail: "Sender Email",
+      sendFromEmail: "Send From Email",
+      websiteUrl: "Website URL"
+    };
+
+    for (var camelKey in keyMap) {
+      if (payload[camelKey] === undefined) continue;
+      var sheetKey = keyMap[camelKey];
+      var found = false;
+      for (var i = 1; i < data.length; i++) {
+        if (String(data[i][0] || "").trim() === sheetKey) {
+          sheet.getRange(i + 1, 2).setValue(payload[camelKey]);
+          found = true;
+          break;
+        }
+      }
+      if (!found) {
+        // Add new setting row
+        sheet.appendRow([sheetKey, payload[camelKey]]);
+      }
+    }
+
+    // Re-read and return
+    var settings = mkt_getSettings_(ss);
+    return jsonResponse_({
+      dailyDigestEmail: String(settings["Daily Digest Email"] || ""),
+      bookingUrl:       String(settings["Booking URL"] || ""),
+      unsubscribeBaseUrl: String(settings["Unsubscribe Base URL"] || ""),
+      senderName:       String(settings["Sender Name"] || ""),
+      senderPhone:      String(settings["Sender Phone"] || ""),
+      senderEmail:      String(settings["Sender Email"] || ""),
+      sendFromEmail:    String(settings["Send From Email"] || ""),
+      websiteUrl:       String(settings["Website URL"] || "")
+    });
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// ─── Marketing GMAIL Endpoints ──────────────────────────────────────────────
+
+/** 23. sendTestEmail — build + send a test email for a campaign */
+function handleSendTestEmail_(payload) {
+  var campaignId = String(payload.campaignId || "").trim();
+  if (!campaignId) return errorResponse_("campaignId is required", "INVALID_PAYLOAD");
+
+  var ss = getCampaignSpreadsheet_();
+  var found = mkt_findCampaignRow_(ss, campaignId);
+  if (!found) return errorResponse_("Campaign not found: " + campaignId, "NOT_FOUND");
+
+  var cObj = {};
+  for (var h in found.hdrMap) cObj[h] = found.data[found.rowIdx][found.hdrMap[h]];
+  var campaign = mkt_normalizeCampaign_(cObj);
+
+  var step = String(payload.step || "Initial").trim();
+  var tplName = "";
+  if (step === "Initial") tplName = campaign.initialTemplate;
+  else if (step === "Follow-Up 1") tplName = campaign.followUp1Template;
+  else if (step === "Follow-Up 2") tplName = campaign.followUp2Template;
+  else if (step === "Follow-Up 3") tplName = campaign.followUp3Template;
+
+  if (!tplName) return errorResponse_("No template set for step: " + step, "INVALID_STATE");
+
+  var templates = mkt_getTemplates_(ss);
+  if (!templates[tplName]) return errorResponse_("Template not found: " + tplName, "NOT_FOUND");
+
+  var settings = mkt_getSettings_(ss);
+
+  // Find first non-suppressed contact for sample data
+  var conSheet = ss.getSheetByName("Contacts");
+  var sampleContact = { firstName: "Test", lastName: "User", company: "Test Company", email: "test@example.com", unsubToken: "test-token" };
+  if (conSheet) {
+    var conRows = sheetToObjects_(conSheet);
+    for (var i = 0; i < conRows.length; i++) {
+      if (String(conRows[i]["Suppressed"] || "").toUpperCase() !== "TRUE") {
+        sampleContact = {
+          firstName: String(conRows[i]["First Name"] || ""),
+          lastName: String(conRows[i]["Last Name"] || ""),
+          company: String(conRows[i]["Company"] || ""),
+          email: String(conRows[i]["Email"] || ""),
+          unsubToken: String(conRows[i]["Unsub Token"] || "")
+        };
+        break;
+      }
+    }
+  }
+
+  var emailResult = mkt_buildEmail_(templates[tplName], sampleContact, settings, campaign, step, null);
+
+  // Determine recipient
+  var recipientEmail = String(payload.recipientEmail || "").trim();
+  if (!recipientEmail) recipientEmail = campaign.testRecipient;
+  if (!recipientEmail) recipientEmail = String(settings["Daily Digest Email"] || "");
+  if (!recipientEmail) return errorResponse_("No test recipient configured", "INVALID_STATE");
+
+  var subject = "[TEST] " + emailResult.subject;
+
+  try {
+    var sendFromEmail = String(settings["Send From Email"] || "");
+    var sendOpts = {
+      htmlBody: emailResult.body,
+      name: String(settings["Sender Name"] || ""),
+      replyTo: String(settings["Sender Email"] || "")
+    };
+    if (sendFromEmail && sendFromEmail.indexOf("@") > -1) {
+      sendOpts.from = sendFromEmail;
+    }
+    GmailApp.sendEmail(recipientEmail, subject, "", sendOpts);
+  } catch (err) {
+    return errorResponse_("Failed to send test email: " + err.message, "SEND_FAILED");
+  }
+
+  return jsonResponse_({ sentTo: recipientEmail, subject: subject });
+}
+
+/** 24. previewTemplate — render template with sample data, return HTML (no send) */
+function handlePreviewTemplate_(payload) {
+  var templateName = String(payload.templateName || "").trim();
+  if (!templateName) return errorResponse_("templateName is required", "INVALID_PAYLOAD");
+
+  var ss = getCampaignSpreadsheet_();
+  var templates = mkt_getTemplates_(ss);
+  if (!templates[templateName]) return errorResponse_("Template not found: " + templateName, "NOT_FOUND");
+
+  var settings = mkt_getSettings_(ss);
+
+  // Optional campaign for custom tokens
+  var campaign = null;
+  var campaignId = String(payload.campaignId || "").trim();
+  if (campaignId) {
+    var found = mkt_findCampaignRow_(ss, campaignId);
+    if (found) {
+      var cObj = {};
+      for (var h in found.hdrMap) cObj[h] = found.data[found.rowIdx][found.hdrMap[h]];
+      campaign = mkt_normalizeCampaign_(cObj);
+    }
+  }
+
+  var sampleContact = { firstName: "Jane", lastName: "Doe", company: "Acme Corp", email: "jane@example.com", unsubToken: "sample-token" };
+  var result = mkt_buildEmail_(templates[templateName], sampleContact, settings, campaign, "Initial", null);
+
+  return jsonResponse_({
+    subject: result.subject,
+    htmlBody: result.body,
+    previewText: templates[templateName].previewText
+  });
+}
+
+/** 25. checkMarketingInbox — process replies, bounces, unsubscribes */
+function handleCheckMarketingInbox_() {
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(10000)) return errorResponse_("Could not acquire lock — try again", "LOCK_TIMEOUT");
+
+  try {
+    var ss = getCampaignSpreadsheet_();
+    var ccSheet = ss.getSheetByName("Campaign Contacts");
+    if (!ccSheet) return jsonResponse_({ repliesFound: 0, bouncesFound: 0, unsubscribesFound: 0 });
+
+    var ccData = ccSheet.getDataRange().getValues();
+    var ccHdr = {};
+    ccData[0].forEach(function(h, i) { ccHdr[String(h || "").trim()] = i; });
+
+    var unsubKeywords = ["unsubscribe", "stop", "remove me", "opt out", "opt-out",
+      "take me off", "no more", "cancel subscription", "stop emailing"];
+
+    var repliesFound = 0, bouncesFound = 0, unsubscribesFound = 0;
+    var now = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm:ss");
+
+    // Build lookup of CC rows by thread ID
+    var threadMap = {};
+    for (var i = 1; i < ccData.length; i++) {
+      var tid = String(ccData[i][ccHdr["Gmail Thread ID"]] || "").trim();
+      if (!tid) continue;
+      var ccSt = String(ccData[i][ccHdr["Status"]] || "");
+      if (ccSt === "Replied" || ccSt === "Bounced" || ccSt === "Unsubscribed") continue;
+      threadMap[tid] = i; // 0-based data row index
+    }
+
+    // Check replies
+    var threadIds = Object.keys(threadMap);
+    for (var t = 0; t < threadIds.length; t++) {
+      try {
+        var thread = GmailApp.getThreadById(threadIds[t]);
+        if (!thread) continue;
+        var msgs = thread.getMessages();
+        if (msgs.length <= 1) continue; // No reply
+
+        var rowIdx = threadMap[threadIds[t]];
+        var ccEmail = String(ccData[rowIdx][ccHdr["Contact Email"]] || "").trim().toLowerCase();
+
+        // Check last reply message
+        var lastMsg = msgs[msgs.length - 1];
+        var replyFrom = String(lastMsg.getFrom() || "").toLowerCase();
+        if (replyFrom.indexOf(ccEmail) < 0) continue; // Not from contact
+
+        var replyBody = String(lastMsg.getPlainBody() || "").toLowerCase();
+        var isUnsub = false;
+        for (var u = 0; u < unsubKeywords.length; u++) {
+          if (replyBody.indexOf(unsubKeywords[u]) >= 0) { isUnsub = true; break; }
+        }
+
+        if (isUnsub) {
+          // Process as unsubscribe
+          ccSheet.getRange(rowIdx + 1, ccHdr["Status"] + 1).setValue("Unsubscribed");
+          ccSheet.getRange(rowIdx + 1, ccHdr["Unsubscribed"] + 1).setValue("TRUE");
+          // Suppress globally
+          var conFound = mkt_findContactRow_(ss, ccEmail);
+          if (conFound) {
+            mkt_patchRow_(conFound.sheet, conFound.sheetRow, conFound.hdrMap, {
+              "Suppressed": "TRUE", "Suppression Reason": "Reply Keyword", "Suppression Date": now,
+              "Unsubscribed": "TRUE", "Status": "Suppressed"
+            });
+          }
+          var slSheet = ss.getSheetByName("Suppression Log");
+          if (slSheet) slSheet.appendRow([now, ccEmail, "", "", "Reply Keyword", "Inbox Check"]);
+
+          // Label
+          try {
+            var unsubLabel = GmailApp.getUserLabelByName("Stride/Campaign/Unsubscribed") || GmailApp.createLabel("Stride/Campaign/Unsubscribed");
+            unsubLabel.addToThread(thread);
+          } catch (le) {}
+
+          unsubscribesFound++;
+        } else {
+          // Regular reply — suppress
+          ccSheet.getRange(rowIdx + 1, ccHdr["Status"] + 1).setValue("Replied");
+          ccSheet.getRange(rowIdx + 1, ccHdr["Replied"] + 1).setValue("TRUE");
+          var conFound2 = mkt_findContactRow_(ss, ccEmail);
+          if (conFound2) {
+            mkt_patchRow_(conFound2.sheet, conFound2.sheetRow, conFound2.hdrMap, {
+              "Replied": "TRUE", "Suppressed": "TRUE", "Suppression Reason": "Replied", "Status": "Suppressed"
+            });
+          }
+          var slSheet2 = ss.getSheetByName("Suppression Log");
+          if (slSheet2) slSheet2.appendRow([now, ccEmail, "", "", "Replied", "Inbox Check"]);
+
+          try {
+            var repliedLabel = GmailApp.getUserLabelByName("Stride/Campaign/Replied") || GmailApp.createLabel("Stride/Campaign/Replied");
+            repliedLabel.addToThread(thread);
+          } catch (le2) {}
+
+          repliesFound++;
+        }
+      } catch (threadErr) {
+        // Skip individual thread errors
+      }
+    }
+
+    // Check bounces
+    try {
+      var bounceThreads = GmailApp.search("from:mailer-daemon newer_than:2d", 0, 50);
+      var emailRegex = /[\w.+-]+@[\w.-]+\.[a-zA-Z]{2,}/g;
+
+      // Build set of all contact emails for matching
+      var conSheet = ss.getSheetByName("Contacts");
+      var allContactEmails = {};
+      if (conSheet) {
+        var conRows = sheetToObjects_(conSheet);
+        for (var ci = 0; ci < conRows.length; ci++) {
+          var ce = String(conRows[ci]["Email"] || "").trim().toLowerCase();
+          if (ce) allContactEmails[ce] = true;
+        }
+      }
+
+      for (var b = 0; b < bounceThreads.length; b++) {
+        var bMsgs = bounceThreads[b].getMessages();
+        for (var bm = 0; bm < bMsgs.length; bm++) {
+          var bBody = String(bMsgs[bm].getPlainBody() || "");
+          var matches = bBody.match(emailRegex);
+          if (!matches) continue;
+          for (var mx = 0; mx < matches.length; mx++) {
+            var bounceEmail = matches[mx].toLowerCase();
+            if (!allContactEmails[bounceEmail]) continue;
+
+            // Check if already bounced
+            var conFound3 = mkt_findContactRow_(ss, bounceEmail);
+            if (!conFound3) continue;
+            if (String(conFound3.data[conFound3.rowIdx][conFound3.hdrMap["Bounced"]] || "").toUpperCase() === "TRUE") continue;
+
+            // Suppress
+            mkt_patchRow_(conFound3.sheet, conFound3.sheetRow, conFound3.hdrMap, {
+              "Bounced": "TRUE", "Suppressed": "TRUE", "Suppression Reason": "Bounced",
+              "Suppression Date": now, "Status": "Suppressed"
+            });
+
+            // Update all CC rows for this email
+            for (var ccr = 1; ccr < ccData.length; ccr++) {
+              if (String(ccData[ccr][ccHdr["Contact Email"]] || "").trim().toLowerCase() === bounceEmail) {
+                ccSheet.getRange(ccr + 1, ccHdr["Bounced"] + 1).setValue("TRUE");
+                var ccSt2 = String(ccData[ccr][ccHdr["Status"]] || "");
+                if (ccSt2 === "Pending" || ccSt2 === "Sent" || ccSt2 === "Follow-Up Scheduled") {
+                  ccSheet.getRange(ccr + 1, ccHdr["Status"] + 1).setValue("Bounced");
+                }
+              }
+            }
+
+            var slSheet3 = ss.getSheetByName("Suppression Log");
+            if (slSheet3) slSheet3.appendRow([now, bounceEmail, "", "", "Bounced", "Inbox Check"]);
+
+            try {
+              var bounceLabel = GmailApp.getUserLabelByName("Stride/Campaign/Bounced") || GmailApp.createLabel("Stride/Campaign/Bounced");
+              bounceLabel.addToThread(bounceThreads[b]);
+            } catch (le3) {}
+
+            bouncesFound++;
+          }
+        }
+      }
+    } catch (bounceErr) {
+      // Bounce detection error — non-fatal
+    }
+
+    // Update stats for all active campaigns
+    var cmpSheet = ss.getSheetByName("Campaigns");
+    if (cmpSheet) {
+      var cmpRows = sheetToObjects_(cmpSheet);
+      for (var cm = 0; cm < cmpRows.length; cm++) {
+        if (String(cmpRows[cm]["Status"] || "") === "Active") {
+          mkt_updateCampaignStats_(ss, String(cmpRows[cm]["Campaign ID"] || ""));
+        }
+      }
+    }
+
+    return jsonResponse_({ repliesFound: repliesFound, bouncesFound: bouncesFound, unsubscribesFound: unsubscribesFound });
+  } finally {
+    lock.releaseLock();
+  }
+}

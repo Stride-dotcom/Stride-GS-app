@@ -1,0 +1,77 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"></head><body style="margin:0;padding:0;background:#F1F5F9;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Arial,sans-serif;">
+<div style="max-width:600px;margin:0 auto;background:#ffffff;">
+<!-- Header -->
+<div style="background:#1E293B;padding:24px 32px;text-align:center;">
+<div style="display:inline-block;vertical-align:middle;">
+<span style="font-size:26px;font-weight:bold;color:#ffffff;">Stride Logistics </span>
+<span style="font-size:26px;font-weight:bold;color:#E85D2D;">WMS</span>
+</div>
+<div style="font-size:12px;color:#94A3B8;margin-top:6px;">Warehouse Management System</div>
+</div>
+<!-- Welcome Banner -->
+<div style="background:#E85D2D;padding:20px 32px;text-align:center;">
+<div style="font-size:22px;font-weight:bold;color:#ffffff;">Welcome, {{CLIENT_NAME}}!</div>
+<div style="font-size:14px;color:#FFD4C4;margin-top:6px;">Your inventory management portal is ready to go.</div>
+</div>
+<!-- Body -->
+<div style="padding:28px 32px;">
+<p style="font-size:14px;color:#1E293B;line-height:1.6;margin:0 0 20px;">Your Stride Hub account has been set up. You can view your inventory, shipments, tasks, repairs, and will calls anytime from your browser or phone.</p>
+<!-- Getting Started -->
+<div style="background:#EFF6FF;border:1px solid #BFDBFE;border-radius:10px;padding:16px 20px;margin:0 0 20px;">
+<div style="font-size:15px;font-weight:bold;color:#1D4ED8;margin:0 0 10px;">Getting Started</div>
+<ol style="margin:0;padding-left:20px;font-size:13px;color:#1E293B;line-height:1.8;">
+<li>Go to <a href="https://www.mystridehub.com" style="color:#E85D2D;font-weight:bold;">www.mystridehub.com</a></li>
+<li>Your username is <b>this email address</b> (the one receiving this email)</li>
+<li>Click <b>"Forgot Password"</b> on the login page</li>
+<li>Check your inbox for the password reset link</li>
+<li>Create your password and log in</li>
+</ol>
+</div>
+<!-- Open Stride Hub Button -->
+<div style="text-align:center;margin:0 0 28px;">
+<a href="https://www.mystridehub.com" style="display:inline-block;background:#E85D2D;color:#ffffff;text-decoration:none;padding:14px 36px;border-radius:8px;font-size:15px;font-weight:bold;">Open Stride Hub</a>
+</div>
+<!-- Divider -->
+<div style="border-top:2px solid #E2E8F0;margin:0 0 24px;"></div>
+<div style="font-size:16px;font-weight:bold;color:#1E293B;margin:0 0 16px;">What You Can Do</div>
+<!-- Tip 1 -->
+<div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:8px;padding:16px 20px;margin:0 0 12px;">
+<div style="font-size:14px;font-weight:bold;color:#E85D2D;margin:0 0 6px;">View Your Inventory</div>
+<div style="font-size:13px;color:#475569;line-height:1.5;">See all items in storage with full search, sorting, and filtering. Click any item to view details, photos, and history.</div>
+</div>
+<!-- Tip 2 -->
+<div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:8px;padding:16px 20px;margin:0 0 12px;">
+<div style="font-size:14px;font-weight:bold;color:#E85D2D;margin:0 0 6px;">Track Shipments</div>
+<div style="font-size:13px;color:#475569;line-height:1.5;">View all incoming shipments with carrier, tracking, and item details. Photos are linked directly from each shipment.</div>
+</div>
+<!-- Tip 3 -->
+<div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:8px;padding:16px 20px;margin:0 0 12px;">
+<div style="font-size:14px;font-weight:bold;color:#E85D2D;margin:0 0 6px;">Request Inspections &amp; Repairs</div>
+<div style="font-size:13px;color:#475569;line-height:1.5;">Select items and request inspections or repair quotes directly from the app. You will receive email updates as work progresses.</div>
+</div>
+<!-- Tip 4 -->
+<div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:8px;padding:16px 20px;margin:0 0 12px;">
+<div style="font-size:14px;font-weight:bold;color:#E85D2D;margin:0 0 6px;">Schedule Will Calls</div>
+<div style="font-size:13px;color:#475569;line-height:1.5;">Create will calls to schedule item pickups. Add or remove items as needed before the pickup date.</div>
+</div>
+<!-- What to Expect -->
+<div style="border-top:2px solid #E2E8F0;margin:24px 0 20px;"></div>
+<div style="font-size:16px;font-weight:bold;color:#1E293B;margin:0 0 12px;">What to Expect</div>
+<div style="font-size:13px;color:#475569;line-height:1.7;margin:0 0 20px;">
+&bull; You will receive <b>email notifications</b> when shipments arrive, inspections are completed, repair quotes are ready, and items are released.<br>
+&bull; Each email includes a <b>View in Stride Hub</b> button that takes you directly to the relevant page.<br>
+&bull; Your data updates in <b>real time</b> &mdash; use the refresh button on any page to pull the latest.
+</div>
+<!-- Contact -->
+<div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:8px;padding:16px 20px;text-align:center;">
+<div style="font-size:14px;font-weight:bold;color:#1E293B;margin:0 0 6px;">Questions?</div>
+<div style="font-size:13px;color:#475569;">Contact us anytime at <a href="mailto:whse@stridenw.com" style="color:#E85D2D;font-weight:bold;text-decoration:none;">whse@stridenw.com</a> or call <b>206-550-1848</b></div>
+</div>
+</div>
+<!-- Footer -->
+<div style="background:#1E293B;padding:16px 32px;text-align:center;">
+<div style="font-size:11px;color:#94A3B8;">Stride Logistics &middot; Kent, WA &middot; 206-550-1848</div>
+<div style="font-size:10px;color:#64748B;margin-top:4px;">This is an automated message from Stride Warehouse Management System</div>
+</div>
+</div>
+</body></html>

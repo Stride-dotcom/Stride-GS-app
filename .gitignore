@@ -5,3 +5,5 @@ _backups/
 stride-gs-app/.env
 stride-gs-app/.env.local
 AppScripts/stride-client-inventory/admin/.credentials.json
+.claude/
+AppScripts/stride-client-inventory/

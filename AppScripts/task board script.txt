@@ -1,0 +1,2570 @@
+/* ===================================================
+   task board script — v1.7.0 — 2026-04-01 10:15 PM PST
+   =================================================== */
+/***************************************************************
+[SCRIPT TB] STRIDE TASK BOARD — v1.4.2 (FULL SCRIPT)
+
+v1.3.0 changes vs v1.2.0:
+1) NEW: Open_Will_Calls sheet — mirrors Pending, Scheduled, Partial will calls
+2) NEW: Two-way sync for will call editable fields (Status, Est Pickup Date,
+   Pickup Party, Phone, Requested By, Notes, COD, COD Amount)
+3) NEW: Auto-flip Pending → Scheduled when Estimated Pickup Date set from TB
+4) NEW: Cancellation email sent from TB when WC Status → Cancelled
+5) NEW: COD checkbox validation on Open_Will_Calls
+6) NEW: WC Number hyperlinks to source client sheet
+
+v1.2.0 changes vs v1.1.2:
+1) FIX: Removed duplicate "Task Notes" from TB_TASK_HEADERS (21→20 cols)
+2) FIX: Added missing "Billed" to TB_REPAIR_HEADERS (27→28 cols)
+3) FIX: Task status dropdown uses "Completed" (not "Complete")
+4) FIX: Quote auto-status uses "Pending Quote" (not "Quote Provided")
+
+v1.1.2 changes vs v1.1.1:
+1) ✅ clearDataValidations() before setValues() in TB_writeMirror_
+   — prevents stale validations from silently dropping rows
+2) ✅ SpreadsheetApp.flush() after setValues() for error surfacing
+3) ✅ "Task Notes" renamed to "Task Notes" (Tasks)
+4) ✅ "Inspection Notes" added to TB_REPAIR_HEADERS + EDITABLE
+5) ✅ "Repair Notes" added to TB_REPAIR_HEADERS + EDITABLE (2-way sync)
+6) ✅ Debug code removed (DEBUG_traceRefresh, MIRROR_DEBUG logs)
+
+v1.1.1 changes:
+- FIX 3: Auto-complete when Result is pushed from Task Board
+- 2-WAY SYNC ENABLED (TB_OnBoardEdit pushes editable fields back)
+
+v1.0.5 fixes:
+- TB_readTable guards truly-empty sheets
+- TB_readClients_ guards missing Clients tab
+- Column reorder-safe reads (header-name mapping)
+- Repairs filter excludes cancelled/canceled
+
+YOU MUST SET:
+Settings!CONSOLIDATED_BILLING_ID = 16Yqap3i-nuBWTL9yQGjpuDNEybKCaE8IlM2mb9VJTq8
+Settings!CLIENTS_TAB_NAME = Clients
+Settings!ERROR_EMAILS = info@stridenw.com
+***************************************************************/
+
+var TB_V = "v1.6.0"; // v1.6.0: startTask_ sets Status to "In Progress" (parity with StrideAPI + client Tasks.gs)
+
+var TB_SH = {
+  SETTINGS: "Settings",
+  OPEN_TASKS: "Open_Tasks",
+  OPEN_REPAIRS: "Open_Repairs",
+  OPEN_WILL_CALLS: "Open_Will_Calls",
+  LOG: "Sync_Log"
+};
+
+var TB_SETTINGS_KEYS = {
+  CONSOLIDATED_BILLING_ID: "CONSOLIDATED_BILLING_ID",
+  CLIENTS_TAB_NAME: "CLIENTS_TAB_NAME",
+  REFRESH_MINUTES: "REFRESH_MINUTES",
+  ERROR_EMAILS: "ERROR_EMAILS"
+};
+
+var TB_DEFAULTS = {
+  CLIENTS_TAB_NAME: "Clients",
+  REFRESH_MINUTES: 5,
+  ERROR_EMAILS: "info@stridenw.com"
+};
+
+var TB_SYS = [
+  "__Client Spreadsheet ID",
+  "__Source Sheet",
+  "__Last Sync",
+  "__Sync Token",
+  "__Sync Status"
+];
+
+/** MUST match client sheet headers exactly (Tasks / Repairs). */
+var TB_TASK_HEADERS = [
+    "Status",
+    "Task ID",
+    "Type",
+    "Item ID",
+    "Vendor",
+    "Description",
+    "Location",
+    "Created",
+    "Task Notes",
+    "Result",
+    "Assigned To",
+    "Completed At",
+    "Cancelled At",
+    "Item Notes",
+    "Shipment #",
+    "Svc Code",
+    "Billed",
+    "Start Task",
+    "Started At"
+];
+
+var TB_REPAIR_HEADERS = [
+    "Status",
+    "Repair ID",
+    "Source Task ID",
+    "Item ID",
+    "Vendor",
+    "Description",
+    "Location",
+    "Class",
+    "Quote Amount",
+    "Approved",
+    "Repair Result",
+    "Repair Vendor",
+    "Scheduled Date",
+    "Start Date",
+    "Item Notes",
+    "Created By",
+    "Created Date",
+    "Quote Sent Date",
+    "Completed Date",
+    "Invoice ID",
+    "Parts Cost",
+    "Labor Hours",
+    "Final Amount",
+    "Task Notes",
+    "Repair Notes",
+    "Billed"
+];
+
+var TB_WC_HEADERS = [
+    "WC Number",
+    "Status",
+    "Created Date",
+    "Pickup Party",
+    "Pickup Phone",
+    "Requested By",
+    "Estimated Pickup Date",
+    "Actual Pickup Date",
+    "Notes",
+    "COD",
+    "COD Amount",
+    "Items Count",
+    "Total WC Fee"
+];
+
+var TB_TASK_HEADERS_BOARD = ["Client Name", "Sidemark"].concat(TB_TASK_HEADERS);
+var TB_REPAIR_HEADERS_BOARD = ["Client Name", "Sidemark"].concat(TB_REPAIR_HEADERS);
+var TB_WC_HEADERS_BOARD = ["Client Name"].concat(TB_WC_HEADERS);
+
+/* =========================
+   HELPERS (must be hoisted)
+   ========================= */
+
+function setFromArray_(arr) {
+  var o = {};
+  arr.forEach(function (a) { o[a] = true; });
+  return o;
+}
+
+function TB_headerMap_(headers) {
+  var m = {};
+  for (var i = 0; i < headers.length; i++) {
+    m[String(headers[i] || "").trim()] = i;
+  }
+  return m;
+}
+
+function TB_readTable_(sheet) {
+  if (!sheet) return { headers: [], rows: [] };
+
+  var v = sheet.getDataRange().getValues();
+  if (!v || v.length < 1) return { headers: [], rows: [] };
+
+  // Apps Script "empty" sheet often returns [[""]]
+  if (v.length === 1 && v[0].length === 1 && String(v[0][0] || "").trim() === "") {
+    return { headers: [], rows: [] };
+  }
+
+  return { headers: v[0], rows: v.slice(1) };
+}
+
+function TB_ensureSheet_(ss, name) {
+  var sh = ss.getSheetByName(name);
+  if (!sh) sh = ss.insertSheet(name);
+  return sh;
+}
+
+function TB_toast_(msg) {
+  try { SpreadsheetApp.getActive().toast(String(msg), "Stride Task Board"); } catch (e) {}
+}
+
+function TB_getSetting_(ss, key) {
+  var sh = ss.getSheetByName(TB_SH.SETTINGS);
+  if (!sh) return "";
+
+  var v = sh.getDataRange().getValues();
+  for (var i = 1; i < v.length; i++) {
+    if (String(v[i][0] || "").trim() === key) return v[i][1];
+  }
+  return "";
+}
+
+function TB_setupLog_(sh) {
+  sh.clear();
+  sh.getRange(1, 1, 1, 6)
+    .setValues([["At", "Level", "Message", "Client", "Sheet", "Details"]])
+    .setFontWeight("bold");
+  sh.setFrozenRows(1);
+}
+
+// Find actual last data row — ignores checkboxes/validations on empty rows
+function TB_getLastDataRow_(sheet) {
+  var lr = sheet.getLastRow();
+  if (lr < 2) return 1;
+  var scanCols = Math.min(3, sheet.getLastColumn());
+  var data = sheet.getRange(2, 1, lr - 1, scanCols).getValues();
+  for (var i = data.length - 1; i >= 0; i--) {
+    for (var c = 0; c < scanCols; c++) {
+      if (data[i][c] === false) continue;
+      if (String(data[i][c] || "").trim() !== "") return i + 2;
+    }
+  }
+  return 1;
+}
+
+function TB_log_(lvl, msg, client, sheet, det) {
+  try {
+    var ss = SpreadsheetApp.getActive();
+    var sh = ss.getSheetByName(TB_SH.LOG);
+    if (!sh) sh = TB_ensureSheet_(ss, TB_SH.LOG);
+    if (sh.getLastRow() < 1) TB_setupLog_(sh);
+    sh.appendRow([new Date(), lvl, msg, client || "", sheet || "", det || ""]);
+  } catch (e) {}
+}
+
+function TB_truthy_(v) {
+  var s = String(v || "").toLowerCase().trim();
+  return s === "true" || s === "yes" || s === "1" || s === "y" || s === "on";
+}
+
+/* =========================
+   EDITABLE SETS (board-only)
+   ========================= */
+
+var TB_TASK_EDITABLE = setFromArray_([
+  "Result",
+  "Task Notes",
+  "Item Notes",
+  "Assigned To",
+  "Location",
+  "Start Task"
+]);
+
+var TB_REPAIR_EDITABLE = setFromArray_([
+  "Quote Amount",
+  "Approved",
+  "Parts Cost",
+  "Labor Hours",
+  "Repair Vendor",
+  "Item Notes",
+  "Final Amount",
+  "Repair Result",
+  "Location",
+  "Repair Notes",
+  "Task Notes",
+  "Scheduled Date",
+  "Start Date"
+]);
+
+var TB_WC_EDITABLE = setFromArray_([
+  "Estimated Pickup Date",
+  "Pickup Party",
+  "Pickup Phone",
+  "Requested By",
+  "Notes",
+  "COD",
+  "COD Amount"
+]);
+/* ============================
+   COLUMN VALIDATIONS (by header name)
+   ============================ */
+var TB_COL_VALIDATIONS = {
+  "Start Task": { type: "checkbox" },  // v1.4.3: was missing — checkboxes reverted to TRUE/FALSE on every refresh
+  "Result": { type: "list", values: ["Pass", "Fail"] },
+  "Repair Result": { type: "list", values: ["Pass", "Fail"] },
+  "Approved": { type: "list", values: ["Approved", "Declined"] },
+  "Billed": { type: "checkbox" },
+  "COD": { type: "checkbox" }
+};
+
+
+/* =========================
+   MENU
+   ========================= */
+
+function onOpen() {
+  SpreadsheetApp.getUi()
+    .createMenu("Stride Task Board")
+    .addItem("Refresh Now (Pull from all clients)", "TB_RefreshNow")
+    .addSeparator()
+    .addItem("Default View: Tasks", "TB_DefaultViewTasks")
+    .addItem("Default View: Repairs", "TB_DefaultViewRepairs")
+    .addItem("Clear Filters", "TB_ClearFilters")
+    .addSeparator()
+    .addItem("Install / Reset Triggers", "TB_InstallTriggers")
+    .addItem("Initialize / Repair Sheets", "TB_Setup")
+    .addSeparator()
+    .addItem("View Sync Log", "TB_OpenLog")
+    .addToUi();
+}
+
+function TB_OpenLog() {
+  var ss = SpreadsheetApp.getActive();
+  var sh = ss.getSheetByName(TB_SH.LOG);
+  if (sh) ss.setActiveSheet(sh);
+}
+
+/* =========================
+   SETUP
+   ========================= */
+
+function TB_Setup() {
+  var ss = SpreadsheetApp.getActive();
+
+  TB_setupSettings_(TB_ensureSheet_(ss, TB_SH.SETTINGS));
+  var openTasks = TB_ensureSheet_(ss, TB_SH.OPEN_TASKS);
+  TB_setupMirrorSheet_(openTasks, TB_TASK_HEADERS_BOARD);
+  // v4.0.0: Apply Start Task checkbox on Open_Tasks
+  try {
+    var otMap = {};
+    var otHeaders = openTasks.getRange(1, 1, 1, openTasks.getLastColumn()).getValues()[0];
+    for (var oti = 0; oti < otHeaders.length; oti++) {
+      var otk = String(otHeaders[oti] || "").trim();
+      if (otk) otMap[otk] = oti + 1;
+    }
+    if (otMap["Start Task"]) {
+      openTasks.getRange(2, otMap["Start Task"], Math.max(openTasks.getMaxRows() - 1, 1), 1)
+        .setDataValidation(SpreadsheetApp.newDataValidation().requireCheckbox().build());
+    }
+  } catch (_) {}
+  TB_setupMirrorSheet_(TB_ensureSheet_(ss, TB_SH.OPEN_REPAIRS), TB_REPAIR_HEADERS_BOARD);
+  TB_setupMirrorSheet_(TB_ensureSheet_(ss, TB_SH.OPEN_WILL_CALLS), TB_WC_HEADERS_BOARD);
+  TB_setupLog_(TB_ensureSheet_(ss, TB_SH.LOG));
+
+  TB_toast_("Task Board setup complete.");
+}
+
+function TB_setupSettings_(sh) {
+  // Preserve existing settings — only write missing keys
+  var existing = {};
+  var lastRow = sh.getLastRow();
+  if (lastRow >= 2) {
+    var data = sh.getRange(2, 1, lastRow - 1, 2).getValues();
+    for (var i = 0; i < data.length; i++) {
+      var k = String(data[i][0] || "").trim();
+      if (k) existing[k] = String(data[i][1] || "").trim();
+    }
+  }
+
+  var defaults = [
+    [TB_SETTINGS_KEYS.CONSOLIDATED_BILLING_ID, "16Yqap3i-nuBWTL9yQGjpuDNEybKCaE8IlM2mb9VJTq8"],
+    [TB_SETTINGS_KEYS.CLIENTS_TAB_NAME, TB_DEFAULTS.CLIENTS_TAB_NAME],
+    [TB_SETTINGS_KEYS.REFRESH_MINUTES, TB_DEFAULTS.REFRESH_MINUTES],
+    [TB_SETTINGS_KEYS.ERROR_EMAILS, TB_DEFAULTS.ERROR_EMAILS]
+  ];
+
+  // Build final rows: keep existing values, fill missing with defaults
+  var rows = [];
+  for (var j = 0; j < defaults.length; j++) {
+    var key = defaults[j][0];
+    rows.push([key, existing[key] || defaults[j][1]]);
+  }
+
+  sh.clear();
+  sh.getRange(1, 1, 1, 2).setValues([["Key", "Value"]]).setFontWeight("bold");
+  sh.setFrozenRows(1);
+  sh.getRange(2, 1, rows.length, 2).setValues(rows);
+  sh.autoResizeColumns(1, 2);
+}
+
+function TB_setupMirrorSheet_(sh, headers) {
+  var all = headers.concat(TB_SYS);
+  var existingColCount = sh.getLastColumn();
+  var existingRowCount = sh.getLastRow();
+
+  // Clear data rows only (preserve header row formatting if it exists)
+  if (existingRowCount > 1) {
+    sh.getRange(2, 1, existingRowCount - 1, Math.max(existingColCount, all.length)).clearContent();
+  }
+
+  // Read existing headers to detect stale/ghost columns
+  var existingHeaders = [];
+  if (existingColCount > 0) {
+    existingHeaders = sh.getRange(1, 1, 1, existingColCount).getValues()[0].map(String);
+  }
+
+  // Find ghost columns (on sheet but NOT in expected headers)
+  var expectedSet = {};
+  for (var i = 0; i < all.length; i++) expectedSet[all[i]] = true;
+  var ghostCols = []; // 1-based column indices to delete
+  for (var i = existingHeaders.length - 1; i >= 0; i--) {
+    var h = String(existingHeaders[i] || "").trim();
+    if (h && !expectedSet[h]) ghostCols.push(i + 1);
+  }
+
+  // Delete ghost columns in reverse order (preserves indices)
+  for (var g = 0; g < ghostCols.length; g++) {
+    try { sh.deleteColumn(ghostCols[g]); } catch (_) {}
+  }
+
+  // Ensure sheet has enough columns for all expected headers
+  var currentCols = sh.getLastColumn() || 0;
+  if (currentCols < all.length) {
+    if (currentCols === 0) {
+      // Brand new sheet — write headers fresh
+      sh.getRange(1, 1, 1, all.length).setValues([all]).setFontWeight("bold");
+    } else {
+      // Append missing headers at the end (non-destructive)
+      var currentHeaders = sh.getRange(1, 1, 1, currentCols).getValues()[0].map(String);
+      var currentSet = {};
+      for (var c = 0; c < currentHeaders.length; c++) currentSet[String(currentHeaders[c] || "").trim()] = true;
+      var missing = [];
+      for (var m = 0; m < all.length; m++) {
+        if (!currentSet[all[m]]) missing.push(all[m]);
+      }
+      if (missing.length > 0) {
+        sh.getRange(1, currentCols + 1, 1, missing.length).setValues([missing]).setFontWeight("bold");
+      }
+    }
+  }
+
+  sh.setFrozenRows(1);
+
+  // Hide system columns except __Sync Status (last in TB_SYS — keep visible for staff)
+  var finalColCount = sh.getLastColumn();
+  var sysStart = finalColCount - TB_SYS.length + 1;
+  try { if (TB_SYS.length > 1) sh.hideColumns(sysStart, TB_SYS.length - 1); } catch (e) {}
+}
+
+/* =========================
+   TRIGGERS
+   ========================= */
+
+function TB_InstallTriggers() {
+  var ss = SpreadsheetApp.getActive();
+  var refreshMinutes = Number(TB_getSetting_(ss, TB_SETTINGS_KEYS.REFRESH_MINUTES) || TB_DEFAULTS.REFRESH_MINUTES);
+
+  var triggers = ScriptApp.getProjectTriggers();
+  for (var i = 0; i < triggers.length; i++) {
+    var fn = triggers[i].getHandlerFunction();
+    if (fn === "TB_RefreshNow" || fn === "TB_OnBoardEdit") {
+      ScriptApp.deleteTrigger(triggers[i]);
+    }
+  }
+
+  ScriptApp.newTrigger("TB_RefreshNow")
+    .timeBased()
+    .everyMinutes(Math.max(1, Math.min(30, Math.floor(refreshMinutes))))
+    .create();
+
+  ScriptApp.newTrigger("TB_OnBoardEdit")
+    .forSpreadsheet(ss)
+    .onEdit()
+    .create();
+
+  TB_toast_("Triggers installed (refresh every " + refreshMinutes + " min).");
+}
+
+/* =========================
+   REFRESH (pull)
+   ========================= */
+
+function TB_RefreshNow() {
+  var tbRefreshStart_ = Date.now();
+  var ss = SpreadsheetApp.getActive();
+  TB_log_("INFO", "TB_RefreshNow start", "TB=" + TB_V + " SH=" + SHARED_HANDLER_VERSION, "", "");
+  console.log("[TB] RefreshNow start — TB=" + TB_V);
+  var refreshLock = LockService.getScriptLock();
+  if (!refreshLock.tryLock(5000)) {
+    TB_log_("WARN", "TB_RefreshNow skipped — edit in progress", "", "", "");
+    return;
+  }
+
+  var billingId = String(TB_getSetting_(ss, TB_SETTINGS_KEYS.CONSOLIDATED_BILLING_ID) || "").trim();
+  var clientsTab = String(TB_getSetting_(ss, TB_SETTINGS_KEYS.CLIENTS_TAB_NAME) || TB_DEFAULTS.CLIENTS_TAB_NAME).trim();
+
+  if (!billingId) {
+    TB_log_("ERROR", "Missing CONSOLIDATED_BILLING_ID in Settings.", "", "", "");
+    TB_toast_("Missing CONSOLIDATED_BILLING_ID.");
+    return;
+  }
+
+  var clients = TB_readClients_(billingId, clientsTab);
+  if (!clients || clients.length === 0) {
+    TB_toast_("No clients found (check Clients tab + headers).");
+  }
+
+  var tasks = [];
+  var repairs = [];
+  var willCalls = [];
+  var now = new Date();
+  var token = "TB_SYNC_" + now.getTime();
+
+  /* --- FIX 7: Dynamic header reading ---
+   * First pass: collect all unique headers from all client sheets.
+   * Build union sets for Tasks, Repairs, and Will Calls to handle varying schemas.
+   */
+  // v4.0.0: Exclude dead/deprecated columns from union headers
+  var TB_EXCLUDE_HEADERS = {
+    "Inventory Row": true,
+    "TB_Processed": true,
+    "Inspection Photos URL": true,
+    "Repair Photos URL": true,
+    "Shipment Photos URL": true,
+    "Needs Inspection": true,
+    "Needs Assembly": true,
+    "Create Task": true,
+    "Task Type": true
+  };
+  var unionTaskHeaders = {};
+  var unionRepairHeaders = {};
+  var unionWcHeaders = {};
+
+  for (var i = 0; i < clients.length; i++) {
+    var cl = clients[i];
+    if (!cl.active) continue;
+
+    try {
+      var css = SpreadsheetApp.openById(cl.spreadsheetId);
+
+      var tSh = css.getSheetByName("Tasks");
+      if (tSh) {
+        var t = TB_readTable_(tSh);
+        if (t.headers && t.headers.length > 0) {
+          for (var th = 0; th < t.headers.length; th++) {
+            var h = String(t.headers[th] || "").trim();
+            if (h !== "" && !TB_EXCLUDE_HEADERS[h]) unionTaskHeaders[h] = true;
+          }
+        }
+      }
+
+      var rSh = css.getSheetByName("Repairs");
+      if (rSh) {
+        var rr = TB_readTable_(rSh);
+        if (rr.headers && rr.headers.length > 0) {
+          for (var rh = 0; rh < rr.headers.length; rh++) {
+            var h = String(rr.headers[rh] || "").trim();
+            if (h !== "" && !TB_EXCLUDE_HEADERS[h]) unionRepairHeaders[h] = true;
+          }
+        }
+      }
+
+      var wcSh = css.getSheetByName("Will_Calls");
+      if (wcSh) {
+        var wc = TB_readTable_(wcSh);
+        if (wc.headers && wc.headers.length > 0) {
+          for (var wh = 0; wh < wc.headers.length; wh++) {
+            var h = String(wc.headers[wh] || "").trim();
+            if (h !== "" && !TB_EXCLUDE_HEADERS[h]) unionWcHeaders[h] = true;
+          }
+        }
+      }
+    } catch (err) {
+      // Skip this client on error, continue to next
+    }
+  }
+
+  // Convert union sets to ordered arrays (start with required TB_*_HEADERS as base)
+  var actualTaskHeaders = [];
+  var actualRepairHeaders = [];
+
+  for (var j = 0; j < TB_TASK_HEADERS.length; j++) {
+    actualTaskHeaders.push(TB_TASK_HEADERS[j]);
+  }
+  for (var h in unionTaskHeaders) {
+    if (actualTaskHeaders.indexOf(h) === -1) {
+      actualTaskHeaders.push(h);
+    }
+  }
+
+  for (var j = 0; j < TB_REPAIR_HEADERS.length; j++) {
+    actualRepairHeaders.push(TB_REPAIR_HEADERS[j]);
+  }
+  for (var h in unionRepairHeaders) {
+    if (actualRepairHeaders.indexOf(h) === -1) {
+      actualRepairHeaders.push(h);
+    }
+  }
+
+  var actualWcHeaders = [];
+  for (var j = 0; j < TB_WC_HEADERS.length; j++) {
+    actualWcHeaders.push(TB_WC_HEADERS[j]);
+  }
+  for (var h in unionWcHeaders) {
+    if (actualWcHeaders.indexOf(h) === -1) {
+      actualWcHeaders.push(h);
+    }
+  }
+
+  /* Second pass: read data using union headers. */
+  for (var i = 0; i < clients.length; i++) {
+    var cl = clients[i];
+    if (!cl.active) continue;
+
+    try {
+      var css = SpreadsheetApp.openById(cl.spreadsheetId);
+
+      // fallback index for older clients
+      var sidemarkIndex = TB_buildSidemarkIndex_(css);
+
+      // TASKS
+      var tSh = css.getSheetByName("Tasks");
+      if (tSh) {
+        var t = TB_readTable_(tSh);
+        if (t.headers && t.headers.length > 0) {
+
+        var map = TB_headerMap_(t.headers);
+
+        if (map["Status"] != null) {
+          for (var r = 0; r < t.rows.length; r++) {
+            var rowVals = t.rows[r];
+
+            var status = String(rowVals[map["Status"]] || "").trim().toLowerCase();
+            var completed = (map["Completed At"] != null) ? rowVals[map["Completed At"]] : "";
+            var cancelled = (map["Cancelled At"] != null) ? rowVals[map["Cancelled At"]] : "";
+
+            if (completed || cancelled || status === "completed" || status === "cancelled" || status === "canceled") continue;
+
+            var itemId = (map["Item ID"] != null) ? String(rowVals[map["Item ID"]] || "").trim() : "";
+          if (!itemId) continue; // skip blank rows
+            var sidemark = "";
+            if (map["Sidemark"] != null) sidemark = String(rowVals[map["Sidemark"]] || "").trim();
+            else if (itemId && sidemarkIndex[itemId]) sidemark = String(sidemarkIndex[itemId] || "").trim();
+
+            var out = [cl.name, sidemark];
+            for (var h = 0; h < actualTaskHeaders.length; h++) {
+              var head = actualTaskHeaders[h];
+              out.push(map[head] != null ? rowVals[map[head]] : "");
+            }
+            out.push(cl.spreadsheetId, "Tasks", r + 2, now, token);
+            // v2.6.4: Hyperlink Task ID to its Drive folder (read from source cell hyperlink)
+            var taskIdHdrPos = actualTaskHeaders.indexOf("Task ID");
+            var taskIdIdx = taskIdHdrPos >= 0 ? 2 + taskIdHdrPos : -1;
+            if (taskIdIdx >= 0 && out[taskIdIdx] && map["Task ID"] != null) {
+              var taskIdRt = tSh.getRange(r + 2, map["Task ID"] + 1).getRichTextValue();
+              var taskDriveUrl = (taskIdRt && taskIdRt.getLinkUrl()) ? taskIdRt.getLinkUrl() : "";
+              if (taskDriveUrl) {
+                out[taskIdIdx] = '=HYPERLINK("' + taskDriveUrl + '","' + String(out[taskIdIdx]).replace(/"/g, '""') + '")';
+              } else {
+                var taskGid = tSh.getSheetId();
+                out[taskIdIdx] = '=HYPERLINK("h' + 'ttps://docs.go' + 'ogle.com/spreadsheets/d/' + cl.spreadsheetId + '/edit#gid=' + taskGid + '","' + String(out[taskIdIdx]).replace(/"/g, '""') + '")';
+              }
+            }
+            // v2.6.4: Hyperlink Shipment # to its Drive folder (read from source cell hyperlink)
+            var shipHdrIdx = actualTaskHeaders.indexOf("Shipment #");
+            if (shipHdrIdx !== -1 && map["Shipment #"] != null) {
+              var shipBoardIdx = 2 + shipHdrIdx; // offset by Client Name + Sidemark
+              var shipVal = String(out[shipBoardIdx] || "").trim();
+              if (shipVal) {
+                var shipRtTB = tSh.getRange(r + 2, map["Shipment #"] + 1).getRichTextValue();
+                var shipDriveUrl = (shipRtTB && shipRtTB.getLinkUrl()) ? shipRtTB.getLinkUrl() : "";
+                if (shipDriveUrl) {
+                  out[shipBoardIdx] = '=HYPERLINK("' + shipDriveUrl + '","' + shipVal.replace(/"/g, '""') + '")';
+                }
+              }
+            }
+            tasks.push(out);
+          }
+        }
+        } // end if (t.headers)
+      }
+
+      // REPAIRS
+      var rSh = css.getSheetByName("Repairs");
+      if (rSh) {
+        var rr = TB_readTable_(rSh);
+        if (rr.headers && rr.headers.length > 0) {
+
+        var rMap = TB_headerMap_(rr.headers);
+
+        if (rMap["Status"] != null) {
+          for (var j = 0; j < rr.rows.length; j++) {
+            var rowR = rr.rows[j];
+
+            var statusR = String(rowR[rMap["Status"]] || "").trim().toLowerCase();
+            var doneR = (rMap["Completed Date"] != null) ? rowR[rMap["Completed Date"]] : "";
+
+            if (statusR === "complete" || statusR === "completed" || statusR === "cancelled" || statusR === "canceled" || doneR) continue;
+
+            var itemIdR = (rMap["Item ID"] != null) ? String(rowR[rMap["Item ID"]] || "").trim() : "";
+          if (!itemIdR) continue; // skip blank rows
+            var sidemarkR = "";
+            if (rMap["Sidemark"] != null) sidemarkR = String(rowR[rMap["Sidemark"]] || "").trim();
+            else if (itemIdR && sidemarkIndex[itemIdR]) sidemarkR = String(sidemarkIndex[itemIdR] || "").trim();
+
+            var outR = [cl.name, sidemarkR];
+            for (var hh = 0; hh < actualRepairHeaders.length; hh++) {
+              var headR = actualRepairHeaders[hh];
+              outR.push(rMap[headR] != null ? rowR[rMap[headR]] : "");
+            }
+            outR.push(cl.spreadsheetId, "Repairs", j + 2, now, token);
+            // v2.6.4: Hyperlink Repair ID to its Drive folder (read from source cell hyperlink)
+            var repairIdHdrPos = actualRepairHeaders.indexOf("Repair ID");
+            var repairIdIdx = repairIdHdrPos >= 0 ? 2 + repairIdHdrPos : -1;
+            if (repairIdIdx >= 0 && outR[repairIdIdx] && rMap["Repair ID"] != null) {
+              var repIdRt = rSh.getRange(j + 2, rMap["Repair ID"] + 1).getRichTextValue();
+              var repDriveUrl = (repIdRt && repIdRt.getLinkUrl()) ? repIdRt.getLinkUrl() : "";
+              if (repDriveUrl) {
+                outR[repairIdIdx] = '=HYPERLINK("' + repDriveUrl + '","' + String(outR[repairIdIdx]).replace(/"/g, '""') + '")';
+              } else {
+                var repairGid = rSh.getSheetId();
+                outR[repairIdIdx] = '=HYPERLINK("h' + 'ttps://docs.go' + 'ogle.com/spreadsheets/d/' + cl.spreadsheetId + '/edit#gid=' + repairGid + '","' + String(outR[repairIdIdx]).replace(/"/g, '""') + '")';
+              }
+            }
+            repairs.push(outR);
+          }
+        }
+        } // end if (rr.headers)
+      }
+
+      // WILL CALLS
+      var wcSh = css.getSheetByName("Will_Calls");
+      if (wcSh) {
+        var wcT = TB_readTable_(wcSh);
+        if (wcT.headers && wcT.headers.length > 0) {
+          var wcMap = TB_headerMap_(wcT.headers);
+
+          if (wcMap["Status"] != null) {
+            // Read client name from Settings for board display
+            var wcClientName = cl.name;
+
+            for (var w = 0; w < wcT.rows.length; w++) {
+              var wcRow = wcT.rows[w];
+              var wcStatus = String(wcRow[wcMap["Status"]] || "").trim().toLowerCase();
+
+              // Only show Pending, Scheduled, Partial on Task Board (D25)
+              if (wcStatus !== "pending" && wcStatus !== "scheduled" && wcStatus !== "partial") continue;
+
+              var wcNumber = (wcMap["WC Number"] != null) ? String(wcRow[wcMap["WC Number"]] || "").trim() : "";
+              if (!wcNumber) continue; // skip blank rows
+
+              var outWC = [wcClientName];
+              for (var wh = 0; wh < actualWcHeaders.length; wh++) {
+                var headWC = actualWcHeaders[wh];
+                outWC.push(wcMap[headWC] != null ? wcRow[wcMap[headWC]] : "");
+              }
+              outWC.push(cl.spreadsheetId, "Will_Calls", w + 2, now, token);
+
+              // v2.6.4: Hyperlink WC Number to its Drive folder (read from source cell hyperlink)
+              var wcIdIdx = 1; // index 0 = Client Name, index 1 = WC Number
+              if (outWC[wcIdIdx] && wcMap["WC Number"] != null) {
+                var wcNumRt = wcSh.getRange(w + 2, wcMap["WC Number"] + 1).getRichTextValue();
+                var wcDriveUrl = (wcNumRt && wcNumRt.getLinkUrl()) ? wcNumRt.getLinkUrl() : "";
+                if (wcDriveUrl) {
+                  outWC[wcIdIdx] = '=HYPERLINK("' + wcDriveUrl + '","' + String(outWC[wcIdIdx]).replace(/"/g, '""') + '")';
+                } else {
+                  var wcGid = wcSh.getSheetId();
+                  outWC[wcIdIdx] = '=HYPERLINK("h' + 'ttps://docs.go' + 'ogle.com/spreadsheets/d/' + cl.spreadsheetId + '/edit#gid=' + wcGid + '","' + String(outWC[wcIdIdx]).replace(/"/g, '""') + '")';
+                }
+              }
+              willCalls.push(outWC);
+            }
+          }
+        }
+      }
+
+    } catch (err) {
+      TB_log_("ERROR", "Client read failed", cl.name, "", String(err && err.stack ? err.stack : err));
+    }
+  }
+
+  // Build board headers with dynamic discovered headers
+  var taskBoardHeaders = ["Client Name", "Sidemark"].concat(actualTaskHeaders);
+  var repairBoardHeaders = ["Client Name", "Sidemark"].concat(actualRepairHeaders);
+  var wcBoardHeaders = ["Client Name"].concat(actualWcHeaders);
+
+  TB_writeMirror_(TB_ensureSheet_(ss, TB_SH.OPEN_TASKS), taskBoardHeaders, tasks);
+  TB_writeMirror_(TB_ensureSheet_(ss, TB_SH.OPEN_REPAIRS), repairBoardHeaders, repairs);
+  TB_writeMirror_(TB_ensureSheet_(ss, TB_SH.OPEN_WILL_CALLS), wcBoardHeaders, willCalls);
+
+  var tbElapsed_ = Date.now() - tbRefreshStart_;
+  TB_log_("INFO", "Refresh complete", "", "", "Tasks=" + tasks.length + " Repairs=" + repairs.length + " WCs=" + willCalls.length + " " + tbElapsed_ + "ms");
+  TB_toast_("Refresh complete: Tasks=" + tasks.length + " Repairs=" + repairs.length + " WCs=" + willCalls.length);
+  console.log(JSON.stringify({
+    fn: "TB_RefreshNow",
+    clients: clients.length,
+    tasks: tasks.length,
+    repairs: repairs.length,
+    willCalls: willCalls.length,
+    durationMs: tbElapsed_
+  }));
+  refreshLock.releaseLock();
+}
+
+function TB_readClients_(billingId, tabName) {
+  var ss = SpreadsheetApp.openById(billingId);
+  var sh = ss.getSheetByName(tabName);
+
+  if (!sh) {
+    TB_log_("ERROR", "Clients tab not found: " + tabName, "", "", "");
+    return [];
+  }
+
+  // v1.4.0: Clients tab — headers on row 1, data on row 2+ (config rows moved to Settings)
+  // Also supports legacy layout (headers row 4) by scanning for "Client Name" row
+  var lastRow = sh.getLastRow();
+  var lastCol = sh.getLastColumn();
+  if (lastRow < 2 || lastCol < 1) return [];
+
+  // Find header row by looking for the row with both "Client Name" and "Active"
+  var headerRowIdx = 0; // default: row 1
+  var scanRows = Math.min(lastRow, 10);
+  var scanData = sh.getRange(1, 1, scanRows, lastCol).getValues();
+  for (var si = 0; si < scanRows; si++) {
+    var rowStr = scanData[si].map(function(c) { return String(c || "").trim().toUpperCase(); }).join("|");
+    if (rowStr.indexOf("CLIENT NAME") !== -1 && rowStr.indexOf("ACTIVE") !== -1) {
+      headerRowIdx = si;
+      break;
+    }
+  }
+
+  var dataStartRow = headerRowIdx + 2; // 1-indexed sheet row
+  if (lastRow < dataStartRow) return [];
+  var v = sh.getRange(headerRowIdx + 1, 1, lastRow - headerRowIdx, lastCol).getValues();
+  var t = { headers: v[0], rows: v.slice(1) };
+  var map = TB_headerMap_(t.headers);
+
+  var nameIdx = map["Client Name"];
+  var idIdx = map["Client Spreadsheet ID"];
+  var activeIdx = map["Active"];
+
+  if (nameIdx == null || idIdx == null) {
+    TB_log_("ERROR", "Clients sheet missing headers: Client Name, Client Spreadsheet ID", "", "", "");
+    return [];
+  }
+
+  var out = [];
+  for (var i = 0; i < t.rows.length; i++) {
+    var r = t.rows[i];
+    var name = String(r[nameIdx] || "").trim();
+    var id = String(r[idIdx] || "").trim();
+    var active = (activeIdx != null) ? TB_truthy_(r[activeIdx]) : true;
+    if (name && id) out.push({ name: name, spreadsheetId: id, active: active });
+  }
+  return out;
+}
+
+function TB_buildSidemarkIndex_(clientSS) {
+  var out = {};
+  try {
+    var inv = clientSS.getSheetByName("Inventory");
+    if (!inv) return out;
+
+    var t = TB_readTable_(inv);
+    if (!t.headers || t.headers.length === 0) return out;
+
+    var map = TB_headerMap_(t.headers);
+    if (map["Item ID"] == null || map["Sidemark"] == null) return out;
+
+    for (var i = 0; i < t.rows.length; i++) {
+      var r = t.rows[i];
+      var id = String(r[map["Item ID"]] || "").trim();
+      if (!id) continue;
+      out[id] = String(r[map["Sidemark"]] || "").trim();
+    }
+  } catch (e) {}
+  return out;
+}
+
+/* =========================
+   WRITE MIRROR (board)
+   ========================= */
+
+function TB_writeMirror_(sh, baseHeaders, rows) {
+  var all = baseHeaders.concat(TB_SYS);
+
+  // --- Preserve user column order ---
+  var existingHeaders = [];
+  try {
+    var lastCol = sh.getLastColumn();
+    if (lastCol > 0) {
+      existingHeaders = sh.getRange(1, 1, 1, lastCol).getValues()[0].map(String);
+    }
+  } catch (e) { /* empty sheet, use code order */ }
+
+  // Build sets for expected visible and system headers
+  var expectedSet = {};
+  for (var i = 0; i < all.length; i++) expectedSet[all[i]] = true;
+  var sysSet = {};
+  for (var i = 0; i < TB_SYS.length; i++) sysSet[TB_SYS[i]] = true;
+
+  // Header renames: map old names to new names so reorder handles renamed columns
+  var headerRenameMap = {
+  };
+
+  // Check if existing headers are a valid reorder of expected headers
+  var existingValid = existingHeaders.length > 0;
+  if (existingValid) {
+    var seen = {};
+    for (var i = 0; i < existingHeaders.length; i++) {
+      var h = existingHeaders[i];
+      if (h === "") continue;
+      // Reject if unknown header or duplicate
+      if (!expectedSet[h] || seen[h]) continue;  // skip unknown/duplicate, keep order
+      seen[h] = true;
+      // Reject if system column appears in visible area
+      if (sysSet[h] && i < baseHeaders.length) continue;  // skip sys cols in visible area
+    }
+  }
+
+  var finalHeaders;
+  if (existingValid && existingHeaders.length > 0) {
+    // Start with user existing order (only visible headers that are still expected)
+    // Apply renames for old column names
+    finalHeaders = [];
+    var usedSet = {};
+    for (var i = 0; i < existingHeaders.length; i++) {
+      var h = existingHeaders[i];
+      // If this is an old renamed header, use the new name
+      if (headerRenameMap[h] && expectedSet[headerRenameMap[h]]) {
+        h = headerRenameMap[h];
+      }
+      if (expectedSet[h] && !usedSet[h] && !sysSet[h]) {
+        finalHeaders.push(h);
+        usedSet[h] = true;
+      }
+    }
+    // Append any NEW visible headers not yet on the sheet
+    for (var i = 0; i < baseHeaders.length; i++) {
+      if (!usedSet[baseHeaders[i]]) {
+        finalHeaders.push(baseHeaders[i]);
+        usedSet[baseHeaders[i]] = true;
+      }
+    }
+    // Always put system columns last in code-defined order
+    finalHeaders = finalHeaders.concat(TB_SYS);
+  } else {
+    // First write or invalid state - use code-defined order
+    finalHeaders = all;
+  }
+
+  // Build a mapping from code-order index by header name
+  var codeIndex = {};
+  for (var i = 0; i < all.length; i++) codeIndex[all[i]] = i;
+
+  // Reorder each row to match finalHeaders order
+  var reorderedRows = [];
+  for (var r = 0; r < rows.length; r++) {
+    var newRow = [];
+    for (var c = 0; c < finalHeaders.length; c++) {
+      var ci = codeIndex[finalHeaders[c]];
+      newRow.push(ci != null ? rows[r][ci] : "");
+    }
+    reorderedRows.push(newRow);
+  }
+
+  // Clear ALL data rows
+  var lastRow = sh.getLastRow();
+  var sheetColCount = sh.getLastColumn() || finalHeaders.length;
+  if (lastRow > 1) {
+    sh.getRange(2, 1, lastRow - 1, sheetColCount).clearContent();
+  }
+
+  // Write header row — always write exactly finalHeaders.length columns
+  // If the sheet has MORE columns than finalHeaders (stale renamed cols),
+  // clear the extra columns to prevent misalignment
+  if (sheetColCount > finalHeaders.length) {
+    sh.getRange(1, finalHeaders.length + 1, 1, sheetColCount - finalHeaders.length).clearContent();
+  }
+  sh.getRange(1, 1, 1, finalHeaders.length).setValues([finalHeaders]);
+  sh.setFrozenRows(1);
+
+  // Re-hide system columns except __Sync Status (last in TB_SYS — keep visible)
+  var sysStart = finalHeaders.length - TB_SYS.length + 1;
+  try { if (TB_SYS.length > 1) sh.hideColumns(sysStart, TB_SYS.length - 1); } catch (e) {}
+
+  /* FIX 8: Row 2 blank / clearDataValidations range fix
+   * v1.1.2: Clear stale data validations from entire data area to prevent
+   * silent setValues() failures (e.g. wrong dropdowns on reordered columns)
+   */
+  var clearRow = sh.getLastRow();
+  if (clearRow >= 2) {
+    sh.getRange(2, 1, sh.getMaxRows() - 1, sh.getMaxColumns()).clearDataValidations();
+  }
+
+  if (!rows || rows.length === 0) return;
+  sh.getRange(2, 1, reorderedRows.length, finalHeaders.length).setValues(reorderedRows);
+  SpreadsheetApp.flush();
+
+  // Re-apply data validations by header name
+  var sheetType = sh.getName() === TB_SH.OPEN_TASKS ? "task" : (sh.getName() === TB_SH.OPEN_WILL_CALLS ? "willcall" : "repair");
+  TB_applyColumnValidations_(sh, finalHeaders, sheetType);
+}
+function TB_applyColumnValidations_(sh, headers, sheetType) {
+  var lastDataRow = sh.getLastRow();
+  if (lastDataRow < 2) return;
+  var numRows = lastDataRow - 1;
+  for (var c = 0; c < headers.length; c++) {
+    var h = headers[c];
+    var cfg = TB_COL_VALIDATIONS[h];
+    if (!cfg) continue;
+    var col = c + 1;
+    var range = sh.getRange(2, col, numRows, 1);
+    if (cfg.type === "checkbox") {
+      var rule = SpreadsheetApp.newDataValidation().requireCheckbox().setAllowInvalid(true).build();
+      range.setDataValidation(rule);
+    } else if (cfg.type === "list") {
+      var vals = cfg.values || (sheetType === "task" ? cfg.taskValues : (sheetType === "willcall" ? cfg.wcValues : cfg.repairValues));
+      if (vals && vals.length) {
+        var rule = SpreadsheetApp.newDataValidation()
+          .requireValueInList(vals, true)
+          .setAllowInvalid(true)
+          .build();
+        range.setDataValidation(rule);
+      }
+    }
+  }
+  // v1.2.0: Apply Pass/Fail conditional formatting (green/red)
+  var resultHeader = (sheetType === "task") ? "Result" : "Repair Result";
+  for (var rf = 0; rf < headers.length; rf++) {
+    if (headers[rf] === resultHeader) {
+      TB_applyPassFailFormatting_(sh, rf + 1, numRows);
+      break;
+    }
+  }
+}
+
+/**
+ * v1.2.0: Applies conditional formatting for Pass/Fail on a column.
+ * Pass/PASS = green background, white text. Fail/FAIL = red background, white text.
+ */
+function TB_applyPassFailFormatting_(sh, col, numRows) {
+  if (!col || numRows < 1) return;
+  try {
+    var range = sh.getRange(2, col, numRows, 1);
+    var passRule = SpreadsheetApp.newConditionalFormatRule()
+      .whenTextEqualTo("Pass").setBackground("#16A34A").setFontColor("#FFFFFF").setRanges([range]).build();
+    var passUpperRule = SpreadsheetApp.newConditionalFormatRule()
+      .whenTextEqualTo("PASS").setBackground("#16A34A").setFontColor("#FFFFFF").setRanges([range]).build();
+    var failRule = SpreadsheetApp.newConditionalFormatRule()
+      .whenTextEqualTo("Fail").setBackground("#DC2626").setFontColor("#FFFFFF").setRanges([range]).build();
+    var failUpperRule = SpreadsheetApp.newConditionalFormatRule()
+      .whenTextEqualTo("FAIL").setBackground("#DC2626").setFontColor("#FFFFFF").setRanges([range]).build();
+    // Remove existing rules on this column, then add fresh ones
+    var rules = (sh.getConditionalFormatRules() || []).filter(function(r) {
+      var ranges = r.getRanges();
+      for (var i = 0; i < ranges.length; i++) { if (ranges[i].getColumn() === col) return false; }
+      return true;
+    });
+    rules.push(passRule, passUpperRule, failRule, failUpperRule);
+    sh.setConditionalFormatRules(rules);
+  } catch (err) {
+    TB_log_("WARN", "TB_applyPassFailFormatting_ error", "", "", String(err));
+  }
+}
+
+/* =========================
+   PUSH (2-way sync enabled)
+   ========================= */
+
+/* =====================================================================
+   SHARED HANDLERS v1.0.0 (keep in sync with task board script)
+   Parity-controlled duplicated block. MUST be identical in:
+     - inventory code.gs.txt (Client Inventory)
+     - task board script.txt (Task Board)
+   Any change requires:
+     1. Increment SHARED_HANDLER_VERSION in BOTH files
+     2. Copy updated shared handler section to BOTH files
+     3. Verify parity: diff shared sections
+     4. Deployment instructions ALWAYS list BOTH files
+   ===================================================================== */
+var SHARED_HANDLER_VERSION = "1.1.0";
+
+function SH_headerMap_(sheet) {
+  var headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  var map = {};
+  for (var i = 0; i < headers.length; i++) {
+    var h = String(headers[i] || "").trim();
+    if (h && !map[h]) map[h] = i + 1;
+  }
+  return map;
+}
+
+function SH_getSetting_(ss, key) {
+  var sh = ss.getSheetByName("Settings");
+  if (!sh) return "";
+  var data = sh.getDataRange().getValues();
+  for (var i = 0; i < data.length; i++) {
+    if (String(data[i][0] || "").trim() === key) return data[i][1];
+  }
+  return "";
+}
+
+function SH_findRowById_(sheet, idColNum, idValue) {
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return -1;
+  var data = sheet.getRange(2, idColNum, lastRow - 1, 1).getValues();
+  for (var i = 0; i < data.length; i++) {
+    if (String(data[i][0] || "").trim() === String(idValue).trim()) return i + 2;
+  }
+  return -1;
+}
+
+function SH_truthy_(v) {
+  var s = String(v || "").toLowerCase().trim();
+  return s === "true" || s === "yes" || s === "1" || s === "y" || s === "on";
+}
+
+function SH_esc_(s) {
+  return String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+function SH_formatCurrency_(v) {
+  var n = Number(v);
+  return isFinite(n) ? n.toFixed(2) : String(v || "0");
+}
+
+function SH_mergeEmails_() {
+  var all = [];
+  for (var i = 0; i < arguments.length; i++) {
+    var s = String(arguments[i] || "").trim();
+    if (s) s.split(",").forEach(function(e) { var t = e.trim(); if (t && all.indexOf(t) === -1) all.push(t); });
+  }
+  return all.join(",");
+}
+
+function SH_getLastDataRow_(sheet) {
+  var lr = sheet.getLastRow();
+  if (lr < 2) return 1;
+  var scanCols = Math.min(3, sheet.getLastColumn());
+  var data = sheet.getRange(2, 1, lr - 1, scanCols).getValues();
+  for (var i = data.length - 1; i >= 0; i--) {
+    for (var c = 0; c < scanCols; c++) {
+      if (data[i][c] === false) continue;
+      if (String(data[i][c] || "").trim() !== "") return i + 2;
+    }
+  }
+  return 1;
+}
+
+function SH_findInventoryItem_(ss, itemId) {
+  var inv = ss.getSheetByName("Inventory");
+  if (!inv || inv.getLastRow() < 2) return null;
+  var data = inv.getDataRange().getValues();
+  var hdr = {};
+  data[0].forEach(function(h, i) { hdr[String(h || "").trim()] = i; });
+  var itemCol = hdr["Item ID"];
+  if (itemCol === undefined) return null;
+  for (var r = 1; r < data.length; r++) {
+    if (String(data[r][itemCol] || "").trim() === String(itemId).trim()) {
+      return {
+        description: hdr["Description"] !== undefined ? String(data[r][hdr["Description"]] || "") : "",
+        itemClass: hdr["Class"] !== undefined ? String(data[r][hdr["Class"]] || "") : "",
+        vendor: hdr["Vendor"] !== undefined ? String(data[r][hdr["Vendor"]] || "") : "",
+        location: hdr["Location"] !== undefined ? String(data[r][hdr["Location"]] || "") : "",
+        sidemark: hdr["Sidemark"] !== undefined ? String(data[r][hdr["Sidemark"]] || "") : "",
+        shipNo: hdr["Shipment #"] !== undefined ? String(data[r][hdr["Shipment #"]] || "") : "",
+        qty: hdr["Qty"] !== undefined ? data[r][hdr["Qty"]] : "",
+        room: hdr["Room"] !== undefined ? String(data[r][hdr["Room"]] || "") : "",
+        row: r + 1,
+        _raw: data[r],
+        _hdr: hdr
+      };
+    }
+  }
+  return null;
+}
+
+function SH_lookupRate_(ss, svcCode, itemClass) {
+  var result = { rate: 0, svcName: svcCode, category: "", billIfPass: true, billIfFail: true };
+  var pc = ss.getSheetByName("Price_Cache");
+  if (!pc || pc.getLastRow() < 2) return result;
+  var data = pc.getDataRange().getValues();
+  var hdr = {};
+  data[0].forEach(function(h, i) { hdr[String(h || "").trim().toUpperCase()] = i; });
+  var codeCol = hdr["SERVICE CODE"] !== undefined ? hdr["SERVICE CODE"] : hdr["SVC CODE"];
+  var nameCol = hdr["SERVICE NAME"] !== undefined ? hdr["SERVICE NAME"] : hdr["SVC NAME"];
+  var catCol = hdr["CATEGORY"];
+  var rateCol = hdr[(itemClass || "").toUpperCase() + " RATE"];
+  var passCol = hdr["BILL IF PASS"];
+  var failCol = hdr["BILL IF FAIL"];
+  if (codeCol === undefined) return result;
+  for (var r = 1; r < data.length; r++) {
+    if (String(data[r][codeCol] || "").trim().toUpperCase() === svcCode.toUpperCase()) {
+      if (nameCol !== undefined) result.svcName = String(data[r][nameCol] || "").trim() || svcCode;
+      if (catCol !== undefined) result.category = String(data[r][catCol] || "").trim();
+      if (rateCol !== undefined) result.rate = Number(data[r][rateCol] || 0) || 0;
+      if (passCol !== undefined) result.billIfPass = SH_truthy_(data[r][passCol]);
+      if (failCol !== undefined) result.billIfFail = SH_truthy_(data[r][failCol]);
+      break;
+    }
+  }
+  return result;
+}
+
+function SH_getItemFolderUrl_(ss, itemId) {
+  var inv = ss.getSheetByName("Inventory");
+  if (!inv || inv.getLastRow() < 2) return "";
+  var hdr = SH_headerMap_(inv);
+  var itemCol = hdr["Item ID"];
+  if (!itemCol) return "";
+  var lastRow = inv.getLastRow();
+  var ids = inv.getRange(2, itemCol, lastRow - 1, 1).getValues();
+  for (var i = 0; i < ids.length; i++) {
+    if (String(ids[i][0] || "").trim() === String(itemId).trim()) {
+      try {
+        var rt = inv.getRange(i + 2, itemCol).getRichTextValue();
+        if (rt && rt.getLinkUrl()) return rt.getLinkUrl();
+      } catch (_) {}
+      return "";
+    }
+  }
+  return "";
+}
+
+function SH_findPdfInFolder_(folderUrl, namePrefix) {
+  if (!folderUrl || folderUrl.indexOf("http") !== 0) return null;
+  try {
+    var folderId = String(folderUrl).match(/[-\w]{25,}/);
+    if (!folderId) return null;
+    var folder = DriveApp.getFolderById(folderId[0]);
+    var files = folder.getFilesByType(MimeType.PDF);
+    while (files.hasNext()) {
+      var f = files.next();
+      if (f.getName().indexOf(namePrefix) === 0) return f.getBlob();
+    }
+  } catch (_) {}
+  return null;
+}
+
+function SH_buildItemTableHtml_(ss, itemId, fallbackDesc) {
+  if (!itemId) return '<p style="color:#94a3b8;font-size:13px"><em>Item details unavailable</em></p>';
+  try {
+    var inv = ss.getSheetByName("Inventory");
+    if (inv && inv.getLastRow() >= 2) {
+      var data = inv.getDataRange().getValues();
+      var hdr = {};
+      data[0].forEach(function(h, i) { hdr[String(h || "").trim()] = i; });
+      var itemCol = hdr["Item ID"];
+      if (itemCol !== undefined) {
+        for (var r = 1; r < data.length; r++) {
+          if (String(data[r][itemCol] || "").trim() === String(itemId).trim()) {
+            var cols = ["Item ID", "Qty", "Vendor", "Description", "Sidemark", "Room"];
+            var vals = [SH_esc_(itemId)];
+            for (var ci = 1; ci < cols.length; ci++) {
+              vals.push(SH_esc_(hdr[cols[ci]] !== undefined ? String(data[r][hdr[cols[ci]]] || "") : ""));
+            }
+            var html = '<table style="width:100%;border-collapse:collapse;margin-bottom:16px"><tr>';
+            for (var c = 0; c < cols.length; c++) html += '<td style="padding:8px 12px;border:1px solid #e2e8f0;background:#f8fafc;font-weight:600;font-size:13px">' + cols[c] + '</td>';
+            html += '</tr><tr>';
+            for (var v = 0; v < vals.length; v++) html += '<td style="padding:6px 12px;border:1px solid #e2e8f0;font-size:13px">' + vals[v] + '</td>';
+            html += '</tr></table>';
+            return html;
+          }
+        }
+      }
+    }
+  } catch (_) {}
+  return '<table cellpadding="0" cellspacing="0" border="0" width="100%"><tr>' +
+    '<td style="padding-right:24px;vertical-align:top;"><div style="font-size:11px;color:#64748B;font-weight:800;text-transform:uppercase">Item ID</div><div style="font-size:14px;font-weight:800">' + SH_esc_(itemId) + '</div></td>' +
+    '<td style="vertical-align:top;"><div style="font-size:11px;color:#64748B;font-weight:800;text-transform:uppercase">Description</div><div style="font-size:14px;font-weight:600">' + SH_esc_(fallbackDesc || "-") + '</div></td></tr></table>';
+}
+
+function SH_writeBillingRow_(ss, payload) {
+  try {
+    var blSheet = ss.getSheetByName("Billing_Ledger");
+    if (!blSheet) return { success: false, error: "Billing_Ledger sheet not found" };
+    var headers = blSheet.getRange(1, 1, 1, blSheet.getLastColumn()).getValues()[0];
+    var blMap = {};
+    headers.forEach(function(h, i) { blMap[String(h || "").trim().toUpperCase()] = i; });
+    var leidCol = blMap["LEDGER ENTRY ID"];
+    if (leidCol !== undefined && payload.ledgerEntryId) {
+      var blData = blSheet.getDataRange().getValues();
+      for (var d = 1; d < blData.length; d++) {
+        if (String(blData[d][leidCol] || "").trim() === payload.ledgerEntryId) {
+          return { success: true, ledgerRowId: "", skipped: true };
+        }
+      }
+    }
+    var ledgerRowId = "";
+    var settingsSh = ss.getSheetByName("Settings");
+    if (settingsSh) {
+      var sData = settingsSh.getDataRange().getValues();
+      for (var s = 0; s < sData.length; s++) {
+        if (String(sData[s][0] || "").trim() === "BILLING_LEDGER_COUNTER") {
+          var cnt = parseInt(sData[s][1], 10) || 0;
+          cnt++;
+          settingsSh.getRange(s + 1, 2).setValue(cnt);
+          ledgerRowId = "BL-" + String(cnt).padStart(6, "0");
+          break;
+        }
+      }
+    }
+    var rate = Number(payload.rate || 0);
+    var total = rate * (payload.qty || 1);
+    if (rate > 0 && payload.category) {
+      var cat = String(payload.category).trim().toLowerCase();
+      var discKey = (cat === "storage charges" || cat === "storage") ? "DISCOUNT_STORAGE_PCT" : "DISCOUNT_SERVICES_PCT";
+      var pct = Number(SH_getSetting_(ss, discKey) || 0);
+      // Convention: negative = discount, positive = surcharge. Range: -10 to +10.
+      if (pct !== 0 && pct >= -10 && pct <= 10) {
+        total = Math.round(total * (1 + pct / 100) * 100) / 100;
+      }
+    }
+    var row = new Array(headers.length).fill("");
+    function setCol(name, val) { var idx = blMap[name.toUpperCase()]; if (idx !== undefined) row[idx] = val != null ? val : ""; }
+    setCol("Status", payload.status || "Unbilled");
+    setCol("Invoice #", "");
+    setCol("Client", payload.client || "");
+    setCol("Date", payload.date || new Date());
+    setCol("Svc Code", payload.svcCode || "");
+    setCol("Svc Name", payload.svcName || "");
+    setCol("Category", payload.category || "");
+    setCol("Item ID", payload.itemId || "");
+    setCol("Description", payload.description || "");
+    setCol("Class", payload.itemClass || "");
+    setCol("Qty", payload.qty || 1);
+    setCol("Rate", rate);
+    setCol("Total", payload.totalOverride !== null && payload.totalOverride !== undefined ? payload.totalOverride : total);
+    setCol("Task ID", payload.taskId || "");
+    setCol("Repair ID", payload.repairId || "");
+    setCol("Shipment #", payload.shipNo || "");
+    setCol("Item Notes", payload.notes || "");
+    setCol("Ledger Row ID", ledgerRowId);
+    setCol("Ledger Entry ID", payload.ledgerEntryId || "");
+    blSheet.getRange(SH_getLastDataRow_(blSheet) + 1, 1, 1, row.length).setValues([row]);
+    return { success: true, ledgerRowId: ledgerRowId };
+  } catch (err) {
+    return { success: false, error: String(err) };
+  }
+}
+
+function SH_sendTemplateEmail_(ss, templateKey, toEmails, subject, tokens, pdfBlob) {
+  if (!toEmails) return { success: false, error: "No recipients" };
+  try {
+    var masterId = String(SH_getSetting_(ss, "MASTER_SPREADSHEET_ID") || "").trim();
+    var eSubj = subject;
+    var eBody = "";
+    var tplRecipients = "";
+    if (masterId) {
+      try {
+        var mSS = SpreadsheetApp.openById(masterId);
+        var tplSh = mSS.getSheetByName("Email_Templates");
+        if (tplSh && tplSh.getLastRow() >= 2) {
+          var tplD = tplSh.getDataRange().getValues();
+          var tplH = {};
+          tplD[0].forEach(function(h, i) { tplH[String(h || "").trim()] = i; });
+          var tKC = tplH["Template Key"] !== undefined ? tplH["Template Key"] : 0;
+          var tSC = tplH["Subject"] !== undefined ? tplH["Subject"] : 1;
+          var tBC = tplH["HTML Body"] !== undefined ? tplH["HTML Body"] : 2;
+          var tRC = tplH["Recipients"] !== undefined ? tplH["Recipients"] : -1;
+          for (var ti = 1; ti < tplD.length; ti++) {
+            if (String(tplD[ti][tKC] || "").trim() === templateKey) {
+              eSubj = String(tplD[ti][tSC] || "").trim() || eSubj;
+              eBody = String(tplD[ti][tBC] || "").trim();
+              if (tRC >= 0) tplRecipients = String(tplD[ti][tRC] || "").trim();
+              break;
+            }
+          }
+        }
+      } catch (_) {}
+    }
+    var staffEmails = String(SH_getSetting_(ss, "NOTIFICATION_EMAILS") || "").trim();
+    var clientEmail = String(SH_getSetting_(ss, "CLIENT_EMAIL") || "").trim();
+    if (tplRecipients) {
+      toEmails = tplRecipients.replace(/\{\{STAFF_EMAILS\}\}/gi, staffEmails || "").replace(/\{\{CLIENT_EMAIL\}\}/gi, clientEmail || "");
+    }
+    if (eBody) {
+      var photosUrl = tokens["{{PHOTOS_URL}}"] || "";
+      if (!photosUrl || photosUrl === "#" || photosUrl.indexOf("http") !== 0) {
+        eBody = eBody.replace(/<a[^>]*\{\{PHOTOS_URL\}\}[^>]*>[^<]*<\/a>/gi, "");
+        tokens["{{PHOTOS_URL}}"] = "#";
+      }
+      for (var tk in tokens) { eSubj = eSubj.split(tk).join(tokens[tk] || ""); eBody = eBody.split(tk).join(tokens[tk] || ""); }
+      eBody += '<div style="text-align:center;font-size:8px;color:#CBD5E1;margin-top:4px;">T-SH</div>';
+    } else {
+      // No template found — per approved plan, do NOT invent fallback email.
+      // Skip send, log exception, leave Email Sent At blank for manual resend.
+      Logger.log("SH_sendTemplateEmail_: No template found for key '" + templateKey + "'. Skipping send.");
+      return { success: false, error: "No template found for " + templateKey + ". Email skipped — resendable via menu." };
+    }
+    var emailOpts = { htmlBody: eBody, from: "whse@stridenw.com" };
+    if (pdfBlob) emailOpts.attachments = [pdfBlob];
+    GmailApp.sendEmail(toEmails, eSubj, "", emailOpts);
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: String(err) };
+  }
+}
+
+/* --- Shared PDF Generation Helpers --- */
+
+function SH_getDocTemplateHtml_(ss, templateKey) {
+  try {
+    var masterId = String(SH_getSetting_(ss, "MASTER_SPREADSHEET_ID") || "").trim();
+    if (!masterId) return null;
+    var master = SpreadsheetApp.openById(masterId);
+    var tmplSh = master.getSheetByName("Email_Templates");
+    if (!tmplSh || tmplSh.getLastRow() < 2) return null;
+    var lastCol = Math.max(tmplSh.getLastColumn(), 6);
+    var data = tmplSh.getRange(2, 1, tmplSh.getLastRow() - 1, lastCol).getValues();
+    for (var i = 0; i < data.length; i++) {
+      if (String(data[i][0] || "").trim() === templateKey) {
+        var html = String(data[i][2] || "").trim();
+        if (!html) return null;
+        return { title: String(data[i][1] || ""), html: html };
+      }
+    }
+  } catch (err) { Logger.log("SH_getDocTemplateHtml_ error for " + templateKey + ": " + err); }
+  return null;
+}
+
+function SH_getDefaultRepairWorkOrderHtml_() {
+  return '<html><head><style>body{font-family:Arial,Helvetica,sans-serif;color:#1E293B;margin:0;padding:0;}table{border-collapse:collapse;width:8in;}</style></head><body><div style="width:8in;margin:0;"><table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-bottom:6px;"><tr><td style="vertical-align:middle;"><table cellpadding="0" cellspacing="0" border="0"><tr><td style="vertical-align:middle;padding-right:10px;"><img src="{{LOGO_URL}}" alt="Logo" style="height:38px;width:38px;" /></td><td style="vertical-align:middle;"><span style="font-size:20px;font-weight:bold;color:#1E293B;">Stride Logistics </span><span style="font-size:20px;font-weight:bold;color:#E85D2D;">WMS</span><br><span style="font-size:10px;color:#64748B;">Kent, WA &middot; whse@stridenw.com &middot; 206-550-1848</span></td></tr></table></td><td style="text-align:right;vertical-align:middle;"><div style="font-size:20px;font-weight:bold;color:#1E293B;">Work Order</div><div style="font-size:15px;font-weight:bold;color:#E85D2D;margin-top:2px;">{{REPAIR_ID}}</div></td></tr></table><table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-top:14px;margin-bottom:14px;"><tr><td style="width:50%;vertical-align:top;"><table cellpadding="0" cellspacing="0" border="0" style="width:100%;"><tr><td style="font-size:10px;color:#64748B;padding:2px 0;width:80px;font-weight:bold;">CLIENT</td><td style="font-size:12px;font-weight:bold;">{{CLIENT_NAME}}</td></tr>{{SIDEMARK_ROW}}</table></td><td style="width:50%;vertical-align:top;"><table cellpadding="0" cellspacing="0" border="0" style="width:100%;"><tr><td style="font-size:10px;color:#64748B;padding:2px 0;text-align:right;width:65px;font-weight:bold;">DATE</td><td style="font-size:12px;font-weight:bold;text-align:right;">{{DATE}}</td></tr><tr><td style="font-size:10px;color:#64748B;padding:2px 0;text-align:right;font-weight:bold;">STATUS</td><td style="font-size:12px;font-weight:bold;text-align:right;">{{STATUS}}</td></tr></table></td></tr></table><div style="background:#F8FAFC;border:1px solid #E2E8F0;padding:10px 12px;margin-bottom:14px;"><div style="font-size:9px;color:#64748B;font-weight:bold;margin-bottom:6px;">REPAIR DETAILS</div><table cellpadding="0" cellspacing="0" border="0" style="width:100%;"><tr><td style="font-size:10px;color:#64748B;padding:2px 0;width:100px;font-weight:bold;">Repair Type</td><td style="font-size:12px;font-weight:bold;">{{REPAIR_TYPE}}</td></tr>{{APPROVED_ROW}}{{NOTES_ROW}}{{PHOTOS_ROW}}</table></div><div style="font-size:9px;color:#64748B;font-weight:bold;margin-bottom:4px;">ITEM DETAILS</div><table width="100%" cellpadding="0" cellspacing="0" border="0" style="border:1px solid #E2E8F0;margin-bottom:16px;"><tr style="background:#E85D2D;"><th style="padding:5px 6px;font-size:9px;color:#fff;font-weight:bold;text-align:left;">Item ID</th><th style="padding:5px 6px;font-size:9px;color:#fff;font-weight:bold;text-align:center;width:30px;">Qty</th><th style="padding:5px 6px;font-size:9px;color:#fff;font-weight:bold;text-align:left;">Vendor</th><th style="padding:5px 6px;font-size:9px;color:#fff;font-weight:bold;text-align:left;">Description</th><th style="padding:5px 6px;font-size:9px;color:#fff;font-weight:bold;text-align:left;">Sidemark</th><th style="padding:5px 6px;font-size:9px;color:#fff;font-weight:bold;text-align:left;">Room</th></tr><tr><td style="padding:6px;font-size:11px;border-bottom:1px solid #E2E8F0;font-weight:bold;">{{ITEM_ID}}</td><td style="padding:6px;font-size:11px;border-bottom:1px solid #E2E8F0;text-align:center;">{{ITEM_QTY}}</td><td style="padding:6px;font-size:11px;border-bottom:1px solid #E2E8F0;">{{ITEM_VENDOR}}</td><td style="padding:6px;font-size:11px;border-bottom:1px solid #E2E8F0;">{{ITEM_DESC}}</td><td style="padding:6px;font-size:11px;border-bottom:1px solid #E2E8F0;">{{ITEM_SIDEMARK}}</td><td style="padding:6px;font-size:11px;border-bottom:1px solid #E2E8F0;">{{ITEM_ROOM}}</td></tr></table><div style="border:2px solid #1E293B;padding:14px;margin-bottom:14px;"><div style="font-size:11px;font-weight:bold;color:#1E293B;margin-bottom:10px;border-bottom:2px solid #E2E8F0;padding-bottom:5px;">WAREHOUSE USE ONLY</div><table width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td style="width:50%;padding-bottom:14px;"><div style="font-size:10px;font-weight:bold;color:#64748B;margin-bottom:4px;">Completed By</div><div style="border-bottom:1.5px solid #CBD5E1;height:22px;width:90%;"></div></td><td style="width:50%;padding-bottom:14px;"><div style="font-size:10px;font-weight:bold;color:#64748B;margin-bottom:4px;text-align:right;">Date</div><div style="border-bottom:1.5px solid #CBD5E1;height:22px;width:90%;margin-left:auto;"></div></td></tr></table><div style="margin-bottom:14px;"><div style="font-size:10px;font-weight:bold;color:#64748B;margin-bottom:6px;">Repair Result</div><span style="display:inline-block;margin-right:16px;font-size:11px;"><span style="display:inline-block;width:14px;height:14px;border:1.5px solid #94A3B8;border-radius:3px;vertical-align:middle;margin-right:4px;"></span> Complete</span><span style="display:inline-block;margin-right:16px;font-size:11px;"><span style="display:inline-block;width:14px;height:14px;border:1.5px solid #94A3B8;border-radius:3px;vertical-align:middle;margin-right:4px;"></span> Partial</span><span style="display:inline-block;margin-right:16px;font-size:11px;"><span style="display:inline-block;width:14px;height:14px;border:1.5px solid #94A3B8;border-radius:3px;vertical-align:middle;margin-right:4px;"></span> Unable to Repair</span><span style="display:inline-block;font-size:11px;"><span style="display:inline-block;width:14px;height:14px;border:1.5px solid #94A3B8;border-radius:3px;vertical-align:middle;margin-right:4px;"></span> Other</span></div><div><div style="font-size:10px;font-weight:bold;color:#64748B;margin-bottom:6px;">Notes</div><div style="border-bottom:1px solid #E2E8F0;height:18px;margin-bottom:6px;">&nbsp;</div><div style="border-bottom:1px solid #E2E8F0;height:18px;margin-bottom:6px;">&nbsp;</div><div style="border-bottom:1px solid #E2E8F0;height:18px;">&nbsp;</div></div></div><div style="text-align:center;font-size:9px;color:#94A3B8;border-top:1px solid #E2E8F0;padding-top:6px;">Stride Logistics &middot; 206-550-1848 &middot; whse@stridenw.com</div></div></body></html>';
+}
+
+function SH_createGoogleDocFromHtml_(title, html) {
+  var blob = Utilities.newBlob(html, "text/html", title + ".html");
+  var tempFile = DriveApp.createFile(blob);
+  try {
+    var doc = Drive.Files.copy(
+      { title: title, mimeType: MimeType.GOOGLE_DOCS },
+      tempFile.getId()
+    );
+    tempFile.setTrashed(true);
+    return doc.id;
+  } catch (e) {
+    try { tempFile.setTrashed(true); } catch (_) {}
+    throw new Error("HTML->Doc conversion failed. Enable Advanced Drive Service. Error: " + (e && e.message ? e.message : e));
+  }
+}
+
+function SH_exportDocAsPdfBlob_(docId, fileName, marginInches) {
+  var m = marginInches || 0.25;
+  var pts = m * 72;
+  try {
+    var token = ScriptApp.getOAuthToken();
+    var updateUrl = "https://docs.googleapis.com/v1/documents/" + docId + ":batchUpdate";
+    UrlFetchApp.fetch(updateUrl, {
+      method: "post", contentType: "application/json",
+      headers: { Authorization: "Bearer " + token },
+      payload: JSON.stringify({ requests: [{ updateDocumentStyle: {
+        documentStyle: { marginTop: { magnitude: pts, unit: "PT" }, marginBottom: { magnitude: pts, unit: "PT" },
+          marginLeft: { magnitude: pts, unit: "PT" }, marginRight: { magnitude: pts, unit: "PT" } },
+        fields: "marginTop,marginBottom,marginLeft,marginRight" } }] }),
+      muteHttpExceptions: true
+    });
+  } catch (marginErr) { Logger.log("SH_exportDocAsPdfBlob_ margin update failed (non-fatal): " + marginErr); }
+  var url = "https://docs.google.com/document/d/" + docId + "/export?format=pdf&size=letter&portrait=true&fitw=true&top=" + m + "&bottom=" + m + "&left=" + m + "&right=" + m;
+  var resp = UrlFetchApp.fetch(url, {
+    headers: { Authorization: "Bearer " + ScriptApp.getOAuthToken() },
+    muteHttpExceptions: true
+  });
+  if (resp.getResponseCode() !== 200) throw new Error("PDF export failed (" + resp.getResponseCode() + ")");
+  return resp.getBlob().setName(fileName);
+}
+
+function SH_generateRepairWorkOrderPdf_(ss, repairRowData, repairMap, folderUrl) {
+  var clientName = String(SH_getSetting_(ss, "CLIENT_NAME") || "Client");
+  var logoUrl = String(SH_getSetting_(ss, "LOGO_URL") || "");
+  function gv(h) { return repairMap[h] ? String(repairRowData[repairMap[h] - 1] || "").trim() : ""; }
+  var repairId = gv("Repair ID"); var itemId = gv("Item ID");
+  var repairType = gv("Description"); var repairNotes = gv("Repair Notes");
+  var taskNotes = gv("Task Notes"); var status = gv("Status");
+  var approved = gv("Approved"); var photosUrl = folderUrl || "";
+  var createdDate = repairMap["Created Date"] ? repairRowData[repairMap["Created Date"] - 1] : new Date();
+  var allNotes = (taskNotes && repairNotes) ? taskNotes + "\n" + repairNotes : (taskNotes || repairNotes || "");
+  var invItem = SH_findInventoryItem_(ss, itemId);
+  var sidemark = invItem ? invItem.sidemark : ""; var itemQty = invItem ? String(invItem.qty || "1") : "1";
+  var itemVendor = invItem ? invItem.vendor : ""; var itemDesc = invItem ? invItem.description : "";
+  var itemRoom = invItem ? invItem.room : "";
+  var dateStr;
+  if (createdDate instanceof Date) dateStr = Utilities.formatDate(createdDate, Session.getScriptTimeZone(), "MM/dd/yyyy");
+  else { try { dateStr = Utilities.formatDate(new Date(createdDate), Session.getScriptTimeZone(), "MM/dd/yyyy"); } catch(_) { dateStr = String(createdDate || ""); } }
+  var approvedStr = "";
+  if (approved !== undefined && approved !== null && approved !== "") {
+    approvedStr = (approved === "true" || approved === "TRUE" || approved === "Yes") ? "Yes" : "No";
+  }
+  var e = SH_esc_;
+  var tokens = {
+    "{{LOGO_URL}}": e(logoUrl), "{{REPAIR_ID}}": e(repairId), "{{CLIENT_NAME}}": e(clientName),
+    "{{DATE}}": e(dateStr), "{{SIDEMARK}}": e(sidemark),
+    "{{SIDEMARK_ROW}}": sidemark ? '<tr><td style="font-size:10px;color:#64748B;padding:2px 0;font-weight:700;">SIDEMARK</td><td style="font-size:12px;">' + e(sidemark) + '</td></tr>' : '',
+    "{{STATUS}}": e(status), "{{REPAIR_TYPE}}": e(repairType),
+    "{{APPROVED_ROW}}": approvedStr ? '<tr><td style="font-size:10px;color:#64748B;padding:2px 0;font-weight:700;">Approved</td><td style="font-size:12px;">' + e(approvedStr) + '</td></tr>' : '',
+    "{{NOTES_ROW}}": allNotes ? '<tr><td style="font-size:10px;color:#64748B;padding:2px 0;font-weight:700;">Notes</td><td style="font-size:12px;">' + e(allNotes) + '</td></tr>' : '',
+    "{{PHOTOS_ROW}}": photosUrl ? '<tr><td style="font-size:10px;color:#64748B;padding:2px 0;font-weight:700;">Photos</td><td style="font-size:12px;"><a href="' + e(photosUrl) + '" style="color:#E85D2D;text-decoration:underline;">View Photos</a></td></tr>' : '',
+    "{{ITEM_ID}}": e(itemId), "{{ITEM_QTY}}": e(itemQty), "{{ITEM_VENDOR}}": e(itemVendor),
+    "{{ITEM_DESC}}": e(itemDesc), "{{ITEM_SIDEMARK}}": e(sidemark), "{{ITEM_ROOM}}": e(itemRoom),
+    "{{RESULT_OPTIONS_HTML}}": '<span style="display:inline-block;margin-right:16px;font-size:11px;"><span style="display:inline-block;width:14px;height:14px;border:1.5px solid #94A3B8;border-radius:3px;vertical-align:middle;margin-right:4px;"></span> Complete</span><span style="display:inline-block;margin-right:16px;font-size:11px;"><span style="display:inline-block;width:14px;height:14px;border:1.5px solid #94A3B8;border-radius:3px;vertical-align:middle;margin-right:4px;"></span> Partial</span><span style="display:inline-block;margin-right:16px;font-size:11px;"><span style="display:inline-block;width:14px;height:14px;border:1.5px solid #94A3B8;border-radius:3px;vertical-align:middle;margin-right:4px;"></span> Unable to Repair</span><span style="display:inline-block;font-size:11px;"><span style="display:inline-block;width:14px;height:14px;border:1.5px solid #94A3B8;border-radius:3px;vertical-align:middle;margin-right:4px;"></span> Other</span>'
+  };
+  var tplResult = SH_getDocTemplateHtml_(ss, "DOC_REPAIR_WORK_ORDER");
+  var html = tplResult ? tplResult.html : SH_getDefaultRepairWorkOrderHtml_();
+  for (var tk in tokens) html = html.split(tk).join(tokens[tk]);
+  var docTitle = "Work Order - " + repairId;
+  var docId = SH_createGoogleDocFromHtml_(docTitle, html);
+  var pdfBlob = SH_exportDocAsPdfBlob_(docId, "Work_Order_" + repairId + ".pdf", 0.25);
+  var folderId = String(folderUrl).match(/[-\w]{25,}/);
+  if (folderId) DriveApp.getFolderById(folderId[0]).createFile(pdfBlob);
+  try { DriveApp.getFileById(docId).setTrashed(true); } catch (_) {}
+  Logger.log("SH: Repair work order PDF generated: " + repairId);
+}
+
+/* --- v4.0.0: Start Task shared handler + helpers --- */
+
+function SH_createItemFolder_(parentUrl, folderName) {
+  if (!parentUrl) return "";
+  try {
+    var match = String(parentUrl).match(/[-\w]{25,}/);
+    if (!match) return "";
+    var parentFolder = DriveApp.getFolderById(match[0]);
+    var existing = parentFolder.getFoldersByName(folderName);
+    if (existing.hasNext()) return existing.next().getUrl();
+    return parentFolder.createFolder(folderName).getUrl();
+  } catch (err) {
+    Logger.log("SH_createItemFolder_ error: " + err);
+    return "";
+  }
+}
+
+function SH_generateTaskWorkOrderPdf_(ss, taskRowData, taskMap, folderUrl) {
+  try {
+    var clientName = SH_getSetting_(ss, "CLIENT_NAME") || "Client";
+    var logoUrl = SH_getSetting_(ss, "LOGO_URL") || "";
+    var e = SH_esc_;
+    var taskId = SH_getCellByHeader_(taskRowData, taskMap, "Task ID") || "";
+    var itemId = SH_getCellByHeader_(taskRowData, taskMap, "Item ID") || "";
+    var taskType = SH_getCellByHeader_(taskRowData, taskMap, "Type") || "";
+    var taskNotes = SH_getCellByHeader_(taskRowData, taskMap, "Task Notes") || "";
+    var status = SH_getCellByHeader_(taskRowData, taskMap, "Status") || "Open";
+    var createdDate = SH_getCellByHeader_(taskRowData, taskMap, "Created") || new Date();
+    var inv = SH_findInventoryItem_(ss, itemId);
+    var sidemark = inv ? (inv.sidemark || "") : "";
+    var itemQty = inv ? (inv.qty || "1") : "1";
+    var itemVendor = inv ? (inv.vendor || "") : "";
+    var itemDesc = inv ? (inv.description || "") : "";
+    var itemRoom = inv ? (inv.room || "") : "";
+    var dateStr;
+    if (createdDate instanceof Date) {
+      dateStr = Utilities.formatDate(createdDate, Session.getScriptTimeZone(), "MM/dd/yyyy");
+    } else {
+      try { dateStr = Utilities.formatDate(new Date(createdDate), Session.getScriptTimeZone(), "MM/dd/yyyy"); }
+      catch(_) { dateStr = String(createdDate || ""); }
+    }
+    var tokens = {
+      "{{LOGO_URL}}": e(logoUrl), "{{TASK_ID}}": e(taskId), "{{CLIENT_NAME}}": e(clientName),
+      "{{DATE}}": e(dateStr), "{{SIDEMARK}}": e(sidemark),
+      "{{SIDEMARK_ROW}}": sidemark ? '<tr><td style="font-size:10px;color:#64748B;padding:2px 0;font-weight:700;">SIDEMARK</td><td style="font-size:12px;">' + e(sidemark) + '</td></tr>' : '',
+      "{{STATUS}}": e(status), "{{TASK_TYPE}}": e(taskType),
+      "{{NOTES_ROW}}": taskNotes ? '<tr><td style="font-size:10px;color:#64748B;padding:2px 0;font-weight:700;">Notes</td><td style="font-size:12px;">' + e(taskNotes) + '</td></tr>' : '',
+      "{{PHOTOS_ROW}}": folderUrl ? '<tr><td style="font-size:10px;color:#64748B;padding:2px 0;font-weight:700;">Photos</td><td style="font-size:12px;"><a href="' + e(folderUrl) + '" style="color:#E85D2D;text-decoration:underline;">View Photos</a></td></tr>' : '',
+      "{{ITEM_ID}}": e(itemId), "{{ITEM_QTY}}": e(String(itemQty)),
+      "{{ITEM_VENDOR}}": e(itemVendor), "{{ITEM_DESC}}": e(itemDesc),
+      "{{ITEM_SIDEMARK}}": e(sidemark), "{{ITEM_ROOM}}": e(itemRoom),
+      "{{RESULT_OPTIONS_HTML}}": '<span style="display:inline-block;margin-right:16px;font-size:11px;"><span style="display:inline-block;width:14px;height:14px;border:1.5px solid #94A3B8;border-radius:3px;vertical-align:middle;margin-right:4px;"></span> Pass</span><span style="display:inline-block;margin-right:16px;font-size:11px;"><span style="display:inline-block;width:14px;height:14px;border:1.5px solid #94A3B8;border-radius:3px;vertical-align:middle;margin-right:4px;"></span> Fail</span><span style="display:inline-block;margin-right:16px;font-size:11px;"><span style="display:inline-block;width:14px;height:14px;border:1.5px solid #94A3B8;border-radius:3px;vertical-align:middle;margin-right:4px;"></span> Needs Repair</span><span style="display:inline-block;font-size:11px;"><span style="display:inline-block;width:14px;height:14px;border:1.5px solid #94A3B8;border-radius:3px;vertical-align:middle;margin-right:4px;"></span> Other</span>'
+    };
+    var tmpl = SH_getDocTemplateHtml_(ss, "DOC_TASK_WORK_ORDER");
+    var fallbackHtml = '<html><body><h2>Work Order — ' + e(taskId) + '</h2><p>Client: ' + e(clientName) + '</p><p>Item: ' + e(itemId) + ' — ' + e(itemDesc) + '</p></body></html>';
+    var html = tmpl ? tmpl.html : fallbackHtml;
+    for (var tk in tokens) { html = html.split(tk).join(tokens[tk]); }
+    var docId = SH_createGoogleDocFromHtml_("Work Order - " + taskId, html);
+    var pdfBlob = SH_exportDocAsPdfBlob_(docId, "Work_Order_" + taskId + ".pdf", 0.25);
+    var folderId = String(folderUrl).match(/[-\w]{25,}/);
+    if (folderId) DriveApp.getFolderById(folderId[0]).createFile(pdfBlob);
+    try { DriveApp.getFileById(docId).setTrashed(true); } catch (_) {}
+    Logger.log("SH: Task work order PDF generated: " + taskId);
+  } catch (err) {
+    Logger.log("SH_generateTaskWorkOrderPdf_ error: " + err);
+  }
+}
+
+function SH_getCellByHeader_(rowData, headerMap, headerName) {
+  var col = headerMap[headerName];
+  if (!col) return "";
+  return rowData[col - 1];
+}
+
+/**
+ * startTask_: Creates Drive folder + Work Order PDF for a task.
+ * Called from client onTaskEdit_ (Start Task checkbox) or TB_OnBoardEdit.
+ * Fully idempotent and retry-safe.
+ */
+function startTask_(ss, tasksSheet, taskRowNum, taskMap) {
+  var start = Date.now();
+  try {
+    var rowData = tasksSheet.getRange(taskRowNum, 1, 1, tasksSheet.getLastColumn()).getValues()[0];
+    var taskId = String(SH_getCellByHeader_(rowData, taskMap, "Task ID") || "").trim();
+    var itemId = String(SH_getCellByHeader_(rowData, taskMap, "Item ID") || "").trim();
+    var shipNo = String(SH_getCellByHeader_(rowData, taskMap, "Shipment #") || "").trim();
+    if (!taskId || !itemId) return;
+
+    var startedAtCol = taskMap["Started At"];
+    var startedAtVal = startedAtCol ? rowData[startedAtCol - 1] : null;
+    var idCol = taskMap["Task ID"] || 1;
+    var existingRt = tasksSheet.getRange(taskRowNum, idCol).getRichTextValue();
+    var existingFolderUrl = (existingRt && existingRt.getLinkUrl()) ? existingRt.getLinkUrl() : "";
+    if (startedAtVal && existingFolderUrl) return;
+
+    // v4.0.3: Find SHIPMENT folder (task folders go directly inside — no item folder)
+    var shipmentFolderUrl = "";
+    if (shipNo) {
+      try {
+        var shipSheet = ss.getSheetByName("Shipments");
+        if (shipSheet) {
+          var shipMap = SH_headerMap_(shipSheet);
+          var shipNoCol = shipMap["Shipment #"];
+          if (shipNoCol && shipSheet.getLastRow() > 1) {
+            var shipData = shipSheet.getRange(2, shipNoCol, shipSheet.getLastRow() - 1, 1).getValues();
+            for (var si = 0; si < shipData.length; si++) {
+              if (String(shipData[si][0] || "").trim() === shipNo) {
+                var shipRtVal = shipSheet.getRange(si + 2, shipNoCol).getRichTextValue();
+                if (shipRtVal && shipRtVal.getLinkUrl()) shipmentFolderUrl = shipRtVal.getLinkUrl();
+                break;
+              }
+            }
+          }
+        }
+      } catch (shipErr) { Logger.log("startTask_ shipment folder lookup error: " + shipErr); }
+    }
+    if (!shipmentFolderUrl) {
+      var fallbackId = SH_getSetting_(ss, "PHOTOS_FOLDER_ID") || SH_getSetting_(ss, "DRIVE_PARENT_FOLDER_ID");
+      if (fallbackId) shipmentFolderUrl = "https://drive.google.com/drive/folders/" + fallbackId;
+    }
+
+    var taskFolderUrl = existingFolderUrl;
+    if (!taskFolderUrl && shipmentFolderUrl) {
+      taskFolderUrl = SH_createItemFolder_(shipmentFolderUrl, taskId);
+    }
+
+    if (taskFolderUrl && idCol) {
+      var taskRt = SpreadsheetApp.newRichTextValue().setText(taskId).setLinkUrl(taskFolderUrl).build();
+      tasksSheet.getRange(taskRowNum, idCol).setRichTextValue(taskRt);
+    }
+
+    if (taskFolderUrl) {
+      var folderId = String(taskFolderUrl).match(/[-\w]{25,}/);
+      var pdfExists = false;
+      if (folderId) {
+        try {
+          var files = DriveApp.getFolderById(folderId[0]).getFilesByType(MimeType.PDF);
+          if (files.hasNext()) pdfExists = true;
+        } catch (_) {}
+      }
+      if (!pdfExists) {
+        var woData = tasksSheet.getRange(taskRowNum, 1, 1, tasksSheet.getLastColumn()).getValues()[0];
+        SH_generateTaskWorkOrderPdf_(ss, woData, taskMap, taskFolderUrl);
+      }
+    }
+
+    // Hyperlink Shipment # on task row (reuse URL from lookup above)
+    var taskShipCol = taskMap["Shipment #"];
+    if (taskShipCol && shipNo && shipmentFolderUrl) {
+      var taskShipRt = SpreadsheetApp.newRichTextValue().setText(shipNo).setLinkUrl(shipmentFolderUrl).build();
+      tasksSheet.getRange(taskRowNum, taskShipCol).setRichTextValue(taskShipRt);
+    }
+
+    if (startedAtCol) tasksSheet.getRange(taskRowNum, startedAtCol).setValue(new Date());
+    var startTaskCol = taskMap["Start Task"];
+    if (startTaskCol) tasksSheet.getRange(taskRowNum, startTaskCol).setValue(false);
+    // v1.6.0: Set Status to "In Progress" when starting a task
+    var statusCol = taskMap["Status"];
+    if (statusCol) {
+      var currentStatus = String(rowData[statusCol - 1] || "").trim();
+      if (currentStatus === "Open") {
+        tasksSheet.getRange(taskRowNum, statusCol).setValue("In Progress");
+      }
+    }
+
+    console.log(JSON.stringify({ fn: "startTask_", taskId: taskId, itemId: itemId, durationMs: Date.now() - start }));
+  } catch (err) {
+    Logger.log("startTask_ error: " + err + " | " + (err.stack || ""));
+    try { SpreadsheetApp.getActive().toast("Start Task failed: " + (err.message || err), "Error", 10); } catch (_) {}
+  }
+}
+
+/* --- Main Shared Handlers --- */
+
+function processTaskCompletionById_(srcSs, taskId, resultValue) {
+  var out = { success: false, skipped: false, error: "", billingCreated: false, billingException: "", emailSent: false, emailException: "", pdfFound: false, repairCreated: false };
+  try {
+    var taskSheet = srcSs.getSheetByName("Tasks");
+    if (!taskSheet) { out.error = "Tasks sheet not found"; return out; }
+    var map = SH_headerMap_(taskSheet);
+    var idCol = map["Task ID"];
+    if (!idCol) { out.error = "Task ID column not found"; return out; }
+    var row = SH_findRowById_(taskSheet, idCol, taskId);
+    if (row < 2) { out.error = "Task not found: " + taskId; return out; }
+    var rowData = taskSheet.getRange(row, 1, 1, taskSheet.getLastColumn()).getValues()[0];
+    function getVal(h) { return map[h] ? String(rowData[map[h] - 1] || "").trim() : ""; }
+    var processedAt = getVal("Completion Processed At");
+    if (processedAt) { out.success = true; out.skipped = true; return out; }
+    var now = new Date();
+    var tz = Session.getScriptTimeZone();
+    var nowFmt = Utilities.formatDate(now, tz, "MM/dd/yyyy HH:mm:ss");
+    if (map["Completion Started At"]) taskSheet.getRange(row, map["Completion Started At"]).setValue(nowFmt);
+    var currentStatus = getVal("Status");
+    if (currentStatus === "Completed" || currentStatus === "Cancelled") {
+      out.success = true; out.skipped = true;
+      if (map["Completion Processed At"]) taskSheet.getRange(row, map["Completion Processed At"]).setValue(nowFmt);
+      return out;
+    }
+    if (map["Status"]) taskSheet.getRange(row, map["Status"]).setValue("Completed");
+    if (map["Completed At"]) taskSheet.getRange(row, map["Completed At"]).setValue(now);
+    var svcCode = getVal("Svc Code") || getVal("Type");
+    if (map["Svc Code"] && !getVal("Svc Code")) taskSheet.getRange(row, map["Svc Code"]).setValue(svcCode);
+    var itemId = getVal("Item ID");
+    if (!itemId) { out.error = "Item ID is empty on task row"; return out; }
+    var invItem = SH_findInventoryItem_(srcSs, itemId);
+    if (!invItem) { out.error = "Item not found in Inventory: " + itemId; return out; }
+    var taskType = getVal("Type");
+    var shipNo = getVal("Shipment #");
+    var taskNotes = getVal("Task Notes");
+    var photosUrl = "";
+    if (map["Task ID"]) { try { var rt = taskSheet.getRange(row, map["Task ID"]).getRichTextValue(); if (rt) photosUrl = rt.getLinkUrl() || ""; } catch (_) {} }
+    if (!photosUrl) photosUrl = SH_getItemFolderUrl_(srcSs, itemId) || "";
+    var rateData = SH_lookupRate_(srcSs, svcCode, invItem.itemClass);
+    var resultToCheck = resultValue ? resultValue : "Pass";
+    var isPASS = (resultToCheck === "Pass" || resultToCheck === "PASS");
+    var isFAIL = (resultToCheck === "Fail" || resultToCheck === "FAIL");
+    var shouldBill = (isPASS && rateData.billIfPass) || (isFAIL && rateData.billIfFail);
+    if (shouldBill) {
+      var clientName = String(SH_getSetting_(srcSs, "CLIENT_NAME") || "");
+      var missingRate = (rateData.rate === 0);
+      var billingResult = SH_writeBillingRow_(srcSs, {
+        status: "Unbilled", client: clientName, date: now,
+        svcCode: svcCode, svcName: rateData.svcName || svcCode, category: rateData.category || "",
+        itemId: itemId, description: invItem.description, itemClass: invItem.itemClass, qty: 1,
+        rate: missingRate ? 0 : rateData.rate,
+        totalOverride: missingRate ? "Missing Rate" : null,
+        taskId: taskId, repairId: "", shipNo: shipNo,
+        notes: (missingRate ? "MISSING RATE - " : "") + resultToCheck + (taskNotes ? " - " + taskNotes : ""),
+        ledgerEntryId: svcCode + "-TASK-" + taskId
+      });
+      if (billingResult.success && !billingResult.skipped) {
+        out.billingCreated = true;
+        if (missingRate) {
+          out.billingException = "Missing Rate for " + svcCode + "/" + invItem.itemClass + " — billing row created, rate needs update";
+          if (map["Billing Exception"]) taskSheet.getRange(row, map["Billing Exception"]).setValue(out.billingException);
+          // Do NOT set Billed=true when rate is missing — admin must fix rate first
+        } else {
+          if (map["Billed"]) taskSheet.getRange(row, map["Billed"]).setValue(true);
+        }
+      } else if (!billingResult.success) {
+        out.billingException = billingResult.error || "Billing row creation failed";
+        if (map["Billing Exception"]) taskSheet.getRange(row, map["Billing Exception"]).setValue(out.billingException);
+      }
+    }
+    var pdfBlob = null;
+    if (photosUrl) { try { pdfBlob = SH_findPdfInFolder_(photosUrl, "Work_Order_"); if (pdfBlob) out.pdfFound = true; } catch (_) {} }
+    var emailSentAt = getVal("Email Sent At");
+    if (!emailSentAt && resultValue) {
+      var notifOn = SH_truthy_(SH_getSetting_(srcSs, "ENABLE_NOTIFICATIONS"));
+      if (notifOn) {
+        var staffEmails = String(SH_getSetting_(srcSs, "NOTIFICATION_EMAILS") || "");
+        var clientEmail = String(SH_getSetting_(srcSs, "CLIENT_EMAIL") || "");
+        var clientNameE = String(SH_getSetting_(srcSs, "CLIENT_NAME") || "Client");
+        var allRecipients = SH_mergeEmails_(staffEmails, clientEmail);
+        if (allRecipients) {
+          var taskTypeLower = String(taskType || "").trim().toLowerCase();
+          var isInspection = (taskTypeLower === "inspection" || taskTypeLower === "insp");
+          var emailKey = isInspection ? "INSP_EMAIL" : "TASK_COMPLETE";
+          var emailSubj = (isInspection ? "Inspection Report " : "Task Completed ") + clientNameE + " Item " + itemId;
+          var itemTableHtml = SH_buildItemTableHtml_(srcSs, itemId, invItem.description);
+          var resultColor = isPASS ? "#16A34A" : isFAIL ? "#DC2626" : "#64748B";
+          var emailResult = SH_sendTemplateEmail_(srcSs, emailKey, allRecipients, emailSubj, {
+            "{{ITEM_ID}}": itemId, "{{CLIENT_NAME}}": clientNameE, "{{SHIPMENT_NO}}": shipNo || "-",
+            "{{RESULT}}": resultValue, "{{TASK_TYPE}}": taskType || "Task",
+            "{{SVC_NAME}}": rateData.svcName || taskType || "Task", "{{TASK_NOTES}}": taskNotes || "-",
+            "{{DESCRIPTION}}": invItem.description || "-", "{{ITEM_TABLE_HTML}}": itemTableHtml,
+            "{{PHOTOS_URL}}": photosUrl || "", "{{RESULT_COLOR}}": resultColor, "{{REPAIR_NOTE}}": ""
+          }, pdfBlob);
+          if (emailResult.success) {
+            out.emailSent = true;
+            if (map["Email Sent At"]) taskSheet.getRange(row, map["Email Sent At"]).setValue(nowFmt);
+          } else { out.emailException = emailResult.error || "Email send failed"; }
+        }
+      }
+    }
+    if (map["Completion Processed At"]) taskSheet.getRange(row, map["Completion Processed At"]).setValue(nowFmt);
+    if (map["Completion Started At"]) taskSheet.getRange(row, map["Completion Started At"]).setValue("");
+
+    // Update aggregated Task Notes on Inventory
+    try { SH_updateInventoryTaskNotes_(srcSs, itemId); } catch (_) {}
+
+    out.success = true;
+  } catch (err) { out.error = String(err); }
+  return out;
+}
+
+function processRepairCompletionById_(srcSs, repairId, resultValue) {
+  var out = { success: false, skipped: false, error: "", billingCreated: false, billingException: "", emailSent: false, emailException: "" };
+  try {
+    var repSheet = srcSs.getSheetByName("Repairs");
+    if (!repSheet) { out.error = "Repairs sheet not found"; return out; }
+    var map = SH_headerMap_(repSheet);
+    var idCol = map["Repair ID"];
+    if (!idCol) { out.error = "Repair ID column not found"; return out; }
+    var row = SH_findRowById_(repSheet, idCol, repairId);
+    if (row < 2) { out.error = "Repair not found: " + repairId; return out; }
+    var rowData = repSheet.getRange(row, 1, 1, repSheet.getLastColumn()).getValues()[0];
+    function getVal(h) { return map[h] ? String(rowData[map[h] - 1] || "").trim() : ""; }
+    function getRaw(h) { return map[h] ? rowData[map[h] - 1] : ""; }
+    var processedAt = getVal("Completion Processed At");
+    if (processedAt) { out.success = true; out.skipped = true; return out; }
+    var currentStatus = getVal("Status");
+    if (currentStatus === "Complete" || currentStatus === "Cancelled") { out.success = true; out.skipped = true; return out; }
+    var now = new Date();
+    var tz = Session.getScriptTimeZone();
+    var nowFmt = Utilities.formatDate(now, tz, "MM/dd/yyyy HH:mm:ss");
+    if (map["Completion Started At"]) repSheet.getRange(row, map["Completion Started At"]).setValue(nowFmt);
+    if (map["Status"]) repSheet.getRange(row, map["Status"]).setValue("Complete");
+    if (map["Completed Date"] && !getVal("Completed Date")) repSheet.getRange(row, map["Completed Date"]).setValue(now);
+    var itemId = getVal("Item ID"); var desc = getVal("Description"); var itemClass = getVal("Class");
+    var quoteAmt = getRaw("Quote Amount"); var finalAmt = getRaw("Final Amount");
+    var vendor = getVal("Repair Vendor"); var repairNotes = getVal("Repair Notes");
+    var billingAmt = (finalAmt !== "" && finalAmt !== null && finalAmt !== 0) ? finalAmt : quoteAmt;
+    billingAmt = Number(billingAmt || 0);
+    {
+      var missingRate = (billingAmt === 0);
+      var clientName = String(SH_getSetting_(srcSs, "CLIENT_NAME") || "");
+      var billingResult = SH_writeBillingRow_(srcSs, {
+        status: "Unbilled", client: clientName, date: now, svcCode: "REPAIR", svcName: "Repair",
+        itemId: itemId, description: desc, itemClass: itemClass, qty: 1,
+        rate: missingRate ? 0 : billingAmt,
+        totalOverride: missingRate ? "Missing Rate" : null,
+        repairId: repairId, taskId: "", shipNo: "",
+        notes: (missingRate ? "MISSING RATE - " : "") + "Result: " + resultValue,
+        ledgerEntryId: "REPAIR-" + repairId
+      });
+      if (billingResult.success && !billingResult.skipped) {
+        out.billingCreated = true;
+        if (missingRate) {
+          out.billingException = "Missing Rate — billing row created, amount needs update";
+          if (map["Billing Exception"]) repSheet.getRange(row, map["Billing Exception"]).setValue(out.billingException);
+        } else {
+          if (map["Billed"]) repSheet.getRange(row, map["Billed"]).setValue(true);
+        }
+      }
+      else if (!billingResult.success) { out.billingException = billingResult.error || "Billing failed"; if (map["Billing Exception"]) repSheet.getRange(row, map["Billing Exception"]).setValue(out.billingException); }
+    }
+    var emailSentAt = getVal("Email Sent At");
+    if (!emailSentAt) {
+      var notifOn = SH_truthy_(SH_getSetting_(srcSs, "ENABLE_NOTIFICATIONS"));
+      var clientEmail = String(SH_getSetting_(srcSs, "CLIENT_EMAIL") || "");
+      var clientNameE = String(SH_getSetting_(srcSs, "CLIENT_NAME") || "Client");
+      if (notifOn && clientEmail) {
+        var repairPhotosUrl = "";
+        try { var rrt = repSheet.getRange(row, idCol).getRichTextValue(); if (rrt) repairPhotosUrl = rrt.getLinkUrl() || ""; } catch (_) {}
+        var repairPdfBlob = null;
+        if (repairPhotosUrl) { try { repairPdfBlob = SH_findPdfInFolder_(repairPhotosUrl, "Work_Order_"); } catch (_) {} }
+        var itemTableHtml = SH_buildItemTableHtml_(srcSs, itemId, desc);
+        var resultColor = (resultValue === "Pass" || resultValue === "PASS") ? "#16A34A" : (resultValue === "Fail" || resultValue === "FAIL") ? "#DC2626" : "#64748B";
+        var emailSubj = "Repair Complete: " + itemId + " " + resultValue;
+        var emailResult = SH_sendTemplateEmail_(srcSs, "REPAIR_COMPLETE", clientEmail, emailSubj, {
+          "{{ITEM_ID}}": itemId, "{{CLIENT_NAME}}": clientNameE, "{{DESCRIPTION}}": desc || "-",
+          "{{ITEM_TABLE_HTML}}": itemTableHtml, "{{REPAIR_RESULT}}": resultValue,
+          "{{REPAIR_RESULT_COLOR}}": resultColor,
+          "{{COMPLETED_DATE}}": Utilities.formatDate(now, Session.getScriptTimeZone(), "MM/dd/yyyy"),
+          "{{QUOTE_AMOUNT}}": SH_formatCurrency_(quoteAmt), "{{FINAL_AMOUNT}}": SH_formatCurrency_(billingAmt),
+          "{{REPAIR_VENDOR}}": vendor || "-", "{{PARTS_COST}}": SH_formatCurrency_(getRaw("Parts Cost") || "-"),
+          "{{LABOR_HOURS}}": String(getRaw("Labor Hours") || "-"), "{{REPAIR_PHOTOS_URL}}": repairPhotosUrl || "#",
+          "{{REPAIR_ID}}": repairId, "{{NOTES}}": repairNotes || "-"
+        }, repairPdfBlob);
+        if (emailResult.success) { out.emailSent = true; if (map["Email Sent At"]) repSheet.getRange(row, map["Email Sent At"]).setValue(nowFmt); }
+        else { out.emailException = emailResult.error || "Email send failed"; }
+      }
+    }
+    if (map["Completion Processed At"]) repSheet.getRange(row, map["Completion Processed At"]).setValue(nowFmt);
+    if (map["Completion Started At"]) repSheet.getRange(row, map["Completion Started At"]).setValue("");
+    out.success = true;
+  } catch (err) { out.error = String(err); }
+  return out;
+}
+
+function processRepairQuoteById_(srcSs, repairId, quoteAmount) {
+  var out = { success: false, skipped: false, error: "", emailSent: false };
+  try {
+    var repSheet = srcSs.getSheetByName("Repairs");
+    if (!repSheet) { out.error = "Repairs sheet not found"; return out; }
+    var map = SH_headerMap_(repSheet);
+    var idCol = map["Repair ID"];
+    if (!idCol) { out.error = "Repair ID column not found"; return out; }
+    var row = SH_findRowById_(repSheet, idCol, repairId);
+    if (row < 2) { out.error = "Repair not found: " + repairId; return out; }
+    var rowData = repSheet.getRange(row, 1, 1, repSheet.getLastColumn()).getValues()[0];
+    function getVal(h) { return map[h] ? String(rowData[map[h] - 1] || "").trim() : ""; }
+    var quoteSentAt = getVal("Quote Sent At");
+    if (quoteSentAt && String(getVal("Quote Amount")) === String(quoteAmount)) { out.success = true; out.skipped = true; return out; }
+    var currentStatus = getVal("Status");
+    var wasQuotePending = (currentStatus === "Pending Quote" || currentStatus === "");
+    if (wasQuotePending && map["Status"]) repSheet.getRange(row, map["Status"]).setValue("Quote Sent");
+    var now = new Date();
+    var tz = Session.getScriptTimeZone();
+    var nowFmt = Utilities.formatDate(now, tz, "MM/dd/yyyy HH:mm:ss");
+    if (map["Quote Sent Date"] && !getVal("Quote Sent Date")) repSheet.getRange(row, map["Quote Sent Date"]).setValue(now);
+    if (wasQuotePending) {
+      var notifOn = SH_truthy_(SH_getSetting_(srcSs, "ENABLE_NOTIFICATIONS"));
+      var clientEmail = String(SH_getSetting_(srcSs, "CLIENT_EMAIL") || "");
+      var clientName = String(SH_getSetting_(srcSs, "CLIENT_NAME") || "Client");
+      if (notifOn && clientEmail) {
+        var itemId = getVal("Item ID"); var desc = getVal("Description");
+        var vendor = getVal("Repair Vendor"); var repairNotes = getVal("Repair Notes"); var taskNotes = getVal("Task Notes");
+        var photosUrl = "";
+        try { var rrt = repSheet.getRange(row, idCol).getRichTextValue(); if (rrt) photosUrl = rrt.getLinkUrl() || ""; } catch (_) {}
+        if (!photosUrl && map["Source Task ID"]) { try { var srt = repSheet.getRange(row, map["Source Task ID"]).getRichTextValue(); if (srt) photosUrl = srt.getLinkUrl() || ""; } catch (_) {} }
+        if (!photosUrl) photosUrl = SH_getItemFolderUrl_(srcSs, itemId) || "";
+        var itemTableHtml = SH_buildItemTableHtml_(srcSs, itemId, desc);
+        var quoteAmtFmt = SH_formatCurrency_(quoteAmount);
+        var photosButton = photosUrl ? '<a href="' + photosUrl + '" style="display:inline-block;background:#E85D2D;color:#fff;text-decoration:none;font-weight:700;padding:12px 16px;border-radius:10px">View Inspection Photos</a>' : '';
+        var emailResult = SH_sendTemplateEmail_(srcSs, "REPAIR_QUOTE", clientEmail,
+          "Repair Quote Ready: " + itemId + " $" + quoteAmtFmt, {
+          "{{ITEM_ID}}": itemId, "{{CLIENT_NAME}}": clientName, "{{DESCRIPTION}}": desc || "-",
+          "{{ITEM_TABLE_HTML}}": itemTableHtml, "{{TASK_NOTES}}": taskNotes || "-",
+          "{{QUOTE_AMOUNT}}": quoteAmtFmt, "{{REPAIR_ID}}": repairId, "{{REPAIR_VENDOR}}": vendor || "-",
+          "{{NOTES}}": repairNotes || "-", "{{PHOTOS_URL}}": photosUrl || "#", "{{PHOTOS_BUTTON}}": photosButton
+        }, null);
+        if (emailResult.success) { out.emailSent = true; if (map["Quote Sent At"]) repSheet.getRange(row, map["Quote Sent At"]).setValue(nowFmt); }
+      }
+    }
+    out.success = true;
+  } catch (err) { out.error = String(err); }
+  return out;
+}
+
+function processRepairApprovalById_(srcSs, repairId) {
+  var out = { success: false, skipped: false, error: "", folderCreated: false, pdfGenerated: false };
+  try {
+    var repSheet = srcSs.getSheetByName("Repairs");
+    if (!repSheet) { out.error = "Repairs sheet not found"; return out; }
+    var map = SH_headerMap_(repSheet);
+    var idCol = map["Repair ID"];
+    if (!idCol) { out.error = "Repair ID column not found"; return out; }
+    var row = SH_findRowById_(repSheet, idCol, repairId);
+    if (row < 2) { out.error = "Repair not found: " + repairId; return out; }
+    var rowData = repSheet.getRange(row, 1, 1, repSheet.getLastColumn()).getValues()[0];
+    function getVal(h) { return map[h] ? String(rowData[map[h] - 1] || "").trim() : ""; }
+    var approvalProcessed = getVal("Approval Processed At");
+    if (approvalProcessed) { out.success = true; out.skipped = true; return out; }
+    if (map["Status"]) repSheet.getRange(row, map["Status"]).setValue("Approved");
+    var now = new Date();
+    var tz = Session.getScriptTimeZone();
+    var nowFmt = Utilities.formatDate(now, tz, "MM/dd/yyyy HH:mm:ss");
+    var itemId = getVal("Item ID");
+    try {
+      var itemFolderUrl = SH_getItemFolderUrl_(srcSs, itemId);
+      if (!itemFolderUrl) {
+        var invItem = SH_findInventoryItem_(srcSs, itemId);
+        if (invItem && invItem._hdr && invItem._raw) {
+          var pUrlCol = invItem._hdr["Photos URL"] || invItem._hdr["Shipment Photos URL"];
+          if (pUrlCol !== undefined) itemFolderUrl = String(invItem._raw[pUrlCol] || "").trim();
+        }
+        if (!itemFolderUrl) {
+          var photosId = String(SH_getSetting_(srcSs, "PHOTOS_FOLDER_ID") || "").trim();
+          var fallbackId = photosId || String(SH_getSetting_(srcSs, "DRIVE_PARENT_FOLDER_ID") || "").trim();
+          if (fallbackId) { try { itemFolderUrl = DriveApp.getFolderById(fallbackId).getUrl(); } catch (_) {} }
+        }
+      }
+      if (itemFolderUrl) {
+        var folderId = String(itemFolderUrl).match(/[-\w]{25,}/);
+        if (folderId) {
+          var parentFolder = DriveApp.getFolderById(folderId[0]);
+          var repFolderName = "REPAIR-" + repairId;
+          var existing = parentFolder.getFoldersByName(repFolderName);
+          var repairFolder = existing.hasNext() ? existing.next() : parentFolder.createFolder(repFolderName);
+          var repairFolderUrl = repairFolder.getUrl();
+          out.folderCreated = true;
+          try {
+            var ridVal = String(repSheet.getRange(row, idCol).getValue() || "");
+            var repRt = SpreadsheetApp.newRichTextValue().setText(ridVal).setLinkUrl(repairFolderUrl).build();
+            repSheet.getRange(row, idCol).setRichTextValue(repRt);
+          } catch (_) {}
+          try {
+            SH_generateRepairWorkOrderPdf_(srcSs, rowData, map, repairFolderUrl);
+            out.pdfGenerated = true;
+          } catch (pdfErr) {
+            Logger.log("SH_generateRepairWorkOrderPdf_ failed (non-fatal): " + pdfErr);
+          }
+        }
+      }
+    } catch (folderErr) { Logger.log("Approval folder/PDF failed (non-fatal): " + folderErr); }
+    if (map["Approval Processed At"]) repSheet.getRange(row, map["Approval Processed At"]).setValue(nowFmt);
+    out.success = true;
+  } catch (err) { out.error = String(err); }
+  return out;
+}
+
+/**
+ * Shared helper: update aggregated Task Notes on Inventory for an item.
+ * Builds multi-line text with hyperlinked Task IDs showing result + notes.
+ */
+function SH_updateInventoryTaskNotes_(ss, itemId) {
+  try {
+    if (!itemId) return;
+    var inv = ss.getSheetByName("Inventory");
+    if (!inv || inv.getLastRow() < 2) return;
+    var invMap = SH_headerMap_(inv);
+    var invTaskNotesCol = invMap["Task Notes"];
+    var invItemCol = invMap["Item ID"];
+    if (!invTaskNotesCol || !invItemCol) return;
+
+    var invRow = SH_findRowById_(inv, invItemCol, itemId);
+    if (invRow < 2) return;
+
+    var taskSheet = ss.getSheetByName("Tasks");
+    if (!taskSheet || taskSheet.getLastRow() < 2) return;
+    var tMap = SH_headerMap_(taskSheet);
+    var tItemCol = tMap["Item ID"];
+    var tIdCol = tMap["Task ID"];
+    var tResultCol = tMap["Result"];
+    var tNotesCol = tMap["Task Notes"];
+    var tStatusCol = tMap["Status"];
+    if (!tItemCol || !tIdCol) return;
+
+    var tData = taskSheet.getDataRange().getValues();
+    var lines = [];
+    var linkUrls = [];
+
+    for (var r = tData.length - 1; r >= 1; r--) {
+      if (String(tData[r][tItemCol - 1] || "").trim() !== String(itemId).trim()) continue;
+      var taskId = String(tData[r][tIdCol - 1] || "").trim();
+      if (!taskId) continue;
+      var result = tResultCol ? String(tData[r][tResultCol - 1] || "").trim() : "";
+      var status = tStatusCol ? String(tData[r][tStatusCol - 1] || "").trim() : "";
+      var notes = tNotesCol ? String(tData[r][tNotesCol - 1] || "").trim() : "";
+      var display = result || status || "Open";
+      var line = taskId + " (" + display + ")" + (notes ? ": " + notes : "");
+      var folderUrl = "";
+      try {
+        var rt = taskSheet.getRange(r + 1, tIdCol).getRichTextValue();
+        if (rt && rt.getLinkUrl()) folderUrl = rt.getLinkUrl();
+      } catch (_) {}
+
+      var startPos = 0;
+      if (lines.length > 0) startPos = lines.join("\n").length + 1;
+      lines.push(line);
+      linkUrls.push({ start: startPos, end: startPos + taskId.length, url: folderUrl });
+    }
+
+    if (lines.length === 0) {
+      inv.getRange(invRow, invTaskNotesCol).setValue("");
+      return;
+    }
+
+    var fullText = lines.join("\n");
+    var rtBuilder = SpreadsheetApp.newRichTextValue().setText(fullText);
+    for (var li = 0; li < linkUrls.length; li++) {
+      if (linkUrls[li].url) {
+        rtBuilder.setLinkUrl(linkUrls[li].start, linkUrls[li].end, linkUrls[li].url);
+      }
+    }
+    inv.getRange(invRow, invTaskNotesCol).setRichTextValue(rtBuilder.build());
+  } catch (err) {
+    Logger.log("SH_updateInventoryTaskNotes_ error: " + err);
+  }
+}
+
+/* === END SHARED HANDLERS v1.1.0 === */
+
+function TB_OnBoardEdit(e) {
+  try {
+    if (!e || !e.range) return;
+    var sh = e.range.getSheet();
+    var shName = sh.getName();
+
+    // Only act on Open_Tasks, Open_Repairs, or Open_Will_Calls
+    var isTask = (shName === TB_SH.OPEN_TASKS);
+    var isRepair = (shName === TB_SH.OPEN_REPAIRS);
+    var isWillCall = (shName === TB_SH.OPEN_WILL_CALLS);
+    if (!isTask && !isRepair && !isWillCall) return;
+
+    // Debug: log every edit event on these sheets
+    TB_log_("DEBUG", "TB_OnBoardEdit fired", shName, "row=" + e.range.getRow() + " col=" + e.range.getColumn(), "val=" + String(e.range.getValue()).substring(0, 50));
+
+    var editedRow = e.range.getRow();
+    var editedCol = e.range.getColumn();
+
+    // Ignore header row edits
+    if (editedRow < 2) return;
+
+    // Build 1-based header map for the board sheet
+    var boardHeaders = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
+    var boardMap = {};
+    for (var bi = 0; bi < boardHeaders.length; bi++) {
+      boardMap[String(boardHeaders[bi] || "").trim()] = bi + 1;
+    }
+
+    // Determine which column name was edited
+    var editedHeader = null;
+    for (var key in boardMap) {
+      if (boardMap[key] === editedCol) { editedHeader = key; break; }
+    }
+    if (!editedHeader) return;
+
+    // Block any system column edits (security: prevent redirect attacks)
+    if (editedHeader.indexOf("__") === 0) return;
+
+    // Check if this column is editable
+    var editableSet = isTask ? TB_TASK_EDITABLE : (isWillCall ? TB_WC_EDITABLE : TB_REPAIR_EDITABLE);
+    if (!editableSet[editedHeader]) return;
+
+    // Read system columns for this row to find the source
+    var ssIdCol = boardMap["__Client Spreadsheet ID"];
+    var srcSheetCol = boardMap["__Source Sheet"];
+
+    if (!ssIdCol || !srcSheetCol) {
+      TB_log_("WARN", "Push failed: missing system columns", shName, "", "");
+      return;
+    }
+
+    var rowData = sh.getRange(editedRow, 1, 1, sh.getLastColumn()).getValues()[0];
+    var srcSsId = String(rowData[ssIdCol - 1] || "").trim();
+    var srcSheetName = String(rowData[srcSheetCol - 1] || "").trim();
+
+    if (!srcSsId || !srcSheetName) {
+      TB_log_("WARN", "Push failed: missing spreadsheet ID or sheet name.",
+              shName, String(editedRow), "ssId=" + srcSsId + " sheet=" + srcSheetName);
+      return;
+    }
+
+    // Determine the unique ID column and value for finding the source row
+    // Tasks use "Task ID", Repairs use "Repair ID", Will Calls use "WC Number"
+    var idHeader = isTask ? "Task ID" : (isWillCall ? "WC Number" : "Repair ID");
+    var idBoardCol = boardMap[idHeader];
+    var idValue = "";
+    if (idBoardCol) {
+      // Use getDisplayValue to get the visible text even for HYPERLINK formulas
+      idValue = String(sh.getRange(editedRow, idBoardCol).getDisplayValue() || "").trim();
+      // Fallback: if display value is empty, try raw value and strip formula
+      if (!idValue) {
+        idValue = String(rowData[idBoardCol - 1] || "").trim();
+        if (idValue.indexOf("=HYPERLINK") === 0) {
+          var hMatch = idValue.match(/,"([^"]+)"\)/);
+          if (hMatch) idValue = hMatch[1];
+        }
+      }
+    }
+
+    if (!idValue) {
+      TB_log_("WARN", "Push failed: no " + idHeader + " found on board row.",
+              shName, String(editedRow), "idHeader=" + idHeader);
+      return;
+    }
+
+    // Open the source client spreadsheet and find the target cell
+    var srcSs;
+    try {
+      srcSs = SpreadsheetApp.openById(srcSsId);
+    } catch (err) {
+      TB_log_("ERROR", "Push failed: cannot open source", srcSsId, "", String(err));
+      return;
+    }
+
+    var srcSheet = srcSs.getSheetByName(srcSheetName);
+    if (!srcSheet) {
+      TB_log_("ERROR", "Push failed: sheet not found", srcSsId, srcSheetName, "");
+      return;
+    }
+
+    // Build 1-based header map for the source sheet
+    var srcHeaders = srcSheet.getRange(1, 1, 1, srcSheet.getLastColumn()).getValues()[0];
+    var srcMap = {};
+    for (var si = 0; si < srcHeaders.length; si++) {
+      srcMap[String(srcHeaders[si] || "").trim()] = si + 1;
+    }
+    var srcCol = srcMap[editedHeader];
+    if (!srcCol) {
+      TB_log_("WARN", "Push skipped: column missing on source", editedHeader, srcSheetName, "");
+      return;
+    }
+
+    // Find source row by unique ID (sort-safe — doesn't depend on row numbers)
+    var srcIdCol = srcMap[idHeader];
+    if (!srcIdCol) {
+      TB_log_("ERROR", "Push failed: " + idHeader + " column missing on source sheet", srcSheetName, "", "");
+      return;
+    }
+    var srcRow = -1;
+    var srcLastRow = srcSheet.getLastRow();
+    if (srcLastRow < 2) {
+      TB_log_("ERROR", "Push failed: source sheet " + srcSheetName + " has no data rows", "", "", "");
+      return;
+    }
+    var srcIdData = srcSheet.getRange(2, srcIdCol, srcLastRow - 1, 1).getValues();
+    for (var fi = 0; fi < srcIdData.length; fi++) {
+      if (String(srcIdData[fi][0] || "").trim() === idValue) {
+        srcRow = fi + 2; // 1-based, data starts at row 2
+        break;
+      }
+    }
+    if (srcRow < 2) {
+      TB_log_("ERROR", "Push failed: " + idHeader + " '" + idValue + "' not found on source " + srcSheetName,
+              shName, String(editedRow), "");
+      return;
+    }
+
+    // Write the new value to the source cell
+    var newValue = e.range.getValue();
+    srcSheet.getRange(srcRow, srcCol).setValue(newValue);
+
+    TB_log_("INFO", "Push OK", editedHeader, srcSheetName + "!" + srcRow, idHeader + "=" + idValue + " val=" + String(newValue).substring(0, 100));
+
+    // === v1.4.0: Shared handler calls (replaces legacy inline business logic) ===
+
+    // --- __Sync Status column helper ---
+    var syncStatusCol = boardMap["__Sync Status"];
+
+    // --- TASK: Start Task checkbox -> call startTask_ on source client sheet (v4.0.0) ---
+    if (isTask && editedHeader === "Start Task" && (newValue === true || String(newValue).toLowerCase() === "true")) {
+      if (syncStatusCol) { sh.getRange(editedRow, syncStatusCol).setValue("Processing"); SpreadsheetApp.flush(); }
+      TB_log_("INFO", "Calling startTask_ via TB", idValue, srcSheetName, "");
+      try {
+        var srcTasksSheet = srcSs.getSheetByName(srcSheetName);
+        if (!srcTasksSheet) throw new Error("Source Tasks sheet not found");
+        var srcTaskMap = {};
+        var srcTaskHeaders = srcTasksSheet.getRange(1, 1, 1, srcTasksSheet.getLastColumn()).getValues()[0];
+        for (var sti = 0; sti < srcTaskHeaders.length; sti++) {
+          var stk = String(srcTaskHeaders[sti] || "").trim();
+          if (stk) srcTaskMap[stk] = sti + 1;
+        }
+        // Find the task row on the source sheet by Task ID
+        var srcIdCol = srcTaskMap["Task ID"];
+        if (!srcIdCol) throw new Error("Source sheet missing Task ID column");
+        var srcLastRow = srcTasksSheet.getLastRow();
+        if (srcLastRow < 2) throw new Error("No data rows on source Tasks sheet");
+        var srcIds = srcTasksSheet.getRange(2, srcIdCol, srcLastRow - 1, 1).getValues().flat().map(String);
+        var srcRowIdx = -1;
+        for (var si = 0; si < srcIds.length; si++) {
+          if (srcIds[si].trim() === String(idValue).trim()) { srcRowIdx = si; break; }
+        }
+        if (srcRowIdx === -1) throw new Error("Task ID " + idValue + " not found on source sheet");
+        startTask_(srcSs, srcTasksSheet, srcRowIdx + 2, srcTaskMap);
+        // Update board: uncheck Start Task, set Started At
+        var boardStartCol = boardMap["Start Task"];
+        var boardStartedAtCol = boardMap["Started At"];
+        if (boardStartCol) sh.getRange(editedRow, boardStartCol).setValue(false);
+        if (boardStartedAtCol) sh.getRange(editedRow, boardStartedAtCol).setValue(new Date());
+        if (syncStatusCol) sh.getRange(editedRow, syncStatusCol).setValue("Synced");
+        TB_log_("INFO", "startTask_ OK via TB", idValue, srcSheetName, "");
+        SpreadsheetApp.getActive().toast("Task " + idValue + " started — folder + work order created.", "Task Board", 5);
+      } catch (startErr) {
+        if (syncStatusCol) sh.getRange(editedRow, syncStatusCol).setValue("Error");
+        TB_log_("ERROR", "startTask_ FAILED via TB", idValue, srcSheetName, String(startErr));
+        SpreadsheetApp.getActive().toast("Start Task error: " + (startErr.message || startErr), "Task Board", 10);
+      }
+      try { SpreadsheetApp.flush(); } catch(_) {}
+    }
+
+    // --- TASK: Result edited -> call shared handler ---
+    if (isTask && editedHeader === "Result" && newValue !== "" && newValue !== null) {
+      if (syncStatusCol) { sh.getRange(editedRow, syncStatusCol).setValue("Processing"); SpreadsheetApp.flush(); }
+      TB_log_("INFO", "Calling processTaskCompletionById_", idValue, srcSheetName, "Result=" + newValue);
+
+      var taskResult = processTaskCompletionById_(srcSs, idValue, String(newValue));
+
+      if (taskResult.success) {
+        // Update board row with completion state
+        var boardStatusCol2 = boardMap["Status"];
+        var boardCompCol2 = boardMap["Completed At"];
+        if (!taskResult.skipped) {
+          if (boardStatusCol2) sh.getRange(editedRow, boardStatusCol2).setValue("Completed");
+          if (boardCompCol2) sh.getRange(editedRow, boardCompCol2).setValue(new Date());
+        }
+        var taskExceptions = [taskResult.billingException, taskResult.emailException].filter(Boolean).join("; ");
+        var syncVal = (taskResult.billingException || taskResult.emailException) ? "Exception" : "Synced";
+        if (syncStatusCol) sh.getRange(editedRow, syncStatusCol).setValue(syncVal);
+        TB_log_("INFO", "Task completion OK", idValue, srcSheetName,
+          "billing=" + taskResult.billingCreated + " email=" + taskResult.emailSent +
+          " repair=" + taskResult.repairCreated + " exception=" + (taskExceptions || "none"));
+        SpreadsheetApp.getActive().toast("Task " + idValue + " completed." +
+          (taskResult.billingException ? " Billing Exception: " + taskResult.billingException : ""), "Task Board", 5);
+      } else {
+        if (syncStatusCol) sh.getRange(editedRow, syncStatusCol).setValue("Error");
+        TB_log_("ERROR", "Task completion FAILED", idValue, srcSheetName, taskResult.error);
+        SpreadsheetApp.getActive().toast("Error: " + taskResult.error, "Task Board", 10);
+      }
+      try { SpreadsheetApp.flush(); } catch(_) {}
+    }
+
+    // --- REPAIR: Quote Amount edited -> call shared handler ---
+    if (isRepair && editedHeader === "Quote Amount" && newValue !== "" && newValue !== null) {
+      if (syncStatusCol) { sh.getRange(editedRow, syncStatusCol).setValue("Processing"); SpreadsheetApp.flush(); }
+      TB_log_("INFO", "Calling processRepairQuoteById_", idValue, srcSheetName, "Quote=" + newValue);
+
+      var quoteResult = processRepairQuoteById_(srcSs, idValue, newValue);
+
+      if (quoteResult.success) {
+        // Update board status if changed
+        var boardStatusQ = boardMap["Status"];
+        var boardQSDCol = boardMap["Quote Sent Date"];
+        if (!quoteResult.skipped && boardStatusQ) {
+          var curBoardSt = String(sh.getRange(editedRow, boardStatusQ).getValue() || "").trim();
+          if (curBoardSt === "Pending Quote" || curBoardSt === "") sh.getRange(editedRow, boardStatusQ).setValue("Quote Sent");
+          if (boardQSDCol) sh.getRange(editedRow, boardQSDCol).setValue(new Date());
+        }
+        if (syncStatusCol) sh.getRange(editedRow, syncStatusCol).setValue("Synced");
+        TB_log_("INFO", "Quote send OK", idValue, srcSheetName, "email=" + quoteResult.emailSent);
+      } else {
+        if (syncStatusCol) sh.getRange(editedRow, syncStatusCol).setValue("Error");
+        TB_log_("ERROR", "Quote send FAILED", idValue, srcSheetName, quoteResult.error);
+        SpreadsheetApp.getActive().toast("Error: " + quoteResult.error, "Task Board", 10);
+      }
+      try { SpreadsheetApp.flush(); } catch(_) {}
+    }
+
+    // --- REPAIR: Approved dropdown (Approved / Declined) -> call shared handler ---
+    if (isRepair && editedHeader === "Approved") {
+      var approvedVal = String(newValue || "").trim();
+      if (approvedVal === "Approved") {
+        if (syncStatusCol) { sh.getRange(editedRow, syncStatusCol).setValue("Processing"); SpreadsheetApp.flush(); }
+        TB_log_("INFO", "Calling processRepairApprovalById_", idValue, srcSheetName, "");
+
+        var apprResult = processRepairApprovalById_(srcSs, idValue);
+
+        if (apprResult.success) {
+          var boardStatusA = boardMap["Status"];
+          if (!apprResult.skipped && boardStatusA) sh.getRange(editedRow, boardStatusA).setValue("Approved");
+          // Copy Repair ID hyperlink from source to board
+          try {
+            var srcRepIdCol = srcMap["Repair ID"];
+            var boardRepIdCol = boardMap["Repair ID"];
+            if (srcRepIdCol && boardRepIdCol) {
+              var srcRepRt = srcSheet.getRange(srcRow, srcRepIdCol).getRichTextValue();
+              if (srcRepRt && srcRepRt.getLinkUrl()) {
+                var bRepIdVal = String(sh.getRange(editedRow, boardRepIdCol).getValue() || "");
+                var bRepRt = SpreadsheetApp.newRichTextValue().setText(bRepIdVal).setLinkUrl(srcRepRt.getLinkUrl()).build();
+                sh.getRange(editedRow, boardRepIdCol).setRichTextValue(bRepRt);
+              }
+            }
+          } catch (_) {}
+          if (syncStatusCol) sh.getRange(editedRow, syncStatusCol).setValue("Synced");
+          TB_log_("INFO", "Approval OK", idValue, srcSheetName, "folder=" + apprResult.folderCreated + " pdf=" + apprResult.pdfGenerated);
+        } else {
+          if (syncStatusCol) sh.getRange(editedRow, syncStatusCol).setValue("Error");
+          TB_log_("ERROR", "Approval FAILED", idValue, srcSheetName, apprResult.error);
+          SpreadsheetApp.getActive().toast("Error: " + apprResult.error, "Task Board", 10);
+        }
+        try { SpreadsheetApp.flush(); } catch(_) {}
+      } else if (approvedVal === "Declined") {
+        if (syncStatusCol) { sh.getRange(editedRow, syncStatusCol).setValue("Processing"); SpreadsheetApp.flush(); }
+        TB_log_("INFO", "Calling processRepairDeclinedById_", idValue, srcSheetName, "");
+
+        var declResult = processRepairDeclinedById_(srcSs, idValue);
+
+        if (declResult.success) {
+          var boardStatusD = boardMap["Status"];
+          if (!declResult.skipped && boardStatusD) sh.getRange(editedRow, boardStatusD).setValue("Declined");
+          if (syncStatusCol) sh.getRange(editedRow, syncStatusCol).setValue("Synced");
+          TB_log_("INFO", "Declined OK", idValue, srcSheetName, "email=" + declResult.emailSent);
+        } else {
+          if (syncStatusCol) sh.getRange(editedRow, syncStatusCol).setValue("Error");
+          TB_log_("ERROR", "Declined FAILED", idValue, srcSheetName, declResult.error);
+          SpreadsheetApp.getActive().toast("Error: " + declResult.error, "Task Board", 10);
+        }
+        try { SpreadsheetApp.flush(); } catch(_) {}
+      }
+    }
+
+    // --- REPAIR: Repair Result -> call shared handler ---
+    if (isRepair && editedHeader === "Repair Result" && newValue !== "" && newValue !== null) {
+      if (syncStatusCol) { sh.getRange(editedRow, syncStatusCol).setValue("Processing"); SpreadsheetApp.flush(); }
+      TB_log_("INFO", "Calling processRepairCompletionById_", idValue, srcSheetName, "Result=" + newValue);
+
+      var repResult = processRepairCompletionById_(srcSs, idValue, String(newValue));
+
+      if (repResult.success) {
+        var boardStatusR = boardMap["Status"];
+        var boardCompR = boardMap["Completed Date"];
+        if (!repResult.skipped) {
+          if (boardStatusR) sh.getRange(editedRow, boardStatusR).setValue("Complete");
+          if (boardCompR) sh.getRange(editedRow, boardCompR).setValue(new Date());
+        }
+        var repExceptions = [repResult.billingException, repResult.emailException].filter(Boolean).join("; ");
+        var syncValR = (repResult.billingException || repResult.emailException) ? "Exception" : "Synced";
+        if (syncStatusCol) sh.getRange(editedRow, syncStatusCol).setValue(syncValR);
+        TB_log_("INFO", "Repair completion OK", idValue, srcSheetName,
+          "billing=" + repResult.billingCreated + " email=" + repResult.emailSent +
+          " exception=" + (repExceptions || "none"));
+        SpreadsheetApp.getActive().toast("Repair " + idValue + " completed." +
+          (repResult.billingException ? " Billing Exception: " + repResult.billingException : ""), "Task Board", 5);
+      } else {
+        if (syncStatusCol) sh.getRange(editedRow, syncStatusCol).setValue("Error");
+        TB_log_("ERROR", "Repair completion FAILED", idValue, srcSheetName, repResult.error);
+        SpreadsheetApp.getActive().toast("Error: " + repResult.error, "Task Board", 10);
+      }
+      try { SpreadsheetApp.flush(); } catch(_) {}
+    }
+
+    // --- WILL CALL: Keep existing logic (not in shared handler scope) ---
+    if (isWillCall && editedHeader === "Estimated Pickup Date" && newValue !== "" && newValue !== null) {
+      var wcStatusCol = srcMap["Status"];
+      if (wcStatusCol) {
+        var wcCurStatus = String(srcSheet.getRange(srcRow, wcStatusCol).getValue() || "").trim();
+        if (wcCurStatus === "Pending") {
+          srcSheet.getRange(srcRow, wcStatusCol).setValue("Scheduled");
+          TB_log_("INFO", "WC auto-scheduled (source)", "Status→Scheduled", srcSheetName + "!" + srcRow, "Est date set from TB");
+          var boardWcStatusCol = boardMap["Status"];
+          if (boardWcStatusCol) {
+            sh.getRange(editedRow, boardWcStatusCol).setValue("Scheduled");
+            TB_log_("INFO", "WC auto-scheduled (board)", "Status→Scheduled", shName + "!" + editedRow, "");
+          }
+        }
+      }
+      try { SpreadsheetApp.flush(); } catch(_) {}
+    }
+
+    if (isWillCall && editedHeader === "Status" && String(newValue || "").trim() === "Cancelled") {
+      // WC Cancellation email — preserved from legacy (not in shared handler scope)
+      try {
+        var wcSrcRowData = srcSheet.getRange(srcRow, 1, 1, srcSheet.getLastColumn()).getValues()[0];
+        var wcNumber = srcMap["WC Number"] ? String(wcSrcRowData[srcMap["WC Number"] - 1] || "").trim() : "";
+        var wcPickupParty = srcMap["Pickup Party"] ? String(wcSrcRowData[srcMap["Pickup Party"] - 1] || "").trim() : "";
+        var wcSettSh = srcSs.getSheetByName("Settings");
+        var wcNotifOn = false, wcClientEmail = "", wcClientName = "", wcMasterId = "", wcStaffEmails = "";
+        if (wcSettSh) {
+          var wcSD = wcSettSh.getDataRange().getValues();
+          for (var ws = 0; ws < wcSD.length; ws++) {
+            var wsk = String(wcSD[ws][0] || "").trim();
+            if (wsk === "ENABLE_NOTIFICATIONS") wcNotifOn = TB_truthy_(wcSD[ws][1]);
+            if (wsk === "CLIENT_EMAIL") wcClientEmail = String(wcSD[ws][1] || "").trim();
+            if (wsk === "CLIENT_NAME") wcClientName = String(wcSD[ws][1] || "").trim();
+            if (wsk === "MASTER_SPREADSHEET_ID") wcMasterId = String(wcSD[ws][1] || "").trim();
+            if (wsk === "NOTIFICATION_EMAILS") wcStaffEmails = String(wcSD[ws][1] || "").trim();
+          }
+        }
+        var wcAllEmails = [wcStaffEmails, wcClientEmail].filter(Boolean).join(",");
+        if (wcNotifOn && wcAllEmails && wcNumber) {
+          var wcItemsTable = "";
+          var wcItemsSh = srcSs.getSheetByName("WC_Items");
+          if (wcItemsSh) {
+            var wcItemsData = wcItemsSh.getDataRange().getValues();
+            var wcItemsHdr = {};
+            wcItemsData[0].forEach(function(h, i) { wcItemsHdr[String(h || "").trim()] = i; });
+            var wcItemsWcCol = wcItemsHdr["WC Number"];
+            if (wcItemsWcCol !== undefined) {
+              var matchedItems = [];
+              for (var wi = 1; wi < wcItemsData.length; wi++) {
+                if (String(wcItemsData[wi][wcItemsWcCol] || "").trim() === wcNumber) matchedItems.push(wcItemsData[wi]);
+              }
+              if (matchedItems.length > 0) {
+                var esc = function(v) { return String(v == null ? "" : v).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); };
+                wcItemsTable = '<table style="width:100%;border-collapse:collapse;margin:12px 0;"><tr style="background:#1E3A5F;color:#fff;"><th style="padding:8px;text-align:left;">Item ID</th><th style="padding:8px;text-align:left;">Description</th><th style="padding:8px;text-align:left;">Vendor</th><th style="padding:8px;text-align:left;">Location</th></tr>';
+                for (var mi = 0; mi < matchedItems.length; mi++) {
+                  var bg = mi % 2 === 0 ? "#F8FAFC" : "#FFFFFF";
+                  wcItemsTable += '<tr style="background:' + bg + ';"><td style="padding:6px 8px;border-bottom:1px solid #E2E8F0;">' + esc(matchedItems[mi][wcItemsHdr["Item ID"]]) + '</td><td style="padding:6px 8px;border-bottom:1px solid #E2E8F0;">' + esc(matchedItems[mi][wcItemsHdr["Description"]]) + '</td><td style="padding:6px 8px;border-bottom:1px solid #E2E8F0;">' + esc(matchedItems[mi][wcItemsHdr["Vendor"]]) + '</td><td style="padding:6px 8px;border-bottom:1px solid #E2E8F0;">' + esc(matchedItems[mi][wcItemsHdr["Location"]]) + '</td></tr>';
+                }
+                wcItemsTable += '</table>';
+              }
+            }
+          }
+          var wcSubj = "Will Call " + wcNumber + " — Cancelled — " + wcClientName;
+          var wcBody = "";
+          if (wcMasterId) {
+            try {
+              var wcMSS = SpreadsheetApp.openById(wcMasterId);
+              var wcTplSh = wcMSS.getSheetByName("Email_Templates");
+              if (wcTplSh && wcTplSh.getLastRow() >= 2) {
+                var wcTplData = wcTplSh.getDataRange().getValues();
+                var wcTplHdr = {}; wcTplData[0].forEach(function(h, i) { wcTplHdr[String(h || "").trim()] = i; });
+                var wcTplKeyCol = wcTplHdr["Template Key"] !== undefined ? wcTplHdr["Template Key"] : 0;
+                var wcTplSubjCol = wcTplHdr["Subject"] !== undefined ? wcTplHdr["Subject"] : 1;
+                var wcTplBodyCol = wcTplHdr["HTML Body"] !== undefined ? wcTplHdr["HTML Body"] : 2;
+                for (var wt = 1; wt < wcTplData.length; wt++) {
+                  if (String(wcTplData[wt][wcTplKeyCol] || "").trim() === "WILL_CALL_CANCELLED") {
+                    wcSubj = String(wcTplData[wt][wcTplSubjCol] || "").trim() || wcSubj;
+                    wcBody = String(wcTplData[wt][wcTplBodyCol] || "").trim(); break;
+                  }
+                }
+              }
+            } catch (wcTplErr) { TB_log_("WARN", "WC cancel template load failed", "", "", String(wcTplErr)); }
+          }
+          var wcTokens = { "{{WC_NUMBER}}": wcNumber, "{{CLIENT_NAME}}": wcClientName || "Client", "{{PICKUP_PARTY}}": wcPickupParty || "-", "{{ITEMS_TABLE}}": wcItemsTable || "<p>No items</p>" };
+          if (wcBody) { for (var wk in wcTokens) { wcSubj = wcSubj.split(wk).join(wcTokens[wk]); wcBody = wcBody.split(wk).join(wcTokens[wk]); } }
+          else { wcBody = '<p>Will Call <b>' + wcNumber + '</b> for <b>' + (wcClientName || "Client") + '</b> has been cancelled.</p><p>Pickup Party: ' + (wcPickupParty || "-") + '</p>' + wcItemsTable; }
+          GmailApp.sendEmail(wcAllEmails, wcSubj, "", { htmlBody: wcBody, from: "whse@stridenw.com" });
+          TB_log_("INFO", "WC cancellation email sent from TB", wcSubj, wcAllEmails, "");
+        }
+      } catch (wcEmailErr) { TB_log_("WARN", "WC cancellation email failed from TB", "", "", String(wcEmailErr)); }
+      try { SpreadsheetApp.flush(); } catch(_) {}
+    }
+
+  } catch (err) {
+    try {
+      TB_log_("ERROR", "TB_OnBoardEdit failed", "", "", String(err && err.stack ? err.stack : err));
+    } catch (e2) {}
+  }
+}
+
+/* ============================================================
+   SMART FILTER & SORT — v1.4.1
+   Same pattern as client inventory: rebuilds filter on full
+   range so new rows are always included.
+   ============================================================ */
+
+function TB_applySmartFilterSort_(sheet, filterSpec, sortSpec) {
+  if (!sheet) return;
+  var headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  var map = {};
+  for (var i = 0; i < headers.length; i++) {
+    var h = String(headers[i] || "").trim();
+    if (h) map[h] = i + 1;
+  }
+  var maxRows = sheet.getMaxRows();
+  var maxCols = sheet.getMaxColumns();
+
+  try { var f = sheet.getFilter(); if (f) f.remove(); } catch (_) {}
+
+  sheet.getRange(1, 1, maxRows, maxCols).createFilter();
+  var filter = sheet.getFilter();
+  if (!filter) return;
+
+  if (filterSpec) {
+    var filterKeys = Object.keys(filterSpec);
+    for (var fi = 0; fi < filterKeys.length; fi++) {
+      var colName = filterKeys[fi];
+      var col = map[colName];
+      if (!col) continue;
+      var spec = filterSpec[colName];
+      var crit;
+      if (spec.mode === "show") {
+        var colData = sheet.getRange(2, col, Math.max(sheet.getLastRow() - 1, 1), 1).getValues();
+        var allVals = {};
+        for (var cv = 0; cv < colData.length; cv++) {
+          var v = String(colData[cv][0] || "").trim();
+          if (v) allVals[v] = true;
+        }
+        var hidden = Object.keys(allVals).filter(function(v) { return spec.values.indexOf(v) === -1; });
+        if (hidden.length === 0) continue;
+        crit = SpreadsheetApp.newFilterCriteria().setHiddenValues(hidden).build();
+      } else {
+        crit = SpreadsheetApp.newFilterCriteria().setHiddenValues(spec).build();
+      }
+      filter.setColumnFilterCriteria(col, crit);
+    }
+  }
+
+  if (sortSpec && sortSpec.length > 0) {
+    var sortRange = sheet.getRange(2, 1, Math.max(sheet.getLastRow() - 1, 1), maxCols);
+    for (var si = 0; si < sortSpec.length; si++) {
+      var sortCol = map[sortSpec[si].column];
+      if (!sortCol) continue;
+      sortRange.sort({ column: sortCol, ascending: sortSpec[si].ascending !== false });
+    }
+  }
+}
+
+function TB_DefaultViewTasks() {
+  var ss = SpreadsheetApp.getActive();
+  var tasks = ss.getSheetByName(TB_SH.OPEN_TASKS);
+  if (!tasks) return;
+  TB_applySmartFilterSort_(tasks,
+    { "Status": { values: ["Open", "In Progress"], mode: "show" } },
+    [{ column: "Type", ascending: true }, { column: "Created", ascending: true }]
+  );
+}
+
+function TB_DefaultViewRepairs() {
+  var ss = SpreadsheetApp.getActive();
+  var repairs = ss.getSheetByName(TB_SH.OPEN_REPAIRS);
+  if (!repairs) return;
+  TB_applySmartFilterSort_(repairs,
+    { "Status": { values: ["Pending Quote", "Quote Sent", "Approved", "In Progress"], mode: "show" } },
+    [{ column: "Status", ascending: true }, { column: "Scheduled Date", ascending: true }]
+  );
+}
+
+function TB_ClearFilters() {
+  var ss = SpreadsheetApp.getActive();
+  var sheet = ss.getActiveSheet();
+  try { var filter = sheet.getFilter(); if (filter) filter.remove(); } catch (_) {}
+}

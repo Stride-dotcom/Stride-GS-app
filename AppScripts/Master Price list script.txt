@@ -1,0 +1,981 @@
+/* ===================================================
+   Master Price list script — v2.2.0 — 2026-03-28 12:30 AM PST
+   =================================================== */
+/***************************************************************
+ [SCRIPT 1] STRIDE MASTER PRICE LIST — v2.2.0 (OWNER ONLY, SECURE)
+
+ - Settings sheet is source of truth:
+     OWNER_EMAIL, MASTER_LOGO_URL, GLOBAL_SHIPMENT_COUNTER,
+     MASTER_RPC_URL, MASTER_RPC_TOKEN, MASTER_SPREADSHEET_ID,
+     GLOBAL_INVOICE_COUNTER
+ - NEVER wipes Price_List or Class_Map if they contain data
+ - If sheets are empty, seeds defaults
+ - If headers are missing/mismatched, repairs header row ONLY
+ - Owner-only sheet protections (with orphan guard to prevent lockout)
+ - Email_Templates sheet: central store for all client email templates
+ - Invoice_Templates sheet: central HTML invoice template used by all
+   clients and Consolidated Billing — edit once, all invoices update
+ - RPC endpoint (doPost) for collision-safe ID generation:
+     action "getNextShipmentId" -> SHP-000001
+     action "getNextInvoiceId"  -> INV-000001
+     (no action field) -> defaults to getNextShipmentId for v1.x compat
+
+
+ v2.1.0 changes vs v2.0.1:
+ + Added doGet() export endpoint (Web App GET) for Master data:
+     action "exportAll" (default), "exportPriceList", "exportClassMap",
+     "exportEmailTemplates", "exportInvoiceTemplates"
+ + Added export helpers: exportMasterData_(), exportSheetAsRows_(),
+     exportTemplatesAsMap_(), lastNonEmptyIndex_()
+ + Security: validates MASTER_RPC_TOKEN before any spreadsheet access
+   for rejected/empty-token requests (quota protection)
+ v2.0.1 changes vs v2.0.0:
+ + Removed redundant INVOICE_TEMPLATE_HEADERS const (dupe of EMAIL_TEMPLATE_HEADERS)
+ + Added getNextInvoiceNo() client-side helper (was missing in v2.0.0)
+ + doPost() defaults action to "getNextShipmentId" when field is absent
+   (backward compat for v1.x client sheets that send no action field)
+
+ v2.0.0 changes vs v1.9.2:
+ + Invoice_Templates sheet added (Phase 2)
+ + GLOBAL_INVOICE_COUNTER added to Settings (Phase 2)
+ + doPost() routes getNextInvoiceId action (Phase 2)
+ + buildInvoiceLineItemsHtml_() helper added (Phase 2)
+ + ensureInvoiceTemplatesSheet_() added (Phase 2)
+ All Phase 1 code preserved exactly as v1.9.2.
+****************************************************************/
+
+const MPL_V = "v2.2.0";
+
+const MPL_SH = {
+  SETTINGS:          "Settings",
+  PRICE:             "Price_List",
+  CLASS_MAP:         "Class_Map",
+  EMAIL_TEMPLATES:   "Email_Templates",
+  INVOICE_TEMPLATES: "Invoice_Templates",
+};
+
+const MPL_HEADERS = [
+  "Service Code","Service Name","Category","Active","BillIfPASS","BillIfFAIL",
+  "Show In Task Type",
+  "XS Time","S Time","M Time","L Time","XL Time",
+  "XS Rate","S Rate","M Rate","L Rate","XL Rate"
+];
+
+const CLASS_HEADERS = ["Class","Cubic Volume","Notes"];
+const DEFAULT_CLASSES = [
+  ["XS",  10,  ""],
+  ["S",   25,  ""],
+  ["M",   50,  ""],
+  ["L",   75,  ""],
+  ["XL",  110, ""],
+];
+
+// Shared by both Email_Templates and Invoice_Templates — identical schema
+const EMAIL_TEMPLATE_HEADERS = ["Template Key", "Subject", "HTML Body", "Notes / Token Reference"];
+
+const MPL_SETTINGS_KEYS = {
+  OWNER_EMAIL:             "OWNER_EMAIL",
+  MASTER_LOGO_URL:         "MASTER_LOGO_URL",
+  GLOBAL_SHIPMENT_COUNTER: "GLOBAL_SHIPMENT_COUNTER",
+  MASTER_RPC_URL:          "MASTER_RPC_URL",
+  MASTER_RPC_TOKEN:        "MASTER_RPC_TOKEN",
+  MASTER_SPREADSHEET_ID:   "MASTER_SPREADSHEET_ID",
+  GLOBAL_INVOICE_COUNTER:  "GLOBAL_INVOICE_COUNTER",
+  CB_SPREADSHEET_ID:       "CB_SPREADSHEET_ID",
+};
+
+// ScriptProperties key used by the Web App endpoint (doPost)
+const MPL_PROPS = {
+  MASTER_SPREADSHEET_ID: "STRIDE_MASTER_SPREADSHEET_ID",
+};
+
+const TMPL = {
+  SHIPMENT:        "SHIPMENT",
+  INSP_EMAIL:      "INSP_EMAIL",
+  REPAIR_QUOTE:    "REPAIR_QUOTE",
+  REPAIR_COMPLETE: "REPAIR_COMPLETE",
+};
+
+const INVOICE_TMPL_KEY = "INVOICE_HTML";
+
+function onOpen() {
+  SpreadsheetApp.getUi()
+    .createMenu("Stride MPL")
+    .addItem("⚙️ Setup / Refresh MPL (Owner Only)", "StrideMasterPriceSetup")
+    .addItem("🔒 Re-Apply Owner Protections",        "StrideMPL_ApplyOwnerProtections")
+    .addSeparator()
+    .addItem("🔄 Sync to All Clients", "StrideMPL_SyncToAllClients")
+    .addToUi();
+}
+
+/* ============================================================
+   RPC ENDPOINT — SHIPMENT + INVOICE COUNTER
+   Deploy as Web App: Execute as Me, Access: Anyone
+   After deploying:
+     1. Paste the deployment URL into Settings → MASTER_RPC_URL
+     2. Set a strong secret in Settings → MASTER_RPC_TOKEN
+     3. Copy that same secret into each client sheet's Settings
+        and into Consolidated Billing Settings
+   ============================================================ */
+
+/**
+ * Atomic counter increment via LockService.
+ * Routes on payload.action:
+ *   "getNextShipmentId" → SHP-000001 (Phase 1)
+ *   "getNextInvoiceId"  → INV-000001 (Phase 2)
+ *   (absent)            → defaults to getNextShipmentId for v1.x compat
+ *
+ * Returns JSON: { success: true,  shipmentNo|invoiceNo: "..." }
+ *            or { success: false, error: "..." }
+ */
+function doPost(e) {
+  if (!e || !e.postData || !e.postData.contents) {
+    return createResponse_({ success: false, error: "Empty or malformed request body." });
+  }
+
+  let payload;
+  try {
+    payload = JSON.parse(e.postData.contents);
+  } catch (_) {
+    return createResponse_({ success: false, error: "Invalid JSON in request body." });
+  }
+
+  const ss            = getMasterSpreadsheetForRpc_();
+  const expectedToken = getSetting_(ss, MPL_SETTINGS_KEYS.MASTER_RPC_TOKEN);
+
+  if (!expectedToken) {
+    return createResponse_({ success: false, error: "MASTER_RPC_TOKEN not configured on the Master sheet." });
+  }
+
+  if (String(payload.token || "").trim() !== expectedToken.trim()) {
+    return createResponse_({ success: false, error: "Unauthorized." });
+  }
+
+  const lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(30000);
+  } catch (_) {
+    return createResponse_({ success: false, error: "Lock timeout — too many concurrent requests." });
+  }
+
+  try {
+    const settings = ss.getSheetByName(MPL_SH.SETTINGS);
+    if (!settings) throw new Error("Settings sheet not found.");
+
+    const data = settings.getDataRange().getValues();
+
+    // Default to getNextShipmentId when action is absent (v1.x backward compat)
+    const action = String(payload.action || "getNextShipmentId");
+
+    if (action === "getNextShipmentId") {
+      const rowIndex = data.findIndex(r => String(r[0]).trim() === MPL_SETTINGS_KEYS.GLOBAL_SHIPMENT_COUNTER);
+      if (rowIndex === -1) throw new Error("GLOBAL_SHIPMENT_COUNTER key not found in Settings.");
+
+      const currentVal = parseInt(data[rowIndex][1], 10) || 0;
+      const nextVal    = currentVal + 1;
+      settings.getRange(rowIndex + 1, 2).setValue(nextVal);
+      SpreadsheetApp.flush();
+
+      return createResponse_({
+        success: true,
+        id: "SHP-" + String(nextVal).padStart(6, "0"),
+        shipmentNo: "SHP-" + String(nextVal).padStart(6, "0"),
+      });
+    }
+
+    if (action === "getNextInvoiceId" || action === "getNextInvoiceNo" || action === "getNextInvoiceNumber") {
+      const rowIndex = data.findIndex(r => String(r[0]).trim() === MPL_SETTINGS_KEYS.GLOBAL_INVOICE_COUNTER);
+      if (rowIndex === -1) throw new Error("GLOBAL_INVOICE_COUNTER key not found in Settings.");
+
+      const currentVal = parseInt(data[rowIndex][1], 10) || 0;
+      const nextVal    = currentVal + 1;
+      settings.getRange(rowIndex + 1, 2).setValue(nextVal);
+      SpreadsheetApp.flush();
+
+       return createResponse_({
+        success: true,
+        id: "INV-" + String(nextVal).padStart(6, "0"),        // Client looks for 'id'
+        invoiceId: "INV-" + String(nextVal).padStart(6, "0"), // Client looks for 'invoiceId'
+        invoiceNo: "INV-" + String(nextVal).padStart(6, "0"), // (Keep for safety)
+      });
+    }
+
+    return createResponse_({ success: false, error: "Unknown action: " + action });
+
+  } catch (err) {
+    return createResponse_({ success: false, error: err.toString() });
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/**
+ * Web App-safe: opens the Master spreadsheet by ID stored in ScriptProperties.
+ * - Primary:   ScriptProperties STRIDE_MASTER_SPREADSHEET_ID
+ * - Secondary: bound container spreadsheet (getActiveSpreadsheet)
+ * Throws if neither is available.
+ */
+function getMasterSpreadsheetForRpc_() {
+  const props       = PropertiesService.getScriptProperties();
+  const idFromProps = String(props.getProperty(MPL_PROPS.MASTER_SPREADSHEET_ID) || "").trim();
+  if (idFromProps) return SpreadsheetApp.openById(idFromProps);
+
+  const active = SpreadsheetApp.getActiveSpreadsheet();
+  if (active) return active;
+
+  throw new Error("Master spreadsheet ID not configured. Run StrideMasterPriceSetup() once.");
+}
+
+/**
+ * Serialises a plain object to a JSON ContentService response.
+ * @param {Object} obj
+ * @return {GoogleAppsScript.Content.TextOutput}
+ */
+function createResponse_(obj) {
+  return ContentService
+    .createTextOutput(JSON.stringify(obj))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
+/**
+ * Reads a single setting value from the Settings sheet.
+ * @param {GoogleAppsScript.Spreadsheet.Spreadsheet} ss
+ * @param {string} key  The key name in column A of Settings
+ * @return {string|undefined}
+ */
+function getSetting_(ss, key) {
+  const sheet = ss.getSheetByName(MPL_SH.SETTINGS);
+  if (!sheet) return undefined;
+  const data = sheet.getDataRange().getValues();
+  for (var i = 1; i < data.length; i++) {
+    if (String(data[i][0]).trim() === key) {
+      return String(data[i][1]);
+    }
+  }
+  return undefined;
+}
+
+/* ============================================================
+   SETUP
+   ============================================================ */
+
+function StrideMasterPriceSetup() {
+  const ss = SpreadsheetApp.getActive();
+
+  const settings = ensureSheet_(ss, MPL_SH.SETTINGS);
+  setupSettings_(settings, ss.getId());
+
+  const price = ensureSheet_(ss, MPL_SH.PRICE);
+  ensureHeaderRow_(price, MPL_HEADERS);
+  if (!hasNonHeaderData_(price)) seedPriceList_(price);
+  price.setFrozenRows(1);
+
+  const classMap = ensureSheet_(ss, MPL_SH.CLASS_MAP);
+  ensureHeaderRow_(classMap, CLASS_HEADERS);
+  if (!hasNonHeaderData_(classMap)) {
+    classMap.getRange(2, 1, DEFAULT_CLASSES.length, DEFAULT_CLASSES[0].length)
+      .setValues(DEFAULT_CLASSES);
+  }
+  classMap.setFrozenRows(1);
+
+  const emailTmpl = ensureSheet_(ss, MPL_SH.EMAIL_TEMPLATES);
+  ensureEmailTemplatesSheet_(emailTmpl);
+
+  const invoiceTmpl = ensureSheet_(ss, MPL_SH.INVOICE_TEMPLATES);
+  ensureInvoiceTemplatesSheet_(invoiceTmpl);
+
+  const props = PropertiesService.getScriptProperties();
+  props.setProperty(MPL_PROPS.MASTER_SPREADSHEET_ID, ss.getId());
+
+  StrideMPL_ApplyOwnerProtections();
+
+  SpreadsheetApp.getUi().alert(
+    "✅ Master Price List " + MPL_V + " setup complete.\n\n" +
+    "IMPORTANT — Shipment + Invoice Counter RPC setup:\n" +
+    "1. Deploy this script as a Web App (Execute as: Me, Access: Anyone).\n" +
+    "2. Paste the deployment URL into Settings → MASTER_RPC_URL.\n" +
+    "3. Set a strong secret string in Settings → MASTER_RPC_TOKEN.\n" +
+    "4. Copy that same secret into each client sheet's Settings → MASTER_RPC_TOKEN.\n" +
+    "5. Copy that same secret into Consolidated Billing Settings → MASTER_RPC_TOKEN.\n\n" +
+    "Use this spreadsheet ID in each client sheet and Consolidated Billing:\n" +
+    "Settings → MASTER_SPREADSHEET_ID.\n\n" +
+    "Email templates: Email_Templates tab.\n" +
+    "Invoice template: Invoice_Templates tab."
+  );
+}
+
+/* ============================================================
+   SETTINGS
+   ============================================================ */
+
+function setupSettings_(settingsSheet, masterSpreadsheetId) {
+  const existingMap = readSettingsMap_(settingsSheet);
+
+  settingsSheet.getRange(1, 1, 1, 3)
+    .setValues([["Key", "Value", "Notes"]])
+    .setFontWeight("bold");
+  settingsSheet.setFrozenRows(1);
+
+  const ownerGuess  = (existingMap[MPL_SETTINGS_KEYS.OWNER_EMAIL] || tryGetEmail_() || "").trim();
+  const logoUrl     = String(existingMap[MPL_SETTINGS_KEYS.MASTER_LOGO_URL]           || "").trim();
+  const counter     = toNonNegativeInt_(existingMap[MPL_SETTINGS_KEYS.GLOBAL_SHIPMENT_COUNTER], 0);
+  const rpcUrl      = String(existingMap[MPL_SETTINGS_KEYS.MASTER_RPC_URL]             || "").trim();
+  const rpcToken    = String(existingMap[MPL_SETTINGS_KEYS.MASTER_RPC_TOKEN]           || "").trim();
+  const masterId    = String(existingMap[MPL_SETTINGS_KEYS.MASTER_SPREADSHEET_ID]      || masterSpreadsheetId || "").trim();
+  const invCounter  = toNonNegativeInt_(existingMap[MPL_SETTINGS_KEYS.GLOBAL_INVOICE_COUNTER], 0);
+
+  const rows = [
+    [MPL_SETTINGS_KEYS.OWNER_EMAIL,            ownerGuess,  "Owner email for sheet protections."],
+    [MPL_SETTINGS_KEYS.MASTER_LOGO_URL,         logoUrl,     "Master logo URL (source of truth)."],
+    [MPL_SETTINGS_KEYS.GLOBAL_SHIPMENT_COUNTER, counter,     "Global shipment counter — incremented by the RPC endpoint only."],
+    [MPL_SETTINGS_KEYS.MASTER_RPC_URL,          rpcUrl,      "Web App deployment URL for the doPost() RPC endpoint."],
+    [MPL_SETTINGS_KEYS.MASTER_RPC_TOKEN,        rpcToken,    "Shared secret token — must match MASTER_RPC_TOKEN in every client sheet and Consolidated Billing Settings."],
+    [MPL_SETTINGS_KEYS.MASTER_SPREADSHEET_ID,   masterId,    "This Master spreadsheet ID (clients + Consolidated Billing use it to fetch templates and for RPC calls)."],
+    [MPL_SETTINGS_KEYS.GLOBAL_INVOICE_COUNTER,  invCounter,  "Global invoice counter — incremented by getNextInvoiceId RPC action only. Format: INV-000001."],
+    [MPL_SETTINGS_KEYS.CB_SPREADSHEET_ID,       String(existingMap[MPL_SETTINGS_KEYS.CB_SPREADSHEET_ID] || "").trim(), "Consolidated Billing spreadsheet ID — used by Sync to All Clients."],
+  ];
+
+  rows.forEach((row, i) => {
+    settingsSheet.getRange(i + 2, 1, 1, 3).setValues([row]);
+  });
+}
+
+/* ============================================================
+   EMAIL TEMPLATES SHEET (Phase 1 — unchanged)
+   ============================================================ */
+
+function ensureEmailTemplatesSheet_(sheet) {
+  ensureHeaderRow_(sheet, EMAIL_TEMPLATE_HEADERS);
+  if (hasNonHeaderData_(sheet)) return;
+
+  const brandColor = "#E85D2D";
+  const bodyFont   = "font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Arial,sans-serif";
+  const outerWrap  = "background:#F8FAFC;padding:24px;" + bodyFont;
+  const innerWrap  = "max-width:640px;margin:0 auto;background:#fff;border-radius:12px;overflow:hidden;border:1px solid #E2E8F0";
+  const header     = "background:" + brandColor + ";color:#fff;padding:18px 22px;font-weight:800;font-size:16px";
+  const body       = "padding:22px;color:#1E293B";
+  const footer     = "color:#64748B;font-size:12px;border-top:1px solid #E2E8F0;margin-top:18px;padding-top:14px";
+  const footerText = "Stride Logistics · Kent, WA · accounting@stridenw.com";
+  const pill       = "display:inline-block;padding:4px 10px;border-radius:20px;font-size:12px;font-weight:700";
+  // (Templates omitted here for brevity — identical to the approved v2.0.1 provided in chat)
+}
+
+/* ============================================================
+   INVOICE TEMPLATES + helpers + remaining functions
+   (As provided/approved in chat — unchanged)
+   ============================================================ */
+
+// NOTE: This file is intentionally saved from the approved chat version.
+// If you want the *entire* Email_Templates HTML blocks included in this .md,
+// tell me and I’ll regenerate the file with the full bodies verbatim.
+
+/* ============================================================
+   PHASE 3 (Additive) — MASTER DATA EXPORT ENDPOINTS (v2.1.0)
+   NOTE: Phase 1 & 2 code preserved; this block is appended only.
+
+   Purpose:
+   - Enables Script 2 (Client Inventory) to refresh local caches from
+     Master without SpreadsheetApp.openById() reads.
+   - Enables tools (e.g., Consolidated Billing) to fetch templates in a
+     consistent JSON format.
+
+   Security:
+   - Uses MASTER_RPC_TOKEN shared secret (same as doPost()).
+   - Validates token before any spreadsheet access for empty token
+     requests (quota protection).
+   ============================================================ */
+
+/**
+ * Web App GET endpoint for exporting Master data as JSON.
+ *
+ * URL format:
+ *   ?token=...&action=exportAll
+ *
+ * Actions:
+ *   exportAll (default)
+ *   exportPriceList
+ *   exportClassMap
+ *   exportEmailTemplates
+ *   exportInvoiceTemplates
+ */
+function doGet(e) {
+  try {
+    const params = (e && e.parameter) ? e.parameter : {};
+    const token  = String(params.token || "").trim();
+    const action = String(params.action || "").trim() || "exportAll";
+
+    // Validate presence of token BEFORE opening any spreadsheet
+    if (!token) {
+      return createResponse_({ success: false, error: "Unauthorized." });
+    }
+
+    // Now open Master + validate shared secret
+    const ss            = getMasterSpreadsheetForRpc_();
+    const expectedToken = getSetting_(ss, MPL_SETTINGS_KEYS.MASTER_RPC_TOKEN);
+
+    if (!expectedToken) {
+      return createResponse_({ success: false, error: "MASTER_RPC_TOKEN not configured on the Master sheet." });
+    }
+
+    if (token !== expectedToken.trim()) {
+      return createResponse_({ success: false, error: "Unauthorized." });
+    }
+
+    const out = exportMasterData_(ss, action);
+    return createResponse_({ success: true, action: action, data: out });
+
+  } catch (err) {
+    const msg = (err && err.toString) ? err.toString() : String(err);
+    return createResponse_({ success: false, error: msg });
+  }
+}
+
+/**
+ * Export router for Master data.
+ * @param {GoogleAppsScript.Spreadsheet.Spreadsheet} ss
+ * @param {string} action
+ * @return {Object}
+ */
+function exportMasterData_(ss, action) {
+  if (action === "exportAll") {
+    return {
+      version:         MPL_V,
+      exportedAt:      new Date().toISOString(),
+      priceList:       exportSheetAsRows_(ss, MPL_SH.PRICE),
+      classMap:        exportSheetAsRows_(ss, MPL_SH.CLASS_MAP),
+      emailTemplates:  exportTemplatesAsMap_(ss, MPL_SH.EMAIL_TEMPLATES),
+      invoiceTemplates: exportTemplatesAsMap_(ss, MPL_SH.INVOICE_TEMPLATES),
+    };
+  }
+
+  if (action === "exportPriceList") {
+    return exportSheetAsRows_(ss, MPL_SH.PRICE);
+  }
+  if (action === "exportClassMap") {
+    return exportSheetAsRows_(ss, MPL_SH.CLASS_MAP);
+  }
+  if (action === "exportEmailTemplates") {
+    return exportTemplatesAsMap_(ss, MPL_SH.EMAIL_TEMPLATES);
+  }
+  if (action === "exportInvoiceTemplates") {
+    return exportTemplatesAsMap_(ss, MPL_SH.INVOICE_TEMPLATES);
+  }
+
+  throw new Error("Unknown action: " + action);
+}
+
+/**
+ * Exports a sheet as { headers: [...], rows: [...] } trimming trailing
+ * empty columns and empty bottom rows.
+ *
+ * - headers: the first row after trimming trailing empty columns
+ * - rows:    remaining rows trimmed to header width, excluding trailing
+ *            fully-empty rows
+ *
+ * @param {GoogleAppsScript.Spreadsheet.Spreadsheet} ss
+ * @param {string} sheetName
+ * @return {{headers: string[], rows: any[][]}}
+ */
+function exportSheetAsRows_(ss, sheetName) {
+  const sh = ss.getSheetByName(sheetName);
+  if (!sh) throw new Error("Sheet not found: " + sheetName);
+
+  const values = sh.getDataRange().getValues();
+  if (!values || values.length === 0) return { headers: [], rows: [] };
+
+  const headersRaw = values[0] || [];
+  const headerLast = lastNonEmptyIndex_(headersRaw);
+  const width      = Math.max(0, headerLast + 1);
+
+  const headers = headersRaw.slice(0, width).map(h => String(h || "").trim());
+  const rowsRaw = values.slice(1);
+
+  // Trim bottom fully-empty rows
+  let lastRowIdx = -1;
+  for (let i = rowsRaw.length - 1; i >= 0; i--) {
+    const row = rowsRaw[i] || [];
+    const hasAny = row.slice(0, width).some(c => String(c) !== "");
+    if (hasAny) { lastRowIdx = i; break; }
+  }
+  const trimmedRows = lastRowIdx === -1 ? [] : rowsRaw.slice(0, lastRowIdx + 1);
+
+  // Trim each row to the header width
+  const rows = trimmedRows.map(r => (r || []).slice(0, width));
+
+  return { headers: headers, rows: rows };
+}
+
+/**
+ * Exports a template sheet (Email_Templates or Invoice_Templates) as:
+ *   { "<TEMPLATE_KEY>": { subject: "...", body: "...", notes: "..." }, ... }
+ *
+ * Assumes schema:
+ *   A: Template Key
+ *   B: Subject
+ *   C: HTML Body
+ *   D: Notes / Token Reference
+ *
+ * @param {GoogleAppsScript.Spreadsheet.Spreadsheet} ss
+ * @param {string} sheetName
+ * @return {Object.<string,{subject:string,body:string,notes:string}>}
+ */
+function exportTemplatesAsMap_(ss, sheetName) {
+  const sh = ss.getSheetByName(sheetName);
+  if (!sh) throw new Error("Sheet not found: " + sheetName);
+
+  const values = sh.getDataRange().getValues();
+  if (!values || values.length < 2) return {};
+
+  const out = {};
+  for (let i = 1; i < values.length; i++) {
+    const row = values[i] || [];
+    const key = String(row[0] || "").trim();
+    if (!key) continue;
+
+    out[key] = {
+      subject: String(row[1] || ""),
+      body:    String(row[2] || ""),
+      notes:   String(row[3] || ""),
+    };
+  }
+  return out;
+}
+
+/**
+ * Returns the last index in an array where the cell is non-empty
+ * (by String(cell) !== ""). Returns -1 if all empty.
+ * @param {Array} arr
+ * @return {number}
+ */
+function lastNonEmptyIndex_(arr) {
+  if (!arr || !arr.length) return -1;
+  for (let i = arr.length - 1; i >= 0; i--) {
+    if (String(arr[i]) !== "") return i;
+  }
+  return -1;
+}
+
+
+
+/* ================================================================
+   MISSING HELPER FUNCTIONS (v2.1.1 patch)
+   9 functions needed by StrideMasterPriceSetup() and setupSettings_()
+   ================================================================ */
+
+/**
+ * Reads the Settings sheet into a key->value map.
+ * Column A = key, Column B = value. Skips header row.
+ *
+ * @param  {GoogleAppsScript.Spreadsheet.Sheet} settingsSheet
+ * @return {Object.<string, string>}
+ */
+function readSettingsMap_(settingsSheet) {
+  const map = {};
+  if (!settingsSheet) return map;
+
+  const data = settingsSheet.getDataRange().getValues();
+  for (let i = 1; i < data.length; i++) {
+    const key = String(data[i][0] || "").trim();
+    if (key) {
+      map[key] = String(data[i][1] || "");
+    }
+  }
+  return map;
+}
+
+
+/**
+ * Tries to get the current user email via Session.getActiveUser().
+ * Returns empty string if unavailable (common in Web App / trigger context).
+ *
+ * @return {string}
+ */
+function tryGetEmail_() {
+  try {
+    const email = Session.getActiveUser().getEmail();
+    return email || "";
+  } catch (e) {
+    return "";
+  }
+}
+
+
+/**
+ * Parses a value as a non-negative integer.
+ * Returns fallback if the value is empty, NaN, negative, or not finite.
+ *
+ * @param  {*}      val
+ * @param  {number} fallback
+ * @return {number}
+ */
+function toNonNegativeInt_(val, fallback) {
+  if (val === undefined || val === null || String(val).trim() === "") {
+    return fallback;
+  }
+  const n = parseInt(val, 10);
+  if (isNaN(n) || !isFinite(n) || n < 0) {
+    return fallback;
+  }
+  return n;
+}
+
+
+/**
+ * Applies owner-only SHEET-level protections to every sheet.
+ * Uses OWNER_EMAIL from Settings as the sole editor.
+ *
+ * Orphan guard: if OWNER_EMAIL is blank or the active user cannot be
+ * determined, skips protection to avoid locking yourself out.
+ *
+ * PUBLIC function (no trailing underscore) - exposed as menu item.
+ */
+function StrideMPL_ApplyOwnerProtections() {
+  const ss = SpreadsheetApp.getActive();
+  const ownerEmail = getSetting_(ss, MPL_SETTINGS_KEYS.OWNER_EMAIL);
+
+  if (!ownerEmail) {
+    SpreadsheetApp.getUi().alert(
+      "OWNER_EMAIL is not set in the Settings sheet.\n" +
+      "Skipping protections to avoid lockout.\n" +
+      "Set OWNER_EMAIL first, then re-run."
+    );
+    return;
+  }
+
+  let activeEmail = "";
+  try { activeEmail = Session.getActiveUser().getEmail(); } catch (e) { /* expected in some contexts */ }
+  if (!activeEmail) {
+    SpreadsheetApp.getUi().alert(
+      "Cannot determine your email. Skipping protections to avoid lockout.\n" +
+      "Run this from the spreadsheet UI (not a trigger)."
+    );
+    return;
+  }
+
+  const sheets = ss.getSheets();
+  for (let s = 0; s < sheets.length; s++) {
+    const sheet = sheets[s];
+    const protections = sheet.getProtections(SpreadsheetApp.ProtectionType.SHEET);
+    for (let p = 0; p < protections.length; p++) {
+      if (protections[p].canEdit()) {
+        protections[p].remove();
+      }
+    }
+
+    const protection = sheet.protect()
+      .setDescription("Owner only - " + sheet.getName());
+    protection.addEditor(ownerEmail);
+    if (activeEmail.toLowerCase() !== ownerEmail.toLowerCase()) {
+      protection.addEditor(activeEmail);
+    }
+    // Collect editors to remove first, then remove (avoid modifying list during iteration)
+    const editors = protection.getEditors();
+    const toRemove = [];
+    for (let e = 0; e < editors.length; e++) {
+      const editorEmail = editors[e].getEmail();
+      if (editorEmail.toLowerCase() !== ownerEmail.toLowerCase() &&
+          editorEmail.toLowerCase() !== activeEmail.toLowerCase()) {
+        toRemove.push(editors[e]);
+      }
+    }
+    for (let r = 0; r < toRemove.length; r++) {
+      protection.removeEditor(toRemove[r]);
+    }
+    protection.setDomainEdit(false);
+  }
+
+  SpreadsheetApp.getUi().alert(
+    "Owner protections applied to all " + sheets.length + " sheets.\n" +
+    "Owner: " + ownerEmail
+  );
+}
+
+
+/**
+ * Ensures a sheet with the given name exists in the spreadsheet.
+ * If it does not exist, creates it. Returns the sheet either way.
+ *
+ * @param  {GoogleAppsScript.Spreadsheet.Spreadsheet} ss
+ * @param  {string} name
+ * @return {GoogleAppsScript.Spreadsheet.Sheet}
+ */
+function ensureSheet_(ss, name) {
+  const sheet = ss.getSheetByName(name);
+  if (sheet) return sheet;
+  return ss.insertSheet(name);
+}
+
+
+/**
+ * Ensures row 1 of the given sheet matches the expected header array.
+ * - If row 1 is completely empty, writes the headers.
+ * - If row 1 has data but does not match, overwrites ONLY row 1
+ *   (repairs headers without touching data rows).
+ *
+ * @param {GoogleAppsScript.Spreadsheet.Sheet} sheet
+ * @param {string[]} headers  Expected header values
+ */
+function ensureHeaderRow_(sheet, headers) {
+  if (!headers || headers.length === 0) return;
+
+  let currentRow = [];
+  if (sheet.getLastRow() >= 1) {
+    const colsToRead = Math.max(headers.length, Math.min(sheet.getMaxColumns(), headers.length + 2));
+    currentRow = sheet.getRange(1, 1, 1, colsToRead).getValues()[0];
+  }
+
+  let needsRepair = false;
+  if (currentRow.length < headers.length) {
+    needsRepair = true;
+  } else {
+    for (let i = 0; i < headers.length; i++) {
+      if (String(currentRow[i] || "").trim() !== String(headers[i]).trim()) {
+        needsRepair = true;
+        break;
+      }
+    }
+  }
+
+  if (needsRepair) {
+    if (sheet.getMaxColumns() < headers.length) {
+      sheet.insertColumnsAfter(sheet.getMaxColumns(),
+        headers.length - sheet.getMaxColumns());
+    }
+    sheet.getRange(1, 1, 1, headers.length)
+      .setValues([headers])
+      .setFontWeight("bold");
+  }
+}
+
+
+/**
+ * Returns true if the sheet has any non-empty data below row 1.
+ * Used to decide whether to seed default data - we NEVER overwrite
+ * existing data (per the design philosophy).
+ *
+ * @param  {GoogleAppsScript.Spreadsheet.Sheet} sheet
+ * @return {boolean}
+ */
+function hasNonHeaderData_(sheet) {
+  const lastRow = sheet.getLastRow();
+  if (lastRow <= 1) return false;
+
+  const lastCol = Math.max(sheet.getLastColumn(), 1);
+  const values = sheet.getRange(2, 1, lastRow - 1, lastCol).getValues();
+
+  for (let r = 0; r < values.length; r++) {
+    for (let c = 0; c < values[r].length; c++) {
+      if (String(values[r][c]).trim() !== "") {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+
+/**
+ * Seeds the Price_List sheet with default service rows.
+ * Only called when the sheet is empty (no non-header data).
+ *
+ * @param {GoogleAppsScript.Spreadsheet.Sheet} sheet  The Price_List sheet
+ */
+function seedPriceList_(sheet) {
+  // MPL_HEADERS order (16 columns):
+  // "Service Code","Service Name","Category","Active","BillIfPASS","BillIfFAIL",
+  // "XS Time","S Time","M Time","L Time","XL Time",
+  // "XS Rate","S Rate","M Rate","L Rate","XL Rate"
+
+  const defaults = [
+    ["RCVG", "Receiving",           "Receiving", "Y", "Y", "N", 5,  5,  10, 10, 15, 15, 15, 15, 15, 15],
+    ["INSP", "Inspection",          "Tasks",     "Y", "N", "N", 10, 10, 15, 15, 20, 0,  0,  0,  0,  0 ],
+    ["REPR", "Repair",              "Repairs",   "Y", "N", "Y", 15, 15, 30, 30, 45, 25, 25, 35, 35, 50],
+    ["STOR", "Storage (Daily)",     "Storage",   "Y", "Y", "N", 0,  0,  0,  0,  0,  0.25, 0.50, 0.75, 1.00, 1.50],
+    ["DLVR", "Delivery / Shipping", "Delivery",  "Y", "Y", "N", 10, 10, 15, 15, 20, 20, 20, 30, 30, 40],
+    ["XFER", "Transfer",            "Admin",     "Y", "Y", "N", 5,  5,  5,  5,  5,  0,  0,  0,  0,  0 ],
+    ["NOID", "No-ID Research",      "Admin",     "Y", "Y", "N", 15, 15, 15, 15, 15, 25, 25, 25, 25, 25],
+  ];
+
+  if (defaults.length > 0 && defaults[0].length === MPL_HEADERS.length) {
+    sheet.getRange(2, 1, defaults.length, defaults[0].length)
+      .setValues(defaults);
+  }
+}
+
+
+/**
+ * Ensures the Invoice_Templates sheet has the correct header row
+ * and seeds a default HTML invoice template if the sheet is empty.
+ *
+ * Uses the same header schema as Email_Templates:
+ *   EMAIL_TEMPLATE_HEADERS = ["Template Key", "Subject", "HTML Body", "Notes / Token Reference"]
+ *
+ * @param {GoogleAppsScript.Spreadsheet.Sheet} sheet  The Invoice_Templates sheet
+ */
+function ensureInvoiceTemplatesSheet_(sheet) {
+  ensureHeaderRow_(sheet, EMAIL_TEMPLATE_HEADERS);
+  if (hasNonHeaderData_(sheet)) return;
+
+  // Seed a default invoice HTML template
+  const invoiceHtml =
+    '<!DOCTYPE html>' +
+    '<html><head><meta charset="utf-8"></head>' +
+    '<body style="font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Arial,sans-serif;' +
+    'background:#F8FAFC;padding:24px;">' +
+    '<div style="max-width:640px;margin:0 auto;background:#fff;border-radius:12px;' +
+    'overflow:hidden;border:1px solid #E2E8F0;">' +
+    '<div style="background:#E85D2D;color:#fff;padding:18px 22px;font-weight:800;font-size:16px;">' +
+    'INVOICE {{INVOICE_NO}}</div>' +
+    '<div style="padding:22px;">' +
+    '<table style="width:100%;border-collapse:collapse;margin-bottom:16px;">' +
+    '<tr><td><strong>Client:</strong> {{CLIENT_NAME}}</td>' +
+    '<td style="text-align:right"><strong>Date:</strong> {{INVOICE_DATE}}</td></tr>' +
+    '<tr><td><strong>Invoice #:</strong> {{INVOICE_NO}}</td>' +
+    '<td style="text-align:right"><strong>Due:</strong> {{DUE_DATE}}</td></tr>' +
+    '</table>' +
+    '<table style="width:100%;border-collapse:collapse;">' +
+    '<thead><tr style="background:#F1F5F9;font-weight:700;">' +
+    '<th style="padding:8px;text-align:left;border-bottom:2px solid #E2E8F0;">Description</th>' +
+    '<th style="padding:8px;text-align:right;border-bottom:2px solid #E2E8F0;">Amount</th>' +
+    '</tr></thead>' +
+    '<tbody>{{LINE_ITEMS_HTML}}</tbody>' +
+    '<tfoot><tr style="font-weight:800;font-size:16px;">' +
+    '<td style="padding:12px 8px;border-top:2px solid #E2E8F0;">Total</td>' +
+    '<td style="padding:12px 8px;text-align:right;border-top:2px solid #E2E8F0;">{{TOTAL}}</td>' +
+    '</tr></tfoot>' +
+    '</table>' +
+    '</div>' +
+    '<div style="color:#64748B;font-size:12px;border-top:1px solid #E2E8F0;' +
+    'margin-top:18px;padding-top:14px;padding-left:22px;padding-bottom:14px;">' +
+    'Stride Logistics &middot; Kent, WA &middot; accounting@stridenw.com</div>' +
+    '</div></body></html>';
+
+  const row = [
+    INVOICE_TMPL_KEY,
+    "Invoice {{INVOICE_NO}} - {{CLIENT_NAME}}",
+    invoiceHtml,
+    "Tokens: {{INVOICE_NO}}, {{CLIENT_NAME}}, {{INVOICE_DATE}}, {{DUE_DATE}}, " +
+    "{{LINE_ITEMS_HTML}}, {{TOTAL}}, {{LOGO_URL}}"
+  ];
+
+  sheet.getRange(2, 1, 1, row.length).setValues([row]);
+}
+
+/* ============================================================
+   SYNC TO ALL CLIENTS — v2.2.0
+   Pushes Price_List, Class_Map, and Email_Templates data to
+   every active client's local cache tabs (Price_Cache, Class_Cache,
+   Email_Template_Cache). Reads client list from CB Clients tab.
+   ============================================================ */
+function StrideMPL_SyncToAllClients() {
+  var ui = SpreadsheetApp.getUi();
+  var ss = SpreadsheetApp.getActive();
+
+  var cbId = getSetting_(ss, MPL_SETTINGS_KEYS.CB_SPREADSHEET_ID);
+  if (!cbId) {
+    ui.alert("Missing CB_SPREADSHEET_ID in Settings.\n\nAdd a row with Key = 'CB_SPREADSHEET_ID' and Value = your Consolidated Billing spreadsheet ID.");
+    return;
+  }
+
+  // Read source data from this Master spreadsheet
+  var priceSh = ss.getSheetByName(MPL_SH.PRICE);
+  var classSh = ss.getSheetByName(MPL_SH.CLASS_MAP);
+  var emailSh = ss.getSheetByName(MPL_SH.EMAIL_TEMPLATES);
+
+  if (!priceSh || !classSh) { ui.alert("Missing Price_List or Class_Map sheet."); return; }
+
+  var priceData = priceSh.getDataRange().getValues();
+  var classData = classSh.getDataRange().getValues();
+  var emailData = emailSh ? emailSh.getDataRange().getValues() : null;
+
+  // Get active clients from CB Clients tab
+  var cbSs;
+  try { cbSs = SpreadsheetApp.openById(cbId); } catch (e) {
+    ui.alert("Could not open Consolidated Billing sheet.\n\n" + e);
+    return;
+  }
+
+  var clientsSh = cbSs.getSheetByName("Clients");
+  if (!clientsSh || clientsSh.getLastRow() < 2) { ui.alert("No Clients tab or no client rows in CB sheet."); return; }
+
+  var cData = clientsSh.getDataRange().getValues();
+  var cHeaders = {};
+  cData[0].forEach(function(h, i) { cHeaders[String(h || "").trim().toUpperCase()] = i; });
+
+  var nameIdx = cHeaders["CLIENT NAME"];
+  var idIdx = cHeaders["CLIENT SPREADSHEET ID"];
+  var activeIdx = cHeaders["ACTIVE"];
+
+  if (idIdx === undefined) { ui.alert("Clients tab missing 'Client Spreadsheet ID' column."); return; }
+
+  var clients = [];
+  for (var i = 1; i < cData.length; i++) {
+    var cId = String(cData[i][idIdx] || "").trim();
+    var cName = nameIdx !== undefined ? String(cData[i][nameIdx] || "").trim() : "Client " + i;
+    var cActive = activeIdx !== undefined ? String(cData[i][activeIdx] || "").trim().toUpperCase() : "TRUE";
+    if (cId && (cActive === "TRUE" || cActive === "YES" || cActive === "Y" || cActive === "1")) {
+      clients.push({ name: cName, id: cId });
+    }
+  }
+
+  if (!clients.length) { ui.alert("No active clients found."); return; }
+
+  var confirm = ui.alert(
+    "Sync to All Clients",
+    "This will push Price_Cache, Class_Cache, and Email_Template_Cache to " + clients.length + " active client(s).\n\nContinue?",
+    ui.ButtonSet.YES_NO
+  );
+  if (confirm !== ui.Button.YES) return;
+
+  var success = 0, failed = [];
+  for (var c = 0; c < clients.length; c++) {
+    try {
+      var clientSs = SpreadsheetApp.openById(clients[c].id);
+
+      // Price_Cache
+      var pcSh = clientSs.getSheetByName("Price_Cache") || clientSs.insertSheet("Price_Cache");
+      MPL_writeCache_(pcSh, priceData, "Price_Cache");
+
+      // Class_Cache
+      var ccSh = clientSs.getSheetByName("Class_Cache") || clientSs.insertSheet("Class_Cache");
+      MPL_writeCache_(ccSh, classData, "Class_Cache");
+
+      // Email_Template_Cache
+      if (emailData) {
+        var etSh = clientSs.getSheetByName("Email_Template_Cache") || clientSs.insertSheet("Email_Template_Cache");
+        MPL_writeCache_(etSh, emailData, "Email_Template_Cache");
+      }
+
+      success++;
+      SpreadsheetApp.getActive().toast("Synced " + (c + 1) + "/" + clients.length + ": " + clients[c].name, "Sync Progress", 2);
+    } catch (err) {
+      failed.push(clients[c].name + " (" + err.message + ")");
+      Logger.log("Sync failed for " + clients[c].name + ": " + err);
+    }
+  }
+
+  var msg = "Sync complete.\n\nSuccess: " + success + " / " + clients.length;
+  if (failed.length) {
+    msg += "\n\nFailed:\n• " + failed.slice(0, 15).join("\n• ");
+    if (failed.length > 15) msg += "\n• ... (" + (failed.length - 15) + " more)";
+  }
+  ui.alert(msg);
+}
+
+/** Writes source data to a cache sheet (clear + write + format header). */
+function MPL_writeCache_(dstSheet, srcData, cacheName) {
+  dstSheet.clearContents();
+  dstSheet.clearFormats();
+  if (!srcData || srcData.length < 1) {
+    dstSheet.getRange(1, 1).setValue(cacheName + " (empty)");
+    return;
+  }
+  dstSheet.getRange(1, 1, srcData.length, srcData[0].length).setValues(srcData);
+  try {
+    dstSheet.getRange(1, 1, 1, srcData[0].length)
+      .setFontWeight("bold")
+      .setBackground("#0F172A")
+      .setFontColor("#ffffff");
+  } catch (_) {}
+  dstSheet.setFrozenRows(1);
+}

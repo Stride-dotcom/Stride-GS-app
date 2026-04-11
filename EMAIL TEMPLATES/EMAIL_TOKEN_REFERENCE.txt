@@ -1,0 +1,229 @@
+EMAIL TEMPLATE TOKEN REFERENCE (Corrected — Updated 2026-04-02)
+================================================================
+
+GLOBAL TOKENS (auto-injected on all templates)
+-----------------------------------------------
+  {{APP_URL}}            - React app base URL (https://www.mystridehub.com/#)
+                           Use in templates: {{APP_URL}}/inventory, {{APP_URL}}/tasks, etc.
+                           Auto-injected by api_sendTemplateEmail_ — no need to pass manually
+
+INSP_EMAIL
+----------
+Subject: Inspection Report {{CLIENT_NAME}} Item {{ITEM_ID}}
+Tokens:
+  {{ITEM_ID}}          - Item identifier
+  {{CLIENT_NAME}}      - Client name
+  {{SHIPMENT_NO}}      - Shipment number
+  {{RESULT}}           - Inspection result (PASS / FAIL / Needs Repair)
+  {{RESULT_COLOR}}     - Hex color (#16A34A=PASS, #DC2626=FAIL, #D97706=Needs Repair)
+  {{TASK_NOTES}}       - Task notes (CORRECTED from RESULT_NOTES)
+  {{DESCRIPTION}}      - Item description
+  {{ITEM_TABLE_HTML}}  - Auto-generated item detail table
+  {{PHOTOS_URL}}       - Link to photos folder
+  {{REPAIR_NOTE}}      - Injected HTML block when result is Needs Repair
+
+
+REPAIR_QUOTE
+------------
+Subject: Repair Quote Ready: {{ITEM_ID}} {{QUOTE_AMOUNT}}
+Tokens:
+  {{ITEM_ID}}          - Item identifier
+  {{CLIENT_NAME}}      - Client name
+  {{DESCRIPTION}}      - Item description
+  {{ITEM_TABLE_HTML}}  - Auto-generated item detail table
+  {{TASK_NOTES}}       - Task notes (CORRECTED from ISSUE)
+  {{QUOTE_AMOUNT}}     - Dollar amount of quote
+  {{REPAIR_ID}}        - Repair record ID
+  {{REPAIR_VENDOR}}    - Repair vendor name
+  {{NOTES}}            - Additional notes
+  {{PHOTOS_URL}}       - Link to inspection photos
+
+
+SHIPMENT_RECEIVED
+-----------------
+Subject: Shipment Received: {{SHIPMENT_NO}} {{ITEM_COUNT}} items
+Tokens:
+  {{SHIPMENT_NO}}      - Shipment number
+  {{CLIENT_NAME}}      - Client name
+  {{ITEM_COUNT}}       - Number of items in shipment
+  {{CARRIER}}          - Carrier name
+  {{TRACKING}}         - Tracking number
+  {{RECEIVED_DATE}}    - Date shipment was received
+  {{SHIPMENT_NOTES}}   - Shipment notes
+  {{ITEMS_TABLE}}      - Auto-generated items table (columns: Item ID, Qty, Vendor, Description, Sidemark, Room, Item Notes)
+  {{PHOTOS_URL}}       - Link to photos folder
+
+REPAIR_QUOTE_REQUEST
+--------------------
+Subject: Repair Quote Requested: {{CLIENT_NAME}} Item ID {{ITEM_ID}}
+Tokens:
+  {{ITEM_ID}}          - Item identifier
+  {{CLIENT_NAME}}      - Client name
+  {{DESCRIPTION}}      - Item description
+  {{LOCATION}}         - Item location
+  {{SIDEMARK}}         - Item sidemark
+  {{ITEM_TABLE_HTML}}  - Auto-generated item detail table
+  {{PHOTOS_URL}}       - Link to item photos folder
+
+
+TRANSFER_RECEIVED
+------------------
+Subject: Items Transferred to {{CLIENT_NAME}} from {{SOURCE_CLIENT_NAME}}
+Tokens:
+  {{CLIENT_NAME}}          - Destination client name
+  {{SOURCE_CLIENT_NAME}}   - Source client name (where items came from)
+  {{ITEM_COUNT}}           - Number of items transferred
+  {{TRANSFER_DATE}}        - Date of transfer (MM/DD/YYYY)
+  {{TRANSFER_NOTES}}       - Transfer note string (auto-generated)
+  {{ITEMS_TABLE}}          - Auto-generated items table (columns: Item ID, Qty, Vendor, Description, Sidemark, Room, Item Notes)
+  {{INVENTORY_URL}}        - Link to destination client spreadsheet (auto-resolved)
+
+
+DOC_RECEIVING (PDF Document Template)
+-------------------------------------
+Tokens:
+  {{LOGO_URL}}              - Logo image URL
+  {{SHIPMENT_NO}}           - Shipment number
+  {{RECEIVED_DATE}}         - Date received
+  {{CARRIER}}               - Carrier name (defaults to "-")
+  {{TRACKING}}              - Tracking number (defaults to "-")
+  {{ITEM_COUNT}}            - Number of items
+  {{CLIENT_NAME}}           - Client name
+  {{CLIENT_EMAIL_HTML}}     - Conditional: client email div (or empty)
+  {{SHIPMENT_NOTES_HTML}}   - Conditional: notes banner (or empty)
+  {{ITEMS_TABLE_ROWS}}      - Loop: <tr> rows with #, Item ID, Qty, Vendor, Description, Class, Location, Sidemark, Notes
+  {{TOTAL_ITEMS}}           - Total item count
+
+DOC_TASK_WORK_ORDER (PDF Document Template)
+-------------------------------------------
+Tokens:
+  {{LOGO_URL}}              - Logo image URL
+  {{TASK_ID}}               - Task ID
+  {{CLIENT_NAME}}           - Client name
+  {{DATE}}                  - Date created
+  {{STATUS}}                - Task status
+  {{TASK_TYPE}}             - Task type (Inspection, Assembly, etc.)
+  {{SIDEMARK_ROW}}          - Conditional: sidemark row (or empty)
+  {{NOTES_ROW}}             - Conditional: notes row (or empty)
+  {{PHOTOS_ROW}}            - Conditional: photos link row (or empty)
+  {{ITEM_ID}}               - Item ID
+  {{ITEM_QTY}}              - Item quantity
+  {{ITEM_VENDOR}}           - Item vendor
+  {{ITEM_DESC}}             - Item description
+  {{ITEM_SIDEMARK}}         - Item sidemark
+  {{ITEM_ROOM}}             - Item room
+  {{RESULT_OPTIONS_HTML}}   - Checkbox HTML (Pass / Fail / Needs Repair / Other)
+
+DOC_REPAIR_WORK_ORDER (PDF Document Template)
+----------------------------------------------
+Tokens:
+  {{LOGO_URL}}              - Logo image URL
+  {{REPAIR_ID}}             - Repair ID
+  {{CLIENT_NAME}}           - Client name
+  {{DATE}}                  - Date created
+  {{STATUS}}                - Repair status
+  {{REPAIR_TYPE}}           - Repair type
+  {{SIDEMARK_ROW}}          - Conditional: sidemark row (or empty)
+  {{APPROVED_ROW}}          - Conditional: approved amount row (or empty)
+  {{NOTES_ROW}}             - Conditional: notes row (or empty)
+  {{PHOTOS_ROW}}            - Conditional: photos link row (or empty)
+  {{ITEM_ID}}               - Item ID
+  {{ITEM_QTY}}              - Item quantity
+  {{ITEM_VENDOR}}           - Item vendor
+  {{ITEM_DESC}}             - Item description
+  {{ITEM_SIDEMARK}}         - Item sidemark
+  {{ITEM_ROOM}}             - Item room
+  {{RESULT_OPTIONS_HTML}}   - Checkbox HTML (Complete / Partial / Unable to Repair / Other)
+
+DOC_WILL_CALL_RELEASE (PDF Document Template)
+----------------------------------------------
+Tokens:
+  {{LOGO_URL}}              - Logo image URL
+  {{WC_NUMBER}}             - Will Call number
+  {{COD_BANNER_HTML}}       - Conditional: COD payment banner (or empty)
+  {{CLIENT_NAME}}           - Client name
+  {{DATE}}                  - Release date
+  {{EST_PICKUP_ROW}}        - Conditional: estimated pickup row (or empty)
+  {{REQUESTED_BY_ROW}}      - Conditional: requested by row (or empty)
+  {{ITEM_COUNT}}            - Number of items
+  {{PICKUP_PARTY}}          - Pickup party name
+  {{PICKUP_PHONE_HTML}}     - Conditional: phone number div (or empty)
+  {{NOTES_HTML}}            - Conditional: notes banner (or empty)
+  {{ITEMS_TABLE_ROWS}}      - Loop: <tr> rows with #, Item ID, Qty, Vendor, Description, Class, Location, Sidemark
+  {{TOTAL_ITEMS}}           - Total item count
+
+
+CLAIM_RECEIVED
+--------------
+Subject: Claim {{CLAIM_NO}} — Received
+Tokens:
+  {{CLAIM_NO}}         - Claim number (e.g. CLM-0001)
+  {{CLAIMANT_NAME}}    - Primary contact name
+  {{CLAIM_TYPE}}       - "Item Claim" or "Property Claim"
+  {{DATE_OPENED}}      - Date claim was filed
+
+
+CLAIM_STAFF_NOTIFY
+------------------
+Subject: New Claim {{CLAIM_NO}} — {{COMPANY_NAME}}
+Tokens:
+  {{CLAIM_NO}}           - Claim number
+  {{CLAIM_TYPE}}         - "Item Claim" or "Property Claim"
+  {{COMPANY_NAME}}       - Client/company name
+  {{CLAIMANT_NAME}}      - Primary contact name
+  {{CREATED_BY}}         - Staff member who filed the claim
+  {{REQUESTED_AMOUNT}}   - Dollar amount requested (e.g. "$1,200.00")
+  {{DATE_OPENED}}        - Date claim was filed
+  {{ISSUE_DESCRIPTION}}  - Full description of the incident
+
+
+CLAIM_MORE_INFO
+---------------
+Subject: Additional Information Needed — Claim {{CLAIM_NO}}
+Tokens:
+  {{CLAIM_NO}}         - Claim number
+  {{CLAIMANT_NAME}}    - Primary contact name
+  {{INFO_REQUESTED}}   - Description of what info is needed from the claimant
+
+
+CLAIM_DENIAL
+------------
+Subject: Claim {{CLAIM_NO}} — Decision
+Tokens:
+  {{CLAIM_NO}}             - Claim number
+  {{CLAIMANT_NAME}}        - Primary contact name
+  {{DECISION_EXPLANATION}} - Explanation of why the claim was denied
+
+
+CLAIM_SETTLEMENT (PDF attached)
+--------------------------------
+Subject: Settlement Offer — Claim {{CLAIM_NO}}
+Tokens:
+  {{CLAIM_NO}}             - Claim number
+  {{CLAIMANT_NAME}}        - Primary contact name
+  {{APPROVED_AMOUNT}}      - Approved settlement amount (e.g. "850.00" — rendered as ${{APPROVED_AMOUNT}})
+  {{RESOLUTION_TYPE}}      - "Cash Settlement", "Repair", "Replace", or "Other"
+  {{DECISION_EXPLANATION}} - Explanation/terms of the settlement
+
+
+SETTLEMENT PDF DOCUMENT (Google Doc Template — DOC_SETTLEMENT)
+----------------------------------------------------------------
+Template ID stored in: CB Claims_Config tab → SETTLEMENT_TEMPLATE_DOC_ID
+Tokens (17 total):
+  {{CLAIM_NO}}             - Claim number
+  {{CLAIMANT_NAME}}        - Primary contact name
+  {{COMPANY_NAME}}         - Company/client name
+  {{INCIDENT_DATE}}        - Date of incident
+  {{DATE_OPENED}}          - Date claim was opened
+  {{CLAIM_TYPE}}           - "Item Claim" or "Property Claim"
+  {{ITEM_REFERENCE}}       - Item ID(s) or property description
+  {{ISSUE_DESCRIPTION}}    - Description of the incident/damage
+  {{COVERAGE_TYPE}}        - Coverage type selected
+  {{REQUESTED_AMOUNT}}     - Original requested amount
+  {{APPROVED_AMOUNT}}      - Settlement amount being offered
+  {{OUTCOME_TYPE}}         - "Approved" or "Partial Approval"
+  {{RESOLUTION_TYPE}}      - "Cash Settlement", "Repair", "Replace", or "Other"
+  {{DECISION_EXPLANATION}} - Settlement explanation / terms
+  {{SETTLEMENT_DATE}}      - Date settlement was generated
+  {{SETTLEMENT_VERSION}}   - Version number (e.g. "1")
+  {{LEGAL_TERMS}}          - Auto-generated by backend (release language + coverage-specific terms)

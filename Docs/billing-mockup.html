@@ -1,0 +1,535 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Stride Billing — Redesigned Mockup</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #F2F2F2; color: #1E293B; }
+
+  /* Layout */
+  .sidebar { position: fixed; left: 0; top: 0; bottom: 0; width: 180px; background: #fff; border-right: 1px solid #E2E8F0; padding: 20px 0; z-index: 10; }
+  .sidebar .logo { padding: 0 20px 20px; font-size: 18px; font-weight: 800; }
+  .sidebar .logo span { color: #E85D2D; }
+  .sidebar a { display: block; padding: 10px 20px; font-size: 13px; color: #64748B; text-decoration: none; font-weight: 500; }
+  .sidebar a:hover { background: #F8FAFC; color: #1E293B; }
+  .sidebar a.active { background: #FFF7ED; color: #E85D2D; border-left: 3px solid #E85D2D; font-weight: 600; }
+  .main { margin-left: 180px; padding: 24px 32px; min-height: 100vh; }
+
+  /* Header */
+  .page-header { margin-bottom: 24px; }
+  .page-header h1 { font-size: 22px; font-weight: 700; margin-bottom: 4px; }
+  .page-header p { font-size: 13px; color: #64748B; }
+
+  /* Tabs */
+  .tabs { display: flex; gap: 0; border-bottom: 2px solid #E2E8F0; margin-bottom: 20px; }
+  .tab { padding: 10px 20px; font-size: 13px; font-weight: 600; color: #64748B; cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -2px; background: none; border-top: none; border-left: none; border-right: none; }
+  .tab:hover { color: #1E293B; }
+  .tab.active { color: #E85D2D; border-bottom-color: #E85D2D; }
+
+  /* Cards Row */
+  .cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 20px; }
+  .card { background: #fff; border: 1px solid #E2E8F0; border-radius: 12px; padding: 16px; }
+  .card .label { font-size: 11px; color: #64748B; font-weight: 700; text-transform: uppercase; margin-bottom: 6px; }
+  .card .value { font-size: 24px; font-weight: 800; }
+  .card .value.orange { color: #E85D2D; }
+  .card .value.blue { color: #1D4ED8; }
+  .card .value.green { color: #15803D; }
+  .card .sub { font-size: 11px; color: #94A3B8; margin-top: 2px; }
+
+  /* Action Bar */
+  .action-bar { display: flex; gap: 10px; margin-bottom: 16px; align-items: center; flex-wrap: wrap; }
+  .btn { padding: 8px 16px; font-size: 12px; font-weight: 600; border-radius: 8px; cursor: pointer; border: 1px solid #E2E8F0; background: #fff; color: #1E293B; display: inline-flex; align-items: center; gap: 6px; }
+  .btn:hover { background: #F8FAFC; }
+  .btn.primary { background: #E85D2D; color: #fff; border-color: #E85D2D; }
+  .btn.primary:hover { background: #D14D1F; }
+  .btn.outline-orange { border-color: #E85D2D; color: #E85D2D; }
+  .btn.green { background: #16A34A; color: #fff; border-color: #16A34A; }
+  .btn.disabled { opacity: 0.5; cursor: not-allowed; }
+
+  /* Status chips */
+  .chips { display: flex; gap: 6px; margin-bottom: 16px; flex-wrap: wrap; }
+  .chip { padding: 5px 12px; font-size: 11px; font-weight: 600; border-radius: 20px; cursor: pointer; border: 1px solid #E2E8F0; background: #fff; }
+  .chip:hover { background: #F8FAFC; }
+  .chip.active { background: #FFF7ED; border-color: #E85D2D; color: #E85D2D; }
+  .chip .count { color: #94A3B8; margin-left: 4px; }
+
+  /* Table */
+  .table-wrap { background: #fff; border: 1px solid #E2E8F0; border-radius: 12px; overflow: hidden; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  thead th { padding: 10px 12px; text-align: left; font-size: 10px; font-weight: 700; color: #64748B; text-transform: uppercase; border-bottom: 2px solid #E2E8F0; background: #FAFAFA; position: sticky; top: 0; }
+  tbody td { padding: 10px 12px; border-bottom: 1px solid #F1F5F9; }
+  tbody tr:hover { background: #FAFAFA; }
+  tbody tr.selected { background: #FFF7ED; }
+  tbody tr.preview { background: #FFFBEB; border-left: 3px solid #F59E0B; }
+  .check { width: 16px; height: 16px; accent-color: #E85D2D; cursor: pointer; }
+
+  /* Badges */
+  .badge { padding: 2px 8px; border-radius: 10px; font-size: 10px; font-weight: 700; display: inline-block; }
+  .badge.unbilled { background: #FEF3C7; color: #B45309; }
+  .badge.invoiced { background: #EFF6FF; color: #1D4ED8; }
+  .badge.billed { background: #F0FDF4; color: #15803D; }
+  .badge.preview-badge { background: #FFFBEB; color: #D97706; border: 1px dashed #F59E0B; }
+  .badge.stor { background: #FFF7ED; color: #E85D2D; }
+
+  /* Editable cell */
+  .editable { cursor: pointer; border-bottom: 1px dashed #CBD5E1; }
+  .editable:hover { background: #F0F9FF; }
+
+  /* Toolbar */
+  .toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; flex-wrap: wrap; gap: 8px; }
+  .search { padding: 8px 12px; border: 1px solid #E2E8F0; border-radius: 8px; font-size: 12px; width: 240px; outline: none; }
+  .search:focus { border-color: #E85D2D; }
+
+  /* Selection footer */
+  .selection-bar { position: fixed; bottom: 0; left: 180px; right: 0; background: #1E293B; color: #fff; padding: 12px 32px; display: flex; justify-content: space-between; align-items: center; z-index: 20; }
+  .selection-bar .info { font-size: 13px; font-weight: 500; }
+  .selection-bar .info strong { color: #E85D2D; }
+  .selection-bar .actions { display: flex; gap: 8px; }
+  .selection-bar .btn { color: #fff; border-color: rgba(255,255,255,0.2); }
+  .selection-bar .btn.primary { background: #E85D2D; border-color: #E85D2D; }
+  .selection-bar .btn.green { background: #16A34A; border-color: #16A34A; }
+
+  /* Preview banner */
+  .preview-banner { background: #FFFBEB; border: 1px solid #F59E0B; border-radius: 10px; padding: 14px 18px; margin-bottom: 16px; display: flex; justify-content: space-between; align-items: center; }
+  .preview-banner .left { }
+  .preview-banner .title { font-size: 14px; font-weight: 700; color: #92400E; }
+  .preview-banner .desc { font-size: 12px; color: #A16207; margin-top: 2px; }
+  .preview-banner .actions { display: flex; gap: 8px; }
+
+  /* Storage form */
+  .storage-form { background: #fff; border: 1px solid #E2E8F0; border-radius: 12px; padding: 20px; margin-bottom: 16px; }
+  .storage-form h3 { font-size: 14px; font-weight: 700; margin-bottom: 12px; }
+  .form-row { display: flex; gap: 12px; align-items: end; flex-wrap: wrap; }
+  .form-group { display: flex; flex-direction: column; gap: 4px; }
+  .form-group label { font-size: 11px; font-weight: 600; color: #64748B; }
+  .form-group input, .form-group select { padding: 8px 12px; border: 1px solid #E2E8F0; border-radius: 8px; font-size: 12px; }
+
+  /* Section divider */
+  .section-note { font-size: 11px; color: #94A3B8; padding: 8px 0; text-align: right; }
+
+  /* Annotations */
+  .annotation { position: relative; display: inline-block; }
+  .annotation::after { content: attr(data-note); position: absolute; top: -8px; right: -8px; background: #E85D2D; color: #fff; font-size: 9px; font-weight: 700; padding: 2px 6px; border-radius: 10px; white-space: nowrap; }
+
+  /* View switcher for mockup */
+  .view-switcher { background: #1E293B; color: #fff; padding: 12px 32px; margin: -24px -32px 24px; display: flex; gap: 12px; align-items: center; }
+  .view-switcher span { font-size: 11px; font-weight: 600; text-transform: uppercase; color: #94A3B8; }
+  .view-btn { padding: 6px 14px; font-size: 12px; font-weight: 600; border-radius: 6px; cursor: pointer; border: 1px solid rgba(255,255,255,0.2); background: transparent; color: #fff; }
+  .view-btn:hover { background: rgba(255,255,255,0.1); }
+  .view-btn.active { background: #E85D2D; border-color: #E85D2D; }
+
+  .hidden { display: none; }
+
+  /* Tooltip */
+  .tip { display: inline-block; width: 16px; height: 16px; background: #E85D2D; color: #fff; border-radius: 50%; font-size: 10px; font-weight: 700; text-align: center; line-height: 16px; cursor: help; margin-left: 4px; }
+</style>
+</head>
+<body>
+
+<!-- Sidebar -->
+<div class="sidebar">
+  <div class="logo">Stride <span>WMS</span></div>
+  <a href="#">Dashboard</a>
+  <a href="#">Inventory</a>
+  <a href="#">Receiving</a>
+  <a href="#">Shipments</a>
+  <a href="#">Tasks</a>
+  <a href="#">Repairs</a>
+  <a href="#">Will Calls</a>
+  <a href="#" class="active">Billing</a>
+  <a href="#">Claims</a>
+  <a href="#">Settings</a>
+</div>
+
+<!-- Main Content -->
+<div class="main">
+
+  <!-- Mockup View Switcher -->
+  <div class="view-switcher">
+    <span>Mockup View:</span>
+    <button class="view-btn active" onclick="showView('default')">Default State</button>
+    <button class="view-btn" onclick="showView('preview')">Storage Preview</button>
+    <button class="view-btn" onclick="showView('selected')">Rows Selected</button>
+    <button class="view-btn" onclick="showView('invoice')">Create Invoice</button>
+  </div>
+
+  <div class="page-header">
+    <h1>Billing</h1>
+    <p>Manage charges, preview storage, create invoices, and export to QuickBooks</p>
+  </div>
+
+  <!-- Tabs -->
+  <div class="tabs">
+    <button class="tab active">Billing Ledger</button>
+    <button class="tab">Invoice Review</button>
+  </div>
+
+  <!-- Summary Cards -->
+  <div class="cards">
+    <div class="card">
+      <div class="label">Unbilled</div>
+      <div class="value orange">$4,285.50</div>
+      <div class="sub">142 line items</div>
+    </div>
+    <div class="card">
+      <div class="label">Invoiced (Pending)</div>
+      <div class="value blue">$1,200.00</div>
+      <div class="sub">28 line items</div>
+    </div>
+    <div class="card">
+      <div class="label">Billed (Paid)</div>
+      <div class="value green">$12,450.00</div>
+      <div class="sub">318 line items</div>
+    </div>
+    <div class="card" id="preview-card" style="border: 2px dashed #F59E0B; background: #FFFDF5;">
+      <div class="label" style="color: #D97706;">Storage Preview</div>
+      <div class="value" style="color: #D97706;" id="preview-value">—</div>
+      <div class="sub" id="preview-sub">Run preview to calculate</div>
+    </div>
+  </div>
+
+  <!-- Action Bar -->
+  <div class="action-bar">
+    <button class="btn primary" onclick="toggleStorageForm()">
+      ⚡ Preview Storage Charges
+    </button>
+    <button class="btn outline-orange">
+      📊 Unbilled Report
+    </button>
+    <button class="btn">
+      📥 QB IIF Export
+    </button>
+    <button class="btn">
+      📥 CSV Export
+    </button>
+    <div style="flex:1"></div>
+    <span style="font-size:11px; color:#94A3B8;">Showing 142 of 488 rows</span>
+  </div>
+
+  <!-- Storage Preview Form (collapsible) -->
+  <div class="storage-form hidden" id="storage-form">
+    <h3>⚡ Storage Charge Preview <span class="tip" title="Preview calculates charges without writing to the ledger. Click 'Commit' to add them.">?</span></h3>
+    <div class="form-row">
+      <div class="form-group">
+        <label>Client</label>
+        <select>
+          <option>All Clients</option>
+          <option>Brian Paquette Interiors</option>
+          <option selected>Demo Company</option>
+          <option>Justin Demo Account</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Period Start</label>
+        <input type="date" value="2026-04-01">
+      </div>
+      <div class="form-group">
+        <label>Period End</label>
+        <input type="date" value="2026-04-15">
+      </div>
+      <button class="btn primary" onclick="showView('preview')">Calculate Preview</button>
+      <button class="btn" onclick="toggleStorageForm()">Cancel</button>
+    </div>
+    <div style="font-size:11px; color:#64748B; margin-top:8px;">
+      ℹ️ Preview only — no charges will be created until you click "Commit to Ledger"
+    </div>
+  </div>
+
+  <!-- Preview Banner (shown when preview is active) -->
+  <div class="preview-banner hidden" id="preview-banner">
+    <div class="left">
+      <div class="title">📋 Storage Preview — Demo Company · Apr 1–15, 2026</div>
+      <div class="desc">81 items · $1,215.00 estimated · These charges are NOT in the ledger yet</div>
+    </div>
+    <div class="actions">
+      <button class="btn green" onclick="alert('Charges committed to ledger!')">✅ Commit to Ledger</button>
+      <button class="btn" onclick="showView('default')">Dismiss Preview</button>
+    </div>
+  </div>
+
+  <!-- Toolbar -->
+  <div class="toolbar">
+    <input class="search" type="text" placeholder="Search billing...">
+    <div class="chips">
+      <div class="chip active">All <span class="count">488</span></div>
+      <div class="chip">Unbilled <span class="count">142</span></div>
+      <div class="chip">Invoiced <span class="count">28</span></div>
+      <div class="chip">Billed <span class="count">318</span></div>
+      <div class="chip">Void <span class="count">0</span></div>
+    </div>
+  </div>
+
+  <!-- Billing Table -->
+  <div class="table-wrap" style="max-height: 480px; overflow-y: auto;">
+    <table>
+      <thead>
+        <tr>
+          <th style="width:30px"><input type="checkbox" class="check" onclick="toggleAll(this)"></th>
+          <th>Ledger ID</th>
+          <th>Status</th>
+          <th>Client</th>
+          <th>Date</th>
+          <th>Svc Code</th>
+          <th>Service</th>
+          <th>Item ID</th>
+          <th>Description</th>
+          <th>Qty</th>
+          <th>Rate</th>
+          <th>Total</th>
+          <th>Notes</th>
+          <th>Invoice #</th>
+        </tr>
+      </thead>
+      <tbody id="table-body">
+        <!-- Preview rows (shown in preview mode) -->
+        <tr class="preview hidden preview-row">
+          <td><input type="checkbox" class="check" checked></td>
+          <td style="font-weight:600">—</td>
+          <td><span class="badge preview-badge">Preview</span></td>
+          <td>Demo Company</td>
+          <td>Apr 15, 26</td>
+          <td><span class="badge stor">STOR</span></td>
+          <td>Storage</td>
+          <td>92262</td>
+          <td class="editable">TASK CHAIR</td>
+          <td class="editable" style="text-align:right">1</td>
+          <td class="editable" style="text-align:right">$15.00</td>
+          <td style="text-align:right; font-weight:700">$15.00</td>
+          <td class="editable">Storage 4/1-4/15 (15 days)</td>
+          <td>—</td>
+        </tr>
+        <tr class="preview hidden preview-row">
+          <td><input type="checkbox" class="check" checked></td>
+          <td style="font-weight:600">—</td>
+          <td><span class="badge preview-badge">Preview</span></td>
+          <td>Demo Company</td>
+          <td>Apr 15, 26</td>
+          <td><span class="badge stor">STOR</span></td>
+          <td>Storage</td>
+          <td>61192</td>
+          <td class="editable">ROSEDALE 6-DRAWER DRESSER</td>
+          <td class="editable" style="text-align:right">1</td>
+          <td class="editable" style="text-align:right">$37.50</td>
+          <td style="text-align:right; font-weight:700">$37.50</td>
+          <td class="editable">Storage 4/1-4/15 (15 days)</td>
+          <td>—</td>
+        </tr>
+        <tr class="preview hidden preview-row">
+          <td><input type="checkbox" class="check" checked></td>
+          <td style="font-weight:600">—</td>
+          <td><span class="badge preview-badge">Preview</span></td>
+          <td>Demo Company</td>
+          <td>Apr 15, 26</td>
+          <td><span class="badge stor">STOR</span></td>
+          <td>Storage</td>
+          <td>67890</td>
+          <td class="editable">BLAKE SOFA</td>
+          <td class="editable" style="text-align:right">1</td>
+          <td class="editable" style="text-align:right">$22.50</td>
+          <td style="text-align:right; font-weight:700">$22.50</td>
+          <td class="editable">Storage 4/1-4/15 (15 days)</td>
+          <td>—</td>
+        </tr>
+
+        <!-- Regular unbilled rows -->
+        <tr>
+          <td><input type="checkbox" class="check"></td>
+          <td style="font-weight:600">BL-00142</td>
+          <td><span class="badge unbilled">Unbilled</span></td>
+          <td>Demo Company</td>
+          <td>Mar 30, 26</td>
+          <td><span class="badge" style="background:#EFF6FF;color:#1D4ED8;">RCVG</span></td>
+          <td>Receiving</td>
+          <td>92262</td>
+          <td>TASK CHAIR</td>
+          <td style="text-align:right">1</td>
+          <td style="text-align:right">$35.00</td>
+          <td style="text-align:right; font-weight:700">$35.00</td>
+          <td class="editable">—</td>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td><input type="checkbox" class="check"></td>
+          <td style="font-weight:600">BL-00141</td>
+          <td><span class="badge unbilled">Unbilled</span></td>
+          <td>Demo Company</td>
+          <td>Mar 30, 26</td>
+          <td><span class="badge" style="background:#FFF7ED;color:#E85D2D;">INSP</span></td>
+          <td>Inspection</td>
+          <td>92262</td>
+          <td>TASK CHAIR</td>
+          <td style="text-align:right">1</td>
+          <td style="text-align:right">$25.00</td>
+          <td style="text-align:right; font-weight:700">$25.00</td>
+          <td class="editable">Pass - minor scuff</td>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td><input type="checkbox" class="check"></td>
+          <td style="font-weight:600">BL-00140</td>
+          <td><span class="badge unbilled">Unbilled</span></td>
+          <td>Demo Company</td>
+          <td>Mar 30, 26</td>
+          <td><span class="badge" style="background:#EFF6FF;color:#1D4ED8;">RCVG</span></td>
+          <td>Receiving</td>
+          <td>61192</td>
+          <td>ROSEDALE 6-DRAWER DRESSER</td>
+          <td style="text-align:right">1</td>
+          <td style="text-align:right">$35.00</td>
+          <td style="text-align:right; font-weight:700">$35.00</td>
+          <td class="editable">—</td>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td><input type="checkbox" class="check"></td>
+          <td style="font-weight:600">BL-00139</td>
+          <td><span class="badge unbilled">Unbilled</span></td>
+          <td>Demo Company</td>
+          <td>Mar 27, 26</td>
+          <td><span class="badge" style="background:#F0FDF4;color:#15803D;">ASM</span></td>
+          <td>Assembly</td>
+          <td>67890</td>
+          <td>BLAKE SOFA</td>
+          <td style="text-align:right">1</td>
+          <td style="text-align:right">$75.00</td>
+          <td style="text-align:right; font-weight:700">$75.00</td>
+          <td class="editable">Legs attached</td>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td><input type="checkbox" class="check"></td>
+          <td style="font-weight:600">BL-00138</td>
+          <td><span class="badge invoiced">Invoiced</span></td>
+          <td>Demo Company</td>
+          <td>Mar 15, 26</td>
+          <td><span class="badge stor">STOR</span></td>
+          <td>Storage</td>
+          <td>67890</td>
+          <td>BLAKE SOFA</td>
+          <td style="text-align:right">1</td>
+          <td style="text-align:right">$22.50</td>
+          <td style="text-align:right; font-weight:700">$22.50</td>
+          <td>Storage 3/1-3/15</td>
+          <td style="font-weight:600">INV-2026-0041</td>
+        </tr>
+        <tr>
+          <td><input type="checkbox" class="check"></td>
+          <td style="font-weight:600">BL-00137</td>
+          <td><span class="badge billed">Billed</span></td>
+          <td>Demo Company</td>
+          <td>Mar 1, 26</td>
+          <td><span class="badge" style="background:#EFF6FF;color:#1D4ED8;">RCVG</span></td>
+          <td>Receiving</td>
+          <td>67890</td>
+          <td>BLAKE SOFA</td>
+          <td style="text-align:right">1</td>
+          <td style="text-align:right">$35.00</td>
+          <td style="text-align:right; font-weight:700">$35.00</td>
+          <td>—</td>
+          <td style="font-weight:600">INV-2026-0038</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="section-note">Page 1 of 5 · 488 total rows</div>
+
+  <!-- Selection Bar (shown when rows selected) -->
+  <div class="selection-bar hidden" id="selection-bar">
+    <div class="info">
+      <strong id="sel-count">4</strong> rows selected · <strong id="sel-total">$170.00</strong> total
+      <button class="btn" style="margin-left:12px; padding:4px 10px; font-size:11px;" onclick="showView('default')">Clear</button>
+    </div>
+    <div class="actions">
+      <button class="btn" onclick="alert('CSV exported!')">📥 Export Selected</button>
+      <button class="btn" onclick="alert('IIF file generated and saved to Drive!')">📥 QB IIF Export</button>
+      <button class="btn primary" onclick="showView('invoice')">📄 Create Invoice</button>
+    </div>
+  </div>
+
+</div>
+
+<!-- Invoice Creation Overlay -->
+<div class="hidden" id="invoice-overlay" style="position:fixed; inset:0; background:rgba(0,0,0,0.5); z-index:100; display:flex; align-items:center; justify-content:center;">
+  <div style="background:#fff; border-radius:16px; width:540px; max-height:80vh; overflow-y:auto; padding:28px;">
+    <h2 style="font-size:18px; font-weight:700; margin-bottom:4px;">Create & Send Invoices</h2>
+    <p style="font-size:12px; color:#64748B; margin-bottom:20px;">4 rows selected · $170.00 total</p>
+
+    <div style="background:#F1F5F9; border-radius:10px; padding:16px; margin-bottom:16px;">
+      <div style="font-size:11px; color:#64748B; font-weight:700; text-transform:uppercase; margin-bottom:8px;">Invoice Summary</div>
+      <div style="display:flex; gap:24px;">
+        <div><div style="font-size:11px; color:#64748B;">Invoices</div><div style="font-size:18px; font-weight:800;">1</div></div>
+        <div><div style="font-size:11px; color:#64748B;">Line Items</div><div style="font-size:18px; font-weight:800;">4</div></div>
+        <div><div style="font-size:11px; color:#64748B;">Total</div><div style="font-size:18px; font-weight:800; color:#E85D2D;">$170.00</div></div>
+      </div>
+    </div>
+
+    <div style="border:1px solid #E2E8F0; border-radius:10px; padding:14px; margin-bottom:16px;">
+      <div style="font-weight:700; font-size:13px; margin-bottom:4px;">Demo Company</div>
+      <div style="font-size:12px; color:#64748B;">4 line items · $170.00</div>
+      <div style="font-size:11px; color:#94A3B8; margin-top:4px;">RCVG × 2, INSP × 1, ASM × 1</div>
+    </div>
+
+    <div style="display:flex; gap:8px; justify-content:flex-end;">
+      <button class="btn" onclick="showView('selected')">Cancel</button>
+      <button class="btn primary" onclick="alert('Invoice created! Email sent to client.')">Create Invoice</button>
+    </div>
+  </div>
+</div>
+
+<script>
+function showView(view) {
+  // Reset all
+  document.querySelectorAll('.view-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('storage-form').classList.add('hidden');
+  document.getElementById('preview-banner').classList.add('hidden');
+  document.getElementById('selection-bar').classList.add('hidden');
+  document.getElementById('invoice-overlay').classList.add('hidden');
+  document.querySelectorAll('.preview-row').forEach(r => r.classList.add('hidden'));
+
+  const previewCard = document.getElementById('preview-card');
+  const previewValue = document.getElementById('preview-value');
+  const previewSub = document.getElementById('preview-sub');
+
+  if (view === 'default') {
+    document.querySelectorAll('.view-btn')[0].classList.add('active');
+    previewValue.textContent = '—';
+    previewSub.textContent = 'Run preview to calculate';
+  }
+  else if (view === 'preview') {
+    document.querySelectorAll('.view-btn')[1].classList.add('active');
+    document.getElementById('preview-banner').classList.remove('hidden');
+    document.querySelectorAll('.preview-row').forEach(r => r.classList.remove('hidden'));
+    previewValue.textContent = '$1,215.00';
+    previewSub.textContent = '81 items · Apr 1–15';
+    previewCard.style.borderColor = '#F59E0B';
+  }
+  else if (view === 'selected') {
+    document.querySelectorAll('.view-btn')[2].classList.add('active');
+    document.getElementById('selection-bar').classList.remove('hidden');
+    previewValue.textContent = '—';
+    previewSub.textContent = 'Run preview to calculate';
+  }
+  else if (view === 'invoice') {
+    document.querySelectorAll('.view-btn')[3].classList.add('active');
+    document.getElementById('selection-bar').classList.remove('hidden');
+    document.getElementById('invoice-overlay').classList.remove('hidden');
+    document.getElementById('invoice-overlay').style.display = 'flex';
+  }
+}
+
+function toggleStorageForm() {
+  document.getElementById('storage-form').classList.toggle('hidden');
+}
+
+function toggleAll(el) {
+  document.querySelectorAll('.check').forEach(c => c.checked = el.checked);
+  if (el.checked) showView('selected');
+  else showView('default');
+}
+</script>
+
+</body>
+</html>

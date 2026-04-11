@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html>
+<head>
+<base target="_top" />
+<style>
+body { font-family: Arial, sans-serif; padding: 16px; }
+.title { font-size: 18px; font-weight: 700; margin-bottom: 6px; }
+.meta { margin: 4px 0; }
+table { width: 100%; border-collapse: collapse; margin-top: 12px; }
+th, td { border-bottom: 1px solid #eee; padding: 8px 6px; font-size: 12px; text-align: left; }
+th { border-bottom: 2px solid #ddd; }
+.right { text-align: right; }
+.footer { margin-top: 10px; color: #666; font-size: 12px; }
+.controls { margin-top: 14px; }
+button { padding: 8px 12px; margin-right: 8px; }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+pre { white-space: pre-wrap; }
+
+.status-banner {
+  padding: 10px 14px;
+  border-radius: 6px;
+  margin-top: 10px;
+  font-size: 13px;
+  font-weight: 600;
+  display: none;
+}
+.status-banner.success { background: #d4edda; color: #155724; display: block; }
+.status-banner.error { background: #f8d7da; color: #721c24; display: block; }
+
+.spinner-overlay {
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(255,255,255,0.85);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  z-index: 1000;
+}
+.spinner {
+  border: 4px solid #e0e0e0;
+  border-top: 4px solid #3498db;
+  border-radius: 50%;
+  width: 40px;
+  height: 40px;
+  animation: spin 1s linear infinite;
+}
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+.spinner-text {
+  margin-top: 12px;
+  font-size: 14px;
+  color: #555;
+}
+</style>
+</head>
+<body>
+<div id="content">Loading...</div>
+
+<div id="status-banner" class="status-banner"></div>
+
+<div class="controls">
+<button id="btnPrev" onclick="prev()">Previous</button>
+<button id="btnApprove" onclick="approve()">Approve</button>
+<button id="btnCancel" onclick="cancelInvoice()">Cancel</button>
+<button id="btnNext" onclick="next()">Next</button>
+</div>
+
+<div id="spinner-overlay" class="spinner-overlay" style="display:none;">
+  <div class="spinner"></div>
+  <div class="spinner-text">Creating invoice...</div>
+</div>
+
+<script>
+let invoices = [];
+let index = 0;
+let approvedCount = 0;
+let skippedCount = 0;
+
+function esc(s) {
+return String(s == null ? "" : s).replace(/[&<>"']/g, function(c) {
+  return {"&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#039;"}[c];
+});
+}
+
+function fmtDate(val) {
+var s = String(val == null ? "" : val);
+var m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+if (m) return m[2] + "-" + m[3] + "-" + m[1];
+return s;
+}
+
+function money(v) {
+var n = Number(v);
+if (!isFinite(n)) return esc(v);
+return n.toFixed(2);
+}
+
+function showStatus(message, type) {
+  var banner = document.getElementById("status-banner");
+  banner.textContent = message;
+  banner.className = "status-banner " + type;
+}
+
+function hideStatus() {
+  document.getElementById("status-banner").className = "status-banner";
+}
+
+function showSpinner(show) {
+  document.getElementById("spinner-overlay").style.display = show ? "flex" : "none";
+}
+
+function setButtonsEnabled(enabled) {
+  ["btnPrev","btnApprove","btnCancel","btnNext"].forEach(function(id) {
+    document.getElementById(id).disabled = !enabled;
+  });
+}
+
+function render() {
+var el = document.getElementById("content");
+if (!el) return;
+hideStatus();
+
+if (!invoices.length) {
+el.innerHTML = "<div class='title'>Invoice Preview</div><div>No invoices to review.</div>";
+return;
+}
+
+var inv = invoices[index];
+var rows = inv.rows || [];
+
+// Column indexes (Unbilled_Report):
+// 0 Billing Status, 1 Client, 2 Sidemark, 3 Service Date,
+// 4 Service Name, 5 Qty, 6 Rate, 7 Total, 8 Svc Code,
+// 9 Item ID, 10 Ledger Entry ID, 11 Source Sheet ID
+
+var subtotal = 0;
+var html = "";
+html += "<div class='title'>Invoice Preview</div>";
+html += "<div class='meta'><strong>Client:</strong> " + esc(inv.client) + "</div>";
+html += "<div class='meta'><strong>Sidemark:</strong> " + esc(inv.sidemark || "") + "</div>";
+
+html += "<table><thead><tr>";
+html += "<th>Service Date</th><th>Service Name</th><th>Item ID</th>";
+html += "<th class='right'>Qty</th><th class='right'>Rate</th><th class='right'>Total</th>";
+html += "</tr></thead><tbody>";
+
+for (var i = 0; i < rows.length; i++) {
+  var r = rows[i];
+  var serviceDate = fmtDate(r[3]);
+  var serviceName = r[4];
+  var itemId = r[9];
+  var total = r[7];
+  var qty = r[5];
+  var rate = r[6];
+
+  var n = Number(total);
+  if (isFinite(n)) subtotal += n;
+
+  html += "<tr>";
+  html += "<td>" + esc(serviceDate) + "</td>";
+  html += "<td>" + esc(serviceName) + "</td>";
+  html += "<td>" + esc(itemId) + "</td>";
+  html += "<td class='right'>" + esc(String(qty)) + "</td>";
+  html += "<td class='right'>" + money(rate) + "</td>";
+  html += "<td class='right'>" + money(total) + "</td>";
+  html += "</tr>";
+}
+
+html += "</tbody></table>";
+html += "<div class='footer'><strong>Subtotal:</strong> " + subtotal.toFixed(2) + "</div>";
+html += "<div class='footer'><strong>Invoice " + (index + 1) + " of " + invoices.length + "</strong></div>";
+
+el.innerHTML = html;
+}
+
+function advanceOrClose() {
+  if (index < invoices.length - 1) {
+    index++;
+    render();
+  } else {
+    showSpinner(true);
+    document.querySelector(".spinner-text").textContent = "Refreshing report...";
+    google.script.run
+      .withSuccessHandler(function() { google.script.host.close(); })
+      .withFailureHandler(function() { google.script.host.close(); })
+      .CB13_refreshUnbilledReport();
+  }
+}
+
+function next() {
+  if (index < invoices.length - 1) { index++; render(); }
+}
+function prev() { if (index > 0) { index--; render(); } }
+
+function cancelInvoice() {
+  skippedCount++;
+  advanceOrClose();
+}
+
+function approve() {
+  showSpinner(true);
+  setButtonsEnabled(false);
+  hideStatus();
+
+  google.script.run
+    .withSuccessHandler(function(result) {
+      showSpinner(false);
+      approvedCount++;
+      var invNo = (result && result.invoiceNumber) ? result.invoiceNumber : "";
+      showStatus("Invoice " + invNo + " created successfully.", "success");
+      setTimeout(function() {
+        setButtonsEnabled(true);
+        advanceOrClose();
+      }, 2500);
+    })
+    .withFailureHandler(function(err) {
+      showSpinner(false);
+      setButtonsEnabled(true);
+      showStatus("Approve failed: " + (err && err.message ? err.message : err), "error");
+    })
+    .CB13_commitInvoice(index);
+}
+
+google.script.run
+  .withSuccessHandler(function(result) {
+    invoices = result || [];
+    index = 0;
+    render();
+  })
+  .withFailureHandler(function(err) {
+    document.getElementById("content").innerHTML =
+      "<pre style='color:red;'>" + esc(err && err.message ? err.message : err) + "</pre>";
+  })
+  .CB13_getPreviewData();
+</script>
+</body>
+</html>

@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Move History Mockup — Option 1 (Combined)</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #F2F2F2; color: #1E293B; padding: 24px; }
+  .panel { max-width: 480px; margin: 0 auto; background: #fff; border-radius: 16px; border: 1px solid #E2E8F0; overflow: hidden; box-shadow: 0 2px 12px rgba(0,0,0,0.06); }
+  .header { padding: 20px; border-bottom: 1px solid #E2E8F0; }
+  .header h2 { font-size: 18px; font-weight: 700; margin-bottom: 2px; }
+  .header .sub { font-size: 12px; color: #64748B; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 10px; font-weight: 700; }
+  .badge.active { background: #F0FDF4; color: #15803D; }
+
+  /* Section */
+  .section { border-top: 1px solid #F1F5F9; }
+  .section-header { display: flex; align-items: center; justify-content: space-between; padding: 12px 20px; cursor: pointer; user-select: none; }
+  .section-header:hover { background: #FAFAFA; }
+  .section-title { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 700; color: #1E293B; }
+  .section-title .icon { width: 18px; height: 18px; display: flex; align-items: center; justify-content: center; }
+  .section-count { font-size: 11px; color: #94A3B8; font-weight: 500; }
+  .chevron { font-size: 14px; color: #94A3B8; transition: transform 0.2s; }
+  .section.open .chevron { transform: rotate(180deg); }
+  .section-body { display: none; padding: 0 20px 16px; }
+  .section.open .section-body { display: block; }
+
+  /* Move row */
+  .move-row { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid #F8FAFC; font-size: 12px; }
+  .move-row:last-child { border-bottom: none; }
+  .move-date { color: #94A3B8; font-size: 11px; min-width: 72px; }
+  .move-detail { flex: 1; }
+  .move-label { font-weight: 600; color: #1E293B; }
+  .move-arrow { color: #E85D2D; font-weight: 700; margin: 0 4px; }
+  .move-loc { color: #475569; }
+  .move-by { font-size: 10px; color: #94A3B8; }
+  .move-type { display: inline-block; padding: 1px 6px; border-radius: 8px; font-size: 9px; font-weight: 700; margin-left: 6px; }
+  .move-type.location { background: #EFF6FF; color: #1D4ED8; }
+  .move-type.transfer { background: #FFF7ED; color: #E85D2D; }
+
+  /* Task/shipment rows for context */
+  .hist-row { padding: 6px 0; border-bottom: 1px solid #F8FAFC; font-size: 12px; display: flex; gap: 10px; }
+  .hist-row:last-child { border-bottom: none; }
+  .hist-id { font-weight: 600; color: #E85D2D; font-family: monospace; cursor: pointer; }
+  .hist-id:hover { text-decoration: underline; }
+  .hist-status { font-size: 10px; font-weight: 600; }
+  .hist-status.completed { color: #16A34A; }
+  .hist-status.open { color: #E85D2D; }
+  .hist-date { color: #94A3B8; font-size: 11px; }
+  .hist-note { color: #64748B; font-size: 11px; }
+
+  .note { font-size: 11px; color: #94A3B8; padding: 12px 20px; border-top: 1px solid #F1F5F9; text-align: center; }
+</style>
+</head>
+<body>
+
+<div style="text-align:center; margin-bottom:16px;">
+  <h1 style="font-size:16px; font-weight:700;">Move History Mockup — Option 1</h1>
+  <p style="font-size:12px; color:#64748B;">Both location moves and client transfers in one "Moves" section</p>
+</div>
+
+<div class="panel">
+  <!-- Item Header -->
+  <div class="header">
+    <div style="display:flex; justify-content:space-between; align-items:center;">
+      <h2>Item 92262</h2>
+      <span class="badge active">Active</span>
+    </div>
+    <div class="sub">TASK CHAIR · Demo Company · Class S · Bay A-12</div>
+  </div>
+
+  <!-- Shipments Section (collapsed) -->
+  <div class="section" onclick="this.classList.toggle('open')">
+    <div class="section-header">
+      <div class="section-title">
+        <div class="icon">📦</div>
+        Shipments
+        <span class="section-count">1</span>
+      </div>
+      <span class="chevron">▾</span>
+    </div>
+    <div class="section-body">
+      <div class="hist-row">
+        <span class="hist-id">SHP-000084</span>
+        <span class="hist-status completed">Received</span>
+        <span class="hist-date">Mar 30, 26</span>
+        <span class="hist-note">ABF · 7171</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ★ MOVES SECTION — THE MOCKUP ★ -->
+  <div class="section open" onclick="this.classList.toggle('open')">
+    <div class="section-header">
+      <div class="section-title">
+        <div class="icon">📍</div>
+        Moves
+        <span class="section-count">5</span>
+      </div>
+      <span class="chevron">▾</span>
+    </div>
+    <div class="section-body">
+
+      <!-- Transfer move (most recent first) -->
+      <div class="move-row">
+        <div class="move-date">Apr 2, 26</div>
+        <div class="move-detail">
+          <div>
+            <span class="move-label">Demo Company</span>
+            <span class="move-arrow">→</span>
+            <span class="move-label">BPI - Smith Residence</span>
+            <span class="move-type transfer">Transfer</span>
+          </div>
+          <div class="move-by">justin@stridenw.com</div>
+        </div>
+      </div>
+
+      <!-- Location move -->
+      <div class="move-row">
+        <div class="move-date">Apr 1, 26</div>
+        <div class="move-detail">
+          <div>
+            <span class="move-loc">Bay A-12</span>
+            <span class="move-arrow">→</span>
+            <span class="move-loc">Staging Area</span>
+            <span class="move-type location">Location</span>
+          </div>
+          <div class="move-by">warehouse@stridenw.com</div>
+        </div>
+      </div>
+
+      <!-- Location move -->
+      <div class="move-row">
+        <div class="move-date">Mar 31, 26</div>
+        <div class="move-detail">
+          <div>
+            <span class="move-loc">Bay C-04</span>
+            <span class="move-arrow">→</span>
+            <span class="move-loc">Bay A-12</span>
+            <span class="move-type location">Location</span>
+          </div>
+          <div class="move-by">warehouse@stridenw.com</div>
+        </div>
+      </div>
+
+      <!-- Transfer move (came back from another client) -->
+      <div class="move-row">
+        <div class="move-date">Mar 28, 26</div>
+        <div class="move-detail">
+          <div>
+            <span class="move-label">Justin Demo Account</span>
+            <span class="move-arrow">→</span>
+            <span class="move-label">Demo Company</span>
+            <span class="move-type transfer">Transfer</span>
+          </div>
+          <div class="move-by">justin@stridenw.com</div>
+        </div>
+      </div>
+
+      <!-- Location move -->
+      <div class="move-row">
+        <div class="move-date">Mar 27, 26</div>
+        <div class="move-detail">
+          <div>
+            <span class="move-loc">Receiving Dock</span>
+            <span class="move-arrow">→</span>
+            <span class="move-loc">Bay C-04</span>
+            <span class="move-type location">Location</span>
+          </div>
+          <div class="move-by">warehouse@stridenw.com</div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- Tasks Section (collapsed) -->
+  <div class="section" onclick="this.classList.toggle('open')">
+    <div class="section-header">
+      <div class="section-title">
+        <div class="icon">📋</div>
+        Tasks
+        <span class="section-count">2</span>
+      </div>
+      <span class="chevron">▾</span>
+    </div>
+    <div class="section-body">
+      <div class="hist-row">
+        <span class="hist-id">INSP-92262-1</span>
+        <span class="hist-status completed">Completed</span>
+        <span class="hist-date">Mar 30, 26</span>
+        <span class="hist-note">Pass</span>
+      </div>
+      <div class="hist-row">
+        <span class="hist-id">ASM-92262-2</span>
+        <span class="hist-status open">Open</span>
+        <span class="hist-date">Mar 31, 26</span>
+        <span class="hist-note">Legs need attachment</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Repairs Section (collapsed) -->
+  <div class="section" onclick="this.classList.toggle('open')">
+    <div class="section-header">
+      <div class="section-title">
+        <div class="icon">🔧</div>
+        Repairs
+        <span class="section-count">0</span>
+      </div>
+      <span class="chevron">▾</span>
+    </div>
+    <div class="section-body">
+      <div style="color:#94A3B8; font-size:12px; padding:4px 0;">None</div>
+    </div>
+  </div>
+
+  <!-- Billing Section (collapsed) -->
+  <div class="section" onclick="this.classList.toggle('open')">
+    <div class="section-header">
+      <div class="section-title">
+        <div class="icon">💰</div>
+        Billing
+        <span class="section-count">3</span>
+      </div>
+      <span class="chevron">▾</span>
+    </div>
+    <div class="section-body">
+      <div class="hist-row">
+        <span style="min-width:72px; font-size:11px; color:#94A3B8;">Mar 30</span>
+        <span>RCVG · Receiving</span>
+        <span style="font-weight:600; margin-left:auto;">$35.00</span>
+      </div>
+      <div class="hist-row">
+        <span style="min-width:72px; font-size:11px; color:#94A3B8;">Mar 30</span>
+        <span>INSP · Inspection</span>
+        <span style="font-weight:600; margin-left:auto;">$25.00</span>
+      </div>
+      <div class="hist-row">
+        <span style="min-width:72px; font-size:11px; color:#94A3B8;">Apr 1</span>
+        <span>STOR · Storage</span>
+        <span style="font-weight:600; margin-left:auto;">$15.00</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Will Calls (collapsed) -->
+  <div class="section" onclick="this.classList.toggle('open')">
+    <div class="section-header">
+      <div class="section-title">
+        <div class="icon">🚚</div>
+        Will Calls
+        <span class="section-count">0</span>
+      </div>
+      <span class="chevron">▾</span>
+    </div>
+    <div class="section-body">
+      <div style="color:#94A3B8; font-size:12px; padding:4px 0;">None</div>
+    </div>
+  </div>
+
+  <div class="note">
+    Click any section to expand/collapse · Moves section shows both location changes and client transfers
+  </div>
+</div>
+
+</body>
+</html>

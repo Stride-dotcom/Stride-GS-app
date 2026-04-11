@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif; background: #F1F5F9; padding: 20px; }
+
+  .section-label { font-size: 10px; color: #94A3B8; font-weight: 600; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 10px; margin-top: 30px; }
+
+  /* Top Toolbar */
+  .top-toolbar { background: #fff; border: 1px solid #E2E8F0; border-radius: 12px; padding: 10px 16px; display: flex; gap: 8px; align-items: center; justify-content: flex-end; }
+  .tb { padding: 7px 12px; font-size: 12px; font-weight: 500; border: 1px solid #E2E8F0; border-radius: 8px; background: #fff; cursor: pointer; display: flex; align-items: center; gap: 5px; color: #64748B; }
+  .tb-accent { border-color: #E85D2D; color: #E85D2D; font-weight: 600; }
+  .tb-purple { border-color: #7C3AED; color: #7C3AED; font-weight: 600; }
+
+  /* Bottom Action Bar */
+  .bottom-bar { background: #1A1A1A; border-radius: 12px; padding: 12px 20px; display: flex; justify-content: space-between; align-items: center; }
+  .bb-left { display: flex; align-items: center; gap: 12px; }
+  .bb-left span { color: #fff; font-size: 13px; font-weight: 600; }
+  .bb-clear { background: transparent; border: 1px solid #555; border-radius: 6px; color: #999; padding: 4px 10px; font-size: 12px; cursor: pointer; }
+  .bb-create { background: #E85D2D; color: #fff; border: none; padding: 9px 20px; border-radius: 8px; font-size: 13px; font-weight: 700; cursor: pointer; display: flex; align-items: center; gap: 6px; }
+
+  /* Modal */
+  .modal-bg { background: rgba(0,0,0,0.3); border-radius: 16px; padding: 40px; margin-top: 10px; display: flex; justify-content: center; }
+  .modal { background: #fff; border-radius: 16px; width: 560px; box-shadow: 0 8px 40px rgba(0,0,0,0.15); overflow: hidden; }
+  .m-header { padding: 18px 24px; border-bottom: 1px solid #E2E8F0; }
+  .m-header h2 { font-size: 18px; font-weight: 700; color: #1E293B; }
+  .m-header p { font-size: 13px; color: #64748B; margin-top: 4px; }
+  .m-body { padding: 20px 24px; }
+
+  .summary { background: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 10px; padding: 14px; margin-bottom: 16px; font-size: 12px; }
+  .sr { display: flex; justify-content: space-between; margin-bottom: 6px; }
+  .sr:last-child { margin-bottom: 0; }
+  .sr-l { color: #64748B; }
+  .sr-v { font-weight: 700; }
+  .sr-o { color: #E85D2D; }
+
+  .group { display: flex; justify-content: space-between; align-items: center; padding: 8px 12px; background: #F8FAFC; border-radius: 8px; margin-bottom: 6px; font-size: 12px; }
+  .g-name { font-weight: 600; color: #1E293B; }
+  .g-info { color: #64748B; }
+  .g-info strong { color: #1E293B; }
+
+  .divider { border-top: 1px solid #E2E8F0; margin: 16px 0; }
+  .opt-title { font-size: 13px; font-weight: 700; color: #1E293B; margin-bottom: 12px; }
+
+  .opt { display: flex; align-items: flex-start; gap: 10px; padding: 10px 12px; border: 1px solid #E2E8F0; border-radius: 10px; margin-bottom: 8px; cursor: pointer; transition: all 0.15s; }
+  .opt.on { border-color: #E85D2D; background: #FEF3EE; }
+  .opt input { accent-color: #E85D2D; margin-top: 2px; width: 16px; height: 16px; cursor: pointer; }
+  .opt-c { flex: 1; }
+  .opt-l { font-size: 13px; font-weight: 600; color: #1E293B; }
+  .opt-d { font-size: 11px; color: #64748B; margin-top: 2px; line-height: 1.5; }
+  .badge { font-size: 9px; padding: 2px 6px; border-radius: 4px; font-weight: 700; margin-left: 6px; }
+  .badge-g { background: #F0FDF4; color: #15803D; }
+
+  .m-footer { padding: 14px 24px; border-top: 1px solid #E2E8F0; display: flex; justify-content: space-between; align-items: center; background: #F8FAFC; }
+  .btn-c { padding: 9px 18px; border-radius: 8px; font-size: 13px; font-weight: 500; cursor: pointer; background: #fff; border: 1px solid #E2E8F0; color: #64748B; }
+  .btn-p { padding: 9px 22px; border-radius: 8px; font-size: 13px; font-weight: 700; cursor: pointer; background: #E85D2D; border: none; color: #fff; }
+</style>
+</head>
+<body>
+
+<div style="max-width: 900px; margin: 0 auto;">
+
+<div class="section-label">Top Toolbar (above table - always visible)</div>
+<div class="top-toolbar">
+  <div style="flex:1; display: flex; align-items: center; gap: 6px; font-size: 13px; color: #64748B;">Showing <strong style="color:#1E293B">98</strong> of <strong style="color:#1E293B">98</strong> rows</div>
+  <button class="tb">&#9881; Columns</button>
+  <button class="tb">&#8595; Export</button>
+  <button class="tb" style="color:#1D4ED8; border-color:#BFDBFE;">&#128279; Exports</button>
+  <button class="tb tb-accent">$ QB Export</button>
+  <button class="tb tb-purple">$ Stax IIF</button>
+</div>
+
+<div class="section-label">Bottom Action Bar (when rows are selected)</div>
+<div class="bottom-bar">
+  <div class="bb-left">
+    <span>6 row(s) selected &middot; $27.28</span>
+    <button class="bb-clear">Clear</button>
+  </div>
+  <button class="bb-create">&#9993; Create Invoice</button>
+</div>
+
+<div class="section-label">Modal (opens when "Create Invoice" is clicked)</div>
+<div class="modal-bg">
+  <div class="modal">
+    <div class="m-header">
+      <h2>Create &amp; Send Invoices</h2>
+      <p>6 selected rows &middot; $27.28 total</p>
+    </div>
+    <div class="m-body">
+      <div class="summary">
+        <div class="sr"><span class="sr-l">Invoices to create:</span><span class="sr-v">3</span></div>
+        <div class="sr"><span class="sr-l">Total line items:</span><span class="sr-v">6</span></div>
+        <div class="sr"><span class="sr-l">Grand total:</span><span class="sr-v sr-o">$27.28</span></div>
+      </div>
+
+      <div class="group"><span class="g-name">Demo Company &mdash; MILLER RESIDENCE</span><span class="g-info">1 row &middot; <strong>$17.82</strong></span></div>
+      <div class="group"><span class="g-name">Demo Company &mdash; JOHNSON OFFICE</span><span class="g-info">1 row &middot; <strong>$5.94</strong></span></div>
+      <div class="group"><span class="g-name">Demo Company &mdash; DD TESTING</span><span class="g-info">4 rows &middot; <strong>$3.52</strong></span></div>
+
+      <div class="divider"></div>
+
+      <div class="opt-title">Actions to perform:</div>
+
+      <div class="opt on">
+        <input type="checkbox" checked disabled />
+        <div class="opt-c">
+          <div class="opt-l">Create &amp; Save Invoices <span class="badge badge-g">Always</span></div>
+          <div class="opt-d">Generate invoice PDFs and save to each client's accounting folder. Updates billing status to Invoiced.</div>
+        </div>
+      </div>
+
+      <div class="opt on">
+        <input type="checkbox" checked />
+        <div class="opt-c">
+          <div class="opt-l">Send Email to Client</div>
+          <div class="opt-d">Email the invoice PDF to the client's email on file. Uses the invoice email template.</div>
+        </div>
+      </div>
+
+      <div class="opt">
+        <input type="checkbox" />
+        <div class="opt-c">
+          <div class="opt-l">Export QB File (.xlsx)</div>
+          <div class="opt-d">Generate a QuickBooks Online-compatible Excel file and save to the exports folder. Can also be exported later from the toolbar.</div>
+        </div>
+      </div>
+
+      <div class="opt">
+        <input type="checkbox" />
+        <div class="opt-c">
+          <div class="opt-l">Export Stax IIF</div>
+          <div class="opt-d">Generate a Stax-compatible IIF file for payment processing. Can also be exported later from the toolbar.</div>
+        </div>
+      </div>
+    </div>
+    <div class="m-footer">
+      <button class="btn-c">Cancel</button>
+      <button class="btn-p">Create 3 Invoices</button>
+    </div>
+  </div>
+</div>
+
+</div>
+</body>
+</html>
