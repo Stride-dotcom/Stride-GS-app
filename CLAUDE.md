@@ -28,6 +28,11 @@ Historical and rarely-needed reference material has been moved to `Docs/Archive/
 | `Docs/Archive/Architectural_Decisions_Log.md` | Full numbered list of 53 decisions — the "why" behind feature implementations |
 | `Docs/Archive/Performance_Track_History.md` | Completed performance phases 1-3 with version numbers |
 
+**DispatchTrack integration docs (active):**
+| File | When to read |
+|---|---|
+| `Docs/DT_Integration_Build_Plan.md` | Full DT build plan — all phases, locked decisions, table schema, RLS summary, open questions |
+
 Companion living doc: **`Docs/Stride_GS_App_Build_Status.md`** — current session changes, what's next, feature parity matrix.
 
 ---
@@ -76,13 +81,34 @@ All commands run from: `AppScripts/stride-client-inventory/` (except React, whic
 | Stax Auto Pay | `npm run push-stax` | — |
 | Email templates | `npm run push-templates` | `npm run refresh-caches` |
 | React app | (from `stride-gs-app/`) `npx tsc --noEmit && npm run build` then `cd dist && git add -A && git commit -m "Deploy: ..." && git push origin main --force` | GitHub Pages auto (CDN 1-5 min; hard-refresh to verify) |
+| Supabase migrations | Apply via MCP tool (see below) — no manual SQL editor needed | MCP `apply_migration` is the deploy |
 
 **All-at-once after a big session:**
 ```bash
 npm run push-api && npm run deploy-api
 npm run rollout && npm run deploy-clients
 # Then React build from stride-gs-app/
+# Then any Supabase migrations via MCP tool
 ```
+
+### Supabase Migrations (MCP tool)
+
+Supabase schema changes go through the MCP tool — NOT the Supabase SQL Editor dashboard. This keeps migrations versioned and trackable.
+
+- **MCP tool ID:** `mcp__94cd3688-d1f9-4417-a61a-6e38b1d2b097`
+- **Supabase project ID:** `uqplppugeickmamycpuz`
+- **Migration files live at:** `stride-gs-app/supabase/migrations/YYYYMMDDHHMMSS_name.sql`
+
+| Operation | MCP function | When to use |
+|---|---|---|
+| Apply a new migration | `apply_migration(project_id, name, query)` | Every schema change (CREATE TABLE, ALTER TABLE, RLS, indexes) |
+| List applied migrations | `list_migrations(project_id)` | Verify what's been applied |
+| List current tables | `list_tables(project_id, schemas)` | Verify table state before/after |
+| Run arbitrary SQL | `execute_sql(project_id, query)` | Data fixes, one-off queries, debugging |
+
+**Naming convention for migration files:** `YYYYMMDDHHMMSS_snake_case_description.sql` (matches existing Supabase timestamp format).
+
+**Always write the migration SQL to `stride-gs-app/supabase/migrations/` before applying** so the file is committed to git as the source of truth.
 
 **`npm run deploy-all`** updates clients + StrideAPI Web App deployments in one shot. Idempotent, safe to run anytime.
 
@@ -273,6 +299,8 @@ Client inventory scripts are NOT edited via direct URLs — use `npm run rollout
 
 ### Active open items
 
+- [x] **DispatchTrack Phase 1b** — React Orders tab live (admin-only, empty until Phase 1c ingest). Build `63207c2`. See `Docs/DT_Integration_Build_Plan.md`.
+- [ ] **DispatchTrack Phase 1c** — Webhook ingest Edge Function. Needs DT account API credentials + webhook secret first.
 - [ ] **Standalone Repair Detail Page (Phase 2)** — `#/repairs/:repairId` — same pattern as Task Detail, pending.
 - [ ] **Standalone Will Call Detail Page (Phase 3)** — `#/will-calls/:wcNumber` — same pattern, requires WC items parity audit.
 - [ ] **Generate Work Order button** — Manual PDF generation from TaskDetailPanel. Backend handler exists, needs React wiring + router case.

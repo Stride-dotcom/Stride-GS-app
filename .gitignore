@@ -1,9 +1,27 @@
 node_modules/
 _backups/
+
+# Secrets — NEVER commit
 .env
 .env.local
 stride-gs-app/.env
 stride-gs-app/.env.local
 AppScripts/stride-client-inventory/admin/.credentials.json
+
+# Claude Code workspace metadata
 .claude/
+
+# Rollout tooling (local master for npm run rollout to client scripts)
 AppScripts/stride-client-inventory/
+
+# React app built output (served from stride-gs-app/dist/ via its own subtree repo)
+stride-gs-app/dist/
+
+# Build caches
+**/*.tsbuildinfo
+stride-gs-app/.vite/
+
+# Crashed-save + legacy backup artifacts (cleaned up in session 59)
+**/*.tmp.*
+**/*.backup.pre-jobdetail-*.ts
+**/*.backup.pre-jobdetail-*.tsx

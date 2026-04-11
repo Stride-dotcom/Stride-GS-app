@@ -664,3 +664,152 @@ export async function fetchDashboardSummaryFromSupabase(
     return null;
   }
 }
+
+// ─── DispatchTrack Orders ─────────────────────────────────────────────────────
+
+export interface SupabaseDtStatusRow {
+  id: number;
+  code: string;
+  name: string;
+  category: string;
+  display_order: number;
+  color: string | null;
+}
+
+export interface SupabaseDtOrderRow {
+  id: string;
+  tenant_id: string | null;
+  dt_dispatch_id: number | null;
+  dt_identifier: string;
+  dt_mode: number | null;
+  is_pickup: boolean | null;
+  status_id: number | null;
+  substatus_id: number | null;
+  contact_name: string | null;
+  contact_address: string | null;
+  contact_city: string | null;
+  contact_state: string | null;
+  contact_zip: string | null;
+  contact_phone: string | null;
+  contact_email: string | null;
+  contact_latitude: number | null;
+  contact_longitude: number | null;
+  pickup_address_json: Record<string, unknown> | null;
+  local_service_date: string | null;
+  window_start_local: string | null;
+  window_end_local: string | null;
+  timezone: string;
+  service_time_minutes: number | null;
+  load: number | null;
+  priority: number | null;
+  po_number: string | null;
+  sidemark: string | null;
+  client_reference: string | null;
+  details: string | null;
+  latest_note_preview: string | null;
+  linked_order_id: string | null;
+  source: string | null;
+  last_synced_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DtOrderForUI {
+  id: string;
+  tenantId: string | null;
+  dtIdentifier: string;
+  dtDispatchId: number | null;
+  isPickup: boolean;
+  statusId: number | null;
+  statusCode: string;
+  statusName: string;
+  statusColor: string;
+  statusCategory: string;
+  contactName: string;
+  contactAddress: string;
+  contactCity: string;
+  contactState: string;
+  contactZip: string;
+  contactPhone: string;
+  contactEmail: string;
+  localServiceDate: string;
+  windowStartLocal: string;
+  windowEndLocal: string;
+  timezone: string;
+  poNumber: string;
+  sidemark: string;
+  clientReference: string;
+  details: string;
+  latestNotePreview: string;
+  source: string;
+  lastSyncedAt: string;
+  clientName: string;
+}
+
+export async function fetchDtStatusesFromSupabase(): Promise<SupabaseDtStatusRow[]> {
+  try {
+    const { data, error } = await supabase
+      .from('dt_statuses')
+      .select('*')
+      .order('display_order');
+    if (error || !data) return [];
+    return data as SupabaseDtStatusRow[];
+  } catch {
+    return [];
+  }
+}
+
+export async function fetchDtOrdersFromSupabase(
+  clientNameMap: ClientNameMap,
+  clientSheetId?: string
+): Promise<DtOrderForUI[] | null> {
+  try {
+    const statuses = await fetchDtStatusesFromSupabase();
+    const statusMap = new Map(statuses.map(s => [s.id, s]));
+    let query = supabase
+      .from('dt_orders')
+      .select('*')
+      .order('local_service_date', { ascending: false });
+    if (clientSheetId) {
+      query = query.eq('tenant_id', clientSheetId);
+    }
+    const { data, error } = await query;
+    if (error || !data) return null;
+    return (data as SupabaseDtOrderRow[]).map(row => {
+      const status = row.status_id != null ? statusMap.get(row.status_id) : undefined;
+      return {
+        id: row.id,
+        tenantId: row.tenant_id,
+        dtIdentifier: row.dt_identifier,
+        dtDispatchId: row.dt_dispatch_id,
+        isPickup: row.is_pickup ?? false,
+        statusId: row.status_id,
+        statusCode: status?.code ?? '',
+        statusName: status?.name ?? '—',
+        statusColor: status?.color ?? '#94a3b8',
+        statusCategory: status?.category ?? 'open',
+        contactName: row.contact_name ?? '',
+        contactAddress: row.contact_address ?? '',
+        contactCity: row.contact_city ?? '',
+        contactState: row.contact_state ?? '',
+        contactZip: row.contact_zip ?? '',
+        contactPhone: row.contact_phone ?? '',
+        contactEmail: row.contact_email ?? '',
+        localServiceDate: row.local_service_date ?? '',
+        windowStartLocal: row.window_start_local ?? '',
+        windowEndLocal: row.window_end_local ?? '',
+        timezone: row.timezone,
+        poNumber: row.po_number ?? '',
+        sidemark: row.sidemark ?? '',
+        clientReference: row.client_reference ?? '',
+        details: row.details ?? '',
+        latestNotePreview: row.latest_note_preview ?? '',
+        source: row.source ?? '',
+        lastSyncedAt: row.last_synced_at ?? '',
+        clientName: (row.tenant_id ? clientNameMap[row.tenant_id] : null) ?? '',
+      };
+    });
+  } catch {
+    return null;
+  }
+}

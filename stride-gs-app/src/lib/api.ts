@@ -2494,6 +2494,47 @@ export function postTestSendClaimEmails(
   );
 }
 
+// ─── Send Welcome Email to Users (v38.43.0) ──────────────────────────────────
+
+export interface SendWelcomeToUsersPayload {
+  userEmails: string[];
+}
+
+export interface SendWelcomeToUsersResult {
+  email: string;
+  ok: boolean;
+  reason?: string;
+  error?: string;
+  sentTo?: string;
+  role?: string;
+}
+
+export interface SendWelcomeToUsersResponse {
+  success: boolean;
+  sent: number;
+  failed: number;
+  total: number;
+  results: SendWelcomeToUsersResult[];
+  error?: string;
+}
+
+/**
+ * Batch resend the welcome email to one or more users.
+ * Admin-only. Bypasses the dedup guard (explicit resend) but updates the
+ * Welcome Sent At column after successful send.
+ */
+export function postSendWelcomeToUsers(
+  payload: SendWelcomeToUsersPayload,
+  signal?: AbortSignal
+) {
+  return apiPost<SendWelcomeToUsersResponse>(
+    'sendWelcomeToUsers',
+    payload as unknown as Record<string, unknown>,
+    undefined,
+    { signal }
+  );
+}
+
 // ─── Template Management (v38.12.0) ──────────────────────────────────────────
 
 export interface EmailTemplate {

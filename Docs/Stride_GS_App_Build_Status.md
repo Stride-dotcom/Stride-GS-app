@@ -1,7 +1,8 @@
 # Stride GS App — Build Status & Continuation Guide
 
-**Last updated:** 2026-04-10 (session 55 — Dashboard Created column fix for Repairs + Will Calls)
-**StrideAPI.gs:** v38.41.0 (Web App v230)
+**Last updated:** 2026-04-11 (session 59 — Welcome email auto-send on activation + Users page button + build pipeline fix)
+**StrideAPI.gs:** v38.43.0 (Web App v232)
+**Emails.gs (client):** v4.2.0 (rolled out to all 6 clients)
 **Code.gs (client):** v4.6.0 (rolled out to all 6 clients, web apps deployed)
 **StaxAutoPay.gs:** v4.5.0 (pushed to Stax Auto Pay bound script)
 **Purpose:** Single living progress document. Updated every session.
@@ -38,12 +39,12 @@
 ### Backend (Google Sheets + Apps Script)
 - **System reference:** `CLAUDE.md` (read first)
 - **Client inventory (modular):** `AppScripts/stride-client-inventory/src/` — 13 `.gs` files, `npm run rollout`
-- **API:** `AppScripts/stride-api/StrideAPI.gs` — standalone project, v38.40.0 (Web App v228)
+- **API:** `AppScripts/stride-api/StrideAPI.gs` — standalone project, v38.42.0 (Web App v231)
 - **Stax Auto Pay:** `AppScripts/stax-auto-pay/StaxAutoPay.gs` — v4.5.0, bound to Stax spreadsheet
 - **Supabase cache:** 6 mirror tables + `gs_sync_events` failure tracking
 
-### 13 Pages Built
-Login, Dashboard, Inventory, Receiving, Shipments, Tasks, Repairs, Will Calls, Billing, Payments/Stax, Claims, Settings, **Marketing** (admin-only). QR Scanner + Labels (iframe pages). All wired to live API — all mock data removed.
+### 14 Pages Built
+Login, Dashboard, Inventory, Receiving, Shipments, Tasks, Repairs, Will Calls, Billing, Payments/Stax, Claims, Settings, **Marketing** (admin-only), **Orders** (admin-only, DT integration). QR Scanner + Labels (iframe pages). All wired to live API — all mock data removed.
 
 ### Key Components
 - Universal Search (⌘K)
@@ -65,37 +66,38 @@ Login, Dashboard, Inventory, Receiving, Shipments, Tasks, Repairs, Will Calls, B
 **Performance:** Server-side CacheService (600s TTL, chunked >100KB), cache invalidation on all writes. Folder URL reads always-on. Supabase-first reads (~50ms) with GAS fallback. `api_fetchWithRetry_` (exponential backoff on Drive 403/429/5xx). Filtered billing queries bypass cache.
 
 ### React Hooks
-`useClients`, `usePricing`, `useLocations`, `useInventory`, `useTasks`, `useRepairs`, `useWillCalls`, `useShipments`, `useBilling` (accepts BillingFilterParams for report builder), `useClaims`, `useUsers`, `useFailedOperations`, `useTablePreferences` (reconciles new columns into saved order), `useResizablePanel`, `useSidebarOrder`, `useIsMobile`, `useBatchData`.
+`useClients`, `usePricing`, `useLocations`, `useInventory`, `useTasks`, `useRepairs`, `useWillCalls`, `useShipments`, `useBilling` (accepts BillingFilterParams for report builder), `useClaims`, `useUsers`, `useOrders` (Supabase-only, DT integration), `useFailedOperations`, `useTablePreferences` (reconciles new columns into saved order), `useResizablePanel`, `useSidebarOrder`, `useIsMobile`, `useBatchData`.
 
 ---
 
-## RECENT CHANGES (2026-04-10 session 55)
+## RECENT CHANGES (2026-04-11 session 59)
 
-### Session 55: Dashboard Created column fix for Repairs + Will Calls
+### Session 59: Welcome email auto-send on activation + Users page Send button + build pipeline fix
 
-The Repairs and Will Calls tabs on the Dashboard always showed em-dashes in the Created column for every row, even when the sheet had real `Created Date` values. Tasks worked correctly, which masked the issue during Phase 4 Supabase setup. The bug was a three-layer end-to-end gap:
+Five interlocking changes to the welcome-email path, plus the discovery of a serious build pipeline regression that had been silently shipping stale bundles since session 58.
 
-| Layer | Problem |
-|---|---|
-| **Supabase schema** | Neither `repairs` nor `will_calls` mirror tables had a `created_date` column. The auto `created_at timestamptz` column was insert time, not business date, so the React types deliberately ignored it. |
-| **Backend row builders** | `sbRepairRow_` and `sbWillCallRow_` in StrideAPI.gs didn't include `created_date` at all. Every write-through, resync, and bulk sync wrote nothing for this field. |
-| **React Supabase read path** | `fetchRepairsFromSupabase`, `fetchWillCallsFromSupabase`, the second repair mapper, and the two `fetchDashboardSummaryFromSupabase` mappers all hardcoded `createdDate: ''`. Since the dashboard is Supabase-first on mount, the empty string always won. |
+**1. Test-send "Unknown templateKey" bug fixed.** `handleTestSendClientTemplates_`'s hardcoded `CLIENT_TEMPLATES` list didn't include `WELCOME_EMAIL` or `ONBOARDING_EMAIL`. The React Template Editor sends test requests for these system-category keys and the endpoint returned `Unknown templateKey: WELCOME_EMAIL`. Added both to the list with appropriate subjects. Also added `{{SPREADSHEET_URL}}` and `{{CLIENT_EMAIL}}` to the mock token set so the rendered preview resolves cleanly.
 
-| Change | Files Changed |
-|--------|---------------|
-| **Supabase migration** — `add_created_date_to_repairs_and_will_calls` adds `created_date text` to both tables via `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`. Purely additive; no reordering, no data loss. | Supabase project `uqplppugeickmamycpuz` |
-| **`sbRepairRow_` + `sbWillCallRow_`** — both now write `created_date: String(repair.createdDate \|\| "")`. | StrideAPI.gs v38.41.0 |
-| **All 5 backend callsites pass `createdDate`** — `resyncEntityToSupabase_` (2), `api_fullClientSync_` (2), `handleBulkSyncToSupabase_` (2). Each reads `formatDate_(row["Created Date"])` from the sheet. Without this, a bulk sync would still backfill blank values. | StrideAPI.gs v38.41.0 |
-| **React `SupabaseRepairRow` + `SupabaseWillCallRow`** — interfaces gain `created_date: string \| null`. | `stride-gs-app/src/lib/supabaseQueries.ts` |
-| **All 5 React mappers** — `fetchRepairsFromSupabase`, `fetchWillCallsFromSupabase`, the single-tenant repair mapper at line 542, `fetchDashboardSummaryFromSupabase` repairs + will calls — each now map `createdDate: row.created_date \|\| ''`. | same |
+**2. `handleSyncTemplatesToClients_` header lookup bug fixed.** Line 14908 was searching `cbHeaders.indexOf("SPREADSHEET ID")` but the actual CB Clients header uppercases to `"CLIENT SPREADSHEET ID"`. The React "Sync Email Templates to Clients" button errored with "CB Clients missing required columns" and did nothing. Now uses `"CLIENT SPREADSHEET ID"` first with a legacy fallback.
 
-**Backfill required:** existing rows in Supabase have `created_date = null`. Run **Settings → Maintenance → Bulk Sync to Supabase** once — the repaired `handleBulkSyncToSupabase_` will re-read all Repairs + Will_Calls rows from every client sheet and upsert with the real Created Date. After that, the dashboard Created column will populate for all rows on the next load.
+**3. `handleSendWelcomeEmail_` recipient override.** Previously hardcoded to send to the client's `CLIENT_EMAIL` from Settings. Now accepts optional `payload.recipient` to override — used by user activation + batch resend flows where the target is a specific user email (from CB Users) that may differ from the client's primary email.
 
-**Why Tasks wasn't affected:** tasks already had `created_date` wired end-to-end from an earlier phase (Session 47), so the field was always present on the mirror and the read path.
+**4. NEW `api_sendWelcomeOnce_` helper + auto-send on activation.** Dedups via an auto-created `Welcome Sent At` column on CB Users (appended non-destructively on first call). Only fires for role=client. Never throws. Wired into three activation sites:
+- `api_upsertClientUser_` — the onboarding path creates client users with Active=TRUE immediately
+- `handleCreateUser_` — manual create with `active: "TRUE"` override (non-default)
+- `handleUpdateUser_` — captures `prevActive` before the write and fires on FALSE→TRUE transitions
 
-**Deployed:** StrideAPI.gs v38.41.0 → Web App v230. React commit `8441ff3` → GitHub Pages (bundle `index-5gy4c4OL.js`). TypeScript clean (`npx tsc --noEmit` exit 0). Supabase migration applied.
+**5. NEW `sendWelcomeToUsers` batch endpoint + React Send Welcome button.** Admin-only endpoint that accepts a `userEmails` array. For each user: looks up their row in CB Users, fires `handleSendWelcomeEmail_` with `recipient` override set to the user's email and `clientSheetId` set to their first client sheet. BYPASSES the `Welcome Sent At` dedup guard (explicit resend) but still updates the timestamp after successful send. React Settings → Users tab now has a **Send Welcome** button in the actions column next to Login As, admin-only, only visible for client-role users (staff/admin don't need the mystridehub.com walkthrough). Shows an inline success/error banner after the send completes.
 
-Previous sessions (48 Supabase Realtime, 49 Delete-aware sync + Optimistic UI, 50 Billing two-table restructure, 51 Released/On Hold billable for storage, 52 Transfer Date storage cutover, 53 Client Shipment Note banner, 54 Stax Autopay Phase 4A+4B + setCol_ hardening): See `Docs/Archive/Session_History.md`.
+**6. Client-bound `Emails.gs` v4.2.0 — `{{APP_URL}}` token parity.** The spreadsheet custom menu "Send Welcome Email" path uses `sendWelcomeEmail_` which loads the template from local `Email_Template_Cache` first, then Master as fallback. The client-side token resolver previously only knew `{{CLIENT_NAME}}`, `{{SPREADSHEET_URL}}`, `{{CLIENT_EMAIL}}` — so if the Master template was updated to use `{{APP_URL}}` for the login CTA (as it should), the spreadsheet-menu path would render `{{APP_URL}}` as literal text. Added `{{APP_URL}}: "https://www.mystridehub.com"` to both the production path and the test-send path.
+
+**7. CRITICAL — React build pipeline regression found and fixed.** The stride-gs-app root `index.html` had been silently broken since commit `8441ff3` (session 58 — Dashboard Created column fix). The `<script>` tag referenced a built asset `/assets/index-5gy4c4OL.js` instead of the source entry `/src/main.tsx`. Vite reads `index.html` as the build entry point, so every `npm run build` since session 58 transformed only 6 modules (the HTML itself + its script tag + its CSS link) and produced a no-op bundle that just echoed the previously-built JS. **This means the release_date fix (session 58), the Dashboard Created column fix, and the DT Phase 1b Orders tab were NEVER actually shipped to mystridehub.com — the production bundle was locked at the pre-session-58 version.** Fix: replaced the bad `<script>` line with `<script type="module" src="/src/main.tsx"></script>` and rebuilt clean. New build transformed 1,875 modules and produced `index-BuGBj9aB.js` (1,449,990 bytes, 15KB larger than the stale echo). **This deploy contains ALL React changes from the past three sessions that were previously stuck in the build cache.**
+
+Deployed: StrideAPI.gs v38.43.0 → Web App v232. Emails.gs v4.2.0 rolled to all 6 clients. React dist commit `5730f7a` → GitHub Pages (bundle `index-BuGBj9aB.js`). TypeScript clean.
+
+**Still required (user action):** Go to Settings → Email Templates → click "Sync to Clients". This pushes the correct Master `WELCOME_EMAIL` template down to each client's local `Email_Template_Cache` tab. The curl path I tried hit a 502 because the sync takes ~30s across 6 clients and intermediate gateways time out — the React page handles the long-running call via the browser fetch so it works there. After the sync runs successfully, the spreadsheet custom menu "Send Welcome Email" will also produce the correct mystridehub.com-linking version.
+
+Previous sessions (58 releaseItems Supabase sync fix, 57 DT Phase 1b Orders tab): See `Docs/Archive/Session_History.md`.
 
 ---
 

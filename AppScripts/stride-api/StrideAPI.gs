@@ -1,5 +1,48 @@
 /* ===================================================
-   StrideAPI.gs — v38.41.0 — 2026-04-10 05:15 PM PST — Dashboard Created column fix for Repairs + Will Calls
+   StrideAPI.gs — v38.43.0 — 2026-04-11 02:30 PM PST — Welcome email: auto-send on activation + resend batch + test-send fix + sync fix
+   v38.43.0: Five related changes to the welcome-email path.
+   (1) handleTestSendClientTemplates_ CLIENT_TEMPLATES list now includes
+   WELCOME_EMAIL + ONBOARDING_EMAIL. Previously the React Email Template Editor
+   sent "Test" requests for these keys and the endpoint returned
+   "Unknown templateKey: WELCOME_EMAIL" because the hardcoded filter list
+   omitted system-category templates.
+   (2) handleSyncTemplatesToClients_ header lookup fixed. Was searching for
+   "SPREADSHEET ID" but the actual CB Clients header is "Client Spreadsheet ID",
+   so the React sync button errored with "CB Clients missing required columns".
+   Now looks for "CLIENT SPREADSHEET ID" first with legacy fallback.
+   (3) handleSendWelcomeEmail_ now accepts optional payload.recipient to override
+   the default CLIENT_EMAIL lookup. Used by user activation + batch resend
+   flows where the target is a specific user email, not the client's primary
+   email.
+   (4) NEW api_sendWelcomeOnce_ helper: dedups via auto-created "Welcome Sent At"
+   column on CB Users. Wired into three activation sites:
+     - api_upsertClientUser_ (onboarding creates client users with Active=TRUE)
+     - handleCreateUser_ (manual create with active=TRUE override)
+     - handleUpdateUser_ (FALSE→TRUE activation transition)
+   Only fires for role=client. Never throws — caller flow continues on failure.
+   (5) NEW handleSendWelcomeToUsers_ endpoint + "sendWelcomeToUsers" router case
+   for batch resend from the React Users page. Admin-only. Bypasses the
+   dedup check (this is an explicit resend) but still updates Welcome Sent At
+   after successful send so the column reflects the most recent delivery.
+   v38.42.0: Fixes the bug where releasing items in React showed blank release_date
+   v38.42.0: Fixes the bug where releasing items in React showed blank release_date
+   even though the sheet had the correct value. Two interlocking problems:
+   (1) handleReleaseItems_ never called SpreadsheetApp.flush() before returning,
+   so the router's downstream api_fullClientSync_(clientSheetId, ["inventory"])
+   call could re-open the sheet and read stale values (pre-write batched state).
+   Evidence: Supabase audit showed the test tenant's inventory had updated_at
+   frozen at yesterday's Bulk Sync timestamp despite multiple release actions
+   being performed today — the sync HAD been running but reading stale data.
+   (2) The router used the heavy api_fullClientSync_(... ["inventory"]) which
+   re-reads the entire Inventory sheet and upserts every row — wasteful for a
+   1-5 item release, and any silent failure leaves the full sheet stale. Every
+   other single-entity write handler uses api_writeThrough_(r, entityType,
+   tenantId, entityId) which calls resyncEntityToSupabase_ to re-read and upsert
+   only the changed rows. Fix: (a) added SpreadsheetApp.flush() at the end of
+   handleReleaseItems_ matching the handleStartTask pattern. (b) switched the
+   releaseItems router case from api_fullClientSync_ to api_writeThrough_ with
+   the itemIds from the payload. No schema changes. No React changes.
+   v38.41.0: Fixes the dashboard Repairs + Will Calls Created column always showing em-dashes.
    v38.41.0: Fixes the dashboard Repairs + Will Calls Created column always showing em-dashes.
    Root cause was layered: (1) Supabase mirror tables had no `created_date` column,
    (2) sbRepairRow_/sbWillCallRow_ didn't write the field, (3) React's
@@ -1693,7 +1736,16 @@ function doPost(e) {
         return withStaffGuard_(callerEmail, function() {
           var r = handleReleaseItems_(clientSheetId, payload, callerEmail);
           invalidateClientCache_(clientSheetId);
-          api_fullClientSync_(clientSheetId, ["inventory"]);
+          // v38.42.0 — Targeted per-item resync is cheaper AND more reliable
+          // than api_fullClientSync_. fullClientSync re-reads the entire
+          // Inventory sheet and upserts every row; for a 250-row client,
+          // that's a lot of wasted Supabase traffic, and any silent failure
+          // would leave the app showing stale data. api_writeThrough_ re-reads
+          // only the specific released Item IDs via resyncEntityToSupabase_
+          // (which itself calls SpreadsheetApp.flush() before reading). This
+          // matches the pattern used by every other single-entity handler.
+          var releasedIds = Array.isArray(payload && payload.itemIds) ? payload.itemIds : [];
+          api_writeThrough_(r, "inventory", clientSheetId, releasedIds);
           return r;
         });
 
@@ -2008,6 +2060,11 @@ function doPost(e) {
       case "sendWelcomeEmail":
         return withAdminGuard_(callerEmail, function() {
           return handleSendWelcomeEmail_(payload);
+        });
+      // v38.43.0 — Batch resend to selected users from Users page.
+      case "sendWelcomeToUsers":
+        return withAdminGuard_(callerEmail, function() {
+          return handleSendWelcomeToUsers_(payload, callerEmail);
         });
       case "testSendClientTemplates":
         return withStaffGuard_(callerEmail, function() {
@@ -2583,6 +2640,27 @@ function handleCreateUser_(params, callerEmail) {
     Logger.log("handleCreateUser_: " + supabaseWarning);
   }
 
+  // v38.43.0 — If the user was created ACTIVE (non-default path — admin
+  // passed active: "TRUE" explicitly), auto-send the welcome email. The
+  // usual manual create-user flow defaults to Active=FALSE so this won't
+  // fire; activation happens later via handleUpdateUser_ which has its own
+  // hook.
+  var welcomeWarning = "";
+  if (active === "TRUE" && role === "client") {
+    try {
+      // Use the first clientSheetId from the comma-separated list.
+      var firstClientId = parseCSV_(clientSheetId)[0] || clientSheetId;
+      var wResult = api_sendWelcomeOnce_(ss, email, role, firstClientId);
+      if (!wResult.success && wResult.reason !== "already_sent") {
+        welcomeWarning = "User created but welcome email skipped: " + (wResult.reason || "unknown");
+        Logger.log("handleCreateUser_: " + welcomeWarning);
+      }
+    } catch (wErr) {
+      welcomeWarning = "Welcome email failed (non-fatal): " + wErr.message;
+      Logger.log("handleCreateUser_: " + welcomeWarning);
+    }
+  }
+
   var user = {
     email: email,
     role: role,
@@ -2598,6 +2676,7 @@ function handleCreateUser_(params, callerEmail) {
 
   var resp = { success: true, user: user };
   if (supabaseWarning) resp.supabaseWarning = supabaseWarning;
+  if (welcomeWarning) resp.welcomeWarning = welcomeWarning;
   return jsonResponse_(resp);
 }
 
@@ -2658,6 +2737,10 @@ function handleUpdateUser_(params, callerEmail) {
   }
 
   // Update Active
+  // v38.43.0 — Capture previous Active state BEFORE the write so we can detect
+  // the FALSE→TRUE activation transition and fire the welcome email once.
+  var prevActive = !!lookup.user.active;
+  var activatedThisCall = false;
   var newActive = String(params.active || "").trim().toUpperCase();
   if (newActive === "TRUE" || newActive === "FALSE") {
     var activeIdx = headers.indexOf("Active");
@@ -2665,6 +2748,9 @@ function handleUpdateUser_(params, callerEmail) {
       sheet.getRange(rowIdx, activeIdx + 1).setValue(newActive === "TRUE");
       lookup.user.active = newActive === "TRUE";
       changed = true;
+      if (!prevActive && newActive === "TRUE") {
+        activatedThisCall = true;
+      }
     }
   }
 
@@ -2761,7 +2847,35 @@ function handleUpdateUser_(params, callerEmail) {
     } catch (_) {}
   }
 
-  return jsonResponse_({ success: true, user: lookup.user });
+  // v38.43.0 — Auto-send welcome email on FALSE→TRUE activation. Only for
+  // client-role users. api_sendWelcomeOnce_ dedups via the Welcome Sent At
+  // column so a re-activation (deactivate → reactivate) won't spam them.
+  var welcomeResult = null;
+  if (activatedThisCall && String(lookup.user.role || "").toLowerCase() === "client") {
+    try {
+      var cbSS = SpreadsheetApp.openById(prop_("CB_SPREADSHEET_ID"));
+      var firstClientId = parseCSV_(lookup.user.clientSheetId)[0] || lookup.user.clientSheetId;
+      if (firstClientId) {
+        welcomeResult = api_sendWelcomeOnce_(cbSS, lookup.user.email, "client", firstClientId);
+        if (welcomeResult && welcomeResult.success) {
+          Logger.log("handleUpdateUser_: welcome email sent to " + lookup.user.email + " on activation");
+        } else {
+          Logger.log("handleUpdateUser_: welcome email skipped for " + lookup.user.email + " — " + (welcomeResult && welcomeResult.reason ? welcomeResult.reason : "unknown"));
+        }
+      }
+    } catch (wErr) {
+      Logger.log("handleUpdateUser_: welcome email exception (non-fatal): " + wErr);
+    }
+  }
+
+  var resp = { success: true, user: lookup.user };
+  if (welcomeResult && welcomeResult.success) {
+    resp.welcomeEmailSent = true;
+    resp.welcomeSentTo = welcomeResult.sentTo;
+  } else if (welcomeResult && welcomeResult.reason && welcomeResult.reason !== "already_sent") {
+    resp.welcomeWarning = "Activation succeeded but welcome email skipped: " + welcomeResult.reason;
+  }
+  return jsonResponse_(resp);
 }
 
 /**
@@ -7626,6 +7740,14 @@ function handleReleaseItems_(clientSheetId, payload, callerEmail) {
     updated++;
   }
 
+  // v38.42.0 — Flush all sheet writes before returning so that the router's
+  // downstream Supabase sync (api_writeThrough_ / api_fullClientSync_) reads
+  // committed data instead of stale values. Without this, setValue() writes
+  // may still be batched in memory when api_fullClientSync_ re-opens the
+  // sheet, causing released items to sync with blank release_date.
+  // Matches the pattern used by handleStartTask / handleCompleteTask.
+  SpreadsheetApp.flush();
+
   return jsonResponse_({
     success: true,
     releasedCount: updated,
@@ -10951,6 +11073,18 @@ function api_upsertClientUser_(cbSS, email, clientName, clientSheetId) {
     if (!sbResult.success) {
       Logger.log("api_upsertClientUser_: Supabase auth creation failed for " + email + ": " + sbResult.error);
     }
+
+    // v38.43.0 — Auto-send welcome email to the new client user. This runs in
+    // the onboarding path (handleOnboardClient_ → api_upsertClientUser_) where
+    // the user is immediately Active. Dedup via Welcome Sent At column
+    // prevents duplicate sends if the same email is re-upserted (e.g. adding
+    // the same user to a second client later).
+    try {
+      api_sendWelcomeOnce_(cbSS, email, "client", clientSheetId);
+    } catch (wErr) {
+      Logger.log("api_upsertClientUser_: welcome email (non-fatal) failed for " + email + ": " + wErr);
+    }
+
     return { existed: false };
   }
 }
@@ -14870,9 +15004,13 @@ function handleSyncTemplatesToClients_() {
     var cbData = clientsSh.getDataRange().getValues();
     var cbHeaders = cbData[0].map(function(h) { return String(h || "").trim().toUpperCase(); });
     var nameIdx = cbHeaders.indexOf("CLIENT NAME");
-    var ssIdIdx = cbHeaders.indexOf("SPREADSHEET ID");
+    // v38.43.0 — Fix: CB Clients header is "Client Spreadsheet ID", not "Spreadsheet ID".
+    // The old indexOf("SPREADSHEET ID") returned -1 and the whole sync path errored with
+    // "CB Clients missing required columns". Falls back to the legacy name just in case.
+    var ssIdIdx = cbHeaders.indexOf("CLIENT SPREADSHEET ID");
+    if (ssIdIdx === -1) ssIdIdx = cbHeaders.indexOf("SPREADSHEET ID");
     var activeIdx = cbHeaders.indexOf("ACTIVE");
-    if (nameIdx === -1 || ssIdIdx === -1) return errorResponse_("CB Clients missing required columns", "SCHEMA_ERROR");
+    if (nameIdx === -1 || ssIdIdx === -1) return errorResponse_("CB Clients missing required columns (Client Name, Client Spreadsheet ID)", "SCHEMA_ERROR");
 
     for (var c = 1; c < cbData.length; c++) {
       var active = activeIdx !== -1 ? String(cbData[c][activeIdx] || "").trim().toUpperCase() : "TRUE";
@@ -14997,7 +15135,12 @@ function handleSendWelcomeEmail_(payload) {
   var settings = api_readSettings_(ss);
   var clientName = String(settings["CLIENT_NAME"] || "Valued Client").trim();
   var clientEmail = String(settings["CLIENT_EMAIL"] || "").trim();
-  if (!clientEmail) return errorResponse_("No CLIENT_EMAIL configured for " + clientName, "MISSING_CONFIG");
+  // v38.43.0 — Allow caller to override the recipient (e.g. auto-send on user
+  // activation sends to the USER'S email from the Users tab, not to the client's
+  // primary CLIENT_EMAIL in Settings). Falls back to CLIENT_EMAIL if omitted.
+  var recipientOverride = String(payload.recipient || "").trim();
+  var sendTo = recipientOverride || clientEmail;
+  if (!sendTo) return errorResponse_("No recipient configured for " + clientName, "MISSING_CONFIG");
 
   // Load WELCOME_EMAIL template from Master Price List
   var masterSsId = prop_("MASTER_PRICE_LIST_SPREADSHEET_ID");
@@ -15043,11 +15186,241 @@ function handleSendWelcomeEmail_(payload) {
 
   // Send
   try {
-    GmailApp.sendEmail(clientEmail, subject, "", { htmlBody: htmlBody });
-    return jsonResponse_({ success: true, sentTo: clientEmail, clientName: clientName, subject: subject });
+    GmailApp.sendEmail(sendTo, subject, "", { htmlBody: htmlBody });
+    return jsonResponse_({ success: true, sentTo: sendTo, clientName: clientName, subject: subject });
   } catch (err) {
     return errorResponse_("Failed to send email: " + err.message, "SEND_FAILED");
   }
+}
+
+/**
+ * v38.43.0 — Auto-send welcome email once per user lifetime on activation.
+ *
+ * Called from: handleCreateUser_ (if created active), handleUpdateUser_
+ * (on Active FALSE→TRUE transition), api_upsertClientUser_ (onboarding path
+ * creates client users with Active=TRUE).
+ *
+ * Dedup: writes a timestamp to the "Welcome Sent At" column on CB Users.
+ * Column is auto-created on first use (non-destructive append). If the
+ * timestamp is already set, the send is skipped.
+ *
+ * Role gate: only client-role users receive the welcome. Staff/admin don't
+ * need the "go to mystridehub.com and set a password" walkthrough.
+ *
+ * Recipient: the user's OWN email from the Users tab — NOT the client's
+ * CLIENT_EMAIL from the client Settings tab. These can differ when a
+ * client has multiple users.
+ *
+ * Best-effort: any failure is logged as a warning. Never throws — must
+ * not break the caller's core write operation.
+ *
+ * @param {Spreadsheet} cbSS      — CB spreadsheet (already open)
+ * @param {string}      userEmail — Users tab Email column value
+ * @param {string}      role      — "client" | "staff" | "admin"
+ * @param {string}      firstClientSheetId — Primary client sheet ID for {{CLIENT_NAME}} + {{SPREADSHEET_URL}}
+ * @return {{success: boolean, reason?: string, sentTo?: string}}
+ */
+function api_sendWelcomeOnce_(cbSS, userEmail, role, firstClientSheetId) {
+  try {
+    userEmail = String(userEmail || "").trim().toLowerCase();
+    role = String(role || "").trim().toLowerCase();
+    firstClientSheetId = String(firstClientSheetId || "").trim();
+
+    if (!userEmail) return { success: false, reason: "no_email" };
+    if (role !== "client") return { success: false, reason: "not_client_role" };
+    if (!firstClientSheetId) return { success: false, reason: "no_client_sheet_id" };
+
+    var usersSh = cbSS.getSheetByName("Users");
+    if (!usersSh) return { success: false, reason: "users_tab_missing" };
+
+    // Find the user row + ensure "Welcome Sent At" column exists.
+    var data = usersSh.getDataRange().getValues();
+    var hRow = data[0] || [];
+    var hMap = {};
+    for (var h = 0; h < hRow.length; h++) {
+      var k = String(hRow[h] || "").trim().toUpperCase();
+      if (k) hMap[k] = h;
+    }
+    var emailIdx = hMap["EMAIL"];
+    if (emailIdx === undefined) return { success: false, reason: "no_email_column" };
+
+    // Auto-create Welcome Sent At column (append-only, non-destructive).
+    var wsIdx = hMap["WELCOME SENT AT"];
+    if (wsIdx === undefined) {
+      var newCol = usersSh.getLastColumn() + 1;
+      usersSh.getRange(1, newCol).setValue("Welcome Sent At");
+      wsIdx = newCol - 1; // 0-based
+      Logger.log("api_sendWelcomeOnce_: auto-created 'Welcome Sent At' column at index " + newCol);
+    }
+
+    // Find the target row by email.
+    var targetRow = -1;
+    for (var r = 1; r < data.length; r++) {
+      if (String(data[r][emailIdx] || "").trim().toLowerCase() === userEmail) {
+        targetRow = r + 1; // 1-based sheet row
+        // Dedup guard: skip if Welcome Sent At already has a value.
+        // (data[] was read before the column was auto-created, so re-read the
+        //  cell directly — the append above would not be reflected in data[].)
+        if (r < data.length && data[r].length > wsIdx) {
+          var existing = data[r][wsIdx];
+          if (existing && String(existing).trim()) {
+            Logger.log("api_sendWelcomeOnce_: welcome already sent for " + userEmail + " at " + existing + " — skipping");
+            return { success: false, reason: "already_sent" };
+          }
+        } else {
+          // Column was just auto-created — read the cell fresh to be safe.
+          try {
+            var freshVal = usersSh.getRange(targetRow, wsIdx + 1).getValue();
+            if (freshVal && String(freshVal).trim()) {
+              Logger.log("api_sendWelcomeOnce_: welcome already sent for " + userEmail + " (fresh read) — skipping");
+              return { success: false, reason: "already_sent" };
+            }
+          } catch (_) {}
+        }
+        break;
+      }
+    }
+    if (targetRow < 0) return { success: false, reason: "user_row_not_found" };
+
+    // Fire the welcome email via the existing handler with recipient override.
+    var resp = handleSendWelcomeEmail_({
+      clientSheetId: firstClientSheetId,
+      recipient: userEmail
+    });
+    // handleSendWelcomeEmail_ returns a ContentService TextOutput — parse to check success.
+    var json;
+    try { json = JSON.parse(resp.getContent()); } catch (_) { json = {}; }
+    if (!json || !json.success) {
+      Logger.log("api_sendWelcomeOnce_: send failed for " + userEmail + ": " + (json && json.error ? json.error : "unknown"));
+      return { success: false, reason: "send_failed", error: json && json.error ? json.error : "unknown" };
+    }
+
+    // Stamp Welcome Sent At so we never re-send to this user.
+    try {
+      usersSh.getRange(targetRow, wsIdx + 1).setValue(new Date());
+    } catch (stampErr) {
+      Logger.log("api_sendWelcomeOnce_: stamp failed (non-fatal) for " + userEmail + ": " + stampErr);
+    }
+
+    return { success: true, sentTo: userEmail };
+  } catch (err) {
+    Logger.log("api_sendWelcomeOnce_ error (non-fatal): " + err);
+    return { success: false, reason: "exception", error: String(err) };
+  }
+}
+
+/**
+ * v38.43.0 — handleSendWelcomeToUsers_ — batch resend from Users page.
+ *
+ * Explicit admin action to re-fire the welcome email to one or more users.
+ * BYPASSES the dedup guard (Welcome Sent At column) because this is a deliberate
+ * resend — the admin knows the user already got it once. Still updates the
+ * timestamp after a successful send so the column always reflects the most
+ * recent delivery.
+ *
+ * Payload: { userEmails: string[] }
+ * Returns: { success: true, sent: number, failed: number, results: [{email, ok, reason?, error?}] }
+ */
+function handleSendWelcomeToUsers_(payload, callerEmail) {
+  var userEmails = Array.isArray(payload.userEmails) ? payload.userEmails : [];
+  if (userEmails.length === 0) return errorResponse_("userEmails array is required and must not be empty", "MISSING_PARAM");
+
+  var cbSsId = prop_("CB_SPREADSHEET_ID");
+  if (!cbSsId) return errorResponse_("CB_SPREADSHEET_ID not configured", "CONFIG_ERROR");
+
+  var cbSS;
+  try { cbSS = SpreadsheetApp.openById(cbSsId); }
+  catch (e) { return errorResponse_("Cannot open CB: " + e.message, "CONFIG_ERROR"); }
+
+  var usersSh = cbSS.getSheetByName("Users");
+  if (!usersSh) return errorResponse_("Users tab not found in CB", "NOT_FOUND");
+
+  var data = usersSh.getDataRange().getValues();
+  var hRow = data[0] || [];
+  var hMap = {};
+  for (var h = 0; h < hRow.length; h++) {
+    var k = String(hRow[h] || "").trim().toUpperCase();
+    if (k) hMap[k] = h;
+  }
+  var emailIdx = hMap["EMAIL"];
+  var roleIdx = hMap["ROLE"];
+  var ssIdIdx = hMap["CLIENT SPREADSHEET ID"];
+  if (emailIdx === undefined || ssIdIdx === undefined) {
+    return errorResponse_("Users tab missing required columns", "SCHEMA_ERROR");
+  }
+
+  // Auto-create Welcome Sent At column if missing (for timestamp stamping after send).
+  var wsIdx = hMap["WELCOME SENT AT"];
+  if (wsIdx === undefined) {
+    var newCol = usersSh.getLastColumn() + 1;
+    usersSh.getRange(1, newCol).setValue("Welcome Sent At");
+    wsIdx = newCol - 1;
+  }
+
+  // Build email → rowNum map for fast lookup.
+  var emailToRow = {};
+  for (var r = 1; r < data.length; r++) {
+    var rowEmail = String(data[r][emailIdx] || "").trim().toLowerCase();
+    if (rowEmail) emailToRow[rowEmail] = r + 1; // 1-based sheet row
+  }
+
+  var results = [];
+  var sent = 0;
+  var failed = 0;
+
+  for (var i = 0; i < userEmails.length; i++) {
+    var targetEmail = String(userEmails[i] || "").trim().toLowerCase();
+    if (!targetEmail) {
+      results.push({ email: userEmails[i], ok: false, reason: "blank_email" });
+      failed++;
+      continue;
+    }
+
+    var rowNum = emailToRow[targetEmail];
+    if (!rowNum) {
+      results.push({ email: targetEmail, ok: false, reason: "user_not_found" });
+      failed++;
+      continue;
+    }
+
+    // Read row values fresh from the data array.
+    var userRow = data[rowNum - 1];
+    var userRole = roleIdx !== undefined ? String(userRow[roleIdx] || "").trim().toLowerCase() : "";
+    var userClientSheetIds = String(userRow[ssIdIdx] || "").trim();
+    var firstClientId = parseCSV_(userClientSheetIds)[0] || userClientSheetIds;
+
+    if (!firstClientId) {
+      results.push({ email: targetEmail, ok: false, reason: "no_client_sheet_id" });
+      failed++;
+      continue;
+    }
+
+    // Fire the welcome directly via handleSendWelcomeEmail_ with recipient override.
+    // We skip api_sendWelcomeOnce_'s dedup check because this is an explicit resend.
+    try {
+      var resp = handleSendWelcomeEmail_({
+        clientSheetId: firstClientId,
+        recipient: targetEmail
+      });
+      var json;
+      try { json = JSON.parse(resp.getContent()); } catch (_) { json = {}; }
+      if (json && json.success) {
+        // Stamp Welcome Sent At with current timestamp (reflects most recent send).
+        try { usersSh.getRange(rowNum, wsIdx + 1).setValue(new Date()); } catch (_) {}
+        results.push({ email: targetEmail, ok: true, sentTo: targetEmail, role: userRole });
+        sent++;
+      } else {
+        results.push({ email: targetEmail, ok: false, reason: "send_failed", error: (json && json.error) || "unknown" });
+        failed++;
+      }
+    } catch (err) {
+      results.push({ email: targetEmail, ok: false, reason: "exception", error: String(err.message || err) });
+      failed++;
+    }
+  }
+
+  Logger.log("handleSendWelcomeToUsers_: caller=" + callerEmail + " sent=" + sent + " failed=" + failed);
+  return jsonResponse_({ success: true, sent: sent, failed: failed, total: userEmails.length, results: results });
 }
 
 function handleTestSendClientTemplates_(callerEmail, payload) {
@@ -15069,6 +15442,11 @@ function handleTestSendClientTemplates_(callerEmail, payload) {
     { key: "WILL_CALL_RELEASE",    subject: "Will Call Release — TEST" },
     { key: "WILL_CALL_CANCELLED",  subject: "Will Call Cancelled — TEST" },
     { key: "TRANSFER_RECEIVED",    subject: "Transfer Received — TEST" },
+    // v38.43.0: System-category templates also testable via this endpoint.
+    // Previously these returned "Unknown templateKey" because the React
+    // Template Editor sends WELCOME_EMAIL / ONBOARDING_EMAIL here.
+    { key: "WELCOME_EMAIL",        subject: "Welcome to Stride Warehouse Management — TEST" },
+    { key: "ONBOARDING_EMAIL",     subject: "Getting Started with Stride Hub — TEST" },
   ];
 
   var mockTokens = {
@@ -15101,6 +15479,10 @@ function handleTestSendClientTemplates_(callerEmail, payload) {
     "{{DEST_CLIENT}}": "Destination Client",
     "{{TRANSFER_ITEMS}}": "ITM-TEST-001 — Test sofa",
     "{{CANCEL_REASON}}": "Client request",
+    // v38.43.0 — WELCOME_EMAIL / ONBOARDING_EMAIL tokens. {{APP_URL}} is
+    // auto-injected by api_sendTemplateEmail_ so it's not listed here.
+    "{{SPREADSHEET_URL}}": "https://docs.google.com/spreadsheets/d/TEST_SHEET_ID",
+    "{{CLIENT_EMAIL}}": "test-client@example.com",
   };
 
   var toSend = templateKey

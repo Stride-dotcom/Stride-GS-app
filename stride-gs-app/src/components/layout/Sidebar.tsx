@@ -19,6 +19,7 @@ import {
   AlertCircle,
   GripVertical,
   Mail,
+  Route,
 } from 'lucide-react';
 import { theme } from '../../styles/theme';
 import { cacheClearAll } from '../../lib/apiCache';
@@ -37,6 +38,7 @@ const ADMIN_NAV = [
   { id: 'billing', label: 'Billing', path: '/billing', icon: DollarSign },
   { id: 'claims', label: 'Claims', path: '/claims', icon: Shield },
   { id: 'payments', label: 'Payments', path: '/payments', icon: CreditCard },
+  { id: 'orders', label: 'Orders', path: '/orders', icon: Route },
   { id: 'marketing', label: 'Marketing', path: '/marketing', icon: Mail },
   { id: 'scanner', label: 'QR Scanner', path: '/scanner', icon: ScanLine },
   { id: 'labels', label: 'Labels', path: '/labels', icon: Tag },

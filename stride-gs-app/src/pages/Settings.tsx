@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Settings as SettingsIcon, Users, DollarSign, Mail, Database, Globe, Bell, Plus, ChevronRight, CheckCircle2, AlertCircle, UserPlus, Shield, ToggleLeft, ToggleRight, Eye, EyeOff, Wifi, WifiOff, RefreshCw, Loader2, RefreshCcw, ExternalLink, Wrench, PlayCircle, Send, FolderSync, BookText, LogIn, Cloud, Edit2, Zap } from 'lucide-react';
-import { getApiUrl, getApiToken, setApiCredentials, isApiConfigured, fetchHealth, postOnboardClient, postUpdateClient, postSyncSettings, postRefreshCaches, postFixMissingFolders, postTestSendClientTemplates, postTestSendClaimEmails, fetchAutoIdSetting, postUpdateAutoIdSetting, postResolveOnboardUser, fetchStaxConfig, postUpdateStaxConfig, apiPost, fetchEmailTemplates, postSyncTemplatesToClients, postBulkSyncToSupabase, fetchClients, postFinishClientSetup } from '../lib/api';
+import { getApiUrl, getApiToken, setApiCredentials, isApiConfigured, fetchHealth, postOnboardClient, postUpdateClient, postSyncSettings, postRefreshCaches, postFixMissingFolders, postTestSendClientTemplates, postTestSendClaimEmails, fetchAutoIdSetting, postUpdateAutoIdSetting, postResolveOnboardUser, fetchStaxConfig, postUpdateStaxConfig, apiPost, fetchEmailTemplates, postSyncTemplatesToClients, postBulkSyncToSupabase, fetchClients, postFinishClientSetup, postSendWelcomeToUsers } from '../lib/api';
 import type { BulkSyncResult } from '../lib/api';
 import type { EmailTemplate } from '../lib/api';
 import { TemplateEditor } from '../components/shared/TemplateEditor';
@@ -455,6 +455,33 @@ export function Settings() {
   const [addUserError, setAddUserError] = useState('');
   const [impersonatingEmail, setImpersonatingEmail] = useState<string | null>(null);
   const [addUserSuccess, setAddUserSuccess] = useState('');
+  // v38.43.0 — Send Welcome Email button per row on Users tab
+  const [sendingWelcomeEmail, setSendingWelcomeEmail] = useState<string | null>(null);
+  const [sendWelcomeResult, setSendWelcomeResult] = useState<{ email: string; ok: boolean; message: string } | null>(null);
+
+  async function handleSendWelcomeToOneUser(userEmail: string) {
+    setSendingWelcomeEmail(userEmail);
+    setSendWelcomeResult(null);
+    try {
+      const res = await postSendWelcomeToUsers({ userEmails: [userEmail] });
+      if (res.ok && res.data?.success) {
+        const row = res.data.results[0];
+        if (row?.ok) {
+          setSendWelcomeResult({ email: userEmail, ok: true, message: `Welcome email sent to ${userEmail}` });
+        } else {
+          setSendWelcomeResult({ email: userEmail, ok: false, message: `Send failed: ${row?.reason || row?.error || 'unknown'}` });
+        }
+      } else {
+        setSendWelcomeResult({ email: userEmail, ok: false, message: res.error || res.data?.error || 'Request failed' });
+      }
+    } catch (err) {
+      setSendWelcomeResult({ email: userEmail, ok: false, message: String(err) });
+    } finally {
+      setSendingWelcomeEmail(null);
+      // Auto-dismiss toast after 4 seconds
+      setTimeout(() => setSendWelcomeResult(null), 4000);
+    }
+  }
   // userActionErrors removed — inline toggle replaced by edit panel
 
   // User edit panel state (v33)
@@ -1548,6 +1575,18 @@ export function Settings() {
                 </div>
               )}
 
+              {sendWelcomeResult && (
+                <div style={{
+                  padding: '10px 14px', fontSize: 12, borderRadius: 8, marginBottom: 12,
+                  background: sendWelcomeResult.ok ? '#ECFDF5' : '#FEF2F2',
+                  border: `1px solid ${sendWelcomeResult.ok ? '#A7F3D0' : '#FECACA'}`,
+                  color: sendWelcomeResult.ok ? '#065F46' : '#991B1B',
+                  fontWeight: 500,
+                }}>
+                  {sendWelcomeResult.message}
+                </div>
+              )}
+
               {/* Add User inline form */}
               {addUserOpen && (
                 <div style={{ ...card, border: `1px solid ${theme.colors.orange}`, marginBottom: 16 }}>
@@ -1814,40 +1853,71 @@ export function Settings() {
                             <td style={{ padding: '10px 14px', textAlign: 'center' }}>{u.active ? <span style={{ color: '#15803D' }}>✓</span> : <span style={{ color: theme.colors.textMuted }}>✗</span>}</td>
                             <td style={{ padding: '10px 14px', color: theme.colors.textMuted }}>{u.lastLogin || '—'}</td>
                             <td style={{ padding: '10px 14px', textAlign: 'center' }}>
-                              {realUser?.role === 'admin' && u.email !== realUser.email && u.active && (
-                                <button
-                                  disabled={impersonatingEmail !== null}
-                                  onClick={async (e) => {
-                                    e.stopPropagation();
-                                    setImpersonatingEmail(u.email);
-                                    const { error: impErr } = await impersonateUser(u.email);
-                                    setImpersonatingEmail(null);
-                                    if (!impErr) navigate('/');
-                                  }}
-                                  style={{
-                                    display: 'inline-flex',
-                                    alignItems: 'center',
-                                    gap: 4,
-                                    padding: '3px 10px',
-                                    fontSize: 11,
-                                    fontWeight: 600,
-                                    border: `1px solid ${theme.colors.border}`,
-                                    borderRadius: 6,
-                                    background: impersonatingEmail === u.email ? theme.colors.orangeLight : '#fff',
-                                    color: impersonatingEmail === u.email ? theme.colors.orange : theme.colors.textSecondary,
-                                    cursor: impersonatingEmail !== null ? 'wait' : 'pointer',
-                                    opacity: (impersonatingEmail !== null && impersonatingEmail !== u.email) ? 0.4 : 1,
-                                  }}
-                                  title={`View app as ${u.email}`}
-                                >
-                                  {impersonatingEmail === u.email ? (
-                                    <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} />
-                                  ) : (
-                                    <LogIn size={12} />
-                                  )}
-                                  {impersonatingEmail === u.email ? 'Loading…' : 'Login As'}
-                                </button>
-                              )}
+                              <div style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
+                                {/* v38.43.0 — Send/Resend Welcome Email (admin only, client-role users only — these users need the mystridehub.com login walkthrough) */}
+                                {realUser?.role === 'admin' && u.role === 'client' && (
+                                  <button
+                                    disabled={sendingWelcomeEmail !== null}
+                                    onClick={(e) => { e.stopPropagation(); handleSendWelcomeToOneUser(u.email); }}
+                                    style={{
+                                      display: 'inline-flex',
+                                      alignItems: 'center',
+                                      gap: 4,
+                                      padding: '3px 10px',
+                                      fontSize: 11,
+                                      fontWeight: 600,
+                                      border: `1px solid ${theme.colors.border}`,
+                                      borderRadius: 6,
+                                      background: sendingWelcomeEmail === u.email ? theme.colors.orangeLight : '#fff',
+                                      color: sendingWelcomeEmail === u.email ? theme.colors.orange : theme.colors.textSecondary,
+                                      cursor: sendingWelcomeEmail !== null ? 'wait' : 'pointer',
+                                      opacity: (sendingWelcomeEmail !== null && sendingWelcomeEmail !== u.email) ? 0.4 : 1,
+                                    }}
+                                    title={`Send welcome email to ${u.email}`}
+                                  >
+                                    {sendingWelcomeEmail === u.email ? (
+                                      <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} />
+                                    ) : (
+                                      <Send size={12} />
+                                    )}
+                                    {sendingWelcomeEmail === u.email ? 'Sending…' : 'Send Welcome'}
+                                  </button>
+                                )}
+                                {realUser?.role === 'admin' && u.email !== realUser.email && u.active && (
+                                  <button
+                                    disabled={impersonatingEmail !== null}
+                                    onClick={async (e) => {
+                                      e.stopPropagation();
+                                      setImpersonatingEmail(u.email);
+                                      const { error: impErr } = await impersonateUser(u.email);
+                                      setImpersonatingEmail(null);
+                                      if (!impErr) navigate('/');
+                                    }}
+                                    style={{
+                                      display: 'inline-flex',
+                                      alignItems: 'center',
+                                      gap: 4,
+                                      padding: '3px 10px',
+                                      fontSize: 11,
+                                      fontWeight: 600,
+                                      border: `1px solid ${theme.colors.border}`,
+                                      borderRadius: 6,
+                                      background: impersonatingEmail === u.email ? theme.colors.orangeLight : '#fff',
+                                      color: impersonatingEmail === u.email ? theme.colors.orange : theme.colors.textSecondary,
+                                      cursor: impersonatingEmail !== null ? 'wait' : 'pointer',
+                                      opacity: (impersonatingEmail !== null && impersonatingEmail !== u.email) ? 0.4 : 1,
+                                    }}
+                                    title={`View app as ${u.email}`}
+                                  >
+                                    {impersonatingEmail === u.email ? (
+                                      <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} />
+                                    ) : (
+                                      <LogIn size={12} />
+                                    )}
+                                    {impersonatingEmail === u.email ? 'Loading…' : 'Login As'}
+                                  </button>
+                                )}
+                              </div>
                             </td>
                           </tr>
                         );

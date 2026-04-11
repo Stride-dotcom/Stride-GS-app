@@ -12,6 +12,14 @@ dist
 dist-ssr
 *.local
 
+# Secrets — NEVER commit
+.env
+.env.*
+!.env.example
+
+# Claude Code workspace metadata
+.claude/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
@@ -22,3 +30,13 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Build + TypeScript caches
+*.tsbuildinfo
+.vite/
+
+# Backups and temp save artifacts
+_backups/
+**/*.backup.*.ts
+**/*.backup.*.tsx
+**/*.tmp.*

@@ -21,6 +21,7 @@ import { Scanner } from './pages/Scanner';
 import { Labels } from './pages/Labels';
 import { Marketing } from './pages/Marketing';
 import { TaskJobPage } from './pages/TaskJobPage';
+import { Orders } from './pages/Orders';
 
 /** Route guard — redirects to dashboard if user's role is not in the allowed list */
 function RoleGuard({ allowed, children }: { allowed: AuthUser['role'][]; children: React.ReactNode }) {
@@ -64,6 +65,7 @@ export default function App() {
           {/* Admin + client only */}
           <Route path="/claims" element={<RoleGuard allowed={['admin', 'client']}><Claims /></RoleGuard>} />
           {/* Admin only */}
+          <Route path="/orders" element={<RoleGuard allowed={['admin']}><Orders /></RoleGuard>} />
           <Route path="/billing" element={<RoleGuard allowed={['admin']}><Billing /></RoleGuard>} />
           <Route path="/payments" element={<RoleGuard allowed={['admin']}><Payments /></RoleGuard>} />
           <Route path="/marketing" element={<RoleGuard allowed={['admin']}><Marketing /></RoleGuard>} />
