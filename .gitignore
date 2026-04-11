@@ -25,3 +25,10 @@ stride-gs-app/.vite/
 **/*.tmp.*
 **/*.backup.pre-jobdetail-*.ts
 **/*.backup.pre-jobdetail-*.tsx
+# Security: never commit backup copies of Apps Script files — they carried the
+# 2026-04-11 service_role JWT leak forward into a second file. Extend block to .gs
+# and any generic backup/bak extension.
+**/*.backup.pre-jobdetail-*.gs
+**/*.backup.*.gs
+**/*.bak
+**/*.backup

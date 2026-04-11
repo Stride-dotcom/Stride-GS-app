@@ -1,5 +1,12 @@
 /* ===================================================
-   StrideAPI.gs — v38.44.0 — 2026-04-11 04:45 PM PST — Standalone-client getClients null-scope fix
+   StrideAPI.gs — v38.44.1 — 2026-04-11 03:15 PM PST — SECURITY: redact hardcoded service_role JWT
+   v38.44.1: SECURITY — redact hardcoded service_role JWT from setupSupabaseProperties_.
+   Function now throws with guidance to use Script Properties UI. Key was rotated
+   and project migrated to new publishable/secret API keys upon GitGuardian detection
+   2026-04-11. No behavior change for live handlers — they already read from
+   PropertiesService via prop_("SUPABASE_SERVICE_ROLE_KEY"). Related: parent repo
+   commit 1d3920b redacts the working tree, deletes stale *.backup.*.gs file that
+   carried the same JWT, and extends .gitignore to block .gs backup patterns.
    v38.44.0: Fixes handleGetClientsAuthed_ for standalone client users. Their
    client-selector dropdowns went blank after session 60 deployed useApiData's
    auth-error cleanup, which correctly honored the error this endpoint was
@@ -547,14 +554,26 @@ function createSupabaseAuthUser_(email) {
 // ─── Supabase Phase 2 Notification Helpers ───────────────────────────────────
 
 /**
- * Run this function ONCE from the Apps Script editor to set credentials.
- * Then delete or comment out.
+ * Configure Supabase credentials via the Apps Script editor UI — DO NOT commit secrets.
+ *
+ * SECURITY: On 2026-04-11 a service_role JWT was accidentally committed to this
+ * file and detected by GitGuardian within minutes. The key has been rotated and
+ * Supabase migrated to the publishable/secret API key model. Never paste secrets
+ * into this file again — set them via Apps Script editor → Project Settings →
+ * Script Properties (or run setupSupabaseProperties_ locally with values passed
+ * as arguments from the Script editor prompt, never as string literals in code).
+ *
+ * Required script properties:
+ *   SUPABASE_URL                 e.g. "https://<project-ref>.supabase.co"
+ *   SUPABASE_SERVICE_ROLE_KEY    new Supabase secret API key (sb_secret_...)
+ *                                — NEVER commit the value, set via editor UI only
  */
 function setupSupabaseProperties_() {
-  var props = PropertiesService.getScriptProperties();
-  props.setProperty("SUPABASE_URL",        "https://uqplppugeickmamycpuz.supabase.co");
-  props.setProperty("SUPABASE_SERVICE_ROLE_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVxcGxwcHVnZWlja21hbXljcHV6Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3NDY0MjgxMSwiZXhwIjoyMDkwMjE4ODExfQ.EquOT9vS84saPvd8dfgH4Minff12HAL_EEMqQNH8Rmw");
-  Logger.log("Supabase Script Properties set successfully.");
+  throw new Error(
+    "setupSupabaseProperties_ is disabled. Set SUPABASE_URL and " +
+    "SUPABASE_SERVICE_ROLE_KEY manually via Apps Script editor → " +
+    "Project Settings → Script Properties. Do not commit secrets."
+  );
 }
 
 /**
