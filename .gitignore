@@ -1,0 +1,7 @@
+node_modules/
+_backups/
+.env
+.env.local
+stride-gs-app/.env
+stride-gs-app/.env.local
+AppScripts/stride-client-inventory/admin/.credentials.json
