@@ -73,13 +73,14 @@ src/
 | `20260403213925_phase3_read_cache_tables` | inventory, tasks, repairs, will_calls, shipments, billing |
 | `20260411120000_dt_phase1a_schema` | dt_statuses, dt_substatuses, dt_orders, dt_order_items, dt_order_history, dt_order_photos, dt_order_notes, dt_webhook_events, dt_credentials, dt_orders_quarantine, audit_log |
 
-**DispatchTrack integration:** Phase 1a schema live. Phase 1b (React Orders tab) is next. Full plan: `../Docs/DT_Integration_Build_Plan.md`.
+**DispatchTrack integration:** Phase 1a schema live. Phase 1b Orders tab live (admin-only, commit `63207c2`). Phase 1c (webhook ingest) is next. Full plan: `../Docs/DT_Integration_Build_Plan.md`.
 
 ## Current Status
-See `../Docs/Stride_GS_App_Build_Status.md` for full status. See `../CURRENT_BUILD_STATUS.md` for the quick one-screen summary.
+See `../Docs/Stride_GS_App_Build_Status.md` for full status.
 
-**Current:** Phase 2B and 2C complete. All performance track phases done through Phase 2C.
+**Current:** Phase 2B, 2C, and DT Phase 1b complete.
 - Phase 2B (commit `69d4405`): Tabbed Dashboard, 10s polling, row-click navigation
 - Phase 2C (commit `7328b56`): Optimistic UI — all status changes, field edits, creates
+- DT Phase 1b (commit `63207c2`): Orders tab — Supabase-backed, admin-only, empty until Phase 1c
 
-**Next:** DispatchTrack Phase 1b (Orders tab). See `../Docs/DT_Integration_Build_Plan.md`.
+**Next:** DispatchTrack Phase 1c (webhook ingest Edge Function). Needs DT API credentials + webhook secret.
