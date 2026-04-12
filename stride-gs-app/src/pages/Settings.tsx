@@ -1329,13 +1329,18 @@ export function Settings() {
           {tab === 'clients' && (() => {
             const isLive = apiClients.length > 0;
             const q = clientSearch.toLowerCase();
-            const displayClients = q
+            const filtered = q
               ? apiClients.filter(c =>
                   c.name.toLowerCase().includes(q) ||
                   (c.email || '').toLowerCase().includes(q) ||
                   (c.contactName || '').toLowerCase().includes(q) ||
                   (c.qbCustomerName || '').toLowerCase().includes(q))
               : apiClients;
+            // Auto-sort: active clients A-Z first, then inactive A-Z
+            const displayClients = [...filtered].sort((a, b) => {
+              if (a.active !== b.active) return a.active ? -1 : 1;
+              return a.name.localeCompare(b.name);
+            });
 
             return (
               <>
