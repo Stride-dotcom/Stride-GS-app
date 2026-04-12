@@ -720,6 +720,9 @@ export function Settings() {
   const [welcomeEmailResult, setWelcomeEmailResult] = useState<{ clientName: string; ok: boolean; error?: string } | null>(null);
   const [finishSetupLoading, setFinishSetupLoading] = useState<string | null>(null);
   const [finishSetupResult, setFinishSetupResult] = useState<{ clientName: string; ok: boolean; message?: string; error?: string; webAppUrl?: string } | null>(null);
+  const [purgeInactiveLoading, setPurgeInactiveLoading] = useState(false);
+  const [purgeInactiveResult, setPurgeInactiveResult] = useState<{ purgedCount: number; purged: Array<{ name: string }> } | null>(null);
+  const [purgeInactiveError, setPurgeInactiveError] = useState('');
   const [bulkSyncLoading, setBulkSyncLoading] = useState(false);
   const [bulkSyncResult, setBulkSyncResult] = useState<BulkSyncResult | null>(() => {
     try { const s = localStorage.getItem('stride_bulkSyncResult'); return s ? JSON.parse(s) : null; } catch { return null; }
@@ -992,6 +995,23 @@ export function Settings() {
     setFixFoldersProgress(null);
     setFixFoldersResult({ fixed: totalFixed, clients: activeClients.length, errors: errorCount });
     setFixFoldersLoading(false);
+  }
+
+  async function handlePurgeInactive() {
+    setPurgeInactiveLoading(true);
+    setPurgeInactiveError('');
+    setPurgeInactiveResult(null);
+    try {
+      const res = await postPurgeInactiveFromSupabase();
+      if (res.ok && res.data) {
+        setPurgeInactiveResult({ purgedCount: res.data.purgedCount, purged: res.data.purged });
+      } else {
+        setPurgeInactiveError(res.error || 'Purge failed');
+      }
+    } catch (err: unknown) {
+      setPurgeInactiveError(err instanceof Error ? err.message : String(err));
+    }
+    setPurgeInactiveLoading(false);
   }
 
   async function handleBulkSyncToSupabase() {
@@ -2739,6 +2759,52 @@ export function Settings() {
                       {bulkSyncLoading
                         ? (bulkSyncProgress ? `${bulkSyncProgress.done}/${bulkSyncProgress.total}` : 'Syncing…')
                         : 'Run'}
+                    </button>
+                  </div>
+                </div>
+
+                {/* Purge Inactive Clients from Supabase */}
+                <div style={card}>
+                  <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16 }}>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                        <div style={{ width: 30, height: 30, borderRadius: 8, background: '#FEF2F2', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                          <EyeOff size={15} color="#DC2626" />
+                        </div>
+                        <div style={{ fontSize: 14, fontWeight: 600 }}>Purge Inactive Clients</div>
+                      </div>
+                      <div style={{ fontSize: 12, color: theme.colors.textSecondary, lineHeight: 1.5, marginLeft: 38 }}>
+                        Removes all Supabase cached data (Inventory, Tasks, Repairs, Will Calls, Shipments, Billing) for clients marked <strong>Inactive</strong> in the CB Clients sheet. Fast — only targets inactive clients, no full sync needed. Also runs automatically when you deactivate a client through the Settings edit modal.
+                      </div>
+                      {purgeInactiveResult && (
+                        <div style={{ marginTop: 10, padding: 12, borderRadius: 10, background: purgeInactiveResult.purgedCount > 0 ? '#F0FDF4' : '#F8FAFC', border: `1px solid ${purgeInactiveResult.purgedCount > 0 ? '#BBF7D0' : '#E2E8F0'}`, fontSize: 12 }}>
+                          <div style={{ fontWeight: 600, color: purgeInactiveResult.purgedCount > 0 ? '#15803D' : theme.colors.textSecondary }}>
+                            {purgeInactiveResult.purgedCount > 0
+                              ? `Purged ${purgeInactiveResult.purgedCount} inactive client${purgeInactiveResult.purgedCount !== 1 ? 's' : ''}`
+                              : 'No inactive clients with cached data found'}
+                          </div>
+                          {purgeInactiveResult.purgedCount > 0 && (
+                            <div style={{ color: '#166534', marginTop: 4, fontSize: 11 }}>
+                              {purgeInactiveResult.purged.map(p => p.name).join(', ')}
+                            </div>
+                          )}
+                          <button onClick={() => setPurgeInactiveResult(null)} style={{ marginTop: 4, fontSize: 10, border: 'none', background: 'none', cursor: 'pointer', color: theme.colors.textMuted, padding: 0 }}>Dismiss</button>
+                        </div>
+                      )}
+                      {purgeInactiveError && (
+                        <div style={{ marginTop: 10, padding: '8px 12px', borderRadius: 8, background: '#FEF2F2', border: '1px solid #FECACA', fontSize: 12, color: '#991B1B' }}>
+                          {purgeInactiveError}
+                          <button onClick={() => setPurgeInactiveError('')} style={{ marginLeft: 8, fontSize: 10, border: 'none', background: 'none', cursor: 'pointer', color: theme.colors.textMuted, padding: 0 }}>Dismiss</button>
+                        </div>
+                      )}
+                    </div>
+                    <button
+                      onClick={handlePurgeInactive}
+                      disabled={purgeInactiveLoading || !apiConfigured}
+                      style={{ padding: '8px 18px', fontSize: 12, fontWeight: 600, border: 'none', borderRadius: 8, background: purgeInactiveLoading ? theme.colors.border : '#DC2626', color: purgeInactiveLoading ? theme.colors.textMuted : '#fff', cursor: purgeInactiveLoading ? 'wait' : !apiConfigured ? 'not-allowed' : 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0, opacity: !apiConfigured ? 0.5 : 1 }}
+                    >
+                      {purgeInactiveLoading ? <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} /> : <EyeOff size={13} />}
+                      {purgeInactiveLoading ? 'Purging…' : 'Purge'}
                     </button>
                   </div>
                 </div>
