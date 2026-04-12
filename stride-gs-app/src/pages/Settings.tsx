@@ -2707,8 +2707,8 @@ export function Settings() {
                         <div style={{ marginTop: 10, padding: 12, borderRadius: 10, background: '#F0FDF4', border: '1px solid #BBF7D0', fontSize: 12 }}>
                           <div style={{ fontWeight: 600, color: '#15803D', marginBottom: 6 }}>
                             Synced {bulkSyncResult.clientsSynced} client{bulkSyncResult.clientsSynced !== 1 ? 's' : ''}
-                            {(bulkSyncResult as any).inactivePurged > 0 && (
-                              <span style={{ fontWeight: 400 }}> · {(bulkSyncResult as any).inactivePurged} inactive client{(bulkSyncResult as any).inactivePurged !== 1 ? 's' : ''} purged</span>
+                            {(bulkSyncResult.inactivePurged ?? 0) > 0 && (
+                              <span style={{ fontWeight: 400 }}> · {bulkSyncResult.inactivePurged} inactive client{bulkSyncResult.inactivePurged !== 1 ? 's' : ''} purged</span>
                             )}
                           </div>
                           <div style={{ color: '#166534', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '2px 16px', marginBottom: 4 }}>

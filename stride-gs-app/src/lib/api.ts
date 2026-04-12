@@ -2880,6 +2880,8 @@ export interface BulkSyncResult {
     deleted?: Record<string, number>;
     errors: string[];
   }>;
+  /** v38.45.0: Number of inactive clients whose Supabase data was purged */
+  inactivePurged?: number;
 }
 
 export interface ReconcileResult {
