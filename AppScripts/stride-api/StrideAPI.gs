@@ -915,6 +915,44 @@ function supabaseDeleteStaleRows_(table, tenantId, keepIds, idColumn) {
 }
 
 /**
+ * v38.45.0: Purge ALL Supabase data for a tenant across all 6 entity tables.
+ * Used when a client is deactivated or during Bulk Sync cleanup for inactive clients.
+ * Best-effort — never throws.
+ */
+function supabasePurgeTenant_(tenantId) {
+  var tables = ["inventory", "tasks", "repairs", "will_calls", "shipments", "billing"];
+  var url = prop_("SUPABASE_URL");
+  var key = prop_("SUPABASE_SERVICE_ROLE_KEY");
+  if (!url || !key) return { purged: false, reason: "no credentials" };
+
+  var results = {};
+  for (var t = 0; t < tables.length; t++) {
+    var table = tables[t];
+    try {
+      var delResp = UrlFetchApp.fetch(
+        url + "/rest/v1/" + table + "?tenant_id=eq." + encodeURIComponent(tenantId), {
+        method: "DELETE",
+        headers: { "Authorization": "Bearer " + key, "apikey": key, "Prefer": "return=representation" },
+        muteHttpExceptions: true
+      });
+      var code = delResp.getResponseCode();
+      if (code >= 200 && code < 300) {
+        var deleted = JSON.parse(delResp.getContentText() || "[]");
+        results[table] = deleted.length;
+      } else {
+        results[table] = "HTTP " + code;
+        Logger.log("supabasePurgeTenant_ " + table + " HTTP " + code + ": " + delResp.getContentText().substring(0, 300));
+      }
+    } catch (e) {
+      results[table] = "error: " + e;
+      Logger.log("supabasePurgeTenant_ " + table + " error: " + e);
+    }
+  }
+  Logger.log("supabasePurgeTenant_ tenant=" + tenantId + " results=" + JSON.stringify(results));
+  return { purged: true, details: results };
+}
+
+/**
  * Build a Supabase inventory row from API response fields.
  * @param {string} tenantId - clientSheetId
  * @param {Object} item - inventory item object (API format)
@@ -12118,15 +12156,33 @@ function handleUpdateClient_(payload) {
     }
   }
 
+  // v38.45.0: Auto-purge Supabase data when client is deactivated
+  var purgeWarning = null;
+  var wasPurged = false;
+  if (payload.active === false || payload.active === "false" || payload.active === "FALSE") {
+    try {
+      var purgeResult = supabasePurgeTenant_(targetSheetId);
+      wasPurged = purgeResult.purged;
+      Logger.log("handleUpdateClient_: client " + targetSheetId + " deactivated — Supabase purge: " + JSON.stringify(purgeResult));
+      // Also clear the active_clients cache so getTargetClients_ reflects immediately
+      try { CacheService.getScriptCache().remove("api_active_clients"); } catch (_) {}
+    } catch (purgeErr) {
+      purgeWarning = "Supabase purge warning: " + purgeErr.message;
+      Logger.log(purgeWarning);
+    }
+  }
+
   var updateWarnings = [];
   if (userWarning) updateWarnings.push(userWarning);
   if (syncWarning) updateWarnings.push(syncWarning);
+  if (purgeWarning) updateWarnings.push(purgeWarning);
 
   return jsonResponse_({
     success: true,
     clientName: String(payload.clientName || ""),
     spreadsheetId: targetSheetId,
     synced: payload.syncToSheet !== false && !syncWarning,
+    supabasePurged: wasPurged,
     warnings: updateWarnings
   });
 }
@@ -19508,12 +19564,40 @@ function handleBulkSyncToSupabase_(payload) {
     results.push(clientResult);
   }
 
+  // v38.45.0: Purge Supabase data for INACTIVE clients (only during full sync, not single-client)
+  var purgedClients = [];
+  if (!targetClient) {
+    try {
+      var cbId2 = prop_("CB_SPREADSHEET_ID");
+      var cbSs2 = SpreadsheetApp.openById(cbId2);
+      var clientsSh2 = cbSs2.getSheetByName("Clients");
+      var allRows = sheetToObjects_(clientsSh2);
+      var activeIds = {};
+      for (var ac = 0; ac < clients.length; ac++) activeIds[clients[ac].spreadsheetId] = true;
+      for (var ir = 0; ir < allRows.length; ir++) {
+        var irSid = String(allRows[ir]["Client Spreadsheet ID"] || "").trim();
+        var irName = String(allRows[ir]["Client Name"] || "").trim();
+        var irAct = allRows[ir]["Active"];
+        if (!irSid || !irName) continue;
+        // Only purge explicitly inactive clients that we didn't already sync
+        if (activeIds[irSid]) continue;
+        if (irAct === false || irAct === "FALSE" || irAct === "No") {
+          var purgeResult = supabasePurgeTenant_(irSid);
+          purgedClients.push({ name: irName, spreadsheetId: irSid, purge: purgeResult });
+        }
+      }
+    } catch (purgeErr) {
+      Logger.log("Bulk sync inactive purge error (non-fatal): " + purgeErr);
+    }
+  }
+
   return jsonResponse_({
     success: true,
     clientsSynced: results.length,
     totalRows: totalRows,
     totalDeleted: totalDeleted,
-    clients: results
+    clients: results,
+    inactivePurged: purgedClients
   });
 }
 
