@@ -948,8 +948,15 @@ function supabasePurgeTenant_(tenantId) {
       Logger.log("supabasePurgeTenant_ " + table + " error: " + e);
     }
   }
-  Logger.log("supabasePurgeTenant_ tenant=" + tenantId + " results=" + JSON.stringify(results));
-  return { purged: true, details: results };
+  // Count actual successes vs failures
+  var successCount = 0;
+  var failCount = 0;
+  for (var r in results) {
+    if (typeof results[r] === "number") successCount++;
+    else failCount++;
+  }
+  Logger.log("supabasePurgeTenant_ tenant=" + tenantId + " results=" + JSON.stringify(results) + " (success=" + successCount + " fail=" + failCount + ")");
+  return { purged: failCount === 0, details: results, successCount: successCount, failCount: failCount };
 }
 
 /**

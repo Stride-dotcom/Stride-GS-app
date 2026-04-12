@@ -721,7 +721,7 @@ export function Settings() {
   const [finishSetupLoading, setFinishSetupLoading] = useState<string | null>(null);
   const [finishSetupResult, setFinishSetupResult] = useState<{ clientName: string; ok: boolean; message?: string; error?: string; webAppUrl?: string } | null>(null);
   const [purgeInactiveLoading, setPurgeInactiveLoading] = useState(false);
-  const [purgeInactiveResult, setPurgeInactiveResult] = useState<{ purgedCount: number; purged: Array<{ name: string }> } | null>(null);
+  const [purgeInactiveResult, setPurgeInactiveResult] = useState<{ purgedCount: number; purged: Array<{ name: string; purge?: { purged: boolean; details?: Record<string, number | string>; failCount?: number } }> } | null>(null);
   const [purgeInactiveError, setPurgeInactiveError] = useState('');
   const [bulkSyncLoading, setBulkSyncLoading] = useState(false);
   const [bulkSyncResult, setBulkSyncResult] = useState<BulkSyncResult | null>(() => {
@@ -2776,21 +2776,45 @@ export function Settings() {
                       <div style={{ fontSize: 12, color: theme.colors.textSecondary, lineHeight: 1.5, marginLeft: 38 }}>
                         Removes all Supabase cached data (Inventory, Tasks, Repairs, Will Calls, Shipments, Billing) for clients marked <strong>Inactive</strong> in the CB Clients sheet. Fast — only targets inactive clients, no full sync needed. Also runs automatically when you deactivate a client through the Settings edit modal.
                       </div>
-                      {purgeInactiveResult && (
-                        <div style={{ marginTop: 10, padding: 12, borderRadius: 10, background: purgeInactiveResult.purgedCount > 0 ? '#F0FDF4' : '#F8FAFC', border: `1px solid ${purgeInactiveResult.purgedCount > 0 ? '#BBF7D0' : '#E2E8F0'}`, fontSize: 12 }}>
-                          <div style={{ fontWeight: 600, color: purgeInactiveResult.purgedCount > 0 ? '#15803D' : theme.colors.textSecondary }}>
-                            {purgeInactiveResult.purgedCount > 0
-                              ? `Purged ${purgeInactiveResult.purgedCount} inactive client${purgeInactiveResult.purgedCount !== 1 ? 's' : ''}`
-                              : 'No inactive clients with cached data found'}
-                          </div>
-                          {purgeInactiveResult.purgedCount > 0 && (
-                            <div style={{ color: '#166534', marginTop: 4, fontSize: 11 }}>
-                              {purgeInactiveResult.purged.map(p => p.name).join(', ')}
+                      {purgeInactiveResult && (() => {
+                        const anyFailed = purgeInactiveResult.purged.some(p => p.purge?.failCount && p.purge.failCount > 0);
+                        const bgColor = purgeInactiveResult.purgedCount === 0 ? '#F8FAFC' : anyFailed ? '#FEF2F2' : '#F0FDF4';
+                        const borderColor = purgeInactiveResult.purgedCount === 0 ? '#E2E8F0' : anyFailed ? '#FECACA' : '#BBF7D0';
+                        const textColor = purgeInactiveResult.purgedCount === 0 ? theme.colors.textSecondary : anyFailed ? '#991B1B' : '#15803D';
+                        return (
+                          <div style={{ marginTop: 10, padding: 12, borderRadius: 10, background: bgColor, border: `1px solid ${borderColor}`, fontSize: 12 }}>
+                            <div style={{ fontWeight: 600, color: textColor }}>
+                              {purgeInactiveResult.purgedCount === 0
+                                ? 'No inactive clients found'
+                                : anyFailed
+                                  ? `Purge attempted for ${purgeInactiveResult.purgedCount} inactive client${purgeInactiveResult.purgedCount !== 1 ? 's' : ''} — some DELETEs failed (check Supabase API key)`
+                                  : `Purged ${purgeInactiveResult.purgedCount} inactive client${purgeInactiveResult.purgedCount !== 1 ? 's' : ''}`}
                             </div>
-                          )}
-                          <button onClick={() => setPurgeInactiveResult(null)} style={{ marginTop: 4, fontSize: 10, border: 'none', background: 'none', cursor: 'pointer', color: theme.colors.textMuted, padding: 0 }}>Dismiss</button>
-                        </div>
-                      )}
+                            {purgeInactiveResult.purgedCount > 0 && (
+                              <div style={{ marginTop: 6, fontSize: 11 }}>
+                                {purgeInactiveResult.purged.map((p, i) => {
+                                  const d = p.purge?.details;
+                                  const failed = p.purge?.failCount && p.purge.failCount > 0;
+                                  return (
+                                    <div key={i} style={{ marginBottom: 4, color: failed ? '#991B1B' : '#166534' }}>
+                                      <strong>{p.name}</strong>
+                                      {d && (
+                                        <span style={{ marginLeft: 8, fontWeight: 400 }}>
+                                          {Object.entries(d).map(([table, val]) => (
+                                            `${table}: ${typeof val === 'number' ? val + ' deleted' : val}`
+                                          )).join(' · ')}
+                                        </span>
+                                      )}
+                                      {failed && <span style={{ marginLeft: 6, fontWeight: 600 }}> ⚠ FAILED</span>}
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            )}
+                            <button onClick={() => setPurgeInactiveResult(null)} style={{ marginTop: 4, fontSize: 10, border: 'none', background: 'none', cursor: 'pointer', color: theme.colors.textMuted, padding: 0 }}>Dismiss</button>
+                          </div>
+                        );
+                      })()}
                       {purgeInactiveError && (
                         <div style={{ marginTop: 10, padding: '8px 12px', borderRadius: 8, background: '#FEF2F2', border: '1px solid #FECACA', fontSize: 12, color: '#991B1B' }}>
                           {purgeInactiveError}
