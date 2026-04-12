@@ -953,6 +953,36 @@ function supabasePurgeTenant_(tenantId) {
 }
 
 /**
+ * v38.45.0: Standalone handler for purging all Supabase data for inactive clients.
+ * Called by the frontend after the per-client Bulk Sync loop completes, since the
+ * per-client path never reaches the inactive purge code in handleBulkSyncToSupabase_.
+ */
+function handlePurgeInactiveFromSupabase_() {
+  var cbId = prop_("CB_SPREADSHEET_ID");
+  if (!cbId) return errorResponse_("CB_SPREADSHEET_ID not configured", "CONFIG_ERROR");
+
+  var cbSs = SpreadsheetApp.openById(cbId);
+  var clientsSh = cbSs.getSheetByName("Clients");
+  if (!clientsSh) return errorResponse_("Clients sheet not found", "NOT_FOUND");
+
+  var allRows = sheetToObjects_(clientsSh);
+  var purged = [];
+
+  for (var i = 0; i < allRows.length; i++) {
+    var sid = String(allRows[i]["Client Spreadsheet ID"] || "").trim();
+    var name = String(allRows[i]["Client Name"] || "").trim();
+    var act = allRows[i]["Active"];
+    if (!sid || !name) continue;
+    if (act === false || act === "FALSE" || act === "No") {
+      var result = supabasePurgeTenant_(sid);
+      purged.push({ name: name, spreadsheetId: sid, purge: result });
+    }
+  }
+
+  return jsonResponse_({ success: true, purgedCount: purged.length, purged: purged });
+}
+
+/**
  * Build a Supabase inventory row from API response fields.
  * @param {string} tenantId - clientSheetId
  * @param {Object} item - inventory item object (API format)
@@ -2124,6 +2154,10 @@ function doPost(e) {
       case "bulkSyncToSupabase":
         return withAdminGuard_(callerEmail, function() {
           return handleBulkSyncToSupabase_(payload);
+        });
+      case "purgeInactiveFromSupabase":
+        return withAdminGuard_(callerEmail, function() {
+          return handlePurgeInactiveFromSupabase_();
         });
       case "reconcileSupabase":
         return withAdminGuard_(callerEmail, function() {

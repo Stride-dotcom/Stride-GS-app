@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Settings as SettingsIcon, Users, DollarSign, Mail, Database, Globe, Bell, Plus, ChevronRight, CheckCircle2, AlertCircle, UserPlus, Shield, ToggleLeft, ToggleRight, Eye, EyeOff, Wifi, WifiOff, RefreshCw, Loader2, RefreshCcw, ExternalLink, Wrench, PlayCircle, Send, FolderSync, BookText, LogIn, Cloud, Edit2, Zap, ArrowUpDown, ChevronUp, ChevronDown, X } from 'lucide-react';
 import { useReactTable, getCoreRowModel, getSortedRowModel, flexRender, type SortingState, type ColumnDef } from '@tanstack/react-table';
-import { getApiUrl, getApiToken, setApiCredentials, isApiConfigured, fetchHealth, postOnboardClient, postUpdateClient, postSyncSettings, postRefreshCaches, postFixMissingFolders, postTestSendClientTemplates, postTestSendClaimEmails, fetchAutoIdSetting, postUpdateAutoIdSetting, postResolveOnboardUser, fetchStaxConfig, postUpdateStaxConfig, apiPost, fetchEmailTemplates, postSyncTemplatesToClients, postBulkSyncToSupabase, fetchClients, postFinishClientSetup, postSendWelcomeToUsers } from '../lib/api';
+import { getApiUrl, getApiToken, setApiCredentials, isApiConfigured, fetchHealth, postOnboardClient, postUpdateClient, postSyncSettings, postRefreshCaches, postFixMissingFolders, postTestSendClientTemplates, postTestSendClaimEmails, fetchAutoIdSetting, postUpdateAutoIdSetting, postResolveOnboardUser, fetchStaxConfig, postUpdateStaxConfig, apiPost, fetchEmailTemplates, postSyncTemplatesToClients, postBulkSyncToSupabase, postPurgeInactiveFromSupabase, fetchClients, postFinishClientSetup, postSendWelcomeToUsers } from '../lib/api';
 import type { BulkSyncResult } from '../lib/api';
 import type { EmailTemplate } from '../lib/api';
 import { TemplateEditor } from '../components/shared/TemplateEditor';
@@ -727,7 +727,7 @@ export function Settings() {
   const [bulkSyncError, setBulkSyncError] = useState(() => {
     try { return localStorage.getItem('stride_bulkSyncError') || ''; } catch { return ''; }
   });
-  const [bulkSyncProgress, setBulkSyncProgress] = useState<{ done: number; total: number; current: string } | null>(() => {
+  const [bulkSyncProgress, setBulkSyncProgress] = useState<{ done: number; total: number; current: string; startedAt?: number } | null>(() => {
     // Restore "in progress" state if the user navigated away mid-sync.
     // The sync still runs server-side; we just show "sync was in progress" until it finishes
     // or 10 minutes elapse (considered stale/timed out).
@@ -1062,6 +1062,19 @@ export function Settings() {
       }
     }
 
+    // v38.45.0: After syncing active clients, purge Supabase data for inactive clients
+    setBulkSyncProgress({ done: activeClients.length, total: activeClients.length + 1, current: 'Purging inactive clients…', startedAt: initProgress.startedAt });
+    try { localStorage.setItem('stride_bulkSyncProgress', JSON.stringify({ done: activeClients.length, total: activeClients.length + 1, current: 'Purging inactive clients…', startedAt: initProgress.startedAt })); } catch {};
+    let purgedCount = 0;
+    try {
+      const purgeRes = await postPurgeInactiveFromSupabase();
+      if (purgeRes.ok && purgeRes.data) {
+        purgedCount = purgeRes.data.purgedCount;
+      }
+    } catch (purgeErr) {
+      errors.push('Inactive purge: ' + (purgeErr instanceof Error ? purgeErr.message : String(purgeErr)));
+    }
+
     setBulkSyncProgress(null);
     setBulkSyncLoading(false);
     localStorage.removeItem('stride_bulkSyncProgress');
@@ -1071,9 +1084,11 @@ export function Settings() {
       setBulkSyncError(errMsg);
       try { localStorage.setItem('stride_bulkSyncError', errMsg); } catch {};
     }
+    // Add purge count to the result for display
+    const finalResult = { ...aggregated, inactivePurged: purgedCount };
     if (aggregated.clientsSynced > 0) {
-      setBulkSyncResult(aggregated);
-      try { localStorage.setItem('stride_bulkSyncResult', JSON.stringify(aggregated)); } catch {};
+      setBulkSyncResult(finalResult);
+      try { localStorage.setItem('stride_bulkSyncResult', JSON.stringify(finalResult)); } catch {};
     }
   }
 
@@ -2692,6 +2707,9 @@ export function Settings() {
                         <div style={{ marginTop: 10, padding: 12, borderRadius: 10, background: '#F0FDF4', border: '1px solid #BBF7D0', fontSize: 12 }}>
                           <div style={{ fontWeight: 600, color: '#15803D', marginBottom: 6 }}>
                             Synced {bulkSyncResult.clientsSynced} client{bulkSyncResult.clientsSynced !== 1 ? 's' : ''}
+                            {(bulkSyncResult as any).inactivePurged > 0 && (
+                              <span style={{ fontWeight: 400 }}> · {(bulkSyncResult as any).inactivePurged} inactive client{(bulkSyncResult as any).inactivePurged !== 1 ? 's' : ''} purged</span>
+                            )}
                           </div>
                           <div style={{ color: '#166534', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '2px 16px', marginBottom: 4 }}>
                             <div>Inventory: {bulkSyncResult.totalRows.inventory} upserted{bulkSyncResult.totalDeleted ? `, ${bulkSyncResult.totalDeleted.inventory} deleted` : ''}</div>

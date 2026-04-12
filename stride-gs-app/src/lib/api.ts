@@ -2906,6 +2906,16 @@ export function postBulkSyncToSupabase(clientSheetId?: string) {
   );
 }
 
+/** v38.45.0: Purge Supabase data for all inactive clients. Called after Bulk Sync loop completes. */
+export function postPurgeInactiveFromSupabase() {
+  return apiPost<{ success: boolean; purgedCount: number; purged: Array<{ name: string; spreadsheetId: string }> }>(
+    'purgeInactiveFromSupabase',
+    {},
+    {},
+    { timeoutMs: API_POST_TIMEOUT_LONG_MS }
+  );
+}
+
 export function postReconcileSupabase(clientSheetId?: string, dryRun = false) {
   return apiPost<ReconcileResult>('reconcileSupabase', { clientSheetId: clientSheetId || '', dryRun });
 }
