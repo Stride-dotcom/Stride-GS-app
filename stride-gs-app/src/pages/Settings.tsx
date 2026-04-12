@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Settings as SettingsIcon, Users, DollarSign, Mail, Database, Globe, Bell, Plus, ChevronRight, CheckCircle2, AlertCircle, UserPlus, Shield, ToggleLeft, ToggleRight, Eye, EyeOff, Wifi, WifiOff, RefreshCw, Loader2, RefreshCcw, ExternalLink, Wrench, PlayCircle, Send, FolderSync, BookText, LogIn, Cloud, Edit2, Zap } from 'lucide-react';
+import { Settings as SettingsIcon, Users, DollarSign, Mail, Database, Globe, Bell, Plus, ChevronRight, CheckCircle2, AlertCircle, UserPlus, Shield, ToggleLeft, ToggleRight, Eye, EyeOff, Wifi, WifiOff, RefreshCw, Loader2, RefreshCcw, ExternalLink, Wrench, PlayCircle, Send, FolderSync, BookText, LogIn, Cloud, Edit2, Zap, ArrowUpDown, ChevronUp, ChevronDown, X } from 'lucide-react';
+import { useReactTable, getCoreRowModel, getSortedRowModel, flexRender, type SortingState, type ColumnDef } from '@tanstack/react-table';
 import { getApiUrl, getApiToken, setApiCredentials, isApiConfigured, fetchHealth, postOnboardClient, postUpdateClient, postSyncSettings, postRefreshCaches, postFixMissingFolders, postTestSendClientTemplates, postTestSendClaimEmails, fetchAutoIdSetting, postUpdateAutoIdSetting, postResolveOnboardUser, fetchStaxConfig, postUpdateStaxConfig, apiPost, fetchEmailTemplates, postSyncTemplatesToClients, postBulkSyncToSupabase, fetchClients, postFinishClientSetup, postSendWelcomeToUsers } from '../lib/api';
 import type { BulkSyncResult } from '../lib/api';
 import type { EmailTemplate } from '../lib/api';
@@ -8,6 +9,7 @@ import { TemplateEditor } from '../components/shared/TemplateEditor';
 import { ConfirmDialog } from '../components/shared/ConfirmDialog';
 import { useAuth } from '../contexts/AuthContext';
 import { AutocompleteSelect } from '../components/shared/AutocompleteSelect';
+import { AutocompleteInput } from '../components/shared/AutocompleteInput';
 import type { ApiClient, OnboardClientResponse, UpdateClientResponse, SyncSettingsResponse, RefreshCachesResponse, RunOnClientsResponse, TestSendResult } from '../lib/api';
 import { OnboardClientModal } from '../components/shared/OnboardClientModal';
 import type { OnboardClientFormData } from '../components/shared/OnboardClientModal';
@@ -438,6 +440,9 @@ export function Settings() {
   const { realUser, impersonateUser } = useAuth();
   const isAdmin = realUser?.role === 'admin';
   const [tab, setTab] = useState<Tab>('general');
+  const [clientSearch, setClientSearch] = useState('');
+  const [userSearch, setUserSearch] = useState('');
+  const [userSorting, setUserSorting] = useState<SortingState>([]);
   const apiConfigured = isApiConfigured();
   const { apiClients, loading: clientsLoading, error: clientsError, refetch: refetchClients } = useClients(apiConfigured && true);
   const { priceList, classMap, loading: pricingLoading, error: pricingError, refetch: refetchPricing } = usePricing(apiConfigured && true);
@@ -1322,13 +1327,20 @@ export function Settings() {
 
           {tab === 'clients' && (() => {
             const isLive = apiClients.length > 0;
-            const displayClients = apiClients;
+            const q = clientSearch.toLowerCase();
+            const displayClients = q
+              ? apiClients.filter(c =>
+                  c.name.toLowerCase().includes(q) ||
+                  (c.email || '').toLowerCase().includes(q) ||
+                  (c.contactName || '').toLowerCase().includes(q) ||
+                  (c.qbCustomerName || '').toLowerCase().includes(q))
+              : apiClients;
 
             return (
               <>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                    <div style={sectionTitle}>Active Clients ({displayClients.length})</div>
+                    <div style={sectionTitle}>Active Clients ({q ? `${displayClients.length} of ${apiClients.length}` : displayClients.length})</div>
                     {isLive && <span style={{ fontSize: 9, padding: '2px 8px', borderRadius: 8, background: '#F0FDF4', color: '#15803D', fontWeight: 700, textTransform: 'uppercase' }}>Live</span>}
                     {clientsLoading && <Loader2 size={14} style={{ animation: 'spin 1s linear infinite', color: theme.colors.textMuted }} />}
                     {clientActionLoading && <span style={{ fontSize: 10, color: theme.colors.orange }}>Processing…</span>}
@@ -1464,6 +1476,29 @@ export function Settings() {
                       ? `✓ Finish Setup complete for ${finishSetupResult.clientName}${finishSetupResult.webAppUrl ? ' — Web App deployed & triggers installed' : ''}`
                       : `Finish Setup failed for ${finishSetupResult.clientName}: ${finishSetupResult.error}`}
                     <button onClick={() => setFinishSetupResult(null)} style={{ marginLeft: 8, fontSize: 10, border: 'none', background: 'none', cursor: 'pointer', color: theme.colors.textMuted, padding: 0 }}>Dismiss</button>
+                  </div>
+                )}
+
+                {/* Client search */}
+                {isLive && apiClients.length > 6 && (
+                  <div style={{ position: 'relative', marginBottom: 12 }}>
+                    <AutocompleteInput
+                      value={clientSearch}
+                      onChange={setClientSearch}
+                      suggestions={apiClients.map(c => c.name)}
+                      placeholder="Search clients by name, email, contact, or QB name..."
+                      allowCustom
+                      style={{ width: '100%', fontSize: 13 }}
+                    />
+                    {clientSearch && (
+                      <button
+                        onClick={() => setClientSearch('')}
+                        style={{ position: 'absolute', right: 10, top: '50%', transform: 'translateY(-50%)', border: 'none', background: 'none', cursor: 'pointer', color: theme.colors.textMuted, padding: 2 }}
+                        title="Clear search"
+                      >
+                        <X size={14} />
+                      </button>
+                    )}
                   </div>
                 )}
 
@@ -1802,130 +1837,202 @@ export function Settings() {
                 </div>
               )}
 
-              {/* Users table */}
-              {usersLoading && <div style={{ padding: 20, textAlign: 'center', color: theme.colors.textMuted, fontSize: 13 }}>Loading users…</div>}
-              {usersError && <div style={{ padding: '10px 14px', background: '#FEF2F2', borderRadius: 8, color: '#DC2626', fontSize: 12, marginBottom: 12 }}>{usersError}</div>}
-              {!usersLoading && (
-                <div style={{ ...card, padding: 0 }}>
-                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
-                    <thead><tr style={{ borderBottom: `2px solid ${theme.colors.border}` }}>
-                      <th style={{ padding: '10px 14px', textAlign: 'left', fontSize: 10, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.04em' }}>Email</th>
-                      <th style={{ padding: '10px 14px', textAlign: 'left', fontSize: 10, color: theme.colors.textMuted, textTransform: 'uppercase' }}>Role</th>
-                      <th style={{ padding: '10px 14px', textAlign: 'left', fontSize: 10, color: theme.colors.textMuted, textTransform: 'uppercase' }}>Client Access</th>
-                      <th style={{ padding: '10px 14px', textAlign: 'center', fontSize: 10, color: theme.colors.textMuted, textTransform: 'uppercase' }}>Active</th>
-                      <th style={{ padding: '10px 14px', textAlign: 'left', fontSize: 10, color: theme.colors.textMuted, textTransform: 'uppercase' }}>Last Login</th>
-                      <th style={{ padding: '10px 14px', textAlign: 'center', fontSize: 10, color: theme.colors.textMuted, textTransform: 'uppercase' }}></th>
-                    </tr></thead>
-                    <tbody>
-                      {users.length === 0 && (
-                        <tr><td colSpan={6} style={{ padding: '20px 14px', textAlign: 'center', color: theme.colors.textMuted, fontSize: 12 }}>No users found. Add your first user above.</td></tr>
-                      )}
-                      {users.map(u => {
-                        const roleLabel = u.role.charAt(0).toUpperCase() + u.role.slice(1);
-                        const roleStyle: React.CSSProperties = {
-                          fontSize: 11, padding: '2px 10px', borderRadius: 10, fontWeight: 600,
-                          background: u.role === 'admin' ? '#EDE9FE' : u.role === 'staff' ? '#EFF6FF' : theme.colors.orangeLight,
-                          color: u.role === 'admin' ? '#7C3AED' : u.role === 'staff' ? '#1D4ED8' : theme.colors.orange,
-                        };
-                        const clientNames = u.clientName ? u.clientName.split(',').map(s => s.trim()).filter(Boolean) : [];
-                        const isSelected = editingUser?.email === u.email;
-                        return (
-                          <tr
-                            key={u.email}
-                            onClick={() => openUserEdit(u)}
-                            style={{ borderBottom: `1px solid ${theme.colors.borderLight}`, opacity: u.active ? 1 : 0.55, cursor: 'pointer', background: isSelected ? theme.colors.orangeLight : undefined }}
-                            onMouseOver={e => { if (!isSelected) e.currentTarget.style.background = theme.colors.bgSubtle; }}
-                            onMouseOut={e => { if (!isSelected) e.currentTarget.style.background = ''; }}
-                          >
-                            <td style={{ padding: '10px 14px', fontWeight: 500 }}>{u.email}</td>
-                            <td style={{ padding: '10px 14px' }}><span style={roleStyle}>{roleLabel}</span></td>
-                            <td style={{ padding: '10px 14px' }}>
-                              {clientNames.length === 0 ? (
-                                <span style={{ color: theme.colors.textMuted }}>—</span>
-                              ) : (
-                                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-                                  {clientNames.map((name, i) => (
-                                    <span key={i} style={{ fontSize: 10, padding: '1px 7px', borderRadius: 8, background: theme.colors.orangeLight, color: theme.colors.orange, fontWeight: 600 }}>{name}</span>
-                                  ))}
-                                </div>
-                              )}
-                            </td>
-                            <td style={{ padding: '10px 14px', textAlign: 'center' }}>{u.active ? <span style={{ color: '#15803D' }}>✓</span> : <span style={{ color: theme.colors.textMuted }}>✗</span>}</td>
-                            <td style={{ padding: '10px 14px', color: theme.colors.textMuted }}>{u.lastLogin || '—'}</td>
-                            <td style={{ padding: '10px 14px', textAlign: 'center' }}>
-                              <div style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
-                                {/* v38.43.0 — Send/Resend Welcome Email (admin only, client-role users only — these users need the mystridehub.com login walkthrough) */}
-                                {realUser?.role === 'admin' && u.role === 'client' && (
-                                  <button
-                                    disabled={sendingWelcomeEmail !== null}
-                                    onClick={(e) => { e.stopPropagation(); handleSendWelcomeToOneUser(u.email); }}
-                                    style={{
-                                      display: 'inline-flex',
-                                      alignItems: 'center',
-                                      gap: 4,
-                                      padding: '3px 10px',
-                                      fontSize: 11,
-                                      fontWeight: 600,
-                                      border: `1px solid ${theme.colors.border}`,
-                                      borderRadius: 6,
-                                      background: sendingWelcomeEmail === u.email ? theme.colors.orangeLight : '#fff',
-                                      color: sendingWelcomeEmail === u.email ? theme.colors.orange : theme.colors.textSecondary,
-                                      cursor: sendingWelcomeEmail !== null ? 'wait' : 'pointer',
-                                      opacity: (sendingWelcomeEmail !== null && sendingWelcomeEmail !== u.email) ? 0.4 : 1,
-                                    }}
-                                    title={`Send welcome email to ${u.email}`}
-                                  >
-                                    {sendingWelcomeEmail === u.email ? (
-                                      <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} />
-                                    ) : (
-                                      <Send size={12} />
-                                    )}
-                                    {sendingWelcomeEmail === u.email ? 'Sending…' : 'Send Welcome'}
-                                  </button>
-                                )}
-                                {realUser?.role === 'admin' && u.email !== realUser.email && u.active && (
-                                  <button
-                                    disabled={impersonatingEmail !== null}
-                                    onClick={async (e) => {
-                                      e.stopPropagation();
-                                      setImpersonatingEmail(u.email);
-                                      const { error: impErr } = await impersonateUser(u.email);
-                                      setImpersonatingEmail(null);
-                                      if (!impErr) navigate('/');
-                                    }}
-                                    style={{
-                                      display: 'inline-flex',
-                                      alignItems: 'center',
-                                      gap: 4,
-                                      padding: '3px 10px',
-                                      fontSize: 11,
-                                      fontWeight: 600,
-                                      border: `1px solid ${theme.colors.border}`,
-                                      borderRadius: 6,
-                                      background: impersonatingEmail === u.email ? theme.colors.orangeLight : '#fff',
-                                      color: impersonatingEmail === u.email ? theme.colors.orange : theme.colors.textSecondary,
-                                      cursor: impersonatingEmail !== null ? 'wait' : 'pointer',
-                                      opacity: (impersonatingEmail !== null && impersonatingEmail !== u.email) ? 0.4 : 1,
-                                    }}
-                                    title={`View app as ${u.email}`}
-                                  >
-                                    {impersonatingEmail === u.email ? (
-                                      <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} />
-                                    ) : (
-                                      <LogIn size={12} />
-                                    )}
-                                    {impersonatingEmail === u.email ? 'Loading…' : 'Login As'}
-                                  </button>
-                                )}
-                              </div>
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
+              {/* User search */}
+              {users.length > 4 && (
+                <div style={{ position: 'relative', marginBottom: 12 }}>
+                  <AutocompleteInput
+                    value={userSearch}
+                    onChange={setUserSearch}
+                    suggestions={users.map(u => u.email)}
+                    placeholder="Search users by email, role, or client name..."
+                    allowCustom
+                    style={{ width: '100%', fontSize: 13 }}
+                  />
+                  {userSearch && (
+                    <button
+                      onClick={() => setUserSearch('')}
+                      style={{ position: 'absolute', right: 10, top: '50%', transform: 'translateY(-50%)', border: 'none', background: 'none', cursor: 'pointer', color: theme.colors.textMuted, padding: 2 }}
+                      title="Clear search"
+                    >
+                      <X size={14} />
+                    </button>
+                  )}
                 </div>
               )}
+
+              {/* Users table (TanStack Table with sortable headers) */}
+              {usersLoading && <div style={{ padding: 20, textAlign: 'center', color: theme.colors.textMuted, fontSize: 13 }}>Loading users…</div>}
+              {usersError && <div style={{ padding: '10px 14px', background: '#FEF2F2', borderRadius: 8, color: '#DC2626', fontSize: 12, marginBottom: 12 }}>{usersError}</div>}
+              {!usersLoading && (() => {
+                const uq = userSearch.toLowerCase();
+                const filteredUsers = uq
+                  ? users.filter(u =>
+                      u.email.toLowerCase().includes(uq) ||
+                      u.role.toLowerCase().includes(uq) ||
+                      (u.clientName || '').toLowerCase().includes(uq))
+                  : users;
+
+                const userColumns: ColumnDef<ApiUser, any>[] = [
+                  { accessorKey: 'email', header: 'Email', cell: ({ getValue }) => <span style={{ fontWeight: 500 }}>{getValue()}</span> },
+                  {
+                    accessorKey: 'role', header: 'Role',
+                    cell: ({ getValue }) => {
+                      const role = getValue() as string;
+                      const roleLabel = role.charAt(0).toUpperCase() + role.slice(1);
+                      return <span style={{
+                        fontSize: 11, padding: '2px 10px', borderRadius: 10, fontWeight: 600,
+                        background: role === 'admin' ? '#EDE9FE' : role === 'staff' ? '#EFF6FF' : theme.colors.orangeLight,
+                        color: role === 'admin' ? '#7C3AED' : role === 'staff' ? '#1D4ED8' : theme.colors.orange,
+                      }}>{roleLabel}</span>;
+                    },
+                  },
+                  {
+                    accessorKey: 'clientName', header: 'Client Access',
+                    cell: ({ getValue }) => {
+                      const names = (getValue() as string || '').split(',').map(s => s.trim()).filter(Boolean);
+                      return names.length === 0
+                        ? <span style={{ color: theme.colors.textMuted }}>—</span>
+                        : <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>{names.map((name, i) =>
+                            <span key={i} style={{ fontSize: 10, padding: '1px 7px', borderRadius: 8, background: theme.colors.orangeLight, color: theme.colors.orange, fontWeight: 600 }}>{name}</span>
+                          )}</div>;
+                    },
+                  },
+                  {
+                    accessorKey: 'active', header: 'Active',
+                    cell: ({ getValue }) => getValue() ? <span style={{ color: '#15803D' }}>✓</span> : <span style={{ color: theme.colors.textMuted }}>✗</span>,
+                    meta: { align: 'center' },
+                  },
+                  {
+                    accessorKey: 'lastLogin', header: 'Last Login',
+                    cell: ({ getValue }) => <span style={{ color: theme.colors.textMuted }}>{getValue() || '—'}</span>,
+                  },
+                  {
+                    id: 'actions', header: '', enableSorting: false,
+                    cell: ({ row }) => {
+                      const u = row.original;
+                      return (
+                        <div style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
+                          {realUser?.role === 'admin' && u.role === 'client' && (
+                            <button
+                              disabled={sendingWelcomeEmail !== null}
+                              onClick={(e) => { e.stopPropagation(); handleSendWelcomeToOneUser(u.email); }}
+                              style={{
+                                display: 'inline-flex', alignItems: 'center', gap: 4, padding: '3px 10px', fontSize: 11, fontWeight: 600,
+                                border: `1px solid ${theme.colors.border}`, borderRadius: 6,
+                                background: sendingWelcomeEmail === u.email ? theme.colors.orangeLight : '#fff',
+                                color: sendingWelcomeEmail === u.email ? theme.colors.orange : theme.colors.textSecondary,
+                                cursor: sendingWelcomeEmail !== null ? 'wait' : 'pointer',
+                                opacity: (sendingWelcomeEmail !== null && sendingWelcomeEmail !== u.email) ? 0.4 : 1,
+                              }}
+                              title={`Send welcome email to ${u.email}`}
+                            >
+                              {sendingWelcomeEmail === u.email ? <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} /> : <Send size={12} />}
+                              {sendingWelcomeEmail === u.email ? 'Sending…' : 'Send Welcome'}
+                            </button>
+                          )}
+                          {realUser?.role === 'admin' && u.email !== realUser.email && u.active && (
+                            <button
+                              disabled={impersonatingEmail !== null}
+                              onClick={async (e) => {
+                                e.stopPropagation();
+                                setImpersonatingEmail(u.email);
+                                const { error: impErr } = await impersonateUser(u.email);
+                                setImpersonatingEmail(null);
+                                if (!impErr) navigate('/');
+                              }}
+                              style={{
+                                display: 'inline-flex', alignItems: 'center', gap: 4, padding: '3px 10px', fontSize: 11, fontWeight: 600,
+                                border: `1px solid ${theme.colors.border}`, borderRadius: 6,
+                                background: impersonatingEmail === u.email ? theme.colors.orangeLight : '#fff',
+                                color: impersonatingEmail === u.email ? theme.colors.orange : theme.colors.textSecondary,
+                                cursor: impersonatingEmail !== null ? 'wait' : 'pointer',
+                                opacity: (impersonatingEmail !== null && impersonatingEmail !== u.email) ? 0.4 : 1,
+                              }}
+                              title={`View app as ${u.email}`}
+                            >
+                              {impersonatingEmail === u.email ? <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} /> : <LogIn size={12} />}
+                              {impersonatingEmail === u.email ? 'Loading…' : 'Login As'}
+                            </button>
+                          )}
+                        </div>
+                      );
+                    },
+                  },
+                ];
+
+                const userTable = useReactTable({
+                  data: filteredUsers,
+                  columns: userColumns,
+                  state: { sorting: userSorting },
+                  onSortingChange: setUserSorting,
+                  getCoreRowModel: getCoreRowModel(),
+                  getSortedRowModel: getSortedRowModel(),
+                });
+
+                const thStyle: React.CSSProperties = {
+                  padding: '10px 14px', textAlign: 'left', fontSize: 10, color: theme.colors.textMuted,
+                  textTransform: 'uppercase', letterSpacing: '0.04em', userSelect: 'none',
+                };
+
+                return (
+                  <div style={{ ...card, padding: 0 }}>
+                    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                      <thead>
+                        {userTable.getHeaderGroups().map(hg => (
+                          <tr key={hg.id} style={{ borderBottom: `2px solid ${theme.colors.border}` }}>
+                            {hg.headers.map(h => (
+                              <th
+                                key={h.id}
+                                onClick={h.column.getCanSort() ? (e) => h.column.toggleSorting(undefined, e.shiftKey) : undefined}
+                                style={{
+                                  ...thStyle,
+                                  textAlign: (h.column.columnDef.meta as any)?.align || 'left',
+                                  cursor: h.column.getCanSort() ? 'pointer' : 'default',
+                                }}
+                              >
+                                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                                  {flexRender(h.column.columnDef.header, h.getContext())}
+                                  {h.column.getCanSort() && (
+                                    h.column.getIsSorted() === 'asc' ? <ChevronUp size={12} /> :
+                                    h.column.getIsSorted() === 'desc' ? <ChevronDown size={12} /> :
+                                    <ArrowUpDown size={10} style={{ opacity: 0.4 }} />
+                                  )}
+                                </span>
+                              </th>
+                            ))}
+                          </tr>
+                        ))}
+                      </thead>
+                      <tbody>
+                        {userTable.getRowModel().rows.length === 0 && (
+                          <tr><td colSpan={6} style={{ padding: '20px 14px', textAlign: 'center', color: theme.colors.textMuted, fontSize: 12 }}>
+                            {userSearch ? 'No users match your search.' : 'No users found. Add your first user above.'}
+                          </td></tr>
+                        )}
+                        {userTable.getRowModel().rows.map(row => {
+                          const u = row.original;
+                          const isSelected = editingUser?.email === u.email;
+                          return (
+                            <tr
+                              key={row.id}
+                              onClick={() => openUserEdit(u)}
+                              style={{ borderBottom: `1px solid ${theme.colors.borderLight}`, opacity: u.active ? 1 : 0.55, cursor: 'pointer', background: isSelected ? theme.colors.orangeLight : undefined }}
+                              onMouseOver={e => { if (!isSelected) e.currentTarget.style.background = theme.colors.bgSubtle; }}
+                              onMouseOut={e => { if (!isSelected) e.currentTarget.style.background = ''; }}
+                            >
+                              {row.getVisibleCells().map(cell => (
+                                <td key={cell.id} style={{ padding: '10px 14px', textAlign: (cell.column.columnDef.meta as any)?.align || 'left' }}>
+                                  {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                                </td>
+                              ))}
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                );
+              })()}
 
               <div style={{ padding: 14, background: '#F0F9FF', border: '1px solid #BAE6FD', borderRadius: 10, fontSize: 12, color: '#0369A1', marginTop: 16, lineHeight: 1.6 }}>
                 <strong>How it works:</strong> Users are stored in the "Users" tab of the Consolidated Billing sheet. All roles (admin, staff, client) sign in with email + password. Client users are automatically created when you onboard a new client — they just need to use "Forgot Password" on the login page to set their password. Click any row to edit user details, role, and client access. Users can have access to multiple client accounts (shown as chips).
