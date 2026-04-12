@@ -1,5 +1,9 @@
 /* ===================================================
-   StrideAPI.gs — v38.44.1 — 2026-04-11 03:15 PM PST — SECURITY: redact hardcoded service_role JWT
+   StrideAPI.gs — v38.45.0 — 2026-04-11 07:00 PM PST — Show inactive clients toggle
+   v38.45.0: getClients accepts optional includeInactive=1 query param (admin-only).
+   When set, inactive clients are returned with active:false instead of being
+   filtered out server-side. Staff and client roles always get active-only.
+   Enables the Settings → Clients "Show Inactive" toggle for reactivation workflows.
    v38.44.1: SECURITY — redact hardcoded service_role JWT from setupSupabaseProperties_.
    Function now throws with guidance to use Script Properties UI. Key was rotated
    and project migrated to new publishable/secret API keys upon GitGuardian detection
@@ -1487,7 +1491,7 @@ function doGet(e) {
       case "deleteUser":      return handleDeleteUser_(params, callerEmail);
 
       // ─── Config data (staff/admin only for getClients; others open to all authed) ───
-      case "getClients":      return handleGetClientsAuthed_(callerEmail);
+      case "getClients":      return handleGetClientsAuthed_(callerEmail, params.includeInactive === "1");
       case "getPricing":      return withActiveUserGuard_(callerEmail, function() { return handleGetPricing_(); });
       case "getLocations":    return withActiveUserGuard_(callerEmail, function() { return handleGetLocations_(); });
 
@@ -2941,14 +2945,17 @@ function handleDeleteUser_(params, callerEmail) {
  * - Parent client: returns only their accessible clients (scoped by PARENT_CLIENT column)
  * - Regular client: error (they have no business calling this)
  */
-function handleGetClientsAuthed_(callerEmail) {
+function handleGetClientsAuthed_(callerEmail, includeInactive) {
   if (!callerEmail) return errorResponse_("callerEmail is required", "AUTH_ERROR");
   var lookup = lookupUser_(callerEmail);
   if (!lookup.user) return errorResponse_("User not found: " + callerEmail, "AUTH_ERROR");
   if (!lookup.user.active) return errorResponse_("User account is deactivated", "AUTH_ERROR");
 
+  // v38.45.0: Only admin can see inactive clients (staff/client never see them)
+  var showInactive = includeInactive && lookup.user.role === "admin";
+
   if (lookup.user.role === "admin" || lookup.user.role === "staff") {
-    return handleGetClients_(null); // all clients
+    return handleGetClients_(null, showInactive); // all clients
   }
 
   if (lookup.user.role === "client") {
@@ -2964,7 +2971,7 @@ function handleGetClientsAuthed_(callerEmail) {
     // one entry (their own client). Multi-client / parent users still go
     // through the multi-id scope path returned by the helper.
     if (scope && scope.length > 0) {
-      return handleGetClients_(scope);
+      return handleGetClients_(scope, false);
     }
     // Standalone client — use their own clientSheetId
     var ownId = String(lookup.user.clientSheetId || "").trim();
@@ -2974,13 +2981,13 @@ function handleGetClientsAuthed_(callerEmail) {
     // clientSheetId field can be a comma-separated list for multi-client users
     // (even though this branch usually means "single"). parseCSV_ handles both.
     var ownIds = parseCSV_(ownId);
-    return handleGetClients_(ownIds);
+    return handleGetClients_(ownIds, false);
   }
 
   return errorResponse_("Insufficient permissions", "AUTH_ERROR");
 }
 
-function handleGetClients_(scopeIds) {
+function handleGetClients_(scopeIds, includeInactive) {
   var cbId = prop_("CB_SPREADSHEET_ID");
   if (!cbId) return errorResponse_("CB_SPREADSHEET_ID not configured", "CONFIG_ERROR");
 
@@ -3008,8 +3015,10 @@ function handleGetClients_(scopeIds) {
     var sheetId = String(obj["CLIENT SPREADSHEET ID"] || "").trim();
     if (!name || !sheetId) continue;
 
+    // v38.45.0: respect includeInactive flag — skip inactive unless explicitly requested
     var active = obj["ACTIVE"];
-    if (active === false || active === "FALSE" || active === "No") continue;
+    var isActive = !(active === false || active === "FALSE" || active === "No");
+    if (!isActive && !includeInactive) continue;
 
     clients.push({
       name: name,
@@ -3036,7 +3045,7 @@ function handleGetClients_(scopeIds) {
       webAppUrl: String(obj["WEB APP URL"] || "").trim(),
       notes: String(obj["NOTES"] || "").trim(),
       shipmentNote: String(obj["CLIENT SHIPMENT NOTE"] || "").trim(),
-      active: true
+      active: isActive
     });
   }
 

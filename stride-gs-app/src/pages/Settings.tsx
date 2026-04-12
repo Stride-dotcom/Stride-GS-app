@@ -443,8 +443,9 @@ export function Settings() {
   const [clientSearch, setClientSearch] = useState('');
   const [userSearch, setUserSearch] = useState('');
   const [userSorting, setUserSorting] = useState<SortingState>([]);
+  const [showInactiveClients, setShowInactiveClients] = useState(false);
   const apiConfigured = isApiConfigured();
-  const { apiClients, loading: clientsLoading, error: clientsError, refetch: refetchClients } = useClients(apiConfigured && true);
+  const { apiClients, loading: clientsLoading, error: clientsError, refetch: refetchClients } = useClients(apiConfigured && true, showInactiveClients);
   const { priceList, classMap, loading: pricingLoading, error: pricingError, refetch: refetchPricing } = usePricing(apiConfigured && true);
   // Pre-fetch locations for sub-tabs
   useLocations(apiConfigured && true);
@@ -1340,13 +1341,30 @@ export function Settings() {
               <>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                    <div style={sectionTitle}>Active Clients ({q ? `${displayClients.length} of ${apiClients.length}` : displayClients.length})</div>
+                    <div style={sectionTitle}>{showInactiveClients ? 'All' : 'Active'} Clients ({q ? `${displayClients.length} of ${apiClients.length}` : displayClients.length})</div>
                     {isLive && <span style={{ fontSize: 9, padding: '2px 8px', borderRadius: 8, background: '#F0FDF4', color: '#15803D', fontWeight: 700, textTransform: 'uppercase' }}>Live</span>}
                     {clientsLoading && <Loader2 size={14} style={{ animation: 'spin 1s linear infinite', color: theme.colors.textMuted }} />}
                     {clientActionLoading && <span style={{ fontSize: 10, color: theme.colors.orange }}>Processing…</span>}
                     {clientsError && <span style={{ fontSize: 10, color: '#DC2626' }}>{clientsError}</span>}
                   </div>
-                  <div style={{ display: 'flex', gap: 8 }}>
+                  <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                    {isLive && (
+                      <button
+                        onClick={() => setShowInactiveClients(!showInactiveClients)}
+                        style={{
+                          padding: '6px 12px', fontSize: 11, borderRadius: 6, fontFamily: 'inherit',
+                          display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer',
+                          border: `1px solid ${showInactiveClients ? theme.colors.orange : theme.colors.border}`,
+                          background: showInactiveClients ? theme.colors.orangeLight : '#fff',
+                          color: showInactiveClients ? theme.colors.orange : theme.colors.textMuted,
+                          fontWeight: showInactiveClients ? 600 : 400,
+                        }}
+                        title={showInactiveClients ? 'Hide inactive clients' : 'Show inactive clients for reactivation'}
+                      >
+                        {showInactiveClients ? <EyeOff size={12} /> : <Eye size={12} />}
+                        {showInactiveClients ? 'Hide Inactive' : 'Show Inactive'}
+                      </button>
+                    )}
                     {isLive && (
                       <button
                         onClick={handleSyncAll}
@@ -1503,13 +1521,16 @@ export function Settings() {
                 )}
 
                 {/* Client rows */}
-                {displayClients.map(c => (
+                {displayClients.map(c => {
+                  const clientActive = (c as ApiClient).active !== false;
+                  return (
                   <div key={c.name}
                     onClick={() => isLive ? openEditModal(c as ApiClient) : undefined}
-                    style={{ ...card, display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: isLive ? 'pointer' : 'default' }}>
+                    style={{ ...card, display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: isLive ? 'pointer' : 'default', opacity: clientActive ? 1 : 0.55 }}>
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                         <div style={{ fontSize: 14, fontWeight: 600 }}>{c.name}</div>
+                        {!clientActive && <span style={{ fontSize: 9, padding: '2px 8px', borderRadius: 8, background: '#FEF2F2', color: '#DC2626', fontWeight: 700, textTransform: 'uppercase' }}>Inactive</span>}
                         {(c as ApiClient).spreadsheetId && (
                           <a href={`https://docs.google.com/spreadsheets/d/${(c as ApiClient).spreadsheetId}`}
                             target="_blank" rel="noopener noreferrer"
@@ -1576,7 +1597,8 @@ export function Settings() {
                       {isLive && <ChevronRight size={18} color={theme.colors.textMuted} />}
                     </div>
                   </div>
-                ))}
+                  );
+                })}
 
                 {/* Modal */}
                 {clientModalOpen && (

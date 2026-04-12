@@ -716,8 +716,8 @@ export function fetchHealth(signal?: AbortSignal) {
   return apiFetch<HealthResponse>('health', undefined, { signal });
 }
 
-export function fetchClients(signal?: AbortSignal) {
-  return apiFetch<ClientsResponse>('getClients', undefined, { signal });
+export function fetchClients(signal?: AbortSignal, includeInactive?: boolean) {
+  return apiFetch<ClientsResponse>('getClients', includeInactive ? { includeInactive: '1' } : undefined, { signal });
 }
 
 export function fetchPricing(signal?: AbortSignal) {

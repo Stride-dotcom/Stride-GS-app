@@ -4,7 +4,7 @@
  * Returns the raw API clients and also maps them to the app's Client type
  * for backward compatibility with existing UI components.
  */
-import { useMemo } from 'react';
+import { useMemo, useCallback } from 'react';
 import { fetchClients } from '../lib/api';
 import type { ApiClient, ClientsResponse } from '../lib/api';
 import type { Client } from '../lib/types';
@@ -40,11 +40,17 @@ function mapToAppClient(apiClient: ApiClient): Client {
   };
 }
 
-export function useClients(autoFetch = true): UseClientsResult {
+export function useClients(autoFetch = true, includeInactive = false): UseClientsResult {
+  // Stable fetcher ref that respects the includeInactive flag
+  const fetcher = useCallback(
+    (signal?: AbortSignal) => fetchClients(signal, includeInactive),
+    [includeInactive]
+  );
+
   const { data, loading, error, refetch, lastFetched } = useApiData<ClientsResponse>(
-    fetchClients,
+    fetcher,
     autoFetch,
-    'clients'
+    includeInactive ? 'clients_all' : 'clients'
   );
 
   // Stabilize empty array reference to prevent infinite re-render cascades
