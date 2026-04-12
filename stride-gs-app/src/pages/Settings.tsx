@@ -721,9 +721,28 @@ export function Settings() {
   const [finishSetupLoading, setFinishSetupLoading] = useState<string | null>(null);
   const [finishSetupResult, setFinishSetupResult] = useState<{ clientName: string; ok: boolean; message?: string; error?: string; webAppUrl?: string } | null>(null);
   const [bulkSyncLoading, setBulkSyncLoading] = useState(false);
-  const [bulkSyncResult, setBulkSyncResult] = useState<BulkSyncResult | null>(null);
-  const [bulkSyncError, setBulkSyncError] = useState('');
-  const [bulkSyncProgress, setBulkSyncProgress] = useState<{ done: number; total: number; current: string } | null>(null);
+  const [bulkSyncResult, setBulkSyncResult] = useState<BulkSyncResult | null>(() => {
+    try { const s = localStorage.getItem('stride_bulkSyncResult'); return s ? JSON.parse(s) : null; } catch { return null; }
+  });
+  const [bulkSyncError, setBulkSyncError] = useState(() => {
+    try { return localStorage.getItem('stride_bulkSyncError') || ''; } catch { return ''; }
+  });
+  const [bulkSyncProgress, setBulkSyncProgress] = useState<{ done: number; total: number; current: string } | null>(() => {
+    // Restore "in progress" state if the user navigated away mid-sync.
+    // The sync still runs server-side; we just show "sync was in progress" until it finishes
+    // or 10 minutes elapse (considered stale/timed out).
+    try {
+      const s = localStorage.getItem('stride_bulkSyncProgress');
+      if (!s) return null;
+      const parsed = JSON.parse(s);
+      if (parsed?.startedAt && Date.now() - parsed.startedAt > 10 * 60 * 1000) {
+        // Stale — clear it
+        localStorage.removeItem('stride_bulkSyncProgress');
+        return null;
+      }
+      return parsed;
+    } catch { return null; }
+  });
 
   async function handleRefreshCaches() {
     setRefreshCachesLoading(true);
@@ -981,6 +1000,8 @@ export function Settings() {
     setBulkSyncLoading(true);
     setBulkSyncError('');
     setBulkSyncResult(null);
+    localStorage.removeItem('stride_bulkSyncResult');
+    localStorage.removeItem('stride_bulkSyncError');
 
     // Get the client list — prefer the hook's cached copy, fall back to a fresh
     // fetch if empty (Maintenance tab may be reached before the hook populates).
@@ -998,7 +1019,9 @@ export function Settings() {
       return;
     }
 
-    setBulkSyncProgress({ done: 0, total: activeClients.length, current: activeClients[0].name });
+    const initProgress = { done: 0, total: activeClients.length, current: activeClients[0].name, startedAt: Date.now() };
+    setBulkSyncProgress(initProgress);
+    try { localStorage.setItem('stride_bulkSyncProgress', JSON.stringify(initProgress)); } catch {};
 
     // Aggregated result across all clients
     const aggregated: BulkSyncResult = {
@@ -1013,7 +1036,9 @@ export function Settings() {
 
     for (let i = 0; i < activeClients.length; i++) {
       const client = activeClients[i];
-      setBulkSyncProgress({ done: i, total: activeClients.length, current: client.name });
+      const prog = { done: i, total: activeClients.length, current: client.name, startedAt: initProgress.startedAt };
+      setBulkSyncProgress(prog);
+      try { localStorage.setItem('stride_bulkSyncProgress', JSON.stringify(prog)); } catch {};
 
       try {
         const res = await postBulkSyncToSupabase(client.spreadsheetId);
@@ -1039,12 +1064,16 @@ export function Settings() {
 
     setBulkSyncProgress(null);
     setBulkSyncLoading(false);
+    localStorage.removeItem('stride_bulkSyncProgress');
 
     if (errors.length > 0) {
-      setBulkSyncError(`Synced ${aggregated.clientsSynced} of ${activeClients.length}. Errors: ${errors.join(' | ')}`);
+      const errMsg = `Synced ${aggregated.clientsSynced} of ${activeClients.length}. Errors: ${errors.join(' | ')}`;
+      setBulkSyncError(errMsg);
+      try { localStorage.setItem('stride_bulkSyncError', errMsg); } catch {};
     }
     if (aggregated.clientsSynced > 0) {
       setBulkSyncResult(aggregated);
+      try { localStorage.setItem('stride_bulkSyncResult', JSON.stringify(aggregated)); } catch {};
     }
   }
 
@@ -2672,13 +2701,13 @@ export function Settings() {
                             <div>Shipments: {bulkSyncResult.totalRows.shipments} upserted{bulkSyncResult.totalDeleted ? `, ${bulkSyncResult.totalDeleted.shipments} deleted` : ''}</div>
                             <div>Billing: {bulkSyncResult.totalRows.billing} upserted{bulkSyncResult.totalDeleted ? `, ${bulkSyncResult.totalDeleted.billing} deleted` : ''}</div>
                           </div>
-                          <button onClick={() => setBulkSyncResult(null)} style={{ marginTop: 4, fontSize: 10, border: 'none', background: 'none', cursor: 'pointer', color: theme.colors.textMuted, padding: 0 }}>Dismiss</button>
+                          <button onClick={() => { setBulkSyncResult(null); localStorage.removeItem('stride_bulkSyncResult'); }} style={{ marginTop: 4, fontSize: 10, border: 'none', background: 'none', cursor: 'pointer', color: theme.colors.textMuted, padding: 0 }}>Dismiss</button>
                         </div>
                       )}
                       {bulkSyncError && (
                         <div style={{ marginTop: 10, padding: '8px 12px', borderRadius: 8, background: '#FEF2F2', border: '1px solid #FECACA', fontSize: 12, color: '#991B1B' }}>
                           {bulkSyncError}
-                          <button onClick={() => setBulkSyncError('')} style={{ marginLeft: 8, fontSize: 10, border: 'none', background: 'none', cursor: 'pointer', color: theme.colors.textMuted, padding: 0 }}>Dismiss</button>
+                          <button onClick={() => { setBulkSyncError(''); localStorage.removeItem('stride_bulkSyncError'); }} style={{ marginLeft: 8, fontSize: 10, border: 'none', background: 'none', cursor: 'pointer', color: theme.colors.textMuted, padding: 0 }}>Dismiss</button>
                         </div>
                       )}
                     </div>
