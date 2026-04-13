@@ -22,6 +22,7 @@ import type { ApiShipment } from '../lib/api';
 import { useShipments } from '../hooks/useShipments';
 import { useBatchData } from '../contexts/BatchDataContext';
 import { MultiSelectFilter } from '../components/shared/MultiSelectFilter';
+import { SyncBanner } from '../components/shared/SyncBanner';
 import { useClients } from '../hooks/useClients';
 import { useIsMobile } from '../hooks/useIsMobile';
 import { useAuth } from '../contexts/AuthContext';
@@ -471,6 +472,8 @@ export function Shipments() {
           </p>
         </div>
       </div>
+
+      <SyncBanner syncing={refreshing} label={clientFilter.length === 1 ? clientFilter[0] : clientFilter.length > 1 ? `${clientFilter.length} clients` : undefined} />
 
       {/* Client Filter */}
       <div style={{ display: 'flex', gap: 10, alignItems: 'flex-end', marginBottom: 12, flexWrap: 'wrap' }}>

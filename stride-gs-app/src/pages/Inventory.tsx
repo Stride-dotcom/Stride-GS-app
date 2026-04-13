@@ -59,6 +59,7 @@ import { usePricing } from '../hooks/usePricing';
 import { useAuth } from '../contexts/AuthContext';
 import { useBatchData } from '../contexts/BatchDataContext';
 import { MultiSelectFilter } from '../components/shared/MultiSelectFilter';
+import { SyncBanner } from '../components/shared/SyncBanner';
 import type { LinkedRecord } from '../components/shared/ItemDetailPanel';
 import { useIsMobile } from '../hooks/useIsMobile';
 import { FloatingActionMenu, type FABAction } from '../components/shared/FloatingActionMenu';
@@ -1214,6 +1215,8 @@ export function Inventory() {
         <h1 style={{ fontSize: 22, fontWeight: 700, letterSpacing: '-0.3px', margin: 0 }}>Inventory</h1>
         <p style={{ fontSize: 13, color: theme.colors.textMuted, margin: '2px 0 0' }}>All stored items across clients</p>
       </div>
+
+      <SyncBanner syncing={refreshing} label={clientFilter.length === 1 ? clientFilter[0] : clientFilter.length > 1 ? `${clientFilter.length} clients` : undefined} />
 
       {/* Client Filter */}
       <div className="no-print" style={{ display: 'flex', gap: 10, alignItems: 'flex-end', marginBottom: 12, flexWrap: 'wrap' }}>

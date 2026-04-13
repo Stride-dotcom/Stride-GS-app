@@ -26,6 +26,7 @@ import { runBatchLoop, mergePreflightSkips } from '../lib/batchLoop';
 import { useWillCalls } from '../hooks/useWillCalls';
 import { useBatchData } from '../contexts/BatchDataContext';
 import { MultiSelectFilter } from '../components/shared/MultiSelectFilter';
+import { SyncBanner } from '../components/shared/SyncBanner';
 import { useClients } from '../hooks/useClients';
 import { useTablePreferences } from '../hooks/useTablePreferences';
 import type { WillCall } from '../lib/types';
@@ -385,6 +386,8 @@ export function WillCalls() {
   return (
     <div>
       <div style={{ marginBottom: 16 }}><h1 style={{ fontSize: 22, fontWeight: 700, letterSpacing: '-0.3px' }}>Will Calls</h1><p style={{ fontSize: 13, color: theme.colors.textMuted, marginTop: 2 }}>Pickup scheduling, item release, and status tracking</p></div>
+
+      <SyncBanner syncing={refreshing} label={clientFilter.length === 1 ? clientFilter[0] : clientFilter.length > 1 ? `${clientFilter.length} clients` : undefined} />
 
       {/* Client Filter */}
       <div style={{ display: 'flex', gap: 10, alignItems: 'flex-end', marginBottom: 12, flexWrap: 'wrap' }}>

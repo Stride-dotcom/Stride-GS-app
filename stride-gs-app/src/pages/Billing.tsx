@@ -17,6 +17,7 @@ import { theme } from '../styles/theme';
 import { fmtDate } from '../lib/constants';
 import { WriteButton } from '../components/shared/WriteButton';
 import { MultiSelectFilter } from '../components/shared/MultiSelectFilter';
+import { SyncBanner } from '../components/shared/SyncBanner';
 import {
   isApiConfigured,
   postGenerateStorageCharges, type GenerateStorageChargesResponse,
@@ -1343,6 +1344,8 @@ export function Billing() {
           <RefreshCw size={14} style={(refreshing || reportLoading || billingLoading) ? { animation: 'spin 1s linear infinite' } : undefined} />
         </button>
       </div>
+
+      <SyncBanner syncing={refreshing} />
 
       {/* Tab Nav */}
       <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>

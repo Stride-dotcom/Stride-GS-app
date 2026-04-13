@@ -33,6 +33,7 @@ import { useTasks } from '../hooks/useTasks';
 import { useRepairs } from '../hooks/useRepairs';
 import { useBatchData } from '../contexts/BatchDataContext';
 import { MultiSelectFilter } from '../components/shared/MultiSelectFilter';
+import { SyncBanner } from '../components/shared/SyncBanner';
 import { useClients } from '../hooks/useClients';
 import { useTablePreferences } from '../hooks/useTablePreferences';
 import { SERVICE_CODES } from '../lib/constants';
@@ -406,6 +407,8 @@ export function Tasks() {
   return (
     <div>
       <div style={{ marginBottom: 16 }}><h1 style={{ fontSize: 22, fontWeight: 700, letterSpacing: '-0.3px' }}>Tasks</h1><p style={{ fontSize: 13, color: theme.colors.textMuted, marginTop: 2 }}>Manage tasks across all clients</p></div>
+
+      <SyncBanner syncing={refreshing} label={clientFilter.length === 1 ? clientFilter[0] : clientFilter.length > 1 ? `${clientFilter.length} clients` : undefined} />
 
       {/* Client Filter */}
       <div style={{ display: 'flex', gap: 10, alignItems: 'flex-end', marginBottom: 12, flexWrap: 'wrap' }}>
