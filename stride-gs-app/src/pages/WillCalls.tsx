@@ -25,6 +25,7 @@ import { isApiConfigured, postBatchCancelWillCalls, postUpdateWillCall, postProc
 import { runBatchLoop, mergePreflightSkips } from '../lib/batchLoop';
 import { useWillCalls } from '../hooks/useWillCalls';
 import { useBatchData } from '../contexts/BatchDataContext';
+import { useAuth } from '../contexts/AuthContext';
 import { MultiSelectFilter } from '../components/shared/MultiSelectFilter';
 import { SyncBanner } from '../components/shared/SyncBanner';
 import { useClients } from '../hooks/useClients';
@@ -93,30 +94,42 @@ export function WillCalls() {
   const pendingOpenRef = useRef<string | null>(null);
 
   // Client list for MultiSelectFilter — declared before data hooks so clientFilter gates fetching
-  const { clients } = useClients();
+  const { clients, apiClients } = useClients();
   const clientNames = useMemo(() => clients.map(c => c.name).sort(), [clients]);
   const [clientFilter, setClientFilter] = useState<string[]>([]);
+  const { user: authUser } = useAuth();
+  useEffect(() => {
+    if (authUser?.role === 'client' && authUser.accessibleClientNames?.length && clientFilter.length === 0) {
+      setClientFilter(authUser.accessibleClientNames);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authUser?.role, authUser?.accessibleClientNames?.length]);
 
-  const { willCalls, loading: wcsLoading, refetch: refetchWCs, applyWcPatch, mergeWcPatch, clearWcPatch, addOptimisticWc, removeOptimisticWc } = useWillCalls(apiConfigured && clientFilter.length > 0);
+  const selectedSheetId = useMemo<string | string[] | undefined>(() => {
+    if (clientFilter.length === 0) return undefined;
+    const ids = clientFilter.map(n => apiClients.find(c => c.name === n)?.spreadsheetId).filter((x): x is string => !!x);
+    if (ids.length === 0) return undefined;
+    return ids.length === 1 ? ids[0] : ids;
+  }, [clientFilter, apiClients]);
+
+  const { willCalls, loading: wcsLoading, refetch: refetchWCs, applyWcPatch, mergeWcPatch, clearWcPatch, addOptimisticWc, removeOptimisticWc } = useWillCalls(apiConfigured && clientFilter.length > 0, selectedSheetId);
 
   const columns = useMemo(() => cols(), []);
   const [selectedWcId, setSelectedWcId] = useState<string | null>(null);
   const selectedWC = useMemo(() => willCalls.find(w => w.wcNumber === selectedWcId) ?? null, [willCalls, selectedWcId]);
   (window as any).__openWCDetail = (w: WC) => setSelectedWcId(w.wcNumber);
 
-  // Effect 1: Route state OR ?open= query param → store pendingOpen + auto-load
+  // Effect 1: ?open= query param → store pendingOpen + auto-load
+  // (Dashboard now opens standalone page via #/will-calls/:wcNumber — no route state needed)
   useEffect(() => {
-    const state = location.state as { openWcId?: string; clientSheetId?: string } | null;
-    if (state?.openWcId) {
-      pendingOpenRef.current = state.openWcId;
-      refetchWCs();
-      window.history.replaceState({}, '');
-    } else if (location.search) {
+    // Do NOT call refetchWCs() here — it bypasses Supabase cache and
+    // forces unscoped GAS (session 62). Data hook auto-fetches via
+    // Supabase-first; Effect 2 opens the pending row when data arrives.
+    if (location.search) {
       const params = new URLSearchParams(location.search);
       const openId = params.get('open');
       if (openId) {
         pendingOpenRef.current = openId;
-        refetchWCs();
         window.history.replaceState({}, '', window.location.pathname + window.location.hash.split('?')[0]);
       }
     }
@@ -143,16 +156,13 @@ export function WillCalls() {
   const [batchGuardAction, setBatchGuardAction] = useState('');
   const menuRef = useRef<HTMLDivElement>(null);
 
-  const data = useMemo(() => { if (clientFilter.length === 0) return []; let d = willCalls as WC[]; if (clientFilter.length) d = d.filter(w => clientFilter.includes(w.clientName)); if (sf.length) d = d.filter(w => sf.includes(w.status)); return d; }, [sf, clientFilter, willCalls]);
+  // Page-level safety net: resolve clientName from apiClients if empty (race with useClients load)
+  const idToName = useMemo<Record<string, string>>(() => { const m: Record<string, string> = {}; for (const c of apiClients) { m[c.spreadsheetId] = c.name; } return m; }, [apiClients]);
+  const data = useMemo(() => { if (clientFilter.length === 0) return []; let d = (willCalls as WC[]).map(w => w.clientName ? w : { ...w, clientName: idToName[(w as any).clientSheetId || (w as any).clientId] || '' }); if (clientFilter.length) d = d.filter(w => clientFilter.includes(w.clientName)); if (sf.length) d = d.filter(w => sf.includes(w.status)); return d; }, [sf, clientFilter, willCalls, idToName]);
 
-  // Auto-refresh when client filter changes — ensures fresh data on every filter change
-  const clientFilterKey = clientFilter.join(',');
-  useEffect(() => {
-    if (clientFilter.length > 0) {
-      refetchWCs();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [clientFilterKey]);
+  // Client-filter change is already handled by useWillCalls (cacheKeyScope change
+  // triggers useApiData refetch via Supabase-first path). A manual refetch() here
+  // would force GAS (skipSupabaseCacheOnce) and hang the spinner on multi-client.
 
   const counts = useMemo(() => { const c: Record<string, number> = { '': data.length }; ALL_STATUSES.forEach(s => { c[s] = data.filter(w => w.status === s).length; }); return c; }, [data]);
 

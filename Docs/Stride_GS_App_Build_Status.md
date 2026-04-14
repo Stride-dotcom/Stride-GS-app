@@ -1,7 +1,7 @@
 # Stride GS App — Build Status & Continuation Guide
 
-**Last updated:** 2026-04-11 (session 61 — Import.gs perf fix + StrideAPI.gs service_role JWT leak remediation)
-**StrideAPI.gs:** v38.44.1 (Web App v234)
+**Last updated:** 2026-04-14 (session 63 — Deep-link blank-page fix + Item ID ledger Phases 1-3 + post-ship fixes: ledger error client names, useBilling loop, useClients context refactor)
+**StrideAPI.gs:** v38.52.1 (Web App v263)
 **Import.gs (client):** v4.2.1 (rolled out to all 6 clients, web apps v6–v22)
 **Emails.gs (client):** v4.2.0 (rolled out to all 6 clients)
 **Code.gs (client):** v4.6.0 (rolled out to all 6 clients, web apps deployed)
@@ -40,9 +40,9 @@
 ### Backend (Google Sheets + Apps Script)
 - **System reference:** `CLAUDE.md` (read first)
 - **Client inventory (modular):** `AppScripts/stride-client-inventory/src/` — 13 `.gs` files, `npm run rollout`
-- **API:** `AppScripts/stride-api/StrideAPI.gs` — standalone project, v38.44.1 (Web App v234)
+- **API:** `AppScripts/stride-api/StrideAPI.gs` — standalone project, v38.52.1 (Web App v263)
 - **Stax Auto Pay:** `AppScripts/stax-auto-pay/StaxAutoPay.gs` — v4.5.0, bound to Stax spreadsheet
-- **Supabase cache:** 6 mirror tables + `gs_sync_events` failure tracking
+- **Supabase cache:** 6 mirror tables + `gs_sync_events` failure tracking + **`item_id_ledger`** (authoritative cross-tenant Item ID registry, session 63)
 
 ### 14 Pages Built
 Login, Dashboard, Inventory, Receiving, Shipments, Tasks, Repairs, Will Calls, Billing, Payments/Stax, Claims, Settings, **Marketing** (admin-only), **Orders** (admin-only, DT integration). QR Scanner + Labels (iframe pages). All wired to live API — all mock data removed.
@@ -71,14 +71,232 @@ Login, Dashboard, Inventory, Receiving, Shipments, Tasks, Repairs, Will Calls, B
 
 ---
 
-## RECENT CHANGES (2026-04-11 session 61)
+## RECENT CHANGES (2026-04-14 session 63)
 
-### Session 61: Import.gs perf fix (17 min → ~10s) + StrideAPI.gs service_role JWT leak remediation
+### Session 63: Deep-link blank-page fix + Item ID ledger Phases 1–3
 
-Two unrelated but back-to-back tracks. Started as a perf investigation for a slow legacy client import, interrupted mid-rollout by a GitGuardian alert, handled the security incident end-to-end, then resumed and shipped the perf fix.
+Two independent tracks shipped in one session. Full forensic writeup for each is in `Docs/Archive/Session_History.md` — this section keeps the operational details future builders need.
+
+**Live artifacts after this session:**
+- React bundle: `index-BFRgl5Rm.js` (commit `2e91aa6`) — final of 5 deploys this session
+- StrideAPI.gs: **v38.52.1** → Web App **v263**
+- Supabase migration: `stride-gs-app/supabase/migrations/20260414180000_item_id_ledger.sql` applied
+- New table: `public.item_id_ledger` (4,054 rows backfilled)
+- New view: `public.item_id_ledger_conflicts` (22 pre-existing legacy collisions — no action needed)
+- New React context: `ClientsProvider` at app root — single source of truth for `useClients()`
+
+#### Part 1 — Deep-link blank-page fix (5 React pages + WC panel)
+
+**Problem:** Clicking an Item ID cell from a Task / Repair / WillCall / Shipment detail panel opened a new tab on `/inventory?open=X&client=Y` — and the page rendered **blank for 90s–10 min**. Same for cross-entity deep links on Tasks / Repairs / WillCalls / Shipments.
+
+**Root cause:** each page's mount effect had `refetchX()` hardcoded when the `?open=` param was present. Per session 62's forensics, `refetch()` in `useApiData` explicitly skips the Supabase cache (`skipSupabaseCacheOnce` + `setNextFetchNoCache` + `doFetch(bypass=true)`), which when `clientFilter` is still empty (it doesn't get set until the *next* effect runs, after `apiClients` loads) forces an unscoped full-scan GAS call that hangs the spinner. Bonus bug: `WillCallDetailPanel.tsx:641` used a raw `<a href="#/inventory?open=${itemId}">` with **no `&client=` param**, taking the slower Supabase `tenant_id` lookup fallback.
+
+**Fix:** removed the `refetch()` call from mount effects on `Inventory.tsx`, `Tasks.tsx`, `Repairs.tsx`, `WillCalls.tsx`, and `Shipments.tsx`. The data hooks auto-fetch via `cacheKeyScope` (derived from `clientSheetId`) whenever the clientFilter populates — Supabase-first, ~50ms. Pending-open refs still resolve in Effect 2 when the data arrives. WC panel item-ID link now uses `<DeepLink kind="inventory" id={item.itemId} clientSheetId={clientSheetId} />` matching the Task/Repair pattern.
+
+Intermediate bundle: `index-DiUAvZLS.js` (commit `20e9c1d`). Superseded by Part 2 bundle later the same session.
+
+#### Part 2 — Item ID ledger (cross-tenant uniqueness enforcement)
+
+**Motivation:** the legacy `Import.gs` tool had re-used 22 Item IDs across different clients over time. Without a central registry, nothing prevented this. User wanted to plan a ledger and add a receiving-time guard that blocks cross-client collisions on the React side.
+
+**Phase 1 — Migration + backfill.** New `public.item_id_ledger` table:
+
+```
+item_id      text primary key   -- globally unique across all tenants
+tenant_id    text not null
+created_at   timestamptz default now()
+created_by   text               -- user email at allocation
+source       text default 'manual'   -- auto|manual|import|reassign|backfill
+status       text default 'active'   -- active|released|transferred|voided
+voided_at    timestamptz
+void_reason  text
+updated_at   timestamptz        -- auto-updated via trigger
+```
+
+Indexes on `(tenant_id)`, `(status)`, `(created_at)`. Trigger `trg_item_id_ledger_touch` bumps `updated_at` on any PATCH. RLS enabled; `authenticated` role has SELECT, only `service_role` (StrideAPI.gs) writes. Backfill used `INSERT … SELECT DISTINCT ON (item_id) … ORDER BY item_id, created_at ASC NULLS LAST … ON CONFLICT DO NOTHING` — first-seen wins on the 22 historical collisions. Result: **4,054 ledger rows = 4,054 unique inventory IDs**, 22 conflicts surfaced in the companion view `public.item_id_ledger_conflicts` for forensics.
+
+Inspected the 22 dupes — all originated from `IMP-*` shipment numbers (legacy imports), all are transfer leftovers (one side Released or both Released), and **zero have Active status on more than one client**. No cleanup required; ledger's first-seen assignment is correct for every one.
+
+**Phase 2 — StrideAPI.gs write-through + check endpoint.** Added a dedicated helper block after the existing Supabase helpers (search `Supabase Phase 4 — item_id_ledger` in StrideAPI.gs):
+
+- `api_ledgerInsert_(itemId, tenantId, source, status, createdBy)` — single-row upsert via `Prefer: resolution=ignore-duplicates,return=minimal`.
+- `api_ledgerBatchInsert_(rows[])` — chunked at 100/request.
+- `api_ledgerUpdateStatus_(itemIds[], newStatus, voidReason?)` — PATCH with `item_id=in.(…)`. Sets `voided_at=now()` when status is `voided`.
+- `api_ledgerTransferTenant_(itemIds[], newTenantId)` — PATCH `tenant_id` + forces `status='active'` (destination tenant just received it).
+- `api_ledgerCheckAvailable_(itemIds[])` — GET with `item_id=in.(…)&select=…`. Returns `{duplicates: [{itemId, tenantId, status, source, createdAt}], degraded}`. `degraded=true` whenever Supabase URL/key missing or HTTP non-2xx.
+
+All five helpers are best-effort, never throw. Write path never blocks on ledger failure — per 2026-04-14 decision: "allow save, log warning, reconcile later."
+
+New endpoint `handleCheckItemIdsAvailable_(payload)` returns the check result enriched with `tenantName` via a single pass over the CB Clients tab (uses `api_getHeaderMap_` for case-tolerant lookup on "Client Name" + "Client Spreadsheet ID").
+
+Router wiring in the POST switch:
+- `case "completeShipment"`: pre-check inside `withClientIsolation_` callback. If `pre.degraded` is false, filter duplicates to `tenantId !== effectiveId` (cross-tenant only — same-tenant resubmits are idempotent and pass through). If any cross-tenant dups exist, return `errorResponse_("Item ID already assigned to another client: …", "ITEM_ID_COLLISION")` before the handler runs. On successful response (`json.success && !json.skipped`), call `api_ledgerBatchInsert_` for every `payload.items[i].itemId`.
+- `case "releaseItems"`: after success, `api_ledgerUpdateStatus_(releasedIds, 'released', null)`.
+- `case "transferItems"`: after success, `api_ledgerTransferTenant_(itemIds, destId)` — updates owning tenant and resets status to active.
+- `case "checkItemIdsAvailable"`: `withStaffGuard_` → `handleCheckItemIdsAvailable_(payload)`.
+
+**Phase 3 — React Receiving preflight.** `Receiving.tsx` `handleComplete` now calls `postCheckItemIdsAvailable(ids)` right before `postCompleteShipment`:
+
+1. If `check.data.duplicates` has any rows where `tenantId !== clientSheetId` → build a multi-line error listing up to 8 offending IDs (`• 80123 — already assigned to ClientX (active)`), set `submitError`, abort submit. The error banner now renders with `whiteSpace: 'pre-wrap'` so the list displays readably.
+2. If `check.data.degraded` → `console.warn('[Receiving] item_id_ledger check degraded — Supabase unreachable. Proceeding without preflight duplicate detection.')` and fall through to submit. Server-side guard still runs.
+3. If the check call itself errors (network/auth) → fall through. Server guard remains the last line of defense.
+
+New API: `postCheckItemIdsAvailable(itemIds, signal?)` → `CheckItemIdsAvailableResponse { ok, duplicates, degraded }`. `CheckItemIdsAvailableDuplicate` type exposes `{itemId, tenantId, tenantName?, status, source, createdAt}`.
+
+**Files modified this session:**
+- `stride-gs-app/supabase/migrations/20260414180000_item_id_ledger.sql` — new
+- `AppScripts/stride-api/StrideAPI.gs` — version header + helpers block + handler + 4 router cases (completeShipment pre-check + post-success ledger insert, releaseItems post-success status update, transferItems post-success tenant update, new checkItemIdsAvailable case)
+- `stride-gs-app/src/lib/api.ts` — `postCheckItemIdsAvailable` + response types
+- `stride-gs-app/src/pages/Receiving.tsx` — preflight block in `handleComplete`, `whiteSpace: 'pre-wrap'` on error banner
+- `stride-gs-app/src/pages/Inventory.tsx` / `Tasks.tsx` / `Repairs.tsx` / `WillCalls.tsx` / `Shipments.tsx` — removed `refetch()` on deep-link mount
+- `stride-gs-app/src/components/shared/WillCallDetailPanel.tsx` — DeepLink import + replaced raw item-ID `<a>` with DeepLink
+
+**Verification:**
+- Supabase counts confirmed: `ledger_rows=4054`, `unique_inventory_ids=4054`, `conflict_rows=22`, `ledger_backfill=4054`, `ledger_active=1654`, `ledger_released=2399`, `ledger_transferred=1`.
+- The 22 conflicts were manually inspected — all legacy transfer leftovers, zero active-on-active.
+- `npm run build` produced a clean 1,880-module bundle (safeguards passed).
+
+**Still open:**
+- `Import.gs` bound-script ledger integration — future imports still won't hit the ledger since Import.gs runs inside each client's bound project, not the standalone API. Not urgent (legacy imports are rare and the backfill already captured everything from past imports).
+- Maintenance-page ledger viewer + conflict resolver UI.
+- Nightly reconciliation job to catch writes that slipped through during Supabase degraded mode.
+
+#### Post-ship fixes (same session, 3 follow-up deploys)
+
+**Fix A — Ledger collision error shows client name, not raw spreadsheet ID** (StrideAPI.gs v38.52.1, Web App v263). User tested the flow and hit the server-side guard which had shown `"Item ID already assigned to another client: 62403 (tenant 17iqtKPu87CWIoiV0HZGgMZ6CtTTqJDY4daK6zpgfnA8, active)"`. The tenant ID is useless to the warehouse. New helper `api_clientNameMap_()` (CacheService-backed, 5-min TTL) reads CB Clients and returns `{spreadsheet_id → "Client Name"}`. Both `handleCheckItemIdsAvailable_` (React preflight) and the `completeShipment` router pre-check now use it. Server error is now multi-line matching the React preflight format:
+
+```
+Duplicate Item ID already assigned to another client:
+• 62403 — assigned to Brian Paquette Interiors (active)
+
+Edit the Item ID column and try again.
+```
+
+**Fix B — `useBilling` infinite render loop (React error #300 on Inventory page).** Symptom: Inventory page crashed with `Uncaught Error: Minified React error #300` and DevTools Network tab showed dozens of `(canceled)` Supabase inventory requests cascading. Root cause: the session-62 `clientNameMap` ref-stabilization pattern was applied to `useInventory` / `useTasks` / `useRepairs` / `useWillCalls` / `useShipments` but **not** `useBilling`. Inventory page calls `useBilling(apiConfigured && clientFilter.length > 0, billingSheetId)` alongside the other 5, so the same perpetual abort/refetch loop (new `clients` reference every render → new `clientNameMap` → new `fetchFn` → new `doFetch` → useEffect refire → abort → repeat) fired until React's render limit. Fix: mirror `clientNameMap` into a `useRef` in `useBilling`, narrow `fetchFn` deps to `[clientSheetId, hasServerFilters, filtersKey]`, also stabilized the `filters` prop via ref + serialized key. Commit `91e8b5d`, bundle `index-KmG1qKHk.js`. Intermediate fix — superseded by Fix C the same session.
+
+**Fix C — Root cause: `useClients` single-source-of-truth via Context.** The ref pattern in 6 data hooks was a band-aid for a real problem — multi-instance divergence of `useClients`. Every consumer (page + 8 data hooks) called `useClients()` independently, each instantiating its own `useApiData` for the `"clients"` cache key. On Inventory that meant ~7 parallel instances, each with independent `data` React state. Values identical, but array **references** diverge across instances — any `setData` on any instance rebuilds that instance's `apiClients`/`clients` memos with a new reference. Anything that closes over `clients` then rebuilds.
+
+Refactor: `ClientsProvider` at the app root owns a **single** `useApiData` instance. `useClients()` is now a thin `useContext()` wrapper. Two context channels (`active` and `all`) so Settings' "include inactive" path doesn't pollute the active-only reads. Keeps a unit-test-safe fallback: if no provider mounted, falls through to the old direct-fetch path.
+
+Renamed `src/hooks/useClients.ts` → `useClients.tsx` (now contains JSX). Provider wrapped between `<AuthProvider>` and `<BatchDataProvider>` in `main.tsx`. The ref pattern in the 6 data hooks (useInventory/useTasks/useRepairs/useWillCalls/useShipments/useBilling) remains as defense-in-depth but is no longer load-bearing — values from context are stable.
+
+Commit `2e91aa6`, bundle `index-BFRgl5Rm.js` (live).
+
+**Net effect across all three post-ship fixes:**
+
+| Metric | Before | After |
+|---|---|---|
+| `useClients` instances on Inventory page | ~7 | 1 |
+| Parallel `getClients` network calls on mount | 1–7 | 1 |
+| Cross-instance reference divergence | Yes (root cause) | Impossible |
+| Ledger collision error readability | Raw spreadsheet ID | Client name + status, multi-line |
+| Inventory page render stability under load | Cascading aborts, React #300 crash possible | Stable single fetch, no loop |
+
+Previous session (62 React data-hook perf fixes for single- and multi-client views): see `Docs/Archive/Session_History.md`.
 
 ---
 
+## PRIOR SESSION (2026-04-14 session 62) — MOVED TO ARCHIVE
+
+Full writeup in `Docs/Archive/Session_History.md`. Summary: React-only perf fixes for single- and multi-client data loads on Inventory / Tasks / Repairs / Will Calls / Shipments — previously 90s–10min via unscoped GAS fallback, now Supabase-first and fast. Three commits: Shipments page-level `clientName` safety net (`875b5d6`); `clientNameMap` ref stabilization in 5 hooks to stop the perpetual abort/refetch loop (`b0057cd`); removed forced-GAS `refetch()` on client-filter change from all 5 pages (`aab1a54`). Live bundle `index-lOoM3xSO.js` until session 63 superseded it with deep-link and ledger fixes.
+
+<!-- Session 62 full body removed from hot doc after archive confirmation. See Session_History.md line 143.
+### Session 62: React data-hook perf fixes — single- and multi-client views now load from Supabase in seconds (was 90s-10min via GAS fallback)
+
+React-only session. No backend, no Supabase schema changes. Three sequential React deploys fixed a cascading set of regressions that made Inventory / Tasks / Repairs / Will Calls / Shipments extremely slow when a client was selected, and effectively broken on multi-client selection.
+
+**Live bundle after this session:** `index-lOoM3xSO.js` (commit `aab1a54`).
+
+#### Part 1 — Shipments page-level `clientName` safety net (commit `875b5d6`, bundle `index-CEfzpyld.js`)
+
+**Problem:** On Shipments, selecting a client showed empty rows or a partial list even though Supabase had the data. The page filter was `clientFilter.includes(r.clientName)` — but when `useShipments` fetched from Supabase before `useClients` had populated its name map, rows came back with `clientName: ''` and were silently dropped by the filter.
+
+**Fix:** `Shipments.tsx` — added a `shipIdToName` memo (`apiClients.spreadsheetId → name`) and wrapped the filter in a `.map(...)` that resolves empty `clientName` from `r.clientSheetId` / `r.sourceSheetId` via the map before filtering:
+```tsx
+const shipIdToName = useMemo<Record<string, string>>(() => { const m: Record<string, string> = {}; for (const c of apiClients) { m[c.spreadsheetId] = c.name; } return m; }, [apiClients]);
+const data = useMemo(() => {
+  if (clientFilter.length === 0) return [];
+  const resolved = allData.map(r => r.clientName ? r : { ...r, clientName: shipIdToName[(r as any).clientSheetId || (r as any).sourceSheetId || ''] || '' });
+  return resolved.filter(r => clientFilter.includes(r.clientName));
+}, [allData, clientFilter, shipIdToName]);
+```
+This is the same pattern already in Repairs.tsx and WillCalls.tsx — Shipments had been missed. Not a hook-level fix (a previous attempted hook-level version regressed into slowness because adding `clients` to the hook's memo deps caused cascading re-renders from `useClients` returning a referentially-unstable array every render — see Part 2).
+
+#### Part 2 — Stabilize `clientNameMap` via ref in all 5 data hooks (commit `b0057cd`, bundle `index-C12LkL5D.js`)
+
+**Problem:** After Part 1, multi-client selection still showed only the first client's data and the refresh spinner never stopped. Network tab showed the Supabase query firing with the correct `tenant_id=in.(id1,id2)` and returning data, plus many `(canceled)` GAS requests stacked up — classic perpetual abort/refetch cycle.
+
+**Root cause:** All 5 data hooks (`useInventory`, `useTasks`, `useRepairs`, `useWillCalls`, `useShipments`) had `clientNameMap` in the `useCallback` deps of `fetchFn`:
+```ts
+const clientNameMap = useMemo(() => { /* build map from clients */ }, [clients]);
+const fetchFn = useCallback(async (signal) => { /* uses clientNameMap */ }, [cacheKeyScope, clientNameMap]);
+```
+`clients` from `useClients` is a new array reference on every render → `clientNameMap` gets a new reference → `fetchFn` rebuilds → `useApiData`'s `doFetch` useCallback rebuilds → useEffect fires → aborts in-flight → starts new fetch → repeat forever. Single-client selection masked it because the cache hit short-circuited the effect on re-render; multi-client with no cached entry exposed the full loop.
+
+**Fix:** Move `clientNameMap` out of `fetchFn` deps via a ref that mirrors the latest value. `fetchFn` stays stable (`[cacheKeyScope]` only), and reads the latest map via `clientNameMapRef.current`:
+```ts
+const clientNameMap = useMemo(...);
+const clientNameMapRef = useRef(clientNameMap);
+clientNameMapRef.current = clientNameMap;
+const fetchFn = useCallback(async (signal) => {
+  if (await isSupabaseCacheAvailable()) {
+    const sbResult = await fetchXFromSupabase(clientNameMapRef.current, clientSheetId);
+    ...
+  }
+}, [cacheKeyScope]);
+```
+Applied identically to `useInventory.ts`, `useTasks.ts`, `useRepairs.ts`, `useWillCalls.ts`, `useShipments.ts`. The ref pattern is a workaround for the upstream `useClients` referential-instability bug, not a root-cause fix — see Known Issues.
+
+#### Part 3 — Remove forced-GAS `refetch()` on client-filter change (commit `aab1a54`, bundle `index-lOoM3xSO.js`)
+
+**Problem:** Even after Part 2 the spinner still never stopped for the 2nd client, and no new Supabase request fired. Traced to a `useEffect` on each of 5 list pages:
+```tsx
+const clientFilterKey = clientFilter.join(',');
+useEffect(() => {
+  if (clientFilter.length > 0) refetchX();
+}, [clientFilterKey]);
+```
+The manual `refetch()` in `useApiData` is designed for the refresh button — it calls `cacheDelete()` + `setNextFetchNoCache()` + **`skipSupabaseCacheOnce()`** + `doFetch(bypassCache=true)`. So every client-filter change forced GAS to run unscoped → for 2+ clients, `gasClientId` becomes `undefined` → full all-clients GAS scan → 90s-10min hang with no response. The effect was also redundant: `useApiData` already refetches automatically when `cacheKeyScope` (derived from `clientSheetId`) changes, taking the Supabase-first path.
+
+**Fix:** Removed the `useEffect` block from all 5 pages — `Inventory.tsx`, `Tasks.tsx`, `Repairs.tsx`, `WillCalls.tsx`, `Shipments.tsx`. Replaced with a comment explaining why the manual refetch was harmful. The hook-level refetch via `cacheKeyScope` handles every case correctly.
+
+#### Billing: NOT fixed in this batch (intentional)
+
+User asked about applying the same fix to Billing. After reading `Billing.tsx`, confirmed the page uses `useBilling(false)` (auto-fetch off) and routes through `fetchBilling(undefined, undefined, filters)` for its manual "Load Report" flow. Server-side filtering is Apps-Script-only by architecture. The two-line safety-net pattern does not apply. See Known Issues → "Billing slow by design" for the separate-session plan.
+
+---
+
+**Deployed this session:**
+- Three React builds:
+  - `875b5d6` — Shipments page-level clientName safety net → `index-CEfzpyld.js`
+  - `b0057cd` — `clientNameMap` ref stabilization in 5 hooks → `index-C12LkL5D.js`
+  - `aab1a54` — Remove forced-GAS refetch on client-filter change (5 pages) → `index-lOoM3xSO.js` **(live)**
+- No backend, no Supabase migrations, no Apps Script changes.
+
+**Files modified this session:**
+- `stride-gs-app/src/hooks/useInventory.ts` — added `useRef` import, clientNameMap ref pattern
+- `stride-gs-app/src/hooks/useTasks.ts` — same
+- `stride-gs-app/src/hooks/useRepairs.ts` — same
+- `stride-gs-app/src/hooks/useWillCalls.ts` — same
+- `stride-gs-app/src/hooks/useShipments.ts` — same
+- `stride-gs-app/src/pages/Shipments.tsx` — added `shipIdToName` safety net; removed forced-GAS refetch effect
+- `stride-gs-app/src/pages/Inventory.tsx` — removed forced-GAS refetch effect
+- `stride-gs-app/src/pages/Tasks.tsx` — removed forced-GAS refetch effect
+- `stride-gs-app/src/pages/Repairs.tsx` — removed forced-GAS refetch effect
+- `stride-gs-app/src/pages/WillCalls.tsx` — removed forced-GAS refetch effect
+
+**Verification:** User confirmed multi-select on Shipments now loads fast and spinner stops. Single-client load remains fast (Inventory/Tasks/Repairs/WillCalls already verified fast earlier). "Select All" no longer times out.
+
+Previous sessions (61 Import.gs perf + service_role JWT remediation, 60 client isolation cache fix, 59 welcome email + build pipeline regression): see `Docs/Archive/Session_History.md`.
+
+---
+
+## PRIOR SESSION (2026-04-11 session 61) — MOVED TO ARCHIVE
+
+Full writeup in `Docs/Archive/Session_History.md`. Summary: Import.gs v4.2.1 perf fix (17 min → under 30s for a 98-row import, rolled out to all 6 clients) + StrideAPI.gs v38.44.1 service_role JWT leak remediation (GitGuardian alert → user rotated key → `setupSupabaseProperties_` redacted + stale backup removed + `.gitignore` extended → Web App v234 deployed). No React changes that session.
+
+<!-- Session 61 full body removed from hot doc after archive confirmation. See Session_History.md line 143. -->
+<!--
 #### Part 1 — Import.gs v4.2.1 — Per-row round-trip elimination
 
 **Problem:** A 98-row legacy client inventory import (13 rows from ACTIVE STOCK + 85 rows from RELEASED ITEMS) took 1,016 seconds (~17 min) — visible in Apps Script Executions panel. Two `Logger.log` markers at 2:15:18 PM and 2:31:50 PM revealed a ~16-minute gap between batch inserts, which meant the slowness was inside `importSheetRows_` per-row work, not in `setValues` itself.
@@ -171,6 +389,7 @@ The function header comment literally said *"Run this function ONCE from the App
 - No Supabase migrations this session.
 
 Previous sessions (60 client isolation cache fix, 59 welcome email bundle + build pipeline regression, 58 releaseItems Supabase sync): see `Docs/Archive/Session_History.md`.
+-->
 
 ---
 
@@ -388,6 +607,23 @@ Design polish, photo upload, notifications, offline receiving.
 - Transfer Items dialog needs processing animation + disable buttons after complete
 - Multi-row selection only picks last row for Will Call creation
 - GitHub Pages CDN caching: hard-refresh (Ctrl+Shift+R) after deploy
+
+### React App — Performance (pick up in a new session)
+
+Following the session-62 fixes, these pages remain slow/un-optimized. Each is a self-contained task; group or split as needed.
+
+- **Billing — slow by design.** `Billing.tsx` uses `useBilling(false)` (auto-fetch off) and routes through `fetchBilling(undefined, undefined, filters)` → goes direct to GAS for the server-side filter logic. The session-62 safety-net pattern does NOT apply here because Billing never filters rows by `clientName` at the page level the way list pages do. Two possible fixes, pick one:
+  - **(A) Supabase-first for the default / unfiltered view.** When user lands on Billing with no filters applied, load from the `billing` Supabase table (fast). Switch to the GAS `fetchBilling(..., filters)` path only when the user applies filters and clicks "Load Report". Medium effort.
+  - **(B) Mirror the filter logic in `supabaseQueries.ts`.** Reimplement the status / svcCode / sidemark / endDate / client filters as Supabase `.eq / .in / .gte` queries so the full Report Builder is Supabase-backed. Larger effort, but makes every Billing view fast. Requires understanding StrideAPI.gs's billing filter semantics (status + svcCode + sidemark + endDate + client) exactly.
+  - Scope note: Billing storage-report filter restructure (filter-first UX from an earlier session backlog) is a separate UX change, not required for either (A) or (B).
+
+- **Claims — no Supabase mirror.** Claims live in the single Consolidated Billing spreadsheet (not per-tenant). A full Supabase mirror would require a new `claims` table + write-through in `api_writeClaim_` et al. in `StrideAPI.gs` + `fetchClaimsFromSupabase` in `supabaseQueries.ts` + `useClaims` Supabase-first path. Separate session. Equivalent lift to the original phase-3 mirror work.
+
+- **Payments / Stax — no Supabase mirror.** Lives in the Stax Auto Pay spreadsheet plus CB Clients for the customer map. Same architectural pattern as Claims — needs a dedicated session to design the table shape and write-through.
+
+- **Marketing — no Supabase mirror.** Lives in the Campaign spreadsheet (`CAMPAIGN_SHEET_ID`). Same pattern.
+
+- **`useClients` referential instability (root cause of the ref workaround).** `useClients` currently returns a new `clients` array reference on every render even when the underlying data hasn't changed. This is why session-62 had to stabilize `clientNameMap` via a `useRef` workaround in all 5 data hooks. The right fix is to make `useClients`'s `clients` value referentially stable (e.g., only return a new reference when the underlying response body changes, probably via a content-hash or by caching at the hook level). Once fixed, the ref workaround in `useInventory` / `useTasks` / `useRepairs` / `useWillCalls` / `useShipments` can be removed and `clientNameMap` can go back into the `useCallback` deps. Small isolated change but touches a hook many pages depend on — verify no regression on Dashboard / Settings / Sidebar / Receiving / anywhere that renders client lists.
 
 ---
 

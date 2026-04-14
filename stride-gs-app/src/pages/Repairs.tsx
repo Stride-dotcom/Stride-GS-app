@@ -26,6 +26,7 @@ import { FloatingActionMenu, type FABAction } from '../components/shared/Floatin
 import { XCircle, Send as SendIcon, CheckSquare } from 'lucide-react';
 import { useRepairs } from '../hooks/useRepairs';
 import { useBatchData } from '../contexts/BatchDataContext';
+import { useAuth } from '../contexts/AuthContext';
 import { MultiSelectFilter } from '../components/shared/MultiSelectFilter';
 import { SyncBanner } from '../components/shared/SyncBanner';
 import { useClients } from '../hooks/useClients';
@@ -105,11 +106,25 @@ export function Repairs() {
   const pendingOpenRef = useRef<string | null>(null);
 
   // Client list for MultiSelectFilter — declared before data hooks so clientFilter gates fetching
-  const { clients } = useClients();
+  const { clients, apiClients } = useClients();
   const clientNames = useMemo(() => clients.map(c => c.name).sort(), [clients]);
   const [clientFilter, setClientFilter] = useState<string[]>([]);
+  const { user } = useAuth();
+  useEffect(() => {
+    if (user?.role === 'client' && user.accessibleClientNames?.length && clientFilter.length === 0) {
+      setClientFilter(user.accessibleClientNames);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.role, user?.accessibleClientNames?.length]);
 
-  const { repairs, apiRepairs, loading: repairsLoading, refetch: refetchRepairs, applyRepairPatch, mergeRepairPatch, clearRepairPatch, addOptimisticRepair, removeOptimisticRepair } = useRepairs(apiConfigured && clientFilter.length > 0);
+  const selectedSheetId = useMemo<string | string[] | undefined>(() => {
+    if (clientFilter.length === 0) return undefined;
+    const ids = clientFilter.map(n => apiClients.find(c => c.name === n)?.spreadsheetId).filter((x): x is string => !!x);
+    if (ids.length === 0) return undefined;
+    return ids.length === 1 ? ids[0] : ids;
+  }, [clientFilter, apiClients]);
+
+  const { repairs, apiRepairs, loading: repairsLoading, refetch: refetchRepairs, applyRepairPatch, mergeRepairPatch, clearRepairPatch, addOptimisticRepair, removeOptimisticRepair } = useRepairs(apiConfigured && clientFilter.length > 0, selectedSheetId);
 
   const columns = useMemo(() => cols(), []);
   const [selectedRepairId, setSelectedRepairId] = useState<string | null>(null);
@@ -117,19 +132,17 @@ export function Repairs() {
   const selectedRepair = useMemo<ApiRepair | null>(() => (selectedRepairId ? apiRepairs.find(r => r.repairId === selectedRepairId) ?? null : null), [apiRepairs, selectedRepairId]);
   (window as any).__openRepairDetail = (r: Repair) => setSelectedRepairId(r.repairId);
 
-  // Effect 1: Route state OR ?open= query param → store pendingOpen + auto-load
+  // Effect 1: ?open= query param → store pendingOpen + auto-load
+  // (Dashboard now opens standalone page via #/repairs/:repairId — no route state needed)
   useEffect(() => {
-    const state = location.state as { openRepairId?: string; clientSheetId?: string } | null;
-    if (state?.openRepairId) {
-      pendingOpenRef.current = state.openRepairId;
-      refetchRepairs();
-      window.history.replaceState({}, '');
-    } else if (location.search) {
+    // Do NOT call refetchRepairs() here — it bypasses Supabase cache and
+    // forces unscoped GAS (session 62). Data hook auto-fetches via
+    // Supabase-first; Effect 2 opens the pending row when data arrives.
+    if (location.search) {
       const params = new URLSearchParams(location.search);
       const openId = params.get('open');
       if (openId) {
         pendingOpenRef.current = openId;
-        refetchRepairs();
         window.history.replaceState({}, '', window.location.pathname + window.location.hash.split('?')[0]);
       }
     }
@@ -157,17 +170,14 @@ export function Repairs() {
   const [dragOverColId, setDragOverColId] = useState<string | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
 
-  const data = useMemo(() => { if (clientFilter.length === 0) return []; let d = repairs as Repair[]; if (clientFilter.length) d = d.filter(r => clientFilter.includes(r.clientName)); if (sf.length) d = d.filter(r => sf.includes(r.status)); return d; }, [sf, clientFilter, repairs]);
+  // Page-level safety net: resolve clientName from apiClients if empty (race when Supabase fetch happens before useClients loaded)
+  const idToName = useMemo<Record<string, string>>(() => { const m: Record<string, string> = {}; for (const c of apiClients) { m[c.spreadsheetId] = c.name; } return m; }, [apiClients]);
+  const data = useMemo(() => { if (clientFilter.length === 0) return []; let d = (repairs as Repair[]).map(r => r.clientName ? r : { ...r, clientName: idToName[(r as any).clientSheetId || (r as any).clientId] || '' }); if (clientFilter.length) d = d.filter(r => clientFilter.includes(r.clientName)); if (sf.length) d = d.filter(r => sf.includes(r.status)); return d; }, [sf, clientFilter, repairs, idToName]);
 
-  // Auto-refresh when client filter changes — ensures fresh data on every filter change
-  const clientFilterKey = clientFilter.join(',');
-  useEffect(() => {
-    if (clientFilter.length > 0) {
-      refetchRepairs();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [clientFilterKey]);
-  const counts = useMemo(() => { const base = clientFilter.length === 0 ? [] : repairs as Repair[]; const filtered = clientFilter.length > 0 && clientFilter.length < 999 ? base.filter(r => clientFilter.includes(r.clientName)) : base; const c: Record<string, number> = { '': filtered.length }; ALL_STATUSES.forEach(s => { c[s] = filtered.filter(r => r.status === s).length; }); return c; }, [repairs, clientFilter]);
+  // Client-filter change is already handled by useRepairs (cacheKeyScope change
+  // triggers useApiData refetch via Supabase-first path). A manual refetch() here
+  // would force GAS (skipSupabaseCacheOnce) and hang the spinner on multi-client.
+  const counts = useMemo(() => { const base = clientFilter.length === 0 ? [] : (repairs as Repair[]).map(r => r.clientName ? r : { ...r, clientName: idToName[(r as any).clientSheetId || (r as any).clientId] || '' }); const filtered = clientFilter.length > 0 && clientFilter.length < 999 ? base.filter(r => clientFilter.includes(r.clientName)) : base; const c: Record<string, number> = { '': filtered.length }; ALL_STATUSES.forEach(s => { c[s] = filtered.filter(r => r.status === s).length; }); return c; }, [repairs, clientFilter, idToName]);
 
   const table = useReactTable({
     data, columns,

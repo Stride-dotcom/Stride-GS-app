@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react';
-import { Plus, Copy, X, Check, Truck, Package, AlertTriangle, Printer } from 'lucide-react';
+import { Plus, Copy, X, Check, Truck, Package, AlertTriangle, Printer, ClipboardPaste } from 'lucide-react';
 import { theme } from '../styles/theme';
 import { AutocompleteSelect } from '../components/shared/AutocompleteSelect';
 
@@ -9,7 +9,7 @@ import { useLocations } from '../hooks/useLocations';
 
 import { useClients } from '../hooks/useClients';
 import { useAutocomplete } from '../hooks/useAutocomplete';
-import { isApiConfigured, postCompleteShipment, fetchAutoIdSetting, fetchNextItemId } from '../lib/api';
+import { isApiConfigured, postCompleteShipment, postCheckItemIdsAvailable, fetchAutoIdSetting, fetchNextItemId } from '../lib/api';
 import type { ShipmentItemPayload } from '../lib/api';
 import { ProcessingOverlay } from '../components/shared/ProcessingOverlay';
 import { useIsMobile } from '../hooks/useIsMobile';
@@ -155,11 +155,26 @@ function NewShipmentForm() {
     if (autoIdEnabled) assignAutoId(newId);
   }, [autoIdEnabled, assignAutoId]);
 
-  const handlePaste = useCallback((e: React.ClipboardEvent<HTMLInputElement>, startIdx: number, field: keyof DockItem) => {
-    const text = e.clipboardData.getData('text');
-    const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
-    if (lines.length <= 1) return;
-    e.preventDefault();
+  // Column order used for multi-column Excel paste. Matches the visible table
+  // column order so users can copy an Excel range and it lines up exactly.
+  const PASTE_FIELD_ORDER: (keyof DockItem)[] = [
+    'itemId', 'vendor', 'description', 'itemClass', 'qty',
+    'location', 'sidemark', 'reference', 'room'
+  ];
+
+  // Apply pasted text (TSV — tab-separated columns, newline-separated rows)
+  // into the grid starting at a given row index + field.
+  //   - Single cell (no tabs, no newlines): let the input's default paste handle it.
+  //   - Multi-column paste: spreads rightward across PASTE_FIELD_ORDER.
+  //   - Multi-row paste: creates new rows as needed.
+  //   - qty coerced to int, itemClass coerced to known CLASS letter, others as text.
+  const applyBulkPaste = useCallback((text: string, startIdx: number, startField: keyof DockItem) => {
+    const normalized = text.replace(/\r\n?/g, '\n');
+    if (!normalized.includes('\n') && !normalized.includes('\t')) return false; // single-cell paste, fallback to default
+    const lines = normalized.split('\n').filter((l, i, arr) => l.length > 0 || i < arr.length - 1);
+    if (lines.length === 0) return false;
+    const startFieldIdx = PASTE_FIELD_ORDER.indexOf(startField);
+    if (startFieldIdx < 0) return false;
     const newRowIds: string[] = [];
     setItems(prev => {
       const next = [...prev];
@@ -167,21 +182,61 @@ function NewShipmentForm() {
         const cols = line.split('\t');
         const targetIdx = startIdx + offset;
         if (targetIdx >= next.length) {
-          const newItem = emptyItem();
-          next.push(newItem);
-          newRowIds.push(newItem.id);
+          const item = emptyItem();
+          next.push(item);
+          newRowIds.push(item.id);
         }
-        // When auto-ID is on, don't let paste overwrite Item ID field
-        if (autoIdEnabled && field === 'itemId') return;
-        next[targetIdx] = { ...next[targetIdx], [field]: cols[0] || '' };
+        const row = { ...next[targetIdx] };
+        cols.forEach((raw, colOffset) => {
+          const fieldIdx = startFieldIdx + colOffset;
+          if (fieldIdx >= PASTE_FIELD_ORDER.length) return;
+          const fld = PASTE_FIELD_ORDER[fieldIdx];
+          if (autoIdEnabled && fld === 'itemId') return;
+          const val = raw.trim();
+          if (fld === 'qty') {
+            const n = parseInt(val, 10);
+            row.qty = Number.isFinite(n) && n > 0 ? n : 1;
+          } else if (fld === 'itemClass') {
+            const up = val.toUpperCase();
+            row.itemClass = CLASSES.includes(up) ? up : row.itemClass;
+          } else {
+            (row as Record<string, unknown>)[fld as string] = val;
+          }
+        });
+        next[targetIdx] = row;
       });
       return next;
     });
-    // Auto-assign IDs to newly created rows from paste overflow
     if (autoIdEnabled && newRowIds.length > 0) {
       newRowIds.forEach(id => assignAutoId(id));
     }
+    return true;
   }, [autoIdEnabled, assignAutoId]);
+
+  const handlePaste = useCallback((e: React.ClipboardEvent<HTMLInputElement>, startIdx: number, field: keyof DockItem) => {
+    const text = e.clipboardData.getData('text');
+    const consumed = applyBulkPaste(text, startIdx, field);
+    if (consumed) e.preventDefault();
+  }, [applyBulkPaste]);
+
+  // Bulk-paste dialog state — exposed via the "Paste from Excel" button above the grid
+  const [bulkPasteOpen, setBulkPasteOpen] = useState(false);
+  const [bulkPasteText, setBulkPasteText] = useState('');
+  const [bulkPasteStartField, setBulkPasteStartField] = useState<keyof DockItem>('itemId');
+  const applyBulkPasteFromModal = useCallback(() => {
+    if (!bulkPasteText.trim()) { setBulkPasteOpen(false); return; }
+    // Paste into the first empty row (or row 0 if grid is empty/full of values)
+    const firstEmptyIdx = items.findIndex(r => !r.itemId && !r.description && !r.vendor);
+    const startIdx = firstEmptyIdx >= 0 ? firstEmptyIdx : items.length;
+    // Normalize: if user pasted a single row into the modal without tabs, treat
+    // as a single column paste by inserting a fake tab to trigger applyBulkPaste.
+    const text = bulkPasteText.includes('\t') || bulkPasteText.includes('\n')
+      ? bulkPasteText
+      : bulkPasteText + '\t';
+    applyBulkPaste(text, startIdx, bulkPasteStartField);
+    setBulkPasteText('');
+    setBulkPasteOpen(false);
+  }, [bulkPasteText, bulkPasteStartField, items, applyBulkPaste]);
 
   const toggleAutoPrint = useCallback(() => {
     setAutoPrintLabels(prev => {
@@ -296,6 +351,39 @@ function NewShipmentForm() {
 
     setSubmitting(true);
     try {
+      // ─── Phase 3: item_id_ledger preflight ──────────────────────────────────
+      // Query the ledger for every Item ID on this shipment. Block on cross-
+      // tenant collisions (an ID already owned by a DIFFERENT client). Same-
+      // tenant hits are tolerated — they happen on idempotent resubmits.
+      // Degraded mode (Supabase unreachable): show a warning but let the save
+      // proceed per the 2026-04-14 decision. Server-side completeShipment has
+      // its own guard as the final line of defense.
+      const ids = apiItems.map(i => i.itemId).filter(Boolean);
+      if (ids.length > 0) {
+        const check = await postCheckItemIdsAvailable(ids);
+        if (check.ok && check.data) {
+          const crossDups = check.data.duplicates.filter(d => d.tenantId !== clientSheetId);
+          if (crossDups.length > 0) {
+            const lines = crossDups.slice(0, 8).map(d => {
+              const owner = d.tenantName || `tenant ${d.tenantId.slice(0, 10)}…`;
+              return `• ${d.itemId} — already assigned to ${owner} (${d.status})`;
+            });
+            const more = crossDups.length > 8 ? `\n…and ${crossDups.length - 8} more` : '';
+            setSubmitError(
+              `Duplicate Item ID${crossDups.length > 1 ? 's' : ''} detected — cannot receive:\n${lines.join('\n')}${more}\n\nEdit the Item ID column and try again.`
+            );
+            setSubmitting(false);
+            return;
+          }
+          if (check.data.degraded) {
+            // Non-blocking warning. We still proceed; the server guard + nightly
+            // reconciliation catches anything we missed here.
+            console.warn('[Receiving] item_id_ledger check degraded — Supabase unreachable. Proceeding without preflight duplicate detection.');
+          }
+        }
+        // If check itself errored (network, auth), fall through — server has its own guard.
+      }
+
       const resp = await postCompleteShipment({
         idempotencyKey: idempotencyKeyRef.current,
         items: apiItems,
@@ -545,12 +633,59 @@ function NewShipmentForm() {
             <span style={{ fontSize: 14, fontWeight: 600 }}>Items</span>
             <span style={{ fontSize: 12, color: theme.colors.textMuted }}>({filledItems.length} entered)</span>
           </div>
-          <div style={{ display: 'flex', gap: 6 }}>
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+            <button
+              onClick={() => { setBulkPasteStartField('itemId'); setBulkPasteOpen(true); }}
+              title="Copy a range of cells from Excel/Sheets, paste here, apply to the grid"
+              style={{ padding: '5px 12px', fontSize: 11, fontWeight: 600, border: `1px solid ${theme.colors.orange}`, borderRadius: 6, background: theme.colors.orange, cursor: 'pointer', fontFamily: 'inherit', color: '#fff', display: 'flex', alignItems: 'center', gap: 4 }}>
+              <ClipboardPaste size={13} /> Paste from Excel
+            </button>
             <button onClick={addRow} style={{ padding: '5px 12px', fontSize: 11, fontWeight: 600, border: `1px solid ${theme.colors.border}`, borderRadius: 6, background: '#fff', cursor: 'pointer', fontFamily: 'inherit', color: theme.colors.textSecondary, display: 'flex', alignItems: 'center', gap: 4 }}><Plus size={13} /> Add Row</button>
             <button onClick={() => addRows(5)} style={{ padding: '5px 12px', fontSize: 11, fontWeight: 600, border: `1px solid ${theme.colors.border}`, borderRadius: 6, background: '#fff', cursor: 'pointer', fontFamily: 'inherit', color: theme.colors.textSecondary }}>+5</button>
             <button onClick={() => addRows(10)} style={{ padding: '5px 12px', fontSize: 11, fontWeight: 600, border: `1px solid ${theme.colors.border}`, borderRadius: 6, background: '#fff', cursor: 'pointer', fontFamily: 'inherit', color: theme.colors.textSecondary }}>+10</button>
           </div>
         </div>
+
+        {/* Bulk paste modal */}
+        {bulkPasteOpen && (
+          <div onClick={() => setBulkPasteOpen(false)} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }}>
+            <div onClick={e => e.stopPropagation()} style={{ background: '#fff', borderRadius: 12, padding: 20, width: '100%', maxWidth: 720, maxHeight: '90vh', overflow: 'auto', display: 'flex', flexDirection: 'column', gap: 12 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div style={{ fontSize: 16, fontWeight: 700 }}>Paste from Excel / Google Sheets</div>
+                <button onClick={() => setBulkPasteOpen(false)} style={{ border: 'none', background: 'none', cursor: 'pointer', color: theme.colors.textMuted, padding: 4 }}><X size={18} /></button>
+              </div>
+              <div style={{ fontSize: 12, color: theme.colors.textSecondary, lineHeight: 1.5 }}>
+                Copy cells from Excel or Google Sheets and paste them into the box below. Tabs separate columns, new lines start new rows. Columns fill left-to-right starting from the <strong>Start column</strong> you pick.
+              </div>
+              <div style={{ fontSize: 11, background: '#F9FAFB', border: `1px solid ${theme.colors.borderLight}`, borderRadius: 6, padding: '8px 10px', color: theme.colors.textSecondary }}>
+                <strong>Expected column order:</strong> Item ID &middot; Vendor &middot; Description &middot; Class (XS/S/M/L/XL) &middot; Qty &middot; Location &middot; Sidemark &middot; Reference &middot; Room
+                {autoIdEnabled && <div style={{ marginTop: 4, color: theme.colors.orange }}>Auto-ID is ON — leave the Item ID column out of your paste (or it will be ignored).</div>}
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12 }}>
+                <label style={{ color: theme.colors.textMuted }}>Start column:</label>
+                <select value={bulkPasteStartField} onChange={e => setBulkPasteStartField(e.target.value as keyof DockItem)} style={{ padding: '4px 8px', fontSize: 12, border: `1px solid ${theme.colors.border}`, borderRadius: 6, background: '#fff' }}>
+                  {PASTE_FIELD_ORDER.map(f => (
+                    <option key={f} value={f}>
+                      {f === 'itemId' ? 'Item ID' : f === 'itemClass' ? 'Class' : f.charAt(0).toUpperCase() + f.slice(1)}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <textarea
+                value={bulkPasteText}
+                onChange={e => setBulkPasteText(e.target.value)}
+                placeholder="Paste here (Ctrl+V / Cmd+V)..."
+                autoFocus
+                rows={10}
+                style={{ width: '100%', fontFamily: 'monospace', fontSize: 12, padding: 10, border: `1px solid ${theme.colors.border}`, borderRadius: 8, resize: 'vertical', outline: 'none' }}
+              />
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+                <button onClick={() => setBulkPasteOpen(false)} style={{ padding: '8px 16px', fontSize: 12, fontWeight: 600, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', fontFamily: 'inherit', color: theme.colors.textSecondary }}>Cancel</button>
+                <button onClick={applyBulkPasteFromModal} disabled={!bulkPasteText.trim()} style={{ padding: '8px 20px', fontSize: 12, fontWeight: 700, border: 'none', borderRadius: 8, background: bulkPasteText.trim() ? theme.colors.orange : theme.colors.border, cursor: bulkPasteText.trim() ? 'pointer' : 'not-allowed', fontFamily: 'inherit', color: '#fff' }}>Apply to Grid</button>
+              </div>
+            </div>
+          </div>
+        )}
 
         <div style={{ overflowX: 'auto', maxHeight: isMobile ? 'calc(100dvh - 320px)' : 'calc(100dvh - 440px)', minHeight: isMobile ? 200 : undefined, WebkitOverflowScrolling: 'touch' }}>
           <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: isMobile ? 800 : 1000 }}>
@@ -631,7 +766,7 @@ function NewShipmentForm() {
                   <AlertTriangle size={14} style={{ flexShrink: 0, marginTop: 1 }} />
                   <div>
                     <div style={{ fontWeight: 600, marginBottom: 2 }}>Shipment failed</div>
-                    <div style={{ fontSize: 11 }}>{submitError}</div>
+                    <div style={{ fontSize: 11, whiteSpace: 'pre-wrap' }}>{submitError}</div>
                     {/permission|forbidden|403/i.test(submitError) && (
                       <div style={{ fontSize: 10, color: '#92400E', marginTop: 4 }}>Check that the client spreadsheet is shared with your Google account, and that MASTER_RPC_URL/TOKEN are configured in the client Settings tab.</div>
                     )}
@@ -639,7 +774,7 @@ function NewShipmentForm() {
                 </div>
               </div>
             )}
-            <span style={{ fontSize: 11, color: theme.colors.textMuted }}>Tip: paste from Excel/Sheets — it auto-fills rows</span>
+            <span style={{ fontSize: 11, color: theme.colors.textMuted }}>Tip: use the orange <strong>Paste from Excel</strong> button (top right) for multi-column bulk paste, or paste directly into the Item ID / Reference / Room cell of a row to spread columns rightward.</span>
             <button
               onClick={handleComplete}
               disabled={!client || filledItems.length === 0 || submitting}

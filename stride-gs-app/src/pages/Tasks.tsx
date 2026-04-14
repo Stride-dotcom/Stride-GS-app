@@ -32,6 +32,7 @@ import { mergePreflightSkips } from '../lib/batchLoop';
 import { useTasks } from '../hooks/useTasks';
 import { useRepairs } from '../hooks/useRepairs';
 import { useBatchData } from '../contexts/BatchDataContext';
+import { useAuth } from '../contexts/AuthContext';
 import { MultiSelectFilter } from '../components/shared/MultiSelectFilter';
 import { SyncBanner } from '../components/shared/SyncBanner';
 import { useClients } from '../hooks/useClients';
@@ -139,12 +140,26 @@ export function Tasks() {
   const pendingOpenRef = useRef<string | null>(null);
 
   // Client list for MultiSelectFilter — declared before data hooks so clientFilter gates fetching
-  const { clients } = useClients();
+  const { clients, apiClients } = useClients();
   const clientNames = useMemo(() => clients.map(c => c.name).sort(), [clients]);
   const [clientFilter, setClientFilter] = useState<string[]>([]);
+  const { user } = useAuth();
+  useEffect(() => {
+    if (user?.role === 'client' && user.accessibleClientNames?.length && clientFilter.length === 0) {
+      setClientFilter(user.accessibleClientNames);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.role, user?.accessibleClientNames?.length]);
 
-  const { tasks, loading: tasksLoading, refetch: refetchTasks, applyTaskPatch, mergeTaskPatch, clearTaskPatch, addOptimisticTask, removeOptimisticTask } = useTasks(apiConfigured && clientFilter.length > 0);
-  const { repairs, addOptimisticRepair, removeOptimisticRepair } = useRepairs(apiConfigured && clientFilter.length > 0);
+  const selectedSheetId = useMemo<string | string[] | undefined>(() => {
+    if (clientFilter.length === 0) return undefined;
+    const ids = clientFilter.map(n => apiClients.find(c => c.name === n)?.spreadsheetId).filter((x): x is string => !!x);
+    if (ids.length === 0) return undefined;
+    return ids.length === 1 ? ids[0] : ids;
+  }, [clientFilter, apiClients]);
+
+  const { tasks, loading: tasksLoading, refetch: refetchTasks, applyTaskPatch, mergeTaskPatch, clearTaskPatch, addOptimisticTask, removeOptimisticTask } = useTasks(apiConfigured && clientFilter.length > 0, selectedSheetId);
+  const { repairs, addOptimisticRepair, removeOptimisticRepair } = useRepairs(apiConfigured && clientFilter.length > 0, selectedSheetId);
   const ALL_ASSIGNED = useMemo(() => [...new Set(tasks.map(t => t.assignedTo).filter(Boolean))].sort(), [tasks]);
 
   const columns = useMemo(() => cols(), []);
@@ -156,16 +171,18 @@ export function Tasks() {
   // Effect 1: Route state OR ?open= query param → store pendingOpen + auto-load
   useEffect(() => {
     const state = location.state as { openTaskId?: string; clientSheetId?: string } | null;
+    // Do NOT call refetchTasks() here — it bypasses the Supabase cache and
+    // forces an unscoped GAS call (session 62). The data hook's normal
+    // mount fetch already hits Supabase-first (~50ms). The Effect 2 below
+    // opens the pending row once tasks arrive.
     if (state?.openTaskId) {
       pendingOpenRef.current = state.openTaskId;
-      refetchTasks();
       window.history.replaceState({}, '');
     } else if (location.search) {
       const params = new URLSearchParams(location.search);
       const openId = params.get('open');
       if (openId) {
         pendingOpenRef.current = openId;
-        refetchTasks();
         window.history.replaceState({}, '', window.location.pathname + window.location.hash.split('?')[0]);
       }
     }
@@ -358,14 +375,9 @@ export function Tasks() {
     return d;
   }, [sf, clientFilter, af, tasks]);
 
-  // Auto-refresh when client filter changes — ensures fresh data on every filter change
-  const clientFilterKey = clientFilter.join(',');
-  useEffect(() => {
-    if (clientFilter.length > 0) {
-      refetchTasks();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [clientFilterKey]);
+  // Client-filter change is already handled by useTasks (cacheKeyScope change
+  // triggers useApiData refetch via Supabase-first path). A manual refetch() here
+  // would force GAS (skipSupabaseCacheOnce) and hang the spinner on multi-client.
 
   const counts = useMemo(() => {
     const c: Record<string, number> = { '': data.length };

@@ -1,5 +1,106 @@
 /* ===================================================
-   StrideAPI.gs — v38.45.0 — 2026-04-11 07:00 PM PST — Show inactive clients toggle
+   StrideAPI.gs — v38.52.1 — 2026-04-14 PST — Ledger collision errors include client name
+   v38.52.1: completeShipment ITEM_ID_COLLISION error now lists the owning
+             CLIENT NAME (resolved from CB Clients) instead of the raw
+             spreadsheet ID. New helper api_clientNameMap_() (5-min
+             CacheService cached) shared by checkItemIdsAvailable handler +
+             the router pre-check. Message is now multi-line with one
+             bullet per duplicate + "Edit the Item ID column and try again"
+             footer — matches React preflight format.
+   v38.52.0: New item_id_ledger integration — cross-tenant uniqueness registry.
+             - New endpoint checkItemIdsAvailable({itemIds}) → returns duplicates
+               enriched with tenantName from CB Clients. Used by React Receiving
+               preflight. Degraded mode (Supabase unreachable) returns
+               degraded=true — React warns but allows save per 2026-04-14 decision.
+             - completeShipment: router-level pre-check rejects cross-tenant
+               collisions (ITEM_ID_COLLISION) before the handler runs. Same-tenant
+               re-submits pass through (idempotent). On success, batch-inserts
+               ledger rows (source='manual', status='active'). Degraded mode
+               allows save + logs warning.
+             - releaseItems: write-through updates ledger status → 'released'.
+             - transferItems: write-through updates ledger tenant_id → dest + status → 'active'.
+             - New helpers: api_ledgerInsert_, api_ledgerBatchInsert_,
+               api_ledgerUpdateStatus_, api_ledgerTransferTenant_,
+               api_ledgerCheckAvailable_. All best-effort, never throw.
+             - Ledger backfilled 2026-04-14 from public.inventory (4,054 rows).
+               Migration: stride-gs-app/supabase/migrations/20260414180000_item_id_ledger.sql.
+               22 pre-existing cross-tenant dupes surfaced via view
+               public.item_id_ledger_conflicts — all legacy transfer leftovers
+               (no active-on-active collisions).
+   v38.51.7: handleStartRepair_ now accepts Approved, In Progress, AND Complete
+             statuses. Complete regenerates the Work Order PDF without
+             touching Status / Start Date (read-only reprint). Pending Quote /
+             Quote Sent / Declined / Cancelled / Failed are still rejected.
+   v38.51.6 — Start Repair generates Work Order PDF
+   v38.51.6: handleStartRepair_ now generates the DOC_REPAIR_WORK_ORDER PDF
+             directly into the canonical Repairs/<id> folder (the folder the
+             React app's "Repair Folder" button opens). Previously the PDF was
+             only generated at approve-time into a DIFFERENT path
+             (DRIVE_PARENT_FOLDER_ID/REPAIR-<id>), so the folder the user
+             landed in was empty. Stale PDFs are trashed on retry so the
+             folder always holds the current Work Order.
+   v38.51.5 — Legacy repair fallback via inventory
+   v38.51.5: Both repair sync paths now fall back to the Inventory row's
+             Shipment # when the repair has no Source Task ID (legacy
+             migrated items imported via IMP-* shipments). Combined with a
+             Fix Missing Folders pass on the client, this populates
+             shipment_folder_url for repairs on migrated items.
+   v38.51.4 — Repair sync now resolves Shipment # via source task
+   v38.51.4: Both repair sync paths (per-client Sync button handleBulkSyncToSupabase_
+             and api_fullClientSync_) now look up the source task's Shipment #
+             and Task Notes when building the Supabase repair row. Previously
+             the Repairs sheet has no Shipment # column, so shipment_folder_url
+             was always "" and the React Shipment Folder button always rendered
+             disabled. Also backfills task_notes from the source task when the
+             repair row's Task Notes is empty. After this, running the per-client
+             Sync once populates Shipment/Task folders + Task Notes for all
+             existing repairs that have a valid Source Task ID.
+   v38.51.3: Receiving hyperlinks self-heal
+   v38.51.3: Receiving now creates all required Drive hyperlinks inline, so the
+             React app's folder buttons stop requiring "Fix Missing Folders":
+             • Shipment folder creation pulled OUT of the email block — always runs
+               (previously only created when ENABLE_SHIPMENT_EMAIL was true, which
+               silently broke folder buttons whenever an operator disabled notifications).
+             • NEW api_hyperlinkReceivedItems_ helper hyperlinks Inventory.Item ID
+               → per-item folder (PHOTOS_FOLDER_ID/<itemId>), Inventory.Shipment #
+               → Shipments/<shipNo> (the canonical shipment folder), and auto-
+               created Tasks.Task ID → Tasks/<taskId>. Task folder is pre-created
+               in the canonical Tasks/ subfolder so "Start Task" reuses it.
+             • Partial failures log to warnings[] instead of silently dropping,
+               so operators see which cells weren't hyperlinked.
+             • Helper is documented as load-bearing — removing its call site
+               immediately breaks folder buttons in the React app (defense
+               against the session-63-era regression that quietly dropped the
+               hyperlink work from receiving and only left it in Fix Folders).
+   v38.51.2: (a) handleGenerateWcDoc_ now calls api_readSettings_ (was calling
+             non-existent api_readClientSettings_ → ReferenceError).
+             (b) handleRequestRepairQuote_ enriches new repairs from source task:
+             Task Notes (if quote-request notes empty), Task Folder URL, and
+             Shipment Folder URL (via source task's Shipment # → Shipments row
+             hyperlink). Writes through to Supabase immediately so the React
+             Repair panel renders Task Notes + clickable Task/Shipment folder
+             buttons without waiting for the next bulk sync.
+             Note: repair_folder_url stays empty until Start Repair creates
+             the folder — matches existing behavior.
+   v38.51.0: handleGenerateWcDoc_ now emits the full DOC_WILL_CALL_RELEASE token set
+   v38.51.0: handleGenerateWcDoc_ now emits the full DOC_WILL_CALL_RELEASE token set
+             matching the Google Doc template (DATE, EST_PICKUP_ROW, REQUESTED_BY_ROW,
+             ITEM_COUNT, NOTES_HTML, ITEMS_TABLE_ROWS, TOTAL_ITEMS, TOTAL_FEE,
+             PICKUP_PHONE_HTML, plus legacy tokens for backward compatibility).
+             Previously only set a 9-token subset using mismatched names (ITEMS_TABLE,
+             NOTES, PICKUP_DATE) so most template placeholders rendered as raw text.
+             Also reads Qty/Vendor/Location/Sidemark from WC_Items and builds the
+             full 8-column items table matching the template. Mirrors buildWcReleasePdfTokens
+             in AppScripts/stride-client-inventory/src/WillCalls.gs.
+   v38.50.0: CRITICAL FIX: Partial release was using wcMap (Will_Calls) column index
+             to write WC_Items rows, corrupting Item ID column. Now uses wciMap.
+             Also creates Drive folder for split WC + hyperlinks WC Number.
+   v38.49.0: (merged into v38.50.0).
+   v38.48.0: getWillCallById + getRepairById endpoints for standalone detail pages.
+             Full WC data with items, COD, folders. Full repair with inventory backfill.
+   v38.47.0: resyncEntityToSupabase_ for tasks now reads Task ID hyperlink for folder URL.
+             generateWcDoc endpoint. WC COD in Supabase sync. sbWillCallRow_ includes cod fields.
+   v38.46.0: handleUpdateWillCall_ now accepts cod (boolean) field in WC_FIELD_MAP.
    v38.45.0: getClients accepts optional includeInactive=1 query param (admin-only).
    When set, inactive clients are returned with active:false instead of being
    filtered out server-side. Staff and client roles always get active-only.
@@ -914,6 +1015,258 @@ function supabaseDeleteStaleRows_(table, tenantId, keepIds, idColumn) {
   }
 }
 
+// ─── Supabase Phase 4 — item_id_ledger (authoritative cross-tenant ID registry) ──
+//
+// The ledger is the single source of truth for "has this Item ID ever been
+// issued?" across all clients. Unlike the other Supabase tables (read cache
+// mirrors), this table is the AUTHORITY for uniqueness — it is its own write
+// path, not a sheet mirror. See CLAUDE.md invariant #20 note.
+//
+// Write path: StrideAPI.gs is the only writer. React calls checkItemIdsAvailable
+// to query but does not write directly. Every new Item ID allocation
+// (completeShipment) inserts here; releaseItems / transferItems update status.
+//
+// Degraded mode: all helpers are best-effort. If Supabase is unreachable,
+// warehouse receiving must not block — we log + continue. The nightly
+// reconciliation job (future) catches any gaps.
+
+/**
+ * Insert one Item ID into the ledger. Idempotent via ON CONFLICT DO NOTHING.
+ * Best-effort, never throws.
+ */
+function api_ledgerInsert_(itemId, tenantId, source, status, createdBy) {
+  if (!itemId) return;
+  try {
+    var url = prop_("SUPABASE_URL");
+    var key = prop_("SUPABASE_SERVICE_ROLE_KEY");
+    if (!url || !key) return;
+    UrlFetchApp.fetch(url + "/rest/v1/item_id_ledger?on_conflict=item_id", {
+      method: "POST",
+      headers: {
+        "Authorization": "Bearer " + key,
+        "apikey":        key,
+        "Content-Type":  "application/json",
+        "Prefer":        "resolution=ignore-duplicates,return=minimal"
+      },
+      payload: JSON.stringify({
+        item_id:    String(itemId).trim(),
+        tenant_id:  String(tenantId || ""),
+        source:     source || "manual",
+        status:     status || "active",
+        created_by: createdBy || ""
+      }),
+      muteHttpExceptions: true
+    });
+  } catch (e) {
+    Logger.log("api_ledgerInsert_ error (non-fatal): " + e);
+  }
+}
+
+/**
+ * Batch-insert Item IDs. rows: [{itemId, tenantId, source, status, createdBy}]
+ * Idempotent. Best-effort, never throws.
+ */
+function api_ledgerBatchInsert_(rows) {
+  if (!rows || !rows.length) return;
+  try {
+    var url = prop_("SUPABASE_URL");
+    var key = prop_("SUPABASE_SERVICE_ROLE_KEY");
+    if (!url || !key) return;
+    var payload = [];
+    for (var i = 0; i < rows.length; i++) {
+      var r = rows[i];
+      if (!r || !r.itemId) continue;
+      payload.push({
+        item_id:    String(r.itemId).trim(),
+        tenant_id:  String(r.tenantId || ""),
+        source:     r.source || "manual",
+        status:     r.status || "active",
+        created_by: r.createdBy || ""
+      });
+    }
+    if (!payload.length) return;
+    // Chunk at 100 rows per request for reliability
+    for (var j = 0; j < payload.length; j += 100) {
+      UrlFetchApp.fetch(url + "/rest/v1/item_id_ledger?on_conflict=item_id", {
+        method: "POST",
+        headers: {
+          "Authorization": "Bearer " + key,
+          "apikey":        key,
+          "Content-Type":  "application/json",
+          "Prefer":        "resolution=ignore-duplicates,return=minimal"
+        },
+        payload: JSON.stringify(payload.slice(j, j + 100)),
+        muteHttpExceptions: true
+      });
+    }
+  } catch (e) {
+    Logger.log("api_ledgerBatchInsert_ error (non-fatal): " + e);
+  }
+}
+
+/**
+ * Update status (+ optional void_reason) for a set of Item IDs.
+ * newStatus: 'active'|'released'|'transferred'|'voided'.
+ * Best-effort, never throws.
+ */
+function api_ledgerUpdateStatus_(itemIds, newStatus, voidReason) {
+  if (!itemIds) return;
+  if (!Array.isArray(itemIds)) itemIds = [itemIds];
+  try {
+    var url = prop_("SUPABASE_URL");
+    var key = prop_("SUPABASE_SERVICE_ROLE_KEY");
+    if (!url || !key) return;
+    var ids = [];
+    for (var i = 0; i < itemIds.length; i++) {
+      if (itemIds[i]) ids.push(String(itemIds[i]).trim());
+    }
+    if (!ids.length) return;
+    var patch = { status: newStatus };
+    if (newStatus === "voided") {
+      patch.voided_at = new Date().toISOString();
+      if (voidReason) patch.void_reason = String(voidReason);
+    }
+    UrlFetchApp.fetch(
+      url + "/rest/v1/item_id_ledger?item_id=in.(" + ids.map(encodeURIComponent).join(",") + ")",
+      {
+        method: "PATCH",
+        headers: {
+          "Authorization": "Bearer " + key,
+          "apikey":        key,
+          "Content-Type":  "application/json",
+          "Prefer":        "return=minimal"
+        },
+        payload: JSON.stringify(patch),
+        muteHttpExceptions: true
+      }
+    );
+  } catch (e) {
+    Logger.log("api_ledgerUpdateStatus_ error (non-fatal): " + e);
+  }
+}
+
+/**
+ * Reassign the owning tenant for a set of Item IDs (used by transferItems).
+ * Also resets status to 'active' since the item is now live at the new tenant.
+ * Best-effort, never throws.
+ */
+function api_ledgerTransferTenant_(itemIds, newTenantId) {
+  if (!itemIds || !newTenantId) return;
+  if (!Array.isArray(itemIds)) itemIds = [itemIds];
+  try {
+    var url = prop_("SUPABASE_URL");
+    var key = prop_("SUPABASE_SERVICE_ROLE_KEY");
+    if (!url || !key) return;
+    var ids = [];
+    for (var i = 0; i < itemIds.length; i++) {
+      if (itemIds[i]) ids.push(String(itemIds[i]).trim());
+    }
+    if (!ids.length) return;
+    UrlFetchApp.fetch(
+      url + "/rest/v1/item_id_ledger?item_id=in.(" + ids.map(encodeURIComponent).join(",") + ")",
+      {
+        method: "PATCH",
+        headers: {
+          "Authorization": "Bearer " + key,
+          "apikey":        key,
+          "Content-Type":  "application/json",
+          "Prefer":        "return=minimal"
+        },
+        payload: JSON.stringify({ tenant_id: String(newTenantId), status: "active" }),
+        muteHttpExceptions: true
+      }
+    );
+  } catch (e) {
+    Logger.log("api_ledgerTransferTenant_ error (non-fatal): " + e);
+  }
+}
+
+/**
+ * Build a { spreadsheetId → "Client Name" } map from the CB Clients tab.
+ * Used to enrich ledger collision errors with human-readable client names.
+ * Cached in CacheService (5 min) to avoid re-opening CB on every receive.
+ * Best-effort — returns {} on any failure.
+ */
+function api_clientNameMap_() {
+  try {
+    var cache = CacheService.getScriptCache();
+    var cached = cache.get("clientNameMap_v1");
+    if (cached) return JSON.parse(cached);
+    var cbId = prop_("CB_SPREADSHEET_ID");
+    if (!cbId) return {};
+    var cbSS = SpreadsheetApp.openById(cbId);
+    var sheet = cbSS.getSheetByName("Clients");
+    if (!sheet) return {};
+    var hMap = api_getHeaderMap_(sheet);
+    var nameCol = hMap["Client Name"];
+    var idCol   = hMap["Client Spreadsheet ID"];
+    if (!nameCol || !idCol) return {};
+    var data = sheet.getDataRange().getValues();
+    var out = {};
+    for (var i = 1; i < data.length; i++) {
+      var sid = String(data[i][idCol - 1] || "").trim();
+      var nm  = String(data[i][nameCol - 1] || "").trim();
+      if (sid) out[sid] = nm;
+    }
+    try { cache.put("clientNameMap_v1", JSON.stringify(out), 300); } catch (e2) {}
+    return out;
+  } catch (e) {
+    Logger.log("api_clientNameMap_ error (non-fatal): " + e);
+    return {};
+  }
+}
+
+/**
+ * Look up Item IDs in the ledger. Returns:
+ *   { duplicates: [{itemId, tenantId, status, source, createdAt}], degraded: bool }
+ * If Supabase is unreachable, degraded=true and duplicates=[] so the caller
+ * can decide whether to block or allow (warehouse receiving allows; React
+ * preflight blocks). Never throws.
+ */
+function api_ledgerCheckAvailable_(itemIds) {
+  var out = { duplicates: [], degraded: false };
+  if (!itemIds || !itemIds.length) return out;
+  try {
+    var url = prop_("SUPABASE_URL");
+    var key = prop_("SUPABASE_SERVICE_ROLE_KEY");
+    if (!url || !key) { out.degraded = true; return out; }
+    var ids = [];
+    for (var i = 0; i < itemIds.length; i++) {
+      if (itemIds[i]) ids.push(String(itemIds[i]).trim());
+    }
+    if (!ids.length) return out;
+    var fetchUrl = url + "/rest/v1/item_id_ledger" +
+      "?item_id=in.(" + ids.map(encodeURIComponent).join(",") + ")" +
+      "&select=item_id,tenant_id,status,source,created_at";
+    var resp = UrlFetchApp.fetch(fetchUrl, {
+      method: "GET",
+      headers: { "Authorization": "Bearer " + key, "apikey": key },
+      muteHttpExceptions: true
+    });
+    var code = resp.getResponseCode();
+    if (code < 200 || code >= 300) {
+      Logger.log("api_ledgerCheckAvailable_ HTTP " + code + ": " + resp.getContentText().substring(0, 300));
+      out.degraded = true;
+      return out;
+    }
+    var rows = JSON.parse(resp.getContentText() || "[]");
+    for (var r = 0; r < rows.length; r++) {
+      out.duplicates.push({
+        itemId:    rows[r].item_id,
+        tenantId:  rows[r].tenant_id,
+        status:    rows[r].status,
+        source:    rows[r].source,
+        createdAt: rows[r].created_at
+      });
+    }
+    return out;
+  } catch (e) {
+    Logger.log("api_ledgerCheckAvailable_ error (non-fatal): " + e);
+    out.degraded = true;
+    return out;
+  }
+}
+
 /**
  * v38.45.0: Purge ALL Supabase data for a tenant across all 6 entity tables.
  * Used when a client is deactivated or during Bulk Sync cleanup for inactive clients.
@@ -1092,6 +1445,8 @@ function sbWillCallRow_(tenantId, wc) {
     item_count:            Number(wc.itemsCount || wc.itemCount || 0),
     wc_folder_url:         String(wc.wcFolderUrl || ""),
     shipment_folder_url:   String(wc.shipmentFolderUrl || ""),
+    cod:                   !!(wc.cod),
+    cod_amount:            wc.codAmount != null && wc.codAmount !== "" ? Number(wc.codAmount) : null,
     updated_at:            new Date().toISOString()
   };
 }
@@ -1219,6 +1574,15 @@ function resyncEntityToSupabase_(entityType, tenantId, entityId) {
             }));
             break;
           case "task":
+            // Read folder URL from Task ID cell hyperlink (rich text, not plain text)
+            var taskFolderUrlResync = "";
+            try {
+              var taskIdColResync = api_getHeaderMap_(sheet)["Task ID"];
+              if (taskIdColResync) {
+                var taskRtResync = sheet.getRange(i + 2, taskIdColResync).getRichTextValue();
+                if (taskRtResync) taskFolderUrlResync = taskRtResync.getLinkUrl() || "";
+              }
+            } catch (_) {}
             supabaseUpsert_("tasks", sbTaskRow_(tenantId, {
               taskId: entityId, itemId: row["Item ID"], svcCode: row["Svc Code"] || row["Type"],
               status: row["Status"], result: row["Result"], description: row["Description"],
@@ -1231,7 +1595,8 @@ function resyncEntityToSupabase_(entityType, tenantId, entityId) {
               cancelledAt: formatDate_(row["Cancelled At"]),
               startedAt: formatDate_(row["Started At"]),
               billed: String(row["Billed"] || "").toLowerCase() === "true",
-              clientName: row["_clientName"] || ""
+              clientName: row["_clientName"] || "",
+              taskFolderUrl: taskFolderUrlResync
             }));
             break;
           case "repair":
@@ -1250,7 +1615,8 @@ function resyncEntityToSupabase_(entityType, tenantId, entityId) {
               wcNumber: entityId, status: row["Status"], pickupParty: row["Pickup Party"],
               createdDate: formatDate_(row["Created Date"]),
               estimatedPickupDate: formatDate_(row["Estimated Pickup Date"]),
-              notes: row["Notes"], itemsCount: row["Items Count"]
+              notes: row["Notes"], itemsCount: row["Items Count"],
+              cod: row["COD"], codAmount: row["COD Amount"]
             }));
             break;
           case "shipment":
@@ -1457,6 +1823,7 @@ function api_fullClientSync_(tenantId, entityTypes) {
                 createdDate: formatDate_(wcRows[m]["Created Date"]),
                 estimatedPickupDate: formatDate_(wcRows[m]["Estimated Pickup Date"]),
                 notes: wcRows[m]["Notes"], itemsCount: wcRows[m]["Items Count"],
+                cod: wcRows[m]["COD"], codAmount: wcRows[m]["COD Amount"],
                 wcFolderUrl: wcFolderUrls[wcn] || "",
                 shipmentFolderUrl: wcShipMap[String(wcRows[m]["Shipment #"] || "").trim()] || ""
               }));
@@ -1474,19 +1841,63 @@ function api_fullClientSync_(tenantId, entityTypes) {
             var repShipMap = api_buildShipmentFolderMap_(ss);
             var repTaskSheet = ss.getSheetByName("Tasks");
             var repTaskFolderUrls = repTaskSheet ? api_readIdFolderUrls_(repTaskSheet, "Task ID") : {};
+
+            // v38.51.4 — build Task ID → {Shipment #, Task Notes} lookup from
+            // the Tasks sheet. The Repairs sheet has no "Shipment #" column,
+            // so before this fix shipmentFolderUrl was always "". Now we
+            // resolve it (and backfill missing Task Notes) via the source task.
+            var repTaskMeta = {};
+            if (repTaskSheet) {
+              try {
+                var repTaskRows = sheetToObjects_(repTaskSheet);
+                for (var rti = 0; rti < repTaskRows.length; rti++) {
+                  var rtid = String(repTaskRows[rti]["Task ID"] || "").trim();
+                  if (!rtid) continue;
+                  repTaskMeta[rtid] = {
+                    shipmentNo: String(repTaskRows[rti]["Shipment #"] || "").trim(),
+                    taskNotes: String(repTaskRows[rti]["Task Notes"] || "")
+                  };
+                }
+              } catch (_) { /* tolerate malformed Tasks sheet */ }
+            }
+
+            // v38.51.5 — Item ID → Shipment # fallback for legacy migrated repairs
+            var repInvShipById = {};
+            try {
+              var repInvSheet = ss.getSheetByName("Inventory");
+              if (repInvSheet) {
+                var repInvRows = sheetToObjects_(repInvSheet);
+                for (var rivi = 0; rivi < repInvRows.length; rivi++) {
+                  var riid = String(repInvRows[rivi]["Item ID"] || "").trim();
+                  if (!riid) continue;
+                  repInvShipById[riid] = String(repInvRows[rivi]["Shipment #"] || "").trim();
+                }
+              }
+            } catch (_) {}
+
             var repSb = [];
             var repKeepIds = [];
             for (var n = 0; n < repRows.length; n++) {
               var rid = String(repRows[n]["Repair ID"] || "").trim();
               if (!rid) continue;
               repKeepIds.push(rid);
-              var rShipNo = String(repRows[n]["Shipment #"] || "").trim();
               var rTaskId = String(repRows[n]["Source Task ID"] || repRows[n]["Task ID"] || "").trim();
+              var srcMeta = repTaskMeta[rTaskId] || {};
+              var rItemIdFull = String(repRows[n]["Item ID"] || "").trim();
+              // Prefer explicit Shipment # on repair (rare — legacy), else source task, else inventory fallback
+              var rShipNo = String(
+                repRows[n]["Shipment #"] ||
+                srcMeta.shipmentNo ||
+                repInvShipById[rItemIdFull] ||
+                ""
+              ).trim();
+              // Prefer Task Notes on repair row, else backfill from source task
+              var rTaskNotes = String(repRows[n]["Task Notes"] || "").trim() || srcMeta.taskNotes || "";
               repSb.push(sbRepairRow_(tenantId, {
                 repairId: rid, itemId: repRows[n]["Item ID"], status: repRows[n]["Status"],
                 repairResult: repRows[n]["Repair Result"], quoteAmount: repRows[n]["Quote Amount"],
                 finalAmount: repRows[n]["Final Amount"], repairVendor: repRows[n]["Repair Vendor"],
-                repairNotes: repRows[n]["Repair Notes"], taskNotes: repRows[n]["Task Notes"],
+                repairNotes: repRows[n]["Repair Notes"], taskNotes: rTaskNotes,
                 itemNotes: repRows[n]["Item Notes"],
                 createdDate: formatDate_(repRows[n]["Created Date"]),
                 completedDate: formatDate_(repRows[n]["Completed Date"]),
@@ -1574,6 +1985,8 @@ function doGet(e) {
       case "getInventory":    return withClientIsolation_(callerEmail, clientSheetId, function(eid) { return cachedHandler_("inv:" + eid, function() { return handleGetInventory_(eid); }, noCache); });
       case "getTasks":        return withClientIsolation_(callerEmail, clientSheetId, function(eid) { return cachedHandler_("tasks:" + eid, function() { return handleGetTasks_(eid); }, noCache); });
       case "getTaskById":     return withClientIsolation_(callerEmail, clientSheetId, function(eid) { return handleGetTaskById_(eid, params); });
+      case "getWillCallById": return withClientIsolation_(callerEmail, clientSheetId, function(eid) { return handleGetWillCallById_(eid, params); });
+      case "getRepairById":   return withClientIsolation_(callerEmail, clientSheetId, function(eid) { return handleGetRepairById_(eid, params); });
       case "getRepairs":      return withClientIsolation_(callerEmail, clientSheetId, function(eid) { return cachedHandler_("repairs:" + eid, function() { return handleGetRepairs_(eid); }, noCache); });
       case "getWillCalls":    return withClientIsolation_(callerEmail, clientSheetId, function(eid) { return cachedHandler_("wc:" + eid, function() { return handleGetWillCalls_(eid); }, noCache); });
       case "getShipments":    return withClientIsolation_(callerEmail, clientSheetId, function(eid) { return cachedHandler_("ship:" + eid, function() { return handleGetShipments_(eid); }, noCache); });
@@ -1686,10 +2099,67 @@ function doPost(e) {
     switch (action) {
       case "completeShipment":
         return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
+          // Phase 2 — server-side ledger collision guard. Last line of defense
+          // in case React preflight was skipped (bug / old bundle / wrong flow).
+          // Reject only on CROSS-tenant collision: same tenant re-submit is
+          // allowed (idempotent). Degraded mode (Supabase unreachable) allows
+          // the save per the 2026-04-14 decision — reconciliation catches it.
+          try {
+            var preItems = Array.isArray(payload && payload.items) ? payload.items : [];
+            var preIds = [];
+            for (var pi = 0; pi < preItems.length; pi++) {
+              var pid = String((preItems[pi] || {}).itemId || "").trim();
+              if (pid) preIds.push(pid);
+            }
+            if (preIds.length) {
+              var pre = api_ledgerCheckAvailable_(preIds);
+              if (!pre.degraded) {
+                var crossDup = [];
+                for (var pd = 0; pd < pre.duplicates.length; pd++) {
+                  if (pre.duplicates[pd].tenantId !== effectiveId) crossDup.push(pre.duplicates[pd]);
+                }
+                if (crossDup.length) {
+                  var nameMap_cs = api_clientNameMap_();
+                  var msg = "Duplicate Item ID" + (crossDup.length > 1 ? "s" : "") +
+                    " already assigned to another client:\n" +
+                    crossDup.slice(0, 8).map(function(d){
+                      var owner = nameMap_cs[d.tenantId] || ("tenant " + String(d.tenantId || "").slice(0, 10) + "…");
+                      return "• " + d.itemId + " — assigned to " + owner + " (" + (d.status || "?") + ")";
+                    }).join("\n") +
+                    (crossDup.length > 8 ? "\n…and " + (crossDup.length - 8) + " more" : "") +
+                    "\n\nEdit the Item ID column and try again.";
+                  return errorResponse_(msg, "ITEM_ID_COLLISION");
+                }
+              }
+            }
+          } catch (lerr) {
+            Logger.log("completeShipment ledger pre-check error (non-fatal, allowing save): " + lerr);
+          }
           var r = handleCompleteShipment_(effectiveId, payload);
           invalidateClientCache_(effectiveId);
           api_fullClientSync_(effectiveId, ["inventory", "shipment", "billing"]);
+          // Phase 2 — write-through to item_id_ledger on success so future
+          // collisions are caught. Idempotent (ON CONFLICT DO NOTHING).
+          try {
+            var rJson = JSON.parse(r.getContent());
+            if (rJson && rJson.success && !rJson.skipped && Array.isArray(payload.items)) {
+              var ledgerRows = [];
+              for (var li = 0; li < payload.items.length; li++) {
+                var iid = String((payload.items[li] || {}).itemId || "").trim();
+                if (iid) ledgerRows.push({
+                  itemId: iid, tenantId: effectiveId, source: "manual",
+                  status: "active", createdBy: callerEmail || ""
+                });
+              }
+              if (ledgerRows.length) api_ledgerBatchInsert_(ledgerRows);
+            }
+          } catch (lerr) { Logger.log("completeShipment ledger insert error (non-fatal): " + lerr); }
           return r;
+        });
+
+      case "checkItemIdsAvailable":
+        return withStaffGuard_(callerEmail, function() {
+          return handleCheckItemIdsAvailable_(payload);
         });
 
       case "completeTask":
@@ -1825,6 +2295,11 @@ function doPost(e) {
           return r;
         });
 
+      case "generateWcDoc":
+        return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
+          return handleGenerateWcDoc_(effectiveId, payload);
+        });
+
       case "addItemsToWillCall":
         return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
           var r = handleAddItemsToWillCall_(effectiveId, payload);
@@ -1857,6 +2332,14 @@ function doPost(e) {
           // matches the pattern used by every other single-entity handler.
           var releasedIds = Array.isArray(payload && payload.itemIds) ? payload.itemIds : [];
           api_writeThrough_(r, "inventory", clientSheetId, releasedIds);
+          // Phase 2 — mark released in the ledger (status: released). Slot stays
+          // burned; the ID can never be reissued.
+          try {
+            var rJsonRel = JSON.parse(r.getContent());
+            if (rJsonRel && rJsonRel.success && !rJsonRel.skipped && releasedIds.length) {
+              api_ledgerUpdateStatus_(releasedIds, "released", null);
+            }
+          } catch (lerr) { Logger.log("releaseItems ledger update error (non-fatal): " + lerr); }
           return r;
         });
 
@@ -1872,6 +2355,15 @@ function doPost(e) {
           api_notifySupabase_(r, { tenant_id: effectiveId, entity_type: "inventory", entity_id: "", action_type: "transfer_items", requested_by: callerEmail, request_id: String(payload.requestId || "") });
           api_fullClientSync_(effectiveId, ["inventory", "billing"]);
           if (destId) api_fullClientSync_(destId, ["inventory", "billing"]);
+          // Phase 2 — update ledger: tenant_id → dest, status → active.
+          // The ID stays the same (transfers preserve Item ID across clients).
+          try {
+            var rJsonTx = JSON.parse(r.getContent());
+            var txIds = Array.isArray(payload && payload.itemIds) ? payload.itemIds : [];
+            if (rJsonTx && rJsonTx.success && !rJsonTx.skipped && destId && txIds.length) {
+              api_ledgerTransferTenant_(txIds, destId);
+            }
+          } catch (lerr) { Logger.log("transferItems ledger update error (non-fatal): " + lerr); }
           return r;
         });
 
@@ -3421,6 +3913,227 @@ function handleGetTaskById_(clientSheetId, params) {
   try { syncEntityToSupabase_("task", clientSheetId, task); } catch (e) { /* best-effort */ }
 
   return jsonResponse_({ success: true, task: task });
+}
+
+/**
+ * handleGetWillCallById_ — Fetch a single will call by WC Number from a specific client sheet.
+ * Returns full WC data including items, COD, folder URLs.
+ * Params: { wcNumber }
+ */
+function handleGetWillCallById_(clientSheetId, params) {
+  var targetWcNum = String(params.wcNumber || "").trim();
+  if (!targetWcNum) return errorResponse_("Missing wcNumber parameter", "INVALID_PARAMS");
+
+  var ss = SpreadsheetApp.openById(clientSheetId);
+  var wcSheet = ss.getSheetByName("Will_Calls");
+  if (!wcSheet) return errorResponse_("Will_Calls sheet not found", "NOT_FOUND");
+
+  var wcRows = sheetToObjects_(wcSheet);
+  var matchRow = null;
+  for (var r = 0; r < wcRows.length; r++) {
+    if (String(wcRows[r]["WC Number"] || "").trim() === targetWcNum) { matchRow = wcRows[r]; break; }
+  }
+  if (!matchRow) return errorResponse_("Will Call not found: " + targetWcNum, "NOT_FOUND");
+
+  // Folder URLs
+  var wcFolderUrls = api_readIdFolderUrls_(wcSheet, "WC Number");
+  var shipFolderMap = api_buildShipmentFolderMap_(ss);
+
+  // Read WC_Items for this WC
+  var items = [];
+  var wciSh = ss.getSheetByName("WC_Items");
+  if (wciSh) {
+    var wciRows = sheetToObjects_(wciSh);
+    // Build inventory lookup for fallback fields
+    var invLookup = {};
+    var invSheet = ss.getSheetByName("Inventory");
+    if (invSheet) {
+      var invRows = sheetToObjects_(invSheet);
+      for (var iv = 0; iv < invRows.length; iv++) {
+        var iid = String(invRows[iv]["Item ID"] || "").trim();
+        if (iid) invLookup[iid] = invRows[iv];
+      }
+    }
+    for (var i = 0; i < wciRows.length; i++) {
+      var wci = wciRows[i];
+      if (String(wci["WC Number"] || "").trim() !== targetWcNum) continue;
+      var wciItemId = String(wci["Item ID"] || "").trim();
+      var wciVendor = String(wci["Vendor"] || "").trim();
+      var wciLocation = String(wci["Location"] || "").trim();
+      var wciDesc = String(wci["Description"] || "").trim();
+      if ((!wciVendor || !wciLocation || !wciDesc) && invLookup[wciItemId]) {
+        var inv = invLookup[wciItemId];
+        if (!wciVendor) wciVendor = String(inv["Vendor"] || "").trim();
+        if (!wciLocation) wciLocation = String(inv["Location"] || "").trim();
+        if (!wciDesc) wciDesc = String(inv["Description"] || "").trim();
+      }
+      items.push({
+        wcNumber: targetWcNum,
+        itemId: wciItemId,
+        qty: Number(wci["Qty"]) || 1,
+        vendor: wciVendor,
+        description: wciDesc,
+        itemClass: String(wci["Class"] || "").trim(),
+        location: wciLocation,
+        sidemark: String(wci["Sidemark"] || "").trim(),
+        room: String(wci["Room"] || "").trim(),
+        wcFee: toNum_(wci["WC Fee"]),
+        released: String(wci["Status"] || "").trim() === "Released" || toBool_(wci["Released"]),
+        status: String(wci["Status"] || "").trim()
+      });
+    }
+  }
+
+  // Resolve client name from Settings
+  var clientName = "";
+  try {
+    var stSheet = ss.getSheetByName("Settings");
+    if (stSheet) {
+      var stData = stSheet.getDataRange().getValues();
+      for (var si = 0; si < stData.length; si++) {
+        if (String(stData[si][0] || "").trim() === "CLIENT_NAME") { clientName = String(stData[si][1] || "").trim(); break; }
+      }
+    }
+  } catch (e) { /* best-effort */ }
+
+  // Shipment folder URL via first item's shipment number
+  var shipmentFolderUrl = "";
+  if (items.length > 0) {
+    var firstItemShip = "";
+    if (invLookup && items[0].itemId && invLookup[items[0].itemId]) {
+      firstItemShip = String(invLookup[items[0].itemId]["Shipment #"] || "").trim();
+    }
+    if (firstItemShip) shipmentFolderUrl = shipFolderMap[firstItemShip] || "";
+  }
+
+  var wc = {
+    wcNumber: targetWcNum,
+    clientName: clientName,
+    clientSheetId: clientSheetId,
+    status: String(matchRow["Status"] || "Pending").trim(),
+    createdDate: formatDate_(matchRow["Created Date"]),
+    createdBy: String(matchRow["Created By"] || "").trim(),
+    pickupParty: String(matchRow["Pickup Party"] || "").trim(),
+    pickupPhone: String(matchRow["Pickup Phone"] || "").trim(),
+    requestedBy: String(matchRow["Requested By"] || "").trim(),
+    estimatedPickupDate: formatDate_(matchRow["Estimated Pickup Date"]),
+    actualPickupDate: formatDate_(matchRow["Actual Pickup Date"]),
+    notes: String(matchRow["Notes"] || "").trim(),
+    cod: toBool_(matchRow["COD"]),
+    codAmount: toNum_(matchRow["COD Amount"]),
+    itemsCount: items.length || Number(matchRow["Items Count"]) || 0,
+    totalWcFee: toNum_(matchRow["Total WC Fee"]),
+    items: items,
+    wcFolderUrl: wcFolderUrls[targetWcNum] || "",
+    shipmentFolderUrl: shipmentFolderUrl
+  };
+
+  // Hydrate Supabase read cache
+  try { syncEntityToSupabase_("will_call", clientSheetId, wc); } catch (e) { /* best-effort */ }
+
+  return jsonResponse_({ success: true, willCall: wc });
+}
+
+/**
+ * handleGetRepairById_ — Fetch a single repair by Repair ID from a specific client sheet.
+ * Returns full repair data including folder URLs and inventory backfill.
+ * Params: { repairId }
+ */
+function handleGetRepairById_(clientSheetId, params) {
+  var targetRepairId = String(params.repairId || "").trim();
+  if (!targetRepairId) return errorResponse_("Missing repairId parameter", "INVALID_PARAMS");
+
+  var ss = SpreadsheetApp.openById(clientSheetId);
+  var sheet = ss.getSheetByName("Repairs");
+  if (!sheet) return errorResponse_("Repairs sheet not found", "NOT_FOUND");
+
+  var rows = sheetToObjects_(sheet);
+  var matchRow = null;
+  for (var r = 0; r < rows.length; r++) {
+    if (String(rows[r]["Repair ID"] || "").trim() === targetRepairId) { matchRow = rows[r]; break; }
+  }
+  if (!matchRow) return errorResponse_("Repair not found: " + targetRepairId, "NOT_FOUND");
+
+  // Folder URLs
+  var repairFolderUrls = api_readIdFolderUrls_(sheet, "Repair ID");
+  var shipFolderMap = api_buildShipmentFolderMap_(ss);
+  var taskFolderUrls = {};
+  var taskSheet = ss.getSheetByName("Tasks");
+  if (taskSheet) taskFolderUrls = api_readIdFolderUrls_(taskSheet, "Task ID");
+
+  // Inventory backfill
+  var repairItemId = String(matchRow["Item ID"] || "").trim();
+  var sourceTaskId = String(matchRow["Source Task ID"] || "").trim();
+  var rowVendor = String(matchRow["Vendor"] || "").trim();
+  var rowDesc = String(matchRow["Description"] || "").trim();
+  var rowSidemark = String(matchRow["Sidemark"] || "").trim();
+  var repShipNo = String(matchRow["Shipment #"] || "").trim();
+
+  var invSheet = ss.getSheetByName("Inventory");
+  if (invSheet && repairItemId) {
+    var invRows = sheetToObjects_(invSheet);
+    for (var iv = 0; iv < invRows.length; iv++) {
+      if (String(invRows[iv]["Item ID"] || "").trim() === repairItemId) {
+        if (!rowVendor) rowVendor = String(invRows[iv]["Vendor"] || "").trim();
+        if (!rowDesc) rowDesc = String(invRows[iv]["Description"] || "").trim();
+        if (!rowSidemark) rowSidemark = String(invRows[iv]["Sidemark"] || "").trim();
+        if (!repShipNo) repShipNo = String(invRows[iv]["Shipment #"] || "").trim();
+        break;
+      }
+    }
+  }
+
+  // Resolve client name
+  var clientName = "";
+  try {
+    var stSheet = ss.getSheetByName("Settings");
+    if (stSheet) {
+      var stData = stSheet.getDataRange().getValues();
+      for (var si = 0; si < stData.length; si++) {
+        if (String(stData[si][0] || "").trim() === "CLIENT_NAME") { clientName = String(stData[si][1] || "").trim(); break; }
+      }
+    }
+  } catch (e) { /* best-effort */ }
+
+  var repair = {
+    repairId: targetRepairId,
+    clientName: clientName,
+    clientSheetId: clientSheetId,
+    sourceTaskId: sourceTaskId,
+    itemId: repairItemId,
+    description: rowDesc,
+    itemClass: String(matchRow["Class"] || "").trim(),
+    vendor: rowVendor,
+    location: String(matchRow["Location"] || "").trim(),
+    sidemark: rowSidemark,
+    taskNotes: String(matchRow["Task Notes"] || "").trim(),
+    createdBy: String(matchRow["Created By"] || "").trim(),
+    createdDate: formatDate_(matchRow["Created Date"]),
+    quoteAmount: toNum_(matchRow["Quote Amount"]),
+    quoteSentDate: formatDate_(matchRow["Quote Sent Date"]),
+    status: String(matchRow["Status"] || "").trim(),
+    approved: toBool_(matchRow["Approved"]),
+    scheduledDate: formatDate_(matchRow["Scheduled Date"]),
+    startDate: formatDate_(matchRow["Start Date"]),
+    repairVendor: String(matchRow["Repair Vendor"] || "").trim(),
+    partsCost: toNum_(matchRow["Parts Cost"]),
+    laborHours: toNum_(matchRow["Labor Hours"]),
+    repairResult: String(matchRow["Repair Result"] || "").trim(),
+    finalAmount: toNum_(matchRow["Final Amount"]),
+    invoiceId: String(matchRow["Invoice ID"] || "").trim(),
+    itemNotes: String(matchRow["Item Notes"] || "").trim(),
+    repairNotes: String(matchRow["Repair Notes"] || "").trim(),
+    completedDate: formatDate_(matchRow["Completed Date"]),
+    billed: toBool_(matchRow["Billed"]),
+    repairFolderUrl: repairFolderUrls[targetRepairId] || "",
+    taskFolderUrl: taskFolderUrls[sourceTaskId] || "",
+    shipmentFolderUrl: shipFolderMap[repShipNo] || ""
+  };
+
+  // Hydrate Supabase read cache
+  try { syncEntityToSupabase_("repair", clientSheetId, repair); } catch (e) { /* best-effort */ }
+
+  return jsonResponse_({ success: true, repair: repair });
 }
 
 function handleGetRepairs_(clientSheetId) {
@@ -5423,6 +6136,16 @@ function handleCompleteShipment_(clientSheetId, payload) {
   var tasksCreated = 0;
   var billingRows = 0;
 
+  // v38.51.3 — track written-row locations so the post-lock hyperlink pass can
+  // find them without re-scanning the sheet. Hyperlinks (Item ID → per-item
+  // folder, Inventory.Shipment # → shipment folder, Task ID → task folder)
+  // are the load-bearing input to the React detail panels' folder buttons.
+  // Keeping this bookkeeping explicit — if it breaks, the app immediately
+  // shows broken folder buttons and the post-receive self-check logs a
+  // warning. See api_hyperlinkReceivedItems_.
+  var invInsertStartOuter = 0;
+  var taskRowIdsWritten = []; // [{row, taskId}]
+
   try {
     // ─── FIX 1: Idempotency check (inside lock) ─────────────────────────────
     if (idempotencyKey) {
@@ -5532,6 +6255,7 @@ function handleCompleteShipment_(clientSheetId, payload) {
       invSheet.getRange(invInsertStart, 1, invInsertRows.length, invInsertRows[0].length).setValues(invInsertRows);
     }
     partialState.inventoryWritten = true;
+    invInsertStartOuter = invInsertStart; // expose for post-lock hyperlink pass
 
     // ─── WRITE TASK ROWS (non-critical — FIX 3 + 4: inside lock, try/catch) ─
     try {
@@ -5594,6 +6318,13 @@ function handleCompleteShipment_(clientSheetId, payload) {
           var taskInsertRow = api_getLastDataRow_(taskSheet) + 1;
           taskSheet.getRange(taskInsertRow, 1, taskBatch.length, taskBatch[0].length).setValues(taskBatch);
           tasksCreated = taskBatch.length;
+          // Capture row + ID for post-lock hyperlink pass
+          var taskIdColForCapture = api_getHeaderMap_(taskSheet)["Task ID"];
+          if (taskIdColForCapture) {
+            for (var trc = 0; trc < pendingTaskIds.length; trc++) {
+              taskRowIdsWritten.push({ row: taskInsertRow + trc, taskId: pendingTaskIds[trc] });
+            }
+          }
         }
         partialState.tasksWritten = true;
       }
@@ -5667,6 +6398,54 @@ function handleCompleteShipment_(clientSheetId, payload) {
   // ─── RELEASE LOCK ──────────────────────────────────────────────────────────
   try { lock.releaseLock(); } catch (_) {}
 
+  // ─── v38.51.3: SHIPMENT FOLDER + HYPERLINK PASS ─────────────────────────────
+  // Runs unconditionally (even when email is off). The shipment folder + the
+  // three cell hyperlinks (Shipments.Shipment #, Inventory.Item ID,
+  // Inventory.Shipment #, Tasks.Task ID) are REQUIRED by the React detail
+  // panels — without them folder buttons render disabled. Pulling this out of
+  // the email block means disabling notifications no longer silently breaks
+  // folder buttons. See api_hyperlinkReceivedItems_ below.
+  var shipFolderUrl = "";
+  try {
+    var shipSub = api_getOrCreateEntitySubfolder_(ss, "Shipments");
+    if (shipSub.folder) {
+      var existingIt = shipSub.folder.getFoldersByName(shipmentNo);
+      var newFolder = existingIt.hasNext() ? existingIt.next() : shipSub.folder.createFolder(shipmentNo);
+      shipFolderUrl = "https://drive.google.com/drive/folders/" + newFolder.getId();
+      // Hyperlink Shipment # cell on Shipments sheet
+      try {
+        var shipMap2 = api_getHeaderMap_(shipSheet);
+        var snCol = shipMap2["Shipment #"];
+        if (snCol) {
+          var shipLastRow2 = api_getLastDataRow_(shipSheet);
+          for (var ssi = shipLastRow2; ssi >= 2; ssi--) {
+            if (String(shipSheet.getRange(ssi, snCol).getValue() || "").trim() === shipmentNo) {
+              shipSheet.getRange(ssi, snCol).setRichTextValue(
+                SpreadsheetApp.newRichTextValue().setText(shipmentNo).setLinkUrl(shipFolderUrl).build()
+              );
+              break;
+            }
+          }
+        }
+      } catch (_) {}
+    }
+  } catch (folderErr) {
+    warnings.push("Shipment folder creation failed (non-fatal): " + folderErr.message);
+  }
+
+  // Hyperlink Inventory Item IDs + Shipment #s + Task IDs for newly received items.
+  // Uses PHOTOS_FOLDER_ID as parent for per-item / per-task folders so the React
+  // app can render Drive "open folder" buttons without needing Fix Folders.
+  try {
+    api_hyperlinkReceivedItems_(
+      ss, settings, invSheet, taskSheet,
+      invInsertStartOuter, items, shipmentNo, shipFolderUrl,
+      taskRowIdsWritten, warnings
+    );
+  } catch (hlErr) {
+    warnings.push("Hyperlink pass failed (non-fatal — run Fix Missing Folders to repair): " + hlErr.message);
+  }
+
   // ─── EMAIL + PDF (non-critical — outside lock, v24.0.0) ────────────────────
   var emailSent = false;
   try {
@@ -5678,33 +6457,6 @@ function handleCompleteShipment_(clientSheetId, payload) {
         var logoUrl = String(settings["LOGO_URL"] || "").trim()
                       || "https://static.wixstatic.com/media/a38fbc_a8c7a368447f4723b782c4dbd765ca0e~mv2.png";
         var itemsTable = api_buildItemsHtmlTable_(items);
-        // v26.3.0: Create shipment folder in Shipments/ subfolder (flat structure)
-        var shipFolderUrl = "";
-        try {
-          var shipSub = api_getOrCreateEntitySubfolder_(ss, "Shipments");
-          if (shipSub.folder) {
-            var newFolder = shipSub.folder.createFolder(shipmentNo);
-            shipFolderUrl = "https://drive.google.com/drive/folders/" + newFolder.getId();
-            // Hyperlink Shipment # on Shipments sheet
-            try {
-              var shipMap2 = api_getHeaderMap_(shipSheet);
-              var snCol = shipMap2["Shipment #"];
-              if (snCol) {
-                var shipLastRow2 = api_getLastDataRow_(shipSheet);
-                for (var ssi = shipLastRow2; ssi >= 2; ssi--) {
-                  if (String(shipSheet.getRange(ssi, snCol).getValue() || "").trim() === shipmentNo) {
-                    shipSheet.getRange(ssi, snCol).setRichTextValue(
-                      SpreadsheetApp.newRichTextValue().setText(shipmentNo).setLinkUrl(shipFolderUrl).build()
-                    );
-                    break;
-                  }
-                }
-              }
-            } catch (_) {}
-          }
-        } catch (folderErr) {
-          warnings.push("Shipment folder creation failed (non-fatal): " + folderErr.message);
-        }
 
         var emailTokens = {
           "{{SHIPMENT_NO}}":    shipmentNo,
@@ -5783,6 +6535,109 @@ function handleCompleteShipment_(clientSheetId, payload) {
     warnings: warnings.length > 0 ? warnings : undefined,
     partialState: partialState
   });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// api_hyperlinkReceivedItems_ (v38.51.3)
+// Single source of truth for hyperlinking newly-received items + auto-created
+// tasks. Called by handleCompleteShipment_ after the lock releases.
+//
+// What it does, for each newly-inserted Inventory row:
+//   • Creates (find-or-create) a per-item folder under PHOTOS_FOLDER_ID
+//   • Sets Inventory.Item ID rich text → per-item folder URL
+//   • Sets Inventory.Shipment # rich text → shipFolderUrl (Shipments/<shipNo>)
+// For each newly-inserted Tasks row:
+//   • Sets Tasks.Task ID rich text → task folder URL
+//     (uses Tasks/<Task ID> as folder name in the same Tasks/ subfolder that
+//     "Start Task" uses, so Start Task reuses the pre-created folder)
+//
+// Why this exists as its own function:
+//   1. Makes the hyperlink path AUDITABLE — one function to grep
+//   2. Matches what Fix Missing Folders does, so the two paths can never
+//      diverge again (session 63 regression: folder creation drifted out of
+//      receiving, only Fix Folders still wrote them, React buttons broke)
+//   3. Logs a warning count via `warnings` so a partial failure surfaces to
+//      the operator instead of being silent
+//
+// If this function is ever removed or its call site lost, the React detail
+// panels' folder buttons go disabled for everything received afterwards —
+// treat it as load-bearing.
+// ═══════════════════════════════════════════════════════════════════════════════
+function api_hyperlinkReceivedItems_(ss, settings, invSheet, taskSheet, invInsertStart, items, shipmentNo, shipFolderUrl, taskRowIdsWritten, warnings) {
+  if (!invSheet || !invInsertStart || !items || !items.length) return;
+
+  var photosId = String((settings && settings["PHOTOS_FOLDER_ID"]) || (settings && settings["DRIVE_PARENT_FOLDER_ID"]) || "").trim();
+  var photosFolder = null;
+  if (photosId) {
+    try { photosFolder = DriveApp.getFolderById(photosId); } catch (e) { photosFolder = null; }
+  }
+  if (!photosFolder) {
+    warnings.push("PHOTOS_FOLDER_ID missing/invalid — per-item folders NOT created; Item ID hyperlinks will be empty. Fix in Settings → Clients → [client] → Photos Folder.");
+  }
+
+  var invMap = api_getHeaderMap_(invSheet);
+  var invItemIdCol = invMap["Item ID"];
+  var invShipCol   = invMap["Shipment #"];
+  var shipRichText = shipFolderUrl ? SpreadsheetApp.newRichTextValue().setText(shipmentNo).setLinkUrl(shipFolderUrl).build() : null;
+
+  // Inventory pass — one row per received item, aligned to invInsertStart + i
+  for (var i = 0; i < items.length; i++) {
+    var row = invInsertStart + i;
+    var itemId = String(items[i].itemId || "").trim();
+    if (!itemId) continue;
+    try {
+      // Item ID → per-item folder
+      if (invItemIdCol && photosFolder) {
+        var itemFolderUrl = "";
+        try {
+          var itemIt = photosFolder.getFoldersByName(itemId);
+          var itemFolder = itemIt.hasNext() ? itemIt.next() : photosFolder.createFolder(itemId);
+          itemFolderUrl = "https://drive.google.com/drive/folders/" + itemFolder.getId();
+        } catch (folderErr) { /* leave blank */ }
+        if (itemFolderUrl) {
+          invSheet.getRange(row, invItemIdCol).setRichTextValue(
+            SpreadsheetApp.newRichTextValue().setText(itemId).setLinkUrl(itemFolderUrl).build()
+          );
+        }
+      }
+      // Shipment # → shipment folder (canonical Shipments/<shipNo>)
+      if (invShipCol && shipRichText) {
+        invSheet.getRange(row, invShipCol).setRichTextValue(shipRichText);
+      }
+    } catch (rowErr) {
+      warnings.push("Hyperlink failed for item " + itemId + " (non-fatal): " + rowErr.message);
+    }
+  }
+
+  // Tasks pass — use the explicit row+id pairs captured when we wrote the batch
+  if (taskSheet && taskRowIdsWritten && taskRowIdsWritten.length) {
+    var taskMap = api_getHeaderMap_(taskSheet);
+    var taskIdCol = taskMap["Task ID"];
+    if (taskIdCol) {
+      // Task folders live in Tasks/<taskId> so Start Task reuses them.
+      var tasksSub = null;
+      try { tasksSub = api_getOrCreateEntitySubfolder_(ss, "Tasks"); } catch (e) { tasksSub = null; }
+      if (tasksSub && tasksSub.folder) {
+        for (var tri = 0; tri < taskRowIdsWritten.length; tri++) {
+          var entry = taskRowIdsWritten[tri];
+          var tid = String(entry.taskId || "").trim();
+          if (!tid) continue;
+          try {
+            var tIt = tasksSub.folder.getFoldersByName(tid);
+            var tFolder = tIt.hasNext() ? tIt.next() : tasksSub.folder.createFolder(tid);
+            var tUrl = "https://drive.google.com/drive/folders/" + tFolder.getId();
+            taskSheet.getRange(entry.row, taskIdCol).setRichTextValue(
+              SpreadsheetApp.newRichTextValue().setText(tid).setLinkUrl(tUrl).build()
+            );
+          } catch (tErr) {
+            warnings.push("Task folder hyperlink failed for " + tid + " (non-fatal): " + tErr.message);
+          }
+        }
+      } else {
+        warnings.push("Tasks/ subfolder missing/inaccessible — auto-created Task IDs not hyperlinked.");
+      }
+    }
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -6355,6 +7210,54 @@ function handleRequestRepairQuote_(clientSheetId, payload, callerEmail) {
     var now = new Date();
     var repairId = "RPR-" + itemId + "-" + now.getTime();
 
+    // v38.51.2 — enrich from source task so the new repair surfaces Task Notes,
+    // Task Folder URL, and Shipment Folder URL in Supabase immediately (without
+    // waiting for the next bulk sync) + gives the React detail panel something
+    // to render on the folder buttons.
+    var srcTaskNotes = "";
+    var srcTaskFolderUrl = "";
+    var srcShipmentNo = "";
+    var srcShipmentFolderUrl = "";
+    if (sourceTaskId) {
+      try {
+        var taskSh = ss.getSheetByName("Tasks");
+        if (taskSh && taskSh.getLastRow() >= 2) {
+          var tMap = api_getHeaderMap_(taskSh);
+          var tIdCol = tMap["Task ID"];
+          if (tIdCol) {
+            var tLastRow = api_getLastDataRow_(taskSh);
+            for (var tr = 2; tr <= tLastRow; tr++) {
+              if (String(taskSh.getRange(tr, tIdCol).getValue() || "").trim() === sourceTaskId) {
+                if (tMap["Task Notes"])  srcTaskNotes  = String(taskSh.getRange(tr, tMap["Task Notes"]).getValue()  || "");
+                if (tMap["Shipment #"])  srcShipmentNo = String(taskSh.getRange(tr, tMap["Shipment #"]).getValue() || "").trim();
+                var tRt = taskSh.getRange(tr, tIdCol).getRichTextValue();
+                if (tRt && tRt.getLinkUrl()) srcTaskFolderUrl = tRt.getLinkUrl();
+                break;
+              }
+            }
+          }
+        }
+        if (srcShipmentNo) {
+          var shipSh = ss.getSheetByName("Shipments");
+          if (shipSh && shipSh.getLastRow() >= 2) {
+            var sMap = api_getHeaderMap_(shipSh);
+            var sIdCol = sMap["Shipment #"];
+            if (sIdCol) {
+              var sLastRow = api_getLastDataRow_(shipSh);
+              for (var sr = 2; sr <= sLastRow; sr++) {
+                if (String(shipSh.getRange(sr, sIdCol).getValue() || "").trim() === srcShipmentNo) {
+                  var sRt = shipSh.getRange(sr, sIdCol).getRichTextValue();
+                  if (sRt && sRt.getLinkUrl()) srcShipmentFolderUrl = sRt.getLinkUrl();
+                  break;
+                }
+              }
+            }
+          }
+        }
+      } catch (enrichErr) { /* non-fatal — leave enrichment fields empty */ }
+    }
+    var effectiveTaskNotes = notes || srcTaskNotes;
+
     var repRow = api_buildRow_(repMap, {
       "Repair ID":      repairId,
       "Source Task ID":  sourceTaskId,
@@ -6364,7 +7267,7 @@ function handleRequestRepairQuote_(clientSheetId, payload, callerEmail) {
       "Vendor":          invItem.vendor || "",
       "Location":        invItem.location || "",
       "Sidemark":        invItem.sidemark || "",
-      "Task Notes":      notes,
+      "Task Notes":      effectiveTaskNotes,
       "Created By":      callerEmail || "API",
       "Created Date":    now,
       "Status":          "Pending Quote"
@@ -6372,6 +7275,30 @@ function handleRequestRepairQuote_(clientSheetId, payload, callerEmail) {
 
     var insertRow = api_getLastDataRow_(repairSheet) + 1;
     repairSheet.getRange(insertRow, 1, 1, repRow.length).setValues([repRow]);
+
+    // Supabase write-through so the new repair is immediately visible in React
+    // with its Task Notes + Task Folder URL + Shipment Folder URL populated.
+    try {
+      if (typeof sbRepairRow_ === "function" && typeof supabaseUpsert_ === "function") {
+        supabaseUpsert_("repairs", sbRepairRow_(clientSheetId, {
+          repairId: repairId,
+          itemId: itemId,
+          status: "Pending Quote",
+          repairResult: "",
+          quoteAmount: null,
+          finalAmount: null,
+          repairVendor: "",
+          repairNotes: "",
+          taskNotes: effectiveTaskNotes,
+          itemNotes: "",
+          createdDate: Utilities.formatDate(now, Session.getScriptTimeZone(), "yyyy-MM-dd"),
+          completedDate: "",
+          repairFolderUrl: "",          // created at Start Repair
+          shipmentFolderUrl: srcShipmentFolderUrl,
+          taskFolderUrl: srcTaskFolderUrl
+        }));
+      }
+    } catch (sbErr) { /* non-fatal — next bulk sync will pick it up */ }
 
     // Send notification email to client
     var emailSent = false;
@@ -7048,18 +7975,22 @@ function handleStartRepair_(clientSheetId, payload) {
   if (repRow < 0) return errorResponse_("Repair not found: " + repairId, "NOT_FOUND");
 
   var currentStatus = cStatus ? String(data[repRow - 2][cStatus - 1] || "").trim() : "";
-  if (currentStatus === "In Progress") {
-    return jsonResponse_({ success: true, repairId: repairId, skipped: true,
-      startDate: cStart ? String(data[repRow - 2][cStart - 1] || "") : "",
-      message: "Repair already in progress" });
+  // v38.51.7: Work Order PDF can be regenerated from Approved / In Progress /
+  // Complete (tech needs a reprint for records even after the job's done).
+  // Only block pre-approval (Pending Quote, Quote Sent) and declined/cancelled.
+  var allowedForRegen = ["Approved", "In Progress", "Complete"];
+  if (allowedForRegen.indexOf(currentStatus) === -1) {
+    return errorResponse_("Work Order can only be generated for Approved, In Progress, or Complete repairs (current: " + currentStatus + ")", "INVALID_STATUS");
   }
-  if (currentStatus !== "Approved") {
-    return errorResponse_("Repair must be in Approved status to start (current: " + currentStatus + ")", "INVALID_STATUS");
-  }
+  // reRun = don't mutate status/start date if already In Progress or Complete.
+  var reRun = (currentStatus === "In Progress" || currentStatus === "Complete");
 
   var now = new Date();
-  if (cStatus) repSheet.getRange(repRow, cStatus).setValue("In Progress");
-  if (cStart)  repSheet.getRange(repRow, cStart).setValue(now);
+  if (!reRun) {
+    // Only happens when status = Approved (the first legitimate Start)
+    if (cStatus) repSheet.getRange(repRow, cStatus).setValue("In Progress");
+    if (cStart)  repSheet.getRange(repRow, cStart).setValue(now);
+  }
 
   // v26.3.0: Create repair folder in Repairs/ subfolder (flat structure)
   var repairFolderUrl = "";
@@ -7083,11 +8014,159 @@ function handleStartRepair_(clientSheetId, payload) {
     warnings.push("Folder creation failed: " + folderErr);
   }
 
+  // v38.51.6 — Generate Work Order PDF into the canonical Repairs/<id> folder.
+  // Previously the PDF was generated at approve-time into a DIFFERENT folder
+  // (DRIVE_PARENT_FOLDER_ID/REPAIR-<id>) — clicking the Repair Folder button
+  // in React landed the user in an empty folder because the folder URL stored
+  // on the sheet / in Supabase points to Repairs/<id>. Now Start Repair is
+  // the authoritative PDF generation step: the tech starts the work, the PDF
+  // lands in the folder they're looking at.
+  var pdfGenerated = false;
+  try {
+    if (repairFolderUrl) {
+      var settings = api_readSettings_(ss);
+      var clientName = String(settings["CLIENT_NAME"] || "").trim();
+      var rowData = repSheet.getRange(repRow, 1, 1, repSheet.getLastColumn()).getValues()[0];
+      var repairIdRow = repairId;
+      var repItemId = repMap["Item ID"] ? String(rowData[repMap["Item ID"] - 1] || "") : "";
+      var repQuoteAmt = repMap["Quote Amount"] ? rowData[repMap["Quote Amount"] - 1] : "";
+      var repVendor = repMap["Repair Vendor"] ? String(rowData[repMap["Repair Vendor"] - 1] || "") : "";
+      var repNotes = repMap["Repair Notes"] ? String(rowData[repMap["Repair Notes"] - 1] || "") : "";
+      var invItem = repItemId ? api_findInventoryItem_(ss, repItemId) : null;
+      var itemLoc = invItem ? invItem.location : (repMap["Location"] ? String(rowData[repMap["Location"] - 1] || "") : "");
+      var itemSidemark = invItem ? invItem.sidemark : (repMap["Sidemark"] ? String(rowData[repMap["Sidemark"] - 1] || "") : "");
+      var itemDesc = invItem ? invItem.description : (repMap["Description"] ? String(rowData[repMap["Description"] - 1] || "") : "");
+      var itemTableHtml = api_buildSingleItemTableHtml_(
+        repItemId, itemDesc,
+        invItem ? invItem.vendor : "",
+        invItem ? invItem.itemClass : (repMap["Class"] ? String(rowData[repMap["Class"] - 1] || "") : ""),
+        itemLoc, itemSidemark,
+        invItem ? invItem.qty : 1,
+        invItem ? invItem.room : ""
+      );
+      var pdfTokens = {
+        "{{ITEM_ID}}":          repItemId,
+        "{{CLIENT_NAME}}":      clientName || "Client",
+        "{{REPAIR_ID}}":        repairIdRow,
+        "{{QUOTE_AMOUNT}}":     String(repQuoteAmt || "0"),
+        "{{LOCATION}}":         itemLoc,
+        "{{SIDEMARK}}":         itemSidemark,
+        "{{DESCRIPTION}}":      itemDesc,
+        "{{ITEM_TABLE_HTML}}":  itemTableHtml,
+        "{{LOGO_URL}}":         String(settings["LOGO_URL"] || "").trim() || "https://static.wixstatic.com/media/a38fbc_a8c7a368447f4723b782c4dbd765ca0e~mv2.png",
+        "{{REPAIR_VENDOR}}":    repVendor,
+        "{{NOTES}}":            repNotes
+      };
+      // Remove any stale Work Order PDF from this folder so the fresh one is
+      // unambiguous (Start Repair can be retried; we always want the latest).
+      try {
+        var fId = repairFolderUrl.match(/[-\w]{25,}/);
+        if (fId) {
+          var rFolderObj = DriveApp.getFolderById(fId[0]);
+          var existing = rFolderObj.getFilesByName("Work_Order_" + repairId + ".pdf");
+          while (existing.hasNext()) existing.next().setTrashed(true);
+        }
+      } catch (_) {}
+      var pdfResult = api_generateDocPdf_(ss, "DOC_REPAIR_WORK_ORDER", "Work_Order_" + repairId, repairFolderUrl, pdfTokens);
+      if (pdfResult.blob) pdfGenerated = true;
+      if (pdfResult.warning) warnings.push(pdfResult.warning);
+    }
+  } catch (pdfErr) {
+    warnings.push("Work Order PDF failed (non-fatal): " + pdfErr.message);
+  }
+
   var startDateStr = Utilities.formatDate(now, Session.getScriptTimeZone(), "yyyy-MM-dd");
   api_bumpSummaryVersion_();
+
+  // v38.51.9 — Supabase write-through using the SAME 3-tier fallback as the
+  // per-client sync (source-task → item inventory-lookup → shipment folder map).
+  // v38.51.8 wiped shipment_folder_url/task_folder_url to "" when we had no
+  // source task, breaking folder buttons. Now enriches like the bulk sync.
+  try {
+    if (typeof sbRepairRow_ === "function" && typeof supabaseUpsert_ === "function") {
+      var finalRowData = repSheet.getRange(repRow, 1, 1, repSheet.getLastColumn()).getValues()[0];
+      var finalStatus = cStatus ? String(finalRowData[cStatus - 1] || "").trim() : "";
+      var srcTaskForSb = repMap["Source Task ID"] ? String(finalRowData[repMap["Source Task ID"] - 1] || "").trim() : "";
+      var repItemIdForSb = repMap["Item ID"] ? String(finalRowData[repMap["Item ID"] - 1] || "").trim() : "";
+
+      // Canonical shipment folder map (reads Shipments sheet hyperlinks + Shipment Photos URL col)
+      var shipFolderMap = {};
+      try { shipFolderMap = api_buildShipmentFolderMap_(ss); } catch (_) {}
+
+      // Source task → Shipment # + task folder URL
+      var taskFolderUrlSb = "";
+      var taskShipNoSb = "";
+      var taskTaskNotesSb = "";
+      try {
+        var taskShForSb = ss.getSheetByName("Tasks");
+        if (taskShForSb && srcTaskForSb) {
+          var taskMapSb = api_getHeaderMap_(taskShForSb);
+          var tIdColSb = taskMapSb["Task ID"];
+          var tShipColSb = taskMapSb["Shipment #"];
+          var tNotesColSb = taskMapSb["Task Notes"];
+          if (tIdColSb) {
+            var tLrSb = api_getLastDataRow_(taskShForSb);
+            for (var tri = 2; tri <= tLrSb; tri++) {
+              if (String(taskShForSb.getRange(tri, tIdColSb).getValue() || "").trim() === srcTaskForSb) {
+                var tRtSb = taskShForSb.getRange(tri, tIdColSb).getRichTextValue();
+                if (tRtSb && tRtSb.getLinkUrl()) taskFolderUrlSb = tRtSb.getLinkUrl();
+                if (tShipColSb) taskShipNoSb = String(taskShForSb.getRange(tri, tShipColSb).getValue() || "").trim();
+                if (tNotesColSb) taskTaskNotesSb = String(taskShForSb.getRange(tri, tNotesColSb).getValue() || "");
+                break;
+              }
+            }
+          }
+        }
+      } catch (_) {}
+
+      // Inventory item → Shipment # fallback (for legacy/imported items without source task)
+      var invShipNoSb = "";
+      try {
+        var invShForSb = ss.getSheetByName("Inventory");
+        if (invShForSb && repItemIdForSb) {
+          var invMapSb = api_getHeaderMap_(invShForSb);
+          var iIdCol = invMapSb["Item ID"];
+          var iShipCol = invMapSb["Shipment #"];
+          if (iIdCol && iShipCol) {
+            var iLr = api_getLastDataRow_(invShForSb);
+            for (var iri = 2; iri <= iLr; iri++) {
+              if (String(invShForSb.getRange(iri, iIdCol).getValue() || "").trim() === repItemIdForSb) {
+                invShipNoSb = String(invShForSb.getRange(iri, iShipCol).getValue() || "").trim();
+                break;
+              }
+            }
+          }
+        }
+      } catch (_) {}
+
+      var effectiveShipNo = taskShipNoSb || invShipNoSb;
+      var shipFolderUrlSb = effectiveShipNo ? (shipFolderMap[effectiveShipNo] || "") : "";
+      var effectiveTaskNotes = (repMap["Task Notes"] ? String(finalRowData[repMap["Task Notes"] - 1] || "").trim() : "") || taskTaskNotesSb;
+
+      supabaseUpsert_("repairs", sbRepairRow_(clientSheetId, {
+        repairId: repairId,
+        itemId: repItemIdForSb,
+        status: finalStatus,
+        repairResult: repMap["Repair Result"] ? String(finalRowData[repMap["Repair Result"] - 1] || "") : "",
+        quoteAmount: repMap["Quote Amount"] ? finalRowData[repMap["Quote Amount"] - 1] : null,
+        finalAmount: repMap["Final Amount"] ? finalRowData[repMap["Final Amount"] - 1] : null,
+        repairVendor: repMap["Repair Vendor"] ? String(finalRowData[repMap["Repair Vendor"] - 1] || "") : "",
+        repairNotes: repMap["Repair Notes"] ? String(finalRowData[repMap["Repair Notes"] - 1] || "") : "",
+        taskNotes: effectiveTaskNotes,
+        itemNotes: repMap["Item Notes"] ? String(finalRowData[repMap["Item Notes"] - 1] || "") : "",
+        createdDate: repMap["Created Date"] ? formatDate_(finalRowData[repMap["Created Date"] - 1]) : "",
+        completedDate: repMap["Completed Date"] ? formatDate_(finalRowData[repMap["Completed Date"] - 1]) : "",
+        repairFolderUrl: repairFolderUrl,
+        shipmentFolderUrl: shipFolderUrlSb,
+        taskFolderUrl: taskFolderUrlSb
+      }));
+    }
+  } catch (sbErr) { warnings.push("Supabase write-through failed (non-fatal): " + sbErr); }
+
   return jsonResponse_({
     success: true, repairId: repairId, startDate: startDateStr,
     folderUrl: repairFolderUrl || undefined,
+    pdfGenerated: pdfGenerated,
     warnings: warnings.length > 0 ? warnings : undefined
   });
 }
@@ -7677,9 +8756,25 @@ function handleProcessWcRelease_(clientSheetId, payload) {
           .setValues([api_buildRow_(wcMap, newWcRowObj)]);
 
       // Move unchecked WC_Items to new WC + reset status to Pending
+      // IMPORTANT: use wciMap (WC_Items headers) not wcMap (Will_Calls headers) for column index
+      var wciWcNumCol = wciMap["WC Number"];
       for (var mi = 0; mi < uncheckedItems.length; mi++) {
-        if (wcNumCol) wciSh.getRange(uncheckedItems[mi].row, wcNumCol).setValue(newWcNumber);
+        if (wciWcNumCol) wciSh.getRange(uncheckedItems[mi].row, wciWcNumCol).setValue(newWcNumber);
         if (wciStatusCol) wciSh.getRange(uncheckedItems[mi].row, wciStatusCol).setValue("Pending");
+      }
+
+      // Create Drive folder for the new split WC + hyperlink WC Number cell
+      try {
+        var splitWcSub = api_getOrCreateEntitySubfolder_(ss, "Will Calls");
+        if (splitWcSub.folder) {
+          var splitFolderIt = splitWcSub.folder.getFoldersByName(newWcNumber);
+          var splitFolder = splitFolderIt.hasNext() ? splitFolderIt.next() : splitWcSub.folder.createFolder(newWcNumber);
+          var splitFolderUrl = "https://drive.google.com/drive/folders/" + splitFolder.getId();
+          var newWcRt = SpreadsheetApp.newRichTextValue().setText(newWcNumber).setLinkUrl(splitFolderUrl).build();
+          wcSh.getRange(newInsRow, wcMap["WC Number"]).setRichTextValue(newWcRt);
+        }
+      } catch (splitFolderErr) {
+        warnings.push("Split WC folder creation failed (non-fatal): " + splitFolderErr.message);
       }
 
       // Update items count on original WC
@@ -7750,7 +8845,7 @@ function handleProcessWcRelease_(clientSheetId, payload) {
           var wcFolderUrl2 = "";
           var wcNumCol2 = wcMap["WC Number"];
           if (wcNumCol2) {
-            var wcRt = wcSheet.getRange(wcRow, wcNumCol2).getRichTextValue();
+            var wcRt = wcSh.getRange(wcRow, wcNumCol2).getRichTextValue();
             if (wcRt && wcRt.getLinkUrl()) wcFolderUrl2 = wcRt.getLinkUrl();
           }
           // v26.3.0: Flat folder structure fallback — Will Calls/ subfolder
@@ -7943,6 +9038,7 @@ function handleUpdateWillCall_(clientSheetId, payload) {
     pickupPhone:         "Pickup Phone",
     requestedBy:         "Requested By",
     notes:               "Notes",
+    cod:                 "COD",
     codAmount:           "COD Amount",
     status:              "Status"
   };
@@ -8014,6 +9110,161 @@ function handleUpdateWillCall_(clientSheetId, payload) {
     return jsonResponse_({ success: true, wcNumber: wcNumber, updated: updates, statusPromoted: statusPromoted });
   } catch (err) {
     return errorResponse_("Failed to update will call: " + String(err), "SERVER_ERROR");
+  }
+}
+
+/**
+ * handleGenerateWcDoc_ — Generate (or regenerate) Will Call PDF on demand.
+ * Reads WC + WC_Items from the sheet, builds tokens, generates PDF via
+ * DOC_WILL_CALL_RELEASE template, saves to the WC Drive folder.
+ * Payload: { wcNumber }
+ */
+function handleGenerateWcDoc_(clientSheetId, payload) {
+  var wcNumber = String((payload || {}).wcNumber || "").trim();
+  if (!wcNumber) return errorResponse_("wcNumber is required", "INVALID_PARAMS");
+
+  try {
+    var ss = SpreadsheetApp.openById(clientSheetId);
+    var wcSheet = ss.getSheetByName("Will_Calls");
+    if (!wcSheet) return errorResponse_("Will_Calls sheet not found", "SHEET_NOT_FOUND");
+
+    var wcMap = api_getHeaderMap_(wcSheet);
+    var wcNumCol = wcMap["WC Number"];
+    if (!wcNumCol) return errorResponse_("WC Number column not found", "SCHEMA_ERROR");
+
+    var wcRow = api_findRowById_(wcSheet, wcNumCol, wcNumber);
+    if (wcRow < 2) return errorResponse_("Will Call not found: " + wcNumber, "NOT_FOUND");
+
+    var wcRowData = wcSheet.getRange(wcRow, 1, 1, wcSheet.getLastColumn()).getValues()[0];
+
+    // Read settings (fixed v38.51.1 — was api_readClientSettings_ which doesn't exist)
+    var settings = api_readSettings_(ss);
+    var clientName = settings["CLIENT_NAME"] || "";
+    var tz = Session.getScriptTimeZone();
+
+    // Read WC_Items for this WC — include all display columns (v38.46.0: was previously
+    // only reading itemId/description/class, leaving Qty/Vendor/Location/Sidemark blank)
+    var wciSh = ss.getSheetByName("WC_Items");
+    var items = [];
+    if (wciSh && wciSh.getLastRow() >= 2) {
+      var wciMap = api_getHeaderMap_(wciSh);
+      var wciWcCol = wciMap["WC Number"];
+      if (wciWcCol) {
+        var wciData = wciSh.getRange(2, 1, wciSh.getLastRow() - 1, wciSh.getLastColumn()).getValues();
+        for (var i = 0; i < wciData.length; i++) {
+          if (String(wciData[i][wciWcCol - 1] || "").trim() === wcNumber) {
+            items.push({
+              itemId:      String(wciData[i][(wciMap["Item ID"]     || 1) - 1] || ""),
+              qty:         wciData[i][(wciMap["Qty"]         || 1) - 1] || 1,
+              vendor:      String(wciData[i][(wciMap["Vendor"]      || 1) - 1] || ""),
+              description: String(wciData[i][(wciMap["Description"] || 1) - 1] || ""),
+              itemClass:   String(wciData[i][(wciMap["Class"]       || 1) - 1] || ""),
+              location:    String(wciData[i][(wciMap["Location"]    || 1) - 1] || ""),
+              sidemark:    String(wciData[i][(wciMap["Sidemark"]    || 1) - 1] || "")
+            });
+          }
+        }
+      }
+    }
+
+    // Read WC fields for row helpers
+    var pickupParty = wcMap["Pickup Party"] ? String(wcRowData[wcMap["Pickup Party"] - 1] || "") : "";
+    var pickupPhone = wcMap["Pickup Phone"] ? String(wcRowData[wcMap["Pickup Phone"] - 1] || "") : "";
+    var requestedBy = wcMap["Requested By"] ? String(wcRowData[wcMap["Requested By"] - 1] || "") : "";
+    var estDate    = wcMap["Estimated Pickup Date"] ? wcRowData[wcMap["Estimated Pickup Date"] - 1] || "" : "";
+    var createdDt  = wcMap["Created Date"] ? wcRowData[wcMap["Created Date"] - 1] || new Date() : new Date();
+    var notes      = wcMap["Notes"] ? String(wcRowData[wcMap["Notes"] - 1] || "") : "";
+    var isCod      = wcMap["COD"] ? !!(wcRowData[wcMap["COD"] - 1]) : false;
+    var codAmount  = wcMap["COD Amount"] ? Number(wcRowData[wcMap["COD Amount"] - 1] || 0) : 0;
+    var totalFee   = wcMap["Total WC Fee"] ? Number(wcRowData[wcMap["Total WC Fee"] - 1] || 0) : 0;
+
+    var dateStr    = (createdDt instanceof Date) ? Utilities.formatDate(createdDt, tz, "MM/dd/yyyy") : String(createdDt);
+    var estDateStr = (estDate instanceof Date) ? Utilities.formatDate(estDate, tz, "MM/dd/yyyy") : (estDate ? String(estDate) : "");
+
+    // Build full items-table rows matching the Will Call Release Google Doc template
+    // Columns: #, Item ID, Qty, Vendor, Description, Class, Location, Sidemark
+    var GR = "#E2E8F0";
+    var itemsTableRows = "";
+    for (var ti = 0; ti < items.length; ti++) {
+      var it = items[ti];
+      var rowBg = ti % 2 === 0 ? "#fff" : "#FAFAFA";
+      itemsTableRows +=
+        '<tr style="background:' + rowBg + ';">' +
+        '<td style="padding:5px 6px;border-bottom:1px solid ' + GR + ';font-size:11px;text-align:center;font-weight:600;">' + (ti + 1) + '</td>' +
+        '<td style="padding:5px 6px;border-bottom:1px solid ' + GR + ';font-size:11px;font-weight:700;">' + api_esc_(it.itemId) + '</td>' +
+        '<td style="padding:5px 6px;border-bottom:1px solid ' + GR + ';font-size:11px;text-align:center;">' + api_esc_(String(it.qty)) + '</td>' +
+        '<td style="padding:5px 6px;border-bottom:1px solid ' + GR + ';font-size:11px;">' + api_esc_(it.vendor) + '</td>' +
+        '<td style="padding:5px 6px;border-bottom:1px solid ' + GR + ';font-size:11px;">' + api_esc_(it.description) + '</td>' +
+        '<td style="padding:5px 6px;border-bottom:1px solid ' + GR + ';font-size:11px;text-align:center;">' + api_esc_(it.itemClass) + '</td>' +
+        '<td style="padding:5px 6px;border-bottom:1px solid ' + GR + ';font-size:11px;">' + api_esc_(it.location) + '</td>' +
+        '<td style="padding:5px 6px;border-bottom:1px solid ' + GR + ';font-size:11px;">' + api_esc_(it.sidemark) + '</td>' +
+        '</tr>';
+    }
+
+    // COD banner
+    var codBannerHtml = isCod
+      ? '<div style="background:#DC2626;border:4px solid #991B1B;padding:20px 16px;margin-bottom:14px;text-align:center;">' +
+        '<span style="font-size:28px;font-weight:900;color:#FFFFFF;letter-spacing:1px;">\u26A0 COD - PAYMENT DUE AT PICKUP: $' + codAmount.toFixed(2) + ' \u26A0</span></div>'
+      : '';
+
+    // Tokens MUST match the DOC_WILL_CALL_RELEASE template exactly.
+    // Mirrors AppScripts/stride-client-inventory/src/WillCalls.gs buildWcReleasePdfTokens around v4.6.
+    var tokens = {
+      "{{LOGO_URL}}":          String(settings["LOGO_URL"] || "").trim(),
+      "{{WC_NUMBER}}":         api_esc_(wcNumber),
+      "{{COD_BANNER_HTML}}":   codBannerHtml,
+      "{{CLIENT_NAME}}":       api_esc_(clientName),
+      "{{DATE}}":              api_esc_(dateStr),
+      "{{EST_PICKUP_ROW}}":    estDateStr ? '<tr><td style="font-size:10px;color:#64748B;padding:2px 0;">Est. Pickup</td><td style="font-size:12px;font-weight:600;">' + api_esc_(estDateStr) + '</td></tr>' : '',
+      "{{REQUESTED_BY_ROW}}":  requestedBy ? '<tr><td style="font-size:10px;color:#64748B;padding:2px 0;">Requested By</td><td style="font-size:12px;">' + api_esc_(requestedBy) + '</td></tr>' : '',
+      "{{ITEM_COUNT}}":        String(items.length),
+      "{{PICKUP_PARTY}}":      api_esc_(pickupParty),
+      "{{PICKUP_PHONE_HTML}}": pickupPhone ? '<div style="font-size:11px;color:#64748B;">' + api_esc_(pickupPhone) + '</div>' : '',
+      "{{NOTES_HTML}}":        notes ? '<div style="background:#FFFBEB;border:1px solid #F59E0B;border-radius:6px;padding:8px 12px;margin-bottom:10px;">' +
+                                      '<div style="font-size:9px;color:#92400E;font-weight:800;text-transform:uppercase;margin-bottom:2px;letter-spacing:0.5px;">Notes</div>' +
+                                      '<div style="font-size:11px;color:#78350F;">' + api_esc_(notes) + '</div></div>' : '',
+      "{{ITEMS_TABLE_ROWS}}":  itemsTableRows,
+      "{{TOTAL_ITEMS}}":       String(items.length),
+      "{{TOTAL_FEE}}":         totalFee ? '$' + totalFee.toFixed(2) : '',
+      // Legacy tokens kept for safety if any older template fragment still has them
+      "{{PICKUP_DATE}}":       estDateStr,
+      "{{ITEMS_TABLE}}":       itemsTableRows,
+      "{{ITEMS_COUNT}}":       String(items.length),
+      "{{PHOTOS_URL}}":        "",
+      "{{PARTIAL_NOTE}}":      "",
+      "{{NOTES}}":             notes,
+      "{{COD}}":               isCod ? "Yes \u2014 $" + codAmount.toFixed(2) : "No"
+    };
+
+    // Find or create WC folder
+    var wcFolderUrl = "";
+    var wcRt = wcSheet.getRange(wcRow, wcNumCol).getRichTextValue();
+    if (wcRt && wcRt.getLinkUrl()) wcFolderUrl = wcRt.getLinkUrl();
+    if (!wcFolderUrl) {
+      var wcSub = api_getOrCreateEntitySubfolder_(ss, "Will Calls");
+      if (wcSub.folder) {
+        var wcIt = wcSub.folder.getFoldersByName(wcNumber);
+        var wcF = wcIt.hasNext() ? wcIt.next() : wcSub.folder.createFolder(wcNumber);
+        wcFolderUrl = "https://drive.google.com/drive/folders/" + wcF.getId();
+        // Write folder URL back to WC Number cell as hyperlink
+        var newRt = SpreadsheetApp.newRichTextValue()
+          .setText(wcNumber)
+          .setLinkUrl(wcFolderUrl)
+          .build();
+        wcSheet.getRange(wcRow, wcNumCol).setRichTextValue(newRt);
+      }
+    }
+    tokens["{{PHOTOS_URL}}"] = wcFolderUrl;
+
+    // Generate PDF
+    var pdfResult = api_generateDocPdf_(ss, "DOC_WILL_CALL_RELEASE", "Will_Call_" + wcNumber, wcFolderUrl, tokens);
+    if (!pdfResult.blob && pdfResult.warning) {
+      return jsonResponse_({ success: false, error: pdfResult.warning });
+    }
+
+    return jsonResponse_({ success: true, wcNumber: wcNumber, folderUrl: wcFolderUrl, itemCount: items.length });
+  } catch (err) {
+    return errorResponse_("Failed to generate WC doc: " + String(err), "SERVER_ERROR");
   }
 }
 
@@ -16525,6 +17776,38 @@ function handleGetAutoIdSetting_() {
 }
 
 /**
+ * Phase 2 ledger check endpoint. Payload: { itemIds: string[] }.
+ * Returns { ok: true, duplicates: [{itemId, tenantId, tenantName, status, source, createdAt}], degraded: bool }.
+ *
+ * Called by React Receiving page on submit to block duplicate Item IDs
+ * before the server-side completeShipment runs. If Supabase is unreachable,
+ * degraded=true and duplicates=[] — React should show a warning banner but
+ * still let the user proceed (reconciliation catches missed dups).
+ */
+function handleCheckItemIdsAvailable_(payload) {
+  var itemIds = (payload && payload.itemIds) || [];
+  if (!Array.isArray(itemIds)) {
+    return errorResponse_("'itemIds' must be an array", "INVALID_PARAMS");
+  }
+  var result = api_ledgerCheckAvailable_(itemIds);
+
+  // Enrich with client names so React can show "80123 assigned to ClientX"
+  if (result.duplicates.length > 0) {
+    var nameMap = api_clientNameMap_();
+    for (var di = 0; di < result.duplicates.length; di++) {
+      result.duplicates[di].tenantName = nameMap[result.duplicates[di].tenantId] || "";
+    }
+  }
+
+  return jsonResponse_({
+    success: true,
+    ok: true,
+    duplicates: result.duplicates,
+    degraded: result.degraded
+  });
+}
+
+/**
  * Atomically allocate the next Item ID from the CB Settings NEXT_ITEM_ID counter.
  * Uses LockService to prevent duplicate IDs when two staff receive simultaneously.
  *
@@ -19478,19 +20761,64 @@ function handleBulkSyncToSupabase_(payload) {
           var bkRepShipMap = api_buildShipmentFolderMap_(ss);
           var bkRepTaskSheet = ss.getSheetByName("Tasks");
           var bkRepTaskFolderUrls = bkRepTaskSheet ? api_readIdFolderUrls_(bkRepTaskSheet, "Task ID") : {};
+
+          // v38.51.4 — Task ID → {Shipment #, Task Notes} map. Repairs sheet
+          // has no Shipment # column, so without this lookup shipment_folder_url
+          // stays "" and React's Shipment Folder button renders disabled.
+          var bkRepTaskMeta = {};
+          if (bkRepTaskSheet) {
+            try {
+              var bkRepTaskRows = sheetToObjects_(bkRepTaskSheet);
+              for (var tmi = 0; tmi < bkRepTaskRows.length; tmi++) {
+                var tmid = String(bkRepTaskRows[tmi]["Task ID"] || "").trim();
+                if (!tmid) continue;
+                bkRepTaskMeta[tmid] = {
+                  shipmentNo: String(bkRepTaskRows[tmi]["Shipment #"] || "").trim(),
+                  taskNotes: String(bkRepTaskRows[tmi]["Task Notes"] || "")
+                };
+              }
+            } catch (_) {}
+          }
+
+          // v38.51.5 — Item ID → Shipment # fallback for legacy migrated repairs.
+          // Items imported via the Import tool have no source task, so the
+          // source-task lookup above returns empty. Fall back to the current
+          // Inventory row's Shipment #. If Fix Missing Folders has been run,
+          // the shipment folder map will then resolve a URL for it.
+          var bkRepInvShipById = {};
+          try {
+            var bkInvSheet = ss.getSheetByName("Inventory");
+            if (bkInvSheet) {
+              var bkInvRows = sheetToObjects_(bkInvSheet);
+              for (var ivi = 0; ivi < bkInvRows.length; ivi++) {
+                var iid = String(bkInvRows[ivi]["Item ID"] || "").trim();
+                if (!iid) continue;
+                bkRepInvShipById[iid] = String(bkInvRows[ivi]["Shipment #"] || "").trim();
+              }
+            }
+          } catch (_) {}
+
           var repSb = [];
           var bkRepKeepIds = [];
           for (var k = 0; k < repRows.length; k++) {
             var rid = String(repRows[k]["Repair ID"] || "").trim();
             if (!rid) continue;
             bkRepKeepIds.push(rid);
-            var rShipNo = String(repRows[k]["Shipment #"] || "").trim();
             var rTaskId = String(repRows[k]["Source Task ID"] || repRows[k]["Task ID"] || "").trim();
+            var bkSrcMeta = bkRepTaskMeta[rTaskId] || {};
+            var rItemId = String(repRows[k]["Item ID"] || "").trim();
+            var rShipNo = String(
+              repRows[k]["Shipment #"] ||
+              bkSrcMeta.shipmentNo ||
+              bkRepInvShipById[rItemId] ||
+              ""
+            ).trim();
+            var rTaskNotes = String(repRows[k]["Task Notes"] || "").trim() || bkSrcMeta.taskNotes || "";
             repSb.push(sbRepairRow_(client.spreadsheetId, {
               repairId: rid, itemId: repRows[k]["Item ID"], status: repRows[k]["Status"],
               repairResult: repRows[k]["Repair Result"], quoteAmount: repRows[k]["Quote Amount"],
               finalAmount: repRows[k]["Final Amount"], repairVendor: repRows[k]["Repair Vendor"],
-              repairNotes: repRows[k]["Repair Notes"], taskNotes: repRows[k]["Task Notes"],
+              repairNotes: repRows[k]["Repair Notes"], taskNotes: rTaskNotes,
               itemNotes: repRows[k]["Item Notes"],
               createdDate: formatDate_(repRows[k]["Created Date"]),
               completedDate: formatDate_(repRows[k]["Completed Date"]),
@@ -19526,6 +20854,7 @@ function handleBulkSyncToSupabase_(payload) {
               createdDate: formatDate_(wcRows[m]["Created Date"]),
               estimatedPickupDate: formatDate_(wcRows[m]["Estimated Pickup Date"]),
               notes: wcRows[m]["Notes"], itemsCount: wcRows[m]["Items Count"],
+              cod: wcRows[m]["COD"], codAmount: wcRows[m]["COD Amount"],
               wcFolderUrl: bkWcFolderUrls[wcn] || "",
               shipmentFolderUrl: bkWcShipMap[String(wcRows[m]["Shipment #"] || "").trim()] || ""
             }));

@@ -311,11 +311,18 @@ export function Shipments() {
   const pendingOpenRef = useRef<string | null>(null);
 
   // Client list for MultiSelectFilter — declared before data hooks so clientFilter gates fetching
-  const { clients } = useClients();
+  const { clients, apiClients } = useClients();
   const clientNames = useMemo(() => clients.map(c => c.name).sort(), [clients]);
   const [clientFilter, setClientFilter] = useState<string[]>([]);
 
-  const { apiShipments: liveShipments, loading: apiLoading, error: apiError, refetch: refetchShipments } = useShipments(hasApi && clientFilter.length > 0);
+  const selectedSheetId = useMemo<string | string[] | undefined>(() => {
+    if (clientFilter.length === 0) return undefined;
+    const ids = clientFilter.map(n => apiClients.find(c => c.name === n)?.spreadsheetId).filter((x): x is string => !!x);
+    if (ids.length === 0) return undefined;
+    return ids.length === 1 ? ids[0] : ids;
+  }, [clientFilter, apiClients]);
+
+  const { apiShipments: liveShipments, loading: apiLoading, error: apiError, refetch: refetchShipments } = useShipments(hasApi && clientFilter.length > 0, selectedSheetId);
   const apiSucceeded = hasApi && !apiError && !apiLoading;
   // Map to unified row type (with client-side filtering from top-level MultiSelectFilter)
   const allData: ShipmentRow[] = useMemo(() => liveShipments.map(fromApi), [liveShipments]);
@@ -331,19 +338,28 @@ export function Shipments() {
   const [selectedShipment, setSelectedShipment] = useState<ShipmentRow | null>(null);
   const { user } = useAuth();
 
+  // Auto-select clients for client-portal users
+  useEffect(() => {
+    if (user?.role === 'client' && user.accessibleClientNames?.length && clientFilter.length === 0) {
+      setClientFilter(user.accessibleClientNames);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.role, user?.accessibleClientNames?.length]);
+
   // Effect 1: Route state OR ?open= query param → store pendingOpen + auto-load
   useEffect(() => {
     const state = location.state as { openShipmentId?: string; clientSheetId?: string } | null;
+    // Do NOT call refetchShipments() here — it bypasses Supabase cache and
+    // forces unscoped GAS (session 62). Data hook auto-fetches via
+    // Supabase-first; Effect 2 opens the pending row when data arrives.
     if (state?.openShipmentId) {
       pendingOpenRef.current = state.openShipmentId;
-      refetchShipments();
       window.history.replaceState({}, '');
     } else if (location.search) {
       const params = new URLSearchParams(location.search);
       const openId = params.get('open');
       if (openId) {
         pendingOpenRef.current = openId;
-        refetchShipments();
         window.history.replaceState({}, '', window.location.pathname + window.location.hash.split('?')[0]);
       }
     }
@@ -367,20 +383,19 @@ export function Shipments() {
   const [showStatusDrop, setShowStatusDrop] = useState(false);
   const [showCarrierDrop, setShowCarrierDrop] = useState(false);
 
+  // Page-level safety net: resolve clientName from apiClients if empty (race when Supabase fetch happens before useClients loaded)
+  const shipIdToName = useMemo<Record<string, string>>(() => { const m: Record<string, string> = {}; for (const c of apiClients) { m[c.spreadsheetId] = c.name; } return m; }, [apiClients]);
+
   // Client-side filtering by selected clients (top-level MultiSelectFilter)
   const data: ShipmentRow[] = useMemo(() => {
     if (clientFilter.length === 0) return [];
-    return allData.filter(r => clientFilter.includes(r.clientName));
-  }, [allData, clientFilter]);
+    const resolved = allData.map(r => r.clientName ? r : { ...r, clientName: shipIdToName[(r as any).clientSheetId || (r as any).sourceSheetId || ''] || '' });
+    return resolved.filter(r => clientFilter.includes(r.clientName));
+  }, [allData, clientFilter, shipIdToName]);
 
-  // Auto-refresh when client filter changes — ensures fresh data on every filter change
-  const clientFilterKey = clientFilter.join(',');
-  useEffect(() => {
-    if (clientFilter.length > 0) {
-      refetchShipments();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [clientFilterKey]);
+  // Client-filter change is already handled by useShipments (cacheKeyScope change
+  // triggers useApiData refetch via Supabase-first path). A manual refetch() here
+  // would force GAS (skipSupabaseCacheOnce) and hang the spinner on multi-client.
 
   // Effect 2: When data arrives, open the pending shipment
   useEffect(() => {

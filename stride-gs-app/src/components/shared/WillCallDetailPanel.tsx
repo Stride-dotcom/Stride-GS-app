@@ -1,6 +1,7 @@
-import { useState, useMemo } from 'react';
-import { X, Truck, Package, Calendar, Phone, User, DollarSign, CheckCircle2, CreditCard, FileText, Loader2, AlertTriangle, FolderOpen, Info } from 'lucide-react';
+import { useState, useMemo, useCallback, useEffect, useRef } from 'react';
+import { X, Truck, Package, Calendar, Phone, User, DollarSign, CheckCircle2, CreditCard, FileText, Loader2, AlertTriangle, FolderOpen, Info, Pencil, Save, Play } from 'lucide-react';
 import { FolderButton } from './FolderButton';
+import { DeepLink } from './DeepLink';
 import { theme } from '../../styles/theme';
 import { fmtDate } from '../../lib/constants';
 import { WriteButton } from './WriteButton';
@@ -8,7 +9,7 @@ import { ProcessingOverlay } from './ProcessingOverlay';
 import { getPanelContainerStyle, panelBackdropStyle } from './panelStyles';
 import { useIsMobile } from '../../hooks/useIsMobile';
 import { useResizablePanel } from '../../hooks/useResizablePanel';
-import { postProcessWcRelease, postCancelWillCall, postRemoveItemsFromWillCall, fetchWcDocUrl, isApiConfigured } from '../../lib/api';
+import { postProcessWcRelease, postCancelWillCall, postRemoveItemsFromWillCall, postUpdateWillCall, postGenerateWcDoc, fetchWcDocUrl, fetchWillCallById, isApiConfigured } from '../../lib/api';
 import { useClients } from '../../hooks/useClients';
 import { writeSyncFailed } from '../../lib/syncEvents';
 import { useAuth } from '../../contexts/AuthContext';
@@ -44,16 +45,74 @@ function Field({ label, value, icon: Icon }: { label: string; value?: string | n
   </div>;
 }
 
-export function WillCallDetailPanel({ wc, onClose, onWcUpdated, onNavigateToWc, applyWcPatch, clearWcPatch, applyItemPatch }: Props) {
+export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNavigateToWc, applyWcPatch, clearWcPatch, applyItemPatch }: Props) {
   const { user } = useAuth();
   const { isMobile } = useIsMobile();
   const { width: panelWidth, handleMouseDown: handleResizeMouseDown } = useResizablePanel(440, 'willcall', isMobile);
-  // Release state
   const apiConfigured = isApiConfigured();
   const { apiClients } = useClients(apiConfigured);
-  const clientSheetId = useMemo(() => apiClients.find(c => c.name === wc.clientName)?.spreadsheetId || '', [apiClients, wc.clientName]);
+  const clientSheetId = useMemo(() => wcProp.clientSheetId || apiClients.find(c => c.name === wcProp.clientName)?.spreadsheetId || '', [apiClients, wcProp.clientName, wcProp.clientSheetId]);
+
+  // ── Self-fetch: if items missing, fetch full WC data via getWillCallById ──
+  const [enrichedData, setEnrichedData] = useState<Partial<WillCall> | null>(null);
+  const enrichRef = useRef<string | null>(null);
+  useEffect(() => {
+    const hasItems = wcProp.items && wcProp.items.length > 0;
+    if (hasItems || !apiConfigured) { setEnrichedData(null); return; }
+    if (!clientSheetId) return;
+    if (enrichRef.current === wcProp.wcNumber + ':' + clientSheetId) return;
+    enrichRef.current = wcProp.wcNumber + ':' + clientSheetId;
+    fetchWillCallById(wcProp.wcNumber, clientSheetId).then(resp => {
+      if (resp.ok && resp.data?.success && resp.data.willCall) {
+        const match = resp.data.willCall;
+        // Always set enrichedData even if 0 items — prevents infinite retry loop
+        if (!match.items?.length) {
+          setEnrichedData({ items: [] });
+          enrichRef.current = null;
+          return;
+        }
+        setEnrichedData({
+          items: (match.items || []).map(it => ({
+            itemId: it.itemId, description: it.description, qty: it.qty,
+            released: it.released, vendor: it.vendor || undefined,
+            location: it.location || undefined, status: it.status || undefined,
+          })),
+          itemCount: match.items?.length || match.itemsCount || wcProp.itemCount,
+          pickupPartyPhone: match.pickupPhone || undefined,
+          scheduledDate: match.estimatedPickupDate || undefined,
+          notes: match.notes || undefined,
+          cod: match.cod ?? undefined,
+          codAmount: match.codAmount ?? undefined,
+          wcFolderUrl: match.wcFolderUrl || undefined,
+          shipmentFolderUrl: match.shipmentFolderUrl || undefined,
+        });
+      }
+      enrichRef.current = null;
+    }).catch(() => { enrichRef.current = null; });
+  }, [wcProp.wcNumber, wcProp.items, apiConfigured, clientSheetId]);
+
+  // Merge prop data with enriched data — enriched fills gaps, prop takes priority for non-empty
+  const wc = useMemo(() => {
+    if (!enrichedData) return wcProp;
+    return {
+      ...wcProp,
+      items: (wcProp.items?.length ? wcProp.items : enrichedData.items) || [],
+      itemCount: wcProp.itemCount || enrichedData.itemCount || 0,
+      pickupPartyPhone: wcProp.pickupPartyPhone || enrichedData.pickupPartyPhone,
+      scheduledDate: wcProp.scheduledDate || enrichedData.scheduledDate,
+      notes: wcProp.notes || enrichedData.notes,
+      cod: wcProp.cod ?? enrichedData.cod,
+      codAmount: wcProp.codAmount ?? enrichedData.codAmount,
+      wcFolderUrl: wcProp.wcFolderUrl || enrichedData.wcFolderUrl,
+      shipmentFolderUrl: wcProp.shipmentFolderUrl || enrichedData.shipmentFolderUrl,
+    };
+  }, [wcProp, enrichedData]);
 
   const [effectiveStatus, setEffectiveStatus] = useState<string>(wc.status);
+  // Sync with incoming wc prop — parent may update via optimistic patch or refetch.
+  // Without this, the local state sticks on the initial mount value and the panel
+  // appears to flip/flash between rendered values when wc changes.
+  useEffect(() => { if (wc.status && wc.status !== effectiveStatus) setEffectiveStatus(wc.status); }, [wc.status]); // eslint-disable-line react-hooks/exhaustive-deps
   const sc = STATUS_CFG[effectiveStatus] || STATUS_CFG.Pending;
   const isActive = ['Pending', 'Scheduled', 'Partial'].includes(effectiveStatus);
 
@@ -70,7 +129,7 @@ export function WillCallDetailPanel({ wc, onClose, onWcUpdated, onNavigateToWc, 
   const [releaseError, setReleaseError] = useState<string | null>(null);
   const [releaseResult, setReleaseResult] = useState<ProcessWcReleaseResponse | null>(null);
 
-  const [paid, setPaid] = useState(false);
+  const [paid, setPaid] = useState(() => String(wc.notes || '').includes('[COD Paid'));
 
   // Cancel WC state
   const [cancelling, setCancelling] = useState(false);
@@ -83,6 +142,73 @@ export function WillCallDetailPanel({ wc, onClose, onWcUpdated, onNavigateToWc, 
   const [removing, setRemoving] = useState(false);
   const [removeError, setRemoveError] = useState<string | null>(null);
   const [removeResult, setRemoveResult] = useState<RemoveItemsFromWillCallResponse | null>(null);
+
+  // ── Inline edit state ──
+  const [isEditing, setIsEditing] = useState(false);
+  const [editSaving, setEditSaving] = useState(false);
+  const [editSaveSuccess, setEditSaveSuccess] = useState(false);
+  const [editSaveError, setEditSaveError] = useState<string | null>(null);
+  const [editPickupParty, setEditPickupParty] = useState('');
+  const [editPhone, setEditPhone] = useState('');
+  const [editDate, setEditDate] = useState('');
+  const [editNotes, setEditNotes] = useState('');
+  const [editCod, setEditCod] = useState(false);
+  const [editCodAmount, setEditCodAmount] = useState('');
+
+  const handleEditStart = useCallback(() => {
+    setEditPickupParty(wc.pickupParty || '');
+    setEditPhone(wc.pickupPartyPhone || '');
+    setEditDate(wc.scheduledDate || '');
+    setEditNotes(wc.notes || '');
+    setEditCod(!!wc.cod);
+    setEditCodAmount(wc.codAmount != null ? String(wc.codAmount) : '');
+    setEditSaveError(null);
+    setEditSaveSuccess(false);
+    setIsEditing(true);
+  }, [wc]);
+
+  const handleEditCancel = useCallback(() => {
+    setIsEditing(false);
+    setEditSaveError(null);
+  }, []);
+
+  const handleEditSave = useCallback(async () => {
+    if (!apiConfigured || !clientSheetId || !wc.wcNumber) return;
+    setEditSaving(true);
+    setEditSaveError(null);
+
+    const payload: Record<string, unknown> = { wcNumber: wc.wcNumber };
+    let changed = false;
+    if (editPickupParty !== (wc.pickupParty || '')) { payload.pickupParty = editPickupParty; changed = true; }
+    if (editPhone !== (wc.pickupPartyPhone || '')) { payload.pickupPhone = editPhone; changed = true; }
+    if (editDate !== (wc.scheduledDate || '')) { payload.estimatedPickupDate = editDate; changed = true; }
+    if (editNotes !== (wc.notes || '')) { payload.notes = editNotes; changed = true; }
+    if (editCod !== !!wc.cod) { payload.cod = editCod; changed = true; }
+    const origAmt = wc.codAmount != null ? String(wc.codAmount) : '';
+    if (editCodAmount !== origAmt) {
+      payload.codAmount = editCodAmount.trim() === '' ? 0 : parseFloat(editCodAmount);
+      changed = true;
+    }
+
+    if (!changed) { setIsEditing(false); setEditSaving(false); return; }
+
+    try {
+      const resp = await postUpdateWillCall(payload as any, clientSheetId);
+      if (!resp.ok || !resp.data?.success) {
+        setEditSaveError(resp.error || resp.data?.error || 'Save failed');
+      } else {
+        setIsEditing(false);
+        setEditSaveSuccess(true);
+        setTimeout(() => setEditSaveSuccess(false), 3000);
+        onWcUpdated?.();
+      }
+    } catch {
+      setEditSaveError('Network error — please try again');
+    }
+    setEditSaving(false);
+  }, [apiConfigured, clientSheetId, wc, editPickupParty, editPhone, editDate, editNotes, editCod, editCodAmount, onWcUpdated]);
+
+  const inputStyle: React.CSSProperties = { width: '100%', padding: '6px 10px', fontSize: 13, border: `1px solid ${theme.colors.border}`, borderRadius: 6, outline: 'none', fontFamily: 'inherit' };
 
   const toggleRemoveItem = (id: string) => {
     setRemoveSelected(prev => {
@@ -125,7 +251,7 @@ export function WillCallDetailPanel({ wc, onClose, onWcUpdated, onNavigateToWc, 
         setRemoveResult(resp.data);
         if (resp.data.cancelled) setEffectiveStatus('Cancelled');
         setRemoveMode(false);
-        if (removingAll) clearWcPatch?.(wc.wcNumber); // server confirmed
+        // Don't clear patch on success — let 120s TTL handle it (prevents flicker during refetch)
         onWcUpdated?.();
       }
     } catch (err) {
@@ -180,6 +306,34 @@ export function WillCallDetailPanel({ wc, onClose, onWcUpdated, onNavigateToWc, 
     }
   };
 
+  // Generate WC Doc state
+  const [genDocLoading, setGenDocLoading] = useState(false);
+  const [genDocResult, setGenDocResult] = useState<string | null>(null);
+  const [genDocError, setGenDocError] = useState<string | null>(null);
+
+  const handleGenerateWcDoc = async () => {
+    setGenDocError(null);
+    setGenDocResult(null);
+    if (!apiConfigured || !clientSheetId) { setGenDocError('API not configured'); return; }
+    setGenDocLoading(true);
+    try {
+      const resp = await postGenerateWcDoc(wc.wcNumber, clientSheetId);
+      if (!resp.ok || !resp.data?.success) {
+        setGenDocError(resp.error || resp.data?.error || 'Failed to start will call');
+      } else {
+        const url = resp.data?.folderUrl || '';
+        setGenDocResult(url
+          ? `Pickup document generated — ${url}`
+          : 'Pickup document generated in Will Call folder');
+        // No auto-dismiss — user dismisses manually so they can see the confirmation
+      }
+    } catch (err) {
+      setGenDocError(err instanceof Error ? err.message : 'Network error');
+    } finally {
+      setGenDocLoading(false);
+    }
+  };
+
   const handleCancelWC = async () => {
     setCancelError(null);
     // Phase 2C: patch table row immediately
@@ -198,7 +352,7 @@ export function WillCallDetailPanel({ wc, onClose, onWcUpdated, onNavigateToWc, 
         setCancelError(errMsg);
         void writeSyncFailed({ tenant_id: clientSheetId, entity_type: 'will_call', entity_id: wc.wcNumber, action_type: 'cancel_will_call', requested_by: user?.email ?? '', request_id: resp.requestId, payload: { wcNumber: wc.wcNumber, clientName: wc.clientName }, error_message: errMsg });
       } else {
-        clearWcPatch?.(wc.wcNumber); // server confirmed
+        // Don't clear patch on success — let 120s TTL handle it (prevents flicker during refetch)
         setCancelResult(resp.data);
         setEffectiveStatus('Cancelled');
         onWcUpdated?.();
@@ -253,7 +407,7 @@ export function WillCallDetailPanel({ wc, onClose, onWcUpdated, onNavigateToWc, 
         setReleaseError(errMsg);
         void writeSyncFailed({ tenant_id: clientSheetId, entity_type: 'will_call', entity_id: wc.wcNumber, action_type: 'process_wc_release', requested_by: user?.email ?? '', request_id: resp.requestId, payload: { wcNumber: wc.wcNumber, releaseItemIds: itemIds, clientName: wc.clientName }, error_message: errMsg });
       } else {
-        clearWcPatch?.(wc.wcNumber); // server confirmed
+        // Don't clear patch on success — let 120s TTL handle it (prevents flicker during refetch)
         setReleaseResult(resp.data);
         setEffectiveStatus(resp.data.isPartial ? 'Partial' : 'Released');
         setReleaseMode('none');
@@ -282,7 +436,29 @@ export function WillCallDetailPanel({ wc, onClose, onWcUpdated, onNavigateToWc, 
               <div style={{ fontSize: 18, fontWeight: 700 }}>{wc.wcNumber}</div>
               <div style={{ fontSize: 12, color: theme.colors.textSecondary, marginTop: 2 }}>{wc.clientName}</div>
             </div>
-            <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4, color: theme.colors.textMuted }}><X size={18} /></button>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              {isActive && (
+                isEditing ? (
+                  <>
+                    <button onClick={handleEditSave} disabled={editSaving}
+                      style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '4px 12px', fontSize: 11, fontWeight: 600, borderRadius: 6, border: 'none', background: theme.colors.orange, color: '#fff', cursor: editSaving ? 'wait' : 'pointer', fontFamily: 'inherit' }}>
+                      {editSaving ? <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} /> : <Save size={12} />}
+                      {editSaving ? 'Saving...' : 'Save'}
+                    </button>
+                    <button onClick={handleEditCancel} disabled={editSaving}
+                      style={{ padding: '4px 10px', fontSize: 11, fontWeight: 600, borderRadius: 6, border: `1px solid ${theme.colors.border}`, background: '#fff', color: theme.colors.textSecondary, cursor: 'pointer', fontFamily: 'inherit' }}>
+                      Cancel
+                    </button>
+                  </>
+                ) : (
+                  <button onClick={handleEditStart}
+                    style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '4px 10px', fontSize: 11, fontWeight: 600, borderRadius: 6, border: `1px solid ${theme.colors.border}`, background: '#fff', color: theme.colors.textSecondary, cursor: 'pointer', fontFamily: 'inherit' }}>
+                    <Pencil size={12} /> Edit
+                  </button>
+                )
+              )}
+              <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4, color: theme.colors.textMuted }}><X size={18} /></button>
+            </div>
           </div>
           <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
             <Badge t={wc.status} bg={sc.bg} color={sc.color} />
@@ -290,6 +466,32 @@ export function WillCallDetailPanel({ wc, onClose, onWcUpdated, onNavigateToWc, 
             {paid && <Badge t="Paid" bg="#F0FDF4" color="#15803D" />}
           </div>
         </div>
+        {editSaveError && (
+          <div style={{ padding: '6px 20px', background: '#FEF2F2', color: '#DC2626', fontSize: 12, fontWeight: 500, borderBottom: `1px solid #FECACA` }}>{editSaveError}</div>
+        )}
+        {editSaveSuccess && (
+          <div style={{ padding: '6px 20px', background: '#F0FDF4', color: '#15803D', fontSize: 12, fontWeight: 500, borderBottom: `1px solid #BBF7D0` }}>Changes saved successfully</div>
+        )}
+        {/* Top-of-panel confirmation for Regenerate Pickup Document — lives above scrollable content so
+            it doesn't get pushed off-screen by panel re-renders. Stays visible until explicitly dismissed. */}
+        {genDocResult && (
+          <div style={{ padding: '10px 20px', background: '#F0FDF4', borderBottom: '1px solid #BBF7D0', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <CheckCircle2 size={16} color="#15803D" />
+              <span style={{ fontSize: 13, color: '#15803D', fontWeight: 600 }}>Pickup document generated in Will Call folder</span>
+            </div>
+            <button onClick={() => setGenDocResult(null)} style={{ border: 'none', background: 'none', cursor: 'pointer', color: '#15803D', fontSize: 11, padding: 0, fontWeight: 600 }}>Dismiss</button>
+          </div>
+        )}
+        {genDocError && (
+          <div style={{ padding: '10px 20px', background: '#FEF2F2', borderBottom: '1px solid #FECACA', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <AlertTriangle size={16} color="#DC2626" />
+              <span style={{ fontSize: 13, color: '#DC2626', fontWeight: 600 }}>{genDocError}</span>
+            </div>
+            <button onClick={() => setGenDocError(null)} style={{ border: 'none', background: 'none', cursor: 'pointer', color: '#DC2626', fontSize: 11, padding: 0, fontWeight: 600 }}>Dismiss</button>
+          </div>
+        )}
 
         {/* Content */}
         <div style={{ flex: 1, overflowY: 'auto', padding: 20 }}>
@@ -297,13 +499,61 @@ export function WillCallDetailPanel({ wc, onClose, onWcUpdated, onNavigateToWc, 
           {/* Pickup Details */}
           <div style={{ background: theme.colors.bgSubtle, border: `1px solid ${theme.colors.border}`, borderRadius: 10, padding: 14, marginBottom: 16 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}><Truck size={14} color={theme.colors.orange} /><span style={{ fontSize: 12, fontWeight: 600 }}>Pickup Details</span></div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 14px' }}>
-              <Field label="Pickup Party" value={wc.pickupParty} icon={User} />
-              <Field label="Phone" value={wc.pickupPartyPhone} icon={Phone} />
-              <Field label="Scheduled Date" value={fmtDate(wc.scheduledDate)} icon={Calendar} />
-              <Field label="Items" value={`${wc.itemCount} items`} icon={Package} />
-            </div>
-            {wc.notes && <div style={{ marginTop: 4, fontSize: 12, color: theme.colors.textSecondary }}><strong>Notes:</strong> {wc.notes}</div>}
+            {isEditing ? (
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px 14px' }}>
+                <div>
+                  <label style={{ fontSize: 10, fontWeight: 500, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.04em', display: 'block', marginBottom: 3 }}>Pickup Party</label>
+                  <input value={editPickupParty} onChange={e => setEditPickupParty(e.target.value)} style={inputStyle} />
+                </div>
+                <div>
+                  <label style={{ fontSize: 10, fontWeight: 500, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.04em', display: 'block', marginBottom: 3 }}>Phone</label>
+                  <input value={editPhone} onChange={e => setEditPhone(e.target.value)} style={inputStyle} />
+                </div>
+                <div>
+                  <label style={{ fontSize: 10, fontWeight: 500, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.04em', display: 'block', marginBottom: 3 }}>Estimated Pickup Date</label>
+                  <input type="date" value={editDate} onChange={e => setEditDate(e.target.value)} style={inputStyle} />
+                </div>
+                <div>
+                  <Field label="Items" value={`${wc.itemCount} items`} icon={Package} />
+                </div>
+                <div style={{ gridColumn: '1 / -1' }}>
+                  <label style={{ fontSize: 10, fontWeight: 500, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.04em', display: 'block', marginBottom: 3 }}>Notes</label>
+                  <textarea value={editNotes} onChange={e => setEditNotes(e.target.value)} rows={2} style={{ ...inputStyle, resize: 'vertical' }} />
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, cursor: 'pointer' }}>
+                    <input type="checkbox" checked={editCod} onChange={e => setEditCod(e.target.checked)} style={{ accentColor: theme.colors.orange }} />
+                    COD
+                  </label>
+                </div>
+                {editCod && (
+                  <div>
+                    <label style={{ fontSize: 10, fontWeight: 500, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.04em', display: 'block', marginBottom: 3 }}>COD Amount</label>
+                    <input type="number" value={editCodAmount} onChange={e => setEditCodAmount(e.target.value)} placeholder="$0.00" style={inputStyle} />
+                  </div>
+                )}
+              </div>
+            ) : (
+              <>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 14px' }}>
+                  <Field label="Pickup Party" value={wc.pickupParty} icon={User} />
+                  <Field label="Phone" value={wc.pickupPartyPhone} icon={Phone} />
+                  <Field label="Estimated Pickup Date" value={fmtDate(wc.scheduledDate)} icon={Calendar} />
+                  <Field label="Items" value={`${wc.itemCount} items`} icon={Package} />
+                  <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginBottom: 10 }}>
+                    <DollarSign size={14} color={theme.colors.textMuted} style={{ marginTop: 2 }} />
+                    <div>
+                      <div style={{ fontSize: 10, fontWeight: 500, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 3 }}>COD</div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <input type="checkbox" checked={!!wc.cod} readOnly style={{ accentColor: theme.colors.orange, pointerEvents: 'none', width: 16, height: 16 }} />
+                        {wc.cod && wc.codAmount ? <span style={{ fontSize: 13, fontWeight: 600 }}>${Number(wc.codAmount).toFixed(2)}</span> : null}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                {wc.notes && <div style={{ marginTop: 4, fontSize: 12, color: theme.colors.textSecondary }}><strong>Notes:</strong> {wc.notes}</div>}
+              </>
+            )}
             {/* Drive Folder Buttons */}
             <div style={{ display: 'flex', gap: 6, marginTop: 10, flexWrap: 'wrap' }}>
               <FolderButton label="Will Call Folder" url={wc.wcFolderUrl || undefined} disabledTooltip="Folder link missing — use Fix Missing Folders on Inventory page" icon={FolderOpen} />
@@ -336,8 +586,21 @@ export function WillCallDetailPanel({ wc, onClose, onWcUpdated, onNavigateToWc, 
                 <>
                   <div style={{ fontSize: 20, fontWeight: 700, marginBottom: 10 }}>${wc.codAmount || '0.00'}</div>
                   <div style={{ display: 'flex', gap: 8 }}>
-                    <button onClick={() => window.open('https://pay.fattmerchant.com', '_blank')} style={{ flex: 1, padding: '9px', fontSize: 12, fontWeight: 600, border: 'none', borderRadius: 8, background: theme.colors.orange, color: '#fff', cursor: 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}><CreditCard size={14} /> Collect via Stax</button>
-                    <WriteButton label="Mark Paid" variant="secondary" onClick={async () => { setPaid(true); /* Phase 7B: wire to API */ }} />
+                    <button onClick={() => window.open('https://app.staxpayments.com/#/pay/Stride-Logistics-cd315bf73c1d?l=eyJ0b3RhbCI6IiIsIm1lbW8iOiJDdXN0b21lciBOb3RlcyIsInN1Y2Nlc3NSZWRpcmVjdCI6bnVsbCwiZnJlcXVlbmN5IjpudWxsLCJycnVsZSI6bnVsbCwiaXNUb3RhbEVkaXRhYmxlIjpmYWxzZSwidG9rZW5pemVPbmx5IjpmYWxzZSwiYXJlQ25wRGlnaXRhbFdhbGxldFBheW1lbnRzQWxsb3dlZCI6dHJ1ZSwiYXJlQmFua1BheW1lbnRzQWxsb3dlZCI6InRydWUiLCJhcmVDcmVkaXRDYXJkc1BheW1lbnRzQWxsb3dlZCI6InRydWUifQ==', '_blank')} style={{ flex: 1, padding: '9px', fontSize: 12, fontWeight: 600, border: 'none', borderRadius: 8, background: theme.colors.orange, color: '#fff', cursor: 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}><CreditCard size={14} /> Collect via Stax</button>
+                    <WriteButton label="Mark Paid" variant="secondary" onClick={async () => {
+                      if (apiConfigured && clientSheetId && wc.wcNumber) {
+                        const existingNotes = wc.notes || '';
+                        const paidNote = '[COD Paid ' + new Date().toLocaleDateString('en-US') + ']';
+                        const newNotes = existingNotes ? existingNotes + ' ' + paidNote : paidNote;
+                        const resp = await postUpdateWillCall({ wcNumber: wc.wcNumber, notes: newNotes } as any, clientSheetId);
+                        if (resp.ok && resp.data?.success) {
+                          setPaid(true);
+                          onWcUpdated?.();
+                        }
+                      } else {
+                        setPaid(true);
+                      }
+                    }} />
                   </div>
                   <div style={{ fontSize: 10, color: theme.colors.textMuted, marginTop: 8 }}>Opens Stax payment page in new tab. After collecting payment, tap "Mark Paid" to record it.</div>
                 </>
@@ -375,15 +638,7 @@ export function WillCallDetailPanel({ wc, onClose, onWcUpdated, onNavigateToWc, 
                           </td>
                         )}
                         <td style={{ padding: '6px 10px', fontWeight: 600 }}>
-                          <a
-                            href={`#/inventory?open=${encodeURIComponent(item.itemId)}`}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            onClick={e => e.stopPropagation()}
-                            style={{ color: theme.colors.orange, textDecoration: 'underline', textDecorationColor: 'transparent', transition: 'text-decoration-color 0.15s' }}
-                            onMouseEnter={e => (e.currentTarget.style.textDecorationColor = theme.colors.orange)}
-                            onMouseLeave={e => (e.currentTarget.style.textDecorationColor = 'transparent')}
-                          >{item.itemId}</a>
+                          <DeepLink kind="inventory" id={item.itemId} clientSheetId={clientSheetId} showIcon={false} />
                         </td>
                         <td style={{ padding: '6px 10px', color: theme.colors.textSecondary, maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.description}</td>
                         <td style={{ padding: '6px 10px', color: theme.colors.textSecondary, maxWidth: 80, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.vendor || '\u2014'}</td>
@@ -479,6 +734,43 @@ export function WillCallDetailPanel({ wc, onClose, onWcUpdated, onNavigateToWc, 
             </div>
           )}
 
+          {/* Activity History */}
+          {(() => {
+            const history: { time: string; text: string; color: string }[] = [];
+            // Created
+            if (wc.createdDate) {
+              const by = (wc as any).createdBy || '';
+              history.push({ time: wc.createdDate, text: `Will Call created${by ? ` by ${by}` : ''}`, color: theme.colors.textSecondary });
+            }
+            // Parse notes for activity markers: [Split → WC-xxx], [COD Paid MM/DD/YYYY]
+            const notes = String(wc.notes || '');
+            const splitMatch = notes.match(/\[Split → (WC-\S+)\]/);
+            if (splitMatch) history.push({ time: '', text: `Partial release — remaining items moved to ${splitMatch[1]}`, color: '#7C3AED' });
+            const paidMatch = notes.match(/\[COD Paid ([^\]]+)\]/);
+            if (paidMatch) history.push({ time: paidMatch[1], text: 'COD payment collected', color: '#15803D' });
+            // Status-based entries
+            if (effectiveStatus === 'Released') history.push({ time: (wc as any).actualPickupDate || '', text: 'All items released', color: '#15803D' });
+            if (effectiveStatus === 'Cancelled') history.push({ time: '', text: 'Will Call cancelled', color: '#6B7280' });
+            if (effectiveStatus === 'Scheduled' && wc.scheduledDate) history.push({ time: '', text: `Pickup scheduled for ${fmtDate(wc.scheduledDate)}`, color: '#1D4ED8' });
+
+            return history.length > 0 ? (
+              <div style={{ marginBottom: 16 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}>
+                  <Calendar size={14} color={theme.colors.orange} />
+                  <span style={{ fontSize: 12, fontWeight: 600 }}>Activity</span>
+                </div>
+                <div style={{ borderLeft: `2px solid ${theme.colors.border}`, marginLeft: 6, paddingLeft: 14 }}>
+                  {history.map((h, i) => (
+                    <div key={i} style={{ marginBottom: 10, fontSize: 12 }}>
+                      <div style={{ color: h.color, fontWeight: 500 }}>{h.text}</div>
+                      {h.time && <div style={{ fontSize: 10, color: theme.colors.textMuted, marginTop: 1 }}>{h.time}</div>}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null;
+          })()}
+
           {/* Quick Actions */}
           <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
             {isActive && !releaseResult && !removeResult && releaseMode === 'none' && allItemIds.length > 1 && (
@@ -501,7 +793,26 @@ export function WillCallDetailPanel({ wc, onClose, onWcUpdated, onNavigateToWc, 
             )}
             {isActive && !cancelResult && !removeMode && <WriteButton label={cancelling ? 'Cancelling...' : 'Cancel WC'} variant="danger" size="sm" disabled={cancelling} onClick={handleCancelWC} />}
             {!removeMode && <WriteButton label={printLoading ? 'Loading...' : 'Print Release Doc'} variant="secondary" size="sm" icon={printLoading ? <Loader2 size={11} className="animate-spin" /> : <FileText size={11} />} disabled={printLoading} onClick={handlePrintRelease} />}
+            {/* Always-available regenerate — needed after released WCs so a broken/old PDF can be rebuilt */}
+            {!removeMode && <WriteButton label={genDocLoading ? 'Regenerating...' : 'Regenerate Pickup Document'} variant="secondary" size="sm" icon={genDocLoading ? <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} /> : <Play size={11} />} disabled={genDocLoading} onClick={handleGenerateWcDoc} />}
           </div>
+          {genDocResult && (
+            <div style={{ padding: '8px 12px', background: '#F0FDF4', border: '1px solid #BBF7D0', borderRadius: 8, marginTop: 6, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, flex: 1, minWidth: 0 }}>
+                <CheckCircle2 size={14} color="#15803D" style={{ flexShrink: 0 }} />
+                <span style={{ fontSize: 12, color: '#15803D', fontWeight: 500 }}>Pickup document generated</span>
+              </div>
+              <button onClick={() => setGenDocResult(null)} style={{ border: 'none', background: 'none', cursor: 'pointer', color: '#15803D', fontSize: 11, padding: 0 }}>Dismiss</button>
+            </div>
+          )}
+          {genDocError && (
+            <div style={{ padding: '6px 10px', background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: 8, marginTop: 6 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <AlertTriangle size={13} color="#DC2626" />
+                <span style={{ fontSize: 12, color: '#DC2626' }}>{genDocError}</span>
+              </div>
+            </div>
+          )}
           {printPdfUrl && !printError && (
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 10px', background: '#F0FDF4', border: '1px solid #BBF7D0', borderRadius: 8, marginTop: 6 }}>
               <FileText size={13} color="#15803D" />
@@ -550,6 +861,20 @@ export function WillCallDetailPanel({ wc, onClose, onWcUpdated, onNavigateToWc, 
             <div style={{ marginBottom: 10, padding: '8px 12px', background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: 8, fontSize: 12, color: '#DC2626', display: 'flex', alignItems: 'flex-start', gap: 6 }}>
               <AlertTriangle size={13} style={{ flexShrink: 0, marginTop: 1 }} />
               <span>{releaseError || cancelError}</span>
+            </div>
+          )}
+          {/* Start Will Call — generates the pickup document (same backend as Start Repair's PDF generation).
+              Available on any non-released status so the doc can be regenerated if items change. */}
+          {isActive && !releaseResult && (
+            <div style={{ marginBottom: 10 }}>
+              <WriteButton
+                label={genDocLoading ? 'Starting...' : (genDocResult ? 'Regenerate Pickup Document' : 'Start Will Call')}
+                variant="primary"
+                icon={genDocLoading ? <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} /> : <Play size={16} />}
+                disabled={genDocLoading}
+                style={{ width: '100%', padding: '10px', fontSize: 13, background: '#7C3AED', opacity: genDocLoading ? 0.7 : 1 }}
+                onClick={handleGenerateWcDoc}
+              />
             </div>
           )}
           {isActive && !releaseResult ? (

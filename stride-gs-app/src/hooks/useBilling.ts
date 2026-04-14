@@ -8,7 +8,7 @@
  * Performance: checks BatchDataContext first (client users get all data in 1 call).
  * Falls back to individual API call for staff/admin users or when batch is unavailable.
  */
-import { useCallback, useEffect, useMemo } from 'react';
+import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { fetchBilling } from '../lib/api';
 import type { ApiBillingRow, BillingResponse, BillingSummary, BillingFilterParams } from '../lib/api';
 import { useApiData } from './useApiData';
@@ -47,21 +47,37 @@ export function useBilling(autoFetch = true, filterClientSheetId?: string, filte
     return map;
   }, [clients]);
 
+  // Session 62 ref-stabilization: `clients` from useClients returns a new
+  // array reference on every render, which would rebuild clientNameMap →
+  // rebuild fetchFn → re-run useApiData effect → abort in-flight → refetch,
+  // looping forever (React error #300 "too many re-renders" on Inventory
+  // page which runs 6 data hooks in parallel). Mirror the latest map value
+  // into a ref and keep fetchFn's deps to [cacheKeyScope] only. Same pattern
+  // as useInventory / useTasks / useRepairs / useWillCalls / useShipments.
+  const clientNameMapRef = useRef(clientNameMap);
+  clientNameMapRef.current = clientNameMap;
+
   const shouldFetchIndividual = hasServerFilters || !batchEnabled;
+
+  // filters prop can also be a new object reference each render; serialize
+  // to a stable key so useCallback doesn't rebuild on identical filter state.
+  const filtersKey = hasServerFilters ? JSON.stringify(filters) : '';
+  const filtersRef = useRef(filters);
+  filtersRef.current = filters;
 
   const fetchFn = useCallback(
     async (signal?: AbortSignal) => {
       // When server-side filters are active, go direct to GAS (no Supabase, no batch)
       if (hasServerFilters) {
-        return fetchBilling(signal, clientSheetId, filters);
+        return fetchBilling(signal, clientSheetId, filtersRef.current);
       }
       if (await isSupabaseCacheAvailable()) {
-        const sbResult = await fetchBillingFromSupabase(clientNameMap, clientSheetId);
+        const sbResult = await fetchBillingFromSupabase(clientNameMapRef.current, clientSheetId);
         if (sbResult) return { data: sbResult, ok: true, error: null } as { data: BillingResponse; ok: true; error: null };
       }
       return fetchBilling(signal, clientSheetId);
     },
-    [clientSheetId, clientNameMap, hasServerFilters, filters]
+    [clientSheetId, hasServerFilters, filtersKey]
   );
 
   const { data, loading: individualLoading, error: individualError, refetch: individualRefetch, lastFetched: individualLastFetched } = useApiData<BillingResponse>(

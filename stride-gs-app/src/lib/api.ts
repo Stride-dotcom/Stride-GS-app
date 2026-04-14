@@ -745,6 +745,14 @@ export function fetchTaskById(taskId: string, clientSheetId: string, signal?: Ab
   return apiFetch<{ success: boolean; task: ApiTask }>('getTaskById', { taskId, clientSheetId }, { signal });
 }
 
+export function fetchWillCallById(wcNumber: string, clientSheetId: string, signal?: AbortSignal) {
+  return apiFetch<{ success: boolean; willCall: ApiWillCall }>('getWillCallById', { wcNumber, clientSheetId }, { signal });
+}
+
+export function fetchRepairById(repairId: string, clientSheetId: string, signal?: AbortSignal) {
+  return apiFetch<{ success: boolean; repair: ApiRepair }>('getRepairById', { repairId, clientSheetId }, { signal });
+}
+
 export function fetchRepairs(signal?: AbortSignal, clientSheetId?: string) {
   const extra = clientSheetId ? { clientSheetId } : undefined;
   return apiFetch<RepairsResponse>('getRepairs', extra, { signal });
@@ -1057,6 +1065,46 @@ export function postCompleteShipment(
   );
 }
 
+// ─── checkItemIdsAvailable — Phase 2 item_id_ledger preflight ───────────────
+// Queries the Supabase item_id_ledger (via StrideAPI.gs v38.52.0+) to see
+// whether any Item IDs are already registered. Used by Receiving page on
+// submit to block cross-tenant collisions before completeShipment runs.
+//
+// Returned duplicates may include SAME-tenant rows (e.g. resubmit of an
+// already-received shipment) — the caller must filter by tenantId if they
+// want "cross-tenant only". The server-side completeShipment guard already
+// does the same filter and returns ITEM_ID_COLLISION if any cross-tenant
+// dup exists, so this preflight is primarily for UX, not enforcement.
+
+export interface CheckItemIdsAvailableDuplicate {
+  itemId: string;
+  tenantId: string;
+  tenantName?: string;
+  status: 'active' | 'released' | 'transferred' | 'voided';
+  source: 'auto' | 'manual' | 'import' | 'reassign' | 'backfill';
+  createdAt: string;
+}
+
+export interface CheckItemIdsAvailableResponse {
+  ok: boolean;
+  duplicates: CheckItemIdsAvailableDuplicate[];
+  /** True when Supabase is unreachable. Duplicates will be []; caller should
+   *  warn the user but allow save — nightly reconciliation catches misses. */
+  degraded: boolean;
+}
+
+export function postCheckItemIdsAvailable(
+  itemIds: string[],
+  signal?: AbortSignal
+) {
+  return apiPost<CheckItemIdsAvailableResponse>(
+    'checkItemIdsAvailable',
+    { itemIds } as Record<string, unknown>,
+    {},
+    { signal }
+  );
+}
+
 // ─── completeTask (Phase 7B #2) ──────────────────────────────────────────────
 
 export interface CompleteTaskPayload {
@@ -1343,6 +1391,7 @@ export interface UpdateWillCallPayload {
   pickupPhone?: string;
   requestedBy?: string;
   notes?: string;
+  cod?: boolean;
   codAmount?: number;
   status?: string;
 }
@@ -1363,6 +1412,29 @@ export function postUpdateWillCall(
   return apiPost<UpdateWillCallResponse>(
     'updateWillCall',
     payload as unknown as Record<string, unknown>,
+    { clientSheetId },
+    { signal }
+  );
+}
+
+// ─── Generate Will Call Document (PDF) ───────────────────────────────────────
+
+export interface GenerateWcDocResponse {
+  success: boolean;
+  wcNumber: string;
+  folderUrl?: string;
+  itemCount?: number;
+  error?: string;
+}
+
+export function postGenerateWcDoc(
+  wcNumber: string,
+  clientSheetId: string,
+  signal?: AbortSignal
+) {
+  return apiPost<GenerateWcDocResponse>(
+    'generateWcDoc',
+    { wcNumber } as unknown as Record<string, unknown>,
     { clientSheetId },
     { signal }
   );

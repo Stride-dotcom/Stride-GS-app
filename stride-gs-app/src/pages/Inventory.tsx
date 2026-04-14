@@ -47,6 +47,7 @@ import { WriteButton } from '../components/shared/WriteButton';
 import { BatchGuard, checkBatchClientGuard } from '../components/shared/BatchGuard';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { isApiConfigured, postRequestRepairQuote } from '../lib/api';
+import { supabase } from '../lib/supabase';
 import { useInventory } from '../hooks/useInventory';
 import { useClients } from '../hooks/useClients';
 import { useTasks } from '../hooks/useTasks';
@@ -541,7 +542,7 @@ function ToastBar({ message }: { message: string }) {
 
 const ch = createColumnHelper<InventoryItem>();
 
-// ─── Main Component ───────────────────────────────────────────────────────────
+// ─── Main Component ──────────────────────────────────────────────────────────
 
 export function Inventory() {
   const { isMobile } = useIsMobile();
@@ -553,16 +554,36 @@ export function Inventory() {
   const clientNames = useMemo(() => clients.map(c => c.name).sort(), [clients]);
   const [clientFilter, setClientFilter] = useState<string[]>([]);
 
-  const { items: liveItems, loading: inventoryLoading, refetch, applyItemPatch, mergeItemPatch, clearItemPatch } = useInventory(apiConfigured && clientFilter.length > 0);
-  const { tasks, refetch: refetchTasks, addOptimisticTask, removeOptimisticTask } = useTasks(apiConfigured && clientFilter.length > 0);
-  const { repairs } = useRepairs(apiConfigured && clientFilter.length > 0);
-  const { willCalls, addOptimisticWc, removeOptimisticWc } = useWillCalls(apiConfigured && clientFilter.length > 0);
-  const { apiShipments } = useShipments(apiConfigured && clientFilter.length > 0);
-  const { rows: billingRows } = useBilling(apiConfigured && clientFilter.length > 0);
+  // Resolve selected client names → sheet IDs (string for single, string[] for multi)
+  const selectedSheetId = useMemo<string | string[] | undefined>(() => {
+    if (clientFilter.length === 0) return undefined;
+    const ids = clientFilter
+      .map(n => apiClients.find(c => c.name === n)?.spreadsheetId)
+      .filter((x): x is string => !!x);
+    if (ids.length === 0) return undefined;
+    return ids.length === 1 ? ids[0] : ids;
+  }, [clientFilter, apiClients]);
+
+  const { items: liveItems, loading: inventoryLoading, refetch, applyItemPatch, mergeItemPatch, clearItemPatch } = useInventory(apiConfigured && clientFilter.length > 0, selectedSheetId);
+  const { tasks, refetch: refetchTasks, addOptimisticTask, removeOptimisticTask } = useTasks(apiConfigured && clientFilter.length > 0, selectedSheetId);
+  const { repairs } = useRepairs(apiConfigured && clientFilter.length > 0, selectedSheetId);
+  const { willCalls, addOptimisticWc, removeOptimisticWc } = useWillCalls(apiConfigured && clientFilter.length > 0, selectedSheetId);
+  const { apiShipments } = useShipments(apiConfigured && clientFilter.length > 0, selectedSheetId);
+  // Inventory only uses billing rows to show "this item has billing" hints; single tenant only
+  const billingSheetId = Array.isArray(selectedSheetId) ? (selectedSheetId.length === 1 ? selectedSheetId[0] : undefined) : selectedSheetId;
+  const { rows: billingRows } = useBilling(apiConfigured && clientFilter.length > 0, billingSheetId);
   const { locationNames } = useLocations(apiConfigured);
   const { classNames } = usePricing(apiConfigured);
   const { user } = useAuth();
   const navigate = useNavigate();
+
+  // Auto-select clients for client-portal users (they only have 1-2 clients)
+  useEffect(() => {
+    if (user?.role === 'client' && user.accessibleClientNames?.length && clientFilter.length === 0) {
+      setClientFilter(user.accessibleClientNames);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.role, user?.accessibleClientNames?.length]);
   const location = useLocation();
   const pendingOpenRef = useRef<string | null>(null);
   const inventoryItems: InventoryItem[] = useMemo(() => {
@@ -570,14 +591,9 @@ export function Inventory() {
     return liveItems.filter(i => clientFilter.includes(i.clientName));
   }, [liveItems, clientFilter]);
 
-  // Auto-refresh when client filter changes — ensures fresh data on every filter change
-  const clientFilterKey = clientFilter.join(',');
-  useEffect(() => {
-    if (clientFilter.length > 0) {
-      refetch();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [clientFilterKey]);
+  // Client-filter change is already handled by useInventory (cacheKeyScope change
+  // triggers useApiData refetch via Supabase-first path). A manual refetch() here
+  // would force GAS (skipSupabaseCacheOnce) and hang the spinner on multi-client.
 
   // Dynamic multiselect columns (client names change with live data)
   const ALL_CLIENTS = useMemo(() => [...new Set(inventoryItems.map(i => i.clientName))].sort(), [inventoryItems]);
@@ -686,16 +702,44 @@ export function Inventory() {
   // Route state: { shipmentFilter: 'SHP-xxxxx' } from Shipments page "View in Inventory"
   const [shipmentFilter, setShipmentFilter] = useState<string | null>(null);
 
+  // Ref for deferred deep-link client resolution (declared before first effect that uses it)
+  const deepLinkPendingTenantRef = useRef<string | null>(null);
+
   // Effect 1: read URL params / route state on mount — auto-load if deep link present
   useEffect(() => {
     let needsAutoLoad = false;
-    // ?open=ITEM_ID → open that item's detail panel when data loads
+    // ?open=ITEM_ID[&client=<sheetId>] → open that item's detail panel when
+    // data loads. DeepLink components pass `client` from the calling panel so
+    // the target page can scope the filter without a Supabase round-trip.
+    // Supabase fallback kicks in when `client` is absent (older callers).
     const params = new URLSearchParams(location.search);
     const openId = params.get('open');
+    const clientIdParam = params.get('client');
     if (openId) {
       pendingOpenRef.current = openId;
       needsAutoLoad = true;
       window.history.replaceState({}, '', window.location.pathname + window.location.hash.split('?')[0]);
+
+      if (clientIdParam) {
+        // Cheap synchronous path — we already know the client. Stash and let
+        // the apiClients-loaded effect set the filter (it runs as soon as
+        // apiClients populates, which may be after this mount effect).
+        deepLinkPendingTenantRef.current = clientIdParam;
+      } else {
+        // Fallback: resolve tenant_id via Supabase by item_id.
+        (async () => {
+          try {
+            const { data } = await supabase
+              .from('inventory')
+              .select('tenant_id')
+              .eq('item_id', openId)
+              .limit(1)
+              .maybeSingle();
+            const tid = (data as { tenant_id?: string } | null)?.tenant_id;
+            if (tid) deepLinkPendingTenantRef.current = tid;
+          } catch { /* user can pick manually */ }
+        })();
+      }
     }
     // Route state: { shipmentFilter } → filter table to that shipment number
     const state = location.state as { shipmentFilter?: string } | null;
@@ -704,11 +748,26 @@ export function Inventory() {
       needsAutoLoad = true;
       window.history.replaceState({}, '');
     }
-    if (needsAutoLoad) {
-      refetch();
-    }
+    // Do NOT call refetch() here. refetch() in useApiData bypasses the
+    // Supabase cache and forces an unscoped GAS call (session 62 root cause).
+    // The data hook auto-fetches when cacheKeyScope changes via
+    // clientFilter → clientSheetId in the retry effect below, which goes
+    // through the Supabase-first path (~50ms). Deep links: fast. GAS: never.
+    void needsAutoLoad;
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Retry deep-link client resolution once apiClients loads (handles cold start
+  // where Supabase returns tenant_id before useClients has populated).
+  useEffect(() => {
+    const tid = deepLinkPendingTenantRef.current;
+    if (!tid || apiClients.length === 0 || clientFilter.length > 0) return;
+    const match = apiClients.find(c => c.spreadsheetId === tid);
+    if (match) {
+      setClientFilter([match.name]);
+      deepLinkPendingTenantRef.current = null;
+    }
+  }, [apiClients, clientFilter]);
 
   // Effect 2: when items load, open the pending item
   useEffect(() => {
