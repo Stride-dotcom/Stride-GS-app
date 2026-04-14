@@ -8,7 +8,7 @@
  * Performance: checks BatchDataContext first (client users get all data in 1 call).
  * Falls back to individual API call for staff/admin users or when batch is unavailable.
  */
-import { useCallback, useEffect, useMemo } from 'react';
+import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { fetchBilling } from '../lib/api';
 import type { ApiBillingRow, BillingResponse, BillingSummary, BillingFilterParams } from '../lib/api';
 import { useApiData } from './useApiData';
@@ -47,6 +47,11 @@ export function useBilling(autoFetch = true, filterClientSheetId?: string, filte
     return map;
   }, [clients]);
 
+  // Mirror clientNameMap via ref so fetchFn stays stable across client-list re-renders.
+  // Same pattern applied to the 5 list hooks in session 62 to prevent perpetual refetch loops.
+  const clientNameMapRef = useRef(clientNameMap);
+  useEffect(() => { clientNameMapRef.current = clientNameMap; }, [clientNameMap]);
+
   const shouldFetchIndividual = hasServerFilters || !batchEnabled;
 
   const fetchFn = useCallback(
@@ -56,12 +61,14 @@ export function useBilling(autoFetch = true, filterClientSheetId?: string, filte
         return fetchBilling(signal, clientSheetId, filters);
       }
       if (await isSupabaseCacheAvailable()) {
-        const sbResult = await fetchBillingFromSupabase(clientNameMap, clientSheetId);
+        const sbResult = await fetchBillingFromSupabase(clientNameMapRef.current, clientSheetId);
         if (sbResult) return { data: sbResult, ok: true, error: null } as { data: BillingResponse; ok: true; error: null };
       }
       return fetchBilling(signal, clientSheetId);
     },
-    [clientSheetId, clientNameMap, hasServerFilters, filters]
+    // clientNameMap intentionally omitted — read via ref to prevent perpetual refetch loop.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [clientSheetId, hasServerFilters, filters]
   );
 
   const { data, loading: individualLoading, error: individualError, refetch: individualRefetch, lastFetched: individualLastFetched } = useApiData<BillingResponse>(
