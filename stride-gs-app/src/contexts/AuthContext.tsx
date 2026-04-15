@@ -173,6 +173,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [loginPhaseError, setLoginPhaseError] = useState<string | null>(null);
   const [impersonatedUser, setImpersonatedUser] = useState<AuthUser | null>(null);
   const recoveryRef = useRef(false);
+  // Distinct from recoveryRef: only set when resetPassword() is explicitly called.
+  // handleSession() also calls supabase.auth.updateUser() for role-sync metadata,
+  // which fires USER_UPDATED — passwordChangeRef lets us tell the two apart.
+  const passwordChangeRef = useRef(false);
 
   const clearCache = useCallback(() => {
     localStorage.removeItem(AUTH_CACHE_KEY);
@@ -266,6 +270,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setAuthState({ status: 'recovery' });
         return;
       }
+      if (isRecovery && !session) {
+        // Recovery token in URL but Supabase couldn't establish a session —
+        // the link is expired or already used. Set recoveryRef so the concurrent
+        // SIGNED_OUT event (which fires through onAuthStateChange) also routes
+        // to recovery_expired rather than unauthenticated.
+        sessionStorage.removeItem('stride_recovery');
+        recoveryRef.current = true;
+        setAuthState({ status: 'recovery_expired' });
+        return;
+      }
       if (session) {
         handleSession(session, 'password');
       } else {
@@ -285,11 +299,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           // Supabase session is truly gone — otherwise ignore the noise.
           supabase.auth.getSession().then(({ data }) => {
             if (!data.session) {
-              if (recoveryRef.current) {
-                // Expired reset link: Supabase fires SIGNED_OUT when the token is
-                // invalid/expired instead of PASSWORD_RECOVERY. Don't silently redirect
-                // to login — surface the expired-link UI so the user knows what happened.
-                // Do NOT clear recoveryRef here; clearRecoveryExpired() handles the reset.
+              // Check both signals: recoveryRef (set when PASSWORD_RECOVERY fires first, or
+              // when getSession() resolved with isRecovery&&!session before this handler ran)
+              // and sessionStorage flag (intact when SIGNED_OUT races ahead of getSession()).
+              const isRecoveryFlow = recoveryRef.current || sessionStorage.getItem('stride_recovery') === '1';
+              if (isRecoveryFlow) {
+                sessionStorage.removeItem('stride_recovery');
                 setAuthState({ status: 'recovery_expired' });
               } else {
                 clearCache();
@@ -316,9 +331,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
               return;
             }
             if (event === 'USER_UPDATED') {
-              // Only handle USER_UPDATED when we're in password recovery flow.
-              // USER_UPDATED also fires when we write user_metadata (role sync) — ignore those.
-              if (!recoveryRef.current) return;
+              // Only proceed if resetPassword() explicitly set passwordChangeRef.
+              // handleSession() also calls supabase.auth.updateUser() for role-sync
+              // metadata and that fires USER_UPDATED too — passwordChangeRef lets us
+              // tell the two apart, avoiding a race that logged users in prematurely.
+              if (!passwordChangeRef.current) return;
+              passwordChangeRef.current = false;
               recoveryRef.current = false;
             }
             const source = event === 'USER_UPDATED' ? 'recovery' : 'password';
@@ -358,7 +376,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const resetPassword = useCallback(
     async (newPassword: string): Promise<{ error: string | null }> => {
+      // Mark BEFORE calling updateUser so the USER_UPDATED event that follows
+      // can be distinguished from the role-sync updateUser in handleSession().
+      passwordChangeRef.current = true;
       const { error } = await supabase.auth.updateUser({ password: newPassword });
+      if (error) passwordChangeRef.current = false; // reset on failure — no USER_UPDATED will fire
       return { error: (error as AuthError | null)?.message ?? null };
     },
     []
