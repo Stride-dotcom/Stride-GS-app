@@ -44,7 +44,21 @@ function NewShipmentForm() {
   const [tracking, setTracking] = useState('');
   const [notes, setNotes] = useState('');
   const [receiveDate, setReceiveDate] = useState(() => new Date().toISOString().slice(0, 10));
-  const [clientAutoInspect, setClientAutoInspect] = useState(false);
+  const clientAutoInspect = useMemo(() => {
+    if (!clientSheetId || !apiClients.length) return false;
+    const liveMatch = liveClients.find(c => c.id === clientSheetId);
+    if (!liveMatch) return false;
+    return apiClients.find(a => a.name === liveMatch.name)?.autoInspection ?? false;
+  }, [clientSheetId, liveClients, apiClients]);
+
+  // Race fix: patch existing items when apiClients loads after client was already selected
+  const prevAutoInspectRef = useRef(false);
+  useEffect(() => {
+    if (prevAutoInspectRef.current === clientAutoInspect) return;
+    prevAutoInspectRef.current = clientAutoInspect;
+    setItems(prev => prev.map(item => ({ ...item, needsInspection: clientAutoInspect })));
+  }, [clientAutoInspect]);
+
   const [chargeReceiving, setChargeReceiving] = useState(true);
   const [autoPrintLabels, setAutoPrintLabels] = useState(() => localStorage.getItem('stride_auto_print_labels') === 'true');
   const printRef = useRef<HTMLDivElement>(null);
@@ -430,7 +444,7 @@ function NewShipmentForm() {
   const reset = useCallback(() => {
     setClient(''); setClientSheetId(''); setCarrier(''); setTracking(''); setNotes('');
     setReceiveDate(new Date().toISOString().slice(0, 10));
-    setClientAutoInspect(false); setChargeReceiving(true);
+    setChargeReceiving(true);
     setAutoIdError('');
     const freshItems = Array.from({ length: 5 }, () => emptyItem(false));
     setItems(freshItems);
@@ -545,12 +559,10 @@ function NewShipmentForm() {
                   const autoInspect = apiMatch?.autoInspection ?? false;
                   setClient(liveMatch.name);
                   setClientSheetId(liveMatch.id);
-                  setClientAutoInspect(autoInspect);
                   setItems(prev => prev.map(item => ({ ...item, needsInspection: autoInspect })));
                 } else {
                   setClient('');
                   setClientSheetId('');
-                  setClientAutoInspect(false);
                   setItems(prev => prev.map(item => ({ ...item, needsInspection: false })));
                 }
               }}
