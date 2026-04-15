@@ -50,9 +50,13 @@ export function useBilling(autoFetch = true, filterClientSheetId?: string, filte
   // Mirror clientNameMap via ref so fetchFn stays stable across client-list re-renders.
   // Same pattern applied to the 5 list hooks in session 62 to prevent perpetual refetch loops.
   const clientNameMapRef = useRef(clientNameMap);
-  useEffect(() => { clientNameMapRef.current = clientNameMap; }, [clientNameMap]);
+  clientNameMapRef.current = clientNameMap;
 
   const shouldFetchIndividual = hasServerFilters || !batchEnabled;
+
+  // Stable string key for filters object — prevents fetchFn from rebuilding when callers
+  // pass inline filter objects (new reference each render, same logical value).
+  const filtersKey = useMemo(() => JSON.stringify(filters || {}), [filters]);
 
   const fetchFn = useCallback(
     async (signal?: AbortSignal) => {
@@ -67,8 +71,9 @@ export function useBilling(autoFetch = true, filterClientSheetId?: string, filte
       return fetchBilling(signal, clientSheetId);
     },
     // clientNameMap intentionally omitted — read via ref to prevent perpetual refetch loop.
+    // filters intentionally omitted — filtersKey is the stable proxy; filters read via closure.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [clientSheetId, hasServerFilters, filters]
+    [clientSheetId, hasServerFilters, filtersKey]
   );
 
   const { data, loading: individualLoading, error: individualError, refetch: individualRefetch, lastFetched: individualLastFetched } = useApiData<BillingResponse>(

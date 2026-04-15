@@ -500,7 +500,11 @@ export async function fetchBillingFromSupabaseFiltered(
 
     if (filters.clientFilter?.length) {
       const tenantIds = filters.clientFilter.map(n => nameToId[n]).filter(Boolean);
-      if (tenantIds.length) query = query.in('tenant_id', tenantIds);
+      if (tenantIds.length === 0) {
+        console.warn('[supabaseQueries] clientFilter provided but no tenant_ids resolved — falling back to GAS');
+        return null;
+      }
+      query = query.in('tenant_id', tenantIds);
     }
     if (filters.statusFilter?.length) {
       query = query.in('status', filters.statusFilter);

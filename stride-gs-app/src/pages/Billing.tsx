@@ -503,14 +503,15 @@ export function Billing() {
   // When client filter changes, fetch sidemarks from Supabase for the dropdown.
   // Does NOT load a full billing report — user must click "Load Report" for that.
   useEffect(() => {
-    if (rptClientFilter.length === 0) return;
-    const tenantIds = rptClientFilter.map(name => clientNameToId[name]).filter(Boolean);
+    if (!rptClientFilter?.length) { setKnownSidemarks([]); return; }
+    const tenantIds = rptClientFilter.map(name => clientNameToId[name]).filter(Boolean) as string[];
     if (!tenantIds.length) return;
-    fetchBillingSidemarksFromSupabase(tenantIds).then(sidemarks => {
-      if (sidemarks?.length) {
-        setKnownSidemarks(prev => [...new Set([...prev, ...sidemarks])].sort());
-      }
+    let cancelled = false;
+    fetchBillingSidemarksFromSupabase(tenantIds).then(result => {
+      if (cancelled) return;
+      if (result) setKnownSidemarks(result);
     });
+    return () => { cancelled = true; };
   }, [rptClientFilter, clientNameToId]);
 
   const handlePreviewStorage = useCallback(async () => {
