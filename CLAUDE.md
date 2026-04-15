@@ -211,14 +211,15 @@ All commands run from: `AppScripts/stride-client-inventory/` (except React, whic
 | Task Board | `npm run push-taskboard` | — |
 | Stax Auto Pay | `npm run push-stax` | — |
 | Email templates | `npm run push-templates` | `npm run refresh-caches` |
-| React app | (from `stride-gs-app/`) `npm run build` (orchestrator: verify-entry → tsc → vite → sanity checks) then `cd dist && git add -A && git commit -m "Deploy: ..." && git push origin main --force` | GitHub Pages auto (CDN 1-5 min; hard-refresh to verify) |
+| React app | (from `stride-gs-app/`) **`npm run deploy -- "what changed"`** — single command: build → push bundle to `origin/main` → commit + push source to `origin/source`. Both branches always stay in sync. | GitHub Pages auto (CDN 1-5 min; hard-refresh to verify) |
 | Supabase migrations | Apply via MCP tool (see below) — no manual SQL editor needed | MCP `apply_migration` is the deploy |
 
 **All-at-once after a big session:**
 ```bash
 npm run push-api && npm run deploy-api
 npm run rollout && npm run deploy-clients
-# Then React build from stride-gs-app/
+# Then React (from stride-gs-app/):
+npm run deploy -- "session summary"
 # Then any Supabase migrations via MCP tool
 ```
 
@@ -586,24 +587,39 @@ React app build + dev.
 | Command | What it does |
 |---|---|
 | `npm run dev` | Vite dev server (`http://localhost:5173`). Hot module reload. |
-| `npm run build` | **Session 59 orchestrator.** Runs `scripts/build.js`: verify-entry → tsc -b → vite build (captured) → module-count floor → bundle-size floor. Aborts non-zero on any check. Use this for all production builds. |
+| **`npm run deploy -- "msg"`** | **THE CORRECT DEPLOY COMMAND.** Runs `scripts/deploy.js`: build → push bundle to `origin/main` → commit+push source to `origin/source`. Both branches always updated together. Use this instead of manual steps. |
+| `npm run build` | Build only (no git ops). Runs `scripts/build.js`: verify-entry → tsc -b → vite build (captured) → module-count floor → bundle-size floor. Aborts non-zero on any check. Use when you need just the build artifact (e.g. to inspect it before committing). |
 | `npm run build:raw` | Escape hatch — raw `tsc -b && vite build` without safeguards. **Only use if you are certain the guards are a false positive.** Every use re-opens the session-58 vulnerability. |
 | `npm run lint` | ESLint across all `src/`. |
 | `npm run preview` | Serve `dist/` locally to verify the built bundle renders before deploying. |
 
 ### Deploy the React app to GitHub Pages
 
+**One command does everything:**
+
 ```bash
 cd stride-gs-app/
-npm run build                                        # exits non-zero on any check failure
-cd dist/
-git add -A
-git commit -m "Deploy: <what changed>"
-git push origin main --force                        # GitHub Pages auto-serves within 1-5 min
-# Hard-refresh mystridehub.com (Ctrl+Shift+R) and confirm the bundle hash in DevTools
+npm run deploy -- "what changed"
 ```
 
-**Never `git push` from `stride-gs-app/` parent directory** — that's the parent repo with no remote. The dist subdirectory has its own standalone `.git/` targeting the GitHub Pages repo.
+`scripts/deploy.js` runs three steps in sequence:
+1. `npm run build` — verify-entry → tsc → vite → sanity checks (exits non-zero on any failure)
+2. `dist/.git` — `git add -A && git commit "Deploy: ..." && git push origin main --force` → GitHub Pages
+3. Parent repo — `git add -A && git commit "deploy(react): ..." && git push origin source` → source branch
+
+**Both branches are always updated together.** This is the fix for the long-running bug where `origin/source` was perpetually behind because the old manual flow only pushed the bundle.
+
+Do NOT use the old multi-step manual flow — it's what caused source to drift. The `npm run deploy` command is the only correct path.
+
+**All-at-once after a big session:**
+```bash
+# Backend changes first:
+npm run push-api && npm run deploy-api
+npm run rollout && npm run deploy-clients
+# Then React:
+cd stride-gs-app/
+npm run deploy -- "session summary"
+```
 
 ### MCP tools available in Claude Code
 
