@@ -18,6 +18,7 @@ import {
   Settings2, RefreshCw,
 } from 'lucide-react';
 import { useVirtualRows } from '../hooks/useVirtualRows';
+import { useClientFilterUrlSync } from '../hooks/useClientFilterUrlSync';
 import { theme } from '../styles/theme';
 import { fmtDate } from '../lib/constants';
 import { TaskDetailPanel } from '../components/shared/TaskDetailPanel';
@@ -196,6 +197,9 @@ export function Tasks() {
   // Ref so the deep-link effect reads latest clientFilter without re-triggering.
   const clientFilterRef = useRef(clientFilter);
   useEffect(() => { clientFilterRef.current = clientFilter; }, [clientFilter]);
+
+  // Keep URL's ?client= param in sync with the dropdown (bookmarkable state)
+  useClientFilterUrlSync(clientFilter, apiClients);
 
   // Resolve deep-link ?client= param once apiClients loads
   // eslint-disable-next-line react-hooks/exhaustive-deps

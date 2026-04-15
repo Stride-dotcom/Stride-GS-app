@@ -24,6 +24,7 @@ import { useBatchData } from '../contexts/BatchDataContext';
 import { MultiSelectFilter } from '../components/shared/MultiSelectFilter';
 import { SyncBanner } from '../components/shared/SyncBanner';
 import { useClients } from '../hooks/useClients';
+import { useClientFilterUrlSync } from '../hooks/useClientFilterUrlSync';
 import { useIsMobile } from '../hooks/useIsMobile';
 import { useAuth } from '../contexts/AuthContext';
 import { ShipmentDetailPanel as SharedShipmentDetailPanel } from '../components/shared/ShipmentDetailPanel';
@@ -372,6 +373,9 @@ export function Shipments() {
 
   const clientFilterRef = useRef(clientFilter);
   useEffect(() => { clientFilterRef.current = clientFilter; }, [clientFilter]);
+
+  // Keep URL's ?client= param in sync with the dropdown (bookmarkable state)
+  useClientFilterUrlSync(clientFilter, apiClients);
 
   // Resolve deep-link ?client= param once apiClients loads
   useEffect(() => {

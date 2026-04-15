@@ -1,8 +1,8 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Settings as SettingsIcon, Users, DollarSign, Mail, Database, Globe, Bell, Plus, ChevronRight, CheckCircle2, AlertCircle, UserPlus, Shield, ToggleLeft, ToggleRight, Eye, EyeOff, Wifi, WifiOff, RefreshCw, Loader2, RefreshCcw, ExternalLink, Wrench, PlayCircle, Send, FolderSync, BookText, LogIn, Cloud, Edit2, Zap, ArrowUpDown, ChevronUp, ChevronDown, X } from 'lucide-react';
 import { useReactTable, getCoreRowModel, getSortedRowModel, flexRender, type SortingState, type ColumnDef } from '@tanstack/react-table';
-import { getApiUrl, getApiToken, setApiCredentials, isApiConfigured, fetchHealth, postOnboardClient, postUpdateClient, postSyncSettings, postRefreshCaches, postFixMissingFolders, postTestSendClientTemplates, postTestSendClaimEmails, fetchAutoIdSetting, postUpdateAutoIdSetting, postResolveOnboardUser, fetchStaxConfig, postUpdateStaxConfig, apiPost, fetchEmailTemplates, postSyncTemplatesToClients, postBulkSyncToSupabase, postPurgeInactiveFromSupabase, fetchClients, postFinishClientSetup, postSendWelcomeToUsers, postBackfillScriptIdsViaWebApp } from '../lib/api';
+import { getApiUrl, getApiToken, setApiCredentials, isApiConfigured, fetchHealth, postOnboardClient, postUpdateClient, postSyncSettings, postRefreshCaches, postFixMissingFolders, postTestSendClientTemplates, postTestSendClaimEmails, fetchAutoIdSetting, postUpdateAutoIdSetting, postResolveOnboardUser, fetchStaxConfig, postUpdateStaxConfig, apiPost, fetchEmailTemplates, postSyncTemplatesToClients, postBulkSyncToSupabase, postPurgeInactiveFromSupabase, fetchClients, postFinishClientSetup, postSendWelcomeToUsers } from '../lib/api';
 import type { BulkSyncResult } from '../lib/api';
 import type { EmailTemplate } from '../lib/api';
 import { TemplateEditor } from '../components/shared/TemplateEditor';
@@ -501,6 +501,7 @@ export function Settings() {
   const [editError, setEditError] = useState('');
   const [addClientDropdown, setAddClientDropdown] = useState(false);
   const [deleteConfirm, setDeleteConfirm] = useState(false);
+  const userEditPanelRef = useRef<HTMLDivElement>(null);
 
   function openUserEdit(u: ApiUser) {
     setEditingUser(u);
@@ -514,6 +515,10 @@ export function Settings() {
     setEditError('');
     setAddClientDropdown(false);
     setDeleteConfirm(false);
+    // Scroll the edit panel into view after React renders it
+    setTimeout(() => {
+      userEditPanelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }, 50);
   }
 
   function removeClientAccess(idx: number) {
@@ -1466,39 +1471,6 @@ export function Settings() {
     }
   }
 
-  // Bulk rediscover Script IDs — fixes every CB Clients row whose SCRIPT ID
-  // is blank or still holds the template id (legacy pollution from onboarding).
-  const [rediscoverLoading, setRediscoverLoading] = useState(false);
-  const [rediscoverResult, setRediscoverResult] = useState<{ processed: number; updated: number; skipped: number; details?: Array<{ name: string; before: string; after: string; source?: string; error?: string }> } | null>(null);
-  const [rediscoverError, setRediscoverError] = useState<string | null>(null);
-  async function handleRediscoverAllScriptIds() {
-    setRediscoverLoading(true);
-    setRediscoverError(null);
-    setRediscoverResult(null);
-    try {
-      // Authoritative path: call each client's Web App via action=get_script_id.
-      // The client's bound script runs ScriptApp.getScriptId() in its own context
-      // and returns its real id. Drive/Settings searches only see template leakage.
-      const res = await postBackfillScriptIdsViaWebApp();
-      if (res.ok && res.data) {
-        setRediscoverResult({
-          processed: res.data.processed,
-          updated: res.data.updated,
-          skipped: res.data.skipped,
-          details: res.data.clients,
-        });
-        console.table(res.data.clients);
-        refetchClients();
-      } else {
-        setRediscoverError(res.error || res.data?.error || 'Backfill failed');
-      }
-    } catch (err) {
-      setRediscoverError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setRediscoverLoading(false);
-    }
-  }
-
   async function handleSyncAll() {
     setSyncLoading(true);
     setSyncError('');
@@ -1626,16 +1598,7 @@ export function Settings() {
                         Sync All Settings
                       </button>
                     )}
-                    {isLive && (
-                      <button
-                        onClick={handleRediscoverAllScriptIds}
-                        disabled={rediscoverLoading}
-                        title="Rediscover Script IDs for every client whose CB SCRIPT ID is blank or still holds the template id. Safe to run repeatedly."
-                        style={{ padding: '6px 12px', fontSize: 11, border: `1px solid ${theme.colors.border}`, borderRadius: 6, background: '#fff', cursor: rediscoverLoading ? 'wait' : 'pointer', fontFamily: 'inherit', color: theme.colors.textMuted, display: 'flex', alignItems: 'center', gap: 4 }}>
-                        {rediscoverLoading ? <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} /> : <Wrench size={12} />}
-                        Rediscover Script IDs
-                      </button>
-                    )}
+                    {/* Rediscover Script IDs — hidden from normal view, available in Maintenance tab if needed */}
                     {isLive && <button onClick={refetchClients} style={{ padding: '6px 10px', fontSize: 11, border: `1px solid ${theme.colors.border}`, borderRadius: 6, background: '#fff', cursor: 'pointer', fontFamily: 'inherit', color: theme.colors.textMuted }}><RefreshCw size={12} /></button>}
                     <button onClick={openCreateModal} style={{ padding: '8px 16px', fontSize: 12, fontWeight: 600, border: 'none', borderRadius: 8, background: theme.colors.orange, color: '#fff', cursor: 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', gap: 4 }}>
                       <Plus size={14} /> Onboard New Client
@@ -1689,31 +1652,6 @@ export function Settings() {
                         : `${Math.floor(clientSbSyncTimer.elapsed / 60)}:${String(clientSbSyncTimer.elapsed % 60).padStart(2, '0')}`}
                     </div>
                     <style>{`@keyframes syncPulse { 0%, 100% { background-position: 0% 50%; } 50% { background-position: 100% 50%; } }`}</style>
-                  </div>
-                )}
-
-                {/* Bulk Rediscover Script IDs — result + error banners */}
-                {rediscoverResult && (
-                  <div style={{ padding: 12, borderRadius: 10, marginBottom: 12, background: rediscoverResult.updated > 0 ? '#F0FDF4' : '#F9FAFB', border: `1px solid ${rediscoverResult.updated > 0 ? '#BBF7D0' : theme.colors.border}`, fontSize: 12 }}>
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
-                      <div>
-                        <div style={{ fontWeight: 600, color: rediscoverResult.updated > 0 ? '#15803D' : theme.colors.textSecondary, marginBottom: 2 }}>
-                          ✓ Script ID rediscovery complete — {rediscoverResult.updated} updated, {rediscoverResult.skipped} skipped, {rediscoverResult.processed} processed
-                        </div>
-                        {rediscoverResult.details && rediscoverResult.details.some(d => d.error) && (
-                          <div style={{ fontSize: 11, color: '#B45309', marginTop: 4 }}>
-                            {rediscoverResult.details.filter(d => d.error).length} error(s) — see console.
-                          </div>
-                        )}
-                      </div>
-                      <button onClick={() => setRediscoverResult(null)} style={{ border: 'none', background: 'none', cursor: 'pointer', color: theme.colors.textMuted, padding: 0, fontSize: 11 }}>Dismiss</button>
-                    </div>
-                  </div>
-                )}
-                {rediscoverError && (
-                  <div style={{ padding: 12, borderRadius: 10, marginBottom: 12, background: '#FEF2F2', border: '1px solid #FECACA', fontSize: 12, color: '#991B1B', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
-                    <div>Rediscover failed: {rediscoverError}</div>
-                    <button onClick={() => setRediscoverError(null)} style={{ border: 'none', background: 'none', cursor: 'pointer', color: '#991B1B', fontSize: 11, padding: 0 }}>Dismiss</button>
                   </div>
                 )}
 
@@ -1899,17 +1837,12 @@ export function Settings() {
                       </div>
                     </div>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0, marginLeft: 8 }}>
-                      {/* Finish Setup button — shown when Web App URL OR Script ID is missing.
-                          Expanded beyond partial onboards to also recover clients whose CB
-                          SCRIPT ID was cleared as part of the 2026-04-14 template-pollution
-                          cleanup. Safe to run repeatedly — the handler is idempotent. */}
-                      {isLive && (c as ApiClient).spreadsheetId && (!(c as ApiClient).webAppUrl || !((c as ApiClient & { scriptId?: string }).scriptId)) && (
+                      {/* Finish Setup button — shown only during onboarding (Web App URL missing) */}
+                      {isLive && (c as ApiClient).spreadsheetId && !(c as ApiClient).webAppUrl && (
                         <button
                           onClick={e => { e.stopPropagation(); handleFinishSetup(c as ApiClient); }}
                           disabled={finishSetupLoading === (c as ApiClient).spreadsheetId}
-                          title={!(c as ApiClient).webAppUrl
-                            ? 'Web App URL missing — click to deploy and finish onboarding'
-                            : 'Script ID missing — click to rediscover'}
+                          title="Web App URL missing — click to deploy and finish onboarding"
                           style={{ padding: '5px 10px', fontSize: 10, fontWeight: 700, border: '1px solid #F59E0B', borderRadius: 6, background: '#FEF3C7', cursor: finishSetupLoading === (c as ApiClient).spreadsheetId ? 'wait' : 'pointer', fontFamily: 'inherit', color: '#92400E', display: 'flex', alignItems: 'center', gap: 4, whiteSpace: 'nowrap' }}
                         >
                           {finishSetupLoading === (c as ApiClient).spreadsheetId
@@ -2079,7 +2012,7 @@ export function Settings() {
 
               {/* User Edit Panel */}
               {editingUser && (
-                <div style={{ ...card, border: `2px solid ${theme.colors.orange}`, marginBottom: 16 }}>
+                <div ref={userEditPanelRef} style={{ ...card, border: `2px solid ${theme.colors.orange}`, marginBottom: 16 }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
                     <div style={{ fontSize: 14, fontWeight: 600 }}>Edit User</div>
                     <button onClick={() => setEditingUser(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 18, color: theme.colors.textMuted, padding: 0, lineHeight: 1 }}>&times;</button>

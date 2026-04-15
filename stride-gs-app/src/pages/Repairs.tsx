@@ -30,6 +30,7 @@ import { useAuth } from '../contexts/AuthContext';
 import { MultiSelectFilter } from '../components/shared/MultiSelectFilter';
 import { SyncBanner } from '../components/shared/SyncBanner';
 import { useClients } from '../hooks/useClients';
+import { useClientFilterUrlSync } from '../hooks/useClientFilterUrlSync';
 import { useTablePreferences } from '../hooks/useTablePreferences';
 import type { Repair } from '../lib/types';
 import { useIsMobile } from '../hooks/useIsMobile';
@@ -155,6 +156,9 @@ export function Repairs() {
 
   const clientFilterRef = useRef(clientFilter);
   useEffect(() => { clientFilterRef.current = clientFilter; }, [clientFilter]);
+
+  // Keep URL's ?client= param in sync with the dropdown (bookmarkable state)
+  useClientFilterUrlSync(clientFilter, apiClients);
 
   // Resolve deep-link ?client= param once apiClients loads
   useEffect(() => {

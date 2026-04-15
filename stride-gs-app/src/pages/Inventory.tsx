@@ -50,6 +50,7 @@ import { isApiConfigured, postRequestRepairQuote } from '../lib/api';
 import { supabase } from '../lib/supabase';
 import { useInventory } from '../hooks/useInventory';
 import { useClients } from '../hooks/useClients';
+import { useClientFilterUrlSync } from '../hooks/useClientFilterUrlSync';
 import { useTasks } from '../hooks/useTasks';
 import { useRepairs } from '../hooks/useRepairs';
 import { useWillCalls } from '../hooks/useWillCalls';
@@ -761,6 +762,9 @@ export function Inventory() {
   // being a dep that re-triggers the effect and causes a setState loop.
   const clientFilterRef = useRef(clientFilter);
   useEffect(() => { clientFilterRef.current = clientFilter; }, [clientFilter]);
+
+  // Keep URL's ?client= param in sync with the dropdown (bookmarkable state)
+  useClientFilterUrlSync(clientFilter, apiClients);
 
   // Retry deep-link client resolution once apiClients loads (handles cold start
   // where Supabase returns tenant_id before useClients has populated).
