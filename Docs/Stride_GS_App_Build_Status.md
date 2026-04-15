@@ -1,10 +1,12 @@
 # Stride GS App — Build Status & Continuation Guide
 
-**Last updated:** 2026-04-15 (session 65 — repair quote request: persistent confirmation banner + error feedback; auto-inspect race fix on branch fix/receiving-auto-inspect-race)
+**Last updated:** 2026-04-15 (session 65 — email deep links: CTA button in all GAS email notifications; ?client= auto-select on Shipments/Tasks/Repairs/WillCalls; billing Supabase filter mirror)
 **StrideAPI.gs:** v38.52.4 (Web App v268)
 **Import.gs (client):** v4.3.0 (rolled out to all 47 active clients; Reference column now imported)
-**Emails.gs (client):** v4.2.0 (rolled out to all 47 active clients)
-**WillCalls.gs (client):** v4.3.0 (Item ID / Vendor / Description / Reference columns on completed-WC email)
+**Emails.gs (client):** v4.3.0 (rolled out to all 47 active clients — email deep links CTA button)
+**Shipments.gs (client):** v4.2.0 (rolled out to all 47 active clients — SHIPMENT_RECEIVED deep link)
+**WillCalls.gs (client):** v4.4.0 (rolled out to all 47 active clients — WC deep links)
+**Triggers.gs (client):** v4.5.0 (rolled out to all 47 active clients — repair/inspection deep links)
 **RemoteAdmin.gs (client):** v1.5.1 (new `get_script_id` action writes scriptId to CB on self-report)
 **Code.gs (client):** v4.6.0 (rolled out to all 47 active clients)
 **StaxAutoPay.gs:** v4.5.0 (pushed to Stax Auto Pay bound script)
@@ -75,23 +77,29 @@ Login, Dashboard, Inventory, Receiving, Shipments, Tasks, Repairs, Will Calls, B
 
 ## RECENT CHANGES (2026-04-15 session 65)
 
-### Session 65: Repair quote confirmation + auto-inspect race fix
+### Session 65: Email deep links + billing Supabase filter mirror + repair quote confirmation
+
+**Email deep links (GAS + React):**
+- **`Emails.gs v4.3.0`:** `sendTemplateEmail_` now injects a "View in Stride Hub →" CTA button (orange, centered) after the body when `{{APP_DEEP_LINK}}` token is set. Token replaced inline by the existing loop — button injected as raw HTML after `</body>` or appended to end. Resend menu now passes `{{APP_DEEP_LINK}}` for INSP_EMAIL (→ `#/tasks/<taskId>`), REPAIR_QUOTE, REPAIR_COMPLETE (→ `#/repairs/<repairId>`).
+- **`Shipments.gs v4.2.0`:** Both SHIPMENT_RECEIVED call sites pass `{{APP_DEEP_LINK}}` = `#/shipments?open=<SHP_NO>&client=<ss.getId()>`.
+- **`WillCalls.gs v4.4.0`:** WILL_CALL_CREATED + WILL_CALL_RELEASE pass `{{APP_DEEP_LINK}}` = `#/will-calls/<WC_NUMBER>` (standalone page).
+- **`Triggers.gs v4.5.0`:** INSP_EMAIL = `#/tasks/<taskId>`, REPAIR_COMPLETE + REPAIR_QUOTE + REPAIR_APPROVED + REPAIR_DECLINED = `#/repairs/<repairId>`, WILL_CALL_CANCELLED = `#/will-calls/<wcNumber>`. All use `encodeURIComponent`.
+- **React (4 pages):** `Tasks.tsx`, `Shipments.tsx`, `Repairs.tsx`, `WillCalls.tsx` — added `deepLinkPendingTenantRef` pattern (from Inventory.tsx). On mount, `?client=<spreadsheetId>` is stashed in ref; once `apiClients` loads, resolves to name and calls `setClientFilter`. Committed `890b7f6`.
+
+**Billing Supabase filter mirror (merged to source, deployed):**
+- `feat/billing-supabase-filter-mirror` from worktree `laughing-yonath` — 4 code-review fixes applied and merged. `supabaseQueries.ts` guards against silent tenant-filter bypass (returns null when clientFilter names resolve to zero tenant IDs). `useBilling.ts` uses unconditional `useMemo filtersKey` + `filtersRef`. `Billing.tsx` cancelled flag on sidemark useEffect.
+- Merge artifact fixes: `c.id` → `c.spreadsheetId`, orphaned `supabase` direct calls removed, `Receiving.tsx` variable ordering fixed.
 
 **Repair quote request feedback (`TaskDetailPanel.tsx`):**
-- Added persistent green "Quote request submitted" banner that appears immediately after the API call succeeds — stays visible until the real repair record loads from the server (at which point the existing status badge takes over). No auto-dismiss.
-- Added `repairRequestError` state: red error banner if the API returns a failure or throws. Previously all errors were silent.
-- Fixed potential race: `setRepairRequested(true)` is now called BEFORE `removeOptimisticRepair` so there's no render frame where both are false (which caused the button to briefly reappear).
-- Deployed: `a907ced` (`index-BJ5y1eJ6.js`)
+- Persistent green confirmation banner after quote request; red error banner on failure. Race fix: `setRepairRequested(true)` before `removeOptimisticRepair`.
 
-**Auto-inspect race fix (`Receiving.tsx`) — branch only, not yet merged:**
-- Branch: `fix/receiving-auto-inspect-race` (commit `2d00973`) — applies to the worktree, not shipping yet.
-- Converts `clientAutoInspect` from `useState(false)` to `useMemo(...)` deriving value from stable `clientSheetId + liveClients + apiClients`. Adds `prevAutoInspectRef + useEffect` race guard to backfill `needsInspection` on existing items when `apiClients` resolves after client is already selected. Removes all `setClientAutoInspect` calls.
-- Addresses known landmine #2 from session 64. Ready to merge when tested.
+**Auto-inspect race fix (`Receiving.tsx`) — merged to source:**
+- `clientAutoInspect` now `useMemo(...)` + `prevAutoInspectRef + useEffect` pattern to backfill on race. Merged in same bundle.
 
 **Live artifacts after this session:**
-- React bundle: `index-BJ5y1eJ6.js` (commit `a907ced`)
-- Branch `fix/receiving-auto-inspect-race`: commit `2d00973` (not deployed)
-- No backend changes, no Supabase migrations
+- React bundle: `index-CGEBbJ6Y.js` (commit `e0fdcf4`, 1,880 modules)
+- GAS: Emails.gs v4.3.0, Shipments.gs v4.2.0, WillCalls.gs v4.4.0, Triggers.gs v4.5.0 — rolled out 47/47, deployed 47/47
+- Supabase migrations still pending (MCP tool unavailable): `20260411120000_dt_phase1a_schema.sql`, `20260413180000_add_cod_to_will_calls.sql`
 
 ---
 
