@@ -578,6 +578,15 @@ export function Inventory() {
   const { user } = useAuth();
   const navigate = useNavigate();
 
+  // Client-role users only see their own accounts in the dropdown — admin/staff see all.
+  const dropdownClientNames = useMemo(() => {
+    if (user?.role === 'client' && user.accessibleClientNames?.length) {
+      const allowed = new Set(user.accessibleClientNames);
+      return clientNames.filter(n => allowed.has(n));
+    }
+    return clientNames;
+  }, [clientNames, user?.role, user?.accessibleClientNames]);
+
   // Auto-select clients for client-portal users (they only have 1-2 clients)
   useEffect(() => {
     if (user?.role === 'client' && user.accessibleClientNames?.length && clientFilter.length === 0) {
@@ -1291,7 +1300,7 @@ export function Inventory() {
 
       {/* Client Filter */}
       <div className="no-print" style={{ display: 'flex', gap: 10, alignItems: 'flex-end', marginBottom: 12, flexWrap: 'wrap' }}>
-        <MultiSelectFilter label="Client" options={clientNames} selected={clientFilter} onChange={setClientFilter} placeholder="Select client(s)..." />
+        <MultiSelectFilter label="Client" options={dropdownClientNames} selected={clientFilter} onChange={setClientFilter} placeholder="Select client(s)..." />
       </div>
 
       {/* ── Toolbar ── */}

@@ -236,12 +236,18 @@ export function Claims() {
     removeOptimisticClaim,
   } = useClaims(hasApi);
 
-  // Client filter options: merge managed clients + unique client names from claims data
+  // Client filter options: merge managed clients + unique client names from claims data.
+  // Client-role users only see their own accounts — admin sees everything.
   const clientNames = useMemo(() => {
     const names = new Set(clients.map(c => c.name));
     for (const c of liveClaims) { if (c.companyClientName) names.add(c.companyClientName); }
-    return Array.from(names).sort();
-  }, [clients, liveClaims]);
+    const all = Array.from(names).sort();
+    if (authUser?.role === 'client' && authUser.accessibleClientNames?.length) {
+      const allowed = new Set(authUser.accessibleClientNames);
+      return all.filter(n => allowed.has(n));
+    }
+    return all;
+  }, [clients, liveClaims, authUser?.role, authUser?.accessibleClientNames]);
   const apiSucceeded = hasApi && !apiError && !apiLoading;
   const isLive = apiSucceeded;
   const isDemo = !hasApi;

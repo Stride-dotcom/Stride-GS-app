@@ -341,6 +341,15 @@ export function Shipments() {
   const [selectedShipment, setSelectedShipment] = useState<ShipmentRow | null>(null);
   const { user } = useAuth();
 
+  // Client-role users only see their own accounts in the dropdown — admin/staff see all.
+  const dropdownClientNames = useMemo(() => {
+    if (user?.role === 'client' && user.accessibleClientNames?.length) {
+      const allowed = new Set(user.accessibleClientNames);
+      return clientNames.filter(n => allowed.has(n));
+    }
+    return clientNames;
+  }, [clientNames, user?.role, user?.accessibleClientNames]);
+
   // Auto-select clients for client-portal users
   useEffect(() => {
     if (user?.role === 'client' && user.accessibleClientNames?.length && clientFilter.length === 0) {
@@ -515,7 +524,7 @@ export function Shipments() {
 
       {/* Client Filter */}
       <div style={{ display: 'flex', gap: 10, alignItems: 'flex-end', marginBottom: 12, flexWrap: 'wrap' }}>
-        <MultiSelectFilter label="Client" options={clientNames} selected={clientFilter} onChange={setClientFilter} placeholder="Select client(s)..." />
+        <MultiSelectFilter label="Client" options={dropdownClientNames} selected={clientFilter} onChange={setClientFilter} placeholder="Select client(s)..." />
       </div>
 
       {/* Summary Cards */}
