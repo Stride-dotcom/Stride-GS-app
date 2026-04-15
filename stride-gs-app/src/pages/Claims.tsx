@@ -19,6 +19,7 @@ import { CreateClaimModal } from '../components/shared/CreateClaimModal';
 import { WriteButton } from '../components/shared/WriteButton';
 import { MultiSelectFilter } from '../components/shared/MultiSelectFilter';
 import { isApiConfigured } from '../lib/api';
+import { useAuth } from '../contexts/AuthContext';
 import { useClaims } from '../hooks/useClaims';
 import { useClients } from '../hooks/useClients';
 import type { Claim, ClaimType, ClaimStatus } from '../lib/types';
@@ -215,6 +216,13 @@ export function Claims() {
   // for non-managed clients (e.g. "Michelle Dirkse Interiors" who isn't in CB Clients)
   const { clients } = useClients();
   const [clientFilter, setClientFilter] = useState<string[]>([]);
+  const { user: authUser } = useAuth();
+  useEffect(() => {
+    if (authUser?.role === 'client' && authUser.accessibleClientNames?.length && clientFilter.length === 0) {
+      setClientFilter(authUser.accessibleClientNames);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authUser?.role, authUser?.accessibleClientNames?.length]);
 
   const {
     claims: liveClaims,

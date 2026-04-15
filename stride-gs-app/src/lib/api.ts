@@ -1978,6 +1978,44 @@ export function postFinishClientSetup(clientSheetId: string, signal?: AbortSigna
   );
 }
 
+export interface RediscoverScriptIdsResponse {
+  success: boolean;
+  processed: number;
+  updated: number;
+  skipped: number;
+  clients: Array<{ name: string; before: string; after: string; source?: string; error?: string }>;
+  error?: string;
+}
+
+/**
+ * Bulk rediscover + write back Script IDs for every client whose CB SCRIPT ID
+ * column is blank or still contains the master template id. Wraps the same
+ * logic as per-client Finish Setup. Idempotent. Admin-only.
+ */
+export function postRediscoverAllScriptIds(signal?: AbortSignal) {
+  return apiPost<RediscoverScriptIdsResponse>(
+    'rediscoverAllScriptIds',
+    {},
+    {},
+    { signal, timeoutMs: API_POST_TIMEOUT_LONG_MS }
+  );
+}
+
+/**
+ * Authoritative bulk backfill — calls each client's Web App with action=get_script_id.
+ * The client's bound script runs ScriptApp.getScriptId() in ITS OWN context and
+ * returns its real id. Then writes to CB. Can't return wrong ids the way
+ * Drive/Settings searches can. Requires RemoteAdmin.gs v1.5.0+ on each client.
+ */
+export function postBackfillScriptIdsViaWebApp(signal?: AbortSignal) {
+  return apiPost<RediscoverScriptIdsResponse & { failed?: number }>(
+    'backfillScriptIdsViaWebApp',
+    {},
+    {},
+    { signal, timeoutMs: API_POST_TIMEOUT_LONG_MS }
+  );
+}
+
 export function postResolveOnboardUser(
   payload: ResolveOnboardUserPayload,
   signal?: AbortSignal

@@ -9,7 +9,7 @@
  * Phase 2C: optimistic patch architecture added.
  * applyItemPatch is also used cross-entity (WC release patches linked item statuses).
  */
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { fetchInventory } from '../lib/api';
 import type { ApiInventoryItem, InventoryResponse } from '../lib/api';
 import type { InventoryItem, InventoryStatus } from '../lib/types';
@@ -73,7 +73,7 @@ function mapToAppItem(api: ApiInventoryItem): InventoryItem {
   };
 }
 
-export function useInventory(autoFetch = true, filterClientSheetId?: string): UseInventoryResult {
+export function useInventory(autoFetch = true, filterClientSheetId?: string | string[]): UseInventoryResult {
   const clientFilter = useClientFilter(); // client users: their own ID; staff: undefined
   const clientSheetId = clientFilter ?? filterClientSheetId;
   const { batchData, batchEnabled, batchLoading, batchError, silentRefetchBatch } = useBatchData();
@@ -86,27 +86,37 @@ export function useInventory(autoFetch = true, filterClientSheetId?: string): Us
     return map;
   }, [clients]);
 
+  // Ref keeps fetchFn stable across client-list re-renders
+  const clientNameMapRef = useRef(clientNameMap);
+  clientNameMapRef.current = clientNameMap;
+
   // Only use individual fetch if batch is NOT available
   const shouldFetchIndividual = !batchEnabled;
+
+  // Stable dep key — prevents infinite refetch when clientSheetId is an array
+  // (array reference changes on every page render even when contents are the same)
+  const cacheKeyScope = Array.isArray(clientSheetId) ? clientSheetId.slice().sort().join(',') : (clientSheetId || 'all');
 
   // Try Supabase first, fall back to GAS API
   const fetchFn = useCallback(
     async (signal?: AbortSignal) => {
-      // Try Supabase read cache
       if (await isSupabaseCacheAvailable()) {
-        const sbResult = await fetchInventoryFromSupabase(clientNameMap, clientSheetId);
+        const sbResult = await fetchInventoryFromSupabase(clientNameMapRef.current, clientSheetId);
         if (sbResult) return { data: sbResult, ok: true, error: null } as { data: InventoryResponse; ok: true; error: null };
       }
-      // Fall back to GAS API
-      return fetchInventory(signal, clientSheetId);
+      const gasClientId = Array.isArray(clientSheetId)
+        ? (clientSheetId.length === 1 ? clientSheetId[0] : undefined)
+        : clientSheetId;
+      return fetchInventory(signal, gasClientId);
     },
-    [clientSheetId, clientNameMap]
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [cacheKeyScope]
   );
 
   const { data, loading: individualLoading, error: individualError, refetch: individualRefetch, lastFetched: individualLastFetched } = useApiData<InventoryResponse>(
     fetchFn,
     autoFetch && shouldFetchIndividual,
-    `inventory:${clientSheetId || 'all'}`
+    `inventory:${cacheKeyScope}`
   );
 
   // ─── Phase 2C: Optimistic patch state ────────────────────────────────────

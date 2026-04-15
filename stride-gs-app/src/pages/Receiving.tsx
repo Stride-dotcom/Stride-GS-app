@@ -84,6 +84,9 @@ function NewShipmentForm() {
     return (apiMatch?.shipmentNote ?? '').trim();
   }, [clientSheetId, liveClients, apiClients]);
 
+  // (auto-inspect race fix removed — caused React #300 on Inventory/Clients pages.
+  //  Will re-add with cleaner pattern tomorrow.)
+
   // Auto-generated Item ID state
   const [autoIdEnabled, setAutoIdEnabled] = useState(false);
   const [autoIdError, setAutoIdError] = useState('');
@@ -736,7 +739,7 @@ function NewShipmentForm() {
                     )}
                   </td>
                   <td style={td}><AutocompleteInput value={item.vendor} onChange={val => update(idx, 'vendor', val)} placeholder="Vendor" suggestions={vendors} icon={false} style={{ fontSize: 12 }} /></td>
-                  <td style={td}><AutocompleteInput value={item.description} onChange={val => update(idx, 'description', val)} placeholder="Item description..." suggestions={descriptions} icon={false} style={{ fontSize: 12, fontWeight: item.description ? 500 : 400 }} /></td>
+                  <td style={td}><AutocompleteInput value={item.description} onChange={val => update(idx, 'description', val)} placeholder="Item description... (Ctrl+Enter for new line)" suggestions={descriptions} icon={false} multiline style={{ fontSize: 12, fontWeight: item.description ? 500 : 400 }} /></td>
                   <td style={td}><select value={item.itemClass} onChange={e => update(idx, 'itemClass', e.target.value)} style={cellSelect}><option value="">--</option>{CLASSES.map(c => <option key={c} value={c}>{c}</option>)}</select></td>
                   <td style={td}><input type="number" min={1} value={item.qty} onChange={e => update(idx, 'qty', parseInt(e.target.value) || 1)} style={{ ...cellInput, width: 46, textAlign: 'center' }} /></td>
                   <td style={td}><LocationPicker value={item.location} onChange={val => update(idx, 'location', val)} placeholder="Location" locations={apiConfigured && locationNames.length > 0 ? locationNames : undefined} loading={locationsLoading} /></td>

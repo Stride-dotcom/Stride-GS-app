@@ -214,7 +214,7 @@ export function ClaimDetailPanel({ claim: initialClaim, onClose, onUpdated, appl
       setEditing(false);
       setActionSuccess('Changes saved');
       setTimeout(() => setActionSuccess(null), 3000);
-      clearClaimPatch?.(claim.claimId);
+      // Don't clear patch on success — let 120s TTL handle it (prevents flicker in list while refetch loads)
       onUpdated?.();
     } catch (e) {
       clearClaimPatch?.(claim.claimId); // rollback
@@ -296,10 +296,10 @@ export function ClaimDetailPanel({ claim: initialClaim, onClose, onUpdated, appl
       setActionSuccess('Status updated to Waiting on Info — email sent to claimant');
       setClaim(prev => ({ ...prev, status: 'Waiting on Info' }));
       await loadDetail();
-      clearClaimPatch?.(claim.claimId);
+      // Don't clear patch on success — let 120s TTL handle it (prevents flicker in list while refetch loads)
       onUpdated?.();
     } else {
-      clearClaimPatch?.(claim.claimId); // rollback
+      clearClaimPatch?.(claim.claimId); // rollback on failure
       setActionError(res.error || 'Failed');
     }
   }
@@ -317,10 +317,10 @@ export function ClaimDetailPanel({ claim: initialClaim, onClose, onUpdated, appl
       setActionSuccess('Denial sent — claim closed');
       setClaim(prev => ({ ...prev, status: 'Closed', outcomeType: 'Denied' }));
       await loadDetail();
-      clearClaimPatch?.(claim.claimId);
+      // Don't clear patch on success — let 120s TTL handle it (prevents flicker in list while refetch loads)
       onUpdated?.();
     } else {
-      clearClaimPatch?.(claim.claimId);
+      clearClaimPatch?.(claim.claimId); // rollback on failure
       setActionError(res.error || 'Failed');
     }
   }
@@ -360,10 +360,10 @@ export function ClaimDetailPanel({ claim: initialClaim, onClose, onUpdated, appl
         currentSettlementVersion: String(res.data!.versionNo),
       }));
       await loadDetail();
-      clearClaimPatch?.(claim.claimId);
+      // Don't clear patch on success — let 120s TTL handle it (prevents flicker in list while refetch loads)
       onUpdated?.();
     } else {
-      clearClaimPatch?.(claim.claimId);
+      clearClaimPatch?.(claim.claimId); // rollback on failure
       setActionError(res.error || 'Failed to generate settlement');
     }
   }
@@ -387,10 +387,10 @@ export function ClaimDetailPanel({ claim: initialClaim, onClose, onUpdated, appl
       setActionSuccess('Signed settlement recorded — claim approved');
       setClaim(prev => ({ ...prev, status: 'Approved' }));
       await loadDetail();
-      clearClaimPatch?.(claim.claimId);
+      // Don't clear patch on success — let 120s TTL handle it (prevents flicker in list while refetch loads)
       onUpdated?.();
     } else {
-      clearClaimPatch?.(claim.claimId);
+      clearClaimPatch?.(claim.claimId); // rollback on failure
       setActionError(res.error || 'Failed');
     }
   }
@@ -406,10 +406,10 @@ export function ClaimDetailPanel({ claim: initialClaim, onClose, onUpdated, appl
       setActionSuccess('Claim closed');
       setClaim(prev => ({ ...prev, status: 'Closed' }));
       await loadDetail();
-      clearClaimPatch?.(claim.claimId);
+      // Don't clear patch on success — let 120s TTL handle it (prevents flicker in list while refetch loads)
       onUpdated?.();
     } else {
-      clearClaimPatch?.(claim.claimId);
+      clearClaimPatch?.(claim.claimId); // rollback on failure
       setActionError(res.error || 'Failed');
     }
   }
@@ -426,10 +426,10 @@ export function ClaimDetailPanel({ claim: initialClaim, onClose, onUpdated, appl
       setActionSuccess('Claim voided');
       setClaim(prev => ({ ...prev, status: 'Void', voidReason: voidReason.trim() }));
       await loadDetail();
-      clearClaimPatch?.(claim.claimId);
+      // Don't clear patch on success — let 120s TTL handle it (prevents flicker in list while refetch loads)
       onUpdated?.();
     } else {
-      clearClaimPatch?.(claim.claimId);
+      clearClaimPatch?.(claim.claimId); // rollback on failure
       setActionError(res.error || 'Failed');
     }
   }
@@ -446,10 +446,10 @@ export function ClaimDetailPanel({ claim: initialClaim, onClose, onUpdated, appl
       setActionSuccess('Claim reopened — status reset to Under Review');
       setClaim(prev => ({ ...prev, status: 'Under Review' }));
       await loadDetail();
-      clearClaimPatch?.(claim.claimId);
+      // Don't clear patch on success — let 120s TTL handle it (prevents flicker in list while refetch loads)
       onUpdated?.();
     } else {
-      clearClaimPatch?.(claim.claimId);
+      clearClaimPatch?.(claim.claimId); // rollback on failure
       setActionError(res.error || 'Failed');
     }
   }

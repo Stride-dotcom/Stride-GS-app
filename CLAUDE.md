@@ -101,7 +101,15 @@ Legacy branches (`feat/dt-phase1a`, `feat/dt-integration-phase1a-migration`) are
 
 ### Important: `AppScripts/stride-client-inventory/` is intentionally ignored by the parent repo
 
-The rollout tooling directory is a **local master** for `npm run rollout`. The source of truth for each client's bound script lives in the client spreadsheet itself (pushed there via `clasp push`/`push-cb` equivalents). Editing a file under `stride-client-inventory/src/` and running rollout overwrites all 6 clients with that content — the local copy is ephemeral tooling input, not authoritative source.
+The rollout tooling directory is a **local master** for `npm run rollout`. The source of truth for each client's bound script lives in the client spreadsheet itself (pushed there via `clasp push`/`push-cb` equivalents). Editing a file under `stride-client-inventory/src/` and running rollout overwrites all active clients (47 as of session 64) with that content — the local copy is ephemeral tooling input, not authoritative source.
+
+**Client registry (session 64 refactor):** the canonical map from each client spreadsheet → its bound script's scriptId lives in **CB Clients → SCRIPT ID column**. `npm run sync` pulls CB rows into `admin/clients.json`, `npm run rollout` pushes to each client's real bound script via the Apps Script API. Two self-healing paths for populating SCRIPT ID when blank:
+1. **Onboarding / Finish Setup (React app):** calls `api_resolveBoundScriptViaRedirect_()` which fetches `https://script.google.com/d/<sheetId>/edit` with the caller's OAuth token and parses Google's 302 `Location` header for the bound scriptId. Authoritative — can't return template leakage, no Drive indexing lag.
+2. **Rediscover Script IDs button (Settings → Clients):** calls the `backfillScriptIdsViaWebApp` StrideAPI endpoint, which POSTs `{token, action: "get_script_id"}` to each client's Web App URL. The client's bound RemoteAdmin.gs runs `ScriptApp.getScriptId()` in its own context and writes the result directly to CB. Requires `RemoteAdmin.gs v1.5.1+` already rolled out.
+
+**Template-id pollution guard (v38.52.2+):** every write path to CB `SCRIPT ID` rejects the master template id `1Pk2Oc0u7RRgMs3sQs96brKDBFNA9vCyKOHZA9jMmk4gkD2yNdTGRlI5T`. Container-bound scripts often returned the template via Drive search; this guard prevents that from landing in CB and cascading into rollout targets.
+
+**`deployments.update` → `deployments.create` fallback (`update-deployments.mjs` v2.2.0):** when a client's existing Web App URL was a deployment of the template (as was true for 42 of 47 clients before the session-64 cleanup), `deployments.update(targetScriptId, templateDeploymentId)` returns "not found". The script now catches that and creates a brand-new deployment on the correct script, then writes the new URL to both `clients.json` and `CB Clients.WEB APP URL`. Rate-limited to ~40/min (1500 ms pacing) with 30/60/90 s backoff to stay under Apps Script API's "60 management requests per user per minute" cap.
 
 If you want that directory version-controlled in the future, that's a separate decision. For now it's excluded via `.gitignore` at the parent repo root, which is why `Emails.gs` edits don't show up in `git status` even though they reach production via rollout.
 
@@ -413,16 +421,18 @@ These are the top decisions that affect code generation on every task. For the f
 23. **Stax Autopay Auto Charge override policy** is identical in the prepare and charge stages. Invoice TRUE always wins; invoice FALSE always skips (no log); blank invoice falls back to CB Clients with two distinct exception buckets — `CLIENT_AUTO_DISABLED` (client row exists with AUTO CHARGE=FALSE) and `UNKNOWN_CLIENT` (client not found in CB Clients). Both stages write Exceptions rows with stage-prefixed reason strings so operators can tell where the skip happened. Fixed the prior charge-stage divergence where `undefined` fell through and auto-charged.
 24. **CB Clients column convention is canonical Title Case** (StrideAPI.gs v38.40.0+). All `setCol_` callers use the exact header case that ships in the sheet template ("Client Name", "Client Email", "Contact Name", "Phone", "Stax Customer ID", "Payment Terms", "QB_CUSTOMER_NAME" — the last is ALL-CAPS by QB convention). `api_ensureColumn_` does a case-insensitive match before auto-creating, so an existing bad-case header is reused instead of spawning a duplicate column. A prominent CONVENTION comment block above `setCol_` documents the rule. Read path is already case-tolerant via the `hMap` in `api_clientRowToPayload_`, so previously-saved rows with mis-cased headers surface their data immediately after deploy — no manual sheet cleanup needed.
 25. **`item_id_ledger` is the authoritative cross-tenant registry** (StrideAPI.gs v38.52.0+, session 63). A legitimate exception to invariant #20 — this Supabase table is NOT a mirror of a sheet; it's the single source of truth for "has this Item ID ever been issued?" across all clients. `item_id` is globally unique, rows are never deleted, status evolves (`active`/`released`/`transferred`/`voided`) but the slot is permanently burned. StrideAPI.gs is the only writer via `api_ledger*_` helpers. `completeShipment` pre-check rejects cross-tenant collisions with `ITEM_ID_COLLISION`; same-tenant resubmits pass through (idempotent). `releaseItems` → status `released`; `transferItems` → `tenant_id` updated + status `active`. React `Receiving` page calls `checkItemIdsAvailable` on submit for a fast error before the GAS write. Degraded mode (Supabase unreachable): all helpers log + continue, writes never block. 22 pre-existing cross-tenant dupes from legacy `Import.gs` runs surfaced via `item_id_ledger_conflicts` view — all transfer leftovers, zero active-on-active, no cleanup needed. Client name in error messages resolved via `api_clientNameMap_()` (CacheService 5-min TTL, shared by preflight handler + router guard).
-26. **`useClients` is a single-instance React Context, not a per-consumer hook** (session 63). `ClientsProvider` at app root owns one `useApiData` instance; all 8+ consumers (page + every data hook) read the same reference via `useContext`. Before this refactor, each consumer instantiated its own `useApiData` for the `"clients"` cache key, producing ~7 divergent `clients` array references per Inventory page mount. That caused downstream memos (notably `clientNameMap` in each of 6 data hooks) to rebuild on every render, collapsing into a perpetual abort/refetch loop (React error #300 on Inventory). The ref-pattern workaround in `useInventory/useTasks/useRepairs/useWillCalls/useShipments/useBilling` (sessions 62 + 63) remains as defense-in-depth but is no longer load-bearing. Two channels (active + all) so Settings' "include inactive" reads don't pollute default paths.
+26. **`useClients` is a per-consumer hook, mitigated by in-memory cache + ref pattern** (session 63 revert). A `ClientsProvider` Context singleton was attempted in session 63 and reverted — it cleared the ~7-instance divergence but introduced a React #300 on client-filter click under the minified production build (cause never isolated; likely interaction between the conditional `useContext` fallback and consumer lifecycles across auth transitions). Current state: each consumer (page + 8 data hooks) calls `useClients()` independently, but all instances short-circuit on the in-memory `cacheGet` tier after the first fetch, so array references converge in practice. The **load-bearing mitigation for the Inventory React #300** is the `clientNameMap` ref-stabilization pattern in the 6 data hooks (`useInventory`/`useTasks`/`useRepairs`/`useWillCalls`/`useShipments`/`useBilling`) — always use the ref pattern when a hook builds a memo from `clients` and closes over it in a `useCallback` dep array. A cleaner singleton refactor is on the open-items list but not urgent.
 
 ---
 
 ## Current Versions
 
-- **StrideAPI.gs:** v38.52.1 (Web App v263)
-- **Import.gs (client):** v4.2.1 (rolled out to all 6 clients, Web Apps v6–v22)
-- **Emails.gs (client):** v4.2.0 (rolled out to all 6 clients)
-- **Code.gs (client):** v4.6.0 (rolled out to all 6 clients)
+- **StrideAPI.gs:** v38.52.4 (Web App v268)
+- **Import.gs (client):** v4.3.0 — adds Reference column mapping (rolled out to all 47 active clients, session 64)
+- **Emails.gs (client):** v4.2.0 (rolled out to all 47 active clients)
+- **WillCalls.gs (client):** v4.3.0 — Item ID / Vendor / Description / Reference columns on completed-WC email
+- **RemoteAdmin.gs (client):** v1.5.1 — adds `get_script_id` action; writes own scriptId to CB Clients SCRIPT ID column
+- **Code.gs (client):** v4.6.0 (rolled out to all 47 active clients)
 - **StaxAutoPay.gs:** v4.5.0
 - See `Docs/Stride_GS_App_Build_Status.md` for the full per-script version matrix and session history.
 
@@ -497,10 +507,10 @@ Backend rollout tooling. Push source to Google Apps Script projects and refresh 
 
 | Command | What it does |
 |---|---|
-| `npm run rollout` | Push all 13 `.gs` files to every client's bound script (6 clients currently). Runs `admin/rollout.mjs --execute`. Use after editing anything under `stride-client-inventory/src/`. |
+| `npm run rollout` | Push all 13 `.gs` files to every client's bound script (47 active clients as of session 64). Runs `admin/rollout.mjs --execute`. Use after editing anything under `stride-client-inventory/src/`. **Always run `npm run sync` first** to pull the latest CB scriptIds into `clients.json` — otherwise rollout may target stale/wrong scripts. |
 | `npm run rollout:dry` | Same as rollout but dry-run. Prints the target list without writing. |
 | `npm run rollout:pilot` | Rollout to pilot group only (subset defined in `admin/clients.json`). |
-| `npm run sync` | Pull files FROM one reference client back to `stride-client-inventory/src/`. Useful when a client's bound editor has drift you want to capture. |
+| `npm run sync` | Pull client list (name, spreadsheetId, scriptId, webAppUrl) from CB Clients tab into `admin/clients.json`. Rejects the master template scriptId; falls through to Settings `_SCRIPT_ID` tab → Drive parent search → bulk-Drive scan (`getScriptIdViaBulkDrive`) as fallbacks. Run before every rollout when CB has been edited. |
 | `npm run sync-web-urls` | Re-scan each client's Apps Script project and write the current Web App URL back to CB Clients tab. |
 | `npm run verify` | Run `StrideRemoteVerifyTriggers_` on every client. Reports missing or broken onEdit triggers. |
 | `npm run update-headers` | Remote-run `StrideRemoteUpdateHeaders_` on all clients to refresh missing sheet headers. |
@@ -517,7 +527,7 @@ Backend rollout tooling. Push source to Google Apps Script projects and refresh 
 | `npm run push-scanner` | Push QR Scanner scripts. |
 | `npm run push-templates` | Push email templates from local source to Master Price List Email_Templates tab. |
 | `npm run health-check` | Remote-run `StrideRemoteHealthCheck_` across all clients. |
-| `npm run deploy-clients` | Create new Web App deployment versions on every client (required after changes that affect their `doPost`). |
+| `npm run deploy-clients` | Create / update Web App deployment versions on every client. v2.2.0+: falls back to `deployments.create` when the existing deployment belongs to the wrong script (happens when `clients.json` was pointing at the template — fixed in session 64). Rate-limited to ~40/min with 30/60/90s backoff on quota errors. Writes new deployment URLs back to `clients.json` AND `CB Clients.WEB APP URL`. Required after any `npm run rollout` that affected `doPost` / remote actions. |
 | `npm run deploy-api` | Create a new Web App deployment version on the standalone Stride API project. **Mandatory after `push-api`** — without it, the live Web App still serves the previous deployment. |
 | `npm run deploy-cb` | Create new Web App deployment version on CB script. |
 | `npm run deploy-all` | Clients + API + CB in one shot. Safe + idempotent. Use after a big session when in doubt. |

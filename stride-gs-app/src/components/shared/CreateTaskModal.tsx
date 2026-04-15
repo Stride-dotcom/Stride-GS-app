@@ -57,13 +57,14 @@ export function CreateTaskModal({ items, clientSheetId, onClose, onSuccess, addO
     return types;
   }, [priceList]);
 
-  // Check for existing open tasks that conflict with selected items + task types
+  // Check for existing open tasks that conflict with selected items + task types (exclude optimistic TEMP entries)
   const conflicts = useMemo<ConflictInfo[]>(() => {
     if (!existingTasks?.length || !selectedCodes.size) return [];
     const openStatuses = new Set(['Open', 'In Progress']);
     const itemIdSet = new Set(items.map(i => i.itemId));
     const results: ConflictInfo[] = [];
     for (const t of existingTasks) {
+      if (t.taskId.startsWith('TEMP-')) continue; // skip optimistic creates
       if (!openStatuses.has(t.status)) continue;
       if (!itemIdSet.has(t.itemId)) continue;
       const code = (t.svcCode || t.type || '').toUpperCase();

@@ -1,5 +1,15 @@
 /* ===================================================
-   StrideAPI.gs — v38.52.1 — 2026-04-14 PST — Ledger collision errors include client name
+   StrideAPI.gs — v38.52.2 — 2026-04-14 PST — Stop polluting CB Clients with template scriptId
+   v38.52.2: handleFinishClientSetup_ + api_appendClientRow_ now reject the
+             master template's scriptId (`1Pk2Oc...ZA9jMmk4gkD2yNdTGRlI5T`)
+             in every discovery strategy and NEVER write it to the CB Clients
+             SCRIPT ID column. Drive folder search was returning the template
+             id for clients whose folder/settings weren't properly detached
+             during onboarding, which polluted CB, which poisoned npm run
+             sync, which routed every rollout to the template instead of the
+             real client. Existing bad rows need manual clear (blank SCRIPT
+             ID cells matching template id, then run Finish Setup again).
+   v38.52.1 — Ledger collision errors include client name
    v38.52.1: completeShipment ITEM_ID_COLLISION error now lists the owning
              CLIENT NAME (resolved from CB Clients) instead of the raw
              spreadsheet ID. New helper api_clientNameMap_() (5-min
@@ -2494,6 +2504,16 @@ function doPost(e) {
       case "finishClientSetup":
         return withStaffGuard_(callerEmail, function() {
           return handleFinishClientSetup_(payload);
+        });
+
+      case "rediscoverAllScriptIds":
+        return withStaffGuard_(callerEmail, function() {
+          return handleRediscoverAllScriptIds_();
+        });
+
+      case "backfillScriptIdsViaWebApp":
+        return withStaffGuard_(callerEmail, function() {
+          return handleBackfillScriptIdsViaWebApp_();
         });
 
       case "resolveOnboardUser":
@@ -12606,11 +12626,26 @@ function handleOnboardClient_(payload) {
   // container-bound project, the new script lives in the same folder as the new
   // sheet (not as a child of the sheet). With retries to handle indexing lag.
   var newScriptId = "";
+  var TEMPLATE_SCRIPT_ID_OB = "1Pk2Oc0u7RRgMs3sQs96brKDBFNA9vCyKOHZA9jMmk4gkD2yNdTGRlI5T";
   var retryDelays = [0, 1000, 3000, 5000, 7000]; // ms — first attempt has no delay
   for (var retryIdx = 0; retryIdx < retryDelays.length; retryIdx++) {
     if (retryDelays[retryIdx] > 0) {
       Utilities.sleep(retryDelays[retryIdx]);
       Logger.log("handleOnboardClient_: Retrying script ID discovery after " + retryDelays[retryIdx] + "ms wait (attempt " + (retryIdx + 1) + ")");
+    }
+    // Try 0 (v38.52.4): URL redirect resolver — fetches script.google.com/d/<sheetId>/edit
+    // and parses the redirect Location for the real scriptId. Authoritative —
+    // Google itself redirects from container → bound script, can't return the
+    // wrong project. Fastest path; if it works we skip Drive search entirely.
+    try {
+      var redirectId = api_resolveBoundScriptViaRedirect_(newSpreadsheetId);
+      if (redirectId && redirectId !== TEMPLATE_SCRIPT_ID_OB) {
+        newScriptId = redirectId;
+        Logger.log("handleOnboardClient_: Discovered script ID via URL redirect on attempt " + (retryIdx + 1) + ": " + newScriptId);
+        break;
+      }
+    } catch (redirectErr) {
+      Logger.log("handleOnboardClient_: URL redirect resolver failed on attempt " + (retryIdx + 1) + ": " + redirectErr);
     }
     // Try 1: search by parent folder (more reliable than searching by sheet parent)
     try {
@@ -12995,6 +13030,173 @@ function handleOnboardClient_(payload) {
  * Payload: { clientSheetId }
  * Returns: { success, webAppUrl?, scriptId?, warnings[] }
  */
+
+/**
+ * handleRediscoverAllScriptIds_ — iterate CB Clients and re-run Finish Setup
+ * discovery for every client whose SCRIPT ID is missing or equals the master
+ * template id. Built after the 2026-04-14 template-pollution cleanup so one
+ * click can repair every affected row. Safe: handleFinishClientSetup_ is
+ * idempotent and the v38.52.0+ guards prevent the template id from being
+ * written back.
+ *
+ * Returns: { success, processed, updated, skipped, clients: [{name, before, after, source, error}] }
+ */
+function handleRediscoverAllScriptIds_() {
+  var TEMPLATE_SCRIPT_ID = "1Pk2Oc0u7RRgMs3sQs96brKDBFNA9vCyKOHZA9jMmk4gkD2yNdTGRlI5T";
+  try {
+    var cbSsId = PropertiesService.getScriptProperties().getProperty("CB_SPREADSHEET_ID");
+    if (!cbSsId) return errorResponse_("CB_SPREADSHEET_ID not configured", "CONFIG_ERROR");
+    var cbSs = SpreadsheetApp.openById(cbSsId);
+    var clientsSh = cbSs.getSheetByName("Clients");
+    if (!clientsSh) return errorResponse_("CB Clients tab not found", "CONFIG_ERROR");
+    var cbData = clientsSh.getDataRange().getValues();
+    if (cbData.length < 2) return jsonResponse_({ success: true, processed: 0, updated: 0, skipped: 0, clients: [] });
+
+    var hdr = cbData[0].map(function(h){ return String(h || "").trim().toUpperCase(); });
+    var nameIdx = hdr.indexOf("CLIENT NAME");
+    var sheetIdx = hdr.indexOf("CLIENT SPREADSHEET ID");
+    var scriptIdx = hdr.indexOf("SCRIPT ID");
+    var activeIdx = hdr.indexOf("ACTIVE");
+    if (nameIdx < 0 || sheetIdx < 0 || scriptIdx < 0) {
+      return errorResponse_("CB Clients missing required columns (CLIENT NAME, CLIENT SPREADSHEET ID, SCRIPT ID)", "SCHEMA_ERROR");
+    }
+
+    var results = [];
+    var updated = 0;
+    var skipped = 0;
+    for (var r = 1; r < cbData.length; r++) {
+      var row = cbData[r];
+      var cname = String(row[nameIdx] || "").trim();
+      var csheet = String(row[sheetIdx] || "").trim();
+      var existing = String(row[scriptIdx] || "").trim();
+      var active = activeIdx >= 0 ? String(row[activeIdx] || "").trim().toUpperCase() : "TRUE";
+      if (!cname || !csheet) continue;
+      if (active === "FALSE" || active === "NO") { skipped++; results.push({ name: cname, before: existing, after: existing, source: "skipped: inactive" }); continue; }
+      if (existing && existing !== TEMPLATE_SCRIPT_ID) { skipped++; results.push({ name: cname, before: existing, after: existing, source: "skipped: already valid" }); continue; }
+
+      try {
+        var res = handleFinishClientSetup_({ clientSheetId: csheet });
+        var data = {};
+        try { data = JSON.parse(res.getContent()); } catch (_) { data = {}; }
+        var after = String(data.scriptId || "").trim();
+        if (after && after !== TEMPLATE_SCRIPT_ID) updated++;
+        results.push({
+          name: cname,
+          before: existing,
+          after: after,
+          source: data.discoverySource || data.source || (data.success ? "found" : "not found"),
+          error: data.success ? undefined : (data.error || "unknown error")
+        });
+      } catch (perClientErr) {
+        results.push({ name: cname, before: existing, after: "", source: "error", error: String(perClientErr) });
+      }
+    }
+
+    return jsonResponse_({
+      success: true,
+      processed: results.length,
+      updated: updated,
+      skipped: skipped,
+      clients: results
+    });
+  } catch (err) {
+    return errorResponse_("Rediscover failed: " + String(err), "SERVER_ERROR");
+  }
+}
+
+/**
+ * handleBackfillScriptIdsViaWebApp_ — authoritative way to repopulate CB
+ * SCRIPT ID for every client. Calls each client's Web App URL with
+ * action=get_script_id — the client's bound script runs ScriptApp.getScriptId()
+ * in its OWN context (returns the correct id, not the caller's id).
+ *
+ * This is the correct fix for the 2026-04-14 template-pollution incident:
+ * Drive searches don't reliably find container-bound scripts, but the bound
+ * script always knows its own ID. Safer than Drive/Settings lookups because
+ * it can't return the wrong id.
+ *
+ * Requires each client to have RemoteAdmin.gs v1.5.0+ (the version that adds
+ * the `get_script_id` action — rolled out 2026-04-14).
+ *
+ * Returns: { success, processed, updated, skipped, failed, clients: [...] }
+ */
+function handleBackfillScriptIdsViaWebApp_() {
+  var TEMPLATE_SCRIPT_ID = "1Pk2Oc0u7RRgMs3sQs96brKDBFNA9vCyKOHZA9jMmk4gkD2yNdTGRlI5T";
+  // v38.52.3 — use the same token clients' RemoteAdmin.gs hardcodes (matches
+  // handleRemoteAction_ pattern); earlier version read a nonexistent property
+  // and every client returned unauthorized.
+  var REMOTE_TOKEN = PropertiesService.getScriptProperties().getProperty("CLIENT_REMOTE_EXEC_TOKEN") || "stride-remote-exec-9f3a2";
+  try {
+    var cbSsId = PropertiesService.getScriptProperties().getProperty("CB_SPREADSHEET_ID");
+    if (!cbSsId) return errorResponse_("CB_SPREADSHEET_ID not configured", "CONFIG_ERROR");
+    var cbSs = SpreadsheetApp.openById(cbSsId);
+    var clientsSh = cbSs.getSheetByName("Clients");
+    if (!clientsSh) return errorResponse_("CB Clients tab not found", "CONFIG_ERROR");
+    var cbData = clientsSh.getDataRange().getValues();
+    if (cbData.length < 2) return jsonResponse_({ success: true, processed: 0, updated: 0, skipped: 0, failed: 0, clients: [] });
+
+    var hdr = cbData[0].map(function(h){ return String(h || "").trim().toUpperCase(); });
+    var nameIdx = hdr.indexOf("CLIENT NAME");
+    var webAppIdx = hdr.indexOf("WEB APP URL");
+    var scriptIdx = hdr.indexOf("SCRIPT ID");
+    var activeIdx = hdr.indexOf("ACTIVE");
+    if (nameIdx < 0 || webAppIdx < 0 || scriptIdx < 0) {
+      return errorResponse_("CB Clients missing required columns (CLIENT NAME, WEB APP URL, SCRIPT ID)", "SCHEMA_ERROR");
+    }
+
+    var results = [];
+    var updated = 0, skipped = 0, failed = 0;
+    for (var r = 1; r < cbData.length; r++) {
+      var row = cbData[r];
+      var cname = String(row[nameIdx] || "").trim();
+      var webApp = String(row[webAppIdx] || "").trim();
+      var existing = String(row[scriptIdx] || "").trim();
+      var active = activeIdx >= 0 ? String(row[activeIdx] || "").trim().toUpperCase() : "TRUE";
+      if (!cname || !webApp) continue;
+      if (active === "FALSE" || active === "NO") { skipped++; results.push({ name: cname, before: existing, after: existing, status: "skipped: inactive" }); continue; }
+      if (existing && existing !== TEMPLATE_SCRIPT_ID) { skipped++; results.push({ name: cname, before: existing, after: existing, status: "skipped: already valid" }); continue; }
+
+      try {
+        var resp = UrlFetchApp.fetch(webApp, {
+          method: "post",
+          contentType: "application/json",
+          payload: JSON.stringify({ token: REMOTE_TOKEN, action: "get_script_id" }),
+          muteHttpExceptions: true,
+          followRedirects: true
+        });
+        var body = {};
+        try { body = JSON.parse(resp.getContentText()); } catch (_) {}
+        var newScriptId = String(body.scriptId || "").trim();
+        if (newScriptId && newScriptId !== TEMPLATE_SCRIPT_ID) {
+          clientsSh.getRange(r + 1, scriptIdx + 1).setValue(newScriptId);
+          updated++;
+          results.push({ name: cname, before: existing, after: newScriptId, status: "updated" });
+        } else if (!body.ok) {
+          failed++;
+          results.push({ name: cname, before: existing, after: "", status: "webapp error: " + (body.error || "no scriptId returned") });
+        } else {
+          failed++;
+          results.push({ name: cname, before: existing, after: "", status: "webapp returned template id or blank" });
+        }
+      } catch (err) {
+        failed++;
+        results.push({ name: cname, before: existing, after: "", status: "fetch failed: " + String(err) });
+      }
+    }
+
+    return jsonResponse_({
+      success: true,
+      processed: results.length,
+      updated: updated,
+      skipped: skipped,
+      failed: failed,
+      clients: results
+    });
+  } catch (err) {
+    return errorResponse_("Backfill failed: " + String(err), "SERVER_ERROR");
+  }
+}
+
 function handleFinishClientSetup_(payload) {
   var clientSheetId = String(payload.clientSheetId || "").trim();
   if (!clientSheetId) return errorResponse_("clientSheetId is required", "MISSING_PARAM");
@@ -13043,11 +13245,31 @@ function handleFinishClientSetup_(payload) {
   //    scripts typically don't show up as children of their sheet in Drive queries)
   var scriptId = "";
   var discoverySource = "";
+  var TEMPLATE_SCRIPT_ID_FS = "1Pk2Oc0u7RRgMs3sQs96brKDBFNA9vCyKOHZA9jMmk4gkD2yNdTGRlI5T";
 
-  // Strategy 1: CB Clients sheet Script ID column
-  if (scriptIdColIdx >= 0) {
-    scriptId = String(clientsData[clientRowNum - 1][scriptIdColIdx] || "").trim();
-    if (scriptId) discoverySource = "CB Clients Script ID column";
+  // Strategy 0 (v38.52.4): URL redirect — most reliable for container-bound scripts.
+  // Google redirects script.google.com/d/<sheetId>/edit → home/projects/<SCRIPT_ID>/edit
+  // which is the authoritative bound-script id. Try this first.
+  try {
+    var redirectId = api_resolveBoundScriptViaRedirect_(clientSheetId);
+    if (redirectId && redirectId !== TEMPLATE_SCRIPT_ID_FS) {
+      scriptId = redirectId;
+      discoverySource = "URL redirect (script.google.com/d/<sheetId>)";
+      if (scriptIdColIdx >= 0) {
+        clientsSh.getRange(clientRowNum, scriptIdColIdx + 1).setValue(scriptId);
+      }
+    }
+  } catch (redirectErr) {
+    Logger.log("handleFinishClientSetup_: URL redirect resolver failed: " + redirectErr);
+  }
+
+  // Strategy 1: CB Clients sheet Script ID column (fallback if redirect didn't find it)
+  if (!scriptId && scriptIdColIdx >= 0) {
+    var cbScriptId = String(clientsData[clientRowNum - 1][scriptIdColIdx] || "").trim();
+    if (cbScriptId && cbScriptId !== TEMPLATE_SCRIPT_ID_FS) {
+      scriptId = cbScriptId;
+      discoverySource = "CB Clients Script ID column";
+    }
   }
 
   // Strategy 2: Read _SCRIPT_ID from the client sheet's own Settings tab.
@@ -13067,7 +13289,14 @@ function handleFinishClientSetup_(payload) {
           for (var si = 0; si < settingsData.length; si++) {
             var key = String(settingsData[si][0] || "").trim();
             if (key === "_SCRIPT_ID") {
-              scriptId = String(settingsData[si][1] || "").trim();
+              var candidateSettingsId = String(settingsData[si][1] || "").trim();
+              // v38.52.0 — guard against the master template id leaking in from
+              // an unmigrated client whose Settings tab was copied verbatim.
+              if (candidateSettingsId === "1Pk2Oc0u7RRgMs3sQs96brKDBFNA9vCyKOHZA9jMmk4gkD2yNdTGRlI5T") {
+                Logger.log("handleFinishClientSetup_: Skipping Settings _SCRIPT_ID — matches template id (would pollute CB).");
+                break;
+              }
+              scriptId = candidateSettingsId;
               if (scriptId) {
                 discoverySource = "client Settings tab _SCRIPT_ID row";
                 Logger.log("handleFinishClientSetup_: Found _SCRIPT_ID in client Settings: " + scriptId);
@@ -13107,18 +13336,29 @@ function handleFinishClientSetup_(payload) {
         } catch (_) {}
       }
 
+      // v38.52.0 — never accept the MASTER TEMPLATE's own scriptId as a
+      // client's bound script. Drive's `in parents` query sometimes surfaces
+      // the template's container-bound script because of historical parent
+      // associations — writing that to CB pollutes every client row with
+      // the template id, which is exactly what happened (screenshot 2026-04-14).
+      var TEMPLATE_SCRIPT_ID = "1Pk2Oc0u7RRgMs3sQs96brKDBFNA9vCyKOHZA9jMmk4gkD2yNdTGRlI5T";
+
       if (folderId) {
         var folderScripts = DriveApp.searchFiles(
           "'" + folderId + "' in parents and mimeType = 'application/vnd.google-apps.script' and trashed = false"
         );
-        // Read client name to pick the matching script (in case multiple scripts in folder)
+        // Pick ONLY a script whose name contains the client name — generic
+        // "first match" was letting the template's script through.
         var targetName = clientName.toLowerCase();
         while (folderScripts.hasNext()) {
           var candidate = folderScripts.next();
-          if (!scriptId || candidate.getName().toLowerCase().indexOf(targetName) !== -1) {
-            scriptId = candidate.getId();
+          var candidateName = candidate.getName().toLowerCase();
+          var candidateId = candidate.getId();
+          if (candidateId === TEMPLATE_SCRIPT_ID) continue; // never accept template
+          if (candidateName.indexOf(targetName) !== -1) {
+            scriptId = candidateId;
             discoverySource = "client folder search (name: " + candidate.getName() + ")";
-            if (candidate.getName().toLowerCase().indexOf(targetName) !== -1) break;
+            break;
           }
         }
         if (scriptId) {
@@ -13136,16 +13376,20 @@ function handleFinishClientSetup_(payload) {
   // Strategy 4 (last resort): Drive search by sheet parent — known to be unreliable
   if (!scriptId) {
     try {
+      var TEMPLATE_SCRIPT_ID_S4 = "1Pk2Oc0u7RRgMs3sQs96brKDBFNA9vCyKOHZA9jMmk4gkD2yNdTGRlI5T";
       var scriptFiles = DriveApp.searchFiles(
         "'" + clientSheetId + "' in parents and mimeType = 'application/vnd.google-apps.script'"
       );
-      if (scriptFiles.hasNext()) {
-        scriptId = scriptFiles.next().getId();
+      while (scriptFiles.hasNext()) {
+        var sf = scriptFiles.next();
+        if (sf.getId() === TEMPLATE_SCRIPT_ID_S4) continue; // never accept template
+        scriptId = sf.getId();
         discoverySource = "Drive parent search (unusual — bound scripts don't normally show here)";
         Logger.log("handleFinishClientSetup_: Discovered script ID via Drive search: " + scriptId);
         if (scriptIdColIdx >= 0) {
           clientsSh.getRange(clientRowNum, scriptIdColIdx + 1).setValue(scriptId);
         }
+        break;
       }
     } catch (scriptErr) {
       Logger.log("handleFinishClientSetup_: Script ID search failed: " + scriptErr);
@@ -13703,7 +13947,8 @@ function api_appendClientRow_(clientsSh, hMap, totalCols, data) {
     "CLIENT FOLDER ID":         data.clientFolderId,
     "PHOTOS FOLDER ID":         data.photosFolderId,
     "INVOICE FOLDER ID":        data.invoicesFolderId,
-    "SCRIPT ID":                data.scriptId || "",
+    // v38.52.0: never persist the master template's scriptId to a client row
+    "SCRIPT ID":                (data.scriptId && data.scriptId !== "1Pk2Oc0u7RRgMs3sQs96brKDBFNA9vCyKOHZA9jMmk4gkD2yNdTGRlI5T") ? data.scriptId : "",
     "PARENT CLIENT":            data.parentClient || "",
     "ACTIVE":                   data.active
   };
@@ -14254,6 +14499,52 @@ function api_getOrCreateEntitySubfolder_(ss, entityType) {
     Logger.log("api_getOrCreateEntitySubfolder_ error (" + entityType + "): " + e);
     return { folder: null, url: "" };
   }
+}
+
+/**
+ * api_resolveBoundScriptViaRedirect_ — v38.52.4
+ * Authoritative way to resolve the bound Apps Script project id for a given
+ * spreadsheet. Google redirects https://script.google.com/d/<sheetId>/edit
+ * to the script editor URL, which contains the real scriptId.
+ *
+ * Advantages over Drive search:
+ *   - Returns the ACTUAL bound script, not template leakage.
+ *   - Works immediately after makeCopy (no indexing lag).
+ *   - Can't return ancestor/parent scripts — only the direct container-bound one.
+ *
+ * Returns "" on failure (no bound script, auth issue, or unexpected response).
+ */
+function api_resolveBoundScriptViaRedirect_(sheetId) {
+  if (!sheetId) return "";
+  try {
+    var url = "https://script.google.com/d/" + sheetId + "/edit";
+    var token = ScriptApp.getOAuthToken();
+    var resp = UrlFetchApp.fetch(url, {
+      headers: { Authorization: "Bearer " + token },
+      muteHttpExceptions: true,
+      followRedirects: false
+    });
+    var headers = resp.getAllHeaders() || {};
+    var location = headers["Location"] || headers["location"] || "";
+    if (location) {
+      // Redirect targets look like:
+      //   .../home/projects/<SCRIPT_ID>/edit?...
+      //   .../macros/d/<SCRIPT_ID>/...
+      var m = String(location).match(/\/home\/projects\/([a-zA-Z0-9_-]{20,})/);
+      if (m) return m[1];
+      var m2 = String(location).match(/\/macros\/d\/([a-zA-Z0-9_-]{20,})/);
+      if (m2) return m2[1];
+      var m3 = String(location).match(/\/d\/([a-zA-Z0-9_-]{20,})/);
+      if (m3 && m3[1] !== sheetId) return m3[1];
+    }
+    // Some responses return 200 with the scriptId embedded in the body
+    var body = String(resp.getContentText() || "");
+    var mb = body.match(/\/home\/projects\/([a-zA-Z0-9_-]{20,})/);
+    if (mb) return mb[1];
+  } catch (e) {
+    Logger.log("api_resolveBoundScriptViaRedirect_ error: " + e);
+  }
+  return "";
 }
 
 function api_createItemFolder_(parentUrl, folderName) {

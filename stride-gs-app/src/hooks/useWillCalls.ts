@@ -6,7 +6,7 @@
  *
  * Phase 2C: optimistic patch architecture added.
  */
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { fetchWillCalls } from '../lib/api';
 import type { ApiWillCall, WillCallsResponse } from '../lib/api';
 import type { WillCall, WillCallStatus } from '../lib/types';
@@ -70,10 +70,12 @@ function mapToAppWillCall(api: ApiWillCall): WillCall {
     requiresSignature: false, // Not in sheet schema
     wcFolderUrl: api.wcFolderUrl || undefined,
     shipmentFolderUrl: api.shipmentFolderUrl || undefined,
+    cod: api.cod ?? false,
+    codAmount: api.codAmount ?? undefined,
   };
 }
 
-export function useWillCalls(autoFetch = true, filterClientSheetId?: string): UseWillCallsResult {
+export function useWillCalls(autoFetch = true, filterClientSheetId?: string | string[]): UseWillCallsResult {
   const clientFilter = useClientFilter();
   const clientSheetId = clientFilter ?? filterClientSheetId;
   const { batchData, batchEnabled, batchLoading, batchError, silentRefetchBatch } = useBatchData();
@@ -85,23 +87,34 @@ export function useWillCalls(autoFetch = true, filterClientSheetId?: string): Us
     return map;
   }, [clients]);
 
+  // Ref keeps fetchFn stable across client-list re-renders
+  const clientNameMapRef = useRef(clientNameMap);
+  clientNameMapRef.current = clientNameMap;
+
   const shouldFetchIndividual = !batchEnabled;
+
+  // Stable dep key — prevents infinite refetch when clientSheetId is an array
+  const cacheKeyScope = Array.isArray(clientSheetId) ? clientSheetId.slice().sort().join(',') : (clientSheetId || 'all');
 
   const fetchFn = useCallback(
     async (signal?: AbortSignal) => {
       if (await isSupabaseCacheAvailable()) {
-        const sbResult = await fetchWillCallsFromSupabase(clientNameMap, clientSheetId);
+        const sbResult = await fetchWillCallsFromSupabase(clientNameMapRef.current, clientSheetId);
         if (sbResult) return { data: sbResult, ok: true, error: null } as { data: WillCallsResponse; ok: true; error: null };
       }
-      return fetchWillCalls(signal, clientSheetId);
+      const gasClientId = Array.isArray(clientSheetId)
+        ? (clientSheetId.length === 1 ? clientSheetId[0] : undefined)
+        : clientSheetId;
+      return fetchWillCalls(signal, gasClientId);
     },
-    [clientSheetId, clientNameMap]
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [cacheKeyScope]
   );
 
   const { data, loading: individualLoading, error: individualError, refetch: individualRefetch, lastFetched: individualLastFetched } = useApiData<WillCallsResponse>(
     fetchFn,
     autoFetch && shouldFetchIndividual,
-    `willcalls:${clientSheetId || 'all'}`
+    `willcalls:${cacheKeyScope}`
   );
 
   // ─── Phase 2C: Optimistic patch state ────────────────────────────────────

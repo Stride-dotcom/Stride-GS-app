@@ -11,7 +11,7 @@
  * - addOptimisticTask / removeOptimisticTask: temp entities for create ops
  * Patches auto-expire after 120s (guarded in useMemo merge).
  */
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { fetchTasks } from '../lib/api';
 import type { ApiTask, TasksResponse } from '../lib/api';
 import type { Task, TaskStatus, ServiceCode } from '../lib/types';
@@ -81,7 +81,7 @@ function mapToAppTask(api: ApiTask): Task {
   };
 }
 
-export function useTasks(autoFetch = true, filterClientSheetId?: string): UseTasksResult {
+export function useTasks(autoFetch = true, filterClientSheetId?: string | string[]): UseTasksResult {
   const clientFilter = useClientFilter();
   const clientSheetId = clientFilter ?? filterClientSheetId;
   const { batchData, batchEnabled, batchLoading, batchError, silentRefetchBatch } = useBatchData();
@@ -93,23 +93,34 @@ export function useTasks(autoFetch = true, filterClientSheetId?: string): UseTas
     return map;
   }, [clients]);
 
+  // Ref keeps fetchFn stable across client-list re-renders
+  const clientNameMapRef = useRef(clientNameMap);
+  clientNameMapRef.current = clientNameMap;
+
   const shouldFetchIndividual = !batchEnabled;
+
+  // Stable dep key — prevents infinite refetch when clientSheetId is an array
+  const cacheKeyScope = Array.isArray(clientSheetId) ? clientSheetId.slice().sort().join(',') : (clientSheetId || 'all');
 
   const fetchFn = useCallback(
     async (signal?: AbortSignal) => {
       if (await isSupabaseCacheAvailable()) {
-        const sbResult = await fetchTasksFromSupabase(clientNameMap, clientSheetId);
+        const sbResult = await fetchTasksFromSupabase(clientNameMapRef.current, clientSheetId);
         if (sbResult) return { data: sbResult, ok: true, error: null } as { data: TasksResponse; ok: true; error: null };
       }
-      return fetchTasks(signal, clientSheetId);
+      const gasClientId = Array.isArray(clientSheetId)
+        ? (clientSheetId.length === 1 ? clientSheetId[0] : undefined)
+        : clientSheetId;
+      return fetchTasks(signal, gasClientId);
     },
-    [clientSheetId, clientNameMap]
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [cacheKeyScope]
   );
 
   const { data, loading: individualLoading, error: individualError, refetch: individualRefetch, lastFetched: individualLastFetched } = useApiData<TasksResponse>(
     fetchFn,
     autoFetch && shouldFetchIndividual,
-    `tasks:${clientSheetId || 'all'}`
+    `tasks:${cacheKeyScope}`
   );
 
   // ─── Phase 2C: Optimistic patch state ────────────────────────────────────

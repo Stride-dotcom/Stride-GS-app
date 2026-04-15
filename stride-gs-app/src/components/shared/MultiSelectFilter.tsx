@@ -65,7 +65,11 @@ export function MultiSelectFilter({ label, options, selected, onChange, placehol
     }
   };
 
-  const selectAll = () => onChange([...options]);
+  const selectAll = () => {
+    // Select only the visible (filtered) options, merged with any already-selected
+    const merged = [...new Set([...selected, ...filtered])];
+    onChange(merged);
+  };
   const clearAll = () => onChange([]);
 
   return (
@@ -119,26 +123,31 @@ export function MultiSelectFilter({ label, options, selected, onChange, placehol
             <button onClick={clearAll} style={{ fontSize: 10, fontWeight: 600, color: theme.colors.textMuted, background: 'none', border: 'none', cursor: 'pointer', fontFamily: 'inherit', padding: 0 }}>Clear</button>
           </div>
 
-          {/* Options */}
+          {/* Options — use div+onClick instead of label to avoid touch/iPad bubbling issues */}
           <div style={{ overflowY: 'auto', flex: 1, padding: '4px 0' }}>
             {filtered.map(opt => {
               const checked = selected.includes(opt);
               return (
-                <label key={opt} style={{
-                  display: 'flex', alignItems: 'center', gap: 8, padding: '4px 10px', fontSize: 12, cursor: 'pointer',
-                  background: checked ? 'rgba(232,93,45,0.04)' : 'transparent',
-                }}
+                <div key={opt}
+                  role="option"
+                  aria-selected={checked}
+                  onClick={(e) => { e.preventDefault(); e.stopPropagation(); toggleItem(opt); }}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: 8, padding: '4px 10px', fontSize: 12, cursor: 'pointer',
+                    background: checked ? 'rgba(232,93,45,0.04)' : 'transparent',
+                    userSelect: 'none',
+                  }}
                   onMouseEnter={e => e.currentTarget.style.background = 'rgba(0,0,0,0.03)'}
                   onMouseLeave={e => e.currentTarget.style.background = checked ? 'rgba(232,93,45,0.04)' : 'transparent'}
                 >
                   <input
                     type="checkbox"
                     checked={checked}
-                    onChange={() => toggleItem(opt)}
-                    style={{ accentColor: theme.colors.orange, flexShrink: 0 }}
+                    readOnly
+                    style={{ accentColor: theme.colors.orange, flexShrink: 0, pointerEvents: 'none' }}
                   />
                   <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{opt}</span>
-                </label>
+                </div>
               );
             })}
             {filtered.length === 0 && (

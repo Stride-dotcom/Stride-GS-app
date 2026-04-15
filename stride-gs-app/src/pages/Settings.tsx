@@ -1,8 +1,8 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Settings as SettingsIcon, Users, DollarSign, Mail, Database, Globe, Bell, Plus, ChevronRight, CheckCircle2, AlertCircle, UserPlus, Shield, ToggleLeft, ToggleRight, Eye, EyeOff, Wifi, WifiOff, RefreshCw, Loader2, RefreshCcw, ExternalLink, Wrench, PlayCircle, Send, FolderSync, BookText, LogIn, Cloud, Edit2, Zap, ArrowUpDown, ChevronUp, ChevronDown, X } from 'lucide-react';
 import { useReactTable, getCoreRowModel, getSortedRowModel, flexRender, type SortingState, type ColumnDef } from '@tanstack/react-table';
-import { getApiUrl, getApiToken, setApiCredentials, isApiConfigured, fetchHealth, postOnboardClient, postUpdateClient, postSyncSettings, postRefreshCaches, postFixMissingFolders, postTestSendClientTemplates, postTestSendClaimEmails, fetchAutoIdSetting, postUpdateAutoIdSetting, postResolveOnboardUser, fetchStaxConfig, postUpdateStaxConfig, apiPost, fetchEmailTemplates, postSyncTemplatesToClients, postBulkSyncToSupabase, postPurgeInactiveFromSupabase, fetchClients, postFinishClientSetup, postSendWelcomeToUsers } from '../lib/api';
+import { getApiUrl, getApiToken, setApiCredentials, isApiConfigured, fetchHealth, postOnboardClient, postUpdateClient, postSyncSettings, postRefreshCaches, postFixMissingFolders, postTestSendClientTemplates, postTestSendClaimEmails, fetchAutoIdSetting, postUpdateAutoIdSetting, postResolveOnboardUser, fetchStaxConfig, postUpdateStaxConfig, apiPost, fetchEmailTemplates, postSyncTemplatesToClients, postBulkSyncToSupabase, postPurgeInactiveFromSupabase, fetchClients, postFinishClientSetup, postSendWelcomeToUsers, postBackfillScriptIdsViaWebApp } from '../lib/api';
 import type { BulkSyncResult } from '../lib/api';
 import type { EmailTemplate } from '../lib/api';
 import { TemplateEditor } from '../components/shared/TemplateEditor';
@@ -579,6 +579,116 @@ export function Settings() {
 
   // handleToggleActive removed — active toggle is now in the edit panel
 
+  // Users table (TanStack Table — must be top-level, not inside IIFE)
+  const filteredUsers = useMemo(() => {
+    const uq = userSearch.toLowerCase();
+    return uq
+      ? users.filter(u =>
+          u.email.toLowerCase().includes(uq) ||
+          u.role.toLowerCase().includes(uq) ||
+          (u.clientName || '').toLowerCase().includes(uq))
+      : users;
+  }, [users, userSearch]);
+
+  const userColumns = useMemo<ColumnDef<ApiUser, any>[]>(() => [
+    { accessorKey: 'email', header: 'Email', cell: ({ getValue }) => <span style={{ fontWeight: 500 }}>{getValue()}</span> },
+    {
+      accessorKey: 'role', header: 'Role',
+      cell: ({ getValue }) => {
+        const role = getValue() as string;
+        const roleLabel = role.charAt(0).toUpperCase() + role.slice(1);
+        return <span style={{
+          fontSize: 11, padding: '2px 10px', borderRadius: 10, fontWeight: 600,
+          background: role === 'admin' ? '#EDE9FE' : role === 'staff' ? '#EFF6FF' : theme.colors.orangeLight,
+          color: role === 'admin' ? '#7C3AED' : role === 'staff' ? '#1D4ED8' : theme.colors.orange,
+        }}>{roleLabel}</span>;
+      },
+    },
+    {
+      accessorKey: 'clientName', header: 'Client Access',
+      cell: ({ getValue }) => {
+        const names = (getValue() as string || '').split(',').map(s => s.trim()).filter(Boolean);
+        return names.length === 0
+          ? <span style={{ color: theme.colors.textMuted }}>&mdash;</span>
+          : <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>{names.map((name, i) =>
+              <span key={i} style={{ fontSize: 10, padding: '1px 7px', borderRadius: 8, background: theme.colors.orangeLight, color: theme.colors.orange, fontWeight: 600 }}>{name}</span>
+            )}</div>;
+      },
+    },
+    {
+      accessorKey: 'active', header: 'Active',
+      cell: ({ getValue }) => getValue() ? <span style={{ color: '#15803D' }}>&#10003;</span> : <span style={{ color: theme.colors.textMuted }}>&#10007;</span>,
+      meta: { align: 'center' },
+    },
+    {
+      accessorKey: 'lastLogin', header: 'Last Login',
+      cell: ({ getValue }) => <span style={{ color: theme.colors.textMuted }}>{getValue() || '\u2014'}</span>,
+    },
+    {
+      id: 'actions', header: '', enableSorting: false,
+      cell: ({ row }) => {
+        const u = row.original;
+        return (
+          <div style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
+            {realUser?.role === 'admin' && u.role === 'client' && (
+              <button
+                disabled={sendingWelcomeEmail !== null}
+                onClick={(e) => { e.stopPropagation(); handleSendWelcomeToOneUser(u.email); }}
+                style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 4, padding: '3px 10px', fontSize: 11, fontWeight: 600,
+                  border: `1px solid ${theme.colors.border}`, borderRadius: 6,
+                  background: sendingWelcomeEmail === u.email ? theme.colors.orangeLight : '#fff',
+                  color: sendingWelcomeEmail === u.email ? theme.colors.orange : theme.colors.textSecondary,
+                  cursor: sendingWelcomeEmail !== null ? 'wait' : 'pointer',
+                  opacity: (sendingWelcomeEmail !== null && sendingWelcomeEmail !== u.email) ? 0.4 : 1,
+                  fontFamily: 'inherit',
+                }}
+                title={`Send welcome email to ${u.email}`}
+              >
+                {sendingWelcomeEmail === u.email ? <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} /> : <Send size={12} />}
+                {sendingWelcomeEmail === u.email ? 'Sending\u2026' : 'Send Welcome'}
+              </button>
+            )}
+            {realUser?.role === 'admin' && u.email !== realUser.email && u.active && (
+              <button
+                disabled={impersonatingEmail !== null}
+                onClick={async (e) => {
+                  e.stopPropagation();
+                  setImpersonatingEmail(u.email);
+                  const { error: impErr } = await impersonateUser(u.email);
+                  setImpersonatingEmail(null);
+                  if (!impErr) navigate('/');
+                }}
+                style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 4, padding: '3px 10px', fontSize: 11, fontWeight: 600,
+                  border: `1px solid ${theme.colors.border}`, borderRadius: 6,
+                  background: impersonatingEmail === u.email ? theme.colors.orangeLight : '#fff',
+                  color: impersonatingEmail === u.email ? theme.colors.orange : theme.colors.textSecondary,
+                  cursor: impersonatingEmail !== null ? 'wait' : 'pointer',
+                  opacity: (impersonatingEmail !== null && impersonatingEmail !== u.email) ? 0.4 : 1,
+                  fontFamily: 'inherit',
+                }}
+                title={`View app as ${u.email}`}
+              >
+                {impersonatingEmail === u.email ? <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} /> : <LogIn size={12} />}
+                {impersonatingEmail === u.email ? 'Loading\u2026' : 'Login As'}
+              </button>
+            )}
+          </div>
+        );
+      },
+    },
+  ], [realUser, sendingWelcomeEmail, impersonatingEmail, impersonateUser, navigate]);
+
+  const userTable = useReactTable({
+    data: filteredUsers,
+    columns: userColumns,
+    state: { sorting: userSorting },
+    onSortingChange: setUserSorting,
+    getCoreRowModel: getCoreRowModel(),
+    getSortedRowModel: getSortedRowModel(),
+  });
+
   // Client onboard / edit state
   const [clientModalOpen, setClientModalOpen] = useState(false);
   const [clientModalMode, setClientModalMode] = useState<'create' | 'edit'>('create');
@@ -723,6 +833,20 @@ export function Settings() {
   const [purgeInactiveLoading, setPurgeInactiveLoading] = useState(false);
   const [purgeInactiveResult, setPurgeInactiveResult] = useState<{ purgedCount: number; purged: Array<{ name: string; purge?: { purged: boolean; details?: Record<string, number | string>; failCount?: number } }> } | null>(null);
   const [purgeInactiveError, setPurgeInactiveError] = useState('');
+  // Per-client Supabase sync (card-level button) — separate from bulk sync so
+  // a single client can be re-mirrored without waiting through all active clients.
+  const [clientSbSyncLoading, setClientSbSyncLoading] = useState<string | null>(null);
+  const [clientSbSyncResult, setClientSbSyncResult] = useState<{ clientName: string; totalRows: Record<string, number>; totalDeleted?: Record<string, number> } | null>(null);
+  const [clientSbSyncError, setClientSbSyncError] = useState<{ clientName: string; error: string } | null>(null);
+  // Per-client sync elapsed timer — matches the Maintenance bulk-sync progress banner
+  const [clientSbSyncTimer, setClientSbSyncTimer] = useState<{ clientName: string; startedAt: number; elapsed: number } | null>(null);
+  useEffect(() => {
+    if (!clientSbSyncLoading || !clientSbSyncTimer) return;
+    const id = setInterval(() => {
+      setClientSbSyncTimer(prev => prev ? { ...prev, elapsed: Math.floor((Date.now() - prev.startedAt) / 1000) } : prev);
+    }, 1000);
+    return () => clearInterval(id);
+  }, [clientSbSyncLoading, clientSbSyncTimer]);
   const [bulkSyncLoading, setBulkSyncLoading] = useState(false);
   const [bulkSyncResult, setBulkSyncResult] = useState<BulkSyncResult | null>(() => {
     try { const s = localStorage.getItem('stride_bulkSyncResult'); return s ? JSON.parse(s) : null; } catch { return null; }
@@ -1012,6 +1136,31 @@ export function Settings() {
       setPurgeInactiveError(err instanceof Error ? err.message : String(err));
     }
     setPurgeInactiveLoading(false);
+  }
+
+  async function handleClientSupabaseSync(client: ApiClient) {
+    if (!client.spreadsheetId) return;
+    setClientSbSyncLoading(client.spreadsheetId);
+    setClientSbSyncResult(null);
+    setClientSbSyncError(null);
+    setClientSbSyncTimer({ clientName: client.name, startedAt: Date.now(), elapsed: 0 });
+    try {
+      const res = await postBulkSyncToSupabase(client.spreadsheetId);
+      if (res.ok && res.data) {
+        setClientSbSyncResult({
+          clientName: client.name,
+          totalRows: res.data.totalRows as Record<string, number>,
+          totalDeleted: res.data.totalDeleted as Record<string, number> | undefined,
+        });
+      } else {
+        setClientSbSyncError({ clientName: client.name, error: res.error || 'Sync failed' });
+      }
+    } catch (err) {
+      setClientSbSyncError({ clientName: client.name, error: err instanceof Error ? err.message : String(err) });
+    } finally {
+      setClientSbSyncLoading(null);
+      setClientSbSyncTimer(null);
+    }
   }
 
   async function handleBulkSyncToSupabase() {
@@ -1317,6 +1466,39 @@ export function Settings() {
     }
   }
 
+  // Bulk rediscover Script IDs — fixes every CB Clients row whose SCRIPT ID
+  // is blank or still holds the template id (legacy pollution from onboarding).
+  const [rediscoverLoading, setRediscoverLoading] = useState(false);
+  const [rediscoverResult, setRediscoverResult] = useState<{ processed: number; updated: number; skipped: number; details?: Array<{ name: string; before: string; after: string; source?: string; error?: string }> } | null>(null);
+  const [rediscoverError, setRediscoverError] = useState<string | null>(null);
+  async function handleRediscoverAllScriptIds() {
+    setRediscoverLoading(true);
+    setRediscoverError(null);
+    setRediscoverResult(null);
+    try {
+      // Authoritative path: call each client's Web App via action=get_script_id.
+      // The client's bound script runs ScriptApp.getScriptId() in its own context
+      // and returns its real id. Drive/Settings searches only see template leakage.
+      const res = await postBackfillScriptIdsViaWebApp();
+      if (res.ok && res.data) {
+        setRediscoverResult({
+          processed: res.data.processed,
+          updated: res.data.updated,
+          skipped: res.data.skipped,
+          details: res.data.clients,
+        });
+        console.table(res.data.clients);
+        refetchClients();
+      } else {
+        setRediscoverError(res.error || res.data?.error || 'Backfill failed');
+      }
+    } catch (err) {
+      setRediscoverError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setRediscoverLoading(false);
+    }
+  }
+
   async function handleSyncAll() {
     setSyncLoading(true);
     setSyncError('');
@@ -1444,6 +1626,16 @@ export function Settings() {
                         Sync All Settings
                       </button>
                     )}
+                    {isLive && (
+                      <button
+                        onClick={handleRediscoverAllScriptIds}
+                        disabled={rediscoverLoading}
+                        title="Rediscover Script IDs for every client whose CB SCRIPT ID is blank or still holds the template id. Safe to run repeatedly."
+                        style={{ padding: '6px 12px', fontSize: 11, border: `1px solid ${theme.colors.border}`, borderRadius: 6, background: '#fff', cursor: rediscoverLoading ? 'wait' : 'pointer', fontFamily: 'inherit', color: theme.colors.textMuted, display: 'flex', alignItems: 'center', gap: 4 }}>
+                        {rediscoverLoading ? <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} /> : <Wrench size={12} />}
+                        Rediscover Script IDs
+                      </button>
+                    )}
                     {isLive && <button onClick={refetchClients} style={{ padding: '6px 10px', fontSize: 11, border: `1px solid ${theme.colors.border}`, borderRadius: 6, background: '#fff', cursor: 'pointer', fontFamily: 'inherit', color: theme.colors.textMuted }}><RefreshCw size={12} /></button>}
                     <button onClick={openCreateModal} style={{ padding: '8px 16px', fontSize: 12, fontWeight: 600, border: 'none', borderRadius: 8, background: theme.colors.orange, color: '#fff', cursor: 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', gap: 4 }}>
                       <Plus size={14} /> Onboard New Client
@@ -1467,6 +1659,85 @@ export function Settings() {
                   <div style={{ padding: 12, borderRadius: 10, marginBottom: 12, background: '#FEF2F2', border: '1px solid #FECACA', fontSize: 12, color: '#991B1B' }}>
                     Sync failed: {syncError}
                     <button onClick={() => setSyncError('')} style={{ marginLeft: 8, fontSize: 10, border: 'none', background: 'none', cursor: 'pointer', color: theme.colors.textMuted, padding: 0 }}>Dismiss</button>
+                  </div>
+                )}
+
+                {/* Per-client Supabase sync — live progress banner (matches Maintenance bulk-sync look) */}
+                {clientSbSyncLoading && clientSbSyncTimer && (
+                  <div style={{
+                    padding: '12px 16px', marginBottom: 12, borderRadius: 10,
+                    background: 'linear-gradient(90deg, #FFF7ED 0%, #FFEDD5 50%, #FFF7ED 100%)',
+                    backgroundSize: '200% 100%',
+                    animation: 'syncPulse 2s ease-in-out infinite',
+                    border: `1px solid ${theme.colors.orange}33`,
+                    display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
+                  }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                      <Loader2 size={18} color={theme.colors.orange} style={{ animation: 'spin 1s linear infinite', flexShrink: 0 }} />
+                      <div>
+                        <div style={{ fontSize: 13, fontWeight: 600, color: theme.colors.text }}>
+                          Syncing {clientSbSyncTimer.clientName} to Supabase…
+                        </div>
+                        <div style={{ fontSize: 11, color: theme.colors.textMuted, marginTop: 1 }}>
+                          Rebuilding inventory / tasks / repairs / will calls / shipments / billing. Typical runtime 15–60s.
+                        </div>
+                      </div>
+                    </div>
+                    <div style={{ fontSize: 13, fontWeight: 700, color: theme.colors.orange, fontVariantNumeric: 'tabular-nums', minWidth: 40, textAlign: 'right' }}>
+                      {clientSbSyncTimer.elapsed < 60
+                        ? `${clientSbSyncTimer.elapsed}s`
+                        : `${Math.floor(clientSbSyncTimer.elapsed / 60)}:${String(clientSbSyncTimer.elapsed % 60).padStart(2, '0')}`}
+                    </div>
+                    <style>{`@keyframes syncPulse { 0%, 100% { background-position: 0% 50%; } 50% { background-position: 100% 50%; } }`}</style>
+                  </div>
+                )}
+
+                {/* Bulk Rediscover Script IDs — result + error banners */}
+                {rediscoverResult && (
+                  <div style={{ padding: 12, borderRadius: 10, marginBottom: 12, background: rediscoverResult.updated > 0 ? '#F0FDF4' : '#F9FAFB', border: `1px solid ${rediscoverResult.updated > 0 ? '#BBF7D0' : theme.colors.border}`, fontSize: 12 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+                      <div>
+                        <div style={{ fontWeight: 600, color: rediscoverResult.updated > 0 ? '#15803D' : theme.colors.textSecondary, marginBottom: 2 }}>
+                          ✓ Script ID rediscovery complete — {rediscoverResult.updated} updated, {rediscoverResult.skipped} skipped, {rediscoverResult.processed} processed
+                        </div>
+                        {rediscoverResult.details && rediscoverResult.details.some(d => d.error) && (
+                          <div style={{ fontSize: 11, color: '#B45309', marginTop: 4 }}>
+                            {rediscoverResult.details.filter(d => d.error).length} error(s) — see console.
+                          </div>
+                        )}
+                      </div>
+                      <button onClick={() => setRediscoverResult(null)} style={{ border: 'none', background: 'none', cursor: 'pointer', color: theme.colors.textMuted, padding: 0, fontSize: 11 }}>Dismiss</button>
+                    </div>
+                  </div>
+                )}
+                {rediscoverError && (
+                  <div style={{ padding: 12, borderRadius: 10, marginBottom: 12, background: '#FEF2F2', border: '1px solid #FECACA', fontSize: 12, color: '#991B1B', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+                    <div>Rediscover failed: {rediscoverError}</div>
+                    <button onClick={() => setRediscoverError(null)} style={{ border: 'none', background: 'none', cursor: 'pointer', color: '#991B1B', fontSize: 11, padding: 0 }}>Dismiss</button>
+                  </div>
+                )}
+
+                {/* Per-client Supabase sync result */}
+                {clientSbSyncResult && (
+                  <div style={{ padding: 12, borderRadius: 10, marginBottom: 12, background: '#F0FDF4', border: '1px solid #BBF7D0', fontSize: 12 }}>
+                    <div style={{ fontWeight: 600, color: '#15803D', marginBottom: 4 }}>
+                      ✓ {clientSbSyncResult.clientName} synced to Supabase
+                    </div>
+                    <div style={{ fontSize: 11, color: '#15803D', opacity: 0.85 }}>
+                      Inventory {clientSbSyncResult.totalRows.inventory ?? 0} · Tasks {clientSbSyncResult.totalRows.tasks ?? 0} · Repairs {clientSbSyncResult.totalRows.repairs ?? 0} · Will Calls {clientSbSyncResult.totalRows.will_calls ?? 0} · Shipments {clientSbSyncResult.totalRows.shipments ?? 0} · Billing {clientSbSyncResult.totalRows.billing ?? 0} upserted
+                      {clientSbSyncResult.totalDeleted && (
+                        Object.values(clientSbSyncResult.totalDeleted).some(v => v > 0)
+                          ? ` · ${Object.values(clientSbSyncResult.totalDeleted).reduce((a, b) => a + b, 0)} orphan rows deleted`
+                          : ''
+                      )}
+                    </div>
+                    <button onClick={() => setClientSbSyncResult(null)} style={{ marginTop: 6, fontSize: 10, border: 'none', background: 'none', cursor: 'pointer', color: theme.colors.textMuted, padding: 0 }}>Dismiss</button>
+                  </div>
+                )}
+                {clientSbSyncError && (
+                  <div style={{ padding: 12, borderRadius: 10, marginBottom: 12, background: '#FEF2F2', border: '1px solid #FECACA', fontSize: 12, color: '#991B1B' }}>
+                    Supabase sync failed for {clientSbSyncError.clientName}: {clientSbSyncError.error}
+                    <button onClick={() => setClientSbSyncError(null)} style={{ marginLeft: 8, fontSize: 10, border: 'none', background: 'none', cursor: 'pointer', color: theme.colors.textMuted, padding: 0 }}>Dismiss</button>
                   </div>
                 )}
 
@@ -1628,12 +1899,17 @@ export function Settings() {
                       </div>
                     </div>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0, marginLeft: 8 }}>
-                      {/* Finish Setup button — only shown if Web App URL is missing (partial onboard) */}
-                      {isLive && (c as ApiClient).spreadsheetId && !(c as ApiClient).webAppUrl && (
+                      {/* Finish Setup button — shown when Web App URL OR Script ID is missing.
+                          Expanded beyond partial onboards to also recover clients whose CB
+                          SCRIPT ID was cleared as part of the 2026-04-14 template-pollution
+                          cleanup. Safe to run repeatedly — the handler is idempotent. */}
+                      {isLive && (c as ApiClient).spreadsheetId && (!(c as ApiClient).webAppUrl || !((c as ApiClient & { scriptId?: string }).scriptId)) && (
                         <button
                           onClick={e => { e.stopPropagation(); handleFinishSetup(c as ApiClient); }}
                           disabled={finishSetupLoading === (c as ApiClient).spreadsheetId}
-                          title="This client was onboarded but the Web App wasn't deployed. Click to finish setup."
+                          title={!(c as ApiClient).webAppUrl
+                            ? 'Web App URL missing — click to deploy and finish onboarding'
+                            : 'Script ID missing — click to rediscover'}
                           style={{ padding: '5px 10px', fontSize: 10, fontWeight: 700, border: '1px solid #F59E0B', borderRadius: 6, background: '#FEF3C7', cursor: finishSetupLoading === (c as ApiClient).spreadsheetId ? 'wait' : 'pointer', fontFamily: 'inherit', color: '#92400E', display: 'flex', alignItems: 'center', gap: 4, whiteSpace: 'nowrap' }}
                         >
                           {finishSetupLoading === (c as ApiClient).spreadsheetId
@@ -1651,6 +1927,20 @@ export function Settings() {
                         >
                           {welcomeEmailLoading === (c as ApiClient).spreadsheetId ? <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} /> : <Send size={11} />}
                           Welcome Email
+                        </button>
+                      )}
+                      {/* Per-client Supabase sync — re-mirror this one client without running the full bulk sync */}
+                      {isLive && (c as ApiClient).spreadsheetId && clientActive && (
+                        <button
+                          onClick={e => { e.stopPropagation(); handleClientSupabaseSync(c as ApiClient); }}
+                          disabled={clientSbSyncLoading === (c as ApiClient).spreadsheetId || bulkSyncLoading}
+                          title={`Sync ${c.name} to Supabase (re-mirror inventory / tasks / repairs / will calls / shipments / billing)`}
+                          style={{ padding: '5px 10px', fontSize: 10, fontWeight: 600, border: `1px solid ${theme.colors.border}`, borderRadius: 6, background: '#fff', cursor: clientSbSyncLoading === (c as ApiClient).spreadsheetId ? 'wait' : (bulkSyncLoading ? 'not-allowed' : 'pointer'), fontFamily: 'inherit', color: theme.colors.textSecondary, display: 'flex', alignItems: 'center', gap: 4, whiteSpace: 'nowrap', opacity: bulkSyncLoading ? 0.5 : 1 }}
+                        >
+                          {clientSbSyncLoading === (c as ApiClient).spreadsheetId
+                            ? <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} />
+                            : <Cloud size={11} />}
+                          {clientSbSyncLoading === (c as ApiClient).spreadsheetId ? 'Syncing…' : 'Sync'}
                         </button>
                       )}
                       {/* Edit button — opens the same edit modal as clicking the card, but visible & obvious */}
@@ -1955,111 +2245,6 @@ export function Settings() {
               {usersLoading && <div style={{ padding: 20, textAlign: 'center', color: theme.colors.textMuted, fontSize: 13 }}>Loading users…</div>}
               {usersError && <div style={{ padding: '10px 14px', background: '#FEF2F2', borderRadius: 8, color: '#DC2626', fontSize: 12, marginBottom: 12 }}>{usersError}</div>}
               {!usersLoading && (() => {
-                const uq = userSearch.toLowerCase();
-                const filteredUsers = uq
-                  ? users.filter(u =>
-                      u.email.toLowerCase().includes(uq) ||
-                      u.role.toLowerCase().includes(uq) ||
-                      (u.clientName || '').toLowerCase().includes(uq))
-                  : users;
-
-                const userColumns: ColumnDef<ApiUser, any>[] = [
-                  { accessorKey: 'email', header: 'Email', cell: ({ getValue }) => <span style={{ fontWeight: 500 }}>{getValue()}</span> },
-                  {
-                    accessorKey: 'role', header: 'Role',
-                    cell: ({ getValue }) => {
-                      const role = getValue() as string;
-                      const roleLabel = role.charAt(0).toUpperCase() + role.slice(1);
-                      return <span style={{
-                        fontSize: 11, padding: '2px 10px', borderRadius: 10, fontWeight: 600,
-                        background: role === 'admin' ? '#EDE9FE' : role === 'staff' ? '#EFF6FF' : theme.colors.orangeLight,
-                        color: role === 'admin' ? '#7C3AED' : role === 'staff' ? '#1D4ED8' : theme.colors.orange,
-                      }}>{roleLabel}</span>;
-                    },
-                  },
-                  {
-                    accessorKey: 'clientName', header: 'Client Access',
-                    cell: ({ getValue }) => {
-                      const names = (getValue() as string || '').split(',').map(s => s.trim()).filter(Boolean);
-                      return names.length === 0
-                        ? <span style={{ color: theme.colors.textMuted }}>—</span>
-                        : <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>{names.map((name, i) =>
-                            <span key={i} style={{ fontSize: 10, padding: '1px 7px', borderRadius: 8, background: theme.colors.orangeLight, color: theme.colors.orange, fontWeight: 600 }}>{name}</span>
-                          )}</div>;
-                    },
-                  },
-                  {
-                    accessorKey: 'active', header: 'Active',
-                    cell: ({ getValue }) => getValue() ? <span style={{ color: '#15803D' }}>✓</span> : <span style={{ color: theme.colors.textMuted }}>✗</span>,
-                    meta: { align: 'center' },
-                  },
-                  {
-                    accessorKey: 'lastLogin', header: 'Last Login',
-                    cell: ({ getValue }) => <span style={{ color: theme.colors.textMuted }}>{getValue() || '—'}</span>,
-                  },
-                  {
-                    id: 'actions', header: '', enableSorting: false,
-                    cell: ({ row }) => {
-                      const u = row.original;
-                      return (
-                        <div style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
-                          {realUser?.role === 'admin' && u.role === 'client' && (
-                            <button
-                              disabled={sendingWelcomeEmail !== null}
-                              onClick={(e) => { e.stopPropagation(); handleSendWelcomeToOneUser(u.email); }}
-                              style={{
-                                display: 'inline-flex', alignItems: 'center', gap: 4, padding: '3px 10px', fontSize: 11, fontWeight: 600,
-                                border: `1px solid ${theme.colors.border}`, borderRadius: 6,
-                                background: sendingWelcomeEmail === u.email ? theme.colors.orangeLight : '#fff',
-                                color: sendingWelcomeEmail === u.email ? theme.colors.orange : theme.colors.textSecondary,
-                                cursor: sendingWelcomeEmail !== null ? 'wait' : 'pointer',
-                                opacity: (sendingWelcomeEmail !== null && sendingWelcomeEmail !== u.email) ? 0.4 : 1,
-                              }}
-                              title={`Send welcome email to ${u.email}`}
-                            >
-                              {sendingWelcomeEmail === u.email ? <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} /> : <Send size={12} />}
-                              {sendingWelcomeEmail === u.email ? 'Sending…' : 'Send Welcome'}
-                            </button>
-                          )}
-                          {realUser?.role === 'admin' && u.email !== realUser.email && u.active && (
-                            <button
-                              disabled={impersonatingEmail !== null}
-                              onClick={async (e) => {
-                                e.stopPropagation();
-                                setImpersonatingEmail(u.email);
-                                const { error: impErr } = await impersonateUser(u.email);
-                                setImpersonatingEmail(null);
-                                if (!impErr) navigate('/');
-                              }}
-                              style={{
-                                display: 'inline-flex', alignItems: 'center', gap: 4, padding: '3px 10px', fontSize: 11, fontWeight: 600,
-                                border: `1px solid ${theme.colors.border}`, borderRadius: 6,
-                                background: impersonatingEmail === u.email ? theme.colors.orangeLight : '#fff',
-                                color: impersonatingEmail === u.email ? theme.colors.orange : theme.colors.textSecondary,
-                                cursor: impersonatingEmail !== null ? 'wait' : 'pointer',
-                                opacity: (impersonatingEmail !== null && impersonatingEmail !== u.email) ? 0.4 : 1,
-                              }}
-                              title={`View app as ${u.email}`}
-                            >
-                              {impersonatingEmail === u.email ? <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} /> : <LogIn size={12} />}
-                              {impersonatingEmail === u.email ? 'Loading…' : 'Login As'}
-                            </button>
-                          )}
-                        </div>
-                      );
-                    },
-                  },
-                ];
-
-                const userTable = useReactTable({
-                  data: filteredUsers,
-                  columns: userColumns,
-                  state: { sorting: userSorting },
-                  onSortingChange: setUserSorting,
-                  getCoreRowModel: getCoreRowModel(),
-                  getSortedRowModel: getSortedRowModel(),
-                });
-
                 const thStyle: React.CSSProperties = {
                   padding: '10px 14px', textAlign: 'left', fontSize: 10, color: theme.colors.textMuted,
                   textTransform: 'uppercase', letterSpacing: '0.04em', userSelect: 'none',

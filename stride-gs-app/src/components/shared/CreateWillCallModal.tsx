@@ -6,6 +6,7 @@ import { WriteButton } from './WriteButton';
 import { postCreateWillCall, isApiConfigured } from '../../lib/api';
 import type { CreateWillCallResponse } from '../../lib/api';
 import { useClients } from '../../hooks/useClients';
+import { useAuth } from '../../contexts/AuthContext';
 import type { WillCall } from '../../lib/types';
 
 interface Props {
@@ -27,6 +28,8 @@ interface WcConflictInfo {
 }
 
 export function CreateWillCallModal({ onClose, onSubmit, preSelectedItemIds = [], liveItems, addOptimisticWc, removeOptimisticWc, existingWillCalls }: Props) {
+  const { user } = useAuth();
+  const hasPreSelected = preSelectedItemIds.length > 0;
   const [step, setStep] = useState<'details' | 'items' | 'review'>('details');
   const [pickupParty, setPickupParty] = useState('');
   const [pickupPhone, setPickupPhone] = useState('');
@@ -74,13 +77,14 @@ export function CreateWillCallModal({ onClose, onSubmit, preSelectedItemIds = []
 
   const selectedItems = useMemo(() => allItems.filter(i => selectedIds.has(i.itemId)), [allItems, selectedIds]);
 
-  // Check selected items against existing active will calls
+  // Check selected items against existing active will calls (exclude optimistic TEMP entries)
   const wcConflicts = useMemo<WcConflictInfo[]>(() => {
     if (!existingWillCalls?.length || !selectedIds.size) return [];
     const activeStatuses = new Set(['Pending', 'Scheduled', 'Partial']);
     const results: WcConflictInfo[] = [];
     const seen = new Set<string>(); // avoid duplicate warnings per item
     for (const wc of existingWillCalls) {
+      if (wc.wcNumber.startsWith('TEMP-')) continue; // skip optimistic creates
       if (!activeStatuses.has(wc.status)) continue;
       for (const wcItem of (wc.items || [])) {
         if (wcItem.released) continue;
@@ -149,7 +153,7 @@ export function CreateWillCallModal({ onClose, onSubmit, preSelectedItemIds = []
         notes: wcNotes || undefined,
         cod,
         codAmount: cod && codAmount !== '' ? parseFloat(codAmount) : undefined,
-        createdBy: 'App',
+        createdBy: user?.displayName || user?.email || 'App',
       }, clientSheetId);
       if (!resp.ok || !resp.data?.success) {
         removeOptimisticWc?.(tempWcNum); // rollback
@@ -183,7 +187,11 @@ export function CreateWillCallModal({ onClose, onSubmit, preSelectedItemIds = []
           <div>
             <div style={{ fontSize: 16, fontWeight: 700 }}>Create Will Call</div>
             <div style={{ fontSize: 12, color: theme.colors.textMuted, marginTop: 2 }}>
-              {step === 'details' ? 'Step 1: Pickup details' : step === 'items' ? 'Step 2: Select items' : 'Step 3: Review'}
+              {step === 'details'
+                ? `Step 1 of ${hasPreSelected ? 2 : 3}: Pickup details`
+                : step === 'items'
+                  ? 'Step 2 of 3: Select items'
+                  : `Step ${hasPreSelected ? 2 : 3} of ${hasPreSelected ? 2 : 3}: Review`}
             </div>
           </div>
           <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4, color: theme.colors.textMuted }}><X size={18} /></button>
@@ -196,13 +204,19 @@ export function CreateWillCallModal({ onClose, onSubmit, preSelectedItemIds = []
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
               <div style={{ gridColumn: '1 / -1' }}>
                 <label style={{ fontSize: 11, fontWeight: 500, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.04em', display: 'block', marginBottom: 3 }}>Client *</label>
-                <AutocompleteSelect
-                  value={client}
-                  onChange={v => { handleClientChange(v); setSelectedIds(new Set()); setSearchTerm(''); }}
-                  placeholder="Select client..."
-                  options={clientNames.map(c => ({ value: c, label: c }))}
-                  style={{ width: '100%' }}
-                />
+                {hasPreSelected && autoClient ? (
+                  <div style={{ padding: '9px 12px', fontSize: 13, background: theme.colors.bgSubtle, border: `1px solid ${theme.colors.border}`, borderRadius: 8, color: theme.colors.text, fontWeight: 500 }}>
+                    {autoClient}
+                  </div>
+                ) : (
+                  <AutocompleteSelect
+                    value={client}
+                    onChange={v => { handleClientChange(v); setSelectedIds(new Set()); setSearchTerm(''); }}
+                    placeholder="Select client..."
+                    options={clientNames.map(c => ({ value: c, label: c }))}
+                    style={{ width: '100%' }}
+                  />
+                )}
               </div>
               <div>
                 <label style={{ fontSize: 11, fontWeight: 500, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.04em', display: 'block', marginBottom: 3 }}>Pickup Party *</label>
@@ -357,7 +371,15 @@ export function CreateWillCallModal({ onClose, onSubmit, preSelectedItemIds = []
             <div style={{ padding: '12px 14px', background: '#F0FDF4', border: '1px solid #86EFAC', borderRadius: 10, marginBottom: 10 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
                 <CheckCircle2 size={16} color="#15803D" />
-                <span style={{ fontSize: 13, fontWeight: 600, color: '#15803D' }}>Will Call Created — {createResult.wcNumber}</span>
+                <span style={{ fontSize: 13, fontWeight: 600, color: '#15803D' }}>Will Call Created —{' '}
+                  <a
+                    href={`#/will-calls/${createResult.wcNumber}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    style={{ color: '#15803D', textDecoration: 'underline', cursor: 'pointer' }}
+                    onClick={e => e.stopPropagation()}
+                  >{createResult.wcNumber}</a>
+                </span>
               </div>
               <div style={{ fontSize: 12, color: '#166534', lineHeight: 1.5 }}>
                 <div>{createResult.itemCount} item{createResult.itemCount !== 1 ? 's' : ''} added{typeof createResult.totalFee === 'number' && createResult.totalFee > 0 ? ` · Total WC Fee: $${createResult.totalFee.toFixed(2)}` : ''}</div>
@@ -380,7 +402,11 @@ export function CreateWillCallModal({ onClose, onSubmit, preSelectedItemIds = []
               </div>
             )}
             <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-              <button onClick={() => step === 'details' ? onClose() : setStep(step === 'review' ? 'items' : 'details')} style={{
+              <button onClick={() => {
+                if (step === 'details') onClose();
+                else if (step === 'review') setStep(hasPreSelected ? 'details' : 'items');
+                else setStep('details');
+              }} style={{
                 padding: '9px 18px', fontSize: 13, fontWeight: 500, border: `1px solid ${theme.colors.border}`,
                 borderRadius: 8, background: '#fff', cursor: 'pointer', fontFamily: 'inherit', color: theme.colors.textSecondary,
               }}>{step === 'details' ? 'Cancel' : 'Back'}</button>
@@ -395,7 +421,7 @@ export function CreateWillCallModal({ onClose, onSubmit, preSelectedItemIds = []
                   onClick={handleCreate}
                 />
               ) : (
-                <button onClick={() => setStep(step === 'details' ? 'items' : 'review')}
+                <button onClick={() => setStep(step === 'details' ? (hasPreSelected ? 'review' : 'items') : 'review')}
                   disabled={step === 'details' ? !client || !pickupParty.trim() : selectedIds.size === 0}
                   style={{
                     padding: '9px 24px', fontSize: 13, fontWeight: 600, border: 'none', borderRadius: 8,

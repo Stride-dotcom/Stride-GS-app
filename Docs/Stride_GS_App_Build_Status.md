@@ -1,10 +1,12 @@
 # Stride GS App — Build Status & Continuation Guide
 
-**Last updated:** 2026-04-14 (session 63 — Deep-link blank-page fix + Item ID ledger Phases 1-3 + post-ship fixes: ledger error client names, useBilling loop, useClients context refactor)
-**StrideAPI.gs:** v38.52.1 (Web App v263)
-**Import.gs (client):** v4.2.1 (rolled out to all 6 clients, web apps v6–v22)
-**Emails.gs (client):** v4.2.0 (rolled out to all 6 clients)
-**Code.gs (client):** v4.6.0 (rolled out to all 6 clients, web apps deployed)
+**Last updated:** 2026-04-14 (session 64 — scriptId template-pollution cleanup; rollout reaches all 47 real client scripts; Import.gs v4.3.0 + RemoteAdmin.gs v1.5.1 deployed; Receiving bulk paste + misc fixes)
+**StrideAPI.gs:** v38.52.4 (Web App v268)
+**Import.gs (client):** v4.3.0 (rolled out to all 47 active clients; Reference column now imported)
+**Emails.gs (client):** v4.2.0 (rolled out to all 47 active clients)
+**WillCalls.gs (client):** v4.3.0 (Item ID / Vendor / Description / Reference columns on completed-WC email)
+**RemoteAdmin.gs (client):** v1.5.1 (new `get_script_id` action writes scriptId to CB on self-report)
+**Code.gs (client):** v4.6.0 (rolled out to all 47 active clients)
 **StaxAutoPay.gs:** v4.5.0 (pushed to Stax Auto Pay bound script)
 **Purpose:** Single living progress document. Updated every session.
 
@@ -71,19 +73,63 @@ Login, Dashboard, Inventory, Receiving, Shipments, Tasks, Repairs, Will Calls, B
 
 ---
 
-## RECENT CHANGES (2026-04-14 session 63)
+## RECENT CHANGES (2026-04-14 session 64)
 
-### Session 63: Deep-link blank-page fix + Item ID ledger Phases 1–3
+### Session 64: Script-ID template-pollution cleanup — all 47 clients on their own bound scripts
+
+**The big win:** for months, `npm run sync`/`rollout`/`deploy-clients` had been silently pushing code to the MASTER TEMPLATE instead of each individual client, because `CB Clients.SCRIPT ID` was polluted with the template's scriptId (`1Pk2Oc0u7RRg…`) for 44 of 50 rows. Every apparent "47/47 success" deploy was really the same 1 template script receiving 47 near-simultaneous pushes. All 47 clients ran stale code from whenever they were originally onboarded.
+
+**Root cause (forensic):** `handleOnboardClient_` + `handleFinishClientSetup_` used Drive search (`'<sheetId>' in parents and mimeType=script`) to find the bound script after `makeCopy`. Container-bound scripts don't reliably show up as children of their spreadsheet in Drive queries — the search was returning the TEMPLATE's bound script (which has multiple parent links from old onboarding copies), and that template id was then written to every new client's SCRIPT ID column. `sync-clients.mjs` trusted CB's value, pushed `clients.json` with template ids, and downstream everything aimed at the template.
+
+**Fix (code):**
+- **StrideAPI.gs v38.52.2–v38.52.4:** explicit guard rejecting `TEMPLATE_SCRIPT_ID` everywhere it could flow into CB (append / update / finish-setup / append-client-row). `api_resolveBoundScriptViaRedirect_` helper uses Google's own redirect (`script.google.com/d/<sheetId>/edit` → `.../home/projects/<SCRIPT_ID>/edit`) to get the authoritative bound scriptId — works immediately after makeCopy, can't return template leakage. Wired as Strategy 0 in both onboarding and Finish Setup.
+- **RemoteAdmin.gs v1.5.1:** new `get_script_id` doPost action calls `ScriptApp.getScriptId()` in the client's own context and writes it directly to `CB Clients.SCRIPT ID` via `CONSOLIDATED_BILLING_SPREADSHEET_ID`. Each client self-reports authoritatively — can't lie, can't leak, no Drive search needed.
+- **New endpoint `backfillScriptIdsViaWebApp`** iterates CB Clients and calls each client's Web App URL with `{action: "get_script_id"}`. Requires the RemoteAdmin v1.5.1 rollout to be live on each client first.
+- **React: new "Rediscover Script IDs" button** on Settings → Clients (wraps `backfillScriptIdsViaWebApp`). Progress banner + per-client `console.table` of results.
+- **Finish Setup button** now shows when `scriptId` is missing (not just when Web App URL is missing), so operators can recover individual clients whose scriptId was cleared.
+- **`sync-clients.mjs`:** rejects the template scriptId in every priority (CB column / cached / Settings / Drive) and falls through to the next strategy. Added `getScriptIdViaBulkDrive` that enumerates ALL accessible Apps Script projects with their parents and matches client-side (workaround for Drive's unreliable parent-child queries on container-bound scripts).
+- **`update-deployments.mjs` v2.2.0:** `deployments.update` now falls back to `deployments.create` when the existing deploymentId doesn't belong to the target scriptId (common case after fixing CB — old URLs were template deployments). New deployment URLs are rewritten to both `clients.json` and `CB Clients.WEB APP URL` automatically. Rate-limited to ≈40/min (1500ms pacing) with 30s/60s/90s quota backoff to stay under Apps Script API's "60 management requests per user per minute" cap.
+
+**Client-side workflow Justin executed (resolved in ~2h):**
+1. Manually collected 38 of 50 real scriptIds from each client sheet's Extensions → Apps Script → ⚙️ Project Settings, pasted into CB Clients SCRIPT ID column.
+2. `npm run sync` → `clients.json` now has 47 unique scriptIds (2 inactive, 1 template-only).
+3. `npm run rollout` → Import.gs v4.3.0 + RemoteAdmin.gs v1.5.1 + WillCalls.gs v4.3.0 + Code.gs v4.6.0 pushed to all 47 real client scripts. First time the rollout ever hit the right targets.
+4. `npm run deploy-clients` → 42 fresh Web App deployments created on real client scripts (old URLs were template deployments) + 5 updates. `CB Clients.WEB APP URL` column rewritten with new URLs.
+5. 12 of 50 clients that didn't get manual entry still return `webapp error: template id or blank` on Rediscover because their current webAppUrl is still a template deployment. Workflow to recover any future client: open their sheet → Extensions → Apps Script → ⚙️ Project Settings → copy Script ID → paste into CB → click Finish Setup on their card in Settings → Clients.
+
+**Other session 64 changes (smaller):**
+- **Import.gs v4.3.0:** `IMPORT_COL_MAP_` now maps legacy REFERENCE / REF / REF# / PO / PO# / PURCHASE ORDER / ORDER / SO# / SALES ORDER / WORKROOM / INVOICE # / JOB / JOB # headers to the Inventory Reference column. Was blank on all imported rows before.
+- **WillCalls.gs v4.3.0:** `buildWcItemsEmailTable_` now renders Item ID / Vendor / Description / Reference columns (was Item ID / Description / Class). Vendor + Reference backfilled from Inventory when missing.
+- **StrideAPI.gs handleGenerateWcDoc_ v38.51.0:** emits the full DOC_WILL_CALL_RELEASE token set matching the Doc template (DATE / EST_PICKUP_ROW / REQUESTED_BY_ROW / ITEM_COUNT / NOTES_HTML / ITEMS_TABLE_ROWS / TOTAL_ITEMS / TOTAL_FEE / PICKUP_PHONE_HTML). Previously 9-token subset left most placeholders rendering as raw `{{TOKEN}}` text.
+- **handleGenerateWcDoc_ v38.51.1:** bug fix — was calling nonexistent `api_readClientSettings_` → Regenerate Pickup Document instantly errored. Fixed to `api_readSettings_`.
+- **StrideAPI.gs handleStartRepair_ v38.51.6–v38.51.9:** now generates DOC_REPAIR_WORK_ORDER PDF into canonical `Repairs/<id>` folder (was going to a different path, leaving the Repair Folder button's destination empty). Allows regeneration on Approved / In Progress / Complete statuses. 3-tier fallback for Supabase write-through so Shipment Folder stays populated for legacy repairs with no source task.
+- **Receiving Paste from Excel:** new orange modal button (top-right of Items grid) opens a textarea for bulk TSV paste with a configurable "Start column" dropdown. Inline paste into any input cell now spreads tab-separated columns rightward through the field order. Qty parses as int, Class coerces to XS/S/M/L/XL or stays blank, Item ID skipped when Auto-ID is on.
+- **Receiving hyperlinks self-heal (v38.51.3):** new `api_hyperlinkReceivedItems_` helper creates per-item Drive folders under PHOTOS_FOLDER_ID and hyperlinks Inventory.Item ID / Inventory.Shipment # / Tasks.Task ID at receive time. Shipment-folder creation pulled out of the email block so disabling notifications no longer breaks folder buttons.
+- **Billing WC "Start Will Call" + "Regenerate Pickup Document"** buttons persistent; top-of-panel confirmation banners on Repair Start / WC Regenerate so users see confirmation that doesn't disappear on refetch.
+- **Per-client Supabase Sync button** on Settings → Clients cards with Maintenance-style animated progress banner.
+- **Deep-link `&client=<sheetId>`** passed from Task/Repair panels so Inventory auto-selects the right client without a Supabase round-trip.
+
+**Known landmines from tonight:**
+1. I briefly shipped `cacheSubscribe` pub/sub in `useApiData` to sync AppLayout + Page useClients instances → cascaded into refresh loops on WC / Repairs pages → reverted. A proper `ClientsProvider` Context was also tried in session 63 and reverted (React #300 on client-filter click, cause unclear under minified build). The multi-instance `useClients` race is currently mitigated by the session-62/63 ref pattern in the 6 data hooks + in-memory cache short-circuit — not architecturally fixed. Still on the open list.
+2. A new Receiving `useEffect([clientSheetId, apiClients, liveClients, clientAutoInspect])` intended to patch the auto-inspect race triggered React #300 on Inventory / Clients pages. Removed in final bundle `index-XUulEEyK.js` (commit `530c358`). **The auto-inspect race is NOT fixed in the shipping bundle** — if a user picks a client before `apiClients` resolves from the API, `needsInspection` checkboxes stay unticked. Needs a cleaner re-implementation.
+3. `handleBackfillScriptIdsViaWebApp_` was first shipped reading `PropertiesService.getScriptProperties().getProperty("REMOTE_EXEC_TOKEN")` — wrong key, every client returned `unauthorized`. Fixed in v38.52.3 to use `CLIENT_REMOTE_EXEC_TOKEN` with hardcoded fallback matching `handleRemoteAction_`.
+
+**Live artifacts after this session:**
+- React bundle: `index-XUulEEyK.js` (commit `530c358`)
+- Web Apps: `Stride API v268` (StrideAPI.gs v38.52.4); 47 client Web Apps all on their own bound scripts (v3+)
+- Supabase: no new migrations this session
+
+### Session 63 archive (moved): Deep-link blank-page fix + Item ID ledger Phases 1–3
 
 Two independent tracks shipped in one session. Full forensic writeup for each is in `Docs/Archive/Session_History.md` — this section keeps the operational details future builders need.
 
 **Live artifacts after this session:**
-- React bundle: `index-BFRgl5Rm.js` (commit `2e91aa6`) — final of 5 deploys this session
+- Final React bundle for session 63: `index-BmcdaxbO.js` (commit `573e59b`) — after the Context-refactor revert
 - StrideAPI.gs: **v38.52.1** → Web App **v263**
 - Supabase migration: `stride-gs-app/supabase/migrations/20260414180000_item_id_ledger.sql` applied
 - New table: `public.item_id_ledger` (4,054 rows backfilled)
 - New view: `public.item_id_ledger_conflicts` (22 pre-existing legacy collisions — no action needed)
-- New React context: `ClientsProvider` at app root — single source of truth for `useClients()`
+- **No** React context for clients — `ClientsProvider` was tried then reverted; see Fix C below
 
 #### Part 1 — Deep-link blank-page fix (5 React pages + WC panel)
 
@@ -172,25 +218,26 @@ Duplicate Item ID already assigned to another client:
 Edit the Item ID column and try again.
 ```
 
-**Fix B — `useBilling` infinite render loop (React error #300 on Inventory page).** Symptom: Inventory page crashed with `Uncaught Error: Minified React error #300` and DevTools Network tab showed dozens of `(canceled)` Supabase inventory requests cascading. Root cause: the session-62 `clientNameMap` ref-stabilization pattern was applied to `useInventory` / `useTasks` / `useRepairs` / `useWillCalls` / `useShipments` but **not** `useBilling`. Inventory page calls `useBilling(apiConfigured && clientFilter.length > 0, billingSheetId)` alongside the other 5, so the same perpetual abort/refetch loop (new `clients` reference every render → new `clientNameMap` → new `fetchFn` → new `doFetch` → useEffect refire → abort → repeat) fired until React's render limit. Fix: mirror `clientNameMap` into a `useRef` in `useBilling`, narrow `fetchFn` deps to `[clientSheetId, hasServerFilters, filtersKey]`, also stabilized the `filters` prop via ref + serialized key. Commit `91e8b5d`, bundle `index-KmG1qKHk.js`. Intermediate fix — superseded by Fix C the same session.
+**Fix B — `useBilling` infinite render loop (React error #300 on Inventory page).** Symptom: Inventory page crashed with `Uncaught Error: Minified React error #300` and DevTools Network tab showed dozens of `(canceled)` Supabase inventory requests cascading. Root cause: the session-62 `clientNameMap` ref-stabilization pattern was applied to `useInventory` / `useTasks` / `useRepairs` / `useWillCalls` / `useShipments` but **not** `useBilling`. Inventory page calls `useBilling(apiConfigured && clientFilter.length > 0, billingSheetId)` alongside the other 5, so the same perpetual abort/refetch loop (new `clients` reference every render → new `clientNameMap` → new `fetchFn` → new `doFetch` → useEffect refire → abort → repeat) fired until React's render limit. Fix: mirror `clientNameMap` into a `useRef` in `useBilling`, narrow `fetchFn` deps to `[clientSheetId, hasServerFilters, filtersKey]`, also stabilized the `filters` prop via ref + serialized key. **This is the load-bearing fix** for today's React #300. Commit `91e8b5d`, intermediate bundle `index-KmG1qKHk.js`.
 
-**Fix C — Root cause: `useClients` single-source-of-truth via Context.** The ref pattern in 6 data hooks was a band-aid for a real problem — multi-instance divergence of `useClients`. Every consumer (page + 8 data hooks) called `useClients()` independently, each instantiating its own `useApiData` for the `"clients"` cache key. On Inventory that meant ~7 parallel instances, each with independent `data` React state. Values identical, but array **references** diverge across instances — any `setData` on any instance rebuilds that instance's `apiClients`/`clients` memos with a new reference. Anything that closes over `clients` then rebuilds.
+**Fix C — `useClients` Context refactor: ATTEMPTED AND REVERTED.** After Fix B landed, tried to eliminate the root cause entirely (multi-instance divergence — 7 independent `useApiData` instances for the `"clients"` cache key on Inventory page). Built a `ClientsProvider` singleton mounted above the auth gate in `main.tsx` (commit `2e91aa6`). Two regressions surfaced:
 
-Refactor: `ClientsProvider` at the app root owns a **single** `useApiData` instance. `useClients()` is now a thin `useContext()` wrapper. Two context channels (`active` and `all`) so Settings' "include inactive" path doesn't pollute the active-only reads. Keeps a unit-test-safe fallback: if no provider mounted, falls through to the old direct-fetch path.
+1. **Client dropdown empty for 3–5 minutes.** Provider was above the auth gate, so the `getClients` fetch fired pre-login with no token and hung. Moved provider inside `App.tsx` below the `if (!user) return <Login/>` gate (commit `ea74c8b`, bundle `index-BE58wRh8.js`).
+2. **React error #300 returned on client-filter click.** Exact cause unclear under minified production build — likely interaction between the conditional `useContext` fallback path and consumer lifecycles when `ClientsProvider` mounts/unmounts across auth transitions.
 
-Renamed `src/hooks/useClients.ts` → `useClients.tsx` (now contains JSX). Provider wrapped between `<AuthProvider>` and `<BatchDataProvider>` in `main.tsx`. The ref pattern in the 6 data hooks (useInventory/useTasks/useRepairs/useWillCalls/useShipments/useBilling) remains as defense-in-depth but is no longer load-bearing — values from context are stable.
+Reverted to the pre-Context `useClients` with `useMemo` stabilization (commit `573e59b`, bundle `index-BmcdaxbO.js` — live). The Fix-B ref pattern in the 6 data hooks is sufficient in practice: all `useApiData` instances for the `"clients"` cache key short-circuit on the in-memory cache tier after the first fetch, so references stay stable across consumers. A cleaner Context refactor that doesn't trip React #300 is deferred — it's on the open-items list but not urgent, since the ref pattern handles the failure mode.
 
-Commit `2e91aa6`, bundle `index-BFRgl5Rm.js` (live).
+**Fix D — Receiving description cell supports multi-line with Ctrl+Enter.** `AutocompleteInput` now accepts a `multiline` prop. When true it renders a `<textarea>` (auto-grows to fit content), suppresses plain Enter (no stray newline, no form submit), and inserts a `\n` at the caret on Ctrl+Enter / Cmd+Enter. Enabled on the Receiving page Description cell; placeholder updated to `"Item description... (Ctrl+Enter for new line)"` for discoverability. Vendor / Sidemark / Room still use single-line inputs.
 
-**Net effect across all three post-ship fixes:**
+**Net effect across all post-ship fixes:**
 
 | Metric | Before | After |
 |---|---|---|
-| `useClients` instances on Inventory page | ~7 | 1 |
-| Parallel `getClients` network calls on mount | 1–7 | 1 |
-| Cross-instance reference divergence | Yes (root cause) | Impossible |
+| `useClients` instances on Inventory page | ~7 | ~7 (Context refactor reverted) |
+| Cross-instance reference divergence | Yes | Yes, but mitigated by in-memory cache short-circuit + ref pattern |
 | Ledger collision error readability | Raw spreadsheet ID | Client name + status, multi-line |
-| Inventory page render stability under load | Cascading aborts, React #300 crash possible | Stable single fetch, no loop |
+| Inventory page render stability under load | Cascading aborts, React #300 crash | Stable single fetch (via useBilling ref fix) |
+| Receiving Description field | Single line only | Multi-line via Ctrl+Enter |
 
 Previous session (62 React data-hook perf fixes for single- and multi-client views): see `Docs/Archive/Session_History.md`.
 
@@ -601,12 +648,19 @@ Design polish, photo upload, notifications, offline receiving.
 - `CB13_addBillingStatusValidation()` looks for "Billing Status" instead of "Status"
 - Repair discount behavior — should disable discounts on repairs
 
+### Onboarding / client registry (session 64 carryover)
+- **Auto-inspect race on Receiving page** — if the user picks a client before `apiClients` has resolved from the API (cold start), `apiMatch?.autoInspection ?? false` snapshots to false and the item rows' `needsInspection` checkboxes stay un-ticked even after `apiClients` loads. A `useEffect` to patch this was shipped then reverted (caused React #300 on Inventory / Clients pages). Fix needs a cleaner pattern — probably moving the auto-inspect derivation into a `useMemo` over `[clientSheetId, apiClients]` that the `items` initializer reads, or gating the Client select from rendering until `apiClients.length > 0`. Supabase query for post-hoc counting suggests ~63 items received in the last 30 days across 18 tenants are missing INSP tasks — user will backfill manually.
+- **12 clients still show template scriptId in CB** — their current Web App URLs are template deployments, so `Rediscover Script IDs` returns the template id (blocked by guard). Recovery: open each sheet → Extensions → Apps Script → ⚙️ Project Settings → copy Script ID → paste into CB Clients SCRIPT ID → click Finish Setup on that client's card (uses the new URL-redirect resolver + `deployments.create` fallback in `update-deployments.mjs`, or just re-run `npm run sync && npm run rollout && npm run deploy-clients` at the terminal).
+- **Onboarding still uses Drive search as a fallback** after the URL-redirect resolver; if the redirect fails (unexpected — Google's own redirect should always work for container-bound scripts), Drive search could still return template leakage. Template guard in v38.52.2+ catches that case and skips writing, but the new client's scriptId stays blank and the operator must click Finish Setup manually. Monitor for this.
+- **`clients.json` can drift from CB** — `npm run sync` refreshes `clients.json` from CB but only runs on-demand. If someone edits CB directly and forgets to sync, `npm run rollout` will target stale/template scriptIds. Fix: automate sync-before-rollout via a composite npm script, or have rollout read directly from CB via the Sheets API rather than `clients.json`.
+
 ### React App
 - Autocomplete dropdowns — Room + Sidemark data mixed together
 - Receiving page uses hardcoded table (no TanStack Table / no column reorder)
 - Transfer Items dialog needs processing animation + disable buttons after complete
 - Multi-row selection only picks last row for Will Call creation
 - GitHub Pages CDN caching: hard-refresh (Ctrl+Shift+R) after deploy
+- **Client dropdown load time** — occasional reports of slow (120s+) initial client list loads after a deploy. Root cause unclear — `useClients` goes through a single `useApiData` via `ClientsProvider` (session 63 refactor) and hits GAS `getClients` (no Supabase mirror for clients). Suspected: cold-cache first fetch plus GAS latency plus some edge where the fetch isn't being fired. localStorage cache makes subsequent loads instant, but the slow-first-load path should be investigated. Option: mirror `clients` to Supabase so first load is <100ms regardless.
 
 ### React App — Performance (pick up in a new session)
 

@@ -1,5 +1,15 @@
 /* ===================================================
-   ScannerBackend.gs — v2.2.0 — 2026-04-03 11:30 PM PST
+   ScannerBackend.gs — v2.4.0 — 2026-04-14 PST
+   v2.4.0: Server injects API URL into Scanner + LabelPrinter templates so
+           users no longer need to paste it on first load. Sourced from
+           SCANNER_WEB_APP_URL script property if set, else auto-resolved
+           via ScriptApp.getService().getUrl(). localStorage override still
+           honored for dev / cross-deployment testing.
+   v2.3.0: Scanner write mirrors to Supabase (PATCH inventory.location +
+           updated_at), best-effort — matches arch invariant #20. Locations
+           list cached via CacheService (10-min TTL) so autocomplete is
+           instant on return visits. Requires SUPABASE_URL +
+           SUPABASE_SERVICE_ROLE_KEY on this project's script properties.
    =================================================== */
 /***************************************************************
  * QR Scanner — ScannerBackend.gs  v2.0.0  2026-04-01
@@ -163,11 +173,38 @@ function doGet(e) {
     ? HtmlService.createTemplateFromFile("LabelPrinter")
     : qrCreateScannerTemplate_();
 
+  // v2.4.0: Inject the Web App URL so the frontend can auto-configure itself.
+  // Templates read this via <?= INJECTED_API_URL ?> in an early <script>.
+  tmpl.INJECTED_API_URL = qrResolveWebAppUrl_();
+
   return tmpl.evaluate()
     .setTitle(page === "labels" ? "Label Printer — GS Inventory" : "QR Scanner — GS Inventory")
     .addMetaTag("viewport", "width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no")
     .setSandboxMode(HtmlService.SandboxMode.IFRAME)
     .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+}
+
+/**
+ * v2.4.0: Resolve the Web App URL that the served HTML should call back to.
+ * Priority order:
+ *   1. SCANNER_WEB_APP_URL script property (explicit override for staging /
+ *      non-default deployments).
+ *   2. ScriptApp.getService().getUrl() — matches whatever the current user
+ *      loaded; usually correct and requires zero configuration.
+ *   3. Empty string — frontend keeps its existing modal-prompt fallback.
+ * @returns {string}
+ * @private
+ */
+function qrResolveWebAppUrl_() {
+  try {
+    var prop = PropertiesService.getScriptProperties().getProperty('SCANNER_WEB_APP_URL');
+    if (prop) return String(prop).trim();
+  } catch (_) {}
+  try {
+    var url = ScriptApp.getService().getUrl();
+    if (url) return String(url).trim();
+  } catch (_) {}
+  return '';
 }
 
 /* ============================================================
@@ -309,7 +346,19 @@ function validateInventorySheetForLabels_(css, clientName) {
    LOCATIONS
    ============================================================ */
 
+// v2.3.0: Script-level cache key + TTL for the Locations list. 10 minutes is
+// long enough to absorb repeat scanner opens without serving data that's
+// meaningfully stale — and qrUpdateLocations invalidates on any write anyway.
+var QR_LOCATIONS_CACHE_KEY = 'qr:locations';
+var QR_LOCATIONS_CACHE_TTL_S = 600;
+
 function qrGetLocations() {
+  var cache = CacheService.getScriptCache();
+  var cached = cache.get(QR_LOCATIONS_CACHE_KEY);
+  if (cached) {
+    try { return JSON.parse(cached); } catch (_) { /* fall through and re-read */ }
+  }
+
   var ss = SpreadsheetApp.getActive();
   var sh = ss.getSheetByName(QR_CONFIG.LOCATIONS_SH);
   if (!sh || sh.getLastRow() < 2) return [];
@@ -319,7 +368,20 @@ function qrGetLocations() {
     var loc = String(vals[i][0] || "").trim();
     if (loc) out.push(loc);
   }
+  // Serialized cache size limit is 100 KB — well clear of any realistic
+  // location-list size (even 5000 codes × 20 chars = 100 KB).
+  try { cache.put(QR_LOCATIONS_CACHE_KEY, JSON.stringify(out), QR_LOCATIONS_CACHE_TTL_S); } catch (_) {}
   return out;
+}
+
+/**
+ * v2.3.0: invalidate the locations cache. Called from qrUpdateLocations when
+ * the target location was novel, so autocomplete includes it on next fetch
+ * (once operators add it to the Locations sheet).
+ * @private
+ */
+function qrInvalidateLocationsCache_() {
+  try { CacheService.getScriptCache().remove(QR_LOCATIONS_CACHE_KEY); } catch (_) {}
 }
 
 function qrSetupLocationsSheet() {
@@ -446,11 +508,25 @@ function qrUpdateLocations(itemIds, location) {
           }
         }
 
+        /* v2.3.0: Supabase mirror write — best-effort, never fails the move.
+           PATCH only location + updated_at so we don't touch any other column. */
+        for (var mi = 0; mi < moveRows.length; mi++) {
+          qrSupabasePatchLocation_(sheetId, moveRows[mi].itemId, moveRows[mi].toLoc);
+        }
+
       } catch (sheetErr) {
         for (var fi = 0; fi < items.length; fi++) {
           results.errors.push({ itemId: items[fi].itemId, error: sheetErr.message });
         }
       }
+    }
+
+    // v2.3.0: if anything was actually moved, invalidate the cached Locations
+    // list. The target location may be new (awaiting sheet registration) but
+    // even if not, flushing on write is a cheap guarantee that autocomplete
+    // won't go stale after back-office edits to the Locations tab.
+    if (results.updated.length > 0) {
+      qrInvalidateLocationsCache_();
     }
 
     return { success: true, results: results };
@@ -937,5 +1013,58 @@ function qrUpsertLocations(codes) {
     return { success: true, added: added, existed: existed, total: added.length + existed.length };
   } finally {
     lock.releaseLock();
+  }
+}
+
+/* ============================================================
+   v2.3.0: SUPABASE MIRROR WRITE (best-effort)
+   Patches inventory.location + updated_at for a single item so the
+   React app's Supabase read cache reflects scanner moves in seconds
+   instead of waiting for the periodic full sync.
+   Architectural invariant #20: never block the authoritative Sheets
+   write on a Supabase failure. All errors are logged and swallowed.
+   Requires script properties:
+     - SUPABASE_URL                (e.g. https://xxx.supabase.co)
+     - SUPABASE_SERVICE_ROLE_KEY   (service_role JWT — NEVER ship to browser)
+   ============================================================ */
+function qrSupabasePatchLocation_(tenantId, itemId, location) {
+  try {
+    var props = PropertiesService.getScriptProperties();
+    var url = props.getProperty('SUPABASE_URL');
+    var key = props.getProperty('SUPABASE_SERVICE_ROLE_KEY');
+    if (!url || !key) {
+      // Only log once per execution — avoids spamming logs on every move.
+      if (!qrSupabasePatchLocation_._warned) {
+        Logger.log('qrSupabasePatchLocation_: SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY not set on scanner project — skipping Supabase mirror');
+        qrSupabasePatchLocation_._warned = true;
+      }
+      return;
+    }
+
+    var endpoint = url + '/rest/v1/inventory'
+      + '?tenant_id=eq.' + encodeURIComponent(tenantId)
+      + '&item_id=eq.'  + encodeURIComponent(itemId);
+
+    var resp = UrlFetchApp.fetch(endpoint, {
+      method: 'patch',
+      headers: {
+        'apikey':        key,
+        'Authorization': 'Bearer ' + key,
+        'Content-Type':  'application/json',
+        'Prefer':        'return=minimal'
+      },
+      payload: JSON.stringify({
+        location:   String(location || ''),
+        updated_at: new Date().toISOString()
+      }),
+      muteHttpExceptions: true
+    });
+
+    var code = resp.getResponseCode();
+    if (code < 200 || code >= 300) {
+      Logger.log('qrSupabasePatchLocation_ HTTP ' + code + ' for ' + tenantId + '/' + itemId + ': ' + resp.getContentText().substring(0, 200));
+    }
+  } catch (e) {
+    Logger.log('qrSupabasePatchLocation_ error (non-fatal) for ' + tenantId + '/' + itemId + ': ' + e);
   }
 }

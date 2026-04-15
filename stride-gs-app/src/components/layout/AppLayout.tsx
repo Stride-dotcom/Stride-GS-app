@@ -8,6 +8,10 @@ import { useFailedOperations } from '../../hooks/useFailedOperations';
 import { FailedOperationsDrawer } from '../shared/FailedOperationsDrawer';
 import { useSupabaseRealtime } from '../../hooks/useSupabaseRealtime';
 import { useAuth } from '../../contexts/AuthContext';
+import { useClients } from '../../hooks/useClients';
+import { usePricing } from '../../hooks/usePricing';
+import { useLocations } from '../../hooks/useLocations';
+import { supabase } from '../../lib/supabase';
 
 const PAGE_TITLES: Record<string, string> = {
   '/': 'Dashboard',
@@ -27,6 +31,14 @@ export function AppLayout() {
   // Phase 4: subscribe to Supabase Realtime on all 5 cache tables — all users see
   // changes within 1-2s of GAS write completing (write-through is Phase 3)
   useSupabaseRealtime();
+
+  // Pre-fetch shared data at app level so caches are warm for all pages
+  useClients();
+  usePricing();
+  useLocations();
+
+  // Warm the Supabase connection (first query has ~200-500ms cold start)
+  useEffect(() => { supabase.from('inventory').select('item_id', { count: 'exact', head: true }); }, []);
 
   const { user, isImpersonating, exitImpersonation } = useAuth();
 

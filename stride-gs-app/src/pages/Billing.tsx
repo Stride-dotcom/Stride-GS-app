@@ -360,6 +360,21 @@ export function Billing() {
   const [knownClients, setKnownClients] = useState<string[]>([]);
   const [knownSidemarks, setKnownSidemarks] = useState<string[]>([]);
 
+  // Pre-fetch sidemarks from Supabase when client filter changes
+  useEffect(() => {
+    if (!rptClientFilter.length || !apiClients.length) return;
+    const tenantIds = rptClientFilter
+      .map(name => apiClients.find(c => c.name === name)?.spreadsheetId)
+      .filter(Boolean) as string[];
+    if (!tenantIds.length) return;
+    supabase.from('inventory').select('sidemark').in('tenant_id', tenantIds).then(({ data }) => {
+      if (data) {
+        const sidemarks = [...new Set(data.map((r: any) => String(r.sidemark || '').trim()).filter(Boolean))].sort();
+        setKnownSidemarks(prev => [...new Set([...prev, ...sidemarks])].sort());
+      }
+    });
+  }, [rptClientFilter, apiClients]);
+
   // Derive from loaded data
   const reportClients = useMemo(() => {
     const fromData = [...new Set(reportData.map(r => r.client))].sort();
@@ -474,6 +489,21 @@ export function Billing() {
     return [...new Set([...storKnownClients, ...fromData])].sort();
   }, [previewRows, storKnownClients]);
 
+  // Pre-fetch sidemarks from Supabase when storage client filter changes
+  useEffect(() => {
+    if (!storClientFilter.length || !apiClients.length) return;
+    const tenantIds = storClientFilter
+      .map(name => apiClients.find(c => c.name === name)?.spreadsheetId)
+      .filter(Boolean) as string[];
+    if (!tenantIds.length) return;
+    supabase.from('inventory').select('sidemark').in('tenant_id', tenantIds).then(({ data }) => {
+      if (data) {
+        const sidemarks = [...new Set(data.map((r: any) => String(r.sidemark || '').trim()).filter(Boolean))].sort();
+        setStorKnownSidemarks(prev => [...new Set([...prev, ...sidemarks])].sort());
+      }
+    });
+  }, [storClientFilter, apiClients]);
+
   const storageSidemarks = useMemo(() => {
     const fromData = [...new Set(previewRows.map(r => r.sidemark).filter(Boolean) as string[])].sort();
     return [...new Set([...storKnownSidemarks, ...fromData])].sort();
@@ -514,6 +544,11 @@ export function Billing() {
     return () => { cancelled = true; };
   }, [rptClientFilter, clientNameToId]);
 
+  // Track whether storage filters changed since last preview
+  const [lastStorPreviewKey, setLastStorPreviewKey] = useState('');
+  const currentStorKey = useMemo(() => [storClientFilter.join(','), storSidemarkFilter.join(','), storStartDate, storEndDate].join('|'), [storClientFilter, storSidemarkFilter, storStartDate, storEndDate]);
+  const storFiltersChanged = previewLoaded && currentStorKey !== lastStorPreviewKey;
+
   const handlePreviewStorage = useCallback(async () => {
     setPreviewLoading(true);
     setPreviewError('');
@@ -546,6 +581,7 @@ export function Billing() {
       setPreviewRows(rows);
       setPreviewTotalAmount(rows.reduce((s: number, r: BillingRow) => s + r.total, 0));
       setPreviewLoaded(true);
+      setLastStorPreviewKey(currentStorKey);
       // Track known options
       setStorKnownClients(prev => {
         const fromRows = rows.map((r: BillingRow) => r.client);
@@ -559,7 +595,7 @@ export function Billing() {
       setPreviewError(`Preview error: ${err instanceof Error ? err.message : String(err)}`);
     }
     setPreviewLoading(false);
-  }, [storStartDate, storEndDate, storClientFilter, storSidemarkFilter]);
+  }, [storStartDate, storEndDate, storClientFilter, storSidemarkFilter, currentStorKey]);
 
   const handleCommitPreview = useCallback(async () => {
     setCommitLoading(true);
@@ -1402,28 +1438,10 @@ export function Billing() {
          ═══════════════════════════════════════════════════════════════════════ */}
       {activeTab === 'report' && (
         <>
-          {/* Step 1: Select Client + Load Report */}
-          <div style={{ ...filterPanelStyle, display: 'flex', gap: 12, alignItems: 'end', flexWrap: 'wrap' }}>
-            <div style={{ flex: '1 1 280px', maxWidth: 400 }}>
-              <MultiSelectFilter label="Client" options={reportClients} selected={rptClientFilter} onChange={setRptClientFilter} placeholder={clientsLoading ? 'Loading clients…' : 'Select a client…'} />
-            </div>
-            <WriteButton
-              label={reportLoading ? 'Loading...' : 'Load Report'}
-              variant="primary"
-              icon={reportLoading ? <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} /> : <FileText size={14} />}
-              disabled={reportLoading || !apiConfigured}
-              onClick={loadReport}
-            />
-            {reportData.length > 0 && (
-              <span style={{ fontSize: 12, color: theme.colors.textMuted, paddingBottom: 4 }}>
-                {reportData.length} row{reportData.length !== 1 ? 's' : ''} loaded
-              </span>
-            )}
-          </div>
-
-          {/* Step 2: Filter loaded data */}
+          {/* Filters + Load Report — all in one panel so user sets everything before loading */}
           <div style={filterPanelStyle}>
             <div style={filterGridStyle}>
+              <MultiSelectFilter label="Client" options={reportClients} selected={rptClientFilter} onChange={setRptClientFilter} placeholder={clientsLoading ? 'Loading clients…' : 'Select a client…'} />
               <MultiSelectFilter label="Sidemark" options={reportSidemarks} selected={rptSidemarkFilter} onChange={setRptSidemarkFilter} placeholder="All Sidemarks" />
               <MultiSelectFilter label="Service" options={NON_STOR_SERVICES.map(s => s.name)} selected={rptSvcFilter} onChange={setRptSvcFilter} placeholder="All Services" />
               <MultiSelectFilter label="Status" options={ALL_STATUSES} selected={rptStatusFilter} onChange={setRptStatusFilter} placeholder="All Statuses" />
@@ -1431,9 +1449,21 @@ export function Billing() {
                 <span style={dateLabelStyle}>End Date</span>
                 <input type="date" value={rptEndDate} onChange={e => setRptEndDate(e.target.value)} style={dateInputStyle} />
               </div>
-              <div style={{ display: 'flex', gap: 8, alignItems: 'end', paddingBottom: 1 }}>
-                <button onClick={clearReportFilters} style={{ padding: '7px 14px', fontSize: 12, fontWeight: 500, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', fontFamily: 'inherit', color: theme.colors.textSecondary, minHeight: 34 }}>Clear Filters</button>
-              </div>
+            </div>
+            <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginTop: 12, flexWrap: 'wrap' }}>
+              <WriteButton
+                label={reportLoading ? 'Loading...' : 'Load Report'}
+                variant="primary"
+                icon={reportLoading ? <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} /> : <FileText size={14} />}
+                disabled={reportLoading || !apiConfigured}
+                onClick={loadReport}
+              />
+              <button onClick={clearReportFilters} style={{ padding: '7px 14px', fontSize: 12, fontWeight: 500, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', fontFamily: 'inherit', color: theme.colors.textSecondary, minHeight: 34 }}>Clear Filters</button>
+              {reportData.length > 0 && (
+                <span style={{ fontSize: 12, color: theme.colors.textMuted }}>
+                  {reportData.length} row{reportData.length !== 1 ? 's' : ''} loaded
+                </span>
+              )}
             </div>
             {reportError && (
               <div style={{ marginTop: 12, background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 8, padding: '10px 12px', display: 'flex', gap: 8, alignItems: 'flex-start' }}>
@@ -1498,13 +1528,14 @@ export function Billing() {
                 </span>
                 <input type="date" value={storEndDate} onChange={e => setStorEndDate(e.target.value)} disabled={previewLoading} style={dateInputStyle} />
               </div>
-              <div style={{ display: 'flex', gap: 8, alignItems: 'end', paddingBottom: 1 }}>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'end', paddingBottom: 1, flexWrap: 'wrap' }}>
                 <WriteButton
-                  label={previewLoading ? 'Calculating...' : 'Preview Storage Charges'}
+                  label={previewLoading ? 'Calculating...' : storFiltersChanged ? 'Preview (Filters Changed)' : 'Preview Storage Charges'}
                   variant="primary"
                   icon={previewLoading ? <Loader2 size={14} className="animate-spin" /> : <Eye size={14} />}
                   disabled={previewLoading || !storStartDate || !storEndDate || !apiConfigured}
                   onClick={handlePreviewStorage}
+                  style={storFiltersChanged ? { background: '#F59E0B' } : undefined}
                 />
               </div>
             </div>

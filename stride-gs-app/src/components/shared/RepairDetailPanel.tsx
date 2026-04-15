@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { X, Wrench, Package, ClipboardList, CheckCircle2, XCircle, AlertTriangle, Send, Loader2, Truck, Play } from 'lucide-react';
 import { FolderButton } from './FolderButton';
 import { DeepLink } from './DeepLink';
@@ -45,8 +45,12 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
   const { isMobile } = useIsMobile();
   const { width: panelWidth, handleMouseDown: handleResizeMouseDown } = useResizablePanel(460, 'repair', isMobile);
 
-  // Derive effective status from submit result (optimistic update)
+  // Derive effective status from submit result (optimistic update).
+  // Keep in sync with the repair prop — optimistic patches from the parent
+  // hook (applyRepairPatch) update repair.status, and we need the header /
+  // action footer to reflect that instead of the initial mount value.
   const [effectiveStatus, setEffectiveStatus] = useState<string>(repair.status);
+  useEffect(() => { setEffectiveStatus(repair.status); }, [repair.status]);
   const sc = STATUS_CFG[effectiveStatus] || STATUS_CFG['Pending Quote'];
   const isActive = !['Complete', 'Cancelled', 'Declined'].includes(effectiveStatus);
 
@@ -111,7 +115,10 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
         void writeSyncFailed({ tenant_id: clientSheetId, entity_type: 'repair', entity_id: repair.repairId, action_type: 'send_repair_quote', requested_by: user?.email ?? '', request_id: resp.requestId, payload: { repairId: repair.repairId, quoteAmount: amount, clientName: repair.clientName, description: repair.description }, error_message: errMsg });
       } else {
         setEffectiveStatus('Quote Sent');
-        clearRepairPatch?.(repair.repairId); // server confirmed
+        // Don't clear the patch on success — let the 120s TTL handle it.
+        // Clearing immediately creates a window where the fresh fetch returns
+        // stale data (Supabase write-through delay) and the UI flickers back
+        // to the old status. The patch persists until real data matches.
         setSubmitResult(resp.data);
         onRepairUpdated?.();
       }
@@ -147,7 +154,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
         void writeSyncFailed({ tenant_id: clientSheetId, entity_type: 'repair', entity_id: repair.repairId, action_type: 'respond_repair_quote', requested_by: user?.email ?? '', request_id: resp.requestId, payload: { repairId: repair.repairId, decision, clientName: repair.clientName, description: repair.description }, error_message: errMsg });
       } else {
         setEffectiveStatus(decision === 'Approve' ? 'Approved' : 'Declined');
-        clearRepairPatch?.(repair.repairId); // server confirmed
+        // Don't clear patch on success — let TTL handle it (prevents flicker while refetch loads)
         setRespondResult(resp.data);
         onRepairUpdated?.();
       }
@@ -183,7 +190,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
         void writeSyncFailed({ tenant_id: clientSheetId, entity_type: 'repair', entity_id: repair.repairId, action_type: 'start_repair', requested_by: user?.email ?? '', request_id: resp.requestId, payload: { repairId: repair.repairId, clientName: repair.clientName, description: repair.description }, error_message: errMsg });
       } else {
         setEffectiveStatus('In Progress');
-        clearRepairPatch?.(repair.repairId); // server confirmed
+        // Don't clear patch on success — let TTL handle it (prevents flicker while refetch loads)
         setStartResult(resp.data);
         onRepairUpdated?.();
       }
@@ -223,7 +230,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
         void writeSyncFailed({ tenant_id: clientSheetId, entity_type: 'repair', entity_id: repair.repairId, action_type: 'complete_repair', requested_by: user?.email ?? '', request_id: resp.requestId, payload: { repairId: repair.repairId, resultValue, repairNotes: repairNotes || undefined, clientName: repair.clientName, description: repair.description }, error_message: errMsg });
       } else {
         setEffectiveStatus('Complete');
-        clearRepairPatch?.(repair.repairId); // server confirmed
+        // Don't clear patch on success — let TTL handle it (prevents flicker while refetch loads)
         setCompleted(true);
         setCompleteResult(resp.data);
         onRepairUpdated?.();
@@ -279,6 +286,32 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
           </div>
         </div>
 
+        {/* Top-of-panel persistent confirmation for Start / Regenerate Work Order */}
+        {startResult?.success && (
+          <div style={{ padding: '10px 20px', background: '#F5F3FF', borderBottom: '1px solid #DDD6FE', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <Play size={16} color="#7C3AED" />
+              <span style={{ fontSize: 13, color: '#7C3AED', fontWeight: 600 }}>
+                {startResult.skipped
+                  ? 'Work Order folder ready'
+                  : (effectiveStatus === 'Complete' || effectiveStatus === 'In Progress'
+                      ? 'Work Order PDF regenerated in Repair Folder'
+                      : 'Repair started — Work Order PDF created in Repair Folder')}
+              </span>
+            </div>
+            <button onClick={() => setStartResult(null)} style={{ border: 'none', background: 'none', cursor: 'pointer', color: '#7C3AED', fontSize: 11, padding: 0, fontWeight: 600 }}>Dismiss</button>
+          </div>
+        )}
+        {submitError && (
+          <div style={{ padding: '10px 20px', background: '#FEF2F2', borderBottom: '1px solid #FECACA', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <AlertTriangle size={16} color="#DC2626" />
+              <span style={{ fontSize: 13, color: '#DC2626', fontWeight: 600 }}>{submitError}</span>
+            </div>
+            <button onClick={() => setSubmitError(null)} style={{ border: 'none', background: 'none', cursor: 'pointer', color: '#DC2626', fontSize: 11, padding: 0, fontWeight: 600 }}>Dismiss</button>
+          </div>
+        )}
+
         {/* Content */}
         <div style={{ flex: 1, overflowY: 'auto', padding: 20 }}>
 
@@ -287,7 +320,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
             <div style={{ background: theme.colors.bgSubtle, border: `1px solid ${theme.colors.border}`, borderRadius: 10, padding: 14, marginBottom: 16 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}><Package size={14} color={theme.colors.orange} /><span style={{ fontSize: 12, fontWeight: 600 }}>Item</span></div>
               <div style={{ fontSize: 13, fontWeight: 600 }}>
-                <DeepLink kind="inventory" id={repair.itemId} />
+                <DeepLink kind="inventory" id={repair.itemId} clientSheetId={repair.clientSheetId} />
                 {repair.vendor ? ` — ${repair.vendor}` : ''}
               </div>
               {repair.description && <div style={{ fontSize: 12, color: theme.colors.textSecondary, marginTop: 2 }}>{repair.description}</div>}
@@ -308,7 +341,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
           {repair.sourceTaskId && (
             <div style={{ background: '#FFFBF5', border: '1px solid #FED7AA', borderRadius: 10, padding: 14, marginBottom: 16 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}><ClipboardList size={14} color="#B45309" /><span style={{ fontSize: 12, fontWeight: 600, color: '#92400E' }}>Source Task: {repair.sourceTaskId}</span></div>
-              <div style={{ fontSize: 12, color: '#92400E', lineHeight: 1.5 }}>{repair.repairNotes || 'No inspection notes available'}</div>
+              <div style={{ fontSize: 12, color: '#92400E', lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>{repair.taskNotes || 'No inspection notes available'}</div>
             </div>
           )}
 
@@ -395,8 +428,10 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
           </div>
         )}
 
-        {/* Start Repair footer (Approved) */}
-        {isActive && !completed && effectiveStatus === 'Approved' && !startResult && (
+        {/* Start Repair / Regenerate Work Order — available on Approved, In Progress, Complete.
+            Keep the button visible after success so the user can re-run regenerate as many
+            times as they want without having to dismiss the confirmation first. */}
+        {(effectiveStatus === 'Approved' || effectiveStatus === 'In Progress' || effectiveStatus === 'Complete') && (
           <div style={{ padding: '14px 20px', borderTop: `1px solid ${theme.colors.border}`, flexShrink: 0 }}>
             {submitError && (
               <div style={{ marginBottom: 10, padding: '8px 12px', background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: 8, fontSize: 12, color: '#DC2626', display: 'flex', alignItems: 'flex-start', gap: 6 }}>
@@ -405,7 +440,9 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
               </div>
             )}
             <WriteButton
-              label={submitting ? 'Starting...' : 'Start Repair'}
+              label={submitting
+                ? (effectiveStatus === 'Approved' ? 'Starting...' : 'Regenerating...')
+                : (effectiveStatus === 'Approved' ? 'Start Repair' : 'Regenerate Work Order')}
               variant="primary"
               icon={submitting ? <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} /> : <Play size={16} />}
               style={{ width: '100%', background: '#7C3AED', padding: '10px', fontSize: 13, opacity: submitting ? 0.7 : 1 }}
@@ -577,7 +614,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
                 try {
                   const resp = await postCancelRepair({ repairId: repair.repairId }, cid);
                   if (resp.ok && resp.data?.success) {
-                    clearRepairPatch?.(repair.repairId); // server confirmed
+                    // Don't clear patch on success — let TTL handle it (prevents flicker while refetch loads)
                     setEffectiveStatus('Cancelled'); setCompleted(true); onRepairUpdated?.();
                   } else {
                     clearRepairPatch?.(repair.repairId); // rollback

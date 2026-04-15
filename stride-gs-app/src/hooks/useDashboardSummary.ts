@@ -4,6 +4,7 @@ import type { SummaryTask, SummaryRepair, SummaryWillCall } from '../lib/api';
 import { fetchDashboardSummaryFromSupabase, isSupabaseCacheAvailable } from '../lib/supabaseQueries';
 import type { ClientNameMap } from '../lib/supabaseQueries';
 import { useClients } from './useClients';
+import { useAuth } from '../contexts/AuthContext';
 
 export type { SummaryTask, SummaryRepair, SummaryWillCall };
 
@@ -27,6 +28,13 @@ export function useDashboardSummary(autoFetch = true): UseDashboardSummaryResult
   const abortRef = useRef<AbortController | null>(null);
   const hasFetched = useRef(false);
   const { clients } = useClients();
+  const { user } = useAuth();
+
+  // For client-role users, only include their accessible tenants
+  const tenantFilter = useMemo<string[] | undefined>(() => {
+    if (!user || user.role === 'admin' || user.role === 'staff') return undefined; // no filter
+    return user.accessibleClientSheetIds || [];
+  }, [user]);
 
   const clientNameMap = useMemo<ClientNameMap>(() => {
     const map: ClientNameMap = {};
@@ -46,7 +54,7 @@ export function useDashboardSummary(autoFetch = true): UseDashboardSummaryResult
     try {
       // Try Supabase read cache first (50-100ms vs 3-44s)
       if (await isSupabaseCacheAvailable()) {
-        const sbResult = await fetchDashboardSummaryFromSupabase(clientNameMap);
+        const sbResult = await fetchDashboardSummaryFromSupabase(clientNameMap, tenantFilter);
         if (sbResult && !ctrl.signal.aborted) {
           setTasks(sbResult.tasks || []);
           setRepairs(sbResult.repairs || []);

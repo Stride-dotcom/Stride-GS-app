@@ -65,6 +65,20 @@ export function useTaskDetail(taskId: string | undefined): UseTaskDetailResult {
               if (fetchId === fetchCountRef.current) setRelatedRepairs(repairs);
             });
         }
+
+        // Background enrichment: if task is started but Supabase has no folder URL,
+        // fetch from GAS which reads hyperlinks (covers tasks started before resync fix)
+        const isStarted = sbTask.status === 'In Progress' || sbTask.status === 'Completed';
+        if (isStarted && !sbTask.taskFolderUrl && sbTask.clientSheetId) {
+          fetchTaskById(taskId, sbTask.clientSheetId)
+            .then(gasResp => {
+              if (fetchId !== fetchCountRef.current) return;
+              if (gasResp.data?.success && gasResp.data.task?.taskFolderUrl) {
+                setTask(prev => prev ? { ...prev, taskFolderUrl: gasResp.data!.task!.taskFolderUrl } : prev);
+              }
+            })
+            .catch(() => {}); // best-effort, non-blocking
+        }
         return;
       }
 

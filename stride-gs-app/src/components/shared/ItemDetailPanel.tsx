@@ -1,5 +1,5 @@
 import React, { useState, useRef, useCallback, useEffect, useMemo } from 'react';
-import { X, Package, Calendar, FileText, ClipboardList, Wrench, Truck, ExternalLink, DollarSign, Ship, AlertCircle, MapPin, CheckCircle2, Pencil, Save, Loader2 } from 'lucide-react';
+import { X, Package, Calendar, FileText, ClipboardList, Wrench, Truck, ExternalLink, DollarSign, Ship, AlertCircle, MapPin, CheckCircle2, Pencil, Save, Loader2, FolderOpen } from 'lucide-react';
 import { FolderButton } from './FolderButton';
 import { LinkifiedText } from './LinkifiedText';
 import { AutocompleteInput } from './AutocompleteInput';
@@ -430,7 +430,7 @@ function ItemHistory({ tasks, repairs, willCalls, billing, moves, shipmentNumber
 
 
 export function ItemDetailPanel({
-  item, onClose, shipmentFolderUrl,
+  item, onClose, photosFolderId, shipmentFolderUrl,
   linkedTasks = [], linkedRepairs = [], linkedWillCalls = [],
   onNavigateToRecord,
   onCreateTask, onCreateWillCall, onTransfer,
@@ -779,9 +779,10 @@ export function ItemDetailPanel({
 
           {/* Related Records */}
           <Section icon={FileText} title="Related" count={linkedTasks.length + linkedRepairs.length + linkedWillCalls.length || undefined}>
-            {/* Shipment Folder */}
-            <div style={{ marginBottom: 8 }}>
+            {/* Shipment + Photos Folders */}
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 8 }}>
               <FolderButton label={`Shipment ${item.shipmentNumber || 'Folder'}`} url={shipmentFolderUrl} disabledTooltip="Folder link missing — use Fix Missing Folders on Inventory page" icon={Truck} />
+              {photosFolderId && <FolderButton label="Photos" url={`https://drive.google.com/drive/folders/${photosFolderId}`} icon={FolderOpen} />}
             </div>
 
             {/* Entity folder buttons (task / repair / WC) */}

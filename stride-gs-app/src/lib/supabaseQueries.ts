@@ -98,12 +98,16 @@ interface SupabaseInventoryRow {
 
 export async function fetchInventoryFromSupabase(
   clientNameMap: ClientNameMap,
-  clientSheetId?: string
+  clientSheetId?: string | string[]
 ): Promise<InventoryResponse | null> {
   try {
     let query = supabase.from('inventory').select('*');
     if (clientSheetId) {
-      query = query.eq('tenant_id', clientSheetId);
+      if (Array.isArray(clientSheetId)) {
+        if (clientSheetId.length > 0) query = query.in('tenant_id', clientSheetId);
+      } else {
+        query = query.eq('tenant_id', clientSheetId);
+      }
     }
     const { data, error } = await query;
     if (error || !data) return null;
@@ -137,7 +141,7 @@ export async function fetchInventoryFromSupabase(
     return {
       items,
       count: items.length,
-      clientsQueried: clientSheetId ? 1 : Object.keys(clientNameMap).length,
+      clientsQueried: Array.isArray(clientSheetId) ? clientSheetId.length : (clientSheetId ? 1 : Object.keys(clientNameMap).length),
     };
   } catch {
     return null;
@@ -175,12 +179,16 @@ interface SupabaseTaskRow {
 
 export async function fetchTasksFromSupabase(
   clientNameMap: ClientNameMap,
-  clientSheetId?: string
+  clientSheetId?: string | string[]
 ): Promise<TasksResponse | null> {
   try {
     let query = supabase.from('tasks').select('*');
     if (clientSheetId) {
-      query = query.eq('tenant_id', clientSheetId);
+      if (Array.isArray(clientSheetId)) {
+        if (clientSheetId.length > 0) query = query.in('tenant_id', clientSheetId);
+      } else {
+        query = query.eq('tenant_id', clientSheetId);
+      }
     }
     const { data, error } = await query;
     if (error || !data) return null;
@@ -192,7 +200,7 @@ export async function fetchTasksFromSupabase(
     return {
       tasks,
       count: tasks.length,
-      clientsQueried: clientSheetId ? 1 : Object.keys(clientNameMap).length,
+      clientsQueried: Array.isArray(clientSheetId) ? clientSheetId.length : (clientSheetId ? 1 : Object.keys(clientNameMap).length),
     };
   } catch {
     return null;
@@ -222,12 +230,16 @@ interface SupabaseRepairRow {
 
 export async function fetchRepairsFromSupabase(
   clientNameMap: ClientNameMap,
-  clientSheetId?: string
+  clientSheetId?: string | string[]
 ): Promise<RepairsResponse | null> {
   try {
     let query = supabase.from('repairs').select('*');
     if (clientSheetId) {
-      query = query.eq('tenant_id', clientSheetId);
+      if (Array.isArray(clientSheetId)) {
+        if (clientSheetId.length > 0) query = query.in('tenant_id', clientSheetId);
+      } else {
+        query = query.eq('tenant_id', clientSheetId);
+      }
     }
     const { data, error } = await query;
     if (error || !data) return null;
@@ -270,7 +282,7 @@ export async function fetchRepairsFromSupabase(
     return {
       repairs,
       count: repairs.length,
-      clientsQueried: clientSheetId ? 1 : Object.keys(clientNameMap).length,
+      clientsQueried: Array.isArray(clientSheetId) ? clientSheetId.length : (clientSheetId ? 1 : Object.keys(clientNameMap).length),
     };
   } catch {
     return null;
@@ -291,16 +303,22 @@ interface SupabaseWillCallRow {
   item_count: number | null;
   wc_folder_url: string | null;
   shipment_folder_url: string | null;
+  cod: boolean | null;
+  cod_amount: number | null;
 }
 
 export async function fetchWillCallsFromSupabase(
   clientNameMap: ClientNameMap,
-  clientSheetId?: string
+  clientSheetId?: string | string[]
 ): Promise<WillCallsResponse | null> {
   try {
     let query = supabase.from('will_calls').select('*');
     if (clientSheetId) {
-      query = query.eq('tenant_id', clientSheetId);
+      if (Array.isArray(clientSheetId)) {
+        if (clientSheetId.length > 0) query = query.in('tenant_id', clientSheetId);
+      } else {
+        query = query.eq('tenant_id', clientSheetId);
+      }
     }
     const { data, error } = await query;
     if (error || !data) return null;
@@ -318,8 +336,8 @@ export async function fetchWillCallsFromSupabase(
       estimatedPickupDate: row.estimated_pickup_date || '',
       actualPickupDate: '',
       notes: row.notes || '',
-      cod: false,
-      codAmount: null,
+      cod: row.cod ?? false,
+      codAmount: row.cod_amount != null ? Number(row.cod_amount) : null,
       itemsCount: row.item_count ?? 0,
       totalWcFee: null,
       items: [], // WC items loaded lazily via detail panel
@@ -330,7 +348,7 @@ export async function fetchWillCallsFromSupabase(
     return {
       willCalls,
       count: willCalls.length,
-      clientsQueried: clientSheetId ? 1 : Object.keys(clientNameMap).length,
+      clientsQueried: Array.isArray(clientSheetId) ? clientSheetId.length : (clientSheetId ? 1 : Object.keys(clientNameMap).length),
     };
   } catch {
     return null;
@@ -352,12 +370,16 @@ interface SupabaseShipmentRow {
 
 export async function fetchShipmentsFromSupabase(
   clientNameMap: ClientNameMap,
-  clientSheetId?: string
+  clientSheetId?: string | string[]
 ): Promise<ShipmentsResponse | null> {
   try {
     let query = supabase.from('shipments').select('*');
     if (clientSheetId) {
-      query = query.eq('tenant_id', clientSheetId);
+      if (Array.isArray(clientSheetId)) {
+        if (clientSheetId.length > 0) query = query.in('tenant_id', clientSheetId);
+      } else {
+        query = query.eq('tenant_id', clientSheetId);
+      }
     }
     const { data, error } = await query;
     if (error || !data) return null;
@@ -379,7 +401,7 @@ export async function fetchShipmentsFromSupabase(
     return {
       shipments,
       count: shipments.length,
-      clientsQueried: clientSheetId ? 1 : Object.keys(clientNameMap).length,
+      clientsQueried: Array.isArray(clientSheetId) ? clientSheetId.length : (clientSheetId ? 1 : Object.keys(clientNameMap).length),
     };
   } catch {
     return null;
@@ -652,6 +674,101 @@ export async function fetchTaskByIdFromSupabase(
 }
 
 /**
+ * Fetch a single will call by wc_number from Supabase.
+ * Returns null if not found. Items are NOT included (Supabase doesn't store WC items).
+ */
+export async function fetchWillCallByIdFromSupabase(
+  wcNumber: string
+): Promise<ApiWillCall | null> {
+  try {
+    const { data, error } = await supabase
+      .from('will_calls')
+      .select('*')
+      .eq('wc_number', wcNumber)
+      .maybeSingle();
+    if (error || !data) return null;
+    const row = data as SupabaseWillCallRow;
+    return {
+      wcNumber: row.wc_number,
+      clientName: '',  // resolved by caller via clientNameMap
+      clientSheetId: row.tenant_id,
+      status: row.status || 'Pending',
+      createdDate: row.created_date || '',
+      createdBy: '',
+      pickupParty: row.pickup_party || '',
+      pickupPhone: '',
+      requestedBy: '',
+      estimatedPickupDate: row.estimated_pickup_date || '',
+      actualPickupDate: '',
+      notes: row.notes || '',
+      cod: row.cod ?? false,
+      codAmount: row.cod_amount != null ? Number(row.cod_amount) : null,
+      itemsCount: row.item_count ?? 0,
+      totalWcFee: null,
+      items: [], // WC items not stored in Supabase — GAS fallback needed for full data
+      wcFolderUrl: row.wc_folder_url || '',
+      shipmentFolderUrl: row.shipment_folder_url || '',
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Fetch a single repair by repair_id from Supabase.
+ * Returns null if not found.
+ */
+export async function fetchRepairByIdFromSupabase(
+  repairId: string
+): Promise<ApiRepair | null> {
+  try {
+    const { data, error } = await supabase
+      .from('repairs')
+      .select('*')
+      .eq('repair_id', repairId)
+      .maybeSingle();
+    if (error || !data) return null;
+    const row = data as SupabaseRepairRow;
+    return {
+      repairId: row.repair_id,
+      clientName: '',  // resolved by caller
+      clientSheetId: row.tenant_id,
+      sourceTaskId: '',
+      itemId: row.item_id || '',
+      description: '',
+      itemClass: '',
+      vendor: '',
+      location: '',
+      sidemark: '',
+      taskNotes: row.task_notes || '',
+      createdBy: '',
+      createdDate: row.created_date || '',
+      quoteAmount: row.quote_amount,
+      quoteSentDate: '',
+      status: row.status || '',
+      approved: false,
+      scheduledDate: '',
+      startDate: '',
+      repairVendor: row.repair_vendor || '',
+      partsCost: null,
+      laborHours: null,
+      repairResult: row.repair_result || '',
+      finalAmount: row.final_amount,
+      invoiceId: '',
+      itemNotes: row.item_notes || '',
+      repairNotes: row.repair_notes || '',
+      completedDate: row.completed_date || '',
+      billed: false,
+      repairFolderUrl: row.repair_folder_url || '',
+      shipmentFolderUrl: row.shipment_folder_url || '',
+      taskFolderUrl: row.task_folder_url || '',
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Fetch repairs by item_id + tenant_id from Supabase.
  * Used for task detail parity: shows related repairs for the same item.
  */
@@ -715,18 +832,26 @@ import type {
 } from './api';
 
 export async function fetchDashboardSummaryFromSupabase(
-  clientNameMap: ClientNameMap
+  clientNameMap: ClientNameMap,
+  tenantFilter?: string[]
 ): Promise<BatchSummaryResponse | null> {
   try {
     const openTaskStatuses = ['Open', 'In Progress'];
     const openRepairStatuses = ['Pending Quote', 'Quote Sent', 'Approved', 'In Progress'];
     const openWcStatuses = ['Pending', 'Scheduled', 'Partial'];
 
-    const [tasksRes, repairsRes, wcRes] = await Promise.all([
-      supabase.from('tasks').select('*').in('status', openTaskStatuses),
-      supabase.from('repairs').select('*').in('status', openRepairStatuses),
-      supabase.from('will_calls').select('*').in('status', openWcStatuses),
-    ]);
+    let tasksQ = supabase.from('tasks').select('*').in('status', openTaskStatuses);
+    let repairsQ = supabase.from('repairs').select('*').in('status', openRepairStatuses);
+    let wcQ = supabase.from('will_calls').select('*').in('status', openWcStatuses);
+
+    // Client-role users: filter to their accessible tenants only
+    if (tenantFilter && tenantFilter.length > 0) {
+      tasksQ = tasksQ.in('tenant_id', tenantFilter);
+      repairsQ = repairsQ.in('tenant_id', tenantFilter);
+      wcQ = wcQ.in('tenant_id', tenantFilter);
+    }
+
+    const [tasksRes, repairsRes, wcRes] = await Promise.all([tasksQ, repairsQ, wcQ]);
 
     if (tasksRes.error || repairsRes.error || wcRes.error) return null;
 

@@ -623,7 +623,7 @@ input::placeholder { color: var(--muted); }
     <div class="brand-wrap">
       <span class="brand-name">Stride Logistics</span>
       <span class="brand-wms">WMS</span>
-      <span style="font-size:9px;color:var(--muted);margin-left:6px;">v2.1.0</span>
+      <span style="font-size:9px;color:var(--muted);margin-left:6px;">v2.2.0</span>
     </div>
   </div>
   <div class="header-right">
@@ -821,11 +821,22 @@ function callAPI(action, params) {
 }
 
 function initApiUrl() {
-  API_URL = localStorage.getItem('GS_SCANNER_API_URL') || '';
+  // v2.4.0 priority: explicit localStorage override > server-injected URL >
+  // show modal. The scriptlet below is populated by doGet() when served from
+  // the deployed Web App. If the page is ever served raw (no template eval),
+  // the literal '<' + '?= ... ?>' stays and we detect + discard it.
+  var injected = '<?= INJECTED_API_URL ?>';
+  if (injected.indexOf('<' + '?') === 0 || injected.indexOf('?=') > -1) injected = '';
+
+  API_URL = localStorage.getItem('GS_SCANNER_API_URL') || injected || '';
   if (!API_URL) {
     document.getElementById('url-setup-modal').classList.remove('hidden');
+  } else if (!_locsLoaded) {
+    // Preload locations at startup when API_URL is already stored, so the
+    // move button is ready the instant the user types a location.
+    _locsLoaded = true;
+    loadLocations();
   }
-  // Locations loaded on first loc-input focus (deferred from startup)
   initWedgeListener();
 }
 
@@ -1420,8 +1431,16 @@ function clearLocation() {
 
 function checkNewLocation() {
   var banner = document.getElementById('new-loc-banner');
-  if (!currentLoc || !allLocations.length) {
+  if (!currentLoc) {
     banner.classList.add('hidden');
+    return;
+  }
+  // If allLocations hasn't loaded yet, treat the typed location as unknown
+  // and surface the confirm banner so the user can proceed instead of being
+  // soft-locked (button disabled, no banner to click).
+  if (!allLocations.length) {
+    banner.classList.remove('hidden');
+    newLocConfirmed = false;
     return;
   }
   var locUpper = currentLoc.toUpperCase();
@@ -1450,6 +1469,13 @@ function loadLocations() {
     .then(function (locs) {
       allLocations = Array.isArray(locs) ? locs : [];
       filteredLocs = allLocations.slice();
+      // If the user already typed a location before loadLocations resolved,
+      // re-evaluate so the Move button can light up now that we know whether
+      // the location exists.
+      if (currentLoc) {
+        checkNewLocation();
+        updateBtn();
+      }
     })
     .catch(function (e) {
       console.warn('loadLocations failed:', e);
@@ -1605,6 +1631,20 @@ function commitUpdate() {
       hideLoading();
       if (resp && resp.success) {
         showResults(resp.results, loc);
+        // v2.3.0: notify React parent so its inventory caches silent-refetch.
+        // When the scanner is opened outside an iframe (standalone URL),
+        // window.parent === window and this is a cheap no-op.
+        try {
+          if (window.parent && window.parent !== window) {
+            var moved = (resp.results && resp.results.updated || []).map(function (u) { return u.itemId; });
+            window.parent.postMessage({
+              type: 'stride-scanner-move-complete',
+              itemIds: moved.length ? moved : ids,
+              location: loc,
+              at: Date.now()
+            }, '*');
+          }
+        } catch (_) {}
         clearQueue();
         clearLocation();
       } else {

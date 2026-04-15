@@ -110,6 +110,7 @@ function onOpen() {
     .addItem("📧 Re-send Invoice Email", "CB13_resendInvoiceEmail")
     .addSeparator()
     .addItem("🔄 Sync Settings to Client", "StrideSyncSettingsToClient")
+    .addItem("📧 Add Whse Email to All Clients", "StrideAddWhseEmailToAllClients")
     .addItem("🔧 Update Headers (Safe)", "StrideSafeUpdateHeaders")
     .addSeparator()
     .addItem("⚖️ Claims — Setup Schema", "Claims_SetupSchema")

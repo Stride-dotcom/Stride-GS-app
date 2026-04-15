@@ -257,6 +257,7 @@ export function Sidebar({ collapsed, onToggle, onNavigate, failureCount = 0, onO
       <div style={{
         borderTop: `1px solid ${theme.colors.borderSidebar}`,
         padding: '8px 0', display: 'flex', flexDirection: 'column', gap: '1px',
+        flexShrink: 0,
       }}>
         {/* Settings — admin only */}
         {user?.role === 'admin' && (

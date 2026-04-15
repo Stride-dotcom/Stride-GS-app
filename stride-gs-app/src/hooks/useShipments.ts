@@ -4,7 +4,7 @@
  * Performance: checks BatchDataContext first (client users get all data in 1 call).
  * Falls back to individual API call for staff/admin users or when batch is unavailable.
  */
-import { useCallback, useEffect, useMemo } from 'react';
+import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { fetchShipments } from '../lib/api';
 import type { ApiShipment, ShipmentsResponse } from '../lib/api';
 import type { Shipment } from '../lib/types';
@@ -44,7 +44,7 @@ function mapToAppShipment(api: ApiShipment): Shipment {
   };
 }
 
-export function useShipments(autoFetch = true, filterClientSheetId?: string): UseShipmentsResult {
+export function useShipments(autoFetch = true, filterClientSheetId?: string | string[]): UseShipmentsResult {
   const clientFilter = useClientFilter();
   const clientSheetId = clientFilter ?? filterClientSheetId;
   const { batchData, batchEnabled, batchLoading, batchError, silentRefetchBatch } = useBatchData();
@@ -56,23 +56,36 @@ export function useShipments(autoFetch = true, filterClientSheetId?: string): Us
     return map;
   }, [clients]);
 
+  // Ref keeps fetchFn stable even when clients (and thus clientNameMap)
+  // gets a new reference every render. Without this, fetchFn rebuilds every
+  // render → useApiData effect fires → aborts in-flight → perpetual refetch.
+  const clientNameMapRef = useRef(clientNameMap);
+  clientNameMapRef.current = clientNameMap;
+
   const shouldFetchIndividual = !batchEnabled;
+
+  // Stable dep key — prevents infinite refetch when clientSheetId is an array
+  const cacheKeyScope = Array.isArray(clientSheetId) ? clientSheetId.slice().sort().join(',') : (clientSheetId || 'all');
 
   const fetchFn = useCallback(
     async (signal?: AbortSignal) => {
       if (await isSupabaseCacheAvailable()) {
-        const sbResult = await fetchShipmentsFromSupabase(clientNameMap, clientSheetId);
+        const sbResult = await fetchShipmentsFromSupabase(clientNameMapRef.current, clientSheetId);
         if (sbResult) return { data: sbResult, ok: true, error: null } as { data: ShipmentsResponse; ok: true; error: null };
       }
-      return fetchShipments(signal, clientSheetId);
+      const gasClientId = Array.isArray(clientSheetId)
+        ? (clientSheetId.length === 1 ? clientSheetId[0] : undefined)
+        : clientSheetId;
+      return fetchShipments(signal, gasClientId);
     },
-    [clientSheetId, clientNameMap]
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [cacheKeyScope]
   );
 
   const { data, loading: individualLoading, error: individualError, refetch: individualRefetch, lastFetched: individualLastFetched } = useApiData<ShipmentsResponse>(
     fetchFn,
     autoFetch && shouldFetchIndividual,
-    `shipments:${clientSheetId || 'all'}`
+    `shipments:${cacheKeyScope}`
   );
 
   // Phase 4: subscribe to entityEvents for confirmed shipment writes (non-batch path only)
@@ -103,7 +116,7 @@ export function useShipments(autoFetch = true, filterClientSheetId?: string): Us
     // Individual path: resolve "(single)" clientName using the clients list
     const shipments = data?.shipments ?? [];
     if (clientSheetId && shipments.length > 0 && shipments[0].clientName === '(single)') {
-      const resolved = clients.find(c => c.id === clientSheetId)?.name;
+      const resolved = clients.find(c => c.id === (typeof clientSheetId === 'string' ? clientSheetId : clientSheetId[0]))?.name;
       if (resolved) return shipments.map(s => ({ ...s, clientName: resolved }));
     }
     return shipments;

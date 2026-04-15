@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
-import { useNavigate } from 'react-router-dom';
+// useNavigate removed — Dashboard nav now uses window.open for new-tab detail pages
 import {
   useReactTable, getCoreRowModel, getSortedRowModel, getFilteredRowModel,
   flexRender, createColumnHelper,
@@ -437,7 +437,6 @@ function WillCallsTab({ willCalls, onNavigate }: { willCalls: SummaryWillCall[];
 
 export function Dashboard() {
   const { isMobile, isExtraSmall } = useIsMobile();
-  const navigate = useNavigate();
   const apiConfigured = isApiConfigured();
 
   // Active tab — sessionStorage, default 'tasks' on fresh login
@@ -515,12 +514,12 @@ export function Dashboard() {
   }, []);
 
   const handleRepairNav = useCallback((repair: SummaryRepair) => {
-    navigate('/repairs', { state: { openRepairId: repair.repairId, clientSheetId: repair.clientSheetId } });
-  }, [navigate]);
+    window.open(`#/repairs/${repair.repairId}`, '_blank');
+  }, []);
 
   const handleWcNav = useCallback((wc: SummaryWillCall) => {
-    navigate('/will-calls', { state: { openWcId: wc.wcNumber, clientSheetId: wc.clientSheetId } });
-  }, [navigate]);
+    window.open(`#/will-calls/${wc.wcNumber}`, '_blank');
+  }, []);
 
   // ── Loading / error states ────────────────────────────────────────────────────
   if (loading && tasks.length === 0 && repairs.length === 0 && willCalls.length === 0) {

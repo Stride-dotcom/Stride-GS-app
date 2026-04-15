@@ -1315,4 +1315,92 @@ function sendUserActivationNotification_(email, clientName, clientSheetId, creat
   Logger.log("[AUTO_USER] User creation notification sent for: " + email + " (" + clientName + ")");
 }
 
+/* ================================================================
+   StrideAddWhseEmailToAllClients — one-shot bulk utility
+   Opens every ACTIVE client from CB Clients tab, appends
+   whse@stridenw.com to Settings!NOTIFICATION_EMAILS if missing.
+   Idempotent (case-insensitive dedup). Preserves existing emails.
+   ================================================================ */
+function StrideAddWhseEmailToAllClients() {
+  var ui = SpreadsheetApp.getUi();
+  var TARGET_EMAIL = "whse@stridenw.com";
+
+  var clients = getActiveClients_v2_();
+  if (!clients.length) {
+    ui.alert("No active clients found on the Clients tab.");
+    return;
+  }
+
+  var resp = ui.alert(
+    "Add Warehouse Email to NOTIFICATION_EMAILS",
+    "Append " + TARGET_EMAIL + " to the NOTIFICATION_EMAILS setting on "
+      + clients.length + " active client sheet(s)?\n\n"
+      + "This is idempotent — clients that already have it will be skipped.",
+    ui.ButtonSet.YES_NO
+  );
+  if (resp !== ui.Button.YES) return;
+
+  var added = [];
+  var alreadyHad = [];
+  var failed = [];
+
+  for (var i = 0; i < clients.length; i++) {
+    var c = clients[i];
+    try {
+      var ss = SpreadsheetApp.openById(c.id);
+      var sh = ss.getSheetByName("Settings");
+      if (!sh) { failed.push(c.name + ": no Settings tab"); continue; }
+
+      var lastRow = sh.getLastRow();
+      var before = "";
+      var keyRow = -1;
+      if (lastRow >= 2) {
+        var data = sh.getRange(2, 1, lastRow - 1, 2).getValues();
+        for (var r = 0; r < data.length; r++) {
+          if (String(data[r][0]).trim() === "NOTIFICATION_EMAILS") {
+            before = String(data[r][1] || "").trim();
+            keyRow = r + 2;
+            break;
+          }
+        }
+      }
+
+      // Split on commas, semicolons, whitespace runs
+      var parts = before
+        ? before.split(/[,;\s]+/).filter(function(s) { return s && s.indexOf("@") > 0; })
+        : [];
+      var lc = TARGET_EMAIL.toLowerCase();
+      var already = false;
+      for (var j = 0; j < parts.length; j++) {
+        if (parts[j].toLowerCase() === lc) { already = true; break; }
+      }
+
+      if (already) { alreadyHad.push(c.name); continue; }
+
+      parts.push(TARGET_EMAIL);
+      var after = parts.join(", ");
+      if (keyRow > 0) {
+        sh.getRange(keyRow, 2).setValue(after);
+      } else {
+        sh.appendRow(["NOTIFICATION_EMAILS", after, ""]);
+      }
+      added.push(c.name + "  →  " + after);
+    } catch (err) {
+      failed.push(c.name + ": " + err.message);
+      Logger.log("StrideAddWhseEmailToAllClients error for " + c.name + ": " + err + "\n" + err.stack);
+    }
+  }
+
+  var msg = "Done.\n\n"
+    + "✅ Added: " + added.length + "\n"
+    + "➖ Already had it: " + alreadyHad.length + "\n"
+    + "❌ Failed: " + failed.length;
+  if (added.length)      msg += "\n\n--- Added ---\n"      + added.join("\n");
+  if (alreadyHad.length) msg += "\n\n--- Already had ---\n" + alreadyHad.join(", ");
+  if (failed.length)     msg += "\n\n--- Failed ---\n"     + failed.join("\n");
+
+  Logger.log(msg);
+  ui.alert(msg);
+}
+
 /* escHtml_() is defined in Code.gs.js */

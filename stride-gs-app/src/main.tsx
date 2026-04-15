@@ -4,7 +4,6 @@ import './index.css'
 import App from './App.tsx'
 import { AuthProvider } from './contexts/AuthContext.tsx'
 import { BatchDataProvider } from './contexts/BatchDataContext.tsx'
-import { ClientsProvider } from './hooks/useClients'
 import { supabase } from './lib/supabase.ts'
 
 // ─── Pre-bootstrap PASSWORD_RECOVERY detection ──────────────────────────────
@@ -52,11 +51,9 @@ async function bootstrap() {
   createRoot(document.getElementById('root')!).render(
     <StrictMode>
       <AuthProvider>
-        <ClientsProvider>
-          <BatchDataProvider>
-            <App />
-          </BatchDataProvider>
-        </ClientsProvider>
+        <BatchDataProvider>
+          <App />
+        </BatchDataProvider>
       </AuthProvider>
     </StrictMode>,
   )

@@ -279,7 +279,7 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
       return;
     }
 
-    clearTaskPatch?.(task.taskId); // server confirmed — let real data take over
+    // Don't clear patch on success — let 120s TTL handle it (prevents flicker during refetch)
     setSubmitResult(resp.data);
     setCompleted(true);
     onTaskUpdated?.();
@@ -424,7 +424,7 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
             <div style={{ background: theme.colors.bgSubtle, border: `1px solid ${theme.colors.border}`, borderRadius: 10, padding: 14, marginBottom: 16 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}><Package size={14} color={theme.colors.orange} /><span style={{ fontSize: 12, fontWeight: 600 }}>Item</span></div>
               <div style={{ fontSize: 13, fontWeight: 600 }}>
-                <DeepLink kind="inventory" id={task.itemId} />
+                <DeepLink kind="inventory" id={task.itemId} clientSheetId={(task as any).clientSheetId} />
                 {task.vendor ? ` — ${task.vendor}` : ''}
               </div>
               <div style={{ fontSize: 12, color: theme.colors.textSecondary, marginTop: 2 }}>{task.description}</div>
@@ -470,6 +470,8 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
 
           {/* Task Details */}
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 14px', marginBottom: 16 }}>
+            <Field label="Client" value={task.clientName} />
+            <Field label="Sidemark" value={task.sidemark} />
             <Field label="Assigned To" value={task.assignedTo} />
             <Field label="Service" value={SERVICE_CODES[(task.svcCode || task.serviceCode) as keyof typeof SERVICE_CODES] || task.svcCode || task.serviceCode} />
             <Field label="Created" value={fmtDate(task.created || task.createdDate)} />
@@ -693,7 +695,7 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
                     try {
                       const resp = await postCancelTask({ taskId: task.taskId }, clientSheetId);
                       if (resp.ok && resp.data?.success) {
-                        clearTaskPatch?.(task.taskId); // server confirmed — let real data take over
+                        // Don't clear patch on success — let 120s TTL handle it (prevents flicker during refetch)
                         setCompleted(true);
                         onTaskUpdated?.();
                       }

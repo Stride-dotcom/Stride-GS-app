@@ -11,7 +11,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import type { ApiResponse } from '../lib/api';
 import { setNextFetchNoCache } from '../lib/api';
-import { skipSupabaseCacheOnce } from '../lib/supabaseQueries';
 import { cacheGet, cacheSet, cacheDelete } from '../lib/apiCache';
 
 export interface UseApiDataResult<T> {
@@ -118,13 +117,14 @@ export function useApiData<T>(
       const currentCached = resolvedKey ? cacheGet<T>(resolvedKey) : null;
       if (currentCached) {
         // Show cached data immediately (no loading flash), then do a silent
-        // background refresh that bypasses Supabase so we always get fresh
-        // data from GAS. The cached version is just a placeholder until the
-        // real data arrives.
+        // background refresh using the normal cache path (Supabase-first,
+        // GAS fallback). The cache key already includes the client ID, so
+        // per-client data is already isolated. Previously this forced GAS
+        // via skipSupabaseCacheOnce() — removed because it caused 90-180s
+        // loads when client scope was missing (see session 63 plan).
         setData(currentCached);
         setLoading(false);
-        skipSupabaseCacheOnce();
-        doFetch(true, true);
+        doFetch(false, true);
       } else {
         doFetch();
       }
@@ -140,6 +140,15 @@ export function useApiData<T>(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoFetch, doFetch, resolvedKey]);
 
+  // v62 (re-disabled): cacheSubscribe pub/sub was intended to sync multiple
+  // useApiData instances for the same key (e.g. AppLayout useClients +
+  // page useClients). In practice it cascaded re-renders across the tree
+  // and produced tight flashing/refetch loops on pages that use multiple
+  // hooks sharing a cache key. The original race it solved is handled in
+  // AppLayout — see the comment there about NOT pre-fetching useClients.
+  // Keeping this useEffect block empty so cacheSubscribe can be brought
+  // back with a different mechanism later without having to re-import.
+
   // refetch always bypasses ALL cache layers and forces a fresh GAS API call.
   // It also deletes the localStorage entry so stale data doesn't resurface
   // when the user navigates away and back (the component re-mounts with
@@ -148,7 +157,12 @@ export function useApiData<T>(
   const refetch = useCallback(() => {
     if (resolvedKey) cacheDelete(resolvedKey); // kill localStorage ghost
     setNextFetchNoCache();     // bypass server-side CacheService
-    skipSupabaseCacheOnce();   // bypass Supabase read cache
+    // NOTE: do NOT call skipSupabaseCacheOnce() here. GAS write-through keeps
+    // Supabase within ~1-2s of the authoritative sheet, so forcing GAS is only
+    // ~15-60s slower for single-client and catastrophic (90s-minutes) for
+    // multi-client (gasClientId becomes undefined → unscoped scan). Session 62
+    // fix: trust Supabase on refetch. Rare staleness is handled by
+    // entityEvents/Realtime re-pulls.
     doFetch(true, false);      // bypass in-memory cache, show loading spinner
   }, [doFetch, resolvedKey]);
 

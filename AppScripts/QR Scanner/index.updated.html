@@ -821,7 +821,12 @@ function callAPI(action, params) {
 }
 
 function initApiUrl() {
-  API_URL = localStorage.getItem('GS_SCANNER_API_URL') || '';
+  // v2.4.0 priority: explicit localStorage override > server-injected URL >
+  // show modal. Scriptlet is populated by doGet() on template eval.
+  var injected = '<?= INJECTED_API_URL ?>';
+  if (injected.indexOf('<' + '?') === 0 || injected.indexOf('?=') > -1) injected = '';
+
+  API_URL = localStorage.getItem('GS_SCANNER_API_URL') || injected || '';
   if (!API_URL) {
     document.getElementById('url-setup-modal').classList.remove('hidden');
   }

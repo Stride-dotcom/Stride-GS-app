@@ -139,6 +139,8 @@ export interface WillCall {
   releasedBy?: string;
   wcFolderUrl?: string;
   shipmentFolderUrl?: string;
+  cod?: boolean;
+  codAmount?: number;
 }
 
 export type WillCallStatus = 'Pending' | 'Scheduled' | 'Released' | 'Partial' | 'Cancelled';

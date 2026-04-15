@@ -6,7 +6,7 @@
  *
  * Phase 2C: optimistic patch architecture added.
  */
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { fetchRepairs } from '../lib/api';
 import type { ApiRepair, RepairsResponse } from '../lib/api';
 import type { Repair, RepairStatus } from '../lib/types';
@@ -72,7 +72,7 @@ function mapToAppRepair(api: ApiRepair): Repair {
   };
 }
 
-export function useRepairs(autoFetch = true, filterClientSheetId?: string): UseRepairsResult {
+export function useRepairs(autoFetch = true, filterClientSheetId?: string | string[]): UseRepairsResult {
   const clientFilter = useClientFilter();
   const clientSheetId = clientFilter ?? filterClientSheetId;
   const { batchData, batchEnabled, batchLoading, batchError, silentRefetchBatch } = useBatchData();
@@ -84,23 +84,35 @@ export function useRepairs(autoFetch = true, filterClientSheetId?: string): UseR
     return map;
   }, [clients]);
 
+  // Ref keeps fetchFn stable across client-list re-renders
+  const clientNameMapRef = useRef(clientNameMap);
+  clientNameMapRef.current = clientNameMap;
+
   const shouldFetchIndividual = !batchEnabled;
+
+  // Stable dep key — prevents infinite refetch when clientSheetId is an array
+  // (array reference changes on every page render even when contents are the same)
+  const cacheKeyScope = Array.isArray(clientSheetId) ? clientSheetId.slice().sort().join(',') : (clientSheetId || 'all');
 
   const fetchFn = useCallback(
     async (signal?: AbortSignal) => {
       if (await isSupabaseCacheAvailable()) {
-        const sbResult = await fetchRepairsFromSupabase(clientNameMap, clientSheetId);
+        const sbResult = await fetchRepairsFromSupabase(clientNameMapRef.current, clientSheetId);
         if (sbResult) return { data: sbResult, ok: true, error: null } as { data: RepairsResponse; ok: true; error: null };
       }
-      return fetchRepairs(signal, clientSheetId);
+      const gasClientId = Array.isArray(clientSheetId)
+        ? (clientSheetId.length === 1 ? clientSheetId[0] : undefined)
+        : clientSheetId;
+      return fetchRepairs(signal, gasClientId);
     },
-    [clientSheetId, clientNameMap]
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [cacheKeyScope]
   );
 
   const { data, loading: individualLoading, error: individualError, refetch: individualRefetch, lastFetched: individualLastFetched } = useApiData<RepairsResponse>(
     fetchFn,
     autoFetch && shouldFetchIndividual,
-    `repairs:${clientSheetId || 'all'}`
+    `repairs:${cacheKeyScope}`
   );
 
   // ─── Phase 2C: Optimistic patch state ────────────────────────────────────

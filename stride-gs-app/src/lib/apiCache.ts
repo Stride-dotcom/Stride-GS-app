@@ -18,6 +18,33 @@ interface CacheEntry<T = unknown> {
 
 const store = new Map<string, CacheEntry>();
 
+// v62 — per-key subscribers. When a cacheSet happens for a key, every
+// useApiData instance that mounted with that key gets notified so they can
+// pull the new value. Fixes the AppLayout-vs-Page race where useClients
+// mounts in two places, each with its own state: the first fetch to finish
+// populated the cache but the other instance stayed empty until remount.
+type Subscriber = () => void;
+const subscribers = new Map<string, Set<Subscriber>>();
+
+export function cacheSubscribe(key: string, cb: Subscriber): () => void {
+  if (!key) return () => {};
+  let set = subscribers.get(key);
+  if (!set) { set = new Set(); subscribers.set(key, set); }
+  set.add(cb);
+  return () => {
+    const s = subscribers.get(key);
+    if (!s) return;
+    s.delete(cb);
+    if (s.size === 0) subscribers.delete(key);
+  };
+}
+
+function notify(key: string): void {
+  const s = subscribers.get(key);
+  if (!s) return;
+  for (const cb of s) { try { cb(); } catch { /* swallow */ } }
+}
+
 const LS_PREFIX = 'stride_cache_';
 
 /** Default TTL: 5 minutes */
@@ -80,12 +107,14 @@ export function cacheSet<T>(key: string, data: T): void {
   const entry: CacheEntry = { data, timestamp: Date.now() };
   store.set(key, entry);
   lsWrite(key, entry);
+  notify(key);
 }
 
 /** Invalidate a specific cache key */
 export function cacheDelete(key: string): void {
   store.delete(key);
   lsRemove(key);
+  notify(key);
 }
 
 /** Invalidate all cache entries matching a prefix (e.g., "inventory" clears all inventory caches) */

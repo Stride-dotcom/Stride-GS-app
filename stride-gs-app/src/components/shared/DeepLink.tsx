@@ -44,6 +44,9 @@ export interface DeepLinkProps {
   className?: string;
   /** Size — controls font size and icon size. Default 'md'. */
   size?: 'sm' | 'md' | 'lg';
+  /** Owning client's spreadsheet ID. When present, appended as &client=<id>
+   *  so the target page can auto-select the client filter without a round-trip. */
+  clientSheetId?: string | null;
 }
 
 export function DeepLink({
@@ -54,6 +57,7 @@ export function DeepLink({
   style,
   className,
   size = 'md',
+  clientSheetId,
 }: DeepLinkProps) {
   if (!id) {
     return (
@@ -65,7 +69,8 @@ export function DeepLink({
 
   const fontSize = size === 'sm' ? 11 : size === 'lg' ? 14 : 13;
   const iconSize = size === 'sm' ? 10 : size === 'lg' ? 13 : 11;
-  const href = `#${KIND_TO_ROUTE[kind]}?open=${encodeURIComponent(id)}`;
+  const clientPart = clientSheetId ? `&client=${encodeURIComponent(clientSheetId)}` : '';
+  const href = `#${KIND_TO_ROUTE[kind]}?open=${encodeURIComponent(id)}${clientPart}`;
 
   return (
     <a

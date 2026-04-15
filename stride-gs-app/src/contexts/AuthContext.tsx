@@ -374,6 +374,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setSupabaseImpersonating(false);
     await supabase.auth.signOut();
     setAuthState({ status: 'unauthenticated' });
+    // Session 62 follow-up — reset loginPhase so the Login screen doesn't
+    // re-mount stuck on the "Welcome back / Redirecting..." success UI from
+    // the previous session.
+    setLoginPhase('idle');
+    setLoginPhaseError(null);
     // Session 60 follow-up — reset the HashRouter URL to root so the Login
     // screen isn't rendered under a stale #/inventory (or whatever the user
     // was on) deep link. Without this, logging back in would deep-link the
