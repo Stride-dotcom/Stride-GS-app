@@ -23,6 +23,7 @@ import { Marketing } from './pages/Marketing';
 import { TaskJobPage } from './pages/TaskJobPage';
 const WillCallJobPage = React.lazy(() => import('./pages/WillCallJobPage').then(m => ({ default: m.WillCallJobPage })));
 const RepairJobPage = React.lazy(() => import('./pages/RepairJobPage').then(m => ({ default: m.RepairJobPage })));
+const ShipmentJobPage = React.lazy(() => import('./pages/ShipmentJobPage').then(m => ({ default: m.ShipmentJobPage })));
 import { Orders } from './pages/Orders';
 
 /** Route guard — redirects to dashboard if user's role is not in the allowed list */
@@ -62,6 +63,7 @@ export default function App() {
           <Route path="/will-calls" element={<WillCalls />} />
           <Route path="/will-calls/:wcNumber" element={<React.Suspense fallback={<div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100%' }}>Loading...</div>}><WillCallJobPage /></React.Suspense>} />
           <Route path="/shipments" element={<Shipments />} />
+          <Route path="/shipments/:shipmentNo" element={<React.Suspense fallback={<div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100%' }}>Loading...</div>}><ShipmentJobPage /></React.Suspense>} />
           {/* Admin + staff only */}
           <Route path="/receiving" element={<RoleGuard allowed={['admin', 'staff']}><Receiving /></RoleGuard>} />
           <Route path="/scanner" element={<RoleGuard allowed={['admin', 'staff']}><Scanner /></RoleGuard>} />

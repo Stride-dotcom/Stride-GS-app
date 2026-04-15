@@ -234,6 +234,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setCallerEmail(user.email);
       setLoginPhase('success');
       setAuthState({ status: 'authenticated', user });
+
+      // Session 65 — Prefetch the clients list right after login so the
+      // dropdown on every page (Inventory, Tasks, Repairs, etc.) is already
+      // populated by the time the user navigates. Supabase-first (~50ms);
+      // GAS fallback only if the mirror is empty. Fire-and-forget.
+      void (async () => {
+        try {
+          const { fetchClientsFromSupabase } = await import('../lib/supabaseQueries');
+          const { cacheSet } = await import('../lib/apiCache');
+          const sb = await fetchClientsFromSupabase(false);
+          if (sb && sb.clients.length > 0) cacheSet('clients', sb);
+        } catch { /* best-effort */ }
+      })();
     },
     [clearCache]
   );

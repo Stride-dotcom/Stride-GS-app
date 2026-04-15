@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { X, Truck, Package, FileText, Mail, ClipboardList, LayoutList } from 'lucide-react';
+import { DeepLink } from './DeepLink';
 import { FolderButton } from './FolderButton';
 import { CreateTaskModal } from './CreateTaskModal';
 import { CreateWillCallModal } from './CreateWillCallModal';
@@ -251,7 +252,7 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
                           style={{ cursor: 'pointer', accentColor: theme.colors.orange }} />
                       </td>
                     <td style={{ padding: '6px 10px', fontWeight: 600, color: theme.colors.textMuted }}>{idx + 1}</td>
-                    <td style={{ padding: '6px 10px', fontWeight: 600, color: theme.colors.orange, cursor: 'pointer' }}>{item.itemId}</td>
+                    <td style={{ padding: '6px 10px', fontWeight: 600 }}><DeepLink kind="inventory" id={item.itemId} clientSheetId={shipment.clientSheetId} showIcon={false} /></td>
                     <td style={{ padding: '6px 10px', color: theme.colors.textSecondary, maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.description}</td>
                     <td style={{ padding: '6px 10px' }}>{item.itemClass}</td>
                     <td style={{ padding: '6px 10px', fontFamily: 'monospace', color: theme.colors.textSecondary }}>{item.location}</td>

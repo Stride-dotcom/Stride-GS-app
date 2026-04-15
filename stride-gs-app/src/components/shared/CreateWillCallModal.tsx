@@ -327,7 +327,7 @@ export function CreateWillCallModal({ onClose, onSubmit, preSelectedItemIds = []
                       <div key={i}>
                         Item <strong>{c.itemId}</strong> is on{' '}
                         <a
-                          href={`#/will-calls?open=${c.wcNumber}`}
+                          href={`#/will-calls/${c.wcNumber}`}
                           target="_blank"
                           rel="noopener noreferrer"
                           style={{ color: '#DC2626', fontWeight: 700, textDecoration: 'underline' }}

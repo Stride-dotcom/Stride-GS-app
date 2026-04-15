@@ -1,24 +1,29 @@
 /**
- * useClients — Fetches client list from the Stride API.
+ * useClients — Fetches client list, Supabase-first with GAS fallback.
  *
- * Returns the raw API clients and also maps them to the app's Client type
- * for backward compatibility with existing UI components.
+ * Session 65 rewrite: was GAS-only (120-240s cold-start). Now tries
+ * fetchClientsFromSupabase (~50ms) first; if it returns null (Supabase
+ * unreachable or empty mirror) or throws, falls back to the original
+ * GAS fetchClients path. Matches the pattern used by the 6 data hooks
+ * (useInventory, useTasks, etc.) since session 47.
  *
- * Session 63 note: a ClientsProvider Context refactor was attempted to make
- * this a true singleton, but it introduced a React #300 on client-filter
- * clicks (exact cause unclear under minified production build). Reverted.
- * The session-62/63 ref-stabilization pattern in each of the 6 data hooks
- * (useInventory / useTasks / useRepairs / useWillCalls / useShipments /
- * useBilling) handles the referential-instability risk well enough — all 7
- * useApiData instances for the "clients" cache key short-circuit on the
- * in-memory cache tier after the first fetch, so references stay stable
- * across consumers in practice.
+ * Mirror table: public.clients (see migration 20260415120000). StrideAPI.gs
+ * writes through on every handleUpdateClient_ / handleOnboardClient_ /
+ * handleFinishClientSetup_ call. The backfill endpoint
+ * bulkSyncClientsToSupabase rebuilds it from CB Clients on demand.
+ *
+ * Session 63 historical note: a ClientsProvider Context refactor was
+ * attempted to deduplicate the ~11 parallel useApiData instances across
+ * AppLayout + pages. Reverted (React #300 on client-filter click, cause
+ * unclear under minified build). The in-memory cache tier short-circuits
+ * subsequent consumers to the same reference in practice.
  */
-import { useMemo, useCallback } from 'react';
+import { useCallback, useMemo, useEffect, useState, useRef } from 'react';
 import { fetchClients } from '../lib/api';
-import type { ApiClient, ClientsResponse } from '../lib/api';
+import { fetchClientsFromSupabase } from '../lib/supabaseQueries';
+import type { ApiClient, ClientsResponse, ApiResponse } from '../lib/api';
 import type { Client } from '../lib/types';
-import { useApiData } from './useApiData';
+import { cacheGet, cacheSet } from '../lib/apiCache';
 
 export interface UseClientsResult {
   /** Raw API clients (full data from CB) */
@@ -33,14 +38,9 @@ export interface UseClientsResult {
   lastFetched: Date | null;
 }
 
-/**
- * Map an API client to the app's Client type.
- * The app currently uses a simplified Client with id/name/email/phone/contactName/activeItems/onHold.
- * activeItems and onHold will be 0 until we wire inventory counts (Batch 2).
- */
 function mapToAppClient(apiClient: ApiClient): Client {
   return {
-    id: apiClient.spreadsheetId, // Real Google Sheets ID — used as clientSheetId in API calls
+    id: apiClient.spreadsheetId,
     name: apiClient.name,
     email: apiClient.email,
     phone: apiClient.phone,
@@ -51,27 +51,97 @@ function mapToAppClient(apiClient: ApiClient): Client {
 }
 
 export function useClients(autoFetch = true, includeInactive = false): UseClientsResult {
-  // Stable fetcher ref that respects the includeInactive flag
-  const fetcher = useCallback(
-    (signal?: AbortSignal) => fetchClients(signal, includeInactive),
-    [includeInactive]
-  );
+  const cacheKey = includeInactive ? 'clients_all' : 'clients';
 
-  const { data, loading, error, refetch, lastFetched } = useApiData<ClientsResponse>(
-    fetcher,
-    autoFetch,
-    includeInactive ? 'clients_all' : 'clients'
-  );
+  // Initial state hydrates from in-memory/localStorage cache (~instant if warm).
+  const cached = cacheGet<ClientsResponse>(cacheKey);
+  const [data, setData] = useState<ClientsResponse | null>(cached);
+  const [loading, setLoading] = useState(autoFetch && !cached);
+  const [error, setError] = useState<string | null>(null);
+  const [lastFetched, setLastFetched] = useState<Date | null>(cached ? new Date() : null);
 
-  // Stabilize empty array reference to prevent infinite re-render cascades
-  // (data?.clients ?? [] creates a new [] each render when data is null)
+  const abortRef = useRef<AbortController | null>(null);
+  const mountedRef = useRef(true);
+  useEffect(() => () => { mountedRef.current = false; }, []);
+
+  const doFetch = useCallback(async (silent = false) => {
+    // Abort any in-flight GAS request
+    if (abortRef.current) abortRef.current.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    if (!silent) setLoading(true);
+    setError(null);
+
+    // 1. Supabase-first (~50ms). null on miss / unreachable / empty.
+    try {
+      const sb = await fetchClientsFromSupabase(includeInactive);
+      if (sb && sb.clients.length > 0 && mountedRef.current && !controller.signal.aborted) {
+        setData(sb);
+        setLastFetched(new Date());
+        setLoading(false);
+        cacheSet(cacheKey, sb);
+
+        // Background GAS refresh (silent) to keep mirror honest for any fields
+        // that lag. Fire-and-forget — never blocks UI.
+        void fetchClients(controller.signal, includeInactive)
+          .then((gas: ApiResponse<ClientsResponse>) => {
+            if (!mountedRef.current || controller.signal.aborted) return;
+            if (gas.ok && gas.data) {
+              setData(gas.data);
+              setLastFetched(new Date());
+              cacheSet(cacheKey, gas.data);
+            }
+          })
+          .catch(() => { /* best-effort */ });
+        return;
+      }
+    } catch {
+      // fall through to GAS
+    }
+
+    // 2. GAS fallback (only path when Supabase mirror is empty / down).
+    try {
+      const gas: ApiResponse<ClientsResponse> = await fetchClients(controller.signal, includeInactive);
+      if (!mountedRef.current || controller.signal.aborted) return;
+      if (gas.ok && gas.data) {
+        setData(gas.data);
+        setLastFetched(new Date());
+        cacheSet(cacheKey, gas.data);
+        setError(null);
+      } else {
+        setError(gas.error || 'Failed to load clients');
+      }
+    } catch (err: unknown) {
+      if (!mountedRef.current || controller.signal.aborted) return;
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      if (mountedRef.current && !controller.signal.aborted) setLoading(false);
+    }
+  }, [cacheKey, includeInactive]);
+
+  // Initial fetch
+  useEffect(() => {
+    if (!autoFetch) return;
+    // If cache was already hydrated from the initial useState call, do a silent
+    // background refresh so the user sees up-to-date data on subsequent visits
+    // without the loading spinner flashing.
+    if (cached) {
+      setData(cached);
+      setLoading(false);
+      void doFetch(true);
+    } else {
+      void doFetch(false);
+    }
+
+    return () => { abortRef.current?.abort(); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoFetch, cacheKey]);
+
+  const refetch = useCallback(() => { void doFetch(false); }, [doFetch]);
+
   const apiClients = useMemo(() => data?.clients ?? [], [data]);
-
-  const clients = useMemo(
-    () => apiClients.map(mapToAppClient),
-    [apiClients]
-  );
-
+  const clients = useMemo(() => apiClients.map(mapToAppClient), [apiClients]);
 
   return {
     apiClients,

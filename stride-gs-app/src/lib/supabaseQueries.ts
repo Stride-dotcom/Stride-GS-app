@@ -24,6 +24,8 @@ import type {
   BillingResponse,
   BillingSummary,
   BillingFilterParams,
+  ApiClient,
+  ClientsResponse,
 } from './api';
 
 /** Map of clientSheetId → clientName for enriching Supabase rows */
@@ -402,6 +404,35 @@ export async function fetchShipmentsFromSupabase(
       shipments,
       count: shipments.length,
       clientsQueried: Array.isArray(clientSheetId) ? clientSheetId.length : (clientSheetId ? 1 : Object.keys(clientNameMap).length),
+    };
+  } catch {
+    return null;
+  }
+}
+
+export async function fetchShipmentByNoFromSupabase(
+  shipmentNo: string
+): Promise<ApiShipment | null> {
+  try {
+    const { data, error } = await supabase
+      .from('shipments')
+      .select('*')
+      .eq('shipment_number', shipmentNo)
+      .maybeSingle();
+    if (error || !data) return null;
+    const row = data as SupabaseShipmentRow;
+    return {
+      shipmentNumber: row.shipment_number,
+      clientName: '',
+      clientSheetId: row.tenant_id,
+      receiveDate: row.receive_date || '',
+      itemCount: row.item_count ?? 0,
+      carrier: row.carrier || '',
+      trackingNumber: row.tracking_number || '',
+      photosUrl: '',
+      notes: row.notes || '',
+      invoiceUrl: '',
+      folderUrl: row.folder_url || '',
     };
   } catch {
     return null;
@@ -1060,6 +1091,84 @@ export async function fetchDtOrdersFromSupabase(
         clientName: (row.tenant_id ? clientNameMap[row.tenant_id] : null) ?? '',
       };
     });
+  } catch {
+    return null;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Clients — session 65. Fast dropdown (was 120-240s via GAS cold-start).
+// Mirror written by StrideAPI.gs on every client edit + backfill endpoint.
+// Returns null on any failure so the caller can fall back to fetchClients (GAS).
+// ─────────────────────────────────────────────────────────────────────────────
+
+interface SupabaseClientRow {
+  tenant_id: string;
+  name: string;
+  spreadsheet_id: string;
+  email: string | null;
+  contact_name: string | null;
+  phone: string | null;
+  folder_id: string | null;
+  photos_folder_id: string | null;
+  invoice_folder_id: string | null;
+  free_storage_days: number | null;
+  discount_storage_pct: number | null;
+  discount_services_pct: number | null;
+  payment_terms: string | null;
+  enable_receiving_billing: boolean | null;
+  enable_shipment_email: boolean | null;
+  enable_notifications: boolean | null;
+  auto_inspection: boolean | null;
+  separate_by_sidemark: boolean | null;
+  auto_charge: boolean | null;
+  web_app_url: string | null;
+  qb_customer_name: string | null;
+  stax_customer_id: string | null;
+  parent_client: string | null;
+  notes: string | null;
+  shipment_note: string | null;
+  active: boolean | null;
+}
+
+export async function fetchClientsFromSupabase(
+  includeInactive = false
+): Promise<ClientsResponse | null> {
+  try {
+    let query = supabase.from('clients').select('*');
+    if (!includeInactive) query = query.eq('active', true);
+    const { data, error } = await query.order('name');
+    if (error || !data || data.length === 0) return null;
+
+    const clients: ApiClient[] = (data as SupabaseClientRow[]).map(row => ({
+      name: row.name,
+      spreadsheetId: row.spreadsheet_id,
+      email: row.email ?? '',
+      contactName: row.contact_name ?? '',
+      phone: row.phone ?? '',
+      folderId: row.folder_id ?? '',
+      photosFolderId: row.photos_folder_id ?? '',
+      invoiceFolderId: row.invoice_folder_id ?? '',
+      freeStorageDays: row.free_storage_days ?? 0,
+      discountStoragePct: row.discount_storage_pct ?? 0,
+      discountServicesPct: row.discount_services_pct ?? 0,
+      paymentTerms: row.payment_terms ?? 'NET 30',
+      enableReceivingBilling: row.enable_receiving_billing ?? false,
+      enableShipmentEmail: row.enable_shipment_email ?? false,
+      enableNotifications: row.enable_notifications ?? false,
+      autoInspection: row.auto_inspection ?? false,
+      separateBySidemark: row.separate_by_sidemark ?? false,
+      autoCharge: row.auto_charge ?? false,
+      webAppUrl: row.web_app_url ?? '',
+      qbCustomerName: row.qb_customer_name ?? '',
+      staxCustomerId: row.stax_customer_id ?? '',
+      parentClient: row.parent_client ?? '',
+      notes: row.notes ?? '',
+      shipmentNote: row.shipment_note ?? '',
+      active: row.active ?? true,
+    }));
+
+    return { clients, count: clients.length };
   } catch {
     return null;
   }

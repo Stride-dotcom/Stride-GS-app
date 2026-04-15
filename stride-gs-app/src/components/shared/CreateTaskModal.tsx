@@ -259,7 +259,7 @@ export function CreateTaskModal({ items, clientSheetId, onClose, onSuccess, addO
                       <div key={i}>
                         Item <strong>{c.itemId}</strong> already has an open {c.typeName} task{' '}
                         <a
-                          href={`#/tasks?open=${c.taskId}`}
+                          href={`#/tasks/${c.taskId}`}
                           target="_blank"
                           rel="noopener noreferrer"
                           style={{ color: '#B45309', fontWeight: 700, textDecoration: 'underline' }}

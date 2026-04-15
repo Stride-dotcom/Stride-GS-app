@@ -487,7 +487,7 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
                 if (!shipNo) return <div style={{ fontSize: 13, color: theme.colors.textMuted }}>—</div>;
                 return (
                   <a
-                    href={`#/shipments?open=${encodeURIComponent(shipNo)}`}
+                    href={`#/shipments/${encodeURIComponent(shipNo)}`}
                     target="_blank"
                     rel="noopener noreferrer"
                     style={{ fontSize: 13, color: theme.colors.orange, fontWeight: 600, textDecoration: 'underline', display: 'inline-flex', alignItems: 'center', gap: 4 }}

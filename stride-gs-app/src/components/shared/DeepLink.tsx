@@ -3,17 +3,20 @@ import { ExternalLink } from 'lucide-react';
 import { theme } from '../../styles/theme';
 
 /**
- * DeepLink — renders an anchor that deep-links to another page's detail panel
- * in a new browser tab. All target pages (Inventory, Tasks, Repairs, WillCalls,
- * Shipments) support the `?open=<id>` query param on mount, which auto-opens
- * the matching detail panel.
+ * DeepLink — renders an anchor that deep-links to another entity's detail page
+ * in a new browser tab.
+ *
+ * Standalone pages (task/repair/willcall/shipment) are loaded by ID via
+ * Supabase — ~50ms, no client filter needed, RLS handles access.
+ * Inventory still uses the ?open= list-page approach (no standalone item page).
  *
  * Rationale: Justin wants every cross-entity link to open in a new tab so he
  * can inspect related records without losing his place on the current page.
  *
  * Usage:
- *   <DeepLink kind="inventory" id={task.itemId}>{task.itemId}</DeepLink>
+ *   <DeepLink kind="inventory" id={task.itemId} clientSheetId={task.clientSheetId} />
  *   <DeepLink kind="task"      id="INSP-114-1" />
+ *   <DeepLink kind="shipment"  id="SHP-0001" />
  */
 
 export type DeepLinkKind =
@@ -30,6 +33,9 @@ const KIND_TO_ROUTE: Record<DeepLinkKind, string> = {
   willcall: '/will-calls',
   shipment: '/shipments',
 };
+
+/** Entities with standalone /:id pages — link directly, no ?open= needed */
+const STANDALONE_KINDS = new Set<DeepLinkKind>(['task', 'repair', 'willcall', 'shipment']);
 
 export interface DeepLinkProps {
   kind: DeepLinkKind;
@@ -69,8 +75,11 @@ export function DeepLink({
 
   const fontSize = size === 'sm' ? 11 : size === 'lg' ? 14 : 13;
   const iconSize = size === 'sm' ? 10 : size === 'lg' ? 13 : 11;
-  const clientPart = clientSheetId ? `&client=${encodeURIComponent(clientSheetId)}` : '';
-  const href = `#${KIND_TO_ROUTE[kind]}?open=${encodeURIComponent(id)}${clientPart}`;
+  // Standalone pages: use /:id route (Supabase direct, no client filter needed)
+  // Inventory: still uses ?open= list-page approach (no standalone item page)
+  const href = STANDALONE_KINDS.has(kind)
+    ? `#${KIND_TO_ROUTE[kind]}/${encodeURIComponent(id)}`
+    : `#${KIND_TO_ROUTE[kind]}?open=${encodeURIComponent(id)}${clientSheetId ? `&client=${encodeURIComponent(clientSheetId)}` : ''}`;
 
   return (
     <a

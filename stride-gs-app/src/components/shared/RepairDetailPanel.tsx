@@ -340,7 +340,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
           {/* Inspector Notes (from source task) */}
           {repair.sourceTaskId && (
             <div style={{ background: '#FFFBF5', border: '1px solid #FED7AA', borderRadius: 10, padding: 14, marginBottom: 16 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}><ClipboardList size={14} color="#B45309" /><span style={{ fontSize: 12, fontWeight: 600, color: '#92400E' }}>Source Task: {repair.sourceTaskId}</span></div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}><ClipboardList size={14} color="#B45309" /><span style={{ fontSize: 12, fontWeight: 600, color: '#92400E' }}>Source Task: <DeepLink kind="task" id={repair.sourceTaskId} size="sm" style={{ color: '#B45309' }} /></span></div>
               <div style={{ fontSize: 12, color: '#92400E', lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>{repair.taskNotes || 'No inspection notes available'}</div>
             </div>
           )}

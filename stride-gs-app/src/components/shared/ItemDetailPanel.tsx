@@ -138,9 +138,9 @@ function LinkedRecordButton({ records, type, onNavigate }: {
   if (!records.length) return null;
   const Icon = ICON_MAP[type];
 
-  // Single record → deep link opens the detail panel in a new tab
+  // Single record → standalone detail page in a new tab
   if (records.length === 1) {
-    const href = `#${type === 'willcall' ? '/will-calls' : type === 'task' ? '/tasks' : '/repairs'}?open=${encodeURIComponent(records[0].id)}`;
+    const href = `#${type === 'willcall' ? '/will-calls' : type === 'task' ? '/tasks' : '/repairs'}/${encodeURIComponent(records[0].id)}`;
     return (
       <a
         href={href}
@@ -308,7 +308,7 @@ function ItemHistory({ tasks, repairs, willCalls, billing, moves, shipmentNumber
             <div style={histDateStyle}>{fmtDate(receiveDate)}</div>
             <div style={{ flex: 1 }}>
               <div>
-                <a href={`#/shipments?open=${encodeURIComponent(shipmentNumber!)}`} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()} style={histIdStyle}>{shipmentNumber}</a>
+                <a href={`#/shipments/${encodeURIComponent(shipmentNumber!)}`} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()} style={histIdStyle}>{shipmentNumber}</a>
                 {' '}
                 <span style={{ fontSize: 10, fontWeight: 600, color: '#16A34A' }}>Received</span>
               </div>
@@ -355,7 +355,7 @@ function ItemHistory({ tasks, repairs, willCalls, billing, moves, shipmentNumber
               <div style={histDateStyle}>{fmtDate(t.completedAt || t.cancelledAt || t.created)}</div>
               <div style={{ flex: 1 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <a href={`#/tasks?open=${encodeURIComponent(t.taskId)}`} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()} style={histIdStyle}>{t.taskId}</a>
+                  <a href={`#/tasks/${encodeURIComponent(t.taskId)}`} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()} style={histIdStyle}>{t.taskId}</a>
                   <MiniStatusBadge status={t.status} />
                   {t.result && <MiniStatusBadge status={t.result} />}
                 </div>
@@ -377,7 +377,7 @@ function ItemHistory({ tasks, repairs, willCalls, billing, moves, shipmentNumber
               <div style={histDateStyle}>{fmtDate(r.completedDate || r.createdDate)}</div>
               <div style={{ flex: 1 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <a href={`#/repairs?open=${encodeURIComponent(r.repairId)}`} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()} style={histIdStyle}>{r.repairId}</a>
+                  <a href={`#/repairs/${encodeURIComponent(r.repairId)}`} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()} style={histIdStyle}>{r.repairId}</a>
                   <MiniStatusBadge status={r.status} />
                   {(r.repairResult || r.result) && <MiniStatusBadge status={r.repairResult || r.result} />}
                 </div>
@@ -401,7 +401,7 @@ function ItemHistory({ tasks, repairs, willCalls, billing, moves, shipmentNumber
             <div style={histDateStyle}>{fmtDate(w.actualPickupDate || w.estimatedPickupDate || w.createdDate)}</div>
             <div style={{ flex: 1 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                <a href={`#/will-calls?open=${encodeURIComponent(w.wcNumber)}`} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()} style={histIdStyle}>{w.wcNumber}</a>
+                <a href={`#/will-calls/${encodeURIComponent(w.wcNumber)}`} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()} style={histIdStyle}>{w.wcNumber}</a>
                 <MiniStatusBadge status={w.status} />
               </div>
               {w.pickupParty && <div style={histNoteStyle}>{w.pickupParty}</div>}

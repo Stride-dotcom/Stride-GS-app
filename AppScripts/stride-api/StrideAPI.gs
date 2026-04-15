@@ -1,5 +1,15 @@
 /* ===================================================
-   StrideAPI.gs — v38.52.2 — 2026-04-14 PST — Stop polluting CB Clients with template scriptId
+   StrideAPI.gs — v38.53.0 — 2026-04-15 PST — Clients Supabase mirror (fast dropdown)
+   v38.53.0: NEW — clients read-cache mirror in Supabase. Adds sbClientRow_
+             (builds row from ApiClient shape), resyncClientToSupabase_
+             (reads CB Clients by spreadsheetId and upserts one row),
+             handleBulkSyncClientsToSupabase_ (backfill + periodic resync
+             endpoint), and wires write-through in handleUpdateClient_,
+             handleOnboardClient_, handleFinishClientSetup_. React will fetch
+             via fetchClientsFromSupabase first (~50ms) with GAS fallback.
+             Fixes the 120-240s dropdown load time from session 64 landmines.
+             Supabase migration: 20260415120000_clients_mirror_table.sql.
+   v38.52.2 — Stop polluting CB Clients with template scriptId
    v38.52.2: handleFinishClientSetup_ + api_appendClientRow_ now reject the
              master template's scriptId (`1Pk2Oc...ZA9jMmk4gkD2yNdTGRlI5T`)
              in every discovery strategy and NEVER write it to the CB Clients
@@ -1510,6 +1520,109 @@ function sbBillingRow_(tenantId, row) {
 }
 
 /**
+ * Session 65 — Builds a row for the `public.clients` Supabase mirror.
+ * Input is an ApiClient-shaped object (same fields that handleGetClients_ emits).
+ * tenant_id is always the client's own spreadsheetId (each client is its own tenant).
+ */
+function sbClientRow_(client) {
+  var sid = String(client.spreadsheetId || "");
+  return {
+    tenant_id:                 sid,
+    name:                      String(client.name || ""),
+    spreadsheet_id:            sid,
+    email:                     String(client.email || ""),
+    contact_name:              String(client.contactName || ""),
+    phone:                     String(client.phone || ""),
+    folder_id:                 String(client.folderId || ""),
+    photos_folder_id:          String(client.photosFolderId || ""),
+    invoice_folder_id:         String(client.invoiceFolderId || ""),
+    free_storage_days:         Number(client.freeStorageDays) || 0,
+    discount_storage_pct:      Number(client.discountStoragePct) || 0,
+    discount_services_pct:     Number(client.discountServicesPct) || 0,
+    payment_terms:             String(client.paymentTerms || "NET 30"),
+    enable_receiving_billing:  !!client.enableReceivingBilling,
+    enable_shipment_email:     !!client.enableShipmentEmail,
+    enable_notifications:      !!client.enableNotifications,
+    auto_inspection:           !!client.autoInspection,
+    separate_by_sidemark:      !!client.separateBySidemark,
+    auto_charge:               !!client.autoCharge,
+    web_app_url:               String(client.webAppUrl || ""),
+    qb_customer_name:          String(client.qbCustomerName || ""),
+    stax_customer_id:          String(client.staxCustomerId || ""),
+    parent_client:             String(client.parentClient || ""),
+    notes:                     String(client.notes || ""),
+    shipment_note:             String(client.shipmentNote || ""),
+    active:                    client.active !== false,
+    updated_at:                new Date().toISOString()
+  };
+}
+
+/**
+ * Session 65 — Resync a single client row from CB Clients sheet to Supabase.
+ * Called from api_writeThrough_ with entityType="clients". Best-effort, never
+ * blocks the caller. Uses the same row-build logic as handleGetClients_ so the
+ * mirror matches the API response shape exactly.
+ */
+function resyncClientToSupabase_(spreadsheetId) {
+  try {
+    if (!spreadsheetId) return;
+    var cbId = prop_("CB_SPREADSHEET_ID");
+    if (!cbId) return;
+    SpreadsheetApp.flush();
+    var cbSs = SpreadsheetApp.openById(cbId);
+    var sheet = cbSs.getSheetByName("Clients");
+    if (!sheet) return;
+    var data = sheet.getDataRange().getValues();
+    if (data.length < 2) return;
+    var headersUpper = data[0].map(function(h) { return String(h || "").trim().toUpperCase(); });
+    var targetSid = String(spreadsheetId).trim();
+    for (var i = 1; i < data.length; i++) {
+      var obj = {};
+      for (var j = 0; j < headersUpper.length; j++) {
+        if (headersUpper[j]) obj[headersUpper[j]] = data[i][j];
+      }
+      var rowSid = String(obj["CLIENT SPREADSHEET ID"] || "").trim();
+      if (rowSid !== targetSid) continue;
+      var name = String(obj["CLIENT NAME"] || "").trim();
+      if (!name) return; // row exists but name missing — bail
+      var active = obj["ACTIVE"];
+      var isActive = !(active === false || active === "FALSE" || active === "No");
+      var apiClient = {
+        name: name,
+        spreadsheetId: rowSid,
+        email: String(obj["CLIENT EMAIL"] || "").trim(),
+        contactName: String(obj["CONTACT NAME"] || "").trim(),
+        phone: String(obj["PHONE"] || "").trim(),
+        folderId: String(obj["CLIENT FOLDER ID"] || "").trim(),
+        photosFolderId: String(obj["PHOTOS FOLDER ID"] || "").trim(),
+        invoiceFolderId: String(obj["INVOICE FOLDER ID"] || "").trim(),
+        freeStorageDays: Number(obj["FREE STORAGE DAYS"]) || 0,
+        discountStoragePct: Number(obj["DISCOUNT STORAGE %"]) || 0,
+        discountServicesPct: Number(obj["DISCOUNT SERVICES %"]) || 0,
+        paymentTerms: String(obj["PAYMENT TERMS"] || "NET 30").trim(),
+        enableReceivingBilling: toBool_(obj["ENABLE RECEIVING BILLING"]),
+        enableShipmentEmail: toBool_(obj["ENABLE SHIPMENT EMAIL"]),
+        enableNotifications: toBool_(obj["ENABLE NOTIFICATIONS"]),
+        autoInspection: toBool_(obj["AUTO INSPECTION"]),
+        separateBySidemark: toBool_(obj["SEPARATE BY SIDEMARK"]),
+        qbCustomerName: String(obj["QB_CUSTOMER_NAME"] || "").trim(),
+        staxCustomerId: String(obj["STAX CUSTOMER ID"] || "").trim(),
+        parentClient: String(obj["PARENT CLIENT"] || "").trim(),
+        autoCharge: obj["AUTO CHARGE"] === true || String(obj["AUTO CHARGE"] || "").toUpperCase() === "TRUE",
+        webAppUrl: String(obj["WEB APP URL"] || "").trim(),
+        notes: String(obj["NOTES"] || "").trim(),
+        shipmentNote: String(obj["CLIENT SHIPMENT NOTE"] || "").trim(),
+        active: isActive
+      };
+      supabaseUpsert_("clients", sbClientRow_(apiClient));
+      return;
+    }
+  } catch (e) {
+    Logger.log("resyncClientToSupabase_ error (non-fatal): " + e);
+  }
+}
+
+/**
  * After a write handler succeeds, sync the affected entity to Supabase.
  * Best-effort — wraps supabaseUpsert_ with entity-specific builders.
  * @param {string} entityType - "inventory"|"task"|"repair"|"will_call"|"shipment"|"billing"
@@ -1552,7 +1665,14 @@ function syncEntityToSupabase_(entityType, tenantId, data) {
  */
 function resyncEntityToSupabase_(entityType, tenantId, entityId) {
   try {
-    if (!entityId || !tenantId) return;
+    if (!entityId) return;
+    // Session 65 — "clients" mirrors the CB Clients sheet, not a tenant sheet.
+    // The entityId is the client's spreadsheet_id; tenantId is unused here.
+    if (entityType === "clients") {
+      resyncClientToSupabase_(String(entityId));
+      return;
+    }
+    if (!tenantId) return;
     SpreadsheetApp.flush();
     var ss = SpreadsheetApp.openById(tenantId);
     var tabName, idCol;
@@ -2498,12 +2618,22 @@ function doPost(e) {
 
       case "onboardClient":
         return withStaffGuard_(callerEmail, function() {
-          return handleOnboardClient_(payload);
+          var r = handleOnboardClient_(payload);
+          // Session 65 write-through — extract new spreadsheetId from response.
+          try {
+            var body = JSON.parse(r.getContent());
+            if (body && body.success && body.spreadsheetId) {
+              resyncClientToSupabase_(String(body.spreadsheetId));
+            }
+          } catch (_) {}
+          return r;
         });
 
       case "finishClientSetup":
         return withStaffGuard_(callerEmail, function() {
-          return handleFinishClientSetup_(payload);
+          var r = handleFinishClientSetup_(payload);
+          api_writeThrough_(r, "clients", null, payload.spreadsheetId);
+          return r;
         });
 
       case "rediscoverAllScriptIds":
@@ -2523,7 +2653,9 @@ function doPost(e) {
 
       case "updateClient":
         return withStaffGuard_(callerEmail, function() {
-          return handleUpdateClient_(payload);
+          var r = handleUpdateClient_(payload);
+          api_writeThrough_(r, "clients", null, payload.spreadsheetId);
+          return r;
         });
 
       case "syncSettings":
@@ -2673,6 +2805,12 @@ function doPost(e) {
       case "bulkSyncToSupabase":
         return withAdminGuard_(callerEmail, function() {
           return handleBulkSyncToSupabase_(payload);
+        });
+      case "bulkSyncClientsToSupabase":
+        // Session 65 — backfill / periodic resync of the clients mirror.
+        // Iterates CB Clients once, upserts active rows to public.clients.
+        return withAdminGuard_(callerEmail, function() {
+          return handleBulkSyncClientsToSupabase_();
         });
       case "purgeInactiveFromSupabase":
         return withAdminGuard_(callerEmail, function() {
@@ -20927,6 +21065,81 @@ function handleSendStaxPayLink_(payload) {
 }
 
 // ─── Supabase Phase 3 — Bulk Sync & Reconciliation ──────────────────────────
+
+/**
+ * Session 65 — Backfill / periodic resync of the `public.clients` Supabase
+ * mirror. Reads the full CB Clients sheet once, builds one row per client,
+ * and batch-upserts to Supabase. Active and inactive rows are BOTH included
+ * (inactive rows are filtered out by the default `active=true` Supabase
+ * query in React; including them here means deactivating a client
+ * immediately reflects in the mirror without a separate delete path).
+ * Admin-only endpoint. Safe to run repeatedly — ON CONFLICT by spreadsheet_id.
+ */
+function handleBulkSyncClientsToSupabase_() {
+  try {
+    var cbId = prop_("CB_SPREADSHEET_ID");
+    if (!cbId) return errorResponse_("CB_SPREADSHEET_ID not configured", "CONFIG_ERROR");
+    var cbSs = SpreadsheetApp.openById(cbId);
+    var sheet = cbSs.getSheetByName("Clients");
+    if (!sheet) return errorResponse_("Clients sheet not found in CB", "NOT_FOUND");
+    var data = sheet.getDataRange().getValues();
+    if (data.length < 2) return jsonResponse_({ success: true, synced: 0, skipped: 0 });
+
+    var headersUpper = data[0].map(function(h) { return String(h || "").trim().toUpperCase(); });
+    var rows = [];
+    var skipped = 0;
+    for (var i = 1; i < data.length; i++) {
+      var obj = {};
+      for (var j = 0; j < headersUpper.length; j++) {
+        if (headersUpper[j]) obj[headersUpper[j]] = data[i][j];
+      }
+      var sid = String(obj["CLIENT SPREADSHEET ID"] || "").trim();
+      var name = String(obj["CLIENT NAME"] || "").trim();
+      if (!sid || !name) { skipped++; continue; }
+      var active = obj["ACTIVE"];
+      var isActive = !(active === false || active === "FALSE" || active === "No");
+      rows.push(sbClientRow_({
+        name: name,
+        spreadsheetId: sid,
+        email: String(obj["CLIENT EMAIL"] || "").trim(),
+        contactName: String(obj["CONTACT NAME"] || "").trim(),
+        phone: String(obj["PHONE"] || "").trim(),
+        folderId: String(obj["CLIENT FOLDER ID"] || "").trim(),
+        photosFolderId: String(obj["PHOTOS FOLDER ID"] || "").trim(),
+        invoiceFolderId: String(obj["INVOICE FOLDER ID"] || "").trim(),
+        freeStorageDays: Number(obj["FREE STORAGE DAYS"]) || 0,
+        discountStoragePct: Number(obj["DISCOUNT STORAGE %"]) || 0,
+        discountServicesPct: Number(obj["DISCOUNT SERVICES %"]) || 0,
+        paymentTerms: String(obj["PAYMENT TERMS"] || "NET 30").trim(),
+        enableReceivingBilling: toBool_(obj["ENABLE RECEIVING BILLING"]),
+        enableShipmentEmail: toBool_(obj["ENABLE SHIPMENT EMAIL"]),
+        enableNotifications: toBool_(obj["ENABLE NOTIFICATIONS"]),
+        autoInspection: toBool_(obj["AUTO INSPECTION"]),
+        separateBySidemark: toBool_(obj["SEPARATE BY SIDEMARK"]),
+        qbCustomerName: String(obj["QB_CUSTOMER_NAME"] || "").trim(),
+        staxCustomerId: String(obj["STAX CUSTOMER ID"] || "").trim(),
+        parentClient: String(obj["PARENT CLIENT"] || "").trim(),
+        autoCharge: obj["AUTO CHARGE"] === true || String(obj["AUTO CHARGE"] || "").toUpperCase() === "TRUE",
+        webAppUrl: String(obj["WEB APP URL"] || "").trim(),
+        notes: String(obj["NOTES"] || "").trim(),
+        shipmentNote: String(obj["CLIENT SHIPMENT NOTE"] || "").trim(),
+        active: isActive
+      }));
+    }
+
+    // Batch upsert (chunked internally by supabaseBatchUpsert_)
+    supabaseBatchUpsert_("clients", rows);
+
+    return jsonResponse_({
+      success: true,
+      synced: rows.length,
+      skipped: skipped,
+      total: data.length - 1
+    });
+  } catch (e) {
+    return errorResponse_("bulkSyncClientsToSupabase failed: " + e.message, "SERVER_ERROR");
+  }
+}
 
 /**
  * One-time bulk import: reads all active clients' data and upserts to Supabase.
