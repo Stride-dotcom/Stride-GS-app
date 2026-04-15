@@ -47,23 +47,21 @@ export function useBilling(autoFetch = true, filterClientSheetId?: string, filte
     return map;
   }, [clients]);
 
-  // Session 62 ref-stabilization: `clients` from useClients returns a new
-  // array reference on every render, which would rebuild clientNameMap →
-  // rebuild fetchFn → re-run useApiData effect → abort in-flight → refetch,
-  // looping forever (React error #300 "too many re-renders" on Inventory
-  // page which runs 6 data hooks in parallel). Mirror the latest map value
-  // into a ref and keep fetchFn's deps to [cacheKeyScope] only. Same pattern
-  // as useInventory / useTasks / useRepairs / useWillCalls / useShipments.
+  // Mirror clientNameMap via ref so fetchFn stays stable across client-list re-renders.
+  // Same pattern applied to the 5 list hooks in session 62 to prevent perpetual refetch loops.
   const clientNameMapRef = useRef(clientNameMap);
   clientNameMapRef.current = clientNameMap;
 
-  const shouldFetchIndividual = hasServerFilters || !batchEnabled;
-
-  // filters prop can also be a new object reference each render; serialize
-  // to a stable key so useCallback doesn't rebuild on identical filter state.
-  const filtersKey = hasServerFilters ? JSON.stringify(filters) : '';
+  // Mirror filters via ref so callback stays stable when filter value changes.
   const filtersRef = useRef(filters);
   filtersRef.current = filters;
+
+  const shouldFetchIndividual = hasServerFilters || !batchEnabled;
+
+  // Stable string key for filters — prevents fetchFn from rebuilding when callers pass
+  // inline filter objects (new reference each render, same logical value).
+  // Unconditional JSON.stringify so it handles both the hasServerFilters=true and =false cases.
+  const filtersKey = useMemo(() => JSON.stringify(filters || {}), [filters]);
 
   const fetchFn = useCallback(
     async (signal?: AbortSignal) => {
@@ -77,6 +75,9 @@ export function useBilling(autoFetch = true, filterClientSheetId?: string, filte
       }
       return fetchBilling(signal, clientSheetId);
     },
+    // clientNameMap intentionally omitted — read via ref to prevent perpetual refetch loop.
+    // filters intentionally omitted — read via filtersRef.current; filtersKey is the stable rebuild trigger.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [clientSheetId, hasServerFilters, filtersKey]
   );
 

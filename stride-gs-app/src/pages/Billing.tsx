@@ -31,7 +31,13 @@ import {
   postUpdateBillingRow,
   postUpdateQboStatus,
 } from '../lib/api';
-import type { BillingFilterParams } from '../lib/api';
+import type { BillingFilterParams, BillingResponse } from '../lib/api';
+import {
+  fetchBillingFromSupabaseFiltered,
+  fetchBillingSidemarksFromSupabase,
+  isSupabaseCacheAvailable,
+} from '../lib/supabaseQueries';
+import type { ClientNameMap } from '../lib/supabaseQueries';
 import { useBilling } from '../hooks/useBilling';
 import { useClients } from '../hooks/useClients';
 import { usePricing } from '../hooks/usePricing';
@@ -318,6 +324,19 @@ export function Billing() {
   // Non-storage services for billing report tab
   const NON_STOR_SERVICES = useMemo(() => ALL_SERVICES.filter(s => s.code !== 'STOR'), [ALL_SERVICES]);
 
+  // id → name map for Supabase query enrichment; name → id for clientFilter lookup
+  const clientNameMap = useMemo<ClientNameMap>(() => {
+    const map: ClientNameMap = {};
+    for (const c of apiClients) { if (c.id && c.name) map[c.id] = c.name; }
+    return map;
+  }, [apiClients]);
+
+  const clientNameToId = useMemo<Record<string, string>>(() => {
+    const map: Record<string, string> = {};
+    for (const c of apiClients) { if (c.name && c.id) map[c.name] = c.id; }
+    return map;
+  }, [apiClients]);
+
   // ─── Billing Report Tab State ─────────────────────────────────────────────
   // Use useBilling(false) to avoid auto-fetch. We also keep it around for
   // re-send invoice email which needs liveRows to lookup clientSheetId.
@@ -354,7 +373,26 @@ export function Billing() {
     return merged;
   }, [reportData, knownSidemarks]);
 
-  const loadReport = useCallback(async () => {
+  // Shared row mapper for both Supabase and GAS billing responses
+  const mapBillingRows = useCallback((apiRows: BillingResponse['rows']): BillingRow[] =>
+    (apiRows ?? []).map(r => ({
+      ledgerRowId: r.ledgerRowId, status: r.status, invoiceNo: r.invoiceNo,
+      client: r.clientName, clientSheetId: r.clientSheetId, clientName: r.clientName,
+      date: r.date, svcCode: r.svcCode, svcName: r.svcName,
+      itemId: r.itemId, description: r.description, itemClass: r.itemClass,
+      qty: r.qty, rate: r.rate ?? 0, total: r.total ?? 0,
+      taskId: r.taskId, repairId: r.repairId, shipmentNo: r.shipmentNo,
+      notes: r.itemNotes, sourceSheetId: r.clientSheetId,
+      sidemark: r.sidemark || '', category: (r as any).category || '',
+      staxCustomerId: (r as any).staxCustomerId || null,
+      autoCharge: (r as any).autoCharge === true,
+      qboStatus: r.qboStatus || null,
+      qboInvoiceId: r.qboInvoiceId || null,
+    }))
+  , []);
+
+  // forceGas=true → skip Supabase and go straight to GAS (used by Refresh button)
+  const loadReport = useCallback(async (forceGas = false) => {
     setReportLoading(true);
     setReportError('');
     setRowSel({});
@@ -362,7 +400,7 @@ export function Billing() {
       const filters: BillingFilterParams = {};
       if (rptStatusFilter.length > 0) filters.statusFilter = rptStatusFilter;
       if (rptSvcFilter.length > 0) {
-        // Convert service names back to codes for the backend filter
+        // Convert service names back to codes for the filter
         const nameToCode = new Map(ALL_SERVICES.map(s => [s.name, s.code]));
         filters.svcFilter = rptSvcFilter.map(name => nameToCode.get(name) || name);
       }
@@ -370,41 +408,36 @@ export function Billing() {
       if (rptEndDate) filters.endDate = rptEndDate;
       if (rptClientFilter.length > 0) filters.clientFilter = rptClientFilter;
 
-      const res = await fetchBilling(undefined, undefined, filters);
-      if (res.ok && res.data) {
-        const rows: BillingRow[] = (res.data.rows ?? []).map(r => ({
-          ledgerRowId: r.ledgerRowId, status: r.status, invoiceNo: r.invoiceNo,
-          client: r.clientName, clientSheetId: r.clientSheetId, clientName: r.clientName,
-          date: r.date, svcCode: r.svcCode, svcName: r.svcName,
-          itemId: r.itemId, description: r.description, itemClass: r.itemClass,
-          qty: r.qty, rate: r.rate ?? 0, total: r.total ?? 0,
-          taskId: r.taskId, repairId: r.repairId, shipmentNo: r.shipmentNo,
-          notes: r.itemNotes, sourceSheetId: r.clientSheetId,
-          sidemark: r.sidemark || '', category: (r as any).category || '',
-          staxCustomerId: (r as any).staxCustomerId || null,
-          autoCharge: (r as any).autoCharge === true,
-          qboStatus: r.qboStatus || null,
-          qboInvoiceId: r.qboInvoiceId || null,
-        }));
-        setReportData(rows);
-        setReportLoaded(true);
-        // Track known client/sidemark options
-        setKnownClients(prev => {
-          const fromRows = rows.map(r => r.client);
-          return [...new Set([...prev, ...fromRows])].sort();
-        });
-        setKnownSidemarks(prev => {
-          const fromRows = rows.map(r => r.sidemark).filter(Boolean) as string[];
-          return [...new Set([...prev, ...fromRows])].sort();
-        });
-      } else {
-        setReportError(res.error || 'Failed to load billing data');
+      let billingResponse: BillingResponse | null = null;
+
+      // Supabase-first (fast ~50ms). Skipped when caller requests a live GAS verification.
+      if (!forceGas && await isSupabaseCacheAvailable()) {
+        billingResponse = await fetchBillingFromSupabaseFiltered(filters, clientNameMap);
       }
+
+      // GAS fallback (authoritative, 3–30s)
+      if (!billingResponse) {
+        const res = await fetchBilling(undefined, undefined, filters);
+        if (res.ok && res.data) {
+          billingResponse = res.data;
+        } else {
+          setReportError(res.error || 'Failed to load billing data');
+          setReportLoading(false);
+          return;
+        }
+      }
+
+      const rows = mapBillingRows(billingResponse.rows);
+      setReportData(rows);
+      setReportLoaded(true);
+      // Track known client/sidemark options accumulated across loads
+      setKnownClients(prev => [...new Set([...prev, ...rows.map(r => r.client)])].sort());
+      setKnownSidemarks(prev => [...new Set([...prev, ...(rows.map(r => r.sidemark).filter(Boolean) as string[])])].sort());
     } catch (err) {
       setReportError(err instanceof Error ? err.message : String(err));
     }
     setReportLoading(false);
-  }, [rptStatusFilter, rptSvcFilter, rptSidemarkFilter, rptEndDate, rptClientFilter]);
+  }, [rptStatusFilter, rptSvcFilter, rptSidemarkFilter, rptEndDate, rptClientFilter, ALL_SERVICES, clientNameMap, mapBillingRows]);
 
   const clearReportFilters = useCallback(() => {
     setRptClientFilter([]);
@@ -467,14 +500,19 @@ export function Billing() {
     }
   }, [apiClients]);
 
-  // Auto-load report when client filter changes (populates sidemarks + data)
-  // Only fires when at least one client is selected — page starts blank until user picks a client
+  // When client filter changes, fetch sidemarks from Supabase for the dropdown.
+  // Does NOT load a full billing report — user must click "Load Report" for that.
   useEffect(() => {
-    if (activeTab === 'report' && apiConfigured && rptClientFilter.length > 0) {
-      loadReport();
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rptClientFilter, activeTab]);
+    if (!rptClientFilter?.length) { setKnownSidemarks([]); return; }
+    const tenantIds = rptClientFilter.map(name => clientNameToId[name]).filter(Boolean) as string[];
+    if (!tenantIds.length) return;
+    let cancelled = false;
+    fetchBillingSidemarksFromSupabase(tenantIds).then(result => {
+      if (cancelled) return;
+      if (result) setKnownSidemarks(result);
+    });
+    return () => { cancelled = true; };
+  }, [rptClientFilter, clientNameToId]);
 
   const handlePreviewStorage = useCallback(async () => {
     setPreviewLoading(true);
@@ -1337,15 +1375,15 @@ export function Billing() {
           <p style={{ fontSize: 13, color: theme.colors.textMuted, marginTop: 2 }}>Billing report builder, storage charges, and invoice review</p>
         </div>
         <button
-          onClick={() => { setRefreshing(true); refetchBilling(); loadReport(); }}
-          title="Refresh all billing data"
+          onClick={() => { setRefreshing(true); refetchBilling(); loadReport(true); }}
+          title="Refresh billing data from source (bypasses Supabase cache)"
           style={{ padding: '7px 8px', fontSize: 12, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', display: 'flex', alignItems: 'center', color: (refreshing || reportLoading || billingLoading) ? theme.colors.orange : theme.colors.textSecondary, transition: 'color 0.2s' }}
         >
           <RefreshCw size={14} style={(refreshing || reportLoading || billingLoading) ? { animation: 'spin 1s linear infinite' } : undefined} />
         </button>
       </div>
 
-      <SyncBanner syncing={refreshing} />
+      <SyncBanner syncing={refreshing || reportLoading} />
 
       {/* Tab Nav */}
       <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>

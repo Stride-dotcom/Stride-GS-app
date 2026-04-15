@@ -23,6 +23,7 @@ import type {
   ApiBillingRow,
   BillingResponse,
   BillingSummary,
+  BillingFilterParams,
 } from './api';
 
 /** Map of clientSheetId → clientName for enriching Supabase rows */
@@ -467,6 +468,131 @@ export async function fetchBillingFromSupabase(
       clientsQueried: clientSheetId ? 1 : Object.keys(clientNameMap).length,
       summary,
     };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Billing filter mirror — Supabase-first equivalent of GAS getBilling with
+ * server-side filters. Returns null on any error so the caller can fall back
+ * to the GAS API.
+ *
+ * Filter mapping:
+ *   clientFilter (names)  → tenant_id IN (ids resolved via reverse-lookup)
+ *   statusFilter          → status IN (...)
+ *   svcFilter (codes)     → svc_code IN (...)
+ *   sidemarkFilter        → sidemark IN (...)
+ *   endDate               → date <= endDate
+ */
+export async function fetchBillingFromSupabaseFiltered(
+  filters: BillingFilterParams,
+  clientNameMap: ClientNameMap,
+): Promise<BillingResponse | null> {
+  try {
+    // Build reverse name→id map so clientFilter (names) maps to tenant_ids
+    const nameToId: Record<string, string> = {};
+    for (const [id, name] of Object.entries(clientNameMap)) {
+      nameToId[name] = id;
+    }
+
+    let query = supabase.from('billing').select('*');
+
+    if (filters.clientFilter?.length) {
+      const tenantIds = filters.clientFilter.map(n => nameToId[n]).filter(Boolean);
+      if (tenantIds.length === 0) {
+        console.warn('[supabaseQueries] clientFilter provided but no tenant_ids resolved — falling back to GAS');
+        return null;
+      }
+      query = query.in('tenant_id', tenantIds);
+    }
+    if (filters.statusFilter?.length) {
+      query = query.in('status', filters.statusFilter);
+    }
+    if (filters.svcFilter?.length) {
+      query = query.in('svc_code', filters.svcFilter);
+    }
+    if (filters.sidemarkFilter?.length) {
+      query = query.in('sidemark', filters.sidemarkFilter);
+    }
+    if (filters.endDate) {
+      query = query.lte('date', filters.endDate);
+    }
+
+    const { data, error } = await query;
+    if (error || !data) return null;
+
+    const summary: BillingSummary = { unbilled: 0, invoiced: 0, billed: 0, void_count: 0, totalUnbilled: 0 };
+
+    const rows: ApiBillingRow[] = (data as SupabaseBillingRow[]).map(row => {
+      const status = row.status || 'Unbilled';
+      const total = row.total ?? 0;
+      if (status === 'Unbilled') { summary.unbilled++; summary.totalUnbilled += total; }
+      else if (status === 'Invoiced') { summary.invoiced++; }
+      else if (status === 'Billed') { summary.billed++; }
+      else if (status === 'Void') { summary.void_count++; }
+
+      return {
+        ledgerRowId: row.ledger_row_id,
+        clientName: clientNameMap[row.tenant_id] || row.client_name || '',
+        clientSheetId: row.tenant_id,
+        status,
+        invoiceNo: row.invoice_no || '',
+        client: row.client_name || clientNameMap[row.tenant_id] || '',
+        date: row.date || '',
+        svcCode: row.svc_code || '',
+        svcName: row.svc_name || '',
+        category: row.category || '',
+        itemId: row.item_id || '',
+        description: row.description || '',
+        itemClass: row.item_class || '',
+        qty: row.qty ?? 0,
+        rate: row.rate,
+        total: row.total,
+        taskId: row.task_id || '',
+        repairId: row.repair_id || '',
+        shipmentNo: row.shipment_number || '',
+        itemNotes: row.item_notes || '',
+        invoiceDate: row.invoice_date || '',
+        invoiceUrl: row.invoice_url || '',
+        sidemark: row.sidemark || '',
+      };
+    });
+
+    return {
+      rows,
+      count: rows.length,
+      clientsQueried: filters.clientFilter?.length ?? Object.keys(clientNameMap).length,
+      summary,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Fetch distinct non-empty sidemarks from the billing cache for the given
+ * tenant_ids. Used to populate the Sidemark filter before a full report load.
+ * Returns null on error (caller falls back to empty list).
+ */
+export async function fetchBillingSidemarksFromSupabase(
+  tenantIds: string[],
+): Promise<string[] | null> {
+  try {
+    let query = supabase
+      .from('billing')
+      .select('sidemark')
+      .not('sidemark', 'is', null)
+      .neq('sidemark', '');
+    if (tenantIds.length) {
+      query = query.in('tenant_id', tenantIds);
+    }
+    const { data, error } = await query;
+    if (error || !data) return null;
+    const sidemarks = [...new Set(
+      (data as { sidemark: string | null }[]).map(r => r.sidemark).filter(Boolean) as string[]
+    )].sort();
+    return sidemarks;
   } catch {
     return null;
   }
