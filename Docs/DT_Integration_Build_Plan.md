@@ -78,24 +78,31 @@ DispatchTrack API / Webhooks
 - Migration: `20260411120000_dt_phase1a_schema`
 - **No React, no Edge Functions, no GAS changes**
 
-### Phase 1b — React Orders Tab (NEXT)
-- New route: `#/orders`
-- Gated by `orders_tab_enabled_roles` from `dt_credentials`
-- Read-only table: DT order #, client, service date, status badge, contact name/city
-- Row click → Order detail panel (same pattern as Task/Repair detail panels)
-- Order detail: contact info, time window, items list, history timeline, notes, photos
-- Uses Supabase direct read (same pattern as `supabaseQueries.ts`)
-- TypeScript types generated from Supabase schema
-- **No write operations in Phase 1b** — view only
+### Phase 1b — React Orders Tab (COMPLETE ✅)
+- Route: `#/orders` (admin-only, gated by RoleGuard)
+- TanStack Table with category filter pills, global search, CSV export, virtual rows
+- Row click → OrderDetailPanel (resizable drawer, read-only)
+- Supabase-backed: `fetchDtOrdersFromSupabase` + `fetchDtStatusesFromSupabase`
+- Build: `63207c2` deployed to mystridehub.com — shows empty state until Phase 1c
 
-### Phase 1c — Webhook Ingest
+### Phase 1c — Webhook Ingest (READY TO BUILD)
+**Prerequisites now resolved:**
+- DT instance URL: `expressinstallation.dispatchtrack.com` ✅
+- Business-level API key: obtained 2026-04-15 ✅ (stored as `DT_API_KEY` Edge Function secret)
+- Webhook mechanism: Admin → Alerts → Web Service, POST, `{{...}}` tag payload ✅
+- No per-client credentials needed ✅
+
+**Build tasks:**
 - Supabase Edge Function: `dt-webhook-ingest`
-  - Validates webhook HMAC signature against `dt_credentials.webhook_secret`
-  - Writes raw event to `dt_webhook_events`
-  - Processes: upsert to `dt_orders`, update child tables, quarantine if no tenant match
-  - Idempotency: skip if `idempotency_key` already exists
-- StrideAPI.gs: no changes needed (Edge Function handles ingest directly)
-- Add `SUPABASE_WEBHOOK_SECRET` to `dt_credentials` row once DT account configured
+  - Validates shared secret token (URL param `?token=<secret>` — no HMAC from DT v8.1)
+  - Parses `{{Alert_Type}}`, `{{Account}}`, `{{Service_Order_Number}}`, etc. from POST body
+  - Writes raw event to `dt_webhook_events` (idempotency on `idempotency_key`)
+  - Upserts to `dt_orders`: maps `{{Account}}` → `tenant_id` via client name lookup
+  - Quarantines if no tenant match
+  - Updates `latest_note_preview` on Note events
+  - Queues photo rows on Pictures events
+- DT Admin config: enable relevant alert events (Started, Unable To Start, Unable To Finish, In Transit, Notes, Pictures, Service Route Finished), set Delivery Mechanism = Web Service, POST to Edge Function URL
+- Store Edge Function URL in `dt_credentials.webhook_url`
 
 ### Phase 2 — Bi-directional Sync
 - Background reconciliation: poll DT API for open orders, compare with Supabase, fill gaps
@@ -151,12 +158,59 @@ cd dist && git add -A && git commit -m "Deploy: ..." && git push origin main --f
 
 ---
 
-## Open Questions (resolve before Phase 1b)
+## Credentials & Configuration (Phase 1c)
 
-- [ ] DT API base URL and auth token format (needed for `dt_credentials` row)
-- [ ] DT webhook endpoint URL format and HMAC header name
-- [ ] DT sub-status code list (to seed `dt_substatuses`)
-- [ ] Which clients should see the Orders tab first? (sets initial `orders_tab_enabled_roles`)
+### DT Instance
+- **URL:** `https://expressinstallation.dispatchtrack.com`
+- **Account count:** 60 active accounts (all Stride clients)
+
+### API Authentication
+- **Type:** Business-level API key — one key covers all 60 accounts. No per-client keys needed.
+- **Key storage:** Store in Supabase `dt_credentials` table (`api_key` column) via MCP tool, and as a Supabase Edge Function secret. **Never commit to git.**
+- Key name for Edge Function secret: `DT_API_KEY`
+- Key obtained: 2026-04-15 from Ashok at DispatchTrack support
+
+### Webhook Configuration (Admin → General Settings → Alerts)
+- **Delivery Mechanism:** Web Service
+- **Method:** POST
+- **URL:** Supabase Edge Function URL (to be deployed in Phase 1c)
+- **Auth strategy:** No HMAC signing documented — use a shared secret token in URL params or custom header. Add a `?token=<random-secret>` param to the Edge Function URL and validate it on ingest.
+- **Relevant alert events to wire up:**
+  - `Started` — order is in progress → status: in_progress
+  - `Unable To Start` — failed to start → status: exception
+  - `Unable To Finish` — delivery failed → status: exception
+  - `In Transit` — en route → status: in_progress
+  - `Notes` — driver note added → update `latest_note_preview` + `dt_order_notes`
+  - `Pictures` / `Pictures/Notes` — POD photo added → queue to `dt_order_photos`
+  - `Pre Call Confirm Status` — pre-call sent
+  - `Service Route Finished` — route complete
+
+### Available Webhook Tags (DT `{{...}}` template syntax)
+Tags confirmed visible in Admin → Alerts → Edit → Web Service → Available Tags:
+- `{{Alert_Type}}` — event name (e.g. "Started", "Unable To Finish")
+- `{{Account}}` — account name → maps to client (tenant lookup)
+- `{{Account_Alert_Email}}` — account email
+- `{{Service_Order_Number}}` — order identifier → `dt_identifier`
+- `{{Customer_Name}}`, `{{Customer_Address}}`, `{{Customer_Primary_Phone}}`, `{{Customer_Secondary_Phone}}`, `{{Customer_Email}}`
+- `{{Note}}` — driver/dispatcher note text
+- `{{ItemsInfo::Description|SKU_Number|Quantity|Delivered|Status|Return_Code|Driver_Return_Note}}` — line items
+- Custom fields: `{{cf_Contact_Notes}}`, `{{cf_Fabric_Protection_Added}}` (account-specific)
+- Additional account fields: `{{af_-}}` (account custom fields, names TBD per account config)
+
+### Polling API (Phase 2 reconciliation)
+- **Endpoint:** `https://expressinstallation.dispatchtrack.com/orders/api/export.xml`
+- **Auth:** `code=expressinstallation&api_key=<DT_API_KEY>`
+- **Method:** POST with `date=YYYY-MM-DD` parameter
+- **Returns:** XML with all order activity for that date across all accounts
+
+---
+
+## Open Questions (remaining)
+
+- [ ] DT webhook HMAC/signature: no HMAC documented in v8.1 API. Confirm with Ashok whether a signature header is sent on webhook POST, or use shared-secret-in-URL approach.
+- [ ] DT sub-status code list: to seed `dt_substatuses` table (DT API only returns 6 top-level statuses in export XML)
+- [ ] Which clients should see the Orders tab first? Currently admin-only via `orders_tab_enabled_roles`
+- [ ] Timezone field: DT export XML does not include timezone. Confirm if orders always use America/Los_Angeles or if it varies.
 - [ ] Should order items auto-link to Stride inventory by PO number / sidemark match?
 
 ---
