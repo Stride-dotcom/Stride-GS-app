@@ -19,7 +19,7 @@ import {
   AlertCircle,
   GripVertical,
   Mail,
-  Route,
+  Calendar,
 } from 'lucide-react';
 import { theme } from '../../styles/theme';
 import { cacheClearAll } from '../../lib/apiCache';
@@ -38,7 +38,7 @@ const ADMIN_NAV = [
   { id: 'billing', label: 'Billing', path: '/billing', icon: DollarSign },
   { id: 'claims', label: 'Claims', path: '/claims', icon: Shield },
   { id: 'payments', label: 'Payments', path: '/payments', icon: CreditCard },
-  { id: 'orders', label: 'Orders', path: '/orders', icon: Route },
+  { id: 'orders', label: 'Delivery', path: '/orders', icon: Calendar },
   { id: 'marketing', label: 'Marketing', path: '/marketing', icon: Mail },
   { id: 'scanner', label: 'QR Scanner', path: '/scanner', icon: ScanLine },
   { id: 'labels', label: 'Labels', path: '/labels', icon: Tag },
@@ -53,6 +53,7 @@ const STAFF_NAV = [
   { id: 'tasks', label: 'Tasks', path: '/tasks', icon: ClipboardList },
   { id: 'repairs', label: 'Repairs', path: '/repairs', icon: Wrench },
   { id: 'willcalls', label: 'Will Calls', path: '/will-calls', icon: Truck },
+  { id: 'orders', label: 'Delivery', path: '/orders', icon: Calendar },
   { id: 'scanner', label: 'QR Scanner', path: '/scanner', icon: ScanLine },
   { id: 'labels', label: 'Labels', path: '/labels', icon: Tag },
 ];
@@ -66,6 +67,7 @@ const CLIENT_NAV = [
   { id: 'repairs', label: 'Repairs', path: '/repairs', icon: Wrench },
   { id: 'willcalls', label: 'Will Calls', path: '/will-calls', icon: Truck },
   { id: 'claims', label: 'Claims', path: '/claims', icon: Shield },
+  { id: 'orders', label: 'Delivery', path: '/orders', icon: Calendar },
 ];
 
 // Role display labels

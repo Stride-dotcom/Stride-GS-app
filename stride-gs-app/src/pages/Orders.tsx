@@ -4,13 +4,16 @@ import {
   flexRender, createColumnHelper,
   type SortingState, type FilterFn,
 } from '@tanstack/react-table';
-import { Search, RefreshCw, Download, Truck } from 'lucide-react';
+import { Search, RefreshCw, Download, Truck, Calendar } from 'lucide-react';
 import { theme } from '../styles/theme';
 import { useOrders } from '../hooks/useOrders';
 import type { DtOrderForUI } from '../hooks/useOrders';
 import { OrderDetailPanel } from '../components/shared/OrderDetailPanel';
 import { useVirtualRows } from '../hooks/useVirtualRows';
 import { useAuth } from '../contexts/AuthContext';
+import { AvailabilityCalendar } from '../components/availability/AvailabilityCalendar';
+
+type OrdersTab = 'orders' | 'availability';
 
 // ─── Status chip ─────────────────────────────────────────────────────────────
 
@@ -74,6 +77,8 @@ function exportCsv(rows: DtOrderForUI[]) {
 
 export function Orders() {
   const { user } = useAuth();
+  const isAdmin = user?.role === 'admin';
+  const [activeTab, setActiveTab] = useState<OrdersTab>(isAdmin ? 'orders' : 'availability');
   const { orders, loading, error, refetch, lastFetched } = useOrders();
   const [globalFilter, setGlobalFilter] = useState('');
   const [sorting, setSorting] = useState<SortingState>([{ id: 'localServiceDate', desc: true }]);
@@ -145,15 +150,58 @@ export function Orders() {
 
   const { containerRef, virtualRows, rows, totalHeight, measureElement } = useVirtualRows(table);
 
+  const tabStyle = (tab: OrdersTab) => ({
+    padding: '8px 18px',
+    fontSize: 13,
+    fontWeight: activeTab === tab ? 600 : 400,
+    color: activeTab === tab ? theme.colors.primary : theme.colors.textMuted,
+    background: 'none',
+    border: 'none',
+    borderBottom: activeTab === tab ? `2px solid ${theme.colors.primary}` : '2px solid transparent',
+    cursor: 'pointer',
+    fontFamily: 'inherit',
+    display: 'flex',
+    alignItems: 'center',
+    gap: 6,
+  }) as React.CSSProperties;
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: '#f8f9fa', fontFamily: theme.typography.fontFamily }}>
 
+      {/* Page title + tab bar */}
+      <div style={{ padding: '16px 20px 0', borderBottom: `1px solid ${theme.colors.border}`, flexShrink: 0 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
+          <Truck size={18} color={theme.colors.primary} />
+          <span style={{ fontSize: 18, fontWeight: 700, color: theme.colors.text }}>
+            {isAdmin ? 'Orders & Delivery' : 'Delivery'}
+          </span>
+        </div>
+        <div style={{ display: 'flex', gap: 0 }}>
+          {isAdmin && (
+            <button onClick={() => setActiveTab('orders')} style={tabStyle('orders')}>
+              <Truck size={14} /> Orders
+            </button>
+          )}
+          <button onClick={() => setActiveTab('availability')} style={tabStyle('availability')}>
+            <Calendar size={14} /> Availability
+          </button>
+        </div>
+      </div>
+
+      {/* Availability tab */}
+      {activeTab === 'availability' && (
+        <div style={{ flex: 1, overflow: 'auto', padding: 20 }}>
+          <AvailabilityCalendar />
+        </div>
+      )}
+
+      {/* Orders tab (admin only) */}
+      {activeTab === 'orders' && isAdmin && <>
+
       {/* Header bar */}
-      <div style={{ padding: '16px 20px 12px', borderBottom: `1px solid ${theme.colors.border}`, flexShrink: 0 }}>
+      <div style={{ padding: '12px 20px 12px', borderBottom: `1px solid ${theme.colors.border}`, flexShrink: 0 }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10, marginBottom: 12 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <Truck size={18} color={theme.colors.primary} />
-            <span style={{ fontSize: 18, fontWeight: 700, color: theme.colors.text }}>Orders</span>
             {!loading && <span style={{ fontSize: 12, color: theme.colors.textMuted }}>({rows.length})</span>}
           </div>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
@@ -300,6 +348,8 @@ export function Orders() {
       {selectedOrder && (
         <OrderDetailPanel order={selectedOrder} onClose={() => setSelectedOrder(null)} />
       )}
+
+      </>}
     </div>
   );
 }
