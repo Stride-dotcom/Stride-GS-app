@@ -53,7 +53,8 @@ type AuthState =
   | { status: 'unauthenticated' }
   | { status: 'denied'; reason: string }
   | { status: 'authenticated'; user: AuthUser }
-  | { status: 'recovery' };
+  | { status: 'recovery' }
+  | { status: 'recovery_expired' };
 
 export type LoginPhase = 'idle' | 'verifying' | 'success';
 
@@ -65,6 +66,8 @@ interface AuthContextValue {
   accessDenied: boolean;
   deniedReason: string | null;
   passwordRecoveryMode: boolean;
+  recoveryExpired: boolean;
+  clearRecoveryExpired: () => void;
   loginPhase: LoginPhase;
   loginPhaseError: string | null;
   signInWithPassword: (email: string, password: string) => Promise<{ error: string | null }>;
@@ -282,9 +285,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           // Supabase session is truly gone — otherwise ignore the noise.
           supabase.auth.getSession().then(({ data }) => {
             if (!data.session) {
-              clearCache();
-              setCallerEmail('');
-              setAuthState({ status: 'unauthenticated' });
+              if (recoveryRef.current) {
+                // Expired reset link: Supabase fires SIGNED_OUT when the token is
+                // invalid/expired instead of PASSWORD_RECOVERY. Don't silently redirect
+                // to login — surface the expired-link UI so the user knows what happened.
+                // Do NOT clear recoveryRef here; clearRecoveryExpired() handles the reset.
+                setAuthState({ status: 'recovery_expired' });
+              } else {
+                clearCache();
+                setCallerEmail('');
+                setAuthState({ status: 'unauthenticated' });
+              }
             }
           });
           return;
@@ -374,6 +385,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     } catch { /* non-browser env (tests) — ignore */ }
   }, [clearCache]);
 
+  const clearRecoveryExpired = useCallback(() => {
+    recoveryRef.current = false;
+    sessionStorage.removeItem('stride_recovery');
+    clearCache();
+    setCallerEmail('');
+    setAuthState({ status: 'unauthenticated' });
+  }, [clearCache]);
+
   // ─── Impersonation ─────────────────────────────────────────────────────────
 
   const impersonateUser = useCallback(
@@ -424,6 +443,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const accessDenied = authState.status === 'denied';
   const deniedReason = authState.status === 'denied' ? authState.reason : null;
   const passwordRecoveryMode = authState.status === 'recovery';
+  const recoveryExpired = authState.status === 'recovery_expired';
 
   return (
     <AuthContext.Provider
@@ -435,6 +455,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         accessDenied,
         deniedReason,
         passwordRecoveryMode,
+        recoveryExpired,
+        clearRecoveryExpired,
         loginPhase,
         loginPhaseError,
         signInWithPassword,

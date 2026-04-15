@@ -31,13 +31,13 @@ function RoleGuard({ allowed, children }: { allowed: AuthUser['role'][]; childre
 }
 
 export default function App() {
-  const { user, loading, accessDenied, deniedReason, passwordRecoveryMode } = useAuth();
+  const { user, loading, accessDenied, deniedReason, passwordRecoveryMode, recoveryExpired } = useAuth();
 
   // Auth check in progress
   if (loading) return <LoadingScreen />;
 
-  // Password reset callback — show change-password form
-  if (passwordRecoveryMode) return <SetNewPassword />;
+  // Password reset callback — show change-password form, or expired-link error
+  if (passwordRecoveryMode || recoveryExpired) return <SetNewPassword />;
 
   // Supabase auth succeeded but user not in Users tab / deactivated
   if (accessDenied) return <AccessDenied reason={deniedReason} />;
