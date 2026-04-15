@@ -193,16 +193,22 @@ export function Tasks() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Ref so the deep-link effect reads latest clientFilter without re-triggering.
+  const clientFilterRef = useRef(clientFilter);
+  useEffect(() => { clientFilterRef.current = clientFilter; }, [clientFilter]);
+
   // Resolve deep-link ?client= param once apiClients loads
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     const tid = deepLinkPendingTenantRef.current;
-    if (!tid || apiClients.length === 0 || clientFilter.length > 0) return;
+    if (!tid || apiClients.length === 0 || clientFilterRef.current.length > 0) return;
     const match = apiClients.find(c => c.spreadsheetId === tid);
     if (match) {
       setClientFilter([match.name]);
       deepLinkPendingTenantRef.current = null;
     }
-  }, [apiClients, clientFilter]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [apiClients]);
 
   // Effect 2: When tasks arrive, open the pending task
   useEffect(() => {

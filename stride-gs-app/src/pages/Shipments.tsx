@@ -370,16 +370,20 @@ export function Shipments() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const clientFilterRef = useRef(clientFilter);
+  useEffect(() => { clientFilterRef.current = clientFilter; }, [clientFilter]);
+
   // Resolve deep-link ?client= param once apiClients loads
   useEffect(() => {
     const tid = deepLinkPendingTenantRef.current;
-    if (!tid || apiClients.length === 0 || clientFilter.length > 0) return;
+    if (!tid || apiClients.length === 0 || clientFilterRef.current.length > 0) return;
     const match = apiClients.find(c => c.spreadsheetId === tid);
     if (match) {
       setClientFilter([match.name]);
       deepLinkPendingTenantRef.current = null;
     }
-  }, [apiClients, clientFilter]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [apiClients]);
 
   const [showColMenu, setShowColMenu] = useState(false);
   const [refreshing, setRefreshing] = useState(false);

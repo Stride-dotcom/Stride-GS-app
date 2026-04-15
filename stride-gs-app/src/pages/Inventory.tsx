@@ -757,17 +757,25 @@ export function Inventory() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Ref so the deep-link effect can read the latest clientFilter without it
+  // being a dep that re-triggers the effect and causes a setState loop.
+  const clientFilterRef = useRef(clientFilter);
+  useEffect(() => { clientFilterRef.current = clientFilter; }, [clientFilter]);
+
   // Retry deep-link client resolution once apiClients loads (handles cold start
   // where Supabase returns tenant_id before useClients has populated).
+  // clientFilter is intentionally read via ref — not a dep — to avoid the
+  // apiClients-change → setClientFilter → clientFilter-change → re-trigger loop.
   useEffect(() => {
     const tid = deepLinkPendingTenantRef.current;
-    if (!tid || apiClients.length === 0 || clientFilter.length > 0) return;
+    if (!tid || apiClients.length === 0 || clientFilterRef.current.length > 0) return;
     const match = apiClients.find(c => c.spreadsheetId === tid);
     if (match) {
       setClientFilter([match.name]);
       deepLinkPendingTenantRef.current = null;
     }
-  }, [apiClients, clientFilter]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [apiClients]);
 
   // Effect 2: when items load, open the pending item
   useEffect(() => {
