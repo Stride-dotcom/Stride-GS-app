@@ -94,6 +94,7 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
   // Repair quote state
   const [repairRequested, setRepairRequested] = useState(false);
   const [repairRequesting, setRepairRequesting] = useState(false);
+  const [repairRequestError, setRepairRequestError] = useState<string | null>(null);
 
   const activeRepair = useMemo(() => {
     return itemRepairs.find((r: any) => {
@@ -109,6 +110,7 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
   const handleRequestRepair = useCallback(async () => {
     if (!apiConfigured || !clientSheetId || !task.itemId) return;
     setRepairRequesting(true);
+    setRepairRequestError(null);
 
     // Phase 2C: insert temp repair row immediately
     const tempRepairId = `TEMP-${Date.now()}`;
@@ -128,14 +130,17 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
     try {
       const resp = await postRequestRepairQuote({ itemId: task.itemId, sourceTaskId: task.taskId }, clientSheetId);
       if (resp.ok && resp.data?.success) {
-        removeOptimisticRepair?.(tempRepairId); // remove temp; refetch loads real repair
+        // Set repairRequested BEFORE removing optimistic to avoid a render gap
         setRepairRequested(true);
+        removeOptimisticRepair?.(tempRepairId); // remove temp; refetch loads real repair
         onTaskUpdated?.();
       } else {
         removeOptimisticRepair?.(tempRepairId); // rollback
+        setRepairRequestError(resp.data?.error || 'Request failed — please try again.');
       }
     } catch (_) {
       removeOptimisticRepair?.(tempRepairId); // rollback
+      setRepairRequestError('Request failed — please try again.');
     }
     setRepairRequesting(false);
   }, [apiConfigured, clientSheetId, task.itemId, task.taskId, task.clientName, task.description, onTaskUpdated, addOptimisticRepair, removeOptimisticRepair]);
@@ -579,6 +584,19 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
                 <Wrench size={14} color={theme.colors.orange} />
                 <span style={{ fontSize: 12, fontWeight: 600 }}>Repair</span>
               </div>
+              {/* Persistent confirmation banner — stays until server data confirms the repair */}
+              {repairRequested && !activeRepair && (
+                <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, padding: '9px 12px', background: '#F0FDF4', border: '1px solid #86EFAC', borderRadius: 8, marginBottom: 8, fontSize: 12, color: '#15803D' }}>
+                  <CheckCircle2 size={14} style={{ flexShrink: 0, marginTop: 1 }} />
+                  <span><strong>Quote request submitted.</strong> The repair team has been notified — the repair record will appear below once it's confirmed.</span>
+                </div>
+              )}
+              {/* Error feedback */}
+              {repairRequestError && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '7px 10px', background: '#FEF2F2', border: '1px solid #FCA5A5', borderRadius: 8, marginBottom: 8, fontSize: 12, color: '#DC2626' }}>
+                  <AlertTriangle size={13} style={{ flexShrink: 0 }} />{repairRequestError}
+                </div>
+              )}
               <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                 {!repairStatus ? (
                   <WriteButton label={repairRequesting ? 'Requesting...' : 'Request Repair Quote'} variant="secondary" size="sm" onClick={async () => { await handleRequestRepair(); }} />

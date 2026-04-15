@@ -1,6 +1,6 @@
 # Stride GS App — Build Status & Continuation Guide
 
-**Last updated:** 2026-04-14 (session 64 — scriptId template-pollution cleanup; rollout reaches all 47 real client scripts; Import.gs v4.3.0 + RemoteAdmin.gs v1.5.1 deployed; Receiving bulk paste + misc fixes)
+**Last updated:** 2026-04-15 (session 65 — repair quote request: persistent confirmation banner + error feedback; auto-inspect race fix on branch fix/receiving-auto-inspect-race)
 **StrideAPI.gs:** v38.52.4 (Web App v268)
 **Import.gs (client):** v4.3.0 (rolled out to all 47 active clients; Reference column now imported)
 **Emails.gs (client):** v4.2.0 (rolled out to all 47 active clients)
@@ -73,9 +73,29 @@ Login, Dashboard, Inventory, Receiving, Shipments, Tasks, Repairs, Will Calls, B
 
 ---
 
-## RECENT CHANGES (2026-04-14 session 64)
+## RECENT CHANGES (2026-04-15 session 65)
 
-### Session 64: Script-ID template-pollution cleanup — all 47 clients on their own bound scripts
+### Session 65: Repair quote confirmation + auto-inspect race fix
+
+**Repair quote request feedback (`TaskDetailPanel.tsx`):**
+- Added persistent green "Quote request submitted" banner that appears immediately after the API call succeeds — stays visible until the real repair record loads from the server (at which point the existing status badge takes over). No auto-dismiss.
+- Added `repairRequestError` state: red error banner if the API returns a failure or throws. Previously all errors were silent.
+- Fixed potential race: `setRepairRequested(true)` is now called BEFORE `removeOptimisticRepair` so there's no render frame where both are false (which caused the button to briefly reappear).
+- Deployed: `a907ced` (`index-BJ5y1eJ6.js`)
+
+**Auto-inspect race fix (`Receiving.tsx`) — branch only, not yet merged:**
+- Branch: `fix/receiving-auto-inspect-race` (commit `2d00973`) — applies to the worktree, not shipping yet.
+- Converts `clientAutoInspect` from `useState(false)` to `useMemo(...)` deriving value from stable `clientSheetId + liveClients + apiClients`. Adds `prevAutoInspectRef + useEffect` race guard to backfill `needsInspection` on existing items when `apiClients` resolves after client is already selected. Removes all `setClientAutoInspect` calls.
+- Addresses known landmine #2 from session 64. Ready to merge when tested.
+
+**Live artifacts after this session:**
+- React bundle: `index-BJ5y1eJ6.js` (commit `a907ced`)
+- Branch `fix/receiving-auto-inspect-race`: commit `2d00973` (not deployed)
+- No backend changes, no Supabase migrations
+
+---
+
+### Session 64 archive: Script-ID template-pollution cleanup — all 47 clients on their own bound scripts
 
 **The big win:** for months, `npm run sync`/`rollout`/`deploy-clients` had been silently pushing code to the MASTER TEMPLATE instead of each individual client, because `CB Clients.SCRIPT ID` was polluted with the template's scriptId (`1Pk2Oc0u7RRg…`) for 44 of 50 rows. Every apparent "47/47 success" deploy was really the same 1 template script receiving 47 near-simultaneous pushes. All 47 clients ran stale code from whenever they were originally onboarded.
 
@@ -111,7 +131,7 @@ Login, Dashboard, Inventory, Receiving, Shipments, Tasks, Repairs, Will Calls, B
 
 **Known landmines from tonight:**
 1. I briefly shipped `cacheSubscribe` pub/sub in `useApiData` to sync AppLayout + Page useClients instances → cascaded into refresh loops on WC / Repairs pages → reverted. A proper `ClientsProvider` Context was also tried in session 63 and reverted (React #300 on client-filter click, cause unclear under minified build). The multi-instance `useClients` race is currently mitigated by the session-62/63 ref pattern in the 6 data hooks + in-memory cache short-circuit — not architecturally fixed. Still on the open list.
-2. A new Receiving `useEffect([clientSheetId, apiClients, liveClients, clientAutoInspect])` intended to patch the auto-inspect race triggered React #300 on Inventory / Clients pages. Removed in final bundle `index-XUulEEyK.js` (commit `530c358`). **The auto-inspect race is NOT fixed in the shipping bundle** — if a user picks a client before `apiClients` resolves from the API, `needsInspection` checkboxes stay unticked. Needs a cleaner re-implementation.
+2. A new Receiving `useEffect([clientSheetId, apiClients, liveClients, clientAutoInspect])` intended to patch the auto-inspect race triggered React #300 on Inventory / Clients pages. Removed in final bundle `index-XUulEEyK.js` (commit `530c358`). **Fixed in branch `fix/receiving-auto-inspect-race` (commit `2d00973`, session 65)** — pending merge + deploy. New approach uses `useMemo` + `prevAutoInspectRef + useEffect([clientAutoInspect])` which is #300-safe because deps are stable state/memos.
 3. `handleBackfillScriptIdsViaWebApp_` was first shipped reading `PropertiesService.getScriptProperties().getProperty("REMOTE_EXEC_TOKEN")` — wrong key, every client returned `unauthorized`. Fixed in v38.52.3 to use `CLIENT_REMOTE_EXEC_TOKEN` with hardcoded fallback matching `handleRemoteAction_`.
 
 **Live artifacts after this session:**

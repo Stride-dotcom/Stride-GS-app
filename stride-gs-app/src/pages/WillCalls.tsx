@@ -92,6 +92,8 @@ export function WillCalls() {
   const apiConfigured = isApiConfigured();
   useBatchData();
   const pendingOpenRef = useRef<string | null>(null);
+  // Deep-link: stash ?client= spreadsheet ID until apiClients loads, then resolve to name
+  const deepLinkPendingTenantRef = useRef<string | null>(null);
 
   // Client list for MultiSelectFilter — declared before data hooks so clientFilter gates fetching
   const { clients, apiClients } = useClients();
@@ -128,13 +130,26 @@ export function WillCalls() {
     if (location.search) {
       const params = new URLSearchParams(location.search);
       const openId = params.get('open');
+      const clientIdParam = params.get('client');
       if (openId) {
         pendingOpenRef.current = openId;
         window.history.replaceState({}, '', window.location.pathname + window.location.hash.split('?')[0]);
+        if (clientIdParam) deepLinkPendingTenantRef.current = clientIdParam;
       }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Resolve deep-link ?client= param once apiClients loads
+  useEffect(() => {
+    const tid = deepLinkPendingTenantRef.current;
+    if (!tid || apiClients.length === 0 || clientFilter.length > 0) return;
+    const match = apiClients.find(c => c.spreadsheetId === tid);
+    if (match) {
+      setClientFilter([match.name]);
+      deepLinkPendingTenantRef.current = null;
+    }
+  }, [apiClients, clientFilter]);
 
   // Effect 2: When will calls arrive, open the pending WC
   useEffect(() => {
