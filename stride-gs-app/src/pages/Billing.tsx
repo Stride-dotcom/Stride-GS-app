@@ -327,13 +327,13 @@ export function Billing() {
   // id → name map for Supabase query enrichment; name → id for clientFilter lookup
   const clientNameMap = useMemo<ClientNameMap>(() => {
     const map: ClientNameMap = {};
-    for (const c of apiClients) { if (c.id && c.name) map[c.id] = c.name; }
+    for (const c of apiClients) { if (c.spreadsheetId && c.name) map[c.spreadsheetId] = c.name; }
     return map;
   }, [apiClients]);
 
   const clientNameToId = useMemo<Record<string, string>>(() => {
     const map: Record<string, string> = {};
-    for (const c of apiClients) { if (c.name && c.id) map[c.name] = c.id; }
+    for (const c of apiClients) { if (c.name && c.spreadsheetId) map[c.name] = c.spreadsheetId; }
     return map;
   }, [apiClients]);
 
@@ -359,21 +359,6 @@ export function Billing() {
   // We'll keep a running list so they survive clears
   const [knownClients, setKnownClients] = useState<string[]>([]);
   const [knownSidemarks, setKnownSidemarks] = useState<string[]>([]);
-
-  // Pre-fetch sidemarks from Supabase when client filter changes
-  useEffect(() => {
-    if (!rptClientFilter.length || !apiClients.length) return;
-    const tenantIds = rptClientFilter
-      .map(name => apiClients.find(c => c.name === name)?.spreadsheetId)
-      .filter(Boolean) as string[];
-    if (!tenantIds.length) return;
-    supabase.from('inventory').select('sidemark').in('tenant_id', tenantIds).then(({ data }) => {
-      if (data) {
-        const sidemarks = [...new Set(data.map((r: any) => String(r.sidemark || '').trim()).filter(Boolean))].sort();
-        setKnownSidemarks(prev => [...new Set([...prev, ...sidemarks])].sort());
-      }
-    });
-  }, [rptClientFilter, apiClients]);
 
   // Derive from loaded data
   const reportClients = useMemo(() => {
@@ -491,17 +476,17 @@ export function Billing() {
 
   // Pre-fetch sidemarks from Supabase when storage client filter changes
   useEffect(() => {
-    if (!storClientFilter.length || !apiClients.length) return;
+    if (!storClientFilter.length) return;
     const tenantIds = storClientFilter
       .map(name => apiClients.find(c => c.name === name)?.spreadsheetId)
       .filter(Boolean) as string[];
     if (!tenantIds.length) return;
-    supabase.from('inventory').select('sidemark').in('tenant_id', tenantIds).then(({ data }) => {
-      if (data) {
-        const sidemarks = [...new Set(data.map((r: any) => String(r.sidemark || '').trim()).filter(Boolean))].sort();
-        setStorKnownSidemarks(prev => [...new Set([...prev, ...sidemarks])].sort());
-      }
+    let cancelled = false;
+    fetchBillingSidemarksFromSupabase(tenantIds).then(result => {
+      if (cancelled) return;
+      if (result) setStorKnownSidemarks(result);
     });
+    return () => { cancelled = true; };
   }, [storClientFilter, apiClients]);
 
   const storageSidemarks = useMemo(() => {

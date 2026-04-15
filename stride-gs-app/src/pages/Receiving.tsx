@@ -44,6 +44,19 @@ function NewShipmentForm() {
   const [tracking, setTracking] = useState('');
   const [notes, setNotes] = useState('');
   const [receiveDate, setReceiveDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [chargeReceiving, setChargeReceiving] = useState(true);
+  const [autoPrintLabels, setAutoPrintLabels] = useState(() => localStorage.getItem('stride_auto_print_labels') === 'true');
+  const printRef = useRef<HTMLDivElement>(null);
+  const [items, setItems] = useState<DockItem[]>(() => Array.from({ length: 5 }, () => emptyItem(false)));
+  const [submitted, setSubmitted] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState('');
+  const [submitResult, setSubmitResult] = useState<{ shipmentNo: string; itemCount: number; tasksCreated: number; billingRows: number; warnings?: string[] } | null>(null);
+  const idempotencyKeyRef = useRef(crypto.randomUUID());
+  const apiConfigured = isApiConfigured();
+  const { locationNames, loading: locationsLoading } = useLocations(apiConfigured);
+  const { clients: liveClients, apiClients } = useClients(apiConfigured);
+
   const clientAutoInspect = useMemo(() => {
     if (!clientSheetId || !apiClients.length) return false;
     const liveMatch = liveClients.find(c => c.id === clientSheetId);
@@ -59,18 +72,6 @@ function NewShipmentForm() {
     setItems(prev => prev.map(item => ({ ...item, needsInspection: clientAutoInspect })));
   }, [clientAutoInspect]);
 
-  const [chargeReceiving, setChargeReceiving] = useState(true);
-  const [autoPrintLabels, setAutoPrintLabels] = useState(() => localStorage.getItem('stride_auto_print_labels') === 'true');
-  const printRef = useRef<HTMLDivElement>(null);
-  const [items, setItems] = useState<DockItem[]>(() => Array.from({ length: 5 }, () => emptyItem(false)));
-  const [submitted, setSubmitted] = useState(false);
-  const [submitting, setSubmitting] = useState(false);
-  const [submitError, setSubmitError] = useState('');
-  const [submitResult, setSubmitResult] = useState<{ shipmentNo: string; itemCount: number; tasksCreated: number; billingRows: number; warnings?: string[] } | null>(null);
-  const idempotencyKeyRef = useRef(crypto.randomUUID());
-  const apiConfigured = isApiConfigured();
-  const { locationNames, loading: locationsLoading } = useLocations(apiConfigured);
-  const { clients: liveClients, apiClients } = useClients(apiConfigured);
   const { sidemarks, vendors, descriptions } = useAutocomplete(clientSheetId || undefined);
 
   // v38.37.0 — derive the selected client's shipment note for the amber banner.
