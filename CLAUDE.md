@@ -148,6 +148,53 @@ When changing client-side functions or columns, check whether the Task Board scr
 
 ---
 
+## DEPLOYMENT RULES — MUST READ BEFORE ANY DEPLOY
+
+### Never half-deploy
+
+A deploy is only complete when ALL of the following are done:
+- (a) `source` branch pushed to `origin/source`
+- (b) `stride-gs-app/dist/` force-pushed to `origin/main` (GitHub Pages)
+- (c) Any SQL migration files committed to the repo AND applied to the Supabase project via MCP tool
+- (d) Any GAS changes deployed via the matching `deploy-*` command (not just pushed)
+
+If any step is skipped, the deploy is incomplete. Do not report "done" until every applicable step is confirmed.
+
+### Always run `tsc -b` before building — never `--skipLibCheck`
+
+Run `node_modules/.bin/tsc -b` from `stride-gs-app/` before every production build. This uses project references and catches the full set of TypeScript errors. `--skipLibCheck` hides real errors; never use it as the final pre-deploy check.
+
+### Uncommitted working-tree changes must be resolved before deploy
+
+If `git status` shows unstaged or staged-but-uncommitted changes: STOP and report. Do not stash and proceed silently. The options are:
+- Commit if the work is ready to ship
+- Abort if the work is not ready (and document what was deferred)
+
+Stash-and-forget caused broken builds in this project (merge conflicts surfaced after deploy started).
+
+### Apply SQL migrations BEFORE deploying frontend code
+
+If a new `.sql` migration file exists in `stride-gs-app/supabase/migrations/`, apply it to the Supabase project via MCP tool BEFORE the code deploy. Frontend code that references new columns will fail for live users until the schema exists.
+
+### Verify the live bundle after deploy
+
+After `git push origin main --force` from `stride-gs-app/dist/`, hard-refresh `mystridehub.com` (Ctrl+Shift+R) and check DevTools Network → the main JS bundle filename should match the new build hash. CDN cache takes 1-5 min.
+
+### Post-deploy: update build status doc
+
+After every deploy, add a summary to `Docs/Stride_GS_App_Build_Status.md` with: source commit hash, dist bundle hash, migration(s) applied (or "none"), and any warnings.
+
+---
+
+### WHY WE HAVE `source` + `main`
+
+- **`source`** = source-of-truth TypeScript/React/GAS code. All feature branches merge here. This is what Claude edits and what humans review.
+- **`main`** = compiled dist bundle only. GitHub Pages serves this branch. It is force-pushed from `stride-gs-app/dist/` on every React deploy and contains only `index.html`, `assets/*.js`, `assets/*.css`, and `CNAME`. It has no shared history with `source`.
+- **Never merge source-code branches into `main`.** They have no common ancestor; the merge would produce a corrupt branch mixing TypeScript source with compiled bundles.
+- **Never edit `dist/` manually.** Always build via `npm run build` in `stride-gs-app/` and let vite write the output. Manually edited dist files will be overwritten on the next deploy and may silently ship broken code.
+
+---
+
 ## Deploy Reference (one table, one source of truth)
 
 **Golden rule:** Web App deployments are **frozen snapshots**. `npm run rollout` / `push-api` push SOURCE but the live Web App serves the last DEPLOYMENT. You must run the matching `deploy-*` command after every push to Web App code. If in doubt, `npm run deploy-all`. See `Docs/Archive/Deployment_Reference.md` for full troubleshooting.
