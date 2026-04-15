@@ -1,10 +1,10 @@
 # Stride GS App — Build Status & Continuation Guide
 
-**Last updated:** 2026-04-15 (session 65 — email deep links: CTA button in all GAS email notifications; ?client= auto-select on Shipments/Tasks/Repairs/WillCalls; billing Supabase filter mirror)
-**StrideAPI.gs:** v38.52.4 (Web App v268)
+**Last updated:** 2026-04-15 (session 66 — ShipmentJobPage email deep link + comprehensive in-app deep link overhaul; all cross-entity links now use standalone /:id routes)
+**StrideAPI.gs:** v38.53.0 (Web App v269)
 **Import.gs (client):** v4.3.0 (rolled out to all 47 active clients; Reference column now imported)
 **Emails.gs (client):** v4.3.0 (rolled out to all 47 active clients — email deep links CTA button)
-**Shipments.gs (client):** v4.2.0 (rolled out to all 47 active clients — SHIPMENT_RECEIVED deep link)
+**Shipments.gs (client):** v4.2.1 (rolled out to all 47 active clients — SHIPMENT_RECEIVED uses standalone /#/shipments/:shipmentNo)
 **WillCalls.gs (client):** v4.4.0 (rolled out to all 47 active clients — WC deep links)
 **Triggers.gs (client):** v4.5.0 (rolled out to all 47 active clients — repair/inspection deep links)
 **RemoteAdmin.gs (client):** v1.5.1 (new `get_script_id` action writes scriptId to CB on self-report)
@@ -75,31 +75,50 @@ Login, Dashboard, Inventory, Receiving, Shipments, Tasks, Repairs, Will Calls, B
 
 ---
 
-## RECENT CHANGES (2026-04-15 session 65)
+## RECENT CHANGES (2026-04-15 session 66)
 
-### Session 65: Email deep links + billing Supabase filter mirror + repair quote confirmation
+### Session 66: ShipmentJobPage + comprehensive deep link overhaul
 
-**Email deep links (GAS + React):**
-- **`Emails.gs v4.3.0`:** `sendTemplateEmail_` now injects a "View in Stride Hub →" CTA button (orange, centered) after the body when `{{APP_DEEP_LINK}}` token is set. Token replaced inline by the existing loop — button injected as raw HTML after `</body>` or appended to end. Resend menu now passes `{{APP_DEEP_LINK}}` for INSP_EMAIL (→ `#/tasks/<taskId>`), REPAIR_QUOTE, REPAIR_COMPLETE (→ `#/repairs/<repairId>`).
-- **`Shipments.gs v4.2.0`:** Both SHIPMENT_RECEIVED call sites pass `{{APP_DEEP_LINK}}` = `#/shipments?open=<SHP_NO>&client=<ss.getId()>`.
-- **`WillCalls.gs v4.4.0`:** WILL_CALL_CREATED + WILL_CALL_RELEASE pass `{{APP_DEEP_LINK}}` = `#/will-calls/<WC_NUMBER>` (standalone page).
-- **`Triggers.gs v4.5.0`:** INSP_EMAIL = `#/tasks/<taskId>`, REPAIR_COMPLETE + REPAIR_QUOTE + REPAIR_APPROVED + REPAIR_DECLINED = `#/repairs/<repairId>`, WILL_CALL_CANCELLED = `#/will-calls/<wcNumber>`. All use `encodeURIComponent`.
-- **React (4 pages):** `Tasks.tsx`, `Shipments.tsx`, `Repairs.tsx`, `WillCalls.tsx` — added `deepLinkPendingTenantRef` pattern (from Inventory.tsx). On mount, `?client=<spreadsheetId>` is stashed in ref; once `apiClients` loads, resolves to name and calls `setClientFilter`. Committed `890b7f6`.
+**Problem fixed:** Shipment email deep links opened the list page with nothing loaded (client filter required). All in-app cross-entity links used `?open=` query params on list pages, which broke when a client wasn't selected.
 
-**Billing Supabase filter mirror (merged to source, deployed):**
-- `feat/billing-supabase-filter-mirror` from worktree `laughing-yonath` — 4 code-review fixes applied and merged. `supabaseQueries.ts` guards against silent tenant-filter bypass (returns null when clientFilter names resolve to zero tenant IDs). `useBilling.ts` uses unconditional `useMemo filtersKey` + `filtersRef`. `Billing.tsx` cancelled flag on sidemark useEffect.
-- Merge artifact fixes: `c.id` → `c.spreadsheetId`, orphaned `supabase` direct calls removed, `Receiving.tsx` variable ordering fixed.
+**`ShipmentJobPage.tsx` (new page):**
+- Route: `#/shipments/:shipmentNo` — standalone page, loads shipment from Supabase by `shipment_number` (~50ms, RLS handles access, no client filter needed).
+- Uses `fetchShipmentByNoFromSupabase()` (new function in `supabaseQueries.ts`), resolves client name via `useClients()`, maps `ApiShipment` → `ShipmentDetailPanel` shape.
+- Same pattern as existing `TaskJobPage`, `RepairJobPage`, `WillCallJobPage`.
+- Lazy-loaded chunk: `ShipmentJobPage-BB4kKHNB.js` (3.35 kB).
 
-**Repair quote request feedback (`TaskDetailPanel.tsx`):**
-- Persistent green confirmation banner after quote request; red error banner on failure. Race fix: `setRepairRequested(true)` before `removeOptimisticRepair`.
+**`Shipments.gs v4.2.1`:**
+- Both SHIPMENT_RECEIVED call sites updated: `{{APP_DEEP_LINK}}` now `https://www.mystridehub.com/#/shipments/<encodeURIComponent(shipmentNo)>` (was `?open=...&client=...`).
+- Rolled out 47/47 clients, deployed 47/47.
 
-**Auto-inspect race fix (`Receiving.tsx`) — merged to source:**
-- `clientAutoInspect` now `useMemo(...)` + `prevAutoInspectRef + useEffect` pattern to backfill on race. Merged in same bundle.
+**`DeepLink.tsx` — standalone route upgrade:**
+- Tasks/repairs/will-calls/shipments now link to `#/<entity>/<id>` standalone pages (previously `?open=<id>` on list pages).
+- `STANDALONE_KINDS` set: `['task', 'repair', 'willcall', 'shipment']`.
+- Inventory still uses `?open=` + `clientSheetId` (no standalone item page).
+- All existing `DeepLink` usages app-wide automatically upgraded.
 
-**Live artifacts after this session:**
-- React bundle: `index-CGEBbJ6Y.js` (commit `e0fdcf4`, 1,880 modules)
-- GAS: Emails.gs v4.3.0, Shipments.gs v4.2.0, WillCalls.gs v4.4.0, Triggers.gs v4.5.0 — rolled out 47/47, deployed 47/47
-- Supabase migrations still pending (MCP tool unavailable): `20260411120000_dt_phase1a_schema.sql`, `20260413180000_add_cod_to_will_calls.sql`
+**Missing in-app links added:**
+- `RepairDetailPanel.tsx`: `sourceTaskId` is now a clickable `<DeepLink kind="task">` (was plain text — completely unclickable before).
+- `ShipmentDetailPanel.tsx`: item ID column now renders `<DeepLink kind="inventory">` (was orange text with `cursor:pointer` but no href — broken link that looked functional).
+
+**All remaining `?open=` links upgraded to standalone routes:**
+- `ItemDetailPanel.tsx`: shipment/task/repair/will-call history links (4 inline `<a>` tags)
+- `TaskDetailPanel.tsx`: shipment number link
+- `CreateTaskModal.tsx`: open-task conflict link
+- `CreateWillCallModal.tsx`: open-will-call conflict link
+
+**Verified zero remaining `?open=` links** for task/repair/will-call/shipment in the entire `src/` tree.
+
+**Live artifacts after session 66:**
+- React bundle: `index-D4zrXAph.js` (commit `dc201ff`, 1,881 modules)
+- `ShipmentJobPage.tsx` + `fetchShipmentByNoFromSupabase` in `supabaseQueries.ts` (new)
+- GAS: `Shipments.gs v4.2.1` — rolled out 47/47, deployed 47/47
+
+---
+
+### Session 65 archive: Email deep links + clients Supabase mirror + billing filter mirror + repair quote confirmation
+
+**Email deep links (GAS):** `Emails.gs v4.3.0` injects "View in Stride Hub →" CTA button; `WillCalls.gs v4.4.0` + `Triggers.gs v4.5.0` pass `{{APP_DEEP_LINK}}` to all 8 email types; React 4 pages got `deepLinkPendingTenantRef` pattern. Bundle: `index-CGEBbJ6Y.js` (commit `e0fdcf4`). Supabase `clients_mirror` table + `useClients` Supabase-first prefetch added (`StrideAPI.gs v38.53.0`, Web App v269). Billing Supabase filter mirror merged. Repair quote persistent banner. Auto-inspect race fix.
 
 ---
 
