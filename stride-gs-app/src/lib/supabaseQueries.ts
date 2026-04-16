@@ -30,6 +30,7 @@ import type {
   ClaimsResponse,
   ApiUser,
   UsersResponse,
+  MarketingContact,
 } from './api';
 
 /** Map of clientSheetId → clientName for enriching Supabase rows */
@@ -115,6 +116,9 @@ export async function fetchInventoryFromSupabase(
         query = query.eq('tenant_id', clientSheetId);
       }
     }
+    // Override PostgREST's 1000-row default cap (would silently truncate
+    // multi-client queries across all ~51 tenants → "only S–N showing" bug).
+    query = query.range(0, 49999);
     const { data, error } = await query;
     if (error || !data) return null;
 
@@ -196,6 +200,7 @@ export async function fetchTasksFromSupabase(
         query = query.eq('tenant_id', clientSheetId);
       }
     }
+    query = query.range(0, 49999); // override 1000-row cap
     const { data, error } = await query;
     if (error || !data) return null;
 
@@ -247,6 +252,7 @@ export async function fetchRepairsFromSupabase(
         query = query.eq('tenant_id', clientSheetId);
       }
     }
+    query = query.range(0, 49999); // override 1000-row cap
     const { data, error } = await query;
     if (error || !data) return null;
 
@@ -326,6 +332,7 @@ export async function fetchWillCallsFromSupabase(
         query = query.eq('tenant_id', clientSheetId);
       }
     }
+    query = query.range(0, 49999); // override 1000-row cap
     const { data, error } = await query;
     if (error || !data) return null;
 
@@ -387,6 +394,7 @@ export async function fetchShipmentsFromSupabase(
         query = query.eq('tenant_id', clientSheetId);
       }
     }
+    query = query.range(0, 49999); // override 1000-row cap
     const { data, error } = await query;
     if (error || !data) return null;
 
@@ -479,6 +487,7 @@ export async function fetchBillingFromSupabase(
     if (clientSheetId) {
       query = query.eq('tenant_id', clientSheetId);
     }
+    query = query.range(0, 49999); // override 1000-row cap
     const { data, error } = await query;
     if (error || !data) return null;
 
@@ -576,6 +585,7 @@ export async function fetchBillingFromSupabaseFiltered(
       query = query.lte('date', filters.endDate);
     }
 
+    query = query.range(0, 49999); // override 1000-row cap
     const { data, error } = await query;
     if (error || !data) return null;
 
@@ -885,6 +895,11 @@ export async function fetchDashboardSummaryFromSupabase(
       repairsQ = repairsQ.in('tenant_id', tenantFilter);
       wcQ = wcQ.in('tenant_id', tenantFilter);
     }
+
+    // Override PostgREST 1000-row cap (dashboard sums open items across ALL tenants)
+    tasksQ = tasksQ.range(0, 49999);
+    repairsQ = repairsQ.range(0, 49999);
+    wcQ = wcQ.range(0, 49999);
 
     const [tasksRes, repairsRes, wcRes] = await Promise.all([tasksQ, repairsQ, wcQ]);
 
@@ -1298,6 +1313,101 @@ export async function fetchUsersFromSupabase(): Promise<UsersResponse | null> {
     }));
 
     return { users, count: users.length };
+  } catch {
+    return null;
+  }
+}
+
+// ─── Marketing contacts read cache ──────────────────────────────────────────
+
+interface SupabaseMarketingContactRow {
+  email: string;
+  first_name: string | null;
+  last_name: string | null;
+  company: string | null;
+  status: string | null;
+  existing_client: boolean | null;
+  campaign_tag: string | null;
+  source: string | null;
+  added_by: string | null;
+  date_added: string | null;
+  last_campaign_date: string | null;
+  replied: boolean | null;
+  converted: boolean | null;
+  bounced: boolean | null;
+  unsubscribed: boolean | null;
+  suppressed: boolean | null;
+  suppression_reason: string | null;
+  suppression_date: string | null;
+  manual_release_note: string | null;
+  notes: string | null;
+}
+
+export interface MarketingContactsQueryParams {
+  status?: string;        // 'Pending' | 'Client' | 'Suppressed' | undefined (= all)
+  search?: string;        // searches first/last/email/company
+  page?: number;
+  pageSize?: number;
+}
+
+export async function fetchMarketingContactsFromSupabase(
+  params?: MarketingContactsQueryParams
+): Promise<{ contacts: MarketingContact[]; total: number; page: number; pageSize: number } | null> {
+  try {
+    const page = Math.max(1, params?.page ?? 1);
+    const pageSize = Math.max(1, Math.min(500, params?.pageSize ?? 100));
+    const from = (page - 1) * pageSize;
+    const to = from + pageSize - 1;
+
+    let countQuery = supabase.from('marketing_contacts').select('*', { count: 'exact', head: true });
+    let dataQuery = supabase.from('marketing_contacts').select('*');
+
+    if (params?.status && params.status !== 'All') {
+      countQuery = countQuery.eq('status', params.status);
+      dataQuery = dataQuery.eq('status', params.status);
+    }
+    if (params?.search) {
+      const s = params.search.trim();
+      if (s) {
+        // Multi-field ILIKE search on first_name, last_name, email, company
+        const pattern = `%${s}%`;
+        const orFilter = `first_name.ilike.${pattern},last_name.ilike.${pattern},email.ilike.${pattern},company.ilike.${pattern}`;
+        countQuery = countQuery.or(orFilter);
+        dataQuery = dataQuery.or(orFilter);
+      }
+    }
+
+    const [{ count, error: countErr }, { data, error: dataErr }] = await Promise.all([
+      countQuery,
+      dataQuery.order('date_added', { ascending: false, nullsFirst: false }).range(from, to),
+    ]);
+
+    if (countErr || dataErr || !data) return null;
+
+    const contacts: MarketingContact[] = (data as SupabaseMarketingContactRow[]).map(row => ({
+      email: row.email,
+      firstName: row.first_name ?? '',
+      lastName: row.last_name ?? '',
+      company: row.company ?? '',
+      status: (row.status || 'Pending') as MarketingContact['status'],
+      existingClient: row.existing_client ?? false,
+      campaignTag: row.campaign_tag ?? '',
+      dateAdded: row.date_added ?? '',
+      addedBy: row.added_by ?? '',
+      source: row.source ?? '',
+      lastCampaignDate: row.last_campaign_date,
+      replied: row.replied ?? false,
+      converted: row.converted ?? false,
+      bounced: row.bounced ?? false,
+      unsubscribed: row.unsubscribed ?? false,
+      suppressed: row.suppressed ?? false,
+      suppressionReason: row.suppression_reason ?? '',
+      suppressionDate: row.suppression_date,
+      manualReleaseNote: row.manual_release_note ?? '',
+      notes: row.notes ?? '',
+    }));
+
+    return { contacts, total: count ?? contacts.length, page, pageSize };
   } catch {
     return null;
   }

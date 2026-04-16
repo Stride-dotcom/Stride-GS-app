@@ -1,4 +1,11 @@
 /* ===================================================
+   StrideAPI.gs — v38.55.0 — 2026-04-15 PST — Marketing contacts Supabase read cache
+   v38.55.0: NEW — marketing_contacts read-cache table in Supabase. Adds
+             sbMarketingContactRow_, resyncMarketingContactToSupabase_,
+             deleteMarketingContactFromSupabase_, seedMarketingContactsToSupabase.
+             Write-through wired into handleCreateMarketingContact_,
+             handleImportMarketingContacts_, handleUpdateMarketingContact_,
+             handleSuppressContact_, handleUnsuppressContact_.
    StrideAPI.gs — v38.54.1 — 2026-04-15 PST — Fix TRANSFER_RECEIVED email silently failing
    v38.54.1: BUGFIX — transferItems TRANSFER_RECEIVED email was calling
              api_sendTemplateEmail_(destSS, ..., "") — wrong first arg (Spreadsheet
@@ -832,7 +839,7 @@ function supabaseUpsert_(table, data) {
     if (!url || !key) return;
     var conflictCol = { inventory: "tenant_id,item_id", tasks: "tenant_id,task_id", repairs: "tenant_id,repair_id",
                         will_calls: "tenant_id,wc_number", shipments: "tenant_id,shipment_number", billing: "tenant_id,ledger_row_id",
-                        claims: "claim_id", cb_users: "email" }[table] || "";
+                        claims: "claim_id", cb_users: "email", marketing_contacts: "email" }[table] || "";
     var postUrl = url + "/rest/v1/" + table;
     if (conflictCol) postUrl += "?on_conflict=" + conflictCol;
     var resp = UrlFetchApp.fetch(postUrl, {
@@ -885,7 +892,7 @@ function supabaseBatchUpsert_(table, rows) {
     // Unique constraint column per table (for on_conflict parameter)
     var conflictCol = { inventory: "tenant_id,item_id", tasks: "tenant_id,task_id", repairs: "tenant_id,repair_id",
                         will_calls: "tenant_id,wc_number", shipments: "tenant_id,shipment_number", billing: "tenant_id,ledger_row_id",
-                        claims: "claim_id", cb_users: "email" }[table] || "";
+                        claims: "claim_id", cb_users: "email", marketing_contacts: "email" }[table] || "";
 
     // Supabase REST API handles arrays up to ~1000 rows; chunk at 50 for reliability
     var CHUNK = 50;
@@ -1757,6 +1764,123 @@ function seedCbUsersToSupabase() {
     count++;
   }
   Logger.log("seedCbUsersToSupabase: upserted " + count + " users");
+}
+
+/**
+ * Build a Supabase marketing_contacts row from Campaign sheet row object (column-name-keyed).
+ * No tenant_id — marketing contacts are global (Campaign sheet), keyed by email.
+ */
+function sbMarketingContactRow_(row) {
+  function toBool(v) { return v === true || String(v).toUpperCase() === "TRUE" || v === 1 || v === "1" || String(v).toLowerCase() === "yes"; }
+  function toStr(v) { return v == null ? "" : String(v); }
+  function toDateStr(v) {
+    if (!v) return "";
+    if (v instanceof Date) return v.toISOString();
+    return String(v);
+  }
+  return {
+    email:                toStr(row["Email"]).trim().toLowerCase(),
+    first_name:           toStr(row["First Name"]).trim(),
+    last_name:            toStr(row["Last Name"]).trim(),
+    company:              toStr(row["Company"]).trim(),
+    status:               toStr(row["Status"]).trim() || "Pending",
+    existing_client:      toBool(row["Existing Client"]),
+    campaign_tag:         toStr(row["Campaign Tag"]).trim(),
+    source:               toStr(row["Source"]).trim(),
+    added_by:             toStr(row["Added By"]).trim(),
+    date_added:           toDateStr(row["Date Added"]),
+    last_campaign_date:   toDateStr(row["Last Campaign Sent Date"]),
+    replied:              toBool(row["Replied"]),
+    converted:            toBool(row["Converted"]),
+    bounced:              toBool(row["Bounced"]),
+    unsubscribed:         toBool(row["Unsubscribed"]),
+    suppressed:           toBool(row["Suppressed"]),
+    suppression_reason:   toStr(row["Suppression Reason"]).trim(),
+    suppression_date:     toDateStr(row["Suppression Date"]),
+    manual_release_note:  toStr(row["Manual Release Note"]).trim(),
+    notes:                toStr(row["Notes"]).trim(),
+    updated_at:           new Date().toISOString()
+  };
+}
+
+/**
+ * Resync a single marketing contact from Campaign spreadsheet to Supabase.
+ * Reads the row fresh from the sheet by email. Best-effort, never blocks.
+ */
+function resyncMarketingContactToSupabase_(email) {
+  try {
+    if (!email) return;
+    var campaignId = prop_("CAMPAIGN_SHEET_ID");
+    if (!campaignId) return;
+    var ss = SpreadsheetApp.openById(campaignId);
+    var sheet = ss.getSheetByName("Contacts");
+    if (!sheet) return;
+    var data = sheet.getDataRange().getValues();
+    if (data.length < 2) return;
+    var headers = data[0].map(function(h) { return String(h || "").trim(); });
+    var emailCol = -1;
+    for (var h = 0; h < headers.length; h++) {
+      if (headers[h].toUpperCase() === "EMAIL") { emailCol = h; break; }
+    }
+    if (emailCol < 0) return;
+    var target = String(email).trim().toLowerCase();
+    for (var i = 1; i < data.length; i++) {
+      if (String(data[i][emailCol] || "").trim().toLowerCase() !== target) continue;
+      var obj = {};
+      for (var j = 0; j < headers.length; j++) obj[headers[j]] = data[i][j];
+      supabaseUpsert_("marketing_contacts", sbMarketingContactRow_(obj));
+      return;
+    }
+  } catch (e) { Logger.log("resyncMarketingContactToSupabase_ error (non-fatal): " + e); }
+}
+
+/**
+ * Delete a marketing contact from Supabase by email. Best-effort.
+ */
+function deleteMarketingContactFromSupabase_(email) {
+  try {
+    if (!email) return;
+    var url = prop_("SUPABASE_URL");
+    var key = prop_("SUPABASE_SERVICE_ROLE_KEY");
+    if (!url || !key) return;
+    UrlFetchApp.fetch(url + "/rest/v1/marketing_contacts?email=eq." + encodeURIComponent(String(email).toLowerCase()), {
+      method: "DELETE",
+      headers: { "Authorization": "Bearer " + key, "apikey": key, "Prefer": "return=minimal" },
+      muteHttpExceptions: true
+    });
+  } catch (e) { Logger.log("deleteMarketingContactFromSupabase_ (non-fatal): " + e); }
+}
+
+/**
+ * One-time seed: read ALL marketing contacts from Campaign sheet and upsert to Supabase.
+ * Run manually once from the Apps Script editor to populate an empty cache.
+ * Batches upserts in groups of 50 for speed.
+ */
+function seedMarketingContactsToSupabase() {
+  var campaignId = prop_("CAMPAIGN_SHEET_ID");
+  if (!campaignId) { Logger.log("seedMarketingContactsToSupabase: no CAMPAIGN_SHEET_ID"); return; }
+  var ss = SpreadsheetApp.openById(campaignId);
+  var sheet = ss.getSheetByName("Contacts");
+  if (!sheet) { Logger.log("seedMarketingContactsToSupabase: no Contacts sheet"); return; }
+  var data = sheet.getDataRange().getValues();
+  if (data.length < 2) { Logger.log("seedMarketingContactsToSupabase: Contacts sheet empty"); return; }
+  var headers = data[0].map(function(h) { return String(h || "").trim(); });
+  var batch = [];
+  var count = 0;
+  for (var i = 1; i < data.length; i++) {
+    var obj = {};
+    for (var j = 0; j < headers.length; j++) obj[headers[j]] = data[i][j];
+    var email = String(obj["Email"] || "").trim();
+    if (!email) continue;
+    batch.push(sbMarketingContactRow_(obj));
+    count++;
+    if (batch.length >= 50) {
+      supabaseBatchUpsert_("marketing_contacts", batch);
+      batch = [];
+    }
+  }
+  if (batch.length > 0) supabaseBatchUpsert_("marketing_contacts", batch);
+  Logger.log("seedMarketingContactsToSupabase: upserted " + count + " contacts");
 }
 
 /**
@@ -23150,6 +23274,7 @@ function handleCreateMarketingContact_(payload) {
     for (var h in created.hdrMap) obj[h] = created.data[created.rowIdx][created.hdrMap[h]];
     contact = mkt_normalizeContact_(obj);
   }
+  resyncMarketingContactToSupabase_(email);
   return jsonResponse_({ contact: contact });
 }
 
@@ -23213,6 +23338,18 @@ function handleImportMarketingContacts_(payload) {
       sheet.getRange(sheet.getLastRow() + 1, 1, newRows.length, numCols).setValues(newRows);
     }
 
+    // Write-through to Supabase (best-effort, batched) — reseed the imported contacts
+    try {
+      for (var iEm in existingEmails) {
+        // Only resync the ones we just added, not pre-existing duplicates
+      }
+      // Simpler: resync each contact in the payload that didn't get skipped as invalid
+      for (var ic = 0; ic < contacts.length; ic++) {
+        var em = String((contacts[ic] || {}).email || "").trim();
+        if (em) resyncMarketingContactToSupabase_(em);
+      }
+    } catch (sbErr) { Logger.log("importMarketingContacts sb write-through (non-fatal): " + sbErr); }
+
     return jsonResponse_({ imported: imported, skippedDuplicates: skippedDuplicates, skippedInvalid: skippedInvalid, errors: errs });
   } finally {
     lock.releaseLock();
@@ -23257,6 +23394,7 @@ function handleUpdateMarketingContact_(payload) {
   var updated = mkt_findContactRow_(ss, email);
   var obj = {};
   for (var h in updated.hdrMap) obj[h] = updated.data[updated.rowIdx][updated.hdrMap[h]];
+  resyncMarketingContactToSupabase_(email);
   return jsonResponse_({ contact: mkt_normalizeContact_(obj) });
 }
 
@@ -23310,6 +23448,7 @@ function handleSuppressContact_(payload) {
   var updated = mkt_findContactRow_(ss, email);
   var obj = {};
   for (var h in updated.hdrMap) obj[h] = updated.data[updated.rowIdx][updated.hdrMap[h]];
+  resyncMarketingContactToSupabase_(email);
   return jsonResponse_({ contact: mkt_normalizeContact_(obj) });
 }
 
@@ -23336,6 +23475,7 @@ function handleUnsuppressContact_(payload) {
   var updated = mkt_findContactRow_(ss, email);
   var obj = {};
   for (var h in updated.hdrMap) obj[h] = updated.data[updated.rowIdx][updated.hdrMap[h]];
+  resyncMarketingContactToSupabase_(email);
   return jsonResponse_({ contact: mkt_normalizeContact_(obj) });
 }
 
