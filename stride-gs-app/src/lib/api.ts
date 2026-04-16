@@ -961,6 +961,44 @@ export function deleteApiUser(callerEmail: string, email: string) {
   return apiFetch<{ success: boolean; deletedEmail: string }>('deleteUser', { callerEmail, email });
 }
 
+// ─── Session 70 follow-up — Users resync tool ───────────────────────────────
+
+export interface ResyncUsersDryRunResponse {
+  success: boolean;
+  dryRun: true;
+  cbCount: number;
+  sbCount: number;
+  authCount: number;
+  willUpsertCount: number;
+  willDeleteSb: string[];
+  willDeleteAuth: string[];
+  authOrphansFound: string[];
+}
+
+export interface ResyncUsersResponse {
+  success: boolean;
+  cbCount: number;
+  sbCountBefore: number;
+  authCount: number;
+  upserted: number;
+  sbDeleted: number;
+  authOrphansFound: string[];
+  authDeleted: number;
+  authErrors: Array<{ email: string; status: number; body: string }>;
+  pruneAuth: boolean;
+}
+
+export function resyncUsersPreview(callerEmail: string) {
+  return apiFetch<ResyncUsersDryRunResponse>('resyncUsers', { callerEmail, dryRun: '1' });
+}
+
+export function resyncUsers(callerEmail: string, pruneAuth: boolean) {
+  return apiFetch<ResyncUsersResponse>('resyncUsers', {
+    callerEmail,
+    pruneAuth: pruneAuth ? '1' : '0',
+  });
+}
+
 // ─── POST Fetch Wrapper (Write Operations) ──────────────────────────────────
 
 /** Default timeout for write calls — 90 seconds. Apps Script can be slow. */

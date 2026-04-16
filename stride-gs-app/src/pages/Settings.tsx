@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Settings as SettingsIcon, Users, DollarSign, Mail, Database, Globe, Bell, Plus, ChevronRight, CheckCircle2, AlertCircle, UserPlus, Shield, ToggleLeft, ToggleRight, Eye, EyeOff, Wifi, WifiOff, RefreshCw, Loader2, RefreshCcw, ExternalLink, Wrench, PlayCircle, Send, FolderSync, BookText, LogIn, Cloud, Edit2, Zap, ArrowUpDown, ChevronUp, ChevronDown, X } from 'lucide-react';
 import { useReactTable, getCoreRowModel, getSortedRowModel, flexRender, type SortingState, type ColumnDef } from '@tanstack/react-table';
-import { getApiUrl, getApiToken, setApiCredentials, isApiConfigured, fetchHealth, postOnboardClient, postUpdateClient, postSyncSettings, postRefreshCaches, postFixMissingFolders, postTestSendClientTemplates, postTestSendClaimEmails, fetchAutoIdSetting, postUpdateAutoIdSetting, postResolveOnboardUser, fetchStaxConfig, postUpdateStaxConfig, apiPost, fetchEmailTemplates, postSyncTemplatesToClients, postBulkSyncToSupabase, postPurgeInactiveFromSupabase, fetchClients, postFinishClientSetup, postSendWelcomeToUsers } from '../lib/api';
+import { getApiUrl, getApiToken, setApiCredentials, isApiConfigured, fetchHealth, postOnboardClient, postUpdateClient, postSyncSettings, postRefreshCaches, postFixMissingFolders, postTestSendClientTemplates, postTestSendClaimEmails, fetchAutoIdSetting, postUpdateAutoIdSetting, postResolveOnboardUser, fetchStaxConfig, postUpdateStaxConfig, apiPost, fetchEmailTemplates, postSyncTemplatesToClients, postBulkSyncToSupabase, postPurgeInactiveFromSupabase, fetchClients, postFinishClientSetup, postSendWelcomeToUsers, resyncUsersPreview, resyncUsers } from '../lib/api';
 import type { BulkSyncResult } from '../lib/api';
 import type { EmailTemplate } from '../lib/api';
 import { entityEvents } from '../lib/entityEvents';
@@ -452,7 +452,7 @@ export function Settings() {
   useLocations(apiConfigured && true);
 
   // Users tab
-  const { users, loading: usersLoading, error: usersError, addUser, updateUser, deleteUser } = useUsers();
+  const { users, loading: usersLoading, error: usersError, addUser, updateUser, deleteUser, refetch: refetchUsers } = useUsers();
   const [addUserOpen, setAddUserOpen] = useState(false);
   const [newUserEmail, setNewUserEmail] = useState('');
   const [newUserRole, setNewUserRole] = useState<'admin' | 'staff' | 'client'>('staff');
@@ -465,6 +465,85 @@ export function Settings() {
   // v38.43.0 — Send Welcome Email button per row on Users tab
   const [sendingWelcomeEmail, setSendingWelcomeEmail] = useState<string | null>(null);
   const [sendWelcomeResult, setSendWelcomeResult] = useState<{ email: string; ok: boolean; message: string } | null>(null);
+
+  // Session 70 follow-up — Resync Users (CB → Supabase cb_users + optional auth.users prune)
+  const [resyncOpen, setResyncOpen] = useState(false);
+  const [resyncLoading, setResyncLoading] = useState(false);
+  const [resyncPreview, setResyncPreviewState] = useState<null | {
+    cbCount: number;
+    sbCount: number;
+    authCount: number;
+    willDeleteSb: string[];
+    authOrphans: string[];
+  }>(null);
+  const [resyncPruneAuth, setResyncPruneAuth] = useState(false);
+  const [resyncResult, setResyncResult] = useState<null | {
+    ok: boolean;
+    message: string;
+    details?: string[];
+  }>(null);
+
+  async function handleOpenResync() {
+    setResyncOpen(true);
+    setResyncPreviewState(null);
+    setResyncResult(null);
+    setResyncPruneAuth(false);
+    if (!realUser?.email) return;
+    setResyncLoading(true);
+    try {
+      const res = await resyncUsersPreview(realUser.email);
+      if (res.ok && res.data?.success) {
+        setResyncPreviewState({
+          cbCount: res.data.cbCount,
+          sbCount: res.data.sbCount,
+          authCount: res.data.authCount,
+          willDeleteSb: res.data.willDeleteSb || [],
+          authOrphans: res.data.authOrphansFound || [],
+        });
+      } else {
+        setResyncResult({ ok: false, message: res.error || 'Preview failed — check API connection.' });
+      }
+    } catch (err) {
+      setResyncResult({ ok: false, message: String(err) });
+    } finally {
+      setResyncLoading(false);
+    }
+  }
+
+  async function handleRunResync() {
+    if (!realUser?.email) return;
+    setResyncLoading(true);
+    setResyncResult(null);
+    try {
+      const res = await resyncUsers(realUser.email, resyncPruneAuth);
+      if (res.ok && res.data?.success) {
+        const d = res.data;
+        const details: string[] = [
+          `CB Users: ${d.cbCount}`,
+          `Upserted to cb_users: ${d.upserted}`,
+          `Deleted from cb_users: ${d.sbDeleted}`,
+          `auth.users orphans found: ${d.authOrphansFound?.length ?? 0}`,
+        ];
+        if (d.pruneAuth) details.push(`Deleted from auth.users: ${d.authDeleted}`);
+        if (d.authErrors && d.authErrors.length > 0) {
+          details.push(`auth delete errors: ${d.authErrors.length} (see logs)`);
+        }
+        setResyncResult({
+          ok: true,
+          message: `Resync complete — all 3 stores aligned with CB Users.`,
+          details,
+        });
+        // Refetch the displayed user list
+        await refetchUsers();
+      } else {
+        setResyncResult({ ok: false, message: res.error || 'Resync failed.' });
+      }
+    } catch (err) {
+      setResyncResult({ ok: false, message: String(err) });
+    } finally {
+      setResyncLoading(false);
+    }
+  }
 
   async function handleSendWelcomeToOneUser(userEmail: string) {
     setSendingWelcomeEmail(userEmail);
@@ -1947,12 +2026,24 @@ export function Settings() {
             <>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
                 <div style={sectionTitle}>User Access Management</div>
-                <button
-                  onClick={() => { setAddUserOpen(true); setAddUserError(''); }}
-                  style={{ padding: '8px 16px', fontSize: 12, fontWeight: 600, border: 'none', borderRadius: 8, background: theme.colors.orange, color: '#fff', cursor: 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', gap: 4 }}
-                >
-                  <UserPlus size={14} /> Add User
-                </button>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  {/* Session 70 follow-up — admin-only resync tool */}
+                  {isAdmin && (
+                    <button
+                      onClick={handleOpenResync}
+                      title="Reconcile CB Users (source of truth) with Supabase cb_users mirror and (optionally) auth.users"
+                      style={{ padding: '8px 14px', fontSize: 12, fontWeight: 600, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', color: theme.colors.textSecondary, cursor: 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', gap: 4 }}
+                    >
+                      <RefreshCcw size={14} /> Resync Users
+                    </button>
+                  )}
+                  <button
+                    onClick={() => { setAddUserOpen(true); setAddUserError(''); }}
+                    style={{ padding: '8px 16px', fontSize: 12, fontWeight: 600, border: 'none', borderRadius: 8, background: theme.colors.orange, color: '#fff', cursor: 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', gap: 4 }}
+                  >
+                    <UserPlus size={14} /> Add User
+                  </button>
+                </div>
               </div>
 
               {addUserSuccess && (
@@ -2283,6 +2374,148 @@ export function Settings() {
               <div style={{ padding: 14, background: '#F0F9FF', border: '1px solid #BAE6FD', borderRadius: 10, fontSize: 12, color: '#0369A1', marginTop: 16, lineHeight: 1.6 }}>
                 <strong>How it works:</strong> Users are stored in the "Users" tab of the Consolidated Billing sheet. All roles (admin, staff, client) sign in with email + password. Client users are automatically created when you onboard a new client — they just need to use "Forgot Password" on the login page to set their password. Click any row to edit user details, role, and client access. Users can have access to multiple client accounts (shown as chips).
               </div>
+
+              {/* Session 70 follow-up — Resync Users modal */}
+              {resyncOpen && (
+                <div
+                  onClick={() => !resyncLoading && setResyncOpen(false)}
+                  style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)', zIndex: 200, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                >
+                  <div
+                    onClick={e => e.stopPropagation()}
+                    style={{ background: '#fff', borderRadius: 12, width: 'min(600px, 92vw)', maxHeight: '86vh', overflow: 'auto', boxShadow: '0 10px 40px rgba(0,0,0,0.2)' }}
+                  >
+                    <div style={{ padding: '16px 20px', borderBottom: `1px solid ${theme.colors.border}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <div style={{ fontSize: 16, fontWeight: 700 }}>Resync Users</div>
+                      <button onClick={() => !resyncLoading && setResyncOpen(false)} style={{ background: 'none', border: 'none', cursor: resyncLoading ? 'not-allowed' : 'pointer', padding: 4, color: theme.colors.textMuted }}>
+                        <X size={18} />
+                      </button>
+                    </div>
+
+                    <div style={{ padding: 20 }}>
+                      <div style={{ fontSize: 13, color: theme.colors.textSecondary, lineHeight: 1.6, marginBottom: 14 }}>
+                        Reconciles the three places user data lives. <strong>CB Users</strong> is the source of truth.
+                        <ul style={{ margin: '8px 0 0', paddingLeft: 20 }}>
+                          <li><strong>cb_users</strong> (Supabase mirror) — every CB row is upserted; orphans are deleted</li>
+                          <li><strong>auth.users</strong> (Supabase login) — orphans are listed; deletion is opt-in below</li>
+                        </ul>
+                      </div>
+
+                      {resyncLoading && !resyncPreview && !resyncResult && (
+                        <div style={{ padding: '20px 0', textAlign: 'center', color: theme.colors.textMuted, fontSize: 13 }}>
+                          <Loader2 size={20} style={{ animation: 'spin 1s linear infinite', marginBottom: 8 }} />
+                          <div>Computing diff…</div>
+                        </div>
+                      )}
+
+                      {resyncPreview && !resyncResult && (
+                        <>
+                          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10, marginBottom: 14 }}>
+                            <div style={{ padding: 12, background: theme.colors.bgSubtle, borderRadius: 8, border: `1px solid ${theme.colors.border}` }}>
+                              <div style={{ fontSize: 11, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: 0.5 }}>CB Users</div>
+                              <div style={{ fontSize: 22, fontWeight: 700, color: theme.colors.text }}>{resyncPreview.cbCount}</div>
+                              <div style={{ fontSize: 10, color: theme.colors.textMuted }}>source of truth</div>
+                            </div>
+                            <div style={{ padding: 12, background: theme.colors.bgSubtle, borderRadius: 8, border: `1px solid ${theme.colors.border}` }}>
+                              <div style={{ fontSize: 11, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: 0.5 }}>cb_users</div>
+                              <div style={{ fontSize: 22, fontWeight: 700, color: theme.colors.text }}>{resyncPreview.sbCount}</div>
+                              <div style={{ fontSize: 10, color: resyncPreview.willDeleteSb.length > 0 ? '#DC2626' : theme.colors.textMuted }}>
+                                {resyncPreview.willDeleteSb.length > 0 ? `${resyncPreview.willDeleteSb.length} orphan${resyncPreview.willDeleteSb.length === 1 ? '' : 's'}` : 'in sync'}
+                              </div>
+                            </div>
+                            <div style={{ padding: 12, background: theme.colors.bgSubtle, borderRadius: 8, border: `1px solid ${theme.colors.border}` }}>
+                              <div style={{ fontSize: 11, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: 0.5 }}>auth.users</div>
+                              <div style={{ fontSize: 22, fontWeight: 700, color: theme.colors.text }}>{resyncPreview.authCount}</div>
+                              <div style={{ fontSize: 10, color: resyncPreview.authOrphans.length > 0 ? '#B45309' : theme.colors.textMuted }}>
+                                {resyncPreview.authOrphans.length > 0 ? `${resyncPreview.authOrphans.length} orphan${resyncPreview.authOrphans.length === 1 ? '' : 's'}` : 'in sync'}
+                              </div>
+                            </div>
+                          </div>
+
+                          {resyncPreview.willDeleteSb.length > 0 && (
+                            <div style={{ padding: 10, border: '1px solid #FECACA', background: '#FEF2F2', borderRadius: 8, marginBottom: 10 }}>
+                              <div style={{ fontSize: 12, fontWeight: 600, color: '#991B1B', marginBottom: 4 }}>
+                                Will delete from cb_users ({resyncPreview.willDeleteSb.length}):
+                              </div>
+                              <div style={{ fontSize: 11, color: '#991B1B', fontFamily: 'monospace', wordBreak: 'break-all', maxHeight: 120, overflowY: 'auto' }}>
+                                {resyncPreview.willDeleteSb.join('\n')}
+                              </div>
+                            </div>
+                          )}
+
+                          {resyncPreview.authOrphans.length > 0 && (
+                            <div style={{ padding: 10, border: '1px solid #FDE68A', background: '#FFFBEB', borderRadius: 8, marginBottom: 14 }}>
+                              <div style={{ fontSize: 12, fontWeight: 600, color: '#92400E', marginBottom: 4 }}>
+                                auth.users accounts NOT in CB ({resyncPreview.authOrphans.length}):
+                              </div>
+                              <div style={{ fontSize: 11, color: '#92400E', fontFamily: 'monospace', wordBreak: 'break-all', maxHeight: 120, overflowY: 'auto' }}>
+                                {resyncPreview.authOrphans.join('\n')}
+                              </div>
+                              <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: '#92400E', marginTop: 8, cursor: 'pointer' }}>
+                                <input
+                                  type="checkbox"
+                                  checked={resyncPruneAuth}
+                                  onChange={e => setResyncPruneAuth(e.target.checked)}
+                                  style={{ accentColor: theme.colors.orange }}
+                                />
+                                Also delete these {resyncPreview.authOrphans.length} auth.users accounts (disables login for these emails)
+                              </label>
+                            </div>
+                          )}
+
+                          {resyncPreview.willDeleteSb.length === 0 && resyncPreview.authOrphans.length === 0 && (
+                            <div style={{ padding: 10, border: '1px solid #A7F3D0', background: '#ECFDF5', borderRadius: 8, marginBottom: 14, fontSize: 12, color: '#065F46' }}>
+                              ✓ All 3 stores are already in sync. Running resync will re-upsert {resyncPreview.cbCount} CB rows for idempotency.
+                            </div>
+                          )}
+                        </>
+                      )}
+
+                      {resyncResult && (
+                        <div style={{ padding: 12, border: `1px solid ${resyncResult.ok ? '#A7F3D0' : '#FECACA'}`, background: resyncResult.ok ? '#ECFDF5' : '#FEF2F2', borderRadius: 8, marginBottom: 14 }}>
+                          <div style={{ fontSize: 13, fontWeight: 600, color: resyncResult.ok ? '#065F46' : '#991B1B', marginBottom: 6 }}>
+                            {resyncResult.message}
+                          </div>
+                          {resyncResult.details && resyncResult.details.length > 0 && (
+                            <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12, color: resyncResult.ok ? '#065F46' : '#991B1B' }}>
+                              {resyncResult.details.map((d, i) => <li key={i}>{d}</li>)}
+                            </ul>
+                          )}
+                        </div>
+                      )}
+
+                      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 10 }}>
+                        {!resyncResult ? (
+                          <>
+                            <button
+                              onClick={() => !resyncLoading && setResyncOpen(false)}
+                              disabled={resyncLoading}
+                              style={{ padding: '8px 16px', fontSize: 12, fontWeight: 600, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: resyncLoading ? 'not-allowed' : 'pointer', fontFamily: 'inherit', color: theme.colors.textSecondary }}
+                            >
+                              Cancel
+                            </button>
+                            <button
+                              onClick={handleRunResync}
+                              disabled={resyncLoading || !resyncPreview}
+                              style={{ padding: '8px 16px', fontSize: 12, fontWeight: 600, border: 'none', borderRadius: 8, background: theme.colors.orange, color: '#fff', cursor: (resyncLoading || !resyncPreview) ? 'wait' : 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', gap: 4, opacity: (resyncLoading || !resyncPreview) ? 0.7 : 1 }}
+                            >
+                              {resyncLoading ? <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} /> : <RefreshCcw size={13} />}
+                              {resyncLoading ? 'Resyncing…' : 'Run Resync'}
+                            </button>
+                          </>
+                        ) : (
+                          <button
+                            onClick={() => setResyncOpen(false)}
+                            style={{ padding: '8px 16px', fontSize: 12, fontWeight: 600, border: 'none', borderRadius: 8, background: theme.colors.orange, color: '#fff', cursor: 'pointer', fontFamily: 'inherit' }}
+                          >
+                            Done
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
             </>
           )}
 

@@ -1,5 +1,16 @@
 /* ===================================================
-   StrideAPI.gs — v38.61.0 — 2026-04-16 PST — Session 70 fix batch (IK prefix strip, inspection photos URL, payment terms)
+   StrideAPI.gs — v38.62.0 — 2026-04-16 PST — Users resync tool + lookupUser whitespace fix
+   v38.62.0: NEW — handleResyncUsers_ admin endpoint reconciles CB Users (source
+             of truth) with Supabase cb_users mirror AND (optionally) prunes
+             Supabase auth.users orphans. Supports dryRun preview. Fixes the
+             "can't delete a user because CB + SB have drifted" problem.
+             FIX — lookupUser_ now whitespace-normalizes emails on both sides
+             (collapses any run of whitespace to a single space before lowercase
+             compare) so corrupted rows like "a@x.com  b@x.com c@x.com" (double
+             space) still match when the React form sends single-spaced payload.
+             Previously exact-match failed and the Delete User button couldn't
+             remove the bad row at all.
+   v38.61.0 — 2026-04-16 PST — Session 70 fix batch (IK prefix strip, inspection photos URL, payment terms)
    v38.61.0: FIX #4 — sbShipmentRow_ now strips the [IK:<uuid>] idempotency-key
              prefix before writing to Supabase. The GAS read path already
              stripped it, but the write-through was leaking the raw value to
@@ -3055,6 +3066,7 @@ function doGet(e) {
       case "createUser":      return handleCreateUser_(params, callerEmail);
       case "updateUser":      return handleUpdateUser_(params, callerEmail);
       case "deleteUser":      return handleDeleteUser_(params, callerEmail);
+      case "resyncUsers":     return handleResyncUsers_(params, callerEmail);
 
       // ─── Config data (staff/admin only for getClients; others open to all authed) ───
       case "getClients":      return handleGetClientsAuthed_(callerEmail, params.includeInactive === "1");
@@ -3937,9 +3949,17 @@ function lookupUser_(email) {
   var emailIdx = headers.indexOf("Email");
   if (emailIdx < 0) return { user: null };
 
-  var lowerEmail = email.toLowerCase();
+  // Session 70 follow-up: normalize whitespace on BOTH sides so rows with
+  // accidental double-spaces / tabs / trailing whitespace (e.g. a corrupted
+  // "a@x.com  b@x.com c@x.com" row) still match when the React form normalizes
+  // the payload to single-spaces. Previously exact-match failed and the app
+  // couldn't delete / edit the bad row at all.
+  var normalizeEmail = function(s) {
+    return String(s || "").replace(/\s+/g, " ").trim().toLowerCase();
+  };
+  var lowerEmail = normalizeEmail(email);
   for (var i = 1; i < data.length; i++) {
-    var rowEmail = String(data[i][emailIdx] || "").trim().toLowerCase();
+    var rowEmail = normalizeEmail(data[i][emailIdx]);
     if (rowEmail === lowerEmail) {
       var obj = {};
       for (var j = 0; j < headers.length; j++) {
@@ -4288,6 +4308,201 @@ function handleGetUserByEmail_(params) {
   }
 
   return jsonResponse_({ user: userResponse });
+}
+
+/**
+ * Session 70 follow-up — handleResyncUsers_
+ *
+ * Reconciles the three places user data lives:
+ *   1. CB Users sheet       — authoritative for role + client access (source of truth)
+ *   2. Supabase cb_users    — read-cache mirror of #1
+ *   3. Supabase auth.users  — login credentials (authoritative for WHO can log in)
+ *
+ * After a run, Supabase cb_users matches CB Users exactly:
+ *   • every CB row is UPSERTed into cb_users
+ *   • every cb_users row whose email isn't in CB is DELETED
+ * If `pruneAuth` is true, auth.users is also pruned — any auth account whose
+ * email isn't in CB Users is deleted via the Supabase admin API. Without this
+ * flag, auth.users is only reported (so you see orphans without deleting them).
+ *
+ * Admin only. Rate-limited. Returns diff stats so the UI can show what changed.
+ * Payload: { pruneAuth?: boolean, dryRun?: boolean }
+ */
+function handleResyncUsers_(params, callerEmail) {
+  if (!callerEmail) return errorResponse_("callerEmail is required", "AUTH_ERROR");
+  try { rateLimit_("resyncUsers_" + callerEmail, 10); } catch(e) { return errorResponse_(String(e.message), "RATE_LIMIT"); }
+
+  var callerLookup = lookupUser_(callerEmail);
+  if (!callerLookup.user) return errorResponse_("Caller not found", "AUTH_ERROR");
+  if (!callerLookup.user.active) return errorResponse_("Caller deactivated", "AUTH_ERROR");
+  if (callerLookup.user.role !== "admin") return errorResponse_("Admin only", "AUTH_ERROR");
+
+  // Accept both boolean true (JSON bodies) and "1"/"true" strings (query params)
+  var truthy = function(v) { return v === true || v === "1" || v === "true" || v === 1; };
+  var pruneAuth = params && truthy(params.pruneAuth);
+  var dryRun    = params && truthy(params.dryRun);
+
+  var url = prop_("SUPABASE_URL");
+  var key = prop_("SUPABASE_SERVICE_ROLE_KEY");
+  if (!url || !key) return errorResponse_("Supabase credentials not configured", "CONFIG_ERROR");
+
+  // ─── 1. Read CB Users (authoritative) ───────────────────────────────────────
+  var cbId = prop_("CB_SPREADSHEET_ID");
+  var ss = SpreadsheetApp.openById(cbId);
+  var sheet = ss.getSheetByName("Users");
+  if (!sheet) return errorResponse_("CB Users sheet not found", "SCHEMA_ERROR");
+  var data = sheet.getDataRange().getValues();
+  if (data.length < 2) return jsonResponse_({ success: true, cbCount: 0, upserted: 0, sbDeleted: 0, authDeleted: 0, authOrphans: [] });
+
+  var headers = data[0].map(function(h) { return String(h).trim(); });
+  var col = function(name) { return headers.indexOf(name); };
+  var cbRows = [];
+  var cbEmails = {}; // normalized email → true
+  var normalizeEmail = function(s) { return String(s || "").replace(/\s+/g, " ").trim().toLowerCase(); };
+
+  for (var i = 1; i < data.length; i++) {
+    var row = data[i];
+    var emailRaw = String(row[col("Email")] || "").trim();
+    if (!emailRaw) continue;
+    var emailNorm = normalizeEmail(emailRaw);
+    cbEmails[emailNorm] = true;
+    cbRows.push({
+      email: emailRaw,
+      role: String(row[col("Role")] || "").trim().toLowerCase() || "client",
+      clientName: String(row[col("Client Name")] || "").trim(),
+      clientSheetId: String(row[col("Client Spreadsheet ID")] || "").trim(),
+      active: toBool_(row[col("Active")]),
+      contactName: col("Contact Name") >= 0 ? String(row[col("Contact Name")] || "").trim() : "",
+      phone: col("Phone") >= 0 ? String(row[col("Phone")] || "").trim() : "",
+      staxCustomerId: col("Stax Customer ID") >= 0 ? String(row[col("Stax Customer ID")] || "").trim() : ""
+    });
+  }
+
+  // ─── 2. Fetch current Supabase cb_users state ──────────────────────────────
+  var sbResp = UrlFetchApp.fetch(url + "/rest/v1/cb_users?select=email", {
+    method: "GET",
+    headers: { "Authorization": "Bearer " + key, "apikey": key },
+    muteHttpExceptions: true
+  });
+  var sbEmailsArr = [];
+  if (sbResp.getResponseCode() >= 200 && sbResp.getResponseCode() < 300) {
+    try { sbEmailsArr = JSON.parse(sbResp.getContentText()).map(function(r) { return r.email; }); } catch (_) {}
+  }
+  var sbOrphans = sbEmailsArr.filter(function(e) { return !cbEmails[normalizeEmail(e)]; });
+
+  // ─── 3. Fetch current auth.users state (via admin API) ─────────────────────
+  var authEmails = [];
+  var authByEmailNorm = {}; // normalized email → auth user id
+  try {
+    // auth admin API: GET /auth/v1/admin/users?page=1&per_page=1000
+    // For simplicity we page up to 5000 users.
+    for (var page = 1; page <= 5; page++) {
+      var authResp = UrlFetchApp.fetch(url + "/auth/v1/admin/users?page=" + page + "&per_page=1000", {
+        method: "GET",
+        headers: { "Authorization": "Bearer " + key, "apikey": key },
+        muteHttpExceptions: true
+      });
+      if (authResp.getResponseCode() < 200 || authResp.getResponseCode() >= 300) break;
+      var authJson = JSON.parse(authResp.getContentText());
+      var users = authJson.users || [];
+      if (users.length === 0) break;
+      for (var u = 0; u < users.length; u++) {
+        var ae = String(users[u].email || "").trim();
+        if (!ae) continue;
+        authEmails.push(ae);
+        authByEmailNorm[normalizeEmail(ae)] = users[u].id;
+      }
+      if (users.length < 1000) break;
+    }
+  } catch (e) { Logger.log("resyncUsers auth list (non-fatal): " + e); }
+  var authOrphans = authEmails.filter(function(e) { return !cbEmails[normalizeEmail(e)]; });
+
+  // Dry-run: return the diff without mutating anything.
+  if (dryRun) {
+    return jsonResponse_({
+      success: true,
+      dryRun: true,
+      cbCount: cbRows.length,
+      sbCount: sbEmailsArr.length,
+      authCount: authEmails.length,
+      willUpsertCount: cbRows.length,
+      willDeleteSb: sbOrphans,
+      willDeleteAuth: pruneAuth ? authOrphans : [],
+      authOrphansFound: authOrphans  // always reported, whether pruning or not
+    });
+  }
+
+  // ─── 4. Upsert every CB row into cb_users ──────────────────────────────────
+  var upserted = 0;
+  if (cbRows.length > 0) {
+    var payload = cbRows.map(function(r) { return sbUserRow_(r); });
+    // Chunk at 500 per request (Supabase default max)
+    for (var c = 0; c < payload.length; c += 500) {
+      var chunk = payload.slice(c, c + 500);
+      var up = UrlFetchApp.fetch(url + "/rest/v1/cb_users?on_conflict=email", {
+        method: "POST",
+        headers: {
+          "Authorization": "Bearer " + key, "apikey": key,
+          "Content-Type": "application/json",
+          "Prefer": "resolution=merge-duplicates,return=minimal"
+        },
+        payload: JSON.stringify(chunk),
+        muteHttpExceptions: true
+      });
+      if (up.getResponseCode() >= 200 && up.getResponseCode() < 300) {
+        upserted += chunk.length;
+      } else {
+        Logger.log("resyncUsers upsert chunk failed: " + up.getResponseCode() + " " + up.getContentText());
+      }
+    }
+  }
+
+  // ─── 5. Delete cb_users orphans (rows whose email isn't in CB) ─────────────
+  var sbDeleted = 0;
+  for (var o = 0; o < sbOrphans.length; o++) {
+    var del = UrlFetchApp.fetch(url + "/rest/v1/cb_users?email=eq." + encodeURIComponent(sbOrphans[o]), {
+      method: "DELETE",
+      headers: { "Authorization": "Bearer " + key, "apikey": key, "Prefer": "return=minimal" },
+      muteHttpExceptions: true
+    });
+    if (del.getResponseCode() >= 200 && del.getResponseCode() < 300) sbDeleted++;
+  }
+
+  // ─── 6. Optional: delete auth.users orphans ────────────────────────────────
+  var authDeleted = 0;
+  var authErrors = [];
+  if (pruneAuth) {
+    for (var a = 0; a < authOrphans.length; a++) {
+      var authId = authByEmailNorm[normalizeEmail(authOrphans[a])];
+      if (!authId) continue;
+      var ad = UrlFetchApp.fetch(url + "/auth/v1/admin/users/" + encodeURIComponent(authId), {
+        method: "DELETE",
+        headers: { "Authorization": "Bearer " + key, "apikey": key },
+        muteHttpExceptions: true
+      });
+      if (ad.getResponseCode() >= 200 && ad.getResponseCode() < 300) {
+        authDeleted++;
+      } else {
+        authErrors.push({ email: authOrphans[a], status: ad.getResponseCode(), body: ad.getContentText().substring(0, 200) });
+      }
+    }
+  }
+
+  // Invalidate caches so the React app refetches fresh
+  try { CacheService.getScriptCache().remove("api_users"); } catch (_) {}
+
+  return jsonResponse_({
+    success: true,
+    cbCount: cbRows.length,
+    sbCountBefore: sbEmailsArr.length,
+    authCount: authEmails.length,
+    upserted: upserted,
+    sbDeleted: sbDeleted,
+    authOrphansFound: authOrphans,
+    authDeleted: authDeleted,
+    authErrors: authErrors,
+    pruneAuth: pruneAuth
+  });
 }
 
 /**
