@@ -817,7 +817,8 @@ function supabaseUpsert_(table, data) {
     var key = prop_("SUPABASE_SERVICE_ROLE_KEY");
     if (!url || !key) return;
     var conflictCol = { inventory: "tenant_id,item_id", tasks: "tenant_id,task_id", repairs: "tenant_id,repair_id",
-                        will_calls: "tenant_id,wc_number", shipments: "tenant_id,shipment_number", billing: "tenant_id,ledger_row_id" }[table] || "";
+                        will_calls: "tenant_id,wc_number", shipments: "tenant_id,shipment_number", billing: "tenant_id,ledger_row_id",
+                        claims: "claim_id", cb_users: "email" }[table] || "";
     var postUrl = url + "/rest/v1/" + table;
     if (conflictCol) postUrl += "?on_conflict=" + conflictCol;
     var resp = UrlFetchApp.fetch(postUrl, {
@@ -869,7 +870,8 @@ function supabaseBatchUpsert_(table, rows) {
 
     // Unique constraint column per table (for on_conflict parameter)
     var conflictCol = { inventory: "tenant_id,item_id", tasks: "tenant_id,task_id", repairs: "tenant_id,repair_id",
-                        will_calls: "tenant_id,wc_number", shipments: "tenant_id,shipment_number", billing: "tenant_id,ledger_row_id" }[table] || "";
+                        will_calls: "tenant_id,wc_number", shipments: "tenant_id,shipment_number", billing: "tenant_id,ledger_row_id",
+                        claims: "claim_id", cb_users: "email" }[table] || "";
 
     // Supabase REST API handles arrays up to ~1000 rows; chunk at 50 for reliability
     var CHUNK = 50;
@@ -1554,6 +1556,160 @@ function sbClientRow_(client) {
     shipment_note:             String(client.shipmentNote || ""),
     active:                    client.active !== false,
     updated_at:                new Date().toISOString()
+  };
+}
+
+/**
+ * Build a Supabase claims row from API response fields.
+ * No tenant_id — claims are global (CB sheet), keyed by claim_id.
+ */
+function sbClaimRow_(claim) {
+  return {
+    claim_id:                          String(claim.claimId || ""),
+    claim_type:                        String(claim.claimType || ""),
+    status:                            String(claim.status || ""),
+    outcome_type:                      String(claim.outcomeType || ""),
+    resolution_type:                   String(claim.resolutionType || ""),
+    date_opened:                       String(claim.dateOpened || ""),
+    incident_date:                     String(claim.incidentDate || ""),
+    date_closed:                       String(claim.dateClosed || ""),
+    date_settlement_sent:              String(claim.dateSettlementSent || ""),
+    date_signed_settlement_received:   String(claim.dateSignedSettlementReceived || ""),
+    created_by:                        String(claim.createdBy || ""),
+    first_reviewed_by:                 String(claim.firstReviewedBy || ""),
+    first_reviewed_at:                 String(claim.firstReviewedAt || ""),
+    primary_contact_name:              String(claim.primaryContactName || ""),
+    company_client_name:               String(claim.companyClientName || ""),
+    email:                             String(claim.email || ""),
+    phone:                             String(claim.phone || ""),
+    requested_amount:                  claim.requestedAmount != null ? Number(claim.requestedAmount) : null,
+    approved_amount:                   claim.approvedAmount != null ? Number(claim.approvedAmount) : null,
+    coverage_type:                     String(claim.coverageType || ""),
+    client_selected_coverage:          String(claim.clientSelectedCoverage || ""),
+    property_incident_reference:       String(claim.propertyIncidentReference || ""),
+    incident_location:                 String(claim.incidentLocation || ""),
+    issue_description:                 String(claim.issueDescription || ""),
+    decision_explanation:              String(claim.decisionExplanation || ""),
+    internal_notes_summary:            String(claim.internalNotesSummary || ""),
+    public_notes_summary:              String(claim.publicNotesSummary || ""),
+    claim_folder_url:                  String(claim.claimFolderUrl || ""),
+    current_settlement_file_url:       String(claim.currentSettlementFileUrl || ""),
+    current_settlement_version:        String(claim.currentSettlementVersion || ""),
+    void_reason:                       String(claim.voidReason || ""),
+    close_note:                        String(claim.closeNote || ""),
+    last_updated:                      String(claim.lastUpdated || ""),
+    updated_at:                        new Date().toISOString()
+  };
+}
+
+/**
+ * Resync a single claim row from CB Claims sheet to Supabase.
+ * Reads the row fresh from the sheet (so Supabase always matches sheet state).
+ * Best-effort, never blocks.
+ */
+function resyncClaimToSupabase_(claimId) {
+  try {
+    if (!claimId) return;
+    var cbSs = api_openCbSs_();
+    if (cbSs.error) return;
+    var db = claimsDb_(cbSs);
+    if (!api_claimsReady_(db)) return;
+    var row = api_getClaimRow_(db.claims, claimId);
+    if (!row) return;
+    // Map sheet row (column-name-keyed) to ApiClaim shape
+    var claim = {
+      claimId: String(row["Claim ID"] || claimId),
+      claimType: String(row["Claim Type"] || ""),
+      status: String(row["Status"] || ""),
+      outcomeType: String(row["Outcome Type"] || ""),
+      resolutionType: String(row["Resolution Type"] || ""),
+      dateOpened: row["Date Opened"] ? String(row["Date Opened"]) : "",
+      incidentDate: row["Incident Date"] ? String(row["Incident Date"]) : "",
+      dateClosed: row["Date Closed"] ? String(row["Date Closed"]) : "",
+      dateSettlementSent: row["Date Settlement Sent"] ? String(row["Date Settlement Sent"]) : "",
+      dateSignedSettlementReceived: row["Date Signed Settlement Received"] ? String(row["Date Signed Settlement Received"]) : "",
+      createdBy: String(row["Created By"] || ""),
+      firstReviewedBy: String(row["First Reviewed By"] || ""),
+      firstReviewedAt: row["First Reviewed At"] ? String(row["First Reviewed At"]) : "",
+      primaryContactName: String(row["Primary Contact Name"] || ""),
+      companyClientName: String(row["Company / Client Name"] || ""),
+      email: String(row["Email"] || ""),
+      phone: String(row["Phone"] || ""),
+      requestedAmount: row["Requested Amount"] != null && row["Requested Amount"] !== "" ? Number(row["Requested Amount"]) : null,
+      approvedAmount: row["Approved Amount"] != null && row["Approved Amount"] !== "" ? Number(row["Approved Amount"]) : null,
+      coverageType: String(row["Coverage Type"] || ""),
+      clientSelectedCoverage: String(row["Client Selected Coverage"] || ""),
+      propertyIncidentReference: String(row["Property Incident Reference"] || ""),
+      incidentLocation: String(row["Incident Location"] || ""),
+      issueDescription: String(row["Issue Description"] || ""),
+      decisionExplanation: String(row["Decision Explanation"] || ""),
+      internalNotesSummary: String(row["Internal Notes Summary"] || ""),
+      publicNotesSummary: String(row["Public Notes Summary"] || ""),
+      claimFolderUrl: String(row["Claim Folder URL"] || ""),
+      currentSettlementFileUrl: String(row["Current Settlement File URL"] || ""),
+      currentSettlementVersion: String(row["Current Settlement Version"] || ""),
+      voidReason: String(row["Void Reason"] || ""),
+      closeNote: String(row["Close Note"] || ""),
+      lastUpdated: row["Last Updated"] ? String(row["Last Updated"]) : ""
+    };
+    supabaseUpsert_("claims", sbClaimRow_(claim));
+  } catch (e) { Logger.log("resyncClaimToSupabase_ error (non-fatal): " + e); }
+}
+
+/**
+ * Resync a single user row from CB Users sheet to Supabase.
+ * Reads the row fresh from the sheet. Best-effort, never blocks.
+ */
+function resyncUserToSupabase_(email) {
+  try {
+    if (!email) return;
+    var cbId = prop_("CB_SPREADSHEET_ID");
+    if (!cbId) return;
+    var cbSs = SpreadsheetApp.openById(cbId);
+    var sheet = cbSs.getSheetByName("Users");
+    if (!sheet) return;
+    var data = sheet.getDataRange().getValues();
+    if (data.length < 2) return;
+    var headers = data[0];
+    var hMap = {};
+    for (var h = 0; h < headers.length; h++) {
+      hMap[String(headers[h] || "").trim().toUpperCase()] = h;
+    }
+    var emailLower = String(email).trim().toLowerCase();
+    for (var i = 1; i < data.length; i++) {
+      var rowEmail = String(data[i][hMap["EMAIL"]] || "").trim().toLowerCase();
+      if (rowEmail !== emailLower) continue;
+      var user = {
+        email: String(data[i][hMap["EMAIL"]] || ""),
+        role: String(data[i][hMap["ROLE"]] || "client").toLowerCase(),
+        clientName: String(data[i][hMap["CLIENT NAME"]] || ""),
+        clientSheetId: String(data[i][hMap["CLIENT SHEET ID"]] || ""),
+        active: !(data[i][hMap["ACTIVE"]] === false || String(data[i][hMap["ACTIVE"]]).toUpperCase() === "FALSE"),
+        contactName: hMap["CONTACT NAME"] != null ? String(data[i][hMap["CONTACT NAME"]] || "") : "",
+        phone: hMap["PHONE"] != null ? String(data[i][hMap["PHONE"]] || "") : "",
+        staxCustomerId: hMap["STAX CUSTOMER ID"] != null ? String(data[i][hMap["STAX CUSTOMER ID"]] || "") : ""
+      };
+      supabaseUpsert_("cb_users", sbUserRow_(user));
+      return;
+    }
+  } catch (e) { Logger.log("resyncUserToSupabase_ error (non-fatal): " + e); }
+}
+
+/**
+ * Build a Supabase cb_users row from API response fields.
+ * No tenant_id — users are global (CB sheet), keyed by email.
+ */
+function sbUserRow_(user) {
+  return {
+    email:              String(user.email || ""),
+    role:               String(user.role || "client"),
+    client_name:        String(user.clientName || ""),
+    client_sheet_id:    String(user.clientSheetId || ""),
+    active:             user.active !== false,
+    contact_name:       String(user.contactName || ""),
+    phone:              String(user.phone || ""),
+    stax_customer_id:   String(user.staxCustomerId || ""),
+    updated_at:         new Date().toISOString()
   };
 }
 
@@ -16414,6 +16570,9 @@ function handleCreateClaim_(callerEmail, payload) {
     catch (e) { warnings.push("CLAIM_STAFF_NOTIFY email: " + e.message); }
   }
 
+  // Write-through to Supabase claims cache (best-effort, reads fresh from sheet)
+  resyncClaimToSupabase_(claimNo);
+
   return jsonResponse_({ success: true, claimId: claimNo, folderUrl: folderUrl, warnings: warnings });
 }
 
@@ -16621,6 +16780,7 @@ function handleCloseClaim_(callerEmail, payload) {
   if (!api_getClaimRow_(db.claims, claimId)) return errorResponse_("Claim not found: " + claimId, "NOT_FOUND");
   api_updateClaimRow_(db.claims, claimId, { "Status": "Closed", "Date Closed": new Date(), "Close Note": closeNote });
   api_logClaimHistory_(db.historySheet, claimId, "CLOSED", "Claim closed by " + callerEmail + ". Note: " + closeNote.substring(0, 100), callerEmail, false, "");
+  resyncClaimToSupabase_(claimId);
   return jsonResponse_({ success: true, newStatus: "Closed" });
 }
 

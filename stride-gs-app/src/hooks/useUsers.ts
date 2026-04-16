@@ -4,6 +4,7 @@
  */
 import { useCallback, useMemo } from 'react';
 import { fetchUsers, createApiUser, updateApiUser, deleteApiUser } from '../lib/api';
+import { fetchUsersFromSupabase } from '../lib/supabaseQueries';
 import type { ApiUser, UsersResponse } from '../lib/api';
 import { useApiData } from './useApiData';
 import { useAuth } from '../contexts/AuthContext';
@@ -40,8 +41,17 @@ export function useUsers(): UseUsersResult {
   const { user } = useAuth();
   const callerEmail = user?.email ?? '';
 
+  // Supabase-first (~50ms), GAS fallback on cache miss or empty table
   const fetchFn = useCallback(
-    (signal?: AbortSignal) => fetchUsers(callerEmail, signal),
+    async (signal?: AbortSignal) => {
+      try {
+        const sb = await fetchUsersFromSupabase();
+        if (sb && sb.users.length > 0) {
+          return { data: sb, ok: true as const, error: null };
+        }
+      } catch { /* fall through to GAS */ }
+      return fetchUsers(callerEmail, signal);
+    },
     [callerEmail]
   );
 

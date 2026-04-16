@@ -776,28 +776,31 @@ export function Inventory() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Ref so the deep-link effect can read the latest clientFilter without it
-  // being a dep that re-triggers the effect and causes a setState loop.
+  // Refs so deep-link + URL-sync effects read the latest values without
+  // those values being deps that re-trigger effects and cause React #300.
   const clientFilterRef = useRef(clientFilter);
   useEffect(() => { clientFilterRef.current = clientFilter; }, [clientFilter]);
+  const apiClientsRef = useRef(apiClients);
+  useEffect(() => { apiClientsRef.current = apiClients; }, [apiClients]);
 
   // Keep URL's ?client= param in sync with the dropdown (bookmarkable state)
   useClientFilterUrlSync(clientFilter, apiClients);
 
   // Retry deep-link client resolution once apiClients loads (handles cold start
   // where Supabase returns tenant_id before useClients has populated).
-  // clientFilter is intentionally read via ref — not a dep — to avoid the
-  // apiClients-change → setClientFilter → clientFilter-change → re-trigger loop.
+  // Deps: apiClients.length (a number, stable once loaded — unlike the array
+  // reference which can change identity on every render and cause #300).
   useEffect(() => {
     const tid = deepLinkPendingTenantRef.current;
-    if (!tid || apiClients.length === 0 || clientFilterRef.current.length > 0) return;
-    const match = apiClients.find(c => c.spreadsheetId === tid);
+    const clients = apiClientsRef.current;
+    if (!tid || clients.length === 0 || clientFilterRef.current.length > 0) return;
+    const match = clients.find(c => c.spreadsheetId === tid);
     if (match) {
       setClientFilter([match.name]);
       deepLinkPendingTenantRef.current = null;
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [apiClients]);
+  }, [apiClients.length]);
 
   // Effect 2: when items load, open the pending item
   useEffect(() => {

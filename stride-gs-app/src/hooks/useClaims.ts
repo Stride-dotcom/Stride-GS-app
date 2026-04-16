@@ -12,6 +12,7 @@
  */
 import { useCallback, useMemo, useState } from 'react';
 import { fetchClaims } from '../lib/api';
+import { fetchClaimsFromSupabase } from '../lib/supabaseQueries';
 import type { ApiClaim, ClaimsResponse } from '../lib/api';
 import type { Claim, ClaimType, ClaimStatus } from '../lib/types';
 import { useApiData } from './useApiData';
@@ -89,8 +90,17 @@ function mapToAppClaim(api: ApiClaim): Claim {
 }
 
 export function useClaims(autoFetch = true): UseClaimsResult {
+  // Supabase-first (~50ms), GAS fallback on cache miss or empty table
   const fetchFn = useCallback(
-    (signal?: AbortSignal) => fetchClaims(signal),
+    async (signal?: AbortSignal) => {
+      try {
+        const sb = await fetchClaimsFromSupabase();
+        if (sb && sb.claims.length > 0) {
+          return { data: sb, ok: true as const, error: null };
+        }
+      } catch { /* fall through to GAS */ }
+      return fetchClaims(signal);
+    },
     []
   );
 

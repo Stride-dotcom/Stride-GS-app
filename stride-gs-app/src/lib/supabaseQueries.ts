@@ -26,6 +26,10 @@ import type {
   BillingFilterParams,
   ApiClient,
   ClientsResponse,
+  ApiClaim,
+  ClaimsResponse,
+  ApiUser,
+  UsersResponse,
 } from './api';
 
 /** Map of clientSheetId → clientName for enriching Supabase rows */
@@ -1169,6 +1173,131 @@ export async function fetchClientsFromSupabase(
     }));
 
     return { clients, count: clients.length };
+  } catch {
+    return null;
+  }
+}
+
+// ─── Claims read cache ──────────────────────────────────────────────────────
+
+interface SupabaseClaimRow {
+  claim_id: string;
+  claim_type: string | null;
+  status: string | null;
+  outcome_type: string | null;
+  resolution_type: string | null;
+  date_opened: string | null;
+  incident_date: string | null;
+  date_closed: string | null;
+  date_settlement_sent: string | null;
+  date_signed_settlement_received: string | null;
+  created_by: string | null;
+  first_reviewed_by: string | null;
+  first_reviewed_at: string | null;
+  primary_contact_name: string | null;
+  company_client_name: string | null;
+  email: string | null;
+  phone: string | null;
+  requested_amount: number | null;
+  approved_amount: number | null;
+  coverage_type: string | null;
+  client_selected_coverage: string | null;
+  property_incident_reference: string | null;
+  incident_location: string | null;
+  issue_description: string | null;
+  decision_explanation: string | null;
+  internal_notes_summary: string | null;
+  public_notes_summary: string | null;
+  claim_folder_url: string | null;
+  current_settlement_file_url: string | null;
+  current_settlement_version: string | null;
+  void_reason: string | null;
+  close_note: string | null;
+  last_updated: string | null;
+}
+
+export async function fetchClaimsFromSupabase(): Promise<ClaimsResponse | null> {
+  try {
+    const { data, error } = await supabase.from('claims').select('*');
+    if (error || !data) return null;
+
+    const claims: ApiClaim[] = (data as SupabaseClaimRow[]).map(row => ({
+      claimId: row.claim_id,
+      claimType: row.claim_type ?? '',
+      status: row.status ?? '',
+      outcomeType: row.outcome_type ?? '',
+      resolutionType: row.resolution_type ?? '',
+      dateOpened: row.date_opened ?? '',
+      incidentDate: row.incident_date ?? '',
+      dateClosed: row.date_closed ?? '',
+      dateSettlementSent: row.date_settlement_sent ?? '',
+      dateSignedSettlementReceived: row.date_signed_settlement_received ?? '',
+      createdBy: row.created_by ?? '',
+      firstReviewedBy: row.first_reviewed_by ?? '',
+      firstReviewedAt: row.first_reviewed_at ?? '',
+      primaryContactName: row.primary_contact_name ?? '',
+      companyClientName: row.company_client_name ?? '',
+      email: row.email ?? '',
+      phone: row.phone ?? '',
+      requestedAmount: row.requested_amount,
+      approvedAmount: row.approved_amount,
+      coverageType: row.coverage_type ?? '',
+      clientSelectedCoverage: row.client_selected_coverage ?? '',
+      propertyIncidentReference: row.property_incident_reference ?? '',
+      incidentLocation: row.incident_location ?? '',
+      issueDescription: row.issue_description ?? '',
+      decisionExplanation: row.decision_explanation ?? '',
+      internalNotesSummary: row.internal_notes_summary ?? '',
+      publicNotesSummary: row.public_notes_summary ?? '',
+      claimFolderUrl: row.claim_folder_url ?? '',
+      currentSettlementFileUrl: row.current_settlement_file_url ?? '',
+      currentSettlementVersion: row.current_settlement_version ?? '',
+      voidReason: row.void_reason ?? '',
+      closeNote: row.close_note ?? '',
+      lastUpdated: row.last_updated ?? '',
+    }));
+
+    return { claims, count: claims.length };
+  } catch {
+    return null;
+  }
+}
+
+// ─── Users read cache ───────────────────────────────────────────────────────
+
+interface SupabaseCbUserRow {
+  email: string;
+  role: string | null;
+  client_name: string | null;
+  client_sheet_id: string | null;
+  active: boolean | null;
+  contact_name: string | null;
+  phone: string | null;
+  stax_customer_id: string | null;
+}
+
+export async function fetchUsersFromSupabase(): Promise<UsersResponse | null> {
+  try {
+    const { data, error } = await supabase.from('cb_users').select('*');
+    if (error || !data) return null;
+
+    const users: ApiUser[] = (data as SupabaseCbUserRow[]).map(row => ({
+      email: row.email,
+      role: (row.role as ApiUser['role']) || 'client',
+      clientName: row.client_name ?? '',
+      clientSheetId: row.client_sheet_id ?? '',
+      active: row.active ?? true,
+      created: '',
+      lastLogin: '',
+      lastLoginSource: '',
+      updatedBy: '',
+      updatedAt: '',
+      contactName: row.contact_name ?? undefined,
+      phone: row.phone ?? undefined,
+      staxCustomerId: row.stax_customer_id ?? undefined,
+    }));
+
+    return { users, count: users.length };
   } catch {
     return null;
   }

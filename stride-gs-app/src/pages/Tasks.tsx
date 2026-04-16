@@ -203,25 +203,26 @@ export function Tasks() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Ref so the deep-link effect reads latest clientFilter without re-triggering.
   const clientFilterRef = useRef(clientFilter);
   useEffect(() => { clientFilterRef.current = clientFilter; }, [clientFilter]);
+  const apiClientsRef = useRef(apiClients);
+  useEffect(() => { apiClientsRef.current = apiClients; }, [apiClients]);
 
-  // Keep URL's ?client= param in sync with the dropdown (bookmarkable state)
   useClientFilterUrlSync(clientFilter, apiClients);
 
-  // Resolve deep-link ?client= param once apiClients loads
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+  // Resolve deep-link ?client= param once apiClients loads.
+  // Dep is apiClients.length (stable number) — NOT apiClients (unstable ref → #300).
   useEffect(() => {
     const tid = deepLinkPendingTenantRef.current;
-    if (!tid || apiClients.length === 0 || clientFilterRef.current.length > 0) return;
-    const match = apiClients.find(c => c.spreadsheetId === tid);
+    const clients = apiClientsRef.current;
+    if (!tid || clients.length === 0 || clientFilterRef.current.length > 0) return;
+    const match = clients.find(c => c.spreadsheetId === tid);
     if (match) {
       setClientFilter([match.name]);
       deepLinkPendingTenantRef.current = null;
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [apiClients]);
+  }, [apiClients.length]);
 
   // Effect 2: When tasks arrive, open the pending task
   useEffect(() => {
