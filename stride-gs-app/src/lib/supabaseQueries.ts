@@ -40,6 +40,11 @@ import type {
   CampaignStatus,
   ApiLocation,
   LocationsResponse,
+  StaxInvoicesResponse,
+  StaxChargeLogResponse,
+  StaxExceptionsResponse,
+  StaxCustomersResponse,
+  StaxRunLogResponse,
 } from './api';
 
 /** Map of clientSheetId → clientName for enriching Supabase rows */
@@ -1699,3 +1704,182 @@ export async function fetchItemsByIdsFromSupabase(
     return null;
   }
 }
+
+// ─── Stax read caches (session 69) ──────────────────────────────────────────
+
+interface SupabaseStaxInvoiceRow {
+  qb_invoice_no: string;
+  row_index: number | null;
+  customer: string | null;
+  stax_customer_id: string | null;
+  invoice_date: string | null;
+  due_date: string | null;
+  amount: number | null;
+  line_items_json: string | null;
+  stax_id: string | null;
+  status: string | null;
+  created_at_sheet: string | null;
+  notes: string | null;
+  is_test: boolean | null;
+  auto_charge: boolean | null;
+  payment_method_status: string | null;
+}
+
+export async function fetchStaxInvoicesFromSupabase(): Promise<StaxInvoicesResponse | null> {
+  try {
+    const { data, error } = await supabase.from('stax_invoices').select('*');
+    if (error || !data) return null;
+    const invoices = (data as SupabaseStaxInvoiceRow[]).map(r => ({
+      rowIndex: r.row_index ?? 0,
+      qbInvoice: r.qb_invoice_no,
+      customer: r.customer ?? '',
+      staxCustomerId: r.stax_customer_id ?? '',
+      invoiceDate: r.invoice_date ?? '',
+      dueDate: r.due_date ?? '',
+      amount: r.amount ?? 0,
+      lineItemsJson: r.line_items_json ?? '',
+      staxId: r.stax_id ?? '',
+      status: r.status ?? '',
+      createdAt: r.created_at_sheet ?? '',
+      notes: r.notes ?? '',
+      isTest: r.is_test ?? false,
+      autoCharge: r.auto_charge ?? false,
+      paymentMethodStatus: (r.payment_method_status as any) ?? 'unknown',
+    }));
+    return { invoices, count: invoices.length };
+  } catch {
+    return null;
+  }
+}
+
+interface SupabaseStaxChargeRow {
+  timestamp: string | null;
+  qb_invoice_no: string | null;
+  stax_invoice_id: string | null;
+  stax_customer_id: string | null;
+  customer: string | null;
+  amount: number | null;
+  status: string | null;
+  txn_id: string | null;
+  notes: string | null;
+}
+
+export async function fetchStaxChargeLogFromSupabase(): Promise<StaxChargeLogResponse | null> {
+  try {
+    const { data, error } = await supabase
+      .from('stax_charges')
+      .select('*')
+      .order('timestamp', { ascending: false })
+      .limit(2000);
+    if (error || !data) return null;
+    const charges = (data as SupabaseStaxChargeRow[]).map(r => ({
+      timestamp: r.timestamp ?? '',
+      qbInvoice: r.qb_invoice_no ?? '',
+      staxInvoiceId: r.stax_invoice_id ?? '',
+      staxCustomerId: r.stax_customer_id ?? '',
+      customer: r.customer ?? '',
+      amount: r.amount ?? 0,
+      status: r.status ?? '',
+      txnId: r.txn_id ?? '',
+      notes: r.notes ?? '',
+    }));
+    return { charges, count: charges.length };
+  } catch {
+    return null;
+  }
+}
+
+interface SupabaseStaxExceptionRow {
+  timestamp: string | null;
+  qb_invoice_no: string | null;
+  customer: string | null;
+  stax_customer_id: string | null;
+  amount: number | null;
+  due_date: string | null;
+  reason: string | null;
+  pay_link: string | null;
+  resolved: boolean | null;
+}
+
+export async function fetchStaxExceptionsFromSupabase(): Promise<StaxExceptionsResponse | null> {
+  try {
+    const { data, error } = await supabase
+      .from('stax_exceptions')
+      .select('*')
+      .order('timestamp', { ascending: false })
+      .limit(2000);
+    if (error || !data) return null;
+    const exceptions = (data as SupabaseStaxExceptionRow[]).map(r => ({
+      timestamp: r.timestamp ?? '',
+      qbInvoice: r.qb_invoice_no ?? '',
+      customer: r.customer ?? '',
+      staxCustomerId: r.stax_customer_id ?? '',
+      amount: r.amount ?? 0,
+      dueDate: r.due_date ?? '',
+      reason: r.reason ?? '',
+      payLink: r.pay_link ?? '',
+      resolved: r.resolved ?? false,
+    }));
+    const unresolvedCount = exceptions.filter(e => !e.resolved).length;
+    return { exceptions, count: exceptions.length, unresolvedCount };
+  } catch {
+    return null;
+  }
+}
+
+interface SupabaseStaxCustomerRow {
+  qb_name: string;
+  stax_company: string | null;
+  stax_name: string | null;
+  stax_id: string | null;
+  email: string | null;
+  pay_method: string | null;
+  notes: string | null;
+}
+
+export async function fetchStaxCustomersFromSupabase(): Promise<StaxCustomersResponse | null> {
+  try {
+    const { data, error } = await supabase.from('stax_customers').select('*');
+    if (error || !data) return null;
+    const customers = (data as SupabaseStaxCustomerRow[]).map(r => ({
+      qbName: r.qb_name,
+      staxCompany: r.stax_company ?? '',
+      staxName: r.stax_name ?? '',
+      staxId: r.stax_id ?? '',
+      email: r.email ?? '',
+      payMethod: r.pay_method ?? '',
+      notes: r.notes ?? '',
+    }));
+    return { customers, count: customers.length };
+  } catch {
+    return null;
+  }
+}
+
+interface SupabaseStaxRunLogRow {
+  timestamp: string | null;
+  fn: string | null;
+  summary: string | null;
+  details: string | null;
+}
+
+export async function fetchStaxRunLogFromSupabase(): Promise<StaxRunLogResponse | null> {
+  try {
+    const { data, error } = await supabase
+      .from('stax_run_log')
+      .select('*')
+      .order('timestamp', { ascending: false })
+      .limit(500);
+    if (error || !data) return null;
+    const entries = (data as SupabaseStaxRunLogRow[]).map(r => ({
+      timestamp: r.timestamp ?? '',
+      fn: r.fn ?? '',
+      summary: r.summary ?? '',
+      details: r.details ?? '',
+    }));
+    return { entries, count: entries.length };
+  } catch {
+    return null;
+  }
+}
+

@@ -26,6 +26,14 @@ import { InfoTooltip } from '../components/shared/InfoTooltip';
 import { BulkResultSummary } from '../components/shared/BulkResultSummary';
 import { BatchProgress, type BatchState } from '../components/shared/BatchProgress';
 import { runBatchLoop, mergePreflightSkips } from '../lib/batchLoop';
+import {
+  fetchStaxInvoicesFromSupabase,
+  fetchStaxChargeLogFromSupabase,
+  fetchStaxExceptionsFromSupabase,
+  fetchStaxCustomersFromSupabase,
+  fetchStaxRunLogFromSupabase,
+  isSupabaseCacheAvailable,
+} from '../lib/supabaseQueries';
 
 type Tab = 'iif' | 'review' | 'invoices' | 'queue' | 'charges' | 'exceptions' | 'customers' | 'pipeline' | 'mapping' | 'runlog';
 
@@ -398,6 +406,46 @@ export function Payments() {
     setRefreshing(true);
     setError(null);
     try {
+      // Session 69 — Supabase-first for the 5 list datasets. Config stays GAS (live Script Properties).
+      // When noCache=true (explicit refresh button), skip Supabase to get the freshest data.
+      const supabaseAvailable = !noCache && (await isSupabaseCacheAvailable());
+      if (supabaseAvailable) {
+        const [sbInv, sbCharges, sbExc, sbCust, sbLog, cfgRes] = await Promise.all([
+          fetchStaxInvoicesFromSupabase(),
+          fetchStaxChargeLogFromSupabase(),
+          fetchStaxExceptionsFromSupabase(),
+          fetchStaxCustomersFromSupabase(),
+          fetchStaxRunLogFromSupabase(),
+          fetchStaxConfig(),
+        ]);
+        if (sbInv) setInvoices(sbInv.invoices);
+        if (sbCharges) setCharges(sbCharges.charges);
+        if (sbExc) setExceptions(sbExc.exceptions);
+        if (sbCust) setCustomers(sbCust.customers);
+        if (sbLog) setRunLog(sbLog.entries);
+        if (cfgRes.ok && cfgRes.data) {
+          setAutoCharge(cfgRes.data.config.AUTO_CHARGE_ENABLED === true);
+        }
+        // If any Supabase table returned null, fall through to GAS for that specific dataset.
+        // In practice the tables should be seeded before first production use.
+        if (!sbInv || !sbCharges || !sbExc || !sbCust || !sbLog) {
+          const [invRes, chargeRes, excRes, custRes, logRes] = await Promise.all([
+            !sbInv ? fetchStaxInvoices() : Promise.resolve({ ok: true, data: null } as any),
+            !sbCharges ? fetchStaxChargeLog() : Promise.resolve({ ok: true, data: null } as any),
+            !sbExc ? fetchStaxExceptions() : Promise.resolve({ ok: true, data: null } as any),
+            !sbCust ? fetchStaxCustomers() : Promise.resolve({ ok: true, data: null } as any),
+            !sbLog ? fetchStaxRunLog() : Promise.resolve({ ok: true, data: null } as any),
+          ]);
+          if (invRes.ok && invRes.data) setInvoices(invRes.data.invoices);
+          if (chargeRes.ok && chargeRes.data) setCharges(chargeRes.data.charges);
+          if (excRes.ok && excRes.data) setExceptions(excRes.data.exceptions);
+          if (custRes.ok && custRes.data) setCustomers(custRes.data.customers);
+          if (logRes.ok && logRes.data) setRunLog(logRes.data.entries);
+        }
+        setLastUpdated(new Date());
+        return;
+      }
+
       const [invRes, chargeRes, excRes, custRes, logRes, cfgRes] = await Promise.all([
         fetchStaxInvoices(),
         fetchStaxChargeLog(),

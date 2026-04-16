@@ -1,5 +1,16 @@
 /* ===================================================
-   StrideAPI.gs — v38.58.0 — 2026-04-15 PST — Server-side batch endpoints (eliminate tab-close partial completion)
+   StrideAPI.gs — v38.59.0 — 2026-04-16 PST — Stax Supabase mirror (Phase 2 of session 69)
+   v38.59.0: NEW — Stax tables mirrored to Supabase for fast Payments page loads:
+             • 5 new caches (stax_invoices, stax_charges, stax_exceptions,
+               stax_customers, stax_run_log) with RLS admin/staff SELECT
+             • api_sbUpsertStaxInvoice_ / api_sbBatchUpsertStaxInvoices_ /
+               api_sbResyncStaxInvoice_ / api_sbResyncStaxInvoices_ helpers
+             • seedAllStaxToSupabase() seed function (run once from editor)
+             • Write-through added to handleVoidStaxInvoice_, handleDeleteStaxInvoice_,
+               handleBatchVoidStaxInvoices_, handleBatchDeleteStaxInvoices_,
+               handleUpdateStaxInvoice_, handleResetStaxInvoiceStatus_,
+               handleToggleAutoCharge_, handleChargeSingleInvoice_ (+ charge log row).
+             Best-effort — never blocks the sheet write.
    v38.58.0: NEW — 4 server-side batch handlers that return BatchMutationResult in
              a single server call (no client-side for-loop, survives tab close):
              • handleBatchVoidStaxInvoices_ (router: batchVoidStaxInvoices)
@@ -872,7 +883,8 @@ function supabaseUpsert_(table, data) {
     var conflictCol = { inventory: "tenant_id,item_id", tasks: "tenant_id,task_id", repairs: "tenant_id,repair_id",
                         will_calls: "tenant_id,wc_number", shipments: "tenant_id,shipment_number", billing: "tenant_id,ledger_row_id",
                         claims: "claim_id", cb_users: "email", marketing_contacts: "email",
-                        marketing_campaigns: "campaign_id", marketing_templates: "name", marketing_settings: "id" }[table] || "";
+                        marketing_campaigns: "campaign_id", marketing_templates: "name", marketing_settings: "id",
+                        stax_invoices: "qb_invoice_no", stax_customers: "qb_name" }[table] || "";
     var postUrl = url + "/rest/v1/" + table;
     if (conflictCol) postUrl += "?on_conflict=" + conflictCol;
     var resp = UrlFetchApp.fetch(postUrl, {
@@ -926,7 +938,8 @@ function supabaseBatchUpsert_(table, rows) {
     var conflictCol = { inventory: "tenant_id,item_id", tasks: "tenant_id,task_id", repairs: "tenant_id,repair_id",
                         will_calls: "tenant_id,wc_number", shipments: "tenant_id,shipment_number", billing: "tenant_id,ledger_row_id",
                         claims: "claim_id", cb_users: "email", marketing_contacts: "email",
-                        marketing_campaigns: "campaign_id", marketing_templates: "name", marketing_settings: "id" }[table] || "";
+                        marketing_campaigns: "campaign_id", marketing_templates: "name", marketing_settings: "id",
+                        stax_invoices: "qb_invoice_no", stax_customers: "qb_name" }[table] || "";
 
     // Supabase REST API handles arrays up to ~1000 rows; chunk at 50 for reliability
     var CHUNK = 50;
@@ -1342,6 +1355,266 @@ function api_ledgerCheckAvailable_(itemIds) {
     out.degraded = true;
     return out;
   }
+}
+
+// ═══ Stax Supabase write-through helpers (session 69 / v38.59.0) ═══════════════
+
+/**
+ * Upsert a single Stax invoice row (shape as returned by handleGetStaxInvoices_)
+ * to public.stax_invoices. Best-effort, never throws.
+ */
+function api_sbUpsertStaxInvoice_(inv) {
+  if (!inv || !inv.qbInvoice) return;
+  supabaseUpsert_("stax_invoices", {
+    qb_invoice_no:          String(inv.qbInvoice || ""),
+    row_index:              Number(inv.rowIndex || 0) || null,
+    customer:               inv.customer || "",
+    stax_customer_id:       inv.staxCustomerId || "",
+    invoice_date:           inv.invoiceDate || "",
+    due_date:               inv.dueDate || "",
+    amount:                 Number(inv.amount || 0),
+    line_items_json:        inv.lineItemsJson || "",
+    stax_id:                inv.staxId || "",
+    status:                 inv.status || "",
+    created_at_sheet:       inv.createdAt || "",
+    notes:                  inv.notes || "",
+    is_test:                !!inv.isTest,
+    auto_charge:            !!inv.autoCharge,
+    payment_method_status:  inv.paymentMethodStatus || "unknown",
+    updated_at:             new Date().toISOString()
+  });
+}
+
+/** Batch upsert. Accepts array of same-shape objects. */
+function api_sbBatchUpsertStaxInvoices_(invs) {
+  if (!invs || !invs.length) return;
+  var rows = [];
+  for (var i = 0; i < invs.length; i++) {
+    var inv = invs[i]; if (!inv || !inv.qbInvoice) continue;
+    rows.push({
+      qb_invoice_no:          String(inv.qbInvoice || ""),
+      row_index:              Number(inv.rowIndex || 0) || null,
+      customer:               inv.customer || "",
+      stax_customer_id:       inv.staxCustomerId || "",
+      invoice_date:           inv.invoiceDate || "",
+      due_date:               inv.dueDate || "",
+      amount:                 Number(inv.amount || 0),
+      line_items_json:        inv.lineItemsJson || "",
+      stax_id:                inv.staxId || "",
+      status:                 inv.status || "",
+      created_at_sheet:       inv.createdAt || "",
+      notes:                  inv.notes || "",
+      is_test:                !!inv.isTest,
+      auto_charge:            !!inv.autoCharge,
+      payment_method_status:  inv.paymentMethodStatus || "unknown",
+      updated_at:             new Date().toISOString()
+    });
+  }
+  supabaseBatchUpsert_("stax_invoices", rows);
+}
+
+/**
+ * Re-fetch a single invoice row by QB# from the Stax sheet and push it up.
+ * Convenience: when a handler mutates a row but doesn't have the full shape in hand.
+ */
+function api_sbResyncStaxInvoice_(qbInvoiceNo) {
+  if (!qbInvoiceNo) return;
+  try {
+    var ss = getStaxSpreadsheet_();
+    var sheet = ss.getSheetByName("Invoices");
+    if (!sheet) return;
+    var rows = sheetToObjects_(sheet);
+    for (var i = 0; i < rows.length; i++) {
+      if (String(rows[i]["QB Invoice #"] || "").trim() === String(qbInvoiceNo).trim()) {
+        var r = rows[i];
+        var staxCustId = String(r["Stax Customer ID"] || "");
+        api_sbUpsertStaxInvoice_({
+          rowIndex:        i + 2,
+          qbInvoice:       String(r["QB Invoice #"] || ""),
+          customer:        String(r["QB Customer Name"] || ""),
+          staxCustomerId:  staxCustId,
+          invoiceDate:     formatDate_(r["Invoice Date"]),
+          dueDate:         formatDate_(r["Due Date"]),
+          amount:          toNum_(r["Total Amount"]) || 0,
+          lineItemsJson:   String(r["Line Items JSON"] || ""),
+          staxId:          String(r["Stax Invoice ID"] || ""),
+          status:          String(r["Status"] || ""),
+          createdAt:       formatDate_(r["Created At"]),
+          notes:           String(r["Notes"] || ""),
+          isTest:          String(r["Is Test"] || "").toUpperCase() === "TRUE",
+          autoCharge:      !(String(r["Auto Charge"] || "").toUpperCase() === "FALSE" || String(r["Auto Charge"] || "").toUpperCase() === "NO" || String(r["Auto Charge"] || "").toUpperCase() === "OFF"),
+          paymentMethodStatus: staxCustId ? "unknown" : "no_customer"
+        });
+        break;
+      }
+    }
+  } catch (e) { Logger.log("api_sbResyncStaxInvoice_ error (non-fatal): " + e); }
+}
+
+/** Batch version for multiple QB#s. */
+function api_sbResyncStaxInvoices_(qbInvoiceNos) {
+  if (!qbInvoiceNos || !qbInvoiceNos.length) return;
+  try {
+    var ss = getStaxSpreadsheet_();
+    var sheet = ss.getSheetByName("Invoices");
+    if (!sheet) return;
+    var rows = sheetToObjects_(sheet);
+    var wanted = {};
+    for (var q = 0; q < qbInvoiceNos.length; q++) wanted[String(qbInvoiceNos[q] || "").trim()] = true;
+    var out = [];
+    for (var i = 0; i < rows.length; i++) {
+      var qb = String(rows[i]["QB Invoice #"] || "").trim();
+      if (!wanted[qb]) continue;
+      var r = rows[i];
+      var staxCustId = String(r["Stax Customer ID"] || "");
+      out.push({
+        rowIndex:        i + 2,
+        qbInvoice:       String(r["QB Invoice #"] || ""),
+        customer:        String(r["QB Customer Name"] || ""),
+        staxCustomerId:  staxCustId,
+        invoiceDate:     formatDate_(r["Invoice Date"]),
+        dueDate:         formatDate_(r["Due Date"]),
+        amount:          toNum_(r["Total Amount"]) || 0,
+        lineItemsJson:   String(r["Line Items JSON"] || ""),
+        staxId:          String(r["Stax Invoice ID"] || ""),
+        status:          String(r["Status"] || ""),
+        createdAt:       formatDate_(r["Created At"]),
+        notes:           String(r["Notes"] || ""),
+        isTest:          String(r["Is Test"] || "").toUpperCase() === "TRUE",
+        autoCharge:      !(String(r["Auto Charge"] || "").toUpperCase() === "FALSE" || String(r["Auto Charge"] || "").toUpperCase() === "NO" || String(r["Auto Charge"] || "").toUpperCase() === "OFF"),
+        paymentMethodStatus: staxCustId ? "unknown" : "no_customer"
+      });
+    }
+    api_sbBatchUpsertStaxInvoices_(out);
+  } catch (e) { Logger.log("api_sbResyncStaxInvoices_ error (non-fatal): " + e); }
+}
+
+/**
+ * Seed all 5 Stax Supabase caches from the Stax spreadsheet.
+ * Run ONCE from the Apps Script editor after migration apply.
+ */
+function seedAllStaxToSupabase() {
+  var ss = getStaxSpreadsheet_();
+  var report = { invoices: 0, charges: 0, exceptions: 0, customers: 0, runLog: 0 };
+
+  // Invoices
+  try {
+    var invSheet = ss.getSheetByName("Invoices");
+    if (invSheet) {
+      var rows = sheetToObjects_(invSheet);
+      var invs = rows.map(function(r, idx) {
+        var staxCustId = String(r["Stax Customer ID"] || "");
+        return {
+          rowIndex:        idx + 2,
+          qbInvoice:       String(r["QB Invoice #"] || ""),
+          customer:        String(r["QB Customer Name"] || ""),
+          staxCustomerId:  staxCustId,
+          invoiceDate:     formatDate_(r["Invoice Date"]),
+          dueDate:         formatDate_(r["Due Date"]),
+          amount:          toNum_(r["Total Amount"]) || 0,
+          lineItemsJson:   String(r["Line Items JSON"] || ""),
+          staxId:          String(r["Stax Invoice ID"] || ""),
+          status:          String(r["Status"] || ""),
+          createdAt:       formatDate_(r["Created At"]),
+          notes:           String(r["Notes"] || ""),
+          isTest:          String(r["Is Test"] || "").toUpperCase() === "TRUE",
+          autoCharge:      !(String(r["Auto Charge"] || "").toUpperCase() === "FALSE"),
+          paymentMethodStatus: staxCustId ? "unknown" : "no_customer"
+        };
+      }).filter(function(x) { return x.qbInvoice; });
+      api_sbBatchUpsertStaxInvoices_(invs);
+      report.invoices = invs.length;
+    }
+  } catch (e) { Logger.log("seed invoices err: " + e); }
+
+  // Charges (append-only)
+  try {
+    var chSheet = ss.getSheetByName("Charge Log");
+    if (chSheet) {
+      var cRows = sheetToObjects_(chSheet);
+      var chargeRows = cRows.map(function(r) {
+        return {
+          timestamp:        formatDate_(r["Timestamp"]),
+          qb_invoice_no:    String(r["QB Invoice #"] || ""),
+          stax_invoice_id:  String(r["Stax Invoice ID"] || ""),
+          stax_customer_id: String(r["Stax Customer ID"] || ""),
+          customer:         String(r["Customer"] || ""),
+          amount:           toNum_(r["Amount"]) || 0,
+          status:           String(r["Status"] || ""),
+          txn_id:           String(r["Transaction ID"] || ""),
+          notes:            String(r["Notes"] || "")
+        };
+      });
+      supabaseBatchUpsert_("stax_charges", chargeRows);
+      report.charges = chargeRows.length;
+    }
+  } catch (e) { Logger.log("seed charges err: " + e); }
+
+  // Exceptions
+  try {
+    var exSheet = ss.getSheetByName("Exceptions");
+    if (exSheet) {
+      var eRows = sheetToObjects_(exSheet);
+      var exceptionRows = eRows.map(function(r) {
+        return {
+          timestamp:        formatDate_(r["Timestamp"]),
+          qb_invoice_no:    String(r["QB Invoice #"] || ""),
+          customer:         String(r["Customer"] || ""),
+          stax_customer_id: String(r["Stax Customer ID"] || ""),
+          amount:           toNum_(r["Amount"]) || 0,
+          due_date:         formatDate_(r["Due Date"]),
+          reason:           String(r["Reason"] || ""),
+          pay_link:         String(r["Pay Link"] || ""),
+          resolved:         String(r["Resolved"] || "").toUpperCase() === "TRUE"
+        };
+      });
+      supabaseBatchUpsert_("stax_exceptions", exceptionRows);
+      report.exceptions = exceptionRows.length;
+    }
+  } catch (e) { Logger.log("seed exceptions err: " + e); }
+
+  // Customers
+  try {
+    var cuSheet = ss.getSheetByName("Customers");
+    if (cuSheet) {
+      var uRows = sheetToObjects_(cuSheet);
+      var customerRows = uRows.map(function(r) {
+        return {
+          qb_name:       String(r["QB Customer Name"] || ""),
+          stax_company:  String(r["Stax Company"] || ""),
+          stax_name:     String(r["Stax Name"] || ""),
+          stax_id:       String(r["Stax Customer ID"] || ""),
+          email:         String(r["Email"] || ""),
+          pay_method:    String(r["Payment Method"] || ""),
+          notes:         String(r["Notes"] || ""),
+          updated_at:    new Date().toISOString()
+        };
+      }).filter(function(x) { return x.qb_name; });
+      supabaseBatchUpsert_("stax_customers", customerRows);
+      report.customers = customerRows.length;
+    }
+  } catch (e) { Logger.log("seed customers err: " + e); }
+
+  // Run Log
+  try {
+    var rlSheet = ss.getSheetByName("Run Log");
+    if (rlSheet) {
+      var lRows = sheetToObjects_(rlSheet);
+      var runLogRows = lRows.map(function(r) {
+        return {
+          timestamp: formatDate_(r["Timestamp"]),
+          fn:        String(r["Function"] || ""),
+          summary:   String(r["Summary"] || ""),
+          details:   String(r["Details"] || "")
+        };
+      });
+      supabaseBatchUpsert_("stax_run_log", runLogRows);
+      report.runLog = runLogRows.length;
+    }
+  } catch (e) { Logger.log("seed runLog err: " + e); }
+
+  Logger.log("seedAllStaxToSupabase complete: " + JSON.stringify(report));
+  return report;
 }
 
 /**
@@ -16604,6 +16877,9 @@ function handleBatchVoidStaxInvoices_(payload) {
   try { CacheService.getScriptCache().remove("stax_invoices"); } catch (_) {}
   try { stax_appendRunLog_(ss, "batchVoidStaxInvoices", "Voided " + result.succeeded + " invoice(s)", ""); } catch (_) {}
 
+  // v38.59.0 — Supabase write-through
+  try { api_sbResyncStaxInvoices_(qbInvoiceNos); } catch (_) {}
+
   result.message = "Voided " + result.succeeded + " invoice(s)" +
                    (result.skipped.length ? ", skipped " + result.skipped.length : "") +
                    (result.failed ? ", failed " + result.failed : "");
@@ -16660,6 +16936,9 @@ function handleBatchDeleteStaxInvoices_(payload) {
   try { SpreadsheetApp.flush(); } catch (_) {}
   try { CacheService.getScriptCache().remove("stax_invoices"); } catch (_) {}
   try { stax_appendRunLog_(ss, "batchDeleteStaxInvoices", "Deleted " + result.succeeded + " invoice(s)", ""); } catch (_) {}
+
+  // v38.59.0 — Supabase write-through
+  try { api_sbResyncStaxInvoices_(qbInvoiceNos); } catch (_) {}
 
   result.message = "Deleted " + result.succeeded + " invoice(s)" +
                    (result.skipped.length ? ", skipped " + result.skipped.length : "") +
@@ -21292,6 +21571,9 @@ function handleUpdateStaxInvoice_(payload) {
   // Invalidate cache
   try { CacheService.getScriptCache().remove("stax_invoices"); } catch (e) {}
 
+  // v38.59.0 — Supabase write-through
+  try { api_sbResyncStaxInvoice_(qbInvoiceNo); } catch (_) {}
+
   return jsonResponse_({
     success: true, qbInvoiceNo: qbInvoiceNo, status: currentStatus,
     changed: changed, message: changed.length + " field(s) updated"
@@ -21338,6 +21620,9 @@ function handleDeleteStaxInvoice_(payload) {
 
   try { CacheService.getScriptCache().remove("stax_invoices"); } catch (e) {}
   stax_appendRunLog_(ss, "deleteStaxInvoice", "Deleted QB#" + qbInvoiceNo, "");
+
+  // v38.59.0 — Supabase write-through
+  try { api_sbResyncStaxInvoice_(qbInvoiceNo); } catch (_) {}
 
   return jsonResponse_({ success: true, qbInvoiceNo: qbInvoiceNo, previousStatus: currentStatus });
 }
@@ -22135,6 +22420,22 @@ function handleChargeSingleInvoice_(payload) {
     cache.remove("stax_runlog");
   } catch (e) {}
 
+  // v38.59.0 — Supabase write-through: resync this invoice + append charge log row
+  try { api_sbResyncStaxInvoice_(docNum); } catch (_) {}
+  try {
+    supabaseUpsert_("stax_charges", {
+      timestamp:        Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm:ss"),
+      qb_invoice_no:    docNum,
+      stax_invoice_id:  staxInvId,
+      stax_customer_id: staxCustId,
+      customer:         custName,
+      amount:           Number(totalRaw || 0),
+      status:           chargeResult.success ? "SUCCESS" : (chargeResult.partial ? "PARTIAL" : (chargeResult.declined ? "DECLINED" : "API_ERROR")),
+      txn_id:           chargeResult.transactionId || "",
+      notes:            chargeResult.error || ""
+    });
+  } catch (_) {}
+
   return jsonResponse_({
     success: chargeResult.success,
     status: chargeResult.success ? "PAID" : (chargeResult.partial ? "PARTIAL" : (chargeResult.declined ? "DECLINED" : "API_ERROR")),
@@ -22188,6 +22489,9 @@ function handleVoidStaxInvoice_(payload) {
 
   stax_appendRunLog_(ss, "voidStaxInvoice", "Voided QB#" + qbInvoiceNo + " (was " + currentStatus + ")", "");
 
+  // v38.59.0 — Supabase write-through
+  try { api_sbResyncStaxInvoice_(qbInvoiceNo); } catch (_) {}
+
   return jsonResponse_({ success: true, qbInvoiceNo: qbInvoiceNo, previousStatus: currentStatus });
 }
 
@@ -22234,6 +22538,9 @@ function handleToggleAutoCharge_(payload) {
   }
 
   try { CacheService.getScriptCache().remove("stax_invoices"); } catch (e) {}
+
+  // v38.59.0 — Supabase write-through for touched invoices
+  try { api_sbResyncStaxInvoices_(invoiceNos); } catch (_) {}
 
   return jsonResponse_({
     success: true, updated: updated, autoCharge: payload.autoCharge === true,
@@ -22284,6 +22591,9 @@ function handleResetStaxInvoiceStatus_(payload) {
 
   try { CacheService.getScriptCache().remove("stax_invoices"); } catch (e) {}
   stax_appendRunLog_(ss, "resetInvoiceStatus", "Reset QB#" + qbInvoiceNo + ": " + currentStatus + " → " + newStatus, "");
+
+  // v38.59.0 — Supabase write-through
+  try { api_sbResyncStaxInvoice_(qbInvoiceNo); } catch (_) {}
 
   return jsonResponse_({ success: true, qbInvoiceNo: qbInvoiceNo, previousStatus: currentStatus, newStatus: newStatus });
 }
