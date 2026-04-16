@@ -24,6 +24,7 @@ import { TaskJobPage } from './pages/TaskJobPage';
 const WillCallJobPage = React.lazy(() => import('./pages/WillCallJobPage').then(m => ({ default: m.WillCallJobPage })));
 const RepairJobPage = React.lazy(() => import('./pages/RepairJobPage').then(m => ({ default: m.RepairJobPage })));
 const ShipmentJobPage = React.lazy(() => import('./pages/ShipmentJobPage').then(m => ({ default: m.ShipmentJobPage })));
+const DetailPanelMockup = React.lazy(() => import('./pages/DetailPanelMockup').then(m => ({ default: m.DetailPanelMockup })));
 import { Orders } from './pages/Orders';
 
 /** Route guard — redirects to dashboard if user's role is not in the allowed list */
@@ -76,6 +77,9 @@ export default function App() {
           <Route path="/payments" element={<RoleGuard allowed={['admin']}><Payments /></RoleGuard>} />
           <Route path="/marketing" element={<RoleGuard allowed={['admin']}><Marketing /></RoleGuard>} />
           <Route path="/settings" element={<RoleGuard allowed={['admin']}><Settings /></RoleGuard>} />
+          {/* Session 70 follow-up — admin-only DetailHeader mockup for reviewing the proposed
+              unified layout across all 7 detail panel types before mass adoption. */}
+          <Route path="/mockup/panels" element={<RoleGuard allowed={['admin']}><React.Suspense fallback={<div style={{ padding: 20 }}>Loading mockup...</div>}><DetailPanelMockup /></React.Suspense></RoleGuard>} />
         </Route>
       </Routes>
     </HashRouter>
