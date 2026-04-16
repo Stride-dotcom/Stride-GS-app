@@ -18,12 +18,13 @@
  * unclear under minified build). The in-memory cache tier short-circuits
  * subsequent consumers to the same reference in practice.
  */
-import { useMemo, useCallback, useState } from 'react';
+import { useMemo, useCallback, useState, useEffect } from 'react';
 import { fetchClients } from '../lib/api';
 import { fetchClientsFromSupabase } from '../lib/supabaseQueries';
 import type { ApiClient, ClientsResponse } from '../lib/api';
 import type { Client } from '../lib/types';
 import { useApiData } from './useApiData';
+import { entityEvents } from '../lib/entityEvents';
 
 export interface UseClientsResult {
   /** Raw API clients (full data from CB) */
@@ -78,6 +79,16 @@ export function useClients(autoFetch = true, includeInactive = false): UseClient
     autoFetch,
     includeInactive ? 'clients_all' : 'clients'
   );
+
+  // Session 69 — subscribe to 'client' entity events so every mounted useClients
+  // instance (every page with a client dropdown) refetches when a client is
+  // created / updated / reactivated. Keeps dropdowns live across the app without
+  // requiring a page refresh.
+  useEffect(() => {
+    return entityEvents.subscribe((type) => {
+      if (type === 'client') refetch();
+    });
+  }, [refetch]);
 
   // Session 69 — optimistic patches keyed by spreadsheetId. Merges into apiClients
   // below. Auto-cleared on next refetch (or explicitly via clearClientPatch).

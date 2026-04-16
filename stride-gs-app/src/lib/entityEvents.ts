@@ -6,7 +6,7 @@
  *   const unsub = entityEvents.subscribe(fn)  // called from hooks / BatchDataContext
  */
 
-type EntityType = 'task' | 'repair' | 'will_call' | 'inventory' | 'shipment' | 'billing';
+type EntityType = 'task' | 'repair' | 'will_call' | 'inventory' | 'shipment' | 'billing' | 'client';
 
 type EntityEventCallback = (entityType: EntityType, entityId: string) => void;
 

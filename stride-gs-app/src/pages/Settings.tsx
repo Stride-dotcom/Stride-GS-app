@@ -5,6 +5,7 @@ import { useReactTable, getCoreRowModel, getSortedRowModel, flexRender, type Sor
 import { getApiUrl, getApiToken, setApiCredentials, isApiConfigured, fetchHealth, postOnboardClient, postUpdateClient, postSyncSettings, postRefreshCaches, postFixMissingFolders, postTestSendClientTemplates, postTestSendClaimEmails, fetchAutoIdSetting, postUpdateAutoIdSetting, postResolveOnboardUser, fetchStaxConfig, postUpdateStaxConfig, apiPost, fetchEmailTemplates, postSyncTemplatesToClients, postBulkSyncToSupabase, postPurgeInactiveFromSupabase, fetchClients, postFinishClientSetup, postSendWelcomeToUsers } from '../lib/api';
 import type { BulkSyncResult } from '../lib/api';
 import type { EmailTemplate } from '../lib/api';
+import { entityEvents } from '../lib/entityEvents';
 import { TemplateEditor } from '../components/shared/TemplateEditor';
 import { ConfirmDialog } from '../components/shared/ConfirmDialog';
 import { useAuth } from '../contexts/AuthContext';
@@ -1398,6 +1399,8 @@ export function Settings() {
         if (res.data?.success) {
           setOnboardResult(res.data);
           refetchClients();
+          // Session 69 — broadcast so every mounted useClients (dropdowns on other pages) refetches.
+          entityEvents.emit('client', data.spreadsheetId || data.clientName || '');
           return {
             ok: true,
             successMessage: `Client "${data.clientName}" onboarded successfully`,
@@ -1467,6 +1470,8 @@ export function Settings() {
         if (res.data?.success) {
           setUpdateResult(res.data);
           refetchClients();
+          // Session 69 — broadcast so every mounted useClients (dropdowns on other pages) refetches.
+          entityEvents.emit('client', data.spreadsheetId);
           return {
             ok: true,
             successMessage: `Client "${data.clientName}" ${data.active ? (apiClients.find(c => c.spreadsheetId === data.spreadsheetId && !c.active) ? 'reactivated' : 'updated') : 'updated'} successfully`,
