@@ -1,5 +1,31 @@
 /* ===================================================
-   StrideAPI.gs — v38.59.1 — 2026-04-16 PST — Hotfix: reactivate client cache invalidation
+   StrideAPI.gs — v38.60.1 — 2026-04-16 PST — handleGetBatch_ field parity with individual-fetch
+   v38.60.1: FIX — client-role users (who load data via getBatch instead of
+             individual getInventory/getTasks/etc.) were missing a LOT of
+             fields the detail panels expect: blank Reference, Item Notes,
+             Task Notes, Carrier, Tracking #, Repair Notes, Repair Result,
+             Final Amount, WC Pickup Phone, WC Notes, Billing Category, Task
+             ID on billing rows, etc. `handleGetBatch_` now emits the full
+             ApiInventoryItem / ApiTask / ApiRepair / ApiWillCall /
+             ApiShipment / ApiBillingRow field set (WC items array is still
+             loaded on-demand by the detail panel). Matching TypeScript
+             BatchInventoryItem / BatchTask / BatchRepair / BatchWillCall /
+             BatchShipment / BatchBillingRow types extended; all 5 hooks
+             updated to pass the new fields through instead of hardcoding
+             empty. Bandwidth impact negligible — small string fields on
+             already-scanned rows.
+   v38.60.0: FIX — Repair Work Order PDF was rendering literal {{SIDEMARK_ROW}},
+             {{DATE}}, {{STATUS}}, {{APPROVED_ROW}}, {{NOTES_ROW}}, {{PHOTOS_ROW}},
+             {{REPAIR_TYPE}}, {{ITEM_QTY}}, {{ITEM_VENDOR}}, {{ITEM_DESC}},
+             {{ITEM_SIDEMARK}}, {{ITEM_ROOM}}, {{RESULT_OPTIONS_HTML}} because
+             both PDF call sites (handleStartRepair_ ~line 9574 and
+             handleRespondToRepairQuote_ ~line 9173) built only the legacy
+             11-token set. Extended both to mirror the full Repairs.gs
+             template dict so every token in DOC_REPAIR_WORK_ORDER resolves.
+             FIX — added defensive doGet case for respondToRepairQuote that
+             returns success-skipped (instead of "Unknown action" error) so
+             any stray GET on a write action doesn't surface a red banner in
+             RepairDetailPanel after an approve/decline click.
    v38.59.1: FIX — handleUpdateClient_ now invalidates `api_active_clients`,
              `clients`, `clients_all`, and `api_client_name_map` caches on
              ANY change to the Active field, not just on deactivation.
@@ -3094,6 +3120,13 @@ function doGet(e) {
       case "qboGetStatus":     return withAdminGuard_(callerEmail, function() { return jsonResponse_(qbo_getStatus_()); });
       case "qboAuthUrl":       return withAdminGuard_(callerEmail, function() { return jsonResponse_({ url: qbo_getAuthUrl_() }); });
       case "qboGetCustomers":  return withAdminGuard_(callerEmail, function() { return jsonResponse_(handleQboGetCustomers_()); });
+
+      // ─── Write-action GET stubs (defensive) ───
+      // Web-app POSTs can 302-redirect to a GET on googleusercontent, and
+      // a stray GET shouldn't surface as a user-facing "Unknown action" toast.
+      // Return success-skipped so the React error branch doesn't fire.
+      case "respondToRepairQuote":
+        return jsonResponse_({ success: true, skipped: true, message: "GET not supported for write action — use POST" });
 
       default:
         return errorResponse_("Unknown action: " + action, "INVALID_ACTION");
@@ -6773,6 +6806,17 @@ function handleGetBatch_(clientSheetId) {
             room: String(ir["Room"] || "").trim(), shipmentNumber: invShipNo,
             receiveDate: formatDate_(ir["Receive Date"]), releaseDate: formatDate_(ir["Release Date"]),
             status: String(ir["Status"] || "Active").trim(),
+            // v38.60.1 — include every field that the individual-fetch path
+            // returns so client-role users (who get inventory via getBatch)
+            // see the same data as staff/admin on the Inventory detail panel.
+            reference:       String(ir["Reference"] || "").trim(),
+            itemNotes:       String(ir["Item Notes"] || "").trim(),
+            taskNotes:       String(ir["Task Notes"] || "").trim(),
+            needsInspection: toBool_(ir["Needs Inspection"]),
+            needsAssembly:   toBool_(ir["Needs Assembly"]),
+            carrier:         String(ir["Carrier"] || "").trim(),
+            trackingNumber:  String(ir["Tracking #"] || "").trim(),
+            invoiceUrl:      String(ir["Invoice URL"] || "").trim(),
             shipmentFolderUrl: shipFolderMap[invShipNo] || ""
           });
         }
@@ -6804,6 +6848,10 @@ function handleGetBatch_(clientSheetId) {
             result: String(tr["Result"] || "").trim(), svcCode: String(tr["Svc Code"] || "").trim(),
             billed: toBool_(tr["Billed"]), assignedTo: String(tr["Assigned To"] || "").trim(),
             startedAt: formatDateTime_(tr["Started At"]), customPrice: toNum_(tr["Custom Price"]) || undefined,
+            // v38.60.1 — parity with ApiTask individual-fetch shape
+            itemNotes:   String(tr["Item Notes"] || "").trim(),
+            taskNotes:   String(tr["Task Notes"] || "").trim(),
+            cancelledAt: formatDateTime_(tr["Cancelled At"]),
             taskFolderUrl: taskFolderMap[tid] || "", shipmentFolderUrl: shipFolderMap[taskShipNo] || ""
           });
         }
@@ -6832,6 +6880,23 @@ function handleGetBatch_(clientSheetId) {
             status: String(rr["Status"] || "").trim(), quoteAmount: toNum_(rr["Quote Amount"]),
             createdDate: formatDate_(rr["Created Date"]), completedDate: formatDate_(rr["Completed Date"]),
             repairVendor: String(rr["Repair Vendor"] || "").trim(), billed: toBool_(rr["Billed"]),
+            // v38.60.1 — parity with ApiRepair individual-fetch shape
+            itemClass:     String(rr["Class"] || "").trim(),
+            location:      String(rr["Location"] || "").trim(),
+            sidemark:      String(rr["Sidemark"] || "").trim(),
+            taskNotes:     String(rr["Task Notes"] || "").trim(),
+            createdBy:     String(rr["Created By"] || "").trim(),
+            quoteSentDate: formatDate_(rr["Quote Sent Date"]),
+            approved:      toBool_(rr["Approved"]),
+            scheduledDate: formatDate_(rr["Scheduled Date"]),
+            startDate:     formatDate_(rr["Start Date"]),
+            partsCost:     toNum_(rr["Parts Cost"]),
+            laborHours:    toNum_(rr["Labor Hours"]),
+            repairResult:  String(rr["Repair Result"] || "").trim(),
+            finalAmount:   toNum_(rr["Final Amount"]),
+            invoiceId:     String(rr["Invoice ID"] || "").trim(),
+            itemNotes:     String(rr["Item Notes"] || "").trim(),
+            repairNotes:   String(rr["Repair Notes"] || "").trim(),
             repairFolderUrl: repairFolderMap[rid] || "", shipmentFolderUrl: "",
             taskFolderUrl: taskFolderMap[repSrcTask] || ""
           });
@@ -6864,6 +6929,15 @@ function handleGetBatch_(clientSheetId) {
             createdDate: formatDate_(wr["Created Date"]),
             itemsCount: Number(wr["Items Count"]) || 0,
             cod: toBool_(wr["COD"]), codAmount: toNum_(wr["COD Amount"]),
+            // v38.60.1 — parity with ApiWillCall individual-fetch shape (items
+            // array intentionally omitted from batch — fetched on-demand by
+            // the WC detail panel via separate endpoint).
+            createdBy:         String(wr["Created By"] || "").trim(),
+            pickupPhone:       String(wr["Pickup Phone"] || "").trim(),
+            requestedBy:       String(wr["Requested By"] || "").trim(),
+            actualPickupDate:  formatDate_(wr["Actual Pickup Date"]),
+            notes:             String(wr["Notes"] || "").trim(),
+            totalWcFee:        toNum_(wr["Total WC Fee"]),
             wcFolderUrl: wcFolderMap[wn] || "", shipmentFolderUrl: ""
           });
         }
@@ -6883,6 +6957,9 @@ function handleGetBatch_(clientSheetId) {
             carrier: String(sr["Carrier"] || "").trim(),
             trackingNumber: String(sr["Tracking #"] || "").trim(),
             notes: String(sr["Shipment Notes"] || "").trim().replace(/^\[IK:[^\]]*\]\s*/, ''),
+            // v38.60.1 — parity with ApiShipment individual-fetch shape
+            photosUrl:  String(sr["Photos URL"] || "").trim(),
+            invoiceUrl: String(sr["Invoice URL"] || "").trim(),
             folderUrl: shipFolderMap[sn] || ""
           });
         }
@@ -6914,7 +6991,17 @@ function handleGetBatch_(clientSheetId) {
             svcName: String(br["Svc Name"] || "").trim(), itemId: bItemId,
             description: String(br["Description"] || "").trim(),
             qty: toNum_(br["Qty"]), rate: toNum_(br["Rate"]), total: btotal,
-            sidemark: bSidemark
+            sidemark: bSidemark,
+            // v38.60.1 — parity with ApiBillingRow individual-fetch shape
+            client:      String(br["Client"] || "").trim(),
+            category:    String(br["Category"] || "").trim(),
+            itemClass:   String(br["Class"] || "").trim(),
+            taskId:      String(br["Task ID"] || "").trim(),
+            repairId:    String(br["Repair ID"] || "").trim(),
+            shipmentNo:  String(br["Shipment #"] || "").trim(),
+            itemNotes:   String(br["Item Notes"] || "").trim(),
+            invoiceDate: formatDate_(br["Invoice Date"]),
+            invoiceUrl:  String(br["Invoice URL"] || "").trim()
           });
         }
       }
@@ -9193,7 +9280,49 @@ function handleRespondToRepairQuote_(clientSheetId, payload) {
           if (parentFolderId) {
             repairFolderUrl = api_createItemFolder_("https://drive.google.com/drive/folders/" + parentFolderId, "REPAIR-" + repairId);
           }
-          var pdfResult = api_generateDocPdf_(ss, "DOC_REPAIR_WORK_ORDER", "Work_Order_" + repairId, repairFolderUrl, emailTokens);
+          // v38.60.0 — extend tokens to match DOC_REPAIR_WORK_ORDER template
+          // (was missing row/item/results tokens — template rendered literal {{…}}).
+          var _rqStatus      = "Approved";
+          var _rqTaskNotes   = getVal("Task Notes");
+          var _rqRepairNotes = getVal("Repair Notes");
+          var _rqAllNotes    = "";
+          if (_rqTaskNotes && _rqRepairNotes) _rqAllNotes = _rqTaskNotes + "\n" + _rqRepairNotes;
+          else _rqAllNotes = _rqTaskNotes || _rqRepairNotes || "";
+          var _rqItemQty    = invItem ? String(invItem.qty || 1) : "1";
+          var _rqItemVendor = invItem ? (invItem.vendor || "") : "";
+          var _rqItemDesc   = invItem ? (invItem.description || "") : (itemDesc || "");
+          var _rqItemRoom   = invItem ? (invItem.room || "") : "";
+          var _rqDateStr    = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "MM/dd/yyyy");
+          var pdfTokens = {
+            "{{ITEM_ID}}":          itemId       || "",
+            "{{CLIENT_NAME}}":      clientName   || "Client",
+            "{{REPAIR_ID}}":        repairId,
+            "{{QUOTE_AMOUNT}}":     quoteAmt     || "0",
+            "{{LOCATION}}":         itemLoc      || "",
+            "{{SIDEMARK}}":         itemSidemark || "",
+            "{{DESCRIPTION}}":      itemDesc     || "",
+            "{{ITEM_TABLE_HTML}}":  emailTokens["{{ITEM_TABLE_HTML}}"],
+            "{{LOGO_URL}}":         emailTokens["{{LOGO_URL}}"],
+            "{{REPAIR_VENDOR}}":    emailTokens["{{REPAIR_VENDOR}}"],
+            "{{NOTES}}":            emailTokens["{{NOTES}}"],
+            "{{DATE}}":             _rqDateStr,
+            "{{STATUS}}":           api_esc_(_rqStatus),
+            "{{REPAIR_TYPE}}":      api_esc_(itemDesc || ""),
+            "{{SIDEMARK_ROW}}":     itemSidemark ? '<tr><td style="font-size:10px;color:#64748B;padding:2px 0;font-weight:700;">SIDEMARK</td><td style="font-size:12px;">' + api_esc_(itemSidemark) + '</td></tr>' : '',
+            "{{APPROVED_ROW}}":     '<tr><td style="font-size:10px;color:#64748B;padding:2px 0;font-weight:700;">Approved</td><td style="font-size:12px;">Yes</td></tr>',
+            "{{NOTES_ROW}}":        _rqAllNotes ? '<tr><td style="font-size:10px;color:#64748B;padding:2px 0;font-weight:700;">Notes</td><td style="font-size:12px;">' + api_esc_(_rqAllNotes) + '</td></tr>' : '',
+            "{{PHOTOS_ROW}}":       repairFolderUrl ? '<tr><td style="font-size:10px;color:#64748B;padding:2px 0;font-weight:700;">Photos</td><td style="font-size:12px;"><a href="' + api_esc_(repairFolderUrl) + '" style="color:#E85D2D;text-decoration:underline;">View Photos</a></td></tr>' : '',
+            "{{ITEM_QTY}}":         api_esc_(_rqItemQty),
+            "{{ITEM_VENDOR}}":      api_esc_(_rqItemVendor),
+            "{{ITEM_DESC}}":        api_esc_(_rqItemDesc),
+            "{{ITEM_SIDEMARK}}":    api_esc_(itemSidemark || ""),
+            "{{ITEM_ROOM}}":        api_esc_(_rqItemRoom),
+            "{{RESULT_OPTIONS_HTML}}": '<span style="display:inline-block;margin-right:16px;font-size:11px;"><span style="display:inline-block;width:14px;height:14px;border:1.5px solid #94A3B8;border-radius:3px;vertical-align:middle;margin-right:4px;"></span> Complete</span>' +
+              '<span style="display:inline-block;margin-right:16px;font-size:11px;"><span style="display:inline-block;width:14px;height:14px;border:1.5px solid #94A3B8;border-radius:3px;vertical-align:middle;margin-right:4px;"></span> Partial</span>' +
+              '<span style="display:inline-block;margin-right:16px;font-size:11px;"><span style="display:inline-block;width:14px;height:14px;border:1.5px solid #94A3B8;border-radius:3px;vertical-align:middle;margin-right:4px;"></span> Unable to Repair</span>' +
+              '<span style="display:inline-block;font-size:11px;"><span style="display:inline-block;width:14px;height:14px;border:1.5px solid #94A3B8;border-radius:3px;vertical-align:middle;margin-right:4px;"></span> Other</span>'
+          };
+          var pdfResult = api_generateDocPdf_(ss, "DOC_REPAIR_WORK_ORDER", "Work_Order_" + repairId, repairFolderUrl, pdfTokens);
           if (pdfResult.blob) pdfBlob = pdfResult.blob;
           if (pdfResult.warning) warnings.push(pdfResult.warning);
         } catch (pdfErr) {
@@ -9571,6 +9700,26 @@ function handleStartRepair_(clientSheetId, payload) {
         invItem ? invItem.qty : 1,
         invItem ? invItem.room : ""
       );
+      // v38.60.0 — full token set to match DOC_REPAIR_WORK_ORDER template
+      // (was missing {{DATE}}, {{STATUS}}, {{SIDEMARK_ROW}}, {{APPROVED_ROW}},
+      // {{NOTES_ROW}}, {{PHOTOS_ROW}}, {{REPAIR_TYPE}}, {{ITEM_QTY}},
+      // {{ITEM_VENDOR}}, {{ITEM_DESC}}, {{ITEM_SIDEMARK}}, {{ITEM_ROOM}},
+      // {{RESULT_OPTIONS_HTML}} — PDF was rendering raw {{…}} literals).
+      var _repStatusStart = repMap["Status"] ? String(rowData[repMap["Status"] - 1] || "") : "In Progress";
+      var _repApprovedRaw = repMap["Approved"] ? rowData[repMap["Approved"] - 1] : "";
+      var _repApprovedStr = "";
+      if (_repApprovedRaw !== undefined && _repApprovedRaw !== null && _repApprovedRaw !== "") {
+        _repApprovedStr = (_repApprovedRaw === true || String(_repApprovedRaw).toUpperCase() === "TRUE" || _repApprovedRaw === "Yes") ? "Yes" : (_repApprovedRaw === "Declined" ? "Declined" : "No");
+      }
+      var _repTaskNotes = repMap["Task Notes"] ? String(rowData[repMap["Task Notes"] - 1] || "") : "";
+      var _repAllNotes = "";
+      if (_repTaskNotes && repNotes) _repAllNotes = _repTaskNotes + "\n" + repNotes;
+      else _repAllNotes = _repTaskNotes || repNotes || "";
+      var _repItemQty    = invItem ? String(invItem.qty || 1) : "1";
+      var _repItemVendor = invItem ? (invItem.vendor || "") : "";
+      var _repItemDesc   = invItem ? (invItem.description || "") : (itemDesc || "");
+      var _repItemRoom   = invItem ? (invItem.room || "") : "";
+      var _repDateStr    = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "MM/dd/yyyy");
       var pdfTokens = {
         "{{ITEM_ID}}":          repItemId,
         "{{CLIENT_NAME}}":      clientName || "Client",
@@ -9582,7 +9731,23 @@ function handleStartRepair_(clientSheetId, payload) {
         "{{ITEM_TABLE_HTML}}":  itemTableHtml,
         "{{LOGO_URL}}":         String(settings["LOGO_URL"] || "").trim() || "https://static.wixstatic.com/media/a38fbc_a8c7a368447f4723b782c4dbd765ca0e~mv2.png",
         "{{REPAIR_VENDOR}}":    repVendor,
-        "{{NOTES}}":            repNotes
+        "{{NOTES}}":            repNotes,
+        "{{DATE}}":             _repDateStr,
+        "{{STATUS}}":           api_esc_(_repStatusStart),
+        "{{REPAIR_TYPE}}":      api_esc_(itemDesc),
+        "{{SIDEMARK_ROW}}":     itemSidemark ? '<tr><td style="font-size:10px;color:#64748B;padding:2px 0;font-weight:700;">SIDEMARK</td><td style="font-size:12px;">' + api_esc_(itemSidemark) + '</td></tr>' : '',
+        "{{APPROVED_ROW}}":     _repApprovedStr ? '<tr><td style="font-size:10px;color:#64748B;padding:2px 0;font-weight:700;">Approved</td><td style="font-size:12px;">' + api_esc_(_repApprovedStr) + '</td></tr>' : '',
+        "{{NOTES_ROW}}":        _repAllNotes ? '<tr><td style="font-size:10px;color:#64748B;padding:2px 0;font-weight:700;">Notes</td><td style="font-size:12px;">' + api_esc_(_repAllNotes) + '</td></tr>' : '',
+        "{{PHOTOS_ROW}}":       repairFolderUrl ? '<tr><td style="font-size:10px;color:#64748B;padding:2px 0;font-weight:700;">Photos</td><td style="font-size:12px;"><a href="' + api_esc_(repairFolderUrl) + '" style="color:#E85D2D;text-decoration:underline;">View Photos</a></td></tr>' : '',
+        "{{ITEM_QTY}}":         api_esc_(_repItemQty),
+        "{{ITEM_VENDOR}}":      api_esc_(_repItemVendor),
+        "{{ITEM_DESC}}":        api_esc_(_repItemDesc),
+        "{{ITEM_SIDEMARK}}":    api_esc_(itemSidemark),
+        "{{ITEM_ROOM}}":        api_esc_(_repItemRoom),
+        "{{RESULT_OPTIONS_HTML}}": '<span style="display:inline-block;margin-right:16px;font-size:11px;"><span style="display:inline-block;width:14px;height:14px;border:1.5px solid #94A3B8;border-radius:3px;vertical-align:middle;margin-right:4px;"></span> Complete</span>' +
+          '<span style="display:inline-block;margin-right:16px;font-size:11px;"><span style="display:inline-block;width:14px;height:14px;border:1.5px solid #94A3B8;border-radius:3px;vertical-align:middle;margin-right:4px;"></span> Partial</span>' +
+          '<span style="display:inline-block;margin-right:16px;font-size:11px;"><span style="display:inline-block;width:14px;height:14px;border:1.5px solid #94A3B8;border-radius:3px;vertical-align:middle;margin-right:4px;"></span> Unable to Repair</span>' +
+          '<span style="display:inline-block;font-size:11px;"><span style="display:inline-block;width:14px;height:14px;border:1.5px solid #94A3B8;border-radius:3px;vertical-align:middle;margin-right:4px;"></span> Other</span>'
       };
       // Remove any stale Work Order PDF from this folder so the fresh one is
       // unambiguous (Start Repair can be retried; we always want the latest).

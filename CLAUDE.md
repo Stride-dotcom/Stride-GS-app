@@ -476,13 +476,14 @@ These are the top decisions that affect code generation on every task. For the f
 
 ## Current Versions
 
-- **StrideAPI.gs:** v38.59.0 (Web App v276) — session 69: Payments Supabase mirror (5 new caches — stax_invoices, stax_charges, stax_exceptions, stax_customers, stax_run_log) + write-through in 7 Stax mutation handlers + `seedAllStaxToSupabase()` seed function (**run once manually from the Apps Script editor after deploy**)
+- **StrideAPI.gs:** v38.60.0 (Web App v279) — session 70: Repair Work Order PDF full-token fix + defensive `doGet` stub for `respondToRepairQuote` (suppresses spurious "Unknown action" banner in RepairDetailPanel while POST path continues unchanged)
 - **StaxAutoPay.gs:** v4.6.0 — session 69 Phase 2f: Supabase write-through at end of `_prepareEligiblePendingInvoicesForChargeRun` (invoices + run log) and `_executeChargeRun` (invoices + charge log + exceptions + run log). **Requires SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY Script Properties on the Stax Auto Pay project** — see open items.
-- **Import.gs (client):** v4.3.0 — adds Reference column mapping (rolled out to all 47 active clients, session 64)
-- **Emails.gs (client):** v4.2.0 (rolled out to all 47 active clients)
+- **Triggers.gs (client):** v4.7.1 — session 70: VIEW INSPECTION PHOTOS button in REPAIR_QUOTE email now opens the Source Task folder (looks up task row in Tasks sheet and reads Task ID cell's hyperlink, set by `startTask_` to the task's Drive folder). Previously fell back to the Item folder because Source Task ID stores plain text, not a hyperlink.
+- **Import.gs (client):** v4.3.0 — adds Reference column mapping (rolled out to all 49 active clients, session 70)
+- **Emails.gs (client):** v4.2.0 (rolled out to all 49 active clients)
 - **WillCalls.gs (client):** v4.3.0 — Item ID / Vendor / Description / Reference columns on completed-WC email
 - **RemoteAdmin.gs (client):** v1.5.1 — adds `get_script_id` action; writes own scriptId to CB Clients SCRIPT ID column
-- **Code.gs (client):** v4.6.0 (rolled out to all 47 active clients)
+- **Code.gs (client):** v4.6.0 (rolled out to all 49 active clients)
 - **StaxAutoPay.gs:** v4.5.0
 - See `Docs/Stride_GS_App_Build_Status.md` for the full per-script version matrix and session history.
 

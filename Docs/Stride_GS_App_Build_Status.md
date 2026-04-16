@@ -1,14 +1,14 @@
 # Stride GS App — Build Status & Continuation Guide
 
-**Last updated:** 2026-04-16 (session 69 — Optimistic bulk updates + Payments Supabase mirror + Scanner/Labels native React rebuild + locations Supabase mirror + cross-tenant batch move + auth cache-wipe fix)
-**StrideAPI.gs:** v38.59.0 (Web App v276)
-**Import.gs (client):** v4.3.0 (rolled out to all 47 active clients; Reference column now imported)
-**Emails.gs (client):** v4.3.0 (rolled out to all 47 active clients — email deep links CTA button)
-**Shipments.gs (client):** v4.2.1 (rolled out to all 47 active clients — SHIPMENT_RECEIVED uses standalone /#/shipments/:shipmentNo)
-**WillCalls.gs (client):** v4.4.0 (rolled out to all 47 active clients — WC deep links)
-**Triggers.gs (client):** v4.5.0 (rolled out to all 47 active clients — repair/inspection deep links)
+**Last updated:** 2026-04-16 (session 70 — Three repair fixes: Work Order PDF tokens, respondToRepairQuote GET stub, VIEW INSPECTION PHOTOS source-task folder lookup)
+**StrideAPI.gs:** v38.60.0 (Web App v279)
+**Import.gs (client):** v4.3.0 (rolled out to all 49 active clients; Reference column now imported)
+**Emails.gs (client):** v4.3.0 (rolled out to all 49 active clients — email deep links CTA button)
+**Shipments.gs (client):** v4.2.1 (rolled out to all 49 active clients — SHIPMENT_RECEIVED uses standalone /#/shipments/:shipmentNo)
+**WillCalls.gs (client):** v4.4.0 (rolled out to all 49 active clients — WC deep links)
+**Triggers.gs (client):** v4.7.1 (rolled out to all 49 active clients — VIEW INSPECTION PHOTOS button now opens Source Task folder)
 **RemoteAdmin.gs (client):** v1.5.1 (new `get_script_id` action writes scriptId to CB on self-report)
-**Code.gs (client):** v4.6.0 (rolled out to all 47 active clients)
+**Code.gs (client):** v4.6.0 (rolled out to all 49 active clients)
 **StaxAutoPay.gs:** v4.5.0 (pushed to Stax Auto Pay bound script)
 **Purpose:** Single living progress document. Updated every session.
 
@@ -75,7 +75,45 @@ Login, Dashboard, Inventory, Receiving, Shipments, Tasks, Repairs, Will Calls, B
 
 ---
 
-## RECENT CHANGES (2026-04-16 session 69)
+## RECENT CHANGES (2026-04-16 session 70)
+
+### Session 70: Three repair fixes
+
+1. **Repair Work Order PDF tokens** (StrideAPI.gs v38.60.0). Both PDF call sites
+   — `handleStartRepair_` (~line 9635) and the Approve branch of
+   `handleRespondToRepairQuote_` (~line 9190) — were building only the legacy
+   11-token dict. The `DOC_REPAIR_WORK_ORDER` template had been updated to
+   expect the richer 24-token set (matching Repairs.gs `generateRepairWorkOrderPdf_`
+   at line 100-122), so the PDF rendered literal `{{SIDEMARK_ROW}}`, `{{DATE}}`,
+   `{{STATUS}}`, `{{APPROVED_ROW}}`, `{{NOTES_ROW}}`, `{{PHOTOS_ROW}}`,
+   `{{REPAIR_TYPE}}`, `{{ITEM_QTY}}`, `{{ITEM_VENDOR}}`, `{{ITEM_DESC}}`,
+   `{{ITEM_SIDEMARK}}`, `{{ITEM_ROOM}}`, `{{RESULT_OPTIONS_HTML}}`. Extended
+   both sites to emit the full set, using `api_esc_` for text tokens and
+   conditional HTML row snippets matching the Repairs.gs pattern.
+
+2. **"Unknown action: respondToRepairQuote" banner** (StrideAPI.gs v38.60.0).
+   Added a defensive `doGet` stub (~line 3101) for `respondToRepairQuote` that
+   returns `{success: true, skipped: true, message: "GET not supported..."}`
+   instead of the generic `errorResponse_("Unknown action: " + action)`.
+   React's `RepairDetailPanel.handleRespond` treats any response with
+   `!resp.data?.success` as an error and surfaces the backend error string in
+   the red banner at line 305-313 — returning success-skipped keeps the banner
+   quiet on stray GETs while the POST path in `doPost` (line 3225) continues
+   to do the real work of writing the sheet and sending the email.
+
+3. **VIEW INSPECTION PHOTOS button opens Source Task folder** (Triggers.gs v4.7.1).
+   `processRepairQuoteById_` was falling back to the Item folder for the
+   `{{PHOTOS_BUTTON}}` URL because the Source Task ID column stores plain text,
+   not a hyperlink. Added a fourth tier that looks up the Source Task row in
+   the Tasks sheet (via `SH_headerMap_` + `SH_findRowById_`) and reads the
+   Task ID cell's hyperlink (set by `startTask_` to the task's Drive folder).
+   The email's VIEW INSPECTION PHOTOS button now opens the inspection task
+   folder where damage photos actually live.
+
+**Deployed:** StrideAPI.gs pushed + deployed as Web App v279. Triggers.gs
+rolled out to 49 clients + Web App deployments refreshed on all 48 active
+clients. `Roche Bobois - PDX` missing scriptId (needs manual onboarding, same
+as session 69).
 
 ### Session 69: Optimistic bulk updates + Payments Supabase mirror
 

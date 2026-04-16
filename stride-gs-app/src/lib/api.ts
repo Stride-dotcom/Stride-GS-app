@@ -2818,6 +2818,15 @@ export interface BatchInventoryItem {
   receiveDate: string;
   releaseDate: string;
   status: string;
+  /** v38.60.1 — full parity with ApiInventoryItem for client-role batch reads */
+  reference?: string;
+  itemNotes?: string;
+  taskNotes?: string;
+  needsInspection?: boolean;
+  needsAssembly?: boolean;
+  carrier?: string;
+  trackingNumber?: string;
+  invoiceUrl?: string;
   shipmentFolderUrl?: string;
 }
 
@@ -2841,6 +2850,10 @@ export interface BatchTask {
   assignedTo: string;
   startedAt: string;
   customPrice?: number;
+  /** v38.60.1 — full parity with ApiTask for client-role batch reads */
+  itemNotes?: string;
+  taskNotes?: string;
+  cancelledAt?: string;
   taskFolderUrl?: string;
   shipmentFolderUrl?: string;
 }
@@ -2859,6 +2872,23 @@ export interface BatchRepair {
   completedDate: string;
   repairVendor: string;
   billed: boolean;
+  /** v38.60.1 — full parity with ApiRepair for client-role batch reads */
+  itemClass?: string;
+  location?: string;
+  sidemark?: string;
+  taskNotes?: string;
+  createdBy?: string;
+  quoteSentDate?: string;
+  approved?: boolean;
+  scheduledDate?: string;
+  startDate?: string;
+  partsCost?: number | null;
+  laborHours?: number | null;
+  repairResult?: string;
+  finalAmount?: number | null;
+  invoiceId?: string;
+  itemNotes?: string;
+  repairNotes?: string;
   repairFolderUrl?: string;
   shipmentFolderUrl?: string;
   taskFolderUrl?: string;
@@ -2875,7 +2905,16 @@ export interface BatchWillCall {
   itemsCount: number;
   cod: boolean;
   codAmount: number | null;
+  /** v38.60.1 — full parity with ApiWillCall for client-role batch reads
+   * (items array intentionally excluded — fetched on-demand by WC detail panel). */
+  createdBy?: string;
+  pickupPhone?: string;
+  requestedBy?: string;
+  actualPickupDate?: string;
+  notes?: string;
+  totalWcFee?: number | null;
   wcFolderUrl?: string;
+  shipmentFolderUrl?: string;
 }
 
 /** Lightweight shipment from batch response */
@@ -2887,6 +2926,9 @@ export interface BatchShipment {
   carrier: string;
   trackingNumber: string;
   notes: string;
+  /** v38.60.1 — full parity with ApiShipment for client-role batch reads */
+  photosUrl?: string;
+  invoiceUrl?: string;
   folderUrl?: string;
 }
 
@@ -2905,6 +2947,16 @@ export interface BatchBillingRow {
   rate: number | null;
   total: number | null;
   sidemark?: string;
+  /** v38.60.1 — full parity with ApiBillingRow for client-role batch reads */
+  client?: string;
+  category?: string;
+  itemClass?: string;
+  taskId?: string;
+  repairId?: string;
+  shipmentNo?: string;
+  itemNotes?: string;
+  invoiceDate?: string;
+  invoiceUrl?: string;
 }
 
 export interface BatchBillingSummary {

@@ -107,9 +107,10 @@ export function useShipments(autoFetch = true, filterClientSheetId?: string | st
         itemCount: b.itemCount,
         carrier: b.carrier,
         trackingNumber: b.trackingNumber,
-        photosUrl: '',
+        // v38.60.1 — batch now includes full ApiShipment field set
+        photosUrl: b.photosUrl || '',
         notes: b.notes,
-        invoiceUrl: '',
+        invoiceUrl: b.invoiceUrl || '',
         folderUrl: b.folderUrl || '',
       } as ApiShipment));
     }

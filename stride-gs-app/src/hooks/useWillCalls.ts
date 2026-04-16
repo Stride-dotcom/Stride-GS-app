@@ -169,20 +169,22 @@ export function useWillCalls(autoFetch = true, filterClientSheetId?: string | st
         clientSheetId: b.clientSheetId,
         status: b.status,
         createdDate: b.createdDate,
-        createdBy: '',
+        // v38.60.1 — batch now includes full ApiWillCall field set (items still
+        // omitted — loaded on detail panel open via separate endpoint)
+        createdBy: b.createdBy || '',
         pickupParty: b.pickupParty,
-        pickupPhone: '',
-        requestedBy: '',
+        pickupPhone: b.pickupPhone || '',
+        requestedBy: b.requestedBy || '',
         estimatedPickupDate: b.estimatedPickupDate,
-        actualPickupDate: '',
-        notes: '',
+        actualPickupDate: b.actualPickupDate || '',
+        notes: b.notes || '',
         cod: b.cod,
         codAmount: b.codAmount,
         itemsCount: b.itemsCount,
-        totalWcFee: null,
-        items: [], // Items loaded on detail panel open
+        totalWcFee: b.totalWcFee ?? null,
+        items: [],
         wcFolderUrl: b.wcFolderUrl || undefined,
-        shipmentFolderUrl: (b as any).shipmentFolderUrl || undefined,
+        shipmentFolderUrl: b.shipmentFolderUrl || undefined,
       } as ApiWillCall));
     }
     // Individual path: resolve "(single)" clientName using the clients list
