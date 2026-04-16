@@ -1,6 +1,6 @@
 # Stride GS App — Build Status & Continuation Guide
 
-**Last updated:** 2026-04-16 (session 69 — Optimistic bulk updates + Payments Supabase mirror)
+**Last updated:** 2026-04-16 (session 69 — Optimistic bulk updates + Payments Supabase mirror + Scanner/Labels native React rebuild + locations Supabase mirror + cross-tenant batch move + auth cache-wipe fix)
 **StrideAPI.gs:** v38.59.0 (Web App v276)
 **Import.gs (client):** v4.3.0 (rolled out to all 47 active clients; Reference column now imported)
 **Emails.gs (client):** v4.3.0 (rolled out to all 47 active clients — email deep links CTA button)
@@ -44,12 +44,12 @@
 ### Backend (Google Sheets + Apps Script)
 - **System reference:** `CLAUDE.md` (read first)
 - **Client inventory (modular):** `AppScripts/stride-client-inventory/src/` — 13 `.gs` files, `npm run rollout`
-- **API:** `AppScripts/stride-api/StrideAPI.gs` — standalone project, v38.52.1 (Web App v263)
-- **Stax Auto Pay:** `AppScripts/stax-auto-pay/StaxAutoPay.gs` — v4.5.0, bound to Stax spreadsheet
-- **Supabase cache:** 6 mirror tables + `gs_sync_events` failure tracking + **`item_id_ledger`** (authoritative cross-tenant Item ID registry, session 63)
+- **API:** `AppScripts/stride-api/StrideAPI.gs` — standalone project, v38.59.0 (Web App v276)
+- **Stax Auto Pay:** `AppScripts/stax-auto-pay/StaxAutoPay.gs` — v4.6.0, bound to Stax spreadsheet
+- **Supabase cache:** **11 mirror tables** (inventory, tasks, repairs, will_calls, shipments, billing, clients, claims, cb_users, locations, marketing_contacts/campaigns/templates/settings, stax_invoices/charges/exceptions/customers/run_log) + `gs_sync_events` failure tracking + **`item_id_ledger`** (authoritative cross-tenant Item ID registry, session 63) + **`move_history`** (central audit for React scanner moves, session 69 Phase 3) + **`delivery_availability`** + **`dt_*`** tables
 
 ### 14 Pages Built
-Login, Dashboard, Inventory, Receiving, Shipments, Tasks, Repairs, Will Calls, Billing, Payments/Stax, Claims, Settings, **Marketing** (admin-only), **Orders** (admin-only, DT integration). QR Scanner + Labels (iframe pages). All wired to live API — all mock data removed.
+Login, Dashboard, Inventory, Receiving, Shipments, Tasks, Repairs, Will Calls, Billing, Payments/Stax, Claims, Settings, **Marketing** (admin-only), **Orders** (admin-only, DT integration). **Scanner + Labels** (native React, Supabase-backed — session 69 Phase 3, no longer GAS iframes). All wired to live API — all mock data removed.
 
 ### Key Components
 - Universal Search (⌘K)
@@ -162,6 +162,124 @@ React:
   `20260416120001_stax_charges_exceptions_customers_runlog_cache`.
 - Supabase row counts: stax_invoices=0, stax_charges=0, stax_exceptions=0,
   stax_customers=0, stax_run_log=0 (pending first `seedAllStaxToSupabase()` run).
+
+**Phase 3 — Scanner + Labels native React rebuild (eliminate GAS iframes).**
+
+Both `/scanner` and `/labels` were last-mile pages that loaded a GAS HTML web app
+via `<iframe>` — slow (CB sheet reads with 10-min CacheService TTL on the
+locations dropdown), no native mobile UX, and the scanner had to rebuild a
+cross-tenant item-id index by reading every client's Inventory sheet (47+ sheets)
+before each move (20-60s for a typical batch). Both pages are now full React.
+
+**Supabase migrations (applied via MCP):**
+- `20260415200000_locations_and_move_history.sql`:
+  - `public.locations` mirror of CB Locations sheet — Realtime-enabled, RLS:
+    everyone reads / admin+staff write. New locations propagate instantly to
+    every dropdown via Realtime sub.
+  - `public.move_history` central audit table for React scanner moves —
+    `tenant_id, item_id, from_location, to_location, moved_by, moved_at,
+    source ('react_scanner'), notes`. Indexes on item_id, moved_at DESC,
+    to_location.
+
+**StrideAPI.gs v38.56.0 (rolled into v38.59.0):**
+- New helpers: `sbLocationRow_`, `resyncLocationToSupabase_`,
+  `deleteLocationFromSupabase_`. Best-effort write-through (per invariant #20).
+- New endpoints (staff-guarded): `createLocation`, `updateLocation`
+  (rename + activate/deactivate; soft-delete by `active=false`),
+  `deleteLocation`, `bulkSyncLocationsToSupabase` (admin one-shot backfill).
+- New endpoint: `batchUpdateItemLocations` — cross-tenant batch move.
+  Resolves `item_id → tenant_id` via single Supabase query against
+  `item_id_ledger` (~50 ms vs 20-60 s sheet-scan), groups by tenant,
+  writes per-tenant Inventory + Move History tab + appends audit line to
+  Item Notes column, mirrors each item to Supabase inventory, batch-inserts
+  central `public.move_history` rows. URL-length safe via 200-id chunks.
+  Result includes `updated[]`, `notFound[]`, `errors[]` + counts.
+
+**React (`stride-gs-app/`):**
+- `src/lib/scanAudioFeedback.ts` — WebAudio oscillator beeps (success: 880Hz
+  120ms; error: two lower beeps). Opt-out via `localStorage` key. Handles
+  iOS suspended-context gotcha. `hapticScan()` via `navigator.vibrate(20)`.
+- `src/lib/parseScanPayload.ts` — normalizes scan payloads: `ITEM:<id>` /
+  `LOC:<code>` prefixes, JSON Stride labels, deep-link URLs, raw codes.
+  Returns `{ type: 'item' | 'location' | 'unknown', code, raw, source }`.
+- `src/components/scanner/QRScanner.tsx` — camera component ported from
+  the production WMS app. Dual-path:
+  - **Primary**: native `BarcodeDetector` API (Chrome/Edge desktop+Android,
+    iOS 16.4+). Fast, low CPU, supports QR + 9 barcode formats.
+  - **Fallback**: `html5-qrcode` (npm) for older browsers / iOS < 16.4.
+  - UI: video viewfinder with 4 glowing orange corner brackets, animated
+    scan line, "SENSOR ACTIVE" chip, tap-to-start overlay, denied/error
+    states with retry, embedded-iframe-blocked detection with "open in new
+    tab" action. 400 ms repeat dedupe.
+- `src/lib/supabaseQueries.ts` — `fetchLocationsFromSupabase()` (50 ms;
+  used by `useLocations` Supabase-first) and `fetchItemsByIdsFromSupabase()`
+  (batch resolves item IDs → inventory rows with client-name enrichment, for
+  Scanner queue verification + Labels print preview).
+- `src/hooks/useLocations.ts` — Supabase-first with GAS fallback + Realtime
+  subscription. New / updated / deleted locations refresh every dropdown
+  instantly across all logged-in users.
+- `src/lib/api.ts` — wrappers: `postCreateLocation`, `postUpdateLocation`,
+  `postDeleteLocation`, `postBatchUpdateItemLocations`.
+- `src/pages/Scanner.tsx` — full rewrite. Two cards on desktop: camera
+  scanner + textarea (handheld scanner / paste). Camera scans dispatch by
+  type — `LOC:` auto-populates Destination Location, items auto-add to
+  queue with success beep + green hint. Each queued item shows Client /
+  Vendor / Sidemark / Description / Current Location resolved from
+  Supabase (~50 ms) for verify-before-commit. Inline `+ New Location`
+  modal creates location in CB + Supabase one click. Single Move button
+  fires `batchUpdateItemLocations`. Mobile sticky bottom bar shows queue
+  counts + target location + Move button so it's always reachable.
+- `src/pages/Labels.tsx` — full rewrite with `qrcode` npm library for
+  client-side QR rendering (no external API). Two modes (Item / Location)
+  with prominent always-visible top tabs. Per-mode field configuration
+  (toggle + font size + drag-to-reorder), 4 label sizes (4×6 / 4×2 /
+  3×2 / 2×1), QR show/hide + size slider, border toggle, save/reset
+  template (localStorage). Print via browser dialog with tight `@media
+  print` rules (kills app chrome). Mobile: input-first layout, Settings
+  collapsed by default, sticky bottom Print bar with live label count.
+
+**Mobile responsiveness (both Scanner and Labels):**
+- Both pages now use `useIsMobile` + `makeStyles(isMobile)` factories.
+- Scanner queue rows stack vertically on mobile with item ID + client name
+  + vendor/sidemark/description as separate lines (instead of 6-col grid).
+- Larger tap targets (≥38px), `fontSize: 16` on inputs to suppress iOS
+  zoom-on-focus, sticky bottom action bars on both pages.
+- Labels: textarea no longer auto-focuses on mobile (was popping the
+  keyboard and hiding the tabs/preview).
+
+**Auth cache-wipe fix (today, follow-up to slowness report):**
+- `AuthContext.handleSession` was calling `cacheClearAll()` on every
+  successful sign-in, including every page refresh for an already-logged-in
+  user. Original session-60 fix to prevent cross-user data leakage on
+  shared browsers. Side-effect: after every refresh, all 15+ data hooks
+  (clients, inventory, tasks, repairs, will calls, shipments, billing,
+  locations, pricing, claims, users, marketing contacts/campaigns/templates/
+  settings) refetched from scratch — felt slow especially when GAS was cold.
+- Now: cache wipe only fires when `session.user.email !== prevCachedEmail`
+  (different user signing in OR cache empty). Same-user refresh keeps the
+  cache intact → instant nav. Security guarantee preserved.
+
+**One-time manual steps after this deploy:**
+- Run `bulkSyncLocationsToSupabase` once from DevTools console to populate
+  the new mirror table (otherwise dropdown falls back to GAS — still works,
+  just slower):
+  ```js
+  fetch('https://script.google.com/macros/s/AKfycbz7v3wu3bXAR3mXSako_DcSDzcT9WZZ0wvcX06OeGmxd-gT1P1w-nSTNx0aF3Z2KNbq/exec?token=stride-prod-2026&action=bulkSyncLocationsToSupabase&callerEmail=justin@stridelogistics.com', {
+    method: 'POST', redirect: 'follow',
+    headers: { 'Content-Type': 'text/plain' }, body: '{}'
+  }).then(r => r.json()).then(console.log)
+  ```
+  Returns `{ success: true, synced: <N> }`.
+
+**Live artifacts after Phase 3:**
+- React bundle on `origin/main`: `index-BRhAqluY.js` (1940 modules, 1.69 MB
+  — html5-qrcode + qrcode added ~400 KB)
+- Source commits on `origin/source`: `1a30c9f` (scanner port), `f437373`
+  (labels mobile fix), `4921cb9` (auth cache-wipe fix)
+- npm dependencies added: `html5-qrcode`, `qrcode` + `@types/qrcode`
+- Deprecated path: `AppScripts/QR Scanner/` GAS web app no longer used by
+  the React `/scanner` and `/labels` routes (the standalone GAS HTML web
+  apps still exist for direct-URL access, no harm in keeping them)
 
 **Build guardrails held:** 1940 modules, 1.69 MB bundle, all sanity checks passed.
 

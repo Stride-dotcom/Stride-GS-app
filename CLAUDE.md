@@ -292,7 +292,7 @@ Task Board (1)  →  cross-client task dashboard (decommissioning)
 
 StrideAPI.gs (standalone)  →  Web App doPost endpoint backing the React app
 React app (mystridehub.com)  →  GitHub Pages, reads StrideAPI + Supabase cache
-Supabase  →  read cache mirror of 6 entity types + failure tracking
+Supabase  →  read cache mirror of 11 entity types (inventory, tasks, repairs, will_calls, shipments, billing, clients, claims, cb_users, locations, marketing_*) + item_id_ledger + move_history + delivery_availability + dt_orders + gs_sync_events
 ```
 
 ---
@@ -528,8 +528,8 @@ Client inventory scripts are NOT edited via direct URLs — use `npm run rollout
 - [ ] **Generate Work Order button** — Manual PDF generation from TaskDetailPanel. Backend handler exists, needs React wiring + router case.
 - [ ] **Seed Stax Supabase caches (one-time)** — Open Stride API in Apps Script editor → run `seedAllStaxToSupabase()` once. Populates `stax_invoices`, `stax_charges`, `stax_exceptions`, `stax_customers`, `stax_run_log` from the Stax spreadsheet. Until this runs, Payments page falls back to GAS on first load.
 - [ ] **Set Supabase Script Properties on Stax Auto Pay project** — StaxAutoPay.gs v4.6.0 (session 69 Phase 2f) added Supabase write-through but the Stax Auto Pay Apps Script project is separate from Stride API, so it needs its own `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY` Script Properties. Open `https://script.google.com/u/0/home/projects/1n_AkHhTB1ijUxLdfH8qCcYitHHBD30gCz2FKB1-q33wkJrXLiCpVqmt4/edit` → ⚙️ Project Settings → Script Properties → add both (same values as Stride API project). Until set, the write-through is a silent no-op (by design) and Supabase will trail the autopay runs.
-- [ ] **Scanner Supabase Direct Lookup** — Replace CacheService index with direct Supabase query (~50ms vs 3-30s). See `Docs/Archive/QR_Scanner_Next_Phase.md` Feature A
-- [ ] **Auto-Print Labels from Receiving** — Toggle on Receiving page for inline label printing. See `Docs/Archive/QR_Scanner_Next_Phase.md` Feature B
+- [x] ~~Scanner Supabase Direct Lookup~~ — **DONE session 68/69**. Native React `/scanner` and `/labels` pages now use Supabase `item_id_ledger` for cross-tenant item resolution (~50ms) and Supabase `locations` mirror for the dropdown. New endpoint `batchUpdateItemLocations` writes per-tenant + central `move_history` audit. The old GAS iframe Scanner/Labels HTML web apps are no longer the React `/scanner` and `/labels` routes (they still exist for direct-URL access).
+- [ ] **Auto-Print Labels from Receiving** — Toggle on Receiving page for inline label printing. See `Docs/Archive/QR_Scanner_Next_Phase.md` Feature B (still applies; Labels page is now native React so wiring is straightforward)
 - [ ] **Parent Transfer Access** — Allow parent users to transfer items between their own children only (currently staff-only)
 - [ ] **Global search expansion** — Add shipments, billing, claims entities + missing fields per audit
 - [ ] **Autocomplete DB in React** — Sidemark/Vendor/Description per client
