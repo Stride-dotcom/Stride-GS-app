@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { X, Truck, Package, FileText, Mail, ClipboardList, LayoutList } from 'lucide-react';
 import { DeepLink } from './DeepLink';
+import { DetailHeader } from './DetailHeader';
 import { FolderButton } from './FolderButton';
 import { CreateTaskModal } from './CreateTaskModal';
 import { CreateWillCallModal } from './CreateWillCallModal';
@@ -145,19 +146,18 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
       <div style={getPanelContainerStyle(panelWidth, isMobile)}>
         {!isMobile && <div onMouseDown={handleResizeMouseDown} style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: 6, cursor: 'col-resize', zIndex: 101 }} />}
 
-        {/* Header */}
-        <div style={{ padding: '16px 20px', borderBottom: `1px solid ${theme.colors.border}`, flexShrink: 0 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-            <div>
-              <div style={{ fontSize: 18, fontWeight: 700 }}>{shipment.shipmentNo}</div>
-              <div style={{ fontSize: 12, color: theme.colors.textSecondary, marginTop: 2 }}>{shipment.client}</div>
-            </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-              <Badge t={shipment.status} bg={sc.bg} color={sc.color} />
-              <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4, color: theme.colors.textMuted }}><X size={18} /></button>
-            </div>
-          </div>
-        </div>
+        {/* Header — unified DetailHeader (session 70 follow-up).
+            Shipments have no sidemark at the shipment level (sidemarks live on items). */}
+        <DetailHeader
+          entityId={shipment.shipmentNo}
+          clientName={shipment.client}
+          actions={
+            <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4, color: theme.colors.textMuted }}>
+              <X size={18} />
+            </button>
+          }
+          belowId={<Badge t={shipment.status} bg={sc.bg} color={sc.color} />}
+        />
 
         {/* Content */}
         <div style={{ flex: 1, overflowY: 'auto', padding: 20 }}>

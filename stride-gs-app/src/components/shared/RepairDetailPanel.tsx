@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { X, Wrench, Package, ClipboardList, CheckCircle2, XCircle, AlertTriangle, Send, Loader2, Truck, Play } from 'lucide-react';
 import { FolderButton } from './FolderButton';
 import { DeepLink } from './DeepLink';
+import { DetailHeader } from './DetailHeader';
 import { theme } from '../../styles/theme';
 import { fmtDate } from '../../lib/constants';
 import { WriteButton } from './WriteButton';
@@ -271,20 +272,23 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
 
         <ProcessingOverlay visible={submitting} message="Processing..." />
 
-        {/* Header */}
-        <div style={{ padding: '16px 20px', borderBottom: `1px solid ${theme.colors.border}`, flexShrink: 0 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-            <div>
-              <div style={{ fontSize: 18, fontWeight: 700 }}>{repair.repairId}</div>
-              <div style={{ fontSize: 12, color: theme.colors.textSecondary, marginTop: 2 }}>{repair.clientName}</div>
+        {/* Header — unified DetailHeader (session 70 follow-up). */}
+        <DetailHeader
+          entityId={repair.repairId}
+          clientName={repair.clientName}
+          sidemark={repair.sidemark}
+          actions={
+            <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4, color: theme.colors.textMuted }}>
+              <X size={18} />
+            </button>
+          }
+          belowId={
+            <div style={{ display: 'flex', gap: 6 }}>
+              <Badge t={effectiveStatus} bg={sc.bg} color={sc.color} />
+              {repair.quoteAmount != null && <span style={{ fontSize: 12, fontWeight: 600, color: theme.colors.text, padding: '2px 10px', background: theme.colors.bgSubtle, borderRadius: 10 }}>${repair.quoteAmount}</span>}
             </div>
-            <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4, color: theme.colors.textMuted }}><X size={18} /></button>
-          </div>
-          <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
-            <Badge t={effectiveStatus} bg={sc.bg} color={sc.color} />
-            {repair.quoteAmount != null && <span style={{ fontSize: 12, fontWeight: 600, color: theme.colors.text, padding: '2px 10px', background: theme.colors.bgSubtle, borderRadius: 10 }}>${repair.quoteAmount}</span>}
-          </div>
-        </div>
+          }
+        />
 
         {/* Top-of-panel persistent confirmation for Start / Regenerate Work Order */}
         {startResult?.success && (

@@ -6,6 +6,7 @@ import {
 } from 'lucide-react';
 import { theme } from '../../styles/theme';
 import { fmtDate } from '../../lib/constants';
+import { DetailHeader } from './DetailHeader';
 import { WriteButton } from './WriteButton';
 import { getPanelContainerStyle, panelBackdropStyle } from './panelStyles';
 import { useIsMobile } from '../../hooks/useIsMobile';
@@ -473,35 +474,37 @@ export function ClaimDetailPanel({ claim: initialClaim, onClose, onUpdated, appl
       <div style={getPanelContainerStyle(panelWidth, isMobile)}>
         {!isMobile && <div onMouseDown={handleResizeMouseDown} style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: 6, cursor: 'col-resize', zIndex: 101 }} />}
 
-        {/* Header */}
-        <div style={{ padding: '16px 20px', borderBottom: `1px solid ${theme.colors.border}`, flexShrink: 0 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-            <div>
-              <div style={{ fontSize: 18, fontWeight: 700 }}>{claim.claimId}</div>
-              <div style={{ fontSize: 12, color: theme.colors.textSecondary, marginTop: 2 }}>
-                {claim.companyClientName}
-                {claim.primaryContactName && ` · ${claim.primaryContactName}`}
-              </div>
-            </div>
+        {/* Header — unified DetailHeader (session 70 follow-up). */}
+        <DetailHeader
+          entityId={claim.claimId}
+          entityLabel="Claim"
+          clientName={
+            claim.primaryContactName
+              ? `${claim.companyClientName} · ${claim.primaryContactName}`
+              : claim.companyClientName
+          }
+          actions={
             <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4, color: theme.colors.textMuted }}>
               <X size={18} />
             </button>
-          </div>
-          <div style={{ display: 'flex', gap: 6, marginTop: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-            <Badge t={claim.status} bg={sc.bg} color={sc.color} />
-            <Badge t={claim.claimType} bg={tc.bg} color={tc.color} />
-            {claim.outcomeType && (
-              <span style={{ fontSize: 11, color: theme.colors.textSecondary, padding: '2px 8px', background: theme.colors.bgSubtle, borderRadius: 10 }}>
-                {claim.outcomeType}
-              </span>
-            )}
-            {claim.approvedAmount != null && (
-              <span style={{ fontSize: 12, fontWeight: 600, color: '#15803D', padding: '2px 10px', background: '#F0FDF4', borderRadius: 10 }}>
-                {fmtMoney(claim.approvedAmount)} approved
-              </span>
-            )}
-          </div>
-        </div>
+          }
+          belowId={
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+              <Badge t={claim.status} bg={sc.bg} color={sc.color} />
+              <Badge t={claim.claimType} bg={tc.bg} color={tc.color} />
+              {claim.outcomeType && (
+                <span style={{ fontSize: 11, color: theme.colors.textSecondary, padding: '2px 8px', background: theme.colors.bgSubtle, borderRadius: 10 }}>
+                  {claim.outcomeType}
+                </span>
+              )}
+              {claim.approvedAmount != null && (
+                <span style={{ fontSize: 12, fontWeight: 600, color: '#15803D', padding: '2px 10px', background: '#F0FDF4', borderRadius: 10 }}>
+                  {fmtMoney(claim.approvedAmount)} approved
+                </span>
+              )}
+            </div>
+          }
+        />
 
         {/* Tabs */}
         <div style={{ display: 'flex', borderBottom: `1px solid ${theme.colors.border}`, flexShrink: 0 }}>

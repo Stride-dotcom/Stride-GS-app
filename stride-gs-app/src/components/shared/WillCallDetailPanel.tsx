@@ -2,6 +2,7 @@ import { useState, useMemo, useCallback, useEffect, useRef } from 'react';
 import { X, Truck, Package, Calendar, Phone, User, DollarSign, CheckCircle2, CreditCard, FileText, Loader2, AlertTriangle, FolderOpen, Info, Pencil, Save, Play } from 'lucide-react';
 import { FolderButton } from './FolderButton';
 import { DeepLink } from './DeepLink';
+import { DetailHeader } from './DetailHeader';
 import { theme } from '../../styles/theme';
 import { fmtDate } from '../../lib/constants';
 import { WriteButton } from './WriteButton';
@@ -429,43 +430,25 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
 
         <ProcessingOverlay visible={releasing || cancelling || removing} message={removing ? 'Removing items...' : cancelling ? 'Cancelling Will Call...' : 'Processing Release...'} />
 
-        {/* Header */}
-        <div style={{ padding: '16px 20px', borderBottom: `1px solid ${theme.colors.border}`, flexShrink: 0 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-            <div>
-              <div style={{ fontSize: 18, fontWeight: 700 }}>{wc.wcNumber}</div>
-              <div style={{ fontSize: 12, color: theme.colors.textSecondary, marginTop: 2 }}>{wc.clientName}</div>
+        {/* Header — unified DetailHeader (session 70 follow-up).
+            Edit / Save / Cancel moved to the sticky footer bottom-left. */}
+        <DetailHeader
+          entityId={wc.wcNumber}
+          clientName={wc.clientName}
+          sidemark={(wc as any).sidemark}
+          actions={
+            <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4, color: theme.colors.textMuted }}>
+              <X size={18} />
+            </button>
+          }
+          belowId={
+            <div style={{ display: 'flex', gap: 6 }}>
+              <Badge t={wc.status} bg={sc.bg} color={sc.color} />
+              {wc.cod && <span style={{ fontSize: 11, padding: '2px 10px', borderRadius: 10, fontWeight: 600, background: '#FEF3C7', color: '#B45309' }}>COD{wc.codAmount ? `: $${wc.codAmount}` : ''}</span>}
+              {paid && <Badge t="Paid" bg="#F0FDF4" color="#15803D" />}
             </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              {isActive && (
-                isEditing ? (
-                  <>
-                    <button onClick={handleEditSave} disabled={editSaving}
-                      style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '4px 12px', fontSize: 11, fontWeight: 600, borderRadius: 6, border: 'none', background: theme.colors.orange, color: '#fff', cursor: editSaving ? 'wait' : 'pointer', fontFamily: 'inherit' }}>
-                      {editSaving ? <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} /> : <Save size={12} />}
-                      {editSaving ? 'Saving...' : 'Save'}
-                    </button>
-                    <button onClick={handleEditCancel} disabled={editSaving}
-                      style={{ padding: '4px 10px', fontSize: 11, fontWeight: 600, borderRadius: 6, border: `1px solid ${theme.colors.border}`, background: '#fff', color: theme.colors.textSecondary, cursor: 'pointer', fontFamily: 'inherit' }}>
-                      Cancel
-                    </button>
-                  </>
-                ) : (
-                  <button onClick={handleEditStart}
-                    style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '4px 10px', fontSize: 11, fontWeight: 600, borderRadius: 6, border: `1px solid ${theme.colors.border}`, background: '#fff', color: theme.colors.textSecondary, cursor: 'pointer', fontFamily: 'inherit' }}>
-                    <Pencil size={12} /> Edit
-                  </button>
-                )
-              )}
-              <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4, color: theme.colors.textMuted }}><X size={18} /></button>
-            </div>
-          </div>
-          <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
-            <Badge t={wc.status} bg={sc.bg} color={sc.color} />
-            {wc.cod && <span style={{ fontSize: 11, padding: '2px 10px', borderRadius: 10, fontWeight: 600, background: '#FEF3C7', color: '#B45309' }}>COD{wc.codAmount ? `: $${wc.codAmount}` : ''}</span>}
-            {paid && <Badge t="Paid" bg="#F0FDF4" color="#15803D" />}
-          </div>
-        </div>
+          }
+        />
         {editSaveError && (
           <div style={{ padding: '6px 20px', background: '#FEF2F2', color: '#DC2626', fontSize: 12, fontWeight: 500, borderBottom: `1px solid #FECACA` }}>{editSaveError}</div>
         )}
@@ -610,50 +593,8 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
             </div>
           )}
 
-          {/* Items */}
-          <div style={{ marginBottom: 16 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}><Package size={14} color={theme.colors.orange} /><span style={{ fontSize: 12, fontWeight: 600 }}>Items ({wc.items?.length || wc.itemCount || 0})</span></div>
-            {wc.items && wc.items.length > 0 ? (
-              <div style={{ border: `1px solid ${theme.colors.border}`, borderRadius: 10, overflow: 'hidden' }}>
-                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
-                  <thead><tr style={{ background: theme.colors.bgSubtle }}>
-                    {removeMode && <th style={{ padding: '6px 6px', width: 28 }} />}
-                    <th style={{ padding: '6px 10px', textAlign: 'left', fontSize: 10, color: theme.colors.textMuted, textTransform: 'uppercase' }}>Item</th>
-                    <th style={{ padding: '6px 10px', textAlign: 'left', fontSize: 10, color: theme.colors.textMuted, textTransform: 'uppercase' }}>Description</th>
-                    <th style={{ padding: '6px 10px', textAlign: 'left', fontSize: 10, color: theme.colors.textMuted, textTransform: 'uppercase' }}>Vendor</th>
-                    <th style={{ padding: '6px 10px', textAlign: 'left', fontSize: 10, color: theme.colors.textMuted, textTransform: 'uppercase' }}>Location</th>
-                    <th style={{ padding: '6px 10px', textAlign: 'center', fontSize: 10, color: theme.colors.textMuted, textTransform: 'uppercase' }}>Qty</th>
-                    <th style={{ padding: '6px 10px', textAlign: 'center', fontSize: 10, color: theme.colors.textMuted, textTransform: 'uppercase' }}>Released</th>
-                  </tr></thead>
-                  <tbody>{wc.items.map((item: any, i: number) => {
-                    const isRemoveChecked = removeSelected.has(item.itemId);
-                    const isReleased = !!item.released;
-                    return (
-                      <tr key={i} onClick={removeMode && !isReleased ? () => toggleRemoveItem(item.itemId) : undefined} style={{ borderBottom: `1px solid ${theme.colors.borderLight}`, cursor: removeMode && !isReleased ? 'pointer' : 'default', background: isRemoveChecked ? '#FEF2F2' : isReleased ? '#F9FAFB' : 'transparent', opacity: isReleased ? 0.55 : 1 }}>
-                        {removeMode && (
-                          <td style={{ padding: '6px 6px', textAlign: 'center' }}>
-                            {isReleased ? <span style={{ color: theme.colors.textMuted, fontSize: 10 }}>{'\u2014'}</span> : (
-                              <input type="checkbox" checked={isRemoveChecked} readOnly style={{ accentColor: '#DC2626', pointerEvents: 'none' }} />
-                            )}
-                          </td>
-                        )}
-                        <td style={{ padding: '6px 10px', fontWeight: 600 }}>
-                          <DeepLink kind="inventory" id={item.itemId} clientSheetId={clientSheetId} showIcon={false} />
-                        </td>
-                        <td style={{ padding: '6px 10px', color: theme.colors.textSecondary, maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.description}</td>
-                        <td style={{ padding: '6px 10px', color: theme.colors.textSecondary, maxWidth: 80, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.vendor || '\u2014'}</td>
-                        <td style={{ padding: '6px 10px', fontFamily: 'monospace', fontSize: 11, color: theme.colors.textSecondary }}>{item.location || '\u2014'}</td>
-                        <td style={{ padding: '6px 10px', textAlign: 'center' }}>{item.qty}</td>
-                        <td style={{ padding: '6px 10px', textAlign: 'center' }}>{isReleased ? <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 10, fontWeight: 600, color: '#15803D', background: '#F0FDF4', padding: '1px 7px', borderRadius: 8 }}><CheckCircle2 size={11} /> Released</span> : <span style={{ color: theme.colors.textMuted }}>{'\u2014'}</span>}</td>
-                      </tr>
-                    );
-                  })}</tbody>
-                </table>
-              </div>
-            ) : (
-              <div style={{ fontSize: 12, color: theme.colors.textMuted }}>No item details available</div>
-            )}
-          </div>
+          {/* Items section moved to the bottom of the content stack (session 70 follow-up).
+              See the end of this content div for the rendered Items block. */}
 
           {/* Partial Release Selector */}
           {releaseMode === 'partial' && allItemIds.length > 0 && (
@@ -830,6 +771,52 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
               )}
             </div>
           )}
+
+          {/* Items — pinned to the bottom of the content stack (session 70 follow-up)
+              so long rosters don't push Pickup Details / Activity out of view. */}
+          <div style={{ marginBottom: 16 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}><Package size={14} color={theme.colors.orange} /><span style={{ fontSize: 12, fontWeight: 600 }}>Items ({wc.items?.length || wc.itemCount || 0})</span></div>
+            {wc.items && wc.items.length > 0 ? (
+              <div style={{ border: `1px solid ${theme.colors.border}`, borderRadius: 10, overflow: 'hidden' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                  <thead><tr style={{ background: theme.colors.bgSubtle }}>
+                    {removeMode && <th style={{ padding: '6px 6px', width: 28 }} />}
+                    <th style={{ padding: '6px 10px', textAlign: 'left', fontSize: 10, color: theme.colors.textMuted, textTransform: 'uppercase' }}>Item</th>
+                    <th style={{ padding: '6px 10px', textAlign: 'left', fontSize: 10, color: theme.colors.textMuted, textTransform: 'uppercase' }}>Description</th>
+                    <th style={{ padding: '6px 10px', textAlign: 'left', fontSize: 10, color: theme.colors.textMuted, textTransform: 'uppercase' }}>Vendor</th>
+                    <th style={{ padding: '6px 10px', textAlign: 'left', fontSize: 10, color: theme.colors.textMuted, textTransform: 'uppercase' }}>Location</th>
+                    <th style={{ padding: '6px 10px', textAlign: 'center', fontSize: 10, color: theme.colors.textMuted, textTransform: 'uppercase' }}>Qty</th>
+                    <th style={{ padding: '6px 10px', textAlign: 'center', fontSize: 10, color: theme.colors.textMuted, textTransform: 'uppercase' }}>Released</th>
+                  </tr></thead>
+                  <tbody>{wc.items.map((item: any, i: number) => {
+                    const isRemoveChecked = removeSelected.has(item.itemId);
+                    const isReleased = !!item.released;
+                    return (
+                      <tr key={i} onClick={removeMode && !isReleased ? () => toggleRemoveItem(item.itemId) : undefined} style={{ borderBottom: `1px solid ${theme.colors.borderLight}`, cursor: removeMode && !isReleased ? 'pointer' : 'default', background: isRemoveChecked ? '#FEF2F2' : isReleased ? '#F9FAFB' : 'transparent', opacity: isReleased ? 0.55 : 1 }}>
+                        {removeMode && (
+                          <td style={{ padding: '6px 6px', textAlign: 'center' }}>
+                            {isReleased ? <span style={{ color: theme.colors.textMuted, fontSize: 10 }}>{'\u2014'}</span> : (
+                              <input type="checkbox" checked={isRemoveChecked} readOnly style={{ accentColor: '#DC2626', pointerEvents: 'none' }} />
+                            )}
+                          </td>
+                        )}
+                        <td style={{ padding: '6px 10px', fontWeight: 600 }}>
+                          <DeepLink kind="inventory" id={item.itemId} clientSheetId={clientSheetId} showIcon={false} />
+                        </td>
+                        <td style={{ padding: '6px 10px', color: theme.colors.textSecondary, maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.description}</td>
+                        <td style={{ padding: '6px 10px', color: theme.colors.textSecondary, maxWidth: 80, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.vendor || '\u2014'}</td>
+                        <td style={{ padding: '6px 10px', fontFamily: 'monospace', fontSize: 11, color: theme.colors.textSecondary }}>{item.location || '\u2014'}</td>
+                        <td style={{ padding: '6px 10px', textAlign: 'center' }}>{item.qty}</td>
+                        <td style={{ padding: '6px 10px', textAlign: 'center' }}>{isReleased ? <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 10, fontWeight: 600, color: '#15803D', background: '#F0FDF4', padding: '1px 7px', borderRadius: 8 }}><CheckCircle2 size={11} /> Released</span> : <span style={{ color: theme.colors.textMuted }}>{'\u2014'}</span>}</td>
+                      </tr>
+                    );
+                  })}</tbody>
+                </table>
+              </div>
+            ) : (
+              <div style={{ fontSize: 12, color: theme.colors.textMuted }}>No item details available</div>
+            )}
+          </div>
         </div>
 
         {/* Cancel result card */}
@@ -875,6 +862,29 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
                 style={{ width: '100%', padding: '10px', fontSize: 13, background: '#7C3AED', opacity: genDocLoading ? 0.7 : 1 }}
                 onClick={handleGenerateWcDoc}
               />
+            </div>
+          )}
+          {/* Edit / Save / Cancel — moved here from the top-right header (session 70 follow-up). */}
+          {isActive && (
+            <div style={{ display: 'flex', gap: 6, marginBottom: 10 }}>
+              {isEditing ? (
+                <>
+                  <button onClick={handleEditSave} disabled={editSaving}
+                    style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '6px 14px', fontSize: 12, fontWeight: 600, borderRadius: 6, border: 'none', background: theme.colors.orange, color: '#fff', cursor: editSaving ? 'wait' : 'pointer', fontFamily: 'inherit' }}>
+                    {editSaving ? <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} /> : <Save size={12} />}
+                    {editSaving ? 'Saving...' : 'Save'}
+                  </button>
+                  <button onClick={handleEditCancel} disabled={editSaving}
+                    style={{ padding: '6px 12px', fontSize: 12, fontWeight: 600, borderRadius: 6, border: `1px solid ${theme.colors.border}`, background: '#fff', color: theme.colors.textSecondary, cursor: 'pointer', fontFamily: 'inherit' }}>
+                    Cancel
+                  </button>
+                </>
+              ) : (
+                <button onClick={handleEditStart}
+                  style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '6px 12px', fontSize: 12, fontWeight: 600, borderRadius: 6, border: `1px solid ${theme.colors.border}`, background: '#fff', color: theme.colors.textSecondary, cursor: 'pointer', fontFamily: 'inherit' }}>
+                  <Pencil size={12} /> Edit
+                </button>
+              )}
             </div>
           )}
           {isActive && !releaseResult ? (

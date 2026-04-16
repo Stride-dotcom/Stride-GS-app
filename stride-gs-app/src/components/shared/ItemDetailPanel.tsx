@@ -1,6 +1,7 @@
 import React, { useState, useRef, useCallback, useEffect, useMemo } from 'react';
 import { X, Package, Calendar, FileText, ClipboardList, Wrench, Truck, ExternalLink, DollarSign, Ship, AlertCircle, MapPin, CheckCircle2, Pencil, Save, Loader2, FolderOpen } from 'lucide-react';
 import { FolderButton } from './FolderButton';
+import { DetailHeader } from './DetailHeader';
 import { LinkifiedText } from './LinkifiedText';
 import { AutocompleteInput } from './AutocompleteInput';
 import { theme } from '../../styles/theme';
@@ -639,42 +640,28 @@ export function ItemDetailPanel({
             style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: 6, cursor: 'col-resize', zIndex: 101 }}
           />
         )}
-        {/* Header */}
-        <div style={{ padding: '16px 20px', borderBottom: `1px solid ${theme.colors.border}`, display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexShrink: 0 }}>
-          <div>
-            <div style={{ fontSize: 18, fontWeight: 700, letterSpacing: '-0.3px' }}>{item.itemId}</div>
-            <div style={{ fontSize: 13, color: theme.colors.textSecondary, marginTop: 2 }}>{item.clientName}</div>
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            {isEditing && canEditStaff ? (
+        {/* Header — unified DetailHeader (session 70 follow-up).
+            Edit / Save / Cancel moved to the sticky footer bottom-left; only Close stays top-right. */}
+        <DetailHeader
+          entityId={item.itemId}
+          clientName={item.clientName}
+          sidemark={item.sidemark}
+          actions={
+            <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4, borderRadius: 6, color: theme.colors.textMuted }}>
+              <X size={18} />
+            </button>
+          }
+          belowId={
+            isEditing && canEditStaff ? (
               <select value={draft.status} onChange={e => setDraftField('status', e.target.value)}
                 style={{ fontSize: 11, padding: '2px 8px', borderRadius: 12, border: `1px solid ${theme.colors.border}`, fontWeight: 600, background: theme.colors.bgSubtle, cursor: 'pointer' }}>
                 {STATUS_OPTIONS.map(o => <option key={o} value={o}>{o}</option>)}
               </select>
             ) : (
               <Badge t={isEditing ? draft.status : (dv('status') || item.status)} bg={sc.bg} color={sc.color} />
-            )}
-            {isEditing ? (
-              <>
-                <button onClick={handleSave} disabled={saving}
-                  style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '4px 12px', fontSize: 11, fontWeight: 600, borderRadius: 6, border: 'none', background: theme.colors.orange, color: '#fff', cursor: saving ? 'wait' : 'pointer' }}>
-                  {saving ? <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} /> : <Save size={12} />}
-                  {saving ? 'Saving...' : 'Save'}
-                </button>
-                <button onClick={handleEditCancel} disabled={saving}
-                  style={{ padding: '4px 10px', fontSize: 11, fontWeight: 600, borderRadius: 6, border: `1px solid ${theme.colors.border}`, background: '#fff', color: theme.colors.textSecondary, cursor: 'pointer' }}>
-                  Cancel
-                </button>
-              </>
-            ) : canEditBasic ? (
-              <button onClick={handleEditStart}
-                style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '4px 10px', fontSize: 11, fontWeight: 600, borderRadius: 6, border: `1px solid ${theme.colors.border}`, background: '#fff', color: theme.colors.textSecondary, cursor: 'pointer' }}>
-                <Pencil size={12} /> Edit
-              </button>
-            ) : null}
-            <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4, borderRadius: 6, color: theme.colors.textMuted }}><X size={18} /></button>
-          </div>
-        </div>
+            )
+          }
+        />
         {/* Save feedback bar */}
         {saveError && (
           <div style={{ padding: '6px 20px', background: '#FEF2F2', color: '#DC2626', fontSize: 12, fontWeight: 500, borderBottom: `1px solid #FECACA` }}>
@@ -830,7 +817,35 @@ export function ItemDetailPanel({
           </Section>
         </div>
 
-        {/* Footer removed — Quick Actions section above provides all action buttons */}
+        {/* Sticky footer — session 70 follow-up: Edit / Save / Cancel moved here from top-right. */}
+        {(canEditBasic || isEditing) && (
+          <div style={{
+            padding: '10px 20px',
+            borderTop: `1px solid ${theme.colors.border}`,
+            background: '#FAFAFA',
+            display: 'flex', gap: 8, alignItems: 'center',
+            flexShrink: 0,
+          }}>
+            {isEditing ? (
+              <>
+                <button onClick={handleSave} disabled={saving}
+                  style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '6px 14px', fontSize: 12, fontWeight: 600, borderRadius: 6, border: 'none', background: theme.colors.orange, color: '#fff', cursor: saving ? 'wait' : 'pointer' }}>
+                  {saving ? <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} /> : <Save size={12} />}
+                  {saving ? 'Saving...' : 'Save'}
+                </button>
+                <button onClick={handleEditCancel} disabled={saving}
+                  style={{ padding: '6px 12px', fontSize: 12, fontWeight: 600, borderRadius: 6, border: `1px solid ${theme.colors.border}`, background: '#fff', color: theme.colors.textSecondary, cursor: 'pointer' }}>
+                  Cancel
+                </button>
+              </>
+            ) : canEditBasic ? (
+              <button onClick={handleEditStart}
+                style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '6px 12px', fontSize: 12, fontWeight: 600, borderRadius: 6, border: `1px solid ${theme.colors.border}`, background: '#fff', color: theme.colors.textSecondary, cursor: 'pointer' }}>
+                <Pencil size={12} /> Edit
+              </button>
+            ) : null}
+          </div>
+        )}
       </div>
 
       <style>{`@keyframes slideIn { from { transform: translateX(100%); } to { transform: translateX(0); } }`}</style>

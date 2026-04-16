@@ -2,6 +2,7 @@ import React from 'react';
 import { X, DollarSign, Package, ClipboardList, FileText, ExternalLink } from 'lucide-react';
 import { theme } from '../../styles/theme';
 import { fmtDate } from '../../lib/constants';
+import { DetailHeader } from './DetailHeader';
 import { getPanelContainerStyle, panelBackdropStyle } from './panelStyles';
 import { useIsMobile } from '../../hooks/useIsMobile';
 import { useResizablePanel } from '../../hooks/useResizablePanel';
@@ -100,17 +101,23 @@ export function BillingDetailPanel({ row, onClose, onNavigate }: Props) {
       {/* Panel */}
       <div style={getPanelContainerStyle(panelWidth, isMobile)}>
         {!isMobile && <div onMouseDown={handleResizeMouseDown} style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: 6, cursor: 'col-resize', zIndex: 101 }} />}
-        {/* Header */}
-        <div style={{ padding: '16px 20px', borderBottom: `1px solid ${theme.colors.border}`, display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexShrink: 0 }}>
-          <div>
-            <div style={{ fontSize: 18, fontWeight: 700, letterSpacing: '-0.3px' }}>{row.ledgerRowId}</div>
-            <div style={{ fontSize: 13, color: theme.colors.textSecondary, marginTop: 2 }}>{row.client}</div>
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <Badge t={row.status} bg={sc.bg} color={sc.color} />
-            <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4, borderRadius: 6, color: theme.colors.textMuted }}><X size={18} /></button>
-          </div>
-        </div>
+        {/* Header — unified DetailHeader (session 70 follow-up). */}
+        <DetailHeader
+          entityId={row.ledgerRowId}
+          clientName={row.client}
+          sidemark={row.sidemark}
+          actions={
+            <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4, borderRadius: 6, color: theme.colors.textMuted }}>
+              <X size={18} />
+            </button>
+          }
+          belowId={
+            <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+              <Badge t={row.status} bg={sc.bg} color={sc.color} />
+              {row.invoiceNo && <span style={{ fontSize: 12, fontWeight: 600, color: theme.colors.text, padding: '2px 10px', background: theme.colors.bgSubtle, borderRadius: 10 }}>{row.invoiceNo}</span>}
+            </div>
+          }
+        />
 
         {/* Content */}
         <div style={{ flex: 1, overflowY: 'auto', padding: '20px' }}>
