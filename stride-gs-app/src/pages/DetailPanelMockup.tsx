@@ -125,19 +125,6 @@ function PanelShell({ children }: { children: React.ReactNode }) {
   );
 }
 
-function StickyFooter({ children }: { children: React.ReactNode }) {
-  return (
-    <div style={{
-      padding: '12px 20px',
-      borderTop: `1px solid ${theme.colors.border}`,
-      background: '#FAFAFA',
-      display: 'flex', gap: 8, justifyContent: 'flex-end',
-    }}>
-      {children}
-    </div>
-  );
-}
-
 function PanelBody({ children }: { children: React.ReactNode }) {
   return (
     <div style={{ flex: 1, overflowY: 'auto', padding: 18 }}>{children}</div>
@@ -148,24 +135,47 @@ function PanelBody({ children }: { children: React.ReactNode }) {
 
 const MOCK_CLIENT = 'Olson Kundig';
 const MOCK_SIDEMARK = 'Cramer / Living Room';
-const SHARED_EDIT_CLOSE = (
-  <>
+// Session 70 followup: Edit/Save/Cancel now live in the sticky footer bottom-left.
+// The top-right slot only holds the Close (X) button — keeping that in the
+// standard panel-close position matches every other modal in the app.
+const SHARED_CLOSE_ONLY = (
+  <button style={{
+    background: 'none', border: 'none', cursor: 'pointer', padding: 4,
+    color: theme.colors.textMuted,
+  }}>
+    <X size={18} />
+  </button>
+);
+
+/** Bottom-left Edit button — pairs with primary action on the right. */
+function EditBtn() {
+  return (
     <button style={{
-      display: 'flex', alignItems: 'center', gap: 4, padding: '4px 10px',
-      fontSize: 11, fontWeight: 600, borderRadius: 6,
+      display: 'flex', alignItems: 'center', gap: 4,
+      padding: '6px 12px', fontSize: 12, fontWeight: 600, borderRadius: 6,
       border: `1px solid ${theme.colors.border}`, background: '#fff',
-      color: theme.colors.textSecondary, cursor: 'pointer',
+      color: theme.colors.textSecondary, cursor: 'pointer', fontFamily: 'inherit',
     }}>
       <Pencil size={12} /> Edit
     </button>
-    <button style={{
-      background: 'none', border: 'none', cursor: 'pointer', padding: 4,
-      color: theme.colors.textMuted,
+  );
+}
+
+/** Sticky footer variant that holds Edit on the far left and primary/secondary on the right. */
+function FooterWithEdit({ children }: { children: React.ReactNode }) {
+  return (
+    <div style={{
+      padding: '12px 20px',
+      borderTop: `1px solid ${theme.colors.border}`,
+      background: '#FAFAFA',
+      display: 'flex', gap: 8, alignItems: 'center',
     }}>
-      <X size={18} />
-    </button>
-  </>
-);
+      <EditBtn />
+      <div style={{ flex: 1 }} />
+      {children}
+    </div>
+  );
+}
 
 // ─── Individual panel mockups ───────────────────────────────────────────────
 
@@ -177,7 +187,7 @@ function ItemPanelMock() {
         entityLabel="Item"
         clientName={MOCK_CLIENT}
         sidemark={MOCK_SIDEMARK}
-        actions={SHARED_EDIT_CLOSE}
+        actions={SHARED_CLOSE_ONLY}
         belowId={
           <div style={{ display: 'flex', gap: 6 }}>
             <Badge t="Active" bg="#F0FDF4" color="#15803D" />
@@ -217,10 +227,10 @@ function ItemPanelMock() {
           </div>
         </SectionCard>
       </PanelBody>
-      <StickyFooter>
+      <FooterWithEdit>
         <ActionBtn label="Move" />
         <ActionBtn label="Release" primary />
-      </StickyFooter>
+      </FooterWithEdit>
     </PanelShell>
   );
 }
@@ -232,7 +242,7 @@ function TaskPanelMock() {
         entityId="INSP-62545-1"
         clientName={MOCK_CLIENT}
         sidemark={MOCK_SIDEMARK}
-        actions={SHARED_EDIT_CLOSE}
+        actions={SHARED_CLOSE_ONLY}
         belowId={
           <div style={{ display: 'flex', gap: 6 }}>
             <Badge t="Inspection" bg="#FEF3EE" color="#E85D2D" />
@@ -271,10 +281,10 @@ function TaskPanelMock() {
           </div>
         </SectionCard>
       </PanelBody>
-      <StickyFooter>
+      <FooterWithEdit>
         <ActionBtn label="Fail" />
         <ActionBtn label="Pass" primary />
-      </StickyFooter>
+      </FooterWithEdit>
     </PanelShell>
   );
 }
@@ -286,7 +296,7 @@ function RepairPanelMock() {
         entityId="RPR-00042"
         clientName={MOCK_CLIENT}
         sidemark={MOCK_SIDEMARK}
-        actions={SHARED_EDIT_CLOSE}
+        actions={SHARED_CLOSE_ONLY}
         belowId={
           <div style={{ display: 'flex', gap: 6 }}>
             <Badge t="Quote Sent" bg="#EFF6FF" color="#1D4ED8" />
@@ -326,10 +336,10 @@ function RepairPanelMock() {
           </div>
         </SectionCard>
       </PanelBody>
-      <StickyFooter>
+      <FooterWithEdit>
         <ActionBtn label="Decline" />
         <ActionBtn label="Approve" primary />
-      </StickyFooter>
+      </FooterWithEdit>
     </PanelShell>
   );
 }
@@ -341,7 +351,7 @@ function WillCallPanelMock() {
         entityId="WC-000071"
         clientName={MOCK_CLIENT}
         sidemark={MOCK_SIDEMARK}
-        actions={SHARED_EDIT_CLOSE}
+        actions={SHARED_CLOSE_ONLY}
         belowId={
           <div style={{ display: 'flex', gap: 6 }}>
             <Badge t="Scheduled" bg="#EFF6FF" color="#1D4ED8" />
@@ -356,15 +366,6 @@ function WillCallPanelMock() {
             <Field label="Phone" value="(206) 555-0199" />
             <Field label="Requested By" value="procurement@olsonkundig.com" />
             <Field label="Items" value="4 items" />
-          </div>
-        </SectionCard>
-
-        <SectionCard icon={Package} title="Items (4)">
-          <div style={{ fontSize: 12, color: theme.colors.textSecondary }}>
-            80312 · 80313 · 80317 · 80318
-            <div style={{ marginTop: 4, color: theme.colors.textMuted, fontSize: 11 }}>
-              Click a row to open item details
-            </div>
           </div>
         </SectionCard>
 
@@ -385,11 +386,21 @@ function WillCallPanelMock() {
             <Field label="Scheduled" value="03/19/2026" />
           </div>
         </SectionCard>
+
+        {/* Items tile at the BOTTOM — large rosters shouldn't hide the other sections. */}
+        <SectionCard icon={Package} title="Items (4)">
+          <div style={{ fontSize: 12, color: theme.colors.textSecondary }}>
+            80312 · 80313 · 80317 · 80318
+            <div style={{ marginTop: 4, color: theme.colors.textMuted, fontSize: 11 }}>
+              Click a row to open item details
+            </div>
+          </div>
+        </SectionCard>
       </PanelBody>
-      <StickyFooter>
+      <FooterWithEdit>
         <ActionBtn label="Cancel" />
         <ActionBtn label="Release" primary />
-      </StickyFooter>
+      </FooterWithEdit>
     </PanelShell>
   );
 }
@@ -401,7 +412,7 @@ function ShipmentPanelMock() {
         entityId="SHP-000131"
         clientName={MOCK_CLIENT}
         sidemark={MOCK_SIDEMARK}
-        actions={SHARED_EDIT_CLOSE}
+        actions={SHARED_CLOSE_ONLY}
         belowId={
           <div style={{ display: 'flex', gap: 6 }}>
             <Badge t="Received" bg="#F0FDF4" color="#15803D" />
@@ -437,11 +448,21 @@ function ShipmentPanelMock() {
         <SectionCard icon={Calendar} title="Activity">
           <Field label="Received" value="03/14/2026 14:22" />
         </SectionCard>
+
+        {/* Items tile at the BOTTOM — shipments can carry 20–100+ items. */}
+        <SectionCard icon={Package} title="Items (12)">
+          <div style={{ fontSize: 12, color: theme.colors.textSecondary, lineHeight: 1.7 }}>
+            80312 · 80313 · 80314 · 80315 · 80316 · 80317 · 80318 · 80319 · 80320 · 80321 · 80322 · 80323
+            <div style={{ marginTop: 4, color: theme.colors.textMuted, fontSize: 11 }}>
+              Click a row to open item details
+            </div>
+          </div>
+        </SectionCard>
       </PanelBody>
-      <StickyFooter>
+      <FooterWithEdit>
         <ActionBtn label="View Items" />
         <ActionBtn label="Generate PDF" primary icon={FileText} />
-      </StickyFooter>
+      </FooterWithEdit>
     </PanelShell>
   );
 }
@@ -454,7 +475,7 @@ function ClaimPanelMock() {
         entityLabel="Claim"
         clientName={MOCK_CLIENT}
         sidemark={MOCK_SIDEMARK}
-        actions={SHARED_EDIT_CLOSE}
+        actions={SHARED_CLOSE_ONLY}
         belowId={
           <div style={{ display: 'flex', gap: 6 }}>
             <Badge t="Open" bg="#FEF3EE" color="#E85D2D" />
@@ -500,10 +521,10 @@ function ClaimPanelMock() {
           </div>
         </SectionCard>
       </PanelBody>
-      <StickyFooter>
+      <FooterWithEdit>
         <ActionBtn label="Add Note" />
         <ActionBtn label="Resolve" primary />
-      </StickyFooter>
+      </FooterWithEdit>
     </PanelShell>
   );
 }
@@ -516,7 +537,7 @@ function BillingPanelMock() {
         entityLabel="Invoice"
         clientName={MOCK_CLIENT}
         sidemark={MOCK_SIDEMARK}
-        actions={SHARED_EDIT_CLOSE}
+        actions={SHARED_CLOSE_ONLY}
         belowId={
           <div style={{ display: 'flex', gap: 6 }}>
             <Badge t="Invoiced" bg="#EFF6FF" color="#1D4ED8" />
@@ -557,10 +578,10 @@ function BillingPanelMock() {
           </div>
         </SectionCard>
       </PanelBody>
-      <StickyFooter>
+      <FooterWithEdit>
         <ActionBtn label="Email" />
         <ActionBtn label="Charge on File" primary icon={DollarSign} />
-      </StickyFooter>
+      </FooterWithEdit>
     </PanelShell>
   );
 }
@@ -629,8 +650,9 @@ export function DetailPanelMockup() {
           <li>Status badges always below the ID, before the client/sidemark row.</li>
           <li>Client name: 14px weight 700. Sidemark: pill with a deterministic color from the Inventory palette (hash-based, stable across pages).</li>
           <li>Section cards share iconography (lucide) and a consistent "UPPERCASE 10px label + 13px value" field pattern.</li>
-          <li>Action buttons live in a sticky footer — primary action on the right, destructive/secondary to its left.</li>
+          <li><strong>Action buttons live in the sticky footer</strong> — <strong>Edit</strong> on the bottom-left, primary action on the bottom-right, destructive/secondary just before primary. Only the Close (<code>X</code>) stays in the top-right, matching every other modal.</li>
           <li>Notes section always shows Item Notes (read-only, from Inventory) + entity-specific notes (editable).</li>
+          <li><strong>Items roster lives at the bottom</strong> of the stack on Will Call and Shipment panels. Large rosters (20–100+ items on big inbound shipments) no longer push Notes / Links / Activity out of view.</li>
         </ul>
       </div>
     </div>
