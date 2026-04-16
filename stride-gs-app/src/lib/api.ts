@@ -2426,6 +2426,54 @@ export function postBatchReassignTasks(
   );
 }
 
+// v38.58.0 — Server-side batch endpoints (eliminate tab-close partial-completion risk)
+
+export interface BatchScheduleWillCallsPayload { wcNumbers: string[]; estimatedPickupDate: string }
+export function postBatchScheduleWillCalls(
+  payload: BatchScheduleWillCallsPayload,
+  clientSheetId: string,
+  signal?: AbortSignal
+) {
+  return apiPost<BatchMutationResult>(
+    'batchScheduleWillCalls',
+    payload as unknown as Record<string, unknown>,
+    { clientSheetId },
+    { signal }
+  );
+}
+
+export interface BatchRequestRepairQuotePayload { itemIds: string[]; notes?: string }
+export function postBatchRequestRepairQuote(
+  payload: BatchRequestRepairQuotePayload,
+  clientSheetId: string,
+  signal?: AbortSignal
+) {
+  return apiPost<BatchMutationResult>(
+    'batchRequestRepairQuote',
+    payload as unknown as Record<string, unknown>,
+    { clientSheetId },
+    { signal }
+  );
+}
+
+export interface BatchStaxInvoicePayload { qbInvoiceNos: string[] }
+export function postBatchVoidStaxInvoices(payload: BatchStaxInvoicePayload, signal?: AbortSignal) {
+  return apiPost<BatchMutationResult>(
+    'batchVoidStaxInvoices',
+    payload as unknown as Record<string, unknown>,
+    {},
+    { signal }
+  );
+}
+export function postBatchDeleteStaxInvoices(payload: BatchStaxInvoicePayload, signal?: AbortSignal) {
+  return apiPost<BatchMutationResult>(
+    'batchDeleteStaxInvoices',
+    payload as unknown as Record<string, unknown>,
+    {},
+    { signal }
+  );
+}
+
 // ─── Update Inventory Item (inline edit, save-on-blur) ──────────────────────
 
 export interface UpdateInventoryItemPayload {

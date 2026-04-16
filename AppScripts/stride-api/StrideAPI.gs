@@ -1,4 +1,14 @@
 /* ===================================================
+   StrideAPI.gs — v38.58.0 — 2026-04-15 PST — Server-side batch endpoints (eliminate tab-close partial completion)
+   v38.58.0: NEW — 4 server-side batch handlers that return BatchMutationResult in
+             a single server call (no client-side for-loop, survives tab close):
+             • handleBatchVoidStaxInvoices_ (router: batchVoidStaxInvoices)
+             • handleBatchDeleteStaxInvoices_ (router: batchDeleteStaxInvoices)
+             • handleBatchScheduleWillCalls_ (router: batchScheduleWillCalls)
+             • handleBatchRequestRepairQuote_ (router: batchRequestRepairQuote)
+             All follow the handleBatchCancelTasks_ template: api_newBatchResult_,
+             api_batchSkip_, api_batchError_, invalidateClientCache_, per-row
+             Supabase resync after success.
    StrideAPI.gs — v38.57.0 — 2026-04-15 PST — Marketing campaigns/templates/settings Supabase cache
    v38.57.0: NEW — marketing_campaigns, marketing_templates, marketing_settings read-cache tables.
              Row builders + resync helpers + seed functions for all three.
@@ -2993,6 +3003,22 @@ function doPost(e) {
         return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
           return handleBatchReassignTasks_(effectiveId, payload);
         });
+
+      case "batchScheduleWillCalls":
+        return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
+          return handleBatchScheduleWillCalls_(effectiveId, payload);
+        });
+
+      case "batchRequestRepairQuote":
+        return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
+          return handleBatchRequestRepairQuote_(effectiveId, payload, callerEmail);
+        });
+
+      case "batchVoidStaxInvoices":
+        return handleBatchVoidStaxInvoices_(payload);
+
+      case "batchDeleteStaxInvoices":
+        return handleBatchDeleteStaxInvoices_(payload);
 
       case "createWillCall":
         return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
@@ -16514,6 +16540,292 @@ function handleBatchReassignTasks_(clientSheetId, payload) {
   }
 
   result.message = "Reassigned " + result.succeeded + " task(s) to " + assignedTo +
+                   (result.skipped.length ? ", skipped " + result.skipped.length : "") +
+                   (result.failed ? ", failed " + result.failed : "");
+  return jsonResponse_(result);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ─── Server-side batch endpoints (v38.58.0) ─────────────────────────────────
+// Eliminate tab-close partial-completion risk. Each endpoint does a single
+// server-side loop and returns BatchMutationResult with per-row outcomes.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ─── handleBatchVoidStaxInvoices_ ──────────────────────────────────────────────
+// Payload: { qbInvoiceNos: string[] }
+// Sets Status=VOIDED + Last Error="Voided from Stride Hub" on each eligible row.
+// Skip rules: not found; Status=PAID (refund in Stax first).
+
+function handleBatchVoidStaxInvoices_(payload) {
+  var qbInvoiceNos = (payload || {}).qbInvoiceNos;
+  if (!Array.isArray(qbInvoiceNos) || qbInvoiceNos.length === 0) {
+    return errorResponse_("qbInvoiceNos array is required and must be non-empty", "INVALID_PARAMS");
+  }
+
+  var result = api_newBatchResult_();
+  result.processed = qbInvoiceNos.length;
+
+  var ss = getStaxSpreadsheet_();
+  var invSheet = ss.getSheetByName("Invoices");
+  if (!invSheet) {
+    result.success = false;
+    result.message = "Invoices tab not found";
+    return jsonResponse_(result);
+  }
+
+  var invData = invSheet.getDataRange().getValues();
+  // Build lookup: qbInvoiceNo → rowIndex (1-based, like the sheet)
+  var rowByNo = {};
+  for (var r = 1; r < invData.length; r++) {
+    var qb = String(invData[r][0] || "").trim();
+    if (qb) rowByNo[qb] = r + 1;
+  }
+
+  for (var i = 0; i < qbInvoiceNos.length; i++) {
+    var id = String(qbInvoiceNos[i] || "").trim();
+    if (!id) { api_batchSkip_(result, qbInvoiceNos[i], "blank qbInvoiceNo"); continue; }
+    try {
+      var row1 = rowByNo[id];
+      if (!row1) { api_batchSkip_(result, id, "Not found"); continue; }
+      var currentStatus = String(invData[row1 - 1][8] || "").trim().toUpperCase();
+      if (currentStatus === "PAID") {
+        api_batchSkip_(result, id, "Cannot void a PAID invoice — refund in Stax dashboard first");
+        continue;
+      }
+      invSheet.getRange(row1, 9).setValue("VOIDED");
+      invSheet.getRange(row1, 11).setValue("Voided from Stride Hub");
+      result.succeeded++;
+    } catch (rowErr) {
+      api_batchError_(result, id, String(rowErr));
+    }
+  }
+
+  try { SpreadsheetApp.flush(); } catch (_) {}
+  try { CacheService.getScriptCache().remove("stax_invoices"); } catch (_) {}
+  try { stax_appendRunLog_(ss, "batchVoidStaxInvoices", "Voided " + result.succeeded + " invoice(s)", ""); } catch (_) {}
+
+  result.message = "Voided " + result.succeeded + " invoice(s)" +
+                   (result.skipped.length ? ", skipped " + result.skipped.length : "") +
+                   (result.failed ? ", failed " + result.failed : "");
+  return jsonResponse_(result);
+}
+
+// ─── handleBatchDeleteStaxInvoices_ ────────────────────────────────────────────
+// Payload: { qbInvoiceNos: string[] }
+// Sets Status=DELETED on each eligible row. Only PENDING invoices can be deleted.
+
+function handleBatchDeleteStaxInvoices_(payload) {
+  var qbInvoiceNos = (payload || {}).qbInvoiceNos;
+  if (!Array.isArray(qbInvoiceNos) || qbInvoiceNos.length === 0) {
+    return errorResponse_("qbInvoiceNos array is required and must be non-empty", "INVALID_PARAMS");
+  }
+
+  var result = api_newBatchResult_();
+  result.processed = qbInvoiceNos.length;
+
+  var ss = getStaxSpreadsheet_();
+  var invSheet = ss.getSheetByName("Invoices");
+  if (!invSheet) {
+    result.success = false;
+    result.message = "Invoices tab not found";
+    return jsonResponse_(result);
+  }
+
+  var invData = invSheet.getDataRange().getValues();
+  var rowByNo = {};
+  for (var r = 1; r < invData.length; r++) {
+    var qb = String(invData[r][0] || "").trim();
+    if (qb) rowByNo[qb] = r + 1;
+  }
+
+  for (var i = 0; i < qbInvoiceNos.length; i++) {
+    var id = String(qbInvoiceNos[i] || "").trim();
+    if (!id) { api_batchSkip_(result, qbInvoiceNos[i], "blank qbInvoiceNo"); continue; }
+    try {
+      var row1 = rowByNo[id];
+      if (!row1) { api_batchSkip_(result, id, "Not found"); continue; }
+      var currentStatus = String(invData[row1 - 1][8] || "").trim().toUpperCase();
+      if (currentStatus !== "PENDING") {
+        api_batchSkip_(result, id, "Can only delete PENDING invoices (current: " + currentStatus + ")");
+        continue;
+      }
+      invSheet.getRange(row1, 9).setValue("DELETED");
+      invSheet.getRange(row1, 11).setValue("Deleted from Stride Hub");
+      result.succeeded++;
+    } catch (rowErr) {
+      api_batchError_(result, id, String(rowErr));
+    }
+  }
+
+  try { SpreadsheetApp.flush(); } catch (_) {}
+  try { CacheService.getScriptCache().remove("stax_invoices"); } catch (_) {}
+  try { stax_appendRunLog_(ss, "batchDeleteStaxInvoices", "Deleted " + result.succeeded + " invoice(s)", ""); } catch (_) {}
+
+  result.message = "Deleted " + result.succeeded + " invoice(s)" +
+                   (result.skipped.length ? ", skipped " + result.skipped.length : "") +
+                   (result.failed ? ", failed " + result.failed : "");
+  return jsonResponse_(result);
+}
+
+// ─── handleBatchScheduleWillCalls_ ─────────────────────────────────────────────
+// Payload: { wcNumbers: string[], estimatedPickupDate: string }
+// Writes Estimated Pickup Date on each WC; auto-promotes Status Pending→Scheduled.
+
+function handleBatchScheduleWillCalls_(clientSheetId, payload) {
+  var wcNumbers = (payload || {}).wcNumbers;
+  var pickupDate = String((payload || {}).estimatedPickupDate || "").trim();
+  if (!Array.isArray(wcNumbers) || wcNumbers.length === 0) {
+    return errorResponse_("wcNumbers array is required and must be non-empty", "INVALID_PARAMS");
+  }
+  if (!pickupDate) {
+    return errorResponse_("estimatedPickupDate is required", "INVALID_PARAMS");
+  }
+
+  var result = api_newBatchResult_();
+  result.processed = wcNumbers.length;
+
+  var ss;
+  try { ss = SpreadsheetApp.openById(clientSheetId); }
+  catch (e) {
+    result.success = false;
+    result.message = "Cannot open client spreadsheet: " + e.message;
+    return jsonResponse_(result);
+  }
+
+  var wcSheet = ss.getSheetByName("Will_Calls");
+  if (!wcSheet) {
+    result.success = false;
+    result.message = "Will_Calls sheet not found";
+    return jsonResponse_(result);
+  }
+
+  var map = api_getHeaderMap_(wcSheet);
+  var idCol = map["WC Number"];
+  var dateCol = map["Estimated Pickup Date"];
+  var statusCol = map["Status"];
+  if (!idCol || !dateCol) {
+    result.success = false;
+    result.message = "Required columns missing on Will_Calls (WC Number, Estimated Pickup Date)";
+    return jsonResponse_(result);
+  }
+
+  var succeededIds = [];
+  for (var i = 0; i < wcNumbers.length; i++) {
+    var id = String(wcNumbers[i] || "").trim();
+    if (!id) { api_batchSkip_(result, wcNumbers[i], "blank wcNumber"); continue; }
+    try {
+      var row = api_findRowById_(wcSheet, idCol, id);
+      if (row < 2) { api_batchSkip_(result, id, "Not found"); continue; }
+      var currentStatus = statusCol ? String(wcSheet.getRange(row, statusCol).getValue() || "").trim() : "";
+      if (currentStatus === "Released" || currentStatus === "Cancelled") {
+        api_batchSkip_(result, id, "Cannot schedule — status is " + currentStatus);
+        continue;
+      }
+      wcSheet.getRange(row, dateCol).setValue(pickupDate);
+      if (statusCol && currentStatus === "Pending") {
+        wcSheet.getRange(row, statusCol).setValue("Scheduled");
+      }
+      result.succeeded++;
+      succeededIds.push(id);
+    } catch (rowErr) {
+      api_batchError_(result, id, String(rowErr));
+    }
+  }
+
+  try { SpreadsheetApp.flush(); } catch (_) {}
+  try { invalidateClientCache_(clientSheetId); } catch (_) {}
+  try { api_bumpSummaryVersion_(); } catch (_) {}
+
+  for (var w = 0; w < succeededIds.length; w++) {
+    try { resyncEntityToSupabase_("will_call", clientSheetId, succeededIds[w]); } catch (_) {}
+  }
+
+  result.message = "Scheduled " + result.succeeded + " will call(s) for " + pickupDate +
+                   (result.skipped.length ? ", skipped " + result.skipped.length : "") +
+                   (result.failed ? ", failed " + result.failed : "");
+  return jsonResponse_(result);
+}
+
+// ─── handleBatchRequestRepairQuote_ ────────────────────────────────────────────
+// Payload: { itemIds: string[], notes?: string }
+// Creates a new Repairs row per item (status Pending Quote).
+// Skip rules: blank id; inventory item not found.
+
+function handleBatchRequestRepairQuote_(clientSheetId, payload, callerEmail) {
+  var itemIds = (payload || {}).itemIds;
+  if (!Array.isArray(itemIds) || itemIds.length === 0) {
+    return errorResponse_("itemIds array is required and must be non-empty", "INVALID_PARAMS");
+  }
+  var notes = String((payload || {}).notes || "").trim();
+
+  var result = api_newBatchResult_();
+  result.processed = itemIds.length;
+
+  var ss;
+  try { ss = SpreadsheetApp.openById(clientSheetId); }
+  catch (e) {
+    result.success = false;
+    result.message = "Cannot open client spreadsheet: " + e.message;
+    return jsonResponse_(result);
+  }
+
+  var repairSheet = ss.getSheetByName("Repairs");
+  if (!repairSheet) {
+    result.success = false;
+    result.message = "Repairs sheet not found";
+    return jsonResponse_(result);
+  }
+
+  var repMap = api_getHeaderMap_(repairSheet);
+  var createdRepairIds = [];
+
+  for (var i = 0; i < itemIds.length; i++) {
+    var itemId = String(itemIds[i] || "").trim();
+    if (!itemId) { api_batchSkip_(result, itemIds[i], "blank itemId"); continue; }
+    try {
+      var invItem = api_findInventoryItem_(ss, itemId);
+      if (!invItem) { api_batchSkip_(result, itemId, "Inventory item not found"); continue; }
+
+      var now = new Date();
+      var repairId = "RPR-" + itemId + "-" + now.getTime();
+      var row = [];
+      // Build a row matching header order
+      var lastCol = repairSheet.getLastColumn();
+      for (var c = 0; c < lastCol; c++) row.push("");
+      function setCol(header, val) {
+        var col = repMap[header];
+        if (col) row[col - 1] = val;
+      }
+      setCol("Repair ID", repairId);
+      setCol("Item ID", itemId);
+      setCol("Status", "Pending Quote");
+      setCol("Created Date", now);
+      setCol("Created By", callerEmail || "");
+      setCol("Description", String(invItem["Description"] || ""));
+      setCol("Vendor", String(invItem["Vendor"] || ""));
+      setCol("Class", String(invItem["Class"] || ""));
+      setCol("Sidemark", String(invItem["Sidemark"] || ""));
+      setCol("Location", String(invItem["Location"] || ""));
+      setCol("Item Notes", String(invItem["Item Notes"] || ""));
+      if (notes) setCol("Repair Notes", notes);
+
+      repairSheet.appendRow(row);
+      result.succeeded++;
+      createdRepairIds.push(repairId);
+    } catch (rowErr) {
+      api_batchError_(result, itemId, String(rowErr));
+    }
+  }
+
+  try { SpreadsheetApp.flush(); } catch (_) {}
+  try { invalidateClientCache_(clientSheetId); } catch (_) {}
+  try { api_bumpSummaryVersion_(); } catch (_) {}
+
+  for (var w = 0; w < createdRepairIds.length; w++) {
+    try { resyncEntityToSupabase_("repair", clientSheetId, createdRepairIds[w]); } catch (_) {}
+  }
+
+  result.message = "Created " + result.succeeded + " repair quote request(s)" +
                    (result.skipped.length ? ", skipped " + result.skipped.length : "") +
                    (result.failed ? ", failed " + result.failed : "");
   return jsonResponse_(result);

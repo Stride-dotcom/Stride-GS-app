@@ -19,7 +19,7 @@
 import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react';
 import {
   Tag, Printer, Trash2, AlertTriangle, Loader2, MapPin, Package,
-  Save, RotateCcw, ChevronDown, ChevronUp, GripVertical, Eye, EyeOff,
+  Save, RotateCcw, ChevronDown, ChevronUp, GripVertical, Eye, EyeOff, Plus,
 } from 'lucide-react';
 import QRCode from 'qrcode';
 import { theme } from '../styles/theme';
@@ -411,7 +411,8 @@ export function Labels() {
   }, [apiClients]);
 
   const [cfg, setCfg] = useState<LabelsConfig>(() => loadConfig());
-  const [showSettings, setShowSettings] = useState(true);
+  // Collapse settings by default on mobile so input + preview fit above the fold.
+  const [showSettings, setShowSettings] = useState(() => !window.matchMedia('(max-width: 767px)').matches);
 
   // Data state
   const [rawItems, setRawItems] = useState('');
@@ -424,7 +425,11 @@ export function Labels() {
   const [locSearch, setLocSearch] = useState('');
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  useEffect(() => { textareaRef.current?.focus(); }, [cfg.kind]);
+  // Only auto-focus on desktop — focusing a textarea on mobile pops up the
+  // keyboard and hides the mode tabs / print button, confusing users.
+  useEffect(() => {
+    if (!isMobile) textareaRef.current?.focus();
+  }, [cfg.kind, isMobile]);
 
   const loadItems = useCallback(async () => {
     const ids = splitMultiline(rawItems);
@@ -536,6 +541,24 @@ export function Labels() {
 
   const sizeDef = LABEL_SIZES[cfg.size];
 
+  // Mode tab style (always visible at the top of the body)
+  const modeTabStyle = (active: boolean): React.CSSProperties => ({
+    flex: 1,
+    padding: isMobile ? '12px 10px' : '10px 14px',
+    fontSize: isMobile ? 14 : 13,
+    fontWeight: active ? 700 : 500,
+    background: active ? theme.colors.primary : '#fff',
+    color: active ? '#fff' : theme.colors.text,
+    border: `1px solid ${active ? theme.colors.primary : theme.colors.border}`,
+    cursor: 'pointer',
+    fontFamily: 'inherit',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    minHeight: isMobile ? 48 : undefined,
+  });
+
   return (
     <div style={s.page}>
       <div style={s.header} className="no-print">
@@ -544,29 +567,154 @@ export function Labels() {
         <span style={{ fontSize: 11, color: theme.colors.textMuted, marginLeft: 8 }}>
           {sizeDef.label} · {printCount} label{printCount !== 1 ? 's' : ''}
         </span>
-        <button style={{ ...s.btnPrimary, marginLeft: 'auto' }} onClick={print} disabled={printCount === 0}>
-          <Printer size={13} /> Print
+        {!isMobile && (
+          <button style={{ ...s.btnPrimary, marginLeft: 'auto' }} onClick={print} disabled={printCount === 0}>
+            <Printer size={13} /> Print {printCount > 0 ? `${printCount} label${printCount !== 1 ? 's' : ''}` : ''}
+          </button>
+        )}
+      </div>
+
+      {/* Mode tabs — always visible, big targets on mobile */}
+      <div className="no-print" style={{
+        display: 'flex', gap: 0,
+        padding: isMobile ? '10px 10px 0' : '12px 16px 0',
+        background: '#f8f9fa',
+        flexShrink: 0,
+      }}>
+        <button
+          style={{ ...modeTabStyle(cfg.kind === 'item'), borderRadius: '8px 0 0 8px', borderRight: 'none' }}
+          onClick={() => setCfg(c => ({ ...c, kind: 'item' }))}
+        >
+          <Package size={isMobile ? 16 : 14} /> Item labels
+        </button>
+        <button
+          style={{ ...modeTabStyle(cfg.kind === 'location'), borderRadius: '0 8px 8px 0' }}
+          onClick={() => setCfg(c => ({ ...c, kind: 'location' }))}
+        >
+          <MapPin size={isMobile ? 16 : 14} /> Location labels
         </button>
       </div>
 
       <div style={s.body} className="labels-body">
-        {/* LEFT column — controls */}
+        {/* LEFT column — controls.
+            Order on mobile (top → bottom):
+              1. Input panel (type IDs / pick locations)
+              2. Big Generate/Add button
+              3. Settings & fields (collapsible, collapsed by default on mobile)
+         */}
         <div className="no-print" style={{ display: 'flex', flexDirection: 'column', gap: 12, overflow: 'auto' }}>
-          {/* Settings toggle */}
+          {/* Input panel — FIRST on mobile so the action is visible */}
+          {cfg.kind === 'item' ? (
+            <div style={s.card}>
+              <div style={s.cardTitle}><Package size={13} /> Item IDs to print</div>
+              <textarea
+                ref={textareaRef}
+                value={rawItems}
+                onChange={e => setRawItems(e.target.value)}
+                placeholder={isMobile ? "Type or paste item IDs, one per line\ne.g.\n62243\n62244\n62245" : "Paste item IDs, one per line…"}
+                style={{ ...s.textarea, minHeight: isMobile ? 110 : s.textarea.minHeight }}
+              />
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 8, gap: 8 }}>
+                <button style={s.btnDanger} onClick={clearItems} disabled={!itemResults.length && !rawItems}>
+                  <Trash2 size={12} /> Clear
+                </button>
+                <button
+                  style={{
+                    ...s.btnPrimary,
+                    padding: isMobile ? '12px 20px' : s.btnPrimary.padding,
+                    fontSize: isMobile ? 15 : s.btnPrimary.fontSize,
+                    flex: isMobile ? 1 : undefined,
+                    marginLeft: isMobile ? 8 : 0,
+                  }}
+                  onClick={loadItems}
+                  disabled={!rawItems.trim() || itemLoading}
+                >
+                  {itemLoading ? <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} /> : <Eye size={14} />}
+                  {itemLoading ? 'Loading…' : 'Generate labels'}
+                </button>
+              </div>
+              {itemResults.length > 0 && (
+                <div style={{ marginTop: 10, fontSize: 12, color: '#15803D', display: 'flex', alignItems: 'center', gap: 4 }}>
+                  <Eye size={11} /> {itemResults.length} found — scroll down to preview & print
+                </div>
+              )}
+              {itemNotFound.length > 0 && (
+                <div style={{ marginTop: 6, padding: '8px 10px', background: '#FEF2F2', border: '1px solid #FCA5A5', borderRadius: 6, fontSize: 11, color: '#DC2626' }}>
+                  <AlertTriangle size={11} style={{ verticalAlign: 'middle', marginRight: 4 }} />
+                  Not found: {itemNotFound.join(', ')}
+                </div>
+              )}
+            </div>
+          ) : (
+            <>
+              <div style={s.card}>
+                <div style={s.cardTitle}><MapPin size={13} /> Add location codes</div>
+                <textarea
+                  value={rawLocs}
+                  onChange={e => setRawLocs(e.target.value)}
+                  placeholder={isMobile ? "Type or paste codes, one per line\ne.g.\nA-01\nB-02\nWW3" : "Paste codes, one per line…"}
+                  style={{ ...s.textarea, minHeight: isMobile ? 80 : 60 }}
+                />
+                <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 6 }}>
+                  <button
+                    style={{ ...s.btnPrimary, padding: isMobile ? '12px 20px' : s.btnPrimary.padding, fontSize: isMobile ? 15 : s.btnPrimary.fontSize }}
+                    onClick={addLocFromInput}
+                    disabled={!rawLocs.trim()}
+                  >
+                    <Plus size={14} /> Add to list
+                  </button>
+                </div>
+              </div>
+
+              <div style={{ ...s.card, flex: 1, minHeight: 0 }}>
+                <div style={s.cardTitle}>
+                  Pick from existing ({locationNames.length})
+                  <button style={{ ...s.btnDanger, marginLeft: 'auto' }} onClick={clearLocs} disabled={!selectedLocs.length}>
+                    <Trash2 size={11} /> Clear
+                  </button>
+                </div>
+                <input
+                  type="text"
+                  value={locSearch}
+                  onChange={e => setLocSearch(e.target.value)}
+                  placeholder="Search…"
+                  style={{ width: '100%', padding: '7px 10px', border: `1px solid ${theme.colors.border}`, borderRadius: 6, fontSize: 12, marginBottom: 6, outline: 'none' }}
+                />
+                <div style={{ flex: 1, overflow: 'auto', border: `1px solid ${theme.colors.borderLight}`, borderRadius: 6 }}>
+                  {filteredLocs.map(code => {
+                    const on = selectedLocs.includes(code);
+                    return (
+                      <div key={code} onClick={() => toggleLoc(code)} style={{
+                        padding: '5px 8px', borderBottom: `1px solid ${theme.colors.borderLight}`,
+                        fontSize: 12, cursor: 'pointer',
+                        background: on ? '#EFF6FF' : '#fff',
+                        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                      }}>
+                        <span style={{ fontFamily: 'monospace', fontWeight: on ? 600 : 400 }}>{code}</span>
+                        {notesByCode[code] && <span style={{ color: theme.colors.textMuted, fontSize: 10 }}>{notesByCode[code]}</span>}
+                      </div>
+                    );
+                  })}
+                </div>
+                {selectedLocs.length > 0 && (
+                  <div style={{ marginTop: 6, fontSize: 12, color: '#15803D', display: 'flex', alignItems: 'center', gap: 4 }}>
+                    <Eye size={11} /> {selectedLocs.length} selected — scroll down to preview & print
+                  </div>
+                )}
+              </div>
+            </>
+          )}
+
+          {/* Settings & fields — moved BELOW the input panel so the
+              textarea + Generate button are immediately visible. Collapsed
+              by default on mobile. */}
           <div style={s.card}>
             <div style={{ ...s.cardTitle, marginBottom: showSettings ? 10 : 0, cursor: 'pointer' }} onClick={() => setShowSettings(v => !v)}>
-              Label settings
+              Label settings & fields
               {showSettings ? <ChevronUp size={13} style={{ marginLeft: 'auto' }} /> : <ChevronDown size={13} style={{ marginLeft: 'auto' }} />}
             </div>
             {showSettings && (
               <>
-                <div style={s.row}>
-                  <span style={s.label}>Type</span>
-                  <select value={cfg.kind} onChange={e => setCfg(c => ({ ...c, kind: e.target.value as LabelKind }))} style={s.select}>
-                    <option value="item">Item</option>
-                    <option value="location">Location</option>
-                  </select>
-                </div>
                 <div style={s.row}>
                   <span style={s.label}>Size</span>
                   <select value={cfg.size} onChange={e => setCfg(c => ({ ...c, size: e.target.value as LabelSizeKey }))} style={s.select}>
@@ -606,87 +754,6 @@ export function Labels() {
               </>
             )}
           </div>
-
-          {/* Input panel */}
-          {cfg.kind === 'item' ? (
-            <div style={s.card}>
-              <div style={s.cardTitle}><Package size={13} /> Item IDs</div>
-              <textarea
-                ref={textareaRef}
-                value={rawItems}
-                onChange={e => setRawItems(e.target.value)}
-                placeholder="Paste item IDs, one per line…"
-                style={s.textarea}
-              />
-              <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 8, gap: 6 }}>
-                <button style={s.btnDanger} onClick={clearItems} disabled={!itemResults.length && !rawItems}>
-                  <Trash2 size={11} /> Clear
-                </button>
-                <button style={s.btnPrimary} onClick={loadItems} disabled={!rawItems.trim() || itemLoading}>
-                  {itemLoading ? <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} /> : null}
-                  {itemLoading ? 'Loading…' : 'Generate labels'}
-                </button>
-              </div>
-              {itemResults.length > 0 && (
-                <div style={{ marginTop: 10, fontSize: 12, color: '#15803D', display: 'flex', alignItems: 'center', gap: 4 }}>
-                  <Eye size={11} /> {itemResults.length} found
-                </div>
-              )}
-              {itemNotFound.length > 0 && (
-                <div style={{ marginTop: 6, padding: '7px 10px', background: '#FEF2F2', border: '1px solid #FCA5A5', borderRadius: 6, fontSize: 11, color: '#DC2626' }}>
-                  <AlertTriangle size={11} style={{ verticalAlign: 'middle', marginRight: 4 }} />
-                  Not found: {itemNotFound.join(', ')}
-                </div>
-              )}
-            </div>
-          ) : (
-            <>
-              <div style={s.card}>
-                <div style={s.cardTitle}><MapPin size={13} /> Add location codes</div>
-                <textarea value={rawLocs} onChange={e => setRawLocs(e.target.value)} placeholder="Paste codes, one per line…" style={{ ...s.textarea, minHeight: 60 }} />
-                <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 6 }}>
-                  <button style={s.btnPrimary} onClick={addLocFromInput} disabled={!rawLocs.trim()}>Add</button>
-                </div>
-              </div>
-
-              <div style={{ ...s.card, flex: 1, minHeight: 0 }}>
-                <div style={s.cardTitle}>
-                  Pick from existing ({locationNames.length})
-                  <button style={{ ...s.btnDanger, marginLeft: 'auto' }} onClick={clearLocs} disabled={!selectedLocs.length}>
-                    <Trash2 size={11} /> Clear
-                  </button>
-                </div>
-                <input
-                  type="text"
-                  value={locSearch}
-                  onChange={e => setLocSearch(e.target.value)}
-                  placeholder="Search…"
-                  style={{ width: '100%', padding: '7px 10px', border: `1px solid ${theme.colors.border}`, borderRadius: 6, fontSize: 12, marginBottom: 6, outline: 'none' }}
-                />
-                <div style={{ flex: 1, overflow: 'auto', border: `1px solid ${theme.colors.borderLight}`, borderRadius: 6 }}>
-                  {filteredLocs.map(code => {
-                    const on = selectedLocs.includes(code);
-                    return (
-                      <div key={code} onClick={() => toggleLoc(code)} style={{
-                        padding: '5px 8px', borderBottom: `1px solid ${theme.colors.borderLight}`,
-                        fontSize: 12, cursor: 'pointer',
-                        background: on ? '#EFF6FF' : '#fff',
-                        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-                      }}>
-                        <span style={{ fontFamily: 'monospace', fontWeight: on ? 600 : 400 }}>{code}</span>
-                        {notesByCode[code] && <span style={{ color: theme.colors.textMuted, fontSize: 10 }}>{notesByCode[code]}</span>}
-                      </div>
-                    );
-                  })}
-                </div>
-                {selectedLocs.length > 0 && (
-                  <div style={{ marginTop: 6, fontSize: 12, color: '#15803D', display: 'flex', alignItems: 'center', gap: 4 }}>
-                    <Eye size={11} /> {selectedLocs.length} selected
-                  </div>
-                )}
-              </div>
-            </>
-          )}
         </div>
 
         {/* RIGHT column — preview */}
@@ -722,19 +789,51 @@ export function Labels() {
         </div>
       </div>
 
+      {/* Mobile sticky bottom action bar — always-visible Print button */}
+      {isMobile && (
+        <div className="no-print" style={{
+          flexShrink: 0,
+          padding: '10px 12px',
+          background: '#fff',
+          borderTop: `1px solid ${theme.colors.border}`,
+          boxShadow: '0 -2px 10px rgba(0,0,0,0.06)',
+          display: 'flex',
+          gap: 8,
+        }}>
+          <button
+            style={{
+              ...s.btnPrimary,
+              flex: 1,
+              padding: '14px',
+              fontSize: 15,
+              opacity: printCount === 0 ? 0.4 : 1,
+              cursor: printCount === 0 ? 'not-allowed' : 'pointer',
+            }}
+            onClick={print}
+            disabled={printCount === 0}
+          >
+            <Printer size={16} /> {printCount === 0 ? 'Print (no labels yet)' : `Print ${printCount} label${printCount !== 1 ? 's' : ''}`}
+          </button>
+        </div>
+      )}
+
       <style>{`
         @keyframes spin { to { transform: rotate(360deg) } }
         @media print {
+          html, body { background: #fff !important; margin: 0 !important; padding: 0 !important; height: auto !important; }
           .no-print { display: none !important; }
-          body { background: #fff !important; }
-          .labels-body { grid-template-columns: 1fr !important; padding: 0 !important; }
-          .labels-preview-container { background: #fff !important; padding: 0 !important; border-radius: 0 !important; }
-          .labels-grid { gap: 0 !important; }
+          /* Kill every app chrome element — sidebars, topbar, page containers */
+          #root > *:not(.stride-print-container),
+          aside, nav, header.app-topbar { display: none !important; }
+          .labels-body { grid-template-columns: 1fr !important; padding: 0 !important; display: block !important; overflow: visible !important; }
+          .labels-preview-container { background: #fff !important; padding: 0 !important; border-radius: 0 !important; overflow: visible !important; }
+          .labels-grid { gap: 0 !important; display: block !important; }
           .stride-label {
             break-inside: avoid; page-break-inside: avoid;
             border: none !important; margin: 0;
             page-break-after: always;
           }
+          .stride-label:last-child { page-break-after: auto; }
           @page { margin: 0; }
         }
       `}</style>
