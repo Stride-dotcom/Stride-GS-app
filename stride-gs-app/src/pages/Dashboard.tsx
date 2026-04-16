@@ -133,6 +133,7 @@ function TasksTab({ tasks, onNavigate }: { tasks: SummaryTask[]; onNavigate: (ta
   const colT = createColumnHelper<SummaryTask>();
   const { sorting, setSorting, colVis, setColVis, columnOrder, setColumnOrder } = useTablePreferences('dashboard-tasks', [{ id: 'taskCreated', desc: true }], {}, TASK_DEFAULT_ORDER);
   const [statusFilters, setStatusFilters] = useState<string[]>(DEFAULT_TASK_STATUSES);
+  const [typeFilters, setTypeFilters] = useState<string[]>([]);
   const [showCols, setShowCols] = useState(false);
   const [dragColId, setDragColId] = useState<string | null>(null);
   const [dragOverColId, setDragOverColId] = useState<string | null>(null);
@@ -140,8 +141,14 @@ function TasksTab({ tasks, onNavigate }: { tasks: SummaryTask[]; onNavigate: (ta
   useEffect(() => { const h = (e: MouseEvent) => { if (menuRef.current && !menuRef.current.contains(e.target as Node)) setShowCols(false); }; document.addEventListener('mousedown', h); return () => document.removeEventListener('mousedown', h); }, []);
 
   const allStatuses = useMemo(() => [...new Set(tasks.map(t => t.status))].sort(), [tasks]);
+  const allTypes = useMemo(() => [...new Set(tasks.map(t => t.taskType).filter(Boolean))].sort(), [tasks]);
 
-  const filtered = useMemo(() => statusFilters.length === 0 ? tasks : tasks.filter(t => statusFilters.includes(t.status)), [tasks, statusFilters]);
+  const filtered = useMemo(() => {
+    let result = tasks;
+    if (statusFilters.length > 0) result = result.filter(t => statusFilters.includes(t.status));
+    if (typeFilters.length > 0) result = result.filter(t => typeFilters.includes(t.taskType));
+    return result;
+  }, [tasks, statusFilters, typeFilters]);
 
   const columns = useMemo(() => [
     colT.accessor('taskId', { id: 'taskId', header: 'Task ID', size: 110, cell: i => <span style={{ fontWeight: 600, fontSize: 12, fontFamily: 'monospace', color: theme.colors.orange }}>{i.getValue()}</span> }),
@@ -170,17 +177,30 @@ function TasksTab({ tasks, onNavigate }: { tasks: SummaryTask[]; onNavigate: (ta
   const { containerRef, virtualRows, rows: allRows, totalHeight } = useVirtualRows(table);
 
   const toggleStatus = (s: string) => setStatusFilters(prev => prev.includes(s) ? prev.filter(x => x !== s) : [...prev, s]);
+  const toggleType = (t: string) => setTypeFilters(prev => prev.includes(t) ? prev.filter(x => x !== t) : [...prev, t]);
 
   return (
     <div>
-      {/* Toolbar */}
-      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 10 }}>
+      {/* Toolbar — Status filter row */}
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 4 }}>
         <div style={{ fontSize: 12, color: theme.colors.textMuted, fontWeight: 500 }}>Status:</div>
         {allStatuses.map(s => (
           <button key={s} onClick={() => toggleStatus(s)} style={chip(statusFilters.includes(s))}>{s}</button>
         ))}
         {statusFilters.length > 0 && (
           <button onClick={() => setStatusFilters([])} style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '4px 10px', borderRadius: 20, fontSize: 11, fontWeight: 500, border: `1px solid ${theme.colors.border}`, background: 'transparent', cursor: 'pointer', color: theme.colors.textMuted }}>
+            <X size={11} /> Clear
+          </button>
+        )}
+      </div>
+      {/* Toolbar — Type filter row */}
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 10 }}>
+        <div style={{ fontSize: 12, color: theme.colors.textMuted, fontWeight: 500 }}>Type:</div>
+        {allTypes.map(t => (
+          <button key={t} onClick={() => toggleType(t)} style={chip(typeFilters.includes(t))}>{TASK_TYPE_LABELS[t] || t}</button>
+        ))}
+        {typeFilters.length > 0 && (
+          <button onClick={() => setTypeFilters([])} style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '4px 10px', borderRadius: 20, fontSize: 11, fontWeight: 500, border: `1px solid ${theme.colors.border}`, background: 'transparent', cursor: 'pointer', color: theme.colors.textMuted }}>
             <X size={11} /> Clear
           </button>
         )}
