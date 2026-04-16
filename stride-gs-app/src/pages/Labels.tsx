@@ -27,6 +27,7 @@ import { useLocations } from '../hooks/useLocations';
 import { useClients } from '../hooks/useClients';
 import { fetchItemsByIdsFromSupabase, type ResolvedItem } from '../lib/supabaseQueries';
 import { useAuth } from '../contexts/AuthContext';
+import { useIsMobile } from '../hooks/useIsMobile';
 
 // ── Config types ───────────────────────────────────────────────────────
 type LabelKind = 'item' | 'location';
@@ -169,29 +170,40 @@ function useQrDataUrls(payloads: string[], size: number, enabled: boolean) {
 }
 
 // ── Styles ─────────────────────────────────────────────────────────────
-const s = {
-  page: { display: 'flex', flexDirection: 'column' as const, height: '100%', fontFamily: theme.typography.fontFamily, background: '#f8f9fa' },
-  header: { display: 'flex', alignItems: 'center', gap: 10, padding: '14px 20px', borderBottom: `1px solid ${theme.colors.border}`, background: '#fff', flexShrink: 0 },
-  body: { flex: 1, overflow: 'auto', padding: 16, display: 'grid', gridTemplateColumns: '360px 1fr', gap: 16, minHeight: 0 } as React.CSSProperties,
-  card: { background: '#fff', border: `1px solid ${theme.colors.border}`, borderRadius: 10, padding: 14, display: 'flex', flexDirection: 'column' as const },
-  cardTitle: { fontSize: 12, fontWeight: 600, color: theme.colors.text, textTransform: 'uppercase' as const, letterSpacing: '0.04em', marginBottom: 8, display: 'flex', alignItems: 'center', gap: 8 },
-  textarea: { width: '100%', minHeight: 80, padding: '8px 10px', border: `1px solid ${theme.colors.border}`, borderRadius: 6, fontSize: 13, fontFamily: 'monospace', outline: 'none', resize: 'vertical' as const },
-  btnPrimary: { padding: '8px 14px', fontSize: 13, fontWeight: 600, background: theme.colors.primary, color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontFamily: 'inherit', display: 'inline-flex', alignItems: 'center', gap: 5, justifyContent: 'center' as const },
-  btnSecondary: { padding: '6px 12px', fontSize: 12, fontWeight: 500, background: '#fff', color: theme.colors.text, border: `1px solid ${theme.colors.border}`, borderRadius: 6, cursor: 'pointer', fontFamily: 'inherit', display: 'inline-flex', alignItems: 'center', gap: 4 },
-  btnDanger: { padding: '6px 12px', fontSize: 12, fontWeight: 500, background: '#fff', color: '#DC2626', border: '1px solid #FCA5A5', borderRadius: 6, cursor: 'pointer', fontFamily: 'inherit', display: 'inline-flex', alignItems: 'center', gap: 4 },
-  row: { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 } as React.CSSProperties,
-  label: { fontSize: 11, fontWeight: 500, textTransform: 'uppercase' as const, letterSpacing: '0.04em', color: theme.colors.textMuted, flex: '0 0 auto', minWidth: 72 },
-  select: { flex: 1, padding: '6px 8px', border: `1px solid ${theme.colors.border}`, borderRadius: 6, fontSize: 13, background: '#fff', fontFamily: 'inherit', cursor: 'pointer' } as React.CSSProperties,
-  toggleLabel: { display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, cursor: 'pointer', userSelect: 'none' as const },
-  fieldRow: (enabled: boolean, dragging: boolean) => ({
-    display: 'grid', gridTemplateColumns: '18px 20px 1fr 80px',
-    alignItems: 'center', gap: 8, padding: '5px 6px',
-    borderRadius: 4, cursor: 'grab',
-    background: dragging ? '#EFF6FF' : '#fff',
-    opacity: enabled ? 1 : 0.5,
-  }) as React.CSSProperties,
-  sectionHeading: { fontSize: 11, fontWeight: 600, textTransform: 'uppercase' as const, letterSpacing: '0.04em', color: theme.colors.textMuted, marginTop: 8, marginBottom: 4 } as React.CSSProperties,
-};
+function makeStyles(isMobile: boolean) {
+  return {
+    page: { display: 'flex', flexDirection: 'column' as const, height: '100%', fontFamily: theme.typography.fontFamily, background: '#f8f9fa' },
+    header: { display: 'flex', alignItems: 'center', gap: 10, padding: isMobile ? '10px 14px' : '14px 20px', borderBottom: `1px solid ${theme.colors.border}`, background: '#fff', flexShrink: 0, flexWrap: 'wrap' as const },
+    body: {
+      flex: 1, overflow: 'auto',
+      padding: isMobile ? 10 : 16,
+      display: isMobile ? 'flex' : 'grid',
+      flexDirection: isMobile ? ('column' as const) : undefined,
+      gridTemplateColumns: isMobile ? undefined : '360px 1fr',
+      gap: isMobile ? 10 : 16,
+      minHeight: 0,
+    } as React.CSSProperties,
+    card: { background: '#fff', border: `1px solid ${theme.colors.border}`, borderRadius: 10, padding: isMobile ? 10 : 14, display: 'flex', flexDirection: 'column' as const },
+    cardTitle: { fontSize: 12, fontWeight: 600, color: theme.colors.text, textTransform: 'uppercase' as const, letterSpacing: '0.04em', marginBottom: 8, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' as const },
+    textarea: { width: '100%', minHeight: isMobile ? 70 : 80, padding: '10px 12px', border: `1px solid ${theme.colors.border}`, borderRadius: 6, fontSize: 16 /* prevents iOS zoom */, fontFamily: 'monospace', outline: 'none', resize: 'vertical' as const, boxSizing: 'border-box' as const },
+    btnPrimary: { padding: isMobile ? '10px 16px' : '8px 14px', fontSize: 13, fontWeight: 600, background: theme.colors.primary, color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontFamily: 'inherit', display: 'inline-flex', alignItems: 'center', gap: 5, justifyContent: 'center' as const, minHeight: isMobile ? 40 : undefined },
+    btnSecondary: { padding: isMobile ? '9px 14px' : '6px 12px', fontSize: 12, fontWeight: 500, background: '#fff', color: theme.colors.text, border: `1px solid ${theme.colors.border}`, borderRadius: 6, cursor: 'pointer', fontFamily: 'inherit', display: 'inline-flex', alignItems: 'center', gap: 4, minHeight: isMobile ? 38 : undefined },
+    btnDanger: { padding: isMobile ? '9px 14px' : '6px 12px', fontSize: 12, fontWeight: 500, background: '#fff', color: '#DC2626', border: '1px solid #FCA5A5', borderRadius: 6, cursor: 'pointer', fontFamily: 'inherit', display: 'inline-flex', alignItems: 'center', gap: 4, minHeight: isMobile ? 38 : undefined },
+    row: { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 } as React.CSSProperties,
+    label: { fontSize: 11, fontWeight: 500, textTransform: 'uppercase' as const, letterSpacing: '0.04em', color: theme.colors.textMuted, flex: '0 0 auto', minWidth: 72 },
+    select: { flex: 1, padding: isMobile ? '9px 10px' : '6px 8px', border: `1px solid ${theme.colors.border}`, borderRadius: 6, fontSize: isMobile ? 15 : 13, background: '#fff', fontFamily: 'inherit', cursor: 'pointer' } as React.CSSProperties,
+    toggleLabel: { display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, cursor: 'pointer', userSelect: 'none' as const, padding: isMobile ? '6px 0' : 0, minHeight: isMobile ? 36 : undefined },
+    fieldRow: (enabled: boolean, dragging: boolean) => ({
+      display: 'grid', gridTemplateColumns: isMobile ? '24px 26px 1fr 90px' : '18px 20px 1fr 80px',
+      alignItems: 'center', gap: 8, padding: isMobile ? '8px 6px' : '5px 6px',
+      borderRadius: 4, cursor: 'grab',
+      background: dragging ? '#EFF6FF' : '#fff',
+      opacity: enabled ? 1 : 0.5,
+      minHeight: isMobile ? 40 : undefined,
+    }) as React.CSSProperties,
+    sectionHeading: { fontSize: 11, fontWeight: 600, textTransform: 'uppercase' as const, letterSpacing: '0.04em', color: theme.colors.textMuted, marginTop: 8, marginBottom: 4 } as React.CSSProperties,
+  };
+}
 
 // ── Field editor (sortable list with toggle + size) ────────────────────
 interface FieldEditorProps {
@@ -200,6 +212,8 @@ interface FieldEditorProps {
 }
 
 function FieldEditor({ fields, onChange }: FieldEditorProps) {
+  const { isMobile } = useIsMobile();
+  const s = useMemo(() => makeStyles(isMobile), [isMobile]);
   const [dragIdx, setDragIdx] = useState<number | null>(null);
   const [dragOverIdx, setDragOverIdx] = useState<number | null>(null);
 
@@ -384,6 +398,8 @@ function Label({
 // ── Main ────────────────────────────────────────────────────────────────
 export function Labels() {
   const { user } = useAuth();
+  const { isMobile } = useIsMobile();
+  const s = useMemo(() => makeStyles(isMobile), [isMobile]);
   const isStaff = user?.role === 'admin' || user?.role === 'staff';
   const { apiClients } = useClients();
   const { locations, locationNames } = useLocations();
