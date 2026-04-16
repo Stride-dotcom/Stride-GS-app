@@ -28,10 +28,11 @@ Historical and rarely-needed reference material has been moved to `Docs/Archive/
 | `Docs/Archive/Architectural_Decisions_Log.md` | Full numbered list of 53 decisions — the "why" behind feature implementations |
 | `Docs/Archive/Performance_Track_History.md` | Completed performance phases 1-3 with version numbers |
 
-**DispatchTrack integration docs (active):**
+**Active build plans:**
 | File | When to read |
 |---|---|
 | `Docs/DT_Integration_Build_Plan.md` | Full DT build plan — all phases, locked decisions, table schema, RLS summary, open questions |
+| `Docs/Optimistic_Updates_And_Payments_Supabase_Plan.md` | Session-68 planned work: optimistic UI updates for every bulk action + Payments Supabase mirror (not started yet) |
 
 Companion living doc: **`Docs/Stride_GS_App_Build_Status.md`** — current session changes, what's next, feature parity matrix.
 
@@ -475,7 +476,7 @@ These are the top decisions that affect code generation on every task. For the f
 
 ## Current Versions
 
-- **StrideAPI.gs:** v38.52.4 (Web App v268)
+- **StrideAPI.gs:** v38.58.0 (Web App v274) — session 68: server-side batch endpoints, claims/users/marketing/campaigns/templates/settings Supabase caches, TRANSFER_RECEIVED email fix
 - **Import.gs (client):** v4.3.0 — adds Reference column mapping (rolled out to all 47 active clients, session 64)
 - **Emails.gs (client):** v4.2.0 (rolled out to all 47 active clients)
 - **WillCalls.gs (client):** v4.3.0 — Item ID / Vendor / Description / Reference columns on completed-WC email

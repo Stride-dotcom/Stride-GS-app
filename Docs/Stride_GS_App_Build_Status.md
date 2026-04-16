@@ -1,7 +1,7 @@
 # Stride GS App — Build Status & Continuation Guide
 
-**Last updated:** 2026-04-15 (session 67 — DT Phase 1b/1c: Delivery Availability Calendar tab (all roles) + dt-webhook-ingest Edge Function live)
-**StrideAPI.gs:** v38.53.0 (Web App v269)
+**Last updated:** 2026-04-16 (session 68 — Supabase caches for Claims/Users/Marketing + server-side batch endpoints + many bug fixes)
+**StrideAPI.gs:** v38.58.0 (Web App v274)
 **Import.gs (client):** v4.3.0 (rolled out to all 47 active clients; Reference column now imported)
 **Emails.gs (client):** v4.3.0 (rolled out to all 47 active clients — email deep links CTA button)
 **Shipments.gs (client):** v4.2.1 (rolled out to all 47 active clients — SHIPMENT_RECEIVED uses standalone /#/shipments/:shipmentNo)
@@ -75,9 +75,71 @@ Login, Dashboard, Inventory, Receiving, Shipments, Tasks, Repairs, Will Calls, B
 
 ---
 
-## RECENT CHANGES (2026-04-15 session 67)
+## RECENT CHANGES (2026-04-16 session 68)
 
-### Session 67: DT Phase 1b (Delivery page) + Phase 1c (webhook ingest Edge Function)
+### Session 68: Supabase caches everywhere + server-side batch endpoints + tab-close safety
+
+**Supabase read-cache expansion (5 new mirror tables):**
+- `claims` — all claim fields; RLS admin/staff see all, client sees own via `company_client_name` → clients join. Write-through in `handleCreateClaim_`, `handleUpdateClaim_`, `handleCloseClaim_`, `handleVoidClaim_`, `handleReopenClaim_`, `handleFirstReviewClaim_`, `handleSendClaimDenial_`, `handleGenerateClaimSettlement_`, `handleUploadSignedSettlement_`. Seeded (3 rows).
+- `cb_users` — email-keyed; admin/staff RLS only. Write-through in `handleCreateUser_`, `handleUpdateUser_`, `handleDeleteUser_` (DELETE). Seeded (124 rows). Also speeds up auth lookups via `useUsers`.
+- `marketing_contacts` — email-keyed; admin/staff RLS; server-side filter + search + pagination (ILIKE multi-field, page/pageSize via `.range()`). Write-through in 5 mutation handlers (create/import/update/suppress/unsuppress). Seeded (1,635 rows).
+- `marketing_campaigns` — campaign_id-keyed; write-through in 7 handlers (create/update/activate/pause/complete/runNow/delete). Seeded (1 row).
+- `marketing_templates` — name-keyed; write-through in create/update. Seeded (24 rows).
+- `marketing_settings` — singleton (id=1); write-through in updateSettings.
+
+**Marketing Dashboard:** now computes stats entirely from Supabase aggregates (contacts counts + rolling campaign totals). Gmail quota still GAS-only (sentinel -1). Drops Marketing page loads from 2-5 min (was bugged by infinite loop — fixed) or 2-5s (GAS baseline) to ~50ms.
+
+**Marketing infinite-loop bugfix:**
+- 8 `useApiData` call sites across `Marketing.tsx` were passing new arrow functions per render — React fired and canceled 13,000+ requests per page load. All wrapped in `useCallback` with proper dep arrays. One-line fix, massive impact.
+
+**Claims page + Settings Users:** load via Supabase-first with GAS fallback, matching the 6 existing entity tables.
+
+**Server-side batch endpoints (eliminate tab-close partial completion, v38.58.0):**
+- Added 4 new batch handlers following the `handleBatchCancelTasks_` template:
+  - `batchVoidStaxInvoices` — Payments Bulk Void
+  - `batchDeleteStaxInvoices` — Payments Bulk Delete (invoice + review panel)
+  - `batchScheduleWillCalls` — Will Calls Bulk Schedule
+  - `batchRequestRepairQuote` — Inventory Bulk Request Repair Quote (both bar + mobile FAB)
+- 4 React call sites rewired: one HTTP call instead of N, single result modal.
+- 4 heavy-side-effect bulks kept as `runBatchLoop` but upgraded: Payments Bulk Charge (2 Stax API calls + real money), Billing Create Invoices (Drive PDF + email), WillCalls Bulk Release, Repairs Bulk Send Quotes. All now show `<BatchProgress>` overlay with `⚠ Keep this page open` inline warning + `<BulkResultSummary>` modal afterward.
+- Payments → Bulk Charge has red-flag confirm dialog emphasizing real money before starting.
+
+**Settings maintenance "keep page open" warnings:**
+- Bulk Sync to Supabase, Purge Inactive Clients, and per-client sync banner all now show amber "⚠ Keep this page open" callouts. The full-sync is 15-45 min browser-driven; closing tab mid-flight leaves it partial.
+- `BatchProgress` component gained the inline warning too.
+
+**Password reset UX fix:**
+- Expired reset link was firing Supabase `SIGNED_OUT` → silent redirect to Login with no explanation. Added `recovery_expired` AuthState variant + SetNewPassword UI branch. User now sees "Link Expired — Request new link" instead.
+- Root cause found separately: missing `https://www.mystridehub.com` (with www) in Supabase Auth → URL Configuration → Redirect URLs allowlist. Added — reset flow works end-to-end.
+
+**TRANSFER_RECEIVED email fix (v38.54.1):**
+- Bug since shipping: `api_sendTemplateEmail_` was called with `destSS` (Spreadsheet object) as settings arg and `""` as recipient → immediate `"No recipient email address"` error → email never sent. Now passes `destSettings` + merged `CLIENT_EMAIL`/`NOTIFICATION_EMAILS` with explicit skip-reason warnings on the response so future failures are visible.
+
+**Dashboard task type filter (Tasks tab):**
+- Small dropdown on Tasks tab button showing all 19 service types by **name** (not code — Receiving, Inspection, Assembly, Repair (Flat), etc.) from Master Price List seed list.
+- Multi-select checkboxes + Select All default; persisted per user in localStorage (`stride_dashboard_typeFilter_{email}`).
+- Tab badge count reflects filter.
+
+**Client dropdown leak fix:**
+- Regression: client-role users on Inventory/Tasks/Repairs/WillCalls/Shipments/Claims pages saw the full client list in the Client dropdown (selecting another client returned empty data, but the names were exposed). Added `dropdownClientNames` memo that filters `clientNames` to `user.accessibleClientNames` when `role === 'client'`.
+
+**Fragile code guard comments:**
+- Inventory/Tasks/Repairs/WillCalls/Shipments/Dashboard page components + `FolderButton.tsx` got prominent `⚠ FRAGILE` warning comments after repeated React #300 / folder-button regressions. CLAUDE.md also gained two new must-not-do rules.
+
+**Rollout + deploy for all 47 clients:**
+- `syncAutocompleteDb` action failures on Settings maintenance (Unknown action + HTTP 404) resolved by rolling out and redeploying all clients. All 47 at version 6–22+.
+
+**Live artifacts after session 68:**
+- StrideAPI.gs v38.58.0 — Web App v274
+- React bundles: latest commit on `origin/main` (GitHub Pages dist)
+- Source commits on `origin/source`: multiple feature commits this session
+- Supabase: 5 new migration files committed under `stride-gs-app/supabase/migrations/` (claims, users, marketing_contacts, marketing_campaigns+templates+settings, locations) + corresponding tables with RLS + seeded data
+
+**Build guardrails held:** `scripts/build.js` continues to refuse stale bundles. All builds passed module-count (1,939 modules) + bundle-size (~1.6 MB) sanity checks.
+
+---
+
+### Session 67 archive: DT Phase 1b/1c (Delivery Availability Calendar + webhook ingest)
 
 **Phase 1b — Delivery page (all roles):**
 - `Orders.tsx` now has two tabs: **Orders** (admin-only, DT orders table) + **Availability** (all roles, calendar)
