@@ -1,6 +1,6 @@
 # Stride GS App — Build Status & Continuation Guide
 
-**Last updated:** 2026-04-15 (session 66 — ShipmentJobPage email deep link + comprehensive in-app deep link overhaul; all cross-entity links now use standalone /:id routes)
+**Last updated:** 2026-04-15 (session 67 — DT Phase 1b/1c: Delivery Availability Calendar tab (all roles) + dt-webhook-ingest Edge Function live)
 **StrideAPI.gs:** v38.53.0 (Web App v269)
 **Import.gs (client):** v4.3.0 (rolled out to all 47 active clients; Reference column now imported)
 **Emails.gs (client):** v4.3.0 (rolled out to all 47 active clients — email deep links CTA button)
@@ -75,9 +75,41 @@ Login, Dashboard, Inventory, Receiving, Shipments, Tasks, Repairs, Will Calls, B
 
 ---
 
-## RECENT CHANGES (2026-04-15 session 66)
+## RECENT CHANGES (2026-04-15 session 67)
 
-### Session 66: ShipmentJobPage + comprehensive deep link overhaul
+### Session 67: DT Phase 1b (Delivery page) + Phase 1c (webhook ingest Edge Function)
+
+**Phase 1b — Delivery page (all roles):**
+- `Orders.tsx` now has two tabs: **Orders** (admin-only, DT orders table) + **Availability** (all roles, calendar)
+- `AvailabilityCalendar` component (user-built) embedded — click to cycle open/limited/closed, shift+click multi-select, bulk apply
+- `/orders` route has no `RoleGuard` — access control is inside the page per tab
+- Sidebar: "Delivery" item (Calendar icon) added to ALL three nav arrays (admin, staff, client)
+- `useOrders.ts` hook: Supabase-only, no GAS fallback, filters by `tenant_id` via `useClientFilter`
+- `OrderDetailPanel.tsx`: resizable right-side drawer with Schedule / Contact / Order Details / Notes sections
+
+**Phase 1c — dt-webhook-ingest Edge Function:**
+- **Function:** `supabase/functions/dt-webhook-ingest/index.ts` — deployed ACTIVE (v1)
+- **Webhook URL:** `https://uqplppugeickmamycpuz.supabase.co/functions/v1/dt-webhook-ingest?token=<secret>`
+- **Auth:** shared-secret token (`?token=`) validated against `dt_credentials.webhook_secret`
+- **Idempotency:** SHA-256 of raw POST body as `idempotency_key` — DT retries auto-acked
+- **Event types handled:** `Started`, `In_Transit`, `Unable_To_Start`, `Unable_To_Finish`, `Service_Route_Finished`, `Notes` (writes `dt_order_notes`), `Pictures` (writes `dt_order_photos`)
+- **Tenant resolution:** Pass 1 — `dt_credentials.account_name_map` JSONB lookup (exact + lowercase); Pass 2 — `inventory.client_name ILIKE %accountName%` fuzzy fallback; quarantine if unresolved
+- **Migration `20260415000000_dt_phase1c_webhook_prep`:** added `'dt_webhook'` to `dt_orders.source` CHECK; added `account_name_map JSONB` column to `dt_credentials`
+- **`dt_credentials` row seeded:** `api_base_url`, `auth_token_encrypted` (API key), `webhook_secret` (64-char hex), `account_name_map = {}`
+
+**Still needed before first live DT event:**
+1. Configure DT Admin → General Settings → Alerts: set Delivery Mechanism = Web Service, POST, paste webhook URL for each alert event
+2. Populate `dt_credentials.account_name_map` with `{"DT Account Name": "clientSheetId"}` entries for each client — this is the primary tenant resolver
+3. Confirm exact `{{Tag}}` names for customer fields from DT support (email drafted below)
+
+**Live artifacts after session 67:**
+- Source commit: `d18fca1` (2 new files: Edge Function + migration)
+- React bundle: `index-D4zrXAph.js` (unchanged from session 66, commit `dc201ff`)
+- Supabase: migration `20260415000000_dt_phase1c_webhook_prep` applied; Edge Function `dt-webhook-ingest` v1 ACTIVE; `dt_credentials` row seeded
+
+---
+
+### Session 66 archive: ShipmentJobPage + comprehensive deep link overhaul
 
 **Problem fixed:** Shipment email deep links opened the list page with nothing loaded (client filter required). All in-app cross-entity links used `?open=` query params on list pages, which broke when a client wasn't selected.
 

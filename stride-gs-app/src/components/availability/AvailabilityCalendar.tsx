@@ -29,6 +29,48 @@ const STATUS_CYCLE: AvailabilityStatus[] = ['open', 'limited', 'closed'];
 
 type ViewMode = '2month' | '3month' | 'year';
 
+// ── Federal Holidays ────────────────────────────────────────────────────
+// Computes all 11 US federal holidays for a given year. Floating holidays
+// (MLK, Presidents', Memorial, Labor, Columbus, Thanksgiving) are resolved
+// to their actual dates. Returns a Map<'YYYY-MM-DD', holidayName>.
+function nthDayOfMonth(year: number, month: number, dayOfWeek: number, n: number): number {
+  // nth occurrence of dayOfWeek (0=Sun) in month (0-indexed)
+  const first = new Date(year, month, 1).getDay();
+  let day = 1 + ((dayOfWeek - first + 7) % 7) + (n - 1) * 7;
+  return day;
+}
+function lastMondayOfMonth(year: number, month: number): number {
+  const dim = new Date(year, month + 1, 0).getDate();
+  const lastDay = new Date(year, month, dim).getDay();
+  return dim - ((lastDay - 1 + 7) % 7);
+}
+function getFederalHolidays(year: number): Map<string, string> {
+  const h = new Map<string, string>();
+  const add = (m: number, d: number, name: string) => h.set(toDateStr(year, m, d), name);
+  add(0, 1, "New Year's Day");
+  add(0, nthDayOfMonth(year, 0, 1, 3), 'MLK Jr. Day');
+  add(1, nthDayOfMonth(year, 1, 1, 3), "Presidents' Day");
+  add(4, lastMondayOfMonth(year, 4), 'Memorial Day');
+  add(5, 19, 'Juneteenth');
+  add(6, 4, 'Independence Day');
+  add(8, nthDayOfMonth(year, 8, 1, 1), 'Labor Day');
+  add(9, nthDayOfMonth(year, 9, 1, 2), 'Columbus Day');
+  add(10, 11, 'Veterans Day');
+  add(10, nthDayOfMonth(year, 10, 4, 4), 'Thanksgiving');
+  add(11, 25, 'Christmas Day');
+  return h;
+}
+
+// Build a combined map for all visible years (usually 1-2 years)
+function getHolidayMap(months: { year: number; month: number }[]): Map<string, string> {
+  const years = new Set(months.map(m => m.year));
+  const combined = new Map<string, string>();
+  for (const y of years) {
+    for (const [k, v] of getFederalHolidays(y)) combined.set(k, v);
+  }
+  return combined;
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────────
 function toDateStr(year: number, month: number, day: number): string {
   return `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
@@ -132,9 +174,10 @@ interface MonthGridProps {
   isAdmin: boolean;
   selectedDates: Set<string>;
   onDayClick: (dateStr: string, shiftKey: boolean) => void;
+  holidays: Map<string, string>;
 }
 
-function MonthGrid({ year, month, getStatus, isAdmin, selectedDates, onDayClick }: MonthGridProps) {
+function MonthGrid({ year, month, getStatus, isAdmin, selectedDates, onDayClick, holidays }: MonthGridProps) {
   const dim = daysInMonth(year, month);
   const sd = startDayOfMonth(year, month);
 
@@ -153,15 +196,18 @@ function MonthGrid({ year, month, getStatus, isAdmin, selectedDates, onDayClick 
           const status = past ? null : getStatus(dateStr);
           const isSelected = selectedDates.has(dateStr);
           const cfg = status ? STATUS_CONFIG[status] : null;
+          const holiday = holidays.get(dateStr);
 
           return (
             <button
               key={day}
               type="button"
+              title={holiday || undefined}
               disabled={past || !isAdmin}
               onClick={(e) => onDayClick(dateStr, e.shiftKey)}
               style={{
                 ...styles.dayCell,
+                position: holiday ? 'relative' : undefined,
                 background: past ? '#F3F4F6' : cfg ? cfg.bg : '#F3F4F6',
                 color: past ? '#D1D5DB' : cfg ? cfg.text : '#9CA3AF',
                 fontWeight: past ? 400 : 500,
@@ -170,6 +216,13 @@ function MonthGrid({ year, month, getStatus, isAdmin, selectedDates, onDayClick 
               }}
             >
               {day}
+              {holiday && (
+                <span style={{
+                  position: 'absolute', top: 1, right: 2,
+                  fontSize: 7, lineHeight: 1, color: 'rgba(0,0,0,0.45)',
+                  pointerEvents: 'none',
+                }}>★</span>
+              )}
             </button>
           );
         })}
@@ -189,6 +242,7 @@ export function AvailabilityCalendar() {
   const [selectedDates, setSelectedDates] = useState<Set<string>>(new Set());
 
   const visibleMonths = useMemo(() => getVisibleMonths(view), [view]);
+  const holidays = useMemo(() => getHolidayMap(visibleMonths), [visibleMonths]);
 
   // Day click: shift+click multi-select, regular click cycles status
   const handleDayClick = useCallback(
@@ -267,6 +321,10 @@ export function AvailabilityCalendar() {
             <span>{cfg.label}</span>
           </div>
         ))}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <span style={{ fontSize: 13, lineHeight: 1 }}>★</span>
+          <span>Federal holiday (hover for name)</span>
+        </div>
       </div>
 
       {/* Error */}
@@ -311,6 +369,7 @@ export function AvailabilityCalendar() {
             isAdmin={isAdmin}
             selectedDates={selectedDates}
             onDayClick={handleDayClick}
+            holidays={holidays}
           />
         ))}
       </div>
