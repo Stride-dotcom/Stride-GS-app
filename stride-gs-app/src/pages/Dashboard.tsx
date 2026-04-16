@@ -133,7 +133,6 @@ function TasksTab({ tasks, onNavigate }: { tasks: SummaryTask[]; onNavigate: (ta
   const colT = createColumnHelper<SummaryTask>();
   const { sorting, setSorting, colVis, setColVis, columnOrder, setColumnOrder } = useTablePreferences('dashboard-tasks', [{ id: 'taskCreated', desc: true }], {}, TASK_DEFAULT_ORDER);
   const [statusFilters, setStatusFilters] = useState<string[]>(DEFAULT_TASK_STATUSES);
-  const [typeFilters, setTypeFilters] = useState<string[]>([]);
   const [showCols, setShowCols] = useState(false);
   const [dragColId, setDragColId] = useState<string | null>(null);
   const [dragOverColId, setDragOverColId] = useState<string | null>(null);
@@ -141,14 +140,8 @@ function TasksTab({ tasks, onNavigate }: { tasks: SummaryTask[]; onNavigate: (ta
   useEffect(() => { const h = (e: MouseEvent) => { if (menuRef.current && !menuRef.current.contains(e.target as Node)) setShowCols(false); }; document.addEventListener('mousedown', h); return () => document.removeEventListener('mousedown', h); }, []);
 
   const allStatuses = useMemo(() => [...new Set(tasks.map(t => t.status))].sort(), [tasks]);
-  const allTypes = useMemo(() => [...new Set(tasks.map(t => t.taskType).filter(Boolean))].sort(), [tasks]);
 
-  const filtered = useMemo(() => {
-    let result = tasks;
-    if (statusFilters.length > 0) result = result.filter(t => statusFilters.includes(t.status));
-    if (typeFilters.length > 0) result = result.filter(t => typeFilters.includes(t.taskType));
-    return result;
-  }, [tasks, statusFilters, typeFilters]);
+  const filtered = useMemo(() => statusFilters.length === 0 ? tasks : tasks.filter(t => statusFilters.includes(t.status)), [tasks, statusFilters]);
 
   const columns = useMemo(() => [
     colT.accessor('taskId', { id: 'taskId', header: 'Task ID', size: 110, cell: i => <span style={{ fontWeight: 600, fontSize: 12, fontFamily: 'monospace', color: theme.colors.orange }}>{i.getValue()}</span> }),
@@ -177,30 +170,17 @@ function TasksTab({ tasks, onNavigate }: { tasks: SummaryTask[]; onNavigate: (ta
   const { containerRef, virtualRows, rows: allRows, totalHeight } = useVirtualRows(table);
 
   const toggleStatus = (s: string) => setStatusFilters(prev => prev.includes(s) ? prev.filter(x => x !== s) : [...prev, s]);
-  const toggleType = (t: string) => setTypeFilters(prev => prev.includes(t) ? prev.filter(x => x !== t) : [...prev, t]);
 
   return (
     <div>
-      {/* Toolbar — Status filter row */}
-      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 4 }}>
+      {/* Toolbar */}
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 10 }}>
         <div style={{ fontSize: 12, color: theme.colors.textMuted, fontWeight: 500 }}>Status:</div>
         {allStatuses.map(s => (
           <button key={s} onClick={() => toggleStatus(s)} style={chip(statusFilters.includes(s))}>{s}</button>
         ))}
         {statusFilters.length > 0 && (
           <button onClick={() => setStatusFilters([])} style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '4px 10px', borderRadius: 20, fontSize: 11, fontWeight: 500, border: `1px solid ${theme.colors.border}`, background: 'transparent', cursor: 'pointer', color: theme.colors.textMuted }}>
-            <X size={11} /> Clear
-          </button>
-        )}
-      </div>
-      {/* Toolbar — Type filter row */}
-      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 10 }}>
-        <div style={{ fontSize: 12, color: theme.colors.textMuted, fontWeight: 500 }}>Type:</div>
-        {allTypes.map(t => (
-          <button key={t} onClick={() => toggleType(t)} style={chip(typeFilters.includes(t))}>{TASK_TYPE_LABELS[t] || t}</button>
-        ))}
-        {typeFilters.length > 0 && (
-          <button onClick={() => setTypeFilters([])} style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '4px 10px', borderRadius: 20, fontSize: 11, fontWeight: 500, border: `1px solid ${theme.colors.border}`, background: 'transparent', cursor: 'pointer', color: theme.colors.textMuted }}>
             <X size={11} /> Clear
           </button>
         )}
@@ -541,6 +521,35 @@ export function Dashboard() {
     window.open(`#/will-calls/${wc.wcNumber}`, '_blank');
   }, []);
 
+  // ── Task type filter (dropdown on tab button) ────────────────────────────────
+  const [taskTypeFilters, setTaskTypeFilters] = useState<string[]>([]);
+  const [showTypeDropdown, setShowTypeDropdown] = useState(false);
+  const typeDropdownRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const h = (e: MouseEvent) => { if (typeDropdownRef.current && !typeDropdownRef.current.contains(e.target as Node)) setShowTypeDropdown(false); };
+    document.addEventListener('mousedown', h);
+    return () => document.removeEventListener('mousedown', h);
+  }, []);
+
+  const allTaskTypes = useMemo(() => [...new Set(tasks.map(t => t.taskType).filter(Boolean))].sort(), [tasks]);
+  const filteredTasks = useMemo(() => taskTypeFilters.length === 0 ? tasks : tasks.filter(t => taskTypeFilters.includes(t.taskType)), [tasks, taskTypeFilters]);
+  const isAllSelected = taskTypeFilters.length === 0;
+
+  const toggleTaskType = useCallback((type: string) => {
+    setTaskTypeFilters(prev => {
+      // If currently "all" (empty), start with all types MINUS the toggled one
+      if (prev.length === 0) return allTaskTypes.filter(t => t !== type);
+      const next = prev.includes(type) ? prev.filter(t => t !== type) : [...prev, type];
+      // If result includes all types, reset to empty (= show all)
+      if (next.length >= allTaskTypes.length) return [];
+      return next;
+    });
+  }, [allTaskTypes]);
+
+  const toggleSelectAll = useCallback(() => {
+    setTaskTypeFilters(prev => prev.length === 0 ? [] : []);
+  }, []);
+
   // ── Loading / error states ────────────────────────────────────────────────────
   if (loading && tasks.length === 0 && repairs.length === 0 && willCalls.length === 0) {
     return (
@@ -556,7 +565,7 @@ export function Dashboard() {
   }
 
   const TAB_DEFS: { id: DashTab; label: string; icon: React.ReactNode; count: number }[] = [
-    { id: 'tasks', label: 'Tasks', icon: <ClipboardList size={14} />, count: tasks.filter(t => t.status === 'Open' || t.status === 'In Progress').length },
+    { id: 'tasks', label: 'Tasks', icon: <ClipboardList size={14} />, count: filteredTasks.filter(t => t.status === 'Open' || t.status === 'In Progress').length },
     { id: 'repairs', label: 'Repairs', icon: <Wrench size={14} />, count: repairs.filter(r => !['Complete', 'Cancelled', 'Declined'].includes(r.status)).length },
     { id: 'willcalls', label: 'Will Calls', icon: <Truck size={14} />, count: willCalls.filter(w => ['Pending', 'Scheduled', 'Partial'].includes(w.status)).length },
   ];
@@ -600,26 +609,63 @@ export function Dashboard() {
         <div style={{ display: 'flex', gap: 0, borderBottom: `2px solid ${theme.colors.border}`, marginBottom: 16 }}>
           {TAB_DEFS.map(tab => {
             const active = activeTab === tab.id;
+            const isTasksTab = tab.id === 'tasks';
+            const tabStyle: React.CSSProperties = {
+              display: 'flex', alignItems: 'center', gap: 6, padding: '10px 18px',
+              fontSize: 13, fontWeight: active ? 600 : 400, fontFamily: 'inherit',
+              background: 'none', border: 'none', cursor: 'pointer',
+              borderBottom: active ? `2px solid ${theme.colors.orange}` : '2px solid transparent',
+              marginBottom: -2,
+              color: active ? theme.colors.orange : theme.colors.textSecondary,
+              transition: 'color 0.15s',
+            };
             return (
-              <button key={tab.id} onClick={() => handleTabChange(tab.id)} style={{
-                display: 'flex', alignItems: 'center', gap: 6, padding: '10px 18px',
-                fontSize: 13, fontWeight: active ? 600 : 400, fontFamily: 'inherit',
-                background: 'none', border: 'none', cursor: 'pointer',
-                borderBottom: active ? `2px solid ${theme.colors.orange}` : '2px solid transparent',
-                marginBottom: -2,
-                color: active ? theme.colors.orange : theme.colors.textSecondary,
-                transition: 'color 0.15s',
-              }}>
-                {tab.icon}
-                {tab.label}
-                <span style={{
-                  fontSize: 11, fontWeight: 600, padding: '1px 7px', borderRadius: 10,
-                  background: active ? theme.colors.orangeLight : theme.colors.bgSubtle,
-                  color: active ? theme.colors.orange : theme.colors.textMuted,
-                }}>
-                  {tab.count}
-                </span>
-              </button>
+              <div key={tab.id} style={{ position: 'relative' }} ref={isTasksTab ? typeDropdownRef : undefined}>
+                <button onClick={() => handleTabChange(tab.id)} style={tabStyle}>
+                  {tab.icon}
+                  {tab.label}
+                  <span style={{
+                    fontSize: 11, fontWeight: 600, padding: '1px 7px', borderRadius: 10,
+                    background: active ? theme.colors.orangeLight : theme.colors.bgSubtle,
+                    color: active ? theme.colors.orange : theme.colors.textMuted,
+                  }}>
+                    {tab.count}
+                  </span>
+                  {isTasksTab && (
+                    <ChevronDown size={12} onClick={e => { e.stopPropagation(); setShowTypeDropdown(v => !v); }} style={{ marginLeft: -2, opacity: 0.6 }} />
+                  )}
+                </button>
+                {/* Task type dropdown */}
+                {isTasksTab && showTypeDropdown && (
+                  <div style={{
+                    position: 'absolute', top: '100%', left: 0, marginTop: 4, background: '#fff',
+                    border: `1px solid ${theme.colors.border}`, borderRadius: 10, padding: 6,
+                    zIndex: 50, boxShadow: '0 4px 20px rgba(0,0,0,0.1)', minWidth: 190,
+                  }}>
+                    {/* Select All */}
+                    <label style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 8px', fontSize: 12, cursor: 'pointer', fontWeight: 600, borderBottom: `1px solid ${theme.colors.border}`, marginBottom: 2, paddingBottom: 8 }}>
+                      <input type="checkbox" checked={isAllSelected} onChange={toggleSelectAll} style={{ accentColor: theme.colors.orange }} />
+                      Select All
+                    </label>
+                    {allTaskTypes.map(type => {
+                      const checked = isAllSelected || taskTypeFilters.includes(type);
+                      return (
+                        <label key={type} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '5px 8px', fontSize: 12, cursor: 'pointer' }}>
+                          <input type="checkbox" checked={checked} onChange={() => toggleTaskType(type)} style={{ accentColor: theme.colors.orange }} />
+                          {TASK_TYPE_LABELS[type] || type}
+                        </label>
+                      );
+                    })}
+                    {!isAllSelected && (
+                      <div style={{ borderTop: `1px solid ${theme.colors.border}`, marginTop: 4, paddingTop: 4 }}>
+                        <button onClick={() => setTaskTypeFilters([])} style={{ width: '100%', padding: '5px 8px', fontSize: 11, border: 'none', background: 'none', cursor: 'pointer', color: theme.colors.orange, fontWeight: 500, textAlign: 'left', fontFamily: 'inherit' }}>
+                          Reset to all types
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
             );
           })}
           <div style={{ flex: 1 }} />
@@ -628,7 +674,7 @@ export function Dashboard() {
 
         {/* Tab content — render all but hide inactive (preserves scroll/filter state) */}
         <div style={{ display: activeTab === 'tasks' ? 'block' : 'none' }}>
-          {tabsLoaded.tasks && <TasksTab tasks={tasks} onNavigate={handleTaskNav} />}
+          {tabsLoaded.tasks && <TasksTab tasks={filteredTasks} onNavigate={handleTaskNav} />}
         </div>
         <div style={{ display: activeTab === 'repairs' ? 'block' : 'none' }}>
           {tabsLoaded.repairs && <RepairsTab repairs={repairs} onNavigate={handleRepairNav} />}
