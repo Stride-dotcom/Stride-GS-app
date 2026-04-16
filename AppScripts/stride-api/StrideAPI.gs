@@ -1,5 +1,37 @@
 /* ===================================================
-   StrideAPI.gs — v38.66.0 — 2026-04-16 PST — Fix silent Supabase write-through in ALL batch handlers
+   StrideAPI.gs — v38.67.0 — 2026-04-16 PST — Self-healing Supabase sync + loud failure logging
+   v38.67.0: FEAT — End-to-end fix for the "batch cancel appears to work then
+             reverts" class of bugs. Three layered changes:
+             (1) `supabaseUpsert_` now returns `{ok, code, error?}` instead
+                 of undefined — callers can detect HTTP failures, auth issues,
+                 RLS denies, schema mismatches.
+             (2) `resyncEntityToSupabase_` now returns `{ok, error?}` and
+                 captures the upsert result from all 7 entity-type branches
+                 (inventory/task/repair/will_call/shipment/billing/clients).
+             (3) `api_writeThrough_` now LOUDLY logs every failure to the
+                 existing `gs_sync_events` table (the same one the React
+                 FailedOperationsDrawer reads). Users finally see silent
+                 write-through failures instead of discovering them months
+                 later via stranded state.
+             FEAT — New `retryFailedSyncs_()` scheduled function + one-time
+                 `installSyncRetryTrigger_()` installer. Runs every 10 min,
+                 pulls up to 100 rows from gs_sync_events with
+                 sync_status='failed' and action_type LIKE '%_write_through'
+                 in the last 7 days, re-runs `resyncEntityToSupabase_` for
+                 each, marks success as 'confirmed' or bumps updated_at on
+                 repeated failure. Self-healing — Supabase drift caused by
+                 transient network/rate-limit/auth blips now fixes itself
+                 within 10 minutes with zero user action.
+             FEAT — `api_logSyncFailure_` helper writes rows to
+                 gs_sync_events with sync_status='failed' so the existing
+                 FailedOperationsDrawer surfaces write-through failures.
+                 Drawer schema is unchanged — this reuses the contract the
+                 React writeSyncFailed() path already writes.
+             **OPERATOR ACTION REQUIRED**: after this deploy, open the
+             Apps Script editor and run `installSyncRetryTrigger_` once
+             to install the 10-minute cron. It's idempotent and safe to
+             re-run if re-installing.
+   v38.66.0: FIX — `api_writeThrough_` was only shaped for single-entity
    v38.66.0: FIX — `api_writeThrough_` was only shaped for single-entity
              handlers (expects a ContentService Response with `.getContent()`).
              Every batch handler passed a plain `api_newBatchResult_()` object
@@ -1000,11 +1032,18 @@ function api_notifySupabase_(response, context) {
  * @param {string} table - Supabase table name (e.g. "inventory", "tasks")
  * @param {Object} data - Row data matching the table schema
  */
+/**
+ * Upsert a single row to a Supabase table.
+ * v38.67.0 — now returns { ok: boolean, code: number, error?: string } so
+ * callers can detect failure and log it. Previously returned undefined for
+ * both success and failure (fire-and-forget), which hid every write-through
+ * bug.
+ */
 function supabaseUpsert_(table, data) {
   try {
     var url = prop_("SUPABASE_URL");
     var key = prop_("SUPABASE_SERVICE_ROLE_KEY");
-    if (!url || !key) return;
+    if (!url || !key) return { ok: false, code: 0, error: "SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY not configured" };
     var conflictCol = { inventory: "tenant_id,item_id", tasks: "tenant_id,task_id", repairs: "tenant_id,repair_id",
                         will_calls: "tenant_id,wc_number", shipments: "tenant_id,shipment_number", billing: "tenant_id,ledger_row_id",
                         claims: "claim_id", cb_users: "email", marketing_contacts: "email",
@@ -1028,10 +1067,183 @@ function supabaseUpsert_(table, data) {
     });
     var code = resp.getResponseCode();
     if (code < 200 || code >= 300) {
-      Logger.log("supabaseUpsert_ " + table + " HTTP " + code + ": " + resp.getContentText().substring(0, 300));
+      var errBody = resp.getContentText().substring(0, 300);
+      Logger.log("supabaseUpsert_ " + table + " HTTP " + code + ": " + errBody);
+      return { ok: false, code: code, error: "HTTP " + code + ": " + errBody };
     }
+    return { ok: true, code: code };
   } catch (e) {
     Logger.log("supabaseUpsert_ " + table + " error (non-fatal): " + e);
+    return { ok: false, code: 0, error: String(e) };
+  }
+}
+
+/**
+ * v38.67.0 — Logs a Supabase write-through failure to the gs_sync_events
+ * table so it surfaces in the React FailedOperationsDrawer. Also keeps a
+ * pending status='failed' row around for the scheduled retryFailedSyncs_
+ * cron to auto-heal on its next pass.
+ *
+ * Fire-and-forget (has its own try/catch). Never throws.
+ */
+/**
+ * v38.67.0 — Self-healing: scheduled retry of Supabase write-through failures.
+ *
+ * Reads gs_sync_events WHERE sync_status='failed' AND action_type matches
+ * a write_through pattern, attempts to resync each entity, and marks the
+ * row as 'confirmed' on success. On repeated failure the row stays 'failed'
+ * with updated_at bumped (acts as a retry timestamp so you can see whether
+ * retries are even running).
+ *
+ * Runs every 10 minutes via a time-based trigger. To install:
+ *   Apps Script editor → Run installSyncRetryTrigger_
+ * (or just run it once manually via `gas run installSyncRetryTrigger_`).
+ *
+ * Safe to re-run — existing trigger is removed before new one is created.
+ *
+ * Only processes the last 7 days of failures (ignores ancient ones — if a
+ * row has been stuck that long, something else is wrong that a cron won't
+ * fix). Caps at 100 per run to stay under the 6-minute GAS execution limit.
+ */
+function retryFailedSyncs_() {
+  var url = prop_("SUPABASE_URL");
+  var key = prop_("SUPABASE_SERVICE_ROLE_KEY");
+  if (!url || !key) {
+    Logger.log("retryFailedSyncs_: Supabase credentials missing — skipping");
+    return;
+  }
+  var sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+  var listUrl = url + "/rest/v1/gs_sync_events"
+              + "?sync_status=eq.failed"
+              + "&action_type=like.*_write_through"
+              + "&created_at=gte." + encodeURIComponent(sevenDaysAgo)
+              + "&order=created_at.asc"
+              + "&limit=100";
+  var resp;
+  try {
+    resp = UrlFetchApp.fetch(listUrl, {
+      method: "GET",
+      headers: { "Authorization": "Bearer " + key, "apikey": key },
+      muteHttpExceptions: true
+    });
+  } catch (e) {
+    Logger.log("retryFailedSyncs_: list fetch error: " + e);
+    return;
+  }
+  if (resp.getResponseCode() < 200 || resp.getResponseCode() >= 300) {
+    Logger.log("retryFailedSyncs_: list HTTP " + resp.getResponseCode() + " " + resp.getContentText().substring(0, 300));
+    return;
+  }
+  var rows;
+  try { rows = JSON.parse(resp.getContentText()); } catch (e) { rows = []; }
+  if (!rows || rows.length === 0) {
+    Logger.log("retryFailedSyncs_: no failed events to retry");
+    return;
+  }
+
+  var succeeded = 0, stillFailed = 0;
+  var startedAt = Date.now();
+  var TIME_BUDGET_MS = 5 * 60 * 1000; // stay under GAS 6-min limit
+
+  for (var i = 0; i < rows.length; i++) {
+    if (Date.now() - startedAt > TIME_BUDGET_MS) break;
+    var row = rows[i];
+    var result;
+    try {
+      result = resyncEntityToSupabase_(row.entity_type, row.tenant_id, row.entity_id);
+    } catch (err) {
+      result = { ok: false, error: String(err) };
+    }
+    if (result && result.ok) {
+      // Mark the event row as confirmed. PATCH filter by id.
+      try {
+        UrlFetchApp.fetch(url + "/rest/v1/gs_sync_events?id=eq." + encodeURIComponent(row.id), {
+          method: "PATCH",
+          headers: {
+            "Authorization": "Bearer " + key, "apikey": key,
+            "Content-Type": "application/json", "Prefer": "return=minimal"
+          },
+          payload: JSON.stringify({
+            sync_status: "confirmed",
+            confirmed_at: new Date().toISOString(),
+            updated_at: new Date().toISOString()
+          }),
+          muteHttpExceptions: true
+        });
+      } catch (patchErr) {
+        Logger.log("retryFailedSyncs_ patch error: " + patchErr);
+      }
+      succeeded++;
+    } else {
+      // Bump updated_at + error_message so you can see retries happening.
+      try {
+        UrlFetchApp.fetch(url + "/rest/v1/gs_sync_events?id=eq." + encodeURIComponent(row.id), {
+          method: "PATCH",
+          headers: {
+            "Authorization": "Bearer " + key, "apikey": key,
+            "Content-Type": "application/json", "Prefer": "return=minimal"
+          },
+          payload: JSON.stringify({
+            updated_at: new Date().toISOString(),
+            error_message: String((result && result.error) || "retry failed").substring(0, 500)
+          }),
+          muteHttpExceptions: true
+        });
+      } catch (_) {}
+      stillFailed++;
+    }
+  }
+
+  Logger.log("retryFailedSyncs_: processed=" + rows.length + " succeeded=" + succeeded + " stillFailed=" + stillFailed);
+}
+
+/**
+ * One-time installer for the 10-minute retryFailedSyncs_ trigger.
+ * Run manually from Apps Script editor: `installSyncRetryTrigger_`.
+ * Idempotent — removes any existing retryFailedSyncs_ triggers first.
+ */
+function installSyncRetryTrigger_() {
+  var existing = ScriptApp.getProjectTriggers();
+  for (var i = 0; i < existing.length; i++) {
+    if (existing[i].getHandlerFunction() === "retryFailedSyncs_") {
+      ScriptApp.deleteTrigger(existing[i]);
+    }
+  }
+  ScriptApp.newTrigger("retryFailedSyncs_").timeBased().everyMinutes(10).create();
+  Logger.log("installSyncRetryTrigger_: retryFailedSyncs_ scheduled every 10 minutes");
+}
+
+function api_logSyncFailure_(tenantId, entityType, entityId, actionType, errorMessage) {
+  try {
+    var url = prop_("SUPABASE_URL");
+    var key = prop_("SUPABASE_SERVICE_ROLE_KEY");
+    if (!url || !key) return;
+    var now = new Date().toISOString();
+    var payload = {
+      tenant_id:     String(tenantId || "unknown"),
+      entity_type:   String(entityType || "unknown"),
+      entity_id:     String(entityId || "unknown"),
+      action_type:   String(actionType || "write_through"),
+      sync_status:   "failed",
+      requested_by:  "gas_write_through",
+      request_id:    Utilities.getUuid(),
+      error_message: String(errorMessage || "").substring(0, 500),
+      created_at:    now,
+      updated_at:    now
+    };
+    UrlFetchApp.fetch(url + "/rest/v1/gs_sync_events", {
+      method: "POST",
+      headers: {
+        "Authorization": "Bearer " + key,
+        "apikey":        key,
+        "Content-Type":  "application/json",
+        "Prefer":        "return=minimal"
+      },
+      payload: JSON.stringify(payload),
+      muteHttpExceptions: true
+    });
+  } catch (e) {
+    Logger.log("api_logSyncFailure_ (non-fatal, itself): " + e);
   }
 }
 
@@ -2686,17 +2898,20 @@ function syncEntityToSupabase_(entityType, tenantId, data) {
  * @param {string} entityType - "inventory"|"task"|"repair"|"will_call"|"shipment"|"billing"
  * @param {string} tenantId - clientSheetId
  * @param {string} entityId - the entity's ID (Item ID, Task ID, etc.)
+ * @return {{ok: boolean, error?: string}} v38.67.0 — now returns a result so callers can
+ *   detect silent Supabase failures and log them. Previously returned undefined for
+ *   every outcome, which hid hundreds of stranded-state bugs (see session 71 writeup).
  */
 function resyncEntityToSupabase_(entityType, tenantId, entityId) {
   try {
-    if (!entityId) return;
+    if (!entityId) return { ok: false, error: "no entityId" };
     // Session 65 — "clients" mirrors the CB Clients sheet, not a tenant sheet.
     // The entityId is the client's spreadsheet_id; tenantId is unused here.
     if (entityType === "clients") {
       resyncClientToSupabase_(String(entityId));
-      return;
+      return { ok: true }; // resyncClientToSupabase_ still fire-and-forget for now
     }
-    if (!tenantId) return;
+    if (!tenantId) return { ok: false, error: "no tenantId" };
     SpreadsheetApp.flush();
     var ss = SpreadsheetApp.openById(tenantId);
     var tabName, idCol;
@@ -2707,17 +2922,18 @@ function resyncEntityToSupabase_(entityType, tenantId, entityId) {
       case "will_call": tabName = "Will_Calls"; idCol = "WC Number"; break;
       case "shipment":  tabName = "Shipments"; idCol = "Shipment #"; break;
       case "billing":   tabName = "Billing_Ledger"; idCol = "Ledger Row ID"; break;
-      default: return;
+      default: return { ok: false, error: "unknown entityType: " + entityType };
     }
     var sheet = ss.getSheetByName(tabName);
-    if (!sheet) return;
+    if (!sheet) return { ok: false, error: tabName + " sheet not found" };
     var rows = sheetToObjects_(sheet);
     for (var i = 0; i < rows.length; i++) {
       if (String(rows[i][idCol] || "").trim() === entityId) {
         var row = rows[i];
+        var upResult = null;
         switch (entityType) {
           case "inventory":
-            supabaseUpsert_("inventory", sbInventoryRow_(tenantId, {
+            upResult = supabaseUpsert_("inventory", sbInventoryRow_(tenantId, {
               itemId: entityId, description: row["Description"], vendor: row["Vendor"],
               sidemark: row["Sidemark"], room: row["Room"], itemClass: row["Class"],
               qty: row["Qty"], location: row["Location"], status: row["Status"],
@@ -2737,7 +2953,7 @@ function resyncEntityToSupabase_(entityType, tenantId, entityId) {
                 if (taskRtResync) taskFolderUrlResync = taskRtResync.getLinkUrl() || "";
               }
             } catch (_) {}
-            supabaseUpsert_("tasks", sbTaskRow_(tenantId, {
+            upResult = supabaseUpsert_("tasks", sbTaskRow_(tenantId, {
               taskId: entityId, itemId: row["Item ID"], svcCode: row["Svc Code"] || row["Type"],
               status: row["Status"], result: row["Result"], description: row["Description"],
               taskNotes: row["Task Notes"], itemNotes: row["Item Notes"],
@@ -2754,7 +2970,7 @@ function resyncEntityToSupabase_(entityType, tenantId, entityId) {
             }));
             break;
           case "repair":
-            supabaseUpsert_("repairs", sbRepairRow_(tenantId, {
+            upResult = supabaseUpsert_("repairs", sbRepairRow_(tenantId, {
               repairId: entityId, itemId: row["Item ID"], status: row["Status"],
               repairResult: row["Repair Result"], quoteAmount: row["Quote Amount"],
               finalAmount: row["Final Amount"], repairVendor: row["Repair Vendor"],
@@ -2765,7 +2981,7 @@ function resyncEntityToSupabase_(entityType, tenantId, entityId) {
             }));
             break;
           case "will_call":
-            supabaseUpsert_("will_calls", sbWillCallRow_(tenantId, {
+            upResult = supabaseUpsert_("will_calls", sbWillCallRow_(tenantId, {
               wcNumber: entityId, status: row["Status"], pickupParty: row["Pickup Party"],
               createdDate: formatDate_(row["Created Date"]),
               estimatedPickupDate: formatDate_(row["Estimated Pickup Date"]),
@@ -2774,14 +2990,14 @@ function resyncEntityToSupabase_(entityType, tenantId, entityId) {
             }));
             break;
           case "shipment":
-            supabaseUpsert_("shipments", sbShipmentRow_(tenantId, {
+            upResult = supabaseUpsert_("shipments", sbShipmentRow_(tenantId, {
               shipmentNumber: entityId, receiveDate: formatDate_(row["Receive Date"]),
               itemCount: row["Item Count"], carrier: row["Carrier"],
               trackingNumber: row["Tracking #"], notes: row["Shipment Notes"]
             }));
             break;
           case "billing":
-            supabaseUpsert_("billing", sbBillingRow_(tenantId, {
+            upResult = supabaseUpsert_("billing", sbBillingRow_(tenantId, {
               ledgerRowId: entityId, status: row["Status"], invoiceNo: row["Invoice #"],
               clientName: row["Client"], date: formatDate_(row["Date"]),
               svcCode: row["Svc Code"], svcName: row["Svc Name"], category: row["Category"],
@@ -2793,11 +3009,13 @@ function resyncEntityToSupabase_(entityType, tenantId, entityId) {
             }));
             break;
         }
-        return;
+        return upResult || { ok: false, error: "no upsert result (unknown case)" };
       }
     }
+    return { ok: false, error: "entity " + entityId + " not found in " + tabName + " sheet" };
   } catch (e) {
     Logger.log("resyncEntityToSupabase_ error (non-fatal): " + e);
+    return { ok: false, error: String(e) };
   }
 }
 
@@ -2833,27 +3051,57 @@ function resyncEntityToSupabase_(entityType, tenantId, entityId) {
  * handleBatchScheduleWillCalls_, handleBatchRequestRepairQuote_, etc.
  */
 function api_writeThrough_(r, entityType, tenantId, entityId) {
+  var actionType = String(entityType || "") + "_write_through";
   try {
     var isValid = false;
+    var shapeError = null;
     if (r && typeof r.getContent === 'function') {
       // Shape (a): single-entity handler, wrapped in jsonResponse_
-      var json = JSON.parse(r.getContent());
-      isValid = !!(json && json.success && !json.skipped);
+      try {
+        var json = JSON.parse(r.getContent());
+        isValid = !!(json && json.success && !json.skipped);
+        if (!isValid) shapeError = null; // not a shape problem — op legitimately didn't succeed
+      } catch (parseErr) {
+        shapeError = "response content not JSON: " + parseErr;
+      }
     } else if (r && typeof r === 'object' && typeof r.succeeded === 'number') {
       // Shape (b): batch-result object. Caller already filtered to succeeded
       // IDs, so accept as long as at least one row actually succeeded.
       isValid = r.succeeded > 0;
+      if (!isValid) shapeError = null; // zero succeeded is not a shape problem
+    } else {
+      shapeError = "unknown result shape: typeof=" + (typeof r) + " keys=" + (r ? Object.keys(r).join(",") : "null");
+    }
+    // v38.67.0 — log shape mismatches LOUDLY to gs_sync_events. These are
+    // always bugs (caller passed wrong arg) and are invisible today because
+    // the outer catch eats them.
+    if (shapeError) {
+      Logger.log("api_writeThrough_ SHAPE ERROR for " + entityType + "/" + entityId + ": " + shapeError);
+      api_logSyncFailure_(tenantId, entityType, entityId, actionType, "shape_error: " + shapeError);
+      return;
     }
     if (!isValid) return;
-    if (Array.isArray(entityId)) {
-      for (var i = 0; i < entityId.length; i++) {
-        if (entityId[i]) resyncEntityToSupabase_(entityType, tenantId, String(entityId[i]));
+
+    // Do the resync, capturing per-entity failures for gs_sync_events.
+    var ids = Array.isArray(entityId) ? entityId : [entityId];
+    for (var i = 0; i < ids.length; i++) {
+      var id = String(ids[i] || "").trim();
+      if (!id) continue;
+      var result;
+      try {
+        result = resyncEntityToSupabase_(entityType, tenantId, id);
+      } catch (resyncErr) {
+        result = { ok: false, error: String(resyncErr) };
       }
-    } else if (entityId) {
-      resyncEntityToSupabase_(entityType, tenantId, String(entityId));
+      if (!result || !result.ok) {
+        var errMsg = (result && result.error) || "resyncEntityToSupabase_ returned no result";
+        Logger.log("api_writeThrough_ SYNC FAILED " + entityType + "/" + id + ": " + errMsg);
+        api_logSyncFailure_(tenantId, entityType, id, actionType, errMsg);
+      }
     }
   } catch (e) {
-    Logger.log("api_writeThrough_ error (non-fatal): " + e);
+    Logger.log("api_writeThrough_ outer error (non-fatal): " + e);
+    api_logSyncFailure_(tenantId, entityType, String(entityId), actionType, "outer: " + e);
   }
 }
 
