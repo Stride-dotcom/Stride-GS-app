@@ -48,11 +48,32 @@ const STATUS_CFG: Record<string, { bg: string; text: string }> = {
   Partial: { bg: '#FEF3EE', text: '#E85D2D' },
 };
 
-const TASK_TYPE_LABELS: Record<string, string> = {
-  INSP: 'Inspection', ASM: 'Assembly', REPAIR: 'Repair', DLVR: 'Delivery',
-  RCVG: 'Receiving', STOR: 'Storage', WCPU: 'Will Call', WC: 'Will Call',
-  MNRTU: 'Touch-Up', OTHER: 'Other',
-};
+/** All service types — matches Billing page service list from Master Price List */
+const ALL_SERVICE_TYPES: { code: string; name: string }[] = [
+  { code: 'RCVG', name: 'Receiving' },
+  { code: 'INSP', name: 'Inspection' },
+  { code: 'ASM', name: 'Assembly' },
+  { code: 'REPAIR', name: 'Repair (Flat)' },
+  { code: 'PLLT', name: 'Palletize' },
+  { code: 'PICK', name: 'Pull Prep' },
+  { code: 'LABEL', name: 'Relabeling' },
+  { code: 'DISP', name: 'Disposal' },
+  { code: 'RSTK', name: 'Restock' },
+  { code: 'MNRTU', name: 'Minor Touch Up' },
+  { code: 'STOR', name: 'Storage' },
+  { code: 'WC', name: 'Will Call Release' },
+  { code: 'WCPU', name: 'Will Call Pickup' },
+  { code: 'SIT', name: 'Sit Test' },
+  { code: 'DLVR', name: 'Delivery' },
+  { code: 'NO_ID', name: 'No ID' },
+  { code: 'MULTI_INS', name: 'Multi-Piece Inspection' },
+  { code: 'RUSH', name: 'Rush' },
+  { code: 'OTHER', name: 'Other' },
+];
+
+const TASK_TYPE_LABELS: Record<string, string> = Object.fromEntries(
+  ALL_SERVICE_TYPES.map(s => [s.code, s.name])
+);
 
 // ─── Small helpers ────────────────────────────────────────────────────────────
 
@@ -531,23 +552,23 @@ export function Dashboard() {
     return () => document.removeEventListener('mousedown', h);
   }, []);
 
-  const allTaskTypes = useMemo(() => [...new Set(tasks.map(t => t.taskType).filter(Boolean))].sort(), [tasks]);
+  const allTypeCodes = useMemo(() => ALL_SERVICE_TYPES.map(s => s.code), []);
   const filteredTasks = useMemo(() => taskTypeFilters.length === 0 ? tasks : tasks.filter(t => taskTypeFilters.includes(t.taskType)), [tasks, taskTypeFilters]);
   const isAllSelected = taskTypeFilters.length === 0;
 
   const toggleTaskType = useCallback((type: string) => {
     setTaskTypeFilters(prev => {
-      // If currently "all" (empty), start with all types MINUS the toggled one
-      if (prev.length === 0) return allTaskTypes.filter(t => t !== type);
+      // If currently "all" (empty), start with all codes MINUS the toggled one
+      if (prev.length === 0) return allTypeCodes.filter(t => t !== type);
       const next = prev.includes(type) ? prev.filter(t => t !== type) : [...prev, type];
       // If result includes all types, reset to empty (= show all)
-      if (next.length >= allTaskTypes.length) return [];
+      if (next.length >= allTypeCodes.length) return [];
       return next;
     });
-  }, [allTaskTypes]);
+  }, [allTypeCodes]);
 
   const toggleSelectAll = useCallback(() => {
-    setTaskTypeFilters(prev => prev.length === 0 ? [] : []);
+    setTaskTypeFilters([]);
   }, []);
 
   // ── Loading / error states ────────────────────────────────────────────────────
@@ -647,12 +668,12 @@ export function Dashboard() {
                       <input type="checkbox" checked={isAllSelected} onChange={toggleSelectAll} style={{ accentColor: theme.colors.orange }} />
                       Select All
                     </label>
-                    {allTaskTypes.map(type => {
-                      const checked = isAllSelected || taskTypeFilters.includes(type);
+                    {ALL_SERVICE_TYPES.map(svc => {
+                      const checked = isAllSelected || taskTypeFilters.includes(svc.code);
                       return (
-                        <label key={type} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '5px 8px', fontSize: 12, cursor: 'pointer' }}>
-                          <input type="checkbox" checked={checked} onChange={() => toggleTaskType(type)} style={{ accentColor: theme.colors.orange }} />
-                          {TASK_TYPE_LABELS[type] || type}
+                        <label key={svc.code} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '5px 8px', fontSize: 12, cursor: 'pointer' }}>
+                          <input type="checkbox" checked={checked} onChange={() => toggleTaskType(svc.code)} style={{ accentColor: theme.colors.orange }} />
+                          {svc.name}
                         </label>
                       );
                     })}
