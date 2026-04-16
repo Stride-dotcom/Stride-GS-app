@@ -1,5 +1,18 @@
 /* ===================================================
-   StrideAPI.gs — v38.64.0 — 2026-04-16 PST — Canonicalize {{ITEMS_TABLE}} across all emails
+   StrideAPI.gs — v38.65.0 — 2026-04-16 PST — Fix onboardClient silent Supabase write-through + Resync Clients tool
+   v38.65.0: FIX (end-to-end onboarding) — the onboardClient router case was
+             checking `body.spreadsheetId` on the handler response, but the
+             response uses `clientSheetId` as its key. Check silently failed,
+             `resyncClientToSupabase_` never ran, newly-onboarded clients never
+             appeared in the React Clients page, and the "Finish Onboarding"
+             button couldn't be clicked because there was no card to click on.
+             Router now accepts both field names for defence-in-depth.
+             NEW — handleResyncClients_ admin endpoint mirrors handleResyncUsers_
+             for the `clients` table: reads CB Clients (source of truth),
+             upserts every row via resyncClientToSupabase_, deletes Supabase
+             orphans, invalidates all client-list CacheService keys. Supports
+             dryRun preview. Backfills the drift caused by the onboarding bug.
+   v38.64.0 — 2026-04-16 PST — Canonicalize {{ITEMS_TABLE}} across all emails
    v38.64.0: FIX — Previous session updated only the client-bound Emails.gs
              `buildItemsHtmlTable_` to the new 6-column layout (Item ID, Qty,
              Vendor, Description, Sidemark, Reference). The StrideAPI-side
@@ -3100,6 +3113,7 @@ function doGet(e) {
       case "updateUser":      return handleUpdateUser_(params, callerEmail);
       case "deleteUser":      return handleDeleteUser_(params, callerEmail);
       case "resyncUsers":     return handleResyncUsers_(params, callerEmail);
+      case "resyncClients":   return handleResyncClients_(params, callerEmail);
 
       // ─── Config data (staff/admin only for getClients; others open to all authed) ───
       case "getClients":      return handleGetClientsAuthed_(callerEmail, params.includeInactive === "1");
@@ -3674,10 +3688,16 @@ function doPost(e) {
         return withStaffGuard_(callerEmail, function() {
           var r = handleOnboardClient_(payload);
           // Session 65 write-through — extract new spreadsheetId from response.
+          // Session 70 follow-up FIX: the response field is `clientSheetId`, not
+          // `spreadsheetId`. Checking the wrong key silently skipped every
+          // onboarding's Supabase write-through — that's why newly-onboarded
+          // clients never appeared on the React Clients page. Accept both
+          // key names for defence-in-depth going forward.
           try {
             var body = JSON.parse(r.getContent());
-            if (body && body.success && body.spreadsheetId) {
-              resyncClientToSupabase_(String(body.spreadsheetId));
+            var newId = body && body.success && (body.clientSheetId || body.spreadsheetId);
+            if (newId) {
+              resyncClientToSupabase_(String(newId));
             }
           } catch (_) {}
           return r;
@@ -4352,6 +4372,132 @@ function handleGetUserByEmail_(params) {
   }
 
   return jsonResponse_({ user: userResponse });
+}
+
+/**
+ * Session 70 follow-up — handleResyncClients_
+ *
+ * Reconciles CB Clients (source of truth) with Supabase `clients` mirror.
+ * After a run:
+ *   • every CB row is UPSERTed into public.clients via resyncClientToSupabase_
+ *   • every Supabase clients row whose spreadsheet_id isn't in CB is DELETED
+ * Admin only. Rate-limited. Returns diff stats.
+ *
+ * Motivation: the onboardClient router case was checking `body.spreadsheetId`
+ * but the handler returns `clientSheetId`, so write-through was silently
+ * skipped for every onboarding. Backfills the drift that created.
+ *
+ * Payload: { dryRun?: boolean }
+ */
+function handleResyncClients_(params, callerEmail) {
+  if (!callerEmail) return errorResponse_("callerEmail is required", "AUTH_ERROR");
+  try { rateLimit_("resyncClients_" + callerEmail, 10); } catch(e) { return errorResponse_(String(e.message), "RATE_LIMIT"); }
+
+  var callerLookup = lookupUser_(callerEmail);
+  if (!callerLookup.user) return errorResponse_("Caller not found", "AUTH_ERROR");
+  if (!callerLookup.user.active) return errorResponse_("Caller deactivated", "AUTH_ERROR");
+  if (callerLookup.user.role !== "admin") return errorResponse_("Admin only", "AUTH_ERROR");
+
+  var truthy = function(v) { return v === true || v === "1" || v === "true" || v === 1; };
+  var dryRun = params && truthy(params.dryRun);
+
+  var url = prop_("SUPABASE_URL");
+  var key = prop_("SUPABASE_SERVICE_ROLE_KEY");
+  if (!url || !key) return errorResponse_("Supabase credentials not configured", "CONFIG_ERROR");
+
+  var cbId = prop_("CB_SPREADSHEET_ID");
+  var ss = SpreadsheetApp.openById(cbId);
+  var sheet = ss.getSheetByName("Clients");
+  if (!sheet) return errorResponse_("CB Clients sheet not found", "SCHEMA_ERROR");
+  var data = sheet.getDataRange().getValues();
+  if (data.length < 2) return jsonResponse_({ success: true, cbCount: 0, upserted: 0, sbDeleted: 0, missingFromSb: [] });
+
+  var headersUpper = data[0].map(function(h) { return String(h || "").trim().toUpperCase(); });
+  var idIdx = headersUpper.indexOf("CLIENT SPREADSHEET ID");
+  var nameIdx = headersUpper.indexOf("CLIENT NAME");
+  if (idIdx < 0 || nameIdx < 0) return errorResponse_("CB Clients missing required columns (Client Name / Client Spreadsheet ID)", "SCHEMA_ERROR");
+
+  var cbRows = []; // { sid, name }
+  var cbIds = {};  // sid → true
+  for (var i = 1; i < data.length; i++) {
+    var sid = String(data[i][idIdx] || "").trim();
+    var nm  = String(data[i][nameIdx] || "").trim();
+    if (!sid || !nm) continue;
+    cbIds[sid] = true;
+    cbRows.push({ sid: sid, name: nm });
+  }
+
+  // Fetch current Supabase clients
+  var sbResp = UrlFetchApp.fetch(url + "/rest/v1/clients?select=spreadsheet_id,name", {
+    method: "GET",
+    headers: { "Authorization": "Bearer " + key, "apikey": key },
+    muteHttpExceptions: true
+  });
+  var sbRows = [];
+  if (sbResp.getResponseCode() >= 200 && sbResp.getResponseCode() < 300) {
+    try { sbRows = JSON.parse(sbResp.getContentText()); } catch (_) {}
+  }
+  var sbOrphans = sbRows
+    .filter(function(r) { return !cbIds[String(r.spreadsheet_id || "").trim()]; })
+    .map(function(r) { return { spreadsheetId: r.spreadsheet_id, name: r.name }; });
+  var missingFromSb = cbRows.filter(function(r) {
+    return !sbRows.some(function(s) { return String(s.spreadsheet_id || "").trim() === r.sid; });
+  });
+
+  if (dryRun) {
+    return jsonResponse_({
+      success: true,
+      dryRun: true,
+      cbCount: cbRows.length,
+      sbCount: sbRows.length,
+      willUpsertCount: cbRows.length,
+      willDeleteSb: sbOrphans,
+      missingFromSb: missingFromSb  // these are the ones most interesting — CB has them, SB doesn't
+    });
+  }
+
+  // Upsert every CB row using the existing helper (reads full row from CB + builds apiClient shape)
+  var upserted = 0;
+  var upsertErrors = [];
+  for (var u = 0; u < cbRows.length; u++) {
+    try {
+      resyncClientToSupabase_(cbRows[u].sid);
+      upserted++;
+    } catch (e) {
+      upsertErrors.push({ sid: cbRows[u].sid, name: cbRows[u].name, error: String(e) });
+    }
+  }
+
+  // Delete Supabase orphans
+  var sbDeleted = 0;
+  for (var o = 0; o < sbOrphans.length; o++) {
+    var del = UrlFetchApp.fetch(url + "/rest/v1/clients?spreadsheet_id=eq." + encodeURIComponent(sbOrphans[o].spreadsheetId), {
+      method: "DELETE",
+      headers: { "Authorization": "Bearer " + key, "apikey": key, "Prefer": "return=minimal" },
+      muteHttpExceptions: true
+    });
+    if (del.getResponseCode() >= 200 && del.getResponseCode() < 300) sbDeleted++;
+  }
+
+  // Invalidate server caches so next GET /getClients reads fresh
+  try {
+    var cache = CacheService.getScriptCache();
+    cache.remove("api_active_clients");
+    cache.remove("clients");
+    cache.remove("clients_all");
+    cache.remove("api_client_name_map");
+  } catch (_) {}
+
+  return jsonResponse_({
+    success: true,
+    cbCount: cbRows.length,
+    sbCountBefore: sbRows.length,
+    upserted: upserted,
+    upsertErrors: upsertErrors,
+    sbDeleted: sbDeleted,
+    sbOrphans: sbOrphans,
+    missingFromSb: missingFromSb
+  });
 }
 
 /**

@@ -999,6 +999,37 @@ export function resyncUsers(callerEmail: string, pruneAuth: boolean) {
   });
 }
 
+// ─── Session 70 follow-up — Clients resync tool ─────────────────────────────
+
+export interface ResyncClientsDryRunResponse {
+  success: boolean;
+  dryRun: true;
+  cbCount: number;
+  sbCount: number;
+  willUpsertCount: number;
+  willDeleteSb: Array<{ spreadsheetId: string; name: string }>;
+  missingFromSb: Array<{ sid: string; name: string }>;
+}
+
+export interface ResyncClientsResponse {
+  success: boolean;
+  cbCount: number;
+  sbCountBefore: number;
+  upserted: number;
+  upsertErrors: Array<{ sid: string; name: string; error: string }>;
+  sbDeleted: number;
+  sbOrphans: Array<{ spreadsheetId: string; name: string }>;
+  missingFromSb: Array<{ sid: string; name: string }>;
+}
+
+export function resyncClientsPreview(callerEmail: string) {
+  return apiFetch<ResyncClientsDryRunResponse>('resyncClients', { callerEmail, dryRun: '1' });
+}
+
+export function resyncClients(callerEmail: string) {
+  return apiFetch<ResyncClientsResponse>('resyncClients', { callerEmail });
+}
+
 // ─── POST Fetch Wrapper (Write Operations) ──────────────────────────────────
 
 /** Default timeout for write calls — 90 seconds. Apps Script can be slow. */

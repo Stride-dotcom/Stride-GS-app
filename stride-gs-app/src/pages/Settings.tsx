@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Settings as SettingsIcon, Users, DollarSign, Mail, Database, Globe, Bell, Plus, ChevronRight, CheckCircle2, AlertCircle, UserPlus, Shield, ToggleLeft, ToggleRight, Eye, EyeOff, Wifi, WifiOff, RefreshCw, Loader2, RefreshCcw, ExternalLink, Wrench, PlayCircle, Send, FolderSync, BookText, LogIn, Cloud, Edit2, Zap, ArrowUpDown, ChevronUp, ChevronDown, X } from 'lucide-react';
 import { useReactTable, getCoreRowModel, getSortedRowModel, flexRender, type SortingState, type ColumnDef } from '@tanstack/react-table';
-import { getApiUrl, getApiToken, setApiCredentials, isApiConfigured, fetchHealth, postOnboardClient, postUpdateClient, postSyncSettings, postRefreshCaches, postFixMissingFolders, postTestSendClientTemplates, postTestSendClaimEmails, fetchAutoIdSetting, postUpdateAutoIdSetting, postResolveOnboardUser, fetchStaxConfig, postUpdateStaxConfig, apiPost, fetchEmailTemplates, postSyncTemplatesToClients, postBulkSyncToSupabase, postPurgeInactiveFromSupabase, fetchClients, postFinishClientSetup, postSendWelcomeToUsers, resyncUsersPreview, resyncUsers } from '../lib/api';
+import { getApiUrl, getApiToken, setApiCredentials, isApiConfigured, fetchHealth, postOnboardClient, postUpdateClient, postSyncSettings, postRefreshCaches, postFixMissingFolders, postTestSendClientTemplates, postTestSendClaimEmails, fetchAutoIdSetting, postUpdateAutoIdSetting, postResolveOnboardUser, fetchStaxConfig, postUpdateStaxConfig, apiPost, fetchEmailTemplates, postSyncTemplatesToClients, postBulkSyncToSupabase, postPurgeInactiveFromSupabase, fetchClients, postFinishClientSetup, postSendWelcomeToUsers, resyncUsersPreview, resyncUsers, resyncClientsPreview, resyncClients } from '../lib/api';
 import type { BulkSyncResult } from '../lib/api';
 import type { EmailTemplate } from '../lib/api';
 import { entityEvents } from '../lib/entityEvents';
@@ -510,6 +510,79 @@ export function Settings() {
       setResyncResult({ ok: false, message: String(err) });
     } finally {
       setResyncLoading(false);
+    }
+  }
+
+  // Session 70 follow-up — Resync Clients (CB → Supabase clients mirror)
+  const [resyncClientsOpen, setResyncClientsOpen] = useState(false);
+  const [resyncClientsLoading, setResyncClientsLoading] = useState(false);
+  const [resyncClientsPreviewState, setResyncClientsPreviewState] = useState<null | {
+    cbCount: number;
+    sbCount: number;
+    willDeleteSb: Array<{ spreadsheetId: string; name: string }>;
+    missingFromSb: Array<{ sid: string; name: string }>;
+  }>(null);
+  const [resyncClientsResult, setResyncClientsResult] = useState<null | {
+    ok: boolean;
+    message: string;
+    details?: string[];
+  }>(null);
+
+  async function handleOpenResyncClients() {
+    setResyncClientsOpen(true);
+    setResyncClientsPreviewState(null);
+    setResyncClientsResult(null);
+    if (!realUser?.email) return;
+    setResyncClientsLoading(true);
+    try {
+      const res = await resyncClientsPreview(realUser.email);
+      if (res.ok && res.data?.success) {
+        setResyncClientsPreviewState({
+          cbCount: res.data.cbCount,
+          sbCount: res.data.sbCount,
+          willDeleteSb: res.data.willDeleteSb || [],
+          missingFromSb: res.data.missingFromSb || [],
+        });
+      } else {
+        setResyncClientsResult({ ok: false, message: res.error || 'Preview failed — check API connection.' });
+      }
+    } catch (err) {
+      setResyncClientsResult({ ok: false, message: String(err) });
+    } finally {
+      setResyncClientsLoading(false);
+    }
+  }
+
+  async function handleRunResyncClients() {
+    if (!realUser?.email) return;
+    setResyncClientsLoading(true);
+    setResyncClientsResult(null);
+    try {
+      const res = await resyncClients(realUser.email);
+      if (res.ok && res.data?.success) {
+        const d = res.data;
+        const details: string[] = [
+          `CB Clients: ${d.cbCount}`,
+          `Upserted to Supabase: ${d.upserted}`,
+          `Deleted orphans from Supabase: ${d.sbDeleted}`,
+        ];
+        if (d.upsertErrors && d.upsertErrors.length > 0) {
+          details.push(`Upsert errors: ${d.upsertErrors.length}`);
+        }
+        setResyncClientsResult({
+          ok: true,
+          message: `Resync complete — Supabase clients now matches CB Clients.`,
+          details,
+        });
+        // Refetch clients list so UI updates immediately
+        await refetchClients();
+      } else {
+        setResyncClientsResult({ ok: false, message: res.error || 'Resync failed.' });
+      }
+    } catch (err) {
+      setResyncClientsResult({ ok: false, message: String(err) });
+    } finally {
+      setResyncClientsLoading(false);
     }
   }
 
@@ -1724,6 +1797,15 @@ export function Settings() {
                         {showInactiveClients ? 'Hide Inactive' : 'Show Inactive'}
                       </button>
                     )}
+                    {isLive && isAdmin && (
+                      <button
+                        onClick={handleOpenResyncClients}
+                        title="Reconcile CB Clients (source of truth) with Supabase clients mirror. Use when a newly onboarded client isn't showing up in the app."
+                        style={{ padding: '6px 12px', fontSize: 11, border: `1px solid ${theme.colors.border}`, borderRadius: 6, background: '#fff', cursor: 'pointer', fontFamily: 'inherit', color: theme.colors.textMuted, display: 'flex', alignItems: 'center', gap: 4 }}
+                      >
+                        <RefreshCcw size={12} /> Resync from CB
+                      </button>
+                    )}
                     {isLive && (
                       <button
                         onClick={handleSyncAll}
@@ -2037,6 +2119,132 @@ export function Settings() {
                     onClose={() => setClientModalOpen(false)}
                     onSubmit={handleClientSubmit}
                   />
+                )}
+
+                {/* Session 70 follow-up — Resync Clients modal (CB → Supabase clients mirror) */}
+                {resyncClientsOpen && (
+                  <div
+                    onClick={() => !resyncClientsLoading && setResyncClientsOpen(false)}
+                    style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)', zIndex: 200, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                  >
+                    <div
+                      onClick={e => e.stopPropagation()}
+                      style={{ background: '#fff', borderRadius: 12, width: 'min(620px, 92vw)', maxHeight: '86vh', overflow: 'auto', boxShadow: '0 10px 40px rgba(0,0,0,0.2)' }}
+                    >
+                      <div style={{ padding: '16px 20px', borderBottom: `1px solid ${theme.colors.border}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <div style={{ fontSize: 16, fontWeight: 700 }}>Resync Clients from CB</div>
+                        <button onClick={() => !resyncClientsLoading && setResyncClientsOpen(false)} style={{ background: 'none', border: 'none', cursor: resyncClientsLoading ? 'not-allowed' : 'pointer', padding: 4, color: theme.colors.textMuted }}>
+                          <X size={18} />
+                        </button>
+                      </div>
+                      <div style={{ padding: 20 }}>
+                        <div style={{ fontSize: 13, color: theme.colors.textSecondary, lineHeight: 1.6, marginBottom: 14 }}>
+                          Reads every row from the <strong>CB Clients</strong> sheet (source of truth) and upserts into the Supabase <code>clients</code> mirror.
+                          Any Supabase row whose spreadsheet ID isn't in CB is deleted.
+                          Use this when a newly onboarded client isn't appearing in the app.
+                        </div>
+
+                        {resyncClientsLoading && !resyncClientsPreviewState && !resyncClientsResult && (
+                          <div style={{ padding: '20px 0', textAlign: 'center', color: theme.colors.textMuted, fontSize: 13 }}>
+                            <Loader2 size={20} style={{ animation: 'spin 1s linear infinite', marginBottom: 8 }} />
+                            <div>Computing diff…</div>
+                          </div>
+                        )}
+
+                        {resyncClientsPreviewState && !resyncClientsResult && (
+                          <>
+                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 14 }}>
+                              <div style={{ padding: 12, background: theme.colors.bgSubtle, borderRadius: 8, border: `1px solid ${theme.colors.border}` }}>
+                                <div style={{ fontSize: 11, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: 0.5 }}>CB Clients</div>
+                                <div style={{ fontSize: 22, fontWeight: 700, color: theme.colors.text }}>{resyncClientsPreviewState.cbCount}</div>
+                                <div style={{ fontSize: 10, color: theme.colors.textMuted }}>source of truth</div>
+                              </div>
+                              <div style={{ padding: 12, background: theme.colors.bgSubtle, borderRadius: 8, border: `1px solid ${theme.colors.border}` }}>
+                                <div style={{ fontSize: 11, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: 0.5 }}>Supabase clients</div>
+                                <div style={{ fontSize: 22, fontWeight: 700, color: theme.colors.text }}>{resyncClientsPreviewState.sbCount}</div>
+                                <div style={{ fontSize: 10, color: (resyncClientsPreviewState.willDeleteSb.length > 0 || resyncClientsPreviewState.missingFromSb.length > 0) ? '#B45309' : theme.colors.textMuted }}>
+                                  {resyncClientsPreviewState.missingFromSb.length > 0 ? `${resyncClientsPreviewState.missingFromSb.length} missing` : ''}
+                                  {resyncClientsPreviewState.missingFromSb.length > 0 && resyncClientsPreviewState.willDeleteSb.length > 0 ? ' · ' : ''}
+                                  {resyncClientsPreviewState.willDeleteSb.length > 0 ? `${resyncClientsPreviewState.willDeleteSb.length} orphans` : ''}
+                                  {resyncClientsPreviewState.missingFromSb.length === 0 && resyncClientsPreviewState.willDeleteSb.length === 0 ? 'in sync' : ''}
+                                </div>
+                              </div>
+                            </div>
+
+                            {resyncClientsPreviewState.missingFromSb.length > 0 && (
+                              <div style={{ padding: 10, border: '1px solid #A7F3D0', background: '#ECFDF5', borderRadius: 8, marginBottom: 10 }}>
+                                <div style={{ fontSize: 12, fontWeight: 600, color: '#065F46', marginBottom: 4 }}>
+                                  Will add to Supabase ({resyncClientsPreviewState.missingFromSb.length}):
+                                </div>
+                                <div style={{ fontSize: 11, color: '#065F46', fontFamily: 'monospace', wordBreak: 'break-all', maxHeight: 140, overflowY: 'auto' }}>
+                                  {resyncClientsPreviewState.missingFromSb.map(r => `${r.name}  (${r.sid.substring(0, 14)}…)`).join('\n')}
+                                </div>
+                              </div>
+                            )}
+
+                            {resyncClientsPreviewState.willDeleteSb.length > 0 && (
+                              <div style={{ padding: 10, border: '1px solid #FECACA', background: '#FEF2F2', borderRadius: 8, marginBottom: 14 }}>
+                                <div style={{ fontSize: 12, fontWeight: 600, color: '#991B1B', marginBottom: 4 }}>
+                                  Will delete Supabase orphans ({resyncClientsPreviewState.willDeleteSb.length}):
+                                </div>
+                                <div style={{ fontSize: 11, color: '#991B1B', fontFamily: 'monospace', wordBreak: 'break-all', maxHeight: 140, overflowY: 'auto' }}>
+                                  {resyncClientsPreviewState.willDeleteSb.map(r => `${r.name || '(no name)'}  (${(r.spreadsheetId || '').substring(0, 14)}…)`).join('\n')}
+                                </div>
+                              </div>
+                            )}
+
+                            {resyncClientsPreviewState.missingFromSb.length === 0 && resyncClientsPreviewState.willDeleteSb.length === 0 && (
+                              <div style={{ padding: 10, border: '1px solid #A7F3D0', background: '#ECFDF5', borderRadius: 8, marginBottom: 14, fontSize: 12, color: '#065F46' }}>
+                                ✓ Supabase clients already matches CB. Running resync will re-upsert {resyncClientsPreviewState.cbCount} rows for idempotency.
+                              </div>
+                            )}
+                          </>
+                        )}
+
+                        {resyncClientsResult && (
+                          <div style={{ padding: 12, border: `1px solid ${resyncClientsResult.ok ? '#A7F3D0' : '#FECACA'}`, background: resyncClientsResult.ok ? '#ECFDF5' : '#FEF2F2', borderRadius: 8, marginBottom: 14 }}>
+                            <div style={{ fontSize: 13, fontWeight: 600, color: resyncClientsResult.ok ? '#065F46' : '#991B1B', marginBottom: 6 }}>
+                              {resyncClientsResult.message}
+                            </div>
+                            {resyncClientsResult.details && (
+                              <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12, color: resyncClientsResult.ok ? '#065F46' : '#991B1B' }}>
+                                {resyncClientsResult.details.map((d, i) => <li key={i}>{d}</li>)}
+                              </ul>
+                            )}
+                          </div>
+                        )}
+
+                        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 10 }}>
+                          {!resyncClientsResult ? (
+                            <>
+                              <button
+                                onClick={() => !resyncClientsLoading && setResyncClientsOpen(false)}
+                                disabled={resyncClientsLoading}
+                                style={{ padding: '8px 16px', fontSize: 12, fontWeight: 600, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: resyncClientsLoading ? 'not-allowed' : 'pointer', fontFamily: 'inherit', color: theme.colors.textSecondary }}
+                              >
+                                Cancel
+                              </button>
+                              <button
+                                onClick={handleRunResyncClients}
+                                disabled={resyncClientsLoading || !resyncClientsPreviewState}
+                                style={{ padding: '8px 16px', fontSize: 12, fontWeight: 600, border: 'none', borderRadius: 8, background: theme.colors.orange, color: '#fff', cursor: (resyncClientsLoading || !resyncClientsPreviewState) ? 'wait' : 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', gap: 4, opacity: (resyncClientsLoading || !resyncClientsPreviewState) ? 0.7 : 1 }}
+                              >
+                                {resyncClientsLoading ? <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} /> : <RefreshCcw size={13} />}
+                                {resyncClientsLoading ? 'Resyncing…' : 'Run Resync'}
+                              </button>
+                            </>
+                          ) : (
+                            <button
+                              onClick={() => setResyncClientsOpen(false)}
+                              style={{ padding: '8px 16px', fontSize: 12, fontWeight: 600, border: 'none', borderRadius: 8, background: theme.colors.orange, color: '#fff', cursor: 'pointer', fontFamily: 'inherit' }}
+                            >
+                              Done
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
                 )}
               </>
             );
