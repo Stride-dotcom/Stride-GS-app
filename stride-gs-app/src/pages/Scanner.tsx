@@ -27,6 +27,7 @@ import { entityEvents } from '../lib/entityEvents';
 import { QRScanner } from '../components/scanner/QRScanner';
 import { parseScanPayload } from '../lib/parseScanPayload';
 import { playScanAudioFeedback } from '../lib/scanAudioFeedback';
+import { useIsMobile } from '../hooks/useIsMobile';
 
 function normalizeId(raw: string): string {
   return raw.trim().replace(/^ITEM:\s*/i, '').toUpperCase();
@@ -44,29 +45,55 @@ interface QueueItem {
   error?: string;
 }
 
-const s = {
-  page: { display: 'flex', flexDirection: 'column' as const, height: '100%', fontFamily: theme.typography.fontFamily, background: '#f8f9fa' },
-  header: { display: 'flex', alignItems: 'center', gap: 10, padding: '14px 20px', borderBottom: `1px solid ${theme.colors.border}`, background: '#fff', flexShrink: 0 },
-  body: { flex: 1, overflow: 'auto', padding: 16, display: 'grid', gridTemplateColumns: '1fr 380px', gap: 16, minHeight: 0 } as React.CSSProperties,
-  card: { background: '#fff', border: `1px solid ${theme.colors.border}`, borderRadius: 10, padding: 14, display: 'flex', flexDirection: 'column' as const },
-  cardTitle: { fontSize: 13, fontWeight: 600, color: theme.colors.text, textTransform: 'uppercase' as const, letterSpacing: '0.04em', marginBottom: 8, display: 'flex', alignItems: 'center', gap: 8 },
-  textarea: { width: '100%', minHeight: 100, padding: '10px 12px', border: `1px solid ${theme.colors.border}`, borderRadius: 8, fontSize: 14, fontFamily: 'monospace', outline: 'none', resize: 'vertical' as const },
-  btnPrimary: { padding: '9px 18px', fontSize: 14, fontWeight: 600, background: theme.colors.primary, color: '#fff', border: 'none', borderRadius: 8, cursor: 'pointer', fontFamily: 'inherit', display: 'inline-flex', alignItems: 'center', gap: 6 },
-  btnSecondary: { padding: '7px 14px', fontSize: 12, fontWeight: 500, background: '#fff', color: theme.colors.text, border: `1px solid ${theme.colors.border}`, borderRadius: 8, cursor: 'pointer', fontFamily: 'inherit', display: 'inline-flex', alignItems: 'center', gap: 4 },
-  btnDanger: { padding: '7px 14px', fontSize: 12, fontWeight: 500, background: '#fff', color: '#DC2626', border: '1px solid #FCA5A5', borderRadius: 8, cursor: 'pointer', fontFamily: 'inherit', display: 'inline-flex', alignItems: 'center', gap: 4 },
-  queueRow: (status: QueueItem['status']) => ({
-    display: 'grid', gridTemplateColumns: '100px 1fr 1fr 1fr 80px 34px', gap: 8, alignItems: 'center', padding: '8px 10px',
-    borderBottom: `1px solid ${theme.colors.borderLight}`, fontSize: 12,
-    background: status === 'not-found' ? '#FEF2F2' : status === 'pending' ? '#F9FAFB' : '#fff',
-  }) as React.CSSProperties,
-  queueHead: { display: 'grid', gridTemplateColumns: '100px 1fr 1fr 1fr 80px 34px', gap: 8, padding: '8px 10px', borderBottom: `2px solid ${theme.colors.border}`, fontSize: 10, fontWeight: 600, textTransform: 'uppercase' as const, letterSpacing: '0.04em', color: theme.colors.textMuted, background: '#F9FAFB' } as React.CSSProperties,
-  locInput: { width: '100%', padding: '10px 12px', border: `1px solid ${theme.colors.border}`, borderRadius: 8, fontSize: 14, fontFamily: 'inherit', outline: 'none' } as React.CSSProperties,
-  dropdown: { position: 'absolute' as const, top: '100%', left: 0, right: 0, background: '#fff', border: `1px solid ${theme.colors.border}`, borderRadius: 8, marginTop: 4, maxHeight: 240, overflow: 'auto', boxShadow: '0 4px 20px rgba(0,0,0,0.08)', zIndex: 30 },
-  dropdownRow: (active: boolean) => ({ padding: '8px 12px', fontSize: 13, cursor: 'pointer', background: active ? '#EFF6FF' : '#fff', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }) as React.CSSProperties,
-  modal: { position: 'fixed' as const, inset: 0, background: 'rgba(0,0,0,0.35)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 50 },
-  modalCard: { background: '#fff', borderRadius: 10, padding: 20, width: 400, boxShadow: '0 10px 40px rgba(0,0,0,0.2)' },
-  resultBanner: (ok: boolean) => ({ padding: '10px 14px', borderRadius: 8, background: ok ? '#F0FDF4' : '#FEF2F2', border: `1px solid ${ok ? '#86EFAC' : '#FCA5A5'}`, color: ok ? '#15803D' : '#DC2626', fontSize: 13, fontWeight: 500, marginBottom: 12, display: 'flex', alignItems: 'center', gap: 8 }) as React.CSSProperties,
-};
+// Session 68.1 — Style factory, responsive on mobile (single-column, larger
+// tap targets, stacked queue rows, full-width modals).
+function makeStyles(isMobile: boolean) {
+  return {
+    page: { display: 'flex', flexDirection: 'column' as const, height: '100%', fontFamily: theme.typography.fontFamily, background: '#f8f9fa' },
+    header: { display: 'flex', alignItems: 'center', gap: 10, padding: isMobile ? '10px 14px' : '14px 20px', borderBottom: `1px solid ${theme.colors.border}`, background: '#fff', flexShrink: 0 },
+    body: {
+      flex: 1, overflow: 'auto',
+      padding: isMobile ? 10 : 16,
+      display: isMobile ? 'flex' : 'grid',
+      flexDirection: isMobile ? ('column' as const) : undefined,
+      gridTemplateColumns: isMobile ? undefined : '1fr 380px',
+      gap: isMobile ? 10 : 16,
+      minHeight: 0,
+    } as React.CSSProperties,
+    card: { background: '#fff', border: `1px solid ${theme.colors.border}`, borderRadius: 10, padding: isMobile ? 10 : 14, display: 'flex', flexDirection: 'column' as const },
+    cardTitle: { fontSize: 13, fontWeight: 600, color: theme.colors.text, textTransform: 'uppercase' as const, letterSpacing: '0.04em', marginBottom: 8, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' as const },
+    textarea: { width: '100%', minHeight: isMobile ? 80 : 100, padding: '10px 12px', border: `1px solid ${theme.colors.border}`, borderRadius: 8, fontSize: 16 /* 16px avoids iOS zoom-on-focus */, fontFamily: 'monospace', outline: 'none', resize: 'vertical' as const, boxSizing: 'border-box' as const },
+    btnPrimary: { padding: isMobile ? '11px 18px' : '9px 18px', fontSize: 14, fontWeight: 600, background: theme.colors.primary, color: '#fff', border: 'none', borderRadius: 8, cursor: 'pointer', fontFamily: 'inherit', display: 'inline-flex', alignItems: 'center', gap: 6, minHeight: isMobile ? 42 : undefined },
+    btnSecondary: { padding: isMobile ? '9px 14px' : '7px 14px', fontSize: 12, fontWeight: 500, background: '#fff', color: theme.colors.text, border: `1px solid ${theme.colors.border}`, borderRadius: 8, cursor: 'pointer', fontFamily: 'inherit', display: 'inline-flex', alignItems: 'center', gap: 4, minHeight: isMobile ? 38 : undefined },
+    btnDanger: { padding: isMobile ? '9px 14px' : '7px 14px', fontSize: 12, fontWeight: 500, background: '#fff', color: '#DC2626', border: '1px solid #FCA5A5', borderRadius: 8, cursor: 'pointer', fontFamily: 'inherit', display: 'inline-flex', alignItems: 'center', gap: 4, minHeight: isMobile ? 38 : undefined },
+    // On mobile, queue rows stack into a card layout instead of a 6-column grid
+    queueRow: (status: QueueItem['status']) => ({
+      display: isMobile ? 'flex' : 'grid',
+      flexDirection: isMobile ? ('column' as const) : undefined,
+      gridTemplateColumns: isMobile ? undefined : '100px 1fr 1fr 1fr 80px 34px',
+      gap: isMobile ? 2 : 8,
+      alignItems: isMobile ? ('stretch' as const) : ('center' as const),
+      padding: isMobile ? '10px 12px' : '8px 10px',
+      borderBottom: `1px solid ${theme.colors.borderLight}`,
+      fontSize: 12,
+      background: status === 'not-found' ? '#FEF2F2' : status === 'pending' ? '#F9FAFB' : '#fff',
+      position: 'relative' as const,
+    }) as React.CSSProperties,
+    queueHead: {
+      display: isMobile ? 'none' : 'grid',
+      gridTemplateColumns: '100px 1fr 1fr 1fr 80px 34px',
+      gap: 8, padding: '8px 10px',
+      borderBottom: `2px solid ${theme.colors.border}`,
+      fontSize: 10, fontWeight: 600, textTransform: 'uppercase' as const, letterSpacing: '0.04em', color: theme.colors.textMuted, background: '#F9FAFB',
+    } as React.CSSProperties,
+    locInput: { width: '100%', padding: isMobile ? '12px' : '10px 12px', border: `1px solid ${theme.colors.border}`, borderRadius: 8, fontSize: 16, fontFamily: 'inherit', outline: 'none', boxSizing: 'border-box' as const } as React.CSSProperties,
+    dropdown: { position: 'absolute' as const, top: '100%', left: 0, right: 0, background: '#fff', border: `1px solid ${theme.colors.border}`, borderRadius: 8, marginTop: 4, maxHeight: isMobile ? 280 : 240, overflow: 'auto', boxShadow: '0 4px 20px rgba(0,0,0,0.08)', zIndex: 30 },
+    dropdownRow: (active: boolean) => ({ padding: isMobile ? '12px 14px' : '8px 12px', fontSize: 13, cursor: 'pointer', background: active ? '#EFF6FF' : '#fff', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }) as React.CSSProperties,
+    modal: { position: 'fixed' as const, inset: 0, background: 'rgba(0,0,0,0.35)', display: 'flex', alignItems: isMobile ? 'flex-end' : 'center', justifyContent: 'center', zIndex: 50 },
+    modalCard: { background: '#fff', borderRadius: isMobile ? '14px 14px 0 0' : 10, padding: isMobile ? 16 : 20, width: isMobile ? '100%' : 400, maxWidth: '100%', boxShadow: '0 10px 40px rgba(0,0,0,0.2)', boxSizing: 'border-box' as const },
+    resultBanner: (ok: boolean) => ({ padding: '10px 14px', borderRadius: 8, background: ok ? '#F0FDF4' : '#FEF2F2', border: `1px solid ${ok ? '#86EFAC' : '#FCA5A5'}`, color: ok ? '#15803D' : '#DC2626', fontSize: 13, fontWeight: 500, marginBottom: 12, display: 'flex', alignItems: 'center', gap: 8 }) as React.CSSProperties,
+  };
+}
 
 // ── Location picker ────────────────────────────────────────────────────
 interface LocationPickerProps {
@@ -80,6 +107,8 @@ interface LocationPickerProps {
 }
 
 function LocationPicker({ value, onChange, options, notesMap, canCreate, onRequestCreate, disabled }: LocationPickerProps) {
+  const { isMobile } = useIsMobile();
+  const s = useMemo(() => makeStyles(isMobile), [isMobile]);
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState(value);
   const [focusIdx, setFocusIdx] = useState(0);
@@ -149,6 +178,8 @@ function LocationPicker({ value, onChange, options, notesMap, canCreate, onReque
 
 // ── +New modal ─────────────────────────────────────────────────────────
 function NewLocationModal({ initialCode, onClose, onCreated }: { initialCode: string; onClose: () => void; onCreated: (code: string) => void }) {
+  const { isMobile } = useIsMobile();
+  const s = useMemo(() => makeStyles(isMobile), [isMobile]);
   const [code, setCode] = useState(initialCode);
   const [notes, setNotes] = useState('');
   const [busy, setBusy] = useState(false);
@@ -201,6 +232,8 @@ function NewLocationModal({ initialCode, onClose, onCreated }: { initialCode: st
 // ── Main Scanner component ──────────────────────────────────────────────
 export function Scanner() {
   const { user } = useAuth();
+  const { isMobile } = useIsMobile();
+  const s = useMemo(() => makeStyles(isMobile), [isMobile]);
   const isStaff = user?.role === 'admin' || user?.role === 'staff';
   const { apiClients } = useClients();
   const { locations, locationNames, refetch: refetchLocations } = useLocations();
@@ -421,26 +454,73 @@ export function Scanner() {
                 </div>
               )}
               {queue.map(q => (
-                <div key={q.itemId} style={s.queueRow(q.status)}>
-                  <span style={{ fontFamily: 'monospace', fontWeight: 600 }}>{q.itemId}</span>
-                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    {q.status === 'pending' && <Loader2 size={11} style={{ animation: 'spin 1s linear infinite', color: theme.colors.textMuted }} />}
-                    {q.status === 'found' && q.resolved?.clientName}
-                    {q.status === 'not-found' && <span style={{ color: '#DC2626' }}><AlertTriangle size={11} style={{ verticalAlign: 'middle', marginRight: 3 }} />{q.error}</span>}
-                  </span>
-                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    {q.resolved && (q.resolved.vendor || q.resolved.sidemark ? `${q.resolved.vendor || '—'}${q.resolved.sidemark ? ' · ' + q.resolved.sidemark : ''}` : '—')}
-                  </span>
-                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: theme.colors.textSecondary }}>
-                    {q.resolved?.description || ''}
-                  </span>
-                  <span style={{ fontFamily: 'monospace', fontSize: 11, color: theme.colors.textMuted }}>
-                    {q.resolved?.location || ''}
-                  </span>
-                  <button style={{ background: 'none', border: 'none', cursor: 'pointer', color: theme.colors.textMuted, padding: 2 }} onClick={() => removeFromQueue(q.itemId)}>
-                    <X size={14} />
-                  </button>
-                </div>
+                isMobile ? (
+                  // Mobile: stacked card layout
+                  <div key={q.itemId} style={s.queueRow(q.status)}>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+                      <span style={{ fontFamily: 'monospace', fontWeight: 700, fontSize: 14 }}>{q.itemId}</span>
+                      <button
+                        style={{ background: 'none', border: 'none', cursor: 'pointer', color: theme.colors.textMuted, padding: 6, minWidth: 32, minHeight: 32 }}
+                        onClick={() => removeFromQueue(q.itemId)}
+                        aria-label="Remove"
+                      >
+                        <X size={16} />
+                      </button>
+                    </div>
+                    {q.status === 'pending' && (
+                      <div style={{ fontSize: 11, color: theme.colors.textMuted, display: 'flex', alignItems: 'center', gap: 4 }}>
+                        <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} /> Looking up…
+                      </div>
+                    )}
+                    {q.status === 'not-found' && (
+                      <div style={{ fontSize: 12, color: '#DC2626', display: 'flex', alignItems: 'center', gap: 4 }}>
+                        <AlertTriangle size={12} /> {q.error}
+                      </div>
+                    )}
+                    {q.status === 'found' && q.resolved && (
+                      <>
+                        <div style={{ fontSize: 12, fontWeight: 600, color: theme.colors.text }}>{q.resolved.clientName}</div>
+                        {(q.resolved.vendor || q.resolved.sidemark) && (
+                          <div style={{ fontSize: 11, color: theme.colors.textSecondary }}>
+                            {q.resolved.vendor || '—'}{q.resolved.sidemark ? ` · ${q.resolved.sidemark}` : ''}
+                          </div>
+                        )}
+                        {q.resolved.description && (
+                          <div style={{ fontSize: 11, color: theme.colors.textSecondary, overflow: 'hidden', textOverflow: 'ellipsis', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' as const }}>
+                            {q.resolved.description}
+                          </div>
+                        )}
+                        {q.resolved.location && (
+                          <div style={{ fontSize: 11, fontFamily: 'monospace', color: theme.colors.textMuted }}>
+                            Currently: {q.resolved.location}
+                          </div>
+                        )}
+                      </>
+                    )}
+                  </div>
+                ) : (
+                  // Desktop: 6-column grid
+                  <div key={q.itemId} style={s.queueRow(q.status)}>
+                    <span style={{ fontFamily: 'monospace', fontWeight: 600 }}>{q.itemId}</span>
+                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {q.status === 'pending' && <Loader2 size={11} style={{ animation: 'spin 1s linear infinite', color: theme.colors.textMuted }} />}
+                      {q.status === 'found' && q.resolved?.clientName}
+                      {q.status === 'not-found' && <span style={{ color: '#DC2626' }}><AlertTriangle size={11} style={{ verticalAlign: 'middle', marginRight: 3 }} />{q.error}</span>}
+                    </span>
+                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {q.resolved && (q.resolved.vendor || q.resolved.sidemark ? `${q.resolved.vendor || '—'}${q.resolved.sidemark ? ' · ' + q.resolved.sidemark : ''}` : '—')}
+                    </span>
+                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: theme.colors.textSecondary }}>
+                      {q.resolved?.description || ''}
+                    </span>
+                    <span style={{ fontFamily: 'monospace', fontSize: 11, color: theme.colors.textMuted }}>
+                      {q.resolved?.location || ''}
+                    </span>
+                    <button style={{ background: 'none', border: 'none', cursor: 'pointer', color: theme.colors.textMuted, padding: 2 }} onClick={() => removeFromQueue(q.itemId)}>
+                      <X size={14} />
+                    </button>
+                  </div>
+                )
               ))}
             </div>
           </div>

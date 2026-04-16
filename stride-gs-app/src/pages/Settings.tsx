@@ -1642,7 +1642,7 @@ export function Settings() {
                           Syncing {clientSbSyncTimer.clientName} to Supabase…
                         </div>
                         <div style={{ fontSize: 11, color: theme.colors.textMuted, marginTop: 1 }}>
-                          Rebuilding inventory / tasks / repairs / will calls / shipments / billing. Typical runtime 15–60s.
+                          Rebuilding inventory / tasks / repairs / will calls / shipments / billing. Typical runtime 15–60s. <strong>Keep this page open until it finishes.</strong>
                         </div>
                       </div>
                     </div>
@@ -2826,6 +2826,9 @@ export function Settings() {
                       <div style={{ fontSize: 12, color: theme.colors.textSecondary, lineHeight: 1.5, marginLeft: 38 }}>
                         Re-syncs the Supabase read cache (Inventory, Tasks, Repairs, Will Calls, Shipments, Billing) from the current sheet data across all active clients. Also <strong>deletes orphan rows</strong> in Supabase that no longer exist in sheets. Run this after deleting rows directly in Google Sheets to keep the app in sync.
                       </div>
+                      <div style={{ marginTop: 8, marginLeft: 38, padding: '8px 10px', borderRadius: 6, background: '#FFFBEB', border: '1px solid #FDE68A', fontSize: 11, color: '#92400E', lineHeight: 1.4 }}>
+                        <strong>⚠ Keep this page open until the sync finishes.</strong> The sync runs client-by-client (15–60s each, total 15–45 min for all clients). If you close the tab, navigate away, or let the device sleep, the loop stops and you'll need to restart it.
+                      </div>
                       {bulkSyncProgress && (
                         <div style={{ marginTop: 10, padding: 12, borderRadius: 10, background: '#EFF6FF', border: '1px solid #BFDBFE', fontSize: 12 }}>
                           <div style={{ fontWeight: 600, color: '#1D4ED8', marginBottom: 6 }}>
@@ -2893,6 +2896,9 @@ export function Settings() {
                       </div>
                       <div style={{ fontSize: 12, color: theme.colors.textSecondary, lineHeight: 1.5, marginLeft: 38 }}>
                         Removes all Supabase cached data (Inventory, Tasks, Repairs, Will Calls, Shipments, Billing) for clients marked <strong>Inactive</strong> in the CB Clients sheet. Fast — only targets inactive clients, no full sync needed. Also runs automatically when you deactivate a client through the Settings edit modal.
+                      </div>
+                      <div style={{ marginTop: 8, marginLeft: 38, padding: '8px 10px', borderRadius: 6, background: '#FFFBEB', border: '1px solid #FDE68A', fontSize: 11, color: '#92400E', lineHeight: 1.4 }}>
+                        <strong>⚠ Keep this page open until the purge finishes.</strong> Runs for ~5–20s per inactive client. If you close the tab mid-run, partial purges may leave stale data — re-run to clean up.
                       </div>
                       {purgeInactiveResult && (() => {
                         const anyFailed = purgeInactiveResult.purged.some(p => p.purge?.failCount && p.purge.failCount > 0);
