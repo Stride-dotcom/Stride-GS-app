@@ -9145,18 +9145,32 @@ function api_sendTemplateEmail_(settings, templateKey, toEmail, fallbackSubject,
     // Auto-inject APP_URL if not already in tokens
     if (!tokens["{{APP_URL}}"]) tokens["{{APP_URL}}"] = APP_BASE_URL_;
 
-    // Auto-inject entity deep link tokens (v37.0.0) — email CTAs open to specific entity panels
+    // Auto-inject entity deep link tokens (v37.0.0, fixed session 69 Phase 3) —
+    // email CTAs open to specific entity panels. MUST include &client=<sheetId> so
+    // the React list-page deep-link handlers can auto-select the client. Without it,
+    // the page loads with no client filter and the detail panel never opens.
+    // The client spreadsheet ID comes from the settings map (CLIENT_SPREADSHEET_ID
+    // synced from CB) — if it's not there, the deep link still works but requires
+    // the user to manually pick the client.
     var _appUrl = tokens["{{APP_URL}}"] || APP_BASE_URL_;
+    var _clientSuffix = "";
+    try {
+      var _cid = String(settings["CLIENT_SPREADSHEET_ID"] || settings["CONSOLIDATED_BILLING_SPREADSHEET_ID"] || "").trim();
+      // settings object is from the CLIENT sheet — CLIENT_SPREADSHEET_ID is its own ID.
+      // But not all settings objects have it. Fallback: if the caller put it in tokens.
+      if (!_cid && tokens["{{CLIENT_SHEET_ID}}"]) _cid = String(tokens["{{CLIENT_SHEET_ID}}"]);
+      if (_cid) _clientSuffix = "&client=" + encodeURIComponent(_cid);
+    } catch (_) {}
     if (tokens["{{TASK_ID}}"] && !tokens["{{TASK_DEEP_LINK}}"])
-      tokens["{{TASK_DEEP_LINK}}"] = _appUrl + "/tasks?open=" + encodeURIComponent(String(tokens["{{TASK_ID}}"]));
+      tokens["{{TASK_DEEP_LINK}}"] = _appUrl + "/tasks?open=" + encodeURIComponent(String(tokens["{{TASK_ID}}"])) + _clientSuffix;
     if (tokens["{{REPAIR_ID}}"] && !tokens["{{REPAIR_DEEP_LINK}}"])
-      tokens["{{REPAIR_DEEP_LINK}}"] = _appUrl + "/repairs?open=" + encodeURIComponent(String(tokens["{{REPAIR_ID}}"]));
+      tokens["{{REPAIR_DEEP_LINK}}"] = _appUrl + "/repairs?open=" + encodeURIComponent(String(tokens["{{REPAIR_ID}}"])) + _clientSuffix;
     if (tokens["{{WC_NUMBER}}"] && !tokens["{{WC_DEEP_LINK}}"])
-      tokens["{{WC_DEEP_LINK}}"] = _appUrl + "/will-calls?open=" + encodeURIComponent(String(tokens["{{WC_NUMBER}}"]));
+      tokens["{{WC_DEEP_LINK}}"] = _appUrl + "/will-calls?open=" + encodeURIComponent(String(tokens["{{WC_NUMBER}}"])) + _clientSuffix;
     if (tokens["{{SHIPMENT_NO}}"] && !tokens["{{SHIPMENT_DEEP_LINK}}"])
-      tokens["{{SHIPMENT_DEEP_LINK}}"] = _appUrl + "/shipments?open=" + encodeURIComponent(String(tokens["{{SHIPMENT_NO}}"]));
+      tokens["{{SHIPMENT_DEEP_LINK}}"] = _appUrl + "/shipments?open=" + encodeURIComponent(String(tokens["{{SHIPMENT_NO}}"])) + _clientSuffix;
     if (tokens["{{ITEM_ID}}"] && !tokens["{{ITEM_DEEP_LINK}}"])
-      tokens["{{ITEM_DEEP_LINK}}"] = _appUrl + "/inventory?open=" + encodeURIComponent(String(tokens["{{ITEM_ID}}"]));
+      tokens["{{ITEM_DEEP_LINK}}"] = _appUrl + "/inventory?open=" + encodeURIComponent(String(tokens["{{ITEM_ID}}"])) + _clientSuffix;
 
     // Replace tokens in subject + body
     for (var tk in tokens) {

@@ -441,6 +441,48 @@ Note: Sidemark is NOT a Billing_Ledger column. The API resolves it at read time 
 
 ---
 
+## ⚠️ Deep Links — How They Work (DO NOT BREAK)
+
+Email CTA buttons ("View in Stride Hub") link to the React app and auto-open the correct entity detail panel. This has broken multiple times — **read this before touching any deep-link code.**
+
+### The correct URL format
+
+**All deep links MUST use query-param style on the LIST PAGE with `&client=`:**
+```
+https://www.mystridehub.com/#/tasks?open=INSP-62391-1&client=<spreadsheetId>
+https://www.mystridehub.com/#/repairs?open=RPR-00123&client=<spreadsheetId>
+https://www.mystridehub.com/#/will-calls?open=WC-00456&client=<spreadsheetId>
+https://www.mystridehub.com/#/shipments?open=SHP-001234&client=<spreadsheetId>
+https://www.mystridehub.com/#/inventory?open=62391&client=<spreadsheetId>
+```
+
+### Why this format and not route-style (`/#/tasks/INSP-62391-1`)
+
+Route-style URLs (`/#/tasks/INSP-62391-1`) go to standalone `TaskJobPage.tsx` which fetches a single task from Supabase. **This path was unreliable** — clicking from Gmail, the `#` fragment was being stripped by Gmail's link tracker, so users landed on the list page with no context. The query-param format always lands on the list page, which has deep-link handlers that:
+1. Read `?open=` → store in `pendingOpenRef`
+2. Read `?client=` → store in `deepLinkPendingTenantRef`
+3. When `apiClients` loads → auto-select the client in the dropdown
+4. When data loads → auto-open the detail panel for the matching entity
+
+**Without `&client=`**, step 3 never fires → no client selected → no data fetched → detail panel never opens. **This is the most common breakage mode.**
+
+### Where deep-link URLs are built (TWO systems — both must have `&client=`)
+
+| System | Where | Token | Notes |
+|---|---|---|---|
+| **Client-bound scripts** | `Emails.gs`, `Triggers.gs`, `Shipments.gs` | `{{APP_DEEP_LINK}}` | Builds the URL explicitly with `encodeURIComponent(ss.getId())`. The `sendTemplateEmail_` function injects it as a CTA button before `</body>`. |
+| **StrideAPI.gs** | `api_sendTemplateEmail_` (line ~9148) | `{{TASK_DEEP_LINK}}`, `{{REPAIR_DEEP_LINK}}`, `{{WC_DEEP_LINK}}`, `{{SHIPMENT_DEEP_LINK}}`, `{{ITEM_DEEP_LINK}}` | Auto-injected from entity ID tokens. Uses `APP_BASE_URL_` (`https://www.mystridehub.com/#`) + `&client=` suffix from `settings["CLIENT_SPREADSHEET_ID"]`. |
+
+### Rules for future builders
+
+1. **Never use route-style deep links** (`/#/tasks/ID`) — always use query-param style (`/#/tasks?open=ID&client=SHEET_ID`).
+2. **Always include `&client=<spreadsheetId>`** in the URL. The spreadsheet ID comes from `ss.getId()` in client-bound scripts, or `settings["CLIENT_SPREADSHEET_ID"]` in StrideAPI.gs.
+3. **Don't change `APP_BASE_URL_`** in StrideAPI.gs — it must include the `#` (`https://www.mystridehub.com/#`).
+4. **The React deep-link handler** lives in each list page (Inventory, Tasks, Repairs, WillCalls, Shipments) as two effects: one reads URL params on mount, the other resolves the client when `apiClients.length` changes. The dependency must be `[apiClients.length]` (a stable number), NOT `[apiClients]` (unstable array ref → React #300).
+5. **`useClientFilterUrlSync`** hook keeps the URL's `?client=` param in sync with the dropdown — so when a user picks a client manually, the URL becomes shareable/bookmarkable.
+
+---
+
 ## Load-bearing Architectural Invariants
 
 These are the top decisions that affect code generation on every task. For the full 53-item list with implementation notes, see `Docs/Archive/Architectural_Decisions_Log.md`.
