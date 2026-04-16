@@ -1,5 +1,16 @@
 /* ===================================================
-   StrideAPI.gs — v38.59.0 — 2026-04-16 PST — Stax Supabase mirror (Phase 2 of session 69)
+   StrideAPI.gs — v38.59.1 — 2026-04-16 PST — Hotfix: reactivate client cache invalidation
+   v38.59.1: FIX — handleUpdateClient_ now invalidates `api_active_clients`,
+             `clients`, `clients_all`, and `api_client_name_map` caches on
+             ANY change to the Active field, not just on deactivation.
+             Previously, reactivating a client left the cached "active clients"
+             list stale for up to 600s — the reactivated client stayed hidden
+             from getClients / getTargetClients_ / client dropdown until TTL.
+             Also added stax_charges / stax_exceptions / stax_run_log to the
+             composite-key conflict map in supabaseUpsert_ and supabaseBatchUpsert_
+             so seed + resync upserts against append-only tables don't get
+             rejected with 409 duplicate-key.
+   v38.59.0 — 2026-04-16 PST — Stax Supabase mirror (Phase 2 of session 69)
    v38.59.0: NEW — Stax tables mirrored to Supabase for fast Payments page loads:
              • 5 new caches (stax_invoices, stax_charges, stax_exceptions,
                stax_customers, stax_run_log) with RLS admin/staff SELECT
@@ -15214,6 +15225,20 @@ function handleUpdateClient_(payload) {
       purgeWarning = "Supabase purge warning: " + purgeErr.message;
       Logger.log(purgeWarning);
     }
+  }
+
+  // v38.59.1 — Invalidate all client-list caches whenever Active changes,
+  // including reactivation (previously only the deactivate branch above cleared
+  // cache → reactivated clients stayed hidden from getClients / getTargetClients_
+  // / client dropdown until the 600s CacheService TTL expired).
+  if (payload.active !== undefined) {
+    try {
+      var _c = CacheService.getScriptCache();
+      _c.remove("api_active_clients");
+      _c.remove("clients");
+      _c.remove("clients_all");
+      _c.remove("api_client_name_map");
+    } catch (_) {}
   }
 
   var updateWarnings = [];

@@ -1,5 +1,13 @@
 // ============================================================
-// STAX AUTO-PAY TOOL — v4.6.0
+// STAX AUTO-PAY TOOL — v4.6.1
+// v4.6.1 (2026-04-16 — hotfix): Auto Charge column now looked up by HEADER
+//         name, not hardcoded index 12, in both `_prepareEligiblePending` and
+//         `_executeChargeRun`. Prior behavior read the wrong cell when
+//         "Auto Charge" wasn't physically the 13th column (0-based index 12)
+//         — which is the case on the production Stax sheet — causing every
+//         CREATED invoice with explicit Auto=TRUE to fall through to the
+//         client-level check and get blocked by CLIENT_AUTO_DISABLED. Root
+//         cause of: "autopay set to 4/7…4/11, nothing charged."
 // v4.6.0 (2026-04-16 — session 69 Phase 2f): Supabase write-through for
 //         autopay runs. Adds `_sbBatchUpsert` + four resync helpers
 //         (`_sbResyncAllStaxInvoices`, `_sbResyncAllStaxCharges`,
@@ -1450,6 +1458,18 @@ function _createStaxInvoicesForRows_(options) {
     } catch (e) { Logger.log(logLabel + ": Auto Charge client lookup warning: " + e); }
   }
 
+  // v4.6.1 — Header-based lookup for Auto Charge column (fix for hardcoded
+  // index 12 mismatching the actual sheet layout — CLIENT_AUTO_DISABLED gate
+  // was firing for invoices with explicit Auto=TRUE because the wrong cell
+  // was being read).
+  var acColIdx = -1;
+  try {
+    var hdrs = invData[0] || [];
+    for (var hh = 0; hh < hdrs.length; hh++) {
+      if (String(hdrs[hh]).trim() === "Auto Charge") { acColIdx = hh; break; }
+    }
+  } catch (_) {}
+
   // Determine "today" in script timezone for the due-date gate
   var today = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd');
 
@@ -1537,7 +1557,7 @@ function _createStaxInvoicesForRows_(options) {
     // Both cases log an Exception row with a clear reason. Invoice FALSE does NOT log —
     // it's an explicit operator choice, not an error.
     if (requireAutoCharge) {
-      var autoChargeVal = invData[i + 1].length > 12 ? String(invData[i + 1][12] || "").trim().toUpperCase() : "";
+      var autoChargeVal = (acColIdx >= 0 && invData[i + 1].length > acColIdx) ? String(invData[i + 1][acColIdx] || "").trim().toUpperCase() : "";
       var invoiceExplicitlyAuto = (autoChargeVal === "TRUE" || autoChargeVal === "YES" || autoChargeVal === "ON");
       var invoiceExplicitlyManual = (autoChargeVal === "FALSE" || autoChargeVal === "NO" || autoChargeVal === "OFF");
 
@@ -2728,6 +2748,16 @@ function _executeChargeRun() {
     }
   } catch (e) { Logger.log("_executeChargeRun: Auto Charge client lookup warning: " + e); }
 
+  // v4.6.1 — Header-based lookup for Auto Charge column (fix for hardcoded
+  // index 12 mismatching the actual sheet layout).
+  var acColIdxExec = -1;
+  try {
+    var hdrsExec = invData[0] || [];
+    for (var hh2 = 0; hh2 < hdrsExec.length; hh2++) {
+      if (String(hdrsExec[hh2]).trim() === "Auto Charge") { acColIdxExec = hh2; break; }
+    }
+  } catch (_) {}
+
   // ════════════════════════════════════════════════════════════════════
   // PHASE 2a — BUILD CANDIDATE LIST (no API calls, no row writes)
   // ════════════════════════════════════════════════════════════════════
@@ -2766,7 +2796,7 @@ function _executeChargeRun() {
     //   - Invoice FALSE → always skipped (operator choice, no exception logged)
     //   - Blank → fall back to client setting with two distinct buckets:
     //       CLIENT_AUTO_DISABLED (client=false) and UNKNOWN_CLIENT (client missing)
-    var autoChargeVal = invData[i + 1].length > 12 ? String(invData[i + 1][12] || "").trim().toUpperCase() : "";
+    var autoChargeVal = (acColIdxExec >= 0 && invData[i + 1].length > acColIdxExec) ? String(invData[i + 1][acColIdxExec] || "").trim().toUpperCase() : "";
     var invoiceExplicitlyAuto = (autoChargeVal === "TRUE" || autoChargeVal === "YES" || autoChargeVal === "ON");
     var invoiceExplicitlyManual = (autoChargeVal === "FALSE" || autoChargeVal === "NO" || autoChargeVal === "OFF");
 
