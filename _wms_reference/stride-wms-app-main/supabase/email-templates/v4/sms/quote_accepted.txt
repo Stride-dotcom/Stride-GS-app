@@ -1,0 +1,5 @@
+Quote accepted
+
+{alert_message}
+
+Open: {portal_base_url}

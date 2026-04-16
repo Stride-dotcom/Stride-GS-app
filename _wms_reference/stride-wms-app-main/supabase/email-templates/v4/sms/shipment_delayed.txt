@@ -1,0 +1,1 @@
+Delay: Shipment {{shipment_number}}. Reason: {{delay_reason}}. {{shipment_link}}

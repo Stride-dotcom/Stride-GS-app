@@ -1,0 +1,5 @@
+Shipment received: {{shipment_number}}
+
+{alert_message}
+
+Open: {portal_base_url}

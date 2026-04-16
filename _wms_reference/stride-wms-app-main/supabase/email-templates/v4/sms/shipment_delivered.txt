@@ -1,0 +1,1 @@
+Delivered: {{shipment_number}} at {{delivered_at}}. {{shipment_link}}

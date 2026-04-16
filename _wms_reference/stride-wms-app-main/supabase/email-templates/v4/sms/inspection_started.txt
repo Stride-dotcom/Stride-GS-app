@@ -1,0 +1,1 @@
+Inspection started: {{inspection_number}}. {{portal_inspection_url}}

@@ -1,0 +1,5 @@
+Invoice overdue: {{invoice_number}}
+
+{alert_message}
+
+Open: {portal_base_url}

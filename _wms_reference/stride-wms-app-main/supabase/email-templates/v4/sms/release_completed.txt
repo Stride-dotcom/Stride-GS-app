@@ -1,0 +1,5 @@
+Release completed
+
+{alert_message}
+
+Open: {portal_base_url}

@@ -1,0 +1,5 @@
+New attachment on claim {{claim_number}}
+
+{alert_message}
+
+Open: {portal_base_url}

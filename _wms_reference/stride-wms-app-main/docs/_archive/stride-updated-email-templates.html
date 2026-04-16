@@ -1,0 +1,1946 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Stride WMS - Updated Email Templates (Brand Continuity)</title>
+  <style>
+    :root {
+      --stride-orange: #E85D2D;
+      --stride-orange-dark: #D14E20;
+      --slate-900: #0F172A;
+      --slate-800: #1E293B;
+      --slate-600: #475569;
+      --slate-500: #64748B;
+      --slate-400: #94A3B8;
+      --slate-200: #E2E8F0;
+      --slate-100: #F1F5F9;
+      --slate-50: #F8FAFC;
+      --green-bg: #DCFCE7;
+      --green-text: #166534;
+      --blue-bg: #DBEAFE;
+      --blue-text: #1E40AF;
+      --yellow-bg: #FEF3C7;
+      --yellow-text: #92400E;
+      --red-bg: #FEE2E2;
+      --red-text: #991B1B;
+      --purple-bg: #E9D5FF;
+      --purple-text: #7C3AED;
+    }
+    
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    
+    body { 
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; 
+      background: var(--slate-900); 
+      color: #fff;
+      padding: 20px; 
+    }
+    
+    .header { 
+      text-align: center; 
+      padding: 40px 20px; 
+    }
+    
+    .header h1 { 
+      font-size: 2rem; 
+      color: #fff; 
+    }
+    
+    .header h1 span { 
+      color: var(--stride-orange); 
+    }
+    
+    .header p {
+      color: var(--slate-400);
+      margin-top: 8px;
+    }
+    
+    .design-note {
+      max-width: 800px;
+      margin: 0 auto 30px;
+      padding: 20px;
+      background: var(--slate-800);
+      border-radius: 12px;
+      border-left: 4px solid var(--stride-orange);
+    }
+    
+    .design-note h3 {
+      color: var(--stride-orange);
+      margin-bottom: 10px;
+      font-size: 14px;
+    }
+    
+    .design-note ul {
+      list-style: none;
+      font-size: 13px;
+      color: var(--slate-400);
+    }
+    
+    .design-note li {
+      padding: 4px 0;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    
+    .design-note li::before {
+      content: "✓";
+      color: var(--stride-orange);
+      font-weight: bold;
+    }
+    
+    .tabs { 
+      display: flex; 
+      gap: 6px; 
+      flex-wrap: wrap; 
+      justify-content: center; 
+      margin-bottom: 30px; 
+      max-width: 1200px; 
+      margin: 0 auto 30px; 
+    }
+    
+    .tab { 
+      padding: 8px 14px; 
+      background: var(--slate-800); 
+      border: 1px solid var(--slate-600); 
+      border-radius: 8px; 
+      color: var(--slate-400); 
+      cursor: pointer; 
+      font-size: 12px; 
+      transition: all 0.2s;
+    }
+    
+    .tab:hover { 
+      background: var(--slate-700);
+      border-color: var(--slate-500);
+    }
+    
+    .tab.active { 
+      background: var(--stride-orange); 
+      color: white; 
+      border-color: var(--stride-orange); 
+    }
+    
+    .preview { 
+      display: none; 
+      background: var(--slate-200); 
+      border-radius: 16px; 
+      padding: 40px; 
+      max-width: 700px; 
+      margin: 0 auto; 
+    }
+    
+    .preview.active { 
+      display: block; 
+    }
+    
+    .label { 
+      text-align: center; 
+      color: var(--slate-500); 
+      font-size: 11px; 
+      text-transform: uppercase; 
+      letter-spacing: 1px; 
+      margin-bottom: 20px;
+      font-family: monospace;
+    }
+    
+    /* Email Template Styles */
+    .email-container {
+      max-width: 600px;
+      margin: 0 auto;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #fff;
+      border-radius: 12px;
+      overflow: hidden;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.1);
+    }
+    
+    .email-header {
+      background: var(--stride-orange);
+      padding: 24px 32px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    
+    .email-logo {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    
+    .logo-icon {
+      width: 36px;
+      height: 36px;
+      background: white;
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    
+    .logo-icon svg {
+      width: 24px;
+      height: 24px;
+      fill: var(--stride-orange);
+    }
+    
+    .logo-text {
+      font-size: 18px;
+      font-weight: 600;
+      color: white;
+    }
+    
+    .email-badge {
+      display: inline-block;
+      padding: 6px 14px;
+      border-radius: 20px;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    
+    .badge-info { background: rgba(255,255,255,0.2); color: white; }
+    .badge-success { background: var(--green-bg); color: var(--green-text); }
+    .badge-warning { background: var(--yellow-bg); color: var(--yellow-text); }
+    .badge-error { background: var(--red-bg); color: var(--red-text); }
+    .badge-purple { background: var(--purple-bg); color: var(--purple-text); }
+    
+    .email-body {
+      padding: 40px 32px;
+    }
+    
+    .email-icon {
+      width: 64px;
+      height: 64px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin: 0 auto 20px;
+      font-size: 28px;
+    }
+    
+    .icon-info { background: var(--blue-bg); }
+    .icon-success { background: var(--green-bg); }
+    .icon-warning { background: var(--yellow-bg); }
+    .icon-error { background: var(--red-bg); }
+    .icon-purple { background: var(--purple-bg); }
+    .icon-orange { background: #FED7AA; }
+    
+    .email-title {
+      font-size: 24px;
+      font-weight: 700;
+      color: var(--slate-800);
+      text-align: center;
+      margin-bottom: 8px;
+    }
+    
+    .email-subtitle {
+      font-size: 15px;
+      color: var(--slate-500);
+      text-align: center;
+      margin-bottom: 24px;
+    }
+    
+    .email-greeting {
+      font-size: 15px;
+      color: var(--slate-600);
+      margin-bottom: 16px;
+    }
+    
+    .email-message {
+      font-size: 15px;
+      color: var(--slate-600);
+      line-height: 1.6;
+      margin-bottom: 24px;
+    }
+    
+    .info-card {
+      background: var(--slate-50);
+      border: 1px solid var(--slate-200);
+      border-radius: 12px;
+      padding: 20px;
+      margin: 24px 0;
+    }
+    
+    .info-card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      margin-bottom: 16px;
+      padding-bottom: 16px;
+      border-bottom: 1px solid var(--slate-200);
+    }
+    
+    .info-card-ref {
+      font-size: 11px;
+      color: var(--slate-500);
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      font-weight: 600;
+    }
+    
+    .info-card-ref-value {
+      font-size: 18px;
+      font-weight: 700;
+      color: var(--slate-800);
+      margin-top: 4px;
+    }
+    
+    .info-card-amount {
+      text-align: right;
+    }
+    
+    .info-card-amount-label {
+      font-size: 11px;
+      color: var(--slate-500);
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+    
+    .info-card-amount-value {
+      font-size: 24px;
+      font-weight: 700;
+      color: var(--stride-orange);
+      margin-top: 4px;
+    }
+    
+    .info-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+    
+    .info-item label {
+      font-size: 11px;
+      color: var(--slate-500);
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      font-weight: 600;
+    }
+    
+    .info-item p {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--slate-800);
+      margin-top: 4px;
+    }
+    
+    .email-buttons {
+      display: flex;
+      gap: 12px;
+      justify-content: center;
+      margin-top: 28px;
+    }
+    
+    .btn {
+      display: inline-block;
+      padding: 14px 28px;
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: 600;
+      text-decoration: none;
+      text-align: center;
+      transition: all 0.2s;
+    }
+    
+    .btn-primary {
+      background: var(--stride-orange);
+      color: white;
+    }
+    
+    .btn-primary:hover {
+      background: var(--stride-orange-dark);
+    }
+    
+    .btn-secondary {
+      background: white;
+      color: var(--slate-800);
+      border: 2px solid var(--slate-200);
+    }
+    
+    .btn-secondary:hover {
+      border-color: var(--slate-300);
+      background: var(--slate-50);
+    }
+    
+    .email-divider {
+      height: 1px;
+      background: var(--slate-200);
+      margin: 28px 0;
+    }
+    
+    .email-note {
+      font-size: 13px;
+      color: var(--slate-500);
+      line-height: 1.5;
+      text-align: center;
+    }
+    
+    .email-footer {
+      background: var(--slate-50);
+      padding: 24px 32px;
+      text-align: center;
+      border-top: 1px solid var(--slate-200);
+    }
+    
+    .footer-company {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--slate-800);
+      margin-bottom: 4px;
+    }
+    
+    .footer-address {
+      font-size: 12px;
+      color: var(--slate-500);
+      margin-bottom: 8px;
+    }
+    
+    .footer-links {
+      font-size: 12px;
+    }
+    
+    .footer-links a {
+      color: var(--stride-orange);
+      text-decoration: none;
+    }
+    
+    .footer-links a:hover {
+      text-decoration: underline;
+    }
+    
+    /* Special: Invoice template in email */
+    .invoice-summary-table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 16px 0;
+    }
+    
+    .invoice-summary-table th {
+      text-align: left;
+      font-size: 11px;
+      color: var(--slate-500);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      padding: 8px 0;
+      border-bottom: 2px solid var(--slate-200);
+    }
+    
+    .invoice-summary-table td {
+      padding: 12px 0;
+      font-size: 14px;
+      color: var(--slate-800);
+      border-bottom: 1px solid var(--slate-100);
+    }
+    
+    .invoice-summary-table td:last-child {
+      text-align: right;
+      font-weight: 600;
+    }
+    
+    .invoice-total-row td {
+      padding-top: 16px;
+      font-size: 16px;
+      font-weight: 700;
+      border-bottom: none;
+    }
+    
+    .invoice-total-row td:last-child {
+      color: var(--stride-orange);
+    }
+    
+    /* Status timeline for shipments */
+    .status-timeline {
+      margin: 24px 0;
+    }
+    
+    .timeline-item {
+      display: flex;
+      gap: 12px;
+      padding: 12px 0;
+      position: relative;
+    }
+    
+    .timeline-item:not(:last-child)::before {
+      content: '';
+      position: absolute;
+      left: 11px;
+      top: 36px;
+      bottom: 0;
+      width: 2px;
+      background: var(--slate-200);
+    }
+    
+    .timeline-dot {
+      width: 24px;
+      height: 24px;
+      border-radius: 50%;
+      background: var(--slate-200);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+    
+    .timeline-dot.active {
+      background: var(--stride-orange);
+    }
+    
+    .timeline-dot.completed {
+      background: var(--green-bg);
+    }
+    
+    .timeline-dot svg {
+      width: 12px;
+      height: 12px;
+      fill: white;
+    }
+    
+    .timeline-dot.completed svg {
+      fill: var(--green-text);
+    }
+    
+    .timeline-content {
+      flex: 1;
+    }
+    
+    .timeline-title {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--slate-800);
+    }
+    
+    .timeline-time {
+      font-size: 12px;
+      color: var(--slate-500);
+      margin-top: 2px;
+    }
+  </style>
+</head>
+<body>
+
+<div class="header">
+  <h1>Stride<span>WMS</span> Email Templates</h1>
+  <p>Updated with Brand Continuity • 23 notification templates</p>
+</div>
+
+<div class="design-note">
+  <h3>🎨 Design Updates for Brand Continuity</h3>
+  <ul>
+    <li>Orange header with white logo icon (matches invoice accent color)</li>
+    <li>Orange primary CTA buttons (was blue)</li>
+    <li>Orange accent for amounts and highlights</li>
+    <li>Consistent typography and spacing</li>
+    <li>Same footer format as invoice</li>
+    <li>Cleaner info cards with better hierarchy</li>
+  </ul>
+</div>
+
+<div class="tabs">
+  <button class="tab active" onclick="showTemplate('invoice-sent')">Invoice Sent</button>
+  <button class="tab" onclick="showTemplate('invoice-created')">Invoice Created</button>
+  <button class="tab" onclick="showTemplate('payment-received')">Payment Received</button>
+  <button class="tab" onclick="showTemplate('shipment-received')">Shipment Received</button>
+  <button class="tab" onclick="showTemplate('shipment-completed')">Shipment Completed</button>
+  <button class="tab" onclick="showTemplate('shipment-status')">Shipment Status</button>
+  <button class="tab" onclick="showTemplate('item-received')">Item Received</button>
+  <button class="tab" onclick="showTemplate('item-damaged')">Item Damaged</button>
+  <button class="tab" onclick="showTemplate('item-location')">Location Changed</button>
+  <button class="tab" onclick="showTemplate('release-created')">Release Created</button>
+  <button class="tab" onclick="showTemplate('release-approved')">Release Approved</button>
+  <button class="tab" onclick="showTemplate('release-completed')">Release Completed</button>
+  <button class="tab" onclick="showTemplate('task-assigned')">Task Assigned</button>
+  <button class="tab" onclick="showTemplate('task-completed')">Task Completed</button>
+  <button class="tab" onclick="showTemplate('task-created')">Task Created</button>
+  <button class="tab" onclick="showTemplate('claim-attachment')">Claim Attachment</button>
+  <button class="tab" onclick="showTemplate('claim-determination')">Claim Determination</button>
+  <button class="tab" onclick="showTemplate('claim-approval')">Claim Approval</button>
+  <button class="tab" onclick="showTemplate('claim-accepted')">Client Accepted</button>
+  <button class="tab" onclick="showTemplate('claim-countered')">Client Countered</button>
+  <button class="tab" onclick="showTemplate('claim-declined')">Client Declined</button>
+  <button class="tab" onclick="showTemplate('claim-note')">Claim Note</button>
+  <button class="tab" onclick="showTemplate('employee-invite')">Employee Invite</button>
+</div>
+
+<!-- ==================== INVOICE SENT ==================== -->
+<div id="invoice-sent" class="preview active">
+  <div class="label">INVOICE_SENT</div>
+  <div class="email-container">
+    <div class="email-header">
+      <div class="email-logo">
+        <div class="logo-icon">
+          <svg viewBox="0 0 100 100"><path d="M15 25 L50 5 L85 25 L85 45 L50 25 L15 45 Z M15 55 L50 75 L85 55 L85 75 L50 95 L15 75 Z"/></svg>
+        </div>
+        <span class="logo-text">Stride Warehouse</span>
+      </div>
+      <span class="email-badge badge-info">Invoice</span>
+    </div>
+    <div class="email-body">
+      <div class="email-icon icon-orange">💰</div>
+      <h1 class="email-title">Your Invoice is Ready</h1>
+      <p class="email-subtitle">Payment due {{invoice_due_date}}</p>
+      
+      <p class="email-greeting">Dear {{billing_contact_name}},</p>
+      <p class="email-message">Your invoice for warehouse services has been generated and is ready for payment. Please find the details below.</p>
+      
+      <div class="info-card">
+        <div class="info-card-header">
+          <div>
+            <div class="info-card-ref">Invoice Number</div>
+            <div class="info-card-ref-value">{{invoice_number}}</div>
+          </div>
+          <div class="info-card-amount">
+            <div class="info-card-amount-label">Amount Due</div>
+            <div class="info-card-amount-value">{{total_amount}}</div>
+          </div>
+        </div>
+        <div class="info-grid">
+          <div class="info-item">
+            <label>Invoice Date</label>
+            <p>{{invoice_date}}</p>
+          </div>
+          <div class="info-item">
+            <label>Due Date</label>
+            <p>{{invoice_due_date}}</p>
+          </div>
+          <div class="info-item">
+            <label>Billing Period</label>
+            <p>{{period_start}} - {{period_end}}</p>
+          </div>
+          <div class="info-item">
+            <label>Account</label>
+            <p>{{account_name}}</p>
+          </div>
+        </div>
+      </div>
+      
+      <div class="email-buttons">
+        <a href="#" class="btn btn-primary">Pay Now</a>
+        <a href="#" class="btn btn-secondary">View Invoice</a>
+      </div>
+      
+      <div class="email-divider"></div>
+      <p class="email-note">The full invoice PDF is attached to this email. If you have questions about this invoice, please contact us.</p>
+    </div>
+    <div class="email-footer">
+      <div class="footer-company">{{tenant_name}}</div>
+      <div class="footer-address">{{company_address}}</div>
+      <div class="footer-links"><a href="mailto:{{brand_support_email}}">{{brand_support_email}}</a> • {{company_phone}}</div>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== INVOICE CREATED ==================== -->
+<div id="invoice-created" class="preview">
+  <div class="label">INVOICE_CREATED</div>
+  <div class="email-container">
+    <div class="email-header">
+      <div class="email-logo">
+        <div class="logo-icon">
+          <svg viewBox="0 0 100 100"><path d="M15 25 L50 5 L85 25 L85 45 L50 25 L15 45 Z M15 55 L50 75 L85 55 L85 75 L50 95 L15 75 Z"/></svg>
+        </div>
+        <span class="logo-text">Stride Warehouse</span>
+      </div>
+      <span class="email-badge badge-info">Invoice</span>
+    </div>
+    <div class="email-body">
+      <div class="email-icon icon-blue">📄</div>
+      <h1 class="email-title">Invoice Created</h1>
+      <p class="email-subtitle">A new invoice has been generated</p>
+      
+      <p class="email-message">A new invoice has been created for {{account_name}}. The invoice is currently in draft status and will be sent to the customer once finalized.</p>
+      
+      <div class="info-card">
+        <div class="info-card-header">
+          <div>
+            <div class="info-card-ref">Invoice Number</div>
+            <div class="info-card-ref-value">{{invoice_number}}</div>
+          </div>
+          <div class="info-card-amount">
+            <div class="info-card-amount-label">Total</div>
+            <div class="info-card-amount-value">{{total_amount}}</div>
+          </div>
+        </div>
+        <div class="info-grid">
+          <div class="info-item">
+            <label>Account</label>
+            <p>{{account_name}}</p>
+          </div>
+          <div class="info-item">
+            <label>Created Date</label>
+            <p>{{invoice_date}}</p>
+          </div>
+        </div>
+      </div>
+      
+      <div class="email-buttons">
+        <a href="#" class="btn btn-primary">View Invoice</a>
+      </div>
+    </div>
+    <div class="email-footer">
+      <div class="footer-company">{{tenant_name}}</div>
+      <div class="footer-address">{{company_address}}</div>
+      <div class="footer-links"><a href="mailto:{{brand_support_email}}">{{brand_support_email}}</a></div>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== PAYMENT RECEIVED ==================== -->
+<div id="payment-received" class="preview">
+  <div class="label">PAYMENT_RECEIVED</div>
+  <div class="email-container">
+    <div class="email-header">
+      <div class="email-logo">
+        <div class="logo-icon">
+          <svg viewBox="0 0 100 100"><path d="M15 25 L50 5 L85 25 L85 45 L50 25 L15 45 Z M15 55 L50 75 L85 55 L85 75 L50 95 L15 75 Z"/></svg>
+        </div>
+        <span class="logo-text">Stride Warehouse</span>
+      </div>
+      <span class="email-badge badge-success">Payment</span>
+    </div>
+    <div class="email-body">
+      <div class="email-icon icon-success">✓</div>
+      <h1 class="email-title">Payment Received</h1>
+      <p class="email-subtitle">Thank you for your payment</p>
+      
+      <p class="email-greeting">Dear {{billing_contact_name}},</p>
+      <p class="email-message">We have received your payment. Thank you for your prompt attention to this invoice.</p>
+      
+      <div class="info-card">
+        <div class="info-card-header">
+          <div>
+            <div class="info-card-ref">Invoice Number</div>
+            <div class="info-card-ref-value">{{invoice_number}}</div>
+          </div>
+          <div class="info-card-amount">
+            <div class="info-card-amount-label">Amount Paid</div>
+            <div class="info-card-amount-value" style="color: var(--green-text);">{{paid_amount}}</div>
+          </div>
+        </div>
+        <div class="info-grid">
+          <div class="info-item">
+            <label>Payment Date</label>
+            <p>{{payment_date}}</p>
+          </div>
+          <div class="info-item">
+            <label>Payment Method</label>
+            <p>{{payment_method}}</p>
+          </div>
+          <div class="info-item">
+            <label>Reference</label>
+            <p>{{payment_reference}}</p>
+          </div>
+          <div class="info-item">
+            <label>Account</label>
+            <p>{{account_name}}</p>
+          </div>
+        </div>
+      </div>
+      
+      <div class="email-buttons">
+        <a href="#" class="btn btn-primary">View Receipt</a>
+      </div>
+      
+      <div class="email-divider"></div>
+      <p class="email-note">A payment receipt is attached to this email for your records.</p>
+    </div>
+    <div class="email-footer">
+      <div class="footer-company">{{tenant_name}}</div>
+      <div class="footer-address">{{company_address}}</div>
+      <div class="footer-links"><a href="mailto:{{brand_support_email}}">{{brand_support_email}}</a></div>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== SHIPMENT RECEIVED ==================== -->
+<div id="shipment-received" class="preview">
+  <div class="label">SHIPMENT_RECEIVED</div>
+  <div class="email-container">
+    <div class="email-header">
+      <div class="email-logo">
+        <div class="logo-icon">
+          <svg viewBox="0 0 100 100"><path d="M15 25 L50 5 L85 25 L85 45 L50 25 L15 45 Z M15 55 L50 75 L85 55 L85 75 L50 95 L15 75 Z"/></svg>
+        </div>
+        <span class="logo-text">Stride Warehouse</span>
+      </div>
+      <span class="email-badge badge-success">Received</span>
+    </div>
+    <div class="email-body">
+      <div class="email-icon icon-success">📦</div>
+      <h1 class="email-title">Shipment Received</h1>
+      <p class="email-subtitle">Your shipment has arrived at our facility</p>
+      
+      <p class="email-greeting">Dear {{contact_name}},</p>
+      <p class="email-message">Great news! Your shipment has been received at our warehouse and is being processed.</p>
+      
+      <div class="info-card">
+        <div class="info-card-header">
+          <div>
+            <div class="info-card-ref">Shipment Reference</div>
+            <div class="info-card-ref-value">{{shipment_reference}}</div>
+          </div>
+        </div>
+        <div class="info-grid">
+          <div class="info-item">
+            <label>Received Date</label>
+            <p>{{received_date}}</p>
+          </div>
+          <div class="info-item">
+            <label>Carrier</label>
+            <p>{{carrier_name}}</p>
+          </div>
+          <div class="info-item">
+            <label>Items Received</label>
+            <p>{{item_count}} items</p>
+          </div>
+          <div class="info-item">
+            <label>Account</label>
+            <p>{{account_name}}</p>
+          </div>
+        </div>
+      </div>
+      
+      <div class="email-buttons">
+        <a href="#" class="btn btn-primary">View Shipment</a>
+      </div>
+    </div>
+    <div class="email-footer">
+      <div class="footer-company">{{tenant_name}}</div>
+      <div class="footer-address">{{company_address}}</div>
+      <div class="footer-links"><a href="mailto:{{brand_support_email}}">{{brand_support_email}}</a></div>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== SHIPMENT COMPLETED ==================== -->
+<div id="shipment-completed" class="preview">
+  <div class="label">SHIPMENT_COMPLETED</div>
+  <div class="email-container">
+    <div class="email-header">
+      <div class="email-logo">
+        <div class="logo-icon">
+          <svg viewBox="0 0 100 100"><path d="M15 25 L50 5 L85 25 L85 45 L50 25 L15 45 Z M15 55 L50 75 L85 55 L85 75 L50 95 L15 75 Z"/></svg>
+        </div>
+        <span class="logo-text">Stride Warehouse</span>
+      </div>
+      <span class="email-badge badge-success">Completed</span>
+    </div>
+    <div class="email-body">
+      <div class="email-icon icon-success">✅</div>
+      <h1 class="email-title">Shipment Completed</h1>
+      <p class="email-subtitle">Your shipment has been delivered</p>
+      
+      <p class="email-greeting">Dear {{contact_name}},</p>
+      <p class="email-message">Your outbound shipment has been completed and is on its way to the destination.</p>
+      
+      <div class="info-card">
+        <div class="info-card-header">
+          <div>
+            <div class="info-card-ref">Shipment Reference</div>
+            <div class="info-card-ref-value">{{shipment_reference}}</div>
+          </div>
+        </div>
+        <div class="info-grid">
+          <div class="info-item">
+            <label>Ship Date</label>
+            <p>{{ship_date}}</p>
+          </div>
+          <div class="info-item">
+            <label>Carrier</label>
+            <p>{{carrier_name}}</p>
+          </div>
+          <div class="info-item">
+            <label>Tracking #</label>
+            <p>{{tracking_number}}</p>
+          </div>
+          <div class="info-item">
+            <label>Items Shipped</label>
+            <p>{{item_count}} items</p>
+          </div>
+        </div>
+      </div>
+      
+      <div class="email-buttons">
+        <a href="#" class="btn btn-primary">Track Shipment</a>
+        <a href="#" class="btn btn-secondary">View Details</a>
+      </div>
+    </div>
+    <div class="email-footer">
+      <div class="footer-company">{{tenant_name}}</div>
+      <div class="footer-address">{{company_address}}</div>
+      <div class="footer-links"><a href="mailto:{{brand_support_email}}">{{brand_support_email}}</a></div>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== SHIPMENT STATUS ==================== -->
+<div id="shipment-status" class="preview">
+  <div class="label">SHIPMENT_STATUS_CHANGED</div>
+  <div class="email-container">
+    <div class="email-header">
+      <div class="email-logo">
+        <div class="logo-icon">
+          <svg viewBox="0 0 100 100"><path d="M15 25 L50 5 L85 25 L85 45 L50 25 L15 45 Z M15 55 L50 75 L85 55 L85 75 L50 95 L15 75 Z"/></svg>
+        </div>
+        <span class="logo-text">Stride Warehouse</span>
+      </div>
+      <span class="email-badge badge-info">Update</span>
+    </div>
+    <div class="email-body">
+      <div class="email-icon icon-blue">🚚</div>
+      <h1 class="email-title">Shipment Status Update</h1>
+      <p class="email-subtitle">Status changed to: {{new_status}}</p>
+      
+      <p class="email-message">The status of your shipment has been updated.</p>
+      
+      <div class="info-card">
+        <div class="info-card-header">
+          <div>
+            <div class="info-card-ref">Shipment Reference</div>
+            <div class="info-card-ref-value">{{shipment_reference}}</div>
+          </div>
+        </div>
+        
+        <div class="status-timeline">
+          <div class="timeline-item">
+            <div class="timeline-dot completed"><svg viewBox="0 0 20 20"><path d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"/></svg></div>
+            <div class="timeline-content">
+              <div class="timeline-title">Order Created</div>
+              <div class="timeline-time">Jan 28, 2026 • 9:00 AM</div>
+            </div>
+          </div>
+          <div class="timeline-item">
+            <div class="timeline-dot completed"><svg viewBox="0 0 20 20"><path d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"/></svg></div>
+            <div class="timeline-content">
+              <div class="timeline-title">Processing</div>
+              <div class="timeline-time">Jan 28, 2026 • 11:30 AM</div>
+            </div>
+          </div>
+          <div class="timeline-item">
+            <div class="timeline-dot active"></div>
+            <div class="timeline-content">
+              <div class="timeline-title">Ready for Pickup</div>
+              <div class="timeline-time">Jan 29, 2026 • 2:15 PM</div>
+            </div>
+          </div>
+          <div class="timeline-item">
+            <div class="timeline-dot"></div>
+            <div class="timeline-content">
+              <div class="timeline-title">Shipped</div>
+              <div class="timeline-time">Pending</div>
+            </div>
+          </div>
+        </div>
+      </div>
+      
+      <div class="email-buttons">
+        <a href="#" class="btn btn-primary">View Shipment</a>
+      </div>
+    </div>
+    <div class="email-footer">
+      <div class="footer-company">{{tenant_name}}</div>
+      <div class="footer-address">{{company_address}}</div>
+      <div class="footer-links"><a href="mailto:{{brand_support_email}}">{{brand_support_email}}</a></div>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== ITEM RECEIVED ==================== -->
+<div id="item-received" class="preview">
+  <div class="label">ITEM_RECEIVED</div>
+  <div class="email-container">
+    <div class="email-header">
+      <div class="email-logo">
+        <div class="logo-icon">
+          <svg viewBox="0 0 100 100"><path d="M15 25 L50 5 L85 25 L85 45 L50 25 L15 45 Z M15 55 L50 75 L85 55 L85 75 L50 95 L15 75 Z"/></svg>
+        </div>
+        <span class="logo-text">Stride Warehouse</span>
+      </div>
+      <span class="email-badge badge-success">Received</span>
+    </div>
+    <div class="email-body">
+      <div class="email-icon icon-success">📥</div>
+      <h1 class="email-title">Item Received</h1>
+      <p class="email-subtitle">New inventory has been added</p>
+      
+      <p class="email-message">An item has been received and added to your inventory.</p>
+      
+      <div class="info-card">
+        <div class="info-card-header">
+          <div>
+            <div class="info-card-ref">Item Code</div>
+            <div class="info-card-ref-value">{{item_code}}</div>
+          </div>
+        </div>
+        <div class="info-grid">
+          <div class="info-item">
+            <label>Description</label>
+            <p>{{item_description}}</p>
+          </div>
+          <div class="info-item">
+            <label>Quantity</label>
+            <p>{{quantity}} units</p>
+          </div>
+          <div class="info-item">
+            <label>Location</label>
+            <p>{{location}}</p>
+          </div>
+          <div class="info-item">
+            <label>Received Date</label>
+            <p>{{received_date}}</p>
+          </div>
+        </div>
+      </div>
+      
+      <div class="email-buttons">
+        <a href="#" class="btn btn-primary">View Item</a>
+      </div>
+    </div>
+    <div class="email-footer">
+      <div class="footer-company">{{tenant_name}}</div>
+      <div class="footer-address">{{company_address}}</div>
+      <div class="footer-links"><a href="mailto:{{brand_support_email}}">{{brand_support_email}}</a></div>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== ITEM DAMAGED ==================== -->
+<div id="item-damaged" class="preview">
+  <div class="label">ITEM_DAMAGED</div>
+  <div class="email-container">
+    <div class="email-header">
+      <div class="email-logo">
+        <div class="logo-icon">
+          <svg viewBox="0 0 100 100"><path d="M15 25 L50 5 L85 25 L85 45 L50 25 L15 45 Z M15 55 L50 75 L85 55 L85 75 L50 95 L15 75 Z"/></svg>
+        </div>
+        <span class="logo-text">Stride Warehouse</span>
+      </div>
+      <span class="email-badge badge-error">Alert</span>
+    </div>
+    <div class="email-body">
+      <div class="email-icon icon-error">⚠️</div>
+      <h1 class="email-title">Item Damage Reported</h1>
+      <p class="email-subtitle">An item in your inventory has been marked as damaged</p>
+      
+      <p class="email-message">We're notifying you that damage has been reported for an item in your inventory. Our team is documenting the issue.</p>
+      
+      <div class="info-card" style="border-color: var(--red-bg);">
+        <div class="info-card-header">
+          <div>
+            <div class="info-card-ref">Item Code</div>
+            <div class="info-card-ref-value">{{item_code}}</div>
+          </div>
+        </div>
+        <div class="info-grid">
+          <div class="info-item">
+            <label>Description</label>
+            <p>{{item_description}}</p>
+          </div>
+          <div class="info-item">
+            <label>Damage Type</label>
+            <p>{{damage_type}}</p>
+          </div>
+          <div class="info-item">
+            <label>Location</label>
+            <p>{{location}}</p>
+          </div>
+          <div class="info-item">
+            <label>Reported Date</label>
+            <p>{{reported_date}}</p>
+          </div>
+        </div>
+      </div>
+      
+      <div class="email-buttons">
+        <a href="#" class="btn btn-primary">View Details</a>
+        <a href="#" class="btn btn-secondary">File Claim</a>
+      </div>
+    </div>
+    <div class="email-footer">
+      <div class="footer-company">{{tenant_name}}</div>
+      <div class="footer-address">{{company_address}}</div>
+      <div class="footer-links"><a href="mailto:{{brand_support_email}}">{{brand_support_email}}</a></div>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== ITEM LOCATION CHANGED ==================== -->
+<div id="item-location" class="preview">
+  <div class="label">ITEM_LOCATION_CHANGED</div>
+  <div class="email-container">
+    <div class="email-header">
+      <div class="email-logo">
+        <div class="logo-icon">
+          <svg viewBox="0 0 100 100"><path d="M15 25 L50 5 L85 25 L85 45 L50 25 L15 45 Z M15 55 L50 75 L85 55 L85 75 L50 95 L15 75 Z"/></svg>
+        </div>
+        <span class="logo-text">Stride Warehouse</span>
+      </div>
+      <span class="email-badge badge-info">Update</span>
+    </div>
+    <div class="email-body">
+      <div class="email-icon icon-blue">📍</div>
+      <h1 class="email-title">Item Location Changed</h1>
+      <p class="email-subtitle">An item has been moved to a new location</p>
+      
+      <p class="email-message">An item in your inventory has been moved to a different location in the warehouse.</p>
+      
+      <div class="info-card">
+        <div class="info-card-header">
+          <div>
+            <div class="info-card-ref">Item Code</div>
+            <div class="info-card-ref-value">{{item_code}}</div>
+          </div>
+        </div>
+        <div class="info-grid">
+          <div class="info-item">
+            <label>From Location</label>
+            <p>{{from_location}}</p>
+          </div>
+          <div class="info-item">
+            <label>To Location</label>
+            <p style="color: var(--stride-orange); font-weight: 700;">{{to_location}}</p>
+          </div>
+          <div class="info-item">
+            <label>Moved By</label>
+            <p>{{moved_by}}</p>
+          </div>
+          <div class="info-item">
+            <label>Date</label>
+            <p>{{move_date}}</p>
+          </div>
+        </div>
+      </div>
+      
+      <div class="email-buttons">
+        <a href="#" class="btn btn-primary">View Item</a>
+      </div>
+    </div>
+    <div class="email-footer">
+      <div class="footer-company">{{tenant_name}}</div>
+      <div class="footer-address">{{company_address}}</div>
+      <div class="footer-links"><a href="mailto:{{brand_support_email}}">{{brand_support_email}}</a></div>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== RELEASE CREATED ==================== -->
+<div id="release-created" class="preview">
+  <div class="label">RELEASE_CREATED</div>
+  <div class="email-container">
+    <div class="email-header">
+      <div class="email-logo">
+        <div class="logo-icon">
+          <svg viewBox="0 0 100 100"><path d="M15 25 L50 5 L85 25 L85 45 L50 25 L15 45 Z M15 55 L50 75 L85 55 L85 75 L50 95 L15 75 Z"/></svg>
+        </div>
+        <span class="logo-text">Stride Warehouse</span>
+      </div>
+      <span class="email-badge badge-purple">New Release</span>
+    </div>
+    <div class="email-body">
+      <div class="email-icon icon-purple">📋</div>
+      <h1 class="email-title">Release Order Created</h1>
+      <p class="email-subtitle">A new release order has been submitted</p>
+      
+      <p class="email-message">A new release order has been created and is pending approval.</p>
+      
+      <div class="info-card">
+        <div class="info-card-header">
+          <div>
+            <div class="info-card-ref">Release Number</div>
+            <div class="info-card-ref-value">{{release_number}}</div>
+          </div>
+        </div>
+        <div class="info-grid">
+          <div class="info-item">
+            <label>Account</label>
+            <p>{{account_name}}</p>
+          </div>
+          <div class="info-item">
+            <label>Items</label>
+            <p>{{item_count}} items</p>
+          </div>
+          <div class="info-item">
+            <label>Requested Date</label>
+            <p>{{requested_date}}</p>
+          </div>
+          <div class="info-item">
+            <label>Status</label>
+            <p>Pending Approval</p>
+          </div>
+        </div>
+      </div>
+      
+      <div class="email-buttons">
+        <a href="#" class="btn btn-primary">Review Release</a>
+      </div>
+    </div>
+    <div class="email-footer">
+      <div class="footer-company">{{tenant_name}}</div>
+      <div class="footer-address">{{company_address}}</div>
+      <div class="footer-links"><a href="mailto:{{brand_support_email}}">{{brand_support_email}}</a></div>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== RELEASE APPROVED ==================== -->
+<div id="release-approved" class="preview">
+  <div class="label">RELEASE_APPROVED</div>
+  <div class="email-container">
+    <div class="email-header">
+      <div class="email-logo">
+        <div class="logo-icon">
+          <svg viewBox="0 0 100 100"><path d="M15 25 L50 5 L85 25 L85 45 L50 25 L15 45 Z M15 55 L50 75 L85 55 L85 75 L50 95 L15 75 Z"/></svg>
+        </div>
+        <span class="logo-text">Stride Warehouse</span>
+      </div>
+      <span class="email-badge badge-success">Approved</span>
+    </div>
+    <div class="email-body">
+      <div class="email-icon icon-success">✓</div>
+      <h1 class="email-title">Release Approved</h1>
+      <p class="email-subtitle">Your release order has been approved</p>
+      
+      <p class="email-greeting">Dear {{contact_name}},</p>
+      <p class="email-message">Great news! Your release order has been approved and is now being processed for shipment.</p>
+      
+      <div class="info-card">
+        <div class="info-card-header">
+          <div>
+            <div class="info-card-ref">Release Number</div>
+            <div class="info-card-ref-value">{{release_number}}</div>
+          </div>
+        </div>
+        <div class="info-grid">
+          <div class="info-item">
+            <label>Approved By</label>
+            <p>{{approved_by}}</p>
+          </div>
+          <div class="info-item">
+            <label>Approved Date</label>
+            <p>{{approved_date}}</p>
+          </div>
+          <div class="info-item">
+            <label>Items</label>
+            <p>{{item_count}} items</p>
+          </div>
+          <div class="info-item">
+            <label>Est. Ship Date</label>
+            <p>{{estimated_ship_date}}</p>
+          </div>
+        </div>
+      </div>
+      
+      <div class="email-buttons">
+        <a href="#" class="btn btn-primary">Track Release</a>
+      </div>
+    </div>
+    <div class="email-footer">
+      <div class="footer-company">{{tenant_name}}</div>
+      <div class="footer-address">{{company_address}}</div>
+      <div class="footer-links"><a href="mailto:{{brand_support_email}}">{{brand_support_email}}</a></div>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== RELEASE COMPLETED ==================== -->
+<div id="release-completed" class="preview">
+  <div class="label">RELEASE_COMPLETED</div>
+  <div class="email-container">
+    <div class="email-header">
+      <div class="email-logo">
+        <div class="logo-icon">
+          <svg viewBox="0 0 100 100"><path d="M15 25 L50 5 L85 25 L85 45 L50 25 L15 45 Z M15 55 L50 75 L85 55 L85 75 L50 95 L15 75 Z"/></svg>
+        </div>
+        <span class="logo-text">Stride Warehouse</span>
+      </div>
+      <span class="email-badge badge-success">Completed</span>
+    </div>
+    <div class="email-body">
+      <div class="email-icon icon-success">✅</div>
+      <h1 class="email-title">Release Completed</h1>
+      <p class="email-subtitle">Your release order has been fulfilled</p>
+      
+      <p class="email-greeting">Dear {{contact_name}},</p>
+      <p class="email-message">Your release order has been completed. All items have been picked, packed, and shipped.</p>
+      
+      <div class="info-card">
+        <div class="info-card-header">
+          <div>
+            <div class="info-card-ref">Release Number</div>
+            <div class="info-card-ref-value">{{release_number}}</div>
+          </div>
+        </div>
+        <div class="info-grid">
+          <div class="info-item">
+            <label>Completed Date</label>
+            <p>{{completed_date}}</p>
+          </div>
+          <div class="info-item">
+            <label>Items Shipped</label>
+            <p>{{item_count}} items</p>
+          </div>
+          <div class="info-item">
+            <label>Carrier</label>
+            <p>{{carrier_name}}</p>
+          </div>
+          <div class="info-item">
+            <label>Tracking #</label>
+            <p>{{tracking_number}}</p>
+          </div>
+        </div>
+      </div>
+      
+      <div class="email-buttons">
+        <a href="#" class="btn btn-primary">Track Shipment</a>
+        <a href="#" class="btn btn-secondary">View Release</a>
+      </div>
+    </div>
+    <div class="email-footer">
+      <div class="footer-company">{{tenant_name}}</div>
+      <div class="footer-address">{{company_address}}</div>
+      <div class="footer-links"><a href="mailto:{{brand_support_email}}">{{brand_support_email}}</a></div>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== TASK ASSIGNED ==================== -->
+<div id="task-assigned" class="preview">
+  <div class="label">TASK_ASSIGNED</div>
+  <div class="email-container">
+    <div class="email-header">
+      <div class="email-logo">
+        <div class="logo-icon">
+          <svg viewBox="0 0 100 100"><path d="M15 25 L50 5 L85 25 L85 45 L50 25 L15 45 Z M15 55 L50 75 L85 55 L85 75 L50 95 L15 75 Z"/></svg>
+        </div>
+        <span class="logo-text">Stride Warehouse</span>
+      </div>
+      <span class="email-badge badge-purple">Task</span>
+    </div>
+    <div class="email-body">
+      <div class="email-icon icon-purple">👤</div>
+      <h1 class="email-title">Task Assigned to You</h1>
+      <p class="email-subtitle">You have a new task to complete</p>
+      
+      <p class="email-greeting">Hi {{employee_name}},</p>
+      <p class="email-message">A new task has been assigned to you. Please review the details below and complete it by the due date.</p>
+      
+      <div class="info-card">
+        <div class="info-card-header">
+          <div>
+            <div class="info-card-ref">Task</div>
+            <div class="info-card-ref-value">{{task_title}}</div>
+          </div>
+        </div>
+        <div class="info-grid">
+          <div class="info-item">
+            <label>Priority</label>
+            <p>{{task_priority}}</p>
+          </div>
+          <div class="info-item">
+            <label>Due Date</label>
+            <p>{{due_date}}</p>
+          </div>
+          <div class="info-item">
+            <label>Assigned By</label>
+            <p>{{assigned_by}}</p>
+          </div>
+          <div class="info-item">
+            <label>Account</label>
+            <p>{{account_name}}</p>
+          </div>
+        </div>
+      </div>
+      
+      <div class="email-buttons">
+        <a href="#" class="btn btn-primary">View Task</a>
+      </div>
+    </div>
+    <div class="email-footer">
+      <div class="footer-company">{{tenant_name}}</div>
+      <div class="footer-address">{{company_address}}</div>
+      <div class="footer-links"><a href="mailto:{{brand_support_email}}">{{brand_support_email}}</a></div>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== TASK COMPLETED ==================== -->
+<div id="task-completed" class="preview">
+  <div class="label">TASK_COMPLETED</div>
+  <div class="email-container">
+    <div class="email-header">
+      <div class="email-logo">
+        <div class="logo-icon">
+          <svg viewBox="0 0 100 100"><path d="M15 25 L50 5 L85 25 L85 45 L50 25 L15 45 Z M15 55 L50 75 L85 55 L85 75 L50 95 L15 75 Z"/></svg>
+        </div>
+        <span class="logo-text">Stride Warehouse</span>
+      </div>
+      <span class="email-badge badge-success">Completed</span>
+    </div>
+    <div class="email-body">
+      <div class="email-icon icon-success">✅</div>
+      <h1 class="email-title">Task Completed</h1>
+      <p class="email-subtitle">Great work - task finished</p>
+      
+      <p class="email-message">A task has been marked as completed.</p>
+      
+      <div class="info-card">
+        <div class="info-card-header">
+          <div>
+            <div class="info-card-ref">Task</div>
+            <div class="info-card-ref-value">{{task_title}}</div>
+          </div>
+        </div>
+        <div class="info-grid">
+          <div class="info-item">
+            <label>Completed By</label>
+            <p>{{completed_by}}</p>
+          </div>
+          <div class="info-item">
+            <label>Completed Date</label>
+            <p>{{completed_date}}</p>
+          </div>
+          <div class="info-item">
+            <label>Account</label>
+            <p>{{account_name}}</p>
+          </div>
+          <div class="info-item">
+            <label>Time Taken</label>
+            <p>{{time_taken}}</p>
+          </div>
+        </div>
+      </div>
+      
+      <div class="email-buttons">
+        <a href="#" class="btn btn-primary">View Details</a>
+      </div>
+    </div>
+    <div class="email-footer">
+      <div class="footer-company">{{tenant_name}}</div>
+      <div class="footer-address">{{company_address}}</div>
+      <div class="footer-links"><a href="mailto:{{brand_support_email}}">{{brand_support_email}}</a></div>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== TASK CREATED ==================== -->
+<div id="task-created" class="preview">
+  <div class="label">TASK_CREATED</div>
+  <div class="email-container">
+    <div class="email-header">
+      <div class="email-logo">
+        <div class="logo-icon">
+          <svg viewBox="0 0 100 100"><path d="M15 25 L50 5 L85 25 L85 45 L50 25 L15 45 Z M15 55 L50 75 L85 55 L85 75 L50 95 L15 75 Z"/></svg>
+        </div>
+        <span class="logo-text">Stride Warehouse</span>
+      </div>
+      <span class="email-badge badge-purple">New Task</span>
+    </div>
+    <div class="email-body">
+      <div class="email-icon icon-purple">📝</div>
+      <h1 class="email-title">New Task Created</h1>
+      <p class="email-subtitle">A new task has been added</p>
+      
+      <p class="email-message">A new task has been created and is ready for assignment.</p>
+      
+      <div class="info-card">
+        <div class="info-card-header">
+          <div>
+            <div class="info-card-ref">Task</div>
+            <div class="info-card-ref-value">{{task_title}}</div>
+          </div>
+        </div>
+        <div class="info-grid">
+          <div class="info-item">
+            <label>Created By</label>
+            <p>{{created_by}}</p>
+          </div>
+          <div class="info-item">
+            <label>Priority</label>
+            <p>{{task_priority}}</p>
+          </div>
+          <div class="info-item">
+            <label>Account</label>
+            <p>{{account_name}}</p>
+          </div>
+          <div class="info-item">
+            <label>Due Date</label>
+            <p>{{due_date}}</p>
+          </div>
+        </div>
+      </div>
+      
+      <div class="email-buttons">
+        <a href="#" class="btn btn-primary">View Task</a>
+      </div>
+    </div>
+    <div class="email-footer">
+      <div class="footer-company">{{tenant_name}}</div>
+      <div class="footer-address">{{company_address}}</div>
+      <div class="footer-links"><a href="mailto:{{brand_support_email}}">{{brand_support_email}}</a></div>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== CLAIM ATTACHMENT ==================== -->
+<div id="claim-attachment" class="preview">
+  <div class="label">CLAIM_ATTACHMENT_ADDED</div>
+  <div class="email-container">
+    <div class="email-header">
+      <div class="email-logo">
+        <div class="logo-icon">
+          <svg viewBox="0 0 100 100"><path d="M15 25 L50 5 L85 25 L85 45 L50 25 L15 45 Z M15 55 L50 75 L85 55 L85 75 L50 95 L15 75 Z"/></svg>
+        </div>
+        <span class="logo-text">Stride Warehouse</span>
+      </div>
+      <span class="email-badge badge-info">Attachment</span>
+    </div>
+    <div class="email-body">
+      <div class="email-icon icon-blue">📎</div>
+      <h1 class="email-title">New Attachment Added</h1>
+      <p class="email-subtitle">A file has been added to your claim</p>
+      
+      <p class="email-message">A new attachment has been uploaded to a claim.</p>
+      
+      <div class="info-card">
+        <div class="info-card-header">
+          <div>
+            <div class="info-card-ref">Claim Reference</div>
+            <div class="info-card-ref-value">{{claim_reference}}</div>
+          </div>
+        </div>
+        <div class="info-grid">
+          <div class="info-item">
+            <label>File Name</label>
+            <p>{{file_name}}</p>
+          </div>
+          <div class="info-item">
+            <label>Uploaded By</label>
+            <p>{{uploaded_by}}</p>
+          </div>
+          <div class="info-item">
+            <label>Account</label>
+            <p>{{account_name}}</p>
+          </div>
+          <div class="info-item">
+            <label>Date</label>
+            <p>{{upload_date}}</p>
+          </div>
+        </div>
+      </div>
+      
+      <div class="email-buttons">
+        <a href="#" class="btn btn-primary">View Claim</a>
+      </div>
+    </div>
+    <div class="email-footer">
+      <div class="footer-company">{{tenant_name}}</div>
+      <div class="footer-address">{{company_address}}</div>
+      <div class="footer-links"><a href="mailto:{{brand_support_email}}">{{brand_support_email}}</a></div>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== CLAIM DETERMINATION ==================== -->
+<div id="claim-determination" class="preview">
+  <div class="label">CLAIM_DETERMINATION_SENT</div>
+  <div class="email-container">
+    <div class="email-header">
+      <div class="email-logo">
+        <div class="logo-icon">
+          <svg viewBox="0 0 100 100"><path d="M15 25 L50 5 L85 25 L85 45 L50 25 L15 45 Z M15 55 L50 75 L85 55 L85 75 L50 95 L15 75 Z"/></svg>
+        </div>
+        <span class="logo-text">Stride Warehouse</span>
+      </div>
+      <span class="email-badge badge-info">Claim Update</span>
+    </div>
+    <div class="email-body">
+      <div class="email-icon icon-blue">📋</div>
+      <h1 class="email-title">Claim Determination</h1>
+      <p class="email-subtitle">A decision has been made on your claim</p>
+      
+      <p class="email-greeting">Dear {{contact_name}},</p>
+      <p class="email-message">We have completed our review of your claim and a determination has been made. Please review the details below.</p>
+      
+      <div class="info-card">
+        <div class="info-card-header">
+          <div>
+            <div class="info-card-ref">Claim Reference</div>
+            <div class="info-card-ref-value">{{claim_reference}}</div>
+          </div>
+          <div class="info-card-amount">
+            <div class="info-card-amount-label">Offer Amount</div>
+            <div class="info-card-amount-value">{{offer_amount}}</div>
+          </div>
+        </div>
+        <div class="info-grid">
+          <div class="info-item">
+            <label>Account</label>
+            <p>{{account_name}}</p>
+          </div>
+          <div class="info-item">
+            <label>Determination Date</label>
+            <p>{{determination_date}}</p>
+          </div>
+        </div>
+      </div>
+      
+      <div class="email-buttons">
+        <a href="#" class="btn btn-primary">Review Determination</a>
+      </div>
+    </div>
+    <div class="email-footer">
+      <div class="footer-company">{{tenant_name}}</div>
+      <div class="footer-address">{{company_address}}</div>
+      <div class="footer-links"><a href="mailto:{{brand_support_email}}">{{brand_support_email}}</a></div>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== CLAIM APPROVAL ==================== -->
+<div id="claim-approval" class="preview">
+  <div class="label">CLAIM_REQUIRES_APPROVAL</div>
+  <div class="email-container">
+    <div class="email-header">
+      <div class="email-logo">
+        <div class="logo-icon">
+          <svg viewBox="0 0 100 100"><path d="M15 25 L50 5 L85 25 L85 45 L50 25 L15 45 Z M15 55 L50 75 L85 55 L85 75 L50 95 L15 75 Z"/></svg>
+        </div>
+        <span class="logo-text">Stride Warehouse</span>
+      </div>
+      <span class="email-badge badge-warning">Approval Required</span>
+    </div>
+    <div class="email-body">
+      <div class="email-icon icon-warning">⏳</div>
+      <h1 class="email-title">Claim Requires Approval</h1>
+      <p class="email-subtitle">A claim is waiting for your review</p>
+      
+      <p class="email-message">A claim requires your approval before it can proceed. Please review the details and take action.</p>
+      
+      <div class="info-card">
+        <div class="info-card-header">
+          <div>
+            <div class="info-card-ref">Claim Reference</div>
+            <div class="info-card-ref-value">{{claim_reference}}</div>
+          </div>
+          <div class="info-card-amount">
+            <div class="info-card-amount-label">Claim Amount</div>
+            <div class="info-card-amount-value">{{claim_amount}}</div>
+          </div>
+        </div>
+        <div class="info-grid">
+          <div class="info-item">
+            <label>Account</label>
+            <p>{{account_name}}</p>
+          </div>
+          <div class="info-item">
+            <label>Submitted</label>
+            <p>{{submitted_date}}</p>
+          </div>
+        </div>
+      </div>
+      
+      <div class="email-buttons">
+        <a href="#" class="btn btn-primary">Review Claim</a>
+      </div>
+    </div>
+    <div class="email-footer">
+      <div class="footer-company">{{tenant_name}}</div>
+      <div class="footer-address">{{company_address}}</div>
+      <div class="footer-links"><a href="mailto:{{brand_support_email}}">{{brand_support_email}}</a></div>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== CLIENT ACCEPTED CLAIM ==================== -->
+<div id="claim-accepted" class="preview">
+  <div class="label">CLAIM_CLIENT_ACCEPTED</div>
+  <div class="email-container">
+    <div class="email-header">
+      <div class="email-logo">
+        <div class="logo-icon">
+          <svg viewBox="0 0 100 100"><path d="M15 25 L50 5 L85 25 L85 45 L50 25 L15 45 Z M15 55 L50 75 L85 55 L85 75 L50 95 L15 75 Z"/></svg>
+        </div>
+        <span class="logo-text">Stride Warehouse</span>
+      </div>
+      <span class="email-badge badge-success">Accepted</span>
+    </div>
+    <div class="email-body">
+      <div class="email-icon icon-success">✓</div>
+      <h1 class="email-title">Claim Accepted</h1>
+      <p class="email-subtitle">The client has accepted the claim offer</p>
+      
+      <p class="email-message">The client has accepted the determination offer for this claim. The claim can now be processed for payment.</p>
+      
+      <div class="info-card">
+        <div class="info-card-header">
+          <div>
+            <div class="info-card-ref">Claim Reference</div>
+            <div class="info-card-ref-value">{{claim_reference}}</div>
+          </div>
+          <div class="info-card-amount">
+            <div class="info-card-amount-label">Accepted Amount</div>
+            <div class="info-card-amount-value" style="color: var(--green-text);">{{accepted_amount}}</div>
+          </div>
+        </div>
+        <div class="info-grid">
+          <div class="info-item">
+            <label>Account</label>
+            <p>{{account_name}}</p>
+          </div>
+          <div class="info-item">
+            <label>Accepted Date</label>
+            <p>{{accepted_date}}</p>
+          </div>
+        </div>
+      </div>
+      
+      <div class="email-buttons">
+        <a href="#" class="btn btn-primary">View Claim</a>
+      </div>
+    </div>
+    <div class="email-footer">
+      <div class="footer-company">{{tenant_name}}</div>
+      <div class="footer-address">{{company_address}}</div>
+      <div class="footer-links"><a href="mailto:{{brand_support_email}}">{{brand_support_email}}</a></div>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== CLIENT COUNTERED CLAIM ==================== -->
+<div id="claim-countered" class="preview">
+  <div class="label">CLAIM_CLIENT_COUNTERED</div>
+  <div class="email-container">
+    <div class="email-header">
+      <div class="email-logo">
+        <div class="logo-icon">
+          <svg viewBox="0 0 100 100"><path d="M15 25 L50 5 L85 25 L85 45 L50 25 L15 45 Z M15 55 L50 75 L85 55 L85 75 L50 95 L15 75 Z"/></svg>
+        </div>
+        <span class="logo-text">Stride Warehouse</span>
+      </div>
+      <span class="email-badge badge-warning">Counter Offer</span>
+    </div>
+    <div class="email-body">
+      <div class="email-icon icon-warning">↔️</div>
+      <h1 class="email-title">Counter Offer Received</h1>
+      <p class="email-subtitle">The client has submitted a counter offer</p>
+      
+      <p class="email-message">The client has submitted a counter offer for this claim. Please review and respond.</p>
+      
+      <div class="info-card">
+        <div class="info-card-header">
+          <div>
+            <div class="info-card-ref">Claim Reference</div>
+            <div class="info-card-ref-value">{{claim_reference}}</div>
+          </div>
+          <div class="info-card-amount">
+            <div class="info-card-amount-label">Counter Amount</div>
+            <div class="info-card-amount-value">{{counter_amount}}</div>
+          </div>
+        </div>
+        <div class="info-grid">
+          <div class="info-item">
+            <label>Original Offer</label>
+            <p>{{original_offer}}</p>
+          </div>
+          <div class="info-item">
+            <label>Counter Date</label>
+            <p>{{counter_date}}</p>
+          </div>
+          <div class="info-item">
+            <label>Account</label>
+            <p>{{account_name}}</p>
+          </div>
+          <div class="info-item">
+            <label>Counter Reason</label>
+            <p>{{counter_reason}}</p>
+          </div>
+        </div>
+      </div>
+      
+      <div class="email-buttons">
+        <a href="#" class="btn btn-primary">Review Counter Offer</a>
+      </div>
+    </div>
+    <div class="email-footer">
+      <div class="footer-company">{{tenant_name}}</div>
+      <div class="footer-address">{{company_address}}</div>
+      <div class="footer-links"><a href="mailto:{{brand_support_email}}">{{brand_support_email}}</a></div>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== CLIENT DECLINED CLAIM ==================== -->
+<div id="claim-declined" class="preview">
+  <div class="label">CLAIM_CLIENT_DECLINED</div>
+  <div class="email-container">
+    <div class="email-header">
+      <div class="email-logo">
+        <div class="logo-icon">
+          <svg viewBox="0 0 100 100"><path d="M15 25 L50 5 L85 25 L85 45 L50 25 L15 45 Z M15 55 L50 75 L85 55 L85 75 L50 95 L15 75 Z"/></svg>
+        </div>
+        <span class="logo-text">Stride Warehouse</span>
+      </div>
+      <span class="email-badge badge-error">Declined</span>
+    </div>
+    <div class="email-body">
+      <div class="email-icon icon-error">✕</div>
+      <h1 class="email-title">Claim Declined</h1>
+      <p class="email-subtitle">The client has declined the claim offer</p>
+      
+      <p class="email-message">The client has declined the determination offer for this claim.</p>
+      
+      <div class="info-card" style="border-color: var(--red-bg);">
+        <div class="info-card-header">
+          <div>
+            <div class="info-card-ref">Claim Reference</div>
+            <div class="info-card-ref-value">{{claim_reference}}</div>
+          </div>
+        </div>
+        <div class="info-grid">
+          <div class="info-item">
+            <label>Declined Offer</label>
+            <p>{{declined_offer}}</p>
+          </div>
+          <div class="info-item">
+            <label>Declined Date</label>
+            <p>{{declined_date}}</p>
+          </div>
+          <div class="info-item">
+            <label>Account</label>
+            <p>{{account_name}}</p>
+          </div>
+          <div class="info-item">
+            <label>Reason</label>
+            <p>{{decline_reason}}</p>
+          </div>
+        </div>
+      </div>
+      
+      <div class="email-buttons">
+        <a href="#" class="btn btn-primary">View Claim</a>
+      </div>
+    </div>
+    <div class="email-footer">
+      <div class="footer-company">{{tenant_name}}</div>
+      <div class="footer-address">{{company_address}}</div>
+      <div class="footer-links"><a href="mailto:{{brand_support_email}}">{{brand_support_email}}</a></div>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== CLAIM NOTE ==================== -->
+<div id="claim-note" class="preview">
+  <div class="label">CLAIM_NOTE_ADDED</div>
+  <div class="email-container">
+    <div class="email-header">
+      <div class="email-logo">
+        <div class="logo-icon">
+          <svg viewBox="0 0 100 100"><path d="M15 25 L50 5 L85 25 L85 45 L50 25 L15 45 Z M15 55 L50 75 L85 55 L85 75 L50 95 L15 75 Z"/></svg>
+        </div>
+        <span class="logo-text">Stride Warehouse</span>
+      </div>
+      <span class="email-badge badge-info">Note Added</span>
+    </div>
+    <div class="email-body">
+      <div class="email-icon icon-blue">💬</div>
+      <h1 class="email-title">New Note Added</h1>
+      <p class="email-subtitle">A note has been added to a claim</p>
+      
+      <p class="email-message">A new note has been added to a claim you're following.</p>
+      
+      <div class="info-card">
+        <div class="info-card-header">
+          <div>
+            <div class="info-card-ref">Claim Reference</div>
+            <div class="info-card-ref-value">{{claim_reference}}</div>
+          </div>
+        </div>
+        <div style="background: #fff; padding: 16px; border-radius: 8px; margin-top: 16px; border: 1px solid var(--slate-200);">
+          <p style="font-style: italic; color: var(--slate-600); line-height: 1.6;">"{{note_content}}"</p>
+          <p style="margin-top: 12px; font-size: 12px; color: var(--slate-500);">— {{note_author}}, {{note_date}}</p>
+        </div>
+      </div>
+      
+      <div class="email-buttons">
+        <a href="#" class="btn btn-primary">View Claim</a>
+      </div>
+    </div>
+    <div class="email-footer">
+      <div class="footer-company">{{tenant_name}}</div>
+      <div class="footer-address">{{company_address}}</div>
+      <div class="footer-links"><a href="mailto:{{brand_support_email}}">{{brand_support_email}}</a></div>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== EMPLOYEE INVITE ==================== -->
+<div id="employee-invite" class="preview">
+  <div class="label">EMPLOYEE_INVITE</div>
+  <div class="email-container">
+    <div class="email-header">
+      <div class="email-logo">
+        <div class="logo-icon">
+          <svg viewBox="0 0 100 100"><path d="M15 25 L50 5 L85 25 L85 45 L50 25 L15 45 Z M15 55 L50 75 L85 55 L85 75 L50 95 L15 75 Z"/></svg>
+        </div>
+        <span class="logo-text">Stride Warehouse</span>
+      </div>
+      <span class="email-badge badge-purple">Invitation</span>
+    </div>
+    <div class="email-body">
+      <div class="email-icon icon-purple">🎉</div>
+      <h1 class="email-title">You're Invited!</h1>
+      <p class="email-subtitle">Join {{tenant_name}} on Stride WMS</p>
+      
+      <p class="email-greeting">Hi {{employee_name}},</p>
+      <p class="email-message">You've been invited to join {{tenant_name}}'s warehouse management system. Click the button below to create your account and get started.</p>
+      
+      <div class="info-card">
+        <div class="info-grid">
+          <div class="info-item">
+            <label>Organization</label>
+            <p>{{tenant_name}}</p>
+          </div>
+          <div class="info-item">
+            <label>Role</label>
+            <p>{{employee_role}}</p>
+          </div>
+          <div class="info-item">
+            <label>Invited By</label>
+            <p>{{invited_by}}</p>
+          </div>
+          <div class="info-item">
+            <label>Expires</label>
+            <p>{{expiry_date}}</p>
+          </div>
+        </div>
+      </div>
+      
+      <div class="email-buttons">
+        <a href="#" class="btn btn-primary">Accept Invitation</a>
+      </div>
+      
+      <div class="email-divider"></div>
+      <p class="email-note">If you didn't expect this invitation, you can safely ignore this email.</p>
+    </div>
+    <div class="email-footer">
+      <div class="footer-company">Stride Warehouse Management System</div>
+      <div class="footer-links"><a href="mailto:support@stridenw.com">support@stridenw.com</a></div>
+    </div>
+  </div>
+</div>
+
+<script>
+function showTemplate(id) {
+  document.querySelectorAll('.preview').forEach(el => el.classList.remove('active'));
+  document.querySelectorAll('.tab').forEach(el => el.classList.remove('active'));
+  document.getElementById(id).classList.add('active');
+  event.target.classList.add('active');
+}
+</script>
+
+</body>
+</html>

@@ -1,0 +1,1 @@
+Inspection report ready: {{inspection_number}}. Issues: {{inspection_issues_count}}. {{portal_inspection_url}}

@@ -1,0 +1,5 @@
+Inspection completed for {{shipment_number}}
+
+{alert_message}
+
+Open: {portal_base_url}

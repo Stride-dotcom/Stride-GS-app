@@ -1,0 +1,4 @@
+vendor,description,ordered_qty,sidemark,room,notes,photo_filename,primary_photo
+Acme Furniture,Leather Sofa - Brown,2,SMITH,Living Room,Handle with care,sofa_brown.jpg,true
+Acme Furniture,Coffee Table - Oak,1,SMITH,Living Room,,table_oak.jpg,false
+Best Fabrics,Area Rug 8x10,1,SMITH,Bedroom,,,,

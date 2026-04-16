@@ -1,0 +1,1 @@
+Will-call ready: {{release_number}}. {{portal_release_url}}

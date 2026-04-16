@@ -1,0 +1,5 @@
+New task created: {{task_title}}
+
+{alert_message}
+
+Open: {portal_base_url}

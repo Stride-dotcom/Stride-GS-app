@@ -1,0 +1,1 @@
+Will-call released: {{release_number}} at {{released_at}}. {{portal_release_url}}

@@ -1,0 +1,5 @@
+Upcoming storage billing
+
+{alert_message}
+
+Open: {portal_base_url}

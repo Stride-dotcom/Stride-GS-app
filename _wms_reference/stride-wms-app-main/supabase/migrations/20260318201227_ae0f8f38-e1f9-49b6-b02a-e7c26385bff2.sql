@@ -1,0 +1,1 @@
+UPDATE public.charge_types SET charge_name = 'Trip Charges' WHERE id = 'f8f9ffe0-8650-4ddd-943f-38caaef3cbea' AND charge_name = 'Trip chargess';

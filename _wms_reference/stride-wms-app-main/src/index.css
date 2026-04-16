@@ -1,0 +1,565 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Stride Schedules Design System - Obsidian & Solar Flare
+   Philosophy: Dark command center aesthetic with warm orange accents and full animation system
+*/
+
+@layer base {
+  :root {
+    /* Primary - Rich Blue */
+    --primary: 217 91% 60%;
+    --primary-foreground: 0 0% 100%;
+
+    /* Background - Light gray-blue */
+    --background: 210 20% 96%;
+    --foreground: 222 47% 11%;
+
+    /* Cards - White */
+    --card: 0 0% 100%;
+    --card-foreground: 222 47% 11%;
+
+    /* Popover - White */
+    --popover: 0 0% 100%;
+    --popover-foreground: 222 47% 11%;
+
+    /* Secondary - Light Gray */
+    --secondary: 210 20% 92%;
+    --secondary-foreground: 222 47% 11%;
+
+    /* Muted - Soft Gray Blue */
+    --muted: 210 20% 94%;
+    --muted-foreground: 215 16% 47%;
+
+    /* Accent - Subtle Blue Tint */
+    --accent: 217 91% 96%;
+    --accent-foreground: 217 91% 45%;
+
+    /* Destructive - Red */
+    --destructive: 0 72% 50%;
+    --destructive-foreground: 0 0% 100%;
+
+    /* Borders - Light Gray Blue */
+    --border: 214 32% 91%;
+    --input: 214 32% 91%;
+    --ring: 217 91% 60%;
+
+    /* Border Radius - Professional subtle rounding */
+    --radius: 0.375rem;
+
+    /* Sidebar - Dark Gradient */
+    --sidebar-background: 217 33% 17%;
+    --sidebar-foreground: 210 40% 98%;
+    --sidebar-primary: 217 91% 60%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 217 33% 22%;
+    --sidebar-accent-foreground: 210 40% 98%;
+    --sidebar-border: 217 33% 22%;
+    --sidebar-ring: 217 91% 60%;
+    --sidebar-muted: 215 20% 65%;
+
+    /* Status Colors */
+    --success: 142 71% 45%;
+    --success-foreground: 0 0% 100%;
+    --warning: 38 92% 50%;
+    --warning-foreground: 0 0% 100%;
+    --info: 199 89% 48%;
+    --info-foreground: 0 0% 100%;
+
+    /* Chart Colors - Blue Palette */
+    --chart-1: 217 91% 60%;
+    --chart-2: 199 89% 48%;
+    --chart-3: 142 71% 45%;
+    --chart-4: 38 92% 50%;
+    --chart-5: 215 16% 47%;
+
+    /* Shadow System */
+    --shadow-2xs: 0 1px 3px 0px hsl(0 0% 0% / 0.05);
+    --shadow-xs: 0 1px 3px 0px hsl(0 0% 0% / 0.08);
+    --shadow-sm: 0 1px 3px 0px hsl(0 0% 0% / 0.1), 0 1px 2px -1px hsl(0 0% 0% / 0.1);
+    --shadow-md: 0 4px 6px -1px hsl(0 0% 0% / 0.1), 0 2px 4px -2px hsl(0 0% 0% / 0.1);
+    --shadow-lg: 0 20px 25px -5px hsl(0 0% 0% / 0.1), 0 8px 10px -6px hsl(0 0% 0% / 0.1);
+    --shadow-xl: 0 25px 50px -12px hsl(0 0% 0% / 0.15);
+    --shadow-2xl: 0 50px 100px -20px hsl(0 0% 0% / 0.2);
+
+    /* Glow Effects */
+    --glow-primary: 0 0 20px hsl(217 91% 60% / 0.4);
+    --glow-primary-intense: 0 0 30px hsl(217 91% 60% / 0.6);
+  }
+
+  /* Dark mode */
+  .dark {
+    /* Primary - Rich Blue */
+    --primary: 217 91% 60%;
+    --primary-foreground: 0 0% 100%;
+
+    /* Background - Deep Navy */
+    --background: 222 47% 11%;
+    --foreground: 210 40% 98%;
+
+    /* Cards - Slate */
+    --card: 217 33% 17%;
+    --card-foreground: 210 40% 98%;
+
+    /* Popover - Slate */
+    --popover: 217 33% 17%;
+    --popover-foreground: 210 40% 98%;
+
+    /* Secondary - Darker Slate */
+    --secondary: 217 33% 22%;
+    --secondary-foreground: 210 40% 98%;
+
+    /* Muted - Darker Slate */
+    --muted: 217 33% 22%;
+    --muted-foreground: 215 20% 65%;
+
+    /* Accent - Blue Tint */
+    --accent: 217 91% 20%;
+    --accent-foreground: 217 91% 75%;
+
+    /* Destructive - Red */
+    --destructive: 0 72% 50%;
+    --destructive-foreground: 0 0% 100%;
+
+    /* Borders - Darker Slate */
+    --border: 217 33% 22%;
+    --input: 217 33% 22%;
+    --ring: 217 91% 60%;
+
+    /* Sidebar - Deepest Navy */
+    --sidebar-background: 222 47% 7%;
+    --sidebar-foreground: 210 40% 98%;
+    --sidebar-primary: 217 91% 60%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 217 33% 15%;
+    --sidebar-accent-foreground: 210 40% 98%;
+    --sidebar-border: 217 33% 15%;
+    --sidebar-ring: 217 91% 60%;
+    --sidebar-muted: 215 20% 65%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  html {
+    font-family: 'Plus Jakarta Sans', system-ui, sans-serif;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+}
+
+/* Custom scrollbar utilities */
+@layer utilities {
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: hsl(var(--muted-foreground) / 0.3) transparent;
+  }
+  
+  .scrollbar-thin::-webkit-scrollbar {
+    height: 6px;
+    width: 6px;
+  }
+  
+  .scrollbar-thin::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background-color: hsl(var(--muted-foreground) / 0.3);
+    border-radius: 3px;
+  }
+  
+  .scrollbar-thin::-webkit-scrollbar-thumb:hover {
+    background-color: hsl(var(--muted-foreground) / 0.5);
+  }
+
+  /* Hide scrollbars (iOS-style horizontal tab bars, etc.) */
+  .scrollbar-hide {
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+
+  .scrollbar-hide::-webkit-scrollbar {
+    display: none;
+  }
+
+  /* Momentum scrolling for iOS */
+  .scroll-momentum {
+    -webkit-overflow-scrolling: touch;
+  }
+
+  /* Safe area insets for native apps (iOS notch, Android gesture bar) */
+  .pt-safe {
+    padding-top: max(0.5rem, env(safe-area-inset-top));
+  }
+  
+  .pr-safe {
+    padding-right: max(0px, env(safe-area-inset-right));
+  }
+  
+  .pl-safe {
+    padding-left: max(0px, env(safe-area-inset-left));
+  }
+  
+  .pb-safe {
+    padding-bottom: max(1rem, env(safe-area-inset-bottom));
+  }
+  
+  /* For sticky elements that need to account for safe area */
+  .top-safe {
+    top: env(safe-area-inset-top);
+  }
+  
+  .bottom-safe {
+    bottom: env(safe-area-inset-bottom);
+  }
+
+  /* Minimum touch target utility (44x44px iOS guideline) */
+  @media (pointer: coarse) {
+    .touch-target {
+      min-height: 44px;
+      min-width: 44px;
+    }
+  }
+
+  /* Data Label - Micro uppercase text for labels */
+  .data-label {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.2em;
+    color: hsl(var(--muted-foreground));
+    font-weight: 500;
+  }
+
+  /* Glassmorphism utility */
+  .glass {
+    background: hsl(var(--background) / 0.8);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+  }
+
+  /* Glow effect utilities */
+  .glow-primary {
+    filter: drop-shadow(var(--glow-primary));
+  }
+
+  .glow-primary-intense {
+    filter: drop-shadow(var(--glow-primary-intense));
+  }
+
+  /* Hide elements when printing */
+  .no-print {
+    @apply print:hidden;
+  }
+
+  /* Animation fill mode utility */
+  .fill-forwards {
+    animation-fill-mode: forwards;
+  }
+}
+
+/* Cascade animation delay cap utility */
+@layer utilities {
+  .cascade-delay {
+    --cascade-delay: 0ms;
+    animation-delay: var(--cascade-delay);
+  }
+}
+
+/* Global interactive icon hover animation
+   Keep this subtle (more Apple-like) and only on true-hover devices. */
+@media (hover: hover) and (pointer: fine) {
+  button svg,
+  a svg,
+  [role="button"] svg,
+  .cursor-pointer svg {
+    transition: transform 0.15s ease-out, opacity 0.15s ease-out;
+  }
+
+  button:hover svg,
+  a:hover svg,
+  [role="button"]:hover svg,
+  .cursor-pointer:hover svg {
+    transform: scale(1.06);
+    opacity: 0.92;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  button svg,
+  a svg,
+  [role="button"] svg,
+  .cursor-pointer svg {
+    transition: none !important;
+    transform: none !important;
+  }
+}
+
+/* Prevent double-scaling for icons with explicit animations */
+.no-icon-scale svg,
+.no-icon-scale:hover svg {
+  transform: none !important;
+}
+
+/* Premium UI Polish Utilities */
+@layer utilities {
+  /* Uppercase stat labels - enterprise style */
+  .label-caps {
+    font-size: 0.6875rem;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: hsl(var(--muted-foreground));
+  }
+
+  /* Glossy card effect */
+  .card-glossy {
+    background: linear-gradient(180deg, #ffffff 0%, #fafafa 100%);
+    border: 1px solid rgba(0, 0, 0, 0.06);
+    box-shadow:
+      0 1px 3px rgba(0, 0, 0, 0.06),
+      0 4px 12px rgba(0, 0, 0, 0.04),
+      inset 0 1px 0 0 rgba(255, 255, 255, 0.8);
+  }
+
+  .card-glossy:hover {
+    box-shadow:
+      0 2px 8px rgba(0, 0, 0, 0.08),
+      0 8px 24px rgba(0, 0, 0, 0.06),
+      inset 0 1px 0 0 rgba(255, 255, 255, 0.9);
+  }
+
+  /* Dark mode glossy card */
+  .dark .card-glossy {
+    background: linear-gradient(180deg, #1e293b 0%, #0f172a 100%);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    box-shadow:
+      0 4px 12px rgba(0, 0, 0, 0.3),
+      inset 0 1px 0 0 rgba(255, 255, 255, 0.05);
+  }
+
+  /* Glossy sidebar effect */
+  .sidebar-glossy {
+    background:
+      linear-gradient(
+        180deg,
+        rgba(255, 255, 255, 0.08) 0%,
+        rgba(255, 255, 255, 0.02) 50%,
+        rgba(0, 0, 0, 0.1) 100%
+      ),
+      linear-gradient(180deg, #1e293b 0%, #0f172a 100%);
+    box-shadow:
+      inset 0 1px 0 0 rgba(255, 255, 255, 0.05),
+      inset 0 -1px 0 0 rgba(0, 0, 0, 0.2);
+  }
+
+  /* Glossy button effects */
+  .btn-glossy {
+    background: linear-gradient(180deg, rgba(255,255,255,0.15) 0%, rgba(255,255,255,0) 100%);
+    box-shadow: inset 0 1px 0 0 rgba(255, 255, 255, 0.2);
+  }
+
+  /* Main content premium background */
+  .bg-premium {
+    background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+  }
+
+  /* Header premium effect */
+  .header-premium {
+    background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+    border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+  }
+
+  /* Glossy badge base styles */
+  .badge-glossy {
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.3);
+  }
+
+  /* Emoji tile containers */
+  .emoji-tile {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 0.5rem;
+    flex-shrink: 0;
+  }
+
+  .emoji-tile-sm { width: 32px; height: 32px; font-size: 16px; }
+  .emoji-tile-md { width: 40px; height: 40px; font-size: 20px; }
+  .emoji-tile-lg { width: 48px; height: 48px; font-size: 24px; }
+  .emoji-tile-xl { width: 64px; height: 64px; font-size: 32px; }
+
+  /* Navigation emoji tiles */
+  .nav-emoji-tile {
+    width: 36px;
+    height: 36px;
+    background: rgba(255, 255, 255, 0.1);
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 18px;
+    flex-shrink: 0;
+  }
+}
+
+/* Badge gradient classes */
+.badge-gradient-default {
+  background: linear-gradient(135deg, #007AFF, #0055CC);
+}
+.badge-gradient-destructive {
+  background: linear-gradient(135deg, #FF3B30, #CC2D26);
+}
+.badge-gradient-success {
+  background: linear-gradient(135deg, #34C759, #28A745);
+}
+.badge-gradient-warning {
+  background: linear-gradient(135deg, #FF9F0A, #E8900A);
+}
+.badge-gradient-secondary {
+  background: linear-gradient(135deg, #F5F5F7, #E8E8ED);
+}
+.dark .badge-gradient-secondary {
+  background: linear-gradient(135deg, #2C2C2E, #1C1C1E);
+  border-color: rgba(255, 255, 255, 0.08);
+}
+
+/* Mac Stoplight Controls */
+.stoplight-dot {
+  border-radius: 50%;
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: filter 0.15s ease;
+  padding: 0;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.stoplight-dot::before {
+  content: '';
+  position: absolute;
+  inset: -8px;
+}
+
+.stoplight-dot:hover {
+  filter: brightness(1.1);
+}
+
+.stoplight-dot:active {
+  filter: brightness(0.9);
+}
+
+.stoplight-dot[disabled],
+.stoplight-dot[aria-disabled="true"] {
+  opacity: 0.35;
+  cursor: default;
+  filter: none;
+}
+
+.stoplight-sm { width: 12px; height: 12px; }
+.stoplight-md { width: 14px; height: 14px; }
+.stoplight-lg { width: 16px; height: 16px; }
+
+.stoplight-close {
+  background: linear-gradient(180deg, #FF6058 0%, #E7483B 100%);
+  border: 0.5px solid rgba(0, 0, 0, 0.12);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.25), 0 0.5px 1px rgba(0, 0, 0, 0.1);
+}
+
+.stoplight-minimize {
+  background: linear-gradient(180deg, #FFBD2E 0%, #DFA218 100%);
+  border: 0.5px solid rgba(0, 0, 0, 0.12);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.25), 0 0.5px 1px rgba(0, 0, 0, 0.1);
+}
+
+.stoplight-maximize {
+  background: linear-gradient(180deg, #28C940 0%, #1EAD2E 100%);
+  border: 0.5px solid rgba(0, 0, 0, 0.12);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.25), 0 0.5px 1px rgba(0, 0, 0, 0.1);
+}
+
+.dark .stoplight-close {
+  background: linear-gradient(180deg, #FF6B63 0%, #E7483B 100%);
+}
+.dark .stoplight-minimize {
+  background: linear-gradient(180deg, #FFC73A 0%, #DFA218 100%);
+}
+.dark .stoplight-maximize {
+  background: linear-gradient(180deg, #32D74B 0%, #1EAD2E 100%);
+}
+
+/* ===== GLOBAL SCROLL FIX ===== */
+* {
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Use :where() so component utility classes can override these defaults. */
+:where([data-radix-dialog-content]),
+:where([data-radix-sheet-content]),
+:where([role="dialog"]) {
+  max-height: 85vh;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.page-content,
+.form-container,
+main > div {
+  min-height: 0;
+}
+
+/* ===== APPLE BOUNCE-BACK SCROLLING ===== */
+html, body {
+  overscroll-behavior-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+main,
+[role="main"],
+.page-content {
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-y: auto;
+}
+
+/* ===== CARD PRESS STATES ===== */
+[data-pressable="true"] {
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition: transform 0.2s cubic-bezier(0.25, 0.46, 0.45, 0.94), box-shadow 0.3s ease;
+}
+
+[data-pressable="true"]:active {
+  transform: scale(0.98);
+}
+
+.cursor-pointer[class*="rounded"] {
+  transition: transform 0.2s cubic-bezier(0.25, 0.46, 0.45, 0.94), box-shadow 0.3s ease;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.cursor-pointer[class*="rounded"]:active {
+  transform: scale(0.98);
+}
+
+/* ===== FAB SPRING-IN ANIMATION ===== */
+@keyframes fab-spring-in {
+  0% {
+    opacity: 0;
+    transform: scale(0.3);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}

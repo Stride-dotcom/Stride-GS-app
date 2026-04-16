@@ -1,0 +1,190 @@
+/* Template Editor Styles */
+
+.template-editor {
+  --te-primary: #E85D2D;
+  --te-secondary: #1E293B;
+  --te-bg: #0f172a;
+  --te-surface: #1e293b;
+  --te-border: #334155;
+  --te-text: #f8fafc;
+  --te-text-muted: #94a3b8;
+}
+
+/* TipTap Editor Styling */
+.template-editor .ProseMirror {
+  min-height: 100%;
+  outline: none;
+}
+
+.template-editor .ProseMirror:focus {
+  outline: none;
+}
+
+.template-editor .ProseMirror p.is-editor-empty:first-child::before {
+  color: #94a3b8;
+  content: attr(data-placeholder);
+  float: left;
+  height: 0;
+  pointer-events: none;
+}
+
+/* Token highlighting in editor */
+.template-editor .ProseMirror {
+  word-wrap: break-word;
+}
+
+/* Table styling in editor */
+.template-editor .ProseMirror table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 16px 0;
+}
+
+.template-editor .ProseMirror td,
+.template-editor .ProseMirror th {
+  border: 1px solid #e2e8f0;
+  padding: 8px 12px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.template-editor .ProseMirror th {
+  background-color: #f8fafc;
+  font-weight: 600;
+}
+
+.template-editor .ProseMirror .selectedCell:after {
+  background: rgba(232, 93, 45, 0.2);
+  content: "";
+  left: 0;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  pointer-events: none;
+  position: absolute;
+  z-index: 2;
+}
+
+.template-editor .ProseMirror .column-resize-handle {
+  background-color: var(--te-primary);
+  bottom: -2px;
+  pointer-events: none;
+  position: absolute;
+  right: -2px;
+  top: 0;
+  width: 4px;
+}
+
+/* Image styling */
+.template-editor .ProseMirror img {
+  max-width: 100%;
+  height: auto;
+}
+
+.template-editor .ProseMirror img.ProseMirror-selectednode {
+  outline: 2px solid var(--te-primary);
+}
+
+/* Link styling */
+.template-editor .ProseMirror a {
+  color: var(--te-primary);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+/* List styling */
+.template-editor .ProseMirror ul,
+.template-editor .ProseMirror ol {
+  padding-left: 24px;
+  margin: 8px 0;
+}
+
+.template-editor .ProseMirror li {
+  margin: 4px 0;
+}
+
+/* Heading styling */
+.template-editor .ProseMirror h1 {
+  font-size: 2rem;
+  font-weight: 700;
+  margin: 24px 0 16px;
+  line-height: 1.2;
+}
+
+.template-editor .ProseMirror h2 {
+  font-size: 1.5rem;
+  font-weight: 600;
+  margin: 20px 0 12px;
+  line-height: 1.3;
+}
+
+.template-editor .ProseMirror h3 {
+  font-size: 1.25rem;
+  font-weight: 600;
+  margin: 16px 0 8px;
+  line-height: 1.4;
+}
+
+/* Preview mode */
+.template-preview {
+  font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+.template-preview h1,
+.template-preview h2,
+.template-preview h3 {
+  margin-top: 0;
+}
+
+.template-preview table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.template-preview th,
+.template-preview td {
+  padding: 12px;
+  text-align: left;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.template-preview th {
+  background: #f8fafc;
+  font-weight: 600;
+}
+
+/* Scrollbar styling for dark theme */
+.template-editor ::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.template-editor ::-webkit-scrollbar-track {
+  background: var(--te-surface);
+}
+
+.template-editor ::-webkit-scrollbar-thumb {
+  background: var(--te-border);
+  border-radius: 4px;
+}
+
+.template-editor ::-webkit-scrollbar-thumb:hover {
+  background: #475569;
+}
+
+/* Toolbar styling */
+.template-editor-toolbar {
+  flex-shrink: 0;
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+  .template-editor .w-72 {
+    width: 100%;
+    max-width: 280px;
+  }
+
+  .template-editor-toolbar .flex-wrap {
+    gap: 4px;
+  }
+}

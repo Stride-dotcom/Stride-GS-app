@@ -1,0 +1,5 @@
+Repair quote pending: {{item_code}}
+
+{alert_message}
+
+Open: {portal_base_url}

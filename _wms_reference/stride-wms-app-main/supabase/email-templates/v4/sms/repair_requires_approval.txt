@@ -1,0 +1,1 @@
+Approval needed for repair {{item_code}}. Estimate {{repair_estimate_amount}}. {{portal_repair_url}}

@@ -1,0 +1,5 @@
+Invoice {{invoice_number}} is ready
+
+{alert_message}
+
+Open: {portal_base_url}

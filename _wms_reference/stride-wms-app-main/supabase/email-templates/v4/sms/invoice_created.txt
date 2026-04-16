@@ -1,0 +1,5 @@
+Invoice {{invoice_number}} created
+
+{alert_message}
+
+Open: {portal_base_url}

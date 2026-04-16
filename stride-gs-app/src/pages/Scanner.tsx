@@ -24,6 +24,9 @@ import { fetchItemsByIdsFromSupabase, type ResolvedItem } from '../lib/supabaseQ
 import { postCreateLocation, postBatchUpdateItemLocations, type BatchMoveResult } from '../lib/api';
 import { useAuth } from '../contexts/AuthContext';
 import { entityEvents } from '../lib/entityEvents';
+import { QRScanner } from '../components/scanner/QRScanner';
+import { parseScanPayload } from '../lib/parseScanPayload';
+import { playScanAudioFeedback } from '../lib/scanAudioFeedback';
 
 function normalizeId(raw: string): string {
   return raw.trim().replace(/^ITEM:\s*/i, '').toUpperCase();
@@ -220,6 +223,8 @@ export function Scanner() {
   const [newLocPrefill, setNewLocPrefill] = useState('');
   const [busy, setBusy] = useState(false);
   const [lastResult, setLastResult] = useState<BatchMoveResult | null>(null);
+  const [cameraOn, setCameraOn] = useState(false);
+  const [cameraHint, setCameraHint] = useState<string | null>(null);
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   useEffect(() => { textareaRef.current?.focus(); }, []);
@@ -254,6 +259,27 @@ export function Scanner() {
       return next;
     });
   }, [resolveQueue]);
+
+  // Camera scan dispatcher: LOC:<code> → set target location; ITEM:<id> or
+  // raw code → add to queue. Beeps on both paths. Flashes a brief hint so
+  // the operator knows what happened.
+  const handleCameraScan = useCallback((raw: string) => {
+    const parsed = parseScanPayload(raw);
+    if (!parsed.code) return;
+    if (parsed.type === 'location') {
+      setTargetLocation(parsed.code.toUpperCase());
+      setCameraHint(`📍 Location set → ${parsed.code.toUpperCase()}`);
+      void playScanAudioFeedback('success');
+    } else {
+      // type === 'item' or 'unknown' → treat as item
+      const id = parsed.code.toUpperCase();
+      addToQueue([id]);
+      setCameraHint(`📦 Added ${id}`);
+      void playScanAudioFeedback('success');
+    }
+    // Clear the hint after a moment so it doesn't linger
+    setTimeout(() => setCameraHint(null), 1400);
+  }, [addToQueue]);
 
   const flushInput = useCallback(() => {
     const ids = splitMultiline(rawInput);
@@ -326,14 +352,49 @@ export function Scanner() {
 
       <div style={s.body}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12, minWidth: 0 }}>
+          {/* Camera scanner card */}
           <div style={s.card}>
             <div style={s.cardTitle}>
-              <Camera size={14} /> Scan or paste item IDs
+              <Camera size={14} /> Camera scanner
+              <span style={{ marginLeft: 'auto', fontSize: 11, fontWeight: 400, color: theme.colors.textMuted, textTransform: 'none', letterSpacing: 0 }}>
+                {cameraOn ? 'Scan QR or barcode — items auto-queued · LOC labels set target' : 'Use phone/tablet or webcam to scan item & location labels'}
+              </span>
+            </div>
+            {cameraOn ? (
+              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8 }}>
+                <QRScanner
+                  onScan={handleCameraScan}
+                  onStop={() => { setCameraOn(false); setCameraHint(null); }}
+                />
+                {cameraHint && (
+                  <div style={{
+                    padding: '6px 14px',
+                    background: '#F0FDF4', border: '1px solid #86EFAC',
+                    borderRadius: 99, fontSize: 12, fontWeight: 600, color: '#15803D',
+                  }}>
+                    {cameraHint}
+                  </div>
+                )}
+              </div>
+            ) : (
+              <button
+                style={{ ...s.btnPrimary, justifyContent: 'center', padding: '10px 18px' }}
+                onClick={() => setCameraOn(true)}
+              >
+                <Camera size={14} /> Start camera scanner
+              </button>
+            )}
+          </div>
+
+          {/* Keyboard / paste input card */}
+          <div style={s.card}>
+            <div style={s.cardTitle}>
+              <Camera size={14} /> Keyboard / paste entry
               <span style={{ marginLeft: 'auto', fontSize: 11, fontWeight: 400, color: theme.colors.textMuted, textTransform: 'none', letterSpacing: 0 }}>
                 Enter to add · Shift+Enter = new line · paste many at once
               </span>
             </div>
-            <textarea ref={textareaRef} value={rawInput} onChange={e => setRawInput(e.target.value)} onKeyDown={onKeyDown} placeholder="Scan with camera, type, or paste item IDs (one per line)…" style={s.textarea} autoFocus />
+            <textarea ref={textareaRef} value={rawInput} onChange={e => setRawInput(e.target.value)} onKeyDown={onKeyDown} placeholder="Scan with handheld scanner, type, or paste item IDs (one per line)…" style={s.textarea} autoFocus />
             <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 8, gap: 8 }}>
               <button style={s.btnSecondary} onClick={() => setRawInput('')} disabled={!rawInput}>Clear</button>
               <button style={s.btnPrimary} onClick={flushInput} disabled={!rawInput.trim()}>Add to queue</button>

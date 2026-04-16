@@ -1,0 +1,81 @@
+name: Cursor Auto PR
+
+on:
+  push:
+    branches:
+      - "cursor/**"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: cursor-auto-pr-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  create-or-update-pr:
+    name: Create PR + enable auto-merge (cursor branches)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: github.ref_name != 'main'
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create PR if missing, enable auto-merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          if [[ "${BRANCH}" != cursor/* ]]; then
+            echo "Not a cursor/* branch (${BRANCH}); skipping."
+            exit 0
+          fi
+
+          # Skip branches that don't actually differ from main (e.g. after merge).
+          enc_branch="$(python3 -c 'import os,urllib.parse; print(urllib.parse.quote(os.environ["BRANCH"], safe=""))')"
+          ahead="$(gh api "repos/${REPO}/compare/main...${enc_branch}" --jq '.ahead_by' 2>/dev/null || echo '')"
+          if [ -n "${ahead}" ] && [ "${ahead}" -eq 0 ]; then
+            echo "Branch ${BRANCH} is not ahead of main; no PR needed."
+            exit 0
+          fi
+
+          # Ensure labels exist (idempotent).
+          gh label create automerge --repo "${REPO}" --color "0E8A16" --description "Auto-merge when checks pass." 2>/dev/null || true
+
+          pr_number="$(gh pr list --repo "${REPO}" --head "${BRANCH}" --base main --state open --json number --jq '.[0].number' || true)"
+          if [ -z "${pr_number}" ]; then
+            title="$(git log -1 --pretty=%s)"
+            body=$'Automated PR for branch `'"${BRANCH}"$'`.\n\n- Created/maintained by GitHub Actions\n- Auto-merge is enabled for cursor branches'
+
+            # Create PR (no-op if already exists due to race).
+            gh pr create --repo "${REPO}" --head "${BRANCH}" --base main --title "${title}" --body "${body}" --label automerge || true
+
+            # Resolve PR number with a short retry for eventual consistency.
+            for i in $(seq 1 10); do
+              pr_number="$(gh pr list --repo "${REPO}" --head "${BRANCH}" --base main --state open --json number --jq '.[0].number' || true)"
+              [ -n "${pr_number}" ] && break
+              sleep 1
+            done
+          fi
+
+          if [ -z "${pr_number}" ]; then
+            echo "::warning::No PR found/created for ${BRANCH}. (Possibly no diff vs main.)"
+            exit 0
+          fi
+
+          # Ensure automerge label is present.
+          gh pr edit "${pr_number}" --repo "${REPO}" --add-label automerge || true
+
+          # Enable GitHub auto-merge (merge commit), and delete the branch after merge.
+          # If the PR is conflicting or missing requirements, this will be retried by the maintain workflow.
+          gh pr merge "${pr_number}" --repo "${REPO}" --auto --merge --delete-branch || true
+

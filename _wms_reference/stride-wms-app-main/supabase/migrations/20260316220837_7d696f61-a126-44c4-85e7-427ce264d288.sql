@@ -1,0 +1,2 @@
+ALTER TABLE public.documents DROP CONSTRAINT IF EXISTS documents_context_type_check;
+ALTER TABLE public.documents ADD CONSTRAINT documents_context_type_check CHECK (context_type IN ('shipment', 'employee', 'delivery', 'invoice', 'item', 'task', 'general', 'quote'));

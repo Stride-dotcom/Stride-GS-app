@@ -1,0 +1,1 @@
+Out for delivery: {{shipment_number}}. Window: {{delivery_window}}. {{shipment_link}}

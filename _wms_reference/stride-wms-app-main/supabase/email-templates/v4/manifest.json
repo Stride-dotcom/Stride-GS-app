@@ -1,0 +1,102 @@
+{
+  "version": "v4",
+  "generated_at": "2026-02-07T03:30:24.120006Z",
+  "templates": [
+    {
+      "trigger_event": "shipment_created",
+      "email": "shipment_created.html",
+      "sms": "sms/shipment_created.txt",
+      "subject_template": "Shipment Created \u2014 {{shipment_number}}"
+    },
+    {
+      "trigger_event": "shipment_scheduled",
+      "email": "shipment_scheduled.html",
+      "sms": "sms/shipment_scheduled.txt",
+      "subject_template": "Shipment Scheduled \u2014 {{shipment_number}}"
+    },
+    {
+      "trigger_event": "shipment_delayed",
+      "email": "shipment_delayed.html",
+      "sms": "sms/shipment_delayed.txt",
+      "subject_template": "Shipment Delayed \u2014 {{shipment_number}}"
+    },
+    {
+      "trigger_event": "shipment_out_for_delivery",
+      "email": "shipment_out_for_delivery.html",
+      "sms": "sms/shipment_out_for_delivery.txt",
+      "subject_template": "Out for Delivery \u2014 {{shipment_number}}"
+    },
+    {
+      "trigger_event": "shipment_delivered",
+      "email": "shipment_delivered.html",
+      "sms": "sms/shipment_delivered.txt",
+      "subject_template": "Delivered \u2014 {{shipment_number}}"
+    },
+    {
+      "trigger_event": "will_call_ready",
+      "email": "will_call_ready.html",
+      "sms": "sms/will_call_ready.txt",
+      "subject_template": "Will-Call Ready \u2014 {{release_number}}"
+    },
+    {
+      "trigger_event": "will_call_released",
+      "email": "will_call_released.html",
+      "sms": "sms/will_call_released.txt",
+      "subject_template": "Will-Call Released \u2014 {{release_number}}"
+    },
+    {
+      "trigger_event": "inspection_started",
+      "email": "inspection_started.html",
+      "sms": "sms/inspection_started.txt",
+      "subject_template": "Inspection Started \u2014 {{inspection_number}}"
+    },
+    {
+      "trigger_event": "inspection_report_available",
+      "email": "inspection_report_available.html",
+      "sms": "sms/inspection_report_available.txt",
+      "subject_template": "Inspection Report Available \u2014 {{inspection_number}}"
+    },
+    {
+      "trigger_event": "inspection_requires_attention",
+      "email": "inspection_requires_attention.html",
+      "sms": "sms/inspection_requires_attention.txt",
+      "subject_template": "Inspection Requires Attention \u2014 {{inspection_number}}"
+    },
+    {
+      "trigger_event": "task_assigned",
+      "email": "task_assigned.html",
+      "sms": "sms/task_assigned.txt",
+      "subject_template": "Task Assigned \u2014 {{task_title}}"
+    },
+    {
+      "trigger_event": "task_completed",
+      "email": "task_completed.html",
+      "sms": "sms/task_completed.txt",
+      "subject_template": "Task Completed \u2014 {{task_title}}"
+    },
+    {
+      "trigger_event": "task_overdue",
+      "email": "task_overdue.html",
+      "sms": "sms/task_overdue.txt",
+      "subject_template": "Task Overdue \u2014 {{task_title}} ({{task_days_overdue}} days)"
+    },
+    {
+      "trigger_event": "repair_started",
+      "email": "repair_started.html",
+      "sms": "sms/repair_started.txt",
+      "subject_template": "Repair Started \u2014 {{item_code}}"
+    },
+    {
+      "trigger_event": "repair_completed",
+      "email": "repair_completed.html",
+      "sms": "sms/repair_completed.txt",
+      "subject_template": "Repair Completed \u2014 {{item_code}}"
+    },
+    {
+      "trigger_event": "repair_requires_approval",
+      "email": "repair_requires_approval.html",
+      "sms": "sms/repair_requires_approval.txt",
+      "subject_template": "Repair Approval Needed \u2014 {{item_code}}"
+    }
+  ]
+}

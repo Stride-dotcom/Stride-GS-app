@@ -1,0 +1,190 @@
+name: Cursor Auto-fix Merge Conflicts
+
+on:
+  pull_request:
+    types: [labeled]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "Pull request number to auto-fix"
+        required: false
+        type: string
+      base_ref:
+        description: "Base branch ref (e.g. main)"
+        required: false
+        type: string
+      head_ref:
+        description: "Head branch ref (must be cursor/*)"
+        required: false
+        type: string
+      head_repo:
+        description: "Head repo full name (owner/repo)"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: cursor-autofix-${{ github.event.pull_request.number || github.event.inputs.pr_number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  autofix:
+    name: Auto-fix merge conflicts (safe allowlist)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'merge-conflict'
+    steps:
+      - name: Guardrails (only same-repo cursor PRs)
+        id: guard
+        env:
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.inputs.pr_number }}
+          BASE_REF: ${{ github.event.pull_request.base.ref || github.event.inputs.base_ref }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref || github.event.inputs.head_ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name || github.event.inputs.head_repo || github.repository }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${PR_NUMBER:-}" ] || [ -z "${BASE_REF:-}" ] || [ -z "${HEAD_REF:-}" ]; then
+            echo "::warning::Missing PR context (pr_number/base_ref/head_ref); skipping."
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ "${HEAD_REPO}" != "${REPO}" ]; then
+            echo "Fork PR detected (${HEAD_REPO}); skipping."
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [[ "${HEAD_REF}" != cursor/* && "${HEAD_REF}" != claude/* ]]; then
+            echo "Not a managed AI branch (cursor/* or claude/*): ${HEAD_REF}; skipping."
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "pr_number=${PR_NUMBER}" >> "$GITHUB_OUTPUT"
+          echo "base_ref=${BASE_REF}" >> "$GITHUB_OUTPUT"
+          echo "head_ref=${HEAD_REF}" >> "$GITHUB_OUTPUT"
+          echo "should_run=true" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout PR head branch
+        if: steps.guard.outputs.should_run == 'true'
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ steps.guard.outputs.head_ref }}
+
+      - name: Attempt merge base into head; auto-resolve allowlisted conflicts
+        if: steps.guard.outputs.should_run == 'true'
+        env:
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.guard.outputs.pr_number }}
+          BASE_REF: ${{ steps.guard.outputs.base_ref }}
+          HEAD_REF: ${{ steps.guard.outputs.head_ref }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git fetch --no-tags --prune origin "${BASE_REF}"
+
+          managed_ref_regex='^(cursor/|claude/)'
+          allowlist_regex='^(\.github/workflows/supabase-deploy\.yml)$'
+
+          set +e
+          git merge --no-commit --no-ff "origin/${BASE_REF}" >/dev/null 2>&1
+          rc=$?
+          set -e
+
+          if [ "$rc" -eq 0 ]; then
+            if git rev-parse -q --verify MERGE_HEAD >/dev/null 2>&1; then
+              echo "Merge succeeded without conflicts; committing."
+              git commit -m "Merge ${BASE_REF} into ${HEAD_REF}" >/dev/null
+              git push origin "HEAD:${HEAD_REF}"
+            else
+              echo "Already up to date with ${BASE_REF}; nothing to push."
+            fi
+            exit 0
+          fi
+
+          conflicts="$(git diff --name-only --diff-filter=U || true)"
+          if [ -z "${conflicts}" ]; then
+            echo "::error::Merge failed but no conflicted files were detected."
+            git merge --abort || true
+            exit 1
+          fi
+
+          echo "Conflicted files (initial attempt):"
+          echo "${conflicts}"
+
+          # For managed AI branches, first try automatic resolution by preferring
+          # the head branch's changes on conflicted hunks.
+          if printf "%s" "${HEAD_REF}" | python3 -c "import re,sys; sys.exit(0 if re.match(r'${managed_ref_regex}', sys.stdin.read().strip()) else 1)"; then
+            git merge --abort || true
+
+            set +e
+            git merge --no-commit --no-ff -X ours "origin/${BASE_REF}" >/dev/null 2>&1
+            rc_ours=$?
+            set -e
+
+            if [ "$rc_ours" -eq 0 ]; then
+              if git rev-parse -q --verify MERGE_HEAD >/dev/null 2>&1; then
+                git commit -m "Auto-merge ${BASE_REF} into ${HEAD_REF} (prefer head)" >/dev/null
+                git push origin "HEAD:${HEAD_REF}"
+                gh pr comment "${PR_NUMBER}" --repo "${REPO}" --body "Auto-resolved merge conflicts by preferring \`${HEAD_REF}\` changes where needed, then merged \`${BASE_REF}\` into the branch." || true
+              else
+                echo "Already up to date with ${BASE_REF} after strategy merge; nothing to push."
+              fi
+              exit 0
+            fi
+
+            conflicts="$(git diff --name-only --diff-filter=U || true)"
+            if [ -z "${conflicts}" ]; then
+              echo "::error::Auto-resolution (-X ours) failed without conflicted files."
+              git merge --abort || true
+              exit 1
+            fi
+            echo "::warning::Strategy merge (-X ours) could not resolve all conflicts. Falling back to allowlist."
+            echo "Remaining conflicted files:"
+            echo "${conflicts}"
+          fi
+
+          # Only auto-resolve conflicts on a very small allowlist to avoid corrupting business logic.
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            if ! printf "%s" "$f" | python3 -c "import re,sys; sys.exit(0 if re.match(r'${allowlist_regex}', sys.stdin.read().strip()) else 1)"; then
+              echo "::warning::Conflict outside allowlist: ${f}"
+              git merge --abort || true
+              gh pr comment "${PR_NUMBER}" --repo "${REPO}" --body "Merge conflicts remain outside the auto-fix allowlist (e.g. \`${f}\`) after automated attempts. Manual conflict resolution is required." || true
+              exit 0
+            fi
+          done <<< "${conflicts}"
+
+          # For allowlisted files, take the base branch version ("theirs") to unblock merging.
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            git checkout --theirs -- "$f"
+            git add -- "$f"
+          done <<< "${conflicts}"
+
+          git commit -m "Auto-resolve merge conflicts (prefer ${BASE_REF})" >/dev/null
+          git push origin "HEAD:${HEAD_REF}"
+
+          files_md="$(printf '%s\n' "${conflicts}" | sed 's/^/- `/' | sed 's/$/`/')"
+          body="$(cat <<EOF
+          Auto-resolved merge conflict(s) by taking \`${BASE_REF}\` for allowlisted file(s):
+          
+          ${files_md}
+          
+          Pushed an updated merge commit to \`${HEAD_REF}\`.
+          EOF
+          )"
+          gh pr comment "${PR_NUMBER}" --repo "${REPO}" --body "${body}" || true
+

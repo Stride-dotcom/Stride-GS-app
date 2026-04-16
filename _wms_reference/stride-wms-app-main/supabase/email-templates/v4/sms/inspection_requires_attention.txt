@@ -1,0 +1,1 @@
+Action needed: Inspection {{inspection_number}}. {{portal_inspection_url}}

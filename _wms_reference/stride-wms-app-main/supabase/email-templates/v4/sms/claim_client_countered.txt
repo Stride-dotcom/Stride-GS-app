@@ -1,0 +1,5 @@
+Client counter-offer on claim
+
+{alert_message}
+
+Open: {portal_base_url}

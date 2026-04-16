@@ -1,0 +1,5 @@
+Claim declined by client
+
+{alert_message}
+
+Open: {portal_base_url}

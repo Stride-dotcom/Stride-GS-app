@@ -1,0 +1,1 @@
+Task assigned: {{task_title}} due {{task_due_date}}. {{task_link}}
