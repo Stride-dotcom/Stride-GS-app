@@ -558,19 +558,75 @@ export function Scanner() {
             </div>
           )}
 
+          {/* Desktop: Move button inline with the destination controls.
+              Mobile: rendered in the sticky bottom bar (see below) so it's
+              always reachable without scrolling past the queue. */}
+          {!isMobile && (
+            <>
+              <button
+                style={{ ...s.btnPrimary, justifyContent: 'center', padding: '12px 18px', fontSize: 15, opacity: canSubmit ? 1 : 0.4, cursor: canSubmit ? 'pointer' : 'not-allowed' }}
+                onClick={submit}
+                disabled={!canSubmit}
+              >
+                {busy ? <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} /> : <CheckCircle2 size={16} />}
+                {busy ? 'Moving…' : `Move ${foundCount || 0} item${foundCount === 1 ? '' : 's'}`}
+              </button>
+              <div style={{ fontSize: 11, color: theme.colors.textMuted, textAlign: 'center' }}>
+                Uses item_id_ledger for fast cross-tenant lookup.
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+
+      {/* Mobile sticky bottom action bar — always-visible Move button.
+          Shows the queue count + target location above it for quick confirm. */}
+      {isMobile && (
+        <div style={{
+          flexShrink: 0,
+          padding: '8px 12px 10px',
+          background: '#fff',
+          borderTop: `1px solid ${theme.colors.border}`,
+          boxShadow: '0 -2px 10px rgba(0,0,0,0.06)',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 6,
+        }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 11, color: theme.colors.textMuted }}>
+            <span>
+              {foundCount > 0 && <><strong style={{ color: '#15803D' }}>{foundCount}</strong> ready</>}
+              {pendingCount > 0 && <> · <span style={{ color: '#6B7280' }}>{pendingCount} checking</span></>}
+              {notFoundCount > 0 && <> · <span style={{ color: '#DC2626' }}>{notFoundCount} not found</span></>}
+              {foundCount === 0 && pendingCount === 0 && notFoundCount === 0 && 'Scan or type item IDs above'}
+            </span>
+            <span style={{ fontFamily: 'monospace', fontWeight: 600, color: targetLocation ? theme.colors.primary : theme.colors.textMuted }}>
+              → {targetLocation || 'pick location'}
+            </span>
+          </div>
           <button
-            style={{ ...s.btnPrimary, justifyContent: 'center', padding: '12px 18px', fontSize: 15, opacity: canSubmit ? 1 : 0.4, cursor: canSubmit ? 'pointer' : 'not-allowed' }}
+            style={{
+              ...s.btnPrimary,
+              justifyContent: 'center',
+              padding: '14px',
+              fontSize: 15,
+              opacity: canSubmit ? 1 : 0.4,
+              cursor: canSubmit ? 'pointer' : 'not-allowed',
+              width: '100%',
+            }}
             onClick={submit}
             disabled={!canSubmit}
           >
             {busy ? <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} /> : <CheckCircle2 size={16} />}
-            {busy ? 'Moving…' : `Move ${foundCount || 0} item${foundCount === 1 ? '' : 's'}`}
+            {busy
+              ? 'Moving…'
+              : !targetLocation
+                ? 'Pick a destination first'
+                : foundCount === 0
+                  ? 'Add items to queue first'
+                  : `Move ${foundCount} item${foundCount === 1 ? '' : 's'} → ${targetLocation}`}
           </button>
-          <div style={{ fontSize: 11, color: theme.colors.textMuted, textAlign: 'center' }}>
-            Uses item_id_ledger for fast cross-tenant lookup.
-          </div>
         </div>
-      </div>
+      )}
 
       {showNewLoc && (
         <NewLocationModal
