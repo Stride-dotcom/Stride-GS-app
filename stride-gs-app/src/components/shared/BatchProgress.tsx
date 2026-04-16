@@ -46,6 +46,9 @@ export function BatchProgress({ state, total, processed, succeeded, failed, acti
           <span style={{ color: theme.colors.text, fontWeight: 500 }}>
             {actionLabel}... {processed}/{total} ({pct}%)
           </span>
+          <span style={{ fontSize: 11, color: '#92400E', fontWeight: 500, marginLeft: 'auto' }} title="Closing the tab will stop the batch partway through">
+            ⚠ Keep this page open
+          </span>
         </>
       )}
       {state === 'complete' && (

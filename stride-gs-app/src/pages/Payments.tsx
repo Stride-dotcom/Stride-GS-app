@@ -14,6 +14,7 @@ import {
   postCreateStaxInvoices, postStaxRefreshCustomerIds, postChargeSingleInvoice,
   postSendStaxPayLinks, postSendStaxPayLink,
   postCreateTestInvoice, postVoidStaxInvoice, postUpdateStaxInvoice, postDeleteStaxInvoice, postResetStaxInvoiceStatus, postToggleAutoCharge,
+  postBatchVoidStaxInvoices, postBatchDeleteStaxInvoices, type BatchMutationResult,
   fetchIIFFiles, postImportIIFFromDrive, type IIFFile,
   setNextFetchNoCache,
   type StaxInvoice, type StaxCharge, type StaxException,
@@ -22,6 +23,9 @@ import {
 import { AutocompleteSelect } from '../components/shared/AutocompleteSelect';
 import { ProcessingOverlay } from '../components/shared/ProcessingOverlay';
 import { InfoTooltip } from '../components/shared/InfoTooltip';
+import { BulkResultSummary } from '../components/shared/BulkResultSummary';
+import { BatchProgress, type BatchState } from '../components/shared/BatchProgress';
+import { runBatchLoop, mergePreflightSkips } from '../lib/batchLoop';
 
 type Tab = 'iif' | 'review' | 'invoices' | 'queue' | 'charges' | 'exceptions' | 'customers' | 'pipeline' | 'mapping' | 'runlog';
 
@@ -370,6 +374,11 @@ export function Payments() {
   const [voidingInvoice, setVoidingInvoice] = useState<string | null>(null);
   const [selectedInvoices, setSelectedInvoices] = useState<Set<number>>(new Set()); // rowIndex-based for duplicate QB# safety
   const [bulkProcessing, setBulkProcessing] = useState(false);
+  const [bulkResult, setBulkResult] = useState<BatchMutationResult | null>(null);
+  const [bulkActionLabel, setBulkActionLabel] = useState<string>('');
+  const [chargeBatch, setChargeBatch] = useState<{ state: BatchState; total: number; processed: number; succeeded: number; failed: number; errorMessage?: string }>({
+    state: 'idle', total: 0, processed: 0, succeeded: 0, failed: 0,
+  });
   const [reviewSelected, setReviewSelected] = useState<number[]>([]); // rowIndex-based
 
   // ─── Test Mode state (resets on page reload — intentionally not persisted) ───
@@ -473,6 +482,23 @@ export function Payments() {
 
   return (
     <div>
+      {chargeBatch.state !== 'idle' && (
+        <div style={{ position: 'sticky', top: 0, zIndex: 10, marginBottom: 12 }}>
+          <BatchProgress
+            state={chargeBatch.state}
+            total={chargeBatch.total}
+            processed={chargeBatch.processed}
+            succeeded={chargeBatch.succeeded}
+            failed={chargeBatch.failed}
+            actionLabel="Charging invoices"
+            errorMessage={chargeBatch.errorMessage}
+          />
+          {chargeBatch.state === 'complete' && (
+            <button onClick={() => setChargeBatch({ state: 'idle', total: 0, processed: 0, succeeded: 0, failed: 0 })} style={{ marginTop: 4, fontSize: 11, border: 'none', background: 'none', cursor: 'pointer', color: theme.colors.textMuted, padding: 0 }}>Dismiss</button>
+          )}
+        </div>
+      )}
+      <BulkResultSummary open={!!bulkResult} actionLabel={bulkActionLabel} result={bulkResult} onClose={() => setBulkResult(null)} />
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 20 }}>
         <div>
           <h1 style={{ fontSize: 22, fontWeight: 700, letterSpacing: '-0.3px' }}>Payments</h1>
@@ -721,47 +747,83 @@ export function Payments() {
                   <div style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
                     <WriteButton label={bulkProcessing ? 'Processing...' : `Void ${selectedInvoices.size}`} variant="secondary" size="sm" disabled={bulkProcessing}
                       onClick={async () => {
-                        const eligible = filtered.filter(inv => selectedInvoices.has(inv.rowIndex) && (inv.status || '').toUpperCase() !== 'PAID' && (inv.status || '').toUpperCase() !== 'VOIDED');
+                        const allSelected = filtered.filter(inv => selectedInvoices.has(inv.rowIndex));
+                        const eligible: typeof allSelected = [];
+                        const preflightSkipped: Array<{ id: string; reason: string }> = [];
+                        for (const inv of allSelected) {
+                          const st = (inv.status || '').toUpperCase();
+                          if (st === 'PAID') preflightSkipped.push({ id: inv.qbInvoice, reason: 'Cannot void PAID — refund in Stax first' });
+                          else if (st === 'VOIDED') preflightSkipped.push({ id: inv.qbInvoice, reason: 'Already voided' });
+                          else eligible.push(inv);
+                        }
                         if (!eligible.length) { setError('No eligible invoices to void (PAID/VOIDED are excluded)'); return; }
                         if (!confirm(`Void ${eligible.length} invoice(s)?\n\nThis marks them as VOIDED. They stay in the sheet for audit.`)) return;
-                        setBulkProcessing(true); let ok = 0, fail = 0;
-                        for (const inv of eligible) {
-                          const res = await postVoidStaxInvoice({ qbInvoiceNo: inv.qbInvoice, rowIndex: inv.rowIndex });
-                          if (res.ok && res.data?.success) ok++; else fail++;
-                        }
+                        setBulkProcessing(true);
+                        const resp = await postBatchVoidStaxInvoices({ qbInvoiceNos: eligible.map(e => e.qbInvoice) });
+                        const serverResult: BatchMutationResult = resp.ok && resp.data ? resp.data : {
+                          success: false, processed: eligible.length, succeeded: 0, failed: eligible.length,
+                          skipped: [], errors: eligible.map(e => ({ id: e.qbInvoice, reason: resp.error || 'Request failed' })),
+                          message: resp.error || 'Batch void failed',
+                        };
                         setBulkProcessing(false); setSelectedInvoices(new Set());
-                        setChargeResult(`Voided ${ok} invoice(s)${fail ? `, ${fail} failed` : ''}`);
+                        setBulkActionLabel('Void Invoices');
+                        setBulkResult(mergePreflightSkips(serverResult, preflightSkipped));
                         setNextFetchNoCache(); loadData();
                       }}
                     />
                     <WriteButton label={bulkProcessing ? 'Processing...' : `Delete ${selectedInvoices.size}`} variant="secondary" size="sm" disabled={bulkProcessing}
                       style={{ borderColor: '#DC2626', color: '#DC2626' }}
                       onClick={async () => {
-                        const eligible = filtered.filter(inv => selectedInvoices.has(inv.rowIndex) && (inv.status || '').toUpperCase() === 'PENDING');
+                        const allSelected = filtered.filter(inv => selectedInvoices.has(inv.rowIndex));
+                        const eligible: typeof allSelected = [];
+                        const preflightSkipped: Array<{ id: string; reason: string }> = [];
+                        for (const inv of allSelected) {
+                          if ((inv.status || '').toUpperCase() === 'PENDING') eligible.push(inv);
+                          else preflightSkipped.push({ id: inv.qbInvoice, reason: `Only PENDING can be deleted (current: ${inv.status || 'unknown'})` });
+                        }
                         if (!eligible.length) { setError('Only Imported invoices can be deleted. Use Void for Ready to Charge invoices.'); return; }
                         if (!confirm(`Delete ${eligible.length} PENDING invoice(s)?\n\nThis marks them as DELETED. They stay in the sheet for audit.`)) return;
-                        setBulkProcessing(true); let ok = 0, fail = 0;
-                        for (const inv of eligible) {
-                          const res = await postDeleteStaxInvoice({ qbInvoiceNo: inv.qbInvoice, rowIndex: inv.rowIndex });
-                          if (res.ok && res.data?.success) ok++; else fail++;
-                        }
+                        setBulkProcessing(true);
+                        const resp = await postBatchDeleteStaxInvoices({ qbInvoiceNos: eligible.map(e => e.qbInvoice) });
+                        const serverResult: BatchMutationResult = resp.ok && resp.data ? resp.data : {
+                          success: false, processed: eligible.length, succeeded: 0, failed: eligible.length,
+                          skipped: [], errors: eligible.map(e => ({ id: e.qbInvoice, reason: resp.error || 'Request failed' })),
+                          message: resp.error || 'Batch delete failed',
+                        };
                         setBulkProcessing(false); setSelectedInvoices(new Set());
-                        setChargeResult(`Deleted ${ok} invoice(s)${fail ? `, ${fail} failed` : ''}`);
+                        setBulkActionLabel('Delete Invoices');
+                        setBulkResult(mergePreflightSkips(serverResult, preflightSkipped));
                         setNextFetchNoCache(); loadData();
                       }}
                     />
                     <WriteButton label={bulkProcessing ? 'Charging...' : `Charge ${selectedInvoices.size}`} variant="primary" size="sm" disabled={bulkProcessing}
                       onClick={async () => {
-                        const eligible = filtered.filter(inv => selectedInvoices.has(inv.rowIndex) && (inv.status || '').toUpperCase() === 'CREATED' && inv.staxId);
-                        if (!eligible.length) { setError('No eligible invoices to charge. Only "Ready to Charge" invoices with a Stax ID can be charged.'); return; }
-                        if (!confirm(`Charge ${eligible.length} invoice(s) now via Stax?\n\nThis will charge each customer's payment method on file.`)) return;
-                        setBulkProcessing(true); let ok = 0, fail = 0;
-                        for (const inv of eligible) {
-                          const res = await postChargeSingleInvoice({ qbInvoiceNo: inv.qbInvoice });
-                          if (res.ok && res.data?.success) ok++; else fail++;
+                        const allSelected = filtered.filter(inv => selectedInvoices.has(inv.rowIndex));
+                        const eligible: typeof allSelected = [];
+                        const preflightSkipped: Array<{ id: string; reason: string }> = [];
+                        for (const inv of allSelected) {
+                          const st = (inv.status || '').toUpperCase();
+                          if (st !== 'CREATED') preflightSkipped.push({ id: inv.qbInvoice, reason: `Only CREATED invoices can be charged (current: ${inv.status || 'unknown'})` });
+                          else if (!inv.staxId) preflightSkipped.push({ id: inv.qbInvoice, reason: 'Missing Stax ID' });
+                          else eligible.push(inv);
                         }
+                        if (!eligible.length) { setError('No eligible invoices to charge. Only "Ready to Charge" invoices with a Stax ID can be charged.'); return; }
+                        if (!confirm(`⚠ Charge ${eligible.length} invoice(s) now via Stax?\n\nThis will charge each customer's payment method on file (~3-8s each).\n\nKEEP THIS PAGE OPEN until the batch finishes. Closing the tab partway will leave some invoices charged and others not.`)) return;
+                        setBulkProcessing(true);
+                        setChargeBatch({ state: 'processing', total: eligible.length, processed: 0, succeeded: 0, failed: 0 });
+                        const result = await runBatchLoop<typeof eligible[0], { success?: boolean }>({
+                          items: eligible.map(e => ({ id: e.qbInvoice, item: e })),
+                          call: async (inv) => {
+                            const r = await postChargeSingleInvoice({ qbInvoiceNo: inv.qbInvoice });
+                            return { ok: !!(r.ok && r.data?.success), data: r.data ?? undefined, error: r.error || (r.data as any)?.error };
+                          },
+                          onProgress: (done, total) => setChargeBatch(prev => ({ ...prev, processed: done, succeeded: Math.max(0, done - prev.failed), total })),
+                          preflightSkipped,
+                        });
+                        setChargeBatch({ state: 'complete', total: eligible.length, processed: eligible.length, succeeded: result.succeeded, failed: result.failed });
                         setBulkProcessing(false); setSelectedInvoices(new Set());
-                        setChargeResult(`Charged ${ok} invoice(s)${fail ? `, ${fail} failed` : ''}`);
+                        setBulkActionLabel('Charge Invoices');
+                        setBulkResult(result);
                         setNextFetchNoCache(); loadData();
                       }}
                     />
@@ -916,14 +978,17 @@ export function Payments() {
                   style={{ borderColor: '#DC2626', color: '#DC2626' }}
                   onClick={async () => {
                     if (!confirm(`Void ${reviewSelected.length} selected PENDING invoice(s)?\n\nThis removes them from the active workflow. They stay in the sheet for audit.`)) return;
-                    setBulkProcessing(true); let ok = 0, fail = 0;
-                    for (const ri of reviewSelected) {
-                      const inv = pending.find(p => p.rowIndex === ri);
-                      const res = await postDeleteStaxInvoice({ qbInvoiceNo: inv?.qbInvoice || '', rowIndex: ri });
-                      if (res.ok && res.data?.success) ok++; else fail++;
-                    }
+                    const qbNos = reviewSelected.map(ri => pending.find(p => p.rowIndex === ri)?.qbInvoice || '').filter(Boolean);
+                    setBulkProcessing(true);
+                    const resp = await postBatchDeleteStaxInvoices({ qbInvoiceNos: qbNos });
+                    const serverResult: BatchMutationResult = resp.ok && resp.data ? resp.data : {
+                      success: false, processed: qbNos.length, succeeded: 0, failed: qbNos.length,
+                      skipped: [], errors: qbNos.map(q => ({ id: q, reason: resp.error || 'Request failed' })),
+                      message: resp.error || 'Batch delete failed',
+                    };
                     setBulkProcessing(false); setReviewSelected([]);
-                    setChargeResult(`Deleted ${ok} invoice(s)${fail ? `, ${fail} failed` : ''}`);
+                    setBulkActionLabel('Delete PENDING Invoices');
+                    setBulkResult(serverResult);
                     setNextFetchNoCache(); loadData();
                   }} />
                 <WriteButton label={creatingInvoices ? 'Pushing...' : `Push to Stax (${reviewSelected.length})`} variant="primary" size="sm" disabled={creatingInvoices || !reviewSelected.length}

@@ -46,7 +46,7 @@ import type { InventoryItem, InventoryStatus } from '../lib/types';
 import { WriteButton } from '../components/shared/WriteButton';
 import { BatchGuard, checkBatchClientGuard } from '../components/shared/BatchGuard';
 import { useNavigate, useLocation } from 'react-router-dom';
-import { isApiConfigured, postRequestRepairQuote } from '../lib/api';
+import { isApiConfigured, postBatchRequestRepairQuote, type BatchMutationResult } from '../lib/api';
 import { supabase } from '../lib/supabase';
 import { useInventory } from '../hooks/useInventory';
 import { useClients } from '../hooks/useClients';
@@ -62,6 +62,8 @@ import { useAuth } from '../contexts/AuthContext';
 import { useBatchData } from '../contexts/BatchDataContext';
 import { MultiSelectFilter } from '../components/shared/MultiSelectFilter';
 import { SyncBanner } from '../components/shared/SyncBanner';
+import { BulkResultSummary } from '../components/shared/BulkResultSummary';
+import { mergePreflightSkips } from '../lib/batchLoop';
 import type { LinkedRecord } from '../components/shared/ItemDetailPanel';
 import { useIsMobile } from '../hooks/useIsMobile';
 import { FloatingActionMenu, type FABAction } from '../components/shared/FloatingActionMenu';
@@ -849,19 +851,28 @@ export function Inventory() {
     setTimeout(() => setToast(null), 2500);
   }, []);
 
-  const handleRequestRepairQuote = useCallback(async (itemId?: string, sourceTaskId?: string) => {
-    const item = itemId ? inventoryItems.find(i => i.itemId === itemId) : selectedItem;
-    if (!item) return;
-    const csId = item.clientId || '';
+  // v38.58.0 — Bulk Request Repair Quote uses server-side batch endpoint (safe against tab close)
+  const [repairQuoteBulkResult, setRepairQuoteBulkResult] = useState<BatchMutationResult | null>(null);
+  const handleBulkRequestRepairQuote = useCallback(async (items: Array<{ itemId: string; clientId?: string }>) => {
+    if (!items.length) return;
+    const csId = items[0].clientId || '';
     if (!apiConfigured || !csId) { showToast('API not configured'); return; }
-    const resp = await postRequestRepairQuote({ itemId: item.itemId, sourceTaskId }, csId);
-    if (resp.ok && resp.data?.success) {
-      showToast(`Repair ${resp.data.repairId} created — Pending Quote`);
-      refetch();
-    } else {
-      showToast(resp.error || resp.data?.error || 'Failed to create repair');
+    const preflightSkipped: Array<{ id: string; reason: string }> = [];
+    const eligible: typeof items = [];
+    for (const it of items) {
+      if (!it.itemId) preflightSkipped.push({ id: 'blank', reason: 'Missing itemId' });
+      else eligible.push(it);
     }
-  }, [selectedItem, inventoryItems, apiConfigured, showToast, refetch]);
+    if (!eligible.length) { setRepairQuoteBulkResult({ success: true, processed: preflightSkipped.length, succeeded: 0, failed: 0, skipped: preflightSkipped, errors: [], message: 'All items skipped' }); return; }
+    const resp = await postBatchRequestRepairQuote({ itemIds: eligible.map(i => i.itemId) }, csId);
+    const serverResult: BatchMutationResult = resp.ok && resp.data ? resp.data : {
+      success: false, processed: eligible.length, succeeded: 0, failed: eligible.length,
+      skipped: [], errors: eligible.map(i => ({ id: i.itemId, reason: resp.error || 'Request failed' })),
+      message: resp.error || 'Batch request failed',
+    };
+    setRepairQuoteBulkResult(mergePreflightSkips(serverResult, preflightSkipped));
+    refetch();
+  }, [apiConfigured, showToast, refetch]);
 
   // Column definitions
   const columns = useMemo(() => [
@@ -1826,7 +1837,7 @@ export function Inventory() {
           {(user?.role === 'staff' || user?.role === 'admin' || user?.isParent) && (
             <WriteButton label="Transfer" variant="ghost" size="sm" onClick={async () => { const guard = checkBatchClientGuard(selectedRows.map(r => r.original)); if (guard) { setBatchGuardClients(guard); setBatchGuardAction('Transfer'); return; } setShowTransferModal(true); }} />
           )}
-          <WriteButton label="Request Repair Quote" variant="ghost" size="sm" onClick={async () => { const items = selectedRows.map(r => r.original); const guard = checkBatchClientGuard(items); if (guard) { setBatchGuardClients(guard); setBatchGuardAction('Request Repair Quote'); return; } for (const item of items) { await handleRequestRepairQuote(item.itemId); } setRowSelection({}); }} />
+          <WriteButton label="Request Repair Quote" variant="ghost" size="sm" onClick={async () => { const items = selectedRows.map(r => r.original); const guard = checkBatchClientGuard(items); if (guard) { setBatchGuardClients(guard); setBatchGuardAction('Request Repair Quote'); return; } await handleBulkRequestRepairQuote(items.map(i => ({ itemId: i.itemId, clientId: i.clientId }))); setRowSelection({}); }} />
           {(user?.role === 'staff' || user?.role === 'admin') && (
             <WriteButton label="Release Items" variant="ghost" size="sm" onClick={async () => { const items = selectedRows.map(r => r.original); const activeItems = items.filter(i => i.status === 'Active'); if (!activeItems.length) { showToast('No active items selected — only Active items can be released'); return; } const guard = checkBatchClientGuard(activeItems); if (guard) { setBatchGuardClients(guard); setBatchGuardAction('Release Items'); return; } setShowReleaseModal(true); }} />
           )}
@@ -1879,6 +1890,7 @@ export function Inventory() {
 
       {/* ── Batch Guard ── */}
       {batchGuardClients && <BatchGuard selectedClients={batchGuardClients} actionName={batchGuardAction} onDismiss={() => setBatchGuardClients(null)} />}
+      <BulkResultSummary open={!!repairQuoteBulkResult} actionLabel="Request Repair Quotes" result={repairQuoteBulkResult} onClose={() => setRepairQuoteBulkResult(null)} />
 
       {/* ── Toast ── */}
       {toast && <ToastBar message={toast} />}
@@ -1987,10 +1999,11 @@ export function Inventory() {
         actions={[
           { label: 'Create Task', icon: <ClipboardList size={16} />, onClick: () => setShowCreateTaskModal(true) },
           { label: 'Create Will Call', icon: <Package size={16} />, onClick: () => setShowWCModal(true) },
-          { label: 'Request Repair', icon: <Wrench size={16} />, onClick: () => {
+          { label: 'Request Repair', icon: <Wrench size={16} />, onClick: async () => {
             const sel = table.getSelectedRowModel().rows;
-            if (sel.length > 0) { for (const r of sel) { handleRequestRepairQuote(r.original.itemId); } }
-            else { showToast('Select items first'); }
+            if (sel.length === 0) { showToast('Select items first'); return; }
+            const items = sel.map(r => r.original);
+            await handleBulkRequestRepairQuote(items.map(i => ({ itemId: i.itemId, clientId: i.clientId })));
           }},
           { label: 'Transfer', icon: <Truck size={16} />, onClick: () => setShowTransferModal(true) },
         ] satisfies FABAction[]}

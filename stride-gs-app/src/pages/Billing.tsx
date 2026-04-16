@@ -18,6 +18,9 @@ import { fmtDate } from '../lib/constants';
 import { WriteButton } from '../components/shared/WriteButton';
 import { MultiSelectFilter } from '../components/shared/MultiSelectFilter';
 import { SyncBanner } from '../components/shared/SyncBanner';
+import { BatchProgress, type BatchState } from '../components/shared/BatchProgress';
+import { BulkResultSummary } from '../components/shared/BulkResultSummary';
+import { runBatchLoop } from '../lib/batchLoop';
 import {
   isApiConfigured,
   postGenerateStorageCharges, type GenerateStorageChargesResponse,
@@ -31,7 +34,7 @@ import {
   postUpdateBillingRow,
   postUpdateQboStatus,
 } from '../lib/api';
-import type { BillingFilterParams, BillingResponse } from '../lib/api';
+import type { BillingFilterParams, BillingResponse, BatchMutationResult } from '../lib/api';
 import {
   fetchBillingFromSupabaseFiltered,
   fetchBillingSidemarksFromSupabase,
@@ -613,6 +616,10 @@ export function Billing() {
   const [invOptStax, setInvOptStax] = useState(false);
   const [invOptQb, setInvOptQb] = useState(false);
   const [invoiceLoading, setInvoiceLoading] = useState(false);
+  const [invoiceBatch, setInvoiceBatch] = useState<{ state: BatchState; total: number; processed: number; succeeded: number; failed: number }>({
+    state: 'idle', total: 0, processed: 0, succeeded: 0, failed: 0,
+  });
+  const [invoiceBulkResult, setInvoiceBulkResult] = useState<BatchMutationResult | null>(null);
   const [invoiceResults, setInvoiceResults] = useState<Array<CreateInvoiceResponse & { client: string }> | null>(null);
   const [invoiceError, setInvoiceError] = useState('');
 
@@ -1082,27 +1089,56 @@ export function Billing() {
       });
     }
 
-    const results: Array<CreateInvoiceResponse & { client: string }> = [];
-    for (const g of Object.values(groups)) {
+    // Separate groups missing source sheet IDs into preflight skips
+    const groupList = Object.values(groups);
+    const preflightSkipped: Array<{ id: string; reason: string }> = [];
+    const invokable: typeof groupList = [];
+    for (const g of groupList) {
       if (!g.sourceSheetId) {
-        results.push({ success: false, client: g.client, error: 'Missing client sheet ID — load live data first' });
-        continue;
-      }
-      try {
-        const res = await postCreateInvoice({
-          idempotencyKey: crypto.randomUUID(),
-          rows: g.rows,
-          client: g.client,
-          sidemark: g.sidemark || undefined,
-          sourceSheetId: g.sourceSheetId,
-          skipEmail: !invOptEmail,
-        } as any);
-        if (res.data) results.push({ ...res.data, client: g.client });
-        else results.push({ success: false, client: g.client, error: res.error || 'Unknown error' });
-      } catch (err: unknown) {
-        results.push({ success: false, client: g.client, error: String(err) });
+        preflightSkipped.push({ id: g.client + (g.sidemark ? ` · ${g.sidemark}` : ''), reason: 'Missing client sheet ID — load live data first' });
+      } else {
+        invokable.push(g);
       }
     }
+
+    // Client-side loop: each invoice generates a Drive PDF + email (~15-30s per group).
+    // Server-side batch would exceed the 6-min Apps Script wall on 12+ clients.
+    const results: Array<CreateInvoiceResponse & { client: string }> = [];
+    for (const s of preflightSkipped) {
+      results.push({ success: false, client: s.id, error: s.reason });
+    }
+    setInvoiceBatch({ state: 'processing', total: invokable.length, processed: 0, succeeded: 0, failed: 0 });
+    const batchResult = await runBatchLoop<typeof invokable[0], CreateInvoiceResponse>({
+      items: invokable.map(g => ({ id: g.client + (g.sidemark ? ` · ${g.sidemark}` : ''), item: g })),
+      call: async (g) => {
+        try {
+          const res = await postCreateInvoice({
+            idempotencyKey: crypto.randomUUID(),
+            rows: g.rows,
+            client: g.client,
+            sidemark: g.sidemark || undefined,
+            sourceSheetId: g.sourceSheetId,
+            skipEmail: !invOptEmail,
+          } as any);
+          if (res.data) {
+            results.push({ ...res.data, client: g.client });
+            if (!res.data.success) return { ok: false, error: res.data.error || 'Server returned success=false' };
+            return { ok: true, data: res.data };
+          }
+          const err = res.error || 'Unknown error';
+          results.push({ success: false, client: g.client, error: err });
+          return { ok: false, error: err };
+        } catch (err: unknown) {
+          const msg = String(err);
+          results.push({ success: false, client: g.client, error: msg });
+          return { ok: false, error: msg };
+        }
+      },
+      onProgress: (done, total) => setInvoiceBatch(prev => ({ ...prev, processed: done, total })),
+      preflightSkipped,
+    });
+    setInvoiceBatch({ state: 'complete', total: invokable.length, processed: invokable.length, succeeded: batchResult.succeeded, failed: batchResult.failed });
+    setInvoiceBulkResult(batchResult);
 
     setInvoiceResults(results);
     setInvoiceLoading(false);
@@ -1390,6 +1426,22 @@ export function Billing() {
 
   return (
     <div>
+      {invoiceBatch.state !== 'idle' && (
+        <div style={{ position: 'sticky', top: 0, zIndex: 10, marginBottom: 12 }}>
+          <BatchProgress
+            state={invoiceBatch.state}
+            total={invoiceBatch.total}
+            processed={invoiceBatch.processed}
+            succeeded={invoiceBatch.succeeded}
+            failed={invoiceBatch.failed}
+            actionLabel="Creating invoices"
+          />
+          {invoiceBatch.state === 'complete' && (
+            <button onClick={() => setInvoiceBatch({ state: 'idle', total: 0, processed: 0, succeeded: 0, failed: 0 })} style={{ marginTop: 4, fontSize: 11, border: 'none', background: 'none', cursor: 'pointer', color: theme.colors.textMuted, padding: 0 }}>Dismiss</button>
+          )}
+        </div>
+      )}
+      <BulkResultSummary open={!!invoiceBulkResult} actionLabel="Create Invoices" result={invoiceBulkResult} onClose={() => setInvoiceBulkResult(null)} />
       <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
         <div>
           <h1 style={{ fontSize: 22, fontWeight: 700, letterSpacing: '-0.3px' }}>Billing</h1>

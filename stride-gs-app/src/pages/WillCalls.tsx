@@ -21,7 +21,7 @@ import { ConfirmDialog } from '../components/shared/ConfirmDialog';
 import { BulkResultSummary } from '../components/shared/BulkResultSummary';
 import { BulkScheduleModal } from '../components/shared/BulkScheduleModal';
 import { BatchProgress } from '../components/shared/BatchProgress';
-import { isApiConfigured, postBatchCancelWillCalls, postUpdateWillCall, postProcessWcRelease, fetchWillCalls, type BatchMutationResult } from '../lib/api';
+import { isApiConfigured, postBatchCancelWillCalls, postBatchScheduleWillCalls, postProcessWcRelease, fetchWillCalls, type BatchMutationResult } from '../lib/api';
 import { runBatchLoop, mergePreflightSkips } from '../lib/batchLoop';
 import { useWillCalls } from '../hooks/useWillCalls';
 import { useBatchData } from '../contexts/BatchDataContext';
@@ -297,24 +297,23 @@ export function WillCalls() {
     if (!apiConfigured || !clientSheetId) return;
 
     setBulkProcessing(true);
-    setBulkProgress({ done: 0, total: eligible.length, label: 'Scheduling' });
     try {
-      const loopResult = await runBatchLoop<WC, unknown>({
-        items: eligible.map(w => ({ id: w.wcNumber, item: w })),
-        call: async (w) => {
-          const resp = await postUpdateWillCall({ wcNumber: w.wcNumber, estimatedPickupDate: isoDate }, clientSheetId);
-          return { ok: !!(resp.ok && resp.data?.success), data: resp.data, error: resp.error || resp.data?.error };
-        },
-        onProgress: (done, total) => setBulkProgress({ done, total, label: 'Scheduling' }),
-        preflightSkipped,
-      });
-      setBulkResult(loopResult);
+      // v38.58.0 — single server-side batch call. Safe against tab close.
+      const resp = await postBatchScheduleWillCalls(
+        { wcNumbers: eligible.map(w => w.wcNumber), estimatedPickupDate: isoDate },
+        clientSheetId
+      );
+      const serverResult: BatchMutationResult = (resp.ok && resp.data) ? resp.data : {
+        success: false, processed: eligible.length, succeeded: 0, failed: eligible.length,
+        skipped: [], errors: eligible.map(w => ({ id: w.wcNumber, reason: resp.error || 'Request failed' })),
+        message: resp.error || 'Batch schedule failed',
+      };
+      setBulkResult(mergePreflightSkips(serverResult, preflightSkipped));
       setBulkResultLabel('Schedule Will Calls');
       setRowSel({});
       refetchWCs();
     } finally {
       setBulkProcessing(false);
-      setBulkProgress(null);
       setScheduleModalOpen(false);
     }
   };
