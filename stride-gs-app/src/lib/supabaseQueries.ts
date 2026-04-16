@@ -93,6 +93,39 @@ export function skipSupabaseCacheOnce(): void {
   _skipNextSupabase = true;
 }
 
+// ─── Pagination helper ──────────────────────────────────────────────────────
+//
+// Supabase projects enforce a server-side `max_rows` cap (default: 1000) that
+// silently clamps `.range()` requests from clients. A call like
+// `query.range(0, 49999)` looks like it'll return up to 50k rows, but the
+// response is capped at 1000. Symptom users see: "Select All clients only
+// shows clients N-S" — the first 1000 rows (sorted by Postgres' default
+// tenant_id hash order) happen to cover only a subset of tenants, so entire
+// clients appear to be missing from the multi-tenant dataset.
+//
+// `paginateAll` works around this by issuing sequential `.range()` calls in
+// 1000-row chunks until the server returns fewer than `PAGE_SIZE` rows.
+// The `buildQuery` callback must rebuild the filtered query from scratch on
+// each call — Supabase builders are stateful, so the query can't be reused.
+const PAGE_SIZE = 1000;
+const MAX_PAGES = 60; // Safety cap: 60k rows total. Raise if a table ever exceeds.
+
+async function paginateAll<T>(
+  buildQuery: () => { range: (from: number, to: number) => Promise<{ data: T[] | null; error: unknown }> }
+): Promise<T[] | null> {
+  const all: T[] = [];
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const from = page * PAGE_SIZE;
+    const to = from + PAGE_SIZE - 1;
+    const { data, error } = await buildQuery().range(from, to);
+    if (error) return null;
+    if (!data || data.length === 0) break;
+    for (let i = 0; i < data.length; i++) all.push(data[i]);
+    if (data.length < PAGE_SIZE) break;
+  }
+  return all;
+}
+
 // ─── Inventory ───────────────────────────────────────────────────────────────
 
 interface SupabaseInventoryRow {
@@ -122,21 +155,26 @@ export async function fetchInventoryFromSupabase(
   clientSheetId?: string | string[]
 ): Promise<InventoryResponse | null> {
   try {
-    let query = supabase.from('inventory').select('*');
-    if (clientSheetId) {
-      if (Array.isArray(clientSheetId)) {
-        if (clientSheetId.length > 0) query = query.in('tenant_id', clientSheetId);
-      } else {
-        query = query.eq('tenant_id', clientSheetId);
+    // v38.65.0 — paginate instead of a single `.range(0, 49999)`. The previous
+    // approach hit the Supabase project `max_rows` cap (1000) which silently
+    // truncated the result, causing "Select All → only N-S clients showing"
+    // because the first 1000 rows (by tenant_id hash order) covered only a
+    // subset of tenants. Inventory currently has ~4.8k rows across 47 tenants;
+    // pagination iterates in 1000-row chunks until the server returns <1000.
+    const data = await paginateAll<SupabaseInventoryRow>(() => {
+      let query = supabase.from('inventory').select('*');
+      if (clientSheetId) {
+        if (Array.isArray(clientSheetId)) {
+          if (clientSheetId.length > 0) query = query.in('tenant_id', clientSheetId);
+        } else {
+          query = query.eq('tenant_id', clientSheetId);
+        }
       }
-    }
-    // Override PostgREST's 1000-row default cap (would silently truncate
-    // multi-client queries across all ~51 tenants → "only S–N showing" bug).
-    query = query.range(0, 49999);
-    const { data, error } = await query;
-    if (error || !data) return null;
+      return query as unknown as { range: (from: number, to: number) => Promise<{ data: SupabaseInventoryRow[] | null; error: unknown }> };
+    });
+    if (!data) return null;
 
-    const items: ApiInventoryItem[] = (data as SupabaseInventoryRow[]).map(row => ({
+    const items: ApiInventoryItem[] = data.map(row => ({
       itemId: row.item_id,
       clientName: clientNameMap[row.tenant_id] || '',
       clientSheetId: row.tenant_id,
