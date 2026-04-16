@@ -18,6 +18,7 @@ import type { SummaryTask, SummaryRepair, SummaryWillCall } from '../hooks/useDa
 import { useTablePreferences } from '../hooks/useTablePreferences';
 import { fmtDate } from '../lib/constants';
 import { useIsMobile } from '../hooks/useIsMobile';
+import { useAuth } from '../contexts/AuthContext';
 import { FolderButton } from '../components/shared/FolderButton';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -542,8 +543,22 @@ export function Dashboard() {
     window.open(`#/will-calls/${wc.wcNumber}`, '_blank');
   }, []);
 
-  // ── Task type filter (dropdown on tab button) ────────────────────────────────
-  const [taskTypeFilters, setTaskTypeFilters] = useState<string[]>([]);
+  // ── Task type filter (dropdown on tab button, persisted per user) ─────────────
+  const { user } = useAuth();
+  const typeFilterKey = user?.email ? `stride_dashboard_typeFilter_${user.email}` : 'stride_dashboard_typeFilter';
+  const [taskTypeFilters, setTaskTypeFiltersRaw] = useState<string[]>(() => {
+    try {
+      const raw = localStorage.getItem(typeFilterKey);
+      return raw ? JSON.parse(raw) : [];
+    } catch { return []; }
+  });
+  const setTaskTypeFilters = useCallback((updater: string[] | ((prev: string[]) => string[])) => {
+    setTaskTypeFiltersRaw(prev => {
+      const next = typeof updater === 'function' ? updater(prev) : updater;
+      try { localStorage.setItem(typeFilterKey, JSON.stringify(next)); } catch { /* quota */ }
+      return next;
+    });
+  }, [typeFilterKey]);
   const [showTypeDropdown, setShowTypeDropdown] = useState(false);
   const typeDropdownRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
