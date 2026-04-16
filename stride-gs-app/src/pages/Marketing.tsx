@@ -1151,9 +1151,16 @@ function ContactsTab({ onSelectContact, showCreate, onShowCreate, showImport, on
     return p;
   }, [statusFilter, search, page]);
 
-  const { data: raw, loading, error, refetch } = useApiData(
-    (signal) => fetchMarketingContacts(signal, fetchParams), true, `mktg-contacts-${JSON.stringify(fetchParams)}`,
+  // FIX: wrap in useCallback. Without this, every render created a new fetchFn
+  // → useApiData's doFetch dep changed → useEffect refired → loop of 13k+ canceled
+  // fetches. Cache key is also derived from the memo output so it only changes
+  // when real filters change.
+  const cacheKey = useMemo(() => `mktg-contacts-${JSON.stringify(fetchParams)}`, [fetchParams]);
+  const contactsFetchFn = useCallback(
+    (signal?: AbortSignal) => fetchMarketingContacts(signal, fetchParams),
+    [fetchParams]
   );
+  const { data: raw, loading, error, refetch } = useApiData(contactsFetchFn, true, cacheKey);
 
   const result = useMemo(() => {
     if (!raw) return null;
@@ -1161,7 +1168,8 @@ function ContactsTab({ onSelectContact, showCreate, onShowCreate, showImport, on
     return d as { contacts: MarketingContact[]; total: number; page: number; pageSize: number };
   }, [raw]);
 
-  useEffect(() => { refetch(); }, [fetchParams]);
+  // Note: redundant manual refetch() effect removed. useApiData already refetches
+  // automatically when fetchFn or cacheKey change (both are derived from fetchParams).
 
   const contacts = result?.contacts ?? [];
   const total = result?.total ?? 0;
