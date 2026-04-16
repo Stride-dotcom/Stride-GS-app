@@ -22,6 +22,7 @@ import { BulkResultSummary } from '../components/shared/BulkResultSummary';
 import { BulkScheduleModal } from '../components/shared/BulkScheduleModal';
 import { BatchProgress } from '../components/shared/BatchProgress';
 import { isApiConfigured, postBatchCancelWillCalls, postBatchScheduleWillCalls, postProcessWcRelease, fetchWillCalls, type BatchMutationResult } from '../lib/api';
+import { applyBulkPatch, revertBulkPatchForFailures } from '../lib/optimisticBulk';
 import { runBatchLoop, mergePreflightSkips } from '../lib/batchLoop';
 import { useWillCalls } from '../hooks/useWillCalls';
 import { useBatchData } from '../contexts/BatchDataContext';
@@ -251,18 +252,26 @@ export function WillCalls() {
     const clientSheetId = eligible[0].clientSheetId || eligible[0].clientId || '';
     if (!apiConfigured || !clientSheetId) return;
 
+    // Optimistic: flip eligible WCs to Cancelled immediately
+    const eligibleIds = eligible.map(w => w.wcNumber);
+    applyBulkPatch(eligibleIds, applyWcPatch, { status: 'Cancelled' } as any);
+
     setBulkProcessing(true);
     try {
-      const resp = await postBatchCancelWillCalls({ wcNumbers: eligible.map(w => w.wcNumber) }, clientSheetId);
+      const resp = await postBatchCancelWillCalls({ wcNumbers: eligibleIds }, clientSheetId);
       const serverResult: BatchMutationResult = (resp.ok && resp.data) ? resp.data : {
         success: false, processed: eligible.length, succeeded: 0, failed: eligible.length,
         skipped: [], errors: eligible.map(w => ({ id: w.wcNumber, reason: resp.error || 'Request failed' })),
         message: resp.error || 'Batch cancel failed',
       };
+      revertBulkPatchForFailures(serverResult.errors, clearWcPatch);
       setBulkResult(mergePreflightSkips(serverResult, preflightSkipped));
       setBulkResultLabel('Cancel Will Calls');
       setRowSel({});
       refetchWCs();
+    } catch (err) {
+      for (const id of eligibleIds) clearWcPatch(id);
+      throw err;
     } finally {
       setBulkProcessing(false);
       setConfirmCancelOpen(false);
@@ -296,11 +305,15 @@ export function WillCalls() {
     const clientSheetId = eligible[0].clientSheetId || eligible[0].clientId || '';
     if (!apiConfigured || !clientSheetId) return;
 
+    // Optimistic: flip eligible WCs to Scheduled + pickup date immediately
+    const eligibleIds = eligible.map(w => w.wcNumber);
+    applyBulkPatch(eligibleIds, applyWcPatch, { status: 'Scheduled', estimatedPickupDate: isoDate } as any);
+
     setBulkProcessing(true);
     try {
       // v38.58.0 — single server-side batch call. Safe against tab close.
       const resp = await postBatchScheduleWillCalls(
-        { wcNumbers: eligible.map(w => w.wcNumber), estimatedPickupDate: isoDate },
+        { wcNumbers: eligibleIds, estimatedPickupDate: isoDate },
         clientSheetId
       );
       const serverResult: BatchMutationResult = (resp.ok && resp.data) ? resp.data : {
@@ -308,10 +321,14 @@ export function WillCalls() {
         skipped: [], errors: eligible.map(w => ({ id: w.wcNumber, reason: resp.error || 'Request failed' })),
         message: resp.error || 'Batch schedule failed',
       };
+      revertBulkPatchForFailures(serverResult.errors, clearWcPatch);
       setBulkResult(mergePreflightSkips(serverResult, preflightSkipped));
       setBulkResultLabel('Schedule Will Calls');
       setRowSel({});
       refetchWCs();
+    } catch (err) {
+      for (const id of eligibleIds) clearWcPatch(id);
+      throw err;
     } finally {
       setBulkProcessing(false);
       setScheduleModalOpen(false);
@@ -385,6 +402,11 @@ export function WillCalls() {
         return;
       }
 
+      // Optimistic: flip eligible WCs to Released immediately.
+      // If partial (some items previously released), the refetch will reconcile to 'Partial' where appropriate.
+      const eligibleIds = eligible.map(e => e.wc.wcNumber);
+      applyBulkPatch(eligibleIds, applyWcPatch, { status: 'Released' } as any);
+
       setBulkProgress({ done: 0, total: eligible.length, label: 'Releasing' });
       const loopResult = await runBatchLoop<{ wc: WC; pendingItemIds: string[] }, unknown>({
         items: eligible.map(e => ({ id: e.wc.wcNumber, item: e })),
@@ -398,6 +420,7 @@ export function WillCalls() {
         onProgress: (done, total) => setBulkProgress({ done, total, label: 'Releasing' }),
         preflightSkipped,
       });
+      revertBulkPatchForFailures(loopResult.errors, clearWcPatch);
       setBulkResult(loopResult);
       setBulkResultLabel('Release Will Calls');
       setRowSel({});

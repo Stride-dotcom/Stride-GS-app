@@ -578,7 +578,7 @@ export function Inventory() {
 
   const { items: liveItems, loading: inventoryLoading, refetch, applyItemPatch, mergeItemPatch, clearItemPatch } = useInventory(apiConfigured && clientFilter.length > 0, selectedSheetId);
   const { tasks, refetch: refetchTasks, addOptimisticTask, removeOptimisticTask } = useTasks(apiConfigured && clientFilter.length > 0, selectedSheetId);
-  const { repairs } = useRepairs(apiConfigured && clientFilter.length > 0, selectedSheetId);
+  const { repairs, addOptimisticRepair, removeOptimisticRepair } = useRepairs(apiConfigured && clientFilter.length > 0, selectedSheetId);
   const { willCalls, addOptimisticWc, removeOptimisticWc } = useWillCalls(apiConfigured && clientFilter.length > 0, selectedSheetId);
   const { apiShipments } = useShipments(apiConfigured && clientFilter.length > 0, selectedSheetId);
   // Inventory only uses billing rows to show "this item has billing" hints; single tenant only
@@ -864,15 +864,42 @@ export function Inventory() {
       else eligible.push(it);
     }
     if (!eligible.length) { setRepairQuoteBulkResult({ success: true, processed: preflightSkipped.length, succeeded: 0, failed: 0, skipped: preflightSkipped, errors: [], message: 'All items skipped' }); return; }
-    const resp = await postBatchRequestRepairQuote({ itemIds: eligible.map(i => i.itemId) }, csId);
-    const serverResult: BatchMutationResult = resp.ok && resp.data ? resp.data : {
-      success: false, processed: eligible.length, succeeded: 0, failed: eligible.length,
-      skipped: [], errors: eligible.map(i => ({ id: i.itemId, reason: resp.error || 'Request failed' })),
-      message: resp.error || 'Batch request failed',
-    };
-    setRepairQuoteBulkResult(mergePreflightSkips(serverResult, preflightSkipped));
-    refetch();
-  }, [apiConfigured, showToast, refetch]);
+
+    // Optimistic: add a temp Pending Quote repair row per item so Inventory / Repairs views see it immediately.
+    // Temp IDs (REPAIR-TEMP-...) are replaced by real IDs on refetch.
+    const now = Date.now();
+    const tempIds: string[] = [];
+    for (const it of eligible) {
+      const tempId = `REPAIR-TEMP-${it.itemId}-${now}`;
+      tempIds.push(tempId);
+      addOptimisticRepair({
+        repairId: tempId,
+        itemId: it.itemId,
+        clientId: csId,
+        clientSheetId: csId,
+        clientName: '',
+        description: '',
+        status: 'Pending Quote',
+        created: new Date().toISOString(),
+      } as any);
+    }
+
+    try {
+      const resp = await postBatchRequestRepairQuote({ itemIds: eligible.map(i => i.itemId) }, csId);
+      const serverResult: BatchMutationResult = resp.ok && resp.data ? resp.data : {
+        success: false, processed: eligible.length, succeeded: 0, failed: eligible.length,
+        skipped: [], errors: eligible.map(i => ({ id: i.itemId, reason: resp.error || 'Request failed' })),
+        message: resp.error || 'Batch request failed',
+      };
+      // Clear all temps — real repairs come from refetch
+      for (const tid of tempIds) removeOptimisticRepair(tid);
+      setRepairQuoteBulkResult(mergePreflightSkips(serverResult, preflightSkipped));
+      refetch();
+    } catch (err) {
+      for (const tid of tempIds) removeOptimisticRepair(tid);
+      throw err;
+    }
+  }, [apiConfigured, showToast, refetch, addOptimisticRepair, removeOptimisticRepair]);
 
   // Column definitions
   const columns = useMemo(() => [

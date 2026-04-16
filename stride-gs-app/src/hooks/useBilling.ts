@@ -8,7 +8,7 @@
  * Performance: checks BatchDataContext first (client users get all data in 1 call).
  * Falls back to individual API call for staff/admin users or when batch is unavailable.
  */
-import { useCallback, useEffect, useMemo, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { fetchBilling } from '../lib/api';
 import type { ApiBillingRow, BillingResponse, BillingSummary, BillingFilterParams } from '../lib/api';
 import { useApiData } from './useApiData';
@@ -30,6 +30,12 @@ export interface UseBillingResult {
   error: string | null;
   refetch: () => void;
   lastFetched: Date | null;
+  // Session 69 — optimistic hide for Create Invoices flow.
+  // IDs are Ledger Row IDs; hidden rows are filtered out of `rows` until revealed
+  // or cleared by the next refetch.
+  hideUnbilled: (ledgerRowIds: string[]) => void;
+  revealUnbilled: (ledgerRowIds: string[]) => void;
+  clearHiddenUnbilled: () => void;
 }
 
 export function useBilling(autoFetch = true, filterClientSheetId?: string, filters?: BillingFilterParams): UseBillingResult {
@@ -127,7 +133,30 @@ export function useBilling(autoFetch = true, filterClientSheetId?: string, filte
     return data?.rows ?? [];
   }, [hasServerFilters, batchEnabled, batchData, data]);
 
-  const rows = useMemo(() => apiRows, [apiRows]);
+  // Session 69 — optimistic hide state for Create Invoices.
+  const [hiddenIds, setHiddenIds] = useState<Set<string>>(new Set());
+  const hideUnbilled = useCallback((ids: string[]) => {
+    if (!ids || !ids.length) return;
+    setHiddenIds(prev => {
+      const next = new Set(prev);
+      for (const id of ids) if (id) next.add(id);
+      return next;
+    });
+  }, []);
+  const revealUnbilled = useCallback((ids: string[]) => {
+    if (!ids || !ids.length) return;
+    setHiddenIds(prev => {
+      const next = new Set(prev);
+      for (const id of ids) if (id) next.delete(id);
+      return next;
+    });
+  }, []);
+  const clearHiddenUnbilled = useCallback(() => setHiddenIds(new Set()), []);
+
+  const rows = useMemo(() => {
+    if (hiddenIds.size === 0) return apiRows;
+    return apiRows.filter(r => !hiddenIds.has(r.ledgerRowId));
+  }, [apiRows, hiddenIds]);
 
   const summary = useMemo(() => {
     if (!hasServerFilters && batchEnabled && batchData) {
@@ -149,5 +178,8 @@ export function useBilling(autoFetch = true, filterClientSheetId?: string, filte
     error: useBatch ? batchError : individualError,
     refetch: useBatch ? silentRefetchBatch : individualRefetch,
     lastFetched: useBatch ? new Date() : individualLastFetched,
+    hideUnbilled,
+    revealUnbilled,
+    clearHiddenUnbilled,
   };
 }

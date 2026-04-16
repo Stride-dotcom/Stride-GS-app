@@ -30,6 +30,7 @@ import { BulkReassignModal } from '../components/shared/BulkReassignModal';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { isApiConfigured, postRequestRepairQuote, postBatchCancelTasks, postBatchReassignTasks, type BatchMutationResult } from '../lib/api';
 import { mergePreflightSkips } from '../lib/batchLoop';
+import { applyBulkPatch, revertBulkPatchForFailures } from '../lib/optimisticBulk';
 import { useTasks } from '../hooks/useTasks';
 import { useRepairs } from '../hooks/useRepairs';
 import { useBatchData } from '../contexts/BatchDataContext';
@@ -299,9 +300,13 @@ export function Tasks() {
       return;
     }
 
+    // Optimistic: flip eligible rows to Cancelled immediately
+    const eligibleIds = eligible.map(t => t.taskId);
+    applyBulkPatch(eligibleIds, applyTaskPatch, { status: 'Cancelled', cancelledAt: new Date().toISOString() });
+
     setBulkProcessing(true);
     try {
-      const resp = await postBatchCancelTasks({ taskIds: eligible.map(t => t.taskId) }, clientSheetId);
+      const resp = await postBatchCancelTasks({ taskIds: eligibleIds }, clientSheetId);
       const serverResult: BatchMutationResult = (resp.ok && resp.data) ? resp.data : {
         success: false,
         processed: eligible.length,
@@ -311,16 +316,22 @@ export function Tasks() {
         errors: eligible.map(t => ({ id: t.taskId, reason: resp.error || 'Request failed' })),
         message: resp.error || 'Batch cancel failed',
       };
+      // Revert optimistic patches for any server-side failures; successes will be eclipsed by refetch
+      revertBulkPatchForFailures(serverResult.errors, clearTaskPatch);
       const merged = mergePreflightSkips(serverResult, preflightSkipped);
       setBulkResult(merged);
       setBulkResultLabel('Cancel Tasks');
       setRowSel({});
       refetchTasks();
+    } catch (err) {
+      // Network error: revert all optimistic patches
+      for (const id of eligibleIds) clearTaskPatch(id);
+      throw err;
     } finally {
       setBulkProcessing(false);
       setConfirmCancelOpen(false);
     }
-  }, [pendingBulkItems, apiConfigured, showToast, refetchTasks]);
+  }, [pendingBulkItems, apiConfigured, showToast, refetchTasks, applyTaskPatch, clearTaskPatch]);
 
   /**
    * Bulk Reassign — preflights ineligible rows, submits via batchReassignTasks.
@@ -362,10 +373,14 @@ export function Tasks() {
       return;
     }
 
+    // Optimistic: flip assignedTo on eligible rows immediately
+    const eligibleIds = eligible.map(t => t.taskId);
+    applyBulkPatch(eligibleIds, applyTaskPatch, { assignedTo });
+
     setBulkProcessing(true);
     try {
       const resp = await postBatchReassignTasks(
-        { taskIds: eligible.map(t => t.taskId), assignedTo },
+        { taskIds: eligibleIds, assignedTo },
         clientSheetId
       );
       const serverResult: BatchMutationResult = (resp.ok && resp.data) ? resp.data : {
@@ -377,16 +392,20 @@ export function Tasks() {
         errors: eligible.map(t => ({ id: t.taskId, reason: resp.error || 'Request failed' })),
         message: resp.error || 'Batch reassign failed',
       };
+      revertBulkPatchForFailures(serverResult.errors, clearTaskPatch);
       const merged = mergePreflightSkips(serverResult, preflightSkipped);
       setBulkResult(merged);
       setBulkResultLabel(`Reassign Tasks to ${assignedTo}`);
       setRowSel({});
       refetchTasks();
+    } catch (err) {
+      for (const id of eligibleIds) clearTaskPatch(id);
+      throw err;
     } finally {
       setBulkProcessing(false);
       setReassignModalOpen(false);
     }
-  }, [pendingBulkItems, apiConfigured, showToast, refetchTasks]);
+  }, [pendingBulkItems, apiConfigured, showToast, refetchTasks, applyTaskPatch, clearTaskPatch]);
 
   const handleRequestRepairQuote = useCallback(async (itemId: string, sourceTaskId?: string) => {
     const task = tasks.find(t => t.itemId === itemId && (!sourceTaskId || t.taskId === sourceTaskId));

@@ -758,6 +758,9 @@ export function Payments() {
                         }
                         if (!eligible.length) { setError('No eligible invoices to void (PAID/VOIDED are excluded)'); return; }
                         if (!confirm(`Void ${eligible.length} invoice(s)?\n\nThis marks them as VOIDED. They stay in the sheet for audit.`)) return;
+                        // Session 69 — optimistic: flip rows to VOIDED immediately.
+                        const eligibleQbNos = new Set(eligible.map(e => e.qbInvoice));
+                        setInvoices(prev => prev.map(inv => eligibleQbNos.has(inv.qbInvoice) ? { ...inv, status: 'VOIDED' } : inv));
                         setBulkProcessing(true);
                         const resp = await postBatchVoidStaxInvoices({ qbInvoiceNos: eligible.map(e => e.qbInvoice) });
                         const serverResult: BatchMutationResult = resp.ok && resp.data ? resp.data : {
@@ -765,6 +768,13 @@ export function Payments() {
                           skipped: [], errors: eligible.map(e => ({ id: e.qbInvoice, reason: resp.error || 'Request failed' })),
                           message: resp.error || 'Batch void failed',
                         };
+                        // Revert failed rows back to their original status
+                        if (serverResult.errors && serverResult.errors.length) {
+                          const failedIds = new Set(serverResult.errors.map(e => e.id).filter(Boolean));
+                          const origById: Record<string, StaxInvoice> = {};
+                          for (const e of eligible) origById[e.qbInvoice] = e;
+                          setInvoices(prev => prev.map(inv => failedIds.has(inv.qbInvoice) ? { ...inv, status: origById[inv.qbInvoice]?.status ?? inv.status } : inv));
+                        }
                         setBulkProcessing(false); setSelectedInvoices(new Set());
                         setBulkActionLabel('Void Invoices');
                         setBulkResult(mergePreflightSkips(serverResult, preflightSkipped));
@@ -783,6 +793,9 @@ export function Payments() {
                         }
                         if (!eligible.length) { setError('Only Imported invoices can be deleted. Use Void for Ready to Charge invoices.'); return; }
                         if (!confirm(`Delete ${eligible.length} PENDING invoice(s)?\n\nThis marks them as DELETED. They stay in the sheet for audit.`)) return;
+                        // Session 69 — optimistic: flip rows to DELETED immediately.
+                        const eligibleQbNos = new Set(eligible.map(e => e.qbInvoice));
+                        setInvoices(prev => prev.map(inv => eligibleQbNos.has(inv.qbInvoice) ? { ...inv, status: 'DELETED' } : inv));
                         setBulkProcessing(true);
                         const resp = await postBatchDeleteStaxInvoices({ qbInvoiceNos: eligible.map(e => e.qbInvoice) });
                         const serverResult: BatchMutationResult = resp.ok && resp.data ? resp.data : {
@@ -790,6 +803,13 @@ export function Payments() {
                           skipped: [], errors: eligible.map(e => ({ id: e.qbInvoice, reason: resp.error || 'Request failed' })),
                           message: resp.error || 'Batch delete failed',
                         };
+                        // Revert failed rows back to their original status
+                        if (serverResult.errors && serverResult.errors.length) {
+                          const failedIds = new Set(serverResult.errors.map(e => e.id).filter(Boolean));
+                          const origById: Record<string, StaxInvoice> = {};
+                          for (const e of eligible) origById[e.qbInvoice] = e;
+                          setInvoices(prev => prev.map(inv => failedIds.has(inv.qbInvoice) ? { ...inv, status: origById[inv.qbInvoice]?.status ?? inv.status } : inv));
+                        }
                         setBulkProcessing(false); setSelectedInvoices(new Set());
                         setBulkActionLabel('Delete Invoices');
                         setBulkResult(mergePreflightSkips(serverResult, preflightSkipped));
@@ -979,6 +999,11 @@ export function Payments() {
                   onClick={async () => {
                     if (!confirm(`Void ${reviewSelected.length} selected PENDING invoice(s)?\n\nThis removes them from the active workflow. They stay in the sheet for audit.`)) return;
                     const qbNos = reviewSelected.map(ri => pending.find(p => p.rowIndex === ri)?.qbInvoice || '').filter(Boolean);
+                    // Session 69 — optimistic: flip rows to DELETED immediately.
+                    const qbSet = new Set(qbNos);
+                    const origStatusById: Record<string, string> = {};
+                    for (const p of pending) if (qbSet.has(p.qbInvoice)) origStatusById[p.qbInvoice] = p.status || 'PENDING';
+                    setInvoices(prev => prev.map(inv => qbSet.has(inv.qbInvoice) ? { ...inv, status: 'DELETED' } : inv));
                     setBulkProcessing(true);
                     const resp = await postBatchDeleteStaxInvoices({ qbInvoiceNos: qbNos });
                     const serverResult: BatchMutationResult = resp.ok && resp.data ? resp.data : {
@@ -986,6 +1011,10 @@ export function Payments() {
                       skipped: [], errors: qbNos.map(q => ({ id: q, reason: resp.error || 'Request failed' })),
                       message: resp.error || 'Batch delete failed',
                     };
+                    if (serverResult.errors && serverResult.errors.length) {
+                      const failedIds = new Set(serverResult.errors.map(e => e.id).filter(Boolean));
+                      setInvoices(prev => prev.map(inv => failedIds.has(inv.qbInvoice) ? { ...inv, status: origStatusById[inv.qbInvoice] || inv.status } : inv));
+                    }
                     setBulkProcessing(false); setReviewSelected([]);
                     setBulkActionLabel('Delete PENDING Invoices');
                     setBulkResult(serverResult);

@@ -343,7 +343,7 @@ export function Billing() {
   // ─── Billing Report Tab State ─────────────────────────────────────────────
   // Use useBilling(false) to avoid auto-fetch. We also keep it around for
   // re-send invoice email which needs liveRows to lookup clientSheetId.
-  const { rows: liveRows, loading: billingLoading, refetch: refetchBilling } = useBilling(false);
+  const { rows: liveRows, loading: billingLoading, refetch: refetchBilling, hideUnbilled, revealUnbilled } = useBilling(false);
 
   const [reportData, setReportData] = useState<BillingRow[]>([]);
   const [reportLoading, setReportLoading] = useState(false);
@@ -1074,6 +1074,22 @@ export function Billing() {
     setInvoiceLoading(true);
     setInvoiceError('');
 
+    // Session 69 — optimistic hide: remove selected rows from the on-screen report
+    // immediately so the table feels instant. Snapshot so we can restore on failure.
+    // Per-group success/failure reconciliation happens below after runBatchLoop.
+    const selectedIdsByGroup: Record<string, string[]> = {};
+    const allHiddenIds: string[] = [];
+    for (const r of selRows) {
+      const key = (r.sourceSheetId || r.client) + '|' + (r.sidemark || '');
+      if (!selectedIdsByGroup[key]) selectedIdsByGroup[key] = [];
+      selectedIdsByGroup[key].push(r.ledgerRowId);
+      allHiddenIds.push(r.ledgerRowId);
+    }
+    const reportSnapshot = reportData;
+    setReportData(prev => prev.filter(r => !allHiddenIds.includes(r.ledgerRowId)));
+    // Also hide at the useBilling layer so any other consumer reading `rows` sees the same optimistic state.
+    hideUnbilled(allHiddenIds);
+
     const groups: Record<string, { client: string; sourceSheetId: string; sidemark: string; rows: UnbilledReportRow[] }> = {};
     for (const r of selRows) {
       // Group by client + sidemark so SEPARATE_BY_SIDEMARK clients get one invoice per sidemark
@@ -1139,6 +1155,37 @@ export function Billing() {
     });
     setInvoiceBatch({ state: 'complete', total: invokable.length, processed: invokable.length, succeeded: batchResult.succeeded, failed: batchResult.failed });
     setInvoiceBulkResult(batchResult);
+
+    // Session 69 — reveal failures: for every group that did NOT succeed, restore
+    // its rows from the snapshot so the user sees the un-invoiced items return.
+    // (Successful groups stay hidden; refetchBilling() repopulates them marked Invoiced.)
+    const failedGroupKeys = new Set<string>();
+    for (const r of results) {
+      if (!r.success) {
+        // r.client is the group label (client or "client · sidemark") per runBatchLoop
+        // Find the matching group key via selectedIdsByGroup by reverse lookup
+        for (const g of invokable) {
+          const label = g.client + (g.sidemark ? ` · ${g.sidemark}` : '');
+          if (label === r.client) {
+            const key = (g.sourceSheetId || g.client) + '|' + (g.sidemark || '');
+            failedGroupKeys.add(key);
+            break;
+          }
+        }
+      }
+    }
+    if (failedGroupKeys.size > 0) {
+      const idsToRestore: string[] = [];
+      for (const key of failedGroupKeys) {
+        const ids = selectedIdsByGroup[key] || [];
+        idsToRestore.push(...ids);
+      }
+      // Restore those rows from the pre-submission snapshot
+      const restoreSet = new Set(idsToRestore);
+      const restored = reportSnapshot.filter(r => restoreSet.has(r.ledgerRowId));
+      setReportData(prev => [...prev, ...restored]);
+      revealUnbilled(idsToRestore);
+    }
 
     setInvoiceResults(results);
     setInvoiceLoading(false);

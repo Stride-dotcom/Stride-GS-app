@@ -21,6 +21,7 @@ import { ConfirmDialog } from '../components/shared/ConfirmDialog';
 import { BulkResultSummary } from '../components/shared/BulkResultSummary';
 import { BatchProgress } from '../components/shared/BatchProgress';
 import { isApiConfigured, type ApiRepair, postBatchCancelRepairs, postSendRepairQuote, type BatchMutationResult } from '../lib/api';
+import { applyBulkPatch, revertBulkPatchForFailures } from '../lib/optimisticBulk';
 import { runBatchLoop, mergePreflightSkips } from '../lib/batchLoop';
 import { FloatingActionMenu, type FABAction } from '../components/shared/FloatingActionMenu';
 import { XCircle, Send as SendIcon, CheckSquare } from 'lucide-react';
@@ -270,9 +271,13 @@ export function Repairs() {
     const clientSheetId = eligible[0].clientSheetId || '';
     if (!apiConfigured || !clientSheetId) return;
 
+    // Optimistic: flip eligible repairs to Cancelled immediately
+    const eligibleIds = eligible.map(r => r.repairId);
+    applyBulkPatch(eligibleIds, applyRepairPatch, { status: 'Cancelled' });
+
     setBulkProcessing(true);
     try {
-      const resp = await postBatchCancelRepairs({ repairIds: eligible.map(r => r.repairId) }, clientSheetId);
+      const resp = await postBatchCancelRepairs({ repairIds: eligibleIds }, clientSheetId);
       const serverResult: BatchMutationResult = (resp.ok && resp.data) ? resp.data : {
         success: false,
         processed: eligible.length,
@@ -281,10 +286,14 @@ export function Repairs() {
         errors: eligible.map(r => ({ id: r.repairId, reason: resp.error || 'Request failed' })),
         message: resp.error || 'Batch cancel failed',
       };
+      revertBulkPatchForFailures(serverResult.errors, clearRepairPatch);
       setBulkResult(mergePreflightSkips(serverResult, preflightSkipped));
       setBulkResultLabel('Cancel Repairs');
       setRowSel({});
       refetchRepairs();
+    } catch (err) {
+      for (const id of eligibleIds) clearRepairPatch(id);
+      throw err;
     } finally {
       setBulkProcessing(false);
       setConfirmCancelOpen(false);
@@ -329,6 +338,10 @@ export function Repairs() {
     const clientSheetId = eligible[0].clientSheetId || '';
     if (!apiConfigured || !clientSheetId) return;
 
+    // Optimistic: flip eligible repairs to Quote Sent immediately
+    const eligibleIds = eligible.map(r => r.repairId);
+    applyBulkPatch(eligibleIds, applyRepairPatch, { status: 'Quote Sent' });
+
     setBulkProcessing(true);
     setBulkProgress({ done: 0, total: eligible.length });
     try {
@@ -344,10 +357,14 @@ export function Repairs() {
         onProgress: (done, total) => setBulkProgress({ done, total }),
         preflightSkipped,
       });
+      revertBulkPatchForFailures(loopResult.errors, clearRepairPatch);
       setBulkResult(loopResult);
       setBulkResultLabel('Send Repair Quotes');
       setRowSel({});
       refetchRepairs();
+    } catch (err) {
+      for (const id of eligibleIds) clearRepairPatch(id);
+      throw err;
     } finally {
       setBulkProcessing(false);
       setBulkProgress(null);
