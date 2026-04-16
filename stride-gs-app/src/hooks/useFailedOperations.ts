@@ -104,10 +104,13 @@ export function useFailedOperations(): UseFailedOperationsResult {
           if (row?.sync_status === 'confirmed') {
             // Emit so hooks/BatchDataContext can do a targeted refetch
             entityEvents.emit(String(row.entity_type ?? ''), String(row.entity_id ?? ''));
-          } else {
-            // For failed/pending rows just refetch the failures list
-            refetch();
           }
+          // v38.67.0 — always refetch the failures list so:
+          //   • new sync_failed rows appear immediately
+          //   • rows flipped to 'confirmed' by the retryFailedSyncs_ cron
+          //     disappear from the drawer with no manual action
+          //   • rows dismissed by another tab (resolved) disappear too
+          refetch();
         }
       )
       .subscribe();

@@ -1114,7 +1114,7 @@ function retryFailedSyncs_() {
   }
   var sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
   var listUrl = url + "/rest/v1/gs_sync_events"
-              + "?sync_status=eq.failed"
+              + "?sync_status=eq.sync_failed"
               + "&action_type=like.*_write_through"
               + "&created_at=gte." + encodeURIComponent(sevenDaysAgo)
               + "&order=created_at.asc"
@@ -1224,7 +1224,7 @@ function api_logSyncFailure_(tenantId, entityType, entityId, actionType, errorMe
       entity_type:   String(entityType || "unknown"),
       entity_id:     String(entityId || "unknown"),
       action_type:   String(actionType || "write_through"),
-      sync_status:   "failed",
+      sync_status:   "sync_failed",
       requested_by:  "gas_write_through",
       request_id:    Utilities.getUuid(),
       error_message: String(errorMessage || "").substring(0, 500),
