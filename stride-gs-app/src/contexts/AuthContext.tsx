@@ -213,13 +213,30 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         return;
       }
 
-      // CRITICAL: clear the API response cache on every successful sign-in so
-      // the previous user's cached clients/inventory/tasks/etc. can never leak
-      // into this session. The cache was keyed globally by action name, NOT by
-      // callerEmail, so without this clear a client-role user inherited the
-      // previous admin's cached data from localStorage on first page paint.
-      // Session 60 fix. See AuthContext write-up in Docs/Archive/Session_History.md.
-      cacheClearAll();
+      // CRITICAL: clear the API response cache ONLY when the user actually
+      // changes — not on every successful sign-in (which includes every
+      // page refresh for an already-logged-in user). Session-60 fix wiped
+      // the cache on every handleSession call to prevent cross-user data
+      // leakage on shared browsers (admin logs out → client logs in →
+      // client must not see admin's cached inventory). That's still a real
+      // concern, but it made refresh-while-signed-in trigger a full cache
+      // wipe + ~15 refetches every time, compounding any GAS cold-start.
+      //
+      // Fix (session 68): compare session email vs. cached AUTH_CACHE_KEY
+      // email. Wipe ONLY if the user changed (or cache was empty). Same
+      // user reopening their own tab → cache is preserved → instant nav.
+      try {
+        const prevRaw = localStorage.getItem(AUTH_CACHE_KEY);
+        const prevEmail = prevRaw
+          ? (JSON.parse(prevRaw) as { email?: string })?.email?.toLowerCase() ?? ''
+          : '';
+        const nextEmail = String(user.email || '').toLowerCase();
+        const userChanged = !prevEmail || prevEmail !== nextEmail;
+        if (userChanged) cacheClearAll();
+      } catch {
+        // Corrupt / parse error — be safe and wipe
+        cacheClearAll();
+      }
 
       // Cache resolved user for fast subsequent loads (display-only bootstrap)
       localStorage.setItem(AUTH_CACHE_KEY, JSON.stringify(user));
