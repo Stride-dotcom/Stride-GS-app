@@ -73,8 +73,14 @@ export function AutocompleteInput({
     ta.style.height = ta.scrollHeight + 'px';
   }, [query, multiline]);
 
-  // Ctrl/Cmd+Enter inserts a newline at the caret; plain Enter is suppressed
-  // (so it doesn't accidentally submit the form or leave a stray \n).
+  // Newline behavior — three accepted shortcuts, all insert a newline:
+  //   • Plain Enter        — native textarea behavior (textareas don't submit forms,
+  //                          so there's no risk; matches user intuition)
+  //   • Shift+Enter        — universal Slack/Gmail/Discord convention
+  //   • Ctrl/Cmd+Enter     — preserved for muscle memory from earlier release
+  // For Ctrl/Cmd+Enter we manually insert \n via state since the OS may swallow
+  // the default in some browsers. Plain/Shift+Enter use the browser's native
+  // newline insertion (no preventDefault), then handleChange picks it up.
   const handleTextareaKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key !== 'Enter') return;
     if (e.ctrlKey || e.metaKey) {
@@ -93,10 +99,9 @@ export function AutocompleteInput({
           textareaRef.current.selectionEnd = start + 1;
         }
       });
-    } else {
-      // Plain Enter: swallow so the form doesn't submit and no newline sneaks in
-      e.preventDefault();
     }
+    // Otherwise (plain Enter, Shift+Enter): let the browser's native textarea
+    // newline behavior run. handleChange will fire from the resulting input event.
   };
 
   const select = (item: string) => {
