@@ -545,6 +545,15 @@ const ch = createColumnHelper<InventoryItem>();
 
 // ─── Main Component ──────────────────────────────────────────────────────────
 
+/**
+ * ⚠️  FRAGILE HOOK ORDER — DO NOT reorder, add, or remove hook calls (useState,
+ * useMemo, useEffect, useCallback, useRef, useAuth, useNavigate, or any custom
+ * hook) in this component without verifying the TOTAL hook count stays identical
+ * across every render path. React error #300 ("Rendered more hooks than during
+ * the previous render") has broken this page multiple times. If you must add a
+ * hook, append it AFTER all existing hooks and BEFORE any early return. Never
+ * put a hook inside a conditional block.
+ */
 export function Inventory() {
   const { isMobile } = useIsMobile();
   const apiConfigured = isApiConfigured();

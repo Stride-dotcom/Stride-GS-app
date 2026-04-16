@@ -1,3 +1,10 @@
+/**
+ * ⚠️  PROTECTED COMPONENT — FolderButton has broken multiple times from
+ * seemingly unrelated edits. Do NOT modify the props interface, the URL
+ * handling logic, or the click handler without testing on Task Detail,
+ * Repair Detail, Item Detail, Shipment Detail, Will Call Detail, and
+ * Dashboard pages. All must open the correct Drive folder in a new tab.
+ */
 import { ExternalLink, FolderOpen, type LucideIcon } from 'lucide-react';
 import { theme } from '../../styles/theme';
 

@@ -457,6 +457,7 @@ function WillCallsTab({ willCalls, onNavigate }: { willCalls: SummaryWillCall[];
 
 // ─── Dashboard ────────────────────────────────────────────────────────────────
 
+/** ⚠️  FRAGILE HOOK ORDER — see Inventory.tsx for full warning. Do not reorder/add/remove hooks. */
 export function Dashboard() {
   const { isMobile, isExtraSmall } = useIsMobile();
   const apiConfigured = isApiConfigured();

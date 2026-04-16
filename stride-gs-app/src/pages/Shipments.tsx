@@ -304,6 +304,7 @@ function FilterDrop({ label, options, selected, setSelected, open, setOpen, cfgM
 
 // ─── Main Component ──────────────────────────────────────────────────────────
 
+/** ⚠️  FRAGILE HOOK ORDER — see Inventory.tsx for full warning. Do not reorder/add/remove hooks. */
 export function Shipments() {
   const { isMobile } = useIsMobile();
   const location = useLocation();

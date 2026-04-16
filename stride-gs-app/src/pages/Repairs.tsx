@@ -98,6 +98,7 @@ function cols() {
   ];
 }
 
+/** ⚠️  FRAGILE HOOK ORDER — see Inventory.tsx for full warning. Do not reorder/add/remove hooks. */
 export function Repairs() {
   const { isMobile } = useIsMobile();
   const location = useLocation();
