@@ -1,4 +1,11 @@
 /* ===================================================
+   StrideAPI.gs — v38.54.0 — 2026-04-15 PST — Claims + Users Supabase read-cache mirrors
+   v38.54.0: NEW — claims + cb_users read-cache tables in Supabase. Adds sbClaimRow_,
+             sbUserRow_, resyncClaimToSupabase_, resyncUserToSupabase_. Write-through
+             wired into all claim mutation handlers (create/update/close/void/reopen/
+             firstReview/denial/settlement/signedSettlement) and user handlers
+             (create/update/delete). Includes seedClaimsToSupabase + seedCbUsersToSupabase
+             functions for initial one-time population from CB sheet.
    StrideAPI.gs — v38.53.0 — 2026-04-15 PST — Clients Supabase mirror (fast dropdown)
    v38.53.0: NEW — clients read-cache mirror in Supabase. Adds sbClientRow_
              (builds row from ApiClient shape), resyncClientToSupabase_
@@ -1679,11 +1686,12 @@ function resyncUserToSupabase_(email) {
     for (var i = 1; i < data.length; i++) {
       var rowEmail = String(data[i][hMap["EMAIL"]] || "").trim().toLowerCase();
       if (rowEmail !== emailLower) continue;
+      var clientSheetIdCol = hMap["CLIENT SPREADSHEET ID"] != null ? hMap["CLIENT SPREADSHEET ID"] : hMap["CLIENT SHEET ID"];
       var user = {
         email: String(data[i][hMap["EMAIL"]] || ""),
         role: String(data[i][hMap["ROLE"]] || "client").toLowerCase(),
         clientName: String(data[i][hMap["CLIENT NAME"]] || ""),
-        clientSheetId: String(data[i][hMap["CLIENT SHEET ID"]] || ""),
+        clientSheetId: clientSheetIdCol != null ? String(data[i][clientSheetIdCol] || "") : "",
         active: !(data[i][hMap["ACTIVE"]] === false || String(data[i][hMap["ACTIVE"]]).toUpperCase() === "FALSE"),
         contactName: hMap["CONTACT NAME"] != null ? String(data[i][hMap["CONTACT NAME"]] || "") : "",
         phone: hMap["PHONE"] != null ? String(data[i][hMap["PHONE"]] || "") : "",
@@ -1693,6 +1701,55 @@ function resyncUserToSupabase_(email) {
       return;
     }
   } catch (e) { Logger.log("resyncUserToSupabase_ error (non-fatal): " + e); }
+}
+
+/**
+ * One-time seed: read ALL claims from CB sheet and upsert to Supabase.
+ * Run manually once from the Apps Script editor to populate an empty cache.
+ */
+function seedClaimsToSupabase() {
+  var cbSs = api_openCbSs_();
+  if (cbSs.error) { Logger.log("seedClaimsToSupabase error: " + JSON.stringify(cbSs.error)); return; }
+  var db = claimsDb_(cbSs);
+  if (!api_claimsReady_(db)) { Logger.log("seedClaimsToSupabase: claims schema not initialized"); return; }
+  var rows = sheetToObjects_(db.claims);
+  var count = 0;
+  for (var i = 0; i < rows.length; i++) {
+    var claimId = String(rows[i]["Claim ID"] || "").trim();
+    if (!claimId) continue;
+    resyncClaimToSupabase_(claimId);
+    count++;
+    if (count % 20 === 0) Utilities.sleep(100); // throttle
+  }
+  Logger.log("seedClaimsToSupabase: upserted " + count + " claims");
+}
+
+/**
+ * One-time seed: read ALL users from CB Users sheet and upsert to Supabase.
+ * Run manually once from the Apps Script editor to populate an empty cache.
+ */
+function seedCbUsersToSupabase() {
+  var cbId = prop_("CB_SPREADSHEET_ID");
+  if (!cbId) { Logger.log("seedCbUsersToSupabase: no CB_SPREADSHEET_ID"); return; }
+  var ss = SpreadsheetApp.openById(cbId);
+  var sheet = ss.getSheetByName("Users");
+  if (!sheet) { Logger.log("seedCbUsersToSupabase: no Users sheet"); return; }
+  var data = sheet.getDataRange().getValues();
+  if (data.length < 2) { Logger.log("seedCbUsersToSupabase: Users sheet empty"); return; }
+  var headers = data[0];
+  var emailCol = -1;
+  for (var h = 0; h < headers.length; h++) {
+    if (String(headers[h] || "").trim().toUpperCase() === "EMAIL") { emailCol = h; break; }
+  }
+  if (emailCol < 0) { Logger.log("seedCbUsersToSupabase: no Email column"); return; }
+  var count = 0;
+  for (var i = 1; i < data.length; i++) {
+    var email = String(data[i][emailCol] || "").trim();
+    if (!email) continue;
+    resyncUserToSupabase_(email);
+    count++;
+  }
+  Logger.log("seedCbUsersToSupabase: upserted " + count + " users");
 }
 
 /**
@@ -3598,6 +3655,7 @@ function handleCreateUser_(params, callerEmail) {
   var resp = { success: true, user: user };
   if (supabaseWarning) resp.supabaseWarning = supabaseWarning;
   if (welcomeWarning) resp.welcomeWarning = welcomeWarning;
+  resyncUserToSupabase_(email);
   return jsonResponse_(resp);
 }
 
@@ -3796,6 +3854,7 @@ function handleUpdateUser_(params, callerEmail) {
   } else if (welcomeResult && welcomeResult.reason && welcomeResult.reason !== "already_sent") {
     resp.welcomeWarning = "Activation succeeded but welcome email skipped: " + welcomeResult.reason;
   }
+  resyncUserToSupabase_(lookup.user.email);
   return jsonResponse_(resp);
 }
 
@@ -3818,6 +3877,19 @@ function handleDeleteUser_(params, callerEmail) {
 
   lookup.sheet.deleteRow(lookup.rowIndex);
   try { CacheService.getScriptCache().remove("api_users"); } catch (_) {}
+
+  // Delete from Supabase users cache (best-effort)
+  try {
+    var url = prop_("SUPABASE_URL");
+    var key = prop_("SUPABASE_SERVICE_ROLE_KEY");
+    if (url && key) {
+      UrlFetchApp.fetch(url + "/rest/v1/cb_users?email=eq." + encodeURIComponent(targetEmail), {
+        method: "DELETE",
+        headers: { "Authorization": "Bearer " + key, "apikey": key, "Prefer": "return=minimal" },
+        muteHttpExceptions: true
+      });
+    }
+  } catch (e) { Logger.log("cb_users delete (non-fatal): " + e); }
 
   return jsonResponse_({ success: true, deletedEmail: targetEmail });
 }
@@ -16674,6 +16746,7 @@ function handleSendClaimDenial_(callerEmail, payload) {
       { "{{CLAIM_NO}}": claimId, "{{CLAIM_ID}}": claimId, "{{CLAIMANT_NAME}}": String(claim["Primary Contact Name"] || claim["Company / Client Name"] || ""), "{{COMPANY_CLIENT_NAME}}": String(claim["Company / Client Name"] || ""), "{{DECISION_EXPLANATION}}": decisionExplanation }, null);
   } catch (e) { warnings.push("CLAIM_DENIAL email: " + e.message); }
 
+  resyncClaimToSupabase_(claimId);
   return jsonResponse_({ success: true, newStatus: "Closed", outcomeType: "Denied", warnings: warnings });
 }
 
@@ -16729,6 +16802,7 @@ function handleGenerateClaimSettlement_(callerEmail, payload) {
       pdfResult.pdfBlob);
   } catch (e) { warnings.push("CLAIM_SETTLEMENT email: " + e.message); }
 
+  resyncClaimToSupabase_(claimId);
   return jsonResponse_({ success: true, fileUrl: pdfResult.pdfFileUrl, versionNo: newVersion, newStatus: "Settlement Sent", warnings: warnings });
 }
 
@@ -16767,6 +16841,7 @@ function handleUploadSignedSettlement_(callerEmail, payload) {
   api_logClaimHistory_(db.historySheet, claimId, "SIGNED_SETTLEMENT_RECEIVED",
     "Signed settlement uploaded by " + callerEmail, callerEmail, false, signedUrl || "");
 
+  resyncClaimToSupabase_(claimId);
   return jsonResponse_({ success: true, newStatus: "Approved", signedFileUrl: signedUrl });
 }
 
@@ -16792,6 +16867,7 @@ function handleVoidClaim_(callerEmail, payload) {
   if (!api_getClaimRow_(db.claims, claimId)) return errorResponse_("Claim not found: " + claimId, "NOT_FOUND");
   api_updateClaimRow_(db.claims, claimId, { "Status": "Void", "Void Reason": voidReason });
   api_logClaimHistory_(db.historySheet, claimId, "VOIDED", "Claim voided by " + callerEmail + ". Reason: " + voidReason.substring(0, 100), callerEmail, false, "");
+  resyncClaimToSupabase_(claimId);
   return jsonResponse_({ success: true, newStatus: "Void" });
 }
 
@@ -16809,6 +16885,7 @@ function handleReopenClaim_(callerEmail, payload) {
     var c = api_getClaimRow_(db.claims, claimId) || {};
     try { api_sendClaimEmail_(prop_("MASTER_PRICE_LIST_SPREADSHEET_ID") || "", "CLAIM_STAFF_NOTIFY", config.notificationEmails, "Claim " + claimId + " Reopened", { "{{CLAIM_NO}}": claimId, "{{CLAIM_ID}}": claimId, "{{CLAIM_TYPE}}": "Reopen", "{{COMPANY_NAME}}": String(c["Company / Client Name"] || ""), "{{COMPANY_CLIENT_NAME}}": String(c["Company / Client Name"] || ""), "{{CLAIMANT_NAME}}": String(c["Primary Contact Name"] || ""), "{{CREATED_BY}}": callerEmail, "{{ISSUE_DESCRIPTION}}": reopenReason, "{{REQUESTED_AMOUNT}}": "", "{{DATE_OPENED}}": formatDate_(new Date()) }, null); } catch (_) {}
   }
+  resyncClaimToSupabase_(claimId);
   return jsonResponse_({ success: true, newStatus: "Under Review" });
 }
 
@@ -16823,6 +16900,7 @@ function handleFirstReviewClaim_(callerEmail, payload) {
   var now = new Date();
   api_updateClaimRow_(db.claims, claimId, { "First Reviewed By": callerEmail, "First Reviewed At": now });
   api_logClaimHistory_(db.historySheet, claimId, "FIRST_REVIEW", "Claim first reviewed by " + callerEmail, callerEmail, false, "");
+  resyncClaimToSupabase_(claimId);
   return jsonResponse_({ success: true, firstReviewedBy: callerEmail, firstReviewedAt: formatDate_(now) });
 }
 
@@ -16878,6 +16956,7 @@ function handleUpdateClaim_(callerEmail, payload) {
 
   updates["Last Updated"] = new Date();
   api_updateClaimRow_(db.claims, claimId, updates);
+  resyncClaimToSupabase_(claimId);
 
   return jsonResponse_({ success: true, claimId: claimId, saved: saved, message: "Saved: " + saved.join(", ") });
 }
