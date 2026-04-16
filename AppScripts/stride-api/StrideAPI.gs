@@ -1,4 +1,11 @@
 /* ===================================================
+   StrideAPI.gs — v38.54.1 — 2026-04-15 PST — Fix TRANSFER_RECEIVED email silently failing
+   v38.54.1: BUGFIX — transferItems TRANSFER_RECEIVED email was calling
+             api_sendTemplateEmail_(destSS, ..., "") — wrong first arg (Spreadsheet
+             vs settings object) AND empty recipient. Silently returned error, no
+             email ever sent. Fixed to pass destSettings + destination CLIENT_EMAIL
+             (merged with NOTIFICATION_EMAILS), with explicit warnings when
+             ENABLE_NOTIFICATIONS is off or no recipient is configured.
    StrideAPI.gs — v38.54.0 — 2026-04-15 PST — Claims + Users Supabase read-cache mirrors
    v38.54.0: NEW — claims + cb_users read-cache tables in Supabase. Adds sbClaimRow_,
              sbUserRow_, resyncClaimToSupabase_, resyncUserToSupabase_. Write-through
@@ -10445,10 +10452,17 @@ function handleTransferItems_(sourceClientSheetId, payload) {
   }
 
   // ── 6. EMAIL (TRANSFER_RECEIVED to destination — non-critical) ───────────
+  // v38.54.1 fix: was passing destSS (Spreadsheet) as settings and "" as recipient,
+  // so api_sendTemplateEmail_ immediately returned "No recipient email address"
+  // and the template lookup used the wrong object. Pass destSettings + destination
+  // CLIENT_EMAIL (plus any notificationEmails) like every other email caller.
   var emailSent = false;
   try {
     var destNotif = String(destSettings["ENABLE_NOTIFICATIONS"] || "").trim().toLowerCase();
-    if (destNotif === "true" || destNotif === "yes" || destNotif === "1") {
+    var destClientEmail = String(destSettings["CLIENT_EMAIL"] || "").trim();
+    var destNotifEmails = String(destSettings["NOTIFICATION_EMAILS"] || "").trim();
+    var allDestRecip = [destClientEmail, destNotifEmails].filter(function(s) { return !!s; }).join(",");
+    if ((destNotif === "true" || destNotif === "yes" || destNotif === "1") && allDestRecip) {
       var trCols = ["Item ID", "Qty", "Vendor", "Description", "Sidemark", "Room", "Item Notes"];
       var trHtml = '<table style="width:100%;border-collapse:collapse;margin-bottom:16px">';
       trHtml += '<tr>' + trCols.map(function(c) {
@@ -10462,7 +10476,7 @@ function handleTransferItems_(sourceClientSheetId, payload) {
       });
       trHtml += '</table>';
 
-      var emailResult = api_sendTemplateEmail_(destSS, "TRANSFER_RECEIVED", "", {
+      var emailResult = api_sendTemplateEmail_(destSettings, "TRANSFER_RECEIVED", allDestRecip, "Transfer Received — " + rowsToCopy.length + " item(s) from " + sourceClientName, {
         "{{CLIENT_NAME}}":        destClientName,
         "{{SOURCE_CLIENT_NAME}}": sourceClientName,
         "{{ITEM_COUNT}}":         String(rowsToCopy.length),
@@ -10471,7 +10485,12 @@ function handleTransferItems_(sourceClientSheetId, payload) {
         "{{ITEMS_TABLE}}":        trHtml,
         "{{INVENTORY_URL}}":      destSS.getUrl()
       });
-      emailSent = !!(emailResult && emailResult.sent);
+      emailSent = !!(emailResult && emailResult.success);
+      if (emailResult && !emailResult.success) warnings.push("Transfer email skipped: " + (emailResult.error || "unknown"));
+    } else if (!allDestRecip) {
+      warnings.push("Transfer email skipped: destination has no CLIENT_EMAIL or NOTIFICATION_EMAILS configured");
+    } else {
+      warnings.push("Transfer email skipped: destination ENABLE_NOTIFICATIONS is " + (destSettings["ENABLE_NOTIFICATIONS"] || "not set"));
     }
   } catch (emailErr) {
     warnings.push("Transfer email failed: " + emailErr);
