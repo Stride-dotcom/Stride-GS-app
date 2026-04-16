@@ -228,37 +228,48 @@ Deno.serve(async (req: Request) => {
   const newStatusId = ALERT_TYPE_TO_STATUS_ID[eventType];
   if (newStatusId !== undefined) orderUpsert.status_id = newStatusId;
 
-  // Contact fields — tag names TBD pending DT support confirmation
-  // Using the most common DT webhook tag naming convention seen in v8.1 docs
-  if (payload['customer_name'])    orderUpsert.contact_name    = payload['customer_name'];
-  if (payload['Customer_Name'])    orderUpsert.contact_name    = payload['Customer_Name'];
-  if (payload['customer_address']) orderUpsert.contact_address = payload['customer_address'];
-  if (payload['Customer_Address']) orderUpsert.contact_address = payload['Customer_Address'];
-  if (payload['customer_city'])    orderUpsert.contact_city    = payload['customer_city'];
-  if (payload['Customer_City'])    orderUpsert.contact_city    = payload['Customer_City'];
-  if (payload['customer_state'])   orderUpsert.contact_state   = payload['customer_state'];
-  if (payload['Customer_State'])   orderUpsert.contact_state   = payload['Customer_State'];
-  if (payload['customer_zip'])     orderUpsert.contact_zip     = payload['customer_zip'];
-  if (payload['Customer_Zip'])     orderUpsert.contact_zip     = payload['Customer_Zip'];
-  if (payload['customer_phone'])   orderUpsert.contact_phone   = payload['customer_phone'];
-  if (payload['Customer_Phone'])   orderUpsert.contact_phone   = payload['Customer_Phone'];
-  if (payload['customer_email'])   orderUpsert.contact_email   = payload['customer_email'];
-  if (payload['Customer_Email'])   orderUpsert.contact_email   = payload['Customer_Email'];
+  // Contact fields — CONFIRMED from DT Admin → Alerts → Started → Email template:
+  //   {{Customer_Name}}, {{Customer_Address}}, {{Customer_Primary_Phone}},
+  //   {{Customer_Secondary_Phone}}, {{Customer_Email}}
+  // Note: Customer_Address is a combined string (no separate city/state/zip tags confirmed).
+  // We parse city/state/zip from it if possible; otherwise store full address in contact_address.
+  const custName    = payload['Customer_Name']    ?? payload['customer_name'];
+  const custAddress = payload['Customer_Address'] ?? payload['customer_address'];
+  const custPhone   = payload['Customer_Primary_Phone'] ?? payload['customer_phone'] ?? payload['Customer_Phone'];
+  const custEmail   = payload['Customer_Email']   ?? payload['customer_email'];
 
-  // Date / time window
-  const serviceDate = payload['service_date'] ?? payload['Service_Date'] ?? payload['Delivery_Date'];
+  if (custName)    orderUpsert.contact_name    = custName;
+  if (custAddress) orderUpsert.contact_address = custAddress;
+  if (custPhone)   orderUpsert.contact_phone   = custPhone;
+  if (custEmail)   orderUpsert.contact_email   = custEmail;
+
+  // If DT sends separate city/state/zip tags (not confirmed yet — check first webhook payload):
+  const custCity  = payload['Customer_City']  ?? payload['customer_city'];
+  const custState = payload['Customer_State'] ?? payload['customer_state'];
+  const custZip   = payload['Customer_Zip']   ?? payload['customer_zip'];
+  if (custCity)  orderUpsert.contact_city  = custCity;
+  if (custState) orderUpsert.contact_state = custState;
+  if (custZip)   orderUpsert.contact_zip   = custZip;
+
+  // Date / time window — tag names not yet confirmed from DT Admin Available Tags.
+  // Common DT conventions tried; inspect first webhook payload JSONB to confirm.
+  const serviceDate = payload['Service_Date'] ?? payload['Requested_Date'] ?? payload['Delivery_Date'] ?? payload['service_date'];
   if (serviceDate) orderUpsert.local_service_date = serviceDate;
 
-  const winStart = parseTimeStr(payload['window_start'] ?? payload['Window_Start'] ?? payload['Time_From']);
-  const winEnd   = parseTimeStr(payload['window_end']   ?? payload['Window_End']   ?? payload['Time_To']);
+  const winStart = parseTimeStr(payload['Time_From'] ?? payload['Start_Time'] ?? payload['Window_Start'] ?? payload['window_start']);
+  const winEnd   = parseTimeStr(payload['Time_To']   ?? payload['End_Time']   ?? payload['Window_End']   ?? payload['window_end']);
   if (winStart) orderUpsert.window_start_local = winStart;
   if (winEnd)   orderUpsert.window_end_local   = winEnd;
 
-  // Reference fields
-  if (payload['po_number'] ?? payload['PO_Number'])      orderUpsert.po_number       = payload['po_number'] ?? payload['PO_Number'];
-  if (payload['sidemark']  ?? payload['Sidemark'])       orderUpsert.sidemark        = payload['sidemark']  ?? payload['Sidemark'];
-  if (payload['reference'] ?? payload['Client_Reference']) orderUpsert.client_reference = payload['reference'] ?? payload['Client_Reference'];
-  if (payload['details']   ?? payload['Details'])        orderUpsert.details         = payload['details']   ?? payload['Details'];
+  // Reference fields — tag names not yet confirmed; common DT conventions tried.
+  const poNum = payload['PO_Number'] ?? payload['PO'] ?? payload['po_number'];
+  const sm    = payload['Sidemark']  ?? payload['sidemark'];
+  const clRef = payload['Client_Reference'] ?? payload['Reference'] ?? payload['reference'];
+  const det   = payload['Details']   ?? payload['details'];
+  if (poNum) orderUpsert.po_number        = poNum;
+  if (sm)    orderUpsert.sidemark         = sm;
+  if (clRef) orderUpsert.client_reference = clRef;
+  if (det)   orderUpsert.details          = det;
 
   // ── 9. Upsert into dt_orders ───────────────────────────────────────────
   const { data: orderRow, error: orderErr } = await supabase
@@ -303,35 +314,13 @@ Deno.serve(async (req: Request) => {
   }
 
   // ── 11. Handle Pictures event ──────────────────────────────────────────
+  // NOTE (confirmed by DT support 2026-04-16): Image/photo URLs are NOT
+  // included in webhook alerts. Photos must be fetched via the Export API
+  // in a separate polling job (Phase 2). The Pictures event fires to notify
+  // that a photo was added, but the payload contains no URL. We log the
+  // event (already stored in dt_webhook_events) but don't insert dt_order_photos.
   if (eventType === 'Pictures' && orderId) {
-    // DT may send multiple picture URLs; field names TBD.
-    // We collect any key whose value looks like an http(s) URL.
-    const photoUrls: string[] = [];
-    for (const [key, val] of Object.entries(payload)) {
-      if (
-        (key.toLowerCase().includes('photo') ||
-         key.toLowerCase().includes('picture') ||
-         key.toLowerCase().includes('image') ||
-         key.toLowerCase().includes('signature') ||
-         key === 'Picture_URL' || key === 'photo_url') &&
-        val.startsWith('http')
-      ) {
-        photoUrls.push(val);
-      }
-    }
-    for (const photoUrl of photoUrls) {
-      const kind = photoUrl.toLowerCase().includes('signature') ? 'signature' : 'pod';
-      const { error: photoErr } = await supabase.from('dt_order_photos').insert({
-        dt_order_id:      orderId,
-        dt_url:           photoUrl,
-        kind,
-        visible_in_portal: true,
-        fetch_attempts:   0,
-      });
-      if (photoErr) {
-        console.warn('[dt-webhook-ingest] Photo insert error:', photoErr.message);
-      }
-    }
+    console.log(`[dt-webhook-ingest] Pictures event for order=${dtIdentifier} — no photo URLs in webhook (use Export API)`);
   }
 
   // ── 12. Mark event processed ───────────────────────────────────────────
