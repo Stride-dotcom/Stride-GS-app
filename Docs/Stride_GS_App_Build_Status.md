@@ -1,7 +1,7 @@
 # Stride GS App — Build Status & Continuation Guide
 
-**Last updated:** 2026-04-16 (session 70 — Three repair fixes + handleGetBatch_ field parity so client-role users see the same data as staff/admin on detail panels)
-**StrideAPI.gs:** v38.60.1 (Web App v280)
+**Last updated:** 2026-04-16 (session 70 — nine-item UI/email/PDF fix batch: chip counts, sidemark color normalize, payment terms tab, shipment IK prefix strip, DetailHeader component, receiving timeout, inspection photos URL, PDF tokens redeploy, deep-link client/sidemark)
+**StrideAPI.gs:** v38.61.0 (Web App v281)
 **Import.gs (client):** v4.3.0 (rolled out to all 49 active clients; Reference column now imported)
 **Emails.gs (client):** v4.3.0 (rolled out to all 49 active clients — email deep links CTA button)
 **Shipments.gs (client):** v4.2.1 (rolled out to all 49 active clients — SHIPMENT_RECEIVED uses standalone /#/shipments/:shipmentNo)
@@ -76,6 +76,33 @@ Login, Dashboard, Inventory, Receiving, Shipments, Tasks, Repairs, Will Calls, B
 ---
 
 ## RECENT CHANGES (2026-04-16 session 70)
+
+### Session 70 nine-item UI / email / PDF fix batch
+
+Nine unrelated defects surfaced during day-to-day ops. Shipped together to keep
+`deploy-api` + React bundle churn to one round. Summary per item:
+
+| # | Defect | Fix | Files |
+|---|---|---|---|
+| 1 | Status chips on list pages showed `(0)` on every chip except the active status filter | `clientFilteredData` memo now feeds `counts`; `data` memo applies status/search on top | `src/pages/WillCalls.tsx`, `src/pages/Tasks.tsx` (Inventory/Shipments already correct) |
+| 2 | Payment Terms dropdown was a hardcoded 6 options, didn't match QB | New `handleGetPaymentTerms_` endpoint reads CB `Payment_Terms` tab (auto-seeded on first call) + `usePaymentTerms()` hook + modal wiring. Operator edits the tab to match QuickBooks | `StrideAPI.gs`, `api.ts`, `usePaymentTerms.ts` (new), `OnboardClientModal.tsx` |
+| 3 | Same sidemark rendered in multiple colors because " CRAMER" / "CRAMER" / "Cramer" were treated as distinct Set entries | New `normSidemark()` helper (trim + upper); color map keyed by normalized value; `ALL_SIDEMARKS` dedupes on normalized key while keeping first-seen display | `src/pages/Inventory.tsx` |
+| 4 | Shipment Notes on detail page showed internal `[IK:<uuid>]` idempotency-key prefix | `sbShipmentRow_` strips the prefix before Supabase write-through. One-time `UPDATE public.shipments` migration to clean existing rows | `StrideAPI.gs`, `supabase/migrations/20260416200000_strip_shipment_ik_prefix.sql` |
+| 5 | Client name + sidemark too small/thin on detail panels; layout inconsistent across panels | New `DetailHeader` shared component — big bold ID, bold client name, colored sidemark chip, status badges below ID. Wired into TaskDetailPanel. Other panels can adopt incrementally. | `src/components/shared/DetailHeader.tsx` (new), `src/components/shared/TaskDetailPanel.tsx` |
+| 6 | Receiving "Request timed out" banner on large shipments that actually saved successfully | `postCompleteShipment` now passes `API_POST_TIMEOUT_LONG_MS` (300s) instead of default 90s | `src/lib/api.ts` |
+| 7 | REPAIR_QUOTE email "View Inspection Photos" button linked to `#` | `handleSendRepairQuote_` resolves URL from Inventory Item ID hyperlink → Repairs Source Task hyperlink → client `PHOTOS_FOLDER_ID` fallback | `StrideAPI.gs` |
+| 8 | Repair Approved PDF rendered only ID + Client, everything else as literal `{{TOKEN}}` | v38.60.0 already had the tokens; deploying v38.61.0 gets them into the live Web App | Already-written code, deploy-only |
+| 9 | Deep-link pages (`#/tasks/INSP-62545-1` etc.) showed blank Client + Sidemark | `fetchTaskByIdFromSupabase` / `fetchRepairByIdFromSupabase` / `fetchWillCallByIdFromSupabase` accept `clientNameMap`. `useTaskDetail` / `useRepairDetail` / `useWillCallDetail` build the map from `useClients()` and pass it; also fall back to inventory (`fetchItemsByIdsFromSupabase`) for missing sidemark/vendor/description | `supabaseQueries.ts`, `useTaskDetail.ts`, `useRepairDetail.ts`, `useWillCallDetail.ts` |
+
+**Shipped:**
+- StrideAPI.gs v38.60.1 → v38.61.0 (Web App v280 → **v281**)
+- React bundle `index-IR0jRtB3.js` (committed as `1a8c317` on source, force-pushed as `bdbbb66` on main)
+- Supabase migration `20260416200000_strip_shipment_ik_prefix` applied via MCP
+- TypeScript check (`tsc -b`) clean
+
+**Deferred to next session (requires user's gold-standard screenshot):**
+- DetailHeader adoption for the remaining 6 panels: ItemDetailPanel, RepairDetailPanel,
+  WillCallDetailPanel, ShipmentDetailPanel, ClaimDetailPanel, BillingDetailPanel
 
 ### Session 70 follow-up: handleGetBatch_ field parity
 
