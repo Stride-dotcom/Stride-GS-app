@@ -1,5 +1,25 @@
 /* ===================================================
-   StrideAPI.gs — v38.63.0 — 2026-04-16 PST — Room→Reference email swap + updateRepairNotes endpoint
+   StrideAPI.gs — v38.64.0 — 2026-04-16 PST — Canonicalize {{ITEMS_TABLE}} across all emails
+   v38.64.0: FIX — Previous session updated only the client-bound Emails.gs
+             `buildItemsHtmlTable_` to the new 6-column layout (Item ID, Qty,
+             Vendor, Description, Sidemark, Reference). The StrideAPI-side
+             `api_buildItemsHtmlTable_` — which is what actually runs for
+             emails triggered via the API (most shipments, transfers, and
+             will calls) — was left at the old 6-column shape (Item ID,
+             Vendor, Description, Class, Qty, Location). Rewrote it to match
+             the canonical shape and made it row-shape flexible (accepts
+             camelCase payload fields OR raw sheet rows via field-keyed
+             `pick()` lookup).
+             FIX — Unified the 4 inline `{{ITEMS_TABLE}}` builders in
+             handleCreateWillCall_, handleProcessWcRelease_,
+             handleCancelWillCall_, handleTransferInventory_ to call
+             `api_buildItemsHtmlTable_` instead of hand-rolled HTML strings.
+             Now every email's items table renders the same 6 columns, and
+             future column changes require edits in exactly one place.
+             NEW — `api_buildItemIdToReferenceMap_(ss)` helper reads
+             Inventory once per handler to enrich WC_Items rows (which
+             don't carry Reference) before passing to the canonical builder.
+   v38.63.0: FEAT — Drop "Room" column from email/PDF item tables system-wide,
    v38.63.0: FEAT — Drop "Room" column from email/PDF item tables system-wide,
              Reference (PO/client-facing identifier) takes its place.
              `api_buildSingleItemTableHtml_` last positional arg is now
@@ -9012,25 +9032,88 @@ function api_sendTemplateEmail_(settings, templateKey, toEmail, fallbackSubject,
 
 // ─── Email / PDF Helpers (v24.0.0) ────────────────────────────────────────────
 
-/** Builds HTML table of shipment items for SHIPMENT_RECEIVED email. */
+/**
+ * Canonical multi-item HTML table used by EVERY email that emits the
+ * {{ITEMS_TABLE}} token (SHIPMENT_RECEIVED, TRANSFER_RECEIVED, and any
+ * future ones). Columns are deliberately fixed:
+ *
+ *   Item ID | Qty | Vendor | Description | Sidemark | Reference
+ *
+ * v38.64.0 — last session replaced Room → Reference in the email-template
+ * pattern but missed this function (the one actually in use by the API
+ * path). User reported "items table still wrong" because the v4.6.0
+ * Emails.gs rollout only covered the client-bound script path; the
+ * majority of emails are generated server-side by StrideAPI.gs.
+ *
+ * Input items can be either ShipmentItemPayload-shaped (camelCase
+ * itemId/qty/vendor/description/sidemark/reference) or a raw inventory
+ * row wrapped in an object — we check both field shapes so callers
+ * don't have to pre-massage.
+ */
 function api_buildItemsHtmlTable_(items) {
+  function pick(it, keys) {
+    for (var k = 0; k < keys.length; k++) {
+      var v = it[keys[k]];
+      if (v !== undefined && v !== null && v !== "") return v;
+    }
+    return "";
+  }
   var h = '<table style="border-collapse:collapse;width:100%;font-size:13px;">' +
-    '<tr style="background:#f3f4f6;"><th style="padding:6px 10px;border:1px solid #e5e7eb;text-align:left;">Item ID</th>' +
+    '<tr style="background:#f3f4f6;">' +
+    '<th style="padding:6px 10px;border:1px solid #e5e7eb;text-align:left;">Item ID</th>' +
+    '<th style="padding:6px 10px;border:1px solid #e5e7eb;text-align:center;">Qty</th>' +
     '<th style="padding:6px 10px;border:1px solid #e5e7eb;text-align:left;">Vendor</th>' +
     '<th style="padding:6px 10px;border:1px solid #e5e7eb;text-align:left;">Description</th>' +
-    '<th style="padding:6px 10px;border:1px solid #e5e7eb;text-align:left;">Class</th>' +
-    '<th style="padding:6px 10px;border:1px solid #e5e7eb;text-align:center;">Qty</th>' +
-    '<th style="padding:6px 10px;border:1px solid #e5e7eb;text-align:left;">Location</th></tr>';
-  for (var i = 0; i < items.length; i++) {
-    var it = items[i];
-    h += '<tr><td style="padding:6px 10px;border:1px solid #e5e7eb;">' + api_esc_(it.itemId) + '</td>' +
-      '<td style="padding:6px 10px;border:1px solid #e5e7eb;">' + api_esc_(it.vendor || "") + '</td>' +
-      '<td style="padding:6px 10px;border:1px solid #e5e7eb;">' + api_esc_(it.description || "") + '</td>' +
-      '<td style="padding:6px 10px;border:1px solid #e5e7eb;">' + api_esc_(it.class || "") + '</td>' +
-      '<td style="padding:6px 10px;border:1px solid #e5e7eb;text-align:center;">' + (it.qty || 1) + '</td>' +
-      '<td style="padding:6px 10px;border:1px solid #e5e7eb;">' + api_esc_(it.location || "") + '</td></tr>';
+    '<th style="padding:6px 10px;border:1px solid #e5e7eb;text-align:left;">Sidemark</th>' +
+    '<th style="padding:6px 10px;border:1px solid #e5e7eb;text-align:left;">Reference</th>' +
+    '</tr>';
+  for (var i = 0; i < (items || []).length; i++) {
+    var it = items[i] || {};
+    var itemId      = pick(it, ["itemId", "Item ID"]);
+    var qty         = pick(it, ["qty", "Qty"]) || 1;
+    var vendor      = pick(it, ["vendor", "Vendor"]);
+    var description = pick(it, ["description", "Description"]);
+    var sidemark    = pick(it, ["sidemark", "Sidemark"]);
+    var reference   = pick(it, ["reference", "Reference"]);
+    h += '<tr>' +
+      '<td style="padding:6px 10px;border:1px solid #e5e7eb;">' + api_esc_(itemId) + '</td>' +
+      '<td style="padding:6px 10px;border:1px solid #e5e7eb;text-align:center;">' + api_esc_(qty) + '</td>' +
+      '<td style="padding:6px 10px;border:1px solid #e5e7eb;">' + api_esc_(vendor) + '</td>' +
+      '<td style="padding:6px 10px;border:1px solid #e5e7eb;">' + api_esc_(description) + '</td>' +
+      '<td style="padding:6px 10px;border:1px solid #e5e7eb;">' + api_esc_(sidemark) + '</td>' +
+      '<td style="padding:6px 10px;border:1px solid #e5e7eb;">' + api_esc_(reference) + '</td>' +
+      '</tr>';
   }
   return h + '</table>';
+}
+
+/**
+ * v38.64.0 — Batch-reads the Inventory sheet once and returns a map from
+ * Item ID → Reference. Used by WC_* email handlers so they can enrich
+ * their WC_Items-sourced rows (which don't carry Reference) before passing
+ * to the canonical api_buildItemsHtmlTable_. Runs once per email send;
+ * cost is a single getDataRange() call on Inventory.
+ */
+function api_buildItemIdToReferenceMap_(ss) {
+  var out = {};
+  try {
+    var invSheet = ss.getSheetByName("Inventory");
+    if (!invSheet || invSheet.getLastRow() < 2) return out;
+    var map = api_getHeaderMap_(invSheet);
+    var idCol  = map["Item ID"];
+    var refCol = map["Reference"];
+    if (!idCol || !refCol) return out;
+    var data = invSheet.getRange(2, 1, invSheet.getLastRow() - 1, invSheet.getLastColumn()).getValues();
+    for (var i = 0; i < data.length; i++) {
+      var iid = String(data[i][idCol - 1] || "").trim();
+      if (!iid) continue;
+      var ref = String(data[i][refCol - 1] || "").trim();
+      if (ref) out[iid] = ref;
+    }
+  } catch (e) {
+    Logger.log("api_buildItemIdToReferenceMap_ error (non-fatal): " + e);
+  }
+  return out;
 }
 
 /** Builds single-item HTML table for task/repair emails. Matches SH_buildItemTableHtml_ format.
@@ -10482,22 +10565,18 @@ function handleCreateWillCall_(clientSheetId, payload) {
       : (notifEmails || clientEmail);
     if (allRecip) {
       try {
-        var itemsTableRows = enrichedItems.map(function(it) {
-          return { itemId: it.itemId, description: it.description, itemClass: it.itemClass };
+        // v38.64.0 — unified with api_buildItemsHtmlTable_ so all {{ITEMS_TABLE}}
+        // emails show the same 6-column shape. Reference isn't on WC_Items, so
+        // enrich once from Inventory before passing to the canonical builder.
+        var _wcRefMap = api_buildItemIdToReferenceMap_(ss);
+        var wcItemsForTable = enrichedItems.map(function(it) {
+          return {
+            itemId: it.itemId, qty: it.qty, vendor: it.vendor,
+            description: it.description, sidemark: it.sidemark,
+            reference: _wcRefMap[it.itemId] || ""
+          };
         });
-        // Build simple HTML table for items
-        var itemTableHtml = '<table style="border-collapse:collapse;width:100%"><tr>' +
-          '<th style="border:1px solid #ddd;padding:4px 8px;">Item ID</th>' +
-          '<th style="border:1px solid #ddd;padding:4px 8px;">Description</th>' +
-          '<th style="border:1px solid #ddd;padding:4px 8px;">Class</th></tr>';
-        for (var et = 0; et < itemsTableRows.length; et++) {
-          var row = itemsTableRows[et];
-          itemTableHtml += '<tr>' +
-            '<td style="border:1px solid #ddd;padding:4px 8px;">' + (row.itemId      || "") + '</td>' +
-            '<td style="border:1px solid #ddd;padding:4px 8px;">' + (row.description || "") + '</td>' +
-            '<td style="border:1px solid #ddd;padding:4px 8px;">' + (row.itemClass   || "") + '</td></tr>';
-        }
-        itemTableHtml += '</table>';
+        var itemTableHtml = api_buildItemsHtmlTable_(wcItemsForTable);
 
         var wcEmailTokens = {
             "{{WC_NUMBER}}":       wcNumber,
@@ -10899,19 +10978,16 @@ function handleProcessWcRelease_(clientSheetId, payload) {
       : (notifEmails || clientEmail);
     if (allRecip) {
       try {
-        // Build items table for email
-        var itemTableHtml = '<table style="border-collapse:collapse;width:100%"><tr>' +
-          '<th style="border:1px solid #ddd;padding:4px 8px;">Item ID</th>' +
-          '<th style="border:1px solid #ddd;padding:4px 8px;">Description</th>' +
-          '<th style="border:1px solid #ddd;padding:4px 8px;">Class</th></tr>';
-        for (var et = 0; et < releasingItems.length; et++) {
-          var row = releasingItems[et];
-          itemTableHtml += '<tr>' +
-            '<td style="border:1px solid #ddd;padding:4px 8px;font-weight:600;">' + (row.itemId      || "") + '</td>' +
-            '<td style="border:1px solid #ddd;padding:4px 8px;">'                 + (row.description || "") + '</td>' +
-            '<td style="border:1px solid #ddd;padding:4px 8px;">'                 + (row.itemClass   || "") + '</td></tr>';
-        }
-        itemTableHtml += '</table>';
+        // v38.64.0 — unified with api_buildItemsHtmlTable_
+        var _relRefMap = api_buildItemIdToReferenceMap_(ss);
+        var releaseItemsForTable = releasingItems.map(function(r) {
+          return {
+            itemId: r.itemId, qty: r.qty, vendor: r.vendor,
+            description: r.description, sidemark: r.sidemark,
+            reference: _relRefMap[r.itemId] || ""
+          };
+        });
+        var itemTableHtml = api_buildItemsHtmlTable_(releaseItemsForTable);
 
         var partialNote = isPartial
           ? ('<div style="background:#FFF7ED;border:1px solid #FDBA74;border-radius:10px;padding:14px;margin-bottom:16px;font-size:13px;color:#9A3412;font-weight:600;">' +
@@ -11420,24 +11496,28 @@ function handleCancelWillCall_(clientSheetId, payload) {
     }
   }
 
-  // ─── 5. Build items table for email ────────────────────────────────────────
+  // ─── 5. Build items table for email (v38.64.0 — canonical 6-col builder) ───
   var itemsTableHtml = "";
   if (wciSh && wciSh.getLastRow() >= 2) {
     var wciMap2 = api_getHeaderMap_(wciSh);
     var wciData2 = wciSh.getDataRange().getValues();
-    var rows = [];
+    var _canRefMap = api_buildItemIdToReferenceMap_(ss);
+    var cancelItemsForTable = [];
     for (var j = 1; j < wciData2.length; j++) {
       if (String(wciData2[j][(wciMap2["WC Number"] || 1) - 1] || "").trim() === wcNumber) {
-        rows.push("<tr><td>" + (wciData2[j][(wciMap2["Item ID"] || 1) - 1] || "") +
-          "</td><td>" + (wciData2[j][(wciMap2["Description"] || 1) - 1] || "") +
-          "</td><td>" + (wciData2[j][(wciMap2["Class"] || 1) - 1] || "") +
-          "</td><td>" + (wciData2[j][(wciMap2["Qty"] || 1) - 1] || 1) + "</td></tr>");
+        var _iid = String(wciData2[j][(wciMap2["Item ID"] || 1) - 1] || "");
+        cancelItemsForTable.push({
+          itemId:      _iid,
+          qty:         wciMap2["Qty"]         ? (wciData2[j][wciMap2["Qty"] - 1] || 1)                 : 1,
+          vendor:      wciMap2["Vendor"]      ? String(wciData2[j][wciMap2["Vendor"] - 1] || "")       : "",
+          description: wciMap2["Description"] ? String(wciData2[j][wciMap2["Description"] - 1] || "")  : "",
+          sidemark:    wciMap2["Sidemark"]    ? String(wciData2[j][wciMap2["Sidemark"] - 1] || "")     : "",
+          reference:   _canRefMap[_iid] || ""
+        });
       }
     }
-    if (rows.length > 0) {
-      itemsTableHtml = "<table border='1' cellpadding='4' cellspacing='0' style='border-collapse:collapse;'>" +
-        "<tr><th>Item ID</th><th>Description</th><th>Class</th><th>Qty</th></tr>" +
-        rows.join("") + "</table>";
+    if (cancelItemsForTable.length > 0) {
+      itemsTableHtml = api_buildItemsHtmlTable_(cancelItemsForTable);
     }
   }
 
@@ -12163,19 +12243,21 @@ function handleTransferItems_(sourceClientSheetId, payload) {
     var destNotifEmails = String(destSettings["NOTIFICATION_EMAILS"] || "").trim();
     var allDestRecip = [destClientEmail, destNotifEmails].filter(function(s) { return !!s; }).join(",");
     if ((destNotif === "true" || destNotif === "yes" || destNotif === "1") && allDestRecip) {
-      // v38.61.1 — Room dropped, Reference takes its place (client/office-facing)
-      var trCols = ["Item ID", "Qty", "Vendor", "Description", "Sidemark", "Reference", "Item Notes"];
-      var trHtml = '<table style="width:100%;border-collapse:collapse;margin-bottom:16px">';
-      trHtml += '<tr>' + trCols.map(function(c) {
-        return '<td style="padding:8px 12px;border:1px solid #e2e8f0;background:#f8fafc;font-weight:600;font-size:13px">' + c + '</td>';
-      }).join('') + '</tr>';
-      rowsToCopy.forEach(function(row) {
-        trHtml += '<tr>' + trCols.map(function(c) {
-          var col = srcInvMap[c];
-          return '<td style="padding:6px 12px;border:1px solid #e2e8f0;font-size:13px">' + (col ? String(row[col - 1] || "") : "") + '</td>';
-        }).join('') + '</tr>';
+      // v38.64.0 — use the canonical api_buildItemsHtmlTable_ instead of an
+      // inline column array so every email's items table stays in sync. The
+      // function accepts raw sheet rows via field-keyed lookup, but rowsToCopy
+      // here is a 2D array; convert to objects first using srcInvMap.
+      var trItems = rowsToCopy.map(function(row) {
+        return {
+          itemId:      srcInvMap["Item ID"]      ? String(row[srcInvMap["Item ID"] - 1]      || "") : "",
+          qty:         srcInvMap["Qty"]          ? String(row[srcInvMap["Qty"] - 1]          || "") : "",
+          vendor:      srcInvMap["Vendor"]       ? String(row[srcInvMap["Vendor"] - 1]       || "") : "",
+          description: srcInvMap["Description"]  ? String(row[srcInvMap["Description"] - 1]  || "") : "",
+          sidemark:    srcInvMap["Sidemark"]     ? String(row[srcInvMap["Sidemark"] - 1]     || "") : "",
+          reference:   srcInvMap["Reference"]    ? String(row[srcInvMap["Reference"] - 1]    || "") : ""
+        };
       });
-      trHtml += '</table>';
+      var trHtml = api_buildItemsHtmlTable_(trItems);
 
       var emailResult = api_sendTemplateEmail_(destSettings, "TRANSFER_RECEIVED", allDestRecip, "Transfer Received — " + rowsToCopy.length + " item(s) from " + sourceClientName, {
         "{{CLIENT_NAME}}":        destClientName,
