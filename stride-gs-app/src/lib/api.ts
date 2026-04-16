@@ -728,6 +728,49 @@ export function fetchLocations(signal?: AbortSignal) {
   return apiFetch<LocationsResponse>('getLocations', undefined, { signal });
 }
 
+// ─── Session 68: Location CRUD + batch item move ────────────────────────────
+
+export interface CreateLocationResponse { success: boolean; code: string; existed: boolean; error?: string; }
+export interface UpdateLocationResponse { success: boolean; code: string; error?: string; }
+export interface DeleteLocationResponse { success: boolean; code: string; error?: string; }
+export interface BatchMoveResultItem { itemId: string; tenantId: string; clientName: string; fromLocation: string; toLocation: string; }
+export interface BatchMoveResult {
+  success: boolean;
+  updated: BatchMoveResultItem[];
+  notFound: { itemId: string; reason: string }[];
+  errors: { itemId: string; error: string }[];
+  counts: { requested: number; updated: number; notFound: number; errors: number };
+  error?: string;
+}
+
+export function postCreateLocation(code: string, notes?: string) {
+  return apiPost<CreateLocationResponse>('createLocation', { code, notes: notes ?? '' });
+}
+
+export function postUpdateLocation(
+  code: string,
+  updates: { newCode?: string; notes?: string; active?: boolean }
+) {
+  return apiPost<UpdateLocationResponse>('updateLocation', { code, ...updates });
+}
+
+export function postDeleteLocation(code: string) {
+  return apiPost<DeleteLocationResponse>('deleteLocation', { code });
+}
+
+/**
+ * Cross-tenant batch location update. Uses item_id_ledger on the backend to
+ * resolve each item_id → tenant, so the caller doesn't need to know which
+ * client each item belongs to. ~2-4s for a batch of 50 items.
+ */
+export function postBatchUpdateItemLocations(
+  itemIds: string[],
+  location: string,
+  notes?: string
+) {
+  return apiPost<BatchMoveResult>('batchUpdateItemLocations', { itemIds, location, notes: notes ?? '' });
+}
+
 // Batch 2
 
 export function fetchInventory(signal?: AbortSignal, clientSheetId?: string) {

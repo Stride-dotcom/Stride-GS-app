@@ -33,7 +33,13 @@ import {
   postUpdateMarketingSettings,
   postSendTestEmail, postPreviewTemplate, postCheckMarketingInbox,
 } from '../lib/api';
-import { fetchMarketingContactsFromSupabase } from '../lib/supabaseQueries';
+import {
+  fetchMarketingContactsFromSupabase,
+  fetchMarketingCampaignsFromSupabase,
+  fetchMarketingTemplatesFromSupabase,
+  fetchMarketingSettingsFromSupabase,
+  fetchMarketingDashboardFromSupabase,
+} from '../lib/supabaseQueries';
 
 // ─── Status badge colors ────────────────────────────────────────────────────
 
@@ -345,7 +351,18 @@ export function Marketing() {
   const [showCreateTemplate, setShowCreateTemplate] = useState(false);
 
   // Template list — lifted to page level so Create/Edit Campaign modals can use it for dropdowns
-  const templatesFetchFn = useCallback((signal?: AbortSignal) => fetchMarketingTemplates(signal), []);
+  const templatesFetchFn = useCallback(
+    async (signal?: AbortSignal) => {
+      try {
+        const sb = await fetchMarketingTemplatesFromSupabase();
+        if (sb && sb.templates.length > 0) {
+          return { data: { success: true, data: { templates: sb.templates } }, ok: true as const, error: null };
+        }
+      } catch { /* fall through to GAS */ }
+      return fetchMarketingTemplates(signal);
+    },
+    []
+  );
   const { data: rawTemplates, refetch: refetchTemplates } = useApiData(
     templatesFetchFn, true, 'mktg-templates',
   );
@@ -451,7 +468,18 @@ export function Marketing() {
 
 function DashboardTab() {
   const { isMobile: mob } = useIsMobile();
-  const dashFetchFn = useCallback((signal?: AbortSignal) => fetchMarketingDashboard(signal), []);
+  const dashFetchFn = useCallback(
+    async (signal?: AbortSignal) => {
+      try {
+        const sb = await fetchMarketingDashboardFromSupabase();
+        if (sb && sb.totalContacts > 0) {
+          return { data: { success: true, data: sb }, ok: true as const, error: null };
+        }
+      } catch { /* fall through to GAS */ }
+      return fetchMarketingDashboard(signal);
+    },
+    []
+  );
   const { data: raw, loading, error, refetch } = useApiData(
     dashFetchFn, true, 'mktg-dashboard',
   );
@@ -658,7 +686,18 @@ function CampaignsTab({ onSelectCampaign, showCreate, onShowCreate, templateName
   const [statusFilter, setStatusFilter] = useState<string>('All');
   const [search, setSearch] = useState('');
 
-  const campaignsFetchFn = useCallback((signal?: AbortSignal) => fetchMarketingCampaigns(signal), []);
+  const campaignsFetchFn = useCallback(
+    async (signal?: AbortSignal) => {
+      try {
+        const sb = await fetchMarketingCampaignsFromSupabase();
+        if (sb && sb.campaigns.length > 0) {
+          return { data: { success: true, data: { campaigns: sb.campaigns } }, ok: true as const, error: null };
+        }
+      } catch { /* fall through to GAS */ }
+      return fetchMarketingCampaigns(signal);
+    },
+    []
+  );
   const { data: raw, loading, error, refetch } = useApiData(
     campaignsFetchFn, true, 'mktg-campaigns',
   );
@@ -2125,7 +2164,18 @@ function LogsTab() {
 
 function SettingsTab() {
   const { isMobile: mob } = useIsMobile();
-  const settingsFetchFn = useCallback((signal?: AbortSignal) => fetchMarketingSettings(signal), []);
+  const settingsFetchFn = useCallback(
+    async (signal?: AbortSignal) => {
+      try {
+        const sb = await fetchMarketingSettingsFromSupabase();
+        if (sb) {
+          return { data: { success: true, data: sb }, ok: true as const, error: null };
+        }
+      } catch { /* fall through to GAS */ }
+      return fetchMarketingSettings(signal);
+    },
+    []
+  );
   const { data: raw, loading, error, refetch } = useApiData(
     settingsFetchFn, true, 'mktg-settings',
   );

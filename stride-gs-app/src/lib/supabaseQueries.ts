@@ -31,6 +31,15 @@ import type {
   ApiUser,
   UsersResponse,
   MarketingContact,
+  MarketingCampaign,
+  MarketingTemplate,
+  MarketingSettings,
+  DashboardStats,
+  DashboardCampaignRow,
+  CampaignType,
+  CampaignStatus,
+  ApiLocation,
+  LocationsResponse,
 } from './api';
 
 /** Map of clientSheetId → clientName for enriching Supabase rows */
@@ -1408,6 +1417,284 @@ export async function fetchMarketingContactsFromSupabase(
     }));
 
     return { contacts, total: count ?? contacts.length, page, pageSize };
+  } catch {
+    return null;
+  }
+}
+
+// ─── Marketing campaigns read cache ─────────────────────────────────────────
+
+interface SupabaseMarketingCampaignRow {
+  campaign_id: string; name: string | null; type: string | null; status: string | null;
+  priority: number | null; target_type: string | null; target_value: string | null;
+  enrollment_mode: string | null;
+  initial_template: string | null; follow_up_1_template: string | null;
+  follow_up_2_template: string | null; follow_up_3_template: string | null;
+  max_follow_ups: number | null; follow_up_interval_days: number | null;
+  daily_send_limit: number | null; send_window_start: number | null; send_window_end: number | null;
+  start_date: string | null; end_date: string | null;
+  test_mode: boolean | null; test_recipient: string | null;
+  created_date: string | null; last_run_date: string | null;
+  validation_status: string | null; validation_notes: string | null; last_error: string | null;
+  total_sent: number | null; total_replied: number | null; total_bounced: number | null;
+  total_unsubscribed: number | null; total_converted: number | null;
+  notes: string | null; custom_1: string | null; custom_2: string | null; custom_3: string | null;
+}
+
+function mapSupabaseCampaign(row: SupabaseMarketingCampaignRow): MarketingCampaign {
+  return {
+    campaignId: row.campaign_id,
+    name: row.name ?? '',
+    type: (row.type || 'Blast') as CampaignType,
+    status: (row.status || 'Draft') as CampaignStatus,
+    priority: row.priority ?? 0,
+    targetType: row.target_type ?? '',
+    targetValue: row.target_value ?? '',
+    enrollmentMode: row.enrollment_mode ?? '',
+    initialTemplate: row.initial_template ?? '',
+    followUp1Template: row.follow_up_1_template ?? '',
+    followUp2Template: row.follow_up_2_template ?? '',
+    followUp3Template: row.follow_up_3_template ?? '',
+    maxFollowUps: row.max_follow_ups ?? 0,
+    followUpIntervalDays: row.follow_up_interval_days ?? 0,
+    dailySendLimit: row.daily_send_limit ?? 0,
+    sendWindowStart: row.send_window_start ?? 0,
+    sendWindowEnd: row.send_window_end ?? 0,
+    startDate: row.start_date,
+    endDate: row.end_date,
+    testMode: row.test_mode ?? false,
+    testRecipient: row.test_recipient ?? '',
+    createdDate: row.created_date ?? '',
+    lastRunDate: row.last_run_date,
+    validationStatus: row.validation_status ?? '',
+    validationNotes: row.validation_notes ?? '',
+    lastError: row.last_error ?? '',
+    totalSent: row.total_sent ?? 0,
+    totalReplied: row.total_replied ?? 0,
+    totalBounced: row.total_bounced ?? 0,
+    totalUnsubscribed: row.total_unsubscribed ?? 0,
+    totalConverted: row.total_converted ?? 0,
+    notes: row.notes ?? '',
+    custom1: row.custom_1 ?? '',
+    custom2: row.custom_2 ?? '',
+    custom3: row.custom_3 ?? '',
+  };
+}
+
+export async function fetchMarketingCampaignsFromSupabase(): Promise<{ campaigns: MarketingCampaign[] } | null> {
+  try {
+    const { data, error } = await supabase.from('marketing_campaigns').select('*').order('created_date', { ascending: false, nullsFirst: false });
+    if (error || !data) return null;
+    const campaigns = (data as SupabaseMarketingCampaignRow[]).map(mapSupabaseCampaign);
+    return { campaigns };
+  } catch {
+    return null;
+  }
+}
+
+// ─── Marketing templates read cache ─────────────────────────────────────────
+
+interface SupabaseMarketingTemplateRow {
+  name: string; subject: string | null; preview_text: string | null;
+  html_body: string | null; version: string | null; type: string | null; active: boolean | null;
+}
+
+export async function fetchMarketingTemplatesFromSupabase(): Promise<{ templates: MarketingTemplate[] } | null> {
+  try {
+    const { data, error } = await supabase.from('marketing_templates').select('*').order('name', { ascending: true });
+    if (error || !data) return null;
+    const templates: MarketingTemplate[] = (data as SupabaseMarketingTemplateRow[]).map(row => ({
+      name: row.name,
+      subject: row.subject ?? '',
+      previewText: row.preview_text ?? '',
+      htmlBody: row.html_body ?? '',
+      version: row.version ?? '',
+      type: row.type ?? undefined,
+      active: row.active ?? true,
+    }));
+    return { templates };
+  } catch {
+    return null;
+  }
+}
+
+// ─── Marketing settings read cache (singleton) ──────────────────────────────
+
+interface SupabaseMarketingSettingsRow {
+  id: number;
+  daily_digest_email: string | null; booking_url: string | null; unsubscribe_base_url: string | null;
+  sender_name: string | null; sender_phone: string | null; sender_email: string | null;
+  send_from_email: string | null; website_url: string | null;
+}
+
+export async function fetchMarketingSettingsFromSupabase(): Promise<MarketingSettings | null> {
+  try {
+    const { data, error } = await supabase.from('marketing_settings').select('*').eq('id', 1).maybeSingle();
+    if (error || !data) return null;
+    const row = data as SupabaseMarketingSettingsRow;
+    return {
+      dailyDigestEmail: row.daily_digest_email ?? '',
+      bookingUrl: row.booking_url ?? '',
+      unsubscribeBaseUrl: row.unsubscribe_base_url ?? '',
+      senderName: row.sender_name ?? '',
+      senderPhone: row.sender_phone ?? '',
+      senderEmail: row.sender_email ?? '',
+      sendFromEmail: row.send_from_email ?? '',
+      websiteUrl: row.website_url ?? '',
+    };
+  } catch {
+    return null;
+  }
+}
+
+// ─── Marketing dashboard aggregates (built from contacts + campaigns) ───────
+
+/**
+ * Compute DashboardStats entirely from Supabase — contacts counts + campaigns list
+ * with their existing rolling totals. Skips `gmailQuotaRemaining` (GAS-only, reported as 0;
+ * caller can fall back to GAS if they truly need that number). Skips per-campaign
+ * `enrolled`/`pending`/`exhausted` counts (require Campaign Contacts mirror, which
+ * we don't have — reported as 0). Everything else is accurate.
+ */
+export async function fetchMarketingDashboardFromSupabase(): Promise<DashboardStats | null> {
+  try {
+    const [contactsRes, campaignsRes] = await Promise.all([
+      supabase.from('marketing_contacts').select('status,suppressed,existing_client'),
+      supabase.from('marketing_campaigns').select('*').order('created_date', { ascending: false, nullsFirst: false }),
+    ]);
+    if (contactsRes.error || campaignsRes.error || !contactsRes.data || !campaignsRes.data) return null;
+
+    const contacts = contactsRes.data as Array<{ status: string | null; suppressed: boolean | null; existing_client: boolean | null }>;
+    const totalContacts = contacts.length;
+    const suppressed = contacts.filter(c => c.suppressed === true).length;
+    const existingClients = contacts.filter(c => c.existing_client === true && c.suppressed !== true).length;
+    const activeLeads = contacts.filter(c => c.suppressed !== true && c.existing_client !== true).length;
+
+    const campaignRows = campaignsRes.data as SupabaseMarketingCampaignRow[];
+    const activeCampaigns = campaignRows.filter(c => c.status === 'Active').length;
+    const campaigns: DashboardCampaignRow[] = campaignRows.map(c => ({
+      campaignId: c.campaign_id,
+      name: c.name ?? '',
+      type: (c.type || 'Blast') as CampaignType,
+      status: (c.status || 'Draft') as CampaignStatus,
+      priority: c.priority ?? 0,
+      enrolled: 0,         // requires Campaign Contacts mirror (not built yet)
+      sent: c.total_sent ?? 0,
+      replied: c.total_replied ?? 0,
+      bounced: c.total_bounced ?? 0,
+      unsubscribed: c.total_unsubscribed ?? 0,
+      converted: c.total_converted ?? 0,
+      pending: 0,          // requires Campaign Contacts mirror
+      exhausted: 0,        // requires Campaign Contacts mirror
+      lastRunDate: c.last_run_date,
+    }));
+    const globalTotals = {
+      sent: campaignRows.reduce((a, c) => a + (c.total_sent ?? 0), 0),
+      replied: campaignRows.reduce((a, c) => a + (c.total_replied ?? 0), 0),
+      bounced: campaignRows.reduce((a, c) => a + (c.total_bounced ?? 0), 0),
+      unsubscribed: campaignRows.reduce((a, c) => a + (c.total_unsubscribed ?? 0), 0),
+      converted: campaignRows.reduce((a, c) => a + (c.total_converted ?? 0), 0),
+    };
+
+    return {
+      totalContacts, activeLeads, existingClients, suppressed,
+      activeCampaigns,
+      gmailQuotaRemaining: -1, // sentinel — UI can treat as "unknown"
+      campaigns,
+      globalTotals,
+    };
+  } catch {
+    return null;
+  }
+}
+
+// ─── Session 68: Locations ───────────────────────────────────────────────────
+
+interface SupabaseLocationRow {
+  code: string;
+  notes: string | null;
+  active: boolean | null;
+  tenant_id: string;
+  updated_at: string | null;
+}
+
+export async function fetchLocationsFromSupabase(): Promise<LocationsResponse | null> {
+  try {
+    const { data, error } = await supabase
+      .from('locations')
+      .select('code, notes, active, tenant_id, updated_at')
+      .eq('active', true)
+      .order('code', { ascending: true })
+      .range(0, 9999);
+    if (error || !data || data.length === 0) return null;
+    const locations: ApiLocation[] = (data as SupabaseLocationRow[]).map(row => ({
+      location: row.code,
+      notes: row.notes ?? '',
+    }));
+    return { locations, count: locations.length };
+  } catch {
+    return null;
+  }
+}
+
+// ─── Session 68: Batch item ID → inventory row resolution ───────────────────
+// Powers the Scanner + Labels pages. Given an array of item IDs, returns the
+// matching inventory rows with client name enrichment. RLS limits client
+// users to their own tenants; staff/admin see all. Supabase row-cap bumped
+// to 50k via range() (see earlier session-67 fix).
+
+export interface ResolvedItem {
+  itemId: string;
+  tenantId: string;
+  clientName: string;
+  description: string;
+  vendor: string;
+  sidemark: string;
+  room: string;
+  itemClass: string;
+  qty: number;
+  location: string;
+  status: string;
+  reference: string;
+}
+
+export async function fetchItemsByIdsFromSupabase(
+  itemIds: string[],
+  clientNameMap: ClientNameMap
+): Promise<ResolvedItem[] | null> {
+  try {
+    if (!itemIds.length) return [];
+    const deduped = Array.from(new Set(itemIds.map(s => s.trim()).filter(Boolean)));
+    if (!deduped.length) return [];
+    // Chunk large batches (Supabase URL length practical limit)
+    const CHUNK = 200;
+    const results: ResolvedItem[] = [];
+    for (let i = 0; i < deduped.length; i += CHUNK) {
+      const slice = deduped.slice(i, i + CHUNK);
+      const { data, error } = await supabase
+        .from('inventory')
+        .select('item_id, tenant_id, description, vendor, sidemark, room, item_class, qty, location, status, reference')
+        .in('item_id', slice)
+        .range(0, 9999);
+      if (error || !data) continue;
+      for (const row of data as SupabaseInventoryRow[]) {
+        results.push({
+          itemId: row.item_id,
+          tenantId: row.tenant_id,
+          clientName: clientNameMap[row.tenant_id] ?? '',
+          description: row.description ?? '',
+          vendor: row.vendor ?? '',
+          sidemark: row.sidemark ?? '',
+          room: row.room ?? '',
+          itemClass: row.item_class ?? '',
+          qty: row.qty ?? 1,
+          location: row.location ?? '',
+          status: row.status ?? '',
+          reference: row.reference ?? '',
+        });
+      }
+    }
+    return results;
   } catch {
     return null;
   }

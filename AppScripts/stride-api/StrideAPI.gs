@@ -1,5 +1,27 @@
 /* ===================================================
-   StrideAPI.gs — v38.55.0 — 2026-04-15 PST — Marketing contacts Supabase read cache
+   StrideAPI.gs — v38.57.0 — 2026-04-15 PST — Marketing campaigns/templates/settings Supabase cache
+   v38.57.0: NEW — marketing_campaigns, marketing_templates, marketing_settings read-cache tables.
+             Row builders + resync helpers + seed functions for all three.
+             Write-through wired into 10 mutation handlers (create/update/activate/pause/
+             complete/runNow/delete campaigns; create/update templates; updateSettings).
+             Dashboard stats now computable entirely from Supabase (contacts + campaigns).
+   StrideAPI.gs — v38.56.0 — 2026-04-15 PST — Locations Supabase mirror + batch move endpoints
+   v38.56.0: NEW — locations Supabase mirror + central move_history audit + fast
+             cross-tenant batch location update that uses item_id_ledger instead
+             of scanning all client sheets (scan-move was 20-60s for a batch;
+             ledger lookup path is ~2-4s).
+             • sbLocationRow_ + resyncLocationToSupabase_ + delete helper
+             • handleCreateLocation_, handleUpdateLocation_, handleDeleteLocation_
+             • handleBulkSyncLocationsToSupabase_ (backfill from CB Locations)
+             • handleBatchUpdateItemLocations_ — cross-tenant batch move. Reads
+               item_id_ledger once to resolve item_id→tenant, groups by tenant,
+               updates each client sheet's Inventory + Move History tab, appends
+               to item Notes column as audit line, mirrors each item to Supabase
+               inventory, writes to central public.move_history.
+             • GAS-side scanner backend (separate project) continues to work
+               via its existing path; React scanner uses this new endpoint.
+             Migration: 20260415200000_locations_and_move_history.sql.
+   v38.55.0: NEW — marketing_contacts read-cache table in Supabase. Adds
    v38.55.0: NEW — marketing_contacts read-cache table in Supabase. Adds
              sbMarketingContactRow_, resyncMarketingContactToSupabase_,
              deleteMarketingContactFromSupabase_, seedMarketingContactsToSupabase.
@@ -839,7 +861,8 @@ function supabaseUpsert_(table, data) {
     if (!url || !key) return;
     var conflictCol = { inventory: "tenant_id,item_id", tasks: "tenant_id,task_id", repairs: "tenant_id,repair_id",
                         will_calls: "tenant_id,wc_number", shipments: "tenant_id,shipment_number", billing: "tenant_id,ledger_row_id",
-                        claims: "claim_id", cb_users: "email", marketing_contacts: "email" }[table] || "";
+                        claims: "claim_id", cb_users: "email", marketing_contacts: "email",
+                        marketing_campaigns: "campaign_id", marketing_templates: "name", marketing_settings: "id" }[table] || "";
     var postUrl = url + "/rest/v1/" + table;
     if (conflictCol) postUrl += "?on_conflict=" + conflictCol;
     var resp = UrlFetchApp.fetch(postUrl, {
@@ -892,7 +915,8 @@ function supabaseBatchUpsert_(table, rows) {
     // Unique constraint column per table (for on_conflict parameter)
     var conflictCol = { inventory: "tenant_id,item_id", tasks: "tenant_id,task_id", repairs: "tenant_id,repair_id",
                         will_calls: "tenant_id,wc_number", shipments: "tenant_id,shipment_number", billing: "tenant_id,ledger_row_id",
-                        claims: "claim_id", cb_users: "email", marketing_contacts: "email" }[table] || "";
+                        claims: "claim_id", cb_users: "email", marketing_contacts: "email",
+                        marketing_campaigns: "campaign_id", marketing_templates: "name", marketing_settings: "id" }[table] || "";
 
     // Supabase REST API handles arrays up to ~1000 rows; chunk at 50 for reliability
     var CHUNK = 50;
@@ -1883,6 +1907,185 @@ function seedMarketingContactsToSupabase() {
   Logger.log("seedMarketingContactsToSupabase: upserted " + count + " contacts");
 }
 
+// ─── Marketing campaigns ─────────────────────────────────────────────────────
+
+function sbMarketingCampaignRow_(row) {
+  function toBool(v) { return v === true || String(v).toUpperCase() === "TRUE" || v === 1 || v === "1"; }
+  function toStr(v) { return v == null ? "" : String(v); }
+  function toInt(v) { var n = Number(v); return isNaN(n) ? 0 : Math.round(n); }
+  function toDateStr(v) { if (!v) return ""; if (v instanceof Date) return v.toISOString(); return String(v); }
+  return {
+    campaign_id:             toStr(row["Campaign ID"]).trim(),
+    name:                    toStr(row["Campaign Name"]),
+    type:                    toStr(row["Type"]) || "Blast",
+    status:                  toStr(row["Status"]) || "Draft",
+    priority:                toInt(row["Priority"]),
+    target_type:             toStr(row["Target Type"]),
+    target_value:            toStr(row["Target Value"]),
+    enrollment_mode:         toStr(row["Enrollment Mode"]),
+    initial_template:        toStr(row["Initial Template"]),
+    follow_up_1_template:    toStr(row["Follow-Up 1 Template"]),
+    follow_up_2_template:    toStr(row["Follow-Up 2 Template"]),
+    follow_up_3_template:    toStr(row["Follow-Up 3 Template"]),
+    max_follow_ups:          toInt(row["Max Follow-Ups"]),
+    follow_up_interval_days: toInt(row["Follow-Up Interval Days"]),
+    daily_send_limit:        toInt(row["Daily Send Limit"]),
+    send_window_start:       toInt(row["Send Window Start"]),
+    send_window_end:         toInt(row["Send Window End"]),
+    start_date:              toDateStr(row["Start Date"]),
+    end_date:                toDateStr(row["End Date"]),
+    test_mode:               toBool(row["Test Mode"]),
+    test_recipient:          toStr(row["Test Recipient"]),
+    created_date:            toDateStr(row["Created Date"]),
+    last_run_date:           toDateStr(row["Last Run Date"]),
+    validation_status:       toStr(row["Validation Status"]),
+    validation_notes:        toStr(row["Validation Notes"]),
+    last_error:              toStr(row["Last Error"]),
+    total_sent:              toInt(row["Total Sent"]),
+    total_replied:           toInt(row["Total Replied"]),
+    total_bounced:           toInt(row["Total Bounced"]),
+    total_unsubscribed:      toInt(row["Total Unsubscribed"]),
+    total_converted:         toInt(row["Total Converted"]),
+    notes:                   toStr(row["Notes"]),
+    custom_1:                toStr(row["Custom 1"]),
+    custom_2:                toStr(row["Custom 2"]),
+    custom_3:                toStr(row["Custom 3"]),
+    updated_at:              new Date().toISOString()
+  };
+}
+
+function resyncMarketingCampaignToSupabase_(campaignId) {
+  try {
+    if (!campaignId) return;
+    var ss = SpreadsheetApp.openById(prop_("CAMPAIGN_SHEET_ID"));
+    var sheet = ss.getSheetByName("Campaigns");
+    if (!sheet) return;
+    var data = sheet.getDataRange().getValues();
+    if (data.length < 2) return;
+    var headers = data[0].map(function(h) { return String(h || "").trim(); });
+    var idCol = -1;
+    for (var h = 0; h < headers.length; h++) { if (headers[h] === "Campaign ID") { idCol = h; break; } }
+    if (idCol < 0) return;
+    for (var i = 1; i < data.length; i++) {
+      if (String(data[i][idCol] || "").trim() !== campaignId) continue;
+      var obj = {};
+      for (var j = 0; j < headers.length; j++) obj[headers[j]] = data[i][j];
+      supabaseUpsert_("marketing_campaigns", sbMarketingCampaignRow_(obj));
+      return;
+    }
+  } catch (e) { Logger.log("resyncMarketingCampaignToSupabase_ (non-fatal): " + e); }
+}
+
+function seedMarketingCampaignsToSupabase() {
+  var ss = SpreadsheetApp.openById(prop_("CAMPAIGN_SHEET_ID"));
+  var sheet = ss.getSheetByName("Campaigns");
+  if (!sheet) { Logger.log("seedMarketingCampaigns: no Campaigns sheet"); return; }
+  var data = sheet.getDataRange().getValues();
+  if (data.length < 2) { Logger.log("seedMarketingCampaigns: empty"); return; }
+  var headers = data[0].map(function(h) { return String(h || "").trim(); });
+  var batch = [];
+  for (var i = 1; i < data.length; i++) {
+    var obj = {};
+    for (var j = 0; j < headers.length; j++) obj[headers[j]] = data[i][j];
+    if (!String(obj["Campaign ID"] || "").trim()) continue;
+    batch.push(sbMarketingCampaignRow_(obj));
+  }
+  if (batch.length > 0) supabaseBatchUpsert_("marketing_campaigns", batch);
+  Logger.log("seedMarketingCampaigns: upserted " + batch.length + " campaigns");
+}
+
+// ─── Marketing templates ─────────────────────────────────────────────────────
+
+function sbMarketingTemplateRow_(row) {
+  function toBool(v) { return !(v === false || String(v).toUpperCase() === "FALSE"); }
+  function toStr(v) { return v == null ? "" : String(v); }
+  return {
+    name:          toStr(row["Template Name"]).trim(),
+    subject:       toStr(row["Subject Line"]),
+    preview_text:  toStr(row["Preview Text"]),
+    html_body:     toStr(row["HTML Body"]),
+    version:       toStr(row["Version"]),
+    type:          toStr(row["Type"]),
+    active:        toBool(row["Active"]),
+    updated_at:    new Date().toISOString()
+  };
+}
+
+function resyncMarketingTemplateToSupabase_(name) {
+  try {
+    if (!name) return;
+    var ss = SpreadsheetApp.openById(prop_("CAMPAIGN_SHEET_ID"));
+    var sheet = ss.getSheetByName("Templates");
+    if (!sheet) return;
+    var data = sheet.getDataRange().getValues();
+    if (data.length < 2) return;
+    var headers = data[0].map(function(h) { return String(h || "").trim(); });
+    var nameCol = -1;
+    for (var h = 0; h < headers.length; h++) { if (headers[h] === "Template Name") { nameCol = h; break; } }
+    if (nameCol < 0) return;
+    for (var i = 1; i < data.length; i++) {
+      if (String(data[i][nameCol] || "").trim() !== String(name).trim()) continue;
+      var obj = {};
+      for (var j = 0; j < headers.length; j++) obj[headers[j]] = data[i][j];
+      supabaseUpsert_("marketing_templates", sbMarketingTemplateRow_(obj));
+      return;
+    }
+  } catch (e) { Logger.log("resyncMarketingTemplateToSupabase_ (non-fatal): " + e); }
+}
+
+function seedMarketingTemplatesToSupabase() {
+  var ss = SpreadsheetApp.openById(prop_("CAMPAIGN_SHEET_ID"));
+  var sheet = ss.getSheetByName("Templates");
+  if (!sheet) { Logger.log("seedMarketingTemplates: no Templates sheet"); return; }
+  var data = sheet.getDataRange().getValues();
+  if (data.length < 2) { Logger.log("seedMarketingTemplates: empty"); return; }
+  var headers = data[0].map(function(h) { return String(h || "").trim(); });
+  var batch = [];
+  for (var i = 1; i < data.length; i++) {
+    var obj = {};
+    for (var j = 0; j < headers.length; j++) obj[headers[j]] = data[i][j];
+    if (!String(obj["Template Name"] || "").trim()) continue;
+    batch.push(sbMarketingTemplateRow_(obj));
+  }
+  if (batch.length > 0) supabaseBatchUpsert_("marketing_templates", batch);
+  Logger.log("seedMarketingTemplates: upserted " + batch.length + " templates");
+}
+
+// ─── Marketing settings (singleton) ──────────────────────────────────────────
+
+function resyncMarketingSettingsToSupabase_() {
+  try {
+    var ss = SpreadsheetApp.openById(prop_("CAMPAIGN_SHEET_ID"));
+    var sheet = ss.getSheetByName("Settings");
+    if (!sheet) return;
+    var data = sheet.getDataRange().getValues();
+    // Key/value layout: col A = key, col B = value, skip row 0
+    var settings = {};
+    for (var i = 1; i < data.length; i++) {
+      var key = String(data[i][0] || "").trim();
+      var val = data[i][1];
+      if (key) settings[key] = val == null ? "" : String(val);
+    }
+    supabaseUpsert_("marketing_settings", {
+      id: 1,
+      daily_digest_email:   settings["Daily Digest Email"] || "",
+      booking_url:          settings["Booking URL"] || "",
+      unsubscribe_base_url: settings["Unsubscribe Base URL"] || "",
+      sender_name:          settings["Sender Name"] || "",
+      sender_phone:         settings["Sender Phone"] || "",
+      sender_email:         settings["Sender Email"] || "",
+      send_from_email:      settings["Send From Email"] || "",
+      website_url:          settings["Website URL"] || "",
+      updated_at:           new Date().toISOString()
+    });
+  } catch (e) { Logger.log("resyncMarketingSettingsToSupabase_ (non-fatal): " + e); }
+}
+
+function seedMarketingSettingsToSupabase() {
+  resyncMarketingSettingsToSupabase_();
+  Logger.log("seedMarketingSettings: done");
+}
+
 /**
  * Build a Supabase cb_users row from API response fields.
  * No tenant_id — users are global (CB sheet), keyed by email.
@@ -1963,6 +2166,63 @@ function resyncClientToSupabase_(spreadsheetId) {
     }
   } catch (e) {
     Logger.log("resyncClientToSupabase_ error (non-fatal): " + e);
+  }
+}
+
+// ─── Session 68 — Locations Supabase mirror ──────────────────────────────────
+
+/**
+ * Build a public.locations row from a location payload.
+ * tenant_id defaults to 'stride' (warehouse-global).
+ */
+function sbLocationRow_(loc) {
+  return {
+    tenant_id:  String(loc.tenantId || "stride"),
+    code:       String(loc.code || ""),
+    notes:      String(loc.notes || ""),
+    active:     loc.active !== false,
+    updated_by: String(loc.updatedBy || ""),
+    updated_at: new Date().toISOString()
+  };
+}
+
+/**
+ * Upsert one location row to Supabase. Best-effort.
+ */
+function resyncLocationToSupabase_(code, notes, active, actorEmail) {
+  try {
+    if (!code) return;
+    supabaseUpsert_("locations", sbLocationRow_({
+      code: code,
+      notes: notes || "",
+      active: active !== false,
+      updatedBy: actorEmail || ""
+    }));
+  } catch (e) {
+    Logger.log("resyncLocationToSupabase_ error (non-fatal): " + e);
+  }
+}
+
+/**
+ * Delete a location from Supabase by code. Best-effort.
+ */
+function deleteLocationFromSupabase_(code) {
+  try {
+    if (!code) return;
+    var supabaseUrl = prop_("SUPABASE_URL");
+    var serviceKey  = prop_("SUPABASE_SERVICE_KEY");
+    if (!supabaseUrl || !serviceKey) return;
+    var url = supabaseUrl + "/rest/v1/locations?tenant_id=eq.stride&code=eq." + encodeURIComponent(code);
+    UrlFetchApp.fetch(url, {
+      method: "delete",
+      headers: {
+        "apikey": serviceKey,
+        "Authorization": "Bearer " + serviceKey
+      },
+      muteHttpExceptions: true
+    });
+  } catch (e) {
+    Logger.log("deleteLocationFromSupabase_ error (non-fatal): " + e);
   }
 }
 
@@ -2924,6 +3184,30 @@ function doPost(e) {
           api_notifySupabase_(r, { tenant_id: effectiveId, entity_type: "inventory", entity_id: String(payload.itemId || ""), action_type: "update_inventory_item", requested_by: callerEmail, request_id: String(payload.requestId || "") });
           api_writeThrough_(r, "inventory", effectiveId, String(payload.itemId || ""));
           return r;
+        });
+
+      // ─── Session 68: Locations CRUD (staff + admin) ──────────────────────
+      case "createLocation":
+        return withStaffGuard_(callerEmail, function() {
+          return handleCreateLocation_(payload, callerEmail);
+        });
+      case "updateLocation":
+        return withStaffGuard_(callerEmail, function() {
+          return handleUpdateLocation_(payload, callerEmail);
+        });
+      case "deleteLocation":
+        return withStaffGuard_(callerEmail, function() {
+          return handleDeleteLocation_(payload, callerEmail);
+        });
+      case "bulkSyncLocationsToSupabase":
+        return withAdminGuard_(callerEmail, function() {
+          return handleBulkSyncLocationsToSupabase_();
+        });
+
+      // ─── Session 68: Cross-tenant batch location update (scanner + react) ─
+      case "batchUpdateItemLocations":
+        return withStaffGuard_(callerEmail, function() {
+          return handleBatchUpdateItemLocations_(payload, callerEmail);
         });
 
       case "refreshCaches":
@@ -4195,6 +4479,416 @@ function handleGetLocations_() {
   }
 
   return jsonResponse_({ locations: locations, count: locations.length });
+}
+
+/* ================================================================
+   Session 68 — Location CRUD handlers
+   CB Locations sheet is the authority; Supabase mirror is best-effort.
+   ================================================================ */
+
+function _openCbLocationsSheet_() {
+  var cbId = prop_("CB_SPREADSHEET_ID");
+  if (!cbId) throw new Error("CB_SPREADSHEET_ID not configured");
+  var ss = SpreadsheetApp.openById(cbId);
+  var sheet = ss.getSheetByName("Locations");
+  if (!sheet) {
+    sheet = ss.insertSheet("Locations");
+    sheet.getRange(1, 1, 1, 2).setValues([["Location", "Notes"]]);
+    sheet.setFrozenRows(1);
+  }
+  return sheet;
+}
+
+function _findLocationRow_(sheet, code) {
+  if (sheet.getLastRow() < 2) return -1;
+  var vals = sheet.getRange(2, 1, sheet.getLastRow() - 1, 1).getValues();
+  var target = String(code || "").trim().toUpperCase();
+  for (var i = 0; i < vals.length; i++) {
+    if (String(vals[i][0] || "").trim().toUpperCase() === target) return i + 2;
+  }
+  return -1;
+}
+
+/**
+ * Create a new location. Dedups case-insensitive.
+ * Payload: { code, notes? }
+ */
+function handleCreateLocation_(payload, callerEmail) {
+  var code = String(payload.code || "").trim();
+  var notes = String(payload.notes || "").trim();
+  if (!code) return errorResponse_("code is required", "MISSING_PARAM");
+
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(10000)) return errorResponse_("Could not acquire lock — try again", "LOCK_TIMEOUT");
+  try {
+    var sheet = _openCbLocationsSheet_();
+    var existing = _findLocationRow_(sheet, code);
+    if (existing > 0) {
+      // Exists — update notes if provided, otherwise return existing
+      if (notes) sheet.getRange(existing, 2).setValue(notes);
+      resyncLocationToSupabase_(code, notes, true, callerEmail);
+      return jsonResponse_({ success: true, code: code, existed: true });
+    }
+    sheet.appendRow([code, notes]);
+    resyncLocationToSupabase_(code, notes, true, callerEmail);
+    // Invalidate getLocations server cache (if present)
+    try { CacheService.getScriptCache().remove("api_locations"); } catch (_) {}
+    return jsonResponse_({ success: true, code: code, existed: false });
+  } catch (e) {
+    return errorResponse_("createLocation failed: " + e.message, "SERVER_ERROR");
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/**
+ * Update an existing location (rename + re-notes + activate/deactivate).
+ * Payload: { code, newCode?, notes?, active? }
+ * Active=false soft-deletes from Supabase but keeps the CB row (so historical
+ * billing references stay intact).
+ */
+function handleUpdateLocation_(payload, callerEmail) {
+  var code = String(payload.code || "").trim();
+  var newCode = payload.newCode != null ? String(payload.newCode).trim() : null;
+  var notes = payload.notes != null ? String(payload.notes).trim() : null;
+  var active = payload.active == null ? null : !(payload.active === false || payload.active === "false" || payload.active === "FALSE");
+  if (!code) return errorResponse_("code is required", "MISSING_PARAM");
+
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(10000)) return errorResponse_("Could not acquire lock — try again", "LOCK_TIMEOUT");
+  try {
+    var sheet = _openCbLocationsSheet_();
+    var row = _findLocationRow_(sheet, code);
+    if (row < 0) return errorResponse_("Location not found: " + code, "NOT_FOUND");
+
+    if (newCode && newCode.toUpperCase() !== code.toUpperCase()) {
+      sheet.getRange(row, 1).setValue(newCode);
+    }
+    if (notes != null) sheet.getRange(row, 2).setValue(notes);
+
+    var finalCode = newCode || code;
+    var finalNotes = notes != null ? notes : String(sheet.getRange(row, 2).getValue() || "");
+    var finalActive = active == null ? true : active;
+
+    // Supabase mirror:
+    // - If active==false: delete from locations (soft: remove from dropdown)
+    // - Else: upsert with new code/notes (if rename, also delete old row)
+    if (finalActive === false) {
+      deleteLocationFromSupabase_(code);
+    } else {
+      if (newCode && newCode.toUpperCase() !== code.toUpperCase()) {
+        deleteLocationFromSupabase_(code);
+      }
+      resyncLocationToSupabase_(finalCode, finalNotes, true, callerEmail);
+    }
+
+    try { CacheService.getScriptCache().remove("api_locations"); } catch (_) {}
+    return jsonResponse_({ success: true, code: finalCode });
+  } catch (e) {
+    return errorResponse_("updateLocation failed: " + e.message, "SERVER_ERROR");
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/**
+ * Delete a location (by code). Soft-delete: removes from CB Locations sheet
+ * and Supabase mirror so it stops appearing in dropdowns. Existing inventory
+ * rows still referencing it are unaffected.
+ */
+function handleDeleteLocation_(payload, callerEmail) {
+  var code = String(payload.code || "").trim();
+  if (!code) return errorResponse_("code is required", "MISSING_PARAM");
+
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(10000)) return errorResponse_("Could not acquire lock — try again", "LOCK_TIMEOUT");
+  try {
+    var sheet = _openCbLocationsSheet_();
+    var row = _findLocationRow_(sheet, code);
+    if (row < 0) return errorResponse_("Location not found: " + code, "NOT_FOUND");
+    sheet.deleteRow(row);
+    deleteLocationFromSupabase_(code);
+    try { CacheService.getScriptCache().remove("api_locations"); } catch (_) {}
+    Logger.log("Location deleted by " + callerEmail + ": " + code);
+    return jsonResponse_({ success: true, code: code });
+  } catch (e) {
+    return errorResponse_("deleteLocation failed: " + e.message, "SERVER_ERROR");
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/**
+ * Backfill / periodic resync of public.locations from CB Locations sheet.
+ * Admin-only endpoint. Safe to re-run.
+ */
+function handleBulkSyncLocationsToSupabase_() {
+  try {
+    var cbId = prop_("CB_SPREADSHEET_ID");
+    if (!cbId) return errorResponse_("CB_SPREADSHEET_ID not configured", "CONFIG_ERROR");
+    var ss = SpreadsheetApp.openById(cbId);
+    var sheet = ss.getSheetByName("Locations");
+    if (!sheet) return errorResponse_("Locations sheet not found in CB", "NOT_FOUND");
+
+    var data = sheet.getDataRange().getValues();
+    if (data.length < 2) return jsonResponse_({ success: true, synced: 0 });
+
+    var rows = [];
+    for (var i = 1; i < data.length; i++) {
+      var code = String(data[i][0] || "").trim();
+      var notes = String(data[i][1] || "").trim();
+      if (!code) continue;
+      rows.push(sbLocationRow_({ code: code, notes: notes, active: true }));
+    }
+    supabaseBatchUpsert_("locations", rows);
+    return jsonResponse_({ success: true, synced: rows.length });
+  } catch (e) {
+    return errorResponse_("bulkSyncLocationsToSupabase failed: " + e.message, "SERVER_ERROR");
+  }
+}
+
+/* ================================================================
+   Session 68 — Batch cross-tenant location update
+   Replaces the GAS scanner's sheet-scanning index (20-60s for a batch)
+   with a public.item_id_ledger lookup (~50ms). Then groups by tenant,
+   updates each client sheet's Inventory, writes to the "Move History"
+   tab, appends an audit line to the item's Item Notes field, mirrors
+   per item to Supabase inventory, and writes a row to central
+   public.move_history.
+   ================================================================ */
+
+/**
+ * Payload: { itemIds: string[], location: string, notes?: string }
+ * Returns: {
+ *   success: true,
+ *   updated: [{ itemId, tenantId, clientName, fromLocation, toLocation }],
+ *   notFound: [{ itemId, reason }],
+ *   errors:   [{ itemId, error }]
+ * }
+ */
+function handleBatchUpdateItemLocations_(payload, callerEmail) {
+  var itemIds = Array.isArray(payload.itemIds) ? payload.itemIds : [];
+  var location = String(payload.location || "").trim();
+  var moveNotes = String(payload.notes || "").trim();
+  if (itemIds.length === 0) return errorResponse_("itemIds is required", "MISSING_PARAM");
+  if (!location) return errorResponse_("location is required", "MISSING_PARAM");
+
+  // Normalize: trim, strip "ITEM:" prefix, dedup preserving order
+  var seen = {};
+  var normalized = [];
+  for (var i = 0; i < itemIds.length; i++) {
+    var id = String(itemIds[i] || "").trim().replace(/^ITEM:\s*/i, "");
+    if (!id || seen[id]) continue;
+    seen[id] = true;
+    normalized.push(id);
+  }
+  if (normalized.length === 0) return errorResponse_("No valid item IDs after normalization", "MISSING_PARAM");
+
+  var results = { updated: [], notFound: [], errors: [] };
+
+  // Step 1: Resolve item_id → tenant_id via item_id_ledger (single Supabase call)
+  var tenantByItem = {}; // itemId → tenantId
+  try {
+    var supabaseUrl = prop_("SUPABASE_URL");
+    var serviceKey = prop_("SUPABASE_SERVICE_KEY");
+    if (supabaseUrl && serviceKey) {
+      // Chunk large batches to keep URL under ~6KB
+      var CHUNK = 200;
+      for (var c = 0; c < normalized.length; c += CHUNK) {
+        var chunk = normalized.slice(c, c + CHUNK);
+        var inList = chunk.map(function(x) { return '"' + x.replace(/"/g, '\\"') + '"'; }).join(",");
+        var url = supabaseUrl + "/rest/v1/item_id_ledger?item_id=in.(" + encodeURIComponent(inList) + ")&select=item_id,tenant_id,status";
+        var resp = UrlFetchApp.fetch(url, {
+          headers: { "apikey": serviceKey, "Authorization": "Bearer " + serviceKey },
+          muteHttpExceptions: true
+        });
+        if (resp.getResponseCode() === 200) {
+          var rows = JSON.parse(resp.getContentText());
+          for (var r = 0; r < rows.length; r++) {
+            tenantByItem[rows[r].item_id] = rows[r].tenant_id;
+          }
+        } else {
+          Logger.log("ledger lookup failed: HTTP " + resp.getResponseCode() + " — " + resp.getContentText());
+        }
+      }
+    }
+  } catch (e) {
+    Logger.log("ledger lookup threw: " + e);
+  }
+
+  // Step 2: Group by tenant
+  var byTenant = {}; // tenantId → [itemId]
+  for (var j = 0; j < normalized.length; j++) {
+    var t = tenantByItem[normalized[j]];
+    if (!t) {
+      results.notFound.push({ itemId: normalized[j], reason: "not in item_id_ledger" });
+      continue;
+    }
+    if (!byTenant[t]) byTenant[t] = [];
+    byTenant[t].push(normalized[j]);
+  }
+
+  // Client name map (for results enrichment + move_history)
+  var clientNames = api_clientNameMap_ ? api_clientNameMap_() : {};
+
+  // Step 3: For each tenant, update Inventory + Move History tabs
+  var nowFmt = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "MM/dd/yyyy hh:mm a");
+  var isoNow = new Date().toISOString();
+  var moveHistoryRows = []; // for Supabase public.move_history
+
+  Object.keys(byTenant).forEach(function(tenantId) {
+    var ids = byTenant[tenantId];
+    try {
+      var ss = SpreadsheetApp.openById(tenantId);
+      var invSheet = ss.getSheetByName("Inventory");
+      if (!invSheet) {
+        for (var k = 0; k < ids.length; k++) {
+          results.errors.push({ itemId: ids[k], error: "Inventory sheet not found" });
+        }
+        return;
+      }
+      var hmap = api_getHeaderMap_(invSheet);
+      var idCol = hmap["Item ID"];
+      var locCol = hmap["Location"];
+      var notesCol = hmap["Item Notes"];
+      if (!idCol || !locCol) {
+        for (var k2 = 0; k2 < ids.length; k2++) {
+          results.errors.push({ itemId: ids[k2], error: "Inventory sheet missing Item ID or Location column" });
+        }
+        return;
+      }
+
+      // Build row map for this sheet (one pass)
+      var lastRow = invSheet.getLastRow();
+      if (lastRow < 2) {
+        for (var k3 = 0; k3 < ids.length; k3++) {
+          results.errors.push({ itemId: ids[k3], error: "Inventory sheet is empty" });
+        }
+        return;
+      }
+      var rowCount = lastRow - 1;
+      var idCol1 = invSheet.getRange(2, idCol, rowCount, 1).getValues();
+      var locRange = invSheet.getRange(2, locCol, rowCount, 1);
+      var locVals = locRange.getValues();
+      var notesRange = notesCol ? invSheet.getRange(2, notesCol, rowCount, 1) : null;
+      var notesVals = notesRange ? notesRange.getValues() : null;
+
+      var byItemRow = {};
+      for (var r = 0; r < idCol1.length; r++) {
+        var cell = String(idCol1[r][0] || "").trim();
+        if (cell) byItemRow[cell] = r;
+      }
+
+      var locChanged = false;
+      var notesChanged = false;
+      var tenantClientName = clientNames[tenantId] || tenantId;
+
+      for (var k4 = 0; k4 < ids.length; k4++) {
+        var itemId = ids[k4];
+        var idx = byItemRow[itemId];
+        if (idx === undefined) {
+          results.notFound.push({ itemId: itemId, reason: "item_id_ledger had " + tenantId + " but item not found in that sheet" });
+          continue;
+        }
+        var fromLoc = String(locVals[idx][0] || "").trim();
+        if (fromLoc !== location) {
+          locVals[idx][0] = location;
+          locChanged = true;
+          // Append audit line to Item Notes
+          if (notesVals) {
+            var prev = String(notesVals[idx][0] || "").trim();
+            var auditLine = "[" + nowFmt + "] Moved " + (fromLoc || "(blank)") + " → " + location + " by " + (callerEmail || "unknown") + (moveNotes ? " — " + moveNotes : "");
+            notesVals[idx][0] = prev ? (prev + "\n" + auditLine) : auditLine;
+            notesChanged = true;
+          }
+        }
+        results.updated.push({
+          itemId: itemId,
+          tenantId: tenantId,
+          clientName: tenantClientName,
+          fromLocation: fromLoc,
+          toLocation: location
+        });
+        moveHistoryRows.push({
+          tenant_id: tenantId,
+          item_id: itemId,
+          from_location: fromLoc || null,
+          to_location: location,
+          moved_by: callerEmail || "",
+          moved_at: isoNow,
+          source: "react_scanner",
+          notes: moveNotes || null
+        });
+      }
+
+      // Batch write location + notes back in one shot per sheet
+      if (locChanged) locRange.setValues(locVals);
+      if (notesChanged && notesRange) notesRange.setValues(notesVals);
+
+      // Append to this tenant's Move History tab (back-compat with existing scanner)
+      try {
+        var mhSheet = ss.getSheetByName("Move History");
+        if (!mhSheet) {
+          mhSheet = ss.insertSheet("Move History");
+          mhSheet.getRange(1, 1, 1, 6).setValues([["Timestamp", "Item ID", "From", "To", "User", "Notes"]]);
+          mhSheet.setFrozenRows(1);
+        }
+        var mhRows = [];
+        for (var m = 0; m < ids.length; m++) {
+          var upd = null;
+          for (var u = 0; u < results.updated.length; u++) {
+            if (results.updated[u].itemId === ids[m] && results.updated[u].tenantId === tenantId) { upd = results.updated[u]; break; }
+          }
+          if (!upd) continue;
+          mhRows.push([nowFmt, ids[m], upd.fromLocation || "", location, callerEmail || "", moveNotes || ""]);
+        }
+        if (mhRows.length) {
+          mhSheet.getRange(mhSheet.getLastRow() + 1, 1, mhRows.length, 6).setValues(mhRows);
+        }
+      } catch (mhErr) {
+        Logger.log("Move History sheet write failed for " + tenantId + ": " + mhErr);
+      }
+
+      SpreadsheetApp.flush();
+
+      // Write-through each changed item to Supabase inventory (best-effort, per item)
+      for (var v = 0; v < results.updated.length; v++) {
+        var u2 = results.updated[v];
+        if (u2.tenantId !== tenantId) continue;
+        try {
+          resyncEntityToSupabase_("inventory", tenantId, u2.itemId);
+        } catch (_) { /* best-effort */ }
+      }
+    } catch (err) {
+      for (var k5 = 0; k5 < ids.length; k5++) {
+        results.errors.push({ itemId: ids[k5], error: "tenant " + tenantId + " failed: " + err.message });
+      }
+    }
+  });
+
+  // Step 4: Write central move_history rows in one batch (best-effort).
+  // Uses supabaseBatchUpsert_ (safe since move_history PK is a generated uuid —
+  // no natural-key conflicts on insert).
+  if (moveHistoryRows.length) {
+    try {
+      supabaseBatchUpsert_("move_history", moveHistoryRows);
+    } catch (mhSbErr) {
+      Logger.log("move_history Supabase insert failed: " + mhSbErr);
+    }
+  }
+
+  return jsonResponse_({
+    success: true,
+    updated: results.updated,
+    notFound: results.notFound,
+    errors: results.errors,
+    counts: {
+      requested: normalized.length,
+      updated: results.updated.length,
+      notFound: results.notFound.length,
+      errors: results.errors.length
+    }
+  });
 }
 
 // ─── Batch 2 Handlers ───────────────────────────────────────────────────────
@@ -22700,6 +23394,7 @@ function handleCreateMarketingCampaign_(payload) {
       for (var h in found.hdrMap) obj[h] = found.data[found.rowIdx][found.hdrMap[h]];
       campaign = mkt_normalizeCampaign_(obj);
     }
+    resyncMarketingCampaignToSupabase_(campaignId);
 
     return jsonResponse_({ campaignId: campaignId, campaign: campaign });
   } finally {
@@ -22755,6 +23450,7 @@ function handleUpdateMarketingCampaign_(payload) {
   var updated = mkt_findCampaignRow_(ss, campaignId);
   var obj = {};
   for (var h in updated.hdrMap) obj[h] = updated.data[updated.rowIdx][updated.hdrMap[h]];
+  resyncMarketingCampaignToSupabase_(campaignId);
   return jsonResponse_({ campaign: mkt_normalizeCampaign_(obj) });
 }
 
@@ -22813,6 +23509,7 @@ function handleActivateCampaign_(payload) {
     var updated = mkt_findCampaignRow_(ss, campaignId);
     var uObj = {};
     for (var uh in updated.hdrMap) uObj[uh] = updated.data[updated.rowIdx][updated.hdrMap[uh]];
+    resyncMarketingCampaignToSupabase_(campaignId);
     return jsonResponse_({ campaign: mkt_normalizeCampaign_(uObj), enrolled: enrolled, validationNotes: "" });
   } finally {
     lock.releaseLock();
@@ -22897,6 +23594,7 @@ function handlePauseCampaign_(payload) {
   var uObj = {};
   for (var h in found.hdrMap) uObj[h] = found.data[found.rowIdx][found.hdrMap[h]];
   uObj["Status"] = "Paused";
+  resyncMarketingCampaignToSupabase_(campaignId);
   return jsonResponse_({ campaign: mkt_normalizeCampaign_(uObj) });
 }
 
@@ -22945,6 +23643,7 @@ function handleCompleteCampaign_(payload) {
   var uObj = {};
   for (var h in found.hdrMap) uObj[h] = found.data[found.rowIdx][found.hdrMap[h]];
   uObj["Status"] = "Complete";
+  resyncMarketingCampaignToSupabase_(campaignId);
   return jsonResponse_({ campaign: mkt_normalizeCampaign_(uObj), contactsCompleted: contactsCompleted });
 }
 
@@ -23170,6 +23869,7 @@ function handleRunCampaignNow_(payload) {
     mkt_updateCampaignStats_(ss, campaignId);
     mkt_patchRow_(found.sheet, found.sheetRow, found.hdrMap, { "Last Run Date": nowStr, "Last Error": errors.length > 0 ? errors[0] : "" });
 
+    resyncMarketingCampaignToSupabase_(campaignId);
     return jsonResponse_({ sent: sent, skipped: skipped, failed: failed, errors: errors });
   } finally {
     lock.releaseLock();
@@ -23213,6 +23913,19 @@ function handleDeleteCampaign_(payload) {
 
     // Delete campaign row
     found.sheet.deleteRow(found.sheetRow);
+
+    // Delete from Supabase too (best-effort)
+    try {
+      var url = prop_("SUPABASE_URL");
+      var key = prop_("SUPABASE_SERVICE_ROLE_KEY");
+      if (url && key) {
+        UrlFetchApp.fetch(url + "/rest/v1/marketing_campaigns?campaign_id=eq." + encodeURIComponent(campaignId), {
+          method: "DELETE",
+          headers: { "Authorization": "Bearer " + key, "apikey": key, "Prefer": "return=minimal" },
+          muteHttpExceptions: true
+        });
+      }
+    } catch (dErr) { Logger.log("marketing_campaigns delete (non-fatal): " + dErr); }
 
     return jsonResponse_({ deleted: true, contactsRemoved: contactsRemoved });
   } finally {
@@ -23530,6 +24243,7 @@ function handleCreateMarketingTemplate_(payload) {
   sheet.insertRowBefore(insertRow);
   sheet.getRange(insertRow, 1, 1, numCols).setValues([row]);
 
+  resyncMarketingTemplateToSupabase_(name);
   return jsonResponse_({
     template: { name: name, subject: subject, previewText: payload.previewText || "", htmlBody: htmlBody, version: payload.version || "1.0", type: tplType, active: tplActive !== "FALSE" }
   });
@@ -23559,6 +24273,7 @@ function handleUpdateMarketingTemplate_(payload) {
   var updated = mkt_findTemplateRow_(ss, name);
   var obj = {};
   for (var h in updated.hdrMap) obj[h] = updated.data[updated.rowIdx][updated.hdrMap[h]];
+  resyncMarketingTemplateToSupabase_(name);
   return jsonResponse_({
     template: {
       name: name,
@@ -23627,6 +24342,7 @@ function handleUpdateMarketingSettings_(payload) {
     });
   } finally {
     lock.releaseLock();
+    resyncMarketingSettingsToSupabase_();
   }
 }
 
