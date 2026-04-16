@@ -1,7 +1,7 @@
 # Stride GS App — Build Status & Continuation Guide
 
-**Last updated:** 2026-04-16 (session 70 — Three repair fixes: Work Order PDF tokens, respondToRepairQuote GET stub, VIEW INSPECTION PHOTOS source-task folder lookup)
-**StrideAPI.gs:** v38.60.0 (Web App v279)
+**Last updated:** 2026-04-16 (session 70 — Three repair fixes + handleGetBatch_ field parity so client-role users see the same data as staff/admin on detail panels)
+**StrideAPI.gs:** v38.60.1 (Web App v280)
 **Import.gs (client):** v4.3.0 (rolled out to all 49 active clients; Reference column now imported)
 **Emails.gs (client):** v4.3.0 (rolled out to all 49 active clients — email deep links CTA button)
 **Shipments.gs (client):** v4.2.1 (rolled out to all 49 active clients — SHIPMENT_RECEIVED uses standalone /#/shipments/:shipmentNo)
@@ -76,6 +76,42 @@ Login, Dashboard, Inventory, Receiving, Shipments, Tasks, Repairs, Will Calls, B
 ---
 
 ## RECENT CHANGES (2026-04-16 session 70)
+
+### Session 70 follow-up: handleGetBatch_ field parity
+
+Client-role users (including "Viewing as" impersonation) were seeing blank
+fields in Inventory / Tasks / Repairs / Will Calls / Shipments / Billing
+detail panels because `handleGetBatch_` emitted a smaller payload than the
+individual-fetch endpoints. The symptom that prompted this fix: Reference
+column blank on the client's Inventory view even though staff/admin saw it
+populated. Root cause: the batch path hardcoded many fields to empty while
+skipping them in the backend payload entirely.
+
+**Backend (StrideAPI.gs v38.60.1 → Web App v280):** `handleGetBatch_` now
+emits the full ApiInventoryItem / ApiTask / ApiRepair / ApiWillCall /
+ApiShipment / ApiBillingRow field set. WC `items` array intentionally still
+loaded on-demand by the detail panel. Bandwidth impact negligible — small
+string fields on rows already being scanned.
+
+**Frontend (bundle `index-BdBuunm2.js`):**
+- `BatchInventoryItem` / `BatchTask` / `BatchRepair` / `BatchWillCall` /
+  `BatchShipment` / `BatchBillingRow` interfaces extended with the new
+  optional fields (all backward compatible)
+- Hooks `useInventory`, `useTasks`, `useRepairs`, `useWillCalls`,
+  `useShipments`, `useBilling` — batch-mapping code now passes `b.reference`,
+  `b.itemNotes`, `b.carrier`, `b.repairNotes`, `b.pickupPhone`, etc. through
+  instead of hardcoding `''` / `false` / `null`
+
+**Fields that were blank for client-role users and are now populated:**
+
+| Entity | Fields added to batch |
+|---|---|
+| Inventory | reference, itemNotes, taskNotes, needsInspection, needsAssembly, carrier, trackingNumber, invoiceUrl |
+| Tasks | itemNotes, taskNotes, cancelledAt |
+| Repairs | itemClass, location, sidemark, taskNotes, createdBy, quoteSentDate, approved, scheduledDate, startDate, partsCost, laborHours, repairResult, finalAmount, invoiceId, itemNotes, repairNotes |
+| Will Calls | createdBy, pickupPhone, requestedBy, actualPickupDate, notes, totalWcFee, shipmentFolderUrl |
+| Shipments | photosUrl, invoiceUrl |
+| Billing | client, category, itemClass, taskId, repairId, shipmentNo, itemNotes, invoiceDate, invoiceUrl |
 
 ### Session 70: Three repair fixes
 

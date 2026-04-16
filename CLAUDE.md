@@ -476,7 +476,7 @@ These are the top decisions that affect code generation on every task. For the f
 
 ## Current Versions
 
-- **StrideAPI.gs:** v38.60.0 (Web App v279) — session 70: Repair Work Order PDF full-token fix + defensive `doGet` stub for `respondToRepairQuote` (suppresses spurious "Unknown action" banner in RepairDetailPanel while POST path continues unchanged)
+- **StrideAPI.gs:** v38.60.1 (Web App v280) — session 70 + follow-up: Repair Work Order PDF full-token fix + defensive `doGet` stub for `respondToRepairQuote` + `handleGetBatch_` field parity with individual-fetch (client-role users no longer see blank Reference/Item Notes/Carrier/Repair Notes/etc. on detail panels)
 - **StaxAutoPay.gs:** v4.6.0 — session 69 Phase 2f: Supabase write-through at end of `_prepareEligiblePendingInvoicesForChargeRun` (invoices + run log) and `_executeChargeRun` (invoices + charge log + exceptions + run log). **Requires SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY Script Properties on the Stax Auto Pay project** — see open items.
 - **Triggers.gs (client):** v4.7.1 — session 70: VIEW INSPECTION PHOTOS button in REPAIR_QUOTE email now opens the Source Task folder (looks up task row in Tasks sheet and reads Task ID cell's hyperlink, set by `startTask_` to the task's Drive folder). Previously fell back to the Item folder because Source Task ID stores plain text, not a hyperlink.
 - **Import.gs (client):** v4.3.0 — adds Reference column mapping (rolled out to all 49 active clients, session 70)
