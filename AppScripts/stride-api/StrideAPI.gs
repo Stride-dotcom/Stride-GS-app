@@ -884,7 +884,10 @@ function supabaseUpsert_(table, data) {
                         will_calls: "tenant_id,wc_number", shipments: "tenant_id,shipment_number", billing: "tenant_id,ledger_row_id",
                         claims: "claim_id", cb_users: "email", marketing_contacts: "email",
                         marketing_campaigns: "campaign_id", marketing_templates: "name", marketing_settings: "id",
-                        stax_invoices: "qb_invoice_no", stax_customers: "qb_name" }[table] || "";
+                        stax_invoices: "qb_invoice_no", stax_customers: "qb_name",
+                        stax_charges: "timestamp,qb_invoice_no,txn_id",
+                        stax_exceptions: "timestamp,qb_invoice_no",
+                        stax_run_log: "timestamp,fn,summary" }[table] || "";
     var postUrl = url + "/rest/v1/" + table;
     if (conflictCol) postUrl += "?on_conflict=" + conflictCol;
     var resp = UrlFetchApp.fetch(postUrl, {
@@ -939,7 +942,10 @@ function supabaseBatchUpsert_(table, rows) {
                         will_calls: "tenant_id,wc_number", shipments: "tenant_id,shipment_number", billing: "tenant_id,ledger_row_id",
                         claims: "claim_id", cb_users: "email", marketing_contacts: "email",
                         marketing_campaigns: "campaign_id", marketing_templates: "name", marketing_settings: "id",
-                        stax_invoices: "qb_invoice_no", stax_customers: "qb_name" }[table] || "";
+                        stax_invoices: "qb_invoice_no", stax_customers: "qb_name",
+                        stax_charges: "timestamp,qb_invoice_no,txn_id",
+                        stax_exceptions: "timestamp,qb_invoice_no",
+                        stax_run_log: "timestamp,fn,summary" }[table] || "";
 
     // Supabase REST API handles arrays up to ~1000 rows; chunk at 50 for reliability
     var CHUNK = 50;
