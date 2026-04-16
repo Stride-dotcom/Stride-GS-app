@@ -38,7 +38,11 @@ export function TopBar({ isMobile, onMenuToggle }: TopBarProps) {
           flexShrink: 0,
           position: 'sticky',
           top: 0,
-          zIndex: 10,
+          // v38.61.1 — was 10; bumped so the mobile hamburger is never covered
+          // by in-page sticky headers (Dashboard table thead uses zIndex: 2).
+          // Still below the mobile sidebar overlay (zIndex 40/41) so the menu
+          // closes correctly by tapping the backdrop.
+          zIndex: 30,
           gap: 8,
         }}
       >

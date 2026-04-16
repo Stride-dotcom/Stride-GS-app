@@ -10,7 +10,7 @@ import { ProcessingOverlay } from './ProcessingOverlay';
 import { getPanelContainerStyle, panelBackdropStyle } from './panelStyles';
 import { useIsMobile } from '../../hooks/useIsMobile';
 import { useResizablePanel } from '../../hooks/useResizablePanel';
-import { postSendRepairQuote, postRespondToRepairQuote, postCompleteRepair, postStartRepair, postCancelRepair, isApiConfigured } from '../../lib/api';
+import { postSendRepairQuote, postRespondToRepairQuote, postCompleteRepair, postStartRepair, postCancelRepair, postUpdateRepairNotes, isApiConfigured } from '../../lib/api';
 import type { ApiRepair, SendRepairQuoteResponse, RespondToRepairQuoteResponse, CompleteRepairResponse, StartRepairResponse } from '../../lib/api';
 import { writeSyncFailed } from '../../lib/syncEvents';
 import { useAuth } from '../../contexts/AuthContext';
@@ -77,6 +77,48 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
 
   // Start Repair state
   const [startResult, setStartResult] = useState<StartRepairResponse | null>(null);
+
+  // v38.61.1 — Save Notes (before Start Repair) state. Separate from `submitting`
+  // so the Save Notes button doesn't disable/spin the Approve/Start/Complete buttons.
+  const [savingNotes, setSavingNotes] = useState(false);
+  const [notesSavedAt, setNotesSavedAt] = useState<number | null>(null);
+
+  // Track the last-saved notes so the Save button can enable only when dirty.
+  const [savedRepairNotes, setSavedRepairNotes] = useState(repair.repairNotes || '');
+  useEffect(() => { setSavedRepairNotes(repair.repairNotes || ''); }, [repair.repairNotes]);
+  const notesDirty = repairNotes !== savedRepairNotes;
+
+  // ─── Save Repair Notes (available on Approved / pre-Start) ─────────────────
+  const handleSaveNotes = async () => {
+    setSubmitError(null);
+    const clientSheetId = repair.clientSheetId;
+    const demoMode = !isApiConfigured() || !clientSheetId;
+    if (demoMode) {
+      setSavedRepairNotes(repairNotes);
+      setNotesSavedAt(Date.now());
+      return;
+    }
+    setSavingNotes(true);
+    try {
+      const resp = await postUpdateRepairNotes(
+        { repairId: repair.repairId, repairNotes },
+        clientSheetId
+      );
+      if (!resp.ok || !resp.data?.success) {
+        setSubmitError(resp.error || resp.data?.error || 'Failed to save notes. Please try again.');
+      } else {
+        setSavedRepairNotes(repairNotes);
+        setNotesSavedAt(Date.now());
+        onRepairUpdated?.();
+        // Clear "Saved" indicator after a few seconds
+        setTimeout(() => setNotesSavedAt(n => (n && Date.now() - n >= 2500) ? null : n), 3000);
+      }
+    } catch (err) {
+      setSubmitError(err instanceof Error ? err.message : 'Network error. Please try again.');
+    } finally {
+      setSavingNotes(false);
+    }
+  };
 
   // ─── Send Quote ────────────────────────────────────────────────────────────
   const handleSendQuote = async () => {
@@ -366,7 +408,33 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
           <div style={{ marginBottom: 16 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}><Wrench size={14} color={theme.colors.orange} /><span style={{ fontSize: 12, fontWeight: 600 }}>Repair Notes</span></div>
             {isActive && !completed ? (
-              <textarea value={repairNotes} onChange={e => setRepairNotes(e.target.value)} rows={3} placeholder="Document the repair work performed..." style={{ ...input, resize: 'vertical' }} />
+              <>
+                <textarea value={repairNotes} onChange={e => setRepairNotes(e.target.value)} rows={3} placeholder="Billing / warehouse instructions (e.g. 'Bill to Corbin @ Lawson Fenning')…" style={{ ...input, resize: 'vertical' }} />
+                {/* v38.61.1 — inline Save button for pre-Start notes. Completing
+                    the repair also persists notes via completeRepair, so we only
+                    surface this when there are unsaved edits. */}
+                <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 8, marginTop: 6, minHeight: 20 }}>
+                  {notesSavedAt && !notesDirty && (
+                    <span style={{ fontSize: 11, color: '#15803D', fontWeight: 600 }}>✓ Saved</span>
+                  )}
+                  <button
+                    onClick={handleSaveNotes}
+                    disabled={!notesDirty || savingNotes}
+                    style={{
+                      padding: '5px 12px', fontSize: 11, fontWeight: 600,
+                      border: `1px solid ${notesDirty && !savingNotes ? theme.colors.orange : theme.colors.border}`,
+                      borderRadius: 6,
+                      background: notesDirty && !savingNotes ? theme.colors.orange : '#fff',
+                      color: notesDirty && !savingNotes ? '#fff' : theme.colors.textMuted,
+                      cursor: notesDirty && !savingNotes ? 'pointer' : 'not-allowed',
+                      fontFamily: 'inherit', display: 'inline-flex', alignItems: 'center', gap: 5,
+                    }}
+                  >
+                    {savingNotes && <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} />}
+                    {savingNotes ? 'Saving…' : 'Save Notes'}
+                  </button>
+                </div>
+              </>
             ) : (
               <div style={{ fontSize: 13, color: repairNotes ? theme.colors.text : theme.colors.textMuted, lineHeight: 1.5 }}>{repairNotes || 'No notes'}</div>
             )}

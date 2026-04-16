@@ -9,7 +9,6 @@ import { entityEvents } from '../lib/entityEvents';
 import { TemplateEditor } from '../components/shared/TemplateEditor';
 import { ConfirmDialog } from '../components/shared/ConfirmDialog';
 import { useAuth } from '../contexts/AuthContext';
-import { AutocompleteSelect } from '../components/shared/AutocompleteSelect';
 import { AutocompleteInput } from '../components/shared/AutocompleteInput';
 import type { ApiClient, OnboardClientResponse, UpdateClientResponse, SyncSettingsResponse, RefreshCachesResponse, RunOnClientsResponse, TestSendResult } from '../lib/api';
 import { OnboardClientModal } from '../components/shared/OnboardClientModal';
@@ -456,8 +455,12 @@ export function Settings() {
   const [addUserOpen, setAddUserOpen] = useState(false);
   const [newUserEmail, setNewUserEmail] = useState('');
   const [newUserRole, setNewUserRole] = useState<'admin' | 'staff' | 'client'>('staff');
-  const [newUserClientName, setNewUserClientName] = useState('');
-  const [newUserClientSheetId, setNewUserClientSheetId] = useState('');
+  // v38.61.1 — multi-client support on Add User (was single-select).
+  // Each user can now be assigned N client accounts via a chip picker.
+  // CSV-joined on submit; backend already accepts CSV in `clientName`/`clientSheetId`.
+  const [newUserClientNames, setNewUserClientNames] = useState<string[]>([]);
+  const [newUserClientIds, setNewUserClientIds] = useState<string[]>([]);
+  const [newUserAddClientDropdown, setNewUserAddClientDropdown] = useState(false);
   const [addUserLoading, setAddUserLoading] = useState(false);
   const [addUserError, setAddUserError] = useState('');
   const [impersonatingEmail, setImpersonatingEmail] = useState<string | null>(null);
@@ -642,24 +645,41 @@ export function Settings() {
 
   async function handleAddUser() {
     if (!newUserEmail.trim()) { setAddUserError('Email is required.'); return; }
+    if (newUserRole === 'client' && newUserClientIds.length === 0) {
+      setAddUserError('Client-role users must have at least one client account.');
+      return;
+    }
     setAddUserLoading(true);
     setAddUserError('');
     const result = await addUser(
       newUserEmail.trim().toLowerCase(),
       newUserRole,
-      newUserClientName.trim() || undefined,
-      newUserClientSheetId.trim() || undefined
+      newUserClientNames.length ? newUserClientNames.join(', ') : undefined,
+      newUserClientIds.length ? newUserClientIds.join(', ') : undefined
     );
     setAddUserLoading(false);
     if (result.success) {
       setAddUserOpen(false);
       setNewUserEmail(''); setNewUserRole('staff');
-      setNewUserClientName(''); setNewUserClientSheetId('');
+      setNewUserClientNames([]); setNewUserClientIds([]);
+      setNewUserAddClientDropdown(false);
       setAddUserSuccess('User created — they can use "Forgot Password" on the login page to set up their password.');
       setTimeout(() => setAddUserSuccess(''), 8000);
     } else {
       setAddUserError(result.error ?? 'Failed to add user');
     }
+  }
+
+  function addNewUserClientAccess(clientName: string, clientSheetId: string) {
+    if (newUserClientIds.includes(clientSheetId)) return;
+    setNewUserClientNames(prev => [...prev, clientName]);
+    setNewUserClientIds(prev => [...prev, clientSheetId]);
+    setNewUserAddClientDropdown(false);
+  }
+
+  function removeNewUserClientAccess(idx: number) {
+    setNewUserClientNames(prev => prev.filter((_, i) => i !== idx));
+    setNewUserClientIds(prev => prev.filter((_, i) => i !== idx));
   }
 
   // handleToggleActive removed — active toggle is now in the edit panel
@@ -2096,22 +2116,44 @@ export function Settings() {
                   </div>
                   {newUserRole === 'client' && (
                     <div style={{ marginBottom: 10 }}>
-                      <label style={fieldLabel}>Client Account</label>
-                      <AutocompleteSelect
-                        value={newUserClientSheetId}
-                        onChange={id => {
-                          setNewUserClientSheetId(id);
-                          const match = apiClients.find(c => c.spreadsheetId === id);
-                          setNewUserClientName(match?.name || '');
-                        }}
-                        placeholder="Select a client account…"
-                        disabled={addUserLoading}
-                        options={apiClients
-                          .filter(c => c.active !== false)
-                          .sort((a, b) => a.name.localeCompare(b.name))
-                          .map(c => ({ value: c.spreadsheetId, label: c.name }))}
-                        style={{ width: '100%' }}
-                      />
+                      <label style={fieldLabel}>Client Accounts</label>
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, minHeight: 32, padding: '6px 10px', border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', alignItems: 'center' }}>
+                        {newUserClientNames.length === 0 && <span style={{ fontSize: 11, color: theme.colors.textMuted }}>No clients assigned</span>}
+                        {newUserClientNames.map((name, idx) => (
+                          <span key={newUserClientIds[idx] || idx} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '2px 8px', borderRadius: 10, background: theme.colors.orangeLight, color: theme.colors.orange, fontSize: 11, fontWeight: 600 }}>
+                            {name}
+                            <button onClick={() => removeNewUserClientAccess(idx)} disabled={addUserLoading} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 14, color: theme.colors.orange, padding: 0, lineHeight: 1 }}>&times;</button>
+                          </span>
+                        ))}
+                        <button
+                          onClick={() => setNewUserAddClientDropdown(!newUserAddClientDropdown)}
+                          disabled={addUserLoading}
+                          style={{ background: 'none', border: `1px dashed ${theme.colors.border}`, borderRadius: 8, padding: '2px 10px', fontSize: 11, cursor: 'pointer', color: theme.colors.textMuted, fontFamily: 'inherit' }}
+                        >
+                          + Add
+                        </button>
+                      </div>
+                      {newUserAddClientDropdown && (
+                        <div style={{ marginTop: 6, maxHeight: 200, overflowY: 'auto', border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', boxShadow: '0 4px 12px rgba(0,0,0,0.1)' }}>
+                          {apiClients
+                            .filter(c => c.active !== false && !newUserClientIds.includes(c.spreadsheetId))
+                            .sort((a, b) => a.name.localeCompare(b.name))
+                            .map(c => (
+                              <button
+                                key={c.spreadsheetId}
+                                onClick={() => addNewUserClientAccess(c.name, c.spreadsheetId)}
+                                style={{ display: 'block', width: '100%', textAlign: 'left', padding: '8px 12px', fontSize: 12, border: 'none', borderBottom: `1px solid ${theme.colors.borderLight}`, background: '#fff', cursor: 'pointer', fontFamily: 'inherit' }}
+                                onMouseOver={e => (e.currentTarget.style.background = theme.colors.bgSubtle)}
+                                onMouseOut={e => (e.currentTarget.style.background = '#fff')}
+                              >
+                                {c.name}
+                              </button>
+                            ))}
+                          {apiClients.filter(c => c.active !== false && !newUserClientIds.includes(c.spreadsheetId)).length === 0 && (
+                            <div style={{ padding: '8px 12px', fontSize: 11, color: theme.colors.textMuted }}>All clients already assigned</div>
+                          )}
+                        </div>
+                      )}
                     </div>
                   )}
                   {addUserError && (
@@ -2129,7 +2171,7 @@ export function Settings() {
                       {addUserLoading ? 'Adding…' : 'Add User'}
                     </button>
                     <button
-                      onClick={() => { setAddUserOpen(false); setNewUserEmail(''); setNewUserRole('staff'); setNewUserClientName(''); setNewUserClientSheetId(''); setAddUserError(''); }}
+                      onClick={() => { setAddUserOpen(false); setNewUserEmail(''); setNewUserRole('staff'); setNewUserClientNames([]); setNewUserClientIds([]); setNewUserAddClientDropdown(false); setAddUserError(''); }}
                       style={{ padding: '8px 14px', fontSize: 12, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', fontFamily: 'inherit', color: theme.colors.textSecondary }}
                     >
                       Cancel

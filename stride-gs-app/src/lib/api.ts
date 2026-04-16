@@ -1318,6 +1318,36 @@ export function postRespondToRepairQuote(
   );
 }
 
+// ─── updateRepairNotes (v38.61.1) — Save Repair Notes before Start ───────────
+// Used on Approved status so office can stage billing/warehouse instructions
+// ("Bill to Corbin @ Lawson") between Approve and Start Repair. The existing
+// completeRepair endpoint also accepts repairNotes, but only at completion time.
+
+export interface UpdateRepairNotesPayload {
+  repairId: string;
+  repairNotes: string;
+}
+
+export interface UpdateRepairNotesResponse {
+  success: boolean;
+  repairId?: string;
+  repairNotes?: string;
+  error?: string;
+}
+
+export function postUpdateRepairNotes(
+  payload: UpdateRepairNotesPayload,
+  clientSheetId: string,
+  signal?: AbortSignal
+) {
+  return apiPost<UpdateRepairNotesResponse>(
+    'updateRepairNotes',
+    payload as unknown as Record<string, unknown>,
+    { clientSheetId },
+    { signal }
+  );
+}
+
 // ─── Phase 7B #5: Complete Repair ────────────────────────────────────────────
 
 export interface CompleteRepairPayload {

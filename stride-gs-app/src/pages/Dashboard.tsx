@@ -594,7 +594,7 @@ export function Dashboard() {
         <div style={{ width: 32, height: 32, border: `3px solid #E5E7EB`, borderTopColor: theme.colors.orange, borderRadius: '50%', animation: 'spin 0.8s linear infinite' }} />
         <div style={{ textAlign: 'center' }}>
           <div style={{ fontSize: 14, fontWeight: 600, color: theme.colors.textPrimary }}>Loading Dashboard</div>
-          <div style={{ fontSize: 12, color: theme.colors.textMuted, marginTop: 4 }}>Fetching open jobs across all clients…</div>
+          <div style={{ fontSize: 12, color: theme.colors.textMuted, marginTop: 4 }}>{user?.role === 'client' ? 'Loading…' : 'Fetching open jobs across all clients…'}</div>
         </div>
         <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
       </div>

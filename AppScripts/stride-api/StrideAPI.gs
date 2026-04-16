@@ -1,5 +1,18 @@
 /* ===================================================
-   StrideAPI.gs — v38.62.0 — 2026-04-16 PST — Users resync tool + lookupUser whitespace fix
+   StrideAPI.gs — v38.63.0 — 2026-04-16 PST — Room→Reference email swap + updateRepairNotes endpoint
+   v38.63.0: FEAT — Drop "Room" column from email/PDF item tables system-wide,
+             Reference (PO/client-facing identifier) takes its place.
+             `api_buildSingleItemTableHtml_` last positional arg is now
+             `reference` (was `room`). All 5 StrideAPI call sites updated to
+             pass `invItem.reference` (new field on `api_findInventoryItem_`
+             return). TRANSFER_RECEIVED email `trCols` swapped too. Work Order
+             PDFs now emit `{{ITEM_REFERENCE}}` alongside legacy `{{ITEM_ROOM}}`
+             so templates can be retired at the user's pace.
+             FEAT — New `updateRepairNotes` POST endpoint + `handleUpdateRepairNotes_`
+             handler. Lets the office save billing/warehouse instructions
+             ("Bill to Corbin @ Lawson Fenning") on an Approved repair BEFORE
+             Start Repair. Previously Repair Notes were only persisted by
+             completeRepair, so intermediate edits were lost.
    v38.62.0: NEW — handleResyncUsers_ admin endpoint reconciles CB Users (source
              of truth) with Supabase cb_users mirror AND (optionally) prunes
              Supabase auth.users orphans. Supports dryRun preview. Fixes the
@@ -3293,6 +3306,17 @@ function doPost(e) {
           var r = handleRespondToRepairQuote_(effectiveId, payload);
           invalidateClientCache_(effectiveId);
           api_notifySupabase_(r, { tenant_id: effectiveId, entity_type: "repair", entity_id: String(payload.repairId || ""), action_type: "respond_repair_quote", requested_by: callerEmail, request_id: String(payload.requestId || "") });
+          api_writeThrough_(r, "repair", effectiveId, String(payload.repairId || ""));
+          return r;
+        });
+
+      case "updateRepairNotes":
+        // v38.61.1 — allow saving Repair Notes BEFORE Start Repair so office
+        // can stage billing/warehouse instructions ("Bill to Corbin @ Lawson")
+        // between Approve and Start. Notes are plain-text, low-risk, no lock.
+        return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
+          var r = handleUpdateRepairNotes_(effectiveId, payload);
+          invalidateClientCache_(effectiveId);
           api_writeThrough_(r, "repair", effectiveId, String(payload.repairId || ""));
           return r;
         });
@@ -8593,6 +8617,7 @@ function api_findInventoryItem_(ss, itemId) {
       location:    getF("Location"),
       sidemark:    getF("Sidemark"),
       room:        getF("Room"),
+      reference:   getF("Reference"),
       status:      getF("Status"),
       qty:         (qtyRaw !== "" && qtyRaw !== null) ? (Number(qtyRaw) || 1) : 1,
       row:         rowNum,
@@ -8842,8 +8867,8 @@ function handleCompleteTask_(clientSheetId, payload) {
         var location = invItem ? invItem.location    : getVal("Location");
         var sidemark = invItem ? invItem.sidemark    : getVal("Sidemark");
         var qty = invItem ? invItem.qty : (getVal("Qty") || 1);
-        var room = invItem ? invItem.room : "";
-        var itemTableHtml = api_buildSingleItemTableHtml_(itemId, desc, vendor, "", location, sidemark, qty, room);
+        var reference = invItem ? (invItem.reference || "") : getVal("Reference");
+        var itemTableHtml = api_buildSingleItemTableHtml_(itemId, desc, vendor, "", location, sidemark, qty, reference);
 
         var taskFolderUrl = "";
         try {
@@ -9008,8 +9033,14 @@ function api_buildItemsHtmlTable_(items) {
   return h + '</table>';
 }
 
-/** Builds single-item HTML table for task/repair emails. Matches SH_buildItemTableHtml_ format. */
-function api_buildSingleItemTableHtml_(itemId, description, vendor, itemClass, location, sidemark, qty, room) {
+/** Builds single-item HTML table for task/repair emails. Matches SH_buildItemTableHtml_ format.
+ *  v38.61.1 — last column is Reference (was Room). Reference is the PO/client-
+ *  facing identifier office + warehouse need; Room was internal-only.
+ *  NOTE: 8th positional argument is now `reference`. Most call sites were
+ *  passing `invItem.room` — all updated in same patch. If you add a new call
+ *  site, pass `invItem.reference || ""`.
+ */
+function api_buildSingleItemTableHtml_(itemId, description, vendor, itemClass, location, sidemark, qty, reference) {
   return '<table style="border-collapse:collapse;width:100%;font-size:13px;margin:8px 0;">' +
     '<tr style="background:#f3f4f6;">' +
     '<th style="padding:6px 10px;border:1px solid #e5e7eb;text-align:left;">Item ID</th>' +
@@ -9017,14 +9048,14 @@ function api_buildSingleItemTableHtml_(itemId, description, vendor, itemClass, l
     '<th style="padding:6px 10px;border:1px solid #e5e7eb;text-align:left;">Vendor</th>' +
     '<th style="padding:6px 10px;border:1px solid #e5e7eb;text-align:left;">Description</th>' +
     '<th style="padding:6px 10px;border:1px solid #e5e7eb;text-align:left;">Sidemark</th>' +
-    '<th style="padding:6px 10px;border:1px solid #e5e7eb;text-align:left;">Room</th></tr>' +
+    '<th style="padding:6px 10px;border:1px solid #e5e7eb;text-align:left;">Reference</th></tr>' +
     '<tr>' +
     '<td style="padding:6px 10px;border:1px solid #e5e7eb;">' + api_esc_(itemId || "") + '</td>' +
     '<td style="padding:6px 10px;border:1px solid #e5e7eb;text-align:center;">' + (qty || 1) + '</td>' +
     '<td style="padding:6px 10px;border:1px solid #e5e7eb;">' + api_esc_(vendor || "") + '</td>' +
     '<td style="padding:6px 10px;border:1px solid #e5e7eb;">' + api_esc_(description || "") + '</td>' +
     '<td style="padding:6px 10px;border:1px solid #e5e7eb;">' + api_esc_(sidemark || "") + '</td>' +
-    '<td style="padding:6px 10px;border:1px solid #e5e7eb;">' + api_esc_(room || "") + '</td></tr></table>';
+    '<td style="padding:6px 10px;border:1px solid #e5e7eb;">' + api_esc_(reference || "") + '</td></tr></table>';
 }
 
 /** Builds WC items HTML table for will call emails. */
@@ -9220,7 +9251,7 @@ function handleRequestRepairQuote_(clientSheetId, payload, callerEmail) {
         var itemTableHtml = api_buildSingleItemTableHtml_(
           itemId, invItem.description || "", invItem.vendor || "",
           invItem.itemClass || "", invItem.location || "", invItem.sidemark || "",
-          invItem.qty || 1, invItem.room || ""
+          invItem.qty || 1, invItem.reference || ""
         );
         // Try to get photos folder URL from inventory Item ID hyperlink
         var photosUrl = "";
@@ -9388,8 +9419,8 @@ function handleSendRepairQuote_(clientSheetId, payload) {
       var sidemark    = getVal("Sidemark");
       var invItem     = api_findInventoryItem_(ss, itemId);
       var qty         = invItem ? (invItem.qty || 1) : 1;
-      var room        = invItem ? (invItem.room || "") : "";
-      var itemTableHtml = api_buildSingleItemTableHtml_(itemId, desc, vendor, itemClass, location, sidemark, qty, room);
+      var reference   = invItem ? (invItem.reference || "") : getVal("Reference");
+      var itemTableHtml = api_buildSingleItemTableHtml_(itemId, desc, vendor, itemClass, location, sidemark, qty, reference);
 
       // Session 70 fix #7: resolve an inspection-photos URL so the "View
       // Inspection Photos" button in the email actually works. Previously
@@ -9593,7 +9624,7 @@ function handleRespondToRepairQuote_(clientSheetId, payload) {
           "{{LOCATION}}":         itemLoc      || "",
           "{{SIDEMARK}}":         itemSidemark || "",
           "{{DESCRIPTION}}":      itemDesc     || "",
-          "{{ITEM_TABLE_HTML}}":  api_buildSingleItemTableHtml_(itemId, itemDesc, invItem ? invItem.vendor : "", invItem ? invItem.itemClass : "", itemLoc, itemSidemark, invItem ? invItem.qty : 1, invItem ? invItem.room : ""),
+          "{{ITEM_TABLE_HTML}}":  api_buildSingleItemTableHtml_(itemId, itemDesc, invItem ? invItem.vendor : "", invItem ? invItem.itemClass : "", itemLoc, itemSidemark, invItem ? invItem.qty : 1, invItem ? (invItem.reference || "") : ""),
           "{{LOGO_URL}}":         String(settings["LOGO_URL"] || "").trim() || "https://static.wixstatic.com/media/a38fbc_a8c7a368447f4723b782c4dbd765ca0e~mv2.png",
           "{{REPAIR_VENDOR}}":    getVal("Repair Vendor") || "",
           "{{NOTES}}":            getVal("Repair Notes") || ""
@@ -9620,6 +9651,8 @@ function handleRespondToRepairQuote_(clientSheetId, payload) {
           var _rqItemVendor = invItem ? (invItem.vendor || "") : "";
           var _rqItemDesc   = invItem ? (invItem.description || "") : (itemDesc || "");
           var _rqItemRoom   = invItem ? (invItem.room || "") : "";
+          // v38.61.1 — Reference token added alongside Room for template swap
+          var _rqItemRef    = invItem ? (invItem.reference || "") : "";
           var _rqDateStr    = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "MM/dd/yyyy");
           var pdfTokens = {
             "{{ITEM_ID}}":          itemId       || "",
@@ -9645,6 +9678,7 @@ function handleRespondToRepairQuote_(clientSheetId, payload) {
             "{{ITEM_DESC}}":        api_esc_(_rqItemDesc),
             "{{ITEM_SIDEMARK}}":    api_esc_(itemSidemark || ""),
             "{{ITEM_ROOM}}":        api_esc_(_rqItemRoom),
+            "{{ITEM_REFERENCE}}":   api_esc_(_rqItemRef),
             "{{RESULT_OPTIONS_HTML}}": '<span style="display:inline-block;margin-right:16px;font-size:11px;"><span style="display:inline-block;width:14px;height:14px;border:1.5px solid #94A3B8;border-radius:3px;vertical-align:middle;margin-right:4px;"></span> Complete</span>' +
               '<span style="display:inline-block;margin-right:16px;font-size:11px;"><span style="display:inline-block;width:14px;height:14px;border:1.5px solid #94A3B8;border-radius:3px;vertical-align:middle;margin-right:4px;"></span> Partial</span>' +
               '<span style="display:inline-block;margin-right:16px;font-size:11px;"><span style="display:inline-block;width:14px;height:14px;border:1.5px solid #94A3B8;border-radius:3px;vertical-align:middle;margin-right:4px;"></span> Unable to Repair</span>' +
@@ -9682,6 +9716,42 @@ function handleRespondToRepairQuote_(clientSheetId, payload) {
     emailSent: emailSent,
     warnings:  warnings.length > 0 ? warnings : undefined
   });
+}
+
+// ─── Update Repair Notes Handler (v38.61.1) ───────────────────────────────────
+// Lightweight write — sets Repair Notes on any repair, regardless of status.
+// Intended for the period between Approve and Start Repair, where the office
+// needs to stage billing/warehouse instructions. No lock (plain-text single
+// cell write); no email; no PDF regeneration.
+function handleUpdateRepairNotes_(clientSheetId, payload) {
+  if (!clientSheetId) return errorResponse_("clientSheetId is required", "INVALID_PARAMS");
+  if (!payload || !payload.repairId) return errorResponse_("repairId is required in payload", "INVALID_PARAMS");
+  var repairId = String(payload.repairId || "").trim();
+  if (!repairId) return errorResponse_("repairId must not be empty", "INVALID_PARAMS");
+  // repairNotes may be an empty string (user clearing the field) — that's valid.
+  var repairNotes = payload.repairNotes !== undefined && payload.repairNotes !== null
+    ? String(payload.repairNotes) : "";
+
+  var ss;
+  try { ss = SpreadsheetApp.openById(clientSheetId); }
+  catch (e) { return errorResponse_("Cannot open client spreadsheet: " + e.message, "NOT_FOUND"); }
+
+  var repSheet = ss.getSheetByName("Repairs");
+  if (!repSheet) return errorResponse_("Repairs sheet not found", "SCHEMA_ERROR");
+
+  var repMap = api_getHeaderMap_(repSheet);
+  var idCol    = repMap["Repair ID"];
+  var notesCol = repMap["Repair Notes"];
+  if (!idCol) return errorResponse_("Repair ID column not found", "SCHEMA_ERROR");
+  if (!notesCol) return errorResponse_("Repair Notes column not found", "SCHEMA_ERROR");
+
+  var repRow = api_findRowById_(repSheet, idCol, repairId);
+  if (repRow < 2) return errorResponse_("Repair not found: " + repairId, "NOT_FOUND");
+
+  repSheet.getRange(repRow, notesCol).setValue(repairNotes);
+  api_bumpSummaryVersion_();
+
+  return jsonResponse_({ success: true, repairId: repairId, repairNotes: repairNotes });
 }
 
 // ─── Complete Repair Handler ───────────────────────────────────────────────────
@@ -9864,8 +9934,8 @@ function handleCompleteRepair_(clientSheetId, payload) {
       var location2  = invItem2 ? invItem2.location  : getVal("Location");
       var sidemark2  = invItem2 ? invItem2.sidemark  : getVal("Sidemark");
       var qty2       = invItem2 ? (invItem2.qty || 1) : 1;
-      var room2      = invItem2 ? (invItem2.room || "") : "";
-      var repairItemTable = api_buildSingleItemTableHtml_(itemId, desc, vendor, itemClass, location2, sidemark2, qty2, room2);
+      var reference2 = invItem2 ? (invItem2.reference || "") : getVal("Reference");
+      var repairItemTable = api_buildSingleItemTableHtml_(itemId, desc, vendor, itemClass, location2, sidemark2, qty2, reference2);
 
       // Try to get repair folder URL from Repair ID hyperlink
       var repairPhotosUrl = "#";
@@ -10026,7 +10096,7 @@ function handleStartRepair_(clientSheetId, payload) {
         invItem ? invItem.itemClass : (repMap["Class"] ? String(rowData[repMap["Class"] - 1] || "") : ""),
         itemLoc, itemSidemark,
         invItem ? invItem.qty : 1,
-        invItem ? invItem.room : ""
+        invItem ? (invItem.reference || "") : (repMap["Reference"] ? String(rowData[repMap["Reference"] - 1] || "") : "")
       );
       // v38.60.0 — full token set to match DOC_REPAIR_WORK_ORDER template
       // (was missing {{DATE}}, {{STATUS}}, {{SIDEMARK_ROW}}, {{APPROVED_ROW}},
@@ -10047,6 +10117,8 @@ function handleStartRepair_(clientSheetId, payload) {
       var _repItemVendor = invItem ? (invItem.vendor || "") : "";
       var _repItemDesc   = invItem ? (invItem.description || "") : (itemDesc || "");
       var _repItemRoom   = invItem ? (invItem.room || "") : "";
+      // v38.61.1 — Reference token added alongside Room for template swap
+      var _repItemRef    = invItem ? (invItem.reference || "") : (repMap["Reference"] ? String(rowData[repMap["Reference"] - 1] || "") : "");
       var _repDateStr    = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "MM/dd/yyyy");
       var pdfTokens = {
         "{{ITEM_ID}}":          repItemId,
@@ -10072,6 +10144,7 @@ function handleStartRepair_(clientSheetId, payload) {
         "{{ITEM_DESC}}":        api_esc_(_repItemDesc),
         "{{ITEM_SIDEMARK}}":    api_esc_(itemSidemark),
         "{{ITEM_ROOM}}":        api_esc_(_repItemRoom),
+        "{{ITEM_REFERENCE}}":   api_esc_(_repItemRef),
         "{{RESULT_OPTIONS_HTML}}": '<span style="display:inline-block;margin-right:16px;font-size:11px;"><span style="display:inline-block;width:14px;height:14px;border:1.5px solid #94A3B8;border-radius:3px;vertical-align:middle;margin-right:4px;"></span> Complete</span>' +
           '<span style="display:inline-block;margin-right:16px;font-size:11px;"><span style="display:inline-block;width:14px;height:14px;border:1.5px solid #94A3B8;border-radius:3px;vertical-align:middle;margin-right:4px;"></span> Partial</span>' +
           '<span style="display:inline-block;margin-right:16px;font-size:11px;"><span style="display:inline-block;width:14px;height:14px;border:1.5px solid #94A3B8;border-radius:3px;vertical-align:middle;margin-right:4px;"></span> Unable to Repair</span>' +
@@ -12090,7 +12163,8 @@ function handleTransferItems_(sourceClientSheetId, payload) {
     var destNotifEmails = String(destSettings["NOTIFICATION_EMAILS"] || "").trim();
     var allDestRecip = [destClientEmail, destNotifEmails].filter(function(s) { return !!s; }).join(",");
     if ((destNotif === "true" || destNotif === "yes" || destNotif === "1") && allDestRecip) {
-      var trCols = ["Item ID", "Qty", "Vendor", "Description", "Sidemark", "Room", "Item Notes"];
+      // v38.61.1 — Room dropped, Reference takes its place (client/office-facing)
+      var trCols = ["Item ID", "Qty", "Vendor", "Description", "Sidemark", "Reference", "Item Notes"];
       var trHtml = '<table style="width:100%;border-collapse:collapse;margin-bottom:16px">';
       trHtml += '<tr>' + trCols.map(function(c) {
         return '<td style="padding:8px 12px;border:1px solid #e2e8f0;background:#f8fafc;font-weight:600;font-size:13px">' + c + '</td>';
