@@ -18,7 +18,7 @@
  * unclear under minified build). The in-memory cache tier short-circuits
  * subsequent consumers to the same reference in practice.
  */
-import { useMemo, useCallback } from 'react';
+import { useMemo, useCallback, useState } from 'react';
 import { fetchClients } from '../lib/api';
 import { fetchClientsFromSupabase } from '../lib/supabaseQueries';
 import type { ApiClient, ClientsResponse } from '../lib/api';
@@ -36,6 +36,9 @@ export interface UseClientsResult {
   error: string | null;
   refetch: () => void;
   lastFetched: Date | null;
+  /** Session 69 — optimistic patch by spreadsheetId. Overlay is cleared after refetch. */
+  applyClientPatch: (spreadsheetId: string, patch: Partial<ApiClient>) => void;
+  clearClientPatch: (spreadsheetId: string) => void;
 }
 
 function mapToAppClient(apiClient: ApiClient): Client {
@@ -76,9 +79,32 @@ export function useClients(autoFetch = true, includeInactive = false): UseClient
     includeInactive ? 'clients_all' : 'clients'
   );
 
+  // Session 69 — optimistic patches keyed by spreadsheetId. Merges into apiClients
+  // below. Auto-cleared on next refetch (or explicitly via clearClientPatch).
+  const [patches, setPatches] = useState<Record<string, Partial<ApiClient>>>({});
+  const applyClientPatch = useCallback((spreadsheetId: string, patch: Partial<ApiClient>) => {
+    if (!spreadsheetId) return;
+    setPatches(prev => ({ ...prev, [spreadsheetId]: { ...(prev[spreadsheetId] || {}), ...patch } }));
+  }, []);
+  const clearClientPatch = useCallback((spreadsheetId: string) => {
+    setPatches(prev => {
+      if (!(spreadsheetId in prev)) return prev;
+      const next = { ...prev };
+      delete next[spreadsheetId];
+      return next;
+    });
+  }, []);
+
   // Stabilize empty-array reference to prevent infinite re-render cascades
   // (data?.clients ?? [] creates a new [] each render when data is null)
-  const apiClients = useMemo(() => data?.clients ?? [], [data]);
+  const rawApiClients = useMemo(() => data?.clients ?? [], [data]);
+  const apiClients = useMemo(() => {
+    if (Object.keys(patches).length === 0) return rawApiClients;
+    return rawApiClients.map(c => {
+      const p = patches[c.spreadsheetId];
+      return p ? { ...c, ...p } : c;
+    });
+  }, [rawApiClients, patches]);
   const clients = useMemo(() => apiClients.map(mapToAppClient), [apiClients]);
 
   return {
@@ -89,5 +115,7 @@ export function useClients(autoFetch = true, includeInactive = false): UseClient
     error,
     refetch,
     lastFetched,
+    applyClientPatch,
+    clearClientPatch,
   };
 }

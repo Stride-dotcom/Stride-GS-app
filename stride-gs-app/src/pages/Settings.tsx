@@ -445,7 +445,7 @@ export function Settings() {
   const [userSorting, setUserSorting] = useState<SortingState>([]);
   const [showInactiveClients, setShowInactiveClients] = useState(false);
   const apiConfigured = isApiConfigured();
-  const { apiClients, loading: clientsLoading, error: clientsError, refetch: refetchClients } = useClients(apiConfigured && true, showInactiveClients);
+  const { apiClients, loading: clientsLoading, error: clientsError, refetch: refetchClients, applyClientPatch, clearClientPatch } = useClients(apiConfigured && true, showInactiveClients);
   const { priceList, classMap, loading: pricingLoading, error: pricingError, refetch: refetchPricing } = usePricing(apiConfigured && true);
   // Pre-fetch locations for sub-tabs
   useLocations(apiConfigured && true);
@@ -1407,6 +1407,36 @@ export function Settings() {
         const errMsg = res.error || (res.data as any)?.error || 'Onboard failed — check warnings for details';
         return { ok: false, error: errMsg };
       } else {
+        // Session 69 — optimistic patch: flip the client's fields locally BEFORE the
+        // server round-trip so the UI (client card, sort order, active-count badge)
+        // reflects the change immediately. Especially important for reactivation —
+        // operators need to see the client snap back into the active list so they
+        // can continue setting up the account without waiting for a refetch.
+        applyClientPatch(data.spreadsheetId, {
+          name: data.clientName,
+          email: data.clientEmail,
+          contactName: data.contactName,
+          phone: data.phone,
+          qbCustomerName: data.qbCustomerName,
+          staxCustomerId: data.staxCustomerId,
+          paymentTerms: data.paymentTerms,
+          freeStorageDays: Number(data.freeStorageDays),
+          discountStoragePct: Number(data.discountStoragePct),
+          discountServicesPct: Number(data.discountServicesPct),
+          enableReceivingBilling: data.enableReceivingBilling,
+          enableShipmentEmail: data.enableShipmentEmail,
+          enableNotifications: data.enableNotifications,
+          autoInspection: data.autoInspection,
+          separateBySidemark: data.separateBySidemark,
+          active: data.active,
+          parentClient: data.parentClient,
+          folderId: data.folderId,
+          photosFolderId: data.photosFolderId,
+          invoiceFolderId: data.invoiceFolderId,
+          notes: data.notes,
+          shipmentNote: data.shipmentNote,
+        });
+
         const res = await postUpdateClient({
           spreadsheetId: data.spreadsheetId,
           clientName: data.clientName,
@@ -1439,10 +1469,12 @@ export function Settings() {
           refetchClients();
           return {
             ok: true,
-            successMessage: `Client "${data.clientName}" updated successfully`,
+            successMessage: `Client "${data.clientName}" ${data.active ? (apiClients.find(c => c.spreadsheetId === data.spreadsheetId && !c.active) ? 'reactivated' : 'updated') : 'updated'} successfully`,
             warnings: (res.data as any).warnings || [],
           };
         }
+        // Revert optimistic patch on failure
+        clearClientPatch(data.spreadsheetId);
         const errMsg = res.error || (res.data as any)?.error || 'Update failed';
         return { ok: false, error: errMsg };
       }
