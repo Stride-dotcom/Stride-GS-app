@@ -1256,6 +1256,16 @@ export function Inventory() {
     boxSizing: 'border-box',
   });
 
+  // Build print title — MUST be declared BEFORE the early return below to keep
+  // hook count stable across renders (React error #300 otherwise).
+  const printTitle = useMemo(() => {
+    const parts = ['Inventory'];
+    if (clientFilter.length === 1) parts.push(clientFilter[0]);
+    else if (clientFilter.length > 1) parts.push(`${clientFilter.length} clients`);
+    if (sidemarkFilterValue.length > 0) parts.push('Sidemarks: ' + sidemarkFilterValue.join(', '));
+    return parts.join(' — ');
+  }, [clientFilter, sidemarkFilterValue]);
+
   // ── Render ─────────────────────────────────────────────────────────────────
 
   if (apiConfigured && inventoryLoading && liveItems.length === 0) {
@@ -1267,15 +1277,6 @@ export function Inventory() {
       </div>
     );
   }
-
-  // Build print title
-  const printTitle = useMemo(() => {
-    const parts = ['Inventory'];
-    if (clientFilter.length === 1) parts.push(clientFilter[0]);
-    else if (clientFilter.length > 1) parts.push(`${clientFilter.length} clients`);
-    if (sidemarkFilterValue.length > 0) parts.push('Sidemarks: ' + sidemarkFilterValue.join(', '));
-    return parts.join(' — ');
-  }, [clientFilter, sidemarkFilterValue]);
 
   return (
     <div style={{ fontFamily: theme.typography.fontFamily, display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
