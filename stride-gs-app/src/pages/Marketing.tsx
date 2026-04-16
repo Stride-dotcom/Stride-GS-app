@@ -33,6 +33,7 @@ import {
   postUpdateMarketingSettings,
   postSendTestEmail, postPreviewTemplate, postCheckMarketingInbox,
 } from '../lib/api';
+import { fetchMarketingContactsFromSupabase } from '../lib/supabaseQueries';
 
 // ─── Status badge colors ────────────────────────────────────────────────────
 
@@ -344,8 +345,9 @@ export function Marketing() {
   const [showCreateTemplate, setShowCreateTemplate] = useState(false);
 
   // Template list — lifted to page level so Create/Edit Campaign modals can use it for dropdowns
+  const templatesFetchFn = useCallback((signal?: AbortSignal) => fetchMarketingTemplates(signal), []);
   const { data: rawTemplates, refetch: refetchTemplates } = useApiData(
-    (signal) => fetchMarketingTemplates(signal), true, 'mktg-templates',
+    templatesFetchFn, true, 'mktg-templates',
   );
   const allTemplateNames: string[] = useMemo(() => {
     if (!rawTemplates) return [];
@@ -449,8 +451,9 @@ export function Marketing() {
 
 function DashboardTab() {
   const { isMobile: mob } = useIsMobile();
+  const dashFetchFn = useCallback((signal?: AbortSignal) => fetchMarketingDashboard(signal), []);
   const { data: raw, loading, error, refetch } = useApiData(
-    (signal) => fetchMarketingDashboard(signal), true, 'mktg-dashboard',
+    dashFetchFn, true, 'mktg-dashboard',
   );
 
   const stats: DashboardStats | null = useMemo(() => {
@@ -655,8 +658,9 @@ function CampaignsTab({ onSelectCampaign, showCreate, onShowCreate, templateName
   const [statusFilter, setStatusFilter] = useState<string>('All');
   const [search, setSearch] = useState('');
 
+  const campaignsFetchFn = useCallback((signal?: AbortSignal) => fetchMarketingCampaigns(signal), []);
   const { data: raw, loading, error, refetch } = useApiData(
-    (signal) => fetchMarketingCampaigns(signal), true, 'mktg-campaigns',
+    campaignsFetchFn, true, 'mktg-campaigns',
   );
 
   const campaigns: MarketingCampaign[] = useMemo(() => {
@@ -773,8 +777,9 @@ function CampaignsTab({ onSelectCampaign, showCreate, onShowCreate, templateName
 
 function CampaignDetailPanel({ campaignId, onClose, templateNames }: { campaignId: string; onClose: () => void; templateNames: string[] }) {
   const { isMobile: mob } = useIsMobile();
+  const campaignDetailFetchFn = useCallback((signal?: AbortSignal) => fetchMarketingCampaignDetail(campaignId, signal), [campaignId]);
   const { data: raw, loading, error, refetch } = useApiData(
-    (signal) => fetchMarketingCampaignDetail(campaignId, signal), true, `mktg-campaign-${campaignId}`,
+    campaignDetailFetchFn, true, `mktg-campaign-${campaignId}`,
   );
   const { busy, result, setResult, run } = useWriteAction();
   const [confirm, setConfirm] = useState<{ action: string; title: string; message: string } | null>(null);
@@ -1157,8 +1162,24 @@ function ContactsTab({ onSelectContact, showCreate, onShowCreate, showImport, on
   // when real filters change.
   const cacheKey = useMemo(() => `mktg-contacts-${JSON.stringify(fetchParams)}`, [fetchParams]);
   const contactsFetchFn = useCallback(
-    (signal?: AbortSignal) => fetchMarketingContacts(signal, fetchParams),
-    [fetchParams]
+    async (signal?: AbortSignal) => {
+      // Supabase-first (~50ms with server-side filter + pagination).
+      // GAS fallback only on Supabase miss or empty table.
+      try {
+        const sb = await fetchMarketingContactsFromSupabase({
+          status: fetchParams.status,
+          search: fetchParams.search,
+          page: page,
+          pageSize: pageSize,
+        });
+        if (sb && sb.total > 0) {
+          // Match the MarketingContactsResponse nested shape { success, data: {...} }
+          return { data: { success: true, data: { contacts: sb.contacts, total: sb.total, page: sb.page, pageSize: sb.pageSize } }, ok: true as const, error: null };
+        }
+      } catch { /* fall through to GAS */ }
+      return fetchMarketingContacts(signal, fetchParams);
+    },
+    [fetchParams, page]
   );
   const { data: raw, loading, error, refetch } = useApiData(contactsFetchFn, true, cacheKey);
 
@@ -1399,8 +1420,9 @@ function ImportContactsModal({ onClose, onImported }: { onClose: () => void; onI
 
 function ContactDetailPanel({ email, onClose }: { email: string; onClose: () => void }) {
   const { isMobile: mob } = useIsMobile();
+  const contactDetailFetchFn = useCallback((signal?: AbortSignal) => fetchMarketingContactDetail(email, signal), [email]);
   const { data: raw, loading, error, refetch } = useApiData(
-    (signal) => fetchMarketingContactDetail(email, signal), true, `mktg-contact-${email}`,
+    contactDetailFetchFn, true, `mktg-contact-${email}`,
   );
   const { busy, result, setResult, run } = useWriteAction();
   const [showEdit, setShowEdit] = useState(false);
@@ -1897,14 +1919,20 @@ function LogsTab() {
   const pageSize = 100;
 
   // Campaign logs
+  const campaignLogsFetchFn = useCallback(
+    (signal?: AbortSignal) => fetchMarketingLogs(signal, { logType: 'campaign', page: String(page), pageSize: String(pageSize) }),
+    [page]
+  );
   const { data: rawCampaign, loading: loadingCampaign, error: errCampaign, refetch: refetchCampaign } = useApiData(
-    (signal) => fetchMarketingLogs(signal, { logType: 'campaign', page: String(page), pageSize: String(pageSize) }),
-    logType === 'campaign', `mktg-logs-campaign-${page}`,
+    campaignLogsFetchFn, logType === 'campaign', `mktg-logs-campaign-${page}`,
   );
   // Suppression logs
+  const suppressionLogsFetchFn = useCallback(
+    (signal?: AbortSignal) => fetchMarketingSuppressionLogs(signal, { page: String(page), pageSize: String(pageSize) }),
+    [page]
+  );
   const { data: rawSuppression, loading: loadingSuppression, error: errSuppression, refetch: refetchSuppression } = useApiData(
-    (signal) => fetchMarketingSuppressionLogs(signal, { page: String(page), pageSize: String(pageSize) }),
-    logType === 'suppression', `mktg-logs-suppression-${page}`,
+    suppressionLogsFetchFn, logType === 'suppression', `mktg-logs-suppression-${page}`,
   );
 
   const campaignLogs = useMemo(() => {
@@ -2097,8 +2125,9 @@ function LogsTab() {
 
 function SettingsTab() {
   const { isMobile: mob } = useIsMobile();
+  const settingsFetchFn = useCallback((signal?: AbortSignal) => fetchMarketingSettings(signal), []);
   const { data: raw, loading, error, refetch } = useApiData(
-    (signal) => fetchMarketingSettings(signal), true, 'mktg-settings',
+    settingsFetchFn, true, 'mktg-settings',
   );
   const { busy, result, setResult, run } = useWriteAction();
   const [editing, setEditing] = useState(false);
