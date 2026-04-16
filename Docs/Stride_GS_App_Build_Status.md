@@ -1,9 +1,9 @@
 # Stride GS App — Build Status & Continuation Guide
 
-**Last updated:** 2026-04-16 (session 70 — nine-item UI/email/PDF fix batch: chip counts, sidemark color normalize, payment terms tab, shipment IK prefix strip, DetailHeader component, receiving timeout, inspection photos URL, PDF tokens redeploy, deep-link client/sidemark)
-**StrideAPI.gs:** v38.61.0 (Web App v281)
+**Last updated:** 2026-04-16 (session 70 continued — Room→Reference in emails, multi-client Add User, Save Repair Notes on Approved, role-aware loading, mobile TopBar z-index)
+**StrideAPI.gs:** v38.63.0 (Web App v283)
 **Import.gs (client):** v4.3.0 (rolled out to all 49 active clients; Reference column now imported)
-**Emails.gs (client):** v4.3.0 (rolled out to all 49 active clients — email deep links CTA button)
+**Emails.gs (client):** v4.6.0 (rolled out to all 49 active clients — Room column dropped, Reference takes its place)
 **Shipments.gs (client):** v4.2.1 (rolled out to all 49 active clients — SHIPMENT_RECEIVED uses standalone /#/shipments/:shipmentNo)
 **WillCalls.gs (client):** v4.4.0 (rolled out to all 49 active clients — WC deep links)
 **Triggers.gs (client):** v4.7.1 (rolled out to all 49 active clients — VIEW INSPECTION PHOTOS button now opens Source Task folder)
@@ -74,6 +74,50 @@ Login, Dashboard, Inventory, Receiving, Shipments, Tasks, Repairs, Will Calls, B
 `useClients`, `usePricing`, `useLocations`, `useInventory`, `useTasks`, `useRepairs`, `useWillCalls`, `useShipments`, `useBilling` (accepts BillingFilterParams for report builder), `useClaims`, `useUsers`, `useOrders` (Supabase-only, DT integration), `useFailedOperations`, `useTablePreferences` (reconciles new columns into saved order), `useResizablePanel`, `useSidebarOrder`, `useIsMobile`, `useBatchData`.
 
 ---
+
+## RECENT CHANGES (2026-04-16 session 70 — continued)
+
+### Five-item UI/email batch fix (v38.63.0 + Emails.gs v4.6.0)
+
+1. **Room → Reference in all email/PDF item tables.** Room is warehouse-
+   internal noise; Reference (PO/client-facing identifier) is what office +
+   warehouse actually need. Affects SHIPMENT_RECEIVED, INSP_EMAIL,
+   TASK_COMPLETE, REPAIR_QUOTE, REPAIR_APPROVED/DECLINED, REPAIR_COMPLETE,
+   TRANSFER_RECEIVED. `api_buildSingleItemTableHtml_` last positional arg is
+   now `reference`; all 5 StrideAPI call sites updated. Work Order PDFs now
+   emit `{{ITEM_REFERENCE}}` alongside legacy `{{ITEM_ROOM}}` so templates
+   can be retired at the user's pace. `api_findInventoryItem_` return now
+   includes `reference`. Emails.gs v4.6.0 rolled out to 49 clients + Web
+   App deploys refreshed.
+
+2. **Add User modal: multi-client chip picker.** Previously client-role
+   users could only be assigned ONE account at create time (edit already
+   supported N). Added chip picker state + `addNewUserClientAccess` /
+   `removeNewUserClientAccess` helpers; `handleAddUser` joins the list as
+   CSV for the existing CSV-tolerant backend. Save button validates
+   `clientIds.length > 0` when role === 'client'.
+
+3. **Save Repair Notes on Approved status.** New `updateRepairNotes` POST
+   endpoint + `handleUpdateRepairNotes_` handler on the backend.
+   `RepairDetailPanel` gets an inline Save button under the Repair Notes
+   textarea that enables only when dirty and shows "✓ Saved" briefly on
+   success. Lets the office stage billing/warehouse instructions ("Bill to
+   Corbin @ Lawson Fenning") between Approve and Start Repair. Previously
+   notes were only persisted at `completeRepair` time, so intermediate
+   edits were lost.
+
+4. **Dashboard loading copy is now role-aware.** Client users see
+   "Loading…" instead of the misleading "Fetching open jobs across all
+   clients…". Uses `user.role === 'client'` check already available via
+   `useAuth()`.
+
+5. **Mobile TopBar z-index bumped 10 → 30.** Dashboard sticky table headers
+   had `zIndex: 2` and in some mobile layouts could visually cover the
+   hamburger button on scroll. New z-index is still below the mobile
+   sidebar overlay (40/41) so tap-backdrop-to-close still works.
+
+**Deploy:** StrideAPI v38.63.0 (Web App v283). Emails.gs v4.6.0 rolled out
+to all 49 clients. React bundle `index-qy8KYBNA.js`. TypeScript clean.
 
 ## RECENT CHANGES (2026-04-16 session 70)
 
