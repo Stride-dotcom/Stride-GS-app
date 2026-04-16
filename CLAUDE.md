@@ -476,7 +476,7 @@ These are the top decisions that affect code generation on every task. For the f
 
 ## Current Versions
 
-- **StrideAPI.gs:** v38.58.0 (Web App v274) — session 68: server-side batch endpoints, claims/users/marketing/campaigns/templates/settings Supabase caches, TRANSFER_RECEIVED email fix
+- **StrideAPI.gs:** v38.59.0 (Web App v276) — session 69: Payments Supabase mirror (5 new caches — stax_invoices, stax_charges, stax_exceptions, stax_customers, stax_run_log) + write-through in 7 Stax mutation handlers + `seedAllStaxToSupabase()` seed function (**run once manually from the Apps Script editor after deploy**)
 - **Import.gs (client):** v4.3.0 — adds Reference column mapping (rolled out to all 47 active clients, session 64)
 - **Emails.gs (client):** v4.2.0 (rolled out to all 47 active clients)
 - **WillCalls.gs (client):** v4.3.0 — Item ID / Vendor / Description / Reference columns on completed-WC email
@@ -525,6 +525,8 @@ Client inventory scripts are NOT edited via direct URLs — use `npm run rollout
 - [ ] **Standalone Repair Detail Page (Phase 2)** — `#/repairs/:repairId` — same pattern as Task Detail, pending.
 - [ ] **Standalone Will Call Detail Page (Phase 3)** — `#/will-calls/:wcNumber` — same pattern, requires WC items parity audit.
 - [ ] **Generate Work Order button** — Manual PDF generation from TaskDetailPanel. Backend handler exists, needs React wiring + router case.
+- [ ] **Seed Stax Supabase caches (one-time)** — Open Stride API in Apps Script editor → run `seedAllStaxToSupabase()` once. Populates `stax_invoices`, `stax_charges`, `stax_exceptions`, `stax_customers`, `stax_run_log` from the Stax spreadsheet. Until this runs, Payments page falls back to GAS on first load.
+- [ ] **StaxAutoPay.gs batch write-through** — Add batch upsert at end of `_executeChargeRun` and `_prepareEligiblePendingInvoicesForChargeRun` so the daily 9am PT autopay pipeline syncs results to Supabase (`stax_invoices` + `stax_charges` + `stax_run_log`). Write-through helpers live in StrideAPI.gs (different project), so StaxAutoPay.gs needs a local `supabaseUpsert_` copy or its own minimal fetch helper. Session 69 deferred this.
 - [ ] **Scanner Supabase Direct Lookup** — Replace CacheService index with direct Supabase query (~50ms vs 3-30s). See `Docs/Archive/QR_Scanner_Next_Phase.md` Feature A
 - [ ] **Auto-Print Labels from Receiving** — Toggle on Receiving page for inline label printing. See `Docs/Archive/QR_Scanner_Next_Phase.md` Feature B
 - [ ] **Parent Transfer Access** — Allow parent users to transfer items between their own children only (currently staff-only)

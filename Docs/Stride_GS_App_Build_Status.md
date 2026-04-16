@@ -1,7 +1,7 @@
 # Stride GS App — Build Status & Continuation Guide
 
-**Last updated:** 2026-04-16 (session 68 — Supabase caches for Claims/Users/Marketing + server-side batch endpoints + many bug fixes)
-**StrideAPI.gs:** v38.58.0 (Web App v274)
+**Last updated:** 2026-04-16 (session 69 — Optimistic bulk updates + Payments Supabase mirror)
+**StrideAPI.gs:** v38.59.0 (Web App v276)
 **Import.gs (client):** v4.3.0 (rolled out to all 47 active clients; Reference column now imported)
 **Emails.gs (client):** v4.3.0 (rolled out to all 47 active clients — email deep links CTA button)
 **Shipments.gs (client):** v4.2.1 (rolled out to all 47 active clients — SHIPMENT_RECEIVED uses standalone /#/shipments/:shipmentNo)
@@ -75,9 +75,99 @@ Login, Dashboard, Inventory, Receiving, Shipments, Tasks, Repairs, Will Calls, B
 
 ---
 
-## RECENT CHANGES (2026-04-16 session 68)
+## RECENT CHANGES (2026-04-16 session 69)
 
-### Session 68: Supabase caches everywhere + server-side batch endpoints + tab-close safety
+### Session 69: Optimistic bulk updates + Payments Supabase mirror
+
+**Phase 1 — Optimistic bulk updates (every list page).** Bulk actions now flip
+affected rows to their target state in <50ms, fire the batch endpoint in the
+background, and revert per-row on any server-reported failure. User perceives
+instant completion; the `<BulkResultSummary>` modal still shows the full result
+for audit.
+
+- New shared utility `src/lib/optimisticBulk.ts` — `applyBulkPatch` +
+  `revertBulkPatchForFailures`. Reused across 8 call sites.
+- Tasks.tsx: `handleBulkCancel` + `handleBulkReassign` wrap `applyTaskPatch` /
+  `clearTaskPatch`. Cancel sets `status: 'Cancelled'` + `cancelledAt`; Reassign
+  sets `assignedTo`.
+- Repairs.tsx: `handleBulkCancelRepairs` (`status: 'Cancelled'`) + `handleBulkSendQuote`
+  (`status: 'Quote Sent'`). Bulk Send Quote is `runBatchLoop`-based (per-row
+  email side-effect), so reverts happen per-row as failures come in.
+- WillCalls.tsx: `handleBulkCancelWillCalls`, `handleBulkSchedule`, `handleBulkRelease`
+  all optimistic. Schedule flips status to Scheduled + sets estimatedPickupDate;
+  Release flips status to Released (partial is reconciled by refetch).
+- Inventory.tsx: `handleBulkRequestRepairQuote` now `addOptimisticRepair`s a
+  `REPAIR-TEMP-{itemId}-{ts}` row per item so Inventory + Repairs views see a
+  Pending Quote immediately. Real IDs replace temps on refetch.
+- Billing.tsx: `handleCreateInvoices` optimistically removes selected unbilled
+  rows from the report (local `reportData` snapshot + `useBilling.hideUnbilled`).
+  Per-group failures restore those rows; successful rows stay hidden until
+  `refetchBilling()` repopulates them marked Invoiced.
+- Payments.tsx: Bulk Void + Bulk Delete (both in Invoices toolbar + Review tab)
+  flip `status` to VOIDED/DELETED instantly via `setInvoices(prev => prev.map…)`.
+  Failed rows snap back to original status. **Bulk Charge stays non-optimistic
+  by design** — real money, only flip to PAID after Stax confirms.
+
+**Phase 2 — Payments Supabase mirror (5 new caches).**
+
+Migrations (applied via MCP):
+- `20260416120000_stax_invoices_cache_table.sql` — `stax_invoices` (qb_invoice_no unique)
+- `20260416120001_stax_charges_exceptions_customers_runlog_cache.sql` —
+  `stax_charges`, `stax_exceptions`, `stax_customers` (qb_name unique),
+  `stax_run_log`. All 5 admin/staff SELECT + service_role ALL; REPLICA IDENTITY FULL.
+
+StrideAPI.gs v38.59.0 (Web App v276):
+- 4 new helpers: `api_sbUpsertStaxInvoice_` / `api_sbBatchUpsertStaxInvoices_` /
+  `api_sbResyncStaxInvoice_(qbNo)` / `api_sbResyncStaxInvoices_(qbNos[])`.
+- `seedAllStaxToSupabase()` — one-shot bulk seed (invoices + charges + exceptions
+  + customers + run log). Run once from the Apps Script editor after first deploy.
+- Write-through wired into 7 mutation handlers:
+  `handleVoidStaxInvoice_`, `handleDeleteStaxInvoice_`,
+  `handleBatchVoidStaxInvoices_`, `handleBatchDeleteStaxInvoices_`,
+  `handleUpdateStaxInvoice_`, `handleResetStaxInvoiceStatus_`,
+  `handleToggleAutoCharge_` (batch), `handleChargeSingleInvoice_` (invoice
+  row resync + charge log append).
+- Conflict maps in `supabaseUpsert_` / `supabaseBatchUpsert_` extended with
+  `stax_invoices: "qb_invoice_no"` and `stax_customers: "qb_name"`.
+
+React:
+- `src/lib/supabaseQueries.ts` — 5 new fetchers:
+  `fetchStaxInvoicesFromSupabase`, `fetchStaxChargeLogFromSupabase`,
+  `fetchStaxExceptionsFromSupabase`, `fetchStaxCustomersFromSupabase`,
+  `fetchStaxRunLogFromSupabase`. Charge log + run log limited to 2000 / 500
+  rows ordered by timestamp DESC.
+- `Payments.tsx` `loadData()` — Supabase-first with GAS fallback per-dataset.
+  `noCache=true` (Refresh button) skips Supabase to force GAS refresh. Config
+  stays GAS (live Script Properties).
+
+**Deferred to next session (explicitly):**
+- StaxAutoPay.gs batch write-through at end of `executeChargeRun_` /
+  `prepareEligiblePendingInvoicesForChargeRun`. Autopay runs daily 9am PT; until
+  this lands, Supabase's status column trails the sheet by up to 24h for rows
+  touched ONLY by autopay (not by any StrideAPI handler). Manual operations on
+  Payments page still flow through immediately.
+- Initial seed run. `seedAllStaxToSupabase()` must be executed once from the
+  Apps Script editor. Until then all 5 Supabase tables are empty and Payments
+  falls through to GAS (zero regression, just doesn't get the speed boost).
+
+**Live artifacts after session 69:**
+- StrideAPI.gs v38.59.0 — Web App v276
+- React source commits on `origin/source`:
+  - `b380e83` — Phase 1 (optimistic bulk updates)
+  - `7665f80` — Phase 2 (Payments Supabase mirror)
+- React bundles on `origin/main`:
+  - Phase 1: `index-CHdkUszQ.js` (1940 modules, 1.69 MB)
+  - Phase 2: `index-<latest>` (superseded, see dist commit `f14b70d`)
+- Supabase migrations applied: `20260416120000_stax_invoices_cache_table`,
+  `20260416120001_stax_charges_exceptions_customers_runlog_cache`.
+- Supabase row counts: stax_invoices=0, stax_charges=0, stax_exceptions=0,
+  stax_customers=0, stax_run_log=0 (pending first `seedAllStaxToSupabase()` run).
+
+**Build guardrails held:** 1940 modules, 1.69 MB bundle, all sanity checks passed.
+
+---
+
+### Session 68 archive: Supabase caches everywhere + server-side batch endpoints + tab-close safety
 
 **Supabase read-cache expansion (5 new mirror tables):**
 - `claims` — all claim fields; RLS admin/staff see all, client sees own via `company_client_name` → clients join. Write-through in `handleCreateClaim_`, `handleUpdateClaim_`, `handleCloseClaim_`, `handleVoidClaim_`, `handleReopenClaim_`, `handleFirstReviewClaim_`, `handleSendClaimDenial_`, `handleGenerateClaimSettlement_`, `handleUploadSignedSettlement_`. Seeded (3 rows).
@@ -136,6 +226,12 @@ Login, Dashboard, Inventory, Receiving, Shipments, Tasks, Repairs, Will Calls, B
 - Supabase: 5 new migration files committed under `stride-gs-app/supabase/migrations/` (claims, users, marketing_contacts, marketing_campaigns+templates+settings, locations) + corresponding tables with RLS + seeded data
 
 **Build guardrails held:** `scripts/build.js` continues to refuse stale bundles. All builds passed module-count (1,939 modules) + bundle-size (~1.6 MB) sanity checks.
+
+---
+
+### Session 68 archive content:
+
+> See `Docs/Archive/Session_History.md` entry for session 68 or the full writeup that was previously here — it covered Supabase read-cache expansion (claims/users/marketing), server-side batch endpoints, Dashboard task type filter, and 47-client rollouts. Content removed from hot doc to keep this file scannable.
 
 ---
 
