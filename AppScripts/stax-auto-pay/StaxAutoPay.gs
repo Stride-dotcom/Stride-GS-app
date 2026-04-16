@@ -1,5 +1,17 @@
 // ============================================================
-// STAX AUTO-PAY TOOL — Phase 4B v4.5.0
+// STAX AUTO-PAY TOOL — v4.6.0
+// v4.6.0 (2026-04-16 — session 69 Phase 2f): Supabase write-through for
+//         autopay runs. Adds `_sbBatchUpsert` + four resync helpers
+//         (`_sbResyncAllStaxInvoices`, `_sbResyncAllStaxCharges`,
+//          `_sbResyncStaxExceptions`, `_sbResyncStaxRunLog`) called at the
+//         end of `_prepareEligiblePendingInvoicesForChargeRun` (invoices +
+//         run log) and `_executeChargeRun` (all four tables). Requires
+//         SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY in Script Properties.
+//         Best-effort — never blocks a sheet write on Supabase failure.
+//         Charge log resync is limited to the tail 1000 rows per run to
+//         stay under execution time budget; run log to tail 500. Exceptions
+//         to tail 500. Unique indexes on Supabase tables make the upserts
+//         idempotent (see migration 20260416120001).
 // v4.5.0 (2026-04-10 — NVPC Phase 4B): Batch throttling + override verification.
 //         (1) Aligned Auto Charge override policy between prepare and charge stages.
 //             Previously the charge stage let blank-invoice + unknown-client rows
@@ -581,6 +593,212 @@ function _writeRunLog(funcName, summary, details) {
   ];
 
   sheet.getRange(sheet.getLastRow() + 1, 1, 1, row.length).setValues([row]);
+}
+
+// ============================================================
+// SUPABASE WRITE-THROUGH (session 69 / v4.6.0)
+// Best-effort mirror of Stax spreadsheet → Supabase caches.
+// Never throws; never blocks a sheet write on Supabase failure.
+// ============================================================
+
+/** Batch upsert to a Supabase table. Best-effort, never throws. */
+function _sbBatchUpsert(table, rows, conflictCol) {
+  if (!rows || !rows.length) return;
+  try {
+    var url = PropertiesService.getScriptProperties().getProperty("SUPABASE_URL");
+    var key = PropertiesService.getScriptProperties().getProperty("SUPABASE_SERVICE_ROLE_KEY");
+    if (!url || !key) return;
+    var CHUNK = 50;
+    for (var i = 0; i < rows.length; i += CHUNK) {
+      var chunk = rows.slice(i, i + CHUNK);
+      var postUrl = url + "/rest/v1/" + table;
+      if (conflictCol) postUrl += "?on_conflict=" + conflictCol;
+      var resp = UrlFetchApp.fetch(postUrl, {
+        method: "POST",
+        headers: {
+          "Authorization": "Bearer " + key,
+          "apikey":        key,
+          "Content-Type":  "application/json",
+          "Prefer":        "resolution=merge-duplicates,return=minimal"
+        },
+        payload: JSON.stringify(chunk),
+        muteHttpExceptions: true
+      });
+      var code = resp.getResponseCode();
+      if (code < 200 || code >= 300) {
+        Logger.log("_sbBatchUpsert " + table + " HTTP " + code + ": " + resp.getContentText().substring(0, 300));
+      }
+    }
+  } catch (e) {
+    Logger.log("_sbBatchUpsert " + table + " error (non-fatal): " + e);
+  }
+}
+
+/**
+ * Read the full Invoices tab and push to public.stax_invoices.
+ * Called at the end of _prepareEligiblePendingInvoicesForChargeRun and
+ * _executeChargeRun so Supabase reflects the latest statuses.
+ */
+function _sbResyncAllStaxInvoices(ss) {
+  try {
+    if (!ss) ss = _getSpreadsheet();
+    var sheet = ss.getSheetByName(SHEET_NAMES.INVOICES);
+    if (!sheet) return;
+    var data = sheet.getDataRange().getValues();
+    if (data.length <= 1) return;
+    var headers = data[0].map(function(h) { return String(h).trim(); });
+    function col(name) { return headers.indexOf(name); }
+    var cQb = col("QB Invoice #");
+    var cCust = col("QB Customer Name");
+    var cStaxCust = col("Stax Customer ID");
+    var cInvDate = col("Invoice Date");
+    var cDueDate = col("Due Date");
+    var cAmount = col("Total Amount");
+    var cLineItems = col("Line Items JSON");
+    var cStaxId = col("Stax Invoice ID");
+    var cStatus = col("Status");
+    var cCreated = col("Created At");
+    var cNotes = col("Notes");
+    var cIsTest = col("Is Test");
+    var cAutoCharge = col("Auto Charge");
+    if (cQb < 0 || cStatus < 0) return;
+    var rows = [];
+    var now = new Date().toISOString();
+    for (var i = 1; i < data.length; i++) {
+      var qb = String(data[i][cQb] || "").trim();
+      if (!qb) continue;
+      var staxCustId = cStaxCust >= 0 ? String(data[i][cStaxCust] || "") : "";
+      rows.push({
+        qb_invoice_no: qb,
+        row_index: i + 1,
+        customer: cCust >= 0 ? String(data[i][cCust] || "") : "",
+        stax_customer_id: staxCustId,
+        invoice_date: cInvDate >= 0 ? _formatDateLoose(data[i][cInvDate]) : "",
+        due_date: cDueDate >= 0 ? _formatDateLoose(data[i][cDueDate]) : "",
+        amount: cAmount >= 0 ? Number(data[i][cAmount] || 0) : 0,
+        line_items_json: cLineItems >= 0 ? String(data[i][cLineItems] || "") : "",
+        stax_id: cStaxId >= 0 ? String(data[i][cStaxId] || "") : "",
+        status: cStatus >= 0 ? String(data[i][cStatus] || "") : "",
+        created_at_sheet: cCreated >= 0 ? _formatDateLoose(data[i][cCreated]) : "",
+        notes: cNotes >= 0 ? String(data[i][cNotes] || "") : "",
+        is_test: cIsTest >= 0 ? String(data[i][cIsTest] || "").toUpperCase() === "TRUE" : false,
+        auto_charge: cAutoCharge >= 0 ? !(String(data[i][cAutoCharge] || "").toUpperCase() === "FALSE" || String(data[i][cAutoCharge] || "").toUpperCase() === "NO" || String(data[i][cAutoCharge] || "").toUpperCase() === "OFF") : false,
+        payment_method_status: staxCustId ? "unknown" : "no_customer",
+        updated_at: now
+      });
+    }
+    _sbBatchUpsert("stax_invoices", rows, "qb_invoice_no");
+  } catch (e) { Logger.log("_sbResyncAllStaxInvoices error (non-fatal): " + e); }
+}
+
+/**
+ * Read the Charge Log tab and push ALL rows (idempotent via unique index on
+ * timestamp + qb_invoice_no + txn_id). Called at end of _executeChargeRun.
+ */
+function _sbResyncAllStaxCharges(ss) {
+  try {
+    if (!ss) ss = _getSpreadsheet();
+    var sheet = ss.getSheetByName(SHEET_NAMES.CHARGE_LOG);
+    if (!sheet) return;
+    var data = sheet.getDataRange().getValues();
+    if (data.length <= 1) return;
+    var headers = data[0].map(function(h) { return String(h).trim(); });
+    function col(name) { return headers.indexOf(name); }
+    var cTs = col("Timestamp");
+    var cQb = col("QB Invoice #");
+    var cStaxInv = col("Stax Invoice ID");
+    var cStaxCust = col("Stax Customer ID");
+    var cCust = col("Customer");
+    var cAmount = col("Amount");
+    var cStatus = col("Status");
+    var cTxn = col("Transaction ID");
+    var cNotes = col("Notes");
+    var rows = [];
+    // Limit to the tail 1000 rows — no need to re-upsert ancient entries each run
+    var startRow = Math.max(1, data.length - 1000);
+    for (var i = startRow; i < data.length; i++) {
+      rows.push({
+        timestamp: cTs >= 0 ? _formatDateLoose(data[i][cTs]) : "",
+        qb_invoice_no: cQb >= 0 ? String(data[i][cQb] || "") : "",
+        stax_invoice_id: cStaxInv >= 0 ? String(data[i][cStaxInv] || "") : "",
+        stax_customer_id: cStaxCust >= 0 ? String(data[i][cStaxCust] || "") : "",
+        customer: cCust >= 0 ? String(data[i][cCust] || "") : "",
+        amount: cAmount >= 0 ? Number(data[i][cAmount] || 0) : 0,
+        status: cStatus >= 0 ? String(data[i][cStatus] || "") : "",
+        txn_id: cTxn >= 0 ? String(data[i][cTxn] || "") : "",
+        notes: cNotes >= 0 ? String(data[i][cNotes] || "") : ""
+      });
+    }
+    _sbBatchUpsert("stax_charges", rows, "timestamp,qb_invoice_no,txn_id");
+  } catch (e) { Logger.log("_sbResyncAllStaxCharges error (non-fatal): " + e); }
+}
+
+/** Read the Run Log tab tail and upsert to stax_run_log. */
+function _sbResyncStaxRunLog(ss) {
+  try {
+    if (!ss) ss = _getSpreadsheet();
+    var sheet = ss.getSheetByName(SHEET_NAMES.RUN_LOG);
+    if (!sheet) return;
+    var data = sheet.getDataRange().getValues();
+    if (data.length <= 1) return;
+    var headers = data[0].map(function(h) { return String(h).trim(); });
+    function col(name) { return headers.indexOf(name); }
+    var cTs = col("Timestamp");
+    var cFn = col("Function");
+    var cSum = col("Summary");
+    var cDet = col("Details");
+    var rows = [];
+    var startRow = Math.max(1, data.length - 500);
+    for (var i = startRow; i < data.length; i++) {
+      rows.push({
+        timestamp: cTs >= 0 ? _formatDateLoose(data[i][cTs]) : "",
+        fn: cFn >= 0 ? String(data[i][cFn] || "") : "",
+        summary: cSum >= 0 ? String(data[i][cSum] || "") : "",
+        details: cDet >= 0 ? String(data[i][cDet] || "") : ""
+      });
+    }
+    _sbBatchUpsert("stax_run_log", rows, "timestamp,fn,summary");
+  } catch (e) { Logger.log("_sbResyncStaxRunLog error (non-fatal): " + e); }
+}
+
+/** Read Exceptions tab tail and upsert to stax_exceptions. */
+function _sbResyncStaxExceptions(ss) {
+  try {
+    if (!ss) ss = _getSpreadsheet();
+    var sheet = ss.getSheetByName(SHEET_NAMES.EXCEPTIONS);
+    if (!sheet) return;
+    var data = sheet.getDataRange().getValues();
+    if (data.length <= 1) return;
+    var headers = data[0].map(function(h) { return String(h).trim(); });
+    function col(name) { return headers.indexOf(name); }
+    var rows = [];
+    var startRow = Math.max(1, data.length - 500);
+    for (var i = startRow; i < data.length; i++) {
+      rows.push({
+        timestamp:        col("Timestamp") >= 0 ? _formatDateLoose(data[i][col("Timestamp")]) : "",
+        qb_invoice_no:    col("QB Invoice #") >= 0 ? String(data[i][col("QB Invoice #")] || "") : "",
+        customer:         col("Customer") >= 0 ? String(data[i][col("Customer")] || "") : "",
+        stax_customer_id: col("Stax Customer ID") >= 0 ? String(data[i][col("Stax Customer ID")] || "") : "",
+        amount:           col("Amount") >= 0 ? Number(data[i][col("Amount")] || 0) : 0,
+        due_date:         col("Due Date") >= 0 ? _formatDateLoose(data[i][col("Due Date")]) : "",
+        reason:           col("Reason") >= 0 ? String(data[i][col("Reason")] || "") : "",
+        pay_link:         col("Pay Link") >= 0 ? String(data[i][col("Pay Link")] || "") : "",
+        resolved:         col("Resolved") >= 0 ? String(data[i][col("Resolved")] || "").toUpperCase() === "TRUE" : false
+      });
+    }
+    _sbBatchUpsert("stax_exceptions", rows, "timestamp,qb_invoice_no");
+  } catch (e) { Logger.log("_sbResyncStaxExceptions error (non-fatal): " + e); }
+}
+
+/** Tolerant date formatter — Date → yyyy-MM-dd HH:mm:ss; passthrough for strings. */
+function _formatDateLoose(v) {
+  if (!v) return "";
+  try {
+    if (v instanceof Date) {
+      return Utilities.formatDate(v, Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm:ss");
+    }
+    return String(v);
+  } catch (e) { return String(v || ""); }
 }
 
 // ============================================================
@@ -1434,6 +1652,11 @@ function _createStaxInvoicesForRows_(options) {
   }
 
   _writeRunLog(logLabel, summary, JSON.stringify(stats));
+
+  // v4.6.0 — Supabase write-through (session 69 Phase 2f).
+  // Resync all invoices + tail of run log; best-effort, never blocks.
+  try { _sbResyncAllStaxInvoices(ss); } catch (_) {}
+  try { _sbResyncStaxRunLog(ss); } catch (_) {}
 
   return { stats: stats, noRows: false, rowsProcessed: stats.total };
 }
@@ -2854,6 +3077,13 @@ function _executeChargeRun() {
     (stats.watchdogTripped ? ', watchdogTripped=true' : '');
 
   _writeRunLog('_executeChargeRun', summary, JSON.stringify(stats));
+
+  // v4.6.0 — Supabase write-through (session 69 Phase 2f).
+  // Resync invoices + charge log + exceptions + run log tails.
+  try { _sbResyncAllStaxInvoices(ss); } catch (_) {}
+  try { _sbResyncAllStaxCharges(ss); } catch (_) {}
+  try { _sbResyncStaxExceptions(ss); } catch (_) {}
+  try { _sbResyncStaxRunLog(ss); } catch (_) {}
 
   return { stats: stats };
 }
