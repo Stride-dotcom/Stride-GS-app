@@ -192,13 +192,28 @@ export function WillCalls() {
 
   // Page-level safety net: resolve clientName from apiClients if empty (race with useClients load)
   const idToName = useMemo<Record<string, string>>(() => { const m: Record<string, string> = {}; for (const c of apiClients) { m[c.spreadsheetId] = c.name; } return m; }, [apiClients]);
-  const data = useMemo(() => { if (clientFilter.length === 0) return []; let d = (willCalls as WC[]).map(w => w.clientName ? w : { ...w, clientName: idToName[(w as any).clientSheetId || (w as any).clientId] || '' }); if (clientFilter.length) d = d.filter(w => clientFilter.includes(w.clientName)); if (sf.length) d = d.filter(w => sf.includes(w.status)); return d; }, [sf, clientFilter, willCalls, idToName]);
+  // Session 70 fix #1: split filtering so status-chip counts reflect the client-filtered dataset
+  // (not the client-filtered AND status-filtered dataset — previously clicking one chip zeroed the others).
+  const clientFilteredData = useMemo(() => {
+    if (clientFilter.length === 0) return [] as WC[];
+    let d = (willCalls as WC[]).map(w => w.clientName ? w : { ...w, clientName: idToName[(w as any).clientSheetId || (w as any).clientId] || '' });
+    if (clientFilter.length) d = d.filter(w => clientFilter.includes(w.clientName));
+    return d;
+  }, [clientFilter, willCalls, idToName]);
+  const data = useMemo(() => {
+    if (sf.length === 0) return clientFilteredData;
+    return clientFilteredData.filter(w => sf.includes(w.status));
+  }, [clientFilteredData, sf]);
 
   // Client-filter change is already handled by useWillCalls (cacheKeyScope change
   // triggers useApiData refetch via Supabase-first path). A manual refetch() here
   // would force GAS (skipSupabaseCacheOnce) and hang the spinner on multi-client.
 
-  const counts = useMemo(() => { const c: Record<string, number> = { '': data.length }; ALL_STATUSES.forEach(s => { c[s] = data.filter(w => w.status === s).length; }); return c; }, [data]);
+  const counts = useMemo(() => {
+    const c: Record<string, number> = { '': clientFilteredData.length };
+    ALL_STATUSES.forEach(s => { c[s] = clientFilteredData.filter(w => w.status === s).length; });
+    return c;
+  }, [clientFilteredData]);
 
   const table = useReactTable({
     data, columns,

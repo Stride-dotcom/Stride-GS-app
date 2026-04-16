@@ -2,11 +2,14 @@
  * useWillCallDetail.ts — Single-will-call fetch hook for standalone detail page.
  * Fetches one WC from Supabase (~50ms) with legacy GAS fallback.
  * Mirrors useTaskDetail pattern.
+ *
+ * Session 70 fix #9: thread clientNameMap through Supabase fetch for deep-link client resolution.
  */
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { useAuth } from '../contexts/AuthContext';
-import { fetchWillCallByIdFromSupabase } from '../lib/supabaseQueries';
+import { fetchWillCallByIdFromSupabase, type ClientNameMap } from '../lib/supabaseQueries';
 import { fetchWillCallById } from '../lib/api';
+import { useClients } from './useClients';
 import type { ApiWillCall } from '../lib/api';
 
 export type WillCallDetailStatus = 'loading' | 'loaded' | 'not-found' | 'access-denied' | 'error';
@@ -21,12 +24,21 @@ export interface UseWillCallDetailResult {
 
 export function useWillCallDetail(wcNumber: string | undefined): UseWillCallDetailResult {
   const { user } = useAuth();
+  const { clients } = useClients();
   const [wc, setWc] = useState<ApiWillCall | null>(null);
   const [status, setStatus] = useState<WillCallDetailStatus>('loading');
   const [error, setError] = useState<string | null>(null);
   const [source, setSource] = useState<'supabase' | 'legacy' | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const fetchCountRef = useRef(0);
+
+  const clientNameMap = useMemo<ClientNameMap>(() => {
+    const map: ClientNameMap = {};
+    for (const c of clients) { map[c.id] = c.name; }
+    return map;
+  }, [clients]);
+  const clientNameMapRef = useRef(clientNameMap);
+  clientNameMapRef.current = clientNameMap;
 
   const fetchWc = useCallback(async () => {
     if (!wcNumber || !user) return;
@@ -40,8 +52,8 @@ export function useWillCallDetail(wcNumber: string | undefined): UseWillCallDeta
     setError(null);
 
     try {
-      // Step 1: Try Supabase (fast path)
-      const sbWc = await fetchWillCallByIdFromSupabase(wcNumber);
+      // Step 1: Try Supabase (fast path) — pass map for client-name fallback
+      const sbWc = await fetchWillCallByIdFromSupabase(wcNumber, clientNameMapRef.current);
 
       if (controller.signal.aborted || fetchId !== fetchCountRef.current) return;
 
@@ -57,7 +69,12 @@ export function useWillCallDetail(wcNumber: string | undefined): UseWillCallDeta
             const gasResp = await fetchWillCallById(wcNumber, sbWc.clientSheetId, controller.signal);
             if (fetchId !== fetchCountRef.current) return;
             if (gasResp.ok && gasResp.data?.success && gasResp.data.willCall) {
-              setWc({ ...gasResp.data.willCall, clientSheetId: sbWc.clientSheetId });
+              const gasWc = gasResp.data.willCall;
+              setWc({
+                ...gasWc,
+                clientSheetId: sbWc.clientSheetId,
+                clientName: gasWc.clientName || sbWc.clientName,
+              });
               setSource('legacy');
               setStatus('loaded');
               return;

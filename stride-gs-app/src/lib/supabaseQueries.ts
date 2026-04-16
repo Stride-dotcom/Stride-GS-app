@@ -715,9 +715,13 @@ function mapSupabaseTaskRow(row: SupabaseTaskRow, clientNameMap?: ClientNameMap)
 /**
  * Fetch a single task by task_id from Supabase.
  * Returns null if not found or Supabase unavailable.
+ * Session 70 fix #9: accept optional clientNameMap so deep-link opens of
+ * detail pages can resolve the client name from tenant_id when the row's
+ * client_name column is null (historical rows).
  */
 export async function fetchTaskByIdFromSupabase(
-  taskId: string
+  taskId: string,
+  clientNameMap?: ClientNameMap
 ): Promise<ApiTask | null> {
   try {
     const { data, error } = await supabase
@@ -726,7 +730,7 @@ export async function fetchTaskByIdFromSupabase(
       .eq('task_id', taskId)
       .maybeSingle();
     if (error || !data) return null;
-    return mapSupabaseTaskRow(data as SupabaseTaskRow);
+    return mapSupabaseTaskRow(data as SupabaseTaskRow, clientNameMap);
   } catch {
     return null;
   }
@@ -735,9 +739,11 @@ export async function fetchTaskByIdFromSupabase(
 /**
  * Fetch a single will call by wc_number from Supabase.
  * Returns null if not found. Items are NOT included (Supabase doesn't store WC items).
+ * Session 70 fix #9: accept optional clientNameMap for deep-link client resolution.
  */
 export async function fetchWillCallByIdFromSupabase(
-  wcNumber: string
+  wcNumber: string,
+  clientNameMap?: ClientNameMap
 ): Promise<ApiWillCall | null> {
   try {
     const { data, error } = await supabase
@@ -749,7 +755,7 @@ export async function fetchWillCallByIdFromSupabase(
     const row = data as SupabaseWillCallRow;
     return {
       wcNumber: row.wc_number,
-      clientName: '',  // resolved by caller via clientNameMap
+      clientName: clientNameMap ? (clientNameMap[row.tenant_id] || '') : '',
       clientSheetId: row.tenant_id,
       status: row.status || 'Pending',
       createdDate: row.created_date || '',
@@ -776,9 +782,11 @@ export async function fetchWillCallByIdFromSupabase(
 /**
  * Fetch a single repair by repair_id from Supabase.
  * Returns null if not found.
+ * Session 70 fix #9: accept optional clientNameMap for deep-link client resolution.
  */
 export async function fetchRepairByIdFromSupabase(
-  repairId: string
+  repairId: string,
+  clientNameMap?: ClientNameMap
 ): Promise<ApiRepair | null> {
   try {
     const { data, error } = await supabase
@@ -790,7 +798,7 @@ export async function fetchRepairByIdFromSupabase(
     const row = data as SupabaseRepairRow;
     return {
       repairId: row.repair_id,
-      clientName: '',  // resolved by caller
+      clientName: clientNameMap ? (clientNameMap[row.tenant_id] || '') : '',
       clientSheetId: row.tenant_id,
       sourceTaskId: '',
       itemId: row.item_id || '',

@@ -2,6 +2,7 @@ import React, { useState, useCallback, useMemo } from 'react';
 import { X, ClipboardList, Package, MapPin, CheckCircle2, XCircle, AlertTriangle, FolderOpen, Loader2, Play, ExternalLink, Truck, Wrench, Save, DollarSign, Pencil, FileText } from 'lucide-react';
 import { FolderButton } from './FolderButton';
 import { DeepLink } from './DeepLink';
+import { DetailHeader } from './DetailHeader';
 import { theme } from '../../styles/theme';
 import { fmtDate, fmtDateTime } from '../../lib/constants';
 import { WriteButton } from './WriteButton';
@@ -377,14 +378,14 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
 
         <ProcessingOverlay visible={submitting || startTaskLoading} message={startTaskLoading ? 'Starting Task...' : 'Completing Task...'} />
 
-        {/* Header */}
-        <div style={{ padding: '16px 20px', borderBottom: `1px solid ${theme.colors.border}`, flexShrink: 0 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-            <div>
-              <div style={{ fontSize: 18, fontWeight: 700 }}>{task.taskId}</div>
-              <div style={{ fontSize: 12, color: theme.colors.textSecondary, marginTop: 2 }}>{task.clientName}</div>
-            </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        {/* Header — DetailHeader gives canonical layout: big bold ID, bold client,
+            colored sidemark chip, status badges below ID. Session 70 fix #5. */}
+        <DetailHeader
+          entityId={task.taskId}
+          clientName={task.clientName}
+          sidemark={task.sidemark}
+          actions={
+            <>
               {isOpen && !completed && (
                 isEditingTask ? (
                   <>
@@ -406,14 +407,16 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
                 )
               )}
               <button onClick={onClose} disabled={submitting || startTaskLoading} style={{ background: 'none', border: 'none', cursor: (submitting || startTaskLoading) ? 'not-allowed' : 'pointer', padding: 4, color: theme.colors.textMuted, opacity: (submitting || startTaskLoading) ? 0.3 : 1 }}><X size={18} /></button>
+            </>
+          }
+          belowId={
+            <div style={{ display: 'flex', gap: 6 }}>
+              <Badge t={SERVICE_CODES[task.type as keyof typeof SERVICE_CODES] || task.type} bg={tc.bg} color={tc.color} />
+              <Badge t={completed ? 'Completed' : task.status} bg={completed ? STATUS_CFG.Completed.bg : sc.bg} color={completed ? STATUS_CFG.Completed.color : sc.color} />
+              {task.result && <Badge t={task.result} bg={task.result === 'Pass' ? '#F0FDF4' : '#FEF2F2'} color={task.result === 'Pass' ? '#15803D' : '#DC2626'} />}
             </div>
-          </div>
-          <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
-            <Badge t={SERVICE_CODES[task.type as keyof typeof SERVICE_CODES] || task.type} bg={tc.bg} color={tc.color} />
-            <Badge t={completed ? 'Completed' : task.status} bg={completed ? STATUS_CFG.Completed.bg : sc.bg} color={completed ? STATUS_CFG.Completed.color : sc.color} />
-            {task.result && <Badge t={task.result} bg={task.result === 'Pass' ? '#F0FDF4' : '#FEF2F2'} color={task.result === 'Pass' ? '#15803D' : '#DC2626'} />}
-          </div>
-        </div>
+          }
+        />
         {taskSaveError && (
           <div style={{ padding: '6px 20px', background: '#FEF2F2', color: '#DC2626', fontSize: 12, fontWeight: 500, borderBottom: `1px solid #FECACA` }}>{taskSaveError}</div>
         )}

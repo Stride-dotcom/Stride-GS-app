@@ -2,11 +2,21 @@
  * useTaskDetail.ts — Single-task fetch hook for standalone task detail page.
  * Fetches one task by ID from Supabase (fast), falls back to legacy API.
  * Also fetches related repairs for the same item.
+ *
+ * Session 70 fix #9: thread clientNameMap through Supabase fetcher so deep-link
+ * opens resolve clientName from tenant_id when the row's client_name is null.
+ * Additionally, when Supabase task row has no sidemark, fall back to inventory.
  */
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { useAuth } from '../contexts/AuthContext';
-import { fetchTaskByIdFromSupabase, fetchRepairsByItemIdFromSupabase } from '../lib/supabaseQueries';
+import {
+  fetchTaskByIdFromSupabase,
+  fetchRepairsByItemIdFromSupabase,
+  fetchItemsByIdsFromSupabase,
+  type ClientNameMap,
+} from '../lib/supabaseQueries';
 import { fetchTaskById } from '../lib/api';
+import { useClients } from './useClients';
 import type { ApiTask, ApiRepair } from '../lib/api';
 
 export type TaskDetailStatus = 'loading' | 'loaded' | 'not-found' | 'access-denied' | 'error';
@@ -22,6 +32,7 @@ export interface UseTaskDetailResult {
 
 export function useTaskDetail(taskId: string | undefined): UseTaskDetailResult {
   const { user } = useAuth();
+  const { clients } = useClients();
   const [task, setTask] = useState<ApiTask | null>(null);
   const [relatedRepairs, setRelatedRepairs] = useState<ApiRepair[]>([]);
   const [status, setStatus] = useState<TaskDetailStatus>('loading');
@@ -29,6 +40,16 @@ export function useTaskDetail(taskId: string | undefined): UseTaskDetailResult {
   const [source, setSource] = useState<'supabase' | 'legacy' | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const fetchCountRef = useRef(0);
+
+  // Build clientNameMap to resolve client names from tenant_id on Supabase rows
+  // whose client_name column is null (historical tasks).
+  const clientNameMap = useMemo<ClientNameMap>(() => {
+    const map: ClientNameMap = {};
+    for (const c of clients) { map[c.id] = c.name; }
+    return map;
+  }, [clients]);
+  const clientNameMapRef = useRef(clientNameMap);
+  clientNameMapRef.current = clientNameMap;
 
   const fetchTask = useCallback(async () => {
     if (!taskId || !user) return;
@@ -43,8 +64,8 @@ export function useTaskDetail(taskId: string | undefined): UseTaskDetailResult {
     setError(null);
 
     try {
-      // Step 1: Try Supabase (fast path)
-      const sbTask = await fetchTaskByIdFromSupabase(taskId);
+      // Step 1: Try Supabase (fast path) — pass map for client-name fallback
+      const sbTask = await fetchTaskByIdFromSupabase(taskId, clientNameMapRef.current);
 
       if (controller.signal.aborted || fetchId !== fetchCountRef.current) return;
 
@@ -57,6 +78,28 @@ export function useTaskDetail(taskId: string | undefined): UseTaskDetailResult {
         setTask(sbTask);
         setSource('supabase');
         setStatus('loaded');
+
+        // Session 70 fix #9: if sidemark / clientName still empty, fall back to
+        // inventory for the same itemId. Many historical task rows have null
+        // sidemark / client_name on the Supabase side.
+        const needsFallback = !sbTask.sidemark || !sbTask.clientName || !sbTask.vendor || !sbTask.description;
+        if (needsFallback && sbTask.itemId) {
+          fetchItemsByIdsFromSupabase([sbTask.itemId], clientNameMapRef.current)
+            .then(items => {
+              if (fetchId !== fetchCountRef.current) return;
+              const inv = items?.find(x => x.tenantId === sbTask.clientSheetId) || items?.[0];
+              if (!inv) return;
+              setTask(prev => prev ? {
+                ...prev,
+                sidemark: prev.sidemark || inv.sidemark || '',
+                clientName: prev.clientName || inv.clientName || '',
+                vendor: prev.vendor || inv.vendor || '',
+                description: prev.description || inv.description || '',
+                location: prev.location || inv.location || '',
+              } : prev);
+            })
+            .catch(() => {}); // best-effort
+        }
 
         // Fetch related repairs
         if (sbTask.itemId && sbTask.clientSheetId) {

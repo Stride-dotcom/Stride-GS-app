@@ -119,9 +119,17 @@ const SIDEMARK_PALETTE = [
   '#ECFCCB', // light lime
 ];
 
-/** Build a deterministic sidemark → color map from visible data */
+/** Normalize a sidemark string so "CRAMER", " CRAMER", "Cramer" all collapse to one key. */
+export function normSidemark(s: string | null | undefined): string {
+  return String(s ?? '').trim().toLocaleUpperCase();
+}
+
+/** Build a deterministic sidemark → color map from visible data.
+ *  Keys are normalized (trim + upper) so whitespace/case variants share a color. */
 function buildSidemarkColorMap(items: InventoryItem[]): Map<string, string> {
-  const unique = [...new Set(items.map(i => i.sidemark).filter(Boolean))].sort();
+  const unique = [...new Set(
+    items.map(i => normSidemark(i.sidemark)).filter(Boolean)
+  )].sort();
   const map = new Map<string, string>();
   unique.forEach((sm, idx) => map.set(sm, SIDEMARK_PALETTE[idx % SIDEMARK_PALETTE.length]));
   return map;
@@ -618,7 +626,18 @@ export function Inventory() {
 
   // Dynamic multiselect columns (client names change with live data)
   const ALL_CLIENTS = useMemo(() => [...new Set(inventoryItems.map(i => i.clientName))].sort(), [inventoryItems]);
-  const ALL_SIDEMARKS = useMemo(() => [...new Set(inventoryItems.map(i => i.sidemark).filter(Boolean))].sort(), [inventoryItems]);
+  // Session 70 fix #3: dedupe sidemarks on normalized key so case/whitespace variants
+  // (e.g. "CRAMER" vs " CRAMER" vs "Cramer") collapse to one filter option and share a color.
+  const ALL_SIDEMARKS = useMemo(() => {
+    const seen = new Map<string, string>(); // normKey -> first-seen canonical display value
+    for (const i of inventoryItems) {
+      const raw = i.sidemark;
+      if (!raw) continue;
+      const key = normSidemark(raw);
+      if (!seen.has(key)) seen.set(key, raw);
+    }
+    return [...seen.values()].sort();
+  }, [inventoryItems]);
   const MULTISELECT_COLS = useMemo(() => ({
     ...BASE_MULTISELECT_COLS,
     clientName: ALL_CLIENTS,
@@ -1006,7 +1025,7 @@ export function Inventory() {
       filterFn: multiSelectFilter,
       cell: i => {
         const val = i.getValue();
-        const bg = val ? sidemarkColorMap.get(val) : undefined;
+        const bg = val ? sidemarkColorMap.get(normSidemark(val)) : undefined;
         return (
           <span style={{
             fontSize: theme.typography.sizes.sm, display: 'block',
@@ -1757,7 +1776,7 @@ export function Inventory() {
             ) : isPrinting ? (
               /* De-virtualized: render ALL rows for print */
               allVirtualRows.map((row, idx) => {
-                const smColor = colorSidemarks && row.original.sidemark ? sidemarkColorMap.get(row.original.sidemark) : undefined;
+                const smColor = colorSidemarks && row.original.sidemark ? sidemarkColorMap.get(normSidemark(row.original.sidemark)) : undefined;
                 return (
                   <tr key={row.id} style={{ background: smColor ? smColor + '30' : idx % 2 === 0 ? '#fff' : '#FAFAFA' }}>
                     {row.getVisibleCells().map(cell => (
@@ -1774,7 +1793,7 @@ export function Inventory() {
                 const row = allVirtualRows[vRow.index];
                 const isSelected = row.getIsSelected();
                 const isActivePanel = selectedItem?.itemId === row.original.itemId;
-                const smColor = colorSidemarks && row.original.sidemark ? sidemarkColorMap.get(row.original.sidemark) : undefined;
+                const smColor = colorSidemarks && row.original.sidemark ? sidemarkColorMap.get(normSidemark(row.original.sidemark)) : undefined;
                 const rowBg = isSelected ? '#FFF7F4' : isActivePanel ? '#FEF3EE' : smColor ? smColor + '30' : 'transparent';
                 return (
                   <tr

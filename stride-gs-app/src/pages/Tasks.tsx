@@ -420,24 +420,30 @@ export function Tasks() {
     }
   }, [tasks, apiConfigured, showToast, refetchTasks]);
 
-  const data = useMemo(() => {
-    if (clientFilter.length === 0) return [];
+  // Session 70 fix #1: split filtering so status-chip counts reflect the client+assignee
+  // filtered dataset, not the fully-status-filtered dataset. Clicking one chip used to
+  // zero all the others.
+  const clientFilteredData = useMemo(() => {
+    if (clientFilter.length === 0) return [] as typeof tasks;
     let d = tasks;
     if (clientFilter.length) d = d.filter(t => clientFilter.includes(t.clientName));
-    if (sf.length) d = d.filter(t => sf.includes(t.status));
     if (af) d = d.filter(t => t.assignedTo === af);
     return d;
-  }, [sf, clientFilter, af, tasks]);
+  }, [clientFilter, af, tasks]);
+  const data = useMemo(() => {
+    if (sf.length === 0) return clientFilteredData;
+    return clientFilteredData.filter(t => sf.includes(t.status));
+  }, [clientFilteredData, sf]);
 
   // Client-filter change is already handled by useTasks (cacheKeyScope change
   // triggers useApiData refetch via Supabase-first path). A manual refetch() here
   // would force GAS (skipSupabaseCacheOnce) and hang the spinner on multi-client.
 
   const counts = useMemo(() => {
-    const c: Record<string, number> = { '': data.length };
-    ALL_STATUSES.forEach(s => { c[s] = data.filter(t => t.status === s).length; });
+    const c: Record<string, number> = { '': clientFilteredData.length };
+    ALL_STATUSES.forEach(s => { c[s] = clientFilteredData.filter(t => t.status === s).length; });
     return c;
-  }, [data]);
+  }, [clientFilteredData]);
 
   const table = useReactTable({
     data, columns,

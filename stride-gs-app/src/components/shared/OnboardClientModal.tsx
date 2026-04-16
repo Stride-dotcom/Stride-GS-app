@@ -3,6 +3,7 @@ import { X, Check, Users, Edit2, ExternalLink, FolderOpen, Sheet, Info, Loader2,
 import { theme } from '../../styles/theme';
 import { AutocompleteSelect } from './AutocompleteSelect';
 import { InfoTooltip } from './InfoTooltip';
+import { usePaymentTerms } from '../../hooks/usePaymentTerms';
 import type { ApiClient } from '../../lib/api';
 
 export interface OnboardClientFormData {
@@ -144,6 +145,14 @@ function buildInitialData(existing: ApiClient | null): OnboardClientFormData {
 export function OnboardClientModal({ mode = 'create', existingClient = null, allClients = [], onClose, onSubmit }: Props) {
   const isEdit = mode === 'edit';
   const [data, setData] = useState<OnboardClientFormData>(() => buildInitialData(existingClient));
+
+  // Session 70 fix #2 — CB-sourced payment terms (operator-maintained list
+  // matching QuickBooks). Falls back to the legacy 6 options if the endpoint
+  // is unreachable or the Payment_Terms tab is empty.
+  const { terms: paymentTermsList } = usePaymentTerms();
+  const paymentTermsOptions = paymentTermsList.length > 0
+    ? paymentTermsList
+    : ['Net 15', 'Net 30', 'Net 45', 'Net 60', 'Due on Receipt', 'CC ON FILE'];
 
   // Submit lifecycle state — modal owns this, parent just resolves the promise
   const [submitting, setSubmitting] = useState(false);
@@ -364,12 +373,14 @@ export function OnboardClientModal({ mode = 'create', existingClient = null, all
                 </label>
                 <select value={data.paymentTerms} onChange={e => set('paymentTerms', e.target.value)}
                   style={{ ...inp, cursor: 'pointer' }}>
-                  <option>Net 15</option>
-                  <option>Net 30</option>
-                  <option>Net 45</option>
-                  <option>Net 60</option>
-                  <option>Due on Receipt</option>
-                  <option>CC ON FILE</option>
+                  {/* Existing value not in the list (e.g., a custom term set
+                      elsewhere) should stay visible while the operator edits. */}
+                  {data.paymentTerms && !paymentTermsOptions.includes(data.paymentTerms) && (
+                    <option value={data.paymentTerms}>{data.paymentTerms}</option>
+                  )}
+                  {paymentTermsOptions.map(term => (
+                    <option key={term} value={term}>{term}</option>
+                  ))}
                 </select>
               </div>
               <div>

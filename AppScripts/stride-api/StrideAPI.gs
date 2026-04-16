@@ -1,5 +1,19 @@
 /* ===================================================
-   StrideAPI.gs — v38.60.1 — 2026-04-16 PST — handleGetBatch_ field parity with individual-fetch
+   StrideAPI.gs — v38.61.0 — 2026-04-16 PST — Session 70 fix batch (IK prefix strip, inspection photos URL, payment terms)
+   v38.61.0: FIX #4 — sbShipmentRow_ now strips the [IK:<uuid>] idempotency-key
+             prefix before writing to Supabase. The GAS read path already
+             stripped it, but the write-through was leaking the raw value to
+             the React Shipment Notes field.
+             FIX #7 — handleSendRepairQuote_ now resolves the "View Inspection
+             Photos" URL from Inventory Item ID hyperlink (primary) / Tasks
+             Source Task hyperlink (fallback) / client PHOTOS_FOLDER_ID (last
+             resort) instead of the hardcoded "#" placeholder that silently
+             broke the email button.
+             NEW #2 — handleGetPaymentTerms endpoint reads the new
+             CB `Payment_Terms` tab and returns the list to the React
+             Onboard/Edit Client modal. 600s CacheService TTL. Replaces the
+             hardcoded 6-option dropdown with an operator-maintained list
+             that matches the user's QuickBooks payment terms.
    v38.60.1: FIX — client-role users (who load data via getBatch instead of
              individual getInventory/getTasks/etc.) were missing a LOT of
              fields the detail panels expect: blank Reference, Item Notes,
@@ -1848,6 +1862,12 @@ function sbWillCallRow_(tenantId, wc) {
  * Build a Supabase shipment row from API response fields.
  */
 function sbShipmentRow_(tenantId, ship) {
+  // Session 70 fix #4: strip the [IK:<uuid>] idempotency-key prefix that
+  // handleCompleteShipment_ writes into "Shipment Notes" for retry protection.
+  // The GAS read path (api_getShipments_) already strips it, but the Supabase
+  // write-through was leaking the raw value to the React Notes field.
+  var rawNotes = String(ship.notes || "");
+  var cleanNotes = rawNotes.replace(/^\[IK:[^\]]*\]\s*/, "");
   return {
     tenant_id:       tenantId,
     shipment_number: String(ship.shipmentNumber || ""),
@@ -1855,7 +1875,7 @@ function sbShipmentRow_(tenantId, ship) {
     item_count:      Number(ship.itemCount || 0),
     carrier:         String(ship.carrier || ""),
     tracking_number: String(ship.trackingNumber || ""),
-    notes:           String(ship.notes || ""),
+    notes:           cleanNotes,
     folder_url:      String(ship.folderUrl || ""),
     updated_at:      new Date().toISOString()
   };
@@ -3040,6 +3060,7 @@ function doGet(e) {
       case "getClients":      return handleGetClientsAuthed_(callerEmail, params.includeInactive === "1");
       case "getPricing":      return withActiveUserGuard_(callerEmail, function() { return handleGetPricing_(); });
       case "getLocations":    return withActiveUserGuard_(callerEmail, function() { return handleGetLocations_(); });
+      case "getPaymentTerms": return withActiveUserGuard_(callerEmail, function() { return handleGetPaymentTerms_(); });
 
       // ─── Client operational data (server-side isolation + caching) ───
       case "getInventory":    return withClientIsolation_(callerEmail, clientSheetId, function(eid) { return cachedHandler_("inv:" + eid, function() { return handleGetInventory_(eid); }, noCache); });
@@ -4828,6 +4849,61 @@ function handleGetLocations_() {
   }
 
   return jsonResponse_({ locations: locations, count: locations.length });
+}
+
+/**
+ * Session 70 fix #2 — Payment Terms endpoint.
+ *
+ * Reads column A of the CB `Payment_Terms` tab. Auto-creates the tab on first
+ * call with the 6 legacy values so clients aren't broken between deploy and
+ * operator populating the list to match QuickBooks.
+ *
+ * Response: { terms: string[], count: number }
+ * CacheService TTL: 600s. Invalidated by any edit on the Payment_Terms tab if
+ * an onEdit trigger is set up (optional — TTL is short enough for manual edits).
+ */
+function handleGetPaymentTerms_() {
+  var cache = CacheService.getScriptCache();
+  var cached = null;
+  try { cached = cache.get("api_payment_terms"); } catch (_) {}
+  if (cached) {
+    try {
+      var parsed = JSON.parse(cached);
+      if (parsed && Array.isArray(parsed.terms)) return jsonResponse_(parsed);
+    } catch (_) {}
+  }
+
+  var cbId = prop_("CB_SPREADSHEET_ID");
+  if (!cbId) return errorResponse_("CB_SPREADSHEET_ID not configured", "CONFIG_ERROR");
+
+  var ss = SpreadsheetApp.openById(cbId);
+  var sheet = ss.getSheetByName("Payment_Terms");
+  if (!sheet) {
+    // Seed tab with the legacy hardcoded defaults so the app keeps working
+    // until the operator edits the list to match QuickBooks exactly.
+    sheet = ss.insertSheet("Payment_Terms");
+    sheet.getRange(1, 1).setValue("Term");
+    sheet.setFrozenRows(1);
+    var seedTerms = [
+      ["Net 15"], ["Net 30"], ["Net 45"], ["Net 60"],
+      ["Due on Receipt"], ["CC ON FILE"]
+    ];
+    sheet.getRange(2, 1, seedTerms.length, 1).setValues(seedTerms);
+  }
+
+  var lastRow = sheet.getLastRow();
+  var terms = [];
+  if (lastRow >= 2) {
+    var values = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
+    for (var i = 0; i < values.length; i++) {
+      var t = String(values[i][0] || "").trim();
+      if (t && terms.indexOf(t) === -1) terms.push(t);
+    }
+  }
+
+  var result = { terms: terms, count: terms.length };
+  try { cache.put("api_payment_terms", JSON.stringify(result), 600); } catch (_) {}
+  return jsonResponse_(result);
 }
 
 /* ================================================================
@@ -9100,6 +9176,43 @@ function handleSendRepairQuote_(clientSheetId, payload) {
       var room        = invItem ? (invItem.room || "") : "";
       var itemTableHtml = api_buildSingleItemTableHtml_(itemId, desc, vendor, itemClass, location, sidemark, qty, room);
 
+      // Session 70 fix #7: resolve an inspection-photos URL so the "View
+      // Inspection Photos" button in the email actually works. Previously
+      // hardcoded to "#". Fallback chain:
+      //   1. Inventory Item ID cell rich-text hyperlink (the inspection
+      //      task folder URL; this is what the Inventory page links to).
+      //   2. Repairs sheet "Source Task" cell rich-text hyperlink on
+      //      this repair row (task folder).
+      //   3. Client-level PHOTOS_FOLDER_ID (whole photos folder).
+      //   4. Empty — template conditional {{PHOTOS_BUTTON}} stays blank.
+      var photosUrl = "";
+      try {
+        var invSheetP = ss.getSheetByName("Inventory");
+        if (invSheetP && itemId) {
+          var invMapP = api_getHeaderMap_(invSheetP);
+          var invIdColP = invMapP["Item ID"];
+          if (invIdColP) {
+            var invRowP = api_findRowById_(invSheetP, invIdColP, itemId);
+            if (invRowP > 0) {
+              var rtInv = invSheetP.getRange(invRowP, invIdColP).getRichTextValue();
+              if (rtInv && rtInv.getLinkUrl()) photosUrl = rtInv.getLinkUrl();
+            }
+          }
+        }
+      } catch (_) {}
+      if (!photosUrl) {
+        try {
+          if (repMap["Source Task"]) {
+            var rtSrc = repSheet.getRange(repRow, repMap["Source Task"]).getRichTextValue();
+            if (rtSrc && rtSrc.getLinkUrl()) photosUrl = rtSrc.getLinkUrl();
+          }
+        } catch (_) {}
+      }
+      if (!photosUrl) {
+        var photosFolderId = String(settings["PHOTOS_FOLDER_ID"] || "").trim();
+        if (photosFolderId) photosUrl = "https://drive.google.com/drive/folders/" + photosFolderId;
+      }
+
       var emailResult = api_sendTemplateEmail_(settings, "REPAIR_QUOTE", clientEmail,
         "Repair Quote Ready: " + itemId + " $" + quoteAmtFmt,
         {
@@ -9112,7 +9225,7 @@ function handleSendRepairQuote_(clientSheetId, payload) {
           "{{NOTES}}":            repairNotes  || "-",
           "{{TASK_NOTES}}":       taskNotes    || "-",
           "{{ITEM_TABLE_HTML}}":  itemTableHtml,
-          "{{PHOTOS_URL}}":       "#",
+          "{{PHOTOS_URL}}":       photosUrl,
           "{{PHOTOS_BUTTON}}":    ""
         }
       );

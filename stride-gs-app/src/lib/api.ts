@@ -263,6 +263,12 @@ export interface LocationsResponse {
   count: number;
 }
 
+/** Session 70 fix #2 — Payment terms from CB Payment_Terms tab. */
+export interface PaymentTermsResponse {
+  terms: string[];
+  count: number;
+}
+
 // ─── Batch 2 Types (Operational Data) ────────────────────────────────────────
 
 /** Inventory item from a client sheet */
@@ -724,6 +730,11 @@ export function fetchPricing(signal?: AbortSignal) {
   return apiFetch<PricingResponse>('getPricing', undefined, { signal });
 }
 
+/** Session 70 fix #2 — Payment terms from CB Payment_Terms tab. */
+export function fetchPaymentTerms(signal?: AbortSignal) {
+  return apiFetch<PaymentTermsResponse>('getPaymentTerms', undefined, { signal });
+}
+
 export function fetchLocations(signal?: AbortSignal) {
   return apiFetch<LocationsResponse>('getLocations', undefined, { signal });
 }
@@ -1100,11 +1111,16 @@ export function postCompleteShipment(
   clientSheetId: string,
   signal?: AbortSignal
 ) {
+  // Session 70 fix #6: large receiving batches (many items + tasks + billing rows +
+  // PDF + email) routinely take > 90s on GAS even when the writes succeed. The
+  // default 90s POST timeout was firing and showing "Request timed out" in the
+  // banner even though the shipment was fully saved. Bump to long timeout (300s)
+  // to match other heavy writes (onboardClient, createInvoice, etc.).
   return apiPost<CompleteShipmentResponse>(
     'completeShipment',
     payload as unknown as Record<string, unknown>,
     { clientSheetId },
-    { signal }
+    { signal, timeoutMs: API_POST_TIMEOUT_LONG_MS }
   );
 }
 
