@@ -1,5 +1,22 @@
 /* ===================================================
-   StrideAPI.gs — v38.65.0 — 2026-04-16 PST — Fix onboardClient silent Supabase write-through + Resync Clients tool
+   StrideAPI.gs — v38.66.0 — 2026-04-16 PST — Fix silent Supabase write-through in ALL batch handlers
+   v38.66.0: FIX — `api_writeThrough_` was only shaped for single-entity
+             handlers (expects a ContentService Response with `.getContent()`).
+             Every batch handler passed a plain `api_newBatchResult_()` object
+             instead — the `.getContent()` call threw immediately, the catch
+             swallowed, and `resyncEntityToSupabase_` was NEVER called. Batch
+             cancel / reassign / schedule / etc. wrote the change to the sheet
+             but silently failed to update the Supabase mirror. React refetch
+             showed stale "Open" data, user clicked cancel again, backend
+             returned "status is Cancelled" — the user-reported "Cancel Tasks
+             — Finished with issues" on a first-click attempt.
+             Function now accepts both shapes: Response-wrapped JSON (checks
+             `success && !skipped`) and plain batch-result object (checks
+             `succeeded > 0`). Fixes ALL batch handlers in one place:
+             handleBatchCancelTasks_, handleBatchCancelRepairs_,
+             handleBatchCancelWillCalls_, handleBatchReassignTasks_,
+             handleBatchScheduleWillCalls_, handleBatchRequestRepairQuote_,
+             handleBatchVoidStaxInvoices_, handleBatchDeleteStaxInvoices_.
    v38.65.0: FIX (end-to-end onboarding) — the onboardClient router case was
              checking `body.spreadsheetId` on the handler response, but the
              response uses `clientSheetId` as its key. Check silently failed,
@@ -2792,10 +2809,42 @@ function resyncEntityToSupabase_(entityType, tenantId, entityId) {
  * @param {string} tenantId - clientSheetId
  * @param {string|string[]} entityId - single ID or array of IDs to resync
  */
+/**
+ * Supabase write-through helper.
+ *
+ * v38.65.0 — accepts TWO shapes:
+ *   (a) A ContentService Response object from a single-entity handler
+ *       (e.g. `handleCompleteTask_` returns `jsonResponse_({success:true,…})`).
+ *       Shape check: `r.getContent` is a function.
+ *   (b) A plain `api_newBatchResult_()` object from a batch handler
+ *       (e.g. `handleBatchCancelTasks_`). Shape check: `r.succeeded`
+ *       is a number and the object has no `getContent` method.
+ *
+ * Previously this function only handled shape (a) — calling `r.getContent()`
+ * on the batch result threw, the catch swallowed, and `resyncEntityToSupabase_`
+ * was never called. Sheet got "Cancelled" written, but Supabase stayed at
+ * "Open", so the React refetch saw stale data and the row reverted. Retrying
+ * the cancel then returned "status is Cancelled" because the sheet was
+ * already updated. User-reported symptom: "Cancel Tasks — Finished with
+ * issues: Cannot cancel — status is Cancelled" even on a first-click attempt.
+ *
+ * Affects every batch handler that calls api_writeThrough_: handleBatchCancelTasks_,
+ * handleBatchCancelRepairs_, handleBatchCancelWillCalls_, handleBatchReassignTasks_,
+ * handleBatchScheduleWillCalls_, handleBatchRequestRepairQuote_, etc.
+ */
 function api_writeThrough_(r, entityType, tenantId, entityId) {
   try {
-    var json = JSON.parse(r.getContent());
-    if (!json || !json.success || json.skipped) return;
+    var isValid = false;
+    if (r && typeof r.getContent === 'function') {
+      // Shape (a): single-entity handler, wrapped in jsonResponse_
+      var json = JSON.parse(r.getContent());
+      isValid = !!(json && json.success && !json.skipped);
+    } else if (r && typeof r === 'object' && typeof r.succeeded === 'number') {
+      // Shape (b): batch-result object. Caller already filtered to succeeded
+      // IDs, so accept as long as at least one row actually succeeded.
+      isValid = r.succeeded > 0;
+    }
+    if (!isValid) return;
     if (Array.isArray(entityId)) {
       for (var i = 0; i < entityId.length; i++) {
         if (entityId[i]) resyncEntityToSupabase_(entityType, tenantId, String(entityId[i]));
