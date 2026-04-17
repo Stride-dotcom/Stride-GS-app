@@ -920,6 +920,23 @@ export function Inventory() {
     }
   }, [apiConfigured, showToast, refetch, addOptimisticRepair, removeOptimisticRepair]);
 
+  // Session 71: Build item-level task/repair indicator sets from already-loaded data
+  const { inspItems, asmItems, repairItems } = useMemo(() => {
+    const insp = new Set<string>();
+    const asm = new Set<string>();
+    const rep = new Set<string>();
+    for (const t of tasks) {
+      if (!t.itemId) continue;
+      const code = (t.svcCode || t.type || '').toUpperCase();
+      if (code === 'INSP') insp.add(t.itemId);
+      else if (code === 'ASM') asm.add(t.itemId);
+    }
+    for (const r of repairs) {
+      if (r.itemId) rep.add(r.itemId);
+    }
+    return { inspItems: insp, asmItems: asm, repairItems: rep };
+  }, [tasks, repairs]);
+
   // Column definitions
   const columns = useMemo(() => [
     // Select
@@ -947,16 +964,35 @@ export function Inventory() {
       ),
     }),
 
-    // Item ID
+    // Item ID with I/A/R indicators
     ch.accessor('itemId', {
-      header: 'Item ID', size: 100,
-      cell: i => (
-        <span style={{
-          fontFamily: 'monospace', fontSize: 12,
-          fontWeight: theme.typography.weights.semibold,
-          color: theme.colors.textPrimary,
-        }}>{i.getValue()}</span>
-      ),
+      header: 'Item ID', size: 120,
+      cell: i => {
+        const id = i.getValue();
+        const hasI = inspItems.has(id);
+        const hasA = asmItems.has(id);
+        const hasR = repairItems.has(id);
+        const badgeStyle: React.CSSProperties = {
+          fontSize: 9, fontWeight: 700, borderRadius: 3, padding: '1px 3px',
+          lineHeight: 1, fontFamily: 'Inter, system-ui, sans-serif',
+        };
+        return (
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%' }}>
+            <span style={{
+              fontFamily: 'monospace', fontSize: 12,
+              fontWeight: theme.typography.weights.semibold,
+              color: theme.colors.textPrimary,
+            }}>{id}</span>
+            {(hasI || hasA || hasR) && (
+              <span style={{ display: 'inline-flex', gap: 2, marginLeft: 4, flexShrink: 0 }}>
+                {hasI && <span style={{ ...badgeStyle, background: '#DBEAFE', color: '#1E40AF' }} title="Inspection task exists">I</span>}
+                {hasA && <span style={{ ...badgeStyle, background: '#FEF3C7', color: '#92400E' }} title="Assembly task exists">A</span>}
+                {hasR && <span style={{ ...badgeStyle, background: '#FCE7F3', color: '#9D174D' }} title="Repair exists">R</span>}
+              </span>
+            )}
+          </div>
+        );
+      },
     }),
 
     // Client
@@ -1133,7 +1169,7 @@ export function Inventory() {
         </div>
       ),
     }),
-  ], [hoveredRowId, showToast]);
+  ], [hoveredRowId, showToast, inspItems, asmItems, repairItems]);
 
   // When navigating from Shipments page, filter table to that shipment
   const tableData = useMemo(() => {
