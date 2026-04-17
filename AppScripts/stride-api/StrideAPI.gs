@@ -1,5 +1,5 @@
 /* ===================================================
-   StrideAPI.gs — v38.68.0 — 2026-04-16 11:00 PM PST — Inventory full overlay (all 22 cols)
+   StrideAPI.gs — v38.68.1 — 2026-04-17 12:00 AM PST — Fix taskNotes overlay bug + Location redirect
    v38.68.0: FEAT — Complete "Inventory as single source of truth" overlay.
              sbInventoryRow_ now writes 5 new columns to Supabase (shipment_photos_url,
              inspection_photos_url, repair_photos_url, invoice_url, transfer_date).
@@ -6261,7 +6261,7 @@ function handleGetTasks_(clientSheetId) {
           if (invFields.carrier[taskItemId]) carrier = invFields.carrier[taskItemId];
           if (invFields.trackingNumber[taskItemId]) trackingNumber = invFields.trackingNumber[taskItemId];
           if (invFields.itemNotes[taskItemId]) itemNotes = invFields.itemNotes[taskItemId];
-          if (invFields.taskNotes[taskItemId]) taskNotes = invFields.taskNotes[taskItemId];
+          // taskNotes NOT overlaid — entity-specific (task's own notes, not Inventory's aggregated job log)
           if (invFields.shipmentPhotosUrl[taskItemId]) shipmentPhotosUrl = invFields.shipmentPhotosUrl[taskItemId];
           if (invFields.inspectionPhotosUrl[taskItemId]) inspectionPhotosUrl = invFields.inspectionPhotosUrl[taskItemId];
           if (invFields.repairPhotosUrl[taskItemId]) repairPhotosUrl = invFields.repairPhotosUrl[taskItemId];
@@ -7815,7 +7815,7 @@ function handleGetBatch_(clientSheetId) {
             if (invFieldsByItem.carrier[trItemId]) taskCarrier = invFieldsByItem.carrier[trItemId];
             if (invFieldsByItem.trackingNumber[trItemId]) taskTracking = invFieldsByItem.trackingNumber[trItemId];
             if (invFieldsByItem.itemNotes[trItemId]) taskItemNotes = invFieldsByItem.itemNotes[trItemId];
-            if (invFieldsByItem.taskNotes[trItemId]) taskTaskNotes = invFieldsByItem.taskNotes[trItemId];
+            // taskNotes NOT overlaid — entity-specific (task's own notes)
             if (invFieldsByItem.shipmentPhotosUrl[trItemId]) taskShipPhotos = invFieldsByItem.shipmentPhotosUrl[trItemId];
             if (invFieldsByItem.inspectionPhotosUrl[trItemId]) taskInspPhotos = invFieldsByItem.inspectionPhotosUrl[trItemId];
             if (invFieldsByItem.repairPhotosUrl[trItemId]) taskRepairPhotos = invFieldsByItem.repairPhotosUrl[trItemId];
@@ -18666,13 +18666,17 @@ function handleUpdateInventoryItem_(clientSheetId, payload) {
 
     // Propagate field changes to open Tasks and Repairs for this item
     // Mirrors onClientEdit field sync from Triggers.gs
+    // v38.68.1: Expanded fan-out — all item-level fields that exist on Tasks/Repairs sheets
     var SYNC_FIELDS = {
       location:    "Location",
       vendor:      "Vendor",
       description: "Description",
       itemNotes:   "Item Notes",
       status:      "Status",
-      sidemark:    "Sidemark"
+      sidemark:    "Sidemark",
+      room:        "Room",
+      reference:   "Reference",
+      itemClass:   "Class"
     };
 
     var fieldsToSync = {};

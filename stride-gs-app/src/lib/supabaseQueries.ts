@@ -344,7 +344,7 @@ export async function fetchTasksFromSupabase(
         if (inv.trackingNumber) task.trackingNumber = inv.trackingNumber;
         if (inv.shipmentNumber) task.shipmentNumber = inv.shipmentNumber;
         if (inv.itemNotes) task.itemNotes = inv.itemNotes;
-        if (inv.taskNotes) task.taskNotes = inv.taskNotes;
+        // taskNotes NOT overlaid — entity-specific (task's own notes, not Inventory's aggregated job log)
         if (inv.shipmentPhotosUrl) task.shipmentPhotosUrl = inv.shipmentPhotosUrl;
         if (inv.inspectionPhotosUrl) task.inspectionPhotosUrl = inv.inspectionPhotosUrl;
         if (inv.repairPhotosUrl) task.repairPhotosUrl = inv.repairPhotosUrl;

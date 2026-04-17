@@ -6,7 +6,7 @@ import { DetailHeader } from './DetailHeader';
 import { theme } from '../../styles/theme';
 import { fmtDate, fmtDateTime } from '../../lib/constants';
 import { WriteButton } from './WriteButton';
-import { postCompleteTask, postStartTask, postUpdateTaskNotes, postUpdateTaskCustomPrice, postRequestRepairQuote, postCancelTask, postGenerateTaskWorkOrder, isApiConfigured } from '../../lib/api';
+import { postCompleteTask, postStartTask, postUpdateTaskNotes, postUpdateTaskCustomPrice, postRequestRepairQuote, postCancelTask, postGenerateTaskWorkOrder, postUpdateInventoryItem, isApiConfigured } from '../../lib/api';
 import { writeSyncFailed } from '../../lib/syncEvents';
 import { useLocations } from '../../hooks/useLocations';
 import type { CompleteTaskResponse, StartTaskResponse } from '../../lib/api';
@@ -189,12 +189,13 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
     if (Object.keys(patchData).length > 0) mergeTaskPatch?.(task.taskId, patchData);
 
     try {
-      // Save notes + location in one call
-      if (notesChanged || locationChanged) {
-        const payload: Record<string, unknown> = { taskId: task.taskId };
-        if (notesChanged) payload.taskNotes = notes;
-        if (locationChanged) payload.location = location;
-        await postUpdateTaskNotes(payload as any, clientSheetId);
+      // Save notes to Tasks sheet (entity-specific)
+      if (notesChanged) {
+        await postUpdateTaskNotes({ taskId: task.taskId, taskNotes: notes } as any, clientSheetId);
+      }
+      // Save location to Inventory (single source of truth — fans out to Tasks/Repairs)
+      if (locationChanged && task.itemId) {
+        await postUpdateInventoryItem({ itemId: task.itemId, location } as any, clientSheetId);
       }
       // Save custom price if changed (staff + admin)
       if (canSeeCustomPrice && 'customPrice' in patchData) {
