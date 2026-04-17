@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { fetchBatchSummary, setNextFetchNoCache } from '../lib/api';
+import { entityEvents } from '../lib/entityEvents';
 import type { SummaryTask, SummaryRepair, SummaryWillCall } from '../lib/api';
 import { fetchDashboardSummaryFromSupabase, isSupabaseCacheAvailable } from '../lib/supabaseQueries';
 import type { ClientNameMap } from '../lib/supabaseQueries';
@@ -52,8 +53,13 @@ export function useDashboardSummary(autoFetch = true): UseDashboardSummaryResult
     setError(null);
 
     try {
+      // Session 71: After any entity write, skip Supabase and go to GAS for fresh data
+      const skipSb = entityEvents.shouldSkipSupabase('task')
+        || entityEvents.shouldSkipSupabase('repair')
+        || entityEvents.shouldSkipSupabase('will_call');
+
       // Try Supabase read cache first (50-100ms vs 3-44s)
-      if (await isSupabaseCacheAvailable()) {
+      if (!skipSb && !noCache && await isSupabaseCacheAvailable()) {
         const sbResult = await fetchDashboardSummaryFromSupabase(clientNameMap, tenantFilter);
         if (sbResult && !ctrl.signal.aborted) {
           setTasks(sbResult.tasks || []);
@@ -66,8 +72,9 @@ export function useDashboardSummary(autoFetch = true): UseDashboardSummaryResult
         }
       }
 
-      // Fall back to GAS API
-      const resp = await fetchBatchSummary(ctrl.signal, noCache);
+      // Fall back to GAS API (or forced by skipSb/noCache)
+      if (skipSb) setNextFetchNoCache();
+      const resp = await fetchBatchSummary(ctrl.signal, noCache || skipSb);
       if (ctrl.signal.aborted) return;
       if (resp.ok && resp.data) {
         setTasks(resp.data.tasks || []);
@@ -92,6 +99,15 @@ export function useDashboardSummary(autoFetch = true): UseDashboardSummaryResult
     doFetch(false);
     return () => { abortRef.current?.abort(); };
   }, [autoFetch, doFetch]);
+
+  // Session 71: Auto-refresh dashboard when any entity is written
+  useEffect(() => {
+    return entityEvents.subscribe((type) => {
+      if (type === 'task' || type === 'repair' || type === 'will_call' || type === 'inventory') {
+        doFetch(false);
+      }
+    });
+  }, [doFetch]);
 
   const refetch = useCallback((noCache = false) => {
     if (noCache) setNextFetchNoCache();
