@@ -380,6 +380,10 @@ interface SupabaseRepairRow {
   item_notes: string | null;
   created_date: string | null;
   completed_date: string | null;
+  quote_sent_date: string | null;
+  scheduled_date: string | null;
+  start_date: string | null;
+  created_by: string | null;
   repair_folder_url: string | null;
   shipment_folder_url: string | null;
   task_folder_url: string | null;
@@ -414,14 +418,14 @@ export async function fetchRepairsFromSupabase(
       location: '',
       sidemark: '',
       taskNotes: row.task_notes || '',
-      createdBy: '',
+      createdBy: row.created_by || '',
       createdDate: row.created_date || '',
       quoteAmount: row.quote_amount,
-      quoteSentDate: '',
+      quoteSentDate: row.quote_sent_date || '',
       status: row.status || '',
       approved: false,
-      scheduledDate: '',
-      startDate: '',
+      scheduledDate: row.scheduled_date || '',
+      startDate: row.start_date || '',
       repairVendor: row.repair_vendor || '',
       partsCost: null,
       laborHours: null,
@@ -1049,14 +1053,14 @@ export async function fetchRepairByIdFromSupabase(
       location: '',
       sidemark: '',
       taskNotes: row.task_notes || '',
-      createdBy: '',
+      createdBy: row.created_by || '',
       createdDate: row.created_date || '',
       quoteAmount: row.quote_amount,
-      quoteSentDate: '',
+      quoteSentDate: row.quote_sent_date || '',
       status: row.status || '',
       approved: false,
-      scheduledDate: '',
-      startDate: '',
+      scheduledDate: row.scheduled_date || '',
+      startDate: row.start_date || '',
       repairVendor: row.repair_vendor || '',
       partsCost: null,
       laborHours: null,
@@ -1103,14 +1107,14 @@ export async function fetchRepairsByItemIdFromSupabase(
       location: '',
       sidemark: '',
       taskNotes: row.task_notes || '',
-      createdBy: '',
+      createdBy: row.created_by || '',
       createdDate: row.created_date || '',
       quoteAmount: row.quote_amount,
-      quoteSentDate: '',
+      quoteSentDate: row.quote_sent_date || '',
       status: row.status || '',
       approved: false,
-      scheduledDate: '',
-      startDate: '',
+      scheduledDate: row.scheduled_date || '',
+      startDate: row.start_date || '',
       repairVendor: row.repair_vendor || '',
       partsCost: null,
       laborHours: null,

@@ -2319,6 +2319,10 @@ function sbRepairRow_(tenantId, repair) {
     item_notes:         String(repair.itemNotes || ""),
     created_date:       String(repair.createdDate || ""),
     completed_date:     String(repair.completedDate || ""),
+    quote_sent_date:    String(repair.quoteSentDate || ""),
+    scheduled_date:     String(repair.scheduledDate || ""),
+    start_date:         String(repair.startDate || ""),
+    created_by:         String(repair.createdBy || ""),
     repair_folder_url:  String(repair.repairFolderUrl || ""),
     shipment_folder_url: String(repair.shipmentFolderUrl || ""),
     task_folder_url:    String(repair.taskFolderUrl || ""),
@@ -3187,7 +3191,11 @@ function resyncEntityToSupabase_(entityType, tenantId, entityId) {
               repairNotes: row["Repair Notes"], taskNotes: row["Task Notes"],
               itemNotes: row["Item Notes"],
               createdDate: formatDate_(row["Created Date"]),
-              completedDate: formatDate_(row["Completed Date"])
+              completedDate: formatDate_(row["Completed Date"]),
+              quoteSentDate: formatDate_(row["Quote Sent Date"]),
+              scheduledDate: formatDate_(row["Scheduled Date"]),
+              startDate: formatDate_(row["Start Date"]),
+              createdBy: row["Created By"] || ""
             }));
             break;
           case "will_call":
