@@ -148,6 +148,11 @@ interface SupabaseInventoryRow {
   reference: string | null;
   task_notes: string | null;
   item_folder_url: string | null;
+  shipment_photos_url: string | null;
+  inspection_photos_url: string | null;
+  repair_photos_url: string | null;
+  invoice_url: string | null;
+  transfer_date: string | null;
 }
 
 export async function fetchInventoryFromSupabase(
@@ -252,6 +257,9 @@ interface InvFieldMapEntry {
   status: string; itemNotes: string; taskNotes: string;
   receiveDate: string; releaseDate: string; carrier: string;
   trackingNumber: string; shipmentNumber: string;
+  itemFolderUrl: string; shipmentPhotosUrl: string;
+  inspectionPhotosUrl: string; repairPhotosUrl: string;
+  invoiceUrl: string; transferDate: string;
 }
 
 async function _fetchInvFieldMap(clientSheetId?: string | string[]): Promise<Record<string, InvFieldMapEntry>> {
@@ -287,6 +295,12 @@ async function _fetchInvFieldMap(clientSheetId?: string | string[]): Promise<Rec
             carrier: row.carrier ?? '',
             trackingNumber: row.tracking_number ?? '',
             shipmentNumber: row.shipment_number ?? '',
+            itemFolderUrl: row.item_folder_url ?? '',
+            shipmentPhotosUrl: row.shipment_photos_url ?? '',
+            inspectionPhotosUrl: row.inspection_photos_url ?? '',
+            repairPhotosUrl: row.repair_photos_url ?? '',
+            invoiceUrl: row.invoice_url ?? '',
+            transferDate: row.transfer_date ?? '',
           };
         }
       }
@@ -323,6 +337,17 @@ export async function fetchTasksFromSupabase(
         if (inv.vendor) task.vendor = inv.vendor;
         if (inv.sidemark) task.sidemark = inv.sidemark;
         if (inv.description) task.description = inv.description;
+        if (inv.room) task.room = inv.room;
+        if (inv.reference) task.reference = inv.reference;
+        if (inv.itemClass) task.itemClass = inv.itemClass;
+        if (inv.carrier) task.carrier = inv.carrier;
+        if (inv.trackingNumber) task.trackingNumber = inv.trackingNumber;
+        if (inv.shipmentNumber) task.shipmentNumber = inv.shipmentNumber;
+        if (inv.itemNotes) task.itemNotes = inv.itemNotes;
+        if (inv.taskNotes) task.taskNotes = inv.taskNotes;
+        if (inv.shipmentPhotosUrl) task.shipmentPhotosUrl = inv.shipmentPhotosUrl;
+        if (inv.inspectionPhotosUrl) task.inspectionPhotosUrl = inv.inspectionPhotosUrl;
+        if (inv.repairPhotosUrl) task.repairPhotosUrl = inv.repairPhotosUrl;
       }
     }
 
@@ -418,6 +443,15 @@ export async function fetchRepairsFromSupabase(
         if (inv.vendor) repair.vendor = inv.vendor;
         if (inv.sidemark) repair.sidemark = inv.sidemark;
         if (inv.description) repair.description = inv.description;
+        if (inv.room) repair.room = inv.room;
+        if (inv.reference) repair.reference = inv.reference;
+        if (inv.itemClass) repair.itemClass = inv.itemClass;
+        if (inv.carrier) repair.carrier = inv.carrier;
+        if (inv.trackingNumber) repair.trackingNumber = inv.trackingNumber;
+        if (inv.itemNotes) repair.itemNotes = inv.itemNotes;
+        if (inv.shipmentPhotosUrl) repair.shipmentPhotosUrl = inv.shipmentPhotosUrl;
+        if (inv.inspectionPhotosUrl) repair.inspectionPhotosUrl = inv.inspectionPhotosUrl;
+        if (inv.repairPhotosUrl) repair.repairPhotosUrl = inv.repairPhotosUrl;
       }
     }
 
@@ -1088,6 +1122,7 @@ export async function fetchDashboardSummaryFromSupabase(
           if (inv.vendor) t.vendor = inv.vendor;
           if (inv.sidemark) t.sidemark = inv.sidemark;
           if (inv.description) t.description = inv.description;
+          if (inv.shipmentNumber) t.shipmentNumber = inv.shipmentNumber;
         }
       }
       for (const r of repairs) {

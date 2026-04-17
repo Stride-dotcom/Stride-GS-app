@@ -1,5 +1,14 @@
 /* ===================================================
-   StrideAPI.gs — v38.67.1 — 2026-04-16 PST — Expose installer/retry from Run dropdown
+   StrideAPI.gs — v38.68.0 — 2026-04-16 11:00 PM PST — Inventory full overlay (all 22 cols)
+   v38.68.0: FEAT — Complete "Inventory as single source of truth" overlay.
+             sbInventoryRow_ now writes 5 new columns to Supabase (shipment_photos_url,
+             inspection_photos_url, repair_photos_url, invoice_url, transfer_date).
+             resyncEntityToSupabase_ passes the new fields.
+             handleGetTasks_, handleGetRepairs_, handleGetWillCalls_, handleGetBatch_
+             now OVERRIDE all item-level fields from inventory (room, reference,
+             itemClass, carrier, trackingNumber, receiveDate, itemNotes, taskNotes,
+             itemFolderUrl, shipmentPhotosUrl, inspectionPhotosUrl, repairPhotosUrl).
+   v38.67.1 — 2026-04-16 PST — Expose installer/retry from Run dropdown
    v38.67.1: FIX — `installSyncRetryTrigger_` had a trailing underscore,
              which is Apps Script's convention for PRIVATE functions (hidden
              from the Run dropdown). User couldn't find it to execute the
@@ -2090,8 +2099,13 @@ function sbInventoryRow_(tenantId, item) {
     item_notes:      String(item.itemNotes || ""),
     reference:       String(item.reference || ""),
     task_notes:      String(item.taskNotes || ""),
-    item_folder_url: String(item.itemFolderUrl || ""),
-    updated_at:      new Date().toISOString()
+    item_folder_url:       String(item.itemFolderUrl || ""),
+    shipment_photos_url:   String(item.shipmentPhotosUrl || ""),
+    inspection_photos_url: String(item.inspectionPhotosUrl || ""),
+    repair_photos_url:     String(item.repairPhotosUrl || ""),
+    invoice_url:           String(item.invoiceUrl || ""),
+    transfer_date:         String(item.transferDate || ""),
+    updated_at:            new Date().toISOString()
   };
 }
 
@@ -2970,7 +2984,12 @@ function resyncEntityToSupabase_(entityType, tenantId, entityId) {
               receiveDate: formatDate_(row["Receive Date"]), releaseDate: formatDate_(row["Release Date"]),
               shipmentNumber: row["Shipment #"], carrier: row["Carrier"],
               trackingNumber: row["Tracking #"], itemNotes: row["Item Notes"],
-              reference: row["Reference"], taskNotes: row["Task Notes"]
+              reference: row["Reference"], taskNotes: row["Task Notes"],
+              shipmentPhotosUrl: row["Shipment Photos URL"],
+              inspectionPhotosUrl: row["Inspection Photos URL"],
+              repairPhotosUrl: row["Repair Photos URL"],
+              invoiceUrl: row["Invoice URL"],
+              transferDate: formatDate_(row["Transfer Date"])
             }));
             break;
           case "task":
@@ -6225,13 +6244,27 @@ function handleGetTasks_(clientSheetId) {
         var description = String(row["Description"] || "").trim();
         var location = String(row["Location"] || "").trim();
         var sidemark = String(row["Sidemark"] || "").trim();
+        var room = "", reference = "", itemClass = "", carrier = "", trackingNumber = "";
+        var itemNotes = String(row["Item Notes"] || "").trim();
+        var taskNotes = String(row["Task Notes"] || "").trim();
+        var itemFolderUrl = "", shipmentPhotosUrl = "", inspectionPhotosUrl = "", repairPhotosUrl = "";
         if (taskItemId) {
-          // OVERRIDE from inventory (authoritative source for item fields)
+          // OVERRIDE from inventory (authoritative source for ALL item fields)
           if (invFields.ship[taskItemId]) shipNo = invFields.ship[taskItemId];
           if (invFields.vendor[taskItemId]) vendor = invFields.vendor[taskItemId];
           if (invFields.description[taskItemId]) description = invFields.description[taskItemId];
           if (invFields.location[taskItemId]) location = invFields.location[taskItemId];
           if (invFields.sidemark[taskItemId]) sidemark = invFields.sidemark[taskItemId];
+          if (invFields.room[taskItemId]) room = invFields.room[taskItemId];
+          if (invFields.reference[taskItemId]) reference = invFields.reference[taskItemId];
+          if (invFields.itemClass[taskItemId]) itemClass = invFields.itemClass[taskItemId];
+          if (invFields.carrier[taskItemId]) carrier = invFields.carrier[taskItemId];
+          if (invFields.trackingNumber[taskItemId]) trackingNumber = invFields.trackingNumber[taskItemId];
+          if (invFields.itemNotes[taskItemId]) itemNotes = invFields.itemNotes[taskItemId];
+          if (invFields.taskNotes[taskItemId]) taskNotes = invFields.taskNotes[taskItemId];
+          if (invFields.shipmentPhotosUrl[taskItemId]) shipmentPhotosUrl = invFields.shipmentPhotosUrl[taskItemId];
+          if (invFields.inspectionPhotosUrl[taskItemId]) inspectionPhotosUrl = invFields.inspectionPhotosUrl[taskItemId];
+          if (invFields.repairPhotosUrl[taskItemId]) repairPhotosUrl = invFields.repairPhotosUrl[taskItemId];
         }
 
         allTasks.push({
@@ -6246,19 +6279,27 @@ function handleGetTasks_(clientSheetId) {
           location: location,
           sidemark: sidemark,
           shipmentNumber: shipNo,
+          room: room,
+          reference: reference,
+          itemClass: itemClass,
+          carrier: carrier,
+          trackingNumber: trackingNumber,
           created: formatDate_(row["Created"]),
-          itemNotes: String(row["Item Notes"] || "").trim(),
+          itemNotes: itemNotes,
           completedAt: formatDateTime_(row["Completed At"]),
           cancelledAt: formatDateTime_(row["Cancelled At"]),
           result: String(row["Result"] || "").trim(),
-          taskNotes: String(row["Task Notes"] || "").trim(),
+          taskNotes: taskNotes,
           svcCode: String(row["Svc Code"] || "").trim(),
           billed: toBool_(row["Billed"]),
           assignedTo: String(row["Assigned To"] || "").trim(),
           startedAt: formatDateTime_(row["Started At"]),
           customPrice: toNum_(row["Custom Price"]) || undefined,
           taskFolderUrl: taskFolderUrls[taskId] || "",
-          shipmentFolderUrl: shipFolderMap[shipNo] || ""
+          shipmentFolderUrl: shipFolderMap[shipNo] || "",
+          shipmentPhotosUrl: shipmentPhotosUrl,
+          inspectionPhotosUrl: inspectionPhotosUrl,
+          repairPhotosUrl: repairPhotosUrl
         });
       }
     } catch (err) {
@@ -6623,12 +6664,25 @@ function handleGetRepairs_(clientSheetId) {
         var rowDesc = String(row["Description"] || "").trim();
         var rowLocation = String(row["Location"] || "").trim();
         var rowSidemark = String(row["Sidemark"] || "").trim();
+        var rowRoom = "", rowReference = "", rowItemClass = String(row["Class"] || "").trim();
+        var rowCarrier = "", rowTrackingNumber = "";
+        var rowItemNotes = String(row["Item Notes"] || "").trim();
+        var rowShipPhotosUrl = "", rowInspPhotosUrl = "", rowRepairPhotosUrl = "";
         if (repairItemId) {
           if (invFields.ship[repairItemId]) repShipNo = invFields.ship[repairItemId];
           if (invFields.vendor[repairItemId]) rowVendor = invFields.vendor[repairItemId];
           if (invFields.description[repairItemId]) rowDesc = invFields.description[repairItemId];
           if (invFields.location[repairItemId]) rowLocation = invFields.location[repairItemId];
           if (invFields.sidemark[repairItemId]) rowSidemark = invFields.sidemark[repairItemId];
+          if (invFields.room[repairItemId]) rowRoom = invFields.room[repairItemId];
+          if (invFields.reference[repairItemId]) rowReference = invFields.reference[repairItemId];
+          if (invFields.itemClass[repairItemId]) rowItemClass = invFields.itemClass[repairItemId];
+          if (invFields.carrier[repairItemId]) rowCarrier = invFields.carrier[repairItemId];
+          if (invFields.trackingNumber[repairItemId]) rowTrackingNumber = invFields.trackingNumber[repairItemId];
+          if (invFields.itemNotes[repairItemId]) rowItemNotes = invFields.itemNotes[repairItemId];
+          if (invFields.shipmentPhotosUrl[repairItemId]) rowShipPhotosUrl = invFields.shipmentPhotosUrl[repairItemId];
+          if (invFields.inspectionPhotosUrl[repairItemId]) rowInspPhotosUrl = invFields.inspectionPhotosUrl[repairItemId];
+          if (invFields.repairPhotosUrl[repairItemId]) rowRepairPhotosUrl = invFields.repairPhotosUrl[repairItemId];
         }
         allRepairs.push({
           repairId: repairId,
@@ -6637,10 +6691,14 @@ function handleGetRepairs_(clientSheetId) {
           sourceTaskId: sourceTaskId,
           itemId: repairItemId,
           description: rowDesc,
-          itemClass: String(row["Class"] || "").trim(),
+          itemClass: rowItemClass,
           vendor: rowVendor,
           location: rowLocation,
           sidemark: rowSidemark,
+          room: rowRoom,
+          reference: rowReference,
+          carrier: rowCarrier,
+          trackingNumber: rowTrackingNumber,
           taskNotes: String(row["Task Notes"] || "").trim(),
           createdBy: String(row["Created By"] || "").trim(),
           createdDate: formatDate_(row["Created Date"]),
@@ -6656,13 +6714,16 @@ function handleGetRepairs_(clientSheetId) {
           repairResult: String(row["Repair Result"] || "").trim(),
           finalAmount: toNum_(row["Final Amount"]),
           invoiceId: String(row["Invoice ID"] || "").trim(),
-          itemNotes: String(row["Item Notes"] || "").trim(),
+          itemNotes: rowItemNotes,
           repairNotes: String(row["Repair Notes"] || "").trim(),
           completedDate: formatDate_(row["Completed Date"]),
           billed: toBool_(row["Billed"]),
           repairFolderUrl: repairFolderUrls[repairId] || "",
           taskFolderUrl: taskFolderUrls[sourceTaskId] || "",
-          shipmentFolderUrl: shipFolderMap[repShipNo] || ""
+          shipmentFolderUrl: shipFolderMap[repShipNo] || "",
+          shipmentPhotosUrl: rowShipPhotosUrl,
+          inspectionPhotosUrl: rowInspPhotosUrl,
+          repairPhotosUrl: rowRepairPhotosUrl
         });
       }
     } catch (err) {
@@ -6724,13 +6785,21 @@ function handleGetWillCalls_(clientSheetId) {
         var wciDesc = String(wci["Description"] || "").trim();
         var wciSidemark = String(wci["Sidemark"] || "").trim();
         var wciRoom = String(wci["Room"] || "").trim();
-        // OVERRIDE from Inventory (authoritative source)
+        var wciReference = "", wciItemClass = String(wci["Class"] || "").trim();
+        var wciCarrier = "", wciTrackingNumber = "";
+        var wciShipNo = "";
+        // OVERRIDE from Inventory (authoritative source — ALL item fields)
         if (wciItemId) {
           if (invFields.vendor[wciItemId]) wciVendor = invFields.vendor[wciItemId];
           if (invFields.location[wciItemId]) wciLocation = invFields.location[wciItemId];
           if (invFields.description[wciItemId]) wciDesc = invFields.description[wciItemId];
           if (invFields.sidemark[wciItemId]) wciSidemark = invFields.sidemark[wciItemId];
           if (invFields.room[wciItemId]) wciRoom = invFields.room[wciItemId];
+          if (invFields.reference[wciItemId]) wciReference = invFields.reference[wciItemId];
+          if (invFields.itemClass[wciItemId]) wciItemClass = invFields.itemClass[wciItemId];
+          if (invFields.carrier[wciItemId]) wciCarrier = invFields.carrier[wciItemId];
+          if (invFields.trackingNumber[wciItemId]) wciTrackingNumber = invFields.trackingNumber[wciItemId];
+          if (invFields.ship[wciItemId]) wciShipNo = invFields.ship[wciItemId];
         }
         itemsByWC[wcNum].push({
           wcNumber: wcNum,
@@ -6738,10 +6807,14 @@ function handleGetWillCalls_(clientSheetId) {
           qty: Number(wci["Qty"]) || 1,
           vendor: wciVendor,
           description: wciDesc,
-          itemClass: String(wci["Class"] || "").trim(),
+          itemClass: wciItemClass,
           location: wciLocation,
           sidemark: wciSidemark,
           room: wciRoom,
+          reference: wciReference,
+          carrier: wciCarrier,
+          trackingNumber: wciTrackingNumber,
+          shipmentNumber: wciShipNo,
           wcFee: toNum_(wci["WC Fee"]),
           released: String(wci["Status"] || "").trim() === "Released" || toBool_(wci["Released"]),
           status: String(wci["Status"] || "").trim()
@@ -7644,10 +7717,12 @@ function handleGetBatch_(clientSheetId) {
       var shipFolderMap = api_buildShipmentFolderMap_(ss);
       var t_afterRichText = new Date().getTime();
 
-      // Session 69 Phase 4: build itemId → {ship, vendor, description, sidemark,
-      // location, room} from Inventory. These are OVERRIDES (authoritative) for
-      // Tasks/Repairs/Billing/WC items below. Piggybacked on the Inventory loop.
-      var invFieldsByItem = { ship: {}, vendor: {}, description: {}, sidemark: {}, location: {}, room: {} };
+      // Session 71: build itemId → all inventory fields from Inventory sheet.
+      // These are OVERRIDES (authoritative) for Tasks/Repairs/Billing/WC items below.
+      // Piggybacked on the Inventory loop.
+      var invFieldsByItem = { ship: {}, vendor: {}, description: {}, sidemark: {}, location: {}, room: {},
+        reference: {}, itemClass: {}, carrier: {}, trackingNumber: {}, itemNotes: {}, taskNotes: {},
+        shipmentPhotosUrl: {}, inspectionPhotosUrl: {}, repairPhotosUrl: {} };
 
       // ── Inventory ──
       if (invSheet) {
@@ -7668,6 +7743,24 @@ function handleGetBatch_(clientSheetId) {
           if (invSidemark) invFieldsByItem.sidemark[iid] = invSidemark;
           if (invLocation) invFieldsByItem.location[iid] = invLocation;
           if (invRoom) invFieldsByItem.room[iid] = invRoom;
+          var invRef = String(ir["Reference"] || "").trim();
+          var invClass = String(ir["Class"] || "").trim();
+          var invCarrier = String(ir["Carrier"] || "").trim();
+          var invTracking = String(ir["Tracking #"] || "").trim();
+          var invItemNotes = String(ir["Item Notes"] || "").trim();
+          var invTaskNotes = String(ir["Task Notes"] || "").trim();
+          var invShipPhotos = String(ir["Shipment Photos URL"] || "").trim();
+          var invInspPhotos = String(ir["Inspection Photos URL"] || "").trim();
+          var invRepairPhotos = String(ir["Repair Photos URL"] || "").trim();
+          if (invRef) invFieldsByItem.reference[iid] = invRef;
+          if (invClass) invFieldsByItem.itemClass[iid] = invClass;
+          if (invCarrier) invFieldsByItem.carrier[iid] = invCarrier;
+          if (invTracking) invFieldsByItem.trackingNumber[iid] = invTracking;
+          if (invItemNotes) invFieldsByItem.itemNotes[iid] = invItemNotes;
+          if (invTaskNotes) invFieldsByItem.taskNotes[iid] = invTaskNotes;
+          if (invShipPhotos) invFieldsByItem.shipmentPhotosUrl[iid] = invShipPhotos;
+          if (invInspPhotos) invFieldsByItem.inspectionPhotosUrl[iid] = invInspPhotos;
+          if (invRepairPhotos) invFieldsByItem.repairPhotosUrl[iid] = invRepairPhotos;
           result.inventory.push({
             itemId: iid, clientName: cname, clientSheetId: cid,
             qty: Number(ir["Qty"]) || 1, vendor: String(ir["Vendor"] || "").trim(),
@@ -7705,13 +7798,27 @@ function handleGetBatch_(clientSheetId) {
           var taskDesc = String(tr["Description"] || "").trim();
           var taskLocation = String(tr["Location"] || "").trim();
           var taskSidemark = String(tr["Sidemark"] || "").trim();
-          // Session 69 Phase 4: OVERRIDE from inventory (authoritative)
+          // Session 71: OVERRIDE ALL item fields from inventory (authoritative)
+          var taskRoom = "", taskRef = "", taskItemClass = "", taskCarrier = "", taskTracking = "";
+          var taskItemNotes = String(tr["Item Notes"] || "").trim();
+          var taskTaskNotes = String(tr["Task Notes"] || "").trim();
+          var taskShipPhotos = "", taskInspPhotos = "", taskRepairPhotos = "";
           if (trItemId) {
             if (invFieldsByItem.ship[trItemId]) taskShipNo = invFieldsByItem.ship[trItemId];
             if (invFieldsByItem.vendor[trItemId]) taskVendor = invFieldsByItem.vendor[trItemId];
             if (invFieldsByItem.description[trItemId]) taskDesc = invFieldsByItem.description[trItemId];
             if (invFieldsByItem.location && invFieldsByItem.location[trItemId]) taskLocation = invFieldsByItem.location[trItemId];
             if (invFieldsByItem.sidemark[trItemId]) taskSidemark = invFieldsByItem.sidemark[trItemId];
+            if (invFieldsByItem.room[trItemId]) taskRoom = invFieldsByItem.room[trItemId];
+            if (invFieldsByItem.reference[trItemId]) taskRef = invFieldsByItem.reference[trItemId];
+            if (invFieldsByItem.itemClass[trItemId]) taskItemClass = invFieldsByItem.itemClass[trItemId];
+            if (invFieldsByItem.carrier[trItemId]) taskCarrier = invFieldsByItem.carrier[trItemId];
+            if (invFieldsByItem.trackingNumber[trItemId]) taskTracking = invFieldsByItem.trackingNumber[trItemId];
+            if (invFieldsByItem.itemNotes[trItemId]) taskItemNotes = invFieldsByItem.itemNotes[trItemId];
+            if (invFieldsByItem.taskNotes[trItemId]) taskTaskNotes = invFieldsByItem.taskNotes[trItemId];
+            if (invFieldsByItem.shipmentPhotosUrl[trItemId]) taskShipPhotos = invFieldsByItem.shipmentPhotosUrl[trItemId];
+            if (invFieldsByItem.inspectionPhotosUrl[trItemId]) taskInspPhotos = invFieldsByItem.inspectionPhotosUrl[trItemId];
+            if (invFieldsByItem.repairPhotosUrl[trItemId]) taskRepairPhotos = invFieldsByItem.repairPhotosUrl[trItemId];
           }
           result.tasks.push({
             taskId: tid, clientName: cname, clientSheetId: cid,
@@ -7719,15 +7826,17 @@ function handleGetBatch_(clientSheetId) {
             itemId: trItemId, vendor: taskVendor,
             description: taskDesc, location: taskLocation,
             sidemark: taskSidemark, shipmentNumber: taskShipNo,
+            room: taskRoom, reference: taskRef, itemClass: taskItemClass,
+            carrier: taskCarrier, trackingNumber: taskTracking,
             created: formatDate_(tr["Created"]), completedAt: formatDateTime_(tr["Completed At"]),
             result: String(tr["Result"] || "").trim(), svcCode: String(tr["Svc Code"] || "").trim(),
             billed: toBool_(tr["Billed"]), assignedTo: String(tr["Assigned To"] || "").trim(),
             startedAt: formatDateTime_(tr["Started At"]), customPrice: toNum_(tr["Custom Price"]) || undefined,
-            // v38.60.1 — parity with ApiTask individual-fetch shape
-            itemNotes:   String(tr["Item Notes"] || "").trim(),
-            taskNotes:   String(tr["Task Notes"] || "").trim(),
+            itemNotes: taskItemNotes,
+            taskNotes: taskTaskNotes,
             cancelledAt: formatDateTime_(tr["Cancelled At"]),
-            taskFolderUrl: taskFolderMap[tid] || "", shipmentFolderUrl: shipFolderMap[taskShipNo] || ""
+            taskFolderUrl: taskFolderMap[tid] || "", shipmentFolderUrl: shipFolderMap[taskShipNo] || "",
+            shipmentPhotosUrl: taskShipPhotos, inspectionPhotosUrl: taskInspPhotos, repairPhotosUrl: taskRepairPhotos
           });
         }
       }
@@ -7746,12 +7855,25 @@ function handleGetBatch_(clientSheetId) {
           var repDesc = String(rr["Description"] || "").trim();
           var repLocation = String(rr["Location"] || "").trim();
           var repSidemark = String(rr["Sidemark"] || "").trim();
-          // Session 69 Phase 4: OVERRIDE from inventory (authoritative)
+          // Session 71: OVERRIDE ALL item fields from inventory (authoritative)
+          var repRoom = "", repRef = "", repItemClass = String(rr["Class"] || "").trim();
+          var repCarrier = "", repTracking = "";
+          var repItemNotes = String(rr["Item Notes"] || "").trim();
+          var repShipPhotos = "", repInspPhotos = "", repRepairPhotos = "";
           if (repItemId) {
             if (invFieldsByItem.vendor[repItemId]) repVendor = invFieldsByItem.vendor[repItemId];
             if (invFieldsByItem.description[repItemId]) repDesc = invFieldsByItem.description[repItemId];
             if (invFieldsByItem.location && invFieldsByItem.location[repItemId]) repLocation = invFieldsByItem.location[repItemId];
             if (invFieldsByItem.sidemark[repItemId]) repSidemark = invFieldsByItem.sidemark[repItemId];
+            if (invFieldsByItem.room[repItemId]) repRoom = invFieldsByItem.room[repItemId];
+            if (invFieldsByItem.reference[repItemId]) repRef = invFieldsByItem.reference[repItemId];
+            if (invFieldsByItem.itemClass[repItemId]) repItemClass = invFieldsByItem.itemClass[repItemId];
+            if (invFieldsByItem.carrier[repItemId]) repCarrier = invFieldsByItem.carrier[repItemId];
+            if (invFieldsByItem.trackingNumber[repItemId]) repTracking = invFieldsByItem.trackingNumber[repItemId];
+            if (invFieldsByItem.itemNotes[repItemId]) repItemNotes = invFieldsByItem.itemNotes[repItemId];
+            if (invFieldsByItem.shipmentPhotosUrl[repItemId]) repShipPhotos = invFieldsByItem.shipmentPhotosUrl[repItemId];
+            if (invFieldsByItem.inspectionPhotosUrl[repItemId]) repInspPhotos = invFieldsByItem.inspectionPhotosUrl[repItemId];
+            if (invFieldsByItem.repairPhotosUrl[repItemId]) repRepairPhotos = invFieldsByItem.repairPhotosUrl[repItemId];
           }
           result.repairs.push({
             repairId: rid, clientName: cname, clientSheetId: cid,
@@ -7760,10 +7882,13 @@ function handleGetBatch_(clientSheetId) {
             status: String(rr["Status"] || "").trim(), quoteAmount: toNum_(rr["Quote Amount"]),
             createdDate: formatDate_(rr["Created Date"]), completedDate: formatDate_(rr["Completed Date"]),
             repairVendor: String(rr["Repair Vendor"] || "").trim(), billed: toBool_(rr["Billed"]),
-            // v38.60.1 — parity with ApiRepair individual-fetch shape
-            itemClass:     String(rr["Class"] || "").trim(),
-            location:      String(rr["Location"] || "").trim(),
-            sidemark:      String(rr["Sidemark"] || "").trim(),
+            itemClass:     repItemClass,
+            location:      repLocation,
+            sidemark:      repSidemark,
+            room:          repRoom,
+            reference:     repRef,
+            carrier:       repCarrier,
+            trackingNumber: repTracking,
             taskNotes:     String(rr["Task Notes"] || "").trim(),
             createdBy:     String(rr["Created By"] || "").trim(),
             quoteSentDate: formatDate_(rr["Quote Sent Date"]),
@@ -7775,10 +7900,11 @@ function handleGetBatch_(clientSheetId) {
             repairResult:  String(rr["Repair Result"] || "").trim(),
             finalAmount:   toNum_(rr["Final Amount"]),
             invoiceId:     String(rr["Invoice ID"] || "").trim(),
-            itemNotes:     String(rr["Item Notes"] || "").trim(),
+            itemNotes:     repItemNotes,
             repairNotes:   String(rr["Repair Notes"] || "").trim(),
             repairFolderUrl: repairFolderMap[rid] || "", shipmentFolderUrl: "",
-            taskFolderUrl: taskFolderMap[repSrcTask] || ""
+            taskFolderUrl: taskFolderMap[repSrcTask] || "",
+            shipmentPhotosUrl: repShipPhotos, inspectionPhotosUrl: repInspPhotos, repairPhotosUrl: repRepairPhotos
           });
         }
         // Cross-ref: repairs get shipment folder via item → shipment number

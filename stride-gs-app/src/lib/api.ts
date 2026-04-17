@@ -318,6 +318,11 @@ export interface ApiTask {
   location: string;
   sidemark: string;
   shipmentNumber: string;
+  room?: string;
+  reference?: string;
+  itemClass?: string;
+  carrier?: string;
+  trackingNumber?: string;
   created: string;
   itemNotes: string;
   completedAt: string;
@@ -331,6 +336,9 @@ export interface ApiTask {
   customPrice?: number;
   taskFolderUrl?: string;
   shipmentFolderUrl?: string;
+  shipmentPhotosUrl?: string;
+  inspectionPhotosUrl?: string;
+  repairPhotosUrl?: string;
 }
 
 export interface TasksResponse {
@@ -371,9 +379,16 @@ export interface ApiRepair {
   repairNotes: string;
   completedDate: string;
   billed: boolean;
+  room?: string;
+  reference?: string;
+  carrier?: string;
+  trackingNumber?: string;
   repairFolderUrl?: string;
   shipmentFolderUrl?: string;
   taskFolderUrl?: string;
+  shipmentPhotosUrl?: string;
+  inspectionPhotosUrl?: string;
+  repairPhotosUrl?: string;
 }
 
 export interface RepairsResponse {
@@ -3130,6 +3145,7 @@ export interface SummaryTask {
   vendor: string;
   sidemark: string;
   location: string;
+  shipmentNumber?: string;
   taskFolderUrl?: string;
   shipmentFolderUrl?: string;
 }

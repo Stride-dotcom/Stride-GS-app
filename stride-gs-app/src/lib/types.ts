@@ -27,8 +27,16 @@ export interface InventoryItem {
   reference?: string;
   poNumber?: string;
   trackingNumber?: string;
+  carrier?: string;
   notes?: string;
   itemNotes?: string;
+  taskNotes?: string;
+  itemFolderUrl?: string;
+  shipmentPhotosUrl?: string;
+  inspectionPhotosUrl?: string;
+  repairPhotosUrl?: string;
+  invoiceUrl?: string;
+  transferDate?: string;
   condition?: string;
   dimensions?: string;
   weight?: number;
@@ -49,6 +57,11 @@ export interface Task {
   description: string;
   location?: string;
   sidemark?: string;
+  room?: string;
+  reference?: string;
+  itemClass?: string;
+  carrier?: string;
+  trackingNumber?: string;
   assignedTo?: string;
   created: string; // ISO date
   dueDate?: string; // ISO date
@@ -56,6 +69,7 @@ export interface Task {
   completedAt?: string; // ISO date
   cancelledAt?: string; // ISO date
   result?: 'Pass' | 'Fail';
+  itemNotes?: string;
   taskNotes?: string;
   svcCode: ServiceCode;
   billed: boolean;
@@ -63,6 +77,9 @@ export interface Task {
   customPrice?: number;
   taskFolderUrl?: string;
   shipmentFolderUrl?: string;
+  shipmentPhotosUrl?: string;
+  inspectionPhotosUrl?: string;
+  repairPhotosUrl?: string;
 }
 
 export type TaskType =
@@ -106,9 +123,17 @@ export interface Repair {
   completedDate?: string; // ISO date
   notes?: string;
   internalNotes?: string;
+  room?: string;
+  reference?: string;
+  itemClass?: string;
+  carrier?: string;
+  trackingNumber?: string;
   repairFolderUrl?: string;
   taskFolderUrl?: string;
   shipmentFolderUrl?: string;
+  shipmentPhotosUrl?: string;
+  inspectionPhotosUrl?: string;
+  repairPhotosUrl?: string;
 }
 
 export type RepairStatus =
@@ -153,6 +178,13 @@ export interface WCItem {
   vendor?: string;
   location?: string;
   status?: string;
+  room?: string;
+  reference?: string;
+  itemClass?: string;
+  sidemark?: string;
+  carrier?: string;
+  trackingNumber?: string;
+  shipmentNumber?: string;
 }
 
 export interface Shipment {
