@@ -34,11 +34,13 @@ export function useSupabaseRealtime() {
     if (subscribedRef.current) return; // prevent double-subscribe on React StrictMode
     subscribedRef.current = true;
 
-    /** Debounced emit — coalesces rapid-fire events per entity type */
+    /** Debounced emit — coalesces rapid-fire events per entity type.
+     *  Uses emitFromRealtime (not emit) so the refetch reads from Supabase
+     *  (which already has the fresh data) instead of going to GAS. */
     function debouncedEmit(entityType: string, entityId: string) {
       clearTimeout(debounceTimers.current[entityType]);
       debounceTimers.current[entityType] = setTimeout(() => {
-        entityEvents.emit(entityType, entityId);
+        entityEvents.emitFromRealtime(entityType, entityId);
       }, 500);
     }
 
@@ -69,6 +71,9 @@ export function useSupabaseRealtime() {
       // billing
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'billing' }, onRow('billing', 'ledger_row_id'))
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'billing' }, onRow('billing', 'ledger_row_id'))
+      // clients
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'clients' }, onRow('client', 'spreadsheet_id'))
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'clients' }, onRow('client', 'spreadsheet_id'))
       .subscribe();
 
     return () => {

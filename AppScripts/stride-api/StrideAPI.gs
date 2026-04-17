@@ -1369,6 +1369,49 @@ function reconcileClientNow(spreadsheetId) {
   Logger.log("reconcileClientNow: done for " + spreadsheetId);
 }
 
+/**
+ * reconcileAllClientsNow — Full sync of ALL active clients to Supabase.
+ * Run from Apps Script editor when you need everything in sync immediately.
+ * WARNING: Takes 1-3 minutes for 50 clients. GAS has a 6-minute limit.
+ * If you have 50+ clients and it times out, the reconciliation trigger
+ * will catch the remaining ones within the next cycle.
+ */
+function reconcileAllClientsNow() {
+  var cbId = prop_("CB_SPREADSHEET_ID");
+  if (!cbId) { Logger.log("reconcileAllClientsNow: no CB_SPREADSHEET_ID"); return; }
+  var cbSs = SpreadsheetApp.openById(cbId);
+  var sheet = cbSs.getSheetByName("Clients");
+  if (!sheet) { Logger.log("reconcileAllClientsNow: Clients sheet not found"); return; }
+
+  var data = sheet.getDataRange().getValues();
+  if (data.length < 2) return;
+  var headers = data[0].map(function(h) { return String(h || "").trim().toUpperCase(); });
+  var sidCol = headers.indexOf("CLIENT SPREADSHEET ID");
+  var activeCol = headers.indexOf("ACTIVE");
+  var nameCol = headers.indexOf("CLIENT NAME");
+  if (sidCol < 0) return;
+
+  var synced = 0, failed = 0, skipped = 0;
+  for (var i = 1; i < data.length; i++) {
+    var sid = String(data[i][sidCol] || "").trim();
+    if (!sid) continue;
+    var active = activeCol >= 0 ? data[i][activeCol] : true;
+    var isActive = !(active === false || active === "FALSE" || active === "No");
+    if (!isActive) { skipped++; continue; }
+    var name = nameCol >= 0 ? String(data[i][nameCol] || "").trim() : "?";
+    try {
+      api_fullClientSync_(sid, ["inventory", "task", "repair", "will_call", "shipment", "billing"]);
+      resyncClientToSupabase_(sid);
+      synced++;
+      Logger.log("reconcileAllClientsNow: [" + synced + "] " + name + " — OK");
+    } catch (e) {
+      failed++;
+      Logger.log("reconcileAllClientsNow: [" + (synced + failed) + "] " + name + " — FAILED: " + e);
+    }
+  }
+  Logger.log("reconcileAllClientsNow: DONE — synced=" + synced + " failed=" + failed + " skipped=" + skipped);
+}
+
 function api_logSyncFailure_(tenantId, entityType, entityId, actionType, errorMessage) {
   try {
     var url = prop_("SUPABASE_URL");

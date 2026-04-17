@@ -23,10 +23,26 @@ const listeners = new Set<EntityEventCallback>();
 const _skipSupabase: Partial<Record<EntityType, boolean>> = {};
 
 export const entityEvents = {
+  /**
+   * Emit after a LOCAL write (GAS call from this browser tab).
+   * Sets skipSupabase flag so the refetch goes to GAS for authoritative data.
+   */
   emit(entityType: string, entityId: string) {
     const type = entityType as EntityType;
     // Flag: next fetch for this entity type should skip Supabase cache
     _skipSupabase[type] = true;
+    listeners.forEach((fn) => {
+      try { fn(type, entityId); } catch { /* ignore listener errors */ }
+    });
+  },
+
+  /**
+   * Emit from Supabase Realtime (another user/tab changed data).
+   * Does NOT set skipSupabase — the data is already in Supabase, use it.
+   */
+  emitFromRealtime(entityType: string, entityId: string) {
+    const type = entityType as EntityType;
+    // Don't set _skipSupabase — Supabase has the fresh data
     listeners.forEach((fn) => {
       try { fn(type, entityId); } catch { /* ignore listener errors */ }
     });
