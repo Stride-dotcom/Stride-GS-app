@@ -1,10 +1,10 @@
 # Stride GS App — Build Status & Continuation Guide
 
-**Last updated:** 2026-04-16 (session 70 continued — Room→Reference in emails, multi-client Add User, Save Repair Notes on Approved, role-aware loading, mobile TopBar z-index)
+**Last updated:** 2026-04-16 (session 70 — Inventory as single source of truth for all pages; native Scanner+Labels; Supabase locations+move_history+clients+delivery_availability mirrors; auth cache fix; deep-link fixes; React #300 fixes; npm run deploy single-command)
 **StrideAPI.gs:** v38.63.0 (Web App v283)
 **Import.gs (client):** v4.3.0 (rolled out to all 49 active clients; Reference column now imported)
 **Emails.gs (client):** v4.6.0 (rolled out to all 49 active clients — Room column dropped, Reference takes its place)
-**Shipments.gs (client):** v4.2.1 (rolled out to all 49 active clients — SHIPMENT_RECEIVED uses standalone /#/shipments/:shipmentNo)
+**Shipments.gs (client):** v4.3.2 (rolled out to all 49 active clients — deep links use query-param ?open=&client= format)
 **WillCalls.gs (client):** v4.4.0 (rolled out to all 49 active clients — WC deep links)
 **Triggers.gs (client):** v4.7.1 (rolled out to all 49 active clients — VIEW INSPECTION PHOTOS button now opens Source Task folder)
 **RemoteAdmin.gs (client):** v1.5.1 (new `get_script_id` action writes scriptId to CB on self-report)
@@ -72,6 +72,92 @@ Login, Dashboard, Inventory, Receiving, Shipments, Tasks, Repairs, Will Calls, B
 
 ### React Hooks
 `useClients`, `usePricing`, `useLocations`, `useInventory`, `useTasks`, `useRepairs`, `useWillCalls`, `useShipments`, `useBilling` (accepts BillingFilterParams for report builder), `useClaims`, `useUsers`, `useOrders` (Supabase-only, DT integration), `useFailedOperations`, `useTablePreferences` (reconciles new columns into saved order), `useResizablePanel`, `useSidebarOrder`, `useIsMobile`, `useBatchData`.
+
+---
+
+## RECENT CHANGES (2026-04-16 session 70 — this chat)
+
+### Inventory as Single Source of Truth (all 22 columns mapped)
+
+**The core change:** Every page (Tasks, Repairs, Will Calls, Billing, Dashboard) now
+reads item-level fields from Inventory at query time — OVERRIDE, not blank-backfill.
+When you move an item via Scanner, edit its vendor, change its description, etc., ALL
+pages immediately show the updated value without any sync step.
+
+**GAS side (`api_buildInvFieldsByItemMap_`):** Extended from 4 fields to all 22 Inventory
+columns. Uses a data-driven `colMap` so adding a new column is one line. Every handler
+(`handleGetTasks_`, `handleGetRepairs_`, `handleGetWillCalls_`, `handleGetBatch_`) now
+OVERRIDES location/vendor/sidemark/description/shipment#/room from inventory instead of
+reading the entity's own stale copy.
+
+**Supabase side (`_fetchInvFieldMap` in supabaseQueries.ts):** `fetchTasksFromSupabase`,
+`fetchRepairsFromSupabase`, `fetchDashboardSummaryFromSupabase` now fetch a lightweight
+inventory field map and overlay location/vendor/sidemark/description on top of the stale
+entity-table copies. This is what makes it work end-to-end — React reads from Supabase
+first and the Supabase path now also joins with inventory.
+
+### Native React Scanner + Labels (replace GAS iframes)
+
+- **Scanner:** Camera scanner (ported from WMS app — dual-path BarcodeDetector + html5-qrcode
+  fallback), batch textarea entry, Supabase-backed location picker with Realtime, inline
+  +New Location modal, cross-tenant batch move via `batchUpdateItemLocations` endpoint
+  (uses `item_id_ledger` for tenant resolution via React pre-resolved `tenantMap`), mobile
+  sticky bottom bar with Move button + destination + live counts.
+- **Labels:** Client-side QR via `qrcode` npm, two modes (Item 4×6 / Location 3×2),
+  per-mode field config (toggle + font size + drag reorder), 4 label sizes, QR toggle +
+  size slider, border toggle, save/reset template (localStorage), mobile-first layout,
+  sticky bottom Print bar.
+- **Camera:** `html5-qrcode` npm for older browsers, native `BarcodeDetector` for modern.
+  400ms dedupe, WebAudio beep feedback, haptic vibrate, `parseScanPayload` normalizer.
+
+### Supabase mirrors added
+
+- `public.locations` — CB Locations mirror, Realtime-enabled, admin/staff write. Dropdown
+  loads in ~50ms (was 2-10s from GAS CacheService).
+- `public.move_history` — central audit for Scanner moves (tenant_id, item_id, from→to,
+  moved_by, timestamp, source, notes).
+- `public.clients` — CB Clients mirror. Dropdown loads in ~50ms (was 120-240s on GAS
+  cold-start). Login prefetch warms it immediately.
+- `public.delivery_availability` — Availability Calendar, warehouse-global, admin edits,
+  all roles view. Federal holiday markers (11 US holidays computed for any year).
+
+### Auth cache fix
+
+`cacheClearAll()` was firing on every page refresh (same user), wiping 15+ data hook
+caches and forcing a refetch cascade. Now only fires when `session.user.email` differs
+from the cached user. Same-user refresh keeps cache intact → instant navigation.
+
+### Deep link fixes
+
+- All 9 email CTA URLs in Triggers.gs + Emails.gs + Shipments.gs changed from route-style
+  (`/#/tasks/ID`) to query-param style (`/#/tasks?open=ID&client=SHEET_ID`).
+- StrideAPI.gs `api_sendTemplateEmail_` auto-injected deep links now include `&client=`
+  suffix from `settings["CLIENT_SPREADSHEET_ID"]`.
+- New `useClientFilterUrlSync` hook on all 5 list pages — URL updates when client dropdown
+  changes (bookmarkable/shareable).
+- Full deep-link architecture documented in CLAUDE.md "⚠️ Deep Links — How They Work".
+
+### React #300 fixes
+
+- Inventory: moved `printTitle useMemo` before early return (hook count mismatch).
+- All 5 list pages: deep-link effect dep changed from `[apiClients]` (unstable array ref)
+  to `[apiClients.length]` (stable number).
+
+### Other
+
+- `npm run deploy` script (`scripts/deploy.js`) — single command builds + pushes both
+  `origin/main` (bundle) and `origin/source` (source). Fixes the recurring issue where
+  source branch was perpetually behind.
+- Repair quote request: persistent green confirmation banner + red error banner.
+- Supabase 1000-row cap fix: `.range(0, 49999)` on all 6 multi-tenant queries.
+- Federal holidays on Availability Calendar (in-app + public page).
+
+### Open item for next session
+
+- **Centralize folder URLs / deep links on Inventory** — plan saved at
+  `.claude/plans/valiant-splashing-moon.md`. All folder URLs (item/task/repair/shipment/
+  photos) should be stored as plain-text columns on Inventory so they're managed in one
+  place and stop breaking when entity-tab hyperlinks get corrupted.
 
 ---
 
