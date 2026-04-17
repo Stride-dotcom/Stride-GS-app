@@ -239,6 +239,41 @@ interface SupabaseTaskRow {
   client_name: string | null;
 }
 
+/**
+ * Session 69 Phase 4: Fetch a lightweight inventory field map from Supabase.
+ * Used by fetchTasks/Repairs/WillCallsFromSupabase to overlay authoritative
+ * item-level fields (location, vendor, sidemark, description) on top of
+ * stale entity-table copies. Matches the GAS-side api_buildInvFieldsByItemMap_.
+ */
+async function _fetchInvFieldMap(clientSheetId?: string | string[]): Promise<Record<string, { location: string; vendor: string; sidemark: string; description: string }>> {
+  const map: Record<string, { location: string; vendor: string; sidemark: string; description: string }> = {};
+  try {
+    let q = supabase.from('inventory').select('item_id, location, vendor, sidemark, description, tenant_id');
+    if (clientSheetId) {
+      if (Array.isArray(clientSheetId)) {
+        if (clientSheetId.length > 0) q = q.in('tenant_id', clientSheetId);
+      } else {
+        q = q.eq('tenant_id', clientSheetId);
+      }
+    }
+    q = q.range(0, 49999);
+    const { data } = await q;
+    if (data) {
+      for (const row of data as { item_id: string; location: string | null; vendor: string | null; sidemark: string | null; description: string | null }[]) {
+        if (row.item_id) {
+          map[row.item_id] = {
+            location: row.location ?? '',
+            vendor: row.vendor ?? '',
+            sidemark: row.sidemark ?? '',
+            description: row.description ?? '',
+          };
+        }
+      }
+    }
+  } catch { /* best-effort — tasks still display with stale data */ }
+  return map;
+}
+
 export async function fetchTasksFromSupabase(
   clientNameMap: ClientNameMap,
   clientSheetId?: string | string[]
@@ -258,7 +293,17 @@ export async function fetchTasksFromSupabase(
 
     const tasks: ApiTask[] = (data as SupabaseTaskRow[]).map(row => mapSupabaseTaskRow(row, clientNameMap));
 
-
+    // Session 69 Phase 4: overlay inventory fields (authoritative source)
+    const invMap = await _fetchInvFieldMap(clientSheetId);
+    for (const task of tasks) {
+      const inv = task.itemId ? invMap[task.itemId] : null;
+      if (inv) {
+        if (inv.location) task.location = inv.location;
+        if (inv.vendor) task.vendor = inv.vendor;
+        if (inv.sidemark) task.sidemark = inv.sidemark;
+        if (inv.description) task.description = inv.description;
+      }
+    }
 
     return {
       tasks,
@@ -342,6 +387,18 @@ export async function fetchRepairsFromSupabase(
       shipmentFolderUrl: row.shipment_folder_url || '',
       taskFolderUrl: row.task_folder_url || '',
     }));
+
+    // Session 69 Phase 4: overlay inventory fields (authoritative source)
+    const invMap = await _fetchInvFieldMap(clientSheetId);
+    for (const repair of repairs) {
+      const inv = repair.itemId ? invMap[repair.itemId] : null;
+      if (inv) {
+        if (inv.location) repair.location = inv.location;
+        if (inv.vendor) repair.vendor = inv.vendor;
+        if (inv.sidemark) repair.sidemark = inv.sidemark;
+        if (inv.description) repair.description = inv.description;
+      }
+    }
 
     return {
       repairs,
@@ -999,6 +1056,29 @@ export async function fetchDashboardSummaryFromSupabase(
       repairFolderUrl: row.repair_folder_url || '',
       shipmentFolderUrl: row.shipment_folder_url || '',
     }));
+
+    // Session 69 Phase 4: overlay inventory fields on dashboard tasks + repairs
+    try {
+      const invMap = await _fetchInvFieldMap(tenantFilter);
+      for (const t of tasks) {
+        const inv = t.itemId ? invMap[t.itemId] : null;
+        if (inv) {
+          if (inv.location) t.location = inv.location;
+          if (inv.vendor) t.vendor = inv.vendor;
+          if (inv.sidemark) t.sidemark = inv.sidemark;
+          if (inv.description) t.description = inv.description;
+        }
+      }
+      for (const r of repairs) {
+        const inv = r.itemId ? invMap[r.itemId] : null;
+        if (inv) {
+          if (inv.location) r.location = inv.location;
+          if (inv.vendor) r.vendor = inv.vendor;
+          if (inv.sidemark) r.sidemark = inv.sidemark;
+          if (inv.description) r.description = inv.description;
+        }
+      }
+    } catch { /* best-effort */ }
 
     const willCalls: SummaryWillCall[] = ((wcRes.data || []) as SupabaseWillCallRow[]).map(row => ({
       wcNumber: row.wc_number,
