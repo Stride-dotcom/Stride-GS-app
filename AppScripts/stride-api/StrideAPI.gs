@@ -10740,14 +10740,13 @@ function handleRespondToRepairQuote_(clientSheetId, payload) {
 // Intended for the period between Approve and Start Repair, where the office
 // needs to stage billing/warehouse instructions. No lock (plain-text single
 // cell write); no email; no PDF regeneration.
+// v38.68.3: Extended to accept optional repairVendor + scheduledDate fields
+// in addition to repairNotes. All fields are optional — save whichever is provided.
 function handleUpdateRepairNotes_(clientSheetId, payload) {
   if (!clientSheetId) return errorResponse_("clientSheetId is required", "INVALID_PARAMS");
   if (!payload || !payload.repairId) return errorResponse_("repairId is required in payload", "INVALID_PARAMS");
   var repairId = String(payload.repairId || "").trim();
   if (!repairId) return errorResponse_("repairId must not be empty", "INVALID_PARAMS");
-  // repairNotes may be an empty string (user clearing the field) — that's valid.
-  var repairNotes = payload.repairNotes !== undefined && payload.repairNotes !== null
-    ? String(payload.repairNotes) : "";
 
   var ss;
   try { ss = SpreadsheetApp.openById(clientSheetId); }
@@ -10757,18 +10756,54 @@ function handleUpdateRepairNotes_(clientSheetId, payload) {
   if (!repSheet) return errorResponse_("Repairs sheet not found", "SCHEMA_ERROR");
 
   var repMap = api_getHeaderMap_(repSheet);
-  var idCol    = repMap["Repair ID"];
-  var notesCol = repMap["Repair Notes"];
+  var idCol = repMap["Repair ID"];
   if (!idCol) return errorResponse_("Repair ID column not found", "SCHEMA_ERROR");
-  if (!notesCol) return errorResponse_("Repair Notes column not found", "SCHEMA_ERROR");
 
   var repRow = api_findRowById_(repSheet, idCol, repairId);
   if (repRow < 2) return errorResponse_("Repair not found: " + repairId, "NOT_FOUND");
 
-  repSheet.getRange(repRow, notesCol).setValue(repairNotes);
-  api_bumpSummaryVersion_();
+  var saved = [];
 
-  return jsonResponse_({ success: true, repairId: repairId, repairNotes: repairNotes });
+  // Repair Notes
+  if (payload.repairNotes !== undefined && payload.repairNotes !== null) {
+    var notesCol = repMap["Repair Notes"];
+    if (notesCol) {
+      repSheet.getRange(repRow, notesCol).setValue(String(payload.repairNotes));
+      saved.push("repairNotes");
+    }
+  }
+
+  // Repair Vendor / Tech
+  if (payload.repairVendor !== undefined) {
+    var vendorCol = repMap["Repair Vendor"];
+    if (vendorCol) {
+      repSheet.getRange(repRow, vendorCol).setValue(String(payload.repairVendor || ""));
+      saved.push("repairVendor");
+    }
+  }
+
+  // Scheduled Date
+  if (payload.scheduledDate !== undefined) {
+    var schedCol = repMap["Scheduled Date"];
+    if (schedCol) {
+      var schedVal = payload.scheduledDate ? new Date(payload.scheduledDate + "T12:00:00") : "";
+      repSheet.getRange(repRow, schedCol).setValue(schedVal);
+      saved.push("scheduledDate");
+    }
+  }
+
+  // Start Date
+  if (payload.startDate !== undefined) {
+    var startCol = repMap["Start Date"];
+    if (startCol) {
+      var startVal = payload.startDate ? new Date(payload.startDate + "T12:00:00") : "";
+      repSheet.getRange(repRow, startCol).setValue(startVal);
+      saved.push("startDate");
+    }
+  }
+
+  api_bumpSummaryVersion_();
+  return jsonResponse_({ success: true, repairId: repairId, saved: saved });
 }
 
 // ─── Complete Repair Handler ───────────────────────────────────────────────────

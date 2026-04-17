@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { X, Wrench, Package, ClipboardList, CheckCircle2, XCircle, AlertTriangle, Send, Loader2, Truck, Play } from 'lucide-react';
+import { X, Wrench, Package, ClipboardList, CheckCircle2, XCircle, AlertTriangle, Send, Loader2, Truck, Play, Pencil } from 'lucide-react';
 import { FolderButton } from './FolderButton';
 import { DeepLink } from './DeepLink';
 import { DetailHeader } from './DetailHeader';
@@ -87,6 +87,46 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
   const [savedRepairNotes, setSavedRepairNotes] = useState(repair.repairNotes || '');
   useEffect(() => { setSavedRepairNotes(repair.repairNotes || ''); }, [repair.repairNotes]);
   const notesDirty = repairNotes !== savedRepairNotes;
+
+  // ─── Edit mode for repair fields (Repair Tech, Scheduled Date, Start Date) ──
+  const [isEditing, setIsEditing] = useState(false);
+  const [editRepairVendor, setEditRepairVendor] = useState(repair.repairVendor || '');
+  const [editScheduledDate, setEditScheduledDate] = useState(repair.scheduledDate || '');
+  const [editStartDate, setEditStartDate] = useState(repair.startDate || '');
+  const [editSaving, setEditSaving] = useState(false);
+  const [editError, setEditError] = useState<string | null>(null);
+  useEffect(() => {
+    setEditRepairVendor(repair.repairVendor || '');
+    setEditScheduledDate(repair.scheduledDate || '');
+    setEditStartDate(repair.startDate || '');
+  }, [repair.repairVendor, repair.scheduledDate, repair.startDate]);
+
+  // ─── Save Repair Fields (Repair Tech, Scheduled Date, Start Date) ──────────
+  const handleEditSave = async () => {
+    const clientSheetId = repair.clientSheetId;
+    if (!isApiConfigured() || !clientSheetId) return;
+    setEditSaving(true);
+    setEditError(null);
+    try {
+      const payload: Record<string, unknown> = { repairId: repair.repairId };
+      if (editRepairVendor !== (repair.repairVendor || '')) payload.repairVendor = editRepairVendor;
+      if (editScheduledDate !== (repair.scheduledDate || '')) payload.scheduledDate = editScheduledDate || null;
+      if (editStartDate !== (repair.startDate || '')) payload.startDate = editStartDate || null;
+      if (Object.keys(payload).length > 1) {
+        const res = await postUpdateRepairNotes(payload as any, clientSheetId);
+        if (!res.ok || !res.data?.success) {
+          setEditError(res.error || 'Save failed');
+          setEditSaving(false);
+          return;
+        }
+      }
+      setIsEditing(false);
+      onRepairUpdated?.();
+    } catch (err) {
+      setEditError(err instanceof Error ? err.message : 'Save failed');
+    }
+    setEditSaving(false);
+  };
 
   // ─── Save Repair Notes (available on Approved / pre-Start) ─────────────────
   const handleSaveNotes = async () => {
@@ -392,16 +432,49 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
           )}
 
           {/* Repair Details */}
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 14px', marginBottom: 16 }}>
-            <Field label="Repair Tech" value={repair.repairVendor} />
-            <Field label="Created By" value={repair.createdBy} />
-            <Field label="Created" value={fmtDate(repair.createdDate)} />
-            <Field label="Scheduled Date" value={fmtDate(repair.scheduledDate)} />
-            <Field label="Quote Amount" value={repair.quoteAmount != null ? `$${repair.quoteAmount}` : null} />
-            <Field label="Approved Amount" value={repair.finalAmount != null ? `$${repair.finalAmount}` : null} />
-            <Field label="Quote Sent" value={fmtDate(repair.quoteSentDate)} />
-            <Field label="Completed" value={fmtDate(repair.completedDate)} />
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+            <span style={{ fontSize: 12, fontWeight: 600 }}>Repair Details</span>
+            {isActive && !isEditing && (
+              <button onClick={() => setIsEditing(true)} style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, fontWeight: 500, color: theme.colors.orange, background: 'none', border: 'none', cursor: 'pointer', padding: '2px 6px' }}>
+                <Pencil size={12} /> Edit
+              </button>
+            )}
           </div>
+          {isEditing ? (
+            <div style={{ background: '#FAFAFA', border: `1px solid ${theme.colors.border}`, borderRadius: 10, padding: 14, marginBottom: 16 }}>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px 14px' }}>
+                <div>
+                  <div style={{ fontSize: 10, fontWeight: 500, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 4 }}>Repair Tech</div>
+                  <input value={editRepairVendor} onChange={e => setEditRepairVendor(e.target.value)} placeholder="Assign tech..." style={input} />
+                </div>
+                <div>
+                  <div style={{ fontSize: 10, fontWeight: 500, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 4 }}>Scheduled Date</div>
+                  <input type="date" value={editScheduledDate?.slice(0, 10) || ''} onChange={e => setEditScheduledDate(e.target.value)} style={input} />
+                </div>
+                <div>
+                  <div style={{ fontSize: 10, fontWeight: 500, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 4 }}>Start Date</div>
+                  <input type="date" value={editStartDate?.slice(0, 10) || ''} onChange={e => setEditStartDate(e.target.value)} style={input} />
+                </div>
+              </div>
+              {editError && <div style={{ color: '#DC2626', fontSize: 11, marginTop: 8 }}>{editError}</div>}
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 12 }}>
+                <button onClick={() => { setIsEditing(false); setEditError(null); setEditRepairVendor(repair.repairVendor || ''); setEditScheduledDate(repair.scheduledDate || ''); setEditStartDate(repair.startDate || ''); }} style={{ padding: '6px 14px', fontSize: 12, borderRadius: 8, border: `1px solid ${theme.colors.border}`, background: '#fff', cursor: 'pointer', fontFamily: 'inherit' }}>Cancel</button>
+                <button onClick={handleEditSave} disabled={editSaving} style={{ padding: '6px 14px', fontSize: 12, borderRadius: 8, border: 'none', background: theme.colors.orange, color: '#fff', cursor: 'pointer', fontWeight: 600, fontFamily: 'inherit', opacity: editSaving ? 0.6 : 1 }}>{editSaving ? 'Saving...' : 'Save'}</button>
+              </div>
+            </div>
+          ) : (
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 14px', marginBottom: 16 }}>
+              <Field label="Repair Tech" value={repair.repairVendor} />
+              <Field label="Created By" value={repair.createdBy} />
+              <Field label="Created" value={fmtDate(repair.createdDate)} />
+              <Field label="Scheduled Date" value={fmtDate(repair.scheduledDate)} />
+              <Field label="Start Date" value={fmtDate(repair.startDate)} />
+              {user?.role === 'admin' && <Field label="Quote Amount" value={repair.quoteAmount != null ? `$${repair.quoteAmount}` : null} />}
+              {user?.role === 'admin' && <Field label="Approved Amount" value={repair.finalAmount != null ? `$${repair.finalAmount}` : null} />}
+              <Field label="Quote Sent" value={fmtDate(repair.quoteSentDate)} />
+              <Field label="Completed" value={fmtDate(repair.completedDate)} />
+            </div>
+          )}
           <Field label="Description" value={repair.description} />
 
           {/* Repair Notes (editable) */}
