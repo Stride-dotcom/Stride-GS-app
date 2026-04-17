@@ -5853,8 +5853,13 @@ function handleBatchUpdateItemLocations_(payload, callerEmail) {
       var CHUNK = 200;
       for (var c = 0; c < normalized.length; c += CHUNK) {
         var chunk = normalized.slice(c, c + CHUNK);
-        var inList = chunk.map(function(x) { return '"' + x.replace(/"/g, '\\"') + '"'; }).join(",");
-        var url = supabaseUrl + "/rest/v1/item_id_ledger?item_id=in.(" + encodeURIComponent(inList) + ")&select=item_id,tenant_id,status";
+        // Encode each value individually — NOT the surrounding quotes.
+        // PostgREST in.() filter for text columns doesn't need JSON quotes;
+        // wrapping in quotes + encodeURIComponent was double-encoding them
+        // to %22, which PostgREST couldn't parse (returned 0 rows).
+        // Matches the pattern used by api_ledgerCheckAvailable_ (line ~1334).
+        var inList = chunk.map(encodeURIComponent).join(",");
+        var url = supabaseUrl + "/rest/v1/item_id_ledger?item_id=in.(" + inList + ")&select=item_id,tenant_id,status";
         var resp = UrlFetchApp.fetch(url, {
           headers: { "apikey": serviceKey, "Authorization": "Bearer " + serviceKey },
           muteHttpExceptions: true
