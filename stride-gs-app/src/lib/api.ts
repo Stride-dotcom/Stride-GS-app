@@ -3167,6 +3167,7 @@ export interface SummaryRepair {
   clientSheetId: string;
   itemId: string;
   vendor: string;
+  repairVendor: string;
   status: string;
   createdDate: string;
   quoteAmount: number | null;

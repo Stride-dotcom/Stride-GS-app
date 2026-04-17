@@ -1190,7 +1190,8 @@ export async function fetchDashboardSummaryFromSupabase(
       clientName: clientNameMap[row.tenant_id] || '',
       clientSheetId: row.tenant_id,
       itemId: row.item_id || '',
-      vendor: row.repair_vendor || '',
+      vendor: '',
+      repairVendor: row.repair_vendor || '',
       status: row.status || '',
       createdDate: row.created_date || '',
       quoteAmount: row.quote_amount,
@@ -1218,7 +1219,7 @@ export async function fetchDashboardSummaryFromSupabase(
         const inv = r.itemId ? invMap[r.itemId] : null;
         if (inv) {
           if (inv.location) r.location = inv.location;
-          if (inv.vendor) r.vendor = inv.vendor;
+          if (inv.vendor) r.vendor = inv.vendor; // item vendor (from inventory)
           if (inv.sidemark) r.sidemark = inv.sidemark;
           if (inv.description) r.description = inv.description;
         }

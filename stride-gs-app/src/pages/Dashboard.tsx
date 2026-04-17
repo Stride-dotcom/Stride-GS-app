@@ -282,10 +282,10 @@ function TasksTab({ tasks, onNavigate }: { tasks: SummaryTask[]; onNavigate: (ta
 
 // ─── Repairs Tab ──────────────────────────────────────────────────────────────
 
-const REPAIR_DEFAULT_ORDER = ['repairId', 'repairStatus', 'repairItem', 'repairDesc', 'repairVendor', 'repairQuote', 'repairClient', 'repairCreated', 'repairFolder'];
-const REPAIR_COL_LABELS: Record<string, string> = { repairId: 'Repair ID', repairStatus: 'Status', repairItem: 'Item', repairDesc: 'Description', repairVendor: 'Repair Vendor', repairQuote: 'Quote', repairClient: 'Client', repairCreated: 'Created', repairFolder: 'Folder' };
+const REPAIR_DEFAULT_ORDER = ['repairId', 'repairStatus', 'repairItem', 'repairDesc', 'repairItemVendor', 'repairTech', 'repairQuote', 'repairClient', 'repairCreated', 'repairFolder'];
+const REPAIR_COL_LABELS: Record<string, string> = { repairId: 'Repair ID', repairStatus: 'Status', repairItem: 'Item', repairDesc: 'Description', repairItemVendor: 'Vendor', repairTech: 'Repair Tech', repairQuote: 'Quote', repairClient: 'Client', repairCreated: 'Created', repairFolder: 'Folder' };
 
-function RepairsTab({ repairs, onNavigate }: { repairs: SummaryRepair[]; onNavigate: (repair: SummaryRepair) => void }) {
+function RepairsTab({ repairs, onNavigate, userRole }: { repairs: SummaryRepair[]; onNavigate: (repair: SummaryRepair) => void; userRole?: string }) {
   const colR = createColumnHelper<SummaryRepair>();
   const { sorting, setSorting, colVis, setColVis, columnOrder, setColumnOrder } = useTablePreferences('dashboard-repairs', [{ id: 'repairCreated', desc: true }], {}, REPAIR_DEFAULT_ORDER);
   const [statusFilters, setStatusFilters] = useState<string[]>(DEFAULT_REPAIR_STATUSES);
@@ -298,17 +298,27 @@ function RepairsTab({ repairs, onNavigate }: { repairs: SummaryRepair[]; onNavig
   const allStatuses = useMemo(() => [...new Set(repairs.map(r => r.status))].sort(), [repairs]);
   const filtered = useMemo(() => statusFilters.length === 0 ? repairs : repairs.filter(r => statusFilters.includes(r.status)), [repairs, statusFilters]);
 
-  const columns = useMemo(() => [
-    colR.accessor('repairId', { id: 'repairId', header: 'Repair ID', size: 120, cell: i => <span style={{ fontWeight: 600, fontSize: 12, fontFamily: 'monospace', color: theme.colors.orange }}>{i.getValue()}</span> }),
-    colR.accessor('status', { id: 'repairStatus', header: 'Status', size: 130, cell: i => <StatusBadge status={i.getValue()} /> }),
-    colR.accessor('itemId', { id: 'repairItem', header: 'Item', size: 90, cell: i => <span style={{ fontSize: 12, color: theme.colors.textSecondary }}>{i.getValue() || '—'}</span> }),
-    colR.accessor('description', { id: 'repairDesc', header: 'Description', size: 200, cell: i => <span style={{ fontSize: 12, maxWidth: 190, overflow: 'hidden', textOverflow: 'ellipsis', display: 'block', color: theme.colors.textSecondary }}>{i.getValue() || '—'}</span> }),
-    colR.accessor('vendor', { id: 'repairVendor', header: 'Repair Vendor', size: 130, cell: i => <span style={{ fontSize: 12, color: theme.colors.textSecondary }}>{i.getValue() || '—'}</span> }),
-    colR.accessor('quoteAmount', { id: 'repairQuote', header: 'Quote', size: 80, cell: i => <span style={{ fontSize: 12 }}>{i.getValue() != null ? `$${Number(i.getValue()).toFixed(2)}` : '—'}</span> }),
-    colR.accessor('clientName', { id: 'repairClient', header: 'Client', size: 140, cell: i => <span style={{ fontSize: 12, fontWeight: 500 }}>{i.getValue()}</span> }),
-    colR.accessor('createdDate', { id: 'repairCreated', header: 'Created', size: 90, cell: i => <span style={{ fontSize: 12, color: theme.colors.textSecondary }}>{fmtDate(i.getValue())}</span> }),
-    colR.display({ id: 'repairFolder', header: 'Folder', size: 90, cell: i => <FolderButton label="Repair" url={i.row.original.repairFolderUrl} disabledTooltip="Start repair to create folder" /> }),
-  ], [colR]);
+  const columns = useMemo(() => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const cols: any[] = [
+      colR.accessor('repairId', { id: 'repairId', header: 'Repair ID', size: 120, cell: i => <span style={{ fontWeight: 600, fontSize: 12, fontFamily: 'monospace', color: theme.colors.orange }}>{i.getValue()}</span> }),
+      colR.accessor('status', { id: 'repairStatus', header: 'Status', size: 130, cell: i => <StatusBadge status={i.getValue()} /> }),
+      colR.accessor('itemId', { id: 'repairItem', header: 'Item', size: 90, cell: i => <span style={{ fontSize: 12, color: theme.colors.textSecondary }}>{i.getValue() || '—'}</span> }),
+      colR.accessor('description', { id: 'repairDesc', header: 'Description', size: 200, cell: i => <span style={{ fontSize: 12, maxWidth: 190, overflow: 'hidden', textOverflow: 'ellipsis', display: 'block', color: theme.colors.textSecondary }}>{i.getValue() || '—'}</span> }),
+      colR.accessor('vendor', { id: 'repairItemVendor', header: 'Vendor', size: 130, cell: i => <span style={{ fontSize: 12, color: theme.colors.textSecondary }}>{i.getValue() || '—'}</span> }),
+      colR.accessor('repairVendor', { id: 'repairTech', header: 'Repair Tech', size: 130, cell: i => <span style={{ fontSize: 12, color: theme.colors.textSecondary }}>{i.getValue() || '—'}</span> }),
+    ];
+    // Quote visible to admin only — hide from staff and repair techs
+    if (userRole === 'admin') {
+      cols.push(colR.accessor('quoteAmount', { id: 'repairQuote', header: 'Quote', size: 80, cell: i => <span style={{ fontSize: 12 }}>{i.getValue() != null ? `$${Number(i.getValue()).toFixed(2)}` : '—'}</span> }));
+    }
+    cols.push(
+      colR.accessor('clientName', { id: 'repairClient', header: 'Client', size: 140, cell: i => <span style={{ fontSize: 12, fontWeight: 500 }}>{i.getValue()}</span> }),
+      colR.accessor('createdDate', { id: 'repairCreated', header: 'Created', size: 90, cell: i => <span style={{ fontSize: 12, color: theme.colors.textSecondary }}>{fmtDate(i.getValue())}</span> }),
+      colR.display({ id: 'repairFolder', header: 'Folder', size: 90, cell: i => <FolderButton label="Repair" url={i.row.original.repairFolderUrl} disabledTooltip="Start repair to create folder" /> }),
+    );
+    return cols;
+  }, [colR, userRole]);
 
   const table = useReactTable({
     data: filtered, columns,
@@ -715,7 +725,7 @@ export function Dashboard() {
           {tabsLoaded.tasks && <TasksTab tasks={filteredTasks} onNavigate={handleTaskNav} />}
         </div>
         <div style={{ display: activeTab === 'repairs' ? 'block' : 'none' }}>
-          {tabsLoaded.repairs && <RepairsTab repairs={repairs} onNavigate={handleRepairNav} />}
+          {tabsLoaded.repairs && <RepairsTab repairs={repairs} onNavigate={handleRepairNav} userRole={user?.role} />}
         </div>
         <div style={{ display: activeTab === 'willcalls' ? 'block' : 'none' }}>
           {tabsLoaded.willcalls && <WillCallsTab willCalls={willCalls} onNavigate={handleWcNav} />}
