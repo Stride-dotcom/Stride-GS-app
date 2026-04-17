@@ -1,5 +1,5 @@
 /* ===================================================
-   StrideAPI.gs — v38.68.2 — 2026-04-17 12:30 AM PST — Fix auto-inspection task creation
+   StrideAPI.gs — v38.68.3 — 2026-04-17 PST — RECEIVED_DATE email token uses MM/dd/yyyy
    v38.68.2: HOTFIX — handleCompleteShipment_ now reads AUTO_INSPECTION from client
              Settings as server-side authority. Previously relied solely on React's
              per-item needsInspection flag, which had a race condition (items entered
@@ -9156,7 +9156,7 @@ function handleCompleteShipment_(clientSheetId, payload) {
           "{{CARRIER}}":        carrier || "",
           "{{TRACKING}}":       trackingNumber || "",
           "{{ITEM_COUNT}}":     String(items.length),
-          "{{RECEIVED_DATE}}":  receiveDate ? Utilities.formatDate(receiveDate, "America/Los_Angeles", "yyyy-MM-dd") : "",
+          "{{RECEIVED_DATE}}":  receiveDate ? Utilities.formatDate(receiveDate, "America/Los_Angeles", "MM/dd/yyyy") : "",
           "{{SHIPMENT_NOTES}}": notes || "",
           "{{ITEMS_TABLE}}":    itemsTable,
           "{{PHOTOS_URL}}":     shipFolderUrl,

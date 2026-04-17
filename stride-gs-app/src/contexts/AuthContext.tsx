@@ -346,42 +346,28 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         if (!mounted) return;
 
         if (event === 'SIGNED_OUT') {
-          // Defensive: Supabase cross-tab sync can fire spurious SIGNED_OUT events.
-          // Simple approach: delay, then check if the session is truly gone.
-          // If we have a cached auth user, this is almost certainly spurious noise.
-          setTimeout(() => {
-            if (!mounted) return;
-            supabase.auth.getSession().then(({ data }) => {
-              if (!mounted) return;
-              if (data.session) return; // session is fine — ignore
-              // Session truly gone — but if we have a cached user, double-check once more
-              const cachedAuth = localStorage.getItem('stride_auth_user');
-              if (cachedAuth) {
-                // Cache exists — wait a bit longer and recheck (cross-tab race)
-                setTimeout(() => {
-                  if (!mounted) return;
-                  supabase.auth.getSession().then(({ data: d2 }) => {
-                    if (!mounted || d2.session) return;
-                    // Truly gone after 2nd check — log out
-                    clearCache();
-                    setCallerEmail('');
-                    setAuthState({ status: 'unauthenticated' });
-                  });
-                }, 1500);
-                return;
-              }
-              // No cache — check recovery flow, then log out
-              const isRecoveryFlow = recoveryRef.current || sessionStorage.getItem('stride_recovery') === '1';
-              if (isRecoveryFlow) {
-                sessionStorage.removeItem('stride_recovery');
-                setAuthState({ status: 'recovery_expired' });
-              } else {
-                clearCache();
-                setCallerEmail('');
-                setAuthState({ status: 'unauthenticated' });
-              }
-            });
-          }, 500);
+          // Session 71 hardened: Supabase fires spurious SIGNED_OUT on cross-tab
+          // sync, deploys, and refreshes. DO NOT process if we have a cached user —
+          // the explicit signOut() function handles real logouts and clears everything.
+          // Only process SIGNED_OUT for the no-cache case (user was never logged in
+          // on this tab, or signOut() already cleared the cache before this fires).
+          const cachedAuth = localStorage.getItem('stride_auth_user');
+          if (cachedAuth) {
+            // Cached user exists — this is spurious noise, ignore completely.
+            // The user's explicit signOut() clears the cache BEFORE calling
+            // supabase.auth.signOut(), so by the time SIGNED_OUT fires from a
+            // real logout, the cache will already be gone.
+            return;
+          }
+          // No cache — this is either a real sign-out or first load with no session.
+          const isRecoveryFlow = recoveryRef.current || sessionStorage.getItem('stride_recovery') === '1';
+          if (isRecoveryFlow) {
+            sessionStorage.removeItem('stride_recovery');
+            setAuthState({ status: 'recovery_expired' });
+          } else {
+            setCallerEmail('');
+            setAuthState({ status: 'unauthenticated' });
+          }
           return;
         }
 
