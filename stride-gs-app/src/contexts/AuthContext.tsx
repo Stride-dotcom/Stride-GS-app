@@ -346,50 +346,39 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         if (!mounted) return;
 
         if (event === 'SIGNED_OUT') {
-          // Defensive: Supabase cross-tab sync can fire a spurious SIGNED_OUT
-          // when opening a new tab, hard-refreshing, or during deploys while
-          // multiple tabs are open. The session may still be valid in localStorage
-          // but the Supabase client hasn't rehydrated yet. Delay the check to
-          // let the session settle, then verify it's truly gone before logging out.
+          // Defensive: Supabase cross-tab sync can fire spurious SIGNED_OUT events.
+          // Simple approach: delay, then check if the session is truly gone.
+          // If we have a cached auth user, this is almost certainly spurious noise.
           setTimeout(() => {
             if (!mounted) return;
             supabase.auth.getSession().then(({ data }) => {
               if (!mounted) return;
-              if (!data.session) {
-                // Double-check: if our own auth cache still has a user, this is likely
-                // a spurious cross-tab event during a deploy/refresh. Don't log out.
-                const cachedAuth = localStorage.getItem('stride_auth_user');
-                if (cachedAuth) {
-                  try {
-                    const cached = JSON.parse(cachedAuth);
-                    if (cached?.email) {
-                      // Session gone but cache exists — likely a transient cross-tab race.
-                      // Re-check one more time after another delay.
-                      setTimeout(() => {
-                        if (!mounted) return;
-                        supabase.auth.getSession().then(({ data: d2 }) => {
-                          if (!mounted) return;
-                          if (!d2.session) {
-                            // Truly gone — log out for real
-                            clearCache();
-                            setCallerEmail('');
-                            setAuthState({ status: 'unauthenticated' });
-                          }
-                        });
-                      }, 2000);
-                      return;
-                    }
-                  } catch { /* corrupt cache — proceed with logout */ }
-                }
-                const isRecoveryFlow = recoveryRef.current || sessionStorage.getItem('stride_recovery') === '1';
-                if (isRecoveryFlow) {
-                  sessionStorage.removeItem('stride_recovery');
-                  setAuthState({ status: 'recovery_expired' });
-                } else {
-                  clearCache();
-                  setCallerEmail('');
-                  setAuthState({ status: 'unauthenticated' });
-                }
+              if (data.session) return; // session is fine — ignore
+              // Session truly gone — but if we have a cached user, double-check once more
+              const cachedAuth = localStorage.getItem('stride_auth_user');
+              if (cachedAuth) {
+                // Cache exists — wait a bit longer and recheck (cross-tab race)
+                setTimeout(() => {
+                  if (!mounted) return;
+                  supabase.auth.getSession().then(({ data: d2 }) => {
+                    if (!mounted || d2.session) return;
+                    // Truly gone after 2nd check — log out
+                    clearCache();
+                    setCallerEmail('');
+                    setAuthState({ status: 'unauthenticated' });
+                  });
+                }, 1500);
+                return;
+              }
+              // No cache — check recovery flow, then log out
+              const isRecoveryFlow = recoveryRef.current || sessionStorage.getItem('stride_recovery') === '1';
+              if (isRecoveryFlow) {
+                sessionStorage.removeItem('stride_recovery');
+                setAuthState({ status: 'recovery_expired' });
+              } else {
+                clearCache();
+                setCallerEmail('');
+                setAuthState({ status: 'unauthenticated' });
               }
             });
           }, 500);
