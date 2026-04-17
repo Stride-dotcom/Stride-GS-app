@@ -325,24 +325,52 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
         if (event === 'SIGNED_OUT') {
           // Defensive: Supabase cross-tab sync can fire a spurious SIGNED_OUT
-          // when opening a new tab while already logged in. Only logout if the
-          // Supabase session is truly gone — otherwise ignore the noise.
-          supabase.auth.getSession().then(({ data }) => {
-            if (!data.session) {
-              // Check both signals: recoveryRef (set when PASSWORD_RECOVERY fires first, or
-              // when getSession() resolved with isRecovery&&!session before this handler ran)
-              // and sessionStorage flag (intact when SIGNED_OUT races ahead of getSession()).
-              const isRecoveryFlow = recoveryRef.current || sessionStorage.getItem('stride_recovery') === '1';
-              if (isRecoveryFlow) {
-                sessionStorage.removeItem('stride_recovery');
-                setAuthState({ status: 'recovery_expired' });
-              } else {
-                clearCache();
-                setCallerEmail('');
-                setAuthState({ status: 'unauthenticated' });
+          // when opening a new tab, hard-refreshing, or during deploys while
+          // multiple tabs are open. The session may still be valid in localStorage
+          // but the Supabase client hasn't rehydrated yet. Delay the check to
+          // let the session settle, then verify it's truly gone before logging out.
+          setTimeout(() => {
+            if (!mounted) return;
+            supabase.auth.getSession().then(({ data }) => {
+              if (!mounted) return;
+              if (!data.session) {
+                // Double-check: if our own auth cache still has a user, this is likely
+                // a spurious cross-tab event during a deploy/refresh. Don't log out.
+                const cachedAuth = localStorage.getItem('stride_auth_user');
+                if (cachedAuth) {
+                  try {
+                    const cached = JSON.parse(cachedAuth);
+                    if (cached?.email) {
+                      // Session gone but cache exists — likely a transient cross-tab race.
+                      // Re-check one more time after another delay.
+                      setTimeout(() => {
+                        if (!mounted) return;
+                        supabase.auth.getSession().then(({ data: d2 }) => {
+                          if (!mounted) return;
+                          if (!d2.session) {
+                            // Truly gone — log out for real
+                            clearCache();
+                            setCallerEmail('');
+                            setAuthState({ status: 'unauthenticated' });
+                          }
+                        });
+                      }, 2000);
+                      return;
+                    }
+                  } catch { /* corrupt cache — proceed with logout */ }
+                }
+                const isRecoveryFlow = recoveryRef.current || sessionStorage.getItem('stride_recovery') === '1';
+                if (isRecoveryFlow) {
+                  sessionStorage.removeItem('stride_recovery');
+                  setAuthState({ status: 'recovery_expired' });
+                } else {
+                  clearCache();
+                  setCallerEmail('');
+                  setAuthState({ status: 'unauthenticated' });
+                }
               }
-            }
-          });
+            });
+          }, 500);
           return;
         }
 
