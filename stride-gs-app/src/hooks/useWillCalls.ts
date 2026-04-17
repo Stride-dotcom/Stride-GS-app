@@ -7,7 +7,7 @@
  * Phase 2C: optimistic patch architecture added.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { fetchWillCalls } from '../lib/api';
+import { fetchWillCalls, setNextFetchNoCache } from '../lib/api';
 import type { ApiWillCall, WillCallsResponse } from '../lib/api';
 import type { WillCall, WillCallStatus } from '../lib/types';
 import { useApiData } from './useApiData';
@@ -98,10 +98,12 @@ export function useWillCalls(autoFetch = true, filterClientSheetId?: string | st
 
   const fetchFn = useCallback(
     async (signal?: AbortSignal) => {
-      if (await isSupabaseCacheAvailable()) {
+      const skipSb = entityEvents.shouldSkipSupabase('will_call');
+      if (!skipSb && await isSupabaseCacheAvailable()) {
         const sbResult = await fetchWillCallsFromSupabase(clientNameMapRef.current, clientSheetId);
         if (sbResult) return { data: sbResult, ok: true, error: null } as { data: WillCallsResponse; ok: true; error: null };
       }
+      if (skipSb) setNextFetchNoCache();
       const gasClientId = Array.isArray(clientSheetId)
         ? (clientSheetId.length === 1 ? clientSheetId[0] : undefined)
         : clientSheetId;

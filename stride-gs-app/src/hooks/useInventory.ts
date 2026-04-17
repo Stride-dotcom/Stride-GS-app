@@ -10,7 +10,7 @@
  * applyItemPatch is also used cross-entity (WC release patches linked item statuses).
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { fetchInventory } from '../lib/api';
+import { fetchInventory, setNextFetchNoCache } from '../lib/api';
 import type { ApiInventoryItem, InventoryResponse } from '../lib/api';
 import type { InventoryItem, InventoryStatus } from '../lib/types';
 import { useApiData } from './useApiData';
@@ -100,10 +100,12 @@ export function useInventory(autoFetch = true, filterClientSheetId?: string | st
   // Try Supabase first, fall back to GAS API
   const fetchFn = useCallback(
     async (signal?: AbortSignal) => {
-      if (await isSupabaseCacheAvailable()) {
+      const skipSb = entityEvents.shouldSkipSupabase('inventory');
+      if (!skipSb && await isSupabaseCacheAvailable()) {
         const sbResult = await fetchInventoryFromSupabase(clientNameMapRef.current, clientSheetId);
         if (sbResult) return { data: sbResult, ok: true, error: null } as { data: InventoryResponse; ok: true; error: null };
       }
+      if (skipSb) setNextFetchNoCache();
       const gasClientId = Array.isArray(clientSheetId)
         ? (clientSheetId.length === 1 ? clientSheetId[0] : undefined)
         : clientSheetId;

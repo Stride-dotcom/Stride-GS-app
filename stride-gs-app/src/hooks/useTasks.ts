@@ -12,7 +12,7 @@
  * Patches auto-expire after 120s (guarded in useMemo merge).
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { fetchTasks } from '../lib/api';
+import { fetchTasks, setNextFetchNoCache } from '../lib/api';
 import type { ApiTask, TasksResponse } from '../lib/api';
 import type { Task, TaskStatus, ServiceCode } from '../lib/types';
 import { useApiData } from './useApiData';
@@ -104,10 +104,13 @@ export function useTasks(autoFetch = true, filterClientSheetId?: string | string
 
   const fetchFn = useCallback(
     async (signal?: AbortSignal) => {
-      if (await isSupabaseCacheAvailable()) {
+      // Session 71: After a write, skip Supabase (may be stale) and go to GAS
+      const skipSb = entityEvents.shouldSkipSupabase('task');
+      if (!skipSb && await isSupabaseCacheAvailable()) {
         const sbResult = await fetchTasksFromSupabase(clientNameMapRef.current, clientSheetId);
         if (sbResult) return { data: sbResult, ok: true, error: null } as { data: TasksResponse; ok: true; error: null };
       }
+      if (skipSb) setNextFetchNoCache(); // also bypass GAS 600s cache
       const gasClientId = Array.isArray(clientSheetId)
         ? (clientSheetId.length === 1 ? clientSheetId[0] : undefined)
         : clientSheetId;

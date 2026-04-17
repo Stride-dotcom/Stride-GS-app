@@ -5,7 +5,7 @@
  * Falls back to individual API call for staff/admin users or when batch is unavailable.
  */
 import { useCallback, useEffect, useMemo, useRef } from 'react';
-import { fetchShipments } from '../lib/api';
+import { fetchShipments, setNextFetchNoCache } from '../lib/api';
 import type { ApiShipment, ShipmentsResponse } from '../lib/api';
 import type { Shipment } from '../lib/types';
 import { useApiData } from './useApiData';
@@ -69,10 +69,12 @@ export function useShipments(autoFetch = true, filterClientSheetId?: string | st
 
   const fetchFn = useCallback(
     async (signal?: AbortSignal) => {
-      if (await isSupabaseCacheAvailable()) {
+      const skipSb = entityEvents.shouldSkipSupabase('shipment');
+      if (!skipSb && await isSupabaseCacheAvailable()) {
         const sbResult = await fetchShipmentsFromSupabase(clientNameMapRef.current, clientSheetId);
         if (sbResult) return { data: sbResult, ok: true, error: null } as { data: ShipmentsResponse; ok: true; error: null };
       }
+      if (skipSb) setNextFetchNoCache();
       const gasClientId = Array.isArray(clientSheetId)
         ? (clientSheetId.length === 1 ? clientSheetId[0] : undefined)
         : clientSheetId;

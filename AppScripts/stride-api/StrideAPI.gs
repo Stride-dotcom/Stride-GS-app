@@ -1,5 +1,5 @@
 /* ===================================================
-   StrideAPI.gs — v38.68.3 — 2026-04-17 PST — RECEIVED_DATE email token uses MM/dd/yyyy
+   StrideAPI.gs — v38.69.0 — 2026-04-17 PST — Inventory shipmentFolderUrl reads per-row hyperlink (single source of truth)
    v38.68.2: HOTFIX — handleCompleteShipment_ now reads AUTO_INSPECTION from client
              Settings as server-side authority. Previously relied solely on React's
              per-item needsInspection flag, which had a race condition (items entered
@@ -1258,6 +1258,115 @@ function installSyncRetryTrigger() {
   var msg = "installSyncRetryTrigger: removed " + removed + " old trigger(s), scheduled retryFailedSyncs_ every 10 minutes";
   Logger.log(msg);
   return msg;
+}
+
+// ─── Periodic Full Reconciliation ─────────────────────────────────────────────
+/**
+ * reconcileNextClient_ — Background trigger that syncs ONE client's full data
+ * to Supabase on each run. Cycles through all active clients round-robin using
+ * a Script Property cursor. Ensures Supabase never drifts more than a few
+ * minutes from the Google Sheets source of truth.
+ *
+ * Entity types synced per client: inventory, task, repair, will_call, shipment, billing.
+ * Also syncs the client's own CB row to the clients table.
+ *
+ * Run frequency: every 5 minutes via installReconciliationTrigger().
+ * With 50 clients, full cycle = ~250 minutes (~4 hours).
+ * Each run stays well under the 6-minute GAS limit (typically 15-30s per client).
+ */
+function reconcileNextClient_() {
+  try {
+    var url = prop_("SUPABASE_URL");
+    var key = prop_("SUPABASE_SERVICE_ROLE_KEY");
+    if (!url || !key) return; // Supabase not configured
+
+    var cbId = prop_("CB_SPREADSHEET_ID");
+    if (!cbId) return;
+    var cbSs = SpreadsheetApp.openById(cbId);
+    var clientsSheet = cbSs.getSheetByName("Clients");
+    if (!clientsSheet) return;
+
+    // Build list of active client spreadsheet IDs
+    var data = clientsSheet.getDataRange().getValues();
+    if (data.length < 2) return;
+    var headers = data[0].map(function(h) { return String(h || "").trim().toUpperCase(); });
+    var sidCol = headers.indexOf("CLIENT SPREADSHEET ID");
+    var activeCol = headers.indexOf("ACTIVE");
+    var nameCol = headers.indexOf("CLIENT NAME");
+    if (sidCol < 0) return;
+
+    var activeClients = [];
+    for (var i = 1; i < data.length; i++) {
+      var sid = String(data[i][sidCol] || "").trim();
+      if (!sid) continue;
+      var active = activeCol >= 0 ? data[i][activeCol] : true;
+      var isActive = !(active === false || active === "FALSE" || active === "No");
+      if (!isActive) continue;
+      var name = nameCol >= 0 ? String(data[i][nameCol] || "").trim() : "";
+      activeClients.push({ sid: sid, name: name });
+    }
+    if (activeClients.length === 0) return;
+
+    // Round-robin cursor — stored in Script Properties
+    var props = PropertiesService.getScriptProperties();
+    var cursorStr = props.getProperty("RECONCILE_CURSOR") || "0";
+    var cursor = parseInt(cursorStr, 10) || 0;
+    if (cursor >= activeClients.length) cursor = 0;
+
+    var target = activeClients[cursor];
+    var nextCursor = (cursor + 1) % activeClients.length;
+    props.setProperty("RECONCILE_CURSOR", String(nextCursor));
+
+    Logger.log("reconcileNextClient_: syncing " + target.name + " (" + target.sid + ") [" + (cursor + 1) + "/" + activeClients.length + "]");
+
+    // Sync all entity types for this client
+    try {
+      api_fullClientSync_(target.sid, ["inventory", "task", "repair", "will_call", "shipment", "billing"]);
+    } catch (syncErr) {
+      Logger.log("reconcileNextClient_: sync error for " + target.name + ": " + syncErr);
+    }
+
+    // Also resync the client's own CB row
+    try {
+      resyncClientToSupabase_(target.sid);
+    } catch (clientErr) {
+      Logger.log("reconcileNextClient_: client resync error for " + target.name + ": " + clientErr);
+    }
+
+  } catch (e) {
+    Logger.log("reconcileNextClient_ error: " + e);
+  }
+}
+
+/**
+ * One-time installer for the 5-minute reconciliation trigger.
+ * Run from Apps Script editor: pick `installReconciliationTrigger` → Run.
+ * Idempotent — removes existing reconcileNextClient_ triggers first.
+ */
+function installReconciliationTrigger() {
+  var existing = ScriptApp.getProjectTriggers();
+  var removed = 0;
+  for (var i = 0; i < existing.length; i++) {
+    if (existing[i].getHandlerFunction() === "reconcileNextClient_") {
+      ScriptApp.deleteTrigger(existing[i]);
+      removed++;
+    }
+  }
+  ScriptApp.newTrigger("reconcileNextClient_").timeBased().everyMinutes(5).create();
+  var msg = "installReconciliationTrigger: removed " + removed + " old trigger(s), scheduled reconcileNextClient_ every 5 minutes";
+  Logger.log(msg);
+  return msg;
+}
+
+/**
+ * Manual trigger — run full reconciliation for a specific client right now.
+ * Useful for debugging or after a bulk sheet edit.
+ */
+function reconcileClientNow(spreadsheetId) {
+  if (!spreadsheetId) { Logger.log("reconcileClientNow: no spreadsheetId"); return; }
+  api_fullClientSync_(spreadsheetId, ["inventory", "task", "repair", "will_call", "shipment", "billing"]);
+  resyncClientToSupabase_(spreadsheetId);
+  Logger.log("reconcileClientNow: done for " + spreadsheetId);
 }
 
 function api_logSyncFailure_(tenantId, entityType, entityId, actionType, errorMessage) {
@@ -6178,7 +6287,36 @@ function handleGetInventory_(clientSheetId) {
       var sheet = ss.getSheetByName("Inventory");
       if (!sheet) continue;
 
-      // Build shipment folder URL lookup — only for single-client requests
+      // v38.69.0: Read shipmentFolderUrl DIRECTLY from each Inventory row's Shipment #
+      // hyperlink (same URL the sheet shows when you hover). Previously we looked it
+      // up against the Shipments tab's Shipment # folder map — which could diverge
+      // from the sheet (e.g. Import.gs v4.2.3 wrote empty IMP folders to the Shipments
+      // tab while real photo URLs lived on Inventory rows). One source of truth now.
+      // Keyed on Item ID (robust against blank-row filtering in sheetToObjects_).
+      var invHmap = api_getHeaderMap_(sheet);
+      var invShipCol = invHmap["Shipment #"];
+      var invIdCol   = invHmap["Item ID"];
+      var perItemShipUrl = {};
+      if (readFolderUrls && invShipCol && invIdCol) {
+        try {
+          var invLastRow = api_getLastDataRow_(sheet);
+          if (invLastRow >= 2) {
+            var numInvRows = invLastRow - 1;
+            var idVals  = sheet.getRange(2, invIdCol,   numInvRows, 1).getValues();
+            var rtVals  = sheet.getRange(2, invShipCol, numInvRows, 1).getRichTextValues();
+            for (var rti = 0; rti < numInvRows; rti++) {
+              var iid = String(idVals[rti][0] || "").trim();
+              if (!iid) continue;
+              var rtCell = rtVals[rti][0];
+              var urlStr = rtCell ? (rtCell.getLinkUrl() || "") : "";
+              if (urlStr) perItemShipUrl[iid] = urlStr;
+            }
+          }
+        } catch (rtErr) {
+          // non-fatal — fall back to shipFolderMap
+        }
+      }
+      // Fallback map (used if per-row link is missing) — builds from Shipments tab.
       var shipFolderMap = readFolderUrls ? api_buildShipmentFolderMap_(ss) : {};
 
       var rows = sheetToObjects_(sheet);
@@ -6187,6 +6325,7 @@ function handleGetInventory_(clientSheetId) {
         var itemId = String(row["Item ID"] || "").trim();
         if (!itemId) continue;
         var shipNo = String(row["Shipment #"] || "").trim();
+        var perRowShipUrl = perItemShipUrl[itemId] || "";
 
         allItems.push({
           itemId: itemId,
@@ -6211,7 +6350,7 @@ function handleGetInventory_(clientSheetId) {
           releaseDate: formatDate_(row["Release Date"]),
           status: String(row["Status"] || "Active").trim(),
           invoiceUrl: String(row["Invoice URL"] || "").trim(),
-          shipmentFolderUrl: shipFolderMap[shipNo] || ""
+          shipmentFolderUrl: perRowShipUrl || shipFolderMap[shipNo] || ""
         });
       }
     } catch (err) {

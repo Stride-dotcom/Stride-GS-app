@@ -9,7 +9,7 @@
  * Falls back to individual API call for staff/admin users or when batch is unavailable.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { fetchBilling } from '../lib/api';
+import { fetchBilling, setNextFetchNoCache } from '../lib/api';
 import type { ApiBillingRow, BillingResponse, BillingSummary, BillingFilterParams } from '../lib/api';
 import { useApiData } from './useApiData';
 import { useClientFilter } from './useClientFilter';
@@ -75,10 +75,12 @@ export function useBilling(autoFetch = true, filterClientSheetId?: string, filte
       if (hasServerFilters) {
         return fetchBilling(signal, clientSheetId, filtersRef.current);
       }
-      if (await isSupabaseCacheAvailable()) {
+      const skipSb = entityEvents.shouldSkipSupabase('billing');
+      if (!skipSb && await isSupabaseCacheAvailable()) {
         const sbResult = await fetchBillingFromSupabase(clientNameMapRef.current, clientSheetId);
         if (sbResult) return { data: sbResult, ok: true, error: null } as { data: BillingResponse; ok: true; error: null };
       }
+      if (skipSb) setNextFetchNoCache();
       return fetchBilling(signal, clientSheetId);
     },
     // clientNameMap intentionally omitted — read via ref to prevent perpetual refetch loop.

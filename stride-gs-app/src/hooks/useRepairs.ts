@@ -7,7 +7,7 @@
  * Phase 2C: optimistic patch architecture added.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { fetchRepairs } from '../lib/api';
+import { fetchRepairs, setNextFetchNoCache } from '../lib/api';
 import type { ApiRepair, RepairsResponse } from '../lib/api';
 import type { Repair, RepairStatus } from '../lib/types';
 import { useApiData } from './useApiData';
@@ -96,10 +96,12 @@ export function useRepairs(autoFetch = true, filterClientSheetId?: string | stri
 
   const fetchFn = useCallback(
     async (signal?: AbortSignal) => {
-      if (await isSupabaseCacheAvailable()) {
+      const skipSb = entityEvents.shouldSkipSupabase('repair');
+      if (!skipSb && await isSupabaseCacheAvailable()) {
         const sbResult = await fetchRepairsFromSupabase(clientNameMapRef.current, clientSheetId);
         if (sbResult) return { data: sbResult, ok: true, error: null } as { data: RepairsResponse; ok: true; error: null };
       }
+      if (skipSb) setNextFetchNoCache();
       const gasClientId = Array.isArray(clientSheetId)
         ? (clientSheetId.length === 1 ? clientSheetId[0] : undefined)
         : clientSheetId;
