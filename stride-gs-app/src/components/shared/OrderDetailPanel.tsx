@@ -36,14 +36,22 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 
 function formatWindow(start: string, end: string, tz: string): string {
   if (!start && !end) return '—';
-  const fmt = (iso: string) => {
-    try {
-      return new Date(iso).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
-    } catch { return iso; }
+  // Time values come as "HH:MM:SS" from Postgres time column, NOT as ISO dates.
+  // Parse manually to display as "10:00 AM – 12:00 PM"
+  const fmtTime = (t: string) => {
+    if (!t) return '';
+    const parts = t.split(':');
+    if (parts.length < 2) return t;
+    let h = parseInt(parts[0]);
+    const m = parts[1];
+    const period = h >= 12 ? 'PM' : 'AM';
+    if (h === 0) h = 12;
+    else if (h > 12) h -= 12;
+    return `${h}:${m} ${period}`;
   };
-  const parts = [start && fmt(start), end && fmt(end)].filter(Boolean);
-  const tzShort = tz ? ` (${tz})` : '';
-  return parts.join(' – ') + tzShort;
+  const timeStr = [start && fmtTime(start), end && fmtTime(end)].filter(Boolean).join(' – ');
+  const tzShort = tz === 'America/Los_Angeles' ? ' PT' : tz ? ` (${tz})` : '';
+  return timeStr + tzShort;
 }
 
 function formatDate(iso: string): string {
