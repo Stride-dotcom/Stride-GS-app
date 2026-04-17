@@ -3959,18 +3959,10 @@ function doPost(e) {
         return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
           var r = handleBatchCreateTasks_(effectiveId, payload);
           invalidateClientCache_(effectiveId);
-          // v38.68.2: Sync only the newly created tasks, not the full sheet.
-          // api_fullClientSync_ was reading ALL task rows and upserting them,
-          // blocking the response for 10-20s on large clients. Instead, sync
-          // just the new task IDs individually (best-effort, non-fatal).
-          try {
-            var rData = JSON.parse(r.getContent());
-            if (rData.taskIds && rData.taskIds.length) {
-              for (var sti = 0; sti < rData.taskIds.length; sti++) {
-                try { resyncEntityToSupabase_("task", effectiveId, rData.taskIds[sti]); } catch (_) {}
-              }
-            }
-          } catch (_) {}
+          // Full sync — ensures newly created tasks land in Supabase immediately.
+          // The targeted resyncEntityToSupabase_ approach had timing issues with
+          // setValues() not flushing before the row lookup.
+          api_fullClientSync_(effectiveId, ["task"]);
           return r;
         });
 
@@ -8959,8 +8951,8 @@ function handleCompleteShipment_(clientSheetId, payload) {
           var tItemId = String(tItem.itemId || "").trim();
           if (!tItemId) continue;
 
-          // If React resolved the setting (checkboxes are accurate), trust per-item flag.
-          // If React didn't resolve (race condition), fall back to server setting.
+          // v38.68.3: Trust per-item flags from React (user can uncheck individual items).
+          // Server fallback only when React didn't load the setting (autoInspectionLoaded=false).
           var doInspection = clientTrustsFlags ? !!tItem.needsInspection : (!!tItem.needsInspection || autoInspectionSetting);
           if (doInspection) {
             var inspN = api_nextTaskCounter_(taskSheet, "INSP", tItemId, pendingTaskIds);

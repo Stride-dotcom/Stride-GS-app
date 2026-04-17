@@ -200,7 +200,7 @@ function NewShipmentForm() {
         const cols = line.split('\t');
         const targetIdx = startIdx + offset;
         if (targetIdx >= next.length) {
-          const item = emptyItem();
+          const item = emptyItem(clientAutoInspect);
           next.push(item);
           newRowIds.push(item.id);
         }
@@ -229,7 +229,7 @@ function NewShipmentForm() {
       newRowIds.forEach(id => assignAutoId(id));
     }
     return true;
-  }, [autoIdEnabled, assignAutoId]);
+  }, [autoIdEnabled, assignAutoId, clientAutoInspect]);
 
   const handlePaste = useCallback((e: React.ClipboardEvent<HTMLInputElement>, startIdx: number, field: keyof DockItem) => {
     const text = e.clipboardData.getData('text');
