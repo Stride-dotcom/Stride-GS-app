@@ -1178,6 +1178,7 @@ export interface CompleteShipmentPayload {
   notes: string;
   receiveDate: string;
   skipReceivingBilling?: boolean;
+  autoInspectionLoaded?: boolean;
 }
 
 export interface CompleteShipmentResponse {

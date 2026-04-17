@@ -8764,11 +8764,13 @@ function handleCompleteShipment_(clientSheetId, payload) {
   var clientName = String(settings["CLIENT_NAME"] || "").trim();
   var billingEnabled = toBool_(settings["ENABLE_RECEIVING_BILLING"]);
   var skipReceivingBilling = payload.skipReceivingBilling === true;
-  // v38.68.1 FIX: Read AUTO_INSPECTION from client settings as server-side authority.
-  // React sends per-item needsInspection flags, but they can be stale due to a race
-  // condition (items entered before apiClients loads → all flags false). The server-side
-  // setting overrides: if true, ALL items get inspection tasks regardless of React flags.
+  // v38.68.2 FIX: Read AUTO_INSPECTION as server-side fallback for the race condition
+  // where React sends needsInspection=false because apiClients hadn't loaded yet.
+  // If React sends autoInspectionLoaded=true, the user saw the checkboxes correctly
+  // and per-item flags are trustworthy (user may have unchecked individual items).
+  // If autoInspectionLoaded is missing/false, React hit the race → use server setting.
   var autoInspectionSetting = toBool_(settings["AUTO_INSPECTION"]);
+  var clientTrustsFlags = payload.autoInspectionLoaded === true;
 
   if (!rpcUrl) return errorResponse_("Client missing MASTER_RPC_URL setting", "CONFIG_ERROR");
   if (!rpcToken) return errorResponse_("Client missing MASTER_RPC_TOKEN setting", "CONFIG_ERROR");
@@ -8930,7 +8932,10 @@ function handleCompleteShipment_(clientSheetId, payload) {
           var tItemId = String(tItem.itemId || "").trim();
           if (!tItemId) continue;
 
-          if (autoInspectionSetting || tItem.needsInspection) {
+          // If React resolved the setting (checkboxes are accurate), trust per-item flag.
+          // If React didn't resolve (race condition), fall back to server setting.
+          var doInspection = clientTrustsFlags ? !!tItem.needsInspection : (!!tItem.needsInspection || autoInspectionSetting);
+          if (doInspection) {
             var inspN = api_nextTaskCounter_(taskSheet, "INSP", tItemId, pendingTaskIds);
             var inspTaskId = "INSP-" + tItemId + "-" + inspN;
             pendingTaskIds.push(inspTaskId);

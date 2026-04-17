@@ -410,6 +410,10 @@ function NewShipmentForm() {
         notes: notes.trim(),
         receiveDate,
         ...(!chargeReceiving && { skipReceivingBilling: true }),
+        // Signal that React resolved the auto-inspection setting before submit.
+        // If apiClients hadn't loaded (race condition), checkboxes may be wrong →
+        // server falls back to AUTO_INSPECTION from client Settings.
+        autoInspectionLoaded: apiClients.length > 0,
       }, clientSheetId);
 
       if (!resp.ok || !resp.data) {
