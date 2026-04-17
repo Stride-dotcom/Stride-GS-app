@@ -3806,7 +3806,7 @@ function doPost(e) {
           }
           var r = handleCompleteShipment_(effectiveId, payload);
           invalidateClientCache_(effectiveId);
-          api_fullClientSync_(effectiveId, ["inventory", "shipment", "billing"]);
+          api_fullClientSync_(effectiveId, ["inventory", "task", "shipment", "billing"]);
           // Phase 2 — write-through to item_id_ledger on success so future
           // collisions are caught. Idempotent (ON CONFLICT DO NOTHING).
           try {
@@ -4104,7 +4104,10 @@ function doPost(e) {
 
       case "updateBillingRow":
         return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
-          return handleUpdateBillingRow_(effectiveId, payload);
+          var r = handleUpdateBillingRow_(effectiveId, payload);
+          invalidateClientCache_(effectiveId);
+          api_writeThrough_(r, "billing", effectiveId, String(payload.ledgerRowId || ""));
+          return r;
         });
 
       case "batchCreateTasks":
