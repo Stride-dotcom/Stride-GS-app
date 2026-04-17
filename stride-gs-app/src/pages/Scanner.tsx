@@ -555,6 +555,17 @@ export function Scanner() {
               {lastResult.success && (lastResult.errors?.length ?? 0) === 0 && (lastResult.notFound?.length ?? 0) === 0
                 ? <><CheckCircle2 size={14} /> Moved {lastResult.counts.updated} item{lastResult.counts.updated !== 1 ? 's' : ''} to {targetLocation || 'location'}.</>
                 : <><AlertTriangle size={14} /> {lastResult.error || `Moved ${lastResult.counts.updated} · ${lastResult.counts.notFound} not found · ${lastResult.counts.errors} errors`}</>}
+              {/* Show per-item failure details so we can debug */}
+              {(lastResult.notFound?.length ?? 0) > 0 && (
+                <div style={{ fontSize: 11, marginTop: 6, opacity: 0.85 }}>
+                  {lastResult.notFound!.map(nf => <div key={nf.itemId}>{nf.itemId}: {nf.reason}</div>)}
+                </div>
+              )}
+              {(lastResult.errors?.length ?? 0) > 0 && (
+                <div style={{ fontSize: 11, marginTop: 6, opacity: 0.85 }}>
+                  {lastResult.errors!.map(er => <div key={er.itemId}>{er.itemId}: {er.error}</div>)}
+                </div>
+              )}
             </div>
           )}
 

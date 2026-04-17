@@ -5860,12 +5860,15 @@ function handleBatchUpdateItemLocations_(payload, callerEmail) {
         // Matches the pattern used by api_ledgerCheckAvailable_ (line ~1334).
         var inList = chunk.map(encodeURIComponent).join(",");
         var url = supabaseUrl + "/rest/v1/item_id_ledger?item_id=in.(" + inList + ")&select=item_id,tenant_id,status";
+        Logger.log("[batchMove] ledger URL: " + url);
         var resp = UrlFetchApp.fetch(url, {
           headers: { "apikey": serviceKey, "Authorization": "Bearer " + serviceKey },
           muteHttpExceptions: true
         });
+        Logger.log("[batchMove] ledger resp: HTTP " + resp.getResponseCode() + " body=" + resp.getContentText().substring(0, 500));
         if (resp.getResponseCode() === 200) {
           var rows = JSON.parse(resp.getContentText());
+          Logger.log("[batchMove] ledger found " + rows.length + " rows for chunk of " + chunk.length);
           for (var r = 0; r < rows.length; r++) {
             tenantByItem[rows[r].item_id] = rows[r].tenant_id;
           }
@@ -5878,11 +5881,14 @@ function handleBatchUpdateItemLocations_(payload, callerEmail) {
     Logger.log("ledger lookup threw: " + e);
   }
 
+  Logger.log("[batchMove] tenantByItem keys: " + Object.keys(tenantByItem).join(",") + " | normalized: " + normalized.join(","));
+
   // Step 2: Group by tenant
   var byTenant = {}; // tenantId → [itemId]
   for (var j = 0; j < normalized.length; j++) {
     var t = tenantByItem[normalized[j]];
     if (!t) {
+      Logger.log("[batchMove] NOT FOUND in tenantByItem: '" + normalized[j] + "' (type=" + typeof normalized[j] + ")");
       results.notFound.push({ itemId: normalized[j], reason: "not in item_id_ledger" });
       continue;
     }
