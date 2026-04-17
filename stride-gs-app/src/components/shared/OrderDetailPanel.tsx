@@ -4,7 +4,7 @@ import { theme } from '../../styles/theme';
 import { getPanelContainerStyle, panelBackdropStyle } from './panelStyles';
 import { useIsMobile } from '../../hooks/useIsMobile';
 import { useResizablePanel } from '../../hooks/useResizablePanel';
-import type { DtOrderForUI } from '../../lib/supabaseQueries';
+import type { DtOrderForUI, DtOrderItemForUI } from '../../lib/supabaseQueries';
 import { createPortal } from 'react-dom';
 
 interface Props {
@@ -141,6 +141,49 @@ export function OrderDetailPanel({ order, onClose }: Props) {
             <Section title="Notes">
               {order.details && <Field label="Details" value={order.details} />}
               {order.latestNotePreview && <Field label="Latest Note" value={order.latestNotePreview} />}
+            </Section>
+          )}
+
+          {/* Items — at the bottom in case the list is long */}
+          {order.items && order.items.length > 0 && (
+            <Section title={`Items (${order.items.length})`}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {order.items.map((item: DtOrderItemForUI, idx: number) => (
+                  <div key={item.id || idx} style={{
+                    padding: '10px 12px', borderRadius: 8,
+                    background: idx % 2 === 0 ? '#f8f9fa' : '#fff',
+                    border: `1px solid ${theme.colors.border}`,
+                  }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: theme.colors.text, marginBottom: 4 }}>
+                      {item.description || 'No description'}
+                    </div>
+                    <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', fontSize: 12, color: theme.colors.textMuted }}>
+                      {item.dtItemCode && (
+                        <span><span style={{ fontWeight: 500 }}>SKU:</span> {item.dtItemCode}</span>
+                      )}
+                      {item.quantity != null && (
+                        <span><span style={{ fontWeight: 500 }}>Qty:</span> {item.quantity}</span>
+                      )}
+                      {item.deliveredQuantity != null && (
+                        <span>
+                          <span style={{ fontWeight: 500 }}>Delivered:</span>{' '}
+                          <span style={{ color: item.deliveredQuantity === item.quantity ? '#15803D' : '#B45309' }}>
+                            {item.deliveredQuantity}
+                          </span>
+                        </span>
+                      )}
+                      {item.unitPrice != null && item.unitPrice > 0 && (
+                        <span><span style={{ fontWeight: 500 }}>Amount:</span> ${item.unitPrice.toFixed(2)}</span>
+                      )}
+                    </div>
+                    {item.notes && (
+                      <div style={{ fontSize: 11, color: theme.colors.textMuted, marginTop: 4, fontStyle: 'italic' }}>
+                        {item.notes}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
             </Section>
           )}
 

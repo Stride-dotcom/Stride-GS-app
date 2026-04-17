@@ -1075,6 +1075,16 @@ export interface SupabaseDtOrderRow {
   updated_at: string;
 }
 
+export interface DtOrderItemForUI {
+  id: string;
+  dtItemCode: string;
+  description: string;
+  quantity: number | null;
+  deliveredQuantity: number | null;
+  unitPrice: number | null;
+  notes: string;
+}
+
 export interface DtOrderForUI {
   id: string;
   tenantId: string | null;
@@ -1105,6 +1115,7 @@ export interface DtOrderForUI {
   source: string;
   lastSyncedAt: string;
   clientName: string;
+  items: DtOrderItemForUI[];
 }
 
 export async function fetchDtStatusesFromSupabase(): Promise<SupabaseDtStatusRow[]> {
@@ -1129,7 +1140,7 @@ export async function fetchDtOrdersFromSupabase(
     const statusMap = new Map(statuses.map(s => [s.id, s]));
     let query = supabase
       .from('dt_orders')
-      .select('*')
+      .select('*, dt_order_items(*)')
       .order('local_service_date', { ascending: false });
     if (clientSheetId) {
       query = query.eq('tenant_id', clientSheetId);
@@ -1168,6 +1179,15 @@ export async function fetchDtOrdersFromSupabase(
         source: row.source ?? '',
         lastSyncedAt: row.last_synced_at ?? '',
         clientName: (row.tenant_id ? clientNameMap[row.tenant_id] : null) ?? '',
+        items: (((row as unknown as Record<string, unknown>).dt_order_items as Array<Record<string, unknown>>) || []).map((item) => ({
+          id: String(item.id ?? ''),
+          dtItemCode: String(item.dt_item_code ?? ''),
+          description: String(item.description ?? ''),
+          quantity: item.quantity != null ? Number(item.quantity) : null,
+          deliveredQuantity: item.delivered_quantity != null ? Number(item.delivered_quantity) : null,
+          unitPrice: item.unit_price != null ? Number(item.unit_price) : null,
+          notes: String((item.extras as Record<string, unknown>)?.notes ?? ''),
+        })),
       };
     });
   } catch {

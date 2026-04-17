@@ -230,13 +230,46 @@ Deno.serve(async (req: Request) => {
 
         if (tenantId) {
           upsertRow.tenant_id = tenantId;
-          const { error } = await supabase
+          const { data: upsertedOrder, error } = await supabase
             .from('dt_orders')
-            .upsert(upsertRow, { onConflict: 'tenant_id,dt_identifier', ignoreDuplicates: false });
+            .upsert(upsertRow, { onConflict: 'tenant_id,dt_identifier', ignoreDuplicates: false })
+            .select('id')
+            .maybeSingle();
           if (error) {
             results.errors.push(`${dtIdentifier}: ${error.message}`);
           } else {
             results.inserted++;
+
+            // ── Write line items ──────────────────────────────────────
+            if (upsertedOrder?.id) {
+              const itemsEl = order.getElementsByTagName('items')[0];
+              if (itemsEl) {
+                const itemEls = itemsEl.getElementsByTagName('item');
+                // Delete existing items for this order (full replace on backfill)
+                await supabase.from('dt_order_items').delete().eq('dt_order_id', upsertedOrder.id);
+                for (let j = 0; j < itemEls.length; j++) {
+                  const item = itemEls[j];
+                  const desc     = getEl(item, 'description');
+                  const skuNum   = getEl(item, 'serial_number');
+                  const qty      = parseFloat(getEl(item, 'quantity')) || null;
+                  const delQty   = parseFloat(getEl(item, 'delivered_quantity')) || null;
+                  const origQty  = qty; // DT doesn't have a separate "original" in export
+                  const unitAmt  = parseFloat(getEl(item, 'amount')) || null;
+                  const itemNote = getEl(item, 'notes');
+
+                  await supabase.from('dt_order_items').insert({
+                    dt_order_id:        upsertedOrder.id,
+                    dt_item_code:       skuNum || null,
+                    description:        desc || null,
+                    quantity:           qty,
+                    original_quantity:  origQty,
+                    delivered_quantity: delQty,
+                    unit_price:         unitAmt,
+                    extras:             itemNote ? { notes: itemNote } : null,
+                  });
+                }
+              }
+            }
           }
         } else {
           // No tenant_id — try upsert with null tenant (won't conflict on unique)
