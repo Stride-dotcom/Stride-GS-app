@@ -16322,9 +16322,18 @@ function handleFinishClientSetup_(payload) {
   }
 
   if (!scriptId) {
+    // v38.68.2: If all strategies failed, try ONE MORE fallback — open the client
+    // sheet's Settings tab and look for any Apps Script project ID-shaped string.
+    // Also try the ScriptApp API directly if the OAuth scope allows.
+    Logger.log("handleFinishClientSetup_: ALL 5 strategies failed for " + clientName + " (" + clientSheetId + ")");
+
     return errorResponse_(
-      "Could not find the bound Apps Script project. The script ID is written to the client's Settings tab only after its bound script runs at least once. " +
-      "To fix: (1) Open the client spreadsheet in your browser, (2) Click Extensions → Apps Script → authorize if prompted, (3) Return to the sheet and click Stride Admin → Verify Triggers (any menu action works), (4) Come back here and click Finish Setup again.",
+      "Could not find the bound Apps Script project for " + clientName + ". " +
+      "All 5 discovery strategies failed (URL redirect, Drive REST API, CB Script ID, Settings _SCRIPT_ID, folder search). " +
+      "To fix: (1) Open the client spreadsheet, (2) Click Extensions → Apps Script, " +
+      "(3) Copy the script ID from the URL (the long string after /projects/), " +
+      "(4) Paste it into the CB Clients sheet SCRIPT ID column for this client, " +
+      "(5) Click Finish Setup again.",
       "SCRIPT_NOT_FOUND"
     );
   }
@@ -17455,33 +17464,60 @@ function api_getOrCreateEntitySubfolder_(ss, entityType) {
  */
 function api_resolveBoundScriptViaRedirect_(sheetId) {
   if (!sheetId) return "";
+  var TEMPLATE_SCRIPT_ID_RR = "1Pk2Oc0u7RRgMs3sQs96brKDBFNA9vCyKOHZA9jMmk4gkD2yNdTGRlI5T";
+
+  // Method A: Drive API v3 — search for scripts whose parent is the spreadsheet file.
+  // Container-bound scripts are children of their spreadsheet in the Drive file tree,
+  // but DriveApp.searchFiles with 'in parents' doesn't always surface them.
+  // The REST API with supportsAllDrives + includeItemsFromAllDrives is more reliable.
+  try {
+    var token = ScriptApp.getOAuthToken();
+    var q = encodeURIComponent("'" + sheetId + "' in parents and mimeType='application/vnd.google-apps.script' and trashed=false");
+    var apiUrl = "https://www.googleapis.com/drive/v3/files?q=" + q + "&fields=files(id,name)&supportsAllDrives=true&includeItemsFromAllDrives=true";
+    var apiResp = UrlFetchApp.fetch(apiUrl, {
+      headers: { Authorization: "Bearer " + token },
+      muteHttpExceptions: true
+    });
+    if (apiResp.getResponseCode() === 200) {
+      var apiBody = JSON.parse(apiResp.getContentText());
+      var files = apiBody.files || [];
+      for (var fi = 0; fi < files.length; fi++) {
+        var fid = files[fi].id;
+        if (fid && fid !== TEMPLATE_SCRIPT_ID_RR) {
+          Logger.log("api_resolveBoundScriptViaRedirect_: Found via Drive REST API: " + fid + " (" + files[fi].name + ")");
+          return fid;
+        }
+      }
+    }
+  } catch (apiErr) {
+    Logger.log("api_resolveBoundScriptViaRedirect_: Drive REST API failed: " + apiErr);
+  }
+
+  // Method B: URL redirect — fetch script.google.com/d/<sheetId>/edit
   try {
     var url = "https://script.google.com/d/" + sheetId + "/edit";
-    var token = ScriptApp.getOAuthToken();
+    var token2 = ScriptApp.getOAuthToken();
     var resp = UrlFetchApp.fetch(url, {
-      headers: { Authorization: "Bearer " + token },
+      headers: { Authorization: "Bearer " + token2 },
       muteHttpExceptions: true,
       followRedirects: false
     });
     var headers = resp.getAllHeaders() || {};
     var location = headers["Location"] || headers["location"] || "";
     if (location) {
-      // Redirect targets look like:
-      //   .../home/projects/<SCRIPT_ID>/edit?...
-      //   .../macros/d/<SCRIPT_ID>/...
       var m = String(location).match(/\/home\/projects\/([a-zA-Z0-9_-]{20,})/);
-      if (m) return m[1];
+      if (m && m[1] !== TEMPLATE_SCRIPT_ID_RR) return m[1];
       var m2 = String(location).match(/\/macros\/d\/([a-zA-Z0-9_-]{20,})/);
-      if (m2) return m2[1];
+      if (m2 && m2[1] !== TEMPLATE_SCRIPT_ID_RR) return m2[1];
       var m3 = String(location).match(/\/d\/([a-zA-Z0-9_-]{20,})/);
-      if (m3 && m3[1] !== sheetId) return m3[1];
+      if (m3 && m3[1] !== sheetId && m3[1] !== TEMPLATE_SCRIPT_ID_RR) return m3[1];
     }
     // Some responses return 200 with the scriptId embedded in the body
     var body = String(resp.getContentText() || "");
     var mb = body.match(/\/home\/projects\/([a-zA-Z0-9_-]{20,})/);
-    if (mb) return mb[1];
+    if (mb && mb[1] !== TEMPLATE_SCRIPT_ID_RR) return mb[1];
   } catch (e) {
-    Logger.log("api_resolveBoundScriptViaRedirect_ error: " + e);
+    Logger.log("api_resolveBoundScriptViaRedirect_ redirect error: " + e);
   }
   return "";
 }
