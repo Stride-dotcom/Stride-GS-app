@@ -19,6 +19,7 @@ import type {
   ApiWillCall,
   WillCallsResponse,
   ApiShipment,
+  ApiShipmentItem,
   ShipmentsResponse,
   ApiBillingRow,
   BillingResponse,
@@ -481,6 +482,7 @@ interface SupabaseWillCallRow {
   shipment_folder_url: string | null;
   cod: boolean | null;
   cod_amount: number | null;
+  item_ids: string[] | null;
 }
 
 export async function fetchWillCallsFromSupabase(
@@ -517,7 +519,8 @@ export async function fetchWillCallsFromSupabase(
       codAmount: row.cod_amount != null ? Number(row.cod_amount) : null,
       itemsCount: row.item_count ?? 0,
       totalWcFee: null,
-      items: [], // WC items loaded lazily via detail panel
+      items: [], // WC items enriched from inventory via itemIds
+      itemIds: Array.isArray(row.item_ids) ? row.item_ids : [],
       wcFolderUrl: row.wc_folder_url || '',
       shipmentFolderUrl: row.shipment_folder_url || '',
     }));
@@ -610,6 +613,92 @@ export async function fetchShipmentByNoFromSupabase(
       invoiceUrl: '',
       folderUrl: row.folder_url || '',
     };
+  } catch {
+    return null;
+  }
+}
+
+// ─── Shipment Items (from inventory table) ──────────────────────────────────
+
+/**
+ * Session 71: Fetch shipment items directly from Supabase inventory table.
+ * Shipment items are just inventory rows filtered by shipment_number + tenant_id.
+ * ~50ms vs 2-5s from GAS. No new table needed.
+ */
+export async function fetchShipmentItemsFromSupabase(
+  clientSheetId: string,
+  shipmentNo: string
+): Promise<{ items: ApiShipmentItem[]; count: number } | null> {
+  try {
+    const { data, error } = await supabase
+      .from('inventory')
+      .select('item_id, description, item_class, qty, location, vendor, sidemark, room, reference, carrier, tracking_number, status, item_notes, receive_date, item_folder_url, shipment_photos_url, inspection_photos_url, repair_photos_url')
+      .eq('tenant_id', clientSheetId)
+      .eq('shipment_number', shipmentNo);
+    if (error || !data) return null;
+    const items: ApiShipmentItem[] = (data as SupabaseInventoryRow[]).map(row => ({
+      itemId: row.item_id,
+      description: row.description || '',
+      itemClass: row.item_class || '',
+      qty: row.qty ?? 1,
+      location: row.location || '',
+      vendor: row.vendor || '',
+      sidemark: row.sidemark || '',
+      room: row.room || '',
+      reference: row.reference || '',
+      carrier: row.carrier || '',
+      trackingNumber: row.tracking_number || '',
+      status: row.status || 'Active',
+      itemNotes: row.item_notes || '',
+      receiveDate: row.receive_date || '',
+    }));
+    return { items, count: items.length };
+  } catch {
+    return null;
+  }
+}
+
+// ─── Will Call Items (from inventory table via item_id lookup) ───────────────
+
+/**
+ * Session 71: Fetch WC item details from Supabase inventory table.
+ * The will_calls table doesn't store items. Given a list of item IDs
+ * (from the WC header's known items), look up full item data from inventory.
+ * This enables fast item display without hitting GAS.
+ */
+export async function fetchWcItemsFromSupabase(
+  clientSheetId: string,
+  itemIds: string[]
+): Promise<Record<string, {
+  vendor: string; description: string; location: string;
+  sidemark: string; room: string; reference: string;
+  itemClass: string; qty: number; status: string;
+}> | null> {
+  if (!itemIds.length) return {};
+  try {
+    const { data, error } = await supabase
+      .from('inventory')
+      .select('item_id, vendor, description, location, sidemark, room, reference, item_class, qty, status')
+      .eq('tenant_id', clientSheetId)
+      .in('item_id', itemIds);
+    if (error || !data) return null;
+    const map: Record<string, any> = {};
+    for (const row of data as SupabaseInventoryRow[]) {
+      if (row.item_id) {
+        map[row.item_id] = {
+          vendor: row.vendor || '',
+          description: row.description || '',
+          location: row.location || '',
+          sidemark: row.sidemark || '',
+          room: row.room || '',
+          reference: row.reference || '',
+          itemClass: row.item_class || '',
+          qty: row.qty ?? 1,
+          status: row.status || 'Active',
+        };
+      }
+    }
+    return map;
   } catch {
     return null;
   }

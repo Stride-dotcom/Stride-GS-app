@@ -12,6 +12,7 @@ import { theme } from '../../styles/theme';
 import { fmtDate } from '../../lib/constants';
 import { fetchShipmentItems } from '../../lib/api';
 import type { ApiShipmentItem } from '../../lib/api';
+import { fetchShipmentItemsFromSupabase } from '../../lib/supabaseQueries';
 import type { InventoryItem } from '../../lib/types';
 import { getPanelContainerStyle, panelBackdropStyle } from './panelStyles';
 import { useIsMobile } from '../../hooks/useIsMobile';
@@ -77,23 +78,38 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
     let cancelled = false;
     setItemsLoading(true);
     setItemsError(null);
-    fetchShipmentItems(shipment.clientSheetId, shipment.shipmentNo)
-      .then(res => {
+
+    const mapItem = (i: ApiShipmentItem): ShipmentItem => ({
+      itemId: i.itemId, vendor: i.vendor || '', description: i.description,
+      itemClass: i.itemClass, qty: i.qty, location: i.location, sidemark: i.sidemark || '',
+    });
+
+    // Session 71: Try Supabase first (~50ms), fall back to GAS (2-5s)
+    (async () => {
+      try {
+        const sbResult = await fetchShipmentItemsFromSupabase(shipment.clientSheetId!, shipment.shipmentNo);
+        if (!cancelled && sbResult && sbResult.items.length > 0) {
+          setItems(sbResult.items.map(mapItem));
+          setItemsLoading(false);
+          return;
+        }
+      } catch { /* fall through to GAS */ }
+
+      // GAS fallback
+      try {
+        const res = await fetchShipmentItems(shipment.clientSheetId!, shipment.shipmentNo);
         if (!cancelled) {
-          const data = res.data;
-          setItems((data?.items || []).map((i: ApiShipmentItem) => ({
-            itemId: i.itemId, vendor: '', description: i.description, itemClass: i.itemClass,
-            qty: i.qty, location: i.location, sidemark: '',
-          })));
+          setItems((res.data?.items || []).map(mapItem));
           setItemsLoading(false);
         }
-      })
-      .catch(err => {
+      } catch (err) {
         if (!cancelled) {
           setItemsError(String(err));
           setItemsLoading(false);
         }
-      });
+      }
+    })();
+
     return () => { cancelled = true; };
   }, [shipment.clientSheetId, shipment.shipmentNo]);
 

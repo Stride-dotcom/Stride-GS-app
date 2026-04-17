@@ -11,6 +11,7 @@ import { getPanelContainerStyle, panelBackdropStyle } from './panelStyles';
 import { useIsMobile } from '../../hooks/useIsMobile';
 import { useResizablePanel } from '../../hooks/useResizablePanel';
 import { postProcessWcRelease, postCancelWillCall, postRemoveItemsFromWillCall, postUpdateWillCall, postGenerateWcDoc, fetchWcDocUrl, fetchWillCallById, isApiConfigured } from '../../lib/api';
+import { fetchWcItemsFromSupabase } from '../../lib/supabaseQueries';
 import { useClients } from '../../hooks/useClients';
 import { writeSyncFailed } from '../../lib/syncEvents';
 import { useAuth } from '../../contexts/AuthContext';
@@ -63,33 +64,69 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
     if (!clientSheetId) return;
     if (enrichRef.current === wcProp.wcNumber + ':' + clientSheetId) return;
     enrichRef.current = wcProp.wcNumber + ':' + clientSheetId;
-    fetchWillCallById(wcProp.wcNumber, clientSheetId).then(resp => {
-      if (resp.ok && resp.data?.success && resp.data.willCall) {
-        const match = resp.data.willCall;
-        // Always set enrichedData even if 0 items — prevents infinite retry loop
-        if (!match.items?.length) {
-          setEnrichedData({ items: [] });
-          enrichRef.current = null;
-          return;
-        }
-        setEnrichedData({
-          items: (match.items || []).map(it => ({
-            itemId: it.itemId, description: it.description, qty: it.qty,
-            released: it.released, vendor: it.vendor || undefined,
-            location: it.location || undefined, status: it.status || undefined,
-          })),
-          itemCount: match.items?.length || match.itemsCount || wcProp.itemCount,
-          pickupPartyPhone: match.pickupPhone || undefined,
-          scheduledDate: match.estimatedPickupDate || undefined,
-          notes: match.notes || undefined,
-          cod: match.cod ?? undefined,
-          codAmount: match.codAmount ?? undefined,
-          wcFolderUrl: match.wcFolderUrl || undefined,
-          shipmentFolderUrl: match.shipmentFolderUrl || undefined,
-        });
+
+    // Session 71: Try Supabase first if we have itemIds (~50ms vs 2-5s from GAS)
+    const wcItemIds = (wcProp as any).itemIds as string[] | undefined;
+
+    (async () => {
+      // Fast path: itemIds available from Supabase will_calls row
+      if (wcItemIds && wcItemIds.length > 0) {
+        try {
+          const invMap = await fetchWcItemsFromSupabase(clientSheetId!, wcItemIds);
+          if (invMap && Object.keys(invMap).length > 0) {
+            setEnrichedData({
+              items: wcItemIds.map(id => {
+                const inv = invMap[id];
+                return {
+                  itemId: id,
+                  description: inv?.description || '',
+                  qty: inv?.qty ?? 1,
+                  released: false, // WC release status not in inventory — GAS enrichment fills this
+                  vendor: inv?.vendor || undefined,
+                  location: inv?.location || undefined,
+                  status: inv?.status || undefined,
+                  sidemark: inv?.sidemark || undefined,
+                  room: inv?.room || undefined,
+                  reference: inv?.reference || undefined,
+                };
+              }),
+              itemCount: wcItemIds.length,
+            });
+            enrichRef.current = null;
+            return;
+          }
+        } catch { /* fall through to GAS */ }
       }
+
+      // GAS fallback (full enrichment including released status, WC fees, etc.)
+      try {
+        const resp = await fetchWillCallById(wcProp.wcNumber, clientSheetId!);
+        if (resp.ok && resp.data?.success && resp.data.willCall) {
+          const match = resp.data.willCall;
+          if (!match.items?.length) {
+            setEnrichedData({ items: [] });
+            enrichRef.current = null;
+            return;
+          }
+          setEnrichedData({
+            items: (match.items || []).map(it => ({
+              itemId: it.itemId, description: it.description, qty: it.qty,
+              released: it.released, vendor: it.vendor || undefined,
+              location: it.location || undefined, status: it.status || undefined,
+            })),
+            itemCount: match.items?.length || match.itemsCount || wcProp.itemCount,
+            pickupPartyPhone: match.pickupPhone || undefined,
+            scheduledDate: match.estimatedPickupDate || undefined,
+            notes: match.notes || undefined,
+            cod: match.cod ?? undefined,
+            codAmount: match.codAmount ?? undefined,
+            wcFolderUrl: match.wcFolderUrl || undefined,
+            shipmentFolderUrl: match.shipmentFolderUrl || undefined,
+          });
+        }
+      } catch { /* best effort */ }
       enrichRef.current = null;
-    }).catch(() => { enrichRef.current = null; });
+    })();
   }, [wcProp.wcNumber, wcProp.items, apiConfigured, clientSheetId]);
 
   // Merge prop data with enriched data — enriched fills gaps, prop takes priority for non-empty

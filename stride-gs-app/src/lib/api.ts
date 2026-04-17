@@ -433,6 +433,7 @@ export interface ApiWillCall {
   itemsCount: number;
   totalWcFee: number | null;
   items: ApiWCItem[];
+  itemIds?: string[];
   wcFolderUrl?: string;
   shipmentFolderUrl?: string;
 }
@@ -451,6 +452,15 @@ export interface ApiShipmentItem {
   itemClass: string;
   qty: number;
   location: string;
+  vendor?: string;
+  sidemark?: string;
+  room?: string;
+  reference?: string;
+  carrier?: string;
+  trackingNumber?: string;
+  status?: string;
+  itemNotes?: string;
+  receiveDate?: string;
 }
 
 export interface ApiShipment {

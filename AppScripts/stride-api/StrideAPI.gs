@@ -2192,6 +2192,7 @@ function sbWillCallRow_(tenantId, wc) {
     shipment_folder_url:   String(wc.shipmentFolderUrl || ""),
     cod:                   !!(wc.cod),
     cod_amount:            wc.codAmount != null && wc.codAmount !== "" ? Number(wc.codAmount) : null,
+    item_ids:              Array.isArray(wc.itemIds) ? JSON.stringify(wc.itemIds) : "[]",
     updated_at:            new Date().toISOString()
   };
 }
@@ -3303,6 +3304,20 @@ function api_fullClientSync_(tenantId, entityTypes) {
             // Read folder URLs from WC Number hyperlinks + shipment folder map
             var wcFolderUrls = api_readIdFolderUrls_(wcSheet, "WC Number");
             var wcShipMap = api_buildShipmentFolderMap_(ss);
+            // v38.68.2: Build WC Number → [itemId, ...] map from WC_Items sheet
+            var wcItemIdsMap = {};
+            var wciSheet = ss.getSheetByName("WC_Items");
+            if (wciSheet) {
+              var wciRows = sheetToObjects_(wciSheet);
+              for (var wi = 0; wi < wciRows.length; wi++) {
+                var wciWcn = String(wciRows[wi]["WC Number"] || "").trim();
+                var wciIid = String(wciRows[wi]["Item ID"] || "").trim();
+                if (wciWcn && wciIid) {
+                  if (!wcItemIdsMap[wciWcn]) wcItemIdsMap[wciWcn] = [];
+                  wcItemIdsMap[wciWcn].push(wciIid);
+                }
+              }
+            }
             var wcSb = [];
             var wcKeepIds = [];
             for (var m = 0; m < wcRows.length; m++) {
@@ -3316,7 +3331,8 @@ function api_fullClientSync_(tenantId, entityTypes) {
                 notes: wcRows[m]["Notes"], itemsCount: wcRows[m]["Items Count"],
                 cod: wcRows[m]["COD"], codAmount: wcRows[m]["COD Amount"],
                 wcFolderUrl: wcFolderUrls[wcn] || "",
-                shipmentFolderUrl: wcShipMap[String(wcRows[m]["Shipment #"] || "").trim()] || ""
+                shipmentFolderUrl: wcShipMap[String(wcRows[m]["Shipment #"] || "").trim()] || "",
+                itemIds: wcItemIdsMap[wcn] || []
               }));
             }
             supabaseBatchUpsert_("will_calls", wcSb);
