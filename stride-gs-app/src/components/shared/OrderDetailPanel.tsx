@@ -1,11 +1,23 @@
 import React from 'react';
-import { X, MapPin, Phone, Mail, Calendar, Clock, Package, FileText, Truck } from 'lucide-react';
+import { X, MapPin, Phone, Mail, Calendar, Clock, Package, FileText, Truck, DollarSign, CheckCircle2, AlertCircle, Clock3 } from 'lucide-react';
 import { theme } from '../../styles/theme';
 import { getPanelContainerStyle, panelBackdropStyle } from './panelStyles';
 import { useIsMobile } from '../../hooks/useIsMobile';
 import { useResizablePanel } from '../../hooks/useResizablePanel';
 import type { DtOrderForUI, DtOrderItemForUI } from '../../lib/supabaseQueries';
 import { createPortal } from 'react-dom';
+
+// Human-readable labels + chip config for review workflow states
+const REVIEW_CFG: Record<string, { bg: string; color: string; label: string; icon: React.ReactNode }> = {
+  pending_review:      { bg: '#FEF3C7', color: '#B45309', label: 'Pending Review',   icon: <Clock3 size={11} /> },
+  approved:            { bg: '#DCFCE7', color: '#166534', label: 'Approved',         icon: <CheckCircle2 size={11} /> },
+  rejected:            { bg: '#FEE2E2', color: '#991B1B', label: 'Rejected',         icon: <AlertCircle size={11} /> },
+  revision_requested:  { bg: '#FEF3C7', color: '#92400E', label: 'Revision Needed',  icon: <AlertCircle size={11} /> },
+};
+
+function fmtCurrency(n: number): string {
+  return `$${n.toFixed(2)}`;
+}
 
 interface Props {
   order: DtOrderForUI;
@@ -98,6 +110,16 @@ export function OrderDetailPanel({ order, onClose }: Props) {
                 <span style={{ fontSize: 10, fontWeight: 600, background: '#FEF3C7', color: '#B45309', padding: '2px 8px', borderRadius: 10 }}>PICKUP</span>
               )}
               <span style={{ fontSize: 11, fontWeight: 600, background: cfg.bg, color: cfg.color, padding: '2px 10px', borderRadius: 12 }}>{order.statusName}</span>
+              {order.reviewStatus && order.reviewStatus !== 'not_required' && REVIEW_CFG[order.reviewStatus] && (
+                <span style={{
+                  fontSize: 11, fontWeight: 600, background: REVIEW_CFG[order.reviewStatus].bg,
+                  color: REVIEW_CFG[order.reviewStatus].color, padding: '2px 10px', borderRadius: 12,
+                  display: 'inline-flex', alignItems: 'center', gap: 4,
+                }}>
+                  {REVIEW_CFG[order.reviewStatus].icon}
+                  {REVIEW_CFG[order.reviewStatus].label}
+                </span>
+              )}
             </div>
             {order.clientName && (
               <div style={{ fontSize: 12, color: theme.colors.textMuted }}>{order.clientName}</div>
@@ -135,6 +157,83 @@ export function OrderDetailPanel({ order, onClose }: Props) {
               <Field label="Dispatch ID" value={String(order.dtDispatchId)} />
             )}
           </Section>
+
+          {/* Pricing — shown when any pricing field is populated */}
+          {(order.baseDeliveryFee != null || order.orderTotal != null || (order.accessorials?.length ?? 0) > 0) && (
+            <Section title="Pricing">
+              {order.baseDeliveryFee != null && (
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 6 }}>
+                  <span style={{ color: theme.colors.textMuted }}>
+                    {order.isPickup ? 'Base Pickup Fee' : 'Base Delivery Fee'}
+                  </span>
+                  <span style={{ fontWeight: 500 }}>{fmtCurrency(order.baseDeliveryFee)}</span>
+                </div>
+              )}
+              {order.extraItemsCount > 0 && (
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 6 }}>
+                  <span style={{ color: theme.colors.textMuted }}>
+                    Extra Items ({order.extraItemsCount} × $25)
+                  </span>
+                  <span style={{ fontWeight: 500 }}>{fmtCurrency(order.extraItemsFee)}</span>
+                </div>
+              )}
+              {order.accessorials?.map((acc, i) => (
+                <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 6 }}>
+                  <span style={{ color: theme.colors.textMuted }}>
+                    {acc.code}{acc.quantity > 1 ? ` × ${acc.quantity}` : ''}
+                  </span>
+                  <span style={{ fontWeight: 500 }}>{fmtCurrency(acc.subtotal)}</span>
+                </div>
+              ))}
+              {order.fabricProtectionTotal > 0 && (
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 6 }}>
+                  <span style={{ color: theme.colors.textMuted }}>Fabric Protection</span>
+                  <span style={{ fontWeight: 500 }}>{fmtCurrency(order.fabricProtectionTotal)}</span>
+                </div>
+              )}
+              {order.orderTotal != null && (
+                <div style={{
+                  display: 'flex', justifyContent: 'space-between', fontSize: 14,
+                  marginTop: 10, paddingTop: 10, borderTop: `1px solid ${theme.colors.border}`,
+                  fontWeight: 700, color: theme.colors.text,
+                }}>
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                    <DollarSign size={13} />
+                    Order Total
+                    {order.pricingOverride && (
+                      <span style={{ fontSize: 10, fontWeight: 600, background: '#FEF3C7', color: '#B45309', padding: '1px 6px', borderRadius: 6, marginLeft: 6 }}>
+                        MANUAL
+                      </span>
+                    )}
+                  </span>
+                  <span>{fmtCurrency(order.orderTotal)}</span>
+                </div>
+              )}
+              {order.pricingNotes && (
+                <div style={{ fontSize: 11, color: theme.colors.textMuted, marginTop: 8, fontStyle: 'italic' }}>
+                  {order.pricingNotes}
+                </div>
+              )}
+            </Section>
+          )}
+
+          {/* Review — only when there's an active review workflow on this order */}
+          {order.reviewStatus && order.reviewStatus !== 'not_required' && (
+            <Section title="Review">
+              {order.createdByRole && (
+                <Field label="Created By" value={order.createdByRole} />
+              )}
+              {order.reviewNotes && (
+                <Field label="Review Notes" value={order.reviewNotes} />
+              )}
+              {order.reviewedAt && (
+                <Field label="Reviewed At" value={new Date(order.reviewedAt).toLocaleString()} />
+              )}
+              {order.pushedToDtAt && (
+                <Field label="Pushed to DT" value={new Date(order.pushedToDtAt).toLocaleString()} />
+              )}
+            </Section>
+          )}
 
           {/* Details / Notes */}
           {(order.details || order.latestNotePreview) && (

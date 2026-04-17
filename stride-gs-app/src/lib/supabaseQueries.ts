@@ -1299,6 +1299,24 @@ export interface SupabaseDtOrderRow {
   last_synced_at: string | null;
   created_at: string;
   updated_at: string;
+  // Pricing (added session 68 — delivery_pricing_schema migration)
+  base_delivery_fee: number | null;
+  extra_items_count: number | null;
+  extra_items_fee: number | null;
+  accessorials_json: Array<{ code: string; quantity: number; rate: number; subtotal: number }> | null;
+  accessorials_total: number | null;
+  fabric_protection_total: number | null;
+  order_total: number | null;
+  pricing_override: boolean | null;
+  pricing_notes: string | null;
+  // Review workflow
+  review_status: string | null;
+  review_notes: string | null;
+  reviewed_by: string | null;
+  reviewed_at: string | null;
+  created_by_user: string | null;
+  created_by_role: string | null;
+  pushed_to_dt_at: string | null;
 }
 
 export interface DtOrderItemForUI {
@@ -1342,6 +1360,55 @@ export interface DtOrderForUI {
   lastSyncedAt: string;
   clientName: string;
   items: DtOrderItemForUI[];
+  // Pricing
+  baseDeliveryFee: number | null;
+  extraItemsCount: number;
+  extraItemsFee: number;
+  accessorials: Array<{ code: string; quantity: number; rate: number; subtotal: number }>;
+  accessorialsTotal: number;
+  fabricProtectionTotal: number;
+  orderTotal: number | null;
+  pricingOverride: boolean;
+  pricingNotes: string;
+  // Review workflow
+  reviewStatus: string;
+  reviewNotes: string;
+  reviewedBy: string | null;
+  reviewedAt: string | null;
+  createdByRole: string;
+  pushedToDtAt: string | null;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Delivery pricing (session 68 — PLT_PRICE_LISTS_v2 seeded into Supabase)
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface DeliveryZone {
+  zipCode: string;
+  city: string;
+  zone: string;
+  baseRate: number | null;
+  pickupRate: number | null;
+  serviceDays: string;
+}
+
+export interface DeliveryAccessorial {
+  code: string;
+  name: string;
+  rate: number | null;
+  rateUnit: 'flat' | 'per_mile' | 'per_15min' | 'plus_base' | 'per_item';
+  description: string;
+  displayOrder: number;
+  active: boolean;
+}
+
+export interface FabricProtectionRate {
+  itemType: string;
+  rate: number;
+  rateUnit: 'flat' | 'per_sqft' | 'each';
+  minCharge: number | null;
+  displayOrder: number;
+  active: boolean;
 }
 
 export async function fetchDtStatusesFromSupabase(): Promise<SupabaseDtStatusRow[]> {
@@ -1414,8 +1481,137 @@ export async function fetchDtOrdersFromSupabase(
           unitPrice: item.unit_price != null ? Number(item.unit_price) : null,
           notes: String((item.extras as Record<string, unknown>)?.notes ?? ''),
         })),
+        // Pricing
+        baseDeliveryFee: row.base_delivery_fee != null ? Number(row.base_delivery_fee) : null,
+        extraItemsCount: row.extra_items_count ?? 0,
+        extraItemsFee: row.extra_items_fee != null ? Number(row.extra_items_fee) : 0,
+        accessorials: Array.isArray(row.accessorials_json) ? row.accessorials_json : [],
+        accessorialsTotal: row.accessorials_total != null ? Number(row.accessorials_total) : 0,
+        fabricProtectionTotal: row.fabric_protection_total != null ? Number(row.fabric_protection_total) : 0,
+        orderTotal: row.order_total != null ? Number(row.order_total) : null,
+        pricingOverride: row.pricing_override ?? false,
+        pricingNotes: row.pricing_notes ?? '',
+        // Review workflow
+        reviewStatus: row.review_status ?? 'not_required',
+        reviewNotes: row.review_notes ?? '',
+        reviewedBy: row.reviewed_by,
+        reviewedAt: row.reviewed_at,
+        createdByRole: row.created_by_role ?? '',
+        pushedToDtAt: row.pushed_to_dt_at,
       };
     });
+  } catch {
+    return null;
+  }
+}
+
+// ─── Delivery pricing fetchers (session 68) ───────────────────────────────
+
+/** Look up a single ZIP → zone/rate/service days. Returns null if not in the table. */
+export async function fetchDeliveryZone(zip: string): Promise<DeliveryZone | null> {
+  try {
+    const { data, error } = await supabase
+      .from('delivery_zones')
+      .select('*')
+      .eq('zip_code', zip.trim())
+      .maybeSingle();
+    if (error || !data) return null;
+    return {
+      zipCode: data.zip_code,
+      city: data.city,
+      zone: data.zone,
+      baseRate: data.base_rate != null ? Number(data.base_rate) : null,
+      pickupRate: data.pickup_rate != null ? Number(data.pickup_rate) : null,
+      serviceDays: data.service_days ?? '',
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** Fetch all zones for the admin rate editor. */
+export async function fetchAllDeliveryZones(): Promise<DeliveryZone[] | null> {
+  try {
+    const { data, error } = await supabase
+      .from('delivery_zones')
+      .select('*')
+      .order('zip_code');
+    if (error || !data) return null;
+    return data.map((r: {
+      zip_code: string;
+      city: string;
+      zone: string;
+      base_rate: number | null;
+      pickup_rate: number | null;
+      service_days: string | null;
+    }) => ({
+      zipCode: r.zip_code,
+      city: r.city,
+      zone: r.zone,
+      baseRate: r.base_rate != null ? Number(r.base_rate) : null,
+      pickupRate: r.pickup_rate != null ? Number(r.pickup_rate) : null,
+      serviceDays: r.service_days ?? '',
+    }));
+  } catch {
+    return null;
+  }
+}
+
+/** Fetch the active accessorial rate card. */
+export async function fetchDeliveryAccessorials(): Promise<DeliveryAccessorial[] | null> {
+  try {
+    const { data, error } = await supabase
+      .from('delivery_accessorials')
+      .select('*')
+      .eq('active', true)
+      .order('display_order');
+    if (error || !data) return null;
+    return data.map((r: {
+      code: string;
+      name: string;
+      rate: number | null;
+      rate_unit: DeliveryAccessorial['rateUnit'];
+      description: string | null;
+      display_order: number;
+      active: boolean;
+    }) => ({
+      code: r.code,
+      name: r.name,
+      rate: r.rate != null ? Number(r.rate) : null,
+      rateUnit: r.rate_unit,
+      description: r.description ?? '',
+      displayOrder: r.display_order,
+      active: r.active,
+    }));
+  } catch {
+    return null;
+  }
+}
+
+/** Fetch the active fabric protection rate card. */
+export async function fetchFabricProtectionRates(): Promise<FabricProtectionRate[] | null> {
+  try {
+    const { data, error } = await supabase
+      .from('fabric_protection_rates')
+      .select('*')
+      .eq('active', true)
+      .order('display_order');
+    if (error || !data) return null;
+    return data.map((r: {
+      item_type: string;
+      rate: number;
+      rate_unit: FabricProtectionRate['rateUnit'];
+      min_charge: number | null;
+      display_order: number;
+      active: boolean;
+    }) => ({
+      itemType: r.item_type,
+      rate: Number(r.rate),
+      rateUnit: r.rate_unit,
+      minCharge: r.min_charge != null ? Number(r.min_charge) : null,
+      displayOrder: r.display_order,
+      active: r.active,
+    }));
   } catch {
     return null;
   }
