@@ -1,5 +1,12 @@
 /* ===================================================
-   StrideAPI.gs — v38.67.0 — 2026-04-16 PST — Self-healing Supabase sync + loud failure logging
+   StrideAPI.gs — v38.67.1 — 2026-04-16 PST — Expose installer/retry from Run dropdown
+   v38.67.1: FIX — `installSyncRetryTrigger_` had a trailing underscore,
+             which is Apps Script's convention for PRIVATE functions (hidden
+             from the Run dropdown). User couldn't find it to execute the
+             one-time setup. Renamed to `installSyncRetryTrigger` (public).
+             Also added `retryFailedSyncsNow` wrapper so the retry can be
+             fired manually from the editor without waiting for the cron.
+   v38.67.0 — 2026-04-16 PST — Self-healing Supabase sync + loud failure logging
    v38.67.0: FEAT — End-to-end fix for the "batch cancel appears to work then
              reverts" class of bugs. Three layered changes:
              (1) `supabaseUpsert_` now returns `{ok, code, error?}` instead
@@ -1095,9 +1102,12 @@ function supabaseUpsert_(table, data) {
  * with updated_at bumped (acts as a retry timestamp so you can see whether
  * retries are even running).
  *
- * Runs every 10 minutes via a time-based trigger. To install:
- *   Apps Script editor → Run installSyncRetryTrigger_
- * (or just run it once manually via `gas run installSyncRetryTrigger_`).
+ * Runs every 10 minutes via a time-based trigger. To install, run
+ * `installSyncRetryTrigger` from the Apps Script function dropdown ONCE.
+ *
+ * v38.67.1 — also exposes `retryFailedSyncsNow` (no underscore) so you can
+ * manually fire the retry from the Apps Script editor without waiting for
+ * the cron. Useful right after fixing a systemic issue to flush the queue.
  *
  * Safe to re-run — existing trigger is removed before new one is created.
  *
@@ -1198,19 +1208,39 @@ function retryFailedSyncs_() {
 }
 
 /**
+ * v38.67.1 — manual-fire wrapper for retryFailedSyncs_.
+ * Pickable from the Apps Script function dropdown (no trailing underscore).
+ * Useful for flushing the failure queue on demand without waiting for the cron.
+ */
+function retryFailedSyncsNow() {
+  retryFailedSyncs_();
+}
+
+/**
  * One-time installer for the 10-minute retryFailedSyncs_ trigger.
- * Run manually from Apps Script editor: `installSyncRetryTrigger_`.
+ *
+ * Run manually from Apps Script editor: pick `installSyncRetryTrigger` from
+ * the function dropdown → click Run.
+ *
+ * v38.67.1 — renamed from `installSyncRetryTrigger_` (trailing underscore
+ * meant private — the function was hidden from the Apps Script Run dropdown).
+ * Same behavior; callable name just changed.
+ *
  * Idempotent — removes any existing retryFailedSyncs_ triggers first.
  */
-function installSyncRetryTrigger_() {
+function installSyncRetryTrigger() {
   var existing = ScriptApp.getProjectTriggers();
+  var removed = 0;
   for (var i = 0; i < existing.length; i++) {
     if (existing[i].getHandlerFunction() === "retryFailedSyncs_") {
       ScriptApp.deleteTrigger(existing[i]);
+      removed++;
     }
   }
   ScriptApp.newTrigger("retryFailedSyncs_").timeBased().everyMinutes(10).create();
-  Logger.log("installSyncRetryTrigger_: retryFailedSyncs_ scheduled every 10 minutes");
+  var msg = "installSyncRetryTrigger: removed " + removed + " old trigger(s), scheduled retryFailedSyncs_ every 10 minutes";
+  Logger.log(msg);
+  return msg;
 }
 
 function api_logSyncFailure_(tenantId, entityType, entityId, actionType, errorMessage) {
