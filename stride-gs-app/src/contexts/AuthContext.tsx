@@ -196,7 +196,29 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const email = session.user.email;
       const fullName = session.user.user_metadata?.full_name as string | undefined;
 
-      // Phase 2: verifying account via API
+      // Session 71 fix: If we already have a cached auth user for the SAME email,
+      // skip the GAS re-verification. This prevents "Access Denied" when opening
+      // a second tab and GAS is slow/down. Only call GAS on first login, user
+      // change, or recovery flow.
+      try {
+        const cachedRaw = localStorage.getItem(AUTH_CACHE_KEY);
+        if (cachedRaw && loginSource !== 'recovery') {
+          const cached = JSON.parse(cachedRaw) as AuthUser;
+          if (cached?.email?.toLowerCase() === email.toLowerCase() && cached?.role) {
+            // Same user, valid cache — use it directly, no GAS roundtrip
+            setCallerEmail(cached.email);
+            setLoginPhase('success');
+            setAuthState({ status: 'authenticated', user: cached });
+            // Fire-and-forget: sync role metadata (non-blocking)
+            supabase.auth.updateUser({
+              data: { role: cached.role, clientSheetId: cached.clientSheetId ?? '' },
+            }).catch(() => {});
+            return;
+          }
+        }
+      } catch { /* corrupt cache — fall through to full verification */ }
+
+      // Phase 2: verifying account via API (first login or user change)
       setLoginPhase('verifying');
       setLoginPhaseError(null);
 

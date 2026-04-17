@@ -3943,7 +3943,18 @@ function doPost(e) {
         return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
           var r = handleBatchCreateTasks_(effectiveId, payload);
           invalidateClientCache_(effectiveId);
-          api_fullClientSync_(effectiveId, ["task"]);
+          // v38.68.2: Sync only the newly created tasks, not the full sheet.
+          // api_fullClientSync_ was reading ALL task rows and upserting them,
+          // blocking the response for 10-20s on large clients. Instead, sync
+          // just the new task IDs individually (best-effort, non-fatal).
+          try {
+            var rData = JSON.parse(r.getContent());
+            if (rData.taskIds && rData.taskIds.length) {
+              for (var sti = 0; sti < rData.taskIds.length; sti++) {
+                try { resyncEntityToSupabase_("task", effectiveId, rData.taskIds[sti]); } catch (_) {}
+              }
+            }
+          } catch (_) {}
           return r;
         });
 
