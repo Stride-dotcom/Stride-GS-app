@@ -1,5 +1,13 @@
 /* ===================================================
-   StrideAPI.gs — v38.68.1 — 2026-04-17 12:00 AM PST — Fix taskNotes overlay bug + Location redirect
+   StrideAPI.gs — v38.68.2 — 2026-04-17 12:30 AM PST — Fix auto-inspection task creation
+   v38.68.2: HOTFIX — handleCompleteShipment_ now reads AUTO_INSPECTION from client
+             Settings as server-side authority. Previously relied solely on React's
+             per-item needsInspection flag, which had a race condition (items entered
+             before apiClients loaded → all flags false → zero INSP tasks created).
+             Now: if AUTO_INSPECTION=TRUE in Settings, ALL items get INSP tasks
+             regardless of React flags. React flag still works as manual override
+             for clients without auto-inspection enabled.
+   v38.68.1 — 2026-04-17 12:00 AM PST — Fix taskNotes overlay bug + Location redirect
    v38.68.0: FEAT — Complete "Inventory as single source of truth" overlay.
              sbInventoryRow_ now writes 5 new columns to Supabase (shipment_photos_url,
              inspection_photos_url, repair_photos_url, invoice_url, transfer_date).
@@ -8756,6 +8764,11 @@ function handleCompleteShipment_(clientSheetId, payload) {
   var clientName = String(settings["CLIENT_NAME"] || "").trim();
   var billingEnabled = toBool_(settings["ENABLE_RECEIVING_BILLING"]);
   var skipReceivingBilling = payload.skipReceivingBilling === true;
+  // v38.68.1 FIX: Read AUTO_INSPECTION from client settings as server-side authority.
+  // React sends per-item needsInspection flags, but they can be stale due to a race
+  // condition (items entered before apiClients loads → all flags false). The server-side
+  // setting overrides: if true, ALL items get inspection tasks regardless of React flags.
+  var autoInspectionSetting = toBool_(settings["AUTO_INSPECTION"]);
 
   if (!rpcUrl) return errorResponse_("Client missing MASTER_RPC_URL setting", "CONFIG_ERROR");
   if (!rpcToken) return errorResponse_("Client missing MASTER_RPC_TOKEN setting", "CONFIG_ERROR");
@@ -8917,7 +8930,7 @@ function handleCompleteShipment_(clientSheetId, payload) {
           var tItemId = String(tItem.itemId || "").trim();
           if (!tItemId) continue;
 
-          if (tItem.needsInspection) {
+          if (autoInspectionSetting || tItem.needsInspection) {
             var inspN = api_nextTaskCounter_(taskSheet, "INSP", tItemId, pendingTaskIds);
             var inspTaskId = "INSP-" + tItemId + "-" + inspN;
             pendingTaskIds.push(inspTaskId);
