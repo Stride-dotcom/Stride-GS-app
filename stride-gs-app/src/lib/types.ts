@@ -111,6 +111,7 @@ export interface Repair {
   clientId: string;
   clientSheetId?: string;
   clientName: string;
+  vendor?: string;
   description: string;
   status: RepairStatus;
   quoteAmount?: number;

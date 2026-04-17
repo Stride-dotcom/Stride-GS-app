@@ -266,16 +266,18 @@ interface InvFieldMapEntry {
 async function _fetchInvFieldMap(clientSheetId?: string | string[]): Promise<Record<string, InvFieldMapEntry>> {
   const map: Record<string, InvFieldMapEntry> = {};
   try {
-    let q = supabase.from('inventory').select('*');
-    if (clientSheetId) {
-      if (Array.isArray(clientSheetId)) {
-        if (clientSheetId.length > 0) q = q.in('tenant_id', clientSheetId);
-      } else {
-        q = q.eq('tenant_id', clientSheetId);
+    // Session 71: use paginateAll to avoid 1000-row cap (same fix as fetchInventoryFromSupabase)
+    const data = await paginateAll<SupabaseInventoryRow>(() => {
+      let q = supabase.from('inventory').select('*');
+      if (clientSheetId) {
+        if (Array.isArray(clientSheetId)) {
+          if (clientSheetId.length > 0) q = q.in('tenant_id', clientSheetId);
+        } else {
+          q = q.eq('tenant_id', clientSheetId);
+        }
       }
-    }
-    q = q.range(0, 49999);
-    const { data } = await q;
+      return q as unknown as { range: (from: number, to: number) => Promise<{ data: SupabaseInventoryRow[] | null; error: unknown }> };
+    });
     if (data) {
       for (const row of data as SupabaseInventoryRow[]) {
         if (row.item_id) {

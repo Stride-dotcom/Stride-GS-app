@@ -9953,6 +9953,28 @@ function api_sendTemplateEmail_(settings, templateKey, toEmail, fallbackSubject,
       eBody = eBody.split(tk).join(val);
     }
 
+    // v38.68.3: Auto-inject "View in Stride Hub" CTA button before </body>.
+    // Uses the first available entity deep link, or {{APP_DEEP_LINK}} if set.
+    var ctaUrl = String(
+      tokens["{{APP_DEEP_LINK}}"] ||
+      tokens["{{SHIPMENT_DEEP_LINK}}"] ||
+      tokens["{{TASK_DEEP_LINK}}"] ||
+      tokens["{{REPAIR_DEEP_LINK}}"] ||
+      tokens["{{WC_DEEP_LINK}}"] ||
+      tokens["{{ITEM_DEEP_LINK}}"] || ""
+    ).trim();
+    if (ctaUrl && ctaUrl.indexOf("http") === 0) {
+      var ctaBtn = '<div style="text-align:center;margin:20px 0 8px;">' +
+        '<a href="' + ctaUrl + '" style="display:inline-block;background:#E85D2D;color:#ffffff;' +
+        'padding:11px 28px;border-radius:6px;text-decoration:none;font-weight:700;font-size:14px;' +
+        'font-family:Arial,Helvetica,sans-serif;letter-spacing:0.01em;">View in Stride Hub &#8594;</a></div>';
+      if (eBody.indexOf('</body>') !== -1) {
+        eBody = eBody.replace('</body>', ctaBtn + '</body>');
+      } else {
+        eBody += ctaBtn;
+      }
+    }
+
     // Send
     var mailOpts = { htmlBody: eBody, from: "whse@stridenw.com" };
     if (pdfBlob) mailOpts.attachments = [pdfBlob];

@@ -482,7 +482,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}><Wrench size={14} color={theme.colors.orange} /><span style={{ fontSize: 12, fontWeight: 600 }}>Repair Notes</span></div>
             {isActive && !completed ? (
               <>
-                <textarea value={repairNotes} onChange={e => setRepairNotes(e.target.value)} rows={3} placeholder="Billing / warehouse instructions (e.g. 'Bill to Corbin @ Lawson Fenning')…" style={{ ...input, resize: 'vertical' }} />
+                <textarea value={repairNotes} onChange={e => setRepairNotes(e.target.value)} rows={3} placeholder="Notes about the repair job or outcome…" style={{ ...input, resize: 'vertical' }} />
                 {/* v38.61.1 — inline Save button for pre-Start notes. Completing
                     the repair also persists notes via completeRepair, so we only
                     surface this when there are unsaved edits. */}
