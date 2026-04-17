@@ -1648,6 +1648,9 @@ export function Settings() {
         setClientActionLoading(false);
         if (res.data?.success) {
           setUpdateResult(res.data);
+          // Force bypass GAS 600s cache — otherwise refetch returns stale data
+          // and overwrites the optimistic patch, making changes appear to revert.
+          setNextFetchNoCache();
           refetchClients();
           // Session 69 — broadcast so every mounted useClients (dropdowns on other pages) refetches.
           entityEvents.emit('client', data.spreadsheetId);
