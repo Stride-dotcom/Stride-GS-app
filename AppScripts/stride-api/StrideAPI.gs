@@ -5843,16 +5843,33 @@ function handleBatchUpdateItemLocations_(payload, callerEmail) {
 
   var results = { updated: [], notFound: [], errors: [] };
 
-  // Step 1: Resolve item_id → tenant_id via item_id_ledger (single Supabase call)
+  // Step 1: Resolve item_id → tenant_id.
+  // PRIMARY PATH: React sends a pre-resolved tenantMap from its Supabase JS
+  // client lookup (which works reliably). Use it directly — no GAS→Supabase
+  // REST call needed.
+  // FALLBACK: If tenantMap is missing/empty (e.g., called from a non-React
+  // client), query item_id_ledger and inventory tables via REST.
   var tenantByItem = {}; // itemId → tenantId
+  var preResolved = payload.tenantMap;
+  if (preResolved && typeof preResolved === "object") {
+    for (var k in preResolved) {
+      if (preResolved.hasOwnProperty(k) && preResolved[k]) {
+        tenantByItem[String(k).trim().toUpperCase()] = String(preResolved[k]).trim();
+      }
+    }
+    Logger.log("[batchMove] using " + Object.keys(tenantByItem).length + " pre-resolved tenant mappings from React");
+  }
+
+  // Only query Supabase if we have items not yet resolved
+  var unresolvedIds = normalized.filter(function(id) { return !tenantByItem[id]; });
+  if (unresolvedIds.length > 0) {
   try {
     var supabaseUrl = prop_("SUPABASE_URL");
     var serviceKey = prop_("SUPABASE_SERVICE_KEY");
     if (supabaseUrl && serviceKey) {
-      // Chunk large batches to keep URL under ~6KB
       var CHUNK = 200;
-      for (var c = 0; c < normalized.length; c += CHUNK) {
-        var chunk = normalized.slice(c, c + CHUNK);
+      for (var c = 0; c < unresolvedIds.length; c += CHUNK) {
+        var chunk = unresolvedIds.slice(c, c + CHUNK);
         // Encode each value individually — NOT the surrounding quotes.
         // PostgREST in.() filter for text columns doesn't need JSON quotes;
         // wrapping in quotes + encodeURIComponent was double-encoding them
@@ -5881,7 +5898,45 @@ function handleBatchUpdateItemLocations_(payload, callerEmail) {
     Logger.log("ledger lookup threw: " + e);
   }
 
-  Logger.log("[batchMove] tenantByItem keys: " + Object.keys(tenantByItem).join(",") + " | normalized: " + normalized.join(","));
+  Logger.log("[batchMove] tenantByItem keys after ledger: " + Object.keys(tenantByItem).join(",") + " | normalized: " + normalized.join(","));
+
+  // Step 1b: Fallback — any items NOT found in item_id_ledger, try the
+  // inventory mirror table instead. The inventory table has tenant_id for
+  // every synced item. This handles items that were imported before the
+  // ledger existed (session 63), or items whose ledger row wasn't created
+  // due to a degraded-mode write.
+  var missingFromLedger = normalized.filter(function(id) { return !tenantByItem[id]; });
+  if (missingFromLedger.length > 0) {
+    try {
+      var supabaseUrl2 = prop_("SUPABASE_URL");
+      var serviceKey2 = prop_("SUPABASE_SERVICE_KEY");
+      if (supabaseUrl2 && serviceKey2) {
+        for (var c2 = 0; c2 < missingFromLedger.length; c2 += CHUNK) {
+          var chunk2 = missingFromLedger.slice(c2, c2 + CHUNK);
+          var inList2 = chunk2.map(encodeURIComponent).join(",");
+          var url2 = supabaseUrl2 + "/rest/v1/inventory?item_id=in.(" + inList2 + ")&status=eq.Active&select=item_id,tenant_id&limit=1000";
+          Logger.log("[batchMove] inventory fallback URL: " + url2);
+          var resp2 = UrlFetchApp.fetch(url2, {
+            headers: { "apikey": serviceKey2, "Authorization": "Bearer " + serviceKey2 },
+            muteHttpExceptions: true
+          });
+          Logger.log("[batchMove] inventory fallback resp: HTTP " + resp2.getResponseCode() + " rows=" + resp2.getContentText().substring(0, 200));
+          if (resp2.getResponseCode() === 200) {
+            var rows2 = JSON.parse(resp2.getContentText());
+            for (var r2 = 0; r2 < rows2.length; r2++) {
+              if (!tenantByItem[rows2[r2].item_id]) {
+                tenantByItem[rows2[r2].item_id] = rows2[r2].tenant_id;
+              }
+            }
+          }
+        }
+      }
+    } catch (e2) {
+      Logger.log("[batchMove] inventory fallback threw: " + e2);
+    }
+    Logger.log("[batchMove] tenantByItem keys after inventory fallback: " + Object.keys(tenantByItem).join(","));
+  }
+  } // end if (unresolvedIds.length > 0)
 
   // Step 2: Group by tenant
   var byTenant = {}; // tenantId → [itemId]

@@ -777,9 +777,16 @@ export function postDeleteLocation(code: string) {
 export function postBatchUpdateItemLocations(
   itemIds: string[],
   location: string,
-  notes?: string
+  notes?: string,
+  /** Pre-resolved item→tenant mapping from React Supabase lookups. Lets the
+   *  GAS handler skip its own Supabase REST call (which has URL encoding
+   *  issues with the service key). */
+  tenantMap?: Record<string, string>
 ) {
-  return apiPost<BatchMoveResult>('batchUpdateItemLocations', { itemIds, location, notes: notes ?? '' });
+  return apiPost<BatchMoveResult>('batchUpdateItemLocations', {
+    itemIds, location, notes: notes ?? '',
+    ...(tenantMap && Object.keys(tenantMap).length > 0 ? { tenantMap } : {}),
+  });
 }
 
 // Batch 2

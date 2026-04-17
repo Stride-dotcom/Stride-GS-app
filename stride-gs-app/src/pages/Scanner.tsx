@@ -339,8 +339,17 @@ export function Scanner() {
     if (!canSubmit) return;
     setBusy(true);
     setLastResult(null);
-    const itemIds = queue.filter(q => q.status === 'found').map(q => q.itemId);
-    const res = await postBatchUpdateItemLocations(itemIds, targetLocation, moveNotes.trim());
+    const foundItems = queue.filter(q => q.status === 'found');
+    const itemIds = foundItems.map(q => q.itemId);
+    // Pass pre-resolved tenant mappings so GAS doesn't need to query Supabase
+    // for item→tenant resolution (which was failing due to REST URL encoding
+    // issues with the service key). React already resolved these successfully
+    // via the Supabase JS client during queue verification.
+    const tenantMap: Record<string, string> = {};
+    for (const q of foundItems) {
+      if (q.resolved?.tenantId) tenantMap[q.itemId] = q.resolved.tenantId;
+    }
+    const res = await postBatchUpdateItemLocations(itemIds, targetLocation, moveNotes.trim(), tenantMap);
     setBusy(false);
     if (res.ok && res.data) {
       setLastResult(res.data);
