@@ -60,9 +60,12 @@ export function useClients(autoFetch = true, includeInactive = false): UseClient
   const fetchFn = useCallback(
     async (signal?: AbortSignal) => {
       // 1. Supabase-first (~50 ms). Returns null if mirror is empty or unreachable.
+      // Sanity floor: Supabase must have ≥ 5 clients before we trust it over GAS.
+      // A partially-seeded table (e.g. only 2 write-through rows) would otherwise
+      // silently truncate the dropdown. GAS is authoritative when the count is low.
       try {
         const sb = await fetchClientsFromSupabase(includeInactive);
-        if (sb && sb.clients.length > 0) {
+        if (sb && sb.clients.length >= 5) {
           return { data: sb, ok: true as const, error: null };
         }
       } catch {
