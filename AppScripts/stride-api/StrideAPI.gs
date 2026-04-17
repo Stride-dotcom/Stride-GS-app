@@ -6208,10 +6208,10 @@ function handleGetTasks_(clientSheetId) {
         shipFolderMap = api_buildShipmentFolderMap_(ss);
       }
 
-      // v38.5.0: Build itemId → {ship, vendor, description} fallback maps from
-      // the Inventory sheet. Legacy/early tasks created before the React
-      // CreateTaskModal passed these fields have blanks on the Tasks row;
-      // this backfills the API response at read time.
+      // Session 69 Phase 4: Inventory is the single source of truth for item-
+      // level fields. OVERRIDE (not just blank-backfill) vendor, description,
+      // shipment#, location, sidemark from the Inventory tab so every page
+      // shows live data after Scanner moves, Inventory edits, etc.
       var invFields = api_buildInvFieldsByItemMap_(ss);
 
       for (var r = 0; r < rows.length; r++) {
@@ -6219,13 +6219,19 @@ function handleGetTasks_(clientSheetId) {
         var taskId = String(row["Task ID"] || "").trim();
         if (!taskId) continue;
         var taskItemId = String(row["Item ID"] || "").trim();
+        // Start with entity values, then override with inventory
         var shipNo = String(row["Shipment #"] || "").trim();
         var vendor = String(row["Vendor"] || "").trim();
         var description = String(row["Description"] || "").trim();
+        var location = String(row["Location"] || "").trim();
+        var sidemark = String(row["Sidemark"] || "").trim();
         if (taskItemId) {
-          if (!shipNo && invFields.ship[taskItemId]) shipNo = invFields.ship[taskItemId];
-          if (!vendor && invFields.vendor[taskItemId]) vendor = invFields.vendor[taskItemId];
-          if (!description && invFields.description[taskItemId]) description = invFields.description[taskItemId];
+          // OVERRIDE from inventory (authoritative source for item fields)
+          if (invFields.ship[taskItemId]) shipNo = invFields.ship[taskItemId];
+          if (invFields.vendor[taskItemId]) vendor = invFields.vendor[taskItemId];
+          if (invFields.description[taskItemId]) description = invFields.description[taskItemId];
+          if (invFields.location[taskItemId]) location = invFields.location[taskItemId];
+          if (invFields.sidemark[taskItemId]) sidemark = invFields.sidemark[taskItemId];
         }
 
         allTasks.push({
@@ -6237,8 +6243,8 @@ function handleGetTasks_(clientSheetId) {
           itemId: taskItemId,
           vendor: vendor,
           description: description,
-          location: String(row["Location"] || "").trim(),
-          sidemark: String(row["Sidemark"] || "").trim(),
+          location: location,
+          sidemark: sidemark,
           shipmentNumber: shipNo,
           created: formatDate_(row["Created"]),
           itemNotes: String(row["Item Notes"] || "").trim(),
@@ -6288,16 +6294,20 @@ function handleGetTaskById_(clientSheetId, params) {
   }
   if (!match) return errorResponse_("Task not found: " + targetTaskId, "NOT_FOUND");
 
-  // Backfill from Inventory (vendor, description, shipment)
+  // Session 69 Phase 4: Override item fields from Inventory (authoritative)
   var invFields = api_buildInvFieldsByItemMap_(ss);
   var taskItemId = String(match["Item ID"] || "").trim();
   var shipNo = String(match["Shipment #"] || "").trim();
   var vendor = String(match["Vendor"] || "").trim();
   var description = String(match["Description"] || "").trim();
+  var location = String(match["Location"] || "").trim();
+  var sidemark = String(match["Sidemark"] || "").trim();
   if (taskItemId) {
-    if (!shipNo && invFields.ship[taskItemId]) shipNo = invFields.ship[taskItemId];
-    if (!vendor && invFields.vendor[taskItemId]) vendor = invFields.vendor[taskItemId];
-    if (!description && invFields.description[taskItemId]) description = invFields.description[taskItemId];
+    if (invFields.ship[taskItemId]) shipNo = invFields.ship[taskItemId];
+    if (invFields.vendor[taskItemId]) vendor = invFields.vendor[taskItemId];
+    if (invFields.description[taskItemId]) description = invFields.description[taskItemId];
+    if (invFields.location[taskItemId]) location = invFields.location[taskItemId];
+    if (invFields.sidemark[taskItemId]) sidemark = invFields.sidemark[taskItemId];
   }
 
   // Folder URLs
@@ -6325,8 +6335,8 @@ function handleGetTaskById_(clientSheetId, params) {
     itemId: taskItemId,
     vendor: vendor,
     description: description,
-    location: String(match["Location"] || "").trim(),
-    sidemark: String(match["Sidemark"] || "").trim(),
+    location: location,
+    sidemark: sidemark,
     shipmentNumber: shipNo,
     created: formatDate_(match["Created"]),
     itemNotes: String(match["Item Notes"] || "").trim(),
@@ -6598,26 +6608,9 @@ function handleGetRepairs_(clientSheetId) {
         if (taskSheet) taskFolderUrls = api_readIdFolderUrls_(taskSheet, "Task ID");
       }
 
-      // Build item→(shipment, vendor, description) maps for cross-referencing
-      // shipment folders AND for falling back to Inventory fields when the
-      // Repairs row has them blank (legacy/imported data).
-      var itemToShipNo = {};
-      var itemToVendor = {};
-      var itemToDesc = {};
-      var invSheet = ss.getSheetByName("Inventory");
-      if (invSheet) {
-        var invRows = sheetToObjects_(invSheet);
-        for (var iv = 0; iv < invRows.length; iv++) {
-          var iid = String(invRows[iv]["Item ID"] || "").trim();
-          if (!iid) continue;
-          var isn = String(invRows[iv]["Shipment #"] || "").trim();
-          var ivend = String(invRows[iv]["Vendor"] || "").trim();
-          var idesc = String(invRows[iv]["Description"] || "").trim();
-          if (isn && !itemToShipNo[iid]) itemToShipNo[iid] = isn;
-          if (ivend && !itemToVendor[iid]) itemToVendor[iid] = ivend;
-          if (idesc && !itemToDesc[iid]) itemToDesc[iid] = idesc;
-        }
-      }
+      // Session 69 Phase 4: Use shared inventory field map (authoritative
+      // source for item-level fields). OVERRIDE, not just blank-backfill.
+      var invFields = api_buildInvFieldsByItemMap_(ss);
 
       for (var r = 0; r < rows.length; r++) {
         var row = rows[r];
@@ -6625,12 +6618,18 @@ function handleGetRepairs_(clientSheetId) {
         if (!repairId) continue;
         var repairItemId = String(row["Item ID"] || "").trim();
         var sourceTaskId = String(row["Source Task ID"] || "").trim();
-        var repShipNo = String(row["Shipment #"] || "").trim() || itemToShipNo[repairItemId] || "";
-
+        var repShipNo = String(row["Shipment #"] || "").trim();
         var rowVendor = String(row["Vendor"] || "").trim();
         var rowDesc = String(row["Description"] || "").trim();
-        if (!rowVendor && repairItemId && itemToVendor[repairItemId]) rowVendor = itemToVendor[repairItemId];
-        if (!rowDesc && repairItemId && itemToDesc[repairItemId]) rowDesc = itemToDesc[repairItemId];
+        var rowLocation = String(row["Location"] || "").trim();
+        var rowSidemark = String(row["Sidemark"] || "").trim();
+        if (repairItemId) {
+          if (invFields.ship[repairItemId]) repShipNo = invFields.ship[repairItemId];
+          if (invFields.vendor[repairItemId]) rowVendor = invFields.vendor[repairItemId];
+          if (invFields.description[repairItemId]) rowDesc = invFields.description[repairItemId];
+          if (invFields.location[repairItemId]) rowLocation = invFields.location[repairItemId];
+          if (invFields.sidemark[repairItemId]) rowSidemark = invFields.sidemark[repairItemId];
+        }
         allRepairs.push({
           repairId: repairId,
           clientName: client.name,
@@ -6640,8 +6639,8 @@ function handleGetRepairs_(clientSheetId) {
           description: rowDesc,
           itemClass: String(row["Class"] || "").trim(),
           vendor: rowVendor,
-          location: String(row["Location"] || "").trim(),
-          sidemark: String(row["Sidemark"] || "").trim(),
+          location: rowLocation,
+          sidemark: rowSidemark,
           taskNotes: String(row["Task Notes"] || "").trim(),
           createdBy: String(row["Created By"] || "").trim(),
           createdDate: formatDate_(row["Created Date"]),
@@ -6709,18 +6708,9 @@ function handleGetWillCalls_(clientSheetId) {
       var wciSheet = ss.getSheetByName("WC_Items");
       var wciRows = wciSheet ? sheetToObjects_(wciSheet) : [];
 
-      // Build inventory lookup for filling blank WC_Items fields (older WCs lack vendor/location)
-      var invLookup = {};
-      try {
-        var invSh = ss.getSheetByName("Inventory");
-        if (invSh && invSh.getLastRow() >= 2) {
-          var invObjs = sheetToObjects_(invSh);
-          for (var iv = 0; iv < invObjs.length; iv++) {
-            var iid = String(invObjs[iv]["Item ID"] || "").trim();
-            if (iid) invLookup[iid] = invObjs[iv];
-          }
-        }
-      } catch (_) {}
+      // Session 69 Phase 4: Use shared inventory field map for OVERRIDE
+      // (not blank-backfill). Inventory is authoritative for item-level fields.
+      var invFields = api_buildInvFieldsByItemMap_(ss);
 
       var itemsByWC = {};
       for (var i = 0; i < wciRows.length; i++) {
@@ -6732,12 +6722,15 @@ function handleGetWillCalls_(clientSheetId) {
         var wciVendor = String(wci["Vendor"] || "").trim();
         var wciLocation = String(wci["Location"] || "").trim();
         var wciDesc = String(wci["Description"] || "").trim();
-        // Fall back to Inventory data if WC_Items fields are blank
-        if ((!wciVendor || !wciLocation || !wciDesc) && invLookup[wciItemId]) {
-          var inv = invLookup[wciItemId];
-          if (!wciVendor) wciVendor = String(inv["Vendor"] || "").trim();
-          if (!wciLocation) wciLocation = String(inv["Location"] || "").trim();
-          if (!wciDesc) wciDesc = String(inv["Description"] || "").trim();
+        var wciSidemark = String(wci["Sidemark"] || "").trim();
+        var wciRoom = String(wci["Room"] || "").trim();
+        // OVERRIDE from Inventory (authoritative source)
+        if (wciItemId) {
+          if (invFields.vendor[wciItemId]) wciVendor = invFields.vendor[wciItemId];
+          if (invFields.location[wciItemId]) wciLocation = invFields.location[wciItemId];
+          if (invFields.description[wciItemId]) wciDesc = invFields.description[wciItemId];
+          if (invFields.sidemark[wciItemId]) wciSidemark = invFields.sidemark[wciItemId];
+          if (invFields.room[wciItemId]) wciRoom = invFields.room[wciItemId];
         }
         itemsByWC[wcNum].push({
           wcNumber: wcNum,
@@ -6747,8 +6740,8 @@ function handleGetWillCalls_(clientSheetId) {
           description: wciDesc,
           itemClass: String(wci["Class"] || "").trim(),
           location: wciLocation,
-          sidemark: String(wci["Sidemark"] || "").trim(),
-          room: String(wci["Room"] || "").trim(),
+          sidemark: wciSidemark,
+          room: wciRoom,
           wcFee: toNum_(wci["WC Fee"]),
           released: String(wci["Status"] || "").trim() === "Released" || toBool_(wci["Released"]),
           status: String(wci["Status"] || "").trim()
@@ -7651,11 +7644,10 @@ function handleGetBatch_(clientSheetId) {
       var shipFolderMap = api_buildShipmentFolderMap_(ss);
       var t_afterRichText = new Date().getTime();
 
-      // v38.5.0: build itemId → {ship, vendor, description} fallback maps for
-      // Tasks/Repairs that may have blanks on their own rows. Piggybacked on
-      // the Inventory loop — zero extra cost.
-      // v38.6.0: added sidemark map, used by Billing section below.
-      var invFieldsByItem = { ship: {}, vendor: {}, description: {}, sidemark: {} };
+      // Session 69 Phase 4: build itemId → {ship, vendor, description, sidemark,
+      // location, room} from Inventory. These are OVERRIDES (authoritative) for
+      // Tasks/Repairs/Billing/WC items below. Piggybacked on the Inventory loop.
+      var invFieldsByItem = { ship: {}, vendor: {}, description: {}, sidemark: {}, location: {}, room: {} };
 
       // ── Inventory ──
       if (invSheet) {
@@ -7668,10 +7660,14 @@ function handleGetBatch_(clientSheetId) {
           var invVendor = String(ir["Vendor"] || "").trim();
           var invDesc = String(ir["Description"] || "").trim();
           var invSidemark = String(ir["Sidemark"] || "").trim();
-          if (invShipNo && !invFieldsByItem.ship[iid]) invFieldsByItem.ship[iid] = invShipNo;
-          if (invVendor && !invFieldsByItem.vendor[iid]) invFieldsByItem.vendor[iid] = invVendor;
-          if (invDesc && !invFieldsByItem.description[iid]) invFieldsByItem.description[iid] = invDesc;
-          if (invSidemark) invFieldsByItem.sidemark[iid] = invSidemark; // overwrite ok, last row wins
+          var invLocation = String(ir["Location"] || "").trim();
+          var invRoom = String(ir["Room"] || "").trim();
+          if (invShipNo) invFieldsByItem.ship[iid] = invShipNo;
+          if (invVendor) invFieldsByItem.vendor[iid] = invVendor;
+          if (invDesc) invFieldsByItem.description[iid] = invDesc;
+          if (invSidemark) invFieldsByItem.sidemark[iid] = invSidemark;
+          if (invLocation) invFieldsByItem.location[iid] = invLocation;
+          if (invRoom) invFieldsByItem.room[iid] = invRoom;
           result.inventory.push({
             itemId: iid, clientName: cname, clientSheetId: cid,
             qty: Number(ir["Qty"]) || 1, vendor: String(ir["Vendor"] || "").trim(),
@@ -7707,17 +7703,22 @@ function handleGetBatch_(clientSheetId) {
           var taskShipNo = String(tr["Shipment #"] || "").trim();
           var taskVendor = String(tr["Vendor"] || "").trim();
           var taskDesc = String(tr["Description"] || "").trim();
+          var taskLocation = String(tr["Location"] || "").trim();
+          var taskSidemark = String(tr["Sidemark"] || "").trim();
+          // Session 69 Phase 4: OVERRIDE from inventory (authoritative)
           if (trItemId) {
-            if (!taskShipNo && invFieldsByItem.ship[trItemId]) taskShipNo = invFieldsByItem.ship[trItemId];
-            if (!taskVendor && invFieldsByItem.vendor[trItemId]) taskVendor = invFieldsByItem.vendor[trItemId];
-            if (!taskDesc && invFieldsByItem.description[trItemId]) taskDesc = invFieldsByItem.description[trItemId];
+            if (invFieldsByItem.ship[trItemId]) taskShipNo = invFieldsByItem.ship[trItemId];
+            if (invFieldsByItem.vendor[trItemId]) taskVendor = invFieldsByItem.vendor[trItemId];
+            if (invFieldsByItem.description[trItemId]) taskDesc = invFieldsByItem.description[trItemId];
+            if (invFieldsByItem.location && invFieldsByItem.location[trItemId]) taskLocation = invFieldsByItem.location[trItemId];
+            if (invFieldsByItem.sidemark[trItemId]) taskSidemark = invFieldsByItem.sidemark[trItemId];
           }
           result.tasks.push({
             taskId: tid, clientName: cname, clientSheetId: cid,
             type: String(tr["Type"] || "").trim(), status: String(tr["Status"] || "Open").trim(),
             itemId: trItemId, vendor: taskVendor,
-            description: taskDesc, location: String(tr["Location"] || "").trim(),
-            sidemark: String(tr["Sidemark"] || "").trim(), shipmentNumber: taskShipNo,
+            description: taskDesc, location: taskLocation,
+            sidemark: taskSidemark, shipmentNumber: taskShipNo,
             created: formatDate_(tr["Created"]), completedAt: formatDateTime_(tr["Completed At"]),
             result: String(tr["Result"] || "").trim(), svcCode: String(tr["Svc Code"] || "").trim(),
             billed: toBool_(tr["Billed"]), assignedTo: String(tr["Assigned To"] || "").trim(),
@@ -7743,9 +7744,14 @@ function handleGetBatch_(clientSheetId) {
           var repItemId = String(rr["Item ID"] || "").trim();
           var repVendor = String(rr["Vendor"] || "").trim();
           var repDesc = String(rr["Description"] || "").trim();
+          var repLocation = String(rr["Location"] || "").trim();
+          var repSidemark = String(rr["Sidemark"] || "").trim();
+          // Session 69 Phase 4: OVERRIDE from inventory (authoritative)
           if (repItemId) {
-            if (!repVendor && invFieldsByItem.vendor[repItemId]) repVendor = invFieldsByItem.vendor[repItemId];
-            if (!repDesc && invFieldsByItem.description[repItemId]) repDesc = invFieldsByItem.description[repItemId];
+            if (invFieldsByItem.vendor[repItemId]) repVendor = invFieldsByItem.vendor[repItemId];
+            if (invFieldsByItem.description[repItemId]) repDesc = invFieldsByItem.description[repItemId];
+            if (invFieldsByItem.location && invFieldsByItem.location[repItemId]) repLocation = invFieldsByItem.location[repItemId];
+            if (invFieldsByItem.sidemark[repItemId]) repSidemark = invFieldsByItem.sidemark[repItemId];
           }
           result.repairs.push({
             repairId: rid, clientName: cname, clientSheetId: cid,
@@ -8241,8 +8247,18 @@ function api_buildInvShipmentByItemMap_(ss) {
  * rows whose own Vendor/Description/Shipment # cells are blank (legacy or
  * imported data). Single sheet read, cheaper than 3 separate helper calls.
  */
+/**
+ * Build per-item field maps from the Inventory tab. Used by Tasks, Repairs,
+ * Will Calls, and Billing handlers to source item-level fields from Inventory
+ * instead of each entity's stale snapshot copy.
+ *
+ * Session 69 Phase 4: added location + room so ALL pages show live inventory
+ * data. Previously only had ship/vendor/description/sidemark and handlers
+ * used them as blank-backfill only. Now every handler uses these as
+ * AUTHORITATIVE OVERRIDES for item-level fields.
+ */
 function api_buildInvFieldsByItemMap_(ss) {
-  var out = { ship: {}, vendor: {}, description: {}, sidemark: {} };
+  var out = { ship: {}, vendor: {}, description: {}, sidemark: {}, location: {}, room: {} };
   var inv = ss.getSheetByName("Inventory");
   if (!inv || inv.getLastRow() < 2) return out;
   var hMap = api_getHeaderMap_(inv);
@@ -8252,27 +8268,18 @@ function api_buildInvFieldsByItemMap_(ss) {
   var vendorCol = hMap["Vendor"];
   var descCol = hMap["Description"];
   var sidemarkCol = hMap["Sidemark"];
+  var locationCol = hMap["Location"];
+  var roomCol = hMap["Room"];
   var data = inv.getRange(2, 1, inv.getLastRow() - 1, inv.getLastColumn()).getValues();
   for (var i = 0; i < data.length; i++) {
     var iid = String(data[i][idCol - 1] || "").trim();
     if (!iid) continue;
-    if (shipCol) {
-      var sh = String(data[i][shipCol - 1] || "").trim();
-      if (sh && !out.ship[iid]) out.ship[iid] = sh;
-    }
-    if (vendorCol) {
-      var vn = String(data[i][vendorCol - 1] || "").trim();
-      if (vn && !out.vendor[iid]) out.vendor[iid] = vn;
-    }
-    if (descCol) {
-      var dc = String(data[i][descCol - 1] || "").trim();
-      if (dc && !out.description[iid]) out.description[iid] = dc;
-    }
-    if (sidemarkCol) {
-      var sm = String(data[i][sidemarkCol - 1] || "").trim();
-      // Note: overwrite allowed — last row wins (fine since sidemarks are per-item stable)
-      if (sm) out.sidemark[iid] = sm;
-    }
+    if (shipCol) { var sh = String(data[i][shipCol - 1] || "").trim(); if (sh) out.ship[iid] = sh; }
+    if (vendorCol) { var vn = String(data[i][vendorCol - 1] || "").trim(); if (vn) out.vendor[iid] = vn; }
+    if (descCol) { var dc = String(data[i][descCol - 1] || "").trim(); if (dc) out.description[iid] = dc; }
+    if (sidemarkCol) { var sm = String(data[i][sidemarkCol - 1] || "").trim(); if (sm) out.sidemark[iid] = sm; }
+    if (locationCol) { var loc = String(data[i][locationCol - 1] || "").trim(); if (loc) out.location[iid] = loc; }
+    if (roomCol) { var rm = String(data[i][roomCol - 1] || "").trim(); if (rm) out.room[iid] = rm; }
   }
   return out;
 }
