@@ -21,6 +21,8 @@ import { useVirtualRows } from '../hooks/useVirtualRows';
 import { useClientFilterUrlSync } from '../hooks/useClientFilterUrlSync';
 import { theme } from '../styles/theme';
 import { fmtDate } from '../lib/constants';
+import { useItemIndicators } from '../hooks/useItemIndicators';
+import { ItemIdBadges } from '../components/shared/ItemIdBadges';
 import { TaskDetailPanel } from '../components/shared/TaskDetailPanel';
 import { WriteButton } from '../components/shared/WriteButton';
 import { BatchGuard, checkBatchClientGuard } from '../components/shared/BatchGuard';
@@ -116,7 +118,7 @@ function cols() {
     } }),
     col.accessor('type', { header: 'Type', size: 100, filterFn: multiFilter, cell: i => <Badge t={SERVICE_CODES[i.getValue() as keyof typeof SERVICE_CODES] || i.getValue()} c={TYPE_CFG[i.getValue()]} /> }),
     col.accessor('status', { header: 'Status', size: 100, filterFn: multiFilter, cell: i => <Badge t={i.getValue()} c={STATUS_CFG[i.getValue()]} /> }),
-    col.accessor('itemId', { header: 'Item', size: 90, cell: i => <span style={{ color: theme.colors.textSecondary, fontSize: 12 }}>{i.getValue()}</span> }),
+    col.accessor('itemId', { header: 'Item', size: 110, cell: i => { const id = i.getValue(); const ind = (window as any).__itemIndicators; return <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}><span style={{ color: theme.colors.textSecondary, fontSize: 12 }}>{id}</span>{ind && <ItemIdBadges itemId={id} inspItems={ind.inspItems} asmItems={ind.asmItems} repairItems={ind.repairItems} />}</div>; } }),
     col.accessor('clientName', { header: 'Client', size: 160, filterFn: multiFilter, cell: i => <span style={{ fontWeight: 500, fontSize: 12 }}>{i.getValue()}</span> }),
     col.accessor('vendor', { header: 'Vendor', size: 120, cell: i => <span style={{ color: theme.colors.textSecondary, fontSize: 12 }}>{i.getValue()}</span> }),
     col.accessor('description', { header: 'Description', size: 240, cell: i => <span style={{ color: theme.colors.textSecondary, fontSize: 12, maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'block' }}>{i.getValue()}</span> }),
@@ -173,6 +175,8 @@ export function Tasks() {
 
   const { tasks, loading: tasksLoading, refetch: refetchTasks, applyTaskPatch, mergeTaskPatch, clearTaskPatch, addOptimisticTask, removeOptimisticTask } = useTasks(apiConfigured && clientFilter.length > 0, selectedSheetId);
   const { repairs, addOptimisticRepair, removeOptimisticRepair } = useRepairs(apiConfigured && clientFilter.length > 0, selectedSheetId);
+  const itemIndicators = useItemIndicators(selectedSheetId);
+  (window as any).__itemIndicators = itemIndicators.loaded ? itemIndicators : null;
   const ALL_ASSIGNED = useMemo(() => [...new Set(tasks.map(t => t.assignedTo).filter(Boolean))].sort(), [tasks]);
 
   const columns = useMemo(() => cols(), []);

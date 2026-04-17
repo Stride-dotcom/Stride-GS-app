@@ -12,6 +12,8 @@ import {
 import { useVirtualRows } from '../hooks/useVirtualRows';
 import { Card } from '../components/ui/Card';
 import { theme } from '../styles/theme';
+import { useItemIndicators } from '../hooks/useItemIndicators';
+import { ItemIdBadges } from '../components/shared/ItemIdBadges';
 import { isApiConfigured } from '../lib/api';
 import { useDashboardSummary } from '../hooks/useDashboardSummary';
 import type { SummaryTask, SummaryRepair, SummaryWillCall } from '../hooks/useDashboardSummary';
@@ -151,7 +153,7 @@ function DragHeader({ h, dragColId, dragOverColId, onDragStart, onDragOver, onDr
 const TASK_DEFAULT_ORDER = ['taskId', 'taskType', 'taskStatus', 'taskItem', 'taskDesc', 'taskLocation', 'taskVendor', 'taskAssigned', 'taskClient', 'taskSidemark', 'taskCreated', 'taskFolder'];
 const TASK_COL_LABELS: Record<string, string> = { taskId: 'Task ID', taskType: 'Type', taskStatus: 'Status', taskItem: 'Item', taskDesc: 'Description', taskLocation: 'Location', taskVendor: 'Vendor', taskAssigned: 'Assigned', taskClient: 'Client', taskSidemark: 'Sidemark', taskCreated: 'Created', taskFolder: 'Folder' };
 
-function TasksTab({ tasks, onNavigate }: { tasks: SummaryTask[]; onNavigate: (task: SummaryTask) => void }) {
+function TasksTab({ tasks, onNavigate, indicators }: { tasks: SummaryTask[]; onNavigate: (task: SummaryTask) => void; indicators?: { inspItems: Set<string>; asmItems: Set<string>; repairItems: Set<string> } }) {
   const colT = createColumnHelper<SummaryTask>();
   const { sorting, setSorting, colVis, setColVis, columnOrder, setColumnOrder } = useTablePreferences('dashboard-tasks', [{ id: 'taskCreated', desc: true }], {}, TASK_DEFAULT_ORDER);
   const [statusFilters, setStatusFilters] = useState<string[]>(DEFAULT_TASK_STATUSES);
@@ -169,7 +171,7 @@ function TasksTab({ tasks, onNavigate }: { tasks: SummaryTask[]; onNavigate: (ta
     colT.accessor('taskId', { id: 'taskId', header: 'Task ID', size: 110, cell: i => <span style={{ fontWeight: 600, fontSize: 12, fontFamily: 'monospace', color: theme.colors.orange }}>{i.getValue()}</span> }),
     colT.accessor('taskType', { id: 'taskType', header: 'Type', size: 100, cell: i => <span style={{ fontSize: 12 }}>{TASK_TYPE_LABELS[i.getValue()] || i.getValue() || '—'}</span> }),
     colT.accessor('status', { id: 'taskStatus', header: 'Status', size: 115, cell: i => <StatusBadge status={i.getValue()} /> }),
-    colT.accessor('itemId', { id: 'taskItem', header: 'Item', size: 90, cell: i => <span style={{ fontSize: 12, color: theme.colors.textSecondary }}>{i.getValue() || '—'}</span> }),
+    colT.accessor('itemId', { id: 'taskItem', header: 'Item', size: 110, cell: i => { const id = i.getValue(); return <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}><span style={{ fontSize: 12, color: theme.colors.textSecondary }}>{id || '—'}</span>{id && indicators && <ItemIdBadges itemId={id} inspItems={indicators.inspItems} asmItems={indicators.asmItems} repairItems={indicators.repairItems} />}</div>; } }),
     colT.accessor('description', { id: 'taskDesc', header: 'Description', size: 200, cell: i => <span style={{ fontSize: 12, maxWidth: 190, overflow: 'hidden', textOverflow: 'ellipsis', display: 'block', color: theme.colors.textSecondary }}>{i.getValue() || '—'}</span> }),
     colT.accessor('location', { id: 'taskLocation', header: 'Location', size: 90, cell: i => <span style={{ fontSize: 12, fontFamily: 'monospace', color: theme.colors.textSecondary }}>{i.getValue() || '—'}</span> }),
     colT.accessor('vendor', { id: 'taskVendor', header: 'Vendor', size: 120, cell: i => <span style={{ fontSize: 12, color: theme.colors.textSecondary }}>{i.getValue() || '—'}</span> }),
@@ -178,7 +180,7 @@ function TasksTab({ tasks, onNavigate }: { tasks: SummaryTask[]; onNavigate: (ta
     colT.accessor('sidemark', { id: 'taskSidemark', header: 'Sidemark', size: 120, cell: i => <span style={{ fontSize: 12, color: theme.colors.textSecondary }}>{i.getValue() || '—'}</span> }),
     colT.accessor('created', { id: 'taskCreated', header: 'Created', size: 90, cell: i => <span style={{ fontSize: 12, color: theme.colors.textSecondary }}>{fmtDate(i.getValue())}</span> }),
     colT.display({ id: 'taskFolder', header: 'Folder', size: 90, cell: i => <FolderButton label="Task" url={i.row.original.taskFolderUrl} disabledTooltip="Start task to create folder" /> }),
-  ], [colT]);
+  ], [colT, indicators]);
 
   const table = useReactTable({
     data: filtered, columns,
@@ -285,7 +287,7 @@ function TasksTab({ tasks, onNavigate }: { tasks: SummaryTask[]; onNavigate: (ta
 const REPAIR_DEFAULT_ORDER = ['repairId', 'repairStatus', 'repairItem', 'repairDesc', 'repairItemVendor', 'repairTech', 'repairQuote', 'repairClient', 'repairCreated', 'repairFolder'];
 const REPAIR_COL_LABELS: Record<string, string> = { repairId: 'Repair ID', repairStatus: 'Status', repairItem: 'Item', repairDesc: 'Description', repairItemVendor: 'Vendor', repairTech: 'Repair Tech', repairQuote: 'Quote', repairClient: 'Client', repairCreated: 'Created', repairFolder: 'Folder' };
 
-function RepairsTab({ repairs, onNavigate, userRole }: { repairs: SummaryRepair[]; onNavigate: (repair: SummaryRepair) => void; userRole?: string }) {
+function RepairsTab({ repairs, onNavigate, userRole, indicators }: { repairs: SummaryRepair[]; onNavigate: (repair: SummaryRepair) => void; userRole?: string; indicators?: { inspItems: Set<string>; asmItems: Set<string>; repairItems: Set<string> } }) {
   const colR = createColumnHelper<SummaryRepair>();
   const { sorting, setSorting, colVis, setColVis, columnOrder, setColumnOrder } = useTablePreferences('dashboard-repairs', [{ id: 'repairCreated', desc: true }], {}, REPAIR_DEFAULT_ORDER);
   const [statusFilters, setStatusFilters] = useState<string[]>(DEFAULT_REPAIR_STATUSES);
@@ -303,7 +305,7 @@ function RepairsTab({ repairs, onNavigate, userRole }: { repairs: SummaryRepair[
     const cols: any[] = [
       colR.accessor('repairId', { id: 'repairId', header: 'Repair ID', size: 120, cell: i => <span style={{ fontWeight: 600, fontSize: 12, fontFamily: 'monospace', color: theme.colors.orange }}>{i.getValue()}</span> }),
       colR.accessor('status', { id: 'repairStatus', header: 'Status', size: 130, cell: i => <StatusBadge status={i.getValue()} /> }),
-      colR.accessor('itemId', { id: 'repairItem', header: 'Item', size: 90, cell: i => <span style={{ fontSize: 12, color: theme.colors.textSecondary }}>{i.getValue() || '—'}</span> }),
+      colR.accessor('itemId', { id: 'repairItem', header: 'Item', size: 110, cell: i => { const id = i.getValue(); return <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}><span style={{ fontSize: 12, color: theme.colors.textSecondary }}>{id || '—'}</span>{id && indicators && <ItemIdBadges itemId={id} inspItems={indicators.inspItems} asmItems={indicators.asmItems} repairItems={indicators.repairItems} />}</div>; } }),
       colR.accessor('description', { id: 'repairDesc', header: 'Description', size: 200, cell: i => <span style={{ fontSize: 12, maxWidth: 190, overflow: 'hidden', textOverflow: 'ellipsis', display: 'block', color: theme.colors.textSecondary }}>{i.getValue() || '—'}</span> }),
       colR.accessor('vendor', { id: 'repairItemVendor', header: 'Vendor', size: 130, cell: i => <span style={{ fontSize: 12, color: theme.colors.textSecondary }}>{i.getValue() || '—'}</span> }),
       colR.accessor('repairVendor', { id: 'repairTech', header: 'Repair Tech', size: 130, cell: i => <span style={{ fontSize: 12, color: theme.colors.textSecondary }}>{i.getValue() || '—'}</span> }),
@@ -318,7 +320,7 @@ function RepairsTab({ repairs, onNavigate, userRole }: { repairs: SummaryRepair[
       colR.display({ id: 'repairFolder', header: 'Folder', size: 90, cell: i => <FolderButton label="Repair" url={i.row.original.repairFolderUrl} disabledTooltip="Start repair to create folder" /> }),
     );
     return cols;
-  }, [colR, userRole]);
+  }, [colR, userRole, indicators]);
 
   const table = useReactTable({
     data: filtered, columns,
@@ -542,6 +544,9 @@ export function Dashboard() {
   }), [tasks, repairs, willCalls]);
 
   // ── Row click navigation (deep links → list page with detail panel auto-open) ─
+  const itemIndicators = useItemIndicators(undefined); // all clients for dashboard
+  const indicatorData = itemIndicators.loaded ? itemIndicators : undefined;
+
   const nav = useNavigate();
   const handleTaskNav = useCallback((task: SummaryTask) => {
     nav(`/tasks?open=${encodeURIComponent(task.taskId)}&client=${encodeURIComponent(task.clientSheetId)}`);
@@ -722,10 +727,10 @@ export function Dashboard() {
 
         {/* Tab content — render all but hide inactive (preserves scroll/filter state) */}
         <div style={{ display: activeTab === 'tasks' ? 'block' : 'none' }}>
-          {tabsLoaded.tasks && <TasksTab tasks={filteredTasks} onNavigate={handleTaskNav} />}
+          {tabsLoaded.tasks && <TasksTab tasks={filteredTasks} onNavigate={handleTaskNav} indicators={indicatorData} />}
         </div>
         <div style={{ display: activeTab === 'repairs' ? 'block' : 'none' }}>
-          {tabsLoaded.repairs && <RepairsTab repairs={repairs} onNavigate={handleRepairNav} userRole={user?.role} />}
+          {tabsLoaded.repairs && <RepairsTab repairs={repairs} onNavigate={handleRepairNav} userRole={user?.role} indicators={indicatorData} />}
         </div>
         <div style={{ display: activeTab === 'willcalls' ? 'block' : 'none' }}>
           {tabsLoaded.willcalls && <WillCallsTab willCalls={willCalls} onNavigate={handleWcNav} />}

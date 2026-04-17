@@ -14,6 +14,8 @@ import {
 import { useVirtualRows } from '../hooks/useVirtualRows';
 import { theme } from '../styles/theme';
 import { fmtDate } from '../lib/constants';
+import { useItemIndicators } from '../hooks/useItemIndicators';
+import { ItemIdBadges } from '../components/shared/ItemIdBadges';
 import { RepairDetailPanel } from '../components/shared/RepairDetailPanel';
 import { WriteButton } from '../components/shared/WriteButton';
 import { BatchGuard, checkBatchClientGuard } from '../components/shared/BatchGuard';
@@ -84,7 +86,7 @@ function cols() {
     col.accessor('repairId', { header: 'Repair ID', size: 100, cell: i => <span style={{ fontWeight: 600, fontSize: 12 }}>{i.getValue()}</span> }),
     col.accessor('sourceTaskId', { header: 'Source Task', size: 100, cell: i => <span style={{ color: theme.colors.textSecondary, fontSize: 12 }}>{i.getValue() || '\u2014'}</span> }),
     col.accessor('status', { header: 'Status', size: 120, filterFn: mf, cell: i => <Badge t={i.getValue()} c={STATUS_CFG[i.getValue()]} /> }),
-    col.accessor('itemId', { header: 'Item', size: 90, cell: i => <span style={{ color: theme.colors.textSecondary, fontSize: 12 }}>{i.getValue()}</span> }),
+    col.accessor('itemId', { header: 'Item', size: 110, cell: i => { const id = i.getValue(); const ind = (window as any).__itemIndicators; return <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}><span style={{ color: theme.colors.textSecondary, fontSize: 12 }}>{id}</span>{ind && <ItemIdBadges itemId={id} inspItems={ind.inspItems} asmItems={ind.asmItems} repairItems={ind.repairItems} />}</div>; } }),
     col.accessor('clientName', { header: 'Client', size: 160, filterFn: mf, cell: i => <span style={{ fontWeight: 500, fontSize: 12 }}>{i.getValue()}</span> }),
     col.accessor('description', { header: 'Description', size: 260, cell: i => <span style={{ color: theme.colors.textSecondary, fontSize: 12, maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'block' }}>{i.getValue()}</span> }),
     col.accessor('quoteAmount', { header: 'Quote $', size: 90, cell: i => <span style={{ fontSize: 12, fontWeight: 600, color: i.getValue() ? theme.colors.text : theme.colors.textMuted }}>{fmtMoney(i.getValue())}</span> }),
@@ -138,6 +140,8 @@ export function Repairs() {
   }, [clientFilter, apiClients]);
 
   const { repairs, apiRepairs, loading: repairsLoading, refetch: refetchRepairs, applyRepairPatch, mergeRepairPatch, clearRepairPatch, addOptimisticRepair, removeOptimisticRepair } = useRepairs(apiConfigured && clientFilter.length > 0, selectedSheetId);
+  const itemIndicators = useItemIndicators(selectedSheetId);
+  (window as any).__itemIndicators = itemIndicators.loaded ? itemIndicators : null;
 
   const columns = useMemo(() => cols(), []);
   const [selectedRepairId, setSelectedRepairId] = useState<string | null>(null);

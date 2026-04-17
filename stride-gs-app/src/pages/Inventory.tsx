@@ -37,6 +37,7 @@ import { useVirtualRows } from '../hooks/useVirtualRows';
 import { theme } from '../styles/theme';
 import { fmtDate } from '../lib/constants';
 import { ItemDetailPanel } from '../components/shared/ItemDetailPanel';
+import { ItemIdBadges } from '../components/shared/ItemIdBadges';
 import { CreateWillCallModal } from '../components/shared/CreateWillCallModal';
 import { TransferItemsModal } from '../components/shared/TransferItemsModal';
 import { ReleaseItemsModal } from '../components/shared/ReleaseItemsModal';
@@ -969,13 +970,6 @@ export function Inventory() {
       header: 'Item ID', size: 120,
       cell: i => {
         const id = i.getValue();
-        const hasI = inspItems.has(id);
-        const hasA = asmItems.has(id);
-        const hasR = repairItems.has(id);
-        const badgeStyle: React.CSSProperties = {
-          fontSize: 9, fontWeight: 700, borderRadius: 3, padding: '1px 3px',
-          lineHeight: 1, fontFamily: 'Inter, system-ui, sans-serif',
-        };
         return (
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%' }}>
             <span style={{
@@ -983,13 +977,7 @@ export function Inventory() {
               fontWeight: theme.typography.weights.semibold,
               color: theme.colors.textPrimary,
             }}>{id}</span>
-            {(hasI || hasA || hasR) && (
-              <span style={{ display: 'inline-flex', gap: 2, marginLeft: 4, flexShrink: 0 }}>
-                {hasI && <span style={{ ...badgeStyle, background: '#DBEAFE', color: '#1E40AF' }} title="Inspection task exists">I</span>}
-                {hasA && <span style={{ ...badgeStyle, background: '#FEF3C7', color: '#92400E' }} title="Assembly task exists">A</span>}
-                {hasR && <span style={{ ...badgeStyle, background: '#FCE7F3', color: '#9D174D' }} title="Repair exists">R</span>}
-              </span>
-            )}
+            <ItemIdBadges itemId={id} inspItems={inspItems} asmItems={asmItems} repairItems={repairItems} />
           </div>
         );
       },
