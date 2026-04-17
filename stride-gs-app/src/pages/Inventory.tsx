@@ -1877,7 +1877,7 @@ export function Inventory() {
       </div>
 
       {/* ── Floating Action Bar ── */}
-      {selectedRows.length > 0 && !isMobile && (
+      {selectedRows.length > 0 && !isMobile && !selectedItem && (
         <div className="no-print" style={{
           position: 'fixed', bottom: 24, left: '50%', transform: 'translateX(-50%)',
           background: theme.colors.textPrimary,
