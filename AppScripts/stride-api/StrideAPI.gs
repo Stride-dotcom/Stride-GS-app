@@ -8242,44 +8242,70 @@ function api_buildInvShipmentByItemMap_(ss) {
 }
 
 /**
- * v38.5.0: Builds maps of Item ID → { shipmentNo, vendor, description } from
- * the Inventory sheet in a single pass. Used as fallback for Tasks/Repairs
- * rows whose own Vendor/Description/Shipment # cells are blank (legacy or
- * imported data). Single sheet read, cheaper than 3 separate helper calls.
- */
-/**
- * Build per-item field maps from the Inventory tab. Used by Tasks, Repairs,
- * Will Calls, and Billing handlers to source item-level fields from Inventory
- * instead of each entity's stale snapshot copy.
+ * Build per-item field maps from the Inventory tab — EVERY column.
  *
- * Session 69 Phase 4: added location + room so ALL pages show live inventory
- * data. Previously only had ship/vendor/description/sidemark and handlers
- * used them as blank-backfill only. Now every handler uses these as
- * AUTHORITATIVE OVERRIDES for item-level fields.
+ * Inventory is the single source of truth for all item-level data. Every
+ * other page (Tasks, Repairs, Will Calls, Billing, Dashboard) uses these
+ * maps to OVERRIDE their own stale copies. This way any change to an item
+ * (location move, vendor edit, description update, etc.) is immediately
+ * reflected everywhere without syncing individual entity tabs.
+ *
+ * Returns: { [columnKey]: { itemId → value } } for every Inventory column.
+ * Callers pick the fields they need: invFields.location[itemId], etc.
  */
 function api_buildInvFieldsByItemMap_(ss) {
-  var out = { ship: {}, vendor: {}, description: {}, sidemark: {}, location: {}, room: {} };
+  var out = {
+    ship: {}, vendor: {}, description: {}, sidemark: {}, location: {}, room: {},
+    reference: {}, itemClass: {}, qty: {}, status: {}, itemNotes: {}, taskNotes: {},
+    receiveDate: {}, releaseDate: {}, carrier: {}, trackingNumber: {},
+    invoiceUrl: {}, shipmentPhotosUrl: {}, inspectionPhotosUrl: {},
+    repairPhotosUrl: {}, transferDate: {}
+  };
   var inv = ss.getSheetByName("Inventory");
   if (!inv || inv.getLastRow() < 2) return out;
   var hMap = api_getHeaderMap_(inv);
   var idCol = hMap["Item ID"];
   if (!idCol) return out;
-  var shipCol = hMap["Shipment #"];
-  var vendorCol = hMap["Vendor"];
-  var descCol = hMap["Description"];
-  var sidemarkCol = hMap["Sidemark"];
-  var locationCol = hMap["Location"];
-  var roomCol = hMap["Room"];
+
+  // Map every Inventory column to the output key
+  var colMap = {
+    "Shipment #":             "ship",
+    "Vendor":                 "vendor",
+    "Description":            "description",
+    "Sidemark":               "sidemark",
+    "Location":               "location",
+    "Room":                   "room",
+    "Reference":              "reference",
+    "Class":                  "itemClass",
+    "Qty":                    "qty",
+    "Status":                 "status",
+    "Item Notes":             "itemNotes",
+    "Task Notes":             "taskNotes",
+    "Receive Date":           "receiveDate",
+    "Release Date":           "releaseDate",
+    "Carrier":                "carrier",
+    "Tracking #":             "trackingNumber",
+    "Invoice URL":            "invoiceUrl",
+    "Shipment Photos URL":    "shipmentPhotosUrl",
+    "Inspection Photos URL":  "inspectionPhotosUrl",
+    "Repair Photos URL":      "repairPhotosUrl",
+    "Transfer Date":          "transferDate"
+  };
+
+  // Resolve column indices once
+  var cols = {};
+  for (var header in colMap) {
+    if (hMap[header]) cols[colMap[header]] = hMap[header];
+  }
+
   var data = inv.getRange(2, 1, inv.getLastRow() - 1, inv.getLastColumn()).getValues();
   for (var i = 0; i < data.length; i++) {
     var iid = String(data[i][idCol - 1] || "").trim();
     if (!iid) continue;
-    if (shipCol) { var sh = String(data[i][shipCol - 1] || "").trim(); if (sh) out.ship[iid] = sh; }
-    if (vendorCol) { var vn = String(data[i][vendorCol - 1] || "").trim(); if (vn) out.vendor[iid] = vn; }
-    if (descCol) { var dc = String(data[i][descCol - 1] || "").trim(); if (dc) out.description[iid] = dc; }
-    if (sidemarkCol) { var sm = String(data[i][sidemarkCol - 1] || "").trim(); if (sm) out.sidemark[iid] = sm; }
-    if (locationCol) { var loc = String(data[i][locationCol - 1] || "").trim(); if (loc) out.location[iid] = loc; }
-    if (roomCol) { var rm = String(data[i][roomCol - 1] || "").trim(); if (rm) out.room[iid] = rm; }
+    for (var key in cols) {
+      var val = String(data[i][cols[key] - 1] || "").trim();
+      if (val) out[key][iid] = val;
+    }
   }
   return out;
 }

@@ -240,15 +240,24 @@ interface SupabaseTaskRow {
 }
 
 /**
- * Session 69 Phase 4: Fetch a lightweight inventory field map from Supabase.
- * Used by fetchTasks/Repairs/WillCallsFromSupabase to overlay authoritative
- * item-level fields (location, vendor, sidemark, description) on top of
- * stale entity-table copies. Matches the GAS-side api_buildInvFieldsByItemMap_.
+ * Session 69 Phase 4: Fetch ALL inventory fields per item from Supabase.
+ * Used by fetchTasks/Repairs/WillCalls/DashboardFromSupabase to overlay
+ * authoritative item-level fields on top of stale entity-table copies.
+ * Every Inventory column is available so any page can use any field
+ * without needing a code change here.
  */
-async function _fetchInvFieldMap(clientSheetId?: string | string[]): Promise<Record<string, { location: string; vendor: string; sidemark: string; description: string }>> {
-  const map: Record<string, { location: string; vendor: string; sidemark: string; description: string }> = {};
+interface InvFieldMapEntry {
+  location: string; vendor: string; sidemark: string; description: string;
+  room: string; reference: string; itemClass: string; qty: number;
+  status: string; itemNotes: string; taskNotes: string;
+  receiveDate: string; releaseDate: string; carrier: string;
+  trackingNumber: string; shipmentNumber: string;
+}
+
+async function _fetchInvFieldMap(clientSheetId?: string | string[]): Promise<Record<string, InvFieldMapEntry>> {
+  const map: Record<string, InvFieldMapEntry> = {};
   try {
-    let q = supabase.from('inventory').select('item_id, location, vendor, sidemark, description, tenant_id');
+    let q = supabase.from('inventory').select('*');
     if (clientSheetId) {
       if (Array.isArray(clientSheetId)) {
         if (clientSheetId.length > 0) q = q.in('tenant_id', clientSheetId);
@@ -259,18 +268,30 @@ async function _fetchInvFieldMap(clientSheetId?: string | string[]): Promise<Rec
     q = q.range(0, 49999);
     const { data } = await q;
     if (data) {
-      for (const row of data as { item_id: string; location: string | null; vendor: string | null; sidemark: string | null; description: string | null }[]) {
+      for (const row of data as SupabaseInventoryRow[]) {
         if (row.item_id) {
           map[row.item_id] = {
             location: row.location ?? '',
             vendor: row.vendor ?? '',
             sidemark: row.sidemark ?? '',
             description: row.description ?? '',
+            room: row.room ?? '',
+            reference: row.reference ?? '',
+            itemClass: row.item_class ?? '',
+            qty: row.qty ?? 1,
+            status: row.status ?? '',
+            itemNotes: row.item_notes ?? '',
+            taskNotes: row.task_notes ?? '',
+            receiveDate: row.receive_date ?? '',
+            releaseDate: row.release_date ?? '',
+            carrier: row.carrier ?? '',
+            trackingNumber: row.tracking_number ?? '',
+            shipmentNumber: row.shipment_number ?? '',
           };
         }
       }
     }
-  } catch { /* best-effort — tasks still display with stale data */ }
+  } catch { /* best-effort */ }
   return map;
 }
 
