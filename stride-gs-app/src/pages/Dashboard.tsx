@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
-// useNavigate removed — Dashboard nav now uses window.open for new-tab detail pages
+import { useNavigate } from 'react-router-dom';
 import {
   useReactTable, getCoreRowModel, getSortedRowModel, getFilteredRowModel,
   flexRender, createColumnHelper,
@@ -531,18 +531,19 @@ export function Dashboard() {
     pendingWCs: willCalls.filter(w => ['Pending', 'Scheduled', 'Partial'].includes(w.status)).length,
   }), [tasks, repairs, willCalls]);
 
-  // ── Row click navigation ──────────────────────────────────────────────────────
+  // ── Row click navigation (deep links → list page with detail panel auto-open) ─
+  const nav = useNavigate();
   const handleTaskNav = useCallback((task: SummaryTask) => {
-    window.open(`#/tasks/${task.taskId}`, '_blank');
-  }, []);
+    nav(`/tasks?open=${encodeURIComponent(task.taskId)}&client=${encodeURIComponent(task.clientSheetId)}`);
+  }, [nav]);
 
   const handleRepairNav = useCallback((repair: SummaryRepair) => {
-    window.open(`#/repairs/${repair.repairId}`, '_blank');
-  }, []);
+    nav(`/repairs?open=${encodeURIComponent(repair.repairId)}&client=${encodeURIComponent(repair.clientSheetId)}`);
+  }, [nav]);
 
   const handleWcNav = useCallback((wc: SummaryWillCall) => {
-    window.open(`#/will-calls/${wc.wcNumber}`, '_blank');
-  }, []);
+    nav(`/will-calls?open=${encodeURIComponent(wc.wcNumber)}&client=${encodeURIComponent(wc.clientSheetId)}`);
+  }, [nav]);
 
   // ── Task type filter (dropdown on tab button, persisted per user) ─────────────
   const { user } = useAuth();
