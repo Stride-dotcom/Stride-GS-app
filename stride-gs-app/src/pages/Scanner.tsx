@@ -391,6 +391,21 @@ export function Scanner() {
         <span style={{ fontSize: 11, color: theme.colors.textMuted, marginLeft: 'auto' }}>Batch move items to a new location</span>
       </div>
 
+      {/* Dark KPI strip */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 16, marginBottom: 20, flexShrink: 0 }}>
+        {[
+          { label: 'In Queue', value: queue.length, color: '#fff' },
+          { label: 'Found', value: foundCount, color: '#4ADE80' },
+          { label: 'Pending', value: pendingCount, color: '#FBBF24' },
+          { label: 'Not Found', value: notFoundCount, color: '#F87171' },
+        ].map(c => (
+          <div key={c.label} style={{ background: '#1C1C1C', borderRadius: 20, padding: '20px 22px' }}>
+            <div style={{ fontSize: 10, fontWeight: 600, color: 'rgba(255,255,255,0.55)', textTransform: 'uppercase', letterSpacing: '2px', marginBottom: 10 }}>{c.label}</div>
+            <div style={{ fontSize: 28, fontWeight: 300, color: c.color, lineHeight: 1 }}>{c.value}</div>
+          </div>
+        ))}
+      </div>
+
       <div style={s.body}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12, minWidth: 0 }}>
           {/* Camera scanner card */}

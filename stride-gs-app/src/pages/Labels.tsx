@@ -543,20 +543,22 @@ export function Labels() {
 
   // Mode tab style (always visible at the top of the body)
   const modeTabStyle = (active: boolean): React.CSSProperties => ({
-    flex: 1,
-    padding: isMobile ? '12px 10px' : '10px 14px',
-    fontSize: isMobile ? 14 : 13,
-    fontWeight: active ? 700 : 500,
-    background: active ? theme.colors.primary : '#fff',
-    color: active ? '#fff' : theme.colors.text,
-    border: `1px solid ${active ? theme.colors.primary : theme.colors.border}`,
+    padding: isMobile ? '12px 20px' : '10px 22px',
+    fontSize: 11,
+    fontWeight: 600,
+    letterSpacing: '1.5px',
+    textTransform: 'uppercase' as const,
+    background: active ? '#1C1C1C' : '#fff',
+    color: active ? '#fff' : '#666',
+    border: active ? 'none' : '1px solid rgba(0,0,0,0.08)',
+    borderRadius: 100,
     cursor: 'pointer',
     fontFamily: 'inherit',
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',
     gap: 6,
-    minHeight: isMobile ? 48 : undefined,
+    minHeight: isMobile ? 44 : undefined,
   });
 
   return (
@@ -573,24 +575,38 @@ export function Labels() {
         )}
       </div>
 
-      {/* Mode tabs — always visible, big targets on mobile */}
+      {/* Dark KPI strip */}
+      <div className="no-print" style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 16, marginBottom: 20, flexShrink: 0 }}>
+        {[
+          { label: 'Label Size', value: sizeDef.label, color: '#fff' },
+          { label: 'Labels To Print', value: printCount, color: '#4ADE80' },
+          { label: 'QR Code', value: cfg.showQr ? 'On' : 'Off', color: cfg.showQr ? '#60A5FA' : 'rgba(255,255,255,0.45)' },
+          { label: 'Mode', value: cfg.kind === 'item' ? 'Item' : 'Location', color: '#E8692A' },
+        ].map(c => (
+          <div key={c.label} style={{ background: '#1C1C1C', borderRadius: 20, padding: '20px 22px' }}>
+            <div style={{ fontSize: 10, fontWeight: 600, color: 'rgba(255,255,255,0.55)', textTransform: 'uppercase', letterSpacing: '2px', marginBottom: 10 }}>{c.label}</div>
+            <div style={{ fontSize: 22, fontWeight: 300, color: c.color, lineHeight: 1 }}>{c.value}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Mode tabs — pill style */}
       <div className="no-print" style={{
-        display: 'flex', gap: 0,
-        padding: isMobile ? '10px 10px 0' : '12px 16px 0',
-        background: '#f8f9fa',
+        display: 'flex', gap: 8,
+        marginBottom: 16,
         flexShrink: 0,
       }}>
         <button
-          style={{ ...modeTabStyle(cfg.kind === 'item'), borderRadius: '8px 0 0 8px', borderRight: 'none' }}
+          style={modeTabStyle(cfg.kind === 'item')}
           onClick={() => setCfg(c => ({ ...c, kind: 'item' }))}
         >
-          <Package size={isMobile ? 16 : 14} /> Item labels
+          <Package size={13} /> Item Labels
         </button>
         <button
-          style={{ ...modeTabStyle(cfg.kind === 'location'), borderRadius: '0 8px 8px 0' }}
+          style={modeTabStyle(cfg.kind === 'location')}
           onClick={() => setCfg(c => ({ ...c, kind: 'location' }))}
         >
-          <MapPin size={isMobile ? 16 : 14} /> Location labels
+          <MapPin size={13} /> Location Labels
         </button>
       </div>
 
