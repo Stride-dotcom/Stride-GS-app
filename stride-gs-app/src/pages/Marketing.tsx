@@ -391,16 +391,11 @@ export function Marketing() {
   const { isMobile } = useIsMobile();
 
   return (
-    <div style={{ padding: isMobile ? '16px 12px' : '24px 32px', fontFamily: theme.typography.fontFamily }}>
+    <div style={{ background: '#F5F2EE', margin: '-28px -32px', padding: isMobile ? '20px 12px' : '28px 32px', minHeight: '100%', fontFamily: theme.typography.fontFamily }}>
       {/* Page Header */}
-      <div style={{ display: 'flex', flexDirection: isMobile ? 'column' : 'row', justifyContent: 'space-between', alignItems: isMobile ? 'stretch' : 'flex-start', gap: isMobile ? 12 : 0, marginBottom: 20 }}>
-        <div>
-          <h1 style={{ fontSize: isMobile ? 18 : 22, fontWeight: 700, color: theme.colors.text, margin: 0 }}>Marketing</h1>
-          {!isMobile && (
-            <p style={{ fontSize: 13, color: theme.colors.textMuted, margin: '4px 0 0' }}>
-              Email campaigns, contacts, templates, and delivery tracking
-            </p>
-          )}
+      <div style={{ display: 'flex', flexDirection: isMobile ? 'column' : 'row', justifyContent: 'space-between', alignItems: isMobile ? 'stretch' : 'center', gap: isMobile ? 12 : 0, marginBottom: 20 }}>
+        <div style={{ fontSize: 13, fontWeight: 600, letterSpacing: '1px', color: '#1C1C1C' }}>
+          STRIDE LOGISTICS · MARKETING
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
           <ActionBtn label={isMobile ? '+ Campaign' : '+ New Campaign'} variant="primary" onClick={() => { setActiveTab('campaigns'); setShowCreateCampaign(true); }} />

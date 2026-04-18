@@ -1709,8 +1709,8 @@ export function Settings() {
   }
 
   return (
-    <div>
-      <div style={{ marginBottom: 20 }}><h1 style={{ fontSize: 22, fontWeight: 700, letterSpacing: '-0.3px' }}>Settings</h1><p style={{ fontSize: 13, color: theme.colors.textMuted, marginTop: 2 }}>System configuration, client management, and integrations</p></div>
+    <div style={{ background: '#F5F2EE', margin: '-28px -32px', padding: '28px 32px', minHeight: '100%' }}>
+      <div style={{ marginBottom: 20, fontSize: 13, fontWeight: 600, letterSpacing: '1px', color: '#1C1C1C' }}>STRIDE LOGISTICS · SETTINGS</div>
 
       <div style={{ display: 'grid', gridTemplateColumns: '220px 1fr', gap: 20 }}>
         {/* Tab Nav */}
