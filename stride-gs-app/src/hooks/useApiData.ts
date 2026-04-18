@@ -124,7 +124,7 @@ export function useApiData<T>(
         // loads when client scope was missing (see session 63 plan).
         setData(currentCached);
         setLoading(false);
-        doFetch(false, true);
+        doFetch(true, true);
       } else {
         doFetch();
       }

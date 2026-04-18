@@ -20,6 +20,7 @@ import {
   GripVertical,
   Mail,
   Calendar,
+  Receipt,
 } from 'lucide-react';
 import { theme } from '../../styles/theme';
 import { cacheClearAll } from '../../lib/apiCache';
@@ -39,6 +40,7 @@ const ADMIN_NAV = [
   { id: 'claims', label: 'Claims', path: '/claims', icon: Shield },
   { id: 'payments', label: 'Payments', path: '/payments', icon: CreditCard },
   { id: 'orders', label: 'Delivery', path: '/orders', icon: Calendar },
+  { id: 'quotes', label: 'Quotes', path: '/quotes', icon: Receipt },
   { id: 'marketing', label: 'Marketing', path: '/marketing', icon: Mail },
   { id: 'scanner', label: 'QR Scanner', path: '/scanner', icon: ScanLine },
   { id: 'labels', label: 'Labels', path: '/labels', icon: Tag },
@@ -256,11 +258,15 @@ export function Sidebar({ collapsed, onToggle, onNavigate, failureCount = 0, onO
         })}
       </nav>
 
-      {/* Bottom: Settings + User */}
+      {/* Bottom: Settings + User — pinned at bottom so logout is always reachable */}
       <div style={{
         borderTop: `1px solid ${theme.colors.borderSidebar}`,
         padding: '8px 0', display: 'flex', flexDirection: 'column', gap: '1px',
         flexShrink: 0,
+        position: 'sticky',
+        bottom: 0,
+        background: theme.colors.bgSidebar,
+        zIndex: 1,
       }}>
         {/* Settings — admin only */}
         {user?.role === 'admin' && (
