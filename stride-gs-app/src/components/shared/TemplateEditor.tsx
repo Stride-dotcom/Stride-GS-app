@@ -149,7 +149,7 @@ export function TemplateEditor({ template, onClose, onSaved }: Props) {
 
   return createPortal(
     <div style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,0.6)', zIndex: 2000, display: 'flex', justifyContent: 'center', alignItems: 'stretch', padding: 10 }}>
-      <div style={{ background: '#fff', borderRadius: 12, width: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden', boxShadow: '0 20px 60px rgba(0,0,0,0.3)' }}>
+      <div style={{ background: '#fff', borderRadius: 20, width: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden', boxShadow: '0 24px 60px rgba(0,0,0,0.25)' }}>
 
         {/* Header */}
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 18px', borderBottom: `1px solid ${theme.colors.border}`, flexShrink: 0 }}>

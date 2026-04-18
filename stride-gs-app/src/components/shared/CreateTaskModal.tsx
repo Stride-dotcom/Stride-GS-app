@@ -290,23 +290,23 @@ export function CreateTaskModal({ items, clientSheetId, onClose, onSuccess, addO
         {/* Footer */}
         <div style={{ padding: '12px 18px', borderTop: `1px solid ${theme.colors.border}`, display: 'flex', justifyContent: result ? 'center' : 'space-between', flexShrink: 0 }}>
           {result ? (
-            <button onClick={onClose} style={{ padding: '8px 28px', border: 'none', borderRadius: 8, background: theme.colors.orange, color: '#fff', fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit', fontSize: 13 }}>
+            <button onClick={onClose} style={{ padding: '12px 28px', border: 'none', borderRadius: 100, background: theme.colors.orange, color: '#fff', fontWeight: 600, letterSpacing: '1.5px', textTransform: 'uppercase', cursor: 'pointer', fontFamily: 'inherit', fontSize: 11 }}>
               Done
             </button>
           ) : (
             <>
-              <button onClick={onClose} style={{ padding: '8px 16px', border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', fontFamily: 'inherit', fontSize: 13, color: theme.colors.textSecondary }}>
+              <button onClick={onClose} style={{ padding: '12px 24px', border: '1px solid rgba(0,0,0,0.08)', borderRadius: 100, background: '#fff', cursor: 'pointer', fontFamily: 'inherit', fontSize: 11, fontWeight: 600, letterSpacing: '1.5px', textTransform: 'uppercase', color: '#666' }}>
                 Cancel
               </button>
               <button
                 onClick={handleSubmit}
                 disabled={loading || !selectedCodes.size}
                 style={{
-                  padding: '8px 20px', border: 'none', borderRadius: 8,
+                  padding: '12px 28px', border: 'none', borderRadius: 100,
                   background: selectedCodes.size && !loading ? theme.colors.orange : theme.colors.border,
                   color: selectedCodes.size && !loading ? '#fff' : theme.colors.textMuted,
-                  fontWeight: 600, cursor: selectedCodes.size && !loading ? 'pointer' : 'not-allowed',
-                  fontFamily: 'inherit', fontSize: 13,
+                  fontWeight: 600, letterSpacing: '1.5px', textTransform: 'uppercase', cursor: selectedCodes.size && !loading ? 'pointer' : 'not-allowed',
+                  fontFamily: 'inherit', fontSize: 11,
                   display: 'flex', alignItems: 'center', gap: 6,
                 }}
               >
