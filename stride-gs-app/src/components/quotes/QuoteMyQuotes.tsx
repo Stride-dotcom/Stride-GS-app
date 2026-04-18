@@ -31,12 +31,13 @@ export function QuoteMyQuotes({ store, onOpenBuilder }: Props) {
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<QuoteStatus | 'all'>('all');
 
+  const { services, classes, coverageOptions } = store.catalog;
   const quotesWithTotals = useMemo(() => {
     return store.quotes.map(q => ({
       ...q,
-      total: calcQuote(q, store.catalog.services, store.catalog.classes, store.catalog.coverageOptions).grandTotal,
+      total: calcQuote(q, services, classes, coverageOptions).grandTotal,
     }));
-  }, [store.quotes, store.catalog]);
+  }, [store.quotes, services, classes, coverageOptions]);
 
   const filtered = useMemo(() => {
     let list = quotesWithTotals;

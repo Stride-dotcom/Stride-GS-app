@@ -120,6 +120,7 @@ export const DEFAULT_SETTINGS: QuoteStoreSettings = {
   companyEmail: 'whse@stridenw.com',
   defaultExpirationDays: 30,
   defaultStorageMonths: 1,
+  defaultTaxAreaId: 'kent',
   quotePrefix: 'EST',
   nextQuoteNumber: 1000,
 };

@@ -161,6 +161,7 @@ export interface QuoteStoreSettings {
   companyEmail: string;
   defaultExpirationDays: number;
   defaultStorageMonths: number;
+  defaultTaxAreaId: string;
   quotePrefix: string;
   nextQuoteNumber: number;
 }

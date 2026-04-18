@@ -24,13 +24,14 @@ interface Props {
 export function QuoteBuilder({ store, quoteId, onBack }: Props) {
   const { isMobile } = useIsMobile();
   const [toast, setToast] = useState<string | null>(null);
+  const { updateQuote, duplicateQuote, setQuoteStatus, deleteQuote: deleteQuoteFn } = store;
 
   const quote = useMemo(() => store.quotes.find(q => q.id === quoteId) ?? null, [store.quotes, quoteId]);
 
   const handleChange = useCallback((patch: Partial<Quote>) => {
     if (!quoteId) return;
-    store.updateQuote(quoteId, patch);
-  }, [quoteId, store]);
+    updateQuote(quoteId, patch);
+  }, [quoteId, updateQuote]);
 
   const showToast = useCallback((msg: string) => {
     setToast(msg);
@@ -43,21 +44,21 @@ export function QuoteBuilder({ store, quoteId, onBack }: Props) {
 
   const handleDuplicate = useCallback(() => {
     if (!quoteId) return;
-    const dup = store.duplicateQuote(quoteId);
+    const dup = duplicateQuote(quoteId);
     if (dup) showToast(`Duplicated as ${dup.number}`);
-  }, [quoteId, store, showToast]);
+  }, [quoteId, duplicateQuote, showToast]);
 
   const handleVoid = useCallback(() => {
     if (!quoteId || !confirm('Void this quote? This marks it as void.')) return;
-    store.setQuoteStatus(quoteId, 'void');
+    setQuoteStatus(quoteId, 'void');
     showToast('Quote voided');
-  }, [quoteId, store, showToast]);
+  }, [quoteId, setQuoteStatus, showToast]);
 
   const handleDelete = useCallback(() => {
     if (!quoteId || !confirm('Delete this quote permanently?')) return;
-    store.deleteQuote(quoteId);
+    deleteQuoteFn(quoteId);
     onBack();
-  }, [quoteId, store, onBack]);
+  }, [quoteId, deleteQuoteFn, onBack]);
 
   const handleDownloadPdf = useCallback(() => {
     if (!quote) return;
@@ -123,6 +124,7 @@ export function QuoteBuilder({ store, quoteId, onBack }: Props) {
         <QuoteTotalsPanel
           quote={quote}
           catalog={store.catalog}
+          onUpdate={handleChange}
           onSave={handleSave}
           onDuplicate={handleDuplicate}
           onDownloadPdf={handleDownloadPdf}

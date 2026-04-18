@@ -7,6 +7,7 @@ import type { Quote, QuoteCatalog, CalcResult } from '../../lib/quoteTypes';
 interface Props {
   quote: Quote;
   catalog: QuoteCatalog;
+  onUpdate: (patch: Partial<Quote>) => void;
   onSave: () => void;
   onDuplicate: () => void;
   onDownloadPdf: () => void;
@@ -18,7 +19,7 @@ function fmt(n: number): string {
   return n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
-export function QuoteTotalsPanel({ quote, catalog, onSave, onDuplicate, onDownloadPdf, onVoid, onDelete }: Props) {
+export function QuoteTotalsPanel({ quote, catalog, onUpdate, onSave, onDuplicate, onDownloadPdf, onVoid, onDelete }: Props) {
   const result: CalcResult = useMemo(
     () => calcQuote(quote, catalog.services, catalog.classes, catalog.coverageOptions),
     [quote, catalog]
@@ -106,12 +107,27 @@ export function QuoteTotalsPanel({ quote, catalog, onSave, onDuplicate, onDownlo
         </div>
       </div>
 
-      {/* Tax area + toggle */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 12 }}>
-        <input type="checkbox" checked={quote.taxEnabled} id="tax-toggle"
-          onChange={() => {}}
-          style={{ accentColor: theme.colors.orange }} />
-        <label htmlFor="tax-toggle" style={{ fontSize: 11, color: '#94A3B8', cursor: 'pointer' }}>Tax enabled</label>
+      {/* Tax toggle + area selector */}
+      <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 6 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <input type="checkbox" checked={quote.taxEnabled} id="tax-toggle"
+            onChange={() => onUpdate({ taxEnabled: !quote.taxEnabled })}
+            style={{ accentColor: theme.colors.orange }} />
+          <label htmlFor="tax-toggle" style={{ fontSize: 11, color: '#94A3B8', cursor: 'pointer' }}>Tax enabled</label>
+          {quote.taxEnabled && <span style={{ fontSize: 11, color: '#64748B', marginLeft: 'auto' }}>{quote.taxRate}%</span>}
+        </div>
+        {quote.taxEnabled && catalog.taxAreas.length > 0 && (
+          <select value={quote.taxAreaId}
+            onChange={e => {
+              const area = catalog.taxAreas.find(a => a.id === e.target.value);
+              if (area) onUpdate({ taxAreaId: area.id, taxRate: area.rate });
+            }}
+            style={{ width: '100%', padding: '6px 8px', fontSize: 11, background: '#334155', color: '#F1F5F9', border: '1px solid #475569', borderRadius: 6, fontFamily: 'inherit', cursor: 'pointer' }}>
+            {catalog.taxAreas.map(ta => (
+              <option key={ta.id} value={ta.id}>{ta.name} ({ta.rate}%)</option>
+            ))}
+          </select>
+        )}
       </div>
 
       {/* Actions */}

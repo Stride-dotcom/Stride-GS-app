@@ -63,7 +63,7 @@ export function calcQuote(
     if (!entry?.selected) continue;
     const qty = entry.qty || 1;
     const rate = entry.rateOverride ?? svc.flatRate;
-    if (rate <= 0 && !entry.rateOverride) continue;
+    if (rate <= 0 && entry.rateOverride == null) continue;
     lineItems.push({
       serviceId: svc.id, serviceName: svc.name, serviceCode: svc.code,
       qty, rate, amount: qty * rate,

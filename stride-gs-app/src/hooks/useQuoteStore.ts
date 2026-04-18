@@ -37,10 +37,11 @@ function addDays(dateStr: string, days: number): string {
   return d.toISOString().slice(0, 10);
 }
 
-export function createBlankQuote(settings: QuoteStoreSettings, classes: QuoteCatalog['classes']): Quote {
+export function createBlankQuote(settings: QuoteStoreSettings, classes: QuoteCatalog['classes'], taxAreas: QuoteCatalog['taxAreas']): Quote {
   const today = todayISO();
   const num = settings.nextQuoteNumber;
   const classLines: ClassLine[] = classes.filter(c => c.active).map(c => ({ classId: c.id, qty: 0 }));
+  const defaultArea = taxAreas.find(a => a.id === settings.defaultTaxAreaId) ?? taxAreas[0];
   return {
     id: newQuoteId(),
     number: `${settings.quotePrefix}-${String(num).padStart(4, '0')}`,
@@ -53,7 +54,9 @@ export function createBlankQuote(settings: QuoteStoreSettings, classes: QuoteCat
     storage: { months: settings.defaultStorageMonths, days: 0 },
     otherServices: {},
     discount: { type: 'percent', value: 0, reason: '' },
-    taxEnabled: true, taxRate: 10.4, taxAreaId: 'kent',
+    taxEnabled: true,
+    taxRate: defaultArea?.rate ?? 10.4,
+    taxAreaId: defaultArea?.id ?? 'kent',
     coverage: { typeId: 'standard', declaredValue: 0, weightLbs: 0, costOverride: null },
     customerNotes: '', internalNotes: '',
     createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
@@ -107,11 +110,11 @@ export function useQuoteStore() {
 
   // Quote CRUD
   const createQuote = useCallback((): Quote => {
-    const q = createBlankQuote(settings, catalog.classes);
+    const q = createBlankQuote(settings, catalog.classes, catalog.taxAreas);
     setQuotes(prev => [q, ...prev]);
     setSettings(prev => ({ ...prev, nextQuoteNumber: prev.nextQuoteNumber + 1 }));
     return q;
-  }, [settings, catalog.classes, setQuotes, setSettings]);
+  }, [settings, catalog.classes, catalog.taxAreas, setQuotes, setSettings]);
 
   const updateQuote = useCallback((id: string, patch: Partial<Quote>) => {
     setQuotes(prev => prev.map(q => q.id === id ? { ...q, ...patch, updatedAt: new Date().toISOString() } : q));
@@ -124,7 +127,7 @@ export function useQuoteStore() {
   const duplicateQuote = useCallback((id: string): Quote | null => {
     const src = quotes.find(q => q.id === id);
     if (!src) return null;
-    const dup = createBlankQuote(settings, catalog.classes);
+    const dup = createBlankQuote(settings, catalog.classes, catalog.taxAreas);
     const copy: Quote = {
       ...src,
       id: dup.id,
@@ -136,7 +139,7 @@ export function useQuoteStore() {
     setQuotes(prev => [copy, ...prev]);
     setSettings(prev => ({ ...prev, nextQuoteNumber: prev.nextQuoteNumber + 1 }));
     return copy;
-  }, [quotes, settings, catalog.classes, setQuotes, setSettings]);
+  }, [quotes, settings, catalog.classes, catalog.taxAreas, setQuotes, setSettings]);
 
   const setQuoteStatus = useCallback((id: string, status: QuoteStatus) => {
     updateQuote(id, { status });
