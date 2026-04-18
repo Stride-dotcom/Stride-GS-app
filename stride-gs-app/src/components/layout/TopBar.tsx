@@ -77,12 +77,12 @@ export function TopBar({ isMobile, onMenuToggle }: TopBarProps) {
           ) : (
             <button onClick={() => setSearchOpen(true)} style={{
               display: 'flex', alignItems: 'center', gap: 8,
-              padding: '7px 14px', borderRadius: 8,
-              border: `1px solid ${theme.colors.borderDefault}`,
-              background: theme.colors.bgSubtle,
-              cursor: 'pointer', color: theme.colors.textMuted,
+              padding: '10px 18px', borderRadius: 100,
+              border: '1px solid rgba(0,0,0,0.08)',
+              background: '#fff',
+              cursor: 'pointer', color: '#888',
               fontSize: 13, fontFamily: theme.typography.fontFamily,
-              minWidth: 220, transition: 'border-color 0.15s',
+              minWidth: 240, transition: 'border-color 0.15s',
             }}>
               <Search size={14} />
               <span>Search items, tasks...</span>

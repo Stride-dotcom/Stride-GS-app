@@ -35,7 +35,7 @@ export function BatchProgress({ state, total, processed, succeeded, failed, acti
   return (
     <div style={{
       display: 'flex', alignItems: 'center', gap: 10,
-      padding: '8px 14px', borderRadius: 8,
+      padding: '12px 20px', borderRadius: 100,
       background: state === 'error' ? '#FEF2F2' : state === 'complete' ? '#F0FDF4' : theme.colors.bgSubtle,
       border: `1px solid ${state === 'error' ? '#FECACA' : state === 'complete' ? '#A7F3D0' : theme.colors.border}`,
       fontSize: 12, fontFamily: theme.typography.fontFamily,
@@ -102,7 +102,7 @@ export function ActionToast({ message, type, visible }: ToastProps) {
     <div style={{
       position: 'fixed', top: 16, right: 16, zIndex: 500,
       display: 'flex', alignItems: 'center', gap: 8,
-      padding: '10px 16px', borderRadius: 10,
+      padding: '12px 20px', borderRadius: 100,
       background: c.bg, border: `1px solid ${c.border}`,
       color: c.text, fontSize: 13, fontWeight: 500,
       boxShadow: '0 4px 16px rgba(0,0,0,0.1)',
