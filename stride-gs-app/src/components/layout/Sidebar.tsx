@@ -115,7 +115,7 @@ export function Sidebar({ collapsed, onToggle, onNavigate, failureCount = 0, onO
       style={{
         width: collapsed ? theme.sidebar.widthCollapsed : theme.sidebar.width,
         minWidth: collapsed ? theme.sidebar.widthCollapsed : theme.sidebar.width,
-        height: '100vh',
+        height: '100%',
         background: theme.colors.bgSidebar,
         borderRight: `1px solid ${theme.colors.borderSidebar}`,
         display: 'flex',
