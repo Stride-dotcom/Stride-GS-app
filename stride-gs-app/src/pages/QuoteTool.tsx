@@ -1,5 +1,4 @@
 import { useState, useCallback } from 'react';
-import { FileText, Hammer, BookOpen, Settings2 } from 'lucide-react';
 import { theme } from '../styles/theme';
 import { useQuoteStore } from '../hooks/useQuoteStore';
 import { useIsMobile } from '../hooks/useIsMobile';
@@ -11,11 +10,11 @@ import { QuoteSettings } from '../components/quotes/QuoteSettings';
 const v = theme.v2;
 type QuoteTab = 'my-quotes' | 'builder' | 'catalog' | 'settings';
 
-const TAB_DEFS: { id: QuoteTab; label: string; icon: React.ReactNode }[] = [
-  { id: 'my-quotes', label: 'My Quotes', icon: <FileText size={15} /> },
-  { id: 'builder',   label: 'Builder',   icon: <Hammer size={15} /> },
-  { id: 'catalog',   label: 'Catalog',   icon: <BookOpen size={15} /> },
-  { id: 'settings',  label: 'Settings',  icon: <Settings2 size={15} /> },
+const TABS: { id: QuoteTab; label: string }[] = [
+  { id: 'my-quotes', label: 'MY QUOTES' },
+  { id: 'builder',   label: 'BUILDER' },
+  { id: 'catalog',   label: 'CATALOG' },
+  { id: 'settings',  label: 'SETTINGS' },
 ];
 
 export function QuoteTool() {
@@ -35,35 +34,31 @@ export function QuoteTool() {
   }, [store]);
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 24, margin: '-28px -32px', padding: '28px 32px', minHeight: '100%', background: v.colors.bgPage, borderRadius: 0 }}>
-      {/* Header */}
-      <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between' }}>
-        <div>
-          <h1 style={{ fontSize: 28, fontWeight: 300, letterSpacing: '-0.5px', margin: 0, color: v.colors.text }}>Quote Tool</h1>
-          <p style={{ ...v.typography.label, marginTop: 6, marginBottom: 0 }}>CREATE AND MANAGE CLIENT ESTIMATES</p>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 24, margin: '-28px -32px', padding: '28px 32px', minHeight: '100%', background: v.colors.bgPage }}>
+      {/* Header — small inline branding */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <div style={{ fontSize: 13, fontWeight: 600, letterSpacing: '1px', color: v.colors.text }}>
+          STRIDE LOGISTICS · QUOTE TOOL
         </div>
+        <div style={{ fontSize: 11, color: v.colors.textMuted }}>OFFLINE · v1.0</div>
       </div>
 
-      {/* Tabs */}
-      <div style={{ display: 'flex', gap: 4, background: v.colors.bgCard, borderRadius: v.radius.badge, padding: 4 }}>
-        {TAB_DEFS.map(tab => {
+      {/* Tabs — dark active pill, text only, no icons */}
+      <div style={{ display: 'inline-flex', gap: 0, background: v.colors.bgCard, borderRadius: v.radius.badge, padding: 5, alignSelf: 'flex-start' }}>
+        {TABS.map(tab => {
           const active = activeTab === tab.id;
           return (
             <button key={tab.id} onClick={() => setActiveTab(tab.id)} style={{
-              display: 'flex', alignItems: 'center', gap: 8,
-              padding: isMobile ? '10px 14px' : '10px 20px',
-              fontSize: 12, fontWeight: active ? 600 : 500, fontFamily: 'inherit',
-              background: active ? v.colors.bgWhite : 'transparent',
+              padding: isMobile ? '9px 14px' : '9px 22px',
+              fontSize: 12, fontWeight: 600, fontFamily: 'inherit',
+              letterSpacing: '2px',
+              background: active ? v.colors.bgDark : 'transparent',
               border: 'none', cursor: 'pointer',
               borderRadius: v.radius.badge,
-              color: active ? v.colors.accent : v.colors.textSecondary,
+              color: active ? v.colors.textOnDark : v.colors.textMuted,
               transition: 'all 0.2s',
-              boxShadow: active ? '0 1px 4px rgba(0,0,0,0.08)' : 'none',
-              letterSpacing: '0.5px',
-              textTransform: 'uppercase',
             }}>
-              {tab.icon}
-              {!isMobile && tab.label}
+              {tab.label}
             </button>
           );
         })}
