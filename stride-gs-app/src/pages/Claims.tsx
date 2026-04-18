@@ -353,6 +353,7 @@ export function Claims() {
           onClick={async () => setShowCreateModal(true)}
         />
       </div>
+      <div style={{ background: '#FFFFFF', borderRadius: 20, padding: 24, border: '1px solid rgba(0,0,0,0.04)' }}>
 
       {/* Client Filter */}
       <div style={{ display: 'flex', gap: 10, alignItems: 'flex-end', marginBottom: 12, flexWrap: 'wrap' }}>
@@ -567,6 +568,7 @@ export function Claims() {
         />
       )}
       <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>{/* always-rendered for refresh button */}
+      </div>
     </div>
   );
 }

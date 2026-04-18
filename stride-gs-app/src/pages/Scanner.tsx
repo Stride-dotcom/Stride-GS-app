@@ -49,8 +49,8 @@ interface QueueItem {
 // tap targets, stacked queue rows, full-width modals).
 function makeStyles(isMobile: boolean) {
   return {
-    page: { display: 'flex', flexDirection: 'column' as const, height: '100%', fontFamily: theme.typography.fontFamily, background: '#f8f9fa' },
-    header: { display: 'flex', alignItems: 'center', gap: 10, padding: isMobile ? '10px 14px' : '14px 20px', borderBottom: `1px solid ${theme.colors.border}`, background: '#fff', flexShrink: 0 },
+    page: { display: 'flex', flexDirection: 'column' as const, height: '100%', fontFamily: theme.typography.fontFamily, background: '#F5F2EE', margin: '-28px -32px', padding: '28px 32px' },
+    header: { display: 'flex', alignItems: 'center', gap: 10, paddingBottom: 16, marginBottom: 16, flexShrink: 0 },
     body: {
       flex: 1, overflow: 'auto',
       padding: isMobile ? 10 : 16,
@@ -387,9 +387,8 @@ export function Scanner() {
   return (
     <div style={s.page}>
       <div style={s.header}>
-        <ScanLine size={18} color={theme.colors.primary} />
-        <span style={{ fontSize: 15, fontWeight: 600 }}>QR Scanner</span>
-        <span style={{ fontSize: 11, color: theme.colors.textMuted, marginLeft: 8 }}>Batch move items to a new location</span>
+        <div style={{ fontSize: 13, fontWeight: 600, letterSpacing: '1px', color: '#1C1C1C' }}>STRIDE LOGISTICS · QR SCANNER</div>
+        <span style={{ fontSize: 11, color: theme.colors.textMuted, marginLeft: 'auto' }}>Batch move items to a new location</span>
       </div>
 
       <div style={s.body}>

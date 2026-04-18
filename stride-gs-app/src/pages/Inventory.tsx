@@ -1390,6 +1390,7 @@ export function Inventory() {
           STRIDE LOGISTICS · INVENTORY
         </div>
       </div>
+      <div className="no-print" style={{ background: '#FFFFFF', borderRadius: 20, padding: 24, border: '1px solid rgba(0,0,0,0.04)', display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
 
       <SyncBanner syncing={refreshing} label={clientFilter.length === 1 ? clientFilter[0] : clientFilter.length > 1 ? `${clientFilter.length} clients` : undefined} />
 
@@ -2079,6 +2080,7 @@ export function Inventory() {
           { label: 'Transfer', icon: <Truck size={16} />, onClick: () => setShowTransferModal(true) },
         ] satisfies FABAction[]}
       />
+      </div>
     </div>
   );
 }

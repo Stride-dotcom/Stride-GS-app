@@ -566,6 +566,7 @@ export function Payments() {
           <WriteButton label="Import IIF" variant="secondary" icon={<Upload size={14} />} onClick={async () => setTab('iif')} />
         </div>
       </div>
+      <div style={{ background: '#FFFFFF', borderRadius: 20, padding: 24, border: '1px solid rgba(0,0,0,0.04)' }}>
 
       {error && <div style={{ padding: '8px 14px', marginBottom: 14, borderRadius: 8, background: '#FEF2F2', border: '1px solid #FECACA', fontSize: 12, color: '#DC2626' }}>{error}</div>}
       {chargeResult && <div style={{ padding: '8px 14px', marginBottom: 14, borderRadius: 8, background: chargeResult.includes('DRY RUN') ? '#FFFBEB' : '#F0FDF4', border: `1px solid ${chargeResult.includes('DRY RUN') ? '#FCD34D' : '#BBF7D0'}`, fontSize: 12, color: chargeResult.includes('DRY RUN') ? '#92400E' : '#166534', display: 'flex', alignItems: 'center', gap: 8 }}><CheckCircle2 size={14} /> {chargeResult} <button onClick={() => setChargeResult(null)} style={{ marginLeft: 'auto', background: 'none', border: 'none', cursor: 'pointer', color: chargeResult.includes('DRY RUN') ? '#92400E' : '#166534', fontSize: 16 }}>&times;</button></div>}
@@ -1736,6 +1737,7 @@ export function Payments() {
       {selectedCustomer && (
         <CustomerVerificationPanel customer={selectedCustomer} onClose={() => setSelectedCustomer(null)} />
       )}
+      </div>
     </div>
   );
 }

@@ -1501,6 +1501,7 @@ export function Billing() {
           <RefreshCw size={14} style={(refreshing || reportLoading || billingLoading) ? { animation: 'spin 1s linear infinite' } : undefined} />
         </button>
       </div>
+      <div style={{ background: '#FFFFFF', borderRadius: 20, padding: 24, border: '1px solid rgba(0,0,0,0.04)' }}>
 
       <SyncBanner syncing={refreshing || reportLoading} />
 
@@ -1998,6 +1999,7 @@ export function Billing() {
       )}
       <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
       {toast && createPortal(<div style={{ position: 'fixed', bottom: 80, left: '50%', transform: 'translateX(-50%)', background: '#1A1A1A', color: '#fff', padding: '10px 20px', borderRadius: 10, fontSize: 13, fontWeight: 600, zIndex: 9999, boxShadow: '0 4px 12px rgba(0,0,0,0.3)' }}>{toast}</div>, document.body)}
+      </div>
     </div>
   );
 }

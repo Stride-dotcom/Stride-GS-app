@@ -172,7 +172,7 @@ function useQrDataUrls(payloads: string[], size: number, enabled: boolean) {
 // ── Styles ─────────────────────────────────────────────────────────────
 function makeStyles(isMobile: boolean) {
   return {
-    page: { display: 'flex', flexDirection: 'column' as const, height: '100%', fontFamily: theme.typography.fontFamily, background: '#f8f9fa' },
+    page: { display: 'flex', flexDirection: 'column' as const, height: '100%', fontFamily: theme.typography.fontFamily, background: '#F5F2EE', margin: '-28px -32px', padding: '28px 32px' },
     header: { display: 'flex', alignItems: 'center', gap: 10, padding: isMobile ? '10px 14px' : '14px 20px', borderBottom: `1px solid ${theme.colors.border}`, background: '#fff', flexShrink: 0, flexWrap: 'wrap' as const },
     body: {
       flex: 1, overflow: 'auto',
@@ -562,9 +562,8 @@ export function Labels() {
   return (
     <div style={s.page}>
       <div style={s.header} className="no-print">
-        <Tag size={18} color={theme.colors.primary} />
-        <span style={{ fontSize: 15, fontWeight: 600 }}>Label Printer</span>
-        <span style={{ fontSize: 11, color: theme.colors.textMuted, marginLeft: 8 }}>
+        <div style={{ fontSize: 13, fontWeight: 600, letterSpacing: '1px', color: '#1C1C1C' }}>STRIDE LOGISTICS · LABELS</div>
+        <span style={{ fontSize: 11, color: theme.colors.textMuted, marginLeft: 12 }}>
           {sizeDef.label} · {printCount} label{printCount !== 1 ? 's' : ''}
         </span>
         {!isMobile && (

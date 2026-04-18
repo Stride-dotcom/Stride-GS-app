@@ -1733,7 +1733,7 @@ export function Settings() {
         </div>
 
         {/* Tab Content */}
-        <div>
+        <div style={{ background: '#EDE9E3', borderRadius: 20, padding: 24, border: '1px solid rgba(0,0,0,0.04)' }}>
           {tab === 'general' && (
             <>
               <div style={card}>
