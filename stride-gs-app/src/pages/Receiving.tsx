@@ -840,15 +840,5 @@ function NewShipmentForm() {
 }
 
 export function Receiving() {
-  return (
-    <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-        <div>
-          <h1 style={{ fontSize: 22, fontWeight: 700, letterSpacing: '-0.3px' }}>Receiving</h1>
-          <p style={{ fontSize: 13, color: theme.colors.textMuted, marginTop: 2 }}>Dock intake and shipment processing</p>
-        </div>
-      </div>
-      <NewShipmentForm />
-    </div>
-  );
+  return <NewShipmentForm />;
 }

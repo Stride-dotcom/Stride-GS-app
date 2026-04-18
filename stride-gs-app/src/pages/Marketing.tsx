@@ -94,12 +94,12 @@ function Badge({ label, colors }: { label: string; colors?: { bg: string; text: 
 function StatCard({ label, value, color, sub }: { label: string; value: string | number; color?: string; sub?: string }) {
   return (
     <div style={{
-      background: theme.colors.bgCard, border: `1px solid ${theme.colors.border}`,
-      borderRadius: 12, padding: 14, minWidth: 0,
+      background: '#1C1C1C', border: 'none',
+      borderRadius: 20, padding: '20px 22px', minWidth: 0,
     }}>
-      <div style={{ fontSize: 10, color: theme.colors.textMuted, fontWeight: 700, textTransform: 'uppercase', marginBottom: 4 }}>{label}</div>
-      <div style={{ fontSize: 22, fontWeight: 800, color: color || theme.colors.text }}>{value}</div>
-      {sub && <div style={{ fontSize: 10, color: theme.colors.textMuted, marginTop: 2 }}>{sub}</div>}
+      <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.55)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '1.5px', marginBottom: 10 }}>{label}</div>
+      <div style={{ fontSize: 28, fontWeight: 300, color: color || '#fff', lineHeight: 1 }}>{value}</div>
+      {sub && <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.45)', marginTop: 8 }}>{sub}</div>}
     </div>
   );
 }
