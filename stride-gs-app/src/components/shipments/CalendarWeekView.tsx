@@ -6,6 +6,7 @@ import { CalendarTooltip } from './CalendarTooltip';
 interface Props {
   weekStart: Date; // Sunday
   events: CalendarEvent[];
+  onEventClick?: (event: CalendarEvent) => void;
 }
 
 function toDateKey(d: Date): string {
@@ -17,7 +18,7 @@ function toDateKey(d: Date): string {
 
 const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
-export function CalendarWeekView({ weekStart, events }: Props) {
+export function CalendarWeekView({ weekStart, events, onEventClick }: Props) {
   const [hover, setHover] = useState<{ event: CalendarEvent; x: number; y: number } | null>(null);
 
   const days = useMemo(() => {
@@ -84,6 +85,7 @@ export function CalendarWeekView({ weekStart, events }: Props) {
                     setHover({ event: ev, x: rect.right + 8, y: rect.top });
                   }}
                   onMouseLeave={() => setHover(null)}
+                  onClick={onEventClick ? () => { setHover(null); onEventClick(ev); } : undefined}
                 />
               ))}
             </div>

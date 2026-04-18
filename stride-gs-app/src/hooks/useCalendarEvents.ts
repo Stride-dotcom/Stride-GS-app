@@ -19,6 +19,8 @@ export interface CalendarEvent {
   type: CalendarEventType;
   date: string; // YYYY-MM-DD
   client: string;
+  clientSheetId?: string; // populated for willcall + repair; used for deep-link
+  sourceId?: string;      // raw entity id (wcNumber, repairId) or expected-shipment id
   label: string;
   details: {
     title?: string;
@@ -76,6 +78,8 @@ export function useCalendarEvents() {
         type: 'shipment',
         date: d,
         client: e.client,
+        clientSheetId: e.clientSheetId,
+        sourceId: e.id,
         label: e.vendor || e.client || 'Expected',
         details: {
           title: e.vendor ? `${e.vendor}` : 'Expected Shipment',
@@ -98,6 +102,8 @@ export function useCalendarEvents() {
         type: 'willcall',
         date: d,
         client: wc.clientName,
+        clientSheetId: wc.clientSheetId,
+        sourceId: wc.wcNumber,
         label: wc.wcNumber,
         details: {
           title: wc.wcNumber,
@@ -119,6 +125,8 @@ export function useCalendarEvents() {
         type: 'repair',
         date: d,
         client: rp.clientName,
+        clientSheetId: rp.clientSheetId,
+        sourceId: rp.repairId,
         label: rp.repairId,
         details: {
           title: rp.repairId,

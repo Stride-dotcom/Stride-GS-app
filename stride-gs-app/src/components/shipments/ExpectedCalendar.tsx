@@ -1,7 +1,9 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { ChevronLeft, ChevronRight, Plus } from 'lucide-react';
-import { useCalendarEvents } from '../../hooks/useCalendarEvents';
-import { useExpectedShipments } from '../../hooks/useExpectedShipments';
+import { useNavigate } from 'react-router-dom';
+import { useCalendarEvents, type CalendarEvent } from '../../hooks/useCalendarEvents';
+import { useExpectedShipments, type ExpectedShipment } from '../../hooks/useExpectedShipments';
+import { useClients } from '../../hooks/useClients';
 import { CalendarMonthView } from './CalendarMonthView';
 import { CalendarWeekView } from './CalendarWeekView';
 import { AddExpectedModal } from './AddExpectedModal';
@@ -31,9 +33,39 @@ export function ExpectedCalendar() {
   const [view, setView] = useState<ViewMode>('month');
   const [anchor, setAnchor] = useState<Date>(() => new Date());
   const [showAdd, setShowAdd] = useState(false);
+  const [editingEvent, setEditingEvent] = useState<ExpectedShipment | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
 
   const { events, loading } = useCalendarEvents();
-  const { add: addExpected } = useExpectedShipments();
+  const { items: expectedItems, add: addExpected, update: updateExpected, remove: removeExpected } = useExpectedShipments();
+  const { apiClients } = useClients();
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(() => setToast(null), 2000);
+    return () => clearTimeout(t);
+  }, [toast]);
+
+  const handleEventClick = (ev: CalendarEvent) => {
+    if (ev.type === 'willcall' || ev.type === 'repair') {
+      // Resolve clientSheetId from the event, or fall back to looking up by clientName
+      const sheetId = ev.clientSheetId
+        || apiClients.find(c => c.name === ev.client)?.spreadsheetId;
+      if (!ev.sourceId) return;
+      const params = new URLSearchParams();
+      params.set('open', ev.sourceId);
+      if (sheetId) params.set('client', sheetId);
+      const page = ev.type === 'willcall' ? 'will-calls' : 'repairs';
+      navigate(`/${page}?${params.toString()}`);
+      return;
+    }
+    // Expected shipment → open edit modal
+    if (ev.type === 'shipment' && ev.sourceId) {
+      const entry = expectedItems.find(e => e.id === ev.sourceId);
+      if (entry) setEditingEvent(entry);
+    }
+  };
 
   const today = new Date();
   const weekStart = useMemo(() => startOfWeek(anchor), [anchor]);
@@ -170,16 +202,37 @@ export function ExpectedCalendar() {
           Loading calendar...
         </div>
       ) : view === 'month' ? (
-        <CalendarMonthView year={anchor.getFullYear()} month={anchor.getMonth()} events={events} />
+        <CalendarMonthView year={anchor.getFullYear()} month={anchor.getMonth()} events={events} onEventClick={handleEventClick} />
       ) : (
-        <CalendarWeekView weekStart={weekStart} events={events} />
+        <CalendarWeekView weekStart={weekStart} events={events} onEventClick={handleEventClick} />
       )}
 
       {showAdd && (
         <AddExpectedModal
           onClose={() => setShowAdd(false)}
-          onSave={(entry) => addExpected(entry)}
+          onSave={(entry) => { addExpected(entry); setToast('Expected shipment added'); }}
         />
+      )}
+
+      {editingEvent && (
+        <AddExpectedModal
+          key={editingEvent.id}
+          editingEvent={editingEvent}
+          onClose={() => setEditingEvent(null)}
+          onSave={(entry) => { updateExpected(editingEvent.id, entry); setToast('Expected shipment updated'); }}
+          onDelete={(id) => { removeExpected(id); setToast('Expected shipment deleted'); }}
+        />
+      )}
+
+      {toast && (
+        <div style={{
+          position: 'fixed', bottom: 28, left: '50%', transform: 'translateX(-50%)',
+          background: '#1C1C1C', color: '#fff', padding: '10px 20px', borderRadius: 100,
+          fontSize: 12, fontWeight: 500, letterSpacing: '0.02em',
+          boxShadow: '0 8px 32px rgba(0,0,0,0.3)', zIndex: 10001,
+        }}>
+          {toast}
+        </div>
       )}
     </div>
   );

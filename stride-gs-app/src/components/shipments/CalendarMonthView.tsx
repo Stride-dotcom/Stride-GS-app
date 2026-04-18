@@ -7,6 +7,7 @@ interface Props {
   year: number;
   month: number; // 0-11
   events: CalendarEvent[];
+  onEventClick?: (event: CalendarEvent) => void;
 }
 
 function toDateKey(d: Date): string {
@@ -18,7 +19,7 @@ function toDateKey(d: Date): string {
 
 const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
-export function CalendarMonthView({ year, month, events }: Props) {
+export function CalendarMonthView({ year, month, events, onEventClick }: Props) {
   const [hover, setHover] = useState<{ event: CalendarEvent; x: number; y: number } | null>(null);
   const [expandDate, setExpandDate] = useState<string | null>(null);
 
@@ -100,6 +101,7 @@ export function CalendarMonthView({ year, month, events }: Props) {
                     setHover({ event: ev, x: rect.right + 8, y: rect.top });
                   }}
                   onMouseLeave={() => setHover(null)}
+                  onClick={onEventClick ? () => { setHover(null); onEventClick(ev); } : undefined}
                 />
               ))}
               {!expanded && hidden > 0 && (

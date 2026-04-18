@@ -1,5 +1,5 @@
 import { useState, useMemo } from 'react';
-import { X } from 'lucide-react';
+import { X, Trash2 } from 'lucide-react';
 import { useClients } from '../../hooks/useClients';
 import { useAuth } from '../../contexts/AuthContext';
 import type { ExpectedShipment } from '../../hooks/useExpectedShipments';
@@ -8,24 +8,30 @@ const CARRIERS = [
   'Unknown', 'UPS', 'FedEx', 'USPS', 'Freight-LTL', 'White Glove', 'Client Drop-off', 'Other',
 ];
 
+type EntryPayload = Omit<ExpectedShipment, 'id' | 'createdBy' | 'createdAt'>;
+
 interface Props {
   onClose: () => void;
-  onSave: (entry: Omit<ExpectedShipment, 'id' | 'createdBy' | 'createdAt'>) => void;
+  onSave: (entry: EntryPayload) => void;
+  editingEvent?: ExpectedShipment;
+  onDelete?: (id: string) => void;
 }
 
-export function AddExpectedModal({ onClose, onSave }: Props) {
+export function AddExpectedModal({ onClose, onSave, editingEvent, onDelete }: Props) {
   const { apiClients } = useClients();
   const { user } = useAuth();
+  const isEdit = !!editingEvent;
 
-  const [client, setClient] = useState('');
-  const [clientSheetId, setClientSheetId] = useState<string | undefined>();
+  const [client, setClient] = useState(editingEvent?.client ?? '');
+  const [clientSheetId, setClientSheetId] = useState<string | undefined>(editingEvent?.clientSheetId);
   const [showClientDrop, setShowClientDrop] = useState(false);
-  const [vendor, setVendor] = useState('');
-  const [carrier, setCarrier] = useState('Unknown');
-  const [tracking, setTracking] = useState('');
-  const [expectedDate, setExpectedDate] = useState(new Date().toISOString().slice(0, 10));
-  const [pieces, setPieces] = useState('');
-  const [notes, setNotes] = useState('');
+  const [vendor, setVendor] = useState(editingEvent?.vendor ?? '');
+  const [carrier, setCarrier] = useState(editingEvent?.carrier ?? 'Unknown');
+  const [tracking, setTracking] = useState(editingEvent?.tracking ?? '');
+  const [expectedDate, setExpectedDate] = useState(editingEvent?.expectedDate ?? new Date().toISOString().slice(0, 10));
+  const [pieces, setPieces] = useState(editingEvent?.pieces != null ? String(editingEvent.pieces) : '');
+  const [notes, setNotes] = useState(editingEvent?.notes ?? '');
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
   const accessibleClients = useMemo(() => {
     if (user?.role === 'client' && user.accessibleClientNames?.length) {
@@ -74,7 +80,7 @@ export function AddExpectedModal({ onClose, onSave }: Props) {
           boxShadow: '0 20px 60px rgba(0,0,0,0.2)',
         }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
-          <div style={{ fontSize: 20, fontWeight: 400, color: '#1C1C1C' }}>Add Expected Shipment</div>
+          <div style={{ fontSize: 20, fontWeight: 400, color: '#1C1C1C' }}>{isEdit ? 'Edit Expected Shipment' : 'Add Expected Shipment'}</div>
           <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4 }}>
             <X size={18} color="#666" />
           </button>
@@ -147,11 +153,32 @@ export function AddExpectedModal({ onClose, onSave }: Props) {
           />
         </Field>
 
-        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10, marginTop: 20 }}>
-          <button onClick={onClose} style={btnGhost}>Cancel</button>
-          <button onClick={handleSave} disabled={!canSave} style={{ ...btnPrimary, opacity: canSave ? 1 : 0.5, cursor: canSave ? 'pointer' : 'not-allowed' }}>
-            Add to Calendar
-          </button>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, marginTop: 20 }}>
+          <div>
+            {isEdit && onDelete && editingEvent && (
+              <button
+                onClick={() => {
+                  if (confirmDelete) {
+                    onDelete(editingEvent.id);
+                    onClose();
+                  } else {
+                    setConfirmDelete(true);
+                    setTimeout(() => setConfirmDelete(false), 3000);
+                  }
+                }}
+                style={confirmDelete ? btnDangerConfirm : btnDanger}
+              >
+                <Trash2 size={13} style={{ marginRight: 6, verticalAlign: '-2px' }} />
+                {confirmDelete ? 'Confirm Delete' : 'Delete'}
+              </button>
+            )}
+          </div>
+          <div style={{ display: 'flex', gap: 10 }}>
+            <button onClick={onClose} style={btnGhost}>Cancel</button>
+            <button onClick={handleSave} disabled={!canSave} style={{ ...btnPrimary, opacity: canSave ? 1 : 0.5, cursor: canSave ? 'pointer' : 'not-allowed' }}>
+              {isEdit ? 'Save Changes' : 'Add to Calendar'}
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -183,4 +210,16 @@ const btnPrimary: React.CSSProperties = {
   padding: '10px 20px', fontSize: 11, fontWeight: 600, letterSpacing: '2px',
   textTransform: 'uppercase', border: 'none', borderRadius: 100,
   background: '#E8692A', color: '#fff',
+};
+
+const btnDanger: React.CSSProperties = {
+  padding: '10px 18px', fontSize: 11, fontWeight: 600, letterSpacing: '2px',
+  textTransform: 'uppercase', border: '1px solid rgba(180,90,90,0.4)', borderRadius: 100,
+  background: 'rgba(180,90,90,0.1)', color: '#B45A5A', cursor: 'pointer',
+  display: 'inline-flex', alignItems: 'center',
+};
+
+const btnDangerConfirm: React.CSSProperties = {
+  ...btnDanger,
+  background: '#B45A5A', color: '#fff', border: '1px solid #B45A5A',
 };
