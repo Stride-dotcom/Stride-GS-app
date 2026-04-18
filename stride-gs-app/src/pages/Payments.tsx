@@ -574,34 +574,34 @@ export function Payments() {
       <ProcessingOverlay visible={creatingInvoices} message="Creating Stax invoices..." />
 
       {/* Summary Cards */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 14, marginBottom: 20 }}>
-        <div style={card}>
-          <div style={{ fontSize: 11, fontWeight: 500, color: theme.colors.textMuted, textTransform: 'uppercase', marginBottom: 6, display: 'flex', alignItems: 'center' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 16, marginBottom: 24 }}>
+        <div style={{ background: '#1C1C1C', borderRadius: 20, padding: '20px 22px' }}>
+          <div style={{ fontSize: 10, fontWeight: 600, color: 'rgba(255,255,255,0.55)', textTransform: 'uppercase', letterSpacing: '2px', marginBottom: 10, display: 'flex', alignItems: 'center' }}>
             <span>Pending Invoices</span>
             <InfoTooltip text="Invoices that have been created in Stax but have NOT been paid yet. These will be charged automatically on their due date (if Auto-Charge is on), or you can charge them manually." />
           </div>
-          <div style={{ fontSize: 24, fontWeight: 700 }}>{pendingInvoices.length}</div>
-          <div style={{ fontSize: 12, color: theme.colors.textMuted, marginTop: 2 }}>${pendingTotal.toFixed(2)} total</div>
+          <div style={{ fontSize: 28, fontWeight: 300, color: '#fff', lineHeight: 1 }}>{pendingInvoices.length}</div>
+          <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.45)', marginTop: 8 }}>${pendingTotal.toFixed(2)} total</div>
         </div>
-        <div style={card}>
-          <div style={{ fontSize: 11, fontWeight: 500, color: theme.colors.textMuted, textTransform: 'uppercase', marginBottom: 6, display: 'flex', alignItems: 'center' }}>
+        <div style={{ background: '#1C1C1C', borderRadius: 20, padding: '20px 22px' }}>
+          <div style={{ fontSize: 10, fontWeight: 600, color: 'rgba(255,255,255,0.55)', textTransform: 'uppercase', letterSpacing: '2px', marginBottom: 10, display: 'flex', alignItems: 'center' }}>
             <span>Collected (30d)</span>
             <InfoTooltip text="Total money successfully charged to customer credit cards in the last 30 days. This is real money that landed in your account (minus Stax processing fees)." />
           </div>
-          <div style={{ fontSize: 24, fontWeight: 700, color: '#15803D' }}>${collectedTotal.toFixed(2)}</div>
-          <div style={{ fontSize: 12, color: theme.colors.textMuted, marginTop: 2 }}>{paidCharges.length} successful charges</div>
+          <div style={{ fontSize: 28, fontWeight: 300, color: '#4ADE80', lineHeight: 1 }}>${collectedTotal.toFixed(2)}</div>
+          <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.45)', marginTop: 8 }}>{paidCharges.length} successful charges</div>
         </div>
-        <div style={card}>
-          <div style={{ fontSize: 11, fontWeight: 500, color: theme.colors.textMuted, textTransform: 'uppercase', marginBottom: 6, display: 'flex', alignItems: 'center' }}>
+        <div style={{ background: '#1C1C1C', borderRadius: 20, padding: '20px 22px' }}>
+          <div style={{ fontSize: 10, fontWeight: 600, color: 'rgba(255,255,255,0.55)', textTransform: 'uppercase', letterSpacing: '2px', marginBottom: 10, display: 'flex', alignItems: 'center' }}>
             <span>Open Exceptions</span>
             <InfoTooltip text="Charges that failed and need you to fix something. Common reasons: expired card, no card on file, declined transaction, customer not matched to Stax. Click the Exceptions tab to see details and resolve each one." />
           </div>
-          <div style={{ fontSize: 24, fontWeight: 700, color: '#DC2626' }}>{unresolvedExceptions.length}</div>
-          <div style={{ fontSize: 12, color: theme.colors.textMuted, marginTop: 2 }}>Require manual attention</div>
+          <div style={{ fontSize: 28, fontWeight: 300, color: '#F87171', lineHeight: 1 }}>{unresolvedExceptions.length}</div>
+          <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.45)', marginTop: 8 }}>Require manual attention</div>
         </div>
-        <div style={card}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-            <div style={{ fontSize: 11, fontWeight: 500, color: theme.colors.textMuted, textTransform: 'uppercase', display: 'flex', alignItems: 'center' }}>
+        <div style={{ background: '#1C1C1C', borderRadius: 20, padding: '20px 22px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+            <div style={{ fontSize: 10, fontWeight: 600, color: 'rgba(255,255,255,0.55)', textTransform: 'uppercase', letterSpacing: '2px', display: 'flex', alignItems: 'center' }}>
               <span>Auto-Charge</span>
               <InfoTooltip text="When ON, the system automatically charges customer credit cards each day at 9:00 AM Pacific for any invoices that are due that day. When OFF, nothing gets charged automatically — you'd have to run charges manually. Turn this on for hands-off collection, off while you're testing or troubleshooting." />
             </div>
@@ -613,11 +613,11 @@ export function Payments() {
                 if (!res.ok) { setAutoCharge(!newVal); setError(res.error || 'Failed to update'); }
                 else { loadData(); }
               }} style={{ opacity: 0, width: 0, height: 0 }} />
-              <span style={{ position: 'absolute', inset: 0, background: autoCharge ? theme.colors.orange : theme.colors.border, borderRadius: 11, transition: '0.2s' }}><span style={{ position: 'absolute', top: 2, left: autoCharge ? 20 : 2, width: 18, height: 18, background: '#fff', borderRadius: '50%', transition: '0.2s', boxShadow: '0 1px 3px rgba(0,0,0,0.15)' }} /></span>
+              <span style={{ position: 'absolute', inset: 0, background: autoCharge ? theme.colors.orange : 'rgba(255,255,255,0.2)', borderRadius: 11, transition: '0.2s' }}><span style={{ position: 'absolute', top: 2, left: autoCharge ? 20 : 2, width: 18, height: 18, background: '#fff', borderRadius: '50%', transition: '0.2s', boxShadow: '0 1px 3px rgba(0,0,0,0.15)' }} /></span>
             </label>
           </div>
-          <div style={{ fontSize: 13, fontWeight: 600, color: autoCharge ? '#15803D' : theme.colors.textMuted }}>{autoCharge ? 'Enabled' : 'Disabled'}</div>
-          <div style={{ fontSize: 11, color: theme.colors.textMuted, marginTop: 2 }}>Daily at 9:00 AM Pacific</div>
+          <div style={{ fontSize: 22, fontWeight: 300, color: autoCharge ? '#4ADE80' : 'rgba(255,255,255,0.45)' }}>{autoCharge ? 'Enabled' : 'Disabled'}</div>
+          <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.45)', marginTop: 8 }}>Daily at 9:00 AM Pacific</div>
         </div>
       </div>
 

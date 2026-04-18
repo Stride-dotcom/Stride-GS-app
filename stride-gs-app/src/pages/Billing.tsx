@@ -181,11 +181,11 @@ function InvoiceReviewTab() {
   const total = approved.reduce((s, r) => s + r.total, 0);
   return (
     <div>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 14, marginBottom: 16 }}>
-        {[{ label: 'Pending Review', value: pending.length, color: '#B45309' }, { label: 'Approved', value: approved.length, color: '#15803D' }, { label: 'Approved Total', value: `$${total.toFixed(2)}`, color: theme.colors.orange }].map(({ label, value, color }) => (
-          <div key={label} style={{ padding: '14px 18px', background: '#fff', border: `1px solid ${theme.colors.border}`, borderRadius: 12 }}>
-            <div style={{ fontSize: 11, fontWeight: 500, color: theme.colors.textMuted, textTransform: 'uppercase', marginBottom: 4 }}>{label}</div>
-            <div style={{ fontSize: 22, fontWeight: 700, color }}>{value}</div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 16, marginBottom: 20 }}>
+        {[{ label: 'Pending Review', value: pending.length, color: '#FBBF24' }, { label: 'Approved', value: approved.length, color: '#4ADE80' }, { label: 'Approved Total', value: `$${total.toFixed(2)}`, color: '#E8692A' }].map(({ label, value, color }) => (
+          <div key={label} style={{ padding: '20px 22px', background: '#1C1C1C', borderRadius: 20 }}>
+            <div style={{ fontSize: 10, fontWeight: 600, color: 'rgba(255,255,255,0.55)', textTransform: 'uppercase', letterSpacing: '2px', marginBottom: 10 }}>{label}</div>
+            <div style={{ fontSize: 28, fontWeight: 300, color, lineHeight: 1 }}>{value}</div>
           </div>
         ))}
       </div>
@@ -1568,18 +1568,18 @@ export function Billing() {
 
           {/* Summary cards (only when data loaded) */}
           {reportLoaded && !reportLoading && reportData.length > 0 && (
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 14, marginBottom: 16 }}>
-              <div style={{ padding: '14px 18px', background: '#fff', border: `1px solid ${theme.colors.border}`, borderRadius: 12 }}>
-                <div style={{ fontSize: 11, fontWeight: 500, color: theme.colors.textMuted, textTransform: 'uppercase', marginBottom: 4 }}>Rows</div>
-                <div style={{ fontSize: 22, fontWeight: 700, color: theme.colors.text }}>{reportRowCount}</div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 16, marginBottom: 20 }}>
+              <div style={{ padding: '20px 22px', background: '#1C1C1C', borderRadius: 20 }}>
+                <div style={{ fontSize: 10, fontWeight: 600, color: 'rgba(255,255,255,0.55)', textTransform: 'uppercase', letterSpacing: '2px', marginBottom: 10 }}>Rows</div>
+                <div style={{ fontSize: 28, fontWeight: 300, color: '#fff', lineHeight: 1 }}>{reportRowCount}</div>
               </div>
-              <div style={{ padding: '14px 18px', background: '#fff', border: `1px solid ${theme.colors.border}`, borderRadius: 12 }}>
-                <div style={{ fontSize: 11, fontWeight: 500, color: theme.colors.textMuted, textTransform: 'uppercase', marginBottom: 4 }}>Clients</div>
-                <div style={{ fontSize: 22, fontWeight: 700, color: theme.colors.text }}>{reportClientCount}</div>
+              <div style={{ padding: '20px 22px', background: '#1C1C1C', borderRadius: 20 }}>
+                <div style={{ fontSize: 10, fontWeight: 600, color: 'rgba(255,255,255,0.55)', textTransform: 'uppercase', letterSpacing: '2px', marginBottom: 10 }}>Clients</div>
+                <div style={{ fontSize: 28, fontWeight: 300, color: '#60A5FA', lineHeight: 1 }}>{reportClientCount}</div>
               </div>
-              <div style={{ padding: '14px 18px', background: '#fff', border: `1px solid ${theme.colors.border}`, borderRadius: 12 }}>
-                <div style={{ fontSize: 11, fontWeight: 500, color: theme.colors.textMuted, textTransform: 'uppercase', marginBottom: 4 }}>Total</div>
-                <div style={{ fontSize: 22, fontWeight: 700, color: theme.colors.orange }}>${reportTotal.toFixed(2)}</div>
+              <div style={{ padding: '20px 22px', background: '#1C1C1C', borderRadius: 20 }}>
+                <div style={{ fontSize: 10, fontWeight: 600, color: 'rgba(255,255,255,0.55)', textTransform: 'uppercase', letterSpacing: '2px', marginBottom: 10 }}>Total</div>
+                <div style={{ fontSize: 28, fontWeight: 300, color: '#E8692A', lineHeight: 1 }}>${reportTotal.toFixed(2)}</div>
               </div>
             </div>
           )}

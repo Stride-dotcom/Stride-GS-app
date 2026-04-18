@@ -525,18 +525,18 @@ export function Shipments() {
       </div>
 
       {/* Summary Cards */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: 20 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 16, marginBottom: 24 }}>
         {[
-          { label: 'Total Shipments', value: data.length, color: theme.colors.text },
-          { label: 'Received', value: receivedCount, color: '#15803D' },
-          { label: 'Pending', value: pendingCount, color: '#B45309' },
-          { label: 'Total Items', value: totalItems, color: '#1D4ED8' },
+          { label: 'Total Shipments', value: data.length, color: '#fff' },
+          { label: 'Received', value: receivedCount, color: '#4ADE80' },
+          { label: 'Pending', value: pendingCount, color: '#FBBF24' },
+          { label: 'Total Items', value: totalItems, color: '#60A5FA' },
         ].map(c => (
           <div key={c.label} style={{
-            background: '#fff', border: `1px solid ${theme.colors.border}`, borderRadius: 12, padding: '14px 16px',
+            background: '#1C1C1C', border: 'none', borderRadius: 20, padding: '20px 22px',
           }}>
-            <div style={{ fontSize: 10, fontWeight: 500, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.04em' }}>{c.label}</div>
-            <div style={{ fontSize: 22, fontWeight: 700, color: c.color, marginTop: 2 }}>{c.value}</div>
+            <div style={{ fontSize: 10, fontWeight: 600, color: 'rgba(255,255,255,0.55)', textTransform: 'uppercase', letterSpacing: '2px', marginBottom: 10 }}>{c.label}</div>
+            <div style={{ fontSize: 28, fontWeight: 300, color: c.color, lineHeight: 1 }}>{c.value}</div>
           </div>
         ))}
       </div>

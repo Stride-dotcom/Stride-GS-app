@@ -668,9 +668,9 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
                   <button
                     onClick={() => handleStartTask()}
                     disabled={startTaskLoading}
-                    style={{ width: '100%', padding: '9px 14px', fontSize: 13, fontWeight: 600, borderRadius: 8, border: `1px solid ${theme.colors.border}`, background: startTaskLoading ? theme.colors.bgSubtle : '#fff', color: startTaskLoading ? theme.colors.textMuted : theme.colors.orange, cursor: startTaskLoading ? 'wait' : 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, marginBottom: 8 }}
+                    style={{ width: '100%', padding: '14px 20px', fontSize: 12, fontWeight: 600, letterSpacing: '2px', textTransform: 'uppercase', borderRadius: 100, border: 'none', background: startTaskLoading ? 'rgba(124,58,237,0.5)' : '#7C3AED', color: '#fff', cursor: startTaskLoading ? 'wait' : 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, marginBottom: 8, boxShadow: '0 4px 14px rgba(124,58,237,0.3)' }}
                   >
-                    {startTaskLoading ? <Loader2 size={15} style={{ animation: 'spin 1s linear infinite' }} /> : <Play size={15} />}
+                    {startTaskLoading ? <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} /> : <Play size={16} fill="#fff" />}
                     {startTaskLoading ? 'Creating folder & work order…' : 'Start Task'}
                   </button>
                 )}

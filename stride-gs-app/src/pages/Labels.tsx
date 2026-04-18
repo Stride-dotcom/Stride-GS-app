@@ -173,7 +173,7 @@ function useQrDataUrls(payloads: string[], size: number, enabled: boolean) {
 function makeStyles(isMobile: boolean) {
   return {
     page: { display: 'flex', flexDirection: 'column' as const, height: '100%', fontFamily: theme.typography.fontFamily, background: '#F5F2EE', margin: '-28px -32px', padding: '28px 32px' },
-    header: { display: 'flex', alignItems: 'center', gap: 10, padding: isMobile ? '10px 14px' : '14px 20px', borderBottom: `1px solid ${theme.colors.border}`, background: '#fff', flexShrink: 0, flexWrap: 'wrap' as const },
+    header: { display: 'flex', alignItems: 'center', gap: 10, paddingBottom: 16, marginBottom: 16, flexShrink: 0, flexWrap: 'wrap' as const },
     body: {
       flex: 1, overflow: 'auto',
       padding: isMobile ? 10 : 16,
@@ -183,12 +183,12 @@ function makeStyles(isMobile: boolean) {
       gap: isMobile ? 10 : 16,
       minHeight: 0,
     } as React.CSSProperties,
-    card: { background: '#fff', border: `1px solid ${theme.colors.border}`, borderRadius: 10, padding: isMobile ? 10 : 14, display: 'flex', flexDirection: 'column' as const },
-    cardTitle: { fontSize: 12, fontWeight: 600, color: theme.colors.text, textTransform: 'uppercase' as const, letterSpacing: '0.04em', marginBottom: 8, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' as const },
-    textarea: { width: '100%', minHeight: isMobile ? 70 : 80, padding: '10px 12px', border: `1px solid ${theme.colors.border}`, borderRadius: 6, fontSize: 16 /* prevents iOS zoom */, fontFamily: 'monospace', outline: 'none', resize: 'vertical' as const, boxSizing: 'border-box' as const },
-    btnPrimary: { padding: isMobile ? '10px 16px' : '8px 14px', fontSize: 13, fontWeight: 600, background: theme.colors.primary, color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontFamily: 'inherit', display: 'inline-flex', alignItems: 'center', gap: 5, justifyContent: 'center' as const, minHeight: isMobile ? 40 : undefined },
-    btnSecondary: { padding: isMobile ? '9px 14px' : '6px 12px', fontSize: 12, fontWeight: 500, background: '#fff', color: theme.colors.text, border: `1px solid ${theme.colors.border}`, borderRadius: 6, cursor: 'pointer', fontFamily: 'inherit', display: 'inline-flex', alignItems: 'center', gap: 4, minHeight: isMobile ? 38 : undefined },
-    btnDanger: { padding: isMobile ? '9px 14px' : '6px 12px', fontSize: 12, fontWeight: 500, background: '#fff', color: '#DC2626', border: '1px solid #FCA5A5', borderRadius: 6, cursor: 'pointer', fontFamily: 'inherit', display: 'inline-flex', alignItems: 'center', gap: 4, minHeight: isMobile ? 38 : undefined },
+    card: { background: '#fff', border: '1px solid rgba(0,0,0,0.04)', borderRadius: 20, padding: isMobile ? 16 : 24, display: 'flex', flexDirection: 'column' as const },
+    cardTitle: { fontSize: 10, fontWeight: 600, color: '#E8692A', textTransform: 'uppercase' as const, letterSpacing: '2px', marginBottom: 12, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' as const },
+    textarea: { width: '100%', minHeight: isMobile ? 70 : 80, padding: '12px 16px', border: '1px solid rgba(0,0,0,0.08)', borderRadius: 12, fontSize: 16, fontFamily: 'monospace', outline: 'none', resize: 'vertical' as const, boxSizing: 'border-box' as const },
+    btnPrimary: { padding: isMobile ? '14px 22px' : '12px 24px', fontSize: 11, fontWeight: 600, letterSpacing: '1.5px', textTransform: 'uppercase' as const, background: theme.colors.primary, color: '#fff', border: 'none', borderRadius: 100, cursor: 'pointer', fontFamily: 'inherit', display: 'inline-flex', alignItems: 'center', gap: 5, justifyContent: 'center' as const, minHeight: isMobile ? 44 : undefined },
+    btnSecondary: { padding: isMobile ? '11px 18px' : '10px 18px', fontSize: 11, fontWeight: 600, letterSpacing: '1.5px', textTransform: 'uppercase' as const, background: '#fff', color: '#666', border: '1px solid rgba(0,0,0,0.08)', borderRadius: 100, cursor: 'pointer', fontFamily: 'inherit', display: 'inline-flex', alignItems: 'center', gap: 4, minHeight: isMobile ? 42 : undefined },
+    btnDanger: { padding: isMobile ? '11px 18px' : '10px 18px', fontSize: 11, fontWeight: 600, letterSpacing: '1.5px', textTransform: 'uppercase' as const, background: '#fff', color: '#DC2626', border: '1px solid #FCA5A5', borderRadius: 100, cursor: 'pointer', fontFamily: 'inherit', display: 'inline-flex', alignItems: 'center', gap: 4, minHeight: isMobile ? 42 : undefined },
     row: { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 } as React.CSSProperties,
     label: { fontSize: 11, fontWeight: 500, textTransform: 'uppercase' as const, letterSpacing: '0.04em', color: theme.colors.textMuted, flex: '0 0 auto', minWidth: 72 },
     select: { flex: 1, padding: isMobile ? '9px 10px' : '6px 8px', border: `1px solid ${theme.colors.border}`, borderRadius: 6, fontSize: isMobile ? 15 : 13, background: '#fff', fontFamily: 'inherit', cursor: 'pointer' } as React.CSSProperties,

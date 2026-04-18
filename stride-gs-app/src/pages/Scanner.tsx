@@ -60,12 +60,12 @@ function makeStyles(isMobile: boolean) {
       gap: isMobile ? 10 : 16,
       minHeight: 0,
     } as React.CSSProperties,
-    card: { background: '#fff', border: `1px solid ${theme.colors.border}`, borderRadius: 10, padding: isMobile ? 10 : 14, display: 'flex', flexDirection: 'column' as const },
-    cardTitle: { fontSize: 13, fontWeight: 600, color: theme.colors.text, textTransform: 'uppercase' as const, letterSpacing: '0.04em', marginBottom: 8, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' as const },
-    textarea: { width: '100%', minHeight: isMobile ? 80 : 100, padding: '10px 12px', border: `1px solid ${theme.colors.border}`, borderRadius: 8, fontSize: 16 /* 16px avoids iOS zoom-on-focus */, fontFamily: 'monospace', outline: 'none', resize: 'vertical' as const, boxSizing: 'border-box' as const },
-    btnPrimary: { padding: isMobile ? '11px 18px' : '9px 18px', fontSize: 14, fontWeight: 600, background: theme.colors.primary, color: '#fff', border: 'none', borderRadius: 8, cursor: 'pointer', fontFamily: 'inherit', display: 'inline-flex', alignItems: 'center', gap: 6, minHeight: isMobile ? 42 : undefined },
-    btnSecondary: { padding: isMobile ? '9px 14px' : '7px 14px', fontSize: 12, fontWeight: 500, background: '#fff', color: theme.colors.text, border: `1px solid ${theme.colors.border}`, borderRadius: 8, cursor: 'pointer', fontFamily: 'inherit', display: 'inline-flex', alignItems: 'center', gap: 4, minHeight: isMobile ? 38 : undefined },
-    btnDanger: { padding: isMobile ? '9px 14px' : '7px 14px', fontSize: 12, fontWeight: 500, background: '#fff', color: '#DC2626', border: '1px solid #FCA5A5', borderRadius: 8, cursor: 'pointer', fontFamily: 'inherit', display: 'inline-flex', alignItems: 'center', gap: 4, minHeight: isMobile ? 38 : undefined },
+    card: { background: '#fff', border: '1px solid rgba(0,0,0,0.04)', borderRadius: 20, padding: isMobile ? 16 : 24, display: 'flex', flexDirection: 'column' as const },
+    cardTitle: { fontSize: 10, fontWeight: 600, color: '#E8692A', textTransform: 'uppercase' as const, letterSpacing: '2px', marginBottom: 12, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' as const },
+    textarea: { width: '100%', minHeight: isMobile ? 80 : 100, padding: '12px 16px', border: '1px solid rgba(0,0,0,0.08)', borderRadius: 12, fontSize: 16, fontFamily: 'monospace', outline: 'none', resize: 'vertical' as const, boxSizing: 'border-box' as const },
+    btnPrimary: { padding: isMobile ? '14px 22px' : '12px 24px', fontSize: 11, fontWeight: 600, letterSpacing: '1.5px', textTransform: 'uppercase' as const, background: theme.colors.primary, color: '#fff', border: 'none', borderRadius: 100, cursor: 'pointer', fontFamily: 'inherit', display: 'inline-flex', alignItems: 'center', gap: 6, minHeight: isMobile ? 46 : undefined },
+    btnSecondary: { padding: isMobile ? '11px 18px' : '10px 18px', fontSize: 11, fontWeight: 600, letterSpacing: '1.5px', textTransform: 'uppercase' as const, background: '#fff', color: '#666', border: '1px solid rgba(0,0,0,0.08)', borderRadius: 100, cursor: 'pointer', fontFamily: 'inherit', display: 'inline-flex', alignItems: 'center', gap: 4, minHeight: isMobile ? 42 : undefined },
+    btnDanger: { padding: isMobile ? '11px 18px' : '10px 18px', fontSize: 11, fontWeight: 600, letterSpacing: '1.5px', textTransform: 'uppercase' as const, background: '#fff', color: '#DC2626', border: '1px solid #FCA5A5', borderRadius: 100, cursor: 'pointer', fontFamily: 'inherit', display: 'inline-flex', alignItems: 'center', gap: 4, minHeight: isMobile ? 42 : undefined },
     // On mobile, queue rows stack into a card layout instead of a 6-column grid
     queueRow: (status: QueueItem['status']) => ({
       display: isMobile ? 'flex' : 'grid',
@@ -86,12 +86,12 @@ function makeStyles(isMobile: boolean) {
       borderBottom: `2px solid ${theme.colors.border}`,
       fontSize: 10, fontWeight: 600, textTransform: 'uppercase' as const, letterSpacing: '0.04em', color: theme.colors.textMuted, background: '#F9FAFB',
     } as React.CSSProperties,
-    locInput: { width: '100%', padding: isMobile ? '12px' : '10px 12px', border: `1px solid ${theme.colors.border}`, borderRadius: 8, fontSize: 16, fontFamily: 'inherit', outline: 'none', boxSizing: 'border-box' as const } as React.CSSProperties,
+    locInput: { width: '100%', padding: isMobile ? '14px 18px' : '12px 18px', border: '1px solid rgba(0,0,0,0.08)', borderRadius: 100, fontSize: 16, fontFamily: 'inherit', outline: 'none', boxSizing: 'border-box' as const } as React.CSSProperties,
     dropdown: { position: 'absolute' as const, top: '100%', left: 0, right: 0, background: '#fff', border: `1px solid ${theme.colors.border}`, borderRadius: 8, marginTop: 4, maxHeight: isMobile ? 280 : 240, overflow: 'auto', boxShadow: '0 4px 20px rgba(0,0,0,0.08)', zIndex: 30 },
     dropdownRow: (active: boolean) => ({ padding: isMobile ? '12px 14px' : '8px 12px', fontSize: 13, cursor: 'pointer', background: active ? '#EFF6FF' : '#fff', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }) as React.CSSProperties,
     modal: { position: 'fixed' as const, inset: 0, background: 'rgba(0,0,0,0.35)', display: 'flex', alignItems: isMobile ? 'flex-end' : 'center', justifyContent: 'center', zIndex: 50 },
-    modalCard: { background: '#fff', borderRadius: isMobile ? '14px 14px 0 0' : 10, padding: isMobile ? 16 : 20, width: isMobile ? '100%' : 400, maxWidth: '100%', boxShadow: '0 10px 40px rgba(0,0,0,0.2)', boxSizing: 'border-box' as const },
-    resultBanner: (ok: boolean) => ({ padding: '10px 14px', borderRadius: 8, background: ok ? '#F0FDF4' : '#FEF2F2', border: `1px solid ${ok ? '#86EFAC' : '#FCA5A5'}`, color: ok ? '#15803D' : '#DC2626', fontSize: 13, fontWeight: 500, marginBottom: 12, display: 'flex', alignItems: 'center', gap: 8 }) as React.CSSProperties,
+    modalCard: { background: '#fff', borderRadius: isMobile ? '20px 20px 0 0' : 20, padding: isMobile ? 20 : 28, width: isMobile ? '100%' : 440, maxWidth: '100%', boxShadow: '0 24px 60px rgba(0,0,0,0.25)', boxSizing: 'border-box' as const },
+    resultBanner: (ok: boolean) => ({ padding: '12px 18px', borderRadius: 100, background: ok ? '#F0FDF4' : '#FEF2F2', border: `1px solid ${ok ? '#86EFAC' : '#FCA5A5'}`, color: ok ? '#15803D' : '#DC2626', fontSize: 13, fontWeight: 500, marginBottom: 12, display: 'flex', alignItems: 'center', gap: 8 }) as React.CSSProperties,
   };
 }
 

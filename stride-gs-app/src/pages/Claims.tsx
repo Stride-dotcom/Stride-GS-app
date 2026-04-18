@@ -361,20 +361,20 @@ export function Claims() {
       </div>
 
       {/* Summary Cards */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: 20 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 16, marginBottom: 24 }}>
         {[
-          { label: 'Total Claims', value: data.length, color: theme.colors.text },
-          { label: 'Open', value: openCount, color: '#B45309' },
-          { label: 'Resolved', value: resolvedCount, color: '#15803D' },
-          { label: 'Total Requested', value: fmtMoney(totalRequested), color: '#7C3AED' },
+          { label: 'Total Claims', value: data.length, color: '#fff' },
+          { label: 'Open', value: openCount, color: '#FBBF24' },
+          { label: 'Resolved', value: resolvedCount, color: '#4ADE80' },
+          { label: 'Total Requested', value: fmtMoney(totalRequested), color: '#C084FC' },
         ].map(c => (
           <div key={c.label} style={{
-            background: '#fff', border: `1px solid ${theme.colors.border}`, borderRadius: 12, padding: '14px 16px',
+            background: '#1C1C1C', border: 'none', borderRadius: 20, padding: '20px 22px',
           }}>
-            <div style={{ fontSize: 10, fontWeight: 500, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.04em' }}>{c.label}</div>
-            <div style={{ fontSize: 22, fontWeight: 700, color: c.color, marginTop: 2 }}>{c.value}</div>
+            <div style={{ fontSize: 10, fontWeight: 600, color: 'rgba(255,255,255,0.55)', textTransform: 'uppercase', letterSpacing: '2px', marginBottom: 10 }}>{c.label}</div>
+            <div style={{ fontSize: 28, fontWeight: 300, color: c.color, lineHeight: 1 }}>{c.value}</div>
             {c.label === 'Resolved' && totalApproved > 0 && (
-              <div style={{ fontSize: 11, color: theme.colors.textMuted, marginTop: 2 }}>
+              <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.45)', marginTop: 8 }}>
                 {fmtMoney(totalApproved)} approved
               </div>
             )}
