@@ -28,6 +28,7 @@ import { useClientFilterUrlSync } from '../hooks/useClientFilterUrlSync';
 import { useIsMobile } from '../hooks/useIsMobile';
 import { useAuth } from '../contexts/AuthContext';
 import { ShipmentDetailPanel as SharedShipmentDetailPanel } from '../components/shared/ShipmentDetailPanel';
+import { ExpectedCalendar } from '../components/shipments/ExpectedCalendar';
 
 // ─── Row type ───────────────────────────────────────────────────────────────
 interface ShipmentRow {
@@ -340,6 +341,7 @@ export function Shipments() {
   const [rowSelection, setRowSelection] = useState<RowSelectionState>({});
   const [globalFilter, setGlobalFilter] = useState('');
   const [selectedShipment, setSelectedShipment] = useState<ShipmentRow | null>(null);
+  const [activeTab, setActiveTab] = useState<'shipments' | 'expected'>('shipments');
   const { user } = useAuth();
 
   // Client-role users only see their own accounts in the dropdown — admin/staff see all.
@@ -522,6 +524,28 @@ export function Shipments() {
           {isDemo && <span style={{ marginLeft: 12, display: 'inline-block', fontSize: 10, fontWeight: 700, letterSpacing: '2px', color: '#B08810', background: 'rgba(200,160,40,0.15)', padding: '3px 10px', borderRadius: 100 }}>DEMO</span>}
         </div>
       </div>
+      {/* Tab bar */}
+      <div style={{ display: 'flex', gap: 8, marginBottom: 16, background: '#fff', padding: 4, borderRadius: 100, width: 'fit-content', border: '1px solid rgba(0,0,0,0.04)' }}>
+        {(['shipments', 'expected'] as const).map(t => (
+          <button
+            key={t}
+            onClick={() => setActiveTab(t)}
+            style={{
+              padding: '8px 20px', fontSize: 11, fontWeight: 600, letterSpacing: '2px',
+              textTransform: 'uppercase', border: 'none', borderRadius: 100,
+              background: activeTab === t ? '#1C1C1C' : 'transparent',
+              color: activeTab === t ? '#fff' : '#666',
+              cursor: 'pointer', transition: 'all 0.2s',
+            }}
+          >
+            {t === 'shipments' ? 'Received' : 'Expected'}
+          </button>
+        ))}
+      </div>
+
+      {activeTab === 'expected' ? (
+        <ExpectedCalendar />
+      ) : (
       <div style={{ background: '#FFFFFF', borderRadius: 20, padding: 24, border: '1px solid rgba(0,0,0,0.04)' }}>
 
       <SyncBanner syncing={refreshing} label={clientFilter.length === 1 ? clientFilter[0] : clientFilter.length > 1 ? `${clientFilter.length} clients` : undefined} />
@@ -704,6 +728,7 @@ export function Shipments() {
       )}
       <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
       </div>
+      )}
     </div>
   );
 }
