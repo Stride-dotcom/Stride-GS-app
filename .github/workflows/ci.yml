@@ -1,12 +1,13 @@
-name: CI
+name: CI (typecheck + build)
 
+# Manual trigger only — run on demand via GitHub Actions UI or:
+#   gh workflow run ci.yml
+#
+# Requires these secrets (set in GitHub → Settings → Secrets and variables → Actions):
+#   VITE_SUPABASE_URL
+#   VITE_SUPABASE_ANON_KEY
 on:
-  push:
-    branches: [source]
-    paths: ['stride-gs-app/**']
-  pull_request:
-    branches: [source]
-    paths: ['stride-gs-app/**']
+  workflow_dispatch:
 
 jobs:
   typecheck-and-build:
