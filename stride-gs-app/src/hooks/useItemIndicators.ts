@@ -38,8 +38,10 @@ export function useItemIndicators(clientSheetIds?: string | string[]): ItemIndic
       const rep = new Set<string>();
 
       try {
-        // Fetch task indicators (INSP + ASM) — only need item_id and type
-        let tq = supabase.from('tasks').select('item_id, type').not('status', 'in', '("Completed","Cancelled")');
+        // Fetch task indicators (INSP + ASM) — ALL statuses, not just open.
+        // The indicator means "this item has had an inspection/assembly created",
+        // regardless of whether it's completed, in progress, or open.
+        let tq = supabase.from('tasks').select('item_id, type');
         if (Array.isArray(clientSheetIds) && clientSheetIds.length > 0) {
           tq = tq.in('tenant_id', clientSheetIds);
         } else if (typeof clientSheetIds === 'string') {
@@ -55,8 +57,8 @@ export function useItemIndicators(clientSheetIds?: string | string[]): ItemIndic
           }
         }
 
-        // Fetch repair indicators — only need item_id
-        let rq = supabase.from('repairs').select('item_id').not('status', 'in', '("Complete","Cancelled","Declined")');
+        // Fetch repair indicators — ALL statuses
+        let rq = supabase.from('repairs').select('item_id');
         if (Array.isArray(clientSheetIds) && clientSheetIds.length > 0) {
           rq = rq.in('tenant_id', clientSheetIds);
         } else if (typeof clientSheetIds === 'string') {
