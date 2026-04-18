@@ -13,6 +13,7 @@ import type { Quote } from '../../lib/quoteTypes';
 import type { useQuoteStore } from '../../hooks/useQuoteStore';
 import { generateQuotePdf } from '../../lib/quotePdf';
 
+const v = theme.v2;
 type Store = ReturnType<typeof useQuoteStore>;
 
 interface Props {
@@ -33,104 +34,86 @@ export function QuoteBuilder({ store, quoteId, onBack }: Props) {
     updateQuote(quoteId, patch);
   }, [quoteId, updateQuote]);
 
-  const showToast = useCallback((msg: string) => {
-    setToast(msg);
-    setTimeout(() => setToast(null), 3000);
-  }, []);
+  const showToast = useCallback((msg: string) => { setToast(msg); setTimeout(() => setToast(null), 3000); }, []);
 
-  const handleSave = useCallback(() => {
-    showToast('Quote saved');
-  }, [showToast]);
-
+  const handleSave = useCallback(() => { showToast('Quote saved'); }, [showToast]);
   const handleDuplicate = useCallback(() => {
     if (!quoteId) return;
     const dup = duplicateQuote(quoteId);
     if (dup) showToast(`Duplicated as ${dup.number}`);
   }, [quoteId, duplicateQuote, showToast]);
-
   const handleVoid = useCallback(() => {
-    if (!quoteId || !confirm('Void this quote? This marks it as void.')) return;
-    setQuoteStatus(quoteId, 'void');
-    showToast('Quote voided');
+    if (!quoteId || !confirm('Void this quote?')) return;
+    setQuoteStatus(quoteId, 'void'); showToast('Quote voided');
   }, [quoteId, setQuoteStatus, showToast]);
-
   const handleDelete = useCallback(() => {
     if (!quoteId || !confirm('Delete this quote permanently?')) return;
-    deleteQuoteFn(quoteId);
-    onBack();
+    deleteQuoteFn(quoteId); onBack();
   }, [quoteId, deleteQuoteFn, onBack]);
-
   const handleDownloadPdf = useCallback(() => {
     if (!quote) return;
-    generateQuotePdf(quote, store.catalog, store.settings);
-    showToast('PDF downloaded');
+    generateQuotePdf(quote, store.catalog, store.settings); showToast('PDF downloaded');
   }, [quote, store.catalog, store.settings, showToast]);
 
   if (!quote) {
     return (
-      <div style={{ textAlign: 'center', padding: 40 }}>
-        <p style={{ color: theme.colors.textMuted, marginBottom: 12 }}>No quote selected</p>
-        <button onClick={onBack} style={{ padding: '8px 16px', fontSize: 13, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', fontFamily: 'inherit' }}>
-          Back to My Quotes
-        </button>
+      <div style={{ textAlign: 'center', padding: 48 }}>
+        <p style={{ color: v.colors.textMuted, marginBottom: 16 }}>No quote selected</p>
+        <button onClick={onBack} style={{
+          ...v.typography.buttonPrimary, padding: '10px 24px', border: 'none', borderRadius: v.radius.button,
+          background: v.colors.bgDark, color: v.colors.textOnDark, cursor: 'pointer', fontFamily: 'inherit',
+        }}>BACK TO MY QUOTES</button>
       </div>
     );
   }
 
   return (
     <div>
-      {/* Back button */}
-      <button onClick={onBack} style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 12, color: theme.colors.textSecondary, border: 'none', background: 'none', cursor: 'pointer', fontFamily: 'inherit', marginBottom: 12, padding: 0 }}>
-        <ArrowLeft size={14} /> Back to My Quotes
+      <button onClick={onBack} style={{
+        display: 'flex', alignItems: 'center', gap: 6, ...v.typography.label,
+        border: 'none', background: 'none', cursor: 'pointer', fontFamily: 'inherit', marginBottom: 16, padding: 0, color: v.colors.textMuted,
+      }}>
+        <ArrowLeft size={14} /> BACK TO MY QUOTES
       </button>
 
-      {/* Toast */}
       {toast && (
-        <div style={{ position: 'fixed', top: 16, right: 16, zIndex: 500, padding: '10px 16px', borderRadius: 10, background: '#F0FDF4', border: '1px solid #A7F3D0', color: '#15803D', fontSize: 13, fontWeight: 500, boxShadow: '0 4px 16px rgba(0,0,0,0.1)', fontFamily: theme.typography.fontFamily }}>
-          {toast}
-        </div>
+        <div style={{
+          position: 'fixed', top: 16, right: 16, zIndex: 500, padding: '12px 20px',
+          borderRadius: v.radius.badge, background: v.colors.statusAccepted.bg, border: `1px solid ${v.colors.statusAccepted.text}30`,
+          color: v.colors.statusAccepted.text, fontSize: 13, fontWeight: 600, boxShadow: '0 4px 20px rgba(0,0,0,0.1)',
+          fontFamily: theme.typography.fontFamily,
+        }}>{toast}</div>
       )}
 
-      {/* 2-column layout (or stacked on mobile) */}
-      <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 320px', gap: 16, alignItems: 'start' }}>
-        {/* Left column — form */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 340px', gap: 20, alignItems: 'start' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
           <QuoteClientCard quote={quote} onChange={handleChange} />
           <QuotePricingMatrix quote={quote} services={store.catalog.services} classes={store.catalog.classes} onChange={handleChange} />
           <QuoteStorageSection quote={quote} services={store.catalog.services} classes={store.catalog.classes} onChange={handleChange} />
           <QuoteOtherServices quote={quote} services={store.catalog.services} onChange={handleChange} />
           <QuoteDiscountCard quote={quote} onChange={handleChange} />
           <QuoteCoverageCard quote={quote} coverageOptions={store.catalog.coverageOptions} onChange={handleChange} />
-
           {/* Notes */}
-          <div style={{ background: '#fff', border: `1px solid ${theme.colors.border}`, borderRadius: 12, padding: 20 }}>
-            <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 12, color: theme.colors.text }}>Notes</div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+          <div style={{ background: v.colors.bgCard, borderRadius: v.radius.card, padding: v.card.padding }}>
+            <div style={{ ...v.typography.cardTitle, color: v.colors.text, marginBottom: 16 }}>Notes</div>
+            <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: 14 }}>
               <div>
-                <label style={{ fontSize: 11, fontWeight: 600, color: theme.colors.textSecondary, display: 'block', marginBottom: 3 }}>Customer Notes (visible on quote)</label>
+                <label style={{ ...v.typography.label, display: 'block', marginBottom: 6 }}>CUSTOMER NOTES (VISIBLE ON QUOTE)</label>
                 <textarea value={quote.customerNotes} onChange={e => handleChange({ customerNotes: e.target.value })}
-                  rows={3} style={{ width: '100%', padding: '8px 10px', fontSize: 13, border: `1px solid ${theme.colors.border}`, borderRadius: 8, fontFamily: 'inherit', outline: 'none', resize: 'vertical', boxSizing: 'border-box' }} />
+                  rows={3} style={{ width: '100%', padding: '10px 14px', fontSize: 13, border: `1px solid ${v.colors.border}`, borderRadius: v.radius.input, fontFamily: 'inherit', outline: 'none', resize: 'vertical', boxSizing: 'border-box', background: v.colors.bgWhite }} />
               </div>
               <div>
-                <label style={{ fontSize: 11, fontWeight: 600, color: theme.colors.textSecondary, display: 'block', marginBottom: 3 }}>Internal Notes (not shown on quote)</label>
+                <label style={{ ...v.typography.label, display: 'block', marginBottom: 6 }}>INTERNAL NOTES (NOT SHOWN ON QUOTE)</label>
                 <textarea value={quote.internalNotes} onChange={e => handleChange({ internalNotes: e.target.value })}
-                  rows={3} style={{ width: '100%', padding: '8px 10px', fontSize: 13, border: `1px solid ${theme.colors.border}`, borderRadius: 8, fontFamily: 'inherit', outline: 'none', resize: 'vertical', boxSizing: 'border-box' }} />
+                  rows={3} style={{ width: '100%', padding: '10px 14px', fontSize: 13, border: `1px solid ${v.colors.border}`, borderRadius: v.radius.input, fontFamily: 'inherit', outline: 'none', resize: 'vertical', boxSizing: 'border-box', background: v.colors.bgWhite }} />
               </div>
             </div>
           </div>
         </div>
 
-        {/* Right column — sticky totals */}
-        <QuoteTotalsPanel
-          quote={quote}
-          catalog={store.catalog}
-          onUpdate={handleChange}
-          onSave={handleSave}
-          onDuplicate={handleDuplicate}
-          onDownloadPdf={handleDownloadPdf}
-          onVoid={handleVoid}
-          onDelete={handleDelete}
-        />
+        <QuoteTotalsPanel quote={quote} catalog={store.catalog} onUpdate={handleChange}
+          onSave={handleSave} onDuplicate={handleDuplicate} onDownloadPdf={handleDownloadPdf}
+          onVoid={handleVoid} onDelete={handleDelete} />
       </div>
     </div>
   );
