@@ -1719,12 +1719,11 @@ export function Settings() {
             const Icon = t.icon; const active = tab === t.id;
             return (
               <button key={t.id} onClick={() => setTab(t.id)} style={{
-                display: 'flex', alignItems: 'center', gap: 10, width: '100%', padding: '10px 12px', marginBottom: 2,
-                border: 'none', borderRadius: 8, cursor: 'pointer', textAlign: 'left', fontFamily: 'inherit',
-                background: active ? theme.colors.orangeLight : 'transparent',
-                color: active ? theme.colors.orange : theme.colors.textSecondary,
-                fontWeight: active ? 600 : 500, fontSize: 13, transition: 'all 0.15s',
-                borderLeft: active ? `3px solid ${theme.colors.orange}` : '3px solid transparent',
+                display: 'flex', alignItems: 'center', gap: 10, width: '100%', padding: '12px 16px', marginBottom: 4,
+                border: 'none', borderRadius: 100, cursor: 'pointer', textAlign: 'left', fontFamily: 'inherit',
+                background: active ? '#1C1C1C' : 'transparent',
+                color: active ? '#fff' : '#666',
+                fontWeight: 600, fontSize: 11, letterSpacing: '1px', textTransform: 'uppercase', transition: 'all 0.15s',
               }}>
                 <Icon size={16} />{t.label}
               </button>

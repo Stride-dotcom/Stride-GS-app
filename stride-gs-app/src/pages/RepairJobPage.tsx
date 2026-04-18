@@ -119,7 +119,9 @@ export function RepairJobPage() {
   if (!displayRepair) return null;
 
   return (
-    <div style={{ display: 'flex', height: '100%', position: 'relative' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', position: 'relative', background: '#F5F2EE', margin: '-28px -32px', padding: '28px 32px' }}>
+      <div style={{ fontSize: 13, fontWeight: 600, letterSpacing: '1px', color: '#1C1C1C', marginBottom: 16 }}>STRIDE LOGISTICS · REPAIR · {displayRepair.repairId}</div>
+      <div style={{ background: '#FFFFFF', borderRadius: 20, padding: 24, border: '1px solid rgba(0,0,0,0.04)', flex: 1, overflow: 'auto', display: 'flex' }}>
       {saving && (
         <div style={{
           position: 'fixed', top: 12, right: 12, zIndex: 1000,
@@ -133,7 +135,7 @@ export function RepairJobPage() {
           Saving...
         </div>
       )}
-      <div style={{ flex: 1, overflow: 'auto' }}>
+      <div style={{ flex: 1 }}>
         <RepairDetailPanel
           repair={displayRepair}
           onClose={() => navigate('/repairs')}
@@ -142,6 +144,7 @@ export function RepairJobPage() {
           mergeRepairPatch={mergeRepairPatch}
           clearRepairPatch={clearRepairPatch}
         />
+      </div>
       </div>
     </div>
   );

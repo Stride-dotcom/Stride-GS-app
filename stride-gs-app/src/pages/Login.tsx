@@ -101,26 +101,26 @@ export function Login() {
   return (
     <div style={{
       minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center',
-      background: '#F2F2F2', fontFamily: theme.typography.fontFamily,
+      background: '#F5F2EE', fontFamily: theme.typography.fontFamily,
     }}>
-      <div style={{ width: '100%', maxWidth: 420, padding: '0 20px' }}>
+      <div style={{ width: '100%', maxWidth: 440, padding: '0 20px' }}>
 
         {/* Logo */}
-        <div style={{ textAlign: 'center', marginBottom: 36 }}>
+        <div style={{ textAlign: 'center', marginBottom: 40 }}>
           <img src="/stride-logo.png" alt="Stride"
-            style={{ width: 56, height: 56, objectFit: 'contain', marginBottom: 16 }} />
-          <h1 style={{ fontSize: 24, fontWeight: 700, letterSpacing: '-0.5px', color: theme.colors.text }}>
-            Stride Logistics
-          </h1>
-          <p style={{ fontSize: 13, color: theme.colors.textMuted, marginTop: 4 }}>
-            Warehouse Management System
-          </p>
+            style={{ width: 56, height: 56, objectFit: 'contain', marginBottom: 20 }} />
+          <div style={{ fontFamily: "'Oswald',Arial,sans-serif", fontSize: 32, fontWeight: 600, letterSpacing: '3px', color: '#1C1C1C', textTransform: 'uppercase', lineHeight: 1 }}>
+            STRIDE
+          </div>
+          <div style={{ fontFamily: "'Oswald',Arial,sans-serif", fontSize: 11, fontWeight: 400, letterSpacing: '6px', color: '#888', textTransform: 'uppercase', marginTop: 6 }}>
+            LOGISTICS
+          </div>
         </div>
 
         {/* Card */}
         <div style={{
-          background: '#fff', borderRadius: 16, border: `1px solid ${theme.colors.border}`,
-          padding: 32, boxShadow: '0 2px 12px rgba(0,0,0,0.04)',
+          background: '#fff', borderRadius: 20, border: '1px solid rgba(0,0,0,0.04)',
+          padding: 40,
         }}>
 
           {/* ── Sign In View ── */}

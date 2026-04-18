@@ -391,8 +391,8 @@ export function Claims() {
             onChange={e => setGlobalFilter(e.target.value)}
             placeholder="Search claims..."
             style={{
-              width: '100%', padding: '7px 10px 7px 30px', fontSize: 12,
-              border: `1px solid ${theme.colors.border}`, borderRadius: 8, outline: 'none',
+              width: '100%', padding: '10px 16px 10px 36px', fontSize: 13,
+              border: '1px solid rgba(0,0,0,0.08)', borderRadius: 100, outline: 'none', background: '#fff',
               fontFamily: theme.typography.fontFamily,
             }}
           />

@@ -166,15 +166,12 @@ export function Orders() {
   }) as React.CSSProperties;
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: '#f8f9fa', fontFamily: theme.typography.fontFamily }}>
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: '#F5F2EE', margin: '-28px -32px', padding: '28px 32px', fontFamily: theme.typography.fontFamily }}>
 
       {/* Page title + tab bar */}
-      <div style={{ padding: '16px 20px 0', borderBottom: `1px solid ${theme.colors.border}`, flexShrink: 0 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
-          <Truck size={18} color={theme.colors.primary} />
-          <span style={{ fontSize: 18, fontWeight: 700, color: theme.colors.text }}>
-            {isAdmin ? 'Orders & Delivery' : 'Delivery'}
-          </span>
+      <div style={{ flexShrink: 0, marginBottom: 16 }}>
+        <div style={{ fontSize: 13, fontWeight: 600, letterSpacing: '1px', color: '#1C1C1C', marginBottom: 12 }}>
+          STRIDE LOGISTICS · {isAdmin ? 'ORDERS & DELIVERY' : 'DELIVERY'}
         </div>
         <div style={{ display: 'flex', gap: 0 }}>
           {isAdmin && (
