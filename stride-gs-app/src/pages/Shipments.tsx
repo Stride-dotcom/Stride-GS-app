@@ -491,10 +491,17 @@ export function Shipments() {
   const { containerRef, virtualRows, rows: allRows, totalHeight } = useVirtualRows(table);
   const selectedRows = table.getSelectedRowModel().rows.map(r => r.original);
 
-  // Stats
-  const receivedCount = data.filter(r => r.status === 'Received').length;
-  const pendingCount = data.filter(r => r.status === 'Pending' || r.status === 'Expected').length;
-  const totalItems = data.reduce((sum, r) => sum + r.itemCount, 0);
+  // Time-based stats
+  const now = new Date();
+  const todayStr = now.toISOString().slice(0, 10);
+  const weekAgo = new Date(now); weekAgo.setDate(weekAgo.getDate() - 7);
+  const weekAgoStr = weekAgo.toISOString().slice(0, 10);
+  const monthStart = now.toISOString().slice(0, 7); // "YYYY-MM"
+
+  const todayCount = data.filter(r => (r.receivedDate || '').slice(0, 10) === todayStr).length;
+  const weekCount = data.filter(r => (r.receivedDate || '').slice(0, 10) >= weekAgoStr).length;
+  const monthCount = data.filter(r => (r.receivedDate || '').slice(0, 7) === monthStart).length;
+  const monthItems = data.filter(r => (r.receivedDate || '').slice(0, 7) === monthStart).reduce((sum, r) => sum + r.itemCount, 0);
 
   return (
     <div style={{ fontFamily: theme.typography.fontFamily, background: '#F5F2EE', margin: '-28px -32px', padding: '28px 32px', minHeight: '100%' }}>
@@ -527,10 +534,10 @@ export function Shipments() {
       {/* Summary Cards */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 16, marginBottom: 24 }}>
         {[
-          { label: 'Total Shipments', value: data.length, color: '#fff' },
-          { label: 'Received', value: receivedCount, color: '#4ADE80' },
-          { label: 'Pending', value: pendingCount, color: '#FBBF24' },
-          { label: 'Total Items', value: totalItems, color: '#60A5FA' },
+          { label: 'Today', value: todayCount, color: '#fff' },
+          { label: 'This Week', value: weekCount, color: '#4ADE80' },
+          { label: 'This Month', value: monthCount, color: '#FBBF24' },
+          { label: 'Items This Month', value: monthItems, color: '#60A5FA' },
         ].map(c => (
           <div key={c.label} style={{
             background: '#1C1C1C', border: 'none', borderRadius: 20, padding: '20px 22px',

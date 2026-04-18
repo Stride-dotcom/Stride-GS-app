@@ -2120,7 +2120,7 @@ function seedAllStaxToSupabase() {
           due_date:         formatDate_(r["Due Date"]),
           reason:           String(r["Reason"] || ""),
           pay_link:         String(r["Pay Link"] || ""),
-          resolved:         String(r["Resolved"] || "").toUpperCase() === "TRUE"
+          resolved:         !!(r["Resolved"] && String(r["Resolved"]).trim())
         };
       });
       supabaseBatchUpsert_("stax_exceptions", exceptionRows);
@@ -22277,6 +22277,22 @@ function handleResolveStaxException_(payload) {
   sheet.getRange(targetRow, 9).setValue(now); // Column I = 9
 
   stax_appendRunLog_(ss, "resolveException", "Resolved exception: QB#" + qbInvoiceNo + " at " + timestamp, "");
+
+  // Update Supabase directly so the UI reflects immediately
+  try {
+    var sbUrl = prop_("SUPABASE_URL");
+    var sbKey = prop_("SUPABASE_SERVICE_ROLE_KEY");
+    if (sbUrl && sbKey) {
+      var normalizedTs = normalizeTs(data[targetRow - 1][0]);
+      var updateUrl = sbUrl + "/rest/v1/stax_exceptions?qb_invoice_no=eq." + encodeURIComponent(qbInvoiceNo) + "&timestamp=eq." + encodeURIComponent(normalizedTs);
+      UrlFetchApp.fetch(updateUrl, {
+        method: "PATCH",
+        headers: { "Authorization": "Bearer " + sbKey, "apikey": sbKey, "Content-Type": "application/json", "Prefer": "return=minimal" },
+        payload: JSON.stringify({ resolved: true }),
+        muteHttpExceptions: true
+      });
+    }
+  } catch (_) { /* best-effort */ }
 
   return jsonResponse_({ success: true, resolvedAt: now });
 }
