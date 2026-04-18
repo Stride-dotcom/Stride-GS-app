@@ -410,22 +410,25 @@ export function Payments() {
       // When noCache=true (explicit refresh button), skip Supabase to get the freshest data.
       const supabaseAvailable = !noCache && (await isSupabaseCacheAvailable());
       if (supabaseAvailable) {
-        const [sbInv, sbCharges, sbExc, sbCust, sbLog, cfgRes] = await Promise.all([
+        // Load Supabase data first (fast ~50ms), config from GAS separately (slower)
+        const [sbInv, sbCharges, sbExc, sbCust, sbLog] = await Promise.all([
           fetchStaxInvoicesFromSupabase(),
           fetchStaxChargeLogFromSupabase(),
           fetchStaxExceptionsFromSupabase(),
           fetchStaxCustomersFromSupabase(),
           fetchStaxRunLogFromSupabase(),
-          fetchStaxConfig(),
         ]);
         if (sbInv) setInvoices(sbInv.invoices);
         if (sbCharges) setCharges(sbCharges.charges);
         if (sbExc) setExceptions(sbExc.exceptions);
         if (sbCust) setCustomers(sbCust.customers);
         if (sbLog) setRunLog(sbLog.entries);
-        if (cfgRes.ok && cfgRes.data) {
-          setAutoCharge(cfgRes.data.config.AUTO_CHARGE_ENABLED === true);
-        }
+        // Config from GAS — fire-and-forget, don't block render
+        fetchStaxConfig().then(cfgRes => {
+          if (cfgRes.ok && cfgRes.data) {
+            setAutoCharge(cfgRes.data.config.AUTO_CHARGE_ENABLED === true);
+          }
+        }).catch(() => {});
         // If any Supabase table returned null, fall through to GAS for that specific dataset.
         // In practice the tables should be seeded before first production use.
         if (!sbInv || !sbCharges || !sbExc || !sbCust || !sbLog) {
