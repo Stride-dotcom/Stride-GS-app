@@ -10,7 +10,6 @@ import {
   ChevronUp, ChevronDown, ArrowUpDown,
 } from 'lucide-react';
 import { useVirtualRows } from '../hooks/useVirtualRows';
-import { Card } from '../components/ui/Card';
 import { theme } from '../styles/theme';
 import { useItemIndicators } from '../hooks/useItemIndicators';
 import { ItemIdBadges } from '../components/shared/ItemIdBadges';
@@ -89,42 +88,50 @@ function StatusBadge({ status }: { status: string }) {
   );
 }
 
-// ─── StatCard ─────────────────────────────────────────────────────────────────
+// ─── StatCard ─ v2: dark background, large light value ───────────────────────
 
-function StatCard({ icon, label, value, sub, color, onClick }: {
-  icon: React.ReactNode; label: string; value: number; sub?: string; color: string; onClick?: () => void;
+function StatCard({ icon, label, value, sub, onClick }: {
+  icon: React.ReactNode; label: string; value: number; sub?: string; color?: string; onClick?: () => void;
 }) {
+  const v = theme.v2;
   return (
-    <Card onClick={onClick} style={{ display: 'flex', flexDirection: 'column', gap: 10, flex: '1 1 0', minWidth: 140, cursor: onClick ? 'pointer' : undefined, transition: 'box-shadow 0.15s' }}>
-      <div style={{ width: 34, height: 34, borderRadius: 10, background: color + '1A', display: 'flex', alignItems: 'center', justifyContent: 'center', color }}>{icon}</div>
-      <div>
-        <div style={{ fontSize: 28, fontWeight: 700, color: theme.colors.textPrimary, lineHeight: 1 }}>{value}</div>
-        <div style={{ fontSize: 12, color: theme.colors.textSecondary, marginTop: 3 }}>{label}</div>
-        {sub && <div style={{ fontSize: 11, color: theme.colors.textMuted, marginTop: 1 }}>{sub}</div>}
+    <div onClick={onClick} style={{
+      background: v.colors.bgDark, borderRadius: v.radius.card, padding: v.card.padding,
+      color: v.colors.textOnDark, cursor: onClick ? 'pointer' : undefined,
+      transition: 'transform 0.15s ease',
+      flex: '1 1 0', minWidth: 140,
+    }}
+      onMouseEnter={e => onClick && (e.currentTarget.style.transform = 'translateY(-2px)')}
+      onMouseLeave={e => onClick && (e.currentTarget.style.transform = 'translateY(0)')}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
+        <div style={{ opacity: 0.6 }}>{icon}</div>
+        <span style={{ ...v.typography.label, color: v.colors.textOnDarkMuted }}>{label.toUpperCase()}</span>
       </div>
-    </Card>
+      <div style={{ fontSize: 28, fontWeight: 300, lineHeight: 1 }}>{value}</div>
+      {sub && <div style={{ fontSize: 11, color: v.colors.textOnDarkMuted, marginTop: 8 }}>{sub}</div>}
+    </div>
   );
 }
 
-// ─── Shared table styles ──────────────────────────────────────────────────────
+// ─── Shared table styles (v2) ─────────────────────────────────────────────────
 
 const thStyle: React.CSSProperties = {
-  padding: '10px 12px', textAlign: 'left', fontWeight: 500, fontSize: 11,
-  color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.05em',
-  borderBottom: `1px solid ${theme.colors.borderLight}`, position: 'sticky', top: 0,
-  background: '#fff', zIndex: 2, cursor: 'pointer', userSelect: 'none', whiteSpace: 'nowrap',
+  padding: '14px 16px', textAlign: 'left', fontWeight: 600, fontSize: 10,
+  color: '#999999', textTransform: 'uppercase', letterSpacing: '2px',
+  borderBottom: `1px solid rgba(0,0,0,0.05)`, position: 'sticky', top: 0,
+  background: '#F5F2EE', zIndex: 2, cursor: 'pointer', userSelect: 'none', whiteSpace: 'nowrap',
 };
 const tdStyle: React.CSSProperties = {
-  padding: '9px 12px', borderBottom: `1px solid ${theme.colors.borderLight}`, fontSize: 12, whiteSpace: 'nowrap',
+  padding: '14px 16px', borderBottom: `1px solid rgba(0,0,0,0.05)`, fontSize: 13, whiteSpace: 'nowrap',
 };
 
 function chip(active: boolean): React.CSSProperties {
   return {
-    padding: '4px 12px', borderRadius: 20, fontSize: 11, fontWeight: 600, cursor: 'pointer',
-    border: `1px solid ${active ? theme.colors.orange : theme.colors.border}`,
-    background: active ? theme.colors.orangeLight : 'transparent',
-    color: active ? theme.colors.orange : theme.colors.textSecondary,
-    transition: 'all 0.15s', whiteSpace: 'nowrap',
+    padding: '6px 14px', borderRadius: 100, fontSize: 11, fontWeight: 600, cursor: 'pointer',
+    border: `1px solid ${active ? '#E8692A' : 'rgba(0,0,0,0.08)'}`,
+    background: active ? 'rgba(232,105,42,0.12)' : 'transparent',
+    color: active ? '#E8692A' : '#666666',
+    transition: 'all 0.15s', whiteSpace: 'nowrap', fontFamily: 'inherit',
   };
 }
 
@@ -138,7 +145,7 @@ function DragHeader({ h, dragColId, dragOverColId, onDragStart, onDragOver, onDr
       key={h.id} draggable
       onDragStart={onDragStart} onDragOver={e => { e.preventDefault(); onDragOver(); }} onDragEnd={onDragEnd}
       onClick={h.column.getCanSort() ? (e: React.MouseEvent) => h.column.toggleSorting(undefined, e.shiftKey) : undefined}
-      style={{ ...thStyle, width: h.getSize(), color: sorted ? theme.colors.orange : theme.colors.textMuted, cursor: 'grab', background: isDragTarget ? theme.colors.orangeLight : '#fff', borderLeft: isDragTarget ? `2px solid ${theme.colors.orange}` : undefined }}
+      style={{ ...thStyle, width: h.getSize(), color: sorted ? '#E8692A' : '#999999', cursor: 'grab', background: isDragTarget ? 'rgba(232,105,42,0.12)' : '#F5F2EE', borderLeft: isDragTarget ? `2px solid #E8692A` : undefined }}
     >
       <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
         {h.isPlaceholder ? null : flexRender(h.column.columnDef.header, h.getContext())}
@@ -228,7 +235,7 @@ function TasksTab({ tasks, onNavigate, indicators }: { tasks: SummaryTask[]; onN
       </div>
 
       {/* Table */}
-      <div style={{ border: `1px solid ${theme.colors.border}`, borderRadius: 10, overflow: 'hidden', background: '#fff' }}>
+      <div style={{ borderRadius: 12, overflow: 'hidden', background: '#fff' }}>
         <div ref={containerRef} style={{ overflowY: 'auto', overflowX: 'auto', maxHeight: 'calc(100dvh - 380px)', WebkitOverflowScrolling: 'touch' }}>
           <table style={{ width: '100%', borderCollapse: 'collapse' }}>
             <thead>
@@ -362,7 +369,7 @@ function RepairsTab({ repairs, onNavigate, userRole, indicators }: { repairs: Su
           )}
         </div>
       </div>
-      <div style={{ border: `1px solid ${theme.colors.border}`, borderRadius: 10, overflow: 'hidden', background: '#fff' }}>
+      <div style={{ borderRadius: 12, overflow: 'hidden', background: '#fff' }}>
         <div ref={containerRef} style={{ overflowY: 'auto', overflowX: 'auto', maxHeight: 'calc(100dvh - 380px)', WebkitOverflowScrolling: 'touch' }}>
           <table style={{ width: '100%', borderCollapse: 'collapse' }}>
             <thead>{table.getHeaderGroups().map(hg => <tr key={hg.id}>{hg.headers.map(h => <DragHeader key={h.id} h={h} dragColId={dragColId} dragOverColId={dragOverColId} onDragStart={() => setDragColId(h.id)} onDragOver={() => setDragOverColId(h.id)} onDragEnd={() => { if (dragColId && dragOverColId && dragColId !== dragOverColId) { const cur = columnOrder.length ? [...columnOrder] : [...REPAIR_DEFAULT_ORDER]; const from = cur.indexOf(dragColId); const to = cur.indexOf(dragOverColId); if (from !== -1 && to !== -1) { cur.splice(from, 1); cur.splice(to, 0, dragColId); setColumnOrder(cur); } } setDragColId(null); setDragOverColId(null); }} sorted={h.column.getIsSorted()} />)}</tr>)}</thead>
@@ -449,7 +456,7 @@ function WillCallsTab({ willCalls, onNavigate }: { willCalls: SummaryWillCall[];
           )}
         </div>
       </div>
-      <div style={{ border: `1px solid ${theme.colors.border}`, borderRadius: 10, overflow: 'hidden', background: '#fff' }}>
+      <div style={{ borderRadius: 12, overflow: 'hidden', background: '#fff' }}>
         <div ref={containerRef} style={{ overflowY: 'auto', overflowX: 'auto', maxHeight: 'calc(100dvh - 380px)', WebkitOverflowScrolling: 'touch' }}>
           <table style={{ width: '100%', borderCollapse: 'collapse' }}>
             <thead>{table.getHeaderGroups().map(hg => <tr key={hg.id}>{hg.headers.map(h => <DragHeader key={h.id} h={h} dragColId={dragColId} dragOverColId={dragOverColId} onDragStart={() => setDragColId(h.id)} onDragOver={() => setDragOverColId(h.id)} onDragEnd={() => { if (dragColId && dragOverColId && dragColId !== dragOverColId) { const cur = columnOrder.length ? [...columnOrder] : [...WC_DEFAULT_ORDER]; const from = cur.indexOf(dragColId); const to = cur.indexOf(dragOverColId); if (from !== -1 && to !== -1) { cur.splice(from, 1); cur.splice(to, 0, dragColId); setColumnOrder(cur); } } setDragColId(null); setDragOverColId(null); }} sorted={h.column.getIsSorted()} />)}</tr>)}</thead>
@@ -624,94 +631,98 @@ export function Dashboard() {
   ];
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 24, margin: '-28px -32px', padding: '28px 32px', minHeight: '100%', background: '#F5F2EE' }}>
       <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
 
-      {/* Header */}
-      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }}>
-        <div>
-          <h1 style={{ fontSize: 22, fontWeight: 700, letterSpacing: '-0.3px', margin: 0 }}>Dashboard</h1>
-          <p style={{ fontSize: 13, color: theme.colors.textMuted, marginTop: 2, marginBottom: 0 }}>Open jobs across all clients</p>
+      {/* Header — v2 small inline branding */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }}>
+        <div style={{ fontSize: 13, fontWeight: 600, letterSpacing: '1px', color: '#1C1C1C' }}>
+          STRIDE LOGISTICS · DASHBOARD
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          {lastSyncedLabel && <span style={{ fontSize: 11, color: theme.colors.textMuted }}>Updated {lastSyncedLabel}</span>}
-          <button onClick={handleManualSync} title="Force refresh (bypass cache)" style={{ padding: '6px 10px', fontSize: 12, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6, fontFamily: 'inherit', color: refreshing ? theme.colors.orange : theme.colors.textSecondary }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          {lastSyncedLabel && <span style={{ fontSize: 11, color: '#999' }}>Updated {lastSyncedLabel}</span>}
+          <button onClick={handleManualSync} title="Force refresh (bypass cache)" style={{
+            padding: '8px 18px', fontSize: 11, fontWeight: 600, letterSpacing: '2px',
+            border: `1px solid rgba(0,0,0,0.08)`, borderRadius: 100,
+            background: '#fff', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6, fontFamily: 'inherit',
+            color: refreshing ? '#E8692A' : '#1C1C1C', textTransform: 'uppercase',
+          }}>
             <RefreshCw size={13} style={refreshing ? { animation: 'spin 1s linear infinite' } : undefined} />
-            {!isMobile && 'Sync'}
+            {!isMobile && 'SYNC'}
           </button>
         </div>
       </div>
 
       {/* Error banner */}
       {error && (
-        <div style={{ background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: 8, padding: '10px 14px', fontSize: 13, color: '#DC2626' }}>
+        <div style={{ background: 'rgba(180,90,90,0.12)', border: '1px solid rgba(180,90,90,0.3)', borderRadius: 12, padding: '12px 16px', fontSize: 13, color: '#B45A5A', fontWeight: 500 }}>
           {error}
         </div>
       )}
 
-      {/* Stat Cards */}
+      {/* Stat Cards — all dark v2 */}
       <div style={{ display: 'grid', gap: 14, gridTemplateColumns: isExtraSmall ? '1fr' : isMobile ? '1fr 1fr' : 'repeat(3, 1fr)' }}>
-        <StatCard icon={<ClipboardList size={18} />} label="Open Tasks" value={stats.openTasks} sub="Open + In Progress" color={theme.colors.orange} onClick={() => handleTabChange('tasks')} />
-        <StatCard icon={<Wrench size={18} />} label="Active Repairs" value={stats.openRepairs} sub="Pending quote or approved" color="#7C3AED" onClick={() => handleTabChange('repairs')} />
-        <StatCard icon={<Truck size={18} />} label="Pending Will Calls" value={stats.pendingWCs} sub="Pending · Scheduled · Partial" color="#1D4ED8" onClick={() => handleTabChange('willcalls')} />
+        <StatCard icon={<ClipboardList size={16} />} label="Open Tasks" value={stats.openTasks} sub="Open + In Progress" onClick={() => handleTabChange('tasks')} />
+        <StatCard icon={<Wrench size={16} />} label="Active Repairs" value={stats.openRepairs} sub="Pending quote or approved" onClick={() => handleTabChange('repairs')} />
+        <StatCard icon={<Truck size={16} />} label="Pending Will Calls" value={stats.pendingWCs} sub="Pending · Scheduled · Partial" onClick={() => handleTabChange('willcalls')} />
       </div>
 
-      {/* Tabs */}
-      <div>
-        {/* Tab bar */}
-        <div style={{ display: 'flex', gap: 0, borderBottom: `2px solid ${theme.colors.border}`, marginBottom: 16 }}>
+      {/* Content card — wraps tabs + table */}
+      <div style={{ background: '#EDE9E3', borderRadius: 20, padding: '28px 32px' }}>
+        {/* Tab bar — segmented pill style */}
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 20, flexWrap: 'wrap' }}>
+          <div style={{ display: 'inline-flex', gap: 0, background: '#fff', borderRadius: 100, padding: 5 }}>
           {TAB_DEFS.map(tab => {
             const active = activeTab === tab.id;
             const isTasksTab = tab.id === 'tasks';
             const tabStyle: React.CSSProperties = {
-              display: 'flex', alignItems: 'center', gap: 6, padding: '10px 18px',
-              fontSize: 13, fontWeight: active ? 600 : 400, fontFamily: 'inherit',
-              background: 'none', border: 'none', cursor: 'pointer',
-              borderBottom: active ? `2px solid ${theme.colors.orange}` : '2px solid transparent',
-              marginBottom: -2,
-              color: active ? theme.colors.orange : theme.colors.textSecondary,
-              transition: 'color 0.15s',
+              display: 'flex', alignItems: 'center', gap: 8, padding: '9px 18px',
+              fontSize: 12, fontWeight: 600, fontFamily: 'inherit',
+              letterSpacing: '1.5px', textTransform: 'uppercase',
+              background: active ? '#1C1C1C' : 'transparent', border: 'none', cursor: 'pointer',
+              borderRadius: 100,
+              color: active ? '#fff' : '#999',
+              transition: 'all 0.2s',
             };
             return (
               <div key={tab.id} style={{ position: 'relative' }} ref={isTasksTab ? typeDropdownRef : undefined}>
                 <button onClick={() => handleTabChange(tab.id)} style={tabStyle}>
-                  {tab.icon}
                   {tab.label}
                   <span style={{
-                    fontSize: 11, fontWeight: 600, padding: '1px 7px', borderRadius: 10,
-                    background: active ? theme.colors.orangeLight : theme.colors.bgSubtle,
-                    color: active ? theme.colors.orange : theme.colors.textMuted,
+                    fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 100,
+                    background: active ? '#fff' : 'rgba(0,0,0,0.06)',
+                    color: active ? '#1C1C1C' : '#666',
+                    letterSpacing: 0,
                   }}>
                     {tab.count}
                   </span>
                   {isTasksTab && (
-                    <ChevronDown size={12} onClick={e => { e.stopPropagation(); setShowTypeDropdown(v => !v); }} style={{ marginLeft: -2, opacity: 0.6 }} />
+                    <ChevronDown size={12} onClick={e => { e.stopPropagation(); setShowTypeDropdown(v => !v); }} style={{ marginLeft: -2, opacity: 0.7 }} />
                   )}
                 </button>
                 {/* Task type dropdown */}
                 {isTasksTab && showTypeDropdown && (
                   <div style={{
-                    position: 'absolute', top: '100%', left: 0, marginTop: 4, background: '#fff',
-                    border: `1px solid ${theme.colors.border}`, borderRadius: 10, padding: 6,
-                    zIndex: 50, boxShadow: '0 4px 20px rgba(0,0,0,0.1)', minWidth: 190,
+                    position: 'absolute', top: '100%', left: 0, marginTop: 8, background: '#fff',
+                    borderRadius: 12, padding: 8,
+                    zIndex: 50, boxShadow: '0 8px 24px rgba(0,0,0,0.12)', minWidth: 200,
                   }}>
-                    {/* Select All */}
-                    <label style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 8px', fontSize: 12, cursor: 'pointer', fontWeight: 600, borderBottom: `1px solid ${theme.colors.border}`, marginBottom: 2, paddingBottom: 8 }}>
-                      <input type="checkbox" checked={isAllSelected} onChange={toggleSelectAll} style={{ accentColor: theme.colors.orange }} />
+                    <label style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 10px', fontSize: 12, cursor: 'pointer', fontWeight: 600, borderBottom: `1px solid rgba(0,0,0,0.06)`, marginBottom: 4, paddingBottom: 10 }}>
+                      <input type="checkbox" checked={isAllSelected} onChange={toggleSelectAll} style={{ accentColor: '#E8692A' }} />
                       Select All
                     </label>
                     {ALL_SERVICE_TYPES.map(svc => {
                       const checked = isAllSelected || taskTypeFilters.includes(svc.code);
                       return (
-                        <label key={svc.code} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '5px 8px', fontSize: 12, cursor: 'pointer' }}>
-                          <input type="checkbox" checked={checked} onChange={() => toggleTaskType(svc.code)} style={{ accentColor: theme.colors.orange }} />
+                        <label key={svc.code} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px', fontSize: 12, cursor: 'pointer' }}>
+                          <input type="checkbox" checked={checked} onChange={() => toggleTaskType(svc.code)} style={{ accentColor: '#E8692A' }} />
                           {svc.name}
                         </label>
                       );
                     })}
                     {!isAllSelected && (
-                      <div style={{ borderTop: `1px solid ${theme.colors.border}`, marginTop: 4, paddingTop: 4 }}>
-                        <button onClick={() => setTaskTypeFilters([])} style={{ width: '100%', padding: '5px 8px', fontSize: 11, border: 'none', background: 'none', cursor: 'pointer', color: theme.colors.orange, fontWeight: 500, textAlign: 'left', fontFamily: 'inherit' }}>
+                      <div style={{ borderTop: `1px solid rgba(0,0,0,0.06)`, marginTop: 6, paddingTop: 6 }}>
+                        <button onClick={() => setTaskTypeFilters([])} style={{ width: '100%', padding: '6px 10px', fontSize: 11, border: 'none', background: 'none', cursor: 'pointer', color: '#E8692A', fontWeight: 600, textAlign: 'left', fontFamily: 'inherit' }}>
                           Reset to all types
                         </button>
                       </div>
@@ -721,8 +732,8 @@ export function Dashboard() {
               </div>
             );
           })}
-          <div style={{ flex: 1 }} />
-          {loading && <div style={{ display: 'flex', alignItems: 'center', paddingRight: 8 }}><div style={{ width: 14, height: 14, border: `2px solid #E5E7EB`, borderTopColor: theme.colors.orange, borderRadius: '50%', animation: 'spin 0.8s linear infinite' }} /></div>}
+          </div>
+          {loading && <div style={{ display: 'flex', alignItems: 'center' }}><div style={{ width: 14, height: 14, border: `2px solid rgba(0,0,0,0.08)`, borderTopColor: '#E8692A', borderRadius: '50%', animation: 'spin 0.8s linear infinite' }} /></div>}
         </div>
 
         {/* Tab content — render all but hide inactive (preserves scroll/filter state) */}
