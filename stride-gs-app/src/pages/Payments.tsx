@@ -611,7 +611,7 @@ export function Payments() {
                 setAutoCharge(newVal);
                 const res = await postUpdateStaxConfig('AUTO_CHARGE_ENABLED', newVal ? 'TRUE' : 'FALSE');
                 if (!res.ok) { setAutoCharge(!newVal); setError(res.error || 'Failed to update'); }
-                else { loadData(); }
+                else { loadData(true); }
               }} style={{ opacity: 0, width: 0, height: 0 }} />
               <span style={{ position: 'absolute', inset: 0, background: autoCharge ? theme.colors.orange : 'rgba(255,255,255,0.2)', borderRadius: 11, transition: '0.2s' }}><span style={{ position: 'absolute', top: 2, left: autoCharge ? 20 : 2, width: 18, height: 18, background: '#fff', borderRadius: '50%', transition: '0.2s', boxShadow: '0 1px 3px rgba(0,0,0,0.15)' }} /></span>
             </label>
@@ -641,7 +641,7 @@ export function Payments() {
                 setSyncing(true); setCustResult(null); setError(null);
                 const res = await postSyncStaxCustomers();
                 setSyncing(false);
-                if (res.ok && res.data) { setCustResult(`Sync: ${res.data.verified} verified, ${res.data.hasPayment} with payment`); setNextFetchNoCache(); loadData(); }
+                if (res.ok && res.data) { setCustResult(`Sync: ${res.data.verified} verified, ${res.data.hasPayment} with payment`); loadData(true); }
                 else { setError(res.error || 'Sync customers failed'); }
               }} />
               <InfoTooltip text="Pulls the latest customer list from your Stax account and updates the local customer mapping table. Run this after adding or changing customers in Stax." size={12} />
@@ -652,7 +652,7 @@ export function Payments() {
                 setCreatingInvoices(true); setInvoiceResult(null); setError(null);
                 const res = await postCreateStaxInvoices();
                 setCreatingInvoices(false);
-                if (res.ok && res.data) { const details = (res.data as any).errorDetails; setInvoiceResult(res.data.summary + (details?.length ? '\n\nErrors:\n' + details.map((d: any) => `${d.invoice} (${d.customer}): ${d.error}`).join('\n') : '')); setNextFetchNoCache(); loadData(); }
+                if (res.ok && res.data) { const details = (res.data as any).errorDetails; setInvoiceResult(res.data.summary + (details?.length ? '\n\nErrors:\n' + details.map((d: any) => `${d.invoice} (${d.customer}): ${d.error}`).join('\n') : '')); loadData(true); }
                 else { setError(res.error || 'Create invoices failed'); }
               }} />
               <InfoTooltip text="Pushes all PENDING invoices to Stax's system. This creates each invoice in Stax, assigns a Stax Invoice ID, and changes status from PENDING to CREATED. Invoices must be Created in Stax before they can be charged." size={12} />
@@ -698,7 +698,7 @@ export function Payments() {
                         if (res.ok && res.data?.success) {
                           setTestResult(`Test invoice ${res.data.qbInvoiceNo} created for ${res.data.customer} — $${res.data.amount.toFixed(2)}`);
                           setTestCustomer(''); setTestAmount('1.00'); setTestQbNo('');
-                          setNextFetchNoCache(); loadData();
+                          loadData(true);
                         } else { setTestError(res.data?.error || res.error || 'Failed to create test invoice'); }
                       }} />
                     </div>
@@ -826,7 +826,7 @@ export function Payments() {
                         setBulkProcessing(false); setSelectedInvoices(new Set());
                         setBulkActionLabel('Void Invoices');
                         setBulkResult(mergePreflightSkips(serverResult, preflightSkipped));
-                        setNextFetchNoCache(); loadData();
+                        loadData(true);
                       }}
                     />
                     <WriteButton label={bulkProcessing ? 'Processing...' : `Delete ${selectedInvoices.size}`} variant="secondary" size="sm" disabled={bulkProcessing}
@@ -861,7 +861,7 @@ export function Payments() {
                         setBulkProcessing(false); setSelectedInvoices(new Set());
                         setBulkActionLabel('Delete Invoices');
                         setBulkResult(mergePreflightSkips(serverResult, preflightSkipped));
-                        setNextFetchNoCache(); loadData();
+                        loadData(true);
                       }}
                     />
                     <WriteButton label={bulkProcessing ? 'Charging...' : `Charge ${selectedInvoices.size}`} variant="primary" size="sm" disabled={bulkProcessing}
@@ -892,7 +892,7 @@ export function Payments() {
                         setBulkProcessing(false); setSelectedInvoices(new Set());
                         setBulkActionLabel('Charge Invoices');
                         setBulkResult(result);
-                        setNextFetchNoCache(); loadData();
+                        loadData(true);
                       }}
                     />
                     <button onClick={() => setSelectedInvoices(new Set())} style={{ padding: '3px 10px', fontSize: 11, border: `1px solid ${theme.colors.border}`, borderRadius: 4, background: '#fff', cursor: 'pointer', fontFamily: 'inherit', color: theme.colors.textSecondary }}>Clear</button>
@@ -970,7 +970,7 @@ export function Payments() {
                           if (res.data.testMode) { setChargeResult(`[DRY RUN] ${i.qbInvoice}: ${res.data.message || 'Pre-flight passed — no charge executed'}`); }
                           else if (res.data.success) { setChargeResult(`${i.qbInvoice}: Charged successfully — txn ${res.data.transactionId}`); }
                           else { setChargeResult(`${i.qbInvoice}: ${res.data.status} — ${res.data.error || 'Unknown error'}`); }
-                          setNextFetchNoCache(); loadData();
+                          loadData(true);
                         } else { setError(res.error || 'Charge failed'); }
                       }} />}
                       {/* Reset button — on EXCEPTION/CHARGE_FAILED/DELETED rows */}
@@ -982,7 +982,7 @@ export function Payments() {
                             setVoidingInvoice(i.qbInvoice); setError(null);
                             const res = await postResetStaxInvoiceStatus({ qbInvoiceNo: i.qbInvoice });
                             setVoidingInvoice(null);
-                            if (res.ok && res.data?.success) { setChargeResult(`${i.qbInvoice} reset to ${res.data.newStatus}`); setNextFetchNoCache(); loadData(); }
+                            if (res.ok && res.data?.success) { setChargeResult(`${i.qbInvoice} reset to ${res.data.newStatus}`); loadData(true); }
                             else { setError(res.error || 'Reset failed'); }
                           }}
                           style={{ padding: '3px 8px', fontSize: 11, fontWeight: 500, border: `1px solid #3B82F6`, borderRadius: 4, background: '#EFF6FF', cursor: 'pointer', color: '#1D4ED8', fontFamily: 'inherit' }}
@@ -1000,7 +1000,7 @@ export function Payments() {
                             setVoidingInvoice(i.qbInvoice); setError(null);
                             const res = await postVoidStaxInvoice({ qbInvoiceNo: i.qbInvoice });
                             setVoidingInvoice(null);
-                            if (res.ok && res.data?.success) { setChargeResult(`${i.qbInvoice} voided`); setNextFetchNoCache(); loadData(); }
+                            if (res.ok && res.data?.success) { setChargeResult(`${i.qbInvoice} voided`); loadData(true); }
                             else { setError(res.error || 'Void failed'); }
                           }}
                           style={{ padding: '3px 8px', fontSize: 11, fontWeight: 500, border: `1px solid ${theme.colors.border}`, borderRadius: 4, background: '#fff', cursor: 'pointer', color: theme.colors.textMuted, fontFamily: 'inherit' }}
@@ -1066,7 +1066,7 @@ export function Payments() {
                     setBulkProcessing(false); setReviewSelected([]);
                     setBulkActionLabel('Delete PENDING Invoices');
                     setBulkResult(serverResult);
-                    setNextFetchNoCache(); loadData();
+                    loadData(true);
                   }} />
                 <WriteButton label={creatingInvoices ? 'Pushing...' : `Push to Stax (${reviewSelected.length})`} variant="primary" size="sm" disabled={creatingInvoices || !reviewSelected.length}
                   icon={creatingInvoices ? <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} /> : <Zap size={12} />}
@@ -1076,7 +1076,7 @@ export function Payments() {
                     const qbNos = reviewSelected.map(ri => { const inv = pending.find(p => p.rowIndex === ri); return inv?.qbInvoice || ''; }).filter(Boolean);
                     const res = await postCreateStaxInvoices({ invoiceNos: qbNos });
                     setCreatingInvoices(false);
-                    if (res.ok && res.data) { const details = (res.data as any).errorDetails; setInvoiceResult(res.data.summary + (details?.length ? '\n\nErrors:\n' + details.map((d: any) => `${d.invoice} (${d.customer}): ${d.error}`).join('\n') : '')); setReviewSelected([]); setNextFetchNoCache(); loadData(); }
+                    if (res.ok && res.data) { const details = (res.data as any).errorDetails; setInvoiceResult(res.data.summary + (details?.length ? '\n\nErrors:\n' + details.map((d: any) => `${d.invoice} (${d.customer}): ${d.error}`).join('\n') : '')); setReviewSelected([]); loadData(true); }
                     else { setError(res.error || 'Push to Stax failed'); }
                   }} />
               </div>
@@ -1090,7 +1090,7 @@ export function Payments() {
                   setCreatingInvoices(true);
                   const res = await postStaxRefreshCustomerIds();
                   setCreatingInvoices(false);
-                  if (res.ok) { setNextFetchNoCache(); loadData(); setInvoiceResult(res.data?.updated || 'Refreshed'); }
+                  if (res.ok) { loadData(true); setInvoiceResult(res.data?.updated || 'Refreshed'); }
                   else setError(res.error || 'Refresh failed');
                 }} disabled={creatingInvoices} style={{ marginLeft: 'auto', padding: '4px 12px', fontSize: 11, fontWeight: 600, border: `1px solid #D97706`, borderRadius: 6, background: '#FFFBEB', cursor: 'pointer', color: '#B45309', fontFamily: 'inherit', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: 4 }}>
                   <RefreshCw size={11} /> Refresh Stax IDs
@@ -1158,7 +1158,7 @@ export function Payments() {
                         onBlur={async (e) => {
                           if (e.target.value && e.target.value !== i.dueDate) {
                             const res = await postUpdateStaxInvoice({ qbInvoiceNo: i.qbInvoice, dueDate: e.target.value });
-                            if (res.ok) { setNextFetchNoCache(); loadData(); } else setError(res.error || 'Update failed');
+                            if (res.ok) { loadData(true); } else setError(res.error || 'Update failed');
                           }
                         }}
                         style={{ padding: '4px 8px', fontSize: 12, border: `1px solid ${theme.colors.border}`, borderRadius: 4, fontFamily: 'inherit' }} />
@@ -1168,7 +1168,7 @@ export function Payments() {
                         onBlur={async (e) => {
                           if (e.target.value !== i.notes) {
                             const res = await postUpdateStaxInvoice({ qbInvoiceNo: i.qbInvoice, notes: e.target.value });
-                            if (res.ok) { setNextFetchNoCache(); loadData(); } else setError(res.error || 'Update failed');
+                            if (res.ok) { loadData(true); } else setError(res.error || 'Update failed');
                           }
                         }}
                         placeholder="Notes..."
@@ -1178,7 +1178,7 @@ export function Payments() {
                       <button onClick={async () => {
                         if (!confirm(`Delete ${i.qbInvoice}? It will be marked DELETED.`)) return;
                         const res = await postDeleteStaxInvoice({ qbInvoiceNo: i.qbInvoice, rowIndex: i.rowIndex });
-                        if (res.ok && res.data?.success) { setReviewSelected(prev => prev.filter(x => x !== i.rowIndex)); setNextFetchNoCache(); loadData(); }
+                        if (res.ok && res.data?.success) { setReviewSelected(prev => prev.filter(x => x !== i.rowIndex)); loadData(true); }
                         else setError(res.error || 'Delete failed');
                       }} style={{ padding: '3px 8px', fontSize: 11, fontWeight: 500, border: `1px solid #FECACA`, borderRadius: 4, background: '#FEF2F2', cursor: 'pointer', color: '#DC2626', fontFamily: 'inherit' }}>Void</button>
                     </td>
@@ -1233,8 +1233,7 @@ export function Payments() {
           setChargingInvoice(null);
           if (res.ok && res.data) {
             setChargeResult(`${qbInvoice}: ${res.data.summary || 'Pushed to Stax'}`);
-            setNextFetchNoCache();
-            loadData();
+            loadData(true);
           } else {
             setError(res.error || 'Push to Stax failed');
           }
@@ -1271,12 +1270,12 @@ export function Payments() {
                   <WriteButton label={`Set All Auto (${created.length})`} variant="secondary" size="sm"
                     onClick={async () => {
                       const res = await postToggleAutoCharge({ invoiceNos: created.map(c => c.qbInvoice), autoCharge: true });
-                      if (res.ok) { setChargeResult(res.data?.message || 'All set to Auto'); setNextFetchNoCache(); loadData(); } else setError(res.error || 'Failed');
+                      if (res.ok) { setChargeResult(res.data?.message || 'All set to Auto'); loadData(true); } else setError(res.error || 'Failed');
                     }} />
                   <WriteButton label={`Set All Manual (${created.length})`} variant="secondary" size="sm"
                     onClick={async () => {
                       const res = await postToggleAutoCharge({ invoiceNos: created.map(c => c.qbInvoice), autoCharge: false });
-                      if (res.ok) { setChargeResult(res.data?.message || 'All set to Manual'); setNextFetchNoCache(); loadData(); } else setError(res.error || 'Failed');
+                      if (res.ok) { setChargeResult(res.data?.message || 'All set to Manual'); loadData(true); } else setError(res.error || 'Failed');
                     }} />
                 </div>
               )}
@@ -1413,7 +1412,7 @@ export function Payments() {
                           onBlur={async (e) => {
                             if (e.target.value && e.target.value !== i.dueDate) {
                               const res = await postUpdateStaxInvoice({ qbInvoiceNo: i.qbInvoice, dueDate: e.target.value });
-                              if (res.ok) { setNextFetchNoCache(); loadData(); } else setError(res.error || 'Update failed');
+                              if (res.ok) { loadData(true); } else setError(res.error || 'Update failed');
                             }
                           }}
                           title="Change due date"
@@ -1429,7 +1428,7 @@ export function Payments() {
                             if (res.ok && res.data) {
                               if (res.data.success) setChargeResult(`${i.qbInvoice}: Charged — txn ${res.data.transactionId}`);
                               else setChargeResult(`${i.qbInvoice}: ${res.data.status} — ${res.data.error}`);
-                              setNextFetchNoCache(); loadData();
+                              loadData(true);
                             } else setError(res.error || 'Charge failed');
                           }} />
                       </td>
@@ -1495,7 +1494,7 @@ export function Payments() {
               setSendingPayLinks(true); setPayLinkResult(null); setError(null);
               const res = await postSendStaxPayLinks();
               setSendingPayLinks(false);
-              if (res.ok && res.data) { setPayLinkResult(res.data.summary); setNextFetchNoCache(); loadData(); }
+              if (res.ok && res.data) { setPayLinkResult(res.data.summary); loadData(true); }
               else { setError(res.error || 'Send pay links failed'); }
             }} />
           </div>
@@ -1520,7 +1519,7 @@ export function Payments() {
                         setSendingPayLink(exc.qbInvoice); setError(null);
                         const res = await postSendStaxPayLink({ qbInvoiceNo: exc.qbInvoice });
                         setSendingPayLink(null);
-                        if (res.ok && res.data && res.data.success) { setPayLinkResult(`Pay link sent for ${exc.qbInvoice}`); setNextFetchNoCache(); loadData(); }
+                        if (res.ok && res.data && res.data.success) { setPayLinkResult(`Pay link sent for ${exc.qbInvoice}`); loadData(true); }
                         else { setError(res.error || res.data?.error || 'Send pay link failed'); }
                       }} />}
                       <WriteButton label="Resolve" variant="secondary" size="sm" onClick={async () => {
@@ -1548,7 +1547,7 @@ export function Payments() {
                 setPulling(false);
                 if (res.ok && res.data) {
                   setCustResult(`Pull complete: ${res.data.withStaxId} with Stax ID, ${res.data.missingStaxId} missing, ${res.data.apiErrors} errors`);
-                  setNextFetchNoCache(); loadData();
+                  loadData(true);
                 } else { setError(res.error || 'Pull customers failed'); }
               }} />
               <WriteButton label={syncing ? 'Syncing...' : 'Sync with Stax'} variant="secondary" size="sm" disabled={pulling || syncing} icon={syncing ? <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} /> : <RefreshCw size={12} />} onClick={async () => {
@@ -1558,7 +1557,7 @@ export function Payments() {
                 if (res.ok && res.data) {
                   const d = res.data;
                   setCustResult(`Sync: ${d.verified} verified, ${d.hasPayment} with payment, ${d.foundByEmail} found by email, ${d.companyPushed} company names pushed${d.apiErrors ? ', ' + d.apiErrors + ' errors' : ''}`);
-                  setNextFetchNoCache(); loadData();
+                  loadData(true);
                 } else { setError(res.error || 'Sync customers failed'); }
               }} />
             </div>
@@ -1630,7 +1629,7 @@ export function Payments() {
               setCreatingInvoices(true); setInvoiceResult(null); setError(null);
               const res = await postCreateStaxInvoices();
               setCreatingInvoices(false);
-              if (res.ok && res.data) { setInvoiceResult(res.data.summary); setTab('invoices'); setNextFetchNoCache(); loadData(); }
+              if (res.ok && res.data) { setInvoiceResult(res.data.summary); setTab('invoices'); loadData(true); }
               else { setError(res.error || 'Create invoices failed'); }
             }} />
             <WriteButton label="Set Payment Due Dates" variant="secondary" style={{ flex: 1, padding: '12px', fontSize: 13 }} onClick={async () => { /* Phase 2: wire to API */ }} />
@@ -1717,7 +1716,7 @@ export function Payments() {
             const res = await postResetStaxInvoiceStatus({ qbInvoiceNo: qbInvoice });
             if (res.ok && res.data?.success) {
               setChargeResult(`${qbInvoice} reset to ${res.data.newStatus}`);
-              setNextFetchNoCache(); loadData();
+              loadData(true);
             } else { setError(res.error || 'Reset failed'); }
           }}
           onRetryCharge={async (qbInvoice) => {
@@ -1730,7 +1729,7 @@ export function Payments() {
             } else {
               setChargeResult(`${qbInvoice}: ${res.data?.status || 'FAILED'} — ${res.data?.error || res.error || 'Charge failed'}`);
             }
-            setNextFetchNoCache(); loadData();
+            loadData(true);
           }}
         />
       )}

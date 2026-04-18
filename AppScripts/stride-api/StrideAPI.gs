@@ -9337,6 +9337,7 @@ function handleCompleteShipment_(clientSheetId, payload) {
 
         var emailTokens = {
           "{{SHIPMENT_NO}}":    shipmentNo,
+          "{{CLIENT_SHEET_ID}}": clientSheetId,
           "{{CLIENT_NAME}}":    clientName || "Client",
           "{{CARRIER}}":        carrier || "",
           "{{TRACKING}}":       trackingNumber || "",
@@ -9393,7 +9394,7 @@ function handleCompleteShipment_(clientSheetId, payload) {
         }
 
         var emailResult = api_sendTemplateEmail_(settings, "SHIPMENT_RECEIVED", allRecip,
-          "Shipment Received — " + clientName + " — " + shipmentNo, emailTokens, pdfBlob);
+          "Shipment Received — " + clientName + " — " + shipmentNo, emailTokens, pdfBlob, clientSheetId);
         if (emailResult.success) emailSent = true;
         else warnings.push("Email not sent: " + emailResult.error);
       }
@@ -9850,7 +9851,7 @@ function handleCompleteTask_(clientSheetId, payload) {
 
         var emailResult = api_sendTemplateEmail_(settings, templateKey, allRecip,
           (templateKey === "INSP_EMAIL" ? "Inspection Report " : "Task Completed ") + clientName + " — " + itemId,
-          emailTokens, pdfBlob);
+          emailTokens, pdfBlob, clientSheetId);
         if (emailResult.success) emailSent = true;
         else warnings.push("Email not sent: " + emailResult.error);
       }
@@ -9888,7 +9889,7 @@ function handleCompleteTask_(clientSheetId, payload) {
  * @param {Blob=} pdfBlob - Optional PDF blob to attach
  * @returns {{ success: boolean, error?: string }}
  */
-function api_sendTemplateEmail_(settings, templateKey, toEmail, fallbackSubject, tokens, pdfBlob) {
+function api_sendTemplateEmail_(settings, templateKey, toEmail, fallbackSubject, tokens, pdfBlob, clientSheetId) {
   if (!toEmail) return { success: false, error: "No recipient email address" };
   try {
     var masterId = String(settings["MASTER_SPREADSHEET_ID"] || "").trim();
@@ -9938,9 +9939,9 @@ function api_sendTemplateEmail_(settings, templateKey, toEmail, fallbackSubject,
     var _clientSuffix = "";
     try {
       var _cid = String(settings["CLIENT_SPREADSHEET_ID"] || settings["CONSOLIDATED_BILLING_SPREADSHEET_ID"] || "").trim();
-      // settings object is from the CLIENT sheet — CLIENT_SPREADSHEET_ID is its own ID.
-      // But not all settings objects have it. Fallback: if the caller put it in tokens.
+      // Fallback chain: tokens → passed clientSheetId param
       if (!_cid && tokens["{{CLIENT_SHEET_ID}}"]) _cid = String(tokens["{{CLIENT_SHEET_ID}}"]);
+      if (!_cid && clientSheetId) _cid = String(clientSheetId);
       if (_cid) _clientSuffix = "&client=" + encodeURIComponent(_cid);
     } catch (_) {}
     if (tokens["{{TASK_ID}}"] && !tokens["{{TASK_DEEP_LINK}}"])
@@ -10328,7 +10329,7 @@ function handleRequestRepairQuote_(clientSheetId, payload, callerEmail) {
           "{{PHOTOS_URL}}":     photosUrl
         };
         var emailResult = api_sendTemplateEmail_(settings, "REPAIR_QUOTE_REQUEST", allRecip,
-          "Repair Quote Requested — " + clientName + " — " + itemId, emailTokens, null);
+          "Repair Quote Requested — " + clientName + " — " + itemId, emailTokens, null, clientSheetId);
         if (emailResult.success) emailSent = true;
         else warnings.push("Email not sent: " + emailResult.error);
       } else {
@@ -10520,7 +10521,8 @@ function handleSendRepairQuote_(clientSheetId, payload) {
           "{{ITEM_TABLE_HTML}}":  itemTableHtml,
           "{{PHOTOS_URL}}":       photosUrl,
           "{{PHOTOS_BUTTON}}":    ""
-        }
+        },
+        null, clientSheetId
       );
       if (emailResult.success) {
         emailSent = true;
@@ -10741,7 +10743,7 @@ function handleRespondToRepairQuote_(clientSheetId, payload) {
 
       var emailResult = api_sendTemplateEmail_(settings, templateKey, notifEmails,
         (decision === "Approve" ? "Repair Approved: " : "Repair Declined: ") + itemId + " - " + clientName,
-        emailTokens, pdfBlob
+        emailTokens, pdfBlob, clientSheetId
       );
       if (emailResult.success) {
         emailSent = true;
@@ -11044,7 +11046,8 @@ function handleCompleteRepair_(clientSheetId, payload) {
           "{{REPAIR_ID}}":         repairId,
           "{{NOTES}}":             notes         || "-",
           "{{ITEM_TABLE_HTML}}":   repairItemTable
-        }
+        },
+        null, clientSheetId
       );
       if (emailResult.success) {
         emailSent = true;
@@ -11633,7 +11636,7 @@ function handleCreateWillCall_(clientSheetId, payload) {
 
         var emailResult = api_sendTemplateEmail_(settings, "WILL_CALL_CREATED", allRecip,
           "Will Call Created: " + wcNumber,
-          wcEmailTokens, null
+          wcEmailTokens, null, clientSheetId
         );
         if (emailResult.success) {
           emailSent = true;
@@ -12035,7 +12038,7 @@ function handleProcessWcRelease_(clientSheetId, payload) {
 
         var emailResult = api_sendTemplateEmail_(settings, "WILL_CALL_RELEASE", allRecip,
           "Will Call Released: " + wcNumber,
-          releaseTokens, relPdfBlob
+          releaseTokens, relPdfBlob, clientSheetId
         );
         if (emailResult.success) {
           emailSent = true;
@@ -12540,7 +12543,7 @@ function handleCancelWillCall_(clientSheetId, payload) {
       };
       try {
         var result = api_sendTemplateEmail_(settings, "WILL_CALL_CANCELLED", to,
-          "Will Call " + wcNumber + " — Cancelled", tokens);
+          "Will Call " + wcNumber + " — Cancelled", tokens, null, clientSheetId);
         emailSent = (result && result.sent);
       } catch (emailErr) {
         warnings.push("Email failed: " + emailErr.message);
