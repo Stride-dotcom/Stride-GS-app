@@ -278,6 +278,46 @@ npm run build                            # exit 0 again
 
 ---
 
+## GitHub Actions CI/CD
+
+Three workflows in `.github/workflows/`. **Full docs:** `.github/workflows/README.md`.
+
+### Workflows
+
+| File | Trigger | What it does |
+|------|---------|--------------|
+| `ci.yml` | Push to `source` or PR targeting `source` (paths: `stride-gs-app/**`) | `npm ci` → `tsc -b` → `npm run build` → bundle size report |
+| `deploy.yml` | Push to `source` only (paths: `stride-gs-app/**`) | Same build + force-push `dist/` to `origin/main` via `peaceiris/actions-gh-pages@v4` |
+| `migrate.yml` | `workflow_dispatch` (manual only) | Display SQL + `supabase db push` if confirm=true |
+
+### Auto-deploy replaces `npm run deploy`
+Once GitHub Actions is active, pushing React changes to `source` deploys `mystridehub.com` automatically — **no `npm run deploy` needed**. The `dist/.git` subtree and `npm run deploy` still work as a manual override.
+
+### Required GitHub Secrets
+Set in: **GitHub → Settings → Secrets and variables → Actions**
+
+| Secret | Used by |
+|--------|---------|
+| `VITE_SUPABASE_URL` | `ci.yml`, `deploy.yml` (Vite build) |
+| `VITE_SUPABASE_ANON_KEY` | `ci.yml`, `deploy.yml` (Vite build) |
+| `SUPABASE_DB_URL` | `migrate.yml` (PostgreSQL connection string) |
+
+`GITHUB_TOKEN` is auto-provided — no setup needed.
+
+### Migration workflow (Claude agents)
+For production migrations with an approval gate, trigger via CLI:
+```bash
+gh workflow run migrate.yml \
+  -f migration_file=stride-gs-app/supabase/migrations/YYYYMMDDHHMMSS_name.sql \
+  -f confirm=true
+```
+During development, prefer the MCP `apply_migration` tool (faster, no approval gate needed).
+
+### Client rollout — still manual
+No automation for `npm run rollout && npm run deploy-clients` — intentionally gated. When CLAUDE.md instructs a rollout, run it directly from `AppScripts/stride-client-inventory/`.
+
+---
+
 ## Architecture
 
 4 interconnected Google Sheets, each with bound Apps Script, plus a standalone API project and a React frontend:
