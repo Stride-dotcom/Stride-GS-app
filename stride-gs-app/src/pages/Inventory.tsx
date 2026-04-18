@@ -1360,7 +1360,7 @@ export function Inventory() {
   }
 
   return (
-    <div style={{ fontFamily: theme.typography.fontFamily, display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
+    <div style={{ fontFamily: theme.typography.fontFamily, display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, background: '#F5F2EE', margin: '-28px -32px', padding: '28px 32px' }}>
 
       {/* Print styles */}
       <style>{`
@@ -1384,10 +1384,11 @@ export function Inventory() {
         </div>
       </div>
 
-      {/* ── Page Title ── */}
-      <div className="no-print" style={{ marginBottom: 12 }}>
-        <h1 style={{ fontSize: 22, fontWeight: 700, letterSpacing: '-0.3px', margin: 0 }}>Inventory</h1>
-        <p style={{ fontSize: 13, color: theme.colors.textMuted, margin: '2px 0 0' }}>All stored items across clients</p>
+      {/* ── Page Title (v2 small inline branding) ── */}
+      <div className="no-print" style={{ marginBottom: 16 }}>
+        <div style={{ fontSize: 13, fontWeight: 600, letterSpacing: '1px', color: '#1C1C1C' }}>
+          STRIDE LOGISTICS · INVENTORY
+        </div>
       </div>
 
       <SyncBanner syncing={refreshing} label={clientFilter.length === 1 ? clientFilter[0] : clientFilter.length > 1 ? `${clientFilter.length} clients` : undefined} />
