@@ -79,7 +79,7 @@ const STAX_STATUS_LABEL: Record<string, string> = {
 function staxLabel(status: string): string { return STAX_STATUS_LABEL[status.toUpperCase()] || status; }
 
 const card: React.CSSProperties = { background: '#fff', border: `1px solid ${theme.colors.border}`, borderRadius: 12, padding: 20, marginBottom: 16 };
-const th: React.CSSProperties = { padding: '8px 10px', textAlign: 'left', fontSize: 10, fontWeight: 500, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.05em', borderBottom: `2px solid ${theme.colors.border}` };
+const th: React.CSSProperties = { padding: '14px 12px', textAlign: 'left', fontSize: 10, fontWeight: 600, color: '#888', textTransform: 'uppercase', letterSpacing: '2px', borderBottom: 'none', background: '#F5F2EE' };
 const td: React.CSSProperties = { padding: '10px 10px', fontSize: 12, borderBottom: `1px solid ${theme.colors.borderLight}` };
 
 function Badge({ t, c }: { t: string; c?: { bg: string; text: string } }) {
@@ -502,7 +502,7 @@ export function Payments() {
     { id: 'customers', label: 'Customers', icon: Users, count: customers.length },
   ];
 
-  const chip = (active: boolean): React.CSSProperties => ({ padding: '8px 16px', borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: 'pointer', border: `1px solid ${active ? theme.colors.orange : theme.colors.border}`, background: active ? theme.colors.orangeLight : '#fff', color: active ? theme.colors.orange : theme.colors.textSecondary, transition: 'all 0.15s', display: 'flex', alignItems: 'center', gap: 6, fontFamily: 'inherit' });
+  const chip = (active: boolean): React.CSSProperties => ({ padding: '8px 16px', borderRadius: 100, fontSize: 11, fontWeight: 600, letterSpacing: '1px', textTransform: 'uppercase', cursor: 'pointer', border: active ? 'none' : '1px solid rgba(0,0,0,0.08)', background: active ? '#1C1C1C' : '#fff', color: active ? '#fff' : '#666', transition: 'all 0.15s', display: 'flex', alignItems: 'center', gap: 6, fontFamily: 'inherit' });
 
   if (loading) {
     return (

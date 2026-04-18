@@ -1305,14 +1305,14 @@ export function Inventory() {
     position: colId === 'actions' ? 'sticky' : 'relative',
     right: colId === 'actions' ? 0 : undefined,
     zIndex: colId === 'actions' ? 3 : 2,
-    padding: '0 10px',
-    height: 36,
-    borderBottom: `2px solid ${theme.colors.borderDefault}`,
+    padding: '0 12px',
+    height: 44,
+    borderBottom: 'none',
     borderRight: colId === 'actions' ? `1px solid ${theme.colors.borderSubtle}` : undefined,
     textAlign: colId === 'qty' ? 'center' : 'left',
     userSelect: 'none',
     cursor: colId === 'select' || colId === 'actions' ? 'default' : 'grab',
-    background: dragOverColId === colId ? theme.colors.primaryLight : '#F4F5F7',
+    background: dragOverColId === colId ? theme.colors.primaryLight : '#F5F2EE',
     verticalAlign: 'middle',
     whiteSpace: 'nowrap',
     boxSizing: 'border-box',
@@ -1620,13 +1620,13 @@ export function Inventory() {
               key={s ?? 'all'}
               onClick={() => setStatusChip(s)}
               style={{
-                padding: '4px 12px', borderRadius: theme.radii.full,
-                border: `1px solid ${isActive ? theme.colors.primary : theme.colors.borderDefault}`,
-                background: isActive ? theme.colors.primaryLight : theme.colors.bgBase,
-                color: isActive ? theme.colors.primary : theme.colors.textSecondary,
-                fontSize: theme.typography.sizes.sm,
-                fontWeight: isActive ? theme.typography.weights.semibold : theme.typography.weights.normal,
-                cursor: 'pointer', transition: 'all 0.1s',
+                padding: '8px 16px', borderRadius: 100,
+                border: isActive ? 'none' : '1px solid rgba(0,0,0,0.08)',
+                background: isActive ? '#1C1C1C' : '#fff',
+                color: isActive ? '#fff' : '#666',
+                fontSize: 11,
+                fontWeight: 600, letterSpacing: '1px', textTransform: 'uppercase',
+                cursor: 'pointer', transition: 'all 0.15s', fontFamily: 'inherit', whiteSpace: 'nowrap',
               }}
             >
               {s ?? 'All'} <span style={{ opacity: 0.65 }}>({count})</span>
@@ -1687,7 +1687,7 @@ export function Inventory() {
                       key={header.id}
                       style={{
                         ...headerCellStyle(colId),
-                        background: isDragOver ? '#EBF0FF' : '#F4F5F7',
+                        background: isDragOver ? '#EBF0FF' : '#F5F2EE',
                         outline: isDragOver ? `2px solid ${theme.colors.primary}` : undefined,
                         outlineOffset: -2,
                         width: header.getSize(),
@@ -1707,10 +1707,10 @@ export function Inventory() {
                             style={{
                               display: 'flex', alignItems: 'center', gap: 4,
                               background: 'none', border: 'none', cursor: 'pointer', padding: 0,
-                              fontSize: theme.typography.sizes.xs,
-                              fontWeight: theme.typography.weights.semibold,
-                              color: sorted ? theme.colors.orange : theme.colors.textSecondary,
-                              textTransform: 'uppercase', letterSpacing: '0.05em',
+                              fontSize: 10,
+                              fontWeight: 600,
+                              color: sorted ? theme.colors.orange : '#888',
+                              textTransform: 'uppercase', letterSpacing: '2px',
                               flex: 1, minWidth: 0,
                             }}
                           >

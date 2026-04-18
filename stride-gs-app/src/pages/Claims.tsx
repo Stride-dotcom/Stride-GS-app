@@ -464,11 +464,11 @@ export function Claims() {
                           setDragColId(null); setDragOverColId(null);
                         }}
                         style={{
-                          padding: '10px 12px', textAlign: 'left', fontSize: 11, fontWeight: 600,
-                          color: h.column.getIsSorted() ? theme.colors.orange : theme.colors.textSecondary, textTransform: 'uppercase', letterSpacing: '0.04em',
+                          padding: '14px 12px', textAlign: 'left', fontSize: 10, fontWeight: 600,
+                          color: h.column.getIsSorted() ? theme.colors.orange : '#888', textTransform: 'uppercase', letterSpacing: '2px',
                           whiteSpace: 'nowrap', cursor: h.id !== 'select' && h.id !== 'actions' ? 'grab' : 'default',
                           userSelect: 'none', width: h.getSize(),
-                          background: isDragTarget ? theme.colors.orangeLight : undefined,
+                          background: isDragTarget ? theme.colors.orangeLight : '#F5F2EE',
                           borderLeft: isDragTarget ? `2px solid ${theme.colors.orange}` : undefined,
                         }} onClick={(e: React.MouseEvent) => h.column.toggleSorting(undefined, e.shiftKey)}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>

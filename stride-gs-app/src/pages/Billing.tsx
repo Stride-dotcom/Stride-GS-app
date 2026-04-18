@@ -1242,9 +1242,9 @@ export function Billing() {
   };
 
   // ─── Styles ────────────────────────────────────────────────────────────────
-  const th: React.CSSProperties = { padding: '10px 12px', textAlign: 'left', fontWeight: 500, fontSize: 11, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.05em', borderBottom: `1px solid ${theme.colors.borderLight}`, position: 'sticky', top: 0, background: '#fff', zIndex: 2, cursor: 'pointer', userSelect: 'none', whiteSpace: 'nowrap' };
+  const th: React.CSSProperties = { padding: '14px 12px', textAlign: 'left', fontWeight: 600, fontSize: 10, color: '#888', textTransform: 'uppercase', letterSpacing: '2px', borderBottom: 'none', position: 'sticky', top: 0, background: '#F5F2EE', zIndex: 2, cursor: 'pointer', userSelect: 'none', whiteSpace: 'nowrap' };
   const td: React.CSSProperties = { padding: '10px 12px', borderBottom: `1px solid ${theme.colors.borderLight}`, fontSize: 13, whiteSpace: 'nowrap' };
-  const tabChip = (active: boolean): React.CSSProperties => ({ padding: '8px 16px', borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: 'pointer', border: `1px solid ${active ? theme.colors.orange : theme.colors.border}`, background: active ? theme.colors.orangeLight : '#fff', color: active ? theme.colors.orange : theme.colors.textSecondary, transition: 'all 0.15s', display: 'flex', alignItems: 'center', gap: 6, fontFamily: 'inherit' });
+  const tabChip = (active: boolean): React.CSSProperties => ({ padding: '8px 16px', borderRadius: 100, fontSize: 11, fontWeight: 600, letterSpacing: '1px', textTransform: 'uppercase', cursor: 'pointer', border: active ? 'none' : '1px solid rgba(0,0,0,0.08)', background: active ? '#1C1C1C' : '#fff', color: active ? '#fff' : '#666', transition: 'all 0.15s', display: 'flex', alignItems: 'center', gap: 6, fontFamily: 'inherit' });
 
   // ─── Filter panel style ───────────────────────────────────────────────────
   const filterPanelStyle: React.CSSProperties = { padding: '16px 20px', background: '#fff', border: `1px solid ${theme.colors.border}`, borderRadius: 12, marginBottom: 16 };
