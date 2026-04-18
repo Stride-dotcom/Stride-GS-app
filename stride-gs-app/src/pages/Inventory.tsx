@@ -1386,7 +1386,7 @@ export function Inventory() {
 
       {/* ── Page Title (v2 small inline branding) ── */}
       <div className="no-print" style={{ marginBottom: 16 }}>
-        <div style={{ fontSize: 13, fontWeight: 600, letterSpacing: '1px', color: '#1C1C1C' }}>
+        <div style={{ fontSize: 20, fontWeight: 700, letterSpacing: '2px', color: '#1C1C1C' }}>
           STRIDE LOGISTICS · INVENTORY
         </div>
       </div>

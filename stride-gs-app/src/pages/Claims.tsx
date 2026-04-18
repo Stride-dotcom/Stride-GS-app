@@ -340,7 +340,7 @@ export function Claims() {
       {/* Page Header */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-          <div style={{ fontSize: 13, fontWeight: 600, letterSpacing: '1px', color: '#1C1C1C' }}>
+          <div style={{ fontSize: 20, fontWeight: 700, letterSpacing: '2px', color: '#1C1C1C' }}>
             STRIDE LOGISTICS · CLAIMS
           </div>
           {isLive && <span style={{ fontSize: 10, fontWeight: 600, color: '#15803D', background: '#F0FDF4', padding: '2px 10px', borderRadius: 100, textTransform: 'uppercase', letterSpacing: '1px' }}>Live</span>}

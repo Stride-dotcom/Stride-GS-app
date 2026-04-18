@@ -517,7 +517,7 @@ export function Payments() {
   if (error && invoices.length === 0) {
     return (
       <div style={{ padding: 40, textAlign: 'center', background: '#F5F2EE', margin: '-28px -32px', minHeight: '100%' }}>
-        <div style={{ fontSize: 13, fontWeight: 600, letterSpacing: '1px', color: '#1C1C1C', marginBottom: 16 }}>STRIDE LOGISTICS · PAYMENTS</div>
+        <div style={{ fontSize: 20, fontWeight: 700, letterSpacing: '2px', color: '#1C1C1C', marginBottom: 16 }}>STRIDE LOGISTICS · PAYMENTS</div>
         <div style={{ ...card, maxWidth: 480, margin: '0 auto', padding: 24 }}>
           <AlertTriangle size={28} color="#DC2626" style={{ margin: '0 auto 12px', display: 'block' }} />
           <div style={{ fontSize: 14, fontWeight: 600, color: '#DC2626', marginBottom: 8 }}>Failed to load Stax data</div>
@@ -549,7 +549,7 @@ export function Payments() {
       <BulkResultSummary open={!!bulkResult} actionLabel={bulkActionLabel} result={bulkResult} onClose={() => setBulkResult(null)} />
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 20 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-          <div style={{ fontSize: 13, fontWeight: 600, letterSpacing: '1px', color: '#1C1C1C' }}>
+          <div style={{ fontSize: 20, fontWeight: 700, letterSpacing: '2px', color: '#1C1C1C' }}>
             STRIDE LOGISTICS · PAYMENTS
           </div>
           {lastUpdated && <span style={{ fontSize: 10, color: theme.colors.textMuted }}>Updated {lastUpdated.toLocaleTimeString()}</span>}

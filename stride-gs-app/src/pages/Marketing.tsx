@@ -394,7 +394,7 @@ export function Marketing() {
     <div style={{ background: '#F5F2EE', margin: '-28px -32px', padding: isMobile ? '20px 12px' : '28px 32px', minHeight: '100%', fontFamily: theme.typography.fontFamily }}>
       {/* Page Header */}
       <div style={{ display: 'flex', flexDirection: isMobile ? 'column' : 'row', justifyContent: 'space-between', alignItems: isMobile ? 'stretch' : 'center', gap: isMobile ? 12 : 0, marginBottom: 20 }}>
-        <div style={{ fontSize: 13, fontWeight: 600, letterSpacing: '1px', color: '#1C1C1C' }}>
+        <div style={{ fontSize: 20, fontWeight: 700, letterSpacing: '2px', color: '#1C1C1C' }}>
           STRIDE LOGISTICS · MARKETING
         </div>
         <div style={{ display: 'flex', gap: 8 }}>

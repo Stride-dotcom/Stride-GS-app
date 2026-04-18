@@ -562,7 +562,7 @@ export function Labels() {
   return (
     <div style={s.page}>
       <div style={s.header} className="no-print">
-        <div style={{ fontSize: 13, fontWeight: 600, letterSpacing: '1px', color: '#1C1C1C' }}>STRIDE LOGISTICS · LABELS</div>
+        <div style={{ fontSize: 20, fontWeight: 700, letterSpacing: '2px', color: '#1C1C1C' }}>STRIDE LOGISTICS · LABELS</div>
         <span style={{ fontSize: 11, color: theme.colors.textMuted, marginLeft: 12 }}>
           {sizeDef.label} · {printCount} label{printCount !== 1 ? 's' : ''}
         </span>

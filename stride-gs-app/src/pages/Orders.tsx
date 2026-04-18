@@ -170,7 +170,7 @@ export function Orders() {
 
       {/* Page title + tab bar */}
       <div style={{ flexShrink: 0, marginBottom: 16 }}>
-        <div style={{ fontSize: 13, fontWeight: 600, letterSpacing: '1px', color: '#1C1C1C', marginBottom: 12 }}>
+        <div style={{ fontSize: 20, fontWeight: 700, letterSpacing: '2px', color: '#1C1C1C', marginBottom: 12 }}>
           STRIDE LOGISTICS · {isAdmin ? 'ORDERS & DELIVERY' : 'DELIVERY'}
         </div>
         <div style={{ display: 'flex', gap: 0 }}>

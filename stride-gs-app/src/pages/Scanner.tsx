@@ -387,7 +387,7 @@ export function Scanner() {
   return (
     <div style={s.page}>
       <div style={s.header}>
-        <div style={{ fontSize: 13, fontWeight: 600, letterSpacing: '1px', color: '#1C1C1C' }}>STRIDE LOGISTICS · QR SCANNER</div>
+        <div style={{ fontSize: 20, fontWeight: 700, letterSpacing: '2px', color: '#1C1C1C' }}>STRIDE LOGISTICS · QR SCANNER</div>
         <span style={{ fontSize: 11, color: theme.colors.textMuted, marginLeft: 'auto' }}>Batch move items to a new location</span>
       </div>
 

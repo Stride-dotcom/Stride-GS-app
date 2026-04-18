@@ -509,7 +509,7 @@ export function Shipments() {
 
       {/* Page Header — v2 small inline branding */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
-        <div style={{ fontSize: 13, fontWeight: 600, letterSpacing: '1px', color: '#1C1C1C' }}>
+        <div style={{ fontSize: 20, fontWeight: 700, letterSpacing: '2px', color: '#1C1C1C' }}>
           STRIDE LOGISTICS · SHIPMENTS
           {isLive && <span style={{ marginLeft: 12, display: 'inline-block', fontSize: 10, fontWeight: 700, letterSpacing: '2px', color: '#4A8A5C', background: 'rgba(74,138,92,0.15)', padding: '3px 10px', borderRadius: 100 }}>LIVE</span>}
           {isDemo && <span style={{ marginLeft: 12, display: 'inline-block', fontSize: 10, fontWeight: 700, letterSpacing: '2px', color: '#B08810', background: 'rgba(200,160,40,0.15)', padding: '3px 10px', borderRadius: 100 }}>DEMO</span>}

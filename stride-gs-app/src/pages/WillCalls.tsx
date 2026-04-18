@@ -466,7 +466,7 @@ export function WillCalls() {
   return (
     <div style={{ background: '#F5F2EE', margin: '-28px -32px', padding: '28px 32px', minHeight: '100%' }}>
       <div style={{ marginBottom: 20 }}>
-        <div style={{ fontSize: 13, fontWeight: 600, letterSpacing: '1px', color: '#1C1C1C' }}>STRIDE LOGISTICS · WILL CALLS</div>
+        <div style={{ fontSize: 20, fontWeight: 700, letterSpacing: '2px', color: '#1C1C1C' }}>STRIDE LOGISTICS · WILL CALLS</div>
       </div>
       <div style={{ background: '#FFFFFF', borderRadius: 20, padding: 24, border: '1px solid rgba(0,0,0,0.04)' }}>
 
