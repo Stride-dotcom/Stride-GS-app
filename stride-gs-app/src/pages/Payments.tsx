@@ -516,8 +516,8 @@ export function Payments() {
 
   if (error && invoices.length === 0) {
     return (
-      <div style={{ padding: 40, textAlign: 'center' }}>
-        <h1 style={{ fontSize: 22, fontWeight: 700, marginBottom: 12 }}>Payments</h1>
+      <div style={{ padding: 40, textAlign: 'center', background: '#F5F2EE', margin: '-28px -32px', minHeight: '100%' }}>
+        <div style={{ fontSize: 13, fontWeight: 600, letterSpacing: '1px', color: '#1C1C1C', marginBottom: 16 }}>STRIDE LOGISTICS · PAYMENTS</div>
         <div style={{ ...card, maxWidth: 480, margin: '0 auto', padding: 24 }}>
           <AlertTriangle size={28} color="#DC2626" style={{ margin: '0 auto 12px', display: 'block' }} />
           <div style={{ fontSize: 14, fontWeight: 600, color: '#DC2626', marginBottom: 8 }}>Failed to load Stax data</div>
@@ -529,7 +529,7 @@ export function Payments() {
   }
 
   return (
-    <div>
+    <div style={{ background: '#F5F2EE', margin: '-28px -32px', padding: '28px 32px', minHeight: '100%' }}>
       {chargeBatch.state !== 'idle' && (
         <div style={{ position: 'sticky', top: 0, zIndex: 10, marginBottom: 12 }}>
           <BatchProgress
@@ -548,12 +548,11 @@ export function Payments() {
       )}
       <BulkResultSummary open={!!bulkResult} actionLabel={bulkActionLabel} result={bulkResult} onClose={() => setBulkResult(null)} />
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 20 }}>
-        <div>
-          <h1 style={{ fontSize: 22, fontWeight: 700, letterSpacing: '-0.3px' }}>Payments</h1>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 2 }}>
-            <p style={{ fontSize: 13, color: theme.colors.textMuted }}>Stax Auto-Pay — invoice creation, auto-charging, and exception handling</p>
-            {lastUpdated && <span style={{ fontSize: 10, color: theme.colors.textMuted }}>Updated {lastUpdated.toLocaleTimeString()}</span>}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <div style={{ fontSize: 13, fontWeight: 600, letterSpacing: '1px', color: '#1C1C1C' }}>
+            STRIDE LOGISTICS · PAYMENTS
           </div>
+          {lastUpdated && <span style={{ fontSize: 10, color: theme.colors.textMuted }}>Updated {lastUpdated.toLocaleTimeString()}</span>}
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
           <button

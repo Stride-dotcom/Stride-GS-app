@@ -1472,7 +1472,7 @@ export function Billing() {
   );
 
   return (
-    <div>
+    <div style={{ background: '#F5F2EE', margin: '-28px -32px', padding: '28px 32px', minHeight: '100%' }}>
       {invoiceBatch.state !== 'idle' && (
         <div style={{ position: 'sticky', top: 0, zIndex: 10, marginBottom: 12 }}>
           <BatchProgress
@@ -1490,9 +1490,8 @@ export function Billing() {
       )}
       <BulkResultSummary open={!!invoiceBulkResult} actionLabel="Create Invoices" result={invoiceBulkResult} onClose={() => setInvoiceBulkResult(null)} />
       <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-        <div>
-          <h1 style={{ fontSize: 22, fontWeight: 700, letterSpacing: '-0.3px' }}>Billing</h1>
-          <p style={{ fontSize: 13, color: theme.colors.textMuted, marginTop: 2 }}>Billing report builder, storage charges, and invoice review</p>
+        <div style={{ fontSize: 13, fontWeight: 600, letterSpacing: '1px', color: '#1C1C1C' }}>
+          STRIDE LOGISTICS · BILLING
         </div>
         <button
           onClick={() => { setRefreshing(true); refetchBilling(); loadReport(true); }}

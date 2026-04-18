@@ -336,19 +336,16 @@ export function Claims() {
   // FilterDrop removed — replaced by MultiSelectFilter components in the toolbar
 
   return (
-    <div style={{ fontFamily: theme.typography.fontFamily }}>
+    <div style={{ fontFamily: theme.typography.fontFamily, background: '#F5F2EE', margin: '-28px -32px', padding: '28px 32px', minHeight: '100%' }}>
       {/* Page Header */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
-        <div>
-          <h1 style={{ fontSize: theme.typography.sizes['3xl'], fontWeight: theme.typography.weights.bold, color: theme.colors.text, margin: 0, lineHeight: 1.2 }}>
-            Claims
-          </h1>
-          <p style={{ fontSize: 13, color: theme.colors.textSecondary, margin: '4px 0 0' }}>
-            Manage damage, loss, and property claims — admin only
-            {isLive && <span style={{ marginLeft: 8, display: 'inline-block', fontSize: 10, fontWeight: 600, color: '#15803D', background: '#F0FDF4', padding: '1px 8px', borderRadius: 10 }}>Live</span>}
-            {isDemo && <span style={{ marginLeft: 8, display: 'inline-block', fontSize: 10, fontWeight: 600, color: '#B45309', background: '#FEF3C7', padding: '1px 8px', borderRadius: 10 }}>Demo</span>}
-            {hasApi && apiLoading && <span style={{ marginLeft: 8, display: 'inline-block', fontSize: 10, color: theme.colors.textMuted }}>Loading...</span>}
-          </p>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <div style={{ fontSize: 13, fontWeight: 600, letterSpacing: '1px', color: '#1C1C1C' }}>
+            STRIDE LOGISTICS · CLAIMS
+          </div>
+          {isLive && <span style={{ fontSize: 10, fontWeight: 600, color: '#15803D', background: '#F0FDF4', padding: '2px 10px', borderRadius: 100, textTransform: 'uppercase', letterSpacing: '1px' }}>Live</span>}
+          {isDemo && <span style={{ fontSize: 10, fontWeight: 600, color: '#B45309', background: '#FEF3C7', padding: '2px 10px', borderRadius: 100, textTransform: 'uppercase', letterSpacing: '1px' }}>Demo</span>}
+          {hasApi && apiLoading && <span style={{ fontSize: 10, color: theme.colors.textMuted }}>Loading...</span>}
         </div>
         <WriteButton
           label="New Claim"
