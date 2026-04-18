@@ -116,8 +116,8 @@ export function Sidebar({ collapsed, onToggle, onNavigate, failureCount = 0, onO
         width: collapsed ? theme.sidebar.widthCollapsed : theme.sidebar.width,
         minWidth: collapsed ? theme.sidebar.widthCollapsed : theme.sidebar.width,
         height: '100%',
-        background: theme.colors.bgSidebar,
-        borderRight: `1px solid ${theme.colors.borderSidebar}`,
+        background: '#F5F2EE',
+        borderRight: `1px solid rgba(0,0,0,0.06)`,
         display: 'flex',
         flexDirection: 'column',
         transition: 'width 0.2s ease, min-width 0.2s ease',
@@ -135,7 +135,7 @@ export function Sidebar({ collapsed, onToggle, onNavigate, failureCount = 0, onO
           display: 'flex',
           alignItems: 'center',
           padding: collapsed ? '0 14px' : '0 16px',
-          borderBottom: `1px solid ${theme.colors.borderSidebar}`,
+          borderBottom: `1px solid rgba(0,0,0,0.06)`,
           gap: '10px',
           flexShrink: 0,
           cursor: 'pointer',
@@ -212,8 +212,8 @@ export function Sidebar({ collapsed, onToggle, onNavigate, failureCount = 0, onO
                     padding: collapsed ? '10px 16px' : '9px 14px 9px 8px',
                     margin: '1px 8px', borderRadius: theme.radii.lg, cursor: 'pointer',
                     transition: isDragging ? 'none' : 'all 0.15s ease',
-                    borderLeft: isActive ? `3px solid ${theme.colors.primary}` : '3px solid transparent',
-                    background: isDragOver ? 'rgba(232, 93, 45, 0.10)' : isActive ? theme.colors.orangeLight : 'transparent',
+                    borderLeft: isActive ? `3px solid #E8692A` : '3px solid transparent',
+                    background: isDragOver ? 'rgba(232,105,42,0.10)' : isActive ? 'rgba(232,105,42,0.12)' : 'transparent',
                     opacity: isDragging ? 0.4 : 1,
                     position: 'relative',
                     borderTop: isDragOver ? `2px solid ${theme.colors.primary}` : '2px solid transparent',
@@ -236,7 +236,7 @@ export function Sidebar({ collapsed, onToggle, onNavigate, failureCount = 0, onO
                   <Icon
                     size={16}
                     style={{
-                      color: isActive ? theme.colors.primary : theme.colors.textSidebarSecondary,
+                      color: isActive ? '#E8692A' : theme.colors.textSidebarSecondary,
                       flexShrink: 0,
                     }}
                   />
@@ -244,7 +244,7 @@ export function Sidebar({ collapsed, onToggle, onNavigate, failureCount = 0, onO
                     <span style={{
                       fontSize: theme.typography.sizes.sm,
                       fontWeight: isActive ? theme.typography.weights.semibold : theme.typography.weights.medium,
-                      color: isActive ? theme.colors.primary : theme.colors.textSidebarPrimary,
+                      color: isActive ? '#E8692A' : theme.colors.textSidebarPrimary,
                       fontFamily: theme.typography.fontFamily,
                       whiteSpace: 'nowrap',
                     }}>
@@ -260,7 +260,7 @@ export function Sidebar({ collapsed, onToggle, onNavigate, failureCount = 0, onO
 
       {/* Bottom: Settings + User — always visible (nav scrolls, this doesn't) */}
       <div style={{
-        borderTop: `1px solid ${theme.colors.borderSidebar}`,
+        borderTop: `1px solid rgba(0,0,0,0.06)`,
         padding: '8px 0', display: 'flex', flexDirection: 'column', gap: '1px',
         flexShrink: 0,
       }}>
@@ -273,9 +273,9 @@ export function Sidebar({ collapsed, onToggle, onNavigate, failureCount = 0, onO
                 padding: collapsed ? '8px 14px' : '7px 12px 7px 14px',
                 margin: '0 6px', borderRadius: theme.radii.md, cursor: 'pointer',
                 borderLeft: location.pathname === '/settings'
-                  ? `3px solid ${theme.colors.primary}` : '3px solid transparent',
+                  ? '3px solid #E8692A' : '3px solid transparent',
                 background: location.pathname === '/settings'
-                  ? theme.colors.primaryLight : 'transparent',
+                  ? 'rgba(232,105,42,0.12)' : 'transparent',
               }}
               title={collapsed ? 'Settings' : undefined}
             >
@@ -283,7 +283,7 @@ export function Sidebar({ collapsed, onToggle, onNavigate, failureCount = 0, onO
                 size={16}
                 style={{
                   color: location.pathname === '/settings'
-                    ? theme.colors.primary : theme.colors.textSecondary,
+                    ? '#E8692A' : theme.colors.textSecondary,
                   flexShrink: 0,
                 }}
               />
@@ -293,7 +293,7 @@ export function Sidebar({ collapsed, onToggle, onNavigate, failureCount = 0, onO
                   fontWeight: location.pathname === '/settings'
                     ? theme.typography.weights.semibold : theme.typography.weights.medium,
                   color: location.pathname === '/settings'
-                    ? theme.colors.primary : theme.colors.textSecondary,
+                    ? '#E8692A' : theme.colors.textSecondary,
                   fontFamily: theme.typography.fontFamily, whiteSpace: 'nowrap',
                 }}>
                   Settings

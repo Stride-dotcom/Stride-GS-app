@@ -1,6 +1,8 @@
 import { theme } from '../../styles/theme';
 import type { Quote, CoverageOption } from '../../lib/quoteTypes';
 
+const v = theme.v2;
+
 interface Props {
   quote: Quote;
   coverageOptions: CoverageOption[];
@@ -9,30 +11,37 @@ interface Props {
 
 export function QuoteCoverageCard({ quote, coverageOptions, onChange }: Props) {
   const selected = coverageOptions.find(c => c.id === quote.coverage.typeId);
-  const input: React.CSSProperties = { width: '100%', padding: '8px 10px', fontSize: 13, border: `1px solid ${theme.colors.border}`, borderRadius: 8, fontFamily: 'inherit', outline: 'none', boxSizing: 'border-box' };
+  const label: React.CSSProperties = { ...v.typography.label, marginBottom: 6, display: 'block' };
+  const input: React.CSSProperties = { width: '100%', padding: '10px 14px', fontSize: 13, border: `1px solid ${v.colors.border}`, borderRadius: v.radius.input, fontFamily: 'inherit', outline: 'none', boxSizing: 'border-box', background: v.colors.bgWhite };
 
   return (
-    <div style={{ background: '#fff', border: `1px solid ${theme.colors.border}`, borderRadius: 12, padding: 20 }}>
-      <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 12, color: theme.colors.text }}>Coverage / Valuation</div>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+    <div style={{ background: v.colors.bgCard, borderRadius: v.radius.card, padding: v.card.padding }}>
+      <div style={{ ...v.typography.cardTitle, color: v.colors.text, marginBottom: 16 }}>Coverage / Valuation</div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
         {coverageOptions.map(opt => (
-          <label key={opt.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 10px', borderRadius: 8, cursor: 'pointer', border: `1px solid ${quote.coverage.typeId === opt.id ? theme.colors.orange : theme.colors.border}`, background: quote.coverage.typeId === opt.id ? '#FFF7ED' : '#fff' }}>
+          <label key={opt.id} style={{
+            display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px',
+            borderRadius: v.radius.input, cursor: 'pointer',
+            border: `1px solid ${quote.coverage.typeId === opt.id ? v.colors.accent : v.colors.border}`,
+            background: quote.coverage.typeId === opt.id ? v.colors.accentLight : v.colors.bgWhite,
+            transition: 'all 0.15s',
+          }}>
             <input type="radio" name="coverage" value={opt.id} checked={quote.coverage.typeId === opt.id}
               onChange={() => onChange({ coverage: { ...quote.coverage, typeId: opt.id } })}
-              style={{ accentColor: theme.colors.orange }} />
+              style={{ accentColor: v.colors.accent }} />
             <div style={{ flex: 1 }}>
-              <div style={{ fontSize: 13, fontWeight: 600 }}>{opt.name}</div>
-              <div style={{ fontSize: 11, color: theme.colors.textMuted }}>{opt.description}</div>
+              <div style={{ fontSize: 13, fontWeight: 600, color: v.colors.text }}>{opt.name}</div>
+              <div style={{ fontSize: 11, color: v.colors.textMuted, marginTop: 2 }}>{opt.description}</div>
             </div>
-            {opt.included && <span style={{ fontSize: 10, fontWeight: 700, color: '#15803D', background: '#F0FDF4', padding: '2px 8px', borderRadius: 8 }}>Included</span>}
+            {opt.included && <span style={{ ...v.typography.label, color: v.colors.statusAccepted.text, background: v.colors.statusAccepted.bg, padding: '4px 10px', borderRadius: v.radius.badge }}>INCLUDED</span>}
           </label>
         ))}
       </div>
       {selected && !selected.included && (
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginTop: 12 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14, marginTop: 16 }}>
           {selected.method === 'percent_declared' && (
             <div>
-              <label style={{ fontSize: 11, fontWeight: 600, color: theme.colors.textSecondary, display: 'block', marginBottom: 3 }}>Declared Value ($)</label>
+              <label style={label}>DECLARED VALUE ($)</label>
               <input type="number" min={0} step={100} value={quote.coverage.declaredValue || ''}
                 onChange={e => onChange({ coverage: { ...quote.coverage, declaredValue: parseFloat(e.target.value) || 0 } })}
                 style={input} placeholder="0" />
@@ -40,7 +49,7 @@ export function QuoteCoverageCard({ quote, coverageOptions, onChange }: Props) {
           )}
           {selected.method === 'per_lb' && (
             <div>
-              <label style={{ fontSize: 11, fontWeight: 600, color: theme.colors.textSecondary, display: 'block', marginBottom: 3 }}>Weight (lbs)</label>
+              <label style={label}>WEIGHT (LBS)</label>
               <input type="number" min={0} value={quote.coverage.weightLbs || ''}
                 onChange={e => onChange({ coverage: { ...quote.coverage, weightLbs: parseFloat(e.target.value) || 0 } })}
                 style={input} placeholder="0" />

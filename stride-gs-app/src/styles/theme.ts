@@ -116,4 +116,56 @@ export const theme = {
   topbar: {
     height: '60px',        // Slightly taller (was 56px)
   },
+
+  // ── v2 design tokens (Quote Tool prototype aesthetic) ────────────────────
+  // Phase 1: used by Quote Tool only. Phase 2+ will migrate other pages.
+  v2: {
+    colors: {
+      bgPage: '#F5F2EE',           // warm cream page background
+      bgCard: '#EDE9E3',           // slightly darker cream card
+      bgDark: '#1C1C1C',           // near-black (stats, totals)
+      bgWhite: '#FFFFFF',          // inputs, table cells
+      accent: '#E8692A',           // orange primary
+      accentLight: 'rgba(232,105,42,0.12)',
+      accentHover: '#D45A1E',
+      text: '#1C1C1C',
+      textSecondary: '#666666',
+      textMuted: '#999999',
+      textOnDark: '#FFFFFF',
+      textOnDarkMuted: 'rgba(255,255,255,0.5)',
+      border: 'rgba(0,0,0,0.08)',
+      borderOnDark: 'rgba(255,255,255,0.15)',
+      // Status pills
+      statusDraft: { bg: 'rgba(200,160,40,0.15)', text: '#B08810' },
+      statusSent: { bg: 'rgba(40,130,200,0.15)', text: '#2B7FC5' },
+      statusAccepted: { bg: 'rgba(74,138,92,0.15)', text: '#4A8A5C' },
+      statusDeclined: { bg: 'rgba(180,90,90,0.15)', text: '#B45A5A' },
+      statusExpired: { bg: 'rgba(140,140,140,0.15)', text: '#666666' },
+    },
+    radius: {
+      card: '20px',
+      input: '10px',
+      button: '100px',     // pill
+      table: '12px',
+      badge: '100px',
+      chip: '4px',
+    },
+    typography: {
+      label: { fontSize: '10px', fontWeight: 500, letterSpacing: '2px', textTransform: 'uppercase' as const, color: '#999999' },
+      cardTitle: { fontSize: '20px', fontWeight: 400 },
+      statValue: { fontSize: '28px', fontWeight: 300 },
+      buttonPrimary: { fontSize: '11px', fontWeight: 600, letterSpacing: '2px', textTransform: 'uppercase' as const },
+    },
+    card: {
+      padding: '28px 32px',
+    },
+    table: {
+      headerFontSize: '10px',
+      headerWeight: 600,
+      headerLetterSpacing: '2px',
+      cellPadding: '14px 16px',
+      cellFontSize: '13px',
+      rowBorder: 'rgba(0,0,0,0.05)',
+    },
+  },
 } as const;

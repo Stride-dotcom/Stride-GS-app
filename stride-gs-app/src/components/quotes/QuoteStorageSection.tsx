@@ -3,6 +3,8 @@ import { ChevronDown, ChevronRight } from 'lucide-react';
 import { theme } from '../../styles/theme';
 import type { Quote, ServiceDef, ClassDef } from '../../lib/quoteTypes';
 
+const v = theme.v2;
+
 interface Props {
   quote: Quote;
   services: ServiceDef[];
@@ -22,66 +24,69 @@ export function QuoteStorageSection({ quote, services, classes, onChange }: Prop
   }, [quote.storageCells, onChange]);
 
   const storageDays = (quote.storage.months * 30) + quote.storage.days;
-  const td: React.CSSProperties = { padding: '6px', textAlign: 'center', borderBottom: `1px solid ${theme.colors.border}`, fontSize: 12 };
+  const td: React.CSSProperties = { padding: '8px', textAlign: 'center', borderBottom: `1px solid ${v.table.rowBorder}`, fontSize: 13 };
+  const input: React.CSSProperties = { width: 70, padding: '8px', border: `1px solid ${v.colors.border}`, borderRadius: v.radius.input, fontSize: 14, fontFamily: 'inherit', textAlign: 'center', background: v.colors.bgWhite };
 
   return (
-    <div style={{ background: '#fff', border: `1px solid ${theme.colors.border}`, borderRadius: 12, overflow: 'hidden' }}>
-      <button onClick={() => setOpen(v => !v)} style={{
+    <div style={{ background: v.colors.bgCard, borderRadius: v.radius.card, overflow: 'hidden' }}>
+      <button onClick={() => setOpen(o => !o)} style={{
         width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-        padding: '14px 20px', border: 'none', background: 'none', cursor: 'pointer', fontFamily: 'inherit',
+        padding: v.card.padding, border: 'none', background: 'none', cursor: 'pointer', fontFamily: 'inherit',
       }}>
-        <div>
-          <span style={{ fontSize: 14, fontWeight: 700, color: theme.colors.text }}>Storage</span>
-          <span style={{ fontSize: 12, color: theme.colors.textMuted, marginLeft: 8 }}>{storageDays} day{storageDays !== 1 ? 's' : ''}</span>
+        <div style={{ display: 'flex', alignItems: 'baseline', gap: 12 }}>
+          <span style={{ ...v.typography.cardTitle, color: v.colors.text }}>Storage</span>
+          <span style={{ ...v.typography.label }}>{storageDays} DAYS</span>
         </div>
-        {open ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+        {open ? <ChevronDown size={18} color={v.colors.textMuted} /> : <ChevronRight size={18} color={v.colors.textMuted} />}
       </button>
       {open && (
-        <div style={{ padding: '0 20px 16px' }}>
-          <div style={{ display: 'flex', gap: 12, marginBottom: 12 }}>
+        <div style={{ padding: '0 32px 28px' }}>
+          <div style={{ display: 'flex', gap: 14, marginBottom: 16 }}>
             <div>
-              <label style={{ fontSize: 11, fontWeight: 600, color: theme.colors.textSecondary, display: 'block', marginBottom: 3 }}>Months</label>
+              <label style={{ ...v.typography.label, display: 'block', marginBottom: 6 }}>MONTHS</label>
               <input type="number" min={0} value={quote.storage.months}
                 onChange={e => onChange({ storage: { ...quote.storage, months: Math.max(0, parseInt(e.target.value) || 0) } })}
-                style={{ width: 70, padding: '6px 8px', border: `1px solid ${theme.colors.border}`, borderRadius: 6, fontSize: 13, fontFamily: 'inherit', textAlign: 'center' }} />
+                style={input} />
             </div>
             <div>
-              <label style={{ fontSize: 11, fontWeight: 600, color: theme.colors.textSecondary, display: 'block', marginBottom: 3 }}>Days</label>
+              <label style={{ ...v.typography.label, display: 'block', marginBottom: 6 }}>DAYS</label>
               <input type="number" min={0} max={29} value={quote.storage.days}
                 onChange={e => onChange({ storage: { ...quote.storage, days: Math.max(0, Math.min(29, parseInt(e.target.value) || 0)) } })}
-                style={{ width: 70, padding: '6px 8px', border: `1px solid ${theme.colors.border}`, borderRadius: 6, fontSize: 13, fontFamily: 'inherit', textAlign: 'center' }} />
+                style={input} />
             </div>
           </div>
           {storageServices.length > 0 && (
-            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-              <thead>
-                <tr>
-                  <th style={{ ...td, textAlign: 'left', fontSize: 11, fontWeight: 700, color: theme.colors.textSecondary, background: '#F8FAFC' }}>Storage Type</th>
-                  {activeClasses.map(cls => (
-                    <th key={cls.id} style={{ ...td, fontSize: 11, fontWeight: 700, color: theme.colors.textSecondary, background: '#F8FAFC' }}>{cls.id}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {storageServices.map(svc => (
-                  <tr key={svc.id}>
-                    <td style={{ ...td, textAlign: 'left', fontWeight: 500 }}>{svc.name}</td>
-                    {activeClasses.map(cls => {
-                      const key = `${cls.id}:${svc.id}`;
-                      const cell = quote.storageCells[key];
-                      const rate = svc.rates[cls.id as keyof typeof svc.rates] ?? 0;
-                      return (
-                        <td key={cls.id} style={{ ...td, cursor: 'pointer', background: cell?.selected ? '#F0FDF4' : undefined }}
-                          onClick={() => toggleStorage(cls.id, svc.id)}>
-                          <input type="checkbox" checked={!!cell?.selected} onChange={() => {}} style={{ accentColor: theme.colors.orange }} />
-                          <div style={{ fontSize: 10, color: theme.colors.textMuted }}>${rate.toFixed(2)}/day</div>
-                        </td>
-                      );
-                    })}
+            <div style={{ background: v.colors.bgWhite, borderRadius: v.radius.table, overflow: 'hidden' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                <thead>
+                  <tr>
+                    <th style={{ ...td, textAlign: 'left', paddingLeft: 16, ...v.typography.label, background: v.colors.bgPage }}>Storage Type</th>
+                    {activeClasses.map(cls => (
+                      <th key={cls.id} style={{ ...td, ...v.typography.label, background: v.colors.bgPage }}>{cls.id}</th>
+                    ))}
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {storageServices.map(svc => (
+                    <tr key={svc.id}>
+                      <td style={{ ...td, textAlign: 'left', paddingLeft: 16, fontWeight: 500 }}>{svc.name}</td>
+                      {activeClasses.map(cls => {
+                        const key = `${cls.id}:${svc.id}`;
+                        const cell = quote.storageCells[key];
+                        const rate = svc.rates[cls.id as keyof typeof svc.rates] ?? 0;
+                        return (
+                          <td key={cls.id} style={{ ...td, cursor: 'pointer', background: cell?.selected ? 'rgba(74,138,92,0.08)' : undefined }}
+                            onClick={() => toggleStorage(cls.id, svc.id)}>
+                            <input type="checkbox" checked={!!cell?.selected} onChange={() => {}} style={{ accentColor: v.colors.accent }} />
+                            <div style={{ fontSize: 10, color: v.colors.textMuted }}>${rate.toFixed(2)}/day</div>
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           )}
         </div>
       )}
