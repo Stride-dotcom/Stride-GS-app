@@ -70,11 +70,11 @@ export function BulkResultSummary({ open, actionLabel, result, onClose }: BulkRe
       <div
         style={{
           background: '#fff',
-          borderRadius: 12,
+          borderRadius: 20,
           width: '100%',
           maxWidth: 520,
           maxHeight: '85vh',
-          boxShadow: '0 20px 60px rgba(0,0,0,0.3)',
+          boxShadow: '0 24px 60px rgba(0,0,0,0.25)',
           overflow: 'hidden',
           fontFamily: 'inherit',
           display: 'flex',

@@ -59,10 +59,10 @@ export function ConfirmDialog({
       <div
         style={{
           background: '#fff',
-          borderRadius: 12,
+          borderRadius: 20,
           width: '100%',
           maxWidth: 460,
-          boxShadow: '0 20px 60px rgba(0,0,0,0.3)',
+          boxShadow: '0 24px 60px rgba(0,0,0,0.25)',
           overflow: 'hidden',
           fontFamily: 'inherit',
         }}
@@ -118,13 +118,15 @@ export function ConfirmDialog({
             onClick={onCancel}
             disabled={processing}
             style={{
-              padding: '8px 16px',
-              fontSize: 13,
+              padding: '12px 24px',
+              fontSize: 11,
               fontWeight: 600,
-              border: `1px solid ${theme.colors.border}`,
-              borderRadius: 8,
+              letterSpacing: '1.5px',
+              textTransform: 'uppercase',
+              border: '1px solid rgba(0,0,0,0.08)',
+              borderRadius: 100,
               background: '#fff',
-              color: theme.colors.textSecondary,
+              color: '#666',
               cursor: processing ? 'not-allowed' : 'pointer',
               fontFamily: 'inherit',
               opacity: processing ? 0.5 : 1,
@@ -136,11 +138,13 @@ export function ConfirmDialog({
             onClick={() => !processing && onConfirm()}
             disabled={processing}
             style={{
-              padding: '8px 18px',
-              fontSize: 13,
-              fontWeight: 700,
+              padding: '12px 24px',
+              fontSize: 11,
+              fontWeight: 600,
+              letterSpacing: '1.5px',
+              textTransform: 'uppercase',
               border: 'none',
-              borderRadius: 8,
+              borderRadius: 100,
               background: processing ? confirmHover : confirmBg,
               color: '#fff',
               cursor: processing ? 'not-allowed' : 'pointer',

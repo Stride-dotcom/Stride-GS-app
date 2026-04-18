@@ -153,7 +153,7 @@ export function CreateClaimModal({ onClose, onCreated, addOptimisticClaim, remov
       <div style={{
         position: 'fixed', top: '50%', left: '50%', transform: 'translate(-50%, -50%)',
         width: 580, maxWidth: '95vw', maxHeight: '90vh',
-        background: '#fff', borderRadius: 16, boxShadow: theme.shadows.xl,
+        background: '#fff', borderRadius: 20, boxShadow: '0 24px 60px rgba(0,0,0,0.25)',
         zIndex: 160, display: 'flex', flexDirection: 'column',
         fontFamily: theme.typography.fontFamily,
       }}>

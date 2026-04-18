@@ -13,7 +13,6 @@
  * (Type badge, Result, Qty, etc.) the parent wants to stick next to the ID.
  */
 import React from 'react';
-import { theme } from '../../styles/theme';
 import { normSidemark } from '../../pages/Inventory';
 
 // Re-use the Inventory palette so the same sidemark gets the same color
@@ -69,45 +68,49 @@ export function DetailHeader({
   belowId,
   compact,
 }: DetailHeaderProps) {
-  const idSize = compact ? 18 : 20;
+  const idSize = compact ? 22 : 28;
   const smColor = sidemark ? sidemarkColor(sidemark) : undefined;
 
   return (
     <div
       style={{
-        padding: compact ? '14px 20px' : '16px 20px',
-        borderBottom: `1px solid ${theme.colors.border}`,
+        padding: compact ? '20px 24px' : '28px 28px',
+        background: '#1C1C1C',
+        borderRadius: '20px 20px 0 0',
         flexShrink: 0,
+        color: '#fff',
       }}
     >
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: idSize, fontWeight: 700, color: theme.colors.text }}>
-            {entityLabel ? <span style={{ color: theme.colors.textMuted, fontWeight: 600, marginRight: 6 }}>{entityLabel}</span> : null}
+          {entityLabel ? <div style={{ fontSize: 10, fontWeight: 500, letterSpacing: '4px', color: '#E8692A', textTransform: 'uppercase', marginBottom: 8 }}>{entityLabel}</div> : null}
+          <div style={{ fontSize: idSize, fontWeight: 300, color: '#fff', lineHeight: 1.1 }}>
             {entityId}
           </div>
-          {belowId ? <div style={{ marginTop: 8 }}>{belowId}</div> : null}
+          {belowId ? <div style={{ marginTop: 12 }}>{belowId}</div> : null}
           <div
             style={{
               display: 'flex',
               flexWrap: 'wrap',
               gap: 10,
               alignItems: 'center',
-              marginTop: 8,
+              marginTop: 14,
             }}
           >
-            <div style={{ fontSize: 14, fontWeight: 700, color: theme.colors.text }}>
-              {clientName || <span style={{ color: theme.colors.textMuted, fontWeight: 500 }}>— no client —</span>}
+            <div style={{ fontSize: 13, fontWeight: 500, color: 'rgba(255,255,255,0.85)' }}>
+              {clientName || <span style={{ color: 'rgba(255,255,255,0.45)', fontWeight: 400 }}>— no client —</span>}
             </div>
             {sidemark ? (
               <span
                 style={{
-                  fontSize: 13,
-                  fontWeight: 700,
-                  padding: '2px 10px',
-                  borderRadius: 12,
-                  background: smColor || theme.colors.bgSubtle,
-                  color: theme.colors.text,
+                  fontSize: 11,
+                  fontWeight: 600,
+                  letterSpacing: '1px',
+                  textTransform: 'uppercase',
+                  padding: '4px 12px',
+                  borderRadius: 100,
+                  background: smColor || 'rgba(255,255,255,0.15)',
+                  color: '#1C1C1C',
                   lineHeight: 1.3,
                   whiteSpace: 'nowrap',
                   overflow: 'hidden',

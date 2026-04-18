@@ -67,16 +67,16 @@ export function WriteButton({
     ghost: { bg: 'transparent', hover: 'rgba(255,255,255,0.15)', text: '#fff', border: '1px solid rgba(255,255,255,0.2)' },
   };
   const c = colors[variant];
-  const pad = size === 'sm' ? '5px 12px' : '7px 16px';
-  const fs = size === 'sm' ? 11 : 12;
+  const pad = size === 'sm' ? '8px 16px' : '12px 24px';
+  const fs = size === 'sm' ? 10 : 11;
 
   return (
     <div style={{ position: 'relative', display: 'inline-block' }}
       onMouseEnter={() => blockedReason && setShowTooltip(true)}
       onMouseLeave={() => setShowTooltip(false)}>
       <button onClick={handleClick} disabled={isDisabled} style={{
-        padding: pad, fontSize: fs, fontWeight: 600,
-        border: c.border, borderRadius: 8,
+        padding: pad, fontSize: fs, fontWeight: 600, letterSpacing: '1.5px', textTransform: 'uppercase',
+        border: c.border, borderRadius: 100,
         background: state === 'success' ? '#15803D' : state === 'error' ? '#DC2626' : isDisabled ? theme.colors.bgMuted : c.bg,
         color: state === 'success' || state === 'error' ? '#fff' : isDisabled ? theme.colors.textMuted : c.text,
         cursor: isDisabled ? 'not-allowed' : 'pointer',
@@ -97,7 +97,7 @@ export function WriteButton({
       {showTooltip && blockedReason && (
         <div style={{
           position: 'absolute', bottom: 'calc(100% + 6px)', left: '50%', transform: 'translateX(-50%)',
-          background: '#1A1A1A', color: '#fff', padding: '6px 12px', borderRadius: 8,
+          background: '#1A1A1A', color: '#fff', padding: '8px 14px', borderRadius: 100,
           fontSize: 11, fontWeight: 500, whiteSpace: 'nowrap', zIndex: 100,
           boxShadow: '0 4px 12px rgba(0,0,0,0.15)', pointerEvents: 'none',
           fontFamily: theme.typography.fontFamily,

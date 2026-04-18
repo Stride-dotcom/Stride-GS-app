@@ -74,19 +74,19 @@ export function MultiSelectFilter({ label, options, selected, onChange, placehol
 
   return (
     <div ref={ref} style={{ position: 'relative', minWidth: 0 }}>
-      <div style={{ marginBottom: 3 }}>
-        <span style={{ fontSize: 10, fontWeight: 600, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.05em' }}>{label}</span>
+      <div style={{ marginBottom: 6 }}>
+        <span style={{ fontSize: 10, fontWeight: 600, color: '#888', textTransform: 'uppercase', letterSpacing: '2px' }}>{label}</span>
       </div>
       <button
         onClick={() => !disabled && setOpen(!open)}
         disabled={disabled}
         style={{
           display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6,
-          width: '100%', padding: '7px 10px', fontSize: 12, fontWeight: 500,
-          border: `1px solid ${open ? theme.colors.orange : theme.colors.border}`,
-          borderRadius: 8, background: '#fff', cursor: disabled ? 'not-allowed' : 'pointer',
-          fontFamily: 'inherit', color: noneSelected ? theme.colors.textMuted : theme.colors.text,
-          transition: '0.15s', textAlign: 'left', minHeight: 34,
+          width: '100%', padding: '10px 16px', fontSize: 13, fontWeight: 500,
+          border: `1px solid ${open ? '#1C1C1C' : 'rgba(0,0,0,0.08)'}`,
+          borderRadius: 100, background: '#fff', cursor: disabled ? 'not-allowed' : 'pointer',
+          fontFamily: 'inherit', color: noneSelected ? '#888' : '#1C1C1C',
+          transition: '0.15s', textAlign: 'left', minHeight: 40,
         }}
       >
         <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{displayText}</span>
@@ -95,10 +95,10 @@ export function MultiSelectFilter({ label, options, selected, onChange, placehol
 
       {open && (
         <div style={{
-          position: 'absolute', top: '100%', left: 0, right: 0, marginTop: 4,
-          background: '#fff', border: `1px solid ${theme.colors.border}`, borderRadius: 10,
-          boxShadow: '0 8px 24px rgba(0,0,0,0.12)', zIndex: 50, maxHeight: 280, display: 'flex', flexDirection: 'column',
-          minWidth: 200,
+          position: 'absolute', top: '100%', left: 0, right: 0, marginTop: 6,
+          background: '#fff', border: '1px solid rgba(0,0,0,0.06)', borderRadius: 20,
+          boxShadow: '0 12px 36px rgba(0,0,0,0.10)', zIndex: 50, maxHeight: 320, display: 'flex', flexDirection: 'column',
+          minWidth: 220, overflow: 'hidden',
         }}>
           {/* Search */}
           {options.length > 6 && (

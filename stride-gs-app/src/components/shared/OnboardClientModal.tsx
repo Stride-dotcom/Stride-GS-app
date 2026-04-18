@@ -271,7 +271,7 @@ export function OnboardClientModal({ mode = 'create', existingClient = null, all
       <div style={{
         position: 'fixed', top: '50%', left: '50%', transform: 'translate(-50%,-50%)',
         width: 680, maxWidth: '96vw', maxHeight: '92vh',
-        background: '#fff', borderRadius: 16, boxShadow: '0 8px 40px rgba(0,0,0,0.15)',
+        background: '#fff', borderRadius: 20, boxShadow: '0 24px 60px rgba(0,0,0,0.25)',
         zIndex: 201, display: 'flex', flexDirection: 'column', fontFamily: theme.typography.fontFamily,
         overflow: 'hidden',
       }}>

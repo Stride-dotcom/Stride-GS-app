@@ -50,10 +50,10 @@ export function BulkScheduleModal({ open, wcCount, onCancel, onConfirm, processi
       <div
         style={{
           background: '#fff',
-          borderRadius: 12,
+          borderRadius: 20,
           width: '100%',
           maxWidth: 460,
-          boxShadow: '0 20px 60px rgba(0,0,0,0.3)',
+          boxShadow: '0 24px 60px rgba(0,0,0,0.25)',
           fontFamily: 'inherit',
         }}
       >

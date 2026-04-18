@@ -93,12 +93,12 @@ export function DetailField({ label, value }: { label: string; value?: React.Rea
     <div style={{ marginBottom: '14px' }}>
       <div
         style={{
-          fontSize: theme.typography.sizes.xs,
-          fontWeight: theme.typography.weights.semibold,
-          color: theme.colors.textMuted,
+          fontSize: 10,
+          fontWeight: 500,
+          color: '#E8692A',
           textTransform: 'uppercase',
-          letterSpacing: '0.05em',
-          marginBottom: '3px',
+          letterSpacing: '2px',
+          marginBottom: 6,
           fontFamily: theme.typography.fontFamily,
         }}
       >
