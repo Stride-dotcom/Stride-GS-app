@@ -1,9 +1,16 @@
 name: Deploy to GitHub Pages
 
+# DISABLED auto-trigger — this workflow built empty Supabase env vars because
+# VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY secrets are not configured in
+# GitHub Actions. Re-enable by restoring the `push:` trigger below AFTER
+# adding those secrets at Settings → Secrets and variables → Actions.
+# Until then, manual deploys via `npm run deploy` from the local machine are
+# the source of truth.
 on:
-  push:
-    branches: [source]
-    paths: ['stride-gs-app/**']
+  workflow_dispatch:  # manual trigger only
+  # push:
+  #   branches: [source]
+  #   paths: ['stride-gs-app/**']
 
 # GITHUB_TOKEN needs write access to push the built bundle to origin/main
 permissions:
