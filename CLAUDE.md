@@ -619,6 +619,8 @@ Client inventory scripts are NOT edited via direct URLs — use `npm run rollout
 - [ ] **Autocomplete DB in React** — Sidemark/Vendor/Description per client
 - [ ] **Invoice-level `invoiceDate` field** — Billing invoice summary currently falls back to earliest child date. Add a true `invoiceDate` to `InvoiceGroup` (sourced from Consolidated_Ledger "Invoice Date" column) so re-sorted children don't shift the displayed date.
 - [ ] **Invoice number link in summary row** — Wire `invoiceUrl` through `InvoiceGroup` so the Invoice # cell renders as an anchor when a PDF URL exists (currently always renders as bold text).
+- [ ] **DetailPanel internals v2 polish** — Session 71 applied v2 to every page-level surface + shared `DetailHeader`. The deep interiors of each DetailPanel (TaskDetailPanel, RepairDetailPanel, WillCallDetailPanel, ClaimDetailPanel, ItemDetailPanel) still have their own internal section button rows and field grids with 8–10px corners in places. Outer panel via DetailHeader is v2, but interior sections need another pass.
+- [ ] **Master Inventory Template included in rollouts** — User flagged that the onboarding template (used to seed new client sheets) should receive `refresh-caches` updates so new clients inherit the latest templates/cache data. Currently skipped by rollout tooling with "Requested entity was not found" because it's marked inactive / missing a Web App URL in CB Clients. Need to either (a) add Web App URL so rollout includes it, or (b) build a separate "update template" npm script that treats it specially.
 
 ### Known bugs (unresolved)
 

@@ -1,6 +1,6 @@
 # Stride GS App — Build Status & Continuation Guide
 
-**Last updated:** 2026-04-16 (session 70 — Inventory as single source of truth for all pages; native Scanner+Labels; Supabase locations+move_history+clients+delivery_availability mirrors; auth cache fix; deep-link fixes; React #300 fixes; npm run deploy single-command)
+**Last updated:** 2026-04-17 (session 71 — full v2 visual design system across every page + all 19 email templates + bold page titles + dark KPI cards + Start Task pill)
 **StrideAPI.gs:** v38.63.0 (Web App v283)
 **Import.gs (client):** v4.3.0 (rolled out to all 49 active clients; Reference column now imported)
 **Emails.gs (client):** v4.6.0 (rolled out to all 49 active clients — Room column dropped, Reference takes its place)
@@ -74,6 +74,98 @@ Login, Dashboard, Inventory, Receiving, Shipments, Tasks, Repairs, Will Calls, B
 `useClients`, `usePricing`, `useLocations`, `useInventory`, `useTasks`, `useRepairs`, `useWillCalls`, `useShipments`, `useBilling` (accepts BillingFilterParams for report builder), `useClaims`, `useUsers`, `useOrders` (Supabase-only, DT integration), `useFailedOperations`, `useTablePreferences` (reconciles new columns into saved order), `useResizablePanel`, `useSidebarOrder`, `useIsMobile`, `useBatchData`.
 
 ---
+
+## RECENT CHANGES (2026-04-17 session 71 — this chat)
+
+Full visual refresh — every page in the app now runs on a unified "v2" design system
+derived from the marketing-email prototype. No backend changes this session; all work is
+React UI + email template HTML + push-templates tooling.
+
+### v2 design tokens (what "v2" means)
+
+- **Body bg:** `#F5F2EE` (warm cream). Applied at page wrapper via `background` + `margin: -28px -32px; padding: 28px 32px` to break out of AppLayout's content padding.
+- **Content cards:** `#FFFFFF` (or `#EDE9E3` on Settings) wrapping filter+table, 20px radius, thin `1px solid rgba(0,0,0,0.04)` border.
+- **Dark hero/stat cards:** `#1C1C1C` bg, 20px radius, 28px/300 value text, bright accent colors (`#4ADE80`/`#FBBF24`/`#F87171`/`#60A5FA`/`#C084FC`/`#E8692A`), 10px/600 kicker with 2px letter-spacing.
+- **Page title:** `STRIDE LOGISTICS · <PAGE>` — 20px / 700 / 2px letter-spacing / `#1C1C1C`.
+- **Pill buttons / chips / tabs:** 100px radius; active = solid `#1C1C1C` bg + white text, inactive = white bg + `rgba(0,0,0,0.08)` border + `#666` text; 11px uppercase, 1.5px letter-spacing.
+- **Pill inputs (search / dropdowns):** 100px radius, white bg, thin border, 36px left-pad for the search icon.
+- **Table headers:** cream `#F5F2EE` bg, 10px uppercase `#888`, 2px letter-spacing, no bottom border, 14px row height.
+- **Modals:** 20px radius, softer `0 24px 60px rgba(0,0,0,0.25)` shadow.
+- **Oswald brand wordmark** on Login + every email-template header (logo + STRIDE / LOGISTICS two-line mark, 24px/600 with 2px letter-spacing on top line, 10px/400 with 5px letter-spacing on subtitle).
+
+### Pages updated (20 routes + 4 detail job pages)
+
+All got the cream page wrapper, bold `STRIDE LOGISTICS · <PAGE>` title, and page-appropriate v2 controls:
+
+| Page | Dark KPI cards | Content card | Pill chips/tabs | Cream table header | Pill search |
+|---|---|---|---|---|---|
+| Dashboard | ✅ (pre-existing) | ✅ | ✅ tabs | ✅ | — |
+| Inventory | — (chips carry counts) | ✅ white | ✅ status chips | ✅ | — |
+| Tasks | — (chips carry counts) | ✅ white | ✅ status chips | ✅ | ✅ |
+| Repairs | — (chips carry counts) | ✅ white | ✅ status chips | ✅ | ✅ |
+| Will Calls | — (chips carry counts) | ✅ white | ✅ status chips | ✅ | ✅ |
+| Shipments | ✅ (Total/Received/Pending/Items) | ✅ white | ✅ | ✅ | ✅ |
+| Claims | ✅ (Total/Open/Resolved/Requested) | ✅ white | ✅ | ✅ | ✅ |
+| Billing | ✅ (Rows/Clients/Total · Pending/Approved) | ✅ white | ✅ tabs | ✅ | — |
+| Payments | ✅ (Pending/Collected/Exceptions/Auto-Charge) | ✅ white | ✅ tabs | ✅ | — |
+| Orders | ✅ (Total/Open/InProgress/Completed) | — | ✅ tabs + chips | ✅ | ✅ |
+| Receiving | — (form-driven) | — | — | — | — |
+| Marketing | ✅ (pre-existing) | — | — | — | — |
+| Settings | — | ✅ cream | ✅ sidebar nav | — | — |
+| Scanner | ✅ (InQueue/Found/Pending/NotFound) | — | — | — | — |
+| Labels | ✅ (Size/LabelsToPrint/QR/Mode) | — | ✅ tabs | — | — |
+| Login | — | ✅ white | — | — | — |
+| Quote Tool | ✅ (pre-existing) | ✅ | ✅ | ✅ | — |
+| TaskJobPage | — | ✅ white | — | — | — |
+| RepairJobPage | — | ✅ white | — | — | — |
+| WillCallJobPage | — | ✅ white | — | — | — |
+| ShipmentJobPage | — | ✅ white | — | — | — |
+
+### Shared components upgraded
+
+- **`DetailHeader`** (used by every DetailPanel + JobPage) — dark `#1C1C1C` hero, 28px/300 entity ID, orange 10px/4px kicker, pill sidemark chip
+- **`DetailPanel` / `DetailField`** — orange kicker labels with 2px letter-spacing
+- **`WriteButton`** — pill 100px, uppercase 1.5px letter-spacing
+- **`MultiSelectFilter`** — pill trigger, 20px-radius dropdown
+- **`ConfirmDialog`, `BulkResultSummary`, `BulkReassignModal`, `BulkScheduleModal`, `CreateTaskModal`, `CreateClaimModal`, `CreateWillCallModal`, `OnboardClientModal`, `TransferItemsModal`, `TemplateEditor`** — 20px radius, softer shadow, pill footer buttons
+- **`SyncBanner`** — 20px radius
+- **`BatchProgress` + `ActionToast`** — pill 100px
+- **`TopBar`** — pill global search (100px, white, 240px min-width)
+- **`Sidebar`** — cream `#F5F2EE` nav bg, orange active pill (from earlier session)
+
+### TaskDetailPanel "Start Task" button
+
+Upgraded from outlined orange rectangle to solid purple `#7C3AED` pill with drop-shadow and filled `Play` icon — matches Repair's `START REPAIR` and Will Call's `START WILL CALL` bold CTAs. Uppercase 2px letter-spacing.
+
+### Email templates — full redesign (19 templates)
+
+Every client notification rewritten from scratch using the marketing-email design system:
+SHIPMENT_RECEIVED, INSP_EMAIL, TASK_COMPLETE, REPAIR_QUOTE_REQUEST, REPAIR_QUOTE, REPAIR_APPROVED, REPAIR_DECLINED, REPAIR_COMPLETE, TRANSFER_RECEIVED, WILL_CALL_CREATED, WILL_CALL_RELEASE, WILL_CALL_CANCELLED, WELCOME_EMAIL, ONBOARDING_EMAIL, CLAIM_RECEIVED, CLAIM_STAFF_NOTIFY, CLAIM_MORE_INFO, CLAIM_DENIAL, CLAIM_SETTLEMENT.
+
+- Unified Stride header (logo + `STRIDE / LOGISTICS` Oswald wordmark + context label)
+- Dark `#1C1C1C` hero card + cream `#EDE9E3` info cards + white detail cards
+- Pill CTA buttons (orange solid + dark solid)
+- Stride Hub portal info block reused on all client-facing templates
+- Updated "About Inspection" text in SHIPMENT_RECEIVED to reference the "View in Stride Hub" button + "Create Inspection Task" portal flow (the old "check the Needs Inspection box" text was removed — that checkbox no longer exists in the React app)
+- **`push-templates.mjs` map extended** to include WELCOME_EMAIL + ONBOARDING_EMAIL (sheet rows 19 + 20 on Master Price List Email_Templates tab)
+- Pushed via `npm run push-templates` (23 templates, 1 skipped — DOC_SETTLEMENT not yet in sheet)
+- Propagated to 48/49 clients via `npm run refresh-caches` (1 expected skip — Master Inventory Template is the onboarding template, not a live client)
+
+### Deploy log for this session
+
+- Bundles deployed: `index-BtbWEX87.js` → `index-C5ETxlFt.js` → `index-CyUi-_Xf.js` → `index-6jkTSwev.js` → `index-B0k9-Zki.js` → `index-uhi_2v7j.js` → `index-CJBbMeY4.js` → `index-Dstimwyg.js` → `index-BQlePTQB.js` → `index-Cb0awkmW.js` → `index-Bgf2I5P3.js` (11 deploys — each bundle a progressive v2 polish pass)
+- Source commits: `ad90cdc` through `c0f516a` on `origin/source`
+
+### Open items for next session
+
+- **DetailPanels internals** — TaskDetailPanel / RepairDetailPanel / WillCallDetailPanel / ClaimDetailPanel / ItemDetailPanel each have their own internal section styling (action button rows, field grids) with 8–10px corners in places. Outer panel (via DetailHeader) is v2, but deep interiors still show older styling in spots.
+- **Master Inventory Template rollout inclusion** — user flagged that the onboarding template should receive `refresh-caches` updates so new clients inherit the latest templates/cache data. Currently it's skipped with "Requested entity was not found" because it's marked inactive / missing a Web App URL. Investigation + fix pending.
+
+---
+
+## PREVIOUS SESSION ARCHIVE (2026-04-16 session 70)
+
+Content below belongs to session 70 and earlier and will be trimmed to `Docs/Archive/Session_History.md` in a future cleanup pass. Leaving verbatim for now so nothing is lost.
 
 ## RECENT CHANGES (2026-04-16 session 70 — this chat)
 
