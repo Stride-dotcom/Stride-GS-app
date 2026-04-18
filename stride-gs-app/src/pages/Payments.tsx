@@ -1250,8 +1250,7 @@ export function Payments() {
           setCreatingInvoices(false);
           if (res.ok && res.data) {
             setChargeResult(res.data.summary || 'Pushed to Stax');
-            setNextFetchNoCache();
-            loadData();
+            loadData(true);
           } else {
             setError(res.error || 'Push to Stax failed');
           }
@@ -1524,7 +1523,7 @@ export function Payments() {
                       }} />}
                       <WriteButton label="Resolve" variant="secondary" size="sm" onClick={async () => {
                         const res = await postResolveStaxException({ qbInvoiceNo: exc.qbInvoice, timestamp: exc.timestamp });
-                        if (res.ok) { loadData(); }
+                        if (res.ok && res.data?.success) { loadData(true); }
                         else { setError(res.error || 'Failed to resolve exception'); }
                       }} />
                     </div>}
@@ -1596,7 +1595,7 @@ export function Payments() {
         </div>
       )}
 
-      {tab === 'iif' && <IIFImportTab onImported={() => loadData()} />}
+      {tab === 'iif' && <IIFImportTab onImported={() => loadData(true)} />}
 
       {tab === 'runlog' && <RunLogTab entries={runLog} />}
 
@@ -1682,7 +1681,7 @@ export function Payments() {
               if (res.ok && res.data) {
                 setMappingResult(`Saved: ${res.data.updated} updated, ${res.data.added} added`);
                 setMappingEdits({});
-                loadData();
+                loadData(true);
               } else { setError(res.error || 'Failed to save mappings'); }
             }} />
             <WriteButton label={autoMatching ? 'Matching...' : 'Auto-Match by Name'} variant="secondary" disabled={autoMatching} onClick={async () => {
@@ -1691,7 +1690,7 @@ export function Payments() {
               setAutoMatching(false);
               if (res.ok && res.data) {
                 setMappingResult(`Auto-match: ${res.data.added} new customer(s) added, ${res.data.alreadyExisted} already existed`);
-                loadData();
+                loadData(true);
               } else { setError(res.error || 'Auto-match failed'); }
             }} />
             <WriteButton label="Refresh" variant="secondary" onClick={async () => { loadData(true); }} />

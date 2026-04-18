@@ -1461,13 +1461,26 @@ function supabaseBatchUpsert_(table, rows) {
 
     // Deduplicate rows by unique key (tenant_id + entity_id) — last occurrence wins.
     // Supabase PostgREST rejects entire batch if duplicates exist for the same unique constraint.
-    var idCol = { inventory: "item_id", tasks: "task_id", repairs: "repair_id",
-                  will_calls: "wc_number", shipments: "shipment_number", billing: "ledger_row_id" }[table];
-    if (idCol) {
+    // Deduplicate rows by the unique constraint key — PostgREST rejects entire
+    // batch if two rows in the same INSERT conflict on the same unique key.
+    var dedupKeyFn = {
+      inventory: function(r) { return r.tenant_id + "|" + r.item_id; },
+      tasks: function(r) { return r.tenant_id + "|" + r.task_id; },
+      repairs: function(r) { return r.tenant_id + "|" + r.repair_id; },
+      will_calls: function(r) { return r.tenant_id + "|" + r.wc_number; },
+      shipments: function(r) { return r.tenant_id + "|" + r.shipment_number; },
+      billing: function(r) { return r.tenant_id + "|" + r.ledger_row_id; },
+      stax_invoices: function(r) { return String(r.qb_invoice_no || ""); },
+      stax_customers: function(r) { return String(r.qb_name || ""); },
+      stax_charges: function(r) { return (r.timestamp || "") + "|" + (r.qb_invoice_no || "") + "|" + (r.txn_id || ""); },
+      stax_exceptions: function(r) { return (r.timestamp || "") + "|" + (r.qb_invoice_no || ""); },
+      stax_run_log: function(r) { return (r.timestamp || "") + "|" + (r.fn || "") + "|" + (r.summary || ""); },
+    }[table];
+    if (dedupKeyFn) {
       var seen = {};
       var deduped = [];
       for (var d = rows.length - 1; d >= 0; d--) {
-        var dk = rows[d].tenant_id + "|" + rows[d][idCol];
+        var dk = dedupKeyFn(rows[d]);
         if (!seen[dk]) { seen[dk] = true; deduped.unshift(rows[d]); }
       }
       rows = deduped;
