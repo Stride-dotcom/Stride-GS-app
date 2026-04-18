@@ -606,6 +606,7 @@ Client inventory scripts are NOT edited via direct URLs — use `npm run rollout
 ### Active open items
 
 - [x] **DispatchTrack Phase 1b** — React Orders tab live (admin-only, empty until Phase 1c ingest). Build `63207c2`. See `Docs/DT_Integration_Build_Plan.md`.
+- [x] **DispatchTrack Phase 1a migration** — Migration files committed and applied to Supabase. Branch `feat/dt-integration-phase1a-migration`.
 - [ ] **DispatchTrack Phase 1c** — Webhook ingest Edge Function. Needs DT account API credentials + webhook secret first.
 - [ ] **Standalone Repair Detail Page (Phase 2)** — `#/repairs/:repairId` — same pattern as Task Detail, pending.
 - [ ] **Standalone Will Call Detail Page (Phase 3)** — `#/will-calls/:wcNumber` — same pattern, requires WC items parity audit.
@@ -613,24 +614,32 @@ Client inventory scripts are NOT edited via direct URLs — use `npm run rollout
 - [ ] **Seed Stax Supabase caches (one-time)** — Open Stride API in Apps Script editor → run `seedAllStaxToSupabase()` once. Populates `stax_invoices`, `stax_charges`, `stax_exceptions`, `stax_customers`, `stax_run_log` from the Stax spreadsheet. Until this runs, Payments page falls back to GAS on first load.
 - [ ] **Set Supabase Script Properties on Stax Auto Pay project** — StaxAutoPay.gs v4.6.0 (session 69 Phase 2f) added Supabase write-through but the Stax Auto Pay Apps Script project is separate from Stride API, so it needs its own `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY` Script Properties. Open `https://script.google.com/u/0/home/projects/1n_AkHhTB1ijUxLdfH8qCcYitHHBD30gCz2FKB1-q33wkJrXLiCpVqmt4/edit` → ⚙️ Project Settings → Script Properties → add both (same values as Stride API project). Until set, the write-through is a silent no-op (by design) and Supabase will trail the autopay runs.
 - [x] ~~Scanner Supabase Direct Lookup~~ — **DONE session 68/69**. Native React `/scanner` and `/labels` pages now use Supabase `item_id_ledger` for cross-tenant item resolution (~50ms) and Supabase `locations` mirror for the dropdown. New endpoint `batchUpdateItemLocations` writes per-tenant + central `move_history` audit. The old GAS iframe Scanner/Labels HTML web apps are no longer the React `/scanner` and `/labels` routes (they still exist for direct-URL access).
+- [x] **Quote Tool page** — Admin-only `/quote` route, 18 React components, `EST-NNNN` numbering, localStorage-backed Phase 1, full catalog CRUD, coverage tiers, class-based pricing matrix, PDF via print dialog.
+- [x] **Billing Supabase-first report builder** — No auto-load on client select; client pick loads sidemarks only; Load Report button triggers actual query; Refresh forces GAS. Eliminates timeout on large-billing clients.
+- [x] **Auto-inspect race fix** — `useState` → `useMemo` + guarded `useEffect` in `Receiving.tsx`. Zero React #300 risk.
+- [x] **Expired reset link UX** — New `recovery_expired` auth state; user sees "link expired" message instead of silent redirect to login.
+- [x] **Mobile sidebar logout** — Fixed 100vh iOS address bar clipping (`100vh` → `100%`, `overflow: hidden` on `<aside>`).
+- [x] **useApiData background refresh cache bug** — `doFetch(false, true)` → `doFetch(true, true)`; background refresh was serving stale localStorage cache.
+- [x] **Visual refresh Phase 1 + full v2 pass** — `theme.v2` design tokens (cream bg, dark hero cards, orange accent, pill controls), applied across all 20 routes + 4 job pages + all shared components.
+- [x] **Email templates v2 — all 19 templates** — Stride brand design system; `{{SIDEMARK_HEADER}}` removed; pushed via `push-templates` + `refresh-caches` to all clients; "About Inspection" text in SHIPMENT_RECEIVED updated.
+- [x] **GitHub Actions CI/CD** — `ci.yml` (typecheck+build on push/PR), `deploy.yml` (auto-deploy on push, secrets configured and active), `migrate.yml` (manual migration runner). All three workflows live.
+- [x] ~~Master Inventory Template Web App deployment~~ — Removed `!c.isTemplate` guard from `update-deployments.mjs`, added `--name <partial>` filter flag. Template has Web App deployment v108.
 - [ ] **Auto-Print Labels from Receiving** — Toggle on Receiving page for inline label printing. See `Docs/Archive/QR_Scanner_Next_Phase.md` Feature B (still applies; Labels page is now native React so wiring is straightforward)
 - [ ] **Parent Transfer Access** — Allow parent users to transfer items between their own children only (currently staff-only)
 - [ ] **Global search expansion** — Add shipments, billing, claims entities + missing fields per audit
 - [ ] **Autocomplete DB in React** — Sidemark/Vendor/Description per client
 - [ ] **Invoice-level `invoiceDate` field** — Billing invoice summary currently falls back to earliest child date. Add a true `invoiceDate` to `InvoiceGroup` (sourced from Consolidated_Ledger "Invoice Date" column) so re-sorted children don't shift the displayed date.
 - [ ] **Invoice number link in summary row** — Wire `invoiceUrl` through `InvoiceGroup` so the Invoice # cell renders as an anchor when a PDF URL exists (currently always renders as bold text).
-- [ ] **DetailPanel internals v2 polish** — Session 71 applied v2 to every page-level surface + shared `DetailHeader`. The deep interiors of each DetailPanel (TaskDetailPanel, RepairDetailPanel, WillCallDetailPanel, ClaimDetailPanel, ItemDetailPanel) still have their own internal section button rows and field grids with 8–10px corners in places. Outer panel via DetailHeader is v2, but interior sections need another pass.
-- [ ] **Master Inventory Template included in rollouts** — User flagged that the onboarding template (used to seed new client sheets) should receive `refresh-caches` updates so new clients inherit the latest templates/cache data. Currently skipped by rollout tooling with "Requested entity was not found" because it's marked inactive / missing a Web App URL in CB Clients. Need to either (a) add Web App URL so rollout includes it, or (b) build a separate "update template" npm script that treats it specially.
+- [ ] **DetailPanel internals v2 polish** — Outer panel via `DetailHeader` is v2, but deep interiors of each DetailPanel (action button rows, field grids) still have 8–10px corners in places and need another pass.
 
 ### Known bugs (unresolved)
 
 - `populateUnbilledReport_()` in CB `Code.gs.js` uses OLD header names ("Billing Status", "Service Date")
 - `CB13_addBillingStatusValidation()` looks for "Billing Status" instead of "Status"
 - Transfer Items dialog needs processing animation + disable buttons after complete
-- Multi-row selection only picks last row for Will Call creation and other functions
 - Repair discount behavior — should disable discounts on repairs
-- Autocomplete dropdowns in React: Room + Sidemark data mixed together
 - Receiving page uses hardcoded table (no TanStack Table / no column reorder)
+- Auto-inspect race on Receiving — `useMemo` fix shipped but underlying `ClientsProvider` removal still needs permanent resolution
 - **GitHub Pages CDN caching gotcha:** hard-refresh (Ctrl+Shift+R) after `git push` to verify deployed bundle hash
 
 ---
