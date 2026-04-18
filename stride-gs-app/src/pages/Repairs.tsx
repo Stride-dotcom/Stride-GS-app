@@ -394,8 +394,10 @@ export function Repairs() {
   }
 
   return (
-    <div>
-      <div style={{ marginBottom: 16 }}><h1 style={{ fontSize: 22, fontWeight: 700, letterSpacing: '-0.3px' }}>Repairs</h1><p style={{ fontSize: 13, color: theme.colors.textMuted, marginTop: 2 }}>Quote workflow, approval tracking, and vendor management</p></div>
+    <div style={{ background: '#F5F2EE', margin: '-28px -32px', padding: '28px 32px', minHeight: '100%' }}>
+      <div style={{ marginBottom: 20 }}>
+        <div style={{ fontSize: 13, fontWeight: 600, letterSpacing: '1px', color: '#1C1C1C' }}>STRIDE LOGISTICS · REPAIRS</div>
+      </div>
 
       <SyncBanner syncing={refreshing} label={clientFilter.length === 1 ? clientFilter[0] : clientFilter.length > 1 ? `${clientFilter.length} clients` : undefined} />
 

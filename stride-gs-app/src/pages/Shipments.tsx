@@ -497,7 +497,7 @@ export function Shipments() {
   const totalItems = data.reduce((sum, r) => sum + r.itemCount, 0);
 
   return (
-    <div style={{ fontFamily: theme.typography.fontFamily }}>
+    <div style={{ fontFamily: theme.typography.fontFamily, background: '#F5F2EE', margin: '-28px -32px', padding: '28px 32px', minHeight: '100%' }}>
       {/* Loading state */}
       {hasApi && apiLoading && data.length === 0 && (
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minHeight: 300, gap: 12 }}>
@@ -507,18 +507,12 @@ export function Shipments() {
         </div>
       )}
 
-      {/* Page Header */}
+      {/* Page Header — v2 small inline branding */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
-        <div>
-          <h1 style={{ fontSize: theme.typography.sizes['3xl'], fontWeight: theme.typography.weights.bold, color: theme.colors.text, margin: 0, lineHeight: 1.2 }}>
-            Shipments
-          </h1>
-          <p style={{ fontSize: 13, color: theme.colors.textSecondary, margin: '4px 0 0' }}>
-            Track incoming shipments and receiving history
-            {isLive && <span style={{ marginLeft: 8, display: 'inline-block', fontSize: 10, fontWeight: 600, color: '#15803D', background: '#F0FDF4', padding: '1px 8px', borderRadius: 10 }}>Live</span>}
-            {isDemo && <span style={{ marginLeft: 8, display: 'inline-block', fontSize: 10, fontWeight: 600, color: '#B45309', background: '#FEF3C7', padding: '1px 8px', borderRadius: 10 }}>Demo</span>}
-            {hasApi && apiLoading && <span style={{ marginLeft: 8, display: 'inline-block', fontSize: 10, color: theme.colors.textMuted }}>Loading...</span>}
-          </p>
+        <div style={{ fontSize: 13, fontWeight: 600, letterSpacing: '1px', color: '#1C1C1C' }}>
+          STRIDE LOGISTICS · SHIPMENTS
+          {isLive && <span style={{ marginLeft: 12, display: 'inline-block', fontSize: 10, fontWeight: 700, letterSpacing: '2px', color: '#4A8A5C', background: 'rgba(74,138,92,0.15)', padding: '3px 10px', borderRadius: 100 }}>LIVE</span>}
+          {isDemo && <span style={{ marginLeft: 12, display: 'inline-block', fontSize: 10, fontWeight: 700, letterSpacing: '2px', color: '#B08810', background: 'rgba(200,160,40,0.15)', padding: '3px 10px', borderRadius: 100 }}>DEMO</span>}
         </div>
       </div>
 
