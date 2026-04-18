@@ -376,6 +376,7 @@ export function Payments() {
   const [sendingPayLinks, setSendingPayLinks] = useState(false);
   const [payLinkResult, setPayLinkResult] = useState<string | null>(null);
   const [sendingPayLink, setSendingPayLink] = useState<string | null>(null); // QB# being sent
+  const [showResolvedExceptions, setShowResolvedExceptions] = useState(false);
   const [invoiceStatusFilter, setInvoiceStatusFilter] = useState<string>('CREATED');
   const [invoiceSortCol, setInvoiceSortCol] = useState<string>('');
   const [invoiceSortDesc, setInvoiceSortDesc] = useState(false);
@@ -1501,12 +1502,19 @@ export function Payments() {
             }} />
           </div>
           {payLinkResult && <div style={{ padding: '10px 16px', background: '#F0FDF4', borderBottom: `1px solid ${theme.colors.borderLight}`, fontSize: 13, color: '#15803D', display: 'flex', alignItems: 'center', gap: 8 }}><CheckCircle2 size={14} /> {payLinkResult} <button onClick={() => setPayLinkResult(null)} style={{ marginLeft: 'auto', background: 'none', border: 'none', cursor: 'pointer', color: '#15803D', fontSize: 16 }}>&times;</button></div>}
-          {exceptions.length === 0 ? (
-            <div style={{ padding: 24, textAlign: 'center', color: theme.colors.textMuted, fontSize: 13 }}>No exceptions</div>
+          {unresolvedExceptions.length === 0 && !showResolvedExceptions ? (
+            <div style={{ padding: 24, textAlign: 'center' }}>
+              <div style={{ color: '#15803D', fontSize: 14, fontWeight: 600, marginBottom: 4 }}>All clear — no open exceptions</div>
+              {exceptions.length > 0 && (
+                <button onClick={() => setShowResolvedExceptions(true)} style={{ fontSize: 12, color: theme.colors.orange, background: 'none', border: 'none', cursor: 'pointer', textDecoration: 'underline' }}>
+                  Show {exceptions.length} resolved exception{exceptions.length !== 1 ? 's' : ''}
+                </button>
+              )}
+            </div>
           ) : (
             <table style={{ width: '100%', borderCollapse: 'collapse' }}>
               <thead><tr>{['Timestamp', 'Invoice', 'Customer', 'Amount', 'Reason', 'Resolved', ''].map(h => <th key={h} style={th}>{h}</th>)}</tr></thead>
-              <tbody>{exceptions.map((exc, i) => (
+              <tbody>{(showResolvedExceptions ? exceptions : unresolvedExceptions).map((exc, i) => (
                 <tr key={i} style={{ background: exc.resolved ? 'transparent' : '#FFFBF5' }}>
                   <td style={{ ...td, fontSize: 11, color: theme.colors.textMuted }}>{exc.timestamp}</td>
                   <td style={{ ...td, fontWeight: 600 }}>{exc.qbInvoice}</td>
