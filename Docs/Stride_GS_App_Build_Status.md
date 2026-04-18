@@ -131,6 +131,8 @@ Removed `!c.isTemplate` guard from `update-deployments.mjs`. Added `--name <part
 
 - **DetailPanel internals v2 polish** — deep interiors of each DetailPanel (action button rows, field grids) still have 8–10px corners in places; outer panel via `DetailHeader` is v2.
 - **DT Phase 1c** — webhook ingest Edge Function; needs DT API credentials + webhook secret first.
+- **Task Due Dates + Priority** — add Due Date and Priority (High/Medium/Low) to tasks. Requires: new columns on Tasks sheet (GAS), endpoint updates (`getTasks`/`batchCreateTasks`/`completeTask`), Supabase `tasks` table schema update if cached, React UI (date picker, priority dropdown, color-coded list rows, sort/filter by due date + priority). Optional: surface on Expected Calendar view.
+- **Price List Management** — manage the master price list from within the app. Scope TBD.
 
 ---
 
