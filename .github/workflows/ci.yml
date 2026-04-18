@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [source]
+    paths: ['stride-gs-app/**']
+  pull_request:
+    branches: [source]
+    paths: ['stride-gs-app/**']
+
+jobs:
+  typecheck-and-build:
+    name: Type Check & Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: stride-gs-app/package-lock.json
+
+      - name: Install dependencies
+        working-directory: stride-gs-app
+        run: npm ci
+
+      - name: TypeScript strict check
+        working-directory: stride-gs-app
+        run: npx tsc -b
+
+      - name: Build (verify-entry → tsc → vite → sanity checks)
+        working-directory: stride-gs-app
+        env:
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+        run: npm run build
+
+      - name: Report bundle size
+        if: always()
+        working-directory: stride-gs-app
+        run: |
+          echo "### Build output" >> $GITHUB_STEP_SUMMARY
+          if [ -d dist/assets ]; then
+            echo "| File | Size |" >> $GITHUB_STEP_SUMMARY
+            echo "|------|------|" >> $GITHUB_STEP_SUMMARY
+            ls -lh dist/assets/*.js 2>/dev/null \
+              | awk '{split($9,a,"/"); printf "| %s | %s |\n", a[length(a)], $5}' \
+              >> $GITHUB_STEP_SUMMARY || true
+          else
+            echo "No build output — build failed." >> $GITHUB_STEP_SUMMARY
+          fi

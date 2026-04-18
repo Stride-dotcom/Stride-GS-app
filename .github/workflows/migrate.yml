@@ -1,0 +1,82 @@
+name: Apply Supabase Migration
+
+# Manual trigger only — never fires automatically.
+# Trigger via: GitHub Actions UI → "Apply Supabase Migration" → Run workflow
+# Or via CLI:  gh workflow run migrate.yml -f migration_file=stride-gs-app/supabase/migrations/YYYYMMDDHHMMSS_name.sql -f confirm=true
+#
+# Required secret (set in GitHub → Settings → Secrets and variables → Actions):
+#   SUPABASE_DB_URL — PostgreSQL connection string for the Supabase project
+#   Format: postgresql://postgres:[db-password]@db.uqplppugeickmamycpuz.supabase.co:5432/postgres
+#   Find the password in: Supabase dashboard → Settings → Database → Connection string
+
+on:
+  workflow_dispatch:
+    inputs:
+      migration_file:
+        description: >
+          Migration file path relative to repo root.
+          Example: stride-gs-app/supabase/migrations/20240101000000_add_column.sql
+        required: true
+        type: string
+      confirm:
+        description: 'Apply this migration to production Supabase? (leave unchecked to preview SQL only)'
+        required: true
+        type: boolean
+        default: false
+
+jobs:
+  migrate:
+    name: Apply Migration
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Always display the SQL so the operator can see what will be applied
+      - name: Display migration SQL
+        run: |
+          echo "## Migration: \`${{ inputs.migration_file }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ ! -f "${{ inputs.migration_file }}" ]; then
+            echo "❌ **File not found:** \`${{ inputs.migration_file }}\`" >> $GITHUB_STEP_SUMMARY
+            echo "File not found: ${{ inputs.migration_file }}"
+            exit 1
+          fi
+          echo "\`\`\`sql" >> $GITHUB_STEP_SUMMARY
+          cat "${{ inputs.migration_file }}" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "---"
+          echo "SQL to be applied:"
+          echo "---"
+          cat "${{ inputs.migration_file }}"
+
+      # If confirm was not checked, exit cleanly — SQL was shown above for review
+      - name: Preview-only notice
+        if: ${{ !inputs.confirm }}
+        run: |
+          echo "ℹ️  Confirm checkbox not checked — SQL shown above but NOT applied." >> $GITHUB_STEP_SUMMARY
+          echo "Re-run this workflow with 'confirm' checked to apply to production."
+          echo "ℹ️  Dry-run complete — re-run with confirm=true to apply."
+
+      - name: Install Supabase CLI
+        if: ${{ inputs.confirm }}
+        uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Apply pending migrations via supabase db push
+        if: ${{ inputs.confirm }}
+        working-directory: stride-gs-app
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          echo "Applying all pending migrations from supabase/migrations/ ..."
+          supabase db push --db-url "$SUPABASE_DB_URL"
+          echo "✓ Migrations applied successfully"
+
+      - name: Record result
+        if: ${{ inputs.confirm }}
+        run: |
+          echo "## ✅ Migration applied" >> $GITHUB_STEP_SUMMARY
+          echo "Applied at: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
+          echo "Commit: \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
