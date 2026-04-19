@@ -51,6 +51,7 @@ import { isApiConfigured, postBatchRequestRepairQuote, type BatchMutationResult 
 import { supabase } from '../lib/supabase';
 import { useInventory } from '../hooks/useInventory';
 import { useClients } from '../hooks/useClients';
+import { InlineEditableCell } from '../components/shared/InlineEditableCell';
 import { useClientFilterUrlSync } from '../hooks/useClientFilterUrlSync';
 import { useTasks } from '../hooks/useTasks';
 import { useRepairs } from '../hooks/useRepairs';
@@ -597,6 +598,9 @@ export function Inventory() {
   const { classNames } = usePricing(apiConfigured);
   const { user } = useAuth();
   const navigate = useNavigate();
+  // v38.72.0 Phase 3 — inline cell editing is admin/staff only (client-role
+  // users see their own data but shouldn't mutate it from the table).
+  const canEditInventory = user?.role === 'admin' || user?.role === 'staff';
 
   // Client-role users only see their own accounts in the dropdown — admin/staff see all.
   const dropdownClientNames = useMemo(() => {
@@ -990,25 +994,64 @@ export function Inventory() {
       cell: i => <span style={{ fontSize: theme.typography.sizes.sm }}>{i.getValue()}</span>,
     }),
 
-    // Vendor
+    // Reference — inline-editable free text
     ch.accessor('reference', {
       header: 'Reference', size: 120,
-      cell: i => <span style={{ fontSize: theme.typography.sizes.sm, color: theme.colors.textSecondary }}>{i.getValue() || '—'}</span>,
+      cell: i => (
+        <InlineEditableCell
+          value={i.getValue() || ''}
+          itemId={i.row.original.itemId}
+          clientSheetId={i.row.original.clientId}
+          fieldKey="reference"
+          variant="text"
+          applyItemPatch={applyItemPatch as (id: string, patch: Record<string, unknown>) => void}
+          mergeItemPatch={mergeItemPatch as (id: string, patch: Record<string, unknown>) => void}
+          disabled={!canEditInventory}
+          renderValue={v => <span style={{ fontSize: theme.typography.sizes.sm, color: theme.colors.textSecondary }}>{v || '—'}</span>}
+        />
+      ),
     }),
 
+    // Vendor — inline-editable autocomplete from client Autocomplete_DB
     ch.accessor('vendor', {
       header: 'Vendor', size: 130,
-      cell: i => <span style={{ fontSize: theme.typography.sizes.sm }}>{i.getValue()}</span>,
+      cell: i => (
+        <InlineEditableCell
+          value={i.getValue() || ''}
+          itemId={i.row.original.itemId}
+          clientSheetId={i.row.original.clientId}
+          fieldKey="vendor"
+          variant="autocomplete-db"
+          dbField="vendors"
+          applyItemPatch={applyItemPatch as (id: string, patch: Record<string, unknown>) => void}
+          mergeItemPatch={mergeItemPatch as (id: string, patch: Record<string, unknown>) => void}
+          disabled={!canEditInventory}
+          renderValue={v => <span style={{ fontSize: theme.typography.sizes.sm }}>{v || '—'}</span>}
+        />
+      ),
     }),
 
-    // Description
+    // Description — inline-editable autocomplete from client Autocomplete_DB
     ch.accessor('description', {
       header: 'Description', size: 260,
       cell: i => (
-        <span style={{
-          fontSize: theme.typography.sizes.sm, display: 'block',
-          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-        }}>{i.getValue()}</span>
+        <InlineEditableCell
+          value={i.getValue() || ''}
+          itemId={i.row.original.itemId}
+          clientSheetId={i.row.original.clientId}
+          fieldKey="description"
+          variant="autocomplete-db"
+          dbField="descriptions"
+          applyItemPatch={applyItemPatch as (id: string, patch: Record<string, unknown>) => void}
+          mergeItemPatch={mergeItemPatch as (id: string, patch: Record<string, unknown>) => void}
+          disabled={!canEditInventory}
+          renderValue={v => (
+            <span style={{
+              fontSize: theme.typography.sizes.sm, display: 'block',
+              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+            }}>{v || '—'}</span>
+          )}
+        />
       ),
     }),
 
@@ -1029,46 +1072,81 @@ export function Inventory() {
       ),
     }),
 
-    // Location
+    // Location — inline-editable autocomplete from Supabase locations (warehouse-wide)
     ch.accessor('location', {
-      header: 'Location', size: 100,
+      header: 'Location', size: 120,
       cell: i => (
-        <span style={{
-          fontSize: 11, fontFamily: 'monospace', fontWeight: 500,
-          background: theme.colors.bgSubtle,
-          border: `1px solid ${theme.colors.borderSubtle}`,
-          borderRadius: theme.radii.sm, padding: '1px 6px',
-          display: 'inline-block',
-        }}>{i.getValue()}</span>
+        <InlineEditableCell
+          value={i.getValue() || ''}
+          itemId={i.row.original.itemId}
+          clientSheetId={i.row.original.clientId}
+          fieldKey="location"
+          variant="autocomplete-locations"
+          applyItemPatch={applyItemPatch as (id: string, patch: Record<string, unknown>) => void}
+          mergeItemPatch={mergeItemPatch as (id: string, patch: Record<string, unknown>) => void}
+          disabled={!canEditInventory}
+          renderValue={v => v ? (
+            <span style={{
+              fontSize: 11, fontFamily: 'monospace', fontWeight: 500,
+              background: theme.colors.bgSubtle,
+              border: `1px solid ${theme.colors.borderSubtle}`,
+              borderRadius: theme.radii.sm, padding: '1px 6px',
+              display: 'inline-block',
+            }}>{v}</span>
+          ) : <span style={{ color: theme.colors.textMuted }}>—</span>}
+        />
       ),
     }),
 
-    // Sidemark
+    // Sidemark — inline-editable autocomplete from client Autocomplete_DB
     ch.accessor('sidemark', {
       header: 'Sidemark', size: 190,
       filterFn: multiSelectFilter,
       cell: i => {
-        const val = i.getValue();
+        const val = i.getValue() || '';
         const bg = val ? sidemarkColorMap.get(normSidemark(val)) : undefined;
         return (
-          <span style={{
-            fontSize: theme.typography.sizes.sm, display: 'block',
-            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-            color: theme.colors.textSecondary,
-            ...(bg ? { background: bg, borderRadius: 3, padding: '1px 6px', margin: '-1px -6px' } : {}),
-          }}>{val}</span>
+          <InlineEditableCell
+            value={val}
+            itemId={i.row.original.itemId}
+            clientSheetId={i.row.original.clientId}
+            fieldKey="sidemark"
+            variant="autocomplete-db"
+            dbField="sidemarks"
+            applyItemPatch={applyItemPatch as (id: string, patch: Record<string, unknown>) => void}
+            mergeItemPatch={mergeItemPatch as (id: string, patch: Record<string, unknown>) => void}
+            disabled={!canEditInventory}
+            renderValue={v => (
+              <span style={{
+                fontSize: theme.typography.sizes.sm, display: 'block',
+                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                color: theme.colors.textSecondary,
+                ...(bg ? { background: bg, borderRadius: 3, padding: '1px 6px', margin: '-1px -6px' } : {}),
+              }}>{v || '—'}</span>
+            )}
+          />
         );
       },
     }),
 
-    // Room (derived from sidemark)
-    ch.accessor(
-      row => { const p = row.sidemark.split(' / '); return p.length > 1 ? p[1] : ''; },
-      {
-        id: 'room', header: 'Room', size: 130,
-        cell: i => <span style={{ fontSize: theme.typography.sizes.sm }}>{i.getValue() || '—'}</span>,
-      }
-    ),
+    // Room — inline-editable free text (sourced from actual Inventory Room column,
+    // not derived from sidemark as in pre-v38.72.0 builds)
+    ch.accessor('room', {
+      id: 'room', header: 'Room', size: 130,
+      cell: i => (
+        <InlineEditableCell
+          value={i.getValue() || ''}
+          itemId={i.row.original.itemId}
+          clientSheetId={i.row.original.clientId}
+          fieldKey="room"
+          variant="text"
+          applyItemPatch={applyItemPatch as (id: string, patch: Record<string, unknown>) => void}
+          mergeItemPatch={mergeItemPatch as (id: string, patch: Record<string, unknown>) => void}
+          disabled={!canEditInventory}
+          renderValue={v => <span style={{ fontSize: theme.typography.sizes.sm }}>{v || '—'}</span>}
+        />
+      ),
+    }),
 
     // Status
     ch.accessor('status', {
@@ -1157,7 +1235,7 @@ export function Inventory() {
         </div>
       ),
     }),
-  ], [hoveredRowId, showToast, inspItems, asmItems, repairItems]);
+  ], [hoveredRowId, showToast, inspItems, asmItems, repairItems, applyItemPatch, mergeItemPatch, canEditInventory]);
 
   // When navigating from Shipments page, filter table to that shipment
   const tableData = useMemo(() => {
