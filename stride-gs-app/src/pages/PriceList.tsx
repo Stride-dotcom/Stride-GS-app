@@ -1,20 +1,18 @@
 /**
  * PriceList — unified service catalog page (admin-only).
  *
- * Phase 1 (session 72): split panel — category sidebar on the left,
- * search + service cards on the right. Click a card to open the slide-out
- * ServiceEditPanel. "Add service" button opens AddServiceModal.
+ * Session 73 layout: split panel — category sidebar on the left, grouped
+ * collapsible category sections on the right. Each service is a compact
+ * row; clicking Edit expands the row inline (no slide-out panel). Stat
+ * cards and global controls live above the split.
  *
  * Data: public.service_catalog via useServiceCatalog (Supabase Realtime).
- * Does NOT replace the Quote Tool catalog tab (which still reads its own
- * local store). Future phases will migrate Quote Tool to read from here.
  */
 import { useMemo, useState } from 'react';
-import { Plus, Search, Tag, Download, Share2, Check, Copy, X, UploadCloud } from 'lucide-react';
+import { Plus, Search, Tag, Download, Share2, Check, Copy, X, UploadCloud, ChevronDown, ChevronRight } from 'lucide-react';
 import { theme } from '../styles/theme';
 import { useServiceCatalog, type CatalogService, type ServiceCategory } from '../hooks/useServiceCatalog';
-import { ServiceCard } from '../components/pricelist/ServiceCard';
-import { ServiceEditPanel } from '../components/pricelist/ServiceEditPanel';
+import { ServiceRow } from '../components/pricelist/ServiceRow';
 import { AddServiceModal } from '../components/pricelist/AddServiceModal';
 import { downloadPriceListExcel } from '../components/pricelist/exportPriceListExcel';
 import { usePriceListShares, type PriceListShare } from '../hooks/usePriceListShares';
@@ -36,12 +34,13 @@ type CategoryFilter = 'All' | ServiceCategory;
 
 export function PriceList() {
   const v2 = theme.v2;
-  const { services, loading, error, createService, updateService, deleteService, getAuditForService } = useServiceCatalog();
+  const { services, loading, error, createService, updateService, deleteService } = useServiceCatalog();
   const { createShare } = usePriceListShares();
 
   const [categoryFilter, setCategoryFilter] = useState<CategoryFilter>('All');
   const [search, setSearch] = useState('');
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [showAdd, setShowAdd] = useState(false);
   const [showShare, setShowShare] = useState(false);
   const [newShare, setNewShare] = useState<PriceListShare | null>(null);
@@ -60,7 +59,6 @@ export function PriceList() {
     } else {
       setSyncResult({ kind: 'err', message: res.error || 'Sync failed' });
     }
-    // Clear the toast after 6 seconds
     setTimeout(() => setSyncResult(null), 6000);
   };
 
@@ -82,16 +80,59 @@ export function PriceList() {
     });
   }, [services, categoryFilter, search]);
 
+  // Group visible services by category, preserving display order within each group.
+  const grouped = useMemo(() => {
+    const map = new Map<string, CatalogService[]>();
+    for (const s of visible) {
+      const arr = map.get(s.category) ?? [];
+      arr.push(s);
+      map.set(s.category, arr);
+    }
+    // Stable category ordering: ALL_CATEGORIES first, then any extras (e.g., Fabric Protection)
+    const ordered: { category: string; services: CatalogService[] }[] = [];
+    for (const cat of ALL_CATEGORIES) {
+      const arr = map.get(cat);
+      if (arr && arr.length) ordered.push({ category: cat, services: arr });
+      map.delete(cat);
+    }
+    for (const [cat, arr] of map) ordered.push({ category: cat, services: arr });
+    return ordered;
+  }, [visible]);
+
+  // Stats
+  const stats = useMemo(() => {
+    const total = services.length;
+    const active = services.filter(s => s.active).length;
+    const withTimes = services.filter(s =>
+      Object.values(s.times).some(t => (t ?? 0) > 0)
+    ).length;
+    const distinctCategories = new Set(services.map(s => s.category)).size;
+    return { total, active, withTimes, distinctCategories };
+  }, [services]);
+
   const existingCodes = useMemo(() => new Set(services.map(s => s.code)), [services]);
   const nextDisplayOrder = useMemo(() => {
     if (services.length === 0) return 1;
     return Math.max(...services.map(s => s.displayOrder)) + 1;
   }, [services]);
 
-  const selected: CatalogService | null = useMemo(() => {
-    if (!selectedId) return null;
-    return services.find(s => s.id === selectedId) ?? null;
-  }, [services, selectedId]);
+  // Quick toggleActive — used by ActiveToggle in ServiceRow read mode.
+  const toggleActive = async (id: string, active: boolean) => {
+    await updateService(id, { active });
+  };
+
+  const toggleSection = (cat: string) => {
+    setCollapsed(prev => {
+      const next = new Set(prev);
+      if (next.has(cat)) next.delete(cat);
+      else next.add(cat);
+      return next;
+    });
+  };
+
+  const handleEditClick = (id: string) => {
+    setEditingId(prev => (prev === id ? null : id));
+  };
 
   return (
     <div style={{
@@ -112,20 +153,7 @@ export function PriceList() {
           </div>
         </div>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-          <button
-            onClick={() => setShowShare(true)}
-            style={{
-              display: 'flex', alignItems: 'center', gap: 6,
-              padding: '10px 20px', borderRadius: v2.radius.button,
-              background: 'transparent', border: `1px solid ${v2.colors.border}`,
-              color: v2.colors.text, cursor: 'pointer',
-              fontSize: 11, fontWeight: 600, letterSpacing: '1.5px',
-              textTransform: 'uppercase', fontFamily: 'inherit',
-              transition: 'background 0.15s',
-            }}
-            onMouseEnter={e => { e.currentTarget.style.background = v2.colors.bgCard; }}
-            onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}
-          >
+          <button onClick={() => setShowShare(true)} style={ghostHeaderBtn(v2)}>
             <Share2 size={14} /> Share
           </button>
           <button
@@ -133,17 +161,10 @@ export function PriceList() {
             disabled={syncing || services.length === 0}
             title="Push current Supabase rates to the Master Price List sheet so GAS billing sees them"
             style={{
-              display: 'flex', alignItems: 'center', gap: 6,
-              padding: '10px 20px', borderRadius: v2.radius.button,
-              background: 'transparent', border: `1px solid ${v2.colors.border}`,
+              ...ghostHeaderBtn(v2),
               color: (syncing || services.length === 0) ? v2.colors.textMuted : v2.colors.text,
               cursor: (syncing || services.length === 0) ? 'not-allowed' : 'pointer',
-              fontSize: 11, fontWeight: 600, letterSpacing: '1.5px',
-              textTransform: 'uppercase', fontFamily: 'inherit',
-              transition: 'background 0.15s',
             }}
-            onMouseEnter={e => { if (!syncing && services.length > 0) e.currentTarget.style.background = v2.colors.bgCard; }}
-            onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}
           >
             <UploadCloud size={14} /> {syncing ? 'Syncing…' : 'Sync to Sheet'}
           </button>
@@ -152,17 +173,10 @@ export function PriceList() {
             disabled={services.length === 0}
             title="Download a formatted Excel workbook of all services"
             style={{
-              display: 'flex', alignItems: 'center', gap: 6,
-              padding: '10px 20px', borderRadius: v2.radius.button,
-              background: 'transparent', border: `1px solid ${v2.colors.border}`,
+              ...ghostHeaderBtn(v2),
               color: services.length === 0 ? v2.colors.textMuted : v2.colors.text,
               cursor: services.length === 0 ? 'not-allowed' : 'pointer',
-              fontSize: 11, fontWeight: 600, letterSpacing: '1.5px',
-              textTransform: 'uppercase', fontFamily: 'inherit',
-              transition: 'background 0.15s',
             }}
-            onMouseEnter={e => { if (services.length > 0) e.currentTarget.style.background = v2.colors.bgCard; }}
-            onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}
           >
             <Download size={14} /> Download Excel
           </button>
@@ -181,18 +195,22 @@ export function PriceList() {
         </div>
       </div>
 
-      {/* Loading / Error */}
+      {/* ── Stat cards ── */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: 18 }}>
+        <StatCard label="Total Services" value={stats.total} />
+        <StatCard label="Active" value={stats.active} />
+        <StatCard label="Categories" value={stats.distinctCategories} />
+        <StatCard label="With Service Times" value={stats.withTimes} accent />
+      </div>
+
+      {/* Errors / Sync result */}
       {error && (
         <div style={{
           padding: '12px 16px', marginBottom: 16,
           background: 'rgba(180,90,90,0.1)', color: '#B45A5A',
           borderRadius: v2.radius.input, fontSize: 13,
-        }}>
-          {error}
-        </div>
+        }}>{error}</div>
       )}
-
-      {/* Sync result toast */}
       {syncResult && (
         <div style={{
           padding: '12px 16px', marginBottom: 16,
@@ -200,9 +218,7 @@ export function PriceList() {
           color: syncResult.kind === 'ok' ? '#4A8A5C' : '#B45A5A',
           border: `1px solid ${syncResult.kind === 'ok' ? 'rgba(74,138,92,0.3)' : 'rgba(180,90,90,0.3)'}`,
           borderRadius: v2.radius.input, fontSize: 13,
-        }}>
-          {syncResult.message}
-        </div>
+        }}>{syncResult.message}</div>
       )}
 
       {/* ── Split panel ── */}
@@ -218,12 +234,7 @@ export function PriceList() {
         }}>
           <div style={{ ...v2.typography.label, marginBottom: 12, paddingLeft: 4 }}>Category</div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-            <CategoryButton
-              label="All services"
-              count={counts.All}
-              active={categoryFilter === 'All'}
-              onClick={() => setCategoryFilter('All')}
-            />
+            <CategoryButton label="All services" count={counts.All} active={categoryFilter === 'All'} onClick={() => setCategoryFilter('All')} />
             {ALL_CATEGORIES.map(cat => (
               <CategoryButton
                 key={cat}
@@ -260,7 +271,7 @@ export function PriceList() {
             />
           </div>
 
-          {/* Cards */}
+          {/* Grouped list */}
           {loading ? (
             <div style={{ padding: 40, textAlign: 'center', color: v2.colors.textMuted, fontSize: 13 }}>
               Loading services…
@@ -279,34 +290,65 @@ export function PriceList() {
               </div>
             </div>
           ) : (
-            <div style={{
-              display: 'grid',
-              gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))',
-              gap: 16,
-              paddingBottom: 40,
-            }}>
-              {visible.map(s => (
-                <ServiceCard
-                  key={s.id}
-                  service={s}
-                  onClick={() => setSelectedId(s.id)}
-                />
-              ))}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 14, paddingBottom: 40 }}>
+              {grouped.map(({ category, services: rows }) => {
+                const isCollapsed = collapsed.has(category);
+                return (
+                  <section key={category} style={{
+                    background: v2.colors.bgWhite,
+                    border: `1px solid ${v2.colors.border}`,
+                    borderRadius: v2.radius.card,
+                    overflow: 'hidden',
+                  }}>
+                    {/* Collapsible header */}
+                    <button
+                      onClick={() => toggleSection(category)}
+                      style={{
+                        width: '100%', display: 'flex', alignItems: 'center', gap: 10,
+                        padding: '14px 18px',
+                        background: v2.colors.bgCard,
+                        border: 'none', borderBottom: isCollapsed ? 'none' : `1px solid ${v2.colors.border}`,
+                        cursor: 'pointer', fontFamily: 'inherit',
+                        textAlign: 'left',
+                      }}
+                    >
+                      {isCollapsed ? <ChevronRight size={14} color={v2.colors.textSecondary} /> : <ChevronDown size={14} color={v2.colors.textSecondary} />}
+                      <span style={{
+                        fontSize: 13, fontWeight: 600, letterSpacing: '0.5px',
+                        color: v2.colors.text, textTransform: 'uppercase',
+                      }}>{category}</span>
+                      <span style={{
+                        fontSize: 10, fontWeight: 700,
+                        padding: '3px 9px', borderRadius: v2.radius.badge,
+                        background: v2.colors.accent, color: '#fff',
+                        fontVariantNumeric: 'tabular-nums',
+                      }}>{rows.length}</span>
+                    </button>
+
+                    {/* Rows */}
+                    {!isCollapsed && (
+                      <div style={{ padding: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
+                        {rows.map(s => (
+                          <ServiceRow
+                            key={s.id}
+                            service={s}
+                            editing={editingId === s.id}
+                            onEditClick={() => handleEditClick(s.id)}
+                            onCancel={() => setEditingId(null)}
+                            onSave={updateService}
+                            onDelete={deleteService}
+                            onToggleActive={toggleActive}
+                          />
+                        ))}
+                      </div>
+                    )}
+                  </section>
+                );
+              })}
             </div>
           )}
         </section>
       </div>
-
-      {/* Edit panel */}
-      {selected && (
-        <ServiceEditPanel
-          service={selected}
-          onClose={() => setSelectedId(null)}
-          onSave={updateService}
-          onDelete={deleteService}
-          onGetAudit={getAuditForService}
-        />
-      )}
 
       {/* Add modal */}
       {showAdd && (
@@ -329,13 +371,42 @@ export function PriceList() {
 
       {/* Generated link result */}
       {newShare && (
-        <GeneratedLinkCard
-          share={newShare}
-          onClose={() => setNewShare(null)}
-        />
+        <GeneratedLinkCard share={newShare} onClose={() => setNewShare(null)} />
       )}
     </div>
   );
+}
+
+// ─── Stat card ─────────────────────────────────────────────────────────
+function StatCard({ label, value, accent }: { label: string; value: number; accent?: boolean }) {
+  return (
+    <div style={{
+      background: '#1C1C1C', color: '#fff',
+      borderRadius: 20, padding: '20px 24px',
+    }}>
+      <div style={{
+        fontSize: 10, fontWeight: 600, letterSpacing: '2px', textTransform: 'uppercase',
+        color: 'rgba(255,255,255,0.5)',
+      }}>{label}</div>
+      <div style={{
+        fontSize: 32, fontWeight: 300, marginTop: 6,
+        color: accent ? '#E8692A' : '#fff', fontVariantNumeric: 'tabular-nums',
+      }}>{value}</div>
+    </div>
+  );
+}
+
+// ─── Header ghost button helper ────────────────────────────────────────
+function ghostHeaderBtn(v2: typeof theme.v2): React.CSSProperties {
+  return {
+    display: 'flex', alignItems: 'center', gap: 6,
+    padding: '10px 20px', borderRadius: v2.radius.button,
+    background: 'transparent', border: `1px solid ${v2.colors.border}`,
+    color: v2.colors.text, cursor: 'pointer',
+    fontSize: 11, fontWeight: 600, letterSpacing: '1.5px',
+    textTransform: 'uppercase', fontFamily: 'inherit',
+    transition: 'background 0.15s',
+  };
 }
 
 // ─── Share modal ─────────────────────────────────────────────────────────────
@@ -378,7 +449,6 @@ function PriceListShareModal({ createShare, onClose, onCreated }: {
     <div style={{ position: 'fixed', inset: 0, zIndex: 1000, background: 'rgba(0,0,0,0.4)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }}
       onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
       <div style={{ background: v2.colors.bgWhite, borderRadius: v2.radius.card, padding: 32, width: '100%', maxWidth: 480, boxShadow: '0 24px 60px rgba(0,0,0,0.22)', display: 'flex', flexDirection: 'column', gap: 22 }}>
-        {/* Header */}
         <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between' }}>
           <div>
             <div style={{ fontSize: 18, fontWeight: 700, color: v2.colors.text }}>Share Price List</div>
@@ -387,7 +457,6 @@ function PriceListShareModal({ createShare, onClose, onCreated }: {
           <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: v2.colors.textMuted, padding: 4 }}><X size={18} /></button>
         </div>
 
-        {/* Categories */}
         <div>
           <div style={{ ...v2.typography.label, marginBottom: 10 }}>Categories</div>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
@@ -411,20 +480,17 @@ function PriceListShareModal({ createShare, onClose, onCreated }: {
           </div>
         </div>
 
-        {/* Disabled future toggle */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 14px', borderRadius: v2.radius.input, background: v2.colors.bgPage, border: `1px solid ${v2.colors.border}`, opacity: 0.5 }}>
           <div style={{ width: 16, height: 16, borderRadius: 4, border: `2px solid ${v2.colors.border}` }} />
           <span style={{ fontSize: 13, color: v2.colors.textSecondary }}>Include zip code schedule</span>
           <span style={{ marginLeft: 'auto', fontSize: 10, fontWeight: 600, letterSpacing: '1px', color: v2.colors.textMuted, background: v2.colors.bgCard, padding: '2px 8px', borderRadius: 9999 }}>COMING SOON</span>
         </div>
 
-        {/* Title */}
         <div>
           <label style={{ ...v2.typography.label, display: 'block', marginBottom: 6 }}>Custom title <span style={{ fontWeight: 400, textTransform: 'none', letterSpacing: 0, fontSize: 12 }}>(optional)</span></label>
           <input value={title} onChange={e => setTitle(e.target.value)} placeholder="Stride Logistics — Price List" style={inputStyle} />
         </div>
 
-        {/* Expiry */}
         <div>
           <label style={{ ...v2.typography.label, display: 'block', marginBottom: 6 }}>Expires <span style={{ fontWeight: 400, textTransform: 'none', letterSpacing: 0, fontSize: 12 }}>(leave blank = never)</span></label>
           <input type="date" value={expiresAt} onChange={e => setExpiresAt(e.target.value)} min={new Date().toISOString().slice(0, 10)} style={inputStyle} />
@@ -502,12 +568,9 @@ function CategoryButton({ label, count, active, onClick }: { label: string; coun
         padding: '10px 12px', borderRadius: v2.radius.input,
         background: active ? v2.colors.bgDark : 'transparent',
         color: active ? '#fff' : v2.colors.text,
-        border: 'none',
-        cursor: 'pointer',
-        fontSize: 13,
-        fontWeight: active ? 500 : 400,
-        fontFamily: 'inherit',
-        textAlign: 'left',
+        border: 'none', cursor: 'pointer',
+        fontSize: 13, fontWeight: active ? 500 : 400,
+        fontFamily: 'inherit', textAlign: 'left',
         transition: 'background 0.15s',
       }}
       onMouseEnter={e => { if (!active) e.currentTarget.style.background = v2.colors.bgCard; }}

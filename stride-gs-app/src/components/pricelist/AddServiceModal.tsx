@@ -5,15 +5,16 @@
  * Rates default to zeros; admin can fine-tune in the edit panel after.
  */
 import { useState } from 'react';
-import { X } from 'lucide-react';
+import { X, Clock } from 'lucide-react';
 import { theme } from '../../styles/theme';
 import type {
-  NewServiceInput, ServiceCategory, ServiceBilling, ServiceUnit,
+  NewServiceInput, ServiceCategory, ServiceBilling, ServiceUnit, ClassRates, ClassTimes,
 } from '../../hooks/useServiceCatalog';
 
 const CATEGORIES: ServiceCategory[] = ['Warehouse','Storage','Shipping','Assembly','Repair','Labor','Admin','Delivery'];
 const UNITS: ServiceUnit[]           = ['per_item','per_day','per_task','per_hour'];
 const BILLINGS: ServiceBilling[]     = ['class_based','flat'];
+const CLASSES = ['XS','S','M','L','XL','XXL'] as const;
 
 interface AddServiceModalProps {
   existingCodes: Set<string>;
@@ -30,6 +31,8 @@ export function AddServiceModal({ existingCodes, nextDisplayOrder, onClose, onCr
   const [billing, setBilling] = useState<ServiceBilling>('flat');
   const [unit, setUnit] = useState<ServiceUnit>('per_item');
   const [flatRate, setFlatRate] = useState(0);
+  const [rates, setRates] = useState<ClassRates>({ XS: 0, S: 0, M: 0, L: 0, XL: 0, XXL: 0 });
+  const [times, setTimes] = useState<ClassTimes>({});
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -46,8 +49,8 @@ export function AddServiceModal({ existingCodes, nextDisplayOrder, onClose, onCr
       name: name.trim(),
       category,
       billing,
-      rates: billing === 'class_based' ? { XS: 0, S: 0, M: 0, L: 0, XL: 0, XXL: 0 } : {},
-      xxlRate: 0,
+      rates: billing === 'class_based' ? rates : {},
+      xxlRate: billing === 'class_based' ? (rates.XXL ?? 0) : 0,
       flatRate: billing === 'flat' ? flatRate : 0,
       unit,
       taxable: true,
@@ -63,7 +66,7 @@ export function AddServiceModal({ existingCodes, nextDisplayOrder, onClose, onCr
       displayOrder: nextDisplayOrder,
       billIfPass: true,
       billIfFail: true,
-      times: {},
+      times: billing === 'class_based' ? times : {},
     };
     const created = await onCreate(input);
     setSaving(false);
@@ -160,7 +163,7 @@ export function AddServiceModal({ existingCodes, nextDisplayOrder, onClose, onCr
             </div>
           </div>
 
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginTop: 16 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: billing === 'flat' ? '1fr 1fr' : '1fr', gap: 12, marginTop: 16 }}>
             <div>
               <label style={labelStyle}>Billing</label>
               <select style={inputStyle} value={billing} onChange={e => setBilling(e.target.value as ServiceBilling)}>
@@ -181,8 +184,54 @@ export function AddServiceModal({ existingCodes, nextDisplayOrder, onClose, onCr
             )}
           </div>
 
+          {billing === 'class_based' && (
+            <>
+              <div style={{ marginTop: 18 }}>
+                <label style={labelStyle}>Class rates ($)</label>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 6 }}>
+                  {CLASSES.map(cls => (
+                    <div key={cls}>
+                      <div style={{ fontSize: 9, fontWeight: 700, letterSpacing: '1px', color: v2.colors.textMuted, marginBottom: 3, textAlign: 'center' }}>{cls}</div>
+                      <input
+                        type="number"
+                        step="0.01"
+                        style={{ ...inputStyle, padding: '8px 6px', textAlign: 'center', fontSize: 12 }}
+                        value={rates[cls] ?? 0}
+                        onChange={e => setRates({ ...rates, [cls]: Number(e.target.value) || 0 })}
+                      />
+                    </div>
+                  ))}
+                </div>
+              </div>
+              <div style={{ marginTop: 14 }}>
+                <label style={{ ...labelStyle, display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <Clock size={11} /> Service times (minutes)
+                </label>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 6 }}>
+                  {CLASSES.map(cls => (
+                    <div key={cls}>
+                      <div style={{ fontSize: 9, fontWeight: 700, letterSpacing: '1px', color: v2.colors.textMuted, marginBottom: 3, textAlign: 'center' }}>{cls}</div>
+                      <input
+                        type="number"
+                        min="0"
+                        step="1"
+                        style={{ ...inputStyle, padding: '8px 6px', textAlign: 'center', fontSize: 12 }}
+                        value={times[cls] ?? ''}
+                        placeholder="—"
+                        onChange={e => {
+                          const raw = e.target.value;
+                          setTimes({ ...times, [cls]: raw === '' ? undefined : (Number(raw) || 0) });
+                        }}
+                      />
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </>
+          )}
+
           <div style={{ marginTop: 20, fontSize: 12, color: v2.colors.textMuted, lineHeight: 1.4 }}>
-            You can set class rates, surface flags, SLA defaults, and the auto-apply rule after creating the service.
+            You can refine surface flags, SLA defaults, and the auto-apply rule after creating the service.
           </div>
 
           {error && (
