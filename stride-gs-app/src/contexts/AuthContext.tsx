@@ -294,6 +294,39 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     let mounted = true;
 
+    // ─── DEV-ONLY auth bypass ──────────────────────────────────────────────
+    // When running `npm run dev` (import.meta.env.DEV === true) AND the
+    // VITE_DEV_BYPASS_AUTH env var is truthy, skip Supabase auth entirely
+    // and mount as a mock admin user. This lets Claude Code (and any other
+    // dev workflow) preview authenticated pages without real credentials.
+    //
+    // Production safety:
+    //   - `import.meta.env.DEV` is a compile-time constant. Vite tree-shakes
+    //     this entire `if` block out of the production bundle.
+    //   - Even if the compile-time check somehow failed, the Supabase
+    //     service-role key isn't on the client — the mock user would only
+    //     be believed by React state, not by the backend. Any real API
+    //     call would still require a valid Supabase session token.
+    if (import.meta.env.DEV && import.meta.env.VITE_DEV_BYPASS_AUTH === 'true') {
+      const mockUser: AuthUser = {
+        email: 'dev-bypass@stride.local',
+        role: 'admin',
+        clientName: null,
+        clientSheetId: null,
+        isParent: false,
+        childClientSheetIds: [],
+        accessibleClientSheetIds: [],
+        accessibleClientNames: [],
+        displayName: 'Dev Bypass',
+        avatarInitials: 'DB',
+      };
+      setCallerEmail(mockUser.email);
+      setAuthState({ status: 'authenticated', user: mockUser });
+      // eslint-disable-next-line no-console
+      console.warn('[AuthContext] DEV auth bypass active — mounted as mock admin. Set VITE_DEV_BYPASS_AUTH=false to disable.');
+      return () => { mounted = false; };
+    }
+
     // ─── Instant bootstrap from localStorage cache ─────────────────────────
     // When opening a new tab, skip the "Signing you in..." screen by showing
     // the cached user immediately. The API re-validation still runs in the

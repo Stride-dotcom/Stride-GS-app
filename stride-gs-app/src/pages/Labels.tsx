@@ -735,7 +735,7 @@ export function Labels() {
                   onChange={e => setLocSearch(e.target.value)}
                   onFocus={() => setLocSearchFocused(true)}
                   onBlur={() => { /* keep list open if user typed something */ if (!locSearch) setLocSearchFocused(false); }}
-                  placeholder="Click to search and pick from existing locations\u2026"
+                  placeholder={'Click to search and pick from existing locations\u2026'}
                   style={{ width: '100%', padding: '7px 10px', border: `1px solid ${theme.colors.border}`, borderRadius: 6, fontSize: 12, marginBottom: 6, outline: 'none', boxSizing: 'border-box' }}
                 />
                 {(locSearchFocused || locSearch) && (
