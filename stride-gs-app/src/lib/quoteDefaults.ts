@@ -3,11 +3,12 @@ import type {
 } from './quoteTypes';
 
 export const DEFAULT_CLASSES: ClassDef[] = [
-  { id: 'XS', name: 'Extra Small', order: 1, active: true },
-  { id: 'S',  name: 'Small',       order: 2, active: true },
-  { id: 'M',  name: 'Medium',      order: 3, active: true },
-  { id: 'L',  name: 'Large',       order: 4, active: true },
-  { id: 'XL', name: 'Extra Large', order: 5, active: true },
+  { id: 'XS',  name: 'Extra Small',  order: 1, active: true },
+  { id: 'S',   name: 'Small',        order: 2, active: true },
+  { id: 'M',   name: 'Medium',       order: 3, active: true },
+  { id: 'L',   name: 'Large',        order: 4, active: true },
+  { id: 'XL',  name: 'Extra Large',  order: 5, active: true },
+  { id: 'XXL', name: 'XX-Large',     order: 6, active: true },
 ];
 
 let _order = 0;
@@ -23,7 +24,7 @@ function svc(
     taxable: opts.taxable ?? true,
     active: opts.active ?? true,
     flatRate: opts.flatRate ?? 0,
-    rates: { XS: 0, S: 0, M: 0, L: 0, XL: 0, ...opts.rates },
+    rates: { XS: 0, S: 0, M: 0, L: 0, XL: 0, XXL: 0, ...opts.rates },
     showInMatrix: opts.showInMatrix ?? false,
     matrixOrder: opts.showInMatrix ? _order : 999,
   };

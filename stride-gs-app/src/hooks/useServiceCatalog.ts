@@ -18,14 +18,19 @@ import { useAuth } from '../contexts/AuthContext';
 
 export type ServiceCategory =
   | 'Warehouse' | 'Storage' | 'Shipping' | 'Assembly'
-  | 'Repair' | 'Labor' | 'Admin' | 'Delivery';
+  | 'Repair' | 'Labor' | 'Admin' | 'Delivery'
+  | 'Fabric Protection';
 export type ServiceBilling = 'class_based' | 'flat';
 export type ServiceUnit    = 'per_item' | 'per_day' | 'per_task' | 'per_hour';
 export type AutoApplyRule  = 'overweight' | 'no_id' | 'fragile' | 'oversized';
 export type ServicePriority = 'Normal' | 'High';
 
 export interface ClassRates {
-  XS?: number; S?: number; M?: number; L?: number; XL?: number;
+  XS?: number; S?: number; M?: number; L?: number; XL?: number; XXL?: number;
+}
+
+export interface ClassTimes {
+  XS?: number; S?: number; M?: number; L?: number; XL?: number; XXL?: number;
 }
 
 export interface CatalogService {
@@ -35,6 +40,7 @@ export interface CatalogService {
   category: ServiceCategory;
   billing: ServiceBilling;
   rates: ClassRates;
+  xxlRate: number;              // mirrored into rates.XXL; kept for DB parity
   flatRate: number;
   unit: ServiceUnit;
   taxable: boolean;
@@ -48,6 +54,10 @@ export interface CatalogService {
   defaultPriority: ServicePriority | null;
   hasDedicatedPage: boolean;
   displayOrder: number;
+  // Session 73 — MPL-sourced schema additions
+  billIfPass: boolean;
+  billIfFail: boolean;
+  times: ClassTimes;            // minutes per unit by class
   createdAt: string;
   updatedAt: string;
 }
@@ -90,16 +100,38 @@ interface CatalogRow {
   display_order: number;
   created_at: string;
   updated_at: string;
+  // Session 73 additions
+  xxl_rate: number | string | null;
+  bill_if_pass: boolean | null;
+  bill_if_fail: boolean | null;
+  xs_time: number | null;
+  s_time: number | null;
+  m_time: number | null;
+  l_time: number | null;
+  xl_time: number | null;
+  xxl_time: number | null;
 }
 
 function rowToService(row: CatalogRow): CatalogService {
+  const xxlRate = Number(row.xxl_rate ?? 0);
+  const rawRates = (row.rates ?? {}) as Record<string, number>;
+  // Always mirror xxl_rate into rates.XXL so calcQuote can index by class id.
+  const mergedRates: ClassRates = {
+    XS:  rawRates.XS  ?? 0,
+    S:   rawRates.S   ?? 0,
+    M:   rawRates.M   ?? 0,
+    L:   rawRates.L   ?? 0,
+    XL:  rawRates.XL  ?? 0,
+    XXL: (rawRates.XXL ?? xxlRate) || 0,
+  };
   return {
     id: row.id,
     code: row.code,
     name: row.name,
     category: row.category as ServiceCategory,
     billing: row.billing as ServiceBilling,
-    rates: (row.rates ?? {}) as ClassRates,
+    rates: mergedRates,
+    xxlRate,
     flatRate: Number(row.flat_rate ?? 0),
     unit: row.unit as ServiceUnit,
     taxable: row.taxable,
@@ -113,6 +145,16 @@ function rowToService(row: CatalogRow): CatalogService {
     defaultPriority: (row.default_priority as ServicePriority | null) ?? null,
     hasDedicatedPage: row.has_dedicated_page,
     displayOrder: row.display_order,
+    billIfPass: row.bill_if_pass ?? true,
+    billIfFail: row.bill_if_fail ?? true,
+    times: {
+      XS:  row.xs_time  ?? undefined,
+      S:   row.s_time   ?? undefined,
+      M:   row.m_time   ?? undefined,
+      L:   row.l_time   ?? undefined,
+      XL:  row.xl_time  ?? undefined,
+      XXL: row.xxl_time ?? undefined,
+    },
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -125,6 +167,7 @@ function serviceToRow(input: UpdateServiceInput): Record<string, unknown> {
   if (input.category !== undefined)              row.category = input.category;
   if (input.billing !== undefined)               row.billing = input.billing;
   if (input.rates !== undefined)                 row.rates = input.rates;
+  if (input.xxlRate !== undefined)               row.xxl_rate = input.xxlRate;
   if (input.flatRate !== undefined)              row.flat_rate = input.flatRate;
   if (input.unit !== undefined)                  row.unit = input.unit;
   if (input.taxable !== undefined)               row.taxable = input.taxable;
@@ -138,16 +181,27 @@ function serviceToRow(input: UpdateServiceInput): Record<string, unknown> {
   if (input.defaultPriority !== undefined)       row.default_priority = input.defaultPriority;
   if (input.hasDedicatedPage !== undefined)      row.has_dedicated_page = input.hasDedicatedPage;
   if (input.displayOrder !== undefined)          row.display_order = input.displayOrder;
+  if (input.billIfPass !== undefined)            row.bill_if_pass = input.billIfPass;
+  if (input.billIfFail !== undefined)            row.bill_if_fail = input.billIfFail;
+  if (input.times !== undefined) {
+    row.xs_time  = input.times.XS  ?? null;
+    row.s_time   = input.times.S   ?? null;
+    row.m_time   = input.times.M   ?? null;
+    row.l_time   = input.times.L   ?? null;
+    row.xl_time  = input.times.XL  ?? null;
+    row.xxl_time = input.times.XXL ?? null;
+  }
   return row;
 }
 
-// Fields tracked by audit (rates is diffed specially below).
+// Fields tracked by audit (rates + times are diffed specially below).
 const AUDITABLE_SIMPLE_FIELDS: readonly (keyof CatalogService)[] = [
-  'code', 'name', 'category', 'billing', 'flatRate', 'unit',
+  'code', 'name', 'category', 'billing', 'flatRate', 'xxlRate', 'unit',
   'taxable', 'active', 'showInMatrix', 'showAsTask',
   'showAsDeliveryService', 'showAsReceivingAddon',
   'autoApplyRule', 'defaultSlaHours', 'defaultPriority',
   'hasDedicatedPage', 'displayOrder',
+  'billIfPass', 'billIfFail',
 ] as const;
 
 function stringify(v: unknown): string {
@@ -278,6 +332,17 @@ export function useServiceCatalog(): UseServiceCatalogResult {
           field_changed: 'rates',
           old_value: JSON.stringify(before.rates),
           new_value: JSON.stringify(after.rates),
+          changed_by: authUserId,
+          changed_by_name: changedByName,
+        });
+      }
+      // Diff times as a whole
+      if (JSON.stringify(before.times) !== JSON.stringify(after.times)) {
+        auditRows.push({
+          service_id: id,
+          field_changed: 'times',
+          old_value: JSON.stringify(before.times),
+          new_value: JSON.stringify(after.times),
           changed_by: authUserId,
           changed_by_name: changedByName,
         });

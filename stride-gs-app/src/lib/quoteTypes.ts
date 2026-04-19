@@ -13,11 +13,12 @@ export interface ServiceRate {
   M: number;
   L: number;
   XL: number;
+  XXL?: number; // session 73 — added to support MPL-sourced XXL rates
 }
 
 export type ServiceUnit = 'per_item' | 'per_day' | 'per_task' | 'per_hour';
 export type ServiceBilling = 'class_based' | 'flat';
-export type ServiceCategory = 'Warehouse' | 'Storage' | 'Shipping' | 'Assembly' | 'Repair' | 'Labor' | 'Admin';
+export type ServiceCategory = 'Warehouse' | 'Storage' | 'Shipping' | 'Assembly' | 'Repair' | 'Labor' | 'Admin' | 'Delivery';
 
 export interface ServiceDef {
   id: string;

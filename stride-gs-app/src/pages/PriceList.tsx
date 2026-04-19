@@ -10,12 +10,13 @@
  * local store). Future phases will migrate Quote Tool to read from here.
  */
 import { useMemo, useState } from 'react';
-import { Plus, Search, Tag } from 'lucide-react';
+import { Plus, Search, Tag, Download } from 'lucide-react';
 import { theme } from '../styles/theme';
 import { useServiceCatalog, type CatalogService, type ServiceCategory } from '../hooks/useServiceCatalog';
 import { ServiceCard } from '../components/pricelist/ServiceCard';
 import { ServiceEditPanel } from '../components/pricelist/ServiceEditPanel';
 import { AddServiceModal } from '../components/pricelist/AddServiceModal';
+import { downloadPriceListExcel } from '../components/pricelist/exportPriceListExcel';
 
 const ALL_CATEGORIES: ServiceCategory[] = [
   'Warehouse', 'Storage', 'Shipping', 'Assembly',
@@ -80,18 +81,39 @@ export function PriceList() {
             Unified catalog of services, rates, and where they show up across the app.
           </div>
         </div>
-        <button
-          onClick={() => setShowAdd(true)}
-          style={{
-            display: 'flex', alignItems: 'center', gap: 6,
-            padding: '10px 20px', borderRadius: v2.radius.button,
-            background: v2.colors.accent, border: 'none', color: '#fff',
-            cursor: 'pointer', fontSize: 11, fontWeight: 600, letterSpacing: '1.5px',
-            textTransform: 'uppercase', fontFamily: 'inherit',
-          }}
-        >
-          <Plus size={14} /> Add service
-        </button>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          <button
+            onClick={() => downloadPriceListExcel(services)}
+            disabled={services.length === 0}
+            title="Download a formatted Excel workbook of all services"
+            style={{
+              display: 'flex', alignItems: 'center', gap: 6,
+              padding: '10px 20px', borderRadius: v2.radius.button,
+              background: 'transparent', border: `1px solid ${v2.colors.border}`,
+              color: services.length === 0 ? v2.colors.textMuted : v2.colors.text,
+              cursor: services.length === 0 ? 'not-allowed' : 'pointer',
+              fontSize: 11, fontWeight: 600, letterSpacing: '1.5px',
+              textTransform: 'uppercase', fontFamily: 'inherit',
+              transition: 'background 0.15s',
+            }}
+            onMouseEnter={e => { if (services.length > 0) e.currentTarget.style.background = v2.colors.bgCard; }}
+            onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}
+          >
+            <Download size={14} /> Download Excel
+          </button>
+          <button
+            onClick={() => setShowAdd(true)}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 6,
+              padding: '10px 20px', borderRadius: v2.radius.button,
+              background: v2.colors.accent, border: 'none', color: '#fff',
+              cursor: 'pointer', fontSize: 11, fontWeight: 600, letterSpacing: '1.5px',
+              textTransform: 'uppercase', fontFamily: 'inherit',
+            }}
+          >
+            <Plus size={14} /> Add service
+          </button>
+        </div>
       </div>
 
       {/* Loading / Error */}

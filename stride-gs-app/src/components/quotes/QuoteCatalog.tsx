@@ -1,8 +1,14 @@
-import { useState, useMemo } from 'react';
-import { Plus, Pencil, Trash2, Search } from 'lucide-react';
+/**
+ * QuoteCatalog — READ-ONLY view of the Supabase service catalog.
+ *
+ * Session 73: edits happen on /price-list (admin-only). This tab now
+ * just shows what services and rates the Quote Tool will use, with a
+ * button to jump to /price-list for edits.
+ */
+import { useMemo, useState } from 'react';
+import { Search, ExternalLink, CloudOff } from 'lucide-react';
+import { Link } from 'react-router-dom';
 import { theme } from '../../styles/theme';
-import { QuoteServiceModal } from './QuoteServiceModal';
-import type { ServiceDef } from '../../lib/quoteTypes';
 import type { useQuoteStore } from '../../hooks/useQuoteStore';
 
 const v = theme.v2;
@@ -12,12 +18,14 @@ interface Props { store: Store }
 
 export function QuoteCatalog({ store }: Props) {
   const [search, setSearch] = useState('');
-  const [editSvc, setEditSvc] = useState<ServiceDef | null | 'new'>(null);
 
   const filtered = useMemo(() => {
     const s = search.toLowerCase();
     return store.catalog.services.filter(svc =>
-      !s || svc.name.toLowerCase().includes(s) || svc.code.toLowerCase().includes(s) || svc.category.toLowerCase().includes(s)
+      !s
+        || svc.name.toLowerCase().includes(s)
+        || svc.code.toLowerCase().includes(s)
+        || svc.category.toLowerCase().includes(s)
     );
   }, [store.catalog.services, search]);
 
@@ -31,29 +39,69 @@ export function QuoteCatalog({ store }: Props) {
     borderBottom: `1px solid ${v.table.rowBorder}`,
   };
 
+  const fromFallback = store.catalogSource === 'fallback';
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-        <div style={{ position: 'relative', flex: 1, minWidth: 200 }}>
-          <Search size={14} style={{ position: 'absolute', left: 14, top: '50%', transform: 'translateY(-50%)', color: v.colors.textMuted }} />
-          <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search services..."
-            style={{ width: '100%', padding: '10px 14px 10px 38px', fontSize: 13, border: `1px solid ${v.colors.border}`, borderRadius: v.radius.input, fontFamily: 'inherit', outline: 'none', boxSizing: 'border-box', background: v.colors.bgWhite }} />
+      {/* Banner explaining where the data comes from */}
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 12,
+        padding: '14px 18px',
+        background: fromFallback ? 'rgba(200,160,40,0.10)' : v.colors.bgWhite,
+        border: `1px solid ${fromFallback ? 'rgba(200,160,40,0.35)' : v.colors.border}`,
+        borderRadius: v.radius.card, fontSize: 13, color: v.colors.text,
+      }}>
+        {fromFallback ? (
+          <CloudOff size={16} style={{ color: '#B08810', flexShrink: 0 }} />
+        ) : (
+          <div style={{ width: 8, height: 8, borderRadius: '50%', background: v.colors.statusAccepted.text, flexShrink: 0 }} />
+        )}
+        <div style={{ flex: 1, lineHeight: 1.5 }}>
+          {fromFallback ? (
+            <>
+              <strong>Showing offline defaults.</strong> The Supabase service catalog couldn&rsquo;t be loaded — the Quote
+              Tool is using the built-in fallback services. Edits below are disabled.
+            </>
+          ) : (
+            <>
+              <strong>Services load from the central Price List.</strong> To edit codes, rates, taxability, or add/remove
+              services, use the Price List page. Changes propagate to every quote immediately.
+            </>
+          )}
         </div>
-        <button onClick={() => setEditSvc('new')} style={{
-          ...v.typography.buttonPrimary, display: 'flex', alignItems: 'center', gap: 8,
-          padding: '10px 24px', border: 'none', borderRadius: v.radius.button,
-          background: v.colors.accent, color: v.colors.textOnDark, cursor: 'pointer', fontFamily: 'inherit',
-        }}>
-          <Plus size={14} /> ADD SERVICE
-        </button>
+        <Link
+          to="/price-list"
+          style={{
+            display: 'inline-flex', alignItems: 'center', gap: 6,
+            padding: '8px 16px', borderRadius: v.radius.button,
+            background: v.colors.bgDark, color: v.colors.textOnDark,
+            fontSize: 11, fontWeight: 600, letterSpacing: '1.5px', textTransform: 'uppercase',
+            textDecoration: 'none', fontFamily: 'inherit', whiteSpace: 'nowrap',
+          }}
+        >
+          Open Price List <ExternalLink size={12} />
+        </Link>
       </div>
 
+      {/* Search */}
+      <div style={{ position: 'relative', maxWidth: 420 }}>
+        <Search size={14} style={{ position: 'absolute', left: 14, top: '50%', transform: 'translateY(-50%)', color: v.colors.textMuted }} />
+        <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search services..."
+          style={{ width: '100%', padding: '10px 14px 10px 38px', fontSize: 13, border: `1px solid ${v.colors.border}`, borderRadius: v.radius.input, fontFamily: 'inherit', outline: 'none', boxSizing: 'border-box', background: v.colors.bgWhite }} />
+      </div>
+
+      {/* Table */}
       <div style={{ background: v.colors.bgWhite, borderRadius: v.radius.table, overflow: 'auto' }}>
         <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 700 }}>
           <thead><tr>
-            <th style={thStyle}>Code</th><th style={thStyle}>Name</th><th style={thStyle}>Category</th>
-            <th style={thStyle}>Unit</th><th style={thStyle}>Billing</th><th style={thStyle}>Rate</th>
-            <th style={{ ...thStyle, textAlign: 'center' }}>Active</th><th style={{ ...thStyle, width: 80 }}></th>
+            <th style={thStyle}>Code</th>
+            <th style={thStyle}>Name</th>
+            <th style={thStyle}>Category</th>
+            <th style={thStyle}>Unit</th>
+            <th style={thStyle}>Billing</th>
+            <th style={thStyle}>Rate</th>
+            <th style={{ ...thStyle, textAlign: 'center' }}>Matrix</th>
+            <th style={{ ...thStyle, textAlign: 'center' }}>Active</th>
           </tr></thead>
           <tbody>
             {filtered.map(svc => (
@@ -71,33 +119,37 @@ export function QuoteCatalog({ store }: Props) {
                 </td>
                 <td style={{ ...tdStyle, fontVariantNumeric: 'tabular-nums' }}>
                   {svc.billing === 'flat' ? `$${svc.flatRate.toFixed(2)}` : (
-                    <div style={{ display: 'flex', gap: 4 }}>
-                      {(['XS', 'S', 'M', 'L', 'XL'] as const).map(cls => (
-                        <span key={cls} style={{ fontSize: 10, padding: '2px 5px', borderRadius: v.radius.chip, background: v.colors.bgPage, color: v.colors.textSecondary }}>
-                          {cls}:${svc.rates[cls]}
-                        </span>
-                      ))}
+                    <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                      {(['XS', 'S', 'M', 'L', 'XL', 'XXL'] as const).map(cls => {
+                        const r = svc.rates[cls];
+                        if (r == null || r === 0) return null;
+                        return (
+                          <span key={cls} style={{ fontSize: 10, padding: '2px 5px', borderRadius: v.radius.chip, background: v.colors.bgPage, color: v.colors.textSecondary }}>
+                            {cls}:${r}
+                          </span>
+                        );
+                      })}
                     </div>
                   )}
                 </td>
-                <td style={{ ...tdStyle, textAlign: 'center' }}>
-                  <input type="checkbox" checked={svc.active} onChange={e => store.updateService(svc.id, { active: e.target.checked })} style={{ accentColor: v.colors.accent }} />
+                <td style={{ ...tdStyle, textAlign: 'center', color: v.colors.textSecondary }}>
+                  {svc.showInMatrix ? '✓' : '—'}
                 </td>
-                <td style={{ ...tdStyle, display: 'flex', gap: 6 }}>
-                  <button onClick={() => setEditSvc(svc)} style={{ border: 'none', background: 'none', cursor: 'pointer', color: v.colors.textSecondary, padding: 4 }}><Pencil size={13} /></button>
-                  <button onClick={() => { if (confirm(`Delete "${svc.name}"?`)) store.deleteService(svc.id); }} style={{ border: 'none', background: 'none', cursor: 'pointer', color: v.colors.statusDeclined.text, padding: 4 }}><Trash2 size={13} /></button>
+                <td style={{ ...tdStyle, textAlign: 'center', color: v.colors.textSecondary }}>
+                  {svc.active ? '✓' : '—'}
                 </td>
               </tr>
             ))}
+            {filtered.length === 0 && (
+              <tr>
+                <td colSpan={8} style={{ ...tdStyle, textAlign: 'center', padding: 40, color: v.colors.textMuted }}>
+                  {store.catalogLoading ? 'Loading services…' : 'No services match your search.'}
+                </td>
+              </tr>
+            )}
           </tbody>
         </table>
       </div>
-
-      {editSvc !== null && (
-        <QuoteServiceModal service={editSvc === 'new' ? null : editSvc}
-          onSave={svc => { if (editSvc === 'new') store.addService(svc); else store.updateService(svc.id, svc); setEditSvc(null); }}
-          onClose={() => setEditSvc(null)} />
-      )}
     </div>
   );
 }

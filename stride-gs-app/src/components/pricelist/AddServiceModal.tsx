@@ -46,7 +46,8 @@ export function AddServiceModal({ existingCodes, nextDisplayOrder, onClose, onCr
       name: name.trim(),
       category,
       billing,
-      rates: billing === 'class_based' ? { XS: 0, S: 0, M: 0, L: 0, XL: 0 } : {},
+      rates: billing === 'class_based' ? { XS: 0, S: 0, M: 0, L: 0, XL: 0, XXL: 0 } : {},
+      xxlRate: 0,
       flatRate: billing === 'flat' ? flatRate : 0,
       unit,
       taxable: true,
@@ -60,6 +61,9 @@ export function AddServiceModal({ existingCodes, nextDisplayOrder, onClose, onCr
       defaultPriority: null,
       hasDedicatedPage: false,
       displayOrder: nextDisplayOrder,
+      billIfPass: true,
+      billIfFail: true,
+      times: {},
     };
     const created = await onCreate(input);
     setSaving(false);

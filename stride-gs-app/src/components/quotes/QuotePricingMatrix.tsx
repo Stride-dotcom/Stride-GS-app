@@ -69,7 +69,7 @@ export function QuotePricingMatrix({ quote, services, classes, onChange }: Props
                 {activeClasses.map(cls => {
                   const key = `${cls.id}:${svc.id}`;
                   const cell = quote.matrixCells[key];
-                  const rate = svc.billing === 'class_based' ? svc.rates[cls.id as keyof typeof svc.rates] : svc.flatRate;
+                  const rate = svc.billing === 'class_based' ? (svc.rates[cls.id as keyof typeof svc.rates] ?? 0) : svc.flatRate;
                   return (
                     <td key={cls.id} style={{ ...td, cursor: 'pointer', background: cell?.selected ? 'rgba(74,138,92,0.08)' : undefined }}
                       onClick={() => toggleCell(cls.id, svc.id)}>
