@@ -8,13 +8,22 @@ const CARRIERS = [
   'Unknown', 'UPS', 'FedEx', 'USPS', 'Freight-LTL', 'White Glove', 'Client Drop-off', 'Other',
 ];
 
-type EntryPayload = Omit<ExpectedShipment, 'id' | 'createdBy' | 'createdAt'>;
+export interface ExpectedShipmentSavePayload {
+  client: string;
+  clientSheetId: string;         // required — the modal resolves this from the typed name before save
+  vendor?: string;
+  carrier: string;
+  tracking?: string;
+  expectedDate: string;
+  pieces?: number;
+  notes?: string;
+}
 
 interface Props {
   onClose: () => void;
-  onSave: (entry: EntryPayload) => void;
+  onSave: (entry: ExpectedShipmentSavePayload) => Promise<boolean> | boolean | void;
   editingEvent?: ExpectedShipment;
-  onDelete?: (id: string) => void;
+  onDelete?: (id: string) => Promise<boolean> | boolean | void;
 }
 
 export function AddExpectedModal({ onClose, onSave, editingEvent, onDelete }: Props) {
@@ -32,6 +41,8 @@ export function AddExpectedModal({ onClose, onSave, editingEvent, onDelete }: Pr
   const [pieces, setPieces] = useState(editingEvent?.pieces != null ? String(editingEvent.pieces) : '');
   const [notes, setNotes] = useState(editingEvent?.notes ?? '');
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [validationError, setValidationError] = useState<string | null>(null);
 
   const accessibleClients = useMemo(() => {
     if (user?.role === 'client' && user.accessibleClientNames?.length) {
@@ -49,19 +60,65 @@ export function AddExpectedModal({ onClose, onSave, editingEvent, onDelete }: Pr
 
   const canSave = client.trim().length > 0 && expectedDate.length > 0;
 
-  const handleSave = () => {
+  const handleSave = async () => {
     if (!canSave) return;
-    onSave({
-      client: client.trim(),
-      clientSheetId,
-      vendor: vendor.trim(),
-      carrier,
-      tracking: tracking.trim() || undefined,
-      expectedDate,
-      pieces: pieces ? Number(pieces) : undefined,
-      notes: notes.trim() || undefined,
-    });
-    onClose();
+
+    // Resolve clientSheetId from the typed name if the user didn't pick
+    // a dropdown suggestion. Required by RLS on expected_shipments.
+    const typedName = client.trim();
+    let resolvedSheetId = clientSheetId;
+    if (!resolvedSheetId) {
+      const match = accessibleClients.find(
+        c => c.name.trim().toLowerCase() === typedName.toLowerCase()
+      );
+      resolvedSheetId = match?.spreadsheetId;
+    }
+    if (!resolvedSheetId) {
+      setValidationError('Pick a client from the dropdown — free text not allowed.');
+      return;
+    }
+    setValidationError(null);
+    setSaving(true);
+    try {
+      const result = await onSave({
+        client: typedName,
+        clientSheetId: resolvedSheetId,
+        vendor: vendor.trim() || undefined,
+        carrier,
+        tracking: tracking.trim() || undefined,
+        expectedDate,
+        pieces: pieces ? Number(pieces) : undefined,
+        notes: notes.trim() || undefined,
+      });
+      // If the hook returned false/null, keep the modal open so user
+      // can retry. If it returned true/void, close.
+      if (result === false) {
+        setValidationError('Save failed — check connection and retry.');
+        return;
+      }
+      onClose();
+    } catch (err) {
+      setValidationError(err instanceof Error ? err.message : 'Save failed');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleDelete = async () => {
+    if (!editingEvent || !onDelete) return;
+    setSaving(true);
+    try {
+      const result = await onDelete(editingEvent.id);
+      if (result === false) {
+        setValidationError('Delete failed — check connection and retry.');
+        return;
+      }
+      onClose();
+    } catch (err) {
+      setValidationError(err instanceof Error ? err.message : 'Delete failed');
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
@@ -153,20 +210,26 @@ export function AddExpectedModal({ onClose, onSave, editingEvent, onDelete }: Pr
           />
         </Field>
 
+        {validationError && (
+          <div style={{ padding: '8px 12px', marginBottom: 12, background: '#FEF2F2', border: '1px solid #FECACA', color: '#991B1B', fontSize: 12, borderRadius: 8 }}>
+            {validationError}
+          </div>
+        )}
+
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, marginTop: 20 }}>
           <div>
             {isEdit && onDelete && editingEvent && (
               <button
                 onClick={() => {
                   if (confirmDelete) {
-                    onDelete(editingEvent.id);
-                    onClose();
+                    handleDelete();
                   } else {
                     setConfirmDelete(true);
                     setTimeout(() => setConfirmDelete(false), 3000);
                   }
                 }}
-                style={confirmDelete ? btnDangerConfirm : btnDanger}
+                disabled={saving}
+                style={{ ...(confirmDelete ? btnDangerConfirm : btnDanger), opacity: saving ? 0.6 : 1, cursor: saving ? 'wait' : 'pointer' }}
               >
                 <Trash2 size={13} style={{ marginRight: 6, verticalAlign: '-2px' }} />
                 {confirmDelete ? 'Confirm Delete' : 'Delete'}
@@ -174,9 +237,13 @@ export function AddExpectedModal({ onClose, onSave, editingEvent, onDelete }: Pr
             )}
           </div>
           <div style={{ display: 'flex', gap: 10 }}>
-            <button onClick={onClose} style={btnGhost}>Cancel</button>
-            <button onClick={handleSave} disabled={!canSave} style={{ ...btnPrimary, opacity: canSave ? 1 : 0.5, cursor: canSave ? 'pointer' : 'not-allowed' }}>
-              {isEdit ? 'Save Changes' : 'Add to Calendar'}
+            <button onClick={onClose} disabled={saving} style={{ ...btnGhost, opacity: saving ? 0.6 : 1, cursor: saving ? 'not-allowed' : 'pointer' }}>Cancel</button>
+            <button
+              onClick={handleSave}
+              disabled={!canSave || saving}
+              style={{ ...btnPrimary, opacity: (!canSave || saving) ? 0.5 : 1, cursor: (!canSave || saving) ? 'not-allowed' : 'pointer' }}
+            >
+              {saving ? 'Saving\u2026' : (isEdit ? 'Save Changes' : 'Add to Calendar')}
             </button>
           </div>
         </div>

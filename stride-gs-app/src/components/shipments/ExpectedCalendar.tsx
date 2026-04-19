@@ -37,7 +37,7 @@ export function ExpectedCalendar() {
   const [toast, setToast] = useState<string | null>(null);
 
   const { events, loading } = useCalendarEvents();
-  const { items: expectedItems, add: addExpected, update: updateExpected, remove: removeExpected } = useExpectedShipments();
+  const { items: expectedItems, add: addExpected, update: updateExpected, remove: removeExpected, error: expectedError } = useExpectedShipments();
   const { apiClients } = useClients();
   const navigate = useNavigate();
 
@@ -210,7 +210,11 @@ export function ExpectedCalendar() {
       {showAdd && (
         <AddExpectedModal
           onClose={() => setShowAdd(false)}
-          onSave={(entry) => { addExpected(entry); setToast('Expected shipment added'); }}
+          onSave={async (entry) => {
+            const created = await addExpected(entry);
+            if (created) { setToast('Expected shipment added'); return true; }
+            return false;
+          }}
         />
       )}
 
@@ -219,9 +223,28 @@ export function ExpectedCalendar() {
           key={editingEvent.id}
           editingEvent={editingEvent}
           onClose={() => setEditingEvent(null)}
-          onSave={(entry) => { updateExpected(editingEvent.id, entry); setToast('Expected shipment updated'); }}
-          onDelete={(id) => { removeExpected(id); setToast('Expected shipment deleted'); }}
+          onSave={async (entry) => {
+            const ok = await updateExpected(editingEvent.id, entry);
+            if (ok) { setToast('Expected shipment updated'); return true; }
+            return false;
+          }}
+          onDelete={async (id) => {
+            const ok = await removeExpected(id);
+            if (ok) { setToast('Expected shipment deleted'); return true; }
+            return false;
+          }}
         />
+      )}
+
+      {expectedError && !toast && (
+        <div style={{
+          position: 'fixed', bottom: 28, left: '50%', transform: 'translateX(-50%)',
+          background: '#B45A5A', color: '#fff', padding: '10px 20px', borderRadius: 100,
+          fontSize: 12, fontWeight: 500, boxShadow: '0 8px 32px rgba(0,0,0,0.3)', zIndex: 10001,
+          maxWidth: 520,
+        }}>
+          {expectedError}
+        </div>
       )}
 
       {toast && (
