@@ -10,8 +10,9 @@ import {
 import {
   Search, Download, ChevronUp, ChevronDown, ChevronRight, ArrowUpDown,
   Settings2, FileText, DollarSign, Send, Eye, ExternalLink,
-  CheckCircle, AlertTriangle, Loader2, Pencil, X, RefreshCw, Plus,
+  CheckCircle, AlertTriangle, Loader2, Pencil, X, RefreshCw, Plus, Scale,
 } from 'lucide-react';
+import { ParityMonitor } from './ParityMonitor';
 import { useVirtualRows } from '../hooks/useVirtualRows';
 import { theme } from '../styles/theme';
 import { fmtDate } from '../lib/constants';
@@ -305,7 +306,7 @@ export function Billing() {
   const { connected: qboConnected, pushInvoice: qboPushInvoice } = useQBO();
 
   // ─── Top-level tab state ──────────────────────────────────────────────────
-  const [activeTab, setActiveTab] = useState<'report' | 'storage' | 'review'>('report');
+  const [activeTab, setActiveTab] = useState<'report' | 'storage' | 'review' | 'parity'>('report');
 
   // ─── Service list from Master Price List (dynamic, not hardcoded) ─────────
   const { priceList } = usePricing(apiConfigured);
@@ -1561,7 +1562,13 @@ export function Billing() {
         <button onClick={() => setActiveTab('report')} style={tabChip(activeTab === 'report')}><FileText size={14} /> Billing Report</button>
         <button onClick={() => setActiveTab('storage')} style={tabChip(activeTab === 'storage')}><Eye size={14} /> Storage Charges</button>
         <button onClick={() => setActiveTab('review')} style={tabChip(activeTab === 'review')}><DollarSign size={14} /> Invoice Review</button>
+        <button onClick={() => setActiveTab('parity')} style={tabChip(activeTab === 'parity')}><Scale size={14} /> Rate Parity</button>
       </div>
+
+      {/* ═══════════════════════════════════════════════════════════════════════
+          TAB: Rate Parity — MPL sheet vs Supabase service catalog diff
+         ═══════════════════════════════════════════════════════════════════════ */}
+      {activeTab === 'parity' && <ParityMonitor />}
 
       {/* ═══════════════════════════════════════════════════════════════════════
            TAB: Invoice Review

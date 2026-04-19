@@ -770,6 +770,53 @@ export function syncPriceListFromSupabase(signal?: AbortSignal) {
   return apiFetch<SyncPriceListResponse>('syncPriceListFromSupabase', undefined, { signal });
 }
 
+// ─── Pricing Parity Monitor (v38.81.0, admin-only) ──────────────────────────
+export type ParityClass = 'XS' | 'S' | 'M' | 'L' | 'XL' | 'XXL';
+export type ParityClassRates = Record<ParityClass, number>;
+
+export interface ParityServiceSide {
+  rates: ParityClassRates;
+  flatRate: number;
+  active: boolean;
+}
+
+export interface ParityService {
+  code: string;
+  name: string;
+  category: string;
+  billing: 'class_based' | 'flat' | string;
+  /** 'both' | 'sheet' | 'supabase' — which sources the service appears in */
+  source: 'both' | 'sheet' | 'supabase';
+  active: boolean;
+  sheet: ParityServiceSide | null;
+  supabase: ParityServiceSide | null;
+  match: boolean;
+}
+
+export interface ParityClassVolumes {
+  sheet: Partial<Record<ParityClass, number>>;
+  supabase: Partial<Record<ParityClass, number>>;
+  match: boolean;
+}
+
+export interface PricingParityResponse {
+  services: ParityService[];
+  classVolumes: ParityClassVolumes;
+  summary: {
+    total: number;
+    matching: number;
+    mismatched: number;
+    sheetOnly: number;
+    supabaseOnly: number;
+  };
+  supabaseReachable: boolean;
+  generatedAt: string;
+}
+
+export function fetchPricingParity(signal?: AbortSignal) {
+  return apiFetch<PricingParityResponse>('getPricingParity', undefined, { signal });
+}
+
 /** Session 70 fix #2 — Payment terms from CB Payment_Terms tab. */
 export function fetchPaymentTerms(signal?: AbortSignal) {
   return apiFetch<PaymentTermsResponse>('getPaymentTerms', undefined, { signal });

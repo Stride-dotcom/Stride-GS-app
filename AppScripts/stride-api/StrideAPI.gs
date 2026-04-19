@@ -1,5 +1,11 @@
 /* ===================================================
-   StrideAPI.gs — v38.80.0 — 2026-04-19 PST — Phase 5 SHADOW MODE (sheet primary, Supabase compare-only)
+   StrideAPI.gs — v38.81.0 — 2026-04-19 PST — Pricing Parity Monitor endpoint
+   v38.81.0: NEW endpoint getPricingParity (admin) — side-by-side comparison
+             of every service rate from MPL Price_List vs Supabase
+             service_catalog, plus Class_Map vs item_classes. Returns
+             per-service class-rate + flat-rate deltas with a summary count
+             (total/matching/mismatched/sheetOnly/supabaseOnly). Feeds the
+             new ParityMonitor page. Read-only; no side effects.
    v38.80.0: URGENT FLIP. api_lookupRate_, api_loadClassVolumes_, and
              handleGetPricing_ are all back to SHEET-PRIMARY. The Supabase
              helpers added in v38.79.0 still run on every call but now
@@ -3826,6 +3832,7 @@ function doGet(e) {
       case "getClients":      return handleGetClientsAuthed_(callerEmail, params.includeInactive === "1");
       case "getPricing":      return withActiveUserGuard_(callerEmail, function() { return handleGetPricing_(); });
       case "syncPriceListFromSupabase": return handleSyncPriceListFromSupabase_(params, callerEmail);
+      case "getPricingParity": return withActiveUserGuard_(callerEmail, function() { return handleGetPricingParity_(); });
       case "getLocations":    return withActiveUserGuard_(callerEmail, function() { return handleGetLocations_(); });
       case "getPaymentTerms": return withActiveUserGuard_(callerEmail, function() { return handleGetPaymentTerms_(); });
 
@@ -6250,6 +6257,188 @@ function handleGetClients_(scopeIds, includeInactive) {
  *   4. Invalidate the api_pricing CacheService entry so the next
  *      handleGetPricing_ call reflects the new data.
  */
+/**
+ * v38.79.0 — Pricing Parity Monitor.
+ * Returns a side-by-side comparison of every service rate from MPL Price_List
+ * vs Supabase service_catalog, plus Class_Map vs item_classes. Admin-only —
+ * callers should verify role before exposing this data.
+ *
+ * Match rule: for class-based services, every per-class rate (XS, S, M, L,
+ * XL, XXL) must be equal within 0.001 tolerance; for flat services, flatRate
+ * must match within the same tolerance. Inactive rows are included — the UI
+ * shows all rows and lets the admin filter.
+ *
+ * Response shape matches React's ParityMonitor expectations. Returns a
+ * structured error if either source is unreachable (so the UI can render
+ * a "degraded" state instead of blank).
+ */
+function handleGetPricingParity_() {
+  var CLASSES = ["XS", "S", "M", "L", "XL", "XXL"];
+
+  var mplId = prop_("MASTER_PRICE_LIST_SPREADSHEET_ID");
+  if (!mplId) return errorResponse_("MASTER_PRICE_LIST_SPREADSHEET_ID not configured", "CONFIG_ERROR");
+
+  // ── 1. MPL sheet read ───────────────────────────────────────────────────
+  var ss = SpreadsheetApp.openById(mplId);
+  var priceSheet = ss.getSheetByName("Price_List");
+  var classSheet = ss.getSheetByName("Class_Map");
+  var priceRows  = priceSheet ? sheetToObjects_(priceSheet) : [];
+  var classRows  = classSheet ? sheetToObjects_(classSheet) : [];
+
+  var sheetByCode = {};
+  for (var i = 0; i < priceRows.length; i++) {
+    var r = priceRows[i];
+    var code = String(r["Service Code"] || "").trim().toUpperCase();
+    if (!code) continue;
+    var ratesByClass = {};
+    for (var c = 0; c < CLASSES.length; c++) {
+      var k = CLASSES[c];
+      ratesByClass[k] = Number(r[k + " Rate"]) || 0;
+    }
+    sheetByCode[code] = {
+      code: code,
+      name: String(r["Service Name"] || ""),
+      category: String(r["Category"] || ""),
+      active: r["Active"] === true || String(r["Active"]).toUpperCase() === "TRUE",
+      flatRate: Number(r["Flat Rate"] || 0),
+      rates: ratesByClass
+    };
+  }
+
+  var sheetVolumes = {};
+  for (var ci = 0; ci < classRows.length; ci++) {
+    var cr = classRows[ci];
+    var className = String(cr["Class"] || "").trim().toUpperCase();
+    if (!className) continue;
+    sheetVolumes[className] = Number(cr["Cubic Volume"]) || 0;
+  }
+
+  // ── 2. Supabase read ────────────────────────────────────────────────────
+  var sbSvcs = api_supabaseGet_(
+    "/rest/v1/service_catalog?select=code,name,category,billing,rates,flat_rate,xxl_rate,active,display_order&order=display_order.asc"
+  );
+  var sbClasses = api_supabaseGet_(
+    "/rest/v1/item_classes?select=name,storage_size,active&active=eq.true"
+  );
+  var supabaseReachable = sbSvcs !== null && sbClasses !== null;
+
+  var supabaseByCode = {};
+  if (sbSvcs) {
+    for (var si = 0; si < sbSvcs.length; si++) {
+      var s = sbSvcs[si];
+      var sCode = String(s.code || "").trim().toUpperCase();
+      if (!sCode) continue;
+      var sRates = s.rates || {};
+      var ratesByClassSb = {};
+      for (var c2 = 0; c2 < CLASSES.length; c2++) {
+        var k2 = CLASSES[c2];
+        // XXL uses xxl_rate column first, then rates.XXL as fallback
+        if (k2 === "XXL") ratesByClassSb[k2] = Number(s.xxl_rate || sRates.XXL || 0);
+        else ratesByClassSb[k2] = Number(sRates[k2] || 0);
+      }
+      supabaseByCode[sCode] = {
+        code: sCode,
+        name: String(s.name || ""),
+        category: String(s.category || ""),
+        billing: String(s.billing || "class_based"),
+        active: s.active !== false,
+        flatRate: Number(s.flat_rate || 0),
+        rates: ratesByClassSb
+      };
+    }
+  }
+
+  var supabaseVolumes = {};
+  if (sbClasses) {
+    for (var sci = 0; sci < sbClasses.length; sci++) {
+      var sc = sbClasses[sci];
+      var scName = String(sc.name || "").trim().toUpperCase();
+      if (!scName) continue;
+      supabaseVolumes[scName] = Number(sc.storage_size) || 0;
+    }
+  }
+
+  // ── 3. Merge + compare ──────────────────────────────────────────────────
+  var allCodes = {};
+  for (var shCode in sheetByCode)    allCodes[shCode] = true;
+  for (var sbCode in supabaseByCode) allCodes[sbCode] = true;
+
+  function ratesEqual_(a, b) {
+    if (!a || !b) return false;
+    for (var ci2 = 0; ci2 < CLASSES.length; ci2++) {
+      var kk = CLASSES[ci2];
+      if (Math.abs((a[kk] || 0) - (b[kk] || 0)) > 0.001) return false;
+    }
+    return true;
+  }
+  function flatEqual_(a, b) {
+    return Math.abs((a || 0) - (b || 0)) < 0.001;
+  }
+
+  var services = [];
+  var codes = Object.keys(allCodes).sort();
+  var matching = 0, mismatched = 0, sheetOnly = 0, supabaseOnly = 0;
+
+  for (var ac = 0; ac < codes.length; ac++) {
+    var codeAc = codes[ac];
+    var sh = sheetByCode[codeAc]    || null;
+    var sb = supabaseByCode[codeAc] || null;
+
+    var source = sh && sb ? "both" : sh ? "sheet" : "supabase";
+    var match;
+    if (!sh || !sb) match = false;
+    else {
+      // For flat services, compare flatRate; for class-based, compare all classes.
+      if (sb.billing === "flat") match = flatEqual_(sh.flatRate, sb.flatRate);
+      else match = ratesEqual_(sh.rates, sb.rates);
+    }
+
+    if (!sh) supabaseOnly++;
+    else if (!sb) sheetOnly++;
+    else if (match) matching++;
+    else mismatched++;
+
+    services.push({
+      code: codeAc,
+      name: (sb && sb.name) || (sh && sh.name) || codeAc,
+      category: (sb && sb.category) || (sh && sh.category) || "",
+      billing: (sb && sb.billing) || "class_based",
+      source: source,
+      active: sb ? sb.active : (sh ? sh.active : false),
+      sheet: sh ? { rates: sh.rates, flatRate: sh.flatRate, active: sh.active } : null,
+      supabase: sb ? { rates: sb.rates, flatRate: sb.flatRate, active: sb.active } : null,
+      match: match
+    });
+  }
+
+  // Class volumes comparison
+  var volMatch = true;
+  for (var cvi = 0; cvi < CLASSES.length; cvi++) {
+    var cvk = CLASSES[cvi];
+    if (Math.abs((sheetVolumes[cvk] || 0) - (supabaseVolumes[cvk] || 0)) > 0.001) {
+      volMatch = false; break;
+    }
+  }
+
+  return jsonResponse_({
+    services: services,
+    classVolumes: {
+      sheet: sheetVolumes,
+      supabase: supabaseVolumes,
+      match: volMatch
+    },
+    summary: {
+      total: services.length,
+      matching: matching,
+      mismatched: mismatched,
+      sheetOnly: sheetOnly,
+      supabaseOnly: supabaseOnly
+    },
+    supabaseReachable: supabaseReachable,
+    generatedAt: new Date().toISOString()
+  });
+}
+
 function handleSyncPriceListFromSupabase_(params, callerEmail) {
   try { rateLimit_("syncPriceList_" + callerEmail, 10); } catch(e) { return errorResponse_(String(e.message), "RATE_LIMIT"); }
 
