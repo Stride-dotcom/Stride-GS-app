@@ -2,7 +2,7 @@ import React, { useState, useRef, useCallback, useEffect, useMemo } from 'react'
 import { X, Package, Calendar, FileText, ClipboardList, Wrench, Truck, ExternalLink, DollarSign, Ship, AlertCircle, MapPin, CheckCircle2, Pencil, Save, Loader2, FolderOpen } from 'lucide-react';
 import { FolderButton } from './FolderButton';
 import { DetailHeader } from './DetailHeader';
-import { EntityHistory } from './EntityHistory';
+import { supabase } from '../../lib/supabase';
 import { LinkifiedText } from './LinkifiedText';
 import { AutocompleteInput } from './AutocompleteInput';
 import { theme } from '../../styles/theme';
@@ -288,9 +288,59 @@ const SERVICE_CODES: Record<string, string> = {
 
 const STATUS_OPTIONS: InventoryStatus[] = ['Active', 'On Hold', 'Released', 'Transferred'];
 
+// ─── Audit entry sub-timeline ─────────────────────────────────────────────────
+
+const AUDIT_ACTION_LABELS: Record<string, { label: string; color: string }> = {
+  create: { label: 'Created', color: '#15803D' },
+  update: { label: 'Updated', color: '#1D4ED8' },
+  start: { label: 'Started', color: '#E85D2D' },
+  complete: { label: 'Completed', color: '#15803D' },
+  cancel: { label: 'Cancelled', color: '#DC2626' },
+  release: { label: 'Released', color: '#7C3AED' },
+  transfer: { label: 'Transferred', color: '#0891B2' },
+  assign: { label: 'Assigned', color: '#B45309' },
+  status_change: { label: 'Status Changed', color: '#6D28D9' },
+};
+
+interface AuditEntry {
+  id: string; action: string; changes: Record<string, unknown>;
+  performed_by: string; performed_at: string;
+}
+
+function AuditSubTimeline({ entries }: { entries: AuditEntry[] }) {
+  if (!entries.length) return null;
+  return (
+    <div style={{ marginLeft: 12, borderLeft: `1px solid #E2E8F0`, paddingLeft: 10, marginTop: 4, marginBottom: 4 }}>
+      {entries.map(e => {
+        const cfg = AUDIT_ACTION_LABELS[e.action] || { label: e.action, color: '#6B7280' };
+        const who = e.performed_by ? e.performed_by.split('@')[0] : 'System';
+        let detail = '';
+        if (e.changes) {
+          if (e.changes.summary) detail = String(e.changes.summary);
+          else if (e.changes.status && typeof e.changes.status === 'object') {
+            const s = e.changes.status as { old?: string; new?: string };
+            if (s.old && s.new) detail = `${s.old} → ${s.new}`;
+            else if (s.new) detail = `→ ${s.new}`;
+          }
+          if (e.changes.result) detail += (detail ? ' · ' : '') + String(e.changes.result);
+        }
+        const time = (() => { try { const d = new Date(e.performed_at); return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) + ' ' + d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }); } catch { return ''; } })();
+        return (
+          <div key={e.id} style={{ fontSize: 10, color: '#64748B', padding: '2px 0', display: 'flex', gap: 6, alignItems: 'baseline' }}>
+            <span style={{ color: cfg.color, fontWeight: 700, fontSize: 9, textTransform: 'uppercase', flexShrink: 0 }}>{cfg.label}</span>
+            {detail && <span>{detail}</span>}
+            <span style={{ color: '#94A3B8' }}>by {who}</span>
+            <span style={{ color: '#CBD5E1', marginLeft: 'auto', flexShrink: 0 }}>{time}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 // ─── Item History Component ────────────────────────────────────────────────────
 
-function ItemHistory({ tasks, repairs, willCalls, billing, moves, shipmentNumber, receiveDate, shipmentCarrier, shipmentTracking }: {
+function ItemHistory({ tasks, repairs, willCalls, billing, moves, shipmentNumber, receiveDate, shipmentCarrier, shipmentTracking, auditByEntity }: {
   tasks: any[];
   repairs: any[];
   willCalls: any[];
@@ -300,27 +350,31 @@ function ItemHistory({ tasks, repairs, willCalls, billing, moves, shipmentNumber
   receiveDate?: string;
   shipmentCarrier?: string;
   shipmentTracking?: string;
+  auditByEntity: Record<string, AuditEntry[]>;
 }) {
   return (
     <div>
       {/* Shipment — always first */}
       <CollapsibleHistorySection icon={Ship} title="Shipment" count={shipmentNumber ? 1 : 0}>
         {shipmentNumber && (
-          <div style={histRowStyle}>
-            <div style={histDateStyle}>{fmtDate(receiveDate)}</div>
-            <div style={{ flex: 1 }}>
-              <div>
-                <a href={`#/shipments/${encodeURIComponent(shipmentNumber!)}`} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()} style={histIdStyle}>{shipmentNumber}</a>
-                {' '}
-                <span style={{ fontSize: 10, fontWeight: 600, color: '#16A34A' }}>Received</span>
-              </div>
-              {(shipmentCarrier || shipmentTracking) && (
-                <div style={histNoteStyle}>
-                  {[shipmentCarrier, shipmentTracking].filter(Boolean).join(' \u00b7 ')}
+          <>
+            <div style={histRowStyle}>
+              <div style={histDateStyle}>{fmtDate(receiveDate)}</div>
+              <div style={{ flex: 1 }}>
+                <div>
+                  <a href={`#/shipments/${encodeURIComponent(shipmentNumber!)}`} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()} style={histIdStyle}>{shipmentNumber}</a>
+                  {' '}
+                  <span style={{ fontSize: 10, fontWeight: 600, color: '#16A34A' }}>Received</span>
                 </div>
-              )}
+                {(shipmentCarrier || shipmentTracking) && (
+                  <div style={histNoteStyle}>
+                    {[shipmentCarrier, shipmentTracking].filter(Boolean).join(' \u00b7 ')}
+                  </div>
+                )}
+              </div>
             </div>
-          </div>
+            <AuditSubTimeline entries={auditByEntity[shipmentNumber] || []} />
+          </>
         )}
       </CollapsibleHistorySection>
 
@@ -363,10 +417,10 @@ function ItemHistory({ tasks, repairs, willCalls, billing, moves, shipmentNumber
                 </div>
                 <div style={histNoteStyle}>
                   {SERVICE_CODES[t.svcCode] || t.svcCode || t.type || '\u2014'}
-                  {(t.taskNotes || t.itemNotes) && <> \u00b7 {[t.taskNotes, t.itemNotes].filter(Boolean).join(' | ')}</>}
                 </div>
               </div>
             </div>
+            <AuditSubTimeline entries={auditByEntity[t.taskId] || []} />
           </div>
         ))}
       </CollapsibleHistorySection>
@@ -388,10 +442,10 @@ function ItemHistory({ tasks, repairs, willCalls, billing, moves, shipmentNumber
                     ? `$${Number(r.finalAmount ?? r.approvedAmount).toFixed(2)}`
                     : r.quoteAmount != null ? `$${Number(r.quoteAmount).toFixed(2)}` : ''}
                   {r.repairVendor && <> \u00b7 {r.repairVendor}</>}
-                  {(r.repairNotes || r.notes) && <> \u00b7 {r.repairNotes || r.notes}</>}
                 </div>
               </div>
             </div>
+            <AuditSubTimeline entries={auditByEntity[r.repairId] || []} />
           </div>
         ))}
       </CollapsibleHistorySection>
@@ -399,15 +453,18 @@ function ItemHistory({ tasks, repairs, willCalls, billing, moves, shipmentNumber
       {/* Will Calls */}
       <CollapsibleHistorySection icon={Truck} title="Will Calls" count={willCalls.length}>
         {willCalls.map(w => (
-          <div key={w.wcNumber} style={histRowStyle}>
-            <div style={histDateStyle}>{fmtDate(w.actualPickupDate || w.estimatedPickupDate || w.createdDate)}</div>
-            <div style={{ flex: 1 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                <a href={`#/will-calls/${encodeURIComponent(w.wcNumber)}`} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()} style={histIdStyle}>{w.wcNumber}</a>
-                <MiniStatusBadge status={w.status} />
+          <div key={w.wcNumber}>
+            <div style={histRowStyle}>
+              <div style={histDateStyle}>{fmtDate(w.actualPickupDate || w.estimatedPickupDate || w.createdDate)}</div>
+              <div style={{ flex: 1 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <a href={`#/will-calls/${encodeURIComponent(w.wcNumber)}`} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()} style={histIdStyle}>{w.wcNumber}</a>
+                  <MiniStatusBadge status={w.status} />
+                </div>
+                {w.pickupParty && <div style={histNoteStyle}>{w.pickupParty}</div>}
               </div>
-              {w.pickupParty && <div style={histNoteStyle}>{w.pickupParty}</div>}
             </div>
+            <AuditSubTimeline entries={auditByEntity[w.wcNumber] || []} />
           </div>
         ))}
       </CollapsibleHistorySection>
@@ -466,6 +523,38 @@ export function ItemDetailPanel({
     }).catch(() => {});
     return () => { cancelled = true; };
   }, [clientSheetId, item.itemId]);
+
+  // Fetch audit log entries for this item and all related entities
+  const [auditByEntity, setAuditByEntity] = useState<Record<string, AuditEntry[]>>({});
+  useEffect(() => {
+    if (!item.itemId) return;
+    let cancelled = false;
+    // Collect all entity IDs we want audit for
+    const entityIds = [item.itemId];
+    if (item.shipmentNumber) entityIds.push(item.shipmentNumber);
+    for (const t of itemTasks) if (t.taskId) entityIds.push(t.taskId);
+    for (const r of itemRepairs) if (r.repairId) entityIds.push(r.repairId);
+    for (const w of itemWillCalls) if (w.wcNumber) entityIds.push(w.wcNumber);
+    (async () => {
+      try {
+        const { data } = await supabase
+          .from('entity_audit_log')
+          .select('id, entity_id, action, changes, performed_by, performed_at')
+          .in('entity_id', entityIds)
+          .order('performed_at', { ascending: true })
+          .limit(200);
+        if (!cancelled && data) {
+          const grouped: Record<string, AuditEntry[]> = {};
+          for (const row of data as (AuditEntry & { entity_id: string })[]) {
+            if (!grouped[row.entity_id]) grouped[row.entity_id] = [];
+            grouped[row.entity_id].push(row);
+          }
+          setAuditByEntity(grouped);
+        }
+      } catch { /* best-effort */ }
+    })();
+    return () => { cancelled = true; };
+  }, [item.itemId, item.shipmentNumber, itemTasks.length, itemRepairs.length, itemWillCalls.length]);
 
   const historyCount = (hasShipment ? 1 : 0) + moveHistory.length + itemTasks.length + itemRepairs.length + itemWillCalls.length + itemBilling.length;
 
@@ -813,12 +902,10 @@ export function ItemDetailPanel({
                 receiveDate={item.receiveDate}
                 shipmentCarrier={itemShipment?.carrier}
                 shipmentTracking={itemShipment?.trackingNo}
+                auditByEntity={auditByEntity}
               />
             )}
           </Section>
-
-          {/* Activity History — audit log timeline */}
-          <EntityHistory entityType="inventory" entityId={item.itemId} tenantId={item.clientId} />
         </div>
 
         {/* Sticky footer — session 70 follow-up: Edit / Save / Cancel moved here from top-right. */}
