@@ -472,20 +472,6 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
     }
   };
 
-  // Compute a single sidemark for the header chip. Will Calls don't have
-  // a sidemark column of their own — each item carries its own. If every
-  // item shares the same (normalized) sidemark we surface it as the chip;
-  // otherwise show "Multiple" so users know there's more than one.
-  const headerSidemark = useMemo<string | undefined>(() => {
-    const items: Array<{ sidemark?: string }> = wc.items || [];
-    if (items.length === 0) return undefined;
-    const first = (items[0].sidemark || '').trim();
-    if (!first) return undefined;
-    const firstNorm = first.toLowerCase();
-    const allSame = items.every((it: { sidemark?: string }) => (it.sidemark || '').trim().toLowerCase() === firstNorm);
-    return allSame ? first : 'Multiple';
-  }, [wc.items]);
-
   return (
     <>
       {!isMobile && <div onClick={() => { if (!releasing && !cancelling) onClose(); }} style={panelBackdropStyle} />}
@@ -499,7 +485,6 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
         <DetailHeader
           entityId={wc.wcNumber}
           clientName={wc.clientName}
-          sidemark={headerSidemark}
           actions={
             <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4, color: theme.colors.textMuted }}>
               <X size={18} />
