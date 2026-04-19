@@ -46,33 +46,51 @@ export function ExpectedCalendar() {
   }, [toast]);
 
   const handleEventClick = (ev: CalendarEvent) => {
-    if (ev.type === 'willcall' || ev.type === 'repair') {
-      // Resolve clientSheetId from the event, or fall back to looking up by clientName
+    // Task / repair / will call / received shipment → deep link. HashRouter
+    // requires the full `#/` prefix; window.open + '_blank' keeps the
+    // calendar in place and opens the detail panel in a new tab.
+    const deepLinkable: Record<string, string> = {
+      task:      'tasks',
+      repair:    'repairs',
+      willcall:  'will-calls',
+    };
+
+    // Expected shipments (our locally-authored entries) have sourceId that
+    // matches a row in useExpectedShipments — those open an in-place edit
+    // modal. Any OTHER `shipment` event (e.g. a received shipment whose
+    // sourceId looks like SHP-xxxx) falls through to the /shipments deep
+    // link. The expected-shipment lookup is the source-of-truth check.
+    if (ev.type === 'shipment' && ev.sourceId) {
+      const entry = expectedItems.find(e => e.id === ev.sourceId);
+      if (entry) { setEditingEvent(entry); return; }
+      // No local expected row matched — treat as a received shipment.
       const sheetId = ev.clientSheetId
         || apiClients.find(c => c.name === ev.client)?.spreadsheetId;
-      if (!ev.sourceId) return;
       const params = new URLSearchParams();
       params.set('open', ev.sourceId);
       if (sheetId) params.set('client', sheetId);
-      const page = ev.type === 'willcall' ? 'will-calls' : 'repairs';
-      // Open in a new tab so the calendar stays in place. HashRouter requires
-      // the full `#/` prefix; window.open + '_blank' is the only way to get
-      // a real new-tab deep-link (useNavigate stays in the current tab).
-      const url = `${window.location.origin}${window.location.pathname}#/${page}?${params.toString()}`;
+      const url = `${window.location.origin}${window.location.pathname}#/shipments?${params.toString()}`;
       window.open(url, '_blank', 'noopener,noreferrer');
       return;
     }
-    // Expected shipment → open edit modal
-    if (ev.type === 'shipment' && ev.sourceId) {
-      const entry = expectedItems.find(e => e.id === ev.sourceId);
-      if (entry) setEditingEvent(entry);
-    }
+
+    const page = deepLinkable[ev.type];
+    if (!page || !ev.sourceId) return;
+    const sheetId = ev.clientSheetId
+      || apiClients.find(c => c.name === ev.client)?.spreadsheetId;
+    const params = new URLSearchParams();
+    params.set('open', ev.sourceId);
+    if (sheetId) params.set('client', sheetId);
+    const url = `${window.location.origin}${window.location.pathname}#/${page}?${params.toString()}`;
+    window.open(url, '_blank', 'noopener,noreferrer');
   };
 
   const today = new Date();
   const weekStart = useMemo(() => startOfWeek(anchor), [anchor]);
 
-  // Stat calculations
+  // Stat calculations — aggregate across every event type (tasks, repairs,
+  // will calls, expected shipments). Mirrors the "Dashboard Calendar" ask
+  // where these four cards are the at-a-glance summary of workload.
   const stats = useMemo(() => {
     const todayKey = toKey(today);
     const weekStartKey = toKey(startOfWeek(today));
@@ -80,20 +98,22 @@ export function ExpectedCalendar() {
     weekEnd.setDate(weekEnd.getDate() + 6);
     const weekEndKey = toKey(weekEnd);
 
-    const monthStart = new Date(today.getFullYear(), today.getMonth(), 1);
-    const monthEnd = new Date(today.getFullYear(), today.getMonth() + 1, 0);
-    const monthStartKey = toKey(monthStart);
-    const monthEndKey = toKey(monthEnd);
-
     const inRange = (d: string, start: string, end: string) => d >= start && d <= end;
-    const future = (d: string) => d >= todayKey;
 
-    const shipThisWeek = events.filter(e => e.type === 'shipment' && inRange(e.date, weekStartKey, weekEndKey)).length;
-    const shipThisMonth = events.filter(e => e.type === 'shipment' && inRange(e.date, monthStartKey, monthEndKey)).length;
-    const wcScheduled = events.filter(e => e.type === 'willcall' && future(e.date)).length;
-    const repairsScheduled = events.filter(e => e.type === 'repair' && future(e.date)).length;
+    const dueToday      = events.filter(e => e.date === todayKey).length;
+    const thisWeek      = events.filter(e => inRange(e.date, weekStartKey, weekEndKey)).length;
+    const highPriority  = events.filter(e => e.priority === 'High' && inRange(e.date, weekStartKey, weekEndKey)).length;
+    // Overdue = task/repair whose date (dueDate) is strictly before today AND
+    // the event's status is still open/in-progress.
+    const isOpenStatus = (s: string | undefined) =>
+      !s || s === 'Open' || s === 'In Progress' || s === 'Pending Quote' || s === 'Quote Sent' || s === 'Approved';
+    const overdue = events.filter(e =>
+      (e.type === 'task' || e.type === 'repair') &&
+      e.date < todayKey &&
+      isOpenStatus(e.details.status)
+    ).length;
 
-    return { shipThisWeek, shipThisMonth, wcScheduled, repairsScheduled };
+    return { dueToday, thisWeek, highPriority, overdue };
   }, [events, today]);
 
   const goPrev = () => {
@@ -132,10 +152,10 @@ export function ExpectedCalendar() {
     <div>
       {/* Stat cards */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: 20 }}>
-        <StatCard label="Expected This Week" value={stats.shipThisWeek} />
-        <StatCard label="Expected This Month" value={stats.shipThisMonth} />
-        <StatCard label="Scheduled Will Calls" value={stats.wcScheduled} />
-        <StatCard label="Scheduled Repairs" value={stats.repairsScheduled} accent />
+        <StatCard label="Due Today" value={stats.dueToday} />
+        <StatCard label="This Week" value={stats.thisWeek} />
+        <StatCard label="High Priority" value={stats.highPriority} />
+        <StatCard label="Overdue" value={stats.overdue} accent />
       </div>
 
       {/* Legend */}
@@ -145,7 +165,7 @@ export function ExpectedCalendar() {
         border: '1px solid rgba(0,0,0,0.04)', marginBottom: 14, flexWrap: 'wrap',
       }}>
         <span style={{ fontSize: 10, fontWeight: 600, letterSpacing: '2px', textTransform: 'uppercase', color: '#999' }}>Legend</span>
-        {(['shipment', 'willcall', 'repair'] as const).map(type => {
+        {(['task', 'repair', 'willcall', 'shipment'] as const).map(type => {
           const c = EVENT_COLORS[type];
           return (
             <div key={type} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>

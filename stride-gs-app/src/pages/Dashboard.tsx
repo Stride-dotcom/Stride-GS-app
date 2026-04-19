@@ -21,10 +21,12 @@ import { fmtDate } from '../lib/constants';
 import { useIsMobile } from '../hooks/useIsMobile';
 import { useAuth } from '../contexts/AuthContext';
 import { FolderButton } from '../components/shared/FolderButton';
+import { ExpectedCalendar } from '../components/shipments/ExpectedCalendar';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 type DashTab = 'tasks' | 'repairs' | 'willcalls';
+type DashTopTab = 'calendar' | 'overview';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -491,7 +493,19 @@ export function Dashboard() {
   const { isMobile, isExtraSmall } = useIsMobile();
   const apiConfigured = isApiConfigured();
 
-  // Active tab — sessionStorage, default 'tasks' on fresh login
+  // Top-level tab: Calendar (default) or Overview (the task/repair/will-call
+  // widgets). Calendar is the landing page so scheduled work is the first
+  // thing anyone sees. Persisted per-session.
+  const [topTab, setTopTab] = useState<DashTopTab>(() => {
+    const saved = sessionStorage.getItem('dash_top_tab');
+    return (saved as DashTopTab) || 'calendar';
+  });
+  const switchTopTab = useCallback((t: DashTopTab) => {
+    setTopTab(t);
+    try { sessionStorage.setItem('dash_top_tab', t); } catch { /* quota */ }
+  }, []);
+
+  // Secondary tab (Overview sub-tabs) — sessionStorage, default 'tasks'.
   const [activeTab, setActiveTab] = useState<DashTab>(() => {
     const saved = sessionStorage.getItem('dash_active_tab');
     return (saved as DashTab) || 'tasks';
@@ -670,6 +684,36 @@ export function Dashboard() {
         </div>
       )}
 
+      {/* Top-level tab switcher: Calendar (default) | Overview */}
+      <div style={{ display: 'inline-flex', gap: 0, background: '#fff', borderRadius: 100, padding: 5, alignSelf: 'flex-start' }}>
+        {(['calendar', 'overview'] as const).map(t => {
+          const active = topTab === t;
+          return (
+            <button
+              key={t}
+              onClick={() => switchTopTab(t)}
+              style={{
+                padding: '9px 22px', fontSize: 12, fontWeight: 600, fontFamily: 'inherit',
+                letterSpacing: '1.5px', textTransform: 'uppercase',
+                background: active ? '#1C1C1C' : 'transparent', border: 'none', cursor: 'pointer',
+                borderRadius: 100, color: active ? '#fff' : '#999',
+                transition: 'all 0.2s',
+              }}
+            >
+              {t === 'calendar' ? 'Calendar' : 'Overview'}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Calendar tab */}
+      {topTab === 'calendar' && (
+        <ExpectedCalendar />
+      )}
+
+      {/* Overview tab — existing dashboard content */}
+      {topTab === 'overview' && (
+      <>
       {/* Stat Cards — all dark v2 */}
       <div style={{ display: 'grid', gap: 14, gridTemplateColumns: isExtraSmall ? '1fr' : isMobile ? '1fr 1fr' : 'repeat(3, 1fr)' }}>
         <StatCard icon={<ClipboardList size={16} />} label="Open Tasks" value={stats.openTasks} sub="Open + In Progress" onClick={() => handleTabChange('tasks')} />
@@ -757,6 +801,8 @@ export function Dashboard() {
           {tabsLoaded.willcalls && <WillCallsTab willCalls={willCalls} onNavigate={handleWcNav} />}
         </div>
       </div>
+      </>
+      )}
     </div>
   );
 }
