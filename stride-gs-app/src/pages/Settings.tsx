@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Settings as SettingsIcon, Users, DollarSign, Mail, Database, Globe, Bell, Plus, ChevronRight, CheckCircle2, AlertCircle, UserPlus, Shield, ToggleLeft, ToggleRight, Eye, EyeOff, Wifi, WifiOff, RefreshCw, Loader2, RefreshCcw, ExternalLink, Wrench, PlayCircle, Send, FolderSync, BookText, LogIn, Cloud, Edit2, Zap, ArrowUpDown, ChevronUp, ChevronDown, X } from 'lucide-react';
 import { useReactTable, getCoreRowModel, getSortedRowModel, flexRender, type SortingState, type ColumnDef } from '@tanstack/react-table';
-import { getApiUrl, getApiToken, setApiCredentials, isApiConfigured, fetchHealth, postOnboardClient, postUpdateClient, postSyncSettings, postRefreshCaches, postFixMissingFolders, postTestSendClientTemplates, postTestSendClaimEmails, fetchAutoIdSetting, postUpdateAutoIdSetting, postResolveOnboardUser, fetchStaxConfig, postUpdateStaxConfig, apiPost, fetchEmailTemplates, postSyncTemplatesToClients, postBulkSyncToSupabase, postPurgeInactiveFromSupabase, fetchClients, postFinishClientSetup, postSendWelcomeToUsers, resyncUsersPreview, resyncUsers, resyncClientsPreview, resyncClients, setNextFetchNoCache } from '../lib/api';
+import { getApiUrl, getApiToken, setApiCredentials, isApiConfigured, fetchHealth, postOnboardClient, postUpdateClient, postSyncSettings, postRefreshCaches, postFixMissingFolders, postTestSendClientTemplates, postTestSendClaimEmails, fetchAutoIdSetting, postUpdateAutoIdSetting, postResolveOnboardUser, fetchStaxConfig, postUpdateStaxConfig, apiPost, fetchEmailTemplates, postSyncTemplatesToClients, postBulkSyncToSupabase, postPurgeInactiveFromSupabase, fetchClients, postFinishClientSetup, postSendWelcomeToUsers, resyncUsersPreview, resyncUsers, resyncClientsPreview, resyncClients, setNextFetchNoCache, adminSetUserPassword } from '../lib/api';
 import type { BulkSyncResult } from '../lib/api';
 import type { EmailTemplate } from '../lib/api';
 import { entityEvents } from '../lib/entityEvents';
@@ -467,6 +467,13 @@ export function Settings() {
   const [addUserSuccess, setAddUserSuccess] = useState('');
   // v38.43.0 — Send Welcome Email button per row on Users tab
   const [sendingWelcomeEmail, setSendingWelcomeEmail] = useState<string | null>(null);
+  // v38.70.0 — Admin-set-password modal state
+  const [setPasswordEmail, setSetPasswordEmail] = useState<string | null>(null);
+  const [setPasswordValue, setSetPasswordValue] = useState('');
+  const [setPasswordConfirm, setSetPasswordConfirm] = useState('');
+  const [setPasswordError, setSetPasswordError] = useState('');
+  const [setPasswordLoading, setSetPasswordLoading] = useState(false);
+  const [setPasswordSuccess, setSetPasswordSuccess] = useState<string | null>(null);
   const [sendWelcomeResult, setSendWelcomeResult] = useState<{ email: string; ok: boolean; message: string } | null>(null);
 
   // Session 70 follow-up — Resync Users (CB → Supabase cb_users + optional auth.users prune)
@@ -642,6 +649,41 @@ export function Settings() {
       setSendingWelcomeEmail(null);
       // Auto-dismiss toast after 4 seconds
       setTimeout(() => setSendWelcomeResult(null), 4000);
+    }
+  }
+
+  function openSetPasswordModal(email: string) {
+    setSetPasswordEmail(email);
+    setSetPasswordValue('');
+    setSetPasswordConfirm('');
+    setSetPasswordError('');
+  }
+
+  async function handleAdminSetPassword() {
+    if (!setPasswordEmail) return;
+    if (setPasswordValue.length < 8) {
+      setSetPasswordError('Password must be at least 8 characters.');
+      return;
+    }
+    if (setPasswordValue !== setPasswordConfirm) {
+      setSetPasswordError('Passwords do not match.');
+      return;
+    }
+    setSetPasswordLoading(true);
+    setSetPasswordError('');
+    try {
+      const res = await adminSetUserPassword(setPasswordEmail, setPasswordValue);
+      if (res.ok && res.data?.success) {
+        setSetPasswordSuccess(`Password set for ${setPasswordEmail}. Share it with the user — they can change it after logging in.`);
+        setSetPasswordEmail(null);
+        setTimeout(() => setSetPasswordSuccess(null), 8000);
+      } else {
+        setSetPasswordError(res.error || res.data?.error || 'Request failed');
+      }
+    } catch (err) {
+      setSetPasswordError(String(err));
+    } finally {
+      setSetPasswordLoading(false);
     }
   }
   // userActionErrors removed — inline toggle replaced by edit panel
@@ -825,6 +867,20 @@ export function Settings() {
               >
                 {sendingWelcomeEmail === u.email ? <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} /> : <Send size={12} />}
                 {sendingWelcomeEmail === u.email ? 'Sending\u2026' : 'Send Welcome'}
+              </button>
+            )}
+            {realUser?.role === 'admin' && u.email !== realUser.email && (
+              <button
+                onClick={(e) => { e.stopPropagation(); openSetPasswordModal(u.email); }}
+                style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 4, padding: '3px 10px', fontSize: 11, fontWeight: 600,
+                  border: `1px solid ${theme.colors.border}`, borderRadius: 6,
+                  background: '#fff', color: theme.colors.textSecondary,
+                  cursor: 'pointer', fontFamily: 'inherit',
+                }}
+                title={`Set a new password for ${u.email}`}
+              >
+                <Wrench size={12} /> Set Password
               </button>
             )}
             {realUser?.role === 'admin' && u.email !== realUser.email && u.active && (
@@ -2301,6 +2357,15 @@ export function Settings() {
                 </div>
               )}
 
+              {setPasswordSuccess && (
+                <div style={{
+                  padding: '10px 14px', fontSize: 12, borderRadius: 8, marginBottom: 12,
+                  background: '#ECFDF5', border: '1px solid #A7F3D0', color: '#065F46', fontWeight: 500,
+                }}>
+                  {setPasswordSuccess}
+                </div>
+              )}
+
               {/* Add User inline form */}
               {addUserOpen && (
                 <div style={{ ...card, border: `1px solid ${theme.colors.orange}`, marginBottom: 16 }}>
@@ -3544,6 +3609,96 @@ export function Settings() {
           )}
         </div>
       </div>
+
+      {/* Admin-set-password modal (v38.70.0) */}
+      {setPasswordEmail && (
+        <div
+          onClick={() => !setPasswordLoading && setSetPasswordEmail(null)}
+          style={{
+            position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 9999,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              background: '#fff', borderRadius: 16, padding: 24, width: 440, maxWidth: '90vw',
+              boxShadow: '0 20px 60px rgba(0,0,0,0.2)',
+            }}
+          >
+            <div style={{ fontSize: 18, fontWeight: 600, color: theme.colors.text, marginBottom: 4 }}>
+              Set Password
+            </div>
+            <div style={{ fontSize: 12, color: theme.colors.textMuted, marginBottom: 16 }}>
+              For <strong>{setPasswordEmail}</strong>. The user can change this after they log in.
+            </div>
+
+            <div style={{ marginBottom: 12 }}>
+              <div style={{ fontSize: 11, fontWeight: 600, letterSpacing: '0.04em', textTransform: 'uppercase', color: theme.colors.textMuted, marginBottom: 4 }}>New Password</div>
+              <input
+                type="text"
+                autoFocus
+                value={setPasswordValue}
+                onChange={(e) => setSetPasswordValue(e.target.value)}
+                placeholder="At least 8 characters"
+                style={{
+                  width: '100%', padding: '10px 12px', fontSize: 13,
+                  border: `1px solid ${theme.colors.border}`, borderRadius: 8,
+                  outline: 'none', fontFamily: 'monospace', boxSizing: 'border-box',
+                }}
+              />
+            </div>
+
+            <div style={{ marginBottom: 14 }}>
+              <div style={{ fontSize: 11, fontWeight: 600, letterSpacing: '0.04em', textTransform: 'uppercase', color: theme.colors.textMuted, marginBottom: 4 }}>Confirm</div>
+              <input
+                type="text"
+                value={setPasswordConfirm}
+                onChange={(e) => setSetPasswordConfirm(e.target.value)}
+                placeholder="Re-enter the password"
+                style={{
+                  width: '100%', padding: '10px 12px', fontSize: 13,
+                  border: `1px solid ${theme.colors.border}`, borderRadius: 8,
+                  outline: 'none', fontFamily: 'monospace', boxSizing: 'border-box',
+                }}
+              />
+            </div>
+
+            {setPasswordError && (
+              <div style={{ padding: '8px 12px', marginBottom: 12, background: '#FEF2F2', border: '1px solid #FECACA', color: '#991B1B', fontSize: 12, borderRadius: 6 }}>
+                {setPasswordError}
+              </div>
+            )}
+
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+              <button
+                onClick={() => setSetPasswordEmail(null)}
+                disabled={setPasswordLoading}
+                style={{
+                  padding: '8px 16px', fontSize: 12, fontWeight: 600,
+                  border: `1px solid ${theme.colors.border}`, borderRadius: 8,
+                  background: '#fff', color: theme.colors.textSecondary,
+                  cursor: setPasswordLoading ? 'not-allowed' : 'pointer',
+                }}
+              >Cancel</button>
+              <button
+                onClick={handleAdminSetPassword}
+                disabled={setPasswordLoading}
+                style={{
+                  padding: '8px 16px', fontSize: 12, fontWeight: 600,
+                  border: 'none', borderRadius: 8,
+                  background: theme.colors.orange, color: '#fff',
+                  cursor: setPasswordLoading ? 'wait' : 'pointer',
+                  display: 'inline-flex', alignItems: 'center', gap: 6,
+                }}
+              >
+                {setPasswordLoading && <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} />}
+                {setPasswordLoading ? 'Setting\u2026' : 'Set Password'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -1,5 +1,13 @@
 /* ===================================================
-   StrideAPI.gs — v38.69.0 — 2026-04-17 PST — Inventory shipmentFolderUrl reads per-row hyperlink (single source of truth)
+   StrideAPI.gs — v38.70.0 — 2026-04-18 PST — Admin-set-password endpoint
+   v38.70.0: NEW — handleAdminSetUserPassword_ admin endpoint lets an admin set
+             a specific user's Supabase Auth password directly (for clients who
+             can't complete the self-serve reset flow). Calls Supabase admin API
+             GET /auth/v1/admin/users?email=… to resolve the user ID, then PUT
+             /auth/v1/admin/users/{id} with { password }. Self-serve reset flow
+             is unchanged; this is an escape hatch, not a replacement.
+             Requires caller role=admin. Rate-limited. Min 8-char password.
+   v38.69.0: Inventory shipmentFolderUrl reads per-row hyperlink (single source of truth)
    v38.68.2: HOTFIX — handleCompleteShipment_ now reads AUTO_INSPECTION from client
              Settings as server-side authority. Previously relied solely on React's
              per-item needsInspection flag, which had a race condition (items entered
@@ -3656,6 +3664,7 @@ function doGet(e) {
       case "updateUser":      return handleUpdateUser_(params, callerEmail);
       case "deleteUser":      return handleDeleteUser_(params, callerEmail);
       case "resyncUsers":     return handleResyncUsers_(params, callerEmail);
+      case "adminSetUserPassword": return handleAdminSetUserPassword_(params, callerEmail);
       case "resyncClients":   return handleResyncClients_(params, callerEmail);
 
       // ─── Config data (staff/admin only for getClients; others open to all authed) ───
@@ -5047,6 +5056,87 @@ function handleResyncClients_(params, callerEmail) {
     sbOrphans: sbOrphans,
     missingFromSb: missingFromSb
   });
+}
+
+/**
+ * handleAdminSetUserPassword_ (v38.70.0)
+ *
+ * Admin escape hatch: set a specific user's Supabase Auth password directly.
+ * The normal self-serve "Forgot Password" flow is unchanged; this is only for
+ * clients who can't complete that flow on their own.
+ *
+ * Payload: { action: "adminSetUserPassword", callerEmail, email, newPassword }
+ *   - callerEmail must resolve to an admin in CB Users
+ *   - email is the target user (must exist in Supabase auth.users)
+ *   - newPassword must be ≥ 8 chars
+ *
+ * Flow:
+ *   1. Caller authz: lookupUser_(callerEmail) → must be active admin
+ *   2. Find target by email: GET /auth/v1/admin/users?email=<lowercased>
+ *   3. PUT /auth/v1/admin/users/{id} with { password: newPassword }
+ *   4. Return { success: true, email, userId }
+ */
+function handleAdminSetUserPassword_(params, callerEmail) {
+  if (!callerEmail) return errorResponse_("callerEmail is required", "AUTH_ERROR");
+  try { rateLimit_("adminSetUserPassword_" + callerEmail, 20); } catch (e) { return errorResponse_(String(e.message), "RATE_LIMIT"); }
+
+  var callerLookup = lookupUser_(callerEmail);
+  if (!callerLookup.user) return errorResponse_("Caller not found", "AUTH_ERROR");
+  if (!callerLookup.user.active) return errorResponse_("Caller deactivated", "AUTH_ERROR");
+  if (callerLookup.user.role !== "admin") return errorResponse_("Admin only", "AUTH_ERROR");
+
+  var targetEmail = String((params && params.email) || "").trim().toLowerCase();
+  var newPassword = String((params && params.newPassword) || "");
+  if (!targetEmail) return errorResponse_("email is required", "VALIDATION_ERROR");
+  if (!newPassword || newPassword.length < 8) return errorResponse_("newPassword must be ≥ 8 characters", "VALIDATION_ERROR");
+
+  var url = prop_("SUPABASE_URL");
+  var key = prop_("SUPABASE_SERVICE_ROLE_KEY");
+  if (!url || !key) return errorResponse_("Supabase credentials not configured", "CONFIG_ERROR");
+
+  // 1. Resolve target user ID by email. GoTrue's ?email= filter isn't
+  //    guaranteed across versions, so page through up to 5000 users like
+  //    handleResyncUsers_ does.
+  var target = null;
+  for (var page = 1; page <= 5; page++) {
+    var lookupResp = UrlFetchApp.fetch(url + "/auth/v1/admin/users?page=" + page + "&per_page=1000", {
+      method: "GET",
+      headers: { "Authorization": "Bearer " + key, "apikey": key },
+      muteHttpExceptions: true
+    });
+    if (lookupResp.getResponseCode() < 200 || lookupResp.getResponseCode() >= 300) {
+      return errorResponse_("User lookup failed: " + lookupResp.getResponseCode() + " " + lookupResp.getContentText().substring(0, 200), "UPSTREAM_ERROR");
+    }
+    var lookupJson;
+    try { lookupJson = JSON.parse(lookupResp.getContentText()); } catch (_) { lookupJson = {}; }
+    var users = lookupJson.users || [];
+    if (users.length === 0) break;
+    for (var i = 0; i < users.length; i++) {
+      if (String(users[i].email || "").toLowerCase() === targetEmail) { target = users[i]; break; }
+    }
+    if (target) break;
+    if (users.length < 1000) break;
+  }
+  if (!target || !target.id) return errorResponse_("User not found in Supabase auth: " + targetEmail, "NOT_FOUND");
+
+  // 2. PUT new password
+  var putResp = UrlFetchApp.fetch(url + "/auth/v1/admin/users/" + encodeURIComponent(target.id), {
+    method: "PUT",
+    headers: {
+      "Authorization": "Bearer " + key,
+      "apikey": key,
+      "Content-Type": "application/json"
+    },
+    payload: JSON.stringify({ password: newPassword }),
+    muteHttpExceptions: true
+  });
+  if (putResp.getResponseCode() < 200 || putResp.getResponseCode() >= 300) {
+    Logger.log("handleAdminSetUserPassword_ PUT failed: " + putResp.getResponseCode() + " " + putResp.getContentText());
+    return errorResponse_("Password update failed: " + putResp.getResponseCode(), "UPSTREAM_ERROR");
+  }
+
+  Logger.log("handleAdminSetUserPassword_: admin=" + callerEmail + " set password for " + targetEmail + " (id=" + target.id + ")");
+  return jsonResponse_({ success: true, email: targetEmail, userId: target.id });
 }
 
 /**

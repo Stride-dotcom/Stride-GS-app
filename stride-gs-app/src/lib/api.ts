@@ -2884,6 +2884,31 @@ export function postSendWelcomeToUsers(
   );
 }
 
+/**
+ * Admin escape hatch — set a user's Supabase Auth password directly.
+ * Used when a client can't complete the self-serve Forgot Password flow.
+ * StrideAPI handler: handleAdminSetUserPassword_ (admin-only).
+ */
+export interface AdminSetUserPasswordResponse {
+  success: boolean;
+  email?: string;
+  userId?: string;
+  error?: string;
+}
+
+export function adminSetUserPassword(
+  email: string,
+  newPassword: string,
+  signal?: AbortSignal
+) {
+  return apiPost<AdminSetUserPasswordResponse>(
+    'adminSetUserPassword',
+    { email, newPassword },
+    undefined,
+    { signal }
+  );
+}
+
 // ─── Template Management (v38.12.0) ──────────────────────────────────────────
 
 export interface EmailTemplate {
