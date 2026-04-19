@@ -10,7 +10,7 @@
  * to GAS for authoritative data. The flag auto-clears after being consumed.
  */
 
-type EntityType = 'task' | 'repair' | 'will_call' | 'inventory' | 'shipment' | 'billing' | 'client';
+type EntityType = 'task' | 'repair' | 'will_call' | 'inventory' | 'shipment' | 'billing' | 'client' | 'claim' | 'move_history' | 'order';
 
 type EntityEventCallback = (entityType: EntityType, entityId: string) => void;
 

@@ -10,12 +10,13 @@
  * - addOptimisticClaim / removeOptimisticClaim: temp claims for create ops
  * Patches auto-expire after 120s (guarded in useMemo merge).
  */
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { fetchClaims } from '../lib/api';
 import { fetchClaimsFromSupabase } from '../lib/supabaseQueries';
 import type { ApiClaim, ClaimsResponse } from '../lib/api';
 import type { Claim, ClaimType, ClaimStatus } from '../lib/types';
 import { useApiData } from './useApiData';
+import { entityEvents } from '../lib/entityEvents';
 
 export interface UseClaimsResult {
   /** Raw API claims */
@@ -109,6 +110,13 @@ export function useClaims(autoFetch = true): UseClaimsResult {
     autoFetch,
     'claims'
   );
+
+  // Phase 2 (Realtime): refetch when another tab writes a claim.
+  useEffect(() => {
+    return entityEvents.subscribe((type) => {
+      if (type === 'claim') refetch();
+    });
+  }, [refetch]);
 
   // ─── Phase 2C: Optimistic patch state ────────────────────────────────────
   const [patches, setPatches] = useState<Record<string, { data: Partial<Claim>; appliedAt: number }>>({});

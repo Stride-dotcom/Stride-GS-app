@@ -8,6 +8,7 @@ import { fetchDtOrdersFromSupabase, isSupabaseCacheAvailable } from '../lib/supa
 import type { DtOrderForUI, ClientNameMap } from '../lib/supabaseQueries';
 import { useClients } from './useClients';
 import { useClientFilter } from './useClientFilter';
+import { entityEvents } from '../lib/entityEvents';
 
 export type { DtOrderForUI };
 
@@ -73,6 +74,13 @@ export function useOrders(): UseOrdersResult {
   }, [doFetch]);
 
   const refetch = useCallback(() => { doFetch(); }, [doFetch]);
+
+  // Phase 2 (Realtime): refetch when another tab writes a DT order.
+  useEffect(() => {
+    return entityEvents.subscribe((type) => {
+      if (type === 'order') doFetch();
+    });
+  }, [doFetch]);
 
   return { orders, loading, error, refetch, lastFetched };
 }

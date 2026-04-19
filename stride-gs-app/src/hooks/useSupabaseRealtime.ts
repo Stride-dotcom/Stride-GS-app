@@ -1,8 +1,12 @@
 /**
  * useSupabaseRealtime — Phase 4 cross-user realtime subscriptions.
  *
- * Subscribes to Supabase Realtime on all 6 read-cache tables:
- *   inventory, tasks, repairs, will_calls, shipments, billing
+ * Subscribes to Supabase Realtime on the read-cache tables:
+ *   inventory, tasks, repairs, will_calls, shipments, billing, clients,
+ *   claims, move_history, dt_orders
+ *
+ * Session 72 Phase 2 added claims, move_history, and dt_orders so every
+ * entity surfaced in the React app propagates across tabs within ~1-2s.
  *
  * On any INSERT or UPDATE, emits the changed entity type via entityEvents so
  * that all hooks (useInventory, useTasks, useRepairs, useWillCalls,
@@ -74,6 +78,14 @@ export function useSupabaseRealtime() {
       // clients
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'clients' }, onRow('client', 'spreadsheet_id'))
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'clients' }, onRow('client', 'spreadsheet_id'))
+      // claims (Phase 2)
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'claims' }, onRow('claim', 'claim_id'))
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'claims' }, onRow('claim', 'claim_id'))
+      // move_history (Phase 2) — append-only audit log for Scanner moves + transfers
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'move_history' }, onRow('move_history', 'id'))
+      // dt_orders (Phase 2) — DispatchTrack orders surfaced in Orders tab
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'dt_orders' }, onRow('order', 'order_id'))
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'dt_orders' }, onRow('order', 'order_id'))
       .subscribe();
 
     return () => {
