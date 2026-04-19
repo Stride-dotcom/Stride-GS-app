@@ -426,6 +426,7 @@ export function Labels() {
   const [rawLocs, setRawLocs] = useState('');
   const [selectedLocs, setSelectedLocs] = useState<string[]>([]);
   const [locSearch, setLocSearch] = useState('');
+  const [locSearchFocused, setLocSearchFocused] = useState(false);
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   // Only auto-focus on desktop — focusing a textarea on mobile pops up the
@@ -723,7 +724,7 @@ export function Labels() {
 
               <div style={s.card}>
                 <div style={s.cardTitle}>
-                  Pick from existing ({locationNames.length})
+                  Locations ({locationNames.length})
                   <button style={{ ...s.btnDanger, marginLeft: 'auto' }} onClick={clearLocs} disabled={!selectedLocs.length}>
                     <Trash2 size={11} /> Clear
                   </button>
@@ -732,25 +733,33 @@ export function Labels() {
                   type="text"
                   value={locSearch}
                   onChange={e => setLocSearch(e.target.value)}
-                  placeholder="Search…"
+                  onFocus={() => setLocSearchFocused(true)}
+                  onBlur={() => { /* keep list open if user typed something */ if (!locSearch) setLocSearchFocused(false); }}
+                  placeholder="Click to search and pick from existing locations\u2026"
                   style={{ width: '100%', padding: '7px 10px', border: `1px solid ${theme.colors.border}`, borderRadius: 6, fontSize: 12, marginBottom: 6, outline: 'none', boxSizing: 'border-box' }}
                 />
-                <div style={{ maxHeight: 180, overflow: 'auto', border: `1px solid ${theme.colors.borderLight}`, borderRadius: 6 }}>
-                  {filteredLocs.map(code => {
-                    const on = selectedLocs.includes(code);
-                    return (
-                      <div key={code} onClick={() => toggleLoc(code)} style={{
-                        padding: '5px 8px', borderBottom: `1px solid ${theme.colors.borderLight}`,
-                        fontSize: 12, cursor: 'pointer',
-                        background: on ? '#EFF6FF' : '#fff',
-                        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-                      }}>
-                        <span style={{ fontFamily: 'monospace', fontWeight: on ? 600 : 400 }}>{code}</span>
-                        {notesByCode[code] && <span style={{ color: theme.colors.textMuted, fontSize: 10 }}>{notesByCode[code]}</span>}
+                {(locSearchFocused || locSearch) && (
+                  <div style={{ maxHeight: 180, overflow: 'auto', border: `1px solid ${theme.colors.borderLight}`, borderRadius: 6 }}>
+                    {filteredLocs.length === 0 ? (
+                      <div style={{ padding: '8px 10px', fontSize: 11, color: theme.colors.textMuted, fontStyle: 'italic' }}>
+                        No locations match &ldquo;{locSearch}&rdquo;
                       </div>
-                    );
-                  })}
-                </div>
+                    ) : filteredLocs.map(code => {
+                      const on = selectedLocs.includes(code);
+                      return (
+                        <div key={code} onClick={() => toggleLoc(code)} style={{
+                          padding: '5px 8px', borderBottom: `1px solid ${theme.colors.borderLight}`,
+                          fontSize: 12, cursor: 'pointer',
+                          background: on ? '#EFF6FF' : '#fff',
+                          display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                        }}>
+                          <span style={{ fontFamily: 'monospace', fontWeight: on ? 600 : 400 }}>{code}</span>
+                          {notesByCode[code] && <span style={{ color: theme.colors.textMuted, fontSize: 10 }}>{notesByCode[code]}</span>}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
                 {selectedLocs.length > 0 && (
                   <div style={{ marginTop: 6, fontSize: 12, color: '#15803D', display: 'flex', alignItems: 'center', gap: 4 }}>
                     <Eye size={11} /> {selectedLocs.length} selected — scroll down to preview & print
