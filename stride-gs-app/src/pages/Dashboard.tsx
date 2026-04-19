@@ -161,8 +161,9 @@ function DragHeader({ h, dragColId, dragOverColId, onDragStart, onDragOver, onDr
 
 // ─── Tasks Tab ───────────────────────────────────────────────────────────────
 
-const TASK_DEFAULT_ORDER = ['taskId', 'taskType', 'taskStatus', 'taskItem', 'taskDesc', 'taskLocation', 'taskVendor', 'taskAssigned', 'taskClient', 'taskSidemark', 'taskCreated', 'taskFolder'];
-const TASK_COL_LABELS: Record<string, string> = { taskId: 'Task ID', taskType: 'Type', taskStatus: 'Status', taskItem: 'Item', taskDesc: 'Description', taskLocation: 'Location', taskVendor: 'Vendor', taskAssigned: 'Assigned', taskClient: 'Client', taskSidemark: 'Sidemark', taskCreated: 'Created', taskFolder: 'Folder' };
+const TODAY_DASH = new Date().toISOString().slice(0, 10);
+const TASK_DEFAULT_ORDER = ['taskId', 'taskType', 'taskStatus', 'taskPriority', 'taskDueDate', 'taskItem', 'taskDesc', 'taskLocation', 'taskVendor', 'taskAssigned', 'taskClient', 'taskSidemark', 'taskCreated', 'taskFolder'];
+const TASK_COL_LABELS: Record<string, string> = { taskId: 'Task ID', taskType: 'Type', taskStatus: 'Status', taskPriority: 'Priority', taskDueDate: 'Due Date', taskItem: 'Item', taskDesc: 'Description', taskLocation: 'Location', taskVendor: 'Vendor', taskAssigned: 'Assigned', taskClient: 'Client', taskSidemark: 'Sidemark', taskCreated: 'Created', taskFolder: 'Folder' };
 
 function TasksTab({ tasks, onNavigate, indicators }: { tasks: SummaryTask[]; onNavigate: (task: SummaryTask) => void; indicators?: { inspItems: Set<string>; asmItems: Set<string>; repairItems: Set<string> } }) {
   const colT = createColumnHelper<SummaryTask>();
@@ -182,6 +183,8 @@ function TasksTab({ tasks, onNavigate, indicators }: { tasks: SummaryTask[]; onN
     colT.accessor('taskId', { id: 'taskId', header: 'Task ID', size: 110, cell: i => <span style={{ fontWeight: 600, fontSize: 12, fontFamily: 'monospace', color: theme.colors.orange }}>{i.getValue()}</span> }),
     colT.accessor('taskType', { id: 'taskType', header: 'Type', size: 100, cell: i => <span style={{ fontSize: 12 }}>{TASK_TYPE_LABELS[i.getValue()] || i.getValue() || '—'}</span> }),
     colT.accessor('status', { id: 'taskStatus', header: 'Status', size: 115, cell: i => <StatusBadge status={i.getValue()} /> }),
+    colT.accessor('priority', { id: 'taskPriority', header: 'Priority', size: 80, cell: i => { const p = i.getValue() || 'Normal'; return <span style={{ display: 'inline-block', padding: '2px 8px', borderRadius: 10, fontSize: 11, fontWeight: 600, background: p === 'High' ? '#FEF2F2' : '#F3F4F6', color: p === 'High' ? '#DC2626' : '#6B7280' }}>{p}</span>; } }),
+    colT.accessor('dueDate', { id: 'taskDueDate', header: 'Due Date', size: 90, sortingFn: (a, b) => { const av = a.original.dueDate ?? ''; const bv = b.original.dueDate ?? ''; if (!av && !bv) return 0; if (!av) return 1; if (!bv) return -1; return av.localeCompare(bv); }, cell: i => { const d = i.getValue(); if (!d) return <span style={{ fontSize: 12, color: theme.colors.textMuted }}>—</span>; const overdue = d < TODAY_DASH; const isToday = d === TODAY_DASH; return <span style={{ fontSize: 12, color: overdue ? '#DC2626' : isToday ? theme.colors.orange : theme.colors.textSecondary, fontWeight: overdue || isToday ? 600 : 400 }}>{fmtDate(d)}</span>; } }),
     colT.accessor('itemId', { id: 'taskItem', header: 'Item', size: 110, cell: i => { const id = i.getValue(); return <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}><span style={{ fontSize: 12, color: theme.colors.textSecondary }}>{id || '—'}</span>{id && indicators && <ItemIdBadges itemId={id} inspItems={indicators.inspItems} asmItems={indicators.asmItems} repairItems={indicators.repairItems} />}</div>; } }),
     colT.accessor('description', { id: 'taskDesc', header: 'Description', size: 200, cell: i => <span style={{ fontSize: 12, maxWidth: 190, overflow: 'hidden', textOverflow: 'ellipsis', display: 'block', color: theme.colors.textSecondary }}>{i.getValue() || '—'}</span> }),
     colT.accessor('location', { id: 'taskLocation', header: 'Location', size: 90, cell: i => <span style={{ fontSize: 12, fontFamily: 'monospace', color: theme.colors.textSecondary }}>{i.getValue() || '—'}</span> }),
@@ -266,11 +269,14 @@ function TasksTab({ tasks, onNavigate, indicators }: { tasks: SummaryTask[]; onN
               {virtualRows.length > 0 && <tr style={{ height: virtualRows[0].start }}><td colSpan={table.getVisibleFlatColumns().length} /></tr>}
               {virtualRows.map(vRow => {
                 const row = allRows[vRow.index];
+                const t = row.original;
+                const isOverdue = !!t.dueDate && t.dueDate < TODAY_DASH && (t.status === 'Open' || t.status === 'In Progress');
+                const rowBg = isOverdue ? '#FFF5F5' : 'transparent';
                 return (
                   <tr key={row.id} onClick={() => onNavigate(row.original)}
-                    style={{ cursor: 'pointer', transition: 'background 0.1s' }}
-                    onMouseEnter={e => { e.currentTarget.style.background = theme.colors.bgSubtle; }}
-                    onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}
+                    style={{ cursor: 'pointer', transition: 'background 0.1s', background: rowBg }}
+                    onMouseEnter={e => { e.currentTarget.style.background = isOverdue ? '#FEE2E2' : theme.colors.bgSubtle; }}
+                    onMouseLeave={e => { e.currentTarget.style.background = rowBg; }}
                   >
                     {row.getVisibleCells().map(cell => <td key={cell.id} style={tdStyle}>{flexRender(cell.column.columnDef.cell, cell.getContext())}</td>)}
                   </tr>

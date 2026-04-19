@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useMemo } from 'react';
+import React, { useState, useCallback, useMemo, useEffect } from 'react';
 import { X, ClipboardList, Package, MapPin, CheckCircle2, XCircle, AlertTriangle, FolderOpen, Loader2, Play, ExternalLink, Truck, Wrench, Save, DollarSign, Pencil, FileText } from 'lucide-react';
 import { FolderButton } from './FolderButton';
 import { DeepLink } from './DeepLink';
@@ -7,7 +7,7 @@ import { EntityHistory } from './EntityHistory';
 import { theme } from '../../styles/theme';
 import { fmtDate, fmtDateTime } from '../../lib/constants';
 import { WriteButton } from './WriteButton';
-import { postCompleteTask, postStartTask, postUpdateTaskNotes, postUpdateTaskCustomPrice, postRequestRepairQuote, postCancelTask, postGenerateTaskWorkOrder, postUpdateInventoryItem, isApiConfigured } from '../../lib/api';
+import { postCompleteTask, postStartTask, postUpdateTaskNotes, postUpdateTaskCustomPrice, postRequestRepairQuote, postCancelTask, postGenerateTaskWorkOrder, postUpdateInventoryItem, postUpdateTaskPriority, postUpdateTaskDueDate, isApiConfigured } from '../../lib/api';
 import { writeSyncFailed } from '../../lib/syncEvents';
 import { useLocations } from '../../hooks/useLocations';
 import type { CompleteTaskResponse, StartTaskResponse } from '../../lib/api';
@@ -83,6 +83,33 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
     if (!locationQuery) return locationNames.slice(0, 15);
     return locationNames.filter(l => l.toLowerCase().includes(locationQuery.toLowerCase())).slice(0, 20);
   }, [locationQuery, locationNames]);
+
+  // Priority + Due Date — auto-save on change
+  const canEditPriority = user?.role === 'admin' || user?.role === 'staff';
+  const [priority, setPriority] = useState<'High' | 'Normal'>(task.priority === 'High' ? 'High' : 'Normal');
+  const [dueDate, setDueDate] = useState<string>(task.dueDate || '');
+  useEffect(() => {
+    setPriority(task.priority === 'High' ? 'High' : 'Normal');
+    setDueDate(task.dueDate || '');
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [task.taskId]);
+
+  const handlePriorityToggle = useCallback(async () => {
+    if (!apiConfigured || !clientSheetId || !canEditPriority) return;
+    const newPriority = priority === 'High' ? 'Normal' : 'High';
+    setPriority(newPriority);
+    applyTaskPatch?.(task.taskId, { priority: newPriority });
+    const resp = await postUpdateTaskPriority({ taskId: task.taskId, priority: newPriority }, clientSheetId);
+    if (!resp.ok) { setPriority(priority); clearTaskPatch?.(task.taskId); }
+  }, [apiConfigured, clientSheetId, canEditPriority, priority, task.taskId, applyTaskPatch, clearTaskPatch]);
+
+  const handleDueDateChange = useCallback(async (newDate: string) => {
+    if (!apiConfigured || !clientSheetId) return;
+    setDueDate(newDate);
+    mergeTaskPatch?.(task.taskId, { dueDate: newDate || undefined });
+    const resp = await postUpdateTaskDueDate({ taskId: task.taskId, dueDate: newDate || null }, clientSheetId);
+    if (!resp.ok) { setDueDate(task.dueDate || ''); clearTaskPatch?.(task.taskId); }
+  }, [apiConfigured, clientSheetId, task.taskId, task.dueDate, mergeTaskPatch, clearTaskPatch]);
 
   // Edit/Save mode for task fields
   // Custom Price Override is visible to staff + admin; hidden from clients
@@ -503,6 +530,29 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
                   </a>
                 );
               })()}
+            </div>
+            {/* Due Date */}
+            <div style={{ marginBottom: 10 }}>
+              <div style={{ fontSize: 10, fontWeight: 500, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 4 }}>Due Date</div>
+              {isOpen && !completed ? (
+                <input
+                  type="date"
+                  value={dueDate}
+                  onChange={e => handleDueDateChange(e.target.value)}
+                  style={{ fontSize: 13, border: `1px solid ${theme.colors.border}`, borderRadius: 6, padding: '3px 8px', fontFamily: 'inherit', color: theme.colors.text, background: '#fff', cursor: 'text' }}
+                />
+              ) : (
+                <div style={{ fontSize: 13, color: dueDate ? theme.colors.text : theme.colors.textMuted }}>{dueDate ? fmtDate(dueDate) : '—'}</div>
+              )}
+            </div>
+            {/* Priority */}
+            <div style={{ marginBottom: 10 }}>
+              <div style={{ fontSize: 10, fontWeight: 500, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 4 }}>Priority</div>
+              <span
+                onClick={canEditPriority && isOpen && !completed ? handlePriorityToggle : undefined}
+                style={{ display: 'inline-block', padding: '2px 12px', borderRadius: 12, fontSize: 11, fontWeight: 600, background: priority === 'High' ? '#FEF2F2' : '#F3F4F6', color: priority === 'High' ? '#DC2626' : '#6B7280', cursor: canEditPriority && isOpen && !completed ? 'pointer' : 'default', userSelect: 'none' }}
+                title={canEditPriority && isOpen && !completed ? 'Click to toggle' : undefined}
+              >{priority}</span>
             </div>
           </div>
           <Field label="Description" value={task.description} />

@@ -157,18 +157,18 @@ function cols() {
         return (ORDER[rowA.original.priority ?? 'Normal'] ?? 1) - (ORDER[rowB.original.priority ?? 'Normal'] ?? 1);
       },
       cell: i => {
-      const p = i.getValue() ?? 'Normal';
-      const cfg = PRIORITY_CFG[p] || PRIORITY_CFG.Normal;
-      const task = i.row.original;
-      if (p === 'Normal') return <span style={{ fontSize: 11, color: theme.colors.textMuted }}>—</span>;
-      return (
-        <span
-          onClick={e => { e.stopPropagation(); (window as any).__toggleTaskPriority?.(task.taskId, task.clientSheetId || task.clientId, p); }}
-          style={{ display: 'inline-block', padding: '2px 10px', borderRadius: 12, fontSize: 11, fontWeight: 600, background: cfg.bg, color: cfg.text, cursor: 'pointer', userSelect: 'none' }}
-          title="Click to toggle priority"
-        >{p}</span>
-      );
-    } }),
+        const p = i.getValue() ?? 'Normal';
+        const cfg = PRIORITY_CFG[p] || PRIORITY_CFG.Normal;
+        const task = i.row.original;
+        return (
+          <span
+            onClick={e => { e.stopPropagation(); (window as any).__toggleTaskPriority?.(task.taskId, task.clientSheetId || task.clientId, p); }}
+            style={{ display: 'inline-block', padding: '2px 10px', borderRadius: 12, fontSize: 11, fontWeight: 600, background: cfg.bg, color: cfg.text, cursor: 'pointer', userSelect: 'none' }}
+            title="Click to toggle priority"
+          >{p}</span>
+        );
+      },
+    }),
     col.accessor('completedAt', { header: 'Completed', size: 100, cell: i => <span style={{ fontSize: 12, color: theme.colors.textMuted }}>{fmt(i.getValue())}</span> }),
     col.accessor('result', { header: 'Result', size: 80, cell: i => i.getValue() ? <Badge t={i.getValue()!} c={RESULT_CFG[i.getValue()!]} /> : <span style={{ color: theme.colors.textMuted }}>{'\u2014'}</span> }),
     col.accessor('taskNotes', { header: 'Notes', size: 200, cell: i => <span style={{ color: theme.colors.textSecondary, fontSize: 12, maxWidth: 190, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'block' }}>{i.getValue() || '\u2014'}</span> }),
@@ -228,7 +228,7 @@ export function Tasks() {
   // Bridge for column cell access to component state
   (window as any).__openTaskDetail = (task: Task) => setSelectedTaskId(task.taskId);
   (window as any).__toggleTaskPriority = async (taskId: string, clientSheetId: string, currentPriority: string) => {
-    if (!apiConfigured || !clientSheetId) return;
+    if (!apiConfigured || !clientSheetId || user?.role === 'client') return;
     const newPriority = currentPriority === 'High' ? 'Normal' : 'High';
     applyTaskPatch(taskId, { priority: newPriority as 'High' | 'Normal' });
     const resp = await postUpdateTaskPriority({ taskId, priority: newPriority }, clientSheetId);

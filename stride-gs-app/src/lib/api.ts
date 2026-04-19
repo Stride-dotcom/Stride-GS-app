@@ -3266,6 +3266,7 @@ export interface SummaryTask {
   assignedTo: string;
   created: string;
   dueDate: string;
+  priority: string;
   startedAt: string;
   description: string;
   vendor: string;
