@@ -138,6 +138,29 @@ Removed `!c.isTemplate` guard from `update-deployments.mjs`. Added `--name <part
 
 ## RECENT CHANGES (2026-04-18 session 72)
 
+### 8. Inventory inline editing with full DB autocomplete
+
+Click-to-edit on six columns of the Inventory table. No modals, no detail-panel roundtrip — admin/staff can touch a cell, type, and it's saved everywhere.
+
+**Fields wired:**
+- Reference, Room → plain text
+- Vendor, Sidemark, Description → autocomplete from per-client `Autocomplete_DB` sheet (existing `useAutocomplete` hook, per-client in-memory cache)
+- Location → autocomplete from Supabase `public.locations` (existing `useLocations` hook, already Realtime-subscribed)
+
+**Component:** new `src/components/shared/InlineEditableCell.tsx`. Props: `value`, `itemId`, `clientSheetId`, `fieldKey`, `variant`, `dbField?`, `renderValue?`, `applyItemPatch`, `mergeItemPatch?`, `disabled?`. Three variants: `text`, `autocomplete-db`, `autocomplete-locations`. Enter saves, Esc cancels, blur saves (120ms delay so suggestion-click mousedown wins).
+
+**End-to-end flow:** optimistic `applyItemPatch` paints new value immediately → `postUpdateInventoryItem(itemId, { [field]: value }, clientSheetId)` → handler writes Inventory sheet → router `api_writeThrough_` mirrors Inventory row to Supabase → handler fan-out to open Tasks/Repairs + the v38.72.0 mirror for those → Realtime fires → every open tab refetches. Rollback via `mergeItemPatch` on API failure + red corner indicator.
+
+**Suggestion UI:** up to 10 matches, prefix-matches prioritized over substring-matches, filtered as you type. Dropdown auto-closes on save.
+
+**Role gating:** `canEditInventory = user.role === 'admin' || 'staff'`. Client-role users see plain displays, no click affordance. The GAS handler enforces this server-side too.
+
+**Room column note:** the pre-v38.72.0 Room column in `Inventory.tsx` was a computed read derived from sidemark (`sidemark.split(' / ')[1]`). Now it reads the actual `InventoryItem.room` field, matching the sheet's Room column. Pre-existing rows with empty Room now show `—` instead of a derived value — this is correct behavior.
+
+Deploy: source commit `f6dfd13`, dist bundle `index-LsfJ0RN1.js` (1.59 MB, 1,970 modules). No GAS changes — `handleUpdateInventoryItem_` already supported all 6 fields since v27.0.0. No schema changes.
+
+---
+
 ### 7. Realtime sync Phase 2 — React postgres_changes subscriptions extended
 
 Major finding going in: `src/hooks/useSupabaseRealtime.ts` (pre-existing, mounted in `AppLayout`) already subscribed to **inventory, tasks, repairs, will_calls, shipments, billing, clients**. Only three read-mirror tables weren't wired: **claims, move_history, dt_orders**.
