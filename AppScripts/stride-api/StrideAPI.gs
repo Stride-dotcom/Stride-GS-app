@@ -1,5 +1,10 @@
 /* ===================================================
-   StrideAPI.gs — v38.70.0 — 2026-04-18 PST — Admin-set-password endpoint
+   StrideAPI.gs — v38.70.1 — 2026-04-18 PST — Admin-set-password endpoint (doPost router fix)
+   v38.70.1: HOTFIX — adminSetUserPassword case was only registered in doGet's
+             switch; React calls it via apiPost so it hit doPost's default case
+             ("Unknown POST action"). Added case to doPost switch near
+             sendWelcomeToUsers. Handler signature `(data, callerEmail)` reads
+             from either payload (POST body) or params (GET URL).
    v38.70.0: NEW — handleAdminSetUserPassword_ admin endpoint lets an admin set
              a specific user's Supabase Auth password directly (for clients who
              can't complete the self-serve reset flow). Calls Supabase admin API
@@ -4463,6 +4468,9 @@ function doPost(e) {
         return withAdminGuard_(callerEmail, function() {
           return handleSendWelcomeToUsers_(payload, callerEmail);
         });
+      // v38.70.0 — Admin escape hatch: set a user's Supabase Auth password.
+      case "adminSetUserPassword":
+        return handleAdminSetUserPassword_(payload, callerEmail);
       case "testSendClientTemplates":
         return withStaffGuard_(callerEmail, function() {
           return handleTestSendClientTemplates_(callerEmail, payload);
@@ -5076,7 +5084,8 @@ function handleResyncClients_(params, callerEmail) {
  *   3. PUT /auth/v1/admin/users/{id} with { password: newPassword }
  *   4. Return { success: true, email, userId }
  */
-function handleAdminSetUserPassword_(params, callerEmail) {
+function handleAdminSetUserPassword_(data, callerEmail) {
+  // `data` is the payload (doPost body) or params (doGet URL) — accept either.
   if (!callerEmail) return errorResponse_("callerEmail is required", "AUTH_ERROR");
   try { rateLimit_("adminSetUserPassword_" + callerEmail, 20); } catch (e) { return errorResponse_(String(e.message), "RATE_LIMIT"); }
 
@@ -5085,8 +5094,8 @@ function handleAdminSetUserPassword_(params, callerEmail) {
   if (!callerLookup.user.active) return errorResponse_("Caller deactivated", "AUTH_ERROR");
   if (callerLookup.user.role !== "admin") return errorResponse_("Admin only", "AUTH_ERROR");
 
-  var targetEmail = String((params && params.email) || "").trim().toLowerCase();
-  var newPassword = String((params && params.newPassword) || "");
+  var targetEmail = String((data && data.email) || "").trim().toLowerCase();
+  var newPassword = String((data && data.newPassword) || "");
   if (!targetEmail) return errorResponse_("email is required", "VALIDATION_ERROR");
   if (!newPassword || newPassword.length < 8) return errorResponse_("newPassword must be ≥ 8 characters", "VALIDATION_ERROR");
 
