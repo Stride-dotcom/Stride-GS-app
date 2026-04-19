@@ -683,7 +683,7 @@ export function Labels() {
                 </div>
               </div>
 
-              <div style={{ ...s.card, flex: 1, minHeight: 0 }}>
+              <div style={s.card}>
                 <div style={s.cardTitle}>
                   Pick from existing ({locationNames.length})
                   <button style={{ ...s.btnDanger, marginLeft: 'auto' }} onClick={clearLocs} disabled={!selectedLocs.length}>
@@ -695,9 +695,9 @@ export function Labels() {
                   value={locSearch}
                   onChange={e => setLocSearch(e.target.value)}
                   placeholder="Search…"
-                  style={{ width: '100%', padding: '7px 10px', border: `1px solid ${theme.colors.border}`, borderRadius: 6, fontSize: 12, marginBottom: 6, outline: 'none' }}
+                  style={{ width: '100%', padding: '7px 10px', border: `1px solid ${theme.colors.border}`, borderRadius: 6, fontSize: 12, marginBottom: 6, outline: 'none', boxSizing: 'border-box' }}
                 />
-                <div style={{ flex: 1, overflow: 'auto', border: `1px solid ${theme.colors.borderLight}`, borderRadius: 6 }}>
+                <div style={{ maxHeight: 320, overflow: 'auto', border: `1px solid ${theme.colors.borderLight}`, borderRadius: 6 }}>
                   {filteredLocs.map(code => {
                     const on = selectedLocs.includes(code);
                     return (
@@ -839,16 +839,29 @@ export function Labels() {
         @media print {
           html, body { background: #fff !important; margin: 0 !important; padding: 0 !important; height: auto !important; }
           .no-print { display: none !important; }
-          /* Kill every app chrome element — sidebars, topbar, page containers */
-          #root > *:not(.stride-print-container),
-          aside, nav, header.app-topbar { display: none !important; }
-          .labels-body { grid-template-columns: 1fr !important; padding: 0 !important; display: block !important; overflow: visible !important; }
-          .labels-preview-container { background: #fff !important; padding: 0 !important; border-radius: 0 !important; overflow: visible !important; }
-          .labels-grid { gap: 0 !important; display: block !important; }
+          /* Visibility trick — hide everything, then re-show only the labels
+             grid and its descendants. Previous rule referenced a class
+             (.stride-print-container) that didn't exist anywhere, so it
+             hid every child of #root and printed a blank page. */
+          body * { visibility: hidden !important; }
+          .labels-grid, .labels-grid * { visibility: visible !important; }
+          .labels-grid {
+            position: absolute !important;
+            left: 0 !important;
+            top: 0 !important;
+            right: 0 !important;
+            display: block !important;
+            gap: 0 !important;
+            padding: 0 !important;
+            margin: 0 !important;
+            background: #fff !important;
+          }
           .stride-label {
-            break-inside: avoid; page-break-inside: avoid;
-            border: none !important; margin: 0;
+            break-inside: avoid;
+            page-break-inside: avoid;
             page-break-after: always;
+            border: none !important;
+            margin: 0 !important;
           }
           .stride-label:last-child { page-break-after: auto; }
           @page { margin: 0; }
