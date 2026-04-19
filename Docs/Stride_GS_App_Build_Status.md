@@ -1,7 +1,7 @@
 # Stride GS App — Build Status & Continuation Guide
 
-**Last updated:** 2026-04-18 (session 72 — Expected operations calendar on Shipments page, calendar deep-linking + edit/delete, admin-set-password escape hatch for Settings → Users, worktree `.env` deployment gotcha documented, StrideAPI v38.70.0 / Web App v317)
-**StrideAPI.gs:** v38.70.0 (Web App v317)
+**Last updated:** 2026-04-18 (session 72 — Expected calendar, calendar deep-links + edit/delete, admin-set-password, missing-auth-user detection, Realtime sync Phase 1a [inventory fan-out + addClaimItems mirrors], worktree `.env` gotcha. StrideAPI v38.72.0 / Web App v322)
+**StrideAPI.gs:** v38.72.0 (Web App v322)
 **Import.gs (client):** v4.3.0 (rolled out to all 49 active clients; Reference column now imported)
 **Emails.gs (client):** v4.6.0 (rolled out to all 49 active clients — Room column dropped, Reference takes its place)
 **Shipments.gs (client):** v4.3.2 (rolled out to all 49 active clients — deep links use query-param ?open=&client= format)
@@ -137,6 +137,25 @@ Removed `!c.isTemplate` guard from `update-deployments.mjs`. Added `--name <part
 ---
 
 ## RECENT CHANGES (2026-04-18 session 72)
+
+### 6. Realtime sync Phase 1a — Supabase write-through gap audit + fixes (StrideAPI v38.72.0 / Web App v322)
+
+User requested a sweep of every GAS write handler to close Supabase mirror gaps and prep for full realtime sync. Audit surprise: the router-level `api_writeThrough_(r, entityType, tenantId, entityId)` and `api_fullClientSync_(...)` wrappers — already in place for years — mirror the **primary entity** of every update / complete / cancel / start / batch handler. A read-only subagent audit flagged 24 handlers as "missing mirrors"; manual verification against each router case showed **22 of those 24 were already mirrored via the router**. Only two genuine gaps:
+
+1. **`handleUpdateInventoryItem_` fan-out** — the handler writes the Inventory row (mirrored by the router) AND fans field changes out to open Tasks/Repairs rows (Location / Vendor / Sidemark / Description / Room / Reference). The router only knows about the primary inventory row; the fan-out rows reached Google Sheets but not Supabase. Fix: collect `mirroredTaskIds` + `mirroredRepairIds` during the fan-out loops, then `resyncEntityToSupabase_("task"|"repair", ...)` each one after the sheet writes settle. Best-effort per invariant #20.
+2. **`handleAddClaimItems_`** — router case is wrapped by `withAdminGuard_` only, no `api_writeThrough_`. Fix: `resyncClaimToSupabase_(claimId)` before return.
+
+Handlers I pre-emptively patched with in-handler mirrors and then **reverted** after verifying the router already handles them: `handleUpdateRepairNotes_`, `handleUpdateWillCall_`. Router cases already call `api_writeThrough_(r, "repair"|"will_call", ...)` — in-handler mirrors would be redundant double-hits.
+
+Handlers verified to have router-level coverage (no changes needed): `handleCompleteShipment_` (api_fullClientSync_ across 4 entities), `handleCompleteTask_`, `handleCompleteRepair_`, `handleRespondToRepairQuote_`, `handleStartTask_`, `handleStartRepair_`, `handleReleaseItems_`, `handleProcessWcRelease_`, `handleTransferItems_`, `handleCreateWillCall_` (api_fullClientSync_), `handleUpdateClient_`, `handleOnboardClient_`, all Stax handlers, all Marketing handlers, all batch handlers, Claims handlers, Users CRUD.
+
+**Phase 2 deferred:** React Realtime `postgres_changes` subscriptions on inventory / tasks / repairs / will_calls / shipments / billing / claims / move_history / orders. Current state: only `locations` has a Realtime channel (used by Scanner). Once Phase 2 lands, every open browser will pick up edits made in any other tab within ~2s with no refresh.
+
+Deploy: source commit `439f6e6`, StrideAPI push-api 200 OK → deploy-api → **Web App v322**. No React bundle change (pure backend).
+
+---
+
+
 
 ### 1. Expected operations calendar — new Shipments tab
 Added a second tab on the Shipments page (`Received` | `Expected`) rendering a unified calendar of:
