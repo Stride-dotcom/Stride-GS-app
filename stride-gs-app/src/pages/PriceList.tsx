@@ -8,8 +8,8 @@
  *
  * Data: public.service_catalog via useServiceCatalog (Supabase Realtime).
  */
-import { useMemo, useState } from 'react';
-import { Plus, Search, Tag, Download, Share2, Check, Copy, X, UploadCloud, ChevronDown, ChevronRight } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { Plus, Search, Tag, Download, Share2, Check, Copy, X, UploadCloud, ChevronDown, ChevronRight, ArrowUp, ArrowDown } from 'lucide-react';
 import { theme } from '../styles/theme';
 import { useServiceCatalog, type CatalogService, type ServiceCategory } from '../hooks/useServiceCatalog';
 import { ServiceRow } from '../components/pricelist/ServiceRow';
@@ -17,6 +17,47 @@ import { AddServiceModal } from '../components/pricelist/AddServiceModal';
 import { downloadPriceListExcel } from '../components/pricelist/exportPriceListExcel';
 import { usePriceListShares, type PriceListShare } from '../hooks/usePriceListShares';
 import { syncPriceListFromSupabase } from '../lib/api';
+import { useAuth } from '../contexts/AuthContext';
+
+// Persisted user prefs (per-email, mirrors useExpectedShipments's old pattern)
+type SortKey = 'code' | 'name' | 'rate' | 'unit' | 'active';
+type SortDir = 'asc' | 'desc';
+
+interface PriceListPrefs {
+  sortKey: SortKey;
+  sortDir: SortDir;
+  showInactive: boolean;
+  collapsed: string[];
+}
+
+const DEFAULT_PREFS: PriceListPrefs = {
+  sortKey: 'code',
+  sortDir: 'asc',
+  showInactive: false,
+  collapsed: [],
+};
+
+function prefsKey(email: string) {
+  return `stride_pricelist_prefs_${email || '_anon'}`;
+}
+
+function loadPrefs(email: string): PriceListPrefs {
+  try {
+    const raw = localStorage.getItem(prefsKey(email));
+    if (!raw) return DEFAULT_PREFS;
+    const parsed = JSON.parse(raw) as Partial<PriceListPrefs>;
+    return {
+      sortKey: parsed.sortKey ?? DEFAULT_PREFS.sortKey,
+      sortDir: parsed.sortDir ?? DEFAULT_PREFS.sortDir,
+      showInactive: parsed.showInactive ?? DEFAULT_PREFS.showInactive,
+      collapsed: Array.isArray(parsed.collapsed) ? parsed.collapsed : [],
+    };
+  } catch { return DEFAULT_PREFS; }
+}
+
+function savePrefs(email: string, prefs: PriceListPrefs) {
+  try { localStorage.setItem(prefsKey(email), JSON.stringify(prefs)); } catch { /* quota */ }
+}
 
 const ALL_CATEGORIES: ServiceCategory[] = [
   'Warehouse', 'Storage', 'Shipping', 'Assembly',
@@ -34,18 +75,47 @@ type CategoryFilter = 'All' | ServiceCategory;
 
 export function PriceList() {
   const v2 = theme.v2;
+  const { user } = useAuth();
+  const email = user?.email || '_anon';
   const { services, loading, error, createService, updateService, deleteService } = useServiceCatalog();
   const { createShare } = usePriceListShares();
+
+  // Hydrate persisted prefs synchronously on first render so the UI never
+  // flashes the defaults before localStorage loads.
+  const initialPrefs = useRef<PriceListPrefs>(loadPrefs(email)).current;
 
   const [categoryFilter, setCategoryFilter] = useState<CategoryFilter>('All');
   const [search, setSearch] = useState('');
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set(initialPrefs.collapsed));
+  const [sortKey, setSortKey] = useState<SortKey>(initialPrefs.sortKey);
+  const [sortDir, setSortDir] = useState<SortDir>(initialPrefs.sortDir);
+  const [showInactive, setShowInactive] = useState(initialPrefs.showInactive);
   const [showAdd, setShowAdd] = useState(false);
   const [showShare, setShowShare] = useState(false);
   const [newShare, setNewShare] = useState<PriceListShare | null>(null);
   const [syncing, setSyncing] = useState(false);
   const [syncResult, setSyncResult] = useState<{ kind: 'ok'; message: string } | { kind: 'err'; message: string } | null>(null);
+
+  // If the auth email changes mid-session (impersonation, sign-out + sign-in),
+  // re-hydrate from the new key so we don't accidentally write one user's prefs
+  // under another user's key.
+  const lastEmailRef = useRef(email);
+  useEffect(() => {
+    if (lastEmailRef.current !== email) {
+      lastEmailRef.current = email;
+      const next = loadPrefs(email);
+      setSortKey(next.sortKey);
+      setSortDir(next.sortDir);
+      setShowInactive(next.showInactive);
+      setCollapsed(new Set(next.collapsed));
+    }
+  }, [email]);
+
+  // Persist on every relevant change.
+  useEffect(() => {
+    savePrefs(email, { sortKey, sortDir, showInactive, collapsed: Array.from(collapsed) });
+  }, [email, sortKey, sortDir, showInactive, collapsed]);
 
   const handleSyncToSheet = async () => {
     if (syncing) return;
@@ -70,17 +140,47 @@ export function PriceList() {
     return c;
   }, [services]);
 
-  // Filtered + searched
+  // Filtered + searched (Show Inactive applied here — when off, inactive rows
+  // are completely removed from the list; when on, they're kept and dimmed
+  // by ServiceRow's existing opacity rule).
   const visible = useMemo(() => {
     const q = search.trim().toLowerCase();
     return services.filter(s => {
+      if (!showInactive && !s.active) return false;
       if (categoryFilter !== 'All' && s.category !== categoryFilter) return false;
       if (q && !(s.code.toLowerCase().includes(q) || s.name.toLowerCase().includes(q))) return false;
       return true;
     });
-  }, [services, categoryFilter, search]);
+  }, [services, categoryFilter, search, showInactive]);
 
-  // Group visible services by category, preserving display order within each group.
+  // Compare two services by the active sort key. Always stable: ties fall
+  // back to displayOrder so the list doesn't shuffle when sort values match.
+  const compare = useMemo(() => {
+    const dir = sortDir === 'asc' ? 1 : -1;
+    return (a: CatalogService, b: CatalogService) => {
+      let av: string | number = '';
+      let bv: string | number = '';
+      switch (sortKey) {
+        case 'code':
+          av = a.code.toLowerCase(); bv = b.code.toLowerCase(); break;
+        case 'name':
+          av = a.name.toLowerCase(); bv = b.name.toLowerCase(); break;
+        case 'rate':
+          av = a.billing === 'flat' ? a.flatRate : (a.rates.XS ?? 0);
+          bv = b.billing === 'flat' ? b.flatRate : (b.rates.XS ?? 0);
+          break;
+        case 'unit':
+          av = a.unit; bv = b.unit; break;
+        case 'active':
+          av = a.active ? 0 : 1; bv = b.active ? 0 : 1; break;
+      }
+      if (av < bv) return -1 * dir;
+      if (av > bv) return  1 * dir;
+      return a.displayOrder - b.displayOrder;
+    };
+  }, [sortKey, sortDir]);
+
+  // Group visible services by category, sorting each group by the active sort.
   const grouped = useMemo(() => {
     const map = new Map<string, CatalogService[]>();
     for (const s of visible) {
@@ -88,16 +188,26 @@ export function PriceList() {
       arr.push(s);
       map.set(s.category, arr);
     }
-    // Stable category ordering: ALL_CATEGORIES first, then any extras (e.g., Fabric Protection)
     const ordered: { category: string; services: CatalogService[] }[] = [];
     for (const cat of ALL_CATEGORIES) {
       const arr = map.get(cat);
-      if (arr && arr.length) ordered.push({ category: cat, services: arr });
+      if (arr && arr.length) ordered.push({ category: cat, services: [...arr].sort(compare) });
       map.delete(cat);
     }
-    for (const [cat, arr] of map) ordered.push({ category: cat, services: arr });
+    for (const [cat, arr] of map) ordered.push({ category: cat, services: [...arr].sort(compare) });
     return ordered;
-  }, [visible]);
+  }, [visible, compare]);
+
+  const handleSort = (key: SortKey) => {
+    if (sortKey === key) {
+      setSortDir(d => (d === 'asc' ? 'desc' : 'asc'));
+    } else {
+      setSortKey(key);
+      // Sensible default direction per column: most are ascending; for "Active"
+      // ascending puts active rows first (active=0, inactive=1).
+      setSortDir('asc');
+    }
+  };
 
   // Stats
   const stats = useMemo(() => {
@@ -249,26 +359,51 @@ export function PriceList() {
 
         {/* Right pane */}
         <section style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 16 }}>
-          {/* Search bar */}
-          <div style={{ position: 'relative' }}>
-            <Search size={14} style={{
-              position: 'absolute', left: 14, top: '50%', transform: 'translateY(-50%)',
-              color: v2.colors.textMuted,
-            }} />
-            <input
-              value={search}
-              onChange={e => setSearch(e.target.value)}
-              placeholder="Search services by code or name…"
-              style={{
-                width: '100%', boxSizing: 'border-box',
-                padding: '12px 14px 12px 38px',
-                background: v2.colors.bgWhite,
-                border: `1px solid ${v2.colors.border}`,
-                borderRadius: v2.radius.input,
-                fontSize: 13, color: v2.colors.text,
-                fontFamily: 'inherit',
-              }}
+          {/* Search + Show Inactive toggle */}
+          <div style={{ display: 'flex', gap: 12, alignItems: 'stretch' }}>
+            <div style={{ position: 'relative', flex: 1 }}>
+              <Search size={14} style={{
+                position: 'absolute', left: 14, top: '50%', transform: 'translateY(-50%)',
+                color: v2.colors.textMuted,
+              }} />
+              <input
+                value={search}
+                onChange={e => setSearch(e.target.value)}
+                placeholder="Search services by code or name…"
+                style={{
+                  width: '100%', boxSizing: 'border-box',
+                  padding: '12px 14px 12px 38px',
+                  background: v2.colors.bgWhite,
+                  border: `1px solid ${v2.colors.border}`,
+                  borderRadius: v2.radius.input,
+                  fontSize: 13, color: v2.colors.text,
+                  fontFamily: 'inherit',
+                }}
+              />
+            </div>
+            <ShowInactiveToggle
+              checked={showInactive}
+              onChange={setShowInactive}
             />
+          </div>
+
+          {/* Sort header — applies to all category sections */}
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap',
+            padding: '10px 14px',
+            background: v2.colors.bgCard,
+            border: `1px solid ${v2.colors.border}`,
+            borderRadius: v2.radius.input,
+          }}>
+            <span style={{
+              fontSize: 10, fontWeight: 600, letterSpacing: '2px',
+              color: v2.colors.textMuted, textTransform: 'uppercase', marginRight: 4,
+            }}>Sort by</span>
+            <SortHeader label="Code"   active={sortKey === 'code'}   dir={sortDir} onClick={() => handleSort('code')} />
+            <SortHeader label="Name"   active={sortKey === 'name'}   dir={sortDir} onClick={() => handleSort('name')} />
+            <SortHeader label="Rate"   active={sortKey === 'rate'}   dir={sortDir} onClick={() => handleSort('rate')} />
+            <SortHeader label="Unit"   active={sortKey === 'unit'}   dir={sortDir} onClick={() => handleSort('unit')} />
+            <SortHeader label="Active" active={sortKey === 'active'} dir={sortDir} onClick={() => handleSort('active')} />
           </div>
 
           {/* Grouped list */}
@@ -553,6 +688,66 @@ function GeneratedLinkCard({ share, onClose }: { share: PriceListShare; onClose:
         </div>
       </div>
     </div>
+  );
+}
+
+// ─── Sort header pill ──────────────────────────────────────────────────
+
+function SortHeader({ label, active, dir, onClick }: { label: string; active: boolean; dir: SortDir; onClick: () => void }) {
+  const v2 = theme.v2;
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        display: 'inline-flex', alignItems: 'center', gap: 4,
+        padding: '6px 12px', borderRadius: v2.radius.button,
+        background: active ? v2.colors.accent : v2.colors.bgWhite,
+        border: `1px solid ${active ? v2.colors.accent : v2.colors.border}`,
+        color: active ? '#fff' : v2.colors.text,
+        cursor: 'pointer', fontFamily: 'inherit',
+        fontSize: 10, fontWeight: 600, letterSpacing: '1.5px',
+        textTransform: 'uppercase',
+        transition: 'all 0.15s',
+      }}
+    >
+      {label}
+      {active && (dir === 'asc' ? <ArrowUp size={11} /> : <ArrowDown size={11} />)}
+    </button>
+  );
+}
+
+// ─── Show Inactive toggle ──────────────────────────────────────────────
+
+function ShowInactiveToggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
+  const v2 = theme.v2;
+  return (
+    <button
+      onClick={() => onChange(!checked)}
+      title={checked ? 'Showing inactive services (dimmed)' : 'Inactive services hidden'}
+      style={{
+        display: 'inline-flex', alignItems: 'center', gap: 10,
+        padding: '0 16px', borderRadius: v2.radius.input,
+        background: v2.colors.bgWhite,
+        border: `1px solid ${checked ? v2.colors.accent : v2.colors.border}`,
+        color: v2.colors.text, cursor: 'pointer', fontFamily: 'inherit',
+        fontSize: 11, fontWeight: 600, letterSpacing: '1.5px',
+        textTransform: 'uppercase', whiteSpace: 'nowrap',
+        transition: 'border-color 0.15s',
+      }}
+    >
+      <span>Show Inactive</span>
+      <div style={{
+        position: 'relative', width: 30, height: 18,
+        background: checked ? v2.colors.accent : '#D4D0CA',
+        borderRadius: 100, transition: 'background 0.15s', flexShrink: 0,
+      }}>
+        <div style={{
+          position: 'absolute', top: 2, left: checked ? 14 : 2,
+          width: 14, height: 14, borderRadius: '50%', background: '#fff',
+          transition: 'left 0.15s', boxShadow: '0 1px 3px rgba(0,0,0,0.2)',
+        }} />
+      </div>
+    </button>
   );
 }
 
