@@ -1,26 +1,26 @@
 /**
  * useQuoteStore — Quote Tool data layer.
  *
- * Session 73 — service catalog is now sourced from Supabase
- * (public.service_catalog via useServiceCatalog) instead of per-user
- * localStorage. Quotes themselves, plus tax areas / classes / coverage
- * options / settings, remain in localStorage (per-user).
+ * Session 73 Phase 2 — ALL catalog data (services, classes, tax areas,
+ * coverage options) now comes from Supabase via useQuoteCatalog.
+ * quoteDefaults.ts is the fallback only when Supabase returns empty.
  *
- * Fallback: if Supabase returns no services (empty table, auth issue,
- * offline), we fall back to DEFAULT_SERVICES from quoteDefaults.ts so
- * the Quote Tool still loads. Edits to services happen on /price-list,
- * NOT inside the Quote Tool — the Quote Tool's catalog tab is read-only.
+ * Still in localStorage (per-user, not per-workspace):
+ *   - Quotes themselves (createQuote, updateQuote, duplicateQuote, ...)
+ *   - Quote Tool Settings (prefix, expiration days, storage months, company info)
+ *
+ * Catalog-mutation methods (addService/updateService/deleteService/
+ * addTaxArea/updateTaxArea/deleteTaxArea/resetCatalog) are now no-op
+ * warning stubs — edits happen on /price-list.
  */
 import { useState, useCallback, useRef, useMemo } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import type {
   Quote, QuoteStatus, QuoteCatalog, QuoteStoreSettings, ClassLine, ServiceDef,
 } from '../lib/quoteTypes';
-import {
-  DEFAULT_SERVICES, DEFAULT_CLASSES, DEFAULT_TAX_AREAS,
-  DEFAULT_COVERAGE_OPTIONS, DEFAULT_SETTINGS,
-} from '../lib/quoteDefaults';
-import { useServiceCatalog, type CatalogService } from './useServiceCatalog';
+import { DEFAULT_SERVICES, DEFAULT_SETTINGS } from '../lib/quoteDefaults';
+import { useQuoteCatalog } from './useQuoteCatalog';
+import type { CatalogService } from './useServiceCatalog';
 
 function storageKey(email: string, suffix: string) {
   return `stride_quotes_${email}_${suffix}`;
@@ -70,7 +70,7 @@ export function createBlankQuote(settings: QuoteStoreSettings, classes: QuoteCat
     discount: { type: 'percent', value: 0, reason: '' },
     taxEnabled: true,
     taxRate: defaultArea?.rate ?? 10.4,
-    taxAreaId: defaultArea?.id ?? 'kent',
+    taxAreaId: defaultArea?.id ?? '',
     coverage: { typeId: 'standard', declaredValue: 0, weightLbs: 0, costOverride: null },
     customerNotes: '', internalNotes: '',
     createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
@@ -83,14 +83,13 @@ export function createBlankQuote(settings: QuoteStoreSettings, classes: QuoteCat
  * and matrix-ordering from display_order.
  */
 function catalogToServiceDef(c: CatalogService): ServiceDef {
+  const allowed: ServiceDef['category'][] = ['Warehouse','Storage','Shipping','Assembly','Repair','Labor','Admin','Delivery'];
+  const cat = allowed.includes(c.category as ServiceDef['category']) ? (c.category as ServiceDef['category']) : 'Admin';
   return {
-    id: c.code,              // use code as stable ID (matches legacy behavior where id===code for most defaults)
+    id: c.code,              // use code as stable ID for matrix cell keys
     code: c.code,
     name: c.name,
-    // ServiceCategory in quoteTypes is narrower — Fabric Protection is accepted via union widening in the types update.
-    category: (['Warehouse','Storage','Shipping','Assembly','Repair','Labor','Admin','Delivery'].includes(c.category)
-      ? c.category
-      : 'Admin') as ServiceDef['category'],
+    category: cat,
     unit: c.unit,
     billing: c.billing,
     isStorage: c.category === 'Storage',
@@ -115,25 +114,15 @@ export function useQuoteStore() {
   const email = user?.email || '_anon';
   const keysRef = useRef({
     quotes: storageKey(email, 'list'),
-    nonSvcCatalog: storageKey(email, 'catalog_v2'),
     settings: storageKey(email, 'settings'),
   });
   keysRef.current = {
     quotes: storageKey(email, 'list'),
-    nonSvcCatalog: storageKey(email, 'catalog_v2'),
     settings: storageKey(email, 'settings'),
   };
 
-  // ── Supabase-backed service catalog ──────────────────────────────────
-  const sbCatalog = useServiceCatalog();
-
-  // ── Local (classes, tax areas, coverage) — not yet in Supabase ───────
-  type NonServiceCatalog = Omit<QuoteCatalog, 'services'>;
-  const [nonSvcCatalog, setNonSvcCatalogRaw] = useState<NonServiceCatalog>(() => loadJson(keysRef.current.nonSvcCatalog, {
-    classes: DEFAULT_CLASSES,
-    taxAreas: DEFAULT_TAX_AREAS,
-    coverageOptions: DEFAULT_COVERAGE_OPTIONS,
-  }));
+  // ── Supabase-backed catalog (services + classes + tax + coverage) ──
+  const sbCatalog = useQuoteCatalog();
 
   const [quotes, setQuotesRaw] = useState<Quote[]>(() => loadJson(keysRef.current.quotes, []));
   const [settings, setSettingsRaw] = useState<QuoteStoreSettings>(() => loadJson(keysRef.current.settings, DEFAULT_SETTINGS));
@@ -146,14 +135,6 @@ export function useQuoteStore() {
     });
   }, []);
 
-  const setNonSvcCatalog = useCallback((updater: NonServiceCatalog | ((prev: NonServiceCatalog) => NonServiceCatalog)) => {
-    setNonSvcCatalogRaw(prev => {
-      const next = typeof updater === 'function' ? updater(prev) : updater;
-      saveJson(keysRef.current.nonSvcCatalog, next);
-      return next;
-    });
-  }, []);
-
   const setSettings = useCallback((updater: QuoteStoreSettings | ((prev: QuoteStoreSettings) => QuoteStoreSettings)) => {
     setSettingsRaw(prev => {
       const next = typeof updater === 'function' ? updater(prev) : updater;
@@ -162,28 +143,26 @@ export function useQuoteStore() {
     });
   }, []);
 
-  // ── Derived catalog — merge Supabase services with local classes/tax/coverage ──
+  // ── Derived catalog — Supabase-first, DEFAULT_* fallback ────────────
   const services: ServiceDef[] = useMemo(() => {
     if (sbCatalog.services.length > 0) {
       return sbCatalog.services
         .map(catalogToServiceDef)
         .sort((a, b) => a.matrixOrder - b.matrixOrder);
     }
-    // Fallback: Supabase unreachable OR still loading AND no services returned
     return DEFAULT_SERVICES;
   }, [sbCatalog.services]);
 
   const catalog: QuoteCatalog = useMemo(() => ({
     services,
-    classes: nonSvcCatalog.classes,
-    taxAreas: nonSvcCatalog.taxAreas,
-    coverageOptions: nonSvcCatalog.coverageOptions,
-  }), [services, nonSvcCatalog]);
+    classes: sbCatalog.classes,
+    taxAreas: sbCatalog.taxAreas,
+    coverageOptions: sbCatalog.coverageOptions,
+  }), [services, sbCatalog.classes, sbCatalog.taxAreas, sbCatalog.coverageOptions]);
 
-  const catalogSource: 'supabase' | 'fallback' =
-    sbCatalog.services.length > 0 ? 'supabase' : 'fallback';
+  const catalogSource: 'supabase' | 'fallback' = sbCatalog.source;
 
-  // ── Quote CRUD ─────────────────────────────────────────────────────────
+  // ── Quote CRUD (still localStorage) ─────────────────────────────────
   const createQuote = useCallback((): Quote => {
     const q = createBlankQuote(settings, catalog.classes, catalog.taxAreas);
     setQuotes(prev => [q, ...prev]);
@@ -220,70 +199,53 @@ export function useQuoteStore() {
     updateQuote(id, { status });
   }, [updateQuote]);
 
-  // ── Service CRUD — deprecated in Quote Tool UI; edits happen on /price-list.
-  // Stubs kept so existing consumers compile. They no-op with a warning so
-  // we can catch any stray call sites in dev.
+  // ── Quote import/export (quotes only — catalog not exported anymore) ──
+  const exportQuotes = useCallback((): string => {
+    return JSON.stringify({ quotes, settings, version: 2 }, null, 2);
+  }, [quotes, settings]);
+
+  const importQuotes = useCallback((json: string): { imported: number; error?: string } => {
+    try {
+      const data = JSON.parse(json);
+      if (Array.isArray(data.quotes)) {
+        setQuotes(data.quotes as Quote[]);
+      }
+      if (data.settings) {
+        setSettings({ ...DEFAULT_SETTINGS, ...data.settings });
+      }
+      return { imported: Array.isArray(data.quotes) ? data.quotes.length : 0 };
+    } catch (err) {
+      return { imported: 0, error: err instanceof Error ? err.message : 'Invalid JSON' };
+    }
+  }, [setQuotes, setSettings]);
+
+  // ── Deprecated catalog-mutation stubs (edits happen on /price-list) ──
   const notSupported = (what: string) => () => {
-    console.warn(`[useQuoteStore] ${what} is no longer supported from the Quote Tool. Edit services on /price-list.`);
+    console.warn(`[useQuoteStore] ${what} is no longer supported from the Quote Tool. Edit on /price-list.`);
   };
   const addService    = notSupported('addService');
   const updateService = notSupported('updateService');
   const deleteService = notSupported('deleteService');
-
-  // ── Tax area CRUD (still local) ─────────────────────────────────────────
-  const addTaxArea = useCallback((ta: QuoteCatalog['taxAreas'][0]) => {
-    setNonSvcCatalog(prev => ({ ...prev, taxAreas: [...prev.taxAreas, ta] }));
-  }, [setNonSvcCatalog]);
-
-  const updateTaxArea = useCallback((id: string, patch: Partial<QuoteCatalog['taxAreas'][0]>) => {
-    setNonSvcCatalog(prev => ({
-      ...prev,
-      taxAreas: prev.taxAreas.map(t => t.id === id ? { ...t, ...patch } : t),
-    }));
-  }, [setNonSvcCatalog]);
-
-  const deleteTaxArea = useCallback((id: string) => {
-    setNonSvcCatalog(prev => ({ ...prev, taxAreas: prev.taxAreas.filter(t => t.id !== id) }));
-  }, [setNonSvcCatalog]);
-
-  // ── Reset helpers ───────────────────────────────────────────────────────
-  const resetCatalog = useCallback(() => {
-    // Only resets the local (non-service) parts now. Services live in Supabase.
-    setNonSvcCatalog({
-      classes: DEFAULT_CLASSES,
-      taxAreas: DEFAULT_TAX_AREAS,
-      coverageOptions: DEFAULT_COVERAGE_OPTIONS,
-    });
-  }, [setNonSvcCatalog]);
+  const addTaxArea    = notSupported('addTaxArea');
+  const updateTaxArea = notSupported('updateTaxArea');
+  const deleteTaxArea = notSupported('deleteTaxArea');
+  const resetCatalog  = notSupported('resetCatalog');
+  const setCatalog    = notSupported('setCatalog');
 
   const resetSettings = useCallback(() => {
     setSettings(DEFAULT_SETTINGS);
   }, [setSettings]);
 
-  // setCatalog kept for call-site compat: merges into local catalog bits,
-  // silently drops `services` since those are server-owned.
-  const setCatalog = useCallback((updater: QuoteCatalog | ((prev: QuoteCatalog) => QuoteCatalog)) => {
-    setNonSvcCatalog(prev => {
-      const prevFull: QuoteCatalog = { services, ...prev };
-      const next = typeof updater === 'function' ? updater(prevFull) : updater;
-      return {
-        classes: next.classes,
-        taxAreas: next.taxAreas,
-        coverageOptions: next.coverageOptions,
-      };
-    });
-  }, [services, setNonSvcCatalog]);
-
   return {
     quotes, catalog, settings,
     setQuotes, setCatalog, setSettings,
     createQuote, updateQuote, deleteQuote, duplicateQuote, setQuoteStatus,
+    exportQuotes, importQuotes,
     addService, updateService, deleteService,
     addTaxArea, updateTaxArea, deleteTaxArea,
     resetCatalog, resetSettings,
-    // New: expose source + loading so the Catalog tab can display status
     catalogSource,
     catalogLoading: sbCatalog.loading,
-    catalogError: sbCatalog.error,
+    catalogError: null as string | null,
   };
 }

@@ -755,6 +755,18 @@ export function fetchPricing(signal?: AbortSignal) {
   return apiFetch<PricingResponse>('getPricing', undefined, { signal });
 }
 
+/** Session 73 Phase 2 — admin-only. Pushes Supabase service_catalog to MPL Price_List. */
+export interface SyncPriceListResponse {
+  success: boolean;
+  updated: number;
+  appended: number;
+  total_supabase: number;
+  synced_at: string;
+}
+export function syncPriceListFromSupabase(signal?: AbortSignal) {
+  return apiFetch<SyncPriceListResponse>('syncPriceListFromSupabase', undefined, { signal });
+}
+
 /** Session 70 fix #2 — Payment terms from CB Payment_Terms tab. */
 export function fetchPaymentTerms(signal?: AbortSignal) {
   return apiFetch<PaymentTermsResponse>('getPaymentTerms', undefined, { signal });

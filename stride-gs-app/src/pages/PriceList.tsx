@@ -10,7 +10,7 @@
  * local store). Future phases will migrate Quote Tool to read from here.
  */
 import { useMemo, useState } from 'react';
-import { Plus, Search, Tag, Download, Share2, Check, Copy, X } from 'lucide-react';
+import { Plus, Search, Tag, Download, Share2, Check, Copy, X, UploadCloud } from 'lucide-react';
 import { theme } from '../styles/theme';
 import { useServiceCatalog, type CatalogService, type ServiceCategory } from '../hooks/useServiceCatalog';
 import { ServiceCard } from '../components/pricelist/ServiceCard';
@@ -18,6 +18,7 @@ import { ServiceEditPanel } from '../components/pricelist/ServiceEditPanel';
 import { AddServiceModal } from '../components/pricelist/AddServiceModal';
 import { downloadPriceListExcel } from '../components/pricelist/exportPriceListExcel';
 import { usePriceListShares, type PriceListShare } from '../hooks/usePriceListShares';
+import { syncPriceListFromSupabase } from '../lib/api';
 
 const ALL_CATEGORIES: ServiceCategory[] = [
   'Warehouse', 'Storage', 'Shipping', 'Assembly',
@@ -44,6 +45,24 @@ export function PriceList() {
   const [showAdd, setShowAdd] = useState(false);
   const [showShare, setShowShare] = useState(false);
   const [newShare, setNewShare] = useState<PriceListShare | null>(null);
+  const [syncing, setSyncing] = useState(false);
+  const [syncResult, setSyncResult] = useState<{ kind: 'ok'; message: string } | { kind: 'err'; message: string } | null>(null);
+
+  const handleSyncToSheet = async () => {
+    if (syncing) return;
+    setSyncing(true);
+    setSyncResult(null);
+    const res = await syncPriceListFromSupabase();
+    setSyncing(false);
+    if (res.ok && res.data) {
+      const d = res.data;
+      setSyncResult({ kind: 'ok', message: `Synced to Master Price List — ${d.updated} updated, ${d.appended} appended (${d.total_supabase} services)` });
+    } else {
+      setSyncResult({ kind: 'err', message: res.error || 'Sync failed' });
+    }
+    // Clear the toast after 6 seconds
+    setTimeout(() => setSyncResult(null), 6000);
+  };
 
   // Per-category counts for the sidebar
   const counts = useMemo(() => {
@@ -110,6 +129,25 @@ export function PriceList() {
             <Share2 size={14} /> Share
           </button>
           <button
+            onClick={handleSyncToSheet}
+            disabled={syncing || services.length === 0}
+            title="Push current Supabase rates to the Master Price List sheet so GAS billing sees them"
+            style={{
+              display: 'flex', alignItems: 'center', gap: 6,
+              padding: '10px 20px', borderRadius: v2.radius.button,
+              background: 'transparent', border: `1px solid ${v2.colors.border}`,
+              color: (syncing || services.length === 0) ? v2.colors.textMuted : v2.colors.text,
+              cursor: (syncing || services.length === 0) ? 'not-allowed' : 'pointer',
+              fontSize: 11, fontWeight: 600, letterSpacing: '1.5px',
+              textTransform: 'uppercase', fontFamily: 'inherit',
+              transition: 'background 0.15s',
+            }}
+            onMouseEnter={e => { if (!syncing && services.length > 0) e.currentTarget.style.background = v2.colors.bgCard; }}
+            onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}
+          >
+            <UploadCloud size={14} /> {syncing ? 'Syncing…' : 'Sync to Sheet'}
+          </button>
+          <button
             onClick={() => downloadPriceListExcel(services)}
             disabled={services.length === 0}
             title="Download a formatted Excel workbook of all services"
@@ -151,6 +189,19 @@ export function PriceList() {
           borderRadius: v2.radius.input, fontSize: 13,
         }}>
           {error}
+        </div>
+      )}
+
+      {/* Sync result toast */}
+      {syncResult && (
+        <div style={{
+          padding: '12px 16px', marginBottom: 16,
+          background: syncResult.kind === 'ok' ? 'rgba(74,138,92,0.12)' : 'rgba(180,90,90,0.10)',
+          color: syncResult.kind === 'ok' ? '#4A8A5C' : '#B45A5A',
+          border: `1px solid ${syncResult.kind === 'ok' ? 'rgba(74,138,92,0.3)' : 'rgba(180,90,90,0.3)'}`,
+          borderRadius: v2.radius.input, fontSize: 13,
+        }}>
+          {syncResult.message}
         </div>
       )}
 

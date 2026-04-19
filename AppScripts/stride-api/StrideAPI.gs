@@ -1,5 +1,13 @@
 /* ===================================================
-   StrideAPI.gs — v38.72.0 — 2026-04-18 PST — Supabase mirror closes fan-out gaps
+   StrideAPI.gs — v38.73.0 — 2026-04-19 PST — syncPriceListFromSupabase endpoint
+   v38.73.0: Admin-only endpoint that pulls service_catalog rows from Supabase
+             and writes them back to the Master Price List `Price_List` tab via
+             header-based column mapping. Closes the loop so edits made on the
+             React /price-list page reach the billing engine (which reads MPL
+             directly via handleGetPricing_). Non-destructive — unknown columns
+             on the sheet are preserved; new services are appended. Cache
+             invalidation on api_pricing after each successful sync.
+   v38.72.0 — 2026-04-18 PST — Supabase mirror closes fan-out gaps
    v38.72.0: Realtime sync Phase 1a — fill the two genuine write-through gaps
              discovered during the audit. Router-level api_writeThrough_ already
              mirrors the PRIMARY entity for every update / complete / cancel /
@@ -3758,6 +3766,7 @@ function doGet(e) {
       // ─── Config data (staff/admin only for getClients; others open to all authed) ───
       case "getClients":      return handleGetClientsAuthed_(callerEmail, params.includeInactive === "1");
       case "getPricing":      return withActiveUserGuard_(callerEmail, function() { return handleGetPricing_(); });
+      case "syncPriceListFromSupabase": return handleSyncPriceListFromSupabase_(params, callerEmail);
       case "getLocations":    return withActiveUserGuard_(callerEmail, function() { return handleGetLocations_(); });
       case "getPaymentTerms": return withActiveUserGuard_(callerEmail, function() { return handleGetPaymentTerms_(); });
 
@@ -6108,6 +6117,189 @@ function handleGetClients_(scopeIds, includeInactive) {
   }
 
   return jsonResponse_({ clients: clients, count: clients.length });
+}
+
+/**
+ * handleSyncPriceListFromSupabase_ (v38.73.0, session 73 Phase 2) —
+ * Admin-triggered sync from public.service_catalog (Supabase) to the
+ * Master Price List `Price_List` tab. React is the editor; GAS reads
+ * pricing from the MPL sheet via handleGetPricing_ for billing. This
+ * endpoint closes the loop so edits on /price-list reach the billing
+ * engine.
+ *
+ * Strategy:
+ *   1. GET /rest/v1/service_catalog?select=* with service role key.
+ *   2. Read MPL Price_List tab. Header row is authoritative — this
+ *      handler is non-destructive (CLAUDE.md invariant #3).
+ *   3. For each Supabase service, match on "Service Code" column.
+ *      - Match found → update only the columns that exist on the sheet
+ *        AND that we know how to fill. All other columns are left
+ *        untouched (so client-specific notes/flags survive).
+ *      - No match → append a new row populated with whatever columns
+ *        we can fill.
+ *   4. Invalidate the api_pricing CacheService entry so the next
+ *      handleGetPricing_ call reflects the new data.
+ */
+function handleSyncPriceListFromSupabase_(params, callerEmail) {
+  try { rateLimit_("syncPriceList_" + callerEmail, 10); } catch(e) { return errorResponse_(String(e.message), "RATE_LIMIT"); }
+
+  var callerLookup = lookupUser_(callerEmail);
+  if (!callerLookup.user)          return errorResponse_("Caller not found", "AUTH_ERROR");
+  if (!callerLookup.user.active)   return errorResponse_("Caller deactivated", "AUTH_ERROR");
+  if (callerLookup.user.role !== "admin") return errorResponse_("Admin only", "AUTH_ERROR");
+
+  var mplId = prop_("MASTER_PRICE_LIST_SPREADSHEET_ID");
+  if (!mplId) return errorResponse_("MASTER_PRICE_LIST_SPREADSHEET_ID not configured", "CONFIG_ERROR");
+
+  var sbUrl = prop_("SUPABASE_URL");
+  var sbKey = prop_("SUPABASE_SERVICE_ROLE_KEY") || prop_("SUPABASE_SERVICE_KEY");
+  if (!sbUrl || !sbKey) return errorResponse_("Supabase credentials missing", "CONFIG_ERROR");
+
+  // ── 1. Fetch services from Supabase ─────────────────────────────────
+  var sbResp;
+  try {
+    var resp = UrlFetchApp.fetch(
+      sbUrl.replace(/\/+$/, "") + "/rest/v1/service_catalog?select=*",
+      {
+        method: "get",
+        headers: {
+          apikey: sbKey,
+          Authorization: "Bearer " + sbKey,
+          Accept: "application/json",
+        },
+        muteHttpExceptions: true,
+      }
+    );
+    if (resp.getResponseCode() >= 300) {
+      return errorResponse_("Supabase fetch failed: " + resp.getContentText().slice(0, 200), "SUPABASE_ERROR");
+    }
+    sbResp = JSON.parse(resp.getContentText());
+  } catch (fetchErr) {
+    return errorResponse_("Supabase fetch error: " + String(fetchErr), "SUPABASE_ERROR");
+  }
+  if (!Array.isArray(sbResp)) return errorResponse_("Unexpected Supabase response shape", "SUPABASE_ERROR");
+
+  // ── 2. Load MPL Price_List sheet ────────────────────────────────────
+  var ss = SpreadsheetApp.openById(mplId);
+  var sheet = ss.getSheetByName("Price_List");
+  if (!sheet) return errorResponse_("Price_List tab not found in Master Price List", "CONFIG_ERROR");
+
+  var lastRow = sheet.getLastRow();
+  var lastCol = sheet.getLastColumn();
+  if (lastRow < 1 || lastCol < 1) return errorResponse_("Price_List appears empty (no header row)", "SCHEMA_ERROR");
+
+  var headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0].map(function(h) {
+    return String(h || "").trim();
+  });
+
+  // Header index map (case-insensitive, lenient on spaces/underscores)
+  var hMap = {};
+  for (var hi = 0; hi < headers.length; hi++) {
+    var normalized = headers[hi].toLowerCase().replace(/[_\s]+/g, " ").trim();
+    hMap[normalized] = hi; // 0-based column index
+  }
+  function col(name) {
+    var key = name.toLowerCase().replace(/[_\s]+/g, " ").trim();
+    return (key in hMap) ? hMap[key] : -1;
+  }
+
+  var codeCol = col("service code");
+  if (codeCol === -1) codeCol = col("code");
+  if (codeCol === -1) return errorResponse_("Price_List is missing a Service Code column", "SCHEMA_ERROR");
+
+  // ── 3. Read existing rows and build Code → row-index map ────────────
+  var data = lastRow >= 2 ? sheet.getRange(2, 1, lastRow - 1, lastCol).getValues() : [];
+  var codeToIdx = {};
+  for (var ri = 0; ri < data.length; ri++) {
+    var c = String(data[ri][codeCol] || "").trim().toUpperCase();
+    if (c) codeToIdx[c] = ri; // index within `data`, not sheet row
+  }
+
+  // Helper to set a value by header name on the in-memory row array.
+  function setByHeader(row, name, value) {
+    var idx = col(name);
+    if (idx !== -1) row[idx] = value;
+  }
+
+  // ── 4. Merge Supabase rows into the sheet array ─────────────────────
+  var updated = 0, appended = 0;
+  var newRowsToAppend = [];
+
+  for (var si = 0; si < sbResp.length; si++) {
+    var svc = sbResp[si] || {};
+    var code = String(svc.code || "").trim().toUpperCase();
+    if (!code) continue;
+
+    var targetRow;
+    var isNew = false;
+    if (code in codeToIdx) {
+      targetRow = data[codeToIdx[code]];
+    } else {
+      targetRow = new Array(lastCol).fill("");
+      isNew = true;
+    }
+
+    var rates = (svc.rates && typeof svc.rates === "object") ? svc.rates : {};
+    var xsRate  = (rates.XS  != null) ? Number(rates.XS)  : "";
+    var sRate_  = (rates.S   != null) ? Number(rates.S)   : "";
+    var mRate_  = (rates.M   != null) ? Number(rates.M)   : "";
+    var lRate_  = (rates.L   != null) ? Number(rates.L)   : "";
+    var xlRate  = (rates.XL  != null) ? Number(rates.XL)  : "";
+    var xxlR    = (svc.xxl_rate != null) ? Number(svc.xxl_rate)
+                  : (rates.XXL != null) ? Number(rates.XXL) : "";
+
+    setByHeader(targetRow, "Service Code",       code);
+    setByHeader(targetRow, "Service Name",       svc.name || "");
+    setByHeader(targetRow, "Category",           svc.category || "");
+    setByHeader(targetRow, "Active",             svc.active === false ? "FALSE" : "TRUE");
+    setByHeader(targetRow, "BillIfPASS",         svc.bill_if_pass === false ? "FALSE" : "TRUE");
+    setByHeader(targetRow, "BillIfFAIL",         svc.bill_if_fail === false ? "FALSE" : "TRUE");
+    setByHeader(targetRow, "Show In Task Type",  svc.show_as_task === true ? "TRUE" : "FALSE");
+    setByHeader(targetRow, "Taxable",            svc.taxable === false ? "FALSE" : "TRUE");
+    setByHeader(targetRow, "Unit",               svc.unit || "");
+    setByHeader(targetRow, "Billing",            svc.billing || "");
+    setByHeader(targetRow, "Flat Rate",          svc.flat_rate != null ? Number(svc.flat_rate) : "");
+    setByHeader(targetRow, "Display Order",      svc.display_order != null ? Number(svc.display_order) : "");
+
+    // Per-class rates
+    setByHeader(targetRow, "XS Rate",  xsRate);
+    setByHeader(targetRow, "S Rate",   sRate_);
+    setByHeader(targetRow, "M Rate",   mRate_);
+    setByHeader(targetRow, "L Rate",   lRate_);
+    setByHeader(targetRow, "XL Rate",  xlRate);
+    setByHeader(targetRow, "XXL Rate", xxlR);
+
+    // Per-class times
+    setByHeader(targetRow, "XS Time",  svc.xs_time  != null ? Number(svc.xs_time)  : "");
+    setByHeader(targetRow, "S Time",   svc.s_time   != null ? Number(svc.s_time)   : "");
+    setByHeader(targetRow, "M Time",   svc.m_time   != null ? Number(svc.m_time)   : "");
+    setByHeader(targetRow, "L Time",   svc.l_time   != null ? Number(svc.l_time)   : "");
+    setByHeader(targetRow, "XL Time",  svc.xl_time  != null ? Number(svc.xl_time)  : "");
+    setByHeader(targetRow, "XXL Time", svc.xxl_time != null ? Number(svc.xxl_time) : "");
+
+    if (isNew) { newRowsToAppend.push(targetRow); appended++; }
+    else { updated++; }
+  }
+
+  // ── 5. Write back: existing rows (in place) + new rows (appended) ───
+  if (data.length > 0) {
+    sheet.getRange(2, 1, data.length, lastCol).setValues(data);
+  }
+  if (newRowsToAppend.length > 0) {
+    var insertAt = sheet.getLastRow() + 1;
+    sheet.getRange(insertAt, 1, newRowsToAppend.length, lastCol).setValues(newRowsToAppend);
+  }
+
+  // ── 6. Invalidate handleGetPricing_ CacheService entry ──────────────
+  try { CacheService.getScriptCache().remove("api_pricing"); } catch (_) {}
+
+  return jsonResponse_({
+    success: true,
+    updated: updated,
+    appended: appended,
+    total_supabase: sbResp.length,
+    synced_at: new Date().toISOString(),
+  });
 }
 
 function handleGetPricing_() {
