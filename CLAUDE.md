@@ -186,6 +186,28 @@ cp "C:/Users/expre/Dropbox/Apps/GS Inventory/stride-gs-app/.env" \
 Then verify it took: `grep -c VITE_SUPABASE_URL stride-gs-app/.env` should print `1`.
 This bit us once in session 72 — caught by a production runtime error, not the build (because the bundle was "valid" with `undefined` baked in).
 
+### Ask before preview-verifying a UI change
+
+For any change that affects an authenticated React page (a feature, a layout fix, a new component, anything the user would notice in the browser), **ask the user whether to preview-verify before deploying**. Short prompt, two choices:
+
+> "Want me to preview-verify this before deploy? (yes → I'll launch the dev server with the auth bypass, navigate to the affected page, click / eval to confirm the behavior, then continue to build. no → I'll just typecheck and build.)"
+
+If they say yes, the preview-verify flow is:
+
+1. Set `VITE_DEV_BYPASS_AUTH=true` in `stride-gs-app/.env` (session 72+ dev-only bypass, gated by `import.meta.env.DEV` and tree-shaken out of production bundles).
+2. `preview_start` the `stride-gs-app` config.
+3. `preview_eval` to navigate to the affected page (`window.location.hash = '#/labels'` etc.) and wait for mount.
+4. `preview_click` and/or `preview_eval` to exercise the feature — click the new button, focus the new input, check that the DOM reflects the change.
+5. `preview_console_logs` with `level: 'error'` to confirm no runtime errors.
+6. `preview_stop`, then **flip the bypass back to `false`** before the production build so the env var is deterministic.
+7. Report what was verified (and what wasn't — the bypass can't defeat Supabase RLS, so data-dependent behavior is partial).
+
+If they say no, skip straight to `npm run build`.
+
+**Skip the ask for:** pure backend changes (StrideAPI.gs, GAS-side only), docs-only changes, typo fixes, Supabase migrations, or anything that isn't visible in the React UI. For those, `npm run build` directly.
+
+**Why this exists:** before session 72, preview-verification could only confirm the app mounted past module-load; the login wall blocked every authenticated page. The dev bypass now lets the preview workflow actually click around authenticated surfaces — but it's heavier than just building, so it's opt-in per change.
+
 ### Apply SQL migrations BEFORE deploying frontend code
 
 If a new `.sql` migration file exists in `stride-gs-app/supabase/migrations/`, apply it to the Supabase project via MCP tool BEFORE the code deploy. Frontend code that references new columns will fail for live users until the schema exists.
