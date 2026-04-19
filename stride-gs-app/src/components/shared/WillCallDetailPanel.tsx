@@ -57,82 +57,88 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
 
   // ── Self-fetch: if items missing, fetch full WC data via getWillCallById ──
   const [enrichedData, setEnrichedData] = useState<Partial<WillCall> | null>(null);
+  const [enrichLoading, setEnrichLoading] = useState(false);
   const enrichRef = useRef<string | null>(null);
   useEffect(() => {
     const hasItems = wcProp.items && wcProp.items.length > 0;
-    if (hasItems || !apiConfigured) { setEnrichedData(null); return; }
+    if (hasItems || !apiConfigured) { setEnrichedData(null); setEnrichLoading(false); return; }
     if (!clientSheetId) return;
     if (enrichRef.current === wcProp.wcNumber + ':' + clientSheetId) return;
     enrichRef.current = wcProp.wcNumber + ':' + clientSheetId;
+    setEnrichLoading(true);
 
     // Session 71: Try Supabase first if we have itemIds (~50ms vs 2-5s from GAS)
     const wcItemIds = (wcProp as any).itemIds as string[] | undefined;
 
     (async () => {
-      // Fast path: itemIds available from Supabase will_calls row
-      if (wcItemIds && wcItemIds.length > 0) {
-        try {
-          const invMap = await fetchWcItemsFromSupabase(clientSheetId!, wcItemIds);
-          if (invMap && Object.keys(invMap).length > 0) {
-            setEnrichedData({
-              items: wcItemIds.map(id => {
-                const inv = invMap[id];
-                return {
-                  itemId: id,
-                  description: inv?.description || '',
-                  qty: inv?.qty ?? 1,
-                  released: false, // WC release status not in inventory — GAS enrichment fills this
-                  vendor: inv?.vendor || undefined,
-                  location: inv?.location || undefined,
-                  status: inv?.status || undefined,
-                  sidemark: inv?.sidemark || undefined,
-                  room: inv?.room || undefined,
-                  reference: inv?.reference || undefined,
-                };
-              }),
-              itemCount: wcItemIds.length,
-            });
-            enrichRef.current = null;
-            return;
-          }
-        } catch { /* fall through to GAS */ }
-      }
-
-      // GAS fallback (full enrichment including released status, WC fees, etc.)
       try {
-        const resp = await fetchWillCallById(wcProp.wcNumber, clientSheetId!);
-        if (resp.ok && resp.data?.success && resp.data.willCall) {
-          const match = resp.data.willCall;
-          if (!match.items?.length) {
-            setEnrichedData({ items: [] });
-            enrichRef.current = null;
-            return;
-          }
-          setEnrichedData({
-            items: (match.items || []).map(it => ({
-              itemId: it.itemId, description: it.description, qty: it.qty,
-              released: it.released, vendor: it.vendor || undefined,
-              location: it.location || undefined, status: it.status || undefined,
-              // v38.72.0 — include item-level fields so the header sidemark
-              // chip (and other item-field overlays) don't drop out on the
-              // GAS-fallback enrichment path. Supabase fast path already
-              // populates these; we just need to match shape here.
-              sidemark: it.sidemark || undefined,
-              room: it.room || undefined,
-              itemClass: it.itemClass || undefined,
-            })),
-            itemCount: match.items?.length || match.itemsCount || wcProp.itemCount,
-            pickupPartyPhone: match.pickupPhone || undefined,
-            scheduledDate: match.estimatedPickupDate || undefined,
-            notes: match.notes || undefined,
-            cod: match.cod ?? undefined,
-            codAmount: match.codAmount ?? undefined,
-            wcFolderUrl: match.wcFolderUrl || undefined,
-            shipmentFolderUrl: match.shipmentFolderUrl || undefined,
-          });
+        // Fast path: itemIds available from Supabase will_calls row
+        if (wcItemIds && wcItemIds.length > 0) {
+          try {
+            const invMap = await fetchWcItemsFromSupabase(clientSheetId!, wcItemIds);
+            if (invMap && Object.keys(invMap).length > 0) {
+              setEnrichedData({
+                items: wcItemIds.map(id => {
+                  const inv = invMap[id];
+                  return {
+                    itemId: id,
+                    description: inv?.description || '',
+                    qty: inv?.qty ?? 1,
+                    released: false, // WC release status not in inventory — GAS enrichment fills this
+                    vendor: inv?.vendor || undefined,
+                    location: inv?.location || undefined,
+                    status: inv?.status || undefined,
+                    sidemark: inv?.sidemark || undefined,
+                    room: inv?.room || undefined,
+                    reference: inv?.reference || undefined,
+                  };
+                }),
+                itemCount: wcItemIds.length,
+              });
+              enrichRef.current = null;
+              return;
+            }
+          } catch { /* fall through to GAS */ }
         }
-      } catch { /* best effort */ }
-      enrichRef.current = null;
+
+        // GAS fallback (full enrichment including released status, WC fees, etc.)
+        try {
+          const resp = await fetchWillCallById(wcProp.wcNumber, clientSheetId!);
+          if (resp.ok && resp.data?.success && resp.data.willCall) {
+            const match = resp.data.willCall;
+            if (!match.items?.length) {
+              setEnrichedData({ items: [] });
+              enrichRef.current = null;
+              return;
+            }
+            setEnrichedData({
+              items: (match.items || []).map(it => ({
+                itemId: it.itemId, description: it.description, qty: it.qty,
+                released: it.released, vendor: it.vendor || undefined,
+                location: it.location || undefined, status: it.status || undefined,
+                // v38.72.0 — include item-level fields so the header sidemark
+                // chip (and other item-field overlays) don't drop out on the
+                // GAS-fallback enrichment path. Supabase fast path already
+                // populates these; we just need to match shape here.
+                sidemark: it.sidemark || undefined,
+                room: it.room || undefined,
+                itemClass: it.itemClass || undefined,
+              })),
+              itemCount: match.items?.length || match.itemsCount || wcProp.itemCount,
+              pickupPartyPhone: match.pickupPhone || undefined,
+              scheduledDate: match.estimatedPickupDate || undefined,
+              notes: match.notes || undefined,
+              cod: match.cod ?? undefined,
+              codAmount: match.codAmount ?? undefined,
+              wcFolderUrl: match.wcFolderUrl || undefined,
+              shipmentFolderUrl: match.shipmentFolderUrl || undefined,
+            });
+          }
+        } catch { /* best effort */ }
+        enrichRef.current = null;
+      } finally {
+        setEnrichLoading(false);
+      }
     })();
   }, [wcProp.wcNumber, wcProp.items, apiConfigured, clientSheetId]);
 
@@ -872,7 +878,14 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
                 </table>
               </div>
             ) : (
-              <div style={{ fontSize: 12, color: theme.colors.textMuted }}>No item details available</div>
+              enrichLoading ? (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '12px 0', color: theme.colors.textMuted, fontSize: 12 }}>
+                  <Loader2 size={14} style={{ animation: 'spin 1s linear infinite', color: theme.colors.orange }} />
+                  Loading items&hellip;
+                </div>
+              ) : (
+                <div style={{ fontSize: 12, color: theme.colors.textMuted }}>No item details available</div>
+              )
             )}
           </div>
         </div>

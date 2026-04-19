@@ -526,7 +526,21 @@ export async function fetchWillCallsFromSupabase(
       itemsCount: row.item_count ?? 0,
       totalWcFee: null,
       items: [], // WC items enriched from inventory via itemIds
-      itemIds: Array.isArray(row.item_ids) ? row.item_ids : [],
+      // v38.72.1 — item_ids was historically written double-encoded (JSON.stringify'd
+      // array stored in a jsonb column, producing a jsonb string like "[\"60918\",…]").
+      // StrideAPI now writes native arrays, but defensively handle both shapes
+      // during rollout + for any stragglers.
+      itemIds: (() => {
+        const raw = row.item_ids as unknown;
+        if (Array.isArray(raw)) return raw as string[];
+        if (typeof raw === 'string') {
+          try {
+            const parsed = JSON.parse(raw);
+            return Array.isArray(parsed) ? parsed as string[] : [];
+          } catch { return []; }
+        }
+        return [];
+      })(),
       wcFolderUrl: row.wc_folder_url || '',
       shipmentFolderUrl: row.shipment_folder_url || '',
     }));

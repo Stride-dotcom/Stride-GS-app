@@ -2412,7 +2412,14 @@ function sbWillCallRow_(tenantId, wc) {
     shipment_folder_url:   String(wc.shipmentFolderUrl || ""),
     cod:                   !!(wc.cod),
     cod_amount:            wc.codAmount != null && wc.codAmount !== "" ? Number(wc.codAmount) : null,
-    item_ids:              Array.isArray(wc.itemIds) ? JSON.stringify(wc.itemIds) : "[]",
+    // v38.72.1 — item_ids column is jsonb. JSON.stringify'ing an array before
+    // send produces a double-encoded string ("[]" or "[\"60918\",...]") that
+    // Postgres stores as a jsonb STRING, not an ARRAY. React's fast-path
+    // detail-panel loader requires jsonb_typeof = 'array', so this bug made
+    // the Supabase fast path miss for every Will Call — forcing the 10–20 s
+    // GAS fallback on every open. Fix: send the native array; UrlFetchApp's
+    // JSON.stringify of the whole payload handles serialization.
+    item_ids:              Array.isArray(wc.itemIds) ? wc.itemIds : [],
     updated_at:            new Date().toISOString()
   };
 }
