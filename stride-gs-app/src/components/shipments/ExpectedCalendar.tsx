@@ -1,6 +1,5 @@
 import { useState, useMemo, useEffect } from 'react';
 import { ChevronLeft, ChevronRight, Plus } from 'lucide-react';
-import { useNavigate } from 'react-router-dom';
 import { useCalendarEvents, type CalendarEvent } from '../../hooks/useCalendarEvents';
 import { useExpectedShipments, type ExpectedShipment } from '../../hooks/useExpectedShipments';
 import { useClients } from '../../hooks/useClients';
@@ -39,7 +38,6 @@ export function ExpectedCalendar() {
   const { events, loading } = useCalendarEvents();
   const { items: expectedItems, add: addExpected, update: updateExpected, remove: removeExpected, error: expectedError } = useExpectedShipments();
   const { apiClients } = useClients();
-  const navigate = useNavigate();
 
   useEffect(() => {
     if (!toast) return;
@@ -57,7 +55,11 @@ export function ExpectedCalendar() {
       params.set('open', ev.sourceId);
       if (sheetId) params.set('client', sheetId);
       const page = ev.type === 'willcall' ? 'will-calls' : 'repairs';
-      navigate(`/${page}?${params.toString()}`);
+      // Open in a new tab so the calendar stays in place. HashRouter requires
+      // the full `#/` prefix; window.open + '_blank' is the only way to get
+      // a real new-tab deep-link (useNavigate stays in the current tab).
+      const url = `${window.location.origin}${window.location.pathname}#/${page}?${params.toString()}`;
+      window.open(url, '_blank', 'noopener,noreferrer');
       return;
     }
     // Expected shipment → open edit modal
