@@ -3155,7 +3155,10 @@ export interface EmailTemplate {
   notes: string;
   recipients: string;
   attachDoc: string;
-  category: 'email' | 'doc' | 'system';
+  /** Display bucket in Settings → Email Templates. 'document' is the
+   *  canonical value going forward ('doc' preserved for backward compat),
+   *  'claim' added for CLAIM_* templates, 'system' for WELCOME/ONBOARDING. */
+  category: 'email' | 'doc' | 'document' | 'claim' | 'system';
 }
 
 export interface GetEmailTemplatesResponse {

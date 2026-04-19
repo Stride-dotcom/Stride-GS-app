@@ -35,7 +35,8 @@ type KnownCategory = EmailTemplate['category'];
 
 function normalizeCategory(v: string | null | undefined): KnownCategory {
   const s = String(v || '').trim().toLowerCase();
-  if (s === 'doc' || s === 'system') return s;
+  if (s === 'document' || s === 'doc') return 'document';
+  if (s === 'claim' || s === 'system') return s as KnownCategory;
   return 'email';
 }
 

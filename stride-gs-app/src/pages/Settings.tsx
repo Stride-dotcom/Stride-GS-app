@@ -3246,6 +3246,35 @@ export function Settings() {
                 );
               })}
 
+              {/* Document Templates (work orders, receiving, invoice) — Phase 6 extension */}
+              {(() => {
+                const docs = liveTemplates.filter(t => t.category === 'document' || t.category === 'doc');
+                return docs.length > 0 ? (
+                  <>
+                    <div style={{ ...sectionTitle, marginTop: 20, marginBottom: 4 }}>Documents ({docs.length})</div>
+                    <div style={{ fontSize: 11, color: theme.colors.textMuted, marginBottom: 12 }}>
+                      PDF templates rendered by GAS when generating receiving, work orders, will call releases, and invoices. DOC_INVOICE: edits apply once the body contains the <code style={{ fontFamily: 'monospace' }}>{'{{LINE_ITEMS_HTML}}'}</code> token (otherwise the legacy Drive Doc template is used).
+                    </div>
+                    {docs.map(d => (
+                      <div key={d.key} style={{ ...card, display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 16px' }}>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                            <span style={{ fontSize: 13, fontWeight: 600 }}>{d.subject || d.key}</span>
+                            <span style={{ fontSize: 10, fontFamily: 'monospace', color: theme.colors.textMuted, background: theme.colors.bgSubtle, padding: '1px 6px', borderRadius: 4, flexShrink: 0 }}>{d.key}</span>
+                          </div>
+                          {d.notes && (
+                            <div style={{ fontSize: 12, color: theme.colors.textSecondary, marginTop: 3 }}>{d.notes}</div>
+                          )}
+                        </div>
+                        <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexShrink: 0, marginLeft: 12 }}>
+                          <button onClick={() => setEditingTemplate(d)} style={{ padding: '5px 12px', fontSize: 11, fontWeight: 500, border: `1px solid ${theme.colors.border}`, borderRadius: 6, background: '#fff', cursor: 'pointer', fontFamily: 'inherit', color: theme.colors.textSecondary }}>Edit</button>
+                        </div>
+                      </div>
+                    ))}
+                  </>
+                ) : null;
+              })()}
+
               {/* Editor overlay */}
               {editingTemplate && (
                 <TemplateEditor

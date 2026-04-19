@@ -1,5 +1,16 @@
 /* ===================================================
-   StrideAPI.gs — v38.82.0 — 2026-04-19 PST — Phase 6 email templates → Supabase
+   StrideAPI.gs — v38.83.0 — 2026-04-19 PST — Docs (incl. Invoice) Supabase-first
+   v38.83.0: Doc templates migrated to Supabase as primary. Every
+             api_generateDocPdf_ call inherits Supabase-first via
+             api_getDocTemplateHtml_ (fallback: client Email_Template_Cache
+             → MPL Email_Templates). handleCreateInvoice_ has an opt-in
+             Supabase HTML path: when DOC_INVOICE body contains
+             {{LINE_ITEMS_HTML}}, renders via HTML→Doc→PDF; otherwise falls
+             back to the legacy Drive Doc flow. New helpers:
+             api_buildInvoiceLineItemsHtml_ + api_seedInvoiceTemplateFromDrive_.
+             api_seedEmailTemplatesFromMpl_ now categorises DOC_* as
+             'document' (was 'doc') and seeds DOC_INVOICE from the Drive
+             template. Invoice seed skipped when a non-empty row exists.
    v38.82.0: Email templates live in Supabase public.email_templates now.
              api_sendTemplateEmail_ reads the template from Supabase first
              (CacheService TTL 600s), falling back to the MPL sheet if the
@@ -11556,7 +11567,9 @@ function api_seedEmailTemplatesFromMpl_() {
     var body = String(data[i][2] || "").trim();
     if (!key || !body) continue;
     var category = "email";
-    if (key.indexOf("DOC_") === 0) category = "doc";
+    // v38.82.0 — DOC_* templates get category='document' (work orders, receiving,
+    // will call release). v38.79.0 used 'doc' — the React normalizer accepts both.
+    if (key.indexOf("DOC_") === 0) category = "document";
     else if (key === "WELCOME_EMAIL" || key === "ONBOARDING_EMAIL") category = "system";
     else if (key.indexOf("CLAIM_") === 0) category = "claim";
     var row = {
@@ -11573,7 +11586,67 @@ function api_seedEmailTemplatesFromMpl_() {
     if (r.ok) count++;
     else errors.push(key + ": " + r.error);
   }
+
+  // v38.82.0 — also seed the invoice PDF template from its Google Drive Doc.
+  // This makes DOC_INVOICE editable in Settings → Email Templates → Documents.
+  // Best-effort: if the Drive export fails, don't fail the whole seed.
+  try {
+    var invSeed = api_seedInvoiceTemplateFromDrive_();
+    if (invSeed.ok) count++;
+    else if (invSeed.error) errors.push("DOC_INVOICE: " + invSeed.error);
+  } catch (eInv) { errors.push("DOC_INVOICE: " + String(eInv)); }
+
   return { count: count, errors: errors };
+}
+
+/**
+ * v38.82.0 — Export the Google Doc referenced by DOC_INVOICE_TEMPLATE_ID
+ * (stored in MPL Settings) as HTML, then upsert it into Supabase
+ * email_templates with template_key='DOC_INVOICE', category='document'.
+ *
+ * We intentionally don't overwrite an existing row here — admins may have
+ * already tweaked the HTML in the React editor. Only seed when the row is
+ * missing or has an empty body. Returns { ok, error, action }.
+ */
+function api_seedInvoiceTemplateFromDrive_() {
+  try {
+    var mplId = prop_("MASTER_PRICE_LIST_SPREADSHEET_ID");
+    if (!mplId) return { ok: false, error: "MASTER_PRICE_LIST_SPREADSHEET_ID not configured" };
+    var mplSettings = api_readSettings_(SpreadsheetApp.openById(mplId));
+    var docId = String(mplSettings["DOC_INVOICE_TEMPLATE_ID"] || "").trim();
+    if (!docId) return { ok: false, error: "DOC_INVOICE_TEMPLATE_ID missing in MPL Settings" };
+
+    // Skip if already present with a non-empty body.
+    var existing = api_supabaseGet_("/rest/v1/email_templates?template_key=eq.DOC_INVOICE&select=template_key,body");
+    if (existing && existing.length > 0 && String(existing[0].body || "").trim()) {
+      return { ok: false, error: "", action: "skipped_existing" };
+    }
+
+    // Export the Drive Doc as HTML via the Docs API.
+    var url = "https://docs.google.com/feeds/download/documents/export/Export?id=" + encodeURIComponent(docId) + "&exportFormat=html";
+    var resp = UrlFetchApp.fetch(url, {
+      headers: { Authorization: "Bearer " + ScriptApp.getOAuthToken() },
+      muteHttpExceptions: true
+    });
+    if (resp.getResponseCode() !== 200) return { ok: false, error: "Drive export HTTP " + resp.getResponseCode() };
+    var html = String(resp.getContentText() || "").trim();
+    if (!html) return { ok: false, error: "Drive export returned empty HTML" };
+
+    var row = {
+      template_key: "DOC_INVOICE",
+      subject:      "Stride Logistics Invoice",
+      body:         html,
+      notes:        "Seeded from DOC_INVOICE_TEMPLATE_ID Drive Doc — edit freely. Tokens: {{INV_NO}}, {{CLIENT_NAME}}, {{INV_DATE}}, {{PAYMENT_TERMS}}, {{DUE_DATE}}, {{SUBTOTAL}}, {{GRAND_TOTAL}}, {{LINE_ITEMS_HTML}}.",
+      recipients:   "",
+      attach_doc:   "",
+      category:     "document",
+      active:       true
+    };
+    var r = api_upsertTemplateToSupabase_(row);
+    return r.ok ? { ok: true, action: "seeded" } : { ok: false, error: r.error || "upsert failed" };
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
 }
 
 /**
@@ -11886,6 +11959,28 @@ function api_generateDocPdf_(ss, docTemplateKey, pdfFileName, folderUrl, tokens)
     Logger.log("api_generateDocPdf_ error: " + e);
     return { blob: null, warning: "PDF generation failed: " + e.message };
   }
+}
+
+/**
+ * v38.82.0 — Build the HTML table body for the invoice line items. Used by
+ * the Supabase-HTML path in handleCreateInvoice_. Mirrors the column layout
+ * of the legacy Drive Doc table: Service Date | Description | Item | Qty |
+ * Rate | Total. Right-aligns numeric columns (idx >= 4).
+ */
+function api_buildInvoiceLineItemsHtml_(rows) {
+  if (!rows || !rows.length) return "";
+  var out = [];
+  for (var i = 0; i < rows.length; i++) {
+    var r = rows[i];
+    out.push("<tr>");
+    for (var c = 0; c < r.length; c++) {
+      var align = c >= 4 ? "right" : "left";
+      var val = String(r[c] == null ? "" : r[c]);
+      out.push('<td style="padding:4px 6px;border:1px solid #ddd;text-align:' + align + ';font-size:10pt;">' + api_esc_(val) + '</td>');
+    }
+    out.push("</tr>");
+  }
+  return out.join("");
 }
 
 /** Merges two comma-separated email strings, deduplicates. */
@@ -17049,9 +17144,47 @@ function handleCreateInvoice_(payload) {
     );
   }
 
-  // Copy template → populate → export PDF → save to Drive → trash temp Doc
-  var copyFile = DriveApp.getFileById(templateDocId).makeCopy(docTitle);
+  // v38.82.0 — Supabase-first path: if DOC_INVOICE has been migrated to HTML
+  // (body contains {{LINE_ITEMS_HTML}} token), use the HTML flow. Otherwise
+  // fall through to the legacy Drive Doc flow below. This lets admins opt in
+  // by editing DOC_INVOICE in Settings → Documents and adding the token; the
+  // Drive Doc remains the safety net until the HTML template is fully proven.
+  var sbInvTpl = null;
+  try { sbInvTpl = api_getTemplateFromSupabase_("DOC_INVOICE"); } catch (_) {}
+  var useSbHtmlPath = sbInvTpl && sbInvTpl.body && sbInvTpl.body.indexOf("{{LINE_ITEMS_HTML}}") !== -1;
+
   var pdfFile;
+  var copyFile = null;
+
+  if (useSbHtmlPath) {
+    try {
+      var lineItemsHtml = api_buildInvoiceLineItemsHtml_(li.rows);
+      var htmlBody = String(sbInvTpl.body)
+        .replace(/\{\{INV_NO\}\}/g,        api_esc_(invNo))
+        .replace(/\{\{CLIENT_NAME\}\}/g,   api_esc_(client))
+        .replace(/\{\{INV_DATE\}\}/g,      api_esc_(invDateStr))
+        .replace(/\{\{PAYMENT_TERMS\}\}/g, api_esc_(paymentTerms))
+        .replace(/\{\{DUE_DATE\}\}/g,      api_esc_(invDateStr))
+        .replace(/\{\{SUBTOTAL\}\}/g,      api_esc_(api_money_(li.subtotal)))
+        .replace(/\{\{GRAND_TOTAL\}\}/g,   api_esc_(api_money_(grandTotal)))
+        .replace(/\{\{LINE_ITEMS_HTML\}\}/g, lineItemsHtml)
+        .replace(/\{\{DISCOUNT_ROWS\}\}/g,        "")
+        .replace(/\{\{INVOICE_NOTES_BLOCK\}\}/g,  "");
+      var tmpDocId = api_createGoogleDocFromHtml_(docTitle, htmlBody);
+      var pdfBlobHtml = api_exportDocAsPdfBlob_(tmpDocId, docTitle + ".pdf", 0.25);
+      try { DriveApp.getFileById(tmpDocId).setTrashed(true); } catch (_) {}
+      if (!clientSS) clientSS = SpreadsheetApp.openById(sourceSheetId);
+      pdfFile = api_getOrCreateClientInvoiceFolder_(clientSS, cbSS, client).createFile(pdfBlobHtml);
+      try { DriveApp.getFolderById(masterFolderId).createFile(pdfBlobHtml).setName(docTitle + ".pdf"); } catch (_) {}
+    } catch (htmlErr) {
+      Logger.log("handleCreateInvoice_ Supabase HTML path failed, falling back to Drive Doc: " + htmlErr);
+      useSbHtmlPath = false; // retry via Drive Doc path below
+    }
+  }
+
+  // Legacy Drive Doc path (always available as fallback)
+  if (!useSbHtmlPath) {
+    copyFile = DriveApp.getFileById(templateDocId).makeCopy(docTitle);
 
   try {
     var doc  = DocumentApp.openById(copyFile.getId());
@@ -17114,8 +17247,9 @@ function handleCreateInvoice_(payload) {
     DriveApp.getFolderById(masterFolderId).createFile(pdfBlob).setName(docTitle + ".pdf");
 
   } finally {
-    try { copyFile.setTrashed(true); } catch (_) {}
+    try { if (copyFile) copyFile.setTrashed(true); } catch (_) {}
   }
+  } // end legacy Drive Doc path
 
   var invoiceUrl = pdfFile ? pdfFile.getUrl() : "";
   var warnings   = [];
@@ -19649,6 +19783,16 @@ function api_exportDocAsPdfBlob_(docId, fileName, marginInches) {
  * Mirrors getDocTemplateHtml_() from Emails.gs.
  */
 function api_getDocTemplateHtml_(ss, templateKey) {
+  // v38.82.0 — Supabase-first: the service catalog of templates is the single
+  // source of truth for admin edits. Sheet read is a graceful fallback when
+  // Supabase is unreachable or the row hasn't been seeded yet.
+  try {
+    var sbTpl = api_getTemplateFromSupabase_(templateKey);
+    if (sbTpl && String(sbTpl.body || "").trim()) {
+      return { html: String(sbTpl.body) };
+    }
+  } catch (sbErr) { Logger.log("api_getDocTemplateHtml_ Supabase path (non-fatal): " + sbErr); }
+
   try {
     var tmplSh = ss.getSheetByName("Email_Template_Cache");
     if (!tmplSh || tmplSh.getLastRow() < 2) {
