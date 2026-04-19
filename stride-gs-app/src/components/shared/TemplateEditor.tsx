@@ -1,9 +1,9 @@
 import { useState, useMemo, useCallback } from 'react';
 import { createPortal } from 'react-dom';
-import { X, Save, Eye, Code, Loader2, CheckCircle2, AlertTriangle, ChevronDown, ChevronRight } from 'lucide-react';
+import { X, Save, Eye, Code, Loader2, CheckCircle2, AlertTriangle, ChevronDown, ChevronRight, FileText, Download } from 'lucide-react';
 import { theme } from '../../styles/theme';
 import type { EmailTemplate } from '../../lib/api';
-import { postUpdateEmailTemplate } from '../../lib/api';
+import { postUpdateEmailTemplate, postTestGenerateDoc } from '../../lib/api';
 
 /**
  * TemplateEditor — inline HTML editor + live preview for email/doc templates.
@@ -85,6 +85,18 @@ const MOCK_TOKENS: Record<string, string> = {
   '{{IS_COD}}': 'No',
   '{{TRANSFER_ITEMS}}': 'ITM-12345 — Swivel Chair',
   '{{INVENTORY_URL}}': '#',
+  // Invoice-specific tokens (DOC_INVOICE)
+  '{{INV_NO}}': 'INV-2026-0042',
+  '{{INV_DATE}}': '04/19/2026',
+  '{{PAYMENT_TERMS}}': 'NET 30',
+  '{{DUE_DATE}}': '05/19/2026',
+  '{{SUBTOTAL}}': '$450.00',
+  '{{GRAND_TOTAL}}': '$450.00',
+  '{{LINE_ITEMS_HTML}}':
+    '<tr><td style="padding:4px 6px;border:1px solid #ddd;">04/14</td><td style="padding:4px 6px;border:1px solid #ddd;">Receiving — M</td><td style="padding:4px 6px;border:1px solid #ddd;">62426</td><td style="padding:4px 6px;border:1px solid #ddd;text-align:right;">1</td><td style="padding:4px 6px;border:1px solid #ddd;text-align:right;">$15.00</td><td style="padding:4px 6px;border:1px solid #ddd;text-align:right;">$15.00</td></tr>'
+    + '<tr><td style="padding:4px 6px;border:1px solid #ddd;">04/14</td><td style="padding:4px 6px;border:1px solid #ddd;">Storage — M × 30 days</td><td style="padding:4px 6px;border:1px solid #ddd;">62426</td><td style="padding:4px 6px;border:1px solid #ddd;text-align:right;">30</td><td style="padding:4px 6px;border:1px solid #ddd;text-align:right;">$0.15</td><td style="padding:4px 6px;border:1px solid #ddd;text-align:right;">$4.50</td></tr>',
+  '{{DISCOUNT_ROWS}}': '',
+  '{{INVOICE_NOTES_BLOCK}}': '',
 };
 
 function resolveMockTokens(html: string): string {
@@ -116,8 +128,71 @@ export function TemplateEditor({ template, onClose, onSaved, onSave }: Props) {
   const [saveError, setSaveError] = useState('');
   const [showTokens, setShowTokens] = useState(false);
 
+  const isDocument = template.category === 'document' || template.category === 'doc';
+  const [pdfLoading, setPdfLoading] = useState<null | 'preview' | 'download'>(null);
+  const [pdfError, setPdfError] = useState<string | null>(null);
+
   const isDirty = subject !== template.subject || bodyHtml !== template.bodyHtml;
   const previewHtml = useMemo(() => resolveMockTokens(bodyHtml), [bodyHtml]);
+
+  /** Decode the server's base64 PDF into a Blob URL. */
+  const fetchPreviewPdf = useCallback(async () => {
+    const res = await postTestGenerateDoc({ templateKey: template.key });
+    if (!res.ok || !res.data?.success || !res.data.pdfBase64) {
+      throw new Error(res.error || 'PDF generation failed');
+    }
+    const bin = atob(res.data.pdfBase64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return { blob: new Blob([bytes], { type: 'application/pdf' }), filename: res.data.filename };
+  }, [template.key]);
+
+  const handlePreviewPdf = useCallback(async () => {
+    if (isDirty) {
+      setPdfError('Save your changes first — PDF preview reads the saved template.');
+      setTimeout(() => setPdfError(null), 4000);
+      return;
+    }
+    setPdfLoading('preview');
+    setPdfError(null);
+    try {
+      const { blob } = await fetchPreviewPdf();
+      const url = URL.createObjectURL(blob);
+      const win = window.open(url, '_blank');
+      if (!win) setPdfError('Popup blocked — allow popups to preview PDFs');
+      // Revoke after 60s so the browser has time to render
+      setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    } catch (e) {
+      setPdfError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPdfLoading(null);
+    }
+  }, [fetchPreviewPdf, isDirty]);
+
+  const handleDownloadPdf = useCallback(async () => {
+    if (isDirty) {
+      setPdfError('Save your changes first — PDF download uses the saved template.');
+      setTimeout(() => setPdfError(null), 4000);
+      return;
+    }
+    setPdfLoading('download');
+    setPdfError(null);
+    try {
+      const { blob, filename } = await fetchPreviewPdf();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename || `${template.key}_preview.pdf`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 5_000);
+    } catch (e) {
+      setPdfError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPdfLoading(null);
+    }
+  }, [fetchPreviewPdf, isDirty, template.key]);
 
   const handleSave = useCallback(async () => {
     setSaving(true);
@@ -181,6 +256,41 @@ export function TemplateEditor({ template, onClose, onSaved, onSave }: Props) {
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
             {saveResult === 'success' && <span style={{ fontSize: 11, color: '#15803D', display: 'flex', alignItems: 'center', gap: 4 }}><CheckCircle2 size={13} /> Saved. Emails will use the new version immediately.</span>}
             {saveResult === 'error' && <span style={{ fontSize: 11, color: '#DC2626', display: 'flex', alignItems: 'center', gap: 4 }}><AlertTriangle size={13} /> {saveError}</span>}
+            {pdfError && <span style={{ fontSize: 11, color: '#DC2626', display: 'flex', alignItems: 'center', gap: 4 }}><AlertTriangle size={13} /> {pdfError}</span>}
+            {isDocument && (
+              <>
+                <button
+                  onClick={handlePreviewPdf}
+                  disabled={!!pdfLoading || isDirty}
+                  title={isDirty ? 'Save your changes first' : 'Render PDF with sample data and open in a new tab'}
+                  style={{
+                    padding: '6px 12px', fontSize: 11, fontWeight: 600, border: `1px solid ${theme.colors.border}`, borderRadius: 6,
+                    background: '#fff', color: theme.colors.textSecondary,
+                    cursor: (pdfLoading || isDirty) ? 'default' : 'pointer',
+                    fontFamily: 'inherit', display: 'flex', alignItems: 'center', gap: 4,
+                    opacity: (pdfLoading || isDirty) ? 0.55 : 1,
+                  }}
+                >
+                  {pdfLoading === 'preview' ? <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} /> : <FileText size={12} />}
+                  {pdfLoading === 'preview' ? 'Generating…' : 'Preview PDF'}
+                </button>
+                <button
+                  onClick={handleDownloadPdf}
+                  disabled={!!pdfLoading || isDirty}
+                  title={isDirty ? 'Save your changes first' : 'Render PDF with sample data and download'}
+                  style={{
+                    padding: '6px 12px', fontSize: 11, fontWeight: 600, border: `1px solid ${theme.colors.border}`, borderRadius: 6,
+                    background: '#fff', color: theme.colors.textSecondary,
+                    cursor: (pdfLoading || isDirty) ? 'default' : 'pointer',
+                    fontFamily: 'inherit', display: 'flex', alignItems: 'center', gap: 4,
+                    opacity: (pdfLoading || isDirty) ? 0.55 : 1,
+                  }}
+                >
+                  {pdfLoading === 'download' ? <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} /> : <Download size={12} />}
+                  {pdfLoading === 'download' ? 'Generating…' : 'Download PDF'}
+                </button>
+              </>
+            )}
             <button
               onClick={handleSave}
               disabled={saving || !isDirty}

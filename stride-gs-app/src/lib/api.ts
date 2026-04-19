@@ -817,6 +817,26 @@ export function fetchPricingParity(signal?: AbortSignal) {
   return apiFetch<PricingParityResponse>('getPricingParity', undefined, { signal });
 }
 
+// ─── Doc Template Preview (v38.84.0, admin-only) ────────────────────────────
+export interface TestGenerateDocResponse {
+  success: boolean;
+  templateKey: string;
+  filename: string;
+  mimeType: string;
+  pdfBase64: string;
+  byteLength: number;
+}
+
+/** Renders a document template with sample token values and returns the
+ *  resulting PDF as base64. Used by the TemplateEditor's Preview/Download
+ *  buttons. `sampleData` lets the caller override specific tokens. */
+export function postTestGenerateDoc(
+  payload: { templateKey: string; sampleData?: Record<string, string> },
+  signal?: AbortSignal,
+) {
+  return apiPost<TestGenerateDocResponse>('testGenerateDoc', payload as unknown as Record<string, unknown>, {}, { signal, timeoutMs: API_POST_TIMEOUT_LONG_MS });
+}
+
 /** Session 70 fix #2 — Payment terms from CB Payment_Terms tab. */
 export function fetchPaymentTerms(signal?: AbortSignal) {
   return apiFetch<PaymentTermsResponse>('getPaymentTerms', undefined, { signal });

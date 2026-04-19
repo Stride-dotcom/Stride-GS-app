@@ -1,5 +1,12 @@
 /* ===================================================
-   StrideAPI.gs — v38.83.0 — 2026-04-19 PST — Docs (incl. Invoice) Supabase-first
+   StrideAPI.gs — v38.84.0 — 2026-04-19 PST — Doc template Preview PDF endpoint
+   v38.84.0: NEW admin endpoint testGenerateDoc — renders a doc template
+             with sample token values and returns a PDF as base64 for
+             Template Editor preview/download. Uses the same Docs→PDF
+             pipeline as production (api_createGoogleDocFromHtml_ +
+             api_exportDocAsPdfBlob_). Supabase-first read with MPL
+             fallback; invoice-specific tokens included.
+   v38.83.0: Docs (incl. Invoice) Supabase-first
    v38.83.0: Doc templates migrated to Supabase as primary. Every
              api_generateDocPdf_ call inherits Supabase-first via
              api_getDocTemplateHtml_ (fallback: client Email_Template_Cache
@@ -4731,6 +4738,10 @@ function doPost(e) {
       case "testSendClaimEmails":
         return withStaffGuard_(callerEmail, function() {
           return handleTestSendClaimEmails_(callerEmail, payload);
+        });
+      case "testGenerateDoc":
+        return withAdminGuard_(callerEmail, function() {
+          return handleTestGenerateDoc_(payload);
         });
 
       // ─── Template management (admin-only) ─────────────────────────────────
@@ -22879,6 +22890,137 @@ function handleSendWelcomeToUsers_(payload, callerEmail) {
 
   Logger.log("handleSendWelcomeToUsers_: caller=" + callerEmail + " sent=" + sent + " failed=" + failed);
   return jsonResponse_({ success: true, sent: sent, failed: failed, total: userEmails.length, results: results });
+}
+
+/**
+ * v38.84.0 — Test-generate a document template as a PDF without touching
+ * real data. Reads the template from Supabase first (falls back to MPL
+ * sheet via api_getDocTemplateHtml_), substitutes sample token values,
+ * renders to PDF via the same Docs→PDF pipeline used for production, and
+ * returns the PDF as base64 so React can preview or download it.
+ *
+ * Admin-only. Intended for the Template Editor "Preview PDF" / "Download
+ * PDF" buttons. Callers may pass `sampleData` to override specific tokens.
+ */
+function handleTestGenerateDoc_(payload) {
+  var templateKey = String((payload || {}).templateKey || "").trim();
+  if (!templateKey) return errorResponse_("templateKey is required", "INVALID_PARAMS");
+
+  // Read template — Supabase first, then MPL fallback (handled inside helper)
+  var tmplHtml = "";
+  try {
+    var sbTpl = api_getTemplateFromSupabase_(templateKey);
+    if (sbTpl && sbTpl.body) tmplHtml = String(sbTpl.body);
+  } catch (_) {}
+  if (!tmplHtml) {
+    // Fallback: scan MPL directly (no client sheet context for test-gen)
+    try {
+      var mplId = prop_("MASTER_PRICE_LIST_SPREADSHEET_ID");
+      if (mplId) {
+        var tmplSh = SpreadsheetApp.openById(mplId).getSheetByName("Email_Templates");
+        if (tmplSh && tmplSh.getLastRow() >= 2) {
+          var rows = tmplSh.getRange(2, 1, tmplSh.getLastRow() - 1, Math.max(tmplSh.getLastColumn(), 3)).getValues();
+          for (var i = 0; i < rows.length; i++) {
+            if (String(rows[i][0] || "").trim() === templateKey) {
+              tmplHtml = String(rows[i][2] || "").trim();
+              break;
+            }
+          }
+        }
+      }
+    } catch (_) {}
+  }
+  if (!tmplHtml) return errorResponse_("Template not found: " + templateKey, "NOT_FOUND");
+
+  // Sample token values — keep in sync with React MOCK_TOKENS
+  var today = new Date();
+  var tokens = {
+    "CLIENT_NAME":    "Allison Lind Design",
+    "ITEM_ID":        "62426",
+    "SHIPMENT_NO":    "SHP-PREVIEW-001",
+    "SHIPMENT_NUMBER":"SHP-PREVIEW-001",
+    "SIDEMARK":       "Living Room",
+    "CARRIER":        "UPS",
+    "TRACKING":       "1Z999AA10123456784",
+    "RECEIVED_DATE":  Utilities.formatDate(today, Session.getScriptTimeZone(), "MM/dd/yyyy"),
+    "RECEIVE_DATE":   Utilities.formatDate(today, Session.getScriptTimeZone(), "MM/dd/yyyy"),
+    "DATE":           Utilities.formatDate(today, Session.getScriptTimeZone(), "MM/dd/yyyy"),
+    "ITEM_COUNT":     "5",
+    "ITEMS_COUNT":    "5",
+    "TOTAL_ITEMS":    "5",
+    "TOTAL_RELEASED": "3",
+    "TASK_ID":        "INSP-62426-1",
+    "TASK_TYPE":      "Inspection",
+    "RESULT":         "Pass",
+    "TASK_RESULT":    "Pass",
+    "TASK_NOTES":     "All items in good condition",
+    "RESULT_COLOR":   "#4A8A5C",
+    "WC_NUMBER":      "WC-0412",
+    "WC_NO":          "WC-0412",
+    "PICKUP_DATE":    Utilities.formatDate(today, Session.getScriptTimeZone(), "MM/dd/yyyy"),
+    "PICKUP_PARTY":   "John Smith",
+    "REPAIR_ID":      "RPR-0089",
+    "REPAIR_TYPE":    "Upholstery Repair",
+    "REPAIR_RESULT":  "Complete",
+    "QUOTE_AMOUNT":   "$125.00",
+    "FINAL_AMOUNT":   "$125.00",
+    "QUOTE_NOTES":    "Minor touch-up required on left arm",
+    "DESCRIPTION":    "Roller Shades — Custom",
+    "VENDOR":         "Four Hands",
+    "ITEM_VENDOR":    "Four Hands",
+    "ITEM_DESC":      "Roller Shades — Custom",
+    "ITEM_SIDEMARK":  "Living Room",
+    "ITEM_QTY":       "1",
+    "ITEM_ROOM":      "Living Room",
+    "ROOM":           "Living Room",
+    "CLASS":          "M",
+    "CLIENT_EMAIL":   "demo@example.com",
+    "SPREADSHEET_URL":"#",
+    "APP_URL":        "https://www.mystridehub.com/#",
+    "LOGO_URL":       "https://static.wixstatic.com/media/a38fbc_a8c7a368447f4723b782c4dbd765ca0e~mv2.png",
+    "PHOTOS_URL":     "#",
+    "INVENTORY_URL":  "#",
+    "STATUS":         "In Progress",
+    "ITEMS_TABLE":    '<table style="width:100%;border-collapse:collapse;margin:10px 0;"><tr style="background:#F5F2EE;"><th style="padding:6px 8px;text-align:left;border-bottom:1px solid #E2E8F0;">Item ID</th><th style="padding:6px 8px;text-align:left;border-bottom:1px solid #E2E8F0;">Description</th><th style="padding:6px 8px;text-align:center;border-bottom:1px solid #E2E8F0;">Class</th></tr><tr><td style="padding:6px 8px;">62426</td><td style="padding:6px 8px;">Roller Shades</td><td style="padding:6px 8px;text-align:center;">M</td></tr><tr><td style="padding:6px 8px;">62427</td><td style="padding:6px 8px;">Accent Chair</td><td style="padding:6px 8px;text-align:center;">L</td></tr></table>',
+    "ITEM_TABLE_HTML":'<table style="width:100%;border-collapse:collapse;"><tr><td style="padding:6px;">62426 — Roller Shades</td></tr></table>',
+    // Invoice-specific tokens
+    "INV_NO":         "INV-2026-0042",
+    "INV_DATE":       Utilities.formatDate(today, Session.getScriptTimeZone(), "MM/dd/yyyy"),
+    "PAYMENT_TERMS":  "NET 30",
+    "DUE_DATE":       Utilities.formatDate(new Date(today.getTime() + 30 * 864e5), Session.getScriptTimeZone(), "MM/dd/yyyy"),
+    "SUBTOTAL":       "$450.00",
+    "GRAND_TOTAL":    "$450.00",
+    "LINE_ITEMS_HTML":'<tr><td style="padding:4px 6px;border:1px solid #ddd;">04/14</td><td style="padding:4px 6px;border:1px solid #ddd;">Receiving — M</td><td style="padding:4px 6px;border:1px solid #ddd;">62426</td><td style="padding:4px 6px;border:1px solid #ddd;text-align:right;">1</td><td style="padding:4px 6px;border:1px solid #ddd;text-align:right;">$15.00</td><td style="padding:4px 6px;border:1px solid #ddd;text-align:right;">$15.00</td></tr><tr><td style="padding:4px 6px;border:1px solid #ddd;">04/14</td><td style="padding:4px 6px;border:1px solid #ddd;">Storage — M × 30 days</td><td style="padding:4px 6px;border:1px solid #ddd;">62426</td><td style="padding:4px 6px;border:1px solid #ddd;text-align:right;">30</td><td style="padding:4px 6px;border:1px solid #ddd;text-align:right;">$0.15</td><td style="padding:4px 6px;border:1px solid #ddd;text-align:right;">$4.50</td></tr>',
+    "DISCOUNT_ROWS":  "",
+    "INVOICE_NOTES_BLOCK": ""
+  };
+
+  // Payload-level overrides win
+  var overrides = (payload && payload.sampleData) || {};
+  for (var k in overrides) {
+    if (overrides.hasOwnProperty(k)) tokens[String(k)] = String(overrides[k] == null ? "" : overrides[k]);
+  }
+
+  // Resolve tokens — api_resolveDocTokens_ wraps keys as {{KEY}}
+  var resolvedHtml = api_resolveDocTokens_(tmplHtml, tokens);
+
+  try {
+    var baseName = templateKey + "_PREVIEW_" + today.getTime();
+    var docId = api_createGoogleDocFromHtml_(baseName, resolvedHtml);
+    var pdfBlob = api_exportDocAsPdfBlob_(docId, baseName + ".pdf", 0.25);
+    try { DriveApp.getFileById(docId).setTrashed(true); } catch (_) {}
+    var base64 = Utilities.base64Encode(pdfBlob.getBytes());
+    return jsonResponse_({
+      success: true,
+      templateKey: templateKey,
+      filename: templateKey + "_preview.pdf",
+      mimeType: "application/pdf",
+      pdfBase64: base64,
+      byteLength: pdfBlob.getBytes().length
+    });
+  } catch (e) {
+    return errorResponse_("PDF generation failed: " + String(e), "SERVER_ERROR");
+  }
 }
 
 function handleTestSendClientTemplates_(callerEmail, payload) {
