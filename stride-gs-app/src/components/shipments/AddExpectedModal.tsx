@@ -137,7 +137,7 @@ export function AddExpectedModal({ onClose, onSave, editingEvent, onDelete }: Pr
           boxShadow: '0 20px 60px rgba(0,0,0,0.2)',
         }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
-          <div style={{ fontSize: 20, fontWeight: 400, color: '#1C1C1C' }}>{isEdit ? 'Edit Expected Shipment' : 'Add Expected Shipment'}</div>
+          <div style={{ fontSize: 20, fontWeight: 400, color: '#1C1C1C' }}>{isEdit ? 'Edit Shipment' : 'Add Shipment'}</div>
           <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4 }}>
             <X size={18} color="#666" />
           </button>

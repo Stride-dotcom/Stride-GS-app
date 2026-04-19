@@ -213,7 +213,7 @@ export function ExpectedCalendar() {
             >Week</button>
           </div>
           <button onClick={() => setShowAdd(true)} style={pillPrimary}>
-            <Plus size={14} style={{ marginRight: 4 }} /> Add Expected
+            <Plus size={14} style={{ marginRight: 4 }} /> Add Shipment
           </button>
         </div>
       </div>
