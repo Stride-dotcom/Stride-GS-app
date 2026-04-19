@@ -22,6 +22,10 @@ interface DockItem {
   weight?: number;           // lbs — used for overweight auto-apply
   addons: string[];          // add-on service codes selected for this item
   autoAppliedAddons: string[]; // add-on codes auto-applied (shows "Auto" badge, user can override)
+  // Codes the user has MANUALLY unchecked after an auto-apply. The auto-apply
+  // effect filters these out of `shouldBe` so the rule can't keep re-checking
+  // them on every re-render. Cleared when the user manually re-checks the code.
+  dismissedAddons: string[];
   expanded: boolean;         // UI state — expand row to show add-ons
 }
 
@@ -45,7 +49,7 @@ function esc(s: string): string {
 }
 
 function emptyItem(autoInspect = false): DockItem {
-  return { id: `r-${Date.now()}-${Math.random().toString(36).slice(2,6)}`, itemId: '', reference: '', vendor: '', description: '', itemClass: '', qty: 1, location: 'Rec-Dock', sidemark: '', room: '', needsInspection: autoInspect, needsAssembly: false, itemNotes: '', weight: undefined, addons: [], autoAppliedAddons: [], expanded: false };
+  return { id: `r-${Date.now()}-${Math.random().toString(36).slice(2,6)}`, itemId: '', reference: '', vendor: '', description: '', itemClass: '', qty: 1, location: 'Rec-Dock', sidemark: '', room: '', needsInspection: autoInspect, needsAssembly: false, itemNotes: '', weight: undefined, addons: [], autoAppliedAddons: [], dismissedAddons: [], expanded: false };
 }
 
 const cellInput: React.CSSProperties = { width: '100%', padding: '6px 8px', fontSize: 12, border: `1px solid ${theme.colors.borderLight}`, borderRadius: 6, outline: 'none', fontFamily: 'inherit', background: '#fff' };
@@ -96,9 +100,12 @@ function NewShipmentForm() {
   // Auto-apply: recompute which add-ons should be pre-checked per row based on
   // metadata rules. User-added codes are preserved; only codes previously tracked
   // in `autoAppliedAddons` get removed when the rule no longer matches (manual
-  // overrides stay). The reconcile check avoids re-rendering when nothing changed.
+  // overrides stay). Codes in `dismissedAddons` are skipped entirely — that's
+  // how "user manually unchecked NO_ID after auto-apply" stays unchecked even
+  // while the underlying sidemark is still empty. The reconcile check avoids
+  // re-rendering when nothing changed.
   const autoApplySignature = useMemo(
-    () => items.map(i => `${i.id}:${i.sidemark}|${i.weight ?? ''}|${i.itemClass}|${i.autoAppliedAddons.join(',')}`).join('~'),
+    () => items.map(i => `${i.id}:${i.sidemark}|${i.weight ?? ''}|${i.itemClass}|${i.autoAppliedAddons.join(',')}|${i.dismissedAddons.join(',')}`).join('~'),
     [items]
   );
   useEffect(() => {
@@ -106,7 +113,9 @@ function NewShipmentForm() {
     setItems(prev => {
       let changed = false;
       const next = prev.map(row => {
-        const shouldBe = computeAutoAppliedAddons(row, catalogAddons);
+        const rawShould = computeAutoAppliedAddons(row, catalogAddons);
+        // Respect manual dismissals — user already told us "no" for this code.
+        const shouldBe = rawShould.filter(c => !row.dismissedAddons.includes(c));
         const prevAuto = row.autoAppliedAddons;
         const sameTracker = prevAuto.length === shouldBe.length && prevAuto.every(c => shouldBe.includes(c));
         if (sameTracker) return row;
@@ -221,6 +230,7 @@ function NewShipmentForm() {
         itemId: autoIdEnabled ? '' : src.itemId,
         addons: [...src.addons],
         autoAppliedAddons: [...src.autoAppliedAddons],
+        dismissedAddons: [...src.dismissedAddons],
       };
       const next = [...prev];
       next.splice(idx + 1, 0, copy);
@@ -234,14 +244,33 @@ function NewShipmentForm() {
   }, []);
 
   const toggleAddon = useCallback((idx: number, code: string) => {
+    // Local state only — no API calls. Billing entries for every checked
+    // add-on are written ONCE, in handleComplete, via the shipment payload.
     setItems(prev => prev.map((item, i) => {
       if (i !== idx) return item;
       const has = item.addons.includes(code);
-      const nextAddons = has ? item.addons.filter(c => c !== code) : [...item.addons, code];
-      // If the user manually unchecks an auto-applied code, remove from tracker
-      // so it doesn't flip back on the next auto-apply pass.
-      const nextAuto = has ? item.autoAppliedAddons.filter(c => c !== code) : item.autoAppliedAddons;
-      return { ...item, addons: nextAddons, autoAppliedAddons: nextAuto };
+      if (has) {
+        // User unchecked this code — remove from active addons AND from the
+        // auto-applied tracker, AND record the dismissal so the auto-apply
+        // effect won't re-check the box on the next render while the rule
+        // still matches (e.g. sidemark still empty for NO_ID).
+        return {
+          ...item,
+          addons: item.addons.filter(c => c !== code),
+          autoAppliedAddons: item.autoAppliedAddons.filter(c => c !== code),
+          dismissedAddons: item.dismissedAddons.includes(code)
+            ? item.dismissedAddons
+            : [...item.dismissedAddons, code],
+        };
+      }
+      // User checked this code — clear any prior dismissal so the auto-apply
+      // effect can reconcile normally (and can re-promote the code to "auto"
+      // on its next pass if the rule still matches).
+      return {
+        ...item,
+        addons: [...item.addons, code],
+        dismissedAddons: item.dismissedAddons.filter(c => c !== code),
+      };
     }));
   }, []);
 
