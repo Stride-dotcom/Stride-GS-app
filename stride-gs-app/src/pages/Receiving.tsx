@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react';
-import { Plus, Copy, X, Check, Truck, Package, AlertTriangle, Printer, ClipboardPaste } from 'lucide-react';
+import { Plus, Copy, X, Check, Truck, Package, AlertTriangle, Printer, ClipboardPaste, ChevronDown, ChevronRight, Zap } from 'lucide-react';
 import { theme } from '../styles/theme';
 import { AutocompleteSelect } from '../components/shared/AutocompleteSelect';
 
@@ -9,6 +9,7 @@ import { useLocations } from '../hooks/useLocations';
 
 import { useClients } from '../hooks/useClients';
 import { useAutocomplete } from '../hooks/useAutocomplete';
+import { useReceivingAddons, type ReceivingAddon } from '../hooks/useReceivingAddons';
 import { isApiConfigured, postCompleteShipment, postCheckItemIdsAvailable, fetchAutoIdSetting, fetchNextItemId } from '../lib/api';
 import type { ShipmentItemPayload } from '../lib/api';
 import { ProcessingOverlay } from '../components/shared/ProcessingOverlay';
@@ -18,6 +19,23 @@ interface DockItem {
   id: string; itemId: string; reference: string; vendor: string; description: string; itemClass: string;
   qty: number; location: string; sidemark: string; room: string;
   needsInspection: boolean; needsAssembly: boolean; itemNotes: string;
+  weight?: number;           // lbs — used for overweight auto-apply
+  addons: string[];          // add-on service codes selected for this item
+  autoAppliedAddons: string[]; // add-on codes auto-applied (shows "Auto" badge, user can override)
+  expanded: boolean;         // UI state — expand row to show add-ons
+}
+
+const OVERWEIGHT_THRESHOLD = 300; // lbs
+
+/** Compute which add-on codes should be auto-applied for this item. */
+function computeAutoAppliedAddons(item: DockItem, addons: ReceivingAddon[]): string[] {
+  const out: string[] = [];
+  for (const a of addons) {
+    if (!a.autoApplyRule) continue;
+    if (a.autoApplyRule === 'no_id' && !item.sidemark.trim()) out.push(a.code);
+    else if (a.autoApplyRule === 'overweight' && (item.weight ?? 0) > OVERWEIGHT_THRESHOLD) out.push(a.code);
+  }
+  return out;
 }
 
 const CLASSES = ['XS', 'S', 'M', 'L', 'XL'];
@@ -27,7 +45,7 @@ function esc(s: string): string {
 }
 
 function emptyItem(autoInspect = false): DockItem {
-  return { id: `r-${Date.now()}-${Math.random().toString(36).slice(2,6)}`, itemId: '', reference: '', vendor: '', description: '', itemClass: '', qty: 1, location: 'Rec-Dock', sidemark: '', room: '', needsInspection: autoInspect, needsAssembly: false, itemNotes: '' };
+  return { id: `r-${Date.now()}-${Math.random().toString(36).slice(2,6)}`, itemId: '', reference: '', vendor: '', description: '', itemClass: '', qty: 1, location: 'Rec-Dock', sidemark: '', room: '', needsInspection: autoInspect, needsAssembly: false, itemNotes: '', weight: undefined, addons: [], autoAppliedAddons: [], expanded: false };
 }
 
 const cellInput: React.CSSProperties = { width: '100%', padding: '6px 8px', fontSize: 12, border: `1px solid ${theme.colors.borderLight}`, borderRadius: 6, outline: 'none', fontFamily: 'inherit', background: '#fff' };
@@ -73,6 +91,35 @@ function NewShipmentForm() {
   }, [clientAutoInspect]);
 
   const { sidemarks, vendors, descriptions } = useAutocomplete(clientSheetId || undefined);
+  const { addons: catalogAddons } = useReceivingAddons();
+
+  // Auto-apply: recompute which add-ons should be pre-checked per row based on
+  // metadata rules. User-added codes are preserved; only codes previously tracked
+  // in `autoAppliedAddons` get removed when the rule no longer matches (manual
+  // overrides stay). The reconcile check avoids re-rendering when nothing changed.
+  const autoApplySignature = useMemo(
+    () => items.map(i => `${i.id}:${i.sidemark}|${i.weight ?? ''}|${i.itemClass}|${i.autoAppliedAddons.join(',')}`).join('~'),
+    [items]
+  );
+  useEffect(() => {
+    if (catalogAddons.length === 0) return;
+    setItems(prev => {
+      let changed = false;
+      const next = prev.map(row => {
+        const shouldBe = computeAutoAppliedAddons(row, catalogAddons);
+        const prevAuto = row.autoAppliedAddons;
+        const sameTracker = prevAuto.length === shouldBe.length && prevAuto.every(c => shouldBe.includes(c));
+        if (sameTracker) return row;
+        changed = true;
+        const toAdd = shouldBe.filter(c => !row.addons.includes(c));
+        const toRemove = prevAuto.filter(c => !shouldBe.includes(c));
+        const nextAddons = Array.from(new Set([...row.addons.filter(c => !toRemove.includes(c)), ...toAdd]));
+        return { ...row, addons: nextAddons, autoAppliedAddons: shouldBe };
+      });
+      return changed ? next : prev;
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [catalogAddons.length, autoApplySignature]);
 
   // v38.37.0 — derive the selected client's shipment note for the amber banner.
   // Uses the same match chain as the client-change handler (liveClients by id → apiClients
@@ -165,13 +212,43 @@ function NewShipmentForm() {
   const duplicateRow = useCallback((idx: number) => {
     const newId = `r-${Date.now()}-${Math.random().toString(36).slice(2,6)}`;
     setItems(prev => {
-      const copy = { ...prev[idx], id: newId, itemId: autoIdEnabled ? '' : prev[idx].itemId };
+      const src = prev[idx];
+      // Copy ALL settings including add-ons (user requirement). Arrays are cloned
+      // to prevent the new row's toggles from mutating the original row's state.
+      const copy: DockItem = {
+        ...src,
+        id: newId,
+        itemId: autoIdEnabled ? '' : src.itemId,
+        addons: [...src.addons],
+        autoAppliedAddons: [...src.autoAppliedAddons],
+      };
       const next = [...prev];
       next.splice(idx + 1, 0, copy);
       return next;
     });
     if (autoIdEnabled) assignAutoId(newId);
   }, [autoIdEnabled, assignAutoId]);
+
+  const toggleRowExpanded = useCallback((idx: number) => {
+    setItems(prev => prev.map((item, i) => i === idx ? { ...item, expanded: !item.expanded } : item));
+  }, []);
+
+  const toggleAddon = useCallback((idx: number, code: string) => {
+    setItems(prev => prev.map((item, i) => {
+      if (i !== idx) return item;
+      const has = item.addons.includes(code);
+      const nextAddons = has ? item.addons.filter(c => c !== code) : [...item.addons, code];
+      // If the user manually unchecks an auto-applied code, remove from tracker
+      // so it doesn't flip back on the next auto-apply pass.
+      const nextAuto = has ? item.autoAppliedAddons.filter(c => c !== code) : item.autoAppliedAddons;
+      return { ...item, addons: nextAddons, autoAppliedAddons: nextAuto };
+    }));
+  }, []);
+
+  const updateWeight = useCallback((idx: number, raw: string) => {
+    const n = parseFloat(raw);
+    setItems(prev => prev.map((item, i) => i === idx ? { ...item, weight: Number.isFinite(n) && n > 0 ? n : undefined } : item));
+  }, []);
 
   // Column order used for multi-column Excel paste. Matches the visible table
   // column order so users can copy an Excel range and it lines up exactly.
@@ -365,6 +442,8 @@ function NewShipmentForm() {
       needsInspection: i.needsInspection,
       needsAssembly: i.needsAssembly,
       itemNotes: i.itemNotes.trim() || undefined,
+      weight: i.weight,
+      addons: i.addons.length > 0 ? i.addons : undefined,
     }));
 
     setSubmitting(true);
@@ -712,6 +791,7 @@ function NewShipmentForm() {
           <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: isMobile ? 800 : 1000 }}>
             <thead>
               <tr>
+                <th style={{ ...th, width: 28, textAlign: 'center' }} title="Expand for add-on services"></th>
                 <th style={{ ...th, width: 36, textAlign: 'center' }}>#</th>
                 <th style={{ ...th, width: 110 }}>{autoIdEnabled ? 'Item ID (Auto)' : 'Item ID *'}</th>
                 <th style={{ ...th, width: 130 }}>Vendor</th>
@@ -729,7 +809,20 @@ function NewShipmentForm() {
             </thead>
             <tbody>
               {items.map((item, idx) => (
-                <tr key={item.id} style={{ background: item.description.trim() ? 'transparent' : '#FAFAFA' }}>
+                <React.Fragment key={item.id}>
+                <tr style={{ background: item.description.trim() ? 'transparent' : '#FAFAFA' }}>
+                  <td style={{ ...td, textAlign: 'center', padding: 0 }}>
+                    <button
+                      onClick={() => toggleRowExpanded(idx)}
+                      title={item.expanded ? 'Hide add-on services' : 'Show add-on services'}
+                      style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4, color: item.addons.length > 0 ? theme.colors.orange : theme.colors.textMuted, display: 'inline-flex', alignItems: 'center', gap: 2, position: 'relative' }}
+                    >
+                      {item.expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                      {item.addons.length > 0 && (
+                        <span style={{ fontSize: 9, fontWeight: 700, background: theme.colors.orange, color: '#fff', borderRadius: 8, padding: '1px 5px', lineHeight: 1 }}>{item.addons.length}</span>
+                      )}
+                    </button>
+                  </td>
                   <td style={{ ...td, textAlign: 'center', fontSize: 11, color: theme.colors.textMuted, fontWeight: 600 }}>{idx + 1}</td>
                   <td style={td}>
                     {autoIdEnabled ? (
@@ -756,11 +849,79 @@ function NewShipmentForm() {
                   <td style={{ ...td, textAlign: 'center' }}><input type="checkbox" checked={item.needsAssembly} onChange={e => update(idx, 'needsAssembly', e.target.checked)} style={{ accentColor: theme.colors.orange, cursor: 'pointer' }} /></td>
                   <td style={{ ...td, textAlign: 'center' }}>
                     <div style={{ display: 'flex', gap: 2, justifyContent: 'center' }}>
-                      <button onClick={() => duplicateRow(idx)} title="Duplicate row" style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 2, color: theme.colors.textMuted, borderRadius: 4 }}><Copy size={13} /></button>
+                      <button onClick={() => duplicateRow(idx)} title="Duplicate row (includes add-ons)" style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 2, color: theme.colors.textMuted, borderRadius: 4 }}><Copy size={13} /></button>
                       <button onClick={() => removeRow(idx)} title="Remove row" style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 2, color: items.length > 1 ? theme.colors.textMuted : theme.colors.borderLight, borderRadius: 4 }}><X size={13} /></button>
                     </div>
                   </td>
                 </tr>
+                {item.expanded && (
+                  <tr style={{ background: '#FAFBFD' }}>
+                    <td colSpan={14} style={{ padding: '12px 16px 14px 40px', borderBottom: `1px solid ${theme.colors.borderLight}` }}>
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 18, alignItems: 'flex-start' }}>
+                        {/* Weight input — powers "overweight" auto-apply */}
+                        <div style={{ minWidth: 140 }}>
+                          <div style={{ fontSize: 10, fontWeight: 600, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 4 }}>Weight (lbs)</div>
+                          <input
+                            type="number"
+                            min={0}
+                            step={1}
+                            value={item.weight ?? ''}
+                            onChange={e => updateWeight(idx, e.target.value)}
+                            placeholder="Optional"
+                            style={{ ...cellInput, width: 120, fontSize: 12 }}
+                          />
+                          <div style={{ fontSize: 10, color: theme.colors.textMuted, marginTop: 4 }}>&gt; {OVERWEIGHT_THRESHOLD} lbs triggers overweight add-on</div>
+                        </div>
+                        {/* Add-on checkboxes */}
+                        <div style={{ flex: 1, minWidth: 300 }}>
+                          <div style={{ fontSize: 10, fontWeight: 600, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 6 }}>
+                            Add-on Services
+                            {catalogAddons.length === 0 && <span style={{ textTransform: 'none', fontWeight: 400, marginLeft: 8 }}>(none configured)</span>}
+                          </div>
+                          {catalogAddons.length > 0 && (
+                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                              {catalogAddons.map(a => {
+                                const checked = item.addons.includes(a.code);
+                                const auto = item.autoAppliedAddons.includes(a.code);
+                                const rate = a.rateForClass(item.itemClass);
+                                return (
+                                  <label
+                                    key={a.code}
+                                    style={{
+                                      display: 'inline-flex', alignItems: 'center', gap: 6,
+                                      padding: '6px 10px', borderRadius: 8,
+                                      border: `1px solid ${checked ? theme.colors.orange : theme.colors.borderLight}`,
+                                      background: checked ? '#FFF7F0' : '#fff',
+                                      cursor: 'pointer', fontSize: 12,
+                                      userSelect: 'none',
+                                    }}
+                                  >
+                                    <input
+                                      type="checkbox"
+                                      checked={checked}
+                                      onChange={() => toggleAddon(idx, a.code)}
+                                      style={{ accentColor: theme.colors.orange, cursor: 'pointer', margin: 0 }}
+                                    />
+                                    <span style={{ fontWeight: 600, color: theme.colors.text }}>{a.name}</span>
+                                    <span style={{ color: theme.colors.textMuted, fontSize: 11 }}>
+                                      {rate > 0 ? `$${rate.toFixed(2)}` : (item.itemClass ? 'no rate' : 'set class')}
+                                    </span>
+                                    {auto && checked && (
+                                      <span title="Auto-applied based on item metadata" style={{ display: 'inline-flex', alignItems: 'center', gap: 2, fontSize: 9, fontWeight: 700, background: '#FEF3C7', color: '#92400E', padding: '1px 5px', borderRadius: 6, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                                        <Zap size={9} /> Auto
+                                      </span>
+                                    )}
+                                  </label>
+                                );
+                              })}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </td>
+                  </tr>
+                )}
+                </React.Fragment>
               ))}
             </tbody>
           </table>

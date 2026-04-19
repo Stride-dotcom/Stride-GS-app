@@ -1,5 +1,5 @@
 import React, { useState, useRef, useCallback, useEffect, useMemo } from 'react';
-import { X, Package, Calendar, FileText, ClipboardList, Wrench, Truck, ExternalLink, DollarSign, Ship, AlertCircle, MapPin, CheckCircle2, Pencil, Save, Loader2, FolderOpen } from 'lucide-react';
+import { X, Package, Calendar, FileText, ClipboardList, Wrench, Truck, ExternalLink, DollarSign, Ship, AlertCircle, MapPin, CheckCircle2, Pencil, Save, Loader2, FolderOpen, Plus } from 'lucide-react';
 import { FolderButton } from './FolderButton';
 import { DetailHeader } from './DetailHeader';
 import { supabase } from '../../lib/supabase';
@@ -8,7 +8,8 @@ import { AutocompleteInput } from './AutocompleteInput';
 import { theme } from '../../styles/theme';
 import { fmtDate } from '../../lib/constants';
 import { WriteButton } from './WriteButton';
-import { postUpdateInventoryItem, fetchItemMoveHistory, postRequestRepairQuote, isApiConfigured } from '../../lib/api';
+import { useReceivingAddons } from '../../hooks/useReceivingAddons';
+import { postUpdateInventoryItem, fetchItemMoveHistory, postRequestRepairQuote, postAddItemAddon, postRemoveItemAddon, isApiConfigured } from '../../lib/api';
 import type { MoveHistoryEntry } from '../../lib/api';
 import type { InventoryItem, InventoryStatus } from '../../lib/types';
 import { getPanelContainerStyle, panelBackdropStyle } from './panelStyles';
@@ -588,6 +589,75 @@ export function ItemDetailPanel({
     setRepairRequesting(false);
   }, [clientSheetId, item.itemId, onItemUpdated]);
 
+  // ─── Add-on services (OVER300, NO_ID, etc.) — live toggles ───────────────
+  // Checked state derives from itemBilling: an unbilled row with svcCode matching
+  // an addon code = checked. Already-billed rows show the addon as checked + locked.
+  // Optimistic local overrides bridge the gap between click and data refetch.
+  const { addons: catalogAddons } = useReceivingAddons();
+  const canEditAddons = userRole === 'admin' || userRole === 'staff';
+  const [addonPending, setAddonPending] = useState<Record<string, 'adding' | 'removing'>>({});
+  const [addonOverrides, setAddonOverrides] = useState<Record<string, boolean>>({}); // optimistic overrides; cleared on refetch
+  const [addonError, setAddonError] = useState<string | null>(null);
+
+  // Checked state + lock state per addon, derived from itemBilling
+  const addonStatus = useMemo(() => {
+    const out: Record<string, { checked: boolean; locked: boolean; lockedStatus?: string; ledgerRowId?: string }> = {};
+    for (const a of catalogAddons) {
+      let row: any = null;
+      for (const b of itemBilling) {
+        if (String(b.svcCode || '').trim() === a.code) { row = b; break; }
+      }
+      const status = row ? String(row.status || '').trim() : '';
+      const baseChecked = !!row;
+      const override = addonOverrides[a.code];
+      out[a.code] = {
+        checked: override !== undefined ? override : baseChecked,
+        locked: !!row && status !== 'Unbilled',
+        lockedStatus: status || undefined,
+        ledgerRowId: row?.ledgerRowId,
+      };
+    }
+    return out;
+  }, [catalogAddons, itemBilling, addonOverrides]);
+
+  // Clear optimistic overrides when the underlying billing data refreshes
+  useEffect(() => { setAddonOverrides({}); }, [itemBilling]);
+
+  const toggleAddonLive = useCallback(async (code: string) => {
+    if (!canEditAddons) return;
+    if (!isApiConfigured() || !clientSheetId || !item.itemId) return;
+    const s = addonStatus[code];
+    if (!s || s.locked) {
+      setAddonError(`Cannot change — already ${s?.lockedStatus || 'invoiced'}`);
+      setTimeout(() => setAddonError(null), 3000);
+      return;
+    }
+    setAddonError(null);
+    const nextChecked = !s.checked;
+    setAddonOverrides(prev => ({ ...prev, [code]: nextChecked }));
+    setAddonPending(prev => ({ ...prev, [code]: nextChecked ? 'adding' : 'removing' }));
+    try {
+      const resp = nextChecked
+        ? await postAddItemAddon({ itemId: item.itemId, serviceCode: code }, clientSheetId)
+        : await postRemoveItemAddon({ itemId: item.itemId, serviceCode: code }, clientSheetId);
+      if (!resp.ok || !resp.data?.success) {
+        // rollback
+        setAddonOverrides(prev => { const n = { ...prev }; delete n[code]; return n; });
+        const msg = resp.data?.error || resp.error || 'Failed to update add-on';
+        setAddonError(msg);
+        setTimeout(() => setAddonError(null), 3500);
+      } else {
+        onItemUpdated?.();
+      }
+    } catch (err) {
+      setAddonOverrides(prev => { const n = { ...prev }; delete n[code]; return n; });
+      setAddonError(err instanceof Error ? err.message : String(err));
+      setTimeout(() => setAddonError(null), 3500);
+    } finally {
+      setAddonPending(prev => { const n = { ...prev }; delete n[code]; return n; });
+    }
+  }, [canEditAddons, clientSheetId, item.itemId, addonStatus, onItemUpdated]);
+
   // ─── Edit/Save mode ───────────────────────────────────────────────────────
   interface DraftFields {
     vendor: string; description: string; reference: string; sidemark: string; room: string;
@@ -853,6 +923,53 @@ export function ItemDetailPanel({
               {onTransfer && <WriteButton label="Transfer" variant="secondary" size="sm" style={{ width: '100%' }} onClick={async () => { onTransfer(); }} />}
             </div>
           </Section>
+
+          {/* Add-on Services — staff/admin can toggle; clients see read-only */}
+          {catalogAddons.length > 0 && (
+            <Section icon={Plus} title="Add-on Services" count={catalogAddons.filter(a => addonStatus[a.code]?.checked).length || undefined}>
+              {addonError && (
+                <div role="alert" style={{ fontSize: 11, color: '#92400E', background: '#FEF3C7', border: '1px solid #F59E0B', borderRadius: 6, padding: '6px 10px', marginBottom: 8 }}>
+                  {addonError}
+                </div>
+              )}
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                {catalogAddons.map(a => {
+                  const s = addonStatus[a.code] || { checked: false, locked: false };
+                  const rate = a.rateForClass(item.itemClass || '');
+                  const pending = addonPending[a.code];
+                  const disabled = !canEditAddons || !!pending || s.locked;
+                  return (
+                    <label
+                      key={a.code}
+                      onClick={e => { if (disabled) return; e.preventDefault(); toggleAddonLive(a.code); }}
+                      style={{
+                        display: 'inline-flex', alignItems: 'center', gap: 6,
+                        padding: '6px 10px', borderRadius: 8,
+                        border: `1px solid ${s.checked ? theme.colors.orange : theme.colors.borderLight}`,
+                        background: s.locked ? '#F3F4F6' : s.checked ? '#FFF7F0' : '#fff',
+                        cursor: disabled ? 'default' : 'pointer',
+                        fontSize: 12, userSelect: 'none',
+                        opacity: pending ? 0.6 : 1,
+                      }}
+                      title={s.locked ? `Locked — already ${s.lockedStatus}` : !canEditAddons ? 'View only' : 'Click to toggle'}
+                    >
+                      <input type="checkbox" checked={s.checked} readOnly disabled={disabled} style={{ accentColor: theme.colors.orange, cursor: disabled ? 'default' : 'pointer', margin: 0 }} />
+                      <span style={{ fontWeight: 600, color: theme.colors.text }}>{a.name}</span>
+                      <span style={{ color: theme.colors.textMuted, fontSize: 11 }}>
+                        {rate > 0 ? `$${rate.toFixed(2)}` : (item.itemClass ? 'no rate' : 'set class')}
+                      </span>
+                      {pending && <Loader2 size={11} style={{ animation: 'spin 1s linear infinite', color: theme.colors.orange }} />}
+                      {s.locked && (
+                        <span style={{ fontSize: 9, fontWeight: 700, background: '#E5E7EB', color: '#4B5563', padding: '1px 5px', borderRadius: 6, textTransform: 'uppercase' }}>
+                          {s.lockedStatus}
+                        </span>
+                      )}
+                    </label>
+                  );
+                })}
+              </div>
+            </Section>
+          )}
 
           {/* Related Records */}
           <Section icon={FileText} title="Related" count={linkedTasks.length + linkedRepairs.length + linkedWillCalls.length || undefined}>

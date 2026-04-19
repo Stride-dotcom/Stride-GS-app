@@ -1,5 +1,5 @@
 /* ===================================================
-   StrideAPI.gs — v38.75.0 — 2026-04-19 PST — due_date + priority in sbTaskRow_ + resync
+   StrideAPI.gs — v38.76.0 — 2026-04-19 PST — receiving add-on billing rows + live add/remove endpoints
    v38.74.0: Task Due Date + Priority support. handleGetTasks_ returns dueDate
              + priority. handleBatchCreateTasks_ accepts dueDate + priority from
              payload, auto-ensures columns exist in Tasks sheet. New endpoints:
@@ -4309,6 +4309,18 @@ function doPost(e) {
           var r = handleUpdateTaskPriority_(effectiveId, payload);
           invalidateClientCache_(effectiveId);
           api_writeThrough_(r, "task", effectiveId, String(payload.taskId || ""));
+          return r;
+        });
+      case "addItemAddon":
+        return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
+          var r = handleAddItemAddon_(effectiveId, payload);
+          invalidateClientCache_(effectiveId);
+          return r;
+        });
+      case "removeItemAddon":
+        return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
+          var r = handleRemoveItemAddon_(effectiveId, payload);
+          invalidateClientCache_(effectiveId);
           return r;
         });
 
@@ -9859,6 +9871,44 @@ function handleCompleteShipment_(clientSheetId, payload) {
             "Item Notes": "Receiving",
             "Ledger Row ID": "RCVG-" + bItemId + "-" + shipmentNo
           }));
+
+          // v38.76.0 — Add-on services (OVER300, NO_ID, etc.). Each checked code
+          // in item.addons[] produces one extra billing row, priced per item class
+          // with client-specific discount applied the same way as RCVG.
+          var addonCodes = Array.isArray(bItem.addons) ? bItem.addons : [];
+          for (var ac = 0; ac < addonCodes.length; ac++) {
+            var addonCode = String(addonCodes[ac] || "").trim();
+            if (!addonCode || addonCode === "RCVG") continue; // never duplicate the base RCVG row
+            var addonPrice = api_lookupRate_(ss, addonCode, bClass);
+            var addonRate = addonPrice.rate || 0;
+            if (addonRate > 0 && addonPrice.category) {
+              addonRate = api_applyDiscount_(settings, addonRate, addonPrice.category);
+            }
+            var addonTotal = addonRate > 0 ? addonRate : "Missing Rate";
+            if (addonRate <= 0) {
+              warnings.push("Missing " + addonCode + " rate for class " + bClass + " on item " + bItemId + " — billing row created with Missing Rate flag");
+            }
+            billBatch.push(api_buildRow_(billMap, {
+              "Status": "Unbilled",
+              "Invoice #": "",
+              "Client": clientName,
+              "Date": receiveDate,
+              "Svc Code": addonCode,
+              "Svc Name": addonPrice.svcName || addonCode,
+              "Category": addonPrice.category || "",
+              "Item ID": bItemId,
+              "Description": String(bItem.description || "").trim(),
+              "Class": bClass,
+              "Qty": 1,
+              "Rate": addonRate > 0 ? addonRate : 0,
+              "Total": addonTotal,
+              "Task ID": "",
+              "Repair ID": "",
+              "Shipment #": shipmentNo,
+              "Item Notes": "Receiving add-on",
+              "Ledger Row ID": addonCode + "-" + bItemId + "-" + shipmentNo
+            }));
+          }
         }
 
         if (billBatch.length) {
@@ -19593,6 +19643,186 @@ function handleUpdateTaskPriority_(clientSheetId, payload) {
     return jsonResponse_({ success: true, taskId: taskId, priority: priority });
   } catch (err) {
     return errorResponse_("Failed to update priority: " + String(err), "SERVER_ERROR");
+  }
+}
+
+/* ================================================================
+   v38.76.0 — Receiving add-on live toggles (ItemDetailPanel)
+   Add a single add-on billing row for an existing inventory item.
+   Idempotent: if a row with the same Ledger Row ID already exists,
+   returns success with alreadyPresent=true (no duplicate row created).
+   Rate is looked up from client Price_Cache using item's class; the
+   discount convention matches handleCompleteShipment_ RCVG row.
+   ================================================================ */
+function handleAddItemAddon_(clientSheetId, payload) {
+  var itemId = String((payload || {}).itemId || "").trim();
+  var serviceCode = String((payload || {}).serviceCode || "").trim();
+  if (!itemId) return errorResponse_("itemId is required", "INVALID_PARAMS");
+  if (!serviceCode) return errorResponse_("serviceCode is required", "INVALID_PARAMS");
+  if (serviceCode === "RCVG") return errorResponse_("RCVG cannot be added as an add-on", "INVALID_PARAMS");
+
+  var lock = LockService.getDocumentLock();
+  lock.waitLock(15000);
+  try {
+    var ss = SpreadsheetApp.openById(clientSheetId);
+    var invSheet = ss.getSheetByName("Inventory");
+    if (!invSheet) return errorResponse_("Inventory sheet not found", "SHEET_NOT_FOUND");
+    var billSheet = ss.getSheetByName("Billing_Ledger");
+    if (!billSheet) return errorResponse_("Billing_Ledger sheet not found", "SHEET_NOT_FOUND");
+
+    // Look up item's class, description, shipment from Inventory
+    var invHMap = api_getHeaderMap_(invSheet);
+    var invIdCol = invHMap["Item ID"];
+    if (!invIdCol) return errorResponse_("Item ID column not found in Inventory", "SCHEMA_ERROR");
+    var invRowNum = api_findRowById_(invSheet, invIdCol, itemId);
+    if (invRowNum < 2) return errorResponse_("Item not found: " + itemId, "NOT_FOUND");
+    var invRowData = invSheet.getRange(invRowNum, 1, 1, invSheet.getLastColumn()).getValues()[0];
+    function invCell_(header) { var c = invHMap[header]; return c ? String(invRowData[c - 1] || "").trim() : ""; }
+    var itemClass = invCell_("Class");
+    var itemDesc = invCell_("Description");
+    var shipmentNo = invCell_("Shipment #");
+
+    var ledgerRowId = serviceCode + "-" + itemId + "-" + shipmentNo;
+
+    // Idempotency: check if a row already exists with this Ledger Row ID
+    var billMap = api_getHeaderMap_(billSheet);
+    var lidCol = billMap["Ledger Row ID"];
+    if (!lidCol) return errorResponse_("Ledger Row ID column not found", "SCHEMA_ERROR");
+    var lastBillRow = api_getLastDataRow_(billSheet);
+    if (lastBillRow >= 2) {
+      var existingIds = billSheet.getRange(2, lidCol, lastBillRow - 1, 1).getValues();
+      for (var i = 0; i < existingIds.length; i++) {
+        if (String(existingIds[i][0] || "").trim() === ledgerRowId) {
+          return jsonResponse_({ success: true, alreadyPresent: true, ledgerRowId: ledgerRowId });
+        }
+      }
+    }
+
+    // Price lookup + client discount
+    var settings = api_readSettings_(ss);
+    var clientName = settings["CLIENT_NAME"] || "";
+    var priceInfo = api_lookupRate_(ss, serviceCode, itemClass);
+    var rate = priceInfo.rate || 0;
+    if (rate > 0 && priceInfo.category) {
+      rate = api_applyDiscount_(settings, rate, priceInfo.category);
+    }
+    var total = rate > 0 ? rate : "Missing Rate";
+    var today = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd");
+
+    var newRow = api_buildRow_(billMap, {
+      "Status": "Unbilled",
+      "Invoice #": "",
+      "Client": clientName,
+      "Date": today,
+      "Svc Code": serviceCode,
+      "Svc Name": priceInfo.svcName || serviceCode,
+      "Category": priceInfo.category || "",
+      "Item ID": itemId,
+      "Description": itemDesc,
+      "Class": itemClass,
+      "Qty": 1,
+      "Rate": rate > 0 ? rate : 0,
+      "Total": total,
+      "Task ID": "",
+      "Repair ID": "",
+      "Shipment #": shipmentNo,
+      "Item Notes": "Add-on (manual)",
+      "Ledger Row ID": ledgerRowId
+    });
+
+    var insertRow = api_getLastDataRow_(billSheet) + 1;
+    billSheet.getRange(insertRow, 1, 1, newRow.length).setValues([newRow]);
+
+    // Write-through to Supabase (best-effort)
+    try {
+      resyncEntityToSupabase_("billing", clientSheetId, ledgerRowId);
+    } catch (_) {}
+
+    return jsonResponse_({
+      success: true,
+      ledgerRowId: ledgerRowId,
+      rate: rate > 0 ? rate : 0,
+      total: rate > 0 ? rate : 0,
+      serviceName: priceInfo.svcName || serviceCode
+    });
+  } catch (err) {
+    return errorResponse_("Failed to add add-on: " + String(err), "SERVER_ERROR");
+  } finally {
+    try { lock.releaseLock(); } catch (_) {}
+  }
+}
+
+/* ================================================================
+   Remove an add-on billing row. Blocks if the row is not Unbilled
+   (status Invoiced / Billed / Void = cannot remove — already committed).
+   Uses Ledger Row ID "{svcCode}-{itemId}-{shipmentNo}" as the key.
+   ================================================================ */
+function handleRemoveItemAddon_(clientSheetId, payload) {
+  var itemId = String((payload || {}).itemId || "").trim();
+  var serviceCode = String((payload || {}).serviceCode || "").trim();
+  if (!itemId) return errorResponse_("itemId is required", "INVALID_PARAMS");
+  if (!serviceCode) return errorResponse_("serviceCode is required", "INVALID_PARAMS");
+
+  var lock = LockService.getDocumentLock();
+  lock.waitLock(15000);
+  try {
+    var ss = SpreadsheetApp.openById(clientSheetId);
+    var invSheet = ss.getSheetByName("Inventory");
+    if (!invSheet) return errorResponse_("Inventory sheet not found", "SHEET_NOT_FOUND");
+    var billSheet = ss.getSheetByName("Billing_Ledger");
+    if (!billSheet) return errorResponse_("Billing_Ledger sheet not found", "SHEET_NOT_FOUND");
+
+    var invHMap = api_getHeaderMap_(invSheet);
+    var invIdCol = invHMap["Item ID"];
+    if (!invIdCol) return errorResponse_("Item ID column not found in Inventory", "SCHEMA_ERROR");
+    var invRowNum = api_findRowById_(invSheet, invIdCol, itemId);
+    if (invRowNum < 2) return errorResponse_("Item not found: " + itemId, "NOT_FOUND");
+    var shipmentNo = String(invSheet.getRange(invRowNum, invHMap["Shipment #"] || 1).getValue() || "").trim();
+
+    var ledgerRowId = serviceCode + "-" + itemId + "-" + shipmentNo;
+
+    var billMap = api_getHeaderMap_(billSheet);
+    var lidCol = billMap["Ledger Row ID"];
+    var statusCol = billMap["Status"];
+    if (!lidCol || !statusCol) return errorResponse_("Required Billing_Ledger columns missing", "SCHEMA_ERROR");
+
+    var lastBillRow = api_getLastDataRow_(billSheet);
+    if (lastBillRow < 2) return errorResponse_("Add-on row not found: " + ledgerRowId, "NOT_FOUND");
+    var ids = billSheet.getRange(2, lidCol, lastBillRow - 1, 1).getValues();
+    var matchRow = -1;
+    for (var i = 0; i < ids.length; i++) {
+      if (String(ids[i][0] || "").trim() === ledgerRowId) { matchRow = i + 2; break; }
+    }
+    if (matchRow < 2) return errorResponse_("Add-on row not found: " + ledgerRowId, "NOT_FOUND");
+
+    var status = String(billSheet.getRange(matchRow, statusCol).getValue() || "").trim();
+    if (status !== "Unbilled") {
+      return jsonResponse_({ success: false, error: "Cannot remove — already " + (status || "invoiced"), status: status });
+    }
+
+    billSheet.deleteRow(matchRow);
+
+    // Write-through: tell Supabase to delete this ledger row
+    try {
+      var url = prop_("SUPABASE_URL");
+      var key = prop_("SUPABASE_SERVICE_ROLE_KEY");
+      if (url && key) {
+        UrlFetchApp.fetch(
+          url + "/rest/v1/billing?tenant_id=eq." + encodeURIComponent(clientSheetId) + "&ledger_row_id=eq." + encodeURIComponent(ledgerRowId),
+          {
+            method: "delete",
+            headers: { "apikey": key, "Authorization": "Bearer " + key },
+            muteHttpExceptions: true
+          }
+        );
+      }
+    } catch (_) {}
+
+    return jsonResponse_({ success: true });
+  } catch (err) {
+    return errorResponse_("Failed to remove add-on: " + String(err), "SERVER_ERROR");
+  } finally {
+    try { lock.releaseLock(); } catch (_) {}
   }
 }
 

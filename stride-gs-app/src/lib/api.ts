@@ -1192,6 +1192,11 @@ export interface ShipmentItemPayload {
   needsInspection: boolean;
   needsAssembly: boolean;
   itemNotes?: string;
+  /** Optional item weight in lbs — used server-side for audit + auto-apply checks. */
+  weight?: number;
+  /** Addon service codes (from service_catalog, show_as_receiving_addon=true).
+   *  Each code produces an additional billing row at completion. */
+  addons?: string[];
 }
 
 export interface CompleteShipmentPayload {
@@ -1220,6 +1225,42 @@ export interface CompleteShipmentResponse {
     tasksWritten: boolean;
     billingWritten: boolean;
   };
+}
+
+// ─── Receiving add-on services (OVER300, NO_ID, etc.) ──────────────────────
+// Detail-panel live toggles. Receiving-page submit batches addons via
+// ShipmentItemPayload.addons instead of calling these endpoints.
+export interface AddItemAddonResponse {
+  success: boolean;
+  ledgerRowId?: string;
+  rate?: number;
+  total?: number;
+  serviceName?: string;
+  error?: string;
+  /** True if the billing row was already present (idempotent). */
+  alreadyPresent?: boolean;
+}
+export interface RemoveItemAddonResponse {
+  success: boolean;
+  error?: string;
+  /** Present when removal was blocked because the row is already invoiced/billed. */
+  status?: string;
+}
+
+export function postAddItemAddon(
+  payload: { itemId: string; serviceCode: string },
+  clientSheetId: string,
+  signal?: AbortSignal,
+) {
+  return apiPost<AddItemAddonResponse>('addItemAddon', payload as unknown as Record<string, unknown>, { clientSheetId }, { signal });
+}
+
+export function postRemoveItemAddon(
+  payload: { itemId: string; serviceCode: string },
+  clientSheetId: string,
+  signal?: AbortSignal,
+) {
+  return apiPost<RemoveItemAddonResponse>('removeItemAddon', payload as unknown as Record<string, unknown>, { clientSheetId }, { signal });
 }
 
 export function postCompleteShipment(
