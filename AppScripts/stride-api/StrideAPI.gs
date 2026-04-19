@@ -1,5 +1,16 @@
 /* ===================================================
-   StrideAPI.gs — v38.70.2 — 2026-04-18 PST — adminSetUserPassword: create-if-missing
+   StrideAPI.gs — v38.71.0 — 2026-04-18 PST — ensureAuthUser + listMissingAuthUsers
+   v38.71.0: NEW admin endpoints to close the "CB Users row without matching
+             auth.users" gap:
+             - handleEnsureAuthUser_(data): calls createSupabaseAuthUser_ for
+               one email. Idempotent (422 → alreadyExists=true). Creates row
+               with a random strong password; user uses Forgot Password to set
+               their own. Returns {success, email, created, alreadyExists}.
+             - handleListMissingAuthUsers_(data): diffs CB Users vs auth.users,
+               returns {missing: [emails], totalCb, totalAuth, totalMissing}.
+             Used by Settings → Users page to warn about + one-click fix any
+             users whose Supabase Auth row was never created (e.g. half-
+             completed onboarding, direct CB sheet edits, legacy imports).
    v38.70.2: Admin-set-password now CREATES the Supabase auth user with the
              provided password if they don't exist yet (common for CB Users
              rows that were created but never got a welcome email). Returns
@@ -4476,6 +4487,13 @@ function doPost(e) {
       // v38.70.0 — Admin escape hatch: set a user's Supabase Auth password.
       case "adminSetUserPassword":
         return handleAdminSetUserPassword_(payload, callerEmail);
+      // v38.71.0 — Create the auth.users row for an existing CB Users email
+      //            (idempotent — 422 "already exists" is treated as success).
+      case "ensureAuthUser":
+        return handleEnsureAuthUser_(payload, callerEmail);
+      // v38.71.0 — Report CB Users rows that have no matching auth.users.
+      case "listMissingAuthUsers":
+        return handleListMissingAuthUsers_(payload, callerEmail);
       case "testSendClientTemplates":
         return withStaffGuard_(callerEmail, function() {
           return handleTestSendClientTemplates_(callerEmail, payload);
@@ -5180,6 +5198,130 @@ function handleAdminSetUserPassword_(data, callerEmail) {
 
   Logger.log("handleAdminSetUserPassword_: admin=" + callerEmail + " set password for " + targetEmail + " (id=" + target.id + ")");
   return jsonResponse_({ success: true, email: targetEmail, userId: target.id, created: false });
+}
+
+/**
+ * handleEnsureAuthUser_ (v38.71.0)
+ *
+ * Admin-only. Ensures the given email has an auth.users row. Idempotent —
+ * if the row already exists, returns alreadyExists=true with no error. The
+ * user must still use the Forgot Password flow (or admin Set Password) to
+ * establish a password they know; this endpoint writes a random strong
+ * password so nobody can log in until that happens.
+ *
+ * Payload: { action: "ensureAuthUser", callerEmail, email }
+ * Returns: { success, email, created, alreadyExists }
+ */
+function handleEnsureAuthUser_(data, callerEmail) {
+  if (!callerEmail) return errorResponse_("callerEmail is required", "AUTH_ERROR");
+  try { rateLimit_("ensureAuthUser_" + callerEmail, 30); } catch (e) { return errorResponse_(String(e.message), "RATE_LIMIT"); }
+
+  var callerLookup = lookupUser_(callerEmail);
+  if (!callerLookup.user) return errorResponse_("Caller not found", "AUTH_ERROR");
+  if (!callerLookup.user.active) return errorResponse_("Caller deactivated", "AUTH_ERROR");
+  if (callerLookup.user.role !== "admin") return errorResponse_("Admin only", "AUTH_ERROR");
+
+  var targetEmail = String((data && data.email) || "").trim().toLowerCase();
+  if (!targetEmail) return errorResponse_("email is required", "VALIDATION_ERROR");
+
+  var sbResult = createSupabaseAuthUser_(targetEmail);
+  if (!sbResult.success) {
+    return errorResponse_("Auth user creation failed: " + (sbResult.error || "unknown"), "UPSTREAM_ERROR");
+  }
+
+  Logger.log("handleEnsureAuthUser_: admin=" + callerEmail + " ensured auth for " + targetEmail + " (alreadyExists=" + (!!sbResult.alreadyExists) + ")");
+  return jsonResponse_({
+    success: true,
+    email: targetEmail,
+    created: !sbResult.alreadyExists,
+    alreadyExists: !!sbResult.alreadyExists
+  });
+}
+
+/**
+ * handleListMissingAuthUsers_ (v38.71.0)
+ *
+ * Admin-only. Diffs CB Users vs auth.users and reports which CB emails are
+ * missing from Supabase Auth. Used by Settings → Users page to warn about +
+ * one-click fix any users whose auth.users row was never created.
+ *
+ * Payload: { action: "listMissingAuthUsers", callerEmail }
+ * Returns: { success, missing: [emails], totalCb, totalAuth, totalMissing }
+ */
+function handleListMissingAuthUsers_(data, callerEmail) {
+  if (!callerEmail) return errorResponse_("callerEmail is required", "AUTH_ERROR");
+  try { rateLimit_("listMissingAuthUsers_" + callerEmail, 30); } catch (e) { return errorResponse_(String(e.message), "RATE_LIMIT"); }
+
+  var callerLookup = lookupUser_(callerEmail);
+  if (!callerLookup.user) return errorResponse_("Caller not found", "AUTH_ERROR");
+  if (callerLookup.user.role !== "admin") return errorResponse_("Admin only", "AUTH_ERROR");
+
+  var url = prop_("SUPABASE_URL");
+  var key = prop_("SUPABASE_SERVICE_ROLE_KEY");
+  if (!url || !key) return errorResponse_("Supabase credentials not configured", "CONFIG_ERROR");
+
+  // 1. Read CB Users emails (authoritative)
+  var cbId = prop_("CB_SPREADSHEET_ID");
+  var ss = SpreadsheetApp.openById(cbId);
+  var sheet = ss.getSheetByName("Users");
+  if (!sheet) return errorResponse_("CB Users sheet not found", "SCHEMA_ERROR");
+  var cbData = sheet.getDataRange().getValues();
+  if (cbData.length < 2) return jsonResponse_({ success: true, missing: [], totalCb: 0, totalAuth: 0, totalMissing: 0 });
+
+  var headers = cbData[0].map(function(h) { return String(h).trim(); });
+  var emailCol = headers.indexOf("Email");
+  if (emailCol < 0) return errorResponse_("CB Users missing Email column", "SCHEMA_ERROR");
+
+  var normalizeEmail = function(s) { return String(s || "").replace(/\s+/g, " ").trim().toLowerCase(); };
+
+  var cbEmails = []; // preserve original case for reporting
+  var cbSeen = {};
+  for (var i = 1; i < cbData.length; i++) {
+    var raw = String(cbData[i][emailCol] || "").trim();
+    if (!raw) continue;
+    var norm = normalizeEmail(raw);
+    if (cbSeen[norm]) continue;
+    cbSeen[norm] = raw;
+    cbEmails.push(raw);
+  }
+
+  // 2. Page through auth.users (same pattern as handleResyncUsers_ / adminSetUserPassword)
+  var authSeen = {};
+  var totalAuth = 0;
+  for (var page = 1; page <= 5; page++) {
+    var resp = UrlFetchApp.fetch(url + "/auth/v1/admin/users?page=" + page + "&per_page=1000", {
+      method: "GET",
+      headers: { "Authorization": "Bearer " + key, "apikey": key },
+      muteHttpExceptions: true
+    });
+    if (resp.getResponseCode() < 200 || resp.getResponseCode() >= 300) {
+      return errorResponse_("auth.users list failed: " + resp.getResponseCode() + " " + resp.getContentText().substring(0, 200), "UPSTREAM_ERROR");
+    }
+    var json;
+    try { json = JSON.parse(resp.getContentText()); } catch (_) { json = {}; }
+    var users = json.users || [];
+    if (users.length === 0) break;
+    for (var u = 0; u < users.length; u++) {
+      var ae = normalizeEmail(users[u].email);
+      if (ae) authSeen[ae] = true;
+    }
+    totalAuth += users.length;
+    if (users.length < 1000) break;
+  }
+
+  // 3. Diff
+  var missing = [];
+  for (var c = 0; c < cbEmails.length; c++) {
+    if (!authSeen[normalizeEmail(cbEmails[c])]) missing.push(cbEmails[c]);
+  }
+
+  return jsonResponse_({
+    success: true,
+    missing: missing,
+    totalCb: cbEmails.length,
+    totalAuth: totalAuth,
+    totalMissing: missing.length
+  });
 }
 
 /**

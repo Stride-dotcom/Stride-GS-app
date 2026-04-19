@@ -2910,6 +2910,51 @@ export function adminSetUserPassword(
   );
 }
 
+/**
+ * Ensure a CB Users row has a matching Supabase auth.users row.
+ * Idempotent — returns alreadyExists=true if the row is already there.
+ * StrideAPI handler: handleEnsureAuthUser_ (admin-only).
+ */
+export interface EnsureAuthUserResponse {
+  success: boolean;
+  email?: string;
+  created?: boolean;
+  alreadyExists?: boolean;
+  error?: string;
+}
+
+export function ensureUserInAuth(email: string, signal?: AbortSignal) {
+  return apiPost<EnsureAuthUserResponse>(
+    'ensureAuthUser',
+    { email },
+    undefined,
+    { signal }
+  );
+}
+
+/**
+ * Report CB Users rows that are missing from Supabase auth.users.
+ * Used by Settings → Users page to warn about + one-click fix the gap.
+ * StrideAPI handler: handleListMissingAuthUsers_ (admin-only).
+ */
+export interface ListMissingAuthUsersResponse {
+  success: boolean;
+  missing?: string[];
+  totalCb?: number;
+  totalAuth?: number;
+  totalMissing?: number;
+  error?: string;
+}
+
+export function listMissingAuthUsers(signal?: AbortSignal) {
+  return apiPost<ListMissingAuthUsersResponse>(
+    'listMissingAuthUsers',
+    {},
+    undefined,
+    { signal }
+  );
+}
+
 // ─── Template Management (v38.12.0) ──────────────────────────────────────────
 
 export interface EmailTemplate {

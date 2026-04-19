@@ -1,8 +1,8 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Settings as SettingsIcon, Users, DollarSign, Mail, Database, Globe, Bell, Plus, ChevronRight, CheckCircle2, AlertCircle, UserPlus, Shield, ToggleLeft, ToggleRight, Eye, EyeOff, Wifi, WifiOff, RefreshCw, Loader2, RefreshCcw, ExternalLink, Wrench, PlayCircle, Send, FolderSync, BookText, LogIn, Cloud, Edit2, Zap, ArrowUpDown, ChevronUp, ChevronDown, X } from 'lucide-react';
 import { useReactTable, getCoreRowModel, getSortedRowModel, flexRender, type SortingState, type ColumnDef } from '@tanstack/react-table';
-import { getApiUrl, getApiToken, setApiCredentials, isApiConfigured, fetchHealth, postOnboardClient, postUpdateClient, postSyncSettings, postRefreshCaches, postFixMissingFolders, postTestSendClientTemplates, postTestSendClaimEmails, fetchAutoIdSetting, postUpdateAutoIdSetting, postResolveOnboardUser, fetchStaxConfig, postUpdateStaxConfig, apiPost, fetchEmailTemplates, postSyncTemplatesToClients, postBulkSyncToSupabase, postPurgeInactiveFromSupabase, fetchClients, postFinishClientSetup, postSendWelcomeToUsers, resyncUsersPreview, resyncUsers, resyncClientsPreview, resyncClients, setNextFetchNoCache, adminSetUserPassword } from '../lib/api';
+import { getApiUrl, getApiToken, setApiCredentials, isApiConfigured, fetchHealth, postOnboardClient, postUpdateClient, postSyncSettings, postRefreshCaches, postFixMissingFolders, postTestSendClientTemplates, postTestSendClaimEmails, fetchAutoIdSetting, postUpdateAutoIdSetting, postResolveOnboardUser, fetchStaxConfig, postUpdateStaxConfig, apiPost, fetchEmailTemplates, postSyncTemplatesToClients, postBulkSyncToSupabase, postPurgeInactiveFromSupabase, fetchClients, postFinishClientSetup, postSendWelcomeToUsers, resyncUsersPreview, resyncUsers, resyncClientsPreview, resyncClients, setNextFetchNoCache, adminSetUserPassword, ensureUserInAuth, listMissingAuthUsers } from '../lib/api';
 import type { BulkSyncResult } from '../lib/api';
 import type { EmailTemplate } from '../lib/api';
 import { entityEvents } from '../lib/entityEvents';
@@ -474,6 +474,12 @@ export function Settings() {
   const [setPasswordError, setSetPasswordError] = useState('');
   const [setPasswordLoading, setSetPasswordLoading] = useState(false);
   const [setPasswordSuccess, setSetPasswordSuccess] = useState<string | null>(null);
+  // v38.71.0 — Missing-from-Supabase-Auth tracking
+  const [missingAuthEmails, setMissingAuthEmails] = useState<Set<string>>(new Set());
+  const [missingAuthChecking, setMissingAuthChecking] = useState(false);
+  const [creatingAuthFor, setCreatingAuthFor] = useState<string | null>(null);
+  const [createAllLoading, setCreateAllLoading] = useState(false);
+  const [authSyncResult, setAuthSyncResult] = useState<{ ok: boolean; message: string } | null>(null);
   const [sendWelcomeResult, setSendWelcomeResult] = useState<{ email: string; ok: boolean; message: string } | null>(null);
 
   // Session 70 follow-up — Resync Users (CB → Supabase cb_users + optional auth.users prune)
@@ -657,6 +663,80 @@ export function Settings() {
     setSetPasswordValue('');
     setSetPasswordConfirm('');
     setSetPasswordError('');
+  }
+
+  const checkMissingAuthUsers = useCallback(async () => {
+    if (!isAdmin) return;
+    setMissingAuthChecking(true);
+    try {
+      const res = await listMissingAuthUsers();
+      if (res.ok && res.data?.success) {
+        setMissingAuthEmails(new Set((res.data.missing || []).map(e => e.toLowerCase())));
+      }
+    } catch {
+      // Non-fatal — leave banner hidden
+    } finally {
+      setMissingAuthChecking(false);
+    }
+  }, [isAdmin]);
+
+  // Run once when landing on the Users tab
+  useEffect(() => {
+    if (tab === 'users' && isAdmin && missingAuthEmails.size === 0 && !missingAuthChecking) {
+      checkMissingAuthUsers();
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, isAdmin]);
+
+  async function handleEnsureAuthForUser(userEmail: string) {
+    setCreatingAuthFor(userEmail);
+    setAuthSyncResult(null);
+    try {
+      const res = await ensureUserInAuth(userEmail);
+      if (res.ok && res.data?.success) {
+        const verb = res.data.created ? 'Created auth account for' : 'Auth account already existed for';
+        setAuthSyncResult({ ok: true, message: `${verb} ${userEmail}. They can use Forgot Password to set their login.` });
+        // Remove from missing set
+        setMissingAuthEmails(prev => {
+          const next = new Set(prev);
+          next.delete(userEmail.toLowerCase());
+          return next;
+        });
+      } else {
+        setAuthSyncResult({ ok: false, message: res.error || res.data?.error || 'Request failed' });
+      }
+    } catch (err) {
+      setAuthSyncResult({ ok: false, message: String(err) });
+    } finally {
+      setCreatingAuthFor(null);
+      setTimeout(() => setAuthSyncResult(null), 6000);
+    }
+  }
+
+  async function handleCreateAllMissingAuth() {
+    const emails = Array.from(missingAuthEmails);
+    if (emails.length === 0) return;
+    setCreateAllLoading(true);
+    setAuthSyncResult(null);
+    let ok = 0;
+    let fail = 0;
+    for (const e of emails) {
+      try {
+        const res = await ensureUserInAuth(e);
+        if (res.ok && res.data?.success) ok++;
+        else fail++;
+      } catch { fail++; }
+    }
+    setCreateAllLoading(false);
+    setAuthSyncResult({
+      ok: fail === 0,
+      message: fail === 0
+        ? `Created ${ok} auth account${ok === 1 ? '' : 's'}. Users can use Forgot Password to set their logins.`
+        : `Created ${ok}, failed ${fail}. Check Apps Script execution log for details.`,
+    });
+    // Re-check to update banner state
+    await checkMissingAuthUsers();
+    setTimeout(() => setAuthSyncResult(null), 8000);
   }
 
   async function handleAdminSetPassword() {
@@ -870,6 +950,27 @@ export function Settings() {
                 {sendingWelcomeEmail === u.email ? 'Sending\u2026' : 'Send Welcome'}
               </button>
             )}
+            {realUser?.role === 'admin' && u.email !== realUser.email && missingAuthEmails.has(u.email.toLowerCase()) && (
+              <button
+                disabled={creatingAuthFor !== null || createAllLoading}
+                onClick={(e) => { e.stopPropagation(); handleEnsureAuthForUser(u.email); }}
+                style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 4, padding: '3px 10px', fontSize: 11, fontWeight: 600,
+                  border: '1px solid #D97706', borderRadius: 6,
+                  background: creatingAuthFor === u.email ? '#FEF3C7' : '#FFFBEB',
+                  color: '#92400E',
+                  cursor: (creatingAuthFor !== null || createAllLoading) ? 'wait' : 'pointer',
+                  opacity: (creatingAuthFor !== null && creatingAuthFor !== u.email) ? 0.4 : 1,
+                  fontFamily: 'inherit',
+                }}
+                title={`Create Supabase Auth account for ${u.email} — they'll use Forgot Password to set their login.`}
+              >
+                {creatingAuthFor === u.email
+                  ? <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} />
+                  : <AlertCircle size={12} />}
+                {creatingAuthFor === u.email ? 'Creating\u2026' : 'Create Auth'}
+              </button>
+            )}
             {realUser?.role === 'admin' && u.email !== realUser.email && (
               <button
                 onClick={(e) => { e.stopPropagation(); openSetPasswordModal(u.email); }}
@@ -913,7 +1014,7 @@ export function Settings() {
         );
       },
     },
-  ], [realUser, sendingWelcomeEmail, impersonatingEmail, impersonateUser, navigate]);
+  ], [realUser, sendingWelcomeEmail, impersonatingEmail, impersonateUser, navigate, missingAuthEmails, creatingAuthFor, createAllLoading]);
 
   const userTable = useReactTable({
     data: filteredUsers,
@@ -2364,6 +2465,63 @@ export function Settings() {
                   background: '#ECFDF5', border: '1px solid #A7F3D0', color: '#065F46', fontWeight: 500,
                 }}>
                   {setPasswordSuccess}
+                </div>
+              )}
+
+              {authSyncResult && (
+                <div style={{
+                  padding: '10px 14px', fontSize: 12, borderRadius: 8, marginBottom: 12,
+                  background: authSyncResult.ok ? '#ECFDF5' : '#FEF2F2',
+                  border: `1px solid ${authSyncResult.ok ? '#A7F3D0' : '#FECACA'}`,
+                  color: authSyncResult.ok ? '#065F46' : '#991B1B', fontWeight: 500,
+                }}>
+                  {authSyncResult.message}
+                </div>
+              )}
+
+              {/* v38.71.0 — Missing-from-Supabase-Auth banner */}
+              {isAdmin && missingAuthEmails.size > 0 && (
+                <div style={{
+                  padding: '12px 16px', fontSize: 12, borderRadius: 8, marginBottom: 12,
+                  background: '#FFFBEB', border: '1px solid #FCD34D', color: '#92400E',
+                  display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap',
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <AlertCircle size={14} />
+                    <span style={{ fontWeight: 600 }}>
+                      {missingAuthEmails.size} user{missingAuthEmails.size === 1 ? '' : 's'} missing from Supabase Auth.
+                    </span>
+                    <span style={{ color: '#A16207' }}>
+                      They can't log in until their auth account is created.
+                    </span>
+                  </div>
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    <button
+                      onClick={checkMissingAuthUsers}
+                      disabled={missingAuthChecking || createAllLoading}
+                      style={{
+                        display: 'inline-flex', alignItems: 'center', gap: 4, padding: '5px 12px', fontSize: 11, fontWeight: 600,
+                        border: '1px solid #D97706', borderRadius: 6, background: '#fff', color: '#92400E',
+                        cursor: (missingAuthChecking || createAllLoading) ? 'wait' : 'pointer',
+                      }}
+                      title="Re-check for missing auth users"
+                    >
+                      {missingAuthChecking ? <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} /> : <RefreshCcw size={12} />}
+                      Re-check
+                    </button>
+                    <button
+                      onClick={handleCreateAllMissingAuth}
+                      disabled={createAllLoading || missingAuthChecking}
+                      style={{
+                        display: 'inline-flex', alignItems: 'center', gap: 4, padding: '5px 12px', fontSize: 11, fontWeight: 600,
+                        border: 'none', borderRadius: 6, background: '#D97706', color: '#fff',
+                        cursor: createAllLoading ? 'wait' : 'pointer', opacity: createAllLoading ? 0.7 : 1,
+                      }}
+                    >
+                      {createAllLoading && <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} />}
+                      {createAllLoading ? `Creating… (${missingAuthEmails.size})` : `Create All (${missingAuthEmails.size})`}
+                    </button>
+                  </div>
                 </div>
               )}
 
