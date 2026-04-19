@@ -219,39 +219,61 @@ export function InlineEditableCell({
           boxSizing: 'border-box',
         }}
       />
-      {variant !== 'text' && showSuggestions && filtered.length > 0 && (
-        <div
-          style={{
-            position: 'absolute', top: '100%', left: 0, right: 0,
-            marginTop: 2, zIndex: 100,
-            background: '#fff',
-            border: '1px solid rgba(0,0,0,0.08)',
-            borderRadius: 6,
-            boxShadow: '0 6px 20px rgba(0,0,0,0.12)',
-            maxHeight: 220, overflowY: 'auto',
-          }}
-        >
-          {filtered.map(s => (
-            <div
-              key={s}
-              onMouseDown={(e) => {
-                // onMouseDown fires before input blur — safe to commit here.
-                e.preventDefault();
-                setDraft(s);
-                commit(s);
-              }}
-              style={{
-                padding: '6px 10px', fontSize: 12, cursor: 'pointer',
-                color: '#1C1C1C',
-              }}
-              onMouseEnter={e => (e.currentTarget.style.background = '#F5F2EE')}
-              onMouseLeave={e => (e.currentTarget.style.background = '#fff')}
-            >
-              {s}
-            </div>
-          ))}
-        </div>
-      )}
+      {variant !== 'text' && showSuggestions && (() => {
+        const loading = variant === 'autocomplete-db' ? ac.loading : locs.loading;
+        const poolSize = suggestions.length;
+        return (
+          <div
+            style={{
+              position: 'absolute', top: '100%', left: 0, right: 0,
+              marginTop: 2, zIndex: 100,
+              background: '#fff',
+              border: '1px solid rgba(0,0,0,0.08)',
+              borderRadius: 6,
+              boxShadow: '0 6px 20px rgba(0,0,0,0.12)',
+              maxHeight: 220, overflowY: 'auto',
+            }}
+          >
+            {filtered.map(s => (
+              <div
+                key={s}
+                onMouseDown={(e) => {
+                  // onMouseDown fires before input blur — safe to commit here.
+                  e.preventDefault();
+                  setDraft(s);
+                  commit(s);
+                }}
+                style={{
+                  padding: '6px 10px', fontSize: 12, cursor: 'pointer',
+                  color: '#1C1C1C',
+                }}
+                onMouseEnter={e => (e.currentTarget.style.background = '#F5F2EE')}
+                onMouseLeave={e => (e.currentTarget.style.background = '#fff')}
+              >
+                {s}
+              </div>
+            ))}
+            {filtered.length === 0 && loading && (
+              <div style={{ padding: '8px 10px', fontSize: 11, color: '#999', display: 'flex', alignItems: 'center', gap: 6 }}>
+                <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} />
+                Loading suggestions…
+              </div>
+            )}
+            {filtered.length === 0 && !loading && poolSize === 0 && (
+              <div style={{ padding: '8px 10px', fontSize: 11, color: '#999', fontStyle: 'italic' }}>
+                {variant === 'autocomplete-locations'
+                  ? 'No locations configured yet — type a new one'
+                  : 'No suggestions in this client\u2019s Autocomplete DB yet — type a new value'}
+              </div>
+            )}
+            {filtered.length === 0 && !loading && poolSize > 0 && draft && (
+              <div style={{ padding: '8px 10px', fontSize: 11, color: '#999', fontStyle: 'italic' }}>
+                No match — press Enter to save &ldquo;{draft}&rdquo;
+              </div>
+            )}
+          </div>
+        );
+      })()}
     </div>
   );
 }

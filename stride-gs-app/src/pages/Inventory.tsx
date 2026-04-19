@@ -51,6 +51,7 @@ import { isApiConfigured, postBatchRequestRepairQuote, type BatchMutationResult 
 import { supabase } from '../lib/supabase';
 import { useInventory } from '../hooks/useInventory';
 import { useClients } from '../hooks/useClients';
+import { useAutocomplete } from '../hooks/useAutocomplete';
 import { InlineEditableCell } from '../components/shared/InlineEditableCell';
 import { useClientFilterUrlSync } from '../hooks/useClientFilterUrlSync';
 import { useTasks } from '../hooks/useTasks';
@@ -587,6 +588,16 @@ export function Inventory() {
   }, [clientFilter, apiClients]);
 
   const { items: liveItems, loading: inventoryLoading, refetch, applyItemPatch, mergeItemPatch, clearItemPatch } = useInventory(apiConfigured && clientFilter.length > 0, selectedSheetId);
+  // v38.72.0 Phase 3 — pre-fetch Autocomplete DB + locations at page level so
+  // the first inline-edit click on a Vendor/Sidemark/Description/Location cell
+  // already has suggestions ready (no loading flash). Multi-client view: this
+  // warms up the first selected client; other clients populate lazily as
+  // cells render.
+  const autocompletePrefetchSheetId = Array.isArray(selectedSheetId)
+    ? (selectedSheetId.length >= 1 ? selectedSheetId[0] : undefined)
+    : selectedSheetId;
+  useAutocomplete(autocompletePrefetchSheetId);
+  useLocations(apiConfigured);
   const { tasks, refetch: refetchTasks, addOptimisticTask, removeOptimisticTask } = useTasks(apiConfigured && clientFilter.length > 0, selectedSheetId);
   const { repairs, addOptimisticRepair, removeOptimisticRepair } = useRepairs(apiConfigured && clientFilter.length > 0, selectedSheetId);
   const { willCalls, addOptimisticWc, removeOptimisticWc } = useWillCalls(apiConfigured && clientFilter.length > 0, selectedSheetId);
