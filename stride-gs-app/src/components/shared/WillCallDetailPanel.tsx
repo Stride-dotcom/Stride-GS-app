@@ -901,29 +901,6 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
               />
             </div>
           )}
-          {/* Edit / Save / Cancel — moved here from the top-right header (session 70 follow-up). */}
-          {isActive && (
-            <div style={{ display: 'flex', gap: 6, marginBottom: 10 }}>
-              {isEditing ? (
-                <>
-                  <button onClick={handleEditSave} disabled={editSaving}
-                    style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '6px 14px', fontSize: 12, fontWeight: 600, borderRadius: 6, border: 'none', background: theme.colors.orange, color: '#fff', cursor: editSaving ? 'wait' : 'pointer', fontFamily: 'inherit' }}>
-                    {editSaving ? <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} /> : <Save size={12} />}
-                    {editSaving ? 'Saving...' : 'Save'}
-                  </button>
-                  <button onClick={handleEditCancel} disabled={editSaving}
-                    style={{ padding: '6px 12px', fontSize: 12, fontWeight: 600, borderRadius: 6, border: `1px solid ${theme.colors.border}`, background: '#fff', color: theme.colors.textSecondary, cursor: 'pointer', fontFamily: 'inherit' }}>
-                    Cancel
-                  </button>
-                </>
-              ) : (
-                <button onClick={handleEditStart}
-                  style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '6px 12px', fontSize: 12, fontWeight: 600, borderRadius: 6, border: `1px solid ${theme.colors.border}`, background: '#fff', color: theme.colors.textSecondary, cursor: 'pointer', fontFamily: 'inherit' }}>
-                  <Pencil size={12} /> Edit
-                </button>
-              )}
-            </div>
-          )}
           {isActive && !releaseResult ? (
             <WriteButton
               label={releasing ? 'Releasing...' : 'Release All Items'}
@@ -937,6 +914,31 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
             <button onClick={onClose} style={{ width: '100%', padding: '10px', fontSize: 13, fontWeight: 600, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', fontFamily: 'inherit', color: theme.colors.textSecondary }}>
               {releaseResult ? 'Done' : 'Close'}
             </button>
+          )}
+          {/* Edit / Save / Cancel — moved out of the Start/Release CTA stack to
+              a right-aligned utility row so the two primary full-width buttons
+              sit adjacent. */}
+          {isActive && (
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 6, marginTop: 8 }}>
+              {isEditing ? (
+                <>
+                  <button onClick={handleEditCancel} disabled={editSaving}
+                    style={{ padding: '6px 12px', fontSize: 12, fontWeight: 600, borderRadius: 6, border: `1px solid ${theme.colors.border}`, background: '#fff', color: theme.colors.textSecondary, cursor: 'pointer', fontFamily: 'inherit' }}>
+                    Cancel
+                  </button>
+                  <button onClick={handleEditSave} disabled={editSaving}
+                    style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '6px 14px', fontSize: 12, fontWeight: 600, borderRadius: 6, border: 'none', background: theme.colors.orange, color: '#fff', cursor: editSaving ? 'wait' : 'pointer', fontFamily: 'inherit' }}>
+                    {editSaving ? <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} /> : <Save size={12} />}
+                    {editSaving ? 'Saving...' : 'Save'}
+                  </button>
+                </>
+              ) : (
+                <button onClick={handleEditStart}
+                  style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '6px 12px', fontSize: 12, fontWeight: 600, borderRadius: 6, border: `1px solid ${theme.colors.border}`, background: '#fff', color: theme.colors.textSecondary, cursor: 'pointer', fontFamily: 'inherit' }}>
+                  <Pencil size={12} /> Edit
+                </button>
+              )}
+            </div>
           )}
         </div>}
       </div>

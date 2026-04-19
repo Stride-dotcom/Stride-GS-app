@@ -16,6 +16,10 @@ export function getPanelContainerStyle(width: number, isMobile: boolean): React.
       flexDirection: 'column',
       fontFamily: theme.typography.fontFamily,
       animation: 'slideIn 0.2s ease-out',
+      // Match DetailHeader.tsx top-corner radius (20px) so the outer panel
+      // corner doesn't peek out behind the rounded black header.
+      borderRadius: '20px 20px 0 0',
+      overflow: 'hidden',
     };
   }
   return {
@@ -30,6 +34,10 @@ export function getPanelContainerStyle(width: number, isMobile: boolean): React.
     boxShadow: '-4px 0 24px rgba(0,0,0,0.08)',
     fontFamily: theme.typography.fontFamily,
     animation: 'slideIn 0.2s ease-out',
+    // Match DetailHeader.tsx top-corner radius (20px) so the outer panel
+    // corner doesn't peek out behind the rounded black header.
+    borderRadius: '20px 20px 0 0',
+    overflow: 'hidden',
   };
 }
 
