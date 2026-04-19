@@ -173,6 +173,19 @@ If `git status` shows unstaged or staged-but-uncommitted changes: STOP and repor
 
 Stash-and-forget caused broken builds in this project (merge conflicts surfaced after deploy started).
 
+### If deploying from a git worktree, copy `stride-gs-app/.env` from the parent first
+
+`.env` is `.gitignored`, so a fresh worktree (or a fresh `npm install` in a worktree) has no Supabase credentials. Vite will silently inline `VITE_SUPABASE_URL = undefined` and the live app will crash at module load with `Uncaught Error: supabaseUrl is required.`
+
+Before any `npm run build` in a worktree:
+```bash
+cp "C:/Users/expre/Dropbox/Apps/GS Inventory/stride-gs-app/.env" \
+   "<worktree>/stride-gs-app/.env"
+```
+
+Then verify it took: `grep -c VITE_SUPABASE_URL stride-gs-app/.env` should print `1`.
+This bit us once in session 72 — caught by a production runtime error, not the build (because the bundle was "valid" with `undefined` baked in).
+
 ### Apply SQL migrations BEFORE deploying frontend code
 
 If a new `.sql` migration file exists in `stride-gs-app/supabase/migrations/`, apply it to the Supabase project via MCP tool BEFORE the code deploy. Frontend code that references new columns will fail for live users until the schema exists.
@@ -559,7 +572,7 @@ These are the top decisions that affect code generation on every task. For the f
 
 ## Current Versions
 
-- **StrideAPI.gs:** v38.63.0 (Web App v283) — session 70 continued: Room→Reference column swap in all email/PDF item tables (`api_buildSingleItemTableHtml_` last positional arg changed `room`→`reference`, all 5 call sites + TRANSFER_RECEIVED `trCols` updated, Work Order PDFs emit `{{ITEM_REFERENCE}}` alongside legacy `{{ITEM_ROOM}}`, `api_findInventoryItem_` returns `reference`). NEW `updateRepairNotes` POST endpoint + `handleUpdateRepairNotes_` handler so office can save Repair Notes on an Approved repair BEFORE Start Repair (lightweight, no lock, no email, no PDF regen). Also carries v38.61–62: `handleGetPaymentTerms_`, `sbShipmentRow_` IK prefix strip, `handleSendRepairQuote_` photos URL fix, `handleResyncUsers_` admin tool, `lookupUser_` whitespace-normalized email match.
+- **StrideAPI.gs:** v38.70.0 (Web App v317) — session 72: NEW `handleAdminSetUserPassword_` admin escape-hatch endpoint lets an admin set a specific user's Supabase Auth password directly (for clients who can't complete the self-serve reset flow). Pages through `auth.users` to find target by email, then `PUT /auth/v1/admin/users/{id}` with new password. Admin-only, rate-limited (20/min), min 8-char password. Self-serve "Forgot Password" flow unchanged — this is an escape hatch. Carries v38.63–69: Room→Reference column swap in all email/PDF item tables, `handleUpdateRepairNotes_` (office saves Repair Notes on Approved repair before Start), `handleGetPaymentTerms_`, `sbShipmentRow_` IK prefix strip, `handleSendRepairQuote_` photos URL fix, `handleResyncUsers_` admin tool, `lookupUser_` whitespace-normalized email match.
 - **StaxAutoPay.gs:** v4.6.0 — session 69 Phase 2f: Supabase write-through at end of `_prepareEligiblePendingInvoicesForChargeRun` (invoices + run log) and `_executeChargeRun` (invoices + charge log + exceptions + run log). **Requires SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY Script Properties on the Stax Auto Pay project** — see open items.
 - **Triggers.gs (client):** v4.7.1 — session 70: VIEW INSPECTION PHOTOS button in REPAIR_QUOTE email now opens the Source Task folder (looks up task row in Tasks sheet and reads Task ID cell's hyperlink, set by `startTask_` to the task's Drive folder). Previously fell back to the Item folder because Source Task ID stores plain text, not a hyperlink.
 - **Import.gs (client):** v4.3.0 — adds Reference column mapping (rolled out to all 49 active clients, session 70)
@@ -624,6 +637,8 @@ Client inventory scripts are NOT edited via direct URLs — use `npm run rollout
 - [x] **Email templates v2 — all 19 templates** — Stride brand design system; `{{SIDEMARK_HEADER}}` removed; pushed via `push-templates` + `refresh-caches` to all clients; "About Inspection" text in SHIPMENT_RECEIVED updated.
 - [x] **GitHub Actions CI/CD** — `ci.yml` (typecheck+build on push/PR), `deploy.yml` (auto-deploy on push, secrets configured and active), `migrate.yml` (manual migration runner). All three workflows live.
 - [x] ~~Master Inventory Template Web App deployment~~ — Removed `!c.isTemplate` guard from `update-deployments.mjs`, added `--name <partial>` filter flag. Template has Web App deployment v108.
+- [x] **Expected operations calendar (Shipments → Expected tab)** — Session 72. New tab on Shipments page with Month / Week views, unified event feed from 3 sources (user-authored expected shipments in localStorage + scheduled Will Calls + scheduled Repairs). Color-coded pills (shipment=orange, willcall=green, repair=blue), hover tooltips, 4 dark stat cards, legend bar. Client-role users only see events for their accessible clients. Will Call / Repair pills deep-link to the existing list pages via `?open=<id>&client=<sheetId>`. Expected-shipment pills open an edit modal with Save Changes / two-step Delete + inline toast. `useExpectedShipments` (localStorage CRUD, per-user-email keyed) + `useCalendarEvents` (unified feed with role-based filtering). 8 new components under `src/components/shipments/`.
+- [x] **Admin-set-password escape hatch** — Session 72. New per-row "Set Password" button in Settings → Users (admin-only, hidden for self). Opens modal with New Password + Confirm. Calls `adminSetUserPassword` → StrideAPI `handleAdminSetUserPassword_` → Supabase admin API → `PUT /auth/v1/admin/users/{id}`. For clients who can't complete the self-serve Forgot Password flow. Self-serve reset is untouched.
 - [ ] **Auto-Print Labels from Receiving** — Toggle on Receiving page for inline label printing. See `Docs/Archive/QR_Scanner_Next_Phase.md` Feature B (still applies; Labels page is now native React so wiring is straightforward)
 - [ ] **Parent Transfer Access** — Allow parent users to transfer items between their own children only (currently staff-only)
 - [ ] **Global search expansion** — Add shipments, billing, claims entities + missing fields per audit

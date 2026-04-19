@@ -1,7 +1,7 @@
 # Stride GS App — Build Status & Continuation Guide
 
-**Last updated:** 2026-04-18 (session 65 — quote tool, billing report builder, auth fixes, visual refresh, email templates v2, DT Phase 1a, GitHub Actions CI/CD live, template Web App deployment)
-**StrideAPI.gs:** v38.63.0 (Web App v283)
+**Last updated:** 2026-04-18 (session 72 — Expected operations calendar on Shipments page, calendar deep-linking + edit/delete, admin-set-password escape hatch for Settings → Users, worktree `.env` deployment gotcha documented, StrideAPI v38.70.0 / Web App v317)
+**StrideAPI.gs:** v38.70.0 (Web App v317)
 **Import.gs (client):** v4.3.0 (rolled out to all 49 active clients; Reference column now imported)
 **Emails.gs (client):** v4.6.0 (rolled out to all 49 active clients — Room column dropped, Reference takes its place)
 **Shipments.gs (client):** v4.3.2 (rolled out to all 49 active clients — deep links use query-param ?open=&client= format)
@@ -9,7 +9,7 @@
 **Triggers.gs (client):** v4.7.1 (rolled out to all 49 active clients — VIEW INSPECTION PHOTOS button now opens Source Task folder)
 **RemoteAdmin.gs (client):** v1.5.1 (new `get_script_id` action writes scriptId to CB on self-report)
 **Code.gs (client):** v4.6.0 (rolled out to all 49 active clients)
-**StaxAutoPay.gs:** v4.5.0 (pushed to Stax Auto Pay bound script)
+**StaxAutoPay.gs:** v4.6.0 (Supabase write-through — needs Script Properties set on Stax Auto Pay project, see CLAUDE.md open items)
 **Purpose:** Single living progress document. Updated every session.
 
 > **BUILDERS: Read `CLAUDE.md` first** — it has architecture, rules, deployment table, invariants, and current open work.
@@ -133,6 +133,57 @@ Removed `!c.isTemplate` guard from `update-deployments.mjs`. Added `--name <part
 - **DT Phase 1c** — webhook ingest Edge Function; needs DT API credentials + webhook secret first.
 - **Task Due Dates + Priority** — add Due Date and Priority (High/Medium/Low) to tasks. Requires: new columns on Tasks sheet (GAS), endpoint updates (`getTasks`/`batchCreateTasks`/`completeTask`), Supabase `tasks` table schema update if cached, React UI (date picker, priority dropdown, color-coded list rows, sort/filter by due date + priority). Optional: surface on Expected Calendar view.
 - **Price List Management** — manage the master price list from within the app. Scope TBD.
+
+---
+
+## RECENT CHANGES (2026-04-18 session 72)
+
+### 1. Expected operations calendar — new Shipments tab
+Added a second tab on the Shipments page (`Received` | `Expected`) rendering a unified calendar of:
+- User-authored expected shipments (localStorage, per-user-email keyed via `useExpectedShipments`)
+- Scheduled Will Calls (from `useWillCalls` — scheduled/pickup date)
+- Scheduled Repairs (from `useRepairs` — approved/scheduled date)
+
+**Files (8 new + 1 modified):**
+- `src/hooks/useExpectedShipments.ts` — localStorage CRUD (`add` / `update` / `remove`)
+- `src/hooks/useCalendarEvents.ts` — unified event feed with role-based filtering
+- `src/components/shipments/ExpectedCalendar.tsx` — container (4 dark stat cards, legend, prev/next/Today + Month/Week toggle, `+ Add Expected` pill, toast)
+- `src/components/shipments/CalendarMonthView.tsx` — 7-col grid, today highlighted orange, `+N more` expand
+- `src/components/shipments/CalendarWeekView.tsx` — 7 day columns, today header in orange
+- `src/components/shipments/CalendarEventPill.tsx` — shipment=orange, willcall=green, repair=blue
+- `src/components/shipments/CalendarTooltip.tsx` — fixed-position dark card with full event details
+- `src/components/shipments/AddExpectedModal.tsx` — Add + Edit modes with two-step Delete button
+- `src/pages/Shipments.tsx` — tab bar + conditional render
+
+**Access control (3 layers):**
+1. `useCalendarEvents` builds `accessibleClientNames` set for `user.role === 'client'` and filters all 3 event types
+2. Expected shipments stored per-user-email — no cross-user visibility
+3. Add/Edit modal's client autocomplete filtered to accessible clients
+
+### 2. Calendar deep links + edit/delete
+- **Will Call / Repair pills** → `useNavigate(\`/{page}?open={id}&client={sheetId}\`)` — uses the existing list-page deep-link handlers
+- **Expected shipment pills** → open Edit modal pre-filled with entry data
+- **AddExpectedModal** accepts `editingEvent` + `onDelete`, shows "Save Changes" + two-step Delete, inline toast ("Expected shipment added / updated / deleted")
+- `CalendarEvent` gained `clientSheetId` and `sourceId` fields to support navigation + edit lookup
+- Month/Week views accept `onEventClick` prop
+
+### 3. Admin-set-password escape hatch
+For clients who can't complete the self-serve Forgot Password flow.
+
+- **StrideAPI.gs v38.70.0** — new `handleAdminSetUserPassword_` (admin-only, rate-limited 20/min, min 8 chars). Pages through `auth.users` to resolve email → user ID, then `PUT /auth/v1/admin/users/{id}` with the new password. Router case `"adminSetUserPassword"`.
+- **React** — new `adminSetUserPassword(email, newPassword)` wrapper in `lib/api.ts`. New "Set Password" row action in Settings → Users (admin-only, hidden for self). Modal with New Password + Confirm, inline validation, success banner. **Self-serve Forgot Password flow unchanged** — this is purely additive.
+
+### 4. Deployment gotcha documented — worktree `.env`
+Hit this once in session 72: a worktree build produced a bundle where `VITE_SUPABASE_URL = undefined` was inlined, causing runtime `Uncaught Error: supabaseUrl is required.` on the live app. `.env` is gitignored, so a fresh worktree has no Supabase credentials.
+
+**CLAUDE.md updated** with a new deployment rule: before any `npm run build` in a worktree, copy `stride-gs-app/.env` from the parent. The build doesn't fail — the bundle is structurally valid; the error only surfaces in the browser.
+
+### 5. Deploys (session 72)
+- **StrideAPI:** push-api 200 OK → deploy-api → Web App v317
+- **Source branch:** `4b78d3d` (admin-set-password) — fast-forwarded through `ce4c793` (expected calendar) + `70b3ca9` (deep links + edit/delete)
+- **Dist branch:** `5a1a52b` — bundle `index-BJvexzOu.js` (1,585,152 bytes, 1,969 modules)
+- **Feature branch:** `claude/gallant-stonebraker-995dad` pushed to origin
+- **Rebuild note:** the first dist push (`0dcde4b` / `index-j4pFpgH2.js`) was broken because of the worktree `.env` issue. Fixed by copying `.env` and redeploying `cad544f` / `index-DoqY9moO.js`. Then subsequent features rebuilt + redeployed cleanly.
 
 ---
 
