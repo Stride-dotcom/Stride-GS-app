@@ -1,5 +1,10 @@
 /* ===================================================
-   StrideAPI.gs — v38.70.1 — 2026-04-18 PST — Admin-set-password endpoint (doPost router fix)
+   StrideAPI.gs — v38.70.2 — 2026-04-18 PST — adminSetUserPassword: create-if-missing
+   v38.70.2: Admin-set-password now CREATES the Supabase auth user with the
+             provided password if they don't exist yet (common for CB Users
+             rows that were created but never got a welcome email). Returns
+             `{success, email, userId, created: true|false}` so the UI can
+             tell an admin "Account created" vs "Password updated".
    v38.70.1: HOTFIX — adminSetUserPassword case was only registered in doGet's
              switch; React calls it via apiPost so it hit doPost's default case
              ("Unknown POST action"). Added case to doPost switch near
@@ -5126,9 +5131,38 @@ function handleAdminSetUserPassword_(data, callerEmail) {
     if (target) break;
     if (users.length < 1000) break;
   }
-  if (!target || !target.id) return errorResponse_("User not found in Supabase auth: " + targetEmail, "NOT_FOUND");
 
-  // 2. PUT new password
+  // 2a. If the user doesn't exist in Supabase Auth yet (common for CB Users
+  //     rows that were created but never received a welcome email), create
+  //     them with the admin-provided password. This lets this endpoint act
+  //     as both "set" and "reset".
+  if (!target || !target.id) {
+    var createResp = UrlFetchApp.fetch(url + "/auth/v1/admin/users", {
+      method: "POST",
+      headers: {
+        "Authorization": "Bearer " + key,
+        "apikey": key,
+        "Content-Type": "application/json"
+      },
+      payload: JSON.stringify({
+        email: targetEmail,
+        password: newPassword,
+        email_confirm: true
+      }),
+      muteHttpExceptions: true
+    });
+    var createCode = createResp.getResponseCode();
+    if (createCode < 200 || createCode >= 300) {
+      Logger.log("handleAdminSetUserPassword_ CREATE failed: " + createCode + " " + createResp.getContentText());
+      return errorResponse_("Create auth user failed: " + createCode + " " + createResp.getContentText().substring(0, 200), "UPSTREAM_ERROR");
+    }
+    var createJson;
+    try { createJson = JSON.parse(createResp.getContentText()); } catch (_) { createJson = {}; }
+    Logger.log("handleAdminSetUserPassword_: admin=" + callerEmail + " CREATED auth user " + targetEmail + " (id=" + createJson.id + ")");
+    return jsonResponse_({ success: true, email: targetEmail, userId: createJson.id, created: true });
+  }
+
+  // 2b. User exists — PUT new password
   var putResp = UrlFetchApp.fetch(url + "/auth/v1/admin/users/" + encodeURIComponent(target.id), {
     method: "PUT",
     headers: {
@@ -5145,7 +5179,7 @@ function handleAdminSetUserPassword_(data, callerEmail) {
   }
 
   Logger.log("handleAdminSetUserPassword_: admin=" + callerEmail + " set password for " + targetEmail + " (id=" + target.id + ")");
-  return jsonResponse_({ success: true, email: targetEmail, userId: target.id });
+  return jsonResponse_({ success: true, email: targetEmail, userId: target.id, created: false });
 }
 
 /**

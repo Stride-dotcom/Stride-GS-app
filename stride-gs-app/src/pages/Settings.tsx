@@ -674,7 +674,8 @@ export function Settings() {
     try {
       const res = await adminSetUserPassword(setPasswordEmail, setPasswordValue);
       if (res.ok && res.data?.success) {
-        setSetPasswordSuccess(`Password set for ${setPasswordEmail}. Share it with the user — they can change it after logging in.`);
+        const verb = res.data.created ? 'Account created with password' : 'Password set';
+        setSetPasswordSuccess(`${verb} for ${setPasswordEmail}. Share it with the user — they can change it after logging in.`);
         setSetPasswordEmail(null);
         setTimeout(() => setSetPasswordSuccess(null), 8000);
       } else {

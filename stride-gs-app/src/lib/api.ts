@@ -2893,6 +2893,7 @@ export interface AdminSetUserPasswordResponse {
   success: boolean;
   email?: string;
   userId?: string;
+  created?: boolean;
   error?: string;
 }
 
