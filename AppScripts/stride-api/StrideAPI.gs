@@ -1,5 +1,27 @@
 /* ===================================================
-   StrideAPI.gs — v38.71.0 — 2026-04-18 PST — ensureAuthUser + listMissingAuthUsers
+   StrideAPI.gs — v38.72.0 — 2026-04-18 PST — Supabase mirror closes fan-out gaps
+   v38.72.0: Realtime sync Phase 1a — fill the two genuine write-through gaps
+             discovered during the audit. Router-level api_writeThrough_ already
+             mirrors the PRIMARY entity for every update / complete / cancel /
+             start handler — the audit subagent missed this because it only
+             inspected handler bodies. Real remaining gaps:
+             (1) handleUpdateInventoryItem_ fan-out to Tasks/Repairs — the
+                 router only mirrors the inventory row; when an inventory edit
+                 also updates open Task/Repair rows via the field sync (sync
+                 of location/vendor/sidemark/etc.), those changes were reaching
+                 Google Sheets but NOT Supabase. Now: each updated task_id /
+                 repair_id is mirrored via resyncEntityToSupabase_ before
+                 return.
+             (2) handleAddClaimItems_ — router case is wrapped by
+                 withAdminGuard_ only (no api_writeThrough_). Added
+                 resyncClaimToSupabase_(claimId) before return so the
+                 claim row's updated_at + item-count snapshot mirror.
+             No complex handlers (completeShipment / completeTask / transferItems
+             / releaseItems / batch handlers / Stax) needed changes — all
+             already covered by router write-through or inline mirrors.
+             Deferred to Phase 2: React Realtime subscriptions on inventory /
+             tasks / repairs / will_calls / shipments / billing / claims / move_history.
+   v38.71.0: NEW admin endpoints to close the "CB Users row without matching
    v38.71.0: NEW admin endpoints to close the "CB Users row without matching
              auth.users" gap:
              - handleEnsureAuthUser_(data): calls createSupabaseAuthUser_ for
@@ -11123,6 +11145,8 @@ function handleUpdateRepairNotes_(clientSheetId, payload) {
   }
 
   api_bumpSummaryVersion_();
+  // Router wraps this case with api_writeThrough_(r, "repair", ...) so the
+  // Supabase mirror already fires on success — no in-handler mirror needed.
   return jsonResponse_({ success: true, repairId: repairId, saved: saved });
 }
 
@@ -12566,6 +12590,8 @@ function handleUpdateWillCall_(clientSheetId, payload) {
       }
     }
 
+    // Router wraps this case with api_writeThrough_(r, "will_call", ...) so
+    // the Supabase mirror already fires on success — no in-handler mirror.
     return jsonResponse_({ success: true, wcNumber: wcNumber, updated: updates, statusPromoted: statusPromoted });
   } catch (err) {
     return errorResponse_("Failed to update will call: " + String(err), "SERVER_ERROR");
@@ -19302,6 +19328,13 @@ function handleUpdateInventoryItem_(clientSheetId, payload) {
       }
     }
 
+    // v38.72.0 — collect the Task IDs / Repair IDs touched by the fan-out so
+    // we can mirror them to Supabase after the sheet writes settle. Mirror
+    // calls live outside the try/catch of the critical write so a Supabase
+    // failure never blocks the GAS write (invariant #20).
+    var mirroredTaskIds = [];
+    var mirroredRepairIds = [];
+
     if (hasSyncFields) {
       var TASK_CLOSED = { "Completed": true, "Cancelled": true };
       var REPAIR_CLOSED = { "Complete": true, "Cancelled": true, "Declined": true };
@@ -19311,6 +19344,7 @@ function handleUpdateInventoryItem_(clientSheetId, payload) {
         var thmap = api_getHeaderMap_(taskSheet);
         var tItemCol = thmap["Item ID"];
         var tStatusCol = thmap["Status"];
+        var tTaskIdCol = thmap["Task ID"];
         if (tItemCol && tStatusCol) {
           var tLast = api_getLastDataRow_(taskSheet);
           if (tLast >= 2) {
@@ -19324,6 +19358,10 @@ function handleUpdateInventoryItem_(clientSheetId, payload) {
                   var tCol = thmap[syncHeader];
                   if (tCol) taskSheet.getRange(ti + 2, tCol).setValue(fieldsToSync[syncHeader]);
                 }
+                if (tTaskIdCol) {
+                  var tidVal = String(tRows[ti][tTaskIdCol - 1] || "").trim();
+                  if (tidVal) mirroredTaskIds.push(tidVal);
+                }
               }
             }
           }
@@ -19335,6 +19373,7 @@ function handleUpdateInventoryItem_(clientSheetId, payload) {
         var rhmap = api_getHeaderMap_(repairSheet);
         var rItemCol = rhmap["Item ID"];
         var rStatusCol = rhmap["Status"];
+        var rRepairIdCol = rhmap["Repair ID"];
         if (rItemCol && rStatusCol) {
           var rLast = api_getLastDataRow_(repairSheet);
           if (rLast >= 2) {
@@ -19348,11 +19387,32 @@ function handleUpdateInventoryItem_(clientSheetId, payload) {
                   var rCol = rhmap[syncHeader2];
                   if (rCol) repairSheet.getRange(ri + 2, rCol).setValue(fieldsToSync[syncHeader2]);
                 }
+                if (rRepairIdCol) {
+                  var ridVal = String(rRows[ri][rRepairIdCol - 1] || "").trim();
+                  if (ridVal) mirroredRepairIds.push(ridVal);
+                }
               }
             }
           }
         }
       }
+    }
+
+    // v38.72.0 — Supabase write-through for the fan-out Task/Repair rows.
+    // The router wrapper already mirrors the primary Inventory row and
+    // invalidates the client cache; it does NOT know about the fan-out
+    // rows, so we mirror those here. Best-effort per invariant #20.
+    for (var mti = 0; mti < mirroredTaskIds.length; mti++) {
+      try {
+        var tMirror = resyncEntityToSupabase_("task", clientSheetId, mirroredTaskIds[mti]);
+        Logger.log("sb_mirror: task " + mirroredTaskIds[mti] + " " + (tMirror && tMirror.ok ? "ok" : "fail"));
+      } catch (sbErr2) { Logger.log("sb_mirror: task " + mirroredTaskIds[mti] + " threw " + sbErr2); }
+    }
+    for (var mri = 0; mri < mirroredRepairIds.length; mri++) {
+      try {
+        var rMirror = resyncEntityToSupabase_("repair", clientSheetId, mirroredRepairIds[mri]);
+        Logger.log("sb_mirror: repair " + mirroredRepairIds[mri] + " " + (rMirror && rMirror.ok ? "ok" : "fail"));
+      } catch (sbErr3) { Logger.log("sb_mirror: repair " + mirroredRepairIds[mri] + " threw " + sbErr3); }
     }
 
     return jsonResponse_({ success: true, itemId: itemId, updated: updates });
@@ -20114,6 +20174,11 @@ function handleAddClaimItems_(callerEmail, payload) {
   });
   api_logClaimHistory_(db.historySheet, claimId, "ITEMS_ADDED", added + " item(s) linked by " + callerEmail, callerEmail, false, "");
   api_updateClaimRow_(db.claims, claimId, {});
+
+  // v38.72.0 — Supabase write-through. Best-effort per invariant #20.
+  try { resyncClaimToSupabase_(claimId); Logger.log("sb_mirror: claim " + claimId + " ok"); }
+  catch (sbErr) { Logger.log("sb_mirror: claim " + claimId + " threw " + sbErr); }
+
   return jsonResponse_({ success: true, itemsAdded: added });
 }
 
