@@ -2,11 +2,12 @@ import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom';
 import { Settings as SettingsIcon, Users, DollarSign, Mail, Database, Globe, Bell, Plus, ChevronRight, CheckCircle2, AlertCircle, UserPlus, Shield, ToggleLeft, ToggleRight, Eye, EyeOff, Wifi, WifiOff, RefreshCw, Loader2, RefreshCcw, ExternalLink, Wrench, PlayCircle, Send, FolderSync, BookText, LogIn, Cloud, Edit2, Zap, ArrowUpDown, ChevronUp, ChevronDown, X } from 'lucide-react';
 import { useReactTable, getCoreRowModel, getSortedRowModel, flexRender, type SortingState, type ColumnDef } from '@tanstack/react-table';
-import { getApiUrl, getApiToken, setApiCredentials, isApiConfigured, fetchHealth, postOnboardClient, postUpdateClient, postSyncSettings, postRefreshCaches, postFixMissingFolders, postTestSendClientTemplates, postTestSendClaimEmails, fetchAutoIdSetting, postUpdateAutoIdSetting, postResolveOnboardUser, fetchStaxConfig, postUpdateStaxConfig, apiPost, fetchEmailTemplates, postSyncTemplatesToClients, postBulkSyncToSupabase, postPurgeInactiveFromSupabase, fetchClients, postFinishClientSetup, postSendWelcomeToUsers, resyncUsersPreview, resyncUsers, resyncClientsPreview, resyncClients, setNextFetchNoCache, adminSetUserPassword, ensureUserInAuth, listMissingAuthUsers } from '../lib/api';
+import { getApiUrl, getApiToken, setApiCredentials, isApiConfigured, fetchHealth, postOnboardClient, postUpdateClient, postSyncSettings, postRefreshCaches, postFixMissingFolders, postTestSendClientTemplates, postTestSendClaimEmails, fetchAutoIdSetting, postUpdateAutoIdSetting, postResolveOnboardUser, fetchStaxConfig, postUpdateStaxConfig, apiPost, postSyncTemplatesToClients, postBulkSyncToSupabase, postPurgeInactiveFromSupabase, fetchClients, postFinishClientSetup, postSendWelcomeToUsers, resyncUsersPreview, resyncUsers, resyncClientsPreview, resyncClients, setNextFetchNoCache, adminSetUserPassword, ensureUserInAuth, listMissingAuthUsers } from '../lib/api';
 import type { BulkSyncResult } from '../lib/api';
 import type { EmailTemplate } from '../lib/api';
 import { entityEvents } from '../lib/entityEvents';
 import { TemplateEditor } from '../components/shared/TemplateEditor';
+import { useEmailTemplates } from '../hooks/useEmailTemplates';
 import { ConfirmDialog } from '../components/shared/ConfirmDialog';
 import { useAuth } from '../contexts/AuthContext';
 import { AutocompleteInput } from '../components/shared/AutocompleteInput';
@@ -1046,33 +1047,21 @@ export function Settings() {
   const [emailTestLoading, setEmailTestLoading] = useState<Record<string, boolean>>({});
   const [emailSendAllLoading, setEmailSendAllLoading] = useState(false);
 
-  // v38.12.0 — Template editor state
-  const [liveTemplates, setLiveTemplates] = useState<EmailTemplate[]>([]);
-  const [templatesLoading, setTemplatesLoading] = useState(false);
+  // v38.82.0 — templates now come from Supabase via useEmailTemplates. The
+  // hook handles initial fetch, Realtime cross-tab sync, GAS fallback (which
+  // auto-seeds from MPL on first call), and audit logging on update.
+  const {
+    templates: liveTemplates,
+    loading: templatesLoading,
+    error: templatesFetchError,
+    refetch: refreshTemplates,
+    updateTemplate,
+  } = useEmailTemplates();
+
   const [editingTemplate, setEditingTemplate] = useState<EmailTemplate | null>(null);
   const [tplSyncConfirmOpen, setTplSyncConfirmOpen] = useState(false);
   const [tplSyncing, setTplSyncing] = useState(false);
   const [tplSyncResult, setTplSyncResult] = useState<{ synced: number; failed: number; message: string } | null>(null);
-
-  // Fetch templates from Master when emails tab is active
-  const [templatesFetchError, setTemplatesFetchError] = useState<string | null>(null);
-  useEffect(() => {
-    if (tab === 'emails') {
-      setTemplatesLoading(true);
-      setTemplatesFetchError(null);
-      fetchEmailTemplates().then(resp => {
-        if (resp.ok && resp.data?.templates) {
-          setLiveTemplates(resp.data.templates);
-        } else {
-          setTemplatesFetchError(resp.error || resp.data?.error || 'Failed to load templates');
-        }
-        setTemplatesLoading(false);
-      }).catch(err => {
-        setTemplatesFetchError(String(err));
-        setTemplatesLoading(false);
-      });
-    }
-  }, [tab]);
 
   const handleSyncToClients = async () => {
     setTplSyncing(true);
@@ -1085,14 +1074,6 @@ export function Settings() {
     } else {
       setTplSyncResult({ synced: 0, failed: 0, message: resp.error || 'Sync failed' });
     }
-  };
-
-  const refreshTemplates = () => {
-    setTemplatesLoading(true);
-    fetchEmailTemplates().then(resp => {
-      if (resp.ok && resp.data?.templates) setLiveTemplates(resp.data.templates);
-      setTemplatesLoading(false);
-    }).catch(() => setTemplatesLoading(false));
   };
 
   // Helper to find live template HTML for a given key
@@ -3270,7 +3251,11 @@ export function Settings() {
                 <TemplateEditor
                   template={editingTemplate}
                   onClose={() => setEditingTemplate(null)}
-                  onSaved={() => { refreshTemplates(); setEditingTemplate(null); }}
+                  onSave={async (key, patch) => {
+                    const saved = await updateTemplate(key, patch);
+                    return !!saved;
+                  }}
+                  onSaved={() => { void refreshTemplates(); setEditingTemplate(null); }}
                 />
               )}
 

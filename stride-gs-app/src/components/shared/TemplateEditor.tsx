@@ -9,9 +9,10 @@ import { postUpdateEmailTemplate } from '../../lib/api';
  * TemplateEditor — inline HTML editor + live preview for email/doc templates.
  * Opens as an overlay panel when user clicks Edit on a template card.
  *
- * Admin-only. Saves directly to Master Price List via postUpdateEmailTemplate.
- *
- * v38.12.0 / Template management feature.
+ * Session 73 Phase 6: writes go directly to Supabase via the optional
+ * `onSave` callback (injected by Settings → useEmailTemplates). If the
+ * caller doesn't provide `onSave`, falls back to the v38.12.0 behaviour
+ * of POSTing `updateEmailTemplate` to GAS — so older consumers still work.
  */
 
 // Mock tokens for preview — frontend-only, covers all template types
@@ -98,9 +99,15 @@ interface Props {
   template: EmailTemplate;
   onClose: () => void;
   onSaved: () => void;
+  /**
+   * Optional save handler injected by Settings → useEmailTemplates. Writes
+   * directly to Supabase (with audit rows). If omitted, the editor falls
+   * back to POSTing updateEmailTemplate through GAS.
+   */
+  onSave?: (templateKey: string, patch: { subject?: string; bodyHtml?: string }) => Promise<boolean>;
 }
 
-export function TemplateEditor({ template, onClose, onSaved }: Props) {
+export function TemplateEditor({ template, onClose, onSaved, onSave }: Props) {
   const [subject, setSubject] = useState(template.subject);
   const [bodyHtml, setBodyHtml] = useState(template.bodyHtml);
   const [activeTab, setActiveTab] = useState<'split' | 'code' | 'preview'>('split');
@@ -117,24 +124,38 @@ export function TemplateEditor({ template, onClose, onSaved }: Props) {
     setSaveResult(null);
     setSaveError('');
 
-    const payload: { templateKey: string; subject?: string; bodyHtml?: string } = {
-      templateKey: template.key,
-    };
-    if (subject !== template.subject) payload.subject = subject;
-    if (bodyHtml !== template.bodyHtml) payload.bodyHtml = bodyHtml;
+    const patch: { subject?: string; bodyHtml?: string } = {};
+    if (subject !== template.subject) patch.subject = subject;
+    if (bodyHtml !== template.bodyHtml) patch.bodyHtml = bodyHtml;
 
-    const resp = await postUpdateEmailTemplate(payload);
+    // v38.82.0 — prefer the injected onSave (Supabase-direct). Fall back
+    // to GAS postUpdateEmailTemplate for any caller that hasn't adopted
+    // useEmailTemplates yet.
+    let ok = false;
+    let errorMessage: string | null = null;
+    if (onSave) {
+      try {
+        ok = await onSave(template.key, patch);
+        if (!ok) errorMessage = 'Save failed — admin role required, or Supabase unreachable';
+      } catch (e) {
+        errorMessage = e instanceof Error ? e.message : String(e);
+      }
+    } else {
+      const resp = await postUpdateEmailTemplate({ templateKey: template.key, ...patch });
+      ok = !!(resp.ok && resp.data?.success);
+      if (!ok) errorMessage = resp.error || resp.data?.error || 'Save failed';
+    }
     setSaving(false);
 
-    if (resp.ok && resp.data?.success) {
+    if (ok) {
       setSaveResult('success');
       setTimeout(() => setSaveResult(null), 8000); // longer display for reminder
       onSaved();
     } else {
       setSaveResult('error');
-      setSaveError(resp.error || resp.data?.error || 'Save failed');
+      setSaveError(errorMessage ?? 'Save failed');
     }
-  }, [template, subject, bodyHtml, onSaved]);
+  }, [template, subject, bodyHtml, onSaved, onSave]);
 
   // Detect known tokens in the template for the reference panel
   const usedTokens = useMemo(() => {
@@ -158,7 +179,7 @@ export function TemplateEditor({ template, onClose, onSaved }: Props) {
             <div style={{ fontSize: 11, color: theme.colors.textMuted, fontFamily: 'monospace' }}>{template.key}</div>
           </div>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-            {saveResult === 'success' && <span style={{ fontSize: 11, color: '#15803D', display: 'flex', alignItems: 'center', gap: 4 }}><CheckCircle2 size={13} /> Saved to Master — click "Sync to All Clients" to push to client sheets</span>}
+            {saveResult === 'success' && <span style={{ fontSize: 11, color: '#15803D', display: 'flex', alignItems: 'center', gap: 4 }}><CheckCircle2 size={13} /> Saved. Emails will use the new version immediately.</span>}
             {saveResult === 'error' && <span style={{ fontSize: 11, color: '#DC2626', display: 'flex', alignItems: 'center', gap: 4 }}><AlertTriangle size={13} /> {saveError}</span>}
             <button
               onClick={handleSave}

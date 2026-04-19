@@ -1,5 +1,16 @@
 /* ===================================================
-   StrideAPI.gs — v38.81.0 — 2026-04-19 PST — Pricing Parity Monitor endpoint
+   StrideAPI.gs — v38.82.0 — 2026-04-19 PST — Phase 6 email templates → Supabase
+   v38.82.0: Email templates live in Supabase public.email_templates now.
+             api_sendTemplateEmail_ reads the template from Supabase first
+             (CacheService TTL 600s), falling back to the MPL sheet if the
+             row is missing or Supabase is unreachable — email never breaks.
+             handleGetEmailTemplates_ reads from Supabase, auto-seeds from
+             MPL on first call when the table is empty, falls back to MPL
+             on Supabase outage. handleUpdateEmailTemplate_ writes to
+             Supabase (authoritative) and mirrors to MPL best-effort so
+             the backup stays close. New admin endpoint
+             "seedEmailTemplatesToSupabase" for re-seeds. No client sheet
+             schema changes; rollout NOT required.
    v38.81.0: NEW endpoint getPricingParity (admin) — side-by-side comparison
              of every service rate from MPL Price_List vs Supabase
              service_catalog, plus Class_Map vs item_classes. Returns
@@ -4723,6 +4734,12 @@ function doPost(e) {
       case "syncTemplatesToClients":
         return withAdminGuard_(callerEmail, function() {
           return handleSyncTemplatesToClients_();
+        });
+      case "seedEmailTemplatesToSupabase":
+        // v38.82.0 — one-shot (or re-run) seed of MPL → Supabase
+        // public.email_templates. Admin only.
+        return withAdminGuard_(callerEmail, function() {
+          return handleSeedEmailTemplatesToSupabase_();
         });
       case "sendOnboardingEmail":
         return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
@@ -11417,6 +11434,163 @@ function handleCompleteTask_(clientSheetId, payload) {
 
 
 
+// ─── Phase 6: Supabase email templates helpers (v38.82.0) ──────────────────
+
+/**
+ * Fetch one template from Supabase public.email_templates.
+ * Returns { subject, body, notes, recipients, attachDoc, category } or null.
+ * CacheService TTL 600s; negative results cached with SB_NULL_SENTINEL_ so
+ * missing keys don't hammer Supabase.
+ */
+function api_getTemplateFromSupabase_(templateKey) {
+  if (!templateKey) return null;
+  var key = String(templateKey).trim();
+  if (!key) return null;
+  var cacheKey = "sb_tpl_" + key;
+  var cache = CacheService.getScriptCache();
+  var cached = null;
+  try { cached = cache.get(cacheKey); } catch (_) {}
+  if (cached === SB_NULL_SENTINEL_) return null;
+  if (cached) {
+    try { return JSON.parse(cached); } catch (_) {}
+  }
+
+  var rows = api_supabaseGet_(
+    "/rest/v1/email_templates?template_key=eq." + encodeURIComponent(key) +
+    "&active=eq.true&select=subject,body,notes,recipients,attach_doc,category"
+  );
+  if (!rows || !rows.length) {
+    try { cache.put(cacheKey, SB_NULL_SENTINEL_, CACHE_TTL_SECONDS_); } catch (_) {}
+    return null;
+  }
+  var r = rows[0];
+  var result = {
+    subject:    String(r.subject || ""),
+    body:       String(r.body || ""),
+    notes:      String(r.notes || ""),
+    recipients: String(r.recipients || ""),
+    attachDoc:  String(r.attach_doc || ""),
+    category:   String(r.category || "email")
+  };
+  try { cache.put(cacheKey, JSON.stringify(result), CACHE_TTL_SECONDS_); } catch (_) {}
+  return result;
+}
+
+/**
+ * List every Supabase template row.  Used by handleGetEmailTemplates_ and
+ * by the auto-seed check. Returns array in the same shape the React app
+ * already consumes (key/subject/bodyHtml/notes/recipients/attachDoc/category).
+ */
+function api_listTemplatesFromSupabase_() {
+  var rows = api_supabaseGet_(
+    "/rest/v1/email_templates?select=template_key,subject,body,notes,recipients,attach_doc,category,active&order=template_key.asc"
+  );
+  if (!rows) return null;
+  return rows.map(function(r) {
+    return {
+      key:        String(r.template_key || ""),
+      subject:    String(r.subject || ""),
+      bodyHtml:   String(r.body || ""),
+      notes:      String(r.notes || ""),
+      recipients: String(r.recipients || ""),
+      attachDoc:  String(r.attach_doc || ""),
+      category:   String(r.category || "email"),
+      active:     r.active !== false
+    };
+  });
+}
+
+/**
+ * Upsert a single template into public.email_templates. Used by
+ * handleUpdateEmailTemplate_ to keep Supabase authoritative, and by
+ * the seeder below.
+ */
+function api_upsertTemplateToSupabase_(row) {
+  var url = prop_("SUPABASE_URL");
+  var key = prop_("SUPABASE_SERVICE_ROLE_KEY");
+  if (!url || !key) return { ok: false, error: "Supabase credentials missing" };
+  try {
+    var resp = UrlFetchApp.fetch(url + "/rest/v1/email_templates?on_conflict=template_key", {
+      method: "post",
+      contentType: "application/json",
+      headers: {
+        "apikey": key,
+        "Authorization": "Bearer " + key,
+        "Prefer": "resolution=merge-duplicates,return=minimal"
+      },
+      payload: JSON.stringify(row),
+      muteHttpExceptions: true
+    });
+    var code = resp.getResponseCode();
+    if (code >= 200 && code < 300) {
+      // Invalidate the cached row.
+      try { CacheService.getScriptCache().remove("sb_tpl_" + row.template_key); } catch (_) {}
+      return { ok: true };
+    }
+    return { ok: false, error: "HTTP " + code + ": " + resp.getContentText() };
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+}
+
+/**
+ * Read the Master Price List Email_Templates tab and upsert every row to
+ * Supabase. Returns { count, errors }. Category is derived the same way
+ * handleGetEmailTemplates_ has always done it, so existing tab metadata
+ * survives the move byte-for-byte.
+ */
+function api_seedEmailTemplatesFromMpl_() {
+  var masterSsId = prop_("MASTER_PRICE_LIST_SPREADSHEET_ID");
+  if (!masterSsId) return { count: 0, errors: ["MASTER_PRICE_LIST_SPREADSHEET_ID not configured"] };
+  var masterSS;
+  try { masterSS = SpreadsheetApp.openById(masterSsId); }
+  catch (e) { return { count: 0, errors: ["Cannot open Master: " + e.message] }; }
+  var tmplSh = masterSS.getSheetByName("Email_Templates");
+  if (!tmplSh || tmplSh.getLastRow() < 2) return { count: 0, errors: ["Email_Templates tab empty"] };
+
+  var data = tmplSh.getRange(2, 1, tmplSh.getLastRow() - 1, Math.max(tmplSh.getLastColumn(), 6)).getValues();
+  var errors = [];
+  var count = 0;
+  for (var i = 0; i < data.length; i++) {
+    var key = String(data[i][0] || "").trim();
+    var body = String(data[i][2] || "").trim();
+    if (!key || !body) continue;
+    var category = "email";
+    if (key.indexOf("DOC_") === 0) category = "doc";
+    else if (key === "WELCOME_EMAIL" || key === "ONBOARDING_EMAIL") category = "system";
+    else if (key.indexOf("CLAIM_") === 0) category = "claim";
+    var row = {
+      template_key: key,
+      subject:      String(data[i][1] || "").trim(),
+      body:         body,
+      notes:        String(data[i][3] || "").trim(),
+      recipients:   String(data[i][4] || "").trim(),
+      attach_doc:   String(data[i][5] || "").trim(),
+      category:     category,
+      active:       true
+    };
+    var r = api_upsertTemplateToSupabase_(row);
+    if (r.ok) count++;
+    else errors.push(key + ": " + r.error);
+  }
+  return { count: count, errors: errors };
+}
+
+/**
+ * Admin endpoint — force a re-seed of Supabase from MPL. Used once after
+ * the v38.82.0 deploy to populate the table, and any time MPL is updated
+ * outside the app (e.g. `npm run push-templates`).
+ */
+function handleSeedEmailTemplatesToSupabase_() {
+  var result = api_seedEmailTemplatesFromMpl_();
+  return jsonResponse_({
+    success: result.errors.length === 0,
+    seeded: result.count,
+    errors: result.errors,
+    message: "Seeded " + result.count + " templates" + (result.errors.length ? " with " + result.errors.length + " errors" : "")
+  });
+}
+
 /**
  * api_sendTemplateEmail_
  * Sends an email using a named template from the Master Price List's Email_Templates tab.
@@ -11437,8 +11611,17 @@ function api_sendTemplateEmail_(settings, templateKey, toEmail, fallbackSubject,
     var eSubj = fallbackSubject || templateKey;
     var eBody = "";
 
-    // Look up template from Master Price List Email_Templates tab
-    if (masterId) {
+    // v38.82.0 — Supabase is the primary source. Sheet is the fallback
+    // so an outage never breaks email. Read order:
+    //   1. Supabase email_templates (with CacheService 600s TTL)
+    //   2. MPL Email_Templates tab
+    var sbTpl = null;
+    try { sbTpl = api_getTemplateFromSupabase_(templateKey); } catch (_) {}
+    if (sbTpl && sbTpl.body) {
+      eSubj = sbTpl.subject || eSubj;
+      eBody = sbTpl.body;
+    } else if (masterId) {
+      // Sheet fallback — unchanged from pre-v38.82.0.
       try {
         var mSS = SpreadsheetApp.openById(masterId);
         var tplSh = mSS.getSheetByName("Email_Templates");
@@ -21983,13 +22166,36 @@ function handleUpdateClaim_(callerEmail, payload) {
  * Category derived: DOC_* → 'doc', WELCOME/ONBOARDING → 'system', else 'email'.
  */
 function handleGetEmailTemplates_() {
+  // v38.82.0 — Supabase first; auto-seed from MPL on first call when empty;
+  // MPL fallback on outage. The shape returned is unchanged so the React
+  // Settings page needs no coordination on this deploy.
+  try {
+    var sbList = api_listTemplatesFromSupabase_();
+    if (sbList && sbList.length > 0) {
+      return jsonResponse_({ success: true, templates: sbList, source: "supabase" });
+    }
+    if (sbList && sbList.length === 0) {
+      // Supabase reachable but empty — one-shot seed from MPL, then return.
+      var seed = api_seedEmailTemplatesFromMpl_();
+      if (seed.count > 0) {
+        var seeded = api_listTemplatesFromSupabase_();
+        if (seeded && seeded.length > 0) {
+          return jsonResponse_({ success: true, templates: seeded, seeded: seed.count, source: "supabase_seeded" });
+        }
+      }
+    }
+    // Supabase unreachable or seed failed — fall through to sheet read below.
+  } catch (sbErr) {
+    Logger.log("handleGetEmailTemplates_ Supabase path error (non-fatal): " + sbErr);
+  }
+
   var masterSsId = prop_("MASTER_PRICE_LIST_SPREADSHEET_ID");
   if (!masterSsId) return errorResponse_("MASTER_PRICE_LIST_SPREADSHEET_ID not configured", "CONFIG_ERROR");
 
   try {
     var masterSS = SpreadsheetApp.openById(masterSsId);
     var tmplSh = masterSS.getSheetByName("Email_Templates");
-    if (!tmplSh || tmplSh.getLastRow() < 2) return jsonResponse_({ success: true, templates: [] });
+    if (!tmplSh || tmplSh.getLastRow() < 2) return jsonResponse_({ success: true, templates: [], source: "sheet" });
 
     var data = tmplSh.getRange(2, 1, tmplSh.getLastRow() - 1, Math.max(tmplSh.getLastColumn(), 6)).getValues();
     var templates = [];
@@ -22012,7 +22218,7 @@ function handleGetEmailTemplates_() {
         category: category
       });
     }
-    return jsonResponse_({ success: true, templates: templates });
+    return jsonResponse_({ success: true, templates: templates, source: "sheet" });
   } catch (e) {
     return errorResponse_("Failed to read templates: " + e.message, "SERVER_ERROR");
   }
@@ -22032,28 +22238,53 @@ function handleUpdateEmailTemplate_(payload) {
   if (!hasSubject && !hasBody) return errorResponse_("subject or bodyHtml is required", "INVALID_PARAMS");
   if (hasBody && !String(payload.bodyHtml).trim()) return errorResponse_("bodyHtml cannot be blank", "INVALID_PARAMS");
 
-  var masterSsId = prop_("MASTER_PRICE_LIST_SPREADSHEET_ID");
-  if (!masterSsId) return errorResponse_("MASTER_PRICE_LIST_SPREADSHEET_ID not configured", "CONFIG_ERROR");
+  // v38.82.0 — write Supabase (authoritative) + mirror to MPL best-effort.
+  // We read the current Supabase row first so fields we're not updating
+  // stay intact. If Supabase doesn't have the row yet, fall back to MPL
+  // defaults so nothing is nulled.
+  var current = null;
+  try { current = api_getTemplateFromSupabase_(templateKey); } catch (_) {}
+  var row = {
+    template_key: templateKey,
+    subject:      hasSubject ? String(payload.subject)  : (current ? current.subject : ""),
+    body:         hasBody    ? String(payload.bodyHtml) : (current ? current.body    : ""),
+    notes:        current ? current.notes      : "",
+    recipients:   current ? current.recipients : "",
+    attach_doc:   current ? current.attachDoc  : "",
+    category:     current ? current.category   : (
+                    templateKey.indexOf("DOC_") === 0 ? "doc"
+                    : (templateKey === "WELCOME_EMAIL" || templateKey === "ONBOARDING_EMAIL") ? "system"
+                    : templateKey.indexOf("CLAIM_") === 0 ? "claim"
+                    : "email"
+                  ),
+    active:       true
+  };
+  var sbResult = api_upsertTemplateToSupabase_(row);
+  if (!sbResult.ok) return errorResponse_("Failed to save to Supabase: " + sbResult.error, "SERVER_ERROR");
 
+  // Mirror to MPL so the sheet-fallback stays in sync. Best-effort.
   try {
-    var masterSS = SpreadsheetApp.openById(masterSsId);
-    var tmplSh = masterSS.getSheetByName("Email_Templates");
-    if (!tmplSh || tmplSh.getLastRow() < 2) return errorResponse_("Email_Templates sheet not found or empty", "NOT_FOUND");
-
-    var data = tmplSh.getRange(2, 1, tmplSh.getLastRow() - 1, 1).getValues();
-    var matchRow = -1;
-    for (var i = 0; i < data.length; i++) {
-      if (String(data[i][0] || "").trim() === templateKey) { matchRow = i + 2; break; }
+    var masterSsId = prop_("MASTER_PRICE_LIST_SPREADSHEET_ID");
+    if (masterSsId) {
+      var masterSS = SpreadsheetApp.openById(masterSsId);
+      var tmplSh = masterSS.getSheetByName("Email_Templates");
+      if (tmplSh && tmplSh.getLastRow() >= 2) {
+        var data = tmplSh.getRange(2, 1, tmplSh.getLastRow() - 1, 1).getValues();
+        var matchRow = -1;
+        for (var i = 0; i < data.length; i++) {
+          if (String(data[i][0] || "").trim() === templateKey) { matchRow = i + 2; break; }
+        }
+        if (matchRow >= 2) {
+          if (hasSubject) tmplSh.getRange(matchRow, 2).setValue(String(payload.subject));
+          if (hasBody)    tmplSh.getRange(matchRow, 3).setValue(String(payload.bodyHtml));
+        }
+      }
     }
-    if (matchRow < 2) return errorResponse_("Template not found: " + templateKey, "NOT_FOUND");
-
-    if (hasSubject) tmplSh.getRange(matchRow, 2).setValue(String(payload.subject));
-    if (hasBody)    tmplSh.getRange(matchRow, 3).setValue(String(payload.bodyHtml));
-
-    return jsonResponse_({ success: true, templateKey: templateKey, message: "Template updated" });
-  } catch (e) {
-    return errorResponse_("Failed to update template: " + e.message, "SERVER_ERROR");
+  } catch (mErr) {
+    Logger.log("handleUpdateEmailTemplate_ MPL mirror error (non-fatal): " + mErr);
   }
+
+  return jsonResponse_({ success: true, templateKey: templateKey, message: "Template updated (Supabase + MPL)" });
 }
 
 /**
