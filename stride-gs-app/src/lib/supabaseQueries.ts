@@ -777,6 +777,7 @@ interface SupabaseBillingRow {
   invoice_date: string | null;
   invoice_url: string | null;
   sidemark: string | null;
+  reference: string | null;
 }
 
 export async function fetchBillingFromSupabase(
@@ -826,6 +827,7 @@ export async function fetchBillingFromSupabase(
         invoiceDate: row.invoice_date || '',
         invoiceUrl: row.invoice_url || '',
         sidemark: row.sidemark || '',
+        reference: row.reference || '',
       };
     });
 
@@ -924,6 +926,7 @@ export async function fetchBillingFromSupabaseFiltered(
         invoiceDate: row.invoice_date || '',
         invoiceUrl: row.invoice_url || '',
         sidemark: row.sidemark || '',
+        reference: row.reference || '',
       };
     });
 

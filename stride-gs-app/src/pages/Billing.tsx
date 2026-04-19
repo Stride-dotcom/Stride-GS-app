@@ -61,7 +61,7 @@ interface BillingRow {
   date: string; svcCode: string; svcName: string; itemId: string;
   description: string; itemClass: string; qty: number; rate: number; total: number;
   taskId: string; repairId: string; shipmentNo: string; notes: string;
-  sourceSheetId?: string; sidemark?: string; category?: string;
+  sourceSheetId?: string; sidemark?: string; reference?: string; category?: string;
   staxCustomerId?: string | null;
   autoCharge?: boolean;
   qboStatus?: string | null;
@@ -116,13 +116,13 @@ const SVC_CFG: Record<string, { bg: string; text: string }> = {
 
 const COL_LABELS: Record<string, string> = {
   ledgerRowId: 'Ledger ID', status: 'Status', invoiceNo: 'Invoice #', client: 'Client',
-  sidemark: 'Sidemark',
+  sidemark: 'Sidemark', reference: 'Reference',
   date: 'Date', svcCode: 'Svc Code', svcName: 'Service', itemId: 'Item',
   description: 'Description', itemClass: 'Class', qty: 'Qty', rate: 'Rate', total: 'Total',
   taskId: 'Task', repairId: 'Repair', shipmentNo: 'Shipment', notes: 'Notes',
 };
 const TOGGLEABLE = Object.keys(COL_LABELS);
-const DEFAULT_COL_ORDER = ['select', 'ledgerRowId', 'status', 'invoiceNo', 'client', 'sidemark', 'date', 'svcCode', 'svcName', 'itemId', 'description', 'itemClass', 'qty', 'rate', 'total', 'taskId', 'repairId', 'shipmentNo', 'notes', 'actions'];
+const DEFAULT_COL_ORDER = ['select', 'ledgerRowId', 'status', 'invoiceNo', 'client', 'sidemark', 'reference', 'date', 'svcCode', 'svcName', 'itemId', 'description', 'itemClass', 'qty', 'rate', 'total', 'taskId', 'repairId', 'shipmentNo', 'notes', 'actions'];
 
 const mf: FilterFn<BillingRow> = (row, _colId, val: string[]) => { if (!val || !val.length) return true; return val.includes(String(row.getValue(_colId))); };
 mf.autoRemove = (v: string[]) => !v || !v.length;
@@ -132,7 +132,7 @@ function Badge({ t, c }: { t: string; c?: { bg: string; text: string } }) { cons
 
 function toCSV(rows: BillingRow[], fn: string) {
   const h = Object.values(COL_LABELS).join(',');
-  const b = rows.map(r => [r.ledgerRowId, r.status, r.invoiceNo, r.client, r.sidemark || '', r.date, r.svcCode, r.svcName, r.itemId, r.description, r.itemClass, r.qty, r.rate, r.total, r.taskId, r.repairId, r.shipmentNo, r.notes].map(v => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n');
+  const b = rows.map(r => [r.ledgerRowId, r.status, r.invoiceNo, r.client, r.sidemark || '', r.reference || '', r.date, r.svcCode, r.svcName, r.itemId, r.description, r.itemClass, r.qty, r.rate, r.total, r.taskId, r.repairId, r.shipmentNo, r.notes].map(v => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n');
   const bl = new Blob([h + '\n' + b], { type: 'text/csv' }); const a = document.createElement('a'); a.href = URL.createObjectURL(bl); a.download = fn; a.click();
 }
 
@@ -389,7 +389,7 @@ export function Billing() {
       qty: r.qty, rate: r.rate ?? 0, total: r.total ?? 0,
       taskId: r.taskId, repairId: r.repairId, shipmentNo: r.shipmentNo,
       notes: r.itemNotes, sourceSheetId: r.clientSheetId,
-      sidemark: r.sidemark || '', category: (r as any).category || '',
+      sidemark: r.sidemark || '', reference: r.reference || '', category: (r as any).category || '',
       staxCustomerId: (r as any).staxCustomerId || null,
       autoCharge: (r as any).autoCharge === true,
       qboStatus: r.qboStatus || null,
@@ -846,6 +846,10 @@ export function Billing() {
           ? <EditableCell value={i.getValue() || ''} onChange={v => saveReportField(i.row.original, 'sidemark', v)} />
           : <span style={{ fontSize: 12, color: theme.colors.textSecondary }}>{i.getValue() || '\u2014'}</span>;
       } }),
+      col.accessor('reference', {
+        header: 'Reference', size: 130, filterFn: mf,
+        cell: i => <span style={{ fontSize: 12, color: theme.colors.textSecondary, fontFamily: 'monospace' }}>{i.getValue() || '\u2014'}</span>,
+      }),
       col.accessor('date', { header: 'Date', size: 100, cell: i => <span style={{ fontSize: 12, color: theme.colors.textSecondary }}>{fmt(i.getValue())}</span> }),
       col.accessor('svcCode', { header: 'Svc Code', size: 90, filterFn: mf, cell: i => <Badge t={i.getValue()} c={SVC_CFG[i.getValue()]} /> }),
       col.accessor('svcName', { header: 'Service', size: 100, cell: i => <span style={{ fontSize: 12, color: theme.colors.textSecondary }}>{i.getValue()}</span> }),

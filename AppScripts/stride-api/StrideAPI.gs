@@ -1,5 +1,11 @@
 /* ===================================================
-   StrideAPI.gs — v38.77.0 — 2026-04-19 PST — manual billing charges (add/void/edit)
+   StrideAPI.gs — v38.78.0 — 2026-04-19 PST — Reference on billing rows + QB IIF memo
+   v38.78.0: Billing rows now carry Reference (client PO). sbBillingRow_
+             writes reference, resync billing path looks it up from Inventory
+             (same pattern as sidemark). handleGetBilling_ overlays from
+             invFields like sidemark. handleQbExport_ appends [Ref: xxx] to
+             line memo when non-empty, resolving from Supabase billing cache.
+             New helper api_lookupReferenceForItemId_ mirrors sidemark helper.
    v38.77.0: NEW endpoints addManualCharge + voidManualCharge for staff-created
              billing rows from the React Billing page. Ledger Row ID format
              "MANUAL-{ms}-{6char}" never collides with task/item/repair billing
@@ -2536,6 +2542,7 @@ function sbBillingRow_(tenantId, row) {
     invoice_date:    String(row.invoiceDate || ""),
     invoice_url:     String(row.invoiceUrl || ""),
     sidemark:        String(row.sidemark || ""),
+    reference:       String(row.reference || ""),
     updated_at:      new Date().toISOString()
   };
 }
@@ -3356,10 +3363,11 @@ function resyncEntityToSupabase_(entityType, tenantId, entityId) {
             // client sheet has it. Manual charges store sidemark inline so the
             // sheet read wins for those.
             var bSidemark = String(row["Sidemark"] || "").trim();
-            if (!bSidemark) {
-              var bItemId = String(row["Item ID"] || "").trim();
-              if (bItemId) bSidemark = api_lookupSidemarkForItemId_(ss, bItemId);
-            }
+            var bItemId = String(row["Item ID"] || "").trim();
+            if (!bSidemark && bItemId) bSidemark = api_lookupSidemarkForItemId_(ss, bItemId);
+            // v38.78.0 — Reference follows the same sheet-or-Inventory resolution
+            var bReference = String(row["Reference"] || "").trim();
+            if (!bReference && bItemId) bReference = api_lookupReferenceForItemId_(ss, bItemId);
             upResult = supabaseUpsert_("billing", sbBillingRow_(tenantId, {
               ledgerRowId: entityId, status: row["Status"], invoiceNo: row["Invoice #"],
               clientName: row["Client"], date: formatDate_(row["Date"]),
@@ -3369,7 +3377,7 @@ function resyncEntityToSupabase_(entityType, tenantId, entityId) {
               taskId: row["Task ID"], repairId: row["Repair ID"],
               shipmentNumber: row["Shipment #"], itemNotes: row["Item Notes"],
               invoiceDate: formatDate_(row["Invoice Date"]), invoiceUrl: row["Invoice URL"],
-              sidemark: bSidemark
+              sidemark: bSidemark, reference: bReference
             }));
             break;
         }
@@ -3584,21 +3592,31 @@ function api_fullClientSync_(tenantId, entityTypes) {
           var billSheet = ss.getSheetByName("Billing_Ledger");
           if (billSheet) {
             var billRows = sheetToObjects_(billSheet);
+            // v38.78.0 — build Item ID → Sidemark + Reference maps once (Billing_Ledger
+            // has neither column on most clients, so we resolve from Inventory).
+            var _invFields = null;
+            try { _invFields = api_buildInvFieldsByItemMap_(ss); } catch (_e) { _invFields = null; }
+            var sidemarkMap = (_invFields && _invFields.sidemark) || {};
+            var referenceMap = (_invFields && _invFields.reference) || {};
             var billSb = [];
             var billKeepIds = [];
             for (var l = 0; l < billRows.length; l++) {
               var lid = String(billRows[l]["Ledger Row ID"] || "").trim();
               if (!lid) continue;
               billKeepIds.push(lid);
+              var bFcsItemId = String(billRows[l]["Item ID"] || "").trim();
+              var bFcsSidemark = String(billRows[l]["Sidemark"] || "").trim() || (bFcsItemId ? (sidemarkMap[bFcsItemId] || "") : "");
+              var bFcsReference = String(billRows[l]["Reference"] || "").trim() || (bFcsItemId ? (referenceMap[bFcsItemId] || "") : "");
               billSb.push(sbBillingRow_(tenantId, {
                 ledgerRowId: lid, status: billRows[l]["Status"], invoiceNo: billRows[l]["Invoice #"],
                 clientName: billRows[l]["Client"], date: formatDate_(billRows[l]["Date"]),
                 svcCode: billRows[l]["Svc Code"], svcName: billRows[l]["Svc Name"], category: billRows[l]["Category"],
-                itemId: billRows[l]["Item ID"], description: billRows[l]["Description"],
+                itemId: bFcsItemId, description: billRows[l]["Description"],
                 itemClass: billRows[l]["Class"], qty: billRows[l]["Qty"], rate: billRows[l]["Rate"],
                 total: billRows[l]["Total"], taskId: billRows[l]["Task ID"], repairId: billRows[l]["Repair ID"],
                 shipmentNumber: billRows[l]["Shipment #"], itemNotes: billRows[l]["Item Notes"],
-                invoiceDate: formatDate_(billRows[l]["Invoice Date"]), invoiceUrl: billRows[l]["Invoice URL"]
+                invoiceDate: formatDate_(billRows[l]["Invoice Date"]), invoiceUrl: billRows[l]["Invoice URL"],
+                sidemark: bFcsSidemark, reference: bFcsReference
               }));
             }
             supabaseBatchUpsert_("billing", billSb);
@@ -7939,10 +7957,13 @@ function handleGetBilling_(clientSheetId, filters) {
       if (!sheet) continue;
 
       // v38.6.0: Build Item ID → Sidemark map from Inventory (Billing_Ledger has no Sidemark column)
+      // v38.78.0: Also build Item ID → Reference map (same pattern — Reference lives on Inventory)
       var sidemarkByItemId = {};
+      var referenceByItemId = {};
       try {
         var invFields = api_buildInvFieldsByItemMap_(ss);
         sidemarkByItemId = invFields.sidemark || {};
+        referenceByItemId = invFields.reference || {};
       } catch (eSm) { /* non-critical */ }
 
       var rows = sheetToObjects_(sheet);
@@ -7959,6 +7980,10 @@ function handleGetBilling_(clientSheetId, filters) {
         var sidemarkVal = String(row["Sidemark"] || "").trim();
         if (!sidemarkVal && itemIdVal && sidemarkByItemId[itemIdVal]) {
           sidemarkVal = sidemarkByItemId[itemIdVal];
+        }
+        var referenceVal = String(row["Reference"] || "").trim();
+        if (!referenceVal && itemIdVal && referenceByItemId[itemIdVal]) {
+          referenceVal = referenceByItemId[itemIdVal];
         }
 
         // v38.13.0: Server-side filters
@@ -7997,6 +8022,7 @@ function handleGetBilling_(clientSheetId, filters) {
           invoiceDate: formatDate_(row["Invoice Date"]),
           invoiceUrl: String(row["Invoice URL"] || "").trim(),
           sidemark: sidemarkVal,
+          reference: referenceVal,
           staxCustomerId: staxBySheet[client.spreadsheetId] || null,
           autoCharge: autoChargeBySheet[client.spreadsheetId] === true,
           qboStatus: qboStatusByLedgerId[ledgerRowId] || null,
@@ -8155,6 +8181,77 @@ function api_lookupSidemarkForItemId_(ss, itemId) {
     for (var i = 0; i < data.length; i++) {
       if (String(data[i][idCol - 1] || "").trim() === target) {
         return String(data[i][smCol - 1] || "").trim();
+      }
+    }
+    return "";
+  } catch (e) {
+    return "";
+  }
+}
+
+/**
+ * v38.78.0 — Batch fetch billing.reference from Supabase for a list of
+ * ledger_row_ids. Returns a map { ledger_row_id: reference }. Empty map on
+ * any Supabase failure — caller proceeds without references.
+ *
+ * Used by handleQbExport_ to append "[Ref: xxx]" to IIF line item memos.
+ * Batches 100 IDs per HTTP call to keep URL length safe.
+ */
+function api_fetchBillingReferencesByLedgerIds_(ledgerRowIds) {
+  var out = {};
+  if (!ledgerRowIds || !ledgerRowIds.length) return out;
+  try {
+    var url = prop_("SUPABASE_URL");
+    var key = prop_("SUPABASE_SERVICE_ROLE_KEY");
+    if (!url || !key) return out;
+    // Dedupe
+    var seen = {};
+    var uniq = [];
+    for (var i = 0; i < ledgerRowIds.length; i++) {
+      var id = String(ledgerRowIds[i] || "").trim();
+      if (id && !seen[id]) { seen[id] = 1; uniq.push(id); }
+    }
+    for (var j = 0; j < uniq.length; j += 100) {
+      var batch = uniq.slice(j, j + 100);
+      // PostgREST in.() with double-quoted values handles commas/special chars safely
+      var inFilter = batch.map(function(id) { return '"' + String(id).replace(/"/g, '\\"') + '"'; }).join(',');
+      var resp = UrlFetchApp.fetch(
+        url + "/rest/v1/billing?select=ledger_row_id,reference&ledger_row_id=in.(" + encodeURIComponent(inFilter) + ")",
+        { method: "get", headers: { "apikey": key, "Authorization": "Bearer " + key }, muteHttpExceptions: true }
+      );
+      if (resp.getResponseCode() === 200) {
+        var data = JSON.parse(resp.getContentText() || "[]");
+        for (var k = 0; k < data.length; k++) {
+          var r = data[k];
+          if (r && r.ledger_row_id && r.reference) out[String(r.ledger_row_id)] = String(r.reference);
+        }
+      }
+    }
+  } catch (_e) { /* best-effort — no refs is acceptable */ }
+  return out;
+}
+
+/**
+ * v38.78.0 — Look up the Reference column value for a given Item ID from the
+ * client's Inventory sheet. Returns "" on miss. Mirror of the sidemark helper
+ * above — Billing_Ledger doesn't have a Reference column, so the Supabase
+ * mirror and the React read path both resolve it from Inventory.
+ */
+function api_lookupReferenceForItemId_(ss, itemId) {
+  if (!ss || !itemId) return "";
+  try {
+    var inv = ss.getSheetByName("Inventory");
+    if (!inv || inv.getLastRow() < 2) return "";
+    var hMap = api_getHeaderMap_(inv);
+    var idCol = hMap["Item ID"];
+    var refCol = hMap["Reference"];
+    if (!idCol || !refCol) return "";
+    var lastRow = api_getLastDataRow_(inv);
+    var data = inv.getRange(2, 1, lastRow - 1, Math.max(idCol, refCol)).getValues();
+    var target = String(itemId).trim();
+    for (var i = 0; i < data.length; i++) {
+      if (String(data[i][idCol - 1] || "").trim() === target) {
+        return String(data[i][refCol - 1] || "").trim();
       }
     }
     return "";
@@ -15049,11 +15146,31 @@ function handleQbExport_(payload) {
       invoiceMap[invNo] = { qbName: qbCustName, terms: payTerms, invDate: todayIifDate, dueDate: dueDate, lines: [] };
       invoiceOrder.push(invNo);
     }
+    // v38.78.0 — track ledgerRowId per line so we can overlay Reference from
+    // the Supabase billing cache (Reference lives on Inventory, not Consol_Ledger)
+    var lineLedgerRowId = cLedgerRowId !== undefined ? String(consolVals[i][cLedgerRowId] || "").trim() : "";
     invoiceMap[invNo].lines.push({
       svcName: svcName, memo: memo, qty: qty, rate: rate, total: total,
       qbAcct: mapping[svcCode].qbAccount, qbItemName: mapping[svcCode].qbItemName || "",
-      sidemark: sidemark, svcDate: serviceDateStr
+      sidemark: sidemark, svcDate: serviceDateStr, ledgerRowId: lineLedgerRowId
     });
+  }
+
+  // v38.78.0 — fetch Reference for all ledger row IDs being exported, append to
+  // each line's memo as "[Ref: xxx]" when non-empty. Single batched Supabase
+  // query; silently degrades to no-op if Supabase is unreachable.
+  var allLrids = [];
+  for (var inv0 = 0; inv0 < invoiceOrder.length; inv0++) {
+    var ls = invoiceMap[invoiceOrder[inv0]].lines;
+    for (var ll = 0; ll < ls.length; ll++) { if (ls[ll].ledgerRowId) allLrids.push(ls[ll].ledgerRowId); }
+  }
+  var refByLrid = api_fetchBillingReferencesByLedgerIds_(allLrids);
+  for (var invR = 0; invR < invoiceOrder.length; invR++) {
+    var rLines = invoiceMap[invoiceOrder[invR]].lines;
+    for (var rl = 0; rl < rLines.length; rl++) {
+      var ref = refByLrid[rLines[rl].ledgerRowId] || "";
+      if (ref) rLines[rl].memo = (rLines[rl].memo ? rLines[rl].memo + " " : "") + "[Ref: " + ref + "]";
+    }
   }
 
   if (!invoiceOrder.length) {

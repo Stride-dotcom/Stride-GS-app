@@ -518,6 +518,7 @@ export interface ApiBillingRow {
   invoiceDate: string;
   invoiceUrl: string;
   sidemark: string;
+  reference: string;
   qboStatus?: string | null;
   qboInvoiceId?: string | null;
 }
