@@ -16,6 +16,7 @@
  * affordance via background tint + text cursor.
  */
 import { useState, useRef, useEffect, useMemo, type ReactNode } from 'react';
+import { createPortal } from 'react-dom';
 import { Loader2 } from 'lucide-react';
 import { useAutocomplete } from '../../hooks/useAutocomplete';
 import { useLocations } from '../../hooks/useLocations';
@@ -199,9 +200,77 @@ export function InlineEditableCell({
     );
   }
 
-  // ─── Edit mode ───────────────────────────────────────────────────────────
   return (
-    <div onClick={e => e.stopPropagation()} style={{ position: 'relative' }}>
+    <EditMode
+      inputRef={inputRef}
+      draft={draft}
+      setDraft={setDraft}
+      setShowSuggestions={setShowSuggestions}
+      showSuggestions={showSuggestions}
+      variant={variant}
+      commit={commit}
+      onKey={onKey}
+      placeholder={placeholder}
+      saving={saving}
+      error={error}
+      filtered={filtered}
+      loading={variant === 'autocomplete-db' ? ac.loading : locs.loading}
+      poolSize={suggestions.length}
+    />
+  );
+}
+
+/**
+ * Edit-mode renderer — the input lives in the table cell (so focus + layout
+ * line up), but the suggestion dropdown is portaled to document.body so it
+ * can't be clipped by td/tr/tbody overflow settings. Position is computed
+ * from the input's getBoundingClientRect and refreshed on scroll/resize.
+ */
+interface EditModeProps {
+  inputRef: React.RefObject<HTMLInputElement | null>;
+  draft: string;
+  setDraft: (v: string) => void;
+  setShowSuggestions: (v: boolean) => void;
+  showSuggestions: boolean;
+  variant: 'text' | 'autocomplete-db' | 'autocomplete-locations';
+  commit: (finalValue: string) => void;
+  onKey: (e: React.KeyboardEvent<HTMLInputElement>) => void;
+  placeholder?: string;
+  saving: boolean;
+  error: boolean;
+  filtered: string[];
+  loading: boolean;
+  poolSize: number;
+}
+
+function EditMode({
+  inputRef, draft, setDraft, setShowSuggestions, showSuggestions, variant,
+  commit, onKey, placeholder, saving, error, filtered, loading, poolSize,
+}: EditModeProps) {
+  const wrapperRef = useRef<HTMLDivElement | null>(null);
+  const [anchorRect, setAnchorRect] = useState<{ left: number; top: number; width: number } | null>(null);
+
+  // Recompute portal position on mount and whenever the page scrolls/resizes.
+  useEffect(() => {
+    const update = () => {
+      const el = inputRef.current;
+      if (!el) { setAnchorRect(null); return; }
+      const r = el.getBoundingClientRect();
+      setAnchorRect({ left: r.left, top: r.bottom + 2, width: r.width });
+    };
+    update();
+    window.addEventListener('scroll', update, true);
+    window.addEventListener('resize', update);
+    return () => {
+      window.removeEventListener('scroll', update, true);
+      window.removeEventListener('resize', update);
+    };
+  }, [inputRef]);
+
+  const showDropdown = variant !== 'text' && showSuggestions && anchorRect;
+
+  return (
+    <div ref={wrapperRef} onClick={e => e.stopPropagation()} style={{ position: 'relative' }}>
       <input
         ref={inputRef}
         value={draft}
@@ -219,61 +288,58 @@ export function InlineEditableCell({
           boxSizing: 'border-box',
         }}
       />
-      {variant !== 'text' && showSuggestions && (() => {
-        const loading = variant === 'autocomplete-db' ? ac.loading : locs.loading;
-        const poolSize = suggestions.length;
-        return (
-          <div
-            style={{
-              position: 'absolute', top: '100%', left: 0, right: 0,
-              marginTop: 2, zIndex: 100,
-              background: '#fff',
-              border: '1px solid rgba(0,0,0,0.08)',
-              borderRadius: 6,
-              boxShadow: '0 6px 20px rgba(0,0,0,0.12)',
-              maxHeight: 220, overflowY: 'auto',
-            }}
-          >
-            {filtered.map(s => (
-              <div
-                key={s}
-                onMouseDown={(e) => {
-                  // onMouseDown fires before input blur — safe to commit here.
-                  e.preventDefault();
-                  setDraft(s);
-                  commit(s);
-                }}
-                style={{
-                  padding: '6px 10px', fontSize: 12, cursor: 'pointer',
-                  color: '#1C1C1C',
-                }}
-                onMouseEnter={e => (e.currentTarget.style.background = '#F5F2EE')}
-                onMouseLeave={e => (e.currentTarget.style.background = '#fff')}
-              >
-                {s}
-              </div>
-            ))}
-            {filtered.length === 0 && loading && (
-              <div style={{ padding: '8px 10px', fontSize: 11, color: '#999', display: 'flex', alignItems: 'center', gap: 6 }}>
-                <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} />
-                Loading suggestions…
-              </div>
-            )}
-            {filtered.length === 0 && !loading && poolSize === 0 && (
-              <div style={{ padding: '8px 10px', fontSize: 11, color: '#999', fontStyle: 'italic' }}>
-                {variant === 'autocomplete-locations'
-                  ? 'No locations configured yet — type a new one'
-                  : 'No suggestions in this client\u2019s Autocomplete DB yet — type a new value'}
-              </div>
-            )}
-            {filtered.length === 0 && !loading && poolSize > 0 && draft && (
-              <div style={{ padding: '8px 10px', fontSize: 11, color: '#999', fontStyle: 'italic' }}>
-                No match — press Enter to save &ldquo;{draft}&rdquo;
-              </div>
-            )}
-          </div>
-        );
-      })()}
+      {showDropdown && createPortal(
+        <div
+          onMouseDown={e => e.preventDefault() /* keep input focused while interacting */}
+          style={{
+            position: 'fixed',
+            left: anchorRect!.left,
+            top: anchorRect!.top,
+            width: Math.max(anchorRect!.width, 180),
+            zIndex: 10000,
+            background: '#fff',
+            border: '1px solid rgba(0,0,0,0.08)',
+            borderRadius: 6,
+            boxShadow: '0 8px 28px rgba(0,0,0,0.18)',
+            maxHeight: 240, overflowY: 'auto',
+          }}
+        >
+          {filtered.map(s => (
+            <div
+              key={s}
+              onMouseDown={(e) => {
+                e.preventDefault();
+                setDraft(s);
+                commit(s);
+              }}
+              style={{ padding: '6px 10px', fontSize: 12, cursor: 'pointer', color: '#1C1C1C' }}
+              onMouseEnter={e => (e.currentTarget.style.background = '#F5F2EE')}
+              onMouseLeave={e => (e.currentTarget.style.background = '#fff')}
+            >
+              {s}
+            </div>
+          ))}
+          {filtered.length === 0 && loading && (
+            <div style={{ padding: '8px 10px', fontSize: 11, color: '#999', display: 'flex', alignItems: 'center', gap: 6 }}>
+              <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} />
+              Loading suggestions…
+            </div>
+          )}
+          {filtered.length === 0 && !loading && poolSize === 0 && (
+            <div style={{ padding: '8px 10px', fontSize: 11, color: '#999', fontStyle: 'italic' }}>
+              {variant === 'autocomplete-locations'
+                ? 'No locations configured yet — type a new one'
+                : 'No suggestions in this client\u2019s Autocomplete DB yet — type a new value'}
+            </div>
+          )}
+          {filtered.length === 0 && !loading && poolSize > 0 && draft && (
+            <div style={{ padding: '8px 10px', fontSize: 11, color: '#999', fontStyle: 'italic' }}>
+              No match — press Enter to save &ldquo;{draft}&rdquo;
+            </div>
+          )}
+        </div>,
+        document.body,
+      )}
     </div>
   );
 }
