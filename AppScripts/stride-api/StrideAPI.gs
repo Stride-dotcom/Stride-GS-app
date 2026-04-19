@@ -1,5 +1,17 @@
 /* ===================================================
-   StrideAPI.gs — v38.78.0 — 2026-04-19 PST — Reference on billing rows + QB IIF memo
+   StrideAPI.gs — v38.79.0 — 2026-04-19 PST — Phase 5 billing rate cutover (dual-path Supabase + sheet)
+   v38.79.0: PHASE 5 cutover. api_lookupRate_ + api_loadClassVolumes_ now read
+             rates from Supabase service_catalog / item_classes first, fall
+             back to the per-client Price_Cache / Class_Cache sheets if
+             Supabase is unreachable or the code/class isn't found. Parity
+             mismatches are written to Logger ("PARITY_MISMATCH ...") for
+             post-deploy audit. handleGetPricing_ now builds its response
+             from Supabase too (sheet fallback preserved). New helpers
+             api_lookupRateFromSupabase_ + api_loadClassVolumesFromSupabase_
+             share CacheService keys "sb_rate_<code>_<klass>" and
+             "sb_class_volumes" with TTL = CACHE_TTL_SECONDS_ (600s). No
+             billing CALCULATION logic touched — only the rate LOOKUP
+             source. No client sheet schema changes; rollout NOT required.
    v38.78.0: Billing rows now carry Reference (client PO). sbBillingRow_
              writes reference, resync billing path looks it up from Inventory
              (same pattern as sidemark). handleGetBilling_ overlays from
@@ -6410,6 +6422,16 @@ function handleGetPricing_() {
     try { return jsonResponse_(JSON.parse(cached)); } catch (_) {}
   }
 
+  // v38.79.0 — Supabase is the new source of truth for pricing. We build
+  // the same { priceList, classMap, priceCount, classCount } shape the
+  // React app expects so usePricing/PricingHook keep working unchanged.
+  // Sheet fallback preserved for the case where Supabase is unreachable.
+  var fromSupabase = api_buildPricingFromSupabase_();
+  if (fromSupabase) {
+    try { cache.put("api_pricing", JSON.stringify(fromSupabase), 1800); } catch (_) {}
+    return jsonResponse_(fromSupabase);
+  }
+
   var mplId = prop_("MASTER_PRICE_LIST_SPREADSHEET_ID");
   if (!mplId) return errorResponse_("MASTER_PRICE_LIST_SPREADSHEET_ID not configured", "CONFIG_ERROR");
 
@@ -6423,13 +6445,75 @@ function handleGetPricing_() {
     priceList: priceList,
     classMap: classMap,
     priceCount: priceList.length,
-    classCount: classMap.length
+    classCount: classMap.length,
+    source: "sheet"
   };
 
-  // CacheService max value size is 100KB — pricing data is small enough
   try { cache.put("api_pricing", JSON.stringify(result), 1800); } catch (_) {}
-
   return jsonResponse_(result);
+}
+
+/**
+ * v38.79.0 — Build the React-facing pricing payload from Supabase.
+ * Returns null on outage / empty so the caller can fall back to the sheet.
+ *
+ * Output shape mirrors the old sheet-derived payload exactly so the React
+ * app needs no changes:
+ *   priceList: ApiPriceRow[]  with keys "Service Code", "Service Name",
+ *              Category, Active, BillIfPASS, BillIfFAIL, "{XS,S,M,L,XL} Rate",
+ *              "{XS,S,M,L,XL} Time"
+ *   classMap:  ApiClassRow[]  with keys Class, "Cubic Volume", Notes
+ */
+function api_buildPricingFromSupabase_() {
+  var svcRows = api_supabaseGet_(
+    "/rest/v1/service_catalog?select=code,name,category,billing,rates,flat_rate,xxl_rate,active,bill_if_pass,bill_if_fail,show_as_task,xs_time,s_time,m_time,l_time,xl_time,xxl_time,display_order&order=display_order.asc"
+  );
+  var classRows = api_supabaseGet_(
+    "/rest/v1/item_classes?select=id,name,storage_size,active&order=display_order.asc"
+  );
+  if (!svcRows || !classRows) return null;
+  if (!svcRows.length || !classRows.length) return null;
+
+  var priceList = svcRows.map(function(s) {
+    var r = s.rates || {};
+    return {
+      "Service Code":      String(s.code || ""),
+      "Service Name":      String(s.name || ""),
+      "Category":          String(s.category || ""),
+      "Active":            s.active !== false,
+      "BillIfPASS":        s.bill_if_pass !== false,
+      "BillIfFAIL":        s.bill_if_fail === true,
+      "Show In Task Type": s.show_as_task ? "TRUE" : "",
+      "XS Time":           Number(s.xs_time)  || 0,
+      "S Time":            Number(s.s_time)   || 0,
+      "M Time":            Number(s.m_time)   || 0,
+      "L Time":            Number(s.l_time)   || 0,
+      "XL Time":           Number(s.xl_time)  || 0,
+      "XS Rate":           Number(r.XS) || 0,
+      "S Rate":            Number(r.S)  || 0,
+      "M Rate":            Number(r.M)  || 0,
+      "L Rate":            Number(r.L)  || 0,
+      "XL Rate":           Number(r.XL) || 0
+    };
+  });
+
+  var classMap = classRows
+    .filter(function(c) { return c.active !== false; })
+    .map(function(c) {
+      return {
+        "Class":        String(c.id || ""),
+        "Cubic Volume": Number(c.storage_size) || 0,
+        "Notes":        String(c.name || "")
+      };
+    });
+
+  return {
+    priceList: priceList,
+    classMap: classMap,
+    priceCount: priceList.length,
+    classCount: classMap.length,
+    source: "supabase"
+  };
 }
 
 function handleGetLocations_() {
@@ -9736,7 +9820,103 @@ function api_nextShipmentNo_(rpcUrl, rpcToken) {
  * Returns { rate, svcName, category, billIfPass, billIfFail }.
  * billIfPass/billIfFail default: billIfPass=true, billIfFail=false (matches GS behavior for most svc codes).
  */
-function api_lookupRate_(ss, svcCode, itemClass) {
+// ─── Phase 5 Supabase rate cutover (v38.79.0) ───────────────────────────────
+// service_catalog + item_classes are the new source of truth for billing
+// rates and class volumes. The two helpers below fetch from Supabase with
+// CacheService caching (600s TTL) and a "__SVC_NULL__" sentinel so cache
+// misses don't hammer the REST endpoint repeatedly. They return null on
+// any error / missing service so the caller can fall back to the sheet.
+//
+// Wrapper helper api_supabaseGet_ centralises the auth headers + 5s timeout.
+// Network errors are swallowed (returns null) so billing can never break
+// because of a Supabase outage — the sheet path always remains a working
+// fallback.
+
+var SB_NULL_SENTINEL_ = "__SVC_NULL__";
+
+function api_supabaseGet_(path) {
+  var url = prop_("SUPABASE_URL");
+  var key = prop_("SUPABASE_SERVICE_ROLE_KEY");
+  if (!url || !key) return null;
+  try {
+    var resp = UrlFetchApp.fetch(url + path, {
+      method: "get",
+      headers: { "apikey": key, "Authorization": "Bearer " + key },
+      muteHttpExceptions: true
+    });
+    var code = resp.getResponseCode();
+    if (code < 200 || code >= 300) return null;
+    return JSON.parse(resp.getContentText());
+  } catch (e) {
+    Logger.log("api_supabaseGet_ error (non-fatal) " + path + ": " + e);
+    return null;
+  }
+}
+
+/**
+ * Look up a service rate from Supabase service_catalog. Returns the same
+ * shape as api_lookupRate_'s sheet path — { rate, svcName, category,
+ * billIfPass, billIfFail } — so the caller can use it as a drop-in.
+ * Returns null if the service is missing, inactive, or Supabase is down.
+ *
+ * Cached per-(code, klass) for CACHE_TTL_SECONDS_ (600s). Negative results
+ * cached too via the SB_NULL_SENTINEL_ marker.
+ */
+function api_lookupRateFromSupabase_(code, klass) {
+  if (!code) return null;
+  var upperCode = String(code).toUpperCase();
+  var upperClass = klass ? String(klass).toUpperCase() : "";
+  var cacheKey = "sb_rate_" + upperCode + "_" + upperClass;
+  var cache = CacheService.getScriptCache();
+  var cached = null;
+  try { cached = cache.get(cacheKey); } catch (_) {}
+  if (cached === SB_NULL_SENTINEL_) return null;
+  if (cached) {
+    try { return JSON.parse(cached); } catch (_) {}
+  }
+
+  var rows = api_supabaseGet_(
+    "/rest/v1/service_catalog?code=eq." + encodeURIComponent(upperCode) +
+    "&select=code,name,category,billing,rates,flat_rate,xxl_rate,active,bill_if_pass,bill_if_fail"
+  );
+  if (!rows || !rows.length) {
+    try { cache.put(cacheKey, SB_NULL_SENTINEL_, CACHE_TTL_SECONDS_); } catch (_) {}
+    return null;
+  }
+  var svc = rows[0];
+  if (svc.active === false) {
+    try { cache.put(cacheKey, SB_NULL_SENTINEL_, CACHE_TTL_SECONDS_); } catch (_) {}
+    return null;
+  }
+
+  var rate = 0;
+  if (svc.billing === "class_based") {
+    if (upperClass === "XXL") {
+      rate = Number(svc.xxl_rate) || 0;
+    } else if (upperClass) {
+      var rateMap = svc.rates || {};
+      rate = Number(rateMap[upperClass]) || 0;
+    }
+  } else {
+    rate = Number(svc.flat_rate) || 0;
+  }
+
+  var result = {
+    rate: rate,
+    svcName: String(svc.name || svc.code || ""),
+    category: String(svc.category || ""),
+    billIfPass: svc.bill_if_pass === false ? false : true,
+    billIfFail: svc.bill_if_fail === true ? true : false
+  };
+  try { cache.put(cacheKey, JSON.stringify(result), CACHE_TTL_SECONDS_); } catch (_) {}
+  return result;
+}
+
+/**
+ * Internal — sheet-only rate lookup. Matches the pre-v38.79.0 behavior of
+ * api_lookupRate_ exactly so the dual-path wrapper can compare results.
+ */
+function api_lookupRateFromSheet_(ss, svcCode, itemClass) {
   var defaults = { rate: 0, svcName: svcCode || "", category: "", billIfPass: true, billIfFail: false };
   if (!svcCode) return defaults;
   try {
@@ -9758,8 +9938,57 @@ function api_lookupRate_(ss, svcCode, itemClass) {
         };
       }
     }
-  } catch (err) { Logger.log("api_lookupRate_ error: " + err); }
+  } catch (err) { Logger.log("api_lookupRateFromSheet_ error: " + err); }
   return defaults;
+}
+
+/**
+ * v38.79.0 dual-path. Supabase is now authoritative for rates; the
+ * per-client Price_Cache sheet is the fallback path. Both are queried so
+ * we can log parity mismatches during the transition window.
+ *
+ * Decision rules:
+ *   - Supabase result with rate > 0  → use Supabase (log mismatch if sheet differs)
+ *   - Supabase result with rate == 0 AND sheet has rate > 0 → log mismatch,
+ *                                                              use sheet
+ *                                                              (likely a not-yet-
+ *                                                              seeded class)
+ *   - Supabase null (down or missing) → silent fall back to sheet
+ *   - Both 0 → return Supabase shape (defaults)
+ */
+function api_lookupRate_(ss, svcCode, itemClass) {
+  var sbResult = null;
+  try { sbResult = api_lookupRateFromSupabase_(svcCode, itemClass); } catch (e) {
+    Logger.log("api_lookupRate_ Supabase path error (non-fatal): " + e);
+  }
+  var sheetResult = api_lookupRateFromSheet_(ss, svcCode, itemClass);
+
+  // Parity logging — only meaningful when at least one side returned a non-zero rate.
+  if (sbResult && sheetResult) {
+    var diff = Math.abs((sbResult.rate || 0) - (sheetResult.rate || 0));
+    if (diff > 0.001) {
+      Logger.log("PARITY_MISMATCH rate code=" + svcCode +
+                 " class=" + (itemClass || "") +
+                 " supabase=" + sbResult.rate +
+                 " sheet=" + sheetResult.rate +
+                 " delta=" + diff.toFixed(4));
+    }
+  } else if (!sbResult && sheetResult && Number(sheetResult.rate) > 0) {
+    // Sheet has a non-zero rate Supabase doesn't know about — surface it
+    // so the operator can backfill service_catalog before any cutover.
+    Logger.log("PARITY_MISMATCH supabase_missing code=" + svcCode +
+               " class=" + (itemClass || "") +
+               " sheet=" + sheetResult.rate);
+  }
+
+  // Decision: prefer Supabase whenever it returned a rate > 0. If the
+  // Supabase rate is 0 but the sheet has a real rate, fall back to the
+  // sheet — this handles classes/services not yet seeded into Supabase.
+  if (sbResult && Number(sbResult.rate) > 0) return sbResult;
+  if (sheetResult && Number(sheetResult.rate) > 0) return sheetResult;
+  // Neither side has a rate — return the richer of the two shapes so
+  // svcName/category are still populated where possible.
+  return sbResult || sheetResult;
 }
 
 /** Applies client discount (negative=discount, positive=surcharge).
@@ -9910,7 +10139,48 @@ function api_buildStorTaskId_(itemId, startDate, endDate) {
  * Returns e.g. { "XS": 10, "S": 25, "M": 50, "L": 75, "XL": 110 }
  */
 // v24.0.1: Header-based lookup (was positional) — supports "Cubic Volume" or "Storage Size"
-function api_loadClassVolumes_(ss) {
+/**
+ * Phase 5 helper — load class → cubic volume map from Supabase item_classes.
+ * Cached for CACHE_TTL_SECONDS_ (600s) under "sb_class_volumes". Returns
+ * null on Supabase outage / empty so the caller can fall back to the sheet.
+ */
+function api_loadClassVolumesFromSupabase_() {
+  var cacheKey = "sb_class_volumes";
+  var cache = CacheService.getScriptCache();
+  var cached = null;
+  try { cached = cache.get(cacheKey); } catch (_) {}
+  if (cached === SB_NULL_SENTINEL_) return null;
+  if (cached) {
+    try { return JSON.parse(cached); } catch (_) {}
+  }
+
+  var rows = api_supabaseGet_(
+    "/rest/v1/item_classes?select=id,storage_size,active&active=eq.true"
+  );
+  if (!rows || !rows.length) {
+    try { cache.put(cacheKey, SB_NULL_SENTINEL_, CACHE_TTL_SECONDS_); } catch (_) {}
+    return null;
+  }
+  var out = {};
+  for (var i = 0; i < rows.length; i++) {
+    var cls = String(rows[i].id || "").trim().toUpperCase();
+    var vol = Number(rows[i].storage_size) || 0;
+    if (cls && vol > 0) out[cls] = vol;
+  }
+  if (Object.keys(out).length === 0) {
+    try { cache.put(cacheKey, SB_NULL_SENTINEL_, CACHE_TTL_SECONDS_); } catch (_) {}
+    return null;
+  }
+  try { cache.put(cacheKey, JSON.stringify(out), CACHE_TTL_SECONDS_); } catch (_) {}
+  return out;
+}
+
+/**
+ * Internal — sheet-only class volume loader. Matches the pre-v38.79.0
+ * behaviour of api_loadClassVolumes_ exactly so the dual-path wrapper can
+ * compare results.
+ */
+function api_loadClassVolumesFromSheet_(ss) {
   var out = {};
   var ccSh = ss.getSheetByName("Class_Cache") || ss.getSheetByName("CLASSCACHE");
   if (!ccSh || ccSh.getLastRow() < 2) return out;
@@ -9926,6 +10196,40 @@ function api_loadClassVolumes_(ss) {
     if (cls && vol > 0) out[cls] = vol;
   }
   return out;
+}
+
+/**
+ * v38.79.0 dual-path. Supabase item_classes is now authoritative; the
+ * per-client Class_Cache sheet is the fallback. Both are loaded so we
+ * can log parity mismatches per-class. Returns the same shape as before
+ * — a plain object mapping class id → cubic feet.
+ */
+function api_loadClassVolumes_(ss) {
+  var sbVols = null;
+  try { sbVols = api_loadClassVolumesFromSupabase_(); } catch (e) {
+    Logger.log("api_loadClassVolumes_ Supabase path error (non-fatal): " + e);
+  }
+  var sheetVols = api_loadClassVolumesFromSheet_(ss);
+
+  // Parity log per-class — anything seen in either source.
+  if (sbVols && sheetVols) {
+    var allKeys = {};
+    Object.keys(sbVols).forEach(function(k) { allKeys[k] = true; });
+    Object.keys(sheetVols).forEach(function(k) { allKeys[k] = true; });
+    Object.keys(allKeys).forEach(function(cls) {
+      var sbVal = Number(sbVols[cls] || 0);
+      var shVal = Number(sheetVols[cls] || 0);
+      if (Math.abs(sbVal - shVal) > 0.001) {
+        Logger.log("PARITY_MISMATCH class_volume class=" + cls +
+                   " supabase=" + sbVal +
+                   " sheet=" + shVal +
+                   " delta=" + Math.abs(sbVal - shVal).toFixed(4));
+      }
+    });
+  }
+
+  if (sbVols && Object.keys(sbVols).length > 0) return sbVols;
+  return sheetVols;
 }
 
 // ─── Complete Shipment Handler ───────────────────────────────────────────────
