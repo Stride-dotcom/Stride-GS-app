@@ -27,6 +27,7 @@ const ShipmentJobPage = React.lazy(() => import('./pages/ShipmentJobPage').then(
 const DetailPanelMockup = React.lazy(() => import('./pages/DetailPanelMockup').then(m => ({ default: m.DetailPanelMockup })));
 import { Orders } from './pages/Orders';
 import { QuoteTool } from './pages/QuoteTool';
+import { PriceList } from './pages/PriceList';
 
 /** Route guard — redirects to dashboard if user's role is not in the allowed list */
 function RoleGuard({ allowed, children }: { allowed: AuthUser['role'][]; children: React.ReactNode }) {
@@ -78,6 +79,7 @@ export default function App() {
           <Route path="/payments" element={<RoleGuard allowed={['admin']}><Payments /></RoleGuard>} />
           <Route path="/marketing" element={<RoleGuard allowed={['admin']}><Marketing /></RoleGuard>} />
           <Route path="/quotes" element={<RoleGuard allowed={['admin']}><QuoteTool /></RoleGuard>} />
+          <Route path="/price-list" element={<RoleGuard allowed={['admin']}><PriceList /></RoleGuard>} />
           <Route path="/settings" element={<RoleGuard allowed={['admin']}><Settings /></RoleGuard>} />
           {/* Session 70 follow-up — admin-only DetailHeader mockup for reviewing the proposed
               unified layout across all 7 detail panel types before mass adoption. */}

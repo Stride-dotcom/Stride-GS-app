@@ -21,6 +21,7 @@ import {
   Mail,
   Calendar,
   Receipt,
+  BookOpen,
 } from 'lucide-react';
 import { theme } from '../../styles/theme';
 import { cacheClearAll } from '../../lib/apiCache';
@@ -41,6 +42,7 @@ const ADMIN_NAV = [
   { id: 'payments', label: 'Payments', path: '/payments', icon: CreditCard },
   { id: 'orders', label: 'Delivery', path: '/orders', icon: Calendar },
   { id: 'quotes', label: 'Quotes', path: '/quotes', icon: Receipt },
+  { id: 'pricelist', label: 'Price List', path: '/price-list', icon: BookOpen },
   { id: 'marketing', label: 'Marketing', path: '/marketing', icon: Mail },
   { id: 'scanner', label: 'QR Scanner', path: '/scanner', icon: ScanLine },
   { id: 'labels', label: 'Labels', path: '/labels', icon: Tag },
