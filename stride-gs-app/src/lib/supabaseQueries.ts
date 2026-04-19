@@ -65,6 +65,10 @@ export function setSupabaseImpersonating(active: boolean): void {
   _impersonating = active;
 }
 
+// Session 72 dedup: N concurrent consumers race on cold load — without
+// dedup we saw 4x identical HEAD probes in the Network tab.
+let _availabilityInflight: Promise<boolean> | null = null;
+
 export async function isSupabaseCacheAvailable(): Promise<boolean> {
   if (_impersonating) return false;
   if (_skipNextSupabase) {
@@ -72,16 +76,24 @@ export async function isSupabaseCacheAvailable(): Promise<boolean> {
     return false;
   }
   if (_cacheAvailable !== null) return _cacheAvailable;
+  if (_availabilityInflight) return _availabilityInflight;
+  _availabilityInflight = (async () => {
+    try {
+      const { count, error } = await supabase
+        .from('inventory')
+        .select('id', { count: 'exact', head: true })
+        .limit(1);
+      _cacheAvailable = !error && (count ?? 0) > 0;
+    } catch {
+      _cacheAvailable = false;
+    }
+    return _cacheAvailable;
+  })();
   try {
-    const { count, error } = await supabase
-      .from('inventory')
-      .select('id', { count: 'exact', head: true })
-      .limit(1);
-    _cacheAvailable = !error && (count ?? 0) > 0;
-  } catch {
-    _cacheAvailable = false;
+    return await _availabilityInflight;
+  } finally {
+    _availabilityInflight = null;
   }
-  return _cacheAvailable;
 }
 
 /** Reset the cache availability check (call after bulk sync) */
@@ -156,28 +168,50 @@ interface SupabaseInventoryRow {
   transfer_date: string | null;
 }
 
+// Session 72 — shared raw inventory rows fetcher with scope-keyed dedup.
+// Used by both fetchInventoryFromSupabase (useInventory) and _fetchInvFieldMap
+// (the overlay called from tasks/repairs/will_calls). Previously each did its
+// own full pagination, doubling network traffic for the same data.
+const _inventoryRowsInflight = new Map<string, Promise<SupabaseInventoryRow[] | null>>();
+
+function _inventoryScopeKey(clientSheetId?: string | string[]): string {
+  if (!clientSheetId) return '__all__';
+  if (Array.isArray(clientSheetId)) return clientSheetId.slice().sort().join(',');
+  return clientSheetId;
+}
+
+export async function fetchRawInventoryRows(clientSheetId?: string | string[]): Promise<SupabaseInventoryRow[] | null> {
+  const key = _inventoryScopeKey(clientSheetId);
+  const existing = _inventoryRowsInflight.get(key);
+  if (existing) return existing;
+  // v38.65.0 — paginate instead of a single `.range(0, 49999)`. The previous
+  // approach hit the Supabase project `max_rows` cap (1000) which silently
+  // truncated the result, causing "Select All → only N-S clients showing"
+  // because the first 1000 rows (by tenant_id hash order) covered only a
+  // subset of tenants. Inventory currently has ~4.8k rows across 47 tenants;
+  // pagination iterates in 1000-row chunks until the server returns <1000.
+  const p = paginateAll<SupabaseInventoryRow>(() => {
+    let query = supabase.from('inventory').select('*');
+    if (clientSheetId) {
+      if (Array.isArray(clientSheetId)) {
+        if (clientSheetId.length > 0) query = query.in('tenant_id', clientSheetId);
+      } else {
+        query = query.eq('tenant_id', clientSheetId);
+      }
+    }
+    return query as unknown as { range: (from: number, to: number) => Promise<{ data: SupabaseInventoryRow[] | null; error: unknown }> };
+  });
+  _inventoryRowsInflight.set(key, p);
+  p.finally(() => { if (_inventoryRowsInflight.get(key) === p) _inventoryRowsInflight.delete(key); });
+  return p;
+}
+
 export async function fetchInventoryFromSupabase(
   clientNameMap: ClientNameMap,
   clientSheetId?: string | string[]
 ): Promise<InventoryResponse | null> {
   try {
-    // v38.65.0 — paginate instead of a single `.range(0, 49999)`. The previous
-    // approach hit the Supabase project `max_rows` cap (1000) which silently
-    // truncated the result, causing "Select All → only N-S clients showing"
-    // because the first 1000 rows (by tenant_id hash order) covered only a
-    // subset of tenants. Inventory currently has ~4.8k rows across 47 tenants;
-    // pagination iterates in 1000-row chunks until the server returns <1000.
-    const data = await paginateAll<SupabaseInventoryRow>(() => {
-      let query = supabase.from('inventory').select('*');
-      if (clientSheetId) {
-        if (Array.isArray(clientSheetId)) {
-          if (clientSheetId.length > 0) query = query.in('tenant_id', clientSheetId);
-        } else {
-          query = query.eq('tenant_id', clientSheetId);
-        }
-      }
-      return query as unknown as { range: (from: number, to: number) => Promise<{ data: SupabaseInventoryRow[] | null; error: unknown }> };
-    });
+    const data = await fetchRawInventoryRows(clientSheetId);
     if (!data) return null;
 
     const items: ApiInventoryItem[] = data.map(row => ({
@@ -266,18 +300,10 @@ interface InvFieldMapEntry {
 async function _fetchInvFieldMap(clientSheetId?: string | string[]): Promise<Record<string, InvFieldMapEntry>> {
   const map: Record<string, InvFieldMapEntry> = {};
   try {
-    // Session 71: use paginateAll to avoid 1000-row cap (same fix as fetchInventoryFromSupabase)
-    const data = await paginateAll<SupabaseInventoryRow>(() => {
-      let q = supabase.from('inventory').select('*');
-      if (clientSheetId) {
-        if (Array.isArray(clientSheetId)) {
-          if (clientSheetId.length > 0) q = q.in('tenant_id', clientSheetId);
-        } else {
-          q = q.eq('tenant_id', clientSheetId);
-        }
-      }
-      return q as unknown as { range: (from: number, to: number) => Promise<{ data: SupabaseInventoryRow[] | null; error: unknown }> };
-    });
+    // Session 72: share raw rows fetch with fetchInventoryFromSupabase.
+    // Previously each did its own paginateAll, producing 2× pagination on
+    // pages that touch both (Dashboard, Inventory+tasks overlay, etc.).
+    const data = await fetchRawInventoryRows(clientSheetId);
     if (data) {
       for (const row of data as SupabaseInventoryRow[]) {
         if (row.item_id) {

@@ -28,7 +28,11 @@ type DashTab = 'tasks' | 'repairs' | 'willcalls';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
-const POLL_INTERVAL_MS = 10_000;
+// Session 72: trust Supabase Realtime for live data. See useSupabaseRealtime —
+// INSERT/UPDATE on tasks/repairs/will_calls/inventory all push via entityEvents
+// within ~500ms-1s. This fallback poll only fires every 5 minutes as insurance
+// against silent WebSocket disconnects.
+const POLL_INTERVAL_MS = 5 * 60 * 1000;
 
 const DEFAULT_TASK_STATUSES = ['Open', 'In Progress'];
 const DEFAULT_REPAIR_STATUSES = ['Pending Quote', 'Quote Sent', 'Approved', 'In Progress'];

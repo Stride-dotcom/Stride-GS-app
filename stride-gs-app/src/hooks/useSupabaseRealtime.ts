@@ -86,7 +86,15 @@ export function useSupabaseRealtime() {
       // dt_orders (Phase 2) — DispatchTrack orders surfaced in Orders tab
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'dt_orders' }, onRow('order', 'order_id'))
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'dt_orders' }, onRow('order', 'order_id'))
-      .subscribe();
+      // Session 72: log connection state so we can verify Realtime stays live
+      // (Dashboard trusts this channel and only polls every 5 min as fallback).
+      .subscribe((status, err) => {
+        if (status === 'SUBSCRIBED') {
+          console.log('[Realtime] ✓ connected — live updates active');
+        } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
+          console.warn('[Realtime] connection issue:', status, err || '');
+        }
+      });
 
     return () => {
       subscribedRef.current = false;

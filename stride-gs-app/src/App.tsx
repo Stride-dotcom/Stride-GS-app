@@ -28,6 +28,7 @@ const DetailPanelMockup = React.lazy(() => import('./pages/DetailPanelMockup').t
 import { Orders } from './pages/Orders';
 import { QuoteTool } from './pages/QuoteTool';
 import { PriceList } from './pages/PriceList';
+import { PublicRates } from './pages/PublicRates';
 
 /** Route guard — redirects to dashboard if user's role is not in the allowed list */
 function RoleGuard({ allowed, children }: { allowed: AuthUser['role'][]; children: React.ReactNode }) {
@@ -38,6 +39,12 @@ function RoleGuard({ allowed, children }: { allowed: AuthUser['role'][]; childre
 
 export default function App() {
   const { user, loading, accessDenied, deniedReason, passwordRecoveryMode, recoveryExpired } = useAuth();
+
+  // Public routes — render without auth. Check hash before any auth gate.
+  const ratesMatch = typeof window !== 'undefined'
+    ? window.location.hash.match(/^#\/rates\/([A-Za-z0-9_-]+)/)
+    : null;
+  if (ratesMatch) return <PublicRates shareId={ratesMatch[1]} />;
 
   // Auth check in progress
   if (loading) return <LoadingScreen />;

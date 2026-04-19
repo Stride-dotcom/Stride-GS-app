@@ -1,6 +1,6 @@
 # Stride GS App — Build Status & Continuation Guide
 
-**Last updated:** 2026-04-18 (session 72 — Expected calendar, calendar deep-links + edit/delete, admin-set-password, missing-auth-user detection, Realtime sync Phase 1a + Phase 2 complete [GAS mirror fan-out gaps + React channels for claims/move_history/dt_orders], worktree `.env` gotcha. StrideAPI v38.72.0 / Web App v322)
+**Last updated:** 2026-04-18 (session 73 — Price List page Phase 1: `service_catalog` + `service_catalog_audit` Supabase tables, 31 seed services from Quote Tool defaults, split-panel UI with category/feature filters, search, CRUD edit panel, add modal, audit trail. Bundle `index-CBzAZFuG.js` / 1,976 modules. Migrations pending manual apply.)
 **StrideAPI.gs:** v38.72.0 (Web App v322)
 **Import.gs (client):** v4.3.0 (rolled out to all 49 active clients; Reference column now imported)
 **Emails.gs (client):** v4.6.0 (rolled out to all 49 active clients — Room column dropped, Reference takes its place)
@@ -72,6 +72,37 @@ Login, Dashboard, Inventory, Receiving, Shipments, Tasks, Repairs, Will Calls, B
 
 ### React Hooks
 `useClients`, `usePricing`, `useLocations`, `useInventory`, `useTasks`, `useRepairs`, `useWillCalls`, `useShipments`, `useBilling` (accepts BillingFilterParams for report builder), `useClaims`, `useUsers`, `useOrders` (Supabase-only, DT integration), `useFailedOperations`, `useTablePreferences` (reconciles new columns into saved order), `useResizablePanel`, `useSidebarOrder`, `useIsMobile`, `useBatchData`.
+
+---
+
+## RECENT CHANGES (2026-04-18 session 73 — Price List Phase 1)
+
+### Price List page — unified service catalog
+
+New `/price-list` route (admin-only). Split-panel layout backed by Supabase `service_catalog` table.
+
+**Files created:**
+- `stride-gs-app/supabase/migrations/20260418020000_service_catalog.sql` — schema + RLS (`service_catalog` + `service_catalog_audit`)
+- `stride-gs-app/supabase/migrations/20260418020001_service_catalog_seed.sql` — 31 services from Quote Tool defaults
+- `src/hooks/useServiceCatalog.ts` — Supabase CRUD + per-field audit row insertion on update
+- `src/components/pricelist/ServiceCard.tsx` — code pill, rates display, behavior tags, active toggle
+- `src/components/pricelist/ServiceEditPanel.tsx` — right slide-out drawer, all 16 fields, save/2-step-delete
+- `src/components/pricelist/AddServiceModal.tsx` — create modal with all fields
+- `src/pages/PriceList.tsx` — left sidebar (categories + feature filters with counts), search, service list
+
+**Wired into:**
+- `App.tsx` — `/price-list` route with `RoleGuard ['admin']`
+- `Sidebar.tsx` — "Price List" nav item with `BookOpen` icon in `ADMIN_NAV`
+
+**Seed: 31 services** — RCVG, INSP (SLA 48h), PICK, RSTK (has_dedicated_page), STOR, SSTOR, 60MA, 1HRO, CLMT, LABOR, WRAP, STCK, DISP, LABEL, PLLT, CRATE, BLNK, WGLV, PHOTO, MNRTU, REPAIR, FMED, SIT, RUSH, AFHR, APPT, STRS, LCRY, DBRS, INSR, WC (has_dedicated_page)
+
+**⚠️ MIGRATIONS NOT YET APPLIED** — tables don't exist yet. The Price List page will show a "Failed to load" error until applied. Apply via Supabase dashboard SQL editor (paste both migration files) or via:
+```bash
+gh workflow run migrate.yml -f migration_file=stride-gs-app/supabase/migrations/20260418020000_service_catalog.sql -f confirm=true
+```
+Then re-run for `20260418020001_service_catalog_seed.sql`.
+
+**Deploy log:** dist bundle `index-CBzAZFuG.js` (1.6 MB, 1,976 modules). Source branch `claude/beautiful-mclaren-e0a899` pushed to origin. Parent source branch is mid-rebase — needs merge to `origin/source` to complete deploy chain.
 
 ---
 

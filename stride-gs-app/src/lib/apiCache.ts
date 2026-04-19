@@ -18,6 +18,29 @@ interface CacheEntry<T = unknown> {
 
 const store = new Map<string, CacheEntry>();
 
+// ─── Request-level dedup (session 72 fix) ────────────────────────────────────
+// When N consumers mount simultaneously and find an empty cache, each one
+// fires its own network request. This map short-circuits that: the first
+// consumer registers its fetch promise here; subsequent consumers with the
+// same key await the SAME promise instead of making duplicate requests.
+// Cleared automatically when the promise settles.
+const inflightMap = new Map<string, Promise<unknown>>();
+
+export function inflightGet<T = unknown>(key: string): Promise<T> | null {
+  if (!key) return null;
+  return (inflightMap.get(key) as Promise<T> | undefined) ?? null;
+}
+
+export function inflightSet<T>(key: string, p: Promise<T>): Promise<T> {
+  if (!key) return p;
+  inflightMap.set(key, p as Promise<unknown>);
+  const clear = () => {
+    if (inflightMap.get(key) === p) inflightMap.delete(key);
+  };
+  p.then(clear, clear);
+  return p;
+}
+
 // v62 — per-key subscribers. When a cacheSet happens for a key, every
 // useApiData instance that mounted with that key gets notified so they can
 // pull the new value. Fixes the AppLayout-vs-Page race where useClients

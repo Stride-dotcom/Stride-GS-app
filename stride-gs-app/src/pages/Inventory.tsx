@@ -859,7 +859,11 @@ export function Inventory() {
   const [filterAnchorRect, setFilterAnchorRect] = useState<DOMRect | null>(null);
   const [showColToggle, setShowColToggle] = useState(false);
   const [colToggleRect, setColToggleRect] = useState<DOMRect | null>(null);
-  const [hoveredRowId, setHoveredRowId] = useState<string | null>(null);
+  // Session 72: hoveredRowId state REMOVED. Row-hover action-button visibility
+  // is handled by pure CSS (.inv-row:hover .inv-row-actions { opacity: 1 }) so
+  // moving the cursor over rows doesn't trigger React state updates, columns
+  // useMemo rebuild, or TanStack cell re-render (which was causing per-cell
+  // hook re-runs and residual network activity).
   const [toast, setToast] = useState<string | null>(null);
   const [batchGuardClients, setBatchGuardClients] = useState<string[] | null>(null);
   const [batchGuardAction, setBatchGuardAction] = useState('');
@@ -1208,9 +1212,9 @@ export function Inventory() {
       enableResizing: false, enableSorting: false,
       header: () => null,
       cell: ({ row }) => (
-        <div style={{
+        <div className="inv-row-actions" style={{
           display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 2,
-          opacity: hoveredRowId === row.id ? 1 : 0,
+          opacity: 0,
           transition: 'opacity 0.1s',
         }}>
           {[
@@ -1246,7 +1250,8 @@ export function Inventory() {
         </div>
       ),
     }),
-  ], [hoveredRowId, showToast, inspItems, asmItems, repairItems, applyItemPatch, mergeItemPatch, canEditInventory]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  ], [showToast, inspItems, asmItems, repairItems, applyItemPatch, mergeItemPatch, canEditInventory]);
 
   // When navigating from Shipments page, filter table to that shipment
   const tableData = useMemo(() => {
@@ -1285,6 +1290,13 @@ export function Inventory() {
   }, [persistedStatusFilter, table]);
 
   const { containerRef, virtualRows, rows: allVirtualRows, totalHeight } = useVirtualRows(table);
+
+  // Session 72: row-display selector. Replaces the flaky drag-to-resize.
+  // 'default' = viewport-fit (~10 rows). 'all' = render all rows unvirtualized
+  // and let the whole PAGE scroll (sticky headers keep column labels frozen).
+  // Fixed numbers (50/100) set an explicit container height.
+  type RowDisplay = 'default' | 50 | 100 | 'all';
+  const [rowDisplay, setRowDisplay] = useState<RowDisplay>('default');
 
   // Derived
   const selectedRows = table.getSelectedRowModel().rows;
@@ -1451,8 +1463,12 @@ export function Inventory() {
   return (
     <div style={{ fontFamily: theme.typography.fontFamily, display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, background: '#F5F2EE', margin: '-28px -32px', padding: '28px 32px' }}>
 
-      {/* Print styles */}
+      {/* Print + hover styles */}
       <style>{`
+        /* Session 72: row-hover actions via pure CSS — no React state,
+           no useMemo rebuild, no per-hover cell re-renders. */
+        .inv-row:hover .inv-row-actions { opacity: 1 !important; }
+
         @media print {
           aside, .no-print, [data-no-print] { display: none !important; }
           body { margin: 0; padding: 0; }
@@ -1724,10 +1740,40 @@ export function Inventory() {
         })}
 
         {!isMobile && (
-          <div style={{ marginLeft: 'auto', fontSize: theme.typography.sizes.sm, color: theme.colors.textMuted }}>
-            Showing <strong style={{ color: theme.colors.textPrimary }}>{pageRows.length}</strong> of{' '}
-            <strong style={{ color: theme.colors.textPrimary }}>{filteredCount}</strong> items
-            {filteredCount !== totalCount && <span> (filtered from {totalCount})</span>}
+          <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 14, fontSize: theme.typography.sizes.sm, color: theme.colors.textMuted }}>
+            {/* Row-display selector — controls how many rows are visible at once */}
+            <div className="no-print" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={{ fontSize: 11, fontWeight: 600, letterSpacing: '1px', textTransform: 'uppercase', color: theme.colors.textMuted }}>Show</span>
+              {([
+                { key: 'default' as RowDisplay, label: '10' },
+                { key: 50 as RowDisplay, label: '50' },
+                { key: 100 as RowDisplay, label: '100' },
+                { key: 'all' as RowDisplay, label: 'All' },
+              ]).map(opt => {
+                const active = rowDisplay === opt.key;
+                return (
+                  <button
+                    key={String(opt.key)}
+                    onClick={() => setRowDisplay(opt.key)}
+                    style={{
+                      padding: '4px 10px', borderRadius: 100,
+                      border: active ? 'none' : '1px solid rgba(0,0,0,0.08)',
+                      background: active ? '#1C1C1C' : '#fff',
+                      color: active ? '#fff' : '#666',
+                      fontSize: 11, fontWeight: 600, letterSpacing: '0.5px',
+                      cursor: 'pointer', transition: 'all 0.15s', fontFamily: 'inherit',
+                    }}
+                  >
+                    {opt.label}
+                  </button>
+                );
+              })}
+            </div>
+            <div>
+              Showing <strong style={{ color: theme.colors.textPrimary }}>{pageRows.length}</strong> of{' '}
+              <strong style={{ color: theme.colors.textPrimary }}>{filteredCount}</strong> items
+              {filteredCount !== totalCount && <span> (filtered from {totalCount})</span>}
+            </div>
           </div>
         )}
       </div>
@@ -1737,10 +1783,28 @@ export function Inventory() {
 
       {/* ── Table wrapper ── */}
       <div ref={containerRef} style={{
-        flex: 1, minHeight: isMobile ? 200 : 0,
+        // Session 72 row-display modes — ALL use internal container scroll
+        // with sticky thead for consistent Google-Sheets-style frozen
+        // headers. Page-scroll approach was abandoned because asymmetric
+        // overflow (x:visible + y:visible) broke sticky anchoring AND let
+        // the 1941px-wide table bleed past page margins.
+        //  • printing: full expand, no scroll (browser paginates).
+        //  • 'all' (desktop): container fills near-full viewport, internal
+        //    scroll, all rows rendered unvirtualized (Ctrl+F works).
+        //  • 50 / 100: container height = N*40 + 60, capped at viewport.
+        //  • default: flex:1 + viewport-fit (~10 rows).
+        ...(isPrinting
+          ? { flex: 1 }
+          : !isMobile && rowDisplay === 'all'
+          ? { flex: '0 0 auto', height: 'calc(100dvh - 180px)', maxHeight: 'calc(100dvh - 180px)' }
+          : !isMobile && typeof rowDisplay === 'number'
+          ? { flex: '0 0 auto',
+              height: `min(${rowDisplay * 40 + 60}px, calc(100dvh - 180px))`,
+              maxHeight: `min(${rowDisplay * 40 + 60}px, calc(100dvh - 180px))` }
+          : { flex: 1, minHeight: isMobile ? 200 : 0,
+              maxHeight: isMobile ? 'calc(100dvh - 180px)' : 'calc(100dvh - 280px)' }),
         overflowX: isPrinting ? 'visible' : 'auto',
         overflowY: isPrinting ? 'visible' : 'auto',
-        maxHeight: isPrinting ? 'none' : isMobile ? 'calc(100dvh - 180px)' : 'calc(100dvh - 280px)',
         border: `1px solid ${theme.colors.borderDefault}`,
         borderRadius: isMobile ? theme.radii.md : theme.radii.lg,
         background: theme.colors.bgBase,
@@ -1761,9 +1825,13 @@ export function Inventory() {
           </colgroup>
 
           {/* ── Header ── */}
-          <thead style={{ position: 'sticky', top: 0, zIndex: 4 }}>
+          {/* Session 72: sticky applied at THREE levels (<thead>, <tr>, <th>)
+              because browsers disagree about which anchor wins inside
+              table-layout:fixed + border-collapse:collapse. Solid bg on each
+              layer prevents row bleed-through when stuck. */}
+          <thead style={{ position: 'sticky', top: 0, zIndex: 5, background: '#F5F2EE' }}>
             {table.getHeaderGroups().map(hg => (
-              <tr key={hg.id}>
+              <tr key={hg.id} style={{ position: 'sticky', top: 0, background: '#F5F2EE' }}>
                 {hg.headers.map(header => {
                   const colId = header.column.id;
                   const sorted = header.column.getIsSorted();
@@ -1781,6 +1849,9 @@ export function Inventory() {
                         outlineOffset: -2,
                         width: header.getSize(),
                         boxSizing: 'border-box',
+                        position: 'sticky',
+                        top: 0,
+                        zIndex: 4,
                       }}
                       draggable={colId !== 'select' && colId !== 'actions'}
                       onDragStart={e => onHeaderDragStart(e, colId)}
@@ -1888,14 +1959,30 @@ export function Inventory() {
                   No items match your filters.
                 </td>
               </tr>
-            ) : isPrinting ? (
-              /* De-virtualized: render ALL rows for print */
+            ) : (isPrinting || (rowDisplay === 'all' && !isMobile)) ? (
+              /* De-virtualized: render ALL rows (print OR "Show: All" mode).
+                 In user-expanded mode we still attach row-level handlers so
+                 clicking rows / double-click-to-open-detail still works. */
               allVirtualRows.map((row, idx) => {
+                const isSelected = row.getIsSelected();
+                const isActivePanel = selectedItem?.itemId === row.original.itemId;
                 const smColor = colorSidemarks && row.original.sidemark ? sidemarkColorMap.get(normSidemark(row.original.sidemark)) : undefined;
+                const rowBg = isSelected ? '#FFF7F4' : isActivePanel ? '#FEF3EE' : smColor ? smColor + '30' : (isPrinting ? (idx % 2 === 0 ? '#fff' : '#FAFAFA') : 'transparent');
                 return (
-                  <tr key={row.id} style={{ background: smColor ? smColor + '30' : idx % 2 === 0 ? '#fff' : '#FAFAFA' }}>
+                  <tr
+                    key={row.id}
+                    className={isPrinting ? undefined : 'inv-row'}
+                    onClick={isPrinting ? undefined : (e => handleRowClick(e, row, idx))}
+                    onDoubleClick={isPrinting ? undefined : (() => setSelectedItemId(row.original.itemId))}
+                    style={{
+                      background: rowBg,
+                      cursor: isPrinting ? undefined : 'default',
+                      transition: isPrinting ? undefined : 'background 0.08s',
+                      borderLeft: !isPrinting && isActivePanel ? `3px solid ${theme.colors.orange}` : '3px solid transparent',
+                    }}
+                  >
                     {row.getVisibleCells().map(cell => (
-                      <td key={cell.id} style={tdStyle(cell.column.id, false)}>
+                      <td key={cell.id} style={tdStyle(cell.column.id, isSelected)}>
                         {flexRender(cell.column.columnDef.cell, cell.getContext())}
                       </td>
                     ))}
@@ -1913,10 +2000,9 @@ export function Inventory() {
                 return (
                   <tr
                     key={row.id}
+                    className="inv-row"
                     onClick={e => handleRowClick(e, row, vRow.index)}
                     onDoubleClick={() => setSelectedItemId(row.original.itemId)}
-                    onMouseEnter={() => setHoveredRowId(row.id)}
-                    onMouseLeave={() => setHoveredRowId(null)}
                     style={{
                       background: rowBg,
                       cursor: 'default',

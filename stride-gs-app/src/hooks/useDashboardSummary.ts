@@ -43,6 +43,15 @@ export function useDashboardSummary(autoFetch = true): UseDashboardSummaryResult
     return map;
   }, [clients]);
 
+  // Session 72: keep clientNameMap off the doFetch dep list. clients array
+  // identity churns as useClients settles on cold load, which was re-creating
+  // doFetch and re-firing the mount effect — producing 2-3 overlapping
+  // inventory paginations inside fetchDashboardSummaryFromSupabase.
+  const clientNameMapRef = useRef(clientNameMap);
+  clientNameMapRef.current = clientNameMap;
+  const tenantFilterRef = useRef(tenantFilter);
+  tenantFilterRef.current = tenantFilter;
+
   const doFetch = useCallback(async (noCache = false) => {
     // Abort any in-flight request
     abortRef.current?.abort();
@@ -60,7 +69,7 @@ export function useDashboardSummary(autoFetch = true): UseDashboardSummaryResult
 
       // Try Supabase read cache first (50-100ms vs 3-44s)
       if (!skipSb && !noCache && await isSupabaseCacheAvailable()) {
-        const sbResult = await fetchDashboardSummaryFromSupabase(clientNameMap, tenantFilter);
+        const sbResult = await fetchDashboardSummaryFromSupabase(clientNameMapRef.current, tenantFilterRef.current);
         if (sbResult && !ctrl.signal.aborted) {
           setTasks(sbResult.tasks || []);
           setRepairs(sbResult.repairs || []);
@@ -91,7 +100,8 @@ export function useDashboardSummary(autoFetch = true): UseDashboardSummaryResult
     } finally {
       if (!ctrl.signal.aborted) setLoading(false);
     }
-  }, [clientNameMap]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Initial fetch
   useEffect(() => {

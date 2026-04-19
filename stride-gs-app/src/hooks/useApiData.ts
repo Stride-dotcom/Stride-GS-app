@@ -11,7 +11,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import type { ApiResponse } from '../lib/api';
 import { setNextFetchNoCache } from '../lib/api';
-import { cacheGet, cacheSet, cacheDelete } from '../lib/apiCache';
+import { cacheGet, cacheSet, cacheDelete, inflightGet, inflightSet } from '../lib/apiCache';
 
 export interface UseApiDataResult<T> {
   data: T | null;
@@ -53,7 +53,42 @@ export function useApiData<T>(
       }
     }
 
-    // Abort any in-flight request
+    // Session 72: request-level dedup. If another mounted consumer has already
+    // started a fetch for this key, piggy-back on their promise instead of
+    // firing a duplicate network request. Fixes the clients 5×, locations 2×,
+    // inventory 3× fan-out caused by parallel component mounts (Inventory page
+    // + TransferItemsModal + UniversalSearch all mounting useInventory, etc.).
+    if (resolvedKey) {
+      const inflight = inflightGet<ApiResponse<T>>(resolvedKey);
+      if (inflight) {
+        // Own controller for tracking this consumer's unmount state.
+        const controller = new AbortController();
+        abortRef.current = controller;
+        if (!silent) setLoading(true);
+        setError(null);
+        inflight
+          .then((result) => {
+            if (controller.signal.aborted) return;
+            if (result.ok && result.data) {
+              setData(result.data);
+              setLastFetched(new Date());
+              setError(null);
+            } else {
+              setError(result.error || 'Unknown error');
+            }
+          })
+          .catch((err) => {
+            if (controller.signal.aborted) return;
+            setError(err instanceof Error ? err.message : String(err));
+          })
+          .finally(() => {
+            if (!controller.signal.aborted) setLoading(false);
+          });
+        return;
+      }
+    }
+
+    // Abort any in-flight request (owned by THIS consumer only)
     if (abortRef.current) {
       abortRef.current.abort();
     }
@@ -65,7 +100,15 @@ export function useApiData<T>(
     if (!silent) setLoading(true);
     setError(null);
 
-    fetchFn(controller.signal)
+    // IMPORTANT: do NOT pass controller.signal to the shared/deduped fetch.
+    // If this consumer unmounts, the signal abort would cancel the fetch for
+    // every other consumer awaiting the same promise. When no dedup is in
+    // play (cold key), there's still no harm in skipping the signal because
+    // the consumer's own signal-check in .then prevents setState on unmount.
+    const fetchPromise = fetchFn(resolvedKey ? undefined : controller.signal);
+    if (resolvedKey) inflightSet(resolvedKey, fetchPromise);
+
+    fetchPromise
       .then((result) => {
         if (controller.signal.aborted) return;
 
