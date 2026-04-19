@@ -100,21 +100,26 @@ function StatCard({ icon, label, value, sub, onClick }: {
   icon: React.ReactNode; label: string; value: number; sub?: string; color?: string; onClick?: () => void;
 }) {
   const v = theme.v2;
+  const { isMobile } = useIsMobile();
   return (
     <div onClick={onClick} style={{
-      background: v.colors.bgDark, borderRadius: v.radius.card, padding: v.card.padding,
+      background: v.colors.bgDark, borderRadius: v.radius.card,
+      padding: isMobile ? '12px 14px' : v.card.padding,
       color: v.colors.textOnDark, cursor: onClick ? 'pointer' : undefined,
       transition: 'transform 0.15s ease',
-      flex: '1 1 0', minWidth: 140,
+      flex: '1 1 0', minWidth: isMobile ? 0 : 140,
     }}
-      onMouseEnter={e => onClick && (e.currentTarget.style.transform = 'translateY(-2px)')}
-      onMouseLeave={e => onClick && (e.currentTarget.style.transform = 'translateY(0)')}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
-        <div style={{ opacity: 0.6 }}>{icon}</div>
-        <span style={{ ...v.typography.label, color: v.colors.textOnDarkMuted }}>{label.toUpperCase()}</span>
+      onMouseEnter={e => onClick && !isMobile && (e.currentTarget.style.transform = 'translateY(-2px)')}
+      onMouseLeave={e => onClick && !isMobile && (e.currentTarget.style.transform = 'translateY(0)')}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: isMobile ? 6 : 10, marginBottom: isMobile ? 6 : 12 }}>
+        <div style={{ opacity: 0.6, display: 'flex' }}>{icon}</div>
+        <span style={{
+          ...v.typography.label, color: v.colors.textOnDarkMuted,
+          ...(isMobile ? { fontSize: '9px', letterSpacing: '1px' } : {}),
+        }}>{label.toUpperCase()}</span>
       </div>
-      <div style={{ fontSize: 28, fontWeight: 300, lineHeight: 1 }}>{value}</div>
-      {sub && <div style={{ fontSize: 11, color: v.colors.textOnDarkMuted, marginTop: 8 }}>{sub}</div>}
+      <div style={{ fontSize: isMobile ? 20 : 28, fontWeight: 300, lineHeight: 1 }}>{value}</div>
+      {sub && !isMobile && <div style={{ fontSize: 11, color: v.colors.textOnDarkMuted, marginTop: 8 }}>{sub}</div>}
     </div>
   );
 }
@@ -490,7 +495,7 @@ function WillCallsTab({ willCalls, onNavigate }: { willCalls: SummaryWillCall[];
 
 /** ⚠️  FRAGILE HOOK ORDER — see Inventory.tsx for full warning. Do not reorder/add/remove hooks. */
 export function Dashboard() {
-  const { isMobile, isExtraSmall } = useIsMobile();
+  const { isMobile } = useIsMobile();
   const apiConfigured = isApiConfigured();
 
   // Top-level tab: Calendar (default) or Overview (the task/repair/will-call
@@ -714,27 +719,30 @@ export function Dashboard() {
       {/* Overview tab — existing dashboard content */}
       {topTab === 'overview' && (
       <>
-      {/* Stat Cards — all dark v2 */}
-      <div style={{ display: 'grid', gap: 14, gridTemplateColumns: isExtraSmall ? '1fr' : isMobile ? '1fr 1fr' : 'repeat(3, 1fr)' }}>
+      {/* Stat Cards — all dark v2. On mobile we pack all 3 across with the
+          compact StatCard padding so the table below gets real estate. */}
+      <div style={{ display: 'grid', gap: isMobile ? 8 : 14, gridTemplateColumns: 'repeat(3, 1fr)', marginBottom: isMobile ? 10 : 0 }}>
         <StatCard icon={<ClipboardList size={16} />} label="Open Tasks" value={stats.openTasks} sub="Open + In Progress" onClick={() => handleTabChange('tasks')} />
         <StatCard icon={<Wrench size={16} />} label="Active Repairs" value={stats.openRepairs} sub="Pending quote or approved" onClick={() => handleTabChange('repairs')} />
         <StatCard icon={<Truck size={16} />} label="Pending Will Calls" value={stats.pendingWCs} sub="Pending · Scheduled · Partial" onClick={() => handleTabChange('willcalls')} />
       </div>
 
       {/* Content card — wraps tabs + table */}
-      <div style={{ background: '#EDE9E3', borderRadius: 20, padding: '28px 32px' }}>
-        {/* Tab bar — segmented pill style */}
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 20, flexWrap: 'wrap' }}>
-          <div style={{ display: 'inline-flex', gap: 0, background: '#fff', borderRadius: 100, padding: 5 }}>
+      <div style={{ background: '#EDE9E3', borderRadius: isMobile ? 14 : 20, padding: isMobile ? '14px 12px' : '28px 32px' }}>
+        {/* Tab bar — segmented pill style. On mobile the outer row scrolls
+            horizontally instead of wrapping so the Tasks/Repairs/Will Calls
+            pills stay on one line even on narrow screens. */}
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: isMobile ? 12 : 20, flexWrap: isMobile ? 'nowrap' : 'wrap', overflowX: isMobile ? 'auto' : 'visible', WebkitOverflowScrolling: 'touch' }}>
+          <div style={{ display: 'inline-flex', gap: 0, background: '#fff', borderRadius: 100, padding: 5, flexShrink: 0 }}>
           {TAB_DEFS.map(tab => {
             const active = activeTab === tab.id;
             const isTasksTab = tab.id === 'tasks';
             const tabStyle: React.CSSProperties = {
-              display: 'flex', alignItems: 'center', gap: 8, padding: '9px 18px',
-              fontSize: 12, fontWeight: 600, fontFamily: 'inherit',
-              letterSpacing: '1.5px', textTransform: 'uppercase',
+              display: 'flex', alignItems: 'center', gap: isMobile ? 5 : 8, padding: isMobile ? '7px 12px' : '9px 18px',
+              fontSize: isMobile ? 10 : 12, fontWeight: 600, fontFamily: 'inherit',
+              letterSpacing: isMobile ? '1px' : '1.5px', textTransform: 'uppercase',
               background: active ? '#1C1C1C' : 'transparent', border: 'none', cursor: 'pointer',
-              borderRadius: 100,
+              borderRadius: 100, whiteSpace: 'nowrap',
               color: active ? '#fff' : '#999',
               transition: 'all 0.2s',
             };

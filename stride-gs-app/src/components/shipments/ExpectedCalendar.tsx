@@ -3,6 +3,7 @@ import { ChevronLeft, ChevronRight, Plus } from 'lucide-react';
 import { useCalendarEvents, type CalendarEvent } from '../../hooks/useCalendarEvents';
 import { useExpectedShipments, type ExpectedShipment } from '../../hooks/useExpectedShipments';
 import { useClients } from '../../hooks/useClients';
+import { useIsMobile } from '../../hooks/useIsMobile';
 import { CalendarMonthView } from './CalendarMonthView';
 import { CalendarWeekView } from './CalendarWeekView';
 import { AddExpectedModal } from './AddExpectedModal';
@@ -32,6 +33,7 @@ function startOfWeek(d: Date): Date {
 }
 
 export function ExpectedCalendar() {
+  const { isMobile } = useIsMobile();
   const [view, setView] = useState<ViewMode>('month');
   const [anchor, setAnchor] = useState<Date>(() => new Date());
   const [showAdd, setShowAdd] = useState(false);
@@ -153,39 +155,43 @@ export function ExpectedCalendar() {
 
   return (
     <div>
-      {/* Stat cards */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: 20 }}>
-        <StatCard label="Due Today" value={stats.dueToday} />
-        <StatCard label="This Week" value={stats.thisWeek} />
-        <StatCard label="High Priority" value={stats.highPriority} />
-        <StatCard label="Overdue" value={stats.overdue} accent />
+      {/* Stat cards — 4 across on desktop, 2×2 on mobile with compact padding */}
+      <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr 1fr' : 'repeat(4, 1fr)', gap: isMobile ? 8 : 12, marginBottom: isMobile ? 12 : 20 }}>
+        <StatCard label="Due Today" value={stats.dueToday} isMobile={isMobile} />
+        <StatCard label="This Week" value={stats.thisWeek} isMobile={isMobile} />
+        <StatCard label="High Priority" value={stats.highPriority} isMobile={isMobile} />
+        <StatCard label="Overdue" value={stats.overdue} accent isMobile={isMobile} />
       </div>
 
-      {/* Legend */}
-      <div style={{
-        display: 'flex', gap: 18, alignItems: 'center',
-        background: '#fff', borderRadius: 12, padding: '10px 16px',
-        border: '1px solid rgba(0,0,0,0.04)', marginBottom: 14, flexWrap: 'wrap',
-      }}>
-        <span style={{ fontSize: 10, fontWeight: 600, letterSpacing: '2px', textTransform: 'uppercase', color: '#999' }}>Legend</span>
-        {(['task', 'repair', 'willcall', 'shipment'] as const).map(type => {
-          const c = EVENT_COLORS[type];
-          return (
-            <div key={type} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-              <div style={{ width: 10, height: 10, borderRadius: 2, background: c.bg, borderLeft: `3px solid ${c.border}` }} />
-              <span style={{ fontSize: 12, color: '#1C1C1C' }}>{c.label}</span>
-            </div>
-          );
-        })}
-      </div>
+      {/* Legend — hidden on mobile to reclaim vertical space; the colored
+          pills on each event already communicate type at a glance */}
+      {!isMobile && (
+        <div style={{
+          display: 'flex', gap: 18, alignItems: 'center',
+          background: '#fff', borderRadius: 12, padding: '10px 16px',
+          border: '1px solid rgba(0,0,0,0.04)', marginBottom: 14, flexWrap: 'wrap',
+        }}>
+          <span style={{ fontSize: 10, fontWeight: 600, letterSpacing: '2px', textTransform: 'uppercase', color: '#999' }}>Legend</span>
+          {(['task', 'repair', 'willcall', 'shipment'] as const).map(type => {
+            const c = EVENT_COLORS[type];
+            return (
+              <div key={type} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <div style={{ width: 10, height: 10, borderRadius: 2, background: c.bg, borderLeft: `3px solid ${c.border}` }} />
+                <span style={{ fontSize: 12, color: '#1C1C1C' }}>{c.label}</span>
+              </div>
+            );
+          })}
+        </div>
+      )}
 
-      {/* Controls */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14, flexWrap: 'wrap', gap: 10 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+      {/* Controls — wrap cleanly; on mobile the month title drops below the
+          nav buttons and the view toggle + Add Shipment pill sit on their own row */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: isMobile ? 10 : 14, flexWrap: 'wrap', gap: 10 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: isMobile ? 6 : 10 }}>
           <button onClick={goPrev} style={iconBtn} aria-label="Previous">
             <ChevronLeft size={16} />
           </button>
-          <div style={{ fontSize: 18, fontWeight: 500, color: '#1C1C1C', minWidth: 200, textAlign: 'center' }}>
+          <div style={{ fontSize: isMobile ? 15 : 18, fontWeight: 500, color: '#1C1C1C', minWidth: isMobile ? 140 : 200, textAlign: 'center' }}>
             {title}
           </div>
           <button onClick={goNext} style={iconBtn} aria-label="Next">
@@ -193,7 +199,7 @@ export function ExpectedCalendar() {
           </button>
           <button onClick={goToday} style={pillGhost}>Today</button>
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
           <div style={{
             display: 'flex', background: '#fff', border: '1px solid rgba(0,0,0,0.08)',
             borderRadius: 100, padding: 2,
@@ -221,16 +227,21 @@ export function ExpectedCalendar() {
         </div>
       </div>
 
-      {/* Calendar body */}
-      {loading && events.length === 0 ? (
-        <div style={{ padding: 60, textAlign: 'center', color: '#999', fontSize: 13 }}>
-          Loading calendar...
+      {/* Calendar body — on narrow screens the grid can overflow; horizontal
+          scroll preserves the 7-day columns instead of squashing them */}
+      <div style={{ overflowX: 'auto', WebkitOverflowScrolling: 'touch' }}>
+        <div style={{ minWidth: isMobile ? 560 : undefined }}>
+          {loading && events.length === 0 ? (
+            <div style={{ padding: 60, textAlign: 'center', color: '#999', fontSize: 13 }}>
+              Loading calendar...
+            </div>
+          ) : view === 'month' ? (
+            <CalendarMonthView year={anchor.getFullYear()} month={anchor.getMonth()} events={events} onEventClick={handleEventClick} />
+          ) : (
+            <CalendarWeekView weekStart={weekStart} events={events} onEventClick={handleEventClick} />
+          )}
         </div>
-      ) : view === 'month' ? (
-        <CalendarMonthView year={anchor.getFullYear()} month={anchor.getMonth()} events={events} onEventClick={handleEventClick} />
-      ) : (
-        <CalendarWeekView weekStart={weekStart} events={events} onEventClick={handleEventClick} />
-      )}
+      </div>
 
       {showAdd && (
         <AddExpectedModal
@@ -286,18 +297,23 @@ export function ExpectedCalendar() {
   );
 }
 
-function StatCard({ label, value, accent }: { label: string; value: number; accent?: boolean }) {
+function StatCard({ label, value, accent, isMobile }: { label: string; value: number; accent?: boolean; isMobile?: boolean }) {
   return (
     <div style={{
       background: '#1C1C1C', color: '#fff',
-      borderRadius: 20, padding: '20px 24px',
+      borderRadius: isMobile ? 14 : 20,
+      padding: isMobile ? '10px 12px' : '20px 24px',
     }}>
       <div style={{
-        fontSize: 10, fontWeight: 600, letterSpacing: '2px', textTransform: 'uppercase',
+        fontSize: isMobile ? 9 : 10, fontWeight: 600,
+        letterSpacing: isMobile ? '1px' : '2px',
+        textTransform: 'uppercase',
         color: 'rgba(255,255,255,0.5)',
+        whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
       }}>{label}</div>
       <div style={{
-        fontSize: 32, fontWeight: 300, marginTop: 6,
+        fontSize: isMobile ? 20 : 32, fontWeight: 300,
+        marginTop: isMobile ? 4 : 6, lineHeight: 1,
         color: accent ? '#E8692A' : '#fff',
       }}>{value}</div>
     </div>
