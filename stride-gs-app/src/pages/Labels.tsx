@@ -353,7 +353,7 @@ function Label({
         alignItems: isFlat ? 'center' : 'stretch',
       }}
     >
-      <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', justifyContent: 'center', gap: '0.02in' }}>
+      <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center', gap: '0.02in', width: '100%' }}>
         {enabledFields.map(f => {
           const v = getValue(f.id);
           if (!v) return null;
@@ -369,6 +369,8 @@ function Label({
                 textOverflow: 'ellipsis',
                 whiteSpace: f.id === 'description' ? 'normal' : 'nowrap',
                 maxHeight: f.id === 'description' ? '2.2em' : undefined,
+                textAlign: 'center',
+                width: '100%',
               }}
             >
               {v}
