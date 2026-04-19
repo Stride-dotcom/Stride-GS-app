@@ -163,10 +163,21 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
         {!isMobile && <div onMouseDown={handleResizeMouseDown} style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: 6, cursor: 'col-resize', zIndex: 101 }} />}
 
         {/* Header — unified DetailHeader (session 70 follow-up).
-            Shipments have no sidemark at the shipment level (sidemarks live on items). */}
+            Shipments have no sidemark at the shipment level (sidemarks live on
+            items). We surface a common sidemark when all items share one, or
+            "Multiple" when they differ, so the header always matches the
+            Item/Task/Repair/WillCall format Justin expects. */}
         <DetailHeader
           entityId={shipment.shipmentNo}
           clientName={shipment.client}
+          sidemark={(() => {
+            if (!items.length) return undefined;
+            const first = (items[0].sidemark || '').trim();
+            if (!first) return undefined;
+            const firstNorm = first.toLowerCase();
+            const allSame = items.every(it => (it.sidemark || '').trim().toLowerCase() === firstNorm);
+            return allSame ? first : 'Multiple';
+          })()}
           actions={
             <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4, color: theme.colors.textMuted }}>
               <X size={18} />

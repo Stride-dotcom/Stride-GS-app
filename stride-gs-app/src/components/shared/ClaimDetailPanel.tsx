@@ -483,6 +483,17 @@ export function ClaimDetailPanel({ claim: initialClaim, onClose, onUpdated, appl
               ? `${claim.companyClientName} · ${claim.primaryContactName}`
               : claim.companyClientName
           }
+          sidemark={(() => {
+            // Claims surface sidemark from linked items (sidemarkSnapshot
+            // captured at the time items were added). Common sidemark →
+            // show it; mixed → "Multiple"; none → hide chip.
+            if (!detailItems.length) return undefined;
+            const first = (detailItems[0].sidemarkSnapshot || '').trim();
+            if (!first) return undefined;
+            const firstNorm = first.toLowerCase();
+            const allSame = detailItems.every(it => (it.sidemarkSnapshot || '').trim().toLowerCase() === firstNorm);
+            return allSame ? first : 'Multiple';
+          })()}
           actions={
             <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4, color: theme.colors.textMuted }}>
               <X size={18} />
