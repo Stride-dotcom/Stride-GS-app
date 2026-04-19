@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { X, Truck, Package, FileText, Mail, ClipboardList, LayoutList } from 'lucide-react';
 import { DeepLink } from './DeepLink';
 import { DetailHeader } from './DetailHeader';
+import { EntityHistory } from './EntityHistory';
 import { FolderButton } from './FolderButton';
 import { CreateTaskModal } from './CreateTaskModal';
 import { CreateWillCallModal } from './CreateWillCallModal';
@@ -287,6 +288,11 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
               <div style={{ color: theme.colors.textMuted, fontSize: 12, padding: '12px 0' }}>No items recorded</div>
             )}
           </div>
+        </div>
+
+        {/* Activity History */}
+        <div style={{ padding: '0 20px' }}>
+          <EntityHistory entityType="shipment" entityId={shipment.shipmentNo} tenantId={shipment.clientSheetId} />
         </div>
 
         {/* Footer */}

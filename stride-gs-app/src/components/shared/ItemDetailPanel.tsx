@@ -2,6 +2,7 @@ import React, { useState, useRef, useCallback, useEffect, useMemo } from 'react'
 import { X, Package, Calendar, FileText, ClipboardList, Wrench, Truck, ExternalLink, DollarSign, Ship, AlertCircle, MapPin, CheckCircle2, Pencil, Save, Loader2, FolderOpen } from 'lucide-react';
 import { FolderButton } from './FolderButton';
 import { DetailHeader } from './DetailHeader';
+import { EntityHistory } from './EntityHistory';
 import { LinkifiedText } from './LinkifiedText';
 import { AutocompleteInput } from './AutocompleteInput';
 import { theme } from '../../styles/theme';
@@ -815,6 +816,9 @@ export function ItemDetailPanel({
               />
             )}
           </Section>
+
+          {/* Activity History — audit log timeline */}
+          <EntityHistory entityType="inventory" entityId={item.itemId} tenantId={item.clientId} />
         </div>
 
         {/* Sticky footer — session 70 follow-up: Edit / Save / Cancel moved here from top-right. */}

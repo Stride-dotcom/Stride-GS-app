@@ -3,6 +3,7 @@ import { X, ClipboardList, Package, MapPin, CheckCircle2, XCircle, AlertTriangle
 import { FolderButton } from './FolderButton';
 import { DeepLink } from './DeepLink';
 import { DetailHeader } from './DetailHeader';
+import { EntityHistory } from './EntityHistory';
 import { theme } from '../../styles/theme';
 import { fmtDate, fmtDateTime } from '../../lib/constants';
 import { WriteButton } from './WriteButton';
@@ -778,6 +779,7 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
                 ))}
               </div>
             )}
+            <EntityHistory entityType="task" entityId={task.taskId} tenantId={clientSheetId} />
             <button onClick={onClose} style={{ width: '100%', padding: '10px', fontSize: 13, fontWeight: 600, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', fontFamily: 'inherit', color: theme.colors.textSecondary }}>Close</button>
           </div>
         )}

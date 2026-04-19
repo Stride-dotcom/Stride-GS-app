@@ -2,6 +2,7 @@ import { useState, useMemo, useCallback, useEffect, useRef } from 'react';
 import { X, Truck, Package, Calendar, Phone, User, DollarSign, CheckCircle2, CreditCard, FileText, Loader2, AlertTriangle, FolderOpen, Info, Pencil, Save, Play } from 'lucide-react';
 import { FolderButton } from './FolderButton';
 import { DeepLink } from './DeepLink';
+import { EntityHistory } from './EntityHistory';
 import { DetailHeader } from './DetailHeader';
 import { theme } from '../../styles/theme';
 import { fmtDate } from '../../lib/constants';
@@ -893,6 +894,7 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
                 </div>
               )}
             </div>
+            <EntityHistory entityType="will_call" entityId={wc.wcNumber} tenantId={clientSheetId} />
             <button onClick={onClose} style={{ width: '100%', padding: '10px', fontSize: 13, fontWeight: 600, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', fontFamily: 'inherit', color: theme.colors.textSecondary }}>Close</button>
           </div>
         )}
