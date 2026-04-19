@@ -31,12 +31,23 @@ interface DockItem {
 
 const OVERWEIGHT_THRESHOLD = 300; // lbs
 
-/** Compute which add-on codes should be auto-applied for this item. */
-function computeAutoAppliedAddons(item: DockItem, addons: ReceivingAddon[]): string[] {
+/** Compute which add-on codes should be auto-applied for this item.
+ *  `no_id` rule fires per-shipment based on the CLIENT — the "Needs ID Holding
+ *  Account" tenant (our catch-all for items that arrive without a real owner
+ *  yet) gets NO_ID auto-checked on every row. Sidemark is no longer the
+ *  trigger; it's a per-row label, not a signal that an ID hasn't been
+ *  assigned yet. */
+function computeAutoAppliedAddons(
+  item: DockItem,
+  addons: ReceivingAddon[],
+  clientName: string,
+): string[] {
   const out: string[] = [];
+  const client = (clientName || '').trim().toLowerCase();
+  const isHoldingAccount = client.includes('needs id') || client.includes('holding account');
   for (const a of addons) {
     if (!a.autoApplyRule) continue;
-    if (a.autoApplyRule === 'no_id' && !item.sidemark.trim()) out.push(a.code);
+    if (a.autoApplyRule === 'no_id' && isHoldingAccount) out.push(a.code);
     else if (a.autoApplyRule === 'overweight' && (item.weight ?? 0) > OVERWEIGHT_THRESHOLD) out.push(a.code);
   }
   return out;
@@ -105,7 +116,7 @@ function NewShipmentForm() {
   // while the underlying sidemark is still empty. The reconcile check avoids
   // re-rendering when nothing changed.
   const autoApplySignature = useMemo(
-    () => items.map(i => `${i.id}:${i.sidemark}|${i.weight ?? ''}|${i.itemClass}|${i.autoAppliedAddons.join(',')}|${i.dismissedAddons.join(',')}`).join('~'),
+    () => items.map(i => `${i.id}:${i.weight ?? ''}|${i.itemClass}|${i.autoAppliedAddons.join(',')}|${i.dismissedAddons.join(',')}`).join('~'),
     [items]
   );
   useEffect(() => {
@@ -113,7 +124,7 @@ function NewShipmentForm() {
     setItems(prev => {
       let changed = false;
       const next = prev.map(row => {
-        const rawShould = computeAutoAppliedAddons(row, catalogAddons);
+        const rawShould = computeAutoAppliedAddons(row, catalogAddons, client);
         // Respect manual dismissals — user already told us "no" for this code.
         const shouldBe = rawShould.filter(c => !row.dismissedAddons.includes(c));
         const prevAuto = row.autoAppliedAddons;
@@ -128,7 +139,7 @@ function NewShipmentForm() {
       return changed ? next : prev;
     });
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [catalogAddons.length, autoApplySignature]);
+  }, [catalogAddons.length, autoApplySignature, client]);
 
   // v38.37.0 — derive the selected client's shipment note for the amber banner.
   // Uses the same match chain as the client-change handler (liveClients by id → apiClients
