@@ -1,17 +1,15 @@
 /* ===================================================
-   StrideAPI.gs — v38.79.0 — 2026-04-19 PST — Phase 5 billing rate cutover (dual-path Supabase + sheet)
-   v38.79.0: PHASE 5 cutover. api_lookupRate_ + api_loadClassVolumes_ now read
-             rates from Supabase service_catalog / item_classes first, fall
-             back to the per-client Price_Cache / Class_Cache sheets if
-             Supabase is unreachable or the code/class isn't found. Parity
-             mismatches are written to Logger ("PARITY_MISMATCH ...") for
-             post-deploy audit. handleGetPricing_ now builds its response
-             from Supabase too (sheet fallback preserved). New helpers
-             api_lookupRateFromSupabase_ + api_loadClassVolumesFromSupabase_
-             share CacheService keys "sb_rate_<code>_<klass>" and
-             "sb_class_volumes" with TTL = CACHE_TTL_SECONDS_ (600s). No
-             billing CALCULATION logic touched — only the rate LOOKUP
-             source. No client sheet schema changes; rollout NOT required.
+   StrideAPI.gs — v38.80.0 — 2026-04-19 PST — Phase 5 SHADOW MODE (sheet primary, Supabase compare-only)
+   v38.80.0: URGENT FLIP. api_lookupRate_, api_loadClassVolumes_, and
+             handleGetPricing_ are all back to SHEET-PRIMARY. The Supabase
+             helpers added in v38.79.0 still run on every call but now
+             only for parity logging — their return values never flow into
+             billing. Logger writes both "PARITY_OK ..." and
+             "PARITY_MISMATCH ..." lines so the operator can tally real
+             divergence before a future cutover. Billing calculations are
+             guaranteed to match pre-v38.79.0 behaviour byte-for-byte.
+   v38.79.0: PHASE 5 cutover (Supabase-primary) — superseded by v38.80.0
+             flip. Helpers preserved for shadow comparisons.
    v38.78.0: Billing rows now carry Reference (client PO). sbBillingRow_
              writes reference, resync billing path looks it up from Inventory
              (same pattern as sidemark). handleGetBilling_ overlays from
@@ -6422,16 +6420,9 @@ function handleGetPricing_() {
     try { return jsonResponse_(JSON.parse(cached)); } catch (_) {}
   }
 
-  // v38.79.0 — Supabase is the new source of truth for pricing. We build
-  // the same { priceList, classMap, priceCount, classCount } shape the
-  // React app expects so usePricing/PricingHook keep working unchanged.
-  // Sheet fallback preserved for the case where Supabase is unreachable.
-  var fromSupabase = api_buildPricingFromSupabase_();
-  if (fromSupabase) {
-    try { cache.put("api_pricing", JSON.stringify(fromSupabase), 1800); } catch (_) {}
-    return jsonResponse_(fromSupabase);
-  }
-
+  // v38.80.0 SHADOW MODE — sheet is primary again. Supabase version is
+  // built in parallel purely for log-based parity monitoring (row counts
+  // comparison), never returned to the caller.
   var mplId = prop_("MASTER_PRICE_LIST_SPREADSHEET_ID");
   if (!mplId) return errorResponse_("MASTER_PRICE_LIST_SPREADSHEET_ID not configured", "CONFIG_ERROR");
 
@@ -6448,6 +6439,26 @@ function handleGetPricing_() {
     classCount: classMap.length,
     source: "sheet"
   };
+
+  // Shadow comparison — log-only, non-blocking.
+  try {
+    var shadow = api_buildPricingFromSupabase_();
+    if (shadow) {
+      if (shadow.priceCount !== result.priceCount || shadow.classCount !== result.classCount) {
+        Logger.log("PARITY_MISMATCH pricing_counts sheet_prices=" + result.priceCount +
+                   " supabase_prices=" + shadow.priceCount +
+                   " sheet_classes=" + result.classCount +
+                   " supabase_classes=" + shadow.classCount);
+      } else {
+        Logger.log("PARITY_OK pricing_counts prices=" + result.priceCount +
+                   " classes=" + result.classCount);
+      }
+    } else {
+      Logger.log("PARITY_MISMATCH pricing supabase_unreachable_or_empty");
+    }
+  } catch (e) {
+    Logger.log("handleGetPricing_ shadow compare error (non-fatal): " + e);
+  }
 
   try { cache.put("api_pricing", JSON.stringify(result), 1800); } catch (_) {}
   return jsonResponse_(result);
@@ -9943,52 +9954,47 @@ function api_lookupRateFromSheet_(ss, svcCode, itemClass) {
 }
 
 /**
- * v38.79.0 dual-path. Supabase is now authoritative for rates; the
- * per-client Price_Cache sheet is the fallback path. Both are queried so
- * we can log parity mismatches during the transition window.
+ * v38.80.0 SHADOW MODE. Sheet is primary and its result is returned
+ * unconditionally — Supabase is queried in parallel and the comparison
+ * is written to Logger for parity monitoring. Billing calculations are
+ * guaranteed to be identical to pre-v38.79.0 behaviour.
  *
- * Decision rules:
- *   - Supabase result with rate > 0  → use Supabase (log mismatch if sheet differs)
- *   - Supabase result with rate == 0 AND sheet has rate > 0 → log mismatch,
- *                                                              use sheet
- *                                                              (likely a not-yet-
- *                                                              seeded class)
- *   - Supabase null (down or missing) → silent fall back to sheet
- *   - Both 0 → return Supabase shape (defaults)
+ * Logs emitted:
+ *   PARITY_OK       — both sources agreed
+ *   PARITY_MISMATCH — rate delta > 0.001
+ *   PARITY_MISMATCH supabase_missing — sheet has a rate Supabase doesn't
  */
 function api_lookupRate_(ss, svcCode, itemClass) {
-  var sbResult = null;
-  try { sbResult = api_lookupRateFromSupabase_(svcCode, itemClass); } catch (e) {
-    Logger.log("api_lookupRate_ Supabase path error (non-fatal): " + e);
-  }
   var sheetResult = api_lookupRateFromSheet_(ss, svcCode, itemClass);
 
-  // Parity logging — only meaningful when at least one side returned a non-zero rate.
+  var sbResult = null;
+  try { sbResult = api_lookupRateFromSupabase_(svcCode, itemClass); } catch (e) {
+    Logger.log("api_lookupRate_ Supabase shadow error (non-fatal): " + e);
+  }
+
   if (sbResult && sheetResult) {
-    var diff = Math.abs((sbResult.rate || 0) - (sheetResult.rate || 0));
+    var sbRate = Number(sbResult.rate || 0);
+    var shRate = Number(sheetResult.rate || 0);
+    var diff = Math.abs(sbRate - shRate);
     if (diff > 0.001) {
       Logger.log("PARITY_MISMATCH rate code=" + svcCode +
                  " class=" + (itemClass || "") +
-                 " supabase=" + sbResult.rate +
-                 " sheet=" + sheetResult.rate +
+                 " sheet=" + shRate +
+                 " supabase=" + sbRate +
                  " delta=" + diff.toFixed(4));
+    } else {
+      Logger.log("PARITY_OK rate code=" + svcCode +
+                 " class=" + (itemClass || "") +
+                 " rate=" + shRate);
     }
   } else if (!sbResult && sheetResult && Number(sheetResult.rate) > 0) {
-    // Sheet has a non-zero rate Supabase doesn't know about — surface it
-    // so the operator can backfill service_catalog before any cutover.
     Logger.log("PARITY_MISMATCH supabase_missing code=" + svcCode +
                " class=" + (itemClass || "") +
                " sheet=" + sheetResult.rate);
   }
 
-  // Decision: prefer Supabase whenever it returned a rate > 0. If the
-  // Supabase rate is 0 but the sheet has a real rate, fall back to the
-  // sheet — this handles classes/services not yet seeded into Supabase.
-  if (sbResult && Number(sbResult.rate) > 0) return sbResult;
-  if (sheetResult && Number(sheetResult.rate) > 0) return sheetResult;
-  // Neither side has a rate — return the richer of the two shapes so
-  // svcName/category are still populated where possible.
-  return sbResult || sheetResult;
+  // ALWAYS use sheet — Supabase is shadow only.
+  return sheetResult;
 }
 
 /** Applies client discount (negative=discount, positive=surcharge).
@@ -10199,19 +10205,19 @@ function api_loadClassVolumesFromSheet_(ss) {
 }
 
 /**
- * v38.79.0 dual-path. Supabase item_classes is now authoritative; the
- * per-client Class_Cache sheet is the fallback. Both are loaded so we
- * can log parity mismatches per-class. Returns the same shape as before
- * — a plain object mapping class id → cubic feet.
+ * v38.80.0 SHADOW MODE. Sheet is primary and its result is returned
+ * unconditionally — Supabase is queried in parallel and each class is
+ * compared + logged. Billing calculations are guaranteed identical to
+ * pre-v38.79.0 behaviour.
  */
 function api_loadClassVolumes_(ss) {
-  var sbVols = null;
-  try { sbVols = api_loadClassVolumesFromSupabase_(); } catch (e) {
-    Logger.log("api_loadClassVolumes_ Supabase path error (non-fatal): " + e);
-  }
   var sheetVols = api_loadClassVolumesFromSheet_(ss);
 
-  // Parity log per-class — anything seen in either source.
+  var sbVols = null;
+  try { sbVols = api_loadClassVolumesFromSupabase_(); } catch (e) {
+    Logger.log("api_loadClassVolumes_ Supabase shadow error (non-fatal): " + e);
+  }
+
   if (sbVols && sheetVols) {
     var allKeys = {};
     Object.keys(sbVols).forEach(function(k) { allKeys[k] = true; });
@@ -10221,14 +10227,16 @@ function api_loadClassVolumes_(ss) {
       var shVal = Number(sheetVols[cls] || 0);
       if (Math.abs(sbVal - shVal) > 0.001) {
         Logger.log("PARITY_MISMATCH class_volume class=" + cls +
-                   " supabase=" + sbVal +
                    " sheet=" + shVal +
+                   " supabase=" + sbVal +
                    " delta=" + Math.abs(sbVal - shVal).toFixed(4));
+      } else {
+        Logger.log("PARITY_OK class_volume class=" + cls + " volume=" + shVal);
       }
     });
   }
 
-  if (sbVols && Object.keys(sbVols).length > 0) return sbVols;
+  // ALWAYS use sheet — Supabase is shadow only.
   return sheetVols;
 }
 
