@@ -2002,6 +2002,18 @@ export function Inventory() {
           {(user?.role === 'staff' || user?.role === 'admin') && (
             <WriteButton label="Release Items" variant="ghost" size="sm" onClick={async () => { const items = selectedRows.map(r => r.original); const activeItems = items.filter(i => i.status === 'Active'); if (!activeItems.length) { showToast('No active items selected — only Active items can be released'); return; } const guard = checkBatchClientGuard(activeItems); if (guard) { setBatchGuardClients(guard); setBatchGuardAction('Release Items'); return; } setShowReleaseModal(true); }} />
           )}
+          {(user?.role === 'staff' || user?.role === 'admin') && (
+            <WriteButton
+              label="Print Labels"
+              variant="ghost"
+              size="sm"
+              onClick={async () => {
+                const ids = selectedRows.map(r => r.original.itemId).filter(Boolean);
+                if (!ids.length) { showToast('Select at least one item to print labels'); return; }
+                navigate(`/labels?ids=${encodeURIComponent(ids.join(','))}`);
+              }}
+            />
+          )}
 
           <button
             onClick={doExportSelected}

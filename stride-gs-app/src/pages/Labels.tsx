@@ -17,6 +17,7 @@
  * useLocations hook (Supabase-first with Realtime).
  */
 import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react';
+import { useLocation } from 'react-router-dom';
 import {
   Tag, Printer, Trash2, AlertTriangle, Loader2, MapPin, Package,
   Save, RotateCcw, ChevronDown, ChevronUp, GripVertical, Eye, EyeOff, Plus,
@@ -433,6 +434,33 @@ export function Labels() {
     if (!isMobile) textareaRef.current?.focus();
   }, [cfg.kind, isMobile]);
 
+  // Session 72 — URL-param auto-populate. Other pages (Inventory "Print Labels"
+  // bulk action, Scanner "Print Labels for these locations") can deep-link here
+  // with ?ids=123,456 or ?locs=A1.1,A1.2 and we'll pre-fill and auto-generate.
+  const routerLocation = useLocation();
+  const autoLoadedRef = useRef(false);
+  const autoLoadKey = useRef<string>(''); // triggers loadItems once rawItems is set
+  useEffect(() => {
+    if (autoLoadedRef.current) return;
+    const params = new URLSearchParams(routerLocation.search);
+    const ids = params.get('ids');
+    const locs = params.get('locs');
+    if (!ids && !locs) return;
+    autoLoadedRef.current = true;
+    if (ids) {
+      const list = ids.split(/[,\n]/).map(s => s.trim()).filter(Boolean);
+      setCfg(c => ({ ...c, kind: 'item' }));
+      setRawItems(list.join('\n'));
+      autoLoadKey.current = list.join('|'); // flag that loadItems should auto-fire
+    } else if (locs) {
+      const list = locs.split(/[,\n]/).map(s => s.trim().toUpperCase()).filter(Boolean);
+      setCfg(c => ({ ...c, kind: 'location' }));
+      setSelectedLocs(list);
+    }
+    // Strip the query param from the URL so a refresh doesn't re-fire the action
+    window.history.replaceState({}, '', window.location.pathname + window.location.hash.split('?')[0]);
+  }, [routerLocation.search]);
+
   const loadItems = useCallback(async () => {
     const ids = splitMultiline(rawItems);
     if (!ids.length) return;
@@ -452,6 +480,16 @@ export function Labels() {
     setItemResults(resolved);
     setItemNotFound(notFound);
   }, [rawItems, clientNameMap]);
+
+  // Auto-fire loadItems once after URL-param auto-populate sets rawItems.
+  useEffect(() => {
+    if (!autoLoadKey.current) return;
+    const key = rawItems.split('\n').filter(Boolean).join('|');
+    if (key === autoLoadKey.current) {
+      autoLoadKey.current = '';
+      loadItems();
+    }
+  }, [rawItems, loadItems]);
 
   const filteredLocs = useMemo(() => {
     const q = locSearch.trim().toUpperCase();
@@ -697,7 +735,7 @@ export function Labels() {
                   placeholder="Search…"
                   style={{ width: '100%', padding: '7px 10px', border: `1px solid ${theme.colors.border}`, borderRadius: 6, fontSize: 12, marginBottom: 6, outline: 'none', boxSizing: 'border-box' }}
                 />
-                <div style={{ maxHeight: 320, overflow: 'auto', border: `1px solid ${theme.colors.borderLight}`, borderRadius: 6 }}>
+                <div style={{ maxHeight: 180, overflow: 'auto', border: `1px solid ${theme.colors.borderLight}`, borderRadius: 6 }}>
                   {filteredLocs.map(code => {
                     const on = selectedLocs.includes(code);
                     return (
