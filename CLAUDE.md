@@ -350,6 +350,92 @@ Supabase  →  read cache mirror of 11 entity types (inventory, tasks, repairs, 
 
 ---
 
+## Cross-tab Realtime Sync — end-to-end data flow
+
+When a user edits anything that's surfaced on multiple pages (or open in multiple tabs / different browsers), the change propagates everywhere within **~1-2 seconds, zero manual refresh**. Completed in session 72 (Phase 1a + Phase 2). Here's how it actually works:
+
+### 1. Write path (browser A → Google Sheet → Supabase)
+
+```
+React Inventory page edit
+   ↓ optimistic patch (useInventory.applyInventoryPatch)  — paints instantly
+   ↓ POST /exec?action=updateInventoryItem (apiFetch)
+   ↓
+StrideAPI.gs doPost router case
+   ├─ handler writes Inventory sheet (authoritative)
+   ├─ handler writes fan-out rows if any (Tasks/Repairs with matching Item ID)
+   │                                     ↑ invariant #27: Inventory = source of truth for item fields
+   ├─ router: invalidateClientCache_ (CacheService TTL key)
+   ├─ router: api_writeThrough_(r, "inventory", clientSheetId, itemId)
+   │     └─ resyncEntityToSupabase_ reads back the row from the sheet and upserts
+   │        to public.inventory via sbInventoryRow_. Best-effort per invariant #20.
+   ├─ handler: resyncEntityToSupabase_("task"|"repair", …) for each fan-out row
+   │     (Phase 1a fix — router only mirrors the primary entity, handler mirrors the fan-out)
+   └─ return { success: true }
+```
+
+Every write handler (update / complete / cancel / start / batch) is wrapped by
+`api_writeThrough_` OR calls `api_fullClientSync_` OR has an inline
+`resyncXToSupabase_(...)` call. Verified in session 72 Phase 1a audit — see
+`Docs/Stride_GS_App_Build_Status.md` for the full per-handler table.
+
+### 2. Supabase Realtime broadcast
+
+Supabase's postgres_changes publisher fires a WebSocket event on every
+INSERT/UPDATE to the read-mirror tables.
+
+Publisher enabled on these tables (see migrations + `REPLICA IDENTITY FULL`):
+`inventory, tasks, repairs, will_calls, shipments, billing, clients, claims,
+move_history (INSERT-only), dt_orders, locations`.
+
+### 3. Read path (Supabase → every open browser tab)
+
+```
+src/hooks/useSupabaseRealtime.ts   ← mounted once in AppLayout
+   ↓ single channel "stride_cache_realtime"
+   ↓ 20+ listeners (INSERT + UPDATE per table)
+   ↓ 500ms debounced coalesce per entity-type (bulk moves = 1 refetch, not N)
+   ↓
+src/lib/entityEvents.ts
+   ↓ emitFromRealtime('inventory'|'task'|'repair'|…, entityId)
+   ↓ (does NOT set skipSupabase flag — SB has the fresh row, refetch from there)
+   ↓
+src/hooks/useInventory.ts / useTasks.ts / useRepairs.ts / useWillCalls.ts /
+useShipments.ts / useBilling.ts / useClaims.ts / useOrders.ts / useClients.ts
+   ↓ entityEvents.subscribe((type) => if (type === '…') refetch())
+   ↓ Supabase-first fetch via fetchXFromSupabase (~50ms), with GAS fallback
+   ↓ list page re-renders; detail panel if open re-renders
+```
+
+Other-tab user **sees the new value in ~1-2s** with no button press. Same mechanism means **tab B updates even when tab A is on a different page** — any hook mounted anywhere in the tree listens.
+
+### 4. Why the local-tab optimistic patch doesn't fight the Realtime echo
+
+When tab A writes, it:
+1. Paints its own optimistic patch immediately (0ms)
+2. Fires the GAS POST
+3. Receives the Realtime echo for its own write ~1s later
+
+Step 3's payload usually equals what step 1 already painted, so the re-render is a no-op. If there were divergence (server added `updated_at`, `updatedBy`, etc.), the server values win — which is what we want. **No writeId / idempotency-token mechanism needed** unless flicker is observed (none reported to date).
+
+### 5. What's NOT in Realtime
+
+- **Autocomplete DB** (per-client sidemark/vendor/description lists) — not mirrored to Supabase; still GAS.
+- **Move_history**: INSERT-only subscription; no UPDATE/DELETE (it's an append-only audit log).
+- **Stax tables** (invoices/charges/etc.) — mirrored to Supabase via write-through but NOT yet Realtime-subscribed (Payments page still uses explicit refresh button). Phase 3 if needed.
+- **Email templates, cb_users, marketing_contacts/campaigns** — mirrored, Realtime wiring could be added but not driven by user demand yet.
+
+### 6. Failure modes and what to check
+
+| Symptom | Likely cause |
+|---|---|
+| Edit shows on Google Sheet but **never** in React on another tab | Supabase write-through failed silently. Check Apps Script execution log for `sb_mirror: <entity> … fail` or `api_writeThrough_ SYNC FAILED`. Or check `gs_sync_events` table for the entity. |
+| Edit propagates but takes >10s | Supabase Realtime connection might be dropped. Check DevTools → Network → WS tab for an active `stride_cache_realtime` channel. |
+| Bulk receive of 20 items fires 20 rapid re-renders | Check the 500ms debounce in `useSupabaseRealtime.ts` — every entity-type should be throttled. |
+| Fan-out field (Location on Tasks) stale after Inventory edit | Confirm `handleUpdateInventoryItem_` is on v38.72.0+ — earlier versions only mirrored the Inventory row, not the touched Task/Repair rows. |
+
+---
+
 ## File Structure (compact)
 
 Top-level layout, all under the parent repo except `stride-gs-app/dist/` which is the separate subtree deploy repo (see Repository Structure above):
@@ -572,7 +658,7 @@ These are the top decisions that affect code generation on every task. For the f
 
 ## Current Versions
 
-- **StrideAPI.gs:** v38.72.0 (Web App v322) — session 72 continued: Realtime sync Phase 1a. Filled the two genuine Supabase write-through gaps — handleUpdateInventoryItem_ now mirrors the Task/Repair fan-out rows (location/vendor/sidemark/description/room/reference propagation), and handleAddClaimItems_ now calls resyncClaimToSupabase_. All complex handlers (completeShipment / completeTask / transferItems / releaseItems / batch handlers / Stax) were verified — already covered by the router-level api_writeThrough_ / api_fullClientSync_ layer, no changes needed. Phase 2 (React Realtime postgres_changes subscriptions on inventory/tasks/repairs/will_calls/shipments/billing/claims/move_history) deferred to a later deploy. Also carries v38.71.0 (handleEnsureAuthUser_ / handleListMissingAuthUsers_) and v38.70.0 (handleAdminSetUserPassword_ escape-hatch). Pages through `auth.users` to find target by email, then `PUT /auth/v1/admin/users/{id}` with new password. Admin-only, rate-limited (20/min), min 8-char password. Self-serve "Forgot Password" flow unchanged — this is an escape hatch. Carries v38.63–69: Room→Reference column swap in all email/PDF item tables, `handleUpdateRepairNotes_` (office saves Repair Notes on Approved repair before Start), `handleGetPaymentTerms_`, `sbShipmentRow_` IK prefix strip, `handleSendRepairQuote_` photos URL fix, `handleResyncUsers_` admin tool, `lookupUser_` whitespace-normalized email match.
+- **StrideAPI.gs:** v38.72.0 (Web App v322) — session 72: Realtime sync Phase 1a complete. Filled the two genuine Supabase write-through gaps (handleUpdateInventoryItem_ fan-out to Tasks/Repairs, handleAddClaimItems_ claim mirror). Router-level api_writeThrough_ / api_fullClientSync_ already covers all complex handlers. **Phase 2 complete in React** (see `Cross-tab Realtime Sync` section above) — useSupabaseRealtime extended to subscribe on claims / move_history / dt_orders; useClaims + useOrders wired to entityEvents. No GAS changes needed for Phase 2. Also carries v38.71.0 (handleEnsureAuthUser_ / handleListMissingAuthUsers_) and v38.70.0 (handleAdminSetUserPassword_ escape-hatch). Pages through `auth.users` to find target by email, then `PUT /auth/v1/admin/users/{id}` with new password. Admin-only, rate-limited (20/min), min 8-char password. Self-serve "Forgot Password" flow unchanged — this is an escape hatch. Carries v38.63–69: Room→Reference column swap in all email/PDF item tables, `handleUpdateRepairNotes_` (office saves Repair Notes on Approved repair before Start), `handleGetPaymentTerms_`, `sbShipmentRow_` IK prefix strip, `handleSendRepairQuote_` photos URL fix, `handleResyncUsers_` admin tool, `lookupUser_` whitespace-normalized email match.
 - **StaxAutoPay.gs:** v4.6.0 — session 69 Phase 2f: Supabase write-through at end of `_prepareEligiblePendingInvoicesForChargeRun` (invoices + run log) and `_executeChargeRun` (invoices + charge log + exceptions + run log). **Requires SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY Script Properties on the Stax Auto Pay project** — see open items.
 - **Triggers.gs (client):** v4.7.1 — session 70: VIEW INSPECTION PHOTOS button in REPAIR_QUOTE email now opens the Source Task folder (looks up task row in Tasks sheet and reads Task ID cell's hyperlink, set by `startTask_` to the task's Drive folder). Previously fell back to the Item folder because Source Task ID stores plain text, not a hyperlink.
 - **Import.gs (client):** v4.3.0 — adds Reference column mapping (rolled out to all 49 active clients, session 70)

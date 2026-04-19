@@ -1,6 +1,6 @@
 # Stride GS App — Build Status & Continuation Guide
 
-**Last updated:** 2026-04-18 (session 72 — Expected calendar, calendar deep-links + edit/delete, admin-set-password, missing-auth-user detection, Realtime sync Phase 1a [inventory fan-out + addClaimItems mirrors], worktree `.env` gotcha. StrideAPI v38.72.0 / Web App v322)
+**Last updated:** 2026-04-18 (session 72 — Expected calendar, calendar deep-links + edit/delete, admin-set-password, missing-auth-user detection, Realtime sync Phase 1a + Phase 2 complete [GAS mirror fan-out gaps + React channels for claims/move_history/dt_orders], worktree `.env` gotcha. StrideAPI v38.72.0 / Web App v322)
 **StrideAPI.gs:** v38.72.0 (Web App v322)
 **Import.gs (client):** v4.3.0 (rolled out to all 49 active clients; Reference column now imported)
 **Emails.gs (client):** v4.6.0 (rolled out to all 49 active clients — Room column dropped, Reference takes its place)
@@ -137,6 +137,23 @@ Removed `!c.isTemplate` guard from `update-deployments.mjs`. Added `--name <part
 ---
 
 ## RECENT CHANGES (2026-04-18 session 72)
+
+### 7. Realtime sync Phase 2 — React postgres_changes subscriptions extended
+
+Major finding going in: `src/hooks/useSupabaseRealtime.ts` (pre-existing, mounted in `AppLayout`) already subscribed to **inventory, tasks, repairs, will_calls, shipments, billing, clients**. Only three read-mirror tables weren't wired: **claims, move_history, dt_orders**.
+
+**Changes in this session:**
+- `useSupabaseRealtime.ts`: new INSERT + UPDATE listeners on `public.claims` + `public.dt_orders`; INSERT-only listener on `public.move_history` (append-only audit log)
+- `entityEvents.ts`: extended `EntityType` union with `'claim' | 'move_history' | 'order'`
+- `useClaims.ts`: added `useEffect` subscribing to `entityEvents` and calling `refetch()` on `'claim'` events
+- `useOrders.ts`: same pattern for `'order'` events
+- `move_history` events currently land as no-ops (no hook listens) but the channel is live for when the Move History panel wants to subscribe
+
+**End-to-end behavior now:** any edit on any page in any open browser tab propagates to every other tab within ~1-2s with zero refresh. See the new `Cross-tab Realtime Sync` section in root `CLAUDE.md` for the full data-flow diagram, failure modes, and what's NOT in Realtime (Autocomplete DB, Stax tables, email templates).
+
+Deploy: source commit `1b80373`, dist bundle `index-B6rcl-zy.js` (1.59 MB, 1,969 modules). No GAS changes. No schema changes. No Supabase advisor issues (no DDL ran).
+
+---
 
 ### 6. Realtime sync Phase 1a — Supabase write-through gap audit + fixes (StrideAPI v38.72.0 / Web App v322)
 
