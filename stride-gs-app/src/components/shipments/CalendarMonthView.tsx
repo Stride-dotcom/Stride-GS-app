@@ -17,7 +17,11 @@ function toDateKey(d: Date): string {
   return `${yyyy}-${mm}-${dd}`;
 }
 
-const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+// Monday-start week. Header cells are in visual order Mon → Sun.
+const DOW = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+
+// Shift JS getDay() (0=Sun..6=Sat) into Monday-indexed slot (0=Mon..6=Sun).
+const mondayIndex = (jsDay: number) => (jsDay + 6) % 7;
 
 export function CalendarMonthView({ year, month, events, onEventClick }: Props) {
   const [hover, setHover] = useState<{ event: CalendarEvent; x: number; y: number } | null>(null);
@@ -25,7 +29,7 @@ export function CalendarMonthView({ year, month, events, onEventClick }: Props) 
 
   const grid = useMemo(() => {
     const first = new Date(year, month, 1);
-    const startDow = first.getDay();
+    const startDow = mondayIndex(first.getDay());
     const gridStart = new Date(year, month, 1 - startDow);
     const cells: Date[] = [];
     for (let i = 0; i < 42; i++) {

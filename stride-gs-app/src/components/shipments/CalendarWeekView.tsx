@@ -4,7 +4,7 @@ import { CalendarEventPill } from './CalendarEventPill';
 import { CalendarTooltip } from './CalendarTooltip';
 
 interface Props {
-  weekStart: Date; // Sunday
+  weekStart: Date; // Monday (session 73 — week now starts Monday)
   events: CalendarEvent[];
   onEventClick?: (event: CalendarEvent) => void;
 }

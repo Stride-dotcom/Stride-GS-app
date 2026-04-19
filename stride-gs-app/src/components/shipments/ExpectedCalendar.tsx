@@ -22,9 +22,12 @@ function toKey(d: Date) {
   return `${yyyy}-${mm}-${dd}`;
 }
 
+// Monday-start week (session 73). Shift JS getDay() (0=Sun..6=Sat) so
+// Monday becomes the 0-index, then walk back that many days.
 function startOfWeek(d: Date): Date {
   const result = new Date(d.getFullYear(), d.getMonth(), d.getDate());
-  result.setDate(result.getDate() - result.getDay());
+  const mondayOffset = (result.getDay() + 6) % 7;
+  result.setDate(result.getDate() - mondayOffset);
   return result;
 }
 
