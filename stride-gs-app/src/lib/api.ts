@@ -2075,6 +2075,10 @@ export interface UpdateBillingRowPayload {
   rate?: number;
   qty?: number;
   notes?: string;
+  // v38.77.0 — only honoured by GAS when the row's ledgerRowId starts with "MANUAL-"
+  svcCode?: string;
+  svcName?: string;
+  itemClass?: string;
 }
 
 export interface UpdateBillingRowResponse {
@@ -2095,6 +2099,62 @@ export function postUpdateBillingRow(
     payload as unknown as Record<string, unknown>,
     { clientSheetId },
     { signal }
+  );
+}
+
+// ─── Manual billing charges (v38.77.0) ──────────────────────────────────────
+
+export interface AddManualChargePayload {
+  serviceCode: string;
+  serviceName: string;
+  classCode?: string;
+  rate: number;
+  quantity: number;
+  description?: string;
+  notes?: string;
+  sidemark?: string;
+  createdBy?: string;
+}
+
+export interface AddManualChargeResponse {
+  success: boolean;
+  ledgerRowId?: string;
+  total?: number;
+  message?: string;
+  error?: string;
+}
+
+export function postAddManualCharge(
+  payload: AddManualChargePayload,
+  clientSheetId: string,
+  signal?: AbortSignal,
+) {
+  return apiPost<AddManualChargeResponse>(
+    'addManualCharge',
+    payload as unknown as Record<string, unknown>,
+    { clientSheetId },
+    { signal },
+  );
+}
+
+export interface VoidManualChargeResponse {
+  success: boolean;
+  ledgerRowId?: string;
+  newStatus?: string;
+  message?: string;
+  error?: string;
+}
+
+export function postVoidManualCharge(
+  ledgerRowId: string,
+  clientSheetId: string,
+  signal?: AbortSignal,
+) {
+  return apiPost<VoidManualChargeResponse>(
+    'voidManualCharge',
+    { ledgerRowId },
+    { clientSheetId },
+    { signal },
   );
 }
 

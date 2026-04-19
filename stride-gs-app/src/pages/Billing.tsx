@@ -10,7 +10,7 @@ import {
 import {
   Search, Download, ChevronUp, ChevronDown, ChevronRight, ArrowUpDown,
   Settings2, FileText, DollarSign, Send, Eye, ExternalLink,
-  CheckCircle, AlertTriangle, Loader2, Pencil, X, RefreshCw,
+  CheckCircle, AlertTriangle, Loader2, Pencil, X, RefreshCw, Plus,
 } from 'lucide-react';
 import { useVirtualRows } from '../hooks/useVirtualRows';
 import { theme } from '../styles/theme';
@@ -48,7 +48,10 @@ import { BillingDetailPanel } from '../components/shared/BillingDetailPanel';
 import { useTablePreferences } from '../hooks/useTablePreferences';
 import { InfoTooltip } from '../components/shared/InfoTooltip';
 import { QBOPushButton } from '../components/billing/QBOPushButton';
+import { AddChargeModal, type ManualChargeEditTarget } from '../components/billing/AddChargeModal';
 import { useQBO } from '../hooks/useQBO';
+import { useAuth } from '../contexts/AuthContext';
+import { postVoidManualCharge } from '../lib/api';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -636,6 +639,14 @@ export function Billing() {
   useEffect(() => { if (!reportLoading && !billingLoading && refreshing) setRefreshing(false); }, [reportLoading, billingLoading, refreshing]);
   const menuRef = useRef<HTMLDivElement>(null);
 
+  // ─── Manual charges (v38.77.0) — auth + modal state. The useCallbacks
+  //     that depend on showToast / loadReport are defined further down,
+  //     after those identifiers exist.
+  const { user } = useAuth();
+  const canManageManualCharges = user?.role === 'admin' || user?.role === 'staff';
+  const [showAddCharge, setShowAddCharge] = useState(false);
+  const [editingManualCharge, setEditingManualCharge] = useState<ManualChargeEditTarget | null>(null);
+
   // ─── Inline edit support (storage preview tab) ────────────────────────────
   const updatePreviewRow = useCallback((ledgerRowId: string, field: keyof BillingRow, value: string) => {
     setPreviewRows(prev => {
@@ -735,6 +746,42 @@ export function Billing() {
   // ─── Report tab inline edit — optimistic update + backend persist ─────────
   const [toast, setToast] = useState<string | null>(null);
   const showToast = useCallback((msg: string) => { setToast(msg); setTimeout(() => setToast(null), 3000); }, []);
+
+  // Manual charge callbacks (defined here so they can reference showToast +
+  // loadReport, which exist by this point in the component body).
+  const handleManualChargeSaved = useCallback((msg: string) => {
+    showToast(msg);
+    if (reportLoaded) void loadReport(true);
+  }, [reportLoaded, loadReport, showToast]);
+
+  const handleVoidManualCharge = useCallback(async (row: BillingRow) => {
+    if (!row.clientSheetId || !row.ledgerRowId.startsWith('MANUAL-')) return;
+    const res = await postVoidManualCharge(row.ledgerRowId, row.clientSheetId);
+    if (res.ok && res.data?.success) {
+      showToast(`Charge voided — ${row.svcName}`);
+      setSelectedBillingRow(null);
+      if (reportLoaded) void loadReport(true);
+    } else {
+      showToast(res.error || res.data?.error || 'Void failed');
+    }
+  }, [reportLoaded, loadReport, showToast]);
+
+  const openEditManualCharge = useCallback((row: BillingRow) => {
+    setEditingManualCharge({
+      ledgerRowId: row.ledgerRowId,
+      clientSheetId: row.clientSheetId || row.sourceSheetId || '',
+      clientName: row.clientName || row.client || '',
+      svcCode: row.svcCode,
+      svcName: row.svcName,
+      itemClass: row.itemClass,
+      qty: row.qty,
+      rate: row.rate,
+      description: row.description,
+      notes: row.notes,
+      sidemark: row.sidemark || '',
+    });
+    setSelectedBillingRow(null);
+  }, []);
 
   const saveReportField = useCallback(async (row: BillingRow, field: string, value: string) => {
     if (!row.clientSheetId) return;
@@ -1543,6 +1590,21 @@ export function Billing() {
                 onClick={loadReport}
               />
               <button onClick={clearReportFilters} style={{ padding: '7px 14px', fontSize: 12, fontWeight: 500, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', fontFamily: 'inherit', color: theme.colors.textSecondary, minHeight: 34 }}>Clear Filters</button>
+              {canManageManualCharges && (
+                <button
+                  onClick={() => setShowAddCharge(true)}
+                  title="Add a one-off billing charge for a client"
+                  style={{
+                    display: 'inline-flex', alignItems: 'center', gap: 6,
+                    padding: '7px 16px', fontSize: 12, fontWeight: 600, letterSpacing: '0.5px',
+                    border: 'none', borderRadius: 100,
+                    background: theme.colors.orange, color: '#fff',
+                    cursor: 'pointer', fontFamily: 'inherit', minHeight: 34,
+                  }}
+                >
+                  <Plus size={14} /> Add Charge
+                </button>
+              )}
               {reportData.length > 0 && (
                 <span style={{ fontSize: 12, color: theme.colors.textMuted }}>
                   {reportData.length} row{reportData.length !== 1 ? 's' : ''} loaded
@@ -1988,6 +2050,9 @@ export function Billing() {
         <BillingDetailPanel
           row={selectedBillingRow}
           onClose={() => setSelectedBillingRow(null)}
+          canManageManual={canManageManualCharges}
+          onEditManual={() => openEditManualCharge(selectedBillingRow)}
+          onVoidManual={() => handleVoidManualCharge(selectedBillingRow)}
           onNavigate={(type, id) => {
             setSelectedBillingRow(null);
             if (type === 'task') window.location.hash = `#/tasks?highlight=${id}`;
@@ -1995,6 +2060,22 @@ export function Billing() {
             else if (type === 'shipment') window.location.hash = `#/receiving?highlight=${id}`;
             else if (type === 'item') window.location.hash = `#/inventory?highlight=${id}`;
           }}
+        />
+      )}
+
+      {/* Add / Edit Manual Charge modal */}
+      {showAddCharge && (
+        <AddChargeModal
+          defaultClientSheetId={rptClientFilter.length === 1 ? (clientNameMap && Object.entries(clientNameMap).find(([, name]) => name === rptClientFilter[0])?.[0]) || '' : ''}
+          onClose={() => setShowAddCharge(false)}
+          onSaved={handleManualChargeSaved}
+        />
+      )}
+      {editingManualCharge && (
+        <AddChargeModal
+          editing={editingManualCharge}
+          onClose={() => setEditingManualCharge(null)}
+          onSaved={handleManualChargeSaved}
         />
       )}
       <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>

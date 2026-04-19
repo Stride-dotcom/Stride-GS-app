@@ -1,5 +1,12 @@
 /* ===================================================
-   StrideAPI.gs — v38.76.0 — 2026-04-19 PST — receiving add-on billing rows + live add/remove endpoints
+   StrideAPI.gs — v38.77.0 — 2026-04-19 PST — manual billing charges (add/void/edit)
+   v38.77.0: NEW endpoints addManualCharge + voidManualCharge for staff-created
+             billing rows from the React Billing page. Ledger Row ID format
+             "MANUAL-{ms}-{6char}" never collides with task/item/repair billing
+             IDs. handleUpdateBillingRow_ extended to allow svcCode/svcName/
+             itemClass edits on rows whose ID starts with "MANUAL-" (other
+             rows still locked to rate/qty/notes/sidemark/description).
+   v38.76.0: receiving add-on billing rows + live add/remove endpoints
    v38.74.0: Task Due Date + Priority support. handleGetTasks_ returns dueDate
              + priority. handleBatchCreateTasks_ accepts dueDate + priority from
              payload, auto-ensures columns exist in Tasks sheet. New endpoints:
@@ -3343,6 +3350,16 @@ function resyncEntityToSupabase_(entityType, tenantId, entityId) {
             }));
             break;
           case "billing":
+            // v38.77.0 — sidemark fix. Billing_Ledger doesn't have a Sidemark
+            // column on most clients (decision #18), so resolve from Inventory
+            // by Item ID. Fall back to the row's own Sidemark column if a newer
+            // client sheet has it. Manual charges store sidemark inline so the
+            // sheet read wins for those.
+            var bSidemark = String(row["Sidemark"] || "").trim();
+            if (!bSidemark) {
+              var bItemId = String(row["Item ID"] || "").trim();
+              if (bItemId) bSidemark = api_lookupSidemarkForItemId_(ss, bItemId);
+            }
             upResult = supabaseUpsert_("billing", sbBillingRow_(tenantId, {
               ledgerRowId: entityId, status: row["Status"], invoiceNo: row["Invoice #"],
               clientName: row["Client"], date: formatDate_(row["Date"]),
@@ -3351,7 +3368,8 @@ function resyncEntityToSupabase_(entityType, tenantId, entityId) {
               qty: row["Qty"], rate: row["Rate"], total: row["Total"],
               taskId: row["Task ID"], repairId: row["Repair ID"],
               shipmentNumber: row["Shipment #"], itemNotes: row["Item Notes"],
-              invoiceDate: formatDate_(row["Invoice Date"]), invoiceUrl: row["Invoice URL"]
+              invoiceDate: formatDate_(row["Invoice Date"]), invoiceUrl: row["Invoice URL"],
+              sidemark: bSidemark
             }));
             break;
         }
@@ -4260,6 +4278,31 @@ function doPost(e) {
           invalidateClientCache_(effectiveId);
           api_writeThrough_(r, "billing", effectiveId, String(payload.ledgerRowId || ""));
           return r;
+        });
+
+      case "addManualCharge":
+        return withStaffGuard_(callerEmail, function() {
+          return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
+            var r = handleAddManualCharge_(effectiveId, payload, callerEmail);
+            invalidateClientCache_(effectiveId);
+            try {
+              var parsed = JSON.parse(r.getContent());
+              if (parsed && parsed.success && parsed.ledgerRowId) {
+                api_writeThrough_(r, "billing", effectiveId, parsed.ledgerRowId);
+              }
+            } catch (_) { /* writeThrough is best-effort */ }
+            return r;
+          });
+        });
+
+      case "voidManualCharge":
+        return withStaffGuard_(callerEmail, function() {
+          return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
+            var r = handleVoidManualCharge_(effectiveId, payload);
+            invalidateClientCache_(effectiveId);
+            api_writeThrough_(r, "billing", effectiveId, String(payload.ledgerRowId || ""));
+            return r;
+          });
         });
 
       case "batchCreateTasks":
@@ -8016,6 +8059,7 @@ function handleUpdateBillingRow_(clientSheetId, payload) {
 
     // Apply updates
     var updated = {};
+    var isManual = ledgerRowId.indexOf("MANUAL-") === 0;
     if (payload.sidemark !== undefined && hMap["Sidemark"]) {
       sheet.getRange(matchRow, hMap["Sidemark"]).setValue(String(payload.sidemark));
       updated.sidemark = String(payload.sidemark);
@@ -8027,6 +8071,23 @@ function handleUpdateBillingRow_(clientSheetId, payload) {
     if (payload.notes !== undefined && hMap["Item Notes"]) {
       sheet.getRange(matchRow, hMap["Item Notes"]).setValue(String(payload.notes));
       updated.notes = String(payload.notes);
+    }
+    // v38.77.0 — manual charges only: svcCode/svcName/itemClass are editable
+    // because they were arbitrary at creation time. For task/item-derived
+    // billing rows these come from the source entity and shouldn't drift.
+    if (isManual) {
+      if (payload.svcCode !== undefined && hMap["Svc Code"]) {
+        sheet.getRange(matchRow, hMap["Svc Code"]).setValue(String(payload.svcCode));
+        updated.svcCode = String(payload.svcCode);
+      }
+      if (payload.svcName !== undefined && hMap["Svc Name"]) {
+        sheet.getRange(matchRow, hMap["Svc Name"]).setValue(String(payload.svcName));
+        updated.svcName = String(payload.svcName);
+      }
+      if (payload.itemClass !== undefined && hMap["Class"]) {
+        sheet.getRange(matchRow, hMap["Class"]).setValue(String(payload.itemClass));
+        updated.itemClass = String(payload.itemClass);
+      }
     }
 
     // Rate/Qty: recalculate Total = Rate × Qty
@@ -8066,6 +8127,228 @@ function handleUpdateBillingRow_(clientSheetId, payload) {
     });
   } catch (err) {
     return errorResponse_("Failed to update billing row: " + String(err), "SERVER_ERROR");
+  }
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Manual billing charges (v38.77.0)
+// ───────────────────────────────────────────────────────────────────────────
+
+/**
+ * Look up the Sidemark column value for a given Item ID by scanning the
+ * Inventory sheet. Returns "" on miss. Used by Supabase write-through to
+ * populate the billing.sidemark mirror column even though Billing_Ledger
+ * doesn't carry sidemark itself (decision #18).
+ */
+function api_lookupSidemarkForItemId_(ss, itemId) {
+  if (!ss || !itemId) return "";
+  try {
+    var inv = ss.getSheetByName("Inventory");
+    if (!inv || inv.getLastRow() < 2) return "";
+    var hMap = api_getHeaderMap_(inv);
+    var idCol = hMap["Item ID"];
+    var smCol = hMap["Sidemark"];
+    if (!idCol || !smCol) return "";
+    var lastRow = api_getLastDataRow_(inv);
+    var data = inv.getRange(2, 1, lastRow - 1, Math.max(idCol, smCol)).getValues();
+    var target = String(itemId).trim();
+    for (var i = 0; i < data.length; i++) {
+      if (String(data[i][idCol - 1] || "").trim() === target) {
+        return String(data[i][smCol - 1] || "").trim();
+      }
+    }
+    return "";
+  } catch (e) {
+    return "";
+  }
+}
+
+/**
+ * Generates a globally-unique ledger row ID for a manual charge. The
+ * "MANUAL-" prefix is the disambiguator used by handleUpdateBillingRow_ +
+ * handleVoidManualCharge_ + the React BillingDetailPanel — never collides
+ * with task/item/repair-derived IDs.
+ */
+function api_newManualLedgerId_() {
+  var ms = new Date().getTime();
+  var rand = Math.random().toString(36).slice(2, 8).toUpperCase();
+  return "MANUAL-" + ms + "-" + rand;
+}
+
+/**
+ * Add a manually-created billing row to a client's Billing_Ledger.
+ * Staff/admin only. Always Status=Unbilled. Total is server-computed from
+ * rate*qty so the client can't cook the books by sending a mismatched total.
+ */
+function handleAddManualCharge_(clientSheetId, payload, callerEmail) {
+  if (!clientSheetId) return errorResponse_("clientSheetId is required", "MISSING_PARAM");
+  payload = payload || {};
+
+  var serviceCode = String(payload.serviceCode || payload.svcCode || "").trim();
+  var serviceName = String(payload.serviceName || payload.svcName || "").trim();
+  if (!serviceCode) return errorResponse_("serviceCode is required", "INVALID_PARAMS");
+  if (!serviceName) return errorResponse_("serviceName is required", "INVALID_PARAMS");
+
+  var qty = Number(payload.quantity != null ? payload.quantity : payload.qty);
+  if (!qty || qty <= 0) qty = 1;
+  var rate = Number(payload.rate);
+  if (!isFinite(rate)) rate = 0;
+  var total = Math.round(rate * qty * 100) / 100;
+
+  var classCode = String(payload.classCode || payload.itemClass || "").trim();
+  var notes     = String(payload.notes || "").trim();
+  var sidemark  = String(payload.sidemark || "").trim();
+  var description = String(payload.description || serviceName).trim();
+  var createdBy = String(payload.createdBy || callerEmail || "").trim();
+
+  try {
+    var ss = SpreadsheetApp.openById(clientSheetId);
+    var sheet = ss.getSheetByName("Billing_Ledger");
+    if (!sheet) return errorResponse_("Billing_Ledger sheet not found", "SHEET_NOT_FOUND");
+
+    var hMap = api_getHeaderMap_(sheet);
+    if (!hMap["Ledger Row ID"]) return errorResponse_("Ledger Row ID column missing", "SCHEMA_ERROR");
+
+    var clientName = "";
+    try {
+      var settings = api_readSettings_(ss);
+      clientName = String(settings["CLIENT_NAME"] || "").trim();
+    } catch (_) {}
+
+    var ledgerRowId = api_newManualLedgerId_();
+    var dateStr = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+
+    // Some Billing_Ledger sheets don't have a Sidemark column (per decision
+    // #18). api_buildRow_ silently drops keys with no header match, so this
+    // is safe either way — sidemark is mirrored to Supabase below.
+    var rowObj = {
+      "Status":          "Unbilled",
+      "Invoice #":       "",
+      "Client":          clientName,
+      "Date":            dateStr,
+      "Svc Code":        serviceCode,
+      "Svc Name":        serviceName,
+      "Item ID":         "",
+      "Description":     description,
+      "Class":           classCode,
+      "Qty":             qty,
+      "Rate":            rate,
+      "Total":           total,
+      "Task ID":         "",
+      "Repair ID":       "",
+      "Shipment #":      "",
+      "Item Notes":      notes,
+      "Sidemark":        sidemark,
+      "Ledger Row ID":   ledgerRowId,
+      "Source":          "manual",
+      "Created By":      createdBy,
+      "Created At":      new Date().toISOString()
+    };
+
+    var lock = LockService.getDocumentLock();
+    var gotLock = false;
+    try { gotLock = lock.tryLock(15000); } catch (_) {}
+    if (!gotLock) return errorResponse_("Sheet busy — try again", "LOCK_TIMEOUT");
+    try {
+      var insertRow = api_getLastDataRow_(sheet) + 1;
+      var rowArr = api_buildRow_(hMap, rowObj);
+      sheet.getRange(insertRow, 1, 1, rowArr.length).setValues([rowArr]);
+    } finally {
+      try { lock.releaseLock(); } catch (_) {}
+    }
+
+    // Direct Supabase write — sidemark is included explicitly so the mirror
+    // is correct on first paint without relying on the Inventory lookup
+    // (manual charges have no Item ID anyway).
+    try {
+      supabaseUpsert_("billing", sbBillingRow_(clientSheetId, {
+        ledgerRowId:    ledgerRowId,
+        status:         "Unbilled",
+        invoiceNo:      "",
+        clientName:     clientName,
+        date:           dateStr,
+        svcCode:        serviceCode,
+        svcName:        serviceName,
+        category:       "",
+        itemId:         "",
+        description:    description,
+        itemClass:      classCode,
+        qty:            qty,
+        rate:           rate,
+        total:          total,
+        taskId:         "",
+        repairId:       "",
+        shipmentNumber: "",
+        itemNotes:      notes,
+        invoiceDate:    "",
+        invoiceUrl:     "",
+        sidemark:       sidemark
+      }));
+    } catch (sbErr) {
+      Logger.log("addManualCharge Supabase write-through failed (non-fatal): " + sbErr);
+    }
+
+    return jsonResponse_({
+      success: true,
+      ledgerRowId: ledgerRowId,
+      total: total,
+      message: "Manual charge added"
+    });
+  } catch (err) {
+    return errorResponse_("Failed to add manual charge: " + String(err), "SERVER_ERROR");
+  }
+}
+
+/**
+ * Soft-void a manual charge. Hard requirement: ledger row ID must start
+ * with "MANUAL-" (so this endpoint can never void a system-generated
+ * billing row by accident) and current status must be Unbilled.
+ */
+function handleVoidManualCharge_(clientSheetId, payload) {
+  if (!clientSheetId) return errorResponse_("clientSheetId is required", "MISSING_PARAM");
+  var ledgerRowId = String((payload || {}).ledgerRowId || "").trim();
+  if (!ledgerRowId) return errorResponse_("ledgerRowId is required", "INVALID_PARAMS");
+  if (ledgerRowId.indexOf("MANUAL-") !== 0) {
+    return errorResponse_("voidManualCharge only accepts MANUAL- ledger IDs", "INVALID_PARAMS");
+  }
+
+  try {
+    var ss = SpreadsheetApp.openById(clientSheetId);
+    var sheet = ss.getSheetByName("Billing_Ledger");
+    if (!sheet) return errorResponse_("Billing_Ledger sheet not found", "SHEET_NOT_FOUND");
+
+    var hMap = api_getHeaderMap_(sheet);
+    var idCol = hMap["Ledger Row ID"];
+    var statusCol = hMap["Status"];
+    if (!idCol || !statusCol) return errorResponse_("Required columns missing", "SCHEMA_ERROR");
+
+    var lastRow = api_getLastDataRow_(sheet);
+    if (lastRow < 2) return errorResponse_("Empty Billing_Ledger", "NOT_FOUND");
+
+    var idData = sheet.getRange(2, idCol, lastRow - 1, 1).getValues();
+    var matchRow = -1;
+    for (var i = 0; i < idData.length; i++) {
+      if (String(idData[i][0] || "").trim() === ledgerRowId) {
+        matchRow = i + 2;
+        break;
+      }
+    }
+    if (matchRow < 2) return errorResponse_("Manual charge not found: " + ledgerRowId, "NOT_FOUND");
+
+    var currentStatus = String(sheet.getRange(matchRow, statusCol).getValue() || "").trim();
+    if (currentStatus !== "Unbilled") {
+      return errorResponse_("Cannot void — status is " + currentStatus, "INVALID_STATUS");
+    }
+    sheet.getRange(matchRow, statusCol).setValue("Void");
+
+    return jsonResponse_({
+      success: true,
+      ledgerRowId: ledgerRowId,
+      newStatus: "Void",
+      message: "Manual charge voided"
+    });
+  } catch (err) {
+    return errorResponse_("Failed to void manual charge: " + String(err), "SERVER_ERROR");
   }
 }
 

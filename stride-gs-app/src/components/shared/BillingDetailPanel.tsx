@@ -1,5 +1,5 @@
-import React from 'react';
-import { X, DollarSign, Package, ClipboardList, FileText, ExternalLink } from 'lucide-react';
+import React, { useState } from 'react';
+import { X, DollarSign, Package, ClipboardList, FileText, ExternalLink, Pencil, Trash2 } from 'lucide-react';
 import { theme } from '../../styles/theme';
 import { fmtDate } from '../../lib/constants';
 import { DetailHeader } from './DetailHeader';
@@ -19,6 +19,10 @@ interface Props {
   row: BillingRow;
   onClose: () => void;
   onNavigate?: (type: 'task' | 'repair' | 'shipment' | 'item', id: string) => void;
+  /** v38.77.0 — manual-charge actions (only rendered when row is MANUAL- + caller is staff/admin). */
+  canManageManual?: boolean;
+  onEditManual?: () => void;
+  onVoidManual?: () => void | Promise<void>;
 }
 
 const STATUS_CFG: Record<string, { bg: string; color: string }> = {
@@ -87,11 +91,15 @@ function LinkChip({ label, id, onClick }: { label: string; id: string; onClick?:
 // Use shared fmtDate from constants — MM/DD/YY format
 const fmt = fmtDate;
 
-export function BillingDetailPanel({ row, onClose, onNavigate }: Props) {
+export function BillingDetailPanel({ row, onClose, onNavigate, canManageManual, onEditManual, onVoidManual }: Props) {
   const { isMobile } = useIsMobile();
   const { width: panelWidth, handleMouseDown: handleResizeMouseDown } = useResizablePanel(400, 'billing', isMobile);
   const sc = STATUS_CFG[row.status] || STATUS_CFG.Unbilled;
   const svc = SVC_CFG[row.svcCode] || { bg: '#F3F4F6', color: '#6B7280' };
+  const isManual = row.ledgerRowId.startsWith('MANUAL-');
+  const showManualActions = isManual && canManageManual;
+  const [confirmVoid, setConfirmVoid] = useState(false);
+  const [voiding, setVoiding] = useState(false);
 
   return (
     <>
@@ -176,6 +184,59 @@ export function BillingDetailPanel({ row, onClose, onNavigate }: Props) {
               </div>
               <div style={{ padding: '10px 14px', background: theme.colors.bgSubtle, borderRadius: 8, border: `1px solid ${theme.colors.borderLight}`, fontSize: 13, color: theme.colors.textSecondary, lineHeight: 1.5 }}>
                 {row.notes}
+              </div>
+            </div>
+          )}
+
+          {/* Manual charge actions (Edit + Void) — only for MANUAL- rows when
+              caller has staff/admin role. Void is a 2-step confirm and only
+              available while status is still Unbilled. */}
+          {showManualActions && (
+            <div style={{
+              marginBottom: 20, padding: '14px 16px',
+              background: '#FFF7F0', border: '1px solid #FED7AA',
+              borderRadius: 12,
+            }}>
+              <div style={{ fontSize: 11, fontWeight: 600, letterSpacing: '0.5px', color: '#9A3412', textTransform: 'uppercase', marginBottom: 10 }}>
+                Manual Charge
+              </div>
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                <button
+                  onClick={onEditManual}
+                  style={{
+                    display: 'inline-flex', alignItems: 'center', gap: 6,
+                    padding: '8px 14px', borderRadius: 100,
+                    background: theme.colors.orange, color: '#fff', border: 'none',
+                    cursor: 'pointer', fontSize: 11, fontWeight: 600, letterSpacing: '0.5px',
+                    fontFamily: 'inherit',
+                  }}
+                ><Pencil size={12} /> Edit Charge</button>
+                {row.status === 'Unbilled' && onVoidManual && (
+                  <button
+                    onClick={async () => {
+                      if (!confirmVoid) {
+                        setConfirmVoid(true);
+                        window.setTimeout(() => setConfirmVoid(false), 3000);
+                        return;
+                      }
+                      setVoiding(true);
+                      try { await onVoidManual(); } finally { setVoiding(false); }
+                    }}
+                    disabled={voiding}
+                    style={{
+                      display: 'inline-flex', alignItems: 'center', gap: 6,
+                      padding: '8px 14px', borderRadius: 100,
+                      background: confirmVoid ? '#B45A5A' : 'transparent',
+                      border: `1px solid ${confirmVoid ? '#B45A5A' : 'rgba(180,90,90,0.4)'}`,
+                      color: confirmVoid ? '#fff' : '#B45A5A',
+                      cursor: voiding ? 'not-allowed' : 'pointer',
+                      fontSize: 11, fontWeight: 600, letterSpacing: '0.5px',
+                      fontFamily: 'inherit', opacity: voiding ? 0.6 : 1,
+                    }}
+                  >
+                    <Trash2 size={12} /> {voiding ? 'Voiding…' : (confirmVoid ? 'Confirm Void' : 'Void Charge')}
+                  </button>
+                )}
               </div>
             </div>
           )}
