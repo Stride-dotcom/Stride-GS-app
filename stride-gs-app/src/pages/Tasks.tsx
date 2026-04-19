@@ -133,15 +133,30 @@ function cols() {
     col.accessor('sidemark', { header: 'Sidemark', size: 180, cell: i => <span style={{ color: theme.colors.textSecondary, fontSize: 12, maxWidth: 170, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'block' }}>{i.getValue()}</span> }),
     col.accessor('assignedTo', { header: 'Assigned', size: 90, filterFn: multiFilter, cell: i => <span style={{ fontSize: 12, color: i.getValue() ? theme.colors.text : theme.colors.textMuted }}>{i.getValue() || '\u2014'}</span> }),
     col.accessor('created', { header: 'Created', size: 100, cell: i => <span style={{ fontSize: 12, color: theme.colors.textSecondary }}>{fmt(i.getValue())}</span> }),
-    col.accessor('dueDate', { header: 'Due Date', size: 100, cell: i => {
-      const d = i.getValue();
-      if (!d) return <span style={{ color: theme.colors.textMuted, fontSize: 12 }}>—</span>;
-      const overdue = d < TODAY;
-      const isToday = d === TODAY;
-      const color = overdue ? '#DC2626' : isToday ? theme.colors.orange : theme.colors.textSecondary;
-      return <span style={{ fontSize: 12, color, fontWeight: overdue || isToday ? 600 : 400 }}>{fmt(d)}</span>;
-    } }),
-    col.accessor('priority', { header: 'Priority', size: 90, cell: i => {
+    col.accessor('dueDate', { header: 'Due Date', size: 100,
+      sortingFn: (rowA, rowB) => {
+        const a = rowA.original.dueDate ?? '';
+        const b = rowB.original.dueDate ?? '';
+        if (!a && !b) return 0;
+        if (!a) return 1;
+        if (!b) return -1;
+        return a.localeCompare(b);
+      },
+      cell: i => {
+        const d = i.getValue();
+        if (!d) return <span style={{ color: theme.colors.textMuted, fontSize: 12 }}>—</span>;
+        const overdue = d < TODAY;
+        const isToday = d === TODAY;
+        const color = overdue ? '#DC2626' : isToday ? theme.colors.orange : theme.colors.textSecondary;
+        return <span style={{ fontSize: 12, color, fontWeight: overdue || isToday ? 600 : 400 }}>{fmt(d)}</span>;
+      },
+    }),
+    col.accessor('priority', { header: 'Priority', size: 90,
+      sortingFn: (rowA, rowB) => {
+        const ORDER: Record<string, number> = { High: 0, Normal: 1 };
+        return (ORDER[rowA.original.priority ?? 'Normal'] ?? 1) - (ORDER[rowB.original.priority ?? 'Normal'] ?? 1);
+      },
+      cell: i => {
       const p = i.getValue() ?? 'Normal';
       const cfg = PRIORITY_CFG[p] || PRIORITY_CFG.Normal;
       const task = i.row.original;
@@ -272,7 +287,7 @@ export function Tasks() {
     }
   }, [tasks]);
 
-  const { sorting, setSorting, colVis, setColVis, columnOrder, setColumnOrder, statusFilter: sf, toggleStatus, clearStatusFilter } = useTablePreferences('tasks', [{ id: 'created', desc: true }], {}, DEFAULT_COL_ORDER);
+  const { sorting, setSorting, colVis, setColVis, columnOrder, setColumnOrder, statusFilter: sf, toggleStatus, clearStatusFilter } = useTablePreferences('tasks', [{ id: 'priority', desc: false }, { id: 'dueDate', desc: false }], {}, DEFAULT_COL_ORDER);
   const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([]);
   const [globalFilter, setGlobalFilter] = useState('');
   const [rowSel, setRowSel] = useState<RowSelectionState>({});

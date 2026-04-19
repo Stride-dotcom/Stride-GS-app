@@ -200,6 +200,8 @@ export function useTasks(autoFetch = true, filterClientSheetId?: string | string
         customPrice: b.customPrice || undefined,
         taskFolderUrl: b.taskFolderUrl || undefined,
         shipmentFolderUrl: b.shipmentFolderUrl || undefined,
+        dueDate: b.dueDate || undefined,
+        priority: b.priority || undefined,
       } as ApiTask));
     }
     // Individual path: resolve "(single)" clientName using the clients list

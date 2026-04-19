@@ -3117,6 +3117,8 @@ export interface BatchTask {
   cancelledAt?: string;
   taskFolderUrl?: string;
   shipmentFolderUrl?: string;
+  dueDate?: string;
+  priority?: string;
 }
 
 /** Lightweight repair from batch response */

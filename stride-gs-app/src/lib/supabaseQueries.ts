@@ -277,6 +277,8 @@ interface SupabaseTaskRow {
   started_at: string | null;
   billed: boolean | null;
   client_name: string | null;
+  due_date: string | null;
+  priority: string | null;
 }
 
 /**
@@ -992,6 +994,8 @@ function mapSupabaseTaskRow(row: SupabaseTaskRow, clientNameMap?: ClientNameMap)
     customPrice: row.custom_price ?? undefined,
     taskFolderUrl: row.task_folder_url || '',
     shipmentFolderUrl: row.shipment_folder_url || '',
+    dueDate: row.due_date || undefined,
+    priority: (row.priority === 'High' ? 'High' : 'Normal') as 'High' | 'Normal',
   };
 }
 

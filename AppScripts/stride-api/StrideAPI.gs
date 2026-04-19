@@ -1,5 +1,5 @@
 /* ===================================================
-   StrideAPI.gs — v38.74.0 — 2026-04-19 PST — task due dates + priority
+   StrideAPI.gs — v38.75.0 — 2026-04-19 PST — due_date + priority in sbTaskRow_ + resync
    v38.74.0: Task Due Date + Priority support. handleGetTasks_ returns dueDate
              + priority. handleBatchCreateTasks_ accepts dueDate + priority from
              payload, auto-ensures columns exist in Tasks sheet. New endpoints:
@@ -2414,6 +2414,8 @@ function sbTaskRow_(tenantId, task) {
     started_at:         String(task.startedAt || ""),
     billed:             !!task.billed,
     client_name:        String(task.clientName || ""),
+    due_date:           task.dueDate ? String(task.dueDate) : null,
+    priority:           String(task.priority || "Normal"),
     updated_at:         new Date().toISOString()
   };
 }
@@ -3304,7 +3306,9 @@ function resyncEntityToSupabase_(entityType, tenantId, entityId) {
               startedAt: formatDate_(row["Started At"]),
               billed: String(row["Billed"] || "").toLowerCase() === "true",
               clientName: row["_clientName"] || "",
-              taskFolderUrl: taskFolderUrlResync
+              taskFolderUrl: taskFolderUrlResync,
+              dueDate: formatDate_(row["Due Date"]) || null,
+              priority: String(row["Priority"] || "Normal").trim() || "Normal"
             }));
             break;
           case "repair":
@@ -3526,7 +3530,9 @@ function api_fullClientSync_(tenantId, entityTypes) {
                 billed: String(taskRows[j]["Billed"] || "").toLowerCase() === "true",
                 clientName: clientName || "",
                 taskFolderUrl: taskFolderUrls[tid] || "",
-                shipmentFolderUrl: shipFolderMap[tShipNo] || ""
+                shipmentFolderUrl: shipFolderMap[tShipNo] || "",
+                dueDate: formatDate_(taskRows[j]["Due Date"]) || null,
+                priority: String(taskRows[j]["Priority"] || "Normal").trim() || "Normal"
               }));
             }
             supabaseBatchUpsert_("tasks", taskSb);
