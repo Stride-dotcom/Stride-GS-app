@@ -1498,6 +1498,44 @@ function api_logSyncFailure_(tenantId, entityType, entityId, actionType, errorMe
 }
 
 /**
+ * api_auditLog_ — Write an audit log entry to Supabase entity_audit_log.
+ * Best-effort, never blocks or throws. Called from write handlers after mutation.
+ *
+ * @param {string} entityType - 'inventory', 'task', 'repair', 'will_call', 'shipment', 'billing', 'client'
+ * @param {string} entityId - Item ID, Task ID, Repair ID, etc.
+ * @param {string} tenantId - client spreadsheet ID (null for cross-tenant)
+ * @param {string} action - 'create', 'update', 'status_change', 'start', 'complete', 'cancel', 'release', 'transfer', 'assign'
+ * @param {Object} changes - { field: { old: X, new: Y } } or { summary: "text" }
+ * @param {string} performedBy - callerEmail
+ */
+function api_auditLog_(entityType, entityId, tenantId, action, changes, performedBy) {
+  try {
+    var url = prop_("SUPABASE_URL");
+    var key = prop_("SUPABASE_SERVICE_ROLE_KEY");
+    if (!url || !key) return;
+    UrlFetchApp.fetch(url + "/rest/v1/entity_audit_log", {
+      method: "POST",
+      headers: {
+        "Authorization": "Bearer " + key,
+        "apikey": key,
+        "Content-Type": "application/json",
+        "Prefer": "return=minimal"
+      },
+      payload: JSON.stringify({
+        entity_type: String(entityType || ""),
+        entity_id: String(entityId || ""),
+        tenant_id: tenantId ? String(tenantId) : null,
+        action: String(action || "update"),
+        changes: changes || {},
+        performed_by: String(performedBy || ""),
+        source: "gas"
+      }),
+      muteHttpExceptions: true
+    });
+  } catch (_) { /* best-effort, never block */ }
+}
+
+/**
  * Batch upsert rows to a Supabase table. Best-effort, never throws.
  * Sends array of rows in a single POST.
  * @param {string} table - Supabase table name
@@ -3887,6 +3925,7 @@ function doPost(e) {
           var r = handleCompleteShipment_(effectiveId, payload);
           invalidateClientCache_(effectiveId);
           api_fullClientSync_(effectiveId, ["inventory", "task", "shipment", "billing"]);
+          try { var _csJson = JSON.parse(r.getContent()); if (_csJson.success) api_auditLog_("shipment", _csJson.shipmentNo || "", effectiveId, "create", { itemCount: (payload.items || []).length, carrier: payload.carrier || "" }, callerEmail); } catch(_) {}
           // Phase 2 — write-through to item_id_ledger on success so future
           // collisions are caught. Idempotent (ON CONFLICT DO NOTHING).
           try {
@@ -3918,6 +3957,7 @@ function doPost(e) {
           api_notifySupabase_(r, { tenant_id: effectiveId, entity_type: "task", entity_id: String(payload.taskId || ""), action_type: "complete_task", requested_by: callerEmail, request_id: String(payload.requestId || "") });
           api_writeThrough_(r, "task", effectiveId, String(payload.taskId || ""));
           api_writeThrough_(r, "inventory", effectiveId, String(payload.itemId || ""));
+          api_auditLog_("task", String(payload.taskId || ""), effectiveId, "complete", { status: { old: "In Progress", new: "Completed" }, result: payload.resultValue || "" }, callerEmail);
           return r;
         });
 
@@ -3926,6 +3966,7 @@ function doPost(e) {
           var r = handleRequestRepairQuote_(effectiveId, payload, callerEmail);
           invalidateClientCache_(effectiveId);
           api_fullClientSync_(effectiveId, ["repair"]);
+          api_auditLog_("repair", "", effectiveId, "create", { summary: "Repair quote requested for items: " + JSON.stringify(payload.itemIds || payload.items || []).substring(0, 200) }, callerEmail);
           return r;
         });
       case "sendRepairQuote":
@@ -3934,6 +3975,7 @@ function doPost(e) {
           invalidateClientCache_(effectiveId);
           api_notifySupabase_(r, { tenant_id: effectiveId, entity_type: "repair", entity_id: String(payload.repairId || ""), action_type: "send_repair_quote", requested_by: callerEmail, request_id: String(payload.requestId || "") });
           api_writeThrough_(r, "repair", effectiveId, String(payload.repairId || ""));
+          api_auditLog_("repair", String(payload.repairId || ""), effectiveId, "status_change", { status: { old: "Pending Quote", new: "Quote Sent" } }, callerEmail);
           return r;
         });
 
@@ -3943,6 +3985,7 @@ function doPost(e) {
           invalidateClientCache_(effectiveId);
           api_notifySupabase_(r, { tenant_id: effectiveId, entity_type: "repair", entity_id: String(payload.repairId || ""), action_type: "respond_repair_quote", requested_by: callerEmail, request_id: String(payload.requestId || "") });
           api_writeThrough_(r, "repair", effectiveId, String(payload.repairId || ""));
+          api_auditLog_("repair", String(payload.repairId || ""), effectiveId, "status_change", { decision: payload.decision || "", status: { new: payload.decision === "Approve" ? "Approved" : "Declined" } }, callerEmail);
           return r;
         });
 
@@ -3963,6 +4006,7 @@ function doPost(e) {
           invalidateClientCache_(effectiveId);
           api_notifySupabase_(r, { tenant_id: effectiveId, entity_type: "repair", entity_id: String(payload.repairId || ""), action_type: "complete_repair", requested_by: callerEmail, request_id: String(payload.requestId || "") });
           api_writeThrough_(r, "repair", effectiveId, String(payload.repairId || ""));
+          api_auditLog_("repair", String(payload.repairId || ""), effectiveId, "complete", { status: { new: "Complete" }, result: payload.resultValue || "" }, callerEmail);
           return r;
         });
 
@@ -3972,6 +4016,7 @@ function doPost(e) {
           invalidateClientCache_(effectiveId);
           api_notifySupabase_(r, { tenant_id: effectiveId, entity_type: "repair", entity_id: String(payload.repairId || ""), action_type: "start_repair", requested_by: callerEmail, request_id: String(payload.requestId || "") });
           api_writeThrough_(r, "repair", effectiveId, String(payload.repairId || ""));
+          api_auditLog_("repair", String(payload.repairId || ""), effectiveId, "start", { status: { new: "In Progress" } }, callerEmail);
           return r;
         });
 
@@ -3981,6 +4026,7 @@ function doPost(e) {
           invalidateClientCache_(effectiveId);
           api_notifySupabase_(r, { tenant_id: effectiveId, entity_type: "task", entity_id: String(payload.taskId || ""), action_type: "cancel_task", requested_by: callerEmail, request_id: String(payload.requestId || "") });
           api_writeThrough_(r, "task", effectiveId, String(payload.taskId || ""));
+          api_auditLog_("task", String(payload.taskId || ""), effectiveId, "cancel", { status: { new: "Cancelled" } }, callerEmail);
           return r;
         });
 
@@ -3995,6 +4041,7 @@ function doPost(e) {
           invalidateClientCache_(effectiveId);
           api_notifySupabase_(r, { tenant_id: effectiveId, entity_type: "repair", entity_id: String(payload.repairId || ""), action_type: "cancel_repair", requested_by: callerEmail, request_id: String(payload.requestId || "") });
           api_writeThrough_(r, "repair", effectiveId, String(payload.repairId || ""));
+          api_auditLog_("repair", String(payload.repairId || ""), effectiveId, "cancel", { status: { new: "Cancelled" } }, callerEmail);
           return r;
         });
 
@@ -4042,6 +4089,7 @@ function doPost(e) {
           invalidateClientCache_(effectiveId);
           api_notifySupabase_(r, { tenant_id: effectiveId, entity_type: "will_call", entity_id: "", action_type: "create_will_call", requested_by: callerEmail, request_id: String(payload.requestId || "") });
           api_fullClientSync_(effectiveId, ["will_call"]);
+          try { var _wcJson = JSON.parse(r.getContent()); if (_wcJson.success) api_auditLog_("will_call", _wcJson.wcNumber || "", effectiveId, "create", { pickupParty: payload.pickupParty || "", itemCount: (payload.itemIds || []).length }, callerEmail); } catch(_) {}
           return r;
         });
 
@@ -4051,6 +4099,7 @@ function doPost(e) {
           invalidateClientCache_(effectiveId);
           api_notifySupabase_(r, { tenant_id: effectiveId, entity_type: "will_call", entity_id: String(payload.wcNumber || ""), action_type: "process_wc_release", requested_by: callerEmail, request_id: String(payload.requestId || "") });
           api_fullClientSync_(effectiveId, ["will_call", "inventory", "billing"]);
+          api_auditLog_("will_call", String(payload.wcNumber || ""), effectiveId, "release", { summary: "Will call released" }, callerEmail);
           return r;
         });
 
@@ -4116,6 +4165,7 @@ function doPost(e) {
               api_ledgerUpdateStatus_(releasedIds, "released", null);
             }
           } catch (lerr) { Logger.log("releaseItems ledger update error (non-fatal): " + lerr); }
+          for (var _ri = 0; _ri < releasedIds.length; _ri++) { api_auditLog_("inventory", String(releasedIds[_ri]), clientSheetId, "release", { status: { new: "Released" } }, callerEmail); }
           return r;
         });
 
@@ -4207,6 +4257,7 @@ function doPost(e) {
           invalidateClientCache_(effectiveId);
           api_notifySupabase_(r, { tenant_id: effectiveId, entity_type: "task", entity_id: String(payload.taskId || ""), action_type: "start_task", requested_by: callerEmail, request_id: String(payload.requestId || "") });
           api_writeThrough_(r, "task", effectiveId, String(payload.taskId || ""));
+          api_auditLog_("task", String(payload.taskId || ""), effectiveId, "start", { status: { new: "In Progress" } }, callerEmail);
           return r;
         });
 
@@ -4231,6 +4282,8 @@ function doPost(e) {
           invalidateClientCache_(effectiveId);
           api_notifySupabase_(r, { tenant_id: effectiveId, entity_type: "inventory", entity_id: String(payload.itemId || ""), action_type: "update_inventory_item", requested_by: callerEmail, request_id: String(payload.requestId || "") });
           api_writeThrough_(r, "inventory", effectiveId, String(payload.itemId || ""));
+          var _updFields = {}; for (var _uk in payload) { if (_uk !== 'itemId' && _uk !== 'requestId') _updFields[_uk] = payload[_uk]; }
+          api_auditLog_("inventory", String(payload.itemId || ""), effectiveId, "update", _updFields, callerEmail);
           return r;
         });
 
