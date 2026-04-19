@@ -113,6 +113,13 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
               itemId: it.itemId, description: it.description, qty: it.qty,
               released: it.released, vendor: it.vendor || undefined,
               location: it.location || undefined, status: it.status || undefined,
+              // v38.72.0 — include item-level fields so the header sidemark
+              // chip (and other item-field overlays) don't drop out on the
+              // GAS-fallback enrichment path. Supabase fast path already
+              // populates these; we just need to match shape here.
+              sidemark: it.sidemark || undefined,
+              room: it.room || undefined,
+              itemClass: it.itemClass || undefined,
             })),
             itemCount: match.items?.length || match.itemsCount || wcProp.itemCount,
             pickupPartyPhone: match.pickupPhone || undefined,
