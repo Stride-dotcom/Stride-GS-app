@@ -64,7 +64,8 @@ export interface Task {
   trackingNumber?: string;
   assignedTo?: string;
   created: string; // ISO date
-  dueDate?: string; // ISO date
+  dueDate?: string; // ISO date YYYY-MM-DD
+  priority?: 'High' | 'Normal';
   startedAt?: string; // ISO date
   completedAt?: string; // ISO date
   cancelledAt?: string; // ISO date

@@ -339,6 +339,8 @@ export interface ApiTask {
   shipmentPhotosUrl?: string;
   inspectionPhotosUrl?: string;
   repairPhotosUrl?: string;
+  dueDate?: string;
+  priority?: string;
 }
 
 export interface TasksResponse {
@@ -2325,6 +2327,8 @@ export interface BatchCreateTasksItem {
 export interface BatchCreateTasksPayload {
   items: BatchCreateTasksItem[];
   svcCodes: string[];
+  dueDate?: string | null;
+  priority?: string;
 }
 
 export interface BatchCreateTasksResponse {
@@ -2342,6 +2346,32 @@ export function postBatchCreateTasks(
 ) {
   return apiPost<BatchCreateTasksResponse>(
     'batchCreateTasks',
+    payload as unknown as Record<string, unknown>,
+    { clientSheetId },
+    { signal }
+  );
+}
+
+export function postUpdateTaskDueDate(
+  payload: { taskId: string; dueDate: string | null },
+  clientSheetId: string,
+  signal?: AbortSignal
+) {
+  return apiPost<{ success: boolean; taskId: string; dueDate: string | null }>(
+    'updateTaskDueDate',
+    payload as unknown as Record<string, unknown>,
+    { clientSheetId },
+    { signal }
+  );
+}
+
+export function postUpdateTaskPriority(
+  payload: { taskId: string; priority: string },
+  clientSheetId: string,
+  signal?: AbortSignal
+) {
+  return apiPost<{ success: boolean; taskId: string; priority: string }>(
+    'updateTaskPriority',
     payload as unknown as Record<string, unknown>,
     { clientSheetId },
     { signal }

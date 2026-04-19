@@ -4,6 +4,7 @@ export const EVENT_COLORS: Record<CalendarEventType, { bg: string; border: strin
   shipment: { bg: 'rgba(232,105,42,0.15)', border: '#E8692A', text: '#B34710', label: 'Shipment' },
   willcall: { bg: 'rgba(74,138,92,0.15)', border: '#4A8A5C', text: '#2F6B42', label: 'Will Call' },
   repair:   { bg: 'rgba(40,130,200,0.15)', border: '#2882C8', text: '#1A5E94', label: 'Repair' },
+  task:     { bg: 'rgba(124,58,237,0.12)', border: '#7C3AED', text: '#5B21B6', label: 'Task' },
 };
 
 interface Props {

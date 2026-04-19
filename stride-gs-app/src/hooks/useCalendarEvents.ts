@@ -9,18 +9,19 @@
 import { useMemo } from 'react';
 import { useWillCalls } from './useWillCalls';
 import { useRepairs } from './useRepairs';
+import { useTasks } from './useTasks';
 import { useExpectedShipments } from './useExpectedShipments';
 import { useAuth } from '../contexts/AuthContext';
 
-export type CalendarEventType = 'shipment' | 'willcall' | 'repair';
+export type CalendarEventType = 'shipment' | 'willcall' | 'repair' | 'task';
 
 export interface CalendarEvent {
   id: string;
   type: CalendarEventType;
   date: string; // YYYY-MM-DD
   client: string;
-  clientSheetId?: string; // populated for willcall + repair; used for deep-link
-  sourceId?: string;      // raw entity id (wcNumber, repairId) or expected-shipment id
+  clientSheetId?: string; // populated for willcall + repair + task; used for deep-link
+  sourceId?: string;      // raw entity id (wcNumber, repairId, taskId) or expected-shipment id
   label: string;
   details: {
     title?: string;
@@ -33,6 +34,7 @@ export interface CalendarEvent {
     status?: string;
     description?: string;
     repairVendor?: string;
+    priority?: string;
   };
 }
 
@@ -52,11 +54,14 @@ function normalizeDate(raw: string | undefined | null): string | null {
   } catch { return null; }
 }
 
+const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
+
 export function useCalendarEvents() {
   const { user } = useAuth();
   const { items: expectedItems } = useExpectedShipments();
   const { willCalls, loading: wcLoading } = useWillCalls(true);
   const { repairs, loading: rpLoading } = useRepairs(true);
+  const { tasks, loading: tkLoading } = useTasks(true);
 
   const accessibleClientNames = useMemo<Set<string> | null>(() => {
     if (user?.role === 'client' && user.accessibleClientNames?.length) {
@@ -66,6 +71,7 @@ export function useCalendarEvents() {
   }, [user?.role, user?.accessibleClientNames]);
 
   const events = useMemo<CalendarEvent[]>(() => {
+    const now = Date.now();
     const out: CalendarEvent[] = [];
 
     // 1. Expected shipments
@@ -138,13 +144,44 @@ export function useCalendarEvents() {
       });
     }
 
+    // 4. Tasks — show on their dueDate
+    // Include: Open/In Progress with dueDate, OR Completed within 30 days with dueDate
+    for (const tk of tasks) {
+      const d = normalizeDate(tk.dueDate);
+      if (!d) continue;
+      if (accessibleClientNames && !accessibleClientNames.has(tk.clientName)) continue;
+      const isActive = tk.status === 'Open' || tk.status === 'In Progress';
+      const isRecentlyCompleted = tk.status === 'Completed' && tk.completedAt
+        ? (now - new Date(tk.completedAt).getTime()) < THIRTY_DAYS_MS
+        : false;
+      if (!isActive && !isRecentlyCompleted) continue;
+      out.push({
+        id: `tk-${tk.taskId}`,
+        type: 'task',
+        date: d,
+        client: tk.clientName,
+        clientSheetId: tk.clientSheetId,
+        sourceId: tk.taskId,
+        label: tk.taskId,
+        details: {
+          title: tk.taskId,
+          description: tk.description,
+          vendor: tk.vendor,
+          status: tk.status,
+          priority: tk.priority,
+          notes: tk.taskNotes,
+        },
+      });
+    }
+
     // Sort by date asc
     out.sort((a, b) => a.date.localeCompare(b.date));
     return out;
-  }, [expectedItems, willCalls, repairs, accessibleClientNames]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [expectedItems, willCalls, repairs, tasks, accessibleClientNames]);
 
   return {
     events,
-    loading: wcLoading || rpLoading,
+    loading: wcLoading || rpLoading || tkLoading,
   };
 }

@@ -71,6 +71,7 @@ export function CalendarTooltip({ event, x, y }: Props) {
       {fmt('Status', event.details.status)}
       {fmt('Repair', event.details.repairVendor)}
       {fmt('Desc', event.details.description)}
+      {fmt('Priority', event.details.priority)}
       {fmt('Notes', event.details.notes)}
     </div>
   );

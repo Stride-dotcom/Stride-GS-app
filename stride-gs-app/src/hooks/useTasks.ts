@@ -68,6 +68,8 @@ function mapToAppTask(api: ApiTask): Task {
     sidemark: api.sidemark || undefined,
     assignedTo: api.assignedTo || undefined,
     created: api.created,
+    dueDate: api.dueDate || undefined,
+    priority: (api.priority === 'High' ? 'High' : 'Normal') as 'High' | 'Normal',
     startedAt: api.startedAt || undefined,
     completedAt: api.completedAt || undefined,
     cancelledAt: api.cancelledAt || undefined,

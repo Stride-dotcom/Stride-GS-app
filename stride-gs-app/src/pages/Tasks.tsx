@@ -30,7 +30,7 @@ import { ConfirmDialog } from '../components/shared/ConfirmDialog';
 import { BulkResultSummary } from '../components/shared/BulkResultSummary';
 import { BulkReassignModal } from '../components/shared/BulkReassignModal';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { isApiConfigured, postRequestRepairQuote, postBatchCancelTasks, postBatchReassignTasks, type BatchMutationResult } from '../lib/api';
+import { isApiConfigured, postRequestRepairQuote, postBatchCancelTasks, postBatchReassignTasks, postUpdateTaskPriority, type BatchMutationResult } from '../lib/api';
 import { mergePreflightSkips } from '../lib/batchLoop';
 import { applyBulkPatch, revertBulkPatchForFailures } from '../lib/optimisticBulk';
 import { useTasks } from '../hooks/useTasks';
@@ -69,12 +69,17 @@ const RESULT_CFG: Record<string, { bg: string; text: string }> = {
   Pass: { bg: '#F0FDF4', text: '#15803D' },
   Fail: { bg: '#FEF2F2', text: '#DC2626' },
 };
+const PRIORITY_CFG: Record<string, { bg: string; text: string }> = {
+  High:   { bg: '#FEF2F2', text: '#DC2626' },
+  Normal: { bg: '#F3F4F6', text: '#6B7280' },
+};
 
 const COL_LABELS: Record<string, string> = {
   taskId: 'Task ID', type: 'Type', status: 'Status', itemId: 'Item',
   clientName: 'Client', vendor: 'Vendor', description: 'Description',
   location: 'Location', sidemark: 'Sidemark', assignedTo: 'Assigned',
-  created: 'Created', completedAt: 'Completed', result: 'Result',
+  created: 'Created', dueDate: 'Due Date', priority: 'Priority',
+  completedAt: 'Completed', result: 'Result',
   taskNotes: 'Notes', svcCode: 'Service', billed: 'Billed',
 };
 const TOGGLEABLE = Object.keys(COL_LABELS);
@@ -82,8 +87,10 @@ const TOGGLEABLE = Object.keys(COL_LABELS);
 const DEFAULT_COL_ORDER = [
   'select', 'taskId', 'type', 'status', 'itemId', 'clientName', 'vendor',
   'description', 'location', 'sidemark', 'assignedTo', 'created',
-  'completedAt', 'result', 'taskNotes', 'svcCode', 'billed', 'actions',
+  'dueDate', 'priority', 'completedAt', 'result', 'taskNotes', 'svcCode', 'billed', 'actions',
 ];
+
+const TODAY = new Date().toISOString().slice(0, 10);
 
 const multiFilter: FilterFn<Task> = (row, colId, val: string[]) => {
   if (!val || !val.length) return true;
@@ -126,6 +133,27 @@ function cols() {
     col.accessor('sidemark', { header: 'Sidemark', size: 180, cell: i => <span style={{ color: theme.colors.textSecondary, fontSize: 12, maxWidth: 170, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'block' }}>{i.getValue()}</span> }),
     col.accessor('assignedTo', { header: 'Assigned', size: 90, filterFn: multiFilter, cell: i => <span style={{ fontSize: 12, color: i.getValue() ? theme.colors.text : theme.colors.textMuted }}>{i.getValue() || '\u2014'}</span> }),
     col.accessor('created', { header: 'Created', size: 100, cell: i => <span style={{ fontSize: 12, color: theme.colors.textSecondary }}>{fmt(i.getValue())}</span> }),
+    col.accessor('dueDate', { header: 'Due Date', size: 100, cell: i => {
+      const d = i.getValue();
+      if (!d) return <span style={{ color: theme.colors.textMuted, fontSize: 12 }}>—</span>;
+      const overdue = d < TODAY;
+      const isToday = d === TODAY;
+      const color = overdue ? '#DC2626' : isToday ? theme.colors.orange : theme.colors.textSecondary;
+      return <span style={{ fontSize: 12, color, fontWeight: overdue || isToday ? 600 : 400 }}>{fmt(d)}</span>;
+    } }),
+    col.accessor('priority', { header: 'Priority', size: 90, cell: i => {
+      const p = i.getValue() ?? 'Normal';
+      const cfg = PRIORITY_CFG[p] || PRIORITY_CFG.Normal;
+      const task = i.row.original;
+      if (p === 'Normal') return <span style={{ fontSize: 11, color: theme.colors.textMuted }}>—</span>;
+      return (
+        <span
+          onClick={e => { e.stopPropagation(); (window as any).__toggleTaskPriority?.(task.taskId, task.clientSheetId || task.clientId, p); }}
+          style={{ display: 'inline-block', padding: '2px 10px', borderRadius: 12, fontSize: 11, fontWeight: 600, background: cfg.bg, color: cfg.text, cursor: 'pointer', userSelect: 'none' }}
+          title="Click to toggle priority"
+        >{p}</span>
+      );
+    } }),
     col.accessor('completedAt', { header: 'Completed', size: 100, cell: i => <span style={{ fontSize: 12, color: theme.colors.textMuted }}>{fmt(i.getValue())}</span> }),
     col.accessor('result', { header: 'Result', size: 80, cell: i => i.getValue() ? <Badge t={i.getValue()!} c={RESULT_CFG[i.getValue()!]} /> : <span style={{ color: theme.colors.textMuted }}>{'\u2014'}</span> }),
     col.accessor('taskNotes', { header: 'Notes', size: 200, cell: i => <span style={{ color: theme.colors.textSecondary, fontSize: 12, maxWidth: 190, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'block' }}>{i.getValue() || '\u2014'}</span> }),
@@ -184,6 +212,13 @@ export function Tasks() {
   const selectedTask = useMemo(() => tasks.find(t => t.taskId === selectedTaskId) ?? null, [tasks, selectedTaskId]);
   // Bridge for column cell access to component state
   (window as any).__openTaskDetail = (task: Task) => setSelectedTaskId(task.taskId);
+  (window as any).__toggleTaskPriority = async (taskId: string, clientSheetId: string, currentPriority: string) => {
+    if (!apiConfigured || !clientSheetId) return;
+    const newPriority = currentPriority === 'High' ? 'Normal' : 'High';
+    applyTaskPatch(taskId, { priority: newPriority as 'High' | 'Normal' });
+    const resp = await postUpdateTaskPriority({ taskId, priority: newPriority }, clientSheetId);
+    if (!resp.ok) clearTaskPatch(taskId);
+  };
 
   // Effect 1: Route state OR ?open= query param → store pendingOpen + auto-load
   useEffect(() => {
@@ -538,7 +573,7 @@ export function Tasks() {
             })}</tr>)}</thead>
             <tbody>
               {virtualRows.length > 0 && <tr style={{ height: virtualRows[0].start }}><td colSpan={table.getVisibleFlatColumns().length} /></tr>}
-              {virtualRows.map(vRow => { const row = allRows[vRow.index]; const t = row.original; const isActivePanel = selectedTask?.taskId === t.taskId; const statusBg = row.getIsSelected() ? theme.colors.orangeLight : isActivePanel ? '#FEF3EE' : t.status === 'Completed' ? '#F0FDF4' : (t.status === 'In Progress' || (t as any).startedAt) ? '#EFF6FF' : 'transparent'; return <tr key={row.id} style={{ transition: 'background 0.1s', background: statusBg, cursor: 'pointer', borderLeft: isActivePanel ? `3px solid ${theme.colors.orange}` : '3px solid transparent' }} onClick={(e) => { if (!(e.target as HTMLElement).closest('input[type="checkbox"]') && !(e.target as HTMLElement).closest('.row-actions')) setSelectedTaskId(t.taskId); }} onMouseEnter={e => { if (!row.getIsSelected() && !isActivePanel) e.currentTarget.style.background = theme.colors.bgSubtle; const a = e.currentTarget.querySelector('.row-actions') as HTMLElement; if (a) a.style.opacity = '0.6'; }} onMouseLeave={e => { e.currentTarget.style.background = statusBg; const a = e.currentTarget.querySelector('.row-actions') as HTMLElement; if (a) a.style.opacity = '0'; }}>{row.getVisibleCells().map(cell => <td key={cell.id} style={{ ...td, ...(cell.column.id === 'select' ? { position: 'sticky' as const, left: 0, zIndex: 1, background: '#fff' } : {}) }}>{flexRender(cell.column.columnDef.cell, cell.getContext())}</td>)}</tr>; })}
+              {virtualRows.map(vRow => { const row = allRows[vRow.index]; const t = row.original; const isActivePanel = selectedTask?.taskId === t.taskId; const isOverdue = !!t.dueDate && t.dueDate < TODAY && (t.status === 'Open' || t.status === 'In Progress'); const statusBg = row.getIsSelected() ? theme.colors.orangeLight : isActivePanel ? '#FEF3EE' : isOverdue ? '#FFF5F5' : t.status === 'Completed' ? '#F0FDF4' : (t.status === 'In Progress' || (t as any).startedAt) ? '#EFF6FF' : 'transparent'; return <tr key={row.id} style={{ transition: 'background 0.1s', background: statusBg, cursor: 'pointer', borderLeft: isActivePanel ? `3px solid ${theme.colors.orange}` : '3px solid transparent' }} onClick={(e) => { if (!(e.target as HTMLElement).closest('input[type="checkbox"]') && !(e.target as HTMLElement).closest('.row-actions')) setSelectedTaskId(t.taskId); }} onMouseEnter={e => { if (!row.getIsSelected() && !isActivePanel) e.currentTarget.style.background = theme.colors.bgSubtle; const a = e.currentTarget.querySelector('.row-actions') as HTMLElement; if (a) a.style.opacity = '0.6'; }} onMouseLeave={e => { e.currentTarget.style.background = statusBg; const a = e.currentTarget.querySelector('.row-actions') as HTMLElement; if (a) a.style.opacity = '0'; }}>{row.getVisibleCells().map(cell => <td key={cell.id} style={{ ...td, ...(cell.column.id === 'select' ? { position: 'sticky' as const, left: 0, zIndex: 1, background: '#fff' } : {}) }}>{flexRender(cell.column.columnDef.cell, cell.getContext())}</td>)}</tr>; })}
               {virtualRows.length > 0 && <tr style={{ height: totalHeight - (virtualRows[virtualRows.length - 1].end) }}><td colSpan={table.getVisibleFlatColumns().length} /></tr>}
             </tbody>
           </table>

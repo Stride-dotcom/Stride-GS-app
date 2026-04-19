@@ -1,5 +1,12 @@
 /* ===================================================
-   StrideAPI.gs — v38.73.0 — 2026-04-19 PST — syncPriceListFromSupabase endpoint
+   StrideAPI.gs — v38.74.0 — 2026-04-19 PST — task due dates + priority
+   v38.74.0: Task Due Date + Priority support. handleGetTasks_ returns dueDate
+             + priority. handleBatchCreateTasks_ accepts dueDate + priority from
+             payload, auto-ensures columns exist in Tasks sheet. New endpoints:
+             updateTaskDueDate, updateTaskPriority (lightweight save-on-blur).
+             api_ensureTaskColumns_ helper adds "Due Date"/"Priority" headers to
+             any Tasks sheet that's missing them (idempotent, called on first batch
+             create per client).
    v38.73.0: Admin-only endpoint that pulls service_catalog rows from Supabase
              and writes them back to the Master Price List `Price_List` tab via
              header-based column mapping. Closes the loop so edits made on the
@@ -4284,6 +4291,20 @@ function doPost(e) {
           api_writeThrough_(r, "task", effectiveId, String(payload.taskId || ""));
           return r;
         });
+      case "updateTaskDueDate":
+        return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
+          var r = handleUpdateTaskDueDate_(effectiveId, payload);
+          invalidateClientCache_(effectiveId);
+          api_writeThrough_(r, "task", effectiveId, String(payload.taskId || ""));
+          return r;
+        });
+      case "updateTaskPriority":
+        return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
+          var r = handleUpdateTaskPriority_(effectiveId, payload);
+          invalidateClientCache_(effectiveId);
+          api_writeThrough_(r, "task", effectiveId, String(payload.taskId || ""));
+          return r;
+        });
 
       case "updateInventoryItem":
         return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
@@ -7081,7 +7102,9 @@ function handleGetTasks_(clientSheetId) {
           shipmentFolderUrl: shipFolderMap[shipNo] || "",
           shipmentPhotosUrl: shipmentPhotosUrl,
           inspectionPhotosUrl: inspectionPhotosUrl,
-          repairPhotosUrl: repairPhotosUrl
+          repairPhotosUrl: repairPhotosUrl,
+          dueDate: formatDate_(row["Due Date"] || ""),
+          priority: String(row["Priority"] || "Normal").trim() || "Normal"
         });
       }
     } catch (err) {
@@ -9400,6 +9423,25 @@ function api_lookupSvcName_(ss, svcCode) {
     }
   } catch (e) {}
   return svcCode;
+}
+
+/**
+ * Ensures "Due Date" and "Priority" columns exist in a Tasks sheet.
+ * Appends missing headers after the last column. Idempotent — safe to call
+ * on every batch create. Re-read the header map after calling this.
+ */
+function api_ensureTaskColumns_(taskSheet) {
+  if (!taskSheet || taskSheet.getLastRow() < 1) return;
+  var maxCol = taskSheet.getLastColumn();
+  var headerRow = taskSheet.getRange(1, 1, 1, maxCol).getValues()[0];
+  var hasDueDate = false, hasPriority = false;
+  for (var i = 0; i < headerRow.length; i++) {
+    var h = String(headerRow[i] || "").trim();
+    if (h === "Due Date")  hasDueDate  = true;
+    if (h === "Priority")  hasPriority = true;
+  }
+  if (!hasDueDate)  { taskSheet.getRange(1, maxCol + 1).setValue("Due Date");  maxCol++; }
+  if (!hasPriority) { taskSheet.getRange(1, maxCol + 1).setValue("Priority"); }
 }
 
 // ─── Storage Charges Date Math Helpers ──────────────────────────────────────
@@ -17897,6 +17939,8 @@ function handleBatchCreateTasks_(clientSheetId, payload) {
   var taskSheet = ss.getSheetByName("Tasks");
   if (!taskSheet) return errorResponse_("Tasks sheet not found in client spreadsheet", "NOT_FOUND");
 
+  // Ensure Due Date + Priority columns exist (idempotent — adds headers if missing)
+  api_ensureTaskColumns_(taskSheet);
   var taskHMap = api_getHeaderMap_(taskSheet);
 
   // Build idempotency map of open tasks (itemId|SVCCODE → true)
@@ -17936,6 +17980,13 @@ function handleBatchCreateTasks_(clientSheetId, payload) {
       var taskId = svcCode + "-" + itemId + "-" + counter;
       pendingIds.push(taskId);
 
+      // Calculate due date from payload or default to blank
+      var taskDueDate = "";
+      if (payload.dueDate) {
+        try { taskDueDate = new Date(payload.dueDate + "T00:00:00"); } catch (_) {}
+      }
+      var taskPriority = String(payload.priority || "Normal").trim() || "Normal";
+
       // Build task row using existing api_buildRow_ helper
       var rowValues = api_buildRow_(taskHMap, {
         "Task ID":      taskId,
@@ -17957,7 +18008,9 @@ function handleBatchCreateTasks_(clientSheetId, payload) {
         "Billed":       false,
         "Assigned To":  "",
         "Start Task":   false,
-        "Started At":   ""
+        "Started At":   "",
+        "Due Date":     taskDueDate,
+        "Priority":     taskPriority
       });
 
       batchRows.push(rowValues);
@@ -19471,6 +19524,69 @@ function handleUpdateTaskCustomPrice_(clientSheetId, payload) {
     return jsonResponse_({ success: true, taskId: taskId, customPrice: priceValue === "" ? null : priceValue, message: clearPrice ? "Custom price cleared" : "Custom price saved" });
   } catch (err) {
     return errorResponse_("Failed to update custom price: " + String(err), "SERVER_ERROR");
+  }
+}
+
+// ─── updateTaskDueDate — save due date on a single task (save-on-blur) ───────
+
+function handleUpdateTaskDueDate_(clientSheetId, payload) {
+  var taskId  = String((payload || {}).taskId  || "").trim();
+  var dueDate = (payload || {}).dueDate; // YYYY-MM-DD string or null/empty to clear
+  if (!taskId) return errorResponse_("taskId is required", "INVALID_PARAMS");
+
+  try {
+    var ss = SpreadsheetApp.openById(clientSheetId);
+    var sheet = ss.getSheetByName("Tasks");
+    if (!sheet) return errorResponse_("Tasks sheet not found", "SHEET_NOT_FOUND");
+
+    api_ensureTaskColumns_(sheet);
+    var taskMap = api_getHeaderMap_(sheet);
+    var idCol  = taskMap["Task ID"];
+    var ddCol  = taskMap["Due Date"];
+    if (!idCol) return errorResponse_("Task ID column not found", "SCHEMA_ERROR");
+    if (!ddCol) return errorResponse_("Due Date column not found", "SCHEMA_ERROR");
+
+    var taskRowNum = api_findRowById_(sheet, idCol, taskId);
+    if (taskRowNum < 2) return errorResponse_("Task not found: " + taskId, "NOT_FOUND");
+
+    var cellValue = "";
+    if (dueDate && String(dueDate).trim()) {
+      try { cellValue = new Date(String(dueDate).trim() + "T00:00:00"); } catch (_) { cellValue = ""; }
+    }
+    sheet.getRange(taskRowNum, ddCol).setValue(cellValue);
+    return jsonResponse_({ success: true, taskId: taskId, dueDate: dueDate || null });
+  } catch (err) {
+    return errorResponse_("Failed to update due date: " + String(err), "SERVER_ERROR");
+  }
+}
+
+// ─── updateTaskPriority — save priority on a single task (optimistic toggle) ─
+
+function handleUpdateTaskPriority_(clientSheetId, payload) {
+  var taskId   = String((payload || {}).taskId   || "").trim();
+  var priority = String((payload || {}).priority || "Normal").trim();
+  if (!taskId) return errorResponse_("taskId is required", "INVALID_PARAMS");
+  if (priority !== "High" && priority !== "Normal") priority = "Normal";
+
+  try {
+    var ss = SpreadsheetApp.openById(clientSheetId);
+    var sheet = ss.getSheetByName("Tasks");
+    if (!sheet) return errorResponse_("Tasks sheet not found", "SHEET_NOT_FOUND");
+
+    api_ensureTaskColumns_(sheet);
+    var taskMap = api_getHeaderMap_(sheet);
+    var idCol  = taskMap["Task ID"];
+    var prCol  = taskMap["Priority"];
+    if (!idCol) return errorResponse_("Task ID column not found", "SCHEMA_ERROR");
+    if (!prCol) return errorResponse_("Priority column not found", "SCHEMA_ERROR");
+
+    var taskRowNum = api_findRowById_(sheet, idCol, taskId);
+    if (taskRowNum < 2) return errorResponse_("Task not found: " + taskId, "NOT_FOUND");
+
+    sheet.getRange(taskRowNum, prCol).setValue(priority);
+    return jsonResponse_({ success: true, taskId: taskId, priority: priority });
+  } catch (err) {
+    return errorResponse_("Failed to update priority: " + String(err), "SERVER_ERROR");
   }
 }
 
