@@ -9,7 +9,7 @@
  * Ported from the Stride WMS app.
  */
 import { useEffect, useState } from 'react';
-import { ArrowLeft, Tag } from 'lucide-react';
+import { ArrowLeft, Tag, Edit3 } from 'lucide-react';
 import { theme } from '../../styles/theme';
 import { supabase } from '../../lib/supabase';
 import { useIsMobile } from '../../hooks/useIsMobile';
@@ -17,6 +17,7 @@ import { useMessages, type Conversation } from '../../hooks/useMessages';
 import { MessageList } from './MessageList';
 import { ConversationView } from './ConversationView';
 import { MessageInputBar } from './MessageInputBar';
+import { ComposeMessageModal } from './ComposeMessageModal';
 
 export function MessagesPage() {
   const v2 = theme.v2;
@@ -34,9 +35,25 @@ export function MessagesPage() {
   } = useMessages();
 
   const [authUserId, setAuthUserId] = useState<string | null>(null);
+  const [composeOpen, setComposeOpen] = useState(false);
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => setAuthUserId(data.session?.user.id ?? null));
   }, []);
+
+  // After compose: open the newly-sent thread so the user lands on their
+  // message. Entity-linked threads open via entity key; direct threads open
+  // via the first recipient's id.
+  const handleCompose = async (params: Parameters<typeof sendMessage>[0]) => {
+    const msg = await sendMessage(params);
+    if (msg) {
+      if (params.entityType && params.entityId) {
+        void openThread({ entityType: params.entityType, entityId: params.entityId });
+      } else if (params.recipientIds.length > 0) {
+        void openThread(`direct:${params.recipientIds[0]}`);
+      }
+    }
+    return msg;
+  };
 
   // Mark the whole thread read whenever it changes (and is non-empty).
   useEffect(() => {
@@ -82,18 +99,28 @@ export function MessagesPage() {
         fontFamily: theme.typography.fontFamily,
       }}>
         {!activeThreadKey ? (
-          <MessageList
-            conversations={conversations}
-            activeKey={activeThreadKey}
-            loading={loading}
-            onSelect={handleSelect}
-          />
+          <>
+            <ComposeHeader onCompose={() => setComposeOpen(true)} />
+            <MessageList
+              conversations={conversations}
+              activeKey={activeThreadKey}
+              loading={loading}
+              onSelect={handleSelect}
+            />
+          </>
         ) : (
           <>
             <ThreadHeader conversation={active} onBack={() => closeThread()} showBack />
             <ConversationView messages={thread} currentUserId={authUserId} loading={threadLoading} />
             <MessageInputBar onSend={handleSend} />
           </>
+        )}
+        {composeOpen && (
+          <ComposeMessageModal
+            onClose={() => setComposeOpen(false)}
+            onSend={handleCompose}
+            currentUserId={authUserId}
+          />
         )}
       </div>
     );
@@ -108,12 +135,17 @@ export function MessagesPage() {
       background: v2.colors.bgPage,
       fontFamily: theme.typography.fontFamily,
     }}>
-      <MessageList
-        conversations={conversations}
-        activeKey={activeThreadKey}
-        loading={loading}
-        onSelect={handleSelect}
-      />
+      <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0, borderRight: `1px solid ${v2.colors.border}` }}>
+        <ComposeHeader onCompose={() => setComposeOpen(true)} />
+        <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+          <MessageList
+            conversations={conversations}
+            activeKey={activeThreadKey}
+            loading={loading}
+            onSelect={handleSelect}
+          />
+        </div>
+      </div>
       <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
         {active ? (
           <>
@@ -130,6 +162,42 @@ export function MessagesPage() {
           </div>
         )}
       </div>
+      {composeOpen && (
+        <ComposeMessageModal
+          onClose={() => setComposeOpen(false)}
+          onSend={handleCompose}
+          currentUserId={authUserId}
+        />
+      )}
+    </div>
+  );
+}
+
+// ─── Compose header (top of the conversation list) ─────────────────────────
+
+function ComposeHeader({ onCompose }: { onCompose: () => void }) {
+  const v2 = theme.v2;
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10,
+      padding: '10px 14px',
+      background: v2.colors.bgWhite,
+      borderBottom: `1px solid ${v2.colors.border}`,
+    }}>
+      <div style={{ fontSize: 13, fontWeight: 600, color: v2.colors.text }}>Messages</div>
+      <button
+        onClick={onCompose}
+        style={{
+          display: 'inline-flex', alignItems: 'center', gap: 6,
+          padding: '7px 14px', fontSize: 11, fontWeight: 700,
+          letterSpacing: '1.5px', textTransform: 'uppercase',
+          border: 'none', borderRadius: 100,
+          background: v2.colors.accent, color: '#fff',
+          cursor: 'pointer', fontFamily: 'inherit',
+        }}
+      >
+        <Edit3 size={12} /> New Message
+      </button>
     </div>
   );
 }

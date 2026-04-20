@@ -10,6 +10,7 @@ import { useLocations } from '../hooks/useLocations';
 import { useClients } from '../hooks/useClients';
 import { useAutocomplete } from '../hooks/useAutocomplete';
 import { useReceivingAddons, type ReceivingAddon } from '../hooks/useReceivingAddons';
+import { ReceivingRowMedia } from '../components/media/ReceivingRowMedia';
 import { isApiConfigured, postCompleteShipment, postCheckItemIdsAvailable, fetchAutoIdSetting, fetchNextItemId } from '../lib/api';
 import type { ShipmentItemPayload } from '../lib/api';
 import { ProcessingOverlay } from '../components/shared/ProcessingOverlay';
@@ -957,6 +958,13 @@ function NewShipmentForm() {
                             </div>
                           )}
                         </div>
+                      </div>
+                      {/* Inline media — photos (camera + upload), docs, quick notes.
+                          Attaches to entity_type='inventory' with entity_id = item.itemId
+                          so everything persists to the real inventory row once the
+                          shipment completes. Hidden until an Item ID exists. */}
+                      <div style={{ marginTop: 12 }}>
+                        <ReceivingRowMedia itemId={item.itemId} tenantId={clientSheetId} />
                       </div>
                     </td>
                   </tr>
