@@ -65,13 +65,6 @@ const SYSTEM_TEMPLATES = [
   { key: 'ONBOARDING_EMAIL', name: 'Onboarding / Getting Started', desc: 'Setup instructions and getting started guide for new clients' },
 ];
 
-const DOC_TEMPLATES = [
-  { key: 'DOC_RECEIVING', name: 'Receiving Document', desc: 'PDF receipt generated when a shipment is completed' },
-  { key: 'DOC_TASK_WORK_ORDER', name: 'Task Work Order', desc: 'PDF work order generated from task detail panel' },
-  { key: 'DOC_REPAIR_WORK_ORDER', name: 'Repair Work Order', desc: 'PDF work order for repairs' },
-  { key: 'DOC_WILL_CALL_RELEASE', name: 'Will Call Release', desc: 'PDF release document for will call pickups' },
-];
-
 const MOCK_PRICING = [
   { code: 'RCVG', name: 'Receiving', xs: 5, s: 8, m: 12, l: 20, xl: 35 },
   { code: 'INSP', name: 'Inspection', xs: 5, s: 8, m: 12, l: 20, xl: 35 },
@@ -3215,43 +3208,11 @@ export function Settings() {
                 );
               })}
 
-              {/* Document Templates */}
-              <div style={{ ...sectionTitle, marginTop: 20, marginBottom: 12 }}>Document Templates ({DOC_TEMPLATES.length})</div>
-              {docTestError && (
-                <div style={{ fontSize: 12, color: '#B91C1C', background: '#FEF2F2', border: '1px solid #FECACA', padding: '6px 10px', borderRadius: 6, marginBottom: 10, display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <AlertCircle size={12} /> {docTestError}
-                </div>
-              )}
-              {DOC_TEMPLATES.map(e => {
-                const live = getLiveTemplate(e.key);
-                const loading = !!docTestLoading[e.key];
-                return (
-                  <div key={e.key} style={{ ...card, display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 16px' }}>
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                        <span style={{ fontSize: 13, fontWeight: 600 }}>{e.name}</span>
-                        <span style={{ fontSize: 10, fontFamily: 'monospace', color: theme.colors.textMuted, background: theme.colors.bgSubtle, padding: '1px 6px', borderRadius: 4 }}>{e.key}</span>
-                        <span style={{ fontSize: 9, padding: '1px 6px', borderRadius: 4, background: '#FEF3C7', color: '#92400E', fontWeight: 600 }}>DOC</span>
-                      </div>
-                      <div style={{ fontSize: 12, color: theme.colors.textSecondary, marginTop: 3 }}>{e.desc}</div>
-                    </div>
-                    <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexShrink: 0, marginLeft: 12 }}>
-                      {live && (
-                        <button onClick={() => setEditingTemplate(live)} style={{ padding: '5px 12px', fontSize: 11, fontWeight: 500, border: `1px solid ${theme.colors.border}`, borderRadius: 6, background: '#fff', cursor: 'pointer', fontFamily: 'inherit', color: theme.colors.textSecondary }}>Edit</button>
-                      )}
-                      <button
-                        onClick={() => handleTestGenerateDoc(e.key)}
-                        disabled={loading}
-                        title="Generate sample PDF in new tab"
-                        style={{ padding: '5px 14px', fontSize: 11, fontWeight: 500, border: `1px solid ${theme.colors.border}`, borderRadius: 6, background: '#fff', cursor: loading ? 'default' : 'pointer', fontFamily: 'inherit', color: theme.colors.textSecondary, display: 'flex', alignItems: 'center', gap: 5 }}
-                      >
-                        {loading ? <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} /> : <ExternalLink size={11} />}
-                        {loading ? 'Generating…' : 'Test'}
-                      </button>
-                    </div>
-                  </div>
-                );
-              })}
+              {/* Session 74: the hardcoded "Document Templates" section was
+                  removed here — it duplicated the dynamic "Documents" list
+                  below (which reads live rows from Supabase). PDF generation
+                  is unaffected: GAS pulls the HTML by template_key from the
+                  Master Price List cache, not from this React page. */}
 
               {/* Claim Email Templates (merged from Claims tab) */}
               <div style={{ ...sectionTitle, marginTop: 20, marginBottom: 12 }}>Claim Emails ({CLAIM_EMAIL_TEMPLATES.length})</div>
@@ -3296,23 +3257,54 @@ export function Settings() {
               {/* Document Templates (work orders, receiving, invoice) — Phase 6 extension */}
               {(() => {
                 const docs = liveTemplates.filter(t => t.category === 'document' || t.category === 'doc');
+                // Session 74: friendly per-key descriptions. The Supabase
+                // `notes` column lists the token reference (useful when
+                // editing the HTML body), but that's noise in the list
+                // view — show a one-line "what is this for" blurb here
+                // instead. Unknown keys fall back to `d.notes`.
+                const DOC_DESCRIPTIONS: Record<string, string> = {
+                  DOC_INVOICE: 'Customer invoice — itemized charges, totals, and payment terms.',
+                  DOC_QUOTE: 'Customer quote — services and pricing with expiration date.',
+                  DOC_RECEIVING: 'Receiving confirmation — issued when a shipment is completed.',
+                  DOC_TASK_WORK_ORDER: 'Task work order — generated when a task is started.',
+                  DOC_REPAIR_WORK_ORDER: 'Repair work order — generated when a repair is started.',
+                  DOC_WILL_CALL_RELEASE: 'Will call release — issued when items leave the warehouse.',
+                };
+                // Clean titles — the raw `subject` column embeds tokens
+                // like "Quote {{QUOTE_NUMBER}}" (correct for the rendered
+                // PDF subject line) but looks noisy in the card header.
+                const DOC_TITLES: Record<string, string> = {
+                  DOC_INVOICE: 'Invoice',
+                  DOC_QUOTE: 'Quote',
+                  DOC_RECEIVING: 'Receiving',
+                  DOC_TASK_WORK_ORDER: 'Task Work Order',
+                  DOC_REPAIR_WORK_ORDER: 'Repair Work Order',
+                  DOC_WILL_CALL_RELEASE: 'Will Call Release',
+                };
                 return docs.length > 0 ? (
                   <>
                     <div style={{ ...sectionTitle, marginTop: 20, marginBottom: 4 }}>Documents ({docs.length})</div>
                     <div style={{ fontSize: 11, color: theme.colors.textMuted, marginBottom: 12 }}>
-                      PDF templates rendered by GAS when generating receiving, work orders, will call releases, and invoices. DOC_INVOICE: edits apply once the body contains the <code style={{ fontFamily: 'monospace' }}>{'{{LINE_ITEMS_HTML}}'}</code> token (otherwise the legacy Drive Doc template is used).
+                      PDF templates rendered by the server when generating receiving receipts, work orders, will call releases, quotes, and invoices. Edit the HTML in the editor; the token reference is shown there.
                     </div>
+                    {docTestError && (
+                      <div style={{ fontSize: 12, color: '#B91C1C', background: '#FEF2F2', border: '1px solid #FECACA', padding: '6px 10px', borderRadius: 6, marginBottom: 10, display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <AlertCircle size={12} /> {docTestError}
+                      </div>
+                    )}
                     {docs.map(d => {
                       const loading = !!docTestLoading[d.key];
+                      const desc = DOC_DESCRIPTIONS[d.key] || d.notes;
+                      const title = DOC_TITLES[d.key] || d.subject || d.key;
                       return (
                         <div key={d.key} style={{ ...card, display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 16px' }}>
                           <div style={{ flex: 1, minWidth: 0 }}>
                             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                              <span style={{ fontSize: 13, fontWeight: 600 }}>{d.subject || d.key}</span>
+                              <span style={{ fontSize: 13, fontWeight: 600 }}>{title}</span>
                               <span style={{ fontSize: 10, fontFamily: 'monospace', color: theme.colors.textMuted, background: theme.colors.bgSubtle, padding: '1px 6px', borderRadius: 4, flexShrink: 0 }}>{d.key}</span>
                             </div>
-                            {d.notes && (
-                              <div style={{ fontSize: 12, color: theme.colors.textSecondary, marginTop: 3 }}>{d.notes}</div>
+                            {desc && (
+                              <div style={{ fontSize: 12, color: theme.colors.textSecondary, marginTop: 3 }}>{desc}</div>
                             )}
                           </div>
                           <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexShrink: 0, marginLeft: 12 }}>
