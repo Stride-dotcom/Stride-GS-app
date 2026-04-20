@@ -115,25 +115,34 @@ function buildLineItemsRows(calc: CalcResult, quote: Quote): string {
     );
   }
 
-  // Section B — per-class rows (not aggregated — sample PDF shows the
-  // full breakdown so customers can see exactly what each size costs).
-  // Class column shows the ID only ("XS"), Rate is the per-class rate
-  // pulled from the service definition or the cell.
+  // Section B — aggregate by serviceId. One row per service with the
+  // summed qty and summed total. User explicitly asked for the service
+  // summary (not per-class rows): the previous sample only appeared to
+  // show per-class rows because every charge was on XS; for a real
+  // multi-class quote (XS+S+M) the per-class expansion read as noise.
+  // Class + Rate cells are blank on aggregated rows since neither has
+  // a single value across sizes — the detail still lives in the
+  // per-class qty breakdown under "Item Quantities by Size Class".
+  interface Agg { id: string; name: string; code: string; qty: number; amount: number; }
+  const byService = new Map<string, Agg>();
+  for (const li of calc.lineItems) {
+    const prev = byService.get(li.serviceId);
+    if (prev) { prev.qty += li.qty; prev.amount += li.amount; }
+    else byService.set(li.serviceId, {
+      id: li.serviceId, name: li.serviceName, code: li.serviceCode, qty: li.qty, amount: li.amount,
+    });
+  }
   parts.push(
     '<tr><td colspan="5" style="' + sectionHeaderStyle + '">Services</td></tr>'
   );
-  for (const li of calc.lineItems) {
-    // Class label: the raw class.id only (never the expanded name).
-    // CalcLineItem carries classId directly; fall back to className
-    // stripped of parens if we ever lose the id wire.
-    const classLabel = (li.classId || li.className || '').toUpperCase();
+  for (const agg of byService.values()) {
     parts.push(
       '<tr>' +
-      '<td>' + escHtml(li.serviceName) + (li.serviceCode ? ' <span style="color:#94A3B8;font-size:9pt;">' + escHtml(li.serviceCode) + '</span>' : '') + '</td>' +
-      '<td>' + escHtml(classLabel) + '</td>' +
-      '<td class="num">' + fmt$(li.rate) + '</td>' +
-      '<td class="num">' + String(li.qty) + '</td>' +
-      '<td class="num" style="font-weight:600;">' + fmt$(li.amount) + '</td>' +
+      '<td>' + escHtml(agg.name) + (agg.code ? ' <span style="color:#94A3B8;font-size:9pt;">' + escHtml(agg.code) + '</span>' : '') + '</td>' +
+      '<td></td>' +
+      '<td class="num"></td>' +
+      '<td class="num">' + String(agg.qty) + '</td>' +
+      '<td class="num" style="font-weight:600;">' + fmt$(agg.amount) + '</td>' +
       '</tr>'
     );
   }
@@ -234,15 +243,26 @@ function generateFallbackHtml(
     </tr>`;
   }
 
-  linesHtml += `<tr><td colspan="5" style="padding:8px 12px;font-weight:700;font-size:11px;color:#64748B;text-transform:uppercase;letter-spacing:0.5px;background:#F8FAFC;border-bottom:1px solid #E2E8F0">Services</td></tr>`;
+  // Aggregate by service in the fallback too — user wants one line per
+  // service (Receiving / Inspection / Pull Prep / Storage / ...), never
+  // per-class rows.
+  interface FbAgg2 { id: string; name: string; code: string; qty: number; amount: number; }
+  const byServiceFb = new Map<string, FbAgg2>();
   for (const li of result.lineItems) {
-    const classLabel = (li.classId || li.className || '').toUpperCase();
+    const prev = byServiceFb.get(li.serviceId);
+    if (prev) { prev.qty += li.qty; prev.amount += li.amount; }
+    else byServiceFb.set(li.serviceId, {
+      id: li.serviceId, name: li.serviceName, code: li.serviceCode, qty: li.qty, amount: li.amount,
+    });
+  }
+  linesHtml += `<tr><td colspan="5" style="padding:8px 12px;font-weight:700;font-size:11px;color:#64748B;text-transform:uppercase;letter-spacing:0.5px;background:#F8FAFC;border-bottom:1px solid #E2E8F0">Services</td></tr>`;
+  for (const agg of byServiceFb.values()) {
     linesHtml += `<tr>
-      <td style="padding:6px 12px;border-bottom:1px solid #E2E8F0;font-size:12px">${escHtml(li.serviceName)}${li.serviceCode ? ` <span style="color:#94A3B8">${escHtml(li.serviceCode)}</span>` : ''}</td>
-      <td style="padding:6px 12px;border-bottom:1px solid #E2E8F0;font-size:12px">${escHtml(classLabel)}</td>
-      <td style="padding:6px 12px;border-bottom:1px solid #E2E8F0;font-size:12px;text-align:right">${fmt$(li.rate)}</td>
-      <td style="padding:6px 12px;border-bottom:1px solid #E2E8F0;font-size:12px;text-align:right">${li.qty}</td>
-      <td style="padding:6px 12px;border-bottom:1px solid #E2E8F0;font-size:12px;text-align:right;font-weight:600">${fmt$(li.amount)}</td>
+      <td style="padding:6px 12px;border-bottom:1px solid #E2E8F0;font-size:12px">${escHtml(agg.name)}${agg.code ? ` <span style="color:#94A3B8">${escHtml(agg.code)}</span>` : ''}</td>
+      <td style="padding:6px 12px;border-bottom:1px solid #E2E8F0;font-size:12px"></td>
+      <td style="padding:6px 12px;border-bottom:1px solid #E2E8F0;font-size:12px;text-align:right"></td>
+      <td style="padding:6px 12px;border-bottom:1px solid #E2E8F0;font-size:12px;text-align:right">${agg.qty}</td>
+      <td style="padding:6px 12px;border-bottom:1px solid #E2E8F0;font-size:12px;text-align:right;font-weight:600">${fmt$(agg.amount)}</td>
     </tr>`;
   }
 
