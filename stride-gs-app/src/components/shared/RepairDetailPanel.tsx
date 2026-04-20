@@ -598,7 +598,16 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
           <EntityAttachments
             photos={{ entityType: 'repair', entityId: repair.repairId, tenantId: repair.clientSheetId }}
             documents={{ contextType: 'repair', contextId: repair.repairId, tenantId: repair.clientSheetId }}
-            notes={{ entityType: 'repair', entityId: repair.repairId }}
+            notes={{
+              entityType: 'repair',
+              entityId: repair.repairId,
+              // Session 74: item + source-task threads as sibling pills
+              // so the warehouse tech sees everything tied to the item.
+              relatedEntities: [
+                ...(repair.itemId ? [{ type: 'inventory', id: String(repair.itemId), label: `Item ${repair.itemId}` }] : []),
+                ...(repair.sourceTaskId ? [{ type: 'task', id: String(repair.sourceTaskId), label: `Task ${repair.sourceTaskId}` }] : []),
+              ],
+            }}
           />
 
         {/* Approve / Decline footer (Quote Sent) */}

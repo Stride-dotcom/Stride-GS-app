@@ -25,7 +25,10 @@ import { PhotoGallery } from '../media/PhotoGallery';
 import { DocumentList } from '../media/DocumentList';
 import { DocumentUploadButton } from '../media/DocumentUploadButton';
 import { DocumentScanButton } from '../media/DocumentScanButton';
-import { NotesSection } from '../notes/NotesSection';
+// NotesSection is still the flat conversation renderer — ThreadedNotes
+// wraps it and adds the pill-based thread switcher. We only import the
+// ThreadedNotes composition here; the flat one is a transitive dep.
+import { ThreadedNotes } from '../notes/ThreadedNotes';
 import { usePhotos, type EntityType as PhotoEntityType } from '../../hooks/usePhotos';
 import { useDocuments, type DocumentContextType } from '../../hooks/useDocuments';
 import { useEntityNotes } from '../../hooks/useEntityNotes';
@@ -43,6 +46,11 @@ interface DocumentsCfg {
 interface NotesCfg {
   entityType: string;
   entityId: string;
+  /** Session 74: extra threads for this panel — e.g. Item panel shows
+   *  linked task and repair threads so staff can cross-reference
+   *  without leaving the detail view. Optional and deduped against
+   *  the primary entity inside ThreadedNotes. */
+  relatedEntities?: Array<{ type: string; id: string; label?: string }>;
 }
 
 interface Props {
@@ -81,6 +89,7 @@ export function EntityAttachments({ photos, documents, notes, defaultOpen }: Pro
           defaultOpen={defaultOpen?.notes ?? false}
           entityType={notes.entityType}
           entityId={notes.entityId}
+          relatedEntities={notes.relatedEntities}
         />
       )}
     </div>
@@ -210,9 +219,12 @@ function DocumentsSection({
 }
 
 function NotesSectionCollapsible({
-  entityType, entityId, defaultOpen,
+  entityType, entityId, relatedEntities, defaultOpen,
 }: NotesCfg & { defaultOpen: boolean }) {
   const [open, setOpen] = useState(defaultOpen);
+  // Count reflects only the PRIMARY thread's notes for the header
+  // badge — showing a combined cross-thread count would be misleading
+  // (other threads' notes are one pill-click away, not "on" this entity).
   const { notes } = useEntityNotes(entityType, entityId);
   return (
     <section>
@@ -224,7 +236,15 @@ function NotesSectionCollapsible({
         onToggle={() => setOpen(o => !o)}
       />
       <CollapsibleBody open={open}>
-        <NotesSection entityType={entityType} entityId={entityId} />
+        {/* Session 74: flat NotesSection replaced by ThreadedNotes. The
+            component renders a pill row for the primary entity + any
+            relatedEntities passed by the parent panel, plus the currently
+            selected thread's notes via the existing NotesSection. */}
+        <ThreadedNotes
+          entityType={entityType}
+          entityId={entityId}
+          relatedEntities={relatedEntities}
+        />
       </CollapsibleBody>
     </section>
   );

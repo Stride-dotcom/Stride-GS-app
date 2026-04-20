@@ -1050,11 +1050,24 @@ export function ItemDetailPanel({
             )}
           </Section>
 
-          {/* Session 73 — Photos / Documents / Notes (collapsible). */}
+          {/* Session 73 — Photos / Documents / Notes (collapsible).
+              Session 74 — Notes is now a threaded switcher; surface
+              linked tasks / repairs / will calls as sibling pills so
+              staff can flip through everything attached to this item
+              without leaving the Item panel. */}
           <EntityAttachments
             photos={{ entityType: 'inventory', entityId: item.itemId, tenantId: clientSheetId }}
             documents={{ contextType: 'item', contextId: item.itemId, tenantId: clientSheetId }}
-            notes={{ entityType: 'inventory', entityId: item.itemId }}
+            notes={{
+              entityType: 'inventory',
+              entityId: item.itemId,
+              relatedEntities: [
+                ...itemTasks.map((t: any) => ({ type: 'task', id: String(t.taskId || ''), label: `Task ${t.taskId}` })).filter(r => r.id),
+                ...itemRepairs.map((r: any) => ({ type: 'repair', id: String(r.repairId || ''), label: `Repair ${r.repairId}` })).filter(r => r.id),
+                ...itemWillCalls.map((w: any) => ({ type: 'will_call', id: String(w.wcNumber || ''), label: `WC ${w.wcNumber}` })).filter(r => r.id),
+                ...(item.shipmentNumber ? [{ type: 'shipment', id: String(item.shipmentNumber), label: `Shipment ${item.shipmentNumber}` }] : []),
+              ],
+            }}
           />
         </div>
 

@@ -717,7 +717,16 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
           <EntityAttachments
             photos={{ entityType: 'task', entityId: task.taskId, tenantId: clientSheetId }}
             documents={{ contextType: 'task', contextId: task.taskId, tenantId: clientSheetId }}
-            notes={{ entityType: 'task', entityId: task.taskId }}
+            notes={{
+              entityType: 'task',
+              entityId: task.taskId,
+              // Session 74: surface the parent item's notes thread as a
+              // sibling pill so staff can see item-level history without
+              // leaving the task panel.
+              relatedEntities: task.itemId
+                ? [{ type: 'inventory', id: String(task.itemId), label: `Item ${task.itemId}` }]
+                : [],
+            }}
           />
 
         </div>
