@@ -54,16 +54,25 @@ async function loadQuoteTemplateBody(): Promise<string | null> {
 // ─── Line items table generator ────────────────────────────────────────────
 
 /**
- * Build the line-items rows as a single HTML string of <tr>...</tr>
- * blocks matching the new DOC_QUOTE 5-column layout:
+ * Build the PDF's <tbody> content as two stacked sections inside the
+ * same 5-column table the template provides. Matches the approved
+ * sample Quote_EST-00018.pdf layout:
  *
- *   Service | Class | Qty | Rate | Total
+ *   Section A — "Item Quantities by Size Class"
+ *     one row per class with a qty (from quote.classLines). Class ID
+ *     only ("XS" / "S" / "M" / etc.) — NEVER the expanded name
+ *     ("Extra Small" / "Small") because customers only see the ID in
+ *     the Pricing Matrix. Plus a "Total Items" row summing all qtys.
  *
- * The template places {{LINE_ITEMS_HTML}} directly inside a clean
- * <tbody> element, so these rows drop in as first-class tbody
- * children — no structural splice needed.
+ *   Section B — "Services"
+ *     one row per (service × class) combination that was selected in
+ *     the Pricing Matrix + Storage sections. Each row shows the full
+ *     per-class detail (Class ID, Rate for that class, Qty, Total) so
+ *     the customer sees how each charge broke out. This is the
+ *     intentional difference vs. the on-screen Quote Summary which
+ *     aggregates by service — the PDF is the itemized record.
  */
-function buildLineItemsRows(calc: CalcResult): string {
+function buildLineItemsRows(calc: CalcResult, quote: Quote): string {
   if (calc.lineItems.length === 0) {
     return (
       '<tr><td colspan="5" style="padding:12px;text-align:center;color:#94A3B8;font-size:10pt;">' +
@@ -72,20 +81,64 @@ function buildLineItemsRows(calc: CalcResult): string {
     );
   }
 
-  return calc.lineItems
-    .map(li => {
-      const classLabel = li.className ? escHtml(li.className) : escHtml(li.category || '');
-      return (
+  const sectionHeaderStyle =
+    'background:#F1F5F9;color:#334155;font-weight:700;font-size:9pt;letter-spacing:1px;text-transform:uppercase;padding:7px 10px;';
+
+  const parts: string[] = [];
+
+  // Section A — class totals (from quote.classLines, ordered by class.order)
+  // Classes are stored in quote.classLines in the order they came from
+  // catalog.classes — already sorted by class.order at creation time —
+  // so native array iteration gives the right visual order (XS, S, M, L,
+  // XL, XXL). No `sort()` here because ClassLine doesn't carry `order`.
+  const classRows = quote.classLines.filter(cl => (cl.qty || 0) > 0);
+  if (classRows.length > 0) {
+    parts.push(
+      '<tr><td colspan="5" style="' + sectionHeaderStyle + '">Item Quantities by Size Class</td></tr>'
+    );
+    let totalItems = 0;
+    for (const cl of classRows) {
+      totalItems += cl.qty;
+      parts.push(
         '<tr>' +
-        '<td>' + escHtml(li.serviceName) + '</td>' +
-        '<td>' + classLabel + '</td>' +
-        '<td class="num">' + String(li.qty) + '</td>' +
-        '<td class="num">' + fmt$(li.rate) + '</td>' +
-        '<td class="num">' + fmt$(li.amount) + '</td>' +
+        '<td style="padding-left:20px;font-weight:600;">' + escHtml(cl.classId) + '</td>' +
+        '<td colspan="3" style="color:#64748B;">Size class ' + escHtml(cl.classId) + '</td>' +
+        '<td class="num">' + String(cl.qty) + '</td>' +
         '</tr>'
       );
-    })
-    .join('');
+    }
+    parts.push(
+      '<tr>' +
+      '<td colspan="4" style="padding-left:20px;font-weight:700;border-top:1px solid #0F172A;">Total Items</td>' +
+      '<td class="num" style="font-weight:700;border-top:1px solid #0F172A;">' + String(totalItems) + '</td>' +
+      '</tr>'
+    );
+  }
+
+  // Section B — per-class rows (not aggregated — sample PDF shows the
+  // full breakdown so customers can see exactly what each size costs).
+  // Class column shows the ID only ("XS"), Rate is the per-class rate
+  // pulled from the service definition or the cell.
+  parts.push(
+    '<tr><td colspan="5" style="' + sectionHeaderStyle + '">Services</td></tr>'
+  );
+  for (const li of calc.lineItems) {
+    // Class label: the raw class.id only (never the expanded name).
+    // CalcLineItem carries classId directly; fall back to className
+    // stripped of parens if we ever lose the id wire.
+    const classLabel = (li.classId || li.className || '').toUpperCase();
+    parts.push(
+      '<tr>' +
+      '<td>' + escHtml(li.serviceName) + (li.serviceCode ? ' <span style="color:#94A3B8;font-size:9pt;">' + escHtml(li.serviceCode) + '</span>' : '') + '</td>' +
+      '<td>' + escHtml(classLabel) + '</td>' +
+      '<td class="num">' + fmt$(li.rate) + '</td>' +
+      '<td class="num">' + String(li.qty) + '</td>' +
+      '<td class="num" style="font-weight:600;">' + fmt$(li.amount) + '</td>' +
+      '</tr>'
+    );
+  }
+
+  return parts.join('');
 }
 
 // ─── Scalar token substitution ─────────────────────────────────────────────
@@ -112,7 +165,7 @@ async function generateFromTemplate(
   // Step 1: inject line-item rows into the template's <tbody>. The new
   // DOC_QUOTE body has `{{LINE_ITEMS_HTML}}` as a direct tbody child,
   // so plain string substitution is valid and browser-parseable.
-  let html = body.split('{{LINE_ITEMS_HTML}}').join(buildLineItemsRows(calc));
+  let html = body.split('{{LINE_ITEMS_HTML}}').join(buildLineItemsRows(calc, quote));
 
   // Step 2: scalar tokens. All other {{TOKEN}}s are plain text slots.
   const covOption = catalog.coverageOptions.find(c => c.id === quote.coverage.typeId);
@@ -155,21 +208,42 @@ function generateFallbackHtml(
   settings: QuoteStoreSettings,
 ): string {
   const result = calcQuote(quote, catalog.services, catalog.classes, catalog.coverageOptions);
-  const grouped: Record<string, typeof result.lineItems> = {};
-  for (const li of result.lineItems) (grouped[li.category] ??= []).push(li);
   const covOption = catalog.coverageOptions.find(c => c.id === quote.coverage.typeId);
 
+  // Session 74 (fallback path): mirror the primary template — class
+  // counts block at top, then per-class service rows. Class IDs only
+  // (XS/S/M/L/XL/XXL). Column order matches the primary table and the
+  // approved sample: Service | Class | Rate | Qty | Total.
+  const classRowsFb = quote.classLines.filter(cl => (cl.qty || 0) > 0);
+
   let linesHtml = '';
-  for (const [cat, items] of Object.entries(grouped)) {
-    linesHtml += `<tr><td colspan="4" style="padding:8px 12px;font-weight:700;font-size:11px;color:#64748B;text-transform:uppercase;letter-spacing:0.5px;background:#F8FAFC;border-bottom:1px solid #E2E8F0">${escHtml(cat)}</td></tr>`;
-    for (const li of items) {
+  if (classRowsFb.length > 0) {
+    linesHtml += `<tr><td colspan="5" style="padding:8px 12px;font-weight:700;font-size:11px;color:#64748B;text-transform:uppercase;letter-spacing:0.5px;background:#F8FAFC;border-bottom:1px solid #E2E8F0">Item Quantities by Size Class</td></tr>`;
+    let totalItemsFb = 0;
+    for (const cl of classRowsFb) {
+      totalItemsFb += cl.qty;
       linesHtml += `<tr>
-        <td style="padding:6px 12px;border-bottom:1px solid #E2E8F0;font-size:12px">${escHtml(li.serviceName)}${li.className ? ` <span style="color:#94A3B8">(${escHtml(li.className)})</span>` : ''}</td>
-        <td style="padding:6px 12px;border-bottom:1px solid #E2E8F0;font-size:12px;text-align:center">${li.qty}</td>
-        <td style="padding:6px 12px;border-bottom:1px solid #E2E8F0;font-size:12px;text-align:right">${fmt$(li.rate)}</td>
-        <td style="padding:6px 12px;border-bottom:1px solid #E2E8F0;font-size:12px;text-align:right;font-weight:600">${fmt$(li.amount)}</td>
+        <td style="padding:6px 12px 6px 24px;border-bottom:1px solid #E2E8F0;font-size:12px;font-weight:600">${escHtml(cl.classId)}</td>
+        <td colspan="3" style="padding:6px 12px;border-bottom:1px solid #E2E8F0;font-size:12px;color:#64748B">Size class ${escHtml(cl.classId)}</td>
+        <td style="padding:6px 12px;border-bottom:1px solid #E2E8F0;font-size:12px;text-align:right;font-weight:600">${cl.qty}</td>
       </tr>`;
     }
+    linesHtml += `<tr>
+      <td colspan="4" style="padding:6px 12px 6px 24px;border-top:1px solid #0F172A;font-size:12px;font-weight:700">Total Items</td>
+      <td style="padding:6px 12px;border-top:1px solid #0F172A;font-size:12px;text-align:right;font-weight:700">${totalItemsFb}</td>
+    </tr>`;
+  }
+
+  linesHtml += `<tr><td colspan="5" style="padding:8px 12px;font-weight:700;font-size:11px;color:#64748B;text-transform:uppercase;letter-spacing:0.5px;background:#F8FAFC;border-bottom:1px solid #E2E8F0">Services</td></tr>`;
+  for (const li of result.lineItems) {
+    const classLabel = (li.classId || li.className || '').toUpperCase();
+    linesHtml += `<tr>
+      <td style="padding:6px 12px;border-bottom:1px solid #E2E8F0;font-size:12px">${escHtml(li.serviceName)}${li.serviceCode ? ` <span style="color:#94A3B8">${escHtml(li.serviceCode)}</span>` : ''}</td>
+      <td style="padding:6px 12px;border-bottom:1px solid #E2E8F0;font-size:12px">${escHtml(classLabel)}</td>
+      <td style="padding:6px 12px;border-bottom:1px solid #E2E8F0;font-size:12px;text-align:right">${fmt$(li.rate)}</td>
+      <td style="padding:6px 12px;border-bottom:1px solid #E2E8F0;font-size:12px;text-align:right">${li.qty}</td>
+      <td style="padding:6px 12px;border-bottom:1px solid #E2E8F0;font-size:12px;text-align:right;font-weight:600">${fmt$(li.amount)}</td>
+    </tr>`;
   }
 
   return `<!DOCTYPE html>
@@ -225,9 +299,10 @@ function generateFallbackHtml(
 <table>
   <thead><tr>
     <th style="padding:8px 12px;text-align:left;font-size:11px;font-weight:700;color:#64748B;border-bottom:2px solid #E2E8F0;text-transform:uppercase;letter-spacing:0.5px">Service</th>
-    <th style="padding:8px 12px;text-align:center;font-size:11px;font-weight:700;color:#64748B;border-bottom:2px solid #E2E8F0;text-transform:uppercase;letter-spacing:0.5px">Qty</th>
+    <th style="padding:8px 12px;text-align:left;font-size:11px;font-weight:700;color:#64748B;border-bottom:2px solid #E2E8F0;text-transform:uppercase;letter-spacing:0.5px">Class</th>
     <th style="padding:8px 12px;text-align:right;font-size:11px;font-weight:700;color:#64748B;border-bottom:2px solid #E2E8F0;text-transform:uppercase;letter-spacing:0.5px">Rate</th>
-    <th style="padding:8px 12px;text-align:right;font-size:11px;font-weight:700;color:#64748B;border-bottom:2px solid #E2E8F0;text-transform:uppercase;letter-spacing:0.5px">Amount</th>
+    <th style="padding:8px 12px;text-align:right;font-size:11px;font-weight:700;color:#64748B;border-bottom:2px solid #E2E8F0;text-transform:uppercase;letter-spacing:0.5px">Qty</th>
+    <th style="padding:8px 12px;text-align:right;font-size:11px;font-weight:700;color:#64748B;border-bottom:2px solid #E2E8F0;text-transform:uppercase;letter-spacing:0.5px">Total</th>
   </tr></thead>
   <tbody>${linesHtml}</tbody>
 </table>

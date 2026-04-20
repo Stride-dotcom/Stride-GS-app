@@ -90,7 +90,14 @@ export function QuoteBuilder({ store, quoteId, onBack }: Props) {
         }}>{toast}</div>
       )}
 
-      <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 340px', gap: 20, alignItems: 'start' }}>
+      {/* Session 74: dropped `alignItems: 'start'` on the grid. When each
+          cell auto-sizes to its content, the right column (Quote Summary)
+          collapses to the panel's height with zero room to scroll —
+          breaking `position: sticky`. Default `stretch` makes the right
+          cell as tall as the left column, giving the sticky panel the
+          containing block height it needs to stay pinned below the
+          TopBar while the user scrolls through the long left column. */}
+      <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 340px', gap: 20 }}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
           <QuoteClientCard quote={quote} onChange={handleChange} />
           <QuotePricingMatrix quote={quote} services={store.catalog.services} classes={store.catalog.classes} onChange={handleChange} />

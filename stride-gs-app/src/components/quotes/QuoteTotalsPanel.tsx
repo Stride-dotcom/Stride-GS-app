@@ -27,9 +27,43 @@ export function QuoteTotalsPanel({ quote, catalog, onUpdate, onSave, onDuplicate
     [quote, catalog]
   );
 
+  // Session 74: collapse per-class breakdown into one row per service.
+  // Previously the summary showed "Receiving (Large) × 6 $90.00" / "Receiving
+  // (Small) × 4 $60.00" as separate lines — noisy for 6 classes × 5 services.
+  // We now aggregate by serviceId: "Receiving × 21 $385.00" on a single row,
+  // grouped under the service's category heading. The PDF still carries the
+  // full per-class class-counts block at the top + aggregated service lines
+  // so the detail isn't lost on the customer-facing document.
+  interface ServiceAggregate {
+    serviceId: string;
+    serviceName: string;
+    serviceCode: string;
+    category: string;
+    qty: number;
+    amount: number;
+  }
   const grouped = useMemo(() => {
-    const g: Record<string, typeof result.lineItems> = {};
-    for (const li of result.lineItems) (g[li.category] ??= []).push(li);
+    // First fold the flat lineItems into one aggregate per serviceId.
+    const byService = new Map<string, ServiceAggregate>();
+    for (const li of result.lineItems) {
+      const prev = byService.get(li.serviceId);
+      if (prev) {
+        prev.qty += li.qty;
+        prev.amount += li.amount;
+      } else {
+        byService.set(li.serviceId, {
+          serviceId: li.serviceId,
+          serviceName: li.serviceName,
+          serviceCode: li.serviceCode,
+          category: li.category,
+          qty: li.qty,
+          amount: li.amount,
+        });
+      }
+    }
+    // Then group the aggregates by category for the visual sections.
+    const g: Record<string, ServiceAggregate[]> = {};
+    for (const agg of byService.values()) (g[agg.category] ??= []).push(agg);
     return g;
   }, [result.lineItems]);
 
@@ -50,19 +84,27 @@ export function QuoteTotalsPanel({ quote, catalog, onUpdate, onSave, onDuplicate
   return (
     <div style={{
       background: v.colors.bgDark, borderRadius: v.radius.card, padding: v.card.padding, color: v.colors.textOnDark,
-      position: 'sticky', top: 20,
+      // Session 74: stick the summary panel right under the TopBar so it
+      // stays visible while the user scrolls through the pricing matrix,
+      // storage section, and notes below. `top: 12` leaves a small gutter
+      // under the app header; `maxHeight` + internal overflow means a
+      // long quote (30+ services) scrolls INSIDE the panel instead of
+      // letting the bottom slide off-screen.
+      position: 'sticky', top: 12,
+      maxHeight: 'calc(100dvh - 24px)',
+      overflowY: 'auto',
     }}>
       <div style={{ ...v.typography.label, color: v.colors.textOnDarkMuted, marginBottom: 20 }}>QUOTE SUMMARY</div>
 
-      {/* Line items */}
-      <div style={{ maxHeight: 320, overflowY: 'auto', marginBottom: 20 }}>
+      {/* Line items — Session 74: one row per service (class-aggregated) */}
+      <div style={{ marginBottom: 20 }}>
         {Object.entries(grouped).map(([cat, items]) => (
           <div key={cat} style={{ marginBottom: 12 }}>
             <div style={{ ...v.typography.label, color: v.colors.textOnDarkMuted, marginBottom: 6 }}>{cat}</div>
-            {items.map((li, i) => (
-              <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, padding: '4px 0', color: 'rgba(255,255,255,0.7)' }}>
-                <span>{li.serviceName}{li.className ? ` (${li.className})` : ''} × {li.qty}</span>
-                <span style={{ fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>${fmt(li.amount)}</span>
+            {items.map((agg) => (
+              <div key={agg.serviceId} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, padding: '4px 0', color: 'rgba(255,255,255,0.75)' }}>
+                <span>{agg.serviceName} × {agg.qty}</span>
+                <span style={{ fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>${fmt(agg.amount)}</span>
               </div>
             ))}
           </div>
