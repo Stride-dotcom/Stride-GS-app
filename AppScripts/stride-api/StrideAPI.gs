@@ -1,5 +1,36 @@
 /* ===================================================
-   StrideAPI.gs — v38.86.0 — 2026-04-20 PST — PHOTOS_URL → app deep-link
+   StrideAPI.gs — v38.87.0 — 2026-04-20 PST — notes merge sheet + entity_notes
+   v38.87.0: Email + doc tokens ({{NOTES}}, {{TASK_NOTES}},
+             {{SHIPMENT_NOTES}}, {{NOTES_HTML}}, {{NOTES_ROW}},
+             {{SHIPMENT_NOTES_HTML}}) now merge the legacy sheet note
+             with the most recent public rows from Supabase
+             `entity_notes`. Since session 73 the React panel writes
+             notes to entity_notes (visibility='public' | 'internal');
+             the sheet value stayed as a backwards-compat mirror. GAS
+             was only reading the sheet side, so any note authored in
+             the React panel never reached the email/PDF body.
+             New helpers:
+               api_fetchPublicEntityNotes_(entityType, entityId)
+                 → plain-text join of the 5 most-recent public notes
+               api_resolveNotesForEmail_(entityType, entityId, sheetNotes)
+                 → prefers Supabase; dedupes; falls back to sheet when
+                   Supabase is empty or unreachable
+             Call sites migrated:
+               handleCompleteShipment_          (SHIPMENT_NOTES + DOC_RECEIVING)
+               handleCompleteTask_              (TASK_NOTES)
+               handleRequestRepairQuote_        (NOTES on inventory)
+               handleSendRepairQuote_           (NOTES + TASK_NOTES)
+               handleRespondToRepairQuote_      (NOTES + work-order PDF)
+               handleCompleteRepair_            (NOTES)
+               handleStartRepair_               (work-order PDF notes)
+               handleCreateWillCall_            (NOTES)
+               handleProcessWcRelease_          (NOTES_HTML + PDF)
+               handleGenerateWcDoc_             (NOTES_HTML + legacy NOTES)
+               handleGenerateTaskWorkOrder_     (NOTES_ROW)
+             Supabase-read failures are non-fatal — the sheet note is
+             still used as a fallback so email/PDF generation never
+             regresses when Supabase is unreachable.
+   v38.86.0: All email / doc templates now emit `{{PHOTOS_URL}}` (and
    v38.86.0: All email / doc templates now emit `{{PHOTOS_URL}}` (and
              `{{REPAIR_PHOTOS_URL}}`) as an app deep-link to the entity
              detail panel's Photos tab instead of a Drive folder URL.
@@ -10158,6 +10189,61 @@ function api_supabaseGet_(path) {
 }
 
 /**
+ * api_fetchPublicEntityNotes_ — pull the most recent PUBLIC notes from
+ * `public.entity_notes` for a given (entity_type, entity_id) and return a
+ * plain-text string suitable for email-template tokens. Internal-only
+ * notes (visibility != 'public') are never surfaced.
+ *
+ * Returns "" when Supabase is unreachable, creds are missing, or no notes
+ * exist — so the caller can fall through to the legacy sheet value.
+ *
+ * Capped at 5 most-recent notes so the CTA doesn't balloon the email
+ * body; author attribution is appended when present so staff can tell
+ * who wrote what.
+ */
+function api_fetchPublicEntityNotes_(entityType, entityId) {
+  var t = String(entityType || "").trim();
+  var id = String(entityId || "").trim();
+  if (!t || !id) return "";
+  var path = "/rest/v1/entity_notes"
+    + "?entity_type=eq." + encodeURIComponent(t)
+    + "&entity_id=eq."   + encodeURIComponent(id)
+    + "&visibility=eq.public"
+    + "&order=created_at.desc"
+    + "&limit=5";
+  var rows = api_supabaseGet_(path);
+  if (!rows || !rows.length) return "";
+  var lines = [];
+  for (var i = 0; i < rows.length; i++) {
+    var body   = String(rows[i].body || "").trim();
+    if (!body) continue;
+    var author = String(rows[i].author_name || "").trim();
+    lines.push(author ? (body + " \u2014 " + author) : body);
+  }
+  return lines.join("\n\n");
+}
+
+/**
+ * api_resolveNotesForEmail_ — merge sheet-column notes with public
+ * `entity_notes` so email / doc tokens surface BOTH sources. Supabase
+ * notes are the newer authoritative store (session 73+); the sheet value
+ * is still populated by older code paths and by legacy rows.
+ *
+ * Order: newest Supabase notes first, then the sheet note underneath
+ * (labelled so the reader can tell them apart). Deduped so the sheet
+ * note is suppressed if it already appears in the Supabase set — which
+ * happens on WC/Repair flows where React writes to both.
+ */
+function api_resolveNotesForEmail_(entityType, entityId, sheetNotes) {
+  var sheet = String(sheetNotes == null ? "" : sheetNotes).trim();
+  var sb    = api_fetchPublicEntityNotes_(entityType, entityId);
+  if (!sb)    return sheet;
+  if (!sheet) return sb;
+  if (sb.indexOf(sheet) !== -1) return sb;
+  return sb + "\n\n\u2014 Original \u2014\n" + sheet;
+}
+
+/**
  * Look up a service rate from Supabase service_catalog. Returns the same
  * shape as api_lookupRate_'s sheet path — { rate, svcName, category,
  * billIfPass, billIfFail } — so the caller can use it as a drop-in.
@@ -10988,7 +11074,8 @@ function handleCompleteShipment_(clientSheetId, payload) {
           "{{TRACKING}}":       trackingNumber || "",
           "{{ITEM_COUNT}}":     String(items.length),
           "{{RECEIVED_DATE}}":  receiveDate ? Utilities.formatDate(receiveDate, "America/Los_Angeles", "MM/dd/yyyy") : "",
-          "{{SHIPMENT_NOTES}}": notes || "",
+          // v38.87.0: merge sheet note + public entity_notes from Supabase.
+          "{{SHIPMENT_NOTES}}": api_resolveNotesForEmail_("shipment", shipmentNo, notes),
           "{{ITEMS_TABLE}}":    itemsTable,
           // Photos now live in Supabase Storage; deep-link to the shipment
           // panel's Photos tab instead of the Drive folder.
@@ -11028,9 +11115,12 @@ function handleCompleteShipment_(clientSheetId, payload) {
           pdfTokens["{{CLIENT_EMAIL_HTML}}"] = clientEmail
             ? '<div style="font-size:11px;color:#64748B;">' + e(clientEmail) + '</div>'
             : "";
-          pdfTokens["{{SHIPMENT_NOTES_HTML}}"] = notes
+          // v38.87.0: pull sheet + public entity_notes so the Receiving
+          // PDF shows the same notes as the email body + React panel.
+          var _pdfNotes = api_resolveNotesForEmail_("shipment", shipmentNo, notes);
+          pdfTokens["{{SHIPMENT_NOTES_HTML}}"] = _pdfNotes
             ? '<div style="background:#FEF3C7;border:1px solid #FCD34D;padding:8px 12px;margin-bottom:14px;font-size:11px;">' +
-              '<span style="font-weight:bold;color:#92400E;">Notes:</span> ' + e(notes) + '</div>'
+              '<span style="font-weight:bold;color:#92400E;">Notes:</span> ' + e(_pdfNotes) + '</div>'
             : "";
 
           var pdfResult = api_generateDocPdf_(ss, "DOC_RECEIVING", "Receiving_" + shipmentNo + "_" + (clientName || "Client"), shipFolderUrl, pdfTokens);
@@ -11478,7 +11568,8 @@ function handleCompleteTask_(clientSheetId, payload) {
           "{{RESULT}}":           result,
           "{{TASK_TYPE}}":        taskType || svcCode || "",
           "{{SVC_NAME}}":         svcName || "",
-          "{{TASK_NOTES}}":       taskNotes || getVal("Task Notes") || "",
+          // v38.87.0: merge sheet note + public entity_notes from Supabase.
+          "{{TASK_NOTES}}":       api_resolveNotesForEmail_("task", taskId, taskNotes || getVal("Task Notes")),
           "{{DESCRIPTION}}":      desc || "",
           "{{SHIPMENT_NO}}":      shipNo || "-",
           "{{RESULT_COLOR}}":     resultColor,
@@ -12212,7 +12303,9 @@ function handleRequestRepairQuote_(clientSheetId, payload, callerEmail) {
           "{{VENDOR}}":         invItem.vendor || "",
           "{{LOCATION}}":       invItem.location || "",
           "{{SIDEMARK}}":       invItem.sidemark || "",
-          "{{NOTES}}":          notes || "",
+          // v38.87.0: pull the item's public notes so the inspector's
+          // comments ride along with the quote request.
+          "{{NOTES}}":          api_resolveNotesForEmail_("inventory", itemId, notes),
           "{{ITEM_TABLE_HTML}}": itemTableHtml,
           "{{PHOTOS_URL}}":     photosUrl
         };
@@ -12374,8 +12467,11 @@ function handleSendRepairQuote_(clientSheetId, payload) {
           "{{QUOTE_AMOUNT}}":     quoteAmtFmt,
           "{{REPAIR_ID}}":        repairId,
           "{{REPAIR_VENDOR}}":    vendor       || "-",
-          "{{NOTES}}":            repairNotes  || "-",
-          "{{TASK_NOTES}}":       taskNotes    || "-",
+          // v38.87.0: merge sheet note + public entity_notes from Supabase.
+          // NOTES → repair's public notes. TASK_NOTES → the source inspection
+          // task's public notes (resolved via Repair sheet's Source Task col).
+          "{{NOTES}}":            api_resolveNotesForEmail_("repair", repairId, repairNotes) || "-",
+          "{{TASK_NOTES}}":       api_resolveNotesForEmail_("task", getVal("Source Task"), taskNotes) || "-",
           "{{ITEM_TABLE_HTML}}":  itemTableHtml,
           "{{PHOTOS_URL}}":       photosUrl,
           "{{PHOTOS_BUTTON}}":    ""
@@ -12534,7 +12630,8 @@ function handleRespondToRepairQuote_(clientSheetId, payload) {
           "{{ITEM_TABLE_HTML}}":  api_buildSingleItemTableHtml_(itemId, itemDesc, invItem ? invItem.vendor : "", invItem ? invItem.itemClass : "", itemLoc, itemSidemark, invItem ? invItem.qty : 1, invItem ? (invItem.reference || "") : ""),
           "{{LOGO_URL}}":         String(settings["LOGO_URL"] || "").trim() || "https://static.wixstatic.com/media/a38fbc_a8c7a368447f4723b782c4dbd765ca0e~mv2.png",
           "{{REPAIR_VENDOR}}":    getVal("Repair Vendor") || "",
-          "{{NOTES}}":            getVal("Repair Notes") || ""
+          // v38.87.0: merge sheet note + public entity_notes from Supabase.
+          "{{NOTES}}":            api_resolveNotesForEmail_("repair", repairId, getVal("Repair Notes"))
       };
 
       // Generate DOC_REPAIR_WORK_ORDER PDF for Approved (v24.0.0)
@@ -12549,8 +12646,10 @@ function handleRespondToRepairQuote_(clientSheetId, payload) {
           // v38.60.0 — extend tokens to match DOC_REPAIR_WORK_ORDER template
           // (was missing row/item/results tokens — template rendered literal {{…}}).
           var _rqStatus      = "Approved";
-          var _rqTaskNotes   = getVal("Task Notes");
-          var _rqRepairNotes = getVal("Repair Notes");
+          // v38.87.0: merge sheet + public entity_notes for the PDF work
+          // order so operators see the same notes the React panel shows.
+          var _rqTaskNotes   = api_resolveNotesForEmail_("task", getVal("Source Task"), getVal("Task Notes"));
+          var _rqRepairNotes = api_resolveNotesForEmail_("repair", repairId, getVal("Repair Notes"));
           var _rqAllNotes    = "";
           if (_rqTaskNotes && _rqRepairNotes) _rqAllNotes = _rqTaskNotes + "\n" + _rqRepairNotes;
           else _rqAllNotes = _rqTaskNotes || _rqRepairNotes || "";
@@ -12902,7 +13001,8 @@ function handleCompleteRepair_(clientSheetId, payload) {
           "{{LABOR_HOURS}}":       "-",
           "{{REPAIR_PHOTOS_URL}}": repairPhotosUrl,
           "{{REPAIR_ID}}":         repairId,
-          "{{NOTES}}":             notes         || "-",
+          // v38.87.0: merge sheet note + public entity_notes from Supabase.
+          "{{NOTES}}":             api_resolveNotesForEmail_("repair", repairId, notes) || "-",
           "{{ITEM_TABLE_HTML}}":   repairItemTable
         },
         null, clientSheetId
@@ -13052,10 +13152,15 @@ function handleStartRepair_(clientSheetId, payload) {
       if (_repApprovedRaw !== undefined && _repApprovedRaw !== null && _repApprovedRaw !== "") {
         _repApprovedStr = (_repApprovedRaw === true || String(_repApprovedRaw).toUpperCase() === "TRUE" || _repApprovedRaw === "Yes") ? "Yes" : (_repApprovedRaw === "Declined" ? "Declined" : "No");
       }
-      var _repTaskNotes = repMap["Task Notes"] ? String(rowData[repMap["Task Notes"] - 1] || "") : "";
+      // v38.87.0: merge sheet + public entity_notes from Supabase for both
+      // task and repair scopes, then combine for the work-order PDF.
+      var _repSourceTask = repMap["Source Task"] ? String(rowData[repMap["Source Task"] - 1] || "") : "";
+      var _repTaskNotesRaw = repMap["Task Notes"] ? String(rowData[repMap["Task Notes"] - 1] || "") : "";
+      var _repTaskNotes   = api_resolveNotesForEmail_("task", _repSourceTask, _repTaskNotesRaw);
+      var _repRepairNotes = api_resolveNotesForEmail_("repair", repairIdRow, repNotes);
       var _repAllNotes = "";
-      if (_repTaskNotes && repNotes) _repAllNotes = _repTaskNotes + "\n" + repNotes;
-      else _repAllNotes = _repTaskNotes || repNotes || "";
+      if (_repTaskNotes && _repRepairNotes) _repAllNotes = _repTaskNotes + "\n" + _repRepairNotes;
+      else _repAllNotes = _repTaskNotes || _repRepairNotes || "";
       var _repItemQty    = invItem ? String(invItem.qty || 1) : "1";
       var _repItemVendor = invItem ? (invItem.vendor || "") : "";
       var _repItemDesc   = invItem ? (invItem.description || "") : (itemDesc || "");
@@ -13074,7 +13179,8 @@ function handleStartRepair_(clientSheetId, payload) {
         "{{ITEM_TABLE_HTML}}":  itemTableHtml,
         "{{LOGO_URL}}":         String(settings["LOGO_URL"] || "").trim() || "https://static.wixstatic.com/media/a38fbc_a8c7a368447f4723b782c4dbd765ca0e~mv2.png",
         "{{REPAIR_VENDOR}}":    repVendor,
-        "{{NOTES}}":            repNotes,
+        // v38.87.0: resolved (sheet + public entity_notes) repair notes.
+        "{{NOTES}}":            _repRepairNotes,
         "{{DATE}}":             _repDateStr,
         "{{STATUS}}":           api_esc_(_repStatusStart),
         "{{REPAIR_TYPE}}":      api_esc_(itemDesc),
@@ -13445,7 +13551,8 @@ function handleCreateWillCall_(clientSheetId, payload) {
             "{{PICKUP_PHONE}}":    String(payload.pickupPhone  || ""),
             "{{REQUESTED_BY}}":    String(payload.requestedBy  || ""),
             "{{EST_PICKUP_DATE}}": String(payload.estDate      || "Not scheduled"),
-            "{{NOTES}}":           String(payload.notes        || ""),
+            // v38.87.0: merge payload note + public entity_notes from Supabase.
+            "{{NOTES}}":           api_resolveNotesForEmail_("will_call", wcNumber, payload.notes),
             "{{ITEMS_TABLE}}":     itemTableHtml,
             "{{ITEMS_COUNT}}":     String(enrichedItems.length),
             "{{TOTAL_WC_FEE}}":    "$" + totalWcFee.toFixed(2),
@@ -13871,7 +13978,10 @@ function handleProcessWcRelease_(clientSheetId, payload) {
         var _pickupParty  = wcMap["Pickup Party"]    ? String(wcRowData[wcMap["Pickup Party"] - 1]    || "") : "";
         var _pickupPhone  = wcMap["Pickup Phone"]    ? String(wcRowData[wcMap["Pickup Phone"] - 1]    || "") : "";
         var _requestedBy  = wcMap["Requested By"]    ? String(wcRowData[wcMap["Requested By"] - 1]    || "") : "";
-        var _notes        = wcMap["Notes"]           ? String(wcRowData[wcMap["Notes"] - 1]           || "") : "";
+        var _notesRaw     = wcMap["Notes"]           ? String(wcRowData[wcMap["Notes"] - 1]           || "") : "";
+        // v38.87.0: merge sheet note + public entity_notes from Supabase
+        // so the release email shows the same notes the React panel does.
+        var _notes        = api_resolveNotesForEmail_("will_call", wcNumber, _notesRaw);
         var _estPickupRaw = wcMap["Estimated Pickup Date"] ? wcRowData[wcMap["Estimated Pickup Date"] - 1] : "";
         var _estDateStr   = "";
         if (_estPickupRaw) {
@@ -14267,7 +14377,10 @@ function handleGenerateWcDoc_(clientSheetId, payload) {
     var requestedBy = wcMap["Requested By"] ? String(wcRowData[wcMap["Requested By"] - 1] || "") : "";
     var estDate    = wcMap["Estimated Pickup Date"] ? wcRowData[wcMap["Estimated Pickup Date"] - 1] || "" : "";
     var createdDt  = wcMap["Created Date"] ? wcRowData[wcMap["Created Date"] - 1] || new Date() : new Date();
-    var notes      = wcMap["Notes"] ? String(wcRowData[wcMap["Notes"] - 1] || "") : "";
+    var notesRaw   = wcMap["Notes"] ? String(wcRowData[wcMap["Notes"] - 1] || "") : "";
+    // v38.87.0: merge sheet + public entity_notes so the release doc shows
+    // the same notes the React panel does.
+    var notes      = api_resolveNotesForEmail_("will_call", wcNumber, notesRaw);
     var isCod      = wcMap["COD"] ? !!(wcRowData[wcMap["COD"] - 1]) : false;
     var codAmount  = wcMap["COD Amount"] ? Number(wcRowData[wcMap["COD Amount"] - 1] || 0) : 0;
     var totalFee   = wcMap["Total WC Fee"] ? Number(wcRowData[wcMap["Total WC Fee"] - 1] || 0) : 0;
@@ -20009,7 +20122,9 @@ function api_generateTaskWorkOrderPdf_(ss, rowData, taskMap, settings, folderUrl
     var taskId    = getF_("Task ID");
     var itemId    = getF_("Item ID");
     var taskType  = getF_("Type");
-    var taskNotes = getF_("Task Notes");
+    // v38.87.0: merge sheet note + public entity_notes so the PDF matches
+    // what the React Task panel shows.
+    var taskNotes = api_resolveNotesForEmail_("task", taskId, getF_("Task Notes"));
     var status    = getF_("Status") || "Open";
     var photosUrl = folderUrl || "";
     var createdRaw = taskMap["Created"] ? rowData[taskMap["Created"] - 1] : new Date();
