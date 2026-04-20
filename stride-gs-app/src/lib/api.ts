@@ -1417,11 +1417,13 @@ export function postCompleteTask(
   clientSheetId: string,
   signal?: AbortSignal
 ) {
+  // Session 74: bumped to LONG (5 min). Same rationale as
+  // postCompleteRepair — heavy sheet write + PDF + email + billing.
   return apiPost<CompleteTaskResponse>(
     'completeTask',
     payload as unknown as Record<string, unknown>,
     { clientSheetId },
-    { signal }
+    { signal, timeoutMs: API_POST_TIMEOUT_LONG_MS }
   );
 }
 
@@ -1562,11 +1564,16 @@ export function postCompleteRepair(
   clientSheetId: string,
   signal?: AbortSignal
 ) {
+  // Session 74: bumped to LONG (5 min). completeRepair writes to the sheet,
+  // generates a completion PDF, updates inventory, creates a billing row,
+  // and emails the client — any single step can push past the 90s default
+  // on a cold Drive. Users were seeing "Request timed out." on clients
+  // with larger folders/more items. 5 min matches postCompleteShipment.
   return apiPost<CompleteRepairResponse>(
     'completeRepair',
     payload as unknown as Record<string, unknown>,
     { clientSheetId },
-    { signal }
+    { signal, timeoutMs: API_POST_TIMEOUT_LONG_MS }
   );
 }
 
@@ -1591,11 +1598,15 @@ export function postStartRepair(
   clientSheetId: string,
   signal?: AbortSignal
 ) {
+  // Session 74: bumped to LONG (5 min). startRepair creates the Drive
+  // folder, generates the Work Order PDF, and updates the sheet. Cold
+  // Drive roundtrips stacked up can exceed 90s; users were seeing
+  // "Request timed out." on the button click.
   return apiPost<StartRepairResponse>(
     'startRepair',
     payload as unknown as Record<string, unknown>,
     { clientSheetId },
-    { signal }
+    { signal, timeoutMs: API_POST_TIMEOUT_LONG_MS }
   );
 }
 
@@ -1659,11 +1670,14 @@ export function postProcessWcRelease(
   clientSheetId: string,
   signal?: AbortSignal
 ) {
+  // Session 74: bumped to LONG (5 min). processWcRelease writes N
+  // inventory rows, creates a billing row per item, generates the
+  // release PDF, and emails the client — full-bore heavy write.
   return apiPost<ProcessWcReleaseResponse>(
     'processWcRelease',
     payload as unknown as Record<string, unknown>,
     { clientSheetId },
-    { signal }
+    { signal, timeoutMs: API_POST_TIMEOUT_LONG_MS }
   );
 }
 
@@ -1746,11 +1760,14 @@ export function postGenerateWcDoc(
   clientSheetId: string,
   signal?: AbortSignal
 ) {
+  // Session 74: bumped to LONG (5 min). generateWcDoc writes the
+  // pickup document PDF to the WC folder and hyperlinks rich-text
+  // cells — same Drive-heavy pattern as startRepair.
   return apiPost<GenerateWcDocResponse>(
     'generateWcDoc',
     { wcNumber } as unknown as Record<string, unknown>,
     { clientSheetId },
-    { signal }
+    { signal, timeoutMs: API_POST_TIMEOUT_LONG_MS }
   );
 }
 
@@ -2633,11 +2650,14 @@ export function postStartTask(
   clientSheetId: string,
   signal?: AbortSignal
 ) {
+  // Session 74: bumped to LONG (5 min). startTask creates the task
+  // folder inside the shipment folder, generates a Work Order PDF,
+  // and hyperlinks the task ID back to the sheet — Drive-heavy.
   return apiPost<StartTaskResponse>(
     'startTask',
     payload as unknown as Record<string, unknown>,
     { clientSheetId },
-    { signal }
+    { signal, timeoutMs: API_POST_TIMEOUT_LONG_MS }
   );
 }
 
@@ -4341,11 +4361,13 @@ export function postGenerateTaskWorkOrder(
   clientSheetId: string,
   signal?: AbortSignal
 ) {
+  // Session 74: bumped to LONG (5 min). Same rationale as
+  // postGenerateWcDoc — PDF + folder write + hyperlink update.
   return apiPost<GenerateTaskWorkOrderResponse>(
     'generateTaskWorkOrder',
     payload as unknown as Record<string, unknown>,
     { clientSheetId },
-    { signal }
+    { signal, timeoutMs: API_POST_TIMEOUT_LONG_MS }
   );
 }
 
