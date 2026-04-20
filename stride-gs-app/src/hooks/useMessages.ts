@@ -183,6 +183,10 @@ export function useMessages(): UseMessagesResult {
   const [thread, setThread] = useState<Message[]>([]);
   const [threadLoading, setThreadLoading] = useState(false);
   const [activeThreadKey, setActiveThreadKey] = useState<string | null>(null);
+  // Session 74: cache profiles by uid so the conversation list can resolve
+  // the OTHER party's display name + avatar even for threads where I've only
+  // sent messages (no received reply yet). Populated on every hydrate() call.
+  const [profilesByUid, setProfilesByUid] = useState<Record<string, ProfileRow>>({});
 
   // Resolve auth uid once per session change.
   useEffect(() => {
@@ -223,6 +227,16 @@ export function useMessages(): UseMessagesResult {
         .select('id, email, display_name, role')
         .in('id', Array.from(userIds));
       for (const p of (profData ?? []) as ProfileRow[]) profileMap.set(p.id, p);
+    }
+    // Update the shared profile cache so conversationsWithNames can resolve
+    // the OTHER party's name for direct threads (works even for threads
+    // where I've only sent messages and never received a reply).
+    if (profileMap.size > 0) {
+      setProfilesByUid(prev => {
+        const next = { ...prev };
+        profileMap.forEach((p, id) => { next[id] = p; });
+        return next;
+      });
     }
 
     return msgRows.map(m => {
@@ -341,28 +355,25 @@ export function useMessages(): UseMessagesResult {
     return Array.from(byKey.values()).sort((a, b) => (a.lastMessageAt < b.lastMessageAt ? 1 : -1));
   }, [messages, authUserId]);
 
-  // Now resolve direct-thread titles using profile names we already
-  // fetched on the messages (senderName is populated). For direct threads
-  // started by me where the sender is self, we need the OTHER party's name —
-  // look into any message in that thread where senderId !== self.
+  // Resolve direct-thread titles to the OTHER party's display name.
+  // Session 74: instead of only picking names from RECEIVED messages (which
+  // left outbound-only threads showing a generic "Message" title), resolve
+  // the other party's uid from the key and look them up in the profile
+  // cache populated by hydrate().
   const conversationsWithNames = useMemo(() => {
     if (!authUserId) return conversations;
-    // Build: for each direct: key, the other party's best-known name.
-    const otherNameByKey = new Map<string, string>();
-    for (const m of messages) {
-      if (m.relatedEntityType && m.relatedEntityId) continue;
-      const key = keyForMessage(m, authUserId);
-      if (!key.startsWith('direct:')) continue;
-      if (m.senderId !== authUserId && m.senderName && !otherNameByKey.has(key)) {
-        otherNameByKey.set(key, m.senderName);
-      }
-    }
     return conversations.map(c => {
       if (!c.key.startsWith('direct:')) return c;
-      const name = otherNameByKey.get(c.key);
-      return name ? { ...c, title: name } : c;
+      const parts = c.key.split(':');
+      const [a, b] = [parts[1], parts[2]];
+      const otherUid = a === authUserId ? b : a;
+      if (!otherUid) return c;
+      const profile = profilesByUid[otherUid];
+      if (!profile) return c;
+      const name = profile.display_name || profile.email || c.title;
+      return { ...c, title: name };
     });
-  }, [conversations, messages, authUserId]);
+  }, [conversations, authUserId, profilesByUid]);
 
   const unreadCount = useMemo(
     () => messages.reduce((n, m) => n + (m.myRecipient && !m.myRecipient.isRead ? 1 : 0), 0),

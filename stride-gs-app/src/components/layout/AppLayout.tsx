@@ -12,8 +12,9 @@ import { useClients } from '../../hooks/useClients';
 import { usePricing } from '../../hooks/usePricing';
 import { useLocations } from '../../hooks/useLocations';
 import { supabase } from '../../lib/supabase';
-import { useNotifications } from '../../hooks/useNotifications';
-import { PersistentBanner } from '../notifications/PersistentBanner';
+// Session 74: notifications module (useNotifications hook + PersistentBanner)
+// removed. The bell in TopBar is now purely a Messages quick-link backed by
+// useMessages.unreadCount. No sound/vibration/toast-banner side effects.
 
 const PAGE_TITLES: Record<string, string> = {
   '/': 'Dashboard',
@@ -35,9 +36,8 @@ export function AppLayout() {
   // changes within 1-2s of GAS write completing (write-through is Phase 3)
   useSupabaseRealtime();
 
-  // Session 73 Phase B: subscribe to new-message Realtime events so the bell
-  // + toast banners wake up as soon as a recipient row lands for this user.
-  useNotifications();
+  // Session 74: useNotifications() removed (notifications module deleted).
+  // Unread count on the bell is driven by useMessages directly.
 
   // Pre-fetch shared data at app level so caches are warm for all pages
   useClients();
@@ -77,10 +77,7 @@ export function AppLayout() {
         fontFamily: theme.typography.fontFamily,
       }}
     >
-      {/* Session 73 — floating toast banners for new-message + mention events.
-          Self-positions (fixed, top-right). Full-width on mobile via its own
-          media query. Renders nothing when there are no active alerts. */}
-      <PersistentBanner />
+      {/* Session 74: PersistentBanner removed with the notifications module. */}
 
       {/* Mobile overlay backdrop */}
       {isMobile && mobileMenuOpen && (
