@@ -94,11 +94,14 @@ function vibrate(): void {
 }
 
 // ─── Row shape for the realtime payload ───────────────────────────────────
+// Session 74: aligned to the real schema — message_recipients uses user_id
+// (uuid) as the auth.users FK; recipient_id is a text mirror for a NOT NULL
+// that's the same value when recipient_type='user'.
 
 interface RecipientRow {
   id: string;
   message_id: string;
-  recipient_id: string;
+  user_id: string;
   is_read: boolean | null;
   is_archived: boolean | null;
   created_at: string;
@@ -106,12 +109,16 @@ interface RecipientRow {
 
 interface MessageRow {
   id: string;
-  thread_id: string | null;
-  entity_type: string | null;
-  entity_id: string | null;
   body: string;
-  sender_id: string | null;
-  sender_name: string | null;
+  sender_id: string;
+  related_entity_type: string | null;
+  related_entity_id: string | null;
+}
+
+interface ProfileRow {
+  id: string;
+  email: string | null;
+  display_name: string | null;
 }
 
 // ─── Hook ──────────────────────────────────────────────────────────────────
@@ -131,7 +138,7 @@ export function useNotifications(): void {
     const onInsert = async (payload: { new?: RecipientRow }) => {
       const row = payload.new;
       if (!row || !authUserId) return;
-      if (row.recipient_id !== authUserId) return;
+      if (row.user_id !== authUserId) return;
       if (row.is_read || row.is_archived) return;
       if (processed.has(row.id)) return;
       processed.add(row.id);
@@ -142,23 +149,35 @@ export function useNotifications(): void {
       const onMessagesPage = typeof window !== 'undefined'
         && window.location.hash.startsWith('#/messages');
 
-      // Fetch the parent message for the preview.
+      // Fetch the parent message for the preview. Join profile for a
+      // readable sender name since messages has no denormalized sender_name.
       const { data: msgData } = await supabase
         .from('messages')
-        .select('id, thread_id, entity_type, entity_id, body, sender_id, sender_name')
+        .select('id, body, sender_id, related_entity_type, related_entity_id')
         .eq('id', row.message_id)
         .single();
       const msg = msgData as MessageRow | null;
       if (!msg) return;
 
+      let senderName = 'Unknown';
+      if (msg.sender_id) {
+        const { data: profData } = await supabase
+          .from('profiles')
+          .select('id, email, display_name')
+          .eq('id', msg.sender_id)
+          .single();
+        const prof = profData as ProfileRow | null;
+        if (prof) senderName = prof.display_name || prof.email || 'Unknown';
+      }
+
       const evt: NotificationEvent = {
         recipientId: row.id,
         messageId: msg.id,
-        senderName: msg.sender_name ?? 'Unknown',
+        senderName,
         senderId: msg.sender_id,
         body: msg.body,
-        entityType: msg.entity_type,
-        entityId: msg.entity_id,
+        entityType: msg.related_entity_type,
+        entityId: msg.related_entity_id,
         createdAt: row.created_at,
       };
 
@@ -173,8 +192,9 @@ export function useNotifications(): void {
       }
     };
 
-    // We subscribe even before authUserId resolves — the check inside onInsert
-    // skips stray events until we have it.
+    // Server-side filter on the real user_id column (not the inferred
+    // `recipient_id` from the first port) so we only receive INSERTs where
+    // the current user is actually the recipient.
     const channel = supabase
       .channel('messages_notifier')
       .on('postgres_changes',
