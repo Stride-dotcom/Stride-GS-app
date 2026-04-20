@@ -924,9 +924,10 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
             )}
           </div>
 
-          {/* Session 73 — Photos + Notes */}
+          {/* Session 74 — Photos + Documents + Notes */}
           <EntityAttachments
             photos={{ entityType: 'will_call', entityId: wc.wcNumber, tenantId: clientSheetId }}
+            documents={{ contextType: 'willcall', contextId: wc.wcNumber, tenantId: clientSheetId }}
             notes={{ entityType: 'will_call', entityId: wc.wcNumber }}
           />
         </div>
