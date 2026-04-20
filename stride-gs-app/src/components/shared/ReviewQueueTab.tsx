@@ -90,19 +90,27 @@ export function ReviewQueueTab({ orders, loading, onRefetch, onOpenDetail }: Pro
   };
 
   const handleApprove = async (order: DtOrderForUI) => {
-    if (!confirm(`Approve order ${order.dtIdentifier} and push to DispatchTrack?`)) return;
+    const isLinkedPair = order.orderType === 'pickup_and_delivery' && !!order.linkedOrderId;
+    const confirmMsg = isLinkedPair
+      ? `Approve ${order.dtIdentifier} + linked pickup and push BOTH to DispatchTrack?`
+      : `Approve order ${order.dtIdentifier} and push to DispatchTrack?`;
+    if (!confirm(confirmMsg)) return;
     setActingId(order.id);
     setPushingId(order.id);
     try {
-      // Update review status first (optimistic-ish)
+      // Always approve the delivery order; also approve the linked pickup if applicable
       await updateReviewStatus(order.id, 'approved');
-      // Then push to DT
+      if (isLinkedPair && order.linkedOrderId) {
+        await updateReviewStatus(order.linkedOrderId, 'approved');
+      }
+      // Push the primary order (Edge Function handles linked pickup push too)
       try {
         await pushToDt(order.id, order.dtIdentifier);
-        showToast(`${order.dtIdentifier} pushed to DispatchTrack`);
+        showToast(isLinkedPair
+          ? `${order.dtIdentifier} + linked pickup pushed to DispatchTrack`
+          : `${order.dtIdentifier} pushed to DispatchTrack`);
       } catch (pushErr) {
-        // Rollback review status since push failed
-        showToast(`Approved but DT push failed: ${(pushErr as Error).message}. Order stays approved; retry push from detail panel.`);
+        showToast(`Approved but DT push failed: ${(pushErr as Error).message}. Retry push from detail panel.`);
       }
       onRefetch();
     } catch (err) {
@@ -228,11 +236,19 @@ export function ReviewQueueTab({ orders, loading, onRefetch, onOpenDetail }: Pro
                     }}>
                       {cfg.label}
                     </span>
-                    {order.isPickup && (
+                    {/* Order type chip (pickup / pickup_and_delivery / service_only) */}
+                    {order.orderType && order.orderType !== 'delivery' && (
                       <span style={{
                         fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 10,
-                        background: '#FEF3C7', color: '#B45309', textTransform: 'uppercase',
-                      }}>Pickup</span>
+                        background: order.orderType === 'service_only' ? '#E0E7FF' : '#FEF3C7',
+                        color: order.orderType === 'service_only' ? '#3730A3' : '#B45309',
+                        textTransform: 'uppercase', letterSpacing: '0.5px',
+                      }}>
+                        {order.orderType === 'pickup'              ? 'Pickup'
+                          : order.orderType === 'pickup_and_delivery' ? 'Pickup + Delivery'
+                          : order.orderType === 'service_only'        ? 'Service'
+                          : order.orderType}
+                      </span>
                     )}
                   </div>
                   <div style={{ fontSize: 12, color: theme.colors.text, fontWeight: 600 }}>

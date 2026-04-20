@@ -1371,6 +1371,8 @@ export interface SupabaseDtOrderRow {
   created_by_user: string | null;
   created_by_role: string | null;
   pushed_to_dt_at: string | null;
+  // Phase 2c — order type + linking
+  order_type: string | null;
 }
 
 export interface DtOrderItemForUI {
@@ -1431,6 +1433,9 @@ export interface DtOrderForUI {
   reviewedAt: string | null;
   createdByRole: string;
   pushedToDtAt: string | null;
+  // Phase 2c — order type + linked pickup/delivery pair
+  orderType: 'delivery' | 'pickup' | 'pickup_and_delivery' | 'service_only' | 'transfer';
+  linkedOrderId: string | null;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1454,6 +1459,8 @@ export interface DeliveryAccessorial {
   description: string;
   displayOrder: number;
   active: boolean;
+  /** Phase 2c — false means staff/admin-only (applied post-hoc by dispatch). */
+  visibleToClient: boolean;
 }
 
 export interface FabricProtectionRate {
@@ -1552,6 +1559,9 @@ export async function fetchDtOrdersFromSupabase(
         reviewedAt: row.reviewed_at,
         createdByRole: row.created_by_role ?? '',
         pushedToDtAt: row.pushed_to_dt_at,
+        // Phase 2c — order type + linked pickup/delivery
+        orderType: (row.order_type as DtOrderForUI['orderType']) ?? (row.is_pickup ? 'pickup' : 'delivery'),
+        linkedOrderId: row.linked_order_id,
       };
     });
   } catch {
@@ -1628,6 +1638,7 @@ export async function fetchDeliveryAccessorials(): Promise<DeliveryAccessorial[]
       description: string | null;
       display_order: number;
       active: boolean;
+      visible_to_client: boolean | null;
     }) => ({
       code: r.code,
       name: r.name,
@@ -1636,6 +1647,8 @@ export async function fetchDeliveryAccessorials(): Promise<DeliveryAccessorial[]
       description: r.description ?? '',
       displayOrder: r.display_order,
       active: r.active,
+      // Treat null as true for backward compatibility (column added in Phase 2c)
+      visibleToClient: r.visible_to_client === null ? true : r.visible_to_client,
     }));
   } catch {
     return null;
