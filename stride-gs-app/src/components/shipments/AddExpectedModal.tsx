@@ -53,9 +53,14 @@ export function AddExpectedModal({ onClose, onSave, editingEvent, onDelete }: Pr
   }, [apiClients, user?.role, user?.accessibleClientNames]);
 
   const filteredClients = useMemo(() => {
-    const q = client.toLowerCase();
-    if (!q) return accessibleClients.slice(0, 8);
-    return accessibleClients.filter(c => c.name.toLowerCase().includes(q)).slice(0, 8);
+    // Session 74 fix: prior `.slice(0, 8)` capped the dropdown at 8 rows so
+    // the user only ever saw the first 8 alphabetically — clients after
+    // "Cohesively Curated LLC" never appeared. The outer container already
+    // has maxHeight:220 + overflowY:auto, so the list scrolls naturally.
+    // Full list always; substring filter when the user types.
+    const q = client.trim().toLowerCase();
+    if (!q) return accessibleClients;
+    return accessibleClients.filter(c => c.name.toLowerCase().includes(q));
   }, [accessibleClients, client]);
 
   const canSave = client.trim().length > 0 && expectedDate.length > 0;
