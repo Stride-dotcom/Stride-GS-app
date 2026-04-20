@@ -21,7 +21,6 @@ export interface DeliveryZone {
   zipCode: string;
   city: string;
   serviceDays: string | null;
-  currentRate: number;
   updatedRate: number;
   zone: string | null;
   outOfArea: boolean;
@@ -37,7 +36,6 @@ interface DbRow {
   zip_code: string;
   city: string | null;
   service_days: string | null;
-  current_rate: string | number | null;
   updated_rate: string | number | null;
   base_rate: string | number | null;
   zone: string | null;
@@ -64,7 +62,6 @@ function rowToZone(r: DbRow): DeliveryZone {
     zipCode: r.zip_code,
     city: r.city ?? '',
     serviceDays: r.service_days,
-    currentRate: num(r.current_rate),
     updatedRate: updated,
     zone: r.zone,
     outOfArea: r.out_of_area === true,
@@ -134,7 +131,6 @@ export function useDeliveryZones(): UseDeliveryZonesResult {
     if (patch.zipCode !== undefined)      row.zip_code       = patch.zipCode;
     if (patch.city !== undefined)         row.city           = patch.city;
     if (patch.serviceDays !== undefined)  row.service_days   = patch.serviceDays;
-    if (patch.currentRate !== undefined)  row.current_rate   = patch.currentRate;
     // Mirror updated_rate → base_rate so the legacy Quote Tool reader
     // (which still looks at base_rate) stays in sync with whatever the
     // Price List editor writes.

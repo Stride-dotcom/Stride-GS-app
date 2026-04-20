@@ -20,7 +20,6 @@ interface Props {
 type Draft = {
   city: string;
   serviceDays: string;
-  currentRate: string;
   updatedRate: string;
   zone: string;
   active: boolean;
@@ -33,7 +32,6 @@ function zoneToDraft(z: DeliveryZone): Draft {
   return {
     city: z.city,
     serviceDays: z.serviceDays ?? '',
-    currentRate: z.currentRate ? String(z.currentRate) : '',
     updatedRate: z.updatedRate ? String(z.updatedRate) : '',
     zone: z.zone ?? '',
     active: z.active,
@@ -74,7 +72,6 @@ export function ZipCodeTable({ search }: Props) {
     const ok = await update(editingZip, {
       city: draft.city.trim(),
       serviceDays: draft.serviceDays.trim() || null,
-      currentRate: draft.currentRate ? Number(draft.currentRate) : 0,
       updatedRate: draft.updatedRate ? Number(draft.updatedRate) : 0,
       zone: draft.zone.trim() || null,
       active: draft.active,
@@ -157,7 +154,7 @@ export function ZipCodeTable({ search }: Props) {
           {/* Header row */}
           <div style={{
             display: 'grid',
-            gridTemplateColumns: '90px 1fr 1.6fr 90px 90px 70px 140px 130px',
+            gridTemplateColumns: '90px 1fr 1.6fr 100px 70px 140px 130px',
             gap: 12,
             padding: '12px 18px',
             background: v2.colors.bgCard,
@@ -168,7 +165,6 @@ export function ZipCodeTable({ search }: Props) {
             <div>Zip</div>
             <div>City</div>
             <div>Service Days</div>
-            <div style={{ textAlign: 'right' }}>Old Rate</div>
             <div style={{ textAlign: 'right' }}>Rate</div>
             <div style={{ textAlign: 'center' }}>Zone</div>
             <div style={{ textAlign: 'center' }}>Status</div>
@@ -248,13 +244,12 @@ function ReadOnlyRow({ zone, onEdit, onDelete, confirmDelete }: {
   const v2 = theme.v2;
   const dimmed = !zone.active || zone.outOfArea;
   const rateDisplay = zone.callForQuote ? 'Quote' : (zone.updatedRate ? `$${zone.updatedRate}` : '—');
-  const oldRateDisplay = zone.currentRate ? `$${zone.currentRate}` : '—';
   return (
     <div
       onClick={onEdit}
       style={{
         display: 'grid',
-        gridTemplateColumns: '90px 1fr 1.6fr 90px 90px 70px 140px 130px',
+        gridTemplateColumns: '90px 1fr 1.6fr 100px 70px 140px 130px',
         gap: 12,
         padding: '10px 18px',
         borderBottom: `1px solid ${v2.colors.border}`,
@@ -273,7 +268,6 @@ function ReadOnlyRow({ zone, onEdit, onDelete, confirmDelete }: {
         overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
         color: v2.colors.textSecondary, fontSize: 12,
       }}>{zone.serviceDays || '—'}</div>
-      <div style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: v2.colors.textMuted, fontSize: 12 }}>{oldRateDisplay}</div>
       <div style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums', fontWeight: 600 }}>{rateDisplay}</div>
       <div style={{ textAlign: 'center' }}>
         <span style={{
@@ -324,19 +318,12 @@ function EditableRow({ zone, draft, onDraftChange, onSave, onCancel, saving }: {
       borderBottom: `1px solid ${v2.colors.border}`,
       background: 'rgba(232,105,42,0.04)',
     }}>
-      <div style={{ display: 'grid', gridTemplateColumns: '90px 1fr 1.6fr 90px 90px 70px auto', gap: 12, alignItems: 'center' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: '90px 1fr 1.6fr 100px 70px auto', gap: 12, alignItems: 'center' }}>
         <div style={{ fontWeight: 600, fontSize: 13, color: v2.colors.text, fontVariantNumeric: 'tabular-nums' }}>
           {zone.zipCode}
         </div>
         <input value={draft.city} onChange={e => set('city', e.target.value)} style={inputStyle(v2)} placeholder="City" />
         <input value={draft.serviceDays} onChange={e => set('serviceDays', e.target.value)} style={inputStyle(v2)} placeholder="Service days" />
-        <input
-          value={draft.currentRate}
-          onChange={e => set('currentRate', e.target.value.replace(/[^\d.]/g, ''))}
-          style={{ ...inputStyle(v2), textAlign: 'right' }}
-          placeholder="Old"
-          inputMode="decimal"
-        />
         <input
           value={draft.updatedRate}
           onChange={e => set('updatedRate', e.target.value.replace(/[^\d.]/g, ''))}
@@ -446,13 +433,12 @@ function inputStyle(v2: typeof theme.v2): React.CSSProperties {
 function AddZipModal({ existingZips, onClose, onCreate }: {
   existingZips: Set<string>;
   onClose: () => void;
-  onCreate: (payload: { zipCode: string; city: string; serviceDays: string | null; currentRate: number; updatedRate: number; zone: string | null; active: boolean; callForQuote: boolean; outOfArea: boolean; notes: string | null }) => Promise<boolean>;
+  onCreate: (payload: { zipCode: string; city: string; serviceDays: string | null; updatedRate: number; zone: string | null; active: boolean; callForQuote: boolean; outOfArea: boolean; notes: string | null }) => Promise<boolean>;
 }) {
   const v2 = theme.v2;
   const [zip, setZip] = useState('');
   const [city, setCity] = useState('');
   const [serviceDays, setServiceDays] = useState('');
-  const [currentRate, setCurrentRate] = useState('');
   const [updatedRate, setUpdatedRate] = useState('');
   const [zone, setZone] = useState('');
   const [active, setActive] = useState(true);
@@ -471,7 +457,6 @@ function AddZipModal({ existingZips, onClose, onCreate }: {
       zipCode: zip.trim(),
       city: city.trim(),
       serviceDays: serviceDays.trim() || null,
-      currentRate: currentRate ? Number(currentRate) : 0,
       updatedRate: updatedRate ? Number(updatedRate) : 0,
       zone: zone.trim() || null,
       active,
@@ -504,10 +489,7 @@ function AddZipModal({ existingZips, onClose, onCreate }: {
         <Field label="Service Days">
           <input value={serviceDays} onChange={e => setServiceDays(e.target.value)} style={inputStyle(v2)} placeholder="TUE / THUR" />
         </Field>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10 }}>
-          <Field label="Old Rate">
-            <input value={currentRate} onChange={e => setCurrentRate(e.target.value.replace(/[^\d.]/g, ''))} style={inputStyle(v2)} inputMode="decimal" placeholder="175" />
-          </Field>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
           <Field label="Rate">
             <input value={updatedRate} onChange={e => setUpdatedRate(e.target.value.replace(/[^\d.]/g, ''))} style={inputStyle(v2)} inputMode="decimal" placeholder="185" />
           </Field>
