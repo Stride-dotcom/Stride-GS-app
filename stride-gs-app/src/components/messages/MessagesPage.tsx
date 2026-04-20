@@ -8,11 +8,13 @@
  *
  * Ported from the Stride WMS app.
  */
-import { useEffect, useState } from 'react';
-import { ArrowLeft, Tag, Edit3 } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
+import { ArrowLeft, Edit3, ExternalLink } from 'lucide-react';
 import { theme } from '../../styles/theme';
 import { useIsMobile } from '../../hooks/useIsMobile';
-import { useMessages, type Conversation } from '../../hooks/useMessages';
+import { useMessages, type Conversation, type Message } from '../../hooks/useMessages';
+import { useProfiles } from '../../hooks/useProfiles';
+import { useAuth } from '../../contexts/AuthContext';
 import { MessageList } from './MessageList';
 import { ConversationView } from './ConversationView';
 import { MessageInputBar } from './MessageInputBar';
@@ -136,7 +138,7 @@ export function MessagesPage() {
           </>
         ) : (
           <>
-            <ThreadHeader conversation={active} onBack={() => closeThread()} showBack />
+            <ThreadHeader conversation={active} thread={thread} currentUserId={authUserId} onBack={() => closeThread()} showBack />
             <ConversationView messages={thread} currentUserId={authUserId} loading={threadLoading} />
             <MessageInputBar onSend={handleSend} />
           </>
@@ -176,7 +178,7 @@ export function MessagesPage() {
       <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
         {active ? (
           <>
-            <ThreadHeader conversation={active} onBack={closeThread} showBack={false} />
+            <ThreadHeader conversation={active} thread={thread} currentUserId={authUserId} onBack={closeThread} showBack={false} />
             <ConversationView messages={thread} currentUserId={authUserId} loading={threadLoading} />
             <MessageInputBar onSend={handleSend} />
           </>
@@ -230,11 +232,87 @@ function ComposeHeader({ onCompose }: { onCompose: () => void }) {
 }
 
 // ─── Thread header ──────────────────────────────────────────────────────────
+//
+// Entity-linked threads used to render only "RE: inventory 62408" as a title
+// with a tiny grey INVENTORY badge — you couldn't tell who was in the thread
+// and the entity id wasn't clickable. WhatsApp-style fix:
+//   • Line 1: thread title (entity label or other party's name)
+//   • Line 2: comma-separated participant names (everyone on the thread minus
+//     self). Computed from thread messages (senders + recipientUserIds) and
+//     mapped to display names via profiles. Falls back silently if profiles
+//     aren't loaded yet.
+//   • Trailing chip: entity deep-link — e.g. "Inventory 62408" with an
+//     external-link icon. Opens in a new tab (target=_blank) so the user
+//     keeps the chat open while reviewing entity details. Uses the standard
+//     query-param deep-link format (CLAUDE.md "Deep Links" section). When
+//     the current user is a client-role, &client=<their tenant> is appended
+//     so the list page's deep-link handler can resolve immediately; staff/
+//     admin get the entity-only URL (they can pick the client on arrival).
 
-function ThreadHeader({ conversation, onBack, showBack }: { conversation: Conversation | null; onBack: () => void; showBack: boolean }) {
+const ENTITY_ROUTE: Record<string, string> = {
+  inventory: 'inventory',
+  task: 'tasks',
+  repair: 'repairs',
+  will_call: 'will-calls',
+  shipment: 'shipments',
+  claim: 'claims',
+};
+
+const ENTITY_LABEL: Record<string, string> = {
+  inventory: 'Inventory',
+  task: 'Task',
+  repair: 'Repair',
+  will_call: 'Will Call',
+  shipment: 'Shipment',
+  claim: 'Claim',
+};
+
+interface ThreadHeaderProps {
+  conversation: Conversation | null;
+  thread: Message[];
+  currentUserId: string | null;
+  onBack: () => void;
+  showBack: boolean;
+}
+
+function ThreadHeader({ conversation, thread, currentUserId, onBack, showBack }: ThreadHeaderProps) {
   const v2 = theme.v2;
+  const { profiles } = useProfiles(true);
+  const { user } = useAuth();
+
+  const nameById = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const p of profiles) m.set(p.id, p.displayName || p.email);
+    return m;
+  }, [profiles]);
+
+  // Collect every non-self participant from the thread. Using both senderId
+  // and recipientUserIds covers brand-new threads where only one side has
+  // spoken so far (senderId gives us the initiator even before recipients
+  // reply).
+  const participantNames = useMemo(() => {
+    if (!thread.length) return [] as string[];
+    const ids = new Set<string>();
+    for (const m of thread) {
+      if (m.senderId && m.senderId !== currentUserId) ids.add(m.senderId);
+      for (const uid of m.recipientUserIds) {
+        if (uid && uid !== currentUserId) ids.add(uid);
+      }
+    }
+    return Array.from(ids).map(uid => nameById.get(uid) ?? 'Unknown').sort();
+  }, [thread, currentUserId, nameById]);
+
   if (!conversation) return null;
-  const hasEntity = conversation.entityType && conversation.entityId;
+  const hasEntity = !!(conversation.entityType && conversation.entityId);
+  const route = hasEntity ? ENTITY_ROUTE[conversation.entityType!.toLowerCase()] : null;
+  const label = hasEntity ? (ENTITY_LABEL[conversation.entityType!.toLowerCase()] ?? conversation.entityType!) : '';
+  const clientSuffix = user?.role === 'client' && user.clientSheetId
+    ? `&client=${encodeURIComponent(user.clientSheetId)}`
+    : '';
+  const deepLinkHref = hasEntity && route
+    ? `${window.location.origin}/#/${route}?open=${encodeURIComponent(conversation.entityId!)}${clientSuffix}`
+    : null;
+
   return (
     <div style={{
       display: 'flex', alignItems: 'center', gap: 10,
@@ -257,16 +335,37 @@ function ThreadHeader({ conversation, onBack, showBack }: { conversation: Conver
         <div style={{ fontSize: 15, fontWeight: 600, color: v2.colors.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           {conversation.title}
         </div>
+        {participantNames.length > 0 && (
+          <div
+            title={participantNames.join(', ')}
+            style={{
+              fontSize: 11, color: v2.colors.textMuted, marginTop: 2,
+              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+            }}
+          >
+            {participantNames.join(', ')}
+          </div>
+        )}
       </div>
-      {hasEntity && (
-        <span style={{
-          display: 'flex', alignItems: 'center', gap: 4,
-          fontSize: 10, fontWeight: 600, letterSpacing: '0.5px', textTransform: 'uppercase',
-          padding: '3px 8px', borderRadius: v2.radius.badge,
-          background: v2.colors.bgCard, color: v2.colors.textSecondary,
-        }}>
-          <Tag size={10} /> {conversation.entityType}
-        </span>
+      {hasEntity && deepLinkHref && (
+        <a
+          href={deepLinkHref}
+          target="_blank"
+          rel="noopener noreferrer"
+          title={`Open ${label} ${conversation.entityId} in a new tab`}
+          style={{
+            display: 'inline-flex', alignItems: 'center', gap: 5,
+            fontSize: 11, fontWeight: 600,
+            padding: '5px 10px', borderRadius: 100,
+            background: '#FFF7F0', color: '#B34710',
+            border: '1px solid rgba(232,105,42,0.3)',
+            textDecoration: 'none', flexShrink: 0,
+            whiteSpace: 'nowrap',
+          }}
+        >
+          {label} {conversation.entityId}
+          <ExternalLink size={11} />
+        </a>
       )}
     </div>
   );
