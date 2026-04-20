@@ -51,6 +51,7 @@ import { isApiConfigured, postBatchRequestRepairQuote, type BatchMutationResult 
 import { supabase } from '../lib/supabase';
 import { useInventory } from '../hooks/useInventory';
 import { useClients } from '../hooks/useClients';
+import { useItemNotes } from '../hooks/useItemNotes';
 import { useAutocomplete } from '../hooks/useAutocomplete';
 import { InlineEditableCell } from '../components/shared/InlineEditableCell';
 import { useClientFilterUrlSync } from '../hooks/useClientFilterUrlSync';
@@ -957,6 +958,18 @@ export function Inventory() {
     return { inspItems: insp, asmItems: asm, repairItems: rep };
   }, [tasks, repairs]);
 
+  // Latest public entity_note per visible item, batched so the Notes
+  // column can show collaborative notes without per-row queries. Falls
+  // back to the legacy inventory.item_notes value when no entity_note
+  // exists for an item yet (migration covered most rows on 2026-04-21).
+  // Derives itemIds from the live items list AFTER all other hooks so
+  // the fragile hook-order invariant above is preserved.
+  const visibleItemIds = useMemo(
+    () => liveItems.map(i => i.itemId).filter(Boolean),
+    [liveItems],
+  );
+  const { notesByItemId } = useItemNotes(visibleItemIds, apiConfigured && clientFilter.length > 0);
+
   // Column definitions
   const columns = useMemo(() => [
     // Select
@@ -1191,17 +1204,28 @@ export function Inventory() {
       },
     }),
 
-    // Notes
+    // Notes — now reads the latest public entity_notes body first, falling
+    // back to the legacy inventory.item_notes string for rows that haven't
+    // been migrated (backwards compat). Long bodies truncated with ellipsis
+    // and a title tooltip so the full text is still discoverable.
     ch.accessor('notes', {
       header: 'Notes', size: 200,
       cell: i => {
-        const v = i.getValue();
-        return v
-          ? <span style={{
-            fontSize: theme.typography.sizes.sm, color: theme.colors.textSecondary,
-            display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-          }}>{v}</span>
-          : <span style={{ color: theme.colors.textMuted }}>—</span>;
+        const itemId = i.row.original.itemId;
+        const latest = itemId ? notesByItemId[itemId] : undefined;
+        const legacy = i.getValue();
+        const display = latest || legacy || '';
+        if (!display) return <span style={{ color: theme.colors.textMuted }}>—</span>;
+        const truncated = display.length > 80 ? display.slice(0, 80) + '…' : display;
+        return (
+          <span
+            title={display}
+            style={{
+              fontSize: theme.typography.sizes.sm, color: theme.colors.textSecondary,
+              display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+            }}
+          >{truncated}</span>
+        );
       },
     }),
 
@@ -1251,7 +1275,7 @@ export function Inventory() {
       ),
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  ], [showToast, inspItems, asmItems, repairItems, applyItemPatch, mergeItemPatch, canEditInventory]);
+  ], [showToast, inspItems, asmItems, repairItems, applyItemPatch, mergeItemPatch, canEditInventory, notesByItemId]);
 
   // When navigating from Shipments page, filter table to that shipment
   const tableData = useMemo(() => {
