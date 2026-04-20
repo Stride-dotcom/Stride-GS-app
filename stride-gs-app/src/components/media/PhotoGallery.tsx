@@ -98,6 +98,10 @@ export function PhotoGallery({
           photos={photos}
           compact={compact}
           onPhotoClick={(_, i) => setLightboxIndex(i)}
+          onSetPrimary={readOnly ? undefined : (p: Photo) => setPrimaryPhoto(p.id)}
+          onToggleAttention={readOnly ? undefined : (p: Photo, next: boolean) => toggleNeedsAttention(p.id, next)}
+          onToggleRepair={readOnly ? undefined : (p: Photo, next: boolean) => toggleRepair(p.id, next)}
+          onDelete={readOnly ? undefined : (p: Photo) => deletePhoto(p.id)}
         />
       )}
 

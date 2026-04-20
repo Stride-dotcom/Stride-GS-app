@@ -244,8 +244,12 @@ export function usePhotos({ entityType, entityId, tenantId, enabled = true }: Us
       .select('*')
       .single();
     if (insErr || !data) { setError(insErr?.message || 'Insert failed'); return null; }
+    // v2: explicit refetch so the grid updates even if the Realtime channel
+    // is slow or dropped. Realtime is still the primary mechanism — this is
+    // a belt for the suspenders.
+    await refetch();
     return data as Photo;
-  }, [effectiveTenantId, entityType, entityId, photos.length, user?.email]);
+  }, [effectiveTenantId, entityType, entityId, photos.length, user?.email, refetch]);
 
   const setPrimaryPhoto = useCallback(async (photoId: string): Promise<boolean> => {
     if (!entityId) return false;
@@ -258,24 +262,27 @@ export function usePhotos({ entityType, entityId, tenantId, enabled = true }: Us
       .update({ is_primary: true })
       .eq('id', photoId);
     if (err) { setError(err.message); return false; }
+    await refetch();
     return true;
-  }, [entityType, entityId]);
+  }, [entityType, entityId, refetch]);
 
   const toggleNeedsAttention = useCallback(async (photoId: string, needsAttention: boolean): Promise<boolean> => {
     const { error: err } = await supabase.from('item_photos')
       .update({ needs_attention: needsAttention })
       .eq('id', photoId);
     if (err) { setError(err.message); return false; }
+    await refetch();
     return true;
-  }, []);
+  }, [refetch]);
 
   const toggleRepair = useCallback(async (photoId: string, isRepair: boolean): Promise<boolean> => {
     const { error: err } = await supabase.from('item_photos')
       .update({ is_repair: isRepair })
       .eq('id', photoId);
     if (err) { setError(err.message); return false; }
+    await refetch();
     return true;
-  }, []);
+  }, [refetch]);
 
   const deletePhoto = useCallback(async (photoId: string): Promise<boolean> => {
     const photo = photos.find(p => p.id === photoId);
@@ -287,8 +294,9 @@ export function usePhotos({ entityType, entityId, tenantId, enabled = true }: Us
     }
     const { error: err } = await supabase.from('item_photos').delete().eq('id', photoId);
     if (err) { setError(err.message); return false; }
+    await refetch();
     return true;
-  }, [photos]);
+  }, [photos, refetch]);
 
   return { photos, loading, error, refetch, uploadPhoto, setPrimaryPhoto, toggleNeedsAttention, toggleRepair, deletePhoto };
 }
