@@ -179,6 +179,12 @@ function keyForMessage(m: Message, selfId: string): string | null {
 // ─── Hook ──────────────────────────────────────────────────────────────────
 
 export interface UseMessagesResult {
+  /** Supabase auth uid of the currently signed-in user. Exposed so
+   *  consumers like MessagesPage can derive recipients / render bubbles
+   *  from the same auth source the hook uses — avoids a second
+   *  `supabase.auth.getSession()` race that caused sent bubbles to
+   *  render as the other party (or send to `undefined`) on first mount. */
+  authUserId: string | null;
   conversations: Conversation[];
   thread: Message[];
   threadLoading: boolean;
@@ -739,6 +745,7 @@ function useMessagesImpl(): UseMessagesResult {
   }, [messages, authUserId, dismissedBannerIds]);
 
   return useMemo(() => ({
+    authUserId,
     conversations: conversationsWithNames,
     thread,
     threadLoading,
@@ -755,7 +762,7 @@ function useMessagesImpl(): UseMessagesResult {
     refetch,
     latestUnreadIncoming,
     dismissBanner,
-  }), [conversationsWithNames, thread, threadLoading, loading, unreadCount, activeThreadKey,
+  }), [authUserId, conversationsWithNames, thread, threadLoading, loading, unreadCount, activeThreadKey,
        openThread, closeThread, sendMessage, markRead, markAllReadInThread, archiveMessage,
        deleteConversation, refetch, latestUnreadIncoming, dismissBanner]);
 }

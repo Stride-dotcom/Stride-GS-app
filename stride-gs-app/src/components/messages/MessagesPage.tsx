@@ -11,7 +11,6 @@
 import { useEffect, useState } from 'react';
 import { ArrowLeft, Tag, Edit3 } from 'lucide-react';
 import { theme } from '../../styles/theme';
-import { supabase } from '../../lib/supabase';
 import { useIsMobile } from '../../hooks/useIsMobile';
 import { useMessages, type Conversation } from '../../hooks/useMessages';
 import { MessageList } from './MessageList';
@@ -23,6 +22,7 @@ export function MessagesPage() {
   const v2 = theme.v2;
   const { isMobile } = useIsMobile();
   const {
+    authUserId,
     conversations,
     thread,
     threadLoading,
@@ -35,11 +35,16 @@ export function MessagesPage() {
     deleteConversation,
   } = useMessages();
 
-  const [authUserId, setAuthUserId] = useState<string | null>(null);
+  // Session 74: authUserId comes from the shared useMessages provider —
+  // same source the hook itself uses for RLS matching + realtime filtering.
+  // The previous local `supabase.auth.getSession()` lookup raced first-render
+  // sends: on the initial render it was null, handleSend's "pick non-self"
+  // logic then derived the wrong "other" uid (often picking the sender
+  // themselves), and the message was effectively sent to nobody — the
+  // sender's thread stayed empty while the DB insert "succeeded" with a
+  // malformed recipient set.
+
   const [composeOpen, setComposeOpen] = useState(false);
-  useEffect(() => {
-    supabase.auth.getSession().then(({ data }) => setAuthUserId(data.session?.user.id ?? null));
-  }, []);
 
   // After compose: open the newly-sent thread so the user lands on their
   // message. Entity-linked threads open via entity key; direct threads open
@@ -74,6 +79,13 @@ export function MessagesPage() {
 
   const handleSend = async (body: string) => {
     if (!active) return;
+    // Session 74: bail if authUserId isn't resolved yet. Without it the
+    // "other party" detection below would mis-classify self as other and
+    // send the message to the wrong recipient (or no recipient at all).
+    if (!authUserId) {
+      console.warn('[MessagesPage] handleSend: authUserId not ready, ignoring send');
+      return;
+    }
     // Recipient resolution: direct threads → the OTHER party's user id
     // (key format is `direct:<uidA>:<uidB>` sorted-stable; pick whichever
     // isn't self). Entity threads → we can't know recipients from the
