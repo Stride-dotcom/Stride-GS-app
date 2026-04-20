@@ -55,81 +55,37 @@ async function loadQuoteTemplateBody(): Promise<string | null> {
 
 /**
  * Build the line-items rows as a single HTML string of <tr>...</tr>
- * blocks. Column order + cell classes match the invoice-derived quote
- * template's header row so visual styling (border colors, paddings,
- * cell widths) is inherited for free.
+ * blocks matching the new DOC_QUOTE 5-column layout:
  *
- * Invoice-style column layout (7 cols, left→right):
- *   c33 — Service Date   (left blank for quotes)
- *   c32 — Service        (service name)
- *   c32 — Item ID        (service code, or blank)
- *   c41 — Notes          (class name or category fallback)
- *   c39 — Qty
- *   c27 — Rate
- *   c30 — Total
+ *   Service | Class | Qty | Rate | Total
+ *
+ * The template places {{LINE_ITEMS_HTML}} directly inside a clean
+ * <tbody> element, so these rows drop in as first-class tbody
+ * children — no structural splice needed.
  */
 function buildLineItemsRows(calc: CalcResult): string {
   if (calc.lineItems.length === 0) {
-    // Empty state row so the table doesn't collapse to zero height.
     return (
-      '<tr class="c11">' +
-      '<td class="c33" colspan="7" rowspan="1"><p class="c7"><span class="c16">' +
+      '<tr><td colspan="5" style="padding:12px;text-align:center;color:#94A3B8;font-size:10pt;">' +
       '(No line items selected — open the quote and choose services.)' +
-      '</span></p></td>' +
-      '</tr>'
+      '</td></tr>'
     );
   }
 
-  const cell = (cls: string, text: string, align?: 'right' | 'center') => {
-    const pAttr = align === 'right' ? 'c10' : align === 'center' ? 'c18' : 'c7';
-    return (
-      '<td class="' + cls + '" colspan="1" rowspan="1">' +
-      '<p class="' + pAttr + '"><span class="c16">' + text + '</span></p>' +
-      '</td>'
-    );
-  };
-
   return calc.lineItems
     .map(li => {
-      const notes = li.className ? escHtml(li.className) : escHtml(li.category || '');
+      const classLabel = li.className ? escHtml(li.className) : escHtml(li.category || '');
       return (
-        '<tr class="c11">' +
-        cell('c33', '') +
-        cell('c32', escHtml(li.serviceName)) +
-        cell('c32', escHtml(li.serviceCode || '')) +
-        cell('c41', notes) +
-        cell('c39', String(li.qty), 'center') +
-        cell('c27', fmt$(li.rate), 'right') +
-        cell('c30', fmt$(li.amount), 'right') +
+        '<tr>' +
+        '<td>' + escHtml(li.serviceName) + '</td>' +
+        '<td>' + classLabel + '</td>' +
+        '<td class="num">' + String(li.qty) + '</td>' +
+        '<td class="num">' + fmt$(li.rate) + '</td>' +
+        '<td class="num">' + fmt$(li.amount) + '</td>' +
         '</tr>'
       );
     })
     .join('');
-}
-
-/**
- * Replace the whole placeholder <tr>…{{LINE_ITEMS_HTML}}…</tr> row with
- * the generated line-item rows. Inline string replace won't work here
- * because `{{LINE_ITEMS_HTML}}` lives inside a <td><p><span>…</span></p></td>
- * inside a <tr> — a plain substitution would leave that wrapper row in
- * place and insert our `<tr>` rows inside a `<td>`, which browsers
- * reject when parsing into a table.
- *
- * Strategy: find the token, walk backward to the nearest opening `<tr`
- * and forward to the nearest closing `</tr>`, then splice that entire
- * row out and replace with the generated rows.
- */
-function replaceLineItemsRow(html: string, lineRowsHtml: string): string {
-  const TOKEN = '{{LINE_ITEMS_HTML}}';
-  const idx = html.indexOf(TOKEN);
-  if (idx < 0) return html;
-  const trStart = html.lastIndexOf('<tr', idx);
-  const trEnd = html.indexOf('</tr>', idx);
-  if (trStart < 0 || trEnd < 0) {
-    // Couldn't find a wrapping <tr> — fall back to plain substitution.
-    return html.split(TOKEN).join(lineRowsHtml);
-  }
-  return html.slice(0, trStart) + lineRowsHtml + html.slice(trEnd + '</tr>'.length);
 }
 
 // ─── Scalar token substitution ─────────────────────────────────────────────
@@ -153,8 +109,10 @@ async function generateFromTemplate(
   if (!body) return null;
   const calc = calcQuote(quote, catalog.services, catalog.classes, catalog.coverageOptions);
 
-  // Step 1: replace the line-items row (structural splice, not string sub).
-  let html = replaceLineItemsRow(body, buildLineItemsRows(calc));
+  // Step 1: inject line-item rows into the template's <tbody>. The new
+  // DOC_QUOTE body has `{{LINE_ITEMS_HTML}}` as a direct tbody child,
+  // so plain string substitution is valid and browser-parseable.
+  let html = body.split('{{LINE_ITEMS_HTML}}').join(buildLineItemsRows(calc));
 
   // Step 2: scalar tokens. All other {{TOKEN}}s are plain text slots.
   const covOption = catalog.coverageOptions.find(c => c.id === quote.coverage.typeId);
