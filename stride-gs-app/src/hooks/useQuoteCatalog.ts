@@ -25,6 +25,9 @@ interface ItemClassRow {
   name: string;
   display_order: number;
   active: boolean;
+  // Session 74: cubic-foot size from the Price List → Classes page.
+  // Storage math needs this; other services ignore it.
+  storage_size: number | string | null;
 }
 
 interface TaxAreaRow {
@@ -47,11 +50,19 @@ interface CoverageOptionRow {
 }
 
 function rowToClass(r: ItemClassRow): ClassDef {
+  // storage_size arrives as numeric text from Supabase's NUMERIC type;
+  // coerce via Number() then clamp NaN to 0 so downstream math never
+  // produces NaN dollars. A class with size=0 renders storage as $0,
+  // which is accurate — charging for an unconfigured class would be
+  // worse than showing zero.
+  const sizeRaw = r.storage_size;
+  const size = sizeRaw == null ? 0 : Number(sizeRaw);
   return {
     id: r.id,
     name: r.name,
     order: r.display_order,
     active: r.active,
+    storageSize: Number.isFinite(size) ? size : 0,
   };
 }
 

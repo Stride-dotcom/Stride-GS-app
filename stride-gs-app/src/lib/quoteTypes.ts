@@ -2,9 +2,14 @@
 
 export interface ClassDef {
   id: string;       // XS, S, M, L, XL
-  name: string;     // Extra Small, Small, ...
+  name: string;     // Extra Small, Small, ... (legacy display only)
   order: number;
   active: boolean;
+  /** Cubic-foot size assigned to this class on the Price List → Classes
+   *  page (public.item_classes.storage_size). Storage charges are
+   *  calculated as qty × days × storageSize × per-cuFt rate, so this
+   *  MUST be populated for the storage math to produce real dollars. */
+  storageSize?: number;
 }
 
 export interface ServiceRate {

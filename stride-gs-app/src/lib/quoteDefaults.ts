@@ -2,13 +2,18 @@ import type {
   ClassDef, ServiceDef, TaxArea, CoverageOption, QuoteStoreSettings,
 } from './quoteTypes';
 
+// Storage-size defaults mirror public.item_classes.storage_size in
+// Supabase (XS=5, S=15, M=45, L=75, XL=100, XXL=150 cuFt). These are
+// only used when the Supabase fetch fails or the user is running a
+// brand-new client with no Classes configured yet — live quotes pull
+// storage_size from Supabase via useQuoteCatalog → rowToClass.
 export const DEFAULT_CLASSES: ClassDef[] = [
-  { id: 'XS',  name: 'Extra Small',  order: 1, active: true },
-  { id: 'S',   name: 'Small',        order: 2, active: true },
-  { id: 'M',   name: 'Medium',       order: 3, active: true },
-  { id: 'L',   name: 'Large',        order: 4, active: true },
-  { id: 'XL',  name: 'Extra Large',  order: 5, active: true },
-  { id: 'XXL', name: 'XX-Large',     order: 6, active: true },
+  { id: 'XS',  name: 'Extra Small',  order: 1, active: true, storageSize: 5   },
+  { id: 'S',   name: 'Small',        order: 2, active: true, storageSize: 15  },
+  { id: 'M',   name: 'Medium',       order: 3, active: true, storageSize: 45  },
+  { id: 'L',   name: 'Large',        order: 4, active: true, storageSize: 75  },
+  { id: 'XL',  name: 'Extra Large',  order: 5, active: true, storageSize: 100 },
+  { id: 'XXL', name: 'XX-Large',     order: 6, active: true, storageSize: 150 },
 ];
 
 let _order = 0;

@@ -32,7 +32,27 @@ export function calcQuote(
     }
   }
 
-  // 2. Storage services
+  // 2. Storage services — Session 74 fix.
+  //
+  // Storage is billed per cubic-foot per day. Each class carries a
+  // cubic-foot "storage size" configured on the Price List → Classes
+  // page (public.item_classes.storage_size). The price-list storage
+  // service rate is per-cuFt-per-day. So the math is:
+  //
+  //     amount = qty × days × class.storageSize × rate
+  //
+  // Example (user-approved): Small class has storageSize = 15 cuFt.
+  // With a $0.04/cuFt/day Daily Storage rate and 2 items for 1 day:
+  //     2 × 1 × 15 × 0.04 = $1.20
+  //
+  // Previously this multiplied only (qty × days × rate), which missed
+  // the cubic-foot factor and produced values ~1/15th of the real
+  // charge for Small items (and 1/45th for Medium, 1/75th for Large,
+  // etc.). Class-based rate still comes from svc.rates[cls.id]; flat
+  // storage still uses svc.flatRate. If storageSize is unset on a
+  // class (legacy or new class without a configured size), it
+  // falls back to 1 so the calc still produces a non-zero number —
+  // the Price List admin should set the size to fix the rate.
   const storageDays = (quote.storage.months * 30) + quote.storage.days;
   if (storageDays > 0) {
     for (const svc of services.filter(s => s.active && s.isStorage)) {
@@ -46,7 +66,8 @@ export function calcQuote(
         const rate = svc.billing === 'class_based'
           ? (svc.rates[cls.id as keyof typeof svc.rates] ?? 0)
           : svc.flatRate;
-        const amount = qty * storageDays * rate;
+        const storageSize = (cls.storageSize && cls.storageSize > 0) ? cls.storageSize : 1;
+        const amount = qty * storageDays * storageSize * rate;
         lineItems.push({
           serviceId: svc.id, serviceName: svc.name, serviceCode: svc.code,
           classId: cls.id, className: cls.name,
