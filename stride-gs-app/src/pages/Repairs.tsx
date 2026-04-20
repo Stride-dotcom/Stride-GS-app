@@ -42,7 +42,7 @@ import { mobileChipsRow } from '../styles/mobileTable';
 const ALL_STATUSES = ['Pending Quote', 'Quote Sent', 'Approved', 'Declined', 'In Progress', 'Complete', 'Cancelled'];
 
 const DEFAULT_COL_ORDER = [
-  'select', 'status', 'itemId', 'clientName', 'vendor',
+  'select', 'status', 'itemId', 'location', 'clientName', 'vendor',
   'description', 'quoteAmount', 'approvedAmount', 'repairVendor', 'assignedTo',
   'createdDate', 'quoteSentDate', 'sourceTaskId', 'completedDate', 'repairId', 'notes', 'actions',
 ];
@@ -59,6 +59,7 @@ const STATUS_CFG: Record<string, { bg: string; text: string }> = {
 
 const COL_LABELS: Record<string, string> = {
   repairId: 'Repair ID', sourceTaskId: 'Source Task', itemId: 'Item',
+  location: 'Location',
   clientName: 'Client', description: 'Description', status: 'Status',
   quoteAmount: 'Quote $', approvedAmount: 'Approved $', repairVendor: 'Repair Tech',
   assignedTo: 'Assigned', createdDate: 'Created', quoteSentDate: 'Quote Sent',
@@ -87,6 +88,10 @@ function cols() {
     col.accessor('sourceTaskId', { header: 'Source Task', size: 100, cell: i => <span style={{ color: theme.colors.textSecondary, fontSize: 12 }}>{i.getValue() || '\u2014'}</span> }),
     col.accessor('status', { header: 'Status', size: 120, filterFn: mf, cell: i => <Badge t={i.getValue()} c={STATUS_CFG[i.getValue()]} /> }),
     col.accessor('itemId', { header: 'Item', size: 110, cell: i => { const id = i.getValue(); const ind = (window as any).__itemIndicators; return <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}><span style={{ color: theme.colors.textSecondary, fontSize: 12 }}>{id}</span>{ind && <ItemIdBadges itemId={id} inspItems={ind.inspItems} asmItems={ind.asmItems} repairItems={ind.repairItems} />}</div>; } }),
+    // Session 74: warehouse location — mirrored from inventory so the
+    // Repairs table matches what's on the Tasks table. Useful for
+    // warehouse staff sorting by aisle/bay before picking items.
+    col.accessor('location', { header: 'Location', size: 130, cell: i => <span style={{ fontSize: 12, color: i.getValue() ? theme.colors.text : theme.colors.textMuted }}>{i.getValue() || '\u2014'}</span> }),
     col.accessor('clientName', { header: 'Client', size: 160, filterFn: mf, cell: i => <span style={{ fontWeight: 500, fontSize: 12 }}>{i.getValue()}</span> }),
     col.accessor('vendor', { id: 'vendor', header: 'Vendor', size: 130, cell: i => <span style={{ color: theme.colors.textSecondary, fontSize: 12 }}>{i.getValue() || '\u2014'}</span> }),
     col.accessor('description', { header: 'Description', size: 260, cell: i => <span style={{ color: theme.colors.textSecondary, fontSize: 12, maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'block' }}>{i.getValue()}</span> }),
