@@ -60,12 +60,18 @@ function makeStyles(isMobile: boolean) {
       gap: isMobile ? 10 : 16,
       minHeight: 0,
     } as React.CSSProperties,
-    card: { background: '#fff', border: '1px solid rgba(0,0,0,0.04)', borderRadius: 20, padding: isMobile ? 16 : 24, display: 'flex', flexDirection: 'column' as const },
+    card: { background: '#fff', border: '1px solid rgba(0,0,0,0.06)', borderRadius: 20, padding: isMobile ? 16 : 24, display: 'flex', flexDirection: 'column' as const },
     cardTitle: { fontSize: 10, fontWeight: 600, color: '#E8692A', textTransform: 'uppercase' as const, letterSpacing: '2px', marginBottom: 12, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' as const },
-    textarea: { width: '100%', minHeight: isMobile ? 80 : 100, padding: '12px 16px', border: '1px solid rgba(0,0,0,0.08)', borderRadius: 12, fontSize: 16, fontFamily: 'monospace', outline: 'none', resize: 'vertical' as const, boxSizing: 'border-box' as const },
-    btnPrimary: { padding: isMobile ? '14px 22px' : '12px 24px', fontSize: 11, fontWeight: 600, letterSpacing: '1.5px', textTransform: 'uppercase' as const, background: theme.colors.primary, color: '#fff', border: 'none', borderRadius: 100, cursor: 'pointer', fontFamily: 'inherit', display: 'inline-flex', alignItems: 'center', gap: 6, minHeight: isMobile ? 46 : undefined },
-    btnSecondary: { padding: isMobile ? '11px 18px' : '10px 18px', fontSize: 11, fontWeight: 600, letterSpacing: '1.5px', textTransform: 'uppercase' as const, background: '#fff', color: '#666', border: '1px solid rgba(0,0,0,0.08)', borderRadius: 100, cursor: 'pointer', fontFamily: 'inherit', display: 'inline-flex', alignItems: 'center', gap: 4, minHeight: isMobile ? 42 : undefined },
-    btnDanger: { padding: isMobile ? '11px 18px' : '10px 18px', fontSize: 11, fontWeight: 600, letterSpacing: '1.5px', textTransform: 'uppercase' as const, background: '#fff', color: '#DC2626', border: '1px solid #FCA5A5', borderRadius: 100, cursor: 'pointer', fontFamily: 'inherit', display: 'inline-flex', alignItems: 'center', gap: 4, minHeight: isMobile ? 42 : undefined },
+    // Scan/paste input — needs to pop against the cream page background.
+    // 16px font prevents iOS zoom on focus. 2px border + dark text fixes
+    // the "barely visible" complaint on phones.
+    textarea: { width: '100%', minHeight: isMobile ? 96 : 100, padding: '14px 16px', border: '2px solid rgba(0,0,0,0.15)', borderRadius: 12, fontSize: 16, fontFamily: 'monospace', outline: 'none', resize: 'vertical' as const, boxSizing: 'border-box' as const, color: '#1C1C1C', background: '#fff' },
+    btnPrimary: { padding: isMobile ? '14px 22px' : '12px 24px', fontSize: isMobile ? 13 : 11, fontWeight: 700, letterSpacing: '1.5px', textTransform: 'uppercase' as const, background: theme.colors.primary, color: '#fff', border: 'none', borderRadius: 100, cursor: 'pointer', fontFamily: 'inherit', display: 'inline-flex', alignItems: 'center', gap: 6, minHeight: isMobile ? 48 : undefined, boxShadow: '0 2px 8px rgba(232,93,45,0.25)' },
+    // Disabled primary — keep the pill clearly visible against cream. Solid
+    // muted fill instead of opacity so the button shape reads at a glance.
+    btnPrimaryDisabled: { padding: isMobile ? '14px 22px' : '12px 24px', fontSize: isMobile ? 13 : 11, fontWeight: 700, letterSpacing: '1.5px', textTransform: 'uppercase' as const, background: '#CDC8BE', color: '#6B6B6B', border: 'none', borderRadius: 100, cursor: 'not-allowed', fontFamily: 'inherit', display: 'inline-flex', alignItems: 'center', gap: 6, minHeight: isMobile ? 48 : undefined },
+    btnSecondary: { padding: isMobile ? '11px 18px' : '10px 18px', fontSize: 11, fontWeight: 600, letterSpacing: '1.5px', textTransform: 'uppercase' as const, background: '#fff', color: '#1C1C1C', border: '2px solid rgba(0,0,0,0.12)', borderRadius: 100, cursor: 'pointer', fontFamily: 'inherit', display: 'inline-flex', alignItems: 'center', gap: 4, minHeight: isMobile ? 44 : undefined },
+    btnDanger: { padding: isMobile ? '11px 18px' : '10px 18px', fontSize: 11, fontWeight: 600, letterSpacing: '1.5px', textTransform: 'uppercase' as const, background: '#fff', color: '#DC2626', border: '2px solid #FCA5A5', borderRadius: 100, cursor: 'pointer', fontFamily: 'inherit', display: 'inline-flex', alignItems: 'center', gap: 4, minHeight: isMobile ? 44 : undefined },
     // On mobile, queue rows stack into a card layout instead of a 6-column grid
     queueRow: (status: QueueItem['status']) => ({
       display: isMobile ? 'flex' : 'grid',
@@ -86,7 +92,9 @@ function makeStyles(isMobile: boolean) {
       borderBottom: `2px solid ${theme.colors.border}`,
       fontSize: 10, fontWeight: 600, textTransform: 'uppercase' as const, letterSpacing: '0.04em', color: theme.colors.textMuted, background: '#F9FAFB',
     } as React.CSSProperties,
-    locInput: { width: '100%', padding: isMobile ? '14px 18px' : '12px 18px', border: '1px solid rgba(0,0,0,0.08)', borderRadius: 100, fontSize: 16, fontFamily: 'inherit', outline: 'none', boxSizing: 'border-box' as const } as React.CSSProperties,
+    // Location / text inputs — same contrast fix as textarea. 16px prevents
+    // iOS zoom, 2px border + dark text makes the field obvious on cream.
+    locInput: { width: '100%', padding: isMobile ? '14px 20px' : '12px 18px', border: '2px solid rgba(0,0,0,0.15)', borderRadius: 100, fontSize: 16, fontFamily: 'inherit', outline: 'none', boxSizing: 'border-box' as const, color: '#1C1C1C', background: '#fff', minHeight: isMobile ? 48 : undefined } as React.CSSProperties,
     dropdown: { position: 'absolute' as const, top: '100%', left: 0, right: 0, background: '#fff', border: `1px solid ${theme.colors.border}`, borderRadius: 8, marginTop: 4, maxHeight: isMobile ? 280 : 240, overflow: 'auto', boxShadow: '0 4px 20px rgba(0,0,0,0.08)', zIndex: 30 },
     dropdownRow: (active: boolean) => ({ padding: isMobile ? '12px 14px' : '8px 12px', fontSize: 13, cursor: 'pointer', background: active ? '#EFF6FF' : '#fff', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }) as React.CSSProperties,
     modal: { position: 'fixed' as const, inset: 0, background: 'rgba(0,0,0,0.35)', display: 'flex', alignItems: isMobile ? 'flex-end' : 'center', justifyContent: 'center', zIndex: 50 },
@@ -446,7 +454,7 @@ export function Scanner() {
           <div style={s.card}>
             <div style={s.cardTitle}>
               <Camera size={14} /> Keyboard / paste entry
-              <span style={{ marginLeft: 'auto', fontSize: 11, fontWeight: 400, color: theme.colors.textMuted, textTransform: 'none', letterSpacing: 0 }}>
+              <span style={{ marginLeft: 'auto', fontSize: 11, fontWeight: 500, color: '#666', textTransform: 'none', letterSpacing: 0 }}>
                 Enter to add · Shift+Enter = new line · paste many at once
               </span>
             </div>
@@ -472,7 +480,7 @@ export function Scanner() {
                 <span>Item ID</span><span>Client</span><span>Vendor / Sidemark</span><span>Description</span><span>Current Loc</span><span></span>
               </div>
               {!queue.length && (
-                <div style={{ padding: 40, textAlign: 'center', color: theme.colors.textMuted, fontSize: 13 }}>
+                <div style={{ padding: 40, textAlign: 'center', color: '#666', fontSize: 13, fontWeight: 500 }}>
                   Scan or paste item IDs above to begin.
                 </div>
               )}
@@ -598,14 +606,14 @@ export function Scanner() {
           {!isMobile && (
             <>
               <button
-                style={{ ...s.btnPrimary, justifyContent: 'center', padding: '12px 18px', fontSize: 15, opacity: canSubmit ? 1 : 0.4, cursor: canSubmit ? 'pointer' : 'not-allowed' }}
+                style={{ ...(canSubmit ? s.btnPrimary : s.btnPrimaryDisabled), justifyContent: 'center', padding: '12px 18px', fontSize: 15 }}
                 onClick={submit}
                 disabled={!canSubmit}
               >
                 {busy ? <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} /> : <CheckCircle2 size={16} />}
                 {busy ? 'Moving…' : `Move ${foundCount || 0} item${foundCount === 1 ? '' : 's'}`}
               </button>
-              <div style={{ fontSize: 11, color: theme.colors.textMuted, textAlign: 'center' }}>
+              <div style={{ fontSize: 11, color: '#666', textAlign: 'center' }}>
                 Uses item_id_ledger for fast cross-tenant lookup.
               </div>
             </>
@@ -626,25 +634,23 @@ export function Scanner() {
           flexDirection: 'column',
           gap: 6,
         }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 11, color: theme.colors.textMuted }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 12, color: '#666', fontWeight: 500 }}>
             <span>
               {foundCount > 0 && <><strong style={{ color: '#15803D' }}>{foundCount}</strong> ready</>}
               {pendingCount > 0 && <> · <span style={{ color: '#6B7280' }}>{pendingCount} checking</span></>}
               {notFoundCount > 0 && <> · <span style={{ color: '#DC2626' }}>{notFoundCount} not found</span></>}
               {foundCount === 0 && pendingCount === 0 && notFoundCount === 0 && 'Scan or type item IDs above'}
             </span>
-            <span style={{ fontFamily: 'monospace', fontWeight: 600, color: targetLocation ? theme.colors.primary : theme.colors.textMuted }}>
-              → {targetLocation || 'pick location'}
+            <span style={{ fontFamily: 'monospace', fontWeight: 700, color: targetLocation ? theme.colors.primary : '#B45309', textDecoration: targetLocation ? undefined : 'underline' }}>
+              → {targetLocation || 'Pick location'}
             </span>
           </div>
           <button
             style={{
-              ...s.btnPrimary,
+              ...(canSubmit ? s.btnPrimary : s.btnPrimaryDisabled),
               justifyContent: 'center',
-              padding: '14px',
+              padding: '16px',
               fontSize: 15,
-              opacity: canSubmit ? 1 : 0.4,
-              cursor: canSubmit ? 'pointer' : 'not-allowed',
               width: '100%',
             }}
             onClick={submit}
