@@ -1,7 +1,8 @@
 # Stride GS App — Build Status & Continuation Guide
 
-**Last updated:** 2026-04-18 (session 73 — Price List page Phase 1: `service_catalog` + `service_catalog_audit` Supabase tables, 31 seed services from Quote Tool defaults, split-panel UI with category/feature filters, search, CRUD edit panel, add modal, audit trail. Bundle `index-CBzAZFuG.js` / 1,976 modules. Migrations pending manual apply.)
-**StrideAPI.gs:** v38.72.0 (Web App v322)
+**Last updated:** 2026-04-20 (sessions 65+ mega build — Quote Tool, unified Price List with shareable public URLs, Expected/Operations Calendar on Dashboard, Photos / Documents / Notes modules wired into every detail panel, iMessage-style Messages with role-aware recipient filter, email + doc templates on Supabase with auto-seed + template token audit, manual billing charges, task due date + priority, receiving add-ons, Phase 5 rate cutover in shadow mode + Rate Parity Monitor tab, profiles table (137 users), sidemark + Reference across billing pipeline, full v2 visual refresh, full mobile pass on staff pages, GitHub Actions CI/CD live. Bundle `index-6UPsNlux.js`.)
+**StrideAPI.gs:** v38.85.0
+**Supabase (new tables this session):** `item_photos`, `documents`, `entity_notes`, `messages`, `message_recipients`, `in_app_notifications`, `email_templates`, `email_templates_audit`, `service_catalog`, `service_catalog_audit`, `expected_shipments`, `profiles` — plus `photos` / `documents` private storage buckets with tenant-scoped path RLS.
 **Import.gs (client):** v4.3.0 (rolled out to all 49 active clients; Reference column now imported)
 **Emails.gs (client):** v4.6.0 (rolled out to all 49 active clients — Room column dropped, Reference takes its place)
 **Shipments.gs (client):** v4.3.2 (rolled out to all 49 active clients — deep links use query-param ?open=&client= format)
@@ -75,34 +76,75 @@ Login, Dashboard, Inventory, Receiving, Shipments, Tasks, Repairs, Will Calls, B
 
 ---
 
-## RECENT CHANGES (2026-04-18 session 73 — Price List Phase 1)
+## RECENT CHANGES (2026-04-17 → 2026-04-20, sessions 65+ — mega build)
 
-### Price List page — unified service catalog
+Four-day sprint. Everything below is live on `origin/source` + `origin/main` (GitHub Pages) unless explicitly flagged "in progress".
 
-New `/price-list` route (admin-only). Split-panel layout backed by Supabase `service_catalog` table.
+### Features shipped
 
-**Files created:**
-- `stride-gs-app/supabase/migrations/20260418020000_service_catalog.sql` — schema + RLS (`service_catalog` + `service_catalog_audit`)
-- `stride-gs-app/supabase/migrations/20260418020001_service_catalog_seed.sql` — 31 services from Quote Tool defaults
-- `src/hooks/useServiceCatalog.ts` — Supabase CRUD + per-field audit row insertion on update
-- `src/components/pricelist/ServiceCard.tsx` — code pill, rates display, behavior tags, active toggle
-- `src/components/pricelist/ServiceEditPanel.tsx` — right slide-out drawer, all 16 fields, save/2-step-delete
-- `src/components/pricelist/AddServiceModal.tsx` — create modal with all fields
-- `src/pages/PriceList.tsx` — left sidebar (categories + feature filters with counts), search, service list
+| Area | What's live |
+|---|---|
+| **Quote Tool** | Admin-only `/quote` — 18 components, `EST-NNNN` numbering, Supabase `service_catalog`-backed pricing matrix + coverage tiers, `DOC_QUOTE` template drives the printed PDF (Supabase-backed) |
+| **Unified Price List** | Split-panel `/price-list` — inline edit, sortable column headers, show/hide inactive toggle, service time per class (XS–XXL), Storage Size per class, collapsible category sections |
+| **Shareable Price List** | Public `/rates/:shareId` — configurable tab selection, no login required, audit log for every shared snapshot |
+| **Billing workflow** | Supabase-first report builder (no auto-load; client select fetches sidemarks only; Load Report runs the query; Refresh forces GAS). "+ Add Charge" creates `MANUAL-*` rows with edit / 2-step void from the detail panel |
+| **Task due date + priority** | `updateTaskDueDate`, `updateTaskPriority`, idempotent `api_ensureTaskColumns_`. Overdue rows highlight red; calendar lifts `priority` into sort + "High Priority" stat card; SLA auto-populates due date from service default |
+| **Receiving add-ons** | Expandable per-row checkboxes. Local-state only during editing; billing rows written server-side in `handleCompleteShipment_` from the `addons` array. Auto-apply rules: `overweight` (>threshold lbs), `no_id` (fires when client matches "Needs ID Holding Account"). Per-item `dismissedAddons` set prevents re-check after manual override |
+| **Expected / Operations Calendar** | Primary tab on the Dashboard. Unified event feed (tasks, repairs, will calls, expected shipments). Priority-sorted per day. Deep links on every event type. 4 aggregate stat cards (Due Today / This Week / High Priority / Overdue). Mon-start weeks. Free-text UNKNOWN shipments (staff-only). Calendar search. Optimistic sync via per-entity sync buses + `pending` pill visual |
+| **Photos** | `item_photos` table + `photos` private bucket. Upload, gallery, attention / repair tagging, signed URLs, Realtime, thumbnail quick-actions. Wired into every detail panel |
+| **Documents** | `documents` table + `documents` private bucket. Upload, list, signed URLs, soft delete. Wired into Item + Shipment panels |
+| **Notes** | `entity_notes` — per-item / task / repair / WC / shipment. Public / staff_only / internal visibility. Old sheet-based notes migrated. Inventory Notes column reads via `useItemNotes` batch hook |
+| **Messaging** | `messages` + `message_recipients`. iMessage-style bubbles (blue/gray, thread isolation). Compose modal with role-aware recipient picker (clients see admin + same-account coworkers only). Deep-link entity chips on every thread header that resolve tenant + append `&client=` |
+| **Notifications (simplified)** | Session 74 retired the standalone notifications module. TopBar bell is now a pure Messages quick-link driven by `useMessages.unreadCount`. Persistent top banner (`MessageTopBanner`) for unread incoming messages, dismissable + tap-to-navigate |
+| **Email templates → Supabase** | `email_templates` + `email_templates_audit`. GAS `api_getTemplateFromSupabase_` with 600s `CacheService`. Auto-seed from MPL on first empty `handleGetEmailTemplates_` call. `handleUpdateEmailTemplate_` writes Supabase + mirrors to MPL. Settings → Email Templates writes direct to Supabase with audit. `npm run push-templates` + `refresh-caches` are now backup paths only |
+| **Doc templates → Supabase** | Work orders, invoice, quote, claim settlements — all Supabase-backed, editable from Settings → Templates, `Test Generate` button per template |
+| **Template token audit** | Every workflow's token emissions verified against the Supabase template contracts. Two bugs found + fixed in GAS token emission |
+| **Phase 5 rate cutover (shadow mode)** | `api_lookupRate_` + `api_loadClassVolumes_` + `handleGetPricing_` query Supabase in parallel with the sheet. Logs `PARITY_OK` / `PARITY_MISMATCH` lines. Sheet is still primary. `Rate Parity Monitor` tab in Billing page shows live sheet-vs-Supabase side-by-side |
+| **Profiles + user directory** | `profiles` table. 137 users synced via auto-trigger off `auth.users`. Powers messaging recipient picker + `@mentions` |
+| **Sidemark + Reference columns in billing** | Write-through on every create, read-time Inventory overlay as fallback, 304 prior rows backfilled, propagated through QB IIF memo |
+| **Visual refresh Phase 1 + full v2 pass** | `theme.v2` across all 20 routes + 4 job pages + shared components (Sidebar v2, Quote Tool seeded the pattern) |
+| **Mobile pass** | All staff pages: iOS safe areas, 44-px touch targets, full-screen drawers on phones, scrollable tab bars, thumb-reachable controls. NotificationBell popover becomes a fixed full-width drawer on mobile |
+| **Receiving page media** | Inline photos / docs / notes during receiving via `ReceivingRowMedia` |
+| **Client recipient filter** | Clients in the messaging compose picker see admin + same-account coworkers only; broadcast pills hidden |
+| **GitHub Actions CI/CD** | `ci.yml` (typecheck+build on push/PR), `deploy.yml` (auto-deploy), `migrate.yml` (manual migration runner). All three live with secrets |
+| **Master Template deployment fix** | Removed `!c.isTemplate` guard from `update-deployments.mjs`; added `--name <partial>` filter. Template has Web App v108 |
 
-**Wired into:**
-- `App.tsx` — `/price-list` route with `RoleGuard ['admin']`
-- `Sidebar.tsx` — "Price List" nav item with `BookOpen` icon in `ADMIN_NAV`
+### Bug fixes
 
-**Seed: 31 services** — RCVG, INSP (SLA 48h), PICK, RSTK (has_dedicated_page), STOR, SSTOR, 60MA, 1HRO, CLMT, LABOR, WRAP, STCK, DISP, LABEL, PLLT, CRATE, BLNK, WGLV, PHOTO, MNRTU, REPAIR, FMED, SIT, RUSH, AFHR, APPT, STRS, LCRY, DBRS, INSR, WC (has_dedicated_page)
+- **Auto-inspect race on Receiving** — `useState` → `useMemo` + guarded `useEffect`. Zero React #300 risk.
+- **Expired reset link UX** — new `recovery_expired` auth state shows "link expired" instead of silent login redirect.
+- **Mobile sidebar logout clip** — `100vh` → `100%` + `overflow: hidden` on `<aside>`. Logout always visible on iOS.
+- **`useApiData` background refresh cache bug** — `doFetch(false, true)` → `doFetch(true, true)`.
+- **Multi-row select on Will Calls** — previously only last row was picked.
+- **Autocomplete sidemark / room mix** — fixed.
+- **12 clients on template scriptId** — all resolved to real script IDs via `resyncClients`.
+- **`useClients` referential instability** — ref pattern in every data hook.
+- **Billing slow by design (large clients)** — Supabase-first, Load Report gating.
+- **Template token emission bugs (2)** — found during the workflow-wide token audit.
 
-**⚠️ MIGRATIONS NOT YET APPLIED** — tables don't exist yet. The Price List page will show a "Failed to load" error until applied. Apply via Supabase dashboard SQL editor (paste both migration files) or via:
-```bash
-gh workflow run migrate.yml -f migration_file=stride-gs-app/supabase/migrations/20260418020000_service_catalog.sql -f confirm=true
-```
-Then re-run for `20260418020001_service_catalog_seed.sql`.
+### Infrastructure (Supabase)
 
-**Deploy log:** dist bundle `index-CBzAZFuG.js` (1.6 MB, 1,976 modules). Source branch `claude/beautiful-mclaren-e0a899` pushed to origin. Parent source branch is mid-rebase — needs merge to `origin/source` to complete deploy chain.
+12 new tables applied to `uqplppugeickmamycpuz` with RLS, indexes, and Realtime publication. Two new private storage buckets (`photos`, `documents`) with tenant-scoped `split_part(name, '/', 1)` path policies. Every new table has a `_touch_updated_at` trigger matching the existing repo pattern.
+
+### StrideAPI.gs — v38.85.0
+
+Backend carries every new endpoint + the Phase 5 shadow-mode helpers. Key additions:
+
+- **Email + doc template read path** — `api_getTemplateFromSupabase_`, `api_listTemplatesFromSupabase_`, `api_upsertTemplateToSupabase_`, `api_seedEmailTemplatesFromMpl_`, `handleSeedEmailTemplatesToSupabase_`
+- **Rate cutover helpers (shadow)** — `api_lookupRateFromSupabase_`, `api_loadClassVolumesFromSupabase_`, `api_buildPricingFromSupabase_`, `api_supabaseGet_`
+- **Manual billing** — `handleAddManualCharge_`, `handleVoidManualCharge_`, `api_newManualLedgerId_`, `api_lookupSidemarkForItemId_`, extended `handleUpdateBillingRow_` to accept svc/class for `MANUAL-*` rows
+- **Tasks** — `handleUpdateTaskDueDate_`, `handleUpdateTaskPriority_`, `api_ensureTaskColumns_`
+- **Client + user admin** — `handleResyncClients_` (full reseeder w/ script-id rediscovery), `handleAdminSetUserPassword_`, `handleEnsureAuthUser_`, `handleListMissingAuthUsers_`, `handleResyncUsers_`
+- **Pricing parity** — `getPricingParity` endpoint + `api_buildPricingFromSupabase_`
+
+**Web App deployment:** latest deployment live under the Stride API project. `push-api && deploy-api` the standard path.
+
+### Deploy log
+
+- React bundle: **`index-6UPsNlux.js`** (latest main deploy)
+- Migrations applied: 20260418120000 → 20260420100000 (all session-73+ migrations)
+- `origin/source` + `origin/main` up to date
+- GitHub Actions CI/CD fully automating deploys from `source` pushes
 
 ---
 

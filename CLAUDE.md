@@ -680,7 +680,9 @@ These are the top decisions that affect code generation on every task. For the f
 
 ## Current Versions
 
-- **StrideAPI.gs:** v38.72.0 (Web App v322) — session 72: Realtime sync Phase 1a complete. Filled the two genuine Supabase write-through gaps (handleUpdateInventoryItem_ fan-out to Tasks/Repairs, handleAddClaimItems_ claim mirror). Router-level api_writeThrough_ / api_fullClientSync_ already covers all complex handlers. **Phase 2 complete in React** (see `Cross-tab Realtime Sync` section above) — useSupabaseRealtime extended to subscribe on claims / move_history / dt_orders; useClaims + useOrders wired to entityEvents. No GAS changes needed for Phase 2. Also carries v38.71.0 (handleEnsureAuthUser_ / handleListMissingAuthUsers_) and v38.70.0 (handleAdminSetUserPassword_ escape-hatch). Pages through `auth.users` to find target by email, then `PUT /auth/v1/admin/users/{id}` with new password. Admin-only, rate-limited (20/min), min 8-char password. Self-serve "Forgot Password" flow unchanged — this is an escape hatch. Carries v38.63–69: Room→Reference column swap in all email/PDF item tables, `handleUpdateRepairNotes_` (office saves Repair Notes on Approved repair before Start), `handleGetPaymentTerms_`, `sbShipmentRow_` IK prefix strip, `handleSendRepairQuote_` photos URL fix, `handleResyncUsers_` admin tool, `lookupUser_` whitespace-normalized email match.
+- **StrideAPI.gs:** v38.85.0 — sessions 73-77 mega build. Carries (reverse-chronological): DOC_QUOTE Supabase-backed Quote PDF generation + template token audit across every workflow (invoice / quote / work-order / welcome / onboarding / claim emails — two token-emission bugs fixed), messaging endpoints aligned with Supabase schema (sender/recipient joins via auth.uid()), email templates + doc templates moved to Supabase with GAS read-through + CacheService cache, `seedEmailTemplatesToSupabase` one-shot admin endpoint + auto-seed on first `handleGetEmailTemplates_` empty read, manual billing charges (`addManualCharge` / `voidManualCharge` / edit via extended `updateBillingRow` for MANUAL-* rows), Reference column + Sidemark propagation across billing pipeline (writes, reads, IIF memo, Supabase mirror), add-on services on receiving (server writes one billing row per checked add-on at shipment completion), Phase 5 rate cutover helpers + Rate Parity Monitor endpoint (shadow mode — sheet still primary), `api_lookupRateFromSupabase_` + `api_loadClassVolumesFromSupabase_` + `api_getTemplateFromSupabase_` with 600s CacheService, task due date + 2-tier priority (`updateTaskDueDate`, `updateTaskPriority`, `api_ensureTaskColumns_`), `resyncClients` full reseeder + script-id rediscovery paths, `handleAdminSetUserPassword_` + `handleEnsureAuthUser_` + `handleResyncUsers_`. Still carries session-70/69 Room→Reference swap, repair notes save-before-start, payment terms endpoint.
+- **Supabase schema:** session 73 Phase A applied six new tables — `item_photos`, `documents`, `entity_notes`, `messages`, `message_recipients`, `in_app_notifications` — plus `photos` and `documents` private storage buckets with tenant-scoped path RLS. `email_templates` + `email_templates_audit` live (session 73 Phase 6). `service_catalog` + `service_catalog_audit` live with 31 seeds (session 73 Price List). `expected_shipments` live (session 72). Every new table in the `supabase_realtime` publication.
+- **React bundle:** `index-6UPsNlux.js` — latest deploy carries Sessions 65+ accumulated work. See `Docs/Stride_GS_App_Build_Status.md` for the detailed delta list.
 - **StaxAutoPay.gs:** v4.6.0 — session 69 Phase 2f: Supabase write-through at end of `_prepareEligiblePendingInvoicesForChargeRun` (invoices + run log) and `_executeChargeRun` (invoices + charge log + exceptions + run log). **Requires SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY Script Properties on the Stax Auto Pay project** — see open items.
 - **Triggers.gs (client):** v4.7.1 — session 70: VIEW INSPECTION PHOTOS button in REPAIR_QUOTE email now opens the Source Task folder (looks up task row in Tasks sheet and reads Task ID cell's hyperlink, set by `startTask_` to the task's Drive folder). Previously fell back to the Item folder because Source Task ID stores plain text, not a hyperlink.
 - **Import.gs (client):** v4.3.0 — adds Reference column mapping (rolled out to all 49 active clients, session 70)
@@ -724,36 +726,51 @@ Client inventory scripts are NOT edited via direct URLs — use `npm run rollout
 **Phase 7A/7B/7C:** COMPLETE ✅ (all read endpoints, all 32+11 write endpoints, Claims end-to-end)
 **Phase 8 (Additional Features):** mostly complete — see `Docs/Stride_GS_App_Build_Status.md` for the full matrix
 
-### Active open items
+### Sessions 65+ shipped (2026-04-17 → 2026-04-20)
 
-- [x] **DispatchTrack Phase 1b** — React Orders tab live (admin-only, empty until Phase 1c ingest). Build `63207c2`. See `Docs/DT_Integration_Build_Plan.md`.
-- [x] **DispatchTrack Phase 1a migration** — Migration files committed and applied to Supabase. Branch `feat/dt-integration-phase1a-migration`.
-- [ ] **DispatchTrack Phase 1c** — Webhook ingest Edge Function. Needs DT account API credentials + webhook secret first.
-- [ ] **Standalone Repair Detail Page (Phase 2)** — `#/repairs/:repairId` — same pattern as Task Detail, pending.
-- [ ] **Standalone Will Call Detail Page (Phase 3)** — `#/will-calls/:wcNumber` — same pattern, requires WC items parity audit.
-- [ ] **Generate Work Order button** — Manual PDF generation from TaskDetailPanel. Backend handler exists, needs React wiring + router case.
-- [ ] **Seed Stax Supabase caches (one-time)** — Open Stride API in Apps Script editor → run `seedAllStaxToSupabase()` once. Populates `stax_invoices`, `stax_charges`, `stax_exceptions`, `stax_customers`, `stax_run_log` from the Stax spreadsheet. Until this runs, Payments page falls back to GAS on first load.
-- [ ] **Set Supabase Script Properties on Stax Auto Pay project** — StaxAutoPay.gs v4.6.0 (session 69 Phase 2f) added Supabase write-through but the Stax Auto Pay Apps Script project is separate from Stride API, so it needs its own `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY` Script Properties. Open `https://script.google.com/u/0/home/projects/1n_AkHhTB1ijUxLdfH8qCcYitHHBD30gCz2FKB1-q33wkJrXLiCpVqmt4/edit` → ⚙️ Project Settings → Script Properties → add both (same values as Stride API project). Until set, the write-through is a silent no-op (by design) and Supabase will trail the autopay runs.
-- [x] ~~Scanner Supabase Direct Lookup~~ — **DONE session 68/69**. Native React `/scanner` and `/labels` pages now use Supabase `item_id_ledger` for cross-tenant item resolution (~50ms) and Supabase `locations` mirror for the dropdown. New endpoint `batchUpdateItemLocations` writes per-tenant + central `move_history` audit. The old GAS iframe Scanner/Labels HTML web apps are no longer the React `/scanner` and `/labels` routes (they still exist for direct-URL access).
-- [x] **Quote Tool page** — Admin-only `/quote` route, 18 React components, `EST-NNNN` numbering, localStorage-backed Phase 1, full catalog CRUD, coverage tiers, class-based pricing matrix, PDF via print dialog.
-- [x] **Billing Supabase-first report builder** — No auto-load on client select; client pick loads sidemarks only; Load Report button triggers actual query; Refresh forces GAS. Eliminates timeout on large-billing clients.
-- [x] **Auto-inspect race fix** — `useState` → `useMemo` + guarded `useEffect` in `Receiving.tsx`. Zero React #300 risk.
-- [x] **Expired reset link UX** — New `recovery_expired` auth state; user sees "link expired" message instead of silent redirect to login.
-- [x] **Mobile sidebar logout** — Fixed 100vh iOS address bar clipping (`100vh` → `100%`, `overflow: hidden` on `<aside>`).
-- [x] **useApiData background refresh cache bug** — `doFetch(false, true)` → `doFetch(true, true)`; background refresh was serving stale localStorage cache.
-- [x] **Visual refresh Phase 1 + full v2 pass** — `theme.v2` design tokens (cream bg, dark hero cards, orange accent, pill controls), applied across all 20 routes + 4 job pages + all shared components.
-- [x] **Email templates v2 — all 19 templates** — Stride brand design system; `{{SIDEMARK_HEADER}}` removed; pushed via `push-templates` + `refresh-caches` to all clients; "About Inspection" text in SHIPMENT_RECEIVED updated.
-- [x] **GitHub Actions CI/CD** — `ci.yml` (typecheck+build on push/PR), `deploy.yml` (auto-deploy on push, secrets configured and active), `migrate.yml` (manual migration runner). All three workflows live.
-- [x] ~~Master Inventory Template Web App deployment~~ — Removed `!c.isTemplate` guard from `update-deployments.mjs`, added `--name <partial>` filter flag. Template has Web App deployment v108.
-- [x] **Expected operations calendar (Shipments → Expected tab)** — Session 72. New tab on Shipments page with Month / Week views, unified event feed from 3 sources (user-authored expected shipments in localStorage + scheduled Will Calls + scheduled Repairs). Color-coded pills (shipment=orange, willcall=green, repair=blue), hover tooltips, 4 dark stat cards, legend bar. Client-role users only see events for their accessible clients. Will Call / Repair pills deep-link to the existing list pages via `?open=<id>&client=<sheetId>`. Expected-shipment pills open an edit modal with Save Changes / two-step Delete + inline toast. `useExpectedShipments` (localStorage CRUD, per-user-email keyed) + `useCalendarEvents` (unified feed with role-based filtering). 8 new components under `src/components/shipments/`.
-- [x] **Admin-set-password escape hatch** — Session 72. New per-row "Set Password" button in Settings → Users (admin-only, hidden for self). Opens modal with New Password + Confirm. Calls `adminSetUserPassword` → StrideAPI `handleAdminSetUserPassword_` → Supabase admin API → `PUT /auth/v1/admin/users/{id}`. For clients who can't complete the self-serve Forgot Password flow. Self-serve reset is untouched.
-- [ ] **Auto-Print Labels from Receiving** — Toggle on Receiving page for inline label printing. See `Docs/Archive/QR_Scanner_Next_Phase.md` Feature B (still applies; Labels page is now native React so wiring is straightforward)
-- [ ] **Parent Transfer Access** — Allow parent users to transfer items between their own children only (currently staff-only)
-- [ ] **Global search expansion** — Add shipments, billing, claims entities + missing fields per audit
-- [ ] **Autocomplete DB in React** — Sidemark/Vendor/Description per client
-- [ ] **Invoice-level `invoiceDate` field** — Billing invoice summary currently falls back to earliest child date. Add a true `invoiceDate` to `InvoiceGroup` (sourced from Consolidated_Ledger "Invoice Date" column) so re-sorted children don't shift the displayed date.
-- [ ] **Invoice number link in summary row** — Wire `invoiceUrl` through `InvoiceGroup` so the Invoice # cell renders as an anchor when a PDF URL exists (currently always renders as bold text).
-- [ ] **DetailPanel internals v2 polish** — Outer panel via `DetailHeader` is v2, but deep interiors of each DetailPanel (action button rows, field grids) still have 8–10px corners in places and need another pass.
+- [x] **Quote Tool page** — admin-only `/quote`, 18 components, `EST-NNNN` numbering, Supabase `service_catalog`-backed pricing matrix + coverage tiers, Supabase `DOC_QUOTE` template drives the printed PDF.
+- [x] **Unified Price List page** — split-panel layout, inline edit, sortable column headers, show/hide inactive, service time per class (XS–XXL), Storage Size per class exposed, shareable public `/rates/:shareId` URLs with per-tab selection and no-login access.
+- [x] **Billing — Supabase-first report builder** — no auto-load; client select fetches sidemarks only; Load Report runs the query; Refresh forces GAS; "+ Add Charge" creates `MANUAL-*` rows (add / edit / void) with detail panel actions.
+- [x] **Expected / Operations Calendar** — primary Dashboard tab, unified event feed (tasks, repairs, will calls, expected shipments), priority-sorted per day, deep links on every event type, 4 aggregate stat cards, Mon-start weeks, free-text UNKNOWN shipments (staff-only), calendar search input, optimistic sync via per-entity sync buses + `pending` pill state.
+- [x] **Media modules** — `item_photos`, `documents`, `entity_notes` tables + `photos` / `documents` private storage buckets (tenant-scoped path RLS). `PhotoGallery` / `DocumentList` / `NotesSection` wired into every detail panel (Item / Task / Repair / Will Call / Shipment) via shared `EntityAttachments` wrapper with collapsible section headers + live counts.
+- [x] **Messaging** — `messages` + `message_recipients` tables, iMessage-style bubble UI (blue/gray, thread isolation), compose modal with role-aware recipient picker (clients see admin + same-account coworkers only), deep-link entity chips on every thread header that resolve tenant + append `&client=`, persistent unread banner at top of layout, TopBar bell with `useMessages.unreadCount`-driven badge (notifications module retired, simplified to pure Messages quick-link).
+- [x] **Email templates → Supabase** — `email_templates` + `email_templates_audit`, GAS `api_getTemplateFromSupabase_` with 600s `CacheService`, auto-seed from MPL on first empty read, `handleUpdateEmailTemplate_` writes Supabase + mirrors to MPL. Settings → Email Templates writes direct to Supabase with audit. `npm run push-templates` + `refresh-caches` remain as backup paths, no longer required for everyday edits.
+- [x] **Doc templates → Supabase** — work orders, invoice, quote, claim settlements — all Supabase-backed, editable from Settings → Templates, `Test Generate` button per template. Token audit across all 6 workflows; two emission bugs fixed.
+- [x] **Task due date + 2-tier priority** — `updateTaskDueDate`, `updateTaskPriority`, `api_ensureTaskColumns_` idempotent header add. Overdue rows highlight red; calendar lifts task `priority` into sort + "High Priority" stat card. SLA auto-populates due date from service default when a task is created.
+- [x] **Receiving add-ons** — expandable per-row checkboxes for OVER300/NO_ID/etc. Local-state only during editing; billing rows created server-side in `handleCompleteShipment_` from the `addons` array. Auto-apply rules: overweight by `weight > OVERWEIGHT_THRESHOLD`, `no_id` triggers when client matches "Needs ID Holding Account". Per-item `dismissedAddons` set prevents re-check after manual override.
+- [x] **Phase 5 billing rate cutover (shadow mode)** — `api_lookupRate_` + `api_loadClassVolumes_` + `handleGetPricing_` query Supabase `service_catalog` / `item_classes` in parallel with the sheet, log `PARITY_OK` / `PARITY_MISMATCH` lines. Sheet is still primary (authoritative) — flip to Supabase-primary pending parity review. Rate Parity Monitor tab in Billing page surfaces live divergence.
+- [x] **Profiles + user directory** — `profiles` table, 137 users loaded via auto-sync trigger off `auth.users`, powers messaging recipient picker + `@mentions`.
+- [x] **Sidemark + Reference columns in billing pipeline** — write-through on every billing-row create, read-time overlay from Inventory as fallback, backfilled 304 prior rows, propagated through QB IIF memo.
+- [x] **Visual refresh Phase 1 + full v2 pass** — `theme.v2` applied to all 20 routes + 4 job pages + shared components (Sidebar v2, Quote Tool pattern as seed).
+- [x] **Full mobile pass on staff pages** — iOS safe areas, 44px touch targets, full-screen drawers, scrollable tab bars, thumb-reachable controls on Dashboard / Calendar / Receiving / Inventory / Tasks / Repairs / WillCalls / Shipments / Messages.
+- [x] **Receiving page media** — inline photos + documents + notes during receiving via `ReceivingRowMedia`; notes column on Inventory reads `entity_notes` via `useItemNotes` batch hook; old sheet-based notes migrated into `entity_notes`.
+- [x] **Auth + bug fixes** — auto-inspect race (`useMemo` + guarded `useEffect`), expired reset link UX (`recovery_expired` auth state), mobile sidebar logout clip (100vh → 100% + `overflow: hidden`), `useApiData` background refresh cache bug, `useClients` referential-instability ref pattern, Will Calls multi-row select, autocomplete sidemark/room mix, 12 clients with template scriptId.
+- [x] **DispatchTrack Phase 1b** — Orders tab live (admin-only, empty until Phase 1c ingest).
+- [x] **DispatchTrack Phase 1a migration** — schema applied to Supabase.
+- [x] **GitHub Actions CI/CD** — `ci.yml`, `deploy.yml`, `migrate.yml` all live with secrets configured.
+- [x] **Master Inventory Template Web App deployment** — `!c.isTemplate` guard removed from `update-deployments.mjs`, template has Web App v108.
+- [x] **Admin-set-password escape hatch + auth user ensure** — `handleAdminSetUserPassword_`, `handleEnsureAuthUser_`, `handleListMissingAuthUsers_`, `handleResyncUsers_`.
+- [x] **Scanner + Labels Supabase direct** — item_id_ledger cross-tenant resolution, locations mirror, `batchUpdateItemLocations` with central `move_history` audit.
+
+### Still open
+
+- [ ] **Quote Tool PDF wire-up** — Quote PDF generation using Supabase `DOC_QUOTE` template (in progress — React end next).
+- [ ] **Delivery zip codes in Price List** — 400+ delivery zones, migration `20260420100000_delivery_zones.sql` staged.
+- [ ] **DispatchTrack Phase 1c** — webhook ingest Edge Function. Needs DT account API credentials + webhook secret.
+- [ ] **Phase 5 billing cutover flip** — shadow mode is currently logging parity. Switch to Supabase-primary once operator reviews the mismatch log on Justin Demo Account and confirms zero drift.
+- [ ] **GitHub migration — move repo out of Dropbox** — repo is already on GitHub, but the local clone lives in Dropbox. Move the clone to a non-synced local path to end the Dropbox write-conflict category of bugs.
+- [ ] **Messaging client filter polish** — role-aware recipient filter is in; one more pass on broadcast pill visibility for client users.
+- [ ] **Standalone Repair / Will Call detail pages** — `#/repairs/:repairId` and `#/will-calls/:wcNumber` — same pattern as Task Detail, not started.
+- [ ] **Generate Work Order button** — Manual PDF from TaskDetailPanel. Backend handler exists; needs React wiring + router case.
+- [ ] **Seed Stax Supabase caches (one-time)** — Open Stride API editor → run `seedAllStaxToSupabase()` once. Until then Payments falls back to GAS on first load.
+- [ ] **Set Supabase Script Properties on Stax Auto Pay project** — `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY` on the Stax project. Until set, write-through is a silent no-op.
+- [ ] **Auto-Print Labels from Receiving** — toggle for inline label printing during receiving.
+- [ ] **Parent Transfer Access** — allow parent users to transfer items between their own children.
+- [ ] **Global search expansion** — add shipments / billing / claims entities + missing fields.
+- [ ] **Autocomplete DB in React** — Sidemark / Vendor / Description per client.
+- [ ] **Invoice-level `invoiceDate` field** — add to `InvoiceGroup` so re-sorted children don't shift the displayed date.
+- [ ] **Invoice number link in summary row** — wire `invoiceUrl` through `InvoiceGroup`.
+- [ ] **DetailPanel internals v2 polish** — outer panel is v2, deep interiors (action rows, field grids) still have 8–10px corners.
 
 ### Known bugs (unresolved)
 
@@ -762,7 +779,6 @@ Client inventory scripts are NOT edited via direct URLs — use `npm run rollout
 - Transfer Items dialog needs processing animation + disable buttons after complete
 - Repair discount behavior — should disable discounts on repairs
 - Receiving page uses hardcoded table (no TanStack Table / no column reorder)
-- Auto-inspect race on Receiving — `useMemo` fix shipped but underlying `ClientsProvider` removal still needs permanent resolution
 - **GitHub Pages CDN caching gotcha:** hard-refresh (Ctrl+Shift+R) after `git push` to verify deployed bundle hash
 
 ---
