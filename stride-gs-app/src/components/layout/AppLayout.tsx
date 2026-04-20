@@ -12,6 +12,8 @@ import { useClients } from '../../hooks/useClients';
 import { usePricing } from '../../hooks/usePricing';
 import { useLocations } from '../../hooks/useLocations';
 import { supabase } from '../../lib/supabase';
+import { useNotifications } from '../../hooks/useNotifications';
+import { PersistentBanner } from '../notifications/PersistentBanner';
 
 const PAGE_TITLES: Record<string, string> = {
   '/': 'Dashboard',
@@ -32,6 +34,10 @@ export function AppLayout() {
   // Phase 4: subscribe to Supabase Realtime on all 5 cache tables — all users see
   // changes within 1-2s of GAS write completing (write-through is Phase 3)
   useSupabaseRealtime();
+
+  // Session 73 Phase B: subscribe to new-message Realtime events so the bell
+  // + toast banners wake up as soon as a recipient row lands for this user.
+  useNotifications();
 
   // Pre-fetch shared data at app level so caches are warm for all pages
   useClients();
@@ -71,6 +77,11 @@ export function AppLayout() {
         fontFamily: theme.typography.fontFamily,
       }}
     >
+      {/* Session 73 — floating toast banners for new-message + mention events.
+          Self-positions (fixed, top-right). Full-width on mobile via its own
+          media query. Renders nothing when there are no active alerts. */}
+      <PersistentBanner />
+
       {/* Mobile overlay backdrop */}
       {isMobile && mobileMenuOpen && (
         <div

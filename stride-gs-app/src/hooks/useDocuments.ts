@@ -12,8 +12,10 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../contexts/AuthContext';
 
+// Must match the CHECK constraint on public.documents.context_type exactly.
+// Session-73 Phase A migration defines: shipment | item | task | repair | willcall | claim.
 export type DocumentContextType =
-  | 'inventory' | 'task' | 'repair' | 'will_call' | 'shipment' | 'claim' | 'client';
+  | 'shipment' | 'item' | 'task' | 'repair' | 'willcall' | 'claim';
 
 export interface DocumentRow {
   id: string;

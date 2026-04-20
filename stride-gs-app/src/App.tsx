@@ -29,6 +29,7 @@ import { Orders } from './pages/Orders';
 import { QuoteTool } from './pages/QuoteTool';
 import { PriceList } from './pages/PriceList';
 import { PublicRates } from './pages/PublicRates';
+import { MessagesPage } from './components/messages/MessagesPage';
 
 /** Route guard — redirects to dashboard if user's role is not in the allowed list */
 function RoleGuard({ allowed, children }: { allowed: AuthUser['role'][]; children: React.ReactNode }) {
@@ -65,6 +66,7 @@ export default function App() {
         <Route element={<AppLayout />}>
           {/* Open to all roles */}
           <Route path="/" element={<Dashboard />} />
+          <Route path="/messages" element={<MessagesPage />} />
           <Route path="/inventory" element={<Inventory />} />
           <Route path="/tasks" element={<Tasks />} />
           <Route path="/tasks/:taskId" element={<TaskJobPage />} />

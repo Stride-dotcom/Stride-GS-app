@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
-import { Bell, Search, Menu } from 'lucide-react';
+import { Search, Menu } from 'lucide-react';
+import { NotificationBell } from '../notifications/NotificationBell';
 import { theme } from '../../styles/theme';
 import { UniversalSearch } from '../shared/UniversalSearch';
 
@@ -94,22 +95,15 @@ export function TopBar({ isMobile, onMenuToggle }: TopBarProps) {
             </button>
           )}
 
-          {/* Notification Bell */}
-          <button style={{
-            position: 'relative', width: '32px', height: '32px',
+          {/* Session 73 — real NotificationBell (replaces placeholder).
+              Wraps the component to hit the 44px mobile touch target the
+              header's 32px icon didn't meet. */}
+          <div style={{
             display: 'flex', alignItems: 'center', justifyContent: 'center',
-            background: 'transparent', border: 'none',
-            borderRadius: theme.radii.md, cursor: 'pointer',
-            color: theme.colors.textSecondary,
+            minWidth: isMobile ? 44 : 32, minHeight: isMobile ? 44 : 32,
           }}>
-            <Bell size={16} />
-            <span style={{
-              position: 'absolute', top: '4px', right: '4px',
-              width: '8px', height: '8px', borderRadius: '50%',
-              background: theme.colors.primary,
-              border: `2px solid ${theme.colors.bgBase}`,
-            }} />
-          </button>
+            <NotificationBell />
+          </div>
         </div>
       </header>
 

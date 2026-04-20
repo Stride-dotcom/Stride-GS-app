@@ -179,7 +179,7 @@ export function useNotifications(): void {
       .channel('messages_notifier')
       .on('postgres_changes',
         { event: 'INSERT', schema: 'public', table: 'message_recipients' },
-        (payload) => { void onInsert(payload as { new?: RecipientRow }); })
+        (payload) => { void onInsert(payload as unknown as { new?: RecipientRow }); })
       .subscribe();
 
     return () => {

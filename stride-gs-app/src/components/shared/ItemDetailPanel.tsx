@@ -15,6 +15,7 @@ import type { InventoryItem, InventoryStatus } from '../../lib/types';
 import { getPanelContainerStyle, panelBackdropStyle } from './panelStyles';
 import { useIsMobile } from '../../hooks/useIsMobile';
 import { useResizablePanel } from '../../hooks/useResizablePanel';
+import { EntityAttachments } from './EntityAttachments';
 
 export interface LinkedRecord {
   id: string;
@@ -1023,6 +1024,13 @@ export function ItemDetailPanel({
               />
             )}
           </Section>
+
+          {/* Session 73 — Photos / Documents / Notes (collapsible). */}
+          <EntityAttachments
+            photos={{ entityType: 'inventory', entityId: item.itemId, tenantId: clientSheetId }}
+            documents={{ contextType: 'item', contextId: item.itemId, tenantId: clientSheetId }}
+            notes={{ entityType: 'inventory', entityId: item.itemId }}
+          />
         </div>
 
         {/* Sticky footer — session 70 follow-up: Edit / Save / Cancel moved here from top-right. */}

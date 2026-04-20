@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { X, Wrench, Package, ClipboardList, CheckCircle2, XCircle, AlertTriangle, Send, Loader2, Truck, Play, Pencil } from 'lucide-react';
 import { EntityHistory } from './EntityHistory';
+import { EntityAttachments } from './EntityAttachments';
 import { FolderButton } from './FolderButton';
 import { DeepLink } from './DeepLink';
 import { DetailHeader } from './DetailHeader';
@@ -521,6 +522,12 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
 
           {/* Activity History */}
           <EntityHistory entityType="repair" entityId={repair.repairId} tenantId={repair.clientSheetId} />
+
+          {/* Session 73 — Photos + Notes */}
+          <EntityAttachments
+            photos={{ entityType: 'repair', entityId: repair.repairId, tenantId: repair.clientSheetId }}
+            notes={{ entityType: 'repair', entityId: repair.repairId }}
+          />
 
         {/* Approve / Decline footer (Quote Sent) */}
         {isActive && !completed && effectiveStatus === 'Quote Sent' && !respondResult && (

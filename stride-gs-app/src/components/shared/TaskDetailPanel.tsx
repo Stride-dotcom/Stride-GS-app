@@ -4,6 +4,7 @@ import { FolderButton } from './FolderButton';
 import { DeepLink } from './DeepLink';
 import { DetailHeader } from './DetailHeader';
 import { EntityHistory } from './EntityHistory';
+import { EntityAttachments } from './EntityAttachments';
 import { theme } from '../../styles/theme';
 import { fmtDate, fmtDateTime } from '../../lib/constants';
 import { WriteButton } from './WriteButton';
@@ -683,6 +684,12 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
               </div>
             </div>
           )}
+
+          {/* Session 73 — Photos + Notes (always available whether open or completed). */}
+          <EntityAttachments
+            photos={{ entityType: 'task', entityId: task.taskId, tenantId: clientSheetId }}
+            notes={{ entityType: 'task', entityId: task.taskId }}
+          />
 
         </div>
 

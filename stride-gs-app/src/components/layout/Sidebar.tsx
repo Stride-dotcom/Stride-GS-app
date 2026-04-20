@@ -22,6 +22,7 @@ import {
   Calendar,
   Receipt,
   BookOpen,
+  MessageSquare,
 } from 'lucide-react';
 import { theme } from '../../styles/theme';
 import { cacheClearAll } from '../../lib/apiCache';
@@ -31,6 +32,7 @@ import { useSidebarOrder } from '../../hooks/useSidebarOrder';
 // Admin: full access to everything
 const ADMIN_NAV = [
   { id: 'dashboard', label: 'Dashboard', path: '/', icon: LayoutDashboard },
+  { id: 'messages', label: 'Messages', path: '/messages', icon: MessageSquare },
   { id: 'inventory', label: 'Inventory', path: '/inventory', icon: Package },
   { id: 'receiving', label: 'Receiving', path: '/receiving', icon: PackageOpen },
   { id: 'shipments', label: 'Shipments', path: '/shipments', icon: PackageCheck },
@@ -51,6 +53,7 @@ const ADMIN_NAV = [
 // Staff: no billing, claims, payments, or settings — has scanner + labels
 const STAFF_NAV = [
   { id: 'dashboard', label: 'Dashboard', path: '/', icon: LayoutDashboard },
+  { id: 'messages', label: 'Messages', path: '/messages', icon: MessageSquare },
   { id: 'inventory', label: 'Inventory', path: '/inventory', icon: Package },
   { id: 'receiving', label: 'Receiving', path: '/receiving', icon: PackageOpen },
   { id: 'shipments', label: 'Shipments', path: '/shipments', icon: PackageCheck },
@@ -65,6 +68,7 @@ const STAFF_NAV = [
 // Client: own data only — dashboard, inventory, shipments, tasks, repairs, will calls, claims
 const CLIENT_NAV = [
   { id: 'dashboard', label: 'Dashboard', path: '/', icon: LayoutDashboard },
+  { id: 'messages', label: 'Messages', path: '/messages', icon: MessageSquare },
   { id: 'inventory', label: 'Inventory', path: '/inventory', icon: Package },
   { id: 'shipments', label: 'Shipments', path: '/shipments', icon: PackageCheck },
   { id: 'tasks', label: 'Tasks', path: '/tasks', icon: ClipboardList },

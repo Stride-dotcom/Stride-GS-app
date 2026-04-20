@@ -14,6 +14,7 @@ import { Bell, Check } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { theme } from '../../styles/theme';
 import { useMessages } from '../../hooks/useMessages';
+import { useIsMobile } from '../../hooks/useIsMobile';
 import {
   getRecentNotifications,
   subscribeNotifications,
@@ -24,6 +25,7 @@ export function NotificationBell() {
   const v2 = theme.v2;
   const navigate = useNavigate();
   const { unreadCount, markRead, refetch } = useMessages();
+  const { isMobile } = useIsMobile();
 
   const [open, setOpen] = useState(false);
   const [recent, setRecent] = useState<NotificationEvent[]>(() => getRecentNotifications());
@@ -103,8 +105,14 @@ export function NotificationBell() {
 
       {open && (
         <div style={{
-          position: 'absolute', top: 44, right: 0,
-          width: 340, maxHeight: 440,
+          // Mobile: slide-down drawer pinned to top of viewport so it doesn't
+          // clip at the header's right edge. Desktop: floating popover.
+          position: isMobile ? 'fixed' : 'absolute',
+          top:   isMobile ? 56   : 44,
+          right: isMobile ? 8    : 0,
+          left:  isMobile ? 8    : 'auto',
+          width: isMobile ? 'auto' : 340,
+          maxHeight: isMobile ? 'calc(100dvh - 72px)' : 440,
           background: v2.colors.bgWhite,
           border: `1px solid ${v2.colors.border}`,
           borderRadius: v2.radius.card,

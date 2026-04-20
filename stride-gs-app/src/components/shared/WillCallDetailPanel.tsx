@@ -3,6 +3,7 @@ import { X, Truck, Package, Calendar, Phone, User, DollarSign, CheckCircle2, Cre
 import { FolderButton } from './FolderButton';
 import { DeepLink } from './DeepLink';
 import { EntityHistory } from './EntityHistory';
+import { EntityAttachments } from './EntityAttachments';
 import { DetailHeader } from './DetailHeader';
 import { theme } from '../../styles/theme';
 import { fmtDate } from '../../lib/constants';
@@ -874,6 +875,12 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
               )
             )}
           </div>
+
+          {/* Session 73 — Photos + Notes */}
+          <EntityAttachments
+            photos={{ entityType: 'will_call', entityId: wc.wcNumber, tenantId: clientSheetId }}
+            notes={{ entityType: 'will_call', entityId: wc.wcNumber }}
+          />
         </div>
 
         {/* Cancel result card */}

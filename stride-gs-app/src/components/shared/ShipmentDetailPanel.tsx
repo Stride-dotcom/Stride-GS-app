@@ -4,6 +4,7 @@ import { X, Truck, Package, FileText, Mail, ClipboardList, LayoutList } from 'lu
 import { DeepLink } from './DeepLink';
 import { DetailHeader } from './DetailHeader';
 import { EntityHistory } from './EntityHistory';
+import { EntityAttachments } from './EntityAttachments';
 import { FolderButton } from './FolderButton';
 import { CreateTaskModal } from './CreateTaskModal';
 import { CreateWillCallModal } from './CreateWillCallModal';
@@ -293,6 +294,13 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
         {/* Activity History */}
         <div style={{ padding: '0 20px' }}>
           <EntityHistory entityType="shipment" entityId={shipment.shipmentNo} tenantId={shipment.clientSheetId} />
+
+          {/* Session 73 — Photos + Documents + Notes */}
+          <EntityAttachments
+            photos={{ entityType: 'shipment', entityId: shipment.shipmentNo, tenantId: shipment.clientSheetId }}
+            documents={{ contextType: 'shipment', contextId: shipment.shipmentNo, tenantId: shipment.clientSheetId }}
+            notes={{ entityType: 'shipment', entityId: shipment.shipmentNo }}
+          />
         </div>
 
         {/* Footer */}
