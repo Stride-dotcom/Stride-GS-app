@@ -11,11 +11,12 @@
  * ID, the section shows a dashed placeholder — no orphan rows get created.
  */
 import { useCallback, useState } from 'react';
-import { Camera, Upload, FileText, StickyNote, Loader2, X } from 'lucide-react';
+import { Upload, FileText, StickyNote, Loader2, X } from 'lucide-react';
 import { theme } from '../../styles/theme';
 import { usePhotos } from '../../hooks/usePhotos';
 import { useDocuments } from '../../hooks/useDocuments';
 import { useEntityNotes } from '../../hooks/useEntityNotes';
+import { MultiCapture } from './MultiCapture';
 
 interface Props {
   itemId: string;
@@ -49,6 +50,8 @@ function PhotoStrip({ itemId, tenantId }: Props) {
   });
   const [uploading, setUploading] = useState(false);
 
+  // Gallery upload path — instant, one-at-a-time, kept intact. Batch
+  // camera capture goes through MultiCapture below.
   const handleFiles = useCallback(async (files: FileList | null) => {
     if (!files || files.length === 0) return;
     setUploading(true);
@@ -59,15 +62,23 @@ function PhotoStrip({ itemId, tenantId }: Props) {
     } finally { setUploading(false); }
   }, [uploadPhoto]);
 
+  const handleBatchUpload = useCallback(async (file: File) => {
+    const result = await uploadPhoto(file, 'receiving');
+    return !!result;
+  }, [uploadPhoto]);
+
   return (
     <div style={blockStyle}>
       <div style={labelStyle}>Photos ({photos.length})</div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-        <label style={iconBtn(uploading)} title="Open camera">
-          {uploading ? <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} /> : <Camera size={13} />}
-          <input type="file" accept="image/*" capture="environment" onChange={e => { void handleFiles(e.target.files); e.target.value = ''; }} style={{ display: 'none' }} />
-        </label>
-        <label style={iconBtn(uploading)} title="Upload photos">
+      {/* Batch camera — take many, save once. */}
+      <MultiCapture
+        mode="photo"
+        onUpload={handleBatchUpload}
+        compact
+        label="Take Photos"
+      />
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', marginTop: 8 }}>
+        <label style={iconBtn(uploading)} title="Upload photos from files">
           {uploading ? <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} /> : <Upload size={13} />}
           <input type="file" accept="image/*" multiple onChange={e => { void handleFiles(e.target.files); e.target.value = ''; }} style={{ display: 'none' }} />
         </label>
@@ -111,10 +122,24 @@ function DocRow({ itemId, tenantId }: Props) {
     } finally { setUploading(false); }
   }, [uploadDocument]);
 
+  const handleBatchScan = useCallback(async (raw: File) => {
+    const ts = new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-');
+    const renamed = new File([raw], `scan-${ts}.jpg`, { type: raw.type || 'image/jpeg' });
+    const result = await uploadDocument(renamed);
+    return !!result;
+  }, [uploadDocument]);
+
   return (
     <div style={blockStyle}>
       <div style={labelStyle}>Documents ({documents.length})</div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+      {/* Batch scan — same pattern as photos. */}
+      <MultiCapture
+        mode="document"
+        onUpload={handleBatchScan}
+        compact
+        label="Scan Docs"
+      />
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', marginTop: 8 }}>
         <label style={iconBtn(uploading)} title="Upload BOL, receipt, etc.">
           {uploading ? <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} /> : <FileText size={13} />}
           <input

@@ -24,6 +24,7 @@ import { theme } from '../../styles/theme';
 import { PhotoGallery } from '../media/PhotoGallery';
 import { DocumentList } from '../media/DocumentList';
 import { DocumentUploadButton } from '../media/DocumentUploadButton';
+import { DocumentScanButton } from '../media/DocumentScanButton';
 import { NotesSection } from '../notes/NotesSection';
 import { usePhotos, type EntityType as PhotoEntityType } from '../../hooks/usePhotos';
 import { useDocuments, type DocumentContextType } from '../../hooks/useDocuments';
@@ -167,6 +168,14 @@ function DocumentsSection({
       {open && (
         <div style={{ padding: '12px 4px 4px', display: 'flex', flexDirection: 'column', gap: 10 }}>
           <DocumentUploadButton onUpload={handleUpload} uploading={uploading} compact />
+          {/* Batch scan — MultiCapture wrapped for document mode. Shows
+              only when the section is open to avoid mounting a camera
+              input on every collapsed panel on the page. */}
+          <DocumentScanButton
+            contextType={contextType}
+            contextId={contextId}
+            tenantId={tenantId}
+          />
           <DocumentList contextType={contextType} contextId={contextId} tenantId={tenantId} />
         </div>
       )}

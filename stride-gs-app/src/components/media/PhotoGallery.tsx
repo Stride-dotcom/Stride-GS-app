@@ -69,12 +69,16 @@ export function PhotoGallery({
           background: theme.v2.colors.bgCard, color: theme.v2.colors.textMuted,
         }}>{photos.length}</span>
         {!readOnly && (
-          <div style={{ marginLeft: 'auto' }}>
+          <div style={{ marginLeft: 'auto', width: compact ? '100%' : undefined }}>
             <PhotoUploadButton
               onUpload={handleUpload}
               uploading={uploading}
               disabled={!entityId}
               compact
+              onUploadOne={async (file) => {
+                const result = await uploadPhoto(file, defaultPhotoType);
+                return !!result;
+              }}
             />
           </div>
         )}

@@ -8,8 +8,9 @@
  * the files and renders progress.
  */
 import { useCallback, useRef, useState } from 'react';
-import { Camera, UploadCloud, Loader2 } from 'lucide-react';
+import { UploadCloud, Loader2 } from 'lucide-react';
 import { theme } from '../../styles/theme';
+import { MultiCapture } from './MultiCapture';
 
 interface Props {
   /** Called with the user-selected files. May be invoked multiple times. */
@@ -25,14 +26,24 @@ interface Props {
   label?: string;
   /** Hide the drag-and-drop zone (compact mode). */
   compact?: boolean;
+  /** Per-file uploader for batch camera capture. When provided, the
+   *  `Camera` button is replaced by `<MultiCapture mode="photo">` so users
+   *  can take multiple shots in a row and save them in one batch. Parent
+   *  provides this because it owns the usePhotos hook. Callers that only
+   *  want the file-picker path can omit this — a quiet no-op (no camera
+   *  button rendered at all, since the single-shot camera path was the
+   *  regression this replaces). */
+  onUploadOne?: (file: File) => Promise<boolean>;
+  /** Fires after a batch save completes so the parent can show a toast. */
+  onBatchSaved?: (result: { saved: number; failed: number }) => void;
 }
 
 export function PhotoUploadButton({
   onUpload, multiple = true, accept = 'image/*',
   disabled, uploading, label = 'Upload Photos', compact,
+  onUploadOne, onBatchSaved,
 }: Props) {
   const inputRef = useRef<HTMLInputElement>(null);
-  const cameraInputRef = useRef<HTMLInputElement>(null);
   const [dragOver, setDragOver] = useState(false);
 
   const handleFiles = useCallback(async (files: FileList | File[] | null) => {
@@ -59,16 +70,11 @@ export function PhotoUploadButton({
         onChange={e => { void handleFiles(e.target.files); e.target.value = ''; }}
         style={{ display: 'none' }}
       />
-      <input
-        ref={cameraInputRef}
-        type="file"
-        accept={accept}
-        capture="environment"
-        onChange={e => { void handleFiles(e.target.files); e.target.value = ''; }}
-        style={{ display: 'none' }}
-      />
 
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+        {/* File picker — unchanged. Selects existing images from the
+            gallery/filesystem and hands them straight to `onUpload`, which
+            the parent immediately writes via usePhotos.uploadPhoto. */}
         <button
           type="button"
           onClick={() => inputRef.current?.click()}
@@ -80,16 +86,21 @@ export function PhotoUploadButton({
             : <UploadCloud size={14} />}
           {busy ? 'Uploading…' : label}
         </button>
-        <button
-          type="button"
-          onClick={() => cameraInputRef.current?.click()}
-          disabled={disabled || busy}
-          style={ghostBtn(busy || !!disabled)}
-          title="Open camera"
-        >
-          <Camera size={14} /> Camera
-        </button>
       </div>
+
+      {/* Batch camera capture — only rendered when the caller provides a
+          per-file uploader. The single-shot camera button was retired in
+          favour of MultiCapture so warehouse users can capture multiple
+          shots in a row and save them in one go. */}
+      {onUploadOne && (
+        <MultiCapture
+          mode="photo"
+          onUpload={onUploadOne}
+          onSaved={onBatchSaved}
+          disabled={disabled || busy}
+          compact={compact}
+        />
+      )}
 
       {!compact && (
         <div
@@ -133,14 +144,3 @@ function primaryBtn(disabled: boolean): React.CSSProperties {
   };
 }
 
-function ghostBtn(disabled: boolean): React.CSSProperties {
-  return {
-    display: 'inline-flex', alignItems: 'center', gap: 6,
-    padding: '8px 14px', fontSize: 11, fontWeight: 600, letterSpacing: '1.5px', textTransform: 'uppercase',
-    border: `1px solid ${theme.v2.colors.border}`, borderRadius: theme.v2.radius.button,
-    background: '#fff', color: theme.v2.colors.textSecondary,
-    cursor: disabled ? 'default' : 'pointer',
-    fontFamily: 'inherit',
-    opacity: disabled ? 0.6 : 1,
-  };
-}
