@@ -37,7 +37,7 @@ export interface Photo {
   is_repair: boolean;
   photo_type: PhotoType;
   uploaded_by: string | null;
-  uploaded_by_email: string | null;
+  uploaded_by_name: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -193,7 +193,7 @@ export function usePhotos({ entityType, entityId, tenantId, enabled = true }: Us
         is_repair: photoType === 'repair',
         photo_type: photoType,
         uploaded_by: null,
-        uploaded_by_email: user?.email || null,
+        uploaded_by_name: user?.email || null,
       })
       .select('*')
       .single();

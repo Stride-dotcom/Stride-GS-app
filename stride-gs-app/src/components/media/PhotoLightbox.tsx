@@ -146,7 +146,7 @@ export function PhotoLightbox({
           <Meta label="Type" value={photo.photo_type} />
           <Meta label="Size" value={fmtBytes(photo.file_size)} />
           <Meta label="Uploaded" value={fmtWhen(photo.created_at)} />
-          {photo.uploaded_by_email && <Meta label="By" value={photo.uploaded_by_email} />}
+          {photo.uploaded_by_name && <Meta label="By" value={photo.uploaded_by_name} />}
         </div>
 
         {!readOnly && (

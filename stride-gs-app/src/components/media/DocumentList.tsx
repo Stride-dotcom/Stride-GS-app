@@ -122,7 +122,7 @@ export function DocumentList({ contextType, contextId, tenantId, readOnly, compa
                 </div>
                 <div style={{ fontSize: 10, color: theme.v2.colors.textMuted, marginTop: 2 }}>
                   {fmtBytes(d.file_size)} · {fmtDate(d.created_at)}
-                  {d.uploaded_by_email && <> · {d.uploaded_by_email}</>}
+                  {d.uploaded_by_name && <> · {d.uploaded_by_name}</>}
                 </div>
               </div>
               <div style={{ display: 'flex', gap: 4, flexShrink: 0 }}>

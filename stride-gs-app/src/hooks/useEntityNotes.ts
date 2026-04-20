@@ -160,6 +160,11 @@ export function useEntityNotes(entityType: string, entityId: string): UseEntityN
     const { data, error: err } = await supabase
       .from('entity_notes')
       .insert({
+        // tenant_id: explicit so the row satisfies the tenant scoping RLS
+        // policy even before the column's DEFAULT trigger (if any) runs.
+        // Falls to null for admin/staff without a bound client — migration
+        // 2026-04-21 dropped the NOT NULL constraint.
+        tenant_id: user?.clientSheetId ?? null,
         entity_type: entityType,
         entity_id: entityId,
         body: trimmed,

@@ -27,7 +27,7 @@ export interface DocumentRow {
   file_size: number | null;
   mime_type: string | null;
   uploaded_by: string | null;
-  uploaded_by_email: string | null;
+  uploaded_by_name: string | null;
   ocr_text: string | null;
   page_count: number | null;
   deleted_at: string | null;
@@ -117,7 +117,7 @@ export function useDocuments({
         file_size: file.size,
         mime_type: file.type || 'application/octet-stream',
         uploaded_by: null,
-        uploaded_by_email: user?.email || null,
+        uploaded_by_name: user?.email || null,
       })
       .select('*')
       .single();
