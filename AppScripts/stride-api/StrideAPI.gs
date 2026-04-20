@@ -1,5 +1,15 @@
 /* ===================================================
-   StrideAPI.gs — v38.84.0 — 2026-04-19 PST — Doc template Preview PDF endpoint
+   StrideAPI.gs — v38.85.0 — 2026-04-20 PST — WC release PDF token alignment
+   v38.85.0: handleProcessWcRelease_ now emits the full canonical token
+             set expected by DOC_WILL_CALL_RELEASE (ITEMS_TABLE_ROWS,
+             NOTES_HTML, PICKUP_PHONE_HTML, COD_BANNER_HTML, DATE,
+             ITEM_COUNT, EST_PICKUP_ROW, REQUESTED_BY_ROW, TOTAL_ITEMS).
+             Previously the Complete-WC path wrote only the legacy set
+             (ITEMS_TABLE, ITEMS_COUNT, PICKUP_DATE, NOTES) so the live
+             PDF showed literal {{…}} strings for every missing token.
+             Legacy tokens kept in the map as aliases so the
+             WILL_CALL_RELEASE email template is unaffected.
+   v38.84.0: NEW admin endpoint testGenerateDoc — renders a doc template
    v38.84.0: NEW admin endpoint testGenerateDoc — renders a doc template
              with sample token values and returns a PDF as base64 for
              Template Editor preview/download. Uses the same Docs→PDF
@@ -13828,17 +13838,72 @@ function handleProcessWcRelease_(clientSheetId, payload) {
              uncheckedItems.length + ' item(s) remain on new will call ' + newWcNumber + '.</div>')
           : "";
 
+        // v38.85.0: build the CANONICAL token set the DOC_WILL_CALL_RELEASE
+        // Supabase template expects, mirroring handleGenerateWcDoc_ (the
+        // reprint endpoint) so the live Complete-WC PDF and the reprint
+        // produce byte-identical output. Legacy tokens (ITEMS_TABLE,
+        // ITEMS_COUNT, PICKUP_DATE, NOTES, PARTIAL_NOTE) are KEPT as
+        // aliases because `releaseTokens` is also fed to the
+        // WILL_CALL_RELEASE *email* template further down, which may
+        // still reference them.
+        var _dateStr      = Utilities.formatDate(now, tz, "MM/dd/yyyy");
+        var _pickupParty  = wcMap["Pickup Party"]    ? String(wcRowData[wcMap["Pickup Party"] - 1]    || "") : "";
+        var _pickupPhone  = wcMap["Pickup Phone"]    ? String(wcRowData[wcMap["Pickup Phone"] - 1]    || "") : "";
+        var _requestedBy  = wcMap["Requested By"]    ? String(wcRowData[wcMap["Requested By"] - 1]    || "") : "";
+        var _notes        = wcMap["Notes"]           ? String(wcRowData[wcMap["Notes"] - 1]           || "") : "";
+        var _estPickupRaw = wcMap["Estimated Pickup Date"] ? wcRowData[wcMap["Estimated Pickup Date"] - 1] : "";
+        var _estDateStr   = "";
+        if (_estPickupRaw) {
+          try {
+            _estDateStr = (_estPickupRaw instanceof Date)
+              ? Utilities.formatDate(_estPickupRaw, tz, "MM/dd/yyyy")
+              : String(_estPickupRaw);
+          } catch (_e) { _estDateStr = String(_estPickupRaw); }
+        }
+        var _codAmountCol = wcMap["COD Amount"] ? Number(wcRowData[wcMap["COD Amount"] - 1] || 0) : 0;
+
+        var _codBannerHtml = isCod
+          ? '<div style="background:#DC2626;border:4px solid #991B1B;padding:20px 16px;margin-bottom:14px;text-align:center;">' +
+            '<span style="font-size:28px;font-weight:900;color:#FFFFFF;letter-spacing:1px;">\u26A0 COD - PAYMENT DUE AT PICKUP: $' + _codAmountCol.toFixed(2) + ' \u26A0</span></div>'
+          : '';
+        var _notesHtml = _notes
+          ? '<div style="background:#FFFBEB;border:1px solid #F59E0B;border-radius:6px;padding:8px 12px;margin-bottom:10px;">' +
+            '<div style="font-size:9px;color:#92400E;font-weight:800;text-transform:uppercase;margin-bottom:2px;letter-spacing:0.5px;">Notes</div>' +
+            '<div style="font-size:11px;color:#78350F;">' + api_esc_(_notes) + '</div></div>'
+          : '';
+        var _pickupPhoneHtml = _pickupPhone
+          ? '<div style="font-size:11px;color:#64748B;">' + api_esc_(_pickupPhone) + '</div>'
+          : '';
+        var _estPickupRow = _estDateStr
+          ? '<tr><td style="font-size:10px;color:#64748B;padding:2px 0;">Est. Pickup</td><td style="font-size:12px;font-weight:600;">' + api_esc_(_estDateStr) + '</td></tr>'
+          : '';
+        var _requestedByRow = _requestedBy
+          ? '<tr><td style="font-size:10px;color:#64748B;padding:2px 0;">Requested By</td><td style="font-size:12px;">' + api_esc_(_requestedBy) + '</td></tr>'
+          : '';
+
         var releaseTokens = {
-            "{{WC_NUMBER}}":    wcNumber,
-            "{{CLIENT_NAME}}":  clientName,
-            "{{PICKUP_PARTY}}": wcMap["Pickup Party"] ? String(wcRowData[wcMap["Pickup Party"] - 1] || "") : "",
-            "{{PICKUP_DATE}}":  Utilities.formatDate(now, tz, "MM/dd/yyyy"),
-            "{{ITEMS_TABLE}}":  itemTableHtml,
-            "{{ITEMS_COUNT}}":  String(releasingItems.length),
-            "{{PHOTOS_URL}}":   "",
-            "{{PARTIAL_NOTE}}": partialNote,
-            "{{NOTES}}":        wcMap["Notes"] ? String(wcRowData[wcMap["Notes"] - 1] || "") : "",
-            "{{LOGO_URL}}":     String(settings["LOGO_URL"] || "").trim()
+            // Canonical tokens used by DOC_WILL_CALL_RELEASE (Supabase template)
+            "{{WC_NUMBER}}":         wcNumber,
+            "{{CLIENT_NAME}}":       clientName,
+            "{{DATE}}":              _dateStr,
+            "{{ITEM_COUNT}}":        String(releasingItems.length),
+            "{{TOTAL_ITEMS}}":       String(releasingItems.length),
+            "{{PICKUP_PARTY}}":      _pickupParty,
+            "{{PICKUP_PHONE_HTML}}": _pickupPhoneHtml,
+            "{{REQUESTED_BY_ROW}}":  _requestedByRow,
+            "{{EST_PICKUP_ROW}}":    _estPickupRow,
+            "{{NOTES_HTML}}":        _notesHtml,
+            "{{COD_BANNER_HTML}}":   _codBannerHtml,
+            "{{ITEMS_TABLE_ROWS}}":  itemTableHtml,
+            "{{LOGO_URL}}":          String(settings["LOGO_URL"] || "").trim(),
+            // Legacy tokens retained for the email template + any old
+            // sheet-cached WC_RELEASE templates that still reference them.
+            "{{PICKUP_DATE}}":       _dateStr,
+            "{{ITEMS_TABLE}}":       itemTableHtml,
+            "{{ITEMS_COUNT}}":       String(releasingItems.length),
+            "{{PHOTOS_URL}}":        "",
+            "{{PARTIAL_NOTE}}":      partialNote,
+            "{{NOTES}}":             _notes
         };
 
         // Generate DOC_WILL_CALL_RELEASE PDF (v24.0.0)
