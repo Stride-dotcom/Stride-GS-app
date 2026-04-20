@@ -58,7 +58,11 @@ export function EntityAttachments({ photos, documents, notes, defaultOpen }: Pro
     <div style={{ marginTop: 20, display: 'flex', flexDirection: 'column', gap: 10 }}>
       {photos && (
         <PhotosSection
-          defaultOpen={defaultOpen?.photos ?? true}
+          // Session 74: collapsed by default — keeps the detail panel
+          // compact on open so the item list + action row stay visible.
+          // The count badge on the header still shows "N" so the user
+          // knows content exists.
+          defaultOpen={defaultOpen?.photos ?? false}
           entityType={photos.entityType}
           entityId={photos.entityId}
           tenantId={photos.tenantId}
@@ -79,6 +83,30 @@ export function EntityAttachments({ photos, documents, notes, defaultOpen }: Pro
           entityId={notes.entityId}
         />
       )}
+    </div>
+  );
+}
+
+// Session 74: shared collapsible wrapper. Previously each section did
+// `{open && <div>...</div>}` — unmounting on collapse, mounting on expand,
+// with no animation. The new pattern always keeps the body in the DOM
+// but clips it with `max-height` + `overflow: hidden` so it animates
+// smoothly in and out. Content flows DOWN (normal document flow) —
+// expanded content pushes everything below it further down the panel.
+function CollapsibleBody({ open, children }: { open: boolean; children: React.ReactNode }) {
+  return (
+    <div
+      style={{
+        overflow: 'hidden',
+        maxHeight: open ? 4000 : 0,
+        opacity: open ? 1 : 0,
+        transition: 'max-height 260ms ease, opacity 180ms ease',
+      }}
+      aria-hidden={!open}
+    >
+      <div style={{ padding: open ? '12px 4px 4px' : '0 4px' }}>
+        {children}
+      </div>
     </div>
   );
 }
@@ -136,11 +164,9 @@ function PhotosSection({
         open={open}
         onToggle={() => setOpen(o => !o)}
       />
-      {open && (
-        <div style={{ padding: '12px 4px 4px' }}>
-          <PhotoGallery entityType={entityType} entityId={entityId} tenantId={tenantId} naked compact />
-        </div>
-      )}
+      <CollapsibleBody open={open}>
+        <PhotoGallery entityType={entityType} entityId={entityId} tenantId={tenantId} naked compact />
+      </CollapsibleBody>
     </section>
   );
 }
@@ -165,12 +191,12 @@ function DocumentsSection({
         open={open}
         onToggle={() => setOpen(o => !o)}
       />
-      {open && (
-        <div style={{ padding: '12px 4px 4px', display: 'flex', flexDirection: 'column', gap: 10 }}>
+      <CollapsibleBody open={open}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
           <DocumentUploadButton onUpload={handleUpload} uploading={uploading} compact />
-          {/* Batch scan — MultiCapture wrapped for document mode. Shows
-              only when the section is open to avoid mounting a camera
-              input on every collapsed panel on the page. */}
+          {/* Batch scan — MultiCapture wrapped for document mode. Mounted
+              even when collapsed now (for transition smoothness); the
+              camera input is lazy-initialized inside DocumentScanButton. */}
           <DocumentScanButton
             contextType={contextType}
             contextId={contextId}
@@ -178,7 +204,7 @@ function DocumentsSection({
           />
           <DocumentList contextType={contextType} contextId={contextId} tenantId={tenantId} />
         </div>
-      )}
+      </CollapsibleBody>
     </section>
   );
 }
@@ -197,11 +223,9 @@ function NotesSectionCollapsible({
         open={open}
         onToggle={() => setOpen(o => !o)}
       />
-      {open && (
-        <div style={{ padding: '12px 4px 4px' }}>
-          <NotesSection entityType={entityType} entityId={entityId} />
-        </div>
-      )}
+      <CollapsibleBody open={open}>
+        <NotesSection entityType={entityType} entityId={entityId} />
+      </CollapsibleBody>
     </section>
   );
 }
