@@ -12,6 +12,7 @@ import { fmtDate, fmtDateTime } from '../../lib/constants';
 import { WriteButton } from './WriteButton';
 import { postCompleteTask, postStartTask, postUpdateTaskNotes, postUpdateTaskCustomPrice, postRequestRepairQuote, postCancelTask, postGenerateTaskWorkOrder, postUpdateInventoryItem, postUpdateTaskPriority, postUpdateTaskDueDate, isApiConfigured } from '../../lib/api';
 import { writeSyncFailed } from '../../lib/syncEvents';
+import { entityEvents } from '../../lib/entityEvents';
 import { useLocations } from '../../hooks/useLocations';
 import type { CompleteTaskResponse, StartTaskResponse } from '../../lib/api';
 import { useAuth } from '../../contexts/AuthContext';
@@ -66,7 +67,10 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
   const [submitResult, setSubmitResult] = useState<CompleteTaskResponse | null>(null);
 
   // Start Task state
-  const [startTaskLoading, setStartTaskLoading] = useState(false);
+  // Session 74: startTaskLoading retained as an always-false read-only
+  // flag so the legacy button/overlay branches still compile. Optimistic
+  // UI flips state immediately — we never toggle this to true anymore.
+  const [startTaskLoading] = useState(false);
   const [startTaskResult, setStartTaskResult] = useState<StartTaskResponse | null>(null);
   const [startTaskError, setStartTaskError] = useState<string | null>(null);
   const [startTaskConflict, setStartTaskConflict] = useState<{ assignedTo: string } | null>(null);
@@ -248,41 +252,19 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
     setTaskSaving(false);
   }, [apiConfigured, clientSheetId, task, notes, location, customPrice, canSeeCustomPrice, onTaskUpdated, mergeTaskPatch, clearTaskPatch]);
 
+  // Session 74 optimistic-first: flip UI to completed immediately, fire
+  // GAS in the background. See handleStartRepair for the pattern rationale.
   const callCompleteTask = async (result: 'Pass' | 'Fail') => {
-    setSubmitting(true);
     setSubmitError(null);
 
-    // Phase 2C: optimistic patch — table shows "Completed" immediately
-    applyTaskPatch?.(task.taskId, {
-      status: 'Completed',
-      result,
-      completedAt: new Date().toISOString().slice(0, 10),
-    });
-
-    // Demo mode: no API or no client sheet
-    if (!apiConfigured || !clientSheetId) {
-      await new Promise(r => setTimeout(r, 600));
-      setSubmitResult({ success: true, taskId: task.taskId, result, billingCreated: false });
-      setCompleted(true);
-      setSubmitting(false);
-      return;
-    }
-
-    // v32.x: Inline Custom Price override.
-    //  - If the editor has a value → always send it (authoritative). This
-    //    avoids a cache bug where task.customPrice came from Supabase but the
-    //    Google Sheet cell was never actually written, and React would skip
-    //    sending because the values "matched".
-    //  - If the editor is empty but task.customPrice is set → send null to clear.
-    //  - If both empty → send nothing.
+    // v32.x: Inline Custom Price override — validate BEFORE flipping UI
+    // so an invalid value doesn't briefly show the completed state.
     let inlineCustomPrice: number | null | undefined = undefined;
     if (canSeeCustomPrice) {
       if (customPrice.trim() !== '') {
         const priceVal = Number(customPrice);
         if (isNaN(priceVal)) {
           setSubmitError('Invalid custom price — please fix or clear the field before completing.');
-          setSubmitting(false);
-          clearTaskPatch?.(task.taskId);
           return;
         }
         inlineCustomPrice = priceVal;
@@ -291,96 +273,127 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
       }
     }
 
-    const resp = await postCompleteTask(
-      {
-        taskId: task.taskId,
-        result,
-        taskNotes: notes || undefined,
-        ...(inlineCustomPrice !== undefined ? { customPrice: inlineCustomPrice } : {}),
-      },
-      clientSheetId
-    );
-
-    setSubmitting(false);
-
-    if (!resp.ok || !resp.data?.success) {
-      clearTaskPatch?.(task.taskId); // rollback
-      const errMsg = resp.error || resp.data?.error || 'Completion failed. Please try again.';
-      setSubmitError(errMsg);
-      void writeSyncFailed({
-        tenant_id: clientSheetId,
-        entity_type: 'task',
-        entity_id: task.taskId,
-        action_type: 'complete_task',
-        requested_by: user?.email ?? '',
-        request_id: resp.requestId,
-        payload: { taskId: task.taskId, result, taskNotes: notes || undefined, clientName: task.clientName, description: task.description, sidemark: task.sidemark, itemId: task.itemId },
-        error_message: errMsg,
-      });
-      return;
-    }
-
-    // Don't clear patch on success — let 120s TTL handle it (prevents flicker during refetch)
-    setSubmitResult(resp.data);
+    // 1. OPTIMISTIC UI
+    applyTaskPatch?.(task.taskId, {
+      status: 'Completed',
+      result,
+      completedAt: new Date().toISOString().slice(0, 10),
+    });
+    setSubmitResult({ success: true, taskId: task.taskId, result, billingCreated: false });
     setCompleted(true);
-    onTaskUpdated?.();
+    entityEvents.emit('task', task.taskId);
+
+    // Demo mode: no API or no client sheet — stop here, UI already reflects completion.
+    if (!apiConfigured || !clientSheetId) return;
+
+    // 2. Background GAS
+    void (async () => {
+      try {
+        const resp = await postCompleteTask(
+          {
+            taskId: task.taskId,
+            result,
+            taskNotes: notes || undefined,
+            ...(inlineCustomPrice !== undefined ? { customPrice: inlineCustomPrice } : {}),
+          },
+          clientSheetId
+        );
+        if (!resp.ok || !resp.data?.success) {
+          const errMsg = resp.error || resp.data?.error || 'Completion recorded locally but the server call failed.';
+          setSubmitError(errMsg + ' Refresh to reconcile, or retry.');
+          void writeSyncFailed({
+            tenant_id: clientSheetId,
+            entity_type: 'task',
+            entity_id: task.taskId,
+            action_type: 'complete_task',
+            requested_by: user?.email ?? '',
+            request_id: resp.requestId,
+            payload: { taskId: task.taskId, result, taskNotes: notes || undefined, clientName: task.clientName, description: task.description, sidemark: task.sidemark, itemId: task.itemId },
+            error_message: errMsg,
+          });
+        } else {
+          // Refresh the banner with server-shaped data (e.g. billingCreated flag)
+          setSubmitResult(resp.data);
+          onTaskUpdated?.();
+        }
+      } catch (err) {
+        setSubmitError(
+          (err instanceof Error ? err.message : 'Network error')
+          + ' while completing task. Refresh to reconcile.'
+        );
+      }
+    })();
   };
 
+  // Session 74 optimistic-first: flip UI to 'In Progress' immediately,
+  // fire GAS in the background. Conflict responses (another user
+  // already started the task) still roll back — that's a distinct
+  // case from a transient failure.
   const handleStartTask = async (forceOverride = false) => {
-    setStartTaskLoading(true);
     setStartTaskError(null);
     setStartTaskConflict(null);
 
-    // Phase 2C: optimistic patch — table shows "In Progress" immediately
+    // 1. OPTIMISTIC UI
     applyTaskPatch?.(task.taskId, {
       status: 'In Progress',
       assignedTo: user?.email || undefined,
       startedAt: new Date().toISOString().slice(0, 10),
     });
+    setStartTaskResult({
+      success: true,
+      started: true,
+      noOp: false,
+      taskId: task.taskId,
+      folderUrl: '',
+      pdfCreated: false,
+      startedAt: new Date().toISOString().slice(0, 10),
+    });
+    entityEvents.emit('task', task.taskId);
 
-    if (!apiConfigured || !clientSheetId) {
-      // Demo mode
-      await new Promise(r => setTimeout(r, 800));
-      setStartTaskResult({ success: true, started: true, noOp: false, taskId: task.taskId, folderUrl: '', pdfCreated: false, startedAt: new Date().toISOString().slice(0, 10), message: 'Demo mode — no writes made' });
-      setStartTaskLoading(false);
-      return;
-    }
+    if (!apiConfigured || !clientSheetId) return;  // Demo mode — UI already reflects start.
 
-    const resp = await postStartTask(
-      { taskId: task.taskId, assignedTo: user?.email || undefined, forceOverride },
-      clientSheetId
-    );
+    // 2. Background GAS
+    void (async () => {
+      try {
+        const resp = await postStartTask(
+          { taskId: task.taskId, assignedTo: user?.email || undefined, forceOverride },
+          clientSheetId
+        );
 
-    setStartTaskLoading(false);
+        if (resp.ok && resp.data && !resp.data.success && resp.data.conflict) {
+          // Genuine conflict — another user already started it. Roll back.
+          clearTaskPatch?.(task.taskId);
+          setStartTaskResult(null);
+          setStartTaskConflict({ assignedTo: resp.data.assignedTo || 'another user' });
+          return;
+        }
 
-    if (resp.ok && resp.data && !resp.data.success && resp.data.conflict) {
-      // Another user already started this task — show confirmation; rollback patch
-      clearTaskPatch?.(task.taskId);
-      setStartTaskConflict({ assignedTo: resp.data.assignedTo || 'another user' });
-      return;
-    }
+        if (!resp.ok || !resp.data?.success) {
+          const errMsg = resp.error || resp.data?.message || resp.data?.error || 'Work order generation failed.';
+          setStartTaskError(errMsg + ' You can retry from the Regenerate Work Order button.');
+          void writeSyncFailed({
+            tenant_id: clientSheetId,
+            entity_type: 'task',
+            entity_id: task.taskId,
+            action_type: 'start_task',
+            requested_by: user?.email ?? '',
+            request_id: resp.requestId,
+            payload: { taskId: task.taskId, assignedTo: user?.email || undefined, forceOverride, clientName: task.clientName, description: task.description, sidemark: task.sidemark, itemId: task.itemId },
+            error_message: errMsg,
+          });
+          return;
+        }
 
-    if (!resp.ok || !resp.data?.success) {
-      clearTaskPatch?.(task.taskId); // rollback
-      const errMsg = resp.error || resp.data?.message || resp.data?.error || 'Start Task failed. Please try again.';
-      setStartTaskError(errMsg);
-      void writeSyncFailed({
-        tenant_id: clientSheetId,
-        entity_type: 'task',
-        entity_id: task.taskId,
-        action_type: 'start_task',
-        requested_by: user?.email ?? '',
-        request_id: resp.requestId,
-        payload: { taskId: task.taskId, assignedTo: user?.email || undefined, forceOverride, clientName: task.clientName, description: task.description, sidemark: task.sidemark, itemId: task.itemId },
-        error_message: errMsg,
-      });
-      return;
-    }
-
-    // Server confirmed — keep optimistic patch until refetch returns updated data
-    // (Supabase write-through may have slight delay; patch TTL of 120s covers it)
-    setStartTaskResult(resp.data);
-    onTaskUpdated?.();
+        // Success — refresh banner with server-shaped data.
+        setStartTaskResult(resp.data);
+        onTaskUpdated?.();
+      } catch (err) {
+        setStartTaskError(
+          (err instanceof Error ? err.message : 'Network error')
+          + ' while generating work order — you can retry from the Regenerate Work Order button.'
+        );
+      }
+    })();
   };
 
   const handleResult = async (result: 'pass' | 'fail') => {

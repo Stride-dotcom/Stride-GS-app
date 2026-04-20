@@ -18,6 +18,7 @@ import { postProcessWcRelease, postCancelWillCall, postRemoveItemsFromWillCall, 
 import { fetchWcItemsFromSupabase } from '../../lib/supabaseQueries';
 import { useClients } from '../../hooks/useClients';
 import { writeSyncFailed } from '../../lib/syncEvents';
+import { entityEvents } from '../../lib/entityEvents';
 import { useAuth } from '../../contexts/AuthContext';
 import type { ProcessWcReleaseResponse, CancelWillCallResponse, RemoveItemsFromWillCallResponse } from '../../lib/api';
 
@@ -183,7 +184,10 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
 
   const [releaseMode, setReleaseMode] = useState<'none' | 'partial'>('none');
   const [partialSelected, setPartialSelected] = useState<Set<string>>(new Set());
-  const [releasing, setReleasing] = useState(false);
+  // Session 74: releasing retained as an always-false read-only flag so
+  // the legacy overlay/button branches still compile. Optimistic UI
+  // flips releaseResult immediately — we never toggle this to true.
+  const [releasing] = useState(false);
   const [releaseError, setReleaseError] = useState<string | null>(null);
   const [releaseResult, setReleaseResult] = useState<ProcessWcReleaseResponse | null>(null);
 
@@ -369,27 +373,45 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
   const [genDocResult, setGenDocResult] = useState<string | null>(null);
   const [genDocError, setGenDocError] = useState<string | null>(null);
 
+  // Session 74 optimistic-first: hide the Start button + show success
+  // banner instantly. GAS runs in the background. If the PDF generation
+  // fails, we surface an error banner without forcing the button to
+  // reappear — the user can click Regenerate from the banner.
   const handleGenerateWcDoc = async () => {
     setGenDocError(null);
-    setGenDocResult(null);
     if (!apiConfigured || !clientSheetId) { setGenDocError('API not configured'); return; }
-    setGenDocLoading(true);
-    try {
-      const resp = await postGenerateWcDoc(wc.wcNumber, clientSheetId);
-      if (!resp.ok || !resp.data?.success) {
-        setGenDocError(resp.error || resp.data?.error || 'Failed to start will call');
-      } else {
-        const url = resp.data?.folderUrl || '';
-        setGenDocResult(url
-          ? `Pickup document generated — ${url}`
-          : 'Pickup document generated in Will Call folder');
-        // No auto-dismiss — user dismisses manually so they can see the confirmation
+
+    // 1. OPTIMISTIC: flip to success state immediately so the primary
+    //    purple button is replaced by the green banner.
+    setGenDocResult('Pickup document generated in Will Call folder');
+    entityEvents.emit('will_call', wc.wcNumber);
+
+    // 2. Background GAS — refresh the banner with the real folder URL on
+    //    success; surface a non-blocking error banner on failure.
+    void (async () => {
+      setGenDocLoading(true);
+      try {
+        const resp = await postGenerateWcDoc(wc.wcNumber, clientSheetId);
+        if (!resp.ok || !resp.data?.success) {
+          setGenDocError(
+            (resp.error || resp.data?.error || 'Pickup document generation failed')
+            + ' — click Regenerate to retry.'
+          );
+        } else {
+          const url = resp.data?.folderUrl || '';
+          setGenDocResult(url
+            ? `Pickup document generated — ${url}`
+            : 'Pickup document generated in Will Call folder');
+        }
+      } catch (err) {
+        setGenDocError(
+          (err instanceof Error ? err.message : 'Network error')
+          + ' — click Regenerate to retry.'
+        );
+      } finally {
+        setGenDocLoading(false);
       }
-    } catch (err) {
-      setGenDocError(err instanceof Error ? err.message : 'Network error');
-    } finally {
-      setGenDocLoading(false);
-    }
+    })();
   };
 
   const handleCancelWC = async () => {
@@ -436,6 +458,10 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
     });
   };
 
+  // Session 74 optimistic-first: flip the WC to Released/Partial + show
+  // the confirmation screen immediately. GAS runs in the background
+  // (release PDF, billing rows, client email). Error banner surfaces
+  // after the fact; status stays Released so the user can move on.
   const handleRelease = async (itemIds: string[]) => {
     setReleaseError(null);
     if (!itemIds.length) return;
@@ -444,39 +470,42 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
     const newWcStatus = isPartialRelease ? 'Partial' : 'Released';
     const releaseDate = new Date().toISOString().slice(0, 10);
 
-    // Phase 2C: patch WC row + all released inventory items immediately
+    // 1. OPTIMISTIC UI
     applyWcPatch?.(wc.wcNumber, { status: newWcStatus });
     itemIds.forEach(id => applyItemPatch?.(id, { status: 'Released', releaseDate }));
+    setReleaseResult({
+      success: true,
+      releasedCount: itemIds.length,
+      isPartial: isPartialRelease,
+      emailSent: false,  // background will update this when GAS confirms
+    });
+    setEffectiveStatus(newWcStatus);
+    setReleaseMode('none');
+    entityEvents.emit('will_call', wc.wcNumber);
 
-    if (!apiConfigured || !clientSheetId) {
-      // Demo mode
-      setReleaseResult({ success: true, releasedCount: itemIds.length, isPartial: isPartialRelease, emailSent: false, warnings: ['Demo mode — no API configured'] });
-      setEffectiveStatus(newWcStatus);
-      setReleaseMode('none');
-      return;
-    }
+    if (!apiConfigured || !clientSheetId) return;  // Demo mode — UI already reflects release.
 
-    setReleasing(true);
-    try {
-      const resp = await postProcessWcRelease({ wcNumber: wc.wcNumber, releaseItemIds: itemIds }, clientSheetId);
-      if (!resp.ok || !resp.data?.success) {
-        clearWcPatch?.(wc.wcNumber); // rollback WC patch
-        const errMsg = resp.error || resp.data?.error || 'Failed to process release. Please try again.';
-        setReleaseError(errMsg);
-        void writeSyncFailed({ tenant_id: clientSheetId, entity_type: 'will_call', entity_id: wc.wcNumber, action_type: 'process_wc_release', requested_by: user?.email ?? '', request_id: resp.requestId, payload: { wcNumber: wc.wcNumber, releaseItemIds: itemIds, clientName: wc.clientName }, error_message: errMsg });
-      } else {
-        // Don't clear patch on success — let 120s TTL handle it (prevents flicker during refetch)
-        setReleaseResult(resp.data);
-        setEffectiveStatus(resp.data.isPartial ? 'Partial' : 'Released');
-        setReleaseMode('none');
-        onWcUpdated?.();
+    // 2. Background GAS
+    void (async () => {
+      try {
+        const resp = await postProcessWcRelease({ wcNumber: wc.wcNumber, releaseItemIds: itemIds }, clientSheetId);
+        if (!resp.ok || !resp.data?.success) {
+          const errMsg = resp.error || resp.data?.error || 'Release recorded locally but the server call failed.';
+          setReleaseError(errMsg + ' Refresh to reconcile, or retry.');
+          void writeSyncFailed({ tenant_id: clientSheetId, entity_type: 'will_call', entity_id: wc.wcNumber, action_type: 'process_wc_release', requested_by: user?.email ?? '', request_id: resp.requestId, payload: { wcNumber: wc.wcNumber, releaseItemIds: itemIds, clientName: wc.clientName }, error_message: errMsg });
+        } else {
+          // Refresh banner with server-confirmed data (email, warnings, etc.)
+          setReleaseResult(resp.data);
+          setEffectiveStatus(resp.data.isPartial ? 'Partial' : 'Released');
+          onWcUpdated?.();
+        }
+      } catch (err) {
+        setReleaseError(
+          (err instanceof Error ? err.message : 'Network error')
+          + ' while releasing. Refresh to reconcile.'
+        );
       }
-    } catch (err) {
-      clearWcPatch?.(wc.wcNumber); // rollback WC patch
-      setReleaseError(err instanceof Error ? err.message : 'Network error. Please try again.');
-    } finally {
-      setReleasing(false);
-    }
+    })();
   };
 
   return (

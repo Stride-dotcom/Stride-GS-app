@@ -15,6 +15,7 @@ import { getPanelContainerStyle, panelBackdropStyle } from './panelStyles';
 import { useIsMobile } from '../../hooks/useIsMobile';
 import { useResizablePanel } from '../../hooks/useResizablePanel';
 import { postSendRepairQuote, postRespondToRepairQuote, postCompleteRepair, postStartRepair, postCancelRepair, postUpdateRepairNotes, isApiConfigured } from '../../lib/api';
+import { entityEvents } from '../../lib/entityEvents';
 import type { ApiRepair, SendRepairQuoteResponse, RespondToRepairQuoteResponse, CompleteRepairResponse, StartRepairResponse } from '../../lib/api';
 import { writeSyncFailed } from '../../lib/syncEvents';
 import { useAuth } from '../../contexts/AuthContext';
@@ -257,6 +258,12 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
   };
 
   // ─── Start Repair ────────────────────────────────────────────────────────
+  // Session 74 optimistic-first rewrite: the Start button now hides the
+  // moment it's clicked. The user no longer waits 30–60 s while GAS
+  // renders the Work Order PDF — UI flips instantly, GAS runs in the
+  // background. On failure we surface a retry banner but KEEP the
+  // started state (the sheet row has usually been written even when
+  // the downstream PDF step fails, and Realtime will reconcile if not).
   const handleStartRepair = async () => {
     setSubmitError(null);
     const clientSheetId = repair.clientSheetId;
@@ -268,31 +275,47 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
       return;
     }
 
-    // Phase 2C: patch table row immediately
+    // 1. OPTIMISTIC UI — flip panel + table row + cross-page hooks now.
+    //    No setSubmitting(true): we don't want the full-panel
+    //    ProcessingOverlay to cover the Work Order banner that's about
+    //    to appear.
+    setEffectiveStatus('In Progress');
+    setStartResult({
+      success: true,
+      repairId: repair.repairId,
+      startDate: new Date().toISOString().split('T')[0],
+    });
     applyRepairPatch?.(repair.repairId, { status: 'In Progress' });
-    setSubmitting(true);
-    try {
-      const resp = await postStartRepair({ repairId: repair.repairId }, clientSheetId);
-      if (!resp.ok || !resp.data?.success) {
-        clearRepairPatch?.(repair.repairId); // rollback
-        const errMsg = resp.error || resp.data?.error || 'Failed to start repair. Please try again.';
-        setSubmitError(errMsg);
-        void writeSyncFailed({ tenant_id: clientSheetId, entity_type: 'repair', entity_id: repair.repairId, action_type: 'start_repair', requested_by: user?.email ?? '', request_id: resp.requestId, payload: { repairId: repair.repairId, clientName: repair.clientName, description: repair.description }, error_message: errMsg });
-      } else {
-        setEffectiveStatus('In Progress');
-        // Don't clear patch on success — let TTL handle it (prevents flicker while refetch loads)
-        setStartResult(resp.data);
-        onRepairUpdated?.();
+    entityEvents.emit('repair', repair.repairId);
+
+    // 2. Fire GAS in background. We intentionally don't await here so
+    //    the user can continue working; errors land in the retry
+    //    banner without touching the optimistic success state.
+    void (async () => {
+      try {
+        const resp = await postStartRepair({ repairId: repair.repairId }, clientSheetId);
+        if (!resp.ok || !resp.data?.success) {
+          const errMsg = resp.error || resp.data?.error || 'Work order generation failed.';
+          setSubmitError(errMsg + ' You can retry from the Regenerate Work Order button.');
+          void writeSyncFailed({ tenant_id: clientSheetId, entity_type: 'repair', entity_id: repair.repairId, action_type: 'start_repair', requested_by: user?.email ?? '', request_id: resp.requestId, payload: { repairId: repair.repairId, clientName: repair.clientName, description: repair.description }, error_message: errMsg });
+        } else {
+          // Refresh server-shaped data (URL, skipped flag, etc.) into the banner.
+          setStartResult(resp.data);
+          onRepairUpdated?.();
+        }
+      } catch (err) {
+        setSubmitError(
+          (err instanceof Error ? err.message : 'Network error')
+          + ' while generating work order — you can retry from the Regenerate Work Order button.'
+        );
       }
-    } catch (err) {
-      clearRepairPatch?.(repair.repairId); // rollback
-      setSubmitError(err instanceof Error ? err.message : 'Network error. Please try again.');
-    } finally {
-      setSubmitting(false);
-    }
+    })();
   };
 
   // ─── Complete Repair ──────────────────────────────────────────────────────
+  // Session 74: same optimistic-first pattern as handleStartRepair —
+  // flip to 'Complete' immediately, fire GAS in the background, keep
+  // the optimistic state if GAS errors (surface a retry banner).
   const handleComplete = async (resultValue: 'Pass' | 'Fail') => {
     setSubmitError(null);
     const clientSheetId = repair.clientSheetId;
@@ -305,32 +328,40 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
       return;
     }
 
-    // Phase 2C: patch table row immediately
+    // 1. OPTIMISTIC UI
+    setEffectiveStatus('Complete');
+    setCompleted(true);
+    setCompleteResult({
+      success: true,
+      repairId: repair.repairId,
+      resultValue,
+      billingCreated: false,
+    });
     applyRepairPatch?.(repair.repairId, { status: 'Complete', completedDate: new Date().toISOString().slice(0, 10) });
-    setSubmitting(true);
-    try {
-      const resp = await postCompleteRepair(
-        { repairId: repair.repairId, resultValue, repairNotes: repairNotes || undefined },
-        clientSheetId
-      );
-      if (!resp.ok || !resp.data?.success) {
-        clearRepairPatch?.(repair.repairId); // rollback
-        const errMsg = resp.error || resp.data?.error || 'Failed to complete repair. Please try again.';
-        setSubmitError(errMsg);
-        void writeSyncFailed({ tenant_id: clientSheetId, entity_type: 'repair', entity_id: repair.repairId, action_type: 'complete_repair', requested_by: user?.email ?? '', request_id: resp.requestId, payload: { repairId: repair.repairId, resultValue, repairNotes: repairNotes || undefined, clientName: repair.clientName, description: repair.description }, error_message: errMsg });
-      } else {
-        setEffectiveStatus('Complete');
-        // Don't clear patch on success — let TTL handle it (prevents flicker while refetch loads)
-        setCompleted(true);
-        setCompleteResult(resp.data);
-        onRepairUpdated?.();
+    entityEvents.emit('repair', repair.repairId);
+
+    // 2. Background GAS
+    void (async () => {
+      try {
+        const resp = await postCompleteRepair(
+          { repairId: repair.repairId, resultValue, repairNotes: repairNotes || undefined },
+          clientSheetId
+        );
+        if (!resp.ok || !resp.data?.success) {
+          const errMsg = resp.error || resp.data?.error || 'Completion recorded locally but the server call failed.';
+          setSubmitError(errMsg + ' Refresh to reconcile, or retry.');
+          void writeSyncFailed({ tenant_id: clientSheetId, entity_type: 'repair', entity_id: repair.repairId, action_type: 'complete_repair', requested_by: user?.email ?? '', request_id: resp.requestId, payload: { repairId: repair.repairId, resultValue, repairNotes: repairNotes || undefined, clientName: repair.clientName, description: repair.description }, error_message: errMsg });
+        } else {
+          setCompleteResult(resp.data);
+          onRepairUpdated?.();
+        }
+      } catch (err) {
+        setSubmitError(
+          (err instanceof Error ? err.message : 'Network error')
+          + ' while completing repair. Refresh to reconcile.'
+        );
       }
-    } catch (err) {
-      clearRepairPatch?.(repair.repairId); // rollback
-      setSubmitError(err instanceof Error ? err.message : 'Network error. Please try again.');
-    } finally {
-      setSubmitting(false);
-    }
+    })();
   };
 
   const handleResult = (_result: 'pass' | 'fail') => {
