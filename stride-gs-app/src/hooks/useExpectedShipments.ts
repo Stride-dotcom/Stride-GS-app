@@ -158,11 +158,12 @@ export function useExpectedShipments(): UseExpectedShipmentsResult {
   }, [doFetch]);
 
   const add = useCallback(async (entry: AddPayload): Promise<ExpectedShipment | null> => {
-    const tenantId = entry.clientSheetId;
-    if (!tenantId) {
-      setError('Client is required — pick a client from the dropdown');
-      return null;
-    }
+    // v2: tenant_id is allowed to be empty string when an admin/staff user
+    // adds a "call-in" shipment for which the real client isn't yet known.
+    // The RLS `exp_ship_insert_staff` policy only checks role, not tenant,
+    // so an empty string satisfies the policy AND the NOT NULL constraint.
+    // Client-role users still need a bound tenant — RLS enforces that.
+    const tenantId = entry.clientSheetId ?? '';
     const insertRow = {
       tenant_id: tenantId,
       client_name: entry.client,

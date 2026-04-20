@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect } from 'react';
-import { ChevronLeft, ChevronRight, Plus } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Plus, Search, X } from 'lucide-react';
 import { useCalendarEvents, type CalendarEvent } from '../../hooks/useCalendarEvents';
 import { useExpectedShipments, type ExpectedShipment } from '../../hooks/useExpectedShipments';
 import { useClients } from '../../hooks/useClients';
@@ -39,6 +39,7 @@ export function ExpectedCalendar() {
   const [showAdd, setShowAdd] = useState(false);
   const [editingEvent, setEditingEvent] = useState<ExpectedShipment | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState('');
 
   const { events, loading } = useCalendarEvents();
   const { items: expectedItems, add: addExpected, update: updateExpected, remove: removeExpected, error: expectedError } = useExpectedShipments();
@@ -93,6 +94,27 @@ export function ExpectedCalendar() {
   const today = new Date();
   const weekStart = useMemo(() => startOfWeek(anchor), [anchor]);
 
+  // Search: substring-match across every field a user might remember —
+  // client, vendor, carrier, tracking, label, sourceId, pickupParty,
+  // description, notes, priority. Case-insensitive. Empty query → full set.
+  // Stats + month/week views all consume `filteredEvents` so the unread
+  // counts change in step with what's rendered on the grid.
+  const filteredEvents = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return events;
+    return events.filter(e => {
+      const d = e.details || {};
+      const hay = [
+        e.client, e.label, e.sourceId, e.type, e.date,
+        d.title, d.vendor, d.carrier, d.tracking,
+        d.pickupParty, d.status, d.description,
+        d.repairVendor, d.priority, d.notes,
+        d.pieces == null ? '' : String(d.pieces),
+      ].filter(Boolean).join(' ').toLowerCase();
+      return hay.includes(q);
+    });
+  }, [events, searchQuery]);
+
   // Stat calculations — aggregate across every event type (tasks, repairs,
   // will calls, expected shipments). Mirrors the "Dashboard Calendar" ask
   // where these four cards are the at-a-glance summary of workload.
@@ -105,21 +127,23 @@ export function ExpectedCalendar() {
 
     const inRange = (d: string, start: string, end: string) => d >= start && d <= end;
 
-    const dueToday      = events.filter(e => e.date === todayKey).length;
-    const thisWeek      = events.filter(e => inRange(e.date, weekStartKey, weekEndKey)).length;
-    const highPriority  = events.filter(e => e.priority === 'High' && inRange(e.date, weekStartKey, weekEndKey)).length;
+    // Stats reflect the currently-filtered event set so the cards stay in
+    // sync with whatever the user is searching for.
+    const dueToday      = filteredEvents.filter(e => e.date === todayKey).length;
+    const thisWeek      = filteredEvents.filter(e => inRange(e.date, weekStartKey, weekEndKey)).length;
+    const highPriority  = filteredEvents.filter(e => e.priority === 'High' && inRange(e.date, weekStartKey, weekEndKey)).length;
     // Overdue = task/repair whose date (dueDate) is strictly before today AND
     // the event's status is still open/in-progress.
     const isOpenStatus = (s: string | undefined) =>
       !s || s === 'Open' || s === 'In Progress' || s === 'Pending Quote' || s === 'Quote Sent' || s === 'Approved';
-    const overdue = events.filter(e =>
+    const overdue = filteredEvents.filter(e =>
       (e.type === 'task' || e.type === 'repair') &&
       e.date < todayKey &&
       isOpenStatus(e.details.status)
     ).length;
 
     return { dueToday, thisWeek, highPriority, overdue };
-  }, [events, today]);
+  }, [filteredEvents, today]);
 
   const goPrev = () => {
     if (view === 'month') {
@@ -184,6 +208,49 @@ export function ExpectedCalendar() {
         </div>
       )}
 
+      {/* Search — substring-match across every searchable field on every event.
+          Sits above the month navigation so it's the first thing users see
+          and the filter state is obvious (dropdown-style counter shows how
+          many events match). */}
+      <div style={{ marginBottom: isMobile ? 10 : 14, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+        <div style={{ position: 'relative', flex: '1 1 240px', maxWidth: 420 }}>
+          <Search size={14} style={{
+            position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)',
+            color: '#999', pointerEvents: 'none',
+          }} />
+          <input
+            value={searchQuery}
+            onChange={e => setSearchQuery(e.target.value)}
+            placeholder="Search calendar — client, vendor, tracking, notes…"
+            style={{
+              width: '100%', boxSizing: 'border-box',
+              padding: '9px 34px 9px 34px', fontSize: 13,
+              border: '1px solid rgba(0,0,0,0.08)', borderRadius: 100,
+              background: '#fff', color: '#1C1C1C',
+              outline: 'none', fontFamily: 'inherit',
+            }}
+          />
+          {searchQuery && (
+            <button
+              type="button"
+              onClick={() => setSearchQuery('')}
+              aria-label="Clear search"
+              style={{
+                position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)',
+                background: 'rgba(0,0,0,0.06)', border: 'none', borderRadius: '50%',
+                width: 20, height: 20, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                cursor: 'pointer', color: '#666',
+              }}
+            ><X size={12} /></button>
+          )}
+        </div>
+        {searchQuery && (
+          <span style={{ fontSize: 11, color: '#666', fontWeight: 500 }}>
+            {filteredEvents.length} match{filteredEvents.length === 1 ? '' : 'es'} of {events.length}
+          </span>
+        )}
+      </div>
+
       {/* Controls — wrap cleanly; on mobile the month title drops below the
           nav buttons and the view toggle + Add Shipment pill sit on their own row */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: isMobile ? 10 : 14, flexWrap: 'wrap', gap: 10 }}>
@@ -236,9 +303,9 @@ export function ExpectedCalendar() {
               Loading calendar...
             </div>
           ) : view === 'month' ? (
-            <CalendarMonthView year={anchor.getFullYear()} month={anchor.getMonth()} events={events} onEventClick={handleEventClick} />
+            <CalendarMonthView year={anchor.getFullYear()} month={anchor.getMonth()} events={filteredEvents} onEventClick={handleEventClick} />
           ) : (
-            <CalendarWeekView weekStart={weekStart} events={events} onEventClick={handleEventClick} />
+            <CalendarWeekView weekStart={weekStart} events={filteredEvents} onEventClick={handleEventClick} />
           )}
         </div>
       </div>

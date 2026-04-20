@@ -63,31 +63,44 @@ export function AddExpectedModal({ onClose, onSave, editingEvent, onDelete }: Pr
     return accessibleClients.filter(c => c.name.toLowerCase().includes(q));
   }, [accessibleClients, client]);
 
-  const canSave = client.trim().length > 0 && expectedDate.length > 0;
+  const isClientRole = user?.role === 'client';
+  // Free-text ("call-in") shipments are allowed for staff/admin only — a
+  // shipper calls in before the real client is identified, and staff need
+  // to be able to park it on the calendar. Saved with tenant_id='' so no
+  // client user can see it (their RLS requires tenant_id = own sheet id).
+  // Client-role users still MUST pick a real client (RLS would reject
+  // their insert anyway).
+  const canSave = expectedDate.length > 0
+    && (isClientRole ? client.trim().length > 0 : true);
 
   const handleSave = async () => {
     if (!canSave) return;
 
     // Resolve clientSheetId from the typed name if the user didn't pick
-    // a dropdown suggestion. Required by RLS on expected_shipments.
+    // a dropdown suggestion. If staff/admin left it blank or typed free
+    // text with no match, save with clientSheetId='' (admin-only row).
     const typedName = client.trim();
     let resolvedSheetId = clientSheetId;
-    if (!resolvedSheetId) {
+    if (!resolvedSheetId && typedName) {
       const match = accessibleClients.find(
         c => c.name.trim().toLowerCase() === typedName.toLowerCase()
       );
       resolvedSheetId = match?.spreadsheetId;
     }
-    if (!resolvedSheetId) {
-      setValidationError('Pick a client from the dropdown — free text not allowed.');
+    if (isClientRole && !resolvedSheetId) {
+      // Client users can't create "call-in" rows — their RLS requires
+      // tenant_id to match their own bound sheet id.
+      setValidationError('Pick a client from the dropdown.');
       return;
     }
     setValidationError(null);
     setSaving(true);
     try {
       const result = await onSave({
-        client: typedName,
-        clientSheetId: resolvedSheetId,
+        // Fall back to "UNKNOWN" so the calendar chip still has a label
+        // when the caller couldn't identify the client.
+        client: typedName || 'UNKNOWN',
+        clientSheetId: resolvedSheetId ?? '',
         vendor: vendor.trim() || undefined,
         carrier,
         tracking: tracking.trim() || undefined,
@@ -220,6 +233,23 @@ export function AddExpectedModal({ onClose, onSave, editingEvent, onDelete }: Pr
             {validationError}
           </div>
         )}
+
+        {/* Staff/admin advisory: when saving without a resolved client, the
+            row lands with tenant_id='' which no client-role user can see.
+            Shown once the user has typed something that doesn't match, and
+            also when the field is empty but the save is still allowed. */}
+        {!isClientRole && !clientSheetId && !validationError && (() => {
+          const typed = client.trim();
+          const hasMatch = typed && accessibleClients.some(c => c.name.trim().toLowerCase() === typed.toLowerCase());
+          if (hasMatch) return null;
+          return (
+            <div style={{ padding: '8px 12px', marginBottom: 12, background: '#FEF3C7', border: '1px solid #FCD34D', color: '#92400E', fontSize: 12, borderRadius: 8 }}>
+              {typed
+                ? <>No matching client — saving as <strong>{typed || 'UNKNOWN'}</strong>. Only staff/admin will see this shipment until a client is assigned.</>
+                : <>No client selected — saving as <strong>UNKNOWN</strong>. Only staff/admin will see this shipment.</>}
+            </div>
+          );
+        })()}
 
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, marginTop: 20 }}>
           <div>
