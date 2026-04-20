@@ -597,6 +597,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
           {/* Session 73 — Photos + Notes */}
           <EntityAttachments
             photos={{ entityType: 'repair', entityId: repair.repairId, tenantId: repair.clientSheetId }}
+            documents={{ contextType: 'repair', contextId: repair.repairId, tenantId: repair.clientSheetId }}
             notes={{ entityType: 'repair', entityId: repair.repairId }}
           />
 

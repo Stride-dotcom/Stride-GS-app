@@ -1,5 +1,23 @@
 /* ===================================================
-   StrideAPI.gs — v38.85.0 — 2026-04-20 PST — WC release PDF token alignment
+   StrideAPI.gs — v38.86.0 — 2026-04-20 PST — PHOTOS_URL → app deep-link
+   v38.86.0: All email / doc templates now emit `{{PHOTOS_URL}}` (and
+             `{{REPAIR_PHOTOS_URL}}`) as an app deep-link to the entity
+             detail panel's Photos tab instead of a Drive folder URL.
+             Photos live in Supabase Storage (`photos` bucket) since
+             session 73 and are rendered inline via EntityAttachments, so
+             the Drive folder was a dead-end for recipients. New helper
+             api_buildEntityPhotosUrl_(entityType, entityId, clientSheetId)
+             builds `https://www.mystridehub.com/#/<route>?open=<id>
+             &tab=photos&client=<spreadsheetId>`. Call sites updated:
+             shipment email (completeShipment), task completion email
+             (completeTask), repair Start-Task email (startTask), repair
+             quote email (sendRepairQuote / respondToRepairQuote), repair
+             complete email (completeRepair), WC create/release/complete
+             emails (createWillCall, processWcRelease, completeWillCall).
+             Legacy Drive fallback chain retired — Drive folders still
+             exist (receipts / PDFs still file there) but never surface
+             in email CTAs.
+   v38.85.0: handleProcessWcRelease_ now emits the full canonical token
    v38.85.0: handleProcessWcRelease_ now emits the full canonical token
              set expected by DOC_WILL_CALL_RELEASE (ITEMS_TABLE_ROWS,
              NOTES_HTML, PICKUP_PHONE_HTML, COD_BANNER_HTML, DATE,
@@ -9106,6 +9124,43 @@ function api_ensureColumn_(sheet, headerName) {
 var CACHE_TTL_SECONDS_ = 600;
 var APP_BASE_URL_ = "https://www.mystridehub.com/#";
 
+/**
+ * api_buildEntityPhotosUrl_ — Build an app deep-link that lands on an
+ * entity's detail panel with the Photos tab pre-selected. Used by email /
+ * doc templates in place of the legacy Drive folder URL — photos are now
+ * stored in Supabase Storage and surfaced by the React app's inline
+ * EntityAttachments component, so a Drive folder link was a dead end.
+ *
+ * The `&tab=photos` hint is read by the list-page deep-link handlers
+ * (forward-compatible — unknown params are ignored today). `&client=` is
+ * required per CLAUDE.md's deep-link rule so the list page auto-selects
+ * the client and opens the detail panel.
+ *
+ * Fallback: if we don't have an entityId the caller can pass "" and we
+ * return an empty string so `sendTemplateEmail_` strips the CTA button.
+ *
+ * @param {string} entityType  'inventory' | 'task' | 'repair' | 'willcall' | 'shipment' | 'claim'
+ * @param {string} entityId    item id / task id / repair id / wc number / shipment number
+ * @param {string} clientSheetId  CB Clients spreadsheet id (required for auto-open)
+ */
+function api_buildEntityPhotosUrl_(entityType, entityId, clientSheetId) {
+  var id = String(entityId || "").trim();
+  if (!id) return "";
+  var ROUTE = {
+    inventory: "inventory",
+    task:      "tasks",
+    repair:    "repairs",
+    willcall:  "will-calls",
+    "will_call": "will-calls",
+    shipment:  "shipments",
+    claim:     "claims"
+  };
+  var route = ROUTE[String(entityType || "").toLowerCase()] || "inventory";
+  var qs = "?open=" + encodeURIComponent(id) + "&tab=photos";
+  if (clientSheetId) qs += "&client=" + encodeURIComponent(String(clientSheetId));
+  return APP_BASE_URL_ + "/" + route + qs;
+}
+
 function cachedHandler_(cacheKey, handlerFn, skipCache) {
   var cache = CacheService.getScriptCache();
   if (skipCache) {
@@ -10935,7 +10990,9 @@ function handleCompleteShipment_(clientSheetId, payload) {
           "{{RECEIVED_DATE}}":  receiveDate ? Utilities.formatDate(receiveDate, "America/Los_Angeles", "MM/dd/yyyy") : "",
           "{{SHIPMENT_NOTES}}": notes || "",
           "{{ITEMS_TABLE}}":    itemsTable,
-          "{{PHOTOS_URL}}":     shipFolderUrl,
+          // Photos now live in Supabase Storage; deep-link to the shipment
+          // panel's Photos tab instead of the Drive folder.
+          "{{PHOTOS_URL}}":     api_buildEntityPhotosUrl_("shipment", shipmentNo, clientSheetId),
           "{{LOGO_URL}}":       logoUrl,
           "{{INVENTORY_URL}}":  ss.getUrl()
         };
@@ -11426,7 +11483,8 @@ function handleCompleteTask_(clientSheetId, payload) {
           "{{SHIPMENT_NO}}":      shipNo || "-",
           "{{RESULT_COLOR}}":     resultColor,
           "{{ITEM_TABLE_HTML}}":  itemTableHtml,
-          "{{PHOTOS_URL}}":       taskFolderUrl,
+          // Photos in Supabase — link to the task detail panel's Photos tab.
+          "{{PHOTOS_URL}}":       api_buildEntityPhotosUrl_("task", taskId, settings["CLIENT_SPREADSHEET_ID"] || ss.getId()),
           "{{TASK_ID}}":          taskId,
           "{{REPAIR_NOTE}}":      "",
           "{{LOGO_URL}}":         String(settings["LOGO_URL"] || "").trim() || "https://static.wixstatic.com/media/a38fbc_a8c7a368447f4723b782c4dbd765ca0e~mv2.png",
@@ -12141,20 +12199,10 @@ function handleRequestRepairQuote_(clientSheetId, payload, callerEmail) {
           invItem.itemClass || "", invItem.location || "", invItem.sidemark || "",
           invItem.qty || 1, invItem.reference || ""
         );
-        // Try to get photos folder URL from inventory Item ID hyperlink
-        var photosUrl = "";
-        try {
-          var invSheet = ss.getSheetByName("Inventory");
-          var invMap = api_getHeaderMap_(invSheet);
-          var invIdCol = invMap["Item ID"];
-          if (invIdCol) {
-            var invRow = api_findRowById_(invSheet, invIdCol, itemId);
-            if (invRow > 0) {
-              var rt = invSheet.getRange(invRow, invIdCol).getRichTextValue();
-              if (rt && rt.getLinkUrl()) photosUrl = rt.getLinkUrl();
-            }
-          }
-        } catch (_) {}
+        // Photos moved to Supabase — deep-link to the item detail panel's
+        // Photos tab instead of the legacy Drive folder that used to live
+        // on the Inventory Item ID hyperlink.
+        var photosUrl = api_buildEntityPhotosUrl_("inventory", itemId, settings["CLIENT_SPREADSHEET_ID"] || ss.getId());
 
         var emailTokens = {
           "{{CLIENT_NAME}}":    clientName,
@@ -12310,42 +12358,12 @@ function handleSendRepairQuote_(clientSheetId, payload) {
       var reference   = invItem ? (invItem.reference || "") : getVal("Reference");
       var itemTableHtml = api_buildSingleItemTableHtml_(itemId, desc, vendor, itemClass, location, sidemark, qty, reference);
 
-      // Session 70 fix #7: resolve an inspection-photos URL so the "View
-      // Inspection Photos" button in the email actually works. Previously
-      // hardcoded to "#". Fallback chain:
-      //   1. Inventory Item ID cell rich-text hyperlink (the inspection
-      //      task folder URL; this is what the Inventory page links to).
-      //   2. Repairs sheet "Source Task" cell rich-text hyperlink on
-      //      this repair row (task folder).
-      //   3. Client-level PHOTOS_FOLDER_ID (whole photos folder).
-      //   4. Empty — template conditional {{PHOTOS_BUTTON}} stays blank.
-      var photosUrl = "";
-      try {
-        var invSheetP = ss.getSheetByName("Inventory");
-        if (invSheetP && itemId) {
-          var invMapP = api_getHeaderMap_(invSheetP);
-          var invIdColP = invMapP["Item ID"];
-          if (invIdColP) {
-            var invRowP = api_findRowById_(invSheetP, invIdColP, itemId);
-            if (invRowP > 0) {
-              var rtInv = invSheetP.getRange(invRowP, invIdColP).getRichTextValue();
-              if (rtInv && rtInv.getLinkUrl()) photosUrl = rtInv.getLinkUrl();
-            }
-          }
-        }
-      } catch (_) {}
-      if (!photosUrl) {
-        try {
-          if (repMap["Source Task"]) {
-            var rtSrc = repSheet.getRange(repRow, repMap["Source Task"]).getRichTextValue();
-            if (rtSrc && rtSrc.getLinkUrl()) photosUrl = rtSrc.getLinkUrl();
-          }
-        } catch (_) {}
-      }
-      if (!photosUrl) {
-        var photosFolderId = String(settings["PHOTOS_FOLDER_ID"] || "").trim();
-        if (photosFolderId) photosUrl = "https://drive.google.com/drive/folders/" + photosFolderId;
-      }
+      // v38.86.0: photos moved to Supabase Storage — the Drive fallback
+      // chain (Inventory Item ID hyperlink → Source Task → client PHOTOS
+      // folder) is retired. Deep-link straight to the Repair detail panel
+      // on the app; inspection photos are shown inline there via the
+      // EntityAttachments component.
+      var photosUrl = api_buildEntityPhotosUrl_("repair", repairId, clientSheetId);
 
       var emailResult = api_sendTemplateEmail_(settings, "REPAIR_QUOTE", clientEmail,
         "Repair Quote Ready: " + itemId + " $" + quoteAmtFmt,
@@ -12863,12 +12881,10 @@ function handleCompleteRepair_(clientSheetId, payload) {
       var reference2 = invItem2 ? (invItem2.reference || "") : getVal("Reference");
       var repairItemTable = api_buildSingleItemTableHtml_(itemId, desc, vendor, itemClass, location2, sidemark2, qty2, reference2);
 
-      // Try to get repair folder URL from Repair ID hyperlink
-      var repairPhotosUrl = "#";
-      try {
-        var repRt = repSheet.getRange(repRow, idCol).getRichTextValue();
-        if (repRt && repRt.getLinkUrl()) repairPhotosUrl = repRt.getLinkUrl();
-      } catch (_) {}
+      // v38.86.0: Repair photos live in Supabase Storage now — deep-link
+      // to the Repair detail panel's Photos tab instead of the Drive
+      // folder that used to be linked from the Repair ID cell.
+      var repairPhotosUrl = api_buildEntityPhotosUrl_("repair", repairId, clientSheetId);
 
       var emailResult = api_sendTemplateEmail_(settings, "REPAIR_COMPLETE", clientEmail,
         "Repair Complete: " + itemId + " " + resultValue,
@@ -13437,7 +13453,11 @@ function handleCreateWillCall_(clientSheetId, payload) {
             "{{COD}}":             isCod ? ("Yes — $" + codAmount.toFixed(2)) : "No",
             "{{CREATED_DATE}}":    Utilities.formatDate(now, tz, "MM/dd/yyyy"),
             "{{CREATED_BY}}":      String(payload.createdBy || ""),
-            "{{PHOTOS_URL}}":      "",
+            // v38.86.0: WC photos live in Supabase — deep-link to the WC
+            // panel's Photos tab. The Drive folder is still created below
+            // for receipt PDFs / legacy files but is no longer the photo
+            // destination.
+            "{{PHOTOS_URL}}":      api_buildEntityPhotosUrl_("willcall", wcNumber, clientSheetId),
             "{{LOGO_URL}}":        String(settings["LOGO_URL"] || "").trim()
         };
 
@@ -13468,7 +13488,8 @@ function handleCreateWillCall_(clientSheetId, payload) {
                   }
                 }
               } catch (_) {}
-              wcEmailTokens["{{PHOTOS_URL}}"] = wcFolderUrl;
+              // v38.86.0: PHOTOS_URL already points to the app deep-link
+              // (set in wcEmailTokens above). Drive folder kept for PDFs.
             }
           }
           // PDF generation deferred to release time (v29.5.0) — items may change before release
@@ -13901,7 +13922,8 @@ function handleProcessWcRelease_(clientSheetId, payload) {
             "{{PICKUP_DATE}}":       _dateStr,
             "{{ITEMS_TABLE}}":       itemTableHtml,
             "{{ITEMS_COUNT}}":       String(releasingItems.length),
-            "{{PHOTOS_URL}}":        "",
+            // v38.86.0: deep-link to the WC panel's Photos tab.
+            "{{PHOTOS_URL}}":        api_buildEntityPhotosUrl_("willcall", wcNumber, clientSheetId),
             "{{PARTIAL_NOTE}}":      partialNote,
             "{{NOTES}}":             _notes
         };
@@ -13925,7 +13947,9 @@ function handleProcessWcRelease_(clientSheetId, payload) {
               wcFolderUrl2 = "https://drive.google.com/drive/folders/" + wcF2.getId();
             }
           }
-          releaseTokens["{{PHOTOS_URL}}"] = wcFolderUrl2;
+          // v38.86.0: PHOTOS_URL already points to the app deep-link above.
+          // wcFolderUrl2 is still resolved so the release PDF gets filed
+          // into the correct Drive folder below.
           var relPdfResult = api_generateDocPdf_(ss, "DOC_WILL_CALL_RELEASE", "Will_Call_" + wcNumber, wcFolderUrl2, releaseTokens);
           if (relPdfResult.blob) relPdfBlob = relPdfResult.blob;
           if (relPdfResult.warning) warnings.push(relPdfResult.warning);
@@ -14300,7 +14324,8 @@ function handleGenerateWcDoc_(clientSheetId, payload) {
       "{{PICKUP_DATE}}":       estDateStr,
       "{{ITEMS_TABLE}}":       itemsTableRows,
       "{{ITEMS_COUNT}}":       String(items.length),
-      "{{PHOTOS_URL}}":        "",
+      // v38.86.0: deep-link to the WC panel's Photos tab.
+      "{{PHOTOS_URL}}":        api_buildEntityPhotosUrl_("willcall", wcNumber, clientSheetId),
       "{{PARTIAL_NOTE}}":      "",
       "{{NOTES}}":             notes,
       "{{COD}}":               isCod ? "Yes \u2014 $" + codAmount.toFixed(2) : "No"
@@ -14324,7 +14349,8 @@ function handleGenerateWcDoc_(clientSheetId, payload) {
         wcSheet.getRange(wcRow, wcNumCol).setRichTextValue(newRt);
       }
     }
-    tokens["{{PHOTOS_URL}}"] = wcFolderUrl;
+    // v38.86.0: PHOTOS_URL already points to the app deep-link above.
+    // wcFolderUrl is still resolved so the release PDF is filed correctly.
 
     // Generate PDF
     var pdfResult = api_generateDocPdf_(ss, "DOC_WILL_CALL_RELEASE", "Will_Call_" + wcNumber, wcFolderUrl, tokens);

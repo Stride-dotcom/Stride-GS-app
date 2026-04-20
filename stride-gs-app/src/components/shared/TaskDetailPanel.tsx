@@ -716,6 +716,7 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
           {/* Session 73 — Photos + Notes (always available whether open or completed). */}
           <EntityAttachments
             photos={{ entityType: 'task', entityId: task.taskId, tenantId: clientSheetId }}
+            documents={{ contextType: 'task', contextId: task.taskId, tenantId: clientSheetId }}
             notes={{ entityType: 'task', entityId: task.taskId }}
           />
 
