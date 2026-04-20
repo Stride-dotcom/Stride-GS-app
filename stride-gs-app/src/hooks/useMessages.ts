@@ -430,13 +430,17 @@ export function useMessages(): UseMessagesResult {
       if (candidates.length === 0) { setThread([]); setThreadLoading(false); return; }
       // Hydrate (fetches recipients + profile names for every candidate).
       const hydratedCandidates = await hydrate(candidates, authUserId);
-      // Keep only messages where BOTH self AND other are recipients — that
-      // guarantees this message actually belongs to the self↔other thread
-      // (excludes self's messages to C that happened to match sender filter).
+      // Keep only messages where BOTH self AND other are participants.
+      // The sender is always a participant even without their own recipient
+      // row (older test messages + sends where the sender's self-recipient
+      // insert may have been skipped), so treat the participants set as
+      // senderId UNION recipientUserIds. Previously this filter required
+      // both sides in recipientUserIds, which silently excluded every
+      // message whose author wasn't in their own recipient list and
+      // surfaced as "No messages yet" in the thread view.
       hydrated = hydratedCandidates.filter(m => {
-        const hasSelf = m.recipientUserIds.includes(authUserId);
-        const hasOther = m.recipientUserIds.includes(other);
-        return hasSelf && hasOther;
+        const participants = new Set<string>([m.senderId, ...m.recipientUserIds]);
+        return participants.has(authUserId) && participants.has(other);
       });
     }
 
