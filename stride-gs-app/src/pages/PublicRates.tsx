@@ -20,6 +20,46 @@ interface ServiceRow {
   unit: string; taxable: boolean; active: boolean; display_order: number;
 }
 
+// Mirror of the public-read columns on delivery_zones. anon RLS is
+// restricted to active=true, so out-of-area rows are excluded from the
+// public sheet by the database, not by the client.
+interface ZoneRow {
+  zip_code: string;
+  city: string;
+  service_days: string | null;
+  updated_rate: string | number | null;
+  base_rate: string | number | null;
+  zone: string | null;
+  call_for_quote: boolean | null;
+}
+interface PublicZone {
+  zipCode: string;
+  city: string;
+  serviceDays: string;
+  rate: number;
+  zone: string;
+  callForQuote: boolean;
+}
+function zoneRowToPublic(r: ZoneRow): PublicZone {
+  const rateNum = (v: string | number | null): number => {
+    if (v === null || v === undefined) return 0;
+    const n = typeof v === 'number' ? v : parseFloat(v);
+    return Number.isFinite(n) ? n : 0;
+  };
+  return {
+    zipCode: r.zip_code,
+    city: r.city,
+    serviceDays: r.service_days ?? '',
+    rate: rateNum(r.updated_rate) || rateNum(r.base_rate),
+    zone: r.zone ?? '',
+    callForQuote: r.call_for_quote === true,
+  };
+}
+
+// The sentinel tab name used when an admin opts in to include the zip
+// schedule. Must match `ZIP_TAB` in PriceList.tsx.
+const ZIP_TAB = 'Zip Codes';
+
 function rowToService(row: ServiceRow): CatalogService {
   const xxlRate = Number(row.xxl_rate ?? 0);
   const rawRates = (row.rates ?? {}) as Record<string, number>;
@@ -153,6 +193,72 @@ function ServiceTable({ services }: { services: CatalogService[] }) {
   );
 }
 
+function PublicZoneTable({ zones }: { zones: PublicZone[] }) {
+  const [search, setSearch] = useState('');
+  const filtered = zones.filter(z => {
+    const q = search.trim().toLowerCase();
+    if (!q) return true;
+    return (
+      z.zipCode.toLowerCase().includes(q) ||
+      z.city.toLowerCase().includes(q) ||
+      z.zone.toLowerCase().includes(q)
+    );
+  });
+  const thStyle: React.CSSProperties = {
+    padding: '10px 16px', fontSize: 10, fontWeight: 600, letterSpacing: '2px',
+    textTransform: 'uppercase', color: TEXT_MUT, background: TH_BG,
+    textAlign: 'left', borderBottom: `1px solid ${BORDER}`,
+  };
+  const tdStyle: React.CSSProperties = {
+    padding: '11px 16px', fontSize: 13, color: TEXT,
+    borderBottom: `1px solid ${BORDER}`,
+  };
+  const tdNum: React.CSSProperties = { ...tdStyle, textAlign: 'right', fontVariantNumeric: 'tabular-nums' };
+  return (
+    <div>
+      <div style={{ padding: '14px 16px', borderBottom: `1px solid ${BORDER}`, background: BG_CARD }}>
+        <input
+          value={search}
+          onChange={e => setSearch(e.target.value)}
+          placeholder="Search zip, city, or zone…"
+          style={{
+            width: '100%', boxSizing: 'border-box',
+            padding: '10px 14px', fontSize: 13, fontFamily: FONT,
+            border: `1px solid ${BORDER}`, borderRadius: 10,
+            background: BG_PAGE, outline: 'none', color: TEXT,
+          }}
+        />
+      </div>
+      <div style={{ overflowX: 'auto' }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 600 }}>
+          <thead>
+            <tr>
+              <th style={thStyle}>Zip</th>
+              <th style={thStyle}>City</th>
+              <th style={thStyle}>Service Days</th>
+              <th style={{ ...thStyle, textAlign: 'right' }}>Rate</th>
+              <th style={{ ...thStyle, textAlign: 'center' }}>Zone</th>
+            </tr>
+          </thead>
+          <tbody>
+            {filtered.length === 0 ? (
+              <tr><td colSpan={5} style={{ ...tdStyle, textAlign: 'center', color: TEXT_MUT }}>No zones match.</td></tr>
+            ) : filtered.map(z => (
+              <tr key={z.zipCode} style={{ background: BG_CARD }}>
+                <td style={{ ...tdStyle, fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>{z.zipCode}</td>
+                <td style={tdStyle}>{z.city}</td>
+                <td style={{ ...tdStyle, color: TEXT_MUT, fontSize: 12 }}>{z.serviceDays || '—'}</td>
+                <td style={tdNum}>{z.callForQuote ? <span style={{ color: ACCENT, fontWeight: 600 }}>Call for Quote</span> : (z.rate > 0 ? `$${z.rate}` : '—')}</td>
+                <td style={{ ...tdStyle, textAlign: 'center', color: TEXT_MUT, fontSize: 12 }}>{z.zone || '—'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 // ─── Main component ───────────────────────────────────────────────────────────
 
 interface Props { shareId: string }
@@ -160,6 +266,7 @@ interface Props { shareId: string }
 export function PublicRates({ shareId }: Props) {
   const [share, setShare] = useState<PriceListShare | null>(null);
   const [services, setServices] = useState<CatalogService[]>([]);
+  const [zones, setZones] = useState<PublicZone[]>([]);
   const [activeTab, setActiveTab] = useState<string>('');
   const [status, setStatus] = useState<'loading' | 'unavailable' | 'ready'>('loading');
 
@@ -171,16 +278,32 @@ export function PublicRates({ shareId }: Props) {
       if (!s) { setStatus('unavailable'); return; }
       setShare(s);
 
-      const { data, error } = await supabase
-        .from('service_catalog')
-        .select('id,code,name,category,billing,rates,flat_rate,xxl_rate,unit,taxable,active,display_order')
-        .in('category', s.tabs)
-        .eq('active', true)
-        .order('display_order', { ascending: true });
+      // Service tabs are every entry except the zip sentinel.
+      const serviceCategories = s.tabs.filter(t => t !== ZIP_TAB);
+      const includeZips = s.tabs.includes(ZIP_TAB);
 
+      const svcPromise: Promise<{ data: ServiceRow[] | null; error: unknown }> =
+        serviceCategories.length > 0
+          ? (supabase
+              .from('service_catalog')
+              .select('id,code,name,category,billing,rates,flat_rate,xxl_rate,unit,taxable,active,display_order')
+              .in('category', serviceCategories)
+              .eq('active', true)
+              .order('display_order', { ascending: true }) as unknown as Promise<{ data: ServiceRow[] | null; error: unknown }>)
+          : Promise.resolve({ data: [] as ServiceRow[], error: null });
+      const zonePromise: Promise<{ data: ZoneRow[] | null; error: unknown }> =
+        includeZips
+          ? (supabase
+              .from('delivery_zones')
+              .select('zip_code,city,service_days,updated_rate,base_rate,zone,call_for_quote')
+              .eq('active', true)
+              .order('zip_code', { ascending: true }) as unknown as Promise<{ data: ZoneRow[] | null; error: unknown }>)
+          : Promise.resolve({ data: [] as ZoneRow[], error: null });
+      const [svcRes, zoneRes] = await Promise.all([svcPromise, zonePromise]);
       if (cancelled) return;
-      if (error) { setStatus('unavailable'); return; }
-      setServices(((data ?? []) as ServiceRow[]).map(rowToService));
+      if (svcRes.error) { setStatus('unavailable'); return; }
+      setServices(((svcRes.data ?? []) as ServiceRow[]).map(rowToService));
+      setZones(((zoneRes.data ?? []) as ZoneRow[]).map(zoneRowToPublic));
       setActiveTab(s.tabs[0] ?? '');
       setStatus('ready');
     })();
@@ -209,7 +332,8 @@ export function PublicRates({ shareId }: Props) {
   }
 
   // ── Ready ──────────────────────────────────────────────────────────────────
-  const tabServices = services.filter(s => s.category === activeTab);
+  const isZipTab = activeTab === ZIP_TAB;
+  const tabServices = isZipTab ? [] : services.filter(s => s.category === activeTab);
   const multiTab = share.tabs.length > 1;
 
   return (
@@ -261,7 +385,7 @@ export function PublicRates({ shareId }: Props) {
           </div>
         )}
 
-        {/* Service table card */}
+        {/* Service table card — or zip table when active tab is Zip Codes */}
         <div style={{ background: BG_CARD, borderRadius: RADIUS, border: `1px solid ${BORDER}`, overflow: 'hidden', boxShadow: '0 2px 12px rgba(0,0,0,0.04)' }}>
           {/* Card header */}
           <div style={{ padding: '20px 24px 16px', borderBottom: `1px solid ${BORDER}`, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
@@ -270,15 +394,26 @@ export function PublicRates({ shareId }: Props) {
                 {activeTab}
               </div>
               <div style={{ fontSize: 18, fontWeight: 600, color: TEXT }}>
-                {activeTab} Services
+                {isZipTab ? 'Delivery Zones' : `${activeTab} Services`}
               </div>
             </div>
             <div style={{ fontSize: 12, color: TEXT_MUT }}>
-              {tabServices.length} service{tabServices.length !== 1 ? 's' : ''}
+              {isZipTab
+                ? `${zones.length} zone${zones.length !== 1 ? 's' : ''}`
+                : `${tabServices.length} service${tabServices.length !== 1 ? 's' : ''}`
+              }
             </div>
           </div>
 
-          {tabServices.length === 0 ? (
+          {isZipTab ? (
+            zones.length === 0 ? (
+              <div style={{ padding: '40px 24px', textAlign: 'center', color: TEXT_MUT, fontSize: 14 }}>
+                No zones available.
+              </div>
+            ) : (
+              <PublicZoneTable zones={zones} />
+            )
+          ) : tabServices.length === 0 ? (
             <div style={{ padding: '40px 24px', textAlign: 'center', color: TEXT_MUT, fontSize: 14 }}>
               No services listed for this category.
             </div>
@@ -287,8 +422,8 @@ export function PublicRates({ shareId }: Props) {
           )}
         </div>
 
-        {/* Class size legend for class-based tables */}
-        {tabServices.some(s => s.billing === 'class_based') && (
+        {/* Class size legend for class-based tables (not shown on zip tab) */}
+        {!isZipTab && tabServices.some(s => s.billing === 'class_based') && (
           <div style={{ background: BG_CARD, borderRadius: RADIUS, border: `1px solid ${BORDER}`, padding: '16px 24px' }}>
             <div style={{ fontSize: 10, fontWeight: 600, letterSpacing: '2px', textTransform: 'uppercase', color: TEXT_MUT, marginBottom: 12 }}>Size Guide</div>
             <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap' }}>

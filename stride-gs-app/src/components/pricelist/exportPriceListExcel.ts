@@ -10,6 +10,7 @@
  */
 import * as XLSX from 'xlsx';
 import type { CatalogService } from '../../hooks/useServiceCatalog';
+import type { DeliveryZone } from '../../hooks/useDeliveryZones';
 
 function today(): string {
   const d = new Date();
@@ -49,7 +50,7 @@ function autoSize(rows: Array<Record<string, unknown>>): XLSX.ColInfo[] {
   });
 }
 
-export function downloadPriceListExcel(services: CatalogService[]): void {
+export function downloadPriceListExcel(services: CatalogService[], deliveryZones: DeliveryZone[] = []): void {
   const wb = XLSX.utils.book_new();
 
   // ── 1. Warehouse Services ─────────────────────────────────────────────
@@ -148,6 +149,27 @@ export function downloadPriceListExcel(services: CatalogService[]): void {
   const wsAll = XLSX.utils.json_to_sheet(allRows);
   wsAll['!cols'] = autoSize(allRows);
   XLSX.utils.book_append_sheet(wb, wsAll, 'All Services');
+
+  // ── 6. Delivery Zones ─────────────────────────────────────────────────
+  // All zones regardless of active flag — the sheet is a reference sheet,
+  // so showing which zips are Call-for-Quote / Out-of-Area is useful.
+  if (deliveryZones.length > 0) {
+    const zoneRows = [...deliveryZones]
+      .sort((a, b) => a.zipCode.localeCompare(b.zipCode))
+      .map(z => ({
+        'Zip Code':      z.zipCode,
+        City:            z.city,
+        'Service Days':  z.serviceDays ?? '',
+        'Current Rate':  z.currentRate > 0 ? Number(z.currentRate.toFixed(2)) : '',
+        'Updated Rate':  z.callForQuote ? 'CALL FOR QUOTE' : (z.updatedRate > 0 ? Number(z.updatedRate.toFixed(2)) : ''),
+        Zone:            z.zone ?? '',
+        Status:          z.outOfArea ? 'Out of Area' : (z.callForQuote ? 'Call for Quote' : (z.active ? 'Active' : 'Inactive')),
+        Notes:           z.notes ?? '',
+      }));
+    const wsZones = XLSX.utils.json_to_sheet(zoneRows);
+    wsZones['!cols'] = autoSize(zoneRows);
+    XLSX.utils.book_append_sheet(wb, wsZones, 'Delivery Zones');
+  }
 
   XLSX.writeFile(wb, `Stride_Price_List_${today()}.xlsx`);
 }

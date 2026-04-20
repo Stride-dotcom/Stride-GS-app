@@ -14,8 +14,10 @@ import { theme } from '../styles/theme';
 import { useServiceCatalog, type CatalogService, type ServiceCategory } from '../hooks/useServiceCatalog';
 import { ServiceRow } from '../components/pricelist/ServiceRow';
 import { AddServiceModal } from '../components/pricelist/AddServiceModal';
+import { ZipCodeTable } from '../components/pricelist/ZipCodeTable';
 import { downloadPriceListExcel } from '../components/pricelist/exportPriceListExcel';
 import { usePriceListShares, type PriceListShare } from '../hooks/usePriceListShares';
+import { useDeliveryZones } from '../hooks/useDeliveryZones';
 import { syncPriceListFromSupabase } from '../lib/api';
 import { useAuth } from '../contexts/AuthContext';
 
@@ -69,15 +71,25 @@ const SHAREABLE_CATEGORIES: ServiceCategory[] = [
   'Assembly', 'Repair', 'Labor', 'Admin',
 ];
 
+// Sentinel appended to the tabs[] array on price_list_shares when an
+// admin opts in to include the zip-code schedule. PublicRates recognizes
+// it and renders a zones table instead of a service list for that tab.
+export const ZIP_TAB = 'Zip Codes';
+
 const BASE_SHARE_URL = 'https://www.mystridehub.com/#/rates/';
 
-type CategoryFilter = 'All' | ServiceCategory;
+// "Zip Codes" is a pseudo-category — it doesn't live in service_catalog.
+// Selecting it swaps the right pane to a delivery_zones table instead of
+// the normal grouped services list.
+const ZIP_CATEGORY = 'Zip Codes' as const;
+type CategoryFilter = 'All' | ServiceCategory | typeof ZIP_CATEGORY;
 
 export function PriceList() {
   const v2 = theme.v2;
   const { user } = useAuth();
   const email = user?.email || '_anon';
   const { services, loading, error, createService, updateService, deleteService } = useServiceCatalog();
+  const { zones: deliveryZones } = useDeliveryZones();
   const { createShare } = usePriceListShares();
 
   // Hydrate persisted prefs synchronously on first render so the UI never
@@ -279,7 +291,7 @@ export function PriceList() {
             <UploadCloud size={14} /> {syncing ? 'Syncing…' : 'Sync to Sheet'}
           </button>
           <button
-            onClick={() => downloadPriceListExcel(services)}
+            onClick={() => downloadPriceListExcel(services, deliveryZones)}
             disabled={services.length === 0}
             title="Download a formatted Excel workbook of all services"
             style={{
@@ -354,6 +366,15 @@ export function PriceList() {
                 onClick={() => setCategoryFilter(cat)}
               />
             ))}
+            {/* "Zip Codes" swaps the right pane to a delivery_zones table — it's
+                not a service_catalog category so counts come from useDeliveryZones. */}
+            <div style={{ height: 8 }} />
+            <CategoryButton
+              label={ZIP_CATEGORY}
+              count={deliveryZones.length}
+              active={categoryFilter === ZIP_CATEGORY}
+              onClick={() => setCategoryFilter(ZIP_CATEGORY)}
+            />
           </div>
         </aside>
 
@@ -387,27 +408,31 @@ export function PriceList() {
             />
           </div>
 
-          {/* Sort header — applies to all category sections */}
-          <div style={{
-            display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap',
-            padding: '10px 14px',
-            background: v2.colors.bgCard,
-            border: `1px solid ${v2.colors.border}`,
-            borderRadius: v2.radius.input,
-          }}>
-            <span style={{
-              fontSize: 10, fontWeight: 600, letterSpacing: '2px',
-              color: v2.colors.textMuted, textTransform: 'uppercase', marginRight: 4,
-            }}>Sort by</span>
-            <SortHeader label="Code"   active={sortKey === 'code'}   dir={sortDir} onClick={() => handleSort('code')} />
-            <SortHeader label="Name"   active={sortKey === 'name'}   dir={sortDir} onClick={() => handleSort('name')} />
-            <SortHeader label="Rate"   active={sortKey === 'rate'}   dir={sortDir} onClick={() => handleSort('rate')} />
-            <SortHeader label="Unit"   active={sortKey === 'unit'}   dir={sortDir} onClick={() => handleSort('unit')} />
-            <SortHeader label="Active" active={sortKey === 'active'} dir={sortDir} onClick={() => handleSort('active')} />
-          </div>
+          {/* Sort header — applies only to the services list (zones use their own table). */}
+          {categoryFilter !== ZIP_CATEGORY && (
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap',
+              padding: '10px 14px',
+              background: v2.colors.bgCard,
+              border: `1px solid ${v2.colors.border}`,
+              borderRadius: v2.radius.input,
+            }}>
+              <span style={{
+                fontSize: 10, fontWeight: 600, letterSpacing: '2px',
+                color: v2.colors.textMuted, textTransform: 'uppercase', marginRight: 4,
+              }}>Sort by</span>
+              <SortHeader label="Code"   active={sortKey === 'code'}   dir={sortDir} onClick={() => handleSort('code')} />
+              <SortHeader label="Name"   active={sortKey === 'name'}   dir={sortDir} onClick={() => handleSort('name')} />
+              <SortHeader label="Rate"   active={sortKey === 'rate'}   dir={sortDir} onClick={() => handleSort('rate')} />
+              <SortHeader label="Unit"   active={sortKey === 'unit'}   dir={sortDir} onClick={() => handleSort('unit')} />
+              <SortHeader label="Active" active={sortKey === 'active'} dir={sortDir} onClick={() => handleSort('active')} />
+            </div>
+          )}
 
-          {/* Grouped list */}
-          {loading ? (
+          {/* Right pane content — either zones table or grouped services list */}
+          {categoryFilter === ZIP_CATEGORY ? (
+            <ZipCodeTable search={search} />
+          ) : loading ? (
             <div style={{ padding: 40, textAlign: 'center', color: v2.colors.textMuted, fontSize: 13 }}>
               Loading services…
             </div>
@@ -553,6 +578,7 @@ function PriceListShareModal({ createShare, onClose, onCreated }: {
 }) {
   const v2 = theme.v2;
   const [selected, setSelected] = useState<Set<ServiceCategory>>(new Set(['Warehouse', 'Storage']));
+  const [includeZips, setIncludeZips] = useState(false);
   const [title, setTitle] = useState('');
   const [expiresAt, setExpiresAt] = useState('');
   const [saving, setSaving] = useState(false);
@@ -560,19 +586,25 @@ function PriceListShareModal({ createShare, onClose, onCreated }: {
 
   const toggle = (cat: ServiceCategory) => setSelected(prev => {
     const next = new Set(prev);
-    if (next.has(cat)) { if (next.size > 1) next.delete(cat); }
+    // Require at least one thing selected overall (service category or zip tab)
+    if (next.has(cat)) {
+      if (next.size > 1 || includeZips) next.delete(cat);
+    }
     else next.add(cat);
     return next;
   });
 
   const handleGenerate = async () => {
     setSaving(true); setErr(null);
-    const tabs = SHAREABLE_CATEGORIES.filter(c => selected.has(c));
+    const tabs: string[] = SHAREABLE_CATEGORIES.filter(c => selected.has(c));
+    if (includeZips) tabs.push(ZIP_TAB);
     const share = await createShare(tabs, title || undefined, expiresAt || null);
     setSaving(false);
     if (share) onCreated(share);
     else setErr('Failed to generate link — please try again.');
   };
+
+  const canGenerate = selected.size > 0 || includeZips;
 
   const inputStyle: React.CSSProperties = {
     padding: '10px 14px', borderRadius: v2.radius.input, fontFamily: 'inherit',
@@ -615,11 +647,28 @@ function PriceListShareModal({ createShare, onClose, onCreated }: {
           </div>
         </div>
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 14px', borderRadius: v2.radius.input, background: v2.colors.bgPage, border: `1px solid ${v2.colors.border}`, opacity: 0.5 }}>
-          <div style={{ width: 16, height: 16, borderRadius: 4, border: `2px solid ${v2.colors.border}` }} />
-          <span style={{ fontSize: 13, color: v2.colors.textSecondary }}>Include zip code schedule</span>
-          <span style={{ marginLeft: 'auto', fontSize: 10, fontWeight: 600, letterSpacing: '1px', color: v2.colors.textMuted, background: v2.colors.bgCard, padding: '2px 8px', borderRadius: 9999 }}>COMING SOON</span>
-        </div>
+        <button
+          onClick={() => setIncludeZips(v => !v)}
+          style={{
+            display: 'flex', alignItems: 'center', gap: 10, padding: '10px 14px',
+            borderRadius: v2.radius.input, cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left',
+            background: includeZips ? 'rgba(232,105,42,0.08)' : v2.colors.bgPage,
+            border: `1px solid ${includeZips ? v2.colors.accent : v2.colors.border}`,
+            transition: 'all 0.15s',
+          }}
+        >
+          <div style={{
+            width: 16, height: 16, borderRadius: 4, flexShrink: 0,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            background: includeZips ? v2.colors.accent : 'transparent',
+            border: `2px solid ${includeZips ? v2.colors.accent : v2.colors.border}`,
+          }}>
+            {includeZips && <Check size={10} color="#fff" />}
+          </div>
+          <span style={{ fontSize: 13, fontWeight: includeZips ? 600 : 400, color: includeZips ? v2.colors.text : v2.colors.textSecondary }}>
+            Include zip code schedule
+          </span>
+        </button>
 
         <div>
           <label style={{ ...v2.typography.label, display: 'block', marginBottom: 6 }}>Custom title <span style={{ fontWeight: 400, textTransform: 'none', letterSpacing: 0, fontSize: 12 }}>(optional)</span></label>
@@ -635,7 +684,7 @@ function PriceListShareModal({ createShare, onClose, onCreated }: {
 
         <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
           <button onClick={onClose} style={{ padding: '10px 20px', borderRadius: v2.radius.button, border: `1px solid ${v2.colors.border}`, background: 'transparent', color: v2.colors.textSecondary, fontSize: 11, fontWeight: 600, letterSpacing: '1.5px', textTransform: 'uppercase', cursor: 'pointer', fontFamily: 'inherit' }}>Cancel</button>
-          <button onClick={handleGenerate} disabled={saving || selected.size === 0} style={{ padding: '10px 24px', borderRadius: v2.radius.button, border: 'none', background: saving ? v2.colors.textMuted : v2.colors.accent, color: '#fff', fontSize: 11, fontWeight: 600, letterSpacing: '1.5px', textTransform: 'uppercase', cursor: saving ? 'not-allowed' : 'pointer', fontFamily: 'inherit' }}>
+          <button onClick={handleGenerate} disabled={saving || !canGenerate} style={{ padding: '10px 24px', borderRadius: v2.radius.button, border: 'none', background: (saving || !canGenerate) ? v2.colors.textMuted : v2.colors.accent, color: '#fff', fontSize: 11, fontWeight: 600, letterSpacing: '1.5px', textTransform: 'uppercase', cursor: (saving || !canGenerate) ? 'not-allowed' : 'pointer', fontFamily: 'inherit' }}>
             {saving ? 'Generating…' : 'Generate Link'}
           </button>
         </div>
