@@ -1,5 +1,18 @@
 /* ===================================================
-   StrideAPI.gs — v38.87.0 — 2026-04-20 PST — notes merge sheet + entity_notes
+   StrideAPI.gs — v38.88.0 — 2026-04-20 PST — notes render HTML line breaks
+   v38.88.0: Every notes token ({{NOTES}}, {{TASK_NOTES}},
+             {{SHIPMENT_NOTES}}, etc.) now runs through
+             api_notesPlainToHtml_() so multi-note bodies drop into HTML
+             email/doc templates with proper <br><br> between entries
+             instead of collapsing to whitespace. Each note body is
+             api_esc_'d first so user-entered content stays safe. The
+             NOTES_HTML / NOTES_ROW / SHIPMENT_NOTES_HTML wrapper sites
+             also switched from api_esc_() to api_notesPlainToHtml_()
+             so their amber banners + work-order PDF rows render on
+             separate lines. Paired with v38.87.0's Supabase entity_notes
+             merge — together they are the full fix for "multi-note
+             bodies don't show in email / PDFs".
+   v38.87.0: Email + doc tokens ({{NOTES}}, {{TASK_NOTES}},
    v38.87.0: Email + doc tokens ({{NOTES}}, {{TASK_NOTES}},
              {{SHIPMENT_NOTES}}, {{NOTES_HTML}}, {{NOTES_ROW}},
              {{SHIPMENT_NOTES_HTML}}) now merge the legacy sheet note
@@ -10244,6 +10257,32 @@ function api_resolveNotesForEmail_(entityType, entityId, sheetNotes) {
 }
 
 /**
+ * api_notesPlainToHtml_ — convert the plain-text output of
+ * api_resolveNotesForEmail_ ("note A\n\nnote B") into an HTML-safe string
+ * (`<br>`-joined, each segment HTML-escaped). Use at every place a notes
+ * value is dropped into an HTML email body or doc template so multi-note
+ * output renders on separate lines instead of collapsing to whitespace.
+ *
+ * Returns "" on empty input so the caller's `|| "-"` fallback works the
+ * same way it does with the plain helper.
+ */
+function api_notesPlainToHtml_(plain) {
+  var s = String(plain == null ? "" : plain);
+  if (!s.trim()) return "";
+  var parts = s.split(/\n{2,}/);
+  var out = [];
+  for (var i = 0; i < parts.length; i++) {
+    var seg = String(parts[i] || "").trim();
+    if (!seg) continue;
+    // Preserve single line breaks within a single note by converting
+    // any remaining `\n` to `<br>`. The api_esc_ call guards against
+    // XSS from user-entered content.
+    out.push(api_esc_(seg).replace(/\n/g, "<br>"));
+  }
+  return out.join("<br><br>");
+}
+
+/**
  * Look up a service rate from Supabase service_catalog. Returns the same
  * shape as api_lookupRate_'s sheet path — { rate, svcName, category,
  * billIfPass, billIfFail } — so the caller can use it as a drop-in.
@@ -11075,7 +11114,8 @@ function handleCompleteShipment_(clientSheetId, payload) {
           "{{ITEM_COUNT}}":     String(items.length),
           "{{RECEIVED_DATE}}":  receiveDate ? Utilities.formatDate(receiveDate, "America/Los_Angeles", "MM/dd/yyyy") : "",
           // v38.87.0: merge sheet note + public entity_notes from Supabase.
-          "{{SHIPMENT_NOTES}}": api_resolveNotesForEmail_("shipment", shipmentNo, notes),
+          // v38.88.0: HTML-convert so multi-note output renders on separate lines.
+          "{{SHIPMENT_NOTES}}": api_notesPlainToHtml_(api_resolveNotesForEmail_("shipment", shipmentNo, notes)),
           "{{ITEMS_TABLE}}":    itemsTable,
           // Photos now live in Supabase Storage; deep-link to the shipment
           // panel's Photos tab instead of the Drive folder.
@@ -11117,10 +11157,12 @@ function handleCompleteShipment_(clientSheetId, payload) {
             : "";
           // v38.87.0: pull sheet + public entity_notes so the Receiving
           // PDF shows the same notes as the email body + React panel.
+          // v38.88.0: HTML-convert (escape + <br><br>) so multi-note output
+          // keeps its line breaks inside the amber banner.
           var _pdfNotes = api_resolveNotesForEmail_("shipment", shipmentNo, notes);
           pdfTokens["{{SHIPMENT_NOTES_HTML}}"] = _pdfNotes
             ? '<div style="background:#FEF3C7;border:1px solid #FCD34D;padding:8px 12px;margin-bottom:14px;font-size:11px;">' +
-              '<span style="font-weight:bold;color:#92400E;">Notes:</span> ' + e(_pdfNotes) + '</div>'
+              '<span style="font-weight:bold;color:#92400E;">Notes:</span> ' + api_notesPlainToHtml_(_pdfNotes) + '</div>'
             : "";
 
           var pdfResult = api_generateDocPdf_(ss, "DOC_RECEIVING", "Receiving_" + shipmentNo + "_" + (clientName || "Client"), shipFolderUrl, pdfTokens);
@@ -11568,8 +11610,8 @@ function handleCompleteTask_(clientSheetId, payload) {
           "{{RESULT}}":           result,
           "{{TASK_TYPE}}":        taskType || svcCode || "",
           "{{SVC_NAME}}":         svcName || "",
-          // v38.87.0: merge sheet note + public entity_notes from Supabase.
-          "{{TASK_NOTES}}":       api_resolveNotesForEmail_("task", taskId, taskNotes || getVal("Task Notes")),
+          // v38.87.0/v38.88.0: merge sheet + entity_notes then HTML-convert.
+          "{{TASK_NOTES}}":       api_notesPlainToHtml_(api_resolveNotesForEmail_("task", taskId, taskNotes || getVal("Task Notes"))),
           "{{DESCRIPTION}}":      desc || "",
           "{{SHIPMENT_NO}}":      shipNo || "-",
           "{{RESULT_COLOR}}":     resultColor,
@@ -12303,9 +12345,8 @@ function handleRequestRepairQuote_(clientSheetId, payload, callerEmail) {
           "{{VENDOR}}":         invItem.vendor || "",
           "{{LOCATION}}":       invItem.location || "",
           "{{SIDEMARK}}":       invItem.sidemark || "",
-          // v38.87.0: pull the item's public notes so the inspector's
-          // comments ride along with the quote request.
-          "{{NOTES}}":          api_resolveNotesForEmail_("inventory", itemId, notes),
+          // v38.87.0/v38.88.0: pull the item's public notes, HTML-convert.
+          "{{NOTES}}":          api_notesPlainToHtml_(api_resolveNotesForEmail_("inventory", itemId, notes)),
           "{{ITEM_TABLE_HTML}}": itemTableHtml,
           "{{PHOTOS_URL}}":     photosUrl
         };
@@ -12467,11 +12508,10 @@ function handleSendRepairQuote_(clientSheetId, payload) {
           "{{QUOTE_AMOUNT}}":     quoteAmtFmt,
           "{{REPAIR_ID}}":        repairId,
           "{{REPAIR_VENDOR}}":    vendor       || "-",
-          // v38.87.0: merge sheet note + public entity_notes from Supabase.
-          // NOTES → repair's public notes. TASK_NOTES → the source inspection
-          // task's public notes (resolved via Repair sheet's Source Task col).
-          "{{NOTES}}":            api_resolveNotesForEmail_("repair", repairId, repairNotes) || "-",
-          "{{TASK_NOTES}}":       api_resolveNotesForEmail_("task", getVal("Source Task"), taskNotes) || "-",
+          // v38.87.0/v38.88.0: merge sheet + entity_notes then HTML-convert.
+          // NOTES → repair's public notes. TASK_NOTES → source task's notes.
+          "{{NOTES}}":            api_notesPlainToHtml_(api_resolveNotesForEmail_("repair", repairId, repairNotes)) || "-",
+          "{{TASK_NOTES}}":       api_notesPlainToHtml_(api_resolveNotesForEmail_("task", getVal("Source Task"), taskNotes)) || "-",
           "{{ITEM_TABLE_HTML}}":  itemTableHtml,
           "{{PHOTOS_URL}}":       photosUrl,
           "{{PHOTOS_BUTTON}}":    ""
@@ -12630,8 +12670,8 @@ function handleRespondToRepairQuote_(clientSheetId, payload) {
           "{{ITEM_TABLE_HTML}}":  api_buildSingleItemTableHtml_(itemId, itemDesc, invItem ? invItem.vendor : "", invItem ? invItem.itemClass : "", itemLoc, itemSidemark, invItem ? invItem.qty : 1, invItem ? (invItem.reference || "") : ""),
           "{{LOGO_URL}}":         String(settings["LOGO_URL"] || "").trim() || "https://static.wixstatic.com/media/a38fbc_a8c7a368447f4723b782c4dbd765ca0e~mv2.png",
           "{{REPAIR_VENDOR}}":    getVal("Repair Vendor") || "",
-          // v38.87.0: merge sheet note + public entity_notes from Supabase.
-          "{{NOTES}}":            api_resolveNotesForEmail_("repair", repairId, getVal("Repair Notes"))
+          // v38.87.0/v38.88.0: merge sheet + entity_notes then HTML-convert.
+          "{{NOTES}}":            api_notesPlainToHtml_(api_resolveNotesForEmail_("repair", repairId, getVal("Repair Notes")))
       };
 
       // Generate DOC_REPAIR_WORK_ORDER PDF for Approved (v24.0.0)
@@ -12677,7 +12717,7 @@ function handleRespondToRepairQuote_(clientSheetId, payload) {
             "{{REPAIR_TYPE}}":      api_esc_(itemDesc || ""),
             "{{SIDEMARK_ROW}}":     itemSidemark ? '<tr><td style="font-size:10px;color:#64748B;padding:2px 0;font-weight:700;">SIDEMARK</td><td style="font-size:12px;">' + api_esc_(itemSidemark) + '</td></tr>' : '',
             "{{APPROVED_ROW}}":     '<tr><td style="font-size:10px;color:#64748B;padding:2px 0;font-weight:700;">Approved</td><td style="font-size:12px;">Yes</td></tr>',
-            "{{NOTES_ROW}}":        _rqAllNotes ? '<tr><td style="font-size:10px;color:#64748B;padding:2px 0;font-weight:700;">Notes</td><td style="font-size:12px;">' + api_esc_(_rqAllNotes) + '</td></tr>' : '',
+            "{{NOTES_ROW}}":        _rqAllNotes ? '<tr><td style="font-size:10px;color:#64748B;padding:2px 0;font-weight:700;">Notes</td><td style="font-size:12px;">' + api_notesPlainToHtml_(_rqAllNotes) + '</td></tr>' : '',
             "{{PHOTOS_ROW}}":       repairFolderUrl ? '<tr><td style="font-size:10px;color:#64748B;padding:2px 0;font-weight:700;">Photos</td><td style="font-size:12px;"><a href="' + api_esc_(repairFolderUrl) + '" style="color:#E85D2D;text-decoration:underline;">View Photos</a></td></tr>' : '',
             "{{ITEM_QTY}}":         api_esc_(_rqItemQty),
             "{{ITEM_VENDOR}}":      api_esc_(_rqItemVendor),
@@ -13001,8 +13041,8 @@ function handleCompleteRepair_(clientSheetId, payload) {
           "{{LABOR_HOURS}}":       "-",
           "{{REPAIR_PHOTOS_URL}}": repairPhotosUrl,
           "{{REPAIR_ID}}":         repairId,
-          // v38.87.0: merge sheet note + public entity_notes from Supabase.
-          "{{NOTES}}":             api_resolveNotesForEmail_("repair", repairId, notes) || "-",
+          // v38.87.0/v38.88.0: merge sheet + entity_notes then HTML-convert.
+          "{{NOTES}}":             api_notesPlainToHtml_(api_resolveNotesForEmail_("repair", repairId, notes)) || "-",
           "{{ITEM_TABLE_HTML}}":   repairItemTable
         },
         null, clientSheetId
@@ -13179,14 +13219,14 @@ function handleStartRepair_(clientSheetId, payload) {
         "{{ITEM_TABLE_HTML}}":  itemTableHtml,
         "{{LOGO_URL}}":         String(settings["LOGO_URL"] || "").trim() || "https://static.wixstatic.com/media/a38fbc_a8c7a368447f4723b782c4dbd765ca0e~mv2.png",
         "{{REPAIR_VENDOR}}":    repVendor,
-        // v38.87.0: resolved (sheet + public entity_notes) repair notes.
-        "{{NOTES}}":            _repRepairNotes,
+        // v38.87.0/v38.88.0: resolved repair notes, HTML-converted.
+        "{{NOTES}}":            api_notesPlainToHtml_(_repRepairNotes),
         "{{DATE}}":             _repDateStr,
         "{{STATUS}}":           api_esc_(_repStatusStart),
         "{{REPAIR_TYPE}}":      api_esc_(itemDesc),
         "{{SIDEMARK_ROW}}":     itemSidemark ? '<tr><td style="font-size:10px;color:#64748B;padding:2px 0;font-weight:700;">SIDEMARK</td><td style="font-size:12px;">' + api_esc_(itemSidemark) + '</td></tr>' : '',
         "{{APPROVED_ROW}}":     _repApprovedStr ? '<tr><td style="font-size:10px;color:#64748B;padding:2px 0;font-weight:700;">Approved</td><td style="font-size:12px;">' + api_esc_(_repApprovedStr) + '</td></tr>' : '',
-        "{{NOTES_ROW}}":        _repAllNotes ? '<tr><td style="font-size:10px;color:#64748B;padding:2px 0;font-weight:700;">Notes</td><td style="font-size:12px;">' + api_esc_(_repAllNotes) + '</td></tr>' : '',
+        "{{NOTES_ROW}}":        _repAllNotes ? '<tr><td style="font-size:10px;color:#64748B;padding:2px 0;font-weight:700;">Notes</td><td style="font-size:12px;">' + api_notesPlainToHtml_(_repAllNotes) + '</td></tr>' : '',
         "{{PHOTOS_ROW}}":       repairFolderUrl ? '<tr><td style="font-size:10px;color:#64748B;padding:2px 0;font-weight:700;">Photos</td><td style="font-size:12px;"><a href="' + api_esc_(repairFolderUrl) + '" style="color:#E85D2D;text-decoration:underline;">View Photos</a></td></tr>' : '',
         "{{ITEM_QTY}}":         api_esc_(_repItemQty),
         "{{ITEM_VENDOR}}":      api_esc_(_repItemVendor),
@@ -13551,8 +13591,8 @@ function handleCreateWillCall_(clientSheetId, payload) {
             "{{PICKUP_PHONE}}":    String(payload.pickupPhone  || ""),
             "{{REQUESTED_BY}}":    String(payload.requestedBy  || ""),
             "{{EST_PICKUP_DATE}}": String(payload.estDate      || "Not scheduled"),
-            // v38.87.0: merge payload note + public entity_notes from Supabase.
-            "{{NOTES}}":           api_resolveNotesForEmail_("will_call", wcNumber, payload.notes),
+            // v38.87.0/v38.88.0: merge + HTML-convert for the WC create email.
+            "{{NOTES}}":           api_notesPlainToHtml_(api_resolveNotesForEmail_("will_call", wcNumber, payload.notes)),
             "{{ITEMS_TABLE}}":     itemTableHtml,
             "{{ITEMS_COUNT}}":     String(enrichedItems.length),
             "{{TOTAL_WC_FEE}}":    "$" + totalWcFee.toFixed(2),
@@ -14000,7 +14040,9 @@ function handleProcessWcRelease_(clientSheetId, payload) {
         var _notesHtml = _notes
           ? '<div style="background:#FFFBEB;border:1px solid #F59E0B;border-radius:6px;padding:8px 12px;margin-bottom:10px;">' +
             '<div style="font-size:9px;color:#92400E;font-weight:800;text-transform:uppercase;margin-bottom:2px;letter-spacing:0.5px;">Notes</div>' +
-            '<div style="font-size:11px;color:#78350F;">' + api_esc_(_notes) + '</div></div>'
+            // v38.88.0: HTML-convert so multi-note output keeps its line
+            // breaks inside the amber banner.
+            '<div style="font-size:11px;color:#78350F;">' + api_notesPlainToHtml_(_notes) + '</div></div>'
           : '';
         var _pickupPhoneHtml = _pickupPhone
           ? '<div style="font-size:11px;color:#64748B;">' + api_esc_(_pickupPhone) + '</div>'
@@ -14035,7 +14077,9 @@ function handleProcessWcRelease_(clientSheetId, payload) {
             // v38.86.0: deep-link to the WC panel's Photos tab.
             "{{PHOTOS_URL}}":        api_buildEntityPhotosUrl_("willcall", wcNumber, clientSheetId),
             "{{PARTIAL_NOTE}}":      partialNote,
-            "{{NOTES}}":             _notes
+            // v38.88.0: legacy {{NOTES}} token — HTML-convert for old
+            // email templates that render it raw.
+            "{{NOTES}}":             api_notesPlainToHtml_(_notes)
         };
 
         // Generate DOC_WILL_CALL_RELEASE PDF (v24.0.0)
@@ -14429,7 +14473,7 @@ function handleGenerateWcDoc_(clientSheetId, payload) {
       "{{PICKUP_PHONE_HTML}}": pickupPhone ? '<div style="font-size:11px;color:#64748B;">' + api_esc_(pickupPhone) + '</div>' : '',
       "{{NOTES_HTML}}":        notes ? '<div style="background:#FFFBEB;border:1px solid #F59E0B;border-radius:6px;padding:8px 12px;margin-bottom:10px;">' +
                                       '<div style="font-size:9px;color:#92400E;font-weight:800;text-transform:uppercase;margin-bottom:2px;letter-spacing:0.5px;">Notes</div>' +
-                                      '<div style="font-size:11px;color:#78350F;">' + api_esc_(notes) + '</div></div>' : '',
+                                      '<div style="font-size:11px;color:#78350F;">' + api_notesPlainToHtml_(notes) + '</div></div>' : '',
       "{{ITEMS_TABLE_ROWS}}":  itemsTableRows,
       "{{TOTAL_ITEMS}}":       String(items.length),
       "{{TOTAL_FEE}}":         totalFee ? '$' + totalFee.toFixed(2) : '',
@@ -14440,7 +14484,9 @@ function handleGenerateWcDoc_(clientSheetId, payload) {
       // v38.86.0: deep-link to the WC panel's Photos tab.
       "{{PHOTOS_URL}}":        api_buildEntityPhotosUrl_("willcall", wcNumber, clientSheetId),
       "{{PARTIAL_NOTE}}":      "",
-      "{{NOTES}}":             notes,
+      // v38.88.0: legacy {{NOTES}} token — HTML-convert for old email
+      // templates that render it raw.
+      "{{NOTES}}":             api_notesPlainToHtml_(notes),
       "{{COD}}":               isCod ? "Yes \u2014 $" + codAmount.toFixed(2) : "No"
     };
 
@@ -20154,7 +20200,7 @@ function api_generateTaskWorkOrderPdf_(ss, rowData, taskMap, settings, folderUrl
       "{{STATUS}}":       e(status),
       "{{TASK_TYPE}}":    e(taskType),
       "{{NOTES_ROW}}":    taskNotes
-        ? '<tr><td style="font-size:10px;color:#64748B;padding:2px 0;font-weight:700;">Notes</td><td style="font-size:12px;">' + e(taskNotes) + '</td></tr>'
+        ? '<tr><td style="font-size:10px;color:#64748B;padding:2px 0;font-weight:700;">Notes</td><td style="font-size:12px;">' + api_notesPlainToHtml_(taskNotes) + '</td></tr>'
         : "",
       "{{PHOTOS_ROW}}":   photosUrl
         ? '<tr><td style="font-size:10px;color:#64748B;padding:2px 0;font-weight:700;">Photos</td><td style="font-size:12px;"><a href="' + e(photosUrl) + '" style="color:#E85D2D;text-decoration:underline;">View Photos</a></td></tr>'
