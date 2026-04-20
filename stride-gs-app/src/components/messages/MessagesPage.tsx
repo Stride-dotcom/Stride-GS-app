@@ -50,7 +50,12 @@ export function MessagesPage() {
       if (params.entityType && params.entityId) {
         void openThread({ entityType: params.entityType, entityId: params.entityId });
       } else if (params.recipientIds.length > 0) {
-        void openThread(`direct:${params.recipientIds[0]}`);
+        // Session 74 fix: pass the object form so useMessages builds the
+        // canonical sorted `direct:<uidA>:<uidB>` key. The earlier string
+        // form `direct:<recipient_uid>` produced a malformed key (second
+        // uid = undefined) which stored an invalid activeThreadKey and
+        // caused subsequent replies to split into a new conversation bucket.
+        void openThread({ otherUserId: params.recipientIds[0] });
       }
     }
     return msg;

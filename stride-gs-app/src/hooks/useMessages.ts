@@ -149,13 +149,31 @@ function otherPartyForMessage(m: Message, selfId: string): string | null {
   return others[0] ?? null;
 }
 
-function keyForMessage(m: Message, selfId: string): string {
+/**
+ * Session 74: thread keys MUST be stable across sender/receiver and across
+ * every reply in the same conversation. One message = one key, determined
+ * by the thread family, never by message id.
+ *
+ *   • entity conversation → `entity:<type>:<id>`
+ *   • direct DM           → `direct:<uidA>:<uidB>` (sorted)
+ *   • unkeyable           → null (caller must skip — do NOT bucket it
+ *                           under its own message id, that produces one
+ *                           conversation row per message)
+ *
+ * "Unkeyable" happens only for malformed rows (sender = self, zero
+ * recipient rows visible) which shouldn't exist in normal use. The old
+ * `msg:<id>` fallback is removed because it was the root cause of the
+ * "every reply spawns a new chat" symptom: as soon as hydration dropped
+ * the self-recipient row for any reason, the key collapsed to
+ * msg:<new-message-id> and split the thread.
+ */
+function keyForMessage(m: Message, selfId: string): string | null {
   if (m.relatedEntityType && m.relatedEntityId) {
     return `entity:${m.relatedEntityType}:${m.relatedEntityId}`;
   }
   const other = otherPartyForMessage(m, selfId);
   if (other) return directKey(selfId, other);
-  return `msg:${m.id}`;
+  return null;
 }
 
 // ─── Hook ──────────────────────────────────────────────────────────────────
@@ -368,6 +386,15 @@ function useMessagesImpl(): UseMessagesResult {
       .subscribe((status) => {
         if (status === 'SUBSCRIBED') {
           console.log('[useMessages] Realtime subscribed');
+          // Session 74: catch-up refetch on (re)subscribe. If the channel
+          // was previously CLOSED (e.g. token refresh, laptop-sleep,
+          // intermittent network) events fired during the outage were
+          // not delivered. Refetch guarantees the inbox is current the
+          // moment realtime is back online — the user never sees stale
+          // state just because their WebSocket blinked.
+          void refetch();
+          const activeKey = activeThreadKeyRef.current;
+          if (activeKey) void openThreadRef.current?.(activeKey);
         } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
           console.warn('[useMessages] Realtime status:', status);
         }
@@ -382,6 +409,7 @@ function useMessagesImpl(): UseMessagesResult {
 
     for (const m of messages) {
       const key = keyForMessage(m, authUserId);
+      if (!key) continue;                          // skip unkeyable rows
       const prev = byKey.get(key);
       const mine = m.myRecipient;
       const unread = mine && !mine.isRead ? 1 : 0;
@@ -478,22 +506,7 @@ function useMessagesImpl(): UseMessagesResult {
     //     recipient rows and keep only those where BOTH self and other
     //     appear as recipients.
     let hydrated: Message[] = [];
-    if (key.startsWith('msg:')) {
-      // Fallback branch: conversation was keyed on a single message id
-      // because neither a related entity nor an identifiable other party
-      // could be resolved (happens with self-DMs or older messages
-      // missing recipient rows). Load that single message so the thread
-      // still renders something instead of "No messages yet".
-      const msgId = key.slice('msg:'.length);
-      const { data, error } = await supabase
-        .from('messages')
-        .select('*')
-        .eq('id', msgId)
-        .limit(1);
-      if (!error && data && data.length > 0) {
-        hydrated = await hydrate(data as MessageRow[], authUserId);
-      }
-    } else if (key.startsWith('entity:')) {
+    if (key.startsWith('entity:')) {
       const parts = key.split(':');
       const entityType = parts[1];
       const entityId = parts.slice(2).join(':');
@@ -521,41 +534,25 @@ function useMessagesImpl(): UseMessagesResult {
       if (candidates.length === 0) { setThread([]); setThreadLoading(false); return; }
       // Hydrate (fetches recipients + profile names for every candidate).
       const hydratedCandidates = await hydrate(candidates, authUserId);
-      // Keep only messages where BOTH self AND other are participants.
+      // Session 74 (tightened): keep ONLY messages where the participant
+      // set is exactly {self, other} — no third party, no partial rows.
       //
-      // Participants = senderId ∪ recipientUserIds ∪ { any user whose
-      // recipient row can be inferred from RLS-visible data }. The sender
-      // is always a participant even without their own recipient row
-      // (older test messages + sends where the sender's self-recipient
-      // insert may have been skipped); the "other" in the key is also
-      // inherently a participant because we got here by selecting sender
-      // IN (self, other) — a message with sender=self must be TO other
-      // (or the sender-recipient would bleed into unrelated threads, but
-      // the candidate query only considers these two senders, and RLS
-      // only returned messages the current user can already see).
+      //   participants = {senderId} ∪ recipientUserIds
       //
-      // So: if the sender is one of {self, other} and the other party is
-      // present anywhere on the row OR the sender IS the other party
-      // (inbound message from them), we keep it. This is the union
-      // semantics plus a fallback-visible rule.
+      // Must contain self. Must contain other. Must contain nothing else.
+      // This is strict 1:1 DM isolation; the earlier broad fallback
+      // admitted rows based on partial matches and caused messages from
+      // neighboring threads (e.g. sender-only messages missing their
+      // recipient row) to leak into the wrong bucket.
       hydrated = hydratedCandidates.filter(m => {
-        const senderIsSelf  = m.senderId === authUserId;
-        const senderIsOther = m.senderId === other;
-        const recipsContainSelf  = m.recipientUserIds.includes(authUserId);
-        const recipsContainOther = m.recipientUserIds.includes(other);
-        // Inbound from the other party: senderIsOther + recipsContainSelf
-        if (senderIsOther && recipsContainSelf) return true;
-        // Outbound to the other party: senderIsSelf + recipsContainOther
-        if (senderIsSelf && recipsContainOther) return true;
-        // Self-DM: sender = self AND I'm in recipients (rare).
-        if (senderIsSelf && recipsContainSelf && other === authUserId) return true;
-        // Broad fallback: sender is one of the two AND at least one party
-        // is on the row — this catches old data where the sender's
-        // self-recipient insert failed. Doesn't leak third-party messages
-        // because the candidate query already constrained sender_id to
-        // the pair.
-        if ((senderIsSelf || senderIsOther) && (recipsContainSelf || recipsContainOther)) return true;
-        return false;
+        const participants = new Set<string>([m.senderId, ...m.recipientUserIds]);
+        if (!participants.has(authUserId)) return false;
+        if (!participants.has(other)) return false;
+        // No extra participants allowed (for self-DM other === authUserId
+        // so size === 1 is valid; for regular DMs size must be exactly 2).
+        const expected = other === authUserId ? 1 : 2;
+        if (participants.size !== expected) return false;
+        return true;
       });
     }
 
@@ -691,7 +688,8 @@ function useMessagesImpl(): UseMessagesResult {
     const keep: Message[] = [];
     const toArchive: string[] = [];
     for (const m of messages) {
-      if (keyForMessage(m, authUserId) === key) {
+      const mk = keyForMessage(m, authUserId);
+      if (mk && mk === key) {
         if (m.myRecipient) toArchive.push(m.myRecipient.recipientId);
       } else {
         keep.push(m);
