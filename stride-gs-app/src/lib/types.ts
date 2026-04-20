@@ -126,6 +126,8 @@ export interface Repair {
   notes?: string;
   internalNotes?: string;
   room?: string;
+  location?: string;        // Session 74: warehouse location — mirrored from inventory so the Repair panel can show it without a join
+  sidemark?: string;        // Session 74: same rationale — was read by RepairDetailPanel but never declared on the type
   reference?: string;
   itemClass?: string;
   carrier?: string;

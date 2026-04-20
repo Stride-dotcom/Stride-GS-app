@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { X, Wrench, Package, ClipboardList, CheckCircle2, XCircle, AlertTriangle, Send, Loader2, Truck, Play, Pencil } from 'lucide-react';
+import { X, Wrench, Package, ClipboardList, CheckCircle2, XCircle, AlertTriangle, Send, Loader2, Truck, Play, Pencil, MapPin } from 'lucide-react';
 import { EntityHistory } from './EntityHistory';
 import { EntityAttachments } from './EntityAttachments';
 import { FolderButton } from './FolderButton';
@@ -412,7 +412,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
           {repair.itemId && (
             <div style={{ background: theme.colors.bgSubtle, border: `1px solid ${theme.colors.border}`, borderRadius: 10, padding: 14, marginBottom: 16 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}><Package size={14} color={theme.colors.orange} /><span style={{ fontSize: 12, fontWeight: 600 }}>Item</span></div>
-              <div style={{ fontSize: 13, fontWeight: 600, display: 'inline-flex', alignItems: 'center', flexWrap: 'wrap' }}>
+              <div style={{ fontSize: 13, fontWeight: 600, display: 'inline-flex', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
                 <DeepLink kind="inventory" id={repair.itemId} clientSheetId={repair.clientSheetId} />
                 <ItemIdBadges
                   itemId={repair.itemId}
@@ -421,11 +421,29 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
                   repairItems={repairItems}
                 />
                 {repair.vendor ? <span>{` — ${repair.vendor}`}</span> : null}
+                {/* Session 74: prominent warehouse-location pill next to the Item ID.
+                    Warehouse staff use this to physically locate the item before
+                    starting the repair; was previously rendered as a muted 11px
+                    string well below the header. Blue pill gets the eye. */}
+                {repair.location && (
+                  <span
+                    title="Warehouse location"
+                    style={{
+                      display: 'inline-flex', alignItems: 'center', gap: 4,
+                      padding: '3px 8px', borderRadius: 999,
+                      background: '#EFF6FF', color: '#1D4ED8',
+                      border: '1px solid #BFDBFE',
+                      fontSize: 11, fontWeight: 700, letterSpacing: 0.3,
+                    }}
+                  >
+                    <MapPin size={11} /> {repair.location}
+                  </span>
+                )}
               </div>
               {repair.description && <div style={{ fontSize: 12, color: theme.colors.textSecondary, marginTop: 2 }}>{repair.description}</div>}
               <div style={{ display: 'flex', gap: 16, marginTop: 6, fontSize: 11, color: theme.colors.textMuted }}>
-                {repair.location && <span>Location: {repair.location}</span>}
                 {repair.sidemark && <span>Sidemark: {repair.sidemark}</span>}
+                {repair.room && <span>Room: {repair.room}</span>}
               </div>
               {/* Drive Folder Buttons */}
               <div style={{ display: 'flex', gap: 6, marginTop: 10, flexWrap: 'wrap' }}>

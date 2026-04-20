@@ -79,6 +79,13 @@ function mapToAppRepair(api: ApiRepair): Repair {
     completedDate: api.completedDate || undefined,
     notes: api.repairNotes || undefined,
     internalNotes: api.taskNotes || undefined,
+    // Session 74: propagate inventory-mirrored context the detail panel
+    // needs. `location` was present on ApiRepair but dropped here, so the
+    // RepairDetailPanel's `repair.location` branch always read undefined.
+    room: api.room || undefined,
+    location: api.location || undefined,
+    sidemark: api.sidemark || undefined,
+    reference: api.reference || undefined,
     repairFolderUrl: api.repairFolderUrl || undefined,
     taskFolderUrl: api.taskFolderUrl || undefined,
     shipmentFolderUrl: api.shipmentFolderUrl || undefined,
