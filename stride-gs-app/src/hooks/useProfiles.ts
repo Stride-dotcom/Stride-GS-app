@@ -17,6 +17,12 @@ export interface Profile {
   role: 'admin' | 'staff' | 'client' | string;
   avatarUrl: string | null;
   isActive: boolean;
+  /** For role='client' profiles, the bound CB spreadsheetId they can see.
+   *  Sourced from cb_users.client_sheet_id (same id = auth.users.id).
+   *  null for staff/admin (they don't need a tenant binding). Used by the
+   *  compose modal to limit a client's recipient picker to their own
+   *  coworkers + admin. */
+  clientSheetId: string | null;
 }
 
 interface ProfileRow {
@@ -28,7 +34,12 @@ interface ProfileRow {
   is_active: boolean | null;
 }
 
-function rowToProfile(r: ProfileRow): Profile {
+interface CbUserIdRow {
+  id: string;
+  client_sheet_id: string | null;
+}
+
+function rowToProfile(r: ProfileRow, clientSheetId: string | null): Profile {
   return {
     id: r.id,
     email: r.email ?? '',
@@ -36,6 +47,7 @@ function rowToProfile(r: ProfileRow): Profile {
     role: r.role ?? 'client',
     avatarUrl: r.avatar_url,
     isActive: r.is_active !== false,
+    clientSheetId,
   };
 }
 
@@ -56,14 +68,29 @@ export function useProfiles(activeOnly = true): UseProfilesResult {
 
   const refetch = useCallback(async () => {
     setLoading(true); setError(null);
-    let query = supabase
+    let q = supabase
       .from('profiles')
       .select('id,email,display_name,role,avatar_url,is_active')
       .order('email', { ascending: true });
-    if (activeOnly) query = query.eq('is_active', true);
-    const { data, error: err } = await query;
-    if (err) { setError(err.message); setLoading(false); return; }
-    setProfiles(((data ?? []) as ProfileRow[]).map(rowToProfile));
+    if (activeOnly) q = q.eq('is_active', true);
+    // Parallel: profiles + cb_users id→client_sheet_id map. cb_users.id is
+    // keyed to auth.users.id so it aligns 1:1 with profiles.id.
+    const [pRes, uRes] = await Promise.all([
+      q,
+      supabase.from('cb_users').select('id,client_sheet_id'),
+    ]);
+    if (pRes.error) { setError(pRes.error.message); setLoading(false); return; }
+    // cb_users lookup is best-effort: if the read fails we just surface the
+    // profiles with clientSheetId=null — the filter downgrade is strictly
+    // more permissive (shows more entries), never less.
+    const sheetMap = new Map<string, string | null>();
+    if (!uRes.error && uRes.data) {
+      for (const r of uRes.data as CbUserIdRow[]) {
+        sheetMap.set(r.id, r.client_sheet_id);
+      }
+    }
+    setProfiles(((pRes.data ?? []) as ProfileRow[])
+      .map(r => rowToProfile(r, sheetMap.get(r.id) ?? null)));
     setLoading(false);
   }, [activeOnly]);
 

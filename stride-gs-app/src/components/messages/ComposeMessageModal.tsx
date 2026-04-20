@@ -15,6 +15,7 @@ import { createPortal } from 'react-dom';
 import { X, Search, Send, Loader2, Users, Shield, AlertTriangle, CheckCircle2 } from 'lucide-react';
 import { theme } from '../../styles/theme';
 import { useProfiles } from '../../hooks/useProfiles';
+import { useAuth } from '../../contexts/AuthContext';
 import type { SendMessageParams } from '../../hooks/useMessages';
 
 export interface ComposeRecipient {
@@ -22,6 +23,7 @@ export interface ComposeRecipient {
   email: string;
   name: string;
   role: 'admin' | 'staff' | 'client';
+  clientSheetId: string | null;
 }
 
 interface Props {
@@ -34,6 +36,9 @@ interface Props {
 export function ComposeMessageModal({ onClose, onSend, currentUserId }: Props) {
   const v2 = theme.v2;
   const { profiles, loading, error: profilesError } = useProfiles(true);
+  const { user } = useAuth();
+  const isClientRole = user?.role === 'client';
+  const myClientSheetId = user?.clientSheetId ?? null;
   const [query, setQuery] = useState('');
   const [selected, setSelected] = useState<ComposeRecipient[]>([]);
   const [body, setBody] = useState('');
@@ -44,16 +49,28 @@ export function ComposeMessageModal({ onClose, onSend, currentUserId }: Props) {
 
   // Map profiles → compose recipients, excluding the current user so they
   // can't message themselves.
+  //
+  // Client-role users are restricted to admins + same-account coworkers so
+  // they can't start new threads with other clients or with staff directly.
+  // Staff/admin see everyone. This is a UI filter only — RLS still governs
+  // who can read/reply once a thread exists, so a staff member can still
+  // DM a client, and a client can reply to any thread they're already in.
   const users = useMemo<ComposeRecipient[]>(() => {
-    return profiles
+    const base = profiles
       .filter(p => p.id !== currentUserId)
       .map(p => ({
         id: p.id,
         email: p.email,
         name: p.displayName || p.email,
         role: (p.role === 'admin' ? 'admin' : p.role === 'staff' ? 'staff' : 'client') as ComposeRecipient['role'],
+        clientSheetId: p.clientSheetId,
       }));
-  }, [profiles, currentUserId]);
+    if (!isClientRole) return base;
+    return base.filter(u =>
+      u.role === 'admin' ||
+      (u.role === 'client' && !!myClientSheetId && u.clientSheetId === myClientSheetId)
+    );
+  }, [profiles, currentUserId, isClientRole, myClientSheetId]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -163,14 +180,19 @@ export function ComposeMessageModal({ onClose, onSend, currentUserId }: Props) {
                 )}
               </div>
             )}
-            <div style={{ display: 'flex', gap: 6, marginBottom: 6, flexWrap: 'wrap' }}>
-              <button onClick={selectAllStaff} style={quickBtn}>
-                <Shield size={11} /> All Staff
-              </button>
-              <button onClick={selectAllClients} style={quickBtn}>
-                <Users size={11} /> All Clients
-              </button>
-            </div>
+            {/* "All Staff" / "All Clients" broadcast pills — hidden for
+                client-role users since their picker is already scoped to
+                admins + same-account coworkers. */}
+            {!isClientRole && (
+              <div style={{ display: 'flex', gap: 6, marginBottom: 6, flexWrap: 'wrap' }}>
+                <button onClick={selectAllStaff} style={quickBtn}>
+                  <Shield size={11} /> All Staff
+                </button>
+                <button onClick={selectAllClients} style={quickBtn}>
+                  <Users size={11} /> All Clients
+                </button>
+              </div>
+            )}
             <div style={{ position: 'relative' }}>
               <Search size={14} color={v2.colors.textMuted} style={{ position: 'absolute', top: 11, left: 10 }} />
               <input
