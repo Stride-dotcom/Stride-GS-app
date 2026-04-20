@@ -916,17 +916,52 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
             </div>
           )}
           {/* Start Will Call — generates the pickup document (same backend as Start Repair's PDF generation).
-              Available on any non-released status so the doc can be regenerated if items change. */}
-          {isActive && !releaseResult && (
+              Session 74: after a successful start, the primary purple
+              "Start Will Call" button is hidden and replaced by a compact
+              green success banner so the user sees the state transition.
+              A small text-link "Regenerate" still lets them re-run the
+              generation if items change. Previously the button stayed
+              visible as "Regenerate Pickup Document" which made it look
+              like the Start action hadn't completed. */}
+          {isActive && !releaseResult && !genDocResult && (
             <div style={{ marginBottom: 10 }}>
               <WriteButton
-                label={genDocLoading ? 'Starting...' : (genDocResult ? 'Regenerate Pickup Document' : 'Start Will Call')}
+                label={genDocLoading ? 'Starting...' : 'Start Will Call'}
                 variant="primary"
                 icon={genDocLoading ? <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} /> : <Play size={16} />}
                 disabled={genDocLoading}
                 style={{ width: '100%', padding: '10px', fontSize: 13, background: '#7C3AED', opacity: genDocLoading ? 0.7 : 1 }}
                 onClick={handleGenerateWcDoc}
               />
+            </div>
+          )}
+          {isActive && !releaseResult && genDocResult && (
+            <div style={{
+              marginBottom: 10, padding: '8px 12px',
+              background: '#ECFDF5', border: '1px solid #A7F3D0', borderRadius: 8,
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8,
+              fontSize: 12, color: '#065F46',
+            }}>
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+                <CheckCircle2 size={14} style={{ flexShrink: 0 }} />
+                <span style={{ fontWeight: 600 }}>Will Call started</span>
+                <span style={{ color: '#047857', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                  — pickup document generated
+                </span>
+              </span>
+              <button
+                onClick={handleGenerateWcDoc}
+                disabled={genDocLoading}
+                title="Regenerate pickup document"
+                style={{
+                  background: 'transparent', border: 'none', padding: '2px 6px',
+                  color: '#047857', fontSize: 11, fontWeight: 600, cursor: 'pointer',
+                  fontFamily: 'inherit', textDecoration: 'underline', flexShrink: 0,
+                  opacity: genDocLoading ? 0.5 : 1,
+                }}
+              >
+                {genDocLoading ? 'Regenerating…' : 'Regenerate'}
+              </button>
             </div>
           )}
           {isActive && !releaseResult ? (

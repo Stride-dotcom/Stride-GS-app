@@ -59,6 +59,7 @@ import { useClientFilterUrlSync } from '../hooks/useClientFilterUrlSync';
 import { useTasks } from '../hooks/useTasks';
 import { useRepairs } from '../hooks/useRepairs';
 import { useWillCalls } from '../hooks/useWillCalls';
+import { entityEvents } from '../lib/entityEvents';
 import { useShipments } from '../hooks/useShipments';
 import { useBilling } from '../hooks/useBilling';
 import { useLocations } from '../hooks/useLocations';
@@ -937,6 +938,12 @@ export function Inventory() {
       for (const tid of tempIds) removeOptimisticRepair(tid);
       setRepairQuoteBulkResult(mergePreflightSkips(serverResult, preflightSkipped));
       refetch();
+      // Session 74: emit a repair entity event per affected item so the
+      // Repairs page's useRepairs hook force-refetches from GAS (bypassing
+      // stale Supabase cache) on its next mount/subscriber tick. Without
+      // this, newly-created repairs didn't show on /repairs until manual
+      // refresh.
+      for (const it of eligible) entityEvents.emit('repair', it.itemId);
     } catch (err) {
       for (const tid of tempIds) removeOptimisticRepair(tid);
       throw err;
@@ -2219,7 +2226,19 @@ export function Inventory() {
           removeOptimisticWc={removeOptimisticWc}
           existingWillCalls={willCalls}
           onClose={() => { setShowWCModal(false); setDetailActionItem(null); }}
-          onSubmit={(data) => { showToast(`Will Call created for ${data.items.length} items`); setRowSelection({}); setDetailActionItem(null); refetch(); }}
+          onSubmit={(data) => {
+            showToast(`Will Call created for ${data.items.length} items`);
+            setRowSelection({});
+            setDetailActionItem(null);
+            refetch();
+            // Session 74: emit a will_call entity event so the Will Calls
+            // page's useWillCalls hook bypasses Supabase cache on its next
+            // fetch (shouldSkipSupabase('will_call') → true once) and also
+            // any mounted subscribers (e.g. Dashboard) refetch immediately.
+            // Without this, navigating to /will-calls shows stale data
+            // until the Supabase write-through Realtime event arrives.
+            entityEvents.emit('will_call', (data as any).wcNumber || '');
+          }}
         />
       )}
 
@@ -2291,6 +2310,9 @@ export function Inventory() {
             setDetailActionItem(null);
             refetch();        // refresh inventory data
             refetchTasks();   // refresh tasks so they appear on the Tasks page immediately
+            // Session 74: emit for cross-page subscribers + set the skip-cache
+            // flag so a fresh Tasks-page mount bypasses stale Supabase data.
+            for (const tid of taskIds) entityEvents.emit('task', tid);
           }}
         />
       )}
