@@ -11,6 +11,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { ArrowLeft, Edit3, ExternalLink } from 'lucide-react';
 import { theme } from '../../styles/theme';
+import { supabase } from '../../lib/supabase';
 import { useIsMobile } from '../../hooks/useIsMobile';
 import { useMessages, type Conversation, type Message } from '../../hooks/useMessages';
 import { useProfiles } from '../../hooks/useProfiles';
@@ -267,6 +268,41 @@ const ENTITY_LABEL: Record<string, string> = {
   claim: 'Claim',
 };
 
+// Per CLAUDE.md "Deep Links" section: deep-link URLs MUST include
+// `&client=<spreadsheetId>` or the list page's deep-link handler never
+// resolves and the detail panel never opens. Each entity lives in its
+// own Supabase mirror with a `tenant_id` column that maps to the CB
+// Clients spreadsheetId, so we look it up on demand and cache it in a
+// module-level Map so repeat thread opens don't re-query.
+interface EntityTenantLookup {
+  table: string;
+  idColumn: string;
+}
+const ENTITY_TENANT_TABLE: Record<string, EntityTenantLookup> = {
+  inventory: { table: 'item_id_ledger', idColumn: 'item_id' },
+  task:      { table: 'tasks',          idColumn: 'task_id' },
+  repair:    { table: 'repairs',        idColumn: 'repair_id' },
+  will_call: { table: 'will_calls',     idColumn: 'wc_number' },
+  shipment:  { table: 'shipments',      idColumn: 'shipment_number' },
+};
+const tenantCache = new Map<string, string | null>(); // key: `${type}:${id}`
+
+async function resolveEntityTenant(type: string, id: string): Promise<string | null> {
+  const cacheKey = `${type}:${id}`;
+  if (tenantCache.has(cacheKey)) return tenantCache.get(cacheKey) ?? null;
+  const lookup = ENTITY_TENANT_TABLE[type.toLowerCase()];
+  if (!lookup) { tenantCache.set(cacheKey, null); return null; }
+  const { data } = await supabase
+    .from(lookup.table)
+    .select('tenant_id')
+    .eq(lookup.idColumn, id)
+    .limit(1)
+    .maybeSingle();
+  const tid = (data as { tenant_id?: string | null } | null)?.tenant_id ?? null;
+  tenantCache.set(cacheKey, tid);
+  return tid;
+}
+
 interface ThreadHeaderProps {
   conversation: Conversation | null;
   thread: Message[];
@@ -279,12 +315,35 @@ function ThreadHeader({ conversation, thread, currentUserId, onBack, showBack }:
   const v2 = theme.v2;
   const { profiles } = useProfiles(true);
   const { user } = useAuth();
+  const [resolvedTenant, setResolvedTenant] = useState<string | null>(null);
 
   const nameById = useMemo(() => {
     const m = new Map<string, string>();
     for (const p of profiles) m.set(p.id, p.displayName || p.email);
     return m;
   }, [profiles]);
+
+  // Resolve the entity's clientSheetId from Supabase so deep links always
+  // include &client=<tenant> (CLAUDE.md rule #2 for deep links). For
+  // client-role users we short-circuit to their bound tenant; for staff/
+  // admin we query the entity's mirror table. Result is cached in a
+  // module-level Map so rapidly switching between threads doesn't re-query.
+  useEffect(() => {
+    const type = conversation?.entityType;
+    const id = conversation?.entityId;
+    if (!type || !id) { setResolvedTenant(null); return; }
+    // Client-role users always message about their own tenant — skip the
+    // lookup and use their binding directly.
+    if (user?.role === 'client' && user.clientSheetId) {
+      setResolvedTenant(user.clientSheetId);
+      return;
+    }
+    let cancelled = false;
+    void resolveEntityTenant(type, id).then(tid => {
+      if (!cancelled) setResolvedTenant(tid);
+    });
+    return () => { cancelled = true; };
+  }, [conversation?.entityType, conversation?.entityId, user?.role, user?.clientSheetId]);
 
   // Collect every non-self participant from the thread. Using both senderId
   // and recipientUserIds covers brand-new threads where only one side has
@@ -306,11 +365,13 @@ function ThreadHeader({ conversation, thread, currentUserId, onBack, showBack }:
   const hasEntity = !!(conversation.entityType && conversation.entityId);
   const route = hasEntity ? ENTITY_ROUTE[conversation.entityType!.toLowerCase()] : null;
   const label = hasEntity ? (ENTITY_LABEL[conversation.entityType!.toLowerCase()] ?? conversation.entityType!) : '';
-  const clientSuffix = user?.role === 'client' && user.clientSheetId
-    ? `&client=${encodeURIComponent(user.clientSheetId)}`
-    : '';
-  const deepLinkHref = hasEntity && route
-    ? `${window.location.origin}/#/${route}?open=${encodeURIComponent(conversation.entityId!)}${clientSuffix}`
+  // CLAUDE.md deep-link rule: ALWAYS include &client=<spreadsheetId>. The
+  // list page's deep-link handler keys on it to pick the right client in
+  // the dropdown and auto-open the detail panel. Without it the user lands
+  // on an empty list. We only render the chip once the tenant has resolved
+  // to avoid shipping a half-formed URL.
+  const deepLinkHref = hasEntity && route && resolvedTenant
+    ? `${window.location.origin}/#/${route}?open=${encodeURIComponent(conversation.entityId!)}&client=${encodeURIComponent(resolvedTenant)}`
     : null;
 
   return (
