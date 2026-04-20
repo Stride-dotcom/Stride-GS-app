@@ -39,6 +39,7 @@ import { fmtDate } from '../lib/constants';
 import { ItemDetailPanel } from '../components/shared/ItemDetailPanel';
 import { ItemIdBadges } from '../components/shared/ItemIdBadges';
 import { CreateWillCallModal } from '../components/shared/CreateWillCallModal';
+import { CreateDeliveryOrderModal } from '../components/shared/CreateDeliveryOrderModal';
 import { TransferItemsModal } from '../components/shared/TransferItemsModal';
 import { ReleaseItemsModal } from '../components/shared/ReleaseItemsModal';
 import { CreateTaskModal } from '../components/shared/CreateTaskModal';
@@ -733,6 +734,7 @@ export function Inventory() {
   const [showCreateTaskModal, setShowCreateTaskModal] = useState(false);
   const [showAddToWCModal, setShowAddToWCModal] = useState(false);
   const [showReleaseModal, setShowReleaseModal] = useState(false);
+  const [showDeliveryModal, setShowDeliveryModal] = useState(false);
 
   // Detail panel action items — when user triggers action from detail panel, we use these
   const [detailActionItem, setDetailActionItem] = useState<InventoryItem | null>(null);
@@ -2104,6 +2106,7 @@ export function Inventory() {
           {/* Right: action buttons */}
           <WriteButton label="Create Will Call" variant="ghost" size="sm" onClick={async () => { const guard = checkBatchClientGuard(selectedRows.map(r => r.original)); if (guard) { setBatchGuardClients(guard); setBatchGuardAction('Create Will Call'); return; } setShowWCModal(true); }} />
           <WriteButton label="Add to Will Call" variant="ghost" size="sm" onClick={async () => { const guard = checkBatchClientGuard(selectedRows.map(r => r.original)); if (guard) { setBatchGuardClients(guard); setBatchGuardAction('Add to Will Call'); return; } setShowAddToWCModal(true); }} />
+          <WriteButton label="Create Delivery" variant="ghost" size="sm" onClick={async () => { const guard = checkBatchClientGuard(selectedRows.map(r => r.original)); if (guard) { setBatchGuardClients(guard); setBatchGuardAction('Create Delivery'); return; } setShowDeliveryModal(true); }} />
           <WriteButton label="Create Task" variant="ghost" size="sm" onClick={async () => { const guard = checkBatchClientGuard(selectedRows.map(r => r.original)); if (guard) { setBatchGuardClients(guard); setBatchGuardAction('Create Task'); return; } setShowCreateTaskModal(true); }} />
           {(user?.role === 'staff' || user?.role === 'admin' || user?.isParent) && (
             <WriteButton label="Transfer" variant="ghost" size="sm" onClick={async () => { const guard = checkBatchClientGuard(selectedRows.map(r => r.original)); if (guard) { setBatchGuardClients(guard); setBatchGuardAction('Transfer'); return; } setShowTransferModal(true); }} />
@@ -2220,6 +2223,21 @@ export function Inventory() {
         />
       )}
 
+      {/* ── Create Delivery Order Modal (Phase 2b) ── */}
+      {showDeliveryModal && (
+        <CreateDeliveryOrderModal
+          preSelectedItemIds={detailActionItem ? [detailActionItem.itemId] : selectedRows.map(r => r.original.itemId)}
+          liveItems={apiConfigured ? inventoryItems as any : undefined}
+          onClose={() => { setShowDeliveryModal(false); setDetailActionItem(null); }}
+          onSubmit={(data) => {
+            showToast(`Delivery request ${data.dtIdentifier} submitted for review`);
+            setRowSelection({});
+            setDetailActionItem(null);
+            setShowDeliveryModal(false);
+          }}
+        />
+      )}
+
       {/* ── Add to Will Call Modal ── */}
       {showAddToWCModal && (
         <AddToWillCallModal
@@ -2282,6 +2300,7 @@ export function Inventory() {
         actions={[
           { label: 'Create Task', icon: <ClipboardList size={16} />, onClick: () => setShowCreateTaskModal(true) },
           { label: 'Create Will Call', icon: <Package size={16} />, onClick: () => setShowWCModal(true) },
+          { label: 'Create Delivery', icon: <Truck size={16} />, onClick: () => setShowDeliveryModal(true) },
           { label: 'Request Repair', icon: <Wrench size={16} />, onClick: async () => {
             const sel = table.getSelectedRowModel().rows;
             if (sel.length === 0) { showToast('Select items first'); return; }

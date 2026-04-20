@@ -4,16 +4,18 @@ import {
   flexRender, createColumnHelper,
   type SortingState, type FilterFn,
 } from '@tanstack/react-table';
-import { Search, RefreshCw, Download, Truck, Calendar } from 'lucide-react';
+import { Search, RefreshCw, Download, Truck, Calendar, Plus, ClipboardCheck } from 'lucide-react';
 import { theme } from '../styles/theme';
 import { useOrders } from '../hooks/useOrders';
 import type { DtOrderForUI } from '../hooks/useOrders';
 import { OrderDetailPanel } from '../components/shared/OrderDetailPanel';
+import { CreateDeliveryOrderModal } from '../components/shared/CreateDeliveryOrderModal';
+import { ReviewQueueTab } from '../components/shared/ReviewQueueTab';
 import { useVirtualRows } from '../hooks/useVirtualRows';
 import { useAuth } from '../contexts/AuthContext';
 import { AvailabilityCalendar } from '../components/availability/AvailabilityCalendar';
 
-type OrdersTab = 'orders' | 'availability';
+type OrdersTab = 'orders' | 'review' | 'availability';
 
 // ─── Status chip ─────────────────────────────────────────────────────────────
 
@@ -78,12 +80,21 @@ function exportCsv(rows: DtOrderForUI[]) {
 export function Orders() {
   const { user } = useAuth();
   const isAdmin = user?.role === 'admin';
+  const isStaff = user?.role === 'staff' || user?.role === 'admin';
+  const canReview = isStaff;
   const [activeTab, setActiveTab] = useState<OrdersTab>(isAdmin ? 'orders' : 'availability');
   const { orders, loading, error, refetch, lastFetched } = useOrders();
   const [globalFilter, setGlobalFilter] = useState('');
   const [sorting, setSorting] = useState<SortingState>([{ id: 'localServiceDate', desc: true }]);
   const [selectedOrder, setSelectedOrder] = useState<DtOrderForUI | null>(null);
   const [categoryFilter, setCategoryFilter] = useState<string>('');
+  const [showCreateModal, setShowCreateModal] = useState(false);
+
+  // Count of orders pending review (for the tab badge)
+  const pendingReviewCount = useMemo(
+    () => orders.filter(o => o.reviewStatus === 'pending_review' || o.reviewStatus === 'revision_requested').length,
+    [orders]
+  );
 
   const filteredByCategory = useMemo(() => {
     if (!categoryFilter) return orders;
@@ -175,15 +186,45 @@ export function Orders() {
         <div style={{ fontSize: 20, fontWeight: 700, letterSpacing: '2px', color: '#1C1C1C', marginBottom: 12 }}>
           STRIDE LOGISTICS · {isAdmin ? 'ORDERS & DELIVERY' : 'DELIVERY'}
         </div>
-        <div style={{ display: 'flex', gap: 8 }}>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
           {isAdmin && (
             <button onClick={() => setActiveTab('orders')} style={tabStyle('orders')}>
               <Truck size={13} /> Orders
             </button>
           )}
+          {canReview && (
+            <button onClick={() => setActiveTab('review')} style={tabStyle('review')}>
+              <ClipboardCheck size={13} /> Review Queue
+              {pendingReviewCount > 0 && (
+                <span style={{
+                  background: activeTab === 'review' ? '#fff' : '#E85D2D',
+                  color: activeTab === 'review' ? '#1C1C1C' : '#fff',
+                  fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 10,
+                  marginLeft: 4, minWidth: 18, textAlign: 'center',
+                }}>
+                  {pendingReviewCount}
+                </span>
+              )}
+            </button>
+          )}
           <button onClick={() => setActiveTab('availability')} style={tabStyle('availability')}>
             <Calendar size={13} /> Availability
           </button>
+          {/* Create Delivery Order — visible on Orders or Review tabs */}
+          {(activeTab === 'orders' || activeTab === 'review') && (
+            <button
+              onClick={() => setShowCreateModal(true)}
+              style={{
+                marginLeft: 'auto', padding: '10px 18px', borderRadius: 100,
+                border: 'none', background: '#E85D2D', color: '#fff',
+                fontSize: 11, fontWeight: 600, letterSpacing: '1.5px', textTransform: 'uppercase',
+                cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6,
+                fontFamily: 'inherit',
+              }}
+            >
+              <Plus size={14} /> New Delivery
+            </button>
+          )}
         </div>
       </div>
 
@@ -192,6 +233,16 @@ export function Orders() {
         <div style={{ flex: 1, overflow: 'auto', padding: 20 }}>
           <AvailabilityCalendar />
         </div>
+      )}
+
+      {/* Review Queue tab (staff + admin) */}
+      {activeTab === 'review' && canReview && (
+        <ReviewQueueTab
+          orders={orders}
+          loading={loading}
+          onRefetch={refetch}
+          onOpenDetail={(o) => setSelectedOrder(o)}
+        />
       )}
 
       {/* Orders tab (admin only) */}
@@ -365,6 +416,22 @@ export function Orders() {
       )}
 
       </>}
+
+      {/* Detail panel also needs to be available from Review tab */}
+      {selectedOrder && activeTab === 'review' && null /* already rendered above */}
+
+      {/* Create delivery order modal */}
+      {showCreateModal && (
+        <CreateDeliveryOrderModal
+          onClose={() => setShowCreateModal(false)}
+          onSubmit={() => {
+            setShowCreateModal(false);
+            refetch();
+            // After creating, flip to Review Queue so the new order is visible
+            if (canReview) setActiveTab('review');
+          }}
+        />
+      )}
     </div>
   );
 }
