@@ -31,9 +31,12 @@ export function PhotoGallery({
   defaultPhotoType = 'general',
   readOnly, naked, title = 'Photos', compact,
 }: Props) {
+  // Session 74: `setPrimaryPhoto` is still exported by usePhotos for
+  // interface compatibility but no longer consumed here — the "Make
+  // Primary" feature was removed from the UI.
   const {
     photos, loading, error,
-    uploadPhoto, setPrimaryPhoto, toggleNeedsAttention, toggleRepair, deletePhoto,
+    uploadPhoto, toggleNeedsAttention, toggleRepair, deletePhoto,
   } = usePhotos({ entityType, entityId, tenantId });
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
   const [uploading, setUploading] = useState(false);
@@ -98,7 +101,6 @@ export function PhotoGallery({
           photos={photos}
           compact={compact}
           onPhotoClick={(_, i) => setLightboxIndex(i)}
-          onSetPrimary={readOnly ? undefined : (p: Photo) => setPrimaryPhoto(p.id)}
           onToggleAttention={readOnly ? undefined : (p: Photo, next: boolean) => toggleNeedsAttention(p.id, next)}
           onToggleRepair={readOnly ? undefined : (p: Photo, next: boolean) => toggleRepair(p.id, next)}
           onDelete={readOnly ? undefined : (p: Photo) => deletePhoto(p.id)}
@@ -112,7 +114,6 @@ export function PhotoGallery({
           startIndex={lightboxIndex}
           readOnly={readOnly}
           onClose={() => setLightboxIndex(null)}
-          onSetPrimary={(p: Photo) => setPrimaryPhoto(p.id)}
           onToggleAttention={(p: Photo, next: boolean) => toggleNeedsAttention(p.id, next)}
           onToggleRepair={(p: Photo, next: boolean) => toggleRepair(p.id, next)}
           onDelete={(p: Photo) => deletePhoto(p.id)}

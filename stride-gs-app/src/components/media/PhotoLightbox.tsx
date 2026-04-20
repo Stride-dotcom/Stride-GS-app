@@ -7,7 +7,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
-  X, ChevronLeft, ChevronRight, Star, AlertTriangle, Wrench, Download, Trash2, Loader2,
+  X, ChevronLeft, ChevronRight, AlertTriangle, Wrench, Download, Trash2, Loader2,
 } from 'lucide-react';
 import type { Photo } from '../../hooks/usePhotos';
 
@@ -15,7 +15,7 @@ interface Props {
   photos: Photo[];
   startIndex: number;
   onClose: () => void;
-  onSetPrimary?: (photo: Photo) => Promise<boolean> | boolean;
+  // Session 74: onSetPrimary removed — "Make Primary" gone.
   onToggleAttention?: (photo: Photo, next: boolean) => Promise<boolean> | boolean;
   onToggleRepair?: (photo: Photo, next: boolean) => Promise<boolean> | boolean;
   onDelete?: (photo: Photo) => Promise<boolean> | boolean;
@@ -23,7 +23,7 @@ interface Props {
   readOnly?: boolean;
 }
 
-const PRIMARY_RING = '#D97706';
+// Session 74: PRIMARY_RING removed — no "Make Primary" action in the lightbox.
 const ATTENTION_RING = '#DC2626';
 const REPAIR_RING = '#7C3AED';
 
@@ -44,7 +44,7 @@ function fmtWhen(iso: string | null): string {
 
 export function PhotoLightbox({
   photos, startIndex, onClose,
-  onSetPrimary, onToggleAttention, onToggleRepair, onDelete,
+  onToggleAttention, onToggleRepair, onDelete,
   readOnly,
 }: Props) {
   const [index, setIndex] = useState(Math.max(0, Math.min(startIndex, photos.length - 1)));
@@ -151,15 +151,7 @@ export function PhotoLightbox({
 
         {!readOnly && (
           <div style={{ display: 'flex', gap: 6, marginLeft: 'auto', flexWrap: 'wrap' }}>
-            {onSetPrimary && !photo.is_primary && (
-              <ActionBtn
-                icon={<Star size={13} />}
-                label="Make Primary"
-                color={PRIMARY_RING}
-                busy={busy === 'primary'}
-                onClick={() => runAction('primary', () => onSetPrimary(photo))}
-              />
-            )}
+            {/* Primary action removed in session 74. */}
             {onToggleAttention && (
               <ActionBtn
                 icon={<AlertTriangle size={13} />}

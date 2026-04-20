@@ -78,9 +78,9 @@ function PhotoStrip({ itemId, tenantId }: Props) {
               width: 44, height: 44, borderRadius: 6,
               background: `#E5E7EB url(${p.thumbnail_url || p.storage_url || ''}) center/cover`,
               flexShrink: 0,
+              // Session 74: primary amber ring removed — "Make Primary" is gone.
               border: p.needs_attention ? '2px solid #DC2626'
                 : p.is_repair ? '2px solid #7C3AED'
-                : p.is_primary ? '2px solid #D97706'
                 : '1px solid rgba(0,0,0,0.08)',
             }}
             title={p.file_name}

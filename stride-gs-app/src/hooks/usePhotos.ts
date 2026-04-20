@@ -234,7 +234,10 @@ export function usePhotos({ entityType, entityId, tenantId, enabled = true }: Us
         file_name: file.name,
         file_size: file.size,
         mime_type: file.type || 'image/jpeg',
-        is_primary: photos.length === 0, // first photo becomes primary
+        // Session 74: `is_primary` stays on the table (harmless) but is
+        // never set from the UI anymore. No auto-assign to first upload;
+        // no "Make Primary" action. Kept at false for every new row.
+        is_primary: false,
         needs_attention: false,
         is_repair: photoType === 'repair',
         photo_type: photoType,

@@ -17,7 +17,7 @@
 import { useCallback, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
-  AlertTriangle, Wrench, Star, MoreVertical, X, Loader2, Download, Trash2, StarOff,
+  AlertTriangle, Wrench, MoreVertical, X, Loader2, Download, Trash2,
 } from 'lucide-react';
 import { theme } from '../../styles/theme';
 import { useIsMobile } from '../../hooks/useIsMobile';
@@ -29,27 +29,27 @@ interface Props {
   /** Render compact tiles (smaller padding + radius) when embedded in a side panel. */
   compact?: boolean;
   /** Quick-action callbacks. When provided, a 3-dot menu appears on each tile.
-   *  Each returns a boolean indicating success (so the sheet can close cleanly). */
-  onSetPrimary?: (photo: Photo) => Promise<boolean> | boolean;
+   *  Each returns a boolean indicating success (so the sheet can close cleanly).
+   *  Session 74: `onSetPrimary` removed — "Make Primary" feature gone. */
   onToggleAttention?: (photo: Photo, next: boolean) => Promise<boolean> | boolean;
   onToggleRepair?: (photo: Photo, next: boolean) => Promise<boolean> | boolean;
   onDelete?: (photo: Photo) => Promise<boolean> | boolean;
 }
 
-const PRIMARY_RING = '#D97706';      // amber
+// Session 74: PRIMARY_RING removed — "Make Primary" feature is gone.
+// is_primary stays on the DB table but is never surfaced in the UI.
 const ATTENTION_RING = '#DC2626';     // red
 const REPAIR_RING = '#7C3AED';        // purple
 
 function ringColor(p: Photo): string | null {
   if (p.needs_attention) return ATTENTION_RING;
   if (p.is_repair) return REPAIR_RING;
-  if (p.is_primary) return PRIMARY_RING;
   return null;
 }
 
 export function PhotoGrid({
   photos, onPhotoClick, compact,
-  onSetPrimary, onToggleAttention, onToggleRepair, onDelete,
+  onToggleAttention, onToggleRepair, onDelete,
 }: Props) {
   const { isMobile } = useIsMobile();
   const cols = isMobile ? 2 : compact ? 3 : 4;
@@ -58,7 +58,7 @@ export function PhotoGrid({
   const [actionPhoto, setActionPhoto] = useState<Photo | null>(null);
   const [hoverId, setHoverId] = useState<string | null>(null);
   const [pendingAction, setPendingAction] = useState<string | null>(null); // `${photoId}:${kind}`
-  const hasActions = !!(onSetPrimary || onToggleAttention || onToggleRepair || onDelete);
+  const hasActions = !!(onToggleAttention || onToggleRepair || onDelete);
 
   // Inline handler used by desktop hover-overlay icons. Runs optimistically
   // (Realtime refetch will confirm) and keeps the overlay responsive by
@@ -127,11 +127,8 @@ export function PhotoGrid({
                 </div>
               )}
 
-              {/* Indicator chips */}
+              {/* Indicator chips — primary chip removed in session 74 */}
               <div style={{ position: 'absolute', top: 6, left: 6, display: 'flex', gap: 4, pointerEvents: 'none', zIndex: 2 }}>
-                {p.is_primary && (
-                  <span style={chipStyle(PRIMARY_RING)} title="Primary photo"><Star size={10} /> PRIMARY</span>
-                )}
                 {p.needs_attention && (
                   <span style={chipStyle(ATTENTION_RING)} title="Needs attention"><AlertTriangle size={10} /> FLAG</span>
                 )}
@@ -182,14 +179,7 @@ export function PhotoGrid({
                   onClick={e => e.stopPropagation()}
                 >
                   <div style={{ display: 'flex', gap: 6 }}>
-                    {onSetPrimary && !p.is_primary && (
-                      <OverlayIconButton
-                        label="Make primary"
-                        icon={<Star size={15} />}
-                        busy={pendingAction === `${p.id}:primary`}
-                        onClick={() => void runInline(p.id, 'primary', () => onSetPrimary(p))}
-                      />
-                    )}
+                    {/* Primary action removed in session 74. */}
                     {onToggleAttention && (
                       <OverlayIconButton
                         label={p.needs_attention ? 'Clear flag' : 'Flag attention'}
@@ -235,7 +225,6 @@ export function PhotoGrid({
           photo={actionPhoto}
           isMobile={isMobile}
           onClose={() => setActionPhoto(null)}
-          onSetPrimary={onSetPrimary}
           onToggleAttention={onToggleAttention}
           onToggleRepair={onToggleRepair}
           onDelete={onDelete}
@@ -263,7 +252,7 @@ interface SheetProps {
   photo: Photo;
   isMobile: boolean;
   onClose: () => void;
-  onSetPrimary?: (photo: Photo) => Promise<boolean> | boolean;
+  // Session 74: onSetPrimary removed.
   onToggleAttention?: (photo: Photo, next: boolean) => Promise<boolean> | boolean;
   onToggleRepair?: (photo: Photo, next: boolean) => Promise<boolean> | boolean;
   onDelete?: (photo: Photo) => Promise<boolean> | boolean;
@@ -271,7 +260,7 @@ interface SheetProps {
 
 function PhotoActionSheet({
   photo, isMobile, onClose,
-  onSetPrimary, onToggleAttention, onToggleRepair, onDelete,
+  onToggleAttention, onToggleRepair, onDelete,
 }: SheetProps) {
   const [busy, setBusy] = useState<string | null>(null);
 
@@ -352,25 +341,8 @@ function PhotoActionSheet({
           )}
         </div>
 
-        {/* Actions */}
+        {/* Actions — primary action row removed in session 74 */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-          {onSetPrimary && !photo.is_primary && (
-            <ActionRow
-              icon={<Star size={15} />}
-              label="Make Primary"
-              color={PRIMARY_RING}
-              busy={busy === 'primary'}
-              onClick={() => runAction('primary', () => onSetPrimary(photo))}
-            />
-          )}
-          {onSetPrimary && photo.is_primary && (
-            <ActionRow
-              icon={<StarOff size={15} />}
-              label="Already Primary"
-              color={PRIMARY_RING}
-              disabled
-            />
-          )}
           {onToggleAttention && (
             <ActionRow
               icon={<AlertTriangle size={15} />}

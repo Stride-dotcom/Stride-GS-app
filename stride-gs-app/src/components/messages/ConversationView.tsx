@@ -61,7 +61,13 @@ export function ConversationView({ messages, currentUserId, loading = false }: P
         lastSenderId = undefined; // force header on next bubble after a date break
       }
 
-      const isOwn = !!currentUserId && m.senderId === currentUserId;
+      // Session 74 fix: compare case-insensitive on trimmed strings. Both
+      // sides are uuids from auth.uid() so === works in practice, but this
+      // is a belt-and-suspenders guard against any stray whitespace/case
+      // drift that would otherwise make sent bubbles render as received
+      // (grey on the wrong side of the thread).
+      const isOwn = !!currentUserId
+        && (m.senderId || '').trim().toLowerCase() === currentUserId.trim().toLowerCase();
       const prev = messages[i - 1];
       const next = messages[i + 1];
 

@@ -387,26 +387,59 @@ export function useMessages(): UseMessagesResult {
     setActiveThreadKey(key);
     setThreadLoading(true);
 
-    let query = supabase.from('messages').select('*').order('created_at', { ascending: true }).limit(500);
+    // Session 74 fix: the previous direct-thread query used
+    // `.or(sender_id.eq.<self>, sender_id.eq.<other>)` — that leaks any
+    // message you sent to a THIRD party into the <self,other> thread
+    // because RLS only filters by "I'm on the recipient list", not "the
+    // other party is on the recipient list". Correct isolation requires
+    // verifying BOTH self AND other appear as recipients on the message.
+    //
+    // Approach:
+    //   • entity threads: filter on (related_entity_type, related_entity_id)
+    //     — that's already unambiguous
+    //   • direct threads: fetch candidate messages with sender IN (self,
+    //     other) AND related_entity_type IS NULL, then fetch all their
+    //     recipient rows and keep only those where BOTH self and other
+    //     appear as recipients.
+    let hydrated: Message[] = [];
     if (key.startsWith('entity:')) {
       const parts = key.split(':');
       const entityType = parts[1];
       const entityId = parts.slice(2).join(':');
-      query = query.eq('related_entity_type', entityType).eq('related_entity_id', entityId);
+      const { data, error } = await supabase
+        .from('messages')
+        .select('*')
+        .eq('related_entity_type', entityType)
+        .eq('related_entity_id', entityId)
+        .order('created_at', { ascending: true })
+        .limit(500);
+      if (error || !data) { setThread([]); setThreadLoading(false); return; }
+      hydrated = await hydrate(data as MessageRow[], authUserId);
     } else if (key.startsWith('direct:')) {
-      // key format: direct:<idA>:<idB> (sorted-stable). The other party is
-      // whichever id isn't self.
       const [, a, b] = key.split(':');
       const other = a === authUserId ? b : a;
-      // RLS guarantees we only see messages we're a party to, so filtering
-      // by sender_id IN (self, other) captures this pair's DMs.
-      query = query.or(`sender_id.eq.${authUserId},sender_id.eq.${other}`)
-        .is('related_entity_type', null);
+      const { data: candData, error: candErr } = await supabase
+        .from('messages')
+        .select('*')
+        .is('related_entity_type', null)
+        .or(`sender_id.eq.${authUserId},sender_id.eq.${other}`)
+        .order('created_at', { ascending: true })
+        .limit(500);
+      if (candErr || !candData) { setThread([]); setThreadLoading(false); return; }
+      const candidates = candData as MessageRow[];
+      if (candidates.length === 0) { setThread([]); setThreadLoading(false); return; }
+      // Hydrate (fetches recipients + profile names for every candidate).
+      const hydratedCandidates = await hydrate(candidates, authUserId);
+      // Keep only messages where BOTH self AND other are recipients — that
+      // guarantees this message actually belongs to the self↔other thread
+      // (excludes self's messages to C that happened to match sender filter).
+      hydrated = hydratedCandidates.filter(m => {
+        const hasSelf = m.recipientUserIds.includes(authUserId);
+        const hasOther = m.recipientUserIds.includes(other);
+        return hasSelf && hasOther;
+      });
     }
 
-    const { data, error } = await query;
-    if (error || !data) { setThread([]); setThreadLoading(false); return; }
-    const hydrated = await hydrate(data as MessageRow[], authUserId);
     setThread(hydrated);
     setThreadLoading(false);
   }, [authUserId, hydrate]);
