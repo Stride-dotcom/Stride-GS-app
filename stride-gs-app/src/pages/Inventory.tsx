@@ -1461,7 +1461,7 @@ export function Inventory() {
   }
 
   return (
-    <div style={{ fontFamily: theme.typography.fontFamily, display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, background: '#F5F2EE', margin: '-28px -32px', padding: '28px 32px' }}>
+    <div style={{ fontFamily: theme.typography.fontFamily, display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, background: '#F5F2EE', margin: isMobile ? '-14px -12px' : '-28px -32px', padding: isMobile ? '12px' : '28px 32px' }}>
 
       {/* Print + hover styles */}
       <style>{`

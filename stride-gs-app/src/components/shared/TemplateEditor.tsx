@@ -2,6 +2,7 @@ import { useState, useMemo, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { X, Save, Eye, Code, Loader2, CheckCircle2, AlertTriangle, ChevronDown, ChevronRight, FileText, Download } from 'lucide-react';
 import { theme } from '../../styles/theme';
+import { useIsMobile } from '../../hooks/useIsMobile';
 import type { EmailTemplate } from '../../lib/api';
 import { postUpdateEmailTemplate, postTestGenerateDoc } from '../../lib/api';
 
@@ -120,6 +121,7 @@ interface Props {
 }
 
 export function TemplateEditor({ template, onClose, onSaved, onSave }: Props) {
+  const { isMobile } = useIsMobile();
   const [subject, setSubject] = useState(template.subject);
   const [bodyHtml, setBodyHtml] = useState(template.bodyHtml);
   const [activeTab, setActiveTab] = useState<'split' | 'code' | 'preview'>('split');
@@ -345,11 +347,13 @@ export function TemplateEditor({ template, onClose, onSaved, onSave }: Props) {
           </div>
         )}
 
-        {/* Main content area — split / code / preview */}
-        <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: activeTab === 'split' ? 'row' : 'column' }}>
+        {/* Main content area — split / code / preview. On mobile the 'split'
+            view stacks code-over-preview vertically because side-by-side is
+            unreadable on a narrow screen. */}
+        <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: activeTab === 'split' ? (isMobile ? 'column' : 'row') : 'column' }}>
           {/* Code pane (visible in split + code modes) */}
           {(activeTab === 'split' || activeTab === 'code') && (
-            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', borderRight: activeTab === 'split' ? `1px solid ${theme.colors.border}` : 'none' }}>
+            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', borderRight: activeTab === 'split' && !isMobile ? `1px solid ${theme.colors.border}` : 'none', borderBottom: activeTab === 'split' && isMobile ? `1px solid ${theme.colors.border}` : 'none' }}>
               <textarea
                 value={bodyHtml}
                 onChange={e => setBodyHtml(e.target.value)}

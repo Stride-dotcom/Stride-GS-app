@@ -49,7 +49,7 @@ interface QueueItem {
 // tap targets, stacked queue rows, full-width modals).
 function makeStyles(isMobile: boolean) {
   return {
-    page: { display: 'flex', flexDirection: 'column' as const, height: '100%', fontFamily: theme.typography.fontFamily, background: '#F5F2EE', margin: '-28px -32px', padding: '28px 32px' },
+    page: { display: 'flex', flexDirection: 'column' as const, height: '100%', fontFamily: theme.typography.fontFamily, background: '#F5F2EE', margin: isMobile ? '-14px -12px' : '-28px -32px', padding: isMobile ? '14px 12px' : '28px 32px' },
     header: { display: 'flex', alignItems: 'center', gap: 10, paddingBottom: 16, marginBottom: 16, flexShrink: 0 },
     body: {
       flex: 1, overflow: 'auto',
