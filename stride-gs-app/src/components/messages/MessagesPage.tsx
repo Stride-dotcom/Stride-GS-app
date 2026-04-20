@@ -365,13 +365,17 @@ function ThreadHeader({ conversation, thread, currentUserId, onBack, showBack }:
   const hasEntity = !!(conversation.entityType && conversation.entityId);
   const route = hasEntity ? ENTITY_ROUTE[conversation.entityType!.toLowerCase()] : null;
   const label = hasEntity ? (ENTITY_LABEL[conversation.entityType!.toLowerCase()] ?? conversation.entityType!) : '';
-  // CLAUDE.md deep-link rule: ALWAYS include &client=<spreadsheetId>. The
-  // list page's deep-link handler keys on it to pick the right client in
-  // the dropdown and auto-open the detail panel. Without it the user lands
-  // on an empty list. We only render the chip once the tenant has resolved
-  // to avoid shipping a half-formed URL.
-  const deepLinkHref = hasEntity && route && resolvedTenant
-    ? `${window.location.origin}/#/${route}?open=${encodeURIComponent(conversation.entityId!)}&client=${encodeURIComponent(resolvedTenant)}`
+  // CLAUDE.md deep-link rule: include &client=<spreadsheetId> whenever we
+  // can resolve it, so the list page's deep-link handler auto-picks the
+  // client in the dropdown and auto-opens the detail panel. We always
+  // render the chip though — previously we gated on resolvedTenant which
+  // silently hid the chip for receivers whose Supabase session hadn't
+  // finished warming by the time the lookup ran. Without tenant the chip
+  // still navigates to the list page; users with access can pick the
+  // client from the dropdown. Better a slightly-degraded link than no link.
+  const clientSuffix = resolvedTenant ? `&client=${encodeURIComponent(resolvedTenant)}` : '';
+  const deepLinkHref = hasEntity && route
+    ? `${window.location.origin}/#/${route}?open=${encodeURIComponent(conversation.entityId!)}${clientSuffix}`
     : null;
 
   return (
