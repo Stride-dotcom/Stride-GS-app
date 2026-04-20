@@ -190,9 +190,12 @@ export function useExpectedShipments(): UseExpectedShipmentsResult {
   }, []);
 
   // Realtime: refresh on any INSERT/UPDATE/DELETE across all tabs.
+  // Unique channel name per mount (Math.random) so two instances in the
+  // same tab don't collide on the Realtime channel registry.
   useEffect(() => {
+    const channelName = `expected_shipments_rt_${Math.random().toString(36).slice(2, 10)}`;
     const channel = supabase
-      .channel('expected_shipments_realtime')
+      .channel(channelName)
       .on('postgres_changes',
         { event: '*', schema: 'public', table: 'expected_shipments' },
         () => { doFetch(); })
@@ -229,11 +232,15 @@ export function useExpectedShipments(): UseExpectedShipmentsResult {
       return null;
     }
     const created = rowToShipment(data as DbRow);
-    // Broadcast to the module bus — every other mounted instance of this
-    // hook (e.g. useCalendarEvents) receives the new row immediately and
-    // updates its local `items`, so the calendar grid reflects the
-    // addition without waiting on the Supabase Realtime echo. The local
-    // listener picks this up too, so we don't double-setItems here.
+    // Belt + suspenders: update THIS instance's state directly AND broadcast
+    // to every other mounted instance. Direct setItems is synchronous so the
+    // originating caller doesn't depend on the bus round-trip for its own
+    // state. Bus handles cross-instance (e.g. the calendar grid's separate
+    // hook instance in useCalendarEvents).
+    setItems(prev => {
+      if (prev.some(p => p.id === created.id)) return prev;
+      return [...prev, created].sort((a, b) => a.expectedDate.localeCompare(b.expectedDate));
+    });
     broadcast({ type: 'add', item: created });
     return created;
   }, [user?.displayName, user?.email]);
@@ -250,9 +257,8 @@ export function useExpectedShipments(): UseExpectedShipmentsResult {
     if (patch.notes !== undefined) updateRow.notes = patch.notes ?? null;
     if (Object.keys(updateRow).length === 0) return true;
 
-    // Broadcast the optimistic patch to every hook instance. The local
-    // bus listener merges into its own `items`, so the calendar view
-    // updates in lockstep with the panel that made the edit.
+    // Belt + suspenders: update THIS instance's state directly AND broadcast
+    // to every other mounted instance.
     const existing = items.find(it => it.id === id);
     if (existing) {
       const merged: ExpectedShipment = {
@@ -268,6 +274,8 @@ export function useExpectedShipments(): UseExpectedShipmentsResult {
         pieces: patch.pieces !== undefined ? patch.pieces : existing.pieces,
         notes: patch.notes !== undefined ? patch.notes : existing.notes,
       };
+      setItems(prev => prev.map(p => p.id === merged.id ? merged : p)
+                          .sort((a, b) => a.expectedDate.localeCompare(b.expectedDate)));
       broadcast({ type: 'update', item: merged });
     }
 
@@ -284,9 +292,9 @@ export function useExpectedShipments(): UseExpectedShipmentsResult {
   }, [doFetch, items]);
 
   const remove = useCallback(async (id: string): Promise<boolean> => {
-    // Soft delete — flip status to 'cancelled'
-    // Broadcast the remove so every instance (including the calendar's
-    // useCalendarEvents) drops the row from its local cache instantly.
+    // Soft delete — flip status to 'cancelled'. Belt + suspenders same as
+    // add/update: local state drop + bus broadcast for cross-instance sync.
+    setItems(prev => prev.filter(it => it.id !== id));
     broadcast({ type: 'remove', id });
     const { error: err } = await supabase
       .from('expected_shipments')
