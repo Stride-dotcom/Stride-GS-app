@@ -68,6 +68,10 @@ export interface UsePhotosResult {
 const BUCKET = 'photos';
 const THUMB_MAX_EDGE = 400;
 const THUMB_QUALITY = 0.85;
+// Private bucket — every <img src> needs a signed URL. 1 hour TTL is long
+// enough for a warehouse session; panels refetch on focus so URLs get
+// refreshed before they expire in practice.
+const SIGNED_URL_TTL = 60 * 60;
 
 /** Client-side thumbnail: resize onto a canvas keeping aspect ratio. Returns
  *  a new Blob (JPEG). Returns `null` if the File cannot be decoded (e.g.,
@@ -117,8 +121,50 @@ export function usePhotos({ entityType, entityId, tenantId, enabled = true }: Us
       .order('is_primary', { ascending: false })
       .order('created_at', { ascending: false });
     if (!mountedRef.current) return;
-    if (err) setError(err.message);
-    else setPhotos((data || []) as Photo[]);
+    if (err) { setError(err.message); setLoading(false); return; }
+    const rows = (data || []) as Photo[];
+
+    // The `photos` bucket is PRIVATE — public URLs return 403. Batch-request
+    // 1-hour signed URLs for both the original + thumbnail of every row,
+    // then overlay them on the Photo objects so <img src> just works. One
+    // RTT per bucket regardless of photo count (createSignedUrls batches).
+    try {
+      const originalKeys = rows.map(r => r.storage_key).filter(Boolean);
+      const thumbKeys = rows.map(r => r.thumbnail_key).filter((k): k is string => !!k);
+      const [origSigned, thumbSigned] = await Promise.all([
+        originalKeys.length
+          ? supabase.storage.from(BUCKET).createSignedUrls(originalKeys, SIGNED_URL_TTL)
+          : Promise.resolve({ data: [] as Array<{ path: string | null; signedUrl: string }>, error: null }),
+        thumbKeys.length
+          ? supabase.storage.from(BUCKET).createSignedUrls(thumbKeys, SIGNED_URL_TTL)
+          : Promise.resolve({ data: [] as Array<{ path: string | null; signedUrl: string }>, error: null }),
+      ]);
+      const origMap: Record<string, string> = {};
+      for (const item of origSigned.data || []) {
+        if (item.path && item.signedUrl) origMap[item.path] = item.signedUrl;
+      }
+      const thumbMap: Record<string, string> = {};
+      for (const item of thumbSigned.data || []) {
+        if (item.path && item.signedUrl) thumbMap[item.path] = item.signedUrl;
+      }
+      for (const r of rows) {
+        const oSigned = origMap[r.storage_key];
+        if (oSigned) r.storage_url = oSigned;
+        if (r.thumbnail_key) {
+          const tSigned = thumbMap[r.thumbnail_key];
+          if (tSigned) r.thumbnail_url = tSigned;
+        } else if (oSigned) {
+          // No thumbnail stored — fall back to the signed original so the
+          // grid has *something* to render instead of a 403.
+          r.thumbnail_url = oSigned;
+        }
+      }
+    } catch (sigErr) {
+      // Non-fatal: the rows still have storage_url (public path) as fallback.
+      console.warn('[usePhotos] signed-URL batch failed', sigErr);
+    }
+
+    setPhotos(rows);
     setLoading(false);
   }, [enabled, entityType, entityId]);
 

@@ -10,11 +10,11 @@
  * `useMessages.sendMessage` that the inline input uses, then open the
  * thread so the caller sees their sent message immediately.
  */
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { X, Search, Send, Loader2, Users, Shield, AlertTriangle, CheckCircle2 } from 'lucide-react';
 import { theme } from '../../styles/theme';
-import { supabase } from '../../lib/supabase';
+import { useProfiles } from '../../hooks/useProfiles';
 import type { SendMessageParams } from '../../hooks/useMessages';
 
 export interface ComposeRecipient {
@@ -33,44 +33,27 @@ interface Props {
 
 export function ComposeMessageModal({ onClose, onSend, currentUserId }: Props) {
   const v2 = theme.v2;
-  const [users, setUsers] = useState<ComposeRecipient[]>([]);
-  const [loading, setLoading] = useState(true);
+  const { profiles, loading, error: profilesError } = useProfiles(true);
   const [query, setQuery] = useState('');
   const [selected, setSelected] = useState<ComposeRecipient[]>([]);
   const [body, setBody] = useState('');
   const [entityType, setEntityType] = useState('');
   const [entityId, setEntityId] = useState('');
   const [sending, setSending] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(profilesError);
 
-  // Fetch user list — Supabase cb_users is the tenant-aware mirror of CB Users.
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      const { data, error: err } = await supabase
-        .from('cb_users')
-        .select('id,email,role,client_name,contact_name,active')
-        .eq('active', true)
-        .order('email', { ascending: true });
-      if (cancelled) return;
-      if (err) {
-        setError(`Failed to load users: ${err.message}`);
-        setLoading(false);
-        return;
-      }
-      const mapped: ComposeRecipient[] = (data ?? [])
-        .filter(r => r.id && r.email && r.id !== currentUserId)
-        .map(r => ({
-          id: r.id as string,
-          email: r.email as string,
-          name: (r.contact_name as string | null) || (r.client_name as string | null) || (r.email as string),
-          role: ((r.role as string) === 'admin' ? 'admin' : (r.role as string) === 'staff' ? 'staff' : 'client') as ComposeRecipient['role'],
-        }));
-      setUsers(mapped);
-      setLoading(false);
-    })();
-    return () => { cancelled = true; };
-  }, [currentUserId]);
+  // Map profiles → compose recipients, excluding the current user so they
+  // can't message themselves.
+  const users = useMemo<ComposeRecipient[]>(() => {
+    return profiles
+      .filter(p => p.id !== currentUserId)
+      .map(p => ({
+        id: p.id,
+        email: p.email,
+        name: p.displayName || p.email,
+        role: (p.role === 'admin' ? 'admin' : p.role === 'staff' ? 'staff' : 'client') as ComposeRecipient['role'],
+      }));
+  }, [profiles, currentUserId]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
