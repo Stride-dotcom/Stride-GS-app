@@ -1,9 +1,18 @@
 /**
  * PhotoGrid — responsive thumbnail grid. 4 columns on desktop, 2 on mobile.
  * Primary photo: amber outline. Needs-attention: red outline. Repair: purple.
- * Click the thumbnail → opens the lightbox (via onPhotoClick). Click the
- * 3-dot corner button → opens a quick-action bottom-sheet (works on touch
- * and mouse alike; no hover-required controls).
+ *
+ * Click the thumbnail → opens the lightbox (via onPhotoClick).
+ *
+ * Action affordance depends on device:
+ *   - Desktop: semi-transparent dark overlay appears on hover with four
+ *     direct-action icons (Star, AlertTriangle, Wrench, Trash). One click,
+ *     no menu. Delete is 2-step via a confirm dialog.
+ *   - Mobile: a 3-dot corner button is always visible; tapping it opens a
+ *     bottom action sheet with the same actions as full-width rows.
+ *
+ * The split keeps mouse users fast (single click) while respecting the lack
+ * of hover on touch.
  */
 import { useCallback, useState } from 'react';
 import { createPortal } from 'react-dom';
@@ -47,7 +56,17 @@ export function PhotoGrid({
   const radius = compact ? 8 : 12;
 
   const [actionPhoto, setActionPhoto] = useState<Photo | null>(null);
+  const [hoverId, setHoverId] = useState<string | null>(null);
+  const [pendingAction, setPendingAction] = useState<string | null>(null); // `${photoId}:${kind}`
   const hasActions = !!(onSetPrimary || onToggleAttention || onToggleRepair || onDelete);
+
+  // Inline handler used by desktop hover-overlay icons. Runs optimistically
+  // (Realtime refetch will confirm) and keeps the overlay responsive by
+  // flipping a per-photo "pending" flag.
+  const runInline = useCallback(async (photoId: string, kind: string, fn: () => Promise<boolean> | boolean) => {
+    setPendingAction(`${photoId}:${kind}`);
+    try { await fn(); } finally { setPendingAction(null); }
+  }, []);
 
   if (photos.length === 0) {
     return (
@@ -70,10 +89,20 @@ export function PhotoGrid({
         {photos.map((p, i) => {
           const ring = ringColor(p);
           const src = p.thumbnail_url || p.storage_url || '';
+          const isHovered = hoverId === p.id;
+          const showDesktopOverlay = hasActions && !isMobile && isHovered;
           return (
             <div
               key={p.id}
               onClick={onPhotoClick ? () => onPhotoClick(p, i) : undefined}
+              onMouseEnter={e => {
+                setHoverId(p.id);
+                if (onPhotoClick) e.currentTarget.style.transform = 'translateY(-2px)';
+              }}
+              onMouseLeave={e => {
+                setHoverId(prev => (prev === p.id ? null : prev));
+                if (onPhotoClick) e.currentTarget.style.transform = 'translateY(0)';
+              }}
               style={{
                 position: 'relative',
                 aspectRatio: '1 / 1',
@@ -84,8 +113,6 @@ export function PhotoGrid({
                 boxShadow: ring ? `0 0 0 3px ${ring}, 0 2px 8px rgba(0,0,0,0.08)` : '0 2px 8px rgba(0,0,0,0.06)',
                 transition: 'transform 0.12s ease, box-shadow 0.12s ease',
               }}
-              onMouseEnter={e => { if (onPhotoClick) e.currentTarget.style.transform = 'translateY(-2px)'; }}
-              onMouseLeave={e => { if (onPhotoClick) e.currentTarget.style.transform = 'translateY(0)'; }}
             >
               {src ? (
                 <img
@@ -99,8 +126,9 @@ export function PhotoGrid({
                   No preview
                 </div>
               )}
+
               {/* Indicator chips */}
-              <div style={{ position: 'absolute', top: 6, left: 6, display: 'flex', gap: 4, pointerEvents: 'none' }}>
+              <div style={{ position: 'absolute', top: 6, left: 6, display: 'flex', gap: 4, pointerEvents: 'none', zIndex: 2 }}>
                 {p.is_primary && (
                   <span style={chipStyle(PRIMARY_RING)} title="Primary photo"><Star size={10} /> PRIMARY</span>
                 )}
@@ -111,10 +139,10 @@ export function PhotoGrid({
                   <span style={chipStyle(REPAIR_RING)} title="Repair photo"><Wrench size={10} /> REPAIR</span>
                 )}
               </div>
-              {/* 3-dot quick-action button — only rendered when caller wires callbacks.
-                  Always visible on mobile (touch), fades in on hover on desktop
-                  via inline event handlers below. */}
-              {hasActions && (
+
+              {/* Mobile: always-visible 3-dot → bottom sheet.
+                  Hidden on desktop where the hover overlay provides direct actions. */}
+              {hasActions && isMobile && (
                 <button
                   type="button"
                   onClick={e => { e.stopPropagation(); setActionPhoto(p); }}
@@ -125,16 +153,77 @@ export function PhotoGrid({
                     background: 'rgba(0,0,0,0.55)', color: '#fff',
                     border: 'none', cursor: 'pointer',
                     display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-                    opacity: isMobile ? 1 : 0.85,
                     backdropFilter: 'blur(4px)',
                     WebkitBackdropFilter: 'blur(4px)',
-                    transition: 'opacity 0.12s ease, background 0.12s ease',
+                    zIndex: 3,
                   }}
-                  onMouseEnter={e => { e.currentTarget.style.opacity = '1'; e.currentTarget.style.background = 'rgba(0,0,0,0.75)'; }}
-                  onMouseLeave={e => { if (!isMobile) e.currentTarget.style.opacity = '0.85'; e.currentTarget.style.background = 'rgba(0,0,0,0.55)'; }}
                 >
                   <MoreVertical size={14} />
                 </button>
+              )}
+
+              {/* Desktop: semi-transparent hover overlay with direct-action icons.
+                  Fades in on hover. Clicks on the icons stopPropagation so they
+                  don't trigger the lightbox click-through. */}
+              {hasActions && !isMobile && (
+                <div
+                  style={{
+                    position: 'absolute', inset: 0,
+                    background: 'linear-gradient(180deg, rgba(0,0,0,0.12) 0%, rgba(0,0,0,0.55) 100%)',
+                    opacity: showDesktopOverlay ? 1 : 0,
+                    transition: 'opacity 0.15s ease',
+                    pointerEvents: showDesktopOverlay ? 'auto' : 'none',
+                    display: 'flex',
+                    alignItems: 'flex-end',
+                    justifyContent: 'center',
+                    padding: compact ? 6 : 10,
+                    zIndex: 1,
+                  }}
+                  onClick={e => e.stopPropagation()}
+                >
+                  <div style={{ display: 'flex', gap: 6 }}>
+                    {onSetPrimary && !p.is_primary && (
+                      <OverlayIconButton
+                        label="Make primary"
+                        icon={<Star size={15} />}
+                        busy={pendingAction === `${p.id}:primary`}
+                        onClick={() => void runInline(p.id, 'primary', () => onSetPrimary(p))}
+                      />
+                    )}
+                    {onToggleAttention && (
+                      <OverlayIconButton
+                        label={p.needs_attention ? 'Clear flag' : 'Flag attention'}
+                        icon={<AlertTriangle size={15} />}
+                        active={p.needs_attention}
+                        activeColor={ATTENTION_RING}
+                        busy={pendingAction === `${p.id}:attention`}
+                        onClick={() => void runInline(p.id, 'attention', () => onToggleAttention(p, !p.needs_attention))}
+                      />
+                    )}
+                    {onToggleRepair && (
+                      <OverlayIconButton
+                        label={p.is_repair ? 'Unmark repair' : 'Mark repair'}
+                        icon={<Wrench size={15} />}
+                        active={p.is_repair}
+                        activeColor={REPAIR_RING}
+                        busy={pendingAction === `${p.id}:repair`}
+                        onClick={() => void runInline(p.id, 'repair', () => onToggleRepair(p, !p.is_repair))}
+                      />
+                    )}
+                    {onDelete && (
+                      <OverlayIconButton
+                        label="Delete"
+                        icon={<Trash2 size={15} />}
+                        danger
+                        busy={pendingAction === `${p.id}:delete`}
+                        onClick={() => {
+                          if (!window.confirm('Delete this photo?')) return;
+                          void runInline(p.id, 'delete', () => onDelete(p));
+                        }}
+                      />
+                    )}
+                  </div>
+                </div>
               )}
             </div>
           );
@@ -349,6 +438,60 @@ interface ActionRowProps {
   disabled?: boolean;
   danger?: boolean;
   onClick?: () => void;
+}
+
+// ─── Desktop hover-overlay icon button ─────────────────────────────────────
+
+interface OverlayIconButtonProps {
+  icon: React.ReactNode;
+  label: string;
+  onClick: () => void;
+  busy?: boolean;
+  /** When true, apply the active/state color (e.g., already flagged/repair). */
+  active?: boolean;
+  /** Color to use when `active` — defaults to white. */
+  activeColor?: string;
+  /** When true, render in the attention-red tone. Used for Delete. */
+  danger?: boolean;
+}
+
+function OverlayIconButton({ icon, label, onClick, busy, active, activeColor, danger }: OverlayIconButtonProps) {
+  const tint = danger ? ATTENTION_RING : active ? (activeColor ?? '#fff') : '#fff';
+  const bg = active ? `${activeColor ?? '#fff'}33` : 'rgba(255,255,255,0.15)';
+  return (
+    <button
+      type="button"
+      title={label}
+      aria-label={label}
+      onClick={onClick}
+      disabled={busy}
+      style={{
+        width: 32, height: 32, borderRadius: 8,
+        background: bg,
+        color: tint,
+        border: `1px solid rgba(255,255,255,0.25)`,
+        display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+        cursor: busy ? 'default' : 'pointer',
+        backdropFilter: 'blur(6px)',
+        WebkitBackdropFilter: 'blur(6px)',
+        transition: 'background 0.12s ease, color 0.12s ease, transform 0.12s ease',
+      }}
+      onMouseEnter={e => {
+        if (!busy) {
+          e.currentTarget.style.background = danger
+            ? 'rgba(220,38,38,0.85)'
+            : (active ? `${activeColor ?? '#fff'}55` : 'rgba(255,255,255,0.28)');
+          e.currentTarget.style.color = danger || active ? '#fff' : '#fff';
+        }
+      }}
+      onMouseLeave={e => {
+        e.currentTarget.style.background = bg;
+        e.currentTarget.style.color = tint;
+      }}
+    >
+      {busy ? <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} /> : icon}
+    </button>
+  );
 }
 
 function ActionRow({ icon, label, color, active, busy, disabled, danger, onClick }: ActionRowProps) {
