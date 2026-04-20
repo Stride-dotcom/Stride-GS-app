@@ -1,5 +1,47 @@
 /* ===================================================
-   StrideAPI.gs — v38.88.0 — 2026-04-20 PST — notes render HTML line breaks
+   StrideAPI.gs — v38.89.0 — 2026-04-20 PST — billing write-through for tasks + repairs
+   v38.89.0: CRITICAL BILLING FIX. INSP / ASM / REPAIR billing rows were
+             landing on the Billing_Ledger sheet but NEVER reaching
+             public.billing. Since session 74's Supabase-first cutover,
+             the Billing report reads from Supabase, so every task-
+             completion and repair-completion charge since mid-April has
+             been invisible in the app even though it existed on the
+             sheet. Proof: `SELECT svc_code, COUNT(*) FROM billing GROUP
+             BY svc_code` showed RCVG=297 / INSP=87 / ASM=37 / REPAIR=3
+             / WC=5 — the two completion workflows lagged orders of
+             magnitude behind receiving.
+             Root cause: the router ran api_writeThrough_ for the
+             task/repair entity only, never for the billing row that
+             handleCompleteTask_ / handleCompleteRepair_ appended to the
+             sheet. handleCompleteShipment_ escapes this because its
+             router case calls api_fullClientSync_(… "billing") after
+             returning — the two completion handlers did not.
+             Fix: each handler now calls
+             resyncEntityToSupabase_("billing", clientSheetId,
+             ledgerRowId) immediately after writing the billing row.
+             ledger row id = "REPAIR-" + repairId for repair,
+             svcCode + "-TASK-" + taskId for tasks. Best-effort;
+             failures append a warning but never block the response.
+             Full write-through audit across every svc_code:
+               RCVG / addons ........ handleCompleteShipment_ → OK (fullClientSync)
+               INSP / ASM .......... handleCompleteTask_      → FIXED v38.89.0
+               REPAIR ............... handleCompleteRepair_    → FIXED v38.89.0
+               WC .................. handleProcessWcRelease_   → OK (fullClientSync)
+               STOR ................ handleGenerateStorageCharges_ → OK (fullClientSync)
+               MANUAL-* ............ handleAddManualCharge_    → OK (writeThrough)
+               Add-on (toggle) ..... handleAddItemAddon_       → OK (resync in-handler)
+               Add-on remove ....... handleRemoveItemAddon_    → OK (direct DELETE)
+               Transfer ............ handleTransferItems_      → OK (fullClientSync)
+               Invoice ............. handleCreateInvoice_      → OK (fullClientSync)
+               Update row .......... handleUpdateBillingRow_   → OK (writeThrough)
+               Void manual ......... handleVoidManualCharge_   → OK (writeThrough)
+             Backfill path for existing stranded sheet rows: the admin
+             "Bulk Sync to Supabase" action in Settings → Maintenance
+             runs handleBulkSyncToSupabase_ which reads every active
+             client's entire Billing_Ledger and upserts. Running it once
+             after this deploy will sweep up every stranded REPAIR /
+             INSP / ASM charge from April.
+   v38.88.0: Every notes token ({{NOTES}}, {{TASK_NOTES}},
    v38.88.0: Every notes token ({{NOTES}}, {{TASK_NOTES}},
              {{SHIPMENT_NOTES}}, etc.) now runs through
              api_notesPlainToHtml_() so multi-note bodies drop into HTML
@@ -11542,6 +11584,19 @@ function handleCompleteTask_(clientSheetId, payload) {
                   );
                 }
               }
+
+              // v38.89.0 — BILLING WRITE-THROUGH. The router's
+              // api_writeThrough_ calls for completeTask only re-sync the
+              // Tasks + Inventory rows, not the new Billing_Ledger row.
+              // Before this fix INSP/ASM billing rows landed in the sheet
+              // but never in public.billing, so the Billing report missed
+              // every completed-task charge since session 74's Supabase-
+              // first cutover.
+              try {
+                resyncEntityToSupabase_("billing", clientSheetId, svcCode + "-TASK-" + taskId);
+              } catch (sbErr) {
+                warnings.push("Billing Supabase write-through failed (non-fatal): " + sbErr.message);
+              }
             }
           } catch (billErr) {
             warnings.push("Billing write failed (non-fatal): " + billErr.message);
@@ -12987,6 +13042,18 @@ function handleCompleteRepair_(clientSheetId, payload) {
           if (repMap["Billing Exception"]) {
             repSheet.getRange(repRow, repMap["Billing Exception"]).setValue("Missing Rate — amount needs update");
           }
+        }
+
+        // v38.89.0 — BILLING WRITE-THROUGH. The router's api_writeThrough_
+        // call on the repair entity only re-syncs the Repairs row, not the
+        // new Billing_Ledger row. Before this fix, REPAIR billing rows
+        // appeared on the sheet but never landed in public.billing, so
+        // the Billing report (Supabase-first since session 74) didn't see
+        // them. Best-effort; never blocks the response.
+        try {
+          resyncEntityToSupabase_("billing", clientSheetId, "REPAIR-" + repairId);
+        } catch (sbErr) {
+          warnings.push("Billing Supabase write-through failed (non-fatal): " + sbErr.message);
         }
       }
     } catch (billErr) {
