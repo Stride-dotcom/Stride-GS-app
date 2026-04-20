@@ -200,9 +200,19 @@ export function AddExpectedModal({ onClose, onSave, editingEvent, onDelete }: Pr
 
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
           <Field label="Carrier">
-            <select value={carrier} onChange={e => setCarrier(e.target.value)} style={inputStyle}>
-              {CARRIERS.map(c => <option key={c} value={c}>{c}</option>)}
-            </select>
+            {/* Free-text carrier with datalist suggestions — users can pick a
+                common carrier or type any custom value (e.g. a freight line
+                name not in the preset list). */}
+            <input
+              list="carrier-suggestions"
+              value={carrier}
+              onChange={e => setCarrier(e.target.value)}
+              placeholder="Carrier name"
+              style={inputStyle}
+            />
+            <datalist id="carrier-suggestions">
+              {CARRIERS.map(c => <option key={c} value={c} />)}
+            </datalist>
           </Field>
           <Field label="Expected Date *">
             <input type="date" value={expectedDate} onChange={e => setExpectedDate(e.target.value)} style={inputStyle} />

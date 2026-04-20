@@ -100,6 +100,7 @@ export function CalendarMonthView({ year, month, events, onEventClick }: Props) 
                   type={ev.type}
                   label={ev.label}
                   compact
+                  pending={ev.pending}
                   onMouseEnter={(e) => {
                     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
                     setHover({ event: ev, x: rect.right + 8, y: rect.top });

@@ -7,6 +7,18 @@
  * Phase 2C: optimistic patch architecture added.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+
+// ─── Cross-instance optimistic bus ──────────────────────────────────────────
+// Calendar's useWillCalls instance needs to mirror optimistic creates made
+// from the Inventory item detail panel ("Add to Will Call") and elsewhere.
+// See useTasks for the full rationale.
+type WcBusEvent =
+  | { type: 'add';    wc: import('../lib/types').WillCall }
+  | { type: 'remove'; wcNumber: string };
+const wcBus = new EventTarget();
+function wcBroadcast(evt: WcBusEvent): void {
+  wcBus.dispatchEvent(new CustomEvent<WcBusEvent>('change', { detail: evt }));
+}
 import { fetchWillCalls, setNextFetchNoCache } from '../lib/api';
 import type { ApiWillCall, WillCallsResponse } from '../lib/api';
 import type { WillCall, WillCallStatus } from '../lib/types';
@@ -146,11 +158,34 @@ export function useWillCalls(autoFetch = true, filterClientSheetId?: string | st
   }, []);
 
   const addOptimisticWc = useCallback((wc: WillCall) => {
-    setOptimisticCreates(prev => [wc, ...prev]);
+    setOptimisticCreates(prev => {
+      if (prev.some(w => w.wcNumber === wc.wcNumber)) return prev;
+      return [wc, ...prev];
+    });
+    wcBroadcast({ type: 'add', wc });
   }, []);
 
   const removeOptimisticWc = useCallback((tempWcNumber: string) => {
     setOptimisticCreates(prev => prev.filter(w => w.wcNumber !== tempWcNumber));
+    wcBroadcast({ type: 'remove', wcNumber: tempWcNumber });
+  }, []);
+
+  // Sibling-instance sync: mirror bus events into this instance's state.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<WcBusEvent>).detail;
+      if (!detail) return;
+      if (detail.type === 'add') {
+        setOptimisticCreates(prev => {
+          if (prev.some(w => w.wcNumber === detail.wc.wcNumber)) return prev;
+          return [detail.wc, ...prev];
+        });
+      } else {
+        setOptimisticCreates(prev => prev.filter(w => w.wcNumber !== detail.wcNumber));
+      }
+    };
+    wcBus.addEventListener('change', handler);
+    return () => wcBus.removeEventListener('change', handler);
   }, []);
   // ─────────────────────────────────────────────────────────────────────────
 
@@ -197,6 +232,27 @@ export function useWillCalls(autoFetch = true, filterClientSheetId?: string | st
     }
     return wcs;
   }, [batchEnabled, batchData, data, clientSheetId, clients]);
+
+  // Auto-reconcile temps: drop TEMP- WCs once a real row with matching
+  // (clientSheetId, pickupParty, scheduledDate) arrives. WC dedupe key is
+  // looser than task/repair because WC numbers are server-issued late.
+  useEffect(() => {
+    if (optimisticCreates.length === 0) return;
+    const realIds = new Set(apiWillCalls.map(w => w.wcNumber));
+    const realKeys = new Set(apiWillCalls.map(w => `${w.clientSheetId}|${w.pickupParty ?? ''}|${(w as any).scheduledDate ?? ''}`));
+    const stillTemp = optimisticCreates.filter(w => {
+      if (!w.wcNumber.startsWith('TEMP-')) return true;
+      if (realIds.has(w.wcNumber)) return false;
+      const key = `${w.clientSheetId ?? ''}|${w.pickupParty ?? ''}|${(w as any).scheduledDate ?? ''}`;
+      return !realKeys.has(key);
+    });
+    if (stillTemp.length !== optimisticCreates.length) {
+      setOptimisticCreates(stillTemp);
+      const removed = optimisticCreates.filter(w => !stillTemp.includes(w));
+      for (const rr of removed) wcBroadcast({ type: 'remove', wcNumber: rr.wcNumber });
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [apiWillCalls]);
 
   // Phase 2C: merge patches into raw mapped will calls, then prepend optimistic creates
   const willCalls = useMemo(() => {

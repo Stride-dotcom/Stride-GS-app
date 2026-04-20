@@ -13,6 +13,22 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { fetchTasks, setNextFetchNoCache } from '../lib/api';
+
+// ─── Cross-instance optimistic bus ──────────────────────────────────────────
+// Every useTasks call creates its own optimisticCreates state. The Tasks
+// page's instance and the Calendar's instance are separate React trees
+// wired to the same GAS data. Without a bus, a temp task added in one
+// doesn't appear in the other until the GAS → Supabase → Realtime chain
+// completes (1-3s), which is why the calendar felt "refresh required".
+// The bus broadcasts add/remove so every mounted instance mirrors the
+// optimistic list synchronously.
+type TaskBusEvent =
+  | { type: 'add';    task: import('../lib/types').Task }
+  | { type: 'remove'; taskId: string };
+const taskBus = new EventTarget();
+function taskBroadcast(evt: TaskBusEvent): void {
+  taskBus.dispatchEvent(new CustomEvent<TaskBusEvent>('change', { detail: evt }));
+}
 import type { ApiTask, TasksResponse } from '../lib/api';
 import type { Task, TaskStatus, ServiceCode } from '../lib/types';
 import { useApiData } from './useApiData';
@@ -155,12 +171,37 @@ export function useTasks(autoFetch = true, filterClientSheetId?: string | string
   }, []);
 
   const addOptimisticTask = useCallback((task: Task) => {
-    setOptimisticCreates(prev => [task, ...prev]);
+    setOptimisticCreates(prev => {
+      if (prev.some(t => t.taskId === task.taskId)) return prev;
+      return [task, ...prev];
+    });
+    taskBroadcast({ type: 'add', task });
   }, []);
 
   const removeOptimisticTask = useCallback((tempTaskId: string) => {
     setOptimisticCreates(prev => prev.filter(t => t.taskId !== tempTaskId));
+    taskBroadcast({ type: 'remove', taskId: tempTaskId });
   }, []);
+
+  // Listen for bus events so the calendar's separate useTasks instance
+  // mirrors optimistic creates/removes from the Tasks page (and vice versa).
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<TaskBusEvent>).detail;
+      if (!detail) return;
+      if (detail.type === 'add') {
+        setOptimisticCreates(prev => {
+          if (prev.some(t => t.taskId === detail.task.taskId)) return prev;
+          return [detail.task, ...prev];
+        });
+      } else {
+        setOptimisticCreates(prev => prev.filter(t => t.taskId !== detail.taskId));
+      }
+    };
+    taskBus.addEventListener('change', handler);
+    return () => taskBus.removeEventListener('change', handler);
+  }, []);
+
   // ─────────────────────────────────────────────────────────────────────────
 
   // Phase 2: subscribe to entityEvents for confirmed task writes (non-batch path only)
@@ -212,6 +253,28 @@ export function useTasks(autoFetch = true, filterClientSheetId?: string | string
     }
     return tasks;
   }, [batchEnabled, batchData, data, clientSheetId, clients]);
+
+  // Auto-reconcile temps: when the real task arrives via refetch (GAS →
+  // Supabase → Realtime chain), drop any TEMP- row whose (type, itemId,
+  // clientSheetId) now exists as a real row. Prevents duplicate render of
+  // temp + real when the caller forgot to explicitly remove the temp.
+  useEffect(() => {
+    if (optimisticCreates.length === 0) return;
+    const realIds = new Set(apiTasks.map(t => t.taskId));
+    const realKeys = new Set(apiTasks.map(t => `${t.type}|${t.itemId}|${t.clientSheetId}`));
+    const stillTemp = optimisticCreates.filter(t => {
+      if (!t.taskId.startsWith('TEMP-')) return true;
+      if (realIds.has(t.taskId)) return false;
+      const key = `${t.type}|${t.itemId}|${t.clientSheetId}`;
+      return !realKeys.has(key);
+    });
+    if (stillTemp.length !== optimisticCreates.length) {
+      setOptimisticCreates(stillTemp);
+      const removed = optimisticCreates.filter(t => !stillTemp.includes(t));
+      for (const r of removed) taskBroadcast({ type: 'remove', taskId: r.taskId });
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [apiTasks]);
 
   // Phase 2C: merge patches into raw mapped tasks, then prepend optimistic creates
   const tasks = useMemo(() => {

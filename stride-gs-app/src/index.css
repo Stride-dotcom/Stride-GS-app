@@ -84,6 +84,13 @@ input:focus, select:focus, textarea:focus {
   to { transform: translateX(0); }
 }
 
+/* Syncing dot used on optimistic (TEMP-) calendar pills — pulses while the
+ * GAS/Supabase write is in flight so users can tell pending from confirmed. */
+@keyframes stridePulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%      { opacity: 0.35; transform: scale(0.75); }
+}
+
 /* Selection color */
 ::selection {
   background: rgba(232, 93, 45, 0.15);

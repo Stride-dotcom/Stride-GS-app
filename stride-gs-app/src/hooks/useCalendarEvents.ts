@@ -34,6 +34,11 @@ export interface CalendarEvent {
   priority: CalendarEventPriority;
   /** YYYY-MM-DD or ISO dueDate — present for tasks/repairs; used for Overdue stat. */
   dueDate?: string;
+  /** True when the source entity is an optimistic temp row (sourceId starts
+   *  with TEMP-). UI layers render these with a "syncing" visual (dashed
+   *  border, ~60% opacity) so users can see a pending write vs a confirmed
+   *  one at a glance. */
+  pending?: boolean;
   details: {
     title?: string;
     vendor?: string;
@@ -107,6 +112,7 @@ export function useCalendarEvents() {
         sourceId: e.id,
         label: e.vendor || e.client || 'Expected',
         priority: 'Normal',
+        pending: typeof e.id === 'string' && e.id.startsWith('TEMP-'),
         details: {
           title: e.vendor ? `${e.vendor}` : 'Expected Shipment',
           vendor: e.vendor,
@@ -132,6 +138,7 @@ export function useCalendarEvents() {
         sourceId: wc.wcNumber,
         label: wc.wcNumber,
         priority: 'Normal',
+        pending: typeof wc.wcNumber === 'string' && wc.wcNumber.startsWith('TEMP-'),
         details: {
           title: wc.wcNumber,
           pickupParty: wc.pickupParty,
@@ -160,6 +167,7 @@ export function useCalendarEvents() {
         label: rp.repairId,
         priority: priority,
         dueDate: d,
+        pending: typeof rp.repairId === 'string' && rp.repairId.startsWith('TEMP-'),
         details: {
           title: rp.repairId,
           description: rp.description,
@@ -192,6 +200,7 @@ export function useCalendarEvents() {
         label: tk.taskId,
         priority: priority,
         dueDate: d,
+        pending: typeof tk.taskId === 'string' && tk.taskId.startsWith('TEMP-'),
         details: {
           title: tk.taskId,
           description: tk.description,

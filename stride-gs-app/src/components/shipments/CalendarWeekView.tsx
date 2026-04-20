@@ -80,6 +80,7 @@ export function CalendarWeekView({ weekStart, events, onEventClick }: Props) {
                   key={ev.id}
                   type={ev.type}
                   label={ev.label}
+                  pending={ev.pending}
                   onMouseEnter={(e) => {
                     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
                     setHover({ event: ev, x: rect.right + 8, y: rect.top });

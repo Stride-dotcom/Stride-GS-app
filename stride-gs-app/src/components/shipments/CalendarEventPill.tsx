@@ -14,9 +14,14 @@ interface Props {
   onMouseLeave?: () => void;
   onClick?: (e: React.MouseEvent<HTMLDivElement>) => void;
   compact?: boolean;
+  /** True when the source row is an optimistic TEMP- entry still waiting
+   *  on the GAS/Supabase round-trip. Renders with dashed border + ~60%
+   *  opacity + a "syncing" dot so users can tell a pending write from a
+   *  confirmed one at a glance. */
+  pending?: boolean;
 }
 
-export function CalendarEventPill({ type, label, onMouseEnter, onMouseLeave, onClick, compact }: Props) {
+export function CalendarEventPill({ type, label, onMouseEnter, onMouseLeave, onClick, compact, pending }: Props) {
   const c = EVENT_COLORS[type];
   return (
     <div
@@ -25,7 +30,7 @@ export function CalendarEventPill({ type, label, onMouseEnter, onMouseLeave, onC
       onClick={onClick}
       style={{
         background: c.bg,
-        borderLeft: `3px solid ${c.border}`,
+        borderLeft: pending ? `3px dashed ${c.border}` : `3px solid ${c.border}`,
         color: c.text,
         padding: compact ? '2px 6px' : '4px 8px',
         borderRadius: 4,
@@ -37,9 +42,23 @@ export function CalendarEventPill({ type, label, onMouseEnter, onMouseLeave, onC
         cursor: 'pointer',
         marginBottom: 2,
         maxWidth: '100%',
+        opacity: pending ? 0.6 : 1,
+        fontStyle: pending ? 'italic' : 'normal',
       }}
-      title={label}
+      title={pending ? `${label} (syncing…)` : label}
     >
+      {pending && (
+        <span
+          aria-label="syncing"
+          style={{
+            display: 'inline-block',
+            width: 6, height: 6, borderRadius: '50%',
+            background: c.border, marginRight: 5,
+            verticalAlign: 'middle',
+            animation: 'stridePulse 1.2s ease-in-out infinite',
+          }}
+        />
+      )}
       {label}
     </div>
   );

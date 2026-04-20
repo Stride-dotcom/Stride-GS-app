@@ -7,6 +7,19 @@
  * Phase 2C: optimistic patch architecture added.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+
+// ─── Cross-instance optimistic bus ──────────────────────────────────────────
+// See useTasks for rationale. The calendar's useRepairs instance needs to
+// mirror optimistic creates from the detail panels that request repair
+// quotes (TaskDetailPanel calls addOptimisticRepair after the user clicks
+// "Request Repair Quote"). Without this bus the calendar lags 1-3s.
+type RepairBusEvent =
+  | { type: 'add';    repair: import('../lib/types').Repair }
+  | { type: 'remove'; repairId: string };
+const repairBus = new EventTarget();
+function repairBroadcast(evt: RepairBusEvent): void {
+  repairBus.dispatchEvent(new CustomEvent<RepairBusEvent>('change', { detail: evt }));
+}
 import { fetchRepairs, setNextFetchNoCache } from '../lib/api';
 import type { ApiRepair, RepairsResponse } from '../lib/api';
 import type { Repair, RepairStatus } from '../lib/types';
@@ -144,11 +157,34 @@ export function useRepairs(autoFetch = true, filterClientSheetId?: string | stri
   }, []);
 
   const addOptimisticRepair = useCallback((repair: Repair) => {
-    setOptimisticCreates(prev => [repair, ...prev]);
+    setOptimisticCreates(prev => {
+      if (prev.some(r => r.repairId === repair.repairId)) return prev;
+      return [repair, ...prev];
+    });
+    repairBroadcast({ type: 'add', repair });
   }, []);
 
   const removeOptimisticRepair = useCallback((tempRepairId: string) => {
     setOptimisticCreates(prev => prev.filter(r => r.repairId !== tempRepairId));
+    repairBroadcast({ type: 'remove', repairId: tempRepairId });
+  }, []);
+
+  // Sibling-instance sync: mirror bus events into this instance's state.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<RepairBusEvent>).detail;
+      if (!detail) return;
+      if (detail.type === 'add') {
+        setOptimisticCreates(prev => {
+          if (prev.some(r => r.repairId === detail.repair.repairId)) return prev;
+          return [detail.repair, ...prev];
+        });
+      } else {
+        setOptimisticCreates(prev => prev.filter(r => r.repairId !== detail.repairId));
+      }
+    };
+    repairBus.addEventListener('change', handler);
+    return () => repairBus.removeEventListener('change', handler);
   }, []);
   // ─────────────────────────────────────────────────────────────────────────
 
@@ -207,6 +243,26 @@ export function useRepairs(autoFetch = true, filterClientSheetId?: string | stri
     }
     return repairs;
   }, [batchEnabled, batchData, data, clientSheetId, clients]);
+
+  // Auto-reconcile temps: drop TEMP- rows once a real repair with matching
+  // (sourceTaskId, itemId, clientSheetId) arrives in apiRepairs.
+  useEffect(() => {
+    if (optimisticCreates.length === 0) return;
+    const realIds = new Set(apiRepairs.map(r => r.repairId));
+    const realKeys = new Set(apiRepairs.map(r => `${r.sourceTaskId}|${r.itemId}|${r.clientSheetId}`));
+    const stillTemp = optimisticCreates.filter(r => {
+      if (!r.repairId.startsWith('TEMP-')) return true;
+      if (realIds.has(r.repairId)) return false;
+      const key = `${(r as any).sourceTaskId ?? ''}|${r.itemId}|${r.clientSheetId ?? ''}`;
+      return !realKeys.has(key);
+    });
+    if (stillTemp.length !== optimisticCreates.length) {
+      setOptimisticCreates(stillTemp);
+      const removed = optimisticCreates.filter(r => !stillTemp.includes(r));
+      for (const rr of removed) repairBroadcast({ type: 'remove', repairId: rr.repairId });
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [apiRepairs]);
 
   // Phase 2C: merge patches into raw mapped repairs, then prepend optimistic creates
   const repairs = useMemo(() => {
