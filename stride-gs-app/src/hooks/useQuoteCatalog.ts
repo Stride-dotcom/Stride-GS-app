@@ -13,6 +13,7 @@
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { supabase } from '../lib/supabase';
+import { entityEvents } from '../lib/entityEvents';
 import { useServiceCatalog, type CatalogService } from './useServiceCatalog';
 import type { ClassDef, TaxArea, CoverageOption, CoverageMethod } from '../lib/quoteTypes';
 import {
@@ -131,13 +132,12 @@ export function useQuoteCatalog(): UseQuoteCatalogResult {
 
   // Realtime subscriptions — any admin edit on /price-list fans out.
   useEffect(() => {
-    const channel = supabase
-      .channel('quote_catalog_meta')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'item_classes' },     () => { void refetch(); })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'tax_areas' },        () => { void refetch(); })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'coverage_options' }, () => { void refetch(); })
-      .subscribe();
-    return () => { void supabase.removeChannel(channel); };
+    // Session 74: Realtime via central channel (see useSupabaseRealtime).
+    // All three sub-tables (item_classes, tax_areas, coverage_options)
+    // emit the shared 'quote_catalog' entity event.
+    return entityEvents.subscribe((type) => {
+      if (type === 'quote_catalog') void refetch();
+    });
   }, [refetch]);
 
   const source: 'supabase' | 'fallback' =

@@ -10,7 +10,16 @@
  * to GAS for authoritative data. The flag auto-clears after being consumed.
  */
 
-type EntityType = 'task' | 'repair' | 'will_call' | 'inventory' | 'shipment' | 'billing' | 'client' | 'claim' | 'move_history' | 'order';
+type EntityType =
+  | 'task' | 'repair' | 'will_call' | 'inventory' | 'shipment' | 'billing'
+  | 'client' | 'claim' | 'move_history' | 'order'
+  // Session 74: catalog/reference types moved from per-hook Supabase
+  // Realtime channels onto the single central channel. Each hook now
+  // subscribes to entityEvents for its type instead of opening its own
+  // Realtime connection. Reduces 5 channels → 0 (folded into the
+  // central `stride_cache_realtime` channel).
+  | 'email_template' | 'service_catalog' | 'quote_catalog'
+  | 'expected_shipment' | 'delivery_zone';
 
 type EntityEventCallback = (entityType: EntityType, entityId: string) => void;
 

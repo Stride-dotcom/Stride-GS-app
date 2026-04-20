@@ -21,6 +21,7 @@
  */
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { supabase } from '../lib/supabase';
+import { entityEvents } from '../lib/entityEvents';
 import { useAuth } from '../contexts/AuthContext';
 
 export interface ExpectedShipment {
@@ -192,15 +193,13 @@ export function useExpectedShipments(): UseExpectedShipmentsResult {
   // Realtime: refresh on any INSERT/UPDATE/DELETE across all tabs.
   // Unique channel name per mount (Math.random) so two instances in the
   // same tab don't collide on the Realtime channel registry.
+  // Session 74: Realtime via central channel (see useSupabaseRealtime).
+  // Previously opened a random-name channel per mount; now shares the
+  // single `stride_cache_realtime` socket.
   useEffect(() => {
-    const channelName = `expected_shipments_rt_${Math.random().toString(36).slice(2, 10)}`;
-    const channel = supabase
-      .channel(channelName)
-      .on('postgres_changes',
-        { event: '*', schema: 'public', table: 'expected_shipments' },
-        () => { doFetch(); })
-      .subscribe();
-    return () => { supabase.removeChannel(channel); };
+    return entityEvents.subscribe((type) => {
+      if (type === 'expected_shipment') doFetch();
+    });
   }, [doFetch]);
 
   const add = useCallback(async (entry: AddPayload): Promise<ExpectedShipment | null> => {

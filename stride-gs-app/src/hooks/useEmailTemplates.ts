@@ -15,6 +15,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { supabase } from '../lib/supabase';
+import { entityEvents } from '../lib/entityEvents';
 import { useAuth } from '../contexts/AuthContext';
 import { fetchEmailTemplates, type EmailTemplate } from '../lib/api';
 
@@ -113,15 +114,11 @@ export function useEmailTemplates(): UseEmailTemplatesResult {
 
   useEffect(() => { void refetch(); }, [refetch]);
 
-  // Realtime — admin edits propagate across tabs in ~1s.
+  // Session 74: Realtime via central channel (see useSupabaseRealtime).
   useEffect(() => {
-    const channel = supabase
-      .channel('email_templates_live')
-      .on('postgres_changes',
-        { event: '*', schema: 'public', table: 'email_templates' },
-        () => { void refetch(); })
-      .subscribe();
-    return () => { void supabase.removeChannel(channel); };
+    return entityEvents.subscribe((type) => {
+      if (type === 'email_template') void refetch();
+    });
   }, [refetch]);
 
   const updateTemplate = useCallback(

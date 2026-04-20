@@ -12,6 +12,7 @@
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { supabase } from '../lib/supabase';
+import { entityEvents } from '../lib/entityEvents';
 import { useAuth } from '../contexts/AuthContext';
 
 // ─── Types ────────────────────────────────────────────────────────────────
@@ -253,15 +254,14 @@ export function useServiceCatalog(): UseServiceCatalogResult {
     return () => { cancelled = true; };
   }, [refetch]);
 
-  // Realtime — other admins editing rates should appear immediately
+  // Session 74: Realtime refetch via the shared central channel.
+  // Previously this hook opened its own `service_catalog_live` channel;
+  // now useSupabaseRealtime listens for service_catalog rows and emits
+  // the 'service_catalog' entity event. One fewer WebSocket per session.
   useEffect(() => {
-    const channel = supabase
-      .channel('service_catalog_live')
-      .on('postgres_changes',
-        { event: '*', schema: 'public', table: 'service_catalog' },
-        () => { void refetch(); })
-      .subscribe();
-    return () => { void supabase.removeChannel(channel); };
+    return entityEvents.subscribe((type) => {
+      if (type === 'service_catalog') void refetch();
+    });
   }, [refetch]);
 
   // ── Create ─────────────────────────────────────────────────────────────

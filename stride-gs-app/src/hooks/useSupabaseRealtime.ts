@@ -86,6 +86,24 @@ export function useSupabaseRealtime() {
       // dt_orders (Phase 2) — DispatchTrack orders surfaced in Orders tab
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'dt_orders' }, onRow('order', 'order_id'))
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'dt_orders' }, onRow('order', 'order_id'))
+      // Session 74: folded catalog/reference table channels into this
+      // central channel. Previously each of these hooks opened its own
+      // Supabase Realtime channel (useEmailTemplates, useServiceCatalog,
+      // useQuoteCatalog, useExpectedShipments, useDeliveryZones), giving
+      // a logged-in session 5+ redundant sockets. Now one channel
+      // handles them all — each hook subscribes to entityEvents for its
+      // own type instead. Fewer connections = less cycling / fewer
+      // "CLOSED → reconnect" churn events in the console.
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'email_templates' },     onRow('email_template', 'template_key'))
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'service_catalog' },     onRow('service_catalog', 'service_code'))
+      // Quote catalog is actually 3 tables that drive the same store —
+      // emit the same entity type for any of them so useQuoteCatalog
+      // does one refetch for any cross-table change.
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'item_classes' },        onRow('quote_catalog', 'id'))
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'tax_areas' },           onRow('quote_catalog', 'id'))
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'coverage_options' },    onRow('quote_catalog', 'id'))
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'expected_shipments' },  onRow('expected_shipment', 'id'))
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'delivery_zones' },      onRow('delivery_zone', 'id'))
       // Session 72: log connection state so we can verify Realtime stays live
       // (Dashboard trusts this channel and only polls every 5 min as fallback).
       .subscribe((status, err) => {

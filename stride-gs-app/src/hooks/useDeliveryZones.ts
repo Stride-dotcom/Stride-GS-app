@@ -15,6 +15,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from '../lib/supabase';
+import { entityEvents } from '../lib/entityEvents';
 
 export interface DeliveryZone {
   id: string;
@@ -116,14 +117,10 @@ export function useDeliveryZones(): UseDeliveryZonesResult {
   // a manual refresh. Unique channel per mount avoids registry collisions
   // when two instances of this hook mount in the same tab.
   useEffect(() => {
-    const channelName = `delivery_zones_rt_${Math.random().toString(36).slice(2, 10)}`;
-    const channel = supabase
-      .channel(channelName)
-      .on('postgres_changes',
-        { event: '*', schema: 'public', table: 'delivery_zones' },
-        () => { void refetch(); })
-      .subscribe();
-    return () => { void supabase.removeChannel(channel); };
+    // Session 74: Realtime via central channel (see useSupabaseRealtime).
+    return entityEvents.subscribe((type) => {
+      if (type === 'delivery_zone') void refetch();
+    });
   }, [refetch]);
 
   const buildRow = (patch: Partial<DeliveryZonePayload>): Record<string, unknown> => {
