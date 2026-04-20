@@ -15,9 +15,11 @@ import { useServiceCatalog, type CatalogService, type ServiceCategory } from '..
 import { ServiceRow } from '../components/pricelist/ServiceRow';
 import { AddServiceModal } from '../components/pricelist/AddServiceModal';
 import { ZipCodeTable } from '../components/pricelist/ZipCodeTable';
+import { ClassesTable } from '../components/pricelist/ClassesTable';
 import { downloadPriceListExcel } from '../components/pricelist/exportPriceListExcel';
 import { usePriceListShares, type PriceListShare } from '../hooks/usePriceListShares';
 import { useDeliveryZones } from '../hooks/useDeliveryZones';
+import { useItemClasses } from '../hooks/useItemClasses';
 import { syncPriceListFromSupabase } from '../lib/api';
 import { useAuth } from '../contexts/AuthContext';
 
@@ -71,18 +73,20 @@ const SHAREABLE_CATEGORIES: ServiceCategory[] = [
   'Assembly', 'Repair', 'Labor', 'Admin',
 ];
 
-// Sentinel appended to the tabs[] array on price_list_shares when an
-// admin opts in to include the zip-code schedule. PublicRates recognizes
-// it and renders a zones table instead of a service list for that tab.
+// Sentinels appended to the tabs[] array on price_list_shares when an
+// admin opts in to include an auxiliary section. PublicRates recognizes
+// each and renders the matching table instead of a service list.
 export const ZIP_TAB = 'Zip Codes';
+export const CLASSES_TAB = 'Classes';
 
 const BASE_SHARE_URL = 'https://www.mystridehub.com/#/rates/';
 
-// "Zip Codes" is a pseudo-category — it doesn't live in service_catalog.
-// Selecting it swaps the right pane to a delivery_zones table instead of
-// the normal grouped services list.
+// Pseudo-categories — these don't live in service_catalog. Selecting
+// either swaps the right pane to a dedicated table (delivery_zones or
+// item_classes) instead of the normal grouped services list.
 const ZIP_CATEGORY = 'Zip Codes' as const;
-type CategoryFilter = 'All' | ServiceCategory | typeof ZIP_CATEGORY;
+const CLASSES_CATEGORY = 'Classes' as const;
+type CategoryFilter = 'All' | ServiceCategory | typeof ZIP_CATEGORY | typeof CLASSES_CATEGORY;
 
 export function PriceList() {
   const v2 = theme.v2;
@@ -90,6 +94,7 @@ export function PriceList() {
   const email = user?.email || '_anon';
   const { services, loading, error, createService, updateService, deleteService } = useServiceCatalog();
   const { zones: deliveryZones } = useDeliveryZones();
+  const { classes: itemClasses } = useItemClasses();
   const { createShare } = usePriceListShares();
 
   // Hydrate persisted prefs synchronously on first render so the UI never
@@ -291,7 +296,7 @@ export function PriceList() {
             <UploadCloud size={14} /> {syncing ? 'Syncing…' : 'Sync to Sheet'}
           </button>
           <button
-            onClick={() => downloadPriceListExcel(services, deliveryZones)}
+            onClick={() => downloadPriceListExcel(services, deliveryZones, itemClasses)}
             disabled={services.length === 0}
             title="Download a formatted Excel workbook of all services"
             style={{
@@ -366,9 +371,16 @@ export function PriceList() {
                 onClick={() => setCategoryFilter(cat)}
               />
             ))}
-            {/* "Zip Codes" swaps the right pane to a delivery_zones table — it's
-                not a service_catalog category so counts come from useDeliveryZones. */}
+            {/* Auxiliary sections — neither lives in service_catalog. Each
+                swaps the right pane to its own table (delivery_zones /
+                item_classes). Counts come from their dedicated hooks. */}
             <div style={{ height: 8 }} />
+            <CategoryButton
+              label={CLASSES_CATEGORY}
+              count={itemClasses.length}
+              active={categoryFilter === CLASSES_CATEGORY}
+              onClick={() => setCategoryFilter(CLASSES_CATEGORY)}
+            />
             <CategoryButton
               label={ZIP_CATEGORY}
               count={deliveryZones.length}
@@ -408,8 +420,8 @@ export function PriceList() {
             />
           </div>
 
-          {/* Sort header — applies only to the services list (zones use their own table). */}
-          {categoryFilter !== ZIP_CATEGORY && (
+          {/* Sort header — applies only to the services list (aux sections use their own tables). */}
+          {categoryFilter !== ZIP_CATEGORY && categoryFilter !== CLASSES_CATEGORY && (
             <div style={{
               display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap',
               padding: '10px 14px',
@@ -429,9 +441,11 @@ export function PriceList() {
             </div>
           )}
 
-          {/* Right pane content — either zones table or grouped services list */}
+          {/* Right pane content — aux section table, or grouped services list */}
           {categoryFilter === ZIP_CATEGORY ? (
             <ZipCodeTable search={search} />
+          ) : categoryFilter === CLASSES_CATEGORY ? (
+            <ClassesTable search={search} />
           ) : loading ? (
             <div style={{ padding: 40, textAlign: 'center', color: v2.colors.textMuted, fontSize: 13 }}>
               Loading services…
@@ -579,6 +593,7 @@ function PriceListShareModal({ createShare, onClose, onCreated }: {
   const v2 = theme.v2;
   const [selected, setSelected] = useState<Set<ServiceCategory>>(new Set(['Warehouse', 'Storage']));
   const [includeZips, setIncludeZips] = useState(false);
+  const [includeClasses, setIncludeClasses] = useState(false);
   const [title, setTitle] = useState('');
   const [expiresAt, setExpiresAt] = useState('');
   const [saving, setSaving] = useState(false);
@@ -586,9 +601,10 @@ function PriceListShareModal({ createShare, onClose, onCreated }: {
 
   const toggle = (cat: ServiceCategory) => setSelected(prev => {
     const next = new Set(prev);
-    // Require at least one thing selected overall (service category or zip tab)
+    // Require at least one thing selected overall — service category, zip,
+    // or classes tab.
     if (next.has(cat)) {
-      if (next.size > 1 || includeZips) next.delete(cat);
+      if (next.size > 1 || includeZips || includeClasses) next.delete(cat);
     }
     else next.add(cat);
     return next;
@@ -597,14 +613,15 @@ function PriceListShareModal({ createShare, onClose, onCreated }: {
   const handleGenerate = async () => {
     setSaving(true); setErr(null);
     const tabs: string[] = SHAREABLE_CATEGORIES.filter(c => selected.has(c));
-    if (includeZips) tabs.push(ZIP_TAB);
+    if (includeClasses) tabs.push(CLASSES_TAB);
+    if (includeZips)    tabs.push(ZIP_TAB);
     const share = await createShare(tabs, title || undefined, expiresAt || null);
     setSaving(false);
     if (share) onCreated(share);
     else setErr('Failed to generate link — please try again.');
   };
 
-  const canGenerate = selected.size > 0 || includeZips;
+  const canGenerate = selected.size > 0 || includeZips || includeClasses;
 
   const inputStyle: React.CSSProperties = {
     padding: '10px 14px', borderRadius: v2.radius.input, fontFamily: 'inherit',
@@ -647,28 +664,52 @@ function PriceListShareModal({ createShare, onClose, onCreated }: {
           </div>
         </div>
 
-        <button
-          onClick={() => setIncludeZips(v => !v)}
-          style={{
-            display: 'flex', alignItems: 'center', gap: 10, padding: '10px 14px',
-            borderRadius: v2.radius.input, cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left',
-            background: includeZips ? 'rgba(232,105,42,0.08)' : v2.colors.bgPage,
-            border: `1px solid ${includeZips ? v2.colors.accent : v2.colors.border}`,
-            transition: 'all 0.15s',
-          }}
-        >
-          <div style={{
-            width: 16, height: 16, borderRadius: 4, flexShrink: 0,
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            background: includeZips ? v2.colors.accent : 'transparent',
-            border: `2px solid ${includeZips ? v2.colors.accent : v2.colors.border}`,
-          }}>
-            {includeZips && <Check size={10} color="#fff" />}
-          </div>
-          <span style={{ fontSize: 13, fontWeight: includeZips ? 600 : 400, color: includeZips ? v2.colors.text : v2.colors.textSecondary }}>
-            Include zip code schedule
-          </span>
-        </button>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <button
+            onClick={() => setIncludeClasses(v => !v)}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 10, padding: '10px 14px',
+              borderRadius: v2.radius.input, cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left',
+              background: includeClasses ? 'rgba(232,105,42,0.08)' : v2.colors.bgPage,
+              border: `1px solid ${includeClasses ? v2.colors.accent : v2.colors.border}`,
+              transition: 'all 0.15s',
+            }}
+          >
+            <div style={{
+              width: 16, height: 16, borderRadius: 4, flexShrink: 0,
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              background: includeClasses ? v2.colors.accent : 'transparent',
+              border: `2px solid ${includeClasses ? v2.colors.accent : v2.colors.border}`,
+            }}>
+              {includeClasses && <Check size={10} color="#fff" />}
+            </div>
+            <span style={{ fontSize: 13, fontWeight: includeClasses ? 600 : 400, color: includeClasses ? v2.colors.text : v2.colors.textSecondary }}>
+              Include item classes (storage sizes)
+            </span>
+          </button>
+          <button
+            onClick={() => setIncludeZips(v => !v)}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 10, padding: '10px 14px',
+              borderRadius: v2.radius.input, cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left',
+              background: includeZips ? 'rgba(232,105,42,0.08)' : v2.colors.bgPage,
+              border: `1px solid ${includeZips ? v2.colors.accent : v2.colors.border}`,
+              transition: 'all 0.15s',
+            }}
+          >
+            <div style={{
+              width: 16, height: 16, borderRadius: 4, flexShrink: 0,
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              background: includeZips ? v2.colors.accent : 'transparent',
+              border: `2px solid ${includeZips ? v2.colors.accent : v2.colors.border}`,
+            }}>
+              {includeZips && <Check size={10} color="#fff" />}
+            </div>
+            <span style={{ fontSize: 13, fontWeight: includeZips ? 600 : 400, color: includeZips ? v2.colors.text : v2.colors.textSecondary }}>
+              Include zip code schedule
+            </span>
+          </button>
+        </div>
 
         <div>
           <label style={{ ...v2.typography.label, display: 'block', marginBottom: 6 }}>Custom title <span style={{ fontWeight: 400, textTransform: 'none', letterSpacing: 0, fontSize: 12 }}>(optional)</span></label>

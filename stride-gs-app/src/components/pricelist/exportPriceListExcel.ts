@@ -11,6 +11,7 @@
 import * as XLSX from 'xlsx';
 import type { CatalogService } from '../../hooks/useServiceCatalog';
 import type { DeliveryZone } from '../../hooks/useDeliveryZones';
+import type { ItemClass } from '../../hooks/useItemClasses';
 
 function today(): string {
   const d = new Date();
@@ -50,7 +51,11 @@ function autoSize(rows: Array<Record<string, unknown>>): XLSX.ColInfo[] {
   });
 }
 
-export function downloadPriceListExcel(services: CatalogService[], deliveryZones: DeliveryZone[] = []): void {
+export function downloadPriceListExcel(
+  services: CatalogService[],
+  deliveryZones: DeliveryZone[] = [],
+  itemClasses: ItemClass[] = [],
+): void {
   const wb = XLSX.utils.book_new();
 
   // ── 1. Warehouse Services ─────────────────────────────────────────────
@@ -150,7 +155,25 @@ export function downloadPriceListExcel(services: CatalogService[], deliveryZones
   wsAll['!cols'] = autoSize(allRows);
   XLSX.utils.book_append_sheet(wb, wsAll, 'All Services');
 
-  // ── 6. Delivery Zones ─────────────────────────────────────────────────
+  // ── 6. Classes ────────────────────────────────────────────────────────
+  // Reference sheet — the cubic-foot value that storage billing multiplies
+  // against the STOR rate. Include inactive rows so legacy classes remain
+  // auditable.
+  if (itemClasses.length > 0) {
+    const classRows = [...itemClasses]
+      .sort((a, b) => a.displayOrder - b.displayOrder)
+      .map(c => ({
+        Class:          c.id,
+        Name:           c.name,
+        'Storage Size': c.storageSize > 0 ? Number(c.storageSize.toFixed(2)) : '',
+        Active:         c.active ? 'Yes' : 'No',
+      }));
+    const wsClasses = XLSX.utils.json_to_sheet(classRows);
+    wsClasses['!cols'] = autoSize(classRows);
+    XLSX.utils.book_append_sheet(wb, wsClasses, 'Classes');
+  }
+
+  // ── 7. Delivery Zones ─────────────────────────────────────────────────
   // All zones regardless of active flag — the sheet is a reference sheet,
   // so showing which zips are Call-for-Quote / Out-of-Area is useful.
   if (deliveryZones.length > 0) {

@@ -56,9 +56,32 @@ function zoneRowToPublic(r: ZoneRow): PublicZone {
   };
 }
 
-// The sentinel tab name used when an admin opts in to include the zip
-// schedule. Must match `ZIP_TAB` in PriceList.tsx.
+// The sentinel tab names used when an admin opts in to include an
+// auxiliary section. Must match `ZIP_TAB` / `CLASSES_TAB` in PriceList.tsx.
 const ZIP_TAB = 'Zip Codes';
+const CLASSES_TAB = 'Classes';
+
+interface ClassRow {
+  id: string;
+  name: string | null;
+  storage_size: string | number | null;
+  display_order: number | null;
+}
+interface PublicClass {
+  id: string;
+  name: string;
+  storageSize: number;
+}
+function classRowToPublic(r: ClassRow): PublicClass {
+  const n = r.storage_size == null
+    ? 0
+    : (typeof r.storage_size === 'number' ? r.storage_size : parseFloat(r.storage_size) || 0);
+  return {
+    id: r.id,
+    name: r.name ?? '',
+    storageSize: n,
+  };
+}
 
 function rowToService(row: ServiceRow): CatalogService {
   const xxlRate = Number(row.xxl_rate ?? 0);
@@ -259,6 +282,46 @@ function PublicZoneTable({ zones }: { zones: PublicZone[] }) {
   );
 }
 
+function PublicClassesTable({ classes }: { classes: PublicClass[] }) {
+  const thStyle: React.CSSProperties = {
+    padding: '10px 16px', fontSize: 10, fontWeight: 600, letterSpacing: '2px',
+    textTransform: 'uppercase', color: TEXT_MUT, background: TH_BG,
+    textAlign: 'left', borderBottom: `1px solid ${BORDER}`,
+  };
+  const tdStyle: React.CSSProperties = {
+    padding: '11px 16px', fontSize: 13, color: TEXT,
+    borderBottom: `1px solid ${BORDER}`,
+  };
+  const tdNum: React.CSSProperties = { ...tdStyle, textAlign: 'right', fontVariantNumeric: 'tabular-nums' };
+  return (
+    <div>
+      <div style={{ padding: '14px 16px', borderBottom: `1px solid ${BORDER}`, background: BG_CARD, fontSize: 12, color: TEXT_MUT }}>
+        Storage billing uses the <strong style={{ color: TEXT }}>STOR rate × storage size × qty</strong> formula. The size column is the cubic-foot figure applied to each item's class.
+      </div>
+      <div style={{ overflowX: 'auto' }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+          <thead>
+            <tr>
+              <th style={thStyle}>Class</th>
+              <th style={thStyle}>Name</th>
+              <th style={{ ...thStyle, textAlign: 'right' }}>Storage Size</th>
+            </tr>
+          </thead>
+          <tbody>
+            {classes.map(c => (
+              <tr key={c.id} style={{ background: BG_CARD }}>
+                <td style={{ ...tdStyle, fontWeight: 700, letterSpacing: '0.5px' }}>{c.id}</td>
+                <td style={tdStyle}>{c.name || '—'}</td>
+                <td style={tdNum}>{c.storageSize > 0 ? `${c.storageSize} cu ft` : '—'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 // ─── Main component ───────────────────────────────────────────────────────────
 
 interface Props { shareId: string }
@@ -267,6 +330,7 @@ export function PublicRates({ shareId }: Props) {
   const [share, setShare] = useState<PriceListShare | null>(null);
   const [services, setServices] = useState<CatalogService[]>([]);
   const [zones, setZones] = useState<PublicZone[]>([]);
+  const [classes, setClasses] = useState<PublicClass[]>([]);
   const [activeTab, setActiveTab] = useState<string>('');
   const [status, setStatus] = useState<'loading' | 'unavailable' | 'ready'>('loading');
 
@@ -278,9 +342,10 @@ export function PublicRates({ shareId }: Props) {
       if (!s) { setStatus('unavailable'); return; }
       setShare(s);
 
-      // Service tabs are every entry except the zip sentinel.
-      const serviceCategories = s.tabs.filter(t => t !== ZIP_TAB);
-      const includeZips = s.tabs.includes(ZIP_TAB);
+      // Service tabs are every entry except the aux sentinels.
+      const serviceCategories = s.tabs.filter(t => t !== ZIP_TAB && t !== CLASSES_TAB);
+      const includeZips    = s.tabs.includes(ZIP_TAB);
+      const includeClasses = s.tabs.includes(CLASSES_TAB);
 
       const svcPromise: Promise<{ data: ServiceRow[] | null; error: unknown }> =
         serviceCategories.length > 0
@@ -299,11 +364,20 @@ export function PublicRates({ shareId }: Props) {
               .eq('active', true)
               .order('zip_code', { ascending: true }) as unknown as Promise<{ data: ZoneRow[] | null; error: unknown }>)
           : Promise.resolve({ data: [] as ZoneRow[], error: null });
-      const [svcRes, zoneRes] = await Promise.all([svcPromise, zonePromise]);
+      const classPromise: Promise<{ data: ClassRow[] | null; error: unknown }> =
+        includeClasses
+          ? (supabase
+              .from('item_classes')
+              .select('id,name,storage_size,display_order')
+              .eq('active', true)
+              .order('display_order', { ascending: true }) as unknown as Promise<{ data: ClassRow[] | null; error: unknown }>)
+          : Promise.resolve({ data: [] as ClassRow[], error: null });
+      const [svcRes, zoneRes, classRes] = await Promise.all([svcPromise, zonePromise, classPromise]);
       if (cancelled) return;
       if (svcRes.error) { setStatus('unavailable'); return; }
       setServices(((svcRes.data ?? []) as ServiceRow[]).map(rowToService));
       setZones(((zoneRes.data ?? []) as ZoneRow[]).map(zoneRowToPublic));
+      setClasses(((classRes.data ?? []) as ClassRow[]).map(classRowToPublic));
       setActiveTab(s.tabs[0] ?? '');
       setStatus('ready');
     })();
@@ -332,9 +406,11 @@ export function PublicRates({ shareId }: Props) {
   }
 
   // ── Ready ──────────────────────────────────────────────────────────────────
-  const isZipTab = activeTab === ZIP_TAB;
-  const tabServices = isZipTab ? [] : services.filter(s => s.category === activeTab);
-  const multiTab = share.tabs.length > 1;
+  const isZipTab     = activeTab === ZIP_TAB;
+  const isClassesTab = activeTab === CLASSES_TAB;
+  const isAuxTab     = isZipTab || isClassesTab;
+  const tabServices  = isAuxTab ? [] : services.filter(s => s.category === activeTab);
+  const multiTab     = share.tabs.length > 1;
 
   return (
     <div style={{ fontFamily: FONT, minHeight: '100vh', background: BG_PAGE, display: 'flex', flexDirection: 'column' }}>
@@ -394,13 +470,15 @@ export function PublicRates({ shareId }: Props) {
                 {activeTab}
               </div>
               <div style={{ fontSize: 18, fontWeight: 600, color: TEXT }}>
-                {isZipTab ? 'Delivery Zones' : `${activeTab} Services`}
+                {isZipTab ? 'Delivery Zones' : isClassesTab ? 'Item Classes' : `${activeTab} Services`}
               </div>
             </div>
             <div style={{ fontSize: 12, color: TEXT_MUT }}>
               {isZipTab
                 ? `${zones.length} zone${zones.length !== 1 ? 's' : ''}`
-                : `${tabServices.length} service${tabServices.length !== 1 ? 's' : ''}`
+                : isClassesTab
+                  ? `${classes.length} class${classes.length !== 1 ? 'es' : ''}`
+                  : `${tabServices.length} service${tabServices.length !== 1 ? 's' : ''}`
               }
             </div>
           </div>
@@ -413,6 +491,14 @@ export function PublicRates({ shareId }: Props) {
             ) : (
               <PublicZoneTable zones={zones} />
             )
+          ) : isClassesTab ? (
+            classes.length === 0 ? (
+              <div style={{ padding: '40px 24px', textAlign: 'center', color: TEXT_MUT, fontSize: 14 }}>
+                No classes available.
+              </div>
+            ) : (
+              <PublicClassesTable classes={classes} />
+            )
           ) : tabServices.length === 0 ? (
             <div style={{ padding: '40px 24px', textAlign: 'center', color: TEXT_MUT, fontSize: 14 }}>
               No services listed for this category.
@@ -422,8 +508,8 @@ export function PublicRates({ shareId }: Props) {
           )}
         </div>
 
-        {/* Class size legend for class-based tables (not shown on zip tab) */}
-        {!isZipTab && tabServices.some(s => s.billing === 'class_based') && (
+        {/* Class size legend for class-based tables (not shown on aux tabs) */}
+        {!isAuxTab && tabServices.some(s => s.billing === 'class_based') && (
           <div style={{ background: BG_CARD, borderRadius: RADIUS, border: `1px solid ${BORDER}`, padding: '16px 24px' }}>
             <div style={{ fontSize: 10, fontWeight: 600, letterSpacing: '2px', textTransform: 'uppercase', color: TEXT_MUT, marginBottom: 12 }}>Size Guide</div>
             <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap' }}>

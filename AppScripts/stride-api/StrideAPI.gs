@@ -1,5 +1,21 @@
 /* ===================================================
-   StrideAPI.gs — v38.90.0 — 2026-04-20 PST — repair emails: staff + client for all 4 paths
+   StrideAPI.gs — v38.91.0 — 2026-04-20 PST — parity log event-level writes
+   v38.91.0: Phase 5 shadow-mode rate comparisons now land as structured
+             rows in public.billing_parity_log (new table this session).
+             Until now api_lookupRate_ emitted PARITY_OK / PARITY_MISMATCH
+             to Logger.log only — invisible to the app. The Billing
+             Rate Parity tab now queries the table for a live feed.
+             api_lookupRate_ gained an optional 4th `ctx` arg that
+             carries event context (itemId, clientName, tenantId, qty,
+             eventSource, ledgerRowId). Callers that don't pass ctx
+             still produce useful aggregate rows (svcCode + class +
+             rates + match). Write is best-effort via
+             api_writeParityLog_ — silent on any Supabase failure so
+             billing never stalls on logging. Priority call sites
+             threaded: receiving (RCVG + addons), task completion
+             (INSP/ASM/custom), storage generate + preview. Remaining
+             call sites (WC fee at create + add-items, add-on toggle)
+             log aggregate-only; safe to thread later.
    v38.90.0: REPAIR EMAIL RECIPIENT ALIGNMENT. All four repair email
              paths now send to the merged NOTIFICATION_EMAILS +
              CLIENT_EMAIL distribution (was selectively only one or the
@@ -10441,8 +10457,19 @@ function api_lookupRateFromSheet_(ss, svcCode, itemClass) {
  *   PARITY_OK       — both sources agreed
  *   PARITY_MISMATCH — rate delta > 0.001
  *   PARITY_MISMATCH supabase_missing — sheet has a rate Supabase doesn't
+ *
+ * v38.90.0: parity comparison ALSO lands as a structured row in
+ * `public.billing_parity_log` when both sources return a result (or when
+ * Supabase is missing and the sheet has a real rate). Optional 4th arg
+ * `ctx` carries extra event context that's preserved on the log row:
+ *   ctx = {
+ *     itemId, clientName, tenantId,
+ *     qty, eventSource, ledgerRowId
+ *   }
+ * Callers that don't pass ctx still log svcCode/class/rates — those rows
+ * are aggregate-useful even without an item identity.
  */
-function api_lookupRate_(ss, svcCode, itemClass) {
+function api_lookupRate_(ss, svcCode, itemClass, ctx) {
   var sheetResult = api_lookupRateFromSheet_(ss, svcCode, itemClass);
 
   var sbResult = null;
@@ -10450,29 +10477,85 @@ function api_lookupRate_(ss, svcCode, itemClass) {
     Logger.log("api_lookupRate_ Supabase shadow error (non-fatal): " + e);
   }
 
+  var shRate = sheetResult ? Number(sheetResult.rate || 0) : 0;
+  var sbRate = sbResult ? Number(sbResult.rate || 0) : 0;
+  var diff = Math.abs(sbRate - shRate);
+  var match = null;
+
   if (sbResult && sheetResult) {
-    var sbRate = Number(sbResult.rate || 0);
-    var shRate = Number(sheetResult.rate || 0);
-    var diff = Math.abs(sbRate - shRate);
     if (diff > 0.001) {
+      match = false;
       Logger.log("PARITY_MISMATCH rate code=" + svcCode +
                  " class=" + (itemClass || "") +
                  " sheet=" + shRate +
                  " supabase=" + sbRate +
                  " delta=" + diff.toFixed(4));
     } else {
+      match = true;
       Logger.log("PARITY_OK rate code=" + svcCode +
                  " class=" + (itemClass || "") +
                  " rate=" + shRate);
     }
   } else if (!sbResult && sheetResult && Number(sheetResult.rate) > 0) {
+    match = false;
     Logger.log("PARITY_MISMATCH supabase_missing code=" + svcCode +
                " class=" + (itemClass || "") +
                " sheet=" + sheetResult.rate);
   }
 
+  // Structured log to Supabase (best-effort). Only writes when we have
+  // a meaningful comparison — skips pure sheet-miss cases to keep the
+  // table aligned with "was this an actual rate lookup".
+  if (match !== null) {
+    try {
+      var c = ctx || {};
+      var q = Number(c.qty || 1) || 1;
+      api_writeParityLog_({
+        tenant_id:         String(c.tenantId || ""),
+        client_name:       String(c.clientName || ""),
+        item_id:           String(c.itemId || ""),
+        svc_code:          String(svcCode || ""),
+        svc_name:          String((sheetResult && sheetResult.svcName) || (sbResult && sbResult.svcName) || ""),
+        item_class:        String(itemClass || ""),
+        sheet_rate:        sheetResult ? shRate : null,
+        supabase_rate:     sbResult ? sbRate : null,
+        sheet_total:       sheetResult ? Math.round(shRate * q * 100) / 100 : null,
+        supabase_total:    sbResult ? Math.round(sbRate * q * 100) / 100 : null,
+        qty:               q,
+        match:             match,
+        delta:             Math.round((sbRate - shRate) * q * 100) / 100,
+        event_source:      String(c.eventSource || ""),
+        billing_ledger_id: String(c.ledgerRowId || "")
+      });
+    } catch (_) { /* non-fatal */ }
+  }
+
   // ALWAYS use sheet — Supabase is shadow only.
   return sheetResult;
+}
+
+/**
+ * api_writeParityLog_ — fire-and-forget POST to public.billing_parity_log.
+ * Wrapped so api_lookupRate_ never has to worry about Supabase auth or
+ * network failures. Silent on any error.
+ */
+function api_writeParityLog_(row) {
+  var url = prop_("SUPABASE_URL");
+  var key = prop_("SUPABASE_SERVICE_ROLE_KEY");
+  if (!url || !key) return;
+  try {
+    UrlFetchApp.fetch(url + "/rest/v1/billing_parity_log", {
+      method: "post",
+      headers: {
+        "apikey": key,
+        "Authorization": "Bearer " + key,
+        "Content-Type": "application/json",
+        "Prefer": "return=minimal"
+      },
+      payload: JSON.stringify(row),
+      muteHttpExceptions: true
+    });
+  } catch (_) { /* silent */ }
 }
 
 /** Applies client discount (negative=discount, positive=surcharge).
@@ -11012,7 +11095,11 @@ function handleCompleteShipment_(clientSheetId, payload) {
           var bItemId = String(bItem.itemId || "").trim();
           if (!bItemId) continue;
           var bClass = String(bItem.class || "").trim();
-          var priceInfo = api_lookupRate_(ss, "RCVG", bClass);
+          var priceInfo = api_lookupRate_(ss, "RCVG", bClass, {
+            itemId: bItemId, clientName: clientName, tenantId: clientSheetId,
+            qty: 1, eventSource: "receiving",
+            ledgerRowId: "RCVG-" + bItemId + "-" + shipmentNo
+          });
           var rate = priceInfo.rate;
           if (rate > 0 && priceInfo.category) {
             rate = api_applyDiscount_(settings, rate, priceInfo.category);
@@ -11049,7 +11136,11 @@ function handleCompleteShipment_(clientSheetId, payload) {
           for (var ac = 0; ac < addonCodes.length; ac++) {
             var addonCode = String(addonCodes[ac] || "").trim();
             if (!addonCode || addonCode === "RCVG") continue; // never duplicate the base RCVG row
-            var addonPrice = api_lookupRate_(ss, addonCode, bClass);
+            var addonPrice = api_lookupRate_(ss, addonCode, bClass, {
+              itemId: bItemId, clientName: clientName, tenantId: clientSheetId,
+              qty: 1, eventSource: "receiving_addon",
+              ledgerRowId: addonCode + "-" + bItemId + "-" + shipmentNo
+            });
             var addonRate = addonPrice.rate || 0;
             if (addonRate > 0 && addonPrice.category) {
               addonRate = api_applyDiscount_(settings, addonRate, addonPrice.category);
@@ -11543,7 +11634,11 @@ function handleCompleteTask_(clientSheetId, payload) {
       if (!invItem) {
         warnings.push("Inventory item not found for " + itemId + " — billing skipped");
       } else {
-        var rateData = api_lookupRate_(ss, svcCode, invItem.itemClass);
+        var rateData = api_lookupRate_(ss, svcCode, invItem.itemClass, {
+          itemId: itemId, clientName: clientName, tenantId: clientSheetId,
+          qty: 1, eventSource: "task_complete",
+          ledgerRowId: svcCode + "-TASK-" + taskId
+        });
         var isPASS = (result === "Pass");
         var isFAIL = (result === "Fail");
         var shouldBill = (isPASS && rateData.billIfPass) || (isFAIL && rateData.billIfFail);
@@ -15732,7 +15827,11 @@ function handleGenerateStorageCharges_(payload) {
         if (billableDays <= 0) continue;
 
         var klass    = cClass ? String(invVals[r][cClass - 1] || "").trim().toUpperCase() : "";
-        var rateInfo = api_lookupRate_(css, "STOR", klass);
+        var rateInfo = api_lookupRate_(css, "STOR", klass, {
+          itemId: cItem ? String(invVals[r][cItem - 1] || "").trim() : "",
+          clientName: client.name, tenantId: client.spreadsheetId,
+          qty: billableDays, eventSource: "storage"
+        });
         var baseRate = rateInfo.rate || 0;
         var cubicVol = Number(classVols[klass] || 0) || 0;
         var rawRate  = baseRate * cubicVol;
@@ -16068,7 +16167,11 @@ function handlePreviewStorageCharges_(payload) {
         if (billableDays <= 0) continue;
 
         var klass    = cClass ? String(invVals[r][cClass - 1] || "").trim().toUpperCase() : "";
-        var rateInfo = api_lookupRate_(css, "STOR", klass);
+        var rateInfo = api_lookupRate_(css, "STOR", klass, {
+          itemId: cItem ? String(invVals[r][cItem - 1] || "").trim() : "",
+          clientName: client.name, tenantId: client.spreadsheetId,
+          qty: billableDays, eventSource: "storage"
+        });
         var baseRate = rateInfo.rate || 0;
         var cubicVol = Number(classVols[klass] || 0) || 0;
         var rawRate  = baseRate * cubicVol;

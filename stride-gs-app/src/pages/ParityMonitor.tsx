@@ -10,6 +10,7 @@ import { theme } from '../styles/theme';
 import { useParityMonitor } from '../hooks/useParityMonitor';
 import { syncPriceListFromSupabase, type ParityService, type ParityClass } from '../lib/api';
 import { fmtDateTime } from '../lib/constants';
+import { LiveBillingEvents } from '../components/pricelist/LiveBillingEvents';
 
 const CLASSES: ParityClass[] = ['XS', 'S', 'M', 'L', 'XL', 'XXL'];
 
@@ -395,6 +396,15 @@ export function ParityMonitor() {
           <Loader2 size={18} style={{ animation: 'spin 1s linear infinite' }} /> Loading parity data…
         </div>
       )}
+
+      {/* v38.91.0 — live event-level feed from public.billing_parity_log.
+          Whereas the static table above compares every catalog row at a
+          point in time, this section shows the actual rate chosen during
+          each real billing event (receiving / task complete / storage
+          etc). Mismatches here mean the GAS shadow-mode cutover is
+          NOT safe to flip yet; zero mismatches across a representative
+          window = green light for Phase 5 primary flip. */}
+      <LiveBillingEvents />
     </div>
   );
 }
