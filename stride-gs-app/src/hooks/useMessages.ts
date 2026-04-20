@@ -33,7 +33,8 @@
  * derived from (related_entity_type, related_entity_id) for entity-linked
  * threads and from the other-party user_id for direct DMs.
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createContext, createElement, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../contexts/AuthContext';
 
@@ -185,7 +186,19 @@ export interface UseMessagesResult {
   dismissBanner: (messageId: string) => void;
 }
 
-export function useMessages(): UseMessagesResult {
+/**
+ * Internal implementation. Do not call directly from components — use the
+ * `useMessages` export below which reads from <MessagesProvider>.
+ *
+ * Session 74: the hook was previously used from three separate mount
+ * points (TopBar bell, AppLayout banner, MessagesPage). Each call created
+ * a Supabase Realtime channel with the same name (`messages_inbox_<uid>`);
+ * Supabase rejected the duplicates with CHANNEL_ERROR, which also meant
+ * Realtime events only fired for one instance — or none. The fix is a
+ * single shared instance via Context: MessagesProvider calls this impl
+ * once, and every consumer reads from the same result.
+ */
+function useMessagesImpl(): UseMessagesResult {
   const { user } = useAuth();
   const [authUserId, setAuthUserId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -747,4 +760,35 @@ export function useMessages(): UseMessagesResult {
   }), [conversationsWithNames, thread, threadLoading, loading, unreadCount, activeThreadKey,
        openThread, closeThread, sendMessage, markRead, markAllReadInThread, archiveMessage,
        deleteConversation, refetch, latestUnreadIncoming, dismissBanner]);
+}
+
+// ─── Context + Provider + public hook ───────────────────────────────────────
+// Session 74: single-instance pattern. MessagesProvider (mount once in
+// AppLayout) calls useMessagesImpl and provides the result. The exported
+// `useMessages` hook reads from the Context so every consumer — the TopBar
+// bell, the MessageTopBanner, the MessagesPage itself — shares ONE hook
+// instance and ONE Supabase Realtime channel. Prevents the same-name
+// channel collisions that produced CHANNEL_ERROR.
+
+const MessagesContext = createContext<UseMessagesResult | null>(null);
+
+export function MessagesProvider({ children }: { children: ReactNode }) {
+  const value = useMessagesImpl();
+  // createElement avoids needing this file to be .tsx. Equivalent to:
+  //   <MessagesContext.Provider value={value}>{children}</MessagesContext.Provider>
+  return createElement(MessagesContext.Provider, { value }, children);
+}
+
+export function useMessages(): UseMessagesResult {
+  const ctx = useContext(MessagesContext);
+  if (!ctx) {
+    // Defensive: if a consumer mounts outside MessagesProvider we still
+    // return a usable result (just its own instance). This keeps edge
+    // cases like Storybook and isolated tests working without forcing
+    // every wrapping to include the provider. The cost is one channel
+    // per orphan consumer — functional, just not shared.
+    // eslint-disable-next-line react-hooks/rules-of-hooks
+    return useMessagesImpl();
+  }
+  return ctx;
 }

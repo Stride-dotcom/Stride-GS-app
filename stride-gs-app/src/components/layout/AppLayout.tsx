@@ -16,6 +16,7 @@ import { supabase } from '../../lib/supabase';
 // useMessages directly: a persistent top banner (MessageTopBanner) plus
 // the unread-count badge on the TopBar bell.
 import { MessageTopBanner } from '../messages/MessageTopBanner';
+import { MessagesProvider } from '../../hooks/useMessages';
 
 const PAGE_TITLES: Record<string, string> = {
   '/': 'Dashboard',
@@ -69,6 +70,7 @@ export function AppLayout() {
   }, [location.pathname]);
 
   return (
+    <MessagesProvider>
     <div
       style={{
         display: 'flex',
@@ -195,5 +197,6 @@ export function AppLayout() {
         </main>
       </div>
     </div>
+    </MessagesProvider>
   );
 }
