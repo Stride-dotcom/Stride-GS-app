@@ -68,14 +68,22 @@ export function MessagesPage() {
 
   const handleSend = async (body: string) => {
     if (!active) return;
-    // Recipient resolution: direct threads → the other party's user id
-    // lives in the key. Entity threads → we can't know recipients from
-    // the list alone, so we send to the last sender (the person currently
-    // talking to you). This keeps a minimum-viable send path; full
-    // recipient-picker UI lives in a separate follow-up component.
+    // Recipient resolution: direct threads → the OTHER party's user id
+    // (key format is `direct:<uidA>:<uidB>` sorted-stable; pick whichever
+    // isn't self). Entity threads → we can't know recipients from the
+    // list alone, so we send to the last sender (the person currently
+    // talking to you). Minimum-viable send path; full recipient-picker
+    // UI lives in a separate follow-up component.
     let recipientIds: string[] = [];
     if (active.key.startsWith('direct:')) {
-      recipientIds = [active.key.slice('direct:'.length)];
+      // Session 74 hotfix: the previous `.slice('direct:'.length)` returned
+      // the concatenated `uidA:uidB` blob as a single string, which then
+      // became a malformed uuid in message_recipients.user_id and the
+      // insert failed silently. Split properly and pick the non-self side.
+      const parts = active.key.split(':'); // ['direct', uidA, uidB]
+      const [a, b] = [parts[1], parts[2]];
+      const other = a === authUserId ? b : a;
+      if (other) recipientIds = [other];
     } else if (thread.length > 0) {
       const lastOther = [...thread].reverse().find(m => m.senderId !== authUserId);
       if (lastOther?.senderId) recipientIds = [lastOther.senderId];

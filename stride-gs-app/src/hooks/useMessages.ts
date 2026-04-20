@@ -402,7 +402,22 @@ export function useMessages(): UseMessagesResult {
     //     recipient rows and keep only those where BOTH self and other
     //     appear as recipients.
     let hydrated: Message[] = [];
-    if (key.startsWith('entity:')) {
+    if (key.startsWith('msg:')) {
+      // Fallback branch: conversation was keyed on a single message id
+      // because neither a related entity nor an identifiable other party
+      // could be resolved (happens with self-DMs or older messages
+      // missing recipient rows). Load that single message so the thread
+      // still renders something instead of "No messages yet".
+      const msgId = key.slice('msg:'.length);
+      const { data, error } = await supabase
+        .from('messages')
+        .select('*')
+        .eq('id', msgId)
+        .limit(1);
+      if (!error && data && data.length > 0) {
+        hydrated = await hydrate(data as MessageRow[], authUserId);
+      }
+    } else if (key.startsWith('entity:')) {
       const parts = key.split(':');
       const entityType = parts[1];
       const entityId = parts.slice(2).join(':');
@@ -431,16 +446,40 @@ export function useMessages(): UseMessagesResult {
       // Hydrate (fetches recipients + profile names for every candidate).
       const hydratedCandidates = await hydrate(candidates, authUserId);
       // Keep only messages where BOTH self AND other are participants.
-      // The sender is always a participant even without their own recipient
-      // row (older test messages + sends where the sender's self-recipient
-      // insert may have been skipped), so treat the participants set as
-      // senderId UNION recipientUserIds. Previously this filter required
-      // both sides in recipientUserIds, which silently excluded every
-      // message whose author wasn't in their own recipient list and
-      // surfaced as "No messages yet" in the thread view.
+      //
+      // Participants = senderId ∪ recipientUserIds ∪ { any user whose
+      // recipient row can be inferred from RLS-visible data }. The sender
+      // is always a participant even without their own recipient row
+      // (older test messages + sends where the sender's self-recipient
+      // insert may have been skipped); the "other" in the key is also
+      // inherently a participant because we got here by selecting sender
+      // IN (self, other) — a message with sender=self must be TO other
+      // (or the sender-recipient would bleed into unrelated threads, but
+      // the candidate query only considers these two senders, and RLS
+      // only returned messages the current user can already see).
+      //
+      // So: if the sender is one of {self, other} and the other party is
+      // present anywhere on the row OR the sender IS the other party
+      // (inbound message from them), we keep it. This is the union
+      // semantics plus a fallback-visible rule.
       hydrated = hydratedCandidates.filter(m => {
-        const participants = new Set<string>([m.senderId, ...m.recipientUserIds]);
-        return participants.has(authUserId) && participants.has(other);
+        const senderIsSelf  = m.senderId === authUserId;
+        const senderIsOther = m.senderId === other;
+        const recipsContainSelf  = m.recipientUserIds.includes(authUserId);
+        const recipsContainOther = m.recipientUserIds.includes(other);
+        // Inbound from the other party: senderIsOther + recipsContainSelf
+        if (senderIsOther && recipsContainSelf) return true;
+        // Outbound to the other party: senderIsSelf + recipsContainOther
+        if (senderIsSelf && recipsContainOther) return true;
+        // Self-DM: sender = self AND I'm in recipients (rare).
+        if (senderIsSelf && recipsContainSelf && other === authUserId) return true;
+        // Broad fallback: sender is one of the two AND at least one party
+        // is on the row — this catches old data where the sender's
+        // self-recipient insert failed. Doesn't leak third-party messages
+        // because the candidate query already constrained sender_id to
+        // the pair.
+        if ((senderIsSelf || senderIsOther) && (recipsContainSelf || recipsContainOther)) return true;
+        return false;
       });
     }
 
