@@ -109,6 +109,26 @@ export interface UseExpectedShipmentsResult {
   remove: (id: string) => Promise<boolean>;
 }
 
+// ─── Cross-instance sync bus ────────────────────────────────────────────────
+// Problem: ExpectedCalendar and useCalendarEvents each call this hook, so
+// there are TWO independent `items` states. When one instance runs add(),
+// its optimistic update is invisible to the other until Supabase Realtime
+// echoes back (1-2s round trip). The user sees stale calendar views and
+// thinks they need to refresh.
+//
+// Fix: broadcast mutations through a module-level bus so every mounted
+// instance mirrors the change instantly. Supabase Realtime is still the
+// authoritative source for CROSS-CLIENT updates (another user's write);
+// this bus handles SAME-CLIENT cross-instance coherence.
+type BusEvent =
+  | { type: 'add';    item: ExpectedShipment }
+  | { type: 'update'; item: ExpectedShipment }
+  | { type: 'remove'; id: string };
+const syncBus = new EventTarget();
+function broadcast(evt: BusEvent): void {
+  syncBus.dispatchEvent(new CustomEvent<BusEvent>('change', { detail: evt }));
+}
+
 export function useExpectedShipments(): UseExpectedShipmentsResult {
   const { user } = useAuth();
   const [items, setItems] = useState<ExpectedShipment[]>([]);
@@ -145,6 +165,29 @@ export function useExpectedShipments(): UseExpectedShipmentsResult {
   }, []);
 
   useEffect(() => { doFetch(); }, [doFetch]);
+
+  // Subscribe every instance to the module-level bus so same-session mutations
+  // sync across all mount points instantly — no Realtime round trip.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<BusEvent>).detail;
+      if (!detail) return;
+      setItems(prev => {
+        if (detail.type === 'add') {
+          if (prev.some(p => p.id === detail.item.id)) return prev;
+          return [...prev, detail.item].sort((a, b) => a.expectedDate.localeCompare(b.expectedDate));
+        }
+        if (detail.type === 'update') {
+          return prev.map(p => (p.id === detail.item.id ? detail.item : p))
+                     .sort((a, b) => a.expectedDate.localeCompare(b.expectedDate));
+        }
+        // remove
+        return prev.filter(p => p.id !== detail.id);
+      });
+    };
+    syncBus.addEventListener('change', handler);
+    return () => syncBus.removeEventListener('change', handler);
+  }, []);
 
   // Realtime: refresh on any INSERT/UPDATE/DELETE across all tabs.
   useEffect(() => {
@@ -186,12 +229,12 @@ export function useExpectedShipments(): UseExpectedShipmentsResult {
       return null;
     }
     const created = rowToShipment(data as DbRow);
-    // Optimistic local insert — Realtime echo will also fire a refetch,
-    // but this makes the UI feel instant even on slow connections.
-    setItems(prev => {
-      if (prev.some(p => p.id === created.id)) return prev;
-      return [...prev, created].sort((a, b) => a.expectedDate.localeCompare(b.expectedDate));
-    });
+    // Broadcast to the module bus — every other mounted instance of this
+    // hook (e.g. useCalendarEvents) receives the new row immediately and
+    // updates its local `items`, so the calendar grid reflects the
+    // addition without waiting on the Supabase Realtime echo. The local
+    // listener picks this up too, so we don't double-setItems here.
+    broadcast({ type: 'add', item: created });
     return created;
   }, [user?.displayName, user?.email]);
 
@@ -207,20 +250,26 @@ export function useExpectedShipments(): UseExpectedShipmentsResult {
     if (patch.notes !== undefined) updateRow.notes = patch.notes ?? null;
     if (Object.keys(updateRow).length === 0) return true;
 
-    // Optimistic local patch
-    setItems(prev => prev.map(it => it.id === id ? {
-      ...it,
-      client: patch.client ?? it.client,
-      clientName: patch.client ?? it.clientName,
-      clientSheetId: patch.clientSheetId ?? it.clientSheetId,
-      tenantId: patch.clientSheetId ?? it.tenantId,
-      vendor: patch.vendor !== undefined ? patch.vendor : it.vendor,
-      carrier: patch.carrier !== undefined ? patch.carrier : it.carrier,
-      tracking: patch.tracking !== undefined ? patch.tracking : it.tracking,
-      expectedDate: patch.expectedDate ?? it.expectedDate,
-      pieces: patch.pieces !== undefined ? patch.pieces : it.pieces,
-      notes: patch.notes !== undefined ? patch.notes : it.notes,
-    } : it));
+    // Broadcast the optimistic patch to every hook instance. The local
+    // bus listener merges into its own `items`, so the calendar view
+    // updates in lockstep with the panel that made the edit.
+    const existing = items.find(it => it.id === id);
+    if (existing) {
+      const merged: ExpectedShipment = {
+        ...existing,
+        client: patch.client ?? existing.client,
+        clientName: patch.client ?? existing.clientName,
+        clientSheetId: patch.clientSheetId ?? existing.clientSheetId,
+        tenantId: patch.clientSheetId ?? existing.tenantId,
+        vendor: patch.vendor !== undefined ? patch.vendor : existing.vendor,
+        carrier: patch.carrier !== undefined ? patch.carrier : existing.carrier,
+        tracking: patch.tracking !== undefined ? patch.tracking : existing.tracking,
+        expectedDate: patch.expectedDate ?? existing.expectedDate,
+        pieces: patch.pieces !== undefined ? patch.pieces : existing.pieces,
+        notes: patch.notes !== undefined ? patch.notes : existing.notes,
+      };
+      broadcast({ type: 'update', item: merged });
+    }
 
     const { error: err } = await supabase
       .from('expected_shipments')
@@ -232,11 +281,13 @@ export function useExpectedShipments(): UseExpectedShipmentsResult {
       return false;
     }
     return true;
-  }, [doFetch]);
+  }, [doFetch, items]);
 
   const remove = useCallback(async (id: string): Promise<boolean> => {
     // Soft delete — flip status to 'cancelled'
-    setItems(prev => prev.filter(it => it.id !== id)); // optimistic remove from list
+    // Broadcast the remove so every instance (including the calendar's
+    // useCalendarEvents) drops the row from its local cache instantly.
+    broadcast({ type: 'remove', id });
     const { error: err } = await supabase
       .from('expected_shipments')
       .update({ status: 'cancelled' })
