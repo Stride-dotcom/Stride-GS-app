@@ -1,5 +1,27 @@
+/**
+ * quotePdf — generate a branded Quote PDF.
+ *
+ * Primary path (v2): fetch the `DOC_QUOTE` template from Supabase
+ * (`public.email_templates`), inject line-item rows + scalar tokens,
+ * then open the result in a new window and trigger `window.print()`
+ * so the user can Save-as-PDF from the browser dialog. This makes the
+ * Quote PDF use the SAME branded HTML shell as the Invoice PDF
+ * (Stride header, logo, grey right-aligned title, Bill-To block,
+ * line-items table, totals, centered footer) — edits in
+ * Settings → Documents flow through automatically.
+ *
+ * Fallback path (legacy): if Supabase is unreachable or the template
+ * row is missing/empty, fall back to the original inline HTML that
+ * shipped with the Quote Tool. That keeps the button working offline
+ * and if the row is ever accidentally deleted.
+ *
+ * Session 74 — swap from hardcoded HTML to template-driven.
+ */
 import type { Quote, QuoteCatalog, QuoteStoreSettings, CalcResult } from './quoteTypes';
 import { calcQuote } from './quoteCalc';
+import { supabase } from './supabase';
+
+// ─── Formatting helpers ────────────────────────────────────────────────────
 
 function fmt$(n: number): string {
   return '$' + n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -9,13 +31,174 @@ function escHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-export function generateQuotePdf(quote: Quote, catalog: QuoteCatalog, settings: QuoteStoreSettings): void {
-  const result: CalcResult = calcQuote(quote, catalog.services, catalog.classes, catalog.coverageOptions);
+// ─── Supabase template loader ──────────────────────────────────────────────
 
-  // Group line items by category
+async function loadQuoteTemplateBody(): Promise<string | null> {
+  try {
+    const { data, error } = await supabase
+      .from('email_templates')
+      .select('body')
+      .eq('template_key', 'DOC_QUOTE')
+      .single();
+    if (error) {
+      console.warn('[quotePdf] DOC_QUOTE fetch error:', error.message);
+      return null;
+    }
+    return data?.body ?? null;
+  } catch (err) {
+    console.warn('[quotePdf] DOC_QUOTE fetch threw:', err);
+    return null;
+  }
+}
+
+// ─── Line items table generator ────────────────────────────────────────────
+
+/**
+ * Build the line-items rows as a single HTML string of <tr>...</tr>
+ * blocks. Column order + cell classes match the invoice-derived quote
+ * template's header row so visual styling (border colors, paddings,
+ * cell widths) is inherited for free.
+ *
+ * Invoice-style column layout (7 cols, left→right):
+ *   c33 — Service Date   (left blank for quotes)
+ *   c32 — Service        (service name)
+ *   c32 — Item ID        (service code, or blank)
+ *   c41 — Notes          (class name or category fallback)
+ *   c39 — Qty
+ *   c27 — Rate
+ *   c30 — Total
+ */
+function buildLineItemsRows(calc: CalcResult): string {
+  if (calc.lineItems.length === 0) {
+    // Empty state row so the table doesn't collapse to zero height.
+    return (
+      '<tr class="c11">' +
+      '<td class="c33" colspan="7" rowspan="1"><p class="c7"><span class="c16">' +
+      '(No line items selected — open the quote and choose services.)' +
+      '</span></p></td>' +
+      '</tr>'
+    );
+  }
+
+  const cell = (cls: string, text: string, align?: 'right' | 'center') => {
+    const pAttr = align === 'right' ? 'c10' : align === 'center' ? 'c18' : 'c7';
+    return (
+      '<td class="' + cls + '" colspan="1" rowspan="1">' +
+      '<p class="' + pAttr + '"><span class="c16">' + text + '</span></p>' +
+      '</td>'
+    );
+  };
+
+  return calc.lineItems
+    .map(li => {
+      const notes = li.className ? escHtml(li.className) : escHtml(li.category || '');
+      return (
+        '<tr class="c11">' +
+        cell('c33', '') +
+        cell('c32', escHtml(li.serviceName)) +
+        cell('c32', escHtml(li.serviceCode || '')) +
+        cell('c41', notes) +
+        cell('c39', String(li.qty), 'center') +
+        cell('c27', fmt$(li.rate), 'right') +
+        cell('c30', fmt$(li.amount), 'right') +
+        '</tr>'
+      );
+    })
+    .join('');
+}
+
+/**
+ * Replace the whole placeholder <tr>…{{LINE_ITEMS_HTML}}…</tr> row with
+ * the generated line-item rows. Inline string replace won't work here
+ * because `{{LINE_ITEMS_HTML}}` lives inside a <td><p><span>…</span></p></td>
+ * inside a <tr> — a plain substitution would leave that wrapper row in
+ * place and insert our `<tr>` rows inside a `<td>`, which browsers
+ * reject when parsing into a table.
+ *
+ * Strategy: find the token, walk backward to the nearest opening `<tr`
+ * and forward to the nearest closing `</tr>`, then splice that entire
+ * row out and replace with the generated rows.
+ */
+function replaceLineItemsRow(html: string, lineRowsHtml: string): string {
+  const TOKEN = '{{LINE_ITEMS_HTML}}';
+  const idx = html.indexOf(TOKEN);
+  if (idx < 0) return html;
+  const trStart = html.lastIndexOf('<tr', idx);
+  const trEnd = html.indexOf('</tr>', idx);
+  if (trStart < 0 || trEnd < 0) {
+    // Couldn't find a wrapping <tr> — fall back to plain substitution.
+    return html.split(TOKEN).join(lineRowsHtml);
+  }
+  return html.slice(0, trStart) + lineRowsHtml + html.slice(trEnd + '</tr>'.length);
+}
+
+// ─── Scalar token substitution ─────────────────────────────────────────────
+
+function substituteScalars(html: string, tokens: Record<string, string>): string {
+  let out = html;
+  for (const [key, value] of Object.entries(tokens)) {
+    out = out.split('{{' + key + '}}').join(value);
+  }
+  return out;
+}
+
+// ─── Primary template-driven generator ─────────────────────────────────────
+
+async function generateFromTemplate(
+  quote: Quote,
+  catalog: QuoteCatalog,
+  settings: QuoteStoreSettings,
+): Promise<string | null> {
+  const body = await loadQuoteTemplateBody();
+  if (!body) return null;
+  const calc = calcQuote(quote, catalog.services, catalog.classes, catalog.coverageOptions);
+
+  // Step 1: replace the line-items row (structural splice, not string sub).
+  let html = replaceLineItemsRow(body, buildLineItemsRows(calc));
+
+  // Step 2: scalar tokens. All other {{TOKEN}}s are plain text slots.
+  const covOption = catalog.coverageOptions.find(c => c.id === quote.coverage.typeId);
+  const scalars: Record<string, string> = {
+    QUOTE_NUMBER:    escHtml(quote.number),
+    CLIENT_NAME:     escHtml(quote.client || 'N/A'),
+    PROJECT:         escHtml(quote.project || ''),
+    ADDRESS:         escHtml(quote.address || ''),
+    QUOTE_DATE:      escHtml(quote.date),
+    EXPIRATION_DATE: escHtml(quote.expiration),
+    SUBTOTAL:        fmt$(calc.subtotal),
+    DISCOUNT:        calc.discountAmount > 0 ? '-' + fmt$(calc.discountAmount) : fmt$(0),
+    TAX:             fmt$(calc.taxAmount),
+    COVERAGE:        fmt$(calc.coverageCost),
+    GRAND_TOTAL:     fmt$(calc.grandTotal),
+    NOTES:           escHtml(quote.customerNotes || ''),
+    CLIENT_EMAIL:    '',  // not modeled on Quote yet
+    CLIENT_ADDRESS:  escHtml(quote.address || ''),
+    // Legacy invoice-derived tokens kept in case any older quote template
+    // body hasn't been migrated yet: map them to quote equivalents so the
+    // user never sees literal {{INV_NO}} on a quote PDF.
+    INV_NO:          escHtml(quote.number),
+    INV_DATE:        escHtml(quote.date),
+    DUE_DATE:        escHtml(quote.expiration),
+    PAYMENT_TERMS:   escHtml(settings.companyName || ''),
+  };
+  // Coverage label appended into NOTES area if the quote has one selected
+  if (covOption) {
+    scalars.COVERAGE_LABEL = escHtml(covOption.name);
+  }
+  html = substituteScalars(html, scalars);
+  return html;
+}
+
+// ─── Fallback (legacy hardcoded) generator ─────────────────────────────────
+
+function generateFallbackHtml(
+  quote: Quote,
+  catalog: QuoteCatalog,
+  settings: QuoteStoreSettings,
+): string {
+  const result = calcQuote(quote, catalog.services, catalog.classes, catalog.coverageOptions);
   const grouped: Record<string, typeof result.lineItems> = {};
   for (const li of result.lineItems) (grouped[li.category] ??= []).push(li);
-
   const covOption = catalog.coverageOptions.find(c => c.id === quote.coverage.typeId);
 
   let linesHtml = '';
@@ -31,7 +214,7 @@ export function generateQuotePdf(quote: Quote, catalog: QuoteCatalog, settings: 
     }
   }
 
-  const html = `<!DOCTYPE html>
+  return `<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>Estimate ${escHtml(quote.number)}</title>
 <style>
   @media print { body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }
@@ -105,12 +288,38 @@ ${quote.customerNotes ? `<div class="notes"><strong>Notes:</strong> ${escHtml(qu
   ${escHtml(settings.companyName)} · ${escHtml(settings.companyAddress)} · ${escHtml(settings.companyPhone)}
 </div>
 </body></html>`;
+}
 
-  // Open in a new window and trigger print (Save as PDF)
-  const win = window.open('', '_blank');
-  if (win) {
-    win.document.write(html);
-    win.document.close();
-    setTimeout(() => win.print(), 300);
+// ─── Public entry point ────────────────────────────────────────────────────
+
+/**
+ * Generate and open the Quote PDF in a new window. The window then
+ * auto-invokes `print()` so the user gets the Save-as-PDF dialog.
+ * Async because the template fetch crosses the network; callers can
+ * fire-and-forget or await.
+ */
+export async function generateQuotePdf(
+  quote: Quote,
+  catalog: QuoteCatalog,
+  settings: QuoteStoreSettings,
+): Promise<void> {
+  let html: string | null = null;
+  try {
+    html = await generateFromTemplate(quote, catalog, settings);
+  } catch (err) {
+    console.warn('[quotePdf] template generation threw; using fallback:', err);
   }
+  if (!html) {
+    html = generateFallbackHtml(quote, catalog, settings);
+  }
+
+  const win = window.open('', '_blank');
+  if (!win) {
+    console.warn('[quotePdf] popup blocked — cannot open PDF window');
+    return;
+  }
+  win.document.write(html);
+  win.document.close();
+  // Give the browser a beat to paint before invoking the print dialog.
+  setTimeout(() => { try { win.print(); } catch (_e) { /* noop */ } }, 300);
 }

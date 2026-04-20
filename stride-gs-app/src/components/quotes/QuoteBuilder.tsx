@@ -52,7 +52,12 @@ export function QuoteBuilder({ store, quoteId, onBack }: Props) {
   }, [quoteId, deleteQuoteFn, onBack]);
   const handleDownloadPdf = useCallback(() => {
     if (!quote) return;
-    generateQuotePdf(quote, store.catalog, store.settings); showToast('PDF downloaded');
+    // generateQuotePdf is now async (it fetches the DOC_QUOTE template
+    // from Supabase). Fire-and-forget — the toast is shown as soon as
+    // the window.open dialog is triggered; errors are logged inside
+    // quotePdf itself and the fallback HTML is used automatically.
+    void generateQuotePdf(quote, store.catalog, store.settings);
+    showToast('PDF opening — use the print dialog to save as PDF');
   }, [quote, store.catalog, store.settings, showToast]);
 
   if (!quote) {
