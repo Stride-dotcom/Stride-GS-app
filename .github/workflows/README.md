@@ -1,8 +1,6 @@
 # GitHub Actions Workflows
 
-Two workflows — both **manual-trigger only**. Nothing fires automatically.
-
-Deploys are done locally via `npm run deploy` (see `stride-gs-app/scripts/deploy.js`). There is no auto-deploy pipeline.
+Three workflows. **`deploy.yml` fires automatically on every push to `source`** — no manual deploy needed for React changes.
 
 ---
 
@@ -10,10 +8,7 @@ Deploys are done locally via `npm run deploy` (see `stride-gs-app/scripts/deploy
 
 ### 1. `ci.yml` — CI (typecheck + build)
 
-**Trigger:** Manual only (`workflow_dispatch`) — GitHub Actions UI or:
-```bash
-gh workflow run ci.yml
-```
+**Trigger:** Push to `source` or PR targeting `source` (paths: `stride-gs-app/**`), plus `workflow_dispatch`.
 
 **What it does:**
 1. Installs Node 20 + `npm ci`
@@ -21,17 +16,35 @@ gh workflow run ci.yml
 3. Runs `npm run build` (full `verify-entry → tsc → vite → module-count → bundle-size` pipeline)
 4. Reports bundle filename + size in the job summary
 
-**Purpose:** On-demand sanity check — typecheck and build without deploying. Useful for verifying a branch from CI's perspective (e.g. matches what would run on a teammate's machine) or when you don't have Node 20 installed locally.
-
-**Secrets required (only for build to embed Supabase URL):**
+**Secrets required:**
 - `VITE_SUPABASE_URL`
 - `VITE_SUPABASE_ANON_KEY`
 
-Typecheck works without these; only the build embeds them.
+---
+
+### 2. `deploy.yml` — Auto-deploy to GitHub Pages ⚡
+
+**Trigger:** Push to `source` (no path filter — any push), plus `workflow_dispatch`.
+
+**What it does:**
+1. Installs Node 20 + `npm ci`
+2. Builds with `npm run build` (full safeguard pipeline) with Supabase + API secrets injected
+3. Reports bundle size in job summary
+4. Force-pushes `stride-gs-app/dist/` to `origin/main` via `peaceiris/actions-gh-pages@v4` with `force_orphan: true`
+
+**This replaces `npm run deploy`.** After pushing to `source`, GitHub Actions builds and deploys automatically. CDN propagates in 1–5 min; hard-refresh (Ctrl+Shift+R) to verify.
+
+The `dist/.git` subtree and `npm run deploy` still work as a manual override if needed.
+
+**Secrets required:**
+- `VITE_SUPABASE_URL` ✅
+- `VITE_SUPABASE_ANON_KEY` ✅
+- `VITE_API_URL` — optional; falls back to hardcoded production GAS URL
+- `VITE_API_TOKEN` — optional; falls back to `stride-prod-2026`
 
 ---
 
-### 2. `migrate.yml` — Apply Supabase Migration
+### 3. `migrate.yml` — Apply Supabase Migration
 
 **Trigger:** Manual only (`workflow_dispatch`) — GitHub Actions UI or:
 ```bash
@@ -46,9 +59,8 @@ gh workflow run migrate.yml \
 3. If `confirm=true`: installs Supabase CLI and runs `supabase db push --db-url` to apply all pending migrations from `stride-gs-app/supabase/migrations/`
 
 **Secrets required:**
-- `SUPABASE_DB_URL` — PostgreSQL connection string
+- `SUPABASE_DB_URL` ✅ — PostgreSQL connection string
   - Format: `postgresql://postgres:[password]@db.uqplppugeickmamycpuz.supabase.co:5432/postgres`
-  - Find password: Supabase dashboard → Settings → Database → Connection string → URI
 
 ---
 
@@ -56,28 +68,30 @@ gh workflow run migrate.yml \
 
 Set in: **GitHub → Settings → Secrets and variables → Actions → New repository secret**
 
-| Secret | Used by | Where to find |
-|--------|---------|---------------|
-| `VITE_SUPABASE_URL` | `ci.yml` | `.env` file in `stride-gs-app/` |
-| `VITE_SUPABASE_ANON_KEY` | `ci.yml` | `.env` file in `stride-gs-app/` |
-| `SUPABASE_DB_URL` | `migrate.yml` | Supabase dashboard → Settings → Database → URI |
+| Secret | Used by | Status |
+|--------|---------|--------|
+| `VITE_SUPABASE_URL` | `ci.yml`, `deploy.yml` | ✅ Set |
+| `VITE_SUPABASE_ANON_KEY` | `ci.yml`, `deploy.yml` | ✅ Set |
+| `SUPABASE_DB_URL` | `migrate.yml` | ✅ Set |
+| `VITE_API_URL` | `deploy.yml` | Optional — has fallback |
+| `VITE_API_TOKEN` | `deploy.yml` | Optional — has fallback |
+
+`GITHUB_TOKEN` is auto-provided — no setup needed.
 
 ---
 
-## Deploys — local only
+## Deploy flow summary
 
-React deploys continue to use `npm run deploy` from `stride-gs-app/`:
-```bash
-cd stride-gs-app
-npm run deploy -- "commit message"
-```
-
-This builds + pushes `dist/` to `origin/main` (GitHub Pages). No GitHub Action involved. The `dist/.git` subtree is the source of truth for production.
-
-Client script rollout also stays local (`cd AppScripts/stride-client-inventory && npm run rollout && npm run deploy-clients`). No automation.
+| Change type | Action | Deployed by |
+|---|---|---|
+| React source (`stride-gs-app/**`) | Push to `source` | `deploy.yml` auto-runs |
+| GAS scripts | `npm run push-* && npm run deploy-*` | Local (manual, always) |
+| Supabase migrations | MCP `apply_migration` or `migrate.yml` | MCP tool (preferred) |
 
 ---
 
 ## Historical note
 
-An auto-deploy workflow (`deploy.yml`) was added on 2026-04-17 but immediately broke production because the `VITE_SUPABASE_URL` / `VITE_SUPABASE_ANON_KEY` secrets weren't configured in GitHub Actions → builds shipped with empty Supabase credentials → site crashed with `supabaseUrl is required`. The workflow was reverted and then deleted. Manual `npm run deploy` remains the only deploy path.
+An earlier `deploy.yml` was added on 2026-04-17 but broke production because the Supabase secrets weren't configured → builds shipped `undefined` for `VITE_SUPABASE_URL` → site crashed with `supabaseUrl is required`. That version was reverted and deleted.
+
+The current `deploy.yml` (added 2026-04-18) uses the correct secrets (`VITE_SUPABASE_URL` / `VITE_SUPABASE_ANON_KEY`) which are confirmed set. The `VITE_API_URL` / `VITE_API_TOKEN` use `|| 'fallback'` syntax so they never block a build if unset.

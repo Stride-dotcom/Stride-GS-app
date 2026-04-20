@@ -326,7 +326,7 @@ Three workflows in `.github/workflows/`. **Full docs:** `.github/workflows/READM
 | `migrate.yml` | `workflow_dispatch` (manual only) | Display SQL + `supabase db push` if confirm=true |
 
 ### Auto-deploy replaces `npm run deploy`
-Once GitHub Actions is active, pushing React changes to `source` deploys `mystridehub.com` automatically — **no `npm run deploy` needed**. The `dist/.git` subtree and `npm run deploy` still work as a manual override.
+Pushing React changes to `source` deploys `mystridehub.com` automatically — **no `npm run deploy` needed**. `deploy.yml` is active (added 2026-04-18; Supabase secrets confirmed). The `dist/.git` subtree and `npm run deploy` still work as a manual override.
 
 ### Required GitHub Secrets
 Set in: **GitHub → Settings → Secrets and variables → Actions**

@@ -1,0 +1,81 @@
+name: Deploy to GitHub Pages
+
+# Fires on every push to `source`. Builds the React app and force-pushes
+# dist/ to origin/main, which GitHub Pages serves at mystridehub.com.
+#
+# Required secrets (GitHub → Settings → Secrets and variables → Actions):
+#   VITE_SUPABASE_URL      — Supabase project URL
+#   VITE_SUPABASE_ANON_KEY — Supabase anon key
+#   VITE_API_URL           — StrideAPI Web App URL (optional — falls back to .env value)
+#   VITE_API_TOKEN         — StrideAPI token (optional — falls back to default)
+#
+# GITHUB_TOKEN is auto-provided by Actions — no setup needed.
+
+on:
+  push:
+    branches: [source]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  deploy:
+    name: Build + Deploy
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: stride-gs-app/package-lock.json
+
+      - name: Install dependencies
+        working-directory: stride-gs-app
+        run: npm ci
+
+      - name: Build (verify-entry → tsc → vite → sanity checks)
+        working-directory: stride-gs-app
+        env:
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+          # VITE_API_URL / VITE_API_TOKEN: use secret if set, otherwise fall back to
+          # the production values from the .env file. These are GAS endpoint values
+          # (not truly secret) so the fallback keeps deploys working if secrets aren't set.
+          VITE_API_URL: ${{ secrets.VITE_API_URL || 'https://script.google.com/macros/s/AKfycbz7v3wu3bXAR3mXSako_DcSDzcT9WZZ0wvcX06OeGmxd-gT1P1w-nSTNx0aF3Z2KNbq/exec' }}
+          VITE_API_TOKEN: ${{ secrets.VITE_API_TOKEN || 'stride-prod-2026' }}
+        run: npm run build
+
+      - name: Report bundle size
+        if: always()
+        working-directory: stride-gs-app
+        run: |
+          echo "### Build output" >> $GITHUB_STEP_SUMMARY
+          if [ -d dist/assets ]; then
+            echo "| File | Size |" >> $GITHUB_STEP_SUMMARY
+            echo "|------|------|" >> $GITHUB_STEP_SUMMARY
+            ls -lh dist/assets/*.js 2>/dev/null \
+              | awk '{split($9,a,"/"); printf "| %s | %s |\n", a[length(a)], $5}' \
+              >> $GITHUB_STEP_SUMMARY || true
+          else
+            echo "No build output — build failed." >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Deploy to GitHub Pages (origin/main)
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: stride-gs-app/dist
+          publish_branch: main
+          force_orphan: true
+          commit_message: "Deploy: ${{ github.event.head_commit.message }}"
+
+      - name: Summary
+        run: |
+          echo "### ✅ Deployed to [mystridehub.com](https://mystridehub.com)" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit:** \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Trigger:** ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Branch:** ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
