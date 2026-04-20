@@ -157,13 +157,17 @@ export function MessageList({ conversations, activeKey, loading = false, onSelec
                 }}>{c.lastMessagePreview || '\u00A0'}</div>
               </div>
 
-              {/* Unread badge */}
+              {/* Unread badge — red to match the bell icon indicator.
+                  Session 74: user-requested consistency with the TopBar
+                  bell badge (#FF3B30), so the same signal looks the same
+                  everywhere it appears: total unread on the bell, per-chat
+                  unread here, "you haven't read this" everywhere else. */}
               {c.unreadCount > 0 && !showDelete && (
                 <span style={{
                   minWidth: 18, height: 18, padding: '0 6px',
                   borderRadius: 9,
-                  background: '#007AFF', color: '#fff',
-                  fontSize: 11, fontWeight: 600,
+                  background: '#FF3B30', color: '#fff',
+                  fontSize: 11, fontWeight: 700,
                   display: 'flex', alignItems: 'center', justifyContent: 'center',
                   flexShrink: 0,
                 }}>

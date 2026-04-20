@@ -201,6 +201,12 @@ export function useMessages(): UseMessagesResult {
   // reload the currently-open thread without re-subscribing on every
   // identity change.
   const openThreadRef = useRef<((key: string) => Promise<void>) | null>(null);
+  // Session 74: activeThreadKey mirrored in a ref so the realtime handlers
+  // can read the current thread without forcing the channel to re-subscribe
+  // on every open/close (which caused CHANNEL_ERROR from the same-name
+  // channel collision).
+  const activeThreadKeyRef = useRef<string | null>(null);
+  useEffect(() => { activeThreadKeyRef.current = activeThreadKey; }, [activeThreadKey]);
 
   // Resolve auth uid once per session change.
   useEffect(() => {
@@ -328,10 +334,12 @@ export function useMessages(): UseMessagesResult {
           const row = (payload.new ?? payload.old) as { user_id?: string } | undefined;
           if (row?.user_id === authUserId) {
             void refetch();
-            // If we're viewing a thread right now, reload it too so the
-            // new incoming bubble appears without waiting for the next
-            // click or page refresh.
-            if (activeThreadKey) void openThreadRef.current?.(activeThreadKey);
+            // Reload the active thread if one is open — read the latest key
+            // from the ref so this handler doesn't need activeThreadKey as
+            // an effect dep (which would force the channel to re-subscribe
+            // on every open/close → same-name CHANNEL_ERROR collision).
+            const activeKey = activeThreadKeyRef.current;
+            if (activeKey) void openThreadRef.current?.(activeKey);
           }
         })
       .on('postgres_changes',
@@ -340,7 +348,8 @@ export function useMessages(): UseMessagesResult {
           const row = (payload.new ?? payload.old) as { sender_id?: string } | undefined;
           if (row?.sender_id === authUserId) {
             void refetch();
-            if (activeThreadKey) void openThreadRef.current?.(activeThreadKey);
+            const activeKey = activeThreadKeyRef.current;
+            if (activeKey) void openThreadRef.current?.(activeKey);
           }
         })
       .subscribe((status) => {
@@ -351,7 +360,7 @@ export function useMessages(): UseMessagesResult {
         }
       });
     return () => { void supabase.removeChannel(channel); };
-  }, [authUserId, refetch, activeThreadKey]);
+  }, [authUserId, refetch]);
 
   // ── Derived conversation list ───────────────────────────────────────────
   const conversations = useMemo<Conversation[]>(() => {
