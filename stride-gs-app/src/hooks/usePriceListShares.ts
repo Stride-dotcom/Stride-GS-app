@@ -67,19 +67,31 @@ export function usePriceListShares() {
     title?: string,
     expiresAt?: string | null,
   ): Promise<PriceListShare | null> => {
+    // Session 78: force a JWT refresh before the INSERT. RLS on
+    // price_list_shares reads role from auth.jwt()->user_metadata; if the
+    // user's session JWT was issued before AuthContext.handleSession's
+    // updateUser({ data: { role } }) landed, the claim is missing and
+    // the insert is rejected as insufficient_privilege. A refresh pulls
+    // the latest user_metadata into the active JWT and unblocks the write.
+    try { await supabase.auth.refreshSession(); } catch { /* best-effort */ }
+
     const { data: sessionData } = await supabase.auth.getSession();
     const userId = sessionData.session?.user.id ?? null;
+    const payload = {
+      tabs,
+      title: title?.trim() || 'Stride Logistics — Price List',
+      expires_at: expiresAt ?? null,
+      created_by: userId,
+    };
     const { data, error: err } = await supabase
       .from('price_list_shares')
-      .insert({
-        tabs,
-        title: title?.trim() || 'Stride Logistics — Price List',
-        expires_at: expiresAt ?? null,
-        created_by: userId,
-      })
+      .insert(payload)
       .select('*')
       .single();
     if (err || !data) {
+      // Loud console log so the next diagnosis doesn't start from zero —
+      // the UI toast keeps its short message.
+      console.error('[usePriceListShares] createShare failed', { err, payload });
       setError(err?.message ?? 'Failed to create share link');
       return null;
     }

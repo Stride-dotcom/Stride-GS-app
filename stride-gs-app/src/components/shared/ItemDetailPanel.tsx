@@ -18,6 +18,7 @@ import { getPanelContainerStyle, panelBackdropStyle } from './panelStyles';
 import { useIsMobile } from '../../hooks/useIsMobile';
 import { useResizablePanel } from '../../hooks/useResizablePanel';
 import { EntityAttachments } from './EntityAttachments';
+import { buildDeepLink } from '../../lib/deepLinks';
 
 export interface LinkedRecord {
   id: string;
@@ -344,7 +345,7 @@ function AuditSubTimeline({ entries }: { entries: AuditEntry[] }) {
 
 // ─── Item History Component ────────────────────────────────────────────────────
 
-function ItemHistory({ tasks, repairs, willCalls, billing, moves, shipmentNumber, receiveDate, shipmentCarrier, shipmentTracking, auditByEntity }: {
+function ItemHistory({ tasks, repairs, willCalls, billing, moves, shipmentNumber, receiveDate, shipmentCarrier, shipmentTracking, auditByEntity, clientSheetId }: {
   tasks: any[];
   repairs: any[];
   willCalls: any[];
@@ -355,6 +356,7 @@ function ItemHistory({ tasks, repairs, willCalls, billing, moves, shipmentNumber
   shipmentCarrier?: string;
   shipmentTracking?: string;
   auditByEntity: Record<string, AuditEntry[]>;
+  clientSheetId?: string;
 }) {
   return (
     <div>
@@ -366,7 +368,7 @@ function ItemHistory({ tasks, repairs, willCalls, billing, moves, shipmentNumber
               <div style={histDateStyle}>{fmtDate(receiveDate)}</div>
               <div style={{ flex: 1 }}>
                 <div>
-                  <a href={`#/shipments/${encodeURIComponent(shipmentNumber!)}`} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()} style={histIdStyle}>{shipmentNumber}</a>
+                  <a href={buildDeepLink('shipments', shipmentNumber!, clientSheetId)} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()} style={histIdStyle}>{shipmentNumber}</a>
                   {' '}
                   <span style={{ fontSize: 10, fontWeight: 600, color: '#16A34A' }}>Received</span>
                 </div>
@@ -415,7 +417,7 @@ function ItemHistory({ tasks, repairs, willCalls, billing, moves, shipmentNumber
               <div style={histDateStyle}>{fmtDate(t.completedAt || t.cancelledAt || t.created)}</div>
               <div style={{ flex: 1 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <a href={`#/tasks/${encodeURIComponent(t.taskId)}`} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()} style={histIdStyle}>{t.taskId}</a>
+                  <a href={buildDeepLink('tasks', t.taskId, clientSheetId)} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()} style={histIdStyle}>{t.taskId}</a>
                   <MiniStatusBadge status={t.status} />
                   {t.result && <MiniStatusBadge status={t.result} />}
                 </div>
@@ -437,7 +439,7 @@ function ItemHistory({ tasks, repairs, willCalls, billing, moves, shipmentNumber
               <div style={histDateStyle}>{fmtDate(r.completedDate || r.createdDate)}</div>
               <div style={{ flex: 1 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <a href={`#/repairs/${encodeURIComponent(r.repairId)}`} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()} style={histIdStyle}>{r.repairId}</a>
+                  <a href={buildDeepLink('repairs', r.repairId, clientSheetId)} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()} style={histIdStyle}>{r.repairId}</a>
                   <MiniStatusBadge status={r.status} />
                   {(r.repairResult || r.result) && <MiniStatusBadge status={r.repairResult || r.result} />}
                 </div>
@@ -462,7 +464,7 @@ function ItemHistory({ tasks, repairs, willCalls, billing, moves, shipmentNumber
               <div style={histDateStyle}>{fmtDate(w.actualPickupDate || w.estimatedPickupDate || w.createdDate)}</div>
               <div style={{ flex: 1 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <a href={`#/will-calls/${encodeURIComponent(w.wcNumber)}`} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()} style={histIdStyle}>{w.wcNumber}</a>
+                  <a href={buildDeepLink('will-calls', w.wcNumber, clientSheetId)} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()} style={histIdStyle}>{w.wcNumber}</a>
                   <MiniStatusBadge status={w.status} />
                 </div>
                 {w.pickupParty && <div style={histNoteStyle}>{w.pickupParty}</div>}
@@ -1046,6 +1048,7 @@ export function ItemDetailPanel({
                 shipmentCarrier={itemShipment?.carrier}
                 shipmentTracking={itemShipment?.trackingNo}
                 auditByEntity={auditByEntity}
+                clientSheetId={clientSheetId}
               />
             )}
           </Section>

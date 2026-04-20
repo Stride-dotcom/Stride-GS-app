@@ -1,5 +1,23 @@
 /* ===================================================
-   StrideAPI.gs — v38.89.0 — 2026-04-20 PST — billing write-through for tasks + repairs
+   StrideAPI.gs — v38.90.0 — 2026-04-20 PST — repair emails: staff + client for all 4 paths
+   v38.90.0: REPAIR EMAIL RECIPIENT ALIGNMENT. All four repair email
+             paths now send to the merged NOTIFICATION_EMAILS +
+             CLIENT_EMAIL distribution (was selectively only one or the
+             other). This matches TASK_COMPLETE / INSP_EMAIL /
+             SHIPMENT_RECEIVED. Fixes: operators were missing repair
+             completions because REPAIR_COMPLETE only emailed the client;
+             clients were missing decision confirmations because
+             REPAIR_APPROVED / REPAIR_DECLINED only emailed staff; staff
+             had no record of outgoing REPAIR_QUOTE emails.
+             Changed handlers: handleSendRepairQuote_ (REPAIR_QUOTE),
+             handleRespondToRepairQuote_ (REPAIR_APPROVED /
+             REPAIR_DECLINED), handleCompleteRepair_ (REPAIR_COMPLETE).
+             Each now reads NOTIFICATION_EMAILS + CLIENT_EMAIL, builds
+             `allRecip = api_mergeEmails_(notifEmails, clientEmail)`,
+             guards on allRecip, and passes allRecip to
+             api_sendTemplateEmail_. REPAIR_QUOTE_REQUEST was already
+             correct (handleCreateRepair_) — no change needed.
+   v38.89.0: billing write-through for tasks + repairs
    v38.89.0: CRITICAL BILLING FIX. INSP / ASM / REPAIR billing rows were
              landing on the Billing_Ledger sheet but NEVER reaching
              public.billing. Since session 74's Supabase-first cutover,
@@ -12473,10 +12491,15 @@ function handleSendRepairQuote_(clientSheetId, payload) {
   }
 
   // Read settings before lock
-  var settings   = api_readSettings_(ss);
-  var clientName = String(settings["CLIENT_NAME"]  || "").trim();
-  var clientEmail = String(settings["CLIENT_EMAIL"] || "").trim();
-  var notifOn    = toBool_(settings["ENABLE_NOTIFICATIONS"]);
+  // v38.90.0 — REPAIR_QUOTE email now goes to staff + client (was client only).
+  // Matches TASK_COMPLETE pattern so internal Stride distribution list sees
+  // every outgoing quote for record-keeping.
+  var settings    = api_readSettings_(ss);
+  var clientName  = String(settings["CLIENT_NAME"]         || "").trim();
+  var clientEmail = String(settings["CLIENT_EMAIL"]        || "").trim();
+  var notifEmails = String(settings["NOTIFICATION_EMAILS"] || "").trim();
+  var notifOn     = toBool_(settings["ENABLE_NOTIFICATIONS"]);
+  var allRecip    = api_mergeEmails_(notifEmails, clientEmail);
 
   // ─── ACQUIRE LOCK ───────────────────────────────────────────────────────────
   var lock = LockService.getScriptLock();
@@ -12528,8 +12551,10 @@ function handleSendRepairQuote_(clientSheetId, payload) {
   try { lock.releaseLock(); } catch (_) {}
 
   // ─── EMAIL (non-critical — outside lock) ──────────────────────────────────
+  // v38.90.0: recipients merged (staff + client). Send as long as at least
+  // one is configured — previously required clientEmail.
   var emailSent = false;
-  if (notifOn && clientEmail) {
+  if (notifOn && allRecip) {
     try {
       var itemId      = getVal("Item ID");
       var desc        = getVal("Description");
@@ -12554,7 +12579,7 @@ function handleSendRepairQuote_(clientSheetId, payload) {
       // EntityAttachments component.
       var photosUrl = api_buildEntityPhotosUrl_("repair", repairId, clientSheetId);
 
-      var emailResult = api_sendTemplateEmail_(settings, "REPAIR_QUOTE", clientEmail,
+      var emailResult = api_sendTemplateEmail_(settings, "REPAIR_QUOTE", allRecip,
         "Repair Quote Ready: " + itemId + " $" + quoteAmtFmt,
         {
           "{{ITEM_ID}}":          itemId       || "",
@@ -12646,9 +12671,15 @@ function handleRespondToRepairQuote_(clientSheetId, payload) {
   }
 
   // Read settings before lock
+  // v38.90.0 — REPAIR_APPROVED / REPAIR_DECLINED emails now go to staff +
+  // client (was staff only). The client gets a confirmation copy of their
+  // own decision so it matches the bidirectional notification pattern of
+  // TASK_COMPLETE and REPAIR_COMPLETE.
   var settings        = api_readSettings_(ss);
   var clientName      = String(settings["CLIENT_NAME"]         || "").trim();
   var notifEmails     = String(settings["NOTIFICATION_EMAILS"] || "").trim();
+  var clientEmail     = String(settings["CLIENT_EMAIL"]        || "").trim();
+  var allRecip        = api_mergeEmails_(notifEmails, clientEmail);
 
   // ─── ACQUIRE LOCK ───────────────────────────────────────────────────────────
   var lock = LockService.getScriptLock();
@@ -12703,9 +12734,10 @@ function handleRespondToRepairQuote_(clientSheetId, payload) {
   try { lock.releaseLock(); } catch (_) {}
 
   // ─── EMAIL (non-critical — outside lock) ──────────────────────────────────
+  // v38.90.0: send to merged staff + client list (was staff only).
   var emailSent = false;
   var templateKey = decision === "Approve" ? "REPAIR_APPROVED" : "REPAIR_DECLINED";
-  if (notifEmails) {
+  if (allRecip) {
     try {
       var itemId   = getVal("Item ID");
       var quoteAmt = getVal("Quote Amount");
@@ -12793,7 +12825,7 @@ function handleRespondToRepairQuote_(clientSheetId, payload) {
         }
       }
 
-      var emailResult = api_sendTemplateEmail_(settings, templateKey, notifEmails,
+      var emailResult = api_sendTemplateEmail_(settings, templateKey, allRecip,
         (decision === "Approve" ? "Repair Approved: " : "Repair Declined: ") + itemId + " - " + clientName,
         emailTokens, pdfBlob, clientSheetId
       );
@@ -12806,7 +12838,7 @@ function handleRespondToRepairQuote_(clientSheetId, payload) {
       warnings.push("Email error (non-fatal): " + emailErr.message);
     }
   } else {
-    warnings.push("Email skipped: no NOTIFICATION_EMAILS configured");
+    warnings.push("Email skipped: no NOTIFICATION_EMAILS or CLIENT_EMAIL configured");
   }
 
   api_bumpSummaryVersion_();
@@ -12942,9 +12974,15 @@ function handleCompleteRepair_(clientSheetId, payload) {
   }
 
   // Read settings before lock
+  // v38.90.0 — REPAIR_COMPLETE now goes to staff + client (was client only).
+  // Aligns with TASK_COMPLETE / INSP_EMAIL / SHIPMENT_RECEIVED recipient
+  // pattern so Stride's internal distribution list is notified when a
+  // repair finishes, matching every other completion alert.
   var settings    = api_readSettings_(ss);
-  var clientName  = String(settings["CLIENT_NAME"]  || "").trim();
-  var clientEmail = String(settings["CLIENT_EMAIL"] || "").trim();
+  var clientName  = String(settings["CLIENT_NAME"]         || "").trim();
+  var clientEmail = String(settings["CLIENT_EMAIL"]        || "").trim();
+  var notifEmails = String(settings["NOTIFICATION_EMAILS"] || "").trim();
+  var allRecip    = api_mergeEmails_(notifEmails, clientEmail);
   var notifOn     = toBool_(settings["ENABLE_NOTIFICATIONS"]);
 
   // Compute billing amount: payload override > sheet Final Amount > Quote Amount
@@ -13073,8 +13111,9 @@ function handleCompleteRepair_(clientSheetId, payload) {
   try { lock.releaseLock(); } catch (_) {}
 
   // ─── EMAIL (non-critical — outside lock) ──────────────────────────────────
+  // v38.90.0: send to merged staff + client list (was clientEmail only).
   var emailSent = false;
-  if (notifOn && clientEmail) {
+  if (notifOn && allRecip) {
     try {
       var completedDate = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "MM/dd/yyyy");
       var billingAmtFmt = billingAmt > 0 ? billingAmt.toFixed(2) : "0.00";
@@ -13092,7 +13131,7 @@ function handleCompleteRepair_(clientSheetId, payload) {
       // folder that used to be linked from the Repair ID cell.
       var repairPhotosUrl = api_buildEntityPhotosUrl_("repair", repairId, clientSheetId);
 
-      var emailResult = api_sendTemplateEmail_(settings, "REPAIR_COMPLETE", clientEmail,
+      var emailResult = api_sendTemplateEmail_(settings, "REPAIR_COMPLETE", allRecip,
         "Repair Complete: " + itemId + " " + resultValue,
         {
           "{{ITEM_ID}}":           itemId        || "",
