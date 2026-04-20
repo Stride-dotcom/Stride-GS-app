@@ -432,6 +432,19 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
           entityId={task.taskId}
           clientName={task.clientName}
           sidemark={task.sidemark}
+          // Session 74: surface I/A/R badges for the underlying item
+          // right in the dark header pill — matches ItemDetailPanel.
+          // Previously the badges only rendered in the secondary Item
+          // Info card further down; warehouse staff had to scroll to
+          // see them.
+          idBadges={task.itemId ? (
+            <ItemIdBadges
+              itemId={task.itemId}
+              inspItems={inspItems}
+              asmItems={asmItems}
+              repairItems={repairItems}
+            />
+          ) : undefined}
           actions={
             <>
               {isOpen && !completed && (

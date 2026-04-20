@@ -397,6 +397,17 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
           entityId={repair.repairId}
           clientName={repair.clientName}
           sidemark={repair.sidemark}
+          // Session 74: surface I/A/R badges for the underlying item
+          // right next to the Repair ID in the dark header. Same
+          // rationale as TaskDetailPanel.
+          idBadges={repair.itemId ? (
+            <ItemIdBadges
+              itemId={repair.itemId}
+              inspItems={inspItems}
+              asmItems={asmItems}
+              repairItems={repairItems}
+            />
+          ) : undefined}
           actions={
             <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4, color: theme.colors.textMuted }}>
               <X size={18} />

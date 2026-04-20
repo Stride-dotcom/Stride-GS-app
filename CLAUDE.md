@@ -171,6 +171,27 @@ When changing client-side functions or columns, check whether the Task Board scr
 
 > **TL;DR — the default path is push to `source` and let GitHub Actions ship it.** Only reach for the manual commands below when you've changed GAS code, client sheets, or Supabase schema.
 
+### Decision tree — "what does my change need?"
+
+Start from the file you edited; follow the row; deploy the right channel. **Don't chain channels you don't need** — rolling out to 47 clients for a React-only change costs ~4 minutes and can ship half-tested GAS code.
+
+| Change touched… | Channel | Command / action | Live in |
+|---|---|---|---|
+| `stride-gs-app/src/**` (React) | GitHub Actions | `git push origin source` | 2-3 min (Actions + CDN) |
+| `stride-gs-app/supabase/migrations/*.sql` | MCP `apply_migration` OR Actions `migrate.yml` | See § Supabase Migrations (MCP tool) | seconds |
+| `AppScripts/stride-api/StrideAPI.gs` | clasp push + deployments.update | `npm run push-api && npm run deploy-api` | ~20s |
+| `AppScripts/Consolidated Billing Sheet/**` | clasp + deployments.update | `npm run push-cb && npm run deploy-cb` | ~20s |
+| `AppScripts/stax-auto-pay/**` | clasp | `npm run push-stax` | ~10s |
+| `AppScripts/QR Scanner/**` | clasp + deployments | `npm run push-scanner && npm run deploy-cb` | ~20s |
+| `AppScripts/stride-client-inventory/src/*.gs` (per-client) | rollout loop | `npm run rollout && npm run deploy-clients` | 3-4 min/47 clients |
+| `AppScripts/Master Price list script.txt` | clasp | `npm run push-master` | ~10s |
+| Email template content | Edit in app: Settings → Email Templates | (none — Supabase instant) | instant |
+| Doc template content | Edit in app: Settings → Doc Templates | (none — Supabase instant) | instant |
+| Service rate / catalog | Edit in app: Price List → inline edit | "Sync to Sheet" button if GAS billing still uses sheet | instant |
+| `.github/workflows/*.yml` | GitHub Actions (meta) | Push to `source` — next run picks up the new workflow | next run |
+
+The `AppScripts/stride-client-inventory/` directory is BOTH the rollout master (where `npm run rollout` reads from) AND the home of every `deploy-*` script. All commands in the tables below run from that directory.
+
 ### React App Changes (AUTOMATIC — no manual steps)
 - Push your changes to the `source` branch
 - GitHub Actions automatically: typechecks (`tsc -b`) → builds (`vite`) → deploys to GitHub Pages
@@ -215,6 +236,28 @@ When changing client-side functions or columns, check whether the Task Board scr
 - NEVER edit the Master Price List sheet directly — edit in the app, then Sync to Sheet
 - NEVER skip `tsc -b` before committing — the CI will catch it but it wastes a deploy cycle
 - NEVER commit `.env`, `.credentials.json`, or any secrets
+
+### Troubleshooting — "I pushed but it didn't ship"
+
+First line of diagnosis: **which channel carries this change?** (see decision tree above). Every failure mode below is scoped to one channel.
+
+- **React change pushed, mystridehub.com still shows old bundle** →
+  1. Check GitHub Actions tab — is the run green? If red, fix the TS/build error and push again.
+  2. If green, hard-refresh (Ctrl+Shift+R). GitHub Pages CDN caches ~1-5 min.
+  3. Still stale after 5 min? Compare DevTools Network → main `index-*.js` filename against the hash in the Actions build log. Mismatch = the CDN is still propagating; wait and re-check.
+- **GAS change pushed but Web App still runs the old code** → you ran `push-api` but skipped `deploy-api`. `push-api` updates source; `deploy-api` creates a new frozen Web App version. Always chain: `npm run push-api && npm run deploy-api`.
+- **Client bound-script change pushed via rollout but one client still shows old behavior** → `rollout` pushes source to all 47 clients; `deploy-clients` creates a new Web App deployment for each. If one client is stale, their Web App deployment failed (check rollout log) or their Drive quota throttled the deploy — re-run `deploy-clients` (idempotent).
+- **Supabase schema change applied but the app 400s on write** → the MCP `apply_migration` ran but the TypeScript types in `src/lib/supabase.types.ts` are stale. Re-run `generate_typescript_types` OR add the new column to the insert/update payload manually in the hook.
+- **Template edit doesn't show in next email** → Email/doc templates are cached in GAS for 10 min (`CacheService`). Either wait, or hit `Settings → Maintenance → Refresh Caches` to evict immediately. Per-client `push-templates` is only needed for the initial seed.
+- **Price List change doesn't affect billing** → Until Phase 5 cutover is complete, GAS billing still reads the Master Price List sheet, not Supabase. Click "Sync to Sheet" on the Price List page to push Supabase rates back to the sheet.
+- **Migration runner fails with "workflow_dispatch not found"** → `migrate.yml` needs to be present on the branch you're pointing at. Push the workflow file to `source` first, then trigger.
+
+### Known half-deploy traps
+
+- **Missing `&client=` on deep links** → see § Deep Links. Every email CTA must include it; test with a staff user AND a client user.
+- **Race between GAS write and Supabase write-through** → GAS writes the sheet, then resyncs the entity to Supabase (best-effort). If the Supabase call silently fails (network, missing column, RLS), the React app reads stale data until the next write wakes it up. Check `gs_sync_events` table for failed resyncs after every deploy that touched a handler.
+- **New Supabase column used by React BEFORE migration applied** → `{col} does not exist` in prod only. Apply the migration first, **then** deploy the React bundle. `migrate.yml` + Actions `deploy.yml` don't gate each other.
+- **Worktree `.env` missing** → if deploying from `.claude/worktrees/**`, copy `stride-gs-app/.env` from the parent first. Vite silently inlines `undefined` and the runtime crashes at module load with `supabaseUrl is required`. The build is structurally valid so the safeguards don't catch it.
 
 ---
 
@@ -438,6 +481,34 @@ StrideAPI.gs (standalone)  →  Web App doPost endpoint backing the React app
 React app (mystridehub.com)  →  GitHub Pages, reads StrideAPI + Supabase cache
 Supabase  →  read cache mirror of 11 entity types (inventory, tasks, repairs, will_calls, shipments, billing, clients, claims, cb_users, locations, marketing_*) + item_id_ledger + move_history + delivery_availability + dt_orders + gs_sync_events
 ```
+
+---
+
+## Modules Partially Ported from WMS
+
+The Stride WMS web app (separate React/Supabase project, `_archive/_wms_reference/` in this repo) has been the staging ground for several cross-app components. Where a module is worth reusing, we port the implementation down to GS rather than rebuild from scratch — but most ports are **partial**, either because a dependency doesn't exist here or because the GS workflow has different constraints. This section tracks what's landed and what still lives in WMS-only form.
+
+**Fully ported (feature-complete in GS, no open items):**
+
+- **`MultiPhotoCapture` → `MultiCapture`** — session 75. Shared "take many, save once" camera flow that queues photos/documents locally and saves them all in one batch. GS version is mode-agnostic (`photo` | `document`) and sequential-upload (WMS was `Promise.all` — too brittle for warehouse mobile networks). Wired into `PhotoUploadButton`, `DocumentScanButton`, `EntityAttachments.DocumentsSection`, and `ReceivingRowMedia`. GS file: [MultiCapture.tsx](stride-gs-app/src/components/media/MultiCapture.tsx). WMS reference: `_archive/_wms_reference/stride-wms-app-main/src/components/common/MultiPhotoCapture.tsx`.
+- **`QRScanner`** — session 69 Phase 3. Camera-based barcode scanner with `BarcodeDetector` primary path + `html5-qrcode` fallback. Ported nearly 1:1; only change was stripping the WMS-specific device-selection UI. GS file: [QRScanner.tsx](stride-gs-app/src/components/scanner/QRScanner.tsx).
+- **`DeepLink` + query-param routing** — ported pattern, not a single file. GS's query-param deep links (`?open=<id>&client=<sheetId>`) are the proven shape over WMS's route-style URLs; WMS still uses the route-style form for its own pages.
+
+**Partially ported (stub exists but missing a key capability):**
+
+- **Document Scanner** — `DocumentScanButton` (session 75) captures a single JPEG per scan and uploads as a document. The WMS version has multi-page PDF assembly with B&W threshold + edge detection. GS currently lacks those post-processing steps — users scanning a multi-page BOL get N separate JPEG docs instead of one PDF. Planned: port `pdf-lib` + simple threshold filter. Not blocking; operators currently upload multi-page files directly via the file picker when they need PDF output.
+- **OCR on uploaded documents** — WMS runs Tesseract.js on document uploads and stores the extracted text in `documents.ocr_text` (the column exists in GS's `documents` table already — see session 73 migration). GS never wires up the client-side OCR step; `ocr_text` is always NULL in GS. Nothing depends on it today (no search UI surfaces it), so this is deferred until search gains OCR scope.
+- **Drag-to-reorder (labels + price list rows)** — WMS uses `@dnd-kit/sortable` for label field ordering and price-list row reordering. GS's [Labels.tsx](stride-gs-app/src/pages/Labels.tsx) has up/down buttons only; PriceList currently relies on the `display_order` column for sort (no drag UI). Both are functional but less slick. `@dnd-kit` is not in GS's dependency tree — adding it is cheap but every page that would benefit needs wiring separately.
+- **Print label preview canvas** — WMS renders the label to an HTMLCanvas for pixel-accurate WYSIWYG. GS does HTML-to-print via `@media print` CSS, which is close but drifts at edge cases (very long item descriptions, thumbnail QR sizes). Good-enough for daily use.
+
+**WMS-only (not ported, probably never will be):**
+
+- **`AccountPricingTab` / per-tenant rate overrides** — GS has a single Master Price List for all clients; per-client overrides happen via the `DISCOUNT_STORAGE_PCT` / `DISCOUNT_SERVICES_PCT` settings keys, not a rate-override table. No demand to port this.
+- **`EditAdjustmentDialog`** — WMS adjustment flow ties into its `adjustments` table which doesn't exist in GS.
+- **`StocktakeManifest` / inventory cycle count** — GS does cycle counts via the Scanner + Move History audit log, not a dedicated manifest flow.
+- **`get_effective_rate` Postgres function** — WMS's Supabase-resident rate lookup. GS's `api_lookupRate_` lives in GAS today and is mid-cutover to Supabase (Phase 5 shadow mode). Different shape; separate evolution.
+
+When porting from WMS: always check `_archive/_wms_reference/` first to save the reimplementation time, but be prepared to adapt. WMS uses shadcn/ui + Tailwind + `date-fns`; GS uses inline styles + v2 theme tokens + native `Intl.DateTimeFormat`. A straight copy-paste rarely compiles.
 
 ---
 
