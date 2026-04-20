@@ -1,1 +1,0 @@
-ALTER TABLE public.item_photos ADD COLUMN is_repair boolean NOT NULL DEFAULT false;

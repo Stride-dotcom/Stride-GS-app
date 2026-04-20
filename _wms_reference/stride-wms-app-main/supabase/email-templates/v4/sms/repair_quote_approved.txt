@@ -1,5 +1,0 @@
-Repair quote approved: {{item_code}}
-
-{alert_message}
-
-Open: {portal_base_url}

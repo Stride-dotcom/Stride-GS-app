@@ -1,5 +1,0 @@
-Your quote is ready
-
-{alert_message}
-
-Open: {portal_base_url}

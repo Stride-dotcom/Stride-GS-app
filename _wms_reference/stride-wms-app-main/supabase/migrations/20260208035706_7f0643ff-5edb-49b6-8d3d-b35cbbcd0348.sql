@@ -1,2 +1,0 @@
-ALTER TABLE public.documents DROP CONSTRAINT documents_context_type_check;
-ALTER TABLE public.documents ADD CONSTRAINT documents_context_type_check CHECK (context_type = ANY (ARRAY['shipment'::text, 'employee'::text, 'delivery'::text, 'invoice'::text, 'item'::text, 'task'::text, 'general'::text]));

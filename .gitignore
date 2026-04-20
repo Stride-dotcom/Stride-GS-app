@@ -1,18 +1,31 @@
 node_modules/
 _backups/
 
+# Session 77 cleanup — _archive/ is tracked EXCEPT for these bulky subtrees
+# that stay local-only (they were preserved for reference but don't belong
+# in the repo). If you need them, check Dropbox history.
+_archive/_backups/
+_archive/_wms_reference/
+_archive/**/node_modules/
+
 # Secrets — NEVER commit
 .env
 .env.local
 stride-gs-app/.env
 stride-gs-app/.env.local
-AppScripts/stride-client-inventory/admin/.credentials.json
+
+# Session 77 — AppScripts/ is now tracked (including the rollout tooling
+# under stride-client-inventory/). Keep the secret files + node_modules
+# excluded explicitly. These patterns match anywhere under AppScripts/.
+AppScripts/**/.credentials.json
+AppScripts/**/*.credentials.json
+AppScripts/**/client_secret*.json
+AppScripts/**/node_modules/
+AppScripts/**/.env
+AppScripts/**/.env.*
 
 # Claude Code workspace metadata
 .claude/
-
-# Rollout tooling (local master for npm run rollout to client scripts)
-AppScripts/stride-client-inventory/
 
 # React app built output (served from stride-gs-app/dist/ via its own subtree repo)
 stride-gs-app/dist/

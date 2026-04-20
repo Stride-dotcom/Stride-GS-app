@@ -1,5 +1,0 @@
-Task unable to complete: {{task_title}}
-
-{alert_message}
-
-Open: {portal_base_url}

@@ -1,5 +1,0 @@
-You’ve been invited to {{tenant_name}}
-
-{alert_message}
-
-Open: {portal_base_url}

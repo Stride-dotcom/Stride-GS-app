@@ -1,0 +1,4 @@
+node_modules/
+admin/.credentials.json
+admin/.sync-config.json
+logs/

@@ -1,0 +1,459 @@
+{
+  "clients": [
+    {
+      "name": "Allison Lind Design",
+      "spreadsheetId": "1DjKavk3BRXW5Hf9qVm3SCtcmgJpYv1FEoCaHfkIh4k8",
+      "scriptId": "1LhNl8DxpAOUunRAEKTwJ6furPIZ46IymMbuAYzw5gCrcMZrY1HS52t6n",
+      "webAppUrl": "https://script.google.com/macros/s/AKfycbxbPJfkhXp5hF1XrUgCdiT411f7xCI9xXsJ_nTvd4Z4OKx0mzIm6lE2TUNV-TNmQgB9Yg/exec",
+      "group": "default",
+      "enabled": true,
+      "notes": "Script ID could not be auto-detected — add manually"
+    },
+    {
+      "name": "Arkitektura Forty",
+      "spreadsheetId": "1re-AxPDbnlDMI1BO9fEcg4Kw6rLCTjg0dV661Qs3l_g",
+      "scriptId": "1gjDGUuh4MdBCVkgibWqS0obx-gg-84VWOrS4NamycFNPl4IFPLbs-yiN",
+      "webAppUrl": "https://script.google.com/macros/s/AKfycbyYiJtoKANk0T18KKA67CT_deE82xJ4eYDS87PyIG630_0wemnhYE3tsrry-3TBExmf6g/exec",
+      "group": "default",
+      "enabled": true,
+      "notes": "Script ID could not be auto-detected — add manually"
+    },
+    {
+      "name": "Aubrey Maxwell",
+      "spreadsheetId": "1et5o9-9ydjL69SR01NV5Go6pG_Bo470iDkd-hmO7bTg",
+      "scriptId": "1va_gAJOZWPJCiQaBInl__CI9UAX7bucnbX-D9rZdbGazUT06qPNOujji",
+      "webAppUrl": "https://script.google.com/macros/s/AKfycbx4hZNkOCAR1nb3oFg3hQ3jDPRHl4fYAMbuGNm6AfuyU1_rFqRQv2pMBoJcizhfCbfn/exec",
+      "group": "default",
+      "enabled": true,
+      "notes": "Script ID could not be auto-detected — add manually"
+    },
+    {
+      "name": "Bowlds Decor",
+      "spreadsheetId": "1ry0CRSAurrviD-IiFShKp-eJxpVpc_l1dKK9X9EEV9k",
+      "scriptId": "15CJR0m7vZz2nlMMOK_-4bN12UpEFaOMLayd68xZkdqRkhFuxpJphahnI",
+      "webAppUrl": "https://script.google.com/macros/s/AKfycbytB7yD_tqnEdPuJ2O7kaXhSljJcQzKCbvRKtDBtiF6uHY91H1XrkDl2n1qgNBUWj25GQ/exec",
+      "group": "default",
+      "enabled": true,
+      "notes": "Script ID could not be auto-detected — add manually"
+    },
+    {
+      "name": "Brian Paquette Interiors",
+      "spreadsheetId": "1B-cFppl8Bi86sLzGEvQSuUbeRB3Uu0J-891DoIA1jjg",
+      "scriptId": "1708e94MPK6X0uTleWDe0lt5fU3mLm_xVgyN8EBTZShru-QhNgsXOBXKn",
+      "webAppUrl": "https://script.google.com/macros/s/AKfycbxJwNHYEykwR5pPQPujpCOtIJ-8hnP3U3zjdf6MgcYk6bUWofO37OvUCyDGW-C4gEk/exec",
+      "group": "default",
+      "enabled": true,
+      "notes": "Script ID could not be auto-detected — add manually"
+    },
+    {
+      "name": "Brio Interiors",
+      "spreadsheetId": "1v0x7guahDkwywR9unURkS6BBH9iunqnjihEssp5_Hyw",
+      "scriptId": "1-2qdSUYcfP37PLt-K8FDNMtGJsof1sz0_pYm77J__-f2fefbT0gpXOlr",
+      "webAppUrl": "https://script.google.com/macros/s/AKfycby2vOCTG_D8AVK-p7dMc7DE9TWqF4Rzoa90Athf-qa99y4fSy1R-4GkhHjG95lEGUqJ/exec",
+      "group": "default",
+      "enabled": true,
+      "notes": "Script ID could not be auto-detected — add manually"
+    },
+    {
+      "name": "Brume",
+      "spreadsheetId": "1vKOeFOLzPtrK676tEFsI9ZNGbpieCFTToTEZvOpCiv8",
+      "scriptId": "1AScjYrEsABphNdqYTLqpITBIkmdV-5G_21BiKF2lqOT-CuJLVv1meXo4",
+      "webAppUrl": "https://script.google.com/macros/s/AKfycbwC5NWFA1KT7JtWiOyjVCYUKMp-91F-DY5k8bJ-JFQn3kjkVMtzT4IW2e6WpaEVJrVE/exec",
+      "group": "default",
+      "enabled": true,
+      "notes": "Script ID could not be auto-detected — add manually"
+    },
+    {
+      "name": "Cohesively Curated LLC",
+      "spreadsheetId": "11Ig3MZNRksiJEG3O-vFvSJQkiVUOghJOe0qDN9WyUOY",
+      "scriptId": "1WWVxQQjQfpxP_ZiBmIukK_8SanVNDGz3RX5Le6FZYhNmiv4DD1wEpZZs",
+      "webAppUrl": "https://script.google.com/macros/s/AKfycbz9fejuYHLZ9i9cf4awY6k03E-PFNORQ7TnKFJcoqOuR4ASJ5Xj6Mvpa8D1xhRA1xv9Kw/exec",
+      "group": "default",
+      "enabled": true,
+      "notes": "Script ID could not be auto-detected — add manually"
+    },
+    {
+      "name": "Couch Seattle",
+      "spreadsheetId": "194CtmDZTWaGnfAEgrsxgNKDCPH_mazxr7BnrRljukbE",
+      "scriptId": "1Il2ijOCI1PI1bunTyAIB4uG62Xy0BGWv_yZhfcjVg-FlElYAGwv47aYx",
+      "webAppUrl": "https://script.google.com/macros/s/AKfycbyHHw8QX95ptjPwjosgD6yk_7N5R6xteCCddTNh3787YfHSCPviwGOofkmBXaVnkNeQ/exec",
+      "group": "default",
+      "enabled": true,
+      "notes": "Script ID could not be auto-detected — add manually"
+    },
+    {
+      "name": "Demo Company",
+      "spreadsheetId": "1bG4Sd7uEkBcTJF513C2GgESskXDyvZomctfmaBVmpZs",
+      "scriptId": "1cfQgsP2sM4BjjacWk47KrcjHLtZmemgOQH7oYdcQzIUh7meUmQI3IYpv",
+      "webAppUrl": "https://script.google.com/macros/s/AKfycbzwo-pcd9R-FaVR-88tUnwPm5FZA0X5dxDv_XiAnOAMPXRkAKOPJd5KBCzFad2PTsI8Kw/exec",
+      "group": "default",
+      "enabled": false,
+      "notes": "Script ID could not be auto-detected — add manually"
+    },
+    {
+      "name": "Digs Furniture",
+      "spreadsheetId": "1XwlmHro_A1OR1YL3yUK4AV_Ppt4yqApHzRWxfoVIazM",
+      "scriptId": "1c_ZjzXBxenUM59PTX0e7clpgDXA1ofKLJJlCpN8wrdY-igNZRIaSYiGQ",
+      "webAppUrl": "https://script.google.com/macros/s/AKfycbzXCm4zf98ocB659AZt74Ndbz7FWMkXihPyv8HgXez9fRROaHn3YXLOgmOQbe0PdXzN/exec",
+      "group": "default",
+      "enabled": true
+    },
+    {
+      "name": "E Cobb Architects",
+      "spreadsheetId": "1irajxLTrlsMQxHnXKOvlw801DhDwUDoc0ZB3Rhe1IIQ",
+      "scriptId": "10beFtRaPNeTU7Fp32Due-mt_qyNJ7qg5bX1FXY5gBxo3xeB9xNxdqy6s",
+      "webAppUrl": "https://script.google.com/macros/s/AKfycbz6mxPgcyh4YiLcqPBUGEMVBtb7ISVA2CQswEGLMBJ3v1sCmAiFfHm9aZ1ZyniAeRdPtg/exec",
+      "group": "default",
+      "enabled": true,
+      "notes": "Script ID could not be auto-detected — add manually"
+    },
+    {
+      "name": "Elite Anywhere Inventory",
+      "spreadsheetId": "1DtpOVgmfCKTkOIB6TuU9t19kF-GIlWvNJLSsWfFh6Vw",
+      "scriptId": "1B_w_paeGgiTdb-9vO1F6S_N8zc-mPtoQyghyUItFjeQcm5HYAxHn4hAF",
+      "webAppUrl": "https://script.google.com/macros/s/AKfycbyKGsCF3JHfDvnIKoJbEeuUbAmwQInYJs9AhxE42DyhaYYXak9zyhUjUQJ8ndzmQwrf/exec",
+      "group": "default",
+      "enabled": true,
+      "notes": "Script ID could not be auto-detected — add manually"
+    },
+    {
+      "name": "EWF Modern",
+      "spreadsheetId": "1B_yFXYY_asUp7It3U3IOv1FUi9SYm-h-l7uPcKDG5nQ",
+      "scriptId": "1QK_LcDn6WSPwrSdI5R4k92Nnu__POes02gyf5xyYe6BG9IUo2wtiaE8r",
+      "webAppUrl": "https://script.google.com/macros/s/AKfycbx3KR9faSnEv2XfA9uGslASdpTL282yXpIlEwMqb23c-HlYc9ln26vYW4pgG4SbtU-k/exec",
+      "group": "default",
+      "enabled": true,
+      "notes": "Script ID could not be auto-detected — add manually"
+    },
+    {
+      "name": "Hyrel Mathias Interiors",
+      "spreadsheetId": "19Yvc_aherumnLSxJQ1Y9YDf9m3Q6hie27UHdrbXUIGk",
+      "scriptId": "1b95rS3f3O7bCAr6CcL0pAHF1pzjTYqN0TzEeDGzLgK9WLwWW5ltgLZ1u",
+      "webAppUrl": "https://script.google.com/macros/s/AKfycbwaLTk0G2P7VKqk-ilYheizFmBd6c1X-16zMiPax4jbXiZQqY0Oz0BWS_crp-4qlqhX/exec",
+      "group": "default",
+      "enabled": true,
+      "notes": "Script ID could not be auto-detected — add manually"
+    },
+    {
+      "name": "J Garner",
+      "spreadsheetId": "16ZlKfP3zTTjHgnAc-OrUdwzn7Tv14MpmElZr72JRmLw",
+      "scriptId": "1AykhQnqpI3RbNEA7wgGYHM-Q8rhn5hhM7rxeigfLIiFQFIgV3_7ZYUnm",
+      "webAppUrl": "https://script.google.com/macros/s/AKfycbzSkBACjIFHz1zBYyxaXB3MrjEkxqQr_sX7W9cGjhz0SJYfgXE6XiYB3n7-FBaCOs26/exec",
+      "group": "default",
+      "enabled": true,
+      "notes": "Script ID could not be auto-detected — add manually"
+    },
+    {
+      "name": "Jason Dallas Design",
+      "spreadsheetId": "1vIH8RvPsZBuSDbs05_PWHX5l0xI-dMXJ5LawVYCnAIc",
+      "scriptId": "1wjYY_g1b4reLu0GeVQwYq6ICj_DnaD62ePNNVQKim2cjyvdGsPbvfZzF",
+      "webAppUrl": "https://script.google.com/macros/s/AKfycbycvVeTku966NRIMvox5J9IU1dAy1l8S9BYDDEPe0gLwjXiklrXNjPrFYhqNGAsPygxSQ/exec",
+      "group": "default",
+      "enabled": true,
+      "notes": "Script ID could not be auto-detected — add manually"
+    },
+    {
+      "name": "Jodie Thomas Design",
+      "spreadsheetId": "17iqtKPu87CWloiV0HZGgMZ6CtTTqJDY4daK6zpgfnA8",
+      "scriptId": "1wZki1PxsRIuQM1ViDebzxf_KCWO6MjHCt5VUpZYbnEXaAizR45ECNcU5",
+      "webAppUrl": "https://script.google.com/macros/s/AKfycbx_vTniQ4-7LOo02_kkeH5Ym5W0gvZbgNcJqtvFR-ZAWjKNL4QjLlQ0nP2Vz5RfvGp1/exec",
+      "group": "default",
+      "enabled": true,
+      "notes": "Script ID could not be auto-detected — add manually"
+    },
+    {
+      "name": "Justin Demo Account",
+      "spreadsheetId": "1-nF3CgQBcfCncqW6u3d4jilsZzjqR1RO6y_f4OD-O2A",
+      "scriptId": "1VCUX78qfQbWddlX2-3H-jvsuI4u3BuBtVrYMkGjpdZ6VQ7-aUc_-kXkn",
+      "webAppUrl": "https://script.google.com/macros/s/AKfycbyIfXwAdJRbLPVwEdAE1ykTaNl-72C05SrzIcZYcWgwtpLjZoQSREAMN4fZaNRQkahnXA/exec",
+      "group": "pilot",
+      "enabled": true
+    },
+    {
+      "name": "K&M Interiors",
+      "spreadsheetId": "1Wmx9SfQ6O0zZ41pmKBUvH2rQCqcuWln0yE6uzRTaAo0",
+      "scriptId": "1MZjmWWTZeSaIrPHgV2GyAVbf1oaQi_cwD4OmA25OPnZHpla5r0XqMOvY",
+      "webAppUrl": "https://script.google.com/macros/s/AKfycbz0P0sgECMpsYCxg2agmt8jLcBwf94ah9G31pIEghiRBEPyy4AeSfUAhaRXrit7gAbCaQ/exec",
+      "group": "default",
+      "enabled": true,
+      "notes": "Script ID could not be auto-detected — add manually"
+    },
+    {
+      "name": "Leflar LTD",
+      "spreadsheetId": "11r_yQHvQeJdy6Worn7ZfgH2BWsJScADpXln93L8DBTo",
+      "scriptId": "17-MeKnFOZWkiOmEIXGm_MbNDF6av40GqRRuR5ODvDbWq_6DaOod6AL7A",
+      "webAppUrl": "https://script.google.com/macros/s/AKfycbyRrVneaXWJVFcBPjZEuhu3wNHlby4UIkcu3hOi80lWHtfrSLF5tkVZmbysa_DJNvUF/exec",
+      "group": "default",
+      "enabled": true,
+      "notes": "Script ID could not be auto-detected — add manually"
+    },
+    {
+      "name": "Ligne Roset",
+      "spreadsheetId": "1y2mDEEeoMUe8im-EjvZkDnYNhModKVQb4PymNhwWuBY",
+      "scriptId": "1Ai2AcOUxB62zaRWixBVQ2Mz7Ks0aU1WKwHWlYSxB5WOBcliw8f_HbeMq",
+      "webAppUrl": "https://script.google.com/macros/s/AKfycbwyjTEXu_IAG9EnuZVGWr_mkXXDkn2JSeT4s3u6iARbZPfBf7OCsKOzEtXjoT63wKjO/exec",
+      "group": "default",
+      "enabled": true,
+      "notes": "Script ID could not be auto-detected — add manually"
+    },
+    {
+      "name": "Lisa Sherry Interieurs",
+      "spreadsheetId": "16CGokujfbRkmeyDToyDNAPr2j7Ojg31HrLV7dgr3saM",
+      "scriptId": "1YW9oMiKyJLu-kT4iVp4nYBTRGf3MrFp3cSqUuK4D7qQCgx9v7s_klar6",
+      "webAppUrl": "https://script.google.com/macros/s/AKfycbw89xSJI-j2MrCVDyxXHRifsD60aC0tXC7VZYf3a7U0SjBZaCzyDah3hz7Z7pBtVIod/exec",
+      "group": "default",
+      "enabled": true,
+      "notes": "Script ID could not be auto-detected — add manually"
+    },
+    {
+      "name": "Mary Kennegott Design",
+      "spreadsheetId": "1nC0afgfk5KFyPdoK82sxGZeG7kcsA3uRNUI_a2l0Lbg",
+      "scriptId": "18f0X-Sxk2p5xxdhglsQEyGBAPM7CxVXufwVYLTPsOCRonyBKmeNCOkVQ",
+      "webAppUrl": "https://script.google.com/macros/s/AKfycbw4QjriVVw6pXkinchvNaLyIMwcx4s0xMFl_cgNMFvf8KUKKAziUxokmiTXgBzPHR4H/exec",
+      "group": "default",
+      "enabled": true,
+      "notes": "Script ID could not be auto-detected — add manually"
+    },
+    {
+      "name": "Master Inventory Template",
+      "spreadsheetId": "1amA0P9CFJ5sZ-aBlcYAZ7v-gyw7JBzmOdzmfadb4Otc",
+      "scriptId": "1Pk2Oc0u7RRgMs3sQs96brKDBFNA9vCyKOHZA9jMmk4gkD2yNdTGRlI5T",
+      "webAppUrl": "https://script.google.com/macros/s/AKfycbyQqdWNz3siyLQ8tEIN1LoOndFN8Jw6vXdkueG4DUovr1FEYC4ugmUR3kE1phGYM3d_tQ/exec",
+      "isTemplate": true,
+      "group": "template",
+      "enabled": true,
+      "notes": "Script ID could not be auto-detected — add manually"
+    },
+    {
+      "name": "Michelle Dirkse Interior",
+      "spreadsheetId": "1frmHfffHQeuqKOhYrLl5jZgYo0Xc7rsYSDBUD3y0uAY",
+      "scriptId": "1aJ2cqie2Iyz-Q7qHrvHZfWtEggOQ9s4r7Aif7d0T0Bx95A-MlUK_eTTN",
+      "webAppUrl": "https://script.google.com/macros/s/AKfycbxjTLaNP-4zDrtnkMCBF45e8tACjaCeMJSpKwR25xy7mYp7vWdPiLkz9WHSX8P9D2KczQ/exec",
+      "group": "default",
+      "enabled": true,
+      "notes": "Script ID could not be auto-detected — add manually"
+    },
+    {
+      "name": "Modern Design Sofa",
+      "spreadsheetId": "1NQkbtHn730pKrFupC9HSN4q-FhPhhWF3kAnpm2p9Om8",
+      "scriptId": "1C45p947P4VNzkO3QUg3WwIxZdOh3nPNOtI5gpANZch5tQaTXPR8V7Su6",
+      "webAppUrl": "https://script.google.com/macros/s/AKfycbyUp_CXAirzQ9NyujtdZmyWPuv60VaSjG4vSzLzwghdmyTyTTDDlumjfAnZ-Nk9A29z/exec",
+      "group": "default",
+      "enabled": true,
+      "notes": "Script ID could not be auto-detected — add manually"
+    },
+    {
+      "name": "MR. Studio",
+      "spreadsheetId": "1CUPSkPEXYzhWKcoWdmCWasBfiESVWRHg1ihIVJVfya0",
+      "scriptId": "1s_uZjHLSH1oIm4GpGk-zped2HjmRWqLGdqMdjUCBca4DDbmdjXKWEce1",
+      "webAppUrl": "https://script.google.com/macros/s/AKfycby35xudERXwQ79eZaZrpaX9dXLoEgMHWLbUKpaCtYimM0_Z66XphFlnsZ5UZwKyOhIr/exec",
+      "group": "default",
+      "enabled": true
+    },
+    {
+      "name": "Needs ID Holding Account",
+      "spreadsheetId": "1vUiYh3egP6DCyADG9FbOYK8H2Sf_7g1OtUEVgV7nr3k",
+      "scriptId": "1uwKv85ASi7xMJUP5XxCH6d4LKIceHbFHpoc0WXfnd-j5WfQHctF_dfo7",
+      "webAppUrl": "https://script.google.com/macros/s/AKfycbyVeg_kaBMqFCl3JQm1n-dskjjuG-nu1gdZL4EpOnLIjDgtGLWAHPj8XReYQILhlClD/exec",
+      "group": "default",
+      "enabled": true
+    },
+    {
+      "name": "Nip Tuck Remodeling",
+      "spreadsheetId": "1_CINtvpNLs1pSD7kkh5-dbccM-jF7s1B4vQBkjA5eUc",
+      "scriptId": "10vmlTxW7oRTbVuQNp-qQ21asY1mgEyNzqcb4tRTuHXkyouXPvAk5l71F",
+      "webAppUrl": "https://script.google.com/macros/s/AKfycbyW4uh3FYu9Z5RFKednJM-oAEjCJJITKjsHtwdKtCFiOoktsaDT-J3nbbjdWgqgJbB47A/exec",
+      "group": "default",
+      "enabled": true,
+      "notes": "Script ID could not be auto-detected — add manually"
+    },
+    {
+      "name": "Olson Kundig",
+      "spreadsheetId": "1T7WjroGcsq2BT3KFWfp2PdTLyxekpQemIUGlMZEtt5Y",
+      "scriptId": "1MOg90cvyZsvj2OBjgd-6bY2kKRIlJnR_53dxMGvEcegFXA0UHomtLqIy",
+      "webAppUrl": "https://script.google.com/macros/s/AKfycbzsdlLRPJ2fqPJue-Ogx4CyRg1tnAuLdKKdsJOZx8ePs1FnxGv55xjEXTleu2Jy3u2N/exec",
+      "group": "default",
+      "enabled": true,
+      "notes": "Script ID could not be auto-detected — add manually"
+    },
+    {
+      "name": "Perigon Design",
+      "spreadsheetId": "1PCySjksMLL1lMn8MOClWlc6zv163R3g9iDR1IUSeApQ",
+      "scriptId": "1kpeOCFaCVgg4htMMSwZLh66R60rw2wkuCrmvGxNPwP3-62hfSjFggaqI",
+      "webAppUrl": "https://script.google.com/macros/s/AKfycbxgO0VdgEgbj4vYj6qaDYmgiOJkC2zqbAj6N0jHkuLUBmTspphAbqlEhj_K3dKb6zwp/exec",
+      "group": "default",
+      "enabled": true,
+      "notes": "Script ID could not be auto-detected — add manually"
+    },
+    {
+      "name": "PRDA Studio",
+      "spreadsheetId": "1BESPBv3QiX3Ygu1OKFxtdmXhsPjziGhY-NF-8197zns",
+      "scriptId": "1tbw6pQUwBtKj1wWA2-icr_GPsT3kUqZWaP2S9W0rIcj6I1XhWUCzCG94",
+      "webAppUrl": "https://script.google.com/macros/s/AKfycbys8vyfYm1vSp0fzC8K8FbeN1QGpAJ9TtgldfiFFMp85MEKxbNJQu2aN0qwX2kTJqZGrw/exec",
+      "group": "default",
+      "enabled": true,
+      "notes": "Script ID could not be auto-detected — add manually"
+    },
+    {
+      "name": "Pulp Design Studio",
+      "spreadsheetId": "14gIUgOwEaaDpLuhC2ai2V-NOrr2X8MZTohNj15W3xr0",
+      "scriptId": "12Oe9v-VOwY3PliwHGND3uryRESN24FPIHVlbgPdFBecF1GkiLGPUP2Pd",
+      "webAppUrl": "https://script.google.com/macros/s/AKfycbyJQYLzNZeruPD71H8NpPVN82JXpZPVDCbNA_cxN7nqGh1ydw-qdu99_mwMfLp8HbXYew/exec",
+      "group": "default",
+      "enabled": true,
+      "notes": "Script ID could not be auto-detected — add manually"
+    },
+    {
+      "name": "Robin Chell Design",
+      "spreadsheetId": "1LkIvACWSxAh_FK-rd6eq2HL6hF4eTXO6DRkGzykk5QM",
+      "scriptId": "1r3TbztQgVXxTvuq4vPvygSGDCamvwiWU3L27guIdcO7iFClIAAt73axO",
+      "webAppUrl": "https://script.google.com/macros/s/AKfycbzHkhlDBg82BKqVB7OjlWlP9nJRkrSXd3sVB9eR1Nnsp7qh0OeH9V68-t4oe9s97jT0/exec",
+      "group": "default",
+      "enabled": true,
+      "notes": "Script ID could not be auto-detected — add manually"
+    },
+    {
+      "name": "Roche Bobois",
+      "spreadsheetId": "10TAHPoJCPtoyWjUkrqXtnliiNTYLQhs_dvf5_PbB0hY",
+      "scriptId": "1B0fnBfLx7AVjhmOB8Oci-FDmpTX4q1tKLgKQXq1Z8NqB0gtfGyHqhU9O",
+      "webAppUrl": "https://script.google.com/macros/s/AKfycbzPnIk8xmufFN0BoeUP-wNYefYy_cvF4vQXpa2Ab_u_ITIuRooOY_vcSkX4rWhVImwgbg/exec",
+      "group": "default",
+      "enabled": true,
+      "notes": "Script ID could not be auto-detected — add manually"
+    },
+    {
+      "name": "Roche Bobois - PDX",
+      "spreadsheetId": "1kSC-N_1jj6NNIiP2a0leDdDRMaTuEYcc5U1ys970tak",
+      "scriptId": "SCRIPT_ID_NOT_FOUND",
+      "webAppUrl": "",
+      "group": "default",
+      "enabled": false,
+      "notes": "Script ID could not be auto-detected — add manually"
+    },
+    {
+      "name": "Scott Ross - Personal",
+      "spreadsheetId": "1GuoctIfwkPTJSBi-k0RUpzi2FUyvwVsZsVs_nOx46Lg",
+      "scriptId": "1xagCGOYm00cW4ncFVOO2hcOR2uFqGroOQF9cIPOVZ2Mph8aCdZoM_AgI",
+      "webAppUrl": "https://script.google.com/macros/s/AKfycbyzZBgvq7tMTQgNoru9Bq3r8wBb4flea-U41Xs1AgEWT_6ZvZT58uZ1NsBHosIk3eqm/exec",
+      "group": "default",
+      "enabled": true,
+      "notes": "Script ID could not be auto-detected — add manually"
+    },
+    {
+      "name": "Scott Ruthfield",
+      "spreadsheetId": "1Ch19GMRgMHQ0L0wmZLZf4-rW7Q4sfNzPAPbL0g4k9Os",
+      "scriptId": "1Q8t3EZijcGRYkhh1wmsQBuU9oXgz19JoomvrnJVsky_IjGFxe4eyDbuk",
+      "webAppUrl": "https://script.google.com/macros/s/AKfycbwCq5HyU4wLdikaw2mHVgN8N1EembabspuOSe42POFUF74z2mAw10oTNxUF0FBGVDBhrA/exec",
+      "group": "default",
+      "enabled": true,
+      "notes": "Script ID could not be auto-detected — add manually"
+    },
+    {
+      "name": "Seva Home",
+      "spreadsheetId": "1_E5xG0PZR8pGxxFVudrRDLU8NyLYDIXkG4rbPcBfj0s",
+      "scriptId": "1j_cS8i0FpDAO-Xy4cEdFE_RwM63l5KGUwOdHkCQaupsbmGWatNHHGg0p",
+      "webAppUrl": "https://script.google.com/macros/s/AKfycby6JHEBloHOJGQ5FnMlpypMDNJsRVFJ7PJdDgoA1MtnQZPgnqSFRM0ZTNNIGMTC4yURGQ/exec",
+      "group": "default",
+      "enabled": true
+    },
+    {
+      "name": "Shelly Buurman Design",
+      "spreadsheetId": "1P1hHOtBiRpJatdzmSr4txsHIM9nAeSY5jVmZ3JS2FFs",
+      "scriptId": "1UYHLv5uVI3tg8o3ZkGLl4NWjrCTTI0KzhhofetcZ_-Op7URYa-bg9Tud",
+      "webAppUrl": "https://script.google.com/macros/s/AKfycbxctapotwmpMkemFWGN65-t9mKybQ9RUJqryji3475Qc7zZOn2Uxad7-JZIwyVEjUkA/exec",
+      "group": "default",
+      "enabled": true,
+      "notes": "Script ID could not be auto-detected — add manually"
+    },
+    {
+      "name": "Short Term Client Holding Account",
+      "spreadsheetId": "1zFfZh5ZDFJ1e-ANbCTEnMhXJu9d2_WrKnJCEFmgTHEo",
+      "scriptId": "1_kZIqGPHUa2-qGv6CHV2WwbEjQTHMYQGJM0iVCxV5mlxSC4o5zHTkIWI",
+      "webAppUrl": "https://script.google.com/macros/s/AKfycbwiwY5x4idTGVYcsevXAvhOp1-ZM-iQKUI3dZbMzg6Hn8h4Ctrqd4Q7xyzO_nqjklRK/exec",
+      "group": "default",
+      "enabled": true,
+      "notes": "Script ID could not be auto-detected — add manually"
+    },
+    {
+      "name": "Studio AM Architecture",
+      "spreadsheetId": "14i6RKdF59z6tsX7EtcmB95lMyL6RsZrio50HSopYQi8",
+      "scriptId": "1FK_1lnUze-HbjXPHd3joBihi8ZjtQlzTHAidn5NmT2IBXHhzcJ4EW_5H",
+      "webAppUrl": "https://script.google.com/macros/s/AKfycby9Ar6eqhH7SXdx_7QkoaKaPfUrnTHWUPIqeSR9fwWVgvZsogne281R_FIlh9w_jCKdLA/exec",
+      "group": "default",
+      "enabled": true,
+      "notes": "Script ID could not be auto-detected — add manually"
+    },
+    {
+      "name": "Studio Diaa",
+      "spreadsheetId": "10Z1w2vM5hrM0cOZPRZVn0pbjZlJG0Fm_YR47BVig8WU",
+      "scriptId": "1YXzzn4pi74YAGkoy5LaeLhX1GJxNSSpDfpnIB1MaY_eZobgVl2H7zlE8",
+      "webAppUrl": "https://script.google.com/macros/s/AKfycbx5nSV4qmh8OHlOp40ClTqN2sfjeR5qlxhaZewtMA-KHZ0-gwKy0ODJW60gwje1aSKC/exec",
+      "group": "default",
+      "enabled": true,
+      "notes": "Script ID could not be auto-detected — add manually"
+    },
+    {
+      "name": "Studio Pierre Mele",
+      "spreadsheetId": "11wwgK841A5WX_zvSvdp1toSvZw4fzGlGvrTMumWOC7Q",
+      "scriptId": "1YkMHlpTgtAxdyLHxcLKPF5zaNTbKlAhG_MFb-HOv2jp8FVKJP-qFyAI1",
+      "webAppUrl": "https://script.google.com/macros/s/AKfycbxXS3OY5QYAxWJmU4oppjxuZnK2e9I7W4bv9q7LztsoQVIURFODoCqlyTEER-KIuZ-L/exec",
+      "group": "default",
+      "enabled": true,
+      "notes": "Script ID could not be auto-detected — add manually"
+    },
+    {
+      "name": "Suyama Peterson DeGuchi",
+      "spreadsheetId": "1U29MPxOrLUInva5LVVe_sk8y-e-3_lzBHOBhY3PD2LE",
+      "scriptId": "1aV4l6D7JqPQHJeiXNlyk659CZZsVhWBaAD9U1wcR-yL6AVdKFAKkDgn8",
+      "webAppUrl": "https://script.google.com/macros/s/AKfycbzvhouu4mx_MKXo8SGIWYYKplmzycrenQ0uNrhYAGwcUaF0GUuS-QS6Z0SitK5TqRxL/exec",
+      "group": "default",
+      "enabled": true,
+      "notes": "Script ID could not be auto-detected — add manually"
+    },
+    {
+      "name": "Vida Design",
+      "spreadsheetId": "1L7PGWwLUCsMAYCpiLwGVqK50Mg-bCyoWTohIK_FvL7E",
+      "scriptId": "1R_FWqrGvR_O9f9SaQQAlnVhkMEUq1pHENSlS7eVCB3UMKoZRDFGZ0qWD",
+      "webAppUrl": "https://script.google.com/macros/s/AKfycbwtmpx_p3oAQ8P_Z0C0w2LtgiFzY_oXl_9I0GiRXTVIqSzKdcZJSq1CYCSZ58S2EQiRIQ/exec",
+      "group": "default",
+      "enabled": true,
+      "notes": "Script ID could not be auto-detected — add manually"
+    },
+    {
+      "name": "Vida Design - Merit",
+      "spreadsheetId": "1YxkbBZevV4btRz0LNe56HPUo8EOTcZKr5-uLbYtXvfM",
+      "scriptId": "1IogoDQRJm0QeZsK-pCoGfmSoOX8C4SdDF_VO_8v4qpy1NyWgVyw94TA6",
+      "webAppUrl": "https://script.google.com/macros/s/AKfycbzQ9Y2IAmO1pG3QkSaPIFySD7fgqcXyJnDnu7cDRTsi2LtbKiPDQvGrigcn5rg2KECB5g/exec",
+      "group": "default",
+      "enabled": true,
+      "notes": "Script ID could not be auto-detected — add manually"
+    },
+    {
+      "name": "Vida Design - Waymark",
+      "spreadsheetId": "1aFFjJwygoQuAglZ9fqYtmEvAE54d-FjVTTssik7pN_k",
+      "scriptId": "15aW8jnYMgXpiYDY529wQThZZnCTs7sf7NPBInLjySBsEsBbuFJKpRdfh",
+      "webAppUrl": "https://script.google.com/macros/s/AKfycbw9t0kCyM-Ox6L-nXKaZPWDSTaoC9m90Fa6FegDhxVcKFIyLCL9E5_8fr95CS-Cv77z/exec",
+      "group": "default",
+      "enabled": true,
+      "notes": "Script ID could not be auto-detected — add manually"
+    },
+    {
+      "name": "Weidner Apartment Homes",
+      "spreadsheetId": "1uVFuw885ZzoEIQ0MJR_szfNZoBQa8ejB769DOAX5Hcs",
+      "scriptId": "1jawlB1qPIPtm4JLfaQCke48QysqLEHJ4c4IK_cMCXoDSocSCwreDeAsH",
+      "webAppUrl": "https://script.google.com/macros/s/AKfycbyw_sA3aBDXRZhFbjz5Cg68WJDkBUcpp04yz76zkB9IPj_Bq_ogIZG8K99D7gAjaSewlQ/exec",
+      "group": "default",
+      "enabled": true,
+      "notes": "Script ID could not be auto-detected — add manually"
+    },
+    {
+      "name": "Wignall Design",
+      "spreadsheetId": "1lkKmMBVxEjcZUuBj_E811uqkxNPyzPL0pxJwvBa8Flc",
+      "scriptId": "1Hz5gNQaEjHN3ke70ItrFcHevL6zjkt9Ave_FkXLJZE6pO4Doo84JbrV2",
+      "webAppUrl": "https://script.google.com/macros/s/AKfycbzVWDfyykHo7uSSksxqKDH0SnHs-GuOPXS8ihRovFfKh_RH2-9P1uozlvX5jmiPOz3g/exec",
+      "group": "default",
+      "enabled": true,
+      "notes": "Script ID could not be auto-detected — add manually"
+    }
+  ]
+}

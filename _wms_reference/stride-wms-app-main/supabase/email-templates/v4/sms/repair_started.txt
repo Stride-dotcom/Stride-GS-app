@@ -1,1 +1,0 @@
-Repair started: {{item_code}}. {{item_photos_link}}

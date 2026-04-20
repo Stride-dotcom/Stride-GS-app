@@ -1,6 +1,0 @@
--- NO-OP (superseded)
--- This migration was replaced because it caused conflicts / schema mismatch.
--- Use instead:
---   20260205123000_backfill_charge_types_pricing_rules.sql
--- and shipment RPC fix:
---   20260205120000_fix_shipment_validation.sql

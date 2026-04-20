@@ -1,0 +1,40 @@
+{
+  "name": "stride-client-inventory",
+  "version": "3.0.0",
+  "type": "module",
+  "private": true,
+  "description": "Local master codebase with Apps Script API bulk rollout for bound client scripts",
+  "scripts": {
+    "setup": "node admin/setup-auth.mjs",
+    "refresh-auth": "node admin/refresh-auth.mjs",
+    "rollout": "node admin/rollout.mjs --execute",
+    "rollout:dry": "node admin/rollout.mjs",
+    "rollout:pilot": "node admin/rollout.mjs --group=pilot --execute",
+    "sync": "node admin/sync-clients.mjs",
+    "sync-web-urls": "node admin/sync-web-app-urls.mjs",
+    "verify": "node admin/verify-triggers.mjs",
+    "update-headers": "node admin/run-remote.mjs --fn=StrideRemoteUpdateHeaders_",
+    "install-triggers": "node admin/run-remote.mjs --fn=StrideRemoteInstallTriggers_",
+    "refresh-caches": "node admin/run-remote.mjs --fn=StrideRemoteRefreshCaches_",
+    "sync-caches": "node admin/run-remote.mjs --fn=StrideRemoteSyncCaches_",
+    "sync-status": "node admin/run-remote.mjs --fn=StrideRemoteSyncStatus_",
+    "add-whse-email": "node admin/run-remote.mjs --fn=StrideRemoteAddNotificationEmail_",
+    "backfill-imp-folders": "node admin/run-remote.mjs --fn=StrideRemoteBackfillImpFolders_",
+    "remote": "node admin/run-remote.mjs",
+    "push-api": "node admin/push-stride-api.mjs",
+    "push-cb": "node admin/push-cb.mjs",
+    "push-master": "node admin/push-master.mjs",
+    "push-taskboard": "node admin/push-taskboard.mjs",
+    "push-stax": "node admin/push-stax.mjs",
+    "push-scanner": "node admin/push-scanner.mjs",
+    "health-check": "node admin/run-remote.mjs --fn=StrideRemoteHealthCheck_",
+    "deploy-clients": "node admin/update-deployments.mjs",
+    "deploy-api": "node admin/update-deployments.mjs --api",
+    "deploy-cb": "node admin/update-deployments.mjs --cb",
+    "deploy-all": "node admin/update-deployments.mjs --all",
+    "push-templates": "node admin/push-templates.mjs"
+  },
+  "dependencies": {
+    "googleapis": "^144.0.0"
+  }
+}

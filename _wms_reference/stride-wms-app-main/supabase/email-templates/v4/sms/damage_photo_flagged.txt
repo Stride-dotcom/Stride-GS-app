@@ -1,5 +1,0 @@
-Damage photo flagged: {{item_code}}
-
-{alert_message}
-
-Open: {portal_base_url}

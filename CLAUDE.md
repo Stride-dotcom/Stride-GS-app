@@ -16,31 +16,49 @@ This project uses Google Apps Script, Google Sheets, Google Drive APIs — **plu
 
 ## Archive pointers (load on demand)
 
-Historical and rarely-needed reference material has been moved to `Docs/Archive/`. Read these files only when relevant to the current task:
+Session 77 cleanup moved historical docs + templates under `_archive/` so the repo root stays focused on what's needed to ship. Everything below still lives in git — only the path changed.
 
+**Historical reference (previously `_archive/Docs/Archive/`):**
 | File | When to read |
 |---|---|
-| `Docs/Archive/Session_History.md` | Need context on when a feature was built or a decision made — 68 session one-liners |
-| `Docs/Archive/Deployment_Reference.md` | Full deployment guide, troubleshooting, auth prereqs, all npm commands |
-| `Docs/Archive/Supabase_Integration_Plan.md` | Phase 1-4 Supabase integration details; open risks, manual steps |
-| `Docs/Archive/Marketing_Manager_Plan.md` | Marketing Campaign Manager build plan (all 5 phases complete) |
-| `Docs/Archive/QR_Scanner_Next_Phase.md` | Scanner Supabase direct lookup + auto-print labels build plan (not started) |
-| `Docs/Archive/Architectural_Decisions_Log.md` | Full numbered list of 53 decisions — the "why" behind feature implementations |
-| `Docs/Archive/Performance_Track_History.md` | Completed performance phases 1-3 with version numbers |
+| `_archive/Docs/Archive/Session_History.md` | Need context on when a feature was built or a decision made — 68+ session one-liners |
+| `_archive/Docs/Archive/Deployment_Reference.md` | Full deployment guide, troubleshooting, auth prereqs, all npm commands |
+| `_archive/Docs/Archive/Supabase_Integration_Plan.md` | Phase 1-4 Supabase integration details; open risks, manual steps |
+| `_archive/Docs/Archive/Marketing_Manager_Plan.md` | Marketing Campaign Manager build plan (all 5 phases complete) |
+| `_archive/Docs/Archive/QR_Scanner_Next_Phase.md` | Scanner Supabase direct lookup + auto-print labels build plan |
+| `_archive/Docs/Archive/Architectural_Decisions_Log.md` | Full numbered list of 53 decisions — the "why" behind feature implementations |
+| `_archive/Docs/Archive/Performance_Track_History.md` | Completed performance phases 1-3 with version numbers |
 
-**Active build plans:**
+**Living docs + active build plans (relocated under `_archive/Docs/`):**
 | File | When to read |
 |---|---|
-| `Docs/DT_Integration_Build_Plan.md` | Full DT build plan — all phases, locked decisions, table schema, RLS summary, open questions |
-| `Docs/Optimistic_Updates_And_Payments_Supabase_Plan.md` | Session-68 planned work: optimistic UI updates for every bulk action + Payments Supabase mirror (not started yet) |
+| `_archive/Docs/Stride_GS_App_Build_Status.md` | Current session changes, what's next, feature parity matrix. **Still updated every session** — path is under _archive only because of the session-77 root cleanup. |
+| `_archive/Docs/DT_Integration_Build_Plan.md` | Full DT build plan — all phases, locked decisions, table schema, RLS summary, open questions |
+| `_archive/Docs/PAYMENTS_REDESIGN_PLAN.md` | Payments page redesign plan — DRAFT, not yet executed |
+| `_archive/Docs/Future_WMS_PDF_Architecture.md` | Future Stride WMS PDF architecture reference |
+| `_archive/Docs/REPO_STRUCTURE.md` | Canonical branch model + deploy flow reference |
 
-Companion living doc: **`Docs/Stride_GS_App_Build_Status.md`** — current session changes, what's next, feature parity matrix.
+**Completed phase reports + research (superseded):**
+| Path | What it was |
+|---|---|
+| `_archive/phase_reports/` | PHASE1/2A/2B/2C + SUPABASE_PHASE1/2/3 + SUPABASE_REALTIME_PLAN_REVIEW handoff reports |
+| `_archive/build_plans/` | Completed Marketing / Optimistic Updates / PHASE_7D_A prompts |
+| `_archive/research/` | Task Board research, Phase 7 + Stax parity audits |
+| `_archive/legacy_sql/` | Pre-`supabase/migrations/` phase setup SQL |
+| `_archive/reference/` | External vendor refs (DT API PDF, WMS zip, stride-build-instructions skill, old root package.json) |
+
+**Template sources** (runtime copies live in Supabase):
+| Path | Purpose |
+|---|---|
+| `_archive/EMAIL TEMPLATES/` | Source .txt files for the 19 email templates. Supabase `email_templates` is now authoritative; these remain as the import source for `seedEmailTemplatesToSupabase`. |
+| `_archive/Doc Templates/` | Source files for invoice / work-order / settlement doc templates. Same pattern. |
+| `_archive/INSTRUCTION GUIDES/` | WMS user-facing .docx guides (Billing, Inventory, Onboarding). |
 
 ---
 
 ## Repository Structure
 
-**Canonical reference:** `Docs/REPO_STRUCTURE.md` — read that for the full branch model, deployment flow, parallel development stream rules, and health checks. This section is the compact summary.
+**Canonical reference:** `_archive/Docs/REPO_STRUCTURE.md` — read that for the full branch model, deployment flow, parallel development stream rules, and health checks. This section is the compact summary.
 
 After the session 59 cleanup and session 60 remote wiring, there are **exactly two git repositories** in this workspace, each with one clear job. If you see a third, something is wrong.
 
@@ -116,7 +134,7 @@ If you want that directory version-controlled in the future, that's a separate d
 
 ### Historical note — why this structure exists
 
-Before session 59 there were **four** git repos stacked (parent, `stride-gs-app/`, `stride-gs-app/dist/`, `AppScripts/stride-client-inventory/`). The nested `stride-gs-app/.git` had a **sparse** HEAD tracking ~18 files while the working tree had ~200+ real source files that were orphaned from any git history. This caused the session-58 silent-build-failure regression (see `Docs/Archive/Session_History.md` session 59) where three weeks of React source changes never actually reached production.
+Before session 59 there were **four** git repos stacked (parent, `stride-gs-app/`, `stride-gs-app/dist/`, `AppScripts/stride-client-inventory/`). The nested `stride-gs-app/.git` had a **sparse** HEAD tracking ~18 files while the working tree had ~200+ real source files that were orphaned from any git history. This caused the session-58 silent-build-failure regression (see `_archive/Docs/Archive/Session_History.md` session 59) where three weeks of React source changes never actually reached production.
 
 The session-59 cleanup deleted the two junk nested repos (`stride-gs-app/.git`, `AppScripts/stride-client-inventory/.git`), unified everything under the parent repo, added the build safeguards (see below), and left `stride-gs-app/dist/.git` as the only nested repo because it serves a well-defined single purpose. The `feat/dt-phase1a` branch on `github.com/Stride-dotcom/Stride-GS-app` contains the full history of the old nested repo for forensics — commits `d384e48` (DT Phase 1b), `1cd8034` (build safeguards), `6f36457` (orphaned src/ restoration).
 
@@ -137,7 +155,7 @@ The session-59 cleanup deleted the two junk nested repos (`stride-gs-app/.git`, 
 - **Read files before editing.** Don't guess script contents. Grep for all references before removing a variable or moving logic.
 - **Non-destructive header updates.** Rename legacy + append missing, never reorder/remove.
 - **Work incrementally.** Small changes, deploy, test, fix. Don't write massive refactors in one pass.
-- **Update docs at end of session.** See `Docs/Stride_GS_App_Build_Status.md` Recent Changes — CURRENT SESSION ONLY, don't accumulate. Add a one-line entry to `Docs/Archive/Session_History.md`.
+- **Update docs at end of session.** See `_archive/Docs/Stride_GS_App_Build_Status.md` Recent Changes — CURRENT SESSION ONLY, don't accumulate. Add a one-line entry to `_archive/Docs/Archive/Session_History.md`.
 
 ### Must-not-do
 - **Never use `getLastRow()` for insert positions** — use `getLastDataRow_()`. `getLastRow()` returns false positives due to validations on empty rows.
@@ -146,6 +164,57 @@ The session-59 cleanup deleted the two junk nested repos (`stride-gs-app/.git`, 
 
 ### Task Board parity
 When changing client-side functions or columns, check whether the Task Board script needs matching changes (shared handlers, editable sets, header arrays, exclusion lists). Shared handlers use `SH_` prefix with `SHARED_HANDLER_VERSION` constant.
+
+---
+
+## Deployment Guide for Builders
+
+> **TL;DR — the default path is push to `source` and let GitHub Actions ship it.** Only reach for the manual commands below when you've changed GAS code, client sheets, or Supabase schema.
+
+### React App Changes (AUTOMATIC — no manual steps)
+- Push your changes to the `source` branch
+- GitHub Actions automatically: typechecks (`tsc -b`) → builds (`vite`) → deploys to GitHub Pages
+- Live at mystridehub.com in 2-3 minutes
+- Monitor: https://github.com/Stride-dotcom/Stride-GS-app/actions
+- If the build fails, GitHub Actions reports the error — fix and push again
+- NEVER manually force-push to `main` — GitHub Actions owns that branch
+
+### Google Apps Script Changes (MANUAL — requires Google OAuth)
+- Edit files in `AppScripts/stride-api/`
+- Deploy: `cd AppScripts/stride-client-inventory && npm run push-api && npm run deploy-api`
+- Requires `.credentials.json` (Google OAuth) — only available on the project owner's machine
+- If you don't have credentials: commit your GAS changes to `source`, note in the PR that GAS deploy is needed, and the project owner will deploy
+- After GAS deploy: bump the version in StrideAPI.gs header comment
+
+### Client Script Rollout (MANUAL — only for sheet schema changes)
+- `npm run rollout` — pushes GAS code to all client sheets
+- `npm run deploy-clients` — deploys Web Apps for all clients
+- `npm run refresh-caches` — refreshes client-side caches
+- Only needed when: adding new sheet columns, changing GAS function signatures, or updating client-side automation
+- NOT needed for: rate changes (Supabase), template changes (Supabase), React UI changes (auto-deploy)
+
+### Supabase Schema Changes (migrations)
+- Create migration file in `stride-gs-app/supabase/migrations/`
+- Apply via: GitHub Actions migration runner (manual trigger) OR Supabase MCP tools OR Supabase Dashboard SQL editor
+- Always test migrations on a branch first if destructive
+
+### Templates (email, document, invoice)
+- Edit in app: Settings → Email Templates → Edit
+- Changes are INSTANT — no deploy needed
+- Stored in Supabase `email_templates` table
+- GAS reads from Supabase on next email/PDF generation
+
+### Price List / Service Catalog
+- Edit in app: Price List page → inline edit
+- Changes are INSTANT in Supabase
+- Click "Sync to Sheet" button to update the Master Price List Google Sheet (needed for GAS billing lookups until Phase 5 cutover is complete)
+
+### What NOT to do
+- NEVER push directly to `main` branch — it's the compiled dist, managed by GitHub Actions
+- NEVER run `npm run deploy` manually — use GitHub Actions
+- NEVER edit the Master Price List sheet directly — edit in the app, then Sync to Sheet
+- NEVER skip `tsc -b` before committing — the CI will catch it but it wastes a deploy cycle
+- NEVER commit `.env`, `.credentials.json`, or any secrets
 
 ---
 
@@ -218,7 +287,7 @@ After `git push origin main --force` from `stride-gs-app/dist/`, hard-refresh `m
 
 ### Post-deploy: update build status doc
 
-After every deploy, add a summary to `Docs/Stride_GS_App_Build_Status.md` with: source commit hash, dist bundle hash, migration(s) applied (or "none"), and any warnings.
+After every deploy, add a summary to `_archive/Docs/Stride_GS_App_Build_Status.md` with: source commit hash, dist bundle hash, migration(s) applied (or "none"), and any warnings.
 
 ---
 
@@ -233,7 +302,7 @@ After every deploy, add a summary to `Docs/Stride_GS_App_Build_Status.md` with: 
 
 ## Deploy Reference (one table, one source of truth)
 
-**Golden rule:** Web App deployments are **frozen snapshots**. `npm run rollout` / `push-api` push SOURCE but the live Web App serves the last DEPLOYMENT. You must run the matching `deploy-*` command after every push to Web App code. If in doubt, `npm run deploy-all`. See `Docs/Archive/Deployment_Reference.md` for full troubleshooting.
+**Golden rule:** Web App deployments are **frozen snapshots**. `npm run rollout` / `push-api` push SOURCE but the live Web App serves the last DEPLOYMENT. You must run the matching `deploy-*` command after every push to Web App code. If in doubt, `npm run deploy-all`. See `_archive/Docs/Archive/Deployment_Reference.md` for full troubleshooting.
 
 All commands run from: `AppScripts/stride-client-inventory/` (except React, which runs from `stride-gs-app/`).
 
@@ -285,7 +354,7 @@ If a remote admin or API call returns `ok: true` but the expected side-effect is
 
 ### React build safeguards (session 59)
 
-`npm run build` in `stride-gs-app/` now routes through `scripts/build.js` — a wrapper that replaces the raw `tsc -b && vite build` chain with four phases and two sanity checks. It exists because session 58 shipped three sessions worth of React changes into production as **stale echo bundles** (see `Docs/Archive/Session_History.md` session 59 for the forensics). The safeguards make that exact failure mode impossible to recur silently.
+`npm run build` in `stride-gs-app/` now routes through `scripts/build.js` — a wrapper that replaces the raw `tsc -b && vite build` chain with four phases and two sanity checks. It exists because session 58 shipped three sessions worth of React changes into production as **stale echo bundles** (see `_archive/Docs/Archive/Session_History.md` session 59 for the forensics). The safeguards make that exact failure mode impossible to recur silently.
 
 **Phases:**
 
@@ -399,7 +468,7 @@ StrideAPI.gs doPost router case
 Every write handler (update / complete / cancel / start / batch) is wrapped by
 `api_writeThrough_` OR calls `api_fullClientSync_` OR has an inline
 `resyncXToSupabase_(...)` call. Verified in session 72 Phase 1a audit — see
-`Docs/Stride_GS_App_Build_Status.md` for the full per-handler table.
+`_archive/Docs/Stride_GS_App_Build_Status.md` for the full per-handler table.
 
 ### 2. Supabase Realtime broadcast
 
@@ -646,7 +715,7 @@ Route-style URLs (`/#/tasks/INSP-62391-1`) go to standalone `TaskJobPage.tsx` wh
 
 ## Load-bearing Architectural Invariants
 
-These are the top decisions that affect code generation on every task. For the full 53-item list with implementation notes, see `Docs/Archive/Architectural_Decisions_Log.md`.
+These are the top decisions that affect code generation on every task. For the full 53-item list with implementation notes, see `_archive/Docs/Archive/Architectural_Decisions_Log.md`.
 
 1. **Consolidated_Ledger = authoritative billing schema.** Client ledgers sync from it. "Ledger Row ID" is canonical.
 2. **Header-based column mapping only.** Never positional indexes.
@@ -682,7 +751,7 @@ These are the top decisions that affect code generation on every task. For the f
 
 - **StrideAPI.gs:** v38.85.0 — sessions 73-77 mega build. Carries (reverse-chronological): DOC_QUOTE Supabase-backed Quote PDF generation + template token audit across every workflow (invoice / quote / work-order / welcome / onboarding / claim emails — two token-emission bugs fixed), messaging endpoints aligned with Supabase schema (sender/recipient joins via auth.uid()), email templates + doc templates moved to Supabase with GAS read-through + CacheService cache, `seedEmailTemplatesToSupabase` one-shot admin endpoint + auto-seed on first `handleGetEmailTemplates_` empty read, manual billing charges (`addManualCharge` / `voidManualCharge` / edit via extended `updateBillingRow` for MANUAL-* rows), Reference column + Sidemark propagation across billing pipeline (writes, reads, IIF memo, Supabase mirror), add-on services on receiving (server writes one billing row per checked add-on at shipment completion), Phase 5 rate cutover helpers + Rate Parity Monitor endpoint (shadow mode — sheet still primary), `api_lookupRateFromSupabase_` + `api_loadClassVolumesFromSupabase_` + `api_getTemplateFromSupabase_` with 600s CacheService, task due date + 2-tier priority (`updateTaskDueDate`, `updateTaskPriority`, `api_ensureTaskColumns_`), `resyncClients` full reseeder + script-id rediscovery paths, `handleAdminSetUserPassword_` + `handleEnsureAuthUser_` + `handleResyncUsers_`. Still carries session-70/69 Room→Reference swap, repair notes save-before-start, payment terms endpoint.
 - **Supabase schema:** session 73 Phase A applied six new tables — `item_photos`, `documents`, `entity_notes`, `messages`, `message_recipients`, `in_app_notifications` — plus `photos` and `documents` private storage buckets with tenant-scoped path RLS. `email_templates` + `email_templates_audit` live (session 73 Phase 6). `service_catalog` + `service_catalog_audit` live with 31 seeds (session 73 Price List). `expected_shipments` live (session 72). Every new table in the `supabase_realtime` publication.
-- **React bundle:** `index-DUK0tr2v.js` — session 75 delivery zones + Zip Codes category in Price List, role-aware messaging recipient filter, messaging thread header with participant subtitle + clickable entity deep-link chip (resolves tenant from Supabase + appends `&client=` per CLAUDE.md rule), free-text Carrier in Add Shipment modal, optimistic calendar sync buses + pending pill. See `Docs/Stride_GS_App_Build_Status.md` for the detailed delta list.
+- **React bundle:** `index-DUK0tr2v.js` — session 75 delivery zones + Zip Codes category in Price List, role-aware messaging recipient filter, messaging thread header with participant subtitle + clickable entity deep-link chip (resolves tenant from Supabase + appends `&client=` per CLAUDE.md rule), free-text Carrier in Add Shipment modal, optimistic calendar sync buses + pending pill. See `_archive/Docs/Stride_GS_App_Build_Status.md` for the detailed delta list.
 - **StaxAutoPay.gs:** v4.6.0 — session 69 Phase 2f: Supabase write-through at end of `_prepareEligiblePendingInvoicesForChargeRun` (invoices + run log) and `_executeChargeRun` (invoices + charge log + exceptions + run log). **Requires SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY Script Properties on the Stax Auto Pay project** — see open items.
 - **Triggers.gs (client):** v4.7.1 — session 70: VIEW INSPECTION PHOTOS button in REPAIR_QUOTE email now opens the Source Task folder (looks up task row in Tasks sheet and reads Task ID cell's hyperlink, set by `startTask_` to the task's Drive folder). Previously fell back to the Item folder because Source Task ID stores plain text, not a hyperlink.
 - **Import.gs (client):** v4.3.0 — adds Reference column mapping (rolled out to all 49 active clients, session 70)
@@ -691,7 +760,7 @@ These are the top decisions that affect code generation on every task. For the f
 - **RemoteAdmin.gs (client):** v1.5.1 — adds `get_script_id` action; writes own scriptId to CB Clients SCRIPT ID column
 - **Code.gs (client):** v4.6.0 (rolled out to all 49 active clients)
 - **StaxAutoPay.gs:** v4.5.0
-- See `Docs/Stride_GS_App_Build_Status.md` for the full per-script version matrix and session history.
+- See `_archive/Docs/Stride_GS_App_Build_Status.md` for the full per-script version matrix and session history.
 
 ---
 
@@ -724,7 +793,7 @@ Client inventory scripts are NOT edited via direct URLs — use `npm run rollout
 
 **Phase 6 Auth:** COMPLETE ✅ (email + password only, 3-tier role-based access, RoleGuard route protection)
 **Phase 7A/7B/7C:** COMPLETE ✅ (all read endpoints, all 32+11 write endpoints, Claims end-to-end)
-**Phase 8 (Additional Features):** mostly complete — see `Docs/Stride_GS_App_Build_Status.md` for the full matrix
+**Phase 8 (Additional Features):** mostly complete — see `_archive/Docs/Stride_GS_App_Build_Status.md` for the full matrix
 
 ### Sessions 65+ shipped (2026-04-17 → 2026-04-20)
 
@@ -927,15 +996,15 @@ Use `Agent` with specialized `subagent_type`:
 
 ### Hot docs (update every session)
 - **`CLAUDE.md`** (this file): architecture, rules, invariants, current open items, known bugs
-- **`Docs/Stride_GS_App_Build_Status.md`**: current session changes (REPLACE each session — do not accumulate), feature matrix, what's next
+- **`_archive/Docs/Stride_GS_App_Build_Status.md`**: current session changes (REPLACE each session — do not accumulate), feature matrix, what's next
 
 ### Cold docs (update rarely, only when scope shifts)
-- **`Docs/Archive/Session_History.md`**: add one-line entry per session
-- **`Docs/Archive/Architectural_Decisions_Log.md`**: add new numbered decision when one is made; trim nothing
+- **`_archive/Docs/Archive/Session_History.md`**: add one-line entry per session
+- **`_archive/Docs/Archive/Architectural_Decisions_Log.md`**: add new numbered decision when one is made; trim nothing
 - Other archive files: update when the feature/phase they describe gets a major change
 
 ### Trimming rules
 - Session entries in CLAUDE.md "Current Phase & Open Work" → only open items, never `[x] done`
-- Completed phase plans → move the full plan to `Docs/Archive/`, leave a one-liner in CLAUDE.md
+- Completed phase plans → move the full plan to `_archive/Docs/Archive/`, leave a one-liner in CLAUDE.md
 - Known bugs: remove once fixed and deployed
 - Never expand session history into full changelogs — keep it one line per session, max ~200 chars

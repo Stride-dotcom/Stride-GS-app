@@ -1,5 +1,0 @@
-Payment received for Invoice {{invoice_number}}
-
-{alert_message}
-
-Open: {portal_base_url}
