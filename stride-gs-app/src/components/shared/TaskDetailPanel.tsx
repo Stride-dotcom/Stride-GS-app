@@ -494,10 +494,14 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
                 {task.location && <span>Location: {task.location}</span>}
                 {task.sidemark && <span>Sidemark: {task.sidemark}</span>}
               </div>
-              {/* Drive Folder Buttons */}
+              {/* Drive Folder Buttons — only render when the URL exists. */}
               <div style={{ display: 'flex', gap: 6, marginTop: 10, flexWrap: 'wrap', alignItems: 'center' }}>
-                <FolderButton label="Task Folder" url={activeFolderUrl || undefined} disabledTooltip="Start task to create folder" icon={Wrench} />
-                <FolderButton label="Shipment Folder" url={activeShipmentFolderUrl || undefined} disabledTooltip="Folder link missing — use Fix Missing Folders on Inventory page" icon={Truck} />
+                {activeFolderUrl && (
+                  <FolderButton label="Task Folder" url={activeFolderUrl} icon={Wrench} />
+                )}
+                {activeShipmentFolderUrl && (
+                  <FolderButton label="Shipment Folder" url={activeShipmentFolderUrl} icon={Truck} />
+                )}
                 {isAlreadyStarted && canSeeCustomPrice && (
                   <WriteButton
                     label="Work Order"

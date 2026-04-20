@@ -622,11 +622,17 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
                 {wc.notes && <div style={{ marginTop: 4, fontSize: 12, color: theme.colors.textSecondary }}><strong>Notes:</strong> {wc.notes}</div>}
               </>
             )}
-            {/* Drive Folder Buttons */}
-            <div style={{ display: 'flex', gap: 6, marginTop: 10, flexWrap: 'wrap' }}>
-              <FolderButton label="Will Call Folder" url={wc.wcFolderUrl || undefined} disabledTooltip="Folder link missing — use Fix Missing Folders on Inventory page" icon={FolderOpen} />
-              <FolderButton label="Shipment Folder" url={wc.shipmentFolderUrl || undefined} disabledTooltip="Folder link missing — use Fix Missing Folders on Inventory page" icon={Truck} />
-            </div>
+            {/* Drive Folder Buttons — only render when the URL exists. */}
+            {(wc.wcFolderUrl || wc.shipmentFolderUrl) && (
+              <div style={{ display: 'flex', gap: 6, marginTop: 10, flexWrap: 'wrap' }}>
+                {wc.wcFolderUrl && (
+                  <FolderButton label="Will Call Folder" url={wc.wcFolderUrl} icon={FolderOpen} />
+                )}
+                {wc.shipmentFolderUrl && (
+                  <FolderButton label="Shipment Folder" url={wc.shipmentFolderUrl} icon={Truck} />
+                )}
+              </div>
+            )}
           </div>
 
           {/* Partial Release Banner */}

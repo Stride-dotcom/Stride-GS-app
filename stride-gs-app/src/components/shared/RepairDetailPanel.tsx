@@ -476,12 +476,23 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
                 {repair.sidemark && <span>Sidemark: {repair.sidemark}</span>}
                 {repair.room && <span>Room: {repair.room}</span>}
               </div>
-              {/* Drive Folder Buttons */}
-              <div style={{ display: 'flex', gap: 6, marginTop: 10, flexWrap: 'wrap' }}>
-                <FolderButton label="Repair Folder" url={repair.repairFolderUrl || undefined} disabledTooltip="Approve repair to create folder" icon={Wrench} />
-                <FolderButton label="Task Folder" url={repair.taskFolderUrl || undefined} disabledTooltip="Folder link missing — use Fix Missing Folders on Inventory page" icon={ClipboardList} />
-                <FolderButton label="Shipment Folder" url={repair.shipmentFolderUrl || undefined} disabledTooltip="Folder link missing — use Fix Missing Folders on Inventory page" icon={Truck} />
-              </div>
+              {/* Drive Folder Buttons — each one only renders when a real
+                  Drive URL exists. Prior behaviour (grey disabled chip with
+                  a tooltip) was noisy for legacy rows that will never have a
+                  folder (pre-Drive entities, Supabase-only media flow). */}
+              {(repair.repairFolderUrl || repair.taskFolderUrl || repair.shipmentFolderUrl) && (
+                <div style={{ display: 'flex', gap: 6, marginTop: 10, flexWrap: 'wrap' }}>
+                  {repair.repairFolderUrl && (
+                    <FolderButton label="Repair Folder" url={repair.repairFolderUrl} icon={Wrench} />
+                  )}
+                  {repair.taskFolderUrl && (
+                    <FolderButton label="Task Folder" url={repair.taskFolderUrl} icon={ClipboardList} />
+                  )}
+                  {repair.shipmentFolderUrl && (
+                    <FolderButton label="Shipment Folder" url={repair.shipmentFolderUrl} icon={Truck} />
+                  )}
+                </div>
+              )}
             </div>
           )}
 

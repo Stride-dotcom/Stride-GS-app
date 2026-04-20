@@ -990,11 +990,20 @@ export function ItemDetailPanel({
 
           {/* Related Records */}
           <Section icon={FileText} title="Related" count={linkedTasks.length + linkedRepairs.length + linkedWillCalls.length || undefined}>
-            {/* Shipment + Photos Folders */}
-            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 8 }}>
-              <FolderButton label={`Shipment ${item.shipmentNumber || 'Folder'}`} url={shipmentFolderUrl} disabledTooltip="Folder link missing — use Fix Missing Folders on Inventory page" icon={Truck} />
-              {photosFolderId && <FolderButton label="Photos" url={`https://drive.google.com/drive/folders/${photosFolderId}`} icon={FolderOpen} />}
-            </div>
+            {/* Shipment + Photos Folders — only render when the URL exists.
+                The photos-folder Drive chip is legacy: every page now has
+                the in-app Photos gallery via EntityAttachments, so the
+                Drive link is just a side-channel for the underlying files. */}
+            {(shipmentFolderUrl || photosFolderId) && (
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 8 }}>
+                {shipmentFolderUrl && (
+                  <FolderButton label={`Shipment ${item.shipmentNumber || 'Folder'}`} url={shipmentFolderUrl} icon={Truck} />
+                )}
+                {photosFolderId && (
+                  <FolderButton label="Photos" url={`https://drive.google.com/drive/folders/${photosFolderId}`} icon={FolderOpen} />
+                )}
+              </div>
+            )}
 
             {/* Entity folder buttons (task / repair / WC) */}
             {entityFolderButtons.length > 0 && (

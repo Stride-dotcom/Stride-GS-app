@@ -199,9 +199,11 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
             {shipment.notes && <Field label="Notes" value={shipment.notes} />}
           </div>
 
-          {/* Folder Links */}
+          {/* Folder Links — Shipment Folder only renders when URL exists. */}
           <div style={{ display: 'flex', gap: 6, marginBottom: 16, flexWrap: 'wrap', alignItems: 'center' }}>
-            <FolderButton label="Shipment Folder" url={shipment.folderUrl} disabledTooltip="Folder link missing — use Fix Missing Folders on Inventory page" icon={Truck} />
+            {shipment.folderUrl && (
+              <FolderButton label="Shipment Folder" url={shipment.folderUrl} icon={Truck} />
+            )}
             <button
               onClick={() => { onClose(); navigate('/inventory', { state: { shipmentFilter: shipment.shipmentNo } }); }}
               style={{ padding: '6px 12px', fontSize: 11, fontWeight: 500, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', fontFamily: 'inherit', color: theme.colors.textSecondary, display: 'flex', alignItems: 'center', gap: 4 }}
