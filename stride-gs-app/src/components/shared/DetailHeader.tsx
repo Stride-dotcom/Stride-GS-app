@@ -47,6 +47,10 @@ export interface DetailHeaderProps {
   actions?: React.ReactNode;
   /** Below the ID — badges / meta info the parent controls. */
   belowId?: React.ReactNode;
+  /** Inline slot rendered immediately to the right of the entity ID.
+   *  Used by ItemDetailPanel to surface the (I)(A)(R) `ItemIdBadges` next
+   *  to the big item number, matching the list-page presentation. */
+  idBadges?: React.ReactNode;
   /** Compact mode — slightly smaller ID / sidemark for tight panels. */
   compact?: boolean;
 }
@@ -66,6 +70,7 @@ export function DetailHeader({
   sidemark,
   actions,
   belowId,
+  idBadges,
   compact,
 }: DetailHeaderProps) {
   const idSize = compact ? 22 : 28;
@@ -84,8 +89,20 @@ export function DetailHeader({
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
         <div style={{ flex: 1, minWidth: 0 }}>
           {entityLabel ? <div style={{ fontSize: 10, fontWeight: 500, letterSpacing: '4px', color: '#E8692A', textTransform: 'uppercase', marginBottom: 8 }}>{entityLabel}</div> : null}
-          <div style={{ fontSize: idSize, fontWeight: 300, color: '#fff', lineHeight: 1.1 }}>
-            {entityId}
+          <div style={{ fontSize: idSize, fontWeight: 300, color: '#fff', lineHeight: 1.1, display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+            <span>{entityId}</span>
+            {idBadges ? (
+              // Brighten the (I)(A)(R) badges for the dark header — they're
+              // styled for a light list-page row, so dim backgrounds would
+              // disappear. A translucent white pill behind them keeps contrast.
+              <span style={{
+                display: 'inline-flex', alignItems: 'center',
+                background: 'rgba(255,255,255,0.12)',
+                padding: '3px 6px', borderRadius: 6,
+              }}>
+                {idBadges}
+              </span>
+            ) : null}
           </div>
           {belowId ? <div style={{ marginTop: 12 }}>{belowId}</div> : null}
           <div

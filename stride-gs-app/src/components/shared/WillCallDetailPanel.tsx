@@ -5,6 +5,8 @@ import { DeepLink } from './DeepLink';
 import { EntityHistory } from './EntityHistory';
 import { EntityAttachments } from './EntityAttachments';
 import { DetailHeader } from './DetailHeader';
+import { ItemIdBadges } from './ItemIdBadges';
+import { useItemIndicators } from '../../hooks/useItemIndicators';
 import { theme } from '../../styles/theme';
 import { fmtDate } from '../../lib/constants';
 import { WriteButton } from './WriteButton';
@@ -56,6 +58,9 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
   const apiConfigured = isApiConfigured();
   const { apiClients } = useClients(apiConfigured);
   const clientSheetId = useMemo(() => wcProp.clientSheetId || apiClients.find(c => c.name === wcProp.clientName)?.spreadsheetId || '', [apiClients, wcProp.clientName, wcProp.clientSheetId]);
+
+  // (I)(A)(R) indicators for every item in the WC items table below.
+  const { inspItems, asmItems, repairItems } = useItemIndicators(clientSheetId);
 
   // ── Self-fetch: if items missing, fetch full WC data via getWillCallById ──
   const [enrichedData, setEnrichedData] = useState<Partial<WillCall> | null>(null);
@@ -852,7 +857,15 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
                           </td>
                         )}
                         <td style={{ padding: '6px 10px', fontWeight: 600 }}>
-                          <DeepLink kind="inventory" id={item.itemId} clientSheetId={clientSheetId} showIcon={false} />
+                          <span style={{ display: 'inline-flex', alignItems: 'center', flexWrap: 'wrap' }}>
+                            <DeepLink kind="inventory" id={item.itemId} clientSheetId={clientSheetId} showIcon={false} />
+                            <ItemIdBadges
+                              itemId={item.itemId}
+                              inspItems={inspItems}
+                              asmItems={asmItems}
+                              repairItems={repairItems}
+                            />
+                          </span>
                         </td>
                         <td style={{ padding: '6px 10px', color: theme.colors.textSecondary, maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.description}</td>
                         <td style={{ padding: '6px 10px', color: theme.colors.textSecondary, maxWidth: 80, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.vendor || '\u2014'}</td>

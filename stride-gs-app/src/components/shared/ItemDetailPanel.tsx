@@ -2,6 +2,8 @@ import React, { useState, useRef, useCallback, useEffect, useMemo } from 'react'
 import { X, Package, Calendar, FileText, ClipboardList, Wrench, Truck, ExternalLink, DollarSign, Ship, AlertCircle, MapPin, CheckCircle2, Pencil, Save, Loader2, FolderOpen, Plus } from 'lucide-react';
 import { FolderButton } from './FolderButton';
 import { DetailHeader } from './DetailHeader';
+import { ItemIdBadges } from './ItemIdBadges';
+import { useItemIndicators } from '../../hooks/useItemIndicators';
 import { supabase } from '../../lib/supabase';
 import { LinkifiedText } from './LinkifiedText';
 import { AutocompleteInput } from './AutocompleteInput';
@@ -513,6 +515,12 @@ export function ItemDetailPanel({
   const hasLinkedRecords = linkedTasks.length > 0 || linkedRepairs.length > 0 || linkedWillCalls.length > 0;
   const hasShipment = !!item.shipmentNumber;
 
+  // (I)(A)(R) item indicators — list pages already compute these from
+  // already-loaded tasks/repairs; the detail panel has to fetch on its own
+  // because it may open from a deep link or a page that doesn't keep the
+  // full task/repair list in scope. Tenant-scoped Supabase read, ~50ms.
+  const { inspItems, asmItems, repairItems } = useItemIndicators(clientSheetId);
+
   // Move history — fetch from API when panel opens
   const [moveHistory, setMoveHistory] = useState<MoveHistoryEntry[]>([]);
   useEffect(() => {
@@ -807,6 +815,14 @@ export function ItemDetailPanel({
           entityId={item.itemId}
           clientName={item.clientName}
           sidemark={item.sidemark}
+          idBadges={
+            <ItemIdBadges
+              itemId={item.itemId}
+              inspItems={inspItems}
+              asmItems={asmItems}
+              repairItems={repairItems}
+            />
+          }
           actions={
             <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4, borderRadius: 6, color: theme.colors.textMuted }}>
               <X size={18} />

@@ -3,6 +3,8 @@ import { X, ClipboardList, Package, MapPin, CheckCircle2, XCircle, AlertTriangle
 import { FolderButton } from './FolderButton';
 import { DeepLink } from './DeepLink';
 import { DetailHeader } from './DetailHeader';
+import { ItemIdBadges } from './ItemIdBadges';
+import { useItemIndicators } from '../../hooks/useItemIndicators';
 import { EntityHistory } from './EntityHistory';
 import { EntityAttachments } from './EntityAttachments';
 import { theme } from '../../styles/theme';
@@ -75,6 +77,9 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
 
   const apiConfigured = isApiConfigured();
   const clientSheetId: string = task.clientSheetId || task.clientId || '';
+
+  // (I)(A)(R) indicator badges on the Item field below — tenant-scoped.
+  const { inspItems, asmItems, repairItems } = useItemIndicators(clientSheetId);
 
   // Location autocomplete
   const { locationNames } = useLocations();
@@ -461,9 +466,15 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
           {task.itemId && (
             <div style={{ background: theme.colors.bgSubtle, border: `1px solid ${theme.colors.border}`, borderRadius: 10, padding: 14, marginBottom: 16 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}><Package size={14} color={theme.colors.orange} /><span style={{ fontSize: 12, fontWeight: 600 }}>Item</span></div>
-              <div style={{ fontSize: 13, fontWeight: 600 }}>
+              <div style={{ fontSize: 13, fontWeight: 600, display: 'inline-flex', alignItems: 'center', flexWrap: 'wrap' }}>
                 <DeepLink kind="inventory" id={task.itemId} clientSheetId={(task as any).clientSheetId} />
-                {task.vendor ? ` — ${task.vendor}` : ''}
+                <ItemIdBadges
+                  itemId={task.itemId}
+                  inspItems={inspItems}
+                  asmItems={asmItems}
+                  repairItems={repairItems}
+                />
+                {task.vendor ? <span>{` — ${task.vendor}`}</span> : null}
               </div>
               <div style={{ fontSize: 12, color: theme.colors.textSecondary, marginTop: 2 }}>{task.description}</div>
               <div style={{ display: 'flex', gap: 16, marginTop: 8, fontSize: 11, color: theme.colors.textMuted }}>

@@ -5,6 +5,8 @@ import { EntityAttachments } from './EntityAttachments';
 import { FolderButton } from './FolderButton';
 import { DeepLink } from './DeepLink';
 import { DetailHeader } from './DetailHeader';
+import { ItemIdBadges } from './ItemIdBadges';
+import { useItemIndicators } from '../../hooks/useItemIndicators';
 import { theme } from '../../styles/theme';
 import { fmtDate } from '../../lib/constants';
 import { WriteButton } from './WriteButton';
@@ -56,6 +58,9 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
   useEffect(() => { setEffectiveStatus(repair.status); }, [repair.status]);
   const sc = STATUS_CFG[effectiveStatus] || STATUS_CFG['Pending Quote'];
   const isActive = !['Complete', 'Cancelled', 'Declined'].includes(effectiveStatus);
+
+  // (I)(A)(R) indicator badges for the Item card below.
+  const { inspItems, asmItems, repairItems } = useItemIndicators(repair.clientSheetId);
 
   const [repairNotes, setRepairNotes] = useState(repair.repairNotes || '');
   const [showResultPrompt, setShowResultPrompt] = useState<'fail' | null>(null);
@@ -407,9 +412,15 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
           {repair.itemId && (
             <div style={{ background: theme.colors.bgSubtle, border: `1px solid ${theme.colors.border}`, borderRadius: 10, padding: 14, marginBottom: 16 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}><Package size={14} color={theme.colors.orange} /><span style={{ fontSize: 12, fontWeight: 600 }}>Item</span></div>
-              <div style={{ fontSize: 13, fontWeight: 600 }}>
+              <div style={{ fontSize: 13, fontWeight: 600, display: 'inline-flex', alignItems: 'center', flexWrap: 'wrap' }}>
                 <DeepLink kind="inventory" id={repair.itemId} clientSheetId={repair.clientSheetId} />
-                {repair.vendor ? ` — ${repair.vendor}` : ''}
+                <ItemIdBadges
+                  itemId={repair.itemId}
+                  inspItems={inspItems}
+                  asmItems={asmItems}
+                  repairItems={repairItems}
+                />
+                {repair.vendor ? <span>{` — ${repair.vendor}`}</span> : null}
               </div>
               {repair.description && <div style={{ fontSize: 12, color: theme.colors.textSecondary, marginTop: 2 }}>{repair.description}</div>}
               <div style={{ display: 'flex', gap: 16, marginTop: 6, fontSize: 11, color: theme.colors.textMuted }}>

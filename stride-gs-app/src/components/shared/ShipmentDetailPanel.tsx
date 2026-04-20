@@ -3,6 +3,8 @@ import { useNavigate } from 'react-router-dom';
 import { X, Truck, Package, FileText, Mail, ClipboardList, LayoutList } from 'lucide-react';
 import { DeepLink } from './DeepLink';
 import { DetailHeader } from './DetailHeader';
+import { ItemIdBadges } from './ItemIdBadges';
+import { useItemIndicators } from '../../hooks/useItemIndicators';
 import { EntityHistory } from './EntityHistory';
 import { EntityAttachments } from './EntityAttachments';
 import { FolderButton } from './FolderButton';
@@ -63,6 +65,8 @@ const STATUS_CFG: Record<string, { bg: string; color: string }> = {
 };
 
 export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onItemsChanged }: Props) {
+  // (I)(A)(R) indicators for every item row in the shipment items table.
+  const { inspItems, asmItems, repairItems } = useItemIndicators(shipment.clientSheetId);
   const { isMobile } = useIsMobile();
   const { width: panelWidth, handleMouseDown: handleResizeMouseDown } = useResizablePanel(460, 'shipment', isMobile);
   const navigate = useNavigate();
@@ -272,7 +276,17 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
                           style={{ cursor: 'pointer', accentColor: theme.colors.orange }} />
                       </td>
                     <td style={{ padding: '6px 10px', fontWeight: 600, color: theme.colors.textMuted }}>{idx + 1}</td>
-                    <td style={{ padding: '6px 10px', fontWeight: 600 }}><DeepLink kind="inventory" id={item.itemId} clientSheetId={shipment.clientSheetId} showIcon={false} /></td>
+                    <td style={{ padding: '6px 10px', fontWeight: 600 }}>
+                      <span style={{ display: 'inline-flex', alignItems: 'center', flexWrap: 'wrap' }}>
+                        <DeepLink kind="inventory" id={item.itemId} clientSheetId={shipment.clientSheetId} showIcon={false} />
+                        <ItemIdBadges
+                          itemId={item.itemId}
+                          inspItems={inspItems}
+                          asmItems={asmItems}
+                          repairItems={repairItems}
+                        />
+                      </span>
+                    </td>
                     <td style={{ padding: '6px 10px', color: theme.colors.textSecondary, maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.description}</td>
                     <td style={{ padding: '6px 10px' }}>{item.itemClass}</td>
                     <td style={{ padding: '6px 10px', fontFamily: 'monospace', color: theme.colors.textSecondary }}>{item.location}</td>
