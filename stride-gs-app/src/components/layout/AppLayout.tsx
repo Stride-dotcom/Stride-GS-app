@@ -12,9 +12,10 @@ import { useClients } from '../../hooks/useClients';
 import { usePricing } from '../../hooks/usePricing';
 import { useLocations } from '../../hooks/useLocations';
 import { supabase } from '../../lib/supabase';
-// Session 74: notifications module (useNotifications hook + PersistentBanner)
-// removed. The bell in TopBar is now purely a Messages quick-link backed by
-// useMessages.unreadCount. No sound/vibration/toast-banner side effects.
+// Session 74: notifications module retired. Unread signals now come from
+// useMessages directly: a persistent top banner (MessageTopBanner) plus
+// the unread-count badge on the TopBar bell.
+import { MessageTopBanner } from '../messages/MessageTopBanner';
 
 const PAGE_TITLES: Record<string, string> = {
   '/': 'Dashboard',
@@ -77,7 +78,9 @@ export function AppLayout() {
         fontFamily: theme.typography.fontFamily,
       }}
     >
-      {/* Session 74: PersistentBanner removed with the notifications module. */}
+      {/* Session 74: persistent top banner for unread incoming messages.
+          Stays until the user dismisses or clicks through to /messages. */}
+      <MessageTopBanner />
 
       {/* Mobile overlay backdrop */}
       {isMobile && mobileMenuOpen && (

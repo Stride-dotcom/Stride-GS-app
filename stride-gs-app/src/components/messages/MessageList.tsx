@@ -7,7 +7,7 @@
  * search bar filters conversations by title/preview client-side.
  */
 import { useMemo, useState } from 'react';
-import { Search } from 'lucide-react';
+import { Search, Trash2 } from 'lucide-react';
 import { theme } from '../../styles/theme';
 import type { Conversation } from '../../hooks/useMessages';
 
@@ -16,6 +16,9 @@ interface Props {
   activeKey: string | null;
   loading?: boolean;
   onSelect: (conversation: Conversation) => void;
+  /** Session 74: when provided, a trash icon appears on hover + always
+   *  on mobile. Calls with the conversation key after a confirm(). */
+  onDelete?: (conversation: Conversation) => void | Promise<void>;
 }
 
 function initialsFromTitle(title: string): string {
@@ -42,9 +45,17 @@ function formatRelative(iso: string): string {
   return d.toLocaleDateString([], { month: 'numeric', day: 'numeric' });
 }
 
-export function MessageList({ conversations, activeKey, loading = false, onSelect }: Props) {
+export function MessageList({ conversations, activeKey, loading = false, onSelect, onDelete }: Props) {
   const v2 = theme.v2;
   const [search, setSearch] = useState('');
+  const [hoverKey, setHoverKey] = useState<string | null>(null);
+
+  const handleDelete = (c: Conversation, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!onDelete) return;
+    if (!window.confirm(`Delete this conversation with ${c.title}?`)) return;
+    void onDelete(c);
+  };
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -99,22 +110,23 @@ export function MessageList({ conversations, activeKey, loading = false, onSelec
         )}
         {filtered.map(c => {
           const active = c.key === activeKey;
+          const showDelete = !!onDelete && (hoverKey === c.key || active);
           return (
-            <button
+            <div
               key={c.key}
               onClick={() => onSelect(c)}
+              onMouseEnter={() => setHoverKey(c.key)}
+              onMouseLeave={() => setHoverKey(prev => prev === c.key ? null : prev)}
               style={{
                 width: '100%', textAlign: 'left',
                 display: 'flex', alignItems: 'center', gap: 10,
                 padding: '12px 14px',
-                border: 'none',
                 borderBottom: `1px solid ${v2.colors.border}`,
-                background: active ? v2.colors.bgCard : 'transparent',
+                background: active ? v2.colors.bgCard : (hoverKey === c.key ? v2.colors.bgPage : 'transparent'),
                 cursor: 'pointer', fontFamily: 'inherit',
                 transition: 'background 0.15s',
+                position: 'relative',
               }}
-              onMouseEnter={e => { if (!active) e.currentTarget.style.background = v2.colors.bgPage; }}
-              onMouseLeave={e => { if (!active) e.currentTarget.style.background = 'transparent'; }}
             >
               {/* Avatar */}
               <div style={{
@@ -146,7 +158,7 @@ export function MessageList({ conversations, activeKey, loading = false, onSelec
               </div>
 
               {/* Unread badge */}
-              {c.unreadCount > 0 && (
+              {c.unreadCount > 0 && !showDelete && (
                 <span style={{
                   minWidth: 18, height: 18, padding: '0 6px',
                   borderRadius: 9,
@@ -158,7 +170,27 @@ export function MessageList({ conversations, activeKey, loading = false, onSelec
                   {c.unreadCount > 99 ? '99+' : c.unreadCount}
                 </span>
               )}
-            </button>
+
+              {/* Delete (hover desktop, always-visible mobile when onDelete provided) */}
+              {showDelete && (
+                <button
+                  onClick={(e) => handleDelete(c, e)}
+                  title="Delete conversation"
+                  aria-label="Delete conversation"
+                  style={{
+                    width: 28, height: 28, borderRadius: '50%',
+                    border: 'none', background: 'rgba(180,90,90,0.12)',
+                    color: '#B45A5A', cursor: 'pointer',
+                    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                    flexShrink: 0, transition: 'background 0.12s',
+                  }}
+                  onMouseEnter={e => { e.currentTarget.style.background = 'rgba(180,90,90,0.22)'; }}
+                  onMouseLeave={e => { e.currentTarget.style.background = 'rgba(180,90,90,0.12)'; }}
+                >
+                  <Trash2 size={14} />
+                </button>
+              )}
+            </div>
           );
         })}
       </div>

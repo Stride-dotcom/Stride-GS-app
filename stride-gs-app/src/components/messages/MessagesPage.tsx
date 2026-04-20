@@ -32,6 +32,7 @@ export function MessagesPage() {
     closeThread,
     sendMessage,
     markAllReadInThread,
+    deleteConversation,
   } = useMessages();
 
   const [authUserId, setAuthUserId] = useState<string | null>(null);
@@ -151,6 +152,7 @@ export function MessagesPage() {
             activeKey={activeThreadKey}
             loading={loading}
             onSelect={handleSelect}
+            onDelete={(c) => { void deleteConversation(c.key); }}
           />
         </div>
       </div>

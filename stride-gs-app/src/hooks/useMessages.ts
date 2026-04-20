@@ -33,7 +33,7 @@
  * derived from (related_entity_type, related_entity_id) for entity-linked
  * threads and from the other-party user_id for direct DMs.
  */
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../contexts/AuthContext';
 
@@ -172,7 +172,17 @@ export interface UseMessagesResult {
   markRead: (recipientRowId: string) => Promise<void>;
   markAllReadInThread: () => Promise<void>;
   archiveMessage: (recipientRowId: string) => Promise<void>;
+  /** Session 74: remove a whole conversation for the current user by
+   *  archiving every one of their recipient rows in that thread. RLS
+   *  guarantees we only affect our own rows. */
+  deleteConversation: (key: string) => Promise<boolean>;
   refetch: () => Promise<void>;
+  /** The newest unread incoming message (for the top banner). Null if the
+   *  user has no unread messages. */
+  latestUnreadIncoming: Message | null;
+  /** Dismiss the banner for this specific message without marking read
+   *  (banner hides until another unread message arrives). */
+  dismissBanner: (messageId: string) => void;
 }
 
 export function useMessages(): UseMessagesResult {
@@ -187,6 +197,10 @@ export function useMessages(): UseMessagesResult {
   // the OTHER party's display name + avatar even for threads where I've only
   // sent messages (no received reply yet). Populated on every hydrate() call.
   const [profilesByUid, setProfilesByUid] = useState<Record<string, ProfileRow>>({});
+  // Session 74: ref to the latest openThread so the realtime callback can
+  // reload the currently-open thread without re-subscribing on every
+  // identity change.
+  const openThreadRef = useRef<((key: string) => Promise<void>) | null>(null);
 
   // Resolve auth uid once per session change.
   useEffect(() => {
@@ -296,19 +310,48 @@ export function useMessages(): UseMessagesResult {
   // ── Realtime inbox refresh ──────────────────────────────────────────────
   useEffect(() => {
     if (!authUserId) return;
+    // Session 74 fix: server-side postgres_changes filters on UUID columns
+    // are unreliable on Supabase's replication stream — the filter
+    // `user_id=eq.<uuid>` often silently matches nothing even with
+    // REPLICA IDENTITY FULL. Subscribe WITHOUT a filter and match
+    // client-side. RLS still prevents other users' rows from being
+    // streamed to us, so we only receive events we're allowed to see.
+    //
+    // Also: we refetch the thread view when a new incoming message
+    // belongs to the currently-open thread, so the receiver's open
+    // conversation updates instantly without a page refresh.
     const channel = supabase
       .channel(`messages_inbox_${authUserId}`)
-      // My recipient rows (new inbound, read/archive changes)
       .on('postgres_changes',
-        { event: '*', schema: 'public', table: 'message_recipients', filter: `user_id=eq.${authUserId}` },
-        () => { void refetch(); })
-      // My own sent messages (so conversation list updates for outbound)
+        { event: '*', schema: 'public', table: 'message_recipients' },
+        (payload) => {
+          const row = (payload.new ?? payload.old) as { user_id?: string } | undefined;
+          if (row?.user_id === authUserId) {
+            void refetch();
+            // If we're viewing a thread right now, reload it too so the
+            // new incoming bubble appears without waiting for the next
+            // click or page refresh.
+            if (activeThreadKey) void openThreadRef.current?.(activeThreadKey);
+          }
+        })
       .on('postgres_changes',
-        { event: '*', schema: 'public', table: 'messages', filter: `sender_id=eq.${authUserId}` },
-        () => { void refetch(); })
-      .subscribe();
+        { event: '*', schema: 'public', table: 'messages' },
+        (payload) => {
+          const row = (payload.new ?? payload.old) as { sender_id?: string } | undefined;
+          if (row?.sender_id === authUserId) {
+            void refetch();
+            if (activeThreadKey) void openThreadRef.current?.(activeThreadKey);
+          }
+        })
+      .subscribe((status) => {
+        if (status === 'SUBSCRIBED') {
+          console.log('[useMessages] Realtime subscribed');
+        } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
+          console.warn('[useMessages] Realtime status:', status);
+        }
+      });
     return () => { void supabase.removeChannel(channel); };
-  }, [authUserId, refetch]);
+  }, [authUserId, refetch, activeThreadKey]);
 
   // ── Derived conversation list ───────────────────────────────────────────
   const conversations = useMemo<Conversation[]>(() => {
@@ -498,6 +541,11 @@ export function useMessages(): UseMessagesResult {
     setThreadLoading(false);
   }, [authUserId, hydrate]);
 
+  // Keep the ref pointing at the latest openThread so the Realtime
+  // callback above can reload the active thread without re-subscribing
+  // each time openThread's identity changes.
+  useEffect(() => { openThreadRef.current = (key: string) => openThread(key); }, [openThread]);
+
   const closeThread = useCallback(() => {
     setActiveThreadKey(null);
     setThread([]);
@@ -611,6 +659,65 @@ export function useMessages(): UseMessagesResult {
     setMessages(prev => prev.filter(m => m.myRecipient?.recipientId !== recipientRowId));
   }, []);
 
+  // Session 74: delete a whole conversation for the current user. We mark
+  // every one of the user's recipient rows in the thread as archived (RLS
+  // msg_recipients_update_own scopes to their own rows) and drop all of
+  // their matching messages from local state. The other party's copy is
+  // untouched — this is a per-user soft-delete, like iMessage.
+  const deleteConversation = useCallback(async (key: string): Promise<boolean> => {
+    if (!authUserId) return false;
+    const keep: Message[] = [];
+    const toArchive: string[] = [];
+    for (const m of messages) {
+      if (keyForMessage(m, authUserId) === key) {
+        if (m.myRecipient) toArchive.push(m.myRecipient.recipientId);
+      } else {
+        keep.push(m);
+      }
+    }
+    if (toArchive.length > 0) {
+      const { error } = await supabase
+        .from('message_recipients')
+        .update({ is_archived: true })
+        .in('id', toArchive);
+      if (error) {
+        console.error('[useMessages] deleteConversation archive failed:', error);
+        return false;
+      }
+    }
+    setMessages(keep);
+    if (activeThreadKey === key) { setActiveThreadKey(null); setThread([]); }
+    return true;
+  }, [authUserId, messages, activeThreadKey]);
+
+  // Session 74: top-banner state. Tracks the set of messageIds the user
+  // has dismissed so the banner doesn't re-appear after they close it
+  // (unless a NEWER unread incoming message arrives).
+  const [dismissedBannerIds, setDismissedBannerIds] = useState<Set<string>>(new Set());
+  const dismissBanner = useCallback((messageId: string) => {
+    setDismissedBannerIds(prev => {
+      const next = new Set(prev);
+      next.add(messageId);
+      return next;
+    });
+  }, []);
+
+  // Find the single newest unread incoming message (not dismissed). The
+  // banner renders when this is non-null and the user isn't currently
+  // viewing the messages page (MessagesPage auto-marks-as-read which
+  // clears the unread flag and removes the banner anyway).
+  const latestUnreadIncoming = useMemo<Message | null>(() => {
+    if (!authUserId) return null;
+    let newest: Message | null = null;
+    for (const m of messages) {
+      if (m.senderId === authUserId) continue;                // only incoming
+      if (!m.myRecipient || m.myRecipient.isRead) continue;   // only unread
+      if (dismissedBannerIds.has(m.id)) continue;              // dismissed
+      if (!newest || m.createdAt > newest.createdAt) newest = m;
+    }
+    return newest;
+  }, [messages, authUserId, dismissedBannerIds]);
+
   return useMemo(() => ({
     conversations: conversationsWithNames,
     thread,
@@ -624,7 +731,11 @@ export function useMessages(): UseMessagesResult {
     markRead,
     markAllReadInThread,
     archiveMessage,
+    deleteConversation,
     refetch,
+    latestUnreadIncoming,
+    dismissBanner,
   }), [conversationsWithNames, thread, threadLoading, loading, unreadCount, activeThreadKey,
-       openThread, closeThread, sendMessage, markRead, markAllReadInThread, archiveMessage, refetch]);
+       openThread, closeThread, sendMessage, markRead, markAllReadInThread, archiveMessage,
+       deleteConversation, refetch, latestUnreadIncoming, dismissBanner]);
 }
