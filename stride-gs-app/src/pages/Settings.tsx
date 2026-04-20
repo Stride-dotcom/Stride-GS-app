@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom';
 import { Settings as SettingsIcon, Users, DollarSign, Mail, Database, Globe, Bell, Plus, ChevronRight, CheckCircle2, AlertCircle, UserPlus, Shield, ToggleLeft, ToggleRight, Eye, EyeOff, Wifi, WifiOff, RefreshCw, Loader2, RefreshCcw, ExternalLink, Wrench, PlayCircle, Send, FolderSync, BookText, LogIn, Cloud, Edit2, Zap, ArrowUpDown, ChevronUp, ChevronDown, X } from 'lucide-react';
 import { useReactTable, getCoreRowModel, getSortedRowModel, flexRender, type SortingState, type ColumnDef } from '@tanstack/react-table';
-import { getApiUrl, getApiToken, setApiCredentials, isApiConfigured, fetchHealth, postOnboardClient, postUpdateClient, postSyncSettings, postRefreshCaches, postFixMissingFolders, postTestSendClientTemplates, postTestSendClaimEmails, fetchAutoIdSetting, postUpdateAutoIdSetting, postResolveOnboardUser, fetchStaxConfig, postUpdateStaxConfig, apiPost, postSyncTemplatesToClients, postBulkSyncToSupabase, postPurgeInactiveFromSupabase, fetchClients, postFinishClientSetup, postSendWelcomeToUsers, resyncUsersPreview, resyncUsers, resyncClientsPreview, resyncClients, setNextFetchNoCache, adminSetUserPassword, ensureUserInAuth, listMissingAuthUsers } from '../lib/api';
+import { getApiUrl, getApiToken, setApiCredentials, isApiConfigured, fetchHealth, postOnboardClient, postUpdateClient, postSyncSettings, postRefreshCaches, postFixMissingFolders, postTestSendClientTemplates, postTestSendClaimEmails, fetchAutoIdSetting, postUpdateAutoIdSetting, postResolveOnboardUser, fetchStaxConfig, postUpdateStaxConfig, apiPost, postSyncTemplatesToClients, postBulkSyncToSupabase, postPurgeInactiveFromSupabase, fetchClients, postFinishClientSetup, postSendWelcomeToUsers, resyncUsersPreview, resyncUsers, resyncClientsPreview, resyncClients, setNextFetchNoCache, adminSetUserPassword, ensureUserInAuth, listMissingAuthUsers, postTestGenerateDoc } from '../lib/api';
 import type { BulkSyncResult } from '../lib/api';
 import type { EmailTemplate } from '../lib/api';
 import { entityEvents } from '../lib/entityEvents';
@@ -1080,6 +1080,38 @@ export function Settings() {
   const getLiveTemplate = (key: string): EmailTemplate | undefined => liveTemplates.find(t => t.key === key);
   const [claimEmailTestResults, setClaimEmailTestResults] = useState<Record<string, TestSendResult>>({});
   const [claimEmailTestLoading, setClaimEmailTestLoading] = useState<Record<string, boolean>>({});
+  // Session 74: Document template test-generate (PDF-in-new-tab) state.
+  // One loading flag per templateKey; one error string (the last failure).
+  const [docTestLoading, setDocTestLoading] = useState<Record<string, boolean>>({});
+  const [docTestError, setDocTestError] = useState<string | null>(null);
+
+  /** Generate a preview PDF for a document template and open it in a new
+   *  tab. Mirrors TemplateEditor's Preview PDF flow: calls
+   *  postTestGenerateDoc, decodes the base64 PDF → Blob → object URL,
+   *  opens that URL, and revokes it 60 s later. Popup-blocker: if
+   *  window.open returns null we surface an error banner. */
+  async function handleTestGenerateDoc(templateKey: string) {
+    setDocTestError(null);
+    setDocTestLoading(prev => ({ ...prev, [templateKey]: true }));
+    try {
+      const res = await postTestGenerateDoc({ templateKey });
+      if (!res.ok || !res.data?.success || !res.data.pdfBase64) {
+        throw new Error(res.error || 'PDF generation failed');
+      }
+      const bin = atob(res.data.pdfBase64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      const blob = new Blob([bytes], { type: 'application/pdf' });
+      const url = URL.createObjectURL(blob);
+      const win = window.open(url, '_blank');
+      if (!win) setDocTestError('Popup blocked — allow popups to preview PDFs');
+      setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    } catch (e) {
+      setDocTestError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setDocTestLoading(prev => { const n = { ...prev }; delete n[templateKey]; return n; });
+    }
+  }
 
   async function handleTestSendOneClientTemplate(templateKey: string) {
     if (!testToEmail.trim()) return;
@@ -3185,8 +3217,14 @@ export function Settings() {
 
               {/* Document Templates */}
               <div style={{ ...sectionTitle, marginTop: 20, marginBottom: 12 }}>Document Templates ({DOC_TEMPLATES.length})</div>
+              {docTestError && (
+                <div style={{ fontSize: 12, color: '#B91C1C', background: '#FEF2F2', border: '1px solid #FECACA', padding: '6px 10px', borderRadius: 6, marginBottom: 10, display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <AlertCircle size={12} /> {docTestError}
+                </div>
+              )}
               {DOC_TEMPLATES.map(e => {
                 const live = getLiveTemplate(e.key);
+                const loading = !!docTestLoading[e.key];
                 return (
                   <div key={e.key} style={{ ...card, display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 16px' }}>
                     <div style={{ flex: 1, minWidth: 0 }}>
@@ -3201,6 +3239,15 @@ export function Settings() {
                       {live && (
                         <button onClick={() => setEditingTemplate(live)} style={{ padding: '5px 12px', fontSize: 11, fontWeight: 500, border: `1px solid ${theme.colors.border}`, borderRadius: 6, background: '#fff', cursor: 'pointer', fontFamily: 'inherit', color: theme.colors.textSecondary }}>Edit</button>
                       )}
+                      <button
+                        onClick={() => handleTestGenerateDoc(e.key)}
+                        disabled={loading}
+                        title="Generate sample PDF in new tab"
+                        style={{ padding: '5px 14px', fontSize: 11, fontWeight: 500, border: `1px solid ${theme.colors.border}`, borderRadius: 6, background: '#fff', cursor: loading ? 'default' : 'pointer', fontFamily: 'inherit', color: theme.colors.textSecondary, display: 'flex', alignItems: 'center', gap: 5 }}
+                      >
+                        {loading ? <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} /> : <ExternalLink size={11} />}
+                        {loading ? 'Generating…' : 'Test'}
+                      </button>
                     </div>
                   </div>
                 );
@@ -3255,22 +3302,34 @@ export function Settings() {
                     <div style={{ fontSize: 11, color: theme.colors.textMuted, marginBottom: 12 }}>
                       PDF templates rendered by GAS when generating receiving, work orders, will call releases, and invoices. DOC_INVOICE: edits apply once the body contains the <code style={{ fontFamily: 'monospace' }}>{'{{LINE_ITEMS_HTML}}'}</code> token (otherwise the legacy Drive Doc template is used).
                     </div>
-                    {docs.map(d => (
-                      <div key={d.key} style={{ ...card, display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 16px' }}>
-                        <div style={{ flex: 1, minWidth: 0 }}>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                            <span style={{ fontSize: 13, fontWeight: 600 }}>{d.subject || d.key}</span>
-                            <span style={{ fontSize: 10, fontFamily: 'monospace', color: theme.colors.textMuted, background: theme.colors.bgSubtle, padding: '1px 6px', borderRadius: 4, flexShrink: 0 }}>{d.key}</span>
+                    {docs.map(d => {
+                      const loading = !!docTestLoading[d.key];
+                      return (
+                        <div key={d.key} style={{ ...card, display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 16px' }}>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                              <span style={{ fontSize: 13, fontWeight: 600 }}>{d.subject || d.key}</span>
+                              <span style={{ fontSize: 10, fontFamily: 'monospace', color: theme.colors.textMuted, background: theme.colors.bgSubtle, padding: '1px 6px', borderRadius: 4, flexShrink: 0 }}>{d.key}</span>
+                            </div>
+                            {d.notes && (
+                              <div style={{ fontSize: 12, color: theme.colors.textSecondary, marginTop: 3 }}>{d.notes}</div>
+                            )}
                           </div>
-                          {d.notes && (
-                            <div style={{ fontSize: 12, color: theme.colors.textSecondary, marginTop: 3 }}>{d.notes}</div>
-                          )}
+                          <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexShrink: 0, marginLeft: 12 }}>
+                            <button onClick={() => setEditingTemplate(d)} style={{ padding: '5px 12px', fontSize: 11, fontWeight: 500, border: `1px solid ${theme.colors.border}`, borderRadius: 6, background: '#fff', cursor: 'pointer', fontFamily: 'inherit', color: theme.colors.textSecondary }}>Edit</button>
+                            <button
+                              onClick={() => handleTestGenerateDoc(d.key)}
+                              disabled={loading}
+                              title="Generate sample PDF in new tab"
+                              style={{ padding: '5px 14px', fontSize: 11, fontWeight: 500, border: `1px solid ${theme.colors.border}`, borderRadius: 6, background: '#fff', cursor: loading ? 'default' : 'pointer', fontFamily: 'inherit', color: theme.colors.textSecondary, display: 'flex', alignItems: 'center', gap: 5 }}
+                            >
+                              {loading ? <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} /> : <ExternalLink size={11} />}
+                              {loading ? 'Generating…' : 'Test'}
+                            </button>
+                          </div>
                         </div>
-                        <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexShrink: 0, marginLeft: 12 }}>
-                          <button onClick={() => setEditingTemplate(d)} style={{ padding: '5px 12px', fontSize: 11, fontWeight: 500, border: `1px solid ${theme.colors.border}`, borderRadius: 6, background: '#fff', cursor: 'pointer', fontFamily: 'inherit', color: theme.colors.textSecondary }}>Edit</button>
-                        </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </>
                 ) : null;
               })()}
