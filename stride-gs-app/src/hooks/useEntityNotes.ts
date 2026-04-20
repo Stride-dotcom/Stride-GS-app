@@ -34,7 +34,17 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../contexts/AuthContext';
 
-export type NoteVisibility = 'public' | 'staff_only' | 'internal';
+/**
+ * Visibility values (session 73 follow-up):
+ *   - 'public'   — everyone with access to the entity can see it
+ *   - 'internal' — admin/staff only (enforced by RLS entity_notes_select_client)
+ *
+ * A previous `staff_only` tier existed but was collapsed into `internal`
+ * since RLS already hid both from clients. The migration
+ * 20260420020337_entity_notes_drop_staff_only tightened the CHECK
+ * constraint accordingly.
+ */
+export type NoteVisibility = 'public' | 'internal';
 
 export interface EntityNote {
   id: string;
@@ -65,7 +75,10 @@ interface NoteRow {
 }
 
 function rowToNote(r: NoteRow): EntityNote {
-  const v = r.visibility === 'staff_only' || r.visibility === 'internal' ? r.visibility : 'public';
+  // Legacy rows with 'staff_only' get bucketed as 'internal' for the UI,
+  // matching the server-side migration. The DB CHECK constraint now
+  // only permits 'public' | 'internal', but we're defensive on read.
+  const v = r.visibility === 'internal' || r.visibility === 'staff_only' ? 'internal' : 'public';
   const role = r.author_role === 'admin' || r.author_role === 'staff' || r.author_role === 'client'
     ? r.author_role
     : null;

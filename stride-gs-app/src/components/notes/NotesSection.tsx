@@ -2,19 +2,21 @@
  * NotesSection — chronological thread of notes for any entity.
  *
  * Ported from the Stride WMS app's UnifiedNotesSection. Renders the
- * newest-first list of notes with a visibility badge, author, timestamp,
- * and body. Clients see only visibility='public' notes (filter applied
- * server-side via RLS, but we also filter defensively client-side).
+ * newest-first (or oldest-first toggleable) list of notes with an
+ * explicit "Internal" treatment so nobody accidentally leaks sensitive
+ * info in the wrong mode.
  *
- * Add-note row lives at the bottom: textarea + visibility dropdown +
- * orange Send button, v2-themed.
+ * Visibility model (session 73 follow-up — see migration
+ * 20260420020337_entity_notes_drop_staff_only):
+ *   • public   — everyone with access sees it (default)
+ *   • internal — admin/staff only; RLS enforces, UI warns loudly
  *
- * Props: entityType, entityId. Pass these whether you're on a Repair
- * detail, a Will Call page, an Inventory item panel — the hook does the
- * rest.
+ * Props: entityType, entityId. Pass these on any entity detail view
+ * (Repair, Will Call, Inventory item, Shipment, …) — the hook does
+ * the rest.
  */
 import { useMemo, useState } from 'react';
-import { Send, Trash2, Info, Eye, EyeOff, Lock } from 'lucide-react';
+import { Send, Trash2, Info, Lock, AlertTriangle } from 'lucide-react';
 import { theme } from '../../styles/theme';
 import { useAuth } from '../../contexts/AuthContext';
 import {
@@ -24,15 +26,18 @@ import {
 interface Props {
   entityType: string;
   entityId: string;
-  /** Optional override — if omitted, 'oldest' for chronological reading. */
+  /** Oldest-first is default so the thread reads chronologically; toggle via UI. */
   initialOrder?: 'newest' | 'oldest';
 }
 
-const VIS_OPTIONS: { value: NoteVisibility; label: string; icon: React.ReactNode }[] = [
-  { value: 'public',     label: 'Public',     icon: <Eye size={11} /> },
-  { value: 'staff_only', label: 'Staff only', icon: <EyeOff size={11} /> },
-  { value: 'internal',   label: 'Internal',   icon: <Lock size={11} /> },
-];
+// ── Colors for the internal-note treatment ──────────────────────────────────
+// Warning red is distinct from the Stride orange used for primary actions,
+// which keeps the signal "this is sensitive" unambiguous.
+const INTERNAL_RED       = '#B45A5A';
+const INTERNAL_RED_DARK  = '#8C3E3E';
+const INTERNAL_BG_INPUT  = 'rgba(180,90,90,0.06)';
+const INTERNAL_BG_NOTE   = 'rgba(180,90,90,0.08)';
+const INTERNAL_BORDER    = 'rgba(180,90,90,0.45)';
 
 function formatTimestamp(iso: string): string {
   const d = new Date(iso);
@@ -68,8 +73,11 @@ export function NotesSection({ entityType, entityId, initialOrder = 'oldest' }: 
 
   const isClient = user?.role === 'client';
   const isAdmin = user?.role === 'admin';
+  const isInternalMode = visibility === 'internal';
 
-  // Client users only see public notes even if RLS would've filtered anyway.
+  // Client users can't post internal notes (RLS would block anyway).
+  // Server-side RLS already filters internal notes out of client reads;
+  // this is a defensive UI filter on top.
   const visibleNotes = useMemo(() => {
     const filtered = isClient ? notes.filter(n => n.visibility === 'public') : notes;
     return order === 'oldest' ? [...filtered].reverse() : filtered;
@@ -82,7 +90,10 @@ export function NotesSection({ entityType, entityId, initialOrder = 'oldest' }: 
     setSending(false);
     if (result) {
       setDraft('');
-      // Keep visibility sticky — useful when jotting multiple notes in a row.
+      // Reset to 'public' after an internal note goes out — the safer
+      // default for the next message so it can't accidentally be
+      // marked internal.
+      if (isInternalMode) setVisibility('public');
     }
   };
 
@@ -100,8 +111,6 @@ export function NotesSection({ entityType, entityId, initialOrder = 'oldest' }: 
     padding: v2.card.padding,
     fontFamily: theme.typography.fontFamily,
   };
-
-  const labelStyle: React.CSSProperties = { ...v2.typography.label };
 
   return (
     <div style={card}>
@@ -130,7 +139,7 @@ export function NotesSection({ entityType, entityId, initialOrder = 'oldest' }: 
       {error && (
         <div style={{
           padding: '10px 14px', marginBottom: 12, fontSize: 12,
-          background: 'rgba(180,90,90,0.10)', color: '#B45A5A',
+          background: 'rgba(180,90,90,0.10)', color: INTERNAL_RED,
           borderRadius: v2.radius.input,
         }}>{error}</div>
       )}
@@ -156,44 +165,66 @@ export function NotesSection({ entityType, entityId, initialOrder = 'oldest' }: 
         ))}
       </div>
 
-      {/* Compose */}
+      {/* ── Compose ───────────────────────────────────────────────────────── */}
+      {/* Wrapper switches styling completely when Internal is selected so it's
+         impossible to miss which mode you're typing in. */}
       <div style={{
-        border: `1px solid ${v2.colors.border}`,
-        background: v2.colors.bgWhite,
+        border: `2px solid ${isInternalMode ? INTERNAL_RED : v2.colors.border}`,
+        background: isInternalMode ? INTERNAL_BG_INPUT : v2.colors.bgWhite,
         borderRadius: v2.radius.input,
         padding: 10,
+        transition: 'border-color 0.15s, background 0.15s',
       }}>
+        {/* Internal-mode warning strip */}
+        {isInternalMode && (
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 8,
+            padding: '8px 12px', marginBottom: 10,
+            background: INTERNAL_RED, color: '#fff',
+            borderRadius: v2.radius.input,
+            fontSize: 12, fontWeight: 600, letterSpacing: '0.5px',
+          }}>
+            <AlertTriangle size={14} />
+            <span style={{ flex: 1 }}>🔒 INTERNAL — only visible to staff and admin. Clients will NOT see this note.</span>
+          </div>
+        )}
+
         <textarea
           value={draft}
           onChange={e => setDraft(e.target.value)}
           onKeyDown={handleKey}
-          placeholder="Add a note… (⌘↵ to send)"
+          placeholder={isInternalMode
+            ? 'Write an internal note (staff/admin only)…'
+            : 'Add a note… (⌘↵ to send)'}
           rows={3}
           style={{
             width: '100%', border: 'none', outline: 'none', resize: 'vertical',
-            fontFamily: 'inherit', fontSize: 13, color: v2.colors.text,
-            background: 'transparent', boxSizing: 'border-box',
+            fontFamily: 'inherit', fontSize: 13,
+            color: v2.colors.text,
+            background: 'transparent',
+            boxSizing: 'border-box',
           }}
         />
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 8 }}>
           {!isClient && (
-            <>
-              <label style={{ ...labelStyle, display: 'flex', alignItems: 'center', gap: 4 }}>
-                <Info size={11} /> Visibility
-              </label>
-              <select
-                value={visibility}
-                onChange={e => setVisibility(e.target.value as NoteVisibility)}
-                style={{
-                  padding: '6px 10px', borderRadius: v2.radius.badge,
-                  border: `1px solid ${v2.colors.border}`,
-                  background: v2.colors.bgWhite, color: v2.colors.text,
-                  fontSize: 12, fontFamily: 'inherit', cursor: 'pointer',
-                }}
-              >
-                {VIS_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-              </select>
-            </>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }} role="radiogroup" aria-label="Visibility">
+              <VisibilityPill
+                active={!isInternalMode}
+                onClick={() => setVisibility('public')}
+                label="Public"
+                icon={<Info size={11} />}
+                activeBg={v2.colors.bgDark}
+                activeColor="#fff"
+              />
+              <VisibilityPill
+                active={isInternalMode}
+                onClick={() => setVisibility('internal')}
+                label="Internal"
+                icon={<Lock size={11} />}
+                activeBg={INTERNAL_RED}
+                activeColor="#fff"
+              />
+            </div>
           )}
           <div style={{ flex: 1 }} />
           <button
@@ -202,18 +233,57 @@ export function NotesSection({ entityType, entityId, initialOrder = 'oldest' }: 
             style={{
               display: 'flex', alignItems: 'center', gap: 6,
               padding: '8px 18px', borderRadius: v2.radius.button,
-              background: (sending || !draft.trim()) ? v2.colors.border : v2.colors.accent,
+              background: (sending || !draft.trim())
+                ? v2.colors.border
+                : (isInternalMode ? INTERNAL_RED : v2.colors.accent),
               color: '#fff', border: 'none',
               fontSize: 11, fontWeight: 600, letterSpacing: '1.5px', textTransform: 'uppercase',
               cursor: (sending || !draft.trim()) ? 'not-allowed' : 'pointer',
               fontFamily: 'inherit',
             }}
           >
-            <Send size={12} /> {sending ? 'Sending…' : 'Send'}
+            <Send size={12} />
+            {sending ? 'Sending…' : (isInternalMode ? 'Send internal' : 'Send')}
           </button>
         </div>
       </div>
     </div>
+  );
+}
+
+// ─── Visibility pill ────────────────────────────────────────────────────────
+
+function VisibilityPill({
+  active, onClick, label, icon, activeBg, activeColor,
+}: {
+  active: boolean;
+  onClick: () => void;
+  label: string;
+  icon: React.ReactNode;
+  activeBg: string;
+  activeColor: string;
+}) {
+  const v2 = theme.v2;
+  return (
+    <button
+      type="button"
+      role="radio"
+      aria-checked={active}
+      onClick={onClick}
+      style={{
+        display: 'flex', alignItems: 'center', gap: 4,
+        padding: '5px 10px', borderRadius: v2.radius.badge,
+        border: active ? 'none' : `1px solid ${v2.colors.border}`,
+        background: active ? activeBg : v2.colors.bgWhite,
+        color: active ? activeColor : v2.colors.textSecondary,
+        fontSize: 11, fontWeight: 600, letterSpacing: '0.5px', textTransform: 'uppercase',
+        cursor: 'pointer', fontFamily: 'inherit',
+        transition: 'background 0.15s, color 0.15s',
+      }}
+    >
+      {icon}
+      {label}
+    </button>
   );
 }
 
@@ -237,21 +307,18 @@ function NoteItem({ note, canDelete, onDelete }: { note: EntityNote; canDelete: 
     );
   }
 
+  const isInternal = note.visibility === 'internal';
   const authorKey = note.authorId || note.authorName || 'anon';
-  const badgeInfo: { label: string; bg: string; color: string } | null =
-    note.visibility === 'staff_only'
-      ? { label: 'Staff only', bg: v2.colors.statusSent.bg, color: v2.colors.statusSent.text }
-      : note.visibility === 'internal'
-        ? { label: 'Internal',   bg: v2.colors.statusDeclined.bg, color: v2.colors.statusDeclined.text }
-        : null;
 
   return (
     <div style={{
       display: 'flex', gap: 10,
       padding: '10px 12px',
-      background: v2.colors.bgWhite,
-      border: `1px solid ${v2.colors.border}`,
+      background: isInternal ? INTERNAL_BG_NOTE : v2.colors.bgWhite,
+      border: `1px solid ${isInternal ? INTERNAL_BORDER : v2.colors.border}`,
+      borderLeft: isInternal ? `4px solid ${INTERNAL_RED_DARK}` : `1px solid ${v2.colors.border}`,
       borderRadius: v2.radius.input,
+      position: 'relative',
     }}>
       <div style={{
         width: 28, height: 28, borderRadius: '50%',
@@ -272,12 +339,15 @@ function NoteItem({ note, canDelete, onDelete }: { note: EntityNote; canDelete: 
               background: v2.colors.bgCard, color: v2.colors.textSecondary,
             }}>{note.authorRole}</span>
           )}
-          {badgeInfo && (
+          {isInternal && (
             <span style={{
-              fontSize: 9, fontWeight: 600, letterSpacing: '0.5px', textTransform: 'uppercase',
-              padding: '2px 6px', borderRadius: v2.radius.badge,
-              background: badgeInfo.bg, color: badgeInfo.color,
-            }}>{badgeInfo.label}</span>
+              display: 'inline-flex', alignItems: 'center', gap: 4,
+              fontSize: 9, fontWeight: 700, letterSpacing: '0.75px', textTransform: 'uppercase',
+              padding: '2px 7px', borderRadius: v2.radius.badge,
+              background: INTERNAL_RED, color: '#fff',
+            }}>
+              <Lock size={9} /> Internal
+            </span>
           )}
           <span style={{ fontSize: 11, color: v2.colors.textMuted, marginLeft: 'auto' }}>
             {formatTimestamp(note.createdAt)}
@@ -295,7 +365,13 @@ function NoteItem({ note, canDelete, onDelete }: { note: EntityNote; canDelete: 
             </button>
           )}
         </div>
-        <div style={{ fontSize: 13, color: v2.colors.text, marginTop: 4, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+        <div style={{
+          fontSize: 13,
+          color: isInternal ? INTERNAL_RED_DARK : v2.colors.text,
+          marginTop: 4,
+          whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+          fontWeight: isInternal ? 500 : 400,
+        }}>
           {note.body}
         </div>
       </div>
