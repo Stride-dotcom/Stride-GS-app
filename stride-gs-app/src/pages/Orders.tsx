@@ -82,7 +82,17 @@ export function Orders() {
   const isAdmin = user?.role === 'admin';
   const isStaff = user?.role === 'staff' || user?.role === 'admin';
   const canReview = isStaff;
-  const [activeTab, setActiveTab] = useState<OrdersTab>(isAdmin ? 'orders' : 'availability');
+
+  // Read ?tab=review from hash on mount so email deep links auto-switch to the review tab
+  const initialTab = (() => {
+    try {
+      const hash = window.location.hash; // e.g. "#/orders?tab=review"
+      if (hash.includes('tab=review') && isStaff) return 'review' as OrdersTab;
+    } catch (_) {}
+    return (isAdmin ? 'orders' : 'availability') as OrdersTab;
+  })();
+
+  const [activeTab, setActiveTab] = useState<OrdersTab>(initialTab);
   const { orders, loading, error, refetch, lastFetched } = useOrders();
   const [globalFilter, setGlobalFilter] = useState('');
   const [sorting, setSorting] = useState<SortingState>([{ id: 'localServiceDate', desc: true }]);
@@ -410,15 +420,12 @@ export function Orders() {
         </div>
       )}
 
-      {/* Detail panel */}
+      </>}
+
+      {/* Detail panel — available from ALL tabs (orders, review, availability) */}
       {selectedOrder && (
         <OrderDetailPanel order={selectedOrder} onClose={() => setSelectedOrder(null)} />
       )}
-
-      </>}
-
-      {/* Detail panel also needs to be available from Review tab */}
-      {selectedOrder && activeTab === 'review' && null /* already rendered above */}
 
       {/* Create delivery order modal */}
       {showCreateModal && (

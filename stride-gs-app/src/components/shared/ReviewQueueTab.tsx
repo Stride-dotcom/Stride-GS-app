@@ -1,17 +1,19 @@
 /**
- * ReviewQueueTab — Phase 2b
+ * ReviewQueueTab — Phase 2c (revised)
  *
- * Staff/admin queue of orders awaiting review. Filters to
- * review_status IN ('pending_review', 'revision_requested').
+ * Staff/admin queue of orders awaiting review.
  *
- * Actions per row:
- *   - View Details (opens the detail panel)
- *   - Approve    → calls dt-push-order Edge Function, then review_status='approved'
- *   - Request Revision (client must edit)
- *   - Reject
+ * Fixes in this revision:
+ *  - Per-row persistent push error display (no longer toast-only)
+ *  - "Quote Needed" → "Priced with Delivery" for pickup legs of P+D pairs
+ *  - "Push All Pending" batch button
+ *  - Error toast stays visible 8 s (was 3.5 s)
  */
 import React, { useMemo, useState } from 'react';
-import { CheckCircle2, XCircle, AlertCircle, Loader2, ClipboardCheck, RefreshCw } from 'lucide-react';
+import {
+  CheckCircle2, XCircle, AlertCircle, Loader2, ClipboardCheck, RefreshCw,
+  ChevronsRight, AlertTriangle,
+} from 'lucide-react';
 import { theme } from '../../styles/theme';
 import type { DtOrderForUI } from '../../hooks/useOrders';
 import { supabase } from '../../lib/supabase';
@@ -39,10 +41,13 @@ function fmtDate(iso: string): string {
 export function ReviewQueueTab({ orders, loading, onRefetch, onOpenDetail }: Props) {
   const [actingId, setActingId] = useState<string | null>(null);
   const [pushingId, setPushingId] = useState<string | null>(null);
+  const [pushingAll, setPushingAll] = useState(false);
   const [statusFilter, setStatusFilter] = useState<'pending' | 'all'>('pending');
-  const [toast, setToast] = useState<string | null>(null);
+  const [toast, setToast] = useState<{ msg: string; isError: boolean } | null>(null);
   const [revisionNotesFor, setRevisionNotesFor] = useState<string | null>(null);
   const [revisionNotes, setRevisionNotes] = useState('');
+  // Persistent per-row push errors so staff can see the exact message after toast fades
+  const [pushErrors, setPushErrors] = useState<Record<string, string>>({});
 
   const queue = useMemo(() => {
     if (statusFilter === 'pending') {
@@ -51,9 +56,14 @@ export function ReviewQueueTab({ orders, loading, onRefetch, onOpenDetail }: Pro
     return orders.filter(o => o.reviewStatus && o.reviewStatus !== 'not_required');
   }, [orders, statusFilter]);
 
-  const showToast = (msg: string) => {
-    setToast(msg);
-    setTimeout(() => setToast(null), 3500);
+  const pendingOrders = useMemo(
+    () => orders.filter(o => o.reviewStatus === 'pending_review' || o.reviewStatus === 'revision_requested'),
+    [orders]
+  );
+
+  const showToast = (msg: string, isError = false) => {
+    setToast({ msg, isError });
+    setTimeout(() => setToast(null), isError ? 10000 : 4000);
   };
 
   const updateReviewStatus = async (
@@ -74,8 +84,6 @@ export function ReviewQueueTab({ orders, loading, onRefetch, onOpenDetail }: Pro
   };
 
   const pushToDt = async (orderId: string, dtIdentifier: string) => {
-    // Invoke the Edge Function via supabase-js. It handles the XML POST
-    // to DT's /orders/api/add_order and updates pushed_to_dt_at on success.
     const { data, error } = await supabase.functions.invoke('dt-push-order', {
       body: { orderId },
     });
@@ -97,24 +105,26 @@ export function ReviewQueueTab({ orders, loading, onRefetch, onOpenDetail }: Pro
     if (!confirm(confirmMsg)) return;
     setActingId(order.id);
     setPushingId(order.id);
+    // Clear any prior error for this row
+    setPushErrors(prev => { const n = { ...prev }; delete n[order.id]; return n; });
     try {
-      // Always approve the delivery order; also approve the linked pickup if applicable
       await updateReviewStatus(order.id, 'approved');
       if (isLinkedPair && order.linkedOrderId) {
         await updateReviewStatus(order.linkedOrderId, 'approved');
       }
-      // Push the primary order (Edge Function handles linked pickup push too)
       try {
         await pushToDt(order.id, order.dtIdentifier);
         showToast(isLinkedPair
-          ? `${order.dtIdentifier} + linked pickup pushed to DispatchTrack`
-          : `${order.dtIdentifier} pushed to DispatchTrack`);
+          ? `✓ ${order.dtIdentifier} + linked pickup pushed to DispatchTrack`
+          : `✓ ${order.dtIdentifier} pushed to DispatchTrack`);
       } catch (pushErr) {
-        showToast(`Approved but DT push failed: ${(pushErr as Error).message}. Retry push from detail panel.`);
+        const errMsg = (pushErr as Error).message;
+        setPushErrors(prev => ({ ...prev, [order.id]: errMsg }));
+        showToast(`Approved but DT push failed — see error on row`, true);
       }
       onRefetch();
     } catch (err) {
-      showToast(`Approval failed: ${(err as Error).message}`);
+      showToast(`Approval failed: ${(err as Error).message}`, true);
     } finally {
       setActingId(null);
       setPushingId(null);
@@ -130,7 +140,7 @@ export function ReviewQueueTab({ orders, loading, onRefetch, onOpenDetail }: Pro
       showToast(`${order.dtIdentifier} rejected`);
       onRefetch();
     } catch (err) {
-      showToast(`Rejection failed: ${(err as Error).message}`);
+      showToast(`Rejection failed: ${(err as Error).message}`, true);
     } finally {
       setActingId(null);
     }
@@ -151,9 +161,50 @@ export function ReviewQueueTab({ orders, loading, onRefetch, onOpenDetail }: Pro
       setRevisionNotes('');
       onRefetch();
     } catch (err) {
-      showToast(`Failed: ${(err as Error).message}`);
+      showToast(`Failed: ${(err as Error).message}`, true);
     } finally {
       setActingId(null);
+    }
+  };
+
+  const handlePushAll = async () => {
+    const eligible = pendingOrders.filter(o =>
+      // Only push the delivery leg of P+D pairs (Edge Function handles the linked pickup)
+      // Skip pure pickup legs of P+D (order_type=pickup with a linkedOrderId that points to a P+D)
+      !(o.orderType === 'pickup' && !!o.linkedOrderId)
+    );
+    if (eligible.length === 0) {
+      showToast('No pending orders ready to approve & push');
+      return;
+    }
+    if (!confirm(`Approve & push all ${eligible.length} pending order(s) to DispatchTrack?`)) return;
+    setPushingAll(true);
+    const errors: string[] = [];
+    for (const order of eligible) {
+      const isLinkedPair = order.orderType === 'pickup_and_delivery' && !!order.linkedOrderId;
+      setPushErrors(prev => { const n = { ...prev }; delete n[order.id]; return n; });
+      try {
+        await updateReviewStatus(order.id, 'approved');
+        if (isLinkedPair && order.linkedOrderId) {
+          await updateReviewStatus(order.linkedOrderId, 'approved');
+        }
+        try {
+          await pushToDt(order.id, order.dtIdentifier);
+        } catch (pushErr) {
+          const errMsg = (pushErr as Error).message;
+          setPushErrors(prev => ({ ...prev, [order.id]: errMsg }));
+          errors.push(`${order.dtIdentifier}: ${errMsg}`);
+        }
+      } catch (err) {
+        errors.push(`${order.dtIdentifier} approval failed: ${(err as Error).message}`);
+      }
+    }
+    onRefetch();
+    setPushingAll(false);
+    if (errors.length === 0) {
+      showToast(`✓ All ${eligible.length} order(s) approved & pushed`);
+    } else {
+      showToast(`${eligible.length - errors.length} pushed, ${errors.length} failed — check rows for details`, true);
     }
   };
 
@@ -164,12 +215,12 @@ export function ReviewQueueTab({ orders, loading, onRefetch, onOpenDetail }: Pro
         display: 'flex', alignItems: 'center', justifyContent: 'space-between',
         marginBottom: 16, flexWrap: 'wrap', gap: 10,
       }}>
-        <div style={{ display: 'flex', gap: 8 }}>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
           <button
             onClick={() => setStatusFilter('pending')}
             style={filterPillStyle(statusFilter === 'pending')}
           >
-            Pending ({orders.filter(o => o.reviewStatus === 'pending_review' || o.reviewStatus === 'revision_requested').length})
+            Pending ({pendingOrders.length})
           </button>
           <button
             onClick={() => setStatusFilter('all')}
@@ -177,6 +228,25 @@ export function ReviewQueueTab({ orders, loading, onRefetch, onOpenDetail }: Pro
           >
             All Reviewed ({orders.filter(o => o.reviewStatus && o.reviewStatus !== 'not_required').length})
           </button>
+          {/* Push All Pending — only shown when there are pending orders */}
+          {pendingOrders.length > 0 && (
+            <button
+              onClick={handlePushAll}
+              disabled={pushingAll}
+              style={{
+                padding: '8px 14px', borderRadius: 100,
+                border: 'none', background: '#166534', color: '#fff',
+                fontSize: 11, fontWeight: 600, letterSpacing: '1px', textTransform: 'uppercase',
+                cursor: pushingAll ? 'not-allowed' : 'pointer', opacity: pushingAll ? 0.7 : 1,
+                display: 'flex', alignItems: 'center', gap: 5, fontFamily: 'inherit',
+              }}
+            >
+              {pushingAll
+                ? <><Loader2 size={12} className="spin" /> Pushing All…</>
+                : <><ChevronsRight size={12} /> Push All ({pendingOrders.filter(o => !(o.orderType === 'pickup' && !!o.linkedOrderId)).length})</>
+              }
+            </button>
+          )}
         </div>
         <button
           onClick={onRefetch}
@@ -191,12 +261,10 @@ export function ReviewQueueTab({ orders, loading, onRefetch, onOpenDetail }: Pro
         </button>
       </div>
 
-      {/* Loading */}
       {loading && (
         <div style={{ padding: 40, textAlign: 'center', color: theme.colors.textMuted }}>Loading…</div>
       )}
 
-      {/* Empty */}
       {!loading && queue.length === 0 && (
         <div style={{
           padding: '60px 20px', textAlign: 'center',
@@ -209,18 +277,20 @@ export function ReviewQueueTab({ orders, loading, onRefetch, onOpenDetail }: Pro
         </div>
       )}
 
-      {/* Queue */}
       {queue.length > 0 && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
           {queue.map(order => {
             const cfg = REVIEW_CFG[order.reviewStatus] || REVIEW_CFG.pending_review;
-            const isBusy = actingId === order.id;
+            const isBusy = actingId === order.id || pushingAll;
+            const isPickupLegOfPD = order.orderType === 'pickup' && !!order.linkedOrderId;
+            const pushError = pushErrors[order.id];
+
             return (
               <div
                 key={order.id}
                 style={{
                   background: '#fff', borderRadius: 12, padding: 16,
-                  border: `1px solid ${theme.colors.border}`,
+                  border: `1px solid ${pushError ? '#FECACA' : theme.colors.border}`,
                   display: 'flex', gap: 14, alignItems: 'flex-start', flexWrap: 'wrap',
                 }}
               >
@@ -236,7 +306,6 @@ export function ReviewQueueTab({ orders, loading, onRefetch, onOpenDetail }: Pro
                     }}>
                       {cfg.label}
                     </span>
-                    {/* Order type chip (pickup / pickup_and_delivery / service_only) */}
                     {order.orderType && order.orderType !== 'delivery' && (
                       <span style={{
                         fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 10,
@@ -281,12 +350,28 @@ export function ReviewQueueTab({ orders, loading, onRefetch, onOpenDetail }: Pro
                       <strong>Revision note:</strong> {order.reviewNotes}
                     </div>
                   )}
+                  {/* Persistent push error — shown until next refetch */}
+                  {pushError && (
+                    <div style={{
+                      fontSize: 11, padding: '6px 10px', background: '#FEF2F2',
+                      border: '1px solid #FECACA', borderRadius: 6, color: '#991B1B',
+                      marginTop: 6, display: 'flex', alignItems: 'flex-start', gap: 5,
+                    }}>
+                      <AlertTriangle size={12} style={{ flexShrink: 0, marginTop: 1 }} />
+                      <span><strong>DT push failed:</strong> {pushError}</span>
+                    </div>
+                  )}
                 </div>
 
                 {/* Right: Price + actions */}
                 <div style={{ minWidth: 180, flexShrink: 0, textAlign: 'right' }}>
                   <div style={{ fontSize: 18, fontWeight: 700, color: theme.colors.text, marginBottom: 8 }}>
-                    {order.orderTotal != null ? `$${order.orderTotal.toFixed(2)}` : 'Quote Needed'}
+                    {isPickupLegOfPD
+                      ? <span style={{ fontSize: 13, color: theme.colors.textMuted, fontWeight: 500 }}>Priced with Delivery</span>
+                      : order.orderTotal != null
+                        ? `$${order.orderTotal.toFixed(2)}`
+                        : <span style={{ fontSize: 13, color: '#B45309', fontWeight: 600 }}>Quote Needed</span>
+                    }
                   </div>
                   <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end', flexWrap: 'wrap' }}>
                     <button
@@ -312,15 +397,43 @@ export function ReviewQueueTab({ orders, loading, onRefetch, onOpenDetail }: Pro
                         >
                           <XCircle size={11} /> Reject
                         </button>
-                        <button
-                          onClick={() => handleApprove(order)}
-                          disabled={isBusy}
-                          style={smallBtn(true)}
-                        >
-                          {pushingId === order.id ? <Loader2 size={11} className="spin" /> : <CheckCircle2 size={11} />}
-                          {pushingId === order.id ? 'Pushing…' : 'Approve & Push'}
-                        </button>
+                        {/* Don't show Approve & Push on pickup legs — their delivery will push both */}
+                        {!isPickupLegOfPD && (
+                          <button
+                            onClick={() => handleApprove(order)}
+                            disabled={isBusy}
+                            style={smallBtn(true)}
+                          >
+                            {pushingId === order.id ? <Loader2 size={11} className="spin" /> : <CheckCircle2 size={11} />}
+                            {pushingId === order.id ? 'Pushing…' : 'Approve & Push'}
+                          </button>
+                        )}
                       </>
+                    )}
+                    {/* Retry push for approved orders that failed */}
+                    {order.reviewStatus === 'approved' && pushError && (
+                      <button
+                        onClick={async () => {
+                          setPushingId(order.id);
+                          setPushErrors(prev => { const n = { ...prev }; delete n[order.id]; return n; });
+                          try {
+                            await pushToDt(order.id, order.dtIdentifier);
+                            showToast(`✓ ${order.dtIdentifier} pushed to DispatchTrack`);
+                            onRefetch();
+                          } catch (err) {
+                            const errMsg = (err as Error).message;
+                            setPushErrors(prev => ({ ...prev, [order.id]: errMsg }));
+                            showToast('Retry failed — see error', true);
+                          } finally {
+                            setPushingId(null);
+                          }
+                        }}
+                        disabled={pushingId === order.id}
+                        style={smallBtn(true)}
+                      >
+                        {pushingId === order.id ? <Loader2 size={11} className="spin" /> : <ChevronsRight size={11} />}
+                        Retry Push
+                      </button>
                     )}
                   </div>
                 </div>
@@ -332,13 +445,17 @@ export function ReviewQueueTab({ orders, loading, onRefetch, onOpenDetail }: Pro
 
       {/* Toast */}
       {toast && (
-        <div style={{
-          position: 'fixed', bottom: 20, left: '50%', transform: 'translateX(-50%)',
-          background: '#1C1C1C', color: '#fff', padding: '10px 20px',
-          borderRadius: 100, fontSize: 13, zIndex: 500,
-          boxShadow: '0 6px 20px rgba(0,0,0,0.3)',
-        }}>
-          {toast}
+        <div
+          onClick={() => setToast(null)}
+          style={{
+            position: 'fixed', bottom: 20, left: '50%', transform: 'translateX(-50%)',
+            background: toast.isError ? '#7F1D1D' : '#1C1C1C',
+            color: '#fff', padding: '10px 20px',
+            borderRadius: 100, fontSize: 13, zIndex: 500, cursor: 'pointer',
+            boxShadow: '0 6px 20px rgba(0,0,0,0.3)', maxWidth: '80vw', textAlign: 'center',
+          }}
+        >
+          {toast.msg} <span style={{ opacity: 0.6, marginLeft: 8 }}>✕</span>
         </div>
       )}
 

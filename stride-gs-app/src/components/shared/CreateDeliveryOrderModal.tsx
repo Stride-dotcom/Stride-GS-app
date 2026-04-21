@@ -37,6 +37,7 @@ import {
   type DeliveryAccessorial,
 } from '../../lib/supabaseQueries';
 import { supabase } from '../../lib/supabase';
+import { apiFetch } from '../../lib/api';
 
 type OrderMode = 'delivery' | 'pickup' | 'pickup_and_delivery' | 'service_only';
 type ItemsSource = 'warehouse' | 'pickup';
@@ -496,6 +497,18 @@ export function CreateDeliveryOrderModal({
           dtIdentifier: deliveryRow.dt_identifier,
           reviewStatus: 'pending_review',
         });
+        // Notify staff — best-effort, never block submit success
+        apiFetch<void>('notifyNewDeliveryOrder', {
+          orderNumber: deliveryRow.dt_identifier,
+          orderType: 'pickup_and_delivery',
+          clientName,
+          contactName: deliveryContactName.trim(),
+          contactAddress: `${deliveryAddress.trim()}, ${deliveryCity.trim()}, ${deliveryState} ${deliveryZip.trim()}`,
+          serviceDate,
+          itemCount: String(pickupFreeItems.filter(i => i.description.trim()).length),
+          orderTotal: orderTotal != null ? `$${orderTotal.toFixed(2)}` : 'Quote Required',
+          submittedBy: user?.email || 'Unknown',
+        }).catch(() => { /* notification failure is non-fatal */ });
       } else {
         // Single-order path (delivery / pickup / service_only)
         const dtIdentifier = genDtIdentifier();
@@ -581,6 +594,29 @@ export function CreateDeliveryOrderModal({
           dtIdentifier: orderRow.dt_identifier,
           reviewStatus: 'pending_review',
         });
+        // Notify staff — best-effort, never block submit success
+        {
+          const notifContact = isPickup ? pickupContactName : deliveryContactName;
+          const notifAddr = isPickup
+            ? `${pickupAddress.trim()}, ${pickupCity.trim()}, ${pickupState} ${pickupZip.trim()}`
+            : `${deliveryAddress.trim()}, ${deliveryCity.trim()}, ${deliveryState} ${deliveryZip.trim()}`;
+          const notifItemCount = mode === 'delivery'
+            ? String(selectedInvItems.length)
+            : mode === 'pickup'
+              ? String(pickupFreeItems.filter(i => i.description.trim()).length)
+              : '0';
+          apiFetch<void>('notifyNewDeliveryOrder', {
+            orderNumber: orderRow.dt_identifier,
+            orderType: mode,
+            clientName,
+            contactName: notifContact.trim(),
+            contactAddress: notifAddr,
+            serviceDate,
+            itemCount: notifItemCount,
+            orderTotal: (!isServiceOnly && orderTotal != null) ? `$${orderTotal.toFixed(2)}` : 'Quote Required',
+            submittedBy: user?.email || 'Unknown',
+          }).catch(() => { /* notification failure is non-fatal */ });
+        }
       }
     } catch (err) {
       setSubmitError(err instanceof Error ? err.message : 'Submit failed');

@@ -1,5 +1,8 @@
 /* ===================================================
-   StrideAPI.gs — v38.92.1 — 2026-04-16 PST — HOTFIX: installOnboardingRetryTrigger everyMinutes(5)
+   StrideAPI.gs — v38.93.0 — 2026-04-20 PST — Add notifyNewDeliveryOrder handler
+   v38.93.0: NEW — handleNotifyNewDeliveryOrder_ sends ORDER_REVIEW_REQUEST email to
+             NOTIFICATION_EMAILS when a client submits a delivery order.
+             Router case "notifyNewDeliveryOrder" added. Best-effort (non-blocking).
    v38.92.1: FIX — installOnboardingRetryTrigger was calling `everyMinutes(2)`
              which throws at runtime because Apps Script restricts the
              cadence to one of {1, 5, 10, 15, 30}. Changed to 5 minutes and
@@ -5122,6 +5125,10 @@ function doPost(e) {
         return withAdminGuard_(callerEmail, function() { return handlePreviewTemplate_(payload); });
       case "checkMarketingInbox":
         return withAdminGuard_(callerEmail, function() { return handleCheckMarketingInbox_(); });
+
+      // ─── Delivery Order Notifications ───
+      case "notifyNewDeliveryOrder":
+        return jsonResponse_(handleNotifyNewDeliveryOrder_(payload));
 
       // ─── QBO Integration (admin-only writes) ───
       case "qboCreateInvoice":
@@ -23161,6 +23168,89 @@ function handleSyncTemplatesToClients_() {
     errors: errors,
     message: "Synced to " + synced + " of " + clients.length + " clients" + (failed > 0 ? " (" + failed + " failed)" : "")
   });
+}
+
+/**
+ * POST notifyNewDeliveryOrder — Send ORDER_REVIEW_REQUEST email to staff when
+ * a client submits a new delivery order. Best-effort — never blocks the caller.
+ *
+ * Payload: { orderNumber, orderType, clientName, contactName, contactAddress,
+ *            serviceDate, itemCount, orderTotal, submittedBy }
+ */
+function handleNotifyNewDeliveryOrder_(payload) {
+  var orderNumber     = String(payload.orderNumber     || "").trim();
+  var orderType       = String(payload.orderType       || "delivery").trim();
+  var clientName      = String(payload.clientName      || "").trim();
+  var contactName     = String(payload.contactName     || "").trim();
+  var contactAddress  = String(payload.contactAddress  || "").trim();
+  var serviceDate     = String(payload.serviceDate     || "").trim();
+  var itemCount       = String(payload.itemCount       || "").trim();
+  var orderTotal      = String(payload.orderTotal      || "").trim();
+  var submittedBy     = String(payload.submittedBy     || "").trim();
+
+  // Read CB-level settings for NOTIFICATION_EMAILS + MASTER_SPREADSHEET_ID
+  var cbId = prop_("CB_SPREADSHEET_ID");
+  if (!cbId) {
+    Logger.log("handleNotifyNewDeliveryOrder_: CB_SPREADSHEET_ID not set — notification skipped");
+    return { success: false, error: "CB_SPREADSHEET_ID not configured" };
+  }
+
+  var cbSs, cbSettings;
+  try {
+    cbSs       = SpreadsheetApp.openById(cbId);
+    cbSettings = api_readSettings_(cbSs);
+  } catch (e) {
+    Logger.log("handleNotifyNewDeliveryOrder_: could not open CB — " + e.message);
+    return { success: false, error: "Could not read CB settings: " + e.message };
+  }
+
+  var notifEmails = String(cbSettings["NOTIFICATION_EMAILS"] || "").trim();
+  var masterId    = String(cbSettings["MASTER_SPREADSHEET_ID"] || prop_("MASTER_PRICE_LIST_SPREADSHEET_ID") || "").trim();
+
+  if (!notifEmails) {
+    Logger.log("handleNotifyNewDeliveryOrder_: no NOTIFICATION_EMAILS — notification skipped");
+    return { success: false, error: "No NOTIFICATION_EMAILS configured in CB Settings" };
+  }
+
+  // Build the review deep link — opens Orders page on the Review Queue tab
+  var reviewLink = APP_BASE_URL_ + "orders?tab=review";
+
+  // Format order type for display
+  var orderTypeDisplay = orderType === "pickup_and_delivery" ? "Pickup & Delivery"
+                       : orderType === "pickup"              ? "Pickup"
+                       : "Delivery";
+
+  var tokens = {
+    "{{ORDER_NUMBER}}":     orderNumber,
+    "{{ORDER_TYPE}}":       orderTypeDisplay,
+    "{{CLIENT_NAME}}":      clientName,
+    "{{CONTACT_NAME}}":     contactName,
+    "{{CONTACT_ADDRESS}}":  contactAddress,
+    "{{SERVICE_DATE}}":     serviceDate,
+    "{{ITEM_COUNT}}":       itemCount,
+    "{{ORDER_TOTAL}}":      orderTotal,
+    "{{SUBMITTED_BY}}":     submittedBy,
+    "{{REVIEW_LINK}}":      reviewLink
+  };
+
+  // Minimal settings object for api_sendTemplateEmail_ (only needs MASTER_SPREADSHEET_ID
+  // for the MPL fallback; Supabase read is the primary path)
+  var emailSettings = {
+    "MASTER_SPREADSHEET_ID": masterId
+  };
+
+  var result = api_sendTemplateEmail_(
+    emailSettings,
+    "ORDER_REVIEW_REQUEST",
+    notifEmails,
+    "New Delivery Order Pending Review — " + orderNumber,
+    tokens,
+    null,   // no PDF attachment
+    null    // no clientSheetId (CB-level notification)
+  );
+
+  Logger.log("handleNotifyNewDeliveryOrder_: sent to " + notifEmails + " result=" + JSON.stringify(result));
+  return result;
 }
 
 /**
