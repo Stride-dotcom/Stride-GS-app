@@ -1,5 +1,5 @@
 import { useMemo } from 'react';
-import { Save, Copy, FileDown, Trash2, Ban } from 'lucide-react';
+import { Save, Copy, FileDown, Trash2, Ban, CheckCircle2 } from 'lucide-react';
 import { theme } from '../../styles/theme';
 import { calcQuote } from '../../lib/quoteCalc';
 import type { Quote, QuoteCatalog, CalcResult } from '../../lib/quoteTypes';
@@ -11,6 +11,11 @@ interface Props {
   catalog: QuoteCatalog;
   onUpdate: (patch: Partial<Quote>) => void;
   onSave: () => void;
+  /** When false (no unsaved edits), the Save Quote button flips to a
+   *  green "QUOTE SAVED" chip in place. Any change in QuoteBuilder
+   *  turns it back orange. Parent owns the flag so auto-save logic can
+   *  live next to the edit handlers. */
+  dirty: boolean;
   onDuplicate: () => void;
   onDownloadPdf: () => void;
   onVoid: () => void;
@@ -21,7 +26,7 @@ function fmt(n: number): string {
   return n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
-export function QuoteTotalsPanel({ quote, catalog, onUpdate, onSave, onDuplicate, onDownloadPdf, onVoid, onDelete }: Props) {
+export function QuoteTotalsPanel({ quote, catalog, onUpdate, onSave, dirty, onDuplicate, onDownloadPdf, onVoid, onDelete }: Props) {
   const result: CalcResult = useMemo(
     () => calcQuote(quote, catalog.services, catalog.classes, catalog.coverageOptions),
     [quote, catalog]
@@ -71,6 +76,17 @@ export function QuoteTotalsPanel({ quote, catalog, onUpdate, onSave, onDuplicate
     ...v.typography.buttonPrimary, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
     padding: '10px 16px', border: 'none', borderRadius: v.radius.button,
     background: v.colors.accent, color: v.colors.textOnDark, cursor: 'pointer', fontFamily: 'inherit', width: '100%',
+  };
+  // Session 77 — saved-state chip that takes the place of the orange
+  // Save button when there are no unsaved edits. Kept the same size +
+  // padding + font so the rest of the column doesn't reflow, only the
+  // background + icon + label swap.
+  const btnSaved: React.CSSProperties = {
+    ...btnPrimary,
+    background: v.colors.statusAccepted.bg,
+    color: v.colors.statusAccepted.text,
+    border: `1px solid ${v.colors.statusAccepted.text}40`,
+    cursor: 'default',
   };
   const btnGhost: React.CSSProperties = {
     ...v.typography.buttonPrimary, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
@@ -180,7 +196,21 @@ export function QuoteTotalsPanel({ quote, catalog, onUpdate, onSave, onDuplicate
 
       {/* Actions */}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 20 }}>
-        <button onClick={onSave} style={btnPrimary}><Save size={14} /> SAVE QUOTE</button>
+        {dirty ? (
+          <button onClick={onSave} style={btnPrimary}><Save size={14} /> SAVE QUOTE</button>
+        ) : (
+          // aria-disabled + no-op onClick so the chip is a readable
+          // state affordance, not a hot button. We don't use the native
+          // `disabled` attribute — the default disabled style washes
+          // the green out.
+          <button
+            aria-disabled="true"
+            title="All edits saved — make a change to save again"
+            style={btnSaved}
+          >
+            <CheckCircle2 size={14} /> QUOTE SAVED
+          </button>
+        )}
         <button onClick={onDownloadPdf} style={btnGhost}><FileDown size={14} /> DOWNLOAD PDF</button>
         <button onClick={onDuplicate} style={btnGhost}><Copy size={14} /> DUPLICATE</button>
         {quote.status !== 'void' && <button onClick={onVoid} style={btnDanger}><Ban size={14} /> VOID QUOTE</button>}

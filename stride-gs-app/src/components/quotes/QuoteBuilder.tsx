@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo } from 'react';
+import { useState, useCallback, useMemo, useEffect } from 'react';
 import { ArrowLeft } from 'lucide-react';
 import { theme } from '../../styles/theme';
 import { useIsMobile } from '../../hooks/useIsMobile';
@@ -25,13 +25,23 @@ interface Props {
 export function QuoteBuilder({ store, quoteId, onBack }: Props) {
   const { isMobile } = useIsMobile();
   const [toast, setToast] = useState<string | null>(null);
+  // Session 77 — track whether there are unsaved edits since the last
+  // save. When `dirty=false`, the SAVE QUOTE button flips to a green
+  // "QUOTE SAVED" state in place (no floating toast). Any handleChange
+  // flips it back to `dirty=true`, turning the button orange again.
+  const [dirty, setDirty] = useState(false);
   const { updateQuote, duplicateQuote, setQuoteStatus, deleteQuote: deleteQuoteFn } = store;
 
   const quote = useMemo(() => store.quotes.find(q => q.id === quoteId) ?? null, [store.quotes, quoteId]);
 
+  // Reset dirty on quote switch — a freshly-loaded quote is "clean"
+  // relative to what's in Supabase, same as right after a save.
+  useEffect(() => { setDirty(false); }, [quoteId]);
+
   const handleChange = useCallback((patch: Partial<Quote>) => {
     if (!quoteId) return;
     updateQuote(quoteId, patch);
+    setDirty(true);
   }, [quoteId, updateQuote]);
 
   const showToast = useCallback((msg: string) => { setToast(msg); setTimeout(() => setToast(null), 3000); }, []);
@@ -42,11 +52,15 @@ export function QuoteBuilder({ store, quoteId, onBack }: Props) {
   // toast — users saw "saved" but no persistence happened at that
   // instant (auto-save had already covered it, or it hadn't, which is
   // how EST-1001 got lost).
+  //
+  // Session 77: dropped the floating "Quote saved" toast — the button
+  // now transforms into a green "QUOTE SAVED" chip in place, which is
+  // a clearer state affordance than a toast that fades after 3s.
   const handleSave = useCallback(() => {
     if (!quoteId) return;
     updateQuote(quoteId, {});
-    showToast('Quote saved');
-  }, [quoteId, updateQuote, showToast]);
+    setDirty(false);
+  }, [quoteId, updateQuote]);
   const handleDuplicate = useCallback(() => {
     if (!quoteId) return;
     const dup = duplicateQuote(quoteId);
@@ -134,7 +148,8 @@ export function QuoteBuilder({ store, quoteId, onBack }: Props) {
         </div>
 
         <QuoteTotalsPanel quote={quote} catalog={store.catalog} onUpdate={handleChange}
-          onSave={handleSave} onDuplicate={handleDuplicate} onDownloadPdf={handleDownloadPdf}
+          onSave={handleSave} dirty={dirty}
+          onDuplicate={handleDuplicate} onDownloadPdf={handleDownloadPdf}
           onVoid={handleVoid} onDelete={handleDelete} />
       </div>
     </div>
