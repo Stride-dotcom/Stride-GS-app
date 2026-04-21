@@ -29,6 +29,7 @@ import { Orders } from './pages/Orders';
 import { QuoteTool } from './pages/QuoteTool';
 import { PriceList } from './pages/PriceList';
 import { PublicRates } from './pages/PublicRates';
+import { ClientIntake } from './pages/ClientIntake';
 import { MessagesPage } from './components/messages/MessagesPage';
 
 /** Route guard — redirects to dashboard if user's role is not in the allowed list */
@@ -46,6 +47,13 @@ export default function App() {
     ? window.location.hash.match(/^#\/rates\/([A-Za-z0-9_-]+)/)
     : null;
   if (ratesMatch) return <PublicRates shareId={ratesMatch[1]} />;
+
+  // Client intake wizard — public onboarding form gated only by the
+  // magic linkId. Same pre-auth pattern as /rates.
+  const intakeMatch = typeof window !== 'undefined'
+    ? window.location.hash.match(/^#\/intake\/([A-Za-z0-9_-]+)/)
+    : null;
+  if (intakeMatch) return <ClientIntake linkId={intakeMatch[1]} />;
 
   // Auth check in progress
   if (loading) return <LoadingScreen />;
