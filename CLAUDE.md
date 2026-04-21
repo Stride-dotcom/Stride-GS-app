@@ -169,7 +169,7 @@ When changing client-side functions or columns, check whether the Task Board scr
 
 ## Deployment Guide for Builders
 
-> **TL;DR — the default path is push to `source` and let GitHub Actions ship it.** Only reach for the manual commands below when you've changed GAS code, client sheets, or Supabase schema.
+> **TL;DR — React changes ship via `npm run deploy` from `stride-gs-app/`.** That one command does everything: build → force-push dist to `origin/main` (GitHub Pages) → commit + push source to `origin/source`. GitHub Actions CI/CD was wired up in session 72 but **disabled in session 77** (workflows renamed to `*.yml.disabled`) after transport-layer failures made it unreliable. Re-enable by renaming them back if/when those issues are resolved.
 
 ### Decision tree — "what does my change need?"
 
@@ -177,8 +177,8 @@ Start from the file you edited; follow the row; deploy the right channel. **Don'
 
 | Change touched… | Channel | Command / action | Live in |
 |---|---|---|---|
-| `stride-gs-app/src/**` (React) | GitHub Actions | `git push origin source` | 2-3 min (Actions + CDN) |
-| `stride-gs-app/supabase/migrations/*.sql` | MCP `apply_migration` OR Actions `migrate.yml` | See § Supabase Migrations (MCP tool) | seconds |
+| `stride-gs-app/src/**` (React) | Manual | From `stride-gs-app/`: `npm run deploy -- "what changed"` | 1-2 min (CDN) |
+| `stride-gs-app/supabase/migrations/*.sql` | MCP `apply_migration` | See § Supabase Migrations (MCP tool) | seconds |
 | `AppScripts/stride-api/StrideAPI.gs` | clasp push + deployments.update | `npm run push-api && npm run deploy-api` | ~20s |
 | `AppScripts/Consolidated Billing Sheet/**` | clasp + deployments.update | `npm run push-cb && npm run deploy-cb` | ~20s |
 | `AppScripts/stax-auto-pay/**` | clasp | `npm run push-stax` | ~10s |
@@ -188,17 +188,17 @@ Start from the file you edited; follow the row; deploy the right channel. **Don'
 | Email template content | Edit in app: Settings → Email Templates | (none — Supabase instant) | instant |
 | Doc template content | Edit in app: Settings → Doc Templates | (none — Supabase instant) | instant |
 | Service rate / catalog | Edit in app: Price List → inline edit | "Sync to Sheet" button if GAS billing still uses sheet | instant |
-| `.github/workflows/*.yml` | GitHub Actions (meta) | Push to `source` — next run picks up the new workflow | next run |
+| `.github/workflows/*.yml` | n/a (workflows disabled) | See session-77 note at top — rename `*.yml.disabled` back to re-enable | — |
 
 The `AppScripts/stride-client-inventory/` directory is BOTH the rollout master (where `npm run rollout` reads from) AND the home of every `deploy-*` script. All commands in the tables below run from that directory.
 
-### React App Changes (AUTOMATIC — no manual steps)
-- Push your changes to the `source` branch
-- GitHub Actions automatically: typechecks (`tsc -b`) → builds (`vite`) → deploys to GitHub Pages
-- Live at mystridehub.com in 2-3 minutes
-- Monitor: https://github.com/Stride-dotcom/Stride-GS-app/actions
-- If the build fails, GitHub Actions reports the error — fix and push again
-- NEVER manually force-push to `main` — GitHub Actions owns that branch
+### React App Changes (MANUAL — `npm run deploy`)
+- From `stride-gs-app/`: `npm run deploy -- "description of what changed"`
+- The script does all three steps in order: (1) `npm run build` (verify-entry → tsc → vite → sanity checks), (2) commit + force-push `dist/` to `origin/main` as a "Deploy:" commit, (3) commit + push source to `origin/source` as a "deploy(react):" commit.
+- Live at mystridehub.com in 1-2 minutes after the GitHub Pages CDN refreshes
+- Hard-refresh (Ctrl+Shift+R) to verify the new bundle hash matches
+- If you see transient `schannel SEC_E_MESSAGE_ALTERED` or similar TLS errors on the push: retry. Intermediate network appliances occasionally MITM-inspect GitHub pushes and break the TLS session. Set `git config http.version HTTP/1.1` if it persists.
+- Workflows in `.github/workflows/` that could auto-deploy this (`deploy.yml`, `ci.yml`) were renamed to `*.disabled` in session 77 because the Actions runner hit similar intermittent failures. `migrate.yml` (manual-trigger only) is still active for production migrations.
 
 ### Google Apps Script Changes (MANUAL — requires Google OAuth)
 - Edit files in `AppScripts/stride-api/`
@@ -216,7 +216,7 @@ The `AppScripts/stride-client-inventory/` directory is BOTH the rollout master (
 
 ### Supabase Schema Changes (migrations)
 - Create migration file in `stride-gs-app/supabase/migrations/`
-- Apply via: GitHub Actions migration runner (manual trigger) OR Supabase MCP tools OR Supabase Dashboard SQL editor
+- Apply via: Supabase MCP tool (`apply_migration` — preferred) OR the still-active `migrate.yml` GitHub Actions workflow (`workflow_dispatch`, manual trigger) OR the Supabase Dashboard SQL editor
 - Always test migrations on a branch first if destructive
 
 ### Templates (email, document, invoice)
@@ -231,10 +231,10 @@ The `AppScripts/stride-client-inventory/` directory is BOTH the rollout master (
 - Click "Sync to Sheet" button to update the Master Price List Google Sheet (needed for GAS billing lookups until Phase 5 cutover is complete)
 
 ### What NOT to do
-- NEVER push directly to `main` branch — it's the compiled dist, managed by GitHub Actions
-- NEVER run `npm run deploy` manually — use GitHub Actions
+- NEVER edit `dist/` by hand — only `npm run deploy` writes there (force-push territory; a manual edit will be clobbered on the next build anyway)
+- NEVER re-enable `deploy.yml` / `ci.yml` without testing that the TLS transport issues from session 77 are resolved — the workflows will just silently fail again and leave `origin/main` behind
 - NEVER edit the Master Price List sheet directly — edit in the app, then Sync to Sheet
-- NEVER skip `tsc -b` before committing — the CI will catch it but it wastes a deploy cycle
+- NEVER skip `tsc -b` before committing — `npm run deploy` will catch it but it wastes time
 - NEVER commit `.env`, `.credentials.json`, or any secrets
 
 ### Troubleshooting — "I pushed but it didn't ship"
@@ -242,9 +242,10 @@ The `AppScripts/stride-client-inventory/` directory is BOTH the rollout master (
 First line of diagnosis: **which channel carries this change?** (see decision tree above). Every failure mode below is scoped to one channel.
 
 - **React change pushed, mystridehub.com still shows old bundle** →
-  1. Check GitHub Actions tab — is the run green? If red, fix the TS/build error and push again.
-  2. If green, hard-refresh (Ctrl+Shift+R). GitHub Pages CDN caches ~1-5 min.
-  3. Still stale after 5 min? Compare DevTools Network → main `index-*.js` filename against the hash in the Actions build log. Mismatch = the CDN is still propagating; wait and re-check.
+  1. Did you run `npm run deploy`? Just `git push origin source` no longer ships anything — Actions is disabled (session 77). You must run `npm run deploy -- "..."` from `stride-gs-app/` to build + push dist.
+  2. Hard-refresh (Ctrl+Shift+R). GitHub Pages CDN caches ~1-5 min.
+  3. Still stale after 5 min? Compare DevTools Network → main `index-*.js` filename against the hash in your local `stride-gs-app/dist/assets/`. If they match, CDN is just slow. If local is ahead of remote, the dist push failed silently — `cd stride-gs-app/dist && git status` will show if `origin/main` is behind.
+  4. If the push itself fails with `schannel SEC_E_MESSAGE_ALTERED` or similar TLS errors, retry. If it persists, `git config http.version HTTP/1.1` in `dist/.git/config` usually fixes it.
 - **GAS change pushed but Web App still runs the old code** → you ran `push-api` but skipped `deploy-api`. `push-api` updates source; `deploy-api` creates a new frozen Web App version. Always chain: `npm run push-api && npm run deploy-api`.
 - **Client bound-script change pushed via rollout but one client still shows old behavior** → `rollout` pushes source to all 47 clients; `deploy-clients` creates a new Web App deployment for each. If one client is stale, their Web App deployment failed (check rollout log) or their Drive quota throttled the deploy — re-run `deploy-clients` (idempotent).
 - **Supabase schema change applied but the app 400s on write** → the MCP `apply_migration` ran but the TypeScript types in `src/lib/supabase.types.ts` are stale. Re-run `generate_typescript_types` OR add the new column to the insert/update payload manually in the hook.
@@ -427,23 +428,35 @@ npm run build                            # exit 0 again
 
 ## GitHub Actions CI/CD
 
-Three workflows in `.github/workflows/`. **Full docs:** `.github/workflows/README.md`.
+Workflows live in `.github/workflows/`. **Full docs:** `.github/workflows/README.md`.
 
-### Workflows
+### Current state (session 77): auto-deploy workflows disabled
 
-| File | Trigger | What it does |
-|------|---------|--------------|
-| `ci.yml` | Push to `source` or PR targeting `source` (paths: `stride-gs-app/**`) | `npm ci` → `tsc -b` → `npm run build` → bundle size report |
-| `deploy.yml` | Push to `source` only (paths: `stride-gs-app/**`) | Same build + force-push `dist/` to `origin/main` via `peaceiris/actions-gh-pages@v4` |
-| `migrate.yml` | `workflow_dispatch` (manual only) | Display SQL + `supabase db push` if confirm=true |
+`ci.yml` and `deploy.yml` were renamed to `ci.yml.disabled` / `deploy.yml.disabled` after intermittent transport-layer failures on the Actions runner were leaving `origin/main` behind the `source` branch silently. GitHub Actions only picks up `.yml` / `.yaml` files in `workflows/`, so the `.disabled` suffix turns them off without deleting the carefully-wired YAML (including Secrets bindings). Re-enable by renaming back once the transport issues are resolved.
 
-### Auto-deploy replaces `npm run deploy`
-Pushing React changes to `source` deploys `mystridehub.com` automatically — **no `npm run deploy` needed**. `deploy.yml` is active (added 2026-04-18; Supabase secrets confirmed). The `dist/.git` subtree and `npm run deploy` still work as a manual override.
+`migrate.yml` is still active — it's `workflow_dispatch` (manual-trigger only) so it doesn't run on push. Useful as an alternative to the MCP `apply_migration` when you want an approval-gated migration run.
 
-### Required GitHub Secrets
+### Workflow inventory
+
+| File | State | Trigger | What it does |
+|------|-------|---------|--------------|
+| `ci.yml.disabled` | DISABLED | (would fire on push to `source`) | `npm ci` → `tsc -b` → `npm run build` → bundle size report |
+| `deploy.yml.disabled` | DISABLED | (would fire on push to `source`) | Build + force-push `dist/` to `origin/main` via `peaceiris/actions-gh-pages@v4` |
+| `migrate.yml` | ACTIVE | `workflow_dispatch` (manual only) | Display SQL + `supabase db push` if confirm=true |
+
+### Re-enabling later
+
+If you want to try Actions again:
+1. `git mv .github/workflows/deploy.yml.disabled .github/workflows/deploy.yml` (+ same for ci).
+2. Verify the three Secrets are still set: `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`, `SUPABASE_DB_URL`.
+3. Make a small React change and push — watch the Actions tab.
+4. If the run fails (particularly with schannel / TLS errors or "force-push succeeded but `origin/main` didn't advance"), rename them back to `.disabled` and keep using `npm run deploy`.
+
+### Required GitHub Secrets (still set)
+
 Set in: **GitHub → Settings → Secrets and variables → Actions**
 
-| Secret | Used by |
+| Secret | Used by (when enabled) |
 |--------|---------|
 | `VITE_SUPABASE_URL` | `ci.yml`, `deploy.yml` (Vite build) |
 | `VITE_SUPABASE_ANON_KEY` | `ci.yml`, `deploy.yml` (Vite build) |
