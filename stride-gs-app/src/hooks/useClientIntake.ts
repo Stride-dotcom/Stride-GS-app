@@ -22,6 +22,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { supabase } from '../lib/supabase';
+import { apiPost } from '../lib/api';
 
 export interface IntakeLinkInfo {
   id: string;
@@ -202,6 +203,8 @@ export async function submitIntake(payload: IntakeSubmitPayload): Promise<{ id: 
     .single();
   if (error || !data) return { error: error?.message ?? 'Submit failed' };
 
+  const intakeId = (data as { id: string }).id;
+
   // Best-effort link consumption marker — non-fatal if it fails (the
   // intake row is already persisted and the admin can see it). Anon
   // role can't UPDATE links under RLS, so this relies on an admin-run
@@ -214,7 +217,26 @@ export async function submitIntake(payload: IntakeSubmitPayload): Promise<{ id: 
       .eq('link_id', payload.linkId);
   } catch (_) { /* anon UPDATE blocked by RLS; admin reconciles */ }
 
-  return { id: (data as { id: string }).id };
+  // Fire-and-forget admin email alert. The Supabase AFTER-INSERT trigger
+  // already queued in-app notifications for every admin via
+  // in_app_notifications; this call handles the email channel. Uses the
+  // INTAKE_SUBMITTED template (editable in Settings → Email Templates).
+  // Never awaited — prospect's success screen doesn't depend on it.
+  try {
+    void apiPost('notifyIntakeSubmitted', {
+      intakeId,
+      businessName:      row.business_name,
+      contactName:       row.contact_name,
+      contactEmail:      row.email,
+      contactPhone:      row.phone ?? '',
+      submittedAt:       row.submitted_at,
+      insuranceChoice:   row.insurance_choice,
+      declaredValue:     row.insurance_declared_value,
+      paymentAuthorized: row.payment_authorized,
+    }).catch(() => { /* silent — admin still gets in-app notification */ });
+  } catch (_) { /* never let a notify failure break the success screen */ }
+
+  return { id: intakeId };
 }
 
 /**

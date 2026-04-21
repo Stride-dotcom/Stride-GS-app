@@ -1,4 +1,15 @@
 /* ===================================================
+   StrideAPI.gs — v38.100.0 — 2026-04-21 PST — intake submission admin alert
+   v38.100.0: FEAT — handleNotifyIntakeSubmitted_ + router case
+             `notifyIntakeSubmitted` (PUBLIC, no staff guard). Called
+             fire-and-forget from React after a prospect submits the
+             /intake/:linkId form. Sends admin-facing email using the new
+             INTAKE_SUBMITTED template (editable from Settings → Email
+             Templates). Template recipients > CB Settings OWNER_EMAIL +
+             NOTIFICATION_EMAILS fallback. Paired with the Supabase
+             AFTER-INSERT trigger notify_admins_on_intake_submit() that
+             inserts in_app_notifications rows for every admin profile
+             (handled by migration 20260421220000, applied separately).
    StrideAPI.gs — v38.99.0 — 2026-04-21 PST — block clients from release actions
    v38.99.0: FIX — processWcRelease now wrapped in withStaffGuard_ so a client
              with DevTools can't POST it directly. releaseItems was already
@@ -4960,6 +4971,14 @@ function doPost(e) {
         return withStaffGuard_(callerEmail, function() {
           return handleResolveOnboardUser_(payload);
         });
+
+      // v38.100.0 — public endpoint (no staff guard) so the intake submission
+      // flow can fire-and-forget an admin-alert email right after the
+      // Supabase insert. Sender context = the prospect filling out the form,
+      // who has no login. The trigger on client_intakes already handles
+      // in-app notifications to admins; this covers the email channel.
+      case "notifyIntakeSubmitted":
+        return handleNotifyIntakeSubmitted_(payload);
 
       case "updateClient":
         return withStaffGuard_(callerEmail, function() {
@@ -19548,6 +19567,114 @@ function handleResolveOnboardUser_(payload) {
     return jsonResponse_({ success: true, action: "added", upsertResult: result });
   } catch (err) {
     return errorResponse_("Failed to update user access: " + err.message, "SERVER_ERROR");
+  }
+}
+
+/* ================================================================
+   v38.100.0: Intake submission admin alert
+   Called fire-and-forget from the public /intake/:linkId form AFTER the
+   prospect's data lands in public.client_intakes. Sends an admin-facing
+   email built from the INTAKE_SUBMITTED template (editable from
+   Settings → Email Templates). In-app notifications are handled
+   separately by the notify_admins_on_intake_submit() trigger.
+
+   PUBLIC endpoint — no staff guard. Callable by anon. Safe because it:
+     (a) only reads a template from Supabase,
+     (b) only emails the admin distribution list (never a user-supplied
+         address — notification recipients come from the template's
+         recipients field OR CB Settings OWNER_EMAIL + NOTIFICATION_EMAILS),
+     (c) ignores unknown/missing fields gracefully.
+   ================================================================ */
+
+function handleNotifyIntakeSubmitted_(payload) {
+  try {
+    payload = payload || {};
+    var businessName      = String(payload.businessName || "").trim() || "unnamed business";
+    var contactName       = String(payload.contactName  || "").trim() || "unknown contact";
+    var contactEmail      = String(payload.contactEmail || "").trim();
+    var contactPhone      = String(payload.contactPhone || "").trim();
+    var submittedAt       = String(payload.submittedAt  || new Date().toISOString());
+    var insuranceChoice   = String(payload.insuranceChoice || "").trim() || "—";
+    var declaredValueNum  = Number(payload.declaredValue) || 0;
+    var declaredValueFmt  = "$" + declaredValueNum.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    var paymentAuthorized = payload.paymentAuthorized === true ? "Yes" : (payload.paymentAuthorized === false ? "No" : "—");
+    var intakeId          = String(payload.intakeId || "").trim();
+
+    // Review deep link — Settings page, Intakes subtab, pre-selects the row.
+    var reviewLink = APP_BASE_URL_ + "/settings?tab=clients&subtab=intakes"
+                   + (intakeId ? "&intake=" + encodeURIComponent(intakeId) : "");
+
+    // Resolve the admin distribution list. Priority:
+    //   1. INTAKE_SUBMITTED template's `recipients` column (admin-editable)
+    //   2. CB Settings OWNER_EMAIL + NOTIFICATION_EMAILS
+    var sbTpl = null;
+    try { sbTpl = api_getTemplateFromSupabase_("INTAKE_SUBMITTED"); } catch (_) {}
+    var recipients = sbTpl && sbTpl.recipients ? String(sbTpl.recipients).trim() : "";
+
+    if (!recipients) {
+      try {
+        var cbSsId = prop_("CB_SPREADSHEET_ID");
+        if (cbSsId) {
+          var cbSs = SpreadsheetApp.openById(cbSsId);
+          var cbSettingsSh = cbSs.getSheetByName("Settings");
+          if (cbSettingsSh) {
+            var kv = {};
+            var sData = cbSettingsSh.getDataRange().getValues();
+            for (var si = 1; si < sData.length; si++) {
+              var k = String(sData[si][0] || "").trim();
+              if (k) kv[k] = String(sData[si][1] || "").trim();
+            }
+            var owner = kv["OWNER_EMAIL"]  || "";
+            var notif = kv["NOTIFICATION_EMAILS"] || "";
+            recipients = [owner, notif].filter(function(x) { return !!x; }).join(",");
+          }
+        }
+      } catch (settingsErr) {
+        Logger.log("handleNotifyIntakeSubmitted_ settings lookup failed: " + settingsErr);
+      }
+    }
+
+    if (!recipients) {
+      Logger.log("handleNotifyIntakeSubmitted_: no recipients resolved — skipping email (in-app notification still fired via trigger)");
+      return jsonResponse_({ success: true, emailed: false, reason: "no_recipients" });
+    }
+
+    var tokens = {
+      "{{BUSINESS_NAME}}":      businessName,
+      "{{CONTACT_NAME}}":       contactName,
+      "{{CONTACT_EMAIL}}":      contactEmail || "—",
+      "{{CONTACT_PHONE}}":      contactPhone || "—",
+      "{{SUBMITTED_AT}}":       submittedAt,
+      "{{INSURANCE_CHOICE}}":   insuranceChoice,
+      "{{DECLARED_VALUE}}":     declaredValueFmt,
+      "{{PAYMENT_AUTHORIZED}}": paymentAuthorized,
+      "{{REVIEW_LINK}}":        reviewLink
+    };
+
+    // Send. api_sendTemplateEmail_ handles Supabase-first template lookup,
+    // token replacement, APP_URL auto-inject, and the actual MailApp call.
+    var settings = { MASTER_SPREADSHEET_ID: prop_("MASTER_PRICE_LIST_SPREADSHEET_ID") || "" };
+    var res = api_sendTemplateEmail_(
+      settings,
+      "INTAKE_SUBMITTED",
+      recipients,
+      "📝 New Client Intake — " + businessName,
+      tokens,
+      null,
+      null
+    );
+
+    if (!res || !res.success) {
+      Logger.log("handleNotifyIntakeSubmitted_ send failed: " + JSON.stringify(res));
+      return jsonResponse_({ success: false, error: (res && res.error) || "send failed" });
+    }
+    return jsonResponse_({ success: true, emailed: true, recipients: recipients });
+  } catch (e) {
+    Logger.log("handleNotifyIntakeSubmitted_ outer error: " + e);
+    // Never throw on this path — admins still get the in-app notification
+    // via the trigger, and a failure here shouldn't break the prospect's
+    // success screen.
+    return jsonResponse_({ success: false, error: String(e) });
   }
 }
 
