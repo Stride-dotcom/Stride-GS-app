@@ -1,4 +1,16 @@
 /* ===================================================
+   StrideAPI.gs — v38.101.0 — 2026-04-22 PST — deep-link self-heal in email render path
+   v38.101.0: FEAT — api_sendTemplateEmail_ now scans the final body after
+              token substitution for any mystridehub.com/#/<entity>?open=ID
+              URL missing &client=<sheetId> and auto-appends it. Mirrors the
+              same heal added to client-bound Emails.gs v4.7.0. Purpose:
+              stop the recurring "deep link broken again" regression class
+              — any template edit in Settings → Email Templates that omits
+              &client= is now repaired at send time instead of silently
+              shipping a broken link. Paired with a one-shot template body
+              migration that cleaned 8 templates to use {{APP_DEEP_LINK}}
+              directly. Defensive: if the template already contains a well-
+              formed link, this heal is a no-op.
    StrideAPI.gs — v38.100.0 — 2026-04-21 PST — intake submission admin alert
    v38.100.0: FEAT — handleNotifyIntakeSubmitted_ + router case
              `notifyIntakeSubmitted` (PUBLIC, no staff guard). Called
@@ -12555,6 +12567,27 @@ function api_sendTemplateEmail_(settings, templateKey, toEmail, fallbackSubject,
       var val = String(tokens[tk] == null ? "" : tokens[tk]);
       eSubj = eSubj.split(tk).join(val);
       eBody = eBody.split(tk).join(val);
+    }
+
+    // v38.101.0 — DEEP-LINK SELF-HEAL (server-side mirror of Emails.gs v4.7.0).
+    // After token substitution, scan the body for any mystridehub.com/#/<entity>?open=ID
+    // URL missing &client=<sheetId> and auto-append it. Makes template edits
+    // resilient — if anyone saves a template without &client=, the send path
+    // repairs it on the fly instead of shipping a broken link.
+    try {
+      var _healSid = "";
+      try { _healSid = String(clientSheetId || "").trim(); } catch (_) {}
+      if (_healSid) {
+        eBody = eBody.replace(
+          /(https?:\/\/[^"\s]*?mystridehub\.com\/#\/(?:shipments|tasks|repairs|will-calls|inventory)\?open=[^"\s]*?)("|\s|<)/g,
+          function(_m, urlPart, tail) {
+            if (urlPart.indexOf("&client=") !== -1 || urlPart.indexOf("?client=") !== -1) return urlPart + tail;
+            return urlPart + "&client=" + encodeURIComponent(_healSid) + tail;
+          }
+        );
+      }
+    } catch (healErr) {
+      Logger.log("api_sendTemplateEmail_ deep-link self-heal warning: " + healErr);
     }
 
     // v38.68.3: Auto-inject "View in Stride Hub" CTA button before </body>.

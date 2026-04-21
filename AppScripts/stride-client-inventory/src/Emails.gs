@@ -1,4 +1,16 @@
 /* ===================================================
+   Emails.gs — v4.7.0 — 2026-04-22 PST — deep-link self-heal on every template send
+   v4.7.0: sendTemplateEmail_ now scans the final HTML body post-token-
+           substitution for any mystridehub.com/#/<entity>?open=ID URL
+           missing &client=<spreadsheetId>, and auto-appends the current
+           client's spreadsheet id. Fixes the "deep link broken again"
+           regression class: any time someone saves a template edit in
+           Settings → Email Templates that omits &client=, the send path
+           now repairs it on the fly instead of silently shipping a broken
+           link. Paired with a one-shot migration that cleaned 8 templates
+           (SHIPMENT_RECEIVED, INSP_EMAIL, TASK_COMPLETE, REPAIR_*, WILL_CALL_*)
+           to use {{APP_DEEP_LINK}} directly. The heal is defensive — as
+           long as templates keep using {{APP_DEEP_LINK}} it's a no-op.
    Emails.gs — v4.6.0 — 2026-04-16 PST — Drop Room column from email item tables, Reference takes its place
    v4.6.0: buildItemsHtmlTable_ and buildSingleItemTableHtml_ now emit
            Item ID / Qty / Vendor / Description / Sidemark / Reference.
@@ -246,6 +258,42 @@ var value = entries[j][1];
 var safe = String(value !== undefined && value !== null ? value : "");
 subject = subject.split(token).join(safe);
 htmlBody = htmlBody.split(token).join(safe);
+}
+
+// v4.7.0: DEEP-LINK SELF-HEAL — scan the fully-substituted body for any
+// /#/<entity>?open=ID URL that is missing &client=<spreadsheetId>, and
+// auto-patch it by appending the current spreadsheet's id. This makes
+// template edits in the UI (Settings → Email Templates) resilient: even
+// if someone saves a hardcoded URL without the client param, the send
+// path repairs it on the fly instead of silently shipping a broken link.
+//
+// Reference: root CLAUDE.md → "Deep Links — How They Work (DO NOT BREAK)".
+// Every CTA URL must be query-param style on a list page with &client=.
+try {
+  var _ssid = "";
+  try { _ssid = String(ss.getId() || ""); } catch (_) {}
+  if (_ssid) {
+    // Match: mystridehub.com/#/<entity>?open=<anything-not-&>... with NO &client= before the closing " or whitespace
+    // We append &client=<ssid> right before the closing " (or end of URL).
+    htmlBody = htmlBody.replace(
+      /(https?:\/\/[^"\s]*?mystridehub\.com\/#\/(?:shipments|tasks|repairs|will-calls|inventory)\?open=[^"\s&]+)("|\s|<)/g,
+      function(_m, urlPart, tail) {
+        // Only append if this URL doesn't ALREADY contain &client= (match allowed "&" inside e.g. &foo=bar)
+        if (urlPart.indexOf("&client=") !== -1) return urlPart + tail;
+        return urlPart + "&client=" + encodeURIComponent(_ssid) + tail;
+      }
+    );
+    // Also heal any URL that has other query params but is still missing &client=.
+    htmlBody = htmlBody.replace(
+      /(https?:\/\/[^"\s]*?mystridehub\.com\/#\/(?:shipments|tasks|repairs|will-calls|inventory)\?open=[^"\s]*?)("|\s|<)/g,
+      function(_m, urlPart, tail) {
+        if (urlPart.indexOf("&client=") !== -1 || urlPart.indexOf("?client=") !== -1) return urlPart + tail;
+        return urlPart + "&client=" + encodeURIComponent(_ssid) + tail;
+      }
+    );
+  }
+} catch (healErr) {
+  Logger.log("sendTemplateEmail_ deep-link self-heal warning: " + healErr);
 }
 
 // v4.3.0: Inject "View in Stride Hub" deep-link CTA button if caller set {{APP_DEEP_LINK}}
