@@ -55,6 +55,10 @@ export interface IntakeSubmitPayload {
    *  Copied into client_insurance.declared_value on activation and
    *  used by the daily billing job. */
   insuranceDeclaredValue?: number;
+  /** Prospect opted into Stride automatically inspecting every inbound
+   *  shipment for visible shipping damage. Default false; copied into
+   *  the client's AUTO_INSPECTION setting at activation. */
+  autoInspect?: boolean;
   signatureType: 'typed' | 'drawn';
   signatureData: string; // typed name OR base64 PNG data URL
   initials: Record<string, string>; // { storage: 'ABC', ... }
@@ -180,6 +184,7 @@ export async function submitIntake(payload: IntakeSubmitPayload): Promise<{ id: 
     notification_contacts: payload.notificationContacts.filter(c => c.email.trim().length > 0),
     insurance_choice:      payload.insuranceChoice,
     insurance_declared_value: payload.insuranceDeclaredValue ?? 0,
+    auto_inspect:          payload.autoInspect === true,
     payment_authorized:    payload.paymentAuthorized,
     signature_type:        payload.signatureType,
     signature_data:        payload.signatureData,

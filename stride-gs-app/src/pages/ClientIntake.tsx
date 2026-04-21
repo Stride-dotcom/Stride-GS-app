@@ -83,6 +83,9 @@ interface Draft {
   /** Only used when insuranceChoice='stride_coverage'. Dollar value
    *  the prospect wants insured; feeds the monthly charge + $300 min. */
   insuranceDeclaredValue: string;
+  /** Opt-in — authorises Stride to open & inspect every inbound
+   *  shipment for visible shipping damage. Default false. */
+  autoInspect: boolean;
   signatureType: 'typed' | 'drawn';
   typedSignature: string;
   // drawnSignature captured via canvas ref on demand
@@ -100,6 +103,7 @@ const EMPTY_DRAFT: Draft = {
   notificationContacts: [],
   insuranceChoice: '',
   insuranceDeclaredValue: '',
+  autoInspect: false,
   signatureType: 'typed',
   typedSignature: '',
   sectionInitials: {},
@@ -369,6 +373,7 @@ export function ClientIntake({ linkId }: Props) {
         insuranceDeclaredValue: draft.insuranceChoice === 'stride_coverage' && draft.insuranceDeclaredValue
           ? Number(draft.insuranceDeclaredValue)
           : undefined,
+        autoInspect:        draft.autoInspect,
         signatureType:      draft.signatureType,
         signatureData,
         initials:           draft.sectionInitials,
@@ -581,19 +586,32 @@ function StepBilling({ draft, setDraft }: StepProps) {
         </Field>
       </div>
 
-      <div style={{ borderTop: `1px solid ${BORDER}`, paddingTop: 18 }}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
-          <div>
-            <div style={{ fontSize: 13, fontWeight: 600, color: TEXT }}>Notification contacts</div>
-            <div style={{ fontSize: 12, color: TEXT_MUT, marginTop: 2 }}>People who should receive inventory emails (receipts, inspection reports, will-call notices).</div>
-          </div>
+      {/* Warehouse alert emails — visually distinct orange-tinted block
+          so prospects don't confuse this with the primary contact email
+          (Step 1) or the billing email above. These addresses receive the
+          warehouse activity stream only — not marketing or billing. */}
+      <div style={{
+        marginTop: 24,
+        background: ORANGE_SOFT,
+        border: `1px solid ${ACCENT}33`,
+        borderRadius: 14,
+        padding: 18,
+      }}>
+        <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: '1.5px', color: ACCENT, textTransform: 'uppercase', marginBottom: 4 }}>
+          Warehouse Alert Emails
+        </div>
+        <div style={{ fontSize: 12, color: TEXT_SEC, marginBottom: 12, lineHeight: 1.55 }}>
+          These email addresses will receive automated notifications about warehouse activity — receiving confirmations, shipment updates, task completions, and other alerts.
+        </div>
+
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', marginBottom: 8 }}>
           <button onClick={add} style={addRowBtn}>
-            <Plus size={12} /> Add contact
+            <Plus size={12} /> Add alert email
           </button>
         </div>
         {draft.notificationContacts.length === 0 ? (
-          <div style={{ padding: 16, textAlign: 'center', color: TEXT_MUT, fontSize: 12, background: BG_PAGE, borderRadius: 10 }}>
-            No additional contacts — only the main contact above will receive notifications.
+          <div style={{ padding: 16, textAlign: 'center', color: TEXT_MUT, fontSize: 12, background: BG_CARD, borderRadius: 10 }}>
+            No additional alert emails — only the main contact above will receive warehouse alerts.
           </div>
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -690,6 +708,27 @@ function StepTerms({ draft, setDraft, tcHtml, tcLoading, coverageNotes, sig, sig
             </div>
           </div>
         )}
+      </div>
+
+      {/* Auto-inspection opt-in — separate disclosure block, styled
+          like the insurance card so it reads as a peer decision. */}
+      <div style={{ background: BG_PAGE, border: `1px solid ${BORDER}`, borderRadius: 14, padding: 18, marginBottom: 20 }}>
+        <label style={{
+          display: 'flex', alignItems: 'flex-start', gap: 12, cursor: 'pointer',
+        }}>
+          <input
+            type="checkbox"
+            checked={draft.autoInspect}
+            onChange={e => setDraft(d => ({ ...d, autoInspect: e.target.checked }))}
+            style={{ marginTop: 3, accentColor: ACCENT, width: 16, height: 16, flexShrink: 0 }}
+          />
+          <span style={{ fontSize: 13, fontWeight: 600, color: TEXT, lineHeight: 1.4 }}>
+            Opt in to automatic inspection
+          </span>
+        </label>
+        <div style={{ fontSize: 12, color: TEXT_SEC, marginTop: 10, lineHeight: 1.65, paddingLeft: 28 }}>
+          Stride does not automatically open and inspect inbound shipments for shipping damage unless requested by the client or unless the account has opted in to automatic inspection. By checking this box, you are authorizing Stride to open and inspect all inbound shipments to your account for visible shipping damage upon receipt.
+        </div>
       </div>
 
       {tcLoading ? (
@@ -910,6 +949,7 @@ function StepReview({ draft, onJumpTo, sigDataUrl }: { draft: Draft; onJumpTo: (
 
       <ReviewCard title="Terms & Signature" onEdit={() => onJumpTo(3)}>
         <KV k="Insurance" v={insuranceLabel} />
+        <KV k="Auto-inspection" v={draft.autoInspect ? 'Opted in' : 'Not opted in'} />
         <KV k="Sections initialed" v={['storage','insurance','billing','lien','general'].map(k => `${k}:${(draft.sectionInitials[k] || '—')}`).join(' · ')} />
         {draft.signatureType === 'typed' ? (
           <KV k="Signature" v={<span style={{ fontFamily: "'Caveat', cursive", fontSize: 22 }}>{draft.typedSignature || '—'}</span>} />

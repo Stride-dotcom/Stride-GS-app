@@ -140,7 +140,7 @@ export function IntakesPanel() {
     freeStorageDays: '0',
     autoCharge:   intake.paymentAuthorized,
     enableNotifications: true,
-    autoInspection: true,
+    autoInspection: intake.autoInspect,
     notes: [
       intake.notes,
       (intake.insuranceChoice === 'stride_coverage' || intake.insuranceChoice === 'eis_coverage')
