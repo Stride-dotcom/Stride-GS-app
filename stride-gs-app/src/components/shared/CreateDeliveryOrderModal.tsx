@@ -189,10 +189,14 @@ export function CreateDeliveryOrderModal({
   const [sidemark, setSidemark] = useState('');
   const [details, setDetails] = useState('');
 
-  // ── Pricing inputs (zone lookup uses the DELIVERY zip for delivery/P+D;
-  //     the PICKUP zip for pickup-only; destination zip for service_only) ─
+  // ── Pricing inputs ─────────────────────────────────────────────────────
+  // deliveryZone: zone for the DELIVERY zip (delivery / P+D / service_only)
+  // pickupZone:   zone for the PICKUP zip — only used by pickup + P+D modes
   const [zone, setZone] = useState<DeliveryZone | null>(null);
   const [zoneLoading, setZoneLoading] = useState(false);
+  const [pickupZone, setPickupZone] = useState<DeliveryZone | null>(null);
+  const [pickupZoneLoading, setPickupZoneLoading] = useState(false);
+
   const zipForPricing = useMemo(() => {
     if (mode === 'pickup') return pickupZip;
     return deliveryZip;
@@ -213,6 +217,21 @@ export function CreateDeliveryOrderModal({
     });
     return () => { cancelled = true; };
   }, [zipForPricing]);
+
+  // For P+D: also look up the PICKUP zip so we can charge the pickup leg fee
+  useEffect(() => {
+    if (mode !== 'pickup_and_delivery') { setPickupZone(null); return; }
+    const trimmed = pickupZip.trim();
+    if (!/^\d{5}$/.test(trimmed)) { setPickupZone(null); return; }
+    setPickupZoneLoading(true);
+    let cancelled = false;
+    fetchDeliveryZone(trimmed).then(z => {
+      if (cancelled) return;
+      setPickupZone(z);
+      setPickupZoneLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [mode, pickupZip]);
 
   // ── Accessorials (role-filtered) ───────────────────────────────────────
   const [accessorials, setAccessorials] = useState<DeliveryAccessorial[]>([]);
@@ -245,13 +264,22 @@ export function CreateDeliveryOrderModal({
   const isAccessorialSelected = (code: string) => selectedAccessorials.has(code);
 
   // ── Pricing calculation ────────────────────────────────────────────────
-  // Base fee: for pickup-only, use pickup rate; for delivery/P+D, use delivery rate;
-  // service_only uses delivery rate (driving to site).
+  // baseFee: delivery rate for delivery/P+D; pickup rate for pickup-only.
   const baseFee = useMemo(() => {
     if (!zone) return null;
     if (mode === 'pickup') return zone.pickupRate;
-    return zone.baseRate;
+    return zone.baseRate;   // delivery or P+D delivery leg
   }, [zone, mode]);
+
+  // pickupLegFee: for P+D, also charge the pickup-zone pickup rate.
+  // This is the separate pickup trip fee on top of the delivery fee.
+  const pickupLegFee = useMemo(() => {
+    if (mode !== 'pickup_and_delivery') return 0;
+    if (!pickupZone) return 0;
+    return pickupZone.pickupRate ?? 0;
+  }, [mode, pickupZone]);
+
+  const isPickupCallForQuote = mode === 'pickup_and_delivery' && pickupZip.length === 5 && pickupZone && pickupZone.pickupRate == null;
 
   // "Extra items" logic only applies when there are actual items
   const itemCount = useMemo(() => {
@@ -267,15 +295,6 @@ export function CreateDeliveryOrderModal({
     () => Array.from(selectedAccessorials.values()).reduce((s, a) => s + a.subtotal, 0),
     [selectedAccessorials]
   );
-
-  // pickup_and_delivery involves both a pickup trip AND a delivery trip;
-  // we charge the pickup-zone pickup rate on top of the delivery fee.
-  const pickupLegFee = useMemo(() => {
-    if (mode !== 'pickup_and_delivery' || !pickupZip || pickupZip.length !== 5) return 0;
-    // Optimistic estimate using the delivery zone rate (we don't fetch the pickup zone
-    // separately — staff will adjust during review if the pickup zip is a higher zone).
-    return 0; // placeholder — staff applies OUT_OF_AREA / DRIVE_OUT during review if needed
-  }, [mode, pickupZip]);
 
   const orderTotal = useMemo(() => {
     if (baseFee == null) return null;
@@ -358,7 +377,8 @@ export function CreateDeliveryOrderModal({
       review_status: 'pending_review',
       created_by_user: authUid,
       created_by_role: user?.role || 'client',
-      status_id: 0, // Entered
+      // status_id intentionally omitted — app-created orders have no DT status
+      // until they are approved and pushed to DT via the dt-push-order Edge Function.
     };
 
     try {
@@ -396,6 +416,17 @@ export function CreateDeliveryOrderModal({
         if (pErr || !pickupRow) throw new Error(`Pickup order insert failed: ${pErr?.message}`);
 
         // 2) Insert delivery (links to pickup)
+        const pdPricingNotes = [
+          pickupLegFee > 0
+            ? `Pickup fee (${pickupZip} Zone ${pickupZone?.zone}): $${pickupLegFee.toFixed(2)}`
+            : isPickupCallForQuote
+              ? `Pickup zip ${pickupZip} is CALL FOR QUOTE — pickup fee requires manual review.`
+              : pickupZip.length === 5 && !pickupZone
+                ? `Pickup zip ${pickupZip} not in service area — pickup fee requires manual review.`
+                : null,
+          isCallForQuote ? 'Delivery zone marked CALL FOR QUOTE — delivery fee requires manual review.' : null,
+        ].filter(Boolean).join(' | ') || null;
+
         const { data: deliveryRow, error: dErr } = await supabase
           .from('dt_orders')
           .insert({
@@ -412,16 +443,15 @@ export function CreateDeliveryOrderModal({
             contact_email: deliveryEmail.trim() || null,
             linked_order_id: pickupRow.id,
             // Pricing goes on the delivery leg (user-facing total)
-            base_delivery_fee: baseFee,
+            // baseFee = delivery zone base rate; pickupLegFee = pickup zone pickup rate
+            base_delivery_fee: baseFee != null ? baseFee + pickupLegFee : null,
             extra_items_count: extraItemsCount,
             extra_items_fee: extraItemsFee,
             accessorials_json: accList,
             accessorials_total: accessorialsTotal,
             order_total: orderTotal,
-            pricing_override: isCallForQuote || false,
-            pricing_notes: isCallForQuote
-              ? 'Delivery zone marked CALL FOR QUOTE — pricing requires manual review.'
-              : 'Linked pickup+delivery. Pickup zone may require additional OUT_OF_AREA/DRIVE_OUT adjustment during review.',
+            pricing_override: !!(isCallForQuote || isPickupCallForQuote),
+            pricing_notes: pdPricingNotes,
           })
           .select('id, dt_identifier')
           .single();
@@ -577,6 +607,22 @@ export function CreateDeliveryOrderModal({
     marginBottom: 12, display: 'flex', alignItems: 'center', gap: 6,
     textTransform: 'uppercase', letterSpacing: '0.06em',
   };
+
+  // ── Time window options (9am–5pm, 30-min increments) ─────────────────
+  const timeOptions = useMemo(() => {
+    const opts: { value: string; label: string }[] = [{ value: '', label: '— None —' }];
+    for (let h = 9; h <= 17; h++) {
+      for (let m = 0; m < 60; m += 30) {
+        if (h === 17 && m > 0) break;
+        const hh = String(h).padStart(2, '0');
+        const mm = String(m).padStart(2, '0');
+        const ampm = h < 12 ? 'AM' : 'PM';
+        const h12 = h > 12 ? h - 12 : h;
+        opts.push({ value: `${hh}:${mm}`, label: `${h12}:${mm} ${ampm}` });
+      }
+    }
+    return opts;
+  }, []);
 
   const clientNames = liveClients.map(c => c.name).sort();
 
@@ -748,16 +794,20 @@ export function CreateDeliveryOrderModal({
             <div style={sectionTitle}>Schedule</div>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12 }}>
               <div>
-                <label style={label}>Service Date</label>
+                <label style={label}>Preferred Service Date</label>
                 <input type="date" value={serviceDate} onChange={e => setServiceDate(e.target.value)} style={input} />
               </div>
               <div>
-                <label style={label}>Window Start</label>
-                <input type="time" value={windowStart} onChange={e => setWindowStart(e.target.value)} style={input} />
+                <label style={label}>Preferred Window Start</label>
+                <select value={windowStart} onChange={e => setWindowStart(e.target.value)} style={{ ...input, cursor: 'pointer' }}>
+                  {timeOptions.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                </select>
               </div>
               <div>
-                <label style={label}>Window End</label>
-                <input type="time" value={windowEnd} onChange={e => setWindowEnd(e.target.value)} style={input} />
+                <label style={label}>Preferred Window End</label>
+                <select value={windowEnd} onChange={e => setWindowEnd(e.target.value)} style={{ ...input, cursor: 'pointer' }}>
+                  {timeOptions.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                </select>
               </div>
             </div>
             {zone?.serviceDays && (
@@ -783,6 +833,13 @@ export function CreateDeliveryOrderModal({
                 email={pickupEmail}                 setEmail={setPickupEmail}
                 input={input} label={label}
                 contactLabel="Contact at pickup"
+                zoneInfo={pickupZip.length === 5 ? {
+                  loading: mode === 'pickup_and_delivery' ? pickupZoneLoading : zoneLoading,
+                  zone: mode === 'pickup_and_delivery' ? pickupZone : zone,
+                  mode: 'Pickup',
+                  isCallForQuote: !!(mode === 'pickup_and_delivery' ? isPickupCallForQuote : isCallForQuote),
+                  displayRate: mode === 'pickup_and_delivery' ? (pickupZone?.pickupRate ?? null) : (zone?.pickupRate ?? null),
+                } : null}
               />
               <div style={{ marginTop: 14 }}>
                 <div style={{ ...label, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
@@ -1027,12 +1084,21 @@ export function CreateDeliveryOrderModal({
                   <input style={input} value={sidemark} onChange={e => setSidemark(e.target.value)} />
                 </div>
               </div>
-              <label style={label}>Notes / Special Instructions</label>
+              <label style={label}>
+                Notes / Special Instructions
+                {mode === 'pickup_and_delivery' && (
+                  <span style={{ fontWeight: 400, textTransform: 'none', color: theme.colors.textMuted, marginLeft: 6, fontSize: 10 }}>
+                    (appear on both pickup and delivery orders)
+                  </span>
+                )}
+              </label>
               <textarea
                 style={{ ...input, minHeight: 60, resize: 'vertical' }}
                 value={details}
                 onChange={e => setDetails(e.target.value)}
-                placeholder="Delivery instructions, gate codes, elevator notes, etc."
+                placeholder={mode === 'pickup_and_delivery'
+                  ? 'Instructions that apply to both the pickup and delivery (gate codes, elevator, fragile items, etc.)'
+                  : 'Delivery instructions, gate codes, elevator notes, etc.'}
               />
             </div>
           )}
@@ -1046,11 +1112,38 @@ export function CreateDeliveryOrderModal({
               <div style={{ fontSize: 11, fontWeight: 700, color: theme.colors.textMuted, marginBottom: 10, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
                 Pricing Summary
               </div>
-              {baseFee != null && (
-                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 4 }}>
-                  <span>{mode === 'pickup' ? 'Base Pickup Fee' : 'Base Delivery Fee'}</span>
-                  <span style={{ fontWeight: 500 }}>${baseFee.toFixed(2)}</span>
-                </div>
+              {mode === 'pickup_and_delivery' ? (
+                <>
+                  {baseFee != null && (
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 4 }}>
+                      <span>Delivery Fee{zone ? ` (Zone ${zone.zone})` : ''}</span>
+                      <span style={{ fontWeight: 500 }}>${baseFee.toFixed(2)}</span>
+                    </div>
+                  )}
+                  {pickupLegFee > 0 && (
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 4 }}>
+                      <span>Pickup Fee{pickupZone ? ` (Zone ${pickupZone.zone})` : ''}</span>
+                      <span style={{ fontWeight: 500 }}>${pickupLegFee.toFixed(2)}</span>
+                    </div>
+                  )}
+                  {isPickupCallForQuote && (
+                    <div style={{ fontSize: 12, color: '#B45309', marginBottom: 4, fontStyle: 'italic' }}>
+                      Pickup zip is CALL FOR QUOTE — pickup fee TBD during review
+                    </div>
+                  )}
+                  {pickupZip.length === 5 && !pickupZone && !pickupZoneLoading && !isPickupCallForQuote && (
+                    <div style={{ fontSize: 12, color: '#B45309', marginBottom: 4, fontStyle: 'italic' }}>
+                      Pickup zip not in service area — pickup fee TBD during review
+                    </div>
+                  )}
+                </>
+              ) : (
+                baseFee != null && (
+                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 4 }}>
+                    <span>{mode === 'pickup' ? 'Base Pickup Fee' : 'Base Delivery Fee'}</span>
+                    <span style={{ fontWeight: 500 }}>${baseFee.toFixed(2)}</span>
+                  </div>
+                )
               )}
               {extraItemsCount > 0 && (
                 <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 4 }}>
@@ -1075,7 +1168,7 @@ export function CreateDeliveryOrderModal({
                 <span>Order Total</span>
                 <span>{orderTotal != null ? `$${orderTotal.toFixed(2)}` : isCallForQuote ? 'Call for quote' : '—'}</span>
               </div>
-              {(isCallForQuote || mode === 'pickup_and_delivery') && (
+              {(isCallForQuote || isPickupCallForQuote || (mode === 'pickup_and_delivery' && (!pickupZone || pickupLegFee === 0))) && (
                 <div style={{ fontSize: 11, color: '#B45309', marginTop: 6, fontStyle: 'italic' }}>
                   Staff will confirm final pricing during review.
                 </div>
