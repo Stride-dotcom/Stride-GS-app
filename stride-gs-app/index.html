@@ -3,7 +3,15 @@
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/png" href="/stride-logo.png" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- Session 77: maximum-scale=1 + user-scalable=no stops iOS Safari
+         from auto-zooming when the user focuses a form input or opens a
+         detail panel. Previously any input with an effective font-size
+         < 16px triggered an automatic zoom that had to be pinched back
+         out — noticeable every time a detail panel opened on mobile.
+         Trade-off: pinch-to-zoom is disabled app-wide. Acceptable here
+         because this is a warehouse/admin tool used on touch devices
+         in landscape, not a public-read document. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
     <title>Stride — GS Warehouse</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />

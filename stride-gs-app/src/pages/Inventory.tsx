@@ -625,13 +625,20 @@ export function Inventory() {
     return clientNames;
   }, [clientNames, user?.role, user?.accessibleClientNames]);
 
-  // Auto-select clients for client-portal users (they only have 1-2 clients)
+  // Session 77: auto-select every accessible client on mount so the
+  // page auto-loads data without a manual dropdown pick.
+  //   - client-portal users get their own accessibleClientNames (they
+  //     usually only have 1-2 anyway).
+  //   - admin/staff get the full dropdown list. They can still narrow.
   useEffect(() => {
-    if (user?.role === 'client' && user.accessibleClientNames?.length && clientFilter.length === 0) {
+    if (clientFilter.length > 0) return;
+    if (user?.role === 'client' && user.accessibleClientNames?.length) {
       setClientFilter(user.accessibleClientNames);
+    } else if ((user?.role === 'admin' || user?.role === 'staff') && clientNames.length > 0) {
+      setClientFilter(clientNames);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.role, user?.accessibleClientNames?.length]);
+  }, [user?.role, user?.accessibleClientNames?.length, clientNames.length]);
   const location = useLocation();
   const pendingOpenRef = useRef<string | null>(null);
   const inventoryItems: InventoryItem[] = useMemo(() => {

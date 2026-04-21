@@ -203,11 +203,17 @@ export function Tasks() {
     return clientNames;
   }, [clientNames, user?.role, user?.accessibleClientNames]);
   useEffect(() => {
-    if (user?.role === 'client' && user.accessibleClientNames?.length && clientFilter.length === 0) {
+    // Session 77: auto-load all accounts for admin/staff on mount so
+    // the page doesn't show "Select one or more clients to load data."
+    // Client role still scopes to its own accessibleClientNames.
+    if (clientFilter.length > 0) return;
+    if (user?.role === 'client' && user.accessibleClientNames?.length) {
       setClientFilter(user.accessibleClientNames);
+    } else if ((user?.role === 'admin' || user?.role === 'staff') && clientNames.length > 0) {
+      setClientFilter(clientNames);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.role, user?.accessibleClientNames?.length]);
+  }, [user?.role, user?.accessibleClientNames?.length, clientNames.length]);
 
   const selectedSheetId = useMemo<string | string[] | undefined>(() => {
     if (clientFilter.length === 0) return undefined;

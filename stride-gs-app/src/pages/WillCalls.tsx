@@ -112,11 +112,20 @@ export function WillCalls() {
     return clientNames;
   }, [clientNames, authUser?.role, authUser?.accessibleClientNames]);
   useEffect(() => {
-    if (authUser?.role === 'client' && authUser.accessibleClientNames?.length && clientFilter.length === 0) {
+    // Session 77: auto-load all accounts on mount.
+    // - client role: selection is locked to their own accessibleClientNames
+    //   (existing behavior).
+    // - staff / admin: pre-select every client in the dropdown so the
+    //   page auto-loads all data instead of showing "Select one or more
+    //   clients to load data." The dropdown still lets them narrow down.
+    if (clientFilter.length > 0) return;
+    if (authUser?.role === 'client' && authUser.accessibleClientNames?.length) {
       setClientFilter(authUser.accessibleClientNames);
+    } else if ((authUser?.role === 'admin' || authUser?.role === 'staff') && clientNames.length > 0) {
+      setClientFilter(clientNames);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [authUser?.role, authUser?.accessibleClientNames?.length]);
+  }, [authUser?.role, authUser?.accessibleClientNames?.length, clientNames.length]);
 
   const selectedSheetId = useMemo<string | string[] | undefined>(() => {
     if (clientFilter.length === 0) return undefined;
