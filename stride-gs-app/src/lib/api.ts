@@ -2458,6 +2458,13 @@ export interface UpdateClientResponse {
   clientName?: string;
   spreadsheetId?: string;
   synced?: boolean;
+  /**
+   * v38.96.0 — server echoes the CB Clients row AS READ BACK from the sheet
+   * after the write + flush. Use this to hydrate the UI authoritatively
+   * instead of relying on the refetch race (Supabase mirror can lag 1-2s).
+   * Fields match ApiClient: autoInspection, shipmentNote, enableShipmentEmail, etc.
+   */
+  updatedClient?: Partial<ApiClient>;
   warnings?: string[];
   error?: string;
 }

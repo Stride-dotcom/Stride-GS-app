@@ -1,5 +1,26 @@
 /* ===================================================
-   StrideAPI.gs — v38.95.0 — 2026-04-21 PST — Item Coverage Phase B (data only, no billing)
+   StrideAPI.gs — v38.97.0 — 2026-04-21 PST — CRITICAL FIX: clients upsert missing on_conflict
+   v38.97.0: CRITICAL FIX — supabaseUpsert_ conflictCol map was missing a
+             `clients` entry. Without on_conflict=spreadsheet_id in the URL,
+             PostgREST treated every /rest/v1/clients POST as a plain INSERT,
+             which failed with HTTP 409 on the clients_spreadsheet_id_key
+             unique constraint for every existing row. Result: onboarding
+             worked (new INSERT), but EVERY settings-edit save since the
+             Session-65 clients mirror landed never actually updated the
+             Supabase row. Sheet was correct; React kept reading the stale
+             Supabase mirror. Added `clients: "spreadsheet_id"` to both
+             copies of the conflictCol map. No schema change.
+   v38.96.0: DIAGNOSTIC — handleUpdateClient_ now (a) Logger.logs the incoming
+             payload's autoInspection/shipmentNote/enableShipmentEmail/
+             enableNotifications, (b) re-reads the CB Clients row fresh after
+             SpreadsheetApp.flush() and echoes it back in response.updatedClient,
+             and (c) logs the post-write echo. Purpose: users report settings
+             changes revert on page leave/return. Supabase mirror shows stale
+             values. This instruments the server side so one test save reveals
+             whether the payload arrives intact, whether setCol_ actually wrote,
+             and whether the re-read sees the new value. React can also use the
+             echo to skip the refetch race entirely by patching directly from
+             the response. No behavior change on success path — purely additive.
    v38.95.0: FEAT — Per-item coverage fields (declared_value + coverage_option_id)
              wired end-to-end on the read path. Does NOT include a billing
              write — Phase C will add the Apply-Coverage action with the
@@ -1416,6 +1437,7 @@ function supabaseUpsert_(table, data) {
     if (!url || !key) return { ok: false, code: 0, error: "SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY not configured" };
     var conflictCol = { inventory: "tenant_id,item_id", tasks: "tenant_id,task_id", repairs: "tenant_id,repair_id",
                         will_calls: "tenant_id,wc_number", shipments: "tenant_id,shipment_number", billing: "tenant_id,ledger_row_id",
+                        clients: "spreadsheet_id",
                         claims: "claim_id", cb_users: "email", marketing_contacts: "email",
                         marketing_campaigns: "campaign_id", marketing_templates: "name", marketing_settings: "id",
                         stax_invoices: "qb_invoice_no", stax_customers: "qb_name",
@@ -2016,6 +2038,7 @@ function supabaseBatchUpsert_(table, rows) {
     // Unique constraint column per table (for on_conflict parameter)
     var conflictCol = { inventory: "tenant_id,item_id", tasks: "tenant_id,task_id", repairs: "tenant_id,repair_id",
                         will_calls: "tenant_id,wc_number", shipments: "tenant_id,shipment_number", billing: "tenant_id,ledger_row_id",
+                        clients: "spreadsheet_id",
                         claims: "claim_id", cb_users: "email", marketing_contacts: "email",
                         marketing_campaigns: "campaign_id", marketing_templates: "name", marketing_settings: "id",
                         stax_invoices: "qb_invoice_no", stax_customers: "qb_name",
@@ -19514,6 +19537,18 @@ function handleUpdateClient_(payload) {
   var targetSheetId = String(payload.spreadsheetId || "").trim();
   if (!targetSheetId) return errorResponse_("spreadsheetId is required to identify client", "MISSING_PARAM");
 
+  // v38.96.0 — diagnostic trace. Log the incoming payload for the fields that
+  // users have been reporting as "not saving". If these arrive undefined, the
+  // form isn't sending them. If they arrive populated but the post-write
+  // echo shows empty, the sheet write is being dropped.
+  try {
+    Logger.log("handleUpdateClient_ PAYLOAD: sid=" + targetSheetId
+      + " autoInspection=" + JSON.stringify(payload.autoInspection)
+      + " shipmentNote=" + JSON.stringify(payload.shipmentNote)
+      + " enableShipmentEmail=" + JSON.stringify(payload.enableShipmentEmail)
+      + " enableNotifications=" + JSON.stringify(payload.enableNotifications));
+  } catch (_) {}
+
   var cbSsId = prop_("CB_SPREADSHEET_ID");
   if (!cbSsId) return errorResponse_("CB_SPREADSHEET_ID Script Property not set", "CONFIG_ERROR");
 
@@ -19620,12 +19655,32 @@ function handleUpdateClient_(payload) {
   if (syncWarning) updateWarnings.push(syncWarning);
   if (purgeWarning) updateWarnings.push(purgeWarning);
 
+  // v38.96.0 — re-read the row fresh AFTER the write so we can echo the
+  // sheet's authoritative state back to React. Also logs a post-write trace.
+  var echoRow = null;
+  try {
+    SpreadsheetApp.flush();
+    var postData = clientsSh.getDataRange().getValues();
+    var postHMap = {};
+    for (var ph = 0; ph < postData[0].length; ph++) {
+      var phk = String(postData[0][ph] || "").trim().toUpperCase();
+      if (phk) postHMap[phk] = ph;
+    }
+    echoRow = api_clientRowToPayload_(postData[targetRow - 1], postHMap);
+    Logger.log("handleUpdateClient_ POST-WRITE ECHO: sid=" + targetSheetId
+      + " autoInspection=" + echoRow.autoInspection
+      + " shipmentNote=" + JSON.stringify(echoRow.shipmentNote));
+  } catch (echoErr) {
+    Logger.log("handleUpdateClient_ echo warning: " + echoErr);
+  }
+
   return jsonResponse_({
     success: true,
     clientName: String(payload.clientName || ""),
     spreadsheetId: targetSheetId,
     synced: payload.syncToSheet !== false && !syncWarning,
     supabasePurged: wasPurged,
+    updatedClient: echoRow,
     warnings: updateWarnings
   });
 }
