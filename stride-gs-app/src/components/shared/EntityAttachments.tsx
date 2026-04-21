@@ -223,6 +223,88 @@ function DocumentsSection({
   );
 }
 
+// ── Tab-mode sibling components ──────────────────────────────────────────
+//
+// Session 79 Phase A: export three standalone bodies (no SectionHeader /
+// CollapsibleBody wrapper) so the new TabbedDetailPanel shell can render
+// them as tab contents. The existing `EntityAttachments` composition above
+// is unchanged — the other 5 detail panels (Task / Repair / WillCall /
+// Shipment / Claim) still use it and see no difference. Purely additive.
+
+export function PhotosPanel({
+  entityType, entityId, tenantId, itemId,
+}: {
+  entityType: PhotoEntityType;
+  entityId: string | null | undefined;
+  tenantId?: string | null;
+  itemId?: string | null;
+}) {
+  return (
+    <PhotoGallery
+      entityType={entityType}
+      entityId={entityId}
+      tenantId={tenantId}
+      itemId={itemId}
+      naked
+      compact
+    />
+  );
+}
+
+export function DocumentsPanel({
+  contextType, contextId, tenantId,
+}: {
+  contextType: DocumentContextType;
+  contextId: string;
+  tenantId?: string | null;
+}) {
+  const { uploadDocument } = useDocuments({ contextType, contextId, tenantId });
+  const [uploading, setUploading] = useState(false);
+  const handleUpload = async (files: File[]) => {
+    setUploading(true);
+    try { for (const f of files) { await uploadDocument(f); } }
+    finally { setUploading(false); }
+  };
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+      <DocumentUploadButton onUpload={handleUpload} uploading={uploading} compact />
+      <DocumentScanButton
+        contextType={contextType}
+        contextId={contextId}
+        tenantId={tenantId}
+      />
+      <DocumentList contextType={contextType} contextId={contextId} tenantId={tenantId} />
+    </div>
+  );
+}
+
+export function NotesPanel({
+  entityType, entityId, relatedEntities,
+}: {
+  entityType: string;
+  entityId: string;
+  relatedEntities?: Array<{ type: string; id: string; label?: string }>;
+}) {
+  // Heading differentiates the threaded entity_notes system from the
+  // single-text "Item Notes" field that lives on the Details tab.
+  return (
+    <div>
+      <div style={{
+        fontSize: 11, fontWeight: 700, letterSpacing: '0.04em',
+        color: theme.colors.textMuted, textTransform: 'uppercase',
+        marginBottom: 10,
+      }}>
+        Threaded Notes
+      </div>
+      <ThreadedNotes
+        entityType={entityType}
+        entityId={entityId}
+        relatedEntities={relatedEntities}
+      />
+    </div>
+  );
+}
+
 function NotesSectionCollapsible({
   entityType, entityId, relatedEntities, defaultOpen,
 }: NotesCfg & { defaultOpen: boolean }) {

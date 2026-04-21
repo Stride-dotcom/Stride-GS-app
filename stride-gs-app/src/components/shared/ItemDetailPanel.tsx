@@ -1,7 +1,6 @@
 import React, { useState, useRef, useCallback, useEffect, useMemo } from 'react';
-import { X, Package, Calendar, FileText, ClipboardList, Wrench, Truck, ExternalLink, DollarSign, Ship, AlertCircle, MapPin, CheckCircle2, Pencil, Save, Loader2, FolderOpen, Plus } from 'lucide-react';
+import { X, Package, Calendar, FileText, ClipboardList, Wrench, Truck, ExternalLink, DollarSign, Ship, AlertCircle, MapPin, CheckCircle2, Pencil, Save, Loader2, FolderOpen, Plus, ChevronDown, Shield, Image as ImageIcon, StickyNote, Activity } from 'lucide-react';
 import { FolderButton } from './FolderButton';
-import { DetailHeader } from './DetailHeader';
 import { ItemIdBadges } from './ItemIdBadges';
 import { useItemIndicators } from '../../hooks/useItemIndicators';
 import { supabase } from '../../lib/supabase';
@@ -9,15 +8,12 @@ import { LinkifiedText } from './LinkifiedText';
 import { AutocompleteInput } from './AutocompleteInput';
 import { theme } from '../../styles/theme';
 import { fmtDate } from '../../lib/constants';
-import { WriteButton } from './WriteButton';
 import { useReceivingAddons } from '../../hooks/useReceivingAddons';
 import { postUpdateInventoryItem, fetchItemMoveHistory, postRequestRepairQuote, postAddItemAddon, postRemoveItemAddon, isApiConfigured } from '../../lib/api';
 import type { MoveHistoryEntry } from '../../lib/api';
 import type { InventoryItem, InventoryStatus } from '../../lib/types';
-import { getPanelContainerStyle, panelBackdropStyle } from './panelStyles';
-import { useIsMobile } from '../../hooks/useIsMobile';
-import { useResizablePanel } from '../../hooks/useResizablePanel';
-import { EntityAttachments } from './EntityAttachments';
+import { TabbedDetailPanel } from './TabbedDetailPanel';
+import type { TabbedDetailPanelTab } from './TabbedDetailPanel';
 import { buildDeepLink } from '../../lib/deepLinks';
 
 export interface LinkedRecord {
@@ -504,8 +500,7 @@ export function ItemDetailPanel({
   userRole, classNames = [], locationNames = [], clientSheetId, onItemUpdated,
   mergeItemPatch, clearItemPatch,
 }: Props) {
-  const { isMobile } = useIsMobile();
-  const { width: panelWidth, handleMouseDown: handleResizeMouseDown } = useResizablePanel(420, 'item', isMobile);
+  // Panel frame + resize + backdrop are handled by TabbedDetailPanel now.
   const statusCfg: Record<string, { bg: string; color: string }> = {
     Active: { bg: '#F0FDF4', color: '#15803D' },
     Released: { bg: '#EFF6FF', color: '#1D4ED8' },
@@ -797,315 +792,503 @@ export function ItemDetailPanel({
     .map(w => ({ label: w.wcNumber || 'WC Folder', url: w.wcFolderUrl }));
   const entityFolderButtons = [...taskFolderUrls, ...repairFolderUrls, ...wcFolderUrls];
 
-  return (
+  // ── Tab render functions ────────────────────────────────────────────────
+  // Each render function is a plain fragment — ALL existing state,
+  // handlers, and computed values from above are captured in-closure so
+  // behavior is identical to the pre-refactor panel. Only the OUTER frame
+  // + section grouping changes.
+
+  const renderDetailsTab = () => (
     <>
-      {/* Backdrop */}
-      {!isMobile && <div onClick={onClose} style={panelBackdropStyle} />}
-
-      {/* Panel */}
-      <div style={getPanelContainerStyle(panelWidth, isMobile)}>
-        {/* Resize handle (desktop only) */}
-        {!isMobile && (
-          <div
-            onMouseDown={handleResizeMouseDown}
-            style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: 6, cursor: 'col-resize', zIndex: 101 }}
-          />
-        )}
-        {/* Header — unified DetailHeader (session 70 follow-up).
-            Edit / Save / Cancel moved to the sticky footer bottom-left; only Close stays top-right. */}
-        <DetailHeader
-          entityId={item.itemId}
-          clientName={item.clientName}
-          sidemark={item.sidemark}
-          idBadges={
-            <ItemIdBadges
-              itemId={item.itemId}
-              inspItems={inspItems}
-              asmItems={asmItems}
-              repairItems={repairItems}
-            />
-          }
-          actions={
-            <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4, borderRadius: 6, color: theme.colors.textMuted }}>
-              <X size={18} />
-            </button>
-          }
-          belowId={
-            isEditing && canEditStaff ? (
-              <select value={draft.status} onChange={e => setDraftField('status', e.target.value)}
-                style={{ fontSize: 11, padding: '2px 8px', borderRadius: 12, border: `1px solid ${theme.colors.border}`, fontWeight: 600, background: theme.colors.bgSubtle, cursor: 'pointer' }}>
-                {STATUS_OPTIONS.map(o => <option key={o} value={o}>{o}</option>)}
-              </select>
-            ) : (
-              <Badge t={isEditing ? draft.status : (dv('status') || item.status)} bg={sc.bg} color={sc.color} />
-            )
-          }
-        />
-        {/* Save feedback bar */}
-        {saveError && (
-          <div style={{ padding: '6px 20px', background: '#FEF2F2', color: '#DC2626', fontSize: 12, fontWeight: 500, borderBottom: `1px solid #FECACA` }}>
-            {saveError}
-          </div>
-        )}
-        {saveSuccess && (
-          <div style={{ padding: '6px 20px', background: '#F0FDF4', color: '#15803D', fontSize: 12, fontWeight: 500, borderBottom: `1px solid #BBF7D0` }}>
-            Changes saved successfully
-          </div>
-        )}
-
-        {/* Content */}
-        <div style={{ flex: 1, overflowY: 'auto', padding: '20px' }}>
-
-          {/* Item Info */}
-          <Section icon={Package} title="Item Details">
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 16px' }}>
-              {isEditing ? (
-                <>
-                  <EditInput label="Vendor" value={draft.vendor} onChange={v => setDraftField('vendor', v)} />
-                  {canEditStaff ? (
-                    <EditSelect label="Class" value={draft.itemClass} options={classNames.length > 0 ? classNames : [draft.itemClass || '']} onChange={v => setDraftField('itemClass', v)} />
-                  ) : (
-                    <Field label="Class" value={dv('itemClass')} />
-                  )}
-                  {canEditStaff ? (
-                    <div style={{ marginBottom: 8 }}>
-                      <div style={{ fontSize: 10, fontWeight: 500, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 2 }}>Location</div>
-                      <AutocompleteInput value={draft.location} onChange={v => setDraftField('location', v)} suggestions={locationNames} placeholder="Type location..." allowCustom icon={false} style={{ fontSize: 13 }} />
-                    </div>
-                  ) : (
-                    <Field label="Location" value={dv('location')} mono />
-                  )}
-                  {canEditStaff ? (
-                    <EditNumber label="Qty" value={draft.qty} onChange={v => setDraftField('qty', v)} />
-                  ) : (
-                    <Field label="Qty" value={dv('qty')} />
-                  )}
-                  <EditInput label="Sidemark" value={draft.sidemark} onChange={v => setDraftField('sidemark', v)} />
-                  <EditInput label="Room" value={draft.room} onChange={v => setDraftField('room', v)} />
-                </>
+      {/* Item Info */}
+      <Section icon={Package} title="Item Details">
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 16px' }}>
+          {isEditing ? (
+            <>
+              <EditInput label="Vendor" value={draft.vendor} onChange={v => setDraftField('vendor', v)} />
+              {canEditStaff ? (
+                <EditSelect label="Class" value={draft.itemClass} options={classNames.length > 0 ? classNames : [draft.itemClass || '']} onChange={v => setDraftField('itemClass', v)} />
               ) : (
-                <>
-                  <Field label="Vendor" value={dv('vendor')} />
-                  <Field label="Class" value={dv('itemClass')} />
-                  <Field label="Location" value={dv('location')} mono />
-                  <Field label="Qty" value={dv('qty')} />
-                  <Field label="Sidemark" value={dv('sidemark')} />
-                  <Field label="Room" value={dv('room')} />
-                </>
+                <Field label="Class" value={dv('itemClass')} />
               )}
-              <Field label="Receive Date" value={fmtDate(item.receiveDate)} />
-              <Field label="Release Date" value={fmtDate(item.releaseDate)} />
-            </div>
-
-            <div style={{ marginTop: 4 }}>
-              {isEditing ? (
-                <>
-                  <EditInput label="Description" value={draft.description} onChange={v => setDraftField('description', v)} />
-                  <EditInput label="Reference" value={draft.reference} onChange={v => setDraftField('reference', v)} />
-                </>
-              ) : (
-                <>
-                  <Field label="Description" value={dv('description')} />
-                  <Field label="Reference" value={dv('reference')} />
-                </>
-              )}
-            </div>
-          </Section>
-
-          {/* Item Notes — separate section */}
-          <Section icon={AlertCircle} title="Item Notes">
-            {isEditing && canEditStaff ? (
-              <textarea value={draft.itemNotes} onChange={e => setDraftField('itemNotes', e.target.value)} rows={3}
-                style={{ ...editInputStyle, resize: 'vertical' }} />
-            ) : (
-              <LinkifiedText
-                text={dv('itemNotes') || ''}
-                fontSize={13}
-                color={dv('itemNotes') ? theme.colors.text : theme.colors.textMuted}
-              />
-            )}
-          </Section>
-
-          {/* Quick Actions — between Item Notes and Related for easy access */}
-          <Section icon={FileText} title="Quick Actions">
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-              <WriteButton label="Create Task" variant="secondary" size="sm" style={{ width: '100%' }} onClick={async () => { onCreateTask?.(); }} />
-              {!repairStatus ? (
-                <WriteButton label={repairRequesting ? 'Requesting...' : 'Repair Quote'} variant="secondary" size="sm" style={{ width: '100%' }} onClick={async () => { await handleRequestRepair(); }} />
-              ) : (
-                <span style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 4, padding: '4px 12px', borderRadius: 8, fontSize: 11, fontWeight: 600, background: repairStatus === 'Approved' ? '#F0FDF4' : repairStatus === 'Declined' ? '#FEF2F2' : '#EFF6FF', color: repairStatus === 'Approved' ? '#15803D' : repairStatus === 'Declined' ? '#DC2626' : '#1D4ED8' }}>
-                  <CheckCircle2 size={12} />
-                  {repairStatus === 'Pending Quote' ? 'Quote Requested' : repairStatus === 'Quote Sent' ? 'Awaiting Response' : repairStatus === 'Approved' ? 'Approved' : 'Declined'}
-                </span>
-              )}
-              <WriteButton label="Add to Will Call" variant="secondary" size="sm" style={{ width: '100%' }} onClick={async () => { onCreateWillCall?.(); }} />
-              {onTransfer && <WriteButton label="Transfer" variant="secondary" size="sm" style={{ width: '100%' }} onClick={async () => { onTransfer(); }} />}
-            </div>
-          </Section>
-
-          {/* Add-on Services — staff/admin can toggle; clients see read-only */}
-          {catalogAddons.length > 0 && (
-            <Section icon={Plus} title="Add-on Services" count={catalogAddons.filter(a => addonStatus[a.code]?.checked).length || undefined}>
-              {addonError && (
-                <div role="alert" style={{ fontSize: 11, color: '#92400E', background: '#FEF3C7', border: '1px solid #F59E0B', borderRadius: 6, padding: '6px 10px', marginBottom: 8 }}>
-                  {addonError}
+              {canEditStaff ? (
+                <div style={{ marginBottom: 8 }}>
+                  <div style={{ fontSize: 10, fontWeight: 500, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 2 }}>Location</div>
+                  <AutocompleteInput value={draft.location} onChange={v => setDraftField('location', v)} suggestions={locationNames} placeholder="Type location..." allowCustom icon={false} style={{ fontSize: 13 }} />
                 </div>
+              ) : (
+                <Field label="Location" value={dv('location')} mono />
               )}
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-                {catalogAddons.map(a => {
-                  const s = addonStatus[a.code] || { checked: false, locked: false };
-                  const rate = a.rateForClass(item.itemClass || '');
-                  const pending = addonPending[a.code];
-                  const disabled = !canEditAddons || !!pending || s.locked;
-                  return (
-                    <label
-                      key={a.code}
-                      onClick={e => { if (disabled) return; e.preventDefault(); toggleAddonLive(a.code); }}
-                      style={{
-                        display: 'inline-flex', alignItems: 'center', gap: 6,
-                        padding: '6px 10px', borderRadius: 8,
-                        border: `1px solid ${s.checked ? theme.colors.orange : theme.colors.borderLight}`,
-                        background: s.locked ? '#F3F4F6' : s.checked ? '#FFF7F0' : '#fff',
-                        cursor: disabled ? 'default' : 'pointer',
-                        fontSize: 12, userSelect: 'none',
-                        opacity: pending ? 0.6 : 1,
-                      }}
-                      title={s.locked ? `Locked — already ${s.lockedStatus}` : !canEditAddons ? 'View only' : 'Click to toggle'}
-                    >
-                      <input type="checkbox" checked={s.checked} readOnly disabled={disabled} style={{ accentColor: theme.colors.orange, cursor: disabled ? 'default' : 'pointer', margin: 0 }} />
-                      <span style={{ fontWeight: 600, color: theme.colors.text }}>{a.name}</span>
-                      <span style={{ color: theme.colors.textMuted, fontSize: 11 }}>
-                        {rate > 0 ? `$${rate.toFixed(2)}` : (item.itemClass ? 'no rate' : 'set class')}
-                      </span>
-                      {pending && <Loader2 size={11} style={{ animation: 'spin 1s linear infinite', color: theme.colors.orange }} />}
-                      {s.locked && (
-                        <span style={{ fontSize: 9, fontWeight: 700, background: '#E5E7EB', color: '#4B5563', padding: '1px 5px', borderRadius: 6, textTransform: 'uppercase' }}>
-                          {s.lockedStatus}
-                        </span>
-                      )}
-                    </label>
-                  );
-                })}
-              </div>
-            </Section>
+              {canEditStaff ? (
+                <EditNumber label="Qty" value={draft.qty} onChange={v => setDraftField('qty', v)} />
+              ) : (
+                <Field label="Qty" value={dv('qty')} />
+              )}
+              <EditInput label="Sidemark" value={draft.sidemark} onChange={v => setDraftField('sidemark', v)} />
+              <EditInput label="Room" value={draft.room} onChange={v => setDraftField('room', v)} />
+            </>
+          ) : (
+            <>
+              <Field label="Vendor" value={dv('vendor')} />
+              <Field label="Class" value={dv('itemClass')} />
+              <Field label="Location" value={dv('location')} mono />
+              <Field label="Qty" value={dv('qty')} />
+              <Field label="Sidemark" value={dv('sidemark')} />
+              <Field label="Room" value={dv('room')} />
+            </>
           )}
-
-          {/* Related Records */}
-          <Section icon={FileText} title="Related" count={linkedTasks.length + linkedRepairs.length + linkedWillCalls.length || undefined}>
-            {/* Shipment + Photos Folders — only render when the URL exists.
-                The photos-folder Drive chip is legacy: every page now has
-                the in-app Photos gallery via EntityAttachments, so the
-                Drive link is just a side-channel for the underlying files. */}
-            {(shipmentFolderUrl || photosFolderId) && (
-              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 8 }}>
-                {shipmentFolderUrl && (
-                  <FolderButton label={`Shipment ${item.shipmentNumber || 'Folder'}`} url={shipmentFolderUrl} icon={Truck} />
-                )}
-                {photosFolderId && (
-                  <FolderButton label="Photos" url={`https://drive.google.com/drive/folders/${photosFolderId}`} icon={FolderOpen} />
-                )}
-              </div>
-            )}
-
-            {/* Entity folder buttons (task / repair / WC) */}
-            {entityFolderButtons.length > 0 && (
-              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 10 }}>
-                {entityFolderButtons.map(({ label, url }) => (
-                  <FolderButton key={label} label={label} url={url} icon={ExternalLink} />
-                ))}
-              </div>
-            )}
-
-            {/* Linked record buttons */}
-            {hasLinkedRecords ? (
-              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                <LinkedRecordButton records={linkedTasks} type="task" onNavigate={onNavigateToRecord} />
-                <LinkedRecordButton records={linkedRepairs} type="repair" onNavigate={onNavigateToRecord} />
-                <LinkedRecordButton records={linkedWillCalls} type="willcall" onNavigate={onNavigateToRecord} />
-              </div>
-            ) : !item.shipmentNumber && !shipmentFolderUrl && entityFolderButtons.length === 0 ? (
-              <div style={{ fontSize: 12, color: theme.colors.textMuted, padding: '4px 0', fontStyle: 'italic' }}>
-                No linked tasks, repairs, or will calls found for this item.
-              </div>
-            ) : null}
-          </Section>
-
-          {/* Item History */}
-          <Section icon={Calendar} title="Item History" count={historyCount || undefined}>
-            {historyCount === 0 ? (
-              <div style={{ fontSize: 12, color: theme.colors.textMuted, padding: '4px 0', fontStyle: 'italic' }}>
-                No history found for this item.
-              </div>
-            ) : (
-              <ItemHistory
-                tasks={itemTasks}
-                repairs={itemRepairs}
-                willCalls={itemWillCalls}
-                billing={itemBilling}
-                moves={moveHistory}
-                shipmentNumber={item.shipmentNumber}
-                receiveDate={item.receiveDate}
-                shipmentCarrier={itemShipment?.carrier}
-                shipmentTracking={itemShipment?.trackingNo}
-                auditByEntity={auditByEntity}
-                clientSheetId={clientSheetId}
-              />
-            )}
-          </Section>
-
-          {/* Session 73 — Photos / Documents / Notes (collapsible).
-              Session 74 — Notes is now a threaded switcher; surface
-              linked tasks / repairs / will calls as sibling pills so
-              staff can flip through everything attached to this item
-              without leaving the Item panel. */}
-          <EntityAttachments
-            photos={{ entityType: 'inventory', entityId: item.itemId, tenantId: clientSheetId }}
-            documents={{ contextType: 'item', contextId: item.itemId, tenantId: clientSheetId }}
-            notes={{
-              entityType: 'inventory',
-              entityId: item.itemId,
-              relatedEntities: [
-                ...itemTasks.map((t: any) => ({ type: 'task', id: String(t.taskId || ''), label: `Task ${t.taskId}` })).filter(r => r.id),
-                ...itemRepairs.map((r: any) => ({ type: 'repair', id: String(r.repairId || ''), label: `Repair ${r.repairId}` })).filter(r => r.id),
-                ...itemWillCalls.map((w: any) => ({ type: 'will_call', id: String(w.wcNumber || ''), label: `WC ${w.wcNumber}` })).filter(r => r.id),
-                ...(item.shipmentNumber ? [{ type: 'shipment', id: String(item.shipmentNumber), label: `Shipment ${item.shipmentNumber}` }] : []),
-              ],
-            }}
-          />
+          <Field label="Receive Date" value={fmtDate(item.receiveDate)} />
+          <Field label="Release Date" value={fmtDate(item.releaseDate)} />
         </div>
 
-        {/* Sticky footer — session 70 follow-up: Edit / Save / Cancel moved here from top-right. */}
-        {(canEditBasic || isEditing) && (
-          <div style={{
-            padding: '10px 20px',
-            borderTop: `1px solid ${theme.colors.border}`,
-            background: '#FAFAFA',
-            display: 'flex', gap: 8, alignItems: 'center',
-            flexShrink: 0,
-          }}>
-            {isEditing ? (
-              <>
-                <button onClick={handleSave} disabled={saving}
-                  style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '6px 14px', fontSize: 12, fontWeight: 600, borderRadius: 6, border: 'none', background: theme.colors.orange, color: '#fff', cursor: saving ? 'wait' : 'pointer' }}>
-                  {saving ? <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} /> : <Save size={12} />}
-                  {saving ? 'Saving...' : 'Save'}
-                </button>
-                <button onClick={handleEditCancel} disabled={saving}
-                  style={{ padding: '6px 12px', fontSize: 12, fontWeight: 600, borderRadius: 6, border: `1px solid ${theme.colors.border}`, background: '#fff', color: theme.colors.textSecondary, cursor: 'pointer' }}>
-                  Cancel
-                </button>
-              </>
-            ) : canEditBasic ? (
-              <button onClick={handleEditStart}
-                style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '6px 12px', fontSize: 12, fontWeight: 600, borderRadius: 6, border: `1px solid ${theme.colors.border}`, background: '#fff', color: theme.colors.textSecondary, cursor: 'pointer' }}>
-                <Pencil size={12} /> Edit
-              </button>
-            ) : null}
+        <div style={{ marginTop: 4 }}>
+          {isEditing ? (
+            <>
+              <EditInput label="Description" value={draft.description} onChange={v => setDraftField('description', v)} />
+              <EditInput label="Reference" value={draft.reference} onChange={v => setDraftField('reference', v)} />
+            </>
+          ) : (
+            <>
+              <Field label="Description" value={dv('description')} />
+              <Field label="Reference" value={dv('reference')} />
+            </>
+          )}
+        </div>
+      </Section>
+
+      {/* Item Notes — single-text field (distinct from threaded Notes tab) */}
+      <Section icon={AlertCircle} title="Item Notes">
+        {isEditing && canEditStaff ? (
+          <textarea value={draft.itemNotes} onChange={e => setDraftField('itemNotes', e.target.value)} rows={3}
+            style={{ ...editInputStyle, resize: 'vertical' }} />
+        ) : (
+          <LinkifiedText
+            text={dv('itemNotes') || ''}
+            fontSize={13}
+            color={dv('itemNotes') ? theme.colors.text : theme.colors.textMuted}
+          />
+        )}
+      </Section>
+
+      {/* Add-on Services */}
+      {catalogAddons.length > 0 && (
+        <Section icon={Plus} title="Add-on Services" count={catalogAddons.filter(a => addonStatus[a.code]?.checked).length || undefined}>
+          {addonError && (
+            <div role="alert" style={{ fontSize: 11, color: '#92400E', background: '#FEF3C7', border: '1px solid #F59E0B', borderRadius: 6, padding: '6px 10px', marginBottom: 8 }}>
+              {addonError}
+            </div>
+          )}
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+            {catalogAddons.map(a => {
+              const s = addonStatus[a.code] || { checked: false, locked: false };
+              const rate = a.rateForClass(item.itemClass || '');
+              const pending = addonPending[a.code];
+              const disabled = !canEditAddons || !!pending || s.locked;
+              return (
+                <label
+                  key={a.code}
+                  onClick={e => { if (disabled) return; e.preventDefault(); toggleAddonLive(a.code); }}
+                  style={{
+                    display: 'inline-flex', alignItems: 'center', gap: 6,
+                    padding: '6px 10px', borderRadius: 8,
+                    border: `1px solid ${s.checked ? theme.colors.orange : theme.colors.borderLight}`,
+                    background: s.locked ? '#F3F4F6' : s.checked ? '#FFF7F0' : '#fff',
+                    cursor: disabled ? 'default' : 'pointer',
+                    fontSize: 12, userSelect: 'none',
+                    opacity: pending ? 0.6 : 1,
+                  }}
+                  title={s.locked ? `Locked — already ${s.lockedStatus}` : !canEditAddons ? 'View only' : 'Click to toggle'}
+                >
+                  <input type="checkbox" checked={s.checked} readOnly disabled={disabled} style={{ accentColor: theme.colors.orange, cursor: disabled ? 'default' : 'pointer', margin: 0 }} />
+                  <span style={{ fontWeight: 600, color: theme.colors.text }}>{a.name}</span>
+                  <span style={{ color: theme.colors.textMuted, fontSize: 11 }}>
+                    {rate > 0 ? `$${rate.toFixed(2)}` : (item.itemClass ? 'no rate' : 'set class')}
+                  </span>
+                  {pending && <Loader2 size={11} style={{ animation: 'spin 1s linear infinite', color: theme.colors.orange }} />}
+                  {s.locked && (
+                    <span style={{ fontSize: 9, fontWeight: 700, background: '#E5E7EB', color: '#4B5563', padding: '1px 5px', borderRadius: 6, textTransform: 'uppercase' }}>
+                      {s.lockedStatus}
+                    </span>
+                  )}
+                </label>
+              );
+            })}
+          </div>
+        </Section>
+      )}
+
+      {/* Related — folder buttons + linked-record shortcuts */}
+      <Section icon={FileText} title="Related" count={linkedTasks.length + linkedRepairs.length + linkedWillCalls.length || undefined}>
+        {(shipmentFolderUrl || photosFolderId) && (
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 8 }}>
+            {shipmentFolderUrl && (
+              <FolderButton label={`Shipment ${item.shipmentNumber || 'Folder'}`} url={shipmentFolderUrl} icon={Truck} />
+            )}
+            {photosFolderId && (
+              <FolderButton label="Photos" url={`https://drive.google.com/drive/folders/${photosFolderId}`} icon={FolderOpen} />
+            )}
           </div>
         )}
-      </div>
 
+        {entityFolderButtons.length > 0 && (
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 10 }}>
+            {entityFolderButtons.map(({ label, url }) => (
+              <FolderButton key={label} label={label} url={url} icon={ExternalLink} />
+            ))}
+          </div>
+        )}
+
+        {hasLinkedRecords ? (
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            <LinkedRecordButton records={linkedTasks} type="task" onNavigate={onNavigateToRecord} />
+            <LinkedRecordButton records={linkedRepairs} type="repair" onNavigate={onNavigateToRecord} />
+            <LinkedRecordButton records={linkedWillCalls} type="willcall" onNavigate={onNavigateToRecord} />
+          </div>
+        ) : !item.shipmentNumber && !shipmentFolderUrl && entityFolderButtons.length === 0 ? (
+          <div style={{ fontSize: 12, color: theme.colors.textMuted, padding: '4px 0', fontStyle: 'italic' }}>
+            No linked tasks, repairs, or will calls found for this item.
+          </div>
+        ) : null}
+      </Section>
+    </>
+  );
+
+  const renderCoverageTab = () => (
+    <div style={{
+      display: 'flex', flexDirection: 'column', alignItems: 'center',
+      justifyContent: 'center', minHeight: 280, gap: 12,
+      padding: 24, textAlign: 'center',
+    }}>
+      <div style={{ width: 64, height: 64, borderRadius: 16, background: theme.colors.bgSubtle, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+        <Shield size={28} color={theme.colors.orange} />
+      </div>
+      <div style={{ fontSize: 16, fontWeight: 600, color: theme.colors.text }}>
+        Coverage configuration coming soon
+      </div>
+      <div style={{ fontSize: 13, color: theme.colors.textMuted, maxWidth: 380, lineHeight: 1.5 }}>
+        Shortly you'll be able to enter a declared value, pick a coverage option
+        from the price list, and preview the premium here. One-time billing for
+        coverage will be wired in a follow-up release once the service code is
+        finalized.
+      </div>
+    </div>
+  );
+
+  const renderActivityTab = () => (
+    <Section icon={Calendar} title="Item History" count={historyCount || undefined}>
+      {historyCount === 0 ? (
+        <div style={{ fontSize: 12, color: theme.colors.textMuted, padding: '4px 0', fontStyle: 'italic' }}>
+          No history found for this item.
+        </div>
+      ) : (
+        <ItemHistory
+          tasks={itemTasks}
+          repairs={itemRepairs}
+          willCalls={itemWillCalls}
+          billing={itemBilling}
+          moves={moveHistory}
+          shipmentNumber={item.shipmentNumber}
+          receiveDate={item.receiveDate}
+          shipmentCarrier={itemShipment?.carrier}
+          shipmentTracking={itemShipment?.trackingNo}
+          auditByEntity={auditByEntity}
+          clientSheetId={clientSheetId}
+        />
+      )}
+    </Section>
+  );
+
+  // ── Header components: status pill + Actions dropdown ──────────────────
+
+  const headerStatusBadge = isEditing && canEditStaff ? (
+    <select value={draft.status} onChange={e => setDraftField('status', e.target.value)}
+      style={{ fontSize: 11, padding: '2px 8px', borderRadius: 12, border: `1px solid ${theme.colors.border}`, fontWeight: 600, background: theme.colors.bgSubtle, cursor: 'pointer' }}>
+      {STATUS_OPTIONS.map(o => <option key={o} value={o}>{o}</option>)}
+    </select>
+  ) : (
+    <Badge t={isEditing ? draft.status : (dv('status') || item.status)} bg={sc.bg} color={sc.color} />
+  );
+
+  const headerActions = (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+      <ItemActionsMenu
+        onCreateTask={onCreateTask}
+        onCreateWillCall={onCreateWillCall}
+        onTransfer={onTransfer}
+        onRequestRepair={handleRequestRepair}
+        repairStatus={repairStatus ?? undefined}
+        repairRequesting={repairRequesting}
+      />
+      <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4, borderRadius: 6, color: 'rgba(255,255,255,0.7)' }}>
+        <X size={18} />
+      </button>
+    </div>
+  );
+
+  const statusStrip = (saveError || saveSuccess) ? (
+    <>
+      {saveError && (
+        <div style={{ padding: '6px 20px', background: '#FEF2F2', color: '#DC2626', fontSize: 12, fontWeight: 500, borderBottom: `1px solid #FECACA` }}>
+          {saveError}
+        </div>
+      )}
+      {saveSuccess && (
+        <div style={{ padding: '6px 20px', background: '#F0FDF4', color: '#15803D', fontSize: 12, fontWeight: 500, borderBottom: `1px solid #BBF7D0` }}>
+          Changes saved successfully
+        </div>
+      )}
+    </>
+  ) : null;
+
+  const footer = (canEditBasic || isEditing) ? (
+    <div style={{
+      padding: '10px 20px',
+      background: '#FAFAFA',
+      display: 'flex', gap: 8, alignItems: 'center',
+    }}>
+      {isEditing ? (
+        <>
+          <button onClick={handleSave} disabled={saving}
+            style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '6px 14px', fontSize: 12, fontWeight: 600, borderRadius: 6, border: 'none', background: theme.colors.orange, color: '#fff', cursor: saving ? 'wait' : 'pointer' }}>
+            {saving ? <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} /> : <Save size={12} />}
+            {saving ? 'Saving...' : 'Save'}
+          </button>
+          <button onClick={handleEditCancel} disabled={saving}
+            style={{ padding: '6px 12px', fontSize: 12, fontWeight: 600, borderRadius: 6, border: `1px solid ${theme.colors.border}`, background: '#fff', color: theme.colors.textSecondary, cursor: 'pointer' }}>
+            Cancel
+          </button>
+        </>
+      ) : canEditBasic ? (
+        <button onClick={handleEditStart}
+          style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '6px 12px', fontSize: 12, fontWeight: 600, borderRadius: 6, border: `1px solid ${theme.colors.border}`, background: '#fff', color: theme.colors.textSecondary, cursor: 'pointer' }}>
+          <Pencil size={12} /> Edit
+        </button>
+      ) : null}
+    </div>
+  ) : null;
+
+  // Custom tabs listed in the order we want them to appear. Built-in tabs
+  // (Photos/Docs/Notes/Activity) are appended by the shell after any custom
+  // tab NOT matching their id. We interleave by listing the custom tabs with
+  // the ids the built-ins register, so the final order is:
+  //   Details, Photos, Docs, Notes, Coverage, Activity
+  // (Details → custom; Photos/Docs/Notes → built-in; Coverage → custom;
+  //  Activity → built-in with render escape hatch.)
+  const customTabs: TabbedDetailPanelTab[] = [
+    {
+      id: 'details',
+      label: 'Details',
+      icon: <ClipboardList size={13} />,
+      keepMounted: true, // preserve edit-input focus across tab switches
+      render: () => renderDetailsTab(),
+    },
+    // Built-ins (photos/docs/notes) will be inserted by the shell here since
+    // they aren't in `customTabs` — they append after the customs that match
+    // NO built-in id. To force Coverage to sit AFTER the built-ins, we
+    // declare it AFTER registering built-ins. The shell's order logic keeps
+    // customs in array order and appends un-referenced built-ins; so to
+    // achieve the desired final order we instead list ALL tabs manually
+    // here and disable `builtInTabs`.
+    {
+      id: 'photos',
+      label: 'Photos',
+      icon: <ImageIcon size={13} />,
+      render: () => <PhotosPanelProxy item={item} clientSheetId={clientSheetId} />,
+    },
+    {
+      id: 'docs',
+      label: 'Docs',
+      icon: <FileText size={13} />,
+      render: () => <DocsPanelProxy itemId={item.itemId} clientSheetId={clientSheetId} />,
+    },
+    {
+      id: 'notes',
+      label: 'Notes',
+      icon: <StickyNote size={13} />,
+      render: () => <NotesPanelProxy
+        itemId={item.itemId}
+        itemTasks={itemTasks}
+        itemRepairs={itemRepairs}
+        itemWillCalls={itemWillCalls}
+        shipmentNumber={item.shipmentNumber}
+      />,
+    },
+    {
+      id: 'coverage',
+      label: 'Coverage',
+      icon: <Shield size={13} />,
+      render: () => renderCoverageTab(),
+    },
+    {
+      id: 'activity',
+      label: 'Activity',
+      icon: <Activity size={13} />,
+      render: () => renderActivityTab(),
+    },
+  ];
+
+  return (
+    <>
+      <TabbedDetailPanel
+        title={item.itemId}
+        clientName={item.clientName}
+        sidemark={item.sidemark}
+        idBadges={
+          <ItemIdBadges
+            itemId={item.itemId}
+            inspItems={inspItems}
+            asmItems={asmItems}
+            repairItems={repairItems}
+          />
+        }
+        belowId={headerStatusBadge}
+        headerActions={headerActions}
+        tabs={customTabs}
+        initialTabId="details"
+        statusStrip={statusStrip}
+        footer={footer}
+        onClose={onClose}
+        resizeKey="item"
+        defaultWidth={420}
+      />
       <style>{`@keyframes slideIn { from { transform: translateX(100%); } to { transform: translateX(0); } }`}</style>
     </>
+  );
+}
+
+// ── Local proxy components for built-in tab content ────────────────────────
+// These thin wrappers let us compose the shared PhotosPanel / DocumentsPanel
+// / NotesPanel (from EntityAttachments.tsx) with item-specific props (e.g.
+// cross-entity itemId rollup for Photos, related-entity pills for Notes).
+// Imported lazily to keep the main component file from growing wider.
+
+import { PhotosPanel as _PhotosPanel, DocumentsPanel as _DocumentsPanel, NotesPanel as _NotesPanel } from './EntityAttachments';
+
+function PhotosPanelProxy({ item, clientSheetId }: { item: any; clientSheetId: string | undefined }) {
+  return (
+    <_PhotosPanel
+      entityType="inventory"
+      entityId={item.itemId}
+      itemId={item.itemId}
+      tenantId={clientSheetId}
+    />
+  );
+}
+
+function DocsPanelProxy({ itemId, clientSheetId }: { itemId: string; clientSheetId: string | undefined }) {
+  return (
+    <_DocumentsPanel
+      contextType="item"
+      contextId={itemId}
+      tenantId={clientSheetId}
+    />
+  );
+}
+
+function NotesPanelProxy({
+  itemId, itemTasks, itemRepairs, itemWillCalls, shipmentNumber,
+}: {
+  itemId: string;
+  itemTasks: any[];
+  itemRepairs: any[];
+  itemWillCalls: any[];
+  shipmentNumber?: string;
+}) {
+  const related = [
+    ...itemTasks.map((t: any) => ({ type: 'task', id: String(t.taskId || ''), label: `Task ${t.taskId}` })).filter(r => r.id),
+    ...itemRepairs.map((r: any) => ({ type: 'repair', id: String(r.repairId || ''), label: `Repair ${r.repairId}` })).filter(r => r.id),
+    ...itemWillCalls.map((w: any) => ({ type: 'will_call', id: String(w.wcNumber || ''), label: `WC ${w.wcNumber}` })).filter(r => r.id),
+    ...(shipmentNumber ? [{ type: 'shipment', id: String(shipmentNumber), label: `Shipment ${shipmentNumber}` }] : []),
+  ];
+  return <_NotesPanel entityType="inventory" entityId={itemId} relatedEntities={related} />;
+}
+
+// ── Actions dropdown (Quick Actions moved into header per mockup) ──────────
+
+function ItemActionsMenu({
+  onCreateTask, onCreateWillCall, onTransfer, onRequestRepair,
+  repairStatus, repairRequesting,
+}: {
+  onCreateTask?: () => void;
+  onCreateWillCall?: () => void;
+  onTransfer?: () => void;
+  onRequestRepair: () => Promise<void>;
+  repairStatus?: string;
+  repairRequesting: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [open]);
+
+  const itemStyle: React.CSSProperties = {
+    display: 'flex', alignItems: 'center', gap: 8,
+    width: '100%', padding: '8px 12px', fontSize: 12,
+    fontWeight: 500, color: theme.colors.text,
+    background: 'none', border: 'none', cursor: 'pointer',
+    textAlign: 'left', fontFamily: 'inherit',
+  };
+
+  const handle = (fn?: () => void) => () => { setOpen(false); fn?.(); };
+
+  return (
+    <div ref={ref} style={{ position: 'relative' }}>
+      <button
+        onClick={() => setOpen(o => !o)}
+        style={{
+          display: 'inline-flex', alignItems: 'center', gap: 4,
+          padding: '6px 12px', fontSize: 12, fontWeight: 600,
+          borderRadius: 8,
+          border: '1px solid rgba(255,255,255,0.25)',
+          background: 'rgba(255,255,255,0.12)',
+          color: '#fff',
+          cursor: 'pointer',
+          fontFamily: 'inherit',
+        }}
+      >
+        <Plus size={13} /> Actions <ChevronDown size={12} />
+      </button>
+      {open && (
+        <div style={{
+          position: 'absolute', right: 0, top: 'calc(100% + 6px)',
+          background: '#fff', border: `1px solid ${theme.colors.border}`,
+          borderRadius: 10, boxShadow: '0 8px 24px rgba(0,0,0,0.12)',
+          minWidth: 180, zIndex: 150, padding: '4px 0',
+        }}>
+          {onCreateTask && (
+            <button style={itemStyle} onClick={handle(onCreateTask)}>
+              <ClipboardList size={13} color={theme.colors.orange} /> Create Task
+            </button>
+          )}
+          {!repairStatus ? (
+            <button style={itemStyle} onClick={() => { setOpen(false); void onRequestRepair(); }}>
+              <Wrench size={13} color={theme.colors.orange} />
+              {repairRequesting ? 'Requesting…' : 'Request Repair Quote'}
+            </button>
+          ) : (
+            <div style={{ ...itemStyle, cursor: 'default', color: theme.colors.textMuted, fontSize: 11 }}>
+              <CheckCircle2 size={13} color="#15803D" />
+              Repair: {repairStatus === 'Pending Quote' ? 'Quote Requested' : repairStatus === 'Quote Sent' ? 'Awaiting Response' : repairStatus}
+            </div>
+          )}
+          {onCreateWillCall && (
+            <button style={itemStyle} onClick={handle(onCreateWillCall)}>
+              <Truck size={13} color={theme.colors.orange} /> Add to Will Call
+            </button>
+          )}
+          {onTransfer && (
+            <button style={itemStyle} onClick={handle(onTransfer)}>
+              <ExternalLink size={13} color={theme.colors.orange} /> Transfer
+            </button>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
