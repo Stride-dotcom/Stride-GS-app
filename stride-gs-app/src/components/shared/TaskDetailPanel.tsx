@@ -23,7 +23,7 @@ import { getPanelContainerStyle, panelBackdropStyle } from './panelStyles';
 import { useIsMobile } from '../../hooks/useIsMobile';
 import { useResizablePanel } from '../../hooks/useResizablePanel';
 
-import type { Task, Repair } from '../../lib/types';
+import type { Task, Repair, InventoryItem } from '../../lib/types';
 interface Props {
   task: any;
   onClose: () => void;
@@ -39,6 +39,13 @@ interface Props {
   // Cross-entity: repair quote creates a new repair row
   addOptimisticRepair?: (repair: Repair) => void;
   removeOptimisticRepair?: (tempRepairId: string) => void;
+  /** v2026-04-22 — cross-entity: disposal task completion auto-releases the
+   *  parent inventory item (server-side flips Status=Released + Release Date).
+   *  Pass useInventory's applyItemPatch / clearItemPatch so the panel can
+   *  optimistically flip the item locally before the server round-trip,
+   *  matching the pattern every other page uses. */
+  applyItemPatch?: (itemId: string, patch: Partial<InventoryItem>) => void;
+  clearItemPatch?: (itemId: string) => void;
 }
 
 const TYPE_CFG: Record<string, { bg: string; color: string }> = { INSP: { bg: '#FEF3EE', color: '#E85D2D' }, ASM: { bg: '#F0FDF4', color: '#15803D' }, REPAIR: { bg: '#FEF3C7', color: '#B45309' }, DLVR: { bg: '#EDE9FE', color: '#7C3AED' }, RCVG: { bg: '#EFF6FF', color: '#1D4ED8' }, WCPU: { bg: '#FCE7F3', color: '#BE185D' } };
@@ -49,7 +56,7 @@ function Field({ label, value, mono }: { label: string; value?: string | number 
 
 const input: React.CSSProperties = { width: '100%', padding: '8px 10px', fontSize: 13, border: `1px solid ${theme.colors.border}`, borderRadius: 8, outline: 'none', fontFamily: 'inherit' };
 
-export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = [], applyTaskPatch, mergeTaskPatch, clearTaskPatch, addOptimisticRepair, removeOptimisticRepair }: Props) {
+export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = [], applyTaskPatch, mergeTaskPatch, clearTaskPatch, addOptimisticRepair, removeOptimisticRepair, applyItemPatch, clearItemPatch }: Props) {
   const { isMobile } = useIsMobile();
   const { width: panelWidth, handleMouseDown: handleResizeMouseDown } = useResizablePanel(460, 'task', isMobile);
   const tc = TYPE_CFG[task.type] || TYPE_CFG.RCVG;
@@ -284,6 +291,25 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
     setCompleted(true);
     entityEvents.emit('task', task.taskId);
 
+    // v2026-04-22 — Disposal (DISP) tasks auto-release the parent item
+    // server-side (StrideAPI handleCompleteTask_ stamps Release Date +
+    // Status='Released' directly on the inventory row). Apply the same
+    // patch locally so the UI reflects the release immediately — same
+    // pattern every other cross-entity action uses. Rolled back below
+    // on server failure. Emits 'inventory' event + the router's
+    // api_writeThrough_ will mirror the sheet row to Supabase so other
+    // tabs receive the realtime echo within ~1-2s.
+    const svcCode = String(task.svcCode || task.serviceCode || task.type || '').toUpperCase();
+    const isDisposal = svcCode === 'DISP' || svcCode === 'DISPOSAL';
+    const itemIdForPatch = task.itemId ? String(task.itemId) : '';
+    if (isDisposal && itemIdForPatch) {
+      applyItemPatch?.(itemIdForPatch, {
+        status: 'Released' as const,
+        releaseDate: new Date().toISOString().slice(0, 10),
+      });
+      entityEvents.emit('inventory', itemIdForPatch);
+    }
+
     // Demo mode: no API or no client sheet — stop here, UI already reflects completion.
     if (!apiConfigured || !clientSheetId) return;
 
@@ -295,6 +321,10 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
             taskId: task.taskId,
             result,
             taskNotes: notes || undefined,
+            // v2026-04-22 — pass itemId so the router's write-through can
+            // resync the inventory row to Supabase. Without this the mirror
+            // was a no-op and the UI showed stale status until page refresh.
+            ...(itemIdForPatch ? { itemId: itemIdForPatch } : {}),
             ...(inlineCustomPrice !== undefined ? { customPrice: inlineCustomPrice } : {}),
           },
           clientSheetId
@@ -302,6 +332,9 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
         if (!resp.ok || !resp.data?.success) {
           const errMsg = resp.error || resp.data?.error || 'Completion recorded locally but the server call failed.';
           setSubmitError(errMsg + ' Refresh to reconcile, or retry.');
+          // Roll back the disposal item patch on failure so the UI doesn't
+          // linger showing a Released status that didn't actually persist.
+          if (isDisposal && itemIdForPatch) clearItemPatch?.(itemIdForPatch);
           void writeSyncFailed({
             tenant_id: clientSheetId,
             entity_type: 'task',
@@ -318,6 +351,8 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
           onTaskUpdated?.();
         }
       } catch (err) {
+        // Network failure: roll back the disposal item patch too.
+        if (isDisposal && itemIdForPatch) clearItemPatch?.(itemIdForPatch);
         setSubmitError(
           (err instanceof Error ? err.message : 'Network error')
           + ' while completing task. Refresh to reconcile.'

@@ -35,6 +35,7 @@ import { mergePreflightSkips } from '../lib/batchLoop';
 import { applyBulkPatch, revertBulkPatchForFailures } from '../lib/optimisticBulk';
 import { useTasks } from '../hooks/useTasks';
 import { useRepairs } from '../hooks/useRepairs';
+import { useInventory } from '../hooks/useInventory';
 import { useBatchData } from '../contexts/BatchDataContext';
 import { useAuth } from '../contexts/AuthContext';
 import { MultiSelectFilter } from '../components/shared/MultiSelectFilter';
@@ -224,6 +225,11 @@ export function Tasks() {
 
   const { tasks, loading: tasksLoading, refetch: refetchTasks, applyTaskPatch, mergeTaskPatch, clearTaskPatch, addOptimisticTask, removeOptimisticTask } = useTasks(apiConfigured && clientFilter.length > 0, selectedSheetId);
   const { repairs, addOptimisticRepair, removeOptimisticRepair } = useRepairs(apiConfigured && clientFilter.length > 0, selectedSheetId);
+  // v2026-04-22 — useInventory is mounted on Tasks page so the panel can
+  // optimistically flip the parent item's status on disposal completion.
+  // Shares the same in-memory cache with every other useInventory instance
+  // in the app, so patches propagate across pages + tabs via realtime.
+  const { applyItemPatch, clearItemPatch } = useInventory(apiConfigured && clientFilter.length > 0, selectedSheetId);
   const itemIndicators = useItemIndicators(selectedSheetId);
   (window as any).__itemIndicators = itemIndicators.loaded ? itemIndicators : null;
   const ALL_ASSIGNED = useMemo(() => [...new Set(tasks.map(t => t.assignedTo).filter(Boolean))].sort(), [tasks]);
@@ -631,7 +637,7 @@ export function Tasks() {
       <style>{`@keyframes slideUp { from { transform: translateY(100%); } to { transform: translateY(0); } } @keyframes spin { to { transform: rotate(360deg); } }`}</style>
       {toast && createPortal(<div style={{ position: 'fixed', bottom: 80, left: '50%', transform: 'translateX(-50%)', background: '#1A1A1A', color: '#fff', padding: '10px 20px', borderRadius: 10, fontSize: 13, fontWeight: 600, zIndex: 9999, boxShadow: '0 4px 12px rgba(0,0,0,0.3)', animation: 'slideUp 0.2s ease-out' }}>{toast}</div>, document.body)}
       {batchGuardClients && <BatchGuard selectedClients={batchGuardClients} actionName={batchGuardAction} onDismiss={() => setBatchGuardClients(null)} />}
-      {selectedTask && <TaskDetailPanel task={selectedTask} onClose={() => setSelectedTaskId(null)} onTaskUpdated={refetchTasks} onNavigateToItem={(itemId) => { setSelectedTaskId(null); navigate('/inventory', { state: { openItemId: itemId } }); }} itemRepairs={repairs.filter(r => r.itemId === selectedTask.itemId)} applyTaskPatch={applyTaskPatch} mergeTaskPatch={mergeTaskPatch} clearTaskPatch={clearTaskPatch} addOptimisticTask={addOptimisticTask} removeOptimisticTask={removeOptimisticTask} addOptimisticRepair={addOptimisticRepair} removeOptimisticRepair={removeOptimisticRepair} />}
+      {selectedTask && <TaskDetailPanel task={selectedTask} onClose={() => setSelectedTaskId(null)} onTaskUpdated={refetchTasks} onNavigateToItem={(itemId) => { setSelectedTaskId(null); navigate('/inventory', { state: { openItemId: itemId } }); }} itemRepairs={repairs.filter(r => r.itemId === selectedTask.itemId)} applyTaskPatch={applyTaskPatch} mergeTaskPatch={mergeTaskPatch} clearTaskPatch={clearTaskPatch} addOptimisticTask={addOptimisticTask} removeOptimisticTask={removeOptimisticTask} addOptimisticRepair={addOptimisticRepair} removeOptimisticRepair={removeOptimisticRepair} applyItemPatch={applyItemPatch} clearItemPatch={clearItemPatch} />}
       <FloatingActionMenu
         show={isMobile}
         actions={(() => {

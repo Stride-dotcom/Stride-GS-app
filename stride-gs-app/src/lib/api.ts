@@ -1402,6 +1402,13 @@ export interface CompleteTaskPayload {
   /** Optional inline Custom Price override — atomically set on the task before
    *  the billing row is written. number = set, null = clear, undefined = no change. */
   customPrice?: number | null;
+  /** v2026-04-22 — item_id of the task's parent item. Passed so the server
+   *  router's write-through can resync the inventory row to Supabase after
+   *  completion (especially disposal tasks, which auto-flip the item's
+   *  Status to Released + stamp Release Date). Without this, the Supabase
+   *  inventory mirror stays stale and the React UI shows the old status
+   *  until a manual refresh. */
+  itemId?: string;
 }
 
 export interface CompleteTaskResponse {
