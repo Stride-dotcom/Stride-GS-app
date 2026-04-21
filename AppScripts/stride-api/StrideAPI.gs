@@ -1,5 +1,25 @@
 /* ===================================================
-   StrideAPI.gs — v38.91.0 — 2026-04-20 PST — parity log event-level writes
+   StrideAPI.gs — v38.92.0 — 2026-04-16 PST — Deferred onboarding retry (self-healing new-client setup)
+   v38.92.0: FEAT — Fixes the "new client onboarded but SCRIPT ID + WEB APP URL
+             stay blank in CB Clients" bug. Root cause: Google Drive's
+             indexing of a newly-copied container-bound script can take
+             MINUTES, but `handleOnboardClient_` only retries discovery for
+             ~16 seconds before giving up. The manual "Finish Setup" button
+             hits the same indexing-lag wall.
+             Solution: if inline discovery fails, enqueue the sheetId in
+             Script Properties (`PENDING_ONBOARDINGS`) and a new time-based
+             trigger `retryPendingOnboardings_` runs every 2 minutes for up
+             to 30 minutes, re-attempting via `handleFinishClientSetup_`
+             (the same 4-strategy discovery + deploy + CB-write path). By
+             minute 5-10, Drive has indexed the new script and discovery
+             succeeds automatically — no manual button-click needed.
+             On final give-up (15 attempts): logs a 'sync_failed' row to
+             gs_sync_events with action_type='onboarding_finish_setup' so
+             the failure surfaces in the FailedOperationsDrawer.
+             New functions: `api_enqueueOnboardingRetry_`,
+             `retryPendingOnboardings_`, `installOnboardingRetryTrigger`.
+             **OPERATOR ACTION REQUIRED**: run `installOnboardingRetryTrigger`
+             once from the Apps Script editor to install the 2-min cron.
    v38.91.0: Phase 5 shadow-mode rate comparisons now land as structured
              rows in public.billing_parity_log (new table this session).
              Until now api_lookupRate_ emitted PARITY_OK / PARITY_MISMATCH
@@ -1528,6 +1548,146 @@ function installSyncRetryTrigger() {
   }
   ScriptApp.newTrigger("retryFailedSyncs_").timeBased().everyMinutes(10).create();
   var msg = "installSyncRetryTrigger: removed " + removed + " old trigger(s), scheduled retryFailedSyncs_ every 10 minutes";
+  Logger.log(msg);
+  return msg;
+}
+
+// ─── Deferred onboarding completion (v38.68.0) ──────────────────────────────
+//
+// Problem: After `makeCopy()` creates a new client spreadsheet, Google's Drive
+// indexing of the newly-copied container-bound script takes anywhere from
+// seconds to MINUTES before the script appears in any discovery query
+// (Drive REST, URL redirect, or parent-folder search). The inline
+// `handleOnboardClient_` only gets ~16 seconds across 5 retry attempts, which
+// often isn't enough. The user is then stuck with a client row that has
+// neither SCRIPT ID nor WEB APP URL, and the manual Finish Setup button hits
+// the same indexing-lag wall.
+//
+// Solution: if inline discovery fails, enqueue the sheetId in Script
+// Properties and a 2-minute time-based trigger retries up to 15 times
+// (= 30-minute window, long enough for Drive to finish indexing). Each
+// retry attempt calls `handleFinishClientSetup_` which already has the
+// full 4-strategy discovery + deploy + CB-write logic.
+//
+// Install once from the Apps Script editor: run `installOnboardingRetryTrigger`.
+
+/** Enqueue a sheetId for background onboarding completion. */
+function api_enqueueOnboardingRetry_(sheetId, clientName, clientFolderId) {
+  if (!sheetId) return;
+  var props = PropertiesService.getScriptProperties();
+  var raw = props.getProperty("PENDING_ONBOARDINGS");
+  var list = [];
+  try { list = raw ? JSON.parse(raw) : []; } catch (_) { list = []; }
+  // De-dupe — if this sheetId is already queued, don't re-add
+  for (var i = 0; i < list.length; i++) {
+    if (list[i].sheetId === sheetId) {
+      Logger.log("api_enqueueOnboardingRetry_: " + sheetId + " already in queue, skip");
+      return;
+    }
+  }
+  list.push({
+    sheetId: sheetId,
+    clientName: String(clientName || ""),
+    clientFolderId: String(clientFolderId || ""),
+    queuedAt: new Date().toISOString(),
+    attempts: 0
+  });
+  props.setProperty("PENDING_ONBOARDINGS", JSON.stringify(list));
+  Logger.log("api_enqueueOnboardingRetry_: enqueued " + sheetId + " (" + clientName + "), queue size=" + list.length);
+}
+
+/**
+ * Time-based trigger handler — processes the PENDING_ONBOARDINGS queue.
+ * For each pending entry, calls handleFinishClientSetup_ which does the
+ * discovery + Web App deployment + CB-Clients write + Supabase mirror.
+ * On success: remove from queue. On failure: increment attempts. After 15
+ * attempts (30 min at 2-min intervals), give up and log to gs_sync_events
+ * so the failure surfaces in the React FailedOperationsDrawer.
+ */
+function retryPendingOnboardings_() {
+  var props = PropertiesService.getScriptProperties();
+  var raw = props.getProperty("PENDING_ONBOARDINGS");
+  var list;
+  try { list = raw ? JSON.parse(raw) : []; } catch (_) { list = []; }
+  if (!list || list.length === 0) return;
+
+  var MAX_ATTEMPTS = 15; // 30-min window at 2-min intervals
+  var stillPending = [];
+  var resolved = 0;
+  var startedAt = Date.now();
+  var TIME_BUDGET_MS = 5 * 60 * 1000; // stay well under GAS 6-min limit
+
+  for (var i = 0; i < list.length; i++) {
+    if (Date.now() - startedAt > TIME_BUDGET_MS) {
+      // Ran out of time this tick — push remaining items back untouched.
+      stillPending.push(list[i]);
+      continue;
+    }
+    var entry = list[i];
+    entry.attempts = (entry.attempts || 0) + 1;
+
+    var success = false;
+    var lastError = "";
+    try {
+      var resp = handleFinishClientSetup_({ clientSheetId: entry.sheetId });
+      var json = JSON.parse(resp.getContent());
+      // Success = finishClientSetup reports a Web App URL OR Script ID found
+      if (json && json.success && (json.webAppUrl || json.scriptId)) {
+        success = true;
+        Logger.log("retryPendingOnboardings_: resolved " + entry.clientName +
+                   " (" + entry.sheetId + ") on attempt " + entry.attempts);
+      } else {
+        lastError = (json && json.error) || (json && json.warnings && json.warnings.join("; ")) ||
+                    "no scriptId/webAppUrl in response";
+      }
+    } catch (err) {
+      lastError = String(err);
+      Logger.log("retryPendingOnboardings_: error for " + entry.clientName + ": " + err);
+    }
+
+    if (success) {
+      resolved++;
+      continue; // drop from queue
+    }
+
+    if (entry.attempts >= MAX_ATTEMPTS) {
+      Logger.log("retryPendingOnboardings_: giving up on " + entry.clientName +
+                 " after " + MAX_ATTEMPTS + " attempts. Last error: " + lastError);
+      try {
+        api_logSyncFailure_(entry.sheetId, "client", entry.sheetId, "onboarding_finish_setup",
+          "Deferred onboarding gave up after " + MAX_ATTEMPTS + " attempts. Last error: " +
+          lastError.substring(0, 300));
+      } catch (_) {}
+      // Don't re-add to stillPending — queue is fully purged for this sheet
+    } else {
+      entry.lastError = lastError.substring(0, 200);
+      stillPending.push(entry);
+    }
+  }
+
+  props.setProperty("PENDING_ONBOARDINGS", JSON.stringify(stillPending));
+  Logger.log("retryPendingOnboardings_: processed=" + list.length +
+             " resolved=" + resolved + " remaining=" + stillPending.length);
+}
+
+/**
+ * One-time installer for the 2-minute retryPendingOnboardings_ trigger.
+ * Run manually once from the Apps Script editor: pick `installOnboardingRetryTrigger`
+ * from the function dropdown and click Run. Idempotent — removes any existing
+ * trigger before creating a new one.
+ */
+function installOnboardingRetryTrigger() {
+  var existing = ScriptApp.getProjectTriggers();
+  var removed = 0;
+  for (var i = 0; i < existing.length; i++) {
+    if (existing[i].getHandlerFunction() === "retryPendingOnboardings_") {
+      ScriptApp.deleteTrigger(existing[i]);
+      removed++;
+    }
+  }
+  ScriptApp.newTrigger("retryPendingOnboardings_").timeBased().everyMinutes(2).create();
+  var msg = "installOnboardingRetryTrigger: removed " + removed +
+            " old trigger(s), scheduled retryPendingOnboardings_ every 2 minutes";
   Logger.log(msg);
   return msg;
 }
@@ -18203,6 +18363,15 @@ function handleOnboardClient_(payload) {
   }
   if (!newScriptId) {
     Logger.log("handleOnboardClient_: Script ID not found after " + retryDelays.length + " attempts — Finish Setup button will be available on the client card");
+    // v38.68.0 — enqueue for the 2-min background retry so the user doesn't
+    // have to click Finish Setup manually. The retry runs handleFinishClientSetup_
+    // every 2 minutes for up to 30 minutes, which is plenty of time for Drive
+    // to finish indexing the newly-copied bound script.
+    try {
+      api_enqueueOnboardingRetry_(newSpreadsheetId, clientName, clientFolderId);
+    } catch (enqueueErr) {
+      Logger.log("handleOnboardClient_: enqueue onboarding retry failed: " + enqueueErr);
+    }
   }
 
   // Write settings to new client sheet (mirrors writeSettingsToClientSheet_)
