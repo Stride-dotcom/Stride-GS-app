@@ -61,6 +61,11 @@ interface Props {
   onClose: () => void;
   /** Returns a promise with submit result. Modal handles loading/error/success internally. */
   onSubmit: (data: OnboardClientFormData) => Promise<OnboardSubmitResult>;
+  /** Pre-fill specific fields in create mode (e.g. from a client intake
+   *  submission). Only the keys present are applied; everything else
+   *  falls back to the empty-state defaults. Ignored in edit mode —
+   *  edit always starts from `existingClient`. */
+  initialData?: Partial<OnboardClientFormData>;
 }
 
 // Simulated phase sequence shown during the 30-60s onboarding call. Advances on a
@@ -142,9 +147,15 @@ function buildInitialData(existing: ApiClient | null): OnboardClientFormData {
   };
 }
 
-export function OnboardClientModal({ mode = 'create', existingClient = null, allClients = [], onClose, onSubmit }: Props) {
+export function OnboardClientModal({ mode = 'create', existingClient = null, allClients = [], onClose, onSubmit, initialData }: Props) {
   const isEdit = mode === 'edit';
-  const [data, setData] = useState<OnboardClientFormData>(() => buildInitialData(existingClient));
+  const [data, setData] = useState<OnboardClientFormData>(() => {
+    const base = buildInitialData(existingClient);
+    // Apply create-mode prefill (e.g. from a client_intakes row) on top
+    // of the blank defaults. Edit mode always wins over initialData so
+    // an operator can't accidentally clobber an existing client.
+    return isEdit || !initialData ? base : { ...base, ...initialData };
+  });
 
   // Session 70 fix #2 — CB-sourced payment terms (operator-maintained list
   // matching QuickBooks). Falls back to the legacy 6 options if the endpoint

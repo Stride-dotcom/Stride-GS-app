@@ -28,6 +28,7 @@ const DetailPanelMockup = React.lazy(() => import('./pages/DetailPanelMockup').t
 import { Orders } from './pages/Orders';
 import { QuoteTool } from './pages/QuoteTool';
 import { PriceList } from './pages/PriceList';
+import { Intakes } from './pages/Intakes';
 import { PublicRates } from './pages/PublicRates';
 import { ClientIntake } from './pages/ClientIntake';
 import { MessagesPage } from './components/messages/MessagesPage';
@@ -97,6 +98,7 @@ export default function App() {
           <Route path="/marketing" element={<RoleGuard allowed={['admin']}><Marketing /></RoleGuard>} />
           <Route path="/quotes" element={<RoleGuard allowed={['admin']}><QuoteTool /></RoleGuard>} />
           <Route path="/price-list" element={<RoleGuard allowed={['admin']}><PriceList /></RoleGuard>} />
+          <Route path="/intakes" element={<RoleGuard allowed={['admin']}><Intakes /></RoleGuard>} />
           <Route path="/settings" element={<RoleGuard allowed={['admin']}><Settings /></RoleGuard>} />
           {/* Session 70 follow-up — admin-only DetailHeader mockup for reviewing the proposed
               unified layout across all 7 detail panel types before mass adoption. */}

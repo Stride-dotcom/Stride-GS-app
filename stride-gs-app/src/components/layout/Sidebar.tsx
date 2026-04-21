@@ -23,6 +23,7 @@ import {
   Receipt,
   BookOpen,
   MessageSquare,
+  UserPlus,
 } from 'lucide-react';
 import { theme } from '../../styles/theme';
 import { cacheClearAll } from '../../lib/apiCache';
@@ -45,6 +46,7 @@ const ADMIN_NAV = [
   { id: 'orders', label: 'Delivery', path: '/orders', icon: Calendar },
   { id: 'quotes', label: 'Quotes', path: '/quotes', icon: Receipt },
   { id: 'pricelist', label: 'Price List', path: '/price-list', icon: BookOpen },
+  { id: 'intakes', label: 'Intakes', path: '/intakes', icon: UserPlus },
   { id: 'marketing', label: 'Marketing', path: '/marketing', icon: Mail },
   { id: 'scanner', label: 'QR Scanner', path: '/scanner', icon: ScanLine },
   { id: 'labels', label: 'Labels', path: '/labels', icon: Tag },
