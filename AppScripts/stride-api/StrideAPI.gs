@@ -1,5 +1,12 @@
 /* ===================================================
-   StrideAPI.gs — v38.93.1 — 2026-04-20 PST — P+D linked order tokens in notification
+   StrideAPI.gs — v38.93.2 — 2026-04-20 PST — Parity: class volume id-keying
+   v38.93.2: handleGetPricingParity_ now selects id on item_classes and
+             keys supabaseVolumes by class ID (XS/S/M/L/XL/XXL) instead
+             of name ("Extra Small"/"Small"/...). The Parity Monitor's
+             Class Volumes block was always showing zeros on the
+             Supabase row because the React side looks up by ID. Name
+             kept as a defensive fallback.
+   v38.93.1 — 2026-04-20 PST — P+D linked order tokens in notification
    v38.93.1: handleNotifyNewDeliveryOrder_ now accepts linkedOrderNumber, pickupContactName,
              pickupAddress; adds {{LINKED_ORDER_NUMBER}}, {{PICKUP_CONTACT}}, {{PICKUP_ADDRESS}}
              tokens so P+D email shows both order numbers and both addresses.
@@ -6683,8 +6690,13 @@ function handleGetPricingParity_() {
   var sbSvcs = api_supabaseGet_(
     "/rest/v1/service_catalog?select=code,name,category,billing,rates,flat_rate,xxl_rate,active,display_order&order=display_order.asc"
   );
+  // Session 77: pull id in addition to name. The storage_size lookup
+  // on the React side keys by class ID (XS/S/M/L/XL/XXL); keying by
+  // `name` returned the long-form ("Extra Small") which never matches
+  // the CLASSES array, so the Parity page always showed zeros for the
+  // Supabase side even when storage_size was populated correctly.
   var sbClasses = api_supabaseGet_(
-    "/rest/v1/item_classes?select=name,storage_size,active&active=eq.true"
+    "/rest/v1/item_classes?select=id,name,storage_size,active&active=eq.true"
   );
   var supabaseReachable = sbSvcs !== null && sbClasses !== null;
 
@@ -6718,9 +6730,15 @@ function handleGetPricingParity_() {
   if (sbClasses) {
     for (var sci = 0; sci < sbClasses.length; sci++) {
       var sc = sbClasses[sci];
-      var scName = String(sc.name || "").trim().toUpperCase();
-      if (!scName) continue;
-      supabaseVolumes[scName] = Number(sc.storage_size) || 0;
+      // Session 77 fix: key by the class ID ("XS"/"S"/"M"/...) which
+      // matches the CLASSES array the sheet side + React UI use.
+      // Fall back to name-uppercased for any legacy row that
+      // somehow has a populated name but missing id, so old clients
+      // degrade gracefully instead of silently going blank.
+      var scId = String(sc.id || "").trim().toUpperCase();
+      if (!scId) scId = String(sc.name || "").trim().toUpperCase();
+      if (!scId) continue;
+      supabaseVolumes[scId] = Number(sc.storage_size) || 0;
     }
   }
 
