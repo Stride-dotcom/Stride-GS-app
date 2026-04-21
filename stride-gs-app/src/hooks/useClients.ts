@@ -25,6 +25,7 @@ import type { ApiClient, ClientsResponse } from '../lib/api';
 import type { Client } from '../lib/types';
 import { useApiData } from './useApiData';
 import { entityEvents } from '../lib/entityEvents';
+import { cacheDelete } from '../lib/apiCache';
 
 export interface UseClientsResult {
   /** Raw API clients (full data from CB) */
@@ -87,9 +88,21 @@ export function useClients(autoFetch = true, includeInactive = false): UseClient
   // instance (every page with a client dropdown) refetches when a client is
   // created / updated / reactivated. Keeps dropdowns live across the app without
   // requiring a page refresh.
+  // When a 'client' event fires (local save OR Supabase realtime echo), nuke
+  // the cached 'clients'/'clients_all' entries before refetching so stale
+  // localStorage data can't win the next fetch. Previously: save → refetch →
+  // fetchClientsFromSupabase returns fresh data, but the in-memory apiCache
+  // (set by the initial mount) still held the stale object, so other mounted
+  // useClients instances (Sidebar, dropdowns) kept reading the stale copy
+  // until a full page reload. This makes "Auto Inspection" / "Shipment Note"
+  // / any client settings change visible across every open tab within 1-2s.
   useEffect(() => {
     return entityEvents.subscribe((type) => {
-      if (type === 'client') refetch();
+      if (type === 'client') {
+        cacheDelete('clients');
+        cacheDelete('clients_all');
+        refetch();
+      }
     });
   }, [refetch]);
 
