@@ -54,6 +54,9 @@ function Field({ label, value, icon: Icon }: { label: string; value?: string | n
 
 export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNavigateToWc, applyWcPatch, clearWcPatch, applyItemPatch }: Props) {
   const { user } = useAuth();
+  // Clients are not allowed to release items or set release dates — that
+  // decision belongs to warehouse staff. Gate every Release-related action.
+  const canRelease = user?.role === 'admin' || user?.role === 'staff';
   const { isMobile } = useIsMobile();
   const { width: panelWidth, handleMouseDown: handleResizeMouseDown } = useResizablePanel(440, 'willcall', isMobile);
   const apiConfigured = isApiConfigured();
@@ -826,7 +829,7 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
 
           {/* Quick Actions */}
           <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-            {isActive && !releaseResult && !removeResult && releaseMode === 'none' && allItemIds.length > 1 && (
+            {canRelease && isActive && !releaseResult && !removeResult && releaseMode === 'none' && allItemIds.length > 1 && (
               <WriteButton label="Release Some..." variant="secondary" size="sm" onClick={() => { setPartialSelected(new Set(allItemIds)); setReleaseMode('partial'); }} />
             )}
             {isActive && !releaseResult && !removeResult && !removeMode && (
@@ -1034,7 +1037,7 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
               </button>
             </div>
           )}
-          {isActive && !releaseResult ? (
+          {canRelease && isActive && !releaseResult ? (
             <WriteButton
               label={releasing ? 'Releasing...' : 'Release All Items'}
               variant="primary"

@@ -1,4 +1,9 @@
 /* ===================================================
+   StrideAPI.gs — v38.99.0 — 2026-04-21 PST — block clients from release actions
+   v38.99.0: FIX — processWcRelease now wrapped in withStaffGuard_ so a client
+             with DevTools can't POST it directly. releaseItems was already
+             staff-guarded. Matches the new React-side gates on WillCall
+             Release All / Release Some buttons (v38.99.0 bundle).
    StrideAPI.gs — v38.98.0 — 2026-04-21 PST — per-user lock for Start/Complete Task
    v38.98.0: FIX — handleStartTask_ and handleCompleteTask_ now use
              LockService.getUserLock() instead of getScriptLock() and
@@ -4608,13 +4613,18 @@ function doPost(e) {
         });
 
       case "processWcRelease":
-        return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
+        // v38.99.0 — clients are no longer allowed to release Will Call items.
+        // Only staff/admin. Matches the React-side gate on the Release All /
+        // Release Some buttons in WillCallDetailPanel.
+        return withStaffGuard_(callerEmail, function() {
+          return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
           var r = handleProcessWcRelease_(effectiveId, payload);
           invalidateClientCache_(effectiveId);
           api_notifySupabase_(r, { tenant_id: effectiveId, entity_type: "will_call", entity_id: String(payload.wcNumber || ""), action_type: "process_wc_release", requested_by: callerEmail, request_id: String(payload.requestId || "") });
           api_fullClientSync_(effectiveId, ["will_call", "inventory", "billing"]);
           api_auditLog_("will_call", String(payload.wcNumber || ""), effectiveId, "release", { summary: "Will call released" }, callerEmail);
           return r;
+          });
         });
 
       case "cancelWillCall":
