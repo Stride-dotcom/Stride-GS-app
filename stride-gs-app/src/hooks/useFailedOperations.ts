@@ -138,8 +138,30 @@ export function useFailedOperations(): UseFailedOperationsResult {
     // Build payload with fresh request_id
     const retryPayload = { ...event.payload, requestId: crypto.randomUUID() };
 
+    // action_type is stored in snake_case (gs_sync_events convention) but the
+    // StrideAPI.gs router expects camelCase. Map common actions; fall back to
+    // a generic snake→camel conversion for anything not listed.
+    const ACTION_MAP: Record<string, string> = {
+      start_task:             'startTask',
+      complete_task:          'completeTask',
+      cancel_task:            'cancelTask',
+      complete_repair:        'completeRepair',
+      cancel_repair:          'cancelRepair',
+      approve_repair_quote:   'approveRepairQuote',
+      decline_repair_quote:   'declineRepairQuote',
+      process_wc_release:     'processWcRelease',
+      cancel_will_call:       'cancelWillCall',
+      complete_shipment:      'completeShipment',
+      update_inventory_item:  'updateInventoryItem',
+      release_items:          'releaseItems',
+      transfer_items:         'transferItems',
+      update_client:          'updateClient',
+    };
+    const toCamel = (s: string) => s.replace(/_([a-z])/g, (_, c) => c.toUpperCase());
+    const action = ACTION_MAP[event.action_type] || toCamel(event.action_type);
+
     const resp = await apiPost(
-      event.action_type,
+      action,
       retryPayload,
       { clientSheetId: event.tenant_id }
     );
