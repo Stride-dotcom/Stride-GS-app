@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Stride Logistics — Delivery Availability</title>
+  <link rel="icon" href="/favicon.svg" />
+  <style>
+    :root {
+      --orange: #E85D2D;
+      --text: #1a1a1a;
+      --muted: #6B7280;
+      --border: #E5E7EB;
+      --bg: #f8f9fa;
+      --green: #22C55E;
+      --green-text: #052E16;
+      --amber: #F97316;
+      --amber-text: #431407;
+      --red: #EF4444;
+      --red-text: #450A0A;
+      --past-bg: #F3F4F6;
+      --past-text: #D1D5DB;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+    }
+    .container { max-width: 1100px; margin: 0 auto; padding: 32px 20px; }
+    .header {
+      display: flex; align-items: center; gap: 14px; margin-bottom: 8px;
+    }
+    .header img { height: 32px; }
+    .header h1 { font-size: 20px; font-weight: 700; }
+    .subtitle { font-size: 13px; color: var(--muted); margin-bottom: 24px; }
+
+    /* View toggle */
+    .view-toggle { display: flex; gap: 4px; margin-bottom: 16px; }
+    .view-btn {
+      padding: 6px 16px; font-size: 12px; font-weight: 500; border-radius: 6px;
+      border: 1px solid var(--border); background: #fff; color: var(--text);
+      cursor: pointer; font-family: inherit; transition: all 0.15s;
+    }
+    .view-btn.active {
+      background: var(--orange); color: #fff; border-color: var(--orange);
+    }
+
+    /* Legend */
+    .legend { display: flex; flex-wrap: wrap; gap: 18px; margin-bottom: 18px; font-size: 12px; color: var(--muted); }
+    .legend-item { display: flex; align-items: center; gap: 6px; }
+    .legend-dot { width: 12px; height: 12px; border-radius: 3px; }
+
+    /* Calendar grid */
+    .calendar-grid {
+      display: grid; gap: 16px;
+      grid-template-columns: repeat(3, 1fr);
+    }
+    .calendar-grid.cols-2 { grid-template-columns: repeat(2, 1fr); }
+    .calendar-grid.cols-4 { grid-template-columns: repeat(4, 1fr); }
+
+    .month-card {
+      border: 1px solid var(--border); border-radius: 10px;
+      padding: 14px; background: #fff;
+    }
+    .month-title {
+      font-size: 12px; font-weight: 600; text-transform: uppercase;
+      letter-spacing: 0.05em; margin-bottom: 8px; color: var(--text);
+    }
+    .day-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; }
+    .day-header {
+      font-size: 10px; color: var(--muted); text-align: center;
+      font-weight: 500; padding: 2px 0;
+    }
+    .day-cell {
+      aspect-ratio: 1; display: flex; align-items: center; justify-content: center;
+      font-size: 11px; border-radius: 4px; font-weight: 500;
+    }
+    .day-cell.open    { background: var(--green); color: var(--green-text); }
+    .day-cell.limited { background: var(--amber); color: var(--amber-text); }
+    .day-cell.closed  { background: var(--red);   color: var(--red-text); }
+    .day-cell.past    { background: var(--past-bg); color: var(--past-text); font-weight: 400; }
+
+    .footer { font-size: 11px; color: var(--muted); margin-top: 16px; }
+    .loading { text-align: center; padding: 60px 0; color: var(--muted); font-size: 14px; }
+    .error { padding: 12px 16px; background: #FEF2F2; border: 1px solid #FCA5A5; border-radius: 8px; color: #DC2626; font-size: 13px; margin-bottom: 16px; }
+
+    /* Responsive */
+    @media (max-width: 900px) {
+      .calendar-grid { grid-template-columns: repeat(2, 1fr) !important; }
+    }
+    @media (max-width: 550px) {
+      .calendar-grid { grid-template-columns: 1fr !important; }
+      .container { padding: 20px 12px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="container" id="app">
+    <div class="loading" id="loading">Loading availability calendar...</div>
+  </div>
+
+  <script>
+    // ── Config ─────────────────────────────────────────────────────────
+    const SUPABASE_URL  = 'https://uqplppugeickmamycpuz.supabase.co';
+    const SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVxcGxwcHVnZWlja21hbXljcHV6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQ2NDI4MTEsImV4cCI6MjA5MDIxODgxMX0.Ue9tgv8zxmdgaydOSDelG5WY6MTVPK055WOGD32MRyc';
+    const TENANT_ID     = 'stride';
+
+    const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+    const DAYS   = ['S','M','T','W','T','F','S'];
+
+    // ── Helpers ────────────────────────────────────────────────────────
+    function toDateStr(y, m, d) {
+      return `${y}-${String(m+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+    }
+    function daysInMonth(y, m) { return new Date(y, m+1, 0).getDate(); }
+    function startDay(y, m)    { return new Date(y, m, 1).getDay(); }
+    function isPast(ds) {
+      const t = new Date(); t.setHours(0,0,0,0);
+      return new Date(ds+'T00:00:00') < t;
+    }
+    function fmtUpdated(iso) {
+      if (!iso) return 'Never';
+      const d = new Date(iso);
+      return d.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})
+        + ' at ' + d.toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'});
+    }
+    function getMonths(view) {
+      const now = new Date(), y = now.getFullYear(), m = now.getMonth();
+      const n = view === 'year' ? 12 : view === '3month' ? 3 : 2;
+      return Array.from({length:n},(_,i)=>({year:y+Math.floor((m+i)/12), month:(m+i)%12}));
+    }
+
+    // ── Federal Holidays ───────────────────────────────────────────────
+    function nthDow(y, m, dow, n) {
+      const first = new Date(y, m, 1).getDay();
+      return 1 + ((dow - first + 7) % 7) + (n - 1) * 7;
+    }
+    function lastMon(y, m) {
+      const dim = new Date(y, m+1, 0).getDate();
+      const ld = new Date(y, m, dim).getDay();
+      return dim - ((ld - 1 + 7) % 7);
+    }
+    function getFederalHolidays(y) {
+      const h = new Map();
+      const add = (m, d, name) => h.set(toDateStr(y, m, d), name);
+      add(0, 1, "New Year's Day");
+      add(0, nthDow(y,0,1,3), 'MLK Jr. Day');
+      add(1, nthDow(y,1,1,3), "Presidents' Day");
+      add(4, lastMon(y,4), 'Memorial Day');
+      add(5, 19, 'Juneteenth');
+      add(6, 4, 'Independence Day');
+      add(8, nthDow(y,8,1,1), 'Labor Day');
+      add(9, nthDow(y,9,1,2), 'Columbus Day');
+      add(10, 11, 'Veterans Day');
+      add(10, nthDow(y,10,4,4), 'Thanksgiving');
+      add(11, 25, 'Christmas Day');
+      return h;
+    }
+    function getHolidayMap(months) {
+      const years = new Set(months.map(m => m.year));
+      const combined = new Map();
+      for (const y of years) for (const [k,v] of getFederalHolidays(y)) combined.set(k,v);
+      return combined;
+    }
+
+    // ── Fetch from Supabase (REST, anon key) ──────────────────────────
+    async function fetchAvailability() {
+      const url = `${SUPABASE_URL}/rest/v1/delivery_availability?tenant_id=eq.${TENANT_ID}&order=date.asc`;
+      const res = await fetch(url, {
+        headers: {
+          'apikey': SUPABASE_ANON,
+          'Authorization': `Bearer ${SUPABASE_ANON}`,
+        },
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return res.json();
+    }
+
+    // ── Render ─────────────────────────────────────────────────────────
+    let currentView = '3month';
+
+    function renderMonth(y, m, statusMap, holidayMap) {
+      const dim = daysInMonth(y, m);
+      const sd  = startDay(y, m);
+      let cells = '';
+      for (const d of DAYS) cells += `<div class="day-header">${d}</div>`;
+      for (let i = 0; i < sd; i++) cells += '<div></div>';
+      for (let d = 1; d <= dim; d++) {
+        const ds = toDateStr(y, m, d);
+        const past = isPast(ds);
+        const status = past ? 'past' : (statusMap.get(ds) || 'open');
+        const holiday = holidayMap.get(ds);
+        const star = holiday ? `<span style="position:absolute;top:1px;right:2px;font-size:7px;color:rgba(0,0,0,0.45);line-height:1;pointer-events:none;">&#9733;</span>` : '';
+        const posStyle = holiday ? 'position:relative;' : '';
+        const titleAttr = holiday ? ` title="${holiday}"` : '';
+        cells += `<div class="day-cell ${status}" style="${posStyle}"${titleAttr}>${d}${star}</div>`;
+      }
+      return `<div class="month-card"><div class="month-title">${MONTHS[m]} ${y}</div><div class="day-grid">${cells}</div></div>`;
+    }
+
+    function render(entries) {
+      const statusMap = new Map();
+      let lastUpdated = null;
+      for (const e of entries) {
+        statusMap.set(e.date, e.status);
+        if (!lastUpdated || e.updated_at > lastUpdated) lastUpdated = e.updated_at;
+      }
+
+      const months = getMonths(currentView);
+      const holidayMap = getHolidayMap(months);
+      const colClass = currentView === 'year' ? 'cols-4' : currentView === '2month' ? 'cols-2' : '';
+
+      document.getElementById('app').innerHTML = `
+        <div class="header">
+          <img src="/stride-logo.png" alt="Stride Logistics" />
+          <h1>Delivery Availability</h1>
+        </div>
+        <div class="subtitle">View available delivery slots for Stride Logistics warehouse services.</div>
+
+        <div class="view-toggle">
+          <button class="view-btn ${currentView==='2month'?'active':''}" onclick="setView('2month')">2 months</button>
+          <button class="view-btn ${currentView==='3month'?'active':''}" onclick="setView('3month')">3 months</button>
+          <button class="view-btn ${currentView==='year'?'active':''}" onclick="setView('year')">Full year</button>
+        </div>
+
+        <div class="legend">
+          <div class="legend-item"><div class="legend-dot" style="background:var(--green)"></div>Open slots available</div>
+          <div class="legend-item"><div class="legend-dot" style="background:var(--amber)"></div>Limited &mdash; call to confirm</div>
+          <div class="legend-item"><div class="legend-dot" style="background:var(--red)"></div>No available slots</div>
+          <div class="legend-item"><span style="font-size:13px;line-height:1;">&#9733;</span> Federal holiday (hover for name)</div>
+        </div>
+
+        <div class="calendar-grid ${colClass}">
+          ${months.map(({year,month}) => renderMonth(year, month, statusMap, holidayMap)).join('')}
+        </div>
+
+        <div class="footer">Last updated: ${fmtUpdated(lastUpdated)}</div>
+      `;
+    }
+
+    // ── View toggle ───────────────────────────────────────────────────
+    let cachedEntries = [];
+    window.setView = function(v) {
+      currentView = v;
+      render(cachedEntries);
+    };
+
+    // ── Init ──────────────────────────────────────────────────────────
+    (async () => {
+      try {
+        cachedEntries = await fetchAvailability();
+        render(cachedEntries);
+      } catch (e) {
+        document.getElementById('app').innerHTML = `<div class="error">Failed to load calendar: ${e.message}</div>`;
+      }
+    })();
+  </script>
+</body>
+</html>

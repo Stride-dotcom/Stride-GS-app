@@ -1,0 +1,1 @@
+import{a as e}from"./supabaseQueries-VLmSfkCT.js";export{e as fetchClientsFromSupabase};
