@@ -730,8 +730,8 @@ export function Settings() {
         : 'no expiry date';
 
       // Fetch CLIENT_INTAKE_INVITE template for substitution.
-      const tRes = await apiFetch<{ templates: Array<{ templateKey: string; subject: string; body: string }> }>('getEmailTemplates');
-      const tmpl = (tRes.data?.templates ?? []).find(t => t.templateKey === 'CLIENT_INTAKE_INVITE');
+      const tRes = await apiFetch<{ templates: Array<{ key: string; subject: string; bodyHtml: string }> }>('getEmailTemplates');
+      const tmpl = (tRes.data?.templates ?? []).find(t => t.key === 'CLIENT_INTAKE_INVITE');
       const sub = (s: string) => s
         .replace(/\{\{PROSPECT_NAME\}\}/g, client.name)
         .replace(/\{\{INTAKE_LINK\}\}/g, intakeUrl)
@@ -743,7 +743,7 @@ export function Settings() {
         intakeUrl,
         linkId:        linkRow.link_id,
         subject:       tmpl ? sub(tmpl.subject) : `Your Stride Logistics Warehousing Agreement — ${client.name}`,
-        body:          tmpl ? sub(tmpl.body) : `<p>Hi ${client.name},</p><p>Please complete your warehousing agreement: <a href="${intakeUrl}">${intakeUrl}</a></p>`,
+        body:          tmpl ? sub(tmpl.bodyHtml) : `<p>Hi ${client.name},</p><p>Please complete your warehousing agreement: <a href="${intakeUrl}">${intakeUrl}</a></p>`,
       });
     } finally {
       setResendTcLoading(null);
