@@ -1,4 +1,14 @@
 /* ===================================================
+   StrideAPI.gs — v38.98.0 — 2026-04-21 PST — per-user lock for Start/Complete Task
+   v38.98.0: FIX — handleStartTask_ and handleCompleteTask_ now use
+             LockService.getUserLock() instead of getScriptLock() and
+             waitLock timeout is 60s (was 15s). Previous global script
+             lock queued every concurrent task operation across the whole
+             API project; with PDF generation + Drive folder creation
+             holding the lock 3-8s each, a batch of 4+ start/complete
+             calls would time out the 3rd+ request. User-scoped lock
+             means different staff don't block each other and a 60s
+             budget comfortably absorbs one user's 10-task batch.
    StrideAPI.gs — v38.97.0 — 2026-04-21 PST — CRITICAL FIX: clients upsert missing on_conflict
    v38.97.0: CRITICAL FIX — supabaseUpsert_ conflictCol map was missing a
              `clients` entry. Without on_conflict=spreadsheet_id in the URL,
@@ -11957,8 +11967,11 @@ function handleCompleteTask_(clientSheetId, payload) {
   var taskTypeLower = taskType ? taskType.toLowerCase() : "";
 
   // ─── ACQUIRE LOCK ───────────────────────────────────────────────────────────
-  var lock = LockService.getScriptLock();
-  try { lock.waitLock(15000); }
+  // v38.98.0 — getUserLock() (per-caller) + 60s timeout. See handleStartTask_
+  // for the rationale. Previously: batch-complete of 4+ tasks timed out the
+  // 3rd+ request on the shared script-wide lock.
+  var lock = LockService.getUserLock();
+  try { lock.waitLock(60000); }
   catch (lockErr) { return errorResponse_("Could not acquire lock — another operation in progress. Try again.", "LOCK_ERROR"); }
 
   var warnings = [];
@@ -20304,10 +20317,17 @@ function handleStartTask_(clientSheetId, payload) {
   var forceOverride = (payload || {}).forceOverride === true;
   if (!taskId) return errorResponse_("taskId is required", "INVALID_PARAMS");
 
-  // Acquire a per-task lock to prevent concurrent Start Task requests
-  var lock = LockService.getScriptLock();
+  // v38.98.0 — switched from getScriptLock() (single global lock across ALL
+  // handlers in the API project) to getUserLock() (per-caller lock) and
+  // bumped timeout 15s→60s. Previous behavior: batch-starting 4+ tasks, or
+  // Start+Complete fired close together, would queue on ONE lock and the
+  // 3rd+ request would time out at 15s because startTask holds the lock
+  // through Drive folder creation + PDF generation (~3-8s per call).
+  // With getUserLock, different staff don't block each other; 60s budget
+  // absorbs a 10-task batch from one user even at worst-case latency.
+  var lock = LockService.getUserLock();
   try {
-    lock.waitLock(15000); // wait up to 15s
+    lock.waitLock(60000);
   } catch (_) {
     return errorResponse_("Another user is starting this task. Please wait and try again.", "LOCK_BUSY");
   }
