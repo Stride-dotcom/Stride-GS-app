@@ -39,6 +39,10 @@ export interface IntakeRow {
    *  value to be insured — used by the daily billing cron to compute
    *  the monthly charge ($300 min, or declared/$100K × rate). */
   insuranceDeclaredValue: number;
+  /** Prospect opted into Stride auto-inspecting every inbound shipment
+   *  for visible shipping damage. Off by default; copied into the
+   *  client's AUTO_INSPECTION setting at activation. */
+  autoInspect: boolean;
   paymentAuthorized: boolean;
   signatureType: 'typed' | 'drawn' | null;
   signatureData: string | null;
@@ -83,6 +87,7 @@ interface IntakeDbRow {
   notification_contacts: unknown;
   insurance_choice: string | null;
   insurance_declared_value: number | string | null;
+  auto_inspect: boolean | null;
   payment_authorized: boolean | null;
   signature_type: string | null;
   signature_data: string | null;
@@ -130,6 +135,7 @@ function rowToIntake(r: IntakeDbRow): IntakeRow {
       : [],
     insuranceChoice: (r.insurance_choice as IntakeRow['insuranceChoice']) ?? null,
     insuranceDeclaredValue: Number(r.insurance_declared_value ?? 0) || 0,
+    autoInspect: r.auto_inspect === true,
     paymentAuthorized: r.payment_authorized === true,
     signatureType: (r.signature_type as IntakeRow['signatureType']) ?? null,
     signatureData: r.signature_data,

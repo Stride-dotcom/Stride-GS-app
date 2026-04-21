@@ -140,7 +140,10 @@ export function IntakesPanel() {
     freeStorageDays: '0',
     autoCharge:   intake.paymentAuthorized,
     enableNotifications: true,
-    autoInspection: true,
+    // Carry the prospect's opt-in through to the client settings
+    // toggle. Previously hardcoded to true regardless of intake; now
+    // defaults to off unless they checked the box on Step 3.
+    autoInspection: intake.autoInspect === true,
     notes: [
       intake.notes,
       (intake.insuranceChoice === 'stride_coverage' || intake.insuranceChoice === 'eis_coverage')
@@ -584,6 +587,9 @@ function IntakeReview({ intake, onCreateClient, onMarkReviewed, onReject, getFil
           }
           return '—';
         })()} />
+        <KV k="Auto-inspection" v={intake.autoInspect
+          ? 'Opted in — authorised Stride to inspect every inbound shipment'
+          : 'Off — by request only'} />
         <KV k="Sections initialed" v={
           ['storage','insurance','billing','lien','general'].map(k => {
             const val = intake.initials[k] || '—';
