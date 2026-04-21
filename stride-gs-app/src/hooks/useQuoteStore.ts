@@ -13,8 +13,9 @@
  * addTaxArea/updateTaxArea/deleteTaxArea/resetCatalog) are now no-op
  * warning stubs — edits happen on /price-list.
  */
-import { useState, useCallback, useRef, useMemo } from 'react';
+import { useState, useCallback, useRef, useMemo, useEffect } from 'react';
 import { useAuth } from '../contexts/AuthContext';
+import { supabase } from '../lib/supabase';
 import type {
   Quote, QuoteStatus, QuoteCatalog, QuoteStoreSettings, ClassLine, ServiceDef,
 } from '../lib/quoteTypes';
@@ -34,7 +35,55 @@ function loadJson<T>(key: string, fallback: T): T {
 }
 
 function saveJson(key: string, value: unknown) {
-  try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* quota */ }
+  // Session 74: log quota failures instead of swallowing them silently.
+  // The old `catch { /* quota */ }` was hiding the exact class of bug
+  // the user hit on EST-1001.
+  try { localStorage.setItem(key, JSON.stringify(value)); }
+  catch (err) { console.warn('[useQuoteStore] localStorage write failed:', err); }
+}
+
+// ─── Supabase quote sync ─────────────────────────────────────────────────
+// The real persistence layer. localStorage is now just a fast optimistic
+// cache — the Supabase `quotes` table is the source of truth, so losing
+// browser storage doesn't lose a quote.
+
+interface QuoteRow {
+  id: string;
+  owner_email: string;
+  quote_number: string | null;
+  status: string | null;
+  data: Quote;            // full quote doc serialized as jsonb
+  created_at: string;
+  updated_at: string;
+}
+
+async function fetchQuotesFromSupabase(ownerEmail: string): Promise<Quote[]> {
+  const { data, error } = await supabase
+    .from('quotes')
+    .select('data, updated_at')
+    .eq('owner_email', ownerEmail)
+    .order('updated_at', { ascending: false });
+  if (error) {
+    console.warn('[useQuoteStore] Supabase fetch failed:', error.message);
+    return [];
+  }
+  return (data as Array<Pick<QuoteRow, 'data' | 'updated_at'>> | null)?.map(r => r.data) ?? [];
+}
+
+async function upsertQuoteToSupabase(ownerEmail: string, q: Quote): Promise<void> {
+  const { error } = await supabase.from('quotes').upsert({
+    id: q.id,
+    owner_email: ownerEmail,
+    quote_number: q.number || null,
+    status: q.status || null,
+    data: q,
+  });
+  if (error) console.warn('[useQuoteStore] Supabase upsert failed for', q.number, error.message);
+}
+
+async function deleteQuoteFromSupabase(id: string): Promise<void> {
+  const { error } = await supabase.from('quotes').delete().eq('id', id);
+  if (error) console.warn('[useQuoteStore] Supabase delete failed for', id, error.message);
 }
 
 function newQuoteId(): string {
@@ -127,13 +176,77 @@ export function useQuoteStore() {
   const [quotes, setQuotesRaw] = useState<Quote[]>(() => loadJson(keysRef.current.quotes, []));
   const [settings, setSettingsRaw] = useState<QuoteStoreSettings>(() => loadJson(keysRef.current.settings, DEFAULT_SETTINGS));
 
+  // Session 74: hydrate from Supabase once per signed-in user. On the
+  // first load after login, this REPLACES any stale localStorage list
+  // with the authoritative server set. If Supabase is empty but
+  // localStorage has quotes (legacy state from before this migration),
+  // we push the local ones UP to Supabase so nothing is lost.
+  const hydratedFor = useRef<string | null>(null);
+  useEffect(() => {
+    if (!user?.email) return;
+    if (hydratedFor.current === user.email) return;
+    hydratedFor.current = user.email;
+
+    let cancelled = false;
+    (async () => {
+      const serverQuotes = await fetchQuotesFromSupabase(user.email);
+      if (cancelled) return;
+
+      if (serverQuotes.length === 0) {
+        // One-time migration: if the user has localStorage quotes but no
+        // Supabase rows, push them all up so we never lose the quotes they
+        // created before this session. After this block runs once per
+        // user, Supabase becomes the source of truth.
+        const local = loadJson<Quote[]>(keysRef.current.quotes, []);
+        if (local.length > 0) {
+          console.info('[useQuoteStore] migrating', local.length, 'localStorage quotes → Supabase');
+          for (const q of local) {
+            // eslint-disable-next-line no-await-in-loop
+            await upsertQuoteToSupabase(user.email, q);
+          }
+          setQuotesRaw(local);
+          saveJson(keysRef.current.quotes, local);
+          return;
+        }
+      }
+
+      // Supabase has rows (or nothing anywhere) — it's truth.
+      setQuotesRaw(serverQuotes);
+      saveJson(keysRef.current.quotes, serverQuotes);
+    })();
+
+    return () => { cancelled = true; };
+  }, [user?.email]);
+
+  // `setQuotes` writes localStorage AND fires a best-effort Supabase
+  // sync for any quote whose identity or content changed. We don't
+  // await here so the UI stays snappy — errors are logged to console.
+  // Deletes (a quote present before, absent now) trigger a row delete.
   const setQuotes = useCallback((updater: Quote[] | ((prev: Quote[]) => Quote[])) => {
     setQuotesRaw(prev => {
       const next = typeof updater === 'function' ? updater(prev) : updater;
       saveJson(keysRef.current.quotes, next);
+
+      if (user?.email) {
+        const prevById = new Map(prev.map(q => [q.id, q]));
+        const nextById = new Map(next.map(q => [q.id, q]));
+
+        // Upsert anything that's new or changed (by updatedAt).
+        for (const q of next) {
+          const was = prevById.get(q.id);
+          if (!was || was.updatedAt !== q.updatedAt) {
+            void upsertQuoteToSupabase(user.email, q);
+          }
+        }
+        // Delete anything that was there before and isn't now.
+        for (const q of prev) {
+          if (!nextById.has(q.id)) void deleteQuoteFromSupabase(q.id);
+        }
+      }
+
       return next;
     });
-  }, []);
+  }, [user?.email]);
 
   const setSettings = useCallback((updater: QuoteStoreSettings | ((prev: QuoteStoreSettings) => QuoteStoreSettings)) => {
     setSettingsRaw(prev => {

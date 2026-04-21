@@ -36,7 +36,17 @@ export function QuoteBuilder({ store, quoteId, onBack }: Props) {
 
   const showToast = useCallback((msg: string) => { setToast(msg); setTimeout(() => setToast(null), 3000); }, []);
 
-  const handleSave = useCallback(() => { showToast('Quote saved'); }, [showToast]);
+  // Session 74: explicit save bumps updatedAt so the store's setQuotes
+  // diff triggers a Supabase upsert even when the quote body hasn't
+  // changed since the last auto-save. Previously this was a pure
+  // toast — users saw "saved" but no persistence happened at that
+  // instant (auto-save had already covered it, or it hadn't, which is
+  // how EST-1001 got lost).
+  const handleSave = useCallback(() => {
+    if (!quoteId) return;
+    updateQuote(quoteId, {});
+    showToast('Quote saved');
+  }, [quoteId, updateQuote, showToast]);
   const handleDuplicate = useCallback(() => {
     if (!quoteId) return;
     const dup = duplicateQuote(quoteId);
