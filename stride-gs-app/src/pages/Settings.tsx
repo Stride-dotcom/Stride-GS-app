@@ -52,6 +52,10 @@ const EMAIL_TEMPLATES = [
   { key: 'TRANSFER_RECEIVED', name: 'Transfer Received', desc: 'Sent when items are transferred between clients', active: true },
 ];
 
+const DELIVERY_EMAIL_TEMPLATES = [
+  { key: 'ORDER_REVIEW_REQUEST', name: 'New Delivery Order — Internal', desc: 'Staff alert when a client submits a delivery order for review (to notification emails)' },
+];
+
 const CLAIM_EMAIL_TEMPLATES = [
   { key: 'CLAIM_RECEIVED', name: 'Claim Received', desc: 'Sent to client confirming claim submission' },
   { key: 'CLAIM_STAFF_NOTIFY', name: 'New Claim — Internal', desc: 'Staff alert when a new claim is filed (to notification emails)' },
@@ -3213,6 +3217,44 @@ export function Settings() {
                   below (which reads live rows from Supabase). PDF generation
                   is unaffected: GAS pulls the HTML by template_key from the
                   Master Price List cache, not from this React page. */}
+
+              {/* Delivery Email Templates */}
+              <div style={{ ...sectionTitle, marginTop: 20, marginBottom: 12 }}>Delivery Emails ({DELIVERY_EMAIL_TEMPLATES.length})</div>
+              {DELIVERY_EMAIL_TEMPLATES.map(e => {
+                const result = emailTestResults[e.key];
+                const loading = emailTestLoading[e.key];
+                const live = getLiveTemplate(e.key);
+                return (
+                  <div key={e.key} style={{ ...card, display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 16px' }}>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <span style={{ fontSize: 13, fontWeight: 600 }}>{e.name}</span>
+                        <span style={{ fontSize: 10, fontFamily: 'monospace', color: theme.colors.textMuted, background: theme.colors.bgSubtle, padding: '1px 6px', borderRadius: 4, flexShrink: 0 }}>{e.key}</span>
+                      </div>
+                      <div style={{ fontSize: 12, color: theme.colors.textSecondary, marginTop: 3 }}>{e.desc}</div>
+                      {result && (
+                        <div style={{ marginTop: 5, fontSize: 11, color: result.sent ? '#15803D' : '#DC2626', display: 'flex', alignItems: 'center', gap: 4 }}>
+                          {result.sent ? <CheckCircle2 size={12} /> : <AlertCircle size={12} />}
+                          {result.sent ? `Sent to ${testToEmail}` : (result.error || 'Failed')}
+                        </div>
+                      )}
+                    </div>
+                    <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexShrink: 0, marginLeft: 12 }}>
+                      {live && (
+                        <button onClick={() => setEditingTemplate(live)} style={{ padding: '5px 12px', fontSize: 11, fontWeight: 500, border: `1px solid ${theme.colors.border}`, borderRadius: 6, background: '#fff', cursor: 'pointer', fontFamily: 'inherit', color: theme.colors.textSecondary }}>Edit</button>
+                      )}
+                      <button
+                        onClick={() => handleTestSendOneClientTemplate(e.key)}
+                        disabled={loading || !testToEmail.trim()}
+                        style={{ padding: '5px 14px', fontSize: 11, fontWeight: 500, border: `1px solid ${theme.colors.border}`, borderRadius: 6, background: '#fff', cursor: (loading || !testToEmail.trim()) ? 'default' : 'pointer', fontFamily: 'inherit', color: theme.colors.textSecondary, display: 'flex', alignItems: 'center', gap: 5 }}
+                      >
+                        {loading ? <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} /> : <Send size={11} />}
+                        {loading ? 'Sending…' : 'Test'}
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
 
               {/* Claim Email Templates (merged from Claims tab) */}
               <div style={{ ...sectionTitle, marginTop: 20, marginBottom: 12 }}>Claim Emails ({CLAIM_EMAIL_TEMPLATES.length})</div>
