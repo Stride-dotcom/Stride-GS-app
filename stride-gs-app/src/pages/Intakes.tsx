@@ -18,11 +18,14 @@
  * produces a new client_intake_links row + displays the magic URL
  * ready to paste into an email.
  */
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Copy, CheckCircle2, Link2, Plus, Trash2, FileText, UserPlus, Eye, X, AlertTriangle, ExternalLink, Loader2 } from 'lucide-react';
 import { theme } from '../styles/theme';
 import { fmtDateTime } from '../lib/constants';
-import { useIntakeAdmin, type IntakeRow, type IntakeLinkRow } from '../hooks/useIntakeAdmin';
+import { useIntakeAdmin, copyIntakeDocsToClient, type IntakeRow, type IntakeLinkRow } from '../hooks/useIntakeAdmin';
+// Reference for future wiring — keep the helper in the import graph
+// without tripping noUnusedLocals.
+void copyIntakeDocsToClient;
 import { OnboardClientModal, type OnboardClientFormData, type OnboardSubmitResult } from '../components/shared/OnboardClientModal';
 import { postOnboardClient } from '../lib/api';
 
@@ -36,6 +39,24 @@ export function Intakes() {
   const [filter, setFilter] = useState<StatusFilter>('pending');
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [onboardOpen, setOnboardOpen] = useState(false);
+
+  // Deep-link handler: `/#/intakes?email=<addr>` jumps to the most-
+  // recent intake submitted by that email address. Used by the
+  // "View Original Intake" link on OnboardClientModal so an admin can
+  // go from a client row back to its source intake in one click.
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const match = window.location.hash.match(/[?&]email=([^&]+)/);
+    const wantedEmail = match ? decodeURIComponent(match[1]).toLowerCase() : '';
+    if (!wantedEmail || intakes.length === 0) return;
+    const hit = intakes.find(i => i.email.toLowerCase() === wantedEmail);
+    if (hit) {
+      // Activated intakes are hidden under the default "pending" filter —
+      // switch to "all" so the selection becomes visible too.
+      setFilter('all');
+      setSelectedId(hit.id);
+    }
+  }, [intakes]);
 
   const filtered = useMemo(() => {
     if (filter === 'all') return intakes;
@@ -91,11 +112,29 @@ export function Intakes() {
     if (!res.ok || !res.data?.success) {
       return { ok: false, error: res.error || res.data?.error || 'Onboard failed' };
     }
-    // Mark the intake activated now that a client was created.
+    // Session 77 — copy the intake packet into the new client's
+    // Documents module so the intake originals show up in Client
+    // Settings → Client Documents from day one. Non-fatal: any copy
+    // failure surfaces as a warning but doesn't block activation.
+    const warnings: string[] = res.data.warnings ?? [];
     if (selected) {
+      const newClientSheetId = res.data.clientSheetId;
+      if (newClientSheetId) {
+        try {
+          const copyRes = await copyIntakeDocsToClient(selected, newClientSheetId);
+          if (copyRes.copied > 0) {
+            warnings.push(`Copied ${copyRes.copied} intake document${copyRes.copied === 1 ? '' : 's'} to client.`);
+          }
+          for (const f of copyRes.failures) {
+            warnings.push(`Intake doc copy failed: ${f.path.split('/').pop()} — ${f.error}`);
+          }
+        } catch (e) {
+          warnings.push(`Intake doc copy error: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
       await updateStatus(selected.id, 'activated');
     }
-    return { ok: true, successMessage: 'Client created from intake', warnings: res.data.warnings };
+    return { ok: true, successMessage: 'Client created from intake', warnings };
   };
 
   const prefillFromIntake = (intake: IntakeRow): Partial<OnboardClientFormData> => ({

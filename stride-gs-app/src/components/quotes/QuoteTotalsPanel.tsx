@@ -96,17 +96,38 @@ export function QuoteTotalsPanel({ quote, catalog, onUpdate, onSave, onDuplicate
     }}>
       <div style={{ ...v.typography.label, color: v.colors.textOnDarkMuted, marginBottom: 20 }}>QUOTE SUMMARY</div>
 
-      {/* Line items — Session 74: one row per service (class-aggregated) */}
+      {/* Line items — Session 74: one row per service (class-aggregated).
+          Storage lines also show the duration ("×30 days" or "×2 months")
+          so customers don't read the single qty ambiguously — the user
+          pointed out that "Storage × 21" reads as if 21 is the duration,
+          not the item count. */}
       <div style={{ marginBottom: 20 }}>
         {Object.entries(grouped).map(([cat, items]) => (
           <div key={cat} style={{ marginBottom: 12 }}>
             <div style={{ ...v.typography.label, color: v.colors.textOnDarkMuted, marginBottom: 6 }}>{cat}</div>
-            {items.map((agg) => (
-              <div key={agg.serviceId} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, padding: '4px 0', color: 'rgba(255,255,255,0.75)' }}>
-                <span>{agg.serviceName} × {agg.qty}</span>
-                <span style={{ fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>${fmt(agg.amount)}</span>
-              </div>
-            ))}
+            {items.map((agg) => {
+              const isStorage = agg.category === 'Storage';
+              const itemLabel = agg.qty === 1 ? 'item' : 'items';
+              // Prefer months if the user entered a clean month value
+              // (months > 0 and days === 0); otherwise show raw days.
+              const months = quote.storage.months;
+              const days = quote.storage.days;
+              const showMonths = months > 0 && days === 0;
+              const durationLabel = showMonths
+                ? `${months} ${months === 1 ? 'month' : 'months'}`
+                : `${months * 30 + days} days`;
+              return (
+                <div key={agg.serviceId} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, padding: '4px 0', color: 'rgba(255,255,255,0.75)' }}>
+                  <span>
+                    {agg.serviceName}{' '}
+                    {isStorage
+                      ? <>— {agg.qty} {itemLabel} × {durationLabel}</>
+                      : <>× {agg.qty}</>}
+                  </span>
+                  <span style={{ fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>${fmt(agg.amount)}</span>
+                </div>
+              );
+            })}
           </div>
         ))}
         {result.lineItems.length === 0 && (

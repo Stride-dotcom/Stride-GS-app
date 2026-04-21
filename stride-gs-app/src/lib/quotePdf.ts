@@ -123,25 +123,42 @@ function buildLineItemsRows(calc: CalcResult, quote: Quote): string {
   // Class + Rate cells are blank on aggregated rows since neither has
   // a single value across sizes — the detail still lives in the
   // per-class qty breakdown under "Item Quantities by Size Class".
-  interface Agg { id: string; name: string; code: string; qty: number; amount: number; }
+  interface Agg { id: string; name: string; code: string; category: string; qty: number; amount: number; }
   const byService = new Map<string, Agg>();
   for (const li of calc.lineItems) {
     const prev = byService.get(li.serviceId);
     if (prev) { prev.qty += li.qty; prev.amount += li.amount; }
     else byService.set(li.serviceId, {
-      id: li.serviceId, name: li.serviceName, code: li.serviceCode, qty: li.qty, amount: li.amount,
+      id: li.serviceId, name: li.serviceName, code: li.serviceCode, category: li.category,
+      qty: li.qty, amount: li.amount,
     });
   }
+  // Session 74: duration label for storage rows. Non-storage rows show
+  // the plain summed qty; storage rows show "N items × 30 days" (or
+  // months when the quote is entered as whole months) so the customer
+  // can't misread "Storage × 21" as a 21-day term.
+  const months = quote.storage.months;
+  const days = quote.storage.days;
+  const showMonths = months > 0 && days === 0;
+  const durationLabel = showMonths
+    ? `${months} ${months === 1 ? 'month' : 'months'}`
+    : `${months * 30 + days} days`;
+
   parts.push(
     '<tr><td colspan="5" style="' + sectionHeaderStyle + '">Services</td></tr>'
   );
   for (const agg of byService.values()) {
+    const isStorage = agg.category === 'Storage';
+    const itemLabel = agg.qty === 1 ? 'item' : 'items';
+    const qtyCell = isStorage
+      ? `${agg.qty} ${itemLabel} × ${durationLabel}`
+      : String(agg.qty);
     parts.push(
       '<tr>' +
       '<td>' + escHtml(agg.name) + (agg.code ? ' <span style="color:#94A3B8;font-size:9pt;">' + escHtml(agg.code) + '</span>' : '') + '</td>' +
       '<td></td>' +
       '<td class="num"></td>' +
-      '<td class="num">' + String(agg.qty) + '</td>' +
+      '<td class="num">' + escHtml(qtyCell) + '</td>' +
       '<td class="num" style="font-weight:600;">' + fmt$(agg.amount) + '</td>' +
       '</tr>'
     );
@@ -246,22 +263,36 @@ function generateFallbackHtml(
   // Aggregate by service in the fallback too — user wants one line per
   // service (Receiving / Inspection / Pull Prep / Storage / ...), never
   // per-class rows.
-  interface FbAgg2 { id: string; name: string; code: string; qty: number; amount: number; }
+  interface FbAgg2 { id: string; name: string; code: string; category: string; qty: number; amount: number; }
   const byServiceFb = new Map<string, FbAgg2>();
   for (const li of result.lineItems) {
     const prev = byServiceFb.get(li.serviceId);
     if (prev) { prev.qty += li.qty; prev.amount += li.amount; }
     else byServiceFb.set(li.serviceId, {
-      id: li.serviceId, name: li.serviceName, code: li.serviceCode, qty: li.qty, amount: li.amount,
+      id: li.serviceId, name: li.serviceName, code: li.serviceCode, category: li.category,
+      qty: li.qty, amount: li.amount,
     });
   }
+  // Session 74: same duration disambiguation as the primary path.
+  const monthsFb = quote.storage.months;
+  const daysFb = quote.storage.days;
+  const showMonthsFb = monthsFb > 0 && daysFb === 0;
+  const durationLabelFb = showMonthsFb
+    ? `${monthsFb} ${monthsFb === 1 ? 'month' : 'months'}`
+    : `${monthsFb * 30 + daysFb} days`;
+
   linesHtml += `<tr><td colspan="5" style="padding:8px 12px;font-weight:700;font-size:11px;color:#64748B;text-transform:uppercase;letter-spacing:0.5px;background:#F8FAFC;border-bottom:1px solid #E2E8F0">Services</td></tr>`;
   for (const agg of byServiceFb.values()) {
+    const isStorageFb = agg.category === 'Storage';
+    const itemLabelFb = agg.qty === 1 ? 'item' : 'items';
+    const qtyCellFb = isStorageFb
+      ? `${agg.qty} ${itemLabelFb} × ${durationLabelFb}`
+      : String(agg.qty);
     linesHtml += `<tr>
       <td style="padding:6px 12px;border-bottom:1px solid #E2E8F0;font-size:12px">${escHtml(agg.name)}${agg.code ? ` <span style="color:#94A3B8">${escHtml(agg.code)}</span>` : ''}</td>
       <td style="padding:6px 12px;border-bottom:1px solid #E2E8F0;font-size:12px"></td>
       <td style="padding:6px 12px;border-bottom:1px solid #E2E8F0;font-size:12px;text-align:right"></td>
-      <td style="padding:6px 12px;border-bottom:1px solid #E2E8F0;font-size:12px;text-align:right">${agg.qty}</td>
+      <td style="padding:6px 12px;border-bottom:1px solid #E2E8F0;font-size:12px;text-align:right">${escHtml(qtyCellFb)}</td>
       <td style="padding:6px 12px;border-bottom:1px solid #E2E8F0;font-size:12px;text-align:right;font-weight:600">${fmt$(agg.amount)}</td>
     </tr>`;
   }
