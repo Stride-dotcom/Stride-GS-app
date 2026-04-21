@@ -57,9 +57,10 @@ function zoneRowToPublic(r: ZoneRow): PublicZone {
 }
 
 // The sentinel tab names used when an admin opts in to include an
-// auxiliary section. Must match `ZIP_TAB` / `CLASSES_TAB` in PriceList.tsx.
-const ZIP_TAB = 'Zip Codes';
-const CLASSES_TAB = 'Classes';
+// auxiliary section. Must match the _TAB exports in PriceList.tsx.
+const ZIP_TAB      = 'Zip Codes';
+const CLASSES_TAB  = 'Classes';
+const COVERAGE_TAB = 'Coverage';
 
 interface ClassRow {
   id: string;
@@ -81,6 +82,39 @@ function classRowToPublic(r: ClassRow): PublicClass {
     name: r.name ?? '',
     storageSize: n,
   };
+}
+
+interface CoverageRow {
+  id: string;
+  name: string | null;
+  calc_type: string | null;
+  rate: string | number | null;
+  note: string | null;
+  display_order: number | null;
+}
+interface PublicCoverage {
+  id: string;
+  name: string;
+  calcType: string;
+  rate: number;
+  note: string;
+}
+function coverageRowToPublic(r: CoverageRow): PublicCoverage {
+  const n = r.rate == null ? 0 : (typeof r.rate === 'number' ? r.rate : parseFloat(r.rate) || 0);
+  return {
+    id: r.id,
+    name: r.name ?? '',
+    calcType: r.calc_type ?? 'flat',
+    rate: n,
+    note: r.note ?? '',
+  };
+}
+function formatPublicCoverageRate(c: PublicCoverage): string {
+  if (c.calcType === 'per_lb')           return `$${c.rate.toFixed(2)} / lb`;
+  if (c.calcType === 'percent_declared') return `${c.rate.toFixed(2)}% of declared value`;
+  if (c.calcType === 'flat')             return `$${c.rate.toFixed(2)} flat`;
+  if (c.calcType === 'included')         return 'Included';
+  return String(c.rate);
 }
 
 function rowToService(row: ServiceRow): CatalogService {
@@ -322,6 +356,48 @@ function PublicClassesTable({ classes }: { classes: PublicClass[] }) {
   );
 }
 
+function PublicCoverageTable({ coverage }: { coverage: PublicCoverage[] }) {
+  const thStyle: React.CSSProperties = {
+    padding: '10px 16px', fontSize: 10, fontWeight: 600, letterSpacing: '2px',
+    textTransform: 'uppercase', color: TEXT_MUT, background: TH_BG,
+    textAlign: 'left', borderBottom: `1px solid ${BORDER}`,
+  };
+  const tdStyle: React.CSSProperties = {
+    padding: '12px 16px', fontSize: 13, color: TEXT,
+    borderBottom: `1px solid ${BORDER}`,
+    verticalAlign: 'top',
+  };
+  return (
+    <div>
+      <div style={{ padding: '14px 16px', borderBottom: `1px solid ${BORDER}`, background: BG_CARD, fontSize: 12, color: TEXT_MUT, lineHeight: 1.55 }}>
+        Two separate coverages. <strong style={{ color: TEXT }}>Handling valuation</strong> is elected per shipment — default is Standard. <strong style={{ color: TEXT }}>Storage coverage</strong> is monthly. See each row's details for full terms.
+      </div>
+      <div style={{ overflowX: 'auto' }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+          <thead>
+            <tr>
+              <th style={thStyle}>Coverage</th>
+              <th style={{ ...thStyle, textAlign: 'right' }}>Rate</th>
+              <th style={thStyle}>Details</th>
+            </tr>
+          </thead>
+          <tbody>
+            {coverage.map(c => (
+              <tr key={c.id} style={{ background: BG_CARD }}>
+                <td style={{ ...tdStyle, fontWeight: 600, whiteSpace: 'nowrap' }}>{c.name || '—'}</td>
+                <td style={{ ...tdStyle, textAlign: 'right', fontVariantNumeric: 'tabular-nums', fontWeight: 600, whiteSpace: 'nowrap' }}>
+                  {formatPublicCoverageRate(c)}
+                </td>
+                <td style={{ ...tdStyle, color: TEXT_MUT, fontSize: 12, lineHeight: 1.55 }}>{c.note || '—'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 // ─── Main component ───────────────────────────────────────────────────────────
 
 interface Props { shareId: string }
@@ -331,6 +407,7 @@ export function PublicRates({ shareId }: Props) {
   const [services, setServices] = useState<CatalogService[]>([]);
   const [zones, setZones] = useState<PublicZone[]>([]);
   const [classes, setClasses] = useState<PublicClass[]>([]);
+  const [coverage, setCoverage] = useState<PublicCoverage[]>([]);
   const [activeTab, setActiveTab] = useState<string>('');
   const [status, setStatus] = useState<'loading' | 'unavailable' | 'ready'>('loading');
 
@@ -343,9 +420,10 @@ export function PublicRates({ shareId }: Props) {
       setShare(s);
 
       // Service tabs are every entry except the aux sentinels.
-      const serviceCategories = s.tabs.filter(t => t !== ZIP_TAB && t !== CLASSES_TAB);
-      const includeZips    = s.tabs.includes(ZIP_TAB);
-      const includeClasses = s.tabs.includes(CLASSES_TAB);
+      const serviceCategories = s.tabs.filter(t => t !== ZIP_TAB && t !== CLASSES_TAB && t !== COVERAGE_TAB);
+      const includeZips     = s.tabs.includes(ZIP_TAB);
+      const includeClasses  = s.tabs.includes(CLASSES_TAB);
+      const includeCoverage = s.tabs.includes(COVERAGE_TAB);
 
       const svcPromise: Promise<{ data: ServiceRow[] | null; error: unknown }> =
         serviceCategories.length > 0
@@ -372,12 +450,21 @@ export function PublicRates({ shareId }: Props) {
               .eq('active', true)
               .order('display_order', { ascending: true }) as unknown as Promise<{ data: ClassRow[] | null; error: unknown }>)
           : Promise.resolve({ data: [] as ClassRow[], error: null });
-      const [svcRes, zoneRes, classRes] = await Promise.all([svcPromise, zonePromise, classPromise]);
+      const coveragePromise: Promise<{ data: CoverageRow[] | null; error: unknown }> =
+        includeCoverage
+          ? (supabase
+              .from('coverage_options')
+              .select('id,name,calc_type,rate,note,display_order')
+              .eq('active', true)
+              .order('display_order', { ascending: true }) as unknown as Promise<{ data: CoverageRow[] | null; error: unknown }>)
+          : Promise.resolve({ data: [] as CoverageRow[], error: null });
+      const [svcRes, zoneRes, classRes, covRes] = await Promise.all([svcPromise, zonePromise, classPromise, coveragePromise]);
       if (cancelled) return;
       if (svcRes.error) { setStatus('unavailable'); return; }
       setServices(((svcRes.data ?? []) as ServiceRow[]).map(rowToService));
       setZones(((zoneRes.data ?? []) as ZoneRow[]).map(zoneRowToPublic));
       setClasses(((classRes.data ?? []) as ClassRow[]).map(classRowToPublic));
+      setCoverage(((covRes.data ?? []) as CoverageRow[]).map(coverageRowToPublic));
       setActiveTab(s.tabs[0] ?? '');
       setStatus('ready');
     })();
@@ -406,10 +493,11 @@ export function PublicRates({ shareId }: Props) {
   }
 
   // ── Ready ──────────────────────────────────────────────────────────────────
-  const isZipTab     = activeTab === ZIP_TAB;
-  const isClassesTab = activeTab === CLASSES_TAB;
-  const isAuxTab     = isZipTab || isClassesTab;
-  const tabServices  = isAuxTab ? [] : services.filter(s => s.category === activeTab);
+  const isZipTab      = activeTab === ZIP_TAB;
+  const isClassesTab  = activeTab === CLASSES_TAB;
+  const isCoverageTab = activeTab === COVERAGE_TAB;
+  const isAuxTab      = isZipTab || isClassesTab || isCoverageTab;
+  const tabServices   = isAuxTab ? [] : services.filter(s => s.category === activeTab);
   const multiTab     = share.tabs.length > 1;
 
   return (
@@ -470,7 +558,7 @@ export function PublicRates({ shareId }: Props) {
                 {activeTab}
               </div>
               <div style={{ fontSize: 18, fontWeight: 600, color: TEXT }}>
-                {isZipTab ? 'Delivery Zones' : isClassesTab ? 'Item Classes' : `${activeTab} Services`}
+                {isZipTab ? 'Delivery Zones' : isClassesTab ? 'Item Classes' : isCoverageTab ? 'Coverage Options' : `${activeTab} Services`}
               </div>
             </div>
             <div style={{ fontSize: 12, color: TEXT_MUT }}>
@@ -478,7 +566,9 @@ export function PublicRates({ shareId }: Props) {
                 ? `${zones.length} zone${zones.length !== 1 ? 's' : ''}`
                 : isClassesTab
                   ? `${classes.length} class${classes.length !== 1 ? 'es' : ''}`
-                  : `${tabServices.length} service${tabServices.length !== 1 ? 's' : ''}`
+                  : isCoverageTab
+                    ? `${coverage.length} option${coverage.length !== 1 ? 's' : ''}`
+                    : `${tabServices.length} service${tabServices.length !== 1 ? 's' : ''}`
               }
             </div>
           </div>
@@ -498,6 +588,14 @@ export function PublicRates({ shareId }: Props) {
               </div>
             ) : (
               <PublicClassesTable classes={classes} />
+            )
+          ) : isCoverageTab ? (
+            coverage.length === 0 ? (
+              <div style={{ padding: '40px 24px', textAlign: 'center', color: TEXT_MUT, fontSize: 14 }}>
+                No coverage options available.
+              </div>
+            ) : (
+              <PublicCoverageTable coverage={coverage} />
             )
           ) : tabServices.length === 0 ? (
             <div style={{ padding: '40px 24px', textAlign: 'center', color: TEXT_MUT, fontSize: 14 }}>

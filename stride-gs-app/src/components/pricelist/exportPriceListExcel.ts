@@ -12,6 +12,8 @@ import * as XLSX from 'xlsx';
 import type { CatalogService } from '../../hooks/useServiceCatalog';
 import type { DeliveryZone } from '../../hooks/useDeliveryZones';
 import type { ItemClass } from '../../hooks/useItemClasses';
+import type { CoverageOption } from '../../hooks/useCoverageOptions';
+import { formatCoverageRate } from '../../hooks/useCoverageOptions';
 
 function today(): string {
   const d = new Date();
@@ -55,6 +57,7 @@ export function downloadPriceListExcel(
   services: CatalogService[],
   deliveryZones: DeliveryZone[] = [],
   itemClasses: ItemClass[] = [],
+  coverageOptions: CoverageOption[] = [],
 ): void {
   const wb = XLSX.utils.book_new();
 
@@ -173,7 +176,26 @@ export function downloadPriceListExcel(
     XLSX.utils.book_append_sheet(wb, wsClasses, 'Classes');
   }
 
-  // ── 7. Delivery Zones ─────────────────────────────────────────────────
+  // ── 7. Coverage ───────────────────────────────────────────────────────
+  // Handling valuation tiers + storage-policy coverage. Single source
+  // of truth — Quote Tool and public rate sheet read the same rows.
+  if (coverageOptions.length > 0) {
+    const covRows = [...coverageOptions]
+      .sort((a, b) => a.displayOrder - b.displayOrder)
+      .map(o => ({
+        Code:    o.id,
+        Name:    o.name,
+        'Calc Type': o.calcType,
+        Rate:    formatCoverageRate(o),
+        Note:    o.note ?? '',
+        Active:  o.active ? 'Yes' : 'No',
+      }));
+    const wsCov = XLSX.utils.json_to_sheet(covRows);
+    wsCov['!cols'] = autoSize(covRows);
+    XLSX.utils.book_append_sheet(wb, wsCov, 'Coverage');
+  }
+
+  // ── 8. Delivery Zones ─────────────────────────────────────────────────
   // All zones regardless of active flag — the sheet is a reference sheet,
   // so showing which zips are Call-for-Quote / Out-of-Area is useful.
   if (deliveryZones.length > 0) {

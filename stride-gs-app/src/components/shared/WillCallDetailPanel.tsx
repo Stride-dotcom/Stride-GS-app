@@ -660,7 +660,28 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
                 <>
                   <div style={{ fontSize: 20, fontWeight: 700, marginBottom: 10 }}>${wc.codAmount || '0.00'}</div>
                   <div style={{ display: 'flex', gap: 8 }}>
-                    <button onClick={() => window.open('https://app.staxpayments.com/#/pay/Stride-Logistics-cd315bf73c1d?l=eyJ0b3RhbCI6IiIsIm1lbW8iOiJDdXN0b21lciBOb3RlcyIsInN1Y2Nlc3NSZWRpcmVjdCI6bnVsbCwiZnJlcXVlbmN5IjpudWxsLCJycnVsZSI6bnVsbCwiaXNUb3RhbEVkaXRhYmxlIjpmYWxzZSwidG9rZW5pemVPbmx5IjpmYWxzZSwiYXJlQ25wRGlnaXRhbFdhbGxldFBheW1lbnRzQWxsb3dlZCI6dHJ1ZSwiYXJlQmFua1BheW1lbnRzQWxsb3dlZCI6InRydWUiLCJhcmVDcmVkaXRDYXJkc1BheW1lbnRzQWxsb3dlZCI6InRydWUifQ==', '_blank')} style={{ flex: 1, padding: '9px', fontSize: 12, fontWeight: 600, border: 'none', borderRadius: 8, background: theme.colors.orange, color: '#fff', cursor: 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}><CreditCard size={14} /> Collect via Stax</button>
+                    <button
+                      onClick={() => {
+                        // Session 74: open the branded stax-payment.html
+                        // instead of the raw Stax hosted page. Pass the
+                        // WC number in BOTH ?order= (drives the badge +
+                        // Order # input) and ?notes= (so the reference
+                        // back to the Will Call is captured on the Stax
+                        // payment record). The page also pre-fills the
+                        // amount field if we pass one — wire codAmount
+                        // in for a one-click collection flow.
+                        const wcNum = wc.wcNumber || '';
+                        const params = new URLSearchParams();
+                        if (wcNum) {
+                          params.set('order', wcNum);
+                          params.set('notes', `Will Call ${wcNum}`);
+                        }
+                        window.open(`/stax-payment.html?${params.toString()}`, '_blank');
+                      }}
+                      style={{ flex: 1, padding: '9px', fontSize: 12, fontWeight: 600, border: 'none', borderRadius: 8, background: theme.colors.orange, color: '#fff', cursor: 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}
+                    >
+                      <CreditCard size={14} /> Collect via Stax
+                    </button>
                     <WriteButton label="Mark Paid" variant="secondary" onClick={async () => {
                       if (apiConfigured && clientSheetId && wc.wcNumber) {
                         const existingNotes = wc.notes || '';

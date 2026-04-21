@@ -16,10 +16,12 @@ import { ServiceRow } from '../components/pricelist/ServiceRow';
 import { AddServiceModal } from '../components/pricelist/AddServiceModal';
 import { ZipCodeTable } from '../components/pricelist/ZipCodeTable';
 import { ClassesTable } from '../components/pricelist/ClassesTable';
+import { CoverageTable } from '../components/pricelist/CoverageTable';
 import { downloadPriceListExcel } from '../components/pricelist/exportPriceListExcel';
 import { usePriceListShares, type PriceListShare } from '../hooks/usePriceListShares';
 import { useDeliveryZones } from '../hooks/useDeliveryZones';
 import { useItemClasses } from '../hooks/useItemClasses';
+import { useCoverageOptions } from '../hooks/useCoverageOptions';
 import { syncPriceListFromSupabase } from '../lib/api';
 import { useAuth } from '../contexts/AuthContext';
 
@@ -76,17 +78,19 @@ const SHAREABLE_CATEGORIES: ServiceCategory[] = [
 // Sentinels appended to the tabs[] array on price_list_shares when an
 // admin opts in to include an auxiliary section. PublicRates recognizes
 // each and renders the matching table instead of a service list.
-export const ZIP_TAB = 'Zip Codes';
-export const CLASSES_TAB = 'Classes';
+export const ZIP_TAB      = 'Zip Codes';
+export const CLASSES_TAB  = 'Classes';
+export const COVERAGE_TAB = 'Coverage';
 
 const BASE_SHARE_URL = 'https://www.mystridehub.com/#/rates/';
 
-// Pseudo-categories — these don't live in service_catalog. Selecting
-// either swaps the right pane to a dedicated table (delivery_zones or
-// item_classes) instead of the normal grouped services list.
-const ZIP_CATEGORY = 'Zip Codes' as const;
-const CLASSES_CATEGORY = 'Classes' as const;
-type CategoryFilter = 'All' | ServiceCategory | typeof ZIP_CATEGORY | typeof CLASSES_CATEGORY;
+// Pseudo-categories — these don't live in service_catalog. Each one
+// swaps the right pane to its own table: delivery_zones, item_classes,
+// or coverage_options.
+const ZIP_CATEGORY      = 'Zip Codes' as const;
+const CLASSES_CATEGORY  = 'Classes' as const;
+const COVERAGE_CATEGORY = 'Coverage' as const;
+type CategoryFilter = 'All' | ServiceCategory | typeof ZIP_CATEGORY | typeof CLASSES_CATEGORY | typeof COVERAGE_CATEGORY;
 
 export function PriceList() {
   const v2 = theme.v2;
@@ -95,6 +99,7 @@ export function PriceList() {
   const { services, loading, error, createService, updateService, deleteService } = useServiceCatalog();
   const { zones: deliveryZones } = useDeliveryZones();
   const { classes: itemClasses } = useItemClasses();
+  const { options: coverageOptions } = useCoverageOptions();
   const { createShare } = usePriceListShares();
 
   // Hydrate persisted prefs synchronously on first render so the UI never
@@ -296,7 +301,7 @@ export function PriceList() {
             <UploadCloud size={14} /> {syncing ? 'Syncing…' : 'Sync to Sheet'}
           </button>
           <button
-            onClick={() => downloadPriceListExcel(services, deliveryZones, itemClasses)}
+            onClick={() => downloadPriceListExcel(services, deliveryZones, itemClasses, coverageOptions)}
             disabled={services.length === 0}
             title="Download a formatted Excel workbook of all services"
             style={{
@@ -371,15 +376,22 @@ export function PriceList() {
                 onClick={() => setCategoryFilter(cat)}
               />
             ))}
-            {/* Auxiliary sections — neither lives in service_catalog. Each
-                swaps the right pane to its own table (delivery_zones /
-                item_classes). Counts come from their dedicated hooks. */}
+            {/* Auxiliary sections — none of these live in service_catalog.
+                Each swaps the right pane to its own table (item_classes /
+                coverage_options / delivery_zones). Counts come from
+                their dedicated hooks. */}
             <div style={{ height: 8 }} />
             <CategoryButton
               label={CLASSES_CATEGORY}
               count={itemClasses.length}
               active={categoryFilter === CLASSES_CATEGORY}
               onClick={() => setCategoryFilter(CLASSES_CATEGORY)}
+            />
+            <CategoryButton
+              label={COVERAGE_CATEGORY}
+              count={coverageOptions.length}
+              active={categoryFilter === COVERAGE_CATEGORY}
+              onClick={() => setCategoryFilter(COVERAGE_CATEGORY)}
             />
             <CategoryButton
               label={ZIP_CATEGORY}
@@ -421,7 +433,7 @@ export function PriceList() {
           </div>
 
           {/* Sort header — applies only to the services list (aux sections use their own tables). */}
-          {categoryFilter !== ZIP_CATEGORY && categoryFilter !== CLASSES_CATEGORY && (
+          {categoryFilter !== ZIP_CATEGORY && categoryFilter !== CLASSES_CATEGORY && categoryFilter !== COVERAGE_CATEGORY && (
             <div style={{
               display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap',
               padding: '10px 14px',
@@ -446,6 +458,8 @@ export function PriceList() {
             <ZipCodeTable search={search} />
           ) : categoryFilter === CLASSES_CATEGORY ? (
             <ClassesTable search={search} />
+          ) : categoryFilter === COVERAGE_CATEGORY ? (
+            <CoverageTable search={search} />
           ) : loading ? (
             <div style={{ padding: 40, textAlign: 'center', color: v2.colors.textMuted, fontSize: 13 }}>
               Loading services…
@@ -594,6 +608,7 @@ function PriceListShareModal({ createShare, onClose, onCreated }: {
   const [selected, setSelected] = useState<Set<ServiceCategory>>(new Set(['Warehouse', 'Storage']));
   const [includeZips, setIncludeZips] = useState(false);
   const [includeClasses, setIncludeClasses] = useState(false);
+  const [includeCoverage, setIncludeCoverage] = useState(false);
   const [title, setTitle] = useState('');
   const [expiresAt, setExpiresAt] = useState('');
   const [saving, setSaving] = useState(false);
@@ -602,9 +617,9 @@ function PriceListShareModal({ createShare, onClose, onCreated }: {
   const toggle = (cat: ServiceCategory) => setSelected(prev => {
     const next = new Set(prev);
     // Require at least one thing selected overall — service category, zip,
-    // or classes tab.
+    // classes, or coverage tab.
     if (next.has(cat)) {
-      if (next.size > 1 || includeZips || includeClasses) next.delete(cat);
+      if (next.size > 1 || includeZips || includeClasses || includeCoverage) next.delete(cat);
     }
     else next.add(cat);
     return next;
@@ -613,15 +628,16 @@ function PriceListShareModal({ createShare, onClose, onCreated }: {
   const handleGenerate = async () => {
     setSaving(true); setErr(null);
     const tabs: string[] = SHAREABLE_CATEGORIES.filter(c => selected.has(c));
-    if (includeClasses) tabs.push(CLASSES_TAB);
-    if (includeZips)    tabs.push(ZIP_TAB);
+    if (includeClasses)  tabs.push(CLASSES_TAB);
+    if (includeCoverage) tabs.push(COVERAGE_TAB);
+    if (includeZips)     tabs.push(ZIP_TAB);
     const share = await createShare(tabs, title || undefined, expiresAt || null);
     setSaving(false);
     if (share) onCreated(share);
     else setErr('Failed to generate link — please try again.');
   };
 
-  const canGenerate = selected.size > 0 || includeZips || includeClasses;
+  const canGenerate = selected.size > 0 || includeZips || includeClasses || includeCoverage;
 
   const inputStyle: React.CSSProperties = {
     padding: '10px 14px', borderRadius: v2.radius.input, fontFamily: 'inherit',
@@ -685,6 +701,28 @@ function PriceListShareModal({ createShare, onClose, onCreated }: {
             </div>
             <span style={{ fontSize: 13, fontWeight: includeClasses ? 600 : 400, color: includeClasses ? v2.colors.text : v2.colors.textSecondary }}>
               Include item classes (storage sizes)
+            </span>
+          </button>
+          <button
+            onClick={() => setIncludeCoverage(v => !v)}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 10, padding: '10px 14px',
+              borderRadius: v2.radius.input, cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left',
+              background: includeCoverage ? 'rgba(232,105,42,0.08)' : v2.colors.bgPage,
+              border: `1px solid ${includeCoverage ? v2.colors.accent : v2.colors.border}`,
+              transition: 'all 0.15s',
+            }}
+          >
+            <div style={{
+              width: 16, height: 16, borderRadius: 4, flexShrink: 0,
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              background: includeCoverage ? v2.colors.accent : 'transparent',
+              border: `2px solid ${includeCoverage ? v2.colors.accent : v2.colors.border}`,
+            }}>
+              {includeCoverage && <Check size={10} color="#fff" />}
+            </div>
+            <span style={{ fontSize: 13, fontWeight: includeCoverage ? 600 : 400, color: includeCoverage ? v2.colors.text : v2.colors.textSecondary }}>
+              Include coverage rates (handling + storage)
             </span>
           </button>
           <button
