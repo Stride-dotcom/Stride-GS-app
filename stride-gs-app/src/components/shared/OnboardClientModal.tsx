@@ -1,10 +1,13 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { X, Check, Users, Edit2, ExternalLink, FolderOpen, Sheet, Info, Loader2, AlertTriangle, CheckCircle } from 'lucide-react';
+import { X, Check, Users, Edit2, ExternalLink, FolderOpen, Sheet, Info, Loader2, AlertTriangle, CheckCircle, FileText } from 'lucide-react';
 import { theme } from '../../styles/theme';
 import { AutocompleteSelect } from './AutocompleteSelect';
 import { InfoTooltip } from './InfoTooltip';
 import { usePaymentTerms } from '../../hooks/usePaymentTerms';
 import type { ApiClient } from '../../lib/api';
+import { DocumentList } from '../media/DocumentList';
+import { DocumentUploadButton } from '../media/DocumentUploadButton';
+import { useDocuments } from '../../hooks/useDocuments';
 
 export interface OnboardClientFormData {
   // Identity
@@ -544,6 +547,41 @@ export function OnboardClientModal({ mode = 'create', existingClient = null, all
             </div>
           )}
 
+          {/* Edit mode: Client Documents — the shared documents module
+              scoped to (context_type='client', context_id=spreadsheetId).
+              Holds intake originals copied over at activation plus any
+              ad-hoc renewals (COI, updated W-9, parent/child addenda). */}
+          {isEdit && data.spreadsheetId && (
+            <div style={sectionDivider}>
+              <div style={{ ...sectionHead, display: 'flex', alignItems: 'center', gap: 6 }}>
+                <FileText size={14} /> Client Documents
+                <span style={{ fontSize: 10, fontWeight: 400, color: theme.colors.textMuted, marginLeft: 4 }}>
+                  Intake packet + ongoing renewals
+                </span>
+                {data.clientEmail && (
+                  <a
+                    href={`#/intakes?email=${encodeURIComponent(data.clientEmail)}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    style={{
+                      marginLeft: 'auto',
+                      display: 'inline-flex', alignItems: 'center', gap: 4,
+                      fontSize: 10, fontWeight: 700, letterSpacing: '1px', textTransform: 'uppercase',
+                      padding: '4px 10px', borderRadius: 100,
+                      background: '#fff', color: theme.colors.textSecondary,
+                      border: `1px solid ${theme.colors.border}`,
+                      textDecoration: 'none',
+                    }}
+                    title="Open this client's original intake submission"
+                  >
+                    <ExternalLink size={11} /> View Original Intake
+                  </a>
+                )}
+              </div>
+              <ClientDocumentsBlock clientSheetId={data.spreadsheetId} />
+            </div>
+          )}
+
           {/* Optional */}
           <div style={sectionDivider}>
             <div style={sectionHead}>Optional</div>
@@ -711,3 +749,63 @@ export function OnboardClientModal({ mode = 'create', existingClient = null, all
     </>
   );
 }
+
+/**
+ * ClientDocumentsBlock — thin wrapper around the shared documents
+ * module, scoped to context_type='client' + context_id=spreadsheetId.
+ *
+ * Reuses DocumentUploadButton (arbitrary file picker) + DocumentList
+ * (renders every row with soft-delete + signed-URL download). Because
+ * uploads go through useDocuments.uploadDocument, files land in the
+ * same bucket as entity docs — documents/{tenant}/client-{id}/filename —
+ * and RLS automatically scopes reads to the right audience (staff/admin
+ * everything, client-role users only their own tenant).
+ */
+function ClientDocumentsBlock({ clientSheetId }: { clientSheetId: string }) {
+  const { documents, loading, uploadDocument } = useDocuments({
+    contextType: 'client',
+    contextId: clientSheetId,
+    tenantId: clientSheetId,
+  });
+  const [uploading, setUploading] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const handleUpload = async (files: File[]) => {
+    setUploading(true); setErr(null);
+    try {
+      for (const f of files) {
+        const res = await uploadDocument(f);
+        if (!res) { setErr(`Upload failed for ${f.name}`); break; }
+      }
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  return (
+    <div style={{ background: theme.colors.bgSubtle, borderRadius: 10, padding: 14 }}>
+      <div style={{ marginBottom: 10 }}>
+        <DocumentUploadButton onUpload={handleUpload} uploading={uploading} compact />
+      </div>
+      {err && (
+        <div role="alert" style={{
+          padding: '8px 12px', marginBottom: 10,
+          background: '#FEF2F2', border: '1px solid #FCA5A5', color: '#B91C1C',
+          borderRadius: 8, fontSize: 12,
+        }}>
+          <AlertTriangle size={12} style={{ marginRight: 6, verticalAlign: '-2px' }} /> {err}
+        </div>
+      )}
+      {loading ? (
+        <div style={{ padding: 12, textAlign: 'center', color: theme.colors.textMuted, fontSize: 12 }}>Loading…</div>
+      ) : documents.length === 0 ? (
+        <div style={{ padding: 12, textAlign: 'center', color: theme.colors.textMuted, fontSize: 12 }}>
+          No documents yet. The original intake packet lands here when a client is activated from an intake; admins can also upload renewals, COI, tax forms, etc.
+        </div>
+      ) : (
+        <DocumentList contextType="client" contextId={clientSheetId} tenantId={clientSheetId} />
+      )}
+    </div>
+  );
+}
+

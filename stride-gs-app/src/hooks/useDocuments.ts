@@ -13,9 +13,11 @@ import { supabase } from '../lib/supabase';
 import { useAuth } from '../contexts/AuthContext';
 
 // Must match the CHECK constraint on public.documents.context_type exactly.
-// Session-73 Phase A migration defines: shipment | item | task | repair | willcall | claim.
+// Session-73 Phase A migration defined: shipment | item | task | repair | willcall | claim.
+// Session-77 added 'client' — per-client docs (intake packets, COI renewals,
+// tax-exemption updates) ride the same module as entity docs.
 export type DocumentContextType =
-  | 'shipment' | 'item' | 'task' | 'repair' | 'willcall' | 'claim';
+  | 'shipment' | 'item' | 'task' | 'repair' | 'willcall' | 'claim' | 'client';
 
 export interface DocumentRow {
   id: string;

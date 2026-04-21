@@ -278,3 +278,90 @@ export function useIntakeAdmin(): UseIntakeAdminResult {
     generateLink, revokeLink, updateStatus, getFileSignedUrl,
   }), [intakes, links, loading, error, refetch, generateLink, revokeLink, updateStatus, getFileSignedUrl]);
 }
+
+/**
+ * copyIntakeDocsToClient — when an intake is activated into a real
+ * client, carry the original upload packet forward under the client's
+ * own documents scope so the client settings → Client Documents panel
+ * shows the intake packet from day one.
+ *
+ * Source paths live at `intakes/<linkId>/...` in the `documents`
+ * bucket. We use the Storage API's server-side `copy()` to move a copy
+ * to `<clientSheetId>/client-<clientSheetId>/...` (the same storage
+ * layout useDocuments writes to). Then we INSERT a matching row into
+ * the `documents` table with context_type='client' so the module picks
+ * them up.
+ *
+ * Idempotent: if the target key already exists the copy fails with
+ * "already exists" — we catch and continue so the caller can safely
+ * re-trigger from the admin review pane. Failures are logged and
+ * returned in the `failures` array; the caller decides whether to
+ * surface them.
+ *
+ * NOTE: the intake's original files are NOT deleted from
+ * `intakes/<linkId>/...` — the intake review pane still references
+ * them via `client_intakes.resale_cert_path`. They're an audit trail.
+ */
+export interface CopyResult {
+  copied: number;
+  failures: Array<{ path: string; error: string }>;
+}
+export async function copyIntakeDocsToClient(
+  intake: IntakeRow,
+  clientSheetId: string,
+  uploaderName?: string,
+): Promise<CopyResult> {
+  const result: CopyResult = { copied: 0, failures: [] };
+  // Gather every upload path recorded on the intake row.
+  const paths: Array<{ path: string; label: string }> = [];
+  if (intake.resaleCertPath) paths.push({ path: intake.resaleCertPath, label: 'resale-cert' });
+  if (intake.signedTcPdfPath) {
+    // signedTcPdfPath is a CSV of the prospect's "other" uploads (see
+    // ClientIntake.tsx submit path). Split + trim + drop empties.
+    for (const p of intake.signedTcPdfPath.split(',').map(s => s.trim()).filter(Boolean)) {
+      paths.push({ path: p, label: 'intake-other' });
+    }
+  }
+  if (paths.length === 0) return result;
+
+  for (const { path, label } of paths) {
+    // Preserve the original filename on the destination so the list
+    // view shows "Resale_Cert.pdf" instead of "1745123456-ab12cd-cert.pdf".
+    const sourceBase = path.split('/').pop() ?? `intake-${Date.now()}`;
+    const ts = Date.now();
+    const rand = Math.random().toString(36).slice(2, 8);
+    const destKey = `${clientSheetId}/client-${clientSheetId}/${ts}-${rand}-${sourceBase}`;
+
+    // 1. Server-side copy in Storage.
+    const { error: copyErr } = await supabase.storage
+      .from('documents')
+      .copy(path, destKey);
+    if (copyErr) {
+      // "The resource already exists" is a benign re-run; don't count
+      // that as a failure. Anything else propagates.
+      if (!/already exists/i.test(copyErr.message)) {
+        result.failures.push({ path, error: copyErr.message });
+        continue;
+      }
+    }
+
+    // 2. Row in documents table pointing at the new storage key.
+    const { error: insErr } = await supabase.from('documents').insert({
+      tenant_id: clientSheetId,
+      context_type: 'client',
+      context_id: clientSheetId,
+      storage_key: destKey,
+      file_name: sourceBase,
+      mime_type: null,
+      uploaded_by: null,
+      uploaded_by_name: uploaderName ?? `intake:${intake.id.slice(0, 8)}`,
+    });
+    if (insErr) {
+      result.failures.push({ path, error: `${label} → ${insErr.message}` });
+      continue;
+    }
+    result.copied++;
+  }
+
+  return result;
+}
