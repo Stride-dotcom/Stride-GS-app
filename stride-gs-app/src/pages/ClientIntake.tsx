@@ -29,8 +29,10 @@ import {
   uploadIntakeFile,
   submitIntake,
   fetchClientTcBody,
+  fetchPublicCoverageNotes,
   useSignatureCanvas,
   type IntakeSubmitPayload,
+  type PublicCoverageNote,
 } from '../hooks/useClientIntake';
 
 // Style tokens — copied verbatim from PublicRates so the public-side
@@ -129,15 +131,21 @@ export function ClientIntake({ linkId }: Props) {
     }
   }, [link]);
 
-  // Load the T&C HTML once (Step 3 + Step 6 both render it).
+  // Load the T&C HTML + live coverage notes in parallel. The T&C body
+  // contains {{COVERAGE_*_NOTE}} tokens that we interpolate at render
+  // time from the current coverage_options rows — so a rate change in
+  // the Price List flows into the next signed agreement without
+  // anyone editing the template.
   const [tcHtml, setTcHtml] = useState<string | null>(null);
   const [tcLoading, setTcLoading] = useState(false);
+  const [coverageNotes, setCoverageNotes] = useState<PublicCoverageNote[]>([]);
   useEffect(() => {
     let cancelled = false;
     setTcLoading(true);
-    void fetchClientTcBody().then(body => {
+    void Promise.all([fetchClientTcBody(), fetchPublicCoverageNotes()]).then(([body, notes]) => {
       if (cancelled) return;
       setTcHtml(body);
+      setCoverageNotes(notes);
       setTcLoading(false);
     });
     return () => { cancelled = true; };
@@ -318,6 +326,7 @@ export function ClientIntake({ linkId }: Props) {
             setDraft={setDraft}
             tcHtml={tcHtml}
             tcLoading={tcLoading}
+            coverageNotes={coverageNotes}
             sig={sig}
             sigHasInk={sigHasInk}
             setSigHasInk={setSigHasInk}
@@ -518,9 +527,10 @@ function StepBilling({ draft, setDraft }: StepProps) {
   );
 }
 
-function StepTerms({ draft, setDraft, tcHtml, tcLoading, sig, sigHasInk, setSigHasInk }: StepProps & {
+function StepTerms({ draft, setDraft, tcHtml, tcLoading, coverageNotes, sig, sigHasInk, setSigHasInk }: StepProps & {
   tcHtml: string | null;
   tcLoading: boolean;
+  coverageNotes: PublicCoverageNote[];
   sig: ReturnType<typeof useSignatureCanvas>;
   sigHasInk: boolean;
   setSigHasInk: (v: boolean) => void;
@@ -552,7 +562,7 @@ function StepTerms({ draft, setDraft, tcHtml, tcLoading, sig, sigHasInk, setSigH
             selected={draft.insuranceChoice === 'stride_coverage'}
             onSelect={() => setDraft(d => ({ ...d, insuranceChoice: 'stride_coverage' }))}
             title="Add me to Stride's policy"
-            body="Stride adds my property to its storage policy. Processing fee: $300/month per $100,000 declared value ($300/month minimum). Not insurance sold by Stride — we're adding you to ours."
+            body="Stride adds my property to its storage policy. Processing fee: $300/month per $100,000 declared value ($300/month minimum)."
           />
         </div>
       </div>
@@ -568,14 +578,14 @@ function StepTerms({ draft, setDraft, tcHtml, tcLoading, sig, sigHasInk, setSigH
           {sections.intro && (
             <div
               style={tcProseStyle}
-              dangerouslySetInnerHTML={{ __html: replaceTokens(sections.intro, draft) }}
+              dangerouslySetInnerHTML={{ __html: replaceTokens(sections.intro, draft, coverageNotes) }}
             />
           )}
           {sections.sections.map(s => (
             <div key={s.key} style={{ background: BG_PAGE, borderRadius: 14, padding: 18, border: `1px solid ${BORDER}` }}>
               <div
                 style={tcProseStyle}
-                dangerouslySetInnerHTML={{ __html: replaceTokens(s.html, draft) }}
+                dangerouslySetInnerHTML={{ __html: replaceTokens(s.html, draft, coverageNotes) }}
               />
               <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 14, padding: '10px 14px', background: '#fff', borderRadius: 10, border: `1px solid ${BORDER}` }}>
                 <div style={{ fontSize: 11, fontWeight: 700, color: TEXT_MUT, letterSpacing: '1.5px', textTransform: 'uppercase', minWidth: 70 }}>Initial</div>
@@ -594,7 +604,7 @@ function StepTerms({ draft, setDraft, tcHtml, tcLoading, sig, sigHasInk, setSigH
 
           {/* Signature block */}
           <div style={{ background: BG_PAGE, borderRadius: 14, padding: 18, border: `1px solid ${BORDER}` }}>
-            <div style={tcProseStyle} dangerouslySetInnerHTML={{ __html: replaceTokens(sections.signature, draft) }} />
+            <div style={tcProseStyle} dangerouslySetInnerHTML={{ __html: replaceTokens(sections.signature, draft, coverageNotes) }} />
             <div style={{ display: 'flex', gap: 8, marginTop: 14, marginBottom: 10 }}>
               <SigTabBtn active={draft.signatureType === 'typed'} onClick={() => setDraft(d => ({ ...d, signatureType: 'typed' }))}>Type name</SigTabBtn>
               <SigTabBtn active={draft.signatureType === 'drawn'} onClick={() => setDraft(d => ({ ...d, signatureType: 'drawn' }))}>Draw signature</SigTabBtn>
@@ -962,10 +972,21 @@ function KV({ k, v }: { k: string; v: React.ReactNode }) {
 
 // ─── Utilities ───────────────────────────────────────────────────────
 
-function replaceTokens(html: string, draft: Draft): string {
+function replaceTokens(html: string, draft: Draft, coverageNotes: PublicCoverageNote[] = []): string {
+  // Build a lookup of coverage-option id → note so the T&C tokens
+  // resolve to whatever the Price List has *right now*. Ids we know
+  // about ship with dedicated tokens; anything missing from the table
+  // renders an em-dash rather than a literal `{{TOKEN}}` that would
+  // confuse the prospect.
+  const byId = new Map(coverageNotes.map(c => [c.id, c.note || '']));
+  const noteFor = (id: string): string => byId.get(id) || '—';
   return html
     .replace(/\{\{BUSINESS_NAME\}\}/g, escapeHtml(draft.businessName || '[Business Name]'))
-    .replace(/\{\{SIGNED_DATE\}\}/g, escapeHtml(new Date().toLocaleDateString()));
+    .replace(/\{\{SIGNED_DATE\}\}/g, escapeHtml(new Date().toLocaleDateString()))
+    .replace(/\{\{COVERAGE_STANDARD_NOTE\}\}/g, escapeHtml(noteFor('standard')))
+    .replace(/\{\{COVERAGE_FND_NOTE\}\}/g, escapeHtml(noteFor('fnd')))
+    .replace(/\{\{COVERAGE_FWD_NOTE\}\}/g, escapeHtml(noteFor('fwd')))
+    .replace(/\{\{COVERAGE_STORAGE_NOTE\}\}/g, escapeHtml(noteFor('storage_added')));
 }
 
 function escapeHtml(s: string): string {

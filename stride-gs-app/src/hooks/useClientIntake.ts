@@ -223,6 +223,30 @@ export async function fetchClientTcBody(): Promise<string | null> {
   return (data as { body: string | null }).body ?? null;
 }
 
+export interface PublicCoverageNote {
+  id: string;
+  name: string;
+  note: string;
+}
+
+/**
+ * fetchPublicCoverageNotes — pull active coverage options for
+ * interpolation into the T&C. Anon-readable via the
+ * `coverage_options_anon_read` policy. The `note` field is what ends
+ * up as the contractual description; the Price List page is the
+ * editorial surface.
+ */
+export async function fetchPublicCoverageNotes(): Promise<PublicCoverageNote[]> {
+  const { data, error } = await supabase
+    .from('coverage_options')
+    .select('id,name,note')
+    .eq('active', true)
+    .order('display_order', { ascending: true });
+  if (error || !data) return [];
+  return (data as Array<{ id: string; name: string | null; note: string | null }>)
+    .map(r => ({ id: r.id, name: r.name ?? '', note: r.note ?? '' }));
+}
+
 /**
  * getPublicDocumentUrl — staff/admin review helper. Returns a short-
  * lived signed URL to an intake-uploaded document (resale cert, etc).
