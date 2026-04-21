@@ -262,7 +262,7 @@ function ReadOnlyRow({ zone, onEdit, onDelete, confirmDelete }: {
       onMouseEnter={e => e.currentTarget.style.background = v2.colors.bgCard}
       onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
     >
-      <div style={{ fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>{zone.zipCode}</div>
+      <div style={{ fontWeight: 600, fontVariantNumeric: 'tabular-nums', color: v2.colors.accent }}>{zone.zipCode}</div>
       <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{zone.city}</div>
       <div style={{
         overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',

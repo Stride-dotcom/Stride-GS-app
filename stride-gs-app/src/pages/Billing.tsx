@@ -10,7 +10,7 @@ import {
 import {
   Search, Download, ChevronUp, ChevronDown, ChevronRight, ArrowUpDown,
   Settings2, FileText, DollarSign, Send, Eye, ExternalLink,
-  CheckCircle, AlertTriangle, Loader2, Pencil, X, RefreshCw, Plus, Scale,
+  CheckCircle, AlertTriangle, Loader2, Pencil, X, RefreshCw, Plus, Scale, CreditCard,
 } from 'lucide-react';
 import { ParityMonitor } from './ParityMonitor';
 import { useVirtualRows } from '../hooks/useVirtualRows';
@@ -618,7 +618,7 @@ export function Billing() {
   const [invOptEmail, setInvOptEmail] = useState(true);
   const [invOptQbo, setInvOptQbo] = useState(false);
   const [invOptStax, setInvOptStax] = useState(false);
-  const [invOptQb, setInvOptQb] = useState(false);
+  const invOptQb = false; // QB Export removed — checkbox no longer exists
   const [invoiceLoading, setInvoiceLoading] = useState(false);
   const [invoiceBatch, setInvoiceBatch] = useState<{ state: BatchState; total: number; processed: number; succeeded: number; failed: number }>({
     state: 'idle', total: 0, processed: 0, succeeded: 0, failed: 0,
@@ -836,8 +836,10 @@ export function Billing() {
       col.accessor('invoiceNo', { header: 'Invoice #', size: 110, cell: i => <span style={{ fontSize: 12, fontWeight: i.getValue() ? 600 : 400, color: i.getValue() ? theme.colors.text : theme.colors.textMuted }}>{i.getValue() || '\u2014'}</span> }),
       col.accessor('client', { header: 'Client', size: 160, filterFn: mf, cell: i => {
         const auto = i.row.original.autoCharge;
+        const hasStax = !!i.row.original.staxCustomerId;
         return <span style={{ fontWeight: 500, fontSize: 12, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
           {i.getValue()}
+          {hasStax && <span title="Stax payment on file" style={{ display: 'inline-flex', flexShrink: 0 }}><CreditCard size={11} color="#15803D" /></span>}
           {auto && <span style={{ fontSize: 9, padding: '1px 5px', borderRadius: 4, background: '#F0FDF4', color: '#15803D', fontWeight: 700 }}>Auto Pay</span>}
         </span>;
       } }),
@@ -1101,7 +1103,7 @@ export function Billing() {
   };
 
   // ─── QB Excel Export Handler (.xlsx for QBO import) ───────────────────────
-  const [qbExcelLoading, setQbExcelLoading] = useState(false);
+  const [, setQbExcelLoading] = useState(false);
   const handleQbExcelExport = async (ledgerRowIds?: string[]) => {
     setQbExcelLoading(true);
     setQbResult(null);
@@ -1315,15 +1317,8 @@ export function Billing() {
           <button onClick={() => setShowCols(v => !v)} style={{ padding: '7px 12px', fontSize: 12, fontWeight: 500, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4, fontFamily: 'inherit', color: theme.colors.textSecondary }}><Settings2 size={14} /> Columns</button>
           {showCols && <div style={{ position: 'absolute', top: '100%', right: 0, marginTop: 4, background: '#fff', border: `1px solid ${theme.colors.border}`, borderRadius: 10, padding: 8, zIndex: 50, boxShadow: '0 4px 20px rgba(0,0,0,0.1)', minWidth: 180 }}>{TOGGLEABLE.map(id => <label key={id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '5px 8px', fontSize: 12, cursor: 'pointer' }}><input type="checkbox" checked={colVis[id] !== false} onChange={() => setColVis(v => ({ ...v, [id]: v[id] === false }))} style={{ accentColor: theme.colors.orange }} />{COL_LABELS[id]}</label>)}</div>}
         </div>
-        <button onClick={() => toCSV(isStorageTab ? previewRows : reportData, isStorageTab ? 'stride-storage-preview.csv' : 'stride-billing-report.csv')} style={{ padding: '7px 12px', fontSize: 12, fontWeight: 500, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4, fontFamily: 'inherit', color: theme.colors.textSecondary }}><Download size={14} /> Export</button>
-        <button onClick={() => window.open('https://drive.google.com/drive/folders/1nN-9xm2SdR1_Sk603nmudWHhMxlaHElx', '_blank')} title="Open exports folder in Google Drive" style={{ padding: '7px 12px', fontSize: 12, fontWeight: 500, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4, fontFamily: 'inherit', color: theme.colors.textSecondary }}><ExternalLink size={14} /> Exports</button>
-        {isReportTab && <button onClick={async () => {
-          const sel = resolveSelectedRows();
-          if (!sel.length) { setQbResult({ error: 'Select invoiced rows to export. Use the checkboxes to select rows first.' }); return; }
-          const invoicedRows = sel.filter(r => r.status === 'Invoiced');
-          if (!invoicedRows.length) { setQbResult({ error: 'None of the selected rows are Invoiced. Create invoices first, then select the invoiced rows to export.' }); return; }
-          await handleQbExcelExport(invoicedRows.map(r => r.ledgerRowId));
-        }} disabled={qbExcelLoading} style={{ padding: '7px 12px', fontSize: 12, fontWeight: 600, border: `1px solid ${theme.colors.orange}`, borderRadius: 8, background: '#fff', cursor: qbExcelLoading ? 'default' : 'pointer', display: 'flex', alignItems: 'center', gap: 4, fontFamily: 'inherit', color: theme.colors.orange }}><DollarSign size={14} /> {qbExcelLoading ? 'Exporting...' : 'QB Export'}</button>}
+        <button onClick={() => toCSV(isStorageTab ? previewRows : reportData, isStorageTab ? 'stride-storage-preview.csv' : 'stride-billing-report.csv')} style={{ padding: '7px 12px', fontSize: 12, fontWeight: 500, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4, fontFamily: 'inherit', color: theme.colors.textSecondary }}><Download size={14} /> Export xlsx</button>
+        <button onClick={() => window.open('https://drive.google.com/drive/folders/1nN-9xm2SdR1_Sk603nmudWHhMxlaHElx', '_blank')} title="Open exports folder in Google Drive" style={{ padding: '7px 12px', fontSize: 12, fontWeight: 500, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4, fontFamily: 'inherit', color: theme.colors.textSecondary }}><ExternalLink size={14} /> IIF Folder</button>
         {isReportTab && <button onClick={async () => {
           const sel = resolveSelectedRows();
           if (!sel.length) { setQbResult({ error: 'Select invoiced rows to export. Use the checkboxes to select rows first.' }); return; }
@@ -1886,14 +1881,6 @@ export function Billing() {
                         </div>
                       </label>
 
-                      {/* QB Export (legacy) */}
-                      <label style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '10px 12px', border: `1px solid ${invOptQb ? theme.colors.orange : theme.colors.border}`, borderRadius: 10, marginBottom: 8, background: invOptQb ? '#FEF3EE' : '#fff', cursor: 'pointer' }}>
-                        <input type="checkbox" checked={invOptQb} onChange={() => setInvOptQb(!invOptQb)} style={{ accentColor: theme.colors.orange, marginTop: 2, width: 16, height: 16, cursor: 'pointer' }} />
-                        <div style={{ flex: 1 }}>
-                          <div style={{ fontSize: 13, fontWeight: 600 }}>Export QB File (.xlsx)</div>
-                          <div style={{ fontSize: 11, color: '#64748B', marginTop: 2 }}>Generate a QuickBooks-compatible Excel file and save to the exports folder.</div>
-                        </div>
-                      </label>
                     </div>
                   </>
                 );

@@ -175,7 +175,7 @@ function ReadOnlyRow({ cls, onEdit }: { cls: ItemClass; onEdit: () => void }) {
       onMouseEnter={e => e.currentTarget.style.background = v2.colors.bgCard}
       onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
     >
-      <div style={{ fontWeight: 700, letterSpacing: '0.5px' }}>{cls.id}</div>
+      <div style={{ fontWeight: 700, letterSpacing: '0.5px', color: v2.colors.accent }}>{cls.id}</div>
       <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{cls.name}</div>
       <div style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums', fontWeight: 600 }}>
         {cls.storageSize > 0 ? `${cls.storageSize} cu ft` : '—'}
