@@ -80,6 +80,9 @@ interface Draft {
   notificationContacts: NotifyContact[];
   // Step 3
   insuranceChoice: 'own_policy' | 'stride_coverage' | '';
+  /** Only used when insuranceChoice='stride_coverage'. Dollar value
+   *  the prospect wants insured; feeds the monthly charge + $300 min. */
+  insuranceDeclaredValue: string;
   signatureType: 'typed' | 'drawn';
   typedSignature: string;
   // drawnSignature captured via canvas ref on demand
@@ -96,6 +99,7 @@ const EMPTY_DRAFT: Draft = {
   billingContactName: '', billingEmail: '', billingAddress: '',
   notificationContacts: [],
   insuranceChoice: '',
+  insuranceDeclaredValue: '',
   signatureType: 'typed',
   typedSignature: '',
   sectionInitials: {},
@@ -289,7 +293,11 @@ export function ClientIntake({ linkId }: Props) {
           ? draft.typedSignature.trim().length > 0
           : sigHasInk;
         const hasInsurance = !!draft.insuranceChoice;
-        return allInitialed && hasSig && hasInsurance;
+        // Stride coverage requires a declared value > 0 — the daily
+        // billing job uses it to compute the monthly charge ($300/$100K).
+        const declaredOk = draft.insuranceChoice !== 'stride_coverage'
+          || (Number(draft.insuranceDeclaredValue) > 0);
+        return allInitialed && hasSig && hasInsurance && declaredOk;
       }
       case 4: return draft.paymentAuthorized;
       case 5: return true; // documents optional
@@ -306,6 +314,8 @@ export function ClientIntake({ linkId }: Props) {
     // canAdvance() so a user can't leap to Submit with a half-filled form.
     if (!draft.businessName || !draft.contactName || !draft.email) return false;
     if (!draft.insuranceChoice) return false;
+    if (draft.insuranceChoice === 'stride_coverage'
+        && !(Number(draft.insuranceDeclaredValue) > 0)) return false;
     const sigOk = draft.signatureType === 'typed'
       ? draft.typedSignature.trim().length > 0
       : sigHasInk;
@@ -356,6 +366,9 @@ export function ClientIntake({ linkId }: Props) {
         billingAddress:     draft.billingAddress || undefined,
         notificationContacts: draft.notificationContacts.filter(c => c.email.trim().length > 0),
         insuranceChoice:    draft.insuranceChoice as 'own_policy' | 'stride_coverage',
+        insuranceDeclaredValue: draft.insuranceChoice === 'stride_coverage' && draft.insuranceDeclaredValue
+          ? Number(draft.insuranceDeclaredValue)
+          : undefined,
         signatureType:      draft.signatureType,
         signatureData,
         initials:           draft.sectionInitials,
@@ -638,6 +651,45 @@ function StepTerms({ draft, setDraft, tcHtml, tcLoading, coverageNotes, sig, sig
             body="Stride adds my property to its storage policy. Processing fee: $300/month per $100,000 declared value ($300/month minimum)."
           />
         </div>
+
+        {/* Declared-value input — only shown when Stride coverage is
+            selected. Feeds the daily billing cron, which bills
+            GREATEST($300, declared/$100K × rate) per month. */}
+        {draft.insuranceChoice === 'stride_coverage' && (
+          <div style={{ marginTop: 14, padding: 14, background: BG_CARD, border: `1px solid ${BORDER}`, borderRadius: 10 }}>
+            <label style={{ display: 'block', fontSize: 12, fontWeight: 600, color: TEXT, marginBottom: 6 }}>
+              Declared Value (what you want insured) *
+            </label>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{ fontSize: 15, color: TEXT_SEC }}>$</span>
+              <input
+                type="number"
+                min={0}
+                step={1000}
+                value={draft.insuranceDeclaredValue}
+                onChange={e => setDraft(d => ({ ...d, insuranceDeclaredValue: e.target.value }))}
+                placeholder="100000"
+                style={{
+                  flex: 1,
+                  padding: '10px 12px',
+                  fontSize: 14,
+                  border: `1px solid ${BORDER}`,
+                  borderRadius: 8,
+                  outline: 'none',
+                }}
+              />
+            </div>
+            <div style={{ fontSize: 12, color: TEXT_MUT, marginTop: 8, lineHeight: 1.5 }}>
+              {(() => {
+                const declared = Number(draft.insuranceDeclaredValue) || 0;
+                const monthly = Math.max(300, Math.round((declared / 100000) * 300 * 100) / 100);
+                return declared > 0
+                  ? <>Your monthly charge: <strong style={{ color: TEXT }}>${monthly.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong> (per T&C §2.B — $300 minimum).</>
+                  : <>Enter the dollar amount you want insured. Monthly charge: $300 per $100,000 declared, with a $300/month minimum.</>;
+              })()}
+            </div>
+          </div>
+        )}
       </div>
 
       {tcLoading ? (
@@ -823,10 +875,12 @@ function StepDocuments({ draft, setDraft }: StepProps) {
 }
 
 function StepReview({ draft, onJumpTo, sigDataUrl }: { draft: Draft; onJumpTo: (step: number) => void; sigDataUrl: string }) {
+  const declared = Number(draft.insuranceDeclaredValue) || 0;
+  const declaredMonthly = Math.max(300, Math.round((declared / 100000) * 300 * 100) / 100);
   const insuranceLabel = draft.insuranceChoice === 'own_policy'
     ? "Client's own policy"
     : draft.insuranceChoice === 'stride_coverage'
-      ? 'Added to Stride policy ($300/mo per $100K)'
+      ? `Added to Stride policy — $${declared.toLocaleString()} declared · $${declaredMonthly.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}/mo`
       : '—';
   return (
     <div>

@@ -35,6 +35,10 @@ export interface IntakeRow {
   // New intakes write 'stride_coverage'; the UI treats the two as
   // equivalent for display.
   insuranceChoice: 'own_policy' | 'stride_coverage' | 'eis_coverage' | null;
+  /** Only meaningful when insuranceChoice='stride_coverage'. Dollar
+   *  value to be insured — used by the daily billing cron to compute
+   *  the monthly charge ($300 min, or declared/$100K × rate). */
+  insuranceDeclaredValue: number;
   paymentAuthorized: boolean;
   signatureType: 'typed' | 'drawn' | null;
   signatureData: string | null;
@@ -78,6 +82,7 @@ interface IntakeDbRow {
   billing_address: string | null;
   notification_contacts: unknown;
   insurance_choice: string | null;
+  insurance_declared_value: number | string | null;
   payment_authorized: boolean | null;
   signature_type: string | null;
   signature_data: string | null;
@@ -124,6 +129,7 @@ function rowToIntake(r: IntakeDbRow): IntakeRow {
       ? (r.notification_contacts as Array<{ name?: string; email: string }>)
       : [],
     insuranceChoice: (r.insurance_choice as IntakeRow['insuranceChoice']) ?? null,
+    insuranceDeclaredValue: Number(r.insurance_declared_value ?? 0) || 0,
     paymentAuthorized: r.payment_authorized === true,
     signatureType: (r.signature_type as IntakeRow['signatureType']) ?? null,
     signatureData: r.signature_data,
@@ -367,4 +373,73 @@ export async function copyIntakeDocsToClient(
   }
 
   return result;
+}
+
+/**
+ * seedClientInsuranceFromIntake — when an intake activates into a real
+ * client and the prospect chose Stride's coverage, create the
+ * `client_insurance` row that drives the daily billing cron.
+ *
+ * Called immediately after the Onboard Client success path in
+ * IntakesPanel.activateFromIntake. One row per tenant_id (enforced by a
+ * UNIQUE constraint on the column) — upsert on conflict so re-runs of
+ * the activation flow are idempotent.
+ *
+ * Rate is snapshotted from the current service_catalog INSURANCE row at
+ * activation time; historical clients are insulated from future rate
+ * changes that way. Inception = today, next_billing_date = today + 30d
+ * (first month is full-price, per T&C §2.B).
+ *
+ * Only 'stride_coverage' / 'eis_coverage' intakes create a row — 'own_policy'
+ * intakes are skipped (nothing to bill). Returns true on insert/upsert,
+ * false if skipped or failed. The caller treats a failure as a warning,
+ * not a hard block — billing can be repaired manually.
+ */
+export async function seedClientInsuranceFromIntake(
+  intake: IntakeRow,
+  clientSheetId: string,
+  clientName: string,
+): Promise<{ seeded: boolean; error?: string }> {
+  const isStride = intake.insuranceChoice === 'stride_coverage'
+                || intake.insuranceChoice === 'eis_coverage';
+  if (!isStride) return { seeded: false };
+  const declared = intake.insuranceDeclaredValue || 0;
+  if (declared <= 0) {
+    // Prospect picked Stride coverage but didn't provide a value — that
+    // shouldn't happen post-session-77 (form enforces > 0) but old
+    // intakes could land here. Skip the seed; admin can set it up from
+    // the client settings Insurance card.
+    return { seeded: false, error: 'declared_value_missing' };
+  }
+
+  // Pull the current rate from service_catalog so historical clients
+  // can stay on today's rate even if the admin raises it later.
+  let monthlyRate = 300;
+  const { data: svc } = await supabase
+    .from('service_catalog')
+    .select('flat_rate')
+    .eq('code', 'INSURANCE')
+    .maybeSingle();
+  if (svc && typeof svc.flat_rate === 'number') monthlyRate = svc.flat_rate;
+
+  const today = new Date();
+  const nextBilling = new Date(today);
+  nextBilling.setDate(nextBilling.getDate() + 30);
+  const toDateStr = (d: Date) => d.toISOString().slice(0, 10);
+
+  const { error: err } = await supabase
+    .from('client_insurance')
+    .upsert({
+      tenant_id:             clientSheetId,
+      client_name:           clientName,
+      coverage_type:         'stride_coverage',
+      declared_value:        declared,
+      monthly_rate_per_100k: monthlyRate,
+      inception_date:        toDateStr(today),
+      next_billing_date:     toDateStr(nextBilling),
+      active:                true,
+    }, { onConflict: 'tenant_id' });
+
+  if (err) return { seeded: false, error: err.message };
+  return { seeded: true };
 }

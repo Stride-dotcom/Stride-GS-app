@@ -51,6 +51,10 @@ export interface IntakeSubmitPayload {
   // 'eis_coverage' retained in the union as a back-compat read path —
    // new intakes write 'stride_coverage' per session 77 rename.
   insuranceChoice: 'own_policy' | 'stride_coverage' | 'eis_coverage';
+  /** Only captured when the prospect picks 'stride_coverage'. Dollars.
+   *  Copied into client_insurance.declared_value on activation and
+   *  used by the daily billing job. */
+  insuranceDeclaredValue?: number;
   signatureType: 'typed' | 'drawn';
   signatureData: string; // typed name OR base64 PNG data URL
   initials: Record<string, string>; // { storage: 'ABC', ... }
@@ -175,6 +179,7 @@ export async function submitIntake(payload: IntakeSubmitPayload): Promise<{ id: 
     billing_address:       payload.billingAddress?.trim() || null,
     notification_contacts: payload.notificationContacts.filter(c => c.email.trim().length > 0),
     insurance_choice:      payload.insuranceChoice,
+    insurance_declared_value: payload.insuranceDeclaredValue ?? 0,
     payment_authorized:    payload.paymentAuthorized,
     signature_type:        payload.signatureType,
     signature_data:        payload.signatureData,

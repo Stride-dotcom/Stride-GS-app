@@ -13,7 +13,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Copy, CheckCircle2, Link2, Plus, Trash2, FileText, UserPlus, Eye, X, AlertTriangle, ExternalLink, Loader2, Mail } from 'lucide-react';
 import { theme } from '../../styles/theme';
 import { fmtDateTime } from '../../lib/constants';
-import { useIntakeAdmin, copyIntakeDocsToClient, type IntakeRow, type IntakeLinkRow } from '../../hooks/useIntakeAdmin';
+import { useIntakeAdmin, copyIntakeDocsToClient, seedClientInsuranceFromIntake, type IntakeRow, type IntakeLinkRow } from '../../hooks/useIntakeAdmin';
 // Reference for future wiring — keep the helper in the import graph
 // without tripping noUnusedLocals.
 void copyIntakeDocsToClient;
@@ -110,6 +110,20 @@ export function IntakesPanel() {
         } catch (e) {
           warnings.push(`Intake doc copy error: ${e instanceof Error ? e.message : String(e)}`);
         }
+        // Seed the client_insurance row so the daily billing cron picks
+        // the new client up on its next run (+30 days from today).
+        try {
+          const seedRes = await seedClientInsuranceFromIntake(selected, newClientSheetId, formData.clientName);
+          if (seedRes.seeded) {
+            warnings.push(`Insurance auto-billing activated — $${selected.insuranceDeclaredValue.toLocaleString()} declared.`);
+          } else if (seedRes.error === 'declared_value_missing') {
+            warnings.push(`Insurance: prospect chose Stride coverage but declared value was missing — set it up from the client settings Insurance card.`);
+          } else if (seedRes.error) {
+            warnings.push(`Insurance seed failed: ${seedRes.error}. Set up insurance manually from client settings.`);
+          }
+        } catch (e) {
+          warnings.push(`Insurance seed error: ${e instanceof Error ? e.message : String(e)}`);
+        }
       }
       await updateStatus(selected.id, 'activated');
     }
@@ -129,7 +143,9 @@ export function IntakesPanel() {
     autoInspection: true,
     notes: [
       intake.notes,
-      (intake.insuranceChoice === 'stride_coverage' || intake.insuranceChoice === 'eis_coverage') ? 'Added to Stride policy ($300/mo per $100K declared value).' : null,
+      (intake.insuranceChoice === 'stride_coverage' || intake.insuranceChoice === 'eis_coverage')
+        ? `Added to Stride policy${intake.insuranceDeclaredValue > 0 ? ` — declared $${intake.insuranceDeclaredValue.toLocaleString()}` : ''} ($300/mo per $100K declared value).`
+        : null,
       intake.insuranceChoice === 'own_policy' ? "Client's own policy — collect COI." : null,
     ].filter(Boolean).join(' '),
   });
@@ -521,7 +537,19 @@ function IntakeReview({ intake, onCreateClient, onMarkReviewed, onReject, getFil
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10, marginBottom: 18 }}>
         <MetaCard label="Status" value={<StatusPill status={intake.status} />} />
-        <MetaCard label="Coverage" value={intake.insuranceChoice === 'own_policy' ? "Client's own policy" : (intake.insuranceChoice === 'stride_coverage' || intake.insuranceChoice === 'eis_coverage') ? 'Added to Stride policy' : '—'} />
+        <MetaCard label="Coverage" value={(() => {
+          if (intake.insuranceChoice === 'own_policy') return "Client's own policy";
+          if (intake.insuranceChoice === 'stride_coverage' || intake.insuranceChoice === 'eis_coverage') {
+            const dv = intake.insuranceDeclaredValue;
+            // The intake row carries the prospect's declared value; a
+            // zero-value row is an older intake or an edge case so fall
+            // back to just the label.
+            return dv > 0
+              ? `Stride policy · $${dv.toLocaleString()} declared`
+              : 'Added to Stride policy';
+          }
+          return '—';
+        })()} />
         <MetaCard label="Payment authorized" value={intake.paymentAuthorized ? 'Yes' : 'No'} accent={intake.paymentAuthorized ? '#15803D' : '#B45309'} />
         <MetaCard label="Signed" value={intake.signedAt ? fmtDateTime(intake.signedAt) : '—'} />
       </div>
@@ -545,6 +573,17 @@ function IntakeReview({ intake, onCreateClient, onMarkReviewed, onReject, getFil
       </Section>
 
       <Section title="Agreement">
+        <KV k="Insurance choice" v={(() => {
+          if (intake.insuranceChoice === 'own_policy') return "Client's own policy (collect COI at activation)";
+          if (intake.insuranceChoice === 'stride_coverage' || intake.insuranceChoice === 'eis_coverage') {
+            const dv = intake.insuranceDeclaredValue;
+            const monthly = Math.max(300, Math.round((dv / 100000) * 300 * 100) / 100);
+            return dv > 0
+              ? `Added to Stride policy · $${dv.toLocaleString()} declared · $${monthly.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}/mo`
+              : 'Added to Stride policy (declared value not captured — pre-session-77 intake)';
+          }
+          return '—';
+        })()} />
         <KV k="Sections initialed" v={
           ['storage','insurance','billing','lien','general'].map(k => {
             const val = intake.initials[k] || '—';

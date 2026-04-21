@@ -8,6 +8,9 @@ import type { ApiClient } from '../../lib/api';
 import { DocumentList } from '../media/DocumentList';
 import { DocumentUploadButton } from '../media/DocumentUploadButton';
 import { useDocuments } from '../../hooks/useDocuments';
+import { useClientInsurance } from '../../hooks/useClientInsurance';
+import { Shield } from 'lucide-react';
+import { supabase } from '../../lib/supabase';
 
 export interface OnboardClientFormData {
   // Identity
@@ -582,6 +585,23 @@ export function OnboardClientModal({ mode = 'create', existingClient = null, all
             </div>
           )}
 
+          {/* Edit mode: Insurance — shows client_insurance state + a
+              billing history mirror of every svc_code='INSURANCE' row.
+              The daily Postgres cron is the authoritative writer for the
+              billing rows; this card only edits declared value, active
+              toggle, and cancel. */}
+          {isEdit && data.spreadsheetId && (
+            <div style={sectionDivider}>
+              <div style={{ ...sectionHead, display: 'flex', alignItems: 'center', gap: 6 }}>
+                <Shield size={14} /> Insurance
+                <span style={{ fontSize: 10, fontWeight: 400, color: theme.colors.textMuted, marginLeft: 4 }}>
+                  Auto-billed monthly from client_insurance
+                </span>
+              </div>
+              <InsuranceBlock tenantId={data.spreadsheetId} clientName={data.clientName} />
+            </div>
+          )}
+
           {/* Optional */}
           <div style={sectionDivider}>
             <div style={sectionHead}>Optional</div>
@@ -809,3 +829,298 @@ function ClientDocumentsBlock({ clientSheetId }: { clientSheetId: string }) {
   );
 }
 
+/**
+ * InsuranceBlock — per-client insurance state card.
+ *
+ * Shows coverage type, declared value (editable), current monthly rate
+ * (read-only — rate changes are prospective from service_catalog),
+ * inception date, next billing date, last billed, active toggle, and
+ * a billing history table of every svc_code='INSURANCE' row that the
+ * daily cron has inserted into `billing` for this tenant.
+ *
+ * The daily Postgres cron (20260420160001_insurance_auto_billing_cron.sql)
+ * is the only writer to billing.svc_code='INSURANCE' rows. This card
+ * only edits declared_value and active. Cancelling sets active=false
+ * and stamps cancelled_at=now — the row stays for audit history.
+ *
+ * Seeding path: for clients that didn't come through the intake pipeline
+ * (pre-session-77 accounts) there's a "Set up insurance" button that
+ * creates the row with a user-entered declared value.
+ */
+function InsuranceBlock({ tenantId, clientName }: { tenantId: string; clientName: string }) {
+  const { row, history, loading, error, seed, updateDeclaredValue, setActive, cancel } = useClientInsurance(tenantId);
+  const [editing, setEditing] = useState(false);
+  const [draftDeclared, setDraftDeclared] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [confirmCancel, setConfirmCancel] = useState(false);
+  const [seedDraft, setSeedDraft] = useState('');
+  const [localErr, setLocalErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (row) setDraftDeclared(String(row.declaredValue));
+  }, [row]);
+
+  const monthly = row ? Math.max(300, Math.round((row.declaredValue / 100000) * row.monthlyRatePer100k * 100) / 100) : 0;
+
+  const handleSaveDeclared = async () => {
+    const n = Number(draftDeclared);
+    if (!(n >= 0)) { setLocalErr('Enter a non-negative number'); return; }
+    setSaving(true); setLocalErr(null);
+    const ok = await updateDeclaredValue(n);
+    setSaving(false);
+    if (!ok) setLocalErr('Save failed');
+    else setEditing(false);
+  };
+
+  const handleSeed = async () => {
+    const n = Number(seedDraft);
+    if (!(n > 0)) { setLocalErr('Enter a declared value greater than zero'); return; }
+    setSaving(true); setLocalErr(null);
+    // The seed helper only sets tenant_id / declared / dates — clientName
+    // needs a follow-up update so the billing mirror rows show the right
+    // customer name when the cron runs.
+    const ok = await seed({ declaredValue: n, coverageType: 'stride_coverage' });
+    if (ok && clientName) {
+      await supabase.from('client_insurance').update({ client_name: clientName }).eq('tenant_id', tenantId);
+    }
+    setSaving(false);
+    if (!ok) setLocalErr('Setup failed — check RLS or retry');
+  };
+
+  if (loading) {
+    return <div style={{ padding: 12, textAlign: 'center', color: theme.colors.textMuted, fontSize: 12 }}>Loading…</div>;
+  }
+  if (error) {
+    return <div style={{ padding: 12, background: '#FEF2F2', border: '1px solid #FCA5A5', color: '#B91C1C', borderRadius: 8, fontSize: 12 }}>
+      <AlertTriangle size={12} style={{ marginRight: 6, verticalAlign: '-2px' }} /> {error}
+    </div>;
+  }
+
+  if (!row) {
+    // No row yet — this is a pre-intake client or an own-policy intake.
+    // Offer a one-shot seed if the admin wants to add Stride coverage.
+    return (
+      <div style={{ background: theme.colors.bgSubtle, borderRadius: 10, padding: 14 }}>
+        <div style={{ fontSize: 12, color: theme.colors.textSecondary, marginBottom: 10 }}>
+          No active Stride coverage for this client. If the client wants to be added to Stride's storage policy, enter a declared value below and set up insurance auto-billing.
+        </div>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <span style={{ fontSize: 13 }}>$</span>
+          <input
+            type="number"
+            min={0}
+            step={1000}
+            value={seedDraft}
+            onChange={e => setSeedDraft(e.target.value)}
+            placeholder="100000"
+            style={{ ...inp, maxWidth: 200 }}
+          />
+          <button
+            onClick={handleSeed}
+            disabled={saving || !(Number(seedDraft) > 0)}
+            style={{
+              padding: '8px 14px', fontSize: 12, fontWeight: 600,
+              background: theme.colors.orange, color: '#fff', border: 'none',
+              borderRadius: 8, cursor: saving ? 'wait' : 'pointer',
+              opacity: saving || !(Number(seedDraft) > 0) ? 0.5 : 1,
+            }}
+          >{saving ? 'Saving…' : 'Set up insurance'}</button>
+        </div>
+        {localErr && (
+          <div style={{ marginTop: 8, fontSize: 11, color: '#B91C1C' }}>{localErr}</div>
+        )}
+      </div>
+    );
+  }
+
+  const isCancelled = !row.active || !!row.cancelledAt;
+
+  return (
+    <div style={{ background: theme.colors.bgSubtle, borderRadius: 10, padding: 14 }}>
+      {/* Status strip */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+        <span style={{
+          padding: '3px 10px', borderRadius: 100, fontSize: 10, fontWeight: 700, letterSpacing: '1px', textTransform: 'uppercase',
+          background: isCancelled ? '#FEF2F2' : '#F0FDF4',
+          color:      isCancelled ? '#B91C1C' : '#15803D',
+          border:     `1px solid ${isCancelled ? '#FCA5A5' : '#86EFAC'}`,
+        }}>
+          {isCancelled ? 'Cancelled' : 'Active'}
+        </span>
+        <span style={{ fontSize: 11, color: theme.colors.textMuted }}>
+          Next billing: <strong style={{ color: theme.colors.text }}>{row.nextBillingDate}</strong>
+        </span>
+        {row.lastBilledAt && (
+          <span style={{ fontSize: 11, color: theme.colors.textMuted }}>
+            · Last billed: <strong style={{ color: theme.colors.text }}>{new Date(row.lastBilledAt).toLocaleDateString()}</strong>
+          </span>
+        )}
+      </div>
+
+      {/* Key/value grid */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12, marginBottom: 14 }}>
+        <div>
+          <div style={lbl}>Declared Value</div>
+          {editing ? (
+            <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+              <span style={{ fontSize: 13 }}>$</span>
+              <input
+                type="number"
+                min={0}
+                step={1000}
+                value={draftDeclared}
+                onChange={e => setDraftDeclared(e.target.value)}
+                style={inp}
+              />
+            </div>
+          ) : (
+            <div style={{ fontSize: 14, fontWeight: 600 }}>${row.declaredValue.toLocaleString()}</div>
+          )}
+        </div>
+        <div>
+          <div style={lbl}>Monthly Charge</div>
+          <div style={{ fontSize: 14, fontWeight: 600 }}>
+            ${monthly.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+          </div>
+          <div style={{ fontSize: 10, color: theme.colors.textMuted, marginTop: 2 }}>
+            $300 min · ${row.monthlyRatePer100k}/$100K frozen rate
+          </div>
+        </div>
+        <div>
+          <div style={lbl}>Inception</div>
+          <div style={{ fontSize: 14 }}>{row.inceptionDate}</div>
+        </div>
+      </div>
+
+      {/* Action row */}
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+        {editing ? (
+          <>
+            <button
+              onClick={handleSaveDeclared}
+              disabled={saving}
+              style={{
+                padding: '7px 14px', fontSize: 12, fontWeight: 600,
+                background: theme.colors.orange, color: '#fff', border: 'none',
+                borderRadius: 8, cursor: 'pointer', opacity: saving ? 0.5 : 1,
+              }}
+            >{saving ? 'Saving…' : 'Save'}</button>
+            <button
+              onClick={() => { setEditing(false); setDraftDeclared(String(row.declaredValue)); setLocalErr(null); }}
+              style={{
+                padding: '7px 14px', fontSize: 12, fontWeight: 500,
+                background: '#fff', color: theme.colors.textSecondary,
+                border: `1px solid ${theme.colors.border}`, borderRadius: 8, cursor: 'pointer',
+              }}
+            >Cancel</button>
+          </>
+        ) : (
+          <>
+            {!isCancelled && (
+              <button
+                onClick={() => setEditing(true)}
+                style={{
+                  padding: '7px 14px', fontSize: 12, fontWeight: 500,
+                  background: '#fff', color: theme.colors.textSecondary,
+                  border: `1px solid ${theme.colors.border}`, borderRadius: 8, cursor: 'pointer',
+                }}
+              >Edit declared value</button>
+            )}
+            {!isCancelled ? (
+              <button
+                onClick={() => setActive(false)}
+                style={{
+                  padding: '7px 14px', fontSize: 12, fontWeight: 500,
+                  background: '#fff', color: theme.colors.textSecondary,
+                  border: `1px solid ${theme.colors.border}`, borderRadius: 8, cursor: 'pointer',
+                }}
+              >Pause auto-billing</button>
+            ) : row.cancelledAt ? null : (
+              <button
+                onClick={() => setActive(true)}
+                style={{
+                  padding: '7px 14px', fontSize: 12, fontWeight: 500,
+                  background: '#fff', color: theme.colors.textSecondary,
+                  border: `1px solid ${theme.colors.border}`, borderRadius: 8, cursor: 'pointer',
+                }}
+              >Resume</button>
+            )}
+            {!isCancelled && !confirmCancel && (
+              <button
+                onClick={() => setConfirmCancel(true)}
+                style={{
+                  padding: '7px 14px', fontSize: 12, fontWeight: 500,
+                  background: '#fff', color: '#B91C1C',
+                  border: '1px solid #FCA5A5', borderRadius: 8, cursor: 'pointer',
+                  marginLeft: 'auto',
+                }}
+              >Cancel coverage</button>
+            )}
+            {confirmCancel && (
+              <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginLeft: 'auto' }}>
+                <span style={{ fontSize: 11, color: '#B91C1C' }}>Cancel future billing?</span>
+                <button
+                  onClick={async () => { await cancel(); setConfirmCancel(false); }}
+                  style={{
+                    padding: '6px 12px', fontSize: 11, fontWeight: 600,
+                    background: '#DC2626', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer',
+                  }}
+                >Confirm</button>
+                <button
+                  onClick={() => setConfirmCancel(false)}
+                  style={{
+                    padding: '6px 12px', fontSize: 11,
+                    background: '#fff', color: theme.colors.textSecondary,
+                    border: `1px solid ${theme.colors.border}`, borderRadius: 6, cursor: 'pointer',
+                  }}
+                >Keep</button>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+      {localErr && (
+        <div style={{ marginTop: 8, fontSize: 11, color: '#B91C1C' }}>{localErr}</div>
+      )}
+
+      {/* Billing history */}
+      <div style={{ marginTop: 16 }}>
+        <div style={{ ...lbl, marginBottom: 6 }}>Billing history</div>
+        {history.length === 0 ? (
+          <div style={{ fontSize: 11, color: theme.colors.textMuted, padding: '6px 0' }}>
+            No charges yet — the first charge will appear on {row.nextBillingDate}.
+          </div>
+        ) : (
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ width: '100%', fontSize: 11, borderCollapse: 'collapse' }}>
+              <thead>
+                <tr style={{ textAlign: 'left', color: theme.colors.textMuted, borderBottom: `1px solid ${theme.colors.border}` }}>
+                  <th style={{ padding: '6px 8px', fontWeight: 600 }}>Date</th>
+                  <th style={{ padding: '6px 8px', fontWeight: 600 }}>Declared</th>
+                  <th style={{ padding: '6px 8px', fontWeight: 600 }}>Charge</th>
+                  <th style={{ padding: '6px 8px', fontWeight: 600 }}>Status</th>
+                  <th style={{ padding: '6px 8px', fontWeight: 600 }}>Invoice</th>
+                </tr>
+              </thead>
+              <tbody>
+                {history.map((h, i) => (
+                  <tr key={h.ledgerRowId ?? i} style={{ borderBottom: `1px solid ${theme.colors.border}` }}>
+                    <td style={{ padding: '6px 8px' }}>{h.date}</td>
+                    <td style={{ padding: '6px 8px' }}>${(h.qty * 100000).toLocaleString(undefined, { maximumFractionDigits: 0 })}</td>
+                    <td style={{ padding: '6px 8px', fontWeight: 600 }}>${h.total.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                    <td style={{ padding: '6px 8px' }}>{h.status}</td>
+                    <td style={{ padding: '6px 8px' }}>
+                      {h.invoiceUrl
+                        ? <a href={h.invoiceUrl} target="_blank" rel="noopener noreferrer" style={{ color: theme.colors.orange }}>{h.invoiceNumber ?? 'View'}</a>
+                        : (h.invoiceNumber ?? '—')}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
