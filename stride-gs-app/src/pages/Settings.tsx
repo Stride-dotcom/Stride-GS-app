@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Settings as SettingsIcon, Users, DollarSign, Mail, Database, Globe, Bell, Plus, ChevronRight, CheckCircle2, AlertCircle, UserPlus, Shield, ToggleLeft, ToggleRight, Eye, EyeOff, Wifi, WifiOff, RefreshCw, Loader2, RefreshCcw, ExternalLink, Wrench, PlayCircle, Send, FolderSync, BookText, LogIn, Cloud, Edit2, Zap, ArrowUpDown, ChevronUp, ChevronDown, X } from 'lucide-react';
+import { Settings as SettingsIcon, Users, DollarSign, Mail, Database, Globe, Bell, Plus, ChevronRight, CheckCircle2, AlertCircle, UserPlus, Shield, ToggleLeft, ToggleRight, Eye, EyeOff, Wifi, WifiOff, RefreshCw, Loader2, RefreshCcw, ExternalLink, Wrench, PlayCircle, Send, FolderSync, BookText, LogIn, Cloud, Edit2, Zap, ArrowUpDown, ChevronUp, ChevronDown, X, Truck, Link2, Search } from 'lucide-react';
 import { useReactTable, getCoreRowModel, getSortedRowModel, flexRender, type SortingState, type ColumnDef } from '@tanstack/react-table';
 import { getApiUrl, getApiToken, setApiCredentials, isApiConfigured, fetchHealth, postOnboardClient, postUpdateClient, postSyncSettings, postRefreshCaches, postFixMissingFolders, postTestSendClientTemplates, postTestSendClaimEmails, fetchAutoIdSetting, postUpdateAutoIdSetting, postResolveOnboardUser, fetchStaxConfig, postUpdateStaxConfig, apiPost, postSyncTemplatesToClients, postBulkSyncToSupabase, postPurgeInactiveFromSupabase, fetchClients, postFinishClientSetup, postSendWelcomeToUsers, resyncUsersPreview, resyncUsers, resyncClientsPreview, resyncClients, setNextFetchNoCache, adminSetUserPassword, ensureUserInAuth, listMissingAuthUsers, postTestGenerateDoc } from '../lib/api';
 import type { BulkSyncResult } from '../lib/api';
@@ -23,6 +23,7 @@ import type { ApiUser } from '../lib/api';
 import { theme } from '../styles/theme';
 import { WriteButton } from '../components/shared/WriteButton';
 import { QBOConnect } from '../components/settings/QBOConnect';
+import { supabase } from '../lib/supabase';
 
 type Tab = 'general' | 'clients' | 'users' | 'pricing' | 'emails' | 'integrations' | 'notifications' | 'maintenance';
 
@@ -187,6 +188,67 @@ function IntegrationsTab() {
   const [staxResult, setStaxResult] = useState<string | null>(null);
   const [staxError, setStaxError] = useState<string | null>(null);
 
+  // ── DispatchTrack account mapping ────────────────────────────────────────
+  type DtCredsRow = { id: string; api_base_url: string | null; account_name_map: Record<string, string> };
+  const [dtCreds, setDtCreds] = useState<DtCredsRow | null>(null);
+  const [dtCredsLoading, setDtCredsLoading] = useState(true);
+  const [dtOpen, setDtOpen] = useState(false);
+  const [dtFilter, setDtFilter] = useState<'all' | 'missing'>('all');
+  const [dtSearch, setDtSearch] = useState('');
+  const [dtActiveEdit, setDtActiveEdit] = useState<string | null>(null); // spreadsheetId being edited
+  const [dtEditValue, setDtEditValue] = useState('');
+  const [dtSaving, setDtSaving] = useState<Record<string, boolean>>({});
+  const [dtSaveError, setDtSaveError] = useState<string | null>(null);
+  const { apiClients: dtClients } = useClients(true);
+
+  useEffect(() => {
+    supabase.from('dt_credentials').select('id, api_base_url, account_name_map').single()
+      .then(({ data }) => {
+        if (data) setDtCreds(data as DtCredsRow);
+        setDtCredsLoading(false);
+      });
+  }, []);
+
+  const getDtName = (spreadsheetId: string): string => {
+    if (!dtCreds?.account_name_map) return '';
+    const m = dtCreds.account_name_map;
+    return Object.keys(m).find(k => m[k] === spreadsheetId) || '';
+  };
+
+  const dtMissingCount = dtClients.filter(c => !getDtName(c.spreadsheetId)).length;
+
+  const handleDtEditStart = (spreadsheetId: string) => {
+    setDtActiveEdit(spreadsheetId);
+    setDtEditValue(getDtName(spreadsheetId));
+    setDtSaveError(null);
+  };
+
+  const handleDtSave = async (spreadsheetId: string) => {
+    if (!dtCreds) return;
+    const newName = dtEditValue.trim();
+    setDtSaving(prev => ({ ...prev, [spreadsheetId]: true }));
+    const newMap = { ...dtCreds.account_name_map };
+    // Remove any existing key pointing to this client
+    Object.keys(newMap).forEach(k => { if (newMap[k] === spreadsheetId) delete newMap[k]; });
+    // Add new entry if name is provided
+    if (newName) newMap[newName] = spreadsheetId;
+    const { error } = await supabase.from('dt_credentials').update({ account_name_map: newMap }).eq('id', dtCreds.id);
+    if (!error) {
+      setDtCreds(prev => prev ? { ...prev, account_name_map: newMap } : prev);
+      setDtActiveEdit(null);
+    } else {
+      setDtSaveError(error.message);
+    }
+    setDtSaving(prev => { const n = { ...prev }; delete n[spreadsheetId]; return n; });
+  };
+
+  const dtDisplayClients = dtClients
+    .filter(c => {
+      if (dtFilter === 'missing') return !getDtName(c.spreadsheetId);
+      return true;
+    })
+    .filter(c => !dtSearch || c.name.toLowerCase().includes(dtSearch.toLowerCase()) || getDtName(c.spreadsheetId).toLowerCase().includes(dtSearch.toLowerCase()));
+
   // Load real config from API on mount
   useEffect(() => {
     (async () => {
@@ -337,6 +399,177 @@ function IntegrationsTab() {
 
       {/* QuickBooks Online Connection */}
       <QBOConnect />
+
+      {/* ── DispatchTrack Integration ─────────────────────────────────────── */}
+      <div style={card}>
+        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 14 }}>
+          <div style={{ width: 36, height: 36, borderRadius: 8, background: theme.colors.orangeLight, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+            <Truck size={18} color={theme.colors.primary} />
+          </div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 2 }}>DispatchTrack</div>
+            <div style={{ fontSize: 12, color: theme.colors.textSecondary, marginBottom: 12 }}>
+              Delivery route management — links Stride clients to DT customer accounts for order push.
+            </div>
+
+            {dtCredsLoading ? (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: theme.colors.textMuted, fontSize: 12 }}><Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} /> Loading…</div>
+            ) : dtCreds ? (
+              <>
+                {/* Stats row */}
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8, marginBottom: 14 }}>
+                  <div style={{ background: theme.colors.bgSubtle, border: `1px solid ${theme.colors.border}`, borderRadius: 8, padding: '8px 12px' }}>
+                    <div style={{ fontSize: 10, fontWeight: 600, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 2 }}>API URL</div>
+                    <div style={{ fontSize: 12, color: theme.colors.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{dtCreds.api_base_url || '—'}</div>
+                  </div>
+                  <div style={{ background: theme.colors.bgSubtle, border: `1px solid ${theme.colors.border}`, borderRadius: 8, padding: '8px 12px' }}>
+                    <div style={{ fontSize: 10, fontWeight: 600, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 2 }}>Linked Clients</div>
+                    <div style={{ fontSize: 18, fontWeight: 700, color: '#15803D' }}>{dtClients.length - dtMissingCount}<span style={{ fontSize: 12, fontWeight: 400, color: theme.colors.textMuted }}> / {dtClients.length}</span></div>
+                  </div>
+                  <div style={{ background: dtMissingCount > 0 ? '#FEF2F2' : theme.colors.bgSubtle, border: `1px solid ${dtMissingCount > 0 ? '#FECACA' : theme.colors.border}`, borderRadius: 8, padding: '8px 12px' }}>
+                    <div style={{ fontSize: 10, fontWeight: 600, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 2 }}>Missing</div>
+                    <div style={{ fontSize: 18, fontWeight: 700, color: dtMissingCount > 0 ? '#DC2626' : '#15803D' }}>{dtMissingCount}</div>
+                  </div>
+                </div>
+                <button
+                  onClick={() => { setDtOpen(true); setDtFilter(dtMissingCount > 0 ? 'missing' : 'all'); setDtSearch(''); }}
+                  style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '7px 14px', fontSize: 12, fontWeight: 600, background: theme.colors.primary, color: '#fff', border: 'none', borderRadius: 7, cursor: 'pointer', fontFamily: 'inherit' }}
+                >
+                  <Link2 size={13} /> Manage Account Mapping
+                </button>
+              </>
+            ) : (
+              <div style={{ fontSize: 12, color: '#DC2626' }}>No DT credentials found — set up via Supabase <code>dt_credentials</code> table.</div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* DT Account Mapping Drawer */}
+      {dtOpen && (
+        <>
+          {/* Backdrop */}
+          <div onClick={() => setDtOpen(false)} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.3)', zIndex: 500 }} />
+          {/* Panel */}
+          <div style={{ position: 'fixed', top: 0, right: 0, bottom: 0, width: 700, background: '#fff', zIndex: 501, display: 'flex', flexDirection: 'column', boxShadow: '-4px 0 24px rgba(0,0,0,0.12)' }}>
+            {/* Header */}
+            <div style={{ padding: '16px 20px', borderBottom: `1px solid ${theme.colors.border}`, display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
+              <Truck size={18} color={theme.colors.primary} />
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 15, fontWeight: 700 }}>DispatchTrack Account Mapping</div>
+                <div style={{ fontSize: 11, color: theme.colors.textSecondary }}>Link each Stride client to their DispatchTrack customer account name</div>
+              </div>
+              <button onClick={() => setDtOpen(false)} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4, color: theme.colors.textMuted }}><X size={18} /></button>
+            </div>
+
+            {/* Toolbar */}
+            <div style={{ padding: '10px 20px', borderBottom: `1px solid ${theme.colors.border}`, display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0, background: theme.colors.bgSubtle }}>
+              {/* Filter tabs */}
+              <div style={{ display: 'flex', background: '#fff', border: `1px solid ${theme.colors.border}`, borderRadius: 7, overflow: 'hidden', flexShrink: 0 }}>
+                {(['all', 'missing'] as const).map(f => (
+                  <button key={f} onClick={() => setDtFilter(f)} style={{ padding: '5px 12px', fontSize: 11, fontWeight: 600, border: 'none', cursor: 'pointer', fontFamily: 'inherit', background: dtFilter === f ? theme.colors.primary : 'transparent', color: dtFilter === f ? '#fff' : theme.colors.textSecondary }}>
+                    {f === 'all' ? `All (${dtClients.length})` : `Missing (${dtMissingCount})`}
+                  </button>
+                ))}
+              </div>
+              {/* Search */}
+              <div style={{ flex: 1, position: 'relative' }}>
+                <Search size={13} style={{ position: 'absolute', left: 9, top: '50%', transform: 'translateY(-50%)', color: theme.colors.textMuted, pointerEvents: 'none' }} />
+                <input
+                  value={dtSearch}
+                  onChange={e => setDtSearch(e.target.value)}
+                  placeholder="Search clients or DT account names…"
+                  style={{ width: '100%', padding: '6px 10px 6px 28px', fontSize: 12, border: `1px solid ${theme.colors.border}`, borderRadius: 7, outline: 'none', fontFamily: 'inherit', boxSizing: 'border-box' }}
+                />
+              </div>
+              <div style={{ fontSize: 11, color: theme.colors.textMuted, flexShrink: 0 }}>{dtDisplayClients.length} shown</div>
+            </div>
+
+            {/* Table */}
+            <div style={{ flex: 1, overflowY: 'auto' }}>
+              {/* Column headers */}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 90px', padding: '8px 20px', borderBottom: `1px solid ${theme.colors.border}`, background: theme.colors.bgSubtle }}>
+                <div style={{ fontSize: 10, fontWeight: 700, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Stride Client</div>
+                <div style={{ fontSize: 10, fontWeight: 700, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.05em' }}>DT Account Name</div>
+                <div style={{ fontSize: 10, fontWeight: 700, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Status</div>
+              </div>
+
+              {dtDisplayClients.length === 0 ? (
+                <div style={{ padding: 40, textAlign: 'center', color: theme.colors.textMuted, fontSize: 13 }}>
+                  {dtFilter === 'missing' ? '🎉 All clients have a DT account linked' : 'No clients found'}
+                </div>
+              ) : dtDisplayClients.map(client => {
+                const dtName = getDtName(client.spreadsheetId);
+                const isMissing = !dtName;
+                const isEditing = dtActiveEdit === client.spreadsheetId;
+                const isSaving = dtSaving[client.spreadsheetId];
+                return (
+                  <div key={client.spreadsheetId} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 90px', padding: '10px 20px', borderBottom: `1px solid ${theme.colors.border}`, alignItems: 'center', background: isEditing ? '#FAFAFA' : '#fff' }}>
+                    {/* Client name */}
+                    <div style={{ fontSize: 13, fontWeight: 500, paddingRight: 12 }}>{client.name}</div>
+
+                    {/* DT account name — editable */}
+                    <div style={{ paddingRight: 12 }}>
+                      {isEditing ? (
+                        <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                          <input
+                            autoFocus
+                            value={dtEditValue}
+                            onChange={e => setDtEditValue(e.target.value)}
+                            onKeyDown={e => { if (e.key === 'Enter') handleDtSave(client.spreadsheetId); if (e.key === 'Escape') setDtActiveEdit(null); }}
+                            placeholder="e.g. ROCHE BOBOIS"
+                            style={{ flex: 1, padding: '5px 8px', fontSize: 12, border: `1px solid ${theme.colors.primary}`, borderRadius: 6, outline: 'none', fontFamily: 'inherit' }}
+                          />
+                          <button
+                            onClick={() => handleDtSave(client.spreadsheetId)}
+                            disabled={isSaving}
+                            style={{ padding: '4px 10px', fontSize: 11, fontWeight: 600, background: theme.colors.primary, color: '#fff', border: 'none', borderRadius: 6, cursor: isSaving ? 'default' : 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}
+                          >
+                            {isSaving ? <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} /> : <CheckCircle2 size={11} />}
+                            Save
+                          </button>
+                          <button onClick={() => setDtActiveEdit(null)} style={{ padding: '4px 8px', fontSize: 11, background: 'none', border: `1px solid ${theme.colors.border}`, borderRadius: 6, cursor: 'pointer', color: theme.colors.textMuted, fontFamily: 'inherit', flexShrink: 0 }}>Cancel</button>
+                        </div>
+                      ) : (
+                        <button
+                          onClick={() => handleDtEditStart(client.spreadsheetId)}
+                          style={{ display: 'flex', alignItems: 'center', gap: 6, background: 'none', border: `1px dashed ${isMissing ? '#FECACA' : theme.colors.border}`, borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontFamily: 'inherit', width: '100%', textAlign: 'left' }}
+                        >
+                          {isMissing ? (
+                            <span style={{ fontSize: 12, color: '#9CA3AF', fontStyle: 'italic' }}>+ Add DT account name</span>
+                          ) : (
+                            <>
+                              <span style={{ fontSize: 12, fontWeight: 500, color: theme.colors.text, flex: 1 }}>{dtName}</span>
+                              <Edit2 size={11} color={theme.colors.textMuted} style={{ flexShrink: 0 }} />
+                            </>
+                          )}
+                        </button>
+                      )}
+                      {isEditing && dtSaveError && <div style={{ fontSize: 11, color: '#DC2626', marginTop: 3 }}>{dtSaveError}</div>}
+                    </div>
+
+                    {/* Status badge */}
+                    <div>
+                      {isMissing ? (
+                        <span style={{ fontSize: 10, fontWeight: 600, background: '#FEF2F2', color: '#DC2626', border: '1px solid #FECACA', borderRadius: 4, padding: '2px 7px' }}>Missing</span>
+                      ) : (
+                        <span style={{ fontSize: 10, fontWeight: 600, background: '#F0FDF4', color: '#15803D', border: '1px solid #BBF7D0', borderRadius: 4, padding: '2px 7px', display: 'flex', alignItems: 'center', gap: 3 }}><CheckCircle2 size={9} /> Linked</span>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Footer */}
+            <div style={{ padding: '10px 20px', borderTop: `1px solid ${theme.colors.border}`, background: theme.colors.bgSubtle, flexShrink: 0 }}>
+              <div style={{ fontSize: 11, color: theme.colors.textMuted }}>
+                DT account names must match exactly as they appear in DispatchTrack (spelling and capitalization matter). Changes save immediately.
+              </div>
+            </div>
+          </div>
+        </>
+      )}
     </>
   );
 }
