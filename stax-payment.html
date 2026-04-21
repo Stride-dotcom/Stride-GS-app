@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Stride Logistics — Take Payment</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <style>
+    /* ── Stride v2 brand palette — mirror src/styles/theme.ts (theme.v2) ── */
+    :root {
+      --accent:        #E8692A;   /* primary orange */
+      --accent-deep:   #C95518;   /* hover */
+      --accent-soft:   #FFF3EC;   /* orange-tinted background */
+      --accent-border: #F8CFBA;   /* orange-tinted border */
+      --bg-page:       #F5F2EE;   /* warm cream */
+      --bg-card:       #FFFFFF;
+      --bg-dark:       #1C1C1C;
+      --text:          #151515;
+      --text-muted:    #666666;
+      --border:        #E5DFD8;
+      --danger:        #B91C1C;
+      --danger-bg:     #FEF2F2;
+      --danger-border: #FECACA;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+      background: var(--bg-page);
+      color: var(--text);
+      display: flex; align-items: center; justify-content: center;
+      min-height: 100dvh;
+      padding: 24px 16px;
+    }
+    .card {
+      background: var(--bg-card);
+      border-radius: 14px;
+      box-shadow: 0 2px 24px rgba(0,0,0,0.08), 0 0 0 1px rgba(0,0,0,0.03);
+      padding: 32px 36px 28px;
+      width: 460px;
+      max-width: 100%;
+    }
+    /* ── Brand header: dark bar with logo + STRIDE LOGISTICS ── */
+    .brand {
+      display: flex; align-items: center; gap: 12px;
+      background: var(--bg-dark);
+      color: #fff;
+      padding: 14px 18px;
+      border-radius: 10px;
+      margin: -10px -10px 22px;
+    }
+    .brand img { width: 28px; height: 28px; display: block; }
+    .brand .mark {
+      font-size: 15px; font-weight: 800; letter-spacing: 2px;
+      text-transform: uppercase; line-height: 1;
+    }
+    .brand .mark .orange { color: var(--accent); }
+    .brand .sub {
+      margin-left: auto;
+      font-size: 10px; letter-spacing: 1.5px;
+      color: rgba(255,255,255,0.55);
+      text-transform: uppercase;
+    }
+
+    h1 {
+      font-size: 20px;
+      font-weight: 700;
+      color: var(--text);
+      margin-bottom: 4px;
+    }
+    .subtitle {
+      font-size: 12px;
+      color: var(--text-muted);
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
+      font-weight: 600;
+      margin-bottom: 18px;
+    }
+    .order-badge {
+      display: inline-flex; align-items: center; gap: 6px;
+      background: var(--accent-soft);
+      border: 1px solid var(--accent-border);
+      color: var(--accent-deep);
+      font-size: 11px; font-weight: 700;
+      padding: 5px 12px;
+      border-radius: 999px;
+      margin-bottom: 18px;
+      letter-spacing: 0.4px;
+    }
+    label {
+      display: block;
+      font-size: 10px; font-weight: 700;
+      color: var(--text); text-transform: uppercase;
+      letter-spacing: 0.1em;
+      margin-top: 14px; margin-bottom: 6px;
+    }
+    input, textarea {
+      width: 100%;
+      padding: 11px 12px;
+      border: 1.5px solid var(--border);
+      border-radius: 8px;
+      font-size: 14px;
+      color: var(--text);
+      background: #fafaf8;
+      outline: none;
+      transition: border-color 0.15s, background 0.15s, box-shadow 0.15s;
+      font-family: inherit;
+    }
+    input:focus, textarea:focus {
+      border-color: var(--accent);
+      background: #fff;
+      box-shadow: 0 0 0 3px rgba(232,105,42,0.12);
+    }
+    input.error { border-color: var(--danger); background: var(--danger-bg); }
+    .amount-wrap { position: relative; }
+    .amount-wrap .dollar {
+      position: absolute;
+      left: 12px; top: 50%;
+      transform: translateY(-50%);
+      color: var(--text-muted);
+      font-size: 14px; font-weight: 600;
+      pointer-events: none;
+    }
+    .amount-wrap input { padding-left: 26px; }
+    textarea { resize: vertical; min-height: 78px; line-height: 1.4; }
+    .err-msg {
+      color: var(--danger); font-size: 12px;
+      margin-top: 5px; display: none;
+      font-weight: 500;
+    }
+    .err-msg.show { display: block; }
+    button#launch-btn {
+      margin-top: 24px;
+      width: 100%;
+      padding: 14px;
+      background: var(--accent);
+      color: #fff;
+      font-size: 14px;
+      font-weight: 700;
+      border: none;
+      border-radius: 10px;
+      cursor: pointer;
+      letter-spacing: 1.5px;
+      text-transform: uppercase;
+      transition: background 0.15s, box-shadow 0.15s, transform 0.05s;
+      font-family: inherit;
+      box-shadow: 0 2px 8px rgba(232,105,42,0.25);
+    }
+    button#launch-btn:hover:not(:disabled) {
+      background: var(--accent-deep);
+      box-shadow: 0 4px 12px rgba(232,105,42,0.35);
+    }
+    button#launch-btn:active:not(:disabled) { transform: translateY(1px); }
+    button#launch-btn:disabled {
+      background: #C8BFB4; cursor: not-allowed;
+      box-shadow: none;
+    }
+    .footer {
+      margin-top: 18px;
+      font-size: 10px; text-align: center;
+      color: var(--text-muted);
+      letter-spacing: 0.5px;
+    }
+    /* pay_now must exist and be reachable by Stax but invisible */
+    #pay_now {
+      position: absolute;
+      opacity: 0;
+      pointer-events: none;
+      height: 0;
+      overflow: hidden;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <!-- Brand bar: matches Stride app TopBar / PDF header treatment -->
+    <div class="brand">
+      <img src="/stride-logo.png" alt="Stride" onerror="this.style.display='none'">
+      <span class="mark">Stride <span class="orange">Logistics</span></span>
+      <span class="sub">Payment</span>
+    </div>
+
+    <h1>Take Payment</h1>
+    <p class="subtitle">Secure Checkout · Stax</p>
+
+    <div id="order-badge-wrap"></div>
+
+    <label>Amount *</label>
+    <div class="amount-wrap">
+      <span class="dollar">$</span>
+      <input type="number" id="amount" placeholder="0.00" min="0.01" step="0.01" inputmode="decimal">
+    </div>
+    <div class="err-msg" id="amount-err">Please enter a valid amount greater than $0.</div>
+
+    <label>Customer Name</label>
+    <input type="text" id="name" placeholder="Full name" autocomplete="name">
+
+    <label>Email</label>
+    <input type="email" id="email" placeholder="customer@email.com" autocomplete="email">
+    <div class="err-msg" id="email-err">Please enter a valid email address.</div>
+
+    <label>Order #</label>
+    <input type="text" id="order" placeholder="Order number">
+
+    <label>Notes</label>
+    <textarea id="notes" placeholder="Optional notes"></textarea>
+
+    <button id="launch-btn" onclick="launchPayment()">Take Payment</button>
+    <div class="footer">Powered by Stax · Stride Logistics WMS</div>
+  </div>
+
+  <!-- Invisible anchor required by Stax — must not be display:none -->
+  <div id="pay_now"></div>
+
+  <script>
+    // Pre-fill Order # + Notes from URL params (?order=INV-1234&notes=Will+Call+WC-123)
+    // Stride WMS Will Call panel passes both — order goes in the badge
+    // + Order field; notes is pre-populated so the reference back to
+    // the WC is captured on the payment record.
+    (function () {
+      var params = new URLSearchParams(window.location.search);
+      var orderParam = params.get('order');
+      var notesParam = params.get('notes');
+      if (orderParam) {
+        document.getElementById('order').value = orderParam;
+        var badge = document.createElement('div');
+        badge.className = 'order-badge';
+        badge.textContent = 'Order: ' + orderParam; // textContent is XSS-safe
+        document.getElementById('order-badge-wrap').appendChild(badge);
+      }
+      if (notesParam) {
+        // Notes may come URL-encoded with spaces — URLSearchParams decodes them.
+        document.getElementById('notes').value = notesParam;
+      }
+    })();
+
+    function isValidEmail(email) {
+      return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+    }
+
+    function launchPayment() {
+      var amountRaw = parseFloat(document.getElementById('amount').value);
+      var name      = document.getElementById('name').value.trim();
+      var email     = document.getElementById('email').value.trim();
+
+      var valid = true;
+      var amountErr = document.getElementById('amount-err');
+      var emailErr  = document.getElementById('email-err');
+
+      if (!amountRaw || amountRaw <= 0) {
+        amountErr.classList.add('show');
+        document.getElementById('amount').classList.add('error');
+        valid = false;
+      } else {
+        amountErr.classList.remove('show');
+        document.getElementById('amount').classList.remove('error');
+      }
+
+      if (email && !isValidEmail(email)) {
+        emailErr.classList.add('show');
+        document.getElementById('email').classList.add('error');
+        valid = false;
+      } else {
+        emailErr.classList.remove('show');
+        document.getElementById('email').classList.remove('error');
+      }
+
+      if (!valid) return;
+
+      var btn = document.getElementById('launch-btn');
+      btn.disabled = true;
+      btn.textContent = 'Opening payment…';
+
+      var existing = document.getElementById('stax_checkout_script');
+      if (existing) existing.remove();
+
+      // Cache-bust with timestamp so browser re-executes on repeat use.
+      var script = document.createElement('script');
+      script.id  = 'stax_checkout_script';
+      script.src = 'https://checkout.staxpayments.com/v1/checkout.min.js?t=' + Date.now();
+      script.setAttribute('data-webpaymentstoken', 'Stride-Logistics-cd315bf73c1d');
+      script.setAttribute('data-button', '#pay_now');
+      script.setAttribute('data-amount', amountRaw.toFixed(2));
+      script.setAttribute('data-openOnLoad', 'true');
+      script.setAttribute('data-displayConfirmation', 'true');
+      if (name)  script.setAttribute('data-name', name);
+      if (email) script.setAttribute('data-billingEmail', email);
+
+      script.onload  = function () { btn.disabled = false; btn.textContent = 'Take Payment'; };
+      script.onerror = function () {
+        btn.disabled = false; btn.textContent = 'Take Payment';
+        alert('Failed to load payment module. Please check your connection and try again.');
+      };
+
+      document.body.appendChild(script);
+    }
+  </script>
+</body>
+</html>
