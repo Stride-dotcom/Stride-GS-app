@@ -166,6 +166,9 @@ interface SupabaseInventoryRow {
   repair_photos_url: string | null;
   invoice_url: string | null;
   transfer_date: string | null;
+  // Phase B (session 79): per-item coverage fields.
+  declared_value: number | null;
+  coverage_option_id: string | null;
 }
 
 // Session 72 — shared raw inventory rows fetcher with scope-keyed dedup.
@@ -238,6 +241,9 @@ export async function fetchInventoryFromSupabase(
       status: row.status || 'Active',
       invoiceUrl: '',
       shipmentFolderUrl: undefined,
+      // Phase B (session 79): coverage fields.
+      declaredValue: row.declared_value ?? 0,
+      coverageOptionId: row.coverage_option_id ?? '',
     }));
 
     return {

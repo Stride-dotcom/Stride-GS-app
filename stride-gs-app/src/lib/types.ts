@@ -41,6 +41,8 @@ export interface InventoryItem {
   dimensions?: string;
   weight?: number;
   images?: string[];
+  declaredValue?: number;
+  coverageOptionId?: string;
 }
 
 export type InventoryStatus = 'Active' | 'Released' | 'On Hold' | 'Transferred';

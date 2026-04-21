@@ -498,7 +498,7 @@ export function ItemDetailPanel({
   itemTasks = [], itemRepairs = [], itemWillCalls = [], itemBilling = [],
   itemShipment,
   userRole, classNames = [], locationNames = [], clientSheetId, onItemUpdated,
-  mergeItemPatch, clearItemPatch,
+  applyItemPatch, mergeItemPatch, clearItemPatch,
 }: Props) {
   // Panel frame + resize + backdrop are handled by TabbedDetailPanel now.
   const statusCfg: Record<string, { bg: string; color: string }> = {
@@ -954,24 +954,13 @@ export function ItemDetailPanel({
   );
 
   const renderCoverageTab = () => (
-    <div style={{
-      display: 'flex', flexDirection: 'column', alignItems: 'center',
-      justifyContent: 'center', minHeight: 280, gap: 12,
-      padding: 24, textAlign: 'center',
-    }}>
-      <div style={{ width: 64, height: 64, borderRadius: 16, background: theme.colors.bgSubtle, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-        <Shield size={28} color={theme.colors.orange} />
-      </div>
-      <div style={{ fontSize: 16, fontWeight: 600, color: theme.colors.text }}>
-        Coverage configuration coming soon
-      </div>
-      <div style={{ fontSize: 13, color: theme.colors.textMuted, maxWidth: 380, lineHeight: 1.5 }}>
-        Shortly you'll be able to enter a declared value, pick a coverage option
-        from the price list, and preview the premium here. One-time billing for
-        coverage will be wired in a follow-up release once the service code is
-        finalized.
-      </div>
-    </div>
+    <ItemCoverageTab
+      item={item}
+      canEdit={!!canEditStaff}
+      optimistic={optimistic as any}
+      applyItemPatch={applyItemPatch}
+      clearItemPatch={clearItemPatch}
+    />
   );
 
   const renderActivityTab = () => (
@@ -1163,6 +1152,9 @@ export function ItemDetailPanel({
 // Imported lazily to keep the main component file from growing wider.
 
 import { PhotosPanel as _PhotosPanel, DocumentsPanel as _DocumentsPanel, NotesPanel as _NotesPanel } from './EntityAttachments';
+import { useCoverageOptions, formatCoverageRate, type CoverageOption } from '../../hooks/useCoverageOptions';
+import { AutocompleteSelect } from './AutocompleteSelect';
+import type { InventoryItem as CoverageItemType } from '../../lib/types';
 
 function PhotosPanelProxy({ item, clientSheetId }: { item: any; clientSheetId: string | undefined }) {
   return (
@@ -1289,6 +1281,278 @@ function ItemActionsMenu({
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+// ── Coverage tab (Phase B — data only, no billing write) ───────────────────
+//
+// Declared value + coverage option picker + computed premium preview. Save
+// persists to the Inventory sheet via postUpdateInventoryItem. Phase C will
+// add the "Apply Coverage Charge" button + idempotency guard + ledger-based
+// lock display on top of this. Until then this tab is a save-and-preview
+// surface only — no billing rows are created.
+//
+// Per-calc_type math:
+//   per_lb            → rate × weight (weight not on inventory today; shows
+//                       "Weight required" chip and disables Save)
+//   percent_declared  → rate% × declaredValue
+//   flat              → rate
+//   included          → 0
+
+function ItemCoverageTab({
+  item, canEdit, optimistic, applyItemPatch, clearItemPatch,
+}: {
+  item: any;
+  canEdit: boolean;
+  optimistic: { declaredValue?: number | string; coverageOptionId?: string } | null;
+  applyItemPatch?: (itemId: string, patch: Partial<CoverageItemType>) => void;
+  clearItemPatch?: (itemId: string) => void;
+}) {
+  const { options, loading: optionsLoading, error: optionsError } = useCoverageOptions();
+
+  // Prefer optimistic override > item prop > defaults
+  const currentDeclared = (optimistic?.declaredValue != null)
+    ? Number(optimistic.declaredValue)
+    : (item.declaredValue != null ? Number(item.declaredValue) : 0);
+  const currentOptionId = (optimistic?.coverageOptionId != null)
+    ? String(optimistic.coverageOptionId)
+    : String(item.coverageOptionId || '');
+
+  const [declaredInput, setDeclaredInput] = useState<string>(
+    currentDeclared > 0 ? String(currentDeclared) : ''
+  );
+  const [optionId, setOptionId] = useState<string>(currentOptionId);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [saveSuccess, setSaveSuccess] = useState(false);
+
+  // Keep local state in sync if the item prop changes externally
+  useEffect(() => {
+    setDeclaredInput(currentDeclared > 0 ? String(currentDeclared) : '');
+    setOptionId(currentOptionId);
+  }, [item.itemId]);  // eslint-disable-line react-hooks/exhaustive-deps
+
+  const activeOptions = useMemo(
+    () => options.filter(o => o.active).sort((a, b) => a.displayOrder - b.displayOrder),
+    [options]
+  );
+
+  const selectedOption: CoverageOption | null = useMemo(
+    () => activeOptions.find(o => o.id === optionId) || null,
+    [activeOptions, optionId]
+  );
+
+  const declaredValueNum = Number(declaredInput) || 0;
+
+  // Compute premium preview
+  const premiumInfo = useMemo(() => {
+    if (!selectedOption) return { amount: 0, display: '—', disabledReason: 'Pick a coverage option' };
+    switch (selectedOption.calcType) {
+      case 'percent_declared': {
+        const amt = (declaredValueNum * selectedOption.rate) / 100;
+        return {
+          amount: amt,
+          display: `$${amt.toFixed(2)}`,
+          disabledReason: declaredValueNum <= 0 ? 'Enter a declared value' : null,
+        };
+      }
+      case 'flat':
+        return { amount: selectedOption.rate, display: `$${selectedOption.rate.toFixed(2)}`, disabledReason: null };
+      case 'included':
+        return { amount: 0, display: 'Included ($0.00)', disabledReason: null };
+      case 'per_lb':
+        // Per-weight premium requires item weight which isn't on the
+        // inventory schema today. Show a clear disabled reason so the user
+        // knows this is expected rather than a bug.
+        return { amount: 0, display: '—', disabledReason: 'Per-pound coverage requires item weight (not yet tracked)' };
+      default:
+        return { amount: 0, display: '—', disabledReason: 'Unknown calc type' };
+    }
+  }, [selectedOption, declaredValueNum]);
+
+  const isDirty = declaredValueNum !== currentDeclared || optionId !== currentOptionId;
+  const canSave = canEdit && isDirty && !saving;
+
+  const handleSave = useCallback(async () => {
+    if (!canSave) return;
+    setSaveError(null);
+    setSaveSuccess(false);
+    setSaving(true);
+
+    // Optimistic patch so the UI reflects instantly
+    applyItemPatch?.(item.itemId, {
+      declaredValue: declaredValueNum,
+      coverageOptionId: optionId,
+    } as any);
+
+    try {
+      const resp = await postUpdateInventoryItem({
+        itemId: item.itemId,
+        declaredValue: declaredValueNum,
+        coverageOptionId: optionId,
+      }, item.clientSheetId || item.clientId);
+      if (resp.ok && resp.data?.success) {
+        setSaveSuccess(true);
+        // Patch stays — 120s TTL will align with next refetch
+        setTimeout(() => setSaveSuccess(false), 2500);
+      } else {
+        clearItemPatch?.(item.itemId);
+        setSaveError(resp.error || resp.data?.error || 'Save failed.');
+      }
+    } catch (err: any) {
+      clearItemPatch?.(item.itemId);
+      setSaveError(err?.message || 'Save failed.');
+    } finally {
+      setSaving(false);
+    }
+  }, [canSave, item.itemId, item.clientSheetId, item.clientId, declaredValueNum, optionId, applyItemPatch, clearItemPatch]);
+
+  // ── Render ──────────────────────────────────────────────────────────
+
+  if (optionsLoading) {
+    return (
+      <div style={{ display: 'flex', justifyContent: 'center', padding: 40, color: theme.colors.textMuted, fontSize: 13 }}>
+        Loading coverage options…
+      </div>
+    );
+  }
+  if (optionsError) {
+    return (
+      <div style={{ padding: 20, fontSize: 13, color: '#991B1B', background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: 10 }}>
+        Could not load coverage options: {optionsError}
+      </div>
+    );
+  }
+
+  const inputBaseStyle: React.CSSProperties = {
+    width: '100%',
+    padding: '8px 10px',
+    fontSize: 13,
+    border: `1px solid ${theme.colors.border}`,
+    borderRadius: 8,
+    outline: 'none',
+    fontFamily: 'inherit',
+    boxSizing: 'border-box',
+  };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
+      {/* Intro */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <div style={{ width: 36, height: 36, borderRadius: 10, background: theme.colors.bgSubtle, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <Shield size={18} color={theme.colors.orange} />
+        </div>
+        <div>
+          <div style={{ fontSize: 14, fontWeight: 600, color: theme.colors.text }}>Item Coverage</div>
+          <div style={{ fontSize: 11, color: theme.colors.textMuted }}>
+            Declared value + coverage option. Billing action ships in a follow-up.
+          </div>
+        </div>
+      </div>
+
+      {/* Declared value */}
+      <div>
+        <label style={{ display: 'block', fontSize: 10, fontWeight: 500, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 4 }}>
+          Declared Value
+        </label>
+        <div style={{ position: 'relative' }}>
+          <span style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', color: theme.colors.textMuted, fontSize: 13 }}>$</span>
+          <input
+            type="number"
+            min={0}
+            step="0.01"
+            value={declaredInput}
+            onChange={e => setDeclaredInput(e.target.value)}
+            disabled={!canEdit || saving}
+            placeholder="0.00"
+            style={{ ...inputBaseStyle, paddingLeft: 22 }}
+          />
+        </div>
+      </div>
+
+      {/* Coverage option picker */}
+      <div>
+        <label style={{ display: 'block', fontSize: 10, fontWeight: 500, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 4 }}>
+          Coverage Option
+        </label>
+        <AutocompleteSelect
+          options={activeOptions.map(o => ({ value: o.id, label: `${o.name} — ${formatCoverageRate(o)}` }))}
+          value={optionId}
+          onChange={setOptionId}
+          placeholder="Pick a coverage option…"
+          disabled={!canEdit || saving}
+        />
+        {selectedOption?.note && (
+          <div style={{ marginTop: 6, fontSize: 11, color: theme.colors.textMuted, fontStyle: 'italic' }}>
+            {selectedOption.note}
+          </div>
+        )}
+      </div>
+
+      {/* Premium preview */}
+      <div style={{
+        padding: '14px 16px',
+        background: theme.colors.bgSubtle,
+        borderRadius: 12,
+        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+      }}>
+        <div>
+          <div style={{ fontSize: 10, fontWeight: 500, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+            Computed Premium
+          </div>
+          <div style={{ fontSize: 20, fontWeight: 700, color: premiumInfo.disabledReason ? theme.colors.textMuted : theme.colors.text, marginTop: 2 }}>
+            {premiumInfo.display}
+          </div>
+          {premiumInfo.disabledReason && (
+            <div style={{ fontSize: 11, color: theme.colors.textMuted, marginTop: 4 }}>
+              {premiumInfo.disabledReason}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Save row */}
+      <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+        <button
+          onClick={handleSave}
+          disabled={!canSave}
+          style={{
+            display: 'flex', alignItems: 'center', gap: 6,
+            padding: '8px 16px',
+            fontSize: 12, fontWeight: 600,
+            borderRadius: 8,
+            border: 'none',
+            background: canSave ? theme.colors.orange : theme.colors.bgSubtle,
+            color: canSave ? '#fff' : theme.colors.textMuted,
+            cursor: canSave ? 'pointer' : 'not-allowed',
+            fontFamily: 'inherit',
+          }}
+        >
+          {saving ? <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} /> : <Save size={13} />}
+          {saving ? 'Saving…' : 'Save'}
+        </button>
+        {saveSuccess && (
+          <span style={{ fontSize: 12, color: '#15803D', fontWeight: 500 }}>
+            ✓ Saved
+          </span>
+        )}
+        {saveError && (
+          <span style={{ fontSize: 12, color: '#DC2626', fontWeight: 500 }}>
+            {saveError}
+          </span>
+        )}
+      </div>
+
+      {/* Phase C pointer */}
+      <div style={{
+        marginTop: 4, padding: '10px 12px',
+        background: '#FFFBEB', border: '1px solid #FDE68A', borderRadius: 8,
+        fontSize: 11, color: '#92400E',
+      }}>
+        Phase B: save-and-preview only. Billing isn't created yet — the
+        "Apply Coverage Charge" action lands in a follow-up release.
+      </div>
     </div>
   );
 }

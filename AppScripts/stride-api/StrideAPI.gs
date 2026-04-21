@@ -1,5 +1,32 @@
 /* ===================================================
-   StrideAPI.gs — v38.94.0 — 2026-04-20 PST — Intake email endpoints
+   StrideAPI.gs — v38.95.0 — 2026-04-21 PST — Item Coverage Phase B (data only, no billing)
+   v38.95.0: FEAT — Per-item coverage fields (declared_value + coverage_option_id)
+             wired end-to-end on the read path. Does NOT include a billing
+             write — Phase C will add the Apply-Coverage action with the
+             idempotency guard once the coverage-service-code decision is
+             frozen. Changes:
+             • Supabase migration `inventory_coverage_fields_phase_b` adds
+               `declared_value numeric(14,2) DEFAULT 0` and
+               `coverage_option_id text` to `public.inventory`.
+             • `handleUpdateInventoryItem_` FIELD_MAP now includes
+               `declaredValue` → "Declared Value" and `coverageOptionId` →
+               "Coverage Option". Validates declaredValue as non-negative
+               number.
+             • `api_findInventoryItem_` return includes the new fields.
+             • `sbInventoryRow_` mirrors both to Supabase. `resyncEntityToSupabase_`
+               + the per-client bulk-sync path + `handleGetBatch_` all read
+               them off the sheet (graceful when columns not yet rolled out).
+             • NEW `installCoverageColumns` one-shot admin utility (visible
+               in the Run dropdown). Adds `Declared Value` + `Coverage Option`
+               headers to every active client's Inventory sheet via the
+               existing `api_ensureColumn_` helper (case-insensitive,
+               idempotent).
+             **OPERATOR ACTION REQUIRED**: after this deploy, open the
+             Apps Script editor for Stride API and run `installCoverageColumns`
+             once. Until that runs, saving coverage fields from the UI will
+             error out with "Column not found: Declared Value" (by design —
+             matches the reviewer's "rollout schema first, then allow writes"
+             rule).
    v38.94.0: NEW — handleSendIntakeInvitation_ sends CLIENT_INTAKE_INVITE email
              to a prospect when an admin generates a new intake link and
              clicks Send in the modal. Admin-guarded (withAdminGuard_).
@@ -2778,6 +2805,12 @@ function sbInventoryRow_(tenantId, item) {
     repair_photos_url:     String(item.repairPhotosUrl || ""),
     invoice_url:           String(item.invoiceUrl || ""),
     transfer_date:         String(item.transferDate || ""),
+    // Phase B (session 79): per-item coverage fields.
+    // declared_value is numeric in Supabase; we coerce through Number() so
+    // missing/NaN falls back to 0 (matches the DEFAULT 0 in the migration).
+    declared_value:     (item.declaredValue != null && item.declaredValue !== "")
+                          ? (Number(item.declaredValue) || 0) : 0,
+    coverage_option_id: item.coverageOptionId ? String(item.coverageOptionId) : null,
     updated_at:            new Date().toISOString()
   };
 }
@@ -3677,7 +3710,10 @@ function resyncEntityToSupabase_(entityType, tenantId, entityId) {
               inspectionPhotosUrl: row["Inspection Photos URL"],
               repairPhotosUrl: row["Repair Photos URL"],
               invoiceUrl: row["Invoice URL"],
-              transferDate: formatDate_(row["Transfer Date"])
+              transferDate: formatDate_(row["Transfer Date"]),
+              // Phase B coverage fields — graceful if columns not yet rolled
+              declaredValue: row["Declared Value"],
+              coverageOptionId: row["Coverage Option"]
             }));
             break;
           case "task":
@@ -3904,7 +3940,10 @@ function api_fullClientSync_(tenantId, entityTypes) {
                 receiveDate: formatDate_(invRows[i]["Receive Date"]), releaseDate: formatDate_(invRows[i]["Release Date"]),
                 shipmentNumber: invRows[i]["Shipment #"], carrier: invRows[i]["Carrier"],
                 trackingNumber: invRows[i]["Tracking #"], itemNotes: invRows[i]["Item Notes"],
-                reference: invRows[i]["Reference"], taskNotes: invRows[i]["Task Notes"]
+                reference: invRows[i]["Reference"], taskNotes: invRows[i]["Task Notes"],
+                // Phase B coverage fields — graceful when columns missing
+                declaredValue: invRows[i]["Declared Value"],
+                coverageOptionId: invRows[i]["Coverage Option"]
               }));
             }
             supabaseBatchUpsert_("inventory", invSb);
@@ -7749,6 +7788,12 @@ function handleGetInventory_(clientSheetId) {
           releaseDate: formatDate_(row["Release Date"]),
           status: String(row["Status"] || "Active").trim(),
           invoiceUrl: String(row["Invoice URL"] || "").trim(),
+          // Phase B (session 79): coverage fields
+          declaredValue: (function() {
+            var raw = row["Declared Value"];
+            return (raw !== "" && raw != null) ? (Number(raw) || 0) : 0;
+          })(),
+          coverageOptionId: String(row["Coverage Option"] || "").trim(),
           shipmentFolderUrl: perRowShipUrl || shipFolderMap[shipNo] || ""
         });
       }
@@ -9431,6 +9476,89 @@ function api_getHeaderMap_(sheet) {
  * they want to see on brand-new sheets (Title Case per CB Clients convention,
  * unless the column has a special case like QB_CUSTOMER_NAME).
  */
+/**
+ * installCoverageColumns — one-shot rollout utility for Phase B of the
+ * Item Coverage feature (session 79). Adds two headers to every active
+ * client's Inventory sheet:
+ *   • Declared Value
+ *   • Coverage Option
+ *
+ * Idempotent — uses `api_ensureColumn_` which skips clients that already
+ * have the column (case-insensitive). Safe to re-run.
+ *
+ * Visibility: no trailing underscore → appears in the Apps Script editor
+ * Run dropdown. Execute once from the editor after deploy.
+ *
+ * Expected cadence: seconds per client × ~50 clients = ~60–120s total.
+ * Stays well under the 6-minute GAS execution cap.
+ */
+function installCoverageColumns() {
+  var cbId = prop_("CB_SPREADSHEET_ID");
+  if (!cbId) { Logger.log("installCoverageColumns: CB_SPREADSHEET_ID missing"); return "CB_SPREADSHEET_ID missing"; }
+  var cbSs = SpreadsheetApp.openById(cbId);
+  var clientsSheet = cbSs.getSheetByName("Clients");
+  if (!clientsSheet) { Logger.log("installCoverageColumns: Clients tab missing"); return "Clients tab missing"; }
+
+  var data = clientsSheet.getDataRange().getValues();
+  if (data.length < 2) { Logger.log("installCoverageColumns: no clients"); return "No clients"; }
+  var headers = data[0].map(function(h) { return String(h || "").trim().toUpperCase(); });
+  var sidCol = headers.indexOf("CLIENT SPREADSHEET ID");
+  var nameCol = headers.indexOf("CLIENT NAME");
+  var activeCol = headers.indexOf("ACTIVE");
+  if (sidCol < 0) { Logger.log("installCoverageColumns: CLIENT SPREADSHEET ID column missing"); return "CLIENT SPREADSHEET ID column missing"; }
+
+  var targets = [];
+  for (var r = 1; r < data.length; r++) {
+    var sid = String(data[r][sidCol] || "").trim();
+    if (!sid) continue;
+    var active = activeCol >= 0 ? (data[r][activeCol] === true || String(data[r][activeCol] || "").toLowerCase() === "true") : true;
+    if (!active) continue;
+    targets.push({ sid: sid, name: nameCol >= 0 ? String(data[r][nameCol] || "").trim() : sid });
+  }
+
+  var COLS = ["Declared Value", "Coverage Option"];
+  var added = 0, alreadyPresent = 0, failed = 0;
+  var log = [];
+
+  for (var t = 0; t < targets.length; t++) {
+    var tgt = targets[t];
+    try {
+      var clientSs = SpreadsheetApp.openById(tgt.sid);
+      var invSh = clientSs.getSheetByName("Inventory");
+      if (!invSh) {
+        failed++;
+        log.push("[FAIL] " + tgt.name + ": Inventory sheet missing");
+        continue;
+      }
+      var headerRow = invSh.getRange(1, 1, 1, invSh.getLastColumn()).getValues()[0];
+      var existing = headerRow.map(function(h) { return String(h || "").trim().toUpperCase(); });
+      var localAdded = 0;
+      for (var c = 0; c < COLS.length; c++) {
+        if (existing.indexOf(COLS[c].toUpperCase()) >= 0) continue;
+        // api_ensureColumn_ appends + returns the new col index
+        api_ensureColumn_(invSh, COLS[c]);
+        localAdded++;
+      }
+      if (localAdded > 0) {
+        added += localAdded;
+        log.push("[ADD] " + tgt.name + ": added " + localAdded + " column(s)");
+      } else {
+        alreadyPresent++;
+        log.push("[SKIP] " + tgt.name + ": already has both columns");
+      }
+    } catch (err) {
+      failed++;
+      log.push("[FAIL] " + tgt.name + ": " + err);
+    }
+  }
+
+  var summary = "installCoverageColumns: " + targets.length + " clients, " + added +
+    " column-writes, " + alreadyPresent + " already present, " + failed + " failed.";
+  Logger.log(summary);
+  for (var i = 0; i < log.length; i++) Logger.log(log[i]);
+  return summary;
+}
+
 function api_ensureColumn_(sheet, headerName) {
   // Build a case-insensitive index of existing headers
   var headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
@@ -9703,6 +9831,10 @@ function handleGetBatch_(clientSheetId) {
             carrier:         String(ir["Carrier"] || "").trim(),
             trackingNumber:  String(ir["Tracking #"] || "").trim(),
             invoiceUrl:      String(ir["Invoice URL"] || "").trim(),
+            // Phase B (session 79): coverage fields — graceful if columns
+            // not yet rolled out to this client.
+            declaredValue:   (function() { var raw = ir["Declared Value"]; return (raw !== "" && raw != null) ? (Number(raw) || 0) : 0; })(),
+            coverageOptionId: String(ir["Coverage Option"] || "").trim(),
             shipmentFolderUrl: shipFolderMap[invShipNo] || ""
           });
         }
@@ -11700,6 +11832,13 @@ function api_findInventoryItem_(ss, itemId) {
     var rowData = invSheet.getRange(rowNum, 1, 1, invSheet.getLastColumn()).getValues()[0];
     function getF(h) { return map[h] ? String(rowData[map[h] - 1] || "").trim() : ""; }
     var qtyRaw = map["Qty"] ? rowData[map["Qty"] - 1] : 1;
+    // Phase B (session 79): declaredValue + coverageOptionId. Both columns
+    // are added by installCoverageColumns one-shot utility — if the rollout
+    // hasn't run yet these fall back to empty/0 so existing handlers don't
+    // break.
+    var dvRaw = map["Declared Value"] ? rowData[map["Declared Value"] - 1] : "";
+    var declaredValue = (dvRaw !== "" && dvRaw !== null)
+      ? (Number(dvRaw) || 0) : 0;
     return {
       itemId:      getF("Item ID"),
       vendor:      getF("Vendor"),
@@ -11711,6 +11850,8 @@ function api_findInventoryItem_(ss, itemId) {
       reference:   getF("Reference"),
       status:      getF("Status"),
       qty:         (qtyRaw !== "" && qtyRaw !== null) ? (Number(qtyRaw) || 1) : 1,
+      declaredValue:    declaredValue,
+      coverageOptionId: getF("Coverage Option"),
       row:         rowNum,
       _map:        map,
       _sheet:      invSheet
@@ -21767,7 +21908,11 @@ function handleUpdateInventoryItem_(clientSheetId, payload) {
     itemClass: "Class",
     qty:       "Qty",
     status:    "Status",
-    itemNotes: "Item Notes"
+    itemNotes: "Item Notes",
+    // Phase B (session 79): per-item coverage fields. No billing write
+    // happens here — Phase C adds the Apply-Coverage action on top.
+    declaredValue:   "Declared Value",
+    coverageOptionId: "Coverage Option"
   };
 
   // Collect only provided fields
@@ -21796,6 +21941,20 @@ function handleUpdateInventoryItem_(clientSheetId, payload) {
       return errorResponse_("Invalid qty: " + updates.qty, "INVALID_PARAMS");
     }
     updates.qty = qtyVal;
+  }
+
+  // Phase B: validate declaredValue if provided (USD, non-negative)
+  if (updates.hasOwnProperty("declaredValue")) {
+    var dvStr = String(updates.declaredValue || "").trim();
+    if (dvStr === "" || dvStr === "null") {
+      updates.declaredValue = 0;
+    } else {
+      var dvNum = Number(dvStr);
+      if (isNaN(dvNum) || dvNum < 0) {
+        return errorResponse_("Invalid declaredValue: " + updates.declaredValue, "INVALID_PARAMS");
+      }
+      updates.declaredValue = dvNum;
+    }
   }
 
   try {

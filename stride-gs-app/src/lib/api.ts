@@ -296,6 +296,10 @@ export interface ApiInventoryItem {
   status: string;
   invoiceUrl: string;
   shipmentFolderUrl?: string;
+  /** Phase B (session 79): per-item declared value in USD. */
+  declaredValue?: number;
+  /** Phase B (session 79): reference to coverage_options.id. */
+  coverageOptionId?: string;
 }
 
 export interface InventoryResponse {
@@ -2867,6 +2871,10 @@ export interface UpdateInventoryItemPayload {
   qty?: number;
   status?: string;
   itemNotes?: string;
+  /** Phase B (session 79): per-item declared value in USD. */
+  declaredValue?: number;
+  /** Phase B (session 79): reference to coverage_options.id. */
+  coverageOptionId?: string;
 }
 
 export interface UpdateInventoryItemResponse {
