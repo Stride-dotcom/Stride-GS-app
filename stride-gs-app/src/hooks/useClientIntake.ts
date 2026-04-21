@@ -48,7 +48,9 @@ export interface IntakeSubmitPayload {
   billingAddress?: string;
   notificationContacts: Array<{ name?: string; email: string }>;
   // Step 3 — T&C
-  insuranceChoice: 'own_policy' | 'eis_coverage';
+  // 'eis_coverage' retained in the union as a back-compat read path —
+   // new intakes write 'stride_coverage' per session 77 rename.
+  insuranceChoice: 'own_policy' | 'stride_coverage' | 'eis_coverage';
   signatureType: 'typed' | 'drawn';
   signatureData: string; // typed name OR base64 PNG data URL
   initials: Record<string, string>; // { storage: 'ABC', ... }

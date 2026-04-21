@@ -75,7 +75,7 @@ interface Draft {
   billingAddress: string;
   notificationContacts: NotifyContact[];
   // Step 3
-  insuranceChoice: 'own_policy' | 'eis_coverage' | '';
+  insuranceChoice: 'own_policy' | 'stride_coverage' | '';
   signatureType: 'typed' | 'drawn';
   typedSignature: string;
   // drawnSignature captured via canvas ref on demand
@@ -187,8 +187,8 @@ export function ClientIntake({ linkId }: Props) {
             <strong style={{ color: TEXT }}>What happens next?</strong>
             <ol style={{ margin: '6px 0 0 18px', padding: 0 }}>
               <li>We verify your business info and payment setup.</li>
-              <li>Your account is activated and you'll receive your login credentials.</li>
-              <li>You can begin shipping inventory to our Kent, WA warehouse.</li>
+              <li>We will send you your online inventory portal access.</li>
+              <li>You can begin shipping your orders to us!</li>
             </ol>
           </div>
         </div>
@@ -274,7 +274,7 @@ export function ClientIntake({ linkId }: Props) {
         billingEmail:       draft.billingEmail || undefined,
         billingAddress:     draft.billingAddress || undefined,
         notificationContacts: draft.notificationContacts.filter(c => c.email.trim().length > 0),
-        insuranceChoice:    draft.insuranceChoice as 'own_policy' | 'eis_coverage',
+        insuranceChoice:    draft.insuranceChoice as 'own_policy' | 'stride_coverage',
         signatureType:      draft.signatureType,
         signatureData,
         initials:           draft.sectionInitials,
@@ -533,21 +533,26 @@ function StepTerms({ draft, setDraft, tcHtml, tcLoading, sig, sigHasInk, setSigH
         Please read each section and type your initials to acknowledge. A full signature at the bottom completes the agreement.
       </div>
 
-      {/* Insurance choice — needed before the T&C's insurance section is meaningful */}
+      {/* Property-in-storage coverage choice. (Handling valuation, the
+          per-shipment $0.60/lb-vs-replacement tier selection, is
+          explained in §2.A of the T&C but elected at receipt — not here.) */}
       <div style={{ background: ORANGE_SOFT, border: `1px solid ${ACCENT}33`, borderRadius: 14, padding: 18, marginBottom: 20 }}>
-        <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: '1.5px', color: ACCENT, textTransform: 'uppercase', marginBottom: 8 }}>Insurance Choice *</div>
+        <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: '1.5px', color: ACCENT, textTransform: 'uppercase', marginBottom: 4 }}>Property Coverage Choice *</div>
+        <div style={{ fontSize: 12, color: TEXT_SEC, marginBottom: 10, lineHeight: 1.5 }}>
+          This is for your goods while they sit in our warehouse (fire, water, burglary, acts of God, etc). Pick one. You can read the full terms in §2.B of the agreement below.
+        </div>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
           <InsuranceCard
             selected={draft.insuranceChoice === 'own_policy'}
             onSelect={() => setDraft(d => ({ ...d, insuranceChoice: 'own_policy' }))}
             title="My own policy"
-            body="I will maintain my own insurance covering full replacement value and name Stride as additional insured."
+            body="I will maintain my own insurance covering my stored property and name Stride as additional insured. (We'll ask for a COI after activation.)"
           />
           <InsuranceCard
-            selected={draft.insuranceChoice === 'eis_coverage'}
-            onSelect={() => setDraft(d => ({ ...d, insuranceChoice: 'eis_coverage' }))}
-            title="EIS Coverage"
-            body="Purchase upgraded coverage through Stride's insurance partner (rates disclosed during account activation)."
+            selected={draft.insuranceChoice === 'stride_coverage'}
+            onSelect={() => setDraft(d => ({ ...d, insuranceChoice: 'stride_coverage' }))}
+            title="Add me to Stride's policy"
+            body="Stride adds my property to its storage policy. Processing fee: $300/month per $100,000 declared value ($300/month minimum). Not insurance sold by Stride — we're adding you to ours."
           />
         </div>
       </div>
@@ -737,8 +742,8 @@ function StepDocuments({ draft, setDraft }: StepProps) {
 function StepReview({ draft, onJumpTo, sigDataUrl }: { draft: Draft; onJumpTo: (step: number) => void; sigDataUrl: string }) {
   const insuranceLabel = draft.insuranceChoice === 'own_policy'
     ? "Client's own policy"
-    : draft.insuranceChoice === 'eis_coverage'
-      ? 'EIS Coverage'
+    : draft.insuranceChoice === 'stride_coverage'
+      ? 'Added to Stride policy ($300/mo per $100K)'
       : '—';
   return (
     <div>

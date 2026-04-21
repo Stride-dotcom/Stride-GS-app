@@ -150,7 +150,7 @@ export function Intakes() {
     autoInspection: true,
     notes: [
       intake.notes,
-      intake.insuranceChoice === 'eis_coverage' ? 'EIS coverage elected on intake.' : null,
+      (intake.insuranceChoice === 'stride_coverage' || intake.insuranceChoice === 'eis_coverage') ? 'Added to Stride policy ($300/mo per $100K declared value).' : null,
       intake.insuranceChoice === 'own_policy'   ? "Client's own policy — collect COI." : null,
     ].filter(Boolean).join(' '),
   });
@@ -469,7 +469,7 @@ function IntakeReview({ intake, onCreateClient, onMarkReviewed, onReject, getFil
       {/* Meta strip */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10, marginBottom: 18 }}>
         <MetaCard label="Status" value={<StatusPill status={intake.status} />} />
-        <MetaCard label="Insurance" value={intake.insuranceChoice === 'own_policy' ? "Client's own" : intake.insuranceChoice === 'eis_coverage' ? 'EIS Coverage' : '—'} />
+        <MetaCard label="Coverage" value={intake.insuranceChoice === 'own_policy' ? "Client's own policy" : (intake.insuranceChoice === 'stride_coverage' || intake.insuranceChoice === 'eis_coverage') ? 'Added to Stride policy' : '—'} />
         <MetaCard label="Payment authorized" value={intake.paymentAuthorized ? 'Yes' : 'No'} accent={intake.paymentAuthorized ? '#15803D' : '#B45309'} />
         <MetaCard label="Signed" value={intake.signedAt ? fmtDateTime(intake.signedAt) : '—'} />
       </div>

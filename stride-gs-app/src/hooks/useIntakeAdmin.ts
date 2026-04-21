@@ -31,7 +31,10 @@ export interface IntakeRow {
   billingEmail: string | null;
   billingAddress: string | null;
   notificationContacts: Array<{ name?: string; email: string }>;
-  insuranceChoice: 'own_policy' | 'eis_coverage' | null;
+  // 'eis_coverage' retained for back-compat with pre-session-77 rows.
+  // New intakes write 'stride_coverage'; the UI treats the two as
+  // equivalent for display.
+  insuranceChoice: 'own_policy' | 'stride_coverage' | 'eis_coverage' | null;
   paymentAuthorized: boolean;
   signatureType: 'typed' | 'drawn' | null;
   signatureData: string | null;
