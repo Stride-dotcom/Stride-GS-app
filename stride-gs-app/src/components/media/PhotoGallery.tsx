@@ -16,6 +16,8 @@ interface Props {
   entityType: EntityType;
   entityId: string | null | undefined;
   tenantId?: string | null;
+  /** v38.93.0 — parent item ID for cross-entity photo rollup. */
+  itemId?: string | null;
   /** Photo type applied to all uploads from this gallery. Default 'general'. */
   defaultPhotoType?: PhotoType;
   /** Hide upload + action controls (for viewers without write permission). */
@@ -27,7 +29,7 @@ interface Props {
 }
 
 export function PhotoGallery({
-  entityType, entityId, tenantId,
+  entityType, entityId, tenantId, itemId,
   defaultPhotoType = 'general',
   readOnly, naked, title = 'Photos', compact,
 }: Props) {
@@ -37,7 +39,7 @@ export function PhotoGallery({
   const {
     photos, loading, error,
     uploadPhoto, toggleNeedsAttention, toggleRepair, deletePhoto,
-  } = usePhotos({ entityType, entityId, tenantId });
+  } = usePhotos({ entityType, entityId, tenantId, itemId });
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);

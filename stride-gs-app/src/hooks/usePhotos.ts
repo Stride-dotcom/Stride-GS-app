@@ -51,6 +51,12 @@ export interface UsePhotosOptions {
   tenantId?: string | null;
   /** Set false to pause fetching (useful for unmounted panels). */
   enabled?: boolean;
+  /** v38.93.0 — parent item ID, for cross-entity photo rollup. When set,
+   *  (a) uploads stamp item_id on the row so the Item detail panel can find
+   *  them, and (b) the Item detail panel (entityType='inventory') queries
+   *  by item_id instead of entity_type+entity_id so it catches photos from
+   *  tasks, repairs, etc. that were uploaded against this item. */
+  itemId?: string | null;
 }
 
 export interface UsePhotosResult {
@@ -101,7 +107,7 @@ function sanitizeName(name: string): string {
   return name.replace(/[^a-zA-Z0-9._-]/g, '_').slice(-80);
 }
 
-export function usePhotos({ entityType, entityId, tenantId, enabled = true }: UsePhotosOptions): UsePhotosResult {
+export function usePhotos({ entityType, entityId, tenantId, enabled = true, itemId }: UsePhotosOptions): UsePhotosResult {
   const { user } = useAuth();
   const effectiveTenantId = tenantId ?? user?.clientSheetId ?? null;
   const [photos, setPhotos] = useState<Photo[]>([]);
@@ -113,11 +119,16 @@ export function usePhotos({ entityType, entityId, tenantId, enabled = true }: Us
   const refetch = useCallback(async () => {
     if (!enabled || !entityId) { setPhotos([]); setLoading(false); return; }
     setLoading(true); setError(null);
-    const { data, error: err } = await supabase
-      .from('item_photos')
-      .select('*')
-      .eq('entity_type', entityType)
-      .eq('entity_id', entityId)
+    // v38.93.0 — when rendering the Item detail panel, query by item_id so
+    // photos uploaded from ANY entity that points to this item (tasks,
+    // repairs, etc.) roll up into one combined view. Other entity types
+    // (Task/Repair/WC/Shipment panels) keep the entity-scoped query so each
+    // panel still shows only photos uploaded against that specific entity.
+    const query = supabase.from('item_photos').select('*');
+    const scoped = entityType === 'inventory'
+      ? query.eq('item_id', entityId)
+      : query.eq('entity_type', entityType).eq('entity_id', entityId);
+    const { data, error: err } = await scoped
       .order('is_primary', { ascending: false })
       .order('created_at', { ascending: false });
     if (!mountedRef.current) return;
@@ -221,12 +232,19 @@ export function usePhotos({ entityType, entityId, tenantId, enabled = true }: Us
       ? supabase.storage.from(BUCKET).getPublicUrl(thumbUploadedKey).data.publicUrl
       : null;
 
+    // v38.93.0 — always stamp item_id on every upload so the Item detail
+    // panel can aggregate photos across task/repair/etc. entities that
+    // reference this item. For entityType='inventory' the itemId IS the
+    // entityId. For task/repair/etc., the caller passes parent itemId
+    // via the hook option.
+    const resolvedItemId = (entityType === 'inventory' ? entityId : itemId) || null;
     const { data, error: insErr } = await supabase
       .from('item_photos')
       .insert({
         tenant_id: effectiveTenantId,
         entity_type: entityType,
         entity_id: entityId,
+        item_id: resolvedItemId,
         storage_key: storageKey,
         storage_url: urlData.publicUrl,
         thumbnail_key: thumbUploadedKey,
@@ -252,7 +270,7 @@ export function usePhotos({ entityType, entityId, tenantId, enabled = true }: Us
     // a belt for the suspenders.
     await refetch();
     return data as Photo;
-  }, [effectiveTenantId, entityType, entityId, photos.length, user?.email, refetch]);
+  }, [effectiveTenantId, entityType, entityId, itemId, photos.length, user?.email, refetch]);
 
   const setPrimaryPhoto = useCallback(async (photoId: string): Promise<boolean> => {
     if (!entityId) return false;

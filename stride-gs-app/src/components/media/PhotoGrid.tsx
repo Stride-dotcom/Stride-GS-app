@@ -160,8 +160,13 @@ export function PhotoGrid({
               )}
 
               {/* Desktop: semi-transparent hover overlay with direct-action icons.
-                  Fades in on hover. Clicks on the icons stopPropagation so they
-                  don't trigger the lightbox click-through. */}
+                  v38.93.0 — overlay background click now bubbles up to the
+                  container's onClick so clicking the photo (outside the
+                  action buttons) opens the lightbox. Previously the overlay
+                  swallowed every click with `stopPropagation` on the whole
+                  div, so desktop users couldn't open the fullscreen view.
+                  The button-row keeps its own stopPropagation so button
+                  presses don't ALSO open the lightbox. */}
               {hasActions && !isMobile && (
                 <div
                   style={{
@@ -175,11 +180,10 @@ export function PhotoGrid({
                     justifyContent: 'center',
                     padding: compact ? 6 : 10,
                     zIndex: 1,
+                    cursor: onPhotoClick ? 'pointer' : 'default',
                   }}
-                  onClick={e => e.stopPropagation()}
                 >
-                  <div style={{ display: 'flex', gap: 6 }}>
-                    {/* Primary action removed in session 74. */}
+                  <div style={{ display: 'flex', gap: 6 }} onClick={e => e.stopPropagation()}>
                     {onToggleAttention && (
                       <OverlayIconButton
                         label={p.needs_attention ? 'Clear flag' : 'Flag attention'}
@@ -200,6 +204,25 @@ export function PhotoGrid({
                         onClick={() => void runInline(p.id, 'repair', () => onToggleRepair(p, !p.is_repair))}
                       />
                     )}
+                    {/* v38.93.0 — desktop Download button (mirrors PhotoActionSheet
+                        behavior on mobile). Opens the photo in a new tab for
+                        clients who can't right-click save due to CORS on
+                        signed URLs, and downloads the file for staff who can. */}
+                    <OverlayIconButton
+                      label="Download"
+                      icon={<Download size={15} />}
+                      activeColor="#4A8A5C"
+                      onClick={() => {
+                        const url = p.storage_url;
+                        if (!url) return;
+                        const a = document.createElement('a');
+                        a.href = url;
+                        a.download = p.file_name || 'photo.jpg';
+                        a.target = '_blank';
+                        a.rel = 'noopener noreferrer';
+                        document.body.appendChild(a); a.click(); a.remove();
+                      }}
+                    />
                     {onDelete && (
                       <OverlayIconButton
                         label="Delete"

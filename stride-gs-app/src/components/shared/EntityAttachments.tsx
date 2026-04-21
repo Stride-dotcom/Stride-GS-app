@@ -37,6 +37,10 @@ interface PhotosCfg {
   entityType: PhotoEntityType;
   entityId: string | null | undefined;
   tenantId?: string | null;
+  /** v38.93.0 — parent item ID for cross-entity photo rollup. Pass on Task
+   *  and Repair detail panels so photos uploaded there also appear on the
+   *  Item detail panel's Photos section. */
+  itemId?: string | null;
 }
 interface DocumentsCfg {
   contextType: DocumentContextType;
@@ -74,6 +78,7 @@ export function EntityAttachments({ photos, documents, notes, defaultOpen }: Pro
           entityType={photos.entityType}
           entityId={photos.entityId}
           tenantId={photos.tenantId}
+          itemId={photos.itemId}
         />
       )}
       {documents && (
@@ -160,10 +165,10 @@ function SectionHeader({
 }
 
 function PhotosSection({
-  entityType, entityId, tenantId, defaultOpen,
+  entityType, entityId, tenantId, itemId, defaultOpen,
 }: PhotosCfg & { defaultOpen: boolean }) {
   const [open, setOpen] = useState(defaultOpen);
-  const { photos } = usePhotos({ entityType, entityId, tenantId });
+  const { photos } = usePhotos({ entityType, entityId, tenantId, itemId });
   return (
     <section>
       <SectionHeader
@@ -174,7 +179,7 @@ function PhotosSection({
         onToggle={() => setOpen(o => !o)}
       />
       <CollapsibleBody open={open}>
-        <PhotoGallery entityType={entityType} entityId={entityId} tenantId={tenantId} naked compact />
+        <PhotoGallery entityType={entityType} entityId={entityId} tenantId={tenantId} itemId={itemId} naked compact />
       </CollapsibleBody>
     </section>
   );
