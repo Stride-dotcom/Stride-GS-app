@@ -1,5 +1,11 @@
 /* ===================================================
-   StrideAPI.gs — v38.92.0 — 2026-04-16 PST — Deferred onboarding retry (self-healing new-client setup)
+   StrideAPI.gs — v38.92.1 — 2026-04-16 PST — HOTFIX: installOnboardingRetryTrigger everyMinutes(5)
+   v38.92.1: FIX — installOnboardingRetryTrigger was calling `everyMinutes(2)`
+             which throws at runtime because Apps Script restricts the
+             cadence to one of {1, 5, 10, 15, 30}. Changed to 5 minutes and
+             kept MAX_ATTEMPTS=15 → 75-minute total retry window (more
+             generous than the 30-min window planned in v38.92.0). Function
+             now installs successfully.
    v38.92.0: FEAT — Fixes the "new client onboarded but SCRIPT ID + WEB APP URL
              stay blank in CB Clients" bug. Root cause: Google Drive's
              indexing of a newly-copied container-bound script can take
@@ -8,8 +14,8 @@
              hits the same indexing-lag wall.
              Solution: if inline discovery fails, enqueue the sheetId in
              Script Properties (`PENDING_ONBOARDINGS`) and a new time-based
-             trigger `retryPendingOnboardings_` runs every 2 minutes for up
-             to 30 minutes, re-attempting via `handleFinishClientSetup_`
+             trigger `retryPendingOnboardings_` runs every 5 minutes for up
+             to 75 minutes (15 attempts), re-attempting via `handleFinishClientSetup_`
              (the same 4-strategy discovery + deploy + CB-write path). By
              minute 5-10, Drive has indexed the new script and discovery
              succeeds automatically — no manual button-click needed.
@@ -19,7 +25,7 @@
              New functions: `api_enqueueOnboardingRetry_`,
              `retryPendingOnboardings_`, `installOnboardingRetryTrigger`.
              **OPERATOR ACTION REQUIRED**: run `installOnboardingRetryTrigger`
-             once from the Apps Script editor to install the 2-min cron.
+             once from the Apps Script editor to install the 5-min cron.
    v38.91.0: Phase 5 shadow-mode rate comparisons now land as structured
              rows in public.billing_parity_log (new table this session).
              Until now api_lookupRate_ emitted PARITY_OK / PARITY_MISMATCH
@@ -1611,7 +1617,7 @@ function retryPendingOnboardings_() {
   try { list = raw ? JSON.parse(raw) : []; } catch (_) { list = []; }
   if (!list || list.length === 0) return;
 
-  var MAX_ATTEMPTS = 15; // 30-min window at 2-min intervals
+  var MAX_ATTEMPTS = 15; // 75-min window at 5-min intervals (Apps Script caps cadence at 1/5/10/15/30 min)
   var stillPending = [];
   var resolved = 0;
   var startedAt = Date.now();
@@ -1685,9 +1691,12 @@ function installOnboardingRetryTrigger() {
       removed++;
     }
   }
-  ScriptApp.newTrigger("retryPendingOnboardings_").timeBased().everyMinutes(2).create();
+  // Apps Script only supports everyMinutes(1 | 5 | 10 | 15 | 30). 5 is the
+  // fastest practical cadence — faster polling would burn GAS quota for no
+  // meaningful latency gain given Drive indexing typically takes 2-10 minutes.
+  ScriptApp.newTrigger("retryPendingOnboardings_").timeBased().everyMinutes(5).create();
   var msg = "installOnboardingRetryTrigger: removed " + removed +
-            " old trigger(s), scheduled retryPendingOnboardings_ every 2 minutes";
+            " old trigger(s), scheduled retryPendingOnboardings_ every 5 minutes";
   Logger.log(msg);
   return msg;
 }
