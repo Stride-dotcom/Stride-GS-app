@@ -1,5 +1,13 @@
 /* ===================================================
-   StrideAPI.gs — v38.93.2 — 2026-04-20 PST — Parity: class volume id-keying
+   StrideAPI.gs — v38.94.0 — 2026-04-20 PST — Intake email endpoints
+   v38.94.0: NEW — handleSendIntakeInvitation_ sends CLIENT_INTAKE_INVITE email
+             to a prospect when an admin generates a new intake link and
+             clicks Send in the modal. Admin-guarded (withAdminGuard_).
+             NEW — handleEmailSignedAgreement_ sends a simple confirmation
+             receipt to a prospect after they sign the T&C on the public
+             intake form. Public endpoint (no guard) — validates that the
+             linkId exists in client_intake_links before sending.
+             Router cases: "sendIntakeInvitation", "emailSignedAgreement".
    v38.93.2: handleGetPricingParity_ now selects id on item_classes and
              keys supabaseVolumes by class ID (XS/S/M/L/XL/XXL) instead
              of name ("Extra Small"/"Small"/...). The Parity Monitor's
@@ -5139,6 +5147,13 @@ function doPost(e) {
       // ─── Delivery Order Notifications ───
       case "notifyNewDeliveryOrder":
         return jsonResponse_(handleNotifyNewDeliveryOrder_(payload));
+
+      // ─── Client Intake ───
+      case "sendIntakeInvitation":
+        return withAdminGuard_(callerEmail, function() { return handleSendIntakeInvitation_(payload); });
+      case "emailSignedAgreement":
+        // Public — no admin guard; prospect self-requests receipt after signing
+        return jsonResponse_(handleEmailSignedAgreement_(payload));
 
       // ─── QBO Integration (admin-only writes) ───
       case "qboCreateInvoice":
@@ -31284,4 +31299,127 @@ function handleQboGetCustomers_() {
   }
 
   return { customers: customers };
+}
+
+// ─── Client Intake Email Handlers ─────────────────────────────────────────────
+
+/**
+ * POST sendIntakeInvitation — Admin sends the CLIENT_INTAKE_INVITE email to a
+ * prospect after generating a new intake link. Token substitution is done
+ * client-side; this handler just sends the pre-composed email.
+ *
+ * Payload: { to, subject, bodyHtml, linkId }
+ *
+ * Admin-guarded (withAdminGuard_). Logs the send in Apps Script execution log.
+ */
+function handleSendIntakeInvitation_(payload) {
+  var to       = String(payload.to       || "").trim();
+  var subject  = String(payload.subject  || "").trim();
+  var bodyHtml = String(payload.bodyHtml || "").trim();
+  var linkId   = String(payload.linkId   || "").trim();
+
+  if (!to)       return jsonResponse_({ success: false, error: "Missing 'to' address" });
+  if (!subject)  return jsonResponse_({ success: false, error: "Missing email subject" });
+  if (!bodyHtml) return jsonResponse_({ success: false, error: "Missing email body" });
+
+  // Basic email format check
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) {
+    return jsonResponse_({ success: false, error: "Invalid 'to' address: " + to });
+  }
+
+  try {
+    GmailApp.sendEmail(to, subject, "", { htmlBody: bodyHtml });
+    Logger.log("handleSendIntakeInvitation_: sent intake invite to " + to + " (linkId=" + linkId + ")");
+    return jsonResponse_({ success: true, sentTo: to });
+  } catch (e) {
+    Logger.log("handleSendIntakeInvitation_: GmailApp.sendEmail failed — " + e.message);
+    return jsonResponse_({ success: false, error: "Failed to send email: " + e.message });
+  }
+}
+
+/**
+ * POST emailSignedAgreement — Public endpoint (no admin guard).
+ * Sends a simple confirmation receipt to a prospect after they sign the T&C
+ * on the public intake form. Validates that the linkId actually exists in
+ * Supabase client_intake_links as an anti-abuse guard.
+ *
+ * Payload: { linkId, email, businessName }
+ */
+function handleEmailSignedAgreement_(payload) {
+  var linkId       = String(payload.linkId       || "").trim();
+  var email        = String(payload.email        || "").trim();
+  var businessName = String(payload.businessName || "").trim();
+
+  if (!linkId)  return { success: false, error: "Missing linkId" };
+  if (!email)   return { success: false, error: "Missing email" };
+
+  // Basic email format check
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return { success: false, error: "Invalid email address: " + email };
+  }
+
+  // Anti-abuse: verify linkId exists in Supabase before sending
+  var supabaseUrl = prop_("SUPABASE_URL");
+  var supabaseKey = prop_("SUPABASE_SERVICE_KEY");
+  if (supabaseUrl && supabaseKey) {
+    try {
+      var checkResp = UrlFetchApp.fetch(
+        supabaseUrl + "/rest/v1/client_intake_links?id=eq." + encodeURIComponent(linkId) + "&select=id",
+        {
+          method: "GET",
+          headers: {
+            "apikey": supabaseKey,
+            "Authorization": "Bearer " + supabaseKey
+          },
+          muteHttpExceptions: true
+        }
+      );
+      var rows = JSON.parse(checkResp.getContentText() || "[]");
+      if (!rows || rows.length === 0) {
+        Logger.log("handleEmailSignedAgreement_: linkId not found — " + linkId);
+        return { success: false, error: "Invalid linkId" };
+      }
+    } catch (e) {
+      // Supabase check failed — log but continue sending (best-effort)
+      Logger.log("handleEmailSignedAgreement_: Supabase link check failed — " + e.message + " — proceeding anyway");
+    }
+  }
+
+  var displayName = businessName || "your business";
+  var subject     = "Your Signed Agreement is on File — Stride Logistics";
+  var bodyHtml    = '<!DOCTYPE html>' +
+    '<html><head><meta charset="UTF-8"/>' +
+    '<style>body{margin:0;padding:0;background:#F5F2EE;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;}' +
+    '.wrap{max-width:520px;margin:32px auto;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,0.08);}' +
+    '.hdr{background:#1C1C1C;padding:28px 36px;text-align:center;}' +
+    '.hdr .lm{display:inline-block;width:44px;height:44px;background:#E8692A;border-radius:9px;line-height:44px;font-size:24px;font-weight:800;color:#fff;margin-bottom:12px;}' +
+    '.hdr h1{margin:0;color:#fff;font-size:18px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;}' +
+    '.body{padding:32px 36px;}' +
+    '.check{text-align:center;font-size:48px;margin:0 0 20px;}' +
+    '.msg{font-size:15px;color:#333;line-height:1.65;margin:0 0 20px;}' +
+    '.footer{background:#F5F2EE;padding:18px 36px;text-align:center;}' +
+    '.footer p{margin:0;font-size:12px;color:#999;}' +
+    '</style></head><body>' +
+    '<div class="wrap">' +
+    '<div class="hdr"><div class="lm">S</div>' +
+    '<h1>Agreement Received</h1></div>' +
+    '<div class="body">' +
+    '<div class="check">✅</div>' +
+    '<p class="msg">Hi ' + displayName + ',</p>' +
+    '<p class="msg">Your signed Warehousing &amp; Delivery Agreement is now on file with Stride Logistics. ' +
+    'We\'ll be in touch shortly to complete your onboarding.</p>' +
+    '<p class="msg" style="font-size:13px;color:#666;">If you have any questions, reply to this email or contact us at ' +
+    '<a href="mailto:info@stridelogistics.com" style="color:#E8692A;">info@stridelogistics.com</a>.</p>' +
+    '</div>' +
+    '<div class="footer"><p>Stride Logistics · Kent, WA</p></div>' +
+    '</div></body></html>';
+
+  try {
+    GmailApp.sendEmail(email, subject, "", { htmlBody: bodyHtml });
+    Logger.log("handleEmailSignedAgreement_: receipt sent to " + email + " (linkId=" + linkId + ")");
+    return { success: true };
+  } catch (e) {
+    Logger.log("handleEmailSignedAgreement_: GmailApp.sendEmail failed — " + e.message);
+    return { success: false, error: "Failed to send receipt: " + e.message };
+  }
 }

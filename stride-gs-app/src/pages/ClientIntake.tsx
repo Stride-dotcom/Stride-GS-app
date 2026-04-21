@@ -23,7 +23,7 @@
  * surface small (no pdf/canvas deps beyond the built-in HTMLCanvas).
  */
 import { useEffect, useMemo, useState } from 'react';
-import { CheckCircle2, AlertTriangle, Loader2, FileText, Upload, ChevronRight, ChevronLeft, Plus, Trash2, Edit3, ExternalLink } from 'lucide-react';
+import { CheckCircle2, AlertTriangle, Loader2, FileText, Upload, ChevronRight, ChevronLeft, Plus, Trash2, Edit3, ExternalLink, Download, Mail } from 'lucide-react';
 import {
   useIntakeLink,
   uploadIntakeFile,
@@ -34,6 +34,8 @@ import {
   type IntakeSubmitPayload,
   type PublicCoverageNote,
 } from '../hooks/useClientIntake';
+import { generateSignedTcPdf } from '../lib/intakePdf';
+import { postEmailSignedAgreement } from '../lib/api';
 
 // Style tokens — copied verbatim from PublicRates so the public-side
 // pages stay visually coherent without pulling the authed app's theme.
@@ -110,6 +112,11 @@ export function ClientIntake({ linkId }: Props) {
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [submitted, setSubmitted] = useState(false);
+  // Captured at submit time so it's available on the success screen
+  // after the canvas element unmounts.
+  const [capturedSignatureData, setCapturedSignatureData] = useState('');
+  const [emailReceiptSending, setEmailReceiptSending] = useState(false);
+  const [emailReceiptSent, setEmailReceiptSent] = useState(false);
 
   // Signature pad + ink flag — MUST be declared before any conditional
   // return below. Prior bug (session 77): these hooks lived after the
@@ -180,6 +187,33 @@ export function ClientIntake({ linkId }: Props) {
 
   // ── Submitted confirmation ─────────────────────────────────────────
   if (submitted) {
+    const handleDownload = () => {
+      void generateSignedTcPdf({
+        businessName:   draft.businessName,
+        contactName:    draft.contactName,
+        email:          draft.email,
+        signedAt:       new Date().toISOString(),
+        insuranceChoice: draft.insuranceChoice || '',
+        signatureType:  draft.signatureType,
+        signatureData:  capturedSignatureData,
+        sectionInitials: draft.sectionInitials,
+      });
+    };
+
+    const handleEmailReceipt = async () => {
+      setEmailReceiptSending(true);
+      try {
+        await postEmailSignedAgreement({
+          linkId:       linkId,
+          email:        draft.email,
+          businessName: draft.businessName,
+        });
+        setEmailReceiptSent(true);
+      } finally {
+        setEmailReceiptSending(false);
+      }
+    };
+
     return (
       <div style={pageShell}>
         <Header title="Application Received" />
@@ -198,6 +232,43 @@ export function ClientIntake({ linkId }: Props) {
               <li>We will send you your online inventory portal access.</li>
               <li>You can begin shipping your orders to us!</li>
             </ol>
+          </div>
+
+          {/* Agreement copy actions */}
+          <div style={{ display: 'flex', gap: 12, justifyContent: 'center', flexWrap: 'wrap', marginTop: 28 }}>
+            <button
+              onClick={handleDownload}
+              style={{
+                display: 'inline-flex', alignItems: 'center', gap: 8,
+                padding: '11px 22px', fontSize: 13, fontWeight: 600,
+                background: '#fff', color: TEXT,
+                border: `1.5px solid rgba(0,0,0,0.15)`, borderRadius: 100,
+                cursor: 'pointer', fontFamily: FONT,
+              }}
+            >
+              <Download size={15} /> Download a copy
+            </button>
+            {!emailReceiptSent ? (
+              <button
+                onClick={handleEmailReceipt}
+                disabled={emailReceiptSending}
+                style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 8,
+                  padding: '11px 22px', fontSize: 13, fontWeight: 600,
+                  background: '#fff', color: TEXT,
+                  border: `1.5px solid rgba(0,0,0,0.15)`, borderRadius: 100,
+                  cursor: emailReceiptSending ? 'wait' : 'pointer', fontFamily: FONT,
+                  opacity: emailReceiptSending ? 0.7 : 1,
+                }}
+              >
+                {emailReceiptSending ? <Loader2 size={15} style={{ animation: 'spin 1s linear infinite' }} /> : <Mail size={15} />}
+                {emailReceiptSending ? 'Sending…' : 'Email me a copy'}
+              </button>
+            ) : (
+              <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '11px 22px', fontSize: 13, color: '#15803D', fontFamily: FONT }}>
+                <CheckCircle2 size={15} /> Receipt sent to {draft.email}
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -269,6 +340,8 @@ export function ClientIntake({ linkId }: Props) {
       const signatureData = draft.signatureType === 'typed'
         ? draft.typedSignature.trim()
         : sig.toDataURL();
+      // Capture before canvas potentially unmounts on the success screen.
+      setCapturedSignatureData(signatureData);
 
       const payload: IntakeSubmitPayload = {
         linkId,

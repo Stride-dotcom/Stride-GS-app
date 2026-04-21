@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom';
 import { Settings as SettingsIcon, Users, DollarSign, Mail, Database, Globe, Bell, Plus, ChevronRight, CheckCircle2, AlertCircle, UserPlus, Shield, ToggleLeft, ToggleRight, Eye, EyeOff, Wifi, WifiOff, RefreshCw, Loader2, RefreshCcw, ExternalLink, Wrench, PlayCircle, Send, FolderSync, BookText, LogIn, Cloud, Edit2, Zap, ArrowUpDown, ChevronUp, ChevronDown, X, Truck, Link2, Search } from 'lucide-react';
 import { useReactTable, getCoreRowModel, getSortedRowModel, flexRender, type SortingState, type ColumnDef } from '@tanstack/react-table';
-import { getApiUrl, getApiToken, setApiCredentials, isApiConfigured, fetchHealth, postOnboardClient, postUpdateClient, postSyncSettings, postRefreshCaches, postFixMissingFolders, postTestSendClientTemplates, postTestSendClaimEmails, fetchAutoIdSetting, postUpdateAutoIdSetting, postResolveOnboardUser, fetchStaxConfig, postUpdateStaxConfig, apiPost, postSyncTemplatesToClients, postBulkSyncToSupabase, postPurgeInactiveFromSupabase, fetchClients, postFinishClientSetup, postSendWelcomeToUsers, resyncUsersPreview, resyncUsers, resyncClientsPreview, resyncClients, setNextFetchNoCache, adminSetUserPassword, ensureUserInAuth, listMissingAuthUsers, postTestGenerateDoc } from '../lib/api';
+import { getApiUrl, getApiToken, setApiCredentials, isApiConfigured, fetchHealth, postOnboardClient, postUpdateClient, postSyncSettings, postRefreshCaches, postFixMissingFolders, postTestSendClientTemplates, postTestSendClaimEmails, fetchAutoIdSetting, postUpdateAutoIdSetting, postResolveOnboardUser, fetchStaxConfig, postUpdateStaxConfig, apiPost, postSyncTemplatesToClients, postBulkSyncToSupabase, postPurgeInactiveFromSupabase, fetchClients, postFinishClientSetup, postSendWelcomeToUsers, resyncUsersPreview, resyncUsers, resyncClientsPreview, resyncClients, setNextFetchNoCache, adminSetUserPassword, ensureUserInAuth, listMissingAuthUsers, postTestGenerateDoc, apiFetch, postSendIntakeInvitation } from '../lib/api';
 import type { BulkSyncResult } from '../lib/api';
 import type { EmailTemplate } from '../lib/api';
 import { entityEvents } from '../lib/entityEvents';
@@ -23,6 +23,9 @@ import type { ApiUser } from '../lib/api';
 import { theme } from '../styles/theme';
 import { WriteButton } from '../components/shared/WriteButton';
 import { QBOConnect } from '../components/settings/QBOConnect';
+import { IntakesPanel } from '../components/settings/IntakesPanel';
+import { useClientTcStatus } from '../hooks/useClientTcStatus';
+import { IntakeEmailModal } from '../components/shared/IntakeEmailModal';
 import { supabase } from '../lib/supabase';
 
 type Tab = 'general' | 'clients' | 'users' | 'pricing' | 'emails' | 'integrations' | 'notifications' | 'maintenance';
@@ -68,6 +71,7 @@ const CLAIM_EMAIL_TEMPLATES = [
 const SYSTEM_TEMPLATES = [
   { key: 'WELCOME_EMAIL', name: 'Welcome Email', desc: 'Sent to new client when account is created' },
   { key: 'ONBOARDING_EMAIL', name: 'Onboarding / Getting Started', desc: 'Setup instructions and getting started guide for new clients' },
+  { key: 'CLIENT_INTAKE_INVITE', name: 'Client Intake Invitation', desc: 'Sent to a prospect when a new intake link is generated. Tokens: {{PROSPECT_NAME}}, {{INTAKE_LINK}}, {{EXPIRES_DATE}}' },
 ];
 
 const MOCK_PRICING = [
@@ -671,6 +675,97 @@ export function Settings() {
   const { realUser, impersonateUser } = useAuth();
   const isAdmin = realUser?.role === 'admin';
   const [tab, setTab] = useState<Tab>('general');
+  const [clientsSubTab, setClientsSubTab] = useState<'clients' | 'intakes'>('clients');
+
+  // Seed tab + clientsSubTab from URL query params on first mount.
+  // Used by the /#/intakes redirect and by "View in Intakes" deep-links.
+  useEffect(() => {
+    const hash = window.location.hash; // e.g. #/settings?tab=clients&subtab=intakes
+    const qStart = hash.indexOf('?');
+    if (qStart < 0) return;
+    const params = new URLSearchParams(hash.slice(qStart + 1));
+    const tabParam = params.get('tab');
+    const subtabParam = params.get('subtab');
+    if (tabParam && ['general','clients','users','pricing','emails','integrations','notifications','maintenance'].includes(tabParam)) {
+      setTab(tabParam as Tab);
+    }
+    if (subtabParam === 'intakes') setClientsSubTab('intakes');
+  }, []);
+
+  // Resend T&C — generate an intake link for an existing client and show email modal.
+  const [resendTcLoading, setResendTcLoading] = useState<string | null>(null); // spreadsheetId
+  const [resendTcModal, setResendTcModal] = useState<{
+    prospectName: string;
+    prospectEmail: string;
+    intakeUrl: string;
+    linkId: string;
+    subject: string;
+    body: string;
+  } | null>(null);
+  const [resendTcSending, setResendTcSending] = useState(false);
+
+  const handleResendTc = async (client: ApiClient) => {
+    const email = client.email?.trim().toLowerCase();
+    if (!email) return;
+    setResendTcLoading(client.spreadsheetId);
+    try {
+      const { data: sess } = await supabase.auth.getSession();
+      const userId = sess.session?.user.id ?? null;
+      const { data, error: sbErr } = await supabase
+        .from('client_intake_links')
+        .insert({
+          prospect_name:  client.name,
+          prospect_email: email,
+          expires_at:     null,
+          created_by:     userId,
+          active:         true,
+        })
+        .select('*')
+        .single();
+      if (sbErr || !data) return;
+      const linkRow = data as { link_id: string; expires_at: string | null };
+      const intakeUrl = `https://www.mystridehub.com/#/intake/${linkRow.link_id}`;
+      const expiresStr = linkRow.expires_at
+        ? new Date(linkRow.expires_at).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })
+        : 'no expiry date';
+
+      // Fetch CLIENT_INTAKE_INVITE template for substitution.
+      const tRes = await apiFetch<{ templates: Array<{ templateKey: string; subject: string; body: string }> }>('getEmailTemplates');
+      const tmpl = (tRes.data?.templates ?? []).find(t => t.templateKey === 'CLIENT_INTAKE_INVITE');
+      const sub = (s: string) => s
+        .replace(/\{\{PROSPECT_NAME\}\}/g, client.name)
+        .replace(/\{\{INTAKE_LINK\}\}/g, intakeUrl)
+        .replace(/\{\{EXPIRES_DATE\}\}/g, expiresStr);
+
+      setResendTcModal({
+        prospectName:  client.name,
+        prospectEmail: email,
+        intakeUrl,
+        linkId:        linkRow.link_id,
+        subject:       tmpl ? sub(tmpl.subject) : `Your Stride Logistics Warehousing Agreement — ${client.name}`,
+        body:          tmpl ? sub(tmpl.body) : `<p>Hi ${client.name},</p><p>Please complete your warehousing agreement: <a href="${intakeUrl}">${intakeUrl}</a></p>`,
+      });
+    } finally {
+      setResendTcLoading(null);
+    }
+  };
+
+  const handleResendTcSend = async (subject: string, bodyHtml: string) => {
+    if (!resendTcModal) return;
+    setResendTcSending(true);
+    try {
+      await postSendIntakeInvitation({
+        to:       resendTcModal.prospectEmail,
+        subject,
+        bodyHtml,
+        linkId:   resendTcModal.linkId,
+      });
+    } finally {
+      setResendTcSending(false);
+      setResendTcModal(null);
+    }
+  };
+
   const [clientSearch, setClientSearch] = useState('');
   const [userSearch, setUserSearch] = useState('');
   const [userSorting, setUserSorting] = useState<SortingState>([]);
@@ -680,6 +775,8 @@ export function Settings() {
   const { priceList, classMap, loading: pricingLoading, error: pricingError, refetch: refetchPricing } = usePricing(apiConfigured && true);
   // Pre-fetch locations for sub-tabs
   useLocations(apiConfigured && true);
+  // T&C signed-on-file status for client cards (admin view, Clients sub-tab)
+  const { tcMap } = useClientTcStatus();
 
   // Users tab
   const { users, loading: usersLoading, error: usersError, addUser, updateUser, deleteUser, refetch: refetchUsers } = useUsers();
@@ -2181,6 +2278,30 @@ export function Settings() {
 
             return (
               <>
+                {/* Sub-tab selector */}
+                <div style={{ display: 'flex', gap: 6, marginBottom: 20 }}>
+                  {(['clients', 'intakes'] as const).map(st => (
+                    <button
+                      key={st}
+                      onClick={() => setClientsSubTab(st)}
+                      style={{
+                        padding: '7px 18px', fontSize: 12, fontWeight: clientsSubTab === st ? 700 : 500,
+                        border: `1px solid ${clientsSubTab === st ? theme.colors.orange : theme.colors.border}`,
+                        borderRadius: 100, background: clientsSubTab === st ? theme.colors.orangeLight : '#fff',
+                        color: clientsSubTab === st ? theme.colors.orange : theme.colors.textMuted,
+                        cursor: 'pointer', fontFamily: 'inherit', textTransform: 'capitalize',
+                      }}
+                    >
+                      {st === 'intakes' ? 'Intakes' : 'Clients'}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Intakes sub-tab */}
+                {clientsSubTab === 'intakes' && <IntakesPanel />}
+
+                {/* Clients sub-tab */}
+                {clientsSubTab === 'clients' && <>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                     <div style={sectionTitle}>{showInactiveClients ? 'All' : 'Active'} Clients ({q ? `${displayClients.length} of ${apiClients.length}` : displayClients.length})</div>
@@ -2462,6 +2583,24 @@ export function Settings() {
                         {(c as ApiClient).autoCharge !== true && <span style={{ fontSize: 10, padding: '2px 8px', borderRadius: 8, background: '#FEF2F2', color: '#DC2626', fontWeight: 600 }}>Manual Pay</span>}
                         {(c as ApiClient).parentClient && <span style={{ fontSize: 10, padding: '2px 8px', borderRadius: 8, background: '#FEF3C7', color: '#92400E' }}>Child of {(c as ApiClient).parentClient}</span>}
                         {!!(c as ApiClient).name && displayClients.some(dc => (dc as ApiClient).parentClient === c.name) && <span style={{ fontSize: 10, padding: '2px 8px', borderRadius: 8, background: '#DBEAFE', color: '#1E40AF' }}>Parent</span>}
+                        {/* T&C on-file badge */}
+                        {(() => {
+                          const tcRec = tcMap.get((c.email || '').toLowerCase());
+                          if (tcRec) {
+                            return (
+                              <span style={{ fontSize: 10, padding: '2px 8px', borderRadius: 8, background: '#F0FDF4', color: '#15803D', fontWeight: 600 }}
+                                title={`T&C signed ${new Date(tcRec.signedAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`}>
+                                ✓ T&amp;C Signed
+                              </span>
+                            );
+                          }
+                          return (
+                            <span style={{ fontSize: 10, padding: '2px 8px', borderRadius: 8, background: '#FEF3C7', color: '#92400E', fontWeight: 600 }}
+                              title="No signed T&C on file — use Resend T&C to send intake link">
+                              ⚠ No T&amp;C on file
+                            </span>
+                          );
+                        })()}
                       </div>
                     </div>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0, marginLeft: 8 }}>
@@ -2488,6 +2627,18 @@ export function Settings() {
                         >
                           {welcomeEmailLoading === (c as ApiClient).spreadsheetId ? <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} /> : <Send size={11} />}
                           Welcome Email
+                        </button>
+                      )}
+                      {/* Resend T&C — generates a fresh intake link and opens email modal */}
+                      {isLive && (c as ApiClient).email && (
+                        <button
+                          onClick={e => { e.stopPropagation(); void handleResendTc(c as ApiClient); }}
+                          disabled={resendTcLoading === (c as ApiClient).spreadsheetId}
+                          title={`Generate intake link and email T&C to ${c.email}`}
+                          style={{ padding: '5px 10px', fontSize: 10, fontWeight: 600, border: `1px solid ${theme.colors.border}`, borderRadius: 6, background: '#fff', cursor: resendTcLoading === (c as ApiClient).spreadsheetId ? 'wait' : 'pointer', fontFamily: 'inherit', color: theme.colors.textSecondary, display: 'flex', alignItems: 'center', gap: 4, whiteSpace: 'nowrap' }}
+                        >
+                          {resendTcLoading === (c as ApiClient).spreadsheetId ? <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} /> : <Link2 size={11} />}
+                          {tcMap.get((c.email || '').toLowerCase()) ? 'Re-send T&C' : 'Send T&C'}
                         </button>
                       )}
                       {/* Per-client Supabase sync — re-mirror this one client without running the full bulk sync */}
@@ -2656,7 +2807,22 @@ export function Settings() {
                     </div>
                   </div>
                 )}
-              </>
+              </> /* end clientsSubTab === 'clients' */}
+              {/* Resend T&C email modal */}
+              {resendTcModal && (
+                <IntakeEmailModal
+                  prospectName={resendTcModal.prospectName}
+                  prospectEmail={resendTcModal.prospectEmail}
+                  intakeUrl={resendTcModal.intakeUrl}
+                  templateSubject={resendTcModal.subject}
+                  templateBody={resendTcModal.body}
+                  onSend={handleResendTcSend}
+                  onCopyLink={() => setResendTcModal(null)}
+                  onClose={() => setResendTcModal(null)}
+                  sending={resendTcSending}
+                />
+              )}
+            </>
             );
           })()}
 

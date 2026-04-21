@@ -4457,3 +4457,46 @@ export function postUpdateQboStatus(
     { signal }
   );
 }
+
+// ─── Intake Invitation Endpoints ─────────────────────────────────────────────
+
+/**
+ * Send the CLIENT_INTAKE_INVITE email to a prospect after generating a link.
+ * Admin-guarded on the GAS side. Token substitution is done client-side
+ * before passing bodyHtml so the GAS handler just sends.
+ */
+export function postSendIntakeInvitation({
+  to,
+  subject,
+  bodyHtml,
+  linkId,
+}: {
+  to: string;
+  subject: string;
+  bodyHtml: string;
+  linkId: string;
+}) {
+  return apiPost<{ success: boolean; sentTo: string }>(
+    'sendIntakeInvitation',
+    { to, subject, bodyHtml, linkId } as unknown as Record<string, unknown>
+  );
+}
+
+/**
+ * Email a signed-agreement receipt to the prospect from the public
+ * intake success screen. No auth guard on the GAS side.
+ */
+export function postEmailSignedAgreement({
+  linkId,
+  email,
+  businessName,
+}: {
+  linkId: string;
+  email: string;
+  businessName: string;
+}) {
+  return apiPost<{ success: boolean }>(
+    'emailSignedAgreement',
+    { linkId, email, businessName } as unknown as Record<string, unknown>
+  );
+}
