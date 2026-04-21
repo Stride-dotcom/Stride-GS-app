@@ -109,6 +109,15 @@ export function ClientIntake({ linkId }: Props) {
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [submitted, setSubmitted] = useState(false);
 
+  // Signature pad + ink flag — MUST be declared before any conditional
+  // return below. Prior bug (session 77): these hooks lived after the
+  // `if (status === 'loading') return …` guards, so the first render
+  // (status=loading) called fewer hooks than later renders (status=valid),
+  // triggering React error #310 and rendering a blank page. All hooks
+  // up top.
+  const sig = useSignatureCanvas();
+  const [sigHasInk, setSigHasInk] = useState(false);
+
   // Pre-fill contact fields from the invitation row if present.
   useEffect(() => {
     if (link?.prospectEmail || link?.prospectName) {
@@ -212,11 +221,6 @@ export function ClientIntake({ linkId }: Props) {
 
   const next = () => { if (canAdvance() && step < STEPS.length) setStep(step + 1); };
   const prev = () => { if (step > 1) setStep(step - 1); };
-
-  // Signature pad — owned here so it persists across step navigation
-  // without losing ink.
-  const sig = useSignatureCanvas();
-  const [sigHasInk, setSigHasInk] = useState(false);
 
   const canSubmit = (() => {
     // Guardrails for the final submit button. Mirrors step-by-step
