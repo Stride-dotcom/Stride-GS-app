@@ -119,14 +119,16 @@ export function usePhotos({ entityType, entityId, tenantId, enabled = true, item
   const refetch = useCallback(async () => {
     if (!enabled || !entityId) { setPhotos([]); setLoading(false); return; }
     setLoading(true); setError(null);
-    // v38.93.0 — when rendering the Item detail panel, query by item_id so
-    // photos uploaded from ANY entity that points to this item (tasks,
-    // repairs, etc.) roll up into one combined view. Other entity types
-    // (Task/Repair/WC/Shipment panels) keep the entity-scoped query so each
-    // panel still shows only photos uploaded against that specific entity.
+    // v38.93.0 — Item detail panel queries by item_id for cross-entity rollup.
+    // v2026-04-22 — Task/Repair panels (and any future single-item entity
+    // panel) can also opt into rollup by passing an explicit `itemId`. When
+    // itemId is set AND different from entityId, we rollup; otherwise we
+    // fall back to entity-scoped query. Container entities (WC/Shipment)
+    // don't pass itemId → they stay entity-scoped.
     const query = supabase.from('item_photos').select('*');
-    const scoped = entityType === 'inventory'
-      ? query.eq('item_id', entityId)
+    const rollupItemId = entityType === 'inventory' ? entityId : (itemId || null);
+    const scoped = rollupItemId
+      ? query.eq('item_id', rollupItemId)
       : query.eq('entity_type', entityType).eq('entity_id', entityId);
     const { data, error: err } = await scoped
       .order('is_primary', { ascending: false })
@@ -177,7 +179,7 @@ export function usePhotos({ entityType, entityId, tenantId, enabled = true, item
 
     setPhotos(rows);
     setLoading(false);
-  }, [enabled, entityType, entityId]);
+  }, [enabled, entityType, entityId, itemId]);
 
   useEffect(() => { void refetch(); }, [refetch]);
 

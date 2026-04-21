@@ -81,6 +81,9 @@ export interface TabbedDetailPanelBuiltInTabs {
     /** Parent item id — enables cross-entity photo rollup on Item panels. */
     itemId?: string | null;
     tenantId?: string | null;
+    /** v2026-04-22 — opt-in source-entity sub-tabs. The four migrating panels
+     *  (Task/Repair/WC/Shipment) set this; legacy consumers leave it off. */
+    enableSourceFilter?: boolean;
   };
   docs?: {
     contextType: DocumentContextType;
@@ -91,6 +94,12 @@ export interface TabbedDetailPanelBuiltInTabs {
     entityType: string;
     entityId: string;
     relatedEntities?: RelatedNotesEntity[];
+    /** v2026-04-22 — opt-in cross-entity rollup by item_id with source sub-tabs.
+     *  Requires itemId. When omitted/false, falls back to ThreadedNotes pill
+     *  switcher (the legacy path used by Claim). */
+    enableSourceFilter?: boolean;
+    /** Parent item id for the rollup query. Ignored unless enableSourceFilter. */
+    itemId?: string | null;
   };
   /** Activity tab — accepts either a simple entityType/entityId pair (renders
    *  the default `<EntityHistory>`) OR a full render function (escape hatch
@@ -247,6 +256,7 @@ function useBuiltInTabs(cfg: TabbedDetailPanelBuiltInTabs | undefined): TabbedDe
             entityId={photosCfg.entityId}
             itemId={photosCfg.itemId ?? null}
             tenantId={photosCfg.tenantId ?? null}
+            enableSourceFilter={photosCfg.enableSourceFilter}
           />
         ),
       });
@@ -277,6 +287,8 @@ function useBuiltInTabs(cfg: TabbedDetailPanelBuiltInTabs | undefined): TabbedDe
             entityType={notesCfg.entityType}
             entityId={notesCfg.entityId}
             relatedEntities={notesCfg.relatedEntities}
+            enableSourceFilter={notesCfg.enableSourceFilter}
+            itemId={notesCfg.itemId ?? null}
           />
         ),
       });

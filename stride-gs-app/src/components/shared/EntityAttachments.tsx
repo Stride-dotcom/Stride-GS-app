@@ -18,7 +18,7 @@
  *   />
  * Any of the three blocks can be omitted.
  */
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 import { ChevronDown, ChevronRight, ImageIcon, FileText, StickyNote } from 'lucide-react';
 import { theme } from '../../styles/theme';
 import { PhotoGallery } from '../media/PhotoGallery';
@@ -29,9 +29,11 @@ import { DocumentScanButton } from '../media/DocumentScanButton';
 // wraps it and adds the pill-based thread switcher. We only import the
 // ThreadedNotes composition here; the flat one is a transitive dep.
 import { ThreadedNotes } from '../notes/ThreadedNotes';
+import { NotesSection } from '../notes/NotesSection';
 import { usePhotos, type EntityType as PhotoEntityType } from '../../hooks/usePhotos';
 import { useDocuments, type DocumentContextType } from '../../hooks/useDocuments';
-import { useEntityNotes } from '../../hooks/useEntityNotes';
+import { useEntityNotes, useEntityNotesRollup, type EntityNote } from '../../hooks/useEntityNotes';
+import { EntitySourceTabs, ENTITY_LABEL } from './EntitySourceTabs';
 
 interface PhotosCfg {
   entityType: PhotoEntityType;
@@ -41,6 +43,10 @@ interface PhotosCfg {
    *  and Repair detail panels so photos uploaded there also appear on the
    *  Item detail panel's Photos section. */
   itemId?: string | null;
+  /** v2026-04-22 — opt-in source-entity sub-tabs (All / Item / Task / Repair...)
+   *  when the rollup spans multiple entity_types. Off by default so Claim
+   *  and other legacy consumers stay byte-identical. */
+  enableSourceFilter?: boolean;
 }
 interface DocumentsCfg {
   contextType: DocumentContextType;
@@ -55,6 +61,12 @@ interface NotesCfg {
    *  without leaving the detail view. Optional and deduped against
    *  the primary entity inside ThreadedNotes. */
   relatedEntities?: Array<{ type: string; id: string; label?: string }>;
+  /** v2026-04-22 — opt-in cross-entity rollup by item_id with source sub-tabs.
+   *  Requires itemId. When false (default), falls back to the ThreadedNotes
+   *  pill switcher so Claim stays byte-identical. */
+  enableSourceFilter?: boolean;
+  /** Parent item_id; ignored unless enableSourceFilter=true. */
+  itemId?: string | null;
 }
 
 interface Props {
@@ -79,6 +91,7 @@ export function EntityAttachments({ photos, documents, notes, defaultOpen }: Pro
           entityId={photos.entityId}
           tenantId={photos.tenantId}
           itemId={photos.itemId}
+          enableSourceFilter={photos.enableSourceFilter}
         />
       )}
       {documents && (
@@ -95,6 +108,8 @@ export function EntityAttachments({ photos, documents, notes, defaultOpen }: Pro
           entityType={notes.entityType}
           entityId={notes.entityId}
           relatedEntities={notes.relatedEntities}
+          enableSourceFilter={notes.enableSourceFilter}
+          itemId={notes.itemId}
         />
       )}
     </div>
@@ -165,7 +180,7 @@ function SectionHeader({
 }
 
 function PhotosSection({
-  entityType, entityId, tenantId, itemId, defaultOpen,
+  entityType, entityId, tenantId, itemId, enableSourceFilter, defaultOpen,
 }: PhotosCfg & { defaultOpen: boolean }) {
   const [open, setOpen] = useState(defaultOpen);
   const { photos } = usePhotos({ entityType, entityId, tenantId, itemId });
@@ -179,7 +194,15 @@ function PhotosSection({
         onToggle={() => setOpen(o => !o)}
       />
       <CollapsibleBody open={open}>
-        <PhotoGallery entityType={entityType} entityId={entityId} tenantId={tenantId} itemId={itemId} naked compact />
+        <PhotoGallery
+          entityType={entityType}
+          entityId={entityId}
+          tenantId={tenantId}
+          itemId={itemId}
+          enableSourceFilter={enableSourceFilter}
+          naked
+          compact
+        />
       </CollapsibleBody>
     </section>
   );
@@ -232,12 +255,17 @@ function DocumentsSection({
 // Shipment / Claim) still use it and see no difference. Purely additive.
 
 export function PhotosPanel({
-  entityType, entityId, tenantId, itemId,
+  entityType, entityId, tenantId, itemId, enableSourceFilter,
 }: {
   entityType: PhotoEntityType;
   entityId: string | null | undefined;
   tenantId?: string | null;
   itemId?: string | null;
+  /** v2026-04-22 — opt-in: renders a source-entity sub-tab row above the grid
+   *  (All / Item / Task / Repair / ...) filtering a cross-entity rollup. Only
+   *  the migrated tabbed panels pass this; legacy composition leaves it off
+   *  so Claim's UI is byte-identical. */
+  enableSourceFilter?: boolean;
 }) {
   return (
     <PhotoGallery
@@ -245,6 +273,7 @@ export function PhotosPanel({
       entityId={entityId}
       tenantId={tenantId}
       itemId={itemId}
+      enableSourceFilter={enableSourceFilter}
       naked
       compact
     />
@@ -279,12 +308,38 @@ export function DocumentsPanel({
 }
 
 export function NotesPanel({
-  entityType, entityId, relatedEntities,
+  entityType, entityId, relatedEntities, enableSourceFilter, itemId,
 }: {
   entityType: string;
   entityId: string;
   relatedEntities?: Array<{ type: string; id: string; label?: string }>;
+  /** v2026-04-22 — opt-in: renders a cross-entity rollup by item_id with
+   *  source-entity sub-tabs. When false (default), falls back to the
+   *  ThreadedNotes pill switcher so Claim and legacy composition stay
+   *  byte-identical. */
+  enableSourceFilter?: boolean;
+  /** Parent item_id — required when enableSourceFilter=true for the rollup
+   *  query. Ignored otherwise. */
+  itemId?: string | null;
 }) {
+  if (enableSourceFilter && itemId) {
+    return (
+      <div>
+        <div style={{
+          fontSize: 11, fontWeight: 700, letterSpacing: '0.04em',
+          color: theme.colors.textMuted, textTransform: 'uppercase',
+          marginBottom: 10,
+        }}>
+          Threaded Notes
+        </div>
+        <NotesRollupView
+          primaryEntityType={entityType}
+          primaryEntityId={entityId}
+          itemId={itemId}
+        />
+      </div>
+    );
+  }
   // Heading differentiates the threaded entity_notes system from the
   // single-text "Item Notes" field that lives on the Details tab.
   return (
@@ -305,8 +360,113 @@ export function NotesPanel({
   );
 }
 
+/**
+ * NotesRollupView — read view for cross-entity rollup + composer that writes
+ * to the primary entity. Loads every entity_notes row with item_id=itemId,
+ * shows source sub-tabs (All / Item / Task / Repair / ...), and renders a
+ * NotesSection composer at the bottom scoped to the primary entity so a
+ * new note always gets its item_id stamped via useEntityNotes.
+ */
+function NotesRollupView({
+  primaryEntityType, primaryEntityId, itemId,
+}: {
+  primaryEntityType: string;
+  primaryEntityId: string;
+  itemId: string;
+}) {
+  const { notes: rolled, loading: rollupLoading } = useEntityNotesRollup(itemId);
+  const [filter, setFilter] = useState<string>('all');
+
+  // Shape into the { entity_type } shape EntitySourceTabs expects.
+  const sourceItems = useMemo(
+    () => rolled.map(n => ({ entity_type: n.entityType, _note: n })),
+    [rolled],
+  );
+  const visible: EntityNote[] = useMemo(
+    () => (filter === 'all' ? rolled : rolled.filter(n => n.entityType === filter)),
+    [rolled, filter],
+  );
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      {rolled.length > 0 && (
+        <EntitySourceTabs
+          items={sourceItems}
+          activeType={filter}
+          onChange={setFilter}
+          variant="note"
+        />
+      )}
+
+      {rollupLoading && rolled.length === 0 ? (
+        <div style={{ fontSize: 12, color: theme.colors.textMuted, padding: '12px 0' }}>
+          Loading notes…
+        </div>
+      ) : visible.length === 0 ? (
+        <div style={{ fontSize: 12, color: theme.colors.textMuted, padding: '12px 0', fontStyle: 'italic' }}>
+          {filter === 'all'
+            ? 'No notes on this item yet.'
+            : `No ${ENTITY_LABEL[filter] ?? filter} notes for this item.`}
+        </div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {visible.map(n => <RollupNoteRow key={n.id} note={n} />)}
+        </div>
+      )}
+
+      {/* Composer — always posts to the primary entity. useEntityNotes stamps
+          item_id on insert so the rollup above refreshes via its realtime
+          channel within ~1s. */}
+      <div style={{ borderTop: `1px solid ${theme.colors.border}`, paddingTop: 12, marginTop: 4 }}>
+        <NotesSection
+          entityType={primaryEntityType}
+          entityId={primaryEntityId}
+          itemId={itemId}
+          composerOnly
+        />
+      </div>
+    </div>
+  );
+}
+
+function RollupNoteRow({ note }: { note: EntityNote }) {
+  const sourceLabel = ENTITY_LABEL[note.entityType] ?? note.entityType;
+  const isInternal = note.visibility === 'internal';
+  return (
+    <div style={{
+      padding: 10,
+      border: `1px solid ${theme.colors.border}`,
+      borderRadius: 8,
+      background: isInternal ? '#FFFBEB' : '#FFFFFF',
+    }}>
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4,
+        fontSize: 11, color: theme.colors.textMuted,
+      }}>
+        <span style={{
+          padding: '1px 6px', borderRadius: 10, background: theme.colors.bgSubtle,
+          fontWeight: 600, fontSize: 10,
+        }}>{sourceLabel}</span>
+        <span style={{ fontWeight: 600, color: theme.colors.text }}>
+          {note.authorName || 'Unknown'}
+        </span>
+        <span>{new Date(note.createdAt).toLocaleString()}</span>
+        {isInternal && (
+          <span style={{
+            marginLeft: 'auto', padding: '1px 6px', borderRadius: 10,
+            background: '#FEF3C7', color: '#92400E', fontWeight: 600, fontSize: 10,
+          }}>Internal</span>
+        )}
+      </div>
+      <div style={{ fontSize: 13, whiteSpace: 'pre-wrap', lineHeight: 1.45 }}>
+        {note.body}
+      </div>
+    </div>
+  );
+}
+
 function NotesSectionCollapsible({
-  entityType, entityId, relatedEntities, defaultOpen,
+  entityType, entityId, relatedEntities, enableSourceFilter, itemId, defaultOpen,
 }: NotesCfg & { defaultOpen: boolean }) {
   const [open, setOpen] = useState(defaultOpen);
   // Count reflects only the PRIMARY thread's notes for the header
@@ -323,15 +483,28 @@ function NotesSectionCollapsible({
         onToggle={() => setOpen(o => !o)}
       />
       <CollapsibleBody open={open}>
-        {/* Session 74: flat NotesSection replaced by ThreadedNotes. The
-            component renders a pill row for the primary entity + any
-            relatedEntities passed by the parent panel, plus the currently
-            selected thread's notes via the existing NotesSection. */}
-        <ThreadedNotes
-          entityType={entityType}
-          entityId={entityId}
-          relatedEntities={relatedEntities}
-        />
+        {enableSourceFilter && itemId ? (
+          // v2026-04-22: rollup view with source-entity sub-tabs + composer
+          // that writes to the primary entity. Stamps item_id on insert so
+          // the rollup refreshes via realtime.
+          <NotesPanel
+            entityType={entityType}
+            entityId={entityId}
+            relatedEntities={relatedEntities}
+            enableSourceFilter={true}
+            itemId={itemId}
+          />
+        ) : (
+          // Session 74: flat NotesSection replaced by ThreadedNotes. The
+          // component renders a pill row for the primary entity + any
+          // relatedEntities passed by the parent panel, plus the currently
+          // selected thread's notes via the existing NotesSection.
+          <ThreadedNotes
+            entityType={entityType}
+            entityId={entityId}
+            relatedEntities={relatedEntities}
+          />
+        )}
       </CollapsibleBody>
     </section>
   );

@@ -26,6 +26,13 @@ import {
 interface Props {
   entityType: string;
   entityId: string;
+  /** v2026-04-22 — parent item_id stamped on inserts so the rollup can find
+   *  this note. Forwarded to useEntityNotes; null/undefined for container or
+   *  OOS entity types (will_call/shipment/claim). */
+  itemId?: string | null;
+  /** v2026-04-22 — when true, only the composer renders (header + list are
+   *  hidden). Used by NotesRollupView which supplies its own rollup list. */
+  composerOnly?: boolean;
   /** Oldest-first is default so the thread reads chronologically; toggle via UI. */
   initialOrder?: 'newest' | 'oldest';
 }
@@ -61,10 +68,10 @@ function colorForAuthor(key: string): string {
   return `hsl(${hue} 55% 50%)`;
 }
 
-export function NotesSection({ entityType, entityId, initialOrder = 'oldest' }: Props) {
+export function NotesSection({ entityType, entityId, itemId, composerOnly, initialOrder = 'oldest' }: Props) {
   const v2 = theme.v2;
   const { user } = useAuth();
-  const { notes, loading, error, addNote, deleteNote } = useEntityNotes(entityType, entityId);
+  const { notes, loading, error, addNote, deleteNote } = useEntityNotes(entityType, entityId, itemId);
 
   const [draft, setDraft] = useState('');
   const [visibility, setVisibility] = useState<NoteVisibility>('public');
@@ -113,57 +120,60 @@ export function NotesSection({ entityType, entityId, initialOrder = 'oldest' }: 
   };
 
   return (
-    <div style={card}>
-      {/* Header */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16, gap: 12 }}>
-        <div>
-          <div style={{ ...v2.typography.cardTitle, color: v2.colors.text }}>Notes</div>
-          <div style={{ fontSize: 11, color: v2.colors.textMuted, marginTop: 2 }}>
-            {loading ? 'Loading…' : `${notes.length} note${notes.length === 1 ? '' : 's'}`}
+    <div style={composerOnly ? { fontFamily: theme.typography.fontFamily } : card}>
+      {/* Header + thread — hidden in composerOnly mode (NotesRollupView owns them) */}
+      {!composerOnly && (
+        <>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16, gap: 12 }}>
+            <div>
+              <div style={{ ...v2.typography.cardTitle, color: v2.colors.text }}>Notes</div>
+              <div style={{ fontSize: 11, color: v2.colors.textMuted, marginTop: 2 }}>
+                {loading ? 'Loading…' : `${notes.length} note${notes.length === 1 ? '' : 's'}`}
+              </div>
+            </div>
+            <button
+              onClick={() => setOrder(o => o === 'newest' ? 'oldest' : 'newest')}
+              style={{
+                padding: '6px 12px', borderRadius: v2.radius.badge,
+                border: `1px solid ${v2.colors.border}`, background: v2.colors.bgWhite,
+                color: v2.colors.textSecondary,
+                fontSize: 11, fontWeight: 600, letterSpacing: '0.5px', textTransform: 'uppercase',
+                cursor: 'pointer', fontFamily: 'inherit',
+              }}
+            >
+              {order === 'oldest' ? 'Oldest first' : 'Newest first'}
+            </button>
           </div>
-        </div>
-        <button
-          onClick={() => setOrder(o => o === 'newest' ? 'oldest' : 'newest')}
-          style={{
-            padding: '6px 12px', borderRadius: v2.radius.badge,
-            border: `1px solid ${v2.colors.border}`, background: v2.colors.bgWhite,
-            color: v2.colors.textSecondary,
-            fontSize: 11, fontWeight: 600, letterSpacing: '0.5px', textTransform: 'uppercase',
-            cursor: 'pointer', fontFamily: 'inherit',
-          }}
-        >
-          {order === 'oldest' ? 'Oldest first' : 'Newest first'}
-        </button>
-      </div>
 
-      {error && (
-        <div style={{
-          padding: '10px 14px', marginBottom: 12, fontSize: 12,
-          background: 'rgba(180,90,90,0.10)', color: INTERNAL_RED,
-          borderRadius: v2.radius.input,
-        }}>{error}</div>
+          {error && (
+            <div style={{
+              padding: '10px 14px', marginBottom: 12, fontSize: 12,
+              background: 'rgba(180,90,90,0.10)', color: INTERNAL_RED,
+              borderRadius: v2.radius.input,
+            }}>{error}</div>
+          )}
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 16 }}>
+            {visibleNotes.length === 0 && !loading && (
+              <div style={{
+                padding: '24px 16px', textAlign: 'center',
+                background: v2.colors.bgWhite, border: `1px dashed ${v2.colors.border}`,
+                borderRadius: v2.radius.input, color: v2.colors.textMuted, fontSize: 13,
+              }}>
+                No notes yet. Be the first to add one.
+              </div>
+            )}
+            {visibleNotes.map(n => (
+              <NoteItem
+                key={n.id}
+                note={n}
+                canDelete={isAdmin}
+                onDelete={() => { void deleteNote(n.id); }}
+              />
+            ))}
+          </div>
+        </>
       )}
-
-      {/* Thread */}
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 16 }}>
-        {visibleNotes.length === 0 && !loading && (
-          <div style={{
-            padding: '24px 16px', textAlign: 'center',
-            background: v2.colors.bgWhite, border: `1px dashed ${v2.colors.border}`,
-            borderRadius: v2.radius.input, color: v2.colors.textMuted, fontSize: 13,
-          }}>
-            No notes yet. Be the first to add one.
-          </div>
-        )}
-        {visibleNotes.map(n => (
-          <NoteItem
-            key={n.id}
-            note={n}
-            canDelete={isAdmin}
-            onDelete={() => { void deleteNote(n.id); }}
-          />
-        ))}
-      </div>
 
       {/* ── Compose ───────────────────────────────────────────────────────── */}
       {/* Wrapper switches styling completely when Internal is selected so it's

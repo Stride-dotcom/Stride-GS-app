@@ -605,9 +605,22 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
           {/* Activity History */}
           <EntityHistory entityType="repair" entityId={repair.repairId} tenantId={repair.clientSheetId} />
 
-          {/* Session 73 — Photos + Notes */}
+          {/* Session 73 — Photos + Notes.
+              v2026-04-22 — enableSourceFilter turns on cross-entity rollup by
+              item_id so this Repair panel's Photos tab shows inspection photos
+              from the source Task AND any prior repair photos on the same item,
+              with source sub-tabs to filter (All / Item / Task / Repair).
+              Notes tab same — rollup of every note ever stamped on this item.
+              Solves the user's original workflow: "when I'm working a repair,
+              let me see what the inspection photos looked like." */}
           <EntityAttachments
-            photos={{ entityType: 'repair', entityId: repair.repairId, tenantId: repair.clientSheetId, itemId: repair.itemId ? String(repair.itemId) : null }}
+            photos={{
+              entityType: 'repair',
+              entityId: repair.repairId,
+              tenantId: repair.clientSheetId,
+              itemId: repair.itemId ? String(repair.itemId) : null,
+              enableSourceFilter: !!repair.itemId,
+            }}
             documents={{ contextType: 'repair', contextId: repair.repairId, tenantId: repair.clientSheetId }}
             notes={{
               entityType: 'repair',
@@ -618,6 +631,8 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
                 ...(repair.itemId ? [{ type: 'inventory', id: String(repair.itemId), label: `Item ${repair.itemId}` }] : []),
                 ...(repair.sourceTaskId ? [{ type: 'task', id: String(repair.sourceTaskId), label: `Task ${repair.sourceTaskId}` }] : []),
               ],
+              enableSourceFilter: !!repair.itemId,
+              itemId: repair.itemId ? String(repair.itemId) : null,
             }}
           />
 

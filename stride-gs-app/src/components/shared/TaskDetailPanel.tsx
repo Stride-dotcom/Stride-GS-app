@@ -727,9 +727,20 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
             </div>
           )}
 
-          {/* Session 73 — Photos + Notes (always available whether open or completed). */}
+          {/* Session 73 — Photos + Notes (always available whether open or completed).
+              v2026-04-22 — enableSourceFilter turns on the cross-entity rollup:
+              Photos tab now shows every photo against task.itemId regardless of
+              which entity captured it (inspection photos from OTHER tasks on the
+              same item, repair photos, etc.) with source sub-tabs to filter.
+              Notes tab same — rollup by item_id with All/Item/Task/Repair sub-tabs. */}
           <EntityAttachments
-            photos={{ entityType: 'task', entityId: task.taskId, tenantId: clientSheetId, itemId: task.itemId ? String(task.itemId) : null }}
+            photos={{
+              entityType: 'task',
+              entityId: task.taskId,
+              tenantId: clientSheetId,
+              itemId: task.itemId ? String(task.itemId) : null,
+              enableSourceFilter: !!task.itemId,
+            }}
             documents={{ contextType: 'task', contextId: task.taskId, tenantId: clientSheetId }}
             notes={{
               entityType: 'task',
@@ -740,6 +751,8 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
               relatedEntities: task.itemId
                 ? [{ type: 'inventory', id: String(task.itemId), label: `Item ${task.itemId}` }]
                 : [],
+              enableSourceFilter: !!task.itemId,
+              itemId: task.itemId ? String(task.itemId) : null,
             }}
           />
 

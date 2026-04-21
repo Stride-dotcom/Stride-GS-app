@@ -4,13 +4,14 @@
  * panel with an `entityType` + `entityId` + `tenantId` and it handles the
  * full lifecycle.
  */
-import { useCallback, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { ImageIcon, AlertTriangle } from 'lucide-react';
 import { theme } from '../../styles/theme';
 import { usePhotos, type Photo, type EntityType, type PhotoType } from '../../hooks/usePhotos';
 import { PhotoGrid } from './PhotoGrid';
 import { PhotoUploadButton } from './PhotoUploadButton';
 import { PhotoLightbox } from './PhotoLightbox';
+import { EntitySourceTabs } from '../shared/EntitySourceTabs';
 
 interface Props {
   entityType: EntityType;
@@ -26,13 +27,21 @@ interface Props {
   naked?: boolean;
   title?: string;
   compact?: boolean;
+  /** v2026-04-22 — when true, renders EntitySourceTabs above the grid so the
+   *  user can filter a cross-entity rollup by source entity_type.
+   *  Only meaningful when the returned `photos` span multiple entity_types
+   *  (e.g. Item panel with itemId rollup, or Task/Repair panels with item_id
+   *  rollup). Default false so legacy callers (Claim) are byte-identical. */
+  enableSourceFilter?: boolean;
 }
 
 export function PhotoGallery({
   entityType, entityId, tenantId, itemId,
   defaultPhotoType = 'general',
   readOnly, naked, title = 'Photos', compact,
+  enableSourceFilter = false,
 }: Props) {
+  const [sourceFilter, setSourceFilter] = useState<string>('all');
   // Session 74: `setPrimaryPhoto` is still exported by usePhotos for
   // interface compatibility but no longer consumed here — the "Make
   // Primary" feature was removed from the UI.
@@ -43,6 +52,14 @@ export function PhotoGallery({
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
+
+  // Filtered list respects the source-entity sub-tab. When filtering is
+  // disabled or set to 'all', this is the raw photos list (referentially
+  // stable so no extra renders).
+  const filteredPhotos = useMemo(() => {
+    if (!enableSourceFilter || sourceFilter === 'all' || sourceFilter === '') return photos;
+    return photos.filter(p => String(p.entity_type ?? '') === sourceFilter);
+  }, [photos, enableSourceFilter, sourceFilter]);
 
   const handleUpload = useCallback(async (files: File[]) => {
     if (!files.length) return;
@@ -97,14 +114,26 @@ export function PhotoGallery({
         </div>
       )}
 
+      {/* Source-entity sub-tabs (v2026-04-22). Opt-in via enableSourceFilter.
+          Only meaningful when the rollup actually spans multiple entity_types;
+          the component renders nothing when there's only one source present. */}
+      {enableSourceFilter && photos.length > 0 && (
+        <EntitySourceTabs
+          items={photos}
+          activeType={sourceFilter}
+          onChange={setSourceFilter}
+          variant="photo"
+        />
+      )}
+
       {/* Grid */}
-      {loading && photos.length === 0 ? (
+      {loading && filteredPhotos.length === 0 && photos.length === 0 ? (
         <div style={{ padding: 24, textAlign: 'center', color: theme.v2.colors.textMuted, fontSize: 12 }}>
           Loading photos…
         </div>
       ) : (
         <PhotoGrid
-          photos={photos}
+          photos={filteredPhotos}
           compact={compact}
           onPhotoClick={(_, i) => setLightboxIndex(i)}
           onToggleAttention={readOnly ? undefined : (p: Photo, next: boolean) => toggleNeedsAttention(p.id, next)}
@@ -113,10 +142,10 @@ export function PhotoGallery({
         />
       )}
 
-      {/* Lightbox */}
-      {lightboxIndex !== null && photos[lightboxIndex] && (
+      {/* Lightbox — uses filtered list so arrow navigation respects the active filter */}
+      {lightboxIndex !== null && filteredPhotos[lightboxIndex] && (
         <PhotoLightbox
-          photos={photos}
+          photos={filteredPhotos}
           startIndex={lightboxIndex}
           readOnly={readOnly}
           onClose={() => setLightboxIndex(null)}
