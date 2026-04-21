@@ -1,5 +1,8 @@
 /* ===================================================
-   StrideAPI.gs — v38.93.0 — 2026-04-20 PST — Add notifyNewDeliveryOrder handler
+   StrideAPI.gs — v38.93.1 — 2026-04-20 PST — P+D linked order tokens in notification
+   v38.93.1: handleNotifyNewDeliveryOrder_ now accepts linkedOrderNumber, pickupContactName,
+             pickupAddress; adds {{LINKED_ORDER_NUMBER}}, {{PICKUP_CONTACT}}, {{PICKUP_ADDRESS}}
+             tokens so P+D email shows both order numbers and both addresses.
    v38.93.0: NEW — handleNotifyNewDeliveryOrder_ sends ORDER_REVIEW_REQUEST email to
              NOTIFICATION_EMAILS when a client submits a delivery order.
              Router case "notifyNewDeliveryOrder" added. Best-effort (non-blocking).
@@ -23174,19 +23177,26 @@ function handleSyncTemplatesToClients_() {
  * POST notifyNewDeliveryOrder — Send ORDER_REVIEW_REQUEST email to staff when
  * a client submits a new delivery order. Best-effort — never blocks the caller.
  *
- * Payload: { orderNumber, orderType, clientName, contactName, contactAddress,
+ * Payload: { orderNumber, linkedOrderNumber?, orderType, clientName,
+ *            contactName, contactAddress, pickupContactName?, pickupAddress?,
  *            serviceDate, itemCount, orderTotal, submittedBy }
+ *
+ * For pickup_and_delivery orders, linkedOrderNumber = pickup order #,
+ * pickupContactName + pickupAddress contain the origin leg details.
  */
 function handleNotifyNewDeliveryOrder_(payload) {
-  var orderNumber     = String(payload.orderNumber     || "").trim();
-  var orderType       = String(payload.orderType       || "delivery").trim();
-  var clientName      = String(payload.clientName      || "").trim();
-  var contactName     = String(payload.contactName     || "").trim();
-  var contactAddress  = String(payload.contactAddress  || "").trim();
-  var serviceDate     = String(payload.serviceDate     || "").trim();
-  var itemCount       = String(payload.itemCount       || "").trim();
-  var orderTotal      = String(payload.orderTotal      || "").trim();
-  var submittedBy     = String(payload.submittedBy     || "").trim();
+  var orderNumber         = String(payload.orderNumber         || "").trim();
+  var linkedOrderNumber   = String(payload.linkedOrderNumber   || "").trim();
+  var orderType           = String(payload.orderType           || "delivery").trim();
+  var clientName          = String(payload.clientName          || "").trim();
+  var contactName         = String(payload.contactName         || "").trim();
+  var contactAddress      = String(payload.contactAddress      || "").trim();
+  var pickupContactName   = String(payload.pickupContactName   || "").trim();
+  var pickupAddress       = String(payload.pickupAddress       || "").trim();
+  var serviceDate         = String(payload.serviceDate         || "").trim();
+  var itemCount           = String(payload.itemCount           || "").trim();
+  var orderTotal          = String(payload.orderTotal          || "").trim();
+  var submittedBy         = String(payload.submittedBy         || "").trim();
 
   // Read CB-level settings for NOTIFICATION_EMAILS + MASTER_SPREADSHEET_ID
   var cbId = prop_("CB_SPREADSHEET_ID");
@@ -23220,17 +23230,29 @@ function handleNotifyNewDeliveryOrder_(payload) {
                        : orderType === "pickup"              ? "Pickup"
                        : "Delivery";
 
+  // For P+D: show linked order number and pickup origin in the email
+  var linkedOrderLine = linkedOrderNumber
+    ? " (Pickup leg: " + linkedOrderNumber + ")"
+    : "";
+
+  var pickupSection = (orderType === "pickup_and_delivery" && pickupAddress)
+    ? "\nPickup From: " + (pickupContactName ? pickupContactName + " — " : "") + pickupAddress
+    : "";
+
   var tokens = {
-    "{{ORDER_NUMBER}}":     orderNumber,
-    "{{ORDER_TYPE}}":       orderTypeDisplay,
-    "{{CLIENT_NAME}}":      clientName,
-    "{{CONTACT_NAME}}":     contactName,
-    "{{CONTACT_ADDRESS}}":  contactAddress,
-    "{{SERVICE_DATE}}":     serviceDate,
-    "{{ITEM_COUNT}}":       itemCount,
-    "{{ORDER_TOTAL}}":      orderTotal,
-    "{{SUBMITTED_BY}}":     submittedBy,
-    "{{REVIEW_LINK}}":      reviewLink
+    "{{ORDER_NUMBER}}":         orderNumber + linkedOrderLine,
+    "{{LINKED_ORDER_NUMBER}}":  linkedOrderNumber || "—",
+    "{{ORDER_TYPE}}":           orderTypeDisplay,
+    "{{CLIENT_NAME}}":          clientName,
+    "{{CONTACT_NAME}}":         contactName,
+    "{{CONTACT_ADDRESS}}":      contactAddress + pickupSection,
+    "{{PICKUP_CONTACT}}":       pickupContactName || "—",
+    "{{PICKUP_ADDRESS}}":       pickupAddress     || "—",
+    "{{SERVICE_DATE}}":         serviceDate,
+    "{{ITEM_COUNT}}":           itemCount,
+    "{{ORDER_TOTAL}}":          orderTotal,
+    "{{SUBMITTED_BY}}":         submittedBy,
+    "{{REVIEW_LINK}}":          reviewLink
   };
 
   // Minimal settings object for api_sendTemplateEmail_ (only needs MASTER_SPREADSHEET_ID

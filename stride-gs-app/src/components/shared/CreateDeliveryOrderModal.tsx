@@ -463,29 +463,32 @@ export function CreateDeliveryOrderModal({
           .update({ linked_order_id: deliveryRow.id })
           .eq('id', pickupRow.id);
 
-        // 4) Insert items. Free-text items go on BOTH orders (so the pickup
-        //    shows what's being picked up and the delivery shows the same
-        //    list). dt_order_items.inventory_id is NULL for free-text.
+        // 4) Insert items. Free-text items go on BOTH orders.
+        //    Pickup leg: prefix "PU: " + qty -1 (items inbound to warehouse).
+        //    Delivery leg: normal description + qty as entered.
         const pickupItemRows = pickupFreeItems
           .filter(i => i.description.trim())
-          .flatMap(i => [
-            {
-              dt_order_id: pickupRow.id,
-              dt_item_code: null,
-              description: i.description.trim(),
-              quantity: Math.max(1, Number(i.quantity) || 1),
-              original_quantity: Math.max(1, Number(i.quantity) || 1),
-              extras: { source: 'pickup_free_text' },
-            },
-            {
-              dt_order_id: deliveryRow.id,
-              dt_item_code: null,
-              description: i.description.trim(),
-              quantity: Math.max(1, Number(i.quantity) || 1),
-              original_quantity: Math.max(1, Number(i.quantity) || 1),
-              extras: { source: 'pickup_free_text', linked_to_pickup: pickupRow.id },
-            },
-          ]);
+          .flatMap(i => {
+            const qty = Math.max(1, Number(i.quantity) || 1);
+            return [
+              {
+                dt_order_id: pickupRow.id,
+                dt_item_code: null,
+                description: `PU: ${i.description.trim()}`,
+                quantity: -qty,
+                original_quantity: -qty,
+                extras: { source: 'pickup_free_text' },
+              },
+              {
+                dt_order_id: deliveryRow.id,
+                dt_item_code: null,
+                description: i.description.trim(),
+                quantity: qty,
+                original_quantity: qty,
+                extras: { source: 'pickup_free_text', linked_to_pickup: pickupRow.id },
+              },
+            ];
+          });
         if (pickupItemRows.length > 0) {
           const { error: iErr } = await supabase.from('dt_order_items').insert(pickupItemRows);
           if (iErr) throw new Error(`Items insert failed: ${iErr.message}`);
@@ -500,10 +503,13 @@ export function CreateDeliveryOrderModal({
         // Notify staff — best-effort, never block submit success
         apiFetch<void>('notifyNewDeliveryOrder', {
           orderNumber: deliveryRow.dt_identifier,
+          linkedOrderNumber: pickupRow.dt_identifier,
           orderType: 'pickup_and_delivery',
           clientName,
           contactName: deliveryContactName.trim(),
           contactAddress: `${deliveryAddress.trim()}, ${deliveryCity.trim()}, ${deliveryState} ${deliveryZip.trim()}`,
+          pickupContactName: pickupContactName.trim(),
+          pickupAddress: `${pickupAddress.trim()}, ${pickupCity.trim()}, ${pickupState} ${pickupZip.trim()}`,
           serviceDate,
           itemCount: String(pickupFreeItems.filter(i => i.description.trim()).length),
           orderTotal: orderTotal != null ? `$${orderTotal.toFixed(2)}` : 'Quote Required',
