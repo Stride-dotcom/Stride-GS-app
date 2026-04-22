@@ -102,66 +102,72 @@ GROUP BY m.conversation_id, mr.user_id
 ON CONFLICT DO NOTHING;
 
 -- 5. Backfill — direct message conversations --------------------------------
-
+--
 -- For DMs, the conversation key is the sorted set of participant uids.
--- We collapse on that signature so every message between {A, B} lands in
--- the same conversation row.
+-- We loop one signature at a time inside a DO block so the whole backfill
+-- runs in one execution context (TEMP TABLE didn't survive across
+-- statements in the Supabase SQL editor's transaction wrapping).
+DO $$
+DECLARE
+  rec RECORD;
+  v_conv_id UUID;
+BEGIN
+  FOR rec IN
+    SELECT
+      sig,
+      MAX(tenant_id) AS tenant_id,
+      MIN(created_at) AS first_at,
+      MAX(created_at) AS last_at,
+      CASE WHEN array_length(sig, 1) <= 2 THEN 'dm' ELSE 'group' END AS kind
+    FROM (
+      SELECT
+        m.id AS message_id,
+        m.tenant_id,
+        m.created_at,
+        (
+          SELECT array_agg(DISTINCT u ORDER BY u)
+          FROM unnest(
+            ARRAY[m.sender_id] || COALESCE(
+              (SELECT array_agg(mr.user_id) FROM public.message_recipients mr WHERE mr.message_id = m.id),
+              ARRAY[]::uuid[]
+            )
+          ) AS u
+          WHERE u IS NOT NULL
+        ) AS sig
+      FROM public.messages m
+      WHERE m.related_entity_type IS NULL
+        AND m.conversation_id IS NULL
+        AND m.sender_id IS NOT NULL
+    ) AS sig_per_msg
+    WHERE sig IS NOT NULL AND array_length(sig, 1) >= 1
+    GROUP BY sig
+  LOOP
+    INSERT INTO public.conversations (kind, tenant_id, created_at, last_message_at)
+    VALUES (rec.kind, rec.tenant_id, rec.first_at, rec.last_at)
+    RETURNING id INTO v_conv_id;
 
--- 5a. Compute participant signature per DM message.
-DROP TABLE IF EXISTS tmp_dm_msg_sigs;
-CREATE TEMP TABLE tmp_dm_msg_sigs AS
-SELECT
-  m.id AS message_id,
-  m.tenant_id,
-  m.created_at,
-  (
-    SELECT array_agg(DISTINCT u ORDER BY u)
-    FROM unnest(
-      ARRAY[m.sender_id] || COALESCE(
-        (SELECT array_agg(mr.user_id) FROM public.message_recipients mr WHERE mr.message_id = m.id),
-        ARRAY[]::uuid[]
-      )
-    ) AS u
-    WHERE u IS NOT NULL
-  ) AS sig
-FROM public.messages m
-WHERE m.related_entity_type IS NULL
-  AND m.conversation_id IS NULL
-  AND m.sender_id IS NOT NULL;
+    UPDATE public.messages m
+    SET conversation_id = v_conv_id
+    WHERE m.related_entity_type IS NULL
+      AND m.conversation_id IS NULL
+      AND m.sender_id IS NOT NULL
+      AND (
+        SELECT array_agg(DISTINCT u ORDER BY u)
+        FROM unnest(
+          ARRAY[m.sender_id] || COALESCE(
+            (SELECT array_agg(mr.user_id) FROM public.message_recipients mr WHERE mr.message_id = m.id),
+            ARRAY[]::uuid[]
+          )
+        ) AS u
+        WHERE u IS NOT NULL
+      ) = rec.sig;
 
--- 5b. Insert one conversation per unique signature.
-DROP TABLE IF EXISTS tmp_dm_groups;
-CREATE TEMP TABLE tmp_dm_groups AS
-SELECT
-  sig,
-  MAX(tenant_id) AS tenant_id,
-  MIN(created_at) AS first_at,
-  MAX(created_at) AS last_at,
-  CASE WHEN array_length(sig, 1) <= 2 THEN 'dm' ELSE 'group' END AS kind,
-  gen_random_uuid() AS new_id
-FROM tmp_dm_msg_sigs
-WHERE sig IS NOT NULL AND array_length(sig, 1) >= 1
-GROUP BY sig;
-
-INSERT INTO public.conversations (id, kind, tenant_id, created_at, last_message_at)
-SELECT new_id, kind, tenant_id, first_at, last_at FROM tmp_dm_groups;
-
--- 5c. Stamp conversation_id onto each DM message.
-UPDATE public.messages m
-SET conversation_id = g.new_id
-FROM tmp_dm_msg_sigs s
-JOIN tmp_dm_groups g ON g.sig = s.sig
-WHERE m.id = s.message_id AND m.conversation_id IS NULL;
-
--- 5d. Seed DM participants.
-INSERT INTO public.conversation_participants (conversation_id, user_id, joined_at)
-SELECT g.new_id, u, g.first_at
-FROM tmp_dm_groups g
-CROSS JOIN LATERAL unnest(g.sig) AS u
-ON CONFLICT DO NOTHING;
-
-DROP TABLE IF EXISTS tmp_dm_msg_sigs;
-DROP TABLE IF EXISTS tmp_dm_groups;
+    INSERT INTO public.conversation_participants (conversation_id, user_id, joined_at)
+    SELECT v_conv_id, u, rec.first_at
+    FROM unnest(rec.sig) AS u
+    ON CONFLICT DO NOTHING;
+  END LOOP;
+END $$;
 
 -- 6. RLS on conversations ----------------------------------------------------
 
