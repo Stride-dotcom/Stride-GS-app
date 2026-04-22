@@ -1,5 +1,5 @@
 /* ===================================================
-   WillCalls.gs — v4.5.0 — 2026-04-16 PST — Sidemark in WILL_CALL_CREATED / RELEASE emails
+   WillCalls.gs — v4.6.0 — 2026-04-22 PST — Fix sidemark+reference in items email table
    v4.5.0: WILL_CALL_CREATED + WILL_CALL_RELEASE now emit {{SIDEMARK}} +
            {{SIDEMARK_HEADER}} tokens. Distinct Sidemarks collected by joining
            WC items to Inventory via Item ID (comma-joined when multiple
@@ -363,7 +363,14 @@ function StrideCreateWillCallCallback(formData) {
     var allRecipWcc = mergeEmails_(notif, clientEmail);
     if (allRecipWcc) {
       var wccItems = items.map(function(it) {
-        return { itemId: it.itemId, description: it.description || "", itemClass: it.itemClass || "" };
+        return {
+          itemId: it.itemId,
+          description: it.description || "",
+          itemClass: it.itemClass || "",
+          vendor: it.vendor || "",
+          sidemark: it.sidemark || "",
+          reference: it.reference || ""
+        };
       });
       // v4.4.0 — collect distinct Sidemarks across WC items (from Inventory)
       var _wccSidemarks = "";
@@ -482,7 +489,8 @@ function StrideProcessRelease() {
       itemClass: String(wciData[wi][wciMap2["Class"] - 1] || "").trim(),
       description: String(wciData[wi][wciMap2["Description"] - 1] || "").trim(),
       location: wciMap2["Location"] ? String(wciData[wi][wciMap2["Location"] - 1] || "").trim() : "",
-      vendor: wciMap2["Vendor"] ? String(wciData[wi][wciMap2["Vendor"] - 1] || "").trim() : ""
+      vendor: wciMap2["Vendor"] ? String(wciData[wi][wciMap2["Vendor"] - 1] || "").trim() : "",
+      sidemark: wciMap2["Sidemark"] ? String(wciData[wi][wciMap2["Sidemark"] - 1] || "").trim() : ""
     });
   }
 
@@ -802,7 +810,7 @@ function StrideProcessReleaseCallback(selectedIndices) {
  *                            are backfilled from the Inventory sheet per Item ID.
  */
 function buildWcItemsEmailTable_(items, ss) {
-  // Build one-shot lookup from Inventory for vendor + reference backfill.
+  // Build one-shot lookup from Inventory for vendor + sidemark + reference backfill.
   var invLookup = {};
   try {
     if (ss) {
@@ -811,6 +819,7 @@ function buildWcItemsEmailTable_(items, ss) {
         var invMap = getHeaderMap_(invSh);
         var invItemCol = invMap["Item ID"];
         var invVendorCol = invMap["Vendor"];
+        var invSmCol = invMap["Sidemark"];
         var invRefCol = invMap["Reference"];
         if (invItemCol) {
           var invData = invSh.getRange(2, 1, invSh.getLastRow() - 1, invSh.getLastColumn()).getValues();
@@ -818,8 +827,9 @@ function buildWcItemsEmailTable_(items, ss) {
             var iid = String(invData[k][invItemCol - 1] || "").trim();
             if (!iid) continue;
             invLookup[iid] = {
-              vendor: invVendorCol ? String(invData[k][invVendorCol - 1] || "").trim() : "",
-              reference: invRefCol ? String(invData[k][invRefCol - 1] || "").trim() : ""
+              vendor:   invVendorCol ? String(invData[k][invVendorCol - 1] || "").trim() : "",
+              sidemark: invSmCol     ? String(invData[k][invSmCol - 1]     || "").trim() : "",
+              reference: invRefCol   ? String(invData[k][invRefCol - 1]    || "").trim() : ""
             };
           }
         }
@@ -834,18 +844,21 @@ function buildWcItemsEmailTable_(items, ss) {
       '<th style="' + thStyle + '">Item ID</th>' +
       '<th style="' + thStyle + '">Vendor</th>' +
       '<th style="' + thStyle + '">Description</th>' +
+      '<th style="' + thStyle + '">Sidemark</th>' +
       '<th style="' + thStyle + '">Reference</th>' +
     '</tr>';
   for (var i = 0; i < items.length; i++) {
     var it = items[i];
     var inv = invLookup[String(it.itemId || "").trim()] || {};
-    var vendor = it.vendor || inv.vendor || "";
+    var vendor    = it.vendor    || inv.vendor    || "";
+    var sidemark  = it.sidemark  || inv.sidemark  || "";
     var reference = it.reference || inv.reference || "";
     html += '<tr>' +
-      '<td style="' + tdStyle + 'font-weight:600;">' + esc_(it.itemId) + '</td>' +
-      '<td style="' + tdStyle + '">' + esc_(vendor) + '</td>' +
-      '<td style="' + tdStyle + '">' + esc_(it.description) + '</td>' +
-      '<td style="' + tdStyle + '">' + esc_(reference) + '</td>' +
+      '<td style="' + tdStyle + 'font-weight:600;">' + esc_(it.itemId)      + '</td>' +
+      '<td style="' + tdStyle + '">'                 + esc_(vendor)          + '</td>' +
+      '<td style="' + tdStyle + '">'                 + esc_(it.description)  + '</td>' +
+      '<td style="' + tdStyle + '">'                 + esc_(sidemark)        + '</td>' +
+      '<td style="' + tdStyle + '">'                 + esc_(reference)       + '</td>' +
       '</tr>';
   }
   html += '</table>';

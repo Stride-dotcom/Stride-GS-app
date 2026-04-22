@@ -91,14 +91,6 @@
       "notes": "Script ID could not be auto-detected — add manually"
     },
     {
-      "name": "Digs Furniture",
-      "spreadsheetId": "1XwlmHro_A1OR1YL3yUK4AV_Ppt4yqApHzRWxfoVIazM",
-      "scriptId": "1c_ZjzXBxenUM59PTX0e7clpgDXA1ofKLJJlCpN8wrdY-igNZRIaSYiGQ",
-      "webAppUrl": "https://script.google.com/macros/s/AKfycbzXCm4zf98ocB659AZt74Ndbz7FWMkXihPyv8HgXez9fRROaHn3YXLOgmOQbe0PdXzN/exec",
-      "group": "default",
-      "enabled": true
-    },
-    {
       "name": "E Cobb Architects",
       "spreadsheetId": "1irajxLTrlsMQxHnXKOvlw801DhDwUDoc0ZB3Rhe1IIQ",
       "scriptId": "10beFtRaPNeTU7Fp32Due-mt_qyNJ7qg5bX1FXY5gBxo3xeB9xNxdqy6s",
@@ -206,7 +198,7 @@
       "notes": "Script ID could not be auto-detected — add manually"
     },
     {
-      "name": "Mary Kennegott Design",
+      "name": "Mary Kenngott Design",
       "spreadsheetId": "1nC0afgfk5KFyPdoK82sxGZeG7kcsA3uRNUI_a2l0Lbg",
       "scriptId": "18f0X-Sxk2p5xxdhglsQEyGBAPM7CxVXufwVYLTPsOCRonyBKmeNCOkVQ",
       "webAppUrl": "https://script.google.com/macros/s/AKfycbw4QjriVVw6pXkinchvNaLyIMwcx4s0xMFl_cgNMFvf8KUKKAziUxokmiTXgBzPHR4H/exec",
@@ -218,7 +210,7 @@
       "name": "Master Inventory Template",
       "spreadsheetId": "1amA0P9CFJ5sZ-aBlcYAZ7v-gyw7JBzmOdzmfadb4Otc",
       "scriptId": "1Pk2Oc0u7RRgMs3sQs96brKDBFNA9vCyKOHZA9jMmk4gkD2yNdTGRlI5T",
-      "webAppUrl": "https://script.google.com/macros/s/AKfycbyQqdWNz3siyLQ8tEIN1LoOndFN8Jw6vXdkueG4DUovr1FEYC4ugmUR3kE1phGYM3d_tQ/exec",
+      "webAppUrl": "",
       "isTemplate": true,
       "group": "template",
       "enabled": true,
@@ -324,11 +316,19 @@
     {
       "name": "Roche Bobois - PDX",
       "spreadsheetId": "1kSC-N_1jj6NNIiP2a0leDdDRMaTuEYcc5U1ys970tak",
-      "scriptId": "SCRIPT_ID_NOT_FOUND",
-      "webAppUrl": "",
+      "scriptId": "1AVcDfgwfDSHTdsna5K75sE2gb7uCpf5fSGMgCaWDWBUeW_KuZGYOutqZ",
+      "webAppUrl": "https://script.google.com/macros/s/AKfycbwHmse66tevJbbUx0y1vS58xbS64OAmRxDf7nRt5hGWQ3URlbZMy11EKbxC3DccVpOB/exec",
       "group": "default",
-      "enabled": false,
+      "enabled": true,
       "notes": "Script ID could not be auto-detected — add manually"
+    },
+    {
+      "name": "DFG",
+      "spreadsheetId": "1N892t-7rM0vk4e4h8URlEbx_e96pIuBOnGKkF4DgO6I",
+      "scriptId": "1gqiSbn054I9chnKr9S7GL63az2-b7qZ0Mj5IqZsY1r244It_D2kXE8FJ",
+      "webAppUrl": "https://script.google.com/macros/s/AKfycbzsmvu0SICQT27AjiM7LwCJObohmDeJ7Z7UAQyC1gH-RFY1-Erx0GxE_WflEvHbj49MmQ/exec",
+      "group": "default",
+      "enabled": true
     },
     {
       "name": "Scott Ross - Personal",
@@ -454,6 +454,22 @@
       "group": "default",
       "enabled": true,
       "notes": "Script ID could not be auto-detected — add manually"
+    },
+    {
+      "name": "Digs Furniture",
+      "spreadsheetId": "1XwlmHro_A1OR1YL3yUK4AV_Ppt4yqApHzRWxfoVIazM",
+      "scriptId": "1c_ZjzXBxenUM59PTX0e7clpgDXA1ofKLJJlCpN8wrdY-igNZRIaSYiGQ",
+      "webAppUrl": "https://script.google.com/macros/s/AKfycbzXCm4zf98ocB659AZt74Ndbz7FWMkXihPyv8HgXez9fRROaHn3YXLOgmOQbe0PdXzN/exec",
+      "group": "default",
+      "enabled": true
+    },
+    {
+      "name": "Whitney Ford Design",
+      "spreadsheetId": "10kX7_OA0nQPLticOlh0WqXMb1IAMS6ShN2XH7Y6SJps",
+      "scriptId": "1bsQc7PSjSJM3pmbzE811Vu4160Tj48wzmccy9lJWoovoBM8DhM57IOdM",
+      "webAppUrl": "https://script.google.com/macros/s/AKfycbxxm7GaPhFCkUFQMoEdngBQAINEViDMNUmSWmV472gkXAMKG87Hv88WwAX_lKLh10kA5Q/exec",
+      "group": "default",
+      "enabled": true
     }
   ]
 }
