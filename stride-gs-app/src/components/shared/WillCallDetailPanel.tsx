@@ -10,7 +10,7 @@ import { theme } from '../../styles/theme';
 import { fmtDate } from '../../lib/constants';
 import { WriteButton } from './WriteButton';
 import { ProcessingOverlay } from './ProcessingOverlay';
-import { postProcessWcRelease, postCancelWillCall, postRemoveItemsFromWillCall, postUpdateWillCall, postGenerateWcDoc, fetchWcDocUrl, fetchWillCallById, isApiConfigured } from '../../lib/api';
+import { postProcessWcRelease, postCancelWillCall, postRemoveItemsFromWillCall, postUpdateWillCall, postGenerateWcDoc, postReopenWillCall, fetchWcDocUrl, fetchWillCallById, isApiConfigured } from '../../lib/api';
 import { fetchWcItemsFromSupabase } from '../../lib/supabaseQueries';
 import { useClients } from '../../hooks/useClients';
 import { writeSyncFailed } from '../../lib/syncEvents';
@@ -53,6 +53,9 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
   // Clients are not allowed to release items or set release dates — that
   // decision belongs to warehouse staff. Gate every Release-related action.
   const canRelease = user?.role === 'admin' || user?.role === 'staff';
+  // Stage B — reopen (undo Release or undo Start)
+  const [reopenLoading, setReopenLoading] = useState(false);
+  const [reopenError, setReopenError] = useState<string | null>(null);
   const { isMobile } = useIsMobile();
   const [overflowOpen, setOverflowOpen] = useState(false);
   // v2026-04-22 — panel frame (backdrop, resize, header) is provided by
@@ -234,6 +237,34 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
     setIsEditing(false);
     setEditSaveError(null);
   }, []);
+
+  const handleReopenWc = useCallback(async () => {
+    if (!apiConfigured || !clientSheetId || !wc.wcNumber) return;
+    const cur = effectiveStatus || wc.status || '';
+    let confirmMsg = '';
+    if (cur === 'Released' || cur === 'Partial') {
+      confirmMsg = 'Reopen this Will Call?\n\nThis will:\n  • revert status to Scheduled\n  • flip released items back to Scheduled on WC_Items\n  • void any Unbilled WC billing row for this WC\n  • clear Actual Pickup Date\n\nBlocked if billing already invoiced.';
+    } else if (cur === 'Scheduled') {
+      confirmMsg = 'Reopen this Will Call?\n\nReverts status to Pending. No billing impact.';
+    } else {
+      return;
+    }
+    const reason = window.prompt(confirmMsg + '\n\nReason (optional):');
+    if (reason === null) return;
+    setReopenLoading(true);
+    setReopenError(null);
+    try {
+      const resp = await postReopenWillCall({ wcNumber: wc.wcNumber, reason: reason || '' }, clientSheetId);
+      if (resp.ok && resp.data?.success) {
+        onWcUpdated?.();
+      } else {
+        setReopenError(resp.data?.error || resp.error || 'Failed to reopen');
+      }
+    } catch {
+      setReopenError('Network error — please try again');
+    }
+    setReopenLoading(false);
+  }, [apiConfigured, clientSheetId, wc.wcNumber, wc.status, effectiveStatus, onWcUpdated]);
 
   const handleEditSave = useCallback(async () => {
     if (!apiConfigured || !clientSheetId || !wc.wcNumber) return;
@@ -995,6 +1026,21 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
                 style={{ width: '100%', padding: '10px', fontSize: 13, background: '#7C3AED', opacity: genDocLoading ? 0.7 : 1 }}
                 onClick={handleGenerateWcDoc}
               />
+            </div>
+          )}
+          {/* Stage B: Reopen link (admin/staff only, visible on Scheduled/Partial/Released) */}
+          {canRelease && (effectiveStatus === 'Released' || effectiveStatus === 'Partial' || effectiveStatus === 'Scheduled') && (
+            <div style={{ marginBottom: 10, textAlign: 'center' }}>
+              {reopenError && (
+                <div style={{ fontSize: 11, color: '#DC2626', marginBottom: 6, padding: '4px 8px', background: '#FEF2F2', borderRadius: 6 }}>{reopenError}</div>
+              )}
+              <button
+                onClick={handleReopenWc}
+                disabled={reopenLoading}
+                style={{ fontSize: 11, color: '#DC2626', background: 'none', border: 'none', cursor: reopenLoading ? 'wait' : 'pointer', textDecoration: 'underline', padding: '2px 0', fontFamily: 'inherit' }}
+              >
+                {reopenLoading ? 'Reopening…' : (effectiveStatus === 'Scheduled' ? 'Reopen will call (undo Start)...' : 'Reopen will call (undo Release)...')}
+              </button>
             </div>
           )}
           {isActive && !releaseResult && genDocResult && (

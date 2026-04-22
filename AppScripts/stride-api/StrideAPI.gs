@@ -1,5 +1,28 @@
 /* ===================================================
-   StrideAPI.gs — v38.103.0 — 2026-04-22 PST — correctTaskResult endpoint
+   StrideAPI.gs — v38.104.0 — 2026-04-22 PST — Stage B status undo + repair result corrector
+   v38.104.0: FEAT — reopen handlers for accidental Start/Complete reversal
+              (Task/Repair/WillCall) + correctRepairResult mirror of the
+              other builder's correctTaskResult endpoint.
+                handleReopenTask_ / handleReopenRepair_ / handleReopenWillCall_
+                  - Completed → reverts status + voids all Unbilled billing rows
+                    tied to the entity (api_voidBillingRowsWhere_ helper).
+                    BILLING_LOCKED if any billing row past Unbilled.
+                  - In Progress → clears start timestamps + reverts to Open/
+                    Approved/Pending. No billing impact.
+                  - Released/Partial WC → voids WC billing (Svc Code=WC +
+                    Shipment#=wcNum), flips WC_Items Released → Scheduled.
+                  - LockService-gated. admin|staff only via withClientIsolation_.
+                handleCorrectRepairResult_
+                  - Inline Pass/Fail correction on Completed repairs. No
+                    billing impact. (Email resend skipped for repairs —
+                    surgical vs. Task corrector which re-sends.)
+                Router cases: reopenTask, reopenRepair, reopenWillCall,
+                correctRepairResult. All audit-logged.
+   StrideAPI.gs — v38.103.0 — 2026-04-22 PST — Stage A mirror drift + correctTaskResult
+              (Stage A shipments/will_calls/repairs mirror fields + new
+               will_call_items table; + other builder's correctTaskResult
+               endpoint with email resend.)
+   StrideAPI.gs — v38.102.0 — 2026-04-22 PST — Tier 1 inventory mirror drift fix
    v38.102.0: FIX — sbInventoryRow_ now mirrors 3 fields that handleGetInventory_
               returns but the mirror silently dropped: shipment_folder_url
               (per-row Drive folder URL from Inventory Shipment # cell hyperlink),
@@ -4592,6 +4615,37 @@ function doPost(e) {
           api_notifySupabase_(r, { tenant_id: effectiveId, entity_type: "task", entity_id: String(payload.taskId || ""), action_type: "correct_task_result", requested_by: callerEmail, request_id: String(payload.requestId || "") });
           api_writeThrough_(r, "task", effectiveId, String(payload.taskId || ""));
           api_auditLog_("task", String(payload.taskId || ""), effectiveId, "correct_result", { result: { new: String(payload.newResult || "") } }, callerEmail);
+          return r;
+        });
+
+      // Stage B — repair result corrector + reopen handlers
+      case "correctRepairResult":
+        return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
+          var r = handleCorrectRepairResult_(effectiveId, payload);
+          invalidateClientCache_(effectiveId);
+          api_writeThrough_(r, "repair", effectiveId, String(payload.repairId || ""));
+          api_auditLog_("repair", String(payload.repairId || ""), effectiveId, "correct_result", { result: { new: String(payload.newResult || payload.repairResult || "") } }, callerEmail);
+          return r;
+        });
+      case "reopenTask":
+        return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
+          var r = handleReopenTask_(effectiveId, payload, callerEmail);
+          invalidateClientCache_(effectiveId);
+          api_auditLog_("task", String(payload.taskId || ""), effectiveId, "reopen", { reason: String(payload.reason || "").substring(0, 200) }, callerEmail);
+          return r;
+        });
+      case "reopenRepair":
+        return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
+          var r = handleReopenRepair_(effectiveId, payload, callerEmail);
+          invalidateClientCache_(effectiveId);
+          api_auditLog_("repair", String(payload.repairId || ""), effectiveId, "reopen", { reason: String(payload.reason || "").substring(0, 200) }, callerEmail);
+          return r;
+        });
+      case "reopenWillCall":
+        return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
+          var r = handleReopenWillCall_(effectiveId, payload, callerEmail);
+          invalidateClientCache_(effectiveId);
+          api_auditLog_("will_call", String(payload.wcNumber || ""), effectiveId, "reopen", { reason: String(payload.reason || "").substring(0, 200) }, callerEmail);
           return r;
         });
 
@@ -21234,6 +21288,259 @@ function handleCorrectTaskResult_(clientSheetId, payload) {
   } catch (err) {
     return errorResponse_("Failed to correct task result: " + String(err), "SERVER_ERROR");
   }
+}
+
+// ─── correctRepairResult — change Pass/Fail on a completed repair ────────────
+// Stage B companion to handleCorrectTaskResult_. Same contract: only works on
+// Completed/Complete repairs, updates Repair Result in place, no billing impact
+// (result label only). Email resend intentionally skipped — keep this surgical.
+
+function handleCorrectRepairResult_(clientSheetId, payload) {
+  var repairId   = String((payload || {}).repairId     || "").trim();
+  var newResult  = String((payload || {}).newResult    || (payload || {}).repairResult || "").trim();
+
+  if (!repairId)  return errorResponse_("repairId is required", "INVALID_PARAMS");
+  if (newResult !== "Pass" && newResult !== "Fail")
+                  return errorResponse_("newResult must be 'Pass' or 'Fail'", "INVALID_PARAMS");
+
+  try {
+    var ss = SpreadsheetApp.openById(clientSheetId);
+    var sheet = ss.getSheetByName("Repairs");
+    if (!sheet) return errorResponse_("Repairs sheet not found", "SHEET_NOT_FOUND");
+
+    var repMap = api_getHeaderMap_(sheet);
+    var idCol  = repMap["Repair ID"];
+    if (!idCol) return errorResponse_("Repair ID column not found", "SCHEMA_ERROR");
+
+    var repairRow = api_findRowById_(sheet, idCol, repairId);
+    if (repairRow < 2) return errorResponse_("Repair not found: " + repairId, "NOT_FOUND");
+
+    var rowData = sheet.getRange(repairRow, 1, 1, sheet.getLastColumn()).getValues()[0];
+    function gv(h) { return repMap[h] ? String(rowData[repMap[h] - 1] || "").trim() : ""; }
+
+    var currentStatus = gv("Status");
+    if (currentStatus !== "Completed" && currentStatus !== "Complete")
+      return errorResponse_("Can only correct result for Completed repairs (current: " + currentStatus + ")", "INVALID_STATUS");
+
+    var resultCol = repMap["Repair Result"];
+    if (!resultCol) return errorResponse_("Repair Result column not found — run update-headers first", "SCHEMA_ERROR");
+
+    var currentResult = gv("Repair Result");
+    if (currentResult === newResult)
+      return jsonResponse_({ success: true, repairId: repairId, skipped: true, message: "Result is already " + newResult });
+
+    sheet.getRange(repairRow, resultCol).setValue(newResult);
+    return jsonResponse_({ success: true, repairId: repairId, newResult: newResult, previousResult: currentResult });
+  } catch (err) {
+    return errorResponse_("Failed to correct repair result: " + String(err), "SERVER_ERROR");
+  }
+}
+
+// ─── Stage B reopen helpers — undo accidental Start / Complete ───────────────
+// Shared contract for Task/Repair/WillCall:
+//   - Reopen from Complete → voids ALL Unbilled billing rows linked to the
+//     entity (via Ledger Row ID anchor or Task/Repair ID columns). BILLING_LOCKED
+//     error if any row has advanced past Unbilled — operator must handle the
+//     invoice-side cleanup manually.
+//   - Reopen from Start/In Progress → reverts status, clears start timestamps.
+//     No billing impact (Start is billing-neutral).
+//   - Released/Partial WC → voids WC billing rows (Svc Code=WC + Shipment#=wcNum,
+//     the only anchor since WC billing rows lack a per-row Ledger Row ID),
+//     flips WC_Items Released → Scheduled, reverts WC status.
+
+function api_voidBillingRowsWhere_(ss, predicate, reason) {
+  var sheet = ss.getSheetByName("Billing_Ledger");
+  var out = { voided: [], blocked: [] };
+  if (!sheet) return out;
+  var lastRow = api_getLastDataRow_(sheet);
+  if (lastRow < 2) return out;
+  var hMap = api_getHeaderMap_(sheet);
+  var statusCol = hMap["Status"];
+  var notesCol  = hMap["Item Notes"];
+  var idCol     = hMap["Ledger Row ID"];
+  if (!statusCol) return out;
+  var numRows = lastRow - 1;
+  var values = sheet.getRange(2, 1, numRows, sheet.getLastColumn()).getValues();
+  var headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  for (var i = 0; i < values.length; i++) {
+    var row = {};
+    for (var h = 0; h < headers.length; h++) row[String(headers[h] || "")] = values[i][h];
+    if (!predicate(row)) continue;
+    var currentStatus = String(row["Status"] || "").trim();
+    var ledgerId = idCol ? String(row["Ledger Row ID"] || "").trim() : "";
+    if (currentStatus !== "Unbilled") {
+      out.blocked.push({ ledgerRowId: ledgerId, status: currentStatus });
+      continue;
+    }
+    sheet.getRange(2 + i, statusCol).setValue("Void");
+    if (notesCol) {
+      var prevNotes = String(row["Item Notes"] || "");
+      var stamped = "[Voided " + new Date().toISOString().slice(0, 10) + ": " + String(reason || "reopen").substring(0, 120) + "]";
+      sheet.getRange(2 + i, notesCol).setValue(prevNotes ? (prevNotes + " " + stamped) : stamped);
+    }
+    out.voided.push(ledgerId || ("row" + (i + 2)));
+  }
+  return out;
+}
+
+function handleReopenTask_(clientSheetId, payload, callerEmail) {
+  var taskId = String((payload || {}).taskId || "").trim();
+  var reason = String((payload || {}).reason || "").trim();
+  if (!taskId) return errorResponse_("taskId required", "INVALID_PARAMS");
+  var lock = LockService.getScriptLock();
+  try { lock.waitLock(15000); } catch (e) { return errorResponse_("Could not acquire lock", "LOCK_ERROR"); }
+  try {
+    var ss = SpreadsheetApp.openById(clientSheetId);
+    var sheet = ss.getSheetByName("Tasks");
+    if (!sheet) return errorResponse_("Tasks sheet not found", "SCHEMA_ERROR");
+    var hMap = api_getHeaderMap_(sheet);
+    var idCol = hMap["Task ID"];
+    if (!idCol) return errorResponse_("Task ID column not found", "SCHEMA_ERROR");
+    var taskRow = api_findRowById_(sheet, idCol, taskId);
+    if (taskRow < 2) return errorResponse_("Task not found: " + taskId, "NOT_FOUND");
+    var rowData = sheet.getRange(taskRow, 1, 1, sheet.getLastColumn()).getValues()[0];
+    var status = hMap["Status"] ? String(rowData[hMap["Status"] - 1] || "").trim() : "";
+
+    var updates;
+    var newStatus;
+    var voidResult = { voided: [], blocked: [] };
+    if (status === "Completed") {
+      voidResult = api_voidBillingRowsWhere_(ss, function(b) {
+        return String(b["Task ID"] || "").trim() === taskId;
+      }, "Task " + taskId + " reopened by " + (callerEmail || "?") + (reason ? ": " + reason : ""));
+      if (voidResult.blocked.length > 0) {
+        return errorResponse_("Cannot reopen — " + voidResult.blocked.length + " billing row(s) already past Unbilled (" + voidResult.blocked.map(function(b){return b.status;}).join(", ") + "). Void the invoice first.", "BILLING_LOCKED");
+      }
+      newStatus = "In Progress";
+      updates = { "Status": newStatus, "Completed At": "", "Result": "", "Completion Processed At": "" };
+    } else if (status === "In Progress") {
+      newStatus = "Open";
+      updates = { "Status": newStatus, "Started At": "", "Assigned To": "" };
+    } else {
+      return errorResponse_("Task status '" + status + "' cannot be reopened (only Completed or In Progress)", "INVALID_STATE");
+    }
+
+    for (var k in updates) {
+      if (hMap[k]) sheet.getRange(taskRow, hMap[k]).setValue(updates[k]);
+    }
+    invalidateClientCache_(clientSheetId);
+    try { api_fullClientSync_(clientSheetId, ["task", "billing"]); } catch (_) {}
+    return jsonResponse_({ success: true, newStatus: newStatus, voidedBillingRows: voidResult.voided });
+  } finally { try { lock.releaseLock(); } catch (_) {} }
+}
+
+function handleReopenRepair_(clientSheetId, payload, callerEmail) {
+  var repairId = String((payload || {}).repairId || "").trim();
+  var reason = String((payload || {}).reason || "").trim();
+  if (!repairId) return errorResponse_("repairId required", "INVALID_PARAMS");
+  var lock = LockService.getScriptLock();
+  try { lock.waitLock(15000); } catch (e) { return errorResponse_("Could not acquire lock", "LOCK_ERROR"); }
+  try {
+    var ss = SpreadsheetApp.openById(clientSheetId);
+    var sheet = ss.getSheetByName("Repairs");
+    if (!sheet) return errorResponse_("Repairs sheet not found", "SCHEMA_ERROR");
+    var hMap = api_getHeaderMap_(sheet);
+    var idCol = hMap["Repair ID"];
+    if (!idCol) return errorResponse_("Repair ID column not found", "SCHEMA_ERROR");
+    var repairRow = api_findRowById_(sheet, idCol, repairId);
+    if (repairRow < 2) return errorResponse_("Repair not found: " + repairId, "NOT_FOUND");
+    var rowData = sheet.getRange(repairRow, 1, 1, sheet.getLastColumn()).getValues()[0];
+    var status = hMap["Status"] ? String(rowData[hMap["Status"] - 1] || "").trim() : "";
+
+    var updates;
+    var newStatus;
+    var voidResult = { voided: [], blocked: [] };
+    if (status === "Completed" || status === "Complete") {
+      voidResult = api_voidBillingRowsWhere_(ss, function(b) {
+        return String(b["Repair ID"] || "").trim() === repairId;
+      }, "Repair " + repairId + " reopened by " + (callerEmail || "?") + (reason ? ": " + reason : ""));
+      if (voidResult.blocked.length > 0) {
+        return errorResponse_("Cannot reopen — " + voidResult.blocked.length + " billing row(s) already past Unbilled. Void the invoice first.", "BILLING_LOCKED");
+      }
+      newStatus = "In Progress";
+      updates = { "Status": newStatus, "Completed Date": "", "Repair Result": "", "Completion Processed At": "" };
+    } else if (status === "In Progress") {
+      newStatus = "Approved";
+      updates = { "Status": newStatus, "Start Date": "" };
+    } else {
+      return errorResponse_("Repair status '" + status + "' cannot be reopened (only Completed or In Progress)", "INVALID_STATE");
+    }
+
+    for (var k in updates) {
+      if (hMap[k]) sheet.getRange(repairRow, hMap[k]).setValue(updates[k]);
+    }
+    invalidateClientCache_(clientSheetId);
+    try { api_fullClientSync_(clientSheetId, ["repair", "billing"]); } catch (_) {}
+    return jsonResponse_({ success: true, newStatus: newStatus, voidedBillingRows: voidResult.voided });
+  } finally { try { lock.releaseLock(); } catch (_) {} }
+}
+
+function handleReopenWillCall_(clientSheetId, payload, callerEmail) {
+  var wcNumber = String((payload || {}).wcNumber || "").trim();
+  var reason = String((payload || {}).reason || "").trim();
+  if (!wcNumber) return errorResponse_("wcNumber required", "INVALID_PARAMS");
+  var lock = LockService.getScriptLock();
+  try { lock.waitLock(15000); } catch (e) { return errorResponse_("Could not acquire lock", "LOCK_ERROR"); }
+  try {
+    var ss = SpreadsheetApp.openById(clientSheetId);
+    var sheet = ss.getSheetByName("Will_Calls");
+    if (!sheet) return errorResponse_("Will_Calls sheet not found", "SCHEMA_ERROR");
+    var hMap = api_getHeaderMap_(sheet);
+    var idCol = hMap["WC Number"];
+    if (!idCol) return errorResponse_("WC Number column not found", "SCHEMA_ERROR");
+    var wcRow = api_findRowById_(sheet, idCol, wcNumber);
+    if (wcRow < 2) return errorResponse_("Will Call not found: " + wcNumber, "NOT_FOUND");
+    var rowData = sheet.getRange(wcRow, 1, 1, sheet.getLastColumn()).getValues()[0];
+    var status = hMap["Status"] ? String(rowData[hMap["Status"] - 1] || "").trim() : "";
+
+    var updates;
+    var newStatus;
+    var voidResult = { voided: [], blocked: [] };
+    if (status === "Released" || status === "Partial") {
+      voidResult = api_voidBillingRowsWhere_(ss, function(b) {
+        return String(b["Svc Code"] || "").trim().toUpperCase() === "WC" &&
+               String(b["Shipment #"] || "").trim() === wcNumber;
+      }, "WC " + wcNumber + " reopened by " + (callerEmail || "?") + (reason ? ": " + reason : ""));
+      if (voidResult.blocked.length > 0) {
+        return errorResponse_("Cannot reopen — " + voidResult.blocked.length + " billing row(s) already past Unbilled. Void the invoice first.", "BILLING_LOCKED");
+      }
+      // Flip Released WC_Items rows back to Scheduled
+      var wciSheet = ss.getSheetByName("WC_Items");
+      if (wciSheet) {
+        var wciHMap = api_getHeaderMap_(wciSheet);
+        var wciStatusCol = wciHMap["Status"];
+        var wciWcCol = wciHMap["WC Number"];
+        var wciLast = api_getLastDataRow_(wciSheet);
+        if (wciStatusCol && wciWcCol && wciLast >= 2) {
+          var wciNum = wciLast - 1;
+          var wciHeaders = wciSheet.getRange(1, 1, 1, wciSheet.getLastColumn()).getValues()[0];
+          var wciVals = wciSheet.getRange(2, 1, wciNum, wciSheet.getLastColumn()).getValues();
+          for (var wi = 0; wi < wciVals.length; wi++) {
+            var wciObj = {};
+            for (var wh = 0; wh < wciHeaders.length; wh++) wciObj[String(wciHeaders[wh] || "")] = wciVals[wi][wh];
+            if (String(wciObj["WC Number"] || "").trim() !== wcNumber) continue;
+            if (String(wciObj["Status"] || "").trim() === "Released") {
+              wciSheet.getRange(2 + wi, wciStatusCol).setValue("Scheduled");
+            }
+          }
+        }
+      }
+      newStatus = "Scheduled";
+      updates = { "Status": newStatus, "Actual Pickup Date": "" };
+    } else if (status === "Scheduled") {
+      newStatus = "Pending";
+      updates = { "Status": newStatus };
+    } else {
+      return errorResponse_("Will Call status '" + status + "' cannot be reopened (only Released, Partial, or Scheduled)", "INVALID_STATE");
+    }
+
+    for (var k in updates) {
+      if (hMap[k]) sheet.getRange(wcRow, hMap[k]).setValue(updates[k]);
+    }
+    invalidateClientCache_(clientSheetId);
+    try { api_fullClientSync_(clientSheetId, ["will_call", "inventory", "billing"]); } catch (_) {}
+    return jsonResponse_({ success: true, newStatus: newStatus, voidedBillingRows: voidResult.voided });
+  } finally { try { lock.releaseLock(); } catch (_) {} }
 }
 
 // ─── cancelRepair — set repair status to Cancelled (v28.9.0) ─────────────────

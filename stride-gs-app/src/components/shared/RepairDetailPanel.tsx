@@ -9,7 +9,7 @@ import { theme } from '../../styles/theme';
 import { fmtDate } from '../../lib/constants';
 import { WriteButton } from './WriteButton';
 import { ProcessingOverlay } from './ProcessingOverlay';
-import { postSendRepairQuote, postRespondToRepairQuote, postCompleteRepair, postStartRepair, postCancelRepair, postUpdateRepairNotes, isApiConfigured } from '../../lib/api';
+import { postSendRepairQuote, postRespondToRepairQuote, postCompleteRepair, postStartRepair, postCancelRepair, postUpdateRepairNotes, postReopenRepair, postCorrectRepairResult, isApiConfigured } from '../../lib/api';
 import { entityEvents } from '../../lib/entityEvents';
 import type { ApiRepair, SendRepairQuoteResponse, RespondToRepairQuoteResponse, CompleteRepairResponse, StartRepairResponse } from '../../lib/api';
 import { writeSyncFailed } from '../../lib/syncEvents';
@@ -89,6 +89,64 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
   const [savedRepairNotes, setSavedRepairNotes] = useState(repair.repairNotes || '');
   useEffect(() => { setSavedRepairNotes(repair.repairNotes || ''); }, [repair.repairNotes]);
   const notesDirty = repairNotes !== savedRepairNotes;
+
+  // ─── Stage B: Reopen + Result correction ────────────────────────────────
+  const canStaffEdit = user?.role === 'admin' || user?.role === 'staff';
+  const [reopenLoading, setReopenLoading] = useState(false);
+  const [reopenError, setReopenError] = useState<string | null>(null);
+  const [showCorrectRepairResult, setShowCorrectRepairResult] = useState(false);
+  const [correctRepairResultLoading, setCorrectRepairResultLoading] = useState(false);
+  const [correctRepairResultError, setCorrectRepairResultError] = useState<string | null>(null);
+  const [correctedRepairResult, setCorrectedRepairResult] = useState<'Pass' | 'Fail' | null>(null);
+
+  const handleReopenRepairClick = async () => {
+    if (!isApiConfigured() || !repair.clientSheetId) return;
+    const cur = repair.status || '';
+    let confirmMsg = '';
+    if (cur === 'Completed' || cur === 'Complete') {
+      confirmMsg = 'Reopen this repair?\n\nThis will:\n  • revert status to In Progress\n  • void any Unbilled billing row created by Complete\n  • clear Repair Result + Completed Date\n\nBlocked if billing already invoiced.';
+    } else if (cur === 'In Progress') {
+      confirmMsg = 'Reopen this repair?\n\nReverts status to Approved and clears Start Date. No billing impact.';
+    } else {
+      return;
+    }
+    const reason = window.prompt(confirmMsg + '\n\nReason (optional):');
+    if (reason === null) return;
+    setReopenLoading(true);
+    setReopenError(null);
+    try {
+      const resp = await postReopenRepair({ repairId: repair.repairId, reason: reason || '' }, repair.clientSheetId);
+      if (resp.ok && resp.data?.success) {
+        onRepairUpdated?.();
+      } else {
+        setReopenError(resp.data?.error || resp.error || 'Failed to reopen repair');
+      }
+    } catch {
+      setReopenError('Network error — please try again');
+    }
+    setReopenLoading(false);
+  };
+
+  const handleCorrectRepairResultClick = async (newResult: 'Pass' | 'Fail') => {
+    if (!isApiConfigured() || !repair.clientSheetId) return;
+    setCorrectRepairResultLoading(true);
+    setCorrectRepairResultError(null);
+    try {
+      const resp = await postCorrectRepairResult({ repairId: repair.repairId, newResult }, repair.clientSheetId);
+      if (resp.ok && resp.data?.success) {
+        setCorrectedRepairResult(newResult);
+        setShowCorrectRepairResult(false);
+        onRepairUpdated?.();
+      } else {
+        setCorrectRepairResultError(resp.data?.error || resp.error || 'Failed to correct result');
+      }
+    } catch {
+      setCorrectRepairResultError('Network error — please try again');
+    }
+    setCorrectRepairResultLoading(false);
+  };
+
+  const currentRepairResultForWidget: string = correctedRepairResult || repair.repairResult || '';
 
   // ─── Edit mode for repair fields (Repair Tech, Scheduled Date, Start Date) ──
   const [isEditing, setIsEditing] = useState(false);
@@ -728,6 +786,63 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
         )}
 
         {/* Success card after Repair Complete / Failed */}
+        {/* Stage B — Reopen + Correct Result widgets (admin/staff only) */}
+        {canStaffEdit && (effectiveStatus === 'Completed' || effectiveStatus === 'Complete' || effectiveStatus === 'In Progress') && (
+          <div style={{ padding: '10px 20px 14px', borderTop: `1px solid ${theme.colors.border}`, flexShrink: 0 }}>
+            {reopenError && (
+              <div style={{ fontSize: 11, color: '#DC2626', marginBottom: 6, padding: '4px 8px', background: '#FEF2F2', borderRadius: 6 }}>{reopenError}</div>
+            )}
+            {(effectiveStatus === 'Completed' || effectiveStatus === 'Complete') && (
+              !showCorrectRepairResult ? (
+                <div style={{ textAlign: 'center', marginBottom: 6 }}>
+                  <button
+                    onClick={() => setShowCorrectRepairResult(true)}
+                    style={{ fontSize: 11, color: theme.colors.textMuted, background: 'none', border: 'none', cursor: 'pointer', textDecoration: 'underline', padding: '2px 0', fontFamily: 'inherit' }}
+                  >
+                    Correct result...
+                  </button>
+                </div>
+              ) : (
+                <div style={{ marginBottom: 8, paddingTop: 6 }}>
+                  <div style={{ fontSize: 11, color: theme.colors.textMuted, marginBottom: 6 }}>Change repair result:</div>
+                  {correctRepairResultError && (
+                    <div style={{ fontSize: 11, color: '#DC2626', marginBottom: 6, padding: '4px 8px', background: '#FEF2F2', borderRadius: 6 }}>{correctRepairResultError}</div>
+                  )}
+                  <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                    <button
+                      onClick={() => { if (!correctRepairResultLoading && currentRepairResultForWidget !== 'Pass') handleCorrectRepairResultClick('Pass'); }}
+                      disabled={correctRepairResultLoading || currentRepairResultForWidget === 'Pass'}
+                      style={{ flex: 1, padding: '7px', fontSize: 12, fontWeight: 600, borderRadius: 8, border: 'none', background: currentRepairResultForWidget === 'Pass' ? '#D1FAE5' : '#16A34A', color: currentRepairResultForWidget === 'Pass' ? '#6B7280' : '#fff', cursor: correctRepairResultLoading || currentRepairResultForWidget === 'Pass' ? 'not-allowed' : 'pointer', fontFamily: 'inherit', opacity: currentRepairResultForWidget === 'Pass' ? 0.55 : 1 }}
+                    >
+                      {correctRepairResultLoading && currentRepairResultForWidget !== 'Pass' ? <Loader2 size={12} style={{ animation: 'spin 1s linear infinite', verticalAlign: 'middle' }} /> : '✓'} Pass
+                    </button>
+                    <button
+                      onClick={() => { if (!correctRepairResultLoading && currentRepairResultForWidget !== 'Fail') handleCorrectRepairResultClick('Fail'); }}
+                      disabled={correctRepairResultLoading || currentRepairResultForWidget === 'Fail'}
+                      style={{ flex: 1, padding: '7px', fontSize: 12, fontWeight: 600, borderRadius: 8, border: '2px solid #DC2626', background: currentRepairResultForWidget === 'Fail' ? '#FEF2F2' : 'transparent', color: currentRepairResultForWidget === 'Fail' ? '#6B7280' : '#DC2626', cursor: correctRepairResultLoading || currentRepairResultForWidget === 'Fail' ? 'not-allowed' : 'pointer', fontFamily: 'inherit', opacity: currentRepairResultForWidget === 'Fail' ? 0.55 : 1 }}
+                    >
+                      {correctRepairResultLoading && currentRepairResultForWidget !== 'Fail' ? <Loader2 size={12} style={{ animation: 'spin 1s linear infinite', verticalAlign: 'middle' }} /> : '✕'} Fail
+                    </button>
+                    <button
+                      onClick={() => { setShowCorrectRepairResult(false); setCorrectRepairResultError(null); }}
+                      style={{ padding: '7px 10px', fontSize: 12, background: 'none', border: `1px solid ${theme.colors.border}`, borderRadius: 8, color: theme.colors.textMuted, cursor: 'pointer', fontFamily: 'inherit' }}
+                    >Cancel</button>
+                  </div>
+                </div>
+              )
+            )}
+            <div style={{ textAlign: 'center' }}>
+              <button
+                onClick={handleReopenRepairClick}
+                disabled={reopenLoading}
+                style={{ fontSize: 11, color: '#DC2626', background: 'none', border: 'none', cursor: reopenLoading ? 'wait' : 'pointer', textDecoration: 'underline', padding: '2px 0', fontFamily: 'inherit' }}
+              >
+                {reopenLoading ? 'Reopening…' : (effectiveStatus === 'In Progress' ? 'Reopen repair (undo Start)...' : 'Reopen repair (undo Complete)...')}
+              </button>
+            </div>
+          </div>
+        )}
+
         {completeResult && completeResult.success && (
           <div style={{ padding: '14px 20px', borderTop: `1px solid ${theme.colors.border}`, flexShrink: 0 }}>
             <div style={{ padding: '12px 14px', background: completeResult.resultValue === 'Pass' ? '#F0FDF4' : '#FEF3C7', border: `1px solid ${completeResult.resultValue === 'Pass' ? '#86EFAC' : '#FDE68A'}`, borderRadius: 10, marginBottom: 10 }}>

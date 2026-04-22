@@ -2751,6 +2751,57 @@ export function postCorrectTaskResult(
   );
 }
 
+// ─── Stage B: Correct Repair Result ──────────────────────────────────────────
+export interface CorrectRepairResultPayload { repairId: string; newResult: 'Pass' | 'Fail'; }
+export interface CorrectRepairResultResponse { success: boolean; repairId: string; newResult?: string; previousResult?: string; skipped?: boolean; message?: string; error?: string; }
+
+export function postCorrectRepairResult(
+  payload: CorrectRepairResultPayload,
+  clientSheetId: string,
+  signal?: AbortSignal
+) {
+  return apiPost<CorrectRepairResultResponse>(
+    'correctRepairResult',
+    payload as unknown as Record<string, unknown>,
+    { clientSheetId },
+    { signal }
+  );
+}
+
+// ─── Stage B: Reopen (undo Start or Complete) ────────────────────────────────
+// Undo-Complete auto-voids all Unbilled billing rows linked to the entity.
+// If any billing row has advanced past Unbilled, server returns BILLING_LOCKED.
+export interface ReopenResponse {
+  success: boolean;
+  newStatus?: string;
+  voidedBillingRows?: string[];
+  error?: string;
+}
+
+export function postReopenTask(
+  payload: { taskId: string; reason?: string },
+  clientSheetId: string,
+  signal?: AbortSignal
+) {
+  return apiPost<ReopenResponse>('reopenTask', payload as unknown as Record<string, unknown>, { clientSheetId }, { signal });
+}
+
+export function postReopenRepair(
+  payload: { repairId: string; reason?: string },
+  clientSheetId: string,
+  signal?: AbortSignal
+) {
+  return apiPost<ReopenResponse>('reopenRepair', payload as unknown as Record<string, unknown>, { clientSheetId }, { signal });
+}
+
+export function postReopenWillCall(
+  payload: { wcNumber: string; reason?: string },
+  clientSheetId: string,
+  signal?: AbortSignal
+) {
+  return apiPost<ReopenResponse>('reopenWillCall', payload as unknown as Record<string, unknown>, { clientSheetId }, { signal });
+}
+
 // ─── Cancel Repair ────────────────────────────────────────────────────────────
 
 export interface CancelRepairPayload { repairId: string; }

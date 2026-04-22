@@ -9,7 +9,7 @@ import { buildDeepLink } from '../../lib/deepLinks';
 import { theme } from '../../styles/theme';
 import { fmtDate, fmtDateTime } from '../../lib/constants';
 import { WriteButton } from './WriteButton';
-import { postCompleteTask, postStartTask, postUpdateTaskNotes, postUpdateTaskCustomPrice, postRequestRepairQuote, postCancelTask, postCorrectTaskResult, postGenerateTaskWorkOrder, postUpdateInventoryItem, postUpdateTaskPriority, postUpdateTaskDueDate, isApiConfigured } from '../../lib/api';
+import { postCompleteTask, postStartTask, postUpdateTaskNotes, postUpdateTaskCustomPrice, postRequestRepairQuote, postCancelTask, postCorrectTaskResult, postReopenTask, postGenerateTaskWorkOrder, postUpdateInventoryItem, postUpdateTaskPriority, postUpdateTaskDueDate, isApiConfigured } from '../../lib/api';
 import { writeSyncFailed } from '../../lib/syncEvents';
 import { entityEvents } from '../../lib/entityEvents';
 import { useLocations } from '../../hooks/useLocations';
@@ -150,6 +150,11 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
   const [correctResultError, setCorrectResultError] = useState<string | null>(null);
   const [correctedResult, setCorrectedResult] = useState<'Pass' | 'Fail' | null>(null);
 
+  // Stage B — reopen (undo accidental Start or Complete)
+  const canReopen = user?.role === 'admin' || user?.role === 'staff';
+  const [reopenLoading, setReopenLoading] = useState(false);
+  const [reopenError, setReopenError] = useState<string | null>(null);
+
   const activeRepair = useMemo(() => {
     return itemRepairs.find((r: any) => {
       const s = String(r.status || '').trim();
@@ -182,6 +187,34 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
     }
     setCorrectResultLoading(false);
   }, [apiConfigured, clientSheetId, task.taskId, mergeTaskPatch, clearTaskPatch, onTaskUpdated]);
+
+  const handleReopen = useCallback(async () => {
+    if (!apiConfigured || !clientSheetId) return;
+    const currentStatus = task.status;
+    let confirmMsg = '';
+    if (currentStatus === 'Completed') {
+      confirmMsg = 'Reopen this task?\n\nThis will:\n  • revert status to In Progress\n  • void any Unbilled billing row created by the Complete action\n  • clear Result + Completed At\n\nBlocked if billing has already been invoiced.';
+    } else if (currentStatus === 'In Progress') {
+      confirmMsg = 'Reopen this task?\n\nThis will revert status to Open and clear Started At / Assigned To. No billing impact (Start never bills).';
+    } else {
+      return;
+    }
+    const reason = window.prompt(confirmMsg + '\n\nReason (optional):');
+    if (reason === null) return; // cancelled
+    setReopenLoading(true);
+    setReopenError(null);
+    try {
+      const resp = await postReopenTask({ taskId: task.taskId, reason: reason || '' }, clientSheetId);
+      if (resp.ok && resp.data?.success) {
+        onTaskUpdated?.();
+      } else {
+        setReopenError(resp.data?.error || resp.error || 'Failed to reopen task');
+      }
+    } catch {
+      setReopenError('Network error — please try again');
+    }
+    setReopenLoading(false);
+  }, [apiConfigured, clientSheetId, task.taskId, task.status, onTaskUpdated]);
 
   const handleRequestRepair = useCallback(async () => {
     if (!apiConfigured || !clientSheetId || !task.itemId) return;
@@ -513,6 +546,26 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
     setSubmitting(false);
   }, [apiConfigured, clientSheetId, task, applyTaskPatch, clearTaskPatch, onTaskUpdated, user]);
 
+  // ─── Stage B: Reopen link — admin/staff, Completed OR In Progress ───────────
+  const renderReopenLink = () => {
+    if (!canReopen) return null;
+    if (task.status !== 'Completed' && task.status !== 'In Progress') return null;
+    return (
+      <div style={{ marginTop: 6, textAlign: 'center' }}>
+        {reopenError && (
+          <div style={{ fontSize: 11, color: '#DC2626', marginBottom: 6, padding: '4px 8px', background: '#FEF2F2', borderRadius: 6 }}>{reopenError}</div>
+        )}
+        <button
+          onClick={handleReopen}
+          disabled={reopenLoading}
+          style={{ fontSize: 11, color: '#DC2626', background: 'none', border: 'none', cursor: reopenLoading ? 'wait' : 'pointer', textDecoration: 'underline', padding: '2px 0', fontFamily: 'inherit' }}
+        >
+          {reopenLoading ? 'Reopening…' : (task.status === 'Completed' ? 'Reopen task (undo Complete)...' : 'Reopen task (undo Start)...')}
+        </button>
+      </div>
+    );
+  };
+
   // ─── Correct-result widget (Fix 2) — admin/staff only, completed tasks ──────
   const currentResultForWidget = correctedResult || submitResult?.result || task.result;
   const renderCorrectResultWidget = () => {
@@ -630,6 +683,8 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
                   </span>
                 )}
               </div>
+              {/* Stage B — Reopen link (admin/staff only, visible on In Progress + Completed) */}
+              {renderReopenLink()}
             </div>
           )}
 
@@ -892,6 +947,7 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
             </span>
           </div>
           {renderCorrectResultWidget()}
+          {renderReopenLink()}
         </div>
       );
     }
@@ -1145,6 +1201,7 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
             </div>
           )}
           {renderCorrectResultWidget()}
+          {renderReopenLink()}
           <button onClick={onClose} style={{ width: '100%', marginTop: 8, padding: '10px', fontSize: 13, fontWeight: 600, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', fontFamily: 'inherit', color: theme.colors.textSecondary }}>Close</button>
         </div>
       )}
