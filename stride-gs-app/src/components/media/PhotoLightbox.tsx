@@ -10,6 +10,7 @@ import {
   X, ChevronLeft, ChevronRight, AlertTriangle, Wrench, Download, Trash2, Loader2,
 } from 'lucide-react';
 import type { Photo } from '../../hooks/usePhotos';
+import { useIsMobile } from '../../hooks/useIsMobile';
 
 interface Props {
   photos: Photo[];
@@ -49,9 +50,17 @@ export function PhotoLightbox({
 }: Props) {
   const [index, setIndex] = useState(Math.max(0, Math.min(startIndex, photos.length - 1)));
   const [busy, setBusy] = useState<string | null>(null);
+  // Optimistic flag overrides so the UI updates instantly on tap — before
+  // the Supabase refetch (1-3 s) propagates new props from the parent.
+  const [localFlags, setLocalFlags] = useState<Record<string, { needs_attention?: boolean; is_repair?: boolean }>>({});
   const touchStartX = useRef<number | null>(null);
+  const { isTablet } = useIsMobile();
 
   const photo = photos[index] || null;
+  // Effective flag values: local override takes precedence while the async
+  // refetch is in flight; once parent props arrive they'll match.
+  const effectiveNeedsAttention = photo ? (localFlags[photo.id]?.needs_attention ?? photo.needs_attention) : false;
+  const effectiveIsRepair = photo ? (localFlags[photo.id]?.is_repair ?? photo.is_repair) : false;
 
   const goPrev = useCallback(() => setIndex(i => (i > 0 ? i - 1 : i)), []);
   const goNext = useCallback(() => setIndex(i => (i < photos.length - 1 ? i + 1 : i)), [photos.length]);
@@ -135,7 +144,15 @@ export function PhotoLightbox({
         <img
           src={photo.storage_url || ''}
           alt={photo.file_name || 'Photo'}
-          style={{ maxWidth: '96vw', maxHeight: 'calc(100vh - 200px)', objectFit: 'contain', borderRadius: 8 }}
+          style={{
+            maxWidth: '96vw', maxHeight: 'calc(100vh - 200px)', objectFit: 'contain', borderRadius: 8,
+            boxShadow: effectiveNeedsAttention
+              ? `0 0 0 5px ${ATTENTION_RING}, 0 0 0 9px rgba(220,38,38,0.25)`
+              : effectiveIsRepair
+              ? `0 0 0 5px ${REPAIR_RING}, 0 0 0 9px rgba(124,58,237,0.25)`
+              : undefined,
+            transition: 'box-shadow 0.2s ease',
+          }}
         />
         {index < photos.length - 1 && (
           <button onClick={goNext} style={{ ...navBtn, right: 12 }} aria-label="Next">
@@ -162,36 +179,56 @@ export function PhotoLightbox({
             {/* Primary action removed in session 74. */}
             {onToggleAttention && (
               <ActionBtn
-                icon={<AlertTriangle size={13} />}
-                label={photo.needs_attention ? 'Clear Flag' : 'Flag Attention'}
+                icon={<AlertTriangle size={isTablet ? 15 : 13} />}
+                label={effectiveNeedsAttention ? 'Clear Flag' : 'Flag Attention'}
                 color={ATTENTION_RING}
-                active={photo.needs_attention}
+                active={effectiveNeedsAttention}
                 busy={busy === 'attention'}
-                onClick={() => runAction('attention', () => onToggleAttention(photo, !photo.needs_attention))}
+                tablet={isTablet}
+                onClick={() => {
+                  const next = !effectiveNeedsAttention;
+                  setLocalFlags(prev => ({ ...prev, [photo.id]: { ...prev[photo.id], needs_attention: next } }));
+                  void runAction('attention', async () => {
+                    const ok = await onToggleAttention(photo, next);
+                    if (!ok) setLocalFlags(prev => ({ ...prev, [photo.id]: { ...prev[photo.id], needs_attention: !next } }));
+                    return ok ?? false;
+                  });
+                }}
               />
             )}
             {onToggleRepair && (
               <ActionBtn
-                icon={<Wrench size={13} />}
-                label={photo.is_repair ? 'Clear Repair' : 'Mark Repair'}
+                icon={<Wrench size={isTablet ? 15 : 13} />}
+                label={effectiveIsRepair ? 'Clear Repair' : 'Mark Repair'}
                 color={REPAIR_RING}
-                active={photo.is_repair}
+                active={effectiveIsRepair}
                 busy={busy === 'repair'}
-                onClick={() => runAction('repair', () => onToggleRepair(photo, !photo.is_repair))}
+                tablet={isTablet}
+                onClick={() => {
+                  const next = !effectiveIsRepair;
+                  setLocalFlags(prev => ({ ...prev, [photo.id]: { ...prev[photo.id], is_repair: next } }));
+                  void runAction('repair', async () => {
+                    const ok = await onToggleRepair(photo, next);
+                    if (!ok) setLocalFlags(prev => ({ ...prev, [photo.id]: { ...prev[photo.id], is_repair: !next } }));
+                    return ok ?? false;
+                  });
+                }}
               />
             )}
             <ActionBtn
-              icon={<Download size={13} />}
+              icon={<Download size={isTablet ? 15 : 13} />}
               label="Download"
               color="#4A8A5C"
+              tablet={isTablet}
               onClick={handleDownload}
             />
             {onDelete && (
               <ActionBtn
-                icon={<Trash2 size={13} />}
+                icon={<Trash2 size={isTablet ? 15 : 13} />}
                 label="Delete"
                 color={ATTENTION_RING}
                 busy={busy === 'delete'}
+                tablet={isTablet}
                 onClick={async () => {
                   if (!window.confirm('Delete this photo?')) return;
                   await runAction('delete', async () => {
@@ -218,22 +255,22 @@ function Meta({ label, value }: { label: string; value: string }) {
 }
 
 function ActionBtn({
-  icon, label, color, active, busy, onClick,
-}: { icon: React.ReactNode; label: string; color: string; active?: boolean; busy?: boolean; onClick: () => void }) {
+  icon, label, color, active, busy, onClick, tablet,
+}: { icon: React.ReactNode; label: string; color: string; active?: boolean; busy?: boolean; onClick: () => void; tablet?: boolean }) {
   return (
     <button
       onClick={onClick}
       disabled={busy}
       style={{
-        display: 'inline-flex', alignItems: 'center', gap: 5,
-        padding: '6px 10px', fontSize: 11, fontWeight: 600,
+        display: 'inline-flex', alignItems: 'center', gap: tablet ? 7 : 5,
+        padding: tablet ? '9px 14px' : '6px 10px', fontSize: tablet ? 13 : 11, fontWeight: 600,
         background: active ? color : 'rgba(255,255,255,0.08)',
         border: `1px solid ${active ? color : 'rgba(255,255,255,0.18)'}`,
         color: '#fff', borderRadius: 100, cursor: busy ? 'wait' : 'pointer',
         fontFamily: 'inherit',
       }}
     >
-      {busy ? <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} /> : icon}
+      {busy ? <Loader2 size={tablet ? 15 : 13} style={{ animation: 'spin 1s linear infinite' }} /> : icon}
       {label}
     </button>
   );

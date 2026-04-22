@@ -51,7 +51,7 @@ export function PhotoGrid({
   photos, onPhotoClick, compact,
   onToggleAttention, onToggleRepair, onDelete,
 }: Props) {
-  const { isMobile } = useIsMobile();
+  const { isMobile, isTablet } = useIsMobile();
   const cols = isMobile ? 2 : compact ? 3 : 4;
   const radius = compact ? 8 : 12;
 
@@ -110,7 +110,7 @@ export function PhotoGrid({
                 overflow: 'hidden',
                 cursor: onPhotoClick ? 'pointer' : 'default',
                 background: '#E5E7EB',
-                boxShadow: ring ? `0 0 0 3px ${ring}, 0 2px 8px rgba(0,0,0,0.08)` : '0 2px 8px rgba(0,0,0,0.06)',
+                boxShadow: ring ? `0 0 0 5px ${ring}, 0 2px 8px rgba(0,0,0,0.12)` : '0 2px 8px rgba(0,0,0,0.06)',
                 transition: 'transform 0.12s ease, box-shadow 0.12s ease',
               }}
             >
@@ -137,16 +137,17 @@ export function PhotoGrid({
                 )}
               </div>
 
-              {/* Mobile: always-visible 3-dot → bottom sheet.
-                  Hidden on desktop where the hover overlay provides direct actions. */}
-              {hasActions && isMobile && (
+              {/* Mobile/tablet: always-visible 3-dot → bottom sheet.
+                  Hidden on desktop where the hover overlay provides direct actions.
+                  Tablet uses the same sheet (no hover on touch) but with a larger tap target. */}
+              {hasActions && (isMobile || isTablet) && (
                 <button
                   type="button"
                   onClick={e => { e.stopPropagation(); setActionPhoto(p); }}
                   aria-label="Photo actions"
                   style={{
                     position: 'absolute', top: 6, right: 6,
-                    width: 28, height: 28, borderRadius: '50%',
+                    width: isTablet ? 38 : 28, height: isTablet ? 38 : 28, borderRadius: '50%',
                     background: 'rgba(0,0,0,0.55)', color: '#fff',
                     border: 'none', cursor: 'pointer',
                     display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
@@ -155,7 +156,7 @@ export function PhotoGrid({
                     zIndex: 3,
                   }}
                 >
-                  <MoreVertical size={14} />
+                  <MoreVertical size={isTablet ? 20 : 14} />
                 </button>
               )}
 
@@ -167,7 +168,7 @@ export function PhotoGrid({
                   div, so desktop users couldn't open the fullscreen view.
                   The button-row keeps its own stopPropagation so button
                   presses don't ALSO open the lightbox. */}
-              {hasActions && !isMobile && (
+              {hasActions && !isMobile && !isTablet && (
                 <div
                   style={{
                     position: 'absolute', inset: 0,
