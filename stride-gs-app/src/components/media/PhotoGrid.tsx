@@ -215,12 +215,17 @@ export function PhotoGrid({
                       onClick={() => {
                         const url = p.storage_url;
                         if (!url) return;
-                        const a = document.createElement('a');
-                        a.href = url;
-                        a.download = p.file_name || 'photo.jpg';
-                        a.target = '_blank';
-                        a.rel = 'noopener noreferrer';
-                        document.body.appendChild(a); a.click(); a.remove();
+                        fetch(url)
+                          .then(r => r.blob())
+                          .then(blob => {
+                            const objectUrl = URL.createObjectURL(blob);
+                            const a = document.createElement('a');
+                            a.href = objectUrl;
+                            a.download = p.file_name || 'photo.jpg';
+                            document.body.appendChild(a); a.click(); a.remove();
+                            URL.revokeObjectURL(objectUrl);
+                          })
+                          .catch(() => window.open(url, '_blank', 'noopener,noreferrer'));
                       }}
                     />
                     {onDelete && (
@@ -297,13 +302,21 @@ function PhotoActionSheet({
     }
   }, [onClose]);
 
-  const handleDownload = useCallback(() => {
+  const handleDownload = useCallback(async () => {
     const url = photo.storage_url;
     if (!url) return;
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = photo.file_name || 'photo.jpg';
-    document.body.appendChild(a); a.click(); a.remove();
+    try {
+      const resp = await fetch(url);
+      const blob = await resp.blob();
+      const objectUrl = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = objectUrl;
+      a.download = photo.file_name || 'photo.jpg';
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(objectUrl);
+    } catch {
+      window.open(url, '_blank', 'noopener,noreferrer');
+    }
     onClose();
   }, [photo, onClose]);
 

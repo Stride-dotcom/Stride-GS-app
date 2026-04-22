@@ -1,3 +1,4 @@
+import { Check } from 'lucide-react';
 import type { CalendarEventType } from '../../hooks/useCalendarEvents';
 
 export const EVENT_COLORS: Record<CalendarEventType, { bg: string; border: string; text: string; label: string }> = {
@@ -19,10 +20,14 @@ interface Props {
    *  opacity + a "syncing" dot so users can tell a pending write from a
    *  confirmed one at a glance. */
   pending?: boolean;
+  /** True when the entity has a completed/released status. Renders a
+   *  checkmark prefix and reduces opacity slightly. */
+  completed?: boolean;
 }
 
-export function CalendarEventPill({ type, label, onMouseEnter, onMouseLeave, onClick, compact, pending }: Props) {
+export function CalendarEventPill({ type, label, onMouseEnter, onMouseLeave, onClick, compact, pending, completed }: Props) {
   const c = EVENT_COLORS[type];
+  const titleText = pending ? `${label} (syncing…)` : completed ? `${label} (completed)` : label;
   return (
     <div
       onMouseEnter={onMouseEnter}
@@ -42,10 +47,13 @@ export function CalendarEventPill({ type, label, onMouseEnter, onMouseLeave, onC
         cursor: 'pointer',
         marginBottom: 2,
         maxWidth: '100%',
-        opacity: pending ? 0.6 : 1,
+        opacity: pending ? 0.6 : completed ? 0.75 : 1,
         fontStyle: pending ? 'italic' : 'normal',
+        display: 'flex',
+        alignItems: 'center',
+        gap: 3,
       }}
-      title={pending ? `${label} (syncing…)` : label}
+      title={titleText}
     >
       {pending && (
         <span
@@ -53,13 +61,16 @@ export function CalendarEventPill({ type, label, onMouseEnter, onMouseLeave, onC
           style={{
             display: 'inline-block',
             width: 6, height: 6, borderRadius: '50%',
-            background: c.border, marginRight: 5,
-            verticalAlign: 'middle',
+            background: c.border,
+            flexShrink: 0,
             animation: 'stridePulse 1.2s ease-in-out infinite',
           }}
         />
       )}
-      {label}
+      {completed && !pending && (
+        <Check size={compact ? 9 : 10} style={{ flexShrink: 0, strokeWidth: 3 }} aria-label="completed" />
+      )}
+      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{label}</span>
     </div>
   );
 }

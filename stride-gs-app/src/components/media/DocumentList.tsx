@@ -8,7 +8,7 @@
  * owns the hook.
  */
 import { useCallback, useState } from 'react';
-import { FileText, Image as ImageIcon, File as FileIcon, Trash2, ExternalLink, Loader2, AlertTriangle } from 'lucide-react';
+import { FileText, Image as ImageIcon, File as FileIcon, Trash2, ExternalLink, Download, Loader2, AlertTriangle } from 'lucide-react';
 import { theme } from '../../styles/theme';
 import { useDocuments, type DocumentContextType, type DocumentRow } from '../../hooks/useDocuments';
 
@@ -49,6 +49,7 @@ export function DocumentList({ contextType, contextId, tenantId, readOnly, compa
     contextType, contextId, tenantId,
   });
   const [opening, setOpening] = useState<string | null>(null);
+  const [downloading, setDownloading] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<string | null>(null);
   const [openError, setOpenError] = useState<string | null>(null);
 
@@ -60,6 +61,26 @@ export function DocumentList({ contextType, contextId, tenantId, readOnly, compa
       window.open(url, '_blank', 'noopener,noreferrer');
     } finally {
       setOpening(null);
+    }
+  }, [getSignedUrl]);
+
+  const handleDownload = useCallback(async (doc: DocumentRow) => {
+    setDownloading(doc.id); setOpenError(null);
+    try {
+      const url = await getSignedUrl(doc.storage_key);
+      if (!url) { setOpenError('Failed to generate signed URL'); return; }
+      const resp = await fetch(url);
+      const blob = await resp.blob();
+      const objectUrl = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = objectUrl;
+      a.download = doc.file_name || 'document';
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(objectUrl);
+    } catch {
+      setOpenError('Download failed');
+    } finally {
+      setDownloading(null);
     }
   }, [getSignedUrl]);
 
@@ -126,6 +147,16 @@ export function DocumentList({ contextType, contextId, tenantId, readOnly, compa
                 </div>
               </div>
               <div style={{ display: 'flex', gap: 4, flexShrink: 0 }}>
+                <button
+                  onClick={() => handleDownload(d)}
+                  disabled={downloading === d.id}
+                  style={rowBtn}
+                  title="Download"
+                >
+                  {downloading === d.id
+                    ? <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} />
+                    : <Download size={12} />}
+                </button>
                 <button
                   onClick={() => handleOpen(d)}
                   disabled={opening === d.id}

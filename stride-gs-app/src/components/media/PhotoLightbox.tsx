@@ -68,13 +68,21 @@ export function PhotoLightbox({
 
   if (!photo) return null;
 
-  const handleDownload = () => {
+  const handleDownload = async () => {
     const url = photo.storage_url;
     if (!url) return;
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = photo.file_name || 'photo.jpg';
-    document.body.appendChild(a); a.click(); a.remove();
+    try {
+      const resp = await fetch(url);
+      const blob = await resp.blob();
+      const objectUrl = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = objectUrl;
+      a.download = photo.file_name || 'photo.jpg';
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(objectUrl);
+    } catch {
+      window.open(url, '_blank', 'noopener,noreferrer');
+    }
   };
 
   const runAction = async (label: string, fn: () => Promise<boolean> | boolean) => {

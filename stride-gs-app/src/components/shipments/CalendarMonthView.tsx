@@ -3,6 +3,14 @@ import type { CalendarEvent } from '../../hooks/useCalendarEvents';
 import { CalendarEventPill } from './CalendarEventPill';
 import { CalendarTooltip } from './CalendarTooltip';
 
+function isCompleted(ev: CalendarEvent): boolean {
+  const s = ev.details.status;
+  if (!s) return false;
+  if (ev.type === 'task' || ev.type === 'repair') return s === 'Completed';
+  if (ev.type === 'willcall') return s === 'Released';
+  return false;
+}
+
 interface Props {
   year: number;
   month: number; // 0-11
@@ -101,6 +109,7 @@ export function CalendarMonthView({ year, month, events, onEventClick }: Props) 
                   label={ev.label}
                   compact
                   pending={ev.pending}
+                  completed={isCompleted(ev)}
                   onMouseEnter={(e) => {
                     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
                     setHover({ event: ev, x: rect.right + 8, y: rect.top });
