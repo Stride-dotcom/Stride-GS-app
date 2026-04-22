@@ -553,10 +553,6 @@ function useMessagesImpl(): UseMessagesResult {
       hydrated = hydratedCandidates.filter(m => {
         const participants = new Set<string>([m.senderId, ...m.recipientUserIds]);
         if (!participants.has(authUserId)) return false;
-        // For outgoing messages (we are the sender), RLS hides the other
-        // party's recipient row, so `participants` only contains authUserId.
-        // Accept these — the senderId check is sufficient proof of ownership.
-        if (m.senderId === authUserId) return true;
         if (!participants.has(other)) return false;
         // No extra participants allowed (for self-DM other === authUserId
         // so size === 1 is valid; for regular DMs size must be exactly 2).
