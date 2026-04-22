@@ -303,9 +303,9 @@ interface InvFieldMapEntry {
   status: string; itemNotes: string; taskNotes: string;
   receiveDate: string; releaseDate: string; carrier: string;
   trackingNumber: string; shipmentNumber: string;
-  itemFolderUrl: string; shipmentPhotosUrl: string;
-  inspectionPhotosUrl: string; repairPhotosUrl: string;
-  invoiceUrl: string; transferDate: string;
+  itemFolderUrl: string; shipmentFolderUrl: string;
+  shipmentPhotosUrl: string; inspectionPhotosUrl: string;
+  repairPhotosUrl: string; invoiceUrl: string; transferDate: string;
 }
 
 async function _fetchInvFieldMap(clientSheetId?: string | string[]): Promise<Record<string, InvFieldMapEntry>> {
@@ -336,6 +336,7 @@ async function _fetchInvFieldMap(clientSheetId?: string | string[]): Promise<Rec
             trackingNumber: row.tracking_number ?? '',
             shipmentNumber: row.shipment_number ?? '',
             itemFolderUrl: row.item_folder_url ?? '',
+            shipmentFolderUrl: row.shipment_folder_url ?? '',
             shipmentPhotosUrl: row.shipment_photos_url ?? '',
             inspectionPhotosUrl: row.inspection_photos_url ?? '',
             repairPhotosUrl: row.repair_photos_url ?? '',
@@ -384,7 +385,8 @@ export async function fetchTasksFromSupabase(
         if (inv.trackingNumber) task.trackingNumber = inv.trackingNumber;
         if (inv.shipmentNumber) task.shipmentNumber = inv.shipmentNumber;
         if (inv.itemNotes) task.itemNotes = inv.itemNotes;
-        // taskNotes NOT overlaid — entity-specific (task's own notes, not Inventory's aggregated job log)
+        // taskNotes NOT overlaid — entity-specific
+        if (inv.shipmentFolderUrl) task.shipmentFolderUrl = inv.shipmentFolderUrl;
         if (inv.shipmentPhotosUrl) task.shipmentPhotosUrl = inv.shipmentPhotosUrl;
         if (inv.inspectionPhotosUrl) task.inspectionPhotosUrl = inv.inspectionPhotosUrl;
         if (inv.repairPhotosUrl) task.repairPhotosUrl = inv.repairPhotosUrl;
@@ -500,6 +502,7 @@ export async function fetchRepairsFromSupabase(
         if (inv.carrier) repair.carrier = inv.carrier;
         if (inv.trackingNumber) repair.trackingNumber = inv.trackingNumber;
         if (inv.itemNotes) repair.itemNotes = inv.itemNotes;
+        if (inv.shipmentFolderUrl) repair.shipmentFolderUrl = inv.shipmentFolderUrl;
         if (inv.shipmentPhotosUrl) repair.shipmentPhotosUrl = inv.shipmentPhotosUrl;
         if (inv.inspectionPhotosUrl) repair.inspectionPhotosUrl = inv.inspectionPhotosUrl;
         if (inv.repairPhotosUrl) repair.repairPhotosUrl = inv.repairPhotosUrl;
@@ -644,6 +647,12 @@ export async function fetchWillCallsFromSupabase(
           }
           for (const wc of willCalls) {
             wc.items = byWc[wc.wcNumber] || [];
+            // Overlay shipmentFolderUrl from inventory if WC row has none
+            if (!wc.shipmentFolderUrl) {
+              const firstItemId = wc.itemIds?.[0];
+              const inv = firstItemId ? invMap[firstItemId] : null;
+              if (inv?.shipmentFolderUrl) wc.shipmentFolderUrl = inv.shipmentFolderUrl;
+            }
           }
         }
       } catch {
