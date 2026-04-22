@@ -54,13 +54,17 @@ interface Props {
   compact?: boolean;
   /** Override button label. Defaults: photo=`Take Photo`, document=`Scan Document`. */
   label?: string;
+  /** v2026-04-22 — stretch the primary capture button to fill its parent so
+   *  it sits as an equal-width sibling to Upload Photos / Upload Document.
+   *  The pending-queue section below still renders normally. */
+  fullWidth?: boolean;
 }
 
 const DEFAULT_MAX = 10;
 
 export function MultiCapture({
   mode, onUpload, onSaved, disabled,
-  maxItems = DEFAULT_MAX, compact, label,
+  maxItems = DEFAULT_MAX, compact, label, fullWidth,
 }: Props) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [pending, setPending] = useState<PendingItem[]>([]);
@@ -148,7 +152,7 @@ export function MultiCapture({
   const accept = 'image/*';
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: compact ? 8 : 10 }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: compact ? 8 : 10, width: fullWidth ? '100%' : undefined }}>
       <input
         ref={inputRef}
         type="file"

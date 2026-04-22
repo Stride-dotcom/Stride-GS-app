@@ -296,12 +296,17 @@ export function DocumentsPanel({
   };
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-      <DocumentUploadButton onUpload={handleUpload} uploading={uploading} compact />
-      <DocumentScanButton
-        contextType={contextType}
-        contextId={contextId}
-        tenantId={tenantId}
-      />
+      {/* v2026-04-22 — Upload Document on the left, Scan Document on the right
+          — pill-shaped, auto-width, anchored at opposite edges via
+          space-between so they read as two distinct actions. */}
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center' }}>
+        <DocumentUploadButton onUpload={handleUpload} uploading={uploading} compact />
+        <DocumentScanButton
+          contextType={contextType}
+          contextId={contextId}
+          tenantId={tenantId}
+        />
+      </div>
       <DocumentList contextType={contextType} contextId={contextId} tenantId={tenantId} />
     </div>
   );

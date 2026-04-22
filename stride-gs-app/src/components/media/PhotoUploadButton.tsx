@@ -71,10 +71,11 @@ export function PhotoUploadButton({
         style={{ display: 'none' }}
       />
 
-      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-        {/* File picker — unchanged. Selects existing images from the
-            gallery/filesystem and hands them straight to `onUpload`, which
-            the parent immediately writes via usePhotos.uploadPhoto. */}
+      {/* v2026-04-22 — Upload Photos on the left, Take Photo on the right —
+          pill-shaped, auto-width, anchored at opposite edges via
+          space-between so they read as two distinct actions rather than a
+          stacked list. Wraps to two rows on very narrow viewports. */}
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center' }}>
         <button
           type="button"
           onClick={() => inputRef.current?.click()}
@@ -86,21 +87,18 @@ export function PhotoUploadButton({
             : <UploadCloud size={14} />}
           {busy ? 'Uploading…' : label}
         </button>
-      </div>
 
-      {/* Batch camera capture — only rendered when the caller provides a
-          per-file uploader. The single-shot camera button was retired in
-          favour of MultiCapture so warehouse users can capture multiple
-          shots in a row and save them in one go. */}
-      {onUploadOne && (
-        <MultiCapture
-          mode="photo"
-          onUpload={onUploadOne}
-          onSaved={onBatchSaved}
-          disabled={disabled || busy}
-          compact={compact}
-        />
-      )}
+        {/* Batch camera capture — right-anchored pill. */}
+        {onUploadOne && (
+          <MultiCapture
+            mode="photo"
+            onUpload={onUploadOne}
+            onSaved={onBatchSaved}
+            disabled={disabled || busy}
+            compact={compact}
+          />
+        )}
+      </div>
 
       {!compact && (
         <div

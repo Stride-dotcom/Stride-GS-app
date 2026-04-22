@@ -59,7 +59,7 @@ interface Props<T extends { entity_type?: string | null }> {
 }
 
 export function EntitySourceTabs<T extends { entity_type?: string | null }>({
-  items, activeType, onChange, renderRule = 'non-empty',
+  items, activeType, onChange, renderRule = 'always',
 }: Props<T>) {
   // Count per entity_type. 'all' is always the total.
   const { counts, total } = useMemo(() => {
@@ -92,9 +92,13 @@ export function EntitySourceTabs<T extends { entity_type?: string | null }>({
     return out;
   }, [counts, total, renderRule]);
 
-  // If nothing beyond 'all' would render, skip the tab bar entirely — it's
-  // just visual noise when there's only one source.
-  if (tabs.length <= 1) return null;
+  // v2026-04-22 — default renderRule changed from 'non-empty' to 'always' so
+  // the tab affordance stays visible even when some source types have 0
+  // records (matches the All / Item / Task / Repair pattern from the design
+  // mockup). The only case we still bail on: no items at all AND nothing to
+  // show — `tabs` will only contain 'all (0)' in that case; still render it
+  // so the user sees the filter UI for when photos eventually arrive.
+  if (tabs.length === 0) return null;
 
   return (
     <div
