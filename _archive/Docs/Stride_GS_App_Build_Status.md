@@ -1,7 +1,7 @@
 # Stride GS App — Build Status & Continuation Guide
 
-**Last updated:** 2026-04-20 (sessions 65-75 marathon — everything below, capped by session 75 which shipped: **Zip Codes category in Price List** backed by Supabase `delivery_zones` (398 zones seeded from PLT 2025 CSV) with inline-edit table, search, Add Zip modal, Realtime, Excel `Delivery Zones` sheet, and public `/rates/:shareId` zone-tab rendering; **role-aware Compose recipient filter** (clients see admin + same-account coworkers only, broadcast pills hidden); **WhatsApp-style Messages thread header** with participant subtitle + clickable entity deep-link chip that opens in a new tab and always appends `&client=<tenant>` per CLAUDE.md rule (tenant resolved via Supabase lookup on `item_id_ledger` / entity mirrors); **free-text Carrier** in Add Shipment modal (`<input list>` + `<datalist>`); **optimistic calendar sync buses** on useTasks / useRepairs / useWillCalls with `pending` pill state (dashed border + pulsing dot via `stridePulse` keyframe). Prior mega-build items: Quote Tool, unified Price List with shareable public URLs, Expected/Operations Calendar on Dashboard, Photos / Documents / Notes modules wired into every detail panel, iMessage-style Messages, email + doc templates on Supabase with auto-seed + template token audit, manual billing charges, task due date + priority, receiving add-ons, Phase 5 rate cutover in shadow mode + Rate Parity Monitor tab, profiles table (137 users), sidemark + Reference across billing pipeline, full v2 visual refresh, full mobile pass on staff pages, GitHub Actions CI/CD live. Bundle `index-DUK0tr2v.js`.)
-**StrideAPI.gs:** v38.85.0
+**Last updated:** 2026-04-22 (session 76 — Receiving TanStack Table rebuild + CB13 billing-status header fix; prior: sessions 65-75 marathon — everything below, capped by session 75 which shipped: **Zip Codes category in Price List** backed by Supabase `delivery_zones` (398 zones seeded from PLT 2025 CSV) with inline-edit table, search, Add Zip modal, Realtime, Excel `Delivery Zones` sheet, and public `/rates/:shareId` zone-tab rendering; **role-aware Compose recipient filter** (clients see admin + same-account coworkers only, broadcast pills hidden); **WhatsApp-style Messages thread header** with participant subtitle + clickable entity deep-link chip that opens in a new tab and always appends `&client=<tenant>` per CLAUDE.md rule (tenant resolved via Supabase lookup on `item_id_ledger` / entity mirrors); **free-text Carrier** in Add Shipment modal (`<input list>` + `<datalist>`); **optimistic calendar sync buses** on useTasks / useRepairs / useWillCalls with `pending` pill state (dashed border + pulsing dot via `stridePulse` keyframe). Prior mega-build items: Quote Tool, unified Price List with shareable public URLs, Expected/Operations Calendar on Dashboard, Photos / Documents / Notes modules wired into every detail panel, iMessage-style Messages, email + doc templates on Supabase with auto-seed + template token audit, manual billing charges, task due date + priority, receiving add-ons, Phase 5 rate cutover in shadow mode + Rate Parity Monitor tab, profiles table (137 users), sidemark + Reference across billing pipeline, full v2 visual refresh, full mobile pass on staff pages, GitHub Actions CI/CD live. Bundle `index-DUK0tr2v.js`.)
+**StrideAPI.gs:** v38.101.0
 **Supabase (new tables this session):** `item_photos`, `documents`, `entity_notes`, `messages`, `message_recipients`, `in_app_notifications`, `email_templates`, `email_templates_audit`, `service_catalog`, `service_catalog_audit`, `expected_shipments`, `profiles` — plus `photos` / `documents` private storage buckets with tenant-scoped path RLS. Session 75 extended the pre-existing `delivery_zones` table (from Quote Tool schema) with editorial columns (`current_rate`, `updated_rate`, `out_of_area`, `call_for_quote`, `active`, `notes`) and seeded 398 zones; added anon-read RLS policy for the public `/rates/:shareId` page.
 **Import.gs (client):** v4.3.0 (rolled out to all 49 active clients; Reference column now imported)
 **Emails.gs (client):** v4.6.0 (rolled out to all 49 active clients — Room column dropped, Reference takes its place)
@@ -1337,7 +1337,6 @@ Previous sessions (60 client isolation cache fix, 59 welcome email bundle + buil
 - [ ] **Parent Transfer Access** — Allow parent users to transfer between own children.
 - [ ] **Global search expansion** — Shipments, billing, claims entities + missing fields.
 - [ ] **Autocomplete DB in React** — Sidemark/Vendor/Description per client.
-- [ ] **Receiving page TanStack Table** — Currently hardcoded table.
 - [ ] **Inline WC field editing UI wiring** — `updateWillCall` endpoint exists; UI not yet wired.
 
 ### Future scope (Phase 8, unstarted)
@@ -1488,9 +1487,6 @@ Design polish, photo upload, notifications, offline receiving.
 ## KNOWN ISSUES
 
 ### Backend
-- `populateUnbilledReport_()` in CB `Code.gs.js` uses OLD header names ("Billing Status", "Service Date")
-- `CB13_addBillingStatusValidation()` looks for "Billing Status" instead of "Status"
-- Repair discount behavior — should disable discounts on repairs
 
 ### Onboarding / client registry (session 64 carryover)
 - **Auto-inspect race on Receiving page** — if the user picks a client before `apiClients` has resolved from the API (cold start), `apiMatch?.autoInspection ?? false` snapshots to false and the item rows' `needsInspection` checkboxes stay un-ticked even after `apiClients` loads. A `useEffect` to patch this was shipped then reverted (caused React #300 on Inventory / Clients pages). Fix needs a cleaner pattern — probably moving the auto-inspect derivation into a `useMemo` over `[clientSheetId, apiClients]` that the `items` initializer reads, or gating the Client select from rendering until `apiClients.length > 0`. Supabase query for post-hoc counting suggests ~63 items received in the last 30 days across 18 tenants are missing INSP tasks — user will backfill manually.
@@ -1500,8 +1496,6 @@ Design polish, photo upload, notifications, offline receiving.
 
 ### React App
 - Autocomplete dropdowns — Room + Sidemark data mixed together
-- Receiving page uses hardcoded table (no TanStack Table / no column reorder)
-- Transfer Items dialog needs processing animation + disable buttons after complete
 - Multi-row selection only picks last row for Will Call creation
 - GitHub Pages CDN caching: hard-refresh (Ctrl+Shift+R) after deploy
 - **Client dropdown load time** — occasional reports of slow (120s+) initial client list loads after a deploy. Root cause unclear — `useClients` goes through a single `useApiData` via `ClientsProvider` (session 63 refactor) and hits GAS `getClients` (no Supabase mirror for clients). Suspected: cold-cache first fetch plus GAS latency plus some edge where the fetch isn't being fired. localStorage cache makes subsequent loads instant, but the slow-first-load path should be investigated. Option: mirror `clients` to Supabase so first load is <100ms regardless.
