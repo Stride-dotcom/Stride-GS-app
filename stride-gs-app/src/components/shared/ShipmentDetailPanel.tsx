@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useIsMobile } from '../../hooks/useIsMobile';
 import { Truck, Package, FileText, Mail, ClipboardList, LayoutList } from 'lucide-react';
 import { DeepLink } from './DeepLink';
 import { ItemIdBadges } from './ItemIdBadges';
@@ -63,6 +64,7 @@ const STATUS_CFG: Record<string, { bg: string; color: string }> = {
 export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onItemsChanged }: Props) {
   // (I)(A)(R) indicators for every item row in the shipment items table.
   const { inspItems, asmItems, repairItems } = useItemIndicators(shipment.clientSheetId);
+  const { isMobile } = useIsMobile();
   const navigate = useNavigate();
   const sc = STATUS_CFG[shipment.status] || STATUS_CFG.Received;
   const isStaffAdmin = userRole === 'admin' || userRole === 'staff';
@@ -316,9 +318,13 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
         onClose={onClose}
         resizeKey="shipment"
         defaultWidth={460}
-        footer={
+        footer={isMobile ? (
+          <div style={{ padding: '12px 16px', paddingBottom: `calc(env(safe-area-inset-bottom, 0px) + 12px)` }}>
+            <button onClick={onClose} style={{ width: '100%', padding: '14px 0', fontSize: 15, fontWeight: 600, border: 'none', borderRadius: 10, background: '#F1F5F9', cursor: 'pointer', fontFamily: 'inherit', color: '#475569' }}>Done</button>
+          </div>
+        ) : (
           <button onClick={onClose} style={{ width: '100%', padding: '10px', fontSize: 13, fontWeight: 600, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', fontFamily: 'inherit', color: theme.colors.textSecondary }}>Close</button>
-        }
+        )}
       />
 
       {/* Quick Action Modals */}

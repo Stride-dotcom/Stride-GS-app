@@ -15,6 +15,7 @@ import type { InventoryItem, InventoryStatus } from '../../lib/types';
 import { TabbedDetailPanel } from './TabbedDetailPanel';
 import type { TabbedDetailPanelTab } from './TabbedDetailPanel';
 import { buildDeepLink } from '../../lib/deepLinks';
+import { useIsMobile } from '../../hooks/useIsMobile';
 
 export interface LinkedRecord {
   id: string;
@@ -501,6 +502,7 @@ export function ItemDetailPanel({
   applyItemPatch, mergeItemPatch, clearItemPatch,
 }: Props) {
   // Panel frame + resize + backdrop are handled by TabbedDetailPanel now.
+  const { isMobile } = useIsMobile();
   const statusCfg: Record<string, { bg: string; color: string }> = {
     Active: { bg: '#F0FDF4', color: '#15803D' },
     Released: { bg: '#EFF6FF', color: '#1D4ED8' },
@@ -1008,9 +1010,11 @@ export function ItemDetailPanel({
         repairStatus={repairStatus ?? undefined}
         repairRequesting={repairRequesting}
       />
-      <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4, borderRadius: 6, color: 'rgba(255,255,255,0.7)' }}>
-        <X size={18} />
-      </button>
+      {!isMobile && (
+        <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4, borderRadius: 6, color: 'rgba(255,255,255,0.7)' }}>
+          <X size={18} />
+        </button>
+      )}
     </div>
   );
 
@@ -1055,6 +1059,37 @@ export function ItemDetailPanel({
       ) : null}
     </div>
   ) : null;
+
+  const mobileFooter = (() => {
+    const btnBase: React.CSSProperties = {
+      flex: 1, padding: '14px 0', fontSize: 15, fontWeight: 600,
+      borderRadius: 10, border: 'none', cursor: saving ? 'wait' : 'pointer',
+      display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+    };
+    if (isEditing) {
+      return (
+        <div style={{ padding: '12px 16px', display: 'flex', gap: 10, paddingBottom: `calc(env(safe-area-inset-bottom, 0px) + 12px)` }}>
+          <button onClick={handleSave} disabled={saving} style={{ ...btnBase, background: theme.colors.orange, color: '#fff' }}>
+            {saving ? <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} /> : <Save size={16} />}
+            {saving ? 'Saving...' : 'Save'}
+          </button>
+          <button onClick={handleEditCancel} disabled={saving} style={{ ...btnBase, flex: '0 0 auto', padding: '14px 20px', background: '#F1F5F9', color: '#475569' }}>
+            Cancel
+          </button>
+        </div>
+      );
+    }
+    if (canEditBasic) {
+      return (
+        <div style={{ padding: '12px 16px', paddingBottom: `calc(env(safe-area-inset-bottom, 0px) + 12px)` }}>
+          <button onClick={handleEditStart} style={{ ...btnBase, flex: 1, width: '100%', background: '#F1F5F9', color: '#1E293B' }}>
+            <Pencil size={16} /> Edit
+          </button>
+        </div>
+      );
+    }
+    return null;
+  })();
 
   // Custom tabs listed in the order we want them to appear. Built-in tabs
   // (Photos/Docs/Notes/Activity) are appended by the shell after any custom
@@ -1135,7 +1170,7 @@ export function ItemDetailPanel({
         tabs={customTabs}
         initialTabId="details"
         statusStrip={statusStrip}
-        footer={footer}
+        footer={isMobile ? mobileFooter : footer}
         onClose={onClose}
         resizeKey="item"
         defaultWidth={420}

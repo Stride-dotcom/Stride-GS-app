@@ -1,5 +1,6 @@
-import { useState, useMemo, useCallback, useEffect, useRef } from 'react';
-import { X, Truck, Package, Calendar, Phone, User, DollarSign, CheckCircle2, CreditCard, FileText, Loader2, AlertTriangle, FolderOpen, Info, Pencil, Save, Play } from 'lucide-react';
+import React, { useState, useMemo, useCallback, useEffect, useRef } from 'react';
+import { X, Truck, Package, Calendar, Phone, User, DollarSign, CheckCircle2, CreditCard, FileText, Loader2, AlertTriangle, FolderOpen, Info, Pencil, Save, Play, MoreHorizontal } from 'lucide-react';
+import { useIsMobile } from '../../hooks/useIsMobile';
 import { FolderButton } from './FolderButton';
 import { DeepLink } from './DeepLink';
 import { TabbedDetailPanel, type TabbedDetailPanelTab } from './TabbedDetailPanel';
@@ -52,6 +53,8 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
   // Clients are not allowed to release items or set release dates — that
   // decision belongs to warehouse staff. Gate every Release-related action.
   const canRelease = user?.role === 'admin' || user?.role === 'staff';
+  const { isMobile } = useIsMobile();
+  const [overflowOpen, setOverflowOpen] = useState(false);
   // v2026-04-22 — panel frame (backdrop, resize, header) is provided by
   // TabbedDetailPanel. Adapter focuses on entity-specific state + tab content.
   const apiConfigured = isApiConfigured();
@@ -895,7 +898,7 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
   );
 
   // Header actions — edit/save/close
-  const headerActions = (
+  const headerActions = isMobile ? null : (
     <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4, color: 'rgba(255,255,255,0.7)' }}>
       <X size={18} />
     </button>
@@ -1065,6 +1068,91 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
     </>
   );
 
+  // ─── Mobile overflow menu (Cancel WC + Edit) ──────────────────────────
+  const wcOverflowMenu = overflowOpen ? (
+    <>
+      <div onClick={() => setOverflowOpen(false)} style={{ position: 'fixed', inset: 0, zIndex: 999 }} />
+      <div style={{
+        position: 'fixed', bottom: `calc(env(safe-area-inset-bottom, 0px) + 82px)`, right: 16,
+        background: '#fff', borderRadius: 12, boxShadow: '0 4px 24px rgba(0,0,0,0.18)',
+        zIndex: 1000, minWidth: 200, overflow: 'hidden',
+      }}>
+        {isActive && !isEditing && canRelease && (
+          <button onClick={() => { setOverflowOpen(false); setIsEditing(true); }} style={{ display: 'flex', alignItems: 'center', gap: 10, width: '100%', padding: '14px 18px', fontSize: 14, fontWeight: 500, background: 'none', border: 'none', cursor: 'pointer', fontFamily: 'inherit', color: '#1E293B' }}>
+            <Pencil size={16} color="#475569" /> Edit Details
+          </button>
+        )}
+        {isEditing && (
+          <button onClick={() => { setOverflowOpen(false); handleEditCancel(); }} style={{ display: 'flex', alignItems: 'center', gap: 10, width: '100%', padding: '14px 18px', fontSize: 14, fontWeight: 500, background: 'none', border: 'none', cursor: 'pointer', fontFamily: 'inherit', color: '#B45309' }}>
+            <X size={16} color="#B45309" /> Cancel Edit
+          </button>
+        )}
+        {isActive && !cancelResult && (
+          <button onClick={() => { setOverflowOpen(false); void handleCancelWC(); }} style={{ display: 'flex', alignItems: 'center', gap: 10, width: '100%', padding: '14px 18px', fontSize: 14, fontWeight: 500, background: 'none', border: `none`, cursor: 'pointer', fontFamily: 'inherit', color: '#DC2626', borderTop: '1px solid #F1F5F9' }}>
+            <X size={16} color="#DC2626" /> Cancel WC
+          </button>
+        )}
+      </div>
+    </>
+  ) : null;
+
+  // ─── Mobile footer ────────────────────────────────────────────────────
+  const mobileFooter = (() => {
+    const btnBase: React.CSSProperties = {
+      flex: 1, padding: '14px 0', fontSize: 15, fontWeight: 600,
+      borderRadius: 10, border: 'none', cursor: 'pointer',
+      display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+    };
+    if (cancelResult?.success) {
+      return (
+        <div style={{ padding: '12px 16px', paddingBottom: `calc(env(safe-area-inset-bottom, 0px) + 12px)` }}>
+          <button onClick={onClose} style={{ ...btnBase, width: '100%', background: '#F1F5F9', color: '#475569' }}>Done</button>
+        </div>
+      );
+    }
+    if (isEditing) {
+      return (
+        <div style={{ padding: '12px 16px', display: 'flex', gap: 10, paddingBottom: `calc(env(safe-area-inset-bottom, 0px) + 12px)` }}>
+          <button onClick={() => void handleEditSave()} disabled={editSaving} style={{ ...btnBase, background: theme.colors.orange, color: '#fff', cursor: editSaving ? 'wait' : 'pointer' }}>
+            {editSaving ? <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} /> : <Save size={16} />}
+            {editSaving ? 'Saving...' : 'Save'}
+          </button>
+          <button onClick={handleEditCancel} disabled={editSaving} style={{ ...btnBase, flex: '0 0 auto', padding: '14px 20px', background: '#F1F5F9', color: '#475569' }}>
+            Cancel
+          </button>
+        </div>
+      );
+    }
+    if (!isActive || releaseResult) {
+      return (
+        <div style={{ padding: '12px 16px', paddingBottom: `calc(env(safe-area-inset-bottom, 0px) + 12px)` }}>
+          <button onClick={onClose} style={{ ...btnBase, width: '100%', background: '#F1F5F9', color: '#475569' }}>Done</button>
+        </div>
+      );
+    }
+    return (
+      <div style={{ padding: '12px 16px', display: 'flex', gap: 10, paddingBottom: `calc(env(safe-area-inset-bottom, 0px) + 12px)` }}>
+        {canRelease && !releaseResult ? (
+          <button onClick={() => void handleRelease(allItemIds)} disabled={releasing} style={{ ...btnBase, background: '#16A34A', color: '#fff', cursor: releasing ? 'wait' : 'pointer' }}>
+            {releasing ? <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} /> : <CheckCircle2 size={16} />}
+            {releasing ? 'Releasing...' : 'Release All'}
+          </button>
+        ) : !genDocResult ? (
+          <button onClick={() => void handleGenerateWcDoc()} disabled={genDocLoading} style={{ ...btnBase, background: '#7C3AED', color: '#fff', cursor: genDocLoading ? 'wait' : 'pointer' }}>
+            {genDocLoading ? <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} /> : <Play size={16} />}
+            {genDocLoading ? 'Starting...' : 'Start Will Call'}
+          </button>
+        ) : (
+          <button onClick={onClose} style={{ ...btnBase, background: '#F1F5F9', color: '#475569' }}>Done</button>
+        )}
+        <button onClick={() => setOverflowOpen(v => !v)} style={{ ...btnBase, flex: '0 0 auto', width: 48, padding: 0, background: '#F1F5F9', color: '#475569' }}>
+          <MoreHorizontal size={20} />
+        </button>
+        {wcOverflowMenu}
+      </div>
+    );
+  })();
+
   // ─── Shell ────────────────────────────────────────────────────────────
   const tabs: TabbedDetailPanelTab[] = [
     { id: 'details', label: 'Details', keepMounted: true, render: renderDetailsTab },
@@ -1087,7 +1175,7 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
         notes:  { entityType: 'will_call', entityId: wc.wcNumber },
         activity: { entityType: 'will_call', entityId: wc.wcNumber, tenantId: clientSheetId },
       }}
-      footer={footer}
+      footer={isMobile ? mobileFooter : footer}
       onClose={onClose}
       resizeKey="willcall"
       defaultWidth={440}
