@@ -123,14 +123,13 @@ export function DetailHeader({
             </span>
           )}
         </div>
-        {/* Right side: badges (belowId) + idBadges + actions */}
+        {/* Right side: idBadges + actions only (belowId omitted — too wide for 54px row) */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
           {idBadges && (
             <span style={{ display: 'inline-flex', alignItems: 'center', background: 'rgba(255,255,255,0.12)', padding: '2px 5px', borderRadius: 5 }}>
               {idBadges}
             </span>
           )}
-          {belowId}
           {actions}
         </div>
       </div>
