@@ -1,4 +1,14 @@
 /* ===================================================
+   StrideAPI.gs — v38.102.0 — 2026-04-22 PST — Tier 1 inventory mirror drift fix
+   v38.102.0: FIX — sbInventoryRow_ now mirrors 3 fields that handleGetInventory_
+              returns but the mirror silently dropped: shipment_folder_url
+              (per-row Drive folder URL from Inventory Shipment # cell hyperlink),
+              needs_inspection, needs_assembly. Supabase-first inventory reads
+              were returning shipmentFolderUrl: undefined since the column didn't
+              exist, breaking the Shipment Folder button on legacy imported items.
+              Paired with migration 20260422010000_inventory_mirror_drift_tier1.sql
+              and supabaseQueries.ts reader update. Existing rows backfilled on
+              next api_fullClientSync_ / resyncClients run.
    StrideAPI.gs — v38.101.0 — 2026-04-22 PST — deep-link self-heal in email render path
    v38.101.0: FEAT — api_sendTemplateEmail_ now scans the final body after
               token substitution for any mystridehub.com/#/<entity>?open=ID
@@ -2861,11 +2871,14 @@ function sbInventoryRow_(tenantId, item) {
     reference:       String(item.reference || ""),
     task_notes:      String(item.taskNotes || ""),
     item_folder_url:       String(item.itemFolderUrl || ""),
+    shipment_folder_url:   String(item.shipmentFolderUrl || ""),
     shipment_photos_url:   String(item.shipmentPhotosUrl || ""),
     inspection_photos_url: String(item.inspectionPhotosUrl || ""),
     repair_photos_url:     String(item.repairPhotosUrl || ""),
     invoice_url:           String(item.invoiceUrl || ""),
     transfer_date:         String(item.transferDate || ""),
+    needs_inspection:      !!item.needsInspection,
+    needs_assembly:        !!item.needsAssembly,
     // Phase B (session 79): per-item coverage fields.
     // declared_value is numeric in Supabase; we coerce through Number() so
     // missing/NaN falls back to 0 (matches the DEFAULT 0 in the migration).

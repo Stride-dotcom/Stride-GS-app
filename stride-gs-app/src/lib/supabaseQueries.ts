@@ -161,11 +161,14 @@ interface SupabaseInventoryRow {
   reference: string | null;
   task_notes: string | null;
   item_folder_url: string | null;
+  shipment_folder_url: string | null;
   shipment_photos_url: string | null;
   inspection_photos_url: string | null;
   repair_photos_url: string | null;
   invoice_url: string | null;
   transfer_date: string | null;
+  needs_inspection: boolean | null;
+  needs_assembly: boolean | null;
   // Phase B (session 79): per-item coverage fields.
   declared_value: number | null;
   coverage_option_id: string | null;
@@ -231,16 +234,16 @@ export async function fetchInventoryFromSupabase(
       room: row.room || '',
       itemNotes: row.item_notes || '',
       taskNotes: row.task_notes || '',
-      needsInspection: false,
-      needsAssembly: false,
+      needsInspection: !!row.needs_inspection,
+      needsAssembly: !!row.needs_assembly,
       carrier: row.carrier || '',
       trackingNumber: row.tracking_number || '',
       shipmentNumber: row.shipment_number || '',
       receiveDate: row.receive_date || '',
       releaseDate: row.release_date || '',
       status: row.status || 'Active',
-      invoiceUrl: '',
-      shipmentFolderUrl: undefined,
+      invoiceUrl: row.invoice_url || '',
+      shipmentFolderUrl: row.shipment_folder_url || undefined,
       // Phase B (session 79): coverage fields.
       declaredValue: row.declared_value ?? 0,
       coverageOptionId: row.coverage_option_id ?? '',
