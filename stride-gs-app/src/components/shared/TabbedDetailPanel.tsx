@@ -177,21 +177,32 @@ function tabButtonStyle(active: boolean): React.CSSProperties {
   };
 }
 
-function CountChip({ n, active }: { n: number; active: boolean }) {
+function NotifBadge({ n }: { n: number }) {
+  const label = n > 99 ? '99+' : String(n);
   return (
     <span
       style={{
-        fontSize: 10,
-        fontWeight: 700,
-        padding: '1px 7px',
+        position: 'absolute',
+        top: -6,
+        right: label.length > 1 ? -12 : -9,
+        minWidth: 16,
+        height: 16,
         borderRadius: 100,
-        background: active ? theme.colors.orange : theme.colors.bgSubtle,
-        color: active ? '#fff' : theme.colors.textMuted,
+        background: '#DC2626',
+        color: '#fff',
+        fontSize: 9,
+        fontWeight: 700,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: '0 3px',
+        lineHeight: 1,
         fontVariantNumeric: 'tabular-nums',
-        lineHeight: 1.4,
+        boxShadow: '0 1px 3px rgba(0,0,0,0.25)',
+        pointerEvents: 'none',
       }}
     >
-      {n}
+      {label}
     </span>
   );
 }
@@ -480,10 +491,12 @@ export function TabbedDetailPanel(props: TabbedDetailPanelConfig) {
                 role="tab"
               >
                 {tab.icon}
-                <span>{tab.label}</span>
-                {tab.badgeCount != null && tab.badgeCount > 0 && (
-                  <CountChip n={tab.badgeCount} active={isActive} />
-                )}
+                <span style={{ position: 'relative', display: 'inline-block' }}>
+                  {tab.label}
+                  {tab.badgeCount != null && tab.badgeCount > 0 && (
+                    <NotifBadge n={tab.badgeCount} />
+                  )}
+                </span>
               </button>
             );
           })}

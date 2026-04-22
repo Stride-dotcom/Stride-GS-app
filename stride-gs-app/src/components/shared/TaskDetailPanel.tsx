@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useMemo, useEffect } from 'react';
-import { X, ClipboardList, Package, MapPin, CheckCircle2, XCircle, AlertTriangle, FolderOpen, Loader2, Play, ExternalLink, Truck, Wrench, Save, DollarSign, Pencil, FileText, MoreHorizontal } from 'lucide-react';
+import { X, Package, MapPin, CheckCircle2, XCircle, AlertTriangle, FolderOpen, Loader2, Play, ExternalLink, Truck, Wrench, Save, DollarSign, Pencil, FileText, MoreHorizontal } from 'lucide-react';
 import { FolderButton } from './FolderButton';
 import { DeepLink } from './DeepLink';
 import { TabbedDetailPanel, type TabbedDetailPanelTab } from './TabbedDetailPanel';
@@ -665,38 +665,6 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
             ) : (
               <div style={{ fontSize: 13, fontFamily: 'monospace' }}>{location || '\u2014'}</div>
             )}
-          </div>
-
-          {/* Item Notes & Task Notes — combined, clearly labeled */}
-          <div style={{ marginBottom: 16, padding: 12, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#FAFAFA' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}>
-              <ClipboardList size={14} color={theme.colors.orange} />
-              <span style={{ fontSize: 12, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em' }}>Item Notes &amp; Task Notes</span>
-            </div>
-
-            {/* Item Notes (read-only — sourced from Inventory) */}
-            <div style={{ marginBottom: 10 }}>
-              <div style={{ fontSize: 10, fontWeight: 700, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 4 }}>
-                Item Notes <span style={{ fontWeight: 400, textTransform: 'none', letterSpacing: 0 }}>(from Inventory)</span>
-              </div>
-              <div style={{ fontSize: 13, color: task.itemNotes ? theme.colors.text : theme.colors.textMuted, lineHeight: 1.5, whiteSpace: 'pre-wrap', padding: '6px 10px', background: '#fff', border: `1px solid ${theme.colors.borderLight}`, borderRadius: 6, minHeight: 28 }}>
-                {task.itemNotes || 'No item notes'}
-              </div>
-            </div>
-
-            {/* Task Notes (editable) */}
-            <div>
-              <div style={{ fontSize: 10, fontWeight: 700, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 4 }}>
-                Task Notes <span style={{ fontWeight: 400, textTransform: 'none', letterSpacing: 0 }}>(this task)</span>
-              </div>
-              {isEditingTask ? (
-                <textarea value={notes} onChange={e => setNotes(e.target.value)} rows={3} placeholder="Add notes about this task..." style={{ ...input, resize: 'vertical' }} />
-              ) : (
-                <div style={{ fontSize: 13, color: notes ? theme.colors.text : theme.colors.textMuted, lineHeight: 1.5, whiteSpace: 'pre-wrap', padding: '6px 10px', background: '#fff', border: `1px solid ${theme.colors.borderLight}`, borderRadius: 6, minHeight: 28 }}>
-                  {notes || 'No task notes'}
-                </div>
-              )}
-            </div>
           </div>
 
           {/* Repair Quote Actions */}
