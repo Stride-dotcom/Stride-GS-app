@@ -143,6 +143,8 @@ The session-59 cleanup deleted the two junk nested repos (`stride-gs-app/.git`, 
 ## Rules for Claude
 
 ### Must-do
+- **BRANCH FIRST. Never commit directly to `source`.** Every task starts with `git checkout -b feat/<stream>/<desc>` from a fresh `source`. Streams: `feat/warehouse/*` (inventory/tasks/repairs/WC/billing/receiving/claims), `feat/delivery/*` (DT / orders / customer portal), `feat/fix/*` (hotfixes). Commit to the branch, push with `-u origin <branch>`, then give the user the PR compare URL (`https://github.com/Stride-dotcom/Stride-GS-app/compare/source...<branch>`). If `gh` CLI is installed, open + squash-merge the PR yourself. **This is load-bearing for multi-builder parallelism.** Committing to `source` directly causes Dropbox sync conflicts and silently overwrites another builder's work (happened in session 77 — Stage B GAS edits were wiped mid-session). Full workflow: `_archive/Docs/REPO_STRUCTURE.md`.
+- **Deploy separately, AFTER merge.** Feature branches don't deploy. Once the PR is merged into `source`, pull source locally, then run `npm run deploy` from `stride-gs-app/`. The deploy script's parent-repo commit step (`git add -A` on source) only makes sense on an up-to-date `source` — running it mid-feature-branch-work couples build artifacts to unmerged code.
 - **Deploy before reporting done.** After every code change, run the deploy commands via Bash — don't describe them. See deploy table below. Only exception: user explicitly asks for instructions instead of execution.
 - **Version header on every script edit.** Lines 1-3 of every `.gs`/`.js` file:
   ```
