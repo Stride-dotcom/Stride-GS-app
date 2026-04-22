@@ -262,6 +262,39 @@ First line of diagnosis: **which channel carries this change?** (see decision tr
 
 ---
 
+## PARALLEL BUILD WORKFLOW — MANDATORY FOR ALL SESSIONS
+=========================================================
+
+⚠️ NEVER deploy directly from a repair/feature session. ALL sessions must follow this workflow:
+
+### How parallel work works:
+1. Each session works in its own git worktree (automatic with Claude Code)
+2. Make your changes on the worktree branch
+3. Push the branch to origin
+4. Create a PR using `gh pr create`
+5. DO NOT build, DO NOT deploy, DO NOT touch the dist repo
+6. Report what was changed and the PR URL
+
+### Who deploys:
+- Only ONE coordinating session merges PRs and deploys
+- Deploy happens from the MAIN workspace only (`C:\Users\expre\Dropbox\Apps\GS Inventory`)
+- Multiple PRs can be merged before a single deploy
+- Deploy follows the existing DEPLOYMENT RULES (build from main workspace, verify app loads)
+
+### Why:
+- Multiple sessions deploying independently overwrite each other's work
+- The dist repo has one `main` branch — last push wins, previous deploys are lost
+- Dropbox sync conflicts happen when multiple sessions touch the main workspace
+
+### Rules:
+1. NEVER run `npm run build` or `git push origin main` from a worktree session
+2. NEVER copy files to the main workspace dist folder from a worktree session
+3. Always create a PR instead of deploying
+4. If your changes include GAS (StrideAPI.gs, CB scripts), note it in the PR description — GAS deploys are also coordinated, not independent
+5. Include "DO NOT DEPLOY — PR only" in your session's final report if you followed this workflow
+
+---
+
 ## DEPLOYMENT RULES — MUST READ BEFORE ANY DEPLOY
 
 ```
