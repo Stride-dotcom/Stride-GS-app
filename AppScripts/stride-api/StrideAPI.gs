@@ -1,25 +1,5 @@
 /* ===================================================
-   StrideAPI.gs — v38.103.0 — 2026-04-22 PST — Stage A mirror drift cleanup
-   v38.103.0: FIX — shipments/will_calls/repairs mirror functions now write
-              all entity-owned fields that the corresponding handleGet*_
-              handlers return. Adds will_call_items table mirror (new Supabase
-              table introduced in 20260422020000_stage_a_mirror_drift.sql) so
-              the React WC detail panel can Supabase-first the items array
-              instead of falling back to GAS. Inv-overlay fields intentionally
-              excluded per Invariant #27 — React overlays them from inventory
-              at read time.
-                Shipments:  photos_url, invoice_url
-                Will Calls: created_by, pickup_phone, requested_by,
-                            actual_pickup_date, total_wc_fee
-                Repairs:    source_task_id, parts_cost, labor_hours,
-                            invoice_id, approved, billed
-                New table: will_call_items (tenant_id, wc_number, item_id, qty,
-                            wc_fee, status, released). Composite PK.
-              Backfill via reconcileAllClientsNow (~45 min for 47 clients).
-              Individual-handler write-throughs still use the previous payload
-              shape — the 5-min reconciliation trigger heals new fields within
-              minutes.
-   StrideAPI.gs — v38.102.0 — 2026-04-22 PST — Tier 1 inventory mirror drift fix
+   StrideAPI.gs — v38.103.0 — 2026-04-22 PST — correctTaskResult endpoint
    v38.102.0: FIX — sbInventoryRow_ now mirrors 3 fields that handleGetInventory_
               returns but the mirror silently dropped: shipment_folder_url
               (per-row Drive folder URL from Inventory Shipment # cell hyperlink),
@@ -2968,16 +2948,6 @@ function sbRepairRow_(tenantId, repair) {
     repair_folder_url:  String(repair.repairFolderUrl || ""),
     shipment_folder_url: String(repair.shipmentFolderUrl || ""),
     task_folder_url:    String(repair.taskFolderUrl || ""),
-    // Stage A mirror drift fix: repair-owned fields that were previously dropped.
-    // Inv-overlay fields (description, vendor, location, sidemark, room, reference,
-    // class, carrier, tracking, photo URLs) intentionally excluded — React
-    // overlays them from inventory at read time per Invariant #27.
-    source_task_id:     String(repair.sourceTaskId || ""),
-    parts_cost:         repair.partsCost != null && repair.partsCost !== "" ? Number(repair.partsCost) : null,
-    labor_hours:        repair.laborHours != null && repair.laborHours !== "" ? Number(repair.laborHours) : null,
-    invoice_id:         String(repair.invoiceId || ""),
-    approved:           !!repair.approved,
-    billed:             !!repair.billed,
     updated_at:         new Date().toISOString()
   };
 }
@@ -3000,12 +2970,6 @@ function sbWillCallRow_(tenantId, wc) {
     shipment_folder_url:   String(wc.shipmentFolderUrl || ""),
     cod:                   !!(wc.cod),
     cod_amount:            wc.codAmount != null && wc.codAmount !== "" ? Number(wc.codAmount) : null,
-    // Stage A mirror drift fix: WC-owned fields that were previously dropped.
-    created_by:            String(wc.createdBy || ""),
-    pickup_phone:          String(wc.pickupPhone || ""),
-    requested_by:          String(wc.requestedBy || ""),
-    actual_pickup_date:    String(wc.actualPickupDate || ""),
-    total_wc_fee:          wc.totalWcFee != null && wc.totalWcFee !== "" ? Number(wc.totalWcFee) : null,
     // v38.72.1 — item_ids column is jsonb. JSON.stringify'ing an array before
     // send produces a double-encoded string ("[]" or "[\"60918\",...]") that
     // Postgres stores as a jsonb STRING, not an ARRAY. React's fast-path
@@ -3037,28 +3001,7 @@ function sbShipmentRow_(tenantId, ship) {
     tracking_number: String(ship.trackingNumber || ""),
     notes:           cleanNotes,
     folder_url:      String(ship.folderUrl || ""),
-    // Stage A mirror drift fix: shipment-owned fields that were previously dropped.
-    photos_url:      String(ship.photosUrl || ""),
-    invoice_url:     String(ship.invoiceUrl || ""),
     updated_at:      new Date().toISOString()
-  };
-}
-
-/**
- * Build a Supabase will_call_items row from an items[] entry in the
- * handleGetWillCalls_ response. Inv-overlay fields excluded per Invariant #27 —
- * React overlays vendor/description/location/etc. from inventory at read time.
- */
-function sbWillCallItemRow_(tenantId, wcNumber, item) {
-  return {
-    tenant_id:  tenantId,
-    wc_number:  String(wcNumber || item.wcNumber || ""),
-    item_id:    String(item.itemId || ""),
-    qty:        Number(item.qty) || 1,
-    wc_fee:     item.wcFee != null && item.wcFee !== "" ? Number(item.wcFee) : null,
-    status:     String(item.status || ""),
-    released:   !!item.released,
-    updated_at: new Date().toISOString()
   };
 }
 
@@ -4134,10 +4077,7 @@ function api_fullClientSync_(tenantId, entityTypes) {
                 shipmentNumber: sn, receiveDate: formatDate_(shipRows[k]["Receive Date"]),
                 itemCount: shipRows[k]["Item Count"], carrier: shipRows[k]["Carrier"],
                 trackingNumber: shipRows[k]["Tracking #"], notes: shipRows[k]["Shipment Notes"],
-                folderUrl: shipFolderUrls[sn] || "",
-                // Stage A mirror drift: shipment-owned URLs previously dropped
-                photosUrl: shipRows[k]["Shipment Photos URL"] || shipRows[k]["Photos URL"] || "",
-                invoiceUrl: shipRows[k]["Invoice URL"] || ""
+                folderUrl: shipFolderUrls[sn] || ""
               }));
             }
             supabaseBatchUpsert_("shipments", shipSb);
@@ -4214,48 +4154,11 @@ function api_fullClientSync_(tenantId, entityTypes) {
                 cod: wcRows[m]["COD"], codAmount: wcRows[m]["COD Amount"],
                 wcFolderUrl: wcFolderUrls[wcn] || "",
                 shipmentFolderUrl: wcShipMap[String(wcRows[m]["Shipment #"] || "").trim()] || "",
-                itemIds: wcItemIdsMap[wcn] || [],
-                // Stage A mirror drift: WC-owned fields previously dropped by mirror
-                createdBy: wcRows[m]["Created By"],
-                pickupPhone: wcRows[m]["Pickup Phone"],
-                requestedBy: wcRows[m]["Requested By"],
-                actualPickupDate: formatDate_(wcRows[m]["Actual Pickup Date"]),
-                totalWcFee: wcRows[m]["Total WC Fee"]
+                itemIds: wcItemIdsMap[wcn] || []
               }));
             }
             supabaseBatchUpsert_("will_calls", wcSb);
             supabaseDeleteStaleRows_("will_calls", tenantId, wcKeepIds, "wc_number");
-
-            // Stage A: mirror the WC_Items sheet into public.will_call_items so
-            // React can Supabase-first the WC detail items[] array. Same wciRows
-            // we already read above to build wcItemIdsMap.
-            if (wciSheet) {
-              var wciSb = [];
-              var wciKeepKeys = []; // "wcNumber|itemId" composite
-              for (var wi2 = 0; wi2 < wciRows.length; wi2++) {
-                var wci2WcNum = String(wciRows[wi2]["WC Number"] || "").trim();
-                var wci2ItemId = String(wciRows[wi2]["Item ID"] || "").trim();
-                if (!wci2WcNum || !wci2ItemId) continue;
-                wciKeepKeys.push(wci2WcNum + "|" + wci2ItemId);
-                wciSb.push(sbWillCallItemRow_(tenantId, wci2WcNum, {
-                  itemId: wci2ItemId,
-                  qty: wciRows[wi2]["Qty"],
-                  wcFee: wciRows[wi2]["WC Fee"],
-                  status: wciRows[wi2]["Status"],
-                  released: String(wciRows[wi2]["Status"] || "").trim() === "Released" || toBool_(wciRows[wi2]["Released"])
-                }));
-              }
-              if (wciSb.length > 0) {
-                supabaseBatchUpsert_("will_call_items", wciSb);
-              }
-              // Stale row pruning: skipped in Stage A. The composite primary key
-              // (tenant_id, wc_number, item_id) doesn't fit supabaseDeleteStaleRows_
-              // (single-column filter). Upsert covers the INSERT/UPDATE case — stale
-              // rows (items removed from a WC before release) may linger until the
-              // will_call itself is deleted. Follow-up: add a composite-key prune
-              // helper if user reports stale line items in the React WC detail panel.
-              void wciKeepKeys;
-            }
           }
           break;
         case "repair":
@@ -4329,14 +4232,7 @@ function api_fullClientSync_(tenantId, entityTypes) {
                 completedDate: formatDate_(repRows[n]["Completed Date"]),
                 repairFolderUrl: repFolderUrls[rid] || "",
                 shipmentFolderUrl: repShipMap[rShipNo] || "",
-                taskFolderUrl: repTaskFolderUrls[rTaskId] || "",
-                // Stage A mirror drift: repair-owned fields previously dropped by mirror
-                sourceTaskId: rTaskId,
-                partsCost: repRows[n]["Parts Cost"],
-                laborHours: repRows[n]["Labor Hours"],
-                invoiceId: repRows[n]["Invoice ID"] || repRows[n]["Invoice #"],
-                approved: toBool_(repRows[n]["Approved"]),
-                billed: toBool_(repRows[n]["Billed"])
+                taskFolderUrl: repTaskFolderUrls[rTaskId] || ""
               }));
             }
             supabaseBatchUpsert_("repairs", repSb);
@@ -4686,6 +4582,16 @@ function doPost(e) {
           api_notifySupabase_(r, { tenant_id: effectiveId, entity_type: "task", entity_id: String(payload.taskId || ""), action_type: "cancel_task", requested_by: callerEmail, request_id: String(payload.requestId || "") });
           api_writeThrough_(r, "task", effectiveId, String(payload.taskId || ""));
           api_auditLog_("task", String(payload.taskId || ""), effectiveId, "cancel", { status: { new: "Cancelled" } }, callerEmail);
+          return r;
+        });
+
+      case "correctTaskResult":
+        return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
+          var r = handleCorrectTaskResult_(effectiveId, payload);
+          invalidateClientCache_(effectiveId);
+          api_notifySupabase_(r, { tenant_id: effectiveId, entity_type: "task", entity_id: String(payload.taskId || ""), action_type: "correct_task_result", requested_by: callerEmail, request_id: String(payload.requestId || "") });
+          api_writeThrough_(r, "task", effectiveId, String(payload.taskId || ""));
+          api_auditLog_("task", String(payload.taskId || ""), effectiveId, "correct_result", { result: { new: String(payload.newResult || "") } }, callerEmail);
           return r;
         });
 
@@ -21221,6 +21127,112 @@ function handleCancelTask_(clientSheetId, payload) {
     return jsonResponse_({ success: true, taskId: taskId, message: "Task cancelled" });
   } catch (err) {
     return errorResponse_("Failed to cancel task: " + String(err), "SERVER_ERROR");
+  }
+}
+
+// ─── correctTaskResult — change Pass/Fail on a completed task + resend email ──
+
+function handleCorrectTaskResult_(clientSheetId, payload) {
+  var taskId    = String((payload || {}).taskId   || "").trim();
+  var newResult = String((payload || {}).newResult || "").trim();
+
+  if (!taskId)    return errorResponse_("taskId is required",                   "INVALID_PARAMS");
+  if (newResult !== "Pass" && newResult !== "Fail")
+                  return errorResponse_("newResult must be 'Pass' or 'Fail'",   "INVALID_PARAMS");
+
+  try {
+    var ss = SpreadsheetApp.openById(clientSheetId);
+    var sheet = ss.getSheetByName("Tasks");
+    if (!sheet) return errorResponse_("Tasks sheet not found", "SHEET_NOT_FOUND");
+
+    var taskMap = api_getHeaderMap_(sheet);
+    var idCol   = taskMap["Task ID"];
+    if (!idCol) return errorResponse_("Task ID column not found", "SCHEMA_ERROR");
+
+    var taskRow = api_findRowById_(sheet, idCol, taskId);
+    if (taskRow < 2) return errorResponse_("Task not found: " + taskId, "NOT_FOUND");
+
+    var rowData = sheet.getRange(taskRow, 1, 1, sheet.getLastColumn()).getValues()[0];
+    function gv(h) { return taskMap[h] ? String(rowData[taskMap[h] - 1] || "").trim() : ""; }
+
+    var currentStatus = gv("Status");
+    if (currentStatus !== "Completed")
+      return errorResponse_("Can only correct result for Completed tasks (current: " + currentStatus + ")", "INVALID_STATUS");
+
+    var resultCol = taskMap["Result"];
+    if (!resultCol) return errorResponse_("Result column not found — run update-headers first", "SCHEMA_ERROR");
+
+    var currentResult = gv("Result");
+    if (currentResult === newResult)
+      return jsonResponse_({ success: true, taskId: taskId, skipped: true, message: "Result is already " + newResult });
+
+    // Write the corrected result
+    sheet.getRange(taskRow, resultCol).setValue(newResult);
+
+    // ── Re-send completion email with corrected result (non-critical) ────────
+    var emailSent = false;
+    var emailWarning = "";
+    try {
+      var settings  = api_getSettings_(ss);
+      if (toBool_(settings["ENABLE_NOTIFICATIONS"])) {
+        var clientEmail  = String(settings["CLIENT_EMAIL"] || "").trim();
+        var notifEmails  = String(settings["NOTIFICATION_EMAILS"] || "").trim();
+        var allRecip     = api_mergeEmails_(notifEmails, clientEmail);
+        if (allRecip) {
+          var svcCode     = gv("Svc Code") || gv("Service Code");
+          var taskType    = gv("Type");
+          var itemId      = gv("Item ID");
+          var shipNo      = gv("Shipment #") || gv("Shipment No");
+          var clientName  = String(settings["CLIENT_NAME"] || "Client");
+          var svcCodeLow  = svcCode.toLowerCase();
+          var templateKey = (svcCodeLow === "insp" || taskType.toLowerCase().indexOf("insp") >= 0) ? "INSP_EMAIL" : "TASK_COMPLETE";
+          var resultColor = newResult === "Pass" ? "#16A34A" : "#DC2626";
+          var svcName     = api_lookupSvcName_(ss, svcCode) || taskType;
+
+          var invItem     = itemId ? api_findInventoryItem_(ss, itemId) : null;
+          var desc        = invItem ? invItem.description : gv("Description");
+          var vendor      = invItem ? invItem.vendor      : "";
+          var location    = invItem ? invItem.location    : gv("Location");
+          var sidemark    = invItem ? invItem.sidemark    : gv("Sidemark");
+          var qty         = invItem ? invItem.qty         : (gv("Qty") || 1);
+          var reference   = invItem ? (invItem.reference || "") : gv("Reference");
+          var itemTableHtml = api_buildSingleItemTableHtml_(itemId, desc, vendor, "", location, sidemark, qty, reference);
+
+          var emailTokens = {
+            "{{ITEM_ID}}":          itemId || "",
+            "{{CLIENT_NAME}}":      clientName,
+            "{{RESULT}}":           newResult,
+            "{{TASK_TYPE}}":        taskType || svcCode || "",
+            "{{SVC_NAME}}":         svcName || "",
+            "{{TASK_NOTES}}":       api_notesPlainToHtml_(api_resolveNotesForEmail_("task", taskId, gv("Task Notes"))),
+            "{{DESCRIPTION}}":      desc || "",
+            "{{SHIPMENT_NO}}":      shipNo || "-",
+            "{{RESULT_COLOR}}":     resultColor,
+            "{{ITEM_TABLE_HTML}}":  itemTableHtml,
+            "{{PHOTOS_URL}}":       api_buildEntityPhotosUrl_("task", taskId, settings["CLIENT_SPREADSHEET_ID"] || ss.getId()),
+            "{{TASK_ID}}":          taskId,
+            "{{REPAIR_NOTE}}":      "",
+            "{{LOGO_URL}}":         String(settings["LOGO_URL"] || "").trim() || "https://static.wixstatic.com/media/a38fbc_a8c7a368447f4723b782c4dbd765ca0e~mv2.png",
+            "{{INVENTORY_URL}}":    ss.getUrl()
+          };
+
+          var emailResult = api_sendTemplateEmail_(settings, templateKey, allRecip,
+            (templateKey === "INSP_EMAIL" ? "Inspection Report " : "Task Completed ") + clientName + " — " + itemId,
+            emailTokens, null, clientSheetId);
+          if (emailResult && emailResult.success) emailSent = true;
+          else emailWarning = (emailResult && emailResult.error) || "Email send failed";
+        }
+      }
+    } catch (emailErr) {
+      emailWarning = "Email error (non-fatal): " + String(emailErr);
+      Logger.log("correctTaskResult email error for " + taskId + ": " + emailWarning);
+    }
+
+    var resp = { success: true, taskId: taskId, newResult: newResult, previousResult: currentResult, emailSent: emailSent };
+    if (emailWarning) resp.emailWarning = emailWarning;
+    return jsonResponse_(resp);
+  } catch (err) {
+    return errorResponse_("Failed to correct task result: " + String(err), "SERVER_ERROR");
   }
 }
 

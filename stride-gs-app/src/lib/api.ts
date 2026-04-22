@@ -2733,6 +2733,24 @@ export function postCancelTask(
   );
 }
 
+// ─── Correct Task Result ──────────────────────────────────────────────────────
+
+export interface CorrectTaskResultPayload { taskId: string; newResult: 'Pass' | 'Fail'; }
+export interface CorrectTaskResultResponse { success: boolean; taskId: string; newResult?: string; previousResult?: string; emailSent?: boolean; emailWarning?: string; skipped?: boolean; message?: string; error?: string; }
+
+export function postCorrectTaskResult(
+  payload: CorrectTaskResultPayload,
+  clientSheetId: string,
+  signal?: AbortSignal
+) {
+  return apiPost<CorrectTaskResultResponse>(
+    'correctTaskResult',
+    payload as unknown as Record<string, unknown>,
+    { clientSheetId },
+    { signal }
+  );
+}
+
 // ─── Cancel Repair ────────────────────────────────────────────────────────────
 
 export interface CancelRepairPayload { repairId: string; }

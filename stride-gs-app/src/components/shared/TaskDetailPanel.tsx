@@ -9,7 +9,7 @@ import { buildDeepLink } from '../../lib/deepLinks';
 import { theme } from '../../styles/theme';
 import { fmtDate, fmtDateTime } from '../../lib/constants';
 import { WriteButton } from './WriteButton';
-import { postCompleteTask, postStartTask, postUpdateTaskNotes, postUpdateTaskCustomPrice, postRequestRepairQuote, postCancelTask, postGenerateTaskWorkOrder, postUpdateInventoryItem, postUpdateTaskPriority, postUpdateTaskDueDate, isApiConfigured } from '../../lib/api';
+import { postCompleteTask, postStartTask, postUpdateTaskNotes, postUpdateTaskCustomPrice, postRequestRepairQuote, postCancelTask, postCorrectTaskResult, postGenerateTaskWorkOrder, postUpdateInventoryItem, postUpdateTaskPriority, postUpdateTaskDueDate, isApiConfigured } from '../../lib/api';
 import { writeSyncFailed } from '../../lib/syncEvents';
 import { entityEvents } from '../../lib/entityEvents';
 import { useLocations } from '../../hooks/useLocations';
@@ -104,8 +104,6 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
 
   // Priority + Due Date — auto-save on change
   const canEditPriority = user?.role === 'admin' || user?.role === 'staff';
-  // Stage A: clients don't start tasks — staff does. Hide Start Task on client role.
-  const canStart = user?.role === 'admin' || user?.role === 'staff';
   const [priority, setPriority] = useState<'High' | 'Normal'>(task.priority === 'High' ? 'High' : 'Normal');
   const [dueDate, setDueDate] = useState<string>(task.dueDate || '');
   useEffect(() => {
@@ -145,6 +143,13 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
   const [repairRequesting, setRepairRequesting] = useState(false);
   const [repairRequestError, setRepairRequestError] = useState<string | null>(null);
 
+  // Fix 2 — correct result on completed task
+  const canCorrectResult = user?.role === 'admin' || user?.role === 'staff';
+  const [showCorrectResult, setShowCorrectResult] = useState(false);
+  const [correctResultLoading, setCorrectResultLoading] = useState(false);
+  const [correctResultError, setCorrectResultError] = useState<string | null>(null);
+  const [correctedResult, setCorrectedResult] = useState<'Pass' | 'Fail' | null>(null);
+
   const activeRepair = useMemo(() => {
     return itemRepairs.find((r: any) => {
       const s = String(r.status || '').trim();
@@ -155,6 +160,28 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
   const repairStatus = activeRepair ? String(activeRepair.status || '').trim()
     : repairRequested ? 'Pending Quote'
     : null;
+
+  const handleCorrectResult = useCallback(async (newResult: 'Pass' | 'Fail') => {
+    if (!apiConfigured || !clientSheetId) return;
+    setCorrectResultLoading(true);
+    setCorrectResultError(null);
+    mergeTaskPatch?.(task.taskId, { result: newResult });
+    try {
+      const resp = await postCorrectTaskResult({ taskId: task.taskId, newResult }, clientSheetId);
+      if (resp.ok && resp.data?.success) {
+        setCorrectedResult(newResult);
+        setShowCorrectResult(false);
+        onTaskUpdated?.();
+      } else {
+        clearTaskPatch?.(task.taskId);
+        setCorrectResultError(resp.data?.error || resp.error || 'Failed to correct result');
+      }
+    } catch {
+      clearTaskPatch?.(task.taskId);
+      setCorrectResultError('Network error — please try again');
+    }
+    setCorrectResultLoading(false);
+  }, [apiConfigured, clientSheetId, task.taskId, mergeTaskPatch, clearTaskPatch, onTaskUpdated]);
 
   const handleRequestRepair = useCallback(async () => {
     if (!apiConfigured || !clientSheetId || !task.itemId) return;
@@ -486,6 +513,57 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
     setSubmitting(false);
   }, [apiConfigured, clientSheetId, task, applyTaskPatch, clearTaskPatch, onTaskUpdated, user]);
 
+  // ─── Correct-result widget (Fix 2) — admin/staff only, completed tasks ──────
+  const currentResultForWidget = correctedResult || submitResult?.result || task.result;
+  const renderCorrectResultWidget = () => {
+    if (!canCorrectResult) return null;
+    if (task.status !== 'Completed' && !completed) return null;
+    if (!showCorrectResult) {
+      return (
+        <div style={{ marginTop: 8, textAlign: 'center' }}>
+          <button
+            onClick={() => setShowCorrectResult(true)}
+            style={{ fontSize: 11, color: theme.colors.textMuted, background: 'none', border: 'none', cursor: 'pointer', textDecoration: 'underline', padding: '2px 0', fontFamily: 'inherit' }}
+          >
+            Correct result...
+          </button>
+        </div>
+      );
+    }
+    return (
+      <div style={{ marginTop: 10, paddingTop: 10, borderTop: `1px solid ${theme.colors.border}` }}>
+        <div style={{ fontSize: 11, color: theme.colors.textMuted, marginBottom: 6 }}>
+          Change result + resend completion email:
+        </div>
+        {correctResultError && (
+          <div style={{ fontSize: 11, color: '#DC2626', marginBottom: 6, padding: '4px 8px', background: '#FEF2F2', borderRadius: 6 }}>{correctResultError}</div>
+        )}
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+          <button
+            onClick={() => { if (!correctResultLoading && currentResultForWidget !== 'Pass') handleCorrectResult('Pass'); }}
+            disabled={correctResultLoading || currentResultForWidget === 'Pass'}
+            style={{ flex: 1, padding: '7px', fontSize: 12, fontWeight: 600, borderRadius: 8, border: 'none', background: currentResultForWidget === 'Pass' ? '#D1FAE5' : '#16A34A', color: currentResultForWidget === 'Pass' ? '#6B7280' : '#fff', cursor: correctResultLoading || currentResultForWidget === 'Pass' ? 'not-allowed' : 'pointer', fontFamily: 'inherit', opacity: currentResultForWidget === 'Pass' ? 0.55 : 1 }}
+          >
+            {correctResultLoading && currentResultForWidget !== 'Pass' ? <Loader2 size={12} style={{ animation: 'spin 1s linear infinite', verticalAlign: 'middle' }} /> : '✓'} Pass
+          </button>
+          <button
+            onClick={() => { if (!correctResultLoading && currentResultForWidget !== 'Fail') handleCorrectResult('Fail'); }}
+            disabled={correctResultLoading || currentResultForWidget === 'Fail'}
+            style={{ flex: 1, padding: '7px', fontSize: 12, fontWeight: 600, borderRadius: 8, border: '2px solid #DC2626', background: currentResultForWidget === 'Fail' ? '#FEF2F2' : 'transparent', color: currentResultForWidget === 'Fail' ? '#6B7280' : '#DC2626', cursor: correctResultLoading || currentResultForWidget === 'Fail' ? 'not-allowed' : 'pointer', fontFamily: 'inherit', opacity: currentResultForWidget === 'Fail' ? 0.55 : 1 }}
+          >
+            {correctResultLoading && currentResultForWidget !== 'Fail' ? <Loader2 size={12} style={{ animation: 'spin 1s linear infinite', verticalAlign: 'middle' }} /> : '✕'} Fail
+          </button>
+          <button
+            onClick={() => { setShowCorrectResult(false); setCorrectResultError(null); }}
+            style={{ padding: '7px 10px', fontSize: 12, background: 'none', border: `1px solid ${theme.colors.border}`, borderRadius: 8, color: theme.colors.textMuted, cursor: 'pointer', fontFamily: 'inherit' }}
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+    );
+  };
+
   // ─── Tab renderers ───────────────────────────────────────────────────
   // Tab content is kept as small inline render functions that consume
   // state from this adapter's scope (closure). The benefit: future shell
@@ -802,7 +880,7 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
 
     // ── Terminal states — slim strip ────────────────────────────────────
     if (completed || task.status === 'Completed') {
-      const result = submitResult?.result || task.result;
+      const result = correctedResult || submitResult?.result || task.result;
       const isPass = result !== 'Fail';
       return (
         <div style={{ padding: '0 16px 0', paddingBottom: 'env(safe-area-inset-bottom, 12px)' }}>
@@ -813,6 +891,7 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
               {task.completedAt ? ` · Completed ${fmtDate(task.completedAt)}` : ''}
             </span>
           </div>
+          {renderCorrectResultWidget()}
         </div>
       );
     }
@@ -934,19 +1013,17 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
         {errorBanner}
         {overflowMenu}
         <div style={{ padding: '12px 16px', paddingBottom: 'calc(env(safe-area-inset-bottom, 0px) + 12px)', display: 'flex', gap: 8 }}>
-          {canStart && (
-            <button
-              onClick={() => handleStartTask()}
-              disabled={startTaskLoading}
-              style={{ flex: 1, height: 52, background: '#16A34A', color: '#fff', borderRadius: 12, border: 'none', fontSize: 15, fontWeight: 600, cursor: startTaskLoading ? 'wait' : 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, minHeight: 44, boxShadow: '0 3px 10px rgba(22,163,74,0.3)' }}
-            >
-              {startTaskLoading ? <Loader2 size={18} style={{ animation: 'spin 1s linear infinite' }} /> : <Play size={18} fill="#fff" />}
-              Start Task
-            </button>
-          )}
+          <button
+            onClick={() => handleStartTask()}
+            disabled={startTaskLoading}
+            style={{ flex: 1, height: 52, background: '#16A34A', color: '#fff', borderRadius: 12, border: 'none', fontSize: 15, fontWeight: 600, cursor: startTaskLoading ? 'wait' : 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, minHeight: 44, boxShadow: '0 3px 10px rgba(22,163,74,0.3)' }}
+          >
+            {startTaskLoading ? <Loader2 size={18} style={{ animation: 'spin 1s linear infinite' }} /> : <Play size={18} fill="#fff" />}
+            Start Task
+          </button>
           <button
             onClick={() => setOverflowOpen(o => !o)}
-            style={{ width: canStart ? 52 : '100%', height: 52, flexShrink: 0, background: 'none', color: theme.colors.textMuted, borderRadius: 12, border: `1px solid ${theme.colors.border}`, cursor: 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: 44 }}
+            style={{ width: 52, height: 52, flexShrink: 0, background: 'none', color: theme.colors.textMuted, borderRadius: 12, border: `1px solid ${theme.colors.border}`, cursor: 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: 44 }}
             aria-label="More actions"
           >
             <MoreHorizontal size={20} />
@@ -986,7 +1063,7 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
                     </div>
                   </div>
                 )}
-                {!startTaskConflict && canStart && (
+                {!startTaskConflict && (
                   <button
                     onClick={() => handleStartTask()}
                     disabled={startTaskLoading}
@@ -1058,7 +1135,7 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
             <div style={{ padding: '10px 12px', background: '#F0FDF4', border: '1px solid #86EFAC', borderRadius: 8, marginBottom: 10, fontSize: 12, color: '#15803D' }}>
               <div style={{ fontWeight: 600, marginBottom: 4 }}>
                 <CheckCircle2 size={13} style={{ verticalAlign: 'middle', marginRight: 4 }} />
-                Task completed — {submitResult.result || task.result || ''}
+                Task completed — {correctedResult || submitResult.result || task.result || ''}
               </div>
               {submitResult.billingCreated && <div>✓ Billing row created</div>}
               {submitResult.skipped && <div style={{ color: '#B45309' }}>Already processed — no duplicate writes.</div>}
@@ -1067,7 +1144,8 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
               ))}
             </div>
           )}
-          <button onClick={onClose} style={{ width: '100%', padding: '10px', fontSize: 13, fontWeight: 600, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', fontFamily: 'inherit', color: theme.colors.textSecondary }}>Close</button>
+          {renderCorrectResultWidget()}
+          <button onClick={onClose} style={{ width: '100%', marginTop: 8, padding: '10px', fontSize: 13, fontWeight: 600, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', fontFamily: 'inherit', color: theme.colors.textSecondary }}>Close</button>
         </div>
       )}
     </>
