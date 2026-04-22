@@ -518,7 +518,7 @@ export function ItemDetailPanel({
   // already-loaded tasks/repairs; the detail panel has to fetch on its own
   // because it may open from a deep link or a page that doesn't keep the
   // full task/repair list in scope. Tenant-scoped Supabase read, ~50ms.
-  const { inspItems, asmItems, repairItems } = useItemIndicators(clientSheetId);
+  const { inspOpenItems, inspDoneItems, asmOpenItems, asmDoneItems, repairOpenItems, repairDoneItems } = useItemIndicators(clientSheetId);
 
   // Move history — fetch from API when panel opens
   const [moveHistory, setMoveHistory] = useState<MoveHistoryEntry[]>([]);
@@ -1160,9 +1160,12 @@ export function ItemDetailPanel({
         idBadges={
           <ItemIdBadges
             itemId={item.itemId}
-            inspItems={inspItems}
-            asmItems={asmItems}
-            repairItems={repairItems}
+            inspOpenItems={inspOpenItems}
+            inspDoneItems={inspDoneItems}
+            asmOpenItems={asmOpenItems}
+            asmDoneItems={asmDoneItems}
+            repairOpenItems={repairOpenItems}
+            repairDoneItems={repairDoneItems}
           />
         }
         belowId={headerStatusBadge}

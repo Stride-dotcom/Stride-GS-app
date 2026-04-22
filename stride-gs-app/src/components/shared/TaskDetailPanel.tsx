@@ -91,7 +91,7 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
   const clientSheetId: string = task.clientSheetId || task.clientId || '';
 
   // (I)(A)(R) indicator badges on the Item field below — tenant-scoped.
-  const { inspItems, asmItems, repairItems } = useItemIndicators(clientSheetId);
+  const { inspOpenItems, inspDoneItems, asmOpenItems, asmDoneItems, repairOpenItems, repairDoneItems } = useItemIndicators(clientSheetId);
 
   // Location autocomplete
   const { locationNames } = useLocations();
@@ -635,9 +635,12 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
                 <DeepLink kind="inventory" id={task.itemId} clientSheetId={(task as any).clientSheetId} />
                 <ItemIdBadges
                   itemId={task.itemId}
-                  inspItems={inspItems}
-                  asmItems={asmItems}
-                  repairItems={repairItems}
+                  inspOpenItems={inspOpenItems}
+                  inspDoneItems={inspDoneItems}
+                  asmOpenItems={asmOpenItems}
+                  asmDoneItems={asmDoneItems}
+                  repairOpenItems={repairOpenItems}
+                  repairDoneItems={repairDoneItems}
                 />
                 {task.vendor ? <span>{` — ${task.vendor}`}</span> : null}
               </div>
@@ -1233,9 +1236,12 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
       idBadges={task.itemId ? (
         <ItemIdBadges
           itemId={task.itemId}
-          inspItems={inspItems}
-          asmItems={asmItems}
-          repairItems={repairItems}
+          inspOpenItems={inspOpenItems}
+          inspDoneItems={inspDoneItems}
+          asmOpenItems={asmOpenItems}
+          asmDoneItems={asmDoneItems}
+          repairOpenItems={repairOpenItems}
+          repairDoneItems={repairDoneItems}
         />
       ) : undefined}
       belowId={belowIdContent}

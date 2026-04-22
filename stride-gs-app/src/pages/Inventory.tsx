@@ -965,21 +965,33 @@ export function Inventory() {
   }, [apiConfigured, showToast, refetch, addOptimisticRepair, removeOptimisticRepair]);
 
   // Session 71+: Build item-level task/repair/WC/DT indicator sets from already-loaded data
-  const { inspItems, asmItems, repairItems, wcOpenItems, wcDoneItems, dtOpenItems, dtDoneItems } = useMemo(() => {
-    const insp = new Set<string>();
-    const asm = new Set<string>();
-    const rep = new Set<string>();
+  const { inspOpenItems, inspDoneItems, asmOpenItems, asmDoneItems, repairOpenItems, repairDoneItems, wcOpenItems, wcDoneItems, dtOpenItems, dtDoneItems } = useMemo(() => {
+    const inspOpen = new Set<string>();
+    const inspDone = new Set<string>();
+    const asmOpen = new Set<string>();
+    const asmDone = new Set<string>();
+    const repOpen = new Set<string>();
+    const repDone = new Set<string>();
     for (const t of tasks) {
       if (!t.itemId) continue;
       const code = (t.svcCode || t.type || '').toUpperCase();
-      if (code === 'INSP') insp.add(t.itemId);
-      else if (code === 'ASM') asm.add(t.itemId);
+      const done = t.status === 'Completed';
+      if (code === 'INSP') {
+        if (done) { if (!inspOpen.has(t.itemId)) inspDone.add(t.itemId); }
+        else { inspOpen.add(t.itemId); inspDone.delete(t.itemId); }
+      } else if (code === 'ASM') {
+        if (done) { if (!asmOpen.has(t.itemId)) asmDone.add(t.itemId); }
+        else { asmOpen.add(t.itemId); asmDone.delete(t.itemId); }
+      }
     }
     for (const r of repairs) {
-      if (r.itemId) rep.add(r.itemId);
+      if (!r.itemId) continue;
+      const done = r.status === 'Complete';
+      if (done) { if (!repOpen.has(r.itemId)) repDone.add(r.itemId); }
+      else { repOpen.add(r.itemId); repDone.delete(r.itemId); }
     }
 
-    // Will call indicators — orange = open/partial, green = released (all completed)
+    // Will call indicators — Released → green, everything else → orange
     const wcOpen = new Set<string>();
     const wcDone = new Set<string>();
     for (const wc of willCalls) {
@@ -987,14 +999,14 @@ export function Inventory() {
         if (!item.itemId) continue;
         if (wc.status === 'Released') {
           if (!wcOpen.has(item.itemId)) wcDone.add(item.itemId);
-        } else if (wc.status !== 'Cancelled') {
+        } else {
           wcOpen.add(item.itemId);
-          wcDone.delete(item.itemId); // open wins over done
+          wcDone.delete(item.itemId);
         }
       }
     }
 
-    // DT delivery order indicators — orange = open/in-progress, green = completed
+    // DT delivery order indicators — completed → green, everything else → orange
     const dtOpen = new Set<string>();
     const dtDone = new Set<string>();
     for (const order of orders) {
@@ -1003,14 +1015,14 @@ export function Inventory() {
         if (!id) continue;
         if (order.statusCategory === 'completed') {
           if (!dtOpen.has(id)) dtDone.add(id);
-        } else if (order.statusCategory !== 'cancelled') {
+        } else {
           dtOpen.add(id);
-          dtDone.delete(id); // open wins over done
+          dtDone.delete(id);
         }
       }
     }
 
-    return { inspItems: insp, asmItems: asm, repairItems: rep, wcOpenItems: wcOpen, wcDoneItems: wcDone, dtOpenItems: dtOpen, dtDoneItems: dtDone };
+    return { inspOpenItems: inspOpen, inspDoneItems: inspDone, asmOpenItems: asmOpen, asmDoneItems: asmDone, repairOpenItems: repOpen, repairDoneItems: repDone, wcOpenItems: wcOpen, wcDoneItems: wcDone, dtOpenItems: dtOpen, dtDoneItems: dtDone };
   }, [tasks, repairs, willCalls, orders]);
 
   // Latest public entity_note per visible item, batched so the Notes
@@ -1064,7 +1076,7 @@ export function Inventory() {
               fontWeight: theme.typography.weights.semibold,
               color: theme.colors.textPrimary,
             }}>{id}</span>
-            <ItemIdBadges itemId={id} inspItems={inspItems} asmItems={asmItems} repairItems={repairItems} wcOpenItems={wcOpenItems} wcDoneItems={wcDoneItems} dtOpenItems={dtOpenItems} dtDoneItems={dtDoneItems} />
+            <ItemIdBadges itemId={id} inspOpenItems={inspOpenItems} inspDoneItems={inspDoneItems} asmOpenItems={asmOpenItems} asmDoneItems={asmDoneItems} repairOpenItems={repairOpenItems} repairDoneItems={repairDoneItems} wcOpenItems={wcOpenItems} wcDoneItems={wcDoneItems} dtOpenItems={dtOpenItems} dtDoneItems={dtDoneItems} />
           </div>
         );
       },
@@ -1330,7 +1342,7 @@ export function Inventory() {
       ),
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  ], [showToast, inspItems, asmItems, repairItems, applyItemPatch, mergeItemPatch, canEditInventory, notesByItemId]);
+  ], [showToast, inspOpenItems, inspDoneItems, asmOpenItems, asmDoneItems, repairOpenItems, repairDoneItems, applyItemPatch, mergeItemPatch, canEditInventory, notesByItemId]);
 
   // When navigating from Shipments page, filter table to that shipment
   const tableData = useMemo(() => {
