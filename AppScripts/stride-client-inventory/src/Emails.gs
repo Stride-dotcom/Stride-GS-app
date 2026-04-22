@@ -1,5 +1,12 @@
 /* ===================================================
-   Emails.gs — v4.7.0 — 2026-04-22 PST — deep-link self-heal on every template send
+   Emails.gs — v4.8.0 — 2026-04-22 PST — single "Open in Stride Hub" CTA + entity deep-link auto-gen
+   v4.8.0: sendTemplateEmail_ now (a) auto-generates entity deep-link tokens
+           ({{TASK_DEEP_LINK}}, {{REPAIR_DEEP_LINK}}, {{WC_DEEP_LINK}},
+           {{SHIPMENT_DEEP_LINK}}, {{ITEM_DEEP_LINK}}, {{CLAIM_DEEP_LINK}})
+           from their ID tokens — matching StrideAPI.gs v38.107.0. (b) Strips
+           any hardcoded mystridehub.com CTA button before injecting the single
+           "Open in Stride Hub →" button. Fixes the two-CTAs-per-email bug.
+           (c) Self-heal regex extended to /claims?open= URLs.
    v4.7.0: sendTemplateEmail_ now scans the final HTML body post-token-
            substitution for any mystridehub.com/#/<entity>?open=ID URL
            missing &client=<spreadsheetId>, and auto-appends the current
@@ -243,6 +250,32 @@ if (!emails.length) return;
 tokens = tokens || {};
 // {{INVENTORY_URL}} — link to this client spreadsheet
 if (!tokens["{{INVENTORY_URL}}"]) tokens["{{INVENTORY_URL}}"] = ss.getUrl() || "";
+
+// v4.8.0: Auto-generate entity deep-link tokens from IDs (mirror of StrideAPI.gs
+// v38.107.0 api_sendTemplateEmail_). Every entity-specific token gets a matching
+// deep-link URL in query-param style with &client=<spreadsheetId>. Per CLAUDE.md
+// "Deep Links — How They Work (DO NOT BREAK)": route-style /#/<entity>/<id> is
+// forbidden — always /#/<entity>?open=<id>&client=<sheetId>.
+(function autoGenDeepLinks_() {
+  var APP = "https://www.mystridehub.com/#";
+  if (!tokens["{{APP_URL}}"]) tokens["{{APP_URL}}"] = APP;
+  var appUrl = tokens["{{APP_URL}}"] || APP;
+  var cid = "";
+  try { cid = String(ss.getId() || ""); } catch (_) {}
+  var suf = cid ? ("&client=" + encodeURIComponent(cid)) : "";
+  if (tokens["{{TASK_ID}}"] && !tokens["{{TASK_DEEP_LINK}}"])
+    tokens["{{TASK_DEEP_LINK}}"] = appUrl + "/tasks?open=" + encodeURIComponent(String(tokens["{{TASK_ID}}"])) + suf;
+  if (tokens["{{REPAIR_ID}}"] && !tokens["{{REPAIR_DEEP_LINK}}"])
+    tokens["{{REPAIR_DEEP_LINK}}"] = appUrl + "/repairs?open=" + encodeURIComponent(String(tokens["{{REPAIR_ID}}"])) + suf;
+  if (tokens["{{WC_NUMBER}}"] && !tokens["{{WC_DEEP_LINK}}"])
+    tokens["{{WC_DEEP_LINK}}"] = appUrl + "/will-calls?open=" + encodeURIComponent(String(tokens["{{WC_NUMBER}}"])) + suf;
+  if (tokens["{{SHIPMENT_NO}}"] && !tokens["{{SHIPMENT_DEEP_LINK}}"])
+    tokens["{{SHIPMENT_DEEP_LINK}}"] = appUrl + "/shipments?open=" + encodeURIComponent(String(tokens["{{SHIPMENT_NO}}"])) + suf;
+  if (tokens["{{ITEM_ID}}"] && !tokens["{{ITEM_DEEP_LINK}}"])
+    tokens["{{ITEM_DEEP_LINK}}"] = appUrl + "/inventory?open=" + encodeURIComponent(String(tokens["{{ITEM_ID}}"])) + suf;
+  if (tokens["{{CLAIM_ID}}"] && !tokens["{{CLAIM_DEEP_LINK}}"])
+    tokens["{{CLAIM_DEEP_LINK}}"] = appUrl + "/claims?open=" + encodeURIComponent(String(tokens["{{CLAIM_ID}}"])) + suf;
+})();
 // If {{PHOTOS_URL}} is empty, set it to "#" so buttons don't break, and provide a hide-able button token
 var photosUrlVal = tokens["{{PHOTOS_URL}}"] || "";
 if (!photosUrlVal || photosUrlVal === "#" || photosUrlVal.indexOf("http") !== 0) {
@@ -260,6 +293,19 @@ subject = subject.split(token).join(safe);
 htmlBody = htmlBody.split(token).join(safe);
 }
 
+// v4.8.0: STRIP HARDCODED CTAs — templates historically shipped with a hardcoded
+// "View …" button AND we auto-inject one below, producing two CTAs per email.
+// Strip any <div>…<a href="…mystridehub.com…">…</a></div> wrapper block so only
+// the single auto-injected "Open in Stride Hub" button remains.
+try {
+  htmlBody = htmlBody.replace(
+    /<div[^>]*text-align\s*:\s*center[^>]*>\s*<a\s+[^>]*href="https?:\/\/[^"]*mystridehub\.com[^"]*"[^>]*>[\s\S]*?<\/a>\s*<\/div>/gi,
+    ''
+  );
+} catch (stripErr) {
+  Logger.log("sendTemplateEmail_ hardcoded-CTA strip warning: " + stripErr);
+}
+
 // v4.7.0: DEEP-LINK SELF-HEAL — scan the fully-substituted body for any
 // /#/<entity>?open=ID URL that is missing &client=<spreadsheetId>, and
 // auto-patch it by appending the current spreadsheet's id. This makes
@@ -269,23 +315,20 @@ htmlBody = htmlBody.split(token).join(safe);
 //
 // Reference: root CLAUDE.md → "Deep Links — How They Work (DO NOT BREAK)".
 // Every CTA URL must be query-param style on a list page with &client=.
+// v4.8.0: /claims added to entity alternation for claim email support.
 try {
   var _ssid = "";
   try { _ssid = String(ss.getId() || ""); } catch (_) {}
   if (_ssid) {
-    // Match: mystridehub.com/#/<entity>?open=<anything-not-&>... with NO &client= before the closing " or whitespace
-    // We append &client=<ssid> right before the closing " (or end of URL).
     htmlBody = htmlBody.replace(
-      /(https?:\/\/[^"\s]*?mystridehub\.com\/#\/(?:shipments|tasks|repairs|will-calls|inventory)\?open=[^"\s&]+)("|\s|<)/g,
+      /(https?:\/\/[^"\s]*?mystridehub\.com\/#\/(?:shipments|tasks|repairs|will-calls|inventory|claims)\?open=[^"\s&]+)("|\s|<)/g,
       function(_m, urlPart, tail) {
-        // Only append if this URL doesn't ALREADY contain &client= (match allowed "&" inside e.g. &foo=bar)
         if (urlPart.indexOf("&client=") !== -1) return urlPart + tail;
         return urlPart + "&client=" + encodeURIComponent(_ssid) + tail;
       }
     );
-    // Also heal any URL that has other query params but is still missing &client=.
     htmlBody = htmlBody.replace(
-      /(https?:\/\/[^"\s]*?mystridehub\.com\/#\/(?:shipments|tasks|repairs|will-calls|inventory)\?open=[^"\s]*?)("|\s|<)/g,
+      /(https?:\/\/[^"\s]*?mystridehub\.com\/#\/(?:shipments|tasks|repairs|will-calls|inventory|claims)\?open=[^"\s]*?)("|\s|<)/g,
       function(_m, urlPart, tail) {
         if (urlPart.indexOf("&client=") !== -1 || urlPart.indexOf("?client=") !== -1) return urlPart + tail;
         return urlPart + "&client=" + encodeURIComponent(_ssid) + tail;
@@ -296,13 +339,23 @@ try {
   Logger.log("sendTemplateEmail_ deep-link self-heal warning: " + healErr);
 }
 
-// v4.3.0: Inject "View in Stride Hub" deep-link CTA button if caller set {{APP_DEEP_LINK}}
-var deepLinkUrl = (tokens && tokens["{{APP_DEEP_LINK}}"]) || "";
+// v4.8.0: Inject single "Open in Stride Hub" deep-link CTA button. Uses the
+// first available entity deep link (falls back to {{APP_DEEP_LINK}}). This is
+// the ONLY CTA in the email — any hardcoded ones were stripped above.
+var deepLinkUrl = String(
+  (tokens["{{APP_DEEP_LINK}}"] || "") ||
+  (tokens["{{SHIPMENT_DEEP_LINK}}"] || "") ||
+  (tokens["{{TASK_DEEP_LINK}}"] || "") ||
+  (tokens["{{REPAIR_DEEP_LINK}}"] || "") ||
+  (tokens["{{WC_DEEP_LINK}}"] || "") ||
+  (tokens["{{ITEM_DEEP_LINK}}"] || "") ||
+  (tokens["{{CLAIM_DEEP_LINK}}"] || "")
+).trim();
 if (deepLinkUrl && deepLinkUrl.indexOf("http") === 0) {
   var ctaBtn = '<div style="text-align:center;margin:20px 0 8px;">' +
     '<a href="' + deepLinkUrl + '" style="display:inline-block;background:#E85D2D;color:#ffffff;' +
     'padding:11px 28px;border-radius:6px;text-decoration:none;font-weight:700;font-size:14px;' +
-    'font-family:Arial,Helvetica,sans-serif;letter-spacing:0.01em;">View in Stride Hub &#8594;</a></div>';
+    'font-family:Arial,Helvetica,sans-serif;letter-spacing:0.01em;">Open in Stride Hub &#8594;</a></div>';
   htmlBody = htmlBody.indexOf('</body>') !== -1
     ? htmlBody.replace('</body>', ctaBtn + '</body>')
     : htmlBody + ctaBtn;

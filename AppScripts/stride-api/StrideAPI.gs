@@ -1,5 +1,11 @@
 /* ===================================================
-   StrideAPI.gs — v38.106.0 — 2026-04-22 PST — Welcome/onboarding email Supabase-first template load
+   StrideAPI.gs — v38.107.0 — 2026-04-22 PST — Single-CTA email enforcement + claim deep links
+   v38.107.0: FIX — api_sendTemplateEmail_ now strips any hardcoded <div…><a href="…mystridehub.com…">
+              buttons from template body before injecting the single "Open in Stride Hub →" CTA.
+              Fixes bug where 14/19 templates shipped with TWO CTAs (hardcoded + auto-injected).
+              Also adds {{CLAIM_DEEP_LINK}} auto-gen from {{CLAIM_ID}} (→ /claims?open=<id>&client=<sid>)
+              so the 5 claim templates get a CTA too. Renames button label "View" → "Open" per
+              Justin's preference. Self-heal regex extended to recognize /claims?open= URLs.
    v38.106.0: FIX — handleSendWelcomeEmail_ + handleSendOnboardingEmail_ now load template
               from Supabase first (authoritative), MPL sheet as fallback. Fixes bug where
               MPL had outdated brief template while full version lived in Supabase.
@@ -12947,12 +12953,30 @@ function api_sendTemplateEmail_(settings, templateKey, toEmail, fallbackSubject,
       tokens["{{SHIPMENT_DEEP_LINK}}"] = _appUrl + "/shipments?open=" + encodeURIComponent(String(tokens["{{SHIPMENT_NO}}"])) + _clientSuffix;
     if (tokens["{{ITEM_ID}}"] && !tokens["{{ITEM_DEEP_LINK}}"])
       tokens["{{ITEM_DEEP_LINK}}"] = _appUrl + "/inventory?open=" + encodeURIComponent(String(tokens["{{ITEM_ID}}"])) + _clientSuffix;
+    if (tokens["{{CLAIM_ID}}"] && !tokens["{{CLAIM_DEEP_LINK}}"])
+      tokens["{{CLAIM_DEEP_LINK}}"] = _appUrl + "/claims?open=" + encodeURIComponent(String(tokens["{{CLAIM_ID}}"])) + _clientSuffix;
 
     // Replace tokens in subject + body
     for (var tk in tokens) {
       var val = String(tokens[tk] == null ? "" : tokens[tk]);
       eSubj = eSubj.split(tk).join(val);
       eBody = eBody.split(tk).join(val);
+    }
+
+    // v38.105.0 — SINGLE-CTA ENFORCEMENT. Templates historically had hardcoded
+    // CTA buttons AND we auto-inject one, producing two CTAs per email. Strip
+    // any hardcoded CTA (pattern: <div>…<a href="{{APP_URL}}/…">…</a>…</div>
+    // or post-substitution: <a href="https://…mystridehub.com/…">…</a> wrapped
+    // in a div) before injecting the single "Open in Stride Hub" button below.
+    try {
+      // Remove the containing div + anchor whose href points at mystridehub.com.
+      // Non-greedy across the enclosing centered-div block. Keeps other links intact.
+      eBody = eBody.replace(
+        /<div[^>]*text-align\s*:\s*center[^>]*>\s*<a\s+[^>]*href="https?:\/\/[^"]*mystridehub\.com[^"]*"[^>]*>[\s\S]*?<\/a>\s*<\/div>/gi,
+        ''
+      );
+    } catch (stripErr) {
+      Logger.log("api_sendTemplateEmail_ hardcoded-CTA strip warning: " + stripErr);
     }
 
     // v38.101.0 — DEEP-LINK SELF-HEAL (server-side mirror of Emails.gs v4.7.0).
@@ -12965,7 +12989,7 @@ function api_sendTemplateEmail_(settings, templateKey, toEmail, fallbackSubject,
       try { _healSid = String(clientSheetId || "").trim(); } catch (_) {}
       if (_healSid) {
         eBody = eBody.replace(
-          /(https?:\/\/[^"\s]*?mystridehub\.com\/#\/(?:shipments|tasks|repairs|will-calls|inventory)\?open=[^"\s]*?)("|\s|<)/g,
+          /(https?:\/\/[^"\s]*?mystridehub\.com\/#\/(?:shipments|tasks|repairs|will-calls|inventory|claims)\?open=[^"\s]*?)("|\s|<)/g,
           function(_m, urlPart, tail) {
             if (urlPart.indexOf("&client=") !== -1 || urlPart.indexOf("?client=") !== -1) return urlPart + tail;
             return urlPart + "&client=" + encodeURIComponent(_healSid) + tail;
@@ -12976,21 +13000,23 @@ function api_sendTemplateEmail_(settings, templateKey, toEmail, fallbackSubject,
       Logger.log("api_sendTemplateEmail_ deep-link self-heal warning: " + healErr);
     }
 
-    // v38.68.3: Auto-inject "View in Stride Hub" CTA button before </body>.
+    // v38.105.0: Auto-inject "Open in Stride Hub" CTA button before </body>.
     // Uses the first available entity deep link, or {{APP_DEEP_LINK}} if set.
+    // This is the ONLY CTA in the email — hardcoded ones were stripped above.
     var ctaUrl = String(
       tokens["{{APP_DEEP_LINK}}"] ||
       tokens["{{SHIPMENT_DEEP_LINK}}"] ||
       tokens["{{TASK_DEEP_LINK}}"] ||
       tokens["{{REPAIR_DEEP_LINK}}"] ||
       tokens["{{WC_DEEP_LINK}}"] ||
-      tokens["{{ITEM_DEEP_LINK}}"] || ""
+      tokens["{{ITEM_DEEP_LINK}}"] ||
+      tokens["{{CLAIM_DEEP_LINK}}"] || ""
     ).trim();
     if (ctaUrl && ctaUrl.indexOf("http") === 0) {
       var ctaBtn = '<div style="text-align:center;margin:20px 0 8px;">' +
         '<a href="' + ctaUrl + '" style="display:inline-block;background:#E85D2D;color:#ffffff;' +
         'padding:11px 28px;border-radius:6px;text-decoration:none;font-weight:700;font-size:14px;' +
-        'font-family:Arial,Helvetica,sans-serif;letter-spacing:0.01em;">View in Stride Hub &#8594;</a></div>';
+        'font-family:Arial,Helvetica,sans-serif;letter-spacing:0.01em;">Open in Stride Hub &#8594;</a></div>';
       if (eBody.indexOf('</body>') !== -1) {
         eBody = eBody.replace('</body>', ctaBtn + '</body>');
       } else {
