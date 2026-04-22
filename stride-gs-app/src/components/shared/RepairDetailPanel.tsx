@@ -63,7 +63,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
 
   // Quote form state
   const [quoteAmountInput, setQuoteAmountInput] = useState<string>(
-    repair.quoteAmount != null ? String(repair.quoteAmount) : ''
+    repair.quoteAmount != null && repair.quoteAmount !== 0 ? String(repair.quoteAmount) : ''
   );
 
   // Submit state (shared across actions)
