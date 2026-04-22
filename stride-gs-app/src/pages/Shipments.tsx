@@ -351,13 +351,16 @@ export function Shipments() {
     return clientNames;
   }, [clientNames, user?.role, user?.accessibleClientNames]);
 
-  // Auto-select clients for client-portal users
+  // Auto-select all accessible clients on mount so the page loads data without a manual pick.
   useEffect(() => {
-    if (user?.role === 'client' && user.accessibleClientNames?.length && clientFilter.length === 0) {
+    if (clientFilter.length > 0) return;
+    if (user?.role === 'client' && user.accessibleClientNames?.length) {
       setClientFilter(user.accessibleClientNames);
+    } else if ((user?.role === 'admin' || user?.role === 'staff') && clientNames.length > 0) {
+      setClientFilter(clientNames);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.role, user?.accessibleClientNames?.length]);
+  }, [user?.role, user?.accessibleClientNames?.length, clientNames.length]);
 
   // Effect 1: Route state OR ?open= query param → store pendingOpen + auto-load
   useEffect(() => {

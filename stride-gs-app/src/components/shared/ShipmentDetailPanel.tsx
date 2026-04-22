@@ -242,6 +242,7 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
               <th style={{ padding: '6px 10px', textAlign: 'left', fontSize: 10, color: theme.colors.textMuted, textTransform: 'uppercase' }}>#</th>
               <th style={{ padding: '6px 10px', textAlign: 'left', fontSize: 10, color: theme.colors.textMuted, textTransform: 'uppercase' }}>Item ID</th>
               <th style={{ padding: '6px 10px', textAlign: 'left', fontSize: 10, color: theme.colors.textMuted, textTransform: 'uppercase' }}>Description</th>
+              <th style={{ padding: '6px 10px', textAlign: 'left', fontSize: 10, color: theme.colors.textMuted, textTransform: 'uppercase' }}>Vendor</th>
               <th style={{ padding: '6px 10px', textAlign: 'left', fontSize: 10, color: theme.colors.textMuted, textTransform: 'uppercase' }}>Class</th>
               <th style={{ padding: '6px 10px', textAlign: 'left', fontSize: 10, color: theme.colors.textMuted, textTransform: 'uppercase' }}>Location</th>
               <th style={{ padding: '6px 10px', textAlign: 'left', fontSize: 10, color: theme.colors.textMuted, textTransform: 'uppercase' }}>Tasks</th>
@@ -263,6 +264,7 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
                   </span>
                 </td>
                 <td style={{ padding: '6px 10px', color: theme.colors.textSecondary, maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.description}</td>
+                <td style={{ padding: '6px 10px', color: theme.colors.textSecondary, maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.vendor || <span style={{ color: theme.colors.textMuted }}>{'\u2014'}</span>}</td>
                 <td style={{ padding: '6px 10px' }}>{item.itemClass}</td>
                 <td style={{ padding: '6px 10px', fontFamily: 'monospace', color: theme.colors.textSecondary }}>{item.location}</td>
                 <td style={{ padding: '6px 10px' }}>
