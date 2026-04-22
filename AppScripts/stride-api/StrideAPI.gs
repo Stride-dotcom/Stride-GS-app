@@ -24534,7 +24534,11 @@ function handleSendOnboardingEmail_(clientSheetId, payload) {
  * POST sendWelcomeEmail — Send welcome email to a client directly from StrideAPI.gs.
  * Reads CLIENT_EMAIL from the client's Settings tab, loads WELCOME_EMAIL template
  * from Supabase (authoritative) with MPL sheet as fallback, resolves tokens, sends via GmailApp.
+<<<<<<< HEAD
+ * v38.105.0: Supabase-first template load fixes "brief email" bug where the MPL sheet
+=======
  * v38.106.0: Supabase-first template load fixes "brief email" bug where the MPL sheet
+>>>>>>> origin/source
  * had an outdated template while the full version lived in Supabase.
  */
 function handleSendWelcomeEmail_(payload) {
