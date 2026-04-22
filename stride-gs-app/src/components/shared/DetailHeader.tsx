@@ -13,6 +13,7 @@
  * (Type badge, Result, Qty, etc.) the parent wants to stick next to the ID.
  */
 import React from 'react';
+import { ArrowLeft } from 'lucide-react';
 import { normSidemark } from '../../pages/Inventory';
 
 // Re-use the Inventory palette so the same sidemark gets the same color
@@ -53,6 +54,11 @@ export interface DetailHeaderProps {
   idBadges?: React.ReactNode;
   /** Compact mode — slightly smaller ID / sidemark for tight panels. */
   compact?: boolean;
+  /** Render a compact single-row mobile header (~54px) instead of the
+   *  multi-line stacked layout. Intended for full-screen mobile panels. */
+  mobileCompact?: boolean;
+  /** Used when mobileCompact=true to render a ← back button on the far left. */
+  onClose?: () => void;
 }
 
 /**
@@ -72,9 +78,64 @@ export function DetailHeader({
   belowId,
   idBadges,
   compact,
+  mobileCompact,
+  onClose,
 }: DetailHeaderProps) {
   const idSize = compact ? 22 : 28;
   const smColor = sidemark ? sidemarkColor(sidemark) : undefined;
+
+  // ── Mobile compact: single-row ~54px header ───────────────────────────
+  if (mobileCompact) {
+    return (
+      <div
+        style={{
+          padding: '0 12px',
+          height: 54,
+          background: '#1C1C1C',
+          flexShrink: 0,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 6,
+        }}
+      >
+        {/* Back / close button */}
+        {onClose && (
+          <button
+            onClick={onClose}
+            style={{
+              background: 'none', border: 'none', cursor: 'pointer',
+              color: 'rgba(255,255,255,0.7)', padding: '0 2px',
+              display: 'flex', alignItems: 'center',
+              minWidth: 36, minHeight: 44, flexShrink: 0,
+            }}
+          >
+            <ArrowLeft size={22} />
+          </button>
+        )}
+        {/* ID + client name — fills available space, truncates gracefully */}
+        <div style={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'baseline', gap: 8, overflow: 'hidden' }}>
+          <span style={{ fontSize: 18, fontWeight: 600, color: '#fff', whiteSpace: 'nowrap', lineHeight: 1.2 }}>
+            {entityId}
+          </span>
+          {clientName && (
+            <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.45)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+              {clientName}
+            </span>
+          )}
+        </div>
+        {/* Right side: badges (belowId) + idBadges + actions */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+          {idBadges && (
+            <span style={{ display: 'inline-flex', alignItems: 'center', background: 'rgba(255,255,255,0.12)', padding: '2px 5px', borderRadius: 5 }}>
+              {idBadges}
+            </span>
+          )}
+          {belowId}
+          {actions}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div

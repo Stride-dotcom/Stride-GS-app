@@ -452,6 +452,8 @@ export function TabbedDetailPanel(props: TabbedDetailPanelConfig) {
           idBadges={idBadges}
           belowId={belowId}
           actions={headerActions}
+          mobileCompact={isMobile}
+          onClose={isMobile ? onClose : undefined}
         />
 
         {statusStrip}

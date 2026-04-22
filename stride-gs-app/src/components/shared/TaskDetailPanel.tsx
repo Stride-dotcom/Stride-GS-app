@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useMemo, useEffect } from 'react';
-import { X, ClipboardList, Package, MapPin, CheckCircle2, XCircle, AlertTriangle, FolderOpen, Loader2, Play, ExternalLink, Truck, Wrench, Save, DollarSign, Pencil, FileText } from 'lucide-react';
+import { X, ClipboardList, Package, MapPin, CheckCircle2, XCircle, AlertTriangle, FolderOpen, Loader2, Play, ExternalLink, Truck, Wrench, Save, DollarSign, Pencil, FileText, MoreHorizontal } from 'lucide-react';
 import { FolderButton } from './FolderButton';
 import { DeepLink } from './DeepLink';
 import { TabbedDetailPanel, type TabbedDetailPanelTab } from './TabbedDetailPanel';
@@ -13,6 +13,7 @@ import { postCompleteTask, postStartTask, postUpdateTaskNotes, postUpdateTaskCus
 import { writeSyncFailed } from '../../lib/syncEvents';
 import { entityEvents } from '../../lib/entityEvents';
 import { useLocations } from '../../hooks/useLocations';
+import { useIsMobile } from '../../hooks/useIsMobile';
 import type { CompleteTaskResponse, StartTaskResponse } from '../../lib/api';
 import { useAuth } from '../../contexts/AuthContext';
 import { SERVICE_CODES } from '../../lib/constants';
@@ -62,8 +63,10 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
   const isInspection = task.type === 'INSP';
 
   const { user } = useAuth();
+  const { isMobile } = useIsMobile();
 
   const [notes, setNotes] = useState(task.taskNotes || task.notes || '');
+  const [overflowOpen, setOverflowOpen] = useState(false);
   const [location, setLocation] = useState(task.location || '');
   const [showResultPrompt, setShowResultPrompt] = useState<'pass' | 'fail' | null>(null);
   const [completed, setCompleted] = useState(false);
@@ -451,6 +454,36 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
     }
   };
 
+  // ─── Cancel task (extracted so the mobile overflow can call it) ─────
+  const handleCancelTask = useCallback(async () => {
+    if (!confirm('Cancel this task? Status will be set to Cancelled.')) return;
+    if (!apiConfigured || !clientSheetId) return;
+    setSubmitting(true); setSubmitError(null);
+    setOverflowOpen(false);
+
+    applyTaskPatch?.(task.taskId, {
+      status: 'Cancelled',
+      cancelledAt: new Date().toISOString().slice(0, 10),
+    });
+
+    try {
+      const resp = await postCancelTask({ taskId: task.taskId }, clientSheetId);
+      if (resp.ok && resp.data?.success) {
+        setCompleted(true);
+        onTaskUpdated?.();
+      } else {
+        clearTaskPatch?.(task.taskId);
+        const errMsg = resp.data?.error || resp.error || 'Failed to cancel task';
+        setSubmitError(errMsg);
+        void writeSyncFailed({ tenant_id: clientSheetId, entity_type: 'task', entity_id: task.taskId, action_type: 'cancel_task', requested_by: user?.email ?? '', request_id: resp.requestId, payload: { taskId: task.taskId, clientName: task.clientName, description: task.description, sidemark: task.sidemark, itemId: task.itemId }, error_message: errMsg });
+      }
+    } catch {
+      clearTaskPatch?.(task.taskId);
+      setSubmitError('Failed to cancel task');
+    }
+    setSubmitting(false);
+  }, [apiConfigured, clientSheetId, task, applyTaskPatch, clearTaskPatch, onTaskUpdated, user]);
+
   // ─── Tab renderers ───────────────────────────────────────────────────
   // Tab content is kept as small inline render functions that consume
   // state from this adapter's scope (closure). The benefit: future shell
@@ -702,33 +735,39 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
         </div>
   );
 
-  // ─── Header actions: Edit/Save/Cancel/Close — always visible in header.
+  // ─── Header actions: Edit/Save/Cancel — on mobile the back arrow in
+  //     DetailHeader replaces the close X so we omit it to avoid duplication.
+  const editButtons = isOpen && !completed ? (
+    isEditingTask ? (
+      <>
+        <button onClick={handleTaskSave} disabled={taskSaving}
+          style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '4px 12px', fontSize: 11, fontWeight: 600, borderRadius: 6, border: 'none', background: theme.colors.orange, color: '#fff', cursor: taskSaving ? 'wait' : 'pointer' }}>
+          {taskSaving ? <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} /> : <Save size={12} />}
+          {taskSaving ? 'Saving...' : 'Save'}
+        </button>
+        <button onClick={handleTaskEditCancel} disabled={taskSaving}
+          style={{ padding: '4px 10px', fontSize: 11, fontWeight: 600, borderRadius: 6, border: '1px solid rgba(255,255,255,0.25)', background: 'rgba(255,255,255,0.1)', color: 'rgba(255,255,255,0.8)', cursor: 'pointer' }}>
+          Cancel
+        </button>
+      </>
+    ) : (
+      <button onClick={handleTaskEditStart}
+        style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '4px 10px', fontSize: 11, fontWeight: 600, borderRadius: 6, border: '1px solid rgba(255,255,255,0.25)', background: 'rgba(255,255,255,0.1)', color: 'rgba(255,255,255,0.8)', cursor: 'pointer' }}>
+        <Pencil size={12} /> Edit
+      </button>
+    )
+  ) : null;
+
   const headerActions = (
     <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-      {isOpen && !completed && (
-        isEditingTask ? (
-          <>
-            <button onClick={handleTaskSave} disabled={taskSaving}
-              style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '4px 12px', fontSize: 11, fontWeight: 600, borderRadius: 6, border: 'none', background: theme.colors.orange, color: '#fff', cursor: taskSaving ? 'wait' : 'pointer' }}>
-              {taskSaving ? <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} /> : <Save size={12} />}
-              {taskSaving ? 'Saving...' : 'Save'}
-            </button>
-            <button onClick={handleTaskEditCancel} disabled={taskSaving}
-              style={{ padding: '4px 10px', fontSize: 11, fontWeight: 600, borderRadius: 6, border: `1px solid ${theme.colors.border}`, background: '#fff', color: theme.colors.textSecondary, cursor: 'pointer' }}>
-              Cancel
-            </button>
-          </>
-        ) : (
-          <button onClick={handleTaskEditStart}
-            style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '4px 10px', fontSize: 11, fontWeight: 600, borderRadius: 6, border: `1px solid ${theme.colors.border}`, background: '#fff', color: theme.colors.textSecondary, cursor: 'pointer' }}>
-            <Pencil size={12} /> Edit
-          </button>
-        )
+      {editButtons}
+      {/* X close only on desktop — mobile uses the ← back arrow in DetailHeader */}
+      {!isMobile && (
+        <button onClick={onClose} disabled={submitting || startTaskLoading}
+          style={{ background: 'none', border: 'none', cursor: (submitting || startTaskLoading) ? 'not-allowed' : 'pointer', padding: 4, color: 'rgba(255,255,255,0.7)', opacity: (submitting || startTaskLoading) ? 0.3 : 1 }}>
+          <X size={18} />
+        </button>
       )}
-      <button onClick={onClose} disabled={submitting || startTaskLoading}
-        style={{ background: 'none', border: 'none', cursor: (submitting || startTaskLoading) ? 'not-allowed' : 'pointer', padding: 4, color: 'rgba(255,255,255,0.7)', opacity: (submitting || startTaskLoading) ? 0.3 : 1 }}>
-        <X size={18} />
-      </button>
     </div>
   );
 
@@ -753,12 +792,203 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
     </>
   ) : undefined;
 
-  // ─── Footer: Start Task / Pass-Fail / Cancel when open; Close + result
-  //            summary when completed. EntityHistory moved to Activity tab.
-  const footer = (
+  // ─── Footer: state-aware. Mobile = compact (~70px). Desktop = full layout.
+  // ── Shared error/status banners used by both paths ───────────────────
+  const errorBanner = (submitError || startTaskError) ? (
+    <div style={{ padding: '8px 16px', fontSize: 12, color: '#DC2626', background: '#FEF2F2', borderBottom: '1px solid #FECACA', display: 'flex', alignItems: 'center', gap: 6 }}>
+      <AlertTriangle size={13} />
+      {submitError || startTaskError}
+    </div>
+  ) : null;
+
+  // ── Mobile footer ─────────────────────────────────────────────────────
+  const mobileFooter = (() => {
+    // Overflow menu (Cancel Task) — rendered fixed so overflow:hidden on panel
+    // container doesn't clip it.
+    const overflowMenu = overflowOpen ? (
+      <>
+        <div onClick={() => setOverflowOpen(false)} style={{ position: 'fixed', inset: 0, zIndex: 200 }} />
+        <div style={{
+          position: 'fixed',
+          bottom: 'calc(env(safe-area-inset-bottom, 0px) + 82px)',
+          right: 16,
+          zIndex: 201,
+          background: '#fff',
+          border: `1px solid ${theme.colors.border}`,
+          borderRadius: 12,
+          boxShadow: '0 4px 20px rgba(0,0,0,0.18)',
+          minWidth: 160,
+          overflow: 'hidden',
+        }}>
+          <button
+            onClick={handleCancelTask}
+            style={{ width: '100%', padding: '13px 16px', textAlign: 'left', background: 'none', border: 'none', cursor: 'pointer', fontSize: 14, color: '#DC2626', fontFamily: 'inherit', display: 'flex', alignItems: 'center', gap: 8 }}
+          >
+            Cancel Task
+          </button>
+        </div>
+      </>
+    ) : null;
+
+    // ── Terminal states — slim strip ────────────────────────────────────
+    if (completed || task.status === 'Completed') {
+      const result = submitResult?.result || task.result;
+      const isPass = result !== 'Fail';
+      return (
+        <div style={{ padding: '0 16px 0', paddingBottom: 'env(safe-area-inset-bottom, 12px)' }}>
+          <div style={{ margin: '10px 0', padding: '13px 16px', background: isPass ? '#F0FDF4' : '#FEF2F2', borderRadius: 12, display: 'flex', alignItems: 'center', gap: 8 }}>
+            {isPass ? <CheckCircle2 size={16} color="#16A34A" /> : <XCircle size={16} color="#DC2626" />}
+            <span style={{ fontSize: 13, fontWeight: 600, color: isPass ? '#16A34A' : '#DC2626' }}>
+              {isPass ? '✓ Passed' : '✗ Failed'}
+              {task.completedAt ? ` · Completed ${fmtDate(task.completedAt)}` : ''}
+            </span>
+          </div>
+        </div>
+      );
+    }
+    if (task.status === 'Cancelled') {
+      return (
+        <div style={{ padding: '13px 16px', paddingBottom: 'env(safe-area-inset-bottom, 13px)', display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span style={{ fontSize: 13, fontWeight: 500, color: '#6B7280' }}>
+            ✕ Cancelled{task.cancelledAt ? ` · ${fmtDate(task.cancelledAt)}` : ''}
+          </span>
+        </div>
+      );
+    }
+    if (task.status === 'Failed') {
+      return (
+        <div style={{ padding: '13px 16px', paddingBottom: 'env(safe-area-inset-bottom, 13px)', display: 'flex', alignItems: 'center', gap: 8 }}>
+          <XCircle size={15} color="#DC2626" />
+          <span style={{ fontSize: 13, fontWeight: 500, color: '#DC2626' }}>
+            Failed{task.completedAt ? ` · ${fmtDate(task.completedAt)}` : ''}
+          </span>
+        </div>
+      );
+    }
+
+    // ── Fail-choice prompt ──────────────────────────────────────────────
+    if (showResultPrompt === 'fail') {
+      return (
+        <div style={{ padding: '12px 16px', paddingBottom: 'calc(env(safe-area-inset-bottom, 0px) + 12px)' }}>
+          <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 10, color: '#92400E', display: 'flex', alignItems: 'center', gap: 6 }}>
+            <AlertTriangle size={14} color="#B45309" />
+            Task failed — what would you like to do?
+          </div>
+          <div style={{ display: 'flex', gap: 8, marginBottom: 6 }}>
+            <WriteButton label="Complete (Bill)" variant="primary" style={{ flex: 1, background: '#B45309', padding: '12px', borderRadius: 12, fontSize: 13 }} onClick={async () => handleFailChoice('complete')} />
+            <WriteButton label="Cancel (No Bill)" variant="secondary" style={{ flex: 1, padding: '12px', borderRadius: 12, fontSize: 13 }} onClick={async () => handleFailChoice('cancel')} />
+          </div>
+          <button onClick={() => setShowResultPrompt(null)} style={{ width: '100%', padding: '8px', fontSize: 12, border: 'none', background: 'transparent', color: theme.colors.textMuted, cursor: 'pointer', fontFamily: 'inherit' }}>
+            Go back
+          </button>
+        </div>
+      );
+    }
+
+    // ── Conflict prompt ─────────────────────────────────────────────────
+    if (startTaskConflict) {
+      return (
+        <div style={{ padding: '12px 16px', paddingBottom: 'calc(env(safe-area-inset-bottom, 0px) + 12px)' }}>
+          <div style={{ padding: '12px', background: '#FEF3C7', border: '1px solid #FCD34D', borderRadius: 10, marginBottom: 0 }}>
+            <div style={{ fontSize: 13, fontWeight: 600, color: '#92400E', marginBottom: 4, display: 'flex', alignItems: 'center', gap: 6 }}>
+              <AlertTriangle size={14} color="#B45309" />
+              Assigned to {startTaskConflict.assignedTo}
+            </div>
+            <div style={{ fontSize: 12, color: '#92400E', marginBottom: 10 }}>Do you want to reassign this task to yourself?</div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button onClick={() => handleStartTask(true)} style={{ flex: 1, padding: '10px', fontSize: 13, fontWeight: 600, borderRadius: 10, border: '1px solid #F59E0B', background: '#FEF3C7', color: '#92400E', cursor: 'pointer', fontFamily: 'inherit', minHeight: 44 }}>
+                Yes, Reassign
+              </button>
+              <button onClick={() => setStartTaskConflict(null)} style={{ flex: 1, padding: '10px', fontSize: 13, fontWeight: 500, borderRadius: 10, border: `1px solid ${theme.colors.border}`, background: '#fff', color: theme.colors.textMuted, cursor: 'pointer', fontFamily: 'inherit', minHeight: 44 }}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // ── Submitting spinner ──────────────────────────────────────────────
+    if (submitting) {
+      return (
+        <div style={{ padding: '18px 16px', paddingBottom: 'calc(env(safe-area-inset-bottom, 0px) + 18px)', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, color: theme.colors.textMuted, fontSize: 13 }}>
+          <Loader2 size={18} style={{ animation: 'spin 1s linear infinite' }} />
+          Completing task…
+        </div>
+      );
+    }
+
+    // ── In Progress: Pass / Fail / ⋯ ───────────────────────────────────
+    if (isAlreadyStarted || (startTaskResult && task.status !== 'Open')) {
+      return (
+        <>
+          {errorBanner}
+          {/* Start Task success banner (compact) */}
+          {startTaskResult?.success && !startTaskResult.noOp && startTaskResult.folderUrl && (
+            <div style={{ padding: '6px 16px', background: '#F0FDF4', borderBottom: '1px solid #BBF7D0', fontSize: 11, color: '#15803D', display: 'flex', alignItems: 'center', gap: 6 }}>
+              <CheckCircle2 size={11} />
+              <a href={startTaskResult.folderUrl} target="_blank" rel="noopener noreferrer" style={{ color: '#15803D', display: 'inline-flex', alignItems: 'center', gap: 3 }}>
+                Task folder created <ExternalLink size={9} />
+              </a>
+            </div>
+          )}
+          {overflowMenu}
+          <div style={{ padding: '12px 16px', paddingBottom: 'calc(env(safe-area-inset-bottom, 0px) + 12px)', display: 'flex', gap: 8 }}>
+            <button
+              onClick={() => handleResult('pass')}
+              style={{ flex: 1, height: 50, background: '#16A34A', color: '#fff', borderRadius: 12, border: 'none', fontSize: 15, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, minHeight: 44 }}
+            >
+              <CheckCircle2 size={17} /> Pass
+            </button>
+            <button
+              onClick={() => handleResult('fail')}
+              style={{ flex: 1, height: 50, background: 'none', color: '#DC2626', borderRadius: 12, border: '2px solid #DC2626', fontSize: 15, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, minHeight: 44 }}
+            >
+              <XCircle size={17} /> Fail
+            </button>
+            <button
+              onClick={() => setOverflowOpen(o => !o)}
+              style={{ width: 50, height: 50, flexShrink: 0, background: 'none', color: theme.colors.textMuted, borderRadius: 12, border: `1px solid ${theme.colors.border}`, cursor: 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: 44 }}
+              aria-label="More actions"
+            >
+              <MoreHorizontal size={20} />
+            </button>
+          </div>
+        </>
+      );
+    }
+
+    // ── Open (not started): Start Task + ⋯ ─────────────────────────────
+    return (
+      <>
+        {errorBanner}
+        {overflowMenu}
+        <div style={{ padding: '12px 16px', paddingBottom: 'calc(env(safe-area-inset-bottom, 0px) + 12px)', display: 'flex', gap: 8 }}>
+          <button
+            onClick={() => handleStartTask()}
+            disabled={startTaskLoading}
+            style={{ flex: 1, height: 52, background: '#16A34A', color: '#fff', borderRadius: 12, border: 'none', fontSize: 15, fontWeight: 600, cursor: startTaskLoading ? 'wait' : 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, minHeight: 44, boxShadow: '0 3px 10px rgba(22,163,74,0.3)' }}
+          >
+            {startTaskLoading ? <Loader2 size={18} style={{ animation: 'spin 1s linear infinite' }} /> : <Play size={18} fill="#fff" />}
+            Start Task
+          </button>
+          <button
+            onClick={() => setOverflowOpen(o => !o)}
+            style={{ width: 52, height: 52, flexShrink: 0, background: 'none', color: theme.colors.textMuted, borderRadius: 12, border: `1px solid ${theme.colors.border}`, cursor: 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: 44 }}
+            aria-label="More actions"
+          >
+            <MoreHorizontal size={20} />
+          </button>
+        </div>
+      </>
+    );
+  })();
+
+  // ── Desktop footer (unchanged) ────────────────────────────────────────
+  const desktopFooter = (
     <>
       {isOpen && !completed && (
-        <div>
+        <div style={{ padding: '16px' }}>
           {/* Start Task section (shown when not yet started) */}
             {!isAlreadyStarted && !startTaskResult && (
               <div style={{ marginBottom: 12 }}>
@@ -767,7 +997,6 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
                     <AlertTriangle size={13} />{startTaskError}
                   </div>
                 )}
-                {/* Conflict alert — another user is assigned */}
                 {startTaskConflict && (
                   <div style={{ padding: '10px 12px', background: '#FEF3C7', border: '1px solid #FCD34D', borderRadius: 8, marginBottom: 8 }}>
                     <div style={{ fontSize: 12, fontWeight: 600, color: '#92400E', marginBottom: 6 }}>
@@ -797,7 +1026,6 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
                 )}
               </div>
             )}
-            {/* Start Task success banner */}
             {startTaskResult?.success && !startTaskResult.noOp && (
               <div style={{ padding: '8px 10px', background: '#F0FDF4', border: '1px solid #BBF7D0', borderRadius: 8, marginBottom: 10, fontSize: 12, color: '#15803D' }}>
                 <div style={{ fontWeight: 600, marginBottom: 2 }}>
@@ -815,13 +1043,11 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
                 ))}
               </div>
             )}
-            {/* Error banner for complete task */}
             {submitError && (
               <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '8px 10px', background: '#FEF2F2', border: '1px solid #FCA5A5', borderRadius: 8, marginBottom: 10, fontSize: 12, color: '#DC2626' }}>
                 <AlertTriangle size={14} />{submitError}
               </div>
             )}
-            {/* Loading spinner */}
             {submitting ? (
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, padding: '12px', color: theme.colors.textMuted, fontSize: 13 }}>
                 <Loader2 size={18} style={{ animation: 'spin 1s linear infinite' }} />
@@ -843,36 +1069,7 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
                   <WriteButton label="Fail" variant="danger" icon={<XCircle size={16} />} style={{ flex: 1, padding: '10px', fontSize: 13 }} onClick={async () => handleResult('fail')} />
                 </div>
                 <button
-                  onClick={async () => {
-                    if (!confirm('Cancel this task? Status will be set to Cancelled.')) return;
-                    if (!apiConfigured || !clientSheetId) return;
-                    setSubmitting(true); setSubmitError(null);
-
-                    // Phase 2C: optimistic patch — table shows "Cancelled" immediately
-                    applyTaskPatch?.(task.taskId, {
-                      status: 'Cancelled',
-                      cancelledAt: new Date().toISOString().slice(0, 10),
-                    });
-
-                    try {
-                      const resp = await postCancelTask({ taskId: task.taskId }, clientSheetId);
-                      if (resp.ok && resp.data?.success) {
-                        // Don't clear patch on success — let 120s TTL handle it (prevents flicker during refetch)
-                        setCompleted(true);
-                        onTaskUpdated?.();
-                      }
-                      else {
-                        clearTaskPatch?.(task.taskId); // rollback
-                        const errMsg = resp.data?.error || resp.error || 'Failed to cancel task';
-                        setSubmitError(errMsg);
-                        void writeSyncFailed({ tenant_id: clientSheetId, entity_type: 'task', entity_id: task.taskId, action_type: 'cancel_task', requested_by: user?.email ?? '', request_id: resp.requestId, payload: { taskId: task.taskId, clientName: task.clientName, description: task.description, sidemark: task.sidemark, itemId: task.itemId }, error_message: errMsg });
-                      }
-                    } catch (e) {
-                      clearTaskPatch?.(task.taskId); // rollback
-                      setSubmitError('Failed to cancel task');
-                    }
-                    setSubmitting(false);
-                  }}
+                  onClick={handleCancelTask}
                   style={{ width: '100%', marginTop: 8, padding: '7px', fontSize: 12, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: 'transparent', color: theme.colors.textMuted, cursor: 'pointer', fontFamily: 'inherit' }}
                   onMouseEnter={e => { e.currentTarget.style.borderColor = '#EF4444'; e.currentTarget.style.color = '#EF4444'; }}
                   onMouseLeave={e => { e.currentTarget.style.borderColor = theme.colors.border; e.currentTarget.style.color = theme.colors.textMuted; }}
@@ -884,8 +1081,7 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
           </div>
         )}
       {(completed || !isOpen) && (
-        <div>
-          {/* Success summary */}
+        <div style={{ padding: '16px' }}>
           {completed && submitResult?.success && (
             <div style={{ padding: '10px 12px', background: '#F0FDF4', border: '1px solid #86EFAC', borderRadius: 8, marginBottom: 10, fontSize: 12, color: '#15803D' }}>
               <div style={{ fontWeight: 600, marginBottom: 4 }}>
@@ -904,6 +1100,8 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
       )}
     </>
   );
+
+  const footer = isMobile ? mobileFooter : desktopFooter;
 
   // ─── Shell ────────────────────────────────────────────────────────────
   // Everything above this point is adapter-owned state + tab body
