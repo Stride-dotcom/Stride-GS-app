@@ -59,6 +59,7 @@ import { useClientFilterUrlSync } from '../hooks/useClientFilterUrlSync';
 import { useTasks } from '../hooks/useTasks';
 import { useRepairs } from '../hooks/useRepairs';
 import { useWillCalls } from '../hooks/useWillCalls';
+import { useOrders } from '../hooks/useOrders';
 import { entityEvents } from '../lib/entityEvents';
 import { useShipments } from '../hooks/useShipments';
 import { useBilling } from '../hooks/useBilling';
@@ -604,6 +605,7 @@ export function Inventory() {
   const { tasks, refetch: refetchTasks, addOptimisticTask, removeOptimisticTask } = useTasks(apiConfigured && clientFilter.length > 0, selectedSheetId);
   const { repairs, addOptimisticRepair, removeOptimisticRepair } = useRepairs(apiConfigured && clientFilter.length > 0, selectedSheetId);
   const { willCalls, addOptimisticWc, removeOptimisticWc } = useWillCalls(apiConfigured && clientFilter.length > 0, selectedSheetId);
+  const { orders } = useOrders();
   const { apiShipments } = useShipments(apiConfigured && clientFilter.length > 0, selectedSheetId);
   // Inventory only uses billing rows to show "this item has billing" hints; single tenant only
   const billingSheetId = Array.isArray(selectedSheetId) ? (selectedSheetId.length === 1 ? selectedSheetId[0] : undefined) : selectedSheetId;
@@ -957,8 +959,8 @@ export function Inventory() {
     }
   }, [apiConfigured, showToast, refetch, addOptimisticRepair, removeOptimisticRepair]);
 
-  // Session 71: Build item-level task/repair indicator sets from already-loaded data
-  const { inspItems, asmItems, repairItems } = useMemo(() => {
+  // Session 71+: Build item-level task/repair/WC/DT indicator sets from already-loaded data
+  const { inspItems, asmItems, repairItems, wcOpenItems, wcDoneItems, dtOpenItems, dtDoneItems } = useMemo(() => {
     const insp = new Set<string>();
     const asm = new Set<string>();
     const rep = new Set<string>();
@@ -971,8 +973,40 @@ export function Inventory() {
     for (const r of repairs) {
       if (r.itemId) rep.add(r.itemId);
     }
-    return { inspItems: insp, asmItems: asm, repairItems: rep };
-  }, [tasks, repairs]);
+
+    // Will call indicators — orange = open/partial, green = released (all completed)
+    const wcOpen = new Set<string>();
+    const wcDone = new Set<string>();
+    for (const wc of willCalls) {
+      for (const item of wc.items ?? []) {
+        if (!item.itemId) continue;
+        if (wc.status === 'Released') {
+          if (!wcOpen.has(item.itemId)) wcDone.add(item.itemId);
+        } else if (wc.status !== 'Cancelled') {
+          wcOpen.add(item.itemId);
+          wcDone.delete(item.itemId); // open wins over done
+        }
+      }
+    }
+
+    // DT delivery order indicators — orange = open/in-progress, green = completed
+    const dtOpen = new Set<string>();
+    const dtDone = new Set<string>();
+    for (const order of orders) {
+      for (const item of order.items) {
+        const id = item.dtItemCode;
+        if (!id) continue;
+        if (order.statusCategory === 'completed') {
+          if (!dtOpen.has(id)) dtDone.add(id);
+        } else if (order.statusCategory !== 'cancelled') {
+          dtOpen.add(id);
+          dtDone.delete(id); // open wins over done
+        }
+      }
+    }
+
+    return { inspItems: insp, asmItems: asm, repairItems: rep, wcOpenItems: wcOpen, wcDoneItems: wcDone, dtOpenItems: dtOpen, dtDoneItems: dtDone };
+  }, [tasks, repairs, willCalls, orders]);
 
   // Latest public entity_note per visible item, batched so the Notes
   // column can show collaborative notes without per-row queries. Falls
@@ -1025,7 +1059,7 @@ export function Inventory() {
               fontWeight: theme.typography.weights.semibold,
               color: theme.colors.textPrimary,
             }}>{id}</span>
-            <ItemIdBadges itemId={id} inspItems={inspItems} asmItems={asmItems} repairItems={repairItems} />
+            <ItemIdBadges itemId={id} inspItems={inspItems} asmItems={asmItems} repairItems={repairItems} wcOpenItems={wcOpenItems} wcDoneItems={wcDoneItems} dtOpenItems={dtOpenItems} dtDoneItems={dtDoneItems} />
           </div>
         );
       },
