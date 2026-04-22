@@ -210,7 +210,7 @@
       "name": "Master Inventory Template",
       "spreadsheetId": "1amA0P9CFJ5sZ-aBlcYAZ7v-gyw7JBzmOdzmfadb4Otc",
       "scriptId": "1Pk2Oc0u7RRgMs3sQs96brKDBFNA9vCyKOHZA9jMmk4gkD2yNdTGRlI5T",
-      "webAppUrl": "",
+      "webAppUrl": "https://script.google.com/macros/s/AKfycbwmziAMYOQ5YJmhs4uvJ-6ucjU6cDq6LZM7IyIxzCrc2kPn7iU6d4sDDFm8qgfDJbkMcg/exec",
       "isTemplate": true,
       "group": "template",
       "enabled": true,
