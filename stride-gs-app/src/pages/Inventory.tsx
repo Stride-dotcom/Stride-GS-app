@@ -159,16 +159,21 @@ multiSelectFilter.autoRemove = (val: string[]) => !val || val.length === 0;
 
 const formatDate = (iso: string) => fmtDate(iso);
 
-function exportToCSV(rows: InventoryItem[], filename: string): void {
-  const headers = 'Item ID,Client,Vendor,Description,Class,Qty,Location,Sidemark,Status,Receive Date,Release Date,Notes';
-  const body = rows.map(r =>
-    [r.itemId, r.clientName, r.vendor, r.description, r.itemClass,
-      r.qty, r.location, r.sidemark, r.status,
-      r.receiveDate, r.releaseDate ?? '', r.notes ?? '']
-      .map(v => `"${String(v).replace(/"/g, '""')}"`)
-      .join(',')
+
+function exportVisibleToCSV(tableRows: { getValue: (id: string) => unknown }[], visibleCols: { id: string; columnDef: { header?: unknown } }[], filename: string): void {
+  const SKIP = new Set(['select', 'actions']);
+  const cols = visibleCols.filter(c => !SKIP.has(c.id));
+  const headerLine = cols.map(c => {
+    const h = typeof c.columnDef.header === 'string' ? c.columnDef.header : c.id;
+    return `"${h.replace(/"/g, '""')}"`;
+  }).join(',');
+  const body = tableRows.map(row =>
+    cols.map(col => {
+      const val = row.getValue(col.id);
+      return `"${String(val ?? '').replace(/"/g, '""')}"`;
+    }).join(',')
   ).join('\n');
-  const blob = new Blob([headers + '\n' + body], { type: 'text/csv;charset=utf-8;' });
+  const blob = new Blob([headerLine + '\n' + body], { type: 'text/csv;charset=utf-8;' });
   const url = URL.createObjectURL(blob);
   const a = Object.assign(document.createElement('a'), { href: url, download: filename });
   a.click();
@@ -1451,11 +1456,11 @@ export function Inventory() {
   }
 
   function doExportAll() {
-    exportToCSV(table.getFilteredRowModel().rows.map(r => r.original), buildExportFilename('export'));
+    exportVisibleToCSV(table.getFilteredRowModel().rows, table.getVisibleLeafColumns(), buildExportFilename('export'));
   }
 
   function doExportSelected() {
-    exportToCSV(selectedRows.map(r => r.original), buildExportFilename('selected'));
+    exportVisibleToCSV(table.getSelectedRowModel().rows, table.getVisibleLeafColumns(), buildExportFilename('selected'));
   }
 
   // Print handler — de-virtualizes table, prints, re-virtualizes
