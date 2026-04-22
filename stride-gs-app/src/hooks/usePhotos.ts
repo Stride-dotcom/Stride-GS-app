@@ -132,7 +132,7 @@ export function usePhotos({ entityType, entityId, tenantId, enabled = true, item
       : query.eq('entity_type', entityType).eq('entity_id', entityId);
     const { data, error: err } = await scoped
       .order('is_primary', { ascending: false })
-      .order('created_at', { ascending: false });
+      .order('created_at', { ascending: true });
     if (!mountedRef.current) return;
     if (err) { setError(err.message); setLoading(false); return; }
     const rows = (data || []) as Photo[];
