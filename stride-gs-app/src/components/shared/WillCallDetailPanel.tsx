@@ -2,18 +2,13 @@ import { useState, useMemo, useCallback, useEffect, useRef } from 'react';
 import { X, Truck, Package, Calendar, Phone, User, DollarSign, CheckCircle2, CreditCard, FileText, Loader2, AlertTriangle, FolderOpen, Info, Pencil, Save, Play } from 'lucide-react';
 import { FolderButton } from './FolderButton';
 import { DeepLink } from './DeepLink';
-import { EntityHistory } from './EntityHistory';
-import { EntityAttachments } from './EntityAttachments';
-import { DetailHeader } from './DetailHeader';
+import { TabbedDetailPanel, type TabbedDetailPanelTab } from './TabbedDetailPanel';
 import { ItemIdBadges } from './ItemIdBadges';
 import { useItemIndicators } from '../../hooks/useItemIndicators';
 import { theme } from '../../styles/theme';
 import { fmtDate } from '../../lib/constants';
 import { WriteButton } from './WriteButton';
 import { ProcessingOverlay } from './ProcessingOverlay';
-import { getPanelContainerStyle, panelBackdropStyle } from './panelStyles';
-import { useIsMobile } from '../../hooks/useIsMobile';
-import { useResizablePanel } from '../../hooks/useResizablePanel';
 import { postProcessWcRelease, postCancelWillCall, postRemoveItemsFromWillCall, postUpdateWillCall, postGenerateWcDoc, fetchWcDocUrl, fetchWillCallById, isApiConfigured } from '../../lib/api';
 import { fetchWcItemsFromSupabase } from '../../lib/supabaseQueries';
 import { useClients } from '../../hooks/useClients';
@@ -57,8 +52,8 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
   // Clients are not allowed to release items or set release dates — that
   // decision belongs to warehouse staff. Gate every Release-related action.
   const canRelease = user?.role === 'admin' || user?.role === 'staff';
-  const { isMobile } = useIsMobile();
-  const { width: panelWidth, handleMouseDown: handleResizeMouseDown } = useResizablePanel(440, 'willcall', isMobile);
+  // v2026-04-22 — panel frame (backdrop, resize, header) is provided by
+  // TabbedDetailPanel. Adapter focuses on entity-specific state + tab content.
   const apiConfigured = isApiConfigured();
   const { apiClients } = useClients(apiConfigured);
   const clientSheetId = useMemo(() => wcProp.clientSheetId || apiClients.find(c => c.name === wcProp.clientName)?.spreadsheetId || '', [apiClients, wcProp.clientName, wcProp.clientSheetId]);
@@ -511,61 +506,9 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
     })();
   };
 
-  return (
-    <>
-      {!isMobile && <div onClick={() => { if (!releasing && !cancelling) onClose(); }} style={panelBackdropStyle} />}
-      <div style={getPanelContainerStyle(panelWidth, isMobile)}>
-        {!isMobile && <div onMouseDown={handleResizeMouseDown} style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: 6, cursor: 'col-resize', zIndex: 101 }} />}
-
-        <ProcessingOverlay visible={releasing || cancelling || removing} message={removing ? 'Removing items...' : cancelling ? 'Cancelling Will Call...' : 'Processing Release...'} />
-
-        {/* Header — unified DetailHeader (session 70 follow-up).
-            Edit / Save / Cancel moved to the sticky footer bottom-left. */}
-        <DetailHeader
-          entityId={wc.wcNumber}
-          clientName={wc.clientName}
-          actions={
-            <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4, color: theme.colors.textMuted }}>
-              <X size={18} />
-            </button>
-          }
-          belowId={
-            <div style={{ display: 'flex', gap: 6 }}>
-              <Badge t={wc.status} bg={sc.bg} color={sc.color} />
-              {wc.cod && <span style={{ fontSize: 11, padding: '2px 10px', borderRadius: 10, fontWeight: 600, background: '#FEF3C7', color: '#B45309' }}>COD{wc.codAmount ? `: $${wc.codAmount}` : ''}</span>}
-              {paid && <Badge t="Paid" bg="#F0FDF4" color="#15803D" />}
-            </div>
-          }
-        />
-        {editSaveError && (
-          <div style={{ padding: '6px 20px', background: '#FEF2F2', color: '#DC2626', fontSize: 12, fontWeight: 500, borderBottom: `1px solid #FECACA` }}>{editSaveError}</div>
-        )}
-        {editSaveSuccess && (
-          <div style={{ padding: '6px 20px', background: '#F0FDF4', color: '#15803D', fontSize: 12, fontWeight: 500, borderBottom: `1px solid #BBF7D0` }}>Changes saved successfully</div>
-        )}
-        {/* Top-of-panel confirmation for Regenerate Pickup Document — lives above scrollable content so
-            it doesn't get pushed off-screen by panel re-renders. Stays visible until explicitly dismissed. */}
-        {genDocResult && (
-          <div style={{ padding: '10px 20px', background: '#F0FDF4', borderBottom: '1px solid #BBF7D0', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <CheckCircle2 size={16} color="#15803D" />
-              <span style={{ fontSize: 13, color: '#15803D', fontWeight: 600 }}>Pickup document generated in Will Call folder</span>
-            </div>
-            <button onClick={() => setGenDocResult(null)} style={{ border: 'none', background: 'none', cursor: 'pointer', color: '#15803D', fontSize: 11, padding: 0, fontWeight: 600 }}>Dismiss</button>
-          </div>
-        )}
-        {genDocError && (
-          <div style={{ padding: '10px 20px', background: '#FEF2F2', borderBottom: '1px solid #FECACA', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <AlertTriangle size={16} color="#DC2626" />
-              <span style={{ fontSize: 13, color: '#DC2626', fontWeight: 600 }}>{genDocError}</span>
-            </div>
-            <button onClick={() => setGenDocError(null)} style={{ border: 'none', background: 'none', cursor: 'pointer', color: '#DC2626', fontSize: 11, padding: 0, fontWeight: 600 }}>Dismiss</button>
-          </div>
-        )}
-
-        {/* Content */}
-        <div style={{ flex: 1, overflowY: 'auto', padding: 20 }}>
+  // ─── Tab renderers (same modular pattern as TaskDetailPanel) ────────
+  const renderDetailsTab = () => (
+    <div style={{ padding: 20 }}>
 
           {/* Pickup Details */}
           <div style={{ background: theme.colors.bgSubtle, border: `1px solid ${theme.colors.border}`, borderRadius: 10, padding: 14, marginBottom: 16 }}>
@@ -948,39 +891,81 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
             )}
           </div>
 
-          {/* Session 74 — Photos + Documents + Notes */}
-          <EntityAttachments
-            photos={{ entityType: 'will_call', entityId: wc.wcNumber, tenantId: clientSheetId }}
-            documents={{ contextType: 'willcall', contextId: wc.wcNumber, tenantId: clientSheetId }}
-            notes={{ entityType: 'will_call', entityId: wc.wcNumber }}
-          />
-        </div>
+    </div>
+  );
 
-        {/* Cancel result card */}
-        {cancelResult && cancelResult.success && (
-          <div style={{ padding: '14px 20px', borderTop: `1px solid ${theme.colors.border}`, flexShrink: 0 }}>
-            <div style={{ padding: '12px 14px', background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: 10, marginBottom: 10 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
-                <X size={16} color="#DC2626" />
-                <span style={{ fontSize: 13, fontWeight: 600, color: '#DC2626' }}>{cancelResult.skipped ? 'Already cancelled' : 'Will call cancelled'}</span>
-              </div>
-              <div style={{ fontSize: 12, color: '#991B1B' }}>
-                {cancelResult.itemsCancelled != null && <div>{cancelResult.itemsCancelled} item(s) cancelled</div>}
-                <div>Email: {cancelResult.emailSent ? '✓ Sent' : '✗ Not sent'}</div>
-              </div>
-              {cancelResult.warnings && cancelResult.warnings.length > 0 && (
-                <div style={{ marginTop: 6, padding: '4px 8px', background: '#FEF3C7', borderRadius: 6 }}>
-                  {cancelResult.warnings.map((w, i) => <div key={i} style={{ fontSize: 11, color: '#92400E' }}>⚠ {w}</div>)}
-                </div>
-              )}
-            </div>
-            <EntityHistory entityType="will_call" entityId={wc.wcNumber} tenantId={clientSheetId} />
-            <button onClick={onClose} style={{ width: '100%', padding: '10px', fontSize: 13, fontWeight: 600, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', fontFamily: 'inherit', color: theme.colors.textSecondary }}>Close</button>
+  // Header actions — edit/save/close
+  const headerActions = (
+    <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4, color: 'rgba(255,255,255,0.7)' }}>
+      <X size={18} />
+    </button>
+  );
+
+  // Below-ID status row
+  const belowIdContent = (
+    <div style={{ display: 'flex', gap: 6 }}>
+      <Badge t={wc.status} bg={sc.bg} color={sc.color} />
+      {wc.cod && <span style={{ fontSize: 11, padding: '2px 10px', borderRadius: 10, fontWeight: 600, background: '#FEF3C7', color: '#B45309' }}>COD{wc.codAmount ? `: $${wc.codAmount}` : ''}</span>}
+      {paid && <Badge t="Paid" bg="#F0FDF4" color="#15803D" />}
+    </div>
+  );
+
+  // Status strip — inline save success/error banners + document-gen results
+  const statusStrip = (
+    <>
+      {editSaveError && (
+        <div style={{ padding: '6px 20px', background: '#FEF2F2', color: '#DC2626', fontSize: 12, fontWeight: 500, borderBottom: `1px solid #FECACA` }}>{editSaveError}</div>
+      )}
+      {editSaveSuccess && (
+        <div style={{ padding: '6px 20px', background: '#F0FDF4', color: '#15803D', fontSize: 12, fontWeight: 500, borderBottom: `1px solid #BBF7D0` }}>Changes saved successfully</div>
+      )}
+      {genDocResult && (
+        <div style={{ padding: '10px 20px', background: '#F0FDF4', borderBottom: '1px solid #BBF7D0', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <CheckCircle2 size={16} color="#15803D" />
+            <span style={{ fontSize: 13, color: '#15803D', fontWeight: 600 }}>Pickup document generated in Will Call folder</span>
           </div>
-        )}
+          <button onClick={() => setGenDocResult(null)} style={{ border: 'none', background: 'none', cursor: 'pointer', color: '#15803D', fontSize: 11, padding: 0, fontWeight: 600 }}>Dismiss</button>
+        </div>
+      )}
+      {genDocError && (
+        <div style={{ padding: '10px 20px', background: '#FEF2F2', borderBottom: '1px solid #FECACA', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <AlertTriangle size={16} color="#DC2626" />
+            <span style={{ fontSize: 13, color: '#DC2626', fontWeight: 600 }}>{genDocError}</span>
+          </div>
+          <button onClick={() => setGenDocError(null)} style={{ border: 'none', background: 'none', cursor: 'pointer', color: '#DC2626', fontSize: 11, padding: 0, fontWeight: 600 }}>Dismiss</button>
+        </div>
+      )}
+    </>
+  );
 
-        {/* Footer */}
-        {!cancelResult && <div style={{ padding: '14px 20px', borderTop: `1px solid ${theme.colors.border}`, flexShrink: 0 }}>
+  // Footer — Start WC / Release / Close + Edit/Save utility row.
+  // EntityHistory moved to Activity tab (via builtInTabs below).
+  const footer = (
+    <>
+      {cancelResult && cancelResult.success && (
+        <div>
+          <div style={{ padding: '12px 14px', background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: 10, marginBottom: 10 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+              <X size={16} color="#DC2626" />
+              <span style={{ fontSize: 13, fontWeight: 600, color: '#DC2626' }}>{cancelResult.skipped ? 'Already cancelled' : 'Will call cancelled'}</span>
+            </div>
+            <div style={{ fontSize: 12, color: '#991B1B' }}>
+              {cancelResult.itemsCancelled != null && <div>{cancelResult.itemsCancelled} item(s) cancelled</div>}
+              <div>Email: {cancelResult.emailSent ? '✓ Sent' : '✗ Not sent'}</div>
+            </div>
+            {cancelResult.warnings && cancelResult.warnings.length > 0 && (
+              <div style={{ marginTop: 6, padding: '4px 8px', background: '#FEF3C7', borderRadius: 6 }}>
+                {cancelResult.warnings.map((w, i) => <div key={i} style={{ fontSize: 11, color: '#92400E' }}>⚠ {w}</div>)}
+              </div>
+            )}
+          </div>
+          <button onClick={onClose} style={{ width: '100%', padding: '10px', fontSize: 13, fontWeight: 600, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', fontFamily: 'inherit', color: theme.colors.textSecondary }}>Close</button>
+        </div>
+      )}
+
+      {!cancelResult && <div>
           {/* Error banner */}
           {(releaseError || cancelError) && (
             <div style={{ marginBottom: 10, padding: '8px 12px', background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: 8, fontSize: 12, color: '#DC2626', display: 'flex', alignItems: 'flex-start', gap: 6 }}>
@@ -1077,8 +1062,35 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
             </div>
           )}
         </div>}
-      </div>
-      <style>{`@keyframes slideIn { from { transform: translateX(100%); } to { transform: translateX(0); } }`}</style>
     </>
+  );
+
+  // ─── Shell ────────────────────────────────────────────────────────────
+  const tabs: TabbedDetailPanelTab[] = [
+    { id: 'details', label: 'Details', keepMounted: true, render: renderDetailsTab },
+  ];
+
+  return (
+    <TabbedDetailPanel
+      title={wc.wcNumber}
+      clientName={wc.clientName}
+      belowId={belowIdContent}
+      headerActions={headerActions}
+      statusStrip={statusStrip}
+      overlay={<ProcessingOverlay visible={releasing || cancelling || removing} message={removing ? 'Removing items...' : cancelling ? 'Cancelling Will Call...' : 'Processing Release...'} />}
+      tabs={tabs}
+      builtInTabs={{
+        // Will Call is a CONTAINER entity (multiple items). Photos/Notes
+        // scoped to the WC itself — no item_id rollup (would mix items).
+        photos: { entityType: 'will_call', entityId: wc.wcNumber, tenantId: clientSheetId },
+        docs:   { contextType: 'willcall', contextId: wc.wcNumber, tenantId: clientSheetId },
+        notes:  { entityType: 'will_call', entityId: wc.wcNumber },
+        activity: { entityType: 'will_call', entityId: wc.wcNumber, tenantId: clientSheetId },
+      }}
+      footer={footer}
+      onClose={onClose}
+      resizeKey="willcall"
+      defaultWidth={440}
+    />
   );
 }

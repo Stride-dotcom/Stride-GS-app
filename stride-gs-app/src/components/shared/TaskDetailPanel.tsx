@@ -2,11 +2,9 @@ import React, { useState, useCallback, useMemo, useEffect } from 'react';
 import { X, ClipboardList, Package, MapPin, CheckCircle2, XCircle, AlertTriangle, FolderOpen, Loader2, Play, ExternalLink, Truck, Wrench, Save, DollarSign, Pencil, FileText } from 'lucide-react';
 import { FolderButton } from './FolderButton';
 import { DeepLink } from './DeepLink';
-import { DetailHeader } from './DetailHeader';
+import { TabbedDetailPanel, type TabbedDetailPanelTab } from './TabbedDetailPanel';
 import { ItemIdBadges } from './ItemIdBadges';
 import { useItemIndicators } from '../../hooks/useItemIndicators';
-import { EntityHistory } from './EntityHistory';
-import { EntityAttachments } from './EntityAttachments';
 import { buildDeepLink } from '../../lib/deepLinks';
 import { theme } from '../../styles/theme';
 import { fmtDate, fmtDateTime } from '../../lib/constants';
@@ -19,9 +17,6 @@ import type { CompleteTaskResponse, StartTaskResponse } from '../../lib/api';
 import { useAuth } from '../../contexts/AuthContext';
 import { SERVICE_CODES } from '../../lib/constants';
 import { ProcessingOverlay } from './ProcessingOverlay';
-import { getPanelContainerStyle, panelBackdropStyle } from './panelStyles';
-import { useIsMobile } from '../../hooks/useIsMobile';
-import { useResizablePanel } from '../../hooks/useResizablePanel';
 
 import type { Task, Repair, InventoryItem } from '../../lib/types';
 interface Props {
@@ -57,8 +52,10 @@ function Field({ label, value, mono }: { label: string; value?: string | number 
 const input: React.CSSProperties = { width: '100%', padding: '8px 10px', fontSize: 13, border: `1px solid ${theme.colors.border}`, borderRadius: 8, outline: 'none', fontFamily: 'inherit' };
 
 export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = [], applyTaskPatch, mergeTaskPatch, clearTaskPatch, addOptimisticRepair, removeOptimisticRepair, applyItemPatch, clearItemPatch }: Props) {
-  const { isMobile } = useIsMobile();
-  const { width: panelWidth, handleMouseDown: handleResizeMouseDown } = useResizablePanel(460, 'task', isMobile);
+  // v2026-04-22 — migrated to TabbedDetailPanel shell. Adapter owns state;
+  // tab bodies are small inline render functions so future shell swaps
+  // (full-screen view, side panel, modal) only require rewriting the
+  // outer wrapper — the tab content stays intact.
   const tc = TYPE_CFG[task.type] || TYPE_CFG.RCVG;
   const sc = STATUS_CFG[task.status] || STATUS_CFG.Open;
   const isOpen = task.status === 'Open' || task.status === 'In Progress';
@@ -454,75 +451,15 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
     }
   };
 
-  return (
-    <>
-      {!isMobile && <div onClick={() => { if (!submitting && !startTaskLoading) onClose(); }} style={panelBackdropStyle} />}
-      <div style={getPanelContainerStyle(panelWidth, isMobile)}>
-        {!isMobile && <div onMouseDown={handleResizeMouseDown} style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: 6, cursor: 'col-resize', zIndex: 101 }} />}
+  // ─── Tab renderers ───────────────────────────────────────────────────
+  // Tab content is kept as small inline render functions that consume
+  // state from this adapter's scope (closure). The benefit: future shell
+  // redesigns (e.g. full-screen modal, side drawer) only touch the
+  // TabbedDetailPanel call below — the tab body functions stay intact
+  // and can be hoisted into their own files if needed later.
 
-        <ProcessingOverlay visible={submitting || startTaskLoading} message={startTaskLoading ? 'Starting Task...' : 'Completing Task...'} />
-
-        {/* Header — DetailHeader gives canonical layout: big bold ID, bold client,
-            colored sidemark chip, status badges below ID. Session 70 fix #5. */}
-        <DetailHeader
-          entityId={task.taskId}
-          clientName={task.clientName}
-          sidemark={task.sidemark}
-          // Session 74: surface I/A/R badges for the underlying item
-          // right in the dark header pill — matches ItemDetailPanel.
-          // Previously the badges only rendered in the secondary Item
-          // Info card further down; warehouse staff had to scroll to
-          // see them.
-          idBadges={task.itemId ? (
-            <ItemIdBadges
-              itemId={task.itemId}
-              inspItems={inspItems}
-              asmItems={asmItems}
-              repairItems={repairItems}
-            />
-          ) : undefined}
-          actions={
-            <>
-              {isOpen && !completed && (
-                isEditingTask ? (
-                  <>
-                    <button onClick={handleTaskSave} disabled={taskSaving}
-                      style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '4px 12px', fontSize: 11, fontWeight: 600, borderRadius: 6, border: 'none', background: theme.colors.orange, color: '#fff', cursor: taskSaving ? 'wait' : 'pointer' }}>
-                      {taskSaving ? <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} /> : <Save size={12} />}
-                      {taskSaving ? 'Saving...' : 'Save'}
-                    </button>
-                    <button onClick={handleTaskEditCancel} disabled={taskSaving}
-                      style={{ padding: '4px 10px', fontSize: 11, fontWeight: 600, borderRadius: 6, border: `1px solid ${theme.colors.border}`, background: '#fff', color: theme.colors.textSecondary, cursor: 'pointer' }}>
-                      Cancel
-                    </button>
-                  </>
-                ) : (
-                  <button onClick={handleTaskEditStart}
-                    style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '4px 10px', fontSize: 11, fontWeight: 600, borderRadius: 6, border: `1px solid ${theme.colors.border}`, background: '#fff', color: theme.colors.textSecondary, cursor: 'pointer' }}>
-                    <Pencil size={12} /> Edit
-                  </button>
-                )
-              )}
-              <button onClick={onClose} disabled={submitting || startTaskLoading} style={{ background: 'none', border: 'none', cursor: (submitting || startTaskLoading) ? 'not-allowed' : 'pointer', padding: 4, color: theme.colors.textMuted, opacity: (submitting || startTaskLoading) ? 0.3 : 1 }}><X size={18} /></button>
-            </>
-          }
-          belowId={
-            <div style={{ display: 'flex', gap: 6 }}>
-              <Badge t={SERVICE_CODES[task.type as keyof typeof SERVICE_CODES] || task.type} bg={tc.bg} color={tc.color} />
-              <Badge t={completed ? 'Completed' : task.status} bg={completed ? STATUS_CFG.Completed.bg : sc.bg} color={completed ? STATUS_CFG.Completed.color : sc.color} />
-              {task.result && <Badge t={task.result} bg={task.result === 'Pass' ? '#F0FDF4' : '#FEF2F2'} color={task.result === 'Pass' ? '#15803D' : '#DC2626'} />}
-            </div>
-          }
-        />
-        {taskSaveError && (
-          <div style={{ padding: '6px 20px', background: '#FEF2F2', color: '#DC2626', fontSize: 12, fontWeight: 500, borderBottom: `1px solid #FECACA` }}>{taskSaveError}</div>
-        )}
-        {taskSaveSuccess && (
-          <div style={{ padding: '6px 20px', background: '#F0FDF4', color: '#15803D', fontSize: 12, fontWeight: 500, borderBottom: `1px solid #BBF7D0` }}>Changes saved successfully</div>
-        )}
-
-        {/* Content */}
-        <div style={{ flex: 1, overflowY: 'auto', padding: 20 }}>
+  const renderDetailsTab = () => (
+    <div style={{ padding: 20 }}>
 
           {/* Item Info Card */}
           {task.itemId && (
@@ -762,41 +699,67 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
             </div>
           )}
 
-          {/* Session 73 — Photos + Notes (always available whether open or completed).
-              v2026-04-22 — enableSourceFilter turns on the cross-entity rollup:
-              Photos tab now shows every photo against task.itemId regardless of
-              which entity captured it (inspection photos from OTHER tasks on the
-              same item, repair photos, etc.) with source sub-tabs to filter.
-              Notes tab same — rollup by item_id with All/Item/Task/Repair sub-tabs. */}
-          <EntityAttachments
-            photos={{
-              entityType: 'task',
-              entityId: task.taskId,
-              tenantId: clientSheetId,
-              itemId: task.itemId ? String(task.itemId) : null,
-              enableSourceFilter: !!task.itemId,
-            }}
-            documents={{ contextType: 'task', contextId: task.taskId, tenantId: clientSheetId }}
-            notes={{
-              entityType: 'task',
-              entityId: task.taskId,
-              // Session 74: surface the parent item's notes thread as a
-              // sibling pill so staff can see item-level history without
-              // leaving the task panel.
-              relatedEntities: task.itemId
-                ? [{ type: 'inventory', id: String(task.itemId), label: `Item ${task.itemId}` }]
-                : [],
-              enableSourceFilter: !!task.itemId,
-              itemId: task.itemId ? String(task.itemId) : null,
-            }}
-          />
-
         </div>
+  );
 
-        {/* Footer Actions */}
-        {isOpen && !completed && (
-          <div style={{ padding: '14px 20px', borderTop: `1px solid ${theme.colors.border}`, flexShrink: 0 }}>
-            {/* Start Task section (shown when not yet started) */}
+  // ─── Header actions: Edit/Save/Cancel/Close — always visible in header.
+  const headerActions = (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+      {isOpen && !completed && (
+        isEditingTask ? (
+          <>
+            <button onClick={handleTaskSave} disabled={taskSaving}
+              style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '4px 12px', fontSize: 11, fontWeight: 600, borderRadius: 6, border: 'none', background: theme.colors.orange, color: '#fff', cursor: taskSaving ? 'wait' : 'pointer' }}>
+              {taskSaving ? <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} /> : <Save size={12} />}
+              {taskSaving ? 'Saving...' : 'Save'}
+            </button>
+            <button onClick={handleTaskEditCancel} disabled={taskSaving}
+              style={{ padding: '4px 10px', fontSize: 11, fontWeight: 600, borderRadius: 6, border: `1px solid ${theme.colors.border}`, background: '#fff', color: theme.colors.textSecondary, cursor: 'pointer' }}>
+              Cancel
+            </button>
+          </>
+        ) : (
+          <button onClick={handleTaskEditStart}
+            style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '4px 10px', fontSize: 11, fontWeight: 600, borderRadius: 6, border: `1px solid ${theme.colors.border}`, background: '#fff', color: theme.colors.textSecondary, cursor: 'pointer' }}>
+            <Pencil size={12} /> Edit
+          </button>
+        )
+      )}
+      <button onClick={onClose} disabled={submitting || startTaskLoading}
+        style={{ background: 'none', border: 'none', cursor: (submitting || startTaskLoading) ? 'not-allowed' : 'pointer', padding: 4, color: 'rgba(255,255,255,0.7)', opacity: (submitting || startTaskLoading) ? 0.3 : 1 }}>
+        <X size={18} />
+      </button>
+    </div>
+  );
+
+  // Below-ID badge row: service type, status, result
+  const belowIdContent = (
+    <div style={{ display: 'flex', gap: 6 }}>
+      <Badge t={SERVICE_CODES[task.type as keyof typeof SERVICE_CODES] || task.type} bg={tc.bg} color={tc.color} />
+      <Badge t={completed ? 'Completed' : task.status} bg={completed ? STATUS_CFG.Completed.bg : sc.bg} color={completed ? STATUS_CFG.Completed.color : sc.color} />
+      {task.result && <Badge t={task.result} bg={task.result === 'Pass' ? '#F0FDF4' : '#FEF2F2'} color={task.result === 'Pass' ? '#15803D' : '#DC2626'} />}
+    </div>
+  );
+
+  // Save banners shown between header and tab bar.
+  const statusStrip = (taskSaveError || taskSaveSuccess) ? (
+    <>
+      {taskSaveError && (
+        <div style={{ padding: '6px 20px', background: '#FEF2F2', color: '#DC2626', fontSize: 12, fontWeight: 500, borderBottom: `1px solid #FECACA` }}>{taskSaveError}</div>
+      )}
+      {taskSaveSuccess && (
+        <div style={{ padding: '6px 20px', background: '#F0FDF4', color: '#15803D', fontSize: 12, fontWeight: 500, borderBottom: `1px solid #BBF7D0` }}>Changes saved successfully</div>
+      )}
+    </>
+  ) : undefined;
+
+  // ─── Footer: Start Task / Pass-Fail / Cancel when open; Close + result
+  //            summary when completed. EntityHistory moved to Activity tab.
+  const footer = (
+    <>
+      {isOpen && !completed && (
+        <div>
+          {/* Start Task section (shown when not yet started) */}
             {!isAlreadyStarted && !startTaskResult && (
               <div style={{ marginBottom: 12 }}>
                 {startTaskError && (
@@ -920,28 +883,93 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
             )}
           </div>
         )}
-        {(completed || !isOpen) && (
-          <div style={{ padding: '14px 20px', borderTop: `1px solid ${theme.colors.border}`, flexShrink: 0 }}>
-            {/* Success summary */}
-            {completed && submitResult?.success && (
-              <div style={{ padding: '10px 12px', background: '#F0FDF4', border: '1px solid #86EFAC', borderRadius: 8, marginBottom: 10, fontSize: 12, color: '#15803D' }}>
-                <div style={{ fontWeight: 600, marginBottom: 4 }}>
-                  <CheckCircle2 size={13} style={{ verticalAlign: 'middle', marginRight: 4 }} />
-                  Task completed — {submitResult.result || task.result || ''}
-                </div>
-                {submitResult.billingCreated && <div>✓ Billing row created</div>}
-                {submitResult.skipped && <div style={{ color: '#B45309' }}>Already processed — no duplicate writes.</div>}
-                {submitResult.warnings?.map((w, i) => (
-                  <div key={i} style={{ color: '#B45309', marginTop: 2 }}>⚠ {w}</div>
-                ))}
+      {(completed || !isOpen) && (
+        <div>
+          {/* Success summary */}
+          {completed && submitResult?.success && (
+            <div style={{ padding: '10px 12px', background: '#F0FDF4', border: '1px solid #86EFAC', borderRadius: 8, marginBottom: 10, fontSize: 12, color: '#15803D' }}>
+              <div style={{ fontWeight: 600, marginBottom: 4 }}>
+                <CheckCircle2 size={13} style={{ verticalAlign: 'middle', marginRight: 4 }} />
+                Task completed — {submitResult.result || task.result || ''}
               </div>
-            )}
-            <EntityHistory entityType="task" entityId={task.taskId} tenantId={clientSheetId} />
-            <button onClick={onClose} style={{ width: '100%', padding: '10px', fontSize: 13, fontWeight: 600, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', fontFamily: 'inherit', color: theme.colors.textSecondary }}>Close</button>
-          </div>
-        )}
-      </div>
-      <style>{`@keyframes slideIn { from { transform: translateX(100%); } to { transform: translateX(0); } } @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
+              {submitResult.billingCreated && <div>✓ Billing row created</div>}
+              {submitResult.skipped && <div style={{ color: '#B45309' }}>Already processed — no duplicate writes.</div>}
+              {submitResult.warnings?.map((w, i) => (
+                <div key={i} style={{ color: '#B45309', marginTop: 2 }}>⚠ {w}</div>
+              ))}
+            </div>
+          )}
+          <button onClick={onClose} style={{ width: '100%', padding: '10px', fontSize: 13, fontWeight: 600, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', fontFamily: 'inherit', color: theme.colors.textSecondary }}>Close</button>
+        </div>
+      )}
     </>
+  );
+
+  // ─── Shell ────────────────────────────────────────────────────────────
+  // Everything above this point is adapter-owned state + tab body
+  // rendering. If we ever want a different outer shell (full-page view,
+  // modal, split pane), only this return block changes.
+  const tabs: TabbedDetailPanelTab[] = [
+    {
+      id: 'details',
+      label: 'Details',
+      // Keep the Details tab mounted across tab switches so the edit
+      // form draft, autocomplete filter, and focus state survive.
+      keepMounted: true,
+      render: renderDetailsTab,
+    },
+  ];
+
+  return (
+    <TabbedDetailPanel
+      title={task.taskId}
+      clientName={task.clientName}
+      sidemark={task.sidemark}
+      idBadges={task.itemId ? (
+        <ItemIdBadges
+          itemId={task.itemId}
+          inspItems={inspItems}
+          asmItems={asmItems}
+          repairItems={repairItems}
+        />
+      ) : undefined}
+      belowId={belowIdContent}
+      headerActions={headerActions}
+      statusStrip={statusStrip}
+      overlay={<ProcessingOverlay visible={submitting || startTaskLoading} message={startTaskLoading ? 'Starting Task...' : 'Completing Task...'} />}
+      tabs={tabs}
+      builtInTabs={{
+        photos: {
+          entityType: 'task',
+          entityId: task.taskId,
+          tenantId: clientSheetId,
+          itemId: task.itemId ? String(task.itemId) : null,
+          enableSourceFilter: !!task.itemId,
+        },
+        docs: {
+          contextType: 'task',
+          contextId: task.taskId,
+          tenantId: clientSheetId,
+        },
+        notes: {
+          entityType: 'task',
+          entityId: task.taskId,
+          relatedEntities: task.itemId
+            ? [{ type: 'inventory', id: String(task.itemId), label: `Item ${task.itemId}` }]
+            : [],
+          enableSourceFilter: !!task.itemId,
+          itemId: task.itemId ? String(task.itemId) : null,
+        },
+        activity: {
+          entityType: 'task',
+          entityId: task.taskId,
+          tenantId: clientSheetId,
+        },
+      }}
+      footer={footer}
+      onClose={onClose}
+      resizeKey="task"
+      defaultWidth={460}
+    />
   );
 }

@@ -1,19 +1,14 @@
 import React, { useEffect, useState } from 'react';
 import { X, Wrench, Package, ClipboardList, CheckCircle2, XCircle, AlertTriangle, Send, Loader2, Truck, Play, Pencil, MapPin } from 'lucide-react';
-import { EntityHistory } from './EntityHistory';
-import { EntityAttachments } from './EntityAttachments';
+import { TabbedDetailPanel, type TabbedDetailPanelTab } from './TabbedDetailPanel';
 import { FolderButton } from './FolderButton';
 import { DeepLink } from './DeepLink';
-import { DetailHeader } from './DetailHeader';
 import { ItemIdBadges } from './ItemIdBadges';
 import { useItemIndicators } from '../../hooks/useItemIndicators';
 import { theme } from '../../styles/theme';
 import { fmtDate } from '../../lib/constants';
 import { WriteButton } from './WriteButton';
 import { ProcessingOverlay } from './ProcessingOverlay';
-import { getPanelContainerStyle, panelBackdropStyle } from './panelStyles';
-import { useIsMobile } from '../../hooks/useIsMobile';
-import { useResizablePanel } from '../../hooks/useResizablePanel';
 import { postSendRepairQuote, postRespondToRepairQuote, postCompleteRepair, postStartRepair, postCancelRepair, postUpdateRepairNotes, isApiConfigured } from '../../lib/api';
 import { entityEvents } from '../../lib/entityEvents';
 import type { ApiRepair, SendRepairQuoteResponse, RespondToRepairQuoteResponse, CompleteRepairResponse, StartRepairResponse } from '../../lib/api';
@@ -48,8 +43,7 @@ const input: React.CSSProperties = { width: '100%', padding: '8px 10px', fontSiz
 
 export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepairPatch, clearRepairPatch }: Props) {
   const { user } = useAuth();
-  const { isMobile } = useIsMobile();
-  const { width: panelWidth, handleMouseDown: handleResizeMouseDown } = useResizablePanel(460, 'repair', isMobile);
+  // v2026-04-22 — panel frame handled by TabbedDetailPanel shell.
 
   // Derive effective status from submit result (optimistic update).
   // Keep in sync with the repair prop — optimistic patches from the parent
@@ -384,71 +378,9 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
     }
   };
 
-  return (
-    <>
-      {!isMobile && <div onClick={() => { if (!submitting) onClose(); }} style={panelBackdropStyle} />}
-      <div style={getPanelContainerStyle(panelWidth, isMobile)}>
-        {!isMobile && <div onMouseDown={handleResizeMouseDown} style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: 6, cursor: 'col-resize', zIndex: 101 }} />}
-
-        <ProcessingOverlay visible={submitting} message="Processing..." />
-
-        {/* Header — unified DetailHeader (session 70 follow-up). */}
-        <DetailHeader
-          entityId={repair.repairId}
-          clientName={repair.clientName}
-          sidemark={repair.sidemark}
-          // Session 74: surface I/A/R badges for the underlying item
-          // right next to the Repair ID in the dark header. Same
-          // rationale as TaskDetailPanel.
-          idBadges={repair.itemId ? (
-            <ItemIdBadges
-              itemId={repair.itemId}
-              inspItems={inspItems}
-              asmItems={asmItems}
-              repairItems={repairItems}
-            />
-          ) : undefined}
-          actions={
-            <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4, color: theme.colors.textMuted }}>
-              <X size={18} />
-            </button>
-          }
-          belowId={
-            <div style={{ display: 'flex', gap: 6 }}>
-              <Badge t={effectiveStatus} bg={sc.bg} color={sc.color} />
-              {repair.quoteAmount != null && <span style={{ fontSize: 12, fontWeight: 600, color: theme.colors.text, padding: '2px 10px', background: theme.colors.bgSubtle, borderRadius: 10 }}>${repair.quoteAmount}</span>}
-            </div>
-          }
-        />
-
-        {/* Top-of-panel persistent confirmation for Start / Regenerate Work Order */}
-        {startResult?.success && (
-          <div style={{ padding: '10px 20px', background: '#F5F3FF', borderBottom: '1px solid #DDD6FE', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <Play size={16} color="#7C3AED" />
-              <span style={{ fontSize: 13, color: '#7C3AED', fontWeight: 600 }}>
-                {startResult.skipped
-                  ? 'Work Order folder ready'
-                  : (effectiveStatus === 'Complete' || effectiveStatus === 'In Progress'
-                      ? 'Work Order PDF regenerated in Repair Folder'
-                      : 'Repair started — Work Order PDF created in Repair Folder')}
-              </span>
-            </div>
-            <button onClick={() => setStartResult(null)} style={{ border: 'none', background: 'none', cursor: 'pointer', color: '#7C3AED', fontSize: 11, padding: 0, fontWeight: 600 }}>Dismiss</button>
-          </div>
-        )}
-        {submitError && (
-          <div style={{ padding: '10px 20px', background: '#FEF2F2', borderBottom: '1px solid #FECACA', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <AlertTriangle size={16} color="#DC2626" />
-              <span style={{ fontSize: 13, color: '#DC2626', fontWeight: 600 }}>{submitError}</span>
-            </div>
-            <button onClick={() => setSubmitError(null)} style={{ border: 'none', background: 'none', cursor: 'pointer', color: '#DC2626', fontSize: 11, padding: 0, fontWeight: 600 }}>Dismiss</button>
-          </div>
-        )}
-
-        {/* Content */}
-        <div style={{ flex: 1, overflowY: 'auto', padding: 20 }}>
+  // ─── Tab renderers (modular) ────────────────────────────────────────
+  const renderDetailsTab = () => (
+    <div style={{ padding: 20 }}>
 
           {/* Item Info — uses repair's own fields from API */}
           {repair.itemId && (
@@ -597,46 +529,62 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
             )}
           </div>
 
-          {/* Photos section removed — use Repair Folder / Shipment Folder buttons above */}
+        {/* Photos + Notes now live in dedicated tabs via builtInTabs below. */}
+    </div>
+  );
+
+  // Header actions — only Close (edit flow uses inline status-pill CTA).
+  const headerActions = (
+    <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4, color: 'rgba(255,255,255,0.7)' }}>
+      <X size={18} />
+    </button>
+  );
+
+  // Below-ID status row
+  const belowIdContent = (
+    <div style={{ display: 'flex', gap: 6 }}>
+      <Badge t={effectiveStatus} bg={sc.bg} color={sc.color} />
+      {repair.quoteAmount != null && <span style={{ fontSize: 12, fontWeight: 600, color: theme.colors.text, padding: '2px 10px', background: theme.colors.bgSubtle, borderRadius: 10 }}>${repair.quoteAmount}</span>}
+    </div>
+  );
+
+  // Status strip — start-result + error banners that need to persist
+  // above the scrollable body.
+  const statusStrip = (startResult?.success || submitError) ? (
+    <>
+      {startResult?.success && (
+        <div style={{ padding: '10px 20px', background: '#F5F3FF', borderBottom: '1px solid #DDD6FE', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <Play size={16} color="#7C3AED" />
+            <span style={{ fontSize: 13, color: '#7C3AED', fontWeight: 600 }}>
+              {startResult.skipped
+                ? 'Work Order folder ready'
+                : (effectiveStatus === 'Complete' || effectiveStatus === 'In Progress'
+                    ? 'Work Order PDF regenerated in Repair Folder'
+                    : 'Repair started — Work Order PDF created in Repair Folder')}
+            </span>
+          </div>
+          <button onClick={() => setStartResult(null)} style={{ border: 'none', background: 'none', cursor: 'pointer', color: '#7C3AED', fontSize: 11, padding: 0, fontWeight: 600 }}>Dismiss</button>
         </div>
+      )}
+      {submitError && (
+        <div style={{ padding: '10px 20px', background: '#FEF2F2', borderBottom: '1px solid #FECACA', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <AlertTriangle size={16} color="#DC2626" />
+            <span style={{ fontSize: 13, color: '#DC2626', fontWeight: 600 }}>{submitError}</span>
+          </div>
+          <button onClick={() => setSubmitError(null)} style={{ border: 'none', background: 'none', cursor: 'pointer', color: '#DC2626', fontSize: 11, padding: 0, fontWeight: 600 }}>Dismiss</button>
+        </div>
+      )}
+    </>
+  ) : undefined;
 
-        {/* Footer Actions */}
-
-          {/* Activity History */}
-          <EntityHistory entityType="repair" entityId={repair.repairId} tenantId={repair.clientSheetId} />
-
-          {/* Session 73 — Photos + Notes.
-              v2026-04-22 — enableSourceFilter turns on cross-entity rollup by
-              item_id so this Repair panel's Photos tab shows inspection photos
-              from the source Task AND any prior repair photos on the same item,
-              with source sub-tabs to filter (All / Item / Task / Repair).
-              Notes tab same — rollup of every note ever stamped on this item.
-              Solves the user's original workflow: "when I'm working a repair,
-              let me see what the inspection photos looked like." */}
-          <EntityAttachments
-            photos={{
-              entityType: 'repair',
-              entityId: repair.repairId,
-              tenantId: repair.clientSheetId,
-              itemId: repair.itemId ? String(repair.itemId) : null,
-              enableSourceFilter: !!repair.itemId,
-            }}
-            documents={{ contextType: 'repair', contextId: repair.repairId, tenantId: repair.clientSheetId }}
-            notes={{
-              entityType: 'repair',
-              entityId: repair.repairId,
-              // Session 74: item + source-task threads as sibling pills
-              // so the warehouse tech sees everything tied to the item.
-              relatedEntities: [
-                ...(repair.itemId ? [{ type: 'inventory', id: String(repair.itemId), label: `Item ${repair.itemId}` }] : []),
-                ...(repair.sourceTaskId ? [{ type: 'task', id: String(repair.sourceTaskId), label: `Task ${repair.sourceTaskId}` }] : []),
-              ],
-              enableSourceFilter: !!repair.itemId,
-              itemId: repair.itemId ? String(repair.itemId) : null,
-            }}
-          />
-
-        {/* Approve / Decline footer (Quote Sent) */}
+  // Footer — state-keyed CTAs. Each lifecycle state (Quote Sent, Approved,
+  // In Progress, Completed) renders its own action row. EntityHistory
+  // moved to the Activity tab via builtInTabs.
+  const footer = (
+    <>
+      {/* Approve / Decline footer (Quote Sent) */}
         {isActive && !completed && effectiveStatus === 'Quote Sent' && !respondResult && (
           <div style={{ padding: '14px 20px', borderTop: `1px solid ${theme.colors.border}`, flexShrink: 0 }}>
             {submitError && (
@@ -900,16 +848,68 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
           </div>
         )}
 
-        {(!isActive || completed) && !submitResult && (
-          <div style={{ padding: '14px 20px', borderTop: `1px solid ${theme.colors.border}`, flexShrink: 0 }}>
-            <button onClick={onClose} style={{ width: '100%', padding: '10px', fontSize: 13, fontWeight: 600, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', fontFamily: 'inherit', color: theme.colors.textSecondary }}>Close</button>
-          </div>
-        )}
-      </div>
-      <style>{`
-        @keyframes slideIn { from { transform: translateX(100%); } to { transform: translateX(0); } }
-        @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
-      `}</style>
+      {(!isActive || completed) && !submitResult && (
+        <button onClick={onClose} style={{ width: '100%', padding: '10px', fontSize: 13, fontWeight: 600, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', fontFamily: 'inherit', color: theme.colors.textSecondary }}>Close</button>
+      )}
     </>
+  );
+
+  // ─── Shell ────────────────────────────────────────────────────────────
+  const tabs: TabbedDetailPanelTab[] = [
+    { id: 'details', label: 'Details', keepMounted: true, render: renderDetailsTab },
+  ];
+
+  return (
+    <TabbedDetailPanel
+      title={repair.repairId}
+      clientName={repair.clientName}
+      sidemark={repair.sidemark}
+      idBadges={repair.itemId ? (
+        <ItemIdBadges
+          itemId={repair.itemId}
+          inspItems={inspItems}
+          asmItems={asmItems}
+          repairItems={repairItems}
+        />
+      ) : undefined}
+      belowId={belowIdContent}
+      headerActions={headerActions}
+      statusStrip={statusStrip}
+      overlay={<ProcessingOverlay visible={submitting} message="Processing..." />}
+      tabs={tabs}
+      builtInTabs={{
+        photos: {
+          entityType: 'repair',
+          entityId: repair.repairId,
+          tenantId: repair.clientSheetId,
+          itemId: repair.itemId ? String(repair.itemId) : null,
+          enableSourceFilter: !!repair.itemId,
+        },
+        docs: {
+          contextType: 'repair',
+          contextId: repair.repairId,
+          tenantId: repair.clientSheetId,
+        },
+        notes: {
+          entityType: 'repair',
+          entityId: repair.repairId,
+          relatedEntities: [
+            ...(repair.itemId ? [{ type: 'inventory', id: String(repair.itemId), label: `Item ${repair.itemId}` }] : []),
+            ...(repair.sourceTaskId ? [{ type: 'task', id: String(repair.sourceTaskId), label: `Task ${repair.sourceTaskId}` }] : []),
+          ],
+          enableSourceFilter: !!repair.itemId,
+          itemId: repair.itemId ? String(repair.itemId) : null,
+        },
+        activity: {
+          entityType: 'repair',
+          entityId: repair.repairId,
+          tenantId: repair.clientSheetId,
+        },
+      }}
+      footer={footer}
+      onClose={onClose}
+      resizeKey="repair"
+      defaultWidth={460}
+    />
   );
 }
