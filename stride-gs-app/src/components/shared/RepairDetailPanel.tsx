@@ -641,8 +641,11 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
 
         {/* Start Repair / Regenerate Work Order — available on Approved, In Progress, Complete.
             Keep the button visible after success so the user can re-run regenerate as many
-            times as they want without having to dismiss the confirmation first. */}
-        {(effectiveStatus === 'Approved' || effectiveStatus === 'In Progress' || effectiveStatus === 'Complete') && (
+            times as they want without having to dismiss the confirmation first.
+            Stage A: hidden for client role — clients don't start repairs or regenerate
+            work orders; that's a staff action. */}
+        {(user?.role === 'admin' || user?.role === 'staff') &&
+         (effectiveStatus === 'Approved' || effectiveStatus === 'In Progress' || effectiveStatus === 'Complete') && (
           <div style={{ padding: '14px 20px', borderTop: `1px solid ${theme.colors.border}`, flexShrink: 0 }}>
             {submitError && (
               <div style={{ marginBottom: 10, padding: '8px 12px', background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: 8, fontSize: 12, color: '#DC2626', display: 'flex', alignItems: 'flex-start', gap: 6 }}>

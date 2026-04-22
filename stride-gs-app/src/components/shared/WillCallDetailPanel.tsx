@@ -984,7 +984,8 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
               generation if items change. Previously the button stayed
               visible as "Regenerate Pickup Document" which made it look
               like the Start action hadn't completed. */}
-          {isActive && !releaseResult && !genDocResult && (
+          {/* Stage A: hidden for client role — clients don't start will calls */}
+          {isActive && !releaseResult && !genDocResult && (user?.role === 'admin' || user?.role === 'staff') && (
             <div style={{ marginBottom: 10 }}>
               <WriteButton
                 label={genDocLoading ? 'Starting...' : 'Start Will Call'}

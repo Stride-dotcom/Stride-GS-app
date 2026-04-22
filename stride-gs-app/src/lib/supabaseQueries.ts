@@ -424,6 +424,13 @@ interface SupabaseRepairRow {
   repair_folder_url: string | null;
   shipment_folder_url: string | null;
   task_folder_url: string | null;
+  // Stage A mirror drift: repair-owned fields added to inventory table
+  source_task_id: string | null;
+  parts_cost: number | null;
+  labor_hours: number | null;
+  invoice_id: string | null;
+  approved: boolean | null;
+  billed: boolean | null;
 }
 
 export async function fetchRepairsFromSupabase(
@@ -447,7 +454,7 @@ export async function fetchRepairsFromSupabase(
       repairId: row.repair_id,
       clientName: clientNameMap[row.tenant_id] || '',
       clientSheetId: row.tenant_id,
-      sourceTaskId: '',
+      sourceTaskId: row.source_task_id || '',
       itemId: row.item_id || '',
       description: '',
       itemClass: '',
@@ -460,19 +467,19 @@ export async function fetchRepairsFromSupabase(
       quoteAmount: row.quote_amount,
       quoteSentDate: row.quote_sent_date || '',
       status: row.status || '',
-      approved: false,
+      approved: !!row.approved,
       scheduledDate: row.scheduled_date || '',
       startDate: row.start_date || '',
       repairVendor: row.repair_vendor || '',
-      partsCost: null,
-      laborHours: null,
+      partsCost: row.parts_cost,
+      laborHours: row.labor_hours,
       repairResult: row.repair_result || '',
       finalAmount: row.final_amount,
-      invoiceId: '',
+      invoiceId: row.invoice_id || '',
       itemNotes: row.item_notes || '',
       repairNotes: row.repair_notes || '',
       completedDate: row.completed_date || '',
-      billed: false,
+      billed: !!row.billed,
       repairFolderUrl: row.repair_folder_url || '',
       shipmentFolderUrl: row.shipment_folder_url || '',
       taskFolderUrl: row.task_folder_url || '',
@@ -526,6 +533,23 @@ interface SupabaseWillCallRow {
   cod: boolean | null;
   cod_amount: number | null;
   item_ids: string[] | null;
+  // Stage A mirror drift: WC-owned fields
+  created_by: string | null;
+  pickup_phone: string | null;
+  requested_by: string | null;
+  actual_pickup_date: string | null;
+  total_wc_fee: number | null;
+}
+
+// Stage A new table mirror — WC line items (previously missing, forced GAS fallback).
+interface SupabaseWillCallItemRow {
+  tenant_id: string;
+  wc_number: string;
+  item_id: string;
+  qty: number | null;
+  wc_fee: number | null;
+  status: string | null;
+  released: boolean | null;
 }
 
 export async function fetchWillCallsFromSupabase(
@@ -551,18 +575,18 @@ export async function fetchWillCallsFromSupabase(
       clientSheetId: row.tenant_id,
       status: row.status || 'Pending',
       createdDate: row.created_date || '',
-      createdBy: '',
+      createdBy: row.created_by || '',
       pickupParty: row.pickup_party || '',
-      pickupPhone: '',
-      requestedBy: '',
+      pickupPhone: row.pickup_phone || '',
+      requestedBy: row.requested_by || '',
       estimatedPickupDate: row.estimated_pickup_date || '',
-      actualPickupDate: '',
+      actualPickupDate: row.actual_pickup_date || '',
       notes: row.notes || '',
       cod: row.cod ?? false,
       codAmount: row.cod_amount != null ? Number(row.cod_amount) : null,
       itemsCount: row.item_count ?? 0,
-      totalWcFee: null,
-      items: [], // WC items enriched from inventory via itemIds
+      totalWcFee: row.total_wc_fee,
+      items: [], // populated below from will_call_items + inv overlay
       // v38.72.1 — item_ids was historically written double-encoded (JSON.stringify'd
       // array stored in a jsonb column, producing a jsonb string like "[\"60918\",…]").
       // StrideAPI now writes native arrays, but defensively handle both shapes
@@ -581,6 +605,52 @@ export async function fetchWillCallsFromSupabase(
       wcFolderUrl: row.wc_folder_url || '',
       shipmentFolderUrl: row.shipment_folder_url || '',
     }));
+
+    // Stage A: load will_call_items rows for these WCs and fold them into
+    // each WC's items[] array. Inv-overlay fields applied at read time per
+    // Invariant #27 (Inventory is single source of truth).
+    if (willCalls.length > 0) {
+      try {
+        const wcNumbers = willCalls.map(w => w.wcNumber);
+        let itemsQuery = supabase.from('will_call_items').select('*').in('wc_number', wcNumbers);
+        if (clientSheetId) {
+          if (Array.isArray(clientSheetId)) {
+            if (clientSheetId.length > 0) itemsQuery = itemsQuery.in('tenant_id', clientSheetId);
+          } else {
+            itemsQuery = itemsQuery.eq('tenant_id', clientSheetId);
+          }
+        }
+        const { data: itemRows } = await itemsQuery;
+        if (itemRows && itemRows.length > 0) {
+          const invMap = await _fetchInvFieldMap(clientSheetId);
+          const byWc: Record<string, ApiWillCall['items']> = {};
+          for (const r of (itemRows as SupabaseWillCallItemRow[])) {
+            const inv = r.item_id ? invMap[r.item_id] : null;
+            if (!byWc[r.wc_number]) byWc[r.wc_number] = [];
+            byWc[r.wc_number].push({
+              wcNumber: r.wc_number,
+              itemId: r.item_id,
+              qty: Number(r.qty) || 1,
+              vendor: inv?.vendor || '',
+              description: inv?.description || '',
+              itemClass: inv?.itemClass || '',
+              location: inv?.location || '',
+              sidemark: inv?.sidemark || '',
+              room: inv?.room || '',
+              wcFee: r.wc_fee != null ? Number(r.wc_fee) : null,
+              released: !!r.released,
+              status: r.status || '',
+            });
+          }
+          for (const wc of willCalls) {
+            wc.items = byWc[wc.wcNumber] || [];
+          }
+        }
+      } catch {
+        // non-fatal — WC list still works without items; detail panel will
+        // either show empty items or React can re-fetch from GAS if needed.
+      }
+    }
 
     return {
       willCalls,
@@ -603,6 +673,9 @@ interface SupabaseShipmentRow {
   tracking_number: string | null;
   notes: string | null;
   folder_url: string | null;
+  // Stage A mirror drift: shipment-owned URLs
+  photos_url: string | null;
+  invoice_url: string | null;
 }
 
 export async function fetchShipmentsFromSupabase(
@@ -630,9 +703,9 @@ export async function fetchShipmentsFromSupabase(
       itemCount: row.item_count ?? 0,
       carrier: row.carrier || '',
       trackingNumber: row.tracking_number || '',
-      photosUrl: '',
+      photosUrl: row.photos_url || '',
       notes: row.notes || '',
-      invoiceUrl: '',
+      invoiceUrl: row.invoice_url || '',
       folderUrl: row.folder_url || '',
     }));
 

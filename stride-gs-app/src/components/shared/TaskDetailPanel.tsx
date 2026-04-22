@@ -104,6 +104,8 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
 
   // Priority + Due Date — auto-save on change
   const canEditPriority = user?.role === 'admin' || user?.role === 'staff';
+  // Stage A: clients don't start tasks — staff does. Hide Start Task on client role.
+  const canStart = user?.role === 'admin' || user?.role === 'staff';
   const [priority, setPriority] = useState<'High' | 'Normal'>(task.priority === 'High' ? 'High' : 'Normal');
   const [dueDate, setDueDate] = useState<string>(task.dueDate || '');
   useEffect(() => {
@@ -932,17 +934,19 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
         {errorBanner}
         {overflowMenu}
         <div style={{ padding: '12px 16px', paddingBottom: 'calc(env(safe-area-inset-bottom, 0px) + 12px)', display: 'flex', gap: 8 }}>
-          <button
-            onClick={() => handleStartTask()}
-            disabled={startTaskLoading}
-            style={{ flex: 1, height: 52, background: '#16A34A', color: '#fff', borderRadius: 12, border: 'none', fontSize: 15, fontWeight: 600, cursor: startTaskLoading ? 'wait' : 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, minHeight: 44, boxShadow: '0 3px 10px rgba(22,163,74,0.3)' }}
-          >
-            {startTaskLoading ? <Loader2 size={18} style={{ animation: 'spin 1s linear infinite' }} /> : <Play size={18} fill="#fff" />}
-            Start Task
-          </button>
+          {canStart && (
+            <button
+              onClick={() => handleStartTask()}
+              disabled={startTaskLoading}
+              style={{ flex: 1, height: 52, background: '#16A34A', color: '#fff', borderRadius: 12, border: 'none', fontSize: 15, fontWeight: 600, cursor: startTaskLoading ? 'wait' : 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, minHeight: 44, boxShadow: '0 3px 10px rgba(22,163,74,0.3)' }}
+            >
+              {startTaskLoading ? <Loader2 size={18} style={{ animation: 'spin 1s linear infinite' }} /> : <Play size={18} fill="#fff" />}
+              Start Task
+            </button>
+          )}
           <button
             onClick={() => setOverflowOpen(o => !o)}
-            style={{ width: 52, height: 52, flexShrink: 0, background: 'none', color: theme.colors.textMuted, borderRadius: 12, border: `1px solid ${theme.colors.border}`, cursor: 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: 44 }}
+            style={{ width: canStart ? 52 : '100%', height: 52, flexShrink: 0, background: 'none', color: theme.colors.textMuted, borderRadius: 12, border: `1px solid ${theme.colors.border}`, cursor: 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: 44 }}
             aria-label="More actions"
           >
             <MoreHorizontal size={20} />
@@ -982,7 +986,7 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
                     </div>
                   </div>
                 )}
-                {!startTaskConflict && (
+                {!startTaskConflict && canStart && (
                   <button
                     onClick={() => handleStartTask()}
                     disabled={startTaskLoading}

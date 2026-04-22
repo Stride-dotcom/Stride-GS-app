@@ -1,4 +1,24 @@
 /* ===================================================
+   StrideAPI.gs — v38.103.0 — 2026-04-22 PST — Stage A mirror drift cleanup
+   v38.103.0: FIX — shipments/will_calls/repairs mirror functions now write
+              all entity-owned fields that the corresponding handleGet*_
+              handlers return. Adds will_call_items table mirror (new Supabase
+              table introduced in 20260422020000_stage_a_mirror_drift.sql) so
+              the React WC detail panel can Supabase-first the items array
+              instead of falling back to GAS. Inv-overlay fields intentionally
+              excluded per Invariant #27 — React overlays them from inventory
+              at read time.
+                Shipments:  photos_url, invoice_url
+                Will Calls: created_by, pickup_phone, requested_by,
+                            actual_pickup_date, total_wc_fee
+                Repairs:    source_task_id, parts_cost, labor_hours,
+                            invoice_id, approved, billed
+                New table: will_call_items (tenant_id, wc_number, item_id, qty,
+                            wc_fee, status, released). Composite PK.
+              Backfill via reconcileAllClientsNow (~45 min for 47 clients).
+              Individual-handler write-throughs still use the previous payload
+              shape — the 5-min reconciliation trigger heals new fields within
+              minutes.
    StrideAPI.gs — v38.102.0 — 2026-04-22 PST — Tier 1 inventory mirror drift fix
    v38.102.0: FIX — sbInventoryRow_ now mirrors 3 fields that handleGetInventory_
               returns but the mirror silently dropped: shipment_folder_url
@@ -2948,6 +2968,16 @@ function sbRepairRow_(tenantId, repair) {
     repair_folder_url:  String(repair.repairFolderUrl || ""),
     shipment_folder_url: String(repair.shipmentFolderUrl || ""),
     task_folder_url:    String(repair.taskFolderUrl || ""),
+    // Stage A mirror drift fix: repair-owned fields that were previously dropped.
+    // Inv-overlay fields (description, vendor, location, sidemark, room, reference,
+    // class, carrier, tracking, photo URLs) intentionally excluded — React
+    // overlays them from inventory at read time per Invariant #27.
+    source_task_id:     String(repair.sourceTaskId || ""),
+    parts_cost:         repair.partsCost != null && repair.partsCost !== "" ? Number(repair.partsCost) : null,
+    labor_hours:        repair.laborHours != null && repair.laborHours !== "" ? Number(repair.laborHours) : null,
+    invoice_id:         String(repair.invoiceId || ""),
+    approved:           !!repair.approved,
+    billed:             !!repair.billed,
     updated_at:         new Date().toISOString()
   };
 }
@@ -2970,6 +3000,12 @@ function sbWillCallRow_(tenantId, wc) {
     shipment_folder_url:   String(wc.shipmentFolderUrl || ""),
     cod:                   !!(wc.cod),
     cod_amount:            wc.codAmount != null && wc.codAmount !== "" ? Number(wc.codAmount) : null,
+    // Stage A mirror drift fix: WC-owned fields that were previously dropped.
+    created_by:            String(wc.createdBy || ""),
+    pickup_phone:          String(wc.pickupPhone || ""),
+    requested_by:          String(wc.requestedBy || ""),
+    actual_pickup_date:    String(wc.actualPickupDate || ""),
+    total_wc_fee:          wc.totalWcFee != null && wc.totalWcFee !== "" ? Number(wc.totalWcFee) : null,
     // v38.72.1 — item_ids column is jsonb. JSON.stringify'ing an array before
     // send produces a double-encoded string ("[]" or "[\"60918\",...]") that
     // Postgres stores as a jsonb STRING, not an ARRAY. React's fast-path
@@ -3001,7 +3037,28 @@ function sbShipmentRow_(tenantId, ship) {
     tracking_number: String(ship.trackingNumber || ""),
     notes:           cleanNotes,
     folder_url:      String(ship.folderUrl || ""),
+    // Stage A mirror drift fix: shipment-owned fields that were previously dropped.
+    photos_url:      String(ship.photosUrl || ""),
+    invoice_url:     String(ship.invoiceUrl || ""),
     updated_at:      new Date().toISOString()
+  };
+}
+
+/**
+ * Build a Supabase will_call_items row from an items[] entry in the
+ * handleGetWillCalls_ response. Inv-overlay fields excluded per Invariant #27 —
+ * React overlays vendor/description/location/etc. from inventory at read time.
+ */
+function sbWillCallItemRow_(tenantId, wcNumber, item) {
+  return {
+    tenant_id:  tenantId,
+    wc_number:  String(wcNumber || item.wcNumber || ""),
+    item_id:    String(item.itemId || ""),
+    qty:        Number(item.qty) || 1,
+    wc_fee:     item.wcFee != null && item.wcFee !== "" ? Number(item.wcFee) : null,
+    status:     String(item.status || ""),
+    released:   !!item.released,
+    updated_at: new Date().toISOString()
   };
 }
 
@@ -4077,7 +4134,10 @@ function api_fullClientSync_(tenantId, entityTypes) {
                 shipmentNumber: sn, receiveDate: formatDate_(shipRows[k]["Receive Date"]),
                 itemCount: shipRows[k]["Item Count"], carrier: shipRows[k]["Carrier"],
                 trackingNumber: shipRows[k]["Tracking #"], notes: shipRows[k]["Shipment Notes"],
-                folderUrl: shipFolderUrls[sn] || ""
+                folderUrl: shipFolderUrls[sn] || "",
+                // Stage A mirror drift: shipment-owned URLs previously dropped
+                photosUrl: shipRows[k]["Shipment Photos URL"] || shipRows[k]["Photos URL"] || "",
+                invoiceUrl: shipRows[k]["Invoice URL"] || ""
               }));
             }
             supabaseBatchUpsert_("shipments", shipSb);
@@ -4154,11 +4214,48 @@ function api_fullClientSync_(tenantId, entityTypes) {
                 cod: wcRows[m]["COD"], codAmount: wcRows[m]["COD Amount"],
                 wcFolderUrl: wcFolderUrls[wcn] || "",
                 shipmentFolderUrl: wcShipMap[String(wcRows[m]["Shipment #"] || "").trim()] || "",
-                itemIds: wcItemIdsMap[wcn] || []
+                itemIds: wcItemIdsMap[wcn] || [],
+                // Stage A mirror drift: WC-owned fields previously dropped by mirror
+                createdBy: wcRows[m]["Created By"],
+                pickupPhone: wcRows[m]["Pickup Phone"],
+                requestedBy: wcRows[m]["Requested By"],
+                actualPickupDate: formatDate_(wcRows[m]["Actual Pickup Date"]),
+                totalWcFee: wcRows[m]["Total WC Fee"]
               }));
             }
             supabaseBatchUpsert_("will_calls", wcSb);
             supabaseDeleteStaleRows_("will_calls", tenantId, wcKeepIds, "wc_number");
+
+            // Stage A: mirror the WC_Items sheet into public.will_call_items so
+            // React can Supabase-first the WC detail items[] array. Same wciRows
+            // we already read above to build wcItemIdsMap.
+            if (wciSheet) {
+              var wciSb = [];
+              var wciKeepKeys = []; // "wcNumber|itemId" composite
+              for (var wi2 = 0; wi2 < wciRows.length; wi2++) {
+                var wci2WcNum = String(wciRows[wi2]["WC Number"] || "").trim();
+                var wci2ItemId = String(wciRows[wi2]["Item ID"] || "").trim();
+                if (!wci2WcNum || !wci2ItemId) continue;
+                wciKeepKeys.push(wci2WcNum + "|" + wci2ItemId);
+                wciSb.push(sbWillCallItemRow_(tenantId, wci2WcNum, {
+                  itemId: wci2ItemId,
+                  qty: wciRows[wi2]["Qty"],
+                  wcFee: wciRows[wi2]["WC Fee"],
+                  status: wciRows[wi2]["Status"],
+                  released: String(wciRows[wi2]["Status"] || "").trim() === "Released" || toBool_(wciRows[wi2]["Released"])
+                }));
+              }
+              if (wciSb.length > 0) {
+                supabaseBatchUpsert_("will_call_items", wciSb);
+              }
+              // Stale row pruning: skipped in Stage A. The composite primary key
+              // (tenant_id, wc_number, item_id) doesn't fit supabaseDeleteStaleRows_
+              // (single-column filter). Upsert covers the INSERT/UPDATE case — stale
+              // rows (items removed from a WC before release) may linger until the
+              // will_call itself is deleted. Follow-up: add a composite-key prune
+              // helper if user reports stale line items in the React WC detail panel.
+              void wciKeepKeys;
+            }
           }
           break;
         case "repair":
@@ -4232,7 +4329,14 @@ function api_fullClientSync_(tenantId, entityTypes) {
                 completedDate: formatDate_(repRows[n]["Completed Date"]),
                 repairFolderUrl: repFolderUrls[rid] || "",
                 shipmentFolderUrl: repShipMap[rShipNo] || "",
-                taskFolderUrl: repTaskFolderUrls[rTaskId] || ""
+                taskFolderUrl: repTaskFolderUrls[rTaskId] || "",
+                // Stage A mirror drift: repair-owned fields previously dropped by mirror
+                sourceTaskId: rTaskId,
+                partsCost: repRows[n]["Parts Cost"],
+                laborHours: repRows[n]["Labor Hours"],
+                invoiceId: repRows[n]["Invoice ID"] || repRows[n]["Invoice #"],
+                approved: toBool_(repRows[n]["Approved"]),
+                billed: toBool_(repRows[n]["Billed"])
               }));
             }
             supabaseBatchUpsert_("repairs", repSb);
