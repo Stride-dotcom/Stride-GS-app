@@ -1163,6 +1163,7 @@ function PhotosPanelProxy({ item, clientSheetId }: { item: any; clientSheetId: s
       entityId={item.itemId}
       itemId={item.itemId}
       tenantId={clientSheetId}
+      enableSourceFilter
     />
   );
 }
@@ -1192,7 +1193,7 @@ function NotesPanelProxy({
     ...itemWillCalls.map((w: any) => ({ type: 'will_call', id: String(w.wcNumber || ''), label: `WC ${w.wcNumber}` })).filter(r => r.id),
     ...(shipmentNumber ? [{ type: 'shipment', id: String(shipmentNumber), label: `Shipment ${shipmentNumber}` }] : []),
   ];
-  return <_NotesPanel entityType="inventory" entityId={itemId} relatedEntities={related} />;
+  return <_NotesPanel entityType="inventory" entityId={itemId} relatedEntities={related} enableSourceFilter itemId={itemId} />;
 }
 
 // ── Actions dropdown (Quick Actions moved into header per mockup) ──────────

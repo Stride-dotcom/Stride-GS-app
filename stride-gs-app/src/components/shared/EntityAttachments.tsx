@@ -394,7 +394,9 @@ function NotesRollupView({
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-      {rolled.length > 0 && (
+      {/* v2026-04-22b — render even when rolled is empty so the filter
+          affordance is visible before any note is posted. Matches Photos tab. */}
+      {true && (
         <EntitySourceTabs
           items={sourceItems}
           activeType={filter}

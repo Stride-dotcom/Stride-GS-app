@@ -115,9 +115,10 @@ export function PhotoGallery({
       )}
 
       {/* Source-entity sub-tabs (v2026-04-22). Opt-in via enableSourceFilter.
-          Only meaningful when the rollup actually spans multiple entity_types;
-          the component renders nothing when there's only one source present. */}
-      {enableSourceFilter && photos.length > 0 && (
+          v2026-04-22b — renders even at photos.length=0 so the affordance is
+          visible before the user uploads anything (matches the original
+          mockup: "All (0) / Item (0) / Task (0) / Repair (0)"). */}
+      {enableSourceFilter && (
         <EntitySourceTabs
           items={photos}
           activeType={sourceFilter}
