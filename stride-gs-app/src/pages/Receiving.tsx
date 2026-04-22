@@ -1,5 +1,11 @@
 import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react';
-import { Plus, Copy, X, Check, Truck, Package, AlertTriangle, Printer, ClipboardPaste, ChevronDown, ChevronRight, Zap } from 'lucide-react';
+import {
+  useReactTable, getCoreRowModel, getSortedRowModel,
+  flexRender, createColumnHelper,
+  type SortingState, type VisibilityState,
+} from '@tanstack/react-table';
+import { useTablePreferences } from '../hooks/useTablePreferences';
+import { Plus, Copy, X, Check, Truck, Package, AlertTriangle, Printer, ClipboardPaste, ChevronDown, ChevronRight, ChevronUp, Zap, Settings2 } from 'lucide-react';
 import { theme } from '../styles/theme';
 import { AutocompleteSelect } from '../components/shared/AutocompleteSelect';
 
@@ -64,6 +70,31 @@ function emptyItem(autoInspect = false): DockItem {
   return { id: `r-${Date.now()}-${Math.random().toString(36).slice(2,6)}`, itemId: '', reference: '', vendor: '', description: '', itemClass: '', qty: 1, location: 'Rec-Dock', sidemark: '', room: '', needsInspection: autoInspect, needsAssembly: false, itemNotes: '', weight: undefined, addons: [], autoAppliedAddons: [], dismissedAddons: [], expanded: false };
 }
 
+// ─── Table column configuration ───────────────────────────────────────────────
+
+const DEFAULT_RCV_COL_ORDER = [
+  'expand', 'rowNum', 'itemId', 'vendor', 'description',
+  'itemClass', 'qty', 'location', 'sidemark', 'reference', 'room',
+  'needsInspection', 'needsAssembly', 'actions',
+];
+
+const TOGGLEABLE_RCV_COLS = [
+  'itemId', 'vendor', 'description', 'itemClass', 'qty',
+  'location', 'sidemark', 'reference', 'room', 'needsInspection', 'needsAssembly',
+];
+
+const RCV_COL_LABELS: Record<string, string> = {
+  itemId: 'Item ID', vendor: 'Vendor', description: 'Description',
+  itemClass: 'Class', qty: 'Qty', location: 'Location',
+  sidemark: 'Sidemark', reference: 'Reference', room: 'Room',
+  needsInspection: 'INSP', needsAssembly: 'ASM',
+};
+
+type TableRow = DockItem & { _originalIdx: number };
+const columnHelper = createColumnHelper<TableRow>();
+
+// ─── Styles ───────────────────────────────────────────────────────────────────
+
 const cellInput: React.CSSProperties = { width: '100%', padding: '6px 8px', fontSize: 12, border: `1px solid ${theme.colors.borderLight}`, borderRadius: 6, outline: 'none', fontFamily: 'inherit', background: '#fff' };
 const cellSelect: React.CSSProperties = { ...cellInput, cursor: 'pointer', appearance: 'auto' as any };
 const th: React.CSSProperties = { padding: '8px 6px', textAlign: 'left', fontWeight: 500, fontSize: 10, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.05em', borderBottom: `2px solid ${theme.colors.border}`, whiteSpace: 'nowrap', position: 'sticky', top: 0, background: '#fff', zIndex: 2 };
@@ -72,6 +103,17 @@ const td: React.CSSProperties = { padding: '4px 4px', borderBottom: `1px solid $
 
 function NewShipmentForm() {
   const { isMobile } = useIsMobile();
+
+  // ─── Table preferences (column visibility + order, persisted per user) ────
+  const {
+    colVis: columnVisibility, setColVis: setColumnVisibility,
+    columnOrder, setColumnOrder,
+  } = useTablePreferences('receiving', [], {}, DEFAULT_RCV_COL_ORDER);
+  const [sorting, setSorting] = useState<SortingState>([]);
+  const [dragColId, setDragColId] = useState<string | null>(null);
+  const [dragOverColId, setDragOverColId] = useState<string | null>(null);
+  const [showColToggle, setShowColToggle] = useState(false);
+
   const [client, setClient] = useState('');
   const [clientSheetId, setClientSheetId] = useState('');
   const [carrier, setCarrier] = useState('');
@@ -569,6 +611,227 @@ function NewShipmentForm() {
     }
   }, [client, clientSheetId, filledItems, apiConfigured, carrier, tracking, notes, receiveDate, chargeReceiving, autoPrintLabels, printItemLabels]);
 
+  // ─── TanStack Table setup ─────────────────────────────────────────────────
+
+  // Annotate each item with its original array index so cell renderers can
+  // call update(idx, ...) correctly even when rows are sorted.
+  const tableData = useMemo<TableRow[]>(
+    () => items.map((item, i) => ({ ...item, _originalIdx: i })),
+    [items],
+  );
+
+  // Column definitions — not memoized so cell renderers always see fresh closures
+  // (important for autoIdLoadingRef which changes via forceUpdate, not state).
+  const columns = [
+    // ── expand / add-ons toggle ─────────────────────────────────────────────
+    columnHelper.display({
+      id: 'expand',
+      size: 28,
+      enableHiding: false,
+      enableSorting: false,
+      header: () => null,
+      cell: ({ row }) => {
+        const item = row.original;
+        const idx = item._originalIdx;
+        return (
+          <button
+            onClick={() => toggleRowExpanded(idx)}
+            title={item.expanded ? 'Hide add-on services' : 'Show add-on services'}
+            style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4, color: item.addons.length > 0 ? theme.colors.orange : theme.colors.textMuted, display: 'inline-flex', alignItems: 'center', gap: 2 }}
+          >
+            {item.expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+            {item.addons.length > 0 && (
+              <span style={{ fontSize: 9, fontWeight: 700, background: theme.colors.orange, color: '#fff', borderRadius: 8, padding: '1px 5px', lineHeight: 1 }}>{item.addons.length}</span>
+            )}
+          </button>
+        );
+      },
+    }),
+    // ── row number ───────────────────────────────────────────────────────────
+    columnHelper.display({
+      id: 'rowNum',
+      size: 36,
+      enableHiding: false,
+      enableSorting: false,
+      header: () => '#',
+      cell: ({ row }) => (
+        <span style={{ fontSize: 11, color: theme.colors.textMuted, fontWeight: 600 }}>
+          {row.original._originalIdx + 1}
+        </span>
+      ),
+    }),
+    // ── Item ID ──────────────────────────────────────────────────────────────
+    columnHelper.accessor('itemId', {
+      id: 'itemId',
+      size: 110,
+      header: () => autoIdEnabled ? 'Item ID (Auto)' : 'Item ID *',
+      cell: ({ row }) => {
+        const item = row.original;
+        const idx = item._originalIdx;
+        if (autoIdEnabled) {
+          return (
+            <div style={{ ...cellInput, fontWeight: 600, fontFamily: 'monospace', fontSize: 11, background: '#F9FAFB', color: autoIdLoadingRef.current.has(item.id) ? theme.colors.textMuted : theme.colors.textPrimary, display: 'flex', alignItems: 'center', minHeight: 28 }}>
+              {autoIdLoadingRef.current.has(item.id)
+                ? <span style={{ fontFamily: 'inherit', fontWeight: 400, fontSize: 11 }}>Assigning...</span>
+                : (item.itemId || <span style={{ color: '#DC2626', fontSize: 10 }}>Error</span>)
+              }
+            </div>
+          );
+        }
+        return (
+          <input value={item.itemId} onChange={e => update(idx, 'itemId', e.target.value)} onPaste={e => handlePaste(e, idx, 'itemId')} placeholder="Item ID" style={{ ...cellInput, fontWeight: 600, fontFamily: 'monospace', fontSize: 11 }} />
+        );
+      },
+    }),
+    // ── Vendor ───────────────────────────────────────────────────────────────
+    columnHelper.accessor('vendor', {
+      id: 'vendor',
+      size: 130,
+      header: () => 'Vendor',
+      cell: ({ row }) => (
+        <AutocompleteInput value={row.original.vendor} onChange={val => update(row.original._originalIdx, 'vendor', val)} placeholder="Vendor" suggestions={vendors} icon={false} style={{ fontSize: 12 }} />
+      ),
+    }),
+    // ── Description ──────────────────────────────────────────────────────────
+    columnHelper.accessor('description', {
+      id: 'description',
+      size: 260,
+      header: () => 'Description *',
+      cell: ({ row }) => (
+        <AutocompleteInput value={row.original.description} onChange={val => update(row.original._originalIdx, 'description', val)} placeholder="Item description..." suggestions={descriptions} icon={false} multiline style={{ fontSize: 12, fontWeight: row.original.description ? 500 : 400 }} />
+      ),
+    }),
+    // ── Class ────────────────────────────────────────────────────────────────
+    columnHelper.accessor('itemClass', {
+      id: 'itemClass',
+      size: 60,
+      header: () => 'Class',
+      cell: ({ row }) => (
+        <select value={row.original.itemClass} onChange={e => update(row.original._originalIdx, 'itemClass', e.target.value)} style={cellSelect}>
+          <option value="">--</option>
+          {CLASSES.map(c => <option key={c} value={c}>{c}</option>)}
+        </select>
+      ),
+    }),
+    // ── Qty ──────────────────────────────────────────────────────────────────
+    columnHelper.accessor('qty', {
+      id: 'qty',
+      size: 50,
+      header: () => 'Qty',
+      cell: ({ row }) => (
+        <input type="number" min={1} value={row.original.qty} onChange={e => update(row.original._originalIdx, 'qty', parseInt(e.target.value) || 1)} style={{ ...cellInput, width: 46, textAlign: 'center' }} />
+      ),
+    }),
+    // ── Location ─────────────────────────────────────────────────────────────
+    columnHelper.accessor('location', {
+      id: 'location',
+      size: 100,
+      header: () => 'Location',
+      cell: ({ row }) => (
+        <LocationPicker value={row.original.location} onChange={val => update(row.original._originalIdx, 'location', val)} placeholder="Location" locations={apiConfigured && locationNames.length > 0 ? locationNames : undefined} loading={locationsLoading} />
+      ),
+    }),
+    // ── Sidemark ─────────────────────────────────────────────────────────────
+    columnHelper.accessor('sidemark', {
+      id: 'sidemark',
+      size: 150,
+      header: () => 'Sidemark',
+      cell: ({ row }) => (
+        <AutocompleteInput value={row.original.sidemark} onChange={val => update(row.original._originalIdx, 'sidemark', val)} placeholder="Project / client" suggestions={sidemarks} icon={false} style={{ fontSize: 12 }} />
+      ),
+    }),
+    // ── Reference ────────────────────────────────────────────────────────────
+    columnHelper.accessor('reference', {
+      id: 'reference',
+      size: 120,
+      header: () => 'Reference',
+      cell: ({ row }) => (
+        <input value={row.original.reference} onChange={e => update(row.original._originalIdx, 'reference', e.target.value)} onPaste={e => handlePaste(e, row.original._originalIdx, 'reference')} placeholder="PO# / Ref" style={cellInput} />
+      ),
+    }),
+    // ── Room ─────────────────────────────────────────────────────────────────
+    columnHelper.accessor('room', {
+      id: 'room',
+      size: 100,
+      header: () => 'Room',
+      cell: ({ row }) => (
+        <input value={row.original.room} onChange={e => update(row.original._originalIdx, 'room', e.target.value)} onPaste={e => handlePaste(e, row.original._originalIdx, 'room')} placeholder="Room" style={cellInput} />
+      ),
+    }),
+    // ── Needs Inspection ─────────────────────────────────────────────────────
+    columnHelper.accessor('needsInspection', {
+      id: 'needsInspection',
+      size: 50,
+      header: () => 'INSP',
+      cell: ({ row }) => (
+        <input type="checkbox" checked={row.original.needsInspection} onChange={e => update(row.original._originalIdx, 'needsInspection', e.target.checked)} title="Needs Inspection" style={{ accentColor: theme.colors.orange, cursor: 'pointer' }} />
+      ),
+    }),
+    // ── Needs Assembly ───────────────────────────────────────────────────────
+    columnHelper.accessor('needsAssembly', {
+      id: 'needsAssembly',
+      size: 50,
+      header: () => 'ASM',
+      cell: ({ row }) => (
+        <input type="checkbox" checked={row.original.needsAssembly} onChange={e => update(row.original._originalIdx, 'needsAssembly', e.target.checked)} title="Needs Assembly" style={{ accentColor: theme.colors.orange, cursor: 'pointer' }} />
+      ),
+    }),
+    // ── Actions (duplicate / remove) ─────────────────────────────────────────
+    columnHelper.display({
+      id: 'actions',
+      size: 60,
+      enableHiding: false,
+      enableSorting: false,
+      header: () => null,
+      cell: ({ row }) => {
+        const idx = row.original._originalIdx;
+        return (
+          <div style={{ display: 'flex', gap: 2, justifyContent: 'center' }}>
+            <button onClick={() => duplicateRow(idx)} title="Duplicate row (includes add-ons)" style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 2, color: theme.colors.textMuted, borderRadius: 4 }}><Copy size={13} /></button>
+            <button onClick={() => removeRow(idx)} title="Remove row" style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 2, color: items.length > 1 ? theme.colors.textMuted : theme.colors.borderLight, borderRadius: 4 }}><X size={13} /></button>
+          </div>
+        );
+      },
+    }),
+  ];
+
+  const table = useReactTable({
+    data: tableData,
+    columns,
+    state: { sorting, columnVisibility, columnOrder },
+    onSortingChange: setSorting,
+    onColumnVisibilityChange: (updater: VisibilityState | ((prev: VisibilityState) => VisibilityState)) => {
+      setColumnVisibility(typeof updater === 'function' ? updater(columnVisibility) : updater);
+    },
+    onColumnOrderChange: setColumnOrder,
+    getCoreRowModel: getCoreRowModel(),
+    getSortedRowModel: getSortedRowModel(),
+    enableMultiSort: true,
+  });
+
+  // ── Drag-to-reorder column headers ────────────────────────────────────────
+  function onHeaderDragStart(e: React.DragEvent<HTMLTableCellElement>, colId: string) {
+    setDragColId(colId);
+    e.dataTransfer.effectAllowed = 'move';
+  }
+  function onHeaderDragOver(e: React.DragEvent<HTMLTableCellElement>, colId: string) {
+    e.preventDefault();
+    setDragOverColId(colId);
+  }
+  function onHeaderDrop(e: React.DragEvent<HTMLTableCellElement>, targetColId: string) {
+    e.preventDefault();
+    if (!dragColId || targetColId === dragColId) return;
+    const order = [...columnOrder];
+    const from = order.indexOf(dragColId);
+    const to = order.indexOf(targetColId);
+    if (from === -1 || to === -1) return;
+    order.splice(from, 1);
+    order.splice(to, 0, dragColId);
+    setColumnOrder(order);
+    setDragColId(null);
+    setDragOverColId(null);
+  }
+
   const reset = useCallback(() => {
     setClient(''); setClientSheetId(''); setCarrier(''); setTracking(''); setNotes('');
     setReceiveDate(new Date().toISOString().slice(0, 10));
@@ -774,7 +1037,7 @@ function NewShipmentForm() {
             <span style={{ fontSize: 14, fontWeight: 600 }}>Items</span>
             <span style={{ fontSize: 12, color: theme.colors.textMuted }}>({filledItems.length} entered)</span>
           </div>
-          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
             <button
               onClick={() => { setBulkPasteStartField('itemId'); setBulkPasteOpen(true); }}
               title="Copy a range of cells from Excel/Sheets, paste here, apply to the grid"
@@ -784,6 +1047,30 @@ function NewShipmentForm() {
             <button onClick={addRow} style={{ padding: '5px 12px', fontSize: 11, fontWeight: 600, border: `1px solid ${theme.colors.border}`, borderRadius: 6, background: '#fff', cursor: 'pointer', fontFamily: 'inherit', color: theme.colors.textSecondary, display: 'flex', alignItems: 'center', gap: 4 }}><Plus size={13} /> Add Row</button>
             <button onClick={() => addRows(5)} style={{ padding: '5px 12px', fontSize: 11, fontWeight: 600, border: `1px solid ${theme.colors.border}`, borderRadius: 6, background: '#fff', cursor: 'pointer', fontFamily: 'inherit', color: theme.colors.textSecondary }}>+5</button>
             <button onClick={() => addRows(10)} style={{ padding: '5px 12px', fontSize: 11, fontWeight: 600, border: `1px solid ${theme.colors.border}`, borderRadius: 6, background: '#fff', cursor: 'pointer', fontFamily: 'inherit', color: theme.colors.textSecondary }}>+10</button>
+            {/* Column visibility toggle */}
+            <div style={{ position: 'relative' }}>
+              <button
+                onClick={() => setShowColToggle(p => !p)}
+                style={{ padding: '5px 10px', fontSize: 11, fontWeight: 600, border: `1px solid ${theme.colors.border}`, borderRadius: 6, background: showColToggle ? '#F3F4F6' : '#fff', cursor: 'pointer', fontFamily: 'inherit', color: theme.colors.textSecondary, display: 'flex', alignItems: 'center', gap: 4 }}
+              >
+                <Settings2 size={13} /> Columns
+              </button>
+              {showColToggle && (
+                <div style={{ position: 'absolute', top: 'calc(100% + 4px)', right: 0, zIndex: 300, background: '#fff', border: `1px solid ${theme.colors.border}`, borderRadius: 8, padding: '8px 12px', boxShadow: '0 4px 16px rgba(0,0,0,0.12)', minWidth: 150 }}>
+                  <div style={{ fontSize: 10, fontWeight: 600, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 6 }}>Show / Hide</div>
+                  {TOGGLEABLE_RCV_COLS.map(colId => {
+                    const col = table.getColumn(colId);
+                    if (!col) return null;
+                    return (
+                      <label key={colId} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '3px 0', cursor: 'pointer', fontSize: 12, color: theme.colors.textPrimary, userSelect: 'none' }}>
+                        <input type="checkbox" checked={col.getIsVisible()} onChange={() => col.toggleVisibility()} style={{ accentColor: theme.colors.orange, cursor: 'pointer' }} />
+                        {RCV_COL_LABELS[colId]}
+                      </label>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
           </div>
         </div>
 
@@ -831,73 +1118,68 @@ function NewShipmentForm() {
         <div style={{ overflowX: 'auto', maxHeight: isMobile ? 'calc(100dvh - 320px)' : 'calc(100dvh - 440px)', minHeight: isMobile ? 200 : undefined, WebkitOverflowScrolling: 'touch' }}>
           <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: isMobile ? 800 : 1000 }}>
             <thead>
-              <tr>
-                <th style={{ ...th, width: 28, textAlign: 'center' }} title="Expand for add-on services"></th>
-                <th style={{ ...th, width: 36, textAlign: 'center' }}>#</th>
-                <th style={{ ...th, width: 110 }}>{autoIdEnabled ? 'Item ID (Auto)' : 'Item ID *'}</th>
-                <th style={{ ...th, width: 130 }}>Vendor</th>
-                <th style={{ ...th, width: 260 }}>Description *</th>
-                <th style={{ ...th, width: 60 }}>Class</th>
-                <th style={{ ...th, width: 50 }}>Qty</th>
-                <th style={{ ...th, width: 100 }}>Location</th>
-                <th style={{ ...th, width: 150 }}>Sidemark</th>
-                <th style={{ ...th, width: 120 }}>Reference</th>
-                <th style={{ ...th, width: 100 }}>Room</th>
-                <th style={{ ...th, width: 50, textAlign: 'center' }} title="Needs Inspection">INSP</th>
-                <th style={{ ...th, width: 50, textAlign: 'center' }} title="Needs Assembly">ASM</th>
-                <th style={{ ...th, width: 60 }}></th>
-              </tr>
+              {table.getHeaderGroups().map(hg => (
+                <tr key={hg.id}>
+                  {hg.headers.map(header => {
+                    const colId = header.column.id;
+                    const canDrag = colId !== 'expand' && colId !== 'rowNum' && colId !== 'actions';
+                    const canSort = header.column.getCanSort();
+                    const sorted = header.column.getIsSorted();
+                    const center = ['expand', 'rowNum', 'needsInspection', 'needsAssembly', 'actions'].includes(colId);
+                    return (
+                      <th
+                        key={header.id}
+                        style={{
+                          ...th,
+                          width: header.getSize(),
+                          textAlign: center ? 'center' : 'left',
+                          opacity: dragColId === colId ? 0.45 : 1,
+                          background: dragOverColId === colId ? '#F3F4F6' : '#fff',
+                          cursor: canDrag ? 'grab' : 'default',
+                        }}
+                        draggable={canDrag}
+                        onDragStart={canDrag ? e => onHeaderDragStart(e, colId) : undefined}
+                        onDragOver={canDrag ? e => onHeaderDragOver(e, colId) : undefined}
+                        onDrop={canDrag ? e => onHeaderDrop(e, colId) : undefined}
+                        onDragEnd={() => { setDragColId(null); setDragOverColId(null); }}
+                      >
+                        {canSort ? (
+                          <div
+                            onClick={header.column.getToggleSortingHandler()}
+                            style={{ display: 'inline-flex', alignItems: 'center', gap: 3, cursor: 'pointer', userSelect: 'none' }}
+                          >
+                            {flexRender(header.column.columnDef.header, header.getContext())}
+                            {sorted === 'asc' ? <ChevronUp size={11} /> : sorted === 'desc' ? <ChevronDown size={11} /> : null}
+                          </div>
+                        ) : (
+                          flexRender(header.column.columnDef.header, header.getContext())
+                        )}
+                      </th>
+                    );
+                  })}
+                </tr>
+              ))}
             </thead>
             <tbody>
-              {items.map((item, idx) => (
+              {table.getRowModel().rows.map(row => {
+                const item = row.original;
+                const idx = item._originalIdx;
+                return (
                 <React.Fragment key={item.id}>
                 <tr style={{ background: item.description.trim() ? 'transparent' : '#FAFAFA' }}>
-                  <td style={{ ...td, textAlign: 'center', padding: 0 }}>
-                    <button
-                      onClick={() => toggleRowExpanded(idx)}
-                      title={item.expanded ? 'Hide add-on services' : 'Show add-on services'}
-                      style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4, color: item.addons.length > 0 ? theme.colors.orange : theme.colors.textMuted, display: 'inline-flex', alignItems: 'center', gap: 2, position: 'relative' }}
-                    >
-                      {item.expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                      {item.addons.length > 0 && (
-                        <span style={{ fontSize: 9, fontWeight: 700, background: theme.colors.orange, color: '#fff', borderRadius: 8, padding: '1px 5px', lineHeight: 1 }}>{item.addons.length}</span>
-                      )}
-                    </button>
-                  </td>
-                  <td style={{ ...td, textAlign: 'center', fontSize: 11, color: theme.colors.textMuted, fontWeight: 600 }}>{idx + 1}</td>
-                  <td style={td}>
-                    {autoIdEnabled ? (
-                      <div style={{ ...cellInput, fontWeight: 600, fontFamily: 'monospace', fontSize: 11, background: '#F9FAFB', color: autoIdLoadingRef.current.has(item.id) ? theme.colors.textMuted : theme.colors.textPrimary, display: 'flex', alignItems: 'center', minHeight: 28 }}>
-                        {autoIdLoadingRef.current.has(item.id) ? (
-                          <span style={{ color: theme.colors.textMuted, fontFamily: 'inherit', fontWeight: 400, fontSize: 11 }}>Assigning...</span>
-                        ) : (
-                          item.itemId || <span style={{ color: '#DC2626', fontSize: 10 }}>Error</span>
-                        )}
-                      </div>
-                    ) : (
-                      <input value={item.itemId} onChange={e => update(idx, 'itemId', e.target.value)} onPaste={e => handlePaste(e, idx, 'itemId')} placeholder="Item ID" style={{ ...cellInput, fontWeight: 600, fontFamily: 'monospace', fontSize: 11 }} />
-                    )}
-                  </td>
-                  <td style={td}><AutocompleteInput value={item.vendor} onChange={val => update(idx, 'vendor', val)} placeholder="Vendor" suggestions={vendors} icon={false} style={{ fontSize: 12 }} /></td>
-                  <td style={td}><AutocompleteInput value={item.description} onChange={val => update(idx, 'description', val)} placeholder="Item description... (Enter for new line)" suggestions={descriptions} icon={false} multiline style={{ fontSize: 12, fontWeight: item.description ? 500 : 400 }} /></td>
-                  <td style={td}><select value={item.itemClass} onChange={e => update(idx, 'itemClass', e.target.value)} style={cellSelect}><option value="">--</option>{CLASSES.map(c => <option key={c} value={c}>{c}</option>)}</select></td>
-                  <td style={td}><input type="number" min={1} value={item.qty} onChange={e => update(idx, 'qty', parseInt(e.target.value) || 1)} style={{ ...cellInput, width: 46, textAlign: 'center' }} /></td>
-                  <td style={td}><LocationPicker value={item.location} onChange={val => update(idx, 'location', val)} placeholder="Location" locations={apiConfigured && locationNames.length > 0 ? locationNames : undefined} loading={locationsLoading} /></td>
-                  <td style={td}><AutocompleteInput value={item.sidemark} onChange={val => update(idx, 'sidemark', val)} placeholder="Project / client" suggestions={sidemarks} icon={false} style={{ fontSize: 12 }} /></td>
-                  <td style={td}><input value={item.reference} onChange={e => update(idx, 'reference', e.target.value)} onPaste={e => handlePaste(e, idx, 'reference')} placeholder="PO# / Ref" style={cellInput} /></td>
-                  <td style={td}><input value={item.room} onChange={e => update(idx, 'room', e.target.value)} onPaste={e => handlePaste(e, idx, 'room')} placeholder="Room" style={cellInput} /></td>
-                  <td style={{ ...td, textAlign: 'center' }}><input type="checkbox" checked={item.needsInspection} onChange={e => update(idx, 'needsInspection', e.target.checked)} style={{ accentColor: theme.colors.orange, cursor: 'pointer' }} /></td>
-                  <td style={{ ...td, textAlign: 'center' }}><input type="checkbox" checked={item.needsAssembly} onChange={e => update(idx, 'needsAssembly', e.target.checked)} style={{ accentColor: theme.colors.orange, cursor: 'pointer' }} /></td>
-                  <td style={{ ...td, textAlign: 'center' }}>
-                    <div style={{ display: 'flex', gap: 2, justifyContent: 'center' }}>
-                      <button onClick={() => duplicateRow(idx)} title="Duplicate row (includes add-ons)" style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 2, color: theme.colors.textMuted, borderRadius: 4 }}><Copy size={13} /></button>
-                      <button onClick={() => removeRow(idx)} title="Remove row" style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 2, color: items.length > 1 ? theme.colors.textMuted : theme.colors.borderLight, borderRadius: 4 }}><X size={13} /></button>
-                    </div>
-                  </td>
+                  {row.getVisibleCells().map(cell => {
+                    const cid = cell.column.id;
+                    const center = ['expand', 'rowNum', 'needsInspection', 'needsAssembly', 'actions'].includes(cid);
+                    return (
+                      <td key={cell.id} style={{ ...td, textAlign: center ? 'center' : undefined, padding: cid === 'expand' ? 0 : td.padding }}>
+                        {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                      </td>
+                    );
+                  })}
                 </tr>
                 {item.expanded && (
                   <tr style={{ background: '#FAFBFD' }}>
-                    <td colSpan={14} style={{ padding: '12px 16px 14px 40px', borderBottom: `1px solid ${theme.colors.borderLight}` }}>
+                    <td colSpan={table.getVisibleLeafColumns().length} style={{ padding: '12px 16px 14px 40px', borderBottom: `1px solid ${theme.colors.borderLight}` }}>
                       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 18, alignItems: 'flex-start' }}>
                         {/* Weight input — powers "overweight" auto-apply */}
                         <div style={{ minWidth: 140 }}>
@@ -970,7 +1252,8 @@ function NewShipmentForm() {
                   </tr>
                 )}
                 </React.Fragment>
-              ))}
+                );
+              })}
             </tbody>
           </table>
         </div>

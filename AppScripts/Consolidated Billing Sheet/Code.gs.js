@@ -2103,7 +2103,8 @@ function CB13_addBillingStatusValidation() {
   var lastRow = sh.getLastRow();
   if (lastRow < 2) return;
   var headers   = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0].map(String);
-  var idxStatus = headers.indexOf("Billing Status");
+  var idxStatus = headers.indexOf("Status");
+  if (idxStatus === -1) idxStatus = headers.indexOf("Billing Status"); // legacy header fallback
   if (idxStatus === -1) idxStatus = 0;
   var range = sh.getRange(2, idxStatus + 1, lastRow - 1, 1);
   var rule  = SpreadsheetApp.newDataValidation()
