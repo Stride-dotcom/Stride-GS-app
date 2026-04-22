@@ -1,4 +1,8 @@
 /* ===================================================
+   StrideAPI.gs — v38.106.0 — 2026-04-22 PST — Welcome/onboarding email Supabase-first template load
+   v38.106.0: FIX — handleSendWelcomeEmail_ + handleSendOnboardingEmail_ now load template
+              from Supabase first (authoritative), MPL sheet as fallback. Fixes bug where
+              MPL had outdated brief template while full version lived in Supabase.
    StrideAPI.gs — v38.105.0 — 2026-04-22 PST — Stage C activity log coverage + back-fill
    v38.105.0: FEAT — fills the entity_audit_log coverage gaps + ships the
               back-fill function needed to populate historical activity for
@@ -24456,6 +24460,7 @@ function handleNotifyNewDeliveryOrder_(payload) {
 /**
  * POST sendOnboardingEmail — Send onboarding/getting-started email to a client.
  * Mirrors handleSendWelcomeEmail_ but uses ONBOARDING_EMAIL template key.
+ * v38.106.0: Supabase-first template load; MPL sheet is fallback.
  */
 function handleSendOnboardingEmail_(clientSheetId, payload) {
   if (!clientSheetId) return errorResponse_("clientSheetId is required", "MISSING_PARAM");
@@ -24472,29 +24477,39 @@ function handleSendOnboardingEmail_(clientSheetId, payload) {
   var masterSsId = prop_("MASTER_PRICE_LIST_SPREADSHEET_ID");
   var htmlBody = "", subject = "Getting Started with Stride WMS — " + clientName;
 
+  // 1. Supabase first (authoritative — admin edits via Settings → Email Templates go here)
   try {
-    if (masterSsId) {
-      var masterSS = SpreadsheetApp.openById(masterSsId);
-      var tmplSh = masterSS.getSheetByName("Email_Templates");
-      if (tmplSh && tmplSh.getLastRow() >= 2) {
-        var tmplData = tmplSh.getRange(2, 1, tmplSh.getLastRow() - 1, Math.max(tmplSh.getLastColumn(), 3)).getValues();
-        for (var t = 0; t < tmplData.length; t++) {
-          if (String(tmplData[t][0] || "").trim() === "ONBOARDING_EMAIL") {
-            htmlBody = String(tmplData[t][2] || "").trim();
-            var tmplSubject = String(tmplData[t][1] || "").trim();
-            if (tmplSubject) {
-              subject = tmplSubject.split("{{CLIENT_NAME}}").join(clientName);
+    var sbTpl = api_getTemplateFromSupabase_("ONBOARDING_EMAIL");
+    if (sbTpl && sbTpl.body) {
+      htmlBody = String(sbTpl.body);
+      if (sbTpl.subject) subject = String(sbTpl.subject);
+    }
+  } catch (_) {}
+
+  // 2. MPL sheet fallback
+  if (!htmlBody) {
+    try {
+      if (masterSsId) {
+        var masterSS = SpreadsheetApp.openById(masterSsId);
+        var tmplSh = masterSS.getSheetByName("Email_Templates");
+        if (tmplSh && tmplSh.getLastRow() >= 2) {
+          var tmplData = tmplSh.getRange(2, 1, tmplSh.getLastRow() - 1, Math.max(tmplSh.getLastColumn(), 3)).getValues();
+          for (var t = 0; t < tmplData.length; t++) {
+            if (String(tmplData[t][0] || "").trim() === "ONBOARDING_EMAIL") {
+              htmlBody = String(tmplData[t][2] || "").trim();
+              var tmplSubject = String(tmplData[t][1] || "").trim();
+              if (tmplSubject) subject = tmplSubject.split("{{CLIENT_NAME}}").join(clientName);
+              break;
             }
-            break;
           }
         }
       }
+    } catch (err) {
+      Logger.log("sendOnboardingEmail MPL fallback failed: " + err);
     }
-  } catch (err) {
-    Logger.log("sendOnboardingEmail template lookup failed: " + err);
   }
 
-  if (!htmlBody) return errorResponse_("ONBOARDING_EMAIL template not found in Master Price List", "NOT_FOUND");
+  if (!htmlBody) return errorResponse_("ONBOARDING_EMAIL template not found in Supabase or Master Price List", "NOT_FOUND");
 
   var tokens = {
     "{{CLIENT_NAME}}": clientName,
@@ -24518,8 +24533,9 @@ function handleSendOnboardingEmail_(clientSheetId, payload) {
 /**
  * POST sendWelcomeEmail — Send welcome email to a client directly from StrideAPI.gs.
  * Reads CLIENT_EMAIL from the client's Settings tab, loads WELCOME_EMAIL template
- * from Master Price List, resolves tokens, sends via GmailApp.
- * No scripts.run dependency — works in this Google Workspace environment.
+ * from Supabase (authoritative) with MPL sheet as fallback, resolves tokens, sends via GmailApp.
+ * v38.106.0: Supabase-first template load fixes "brief email" bug where the MPL sheet
+ * had an outdated template while the full version lived in Supabase.
  */
 function handleSendWelcomeEmail_(payload) {
   var clientSheetId = String(payload.clientSheetId || "").trim();
@@ -24540,33 +24556,45 @@ function handleSendWelcomeEmail_(payload) {
   var sendTo = recipientOverride || clientEmail;
   if (!sendTo) return errorResponse_("No recipient configured for " + clientName, "MISSING_CONFIG");
 
-  // Load WELCOME_EMAIL template from Master Price List
+  // Load WELCOME_EMAIL template — Supabase first (authoritative), MPL sheet fallback
   var masterSsId = prop_("MASTER_PRICE_LIST_SPREADSHEET_ID");
   var htmlBody = "";
   var subject = "Welcome to Stride Warehouse Management — " + clientName;
 
+  // 1. Supabase first (authoritative — admin edits via Settings → Email Templates go here)
   try {
-    if (masterSsId) {
-      var masterSS = SpreadsheetApp.openById(masterSsId);
-      var tmplSh = masterSS.getSheetByName("Email_Templates");
-      if (tmplSh && tmplSh.getLastRow() >= 2) {
-        var tmplData = tmplSh.getRange(2, 1, tmplSh.getLastRow() - 1, Math.max(tmplSh.getLastColumn(), 3)).getValues();
-        for (var t = 0; t < tmplData.length; t++) {
-          if (String(tmplData[t][0] || "").trim() === "WELCOME_EMAIL") {
-            htmlBody = String(tmplData[t][2] || "").trim();
-            var tmplSubject = String(tmplData[t][1] || "").trim();
-            if (tmplSubject) subject = tmplSubject;
-            break;
+    var sbTpl = api_getTemplateFromSupabase_("WELCOME_EMAIL");
+    if (sbTpl && sbTpl.body) {
+      htmlBody = String(sbTpl.body);
+      if (sbTpl.subject) subject = String(sbTpl.subject);
+    }
+  } catch (_) {}
+
+  // 2. MPL sheet fallback
+  if (!htmlBody) {
+    try {
+      if (masterSsId) {
+        var masterSS = SpreadsheetApp.openById(masterSsId);
+        var tmplSh = masterSS.getSheetByName("Email_Templates");
+        if (tmplSh && tmplSh.getLastRow() >= 2) {
+          var tmplData = tmplSh.getRange(2, 1, tmplSh.getLastRow() - 1, Math.max(tmplSh.getLastColumn(), 3)).getValues();
+          for (var t = 0; t < tmplData.length; t++) {
+            if (String(tmplData[t][0] || "").trim() === "WELCOME_EMAIL") {
+              htmlBody = String(tmplData[t][2] || "").trim();
+              var tmplSubject = String(tmplData[t][1] || "").trim();
+              if (tmplSubject) subject = tmplSubject;
+              break;
+            }
           }
         }
       }
+    } catch (err) {
+      Logger.log("sendWelcomeEmail MPL fallback failed: " + err);
     }
-  } catch (err) {
-    Logger.log("sendWelcomeEmail template lookup failed: " + err);
   }
 
   if (!htmlBody) {
-    return errorResponse_("WELCOME_EMAIL template not found in Master Price List Email_Templates tab", "NOT_FOUND");
+    return errorResponse_("WELCOME_EMAIL template not found in Supabase or Master Price List Email_Templates tab", "NOT_FOUND");
   }
 
   // Resolve tokens
