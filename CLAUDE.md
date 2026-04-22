@@ -264,6 +264,81 @@ First line of diagnosis: **which channel carries this change?** (see decision tr
 
 ## DEPLOYMENT RULES — MUST READ BEFORE ANY DEPLOY
 
+```
+⚠️ WORKTREE DEPLOY TRAP: The stride-gs-app/dist/ folder in a worktree does NOT
+have its own .git repo. Pushing from there pushes the PARENT worktree's source
+files to GitHub Pages, breaking the live app. ALWAYS deploy from the main workspace.
+```
+
+### NEVER deploy the React bundle from a worktree
+
+This has broken the live app twice. The `stride-gs-app/dist/` directory inside a git
+worktree has **no `.git` of its own** — git commands run there fall back to the parent
+worktree repo and push source files (`.tsx`, `.gs`) to `origin/main` instead of built
+assets. GitHub Pages then serves raw TypeScript instead of the bundle.
+
+**The only correct dist repo is:**
+```
+C:\Users\expre\Dropbox\Apps\GS Inventory\stride-gs-app\dist\.git
+```
+That repo is on branch `main` and is the sole GitHub Pages deploy target.
+
+**If you are working in a worktree, the deploy process is:**
+
+```bash
+# Step 1 — Build in the worktree (gets .env from parent first)
+cp "C:/Users/expre/Dropbox/Apps/GS Inventory/stride-gs-app/.env" \
+   "<worktree>/stride-gs-app/.env"
+cd "<worktree>/stride-gs-app"
+npm run build
+
+# Step 2 — Copy built files to the MAIN workspace dist repo
+cp -r "<worktree>/stride-gs-app/dist/." \
+   "C:/Users/expre/Dropbox/Apps/GS Inventory/stride-gs-app/dist/"
+
+# Step 3 — Deploy FROM THE MAIN WORKSPACE dist repo (has .git on main branch)
+cd "C:/Users/expre/Dropbox/Apps/GS Inventory/stride-gs-app/dist"
+# Remove any old bundle chunks that weren't in this build:
+git ls-files assets/ | grep -v -F "$(ls assets/)" | xargs git rm -f 2>/dev/null || true
+git add -A
+git commit -m "Deploy: <description>"
+git push origin main --force
+```
+
+**Quick check — before any dist push, verify you are in the right repo:**
+```bash
+git remote -v   # must show: origin → github.com/Stride-dotcom/Stride-GS-app
+git branch      # must show: * main
+git log --oneline -1  # must show a "Deploy:" commit, not a source commit
+```
+If `git branch` shows `* claude/...` or `* source`, STOP — you are in the wrong repo.
+
+### POST-DEPLOY VERIFICATION (mandatory after every React deploy)
+
+After the `git push origin main --force`:
+
+1. Wait 1–2 minutes for the GitHub Pages CDN to refresh.
+2. Open https://www.mystridehub.com and hard-refresh (Ctrl+Shift+R).
+3. Confirm the app loads (no blank page, no `supabaseUrl is required` error).
+4. DevTools → Network → filter `.js` → confirm the bundle filename matches the hash just deployed (e.g. `index-BjQQczFO.js`).
+5. If the app doesn't load, **immediately revert** by deploying the previous bundle:
+   ```bash
+   cd "C:/Users/expre/Dropbox/Apps/GS Inventory/stride-gs-app/dist"
+   git revert HEAD --no-edit
+   git push origin main --force
+   ```
+
+### Apps Script deploys are independent of React deploys
+
+GAS changes never go through `stride-gs-app/dist/`. Always run them from `AppScripts/stride-client-inventory/`:
+- `npm run push-api && npm run deploy-api` — StrideAPI.gs (sequential, mandatory)
+- `npm run push-cb && npm run deploy-cb` — CB scripts (sequential, mandatory)
+- `npm run rollout && npm run deploy-clients` — all client scripts
+
+Push ≠ deploy for Web App-facing GAS code. If you only `push-*` without `deploy-*`, the live Web App still serves the previous frozen snapshot.
+
+---
+
 ### Never half-deploy
 
 A deploy is only complete when ALL of the following are done:
@@ -286,18 +361,19 @@ If `git status` shows unstaged or staged-but-uncommitted changes: STOP and repor
 
 Stash-and-forget caused broken builds in this project (merge conflicts surfaced after deploy started).
 
-### If deploying from a git worktree, copy `stride-gs-app/.env` from the parent first
+### If deploying from a git worktree — READ THE WORKTREE TRAP SECTION FIRST
 
-`.env` is `.gitignored`, so a fresh worktree (or a fresh `npm install` in a worktree) has no Supabase credentials. Vite will silently inline `VITE_SUPABASE_URL = undefined` and the live app will crash at module load with `Uncaught Error: supabaseUrl is required.`
+See **"NEVER deploy the React bundle from a worktree"** above for the full step-by-step. The short version: build in the worktree, copy built files to the main workspace dist, push from the main workspace dist repo only.
 
-Before any `npm run build` in a worktree:
+**Also: copy `.env` before building.** `.env` is `.gitignored`; a fresh worktree has no Supabase credentials. Vite silently inlines `VITE_SUPABASE_URL = undefined` and the live app crashes with `Uncaught Error: supabaseUrl is required.`
+
 ```bash
 cp "C:/Users/expre/Dropbox/Apps/GS Inventory/stride-gs-app/.env" \
    "<worktree>/stride-gs-app/.env"
+grep -c VITE_SUPABASE_URL stride-gs-app/.env   # must print 1
 ```
 
-Then verify it took: `grep -c VITE_SUPABASE_URL stride-gs-app/.env` should print `1`.
-This bit us once in session 72 — caught by a production runtime error, not the build (because the bundle was "valid" with `undefined` baked in).
+This bit us in session 72 — caught only by a production runtime error, not the build.
 
 ### Ask before preview-verifying a UI change
 
@@ -327,7 +403,7 @@ If a new `.sql` migration file exists in `stride-gs-app/supabase/migrations/`, a
 
 ### Verify the live bundle after deploy
 
-After `git push origin main --force` from `stride-gs-app/dist/`, hard-refresh `mystridehub.com` (Ctrl+Shift+R) and check DevTools Network → the main JS bundle filename should match the new build hash. CDN cache takes 1-5 min.
+After `git push origin main --force`, follow the **POST-DEPLOY VERIFICATION** steps in the "DEPLOYMENT RULES" section above. Hard-refresh `mystridehub.com` (Ctrl+Shift+R), confirm no blank page/errors, and check DevTools Network → the main JS bundle filename matches the new build hash. CDN cache takes 1–5 min. If the app is broken, revert immediately.
 
 ### Post-deploy: update build status doc
 
