@@ -1,5 +1,37 @@
 /* ===================================================
-   StrideAPI.gs — v38.105.0 — 2026-04-22 PST — Fix welcome/onboarding email sending brief template instead of full Supabase template
+   StrideAPI.gs — v38.106.0 — 2026-04-22 PST — Welcome/onboarding email Supabase-first template load
+   v38.106.0: FIX — handleSendWelcomeEmail_ + handleSendOnboardingEmail_ now load template
+              from Supabase first (authoritative), MPL sheet as fallback. Fixes bug where
+              MPL had outdated brief template while full version lived in Supabase.
+   StrideAPI.gs — v38.105.0 — 2026-04-22 PST — Stage C activity log coverage + back-fill
+   v38.105.0: FEAT — fills the entity_audit_log coverage gaps + ships the
+              back-fill function needed to populate historical activity for
+              records that predate the audit-log feature (session 71+).
+                Audit coverage added (router cases):
+                  updateTaskNotes, updateTaskCustomPrice, updateTaskDueDate,
+                  updateTaskPriority, updateRepairNotes, updateWillCall,
+                  cancelWillCall, addItemsToWillCall, removeItemsFromWillCall,
+                  transferItems (per-item on both source + dest tenants),
+                  updateBillingRow, addManualCharge, voidManualCharge, and
+                  every claim action (create/addItems/addNote/requestMoreInfo/
+                  sendClaimDenial/generateClaimSettlement/uploadSignedSettlement/
+                  closeClaim/voidClaim/reopenClaim/firstReviewClaim/updateClaim).
+                Back-fill:
+                  handleBackfillActivity_(sheetId, {force?}) — synthesizes
+                  historical audit rows from Tasks / Repairs / Will_Calls /
+                  Inventory / Shipments timestamps. Tagged source='backfill:v1'
+                  so re-runs are no-ops (api_tenantBackfilled_ pre-check).
+                  Exposed as router case 'backfillActivity' (admin-only) and
+                  convenience function backfillActivityAllClientsNow() for the
+                  editor. Batched into 500-row inserts.
+                Helpers:
+                  api_auditLogBatch_ — bulk POST to entity_audit_log.
+                  api_tenantBackfilled_ — idempotency pre-check.
+              React: all detail panels except Claims already render the
+              Activity tab (via TabbedDetailPanel.builtInTabs.activity or
+              customTabs render escape hatch). Claims has its own History
+              tab reading claim_history, functionally equivalent.
+   StrideAPI.gs — v38.104.0 — 2026-04-22 PST — Stage B status undo + repair result corrector
    v38.104.0: FEAT — reopen handlers for accidental Start/Complete reversal
               (Task/Repair/WillCall) + correctRepairResult mirror of the
               other builder's correctTaskResult endpoint.
@@ -2064,6 +2096,229 @@ function api_auditLog_(entityType, entityId, tenantId, action, changes, performe
       muteHttpExceptions: true
     });
   } catch (_) { /* best-effort, never block */ }
+}
+
+/**
+ * Stage C — batch insert backfill audit rows. One POST per tenant, all rows
+ * tagged source="backfill:v1" so we can detect + skip on re-runs. Used by
+ * handleBackfillActivity_ below. Best-effort, returns row count or 0.
+ */
+function api_auditLogBatch_(rows) {
+  if (!rows || !rows.length) return 0;
+  try {
+    var url = prop_("SUPABASE_URL");
+    var key = prop_("SUPABASE_SERVICE_ROLE_KEY");
+    if (!url || !key) return 0;
+    var resp = UrlFetchApp.fetch(url + "/rest/v1/entity_audit_log", {
+      method: "POST",
+      headers: {
+        "Authorization": "Bearer " + key,
+        "apikey": key,
+        "Content-Type": "application/json",
+        "Prefer": "return=minimal"
+      },
+      payload: JSON.stringify(rows),
+      muteHttpExceptions: true
+    });
+    var code = resp.getResponseCode();
+    if (code >= 200 && code < 300) return rows.length;
+    Logger.log("api_auditLogBatch_: HTTP " + code + " — " + resp.getContentText().substring(0, 200));
+    return 0;
+  } catch (e) { Logger.log("api_auditLogBatch_ error: " + e); return 0; }
+}
+
+/**
+ * Stage C — check whether this tenant has already been backfilled.
+ * Queries entity_audit_log for ANY row with source='backfill:v1' + this tenant.
+ * Returns true if backfill has run before, false otherwise.
+ */
+function api_tenantBackfilled_(tenantId) {
+  try {
+    var url = prop_("SUPABASE_URL");
+    var key = prop_("SUPABASE_SERVICE_ROLE_KEY");
+    if (!url || !key) return false;
+    var q = url + "/rest/v1/entity_audit_log?tenant_id=eq." + encodeURIComponent(tenantId) +
+            "&source=eq.backfill:v1&select=id&limit=1";
+    var resp = UrlFetchApp.fetch(q, {
+      method: "GET",
+      headers: { "Authorization": "Bearer " + key, "apikey": key },
+      muteHttpExceptions: true
+    });
+    if (resp.getResponseCode() !== 200) return false;
+    var arr = JSON.parse(resp.getContentText());
+    return Array.isArray(arr) && arr.length > 0;
+  } catch (_) { return false; }
+}
+
+/**
+ * Stage C — back-fill entity_audit_log from existing sheet timestamps.
+ * Called from the router (action=backfillActivity) per-tenant. Admin-only.
+ * Idempotent via the "already backfilled?" check — running it twice on the
+ * same tenant is a no-op. If you need to re-run, delete the tenant's
+ * source='backfill:v1' rows from Supabase first.
+ *
+ * Synthesized events (all tagged source="backfill:v1"):
+ *   Tasks:      Created → create, Started At → start, Completed At →
+ *               complete (with result), Cancelled At → cancel
+ *   Repairs:    Created Date → create, Start Date → start, Completed Date →
+ *               complete (with result), Quote Sent Date → status_change
+ *   Will Calls: Created Date → create, Actual Pickup Date → release
+ *   Inventory:  Receive Date → create, Release Date → release,
+ *               Transfer Date → transfer
+ *   Shipments:  Receive Date → create
+ */
+function handleBackfillActivity_(clientSheetId, payload, callerEmail) {
+  if (!clientSheetId) return errorResponse_("clientSheetId required", "INVALID_PARAMS");
+  var force = !!(payload && payload.force);
+  if (!force && api_tenantBackfilled_(clientSheetId)) {
+    return jsonResponse_({ success: true, skipped: true, reason: "tenant already backfilled (pass force:true to override)" });
+  }
+  var ss;
+  try { ss = SpreadsheetApp.openById(clientSheetId); } catch (e) {
+    return errorResponse_("Cannot open client sheet: " + e, "SCHEMA_ERROR");
+  }
+  var rows = [];
+  var byEntity = {};
+  function emit(entityType, entityId, action, performedAt, changes) {
+    if (!entityId) return;
+    if (!performedAt) return;
+    var iso;
+    try {
+      var d = performedAt instanceof Date ? performedAt : new Date(performedAt);
+      if (isNaN(d.getTime())) return;
+      iso = d.toISOString();
+    } catch (_) { return; }
+    rows.push({
+      entity_type: entityType,
+      entity_id: String(entityId),
+      tenant_id: clientSheetId,
+      action: action,
+      changes: changes || {},
+      performed_by: "", // historical — actor unknown
+      performed_at: iso,
+      source: "backfill:v1"
+    });
+    byEntity[entityType] = (byEntity[entityType] || 0) + 1;
+  }
+
+  // ── Tasks ────────────────────────────────────────────────────────────
+  var taskSheet = ss.getSheetByName("Tasks");
+  if (taskSheet) {
+    var taskRows = sheetToObjects_(taskSheet);
+    for (var ti = 0; ti < taskRows.length; ti++) {
+      var t = taskRows[ti];
+      var tid = String(t["Task ID"] || "").trim();
+      if (!tid) continue;
+      emit("task", tid, "create", t["Created"], { summary: "Task created", type: String(t["Type"] || t["Svc Code"] || "") });
+      if (t["Started At"]) emit("task", tid, "start", t["Started At"], { status: { new: "In Progress" }, assignedTo: String(t["Assigned To"] || "") });
+      if (t["Completed At"]) emit("task", tid, "complete", t["Completed At"], { status: { new: "Completed" }, result: String(t["Result"] || "") });
+      if (t["Cancelled At"]) emit("task", tid, "cancel", t["Cancelled At"], { status: { new: "Cancelled" } });
+    }
+  }
+
+  // ── Repairs ──────────────────────────────────────────────────────────
+  var repSheet = ss.getSheetByName("Repairs");
+  if (repSheet) {
+    var repRows = sheetToObjects_(repSheet);
+    for (var ri = 0; ri < repRows.length; ri++) {
+      var r = repRows[ri];
+      var rid = String(r["Repair ID"] || "").trim();
+      if (!rid) continue;
+      emit("repair", rid, "create", r["Created Date"], { summary: "Repair quote requested" });
+      if (r["Quote Sent Date"]) emit("repair", rid, "status_change", r["Quote Sent Date"], { status: { new: "Quote Sent" } });
+      if (r["Start Date"]) emit("repair", rid, "start", r["Start Date"], { status: { new: "In Progress" } });
+      if (r["Completed Date"]) emit("repair", rid, "complete", r["Completed Date"], { status: { new: String(r["Status"] || "Completed") }, result: String(r["Repair Result"] || "") });
+    }
+  }
+
+  // ── Will Calls ───────────────────────────────────────────────────────
+  var wcSheet = ss.getSheetByName("Will_Calls");
+  if (wcSheet) {
+    var wcRows = sheetToObjects_(wcSheet);
+    for (var wi = 0; wi < wcRows.length; wi++) {
+      var w = wcRows[wi];
+      var wcn = String(w["WC Number"] || "").trim();
+      if (!wcn) continue;
+      emit("will_call", wcn, "create", w["Created Date"], { summary: "Will call created" });
+      if (w["Actual Pickup Date"]) emit("will_call", wcn, "release", w["Actual Pickup Date"], { status: { new: String(w["Status"] || "Released") } });
+    }
+  }
+
+  // ── Inventory ────────────────────────────────────────────────────────
+  var invSheet = ss.getSheetByName("Inventory");
+  if (invSheet) {
+    var invRows = sheetToObjects_(invSheet);
+    for (var ii = 0; ii < invRows.length; ii++) {
+      var it = invRows[ii];
+      var iid = String(it["Item ID"] || "").trim();
+      if (!iid) continue;
+      emit("inventory", iid, "create", it["Receive Date"], { summary: "Item received", shipmentNumber: String(it["Shipment #"] || "") });
+      if (it["Release Date"]) emit("inventory", iid, "release", it["Release Date"], { status: { new: "Released" } });
+      if (it["Transfer Date"]) emit("inventory", iid, "transfer", it["Transfer Date"], { status: { new: "Transferred" } });
+    }
+  }
+
+  // ── Shipments ────────────────────────────────────────────────────────
+  var shipSheet = ss.getSheetByName("Shipments");
+  if (shipSheet) {
+    var shipRows = sheetToObjects_(shipSheet);
+    for (var si = 0; si < shipRows.length; si++) {
+      var s = shipRows[si];
+      var sn = String(s["Shipment #"] || "").trim();
+      if (!sn) continue;
+      emit("shipment", sn, "create", s["Receive Date"], { summary: "Shipment received", itemCount: Number(s["Item Count"]) || 0, carrier: String(s["Carrier"] || "") });
+    }
+  }
+
+  // Batch insert in chunks of 500 to stay under Supabase request limits.
+  var inserted = 0;
+  for (var off = 0; off < rows.length; off += 500) {
+    inserted += api_auditLogBatch_(rows.slice(off, off + 500));
+  }
+  Logger.log("handleBackfillActivity_: tenant=" + clientSheetId + " inserted=" + inserted + " total=" + rows.length + " by entity=" + JSON.stringify(byEntity));
+  return jsonResponse_({ success: true, inserted: inserted, totalRows: rows.length, byEntity: byEntity, caller: callerEmail || "" });
+}
+
+/**
+ * Stage C convenience — run backfill for every active client.
+ * Call from the Apps Script editor (not routed). Slow (~30-60 min for 47
+ * clients with large sheets); if GAS 6-min limit hits, resumable simply by
+ * re-running — already-backfilled tenants skip.
+ */
+function backfillActivityAllClientsNow() {
+  var cbId = prop_("CB_SPREADSHEET_ID");
+  if (!cbId) { Logger.log("backfillActivityAllClientsNow: no CB_SPREADSHEET_ID"); return; }
+  var cbSs = SpreadsheetApp.openById(cbId);
+  var sheet = cbSs.getSheetByName("Clients");
+  if (!sheet) { Logger.log("backfillActivityAllClientsNow: Clients sheet not found"); return; }
+  var data = sheet.getDataRange().getValues();
+  if (data.length < 2) return;
+  var headers = data[0].map(function(h) { return String(h || "").trim().toUpperCase(); });
+  var sidCol = headers.indexOf("CLIENT SPREADSHEET ID");
+  var activeCol = headers.indexOf("ACTIVE");
+  var nameCol = headers.indexOf("CLIENT NAME");
+  if (sidCol < 0) return;
+  var done = 0, skipped = 0, failed = 0, totalInserted = 0;
+  for (var i = 1; i < data.length; i++) {
+    var sid = String(data[i][sidCol] || "").trim();
+    if (!sid) continue;
+    var active = activeCol >= 0 ? data[i][activeCol] : true;
+    var isActive = !(active === false || active === "FALSE" || active === "No");
+    if (!isActive) continue;
+    var name = nameCol >= 0 ? String(data[i][nameCol] || "").trim() : "?";
+    try {
+      var resp = handleBackfillActivity_(sid, { force: false }, "backfillActivityAllClientsNow");
+      var parsed = JSON.parse(resp.getContent());
+      if (parsed.skipped) { skipped++; }
+      else if (parsed.success) { done++; totalInserted += (parsed.inserted || 0); }
+      else { failed++; }
+      Logger.log("backfillActivityAllClientsNow: [" + (done + skipped + failed) + "] " + name + " — " + (parsed.skipped ? "skipped" : ("inserted " + (parsed.inserted || 0))));
+    } catch (e) {
+      failed++;
+      Logger.log("backfillActivityAllClientsNow: [" + (done + skipped + failed) + "] " + name + " — FAILED: " + e);
+    }
+  }
+  Logger.log("backfillActivityAllClientsNow: DONE — done=" + done + " skipped=" + skipped + " failed=" + failed + " totalInserted=" + totalInserted);
 }
 
 /**
@@ -4575,6 +4830,7 @@ function doPost(e) {
           var r = handleUpdateRepairNotes_(effectiveId, payload);
           invalidateClientCache_(effectiveId);
           api_writeThrough_(r, "repair", effectiveId, String(payload.repairId || ""));
+          api_auditLog_("repair", String(payload.repairId || ""), effectiveId, "update", { field: "repairNotes", summary: "Repair notes updated" }, callerEmail);
           return r;
         });
 
@@ -4733,6 +4989,7 @@ function doPost(e) {
           invalidateClientCache_(effectiveId);
           api_notifySupabase_(r, { tenant_id: effectiveId, entity_type: "will_call", entity_id: String(payload.wcNumber || ""), action_type: "cancel_will_call", requested_by: callerEmail, request_id: String(payload.requestId || "") });
           api_writeThrough_(r, "will_call", effectiveId, String(payload.wcNumber || ""));
+          api_auditLog_("will_call", String(payload.wcNumber || ""), effectiveId, "cancel", { status: { new: "Cancelled" }, reason: String(payload.reason || "").substring(0, 200) }, callerEmail);
           return r;
         });
 
@@ -4741,6 +4998,7 @@ function doPost(e) {
           var r = handleUpdateWillCall_(effectiveId, payload);
           invalidateClientCache_(effectiveId);
           api_writeThrough_(r, "will_call", effectiveId, String(payload.wcNumber || ""));
+          api_auditLog_("will_call", String(payload.wcNumber || ""), effectiveId, "update", { summary: "Will call fields updated", fields: Object.keys(payload || {}).filter(function(k){return k !== "wcNumber" && k !== "requestId";}).join(",") }, callerEmail);
           return r;
         });
 
@@ -4755,6 +5013,7 @@ function doPost(e) {
           invalidateClientCache_(effectiveId);
           api_notifySupabase_(r, { tenant_id: effectiveId, entity_type: "will_call", entity_id: String(payload.wcNumber || ""), action_type: "add_items_to_will_call", requested_by: callerEmail, request_id: String(payload.requestId || "") });
           api_writeThrough_(r, "will_call", effectiveId, String(payload.wcNumber || ""));
+          api_auditLog_("will_call", String(payload.wcNumber || ""), effectiveId, "update", { summary: "Items added to will call", itemIds: Array.isArray(payload.itemIds) ? payload.itemIds.slice(0, 20).join(",") : "" }, callerEmail);
           return r;
         });
 
@@ -4764,6 +5023,7 @@ function doPost(e) {
           invalidateClientCache_(effectiveId);
           api_notifySupabase_(r, { tenant_id: effectiveId, entity_type: "will_call", entity_id: String(payload.wcNumber || ""), action_type: "remove_items_from_will_call", requested_by: callerEmail, request_id: String(payload.requestId || "") });
           api_writeThrough_(r, "will_call", effectiveId, String(payload.wcNumber || ""));
+          api_auditLog_("will_call", String(payload.wcNumber || ""), effectiveId, "update", { summary: "Items removed from will call", itemIds: Array.isArray(payload.itemIds) ? payload.itemIds.slice(0, 20).join(",") : "" }, callerEmail);
           return r;
         });
 
@@ -4812,6 +5072,11 @@ function doPost(e) {
             var txIds = Array.isArray(payload && payload.itemIds) ? payload.itemIds : [];
             if (rJsonTx && rJsonTx.success && !rJsonTx.skipped && destId && txIds.length) {
               api_ledgerTransferTenant_(txIds, destId);
+              // Stage C: per-item transfer audit rows on both source + dest tenants
+              for (var _tx = 0; _tx < txIds.length; _tx++) {
+                api_auditLog_("inventory", String(txIds[_tx]), effectiveId, "transfer", { status: { new: "Transferred" }, destinationTenant: destId }, callerEmail);
+                api_auditLog_("inventory", String(txIds[_tx]), destId, "transfer_in", { summary: "Item transferred in", sourceTenant: effectiveId }, callerEmail);
+              }
             }
           } catch (lerr) { Logger.log("transferItems ledger update error (non-fatal): " + lerr); }
           return r;
@@ -4861,6 +5126,7 @@ function doPost(e) {
           var r = handleUpdateBillingRow_(effectiveId, payload);
           invalidateClientCache_(effectiveId);
           api_writeThrough_(r, "billing", effectiveId, String(payload.ledgerRowId || ""));
+          api_auditLog_("billing", String(payload.ledgerRowId || ""), effectiveId, "update", { summary: "Billing row updated", fields: Object.keys(payload || {}).filter(function(k){return k !== "ledgerRowId" && k !== "requestId";}).join(",") }, callerEmail);
           return r;
         });
 
@@ -4873,6 +5139,7 @@ function doPost(e) {
               var parsed = JSON.parse(r.getContent());
               if (parsed && parsed.success && parsed.ledgerRowId) {
                 api_writeThrough_(r, "billing", effectiveId, parsed.ledgerRowId);
+                api_auditLog_("billing", String(parsed.ledgerRowId), effectiveId, "create", { summary: "Manual charge added", svcCode: String(payload.svcCode || ""), total: payload.total != null ? String(payload.total) : "" }, callerEmail);
               }
             } catch (_) { /* writeThrough is best-effort */ }
             return r;
@@ -4885,6 +5152,7 @@ function doPost(e) {
             var r = handleVoidManualCharge_(effectiveId, payload);
             invalidateClientCache_(effectiveId);
             api_writeThrough_(r, "billing", effectiveId, String(payload.ledgerRowId || ""));
+            api_auditLog_("billing", String(payload.ledgerRowId || ""), effectiveId, "void", { status: { new: "Void" }, reason: String(payload.reason || "").substring(0, 200) }, callerEmail);
             return r;
           });
         });
@@ -4915,6 +5183,7 @@ function doPost(e) {
           var r = handleUpdateTaskNotes_(effectiveId, payload);
           invalidateClientCache_(effectiveId);
           api_writeThrough_(r, "task", effectiveId, String(payload.taskId || ""));
+          api_auditLog_("task", String(payload.taskId || ""), effectiveId, "update", { field: "taskNotes", summary: "Task notes updated" }, callerEmail);
           return r;
         });
       case "updateTaskCustomPrice":
@@ -4922,6 +5191,7 @@ function doPost(e) {
           var r = handleUpdateTaskCustomPrice_(effectiveId, payload);
           invalidateClientCache_(effectiveId);
           api_writeThrough_(r, "task", effectiveId, String(payload.taskId || ""));
+          api_auditLog_("task", String(payload.taskId || ""), effectiveId, "update", { field: "customPrice", customPrice: { new: payload.customPrice != null ? String(payload.customPrice) : "" } }, callerEmail);
           return r;
         });
       case "updateTaskDueDate":
@@ -4929,6 +5199,7 @@ function doPost(e) {
           var r = handleUpdateTaskDueDate_(effectiveId, payload);
           invalidateClientCache_(effectiveId);
           api_writeThrough_(r, "task", effectiveId, String(payload.taskId || ""));
+          api_auditLog_("task", String(payload.taskId || ""), effectiveId, "update", { field: "dueDate", dueDate: { new: String(payload.dueDate || "") } }, callerEmail);
           return r;
         });
       case "updateTaskPriority":
@@ -4936,6 +5207,7 @@ function doPost(e) {
           var r = handleUpdateTaskPriority_(effectiveId, payload);
           invalidateClientCache_(effectiveId);
           api_writeThrough_(r, "task", effectiveId, String(payload.taskId || ""));
+          api_auditLog_("task", String(payload.taskId || ""), effectiveId, "update", { field: "priority", priority: { new: String(payload.priority || "") } }, callerEmail);
           return r;
         });
       case "addItemAddon":
@@ -5082,53 +5354,90 @@ function doPost(e) {
         });
 
       // ─── Claims (admin-only) ───────────────────────────────────────────────
+      // Stage C: every claim action mirrors to entity_audit_log in addition to
+      // the existing claim_history sheet row. Unified Activity tab reads both.
       case "createClaim":
         return withAdminGuard_(callerEmail, function() {
-          return handleCreateClaim_(callerEmail, payload);
+          var r = handleCreateClaim_(callerEmail, payload);
+          try { var pr = JSON.parse(r.getContent()); if (pr && pr.claimId) api_auditLog_("claim", String(pr.claimId), null, "create", { summary: "Claim created", claimType: String(payload.claimType || "") }, callerEmail); } catch (_) {}
+          return r;
         });
       case "addClaimItems":
         return withAdminGuard_(callerEmail, function() {
-          return handleAddClaimItems_(callerEmail, payload);
+          var r = handleAddClaimItems_(callerEmail, payload);
+          api_auditLog_("claim", String(payload.claimId || ""), null, "update", { summary: "Items added to claim", count: Array.isArray(payload.items) ? payload.items.length : 0 }, callerEmail);
+          return r;
         });
       case "addClaimNote":
         return withAdminGuard_(callerEmail, function() {
-          return handleAddClaimNote_(callerEmail, payload);
+          var r = handleAddClaimNote_(callerEmail, payload);
+          api_auditLog_("claim", String(payload.claimId || ""), null, "note", { summary: "Note added", visibility: String(payload.visibility || "internal") }, callerEmail);
+          return r;
         });
       case "requestMoreInfo":
         return withAdminGuard_(callerEmail, function() {
-          return handleRequestMoreInfo_(callerEmail, payload);
+          var r = handleRequestMoreInfo_(callerEmail, payload);
+          api_auditLog_("claim", String(payload.claimId || ""), null, "update", { summary: "More info requested from claimant" }, callerEmail);
+          return r;
         });
       case "sendClaimDenial":
         return withAdminGuard_(callerEmail, function() {
-          return handleSendClaimDenial_(callerEmail, payload);
+          var r = handleSendClaimDenial_(callerEmail, payload);
+          api_auditLog_("claim", String(payload.claimId || ""), null, "status_change", { status: { new: "Denied" } }, callerEmail);
+          return r;
         });
       case "generateClaimSettlement":
         return withAdminGuard_(callerEmail, function() {
-          return handleGenerateClaimSettlement_(callerEmail, payload);
+          var r = handleGenerateClaimSettlement_(callerEmail, payload);
+          api_auditLog_("claim", String(payload.claimId || ""), null, "update", { summary: "Settlement document generated" }, callerEmail);
+          return r;
         });
       case "uploadSignedSettlement":
         return withAdminGuard_(callerEmail, function() {
-          return handleUploadSignedSettlement_(callerEmail, payload);
+          var r = handleUploadSignedSettlement_(callerEmail, payload);
+          api_auditLog_("claim", String(payload.claimId || ""), null, "update", { summary: "Signed settlement uploaded" }, callerEmail);
+          return r;
         });
       case "closeClaim":
         return withAdminGuard_(callerEmail, function() {
-          return handleCloseClaim_(callerEmail, payload);
+          var r = handleCloseClaim_(callerEmail, payload);
+          api_auditLog_("claim", String(payload.claimId || ""), null, "status_change", { status: { new: "Closed" }, closeNote: String(payload.closeNote || "").substring(0, 200) }, callerEmail);
+          return r;
         });
       case "voidClaim":
         return withAdminGuard_(callerEmail, function() {
-          return handleVoidClaim_(callerEmail, payload);
+          var r = handleVoidClaim_(callerEmail, payload);
+          api_auditLog_("claim", String(payload.claimId || ""), null, "void", { status: { new: "Void" }, reason: String(payload.voidReason || "").substring(0, 200) }, callerEmail);
+          return r;
         });
       case "reopenClaim":
         return withAdminGuard_(callerEmail, function() {
-          return handleReopenClaim_(callerEmail, payload);
+          var r = handleReopenClaim_(callerEmail, payload);
+          api_auditLog_("claim", String(payload.claimId || ""), null, "reopen", { summary: "Claim reopened", reason: String(payload.reopenReason || "").substring(0, 200) }, callerEmail);
+          return r;
         });
       case "firstReviewClaim":
         return withAdminGuard_(callerEmail, function() {
-          return handleFirstReviewClaim_(callerEmail, payload);
+          var r = handleFirstReviewClaim_(callerEmail, payload);
+          api_auditLog_("claim", String(payload.claimId || ""), null, "update", { summary: "First review" }, callerEmail);
+          return r;
         });
       case "updateClaim":
         return withAdminGuard_(callerEmail, function() {
-          return handleUpdateClaim_(callerEmail, payload);
+          var r = handleUpdateClaim_(callerEmail, payload);
+          api_auditLog_("claim", String(payload.claimId || ""), null, "update", { summary: "Claim fields updated", fields: Object.keys(payload || {}).filter(function(k){return k !== "claimId";}).join(",") }, callerEmail);
+          return r;
+        });
+
+      // Stage C — backfill entity_audit_log for a single tenant from existing
+      // sheet timestamps. Idempotent (skips if tenant already backfilled).
+      // Pass { force: true } to re-run after manually clearing the tenant's
+      // backfill:v1 rows.
+      case "backfillActivity":
+        return withAdminGuard_(callerEmail, function() {
+          return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
+            return handleBackfillActivity_(effectiveId, payload, callerEmail);
+          });
         });
 
       // ─── Stax Payments (admin-only writes) ─────────────────────────────────
@@ -24151,7 +24460,7 @@ function handleNotifyNewDeliveryOrder_(payload) {
 /**
  * POST sendOnboardingEmail — Send onboarding/getting-started email to a client.
  * Mirrors handleSendWelcomeEmail_ but uses ONBOARDING_EMAIL template key.
- * v38.105.0: Supabase-first template load; MPL sheet is fallback.
+ * v38.106.0: Supabase-first template load; MPL sheet is fallback.
  */
 function handleSendOnboardingEmail_(clientSheetId, payload) {
   if (!clientSheetId) return errorResponse_("clientSheetId is required", "MISSING_PARAM");
@@ -24225,7 +24534,11 @@ function handleSendOnboardingEmail_(clientSheetId, payload) {
  * POST sendWelcomeEmail — Send welcome email to a client directly from StrideAPI.gs.
  * Reads CLIENT_EMAIL from the client's Settings tab, loads WELCOME_EMAIL template
  * from Supabase (authoritative) with MPL sheet as fallback, resolves tokens, sends via GmailApp.
+<<<<<<< HEAD
  * v38.105.0: Supabase-first template load fixes "brief email" bug where the MPL sheet
+=======
+ * v38.106.0: Supabase-first template load fixes "brief email" bug where the MPL sheet
+>>>>>>> origin/source
  * had an outdated template while the full version lived in Supabase.
  */
 function handleSendWelcomeEmail_(payload) {
