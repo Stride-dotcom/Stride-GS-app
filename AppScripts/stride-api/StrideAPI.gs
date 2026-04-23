@@ -5,6 +5,18 @@
               lookup now happen in the Edge Function; GAS is used only for GmailApp send capability.
    =================================================== */
 /* ===================================================
+   StrideAPI.gs — v38.113.0 — 2026-04-23 PST — Fix Supabase sync after invoice creation (UI refresh)
+   v38.113.0: Router cases createInvoice + generateStorageCharges now accept
+              sourceSheetId as a fallback for clientSheetId when deciding whether
+              to call api_fullClientSync_. React's postCreateInvoice sends
+              sourceSheetId (not clientSheetId), so the Supabase sync was never
+              firing. Result: React Billing page showed rows as "Unbilled" after
+              successful invoice creation until the user manually refreshed.
+              This was the root cause of Bug 1's observable symptom ("report still
+              shows unbilled") — the Google Sheet WAS updated correctly, but the
+              Supabase mirror was stale until the next reconcile.
+   =================================================== */
+/* ===================================================
    StrideAPI.gs — v38.112.0 — 2026-04-23 PST — Reference column inline-editable on Billing Report
    v38.112.0: handleUpdateBillingRow_ now accepts and writes payload.reference to
               the Billing_Ledger "Reference" column. Parity with sidemark/notes inline
@@ -5189,7 +5201,9 @@ function doPost(e) {
       case "generateStorageCharges":
         return withStaffGuard_(callerEmail, function() {
           var r = handleGenerateStorageCharges_(payload);
-          if (payload.clientSheetId) api_fullClientSync_(String(payload.clientSheetId), ["billing"]);
+          // v38.113.0: Accept sourceSheetId as fallback for clientSheetId (parity with createInvoice)
+          var _syncSid2 = String(payload.clientSheetId || payload.sourceSheetId || "").trim();
+          if (_syncSid2) api_fullClientSync_(_syncSid2, ["billing"]);
           return r;
         });
 
@@ -5216,7 +5230,12 @@ function doPost(e) {
       case "createInvoice":
         return withStaffGuard_(callerEmail, function() {
           var r = handleCreateInvoice_(payload);
-          if (payload.clientSheetId) api_fullClientSync_(String(payload.clientSheetId), ["billing"]);
+          // v38.113.0: Accept sourceSheetId as fallback for clientSheetId.
+          // React's postCreateInvoice sends sourceSheetId, not clientSheetId — so the
+          // Supabase sync never fired after invoice creation. Result: React showed
+          // rows as "Unbilled" until manual refresh even after successful invoicing.
+          var _syncSid = String(payload.clientSheetId || payload.sourceSheetId || "").trim();
+          if (_syncSid) api_fullClientSync_(_syncSid, ["billing"]);
           return r;
         });
 
