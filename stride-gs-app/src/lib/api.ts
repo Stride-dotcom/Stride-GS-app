@@ -4537,11 +4537,12 @@ export function fetchQboCustomers(signal?: AbortSignal) {
 export function postQboCreateInvoice(
   ledgerRowIds: string[],
   forceRePush: boolean = false,
+  autoAssignDocNumber: boolean = false,
   signal?: AbortSignal
 ) {
   return apiPost<QboCreateInvoiceResponse>(
     'qboCreateInvoice',
-    { ledgerRowIds, forceRePush } as unknown as Record<string, unknown>,
+    { ledgerRowIds, forceRePush, autoAssignDocNumber } as unknown as Record<string, unknown>,
     {},
     { signal, timeoutMs: API_POST_TIMEOUT_LONG_MS }
   );

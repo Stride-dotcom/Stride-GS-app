@@ -1983,9 +1983,9 @@ export function Billing() {
                 ))}
               </div>
             )}
-            {/* Retry button — no need to re-select rows */}
+            {/* Retry buttons — no need to re-select rows */}
             {qboResult.retryIds && qboResult.retryIds.length > 0 && (
-              <div style={{ marginTop: 10, display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+              <div style={{ marginTop: 10, display: 'flex', gap: 8, justifyContent: 'flex-end', flexWrap: 'wrap' }}>
                 <button
                   onClick={async () => {
                     const ids = qboResult.retryIds!;
@@ -2026,6 +2026,58 @@ export function Billing() {
                   }}
                 >
                   {qboRetrying ? <><Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} /> Retrying...</> : <><RefreshCw size={12} /> Retry QBO Push</>}
+                </button>
+                {/* Force Push with QBO auto-assign — rescue for "Duplicate Document Number" errors */}
+                <button
+                  onClick={async () => {
+                    const ids = qboResult.retryIds!;
+                    const confirmed = window.confirm(
+                      'Force Push with QBO Auto-Assign?\n\n' +
+                      'QBO will assign its own invoice number (not using Stride INV#).\n' +
+                      'Stride INV# will be stored in QBO\'s private memo for reference.\n' +
+                      'QBO\'s assigned number will be saved in a new "QBO Invoice #" column.\n\n' +
+                      'Use this only when a normal push fails with "Duplicate Document Number Error".\n\n' +
+                      'Continue?'
+                    );
+                    if (!confirmed) return;
+                    setQboRetrying(true);
+                    setQboResult(null);
+                    try {
+                      const qboRes = await qboPushInvoice(ids, true, true);
+                      if (qboRes) {
+                        const details = (qboRes.results || []).map((r: any) => ({
+                          strideInvoiceNumber: r.strideInvoiceNumber || '',
+                          error: r.error || undefined,
+                          success: r.success || false,
+                          qboInvoiceId: r.qboInvoiceId || undefined,
+                        }));
+                        if (qboRes.success && qboRes.failedCount === 0) {
+                          setQboResult({ success: `${qboRes.pushedCount} invoice(s) force-pushed to QBO (auto-assigned)`, details });
+                        } else {
+                          setQboResult({
+                            error: qboRes.error || `${qboRes.failedCount} invoice(s) failed to force-push`,
+                            details,
+                            retryIds: ids,
+                          });
+                        }
+                      }
+                    } catch (e) {
+                      setQboResult({ error: 'Force Push failed: ' + String(e), retryIds: ids });
+                    } finally {
+                      setQboRetrying(false);
+                    }
+                  }}
+                  disabled={qboRetrying}
+                  style={{
+                    padding: '6px 14px', fontSize: 12, fontWeight: 600,
+                    border: '1px solid #D97706', borderRadius: 8,
+                    background: '#FFFBEB', cursor: qboRetrying ? 'not-allowed' : 'pointer',
+                    fontFamily: 'inherit', color: '#92400E',
+                    display: 'flex', alignItems: 'center', gap: 4,
+                  }}
+                  title="Force push — QBO assigns its own invoice number. Use when you get duplicate number errors."
+                >
+                  <AlertTriangle size={12} /> Force Push (QBO Auto-#)
                 </button>
               </div>
             )}
