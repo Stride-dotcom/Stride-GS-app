@@ -14,8 +14,12 @@ import type { MoveHistoryEntry } from '../../lib/api';
 import type { InventoryItem, InventoryStatus } from '../../lib/types';
 import { TabbedDetailPanel } from './TabbedDetailPanel';
 import type { TabbedDetailPanelTab } from './TabbedDetailPanel';
+import { EntityPage } from './EntityPage';
 import { buildDeepLink } from '../../lib/deepLinks';
 import { useIsMobile } from '../../hooks/useIsMobile';
+import { usePhotos } from '../../hooks/usePhotos';
+import { useDocuments } from '../../hooks/useDocuments';
+import { useEntityNotes } from '../../hooks/useEntityNotes';
 
 export interface LinkedRecord {
   id: string;
@@ -53,6 +57,11 @@ interface Props {
   applyItemPatch?: (itemId: string, patch: Partial<InventoryItem>) => void;
   mergeItemPatch?: (itemId: string, patch: Partial<InventoryItem>) => void;
   clearItemPatch?: (itemId: string) => void;
+  // Session 80+ — render as full EntityPage instead of slide-out TabbedDetailPanel.
+  // When true, sidemark + idBadges are hidden from the header (per redesign spec)
+  // and the outer shell is swapped. All tabs, handlers, modals, and edit logic
+  // are preserved exactly as-is.
+  renderAsPage?: boolean;
 }
 
 function Badge({ t, bg, color }: { t: string; bg: string; color: string }) {
@@ -500,6 +509,7 @@ export function ItemDetailPanel({
   itemShipment,
   userRole, classNames = [], locationNames = [], clientSheetId, onItemUpdated,
   applyItemPatch, mergeItemPatch, clearItemPatch,
+  renderAsPage,
 }: Props) {
   // Panel frame + resize + backdrop are handled by TabbedDetailPanel now.
   const { isMobile } = useIsMobile();
@@ -520,6 +530,26 @@ export function ItemDetailPanel({
   // full task/repair list in scope. Tenant-scoped Supabase read, ~50ms.
   const { inspOpenItems, inspDoneItems, asmOpenItems, asmDoneItems, repairOpenItems, repairDoneItems } = useItemIndicators(clientSheetId);
 
+  // Tab badge counts — Photos / Docs / Notes. Drive folder URLs are external
+  // links, not uploaded assets, and are intentionally NOT counted here.
+  const { photos: itemPhotos } = usePhotos({
+    entityType: 'inventory',
+    entityId: item.itemId ?? null,
+    tenantId: clientSheetId ?? null,
+    itemId: item.itemId ?? null,
+    enabled: renderAsPage && !!item.itemId,
+  });
+  const { documents: itemDocs } = useDocuments({
+    contextType: 'item',
+    contextId: item.itemId ?? '',
+    tenantId: clientSheetId ?? null,
+    enabled: renderAsPage && !!item.itemId,
+  });
+  const { notes: itemNotesList } = useEntityNotes('inventory', renderAsPage ? (item.itemId ?? '') : '');
+  const photoCount = renderAsPage ? itemPhotos.length : 0;
+  const docCount   = renderAsPage ? itemDocs.length   : 0;
+  const noteCount  = renderAsPage ? itemNotesList.length : 0;
+
   // Move history — fetch from API when panel opens
   const [moveHistory, setMoveHistory] = useState<MoveHistoryEntry[]>([]);
   useEffect(() => {
@@ -532,6 +562,43 @@ export function ItemDetailPanel({
     }).catch(() => {});
     return () => { cancelled = true; };
   }, [clientSheetId, item.itemId]);
+
+  // Fallback — parse Item Notes for GAS-appended move lines of the form:
+  //   [MM/DD/YYYY HH:MM AM/PM] Moved <from> → <to> by <user>
+  // Current client scripts write moves here rather than hitting the Move
+  // History sheet API, so without this parse the Moves section in Activity
+  // would stay empty. Deduped against the real API result by timestamp+locations.
+  const parsedMoves = useMemo<MoveHistoryEntry[]>(() => {
+    const notes = (item.itemNotes || item.notes || '') as string;
+    if (!notes) return [];
+    const out: MoveHistoryEntry[] = [];
+    // \u2192 is the → arrow; also accept -> as a fallback.
+    const lineRe = /\[([^\]]+)\]\s*Moved\s+(.+?)\s+(?:\u2192|->|→)\s+(.+?)\s+by\s+(.+?)(?=\s*(?:\[|$))/gi;
+    let m: RegExpExecArray | null;
+    while ((m = lineRe.exec(notes)) !== null) {
+      const [, timestamp, fromLocation, toLocation, user] = m;
+      out.push({
+        timestamp: timestamp.trim(),
+        user: user.trim(),
+        itemId: item.itemId,
+        fromLocation: fromLocation.trim(),
+        toLocation: toLocation.trim(),
+        type: 'Move',
+      });
+    }
+    return out;
+  }, [item.itemNotes, item.notes, item.itemId]);
+
+  // Merge API moves + parsed moves, deduped by timestamp + from/to.
+  const combinedMoves = useMemo<MoveHistoryEntry[]>(() => {
+    const seen = new Set<string>();
+    const keyOf = (mv: MoveHistoryEntry) =>
+      `${mv.timestamp}|${(mv.fromLocation || '').toLowerCase()}|${(mv.toLocation || '').toLowerCase()}`;
+    const all: MoveHistoryEntry[] = [];
+    for (const mv of moveHistory) { const k = keyOf(mv); if (!seen.has(k)) { seen.add(k); all.push(mv); } }
+    for (const mv of parsedMoves)  { const k = keyOf(mv); if (!seen.has(k)) { seen.add(k); all.push(mv); } }
+    return all;
+  }, [moveHistory, parsedMoves]);
 
   // Fetch audit log entries for this item and all related entities
   const [auditByEntity, setAuditByEntity] = useState<Record<string, AuditEntry[]>>({});
@@ -565,7 +632,7 @@ export function ItemDetailPanel({
     return () => { cancelled = true; };
   }, [item.itemId, item.shipmentNumber, itemTasks.length, itemRepairs.length, itemWillCalls.length]);
 
-  const historyCount = (hasShipment ? 1 : 0) + moveHistory.length + itemTasks.length + itemRepairs.length + itemWillCalls.length + itemBilling.length;
+  const historyCount = (hasShipment ? 1 : 0) + combinedMoves.length + itemTasks.length + itemRepairs.length + itemWillCalls.length + itemBilling.length;
 
   // Can this user edit?
   const canEditBasic = !!clientSheetId; // all roles can edit basic fields
@@ -794,6 +861,15 @@ export function ItemDetailPanel({
     .map(w => ({ label: w.wcNumber || 'WC Folder', url: w.wcFolderUrl }));
   const entityFolderButtons = [...taskFolderUrls, ...repairFolderUrls, ...wcFolderUrls];
 
+  // Page mode: all drive folders (shipment + photos + entity folders) rendered
+  // in the Photos / Docs tab as Google-Drive-style rows. State-aware — each
+  // entry only included when its URL actually exists.
+  const pageDriveFolders: DriveFolderLink[] = [
+    ...(shipmentFolderUrl ? [{ label: `Shipment ${item.shipmentNumber || 'Folder'}`, url: shipmentFolderUrl }] : []),
+    ...(photosFolderId ? [{ label: 'Photos Folder', url: `https://drive.google.com/drive/folders/${photosFolderId}` }] : []),
+    ...entityFolderButtons,
+  ];
+
   // ── Tab render functions ────────────────────────────────────────────────
   // Each render function is a plain fragment — ALL existing state,
   // handlers, and computed values from above are captured in-closure so
@@ -919,39 +995,45 @@ export function ItemDetailPanel({
         </Section>
       )}
 
-      {/* Related — folder buttons + linked-record shortcuts */}
-      <Section icon={FileText} title="Related" count={linkedTasks.length + linkedRepairs.length + linkedWillCalls.length || undefined}>
-        {(shipmentFolderUrl || photosFolderId) && (
-          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 8 }}>
-            {shipmentFolderUrl && (
-              <FolderButton label={`Shipment ${item.shipmentNumber || 'Folder'}`} url={shipmentFolderUrl} icon={Truck} />
-            )}
-            {photosFolderId && (
-              <FolderButton label="Photos" url={`https://drive.google.com/drive/folders/${photosFolderId}`} icon={FolderOpen} />
-            )}
-          </div>
-        )}
+      {/* Related — panel mode only. In page mode the Activity tab already
+          shows linked tasks/repairs/WCs with richer context (status, dates,
+          audit trail), and drive folders have moved to the Photos/Docs tabs.
+          Rendering this section in page mode would duplicate both, so it's
+          suppressed there. */}
+      {!renderAsPage && (
+        <Section icon={FileText} title="Related" count={linkedTasks.length + linkedRepairs.length + linkedWillCalls.length || undefined}>
+          {(shipmentFolderUrl || photosFolderId) && (
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 8 }}>
+              {shipmentFolderUrl && (
+                <FolderButton label={`Shipment ${item.shipmentNumber || 'Folder'}`} url={shipmentFolderUrl} icon={Truck} />
+              )}
+              {photosFolderId && (
+                <FolderButton label="Photos" url={`https://drive.google.com/drive/folders/${photosFolderId}`} icon={FolderOpen} />
+              )}
+            </div>
+          )}
 
-        {entityFolderButtons.length > 0 && (
-          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 10 }}>
-            {entityFolderButtons.map(({ label, url }) => (
-              <FolderButton key={label} label={label} url={url} icon={ExternalLink} />
-            ))}
-          </div>
-        )}
+          {entityFolderButtons.length > 0 && (
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 10 }}>
+              {entityFolderButtons.map(({ label, url }) => (
+                <FolderButton key={label} label={label} url={url} icon={ExternalLink} />
+              ))}
+            </div>
+          )}
 
-        {hasLinkedRecords ? (
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-            <LinkedRecordButton records={linkedTasks} type="task" onNavigate={onNavigateToRecord} />
-            <LinkedRecordButton records={linkedRepairs} type="repair" onNavigate={onNavigateToRecord} />
-            <LinkedRecordButton records={linkedWillCalls} type="willcall" onNavigate={onNavigateToRecord} />
-          </div>
-        ) : !item.shipmentNumber && !shipmentFolderUrl && entityFolderButtons.length === 0 ? (
-          <div style={{ fontSize: 12, color: theme.colors.textMuted, padding: '4px 0', fontStyle: 'italic' }}>
-            No linked tasks, repairs, or will calls found for this item.
-          </div>
-        ) : null}
-      </Section>
+          {hasLinkedRecords ? (
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              <LinkedRecordButton records={linkedTasks} type="task" onNavigate={onNavigateToRecord} />
+              <LinkedRecordButton records={linkedRepairs} type="repair" onNavigate={onNavigateToRecord} />
+              <LinkedRecordButton records={linkedWillCalls} type="willcall" onNavigate={onNavigateToRecord} />
+            </div>
+          ) : !item.shipmentNumber && !shipmentFolderUrl && entityFolderButtons.length === 0 ? (
+            <div style={{ fontSize: 12, color: theme.colors.textMuted, padding: '4px 0', fontStyle: 'italic' }}>
+              No linked tasks, repairs, or will calls found for this item.
+            </div>
+          ) : null}
+        </Section>
+      )}
     </>
   );
 
@@ -977,7 +1059,7 @@ export function ItemDetailPanel({
           repairs={itemRepairs}
           willCalls={itemWillCalls}
           billing={itemBilling}
-          moves={moveHistory}
+          moves={combinedMoves}
           shipmentNumber={item.shipmentNumber}
           receiveDate={item.receiveDate}
           shipmentCarrier={itemShipment?.carrier}
@@ -1009,8 +1091,9 @@ export function ItemDetailPanel({
         onRequestRepair={handleRequestRepair}
         repairStatus={repairStatus ?? undefined}
         repairRequesting={repairRequesting}
+        variant={renderAsPage ? 'light' : 'dark'}
       />
-      {!isMobile && (
+      {!isMobile && !renderAsPage && (
         <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4, borderRadius: 6, color: 'rgba(255,255,255,0.7)' }}>
           <X size={18} />
         </button>
@@ -1117,24 +1200,40 @@ export function ItemDetailPanel({
       id: 'photos',
       label: 'Photos',
       icon: <ImageIcon size={13} />,
-      render: () => <PhotosPanelProxy item={item} clientSheetId={clientSheetId} />,
+      badgeCount: photoCount,
+      render: () => (
+        <PhotosPanelProxy
+          item={item}
+          clientSheetId={clientSheetId}
+          driveFolders={renderAsPage ? pageDriveFolders : undefined}
+        />
+      ),
     },
     {
       id: 'docs',
       label: 'Docs',
       icon: <FileText size={13} />,
-      render: () => <DocsPanelProxy itemId={item.itemId} clientSheetId={clientSheetId} />,
+      badgeCount: docCount,
+      render: () => (
+        <DocsPanelProxy
+          itemId={item.itemId}
+          clientSheetId={clientSheetId}
+          driveFolders={renderAsPage ? pageDriveFolders : undefined}
+        />
+      ),
     },
     {
       id: 'notes',
       label: 'Notes',
       icon: <StickyNote size={13} />,
+      badgeCount: noteCount,
       render: () => <NotesPanelProxy
         itemId={item.itemId}
         itemTasks={itemTasks}
         itemRepairs={itemRepairs}
         itemWillCalls={itemWillCalls}
         shipmentNumber={item.shipmentNumber}
+        itemNotesText={item.itemNotes || item.notes}
       />,
     },
     {
@@ -1147,9 +1246,91 @@ export function ItemDetailPanel({
       id: 'activity',
       label: 'Activity',
       icon: <Activity size={13} />,
+      badgeCount: renderAsPage ? historyCount : undefined,
       render: () => renderActivityTab(),
     },
   ];
+
+  // Page-mode footer: state-aware quick-action pills.
+  // Dark secondary pills (Create Task / Repair Quote / Add to WC / Transfer),
+  // orange primary pill on right (Edit or Save+Cancel when editing).
+  // On mobile, pills shrink (smaller padding, font, min-width) so fewer rows
+  // of the fixed footer wrap and the item body has less scroll obstruction.
+  const pagePillBase: React.CSSProperties = {
+    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+    gap: 5, flex: '1 1 0',
+    minWidth: isMobile ? 92 : 110,
+    maxWidth: isMobile ? 140 : 170,
+    padding: isMobile ? '8px 10px' : '10px 14px',
+    borderRadius: 10, border: 'none',
+    fontFamily: 'inherit',
+    fontSize: isMobile ? 11 : 12,
+    fontWeight: 700,
+    letterSpacing: '0.3px', cursor: 'pointer', whiteSpace: 'nowrap',
+  };
+  const darkPill: React.CSSProperties = { ...pagePillBase, background: '#1C1C1C', color: '#fff' };
+  const orangePill: React.CSSProperties = { ...pagePillBase, background: theme.colors.orange, color: '#fff' };
+  const lightPill: React.CSSProperties = { ...pagePillBase, background: '#fff', color: theme.colors.text, border: `1px solid ${theme.colors.border}` };
+
+  const pageFooter = isEditing ? (
+    <>
+      <button onClick={handleEditCancel} disabled={saving} style={lightPill}>Cancel</button>
+      <button onClick={handleSave} disabled={saving} style={orangePill}>
+        {saving ? <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} /> : <Save size={13} />}
+        {saving ? 'Saving…' : 'Save'}
+      </button>
+    </>
+  ) : (
+    <>
+      {onCreateTask && (
+        <button onClick={onCreateTask} style={darkPill}>
+          <ClipboardList size={13} /> Create Task
+        </button>
+      )}
+      {!repairStatus ? (
+        <button onClick={() => void handleRequestRepair()} disabled={repairRequesting} style={darkPill}>
+          <Wrench size={13} /> {repairRequesting ? 'Requesting…' : 'Repair Quote'}
+        </button>
+      ) : null}
+      {onCreateWillCall && (
+        <button onClick={onCreateWillCall} style={darkPill}>
+          <Truck size={13} /> Add to WC
+        </button>
+      )}
+      {onTransfer && (
+        <button onClick={onTransfer} style={darkPill}>
+          <ExternalLink size={13} /> Transfer
+        </button>
+      )}
+      {canEditBasic && (
+        <button onClick={handleEditStart} style={orangePill}>
+          <Pencil size={13} /> Edit
+        </button>
+      )}
+    </>
+  );
+
+  if (renderAsPage) {
+    // Redesign spec: dark tab cards, no sidemark/idBadges chips in header,
+    // white sticky footer with quick-action pills. All tabs + state + handlers
+    // shared with panel mode.
+    return (
+      <>
+        <EntityPage
+          entityLabel="Inventory"
+          entityId={item.itemId}
+          clientName={item.clientName}
+          statusBadge={headerStatusBadge}
+          headerActions={headerActions}
+          statusStrip={statusStrip}
+          tabs={customTabs as unknown as Parameters<typeof EntityPage>[0]['tabs']}
+          initialTabId="details"
+          footer={pageFooter}
+        />
+        <style>{`@keyframes slideIn { from { transform: translateX(100%); } to { transform: translateX(0); } }`}</style>
+      </>
+    );
+  }
 
   return (
     <>
@@ -1193,37 +1374,45 @@ import { PhotosPanel as _PhotosPanel, DocumentsPanel as _DocumentsPanel, NotesPa
 import { useCoverageOptions, formatCoverageRate, type CoverageOption } from '../../hooks/useCoverageOptions';
 import { AutocompleteSelect } from './AutocompleteSelect';
 import type { InventoryItem as CoverageItemType } from '../../lib/types';
+import { DriveFoldersList, type DriveFolderLink } from './DriveFoldersList';
 
-function PhotosPanelProxy({ item, clientSheetId }: { item: any; clientSheetId: string | undefined }) {
+function PhotosPanelProxy({ item, clientSheetId, driveFolders }: { item: any; clientSheetId: string | undefined; driveFolders?: DriveFolderLink[] }) {
   return (
-    <_PhotosPanel
-      entityType="inventory"
-      entityId={item.itemId}
-      itemId={item.itemId}
-      tenantId={clientSheetId}
-      enableSourceFilter
-    />
+    <div>
+      <_PhotosPanel
+        entityType="inventory"
+        entityId={item.itemId}
+        itemId={item.itemId}
+        tenantId={clientSheetId}
+        enableSourceFilter
+      />
+      {driveFolders && <DriveFoldersList folders={driveFolders} />}
+    </div>
   );
 }
 
-function DocsPanelProxy({ itemId, clientSheetId }: { itemId: string; clientSheetId: string | undefined }) {
+function DocsPanelProxy({ itemId, clientSheetId, driveFolders }: { itemId: string; clientSheetId: string | undefined; driveFolders?: DriveFolderLink[] }) {
   return (
-    <_DocumentsPanel
-      contextType="item"
-      contextId={itemId}
-      tenantId={clientSheetId}
-    />
+    <div>
+      <_DocumentsPanel
+        contextType="item"
+        contextId={itemId}
+        tenantId={clientSheetId}
+      />
+      {driveFolders && <DriveFoldersList folders={driveFolders} />}
+    </div>
   );
 }
 
 function NotesPanelProxy({
-  itemId, itemTasks, itemRepairs, itemWillCalls, shipmentNumber,
+  itemId, itemTasks, itemRepairs, itemWillCalls, shipmentNumber, itemNotesText,
 }: {
   itemId: string;
   itemTasks: any[];
   itemRepairs: any[];
   itemWillCalls: any[];
   shipmentNumber?: string;
+  itemNotesText?: string | null;
 }) {
   const related = [
     ...itemTasks.map((t: any) => ({ type: 'task', id: String(t.taskId || ''), label: `Task ${t.taskId}` })).filter(r => r.id),
@@ -1231,14 +1420,23 @@ function NotesPanelProxy({
     ...itemWillCalls.map((w: any) => ({ type: 'will_call', id: String(w.wcNumber || ''), label: `WC ${w.wcNumber}` })).filter(r => r.id),
     ...(shipmentNumber ? [{ type: 'shipment', id: String(shipmentNumber), label: `Shipment ${shipmentNumber}` }] : []),
   ];
-  return <_NotesPanel entityType="inventory" entityId={itemId} relatedEntities={related} enableSourceFilter itemId={itemId} />;
+  return (
+    <_NotesPanel
+      entityType="inventory"
+      entityId={itemId}
+      relatedEntities={related}
+      enableSourceFilter
+      itemId={itemId}
+      pinnedNote={{ label: 'Item Notes', text: itemNotesText }}
+    />
+  );
 }
 
 // ── Actions dropdown (Quick Actions moved into header per mockup) ──────────
 
 function ItemActionsMenu({
   onCreateTask, onCreateWillCall, onTransfer, onRequestRepair,
-  repairStatus, repairRequesting,
+  repairStatus, repairRequesting, variant = 'dark',
 }: {
   onCreateTask?: () => void;
   onCreateWillCall?: () => void;
@@ -1246,6 +1444,8 @@ function ItemActionsMenu({
   onRequestRepair: () => Promise<void>;
   repairStatus?: string;
   repairRequesting: boolean;
+  /** 'dark' for slide-out panel (dark header); 'light' for full-page mode (light header). */
+  variant?: 'dark' | 'light';
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -1276,9 +1476,13 @@ function ItemActionsMenu({
           display: 'inline-flex', alignItems: 'center', gap: 4,
           padding: '6px 12px', fontSize: 12, fontWeight: 600,
           borderRadius: 8,
-          border: '1px solid rgba(255,255,255,0.25)',
-          background: 'rgba(255,255,255,0.12)',
-          color: '#fff',
+          border: variant === 'light'
+            ? `1px solid ${theme.colors.border}`
+            : '1px solid rgba(255,255,255,0.25)',
+          background: variant === 'light'
+            ? theme.colors.bgCard
+            : 'rgba(255,255,255,0.12)',
+          color: variant === 'light' ? theme.colors.text : '#fff',
           cursor: 'pointer',
           fontFamily: 'inherit',
         }}

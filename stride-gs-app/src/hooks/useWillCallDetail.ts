@@ -63,30 +63,35 @@ export function useWillCallDetail(wcNumber: string | undefined): UseWillCallDeta
           return;
         }
 
-        // Supabase WC has no items — always enrich from GAS
-        if (sbWc.clientSheetId) {
-          try {
-            const gasResp = await fetchWillCallById(wcNumber, sbWc.clientSheetId, controller.signal);
-            if (fetchId !== fetchCountRef.current) return;
-            if (gasResp.ok && gasResp.data?.success && gasResp.data.willCall) {
-              const gasWc = gasResp.data.willCall;
-              setWc({
-                ...gasWc,
-                clientSheetId: sbWc.clientSheetId,
-                clientName: gasWc.clientName || sbWc.clientName,
-              });
-              setSource('legacy');
-              setStatus('loaded');
-              return;
-            }
-          } catch {
-            // GAS failed — use Supabase data as-is (no items but better than nothing)
-          }
-        }
-
+        // Render immediately from Supabase (~50ms). GAS item-list enrichment
+        // runs fire-and-forget below so the page is interactive right away.
+        // Previously this was AWAITED, which forced every WC page load to
+        // wait 2-5s for the GAS roundtrip just to hydrate the items list.
         setWc(sbWc);
         setSource('supabase');
         setStatus('loaded');
+
+        // Background GAS enrichment: Supabase WC rows don't include the
+        // items array, so we fetch the full row from GAS and merge it in
+        // when available. The items table shows a "Loading items…" hint
+        // while this resolves — then fills in. If GAS fails, the user
+        // still sees the WC header + pickup details instantly.
+        if (sbWc.clientSheetId) {
+          fetchWillCallById(wcNumber, sbWc.clientSheetId, controller.signal)
+            .then(gasResp => {
+              if (fetchId !== fetchCountRef.current) return;
+              if (gasResp.ok && gasResp.data?.success && gasResp.data.willCall) {
+                const gasWc = gasResp.data.willCall;
+                setWc(prev => prev ? {
+                  ...gasWc,
+                  clientSheetId: sbWc.clientSheetId,
+                  clientName: gasWc.clientName || prev.clientName,
+                } : prev);
+                setSource('legacy');
+              }
+            })
+            .catch(() => { /* best-effort */ });
+        }
         return;
       }
 

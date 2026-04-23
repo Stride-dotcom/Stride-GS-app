@@ -2063,11 +2063,19 @@ export function Inventory() {
                   <tr
                     key={row.id}
                     className={isPrinting ? undefined : 'inv-row'}
-                    onClick={isPrinting ? undefined : (e => handleRowClick(e, row, idx))}
-                    onDoubleClick={isPrinting ? undefined : (() => navigate(`/inventory/${row.original.itemId}`))}
+                    onClick={isPrinting ? undefined : (e => {
+                      // Match Tasks/Repairs/WillCalls/Shipments: single click
+                      // on row body navigates; clicks on checkbox or action
+                      // buttons keep their own behavior. Shift-click on the
+                      // row still range-selects via the checkbox column.
+                      const t = e.target as HTMLElement;
+                      if (t.closest('input[type="checkbox"]') || t.closest('.row-actions')) return;
+                      if (e.shiftKey) { handleRowClick(e, row, idx); return; }
+                      navigate(`/inventory/${row.original.itemId}`);
+                    })}
                     style={{
                       background: rowBg,
-                      cursor: isPrinting ? undefined : 'default',
+                      cursor: isPrinting ? undefined : 'pointer',
                       transition: isPrinting ? undefined : 'background 0.08s',
                       borderLeft: !isPrinting && isActivePanel ? `3px solid ${theme.colors.orange}` : '3px solid transparent',
                     }}
@@ -2092,11 +2100,19 @@ export function Inventory() {
                   <tr
                     key={row.id}
                     className="inv-row"
-                    onClick={e => handleRowClick(e, row, vRow.index)}
-                    onDoubleClick={() => navigate(`/inventory/${row.original.itemId}`)}
+                    onClick={e => {
+                      // Match Tasks/Repairs/WillCalls/Shipments: single click
+                      // on row body navigates; clicks on checkbox or action
+                      // buttons keep their own behavior. Shift-click still
+                      // range-selects (via existing handleRowClick flow).
+                      const t = e.target as HTMLElement;
+                      if (t.closest('input[type="checkbox"]') || t.closest('.row-actions')) return;
+                      if (e.shiftKey) { handleRowClick(e, row, vRow.index); return; }
+                      navigate(`/inventory/${row.original.itemId}`);
+                    }}
                     style={{
                       background: rowBg,
-                      cursor: 'default',
+                      cursor: 'pointer',
                       transition: 'background 0.08s',
                       borderLeft: isActivePanel ? `3px solid ${theme.colors.orange}` : '3px solid transparent',
                     }}
