@@ -47,11 +47,12 @@ export function MessageTopBanner() {
       style={{
         position: 'fixed', top: 0, left: 0, right: 0,
         zIndex: 2500,
+        minHeight: 60,
         background: 'linear-gradient(180deg, rgba(0,122,255,0.98) 0%, rgba(0,102,220,1) 100%)',
         color: '#fff',
         boxShadow: '0 6px 20px rgba(0,0,0,0.2)',
         display: 'flex', alignItems: 'center', gap: 12,
-        padding: '10px 16px',
+        padding: '0 16px',
         fontFamily: theme.typography.fontFamily,
         animation: 'strideMsgBannerIn 0.25s ease-out',
       }}

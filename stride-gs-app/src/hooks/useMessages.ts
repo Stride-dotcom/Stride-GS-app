@@ -63,6 +63,11 @@ export interface Message {
   };
   /** All user_ids on the message (current user + others). Used for direct-thread keying. */
   recipientUserIds: string[];
+  /** Per-recipient read state. Includes the sender's own row. RLS lets the
+   *  sender see all recipient rows for messages they sent (Session 74
+   *  msg_recipients_select_sender), so this is populated for sent messages
+   *  and used to render Delivered / Read receipts iMessage-style. */
+  recipientReads: Array<{ userId: string; isRead: boolean; readAt: string | null }>;
 }
 
 export interface Conversation {
@@ -315,6 +320,11 @@ function useMessagesImpl(): UseMessagesResult {
         senderRole: profile?.role ?? null,
         createdAt: m.created_at,
         recipientUserIds: rcps.map(r => r.user_id),
+        recipientReads: rcps.map(r => ({
+          userId: r.user_id,
+          isRead: !!r.is_read,
+          readAt: r.read_at,
+        })),
         myRecipient: mine ? {
           recipientId: mine.id,
           isRead: !!mine.is_read,
