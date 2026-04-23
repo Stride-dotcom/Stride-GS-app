@@ -620,9 +620,12 @@ function NewShipmentForm() {
     [items],
   );
 
-  // Column definitions — not memoized so cell renderers always see fresh closures
-  // (important for autoIdLoadingRef which changes via forceUpdate, not state).
-  const columns = [
+  // Column definitions memoized to prevent remounting inputs on every keystroke.
+  // autoIdLoadingRef is a ref — closures always see the current .current value
+  // regardless of when they were created, so memoization is safe.
+  // items.length is included so the remove-button disabled state updates on row add/remove.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const columns = useMemo(() => [
     // ── expand / add-ons toggle ─────────────────────────────────────────────
     columnHelper.display({
       id: 'expand',
@@ -793,7 +796,10 @@ function NewShipmentForm() {
         );
       },
     }),
-  ];
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  ], [autoIdEnabled, update, handlePaste, toggleRowExpanded, duplicateRow, removeRow,
+      toggleAddon, updateWeight, vendors, descriptions, sidemarks, locationNames,
+      locationsLoading, apiConfigured, items.length]);
 
   const table = useReactTable({
     data: tableData,
