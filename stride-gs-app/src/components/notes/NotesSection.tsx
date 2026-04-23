@@ -205,7 +205,7 @@ export function NotesSection({ entityType, entityId, itemId, composerOnly, initi
           onKeyDown={handleKey}
           placeholder={isInternalMode
             ? 'Write an internal note (staff/admin only)…'
-            : 'Add a note… (⌘↵ to send)'}
+            : 'Add a note…'}
           rows={3}
           style={{
             width: '100%', border: 'none', outline: 'none', resize: 'vertical',
@@ -253,7 +253,7 @@ export function NotesSection({ entityType, entityId, itemId, composerOnly, initi
             }}
           >
             <Send size={12} />
-            {sending ? 'Sending…' : (isInternalMode ? 'Send internal' : 'Send')}
+            {sending ? 'Saving…' : (isInternalMode ? 'Save internal' : 'Save')}
           </button>
         </div>
       </div>
