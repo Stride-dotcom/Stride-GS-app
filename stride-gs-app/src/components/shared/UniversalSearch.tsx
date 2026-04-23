@@ -1,5 +1,8 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { Search, Package, ClipboardList, Wrench, Truck, Users, X } from 'lucide-react';
+/* ===================================================
+   UniversalSearch — v1.1.0 — 2026-04-22 10:00 AM PST
+   =================================================== */
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import { Search, Package, ClipboardList, Wrench, Truck, Users, X, Anchor } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { theme } from '../../styles/theme';
 import { useIsMobile } from '../../hooks/useIsMobile';
@@ -7,21 +10,33 @@ import { useInventory } from '../../hooks/useInventory';
 import { useTasks } from '../../hooks/useTasks';
 import { useRepairs } from '../../hooks/useRepairs';
 import { useWillCalls } from '../../hooks/useWillCalls';
-import type { InventoryItem, Task, Repair, WillCall } from '../../lib/types';
+import { useShipments } from '../../hooks/useShipments';
+import type { InventoryItem, Task, Repair, WillCall, Shipment } from '../../lib/types';
 
 interface Props { open: boolean; onClose: () => void; }
 
-type ResultType = 'inventory' | 'task' | 'repair' | 'willcall' | 'client';
-interface Result { type: ResultType; id: string; title: string; subtitle: string; path: string; }
+type ResultType = 'inventory' | 'task' | 'repair' | 'willcall' | 'shipment' | 'client';
+
+interface Result {
+  type: ResultType;
+  id: string;
+  title: string;
+  subtitle: string;
+  path: string;
+  clientSheetId?: string;
+}
 
 const TYPE_CONFIG: Record<ResultType, { icon: any; label: string; color: string; bg: string }> = {
-  inventory: { icon: Package, label: 'Item', color: '#E85D2D', bg: '#FEF3EE' },
-  task: { icon: ClipboardList, label: 'Task', color: '#1D4ED8', bg: '#EFF6FF' },
-  repair: { icon: Wrench, label: 'Repair', color: '#B45309', bg: '#FEF3C7' },
-  willcall: { icon: Truck, label: 'Will Call', color: '#7C3AED', bg: '#EDE9FE' },
-  client: { icon: Users, label: 'Client', color: '#15803D', bg: '#F0FDF4' },
+  inventory: { icon: Package,      label: 'Item',      color: '#E85D2D', bg: '#FEF3EE' },
+  task:      { icon: ClipboardList, label: 'Task',      color: '#1D4ED8', bg: '#EFF6FF' },
+  repair:    { icon: Wrench,       label: 'Repair',    color: '#B45309', bg: '#FEF3C7' },
+  willcall:  { icon: Truck,        label: 'Will Call', color: '#7C3AED', bg: '#EDE9FE' },
+  shipment:  { icon: Anchor,       label: 'Shipment',  color: '#0891B2', bg: '#F0F9FF' },
+  client:    { icon: Users,        label: 'Client',    color: '#15803D', bg: '#F0FDF4' },
 };
 
+// Display order for result groups
+const ORDER: ResultType[] = ['inventory', 'task', 'repair', 'willcall', 'shipment', 'client'];
 const MAX_PER_GROUP = 3;
 
 function buildSearchIndex(
@@ -29,14 +44,72 @@ function buildSearchIndex(
   tasks: Task[],
   repairs: Repair[],
   willCalls: WillCall[],
+  shipments: Shipment[],
 ): Result[] {
   const results: Result[] = [];
-  inventoryItems.forEach(i => results.push({ type: 'inventory', id: i.itemId, title: `${i.itemId} — ${i.vendor}`, subtitle: `${i.description} · ${i.clientName} · ${i.sidemark}`, path: '/inventory' }));
-  tasks.forEach(t => results.push({ type: 'task', id: t.taskId, title: `${t.taskId} — ${t.type}`, subtitle: `${t.description} · ${t.clientName}`, path: '/tasks' }));
-  repairs.forEach(r => results.push({ type: 'repair', id: r.repairId, title: `${r.repairId} — ${r.status}`, subtitle: `${r.description} · ${r.clientName}`, path: '/repairs' }));
-  willCalls.forEach(w => results.push({ type: 'willcall', id: w.wcNumber, title: `${w.wcNumber} — ${w.pickupParty}`, subtitle: `${w.clientName} · ${w.status} · ${w.itemCount} items`, path: '/will-calls' }));
-  const clients = [...new Set(inventoryItems.map(i => i.clientName))];
-  clients.forEach(c => { const count = inventoryItems.filter(i => i.clientName === c).length; results.push({ type: 'client', id: c, title: c, subtitle: `${count} inventory items`, path: '/inventory' }); });
+
+  inventoryItems.forEach(i => results.push({
+    type: 'inventory',
+    id: i.itemId,
+    title: `${i.itemId} — ${i.vendor}`,
+    subtitle: `${i.description} · ${i.clientName} · ${i.sidemark}`,
+    path: '/inventory',
+    clientSheetId: i.clientId, // clientId == clientSheetId (mapped in useInventory)
+  }));
+
+  tasks.forEach(t => results.push({
+    type: 'task',
+    id: t.taskId,
+    title: `${t.taskId} — ${t.type}`,
+    subtitle: `${t.description} · ${t.clientName}`,
+    path: '/tasks',
+    clientSheetId: t.clientSheetId,
+  }));
+
+  repairs.forEach(r => results.push({
+    type: 'repair',
+    id: r.repairId,
+    title: `${r.repairId} — ${r.status}`,
+    subtitle: `${r.description} · ${r.clientName}`,
+    path: '/repairs',
+    clientSheetId: r.clientSheetId,
+  }));
+
+  willCalls.forEach(w => results.push({
+    type: 'willcall',
+    id: w.wcNumber,
+    title: `${w.wcNumber} — ${w.pickupParty}`,
+    subtitle: `${w.clientName} · ${w.status} · ${w.itemCount} items`,
+    path: '/will-calls',
+    clientSheetId: w.clientSheetId,
+  }));
+
+  shipments.forEach(s => results.push({
+    type: 'shipment',
+    id: s.shipmentId,
+    title: `${s.shipmentId} — ${s.carrier}`,
+    subtitle: `${s.clientName} · ${s.trackingNumber} · ${s.itemCount} items`,
+    path: '/shipments',
+    clientSheetId: s.clientId, // clientId == clientSheetId (mapped in useShipments)
+  }));
+
+  // Client entries: one per unique clientName, with clientId for tenant context
+  const clientMap = new Map<string, { sheetId: string; count: number }>();
+  inventoryItems.forEach(i => {
+    if (!clientMap.has(i.clientName)) clientMap.set(i.clientName, { sheetId: i.clientId, count: 0 });
+    clientMap.get(i.clientName)!.count++;
+  });
+  clientMap.forEach(({ sheetId, count }, name) => {
+    results.push({
+      type: 'client',
+      id: name,
+      title: name,
+      subtitle: `${count} inventory items`,
+      path: '/inventory',
+      clientSheetId: sheetId,
+    });
+  });
+
   return results;
 }
 
@@ -47,43 +120,62 @@ export function UniversalSearch({ open, onClose }: Props) {
   const inputRef = useRef<HTMLInputElement>(null);
   const navigate = useNavigate();
 
-  // Live data from API hooks
+  // Live data — already scoped to the caller's role/tenant by each hook
   const { items: inventoryItems } = useInventory(true);
   const { tasks } = useTasks(true);
   const { repairs } = useRepairs(true);
   const { willCalls } = useWillCalls(true);
+  const { shipments } = useShipments(true);
 
   const allResults = useMemo(
-    () => buildSearchIndex(inventoryItems, tasks, repairs, willCalls),
-    [inventoryItems, tasks, repairs, willCalls]
+    () => buildSearchIndex(inventoryItems, tasks, repairs, willCalls, shipments),
+    [inventoryItems, tasks, repairs, willCalls, shipments],
   );
 
   const filtered = useMemo(() => {
     if (!query.trim()) return [];
     const q = query.toLowerCase();
-    return allResults.filter(r => r.title.toLowerCase().includes(q) || r.subtitle.toLowerCase().includes(q) || r.id.toLowerCase().includes(q));
+    return allResults.filter(r =>
+      r.title.toLowerCase().includes(q) ||
+      r.subtitle.toLowerCase().includes(q) ||
+      r.id.toLowerCase().includes(q),
+    );
   }, [query, allResults]);
 
   const grouped = useMemo(() => {
-    const groups: Record<ResultType, Result[]> = { inventory: [], task: [], repair: [], willcall: [], client: [] };
+    const groups: Record<ResultType, Result[]> = {
+      inventory: [], task: [], repair: [], willcall: [], shipment: [], client: [],
+    };
     filtered.forEach(r => { if (groups[r.type].length < MAX_PER_GROUP) groups[r.type].push(r); });
     return groups;
   }, [filtered]);
 
-  const flatResults = useMemo(() => {
-    const flat: Result[] = [];
-    (Object.keys(grouped) as ResultType[]).forEach(type => { grouped[type].forEach(r => flat.push(r)); });
-    return flat;
-  }, [grouped]);
+  const flatResults = useMemo(() => ORDER.flatMap(type => grouped[type]), [grouped]);
 
-  useEffect(() => { if (open) { setQuery(''); setFocusIdx(0); setTimeout(() => inputRef.current?.focus(), 50); } }, [open]);
+  useEffect(() => {
+    if (open) { setQuery(''); setFocusIdx(0); setTimeout(() => inputRef.current?.focus(), 50); }
+  }, [open]);
   useEffect(() => { setFocusIdx(0); }, [query]);
+
+  // Navigate to the entity's detail panel. For entity types, appends ?open=ID&client=sheetId
+  // so the list page's deep-link handler auto-selects the client and opens the detail panel.
+  // For client results, navigates to inventory pre-filtered to that client.
+  const navToResult = useCallback((r: Result) => {
+    if (r.type === 'client') {
+      const q = r.clientSheetId ? `?client=${encodeURIComponent(r.clientSheetId)}` : '';
+      navigate(r.path + q);
+    } else {
+      const clientSuffix = r.clientSheetId ? `&client=${encodeURIComponent(r.clientSheetId)}` : '';
+      navigate(`${r.path}?open=${encodeURIComponent(r.id)}${clientSuffix}`);
+    }
+    onClose();
+  }, [navigate, onClose]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Escape') { onClose(); return; }
     if (e.key === 'ArrowDown') { e.preventDefault(); setFocusIdx(i => Math.min(i + 1, flatResults.length - 1)); }
     if (e.key === 'ArrowUp') { e.preventDefault(); setFocusIdx(i => Math.max(i - 1, 0)); }
-    if (e.key === 'Enter' && flatResults[focusIdx]) { navigate(flatResults[focusIdx].path); onClose(); }
+    if (e.key === 'Enter' && flatResults[focusIdx]) { navToResult(flatResults[focusIdx]); }
   };
 
   if (!open) return null;
@@ -108,9 +200,14 @@ export function UniversalSearch({ open, onClose }: Props) {
         {/* Search Input */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '14px 18px', borderBottom: `1px solid ${theme.colors.border}` }}>
           <Search size={18} color={theme.colors.textMuted} />
-          <input ref={inputRef} value={query} onChange={e => setQuery(e.target.value)} onKeyDown={handleKeyDown}
-            placeholder="Search items, tasks, repairs, will calls, clients..."
-            style={{ flex: 1, border: 'none', outline: 'none', fontSize: 15, fontFamily: 'inherit', color: theme.colors.text }} />
+          <input
+            ref={inputRef}
+            value={query}
+            onChange={e => setQuery(e.target.value)}
+            onKeyDown={handleKeyDown}
+            placeholder="Search items, tasks, repairs, will calls, shipments, clients..."
+            style={{ flex: 1, border: 'none', outline: 'none', fontSize: 15, fontFamily: 'inherit', color: theme.colors.text }}
+          />
           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
             <span style={{ fontSize: 10, color: theme.colors.textMuted, background: theme.colors.bgSubtle, border: `1px solid ${theme.colors.border}`, padding: '2px 6px', borderRadius: 4 }}>ESC</span>
             <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 2, color: theme.colors.textMuted }}><X size={16} /></button>
@@ -121,7 +218,7 @@ export function UniversalSearch({ open, onClose }: Props) {
         <div style={{ flex: 1, overflowY: 'auto', padding: '8px 0', maxHeight: isMobile ? undefined : '60vh' }}>
           {!query.trim() && (
             <div style={{ padding: '24px 20px', textAlign: 'center', color: theme.colors.textMuted, fontSize: 13 }}>
-              Type to search across inventory, tasks, repairs, will calls, and clients
+              Type to search across inventory, tasks, repairs, will calls, shipments, and clients
             </div>
           )}
           {query.trim() && flatResults.length === 0 && (
@@ -129,7 +226,7 @@ export function UniversalSearch({ open, onClose }: Props) {
               No results for "{query}"
             </div>
           )}
-          {(Object.keys(grouped) as ResultType[]).map(type => {
+          {ORDER.map(type => {
             const items = grouped[type];
             if (items.length === 0) return null;
             const cfg = TYPE_CONFIG[type];
@@ -145,12 +242,15 @@ export function UniversalSearch({ open, onClose }: Props) {
                   const idx = resultIdx;
                   const focused = idx === focusIdx;
                   return (
-                    <div key={r.id} onClick={() => { navigate(r.path); onClose(); }}
+                    <div
+                      key={r.id}
+                      onClick={() => navToResult(r)}
                       onMouseEnter={() => setFocusIdx(idx)}
                       style={{
                         display: 'flex', alignItems: 'center', gap: 12, padding: '10px 18px', cursor: 'pointer',
                         background: focused ? theme.colors.bgSubtle : 'transparent', transition: 'background 0.08s',
-                      }}>
+                      }}
+                    >
                       <div style={{ width: 32, height: 32, borderRadius: 8, background: cfg.bg, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
                         <Icon size={16} color={cfg.color} />
                       </div>
@@ -163,7 +263,10 @@ export function UniversalSearch({ open, onClose }: Props) {
                   );
                 })}
                 {totalForType > MAX_PER_GROUP && (
-                  <div onClick={() => { navigate(items[0].path); onClose(); }} style={{ padding: '6px 18px 8px 62px', fontSize: 11, color: theme.colors.orange, cursor: 'pointer', fontWeight: 500 }}>
+                  <div
+                    onClick={() => { navigate(items[0].path); onClose(); }}
+                    style={{ padding: '6px 18px 8px 62px', fontSize: 11, color: theme.colors.orange, cursor: 'pointer', fontWeight: 500 }}
+                  >
                     View all {totalForType} {cfg.label.toLowerCase()}s →
                   </div>
                 )}
