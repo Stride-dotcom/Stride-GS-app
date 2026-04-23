@@ -1,4 +1,15 @@
 /* ===================================================
+   StrideAPI.gs — v38.111.0 — 2026-04-23 PST — QBO Force Push with auto-assign DocNumber (rescue + permanent)
+   v38.111.0: NEW — autoAssignDocNumber flag on qboCreateInvoice endpoint. When true,
+              the payload omits DocNumber entirely so QBO auto-assigns its own next invoice number,
+              avoiding "Duplicate Document Number Error" when Stride's counter is behind QBO's.
+              Stride invoice # is preserved in QBO's PrivateNote field as "Stride Ref: INV-NNNNNN".
+              qbo_writeQboInvoiceId_ now also writes QBO's assigned DocNumber back to a new
+              "QBO Invoice #" column on Consolidated_Ledger (auto-added if missing) for cross-reference.
+              Rescue path: React sends { ledgerRowIds, forceRePush: true, autoAssignDocNumber: true }
+              for invoices stuck in "Failed" state due to DocNumber collisions.
+   =================================================== */
+/* ===================================================
    StrideAPI.gs — v38.110.0 — 2026-04-23 PST — Per-user resend now sends ONBOARDING (sendOnboardingToUsers endpoint)
    v38.110.0: New `sendOnboardingToUsers` router case + handleSendOnboardingToUsers_ handler
               so the Settings → Users per-user "Send" button can resend the ONBOARDING email
@@ -32199,19 +32210,40 @@ function qbo_checkDuplicatePush_(strideInvoiceNumber, consolVals, consolHdr) {
 }
 
 /**
- * Write QBO Invoice ID + QBO Status back to Consolidated_Ledger for all rows matching an invoice number.
+ * Write QBO Invoice ID + QBO Status + (v38.111.0) QBO DocNumber back to
+ * Consolidated_Ledger for all rows matching an invoice number.
+ *
+ * qboDocNumber: optional — QBO's auto-assigned invoice number. Written to a new
+ *   "QBO Invoice #" column (auto-added if the column doesn't exist).
+ *   Used for cross-reference when Stride INV# and QBO DocNumber differ (auto-assign case).
  */
-function qbo_writeQboInvoiceId_(strideInvoiceNumber, qboInvoiceId, consolSh, consolVals, consolHdr) {
+function qbo_writeQboInvoiceId_(strideInvoiceNumber, qboInvoiceId, consolSh, consolVals, consolHdr, qboDocNumber) {
   var invCol = consolHdr["INVOICE #"];
   var qboCol = consolHdr["QBO INVOICE ID"];
   var qboStatusCol = consolHdr["QBO STATUS"];
   if (invCol === undefined) return;
+
+  // v38.111.0: Auto-add "QBO Invoice #" column if missing
+  var qboDocNumCol = consolHdr["QBO INVOICE #"];
+  if (qboDocNumCol === undefined && qboDocNumber) {
+    try {
+      var nextCol = consolSh.getLastColumn() + 1;
+      consolSh.getRange(1, nextCol).setValue("QBO Invoice #");
+      qboDocNumCol = nextCol - 1;  // 0-indexed for consolHdr convention
+      consolHdr["QBO INVOICE #"] = qboDocNumCol;
+    } catch (e) {
+      Logger.log("qbo_writeQboInvoiceId_: Could not add QBO Invoice # column: " + e);
+    }
+  }
 
   for (var i = 1; i < consolVals.length; i++) {
     var inv = String(consolVals[i][invCol] || "").trim();
     if (inv === strideInvoiceNumber) {
       if (qboCol !== undefined) consolSh.getRange(i + 1, qboCol + 1).setValue(qboInvoiceId);
       if (qboStatusCol !== undefined) consolSh.getRange(i + 1, qboStatusCol + 1).setValue("Pushed");
+      if (qboDocNumCol !== undefined && qboDocNumber) {
+        consolSh.getRange(i + 1, qboDocNumCol + 1).setValue(qboDocNumber);
+      }
     }
   }
 }
@@ -32234,8 +32266,15 @@ function qbo_writeQboFailure_(strideInvoiceNumber, errorMsg, consolSh, consolVal
 
 /**
  * Build a QBO Invoice payload from grouped Stride line items.
+ *
+ * options.autoAssignDocNumber: when true, omit DocNumber so QBO auto-assigns.
+ *   Stride INV# is then stored in PrivateNote for cross-reference.
+ *   Rescue path for invoices where Stride's counter has collided with existing QBO numbers.
  */
-function qbo_buildInvoicePayload_(invoiceData, customerQboId, itemMap, token, realmId, itemIdCache) {
+function qbo_buildInvoicePayload_(invoiceData, customerQboId, itemMap, token, realmId, itemIdCache, options) {
+  options = options || {};
+  var autoAssign = !!options.autoAssignDocNumber;
+
   var lines = [];
   for (var li = 0; li < invoiceData.lineItems.length; li++) {
     var item = invoiceData.lineItems[li];
@@ -32254,14 +32293,24 @@ function qbo_buildInvoicePayload_(invoiceData, customerQboId, itemMap, token, re
     });
   }
 
-  return {
+  // Always include Stride INV# in PrivateNote so it's searchable in QBO
+  var privateNote = "Stride Ref: " + String(invoiceData.strideInvoiceNumber || "") +
+                    " — Pushed from Stride Logistics";
+
+  var payload = {
     "CustomerRef": { "value": String(customerQboId) },
-    "DocNumber": invoiceData.strideInvoiceNumber,
     "TxnDate": invoiceData.invoiceDate,
     "DueDate": invoiceData.dueDate,
-    "PrivateNote": "Pushed from Stride Logistics",
+    "PrivateNote": privateNote,
     "Line": lines
   };
+
+  // Only set DocNumber when NOT in auto-assign mode — otherwise let QBO pick
+  if (!autoAssign) {
+    payload.DocNumber = invoiceData.strideInvoiceNumber;
+  }
+
+  return payload;
 }
 
 /**
@@ -32295,6 +32344,9 @@ function handleQboCreateInvoice_(payload) {
     return { success: false, error: "ledgerRowIds array is required" };
   }
   var forceRePush = !!payload.forceRePush;
+  // v38.111.0: When true, QBO auto-assigns DocNumber (avoids duplicate-number collisions).
+  // Stride INV# is stored in QBO's PrivateNote for cross-reference.
+  var autoAssignDocNumber = !!payload.autoAssignDocNumber;
 
   // Get QBO credentials
   var token = qbo_getValidToken_();
@@ -32523,7 +32575,11 @@ function handleQboCreateInvoice_(payload) {
       var custResult = qbo_resolveCustomerAndSubJob_(group.clientName, group.sidemark, token, realmId);
 
       // Build and push invoice
-      var invoicePayload = qbo_buildInvoicePayload_(group, custResult.customerId, itemMap, token, realmId, itemIdCache);
+      // v38.111.0: Pass autoAssignDocNumber flag through to payload builder
+      var invoicePayload = qbo_buildInvoicePayload_(
+        group, custResult.customerId, itemMap, token, realmId, itemIdCache,
+        { autoAssignDocNumber: autoAssignDocNumber }
+      );
       var pushResult = qbo_createInvoice_(invoicePayload, token, realmId);
 
       if (pushResult.success) {
@@ -32532,8 +32588,8 @@ function handleQboCreateInvoice_(payload) {
         resultEntry.qboDocNumber = pushResult.qboDocNumber;
         pushedCount++;
 
-        // Write QBO Invoice ID + status back to Consolidated_Ledger
-        qbo_writeQboInvoiceId_(invNum, pushResult.qboInvoiceId, consolSh, consolVals, consolHdr);
+        // Write QBO Invoice ID + QBO DocNumber + status back to Consolidated_Ledger
+        qbo_writeQboInvoiceId_(invNum, pushResult.qboInvoiceId, consolSh, consolVals, consolHdr, pushResult.qboDocNumber);
       } else {
         resultEntry.error = pushResult.error;
         failedCount++;

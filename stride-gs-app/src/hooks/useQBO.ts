@@ -22,7 +22,7 @@ export interface UseQBOResult {
   refreshStatus: () => Promise<void>;
   startAuth: () => Promise<void>;
   disconnect: () => Promise<void>;
-  pushInvoice: (ledgerRowIds: string[], forceRePush?: boolean) => Promise<QboCreateInvoiceResponse | null>;
+  pushInvoice: (ledgerRowIds: string[], forceRePush?: boolean, autoAssignDocNumber?: boolean) => Promise<QboCreateInvoiceResponse | null>;
 }
 
 export function useQBO(): UseQBOResult {
@@ -131,10 +131,11 @@ export function useQBO(): UseQBOResult {
 
   const pushInvoice = useCallback(async (
     ledgerRowIds: string[],
-    forceRePush: boolean = false
+    forceRePush: boolean = false,
+    autoAssignDocNumber: boolean = false
   ): Promise<QboCreateInvoiceResponse | null> => {
     try {
-      const res = await postQboCreateInvoice(ledgerRowIds, forceRePush);
+      const res = await postQboCreateInvoice(ledgerRowIds, forceRePush, autoAssignDocNumber);
       if (res.ok && res.data) {
         return res.data;
       }
