@@ -1,4 +1,14 @@
 /* ===================================================
+   StrideAPI.gs — v38.108.0 — 2026-04-23 PST — Auth improvements: temp passwords + change-password flow
+   v38.108.0: (1) api_generateTempPassword_ — word-word-number passphrases for new users.
+              (2) createSupabaseAuthUser_ now accepts optional password param so temp passphrase
+                  is set rather than a random UUID. Returns tempPassword in result for callers.
+              (3) handleCreateUser_ generates a temp password, uses it for Supabase auth creation,
+                  includes it in the welcome email, and returns it to React so admin UI can display it.
+              (4) handleSendWelcomeEmail_ accepts tempPassword + loginEmail payload fields;
+                  prepends a styled credentials block to the email body when provided.
+              (5) api_sendWelcomeOnce_ threads optional tempPassword through to handleSendWelcomeEmail_.
+/* ===================================================
    StrideAPI.gs — v38.107.0 — 2026-04-22 PST — Single-CTA email enforcement + claim deep links
    v38.107.0: FIX — api_sendTemplateEmail_ now strips any hardcoded <div…><a href="…mystridehub.com…">
               buttons from template body before injecting the single "Open in Stride Hub →" CTA.
@@ -1346,12 +1356,43 @@ function errorResponse_(message, code) {
 // ─── Supabase Auth Helpers ───────────────────────────────────────────────────
 
 /**
+ * Generate a passphrase-style temporary password: adjective-noun-number (e.g. "bright-river-42").
+ * Easy for users to read and type; sufficient entropy for a short-lived credential.
+ */
+function api_generateTempPassword_() {
+  var adjectives = [
+    "blue","fast","green","red","bright","calm","dark","fresh","gold","happy",
+    "icy","jade","keen","lime","mellow","navy","pink","quiet","rose","silver",
+    "tall","vivid","warm","bold","crisp","deep","easy","fine","glad","high",
+    "iron","just","kind","loud","mild","neat","open","pale","rich","safe",
+    "tidy","vast","wide","young","sharp","cool","pure","soft","swift","brave"
+  ];
+  var nouns = [
+    "table","river","chair","stone","cloud","apple","blade","crane","delta","eagle",
+    "flame","grove","horse","island","knife","lemon","maple","north","ocean","pearl",
+    "ridge","spark","tiger","valve","wheat","arrow","brook","cedar","dawn","frost",
+    "grain","hawk","inlet","kelp","lotus","marsh","orbit","pine","robin","trout",
+    "vault","wave","yard","zenith","amber","birch","coral","dune","elm","fern"
+  ];
+  var adj  = adjectives[Math.floor(Math.random() * adjectives.length)];
+  var noun = nouns[Math.floor(Math.random() * nouns.length)];
+  var num  = Math.floor(Math.random() * 90) + 10; // 10–99
+  return adj + "-" + noun + "-" + num;
+}
+
+/**
  * Create a Supabase Auth user via Admin API.
  * Requires Script Properties: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
  * Returns { success: true, id } or { success: false, error }.
  * Idempotent: 422 "already registered" is treated as success.
  */
-function createSupabaseAuthUser_(email) {
+/**
+ * @param {string} email
+ * @param {string} [password] — optional; if omitted a random UUID-based fallback is used.
+ *   Pass the output of api_generateTempPassword_() so the user can log in with a readable passphrase.
+ * @returns {{ success: boolean, id?: string, tempPassword?: string, alreadyExists?: boolean, error?: string }}
+ */
+function createSupabaseAuthUser_(email, password) {
   var supabaseUrl = prop_("SUPABASE_URL");
   var serviceKey  = prop_("SUPABASE_SERVICE_ROLE_KEY");
   if (!supabaseUrl || !serviceKey) {
@@ -1359,8 +1400,8 @@ function createSupabaseAuthUser_(email) {
     return { success: false, error: "Supabase not configured" };
   }
 
-  // Random 32-char password (user will reset via Forgot Password)
-  var tempPassword = Utilities.getUuid().replace(/-/g, "") + "Aa1!";
+  // Use provided passphrase or fall back to random UUID (legacy paths that haven't been updated yet)
+  var pw = password || (Utilities.getUuid().replace(/-/g, "") + "Aa1!");
 
   var url = supabaseUrl + "/auth/v1/admin/users";
   var resp = UrlFetchApp.fetch(url, {
@@ -1373,7 +1414,7 @@ function createSupabaseAuthUser_(email) {
     muteHttpExceptions: true,
     payload: JSON.stringify({
       email: email.toLowerCase(),
-      password: tempPassword,
+      password: pw,
       email_confirm: true
     })
   });
@@ -1384,10 +1425,10 @@ function createSupabaseAuthUser_(email) {
   if (code === 200 || code === 201) {
     var result = JSON.parse(body);
     Logger.log("createSupabaseAuthUser_: created " + email + " (id=" + result.id + ")");
-    return { success: true, id: result.id };
+    return { success: true, id: result.id, tempPassword: pw };
   }
 
-  // 422 = "User already registered" — treat as success
+  // 422 = "User already registered" — treat as success (password unchanged on existing users)
   if (code === 422) {
     Logger.log("createSupabaseAuthUser_: " + email + " already exists in Supabase — OK");
     return { success: true, id: null, alreadyExists: true };
@@ -6725,26 +6766,28 @@ function handleCreateUser_(params, callerEmail) {
 
   sheet.appendRow(newRow);
 
-  // Create Supabase Auth user so they can use Forgot Password to set up login
-  var sbResult = createSupabaseAuthUser_(email);
+  // v38.108.0 — Generate a human-readable passphrase, create Supabase auth user with it
+  // so the user can log in immediately rather than requiring a "Forgot Password" flow.
+  var generatedPassword = api_generateTempPassword_();
+  var sbResult = createSupabaseAuthUser_(email, generatedPassword);
   var supabaseWarning = "";
+  var returnedTempPassword = "";
   if (!sbResult.success) {
     supabaseWarning = "User row created but Supabase auth failed: " + sbResult.error;
     Logger.log("handleCreateUser_: " + supabaseWarning);
+  } else if (!sbResult.alreadyExists) {
+    // Only expose the temp password when we actually set it (not for pre-existing accounts)
+    returnedTempPassword = sbResult.tempPassword || generatedPassword;
   }
 
-  // v38.43.0 — If the user was created ACTIVE (non-default path — admin
-  // passed active: "TRUE" explicitly), auto-send the welcome email. The
-  // usual manual create-user flow defaults to Active=FALSE so this won't
-  // fire; activation happens later via handleUpdateUser_ which has its own
-  // hook.
+  // Send welcome email for client-role users (all new clients — not just when active=TRUE).
+  // The email includes their credentials so they're ready when the admin activates them.
   var welcomeWarning = "";
-  if (active === "TRUE" && role === "client") {
+  if (role === "client") {
     try {
-      // Use the first clientSheetId from the comma-separated list.
       var firstClientId = parseCSV_(clientSheetId)[0] || clientSheetId;
-      var wResult = api_sendWelcomeOnce_(ss, email, role, firstClientId);
-      if (!wResult.success && wResult.reason !== "already_sent") {
+      var wResult = api_sendWelcomeOnce_(ss, email, role, firstClientId, returnedTempPassword);
+      if (!wResult.success && wResult.reason !== "already_sent" && wResult.reason !== "not_client_role" && wResult.reason !== "no_client_sheet_id") {
         welcomeWarning = "User created but welcome email skipped: " + (wResult.reason || "unknown");
         Logger.log("handleCreateUser_: " + welcomeWarning);
       }
@@ -6768,6 +6811,7 @@ function handleCreateUser_(params, callerEmail) {
   };
 
   var resp = { success: true, user: user };
+  if (returnedTempPassword) resp.tempPassword = returnedTempPassword;
   if (supabaseWarning) resp.supabaseWarning = supabaseWarning;
   if (welcomeWarning) resp.welcomeWarning = welcomeWarning;
   resyncUserToSupabase_(email);
@@ -18862,10 +18906,12 @@ function api_upsertClientUser_(cbSS, email, clientName, clientSheetId) {
     sheet.appendRow(newRow);
     Logger.log("api_upsertClientUser_: created user row for " + email);
 
-    // Create Supabase Auth user so client can use Forgot Password to set up login
-    var sbResult = createSupabaseAuthUser_(email);
+    // v38.108.0 — Generate a readable passphrase for Supabase auth so the client can log in directly.
+    var onboardTempPwd = api_generateTempPassword_();
+    var sbResult = createSupabaseAuthUser_(email, onboardTempPwd);
     if (!sbResult.success) {
       Logger.log("api_upsertClientUser_: Supabase auth creation failed for " + email + ": " + sbResult.error);
+      onboardTempPwd = ""; // don't include an unset password in the email
     }
 
     // v38.43.0 — Auto-send welcome email to the new client user. This runs in
@@ -18874,7 +18920,7 @@ function api_upsertClientUser_(cbSS, email, clientName, clientSheetId) {
     // prevents duplicate sends if the same email is re-upserted (e.g. adding
     // the same user to a second client later).
     try {
-      api_sendWelcomeOnce_(cbSS, email, "client", clientSheetId);
+      api_sendWelcomeOnce_(cbSS, email, "client", clientSheetId, onboardTempPwd);
     } catch (wErr) {
       Logger.log("api_upsertClientUser_: welcome email (non-fatal) failed for " + email + ": " + wErr);
     }
@@ -24640,6 +24686,27 @@ function handleSendWelcomeEmail_(payload) {
     htmlBody = htmlBody.split(entries[j][0]).join(String(entries[j][1] || ""));
   }
 
+  // v38.108.0 — If a temporary password is provided, prepend a styled credentials block
+  // so the user can log in without needing a "Forgot Password" flow.
+  var tempPwd = String(payload.tempPassword || "").trim();
+  var loginEmail = String(payload.loginEmail || sendTo || "").trim();
+  if (tempPwd) {
+    var credentialsBlock =
+      '<div style="margin:0 0 28px;padding:20px 24px;background:#FFF7ED;border:2px solid #E85D2D;border-radius:10px;font-family:Inter,Arial,sans-serif;">' +
+        '<p style="margin:0 0 14px;font-size:15px;font-weight:700;color:#1C1C1C;">Your Login Credentials</p>' +
+        '<table style="border-collapse:collapse;width:100%;">' +
+          '<tr><td style="padding:6px 0;font-size:13px;color:#6B7280;width:120px;">Login URL</td>' +
+              '<td style="padding:6px 0;font-size:13px;"><a href="https://www.mystridehub.com" style="color:#E85D2D;text-decoration:none;font-weight:600;">mystridehub.com</a></td></tr>' +
+          '<tr><td style="padding:6px 0;font-size:13px;color:#6B7280;">Email</td>' +
+              '<td style="padding:6px 0;font-size:13px;font-weight:500;font-family:monospace;">' + loginEmail + '</td></tr>' +
+          '<tr><td style="padding:6px 0;font-size:13px;color:#6B7280;">Temp Password</td>' +
+              '<td style="padding:6px 0;"><span style="display:inline-block;font-size:16px;font-weight:700;font-family:monospace;letter-spacing:0.06em;color:#E85D2D;background:#fff;border:1px solid #E85D2D;border-radius:6px;padding:4px 12px;">' + tempPwd + '</span></td></tr>' +
+        '</table>' +
+        '<p style="margin:16px 0 0;font-size:12px;color:#6B7280;">After logging in, click your name in the bottom-left corner of the sidebar and select <strong>Change Password</strong> to set your own password.</p>' +
+      '</div>';
+    htmlBody = credentialsBlock + htmlBody;
+  }
+
   // Send
   try {
     GmailApp.sendEmail(sendTo, subject, "", { htmlBody: htmlBody });
@@ -24676,11 +24743,15 @@ function handleSendWelcomeEmail_(payload) {
  * @param {string}      firstClientSheetId — Primary client sheet ID for {{CLIENT_NAME}} + {{SPREADSHEET_URL}}
  * @return {{success: boolean, reason?: string, sentTo?: string}}
  */
-function api_sendWelcomeOnce_(cbSS, userEmail, role, firstClientSheetId) {
+/**
+ * @param {string} [tempPassword] — v38.108.0: optional passphrase to include in the email credentials block.
+ */
+function api_sendWelcomeOnce_(cbSS, userEmail, role, firstClientSheetId, tempPassword) {
   try {
     userEmail = String(userEmail || "").trim().toLowerCase();
     role = String(role || "").trim().toLowerCase();
     firstClientSheetId = String(firstClientSheetId || "").trim();
+    tempPassword = String(tempPassword || "").trim();
 
     if (!userEmail) return { success: false, reason: "no_email" };
     if (role !== "client") return { success: false, reason: "not_client_role" };
@@ -24739,10 +24810,12 @@ function api_sendWelcomeOnce_(cbSS, userEmail, role, firstClientSheetId) {
     if (targetRow < 0) return { success: false, reason: "user_row_not_found" };
 
     // Fire the welcome email via the existing handler with recipient override.
-    var resp = handleSendWelcomeEmail_({
-      clientSheetId: firstClientSheetId,
-      recipient: userEmail
-    });
+    var emailPayload = { clientSheetId: firstClientSheetId, recipient: userEmail };
+    if (tempPassword) {
+      emailPayload.tempPassword = tempPassword;
+      emailPayload.loginEmail = userEmail;
+    }
+    var resp = handleSendWelcomeEmail_(emailPayload);
     // handleSendWelcomeEmail_ returns a ContentService TextOutput — parse to check success.
     var json;
     try { json = JSON.parse(resp.getContent()); } catch (_) { json = {}; }
