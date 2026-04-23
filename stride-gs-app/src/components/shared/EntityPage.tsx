@@ -233,7 +233,8 @@ function useBuiltInEntityTabs(cfg: EntityPageBuiltInTabs | undefined): EntityPag
 
 // ── Sub-components ────────────────────────────────────────────────────────────
 
-// Tab is a segmented pill (matches Dashboard's Calendar/Overview + Tasks/Repairs/WC pattern).
+// Tab is a dark rounded CARD — same aesthetic as Dashboard StatCard, smaller.
+// Active = orange fill (brand accent); inactive = dark fill.
 function TabButton({
   tab,
   active,
@@ -252,38 +253,41 @@ function TabButton({
       aria-selected={active}
       style={{
         position: 'relative',
-        display: 'inline-flex',
-        alignItems: 'center',
-        gap: 8,
-        padding: compact ? '7px 14px' : '9px 20px',
-        fontSize: compact ? 10 : 12,
+        flex: '1 1 0',
+        minWidth: compact ? 100 : 130,
+        padding: compact ? '14px 12px' : '18px 20px',
+        fontSize: compact ? 10 : 11,
         fontWeight: 600,
         fontFamily: 'inherit',
-        letterSpacing: '1.5px',
+        letterSpacing: '2px',
         textTransform: 'uppercase',
-        color: active ? EP.tabActiveText : EP.tabInactiveText,
-        background: active ? EP.tabActive : 'transparent',
+        color: active ? EP.tabActiveText : 'rgba(255,255,255,0.55)',
+        background: active ? EP.accent : EP.tabActive,  // orange on active, dark otherwise
         border: 'none',
-        borderRadius: 100,  // pill
+        borderRadius: 14,
         cursor: 'pointer',
         whiteSpace: 'nowrap',
         transition: 'all 0.2s',
-        flexShrink: 0,
+        textAlign: 'center',
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: 10,
       }}
     >
-      {tab.label}
+      <span>{tab.label}</span>
 
-      {/* Count badge — inline rounded chip (Dashboard style) */}
+      {/* Count badge — white chip on orange active; translucent white on dark inactive */}
       {tab.badgeCount != null && tab.badgeCount > 0 && (
         <span style={{
           fontSize: 10,
           fontWeight: 700,
           padding: '2px 8px',
           borderRadius: 100,
-          background: active ? '#fff' : 'rgba(0,0,0,0.06)',
-          color: active ? EP.textPrimary : EP.textSecondary,
+          background: active ? 'rgba(255,255,255,0.28)' : 'rgba(255,255,255,0.12)',
+          color: '#fff',
           letterSpacing: 0,
-          minWidth: 18,
+          minWidth: 20,
           textAlign: 'center',
           lineHeight: 1.2,
         }}>
@@ -294,6 +298,7 @@ function TabButton({
       {/* Red notification dot */}
       {tab.hasDot && (
         <span style={{
+          position: 'absolute', top: 8, right: 8,
           width: 7, height: 7, borderRadius: '50%',
           background: EP.dotRed,
         }} />
@@ -448,18 +453,15 @@ export function EntityPage(props: EntityPageConfig) {
 
       {statusStrip}
 
-      {/* ── Tab pill strip (white container, inner pills — Dashboard pattern) */}
+      {/* ── Tab cards (Dashboard StatCard aesthetic, smaller) ──────────────── */}
       <div style={{
-        display: 'inline-flex',
-        gap: 0,
-        background: EP.tabPillContainerBg,
-        borderRadius: 100,
-        padding: 5,
-        alignSelf: 'flex-start',
-        maxWidth: '100%',
+        display: 'flex',
+        gap: isMobile ? 8 : 12,
+        flexWrap: isMobile ? 'nowrap' : 'nowrap',
         overflowX: 'auto',
         WebkitOverflowScrolling: 'touch',
         scrollbarWidth: 'none',
+        paddingBottom: 2,  // room for hover transform if added later
       }}>
         {finalTabs.map(tab => (
           <TabButton

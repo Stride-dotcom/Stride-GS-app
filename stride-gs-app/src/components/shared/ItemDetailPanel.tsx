@@ -563,6 +563,43 @@ export function ItemDetailPanel({
     return () => { cancelled = true; };
   }, [clientSheetId, item.itemId]);
 
+  // Fallback — parse Item Notes for GAS-appended move lines of the form:
+  //   [MM/DD/YYYY HH:MM AM/PM] Moved <from> → <to> by <user>
+  // Current client scripts write moves here rather than hitting the Move
+  // History sheet API, so without this parse the Moves section in Activity
+  // would stay empty. Deduped against the real API result by timestamp+locations.
+  const parsedMoves = useMemo<MoveHistoryEntry[]>(() => {
+    const notes = (item.itemNotes || item.notes || '') as string;
+    if (!notes) return [];
+    const out: MoveHistoryEntry[] = [];
+    // \u2192 is the → arrow; also accept -> as a fallback.
+    const lineRe = /\[([^\]]+)\]\s*Moved\s+(.+?)\s+(?:\u2192|->|→)\s+(.+?)\s+by\s+(.+?)(?=\s*(?:\[|$))/gi;
+    let m: RegExpExecArray | null;
+    while ((m = lineRe.exec(notes)) !== null) {
+      const [, timestamp, fromLocation, toLocation, user] = m;
+      out.push({
+        timestamp: timestamp.trim(),
+        user: user.trim(),
+        itemId: item.itemId,
+        fromLocation: fromLocation.trim(),
+        toLocation: toLocation.trim(),
+        type: 'Move',
+      });
+    }
+    return out;
+  }, [item.itemNotes, item.notes, item.itemId]);
+
+  // Merge API moves + parsed moves, deduped by timestamp + from/to.
+  const combinedMoves = useMemo<MoveHistoryEntry[]>(() => {
+    const seen = new Set<string>();
+    const keyOf = (mv: MoveHistoryEntry) =>
+      `${mv.timestamp}|${(mv.fromLocation || '').toLowerCase()}|${(mv.toLocation || '').toLowerCase()}`;
+    const all: MoveHistoryEntry[] = [];
+    for (const mv of moveHistory) { const k = keyOf(mv); if (!seen.has(k)) { seen.add(k); all.push(mv); } }
+    for (const mv of parsedMoves)  { const k = keyOf(mv); if (!seen.has(k)) { seen.add(k); all.push(mv); } }
+    return all;
+  }, [moveHistory, parsedMoves]);
+
   // Fetch audit log entries for this item and all related entities
   const [auditByEntity, setAuditByEntity] = useState<Record<string, AuditEntry[]>>({});
   useEffect(() => {
@@ -595,7 +632,7 @@ export function ItemDetailPanel({
     return () => { cancelled = true; };
   }, [item.itemId, item.shipmentNumber, itemTasks.length, itemRepairs.length, itemWillCalls.length]);
 
-  const historyCount = (hasShipment ? 1 : 0) + moveHistory.length + itemTasks.length + itemRepairs.length + itemWillCalls.length + itemBilling.length;
+  const historyCount = (hasShipment ? 1 : 0) + combinedMoves.length + itemTasks.length + itemRepairs.length + itemWillCalls.length + itemBilling.length;
 
   // Can this user edit?
   const canEditBasic = !!clientSheetId; // all roles can edit basic fields
@@ -1022,7 +1059,7 @@ export function ItemDetailPanel({
           repairs={itemRepairs}
           willCalls={itemWillCalls}
           billing={itemBilling}
-          moves={moveHistory}
+          moves={combinedMoves}
           shipmentNumber={item.shipmentNumber}
           receiveDate={item.receiveDate}
           shipmentCarrier={itemShipment?.carrier}
