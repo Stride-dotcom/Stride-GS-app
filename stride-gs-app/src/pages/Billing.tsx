@@ -831,6 +831,7 @@ export function Billing() {
     if (!row.clientSheetId) return;
     const payload: Record<string, unknown> = { ledgerRowId: row.ledgerRowId };
     if (field === 'sidemark') payload.sidemark = value;
+    else if (field === 'reference') payload.reference = value;
     else if (field === 'description') payload.description = value;
     else if (field === 'rate') payload.rate = parseFloat(value) || 0;
     else if (field === 'qty') payload.qty = parseFloat(value) || 1;
@@ -894,7 +895,12 @@ export function Billing() {
       } }),
       col.accessor('reference', {
         header: 'Reference', size: 130, filterFn: mf,
-        cell: i => <span style={{ fontSize: 12, color: theme.colors.textSecondary, fontFamily: 'monospace' }}>{i.getValue() || '\u2014'}</span>,
+        cell: i => {
+          const canEdit = isReportTab && i.row.original.status === 'Unbilled';
+          return canEdit
+            ? <EditableCell value={i.getValue() || ''} onChange={v => saveReportField(i.row.original, 'reference', v)} />
+            : <span style={{ fontSize: 12, color: theme.colors.textSecondary, fontFamily: 'monospace' }}>{i.getValue() || '\u2014'}</span>;
+        },
       }),
       col.accessor('date', { header: 'Date', size: 100, cell: i => <span style={{ fontSize: 12, color: theme.colors.textSecondary }}>{fmt(i.getValue())}</span> }),
       col.accessor('svcCode', { header: 'Svc Code', size: 90, filterFn: mf, cell: i => <Badge t={i.getValue()} c={SVC_CFG[i.getValue()]} /> }),

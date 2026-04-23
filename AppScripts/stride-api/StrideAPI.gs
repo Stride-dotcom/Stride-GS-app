@@ -1,4 +1,10 @@
 /* ===================================================
+   StrideAPI.gs — v38.112.0 — 2026-04-23 PST — Reference column inline-editable on Billing Report
+   v38.112.0: handleUpdateBillingRow_ now accepts and writes payload.reference to
+              the Billing_Ledger "Reference" column. Parity with sidemark/notes inline
+              edit — previously "Reference" was read-only because this branch was missing.
+   =================================================== */
+/* ===================================================
    StrideAPI.gs — v38.111.0 — 2026-04-23 PST — QBO Force Push with auto-assign DocNumber (rescue + permanent)
    v38.111.0: NEW — autoAssignDocNumber flag on qboCreateInvoice endpoint. When true,
               the payload omits DocNumber entirely so QBO auto-assigns its own next invoice number,
@@ -9380,6 +9386,11 @@ function handleUpdateBillingRow_(clientSheetId, payload) {
     if (payload.sidemark !== undefined && hMap["Sidemark"]) {
       sheet.getRange(matchRow, hMap["Sidemark"]).setValue(String(payload.sidemark));
       updated.sidemark = String(payload.sidemark);
+    }
+    // v38.112.0: reference is now inline-editable from the Billing Report.
+    if (payload.reference !== undefined && hMap["Reference"]) {
+      sheet.getRange(matchRow, hMap["Reference"]).setValue(String(payload.reference));
+      updated.reference = String(payload.reference);
     }
     if (payload.description !== undefined && hMap["Description"]) {
       sheet.getRange(matchRow, hMap["Description"]).setValue(String(payload.description));
