@@ -164,7 +164,7 @@ export function MessagesPage() {
       background: v2.colors.bgPage,
       fontFamily: theme.typography.fontFamily,
     }}>
-      <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0, borderRight: `1px solid ${v2.colors.border}` }}>
+      <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0, minHeight: 0, borderRight: `1px solid ${v2.colors.border}` }}>
         <ComposeHeader onCompose={() => setComposeOpen(true)} />
         <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
           <MessageList
@@ -176,7 +176,7 @@ export function MessagesPage() {
           />
         </div>
       </div>
-      <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+      <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0, minHeight: 0 }}>
         {active ? (
           <>
             <ThreadHeader conversation={active} thread={thread} currentUserId={authUserId} onBack={closeThread} showBack={false} />
