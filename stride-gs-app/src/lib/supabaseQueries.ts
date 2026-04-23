@@ -2509,6 +2509,57 @@ interface SupabaseStaxRunLogRow {
   details: string | null;
 }
 
+// ─── Single Item by ID ────────────────────────────────────────────────────────
+
+/**
+ * Fetch a single inventory item by item_id. Used by ItemPage standalone route.
+ * Falls back to null on error or not-found — caller handles state.
+ */
+export async function fetchItemByIdFromSupabase(
+  itemId: string,
+  clientNameMap: ClientNameMap
+): Promise<ApiInventoryItem | null> {
+  try {
+    const { data, error } = await supabase
+      .from('inventory')
+      .select('*')
+      .eq('item_id', itemId)
+      .limit(1)
+      .maybeSingle();
+    if (error || !data) return null;
+    const row = data as SupabaseInventoryRow;
+    return {
+      itemId: row.item_id,
+      clientName: clientNameMap[row.tenant_id] || '',
+      clientSheetId: row.tenant_id,
+      reference: row.reference || '',
+      qty: row.qty ?? 1,
+      vendor: row.vendor || '',
+      description: row.description || '',
+      itemClass: row.item_class || '',
+      location: row.location || '',
+      sidemark: row.sidemark || '',
+      room: row.room || '',
+      itemNotes: row.item_notes || '',
+      taskNotes: row.task_notes || '',
+      needsInspection: !!row.needs_inspection,
+      needsAssembly: !!row.needs_assembly,
+      carrier: row.carrier || '',
+      trackingNumber: row.tracking_number || '',
+      shipmentNumber: row.shipment_number || '',
+      receiveDate: row.receive_date || '',
+      releaseDate: row.release_date || '',
+      status: (row.status as ApiInventoryItem['status']) || 'Active',
+      invoiceUrl: row.invoice_url || '',
+      shipmentFolderUrl: row.shipment_folder_url || undefined,
+      declaredValue: row.declared_value ?? 0,
+      coverageOptionId: row.coverage_option_id ?? '',
+    };
+  } catch {
+    return null;
+  }
+}
+
 export async function fetchStaxRunLogFromSupabase(): Promise<StaxRunLogResponse | null> {
   try {
     const { data, error } = await supabase

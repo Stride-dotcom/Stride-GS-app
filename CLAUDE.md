@@ -13,6 +13,79 @@ This project uses Google Apps Script + Google Sheets + Drive + **Supabase as a r
 
 ---
 
+## ENTITY PAGE REDESIGN — DESIGN SPEC (LOCKED)
+
+> Session 80+. Replacing slide-out detail panels with full-page entity views. Design is locked — do not deviate.
+
+### Visual Language
+
+| Token | Value | Usage |
+|---|---|---|
+| Page background | `#f5f0eb` | Warm beige — all entity pages |
+| Tab bar background | `#1a1a1a` | Dark strip containing tab cards |
+| Active tab | `background: #e8772e; color: #fff` | Orange filled card |
+| Inactive tab | `background: transparent; color: rgba(255,255,255,0.55)` | Muted white text on dark |
+| Notification dot | `#e8772e` or `#EF4444` (red) | Small dot on tab label when unread content |
+| Sub-tab pills | active: `#e8772e` bg; inactive: `rgba(255,255,255,0.1)` bg | Inside Photos/Notes/Activity for source filter |
+| Content cards | `background: #fff; border-radius: 12px` | White cards on beige page |
+| Field labels | `#e8772e`, 10px, 500 weight, uppercase, letter-spacing 1.5px | Above every field value |
+| Footer bar bg | `#1a1a1a` | Slim sticky bottom bar |
+| Footer primary CTA | `background: #e8772e; color: #fff` | Right-aligned |
+| Footer secondary | `background: rgba(255,255,255,0.12); color: #fff` | Left-aligned |
+
+### Layout
+
+- **Single column**, full-width, no max-width
+- **Header — 2 rows (compact)**:
+  - Row 1: `← Back` button + entity type label (e.g. "INVENTORY") + entity ID (large, bold) + status badge
+  - Row 2: Client name · Sidemark · field badges (Vendor, Class, Location pills)
+- **Header right**: Edit toggle (pencil icon) + overflow actions
+- **Tab bar**: `position: sticky; top: 0; z-index: 10` on desktop; horizontal scroll on mobile. Dark background (#1a1a1a), tabs are rectangular cards with 8px radius.
+- **Tab body**: White cards, 16px padding, gap between cards 12px
+- **Sticky bottom bar**: `position: sticky; bottom: 0; background: #1a1a1a`. Left: secondary actions. Right: primary CTA. Height: 56px.
+
+### Tabs per entity
+
+| Tab | Photos | Notes | Docs | Activity | Entity-specific |
+|---|---|---|---|---|---|
+| **Item** | EntitySourceTabs (All/Item/Task/Repair) | EntitySourceTabs | yes | Filter pills (All/Shipment/Tasks/Repairs/WC/Billing) | Details, Coverage |
+| **Task** | EntitySourceTabs (if itemId) | EntitySourceTabs (if itemId) | yes | Filter pills (All/Status/Field Changes) | Details |
+| **Repair** | EntitySourceTabs (if itemId) | EntitySourceTabs (if itemId) | yes | Filter pills | Details |
+| **Will Call** | — | — | yes | Filter pills | Details, Items |
+| **Shipment** | — | — | yes | Filter pills | Details, Items |
+
+### Activity filter pills
+
+The Activity tab in EntityPage shows `EntityHistory` entries with optional filter pills above:
+- "All", "Status Changes", "Field Updates", "Created" (map to action types from `entity_audit_log`)
+- Pills: same sub-tab pill style (dark/orange), `font-size: 11px`
+
+### URL routes
+
+```
+#/inventory/:itemId
+#/tasks/:taskId         (already exists — TaskJobPage, will migrate to TaskPage later)
+#/repairs/:repairId     (already exists — RepairJobPage)
+#/will-calls/:wcNumber  (already exists — WillCallJobPage)
+#/shipments/:shipmentNo (already exists — ShipmentJobPage)
+```
+
+### Shared shell: EntityPage.tsx
+
+`src/components/shared/EntityPage.tsx` — the new full-page shell (NOT TabbedDetailPanel, which is for slide-out panels). Ports the `builtInTabs` pattern (Photos/Docs/Notes/Activity) with the new dark tab bar visual. Five entity configs plug into it.
+
+### Implementation order (session 80)
+
+1. CLAUDE.md spec ✓
+2. Backup detail panel files to `_backups/entity-redesign-start/`
+3. Build `EntityPage.tsx` shell
+4. Add `useItemDetail` hook + `fetchItemByIdFromSupabase`
+5. Add `/inventory/:itemId` route in App.tsx
+6. Build `ItemPage.tsx` (first consumer)
+7. Update `Inventory.tsx` row click → `navigate('/inventory/:id')`
+
+---
+
 ## Archive pointers (load on demand)
 
 Most detail lives in `_archive/` so CLAUDE.md stays loadable. Open these when you need the full story:

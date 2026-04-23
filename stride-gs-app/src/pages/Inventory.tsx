@@ -1309,7 +1309,7 @@ export function Inventory() {
           transition: 'opacity 0.1s',
         }}>
           {[
-            { Icon: Eye, label: 'View detail', action: () => setSelectedItemId(row.original.itemId) },
+            { Icon: Eye, label: 'View detail', action: () => navigate(`/inventory/${row.original.itemId}`) },
             { Icon: ClipboardList, label: 'Create task', action: () => { setRowSelection({ [row.id]: true }); setShowCreateTaskModal(true); } },
             { Icon: Truck, label: 'Add to will call', action: async () => { /* Phase 7B: wire to API */ } },
           ].map(({ Icon, label, action }) => (
@@ -2064,7 +2064,7 @@ export function Inventory() {
                     key={row.id}
                     className={isPrinting ? undefined : 'inv-row'}
                     onClick={isPrinting ? undefined : (e => handleRowClick(e, row, idx))}
-                    onDoubleClick={isPrinting ? undefined : (() => setSelectedItemId(row.original.itemId))}
+                    onDoubleClick={isPrinting ? undefined : (() => navigate(`/inventory/${row.original.itemId}`))}
                     style={{
                       background: rowBg,
                       cursor: isPrinting ? undefined : 'default',
@@ -2093,7 +2093,7 @@ export function Inventory() {
                     key={row.id}
                     className="inv-row"
                     onClick={e => handleRowClick(e, row, vRow.index)}
-                    onDoubleClick={() => setSelectedItemId(row.original.itemId)}
+                    onDoubleClick={() => navigate(`/inventory/${row.original.itemId}`)}
                     style={{
                       background: rowBg,
                       cursor: 'default',

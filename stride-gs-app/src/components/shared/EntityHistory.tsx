@@ -21,6 +21,10 @@ interface Props {
   entityType: string;
   entityId: string;
   tenantId?: string;
+  /** Auto-expand on mount (for EntityPage Activity tab where the timeline should be immediately visible). */
+  defaultExpanded?: boolean;
+  /** Limit displayed entries to these action types. Empty/undefined = show all. */
+  actionFilter?: string[];
 }
 
 const ACTION_LABELS: Record<string, { label: string; color: string }> = {
@@ -78,8 +82,8 @@ function renderChanges(changes: Record<string, unknown>): string {
   return parts.join(' · ');
 }
 
-export function EntityHistory({ entityType, entityId, tenantId }: Props) {
-  const [expanded, setExpanded] = useState(false);
+export function EntityHistory({ entityType, entityId, tenantId, defaultExpanded, actionFilter }: Props) {
+  const [expanded, setExpanded] = useState(defaultExpanded ?? false);
   const [entries, setEntries] = useState<AuditEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [loaded, setLoaded] = useState(false);
@@ -135,7 +139,7 @@ export function EntityHistory({ entityType, entityId, tenantId }: Props) {
             <div style={{ fontSize: 12, color: theme.colors.textMuted, padding: '8px 0' }}>No activity recorded yet</div>
           )}
 
-          {entries.map(entry => {
+          {(actionFilter && actionFilter.length > 0 ? entries.filter(e => actionFilter.includes(e.action)) : entries).map(entry => {
             const cfg = ACTION_LABELS[entry.action] || { label: entry.action, color: '#6B7280' };
             const detail = renderChanges(entry.changes);
             return (

@@ -8,6 +8,7 @@ import { AccessDenied } from './pages/AccessDenied';
 import { SetNewPassword } from './components/shared/SetNewPassword';
 import { Dashboard } from './pages/Dashboard';
 import { Inventory } from './pages/Inventory';
+const ItemPage = React.lazy(() => import('./pages/ItemPage').then(m => ({ default: m.ItemPage })));
 import { Receiving } from './pages/Receiving';
 import { Tasks } from './pages/Tasks';
 import { Repairs } from './pages/Repairs';
@@ -77,6 +78,7 @@ export default function App() {
           <Route path="/" element={<Dashboard />} />
           <Route path="/messages" element={<MessagesPage />} />
           <Route path="/inventory" element={<Inventory />} />
+          <Route path="/inventory/:itemId" element={<React.Suspense fallback={<div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100%' }}>Loading...</div>}><ItemPage /></React.Suspense>} />
           <Route path="/tasks" element={<Tasks />} />
           <Route path="/tasks/:taskId" element={<TaskJobPage />} />
           <Route path="/repairs" element={<Repairs />} />
