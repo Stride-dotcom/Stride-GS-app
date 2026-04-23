@@ -5,6 +5,17 @@
               lookup now happen in the Edge Function; GAS is used only for GmailApp send capability.
    =================================================== */
 /* ===================================================
+   StrideAPI.gs — v38.115.0 — 2026-04-23 PST — QBO duplicate-DocNumber auto-fallback
+   v38.115.0: qbo_createInvoice_ now catches HTTP 400 "Duplicate Document Number" errors
+              and retries automatically without DocNumber so QBO auto-assigns.
+              Stride INV# is preserved in PrivateNote as "Stride Ref: INV-NNNNNN
+              (auto-assigned after duplicate)" for traceability.
+              Result includes fallbackApplied=true + originalStrideInvNo so callers
+              can log the auto-fallback. Complements v38.111.0's manual force-push
+              button — users no longer need to click Force Push for collision rescue;
+              it happens transparently per-invoice.
+   =================================================== */
+/* ===================================================
    StrideAPI.gs — v38.114.0 — 2026-04-23 PST — Billing audit trail (billing_activity_log)
    v38.114.0: NEW api_logBillingActivity_ helper writes structured audit rows to
               public.billing_activity_log. Wired into createInvoice, qboCreateInvoice,
@@ -32623,6 +32634,35 @@ function qbo_buildInvoicePayload_(invoiceData, customerQboId, itemMap, token, re
  */
 function qbo_createInvoice_(invoicePayload, token, realmId) {
   var result = qbo_apiRequest_("POST", "invoice", invoicePayload, token, realmId);
+
+  // v38.115.0 — Bug 3 fallback: on 400 "Duplicate Document Number" error, retry
+  // without DocNumber so QBO auto-assigns. Stride INV# is already in PrivateNote
+  // for cross-reference, so we don't lose traceability. Only fires if:
+  //   (a) the error is specifically a duplicate-number error, AND
+  //   (b) DocNumber was sent in the original payload.
+  if (!result.success && invoicePayload.DocNumber) {
+    var errStr = String(result.error || "");
+    if (/duplicate\s+document\s+number|DocNumber.*assigned\s+to\s+TxnType/i.test(errStr)) {
+      Logger.log("qbo_createInvoice_: duplicate DocNumber '" + invoicePayload.DocNumber + "' — retrying with QBO auto-assign");
+      var retryPayload = JSON.parse(JSON.stringify(invoicePayload));
+      delete retryPayload.DocNumber;
+      // Prepend the original Stride INV# to PrivateNote so it's findable
+      var origDocNum = String(invoicePayload.DocNumber || "");
+      retryPayload.PrivateNote = "Stride Ref: " + origDocNum + " (auto-assigned after duplicate) — " +
+        (retryPayload.PrivateNote || "");
+      result = qbo_apiRequest_("POST", "invoice", retryPayload, token, realmId);
+      if (result.success) {
+        var invR = result.data && result.data.Invoice ? result.data.Invoice : result.data;
+        return {
+          success: true,
+          qboInvoiceId: String(invR.Id || ""),
+          qboDocNumber: String(invR.DocNumber || ""),
+          fallbackApplied: true,
+          originalStrideInvNo: origDocNum
+        };
+      }
+    }
+  }
 
   if (!result.success) {
     return { success: false, error: result.error || "QBO invoice creation failed" };
