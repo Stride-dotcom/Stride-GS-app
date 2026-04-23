@@ -85,6 +85,8 @@ interface InvoiceGroup {
   sourceSheetId?: string;
   clientSheetId?: string;
   lineItems: BillingRow[];
+  autoCharge?: boolean;  // Whether this invoice's client has autopay enabled — drives Stax vs QBO routing
+  staxCustomerId?: string | null;  // If set, client is Stax-enabled
 }
 
 const ALL_STATUSES = ['Unbilled', 'Invoiced', 'Billed', 'Void'];
@@ -677,7 +679,7 @@ export function Billing() {
   // Split report data into two sections: unbilled line items vs grouped invoices
   const billingSections = useMemo(() => {
     const unbilledRows: BillingRow[] = [];
-    type BuilderGroup = InvoiceGroup & { _sidemarks: Set<string>; _qboStatuses: Set<string>; _dates: string[]; _invoiceDates: Set<string> };
+    type BuilderGroup = InvoiceGroup & { _sidemarks: Set<string>; _qboStatuses: Set<string>; _dates: string[]; _invoiceDates: Set<string>; _autoCharges: Set<boolean>; _staxIds: Set<string> };
     const groupMap: Record<string, BuilderGroup> = {};
     const order: string[] = [];
     for (const r of reportData) {
@@ -699,10 +701,14 @@ export function Billing() {
           sourceSheetId: r.sourceSheetId,
           clientSheetId: r.clientSheetId,
           lineItems: [],
+          autoCharge: undefined,
+          staxCustomerId: null,
           _sidemarks: new Set<string>(),
           _qboStatuses: new Set<string>(),
           _dates: [],
           _invoiceDates: new Set<string>(),
+          _autoCharges: new Set<boolean>(),
+          _staxIds: new Set<string>(),
         };
         order.push(r.invoiceNo);
       }
@@ -713,6 +719,8 @@ export function Billing() {
       if (r.qboStatus) g._qboStatuses.add(r.qboStatus);
       if (r.date) g._dates.push(r.date);
       if (r.invoiceDate) g._invoiceDates.add(r.invoiceDate);
+      if (r.autoCharge !== undefined) g._autoCharges.add(r.autoCharge);
+      if (r.staxCustomerId) g._staxIds.add(r.staxCustomerId);
     }
     const invoicedGroups: InvoiceGroup[] = order.map(k => {
       const g = groupMap[k];
@@ -720,6 +728,8 @@ export function Billing() {
       const qboStatuses = [...g._qboStatuses];
       const dates = g._dates.slice().sort();
       const invoiceDates = [...g._invoiceDates].sort();
+      const autoCharges = [...g._autoCharges];
+      const staxIds = [...g._staxIds];
       return {
         invoiceNo: g.invoiceNo,
         status: g.status,
@@ -734,6 +744,9 @@ export function Billing() {
         sourceSheetId: g.sourceSheetId,
         clientSheetId: g.clientSheetId,
         lineItems: g.lineItems,
+        // All line items in a group share a client, so autoCharge is consistent
+        autoCharge: autoCharges.length > 0 ? autoCharges[0] : undefined,
+        staxCustomerId: staxIds[0] || null,
       };
     });
     return { unbilledRows, invoicedGroups };
@@ -1001,8 +1014,29 @@ export function Billing() {
       cell: i => <span style={{ fontSize: 12, fontWeight: 700, color: theme.colors.text }}>{i.getValue()}</span>,
     }),
     invCol.accessor('client', {
-      header: 'Client', size: 180,
-      cell: i => <span style={{ fontSize: 12, fontWeight: 500 }}>{i.getValue()}</span>,
+      header: 'Client', size: 200,
+      cell: i => {
+        const row = i.row.original;
+        // Show Auto Pay badge if client has autopay enabled (autoCharge !== false + has staxCustomerId)
+        const hasAutoPay = row.autoCharge !== false && !!row.staxCustomerId;
+        return (
+          <span style={{ fontSize: 12, fontWeight: 500, display: 'inline-flex', alignItems: 'center' }}>
+            {i.getValue()}
+            {hasAutoPay && (
+              <span
+                style={{
+                  marginLeft: 6, fontSize: 9, padding: '1px 5px', borderRadius: 4,
+                  background: '#F0FDF4', color: '#15803D', fontWeight: 700,
+                  whiteSpace: 'nowrap',
+                }}
+                title="Auto Pay enabled — this invoice can be charged automatically via Stax"
+              >
+                Auto Pay
+              </span>
+            )}
+          </span>
+        );
+      },
     }),
     invCol.accessor('sidemark', {
       header: 'Sidemark', size: 140,
