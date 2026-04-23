@@ -47,6 +47,16 @@ export function ConversationView({ messages, currentUserId, loading = false }: P
   const v2 = theme.v2;
   const scrollRef = useRef<HTMLDivElement>(null);
 
+  // Index of the latest own message (so MessageBubble knows which one
+  // gets the "Delivered" / "Read" iMessage receipt below it).
+  const latestOwnId = useMemo(() => {
+    if (!currentUserId) return null;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].senderId === currentUserId) return messages[i].id;
+    }
+    return null;
+  }, [messages, currentUserId]);
+
   const items = useMemo<DisplayItem[]>(() => {
     const out: DisplayItem[] = [];
     let lastDateLabel = '';
@@ -58,26 +68,18 @@ export function ConversationView({ messages, currentUserId, loading = false }: P
       if (label !== lastDateLabel) {
         out.push({ kind: 'separator', id: `sep-${i}`, label });
         lastDateLabel = label;
-        lastSenderId = undefined; // force header on next bubble after a date break
+        lastSenderId = undefined;
       }
 
-      // Session 74 fix: compare case-insensitive on trimmed strings. Both
-      // sides are uuids from auth.uid() so === works in practice, but this
-      // is a belt-and-suspenders guard against any stray whitespace/case
-      // drift that would otherwise make sent bubbles render as received
-      // (grey on the wrong side of the thread).
       const isOwn = !!currentUserId
         && (m.senderId || '').trim().toLowerCase() === currentUserId.trim().toLowerCase();
       const prev = messages[i - 1];
       const next = messages[i + 1];
 
-      // Header (avatar + name) only on the first bubble of a consecutive run.
       const showHeader = lastSenderId !== m.senderId
         || !prev
         || formatDateLabel(prev.createdAt) !== label;
 
-      // Footer (timestamp) on the last bubble of a consecutive run or if the
-      // next bubble is on a different day.
       const showFooter = !next
         || next.senderId !== m.senderId
         || formatDateLabel(next.createdAt) !== label;
@@ -141,8 +143,10 @@ export function ConversationView({ messages, currentUserId, loading = false }: P
             key={item.id}
             message={item.message!}
             isOwn={!!item.isOwn}
+            currentUserId={currentUserId}
             showHeader={!!item.showHeader}
             showFooter={!!item.showFooter}
+            isLatestOwn={item.id === latestOwnId}
           />
         ))}
       </div>

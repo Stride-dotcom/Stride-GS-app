@@ -21,7 +21,7 @@ export interface UseUsersResult {
     role: string,
     clientName?: string,
     clientSheetId?: string
-  ) => Promise<{ success: boolean; error: string | null }>;
+  ) => Promise<{ success: boolean; error: string | null; tempPassword?: string }>;
   toggleActive: (
     email: string,
     active: boolean
@@ -64,11 +64,11 @@ export function useUsers(): UseUsersResult {
       role: string,
       clientName?: string,
       clientSheetId?: string
-    ): Promise<{ success: boolean; error: string | null }> => {
+    ): Promise<{ success: boolean; error: string | null; tempPassword?: string }> => {
       const result = await createApiUser(callerEmail, email, role, clientName, clientSheetId);
       if (result.ok) {
         refetch();
-        return { success: true, error: null };
+        return { success: true, error: null, tempPassword: result.data?.tempPassword };
       }
       return { success: false, error: result.error };
     },

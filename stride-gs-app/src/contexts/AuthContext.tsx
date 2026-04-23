@@ -73,6 +73,7 @@ interface AuthContextValue {
   signInWithPassword: (email: string, password: string) => Promise<{ error: string | null }>;
   forgotPassword: (email: string) => Promise<{ error: string | null }>;
   resetPassword: (newPassword: string) => Promise<{ error: string | null }>;
+  changePassword: (newPassword: string) => Promise<{ error: string | null }>;
   signOut: () => Promise<void>;
   impersonateUser: (email: string) => Promise<{ error: string | null }>;
   exitImpersonation: () => void;
@@ -474,6 +475,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     []
   );
 
+  // Change password while already authenticated — does NOT trigger recovery flow.
+  const changePassword = useCallback(
+    async (newPassword: string): Promise<{ error: string | null }> => {
+      const { error } = await supabase.auth.updateUser({ password: newPassword });
+      return { error: (error as AuthError | null)?.message ?? null };
+    },
+    []
+  );
+
   const signOut = useCallback(async () => {
     // Clear API response cache FIRST so the next user can't inherit data from
     // this session via localStorage. Session 60 isolation fix.
@@ -577,6 +587,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         signInWithPassword,
         forgotPassword,
         resetPassword,
+        changePassword,
         signOut,
         impersonateUser,
         exitImpersonation,

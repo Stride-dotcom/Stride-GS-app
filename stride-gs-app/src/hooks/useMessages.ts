@@ -63,6 +63,11 @@ export interface Message {
   };
   /** All user_ids on the message (current user + others). Used for direct-thread keying. */
   recipientUserIds: string[];
+  /** Per-recipient read state. Includes the sender's own row. RLS lets the
+   *  sender see all recipient rows for messages they sent (Session 74
+   *  msg_recipients_select_sender), so this is populated for sent messages
+   *  and used to render Delivered / Read receipts iMessage-style. */
+  recipientReads: Array<{ userId: string; isRead: boolean; readAt: string | null }>;
 }
 
 export interface Conversation {
@@ -141,6 +146,13 @@ function directKey(selfId: string, otherId: string): string {
   return selfId < otherId ? `direct:${otherId}:${selfId}` : `direct:${selfId}:${otherId}`;
 }
 
+/** Stable group key from a participant set. Sort + join with colons so
+ *  every member of the group derives the same key regardless of who's
+ *  computing it. */
+function groupKey(participantIds: string[]): string {
+  return 'group:' + Array.from(new Set(participantIds)).sort().join(':');
+}
+
 /** Extract the "other party" user_id for a message viewed by the current user.
  *  Ignores self; prefers the first non-self recipient. */
 function otherPartyForMessage(m: Message, selfId: string): string | null {
@@ -171,6 +183,14 @@ function keyForMessage(m: Message, selfId: string): string | null {
   if (m.relatedEntityType && m.relatedEntityId) {
     return `entity:${m.relatedEntityType}:${m.relatedEntityId}`;
   }
+  // Compute the full participant set (sender + every recipient row we can see).
+  // For the SENDER, RLS lets them see all recipient rows on their own
+  // messages, so this is the full group. For RECIPIENTS, RLS only shows
+  // their own row + sender, so they'll fall through to the 1:1 branch and
+  // see it as a DM with the sender. (Real cross-recipient visibility for
+  // group messages requires an additional RLS policy — separate task.)
+  const all = Array.from(new Set([m.senderId, ...m.recipientUserIds]));
+  if (all.length >= 3) return groupKey(all);
   const other = otherPartyForMessage(m, selfId);
   if (other) return directKey(selfId, other);
   return null;
@@ -191,7 +211,7 @@ export interface UseMessagesResult {
   loading: boolean;
   unreadCount: number;
   activeThreadKey: string | null;
-  openThread: (key: string | { entityType?: string; entityId?: string; otherUserId?: string }) => Promise<void>;
+  openThread: (key: string | { entityType?: string; entityId?: string; otherUserId?: string; otherUserIds?: string[] }) => Promise<void>;
   closeThread: () => void;
   sendMessage: (params: SendMessageParams) => Promise<Message | null>;
   markRead: (recipientRowId: string) => Promise<void>;
@@ -315,6 +335,11 @@ function useMessagesImpl(): UseMessagesResult {
         senderRole: profile?.role ?? null,
         createdAt: m.created_at,
         recipientUserIds: rcps.map(r => r.user_id),
+        recipientReads: rcps.map(r => ({
+          userId: r.user_id,
+          isRead: !!r.is_read,
+          readAt: r.read_at,
+        })),
         myRecipient: mine ? {
           recipientId: mine.id,
           isRead: !!mine.is_read,
@@ -462,15 +487,29 @@ function useMessagesImpl(): UseMessagesResult {
   const conversationsWithNames = useMemo(() => {
     if (!authUserId) return conversations;
     return conversations.map(c => {
-      if (!c.key.startsWith('direct:')) return c;
-      const parts = c.key.split(':');
-      const [a, b] = [parts[1], parts[2]];
-      const otherUid = a === authUserId ? b : a;
-      if (!otherUid) return c;
-      const profile = profilesByUid[otherUid];
-      if (!profile) return c;
-      const name = profile.display_name || profile.email || c.title;
-      return { ...c, title: name };
+      if (c.key.startsWith('direct:')) {
+        const parts = c.key.split(':');
+        const [a, b] = [parts[1], parts[2]];
+        const otherUid = a === authUserId ? b : a;
+        if (!otherUid) return c;
+        const profile = profilesByUid[otherUid];
+        if (!profile) return c;
+        const name = profile.display_name || profile.email || c.title;
+        return { ...c, title: name };
+      }
+      if (c.key.startsWith('group:')) {
+        const ids = c.key.slice('group:'.length).split(':').filter(Boolean);
+        const others = ids.filter(u => u !== authUserId);
+        const names = others.map(u => {
+          const p = profilesByUid[u];
+          return p?.display_name || p?.email || `${u.slice(0, 6)}…`;
+        });
+        const title = names.length <= 3
+          ? names.join(', ')
+          : `${names.slice(0, 2).join(', ')} & ${names.length - 2} others`;
+        return { ...c, title };
+      }
+      return c;
     });
   }, [conversations, authUserId, profilesByUid]);
 
@@ -481,7 +520,7 @@ function useMessagesImpl(): UseMessagesResult {
 
   // ── Open a thread ───────────────────────────────────────────────────────
   const openThread = useCallback(async (
-    target: string | { entityType?: string; entityId?: string; otherUserId?: string },
+    target: string | { entityType?: string; entityId?: string; otherUserId?: string; otherUserIds?: string[] },
   ) => {
     if (!authUserId) return;
     const key: string =
@@ -489,9 +528,13 @@ function useMessagesImpl(): UseMessagesResult {
         ? target
         : target.entityType && target.entityId
           ? `entity:${target.entityType}:${target.entityId}`
-          : target.otherUserId
-            ? directKey(authUserId, target.otherUserId)
-            : '';
+          : target.otherUserIds && target.otherUserIds.filter(u => u !== authUserId).length > 1
+            ? groupKey([authUserId, ...target.otherUserIds])
+            : target.otherUserId
+              ? directKey(authUserId, target.otherUserId)
+              : target.otherUserIds && target.otherUserIds.length === 1
+                ? directKey(authUserId, target.otherUserIds[0])
+                : '';
     if (!key) return;
 
     setActiveThreadKey(key);
@@ -558,6 +601,33 @@ function useMessagesImpl(): UseMessagesResult {
         // so size === 1 is valid; for regular DMs size must be exactly 2).
         const expected = other === authUserId ? 1 : 2;
         if (participants.size !== expected) return false;
+        return true;
+      });
+    } else if (key.startsWith('group:')) {
+      // Group thread: parse the sorted participant uid set from the key,
+      // fetch all DM-style messages where the sender is in the set, then
+      // keep only those whose full participant signature matches exactly
+      // (so a 4-person group doesn't pull in the 3-person subset's chat).
+      const targetIds = key.slice('group:'.length).split(':').filter(Boolean);
+      const targetSet = new Set(targetIds);
+      if (!targetSet.has(authUserId) || targetSet.size < 3) {
+        setThread([]); setThreadLoading(false); return;
+      }
+      const { data: candData, error: candErr } = await supabase
+        .from('messages')
+        .select('*')
+        .is('related_entity_type', null)
+        .in('sender_id', Array.from(targetSet))
+        .order('created_at', { ascending: true })
+        .limit(500);
+      if (candErr || !candData) { setThread([]); setThreadLoading(false); return; }
+      const candidates = candData as MessageRow[];
+      if (candidates.length === 0) { setThread([]); setThreadLoading(false); return; }
+      const hydratedCandidates = await hydrate(candidates, authUserId);
+      hydrated = hydratedCandidates.filter(m => {
+        const participants = new Set<string>([m.senderId, ...m.recipientUserIds]);
+        if (participants.size !== targetSet.size) return false;
+        for (const u of targetSet) if (!participants.has(u)) return false;
         return true;
       });
     }

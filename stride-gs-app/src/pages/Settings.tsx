@@ -69,8 +69,8 @@ const CLAIM_EMAIL_TEMPLATES = [
 ];
 
 const SYSTEM_TEMPLATES = [
-  { key: 'WELCOME_EMAIL', name: 'Welcome Email', desc: 'Sent to new client when account is created' },
-  { key: 'ONBOARDING_EMAIL', name: 'Onboarding / Getting Started', desc: 'Setup instructions and getting started guide for new clients' },
+  { key: 'WELCOME_EMAIL', name: 'Welcome Email', desc: 'Sent to all client contacts when a new client ACCOUNT is created. Generic welcome — does NOT contain login credentials. Tokens: {{CLIENT_NAME}}, {{SPREADSHEET_URL}}, {{CLIENT_EMAIL}}, {{APP_URL}}' },
+  { key: 'ONBOARDING_EMAIL', name: 'Onboarding / Getting Started', desc: 'Sent to each individual user when their account is activated. Contains their temporary password + login instructions. Tokens: {{CLIENT_NAME}}, {{LOGIN_URL}}, {{LOGIN_EMAIL}}, {{TEMP_PASSWORD}}, {{SPREADSHEET_URL}}, {{APP_URL}}. If {{TEMP_PASSWORD}} is not used in the body, a styled credentials block is prepended automatically.' },
   { key: 'CLIENT_INTAKE_INVITE', name: 'Client Intake Invitation', desc: 'Sent to a prospect when a new intake link is generated. Tokens: {{PROSPECT_NAME}}, {{INTAKE_LINK}}, {{EXPIRES_DATE}}' },
 ];
 
@@ -809,6 +809,8 @@ export function Settings() {
   const [createAllLoading, setCreateAllLoading] = useState(false);
   const [authSyncResult, setAuthSyncResult] = useState<{ ok: boolean; message: string } | null>(null);
   const [sendWelcomeResult, setSendWelcomeResult] = useState<{ email: string; ok: boolean; message: string } | null>(null);
+  // Temp password shown to admin after user creation
+  const [createdTempPassword, setCreatedTempPassword] = useState<{ email: string; password: string } | null>(null);
 
   // Session 70 follow-up — Resync Users (CB → Supabase cb_users + optional auth.users prune)
   const [resyncOpen, setResyncOpen] = useState(false);
@@ -1183,12 +1185,17 @@ export function Settings() {
     );
     setAddUserLoading(false);
     if (result.success) {
+      const emailCreated = newUserEmail.trim().toLowerCase();
       setAddUserOpen(false);
       setNewUserEmail(''); setNewUserRole('staff');
       setNewUserClientNames([]); setNewUserClientIds([]);
       setNewUserAddClientDropdown(false);
-      setAddUserSuccess('User created — they can use "Forgot Password" on the login page to set up their password.');
-      setTimeout(() => setAddUserSuccess(''), 8000);
+      if (result.tempPassword) {
+        setCreatedTempPassword({ email: emailCreated, password: result.tempPassword });
+      } else {
+        setAddUserSuccess('User created — they can use "Forgot Password" on the login page to set up their password.');
+        setTimeout(() => setAddUserSuccess(''), 8000);
+      }
     } else {
       setAddUserError(result.error ?? 'Failed to add user');
     }
@@ -4274,6 +4281,64 @@ export function Settings() {
           )}
         </div>
       </div>
+
+      {/* Temp password reveal modal — shown after new user creation */}
+      {createdTempPassword && (
+        <div
+          style={{
+            position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 9999,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+          }}
+        >
+          <div style={{
+            background: '#fff', borderRadius: 12, boxShadow: '0 8px 32px rgba(0,0,0,0.18)',
+            width: 440, padding: '28px 28px 24px',
+            fontFamily: theme.typography.fontFamily,
+          }}>
+            <div style={{ fontSize: 16, fontWeight: 700, color: theme.colors.textPrimary, marginBottom: 6 }}>
+              User Created
+            </div>
+            <div style={{ fontSize: 13, color: theme.colors.textSecondary, marginBottom: 18 }}>
+              Share these credentials with <strong>{createdTempPassword.email}</strong>. A welcome email with login instructions has also been sent.
+            </div>
+
+            <div style={{ marginBottom: 12 }}>
+              <div style={{ fontSize: 11, fontWeight: 500, textTransform: 'uppercase', color: theme.colors.orange, marginBottom: 4, letterSpacing: '0.03em' }}>Login Email</div>
+              <div style={{ background: '#F9FAFB', border: '1px solid #E5E7EB', borderRadius: 8, padding: '8px 12px', fontSize: 13, fontFamily: 'monospace' }}>
+                {createdTempPassword.email}
+              </div>
+            </div>
+
+            <div style={{ marginBottom: 20 }}>
+              <div style={{ fontSize: 11, fontWeight: 500, textTransform: 'uppercase', color: theme.colors.orange, marginBottom: 4, letterSpacing: '0.03em' }}>Temporary Password</div>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                <div style={{ flex: 1, background: '#FFF7ED', border: `1px solid ${theme.colors.orange}`, borderRadius: 8, padding: '10px 14px', fontSize: 15, fontWeight: 700, fontFamily: 'monospace', color: theme.colors.orange, letterSpacing: '0.05em' }}>
+                  {createdTempPassword.password}
+                </div>
+                <button
+                  onClick={() => navigator.clipboard.writeText(createdTempPassword.password)}
+                  style={{ background: theme.colors.orangeLight, border: 'none', borderRadius: 8, padding: '10px 14px', fontSize: 12, fontWeight: 600, cursor: 'pointer', color: theme.colors.orange, whiteSpace: 'nowrap' }}
+                >
+                  Copy
+                </button>
+              </div>
+            </div>
+
+            <div style={{ background: '#F0FDF4', border: '1px solid #86EFAC', borderRadius: 8, padding: '10px 12px', fontSize: 12, color: '#166534', marginBottom: 20 }}>
+              After logging in, the user should click their name in the sidebar and select <strong>Change Password</strong>.
+            </div>
+
+            <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+              <button
+                onClick={() => setCreatedTempPassword(null)}
+                style={{ background: theme.colors.orange, border: 'none', borderRadius: 8, padding: '9px 22px', fontSize: 13, fontWeight: 600, color: '#fff', cursor: 'pointer', fontFamily: theme.typography.fontFamily }}
+              >
+                Done
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Admin-set-password modal (v38.70.0) */}
       {setPasswordEmail && (

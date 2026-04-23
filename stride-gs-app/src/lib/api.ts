@@ -1008,6 +1008,7 @@ export interface UsersResponse {
 export interface CreateUserResponse {
   success: boolean;
   user: ApiUser;
+  tempPassword?: string;
 }
 
 export interface UpdateUserResponse {
