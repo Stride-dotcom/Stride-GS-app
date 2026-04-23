@@ -23,7 +23,9 @@ import {
   Receipt,
   BookOpen,
   MessageSquare,
+  KeyRound,
 } from 'lucide-react';
+import { ChangePasswordModal } from '../shared/ChangePasswordModal';
 import { theme } from '../../styles/theme';
 import { cacheClearAll } from '../../lib/apiCache';
 import { useAuth } from '../../contexts/AuthContext';
@@ -115,6 +117,8 @@ export function Sidebar({ collapsed, onToggle, onNavigate, failureCount = 0, onO
   const [dragNavId, setDragNavId] = useState<string | null>(null);
   const [dragOverNavId, setDragOverNavId] = useState<string | null>(null);
   const [hoverNavId, setHoverNavId] = useState<string | null>(null);
+
+  const [changePasswordOpen, setChangePasswordOpen] = useState(false);
 
   return (
     <aside
@@ -444,6 +448,36 @@ export function Sidebar({ collapsed, onToggle, onNavigate, failureCount = 0, onO
           )}
         </div>}
 
+        {/* Change Password row — all users */}
+        <div
+          onClick={() => setChangePasswordOpen(true)}
+          role="button"
+          tabIndex={0}
+          onKeyDown={(e) => e.key === 'Enter' && setChangePasswordOpen(true)}
+          style={{
+            display: 'flex', alignItems: 'center', gap: '8px',
+            padding: collapsed ? '7px 16px' : '7px 14px',
+            margin: '2px 6px 0', borderRadius: theme.radii.md,
+            cursor: 'pointer',
+          }}
+          title={collapsed ? 'Change Password' : undefined}
+          onMouseEnter={e => (e.currentTarget.style.background = 'rgba(0,0,0,0.04)')}
+          onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+        >
+          <KeyRound size={14} style={{ color: theme.colors.textSecondary, flexShrink: 0 }} />
+          {!collapsed && (
+            <span style={{
+              fontSize: theme.typography.sizes.sm,
+              fontWeight: theme.typography.weights.medium,
+              color: theme.colors.textSecondary,
+              fontFamily: theme.typography.fontFamily,
+              whiteSpace: 'nowrap',
+            }}>
+              Change Password
+            </span>
+          )}
+        </div>
+
         {/* Sign Out row — clearly labeled */}
         <div
           onClick={signOut}
@@ -474,6 +508,10 @@ export function Sidebar({ collapsed, onToggle, onNavigate, failureCount = 0, onO
           )}
         </div>
       </div>
+
+      {changePasswordOpen && (
+        <ChangePasswordModal onClose={() => setChangePasswordOpen(false)} />
+      )}
     </aside>
   );
 }
