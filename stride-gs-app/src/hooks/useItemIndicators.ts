@@ -23,6 +23,10 @@ export interface ItemIndicators {
   repairOpenItems: Set<string>;
   /** Repairs that are completed */
   repairDoneItems: Set<string>;
+  /** v2026-04-23 — Will Call items in Pending/Scheduled/Partial → orange W */
+  wcOpenItems: Set<string>;
+  /** v2026-04-23 — Will Call items in Released → green W */
+  wcDoneItems: Set<string>;
   loaded: boolean;
 }
 
@@ -30,6 +34,7 @@ const EMPTY: ItemIndicators = {
   inspOpenItems: new Set(), inspDoneItems: new Set(),
   asmOpenItems: new Set(), asmDoneItems: new Set(),
   repairOpenItems: new Set(), repairDoneItems: new Set(),
+  wcOpenItems: new Set(), wcDoneItems: new Set(),
   loaded: false,
 };
 
@@ -37,6 +42,11 @@ const EMPTY: ItemIndicators = {
 const TASK_DONE = new Set(['completed', 'Completed']);
 /** Repair statuses that mean "done" for badge purposes. */
 const REPAIR_DONE = new Set(['complete', 'Complete', 'completed', 'Completed']);
+/** v2026-04-23 — Will Call statuses that mean "done" (item released) → green W. */
+const WC_DONE = new Set(['Released', 'released']);
+/** v2026-04-23 — Will Call statuses that mean "open/in-progress" → orange W.
+ *  Cancelled yields no badge (callers should exclude). */
+const WC_OPEN = new Set(['Pending', 'Scheduled', 'Partial', 'pending', 'scheduled', 'partial']);
 
 export function useItemIndicators(clientSheetIds?: string | string[]): ItemIndicators {
   const [data, setData] = useState<ItemIndicators>(EMPTY);
@@ -60,6 +70,8 @@ export function useItemIndicators(clientSheetIds?: string | string[]): ItemIndic
       const asmDone = new Set<string>();
       const repOpen = new Set<string>();
       const repDone = new Set<string>();
+      const wcOpen = new Set<string>();
+      const wcDone = new Set<string>();
 
       try {
         // Fetch task indicators (INSP + ASM) with status for open/done split.
@@ -101,6 +113,38 @@ export function useItemIndicators(clientSheetIds?: string | string[]): ItemIndic
             else { repOpen.add(r.item_id); repDone.delete(r.item_id); }
           }
         }
+
+        // v2026-04-23 — Will Call indicators. will_calls.item_ids is jsonb
+        // (array of item IDs on this WC). One WC may cover many items, so
+        // we expand the array and stamp each item with the WC's status.
+        // If an item appears on multiple WCs, Open wins over Done (operator
+        // needs to know there's still an active pickup outstanding).
+        let wq = supabase.from('will_calls').select('item_ids, status');
+        if (Array.isArray(clientSheetIds) && clientSheetIds.length > 0) {
+          wq = wq.in('tenant_id', clientSheetIds);
+        } else if (typeof clientSheetIds === 'string') {
+          wq = wq.eq('tenant_id', clientSheetIds);
+        }
+        const { data: wcs } = await wq.range(0, 49999);
+        if (wcs && !cancelled) {
+          for (const w of wcs as { item_ids: unknown; status: string | null }[]) {
+            const status = w.status ?? '';
+            const isOpen = WC_OPEN.has(status);
+            const isDone = WC_DONE.has(status);
+            if (!isOpen && !isDone) continue; // Cancelled / unknown → no badge
+            const ids: string[] = Array.isArray(w.item_ids)
+              ? (w.item_ids as unknown[]).map(x => String(x)).filter(Boolean)
+              : [];
+            for (const id of ids) {
+              if (isOpen) {
+                wcOpen.add(id);
+                wcDone.delete(id); // open wins
+              } else if (isDone && !wcOpen.has(id)) {
+                wcDone.add(id);
+              }
+            }
+          }
+        }
       } catch { /* best-effort */ }
 
       if (!cancelled) {
@@ -108,6 +152,7 @@ export function useItemIndicators(clientSheetIds?: string | string[]): ItemIndic
           inspOpenItems: inspOpen, inspDoneItems: inspDone,
           asmOpenItems: asmOpen, asmDoneItems: asmDone,
           repairOpenItems: repOpen, repairDoneItems: repDone,
+          wcOpenItems: wcOpen, wcDoneItems: wcDone,
           loaded: true,
         });
       }
