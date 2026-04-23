@@ -24847,22 +24847,28 @@ function api_sendWelcomeOnce_(cbSS, userEmail, role, firstClientSheetId, tempPas
     }
     if (targetRow < 0) return { success: false, reason: "user_row_not_found" };
 
-    // Fire the welcome email via the existing handler with recipient override.
-    var emailPayload = { clientSheetId: firstClientSheetId, recipient: userEmail };
+    // v38.109.0 — user activation now fires the ONBOARDING email (which carries
+    // credentials) rather than WELCOME (which is the generic account-creation
+    // email sent to all client contacts with NO password). Justin's canonical
+    // routing: Welcome = account creation, no creds; Onboarding = individual
+    // user activation, includes temp password + login instructions.
+    var emailPayload = { recipient: userEmail };
     if (tempPassword) {
       emailPayload.tempPassword = tempPassword;
       emailPayload.loginEmail = userEmail;
     }
-    var resp = handleSendWelcomeEmail_(emailPayload);
-    // handleSendWelcomeEmail_ returns a ContentService TextOutput — parse to check success.
+    var resp = handleSendOnboardingEmail_(firstClientSheetId, emailPayload);
+    // handleSendOnboardingEmail_ returns a ContentService TextOutput — parse to check success.
     var json;
     try { json = JSON.parse(resp.getContent()); } catch (_) { json = {}; }
     if (!json || !json.success) {
-      Logger.log("api_sendWelcomeOnce_: send failed for " + userEmail + ": " + (json && json.error ? json.error : "unknown"));
+      Logger.log("api_sendWelcomeOnce_: onboarding send failed for " + userEmail + ": " + (json && json.error ? json.error : "unknown"));
       return { success: false, reason: "send_failed", error: json && json.error ? json.error : "unknown" };
     }
 
-    // Stamp Welcome Sent At so we never re-send to this user.
+    // Stamp Welcome Sent At so we never re-send to this user. (Column name
+    // kept for back-compat with existing sheet headers; it now represents the
+    // one-shot onboarding send rather than the generic account welcome.)
     try {
       usersSh.getRange(targetRow, wsIdx + 1).setValue(new Date());
     } catch (stampErr) {
