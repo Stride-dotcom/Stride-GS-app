@@ -3,6 +3,7 @@ import { X, Package, MapPin, CheckCircle2, XCircle, AlertTriangle, FolderOpen, L
 import { FolderButton } from './FolderButton';
 import { DeepLink } from './DeepLink';
 import { TabbedDetailPanel, type TabbedDetailPanelTab } from './TabbedDetailPanel';
+import { EntityPage } from './EntityPage';
 import { ItemIdBadges } from './ItemIdBadges';
 import { useItemIndicators } from '../../hooks/useItemIndicators';
 import { buildDeepLink } from '../../lib/deepLinks';
@@ -42,6 +43,10 @@ interface Props {
    *  matching the pattern every other page uses. */
   applyItemPatch?: (itemId: string, patch: Partial<InventoryItem>) => void;
   clearItemPatch?: (itemId: string) => void;
+  /** Session 80+ — render as full EntityPage instead of slide-out TabbedDetailPanel.
+   *  Only swaps the outer shell. All tabs, handlers, modals, and edit logic
+   *  are preserved exactly as-is. */
+  renderAsPage?: boolean;
 }
 
 const TYPE_CFG: Record<string, { bg: string; color: string }> = { INSP: { bg: '#FEF3EE', color: '#E85D2D' }, ASM: { bg: '#F0FDF4', color: '#15803D' }, REPAIR: { bg: '#FEF3C7', color: '#B45309' }, DLVR: { bg: '#EDE9FE', color: '#7C3AED' }, RCVG: { bg: '#EFF6FF', color: '#1D4ED8' }, WCPU: { bg: '#FCE7F3', color: '#BE185D' } };
@@ -52,7 +57,7 @@ function Field({ label, value, mono }: { label: string; value?: string | number 
 
 const input: React.CSSProperties = { width: '100%', padding: '8px 10px', fontSize: 13, border: `1px solid ${theme.colors.border}`, borderRadius: 8, outline: 'none', fontFamily: 'inherit' };
 
-export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = [], applyTaskPatch, mergeTaskPatch, clearTaskPatch, addOptimisticRepair, removeOptimisticRepair, applyItemPatch, clearItemPatch }: Props) {
+export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = [], applyTaskPatch, mergeTaskPatch, clearTaskPatch, addOptimisticRepair, removeOptimisticRepair, applyItemPatch, clearItemPatch, renderAsPage }: Props) {
   // v2026-04-22 — migrated to TabbedDetailPanel shell. Adapter owns state;
   // tab bodies are small inline render functions so future shell swaps
   // (full-screen view, side panel, modal) only require rewriting the
@@ -1227,6 +1232,50 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
       render: renderDetailsTab,
     },
   ];
+
+  if (renderAsPage) {
+    return (
+      <EntityPage
+        entityLabel="Task"
+        entityId={task.taskId}
+        clientName={task.clientName}
+        statusBadge={belowIdContent}
+        headerActions={headerActions}
+        statusStrip={statusStrip}
+        tabs={tabs as unknown as Parameters<typeof EntityPage>[0]['tabs']}
+        initialTabId="details"
+        builtInTabs={{
+          photos: {
+            entityType: 'task',
+            entityId: task.taskId,
+            tenantId: clientSheetId,
+            itemId: task.itemId ? String(task.itemId) : null,
+            enableSourceFilter: !!task.itemId,
+          },
+          docs: {
+            contextType: 'task',
+            contextId: task.taskId,
+            tenantId: clientSheetId,
+          },
+          notes: {
+            entityType: 'task',
+            entityId: task.taskId,
+            relatedEntities: task.itemId
+              ? [{ type: 'inventory', id: String(task.itemId), label: `Item ${task.itemId}` }]
+              : [],
+            enableSourceFilter: !!task.itemId,
+            itemId: task.itemId ? String(task.itemId) : null,
+          },
+          activity: {
+            entityType: 'task',
+            entityId: task.taskId,
+            tenantId: clientSheetId,
+          },
+        }}
+        footer={footer}
+      />
+    );
+  }
 
   return (
     <TabbedDetailPanel

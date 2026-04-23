@@ -4,6 +4,7 @@ import { useIsMobile } from '../../hooks/useIsMobile';
 import { FolderButton } from './FolderButton';
 import { DeepLink } from './DeepLink';
 import { TabbedDetailPanel, type TabbedDetailPanelTab } from './TabbedDetailPanel';
+import { EntityPage } from './EntityPage';
 import { ItemIdBadges } from './ItemIdBadges';
 import { useItemIndicators } from '../../hooks/useItemIndicators';
 import { theme } from '../../styles/theme';
@@ -32,6 +33,10 @@ interface Props {
   removeOptimisticWc?: (tempWcNumber: string) => void;
   // Cross-entity: WC release patches inventory item statuses
   applyItemPatch?: (itemId: string, patch: Partial<InventoryItem>) => void;
+  /** Session 80+ — render as full EntityPage instead of slide-out TabbedDetailPanel.
+   *  Only swaps the outer shell. All tabs, handlers, modals, and edit logic
+   *  are preserved exactly as-is. */
+  renderAsPage?: boolean;
 }
 
 const STATUS_CFG: Record<string, { bg: string; color: string }> = {
@@ -48,7 +53,7 @@ function Field({ label, value, icon: Icon }: { label: string; value?: string | n
   </div>;
 }
 
-export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNavigateToWc, applyWcPatch, clearWcPatch, applyItemPatch }: Props) {
+export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNavigateToWc, applyWcPatch, clearWcPatch, applyItemPatch, renderAsPage }: Props) {
   const { user } = useAuth();
   // Clients are not allowed to release items or set release dates — that
   // decision belongs to warehouse staff. Gate every Release-related action.
@@ -1208,6 +1213,32 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
     { id: 'details', label: 'Details', keepMounted: true, render: renderDetailsTab },
   ];
 
+  const builtInTabsCfg = {
+    // Will Call is a CONTAINER entity (multiple items). Photos/Notes
+    // scoped to the WC itself — no item_id rollup (would mix items).
+    photos: { entityType: 'will_call' as const, entityId: wc.wcNumber, tenantId: clientSheetId },
+    docs:   { contextType: 'willcall' as const, contextId: wc.wcNumber, tenantId: clientSheetId },
+    notes:  { entityType: 'will_call', entityId: wc.wcNumber },
+    activity: { entityType: 'will_call', entityId: wc.wcNumber, tenantId: clientSheetId },
+  };
+
+  if (renderAsPage) {
+    return (
+      <EntityPage
+        entityLabel="Will Call"
+        entityId={wc.wcNumber}
+        clientName={wc.clientName}
+        statusBadge={belowIdContent}
+        headerActions={headerActions}
+        statusStrip={statusStrip}
+        tabs={tabs as unknown as Parameters<typeof EntityPage>[0]['tabs']}
+        initialTabId="details"
+        builtInTabs={builtInTabsCfg}
+        footer={footer}
+      />
+    );
+  }
+
   return (
     <TabbedDetailPanel
       title={wc.wcNumber}
@@ -1217,14 +1248,7 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
       statusStrip={statusStrip}
       overlay={<ProcessingOverlay visible={releasing || cancelling || removing} message={removing ? 'Removing items...' : cancelling ? 'Cancelling Will Call...' : 'Processing Release...'} />}
       tabs={tabs}
-      builtInTabs={{
-        // Will Call is a CONTAINER entity (multiple items). Photos/Notes
-        // scoped to the WC itself — no item_id rollup (would mix items).
-        photos: { entityType: 'will_call', entityId: wc.wcNumber, tenantId: clientSheetId },
-        docs:   { contextType: 'willcall', contextId: wc.wcNumber, tenantId: clientSheetId },
-        notes:  { entityType: 'will_call', entityId: wc.wcNumber },
-        activity: { entityType: 'will_call', entityId: wc.wcNumber, tenantId: clientSheetId },
-      }}
+      builtInTabs={builtInTabsCfg}
       footer={isMobile ? mobileFooter : footer}
       onClose={onClose}
       resizeKey="willcall"

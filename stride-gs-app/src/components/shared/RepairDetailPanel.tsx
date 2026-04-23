@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { X, Wrench, Package, ClipboardList, CheckCircle2, XCircle, AlertTriangle, Send, Loader2, Truck, Play, Pencil, MapPin } from 'lucide-react';
 import { TabbedDetailPanel, type TabbedDetailPanelTab } from './TabbedDetailPanel';
+import { EntityPage } from './EntityPage';
 import { FolderButton } from './FolderButton';
 import { DeepLink } from './DeepLink';
 import { ItemIdBadges } from './ItemIdBadges';
@@ -27,6 +28,10 @@ interface Props {
   clearRepairPatch?: (repairId: string) => void;
   addOptimisticRepair?: (repair: Repair) => void;
   removeOptimisticRepair?: (tempRepairId: string) => void;
+  /** Session 80+ — render as full EntityPage instead of slide-out TabbedDetailPanel.
+   *  Only swaps the outer shell. All tabs, handlers, modals, and edit logic
+   *  are preserved exactly as-is. */
+  renderAsPage?: boolean;
 }
 
 const STATUS_CFG: Record<string, { bg: string; color: string }> = {
@@ -41,7 +46,7 @@ function Field({ label, value, mono }: { label: string; value?: string | number 
 
 const input: React.CSSProperties = { width: '100%', padding: '8px 10px', fontSize: 13, border: `1px solid ${theme.colors.border}`, borderRadius: 8, outline: 'none', fontFamily: 'inherit' };
 
-export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepairPatch, clearRepairPatch }: Props) {
+export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepairPatch, clearRepairPatch, renderAsPage }: Props) {
   const { user } = useAuth();
   // v2026-04-22 — panel frame handled by TabbedDetailPanel shell.
 
@@ -980,6 +985,53 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
     { id: 'details', label: 'Details', keepMounted: true, render: renderDetailsTab },
   ];
 
+  const builtInTabsCfg = {
+    photos: {
+      entityType: 'repair' as const,
+      entityId: repair.repairId,
+      tenantId: repair.clientSheetId,
+      itemId: repair.itemId ? String(repair.itemId) : null,
+      enableSourceFilter: !!repair.itemId,
+    },
+    docs: {
+      contextType: 'repair' as const,
+      contextId: repair.repairId,
+      tenantId: repair.clientSheetId,
+    },
+    notes: {
+      entityType: 'repair',
+      entityId: repair.repairId,
+      relatedEntities: [
+        ...(repair.itemId ? [{ type: 'inventory', id: String(repair.itemId), label: `Item ${repair.itemId}` }] : []),
+        ...(repair.sourceTaskId ? [{ type: 'task', id: String(repair.sourceTaskId), label: `Task ${repair.sourceTaskId}` }] : []),
+      ],
+      enableSourceFilter: !!repair.itemId,
+      itemId: repair.itemId ? String(repair.itemId) : null,
+    },
+    activity: {
+      entityType: 'repair',
+      entityId: repair.repairId,
+      tenantId: repair.clientSheetId,
+    },
+  };
+
+  if (renderAsPage) {
+    return (
+      <EntityPage
+        entityLabel="Repair"
+        entityId={repair.repairId}
+        clientName={repair.clientName}
+        statusBadge={belowIdContent}
+        headerActions={headerActions}
+        statusStrip={statusStrip}
+        tabs={tabs as unknown as Parameters<typeof EntityPage>[0]['tabs']}
+        initialTabId="details"
+        builtInTabs={builtInTabsCfg}
+        footer={footer}
+      />
+    );
+  }
+
   return (
     <TabbedDetailPanel
       title={repair.repairId}
@@ -1001,35 +1053,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
       statusStrip={statusStrip}
       overlay={<ProcessingOverlay visible={submitting} message="Processing..." />}
       tabs={tabs}
-      builtInTabs={{
-        photos: {
-          entityType: 'repair',
-          entityId: repair.repairId,
-          tenantId: repair.clientSheetId,
-          itemId: repair.itemId ? String(repair.itemId) : null,
-          enableSourceFilter: !!repair.itemId,
-        },
-        docs: {
-          contextType: 'repair',
-          contextId: repair.repairId,
-          tenantId: repair.clientSheetId,
-        },
-        notes: {
-          entityType: 'repair',
-          entityId: repair.repairId,
-          relatedEntities: [
-            ...(repair.itemId ? [{ type: 'inventory', id: String(repair.itemId), label: `Item ${repair.itemId}` }] : []),
-            ...(repair.sourceTaskId ? [{ type: 'task', id: String(repair.sourceTaskId), label: `Task ${repair.sourceTaskId}` }] : []),
-          ],
-          enableSourceFilter: !!repair.itemId,
-          itemId: repair.itemId ? String(repair.itemId) : null,
-        },
-        activity: {
-          entityType: 'repair',
-          entityId: repair.repairId,
-          tenantId: repair.clientSheetId,
-        },
-      }}
+      builtInTabs={builtInTabsCfg}
       footer={footer}
       onClose={onClose}
       resizeKey="repair"

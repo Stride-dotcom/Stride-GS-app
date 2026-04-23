@@ -6,6 +6,7 @@ import { DeepLink } from './DeepLink';
 import { ItemIdBadges } from './ItemIdBadges';
 import { useItemIndicators } from '../../hooks/useItemIndicators';
 import { TabbedDetailPanel, type TabbedDetailPanelTab } from './TabbedDetailPanel';
+import { EntityPage } from './EntityPage';
 import { FolderButton } from './FolderButton';
 import { CreateTaskModal } from './CreateTaskModal';
 import { CreateWillCallModal } from './CreateWillCallModal';
@@ -45,6 +46,10 @@ interface Props {
   userRole?: 'admin' | 'staff' | 'client';
   isParent?: boolean;
   onItemsChanged?: () => void;
+  /** Session 80+ — render as full EntityPage instead of slide-out TabbedDetailPanel.
+   *  Only swaps the outer shell. All tabs, handlers, modals, and edit logic
+   *  are preserved exactly as-is. */
+  renderAsPage?: boolean;
 }
 
 function Badge({ t, bg, color }: { t: string; bg: string; color: string }) {
@@ -61,7 +66,7 @@ const STATUS_CFG: Record<string, { bg: string; color: string }> = {
   Cancelled: { bg: '#F3F4F6', color: '#6B7280' },
 };
 
-export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onItemsChanged }: Props) {
+export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onItemsChanged, renderAsPage }: Props) {
   // (I)(A)(R) indicators for every item row in the shipment items table.
   const { inspOpenItems, inspDoneItems, asmOpenItems, asmDoneItems, repairOpenItems, repairDoneItems } = useItemIndicators(shipment.clientSheetId);
   const { isMobile } = useIsMobile();
@@ -287,47 +292,61 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
     { id: 'items', label: 'Items', badgeCount: items.length || null, render: renderItemsTab },
   ];
 
+  const builtInTabsCfg = {
+    // Shipments are CONTAINER entities — photos/notes scoped to the
+    // shipment itself, no item_id rollup (rollup would mix items).
+    photos: {
+      entityType: 'shipment' as const,
+      entityId: shipment.shipmentNo,
+      tenantId: shipment.clientSheetId,
+    },
+    docs: {
+      contextType: 'shipment' as const,
+      contextId: shipment.shipmentNo,
+      tenantId: shipment.clientSheetId,
+    },
+    notes: {
+      entityType: 'shipment',
+      entityId: shipment.shipmentNo,
+    },
+    activity: {
+      entityType: 'shipment',
+      entityId: shipment.shipmentNo,
+      tenantId: shipment.clientSheetId,
+    },
+  };
+
   return (
     <>
-      <TabbedDetailPanel
-        title={shipment.shipmentNo}
-        clientName={shipment.client}
-        belowId={<Badge t={shipment.status} bg={sc.bg} color={sc.color} />}
-        tabs={customTabs}
-        builtInTabs={{
-          // Shipments are CONTAINER entities — photos/notes scoped to the
-          // shipment itself, no item_id rollup (rollup would mix items).
-          photos: {
-            entityType: 'shipment',
-            entityId: shipment.shipmentNo,
-            tenantId: shipment.clientSheetId,
-          },
-          docs: {
-            contextType: 'shipment',
-            contextId: shipment.shipmentNo,
-            tenantId: shipment.clientSheetId,
-          },
-          notes: {
-            entityType: 'shipment',
-            entityId: shipment.shipmentNo,
-          },
-          activity: {
-            entityType: 'shipment',
-            entityId: shipment.shipmentNo,
-            tenantId: shipment.clientSheetId,
-          },
-        }}
-        onClose={onClose}
-        resizeKey="shipment"
-        defaultWidth={460}
-        footer={isMobile ? (
-          <div style={{ padding: '12px 16px', paddingBottom: `calc(env(safe-area-inset-bottom, 0px) + 12px)` }}>
-            <button onClick={onClose} style={{ width: '100%', padding: '14px 0', fontSize: 15, fontWeight: 600, border: 'none', borderRadius: 10, background: '#F1F5F9', cursor: 'pointer', fontFamily: 'inherit', color: '#475569' }}>Done</button>
-          </div>
-        ) : (
-          <button onClick={onClose} style={{ width: '100%', padding: '10px', fontSize: 13, fontWeight: 600, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', fontFamily: 'inherit', color: theme.colors.textSecondary }}>Close</button>
-        )}
-      />
+      {renderAsPage ? (
+        <EntityPage
+          entityLabel="Shipment"
+          entityId={shipment.shipmentNo}
+          clientName={shipment.client}
+          statusBadge={<Badge t={shipment.status} bg={sc.bg} color={sc.color} />}
+          tabs={customTabs as unknown as Parameters<typeof EntityPage>[0]['tabs']}
+          initialTabId="details"
+          builtInTabs={builtInTabsCfg}
+        />
+      ) : (
+        <TabbedDetailPanel
+          title={shipment.shipmentNo}
+          clientName={shipment.client}
+          belowId={<Badge t={shipment.status} bg={sc.bg} color={sc.color} />}
+          tabs={customTabs}
+          builtInTabs={builtInTabsCfg}
+          onClose={onClose}
+          resizeKey="shipment"
+          defaultWidth={460}
+          footer={isMobile ? (
+            <div style={{ padding: '12px 16px', paddingBottom: `calc(env(safe-area-inset-bottom, 0px) + 12px)` }}>
+              <button onClick={onClose} style={{ width: '100%', padding: '14px 0', fontSize: 15, fontWeight: 600, border: 'none', borderRadius: 10, background: '#F1F5F9', cursor: 'pointer', fontFamily: 'inherit', color: '#475569' }}>Done</button>
+            </div>
+          ) : (
+            <button onClick={onClose} style={{ width: '100%', padding: '10px', fontSize: 13, fontWeight: 600, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', fontFamily: 'inherit', color: theme.colors.textSecondary }}>Close</button>
+          )}
+        />
+      )}
 
       {/* Quick Action Modals */}
       {showCreateTask && shipment.clientSheetId && (
