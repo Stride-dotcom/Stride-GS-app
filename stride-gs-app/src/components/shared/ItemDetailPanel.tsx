@@ -14,6 +14,7 @@ import type { MoveHistoryEntry } from '../../lib/api';
 import type { InventoryItem, InventoryStatus } from '../../lib/types';
 import { TabbedDetailPanel } from './TabbedDetailPanel';
 import type { TabbedDetailPanelTab } from './TabbedDetailPanel';
+import { EntityPage } from './EntityPage';
 import { buildDeepLink } from '../../lib/deepLinks';
 import { useIsMobile } from '../../hooks/useIsMobile';
 
@@ -53,6 +54,11 @@ interface Props {
   applyItemPatch?: (itemId: string, patch: Partial<InventoryItem>) => void;
   mergeItemPatch?: (itemId: string, patch: Partial<InventoryItem>) => void;
   clearItemPatch?: (itemId: string) => void;
+  // Session 80+ — render as full EntityPage instead of slide-out TabbedDetailPanel.
+  // When true, sidemark + idBadges are hidden from the header (per redesign spec)
+  // and the outer shell is swapped. All tabs, handlers, modals, and edit logic
+  // are preserved exactly as-is.
+  renderAsPage?: boolean;
 }
 
 function Badge({ t, bg, color }: { t: string; bg: string; color: string }) {
@@ -500,6 +506,7 @@ export function ItemDetailPanel({
   itemShipment,
   userRole, classNames = [], locationNames = [], clientSheetId, onItemUpdated,
   applyItemPatch, mergeItemPatch, clearItemPatch,
+  renderAsPage,
 }: Props) {
   // Panel frame + resize + backdrop are handled by TabbedDetailPanel now.
   const { isMobile } = useIsMobile();
@@ -1150,6 +1157,27 @@ export function ItemDetailPanel({
       render: () => renderActivityTab(),
     },
   ];
+
+  if (renderAsPage) {
+    // Redesign spec: dark tab cards, no sidemark/idBadges chips in header,
+    // sticky action footer. All tabs + state + handlers shared with panel mode.
+    return (
+      <>
+        <EntityPage
+          entityLabel="Inventory"
+          entityId={item.itemId}
+          clientName={item.clientName}
+          statusBadge={headerStatusBadge}
+          headerActions={headerActions}
+          statusStrip={statusStrip}
+          tabs={customTabs as unknown as Parameters<typeof EntityPage>[0]['tabs']}
+          initialTabId="details"
+          footer={footer}
+        />
+        <style>{`@keyframes slideIn { from { transform: translateX(100%); } to { transform: translateX(0); } }`}</style>
+      </>
+    );
+  }
 
   return (
     <>
