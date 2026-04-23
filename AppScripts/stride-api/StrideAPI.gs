@@ -1,8 +1,15 @@
 /* ===================================================
-   StrideAPI.gs — v38.112.0 — 2026-04-23 PST — sendRawEmail endpoint for notify-new-order Edge Function
-   v38.112.0: NEW — sendRawEmail (POST) handler called by the notify-new-order Supabase Edge Function.
+   StrideAPI.gs — v38.113.0 — 2026-04-23 PST — sendRawEmail endpoint for notify-new-order Edge Function
+   v38.113.0: NEW — sendRawEmail (POST) handler called by the notify-new-order Supabase Edge Function.
               Accepts { to, subject, htmlBody } and sends via GmailApp. Token substitution and template
               lookup now happen in the Edge Function; GAS is used only for GmailApp send capability.
+   =================================================== */
+/* ===================================================
+   StrideAPI.gs — v38.112.0 — 2026-04-23 PST — Reference column inline-editable on Billing Report
+   v38.112.0: handleUpdateBillingRow_ now accepts and writes payload.reference to
+              the Billing_Ledger "Reference" column. Parity with sidemark/notes inline
+              edit — previously "Reference" was read-only because this branch was missing.
+   =================================================== */
 /* ===================================================
    StrideAPI.gs — v38.111.0 — 2026-04-23 PST — QBO Force Push with auto-assign DocNumber (rescue + permanent)
    v38.111.0: NEW — autoAssignDocNumber flag on qboCreateInvoice endpoint. When true,
@@ -9387,6 +9394,11 @@ function handleUpdateBillingRow_(clientSheetId, payload) {
     if (payload.sidemark !== undefined && hMap["Sidemark"]) {
       sheet.getRange(matchRow, hMap["Sidemark"]).setValue(String(payload.sidemark));
       updated.sidemark = String(payload.sidemark);
+    }
+    // v38.112.0: reference is now inline-editable from the Billing Report.
+    if (payload.reference !== undefined && hMap["Reference"]) {
+      sheet.getRange(matchRow, hMap["Reference"]).setValue(String(payload.reference));
+      updated.reference = String(payload.reference);
     }
     if (payload.description !== undefined && hMap["Description"]) {
       sheet.getRange(matchRow, hMap["Description"]).setValue(String(payload.description));
@@ -20259,6 +20271,7 @@ function handleUpdateClient_(payload) {
   try {
     Logger.log("handleUpdateClient_ PAYLOAD: sid=" + targetSheetId
       + " autoInspection=" + JSON.stringify(payload.autoInspection)
+      + " autoCharge=" + JSON.stringify(payload.autoCharge)
       + " shipmentNote=" + JSON.stringify(payload.shipmentNote)
       + " enableShipmentEmail=" + JSON.stringify(payload.enableShipmentEmail)
       + " enableNotifications=" + JSON.stringify(payload.enableNotifications));

@@ -85,6 +85,8 @@ interface InvoiceGroup {
   sourceSheetId?: string;
   clientSheetId?: string;
   lineItems: BillingRow[];
+  autoCharge?: boolean;  // Whether this invoice's client has autopay enabled — drives Stax vs QBO routing
+  staxCustomerId?: string | null;  // If set, client is Stax-enabled
 }
 
 const ALL_STATUSES = ['Unbilled', 'Invoiced', 'Billed', 'Void'];
@@ -346,6 +348,21 @@ export function Billing() {
     return map;
   }, [apiClients]);
 
+  // Bug 6: Per-client payment info map so billing rows can show Auto Pay badge.
+  // Billing rows only have tenant_id; autoCharge + staxCustomerId live on the client record.
+  const clientPayInfoMap = useMemo<Record<string, { autoCharge: boolean; staxCustomerId: string }>>(() => {
+    const map: Record<string, { autoCharge: boolean; staxCustomerId: string }> = {};
+    for (const c of apiClients) {
+      if (c.spreadsheetId) {
+        map[c.spreadsheetId] = {
+          autoCharge: c.autoCharge ?? false,
+          staxCustomerId: c.staxCustomerId ?? '',
+        };
+      }
+    }
+    return map;
+  }, [apiClients]);
+
   // ─── Billing Report Tab State ─────────────────────────────────────────────
   // Use useBilling(false) to avoid auto-fetch. We also keep it around for
   // re-send invoice email which needs liveRows to lookup clientSheetId.
@@ -384,22 +401,28 @@ export function Billing() {
 
   // Shared row mapper for both Supabase and GAS billing responses
   const mapBillingRows = useCallback((apiRows: BillingResponse['rows']): BillingRow[] =>
-    (apiRows ?? []).map(r => ({
-      ledgerRowId: r.ledgerRowId, status: r.status, invoiceNo: r.invoiceNo,
-      client: r.clientName, clientSheetId: r.clientSheetId, clientName: r.clientName,
-      date: r.date, svcCode: r.svcCode, svcName: r.svcName,
-      itemId: r.itemId, description: r.description, itemClass: r.itemClass,
-      qty: r.qty, rate: r.rate ?? 0, total: r.total ?? 0,
-      taskId: r.taskId, repairId: r.repairId, shipmentNo: r.shipmentNo,
-      notes: r.itemNotes, sourceSheetId: r.clientSheetId,
-      sidemark: r.sidemark || '', reference: r.reference || '', category: (r as any).category || '',
-      staxCustomerId: (r as any).staxCustomerId || null,
-      autoCharge: (r as any).autoCharge === true,
-      qboStatus: r.qboStatus || null,
-      qboInvoiceId: r.qboInvoiceId || null,
-      invoiceDate: r.invoiceDate || '',
-    }))
-  , []);
+    (apiRows ?? []).map(r => {
+      // Bug 6: Look up per-client autoCharge + staxCustomerId by tenant_id
+      // since billing rows from Supabase don't carry these client-level fields.
+      const payInfo = r.clientSheetId ? clientPayInfoMap[r.clientSheetId] : undefined;
+      return {
+        ledgerRowId: r.ledgerRowId, status: r.status, invoiceNo: r.invoiceNo,
+        client: r.clientName, clientSheetId: r.clientSheetId, clientName: r.clientName,
+        date: r.date, svcCode: r.svcCode, svcName: r.svcName,
+        itemId: r.itemId, description: r.description, itemClass: r.itemClass,
+        qty: r.qty, rate: r.rate ?? 0, total: r.total ?? 0,
+        taskId: r.taskId, repairId: r.repairId, shipmentNo: r.shipmentNo,
+        notes: r.itemNotes, sourceSheetId: r.clientSheetId,
+        sidemark: r.sidemark || '', reference: r.reference || '', category: (r as any).category || '',
+        // Prefer row-level value from GAS, fall back to client lookup (for Supabase path)
+        staxCustomerId: (r as any).staxCustomerId || payInfo?.staxCustomerId || null,
+        autoCharge: (r as any).autoCharge === true || payInfo?.autoCharge === true,
+        qboStatus: r.qboStatus || null,
+        qboInvoiceId: r.qboInvoiceId || null,
+        invoiceDate: r.invoiceDate || '',
+      };
+    })
+  , [clientPayInfoMap]);
 
   // forceGas=true → skip Supabase and go straight to GAS (used by Refresh button)
   const loadReport = useCallback(async (forceGas = false) => {
@@ -677,7 +700,7 @@ export function Billing() {
   // Split report data into two sections: unbilled line items vs grouped invoices
   const billingSections = useMemo(() => {
     const unbilledRows: BillingRow[] = [];
-    type BuilderGroup = InvoiceGroup & { _sidemarks: Set<string>; _qboStatuses: Set<string>; _dates: string[]; _invoiceDates: Set<string> };
+    type BuilderGroup = InvoiceGroup & { _sidemarks: Set<string>; _qboStatuses: Set<string>; _dates: string[]; _invoiceDates: Set<string>; _autoCharges: Set<boolean>; _staxIds: Set<string> };
     const groupMap: Record<string, BuilderGroup> = {};
     const order: string[] = [];
     for (const r of reportData) {
@@ -699,10 +722,14 @@ export function Billing() {
           sourceSheetId: r.sourceSheetId,
           clientSheetId: r.clientSheetId,
           lineItems: [],
+          autoCharge: undefined,
+          staxCustomerId: null,
           _sidemarks: new Set<string>(),
           _qboStatuses: new Set<string>(),
           _dates: [],
           _invoiceDates: new Set<string>(),
+          _autoCharges: new Set<boolean>(),
+          _staxIds: new Set<string>(),
         };
         order.push(r.invoiceNo);
       }
@@ -713,6 +740,8 @@ export function Billing() {
       if (r.qboStatus) g._qboStatuses.add(r.qboStatus);
       if (r.date) g._dates.push(r.date);
       if (r.invoiceDate) g._invoiceDates.add(r.invoiceDate);
+      if (r.autoCharge !== undefined) g._autoCharges.add(r.autoCharge);
+      if (r.staxCustomerId) g._staxIds.add(r.staxCustomerId);
     }
     const invoicedGroups: InvoiceGroup[] = order.map(k => {
       const g = groupMap[k];
@@ -720,6 +749,8 @@ export function Billing() {
       const qboStatuses = [...g._qboStatuses];
       const dates = g._dates.slice().sort();
       const invoiceDates = [...g._invoiceDates].sort();
+      const autoCharges = [...g._autoCharges];
+      const staxIds = [...g._staxIds];
       return {
         invoiceNo: g.invoiceNo,
         status: g.status,
@@ -734,6 +765,9 @@ export function Billing() {
         sourceSheetId: g.sourceSheetId,
         clientSheetId: g.clientSheetId,
         lineItems: g.lineItems,
+        // All line items in a group share a client, so autoCharge is consistent
+        autoCharge: autoCharges.length > 0 ? autoCharges[0] : undefined,
+        staxCustomerId: staxIds[0] || null,
       };
     });
     return { unbilledRows, invoicedGroups };
@@ -797,6 +831,7 @@ export function Billing() {
     if (!row.clientSheetId) return;
     const payload: Record<string, unknown> = { ledgerRowId: row.ledgerRowId };
     if (field === 'sidemark') payload.sidemark = value;
+    else if (field === 'reference') payload.reference = value;
     else if (field === 'description') payload.description = value;
     else if (field === 'rate') payload.rate = parseFloat(value) || 0;
     else if (field === 'qty') payload.qty = parseFloat(value) || 1;
@@ -860,7 +895,12 @@ export function Billing() {
       } }),
       col.accessor('reference', {
         header: 'Reference', size: 130, filterFn: mf,
-        cell: i => <span style={{ fontSize: 12, color: theme.colors.textSecondary, fontFamily: 'monospace' }}>{i.getValue() || '\u2014'}</span>,
+        cell: i => {
+          const canEdit = isReportTab && i.row.original.status === 'Unbilled';
+          return canEdit
+            ? <EditableCell value={i.getValue() || ''} onChange={v => saveReportField(i.row.original, 'reference', v)} />
+            : <span style={{ fontSize: 12, color: theme.colors.textSecondary, fontFamily: 'monospace' }}>{i.getValue() || '\u2014'}</span>;
+        },
       }),
       col.accessor('date', { header: 'Date', size: 100, cell: i => <span style={{ fontSize: 12, color: theme.colors.textSecondary }}>{fmt(i.getValue())}</span> }),
       col.accessor('svcCode', { header: 'Svc Code', size: 90, filterFn: mf, cell: i => <Badge t={i.getValue()} c={SVC_CFG[i.getValue()]} /> }),
@@ -1001,8 +1041,29 @@ export function Billing() {
       cell: i => <span style={{ fontSize: 12, fontWeight: 700, color: theme.colors.text }}>{i.getValue()}</span>,
     }),
     invCol.accessor('client', {
-      header: 'Client', size: 180,
-      cell: i => <span style={{ fontSize: 12, fontWeight: 500 }}>{i.getValue()}</span>,
+      header: 'Client', size: 200,
+      cell: i => {
+        const row = i.row.original;
+        // Show Auto Pay badge if client has autopay enabled (autoCharge !== false + has staxCustomerId)
+        const hasAutoPay = row.autoCharge !== false && !!row.staxCustomerId;
+        return (
+          <span style={{ fontSize: 12, fontWeight: 500, display: 'inline-flex', alignItems: 'center' }}>
+            {i.getValue()}
+            {hasAutoPay && (
+              <span
+                style={{
+                  marginLeft: 6, fontSize: 9, padding: '1px 5px', borderRadius: 4,
+                  background: '#F0FDF4', color: '#15803D', fontWeight: 700,
+                  whiteSpace: 'nowrap',
+                }}
+                title="Auto Pay enabled — this invoice can be charged automatically via Stax"
+              >
+                Auto Pay
+              </span>
+            )}
+          </span>
+        );
+      },
     }),
     invCol.accessor('sidemark', {
       header: 'Sidemark', size: 140,

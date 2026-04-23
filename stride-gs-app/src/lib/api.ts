@@ -2171,6 +2171,7 @@ export function postCreateInvoice(
 export interface UpdateBillingRowPayload {
   ledgerRowId: string;
   sidemark?: string;
+  reference?: string;  // v38.112.0 — inline-editable from Billing Report
   description?: string;
   rate?: number;
   qty?: number;
@@ -2184,7 +2185,7 @@ export interface UpdateBillingRowPayload {
 export interface UpdateBillingRowResponse {
   success: boolean;
   ledgerRowId: string;
-  updatedRow: { sidemark?: string; description?: string; rate?: number; qty?: number; total?: number; notes?: string };
+  updatedRow: { sidemark?: string; reference?: string; description?: string; rate?: number; qty?: number; total?: number; notes?: string };
   message?: string;
   error?: string;
 }
@@ -2453,6 +2454,10 @@ export interface UpdateClientPayload {
   enableNotifications?: boolean;
   autoInspection?: boolean;
   separateBySidemark?: boolean;
+  /** Bug 7 fix: autoCharge was missing from UpdateClientPayload, so edits never
+   *  persisted the Auto Pay toggle even though CREATE did. Structural parity
+   *  fix — keep in sync with OnboardClientPayload. */
+  autoCharge?: boolean;
   notes?: string;
   /** v38.37.0 — receiving-page banner text */
   shipmentNote?: string;
