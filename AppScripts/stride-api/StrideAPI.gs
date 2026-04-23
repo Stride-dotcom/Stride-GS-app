@@ -20252,6 +20252,7 @@ function handleUpdateClient_(payload) {
   try {
     Logger.log("handleUpdateClient_ PAYLOAD: sid=" + targetSheetId
       + " autoInspection=" + JSON.stringify(payload.autoInspection)
+      + " autoCharge=" + JSON.stringify(payload.autoCharge)
       + " shipmentNote=" + JSON.stringify(payload.shipmentNote)
       + " enableShipmentEmail=" + JSON.stringify(payload.enableShipmentEmail)
       + " enableNotifications=" + JSON.stringify(payload.enableNotifications));

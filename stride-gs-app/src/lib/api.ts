@@ -2453,6 +2453,10 @@ export interface UpdateClientPayload {
   enableNotifications?: boolean;
   autoInspection?: boolean;
   separateBySidemark?: boolean;
+  /** Bug 7 fix: autoCharge was missing from UpdateClientPayload, so edits never
+   *  persisted the Auto Pay toggle even though CREATE did. Structural parity
+   *  fix — keep in sync with OnboardClientPayload. */
+  autoCharge?: boolean;
   notes?: string;
   /** v38.37.0 — receiving-page banner text */
   shipmentNote?: string;

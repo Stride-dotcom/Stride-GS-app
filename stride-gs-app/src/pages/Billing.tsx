@@ -348,6 +348,21 @@ export function Billing() {
     return map;
   }, [apiClients]);
 
+  // Bug 6: Per-client payment info map so billing rows can show Auto Pay badge.
+  // Billing rows only have tenant_id; autoCharge + staxCustomerId live on the client record.
+  const clientPayInfoMap = useMemo<Record<string, { autoCharge: boolean; staxCustomerId: string }>>(() => {
+    const map: Record<string, { autoCharge: boolean; staxCustomerId: string }> = {};
+    for (const c of apiClients) {
+      if (c.spreadsheetId) {
+        map[c.spreadsheetId] = {
+          autoCharge: c.autoCharge ?? false,
+          staxCustomerId: c.staxCustomerId ?? '',
+        };
+      }
+    }
+    return map;
+  }, [apiClients]);
+
   // ─── Billing Report Tab State ─────────────────────────────────────────────
   // Use useBilling(false) to avoid auto-fetch. We also keep it around for
   // re-send invoice email which needs liveRows to lookup clientSheetId.
@@ -386,22 +401,28 @@ export function Billing() {
 
   // Shared row mapper for both Supabase and GAS billing responses
   const mapBillingRows = useCallback((apiRows: BillingResponse['rows']): BillingRow[] =>
-    (apiRows ?? []).map(r => ({
-      ledgerRowId: r.ledgerRowId, status: r.status, invoiceNo: r.invoiceNo,
-      client: r.clientName, clientSheetId: r.clientSheetId, clientName: r.clientName,
-      date: r.date, svcCode: r.svcCode, svcName: r.svcName,
-      itemId: r.itemId, description: r.description, itemClass: r.itemClass,
-      qty: r.qty, rate: r.rate ?? 0, total: r.total ?? 0,
-      taskId: r.taskId, repairId: r.repairId, shipmentNo: r.shipmentNo,
-      notes: r.itemNotes, sourceSheetId: r.clientSheetId,
-      sidemark: r.sidemark || '', reference: r.reference || '', category: (r as any).category || '',
-      staxCustomerId: (r as any).staxCustomerId || null,
-      autoCharge: (r as any).autoCharge === true,
-      qboStatus: r.qboStatus || null,
-      qboInvoiceId: r.qboInvoiceId || null,
-      invoiceDate: r.invoiceDate || '',
-    }))
-  , []);
+    (apiRows ?? []).map(r => {
+      // Bug 6: Look up per-client autoCharge + staxCustomerId by tenant_id
+      // since billing rows from Supabase don't carry these client-level fields.
+      const payInfo = r.clientSheetId ? clientPayInfoMap[r.clientSheetId] : undefined;
+      return {
+        ledgerRowId: r.ledgerRowId, status: r.status, invoiceNo: r.invoiceNo,
+        client: r.clientName, clientSheetId: r.clientSheetId, clientName: r.clientName,
+        date: r.date, svcCode: r.svcCode, svcName: r.svcName,
+        itemId: r.itemId, description: r.description, itemClass: r.itemClass,
+        qty: r.qty, rate: r.rate ?? 0, total: r.total ?? 0,
+        taskId: r.taskId, repairId: r.repairId, shipmentNo: r.shipmentNo,
+        notes: r.itemNotes, sourceSheetId: r.clientSheetId,
+        sidemark: r.sidemark || '', reference: r.reference || '', category: (r as any).category || '',
+        // Prefer row-level value from GAS, fall back to client lookup (for Supabase path)
+        staxCustomerId: (r as any).staxCustomerId || payInfo?.staxCustomerId || null,
+        autoCharge: (r as any).autoCharge === true || payInfo?.autoCharge === true,
+        qboStatus: r.qboStatus || null,
+        qboInvoiceId: r.qboInvoiceId || null,
+        invoiceDate: r.invoiceDate || '',
+      };
+    })
+  , [clientPayInfoMap]);
 
   // forceGas=true → skip Supabase and go straight to GAS (used by Refresh button)
   const loadReport = useCallback(async (forceGas = false) => {
