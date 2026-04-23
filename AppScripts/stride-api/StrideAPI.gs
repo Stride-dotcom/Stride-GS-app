@@ -1,4 +1,10 @@
 /* ===================================================
+   StrideAPI.gs — v38.110.0 — 2026-04-23 PST — Per-user resend now sends ONBOARDING (sendOnboardingToUsers endpoint)
+   v38.110.0: New `sendOnboardingToUsers` router case + handleSendOnboardingToUsers_ handler
+              so the Settings → Users per-user "Send" button can resend the ONBOARDING email
+              instead of the welcome email. No tempPassword issued — admins use the separate
+              Set Password flow if a credential reset is needed.
+   ===================================================
    StrideAPI.gs — v38.109.0 — 2026-04-23 PST — Route user activation email to ONBOARDING (not WELCOME)
    v38.109.0: (1) handleSendOnboardingEmail_ now accepts payload.recipient / tempPassword /
               loginEmail so it can be addressed to an individual user (not just CLIENT_EMAIL)
@@ -5615,6 +5621,14 @@ function doPost(e) {
       case "sendWelcomeToUsers":
         return withAdminGuard_(callerEmail, function() {
           return handleSendWelcomeToUsers_(payload, callerEmail);
+        });
+      // v38.110.0 — Per-user resend of the ONBOARDING email (getting-started
+      // guide). The Users-page "Send" button calls this instead of the welcome
+      // template; the welcome template is sent automatically on account
+      // creation, while onboarding is the one users want resent on demand.
+      case "sendOnboardingToUsers":
+        return withAdminGuard_(callerEmail, function() {
+          return handleSendOnboardingToUsers_(payload, callerEmail);
         });
       // v38.70.0 — Admin escape hatch: set a user's Supabase Auth password.
       case "adminSetUserPassword":
@@ -24993,6 +25007,109 @@ function handleSendWelcomeToUsers_(payload, callerEmail) {
   }
 
   Logger.log("handleSendWelcomeToUsers_: caller=" + callerEmail + " sent=" + sent + " failed=" + failed);
+  return jsonResponse_({ success: true, sent: sent, failed: failed, total: userEmails.length, results: results });
+}
+
+/**
+ * v38.110.0 — handleSendOnboardingToUsers_ — per-user resend of the
+ * ONBOARDING email from the Users page. Mirrors handleSendWelcomeToUsers_
+ * but calls handleSendOnboardingEmail_ so the user receives the
+ * getting-started template (with login URL + LOGIN_EMAIL token populated)
+ * instead of the generic welcome template.
+ *
+ * No tempPassword is generated — admins should use the separate
+ * Set Password flow if they want to issue a new credential.
+ *
+ * Payload: { userEmails: string[] }
+ * Returns: { success: true, sent: number, failed: number, results: [{email, ok, reason?, error?}] }
+ */
+function handleSendOnboardingToUsers_(payload, callerEmail) {
+  var userEmails = Array.isArray(payload.userEmails) ? payload.userEmails : [];
+  if (userEmails.length === 0) return errorResponse_("userEmails array is required and must not be empty", "MISSING_PARAM");
+
+  var cbSsId = prop_("CB_SPREADSHEET_ID");
+  if (!cbSsId) return errorResponse_("CB_SPREADSHEET_ID not configured", "CONFIG_ERROR");
+
+  var cbSS;
+  try { cbSS = SpreadsheetApp.openById(cbSsId); }
+  catch (e) { return errorResponse_("Cannot open CB: " + e.message, "CONFIG_ERROR"); }
+
+  var usersSh = cbSS.getSheetByName("Users");
+  if (!usersSh) return errorResponse_("Users tab not found in CB", "NOT_FOUND");
+
+  var data = usersSh.getDataRange().getValues();
+  var hRow = data[0] || [];
+  var hMap = {};
+  for (var h = 0; h < hRow.length; h++) {
+    var k = String(hRow[h] || "").trim().toUpperCase();
+    if (k) hMap[k] = h;
+  }
+  var emailIdx = hMap["EMAIL"];
+  var roleIdx = hMap["ROLE"];
+  var ssIdIdx = hMap["CLIENT SPREADSHEET ID"];
+  if (emailIdx === undefined || ssIdIdx === undefined) {
+    return errorResponse_("Users tab missing required columns", "SCHEMA_ERROR");
+  }
+
+  // Build email → rowNum map.
+  var emailToRow = {};
+  for (var r = 1; r < data.length; r++) {
+    var rowEmail = String(data[r][emailIdx] || "").trim().toLowerCase();
+    if (rowEmail) emailToRow[rowEmail] = r + 1;
+  }
+
+  var results = [];
+  var sent = 0;
+  var failed = 0;
+
+  for (var i = 0; i < userEmails.length; i++) {
+    var targetEmail = String(userEmails[i] || "").trim().toLowerCase();
+    if (!targetEmail) {
+      results.push({ email: userEmails[i], ok: false, reason: "blank_email" });
+      failed++;
+      continue;
+    }
+
+    var rowNum = emailToRow[targetEmail];
+    if (!rowNum) {
+      results.push({ email: targetEmail, ok: false, reason: "user_not_found" });
+      failed++;
+      continue;
+    }
+
+    var userRow = data[rowNum - 1];
+    var userRole = roleIdx !== undefined ? String(userRow[roleIdx] || "").trim().toLowerCase() : "";
+    var userClientSheetIds = String(userRow[ssIdIdx] || "").trim();
+    var firstClientId = parseCSV_(userClientSheetIds)[0] || userClientSheetIds;
+
+    if (!firstClientId) {
+      results.push({ email: targetEmail, ok: false, reason: "no_client_sheet_id" });
+      failed++;
+      continue;
+    }
+
+    try {
+      var resp = handleSendOnboardingEmail_(firstClientId, {
+        recipient: targetEmail,
+        loginEmail: targetEmail
+        // tempPassword omitted — this is a resend, not a credential issue.
+      });
+      var json;
+      try { json = JSON.parse(resp.getContent()); } catch (_) { json = {}; }
+      if (json && json.success) {
+        results.push({ email: targetEmail, ok: true, sentTo: targetEmail, role: userRole });
+        sent++;
+      } else {
+        results.push({ email: targetEmail, ok: false, reason: "send_failed", error: (json && json.error) || "unknown" });
+        failed++;
+      }
+    } catch (err) {
+      results.push({ email: targetEmail, ok: false, reason: "exception", error: String(err.message || err) });
+      failed++;
+    }
+  }
+
+  Logger.log("handleSendOnboardingToUsers_: caller=" + callerEmail + " sent=" + sent + " failed=" + failed);
   return jsonResponse_({ success: true, sent: sent, failed: failed, total: userEmails.length, results: results });
 }
 

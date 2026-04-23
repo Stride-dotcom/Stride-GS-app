@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom';
 import { Settings as SettingsIcon, Users, DollarSign, Mail, Database, Globe, Bell, Plus, ChevronRight, CheckCircle2, AlertCircle, UserPlus, Shield, ToggleLeft, ToggleRight, Eye, EyeOff, Wifi, WifiOff, RefreshCw, Loader2, RefreshCcw, ExternalLink, Wrench, PlayCircle, Send, FolderSync, BookText, LogIn, Cloud, Edit2, Zap, ArrowUpDown, ChevronUp, ChevronDown, X, Truck, Link2, Search } from 'lucide-react';
 import { useReactTable, getCoreRowModel, getSortedRowModel, flexRender, type SortingState, type ColumnDef } from '@tanstack/react-table';
-import { getApiUrl, getApiToken, setApiCredentials, isApiConfigured, fetchHealth, postOnboardClient, postUpdateClient, postSyncSettings, postRefreshCaches, postFixMissingFolders, postTestSendClientTemplates, postTestSendClaimEmails, fetchAutoIdSetting, postUpdateAutoIdSetting, postResolveOnboardUser, fetchStaxConfig, postUpdateStaxConfig, apiPost, postSyncTemplatesToClients, postBulkSyncToSupabase, postPurgeInactiveFromSupabase, fetchClients, postFinishClientSetup, postSendWelcomeToUsers, resyncUsersPreview, resyncUsers, resyncClientsPreview, resyncClients, setNextFetchNoCache, adminSetUserPassword, ensureUserInAuth, listMissingAuthUsers, postTestGenerateDoc, apiFetch, postSendIntakeInvitation } from '../lib/api';
+import { getApiUrl, getApiToken, setApiCredentials, isApiConfigured, fetchHealth, postOnboardClient, postUpdateClient, postSyncSettings, postRefreshCaches, postFixMissingFolders, postTestSendClientTemplates, postTestSendClaimEmails, fetchAutoIdSetting, postUpdateAutoIdSetting, postResolveOnboardUser, fetchStaxConfig, postUpdateStaxConfig, apiPost, postSyncTemplatesToClients, postBulkSyncToSupabase, postPurgeInactiveFromSupabase, fetchClients, postFinishClientSetup, postSendOnboardingToUsers, resyncUsersPreview, resyncUsers, resyncClientsPreview, resyncClients, setNextFetchNoCache, adminSetUserPassword, ensureUserInAuth, listMissingAuthUsers, postTestGenerateDoc, apiFetch, postSendIntakeInvitation } from '../lib/api';
 import type { BulkSyncResult } from '../lib/api';
 import type { EmailTemplate } from '../lib/api';
 import { entityEvents } from '../lib/entityEvents';
@@ -968,11 +968,11 @@ export function Settings() {
     setSendingWelcomeEmail(userEmail);
     setSendWelcomeResult(null);
     try {
-      const res = await postSendWelcomeToUsers({ userEmails: [userEmail] });
+      const res = await postSendOnboardingToUsers({ userEmails: [userEmail] });
       if (res.ok && res.data?.success) {
         const row = res.data.results[0];
         if (row?.ok) {
-          setSendWelcomeResult({ email: userEmail, ok: true, message: `Welcome email sent to ${userEmail}` });
+          setSendWelcomeResult({ email: userEmail, ok: true, message: `Onboarding email sent to ${userEmail}` });
         } else {
           setSendWelcomeResult({ email: userEmail, ok: false, message: `Send failed: ${row?.reason || row?.error || 'unknown'}` });
         }
@@ -983,7 +983,6 @@ export function Settings() {
       setSendWelcomeResult({ email: userEmail, ok: false, message: String(err) });
     } finally {
       setSendingWelcomeEmail(null);
-      // Auto-dismiss toast after 4 seconds
       setTimeout(() => setSendWelcomeResult(null), 4000);
     }
   }
@@ -1279,10 +1278,10 @@ export function Settings() {
                   opacity: (sendingWelcomeEmail !== null && sendingWelcomeEmail !== u.email) ? 0.4 : 1,
                   fontFamily: 'inherit',
                 }}
-                title={`Send welcome email to ${u.email}`}
+                title={`Send onboarding email to ${u.email}`}
               >
                 {sendingWelcomeEmail === u.email ? <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} /> : <Send size={12} />}
-                {sendingWelcomeEmail === u.email ? 'Sending\u2026' : 'Send Welcome'}
+                {sendingWelcomeEmail === u.email ? 'Sending\u2026' : 'Send Onboarding'}
               </button>
             )}
             {realUser?.role === 'admin' && u.email !== realUser.email && missingAuthEmails.has(u.email.toLowerCase()) && (

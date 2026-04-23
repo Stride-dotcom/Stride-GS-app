@@ -3211,6 +3211,23 @@ export function postSendWelcomeToUsers(
 }
 
 /**
+ * Per-user resend of the ONBOARDING email (getting-started guide).
+ * Admin-only. No tempPassword issued — admins use Set Password separately
+ * if they want to reset credentials. Backed by handleSendOnboardingToUsers_.
+ */
+export function postSendOnboardingToUsers(
+  payload: SendWelcomeToUsersPayload,
+  signal?: AbortSignal
+) {
+  return apiPost<SendWelcomeToUsersResponse>(
+    'sendOnboardingToUsers',
+    payload as unknown as Record<string, unknown>,
+    undefined,
+    { signal }
+  );
+}
+
+/**
  * Admin escape hatch — set a user's Supabase Auth password directly.
  * Used when a client can't complete the self-serve Forgot Password flow.
  * StrideAPI handler: handleAdminSetUserPassword_ (admin-only).
