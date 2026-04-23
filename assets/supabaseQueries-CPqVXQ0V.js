@@ -1,1 +1,0 @@
-import{a as e}from"./supabaseQueries-CjbfGaPe.js";export{e as fetchClientsFromSupabase};
