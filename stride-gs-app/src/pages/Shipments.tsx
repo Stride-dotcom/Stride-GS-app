@@ -27,7 +27,6 @@ import { useClients } from '../hooks/useClients';
 import { useClientFilterUrlSync } from '../hooks/useClientFilterUrlSync';
 import { useIsMobile } from '../hooks/useIsMobile';
 import { useAuth } from '../contexts/AuthContext';
-import { ShipmentDetailPanel as SharedShipmentDetailPanel } from '../components/shared/ShipmentDetailPanel';
 
 // ─── Row type ───────────────────────────────────────────────────────────────
 interface ShipmentRow {
@@ -215,38 +214,6 @@ function buildColumns(onView: (row: ShipmentRow) => void) {
   ];
 }
 
-// ─── Detail Panel — uses shared component with quick actions ─────────────────
-
-function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onItemsChanged }: {
-  shipment: ShipmentRow; onClose: () => void;
-  userRole?: 'admin' | 'staff' | 'client'; isParent?: boolean; onItemsChanged?: () => void;
-}) {
-  // Map ShipmentRow → shared component's Shipment shape
-  const mapped = useMemo(() => ({
-    shipmentNo: shipment.shipmentNo,
-    client: shipment.clientName,
-    clientSheetId: shipment.clientSheetId,
-    status: shipment.status,
-    carrier: shipment.carrier,
-    tracking: shipment.tracking,
-    receivedDate: shipment.receivedDate,
-    createdBy: shipment.createdBy,
-    notes: shipment.notes,
-    items: [],
-    totalItems: shipment.itemCount,
-    folderUrl: shipment.folderUrl || undefined,
-  }), [shipment]);
-
-  return (
-    <SharedShipmentDetailPanel
-      shipment={mapped}
-      onClose={onClose}
-      userRole={userRole}
-      isParent={isParent}
-      onItemsChanged={onItemsChanged}
-    />
-  );
-}
 
 // ─── Filter Dropdown ─────────────────────────────────────────────────────────
 
@@ -340,7 +307,6 @@ export function Shipments() {
   const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([]);
   const [rowSelection, setRowSelection] = useState<RowSelectionState>({});
   const [globalFilter, setGlobalFilter] = useState('');
-  const [selectedShipment, setSelectedShipment] = useState<ShipmentRow | null>(null);
   const { user } = useAuth();
 
   // Client-role users only see their own accounts in the dropdown — admin/staff see all.
@@ -435,13 +401,14 @@ export function Shipments() {
   // triggers useApiData refetch via Supabase-first path). A manual refetch() here
   // would force GAS (skipSupabaseCacheOnce) and hang the spinner on multi-client.
 
-  // Effect 2: When data arrives, open the pending shipment
+  // Effect 2: When data arrives, navigate to the pending shipment
   useEffect(() => {
     if (pendingOpenRef.current && data.length > 0) {
-      const match = data.find(s => s.shipmentNo === pendingOpenRef.current);
-      if (match) { setSelectedShipment(match); pendingOpenRef.current = null; }
+      const id = pendingOpenRef.current;
+      const found = data.some(s => s.shipmentNo === id);
+      if (found) { pendingOpenRef.current = null; navigate(`/shipments/${id}`); }
     }
-  }, [data]);
+  }, [data, navigate]);
 
   // Dynamic lists
   const ALL_CARRIERS = useMemo(() => Array.from(new Set(data.map(r => r.carrier).filter(Boolean))).sort(), [data]);
@@ -472,7 +439,7 @@ export function Shipments() {
     setColumnFilters(f);
   }, [statusFilter, carrierFilter]);
 
-  const columns = useMemo(() => buildColumns(setSelectedShipment), []);
+  const columns = useMemo(() => buildColumns((row) => navigate(`/shipments/${row.shipmentNo}`)), [navigate]);
 
   const table = useReactTable({
     data,
@@ -654,10 +621,10 @@ export function Shipments() {
             </thead>
             <tbody>
               {virtualRows.length > 0 && <tr style={{ height: virtualRows[0].start }}><td colSpan={table.getVisibleLeafColumns().length} /></tr>}
-              {virtualRows.map(vRow => { const row = allRows[vRow.index]; const isActivePanel = selectedShipment?.shipmentNo === row.original.shipmentNo; const rowBg = isActivePanel ? '#FEF3EE' : ''; return (
+              {virtualRows.map(vRow => { const row = allRows[vRow.index]; const rowBg = ''; return (
                 <tr key={row.id}
-                  style={{ borderBottom: `1px solid ${theme.colors.borderSubtle}`, cursor: 'pointer', transition: 'background 0.1s', background: rowBg, borderLeft: isActivePanel ? `3px solid ${theme.colors.orange}` : '3px solid transparent' }}
-                  onMouseEnter={e => { if (!isActivePanel) e.currentTarget.style.background = theme.colors.bgSubtle; const a = e.currentTarget.querySelector('.row-actions') as HTMLElement; if (a) a.style.opacity = '1'; }}
+                  style={{ borderBottom: `1px solid ${theme.colors.borderSubtle}`, cursor: 'pointer', transition: 'background 0.1s', background: rowBg, borderLeft: '3px solid transparent' }}
+                  onMouseEnter={e => { e.currentTarget.style.background = theme.colors.bgSubtle; const a = e.currentTarget.querySelector('.row-actions') as HTMLElement; if (a) a.style.opacity = '1'; }}
                   onMouseLeave={e => { e.currentTarget.style.background = rowBg; const a = e.currentTarget.querySelector('.row-actions') as HTMLElement; if (a) a.style.opacity = '0'; }}
                   onClick={() => navigate(`/shipments/${row.original.shipmentNo}`)}
                 >
@@ -698,16 +665,6 @@ export function Shipments() {
         </div>
       )}
 
-      {/* Detail Panel — modals are self-contained inside the panel */}
-      {selectedShipment && (
-        <ShipmentDetailPanel
-          shipment={selectedShipment}
-          onClose={() => setSelectedShipment(null)}
-          userRole={user?.role}
-          isParent={user?.isParent}
-          onItemsChanged={() => refetchShipments()}
-        />
-      )}
       <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
       </div>
     </div>

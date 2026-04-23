@@ -23,7 +23,6 @@ import { theme } from '../styles/theme';
 import { fmtDate } from '../lib/constants';
 import { useItemIndicators } from '../hooks/useItemIndicators';
 import { ItemIdBadges } from '../components/shared/ItemIdBadges';
-import { TaskDetailPanel } from '../components/shared/TaskDetailPanel';
 import { WriteButton } from '../components/shared/WriteButton';
 import { BatchGuard, checkBatchClientGuard } from '../components/shared/BatchGuard';
 import { ConfirmDialog } from '../components/shared/ConfirmDialog';
@@ -34,8 +33,6 @@ import { isApiConfigured, postRequestRepairQuote, postBatchCancelTasks, postBatc
 import { mergePreflightSkips } from '../lib/batchLoop';
 import { applyBulkPatch, revertBulkPatchForFailures } from '../lib/optimisticBulk';
 import { useTasks } from '../hooks/useTasks';
-import { useRepairs } from '../hooks/useRepairs';
-import { useInventory } from '../hooks/useInventory';
 import { useBatchData } from '../contexts/BatchDataContext';
 import { useAuth } from '../contexts/AuthContext';
 import { MultiSelectFilter } from '../components/shared/MultiSelectFilter';
@@ -223,22 +220,13 @@ export function Tasks() {
     return ids.length === 1 ? ids[0] : ids;
   }, [clientFilter, apiClients]);
 
-  const { tasks, loading: tasksLoading, refetch: refetchTasks, applyTaskPatch, mergeTaskPatch, clearTaskPatch, addOptimisticTask, removeOptimisticTask } = useTasks(apiConfigured && clientFilter.length > 0, selectedSheetId);
-  const { repairs, addOptimisticRepair, removeOptimisticRepair } = useRepairs(apiConfigured && clientFilter.length > 0, selectedSheetId);
-  // v2026-04-22 — useInventory is mounted on Tasks page so the panel can
-  // optimistically flip the parent item's status on disposal completion.
-  // Shares the same in-memory cache with every other useInventory instance
-  // in the app, so patches propagate across pages + tabs via realtime.
-  const { applyItemPatch, clearItemPatch } = useInventory(apiConfigured && clientFilter.length > 0, selectedSheetId);
+  const { tasks, loading: tasksLoading, refetch: refetchTasks, applyTaskPatch, clearTaskPatch } = useTasks(apiConfigured && clientFilter.length > 0, selectedSheetId);
   const itemIndicators = useItemIndicators(selectedSheetId);
   (window as any).__itemIndicators = itemIndicators.loaded ? itemIndicators : null;
   const ALL_ASSIGNED = useMemo(() => [...new Set(tasks.map(t => t.assignedTo).filter(Boolean))].sort(), [tasks]);
 
   const columns = useMemo(() => cols(), []);
-  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
-  const selectedTask = useMemo(() => tasks.find(t => t.taskId === selectedTaskId) ?? null, [tasks, selectedTaskId]);
-  // Bridge for column cell access to component state
-  (window as any).__openTaskDetail = (task: Task) => setSelectedTaskId(task.taskId);
+  (window as any).__openTaskDetail = (task: Task) => navigate(`/tasks/${task.taskId}`);
   (window as any).__toggleTaskPriority = async (taskId: string, clientSheetId: string, currentPriority: string) => {
     if (!apiConfigured || !clientSheetId || user?.role === 'client') return;
     const newPriority = currentPriority === 'High' ? 'Normal' : 'High';
@@ -291,13 +279,14 @@ export function Tasks() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [apiClients.length]);
 
-  // Effect 2: When tasks arrive, open the pending task
+  // Effect 2: When tasks arrive, navigate to the pending task
   useEffect(() => {
     if (pendingOpenRef.current && tasks.length > 0) {
-      const match = tasks.find(t => t.taskId === pendingOpenRef.current);
-      if (match) { setSelectedTaskId(match.taskId); pendingOpenRef.current = null; }
+      const id = pendingOpenRef.current;
+      const found = tasks.some(t => t.taskId === id);
+      if (found) { pendingOpenRef.current = null; navigate(`/tasks/${id}`); }
     }
-  }, [tasks]);
+  }, [tasks, navigate]);
 
   const { sorting, setSorting, colVis, setColVis, columnOrder, setColumnOrder, statusFilter: sf, toggleStatus, clearStatusFilter } = useTablePreferences('tasks', [{ id: 'priority', desc: false }, { id: 'dueDate', desc: false }], {}, DEFAULT_COL_ORDER);
   const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([]);
@@ -637,7 +626,6 @@ export function Tasks() {
       <style>{`@keyframes slideUp { from { transform: translateY(100%); } to { transform: translateY(0); } } @keyframes spin { to { transform: rotate(360deg); } }`}</style>
       {toast && createPortal(<div style={{ position: 'fixed', bottom: 80, left: '50%', transform: 'translateX(-50%)', background: '#1A1A1A', color: '#fff', padding: '10px 20px', borderRadius: 10, fontSize: 13, fontWeight: 600, zIndex: 9999, boxShadow: '0 4px 12px rgba(0,0,0,0.3)', animation: 'slideUp 0.2s ease-out' }}>{toast}</div>, document.body)}
       {batchGuardClients && <BatchGuard selectedClients={batchGuardClients} actionName={batchGuardAction} onDismiss={() => setBatchGuardClients(null)} />}
-      {selectedTask && <TaskDetailPanel task={selectedTask} onClose={() => setSelectedTaskId(null)} onTaskUpdated={refetchTasks} onNavigateToItem={(itemId) => { setSelectedTaskId(null); navigate('/inventory', { state: { openItemId: itemId } }); }} itemRepairs={repairs.filter(r => r.itemId === selectedTask.itemId)} applyTaskPatch={applyTaskPatch} mergeTaskPatch={mergeTaskPatch} clearTaskPatch={clearTaskPatch} addOptimisticTask={addOptimisticTask} removeOptimisticTask={removeOptimisticTask} addOptimisticRepair={addOptimisticRepair} removeOptimisticRepair={removeOptimisticRepair} applyItemPatch={applyItemPatch} clearItemPatch={clearItemPatch} />}
       <FloatingActionMenu
         show={isMobile}
         actions={(() => {
