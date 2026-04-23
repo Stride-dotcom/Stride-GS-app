@@ -29,7 +29,7 @@ import type { InventoryItem } from '../../lib/types';
 
 interface ShipmentItem {
   itemId: string; vendor: string; description: string; itemClass: string;
-  qty: number; location: string; sidemark: string;
+  qty: number; location: string; sidemark: string; reference?: string;
   needsInspection?: boolean; needsAssembly?: boolean;
 }
 
@@ -78,9 +78,13 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
   // Lazy-load items: fetch kicked off once the Items tab becomes active OR
   // the Details tab's Quick Actions render (which also needs the list).
   const [items, setItems] = useState<ShipmentItem[]>(shipment.items || []);
-  const [itemsLoading, setItemsLoading] = useState(!!shipment.clientSheetId);
+  // When items are supplied up-front (e.g. page mode pre-fetched them), skip
+  // the panel's lazy re-fetch entirely — avoids the "items load after panel
+  // opens" flash that's visible on full-page views.
+  const initiallyHydrated = !!(shipment.items && shipment.items.length > 0);
+  const [itemsLoading, setItemsLoading] = useState(!!shipment.clientSheetId && !initiallyHydrated);
   const [itemsError, setItemsError] = useState<string | null>(null);
-  const [itemsFetched, setItemsFetched] = useState(false);
+  const [itemsFetched, setItemsFetched] = useState(initiallyHydrated);
 
   useEffect(() => {
     if (!shipment.clientSheetId || itemsFetched) return;
@@ -91,6 +95,7 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
     const mapItem = (i: ApiShipmentItem): ShipmentItem => ({
       itemId: i.itemId, vendor: i.vendor || '', description: i.description,
       itemClass: i.itemClass, qty: i.qty, location: i.location, sidemark: i.sidemark || '',
+      reference: (i as { reference?: string }).reference || '',
     });
 
     // Session 71: Try Supabase first (~50ms), fall back to GAS (2-5s)
@@ -246,10 +251,12 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
               </th>
               <th style={{ padding: '6px 10px', textAlign: 'left', fontSize: 10, color: theme.colors.textMuted, textTransform: 'uppercase' }}>#</th>
               <th style={{ padding: '6px 10px', textAlign: 'left', fontSize: 10, color: theme.colors.textMuted, textTransform: 'uppercase' }}>Item ID</th>
-              <th style={{ padding: '6px 10px', textAlign: 'left', fontSize: 10, color: theme.colors.textMuted, textTransform: 'uppercase' }}>Description</th>
+              <th style={{ padding: '6px 10px', textAlign: 'center', fontSize: 10, color: theme.colors.textMuted, textTransform: 'uppercase' }}>Qty</th>
               <th style={{ padding: '6px 10px', textAlign: 'left', fontSize: 10, color: theme.colors.textMuted, textTransform: 'uppercase' }}>Vendor</th>
-              <th style={{ padding: '6px 10px', textAlign: 'left', fontSize: 10, color: theme.colors.textMuted, textTransform: 'uppercase' }}>Class</th>
+              <th style={{ padding: '6px 10px', textAlign: 'left', fontSize: 10, color: theme.colors.textMuted, textTransform: 'uppercase' }}>Description</th>
               <th style={{ padding: '6px 10px', textAlign: 'left', fontSize: 10, color: theme.colors.textMuted, textTransform: 'uppercase' }}>Location</th>
+              <th style={{ padding: '6px 10px', textAlign: 'left', fontSize: 10, color: theme.colors.textMuted, textTransform: 'uppercase' }}>Sidemark</th>
+              <th style={{ padding: '6px 10px', textAlign: 'left', fontSize: 10, color: theme.colors.textMuted, textTransform: 'uppercase' }}>Reference</th>
               <th style={{ padding: '6px 10px', textAlign: 'left', fontSize: 10, color: theme.colors.textMuted, textTransform: 'uppercase' }}>Tasks</th>
             </tr></thead>
             <tbody>{items.map((item, idx) => (
@@ -268,10 +275,12 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
                     <ItemIdBadges itemId={item.itemId} inspOpenItems={inspOpenItems} inspDoneItems={inspDoneItems} asmOpenItems={asmOpenItems} asmDoneItems={asmDoneItems} repairOpenItems={repairOpenItems} repairDoneItems={repairDoneItems} />
                   </span>
                 </td>
-                <td style={{ padding: '6px 10px', color: theme.colors.textSecondary, maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.description}</td>
+                <td style={{ padding: '6px 10px', textAlign: 'center' }}>{item.qty}</td>
                 <td style={{ padding: '6px 10px', color: theme.colors.textSecondary, maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.vendor || <span style={{ color: theme.colors.textMuted }}>{'\u2014'}</span>}</td>
-                <td style={{ padding: '6px 10px' }}>{item.itemClass}</td>
+                <td style={{ padding: '6px 10px', color: theme.colors.textSecondary, maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.description}</td>
                 <td style={{ padding: '6px 10px', fontFamily: 'monospace', color: theme.colors.textSecondary }}>{item.location}</td>
+                <td style={{ padding: '6px 10px', color: theme.colors.textSecondary, maxWidth: 100, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.sidemark || <span style={{ color: theme.colors.textMuted }}>{'\u2014'}</span>}</td>
+                <td style={{ padding: '6px 10px', color: theme.colors.textSecondary, maxWidth: 100, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.reference || <span style={{ color: theme.colors.textMuted }}>{'\u2014'}</span>}</td>
                 <td style={{ padding: '6px 10px' }}>
                   {item.needsInspection && <span style={{ display: 'inline-block', padding: '1px 6px', borderRadius: 8, fontSize: 9, fontWeight: 600, background: '#FEF3EE', color: '#E85D2D', marginRight: 3 }}>INSP</span>}
                   {item.needsAssembly && <span style={{ display: 'inline-block', padding: '1px 6px', borderRadius: 8, fontSize: 9, fontWeight: 600, background: '#F0FDF4', color: '#15803D' }}>ASM</span>}

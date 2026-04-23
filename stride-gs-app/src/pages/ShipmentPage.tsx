@@ -86,6 +86,7 @@ export function ShipmentPage() {
       qty: i.qty || 1,
       location: i.location || '',
       sidemark: i.sidemark || '',
+      reference: (i as { reference?: string }).reference || '',
     })),
   };
 
