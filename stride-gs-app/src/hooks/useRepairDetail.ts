@@ -68,35 +68,36 @@ export function useRepairDetail(repairId: string | undefined): UseRepairDetailRe
           return;
         }
 
-        // Supabase repair has sparse fields — enrich from GAS for full data
-        if (sbRepair.clientSheetId) {
-          try {
-            const gasResp = await fetchRepairById(repairId, sbRepair.clientSheetId, controller.signal);
-            if (fetchId !== fetchCountRef.current) return;
-            if (gasResp.ok && gasResp.data?.success && gasResp.data.repair) {
-              const gasRepair = gasResp.data.repair;
-              // Merge: GAS is authoritative where it has values, Supabase fills the rest
-              // (clientName, sidemark from clientNameMap/Supabase fallback)
-              const merged = {
-                ...sbRepair,
-                ...gasRepair,
-                clientSheetId: sbRepair.clientSheetId,
-                clientName: gasRepair.clientName || sbRepair.clientName,
-              };
-              setRepair(merged);
-              setSource('legacy');
-              setStatus('loaded');
-              maybeEnrichFromInventory(merged, fetchId, fetchCountRef, setRepair, clientNameMapRef.current);
-              return;
-            }
-          } catch {
-            // GAS failed — use Supabase data as-is
-          }
-        }
-
+        // Render immediately from Supabase (~50ms). GAS enrichment runs
+        // fire-and-forget below so the page is interactive right away.
+        // Previously this was AWAITED, which forced every Repair page load
+        // to wait 2-5s for the GAS roundtrip even when Supabase had the data.
         setRepair(sbRepair);
         setSource('supabase');
         setStatus('loaded');
+
+        // Background GAS enrichment: Supabase repair rows are often sparse
+        // (missing vendor, description, notes from the sheet), so we fetch
+        // the full row from GAS and merge into state when it arrives. If it
+        // fails or never arrives, the user still sees Supabase data.
+        if (sbRepair.clientSheetId) {
+          fetchRepairById(repairId, sbRepair.clientSheetId, controller.signal)
+            .then(gasResp => {
+              if (fetchId !== fetchCountRef.current) return;
+              if (gasResp.ok && gasResp.data?.success && gasResp.data.repair) {
+                const gasRepair = gasResp.data.repair;
+                setRepair(prev => prev ? {
+                  ...prev,
+                  ...gasRepair,
+                  clientSheetId: sbRepair.clientSheetId,
+                  clientName: gasRepair.clientName || prev.clientName,
+                } : prev);
+                setSource('legacy');
+              }
+            })
+            .catch(() => { /* best-effort */ });
+        }
+        // Also kick off inventory enrichment in parallel (independent of GAS).
         maybeEnrichFromInventory(sbRepair, fetchId, fetchCountRef, setRepair, clientNameMapRef.current);
         return;
       }
