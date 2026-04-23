@@ -17,6 +17,9 @@ import type { TabbedDetailPanelTab } from './TabbedDetailPanel';
 import { EntityPage } from './EntityPage';
 import { buildDeepLink } from '../../lib/deepLinks';
 import { useIsMobile } from '../../hooks/useIsMobile';
+import { usePhotos } from '../../hooks/usePhotos';
+import { useDocuments } from '../../hooks/useDocuments';
+import { useEntityNotes } from '../../hooks/useEntityNotes';
 
 export interface LinkedRecord {
   id: string;
@@ -527,6 +530,26 @@ export function ItemDetailPanel({
   // full task/repair list in scope. Tenant-scoped Supabase read, ~50ms.
   const { inspOpenItems, inspDoneItems, asmOpenItems, asmDoneItems, repairOpenItems, repairDoneItems } = useItemIndicators(clientSheetId);
 
+  // Tab badge counts — Photos / Docs / Notes. Drive folder URLs are external
+  // links, not uploaded assets, and are intentionally NOT counted here.
+  const { photos: itemPhotos } = usePhotos({
+    entityType: 'inventory',
+    entityId: item.itemId ?? null,
+    tenantId: clientSheetId ?? null,
+    itemId: item.itemId ?? null,
+    enabled: renderAsPage && !!item.itemId,
+  });
+  const { documents: itemDocs } = useDocuments({
+    contextType: 'item',
+    contextId: item.itemId ?? '',
+    tenantId: clientSheetId ?? null,
+    enabled: renderAsPage && !!item.itemId,
+  });
+  const { notes: itemNotesList } = useEntityNotes('inventory', renderAsPage ? (item.itemId ?? '') : '');
+  const photoCount = renderAsPage ? itemPhotos.length : 0;
+  const docCount   = renderAsPage ? itemDocs.length   : 0;
+  const noteCount  = renderAsPage ? itemNotesList.length : 0;
+
   // Move history — fetch from API when panel opens
   const [moveHistory, setMoveHistory] = useState<MoveHistoryEntry[]>([]);
   useEffect(() => {
@@ -935,41 +958,45 @@ export function ItemDetailPanel({
         </Section>
       )}
 
-      {/* Related — folder buttons + linked-record shortcuts. In page mode the
-          folder buttons move to the Photos/Docs tab; here we only show the
-          linked-record shortcut buttons. */}
-      <Section icon={FileText} title="Related" count={linkedTasks.length + linkedRepairs.length + linkedWillCalls.length || undefined}>
-        {!renderAsPage && (shipmentFolderUrl || photosFolderId) && (
-          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 8 }}>
-            {shipmentFolderUrl && (
-              <FolderButton label={`Shipment ${item.shipmentNumber || 'Folder'}`} url={shipmentFolderUrl} icon={Truck} />
-            )}
-            {photosFolderId && (
-              <FolderButton label="Photos" url={`https://drive.google.com/drive/folders/${photosFolderId}`} icon={FolderOpen} />
-            )}
-          </div>
-        )}
+      {/* Related — panel mode only. In page mode the Activity tab already
+          shows linked tasks/repairs/WCs with richer context (status, dates,
+          audit trail), and drive folders have moved to the Photos/Docs tabs.
+          Rendering this section in page mode would duplicate both, so it's
+          suppressed there. */}
+      {!renderAsPage && (
+        <Section icon={FileText} title="Related" count={linkedTasks.length + linkedRepairs.length + linkedWillCalls.length || undefined}>
+          {(shipmentFolderUrl || photosFolderId) && (
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 8 }}>
+              {shipmentFolderUrl && (
+                <FolderButton label={`Shipment ${item.shipmentNumber || 'Folder'}`} url={shipmentFolderUrl} icon={Truck} />
+              )}
+              {photosFolderId && (
+                <FolderButton label="Photos" url={`https://drive.google.com/drive/folders/${photosFolderId}`} icon={FolderOpen} />
+              )}
+            </div>
+          )}
 
-        {!renderAsPage && entityFolderButtons.length > 0 && (
-          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 10 }}>
-            {entityFolderButtons.map(({ label, url }) => (
-              <FolderButton key={label} label={label} url={url} icon={ExternalLink} />
-            ))}
-          </div>
-        )}
+          {entityFolderButtons.length > 0 && (
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 10 }}>
+              {entityFolderButtons.map(({ label, url }) => (
+                <FolderButton key={label} label={label} url={url} icon={ExternalLink} />
+              ))}
+            </div>
+          )}
 
-        {hasLinkedRecords ? (
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-            <LinkedRecordButton records={linkedTasks} type="task" onNavigate={onNavigateToRecord} />
-            <LinkedRecordButton records={linkedRepairs} type="repair" onNavigate={onNavigateToRecord} />
-            <LinkedRecordButton records={linkedWillCalls} type="willcall" onNavigate={onNavigateToRecord} />
-          </div>
-        ) : !item.shipmentNumber && !shipmentFolderUrl && entityFolderButtons.length === 0 ? (
-          <div style={{ fontSize: 12, color: theme.colors.textMuted, padding: '4px 0', fontStyle: 'italic' }}>
-            No linked tasks, repairs, or will calls found for this item.
-          </div>
-        ) : null}
-      </Section>
+          {hasLinkedRecords ? (
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              <LinkedRecordButton records={linkedTasks} type="task" onNavigate={onNavigateToRecord} />
+              <LinkedRecordButton records={linkedRepairs} type="repair" onNavigate={onNavigateToRecord} />
+              <LinkedRecordButton records={linkedWillCalls} type="willcall" onNavigate={onNavigateToRecord} />
+            </div>
+          ) : !item.shipmentNumber && !shipmentFolderUrl && entityFolderButtons.length === 0 ? (
+            <div style={{ fontSize: 12, color: theme.colors.textMuted, padding: '4px 0', fontStyle: 'italic' }}>
+              No linked tasks, repairs, or will calls found for this item.
+            </div>
+          ) : null}
+        </Section>
+      )}
     </>
   );
 
@@ -1136,6 +1163,7 @@ export function ItemDetailPanel({
       id: 'photos',
       label: 'Photos',
       icon: <ImageIcon size={13} />,
+      badgeCount: photoCount,
       render: () => (
         <PhotosPanelProxy
           item={item}
@@ -1148,6 +1176,7 @@ export function ItemDetailPanel({
       id: 'docs',
       label: 'Docs',
       icon: <FileText size={13} />,
+      badgeCount: docCount,
       render: () => (
         <DocsPanelProxy
           itemId={item.itemId}
@@ -1160,6 +1189,7 @@ export function ItemDetailPanel({
       id: 'notes',
       label: 'Notes',
       icon: <StickyNote size={13} />,
+      badgeCount: noteCount,
       render: () => <NotesPanelProxy
         itemId={item.itemId}
         itemTasks={itemTasks}
@@ -1178,6 +1208,7 @@ export function ItemDetailPanel({
       id: 'activity',
       label: 'Activity',
       icon: <Activity size={13} />,
+      badgeCount: renderAsPage ? historyCount : undefined,
       render: () => renderActivityTab(),
     },
   ];
