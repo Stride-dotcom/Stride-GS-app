@@ -2114,6 +2114,9 @@ export function Settings() {
           enableNotifications: data.enableNotifications,
           autoInspection: data.autoInspection,
           separateBySidemark: data.separateBySidemark,
+          // Bug 7: autoCharge was missing here — edits to Auto Pay toggle
+          // didn't update local state, so reopening the dialog showed stale value.
+          autoCharge: data.autoCharge,
           active: data.active,
           parentClient: data.parentClient,
           folderId: data.folderId,
@@ -2140,6 +2143,9 @@ export function Settings() {
           enableNotifications: data.enableNotifications,
           autoInspection: data.autoInspection,
           separateBySidemark: data.separateBySidemark,
+          // Bug 7: autoCharge was missing from the API payload. Backend was
+          // ready to receive it — frontend just never sent it on edits.
+          autoCharge: data.autoCharge,
           active: data.active,
           parentClient: data.parentClient,
           folderId: data.folderId,
