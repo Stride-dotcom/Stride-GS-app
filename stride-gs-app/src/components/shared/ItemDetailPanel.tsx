@@ -801,6 +801,15 @@ export function ItemDetailPanel({
     .map(w => ({ label: w.wcNumber || 'WC Folder', url: w.wcFolderUrl }));
   const entityFolderButtons = [...taskFolderUrls, ...repairFolderUrls, ...wcFolderUrls];
 
+  // Page mode: all drive folders (shipment + photos + entity folders) rendered
+  // in the Photos / Docs tab as Google-Drive-style rows. State-aware — each
+  // entry only included when its URL actually exists.
+  const pageDriveFolders: DriveFolderLink[] = [
+    ...(shipmentFolderUrl ? [{ label: `Shipment ${item.shipmentNumber || 'Folder'}`, url: shipmentFolderUrl }] : []),
+    ...(photosFolderId ? [{ label: 'Photos Folder', url: `https://drive.google.com/drive/folders/${photosFolderId}` }] : []),
+    ...entityFolderButtons,
+  ];
+
   // ── Tab render functions ────────────────────────────────────────────────
   // Each render function is a plain fragment — ALL existing state,
   // handlers, and computed values from above are captured in-closure so
@@ -926,9 +935,11 @@ export function ItemDetailPanel({
         </Section>
       )}
 
-      {/* Related — folder buttons + linked-record shortcuts */}
+      {/* Related — folder buttons + linked-record shortcuts. In page mode the
+          folder buttons move to the Photos/Docs tab; here we only show the
+          linked-record shortcut buttons. */}
       <Section icon={FileText} title="Related" count={linkedTasks.length + linkedRepairs.length + linkedWillCalls.length || undefined}>
-        {(shipmentFolderUrl || photosFolderId) && (
+        {!renderAsPage && (shipmentFolderUrl || photosFolderId) && (
           <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 8 }}>
             {shipmentFolderUrl && (
               <FolderButton label={`Shipment ${item.shipmentNumber || 'Folder'}`} url={shipmentFolderUrl} icon={Truck} />
@@ -939,7 +950,7 @@ export function ItemDetailPanel({
           </div>
         )}
 
-        {entityFolderButtons.length > 0 && (
+        {!renderAsPage && entityFolderButtons.length > 0 && (
           <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 10 }}>
             {entityFolderButtons.map(({ label, url }) => (
               <FolderButton key={label} label={label} url={url} icon={ExternalLink} />
@@ -1016,8 +1027,9 @@ export function ItemDetailPanel({
         onRequestRepair={handleRequestRepair}
         repairStatus={repairStatus ?? undefined}
         repairRequesting={repairRequesting}
+        variant={renderAsPage ? 'light' : 'dark'}
       />
-      {!isMobile && (
+      {!isMobile && !renderAsPage && (
         <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4, borderRadius: 6, color: 'rgba(255,255,255,0.7)' }}>
           <X size={18} />
         </button>
@@ -1124,13 +1136,25 @@ export function ItemDetailPanel({
       id: 'photos',
       label: 'Photos',
       icon: <ImageIcon size={13} />,
-      render: () => <PhotosPanelProxy item={item} clientSheetId={clientSheetId} />,
+      render: () => (
+        <PhotosPanelProxy
+          item={item}
+          clientSheetId={clientSheetId}
+          driveFolders={renderAsPage ? pageDriveFolders : undefined}
+        />
+      ),
     },
     {
       id: 'docs',
       label: 'Docs',
       icon: <FileText size={13} />,
-      render: () => <DocsPanelProxy itemId={item.itemId} clientSheetId={clientSheetId} />,
+      render: () => (
+        <DocsPanelProxy
+          itemId={item.itemId}
+          clientSheetId={clientSheetId}
+          driveFolders={renderAsPage ? pageDriveFolders : undefined}
+        />
+      ),
     },
     {
       id: 'notes',
@@ -1158,9 +1182,62 @@ export function ItemDetailPanel({
     },
   ];
 
+  // Page-mode footer: state-aware quick-action pills.
+  // Dark secondary pills (Create Task / Repair Quote / Add to WC / Transfer),
+  // orange primary pill on right (Edit or Save+Cancel when editing).
+  const pagePillBase: React.CSSProperties = {
+    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+    gap: 5, flex: '1 1 0', minWidth: 110, maxWidth: 170,
+    padding: '10px 14px', borderRadius: 10, border: 'none',
+    fontFamily: 'inherit', fontSize: 12, fontWeight: 700,
+    letterSpacing: '0.3px', cursor: 'pointer', whiteSpace: 'nowrap',
+  };
+  const darkPill: React.CSSProperties = { ...pagePillBase, background: '#1C1C1C', color: '#fff' };
+  const orangePill: React.CSSProperties = { ...pagePillBase, background: theme.colors.orange, color: '#fff' };
+  const lightPill: React.CSSProperties = { ...pagePillBase, background: '#fff', color: theme.colors.text, border: `1px solid ${theme.colors.border}` };
+
+  const pageFooter = isEditing ? (
+    <>
+      <button onClick={handleEditCancel} disabled={saving} style={lightPill}>Cancel</button>
+      <button onClick={handleSave} disabled={saving} style={orangePill}>
+        {saving ? <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} /> : <Save size={13} />}
+        {saving ? 'Saving…' : 'Save'}
+      </button>
+    </>
+  ) : (
+    <>
+      {onCreateTask && (
+        <button onClick={onCreateTask} style={darkPill}>
+          <ClipboardList size={13} /> Create Task
+        </button>
+      )}
+      {!repairStatus ? (
+        <button onClick={() => void handleRequestRepair()} disabled={repairRequesting} style={darkPill}>
+          <Wrench size={13} /> {repairRequesting ? 'Requesting…' : 'Repair Quote'}
+        </button>
+      ) : null}
+      {onCreateWillCall && (
+        <button onClick={onCreateWillCall} style={darkPill}>
+          <Truck size={13} /> Add to WC
+        </button>
+      )}
+      {onTransfer && (
+        <button onClick={onTransfer} style={darkPill}>
+          <ExternalLink size={13} /> Transfer
+        </button>
+      )}
+      {canEditBasic && (
+        <button onClick={handleEditStart} style={orangePill}>
+          <Pencil size={13} /> Edit
+        </button>
+      )}
+    </>
+  );
+
   if (renderAsPage) {
     // Redesign spec: dark tab cards, no sidemark/idBadges chips in header,
-    // sticky action footer. All tabs + state + handlers shared with panel mode.
+    // white sticky footer with quick-action pills. All tabs + state + handlers
+    // shared with panel mode.
     return (
       <>
         <EntityPage
@@ -1172,7 +1249,7 @@ export function ItemDetailPanel({
           statusStrip={statusStrip}
           tabs={customTabs as unknown as Parameters<typeof EntityPage>[0]['tabs']}
           initialTabId="details"
-          footer={footer}
+          footer={pageFooter}
         />
         <style>{`@keyframes slideIn { from { transform: translateX(100%); } to { transform: translateX(0); } }`}</style>
       </>
@@ -1222,25 +1299,83 @@ import { useCoverageOptions, formatCoverageRate, type CoverageOption } from '../
 import { AutocompleteSelect } from './AutocompleteSelect';
 import type { InventoryItem as CoverageItemType } from '../../lib/types';
 
-function PhotosPanelProxy({ item, clientSheetId }: { item: any; clientSheetId: string | undefined }) {
+interface DriveFolderLink { label: string; url: string }
+
+function DriveFoldersList({ folders }: { folders: DriveFolderLink[] }) {
+  if (!folders.length) return null;
   return (
-    <_PhotosPanel
-      entityType="inventory"
-      entityId={item.itemId}
-      itemId={item.itemId}
-      tenantId={clientSheetId}
-      enableSourceFilter
-    />
+    <div style={{ borderTop: `1px solid ${theme.colors.border}`, paddingTop: 14, marginTop: 14 }}>
+      <div style={{
+        fontSize: 10, fontWeight: 700, color: theme.colors.orange,
+        textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 8,
+        textAlign: 'center',
+      }}>Legacy folders</div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6, alignItems: 'center' }}>
+        {folders.map(f => (
+          <a
+            key={f.label + f.url}
+            href={f.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{
+              display: 'flex', alignItems: 'center', gap: 10,
+              padding: '10px 12px',
+              background: '#fff',
+              border: `1px solid ${theme.colors.border}`,
+              borderRadius: 10,
+              textDecoration: 'none',
+              color: theme.colors.text,
+              width: '100%', maxWidth: 360,
+            }}
+          >
+            {/* Google Drive–style triangle icon */}
+            <span style={{
+              width: 34, height: 34, borderRadius: 8,
+              background: 'linear-gradient(135deg, #4285F4 25%, #34A853 25%, #34A853 50%, #FBBC04 50%, #FBBC04 75%, #EA4335 75%)',
+              display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+            }}>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path d="M3 17L8 7H16L21 17H3Z" fill="white" fillOpacity="0.9"/>
+                <path d="M8 7L13 17H3L8 7Z" fill="white" fillOpacity="0.7"/>
+              </svg>
+            </span>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontWeight: 600, fontSize: 13 }}>{f.label}</div>
+              <div style={{ fontSize: 10, color: theme.colors.textMuted }}>Open in Google Drive</div>
+            </div>
+            <ExternalLink size={13} color={theme.colors.textMuted} />
+          </a>
+        ))}
+      </div>
+    </div>
   );
 }
 
-function DocsPanelProxy({ itemId, clientSheetId }: { itemId: string; clientSheetId: string | undefined }) {
+function PhotosPanelProxy({ item, clientSheetId, driveFolders }: { item: any; clientSheetId: string | undefined; driveFolders?: DriveFolderLink[] }) {
   return (
-    <_DocumentsPanel
-      contextType="item"
-      contextId={itemId}
-      tenantId={clientSheetId}
-    />
+    <div>
+      <_PhotosPanel
+        entityType="inventory"
+        entityId={item.itemId}
+        itemId={item.itemId}
+        tenantId={clientSheetId}
+        enableSourceFilter
+      />
+      {driveFolders && <DriveFoldersList folders={driveFolders} />}
+    </div>
+  );
+}
+
+function DocsPanelProxy({ itemId, clientSheetId, driveFolders }: { itemId: string; clientSheetId: string | undefined; driveFolders?: DriveFolderLink[] }) {
+  return (
+    <div>
+      <_DocumentsPanel
+        contextType="item"
+        contextId={itemId}
+        tenantId={clientSheetId}
+      />
+      {driveFolders && <DriveFoldersList folders={driveFolders} />}
+    </div>
   );
 }
 
@@ -1266,7 +1401,7 @@ function NotesPanelProxy({
 
 function ItemActionsMenu({
   onCreateTask, onCreateWillCall, onTransfer, onRequestRepair,
-  repairStatus, repairRequesting,
+  repairStatus, repairRequesting, variant = 'dark',
 }: {
   onCreateTask?: () => void;
   onCreateWillCall?: () => void;
@@ -1274,6 +1409,8 @@ function ItemActionsMenu({
   onRequestRepair: () => Promise<void>;
   repairStatus?: string;
   repairRequesting: boolean;
+  /** 'dark' for slide-out panel (dark header); 'light' for full-page mode (light header). */
+  variant?: 'dark' | 'light';
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -1304,9 +1441,13 @@ function ItemActionsMenu({
           display: 'inline-flex', alignItems: 'center', gap: 4,
           padding: '6px 12px', fontSize: 12, fontWeight: 600,
           borderRadius: 8,
-          border: '1px solid rgba(255,255,255,0.25)',
-          background: 'rgba(255,255,255,0.12)',
-          color: '#fff',
+          border: variant === 'light'
+            ? `1px solid ${theme.colors.border}`
+            : '1px solid rgba(255,255,255,0.25)',
+          background: variant === 'light'
+            ? theme.colors.bgCard
+            : 'rgba(255,255,255,0.12)',
+          color: variant === 'light' ? theme.colors.text : '#fff',
           cursor: 'pointer',
           fontFamily: 'inherit',
         }}
