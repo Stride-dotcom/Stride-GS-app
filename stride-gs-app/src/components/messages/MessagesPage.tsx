@@ -50,19 +50,15 @@ export function MessagesPage() {
   const [composeOpen, setComposeOpen] = useState(false);
 
   // After compose: open the newly-sent thread so the user lands on their
-  // message. Entity-linked threads open via entity key; direct threads open
-  // via the first recipient's id.
+  // message. Entity → entity key. >1 recipient → group key. 1 recipient → DM.
   const handleCompose = async (params: Parameters<typeof sendMessage>[0]) => {
     const msg = await sendMessage(params);
     if (msg) {
       if (params.entityType && params.entityId) {
         void openThread({ entityType: params.entityType, entityId: params.entityId });
-      } else if (params.recipientIds.length > 0) {
-        // Session 74 fix: pass the object form so useMessages builds the
-        // canonical sorted `direct:<uidA>:<uidB>` key. The earlier string
-        // form `direct:<recipient_uid>` produced a malformed key (second
-        // uid = undefined) which stored an invalid activeThreadKey and
-        // caused subsequent replies to split into a new conversation bucket.
+      } else if (params.recipientIds.length > 1) {
+        void openThread({ otherUserIds: params.recipientIds });
+      } else if (params.recipientIds.length === 1) {
         void openThread({ otherUserId: params.recipientIds[0] });
       }
     }
@@ -97,14 +93,16 @@ export function MessagesPage() {
     // UI lives in a separate follow-up component.
     let recipientIds: string[] = [];
     if (active.key.startsWith('direct:')) {
-      // Session 74 hotfix: the previous `.slice('direct:'.length)` returned
-      // the concatenated `uidA:uidB` blob as a single string, which then
-      // became a malformed uuid in message_recipients.user_id and the
-      // insert failed silently. Split properly and pick the non-self side.
       const parts = active.key.split(':'); // ['direct', uidA, uidB]
       const [a, b] = [parts[1], parts[2]];
       const other = a === authUserId ? b : a;
       if (other) recipientIds = [other];
+    } else if (active.key.startsWith('group:')) {
+      // Reply to every member of the group except self. The key carries
+      // the canonical sorted participant set so we don't need to walk the
+      // thread to recover it.
+      const ids = active.key.slice('group:'.length).split(':').filter(Boolean);
+      recipientIds = ids.filter(u => u !== authUserId);
     } else if (thread.length > 0) {
       const lastOther = [...thread].reverse().find(m => m.senderId !== authUserId);
       if (lastOther?.senderId) recipientIds = [lastOther.senderId];

@@ -248,7 +248,7 @@ function TabButton({
         fontFamily: 'inherit',
         letterSpacing: active ? '0.03em' : '0.02em',
         color: active ? EP.tabActiveText : EP.tabInactiveText,
-        background: active ? EP.tabActive : 'transparent',
+        background: active ? EP.tabActive : '#1a1a1a',
         border: 'none',
         borderRadius: 8,
         cursor: 'pointer',
@@ -452,7 +452,7 @@ export function EntityPage(props: EntityPageConfig) {
             fontSize: 12,
           }}>
             {clientName && (
-              <span style={{ color: theme.colors.textSecondary, fontWeight: theme.typography.weights.medium }}>{clientName}</span>
+              <span style={{ color: theme.colors.text, fontWeight: theme.typography.weights.bold, fontSize: 15 }}>{clientName}</span>
             )}
             {clientName && sidemark && (
               <span style={{ color: theme.colors.textMuted }}>·</span>
@@ -478,16 +478,18 @@ export function EntityPage(props: EntityPageConfig) {
 
       {/* ── Tab bar ────────────────────────────────────────────────────────── */}
       <div style={{
-        background: EP.tabBarBg,
+        background: EP.pageBg,
         display: 'flex',
+        justifyContent: 'center',
         alignItems: 'center',
-        padding: '6px 8px',
-        gap: 2,
+        padding: '10px 16px',
+        gap: 8,
         flexShrink: 0,
         overflowX: 'auto',
-        WebkitOverflowScrolling: 'touch',
-        scrollbarWidth: 'none',
-        position: 'sticky',
+        flexWrap: 'wrap' as const,
+        WebkitOverflowScrolling: 'touch' as const,
+        scrollbarWidth: 'none' as const,
+        position: 'sticky' as const,
         top: 0,
         zIndex: 10,
       }}>

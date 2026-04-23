@@ -1,4 +1,15 @@
 /* ===================================================
+   StrideAPI.gs — v38.109.0 — 2026-04-23 PST — Route user activation email to ONBOARDING (not WELCOME)
+   v38.109.0: (1) handleSendOnboardingEmail_ now accepts payload.recipient / tempPassword /
+              loginEmail so it can be addressed to an individual user (not just CLIENT_EMAIL)
+              and prepend the styled credentials block when a temp password is supplied.
+              (2) Adds {{LOGIN_URL}} / {{LOGIN_EMAIL}} / {{TEMP_PASSWORD}} tokens so admins
+              editing the template body can position credentials inline.
+              (3) api_sendWelcomeOnce_ now calls handleSendOnboardingEmail_ instead of
+              handleSendWelcomeEmail_. User-activation fires ONBOARDING (contains creds);
+              WELCOME remains the generic account-creation email sent manually from the
+              Clients → Send Welcome Email flow, no credentials, to all client contacts.
+              (4) Resolves the squash-merge conflict marker left in v38.108 header comment.
    StrideAPI.gs — v38.108.0 — 2026-04-23 PST — Auth improvements: temp passwords + change-password flow
    v38.108.0: (1) api_generateTempPassword_ — word-word-number passphrases for new users.
               (2) createSupabaseAuthUser_ now accepts optional password param so temp passphrase
@@ -24544,7 +24555,12 @@ function handleSendOnboardingEmail_(clientSheetId, payload) {
   var settings = api_readSettings_(ss);
   var clientName = String(settings["CLIENT_NAME"] || "Valued Client").trim();
   var clientEmail = String(settings["CLIENT_EMAIL"] || "").trim();
-  if (!clientEmail) return errorResponse_("No CLIENT_EMAIL configured for " + clientName, "MISSING_CONFIG");
+
+  // v38.109.0 — per-user onboarding: payload.recipient overrides CLIENT_EMAIL
+  // so the email goes to the individual user being activated, not the generic
+  // client contact. tempPassword + loginEmail prepend a styled credentials block.
+  var sendTo = String((payload && payload.recipient) || "").trim() || clientEmail;
+  if (!sendTo) return errorResponse_("No recipient email available for " + clientName, "MISSING_CONFIG");
 
   var masterSsId = prop_("MASTER_PRICE_LIST_SPREADSHEET_ID");
   var htmlBody = "", subject = "Getting Started with Stride WMS — " + clientName;
@@ -24583,20 +24599,46 @@ function handleSendOnboardingEmail_(clientSheetId, payload) {
 
   if (!htmlBody) return errorResponse_("ONBOARDING_EMAIL template not found in Supabase or Master Price List", "NOT_FOUND");
 
+  var tempPwdOb = String((payload && payload.tempPassword) || "").trim();
+  var loginEmailOb = String((payload && payload.loginEmail) || sendTo || "").trim();
+
   var tokens = {
     "{{CLIENT_NAME}}": clientName,
     "{{SPREADSHEET_URL}}": ss.getUrl() || "#",
     "{{CLIENT_EMAIL}}": clientEmail,
-    "{{APP_URL}}": "https://www.mystridehub.com/#"
+    "{{APP_URL}}": "https://www.mystridehub.com/#",
+    "{{LOGIN_URL}}": "https://www.mystridehub.com",
+    "{{LOGIN_EMAIL}}": loginEmailOb,
+    "{{TEMP_PASSWORD}}": tempPwdOb
   };
   var entries = Object.entries(tokens);
   for (var j = 0; j < entries.length; j++) {
     htmlBody = htmlBody.split(entries[j][0]).join(String(entries[j][1] || ""));
   }
 
+  // Fallback: if a temp password was supplied but the template doesn't use
+  // the {{TEMP_PASSWORD}} token, prepend the styled credentials block so the
+  // user can still log in without a "Forgot Password" round-trip.
+  if (tempPwdOb && htmlBody.indexOf(tempPwdOb) === -1) {
+    var credentialsBlock =
+      '<div style="margin:0 0 28px;padding:20px 24px;background:#FFF7ED;border:2px solid #E85D2D;border-radius:10px;font-family:Inter,Arial,sans-serif;">' +
+        '<p style="margin:0 0 14px;font-size:15px;font-weight:700;color:#1C1C1C;">Your Login Credentials</p>' +
+        '<table style="border-collapse:collapse;width:100%;">' +
+          '<tr><td style="padding:6px 0;font-size:13px;color:#6B7280;width:120px;">Login URL</td>' +
+              '<td style="padding:6px 0;font-size:13px;"><a href="https://www.mystridehub.com" style="color:#E85D2D;text-decoration:none;font-weight:600;">mystridehub.com</a></td></tr>' +
+          '<tr><td style="padding:6px 0;font-size:13px;color:#6B7280;">Email</td>' +
+              '<td style="padding:6px 0;font-size:13px;font-weight:500;font-family:monospace;">' + loginEmailOb + '</td></tr>' +
+          '<tr><td style="padding:6px 0;font-size:13px;color:#6B7280;">Temp Password</td>' +
+              '<td style="padding:6px 0;"><span style="display:inline-block;font-size:16px;font-weight:700;font-family:monospace;letter-spacing:0.06em;color:#E85D2D;background:#fff;border:1px solid #E85D2D;border-radius:6px;padding:4px 12px;">' + tempPwdOb + '</span></td></tr>' +
+        '</table>' +
+        '<p style="margin:16px 0 0;font-size:12px;color:#6B7280;">After logging in, click your name in the bottom-left corner of the sidebar and select <strong>Change Password</strong> to set your own password.</p>' +
+      '</div>';
+    htmlBody = credentialsBlock + htmlBody;
+  }
+
   try {
-    GmailApp.sendEmail(clientEmail, subject, "", { htmlBody: htmlBody });
-    return jsonResponse_({ success: true, sentTo: clientEmail, clientName: clientName, subject: subject });
+    GmailApp.sendEmail(sendTo, subject, "", { htmlBody: htmlBody });
+    return jsonResponse_({ success: true, sentTo: sendTo, clientName: clientName, subject: subject });
   } catch (err) {
     return errorResponse_("Failed to send onboarding email: " + err.message, "SEND_FAILED");
   }
@@ -24606,11 +24648,7 @@ function handleSendOnboardingEmail_(clientSheetId, payload) {
  * POST sendWelcomeEmail — Send welcome email to a client directly from StrideAPI.gs.
  * Reads CLIENT_EMAIL from the client's Settings tab, loads WELCOME_EMAIL template
  * from Supabase (authoritative) with MPL sheet as fallback, resolves tokens, sends via GmailApp.
-<<<<<<< HEAD
- * v38.105.0: Supabase-first template load fixes "brief email" bug where the MPL sheet
-=======
  * v38.106.0: Supabase-first template load fixes "brief email" bug where the MPL sheet
->>>>>>> origin/source
  * had an outdated template while the full version lived in Supabase.
  */
 function handleSendWelcomeEmail_(payload) {

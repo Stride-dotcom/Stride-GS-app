@@ -69,8 +69,8 @@ const CLAIM_EMAIL_TEMPLATES = [
 ];
 
 const SYSTEM_TEMPLATES = [
-  { key: 'WELCOME_EMAIL', name: 'Welcome Email', desc: 'Sent to new client when account is created' },
-  { key: 'ONBOARDING_EMAIL', name: 'Onboarding / Getting Started', desc: 'Setup instructions and getting started guide for new clients' },
+  { key: 'WELCOME_EMAIL', name: 'Welcome Email', desc: 'Sent to all client contacts when a new client ACCOUNT is created. Generic welcome — does NOT contain login credentials. Tokens: {{CLIENT_NAME}}, {{SPREADSHEET_URL}}, {{CLIENT_EMAIL}}, {{APP_URL}}' },
+  { key: 'ONBOARDING_EMAIL', name: 'Onboarding / Getting Started', desc: 'Sent to each individual user when their account is activated. Contains their temporary password + login instructions. Tokens: {{CLIENT_NAME}}, {{LOGIN_URL}}, {{LOGIN_EMAIL}}, {{TEMP_PASSWORD}}, {{SPREADSHEET_URL}}, {{APP_URL}}. If {{TEMP_PASSWORD}} is not used in the body, a styled credentials block is prepended automatically.' },
   { key: 'CLIENT_INTAKE_INVITE', name: 'Client Intake Invitation', desc: 'Sent to a prospect when a new intake link is generated. Tokens: {{PROSPECT_NAME}}, {{INTAKE_LINK}}, {{EXPIRES_DATE}}' },
 ];
 
