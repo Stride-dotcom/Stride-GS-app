@@ -26,26 +26,27 @@ import { theme } from '../../styles/theme';
 
 // ── Design tokens (derived from app theme — no hardcoded hex) ─────────────────
 
-// All colors/typography come from theme.v2 — layout from the v4 spec.
+// All colors/typography pulled from theme.v2 to match the Dashboard aesthetic.
 const EP = {
-  pageBg: theme.v2.colors.bgPage,            // warm cream — #F5F2EE
-  tabCardBg: theme.v2.colors.bgDark,         // near-black tab card — #1C1C1C
-  tabActive: theme.v2.colors.accent,         // brand orange — #E8692A
-  tabInactiveText: theme.v2.colors.textOnDarkMuted, // muted white on dark
-  tabActiveText: theme.v2.colors.textOnDark, // #FFFFFF
-  cardBg: theme.v2.colors.bgWhite,           // white content cards
-  cardBorder: theme.v2.colors.border,        // rgba(0,0,0,0.08)
-  labelColor: theme.v2.colors.accent,        // orange field labels (keeping orange per spec)
-  textPrimary: theme.v2.colors.text,         // #1C1C1C
-  textSecondary: theme.v2.colors.textSecondary, // #666
-  textMuted: theme.v2.colors.textMuted,      // #999
-  footerBg: theme.v2.colors.bgWhite,         // white bottom bar
+  pageBg: theme.v2.colors.bgPage,                 // #F5F2EE — warm cream
+  tabPillContainerBg: theme.v2.colors.bgWhite,    // white pill container holding tabs
+  tabActive: theme.v2.colors.bgDark,              // #1C1C1C — active pill (matches Dashboard)
+  tabActiveText: theme.v2.colors.textOnDark,      // #FFFFFF
+  tabInactiveText: theme.v2.colors.textMuted,     // #999
+  bodyCardBg: theme.v2.colors.bgCard,             // #EDE9E3 — same as Dashboard content card
+  innerCardBg: theme.v2.colors.bgWhite,           // white inner sections
+  cardBorder: theme.v2.colors.border,             // rgba(0,0,0,0.08)
+  labelColor: theme.v2.colors.accent,             // #E8692A — orange field labels
+  textPrimary: theme.v2.colors.text,              // #1C1C1C
+  textSecondary: theme.v2.colors.textSecondary,   // #666
+  textMuted: theme.v2.colors.textMuted,           // #999
+  accent: theme.v2.colors.accent,                 // #E8692A orange
+  footerBg: theme.v2.colors.bgWhite,              // white bottom bar
   footerBorder: theme.v2.colors.border,
-  footerPrimary: theme.v2.colors.accent,     // orange primary pill
-  footerSecondaryBg: theme.v2.colors.bgDark, // dark secondary pill
+  footerPrimary: theme.v2.colors.accent,          // orange primary pill
+  footerSecondaryBg: theme.v2.colors.bgDark,      // dark secondary pill
   footerText: theme.v2.colors.textOnDark,
-  dotRed: theme.colors.statusRed,            // red notification dot
-  maxWidth: 720,                             // centered content width
+  dotRed: theme.colors.statusRed,
 } as const;
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -232,14 +233,17 @@ function useBuiltInEntityTabs(cfg: EntityPageBuiltInTabs | undefined): EntityPag
 
 // ── Sub-components ────────────────────────────────────────────────────────────
 
+// Tab is a segmented pill (matches Dashboard's Calendar/Overview + Tasks/Repairs/WC pattern).
 function TabButton({
   tab,
   active,
   onClick,
+  compact,
 }: {
   tab: EntityPageTab;
   active: boolean;
   onClick: () => void;
+  compact?: boolean;
 }) {
   return (
     <button
@@ -248,45 +252,40 @@ function TabButton({
       aria-selected={active}
       style={{
         position: 'relative',
-        flex: '1 1 0',
-        minWidth: 0,
-        padding: '10px 8px',
-        fontSize: 11,
-        fontWeight: 700,
-        fontFamily: 'inherit',
-        letterSpacing: '0.3px',
-        textTransform: 'uppercase',
-        color: active ? EP.tabActiveText : EP.tabInactiveText,
-        background: active ? EP.tabActive : EP.tabCardBg,
-        border: 'none',
-        borderRadius: 10,
-        cursor: 'pointer',
-        whiteSpace: 'nowrap',
         display: 'inline-flex',
         alignItems: 'center',
-        justifyContent: 'center',
-        gap: 6,
-        transition: 'background 0.15s, color 0.15s',
+        gap: 8,
+        padding: compact ? '7px 14px' : '9px 20px',
+        fontSize: compact ? 10 : 12,
+        fontWeight: 600,
+        fontFamily: 'inherit',
+        letterSpacing: '1.5px',
+        textTransform: 'uppercase',
+        color: active ? EP.tabActiveText : EP.tabInactiveText,
+        background: active ? EP.tabActive : 'transparent',
+        border: 'none',
+        borderRadius: 100,  // pill
+        cursor: 'pointer',
+        whiteSpace: 'nowrap',
+        transition: 'all 0.2s',
+        flexShrink: 0,
       }}
     >
       {tab.label}
 
-      {/* Count badge — red circle in top-right corner (matches v4 mockup) */}
+      {/* Count badge — inline rounded chip (Dashboard style) */}
       {tab.badgeCount != null && tab.badgeCount > 0 && (
         <span style={{
-          position: 'absolute',
-          top: -4,
-          right: -2,
-          minWidth: 16,
-          height: 16,
-          borderRadius: '50%',
-          background: active ? '#fff' : EP.dotRed,
-          color: active ? EP.dotRed : '#fff',
-          fontSize: 9,
-          fontWeight: 800,
+          fontSize: 10,
+          fontWeight: 700,
+          padding: '2px 8px',
+          borderRadius: 100,
+          background: active ? '#fff' : 'rgba(0,0,0,0.06)',
+          color: active ? EP.textPrimary : EP.textSecondary,
+          letterSpacing: 0,
+          minWidth: 18,
           textAlign: 'center',
-          lineHeight: '16px',
-          padding: '0 4px',
+          lineHeight: 1.2,
         }}>
           {tab.badgeCount > 99 ? '99+' : tab.badgeCount}
         </span>
@@ -295,12 +294,7 @@ function TabButton({
       {/* Red notification dot */}
       {tab.hasDot && (
         <span style={{
-          position: 'absolute',
-          top: 4,
-          right: 4,
-          width: 7,
-          height: 7,
-          borderRadius: '50%',
+          width: 7, height: 7, borderRadius: '50%',
           background: EP.dotRed,
         }} />
       )}
@@ -375,137 +369,129 @@ export function EntityPage(props: EntityPageConfig) {
 
   return (
     <div style={{
+      // Bleed into AppLayout margins (matches Dashboard pattern).
+      margin: '-28px -32px',
+      padding: isMobile ? '16px 16px 96px' : '28px 32px 96px',
+      background: EP.pageBg,
+      minHeight: '100%',
       display: 'flex',
       flexDirection: 'column',
-      minHeight: '100%',
-      background: EP.pageBg,
-      // Bleed into AppLayout margins so the page fills the content area.
-      margin: '-28px -32px',
+      gap: isMobile ? 16 : 20,
     }}>
 
-      {/* Centered content column (header + tabs + body) */}
+      {/* ── Header (Dashboard typography: tracked-out uppercase title) ────── */}
       <div style={{
-        maxWidth: EP.maxWidth,
-        width: '100%',
-        margin: '0 auto',
-        paddingBottom: 80,  // leave room for fixed bottom bar
+        display: 'flex',
+        alignItems: 'center',
+        gap: 12,
+        flexWrap: 'wrap',
+        justifyContent: 'space-between',
       }}>
-
-        {/* ── Header ─────────────────────────────────────────────────────── */}
-        <div style={{ padding: isMobile ? '12px 16px 6px' : '16px 20px 6px' }}>
-          {/* Row 1: back circle · INVENTORY · ID · status · spacer · actions */}
-          <div style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 10,
-            marginBottom: 4,
-            flexWrap: 'wrap',
-          }}>
-            <button
-              onClick={handleBack}
-              aria-label="Back"
-              style={{
-                width: 32, height: 32,
-                borderRadius: '50%',
-                border: `1px solid ${EP.cardBorder}`,
-                background: EP.cardBg,
-                display: 'inline-flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                cursor: 'pointer',
-                fontFamily: 'inherit',
-                flexShrink: 0,
-                color: EP.textSecondary,
-              }}
-            >
-              <ArrowLeft size={15} />
-            </button>
-
-            <span style={{
-              fontSize: 10,
-              fontWeight: 700,
-              letterSpacing: '2px',
-              textTransform: 'uppercase',
-              color: EP.labelColor,
+        <div style={{ display: 'inline-flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+          <button
+            onClick={handleBack}
+            aria-label="Back"
+            style={{
+              width: 34, height: 34,
+              borderRadius: '50%',
+              border: `1px solid ${EP.cardBorder}`,
+              background: EP.innerCardBg,
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              cursor: 'pointer',
+              fontFamily: 'inherit',
               flexShrink: 0,
-            }}>
-              {entityLabel}
-            </span>
+              color: EP.textSecondary,
+            }}
+          >
+            <ArrowLeft size={15} />
+          </button>
 
-            <span style={{
-              fontSize: isMobile ? 18 : 20,
-              fontWeight: 800,
-              color: EP.textPrimary,
-              letterSpacing: '-0.3px',
-              lineHeight: 1,
-            }}>
-              {entityId}
-            </span>
-
-            {statusBadge && <span style={{ flexShrink: 0 }}>{statusBadge}</span>}
-
-            {headerActions && (
-              <span style={{ marginLeft: 'auto', display: 'inline-flex', gap: 8, alignItems: 'center' }}>
-                {headerActions}
-              </span>
-            )}
+          {/* "INVENTORY · 62697" — matches "STRIDE LOGISTICS · DASHBOARD" cadence */}
+          <div style={{
+            fontSize: isMobile ? 16 : 20,
+            fontWeight: 700,
+            letterSpacing: '2px',
+            color: EP.textPrimary,
+            textTransform: 'uppercase',
+            display: 'inline-flex', alignItems: 'center', gap: 12, flexWrap: 'wrap',
+          }}>
+            <span style={{ color: EP.accent }}>{entityLabel}</span>
+            <span style={{ color: EP.textMuted }}>·</span>
+            <span style={{ letterSpacing: '1px' }}>{entityId}</span>
           </div>
 
-          {/* Row 2: bold client name (bigger per spec). No sidemark / no metaPills. */}
-          {clientName && (
-            <div style={{
-              paddingLeft: 42,  // align under the ID (past the back circle + gap)
-              fontSize: 14,
-              fontWeight: 700,
-              color: EP.textPrimary,
-              lineHeight: 1.3,
-              marginBottom: 8,
-            }}>
-              {clientName}
-            </div>
-          )}
-
-          {statusStrip}
+          {statusBadge && <span style={{ flexShrink: 0 }}>{statusBadge}</span>}
         </div>
 
-        {/* ── Tab cards (individual dark cards, centered, not a dark bar) ─── */}
+        {headerActions && (
+          <div style={{ display: 'inline-flex', gap: 8, alignItems: 'center', flexShrink: 0 }}>
+            {headerActions}
+          </div>
+        )}
+      </div>
+
+      {/* Client name — bigger + bold, matches Dashboard subhead weight */}
+      {clientName && (
         <div style={{
-          display: 'flex',
-          gap: 6,
-          padding: isMobile ? '6px 16px 10px' : '6px 20px 12px',
-          overflowX: 'auto',
-          WebkitOverflowScrolling: 'touch',
-          scrollbarWidth: 'none',
+          fontSize: isMobile ? 14 : 15,
+          fontWeight: 700,
+          color: EP.textPrimary,
+          letterSpacing: '0.2px',
+          marginTop: -8,
+          paddingLeft: 46, // under the back circle
         }}>
-          {finalTabs.map(tab => (
-            <TabButton
+          {clientName}
+        </div>
+      )}
+
+      {statusStrip}
+
+      {/* ── Tab pill strip (white container, inner pills — Dashboard pattern) */}
+      <div style={{
+        display: 'inline-flex',
+        gap: 0,
+        background: EP.tabPillContainerBg,
+        borderRadius: 100,
+        padding: 5,
+        alignSelf: 'flex-start',
+        maxWidth: '100%',
+        overflowX: 'auto',
+        WebkitOverflowScrolling: 'touch',
+        scrollbarWidth: 'none',
+      }}>
+        {finalTabs.map(tab => (
+          <TabButton
+            key={tab.id}
+            tab={tab}
+            active={tab.id === activeId}
+            onClick={() => setActiveId(tab.id)}
+            compact={isMobile}
+          />
+        ))}
+      </div>
+
+      {/* ── Body card (bgCard wrapper, matches Dashboard content card) ───── */}
+      <div style={{
+        background: EP.bodyCardBg,
+        borderRadius: isMobile ? 14 : 20,
+        padding: isMobile ? '16px 14px' : '28px 32px',
+      }}>
+        {finalTabs.map(tab => {
+          const isActive = tab.id === activeId;
+          if (!isActive && !tab.keepMounted) return null;
+          return (
+            <div
               key={tab.id}
-              tab={tab}
-              active={tab.id === activeId}
-              onClick={() => setActiveId(tab.id)}
-            />
-          ))}
-        </div>
-
-        {/* ── Tab body ───────────────────────────────────────────────────── */}
-        <div style={{
-          padding: isMobile ? '4px 14px 24px' : '4px 20px 24px',
-        }}>
-          {finalTabs.map(tab => {
-            const isActive = tab.id === activeId;
-            if (!isActive && !tab.keepMounted) return null;
-            return (
-              <div
-                key={tab.id}
-                role="tabpanel"
-                aria-hidden={!isActive}
-                style={{ display: isActive ? 'block' : 'none' }}
-              >
-                {tab.render?.({ active: isActive })}
-              </div>
-            );
-          })}
-        </div>
+              role="tabpanel"
+              aria-hidden={!isActive}
+              style={{ display: isActive ? 'block' : 'none' }}
+            >
+              {tab.render?.({ active: isActive })}
+            </div>
+          );
+        })}
       </div>
 
       {/* ── Fixed bottom bar (white, centered pill buttons) ───────────────── */}
@@ -529,7 +515,7 @@ export function EntityPage(props: EntityPageConfig) {
             alignItems: 'center',
             justifyContent: 'center',
             width: '100%',
-            maxWidth: EP.maxWidth,
+            maxWidth: 960,
             flexWrap: 'wrap',
           }}>
             {footer}
@@ -568,7 +554,7 @@ export function EPCard({
 }) {
   return (
     <div style={{
-      background: EP.cardBg,
+      background: EP.innerCardBg,
       borderRadius: theme.radii.xl,
       padding: theme.spacing.lg,
       marginBottom: theme.spacing.md,
