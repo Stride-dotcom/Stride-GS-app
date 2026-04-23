@@ -313,7 +313,7 @@ export function DocumentsPanel({
 }
 
 export function NotesPanel({
-  entityType, entityId, relatedEntities, enableSourceFilter, itemId,
+  entityType, entityId, relatedEntities, enableSourceFilter, itemId, pinnedNote,
 }: {
   entityType: string;
   entityId: string;
@@ -326,7 +326,16 @@ export function NotesPanel({
   /** Parent item_id — required when enableSourceFilter=true for the rollup
    *  query. Ignored otherwise. */
   itemId?: string | null;
+  /** v2026-04-23 — surface the entity's single-text "XxxNotes" field (which
+   *  lives on the Details tab) as a pinned system entry at the top of the
+   *  Notes tab so warehouse/admin staff see it in both places. Rendered only
+   *  when `text` is non-empty. */
+  pinnedNote?: { label: string; text: string | null | undefined };
 }) {
+  const pinned = pinnedNote && pinnedNote.text && pinnedNote.text.trim()
+    ? <PinnedSystemNote label={pinnedNote.label} text={pinnedNote.text} />
+    : null;
+
   if (enableSourceFilter && itemId) {
     return (
       <div>
@@ -337,6 +346,7 @@ export function NotesPanel({
         }}>
           Threaded Notes
         </div>
+        {pinned}
         <NotesRollupView
           primaryEntityType={entityType}
           primaryEntityId={entityId}
@@ -356,11 +366,49 @@ export function NotesPanel({
       }}>
         Threaded Notes
       </div>
+      {pinned}
       <ThreadedNotes
         entityType={entityType}
         entityId={entityId}
         relatedEntities={relatedEntities}
       />
+    </div>
+  );
+}
+
+/** Styled read-only card for the entity's single-text notes field, pinned at
+ *  the top of the Notes tab. Distinct visual treatment (orange accent, "Pinned"
+ *  label) so it doesn't get confused with a threaded note. */
+function PinnedSystemNote({ label, text }: { label: string; text: string }) {
+  return (
+    <div style={{
+      background: '#FFF7F0',
+      border: `1px solid ${theme.v2.colors.accent}`,
+      borderLeft: `4px solid ${theme.v2.colors.accent}`,
+      borderRadius: 10,
+      padding: '10px 12px',
+      marginBottom: 14,
+    }}>
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 6,
+        marginBottom: 4,
+      }}>
+        <span style={{
+          fontSize: 9, fontWeight: 700, letterSpacing: '1px',
+          textTransform: 'uppercase', color: theme.v2.colors.accent,
+          background: '#fff', padding: '1px 6px', borderRadius: 4,
+          border: `1px solid ${theme.v2.colors.accent}`,
+        }}>Pinned</span>
+        <span style={{ fontSize: 11, fontWeight: 700, color: theme.v2.colors.text }}>
+          {label}
+        </span>
+      </div>
+      <div style={{ fontSize: 13, color: theme.v2.colors.text, whiteSpace: 'pre-wrap', lineHeight: 1.5 }}>
+        {text}
+      </div>
+      <div style={{ fontSize: 10, color: theme.v2.colors.textMuted, marginTop: 4, fontStyle: 'italic' }}>
+        Shown here + on the Details tab. Edit on the Details tab.
+      </div>
     </div>
   );
 }

@@ -354,7 +354,11 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
     </div>
   );
   const renderShipmentNotesTab = () => (
-    <_NotesPanel entityType="shipment" entityId={shipment.shipmentNo} />
+    <_NotesPanel
+      entityType="shipment"
+      entityId={shipment.shipmentNo}
+      pinnedNote={{ label: 'Shipment Notes', text: shipment.notes }}
+    />
   );
   const renderShipmentActivityTab = () => (
     <EntityHistory entityType="shipment" entityId={shipment.shipmentNo} tenantId={shipment.clientSheetId ?? undefined} />

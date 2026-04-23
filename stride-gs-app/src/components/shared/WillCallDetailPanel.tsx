@@ -1270,7 +1270,11 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
     </div>
   );
   const renderWcNotesTab = () => (
-    <_NotesPanel entityType="will_call" entityId={wc.wcNumber} />
+    <_NotesPanel
+      entityType="will_call"
+      entityId={wc.wcNumber}
+      pinnedNote={{ label: 'Will Call Notes', text: wc.notes }}
+    />
   );
   const renderWcActivityTab = () => (
     <EntityHistory entityType="will_call" entityId={wc.wcNumber} tenantId={clientSheetId ?? undefined} />

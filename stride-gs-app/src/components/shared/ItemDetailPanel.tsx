@@ -1233,6 +1233,7 @@ export function ItemDetailPanel({
         itemRepairs={itemRepairs}
         itemWillCalls={itemWillCalls}
         shipmentNumber={item.shipmentNumber}
+        itemNotesText={item.itemNotes || item.notes}
       />,
     },
     {
@@ -1404,13 +1405,14 @@ function DocsPanelProxy({ itemId, clientSheetId, driveFolders }: { itemId: strin
 }
 
 function NotesPanelProxy({
-  itemId, itemTasks, itemRepairs, itemWillCalls, shipmentNumber,
+  itemId, itemTasks, itemRepairs, itemWillCalls, shipmentNumber, itemNotesText,
 }: {
   itemId: string;
   itemTasks: any[];
   itemRepairs: any[];
   itemWillCalls: any[];
   shipmentNumber?: string;
+  itemNotesText?: string | null;
 }) {
   const related = [
     ...itemTasks.map((t: any) => ({ type: 'task', id: String(t.taskId || ''), label: `Task ${t.taskId}` })).filter(r => r.id),
@@ -1418,7 +1420,16 @@ function NotesPanelProxy({
     ...itemWillCalls.map((w: any) => ({ type: 'will_call', id: String(w.wcNumber || ''), label: `WC ${w.wcNumber}` })).filter(r => r.id),
     ...(shipmentNumber ? [{ type: 'shipment', id: String(shipmentNumber), label: `Shipment ${shipmentNumber}` }] : []),
   ];
-  return <_NotesPanel entityType="inventory" entityId={itemId} relatedEntities={related} enableSourceFilter itemId={itemId} />;
+  return (
+    <_NotesPanel
+      entityType="inventory"
+      entityId={itemId}
+      relatedEntities={related}
+      enableSourceFilter
+      itemId={itemId}
+      pinnedNote={{ label: 'Item Notes', text: itemNotesText }}
+    />
+  );
 }
 
 // ── Actions dropdown (Quick Actions moved into header per mockup) ──────────

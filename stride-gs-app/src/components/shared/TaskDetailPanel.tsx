@@ -821,6 +821,29 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
             )}
           </div>
 
+          {/* Task Notes — single-text field on the task row, distinct from the
+              threaded conversational Notes tab. Visible on every task so
+              warehouse staff see job instructions the moment they open it. */}
+          <div style={{ marginBottom: 16 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+              <FileText size={14} color={theme.colors.orange} />
+              <span style={{ fontSize: 12, fontWeight: 600 }}>Task Notes</span>
+            </div>
+            {isEditingTask && isOpen && !completed ? (
+              <textarea
+                value={notes}
+                onChange={e => setNotes(e.target.value)}
+                placeholder="Job instructions, gotchas, handling requirements…"
+                rows={3}
+                style={{ ...input, resize: 'vertical', fontFamily: 'inherit' }}
+              />
+            ) : (
+              <div style={{ fontSize: 13, color: notes ? theme.colors.text : theme.colors.textMuted, whiteSpace: 'pre-wrap', lineHeight: 1.5 }}>
+                {notes || '\u2014'}
+              </div>
+            )}
+          </div>
+
           {/* Repair Quote Actions — In page mode the Request Repair Quote
               action lives in the sticky footer as a quick-action pill. The
               status banner stays here so the user sees confirmation + active
@@ -1285,6 +1308,7 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
       relatedEntities={task.itemId ? [{ type: 'inventory', id: String(task.itemId), label: `Item ${task.itemId}` }] : []}
       enableSourceFilter={!!task.itemId}
       itemId={task.itemId ? String(task.itemId) : null}
+      pinnedNote={{ label: 'Task Notes', text: task.taskNotes || task.notes }}
     />
   );
   const renderTaskActivityTab = () => (
