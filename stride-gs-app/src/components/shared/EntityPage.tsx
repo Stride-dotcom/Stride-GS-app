@@ -379,41 +379,53 @@ export function EntityPage(props: EntityPageConfig) {
       // Extra bottom padding ensures content scrolls clear of the fixed footer.
       // Mobile footer can wrap to 2-3 rows of action pills; 260px covers the
       // worst case plus iOS safe-area inset.
-      padding: isMobile ? '14px 14px 260px' : '28px 32px 120px',
+      padding: isMobile ? '64px 14px 260px' : '28px 32px 120px',
       background: EP.pageBg,
       minHeight: '100%',
       display: 'flex',
       flexDirection: 'column',
       gap: isMobile ? 12 : 20,
+      position: 'relative',
     }}>
+
+      {/* Floating nav — mobile only. Back and Actions stay pinned while the
+          page scrolls so the user never loses those controls, and the header
+          (title + client) scrolls away like normal body content. */}
+      {isMobile && (
+        <>
+          <button
+            onClick={handleBack}
+            aria-label="Back"
+            style={{
+              position: 'fixed', top: 12, left: 12, zIndex: 20,
+              width: 38, height: 38, borderRadius: '50%',
+              border: `1px solid ${EP.cardBorder}`,
+              background: EP.innerCardBg,
+              boxShadow: '0 2px 8px rgba(0,0,0,0.08)',
+              display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+              cursor: 'pointer', fontFamily: 'inherit', color: EP.textSecondary,
+            }}
+          >
+            <ArrowLeft size={16} />
+          </button>
+          {headerActions && (
+            <div style={{
+              position: 'fixed', top: 12, right: 12, zIndex: 20,
+              boxShadow: '0 2px 8px rgba(0,0,0,0.08)',
+              borderRadius: 8,
+            }}>
+              {headerActions}
+            </div>
+          )}
+        </>
+      )}
 
       {/* ── Header ───────────────────────────────────────────────────────── */}
       {isMobile ? (
-        // Mobile: 3-row stack keeps the title full-size without wrapping the
-        // Actions button underneath it. Row 1 = nav controls; Row 2 = title;
-        // Row 3 = client name.
+        // Mobile: back + Actions become floating fixed icons (rendered below,
+        // outside this in-flow header). The in-flow header shows only the
+        // title and client name and can scroll away normally with the page.
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          {/* Row 1: back ↔ Actions (compact, always fits) */}
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-            <button
-              onClick={handleBack}
-              aria-label="Back"
-              style={{
-                width: 34, height: 34, borderRadius: '50%',
-                border: `1px solid ${EP.cardBorder}`, background: EP.innerCardBg,
-                display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-                cursor: 'pointer', fontFamily: 'inherit', flexShrink: 0, color: EP.textSecondary,
-              }}
-            >
-              <ArrowLeft size={15} />
-            </button>
-            {headerActions && (
-              <div style={{ display: 'inline-flex', gap: 8, alignItems: 'center', flexShrink: 0 }}>
-                {headerActions}
-              </div>
-            )}
-          </div>
-          {/* Row 2: title (INVENTORY · 62697) + status badge */}
           <div style={{
             fontSize: 16, fontWeight: 700, letterSpacing: '2px',
             color: EP.textPrimary, textTransform: 'uppercase',
@@ -424,7 +436,6 @@ export function EntityPage(props: EntityPageConfig) {
             <span style={{ letterSpacing: '1px' }}>{entityId}</span>
             {statusBadge}
           </div>
-          {/* Row 3: client name */}
           {clientName && (
             <div style={{ fontSize: 14, fontWeight: 700, color: EP.textPrimary }}>
               {clientName}
