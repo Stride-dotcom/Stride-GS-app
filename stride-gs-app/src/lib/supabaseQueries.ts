@@ -1136,27 +1136,105 @@ export async function fetchWillCallByIdFromSupabase(
       .maybeSingle();
     if (error || !data) return null;
     const row = data as SupabaseWillCallRow;
-    return {
+
+    const itemIds = (() => {
+      const raw = row.item_ids as unknown;
+      if (Array.isArray(raw)) return raw as string[];
+      if (typeof raw === 'string') {
+        try {
+          const parsed = JSON.parse(raw);
+          return Array.isArray(parsed) ? parsed as string[] : [];
+        } catch { return []; }
+      }
+      return [];
+    })();
+
+    const wc: ApiWillCall = {
       wcNumber: row.wc_number,
       clientName: clientNameMap ? (clientNameMap[row.tenant_id] || '') : '',
       clientSheetId: row.tenant_id,
       status: row.status || 'Pending',
       createdDate: row.created_date || '',
-      createdBy: '',
+      createdBy: row.created_by || '',
       pickupParty: row.pickup_party || '',
-      pickupPhone: '',
-      requestedBy: '',
+      pickupPhone: row.pickup_phone || '',
+      requestedBy: row.requested_by || '',
       estimatedPickupDate: row.estimated_pickup_date || '',
-      actualPickupDate: '',
+      actualPickupDate: row.actual_pickup_date || '',
       notes: row.notes || '',
       cod: row.cod ?? false,
       codAmount: row.cod_amount != null ? Number(row.cod_amount) : null,
       itemsCount: row.item_count ?? 0,
-      totalWcFee: null,
-      items: [], // WC items not stored in Supabase — GAS fallback needed for full data
+      totalWcFee: row.total_wc_fee,
+      items: [],
+      itemIds,
       wcFolderUrl: row.wc_folder_url || '',
       shipmentFolderUrl: row.shipment_folder_url || '',
     };
+
+    // Eagerly load items from will_call_items + inventory overlay so the
+    // detail page renders with items on first paint (no "Loading items…"
+    // delay while GAS enriches). Mirrors the pattern used by the WC-list
+    // Supabase fetcher above (~line 612). Per invariant #27, item-level
+    // fields come from inventory at read time.
+    if (row.tenant_id) {
+      try {
+        const { data: itemRows } = await supabase
+          .from('will_call_items')
+          .select('*')
+          .eq('wc_number', wcNumber)
+          .eq('tenant_id', row.tenant_id);
+        if (itemRows && itemRows.length > 0) {
+          const invMap = await _fetchInvFieldMap(row.tenant_id);
+          wc.items = (itemRows as SupabaseWillCallItemRow[]).map(r => {
+            const inv = r.item_id ? invMap[r.item_id] : null;
+            return {
+              wcNumber: r.wc_number,
+              itemId: r.item_id,
+              qty: Number(r.qty) || 1,
+              vendor: inv?.vendor || '',
+              description: inv?.description || '',
+              itemClass: inv?.itemClass || '',
+              location: inv?.location || '',
+              sidemark: inv?.sidemark || '',
+              room: inv?.room || '',
+              wcFee: r.wc_fee != null ? Number(r.wc_fee) : null,
+              released: !!r.released,
+              status: r.status || '',
+            };
+          });
+          // Overlay shipmentFolderUrl from inventory if WC row has none
+          if (!wc.shipmentFolderUrl && itemIds.length > 0) {
+            const inv = invMap[itemIds[0]];
+            if (inv?.shipmentFolderUrl) wc.shipmentFolderUrl = inv.shipmentFolderUrl;
+          }
+        } else if (itemIds.length > 0) {
+          // Legacy WC (pre-will_call_items table) — build items from itemIds + inv overlay
+          const invMap = await _fetchInvFieldMap(row.tenant_id);
+          wc.items = itemIds.map(id => {
+            const inv = invMap[id];
+            return {
+              wcNumber: row.wc_number,
+              itemId: id,
+              qty: inv?.qty ?? 1,
+              vendor: inv?.vendor || '',
+              description: inv?.description || '',
+              itemClass: inv?.itemClass || '',
+              location: inv?.location || '',
+              sidemark: inv?.sidemark || '',
+              room: inv?.room || '',
+              wcFee: null,
+              released: false,
+              status: inv?.status || '',
+            };
+          });
+        }
+      } catch {
+        // non-fatal — GAS fallback in useWillCallDetail fills in later
+      }
+    }
+
+    return wc;
   } catch {
     return null;
   }

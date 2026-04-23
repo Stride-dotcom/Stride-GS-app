@@ -233,10 +233,13 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
               onClick={async () => openAction('transfer')} />}
           </div>
           <div style={{ fontSize: 10, color: theme.colors.textMuted, marginTop: 6 }}>
-            Select items on the Items tab, or click a button to use all items.
+            Select items below, or click a button to use all items.
           </div>
         </div>
       )}
+
+      {/* Items table — inline on Details tab (no separate Items tab per 2026-04-22 urgent fix). */}
+      {renderItemsTab()}
     </>
   );
 
@@ -366,14 +369,13 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
 
   const customTabs: TabbedDetailPanelTab[] = [
     { id: 'details', label: 'Details', keepMounted: true, render: renderDetailsTab },
-    { id: 'items', label: 'Items', badgeCount: items.length || null, render: renderItemsTab },
   ];
 
   // Page-mode tab list includes Photos/Docs/Notes/Activity with badge counts
-  // and drive-folder-aware Photos/Docs renders.
+  // and drive-folder-aware Photos/Docs renders. Items are rendered inline on
+  // the Details tab (2026-04-22 urgent fix — no separate Items tab).
   const pageCustomTabs = [
     { id: 'details', label: 'Details', keepMounted: true, render: renderDetailsTab },
-    { id: 'items',    label: 'Items',    badgeCount: items.length || null, render: renderItemsTab },
     { id: 'photos',   label: 'Photos',   badgeCount: shPhotoCount, render: renderShipmentPhotosTab },
     { id: 'docs',     label: 'Docs',     badgeCount: shDocCount,   render: renderShipmentDocsTab },
     { id: 'notes',    label: 'Notes',    badgeCount: shNoteCount,  render: renderShipmentNotesTab },

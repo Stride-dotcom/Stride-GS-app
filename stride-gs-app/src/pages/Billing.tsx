@@ -677,7 +677,7 @@ export function Billing() {
   // Split report data into two sections: unbilled line items vs grouped invoices
   const billingSections = useMemo(() => {
     const unbilledRows: BillingRow[] = [];
-    type BuilderGroup = InvoiceGroup & { _sidemarks: Set<string>; _qboStatuses: Set<string>; _dates: string[] };
+    type BuilderGroup = InvoiceGroup & { _sidemarks: Set<string>; _qboStatuses: Set<string>; _dates: string[]; _invoiceDates: Set<string> };
     const groupMap: Record<string, BuilderGroup> = {};
     const order: string[] = [];
     for (const r of reportData) {
