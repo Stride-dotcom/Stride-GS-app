@@ -5,6 +5,15 @@
               lookup now happen in the Edge Function; GAS is used only for GmailApp send capability.
    =================================================== */
 /* ===================================================
+   StrideAPI.gs — v38.114.0 — 2026-04-23 PST — Billing audit trail (billing_activity_log)
+   v38.114.0: NEW api_logBillingActivity_ helper writes structured audit rows to
+              public.billing_activity_log. Wired into createInvoice, qboCreateInvoice,
+              resendInvoiceEmail, addManualCharge, voidManualCharge. Powers the new
+              React Billing Activity tab with filters (action, status, client, date).
+              Both successes AND failures logged so the user gets a complete
+              operational feed, not just exceptions.
+   =================================================== */
+/* ===================================================
    StrideAPI.gs — v38.113.0 — 2026-04-23 PST — Fix Supabase sync after invoice creation (UI refresh)
    v38.113.0: Router cases createInvoice + generateStorageCharges now accept
               sourceSheetId as a fallback for clientSheetId when deciding whether
@@ -2212,6 +2221,98 @@ function api_auditLog_(entityType, entityId, tenantId, action, changes, performe
       muteHttpExceptions: true
     });
   } catch (_) { /* best-effort, never block */ }
+}
+
+/**
+ * v38.113.0 — Billing audit trail. Writes a row to public.billing_activity_log
+ * so the React Billing Activity tab can show a persistent feed of actions
+ * (invoice create, QBO push, email send, charge, exception). Best-effort:
+ * never block or throw. Realtime-subscribed on the React side.
+ *
+ * entry = {
+ *   tenantId, clientName,
+ *   action        // 'invoice_create' | 'invoice_email_send' | 'qbo_push' | 'charge_stax' | 'charge_manual' | 'pay_link_send' | 'exception'
+ *   status        // 'success' | 'failure' | 'partial' | 'skipped'
+ *   invoiceNo, ledgerRowId, qboInvoiceId, qboDocNumber, staxInvoiceId,
+ *   amount, summary, errorMessage, details (object),
+ *   performedBy
+ * }
+ */
+function api_logBillingActivity_(entry) {
+  try {
+    var url = prop_("SUPABASE_URL");
+    var key = prop_("SUPABASE_SERVICE_ROLE_KEY");
+    if (!url || !key) return;
+    if (!entry || !entry.tenantId || !entry.action || !entry.status) {
+      Logger.log("api_logBillingActivity_: missing required fields (tenantId/action/status)");
+      return;
+    }
+    var payload = {
+      tenant_id:        String(entry.tenantId),
+      client_name:      entry.clientName ? String(entry.clientName) : null,
+      action:           String(entry.action),
+      status:           String(entry.status),
+      invoice_no:       entry.invoiceNo       ? String(entry.invoiceNo)       : null,
+      ledger_row_id:    entry.ledgerRowId     ? String(entry.ledgerRowId)     : null,
+      qbo_invoice_id:   entry.qboInvoiceId    ? String(entry.qboInvoiceId)    : null,
+      qbo_doc_number:   entry.qboDocNumber    ? String(entry.qboDocNumber)    : null,
+      stax_invoice_id:  entry.staxInvoiceId   ? String(entry.staxInvoiceId)   : null,
+      amount:           (entry.amount !== undefined && entry.amount !== null) ? Number(entry.amount) : null,
+      summary:          entry.summary         ? String(entry.summary)         : null,
+      error_message:    entry.errorMessage    ? String(entry.errorMessage)    : null,
+      details:          entry.details         || null,
+      performed_by:     entry.performedBy     ? String(entry.performedBy)     : "system"
+    };
+    UrlFetchApp.fetch(url + "/rest/v1/billing_activity_log", {
+      method: "POST",
+      headers: {
+        "Authorization": "Bearer " + key,
+        "apikey": key,
+        "Content-Type": "application/json",
+        "Prefer": "return=minimal"
+      },
+      payload: JSON.stringify(payload),
+      muteHttpExceptions: true
+    });
+  } catch (e) {
+    Logger.log("api_logBillingActivity_ error (non-fatal): " + e);
+  }
+}
+
+/**
+ * v38.114.0 — Mark a billing_activity_log row as resolved. Used by operators
+ * to clear failure rows after manual fix-up. Patches resolved_at, resolved_by,
+ * resolved_note via Supabase REST PATCH.
+ */
+function handleMarkBillingActivityResolved_(payload, callerEmail) {
+  var id = String((payload || {}).id || "").trim();
+  if (!id) return { success: false, error: "id is required" };
+  try {
+    var url = prop_("SUPABASE_URL");
+    var key = prop_("SUPABASE_SERVICE_ROLE_KEY");
+    if (!url || !key) return { success: false, error: "Supabase not configured" };
+    var body = {
+      resolved_at: new Date().toISOString(),
+      resolved_by: String(callerEmail || "unknown"),
+      resolved_note: payload.note ? String(payload.note) : null
+    };
+    var resp = UrlFetchApp.fetch(url + "/rest/v1/billing_activity_log?id=eq." + encodeURIComponent(id), {
+      method: "PATCH",
+      headers: {
+        "Authorization": "Bearer " + key,
+        "apikey": key,
+        "Content-Type": "application/json",
+        "Prefer": "return=minimal"
+      },
+      payload: JSON.stringify(body),
+      muteHttpExceptions: true
+    });
+    var code = resp.getResponseCode();
+    if (code >= 200 && code < 300) return { success: true };
+    return { success: false, error: "HTTP " + code + ": " + resp.getContentText().substring(0, 200) };
+  } catch (e) {
+    return { success: false, error: String(e) };
+  }
 }
 
 /**
@@ -5230,18 +5331,61 @@ function doPost(e) {
       case "createInvoice":
         return withStaffGuard_(callerEmail, function() {
           var r = handleCreateInvoice_(payload);
-          // v38.113.0: Accept sourceSheetId as fallback for clientSheetId.
-          // React's postCreateInvoice sends sourceSheetId, not clientSheetId — so the
-          // Supabase sync never fired after invoice creation. Result: React showed
-          // rows as "Unbilled" until manual refresh even after successful invoicing.
           var _syncSid = String(payload.clientSheetId || payload.sourceSheetId || "").trim();
           if (_syncSid) api_fullClientSync_(_syncSid, ["billing"]);
+          // v38.114.0 — Activity log: one row per invoice create attempt
+          try {
+            var _parsed = (r && r.getContent) ? JSON.parse(r.getContent()) : (r || {});
+            api_logBillingActivity_({
+              tenantId:      _syncSid,
+              clientName:    payload.client || null,
+              action:        "invoice_create",
+              status:        _parsed.success ? "success" : "failure",
+              invoiceNo:     _parsed.invoiceNo || null,
+              amount:        _parsed.total || null,
+              summary:       _parsed.success
+                               ? ("Invoice " + (_parsed.invoiceNo || "?") + " created for " + (payload.client || "?"))
+                               : ("Invoice creation failed for " + (payload.client || "?")),
+              errorMessage:  _parsed.error || null,
+              details:       {
+                sidemark: payload.sidemark || null,
+                rowCount: Array.isArray(payload.rows) ? payload.rows.length : 0,
+                emailStatus: _parsed.emailStatus || null,
+                invoiceUrl: _parsed.invoiceUrl || null
+              },
+              performedBy:   callerEmail
+            });
+          } catch (_) { /* log best-effort */ }
           return r;
+        });
+
+      // v38.114.0 — Mark a billing_activity_log failure row as resolved
+      case "markBillingActivityResolved":
+        return withStaffGuard_(callerEmail, function() {
+          return jsonResponse_(handleMarkBillingActivityResolved_(payload, callerEmail));
         });
 
       case "resendInvoiceEmail":
         return withStaffGuard_(callerEmail, function() {
-          return handleResendInvoiceEmail_(payload);
+          var rir = handleResendInvoiceEmail_(payload);
+          // v38.114.0 — Activity log
+          try {
+            var _rp = (rir && rir.getContent) ? JSON.parse(rir.getContent()) : (rir || {});
+            api_logBillingActivity_({
+              tenantId:     String(payload.clientSheetId || payload.sourceSheetId || ""),
+              clientName:   payload.client || null,
+              action:       "invoice_email_send",
+              status:       _rp.success ? "success" : "failure",
+              invoiceNo:    payload.invoiceNo || null,
+              summary:      _rp.success
+                              ? ("Invoice " + (payload.invoiceNo || "?") + " emailed to " + (payload.to || "client"))
+                              : ("Invoice email resend failed for " + (payload.invoiceNo || "?")),
+              errorMessage: _rp.error || null,
+              details:      { recipient: payload.to || null },
+              performedBy:  callerEmail
+            });
+          } catch (_) { /* log best-effort */ }
+          return rir;
         });
 
       case "updateBillingRow":
@@ -5264,6 +5408,21 @@ function doPost(e) {
                 api_writeThrough_(r, "billing", effectiveId, parsed.ledgerRowId);
                 api_auditLog_("billing", String(parsed.ledgerRowId), effectiveId, "create", { summary: "Manual charge added", svcCode: String(payload.svcCode || ""), total: payload.total != null ? String(payload.total) : "" }, callerEmail);
               }
+              // v38.114.0 — Billing activity log
+              api_logBillingActivity_({
+                tenantId:     effectiveId,
+                clientName:   payload.clientName || null,
+                action:       "charge_manual",
+                status:       (parsed && parsed.success) ? "success" : "failure",
+                ledgerRowId:  (parsed && parsed.ledgerRowId) || null,
+                amount:       payload.total != null ? Number(payload.total) : null,
+                summary:      (parsed && parsed.success)
+                                ? ("Manual charge added: " + (payload.svcCode || "?") + " $" + (payload.total || 0))
+                                : "Manual charge add failed",
+                errorMessage: (parsed && parsed.error) || null,
+                details:      { svcCode: payload.svcCode || null, svcName: payload.svcName || null },
+                performedBy:  callerEmail
+              });
             } catch (_) { /* writeThrough is best-effort */ }
             return r;
           });
@@ -5276,6 +5435,22 @@ function doPost(e) {
             invalidateClientCache_(effectiveId);
             api_writeThrough_(r, "billing", effectiveId, String(payload.ledgerRowId || ""));
             api_auditLog_("billing", String(payload.ledgerRowId || ""), effectiveId, "void", { status: { new: "Void" }, reason: String(payload.reason || "").substring(0, 200) }, callerEmail);
+            // v38.114.0 — Billing activity log
+            try {
+              var _vp = (r && r.getContent) ? JSON.parse(r.getContent()) : {};
+              api_logBillingActivity_({
+                tenantId:     effectiveId,
+                action:       "charge_manual",
+                status:       _vp.success ? "success" : "failure",
+                ledgerRowId:  String(payload.ledgerRowId || ""),
+                summary:      _vp.success
+                                ? ("Manual charge voided: " + (payload.reason || "no reason"))
+                                : "Manual charge void failed",
+                errorMessage: _vp.error || null,
+                details:      { reason: payload.reason || null, action_subtype: "void" },
+                performedBy:  callerEmail
+              });
+            } catch (_) { /* log best-effort */ }
             return r;
           });
         });
@@ -5789,7 +5964,36 @@ function doPost(e) {
 
       // ─── QBO Integration (admin-only writes) ───
       case "qboCreateInvoice":
-        return withAdminGuard_(callerEmail, function() { return jsonResponse_(handleQboCreateInvoice_(payload)); });
+        return withAdminGuard_(callerEmail, function() {
+          var qr = handleQboCreateInvoice_(payload);
+          // v38.114.0 — Activity log: one row per invoice in the batch
+          try {
+            if (qr && qr.results && qr.results.length) {
+              for (var qi = 0; qi < qr.results.length; qi++) {
+                var res = qr.results[qi];
+                var st = res.success ? "success" : (res.skipped ? "skipped" : "failure");
+                api_logBillingActivity_({
+                  tenantId:      String(payload.tenantId || payload.clientSheetId || payload.sourceSheetId || ""),
+                  clientName:    res.customerName || null,
+                  action:        "qbo_push",
+                  status:        st,
+                  invoiceNo:     res.strideInvoiceNumber || null,
+                  qboInvoiceId:  res.qboInvoiceId || res.existingQboInvoiceId || null,
+                  qboDocNumber:  res.qboDocNumber || null,
+                  summary:       res.success
+                                   ? ("Pushed " + res.strideInvoiceNumber + " to QBO" + (res.qboDocNumber ? " (DocNumber " + res.qboDocNumber + ")" : ""))
+                                   : (res.skipped
+                                     ? ("Skipped " + res.strideInvoiceNumber + " — " + (res.warning || "duplicate"))
+                                     : ("QBO push failed for " + res.strideInvoiceNumber)),
+                  errorMessage:  res.error || null,
+                  details:       { subJobName: res.subJobName || null, warning: res.warning || null },
+                  performedBy:   callerEmail
+                });
+              }
+            }
+          } catch (_) { /* log best-effort */ }
+          return jsonResponse_(qr);
+        });
       case "qboDisconnect":
         return withAdminGuard_(callerEmail, function() { return jsonResponse_(handleQboDisconnect_()); });
       case "qboSetupHeaders":

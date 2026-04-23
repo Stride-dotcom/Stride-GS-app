@@ -75,6 +75,9 @@ export function useSupabaseRealtime() {
       // billing
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'billing' }, onRow('billing', 'ledger_row_id'))
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'billing' }, onRow('billing', 'ledger_row_id'))
+      // billing_activity_log (v38.114.0) — audit trail feed for Billing Activity tab
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'billing_activity_log' }, onRow('billing_activity_log', 'id'))
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'billing_activity_log' }, onRow('billing_activity_log', 'id'))
       // clients
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'clients' }, onRow('client', 'spreadsheet_id'))
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'clients' }, onRow('client', 'spreadsheet_id'))

@@ -2658,3 +2658,110 @@ export async function fetchStaxRunLogFromSupabase(): Promise<StaxRunLogResponse 
   }
 }
 
+// ─── Billing Activity Log (v38.114.0) ────────────────────────────────────────
+
+export interface BillingActivityRow {
+  id: string;
+  tenantId: string;
+  clientName: string | null;
+  action: string;                // 'invoice_create' | 'qbo_push' | 'invoice_email_send' | 'charge_stax' | 'charge_manual' | 'pay_link_send' | 'exception'
+  status: string;                // 'success' | 'failure' | 'partial' | 'skipped'
+  invoiceNo: string | null;
+  ledgerRowId: string | null;
+  qboInvoiceId: string | null;
+  qboDocNumber: string | null;
+  staxInvoiceId: string | null;
+  amount: number | null;
+  summary: string | null;
+  errorMessage: string | null;
+  details: Record<string, unknown> | null;
+  performedBy: string | null;
+  performedAt: string;
+  resolvedAt: string | null;
+  resolvedBy: string | null;
+  resolvedNote: string | null;
+}
+
+export interface BillingActivityFilters {
+  tenantIds?: string[];          // Limit to these tenants (undefined = all accessible)
+  actions?: string[];            // e.g. ['invoice_create', 'qbo_push']
+  statuses?: string[];           // e.g. ['failure']
+  unresolvedOnly?: boolean;      // Failures without resolved_at
+  startDate?: string;            // ISO timestamp
+  endDate?: string;              // ISO timestamp
+  limit?: number;                // Default 500
+}
+
+interface SupabaseBillingActivityRow {
+  id: string;
+  tenant_id: string;
+  client_name: string | null;
+  action: string;
+  status: string;
+  invoice_no: string | null;
+  ledger_row_id: string | null;
+  qbo_invoice_id: string | null;
+  qbo_doc_number: string | null;
+  stax_invoice_id: string | null;
+  amount: number | null;
+  summary: string | null;
+  error_message: string | null;
+  details: Record<string, unknown> | null;
+  performed_by: string | null;
+  performed_at: string;
+  resolved_at: string | null;
+  resolved_by: string | null;
+  resolved_note: string | null;
+}
+
+export async function fetchBillingActivityLog(
+  filters: BillingActivityFilters = {}
+): Promise<{ rows: BillingActivityRow[]; count: number } | null> {
+  try {
+    let query = supabase
+      .from('billing_activity_log')
+      .select('*')
+      .order('performed_at', { ascending: false });
+
+    if (filters.tenantIds?.length) query = query.in('tenant_id', filters.tenantIds);
+    if (filters.actions?.length) query = query.in('action', filters.actions);
+    if (filters.statuses?.length) query = query.in('status', filters.statuses);
+    if (filters.unresolvedOnly) {
+      query = query.eq('status', 'failure').is('resolved_at', null);
+    }
+    if (filters.startDate) query = query.gte('performed_at', filters.startDate);
+    if (filters.endDate) query = query.lte('performed_at', filters.endDate);
+
+    query = query.limit(filters.limit ?? 500);
+
+    const { data, error } = await query;
+    if (error || !data) return null;
+
+    const rows: BillingActivityRow[] = (data as SupabaseBillingActivityRow[]).map(r => ({
+      id: r.id,
+      tenantId: r.tenant_id,
+      clientName: r.client_name,
+      action: r.action,
+      status: r.status,
+      invoiceNo: r.invoice_no,
+      ledgerRowId: r.ledger_row_id,
+      qboInvoiceId: r.qbo_invoice_id,
+      qboDocNumber: r.qbo_doc_number,
+      staxInvoiceId: r.stax_invoice_id,
+      amount: r.amount,
+      summary: r.summary,
+      errorMessage: r.error_message,
+      details: r.details,
+      performedBy: r.performed_by,
+      performedAt: r.performed_at,
+      resolvedAt: r.resolved_at,
+      resolvedBy: r.resolved_by,
+      resolvedNote: r.resolved_note,
+    }));
+
+    return { rows, count: rows.length };
+  } catch {
+    return null;
+  }
+}
+
