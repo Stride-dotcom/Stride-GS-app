@@ -146,6 +146,13 @@ function directKey(selfId: string, otherId: string): string {
   return selfId < otherId ? `direct:${otherId}:${selfId}` : `direct:${selfId}:${otherId}`;
 }
 
+/** Stable group key from a participant set. Sort + join with colons so
+ *  every member of the group derives the same key regardless of who's
+ *  computing it. */
+function groupKey(participantIds: string[]): string {
+  return 'group:' + Array.from(new Set(participantIds)).sort().join(':');
+}
+
 /** Extract the "other party" user_id for a message viewed by the current user.
  *  Ignores self; prefers the first non-self recipient. */
 function otherPartyForMessage(m: Message, selfId: string): string | null {
