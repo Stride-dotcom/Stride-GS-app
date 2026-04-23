@@ -1,5 +1,5 @@
 import { useState, useMemo, useRef, useEffect, useCallback } from 'react';
-import { useLocation } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { useTablePreferences } from '../hooks/useTablePreferences';
 import { createPortal } from 'react-dom';
 import {
@@ -308,6 +308,7 @@ function FilterDrop({ label, options, selected, setSelected, open, setOpen, cfgM
 export function Shipments() {
   const { isMobile } = useIsMobile();
   const location = useLocation();
+  const navigate = useNavigate();
   const hasApi = isApiConfigured();
   useBatchData();
   const pendingOpenRef = useRef<string | null>(null);
@@ -658,7 +659,7 @@ export function Shipments() {
                   style={{ borderBottom: `1px solid ${theme.colors.borderSubtle}`, cursor: 'pointer', transition: 'background 0.1s', background: rowBg, borderLeft: isActivePanel ? `3px solid ${theme.colors.orange}` : '3px solid transparent' }}
                   onMouseEnter={e => { if (!isActivePanel) e.currentTarget.style.background = theme.colors.bgSubtle; const a = e.currentTarget.querySelector('.row-actions') as HTMLElement; if (a) a.style.opacity = '1'; }}
                   onMouseLeave={e => { e.currentTarget.style.background = rowBg; const a = e.currentTarget.querySelector('.row-actions') as HTMLElement; if (a) a.style.opacity = '0'; }}
-                  onClick={() => setSelectedShipment(row.original)}
+                  onClick={() => navigate(`/shipments/${row.original.shipmentNo}`)}
                 >
                   {row.getVisibleCells().map(cell => (
                     <td key={cell.id} style={{ padding: '8px 12px', verticalAlign: 'middle' }} onClick={e => { if (cell.column.id === 'select') e.stopPropagation(); }}>

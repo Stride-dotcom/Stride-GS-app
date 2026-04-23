@@ -21,10 +21,10 @@ import { Settings } from './pages/Settings';
 import { Scanner } from './pages/Scanner';
 import { Labels } from './pages/Labels';
 import { Marketing } from './pages/Marketing';
-import { TaskJobPage } from './pages/TaskJobPage';
-const WillCallJobPage = React.lazy(() => import('./pages/WillCallJobPage').then(m => ({ default: m.WillCallJobPage })));
-const RepairJobPage = React.lazy(() => import('./pages/RepairJobPage').then(m => ({ default: m.RepairJobPage })));
-const ShipmentJobPage = React.lazy(() => import('./pages/ShipmentJobPage').then(m => ({ default: m.ShipmentJobPage })));
+const TaskPage = React.lazy(() => import('./pages/TaskPage').then(m => ({ default: m.TaskPage })));
+const WillCallPage = React.lazy(() => import('./pages/WillCallPage').then(m => ({ default: m.WillCallPage })));
+const RepairPage = React.lazy(() => import('./pages/RepairPage').then(m => ({ default: m.RepairPage })));
+const ShipmentPage = React.lazy(() => import('./pages/ShipmentPage').then(m => ({ default: m.ShipmentPage })));
 const DetailPanelMockup = React.lazy(() => import('./pages/DetailPanelMockup').then(m => ({ default: m.DetailPanelMockup })));
 import { Orders } from './pages/Orders';
 import { QuoteTool } from './pages/QuoteTool';
@@ -80,13 +80,13 @@ export default function App() {
           <Route path="/inventory" element={<Inventory />} />
           <Route path="/inventory/:itemId" element={<React.Suspense fallback={<div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100%' }}>Loading...</div>}><ItemPage /></React.Suspense>} />
           <Route path="/tasks" element={<Tasks />} />
-          <Route path="/tasks/:taskId" element={<TaskJobPage />} />
+          <Route path="/tasks/:taskId" element={<React.Suspense fallback={<div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100%' }}>Loading...</div>}><TaskPage /></React.Suspense>} />
           <Route path="/repairs" element={<Repairs />} />
-          <Route path="/repairs/:repairId" element={<React.Suspense fallback={<div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100%' }}>Loading...</div>}><RepairJobPage /></React.Suspense>} />
+          <Route path="/repairs/:repairId" element={<React.Suspense fallback={<div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100%' }}>Loading...</div>}><RepairPage /></React.Suspense>} />
           <Route path="/will-calls" element={<WillCalls />} />
-          <Route path="/will-calls/:wcNumber" element={<React.Suspense fallback={<div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100%' }}>Loading...</div>}><WillCallJobPage /></React.Suspense>} />
+          <Route path="/will-calls/:wcNumber" element={<React.Suspense fallback={<div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100%' }}>Loading...</div>}><WillCallPage /></React.Suspense>} />
           <Route path="/shipments" element={<Shipments />} />
-          <Route path="/shipments/:shipmentNo" element={<React.Suspense fallback={<div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100%' }}>Loading...</div>}><ShipmentJobPage /></React.Suspense>} />
+          <Route path="/shipments/:shipmentNo" element={<React.Suspense fallback={<div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100%' }}>Loading...</div>}><ShipmentPage /></React.Suspense>} />
           {/* Admin + staff only */}
           <Route path="/receiving" element={<RoleGuard allowed={['admin', 'staff']}><Receiving /></RoleGuard>} />
           <Route path="/scanner" element={<RoleGuard allowed={['admin', 'staff']}><Scanner /></RoleGuard>} />
