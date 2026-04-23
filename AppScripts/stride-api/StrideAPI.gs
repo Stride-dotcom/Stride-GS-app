@@ -10,6 +10,23 @@
               for invoices stuck in "Failed" state due to DocNumber collisions.
    =================================================== */
 /* ===================================================
+   StrideAPI.gs — v38.110.1 — 2026-04-23 PST — Fix email CTA deeplinks (table-strip + priority)
+   v38.110.1: FIX — api_sendTemplateEmail_: (1) extend CTA-strip to cover <table>-wrapped buttons
+              (all source templates use <table><tr><td align=center> wrapper; existing strip only
+              matched <div style="text-align:center"> so template CTAs survived and produced
+              duplicate buttons); (2) guard SHIPMENT_DEEP_LINK generation against placeholder
+              value "-" (task/inspection emails default shipNo to "-" when absent, causing
+              SHIPMENT_DEEP_LINK to point at nonexistent shipment "-"); (3) promote TASK_DEEP_LINK
+              above SHIPMENT_DEEP_LINK in CTA button URL priority so task/inspection completion
+              emails link to the task entity, not a shipment.
+   =================================================== */
+/* ===================================================
+   StrideAPI.gs — v38.110.1 — 2026-04-23 PST — Onboarding token replacement is whitespace + case tolerant
+   v38.110.1: handleSendOnboardingEmail_ now uses regex `\\{\\{\\s*NAME\\s*\\}\\}` (case-insensitive)
+              so tokens like `{{ CLIENT_NAME }}` (with stray whitespace) or `{{client_name}}`
+              still resolve. Previous split('{{CLIENT_NAME}}').join() was strict-literal and
+              silently left mis-spaced tokens un-substituted in the rendered email.
+   ===================================================
    StrideAPI.gs — v38.110.0 — 2026-04-23 PST — Per-user resend now sends ONBOARDING (sendOnboardingToUsers endpoint)
    v38.110.0: New `sendOnboardingToUsers` router case + handleSendOnboardingToUsers_ handler
               so the Settings → Users per-user "Send" button can resend the ONBOARDING email
@@ -13029,8 +13046,9 @@ function api_sendTemplateEmail_(settings, templateKey, toEmail, fallbackSubject,
       tokens["{{REPAIR_DEEP_LINK}}"] = _appUrl + "/repairs?open=" + encodeURIComponent(String(tokens["{{REPAIR_ID}}"])) + _clientSuffix;
     if (tokens["{{WC_NUMBER}}"] && !tokens["{{WC_DEEP_LINK}}"])
       tokens["{{WC_DEEP_LINK}}"] = _appUrl + "/will-calls?open=" + encodeURIComponent(String(tokens["{{WC_NUMBER}}"])) + _clientSuffix;
-    if (tokens["{{SHIPMENT_NO}}"] && !tokens["{{SHIPMENT_DEEP_LINK}}"])
-      tokens["{{SHIPMENT_DEEP_LINK}}"] = _appUrl + "/shipments?open=" + encodeURIComponent(String(tokens["{{SHIPMENT_NO}}"])) + _clientSuffix;
+    var _sno = String(tokens["{{SHIPMENT_NO}}"] || "").trim();
+    if (_sno && _sno !== "-" && !tokens["{{SHIPMENT_DEEP_LINK}}"])
+      tokens["{{SHIPMENT_DEEP_LINK}}"] = _appUrl + "/shipments?open=" + encodeURIComponent(_sno) + _clientSuffix;
     if (tokens["{{ITEM_ID}}"] && !tokens["{{ITEM_DEEP_LINK}}"])
       tokens["{{ITEM_DEEP_LINK}}"] = _appUrl + "/inventory?open=" + encodeURIComponent(String(tokens["{{ITEM_ID}}"])) + _clientSuffix;
     if (tokens["{{CLAIM_ID}}"] && !tokens["{{CLAIM_DEEP_LINK}}"])
@@ -13058,6 +13076,17 @@ function api_sendTemplateEmail_(settings, templateKey, toEmail, fallbackSubject,
     } catch (stripErr) {
       Logger.log("api_sendTemplateEmail_ hardcoded-CTA strip warning: " + stripErr);
     }
+    // v38.110.1 — Also strip table-wrapped CTAs (all source templates use
+    // <table><tr><td align=center><a style="background:#E..."> for CTA buttons,
+    // not <div style="text-align:center">, so the regex above never matched them).
+    try {
+      eBody = eBody.replace(
+        /<table[^>]*>\s*<tr[^>]*>\s*<td[^>]*>\s*<a\s[^>]*style="[^"]*background\s*:\s*#[Ee][^"]*"[^>]*>[\s\S]*?<\/a>\s*<\/td>\s*<\/tr>\s*<\/table>/gi,
+        ''
+      );
+    } catch (stripErr2) {
+      Logger.log("api_sendTemplateEmail_ table-CTA strip warning: " + stripErr2);
+    }
 
     // v38.101.0 — DEEP-LINK SELF-HEAL (server-side mirror of Emails.gs v4.7.0).
     // After token substitution, scan the body for any mystridehub.com/#/<entity>?open=ID
@@ -13083,12 +13112,14 @@ function api_sendTemplateEmail_(settings, templateKey, toEmail, fallbackSubject,
     // v38.105.0: Auto-inject "Open in Stride Hub" CTA button before </body>.
     // Uses the first available entity deep link, or {{APP_DEEP_LINK}} if set.
     // This is the ONLY CTA in the email — hardcoded ones were stripped above.
+    // v38.110.1: TASK before SHIPMENT — task/inspection completion emails set SHIPMENT_NO
+    // to "-" by default, so SHIPMENT_DEEP_LINK was incorrectly taking priority over TASK_DEEP_LINK.
     var ctaUrl = String(
       tokens["{{APP_DEEP_LINK}}"] ||
-      tokens["{{SHIPMENT_DEEP_LINK}}"] ||
       tokens["{{TASK_DEEP_LINK}}"] ||
       tokens["{{REPAIR_DEEP_LINK}}"] ||
       tokens["{{WC_DEEP_LINK}}"] ||
+      tokens["{{SHIPMENT_DEEP_LINK}}"] ||
       tokens["{{ITEM_DEEP_LINK}}"] ||
       tokens["{{CLAIM_DEEP_LINK}}"] || ""
     ).trim();
@@ -24627,19 +24658,24 @@ function handleSendOnboardingEmail_(clientSheetId, payload) {
   var tempPwdOb = String((payload && payload.tempPassword) || "").trim();
   var loginEmailOb = String((payload && payload.loginEmail) || sendTo || "").trim();
 
-  var tokens = {
-    "{{CLIENT_NAME}}": clientName,
-    "{{SPREADSHEET_URL}}": ss.getUrl() || "#",
-    "{{CLIENT_EMAIL}}": clientEmail,
-    "{{APP_URL}}": "https://www.mystridehub.com/#",
-    "{{LOGIN_URL}}": "https://www.mystridehub.com",
-    "{{LOGIN_EMAIL}}": loginEmailOb,
-    "{{TEMP_PASSWORD}}": tempPwdOb
+  // Token replacement: regex-based so we tolerate `{{CLIENT_NAME}}`,
+  // `{{ CLIENT_NAME }}`, and case variants — the WYSIWYG/textarea editor
+  // can introduce whitespace around tokens, and split/join only matches
+  // the exact literal which silently leaves them un-replaced.
+  var tokenValues = {
+    CLIENT_NAME: clientName,
+    SPREADSHEET_URL: ss.getUrl() || "#",
+    CLIENT_EMAIL: clientEmail,
+    APP_URL: "https://www.mystridehub.com/#",
+    LOGIN_URL: "https://www.mystridehub.com",
+    LOGIN_EMAIL: loginEmailOb,
+    TEMP_PASSWORD: tempPwdOb
   };
-  var entries = Object.entries(tokens);
-  for (var j = 0; j < entries.length; j++) {
-    htmlBody = htmlBody.split(entries[j][0]).join(String(entries[j][1] || ""));
-  }
+  Object.keys(tokenValues).forEach(function(name) {
+    var re = new RegExp("\\{\\{\\s*" + name + "\\s*\\}\\}", "gi");
+    htmlBody = htmlBody.replace(re, String(tokenValues[name] || ""));
+    subject  = subject.replace(re,  String(tokenValues[name] || ""));
+  });
 
   // Fallback: if a temp password was supplied but the template doesn't use
   // the {{TEMP_PASSWORD}} token, prepend the styled credentials block so the

@@ -528,7 +528,7 @@ export function ItemDetailPanel({
   // already-loaded tasks/repairs; the detail panel has to fetch on its own
   // because it may open from a deep link or a page that doesn't keep the
   // full task/repair list in scope. Tenant-scoped Supabase read, ~50ms.
-  const { inspOpenItems, inspDoneItems, asmOpenItems, asmDoneItems, repairOpenItems, repairDoneItems } = useItemIndicators(clientSheetId);
+  const { inspOpenItems, inspDoneItems, asmOpenItems, asmDoneItems, repairOpenItems, repairDoneItems, wcOpenItems, wcDoneItems } = useItemIndicators(clientSheetId);
 
   // Tab badge counts — Photos / Docs / Notes. Drive folder URLs are external
   // links, not uploaded assets, and are intentionally NOT counted here.
@@ -1347,6 +1347,8 @@ export function ItemDetailPanel({
             asmDoneItems={asmDoneItems}
             repairOpenItems={repairOpenItems}
             repairDoneItems={repairDoneItems}
+            wcOpenItems={wcOpenItems}
+            wcDoneItems={wcDoneItems}
           />
         }
         belowId={headerStatusBadge}

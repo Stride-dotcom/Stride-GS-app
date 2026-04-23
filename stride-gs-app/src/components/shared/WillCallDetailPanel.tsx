@@ -76,7 +76,7 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
   const clientSheetId = useMemo(() => wcProp.clientSheetId || apiClients.find(c => c.name === wcProp.clientName)?.spreadsheetId || '', [apiClients, wcProp.clientName, wcProp.clientSheetId]);
 
   // (I)(A)(R) indicators for every item in the WC items table below.
-  const { inspOpenItems, inspDoneItems, asmOpenItems, asmDoneItems, repairOpenItems, repairDoneItems } = useItemIndicators(clientSheetId);
+  const { inspOpenItems, inspDoneItems, asmOpenItems, asmDoneItems, repairOpenItems, repairDoneItems, wcOpenItems, wcDoneItems } = useItemIndicators(clientSheetId);
 
   // ── Self-fetch: if items missing, fetch full WC data via getWillCallById ──
   const [enrichedData, setEnrichedData] = useState<Partial<WillCall> | null>(null);
@@ -918,6 +918,8 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
                               asmDoneItems={asmDoneItems}
                               repairOpenItems={repairOpenItems}
                               repairDoneItems={repairDoneItems}
+                              wcOpenItems={wcOpenItems}
+                              wcDoneItems={wcDoneItems}
                             />
                           </span>
                         </td>

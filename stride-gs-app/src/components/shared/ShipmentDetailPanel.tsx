@@ -74,7 +74,7 @@ const STATUS_CFG: Record<string, { bg: string; color: string }> = {
 
 export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onItemsChanged, renderAsPage }: Props) {
   // (I)(A)(R) indicators for every item row in the shipment items table.
-  const { inspOpenItems, inspDoneItems, asmOpenItems, asmDoneItems, repairOpenItems, repairDoneItems } = useItemIndicators(shipment.clientSheetId);
+  const { inspOpenItems, inspDoneItems, asmOpenItems, asmDoneItems, repairOpenItems, repairDoneItems, wcOpenItems, wcDoneItems } = useItemIndicators(shipment.clientSheetId);
   const { isMobile } = useIsMobile();
   const navigate = useNavigate();
   const sc = STATUS_CFG[shipment.status] || STATUS_CFG.Received;
@@ -284,7 +284,7 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
                 <td style={{ padding: '6px 10px', fontWeight: 600 }}>
                   <span style={{ display: 'inline-flex', alignItems: 'center', flexWrap: 'wrap' }}>
                     <DeepLink kind="inventory" id={item.itemId} clientSheetId={shipment.clientSheetId} showIcon={false} />
-                    <ItemIdBadges itemId={item.itemId} inspOpenItems={inspOpenItems} inspDoneItems={inspDoneItems} asmOpenItems={asmOpenItems} asmDoneItems={asmDoneItems} repairOpenItems={repairOpenItems} repairDoneItems={repairDoneItems} />
+                    <ItemIdBadges itemId={item.itemId} inspOpenItems={inspOpenItems} inspDoneItems={inspDoneItems} asmOpenItems={asmOpenItems} asmDoneItems={asmDoneItems} repairOpenItems={repairOpenItems} repairDoneItems={repairDoneItems} wcOpenItems={wcOpenItems} wcDoneItems={wcDoneItems} />
                   </span>
                 </td>
                 <td style={{ padding: '6px 10px', textAlign: 'center' }}>{item.qty}</td>
