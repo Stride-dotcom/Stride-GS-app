@@ -1,0 +1,1 @@
+import{a as e}from"./supabaseQueries-PpLaveN7.js";export{e as fetchClientsFromSupabase};

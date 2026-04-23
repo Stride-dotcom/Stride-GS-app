@@ -1,1 +1,0 @@
-import{a as e}from"./supabaseQueries-BvpuadnH.js";export{e as fetchClientsFromSupabase};
