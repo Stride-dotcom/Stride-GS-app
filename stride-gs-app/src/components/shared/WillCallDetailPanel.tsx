@@ -5,6 +5,12 @@ import { FolderButton } from './FolderButton';
 import { DeepLink } from './DeepLink';
 import { TabbedDetailPanel, type TabbedDetailPanelTab } from './TabbedDetailPanel';
 import { EntityPage } from './EntityPage';
+import { DriveFoldersList, type DriveFolderLink } from './DriveFoldersList';
+import { usePhotos } from '../../hooks/usePhotos';
+import { useDocuments } from '../../hooks/useDocuments';
+import { useEntityNotes } from '../../hooks/useEntityNotes';
+import { PhotosPanel as _PhotosPanel, DocumentsPanel as _DocumentsPanel, NotesPanel as _NotesPanel } from './EntityAttachments';
+import { EntityHistory } from './EntityHistory';
 import { ItemIdBadges } from './ItemIdBadges';
 import { useItemIndicators } from '../../hooks/useItemIndicators';
 import { theme } from '../../styles/theme';
@@ -607,8 +613,8 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
                 {wc.notes && <div style={{ marginTop: 4, fontSize: 12, color: theme.colors.textSecondary }}><strong>Notes:</strong> {wc.notes}</div>}
               </>
             )}
-            {/* Drive Folder Buttons — only render when the URL exists. */}
-            {(wc.wcFolderUrl || wc.shipmentFolderUrl) && (
+            {/* Drive Folder Buttons — suppressed in page mode (moved to Photos tab). */}
+            {!renderAsPage && (wc.wcFolderUrl || wc.shipmentFolderUrl) && (
               <div style={{ display: 'flex', gap: 6, marginTop: 10, flexWrap: 'wrap' }}>
                 {wc.wcFolderUrl && (
                   <FolderButton label="Will Call Folder" url={wc.wcFolderUrl} icon={FolderOpen} />
@@ -772,8 +778,8 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
             </div>
           )}
 
-          {/* Activity History */}
-          {(() => {
+          {/* Inline Activity History — suppressed in page mode (moved to Activity tab). */}
+          {!renderAsPage && (() => {
             const history: { time: string; text: string; color: string }[] = [];
             // Created
             if (wc.createdDate) {
@@ -809,7 +815,8 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
             ) : null;
           })()}
 
-          {/* Quick Actions */}
+          {/* Inline Quick Actions — suppressed in page mode (moved to sticky footer). */}
+          {!renderAsPage && (
           <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
             {canRelease && isActive && !releaseResult && !removeResult && releaseMode === 'none' && allItemIds.length > 1 && (
               <WriteButton label="Release Some..." variant="secondary" size="sm" onClick={() => { setPartialSelected(new Set(allItemIds)); setReleaseMode('partial'); }} />
@@ -834,6 +841,7 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
             {/* Always-available regenerate — needed after released WCs so a broken/old PDF can be rebuilt */}
             {!removeMode && <WriteButton label={genDocLoading ? 'Regenerating...' : 'Regenerate Pickup Document'} variant="secondary" size="sm" icon={genDocLoading ? <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} /> : <Play size={11} />} disabled={genDocLoading} onClick={handleGenerateWcDoc} />}
           </div>
+          )}
           {genDocResult && (
             <div style={{ padding: '8px 12px', background: '#F0FDF4', border: '1px solid #BBF7D0', borderRadius: 8, marginTop: 6, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 6, flex: 1, minWidth: 0 }}>
@@ -1226,6 +1234,119 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
     activity: { entityType: 'will_call', entityId: wc.wcNumber, tenantId: clientSheetId },
   };
 
+  // ── Page-mode enhancements ──
+  const { photos: wcPhotos } = usePhotos({
+    entityType: 'will_call',
+    entityId: renderAsPage ? wc.wcNumber : null,
+    tenantId: clientSheetId ?? null,
+    enabled: !!renderAsPage,
+  });
+  const { documents: wcDocsList } = useDocuments({
+    contextType: 'willcall',
+    contextId: renderAsPage ? wc.wcNumber : '',
+    tenantId: clientSheetId ?? null,
+    enabled: !!renderAsPage,
+  });
+  const { notes: wcNotesList } = useEntityNotes('will_call', renderAsPage ? wc.wcNumber : '');
+  const wcPhotoCount = renderAsPage ? wcPhotos.length : 0;
+  const wcDocCount   = renderAsPage ? wcDocsList.length : 0;
+  const wcNoteCount  = renderAsPage ? wcNotesList.length : 0;
+
+  const wcDriveFolders: DriveFolderLink[] = [
+    ...(wc.wcFolderUrl ? [{ label: `Will Call ${wc.wcNumber}`, url: wc.wcFolderUrl }] : []),
+    ...(wc.shipmentFolderUrl ? [{ label: `Shipment ${wc.shipmentNumber || 'Folder'}`, url: wc.shipmentFolderUrl }] : []),
+  ];
+
+  const renderWcPhotosTab = () => (
+    <div>
+      <_PhotosPanel entityType="will_call" entityId={wc.wcNumber} tenantId={clientSheetId} />
+      <DriveFoldersList folders={wcDriveFolders} />
+    </div>
+  );
+  const renderWcDocsTab = () => (
+    <div>
+      <_DocumentsPanel contextType="willcall" contextId={wc.wcNumber} tenantId={clientSheetId} />
+      <DriveFoldersList folders={wcDriveFolders} />
+    </div>
+  );
+  const renderWcNotesTab = () => (
+    <_NotesPanel entityType="will_call" entityId={wc.wcNumber} />
+  );
+  const renderWcActivityTab = () => (
+    <EntityHistory entityType="will_call" entityId={wc.wcNumber} tenantId={clientSheetId ?? undefined} />
+  );
+
+  const pageTabs = [
+    { id: 'details',  label: 'Details',  keepMounted: true, render: renderDetailsTab },
+    { id: 'photos',   label: 'Photos',   badgeCount: wcPhotoCount, render: renderWcPhotosTab },
+    { id: 'docs',     label: 'Docs',     badgeCount: wcDocCount,   render: renderWcDocsTab },
+    { id: 'notes',    label: 'Notes',    badgeCount: wcNoteCount,  render: renderWcNotesTab },
+    { id: 'activity', label: 'Activity', render: renderWcActivityTab },
+  ];
+
+  // Page-mode footer — state-aware pill-styled buttons (reuses existing handlers).
+  const pagePillBase: React.CSSProperties = {
+    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+    gap: 5, flex: '1 1 0',
+    minWidth: isMobile ? 92 : 110,
+    maxWidth: isMobile ? 140 : 170,
+    padding: isMobile ? '8px 10px' : '10px 14px',
+    borderRadius: 10, border: 'none',
+    fontFamily: 'inherit',
+    fontSize: isMobile ? 11 : 12,
+    fontWeight: 700,
+    letterSpacing: '0.3px', cursor: 'pointer', whiteSpace: 'nowrap',
+  };
+  const wcDark: React.CSSProperties = { ...pagePillBase, background: '#1C1C1C', color: '#fff' };
+  const wcOrange: React.CSSProperties = { ...pagePillBase, background: theme.colors.orange, color: '#fff' };
+  const wcLight: React.CSSProperties = { ...pagePillBase, background: '#fff', color: theme.colors.text, border: `1px solid ${theme.colors.border}` };
+  const wcRed: React.CSSProperties = { ...pagePillBase, background: '#B91C1C', color: '#fff' };
+
+  const pageFooter = (
+    <>
+      {!removeMode && (
+        <button onClick={handleGenerateWcDoc} disabled={genDocLoading} style={wcDark}>
+          <Play size={13} /> {genDocLoading ? 'Regenerating…' : 'Pickup Doc'}
+        </button>
+      )}
+      {!removeMode && (
+        <button onClick={handlePrintRelease} disabled={printLoading} style={wcDark}>
+          <FileText size={13} /> {printLoading ? 'Loading…' : 'Release Doc'}
+        </button>
+      )}
+      {isActive && !cancelResult && !removeMode && (
+        <button onClick={handleCancelWC} disabled={cancelling} style={wcRed}>
+          {cancelling ? 'Cancelling…' : 'Cancel WC'}
+        </button>
+      )}
+      {isActive && !releaseResult && !removeResult && !removeMode && (
+        <button onClick={() => { setRemoveMode(true); setRemoveSelected(new Set()); setRemoveError(null); }} style={wcLight}>
+          Remove Items…
+        </button>
+      )}
+      {removeMode && (
+        <>
+          <button onClick={() => { setRemoveMode(false); setRemoveSelected(new Set()); }} style={wcLight}>Cancel</button>
+          {removeSelected.size > 0 && (
+            <button onClick={handleRemoveItems} disabled={removing} style={wcRed}>
+              {removing ? 'Removing…' : `Remove ${removeSelected.size}`}
+            </button>
+          )}
+        </>
+      )}
+      {/* Reopen Will Call — admin/staff only; shown when WC is released or cancelled */}
+      {!isActive && !removeMode && (user?.role === 'admin' || user?.role === 'staff') && (
+        <button onClick={handleReopenWc} style={wcLight}>Reopen WC</button>
+      )}
+      {/* Primary release button — orange */}
+      {canRelease && isActive && !releaseResult && !removeResult && releaseMode === 'none' && allItemIds.length > 1 && (
+        <button onClick={() => { setPartialSelected(new Set(allItemIds)); setReleaseMode('partial'); }} style={wcOrange}>
+          Release Some…
+        </button>
+      )}
+    </>
+  );
+
   if (renderAsPage) {
     return (
       <EntityPage
@@ -1235,10 +1356,9 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
         statusBadge={belowIdContent}
         headerActions={headerActions}
         statusStrip={statusStrip}
-        tabs={tabs as unknown as Parameters<typeof EntityPage>[0]['tabs']}
+        tabs={pageTabs as unknown as Parameters<typeof EntityPage>[0]['tabs']}
         initialTabId="details"
-        builtInTabs={builtInTabsCfg}
-        footer={footer}
+        footer={pageFooter}
       />
     );
   }

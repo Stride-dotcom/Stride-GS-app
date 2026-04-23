@@ -4,6 +4,12 @@ import { FolderButton } from './FolderButton';
 import { DeepLink } from './DeepLink';
 import { TabbedDetailPanel, type TabbedDetailPanelTab } from './TabbedDetailPanel';
 import { EntityPage } from './EntityPage';
+import { DriveFoldersList, type DriveFolderLink } from './DriveFoldersList';
+import { usePhotos } from '../../hooks/usePhotos';
+import { useDocuments } from '../../hooks/useDocuments';
+import { useEntityNotes } from '../../hooks/useEntityNotes';
+import { PhotosPanel as _PhotosPanel, DocumentsPanel as _DocumentsPanel, NotesPanel as _NotesPanel } from './EntityAttachments';
+import { EntityHistory } from './EntityHistory';
 import { ItemIdBadges } from './ItemIdBadges';
 import { useItemIndicators } from '../../hooks/useItemIndicators';
 import { buildDeepLink } from '../../lib/deepLinks';
@@ -647,12 +653,17 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
                   repairOpenItems={repairOpenItems}
                   repairDoneItems={repairDoneItems}
                 />
-                {task.vendor ? <span>{` — ${task.vendor}`}</span> : null}
               </div>
-              <div style={{ fontSize: 12, color: theme.colors.textSecondary, marginTop: 2 }}>{task.description}</div>
-              <div style={{ display: 'flex', gap: 16, marginTop: 8, fontSize: 11, color: theme.colors.textMuted }}>
-                {task.location && <span>Location: {task.location}</span>}
-                {task.sidemark && <span>Sidemark: {task.sidemark}</span>}
+              {/* Item fields — canonical order: Qty · Vendor · Description · Location · Sidemark · Reference. */}
+              <div style={{ display: 'flex', gap: 14, marginTop: 6, fontSize: 11, color: theme.colors.textMuted, flexWrap: 'wrap' }}>
+                {task.qty != null && <span><strong style={{ color: theme.colors.text, fontWeight: 600 }}>Qty:</strong> {task.qty}</span>}
+                {task.vendor && <span><strong style={{ color: theme.colors.text, fontWeight: 600 }}>Vendor:</strong> {task.vendor}</span>}
+              </div>
+              {task.description && <div style={{ fontSize: 12, color: theme.colors.textSecondary, marginTop: 4 }}>{task.description}</div>}
+              <div style={{ display: 'flex', gap: 14, marginTop: 4, fontSize: 11, color: theme.colors.textMuted, flexWrap: 'wrap' }}>
+                {task.location && <span><strong style={{ color: theme.colors.text, fontWeight: 600 }}>Location:</strong> {task.location}</span>}
+                {task.sidemark && <span><strong style={{ color: theme.colors.text, fontWeight: 600 }}>Sidemark:</strong> {task.sidemark}</span>}
+                {task.reference && <span><strong style={{ color: theme.colors.text, fontWeight: 600 }}>Reference:</strong> {task.reference}</span>}
               </div>
               {/* Drive Folder Buttons — only render when the URL exists. */}
               <div style={{ display: 'flex', gap: 6, marginTop: 10, flexWrap: 'wrap', alignItems: 'center' }}>
@@ -810,7 +821,10 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
             )}
           </div>
 
-          {/* Repair Quote Actions */}
+          {/* Repair Quote Actions — In page mode the Request Repair Quote
+              action lives in the sticky footer as a quick-action pill. The
+              status banner stays here so the user sees confirmation + active
+              repair status alongside task details. */}
           {task.itemId && (
             <div style={{ marginBottom: 16 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
@@ -831,14 +845,14 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
                 </div>
               )}
               <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                {!repairStatus ? (
+                {!repairStatus && !renderAsPage ? (
                   <WriteButton label={repairRequesting ? 'Requesting...' : 'Request Repair Quote'} variant="secondary" size="sm" onClick={async () => { await handleRequestRepair(); }} />
-                ) : (
+                ) : repairStatus ? (
                   <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '4px 12px', borderRadius: 6, fontSize: 12, fontWeight: 600, background: repairStatus === 'Approved' ? '#F0FDF4' : repairStatus === 'Declined' ? '#FEF2F2' : '#EFF6FF', color: repairStatus === 'Approved' ? '#15803D' : repairStatus === 'Declined' ? '#DC2626' : '#1D4ED8' }}>
                     <CheckCircle2 size={12} />
                     {repairStatus === 'Pending Quote' ? 'Repair Quote Requested' : repairStatus === 'Quote Sent' ? 'Quote Sent — Awaiting Response' : repairStatus === 'Approved' ? 'Repair Approved' : 'Repair Declined'}
                   </span>
-                )}
+                ) : null}
               </div>
             </div>
           )}
@@ -1218,6 +1232,137 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
 
   const footer = isMobile ? mobileFooter : desktopFooter;
 
+  // ── Page-mode enhancements (drive folders in Photos, tab counters, pill footer) ──
+  const { photos: tkPhotos } = usePhotos({
+    entityType: 'task',
+    entityId: renderAsPage ? task.taskId : null,
+    tenantId: clientSheetId ?? null,
+    itemId: task.itemId ? String(task.itemId) : null,
+    enabled: !!renderAsPage,
+  });
+  const { documents: tkDocs } = useDocuments({
+    contextType: 'task',
+    contextId: renderAsPage ? task.taskId : '',
+    tenantId: clientSheetId ?? null,
+    enabled: !!renderAsPage,
+  });
+  const { notes: tkNotes } = useEntityNotes('task', renderAsPage ? task.taskId : '');
+  const tkPhotoCount = renderAsPage ? tkPhotos.length : 0;
+  const tkDocCount = renderAsPage ? tkDocs.length : 0;
+  const tkNoteCount = renderAsPage ? tkNotes.length : 0;
+
+  const taskDriveFolders: DriveFolderLink[] = [
+    ...(activeFolderUrl ? [{ label: `Task ${task.taskId}`, url: activeFolderUrl }] : []),
+    ...(activeShipmentFolderUrl ? [{ label: `Shipment ${task.shipmentNumber || task.shipmentNo || 'Folder'}`, url: activeShipmentFolderUrl }] : []),
+  ];
+
+  const renderTaskPhotosTab = () => (
+    <div>
+      <_PhotosPanel
+        entityType="task"
+        entityId={task.taskId}
+        tenantId={clientSheetId}
+        itemId={task.itemId ? String(task.itemId) : null}
+        enableSourceFilter={!!task.itemId}
+      />
+      <DriveFoldersList folders={taskDriveFolders} />
+    </div>
+  );
+  const renderTaskDocsTab = () => (
+    <div>
+      <_DocumentsPanel
+        contextType="task"
+        contextId={task.taskId}
+        tenantId={clientSheetId}
+      />
+      <DriveFoldersList folders={taskDriveFolders} />
+    </div>
+  );
+  const renderTaskNotesTab = () => (
+    <_NotesPanel
+      entityType="task"
+      entityId={task.taskId}
+      relatedEntities={task.itemId ? [{ type: 'inventory', id: String(task.itemId), label: `Item ${task.itemId}` }] : []}
+      enableSourceFilter={!!task.itemId}
+      itemId={task.itemId ? String(task.itemId) : null}
+    />
+  );
+  const renderTaskActivityTab = () => (
+    <EntityHistory entityType="task" entityId={task.taskId} tenantId={clientSheetId ?? undefined} />
+  );
+
+  // Page-mode footer — state-aware pill-styled buttons. Mirrors existing handlers.
+  const pagePillBase: React.CSSProperties = {
+    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+    gap: 5, flex: '1 1 0',
+    minWidth: isMobile ? 92 : 110,
+    maxWidth: isMobile ? 140 : 170,
+    padding: isMobile ? '8px 10px' : '10px 14px',
+    borderRadius: 10, border: 'none',
+    fontFamily: 'inherit',
+    fontSize: isMobile ? 11 : 12,
+    fontWeight: 700,
+    letterSpacing: '0.3px', cursor: 'pointer', whiteSpace: 'nowrap',
+  };
+  const tkDark: React.CSSProperties = { ...pagePillBase, background: '#1C1C1C', color: '#fff' };
+  const tkOrange: React.CSSProperties = { ...pagePillBase, background: theme.colors.orange, color: '#fff' };
+  const tkGreen: React.CSSProperties = { ...pagePillBase, background: '#15803D', color: '#fff' };
+  const tkRed: React.CSSProperties = { ...pagePillBase, background: '#B91C1C', color: '#fff' };
+  const tkLight: React.CSSProperties = { ...pagePillBase, background: '#fff', color: theme.colors.text, border: `1px solid ${theme.colors.border}` };
+
+  const showStart = isOpen && !completed && !isAlreadyStarted && !startTaskResult;
+  const showPassFail = isOpen && !completed && (isAlreadyStarted || !!startTaskResult);
+  const pageFooter = (
+    <>
+      {/* Cancel Task — shown for open/in-progress */}
+      {isOpen && !completed && (
+        <button onClick={handleCancelTask} style={tkLight}>Cancel Task</button>
+      )}
+      {/* Request Repair Quote — quick-action pill when no repair yet */}
+      {task.itemId && !repairStatus && (
+        <button
+          onClick={async () => { await handleRequestRepair(); }}
+          disabled={repairRequesting}
+          style={tkDark}
+        >
+          <Wrench size={13} /> {repairRequesting ? 'Requesting…' : 'Repair Quote'}
+        </button>
+      )}
+      {/* Edit toggle */}
+      {isOpen && !completed && !isEditingTask && (
+        <button onClick={() => setIsEditingTask(true)} style={tkDark}>
+          <Pencil size={13} /> Edit
+        </button>
+      )}
+      {/* Save / Cancel when editing */}
+      {isEditingTask && (
+        <>
+          <button onClick={handleTaskEditCancel} style={tkLight}>Cancel</button>
+          <button onClick={handleTaskSave} disabled={taskSaving} style={tkOrange}>
+            <Save size={13} /> {taskSaving ? 'Saving…' : 'Save'}
+          </button>
+        </>
+      )}
+      {/* Start Task — primary when not yet started */}
+      {showStart && (
+        <button onClick={() => handleStartTask()} disabled={startTaskLoading} style={tkOrange}>
+          <Play size={13} /> {startTaskLoading ? 'Starting…' : 'Start Task'}
+        </button>
+      )}
+      {/* Pass / Fail — once started */}
+      {showPassFail && (
+        <>
+          <button onClick={async () => handleResult('fail')} style={tkRed}>
+            <XCircle size={13} /> Fail
+          </button>
+          <button onClick={async () => handleResult('pass')} style={tkGreen}>
+            <CheckCircle2 size={13} /> Pass
+          </button>
+        </>
+      )}
+    </>
+  );
+
   // ─── Shell ────────────────────────────────────────────────────────────
   // Everything above this point is adapter-owned state + tab body
   // rendering. If we ever want a different outer shell (full-page view,
@@ -1233,6 +1378,14 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
     },
   ];
 
+  const pageTabs = [
+    { id: 'details',  label: 'Details',  keepMounted: true, render: renderDetailsTab },
+    { id: 'photos',   label: 'Photos',   badgeCount: tkPhotoCount, render: renderTaskPhotosTab },
+    { id: 'docs',     label: 'Docs',     badgeCount: tkDocCount,   render: renderTaskDocsTab },
+    { id: 'notes',    label: 'Notes',    badgeCount: tkNoteCount,  render: renderTaskNotesTab },
+    { id: 'activity', label: 'Activity', render: renderTaskActivityTab },
+  ];
+
   if (renderAsPage) {
     return (
       <EntityPage
@@ -1242,37 +1395,9 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
         statusBadge={belowIdContent}
         headerActions={headerActions}
         statusStrip={statusStrip}
-        tabs={tabs as unknown as Parameters<typeof EntityPage>[0]['tabs']}
+        tabs={pageTabs as unknown as Parameters<typeof EntityPage>[0]['tabs']}
         initialTabId="details"
-        builtInTabs={{
-          photos: {
-            entityType: 'task',
-            entityId: task.taskId,
-            tenantId: clientSheetId,
-            itemId: task.itemId ? String(task.itemId) : null,
-            enableSourceFilter: !!task.itemId,
-          },
-          docs: {
-            contextType: 'task',
-            contextId: task.taskId,
-            tenantId: clientSheetId,
-          },
-          notes: {
-            entityType: 'task',
-            entityId: task.taskId,
-            relatedEntities: task.itemId
-              ? [{ type: 'inventory', id: String(task.itemId), label: `Item ${task.itemId}` }]
-              : [],
-            enableSourceFilter: !!task.itemId,
-            itemId: task.itemId ? String(task.itemId) : null,
-          },
-          activity: {
-            entityType: 'task',
-            entityId: task.taskId,
-            tenantId: clientSheetId,
-          },
-        }}
-        footer={footer}
+        footer={pageFooter}
       />
     );
   }

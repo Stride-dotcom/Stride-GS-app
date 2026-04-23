@@ -2,6 +2,12 @@ import React, { useEffect, useState } from 'react';
 import { X, Wrench, Package, ClipboardList, CheckCircle2, XCircle, AlertTriangle, Send, Loader2, Truck, Play, Pencil, MapPin } from 'lucide-react';
 import { TabbedDetailPanel, type TabbedDetailPanelTab } from './TabbedDetailPanel';
 import { EntityPage } from './EntityPage';
+import { DriveFoldersList, type DriveFolderLink } from './DriveFoldersList';
+import { usePhotos } from '../../hooks/usePhotos';
+import { useDocuments } from '../../hooks/useDocuments';
+import { useEntityNotes } from '../../hooks/useEntityNotes';
+import { PhotosPanel as _PhotosPanel, DocumentsPanel as _DocumentsPanel, NotesPanel as _NotesPanel } from './EntityAttachments';
+import { EntityHistory } from './EntityHistory';
 import { FolderButton } from './FolderButton';
 import { DeepLink } from './DeepLink';
 import { ItemIdBadges } from './ItemIdBadges';
@@ -480,16 +486,23 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
                   </span>
                 )}
               </div>
-              {repair.description && <div style={{ fontSize: 12, color: theme.colors.textSecondary, marginTop: 2 }}>{repair.description}</div>}
-              <div style={{ display: 'flex', gap: 16, marginTop: 6, fontSize: 11, color: theme.colors.textMuted }}>
-                {repair.sidemark && <span>Sidemark: {repair.sidemark}</span>}
-                {repair.room && <span>Room: {repair.room}</span>}
+              {/* Item fields — canonical order: Qty · Vendor · Description · Location · Sidemark · Reference. */}
+              <div style={{ display: 'flex', gap: 14, marginTop: 6, fontSize: 11, color: theme.colors.textMuted, flexWrap: 'wrap' }}>
+                {(repair as { qty?: number }).qty != null && <span><strong style={{ color: theme.colors.text, fontWeight: 600 }}>Qty:</strong> {(repair as { qty?: number }).qty}</span>}
+                {repair.vendor && <span><strong style={{ color: theme.colors.text, fontWeight: 600 }}>Vendor:</strong> {repair.vendor}</span>}
+              </div>
+              {repair.description && <div style={{ fontSize: 12, color: theme.colors.textSecondary, marginTop: 4 }}>{repair.description}</div>}
+              <div style={{ display: 'flex', gap: 14, marginTop: 4, fontSize: 11, color: theme.colors.textMuted, flexWrap: 'wrap' }}>
+                {repair.location && <span><strong style={{ color: theme.colors.text, fontWeight: 600 }}>Location:</strong> {repair.location}</span>}
+                {repair.sidemark && <span><strong style={{ color: theme.colors.text, fontWeight: 600 }}>Sidemark:</strong> {repair.sidemark}</span>}
+                {(repair as { reference?: string }).reference && <span><strong style={{ color: theme.colors.text, fontWeight: 600 }}>Reference:</strong> {(repair as { reference?: string }).reference}</span>}
+                {repair.room && <span><strong style={{ color: theme.colors.text, fontWeight: 600 }}>Room:</strong> {repair.room}</span>}
               </div>
               {/* Drive Folder Buttons — each one only renders when a real
                   Drive URL exists. Prior behaviour (grey disabled chip with
                   a tooltip) was noisy for legacy rows that will never have a
                   folder (pre-Drive entities, Supabase-only media flow). */}
-              {(repair.repairFolderUrl || repair.taskFolderUrl || repair.shipmentFolderUrl) && (
+              {!renderAsPage && (repair.repairFolderUrl || repair.taskFolderUrl || repair.shipmentFolderUrl) && (
                 <div style={{ display: 'flex', gap: 6, marginTop: 10, flexWrap: 'wrap' }}>
                   {repair.repairFolderUrl && (
                     <FolderButton label="Repair Folder" url={repair.repairFolderUrl} icon={Wrench} />
@@ -1015,6 +1028,145 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
     },
   };
 
+  // ── Page-mode enhancements ──
+  const { photos: rpPhotos } = usePhotos({
+    entityType: 'repair',
+    entityId: renderAsPage ? repair.repairId : null,
+    tenantId: repair.clientSheetId ?? null,
+    itemId: repair.itemId ? String(repair.itemId) : null,
+    enabled: !!renderAsPage,
+  });
+  const { documents: rpDocs } = useDocuments({
+    contextType: 'repair',
+    contextId: renderAsPage ? repair.repairId : '',
+    tenantId: repair.clientSheetId ?? null,
+    enabled: !!renderAsPage,
+  });
+  const { notes: rpNotes } = useEntityNotes('repair', renderAsPage ? repair.repairId : '');
+  const rpPhotoCount = renderAsPage ? rpPhotos.length : 0;
+  const rpDocCount   = renderAsPage ? rpDocs.length   : 0;
+  const rpNoteCount  = renderAsPage ? rpNotes.length  : 0;
+
+  const repairDriveFolders: DriveFolderLink[] = [
+    ...(repair.repairFolderUrl ? [{ label: `Repair ${repair.repairId}`, url: repair.repairFolderUrl }] : []),
+    ...(repair.taskFolderUrl ? [{ label: repair.sourceTaskId ? `Task ${repair.sourceTaskId}` : 'Task Folder', url: repair.taskFolderUrl }] : []),
+    ...(repair.shipmentFolderUrl ? [{ label: 'Shipment Folder', url: repair.shipmentFolderUrl }] : []),
+  ];
+
+  const renderRepairPhotosTab = () => (
+    <div>
+      <_PhotosPanel
+        entityType="repair"
+        entityId={repair.repairId}
+        tenantId={repair.clientSheetId}
+        itemId={repair.itemId ? String(repair.itemId) : null}
+        enableSourceFilter={!!repair.itemId}
+      />
+      <DriveFoldersList folders={repairDriveFolders} />
+    </div>
+  );
+  const renderRepairDocsTab = () => (
+    <div>
+      <_DocumentsPanel contextType="repair" contextId={repair.repairId} tenantId={repair.clientSheetId} />
+      <DriveFoldersList folders={repairDriveFolders} />
+    </div>
+  );
+  const renderRepairNotesTab = () => (
+    <_NotesPanel
+      entityType="repair"
+      entityId={repair.repairId}
+      relatedEntities={[
+        ...(repair.itemId ? [{ type: 'inventory', id: String(repair.itemId), label: `Item ${repair.itemId}` }] : []),
+        ...(repair.sourceTaskId ? [{ type: 'task', id: String(repair.sourceTaskId), label: `Task ${repair.sourceTaskId}` }] : []),
+      ]}
+      enableSourceFilter={!!repair.itemId}
+      itemId={repair.itemId ? String(repair.itemId) : null}
+    />
+  );
+  const renderRepairActivityTab = () => (
+    <EntityHistory entityType="repair" entityId={repair.repairId} tenantId={repair.clientSheetId ?? undefined} />
+  );
+
+  const pageTabs = [
+    { id: 'details',  label: 'Details',  keepMounted: true, render: renderDetailsTab },
+    { id: 'photos',   label: 'Photos',   badgeCount: rpPhotoCount, render: renderRepairPhotosTab },
+    { id: 'docs',     label: 'Docs',     badgeCount: rpDocCount,   render: renderRepairDocsTab },
+    { id: 'notes',    label: 'Notes',    badgeCount: rpNoteCount,  render: renderRepairNotesTab },
+    { id: 'activity', label: 'Activity', render: renderRepairActivityTab },
+  ];
+
+  // Page-mode footer — state-aware pill-styled buttons (reuses existing handlers).
+  const pagePillBase: React.CSSProperties = {
+    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+    gap: 5, flex: '1 1 0',
+    minWidth: 110,
+    maxWidth: 170,
+    padding: '10px 14px',
+    borderRadius: 10, border: 'none',
+    fontFamily: 'inherit',
+    fontSize: 12,
+    fontWeight: 700,
+    letterSpacing: '0.3px', cursor: 'pointer', whiteSpace: 'nowrap',
+  };
+  const rpDark: React.CSSProperties = { ...pagePillBase, background: '#1C1C1C', color: '#fff' };
+  const rpOrange: React.CSSProperties = { ...pagePillBase, background: theme.colors.orange, color: '#fff' };
+  const rpLight: React.CSSProperties = { ...pagePillBase, background: '#fff', color: theme.colors.text, border: `1px solid ${theme.colors.border}` };
+  const rpGreen: React.CSSProperties = { ...pagePillBase, background: '#15803D', color: '#fff' };
+  const rpRed: React.CSSProperties = { ...pagePillBase, background: '#B91C1C', color: '#fff' };
+
+  const s = effectiveStatus;
+  const active = !['Complete', 'Cancelled', 'Declined'].includes(s);
+  const pageFooter = (
+    <>
+      {/* Cancel Repair — active, not editing */}
+      {active && (
+        <button onClick={async () => {
+          const ok = typeof window !== 'undefined' && window.confirm('Cancel this repair?');
+          if (ok) {
+            try {
+              setSubmitting(true);
+              const resp = await (await import('../../lib/api')).postCancelRepair({ repairId: repair.repairId }, repair.clientSheetId);
+              if (resp.ok && resp.data?.success) { setEffectiveStatus('Cancelled'); onRepairUpdated?.(); }
+            } finally { setSubmitting(false); }
+          }
+        }} style={rpLight}>Cancel Repair</button>
+      )}
+      {/* Reopen — admin/staff on Complete or In Progress */}
+      {canStaffEdit && (s === 'Complete' || s === 'In Progress') && (
+        <button onClick={handleReopenRepairClick} style={rpLight}>Reopen</button>
+      )}
+      {/* State-aware primary actions */}
+      {s === 'Pending Quote' && (
+        <button onClick={handleSendQuote} disabled={submitting} style={rpOrange}>
+          Send Quote
+        </button>
+      )}
+      {s === 'Quote Sent' && (
+        <>
+          <button onClick={() => handleRespond('Decline')} disabled={submitting} style={rpRed}>Decline</button>
+          <button onClick={() => handleRespond('Approve')} disabled={submitting} style={rpGreen}>Approve</button>
+        </>
+      )}
+      {s === 'Approved' && canStaffEdit && (
+        <button onClick={handleStartRepair} disabled={submitting} style={rpOrange}>
+          <Play size={13} /> Start Repair
+        </button>
+      )}
+      {s === 'In Progress' && (
+        <>
+          <button onClick={async () => handleResult('fail')} disabled={submitting} style={rpRed}>Failed</button>
+          <button onClick={async () => handleResult('pass')} disabled={submitting} style={rpGreen}>Complete</button>
+        </>
+      )}
+      {/* Regenerate Work Order — In Progress / Complete */}
+      {(s === 'In Progress' || s === 'Complete') && canStaffEdit && (
+        <button onClick={handleStartRepair} disabled={submitting} style={rpDark}>
+          Regenerate WO
+        </button>
+      )}
+    </>
+  );
+
   if (renderAsPage) {
     return (
       <EntityPage
@@ -1024,10 +1176,9 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
         statusBadge={belowIdContent}
         headerActions={headerActions}
         statusStrip={statusStrip}
-        tabs={tabs as unknown as Parameters<typeof EntityPage>[0]['tabs']}
+        tabs={pageTabs as unknown as Parameters<typeof EntityPage>[0]['tabs']}
         initialTabId="details"
-        builtInTabs={builtInTabsCfg}
-        footer={footer}
+        footer={pageFooter}
       />
     );
   }
