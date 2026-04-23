@@ -2,7 +2,23 @@
  CB13_INVOICE_COMMIT.gs
  STRIDE CONSOLIDATED BILLING — PHASE 2 COMMIT ENGINE
  ------------------------------------------------------------
- const CB13_INVOICE_COMMIT_V = "v1.5.0"
+ const CB13_INVOICE_COMMIT_V = "v1.6.0"
+
+ v1.6.0 changes (2026-04-23):
+ - FIX Bug 1: CB13_markUnbilledRowsInvoiced_ now THROWS on missing
+   Status/Ledger Row ID/Client Sheet ID columns instead of silently
+   logging and returning. Previously, if Unbilled_Report headers were
+   mis-named or missing, the Status would stay "Unbilled" even though
+   the client's Billing_Ledger was correctly updated to "Invoiced" —
+   the React Billing page would show "Unbilled" after a successful
+   invoice create, extremely confusing.
+ - FIX Bug 1b: CB13_refreshUnbilledReport now prefers current "Status"
+   header with legacy "Billing Status" fallback (was pure legacy lookup
+   falling back to column B blindly).
+ - Outer CB13_createAndSendInvoices already catches these throws into
+   the errors array and surfaces them to the operator via the summary
+   alert — so missing headers now visibly fail the invoice run instead
+   of silently corrupting state.
 
  v1.5.0 changes:
  - FIX: Sidemark now written to its own Consolidated_Ledger column
@@ -1025,14 +1041,25 @@ function CB13_markUnbilledRowsInvoiced_(invoiceRows) {
     _hm[String(h || "").trim().toUpperCase()] = i;
   });
 
-  // Find indices using header map — no hardcoded fallbacks
+  // Find indices using header map — tolerant of legacy + current names
   var idxStatus = _hm["BILLING STATUS"] !== undefined ? _hm["BILLING STATUS"] : _hm["STATUS"];
   var idxLedgerId = _hm["LEDGER ENTRY ID"] !== undefined ? _hm["LEDGER ENTRY ID"] : _hm["LEDGER ROW ID"];
   var idxSourceId = _hm["SOURCE SHEET ID"] !== undefined ? _hm["SOURCE SHEET ID"] : _hm["CLIENT SHEET ID"];
 
-  if (idxStatus === undefined || idxLedgerId === undefined || idxSourceId === undefined) {
-    Logger.log("CB13_markUnbilledRowsInvoiced_: Missing required headers in Unbilled_Report. Skipping.");
-    return;
+  // v1.5.0: THROW instead of silent-log+return so failures surface to the user's
+  // "Create & Send Invoices" error summary. Previously this would swallow the
+  // failure, leaving the Unbilled_Report showing "Unbilled" after the client
+  // Billing_Ledger was correctly updated to "Invoiced" — confusing.
+  var missing = [];
+  if (idxStatus === undefined) missing.push("Status (or legacy 'Billing Status')");
+  if (idxLedgerId === undefined) missing.push("Ledger Row ID (or legacy 'Ledger Entry ID')");
+  if (idxSourceId === undefined) missing.push("Client Sheet ID (or legacy 'Source Sheet ID')");
+  if (missing.length) {
+    throw new Error(
+      "CB13_markUnbilledRowsInvoiced_: Unbilled_Report is missing required column(s): " +
+      missing.join(", ") +
+      ". Run Update Headers on the Consolidated Billing sheet to repair."
+    );
   }
 
   // Helper to safely get values
@@ -1077,8 +1104,13 @@ function CB13_refreshUnbilledReport() {
   if (data.length < 2) return;
 
   var headers   = data[0].map(String);
-  var idxStatus = headers.indexOf("Billing Status");
-  if (idxStatus === -1) idxStatus = 1;
+  // v1.5.0: Tolerant header lookup — accept both current "Status" and legacy "Billing Status"
+  var idxStatus = headers.indexOf("Status");
+  if (idxStatus === -1) idxStatus = headers.indexOf("Billing Status");
+  if (idxStatus === -1) {
+    Logger.log("CB13_refreshUnbilledReport: No Status or Billing Status column found — skipping.");
+    return;
+  }
 
   for (var row = data.length - 1; row >= 1; row--) {
     var status = String(data[row][idxStatus] || "").trim();

@@ -2105,7 +2105,12 @@ function CB13_addBillingStatusValidation() {
   var headers   = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0].map(String);
   var idxStatus = headers.indexOf("Status");
   if (idxStatus === -1) idxStatus = headers.indexOf("Billing Status"); // legacy header fallback
-  if (idxStatus === -1) idxStatus = 0;
+  // v1.5.0: Don't silently apply validation to column A if neither header is found —
+  // skip instead so we don't corrupt a random column with dropdowns.
+  if (idxStatus === -1) {
+    Logger.log("CB13_addBillingStatusValidation: No 'Status' or 'Billing Status' column on Unbilled_Report — skipping.");
+    return;
+  }
   var range = sh.getRange(2, idxStatus + 1, lastRow - 1, 1);
   var rule  = SpreadsheetApp.newDataValidation()
     .requireValueInList(["Unbilled", "Invoiced", "Void"], true)
