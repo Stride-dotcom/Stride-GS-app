@@ -175,6 +175,20 @@ function CB13_commitInvoice(previewIndexOrInvoiceObj) {
       if (_clientSettings.PAYMENT_TERMS) paymentTerms = _clientSettings.PAYMENT_TERMS;
     } catch (_) {}
 
+    // v1.6.0 — FIX Bug 4b: Apply payment terms to compute due date.
+    // Previously dueDateStr was stuck equal to invDateStr regardless of Net 15/30
+    // — every invoice appeared past due the moment it was created.
+    var _termsMatch = String(paymentTerms || "").toUpperCase().match(/NET\s*(\d+)/);
+    if (_termsMatch) {
+      var _netDays = parseInt(_termsMatch[1], 10);
+      if (!isNaN(_netDays) && _netDays > 0) {
+        var _dueObj = new Date(invDate.getTime());
+        _dueObj.setDate(_dueObj.getDate() + _netDays);
+        dueDateStr = Utilities.formatDate(_dueObj, Session.getScriptTimeZone(), "MM/dd/yyyy");
+      }
+    }
+    // For "Due upon receipt" / "Due on receipt" / unknown terms — dueDateStr stays = invDateStr
+
     // --- Build Invoice PDF from Google Doc Template ---
     var docTitle = "Invoice " + invNo + " — " + (invoice.client || "");
     if (invoice.sidemark) docTitle += " — " + invoice.sidemark;

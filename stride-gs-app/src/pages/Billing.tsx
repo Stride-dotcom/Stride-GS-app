@@ -67,6 +67,7 @@ interface BillingRow {
   autoCharge?: boolean;
   qboStatus?: string | null;
   qboInvoiceId?: string | null;
+  invoiceDate?: string;  // Date the invoice was created (not the service/ledger date)
 }
 
 // Aggregated invoice row for the invoice-list view (one per unique invoiceNo).
@@ -76,7 +77,8 @@ interface InvoiceGroup {
   status: string;
   client: string;
   sidemark: string;      // '' | single value | 'Multiple'
-  date: string;          // earliest child date (fallback — see billingSections memo)
+  date: string;          // earliest child service date (fallback only — prefer invoiceDate for display)
+  invoiceDate: string;   // Date the invoice was actually created (today at create time)
   total: number;
   qboStatus: string | null;  // null | single status | 'Mixed'
   qboInvoiceId: string | null;
@@ -395,6 +397,7 @@ export function Billing() {
       autoCharge: (r as any).autoCharge === true,
       qboStatus: r.qboStatus || null,
       qboInvoiceId: r.qboInvoiceId || null,
+      invoiceDate: r.invoiceDate || '',
     }))
   , []);
 
@@ -689,6 +692,7 @@ export function Billing() {
           client: r.client,
           sidemark: '',
           date: '',
+          invoiceDate: '',
           total: 0,
           qboStatus: null,
           qboInvoiceId: r.qboInvoiceId || null,
@@ -698,6 +702,7 @@ export function Billing() {
           _sidemarks: new Set<string>(),
           _qboStatuses: new Set<string>(),
           _dates: [],
+          _invoiceDates: new Set<string>(),
         };
         order.push(r.invoiceNo);
       }
@@ -707,18 +712,22 @@ export function Billing() {
       if (r.sidemark) g._sidemarks.add(r.sidemark);
       if (r.qboStatus) g._qboStatuses.add(r.qboStatus);
       if (r.date) g._dates.push(r.date);
+      if (r.invoiceDate) g._invoiceDates.add(r.invoiceDate);
     }
     const invoicedGroups: InvoiceGroup[] = order.map(k => {
       const g = groupMap[k];
       const sidemarks = [...g._sidemarks];
       const qboStatuses = [...g._qboStatuses];
       const dates = g._dates.slice().sort();
+      const invoiceDates = [...g._invoiceDates].sort();
       return {
         invoiceNo: g.invoiceNo,
         status: g.status,
         client: g.client,
         sidemark: sidemarks.length === 1 ? sidemarks[0] : (sidemarks.length > 1 ? 'Multiple' : ''),
         date: dates[0] || '',
+        // Prefer invoiceDate (creation date) over service date; fall back to earliest service date
+        invoiceDate: invoiceDates[0] || dates[0] || '',
         total: g.total,
         qboStatus: qboStatuses.length === 1 ? qboStatuses[0] : (qboStatuses.length > 1 ? 'Mixed' : null),
         qboInvoiceId: qboStatuses.length === 1 ? g.qboInvoiceId : null,
@@ -1003,7 +1012,7 @@ export function Billing() {
         return <span style={{ fontSize: 12, color: theme.colors.textSecondary }}>{v || '\u2014'}</span>;
       },
     }),
-    invCol.accessor('date', {
+    invCol.accessor('invoiceDate', {
       header: 'Invoice Date', size: 110,
       cell: i => <span style={{ fontSize: 12, color: theme.colors.textSecondary }}>{fmt(i.getValue())}</span>,
     }),
