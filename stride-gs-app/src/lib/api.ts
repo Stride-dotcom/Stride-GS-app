@@ -1525,7 +1525,10 @@ export function postRespondToRepairQuote(
 
 export interface UpdateRepairNotesPayload {
   repairId: string;
-  repairNotes: string;
+  repairNotes?: string;
+  repairVendor?: string;
+  scheduledDate?: string;
+  startDate?: string;
 }
 
 export interface UpdateRepairNotesResponse {
