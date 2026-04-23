@@ -19,7 +19,9 @@ type EntityType =
   // Realtime connection. Reduces 5 channels → 0 (folded into the
   // central `stride_cache_realtime` channel).
   | 'email_template' | 'service_catalog' | 'quote_catalog'
-  | 'expected_shipment' | 'delivery_zone';
+  | 'expected_shipment' | 'delivery_zone'
+  // v38.114.0 — Billing Activity Log audit trail
+  | 'billing_activity_log';
 
 type EntityEventCallback = (entityType: EntityType, entityId: string) => void;
 

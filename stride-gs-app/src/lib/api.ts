@@ -2259,6 +2259,21 @@ export function postVoidManualCharge(
   );
 }
 
+// ─── v38.114.0: Billing Activity — Mark Resolved ─────────────────────────────
+
+export function postMarkBillingActivityResolved(
+  id: string,
+  note?: string,
+  signal?: AbortSignal,
+) {
+  return apiPost<{ success: boolean; error?: string }>(
+    'markBillingActivityResolved',
+    { id, note: note || '' },
+    {},
+    { signal },
+  );
+}
+
 // ─── Phase 7B #12: Resend Invoice Email ──────────────────────────────────────
 
 export interface ResendInvoiceEmailPayload {
