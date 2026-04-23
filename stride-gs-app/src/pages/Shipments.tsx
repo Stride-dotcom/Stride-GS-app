@@ -329,23 +329,19 @@ export function Shipments() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.role, user?.accessibleClientNames?.length, clientNames.length]);
 
-  // Effect 1: Route state OR ?open= query param → store pendingOpen + auto-load
+  // Effect 1: Route state OR ?open= query param → navigate directly to entity page.
+  // ShipmentPage fetches its own data from Supabase by ID.
   useEffect(() => {
     const state = location.state as { openShipmentId?: string; clientSheetId?: string } | null;
-    // Do NOT call refetchShipments() here — it bypasses Supabase cache and
-    // forces unscoped GAS (session 62). Data hook auto-fetches via
-    // Supabase-first; Effect 2 opens the pending row when data arrives.
     if (state?.openShipmentId) {
-      pendingOpenRef.current = state.openShipmentId;
-      window.history.replaceState({}, '');
-    } else if (location.search) {
+      navigate(`/shipments/${state.openShipmentId}`, { replace: true });
+      return;
+    }
+    if (location.search) {
       const params = new URLSearchParams(location.search);
       const openId = params.get('open');
-      const clientIdParam = params.get('client');
       if (openId) {
-        pendingOpenRef.current = openId;
-        window.history.replaceState({}, '', window.location.pathname + window.location.hash.split('?')[0]);
-        if (clientIdParam) deepLinkPendingTenantRef.current = clientIdParam;
+        navigate(`/shipments/${openId}`, { replace: true });
       }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps

@@ -235,24 +235,20 @@ export function Tasks() {
     if (!resp.ok) clearTaskPatch(taskId);
   };
 
-  // Effect 1: Route state OR ?open= query param → store pendingOpen + auto-load
+  // Effect 1: Route state OR ?open= query param → navigate directly to entity page.
+  // TaskPage fetches its own data from Supabase by ID — no need to wait for
+  // the tasks list to load. replace:true so Back skips the intermediate list entry.
   useEffect(() => {
     const state = location.state as { openTaskId?: string; clientSheetId?: string } | null;
-    // Do NOT call refetchTasks() here — it bypasses the Supabase cache and
-    // forces an unscoped GAS call (session 62). The data hook's normal
-    // mount fetch already hits Supabase-first (~50ms). The Effect 2 below
-    // opens the pending row once tasks arrive.
     if (state?.openTaskId) {
-      pendingOpenRef.current = state.openTaskId;
-      window.history.replaceState({}, '');
-    } else if (location.search) {
+      navigate(`/tasks/${state.openTaskId}`, { replace: true });
+      return;
+    }
+    if (location.search) {
       const params = new URLSearchParams(location.search);
       const openId = params.get('open');
-      const clientIdParam = params.get('client');
       if (openId) {
-        pendingOpenRef.current = openId;
-        window.history.replaceState({}, '', window.location.pathname + window.location.hash.split('?')[0]);
-        if (clientIdParam) deepLinkPendingTenantRef.current = clientIdParam;
+        navigate(`/tasks/${openId}`, { replace: true });
       }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps

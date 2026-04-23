@@ -139,20 +139,14 @@ export function WillCalls() {
   const columns = useMemo(() => cols(), []);
   (window as any).__openWCDetail = (w: WC) => navigate(`/will-calls/${w.wcNumber}`);
 
-  // Effect 1: ?open= query param → store pendingOpen + auto-load
-  // (Dashboard now opens standalone page via #/will-calls/:wcNumber — no route state needed)
+  // Effect 1: ?open= query param → navigate directly to entity page.
+  // WillCallPage fetches its own data from Supabase by ID.
   useEffect(() => {
-    // Do NOT call refetchWCs() here — it bypasses Supabase cache and
-    // forces unscoped GAS (session 62). Data hook auto-fetches via
-    // Supabase-first; Effect 2 opens the pending row when data arrives.
     if (location.search) {
       const params = new URLSearchParams(location.search);
       const openId = params.get('open');
-      const clientIdParam = params.get('client');
       if (openId) {
-        pendingOpenRef.current = openId;
-        window.history.replaceState({}, '', window.location.pathname + window.location.hash.split('?')[0]);
-        if (clientIdParam) deepLinkPendingTenantRef.current = clientIdParam;
+        navigate(`/will-calls/${openId}`, { replace: true });
       }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps

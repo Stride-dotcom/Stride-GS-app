@@ -49,7 +49,6 @@ import { WriteButton } from '../components/shared/WriteButton';
 import { BatchGuard, checkBatchClientGuard } from '../components/shared/BatchGuard';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { isApiConfigured, postBatchRequestRepairQuote, type BatchMutationResult } from '../lib/api';
-import { supabase } from '../lib/supabase';
 import { useInventory } from '../hooks/useInventory';
 import { useClients } from '../hooks/useClients';
 import { useItemNotes } from '../hooks/useItemNotes';
@@ -779,55 +778,22 @@ export function Inventory() {
   // Ref for deferred deep-link client resolution (declared before first effect that uses it)
   const deepLinkPendingTenantRef = useRef<string | null>(null);
 
-  // Effect 1: read URL params / route state on mount — auto-load if deep link present
+  // Effect 1: read URL params / route state on mount.
+  // ?open=ITEM_ID → navigate immediately to ItemPage (fetches its own data from Supabase).
+  // { shipmentFilter } route state → filter table to that shipment number.
   useEffect(() => {
-    let needsAutoLoad = false;
-    // ?open=ITEM_ID[&client=<sheetId>] → open that item's detail panel when
-    // data loads. DeepLink components pass `client` from the calling panel so
-    // the target page can scope the filter without a Supabase round-trip.
-    // Supabase fallback kicks in when `client` is absent (older callers).
     const params = new URLSearchParams(location.search);
     const openId = params.get('open');
-    const clientIdParam = params.get('client');
     if (openId) {
-      pendingOpenRef.current = openId;
-      needsAutoLoad = true;
-      window.history.replaceState({}, '', window.location.pathname + window.location.hash.split('?')[0]);
-
-      if (clientIdParam) {
-        // Cheap synchronous path — we already know the client. Stash and let
-        // the apiClients-loaded effect set the filter (it runs as soon as
-        // apiClients populates, which may be after this mount effect).
-        deepLinkPendingTenantRef.current = clientIdParam;
-      } else {
-        // Fallback: resolve tenant_id via Supabase by item_id.
-        (async () => {
-          try {
-            const { data } = await supabase
-              .from('inventory')
-              .select('tenant_id')
-              .eq('item_id', openId)
-              .limit(1)
-              .maybeSingle();
-            const tid = (data as { tenant_id?: string } | null)?.tenant_id;
-            if (tid) deepLinkPendingTenantRef.current = tid;
-          } catch { /* user can pick manually */ }
-        })();
-      }
+      navigate(`/inventory/${openId}`, { replace: true });
+      return;
     }
     // Route state: { shipmentFilter } → filter table to that shipment number
     const state = location.state as { shipmentFilter?: string } | null;
     if (state?.shipmentFilter) {
       setShipmentFilter(state.shipmentFilter);
-      needsAutoLoad = true;
       window.history.replaceState({}, '');
     }
-    // Do NOT call refetch() here. refetch() in useApiData bypasses the
-    // Supabase cache and forces an unscoped GAS call (session 62 root cause).
-    // The data hook auto-fetches when cacheKeyScope changes via
-    // clientFilter → clientSheetId in the retry effect below, which goes
-    // through the Supabase-first path (~50ms). Deep links: fast. GAS: never.
-    void needsAutoLoad;
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -857,13 +823,15 @@ export function Inventory() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [apiClients.length]);
 
-  // Effect 2: when items load, open the pending item
+  // Effect 2: fallback — if pendingOpenRef was set before Effect 1 could navigate, finish it.
+  // In practice Effect 1 navigates immediately, so this fires only on hot-reload edge cases.
   useEffect(() => {
     if (pendingOpenRef.current && inventoryItems.length > 0) {
-      const match = inventoryItems.find(i => i.itemId === pendingOpenRef.current);
-      if (match) { setSelectedItemId(match.itemId); pendingOpenRef.current = null; }
+      const id = pendingOpenRef.current;
+      pendingOpenRef.current = null;
+      navigate(`/inventory/${id}`, { replace: true });
     }
-  }, [inventoryItems]);
+  }, [inventoryItems, navigate]);
 
   // Table state — column order persisted per user via useTablePreferences
   const { colVis: columnVisibility, setColVis: setColumnVisibility, sorting, setSorting, columnOrder, setColumnOrder, statusFilter: persistedStatusFilter, toggleStatus: togglePersistedStatus, clearStatusFilter: clearPersistedStatus } = useTablePreferences('inventory', [], {}, DEFAULT_COL_ORDER);
