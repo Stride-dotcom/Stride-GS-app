@@ -376,79 +376,110 @@ export function EntityPage(props: EntityPageConfig) {
     <div style={{
       // Bleed into AppLayout margins (matches Dashboard pattern).
       margin: '-28px -32px',
-      padding: isMobile ? '16px 16px 96px' : '28px 32px 96px',
+      // Extra bottom padding ensures content scrolls clear of the fixed footer.
+      // Mobile footer can wrap to 2-3 rows of action pills; 260px covers the
+      // worst case plus iOS safe-area inset.
+      padding: isMobile ? '14px 14px 260px' : '28px 32px 120px',
       background: EP.pageBg,
       minHeight: '100%',
       display: 'flex',
       flexDirection: 'column',
-      gap: isMobile ? 16 : 20,
+      gap: isMobile ? 12 : 20,
     }}>
 
-      {/* ── Header (Dashboard typography: tracked-out uppercase title) ────── */}
-      <div style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: 12,
-        flexWrap: 'wrap',
-        justifyContent: 'space-between',
-      }}>
-        <div style={{ display: 'inline-flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-          <button
-            onClick={handleBack}
-            aria-label="Back"
-            style={{
-              width: 34, height: 34,
-              borderRadius: '50%',
-              border: `1px solid ${EP.cardBorder}`,
-              background: EP.innerCardBg,
-              display: 'inline-flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              cursor: 'pointer',
-              fontFamily: 'inherit',
-              flexShrink: 0,
-              color: EP.textSecondary,
-            }}
-          >
-            <ArrowLeft size={15} />
-          </button>
-
-          {/* "INVENTORY · 62697" — matches "STRIDE LOGISTICS · DASHBOARD" cadence */}
+      {/* ── Header ───────────────────────────────────────────────────────── */}
+      {isMobile ? (
+        // Mobile: 3-row stack keeps the title full-size without wrapping the
+        // Actions button underneath it. Row 1 = nav controls; Row 2 = title;
+        // Row 3 = client name.
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {/* Row 1: back ↔ Actions (compact, always fits) */}
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <button
+              onClick={handleBack}
+              aria-label="Back"
+              style={{
+                width: 34, height: 34, borderRadius: '50%',
+                border: `1px solid ${EP.cardBorder}`, background: EP.innerCardBg,
+                display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                cursor: 'pointer', fontFamily: 'inherit', flexShrink: 0, color: EP.textSecondary,
+              }}
+            >
+              <ArrowLeft size={15} />
+            </button>
+            {headerActions && (
+              <div style={{ display: 'inline-flex', gap: 8, alignItems: 'center', flexShrink: 0 }}>
+                {headerActions}
+              </div>
+            )}
+          </div>
+          {/* Row 2: title (INVENTORY · 62697) + status badge */}
           <div style={{
-            fontSize: isMobile ? 16 : 20,
-            fontWeight: 700,
-            letterSpacing: '2px',
-            color: EP.textPrimary,
-            textTransform: 'uppercase',
-            display: 'inline-flex', alignItems: 'center', gap: 12, flexWrap: 'wrap',
+            fontSize: 16, fontWeight: 700, letterSpacing: '2px',
+            color: EP.textPrimary, textTransform: 'uppercase',
+            display: 'inline-flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
           }}>
             <span style={{ color: EP.accent }}>{entityLabel}</span>
             <span style={{ color: EP.textMuted }}>·</span>
             <span style={{ letterSpacing: '1px' }}>{entityId}</span>
+            {statusBadge}
           </div>
-
-          {statusBadge && <span style={{ flexShrink: 0 }}>{statusBadge}</span>}
+          {/* Row 3: client name */}
+          {clientName && (
+            <div style={{ fontSize: 14, fontWeight: 700, color: EP.textPrimary }}>
+              {clientName}
+            </div>
+          )}
         </div>
-
-        {headerActions && (
-          <div style={{ display: 'inline-flex', gap: 8, alignItems: 'center', flexShrink: 0 }}>
-            {headerActions}
+      ) : (
+        // Desktop: single row with back · title · badge · spacer · actions.
+        <>
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 12,
+            flexWrap: 'nowrap',
+            justifyContent: 'space-between',
+          }}>
+            <div style={{ display: 'inline-flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', minWidth: 0 }}>
+              <button
+                onClick={handleBack}
+                aria-label="Back"
+                style={{
+                  width: 34, height: 34, borderRadius: '50%',
+                  border: `1px solid ${EP.cardBorder}`, background: EP.innerCardBg,
+                  display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                  cursor: 'pointer', fontFamily: 'inherit', flexShrink: 0, color: EP.textSecondary,
+                }}
+              >
+                <ArrowLeft size={15} />
+              </button>
+              <div style={{
+                fontSize: 20, fontWeight: 700, letterSpacing: '2px',
+                color: EP.textPrimary, textTransform: 'uppercase',
+                display: 'inline-flex', alignItems: 'center', gap: 12, flexWrap: 'wrap',
+              }}>
+                <span style={{ color: EP.accent }}>{entityLabel}</span>
+                <span style={{ color: EP.textMuted }}>·</span>
+                <span style={{ letterSpacing: '1px' }}>{entityId}</span>
+              </div>
+              {statusBadge && <span style={{ flexShrink: 0 }}>{statusBadge}</span>}
+            </div>
+            {headerActions && (
+              <div style={{ display: 'inline-flex', gap: 8, alignItems: 'center', flexShrink: 0 }}>
+                {headerActions}
+              </div>
+            )}
           </div>
-        )}
-      </div>
-
-      {/* Client name — bigger + bold, matches Dashboard subhead weight */}
-      {clientName && (
-        <div style={{
-          fontSize: isMobile ? 14 : 15,
-          fontWeight: 700,
-          color: EP.textPrimary,
-          letterSpacing: '0.2px',
-          marginTop: -8,
-          paddingLeft: 46, // under the back circle
-        }}>
-          {clientName}
-        </div>
+          {clientName && (
+            <div style={{
+              fontSize: 15, fontWeight: 700, color: EP.textPrimary,
+              letterSpacing: '0.2px', marginTop: -8, paddingLeft: 46,
+            }}>
+              {clientName}
+            </div>
+          )}
+        </>
       )}
 
       {statusStrip}

@@ -1253,11 +1253,18 @@ export function ItemDetailPanel({
   // Page-mode footer: state-aware quick-action pills.
   // Dark secondary pills (Create Task / Repair Quote / Add to WC / Transfer),
   // orange primary pill on right (Edit or Save+Cancel when editing).
+  // On mobile, pills shrink (smaller padding, font, min-width) so fewer rows
+  // of the fixed footer wrap and the item body has less scroll obstruction.
   const pagePillBase: React.CSSProperties = {
     display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-    gap: 5, flex: '1 1 0', minWidth: 110, maxWidth: 170,
-    padding: '10px 14px', borderRadius: 10, border: 'none',
-    fontFamily: 'inherit', fontSize: 12, fontWeight: 700,
+    gap: 5, flex: '1 1 0',
+    minWidth: isMobile ? 92 : 110,
+    maxWidth: isMobile ? 140 : 170,
+    padding: isMobile ? '8px 10px' : '10px 14px',
+    borderRadius: 10, border: 'none',
+    fontFamily: 'inherit',
+    fontSize: isMobile ? 11 : 12,
+    fontWeight: 700,
     letterSpacing: '0.3px', cursor: 'pointer', whiteSpace: 'nowrap',
   };
   const darkPill: React.CSSProperties = { ...pagePillBase, background: '#1C1C1C', color: '#fff' };
