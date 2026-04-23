@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { useAuth } from '../contexts/AuthContext';
-import { fetchShipmentByNoFromSupabase, type ClientNameMap } from '../lib/supabaseQueries';
+import { fetchShipmentByNoFromSupabase, fetchShipmentItemsFromSupabase, type ClientNameMap } from '../lib/supabaseQueries';
 import { fetchShipments, fetchShipmentItems } from '../lib/api';
 import { useClients } from './useClients';
 import type { ApiShipment, ApiShipmentItem } from '../lib/api';
@@ -59,11 +59,33 @@ export function useShipmentDetail(shipmentNo: string | undefined): UseShipmentDe
         // Resolve clientName from map
         const clientName = clientNameMapRef.current[sbShipment.clientSheetId] || sbShipment.clientName || '';
         const enriched = { ...sbShipment, clientName };
+
+        // Fetch items from Supabase (inventory rows filtered by shipment_number
+        // + tenant_id) — ~50ms vs 2-5s from GAS. Awaiting here so the page
+        // renders with items already populated (no "items load after panel
+        // opens" flash). GAS fallback fires only when Supabase returns empty
+        // (genuine new/empty shipment or rare cache miss).
+        let sbItemsLoaded = false;
+        if (sbShipment.clientSheetId) {
+          try {
+            const sbItems = await fetchShipmentItemsFromSupabase(
+              sbShipment.clientSheetId,
+              shipmentNo
+            );
+            if (controller.signal.aborted || fetchId !== fetchCountRef.current) return;
+            if (sbItems && sbItems.items.length > 0) {
+              setItems(sbItems.items);
+              sbItemsLoaded = true;
+            }
+          } catch { /* fall through to GAS below */ }
+        }
+
         setShipment(enriched);
         setStatus('loaded');
 
-        // Fetch items from GAS
-        if (sbShipment.clientSheetId) {
+        // GAS fallback — only when Supabase returned no items. Fire-and-forget
+        // so it doesn't block the already-rendered page.
+        if (sbShipment.clientSheetId && !sbItemsLoaded) {
           fetchShipmentItems(sbShipment.clientSheetId, shipmentNo, controller.signal)
             .then(resp => {
               if (fetchId !== fetchCountRef.current) return;
@@ -94,14 +116,24 @@ export function useShipmentDetail(shipmentNo: string | undefined): UseShipmentDe
                 return;
               }
               setShipment({ ...found, clientSheetId });
+              // Try Supabase items first (fast) before falling back to GAS.
+              let sbItemsLoaded2 = false;
+              try {
+                const sbItems2 = await fetchShipmentItemsFromSupabase(clientSheetId, shipmentNo);
+                if (sbItems2 && sbItems2.items.length > 0) {
+                  setItems(sbItems2.items);
+                  sbItemsLoaded2 = true;
+                }
+              } catch { /* fall through */ }
               setStatus('loaded');
-              // Fetch items
-              fetchShipmentItems(clientSheetId, shipmentNo, controller.signal)
-                .then(itemsResp => {
-                  if (fetchId !== fetchCountRef.current) return;
-                  if (itemsResp?.data?.items) setItems(itemsResp.data.items);
-                })
-                .catch(() => {});
+              if (!sbItemsLoaded2) {
+                fetchShipmentItems(clientSheetId, shipmentNo, controller.signal)
+                  .then(itemsResp => {
+                    if (fetchId !== fetchCountRef.current) return;
+                    if (itemsResp?.data?.items) setItems(itemsResp.data.items);
+                  })
+                  .catch(() => {});
+              }
               return;
             }
           }
