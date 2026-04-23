@@ -66,7 +66,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
   const isActive = !['Complete', 'Cancelled', 'Declined'].includes(effectiveStatus);
 
   // (I)(A)(R) indicator badges for the Item card below.
-  const { inspOpenItems, inspDoneItems, asmOpenItems, asmDoneItems, repairOpenItems, repairDoneItems } = useItemIndicators(repair.clientSheetId);
+  const { inspOpenItems, inspDoneItems, asmOpenItems, asmDoneItems, repairOpenItems, repairDoneItems, wcOpenItems, wcDoneItems } = useItemIndicators(repair.clientSheetId);
 
   const [repairNotes, setRepairNotes] = useState(repair.repairNotes || '');
   const [showResultPrompt, setShowResultPrompt] = useState<'fail' | null>(null);
@@ -465,6 +465,8 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
                   asmDoneItems={asmDoneItems}
                   repairOpenItems={repairOpenItems}
                   repairDoneItems={repairDoneItems}
+                  wcOpenItems={wcOpenItems}
+                  wcDoneItems={wcDoneItems}
                 />
                 {repair.vendor ? <span>{` — ${repair.vendor}`}</span> : null}
                 {/* Session 74: prominent warehouse-location pill next to the Item ID.
@@ -1198,6 +1200,8 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
           asmDoneItems={asmDoneItems}
           repairOpenItems={repairOpenItems}
           repairDoneItems={repairDoneItems}
+          wcOpenItems={wcOpenItems}
+          wcDoneItems={wcDoneItems}
         />
       ) : undefined}
       belowId={belowIdContent}
