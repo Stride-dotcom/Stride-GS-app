@@ -1,1 +1,0 @@
-import{a as e}from"./supabaseQueries-DxY3atjs.js";export{e as fetchClientsFromSupabase};
