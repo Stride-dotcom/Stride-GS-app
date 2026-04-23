@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useRef, useEffect } from 'react';
-import { useLocation } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { createPortal } from 'react-dom';
 import {
   useReactTable, getCoreRowModel, getSortedRowModel, getFilteredRowModel,
@@ -14,7 +14,6 @@ import {
 import { useVirtualRows } from '../hooks/useVirtualRows';
 import { theme } from '../styles/theme';
 import { fmtDate } from '../lib/constants';
-import { WillCallDetailPanel } from '../components/shared/WillCallDetailPanel';
 import { WriteButton } from '../components/shared/WriteButton';
 import { BatchGuard, checkBatchClientGuard } from '../components/shared/BatchGuard';
 import { ConfirmDialog } from '../components/shared/ConfirmDialog';
@@ -92,6 +91,7 @@ function cols() {
 export function WillCalls() {
   const { isMobile } = useIsMobile();
   const location = useLocation();
+  const navigate = useNavigate();
   const apiConfigured = isApiConfigured();
   useBatchData();
   const pendingOpenRef = useRef<string | null>(null);
@@ -134,12 +134,10 @@ export function WillCalls() {
     return ids.length === 1 ? ids[0] : ids;
   }, [clientFilter, apiClients]);
 
-  const { willCalls, loading: wcsLoading, refetch: refetchWCs, applyWcPatch, mergeWcPatch, clearWcPatch, addOptimisticWc, removeOptimisticWc } = useWillCalls(apiConfigured && clientFilter.length > 0, selectedSheetId);
+  const { willCalls, loading: wcsLoading, refetch: refetchWCs, applyWcPatch, clearWcPatch } = useWillCalls(apiConfigured && clientFilter.length > 0, selectedSheetId);
 
   const columns = useMemo(() => cols(), []);
-  const [selectedWcId, setSelectedWcId] = useState<string | null>(null);
-  const selectedWC = useMemo(() => willCalls.find(w => w.wcNumber === selectedWcId) ?? null, [willCalls, selectedWcId]);
-  (window as any).__openWCDetail = (w: WC) => setSelectedWcId(w.wcNumber);
+  (window as any).__openWCDetail = (w: WC) => navigate(`/will-calls/${w.wcNumber}`);
 
   // Effect 1: ?open= query param → store pendingOpen + auto-load
   // (Dashboard now opens standalone page via #/will-calls/:wcNumber — no route state needed)
@@ -179,13 +177,14 @@ export function WillCalls() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [apiClients.length]);
 
-  // Effect 2: When will calls arrive, open the pending WC
+  // Effect 2: When will calls arrive, navigate to the pending WC
   useEffect(() => {
     if (pendingOpenRef.current && willCalls.length > 0) {
-      const match = willCalls.find(w => w.wcNumber === pendingOpenRef.current);
-      if (match) { setSelectedWcId(match.wcNumber); pendingOpenRef.current = null; }
+      const id = pendingOpenRef.current;
+      const found = willCalls.some(w => w.wcNumber === id);
+      if (found) { pendingOpenRef.current = null; navigate(`/will-calls/${id}`); }
     }
-  }, [willCalls]);
+  }, [willCalls, navigate]);
   const { sorting, setSorting, colVis, setColVis, columnOrder, setColumnOrder, statusFilter: sf, toggleStatus, clearStatusFilter } = useTablePreferences('willcalls', [{ id: 'scheduledDate', desc: false }], {}, DEFAULT_COL_ORDER);
   const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([]);
   const [globalFilter, setGlobalFilter] = useState('');
@@ -529,7 +528,7 @@ export function WillCalls() {
             })}</tr>)}</thead>
             <tbody>
               {virtualRows.length > 0 && <tr style={{ height: virtualRows[0].start }}><td colSpan={table.getVisibleFlatColumns().length} /></tr>}
-              {virtualRows.map(vRow => { const row = allRows[vRow.index]; const wc = row.original; const isActivePanel = selectedWC?.wcNumber === wc.wcNumber; const rowBg = row.getIsSelected() ? theme.colors.orangeLight : isActivePanel ? '#FEF3EE' : 'transparent'; return <tr key={row.id} style={{ transition: 'background 0.1s', background: rowBg, cursor: 'pointer', borderLeft: isActivePanel ? `3px solid ${theme.colors.orange}` : '3px solid transparent' }} onClick={(e) => { if (!(e.target as HTMLElement).closest('input[type="checkbox"]') && !(e.target as HTMLElement).closest('.row-actions')) setSelectedWcId(wc.wcNumber); }} onMouseEnter={e => { if (!row.getIsSelected() && !isActivePanel) e.currentTarget.style.background = theme.colors.bgSubtle; const a = e.currentTarget.querySelector('.row-actions') as HTMLElement; if (a) a.style.opacity = '0.6'; }} onMouseLeave={e => { e.currentTarget.style.background = rowBg; const a = e.currentTarget.querySelector('.row-actions') as HTMLElement; if (a) a.style.opacity = '0'; }}>{row.getVisibleCells().map(cell => <td key={cell.id} style={{ ...tdS, ...(cell.column.id === 'select' ? { position: 'sticky' as const, left: 0, zIndex: 1, background: '#fff' } : {}) }}>{flexRender(cell.column.columnDef.cell, cell.getContext())}</td>)}</tr>; })}
+              {virtualRows.map(vRow => { const row = allRows[vRow.index]; const wc = row.original; const rowBg = row.getIsSelected() ? theme.colors.orangeLight : 'transparent'; return <tr key={row.id} style={{ transition: 'background 0.1s', background: rowBg, cursor: 'pointer', borderLeft: '3px solid transparent' }} onClick={(e) => { if (!(e.target as HTMLElement).closest('input[type="checkbox"]') && !(e.target as HTMLElement).closest('.row-actions')) navigate(`/will-calls/${wc.wcNumber}`); }} onMouseEnter={e => { if (!row.getIsSelected()) e.currentTarget.style.background = theme.colors.bgSubtle; const a = e.currentTarget.querySelector('.row-actions') as HTMLElement; if (a) a.style.opacity = '0.6'; }} onMouseLeave={e => { e.currentTarget.style.background = rowBg; const a = e.currentTarget.querySelector('.row-actions') as HTMLElement; if (a) a.style.opacity = '0'; }}>{row.getVisibleCells().map(cell => <td key={cell.id} style={{ ...tdS, ...(cell.column.id === 'select' ? { position: 'sticky' as const, left: 0, zIndex: 1, background: '#fff' } : {}) }}>{flexRender(cell.column.columnDef.cell, cell.getContext())}</td>)}</tr>; })}
               {virtualRows.length > 0 && <tr style={{ height: totalHeight - (virtualRows[virtualRows.length - 1].end) }}><td colSpan={table.getVisibleFlatColumns().length} /></tr>}
             </tbody>
           </table>
@@ -588,13 +587,6 @@ export function WillCalls() {
       />
       <style>{`@keyframes slideUp { from { transform: translateY(100%); } to { transform: translateY(0); } } @keyframes spin { to { transform: rotate(360deg); } }`}</style>
       {batchGuardClients && <BatchGuard selectedClients={batchGuardClients} actionName={batchGuardAction} onDismiss={() => setBatchGuardClients(null)} />}
-      {selectedWC && <WillCallDetailPanel wc={selectedWC} onClose={() => setSelectedWcId(null)} onWcUpdated={refetchWCs} onNavigateToWc={(wcNumber) => {
-        setSelectedWcId(null);
-        // After refetch, set the new WC ID — derived selectedWC will auto-resolve once willCalls updates
-        setTimeout(() => {
-          setSelectedWcId(wcNumber);
-        }, 300);
-      }} applyWcPatch={applyWcPatch} mergeWcPatch={mergeWcPatch} clearWcPatch={clearWcPatch} addOptimisticWc={addOptimisticWc} removeOptimisticWc={removeOptimisticWc} />}
       <FloatingActionMenu
         show={isMobile}
         actions={(() => {

@@ -16,13 +16,12 @@ import { theme } from '../styles/theme';
 import { fmtDate } from '../lib/constants';
 import { useItemIndicators } from '../hooks/useItemIndicators';
 import { ItemIdBadges } from '../components/shared/ItemIdBadges';
-import { RepairDetailPanel } from '../components/shared/RepairDetailPanel';
 import { WriteButton } from '../components/shared/WriteButton';
 import { BatchGuard, checkBatchClientGuard } from '../components/shared/BatchGuard';
 import { ConfirmDialog } from '../components/shared/ConfirmDialog';
 import { BulkResultSummary } from '../components/shared/BulkResultSummary';
 import { BatchProgress } from '../components/shared/BatchProgress';
-import { isApiConfigured, type ApiRepair, postBatchCancelRepairs, postSendRepairQuote, type BatchMutationResult } from '../lib/api';
+import { isApiConfigured, postBatchCancelRepairs, postSendRepairQuote, type BatchMutationResult } from '../lib/api';
 import { applyBulkPatch, revertBulkPatchForFailures } from '../lib/optimisticBulk';
 import { runBatchLoop, mergePreflightSkips } from '../lib/batchLoop';
 import { FloatingActionMenu, type FABAction } from '../components/shared/FloatingActionMenu';
@@ -150,15 +149,12 @@ export function Repairs() {
     return ids.length === 1 ? ids[0] : ids;
   }, [clientFilter, apiClients]);
 
-  const { repairs, apiRepairs, loading: repairsLoading, refetch: refetchRepairs, applyRepairPatch, mergeRepairPatch, clearRepairPatch, addOptimisticRepair, removeOptimisticRepair } = useRepairs(apiConfigured && clientFilter.length > 0, selectedSheetId);
+  const { repairs, loading: repairsLoading, refetch: refetchRepairs, applyRepairPatch, clearRepairPatch } = useRepairs(apiConfigured && clientFilter.length > 0, selectedSheetId);
   const itemIndicators = useItemIndicators(selectedSheetId);
   (window as any).__itemIndicators = itemIndicators.loaded ? itemIndicators : null;
 
   const columns = useMemo(() => cols(), []);
-  const [selectedRepairId, setSelectedRepairId] = useState<string | null>(null);
-  const findApiRepair = (repairId: string) => apiRepairs.find(r => r.repairId === repairId) || null;
-  const selectedRepair = useMemo<ApiRepair | null>(() => (selectedRepairId ? apiRepairs.find(r => r.repairId === selectedRepairId) ?? null : null), [apiRepairs, selectedRepairId]);
-  (window as any).__openRepairDetail = (r: Repair) => setSelectedRepairId(r.repairId);
+  (window as any).__openRepairDetail = (r: Repair) => navigate(`/repairs/${r.repairId}`);
 
   // Effect 1: ?open= query param → store pendingOpen + auto-load
   // (Dashboard now opens standalone page via #/repairs/:repairId — no route state needed)
@@ -198,14 +194,14 @@ export function Repairs() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [apiClients.length]);
 
-  // Effect 2: When repairs arrive, open the pending repair
+  // Effect 2: When repairs arrive, navigate to the pending repair
   useEffect(() => {
-    if (pendingOpenRef.current && apiRepairs.length > 0) {
-      const match = findApiRepair(pendingOpenRef.current);
-      if (match) { setSelectedRepairId(match.repairId); pendingOpenRef.current = null; }
+    if (pendingOpenRef.current && repairs.length > 0) {
+      const id = pendingOpenRef.current;
+      const found = repairs.some(r => r.repairId === id);
+      if (found) { pendingOpenRef.current = null; navigate(`/repairs/${id}`); }
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [apiRepairs]);
+  }, [repairs, navigate]);
   const { sorting, setSorting, colVis, setColVis, columnOrder, setColumnOrder, statusFilter: sf, toggleStatus, clearStatusFilter } = useTablePreferences('repairs', [{ id: 'createdDate', desc: true }], {}, DEFAULT_COL_ORDER);
   const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([]);
   const [globalFilter, setGlobalFilter] = useState('');
@@ -460,7 +456,7 @@ export function Repairs() {
             })}</tr>)}</thead>
             <tbody>
               {virtualRows.length > 0 && <tr style={{ height: virtualRows[0].start }}><td colSpan={table.getVisibleFlatColumns().length} /></tr>}
-              {virtualRows.map(vRow => { const row = allRows[vRow.index]; const r = row.original as unknown as Repair; const isActivePanel = selectedRepair?.repairId === r.repairId; const rowBg = row.getIsSelected() ? theme.colors.orangeLight : isActivePanel ? '#FEF3EE' : 'transparent'; return <tr key={row.id} style={{ transition: 'background 0.1s', background: rowBg, cursor: 'pointer', borderLeft: isActivePanel ? `3px solid ${theme.colors.orange}` : '3px solid transparent' }} onClick={(e) => { if (!(e.target as HTMLElement).closest('input[type="checkbox"]') && !(e.target as HTMLElement).closest('.row-actions')) { setSelectedRepairId(r.repairId); }; }} onMouseEnter={e => { if (!row.getIsSelected() && !isActivePanel) e.currentTarget.style.background = theme.colors.bgSubtle; const a = e.currentTarget.querySelector('.row-actions') as HTMLElement; if (a) a.style.opacity = '0.6'; }} onMouseLeave={e => { e.currentTarget.style.background = rowBg; const a = e.currentTarget.querySelector('.row-actions') as HTMLElement; if (a) a.style.opacity = '0'; }}>{row.getVisibleCells().map(cell => <td key={cell.id} style={{ ...td, ...(cell.column.id === 'select' ? { position: 'sticky' as const, left: 0, zIndex: 1, background: '#fff' } : {}) }}>{flexRender(cell.column.columnDef.cell, cell.getContext())}</td>)}</tr>; })}
+              {virtualRows.map(vRow => { const row = allRows[vRow.index]; const r = row.original as unknown as Repair; const rowBg = row.getIsSelected() ? theme.colors.orangeLight : 'transparent'; return <tr key={row.id} style={{ transition: 'background 0.1s', background: rowBg, cursor: 'pointer', borderLeft: '3px solid transparent' }} onClick={(e) => { if (!(e.target as HTMLElement).closest('input[type="checkbox"]') && !(e.target as HTMLElement).closest('.row-actions')) { navigate(`/repairs/${r.repairId}`); }; }} onMouseEnter={e => { if (!row.getIsSelected()) e.currentTarget.style.background = theme.colors.bgSubtle; const a = e.currentTarget.querySelector('.row-actions') as HTMLElement; if (a) a.style.opacity = '0.6'; }} onMouseLeave={e => { e.currentTarget.style.background = rowBg; const a = e.currentTarget.querySelector('.row-actions') as HTMLElement; if (a) a.style.opacity = '0'; }}>{row.getVisibleCells().map(cell => <td key={cell.id} style={{ ...td, ...(cell.column.id === 'select' ? { position: 'sticky' as const, left: 0, zIndex: 1, background: '#fff' } : {}) }}>{flexRender(cell.column.columnDef.cell, cell.getContext())}</td>)}</tr>; })}
               {virtualRows.length > 0 && <tr style={{ height: totalHeight - (virtualRows[virtualRows.length - 1].end) }}><td colSpan={table.getVisibleFlatColumns().length} /></tr>}
             </tbody>
           </table>
@@ -512,7 +508,6 @@ export function Repairs() {
       />
       <style>{`@keyframes slideUp { from { transform: translateY(100%); } to { transform: translateY(0); } } @keyframes spin { to { transform: rotate(360deg); } }`}</style>
       {batchGuardClients && <BatchGuard selectedClients={batchGuardClients} actionName={batchGuardAction} onDismiss={() => setBatchGuardClients(null)} />}
-      {selectedRepair && <RepairDetailPanel repair={selectedRepair} onClose={() => setSelectedRepairId(null)} onRepairUpdated={refetchRepairs} onNavigateToItem={(itemId) => navigate('/inventory', { state: { openItemId: itemId } })} applyRepairPatch={applyRepairPatch} mergeRepairPatch={mergeRepairPatch} clearRepairPatch={clearRepairPatch} addOptimisticRepair={addOptimisticRepair} removeOptimisticRepair={removeOptimisticRepair} />}
       <FloatingActionMenu
         show={isMobile}
         actions={(() => {
