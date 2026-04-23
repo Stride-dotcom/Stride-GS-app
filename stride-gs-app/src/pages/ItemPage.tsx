@@ -19,20 +19,20 @@ import type { ApiInventoryItem } from '../lib/api';
 // ── Status badge ──────────────────────────────────────────────────────────────
 
 const STATUS_COLORS: Record<string, { bg: string; color: string }> = {
-  Active:      { bg: '#ECFDF5', color: '#059669' },
-  Released:    { bg: '#EFF6FF', color: '#2563EB' },
-  'On Hold':   { bg: '#FFFBEB', color: '#D97706' },
-  Transferred: { bg: '#F3F4F6', color: '#6B7280' },
+  Active:      { bg: theme.colors.statusGreenBg,  color: theme.colors.statusGreen },
+  Released:    { bg: theme.colors.statusBlueBg,   color: theme.colors.statusBlue },
+  'On Hold':   { bg: theme.colors.statusAmberBg,  color: theme.colors.statusAmber },
+  Transferred: { bg: theme.colors.statusGrayBg,   color: theme.colors.statusGray },
 };
 
 function StatusBadge({ status }: { status: string }) {
-  const c = STATUS_COLORS[status] ?? { bg: '#F3F4F6', color: '#6B7280' };
+  const c = STATUS_COLORS[status] ?? { bg: theme.colors.statusGrayBg, color: theme.colors.statusGray };
   return (
     <span style={{
       display: 'inline-flex', alignItems: 'center', gap: 5,
-      padding: '3px 10px', borderRadius: 20,
+      padding: '3px 10px', borderRadius: theme.radii.full,
       background: c.bg, color: c.color,
-      fontSize: 11, fontWeight: 600,
+      fontSize: theme.typography.sizes.xs, fontWeight: theme.typography.weights.semibold,
     }}>
       <span style={{ width: 5, height: 5, borderRadius: '50%', background: c.color, flexShrink: 0 }} />
       {status}
@@ -47,11 +47,12 @@ function MetaPill({ label, value }: { label: string; value: string }) {
   return (
     <span style={{
       display: 'inline-flex', alignItems: 'center', gap: 3,
-      padding: '2px 8px', borderRadius: 6,
-      background: 'rgba(0,0,0,0.06)',
-      fontSize: 11, color: '#444', fontWeight: 500,
+      padding: `2px ${theme.spacing.sm}`, borderRadius: theme.radii.md,
+      background: theme.colors.bgSubtle,
+      fontSize: theme.typography.sizes.xs, color: theme.colors.textSecondary,
+      fontWeight: theme.typography.weights.medium,
     }}>
-      <span style={{ fontSize: 9, fontWeight: 600, color: EntityPageTokens.labelColor, textTransform: 'uppercase', letterSpacing: '0.5px' }}>{label}</span>
+      <span style={{ fontSize: 9, fontWeight: theme.typography.weights.semibold, color: EntityPageTokens.labelColor, textTransform: 'uppercase', letterSpacing: '0.5px' }}>{label}</span>
       {value}
     </span>
   );
@@ -83,16 +84,16 @@ function ActivityTab({ entityId, tenantId }: { entityId: string; tenantId?: stri
               key={f.label}
               onClick={() => setActiveFilter(i)}
               style={{
-                padding: '4px 12px',
-                borderRadius: 20,
+                padding: `4px ${theme.spacing.md}`,
+                borderRadius: theme.radii.full,
                 border: 'none',
                 fontFamily: 'inherit',
-                fontSize: 11,
-                fontWeight: 600,
+                fontSize: theme.typography.sizes.xs,
+                fontWeight: theme.typography.weights.semibold,
                 cursor: 'pointer',
-                background: isActive ? EntityPageTokens.tabActive : 'rgba(0,0,0,0.07)',
-                color: isActive ? '#fff' : '#555',
-                transition: 'background 0.12s, color 0.12s',
+                background: isActive ? EntityPageTokens.tabActive : theme.colors.bgSubtle,
+                color: isActive ? '#fff' : theme.colors.textSecondary,
+                transition: `background ${theme.transitions.fast}, color ${theme.transitions.fast}`,
               }}
             >
               {f.label}
@@ -180,7 +181,7 @@ function Field({ label, value }: { label: string; value?: string | null }) {
   return (
     <div>
       <EPLabel>{label}</EPLabel>
-      <div style={{ fontSize: 13, color: value ? '#1a1a1a' : '#aaa', fontWeight: value ? 500 : 400 }}>
+      <div style={{ fontSize: theme.typography.sizes.base, color: value ? theme.colors.text : theme.colors.textMuted, fontWeight: value ? theme.typography.weights.medium : theme.typography.weights.normal }}>
         {value || '—'}
       </div>
     </div>
@@ -191,9 +192,9 @@ function FlagChip({ label, color }: { label: string; color: string }) {
   return (
     <span style={{
       display: 'inline-flex', alignItems: 'center', gap: 4,
-      padding: '3px 10px', borderRadius: 6,
+      padding: `3px ${theme.spacing.sm}`, borderRadius: theme.radii.md,
       background: color + '18', color,
-      fontSize: 11, fontWeight: 600,
+      fontSize: theme.typography.sizes.xs, fontWeight: theme.typography.weights.semibold,
     }}>
       {label}
     </span>
@@ -384,9 +385,9 @@ export function ItemPage() {
 
 const backBtnStyle: React.CSSProperties = {
   display: 'inline-flex', alignItems: 'center', gap: 6,
-  padding: '8px 16px', borderRadius: 8,
+  padding: `${theme.spacing.sm} ${theme.spacing.lg}`, borderRadius: theme.radii.lg,
   border: `1px solid ${theme.colors.border}`,
-  background: 'white', color: theme.colors.text,
-  fontSize: 13, fontWeight: 500, cursor: 'pointer',
-  fontFamily: 'inherit',
+  background: theme.colors.bgCard, color: theme.colors.text,
+  fontSize: theme.typography.sizes.base, fontWeight: theme.typography.weights.medium,
+  cursor: 'pointer', fontFamily: 'inherit',
 };

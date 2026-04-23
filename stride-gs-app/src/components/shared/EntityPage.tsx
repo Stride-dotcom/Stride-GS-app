@@ -2,16 +2,16 @@
  * EntityPage.tsx — Full-page entity detail shell (replaces slide-out TabbedDetailPanel
  * for direct-URL entity routes). Session 80 Entity Page Redesign.
  *
- * Design spec:
- *  - Warm beige page background (#f5f0eb)
- *  - Dark tab bar (#1a1a1a) with orange active tab (#e8772e), notification dots
- *  - Sub-tab pills inside Photos/Notes/Activity (dark/orange)
- *  - White content cards
- *  - Orange field labels (uppercase, 10px)
- *  - Slim sticky bottom bar (#1a1a1a) — secondary left, primary CTA right
+ * Layout and structure from the locked design spec:
+ *  - Warm page background (theme.v2.colors.bgPage)
+ *  - Dark tab bar (theme.v2.colors.bgDark) with orange active tab, notification dots
+ *  - Sub-tab pills inside Photos/Notes/Activity
+ *  - White content cards (theme.colors.bgCard)
+ *  - Orange field labels (theme.colors.orange)
+ *  - Slim sticky bottom bar (theme.v2.colors.bgDark)
  *
+ * All colors come from the app theme — not hardcoded hex values.
  * NOT the same as TabbedDetailPanel (slide-out panel for list-page side panels).
- * Both live in parallel — panels for list-page, EntityPage for direct routes.
  */
 import React, { useMemo, useState } from 'react';
 import { ArrowLeft } from 'lucide-react';
@@ -22,22 +22,23 @@ import { EntityHistory } from './EntityHistory';
 import { usePhotos, type EntityType as PhotoEntityType } from '../../hooks/usePhotos';
 import { useDocuments, type DocumentContextType } from '../../hooks/useDocuments';
 import { useEntityNotes } from '../../hooks/useEntityNotes';
+import { theme } from '../../styles/theme';
 
-// ── Design tokens ─────────────────────────────────────────────────────────────
+// ── Design tokens (derived from app theme — no hardcoded hex) ─────────────────
 
 const EP = {
-  pageBg: '#f5f0eb',
-  tabBarBg: '#1a1a1a',
-  tabActive: '#e8772e',
-  tabInactiveText: 'rgba(255,255,255,0.55)',
+  pageBg: theme.v2.colors.bgPage,            // warm cream — '#F5F2EE'
+  tabBarBg: theme.v2.colors.bgDark,          // near-black — '#1C1C1C'
+  tabActive: theme.colors.orange,            // brand orange — '#E85D2D'
+  tabInactiveText: 'rgba(255,255,255,0.55)',  // muted white on dark
   tabActiveText: '#ffffff',
-  cardBg: '#ffffff',
-  labelColor: '#e8772e',
-  footerBg: '#1a1a1a',
-  footerPrimary: '#e8772e',
+  cardBg: theme.colors.bgCard,               // white cards
+  labelColor: theme.colors.orange,           // orange field labels
+  footerBg: theme.v2.colors.bgDark,          // dark bottom bar
+  footerPrimary: theme.colors.orange,        // primary CTA
   footerSecondaryBg: 'rgba(255,255,255,0.12)',
   footerText: '#ffffff',
-  dotRed: '#EF4444',
+  dotRed: theme.colors.statusRed,            // red notification dot
 } as const;
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -394,12 +395,12 @@ export function EntityPage(props: EntityPageConfig) {
               alignItems: 'center',
               gap: 4,
               padding: '4px 8px',
-              borderRadius: 6,
-              border: '1px solid rgba(0,0,0,0.12)',
-              background: 'rgba(255,255,255,0.7)',
-              color: '#555',
-              fontSize: 12,
-              fontWeight: 500,
+              borderRadius: theme.radii.md,
+              border: `1px solid ${theme.colors.border}`,
+              background: theme.colors.bgCard,
+              color: theme.colors.textSecondary,
+              fontSize: theme.typography.sizes.sm,
+              fontWeight: theme.typography.weights.medium,
               cursor: 'pointer',
               fontFamily: 'inherit',
               flexShrink: 0,
@@ -422,8 +423,8 @@ export function EntityPage(props: EntityPageConfig) {
 
           <span style={{
             fontSize: isMobile ? 18 : 22,
-            fontWeight: 700,
-            color: '#1a1a1a',
+            fontWeight: theme.typography.weights.bold,
+            color: theme.colors.text,
             letterSpacing: '-0.02em',
             lineHeight: 1,
           }}>
@@ -451,19 +452,19 @@ export function EntityPage(props: EntityPageConfig) {
             fontSize: 12,
           }}>
             {clientName && (
-              <span style={{ color: '#555', fontWeight: 500 }}>{clientName}</span>
+              <span style={{ color: theme.colors.textSecondary, fontWeight: theme.typography.weights.medium }}>{clientName}</span>
             )}
             {clientName && sidemark && (
-              <span style={{ color: '#bbb' }}>·</span>
+              <span style={{ color: theme.colors.textMuted }}>·</span>
             )}
             {sidemark && (
               <span style={{
                 padding: '2px 8px',
-                borderRadius: 4,
-                background: 'rgba(232,119,46,0.12)',
-                color: '#b85a1a',
-                fontSize: 11,
-                fontWeight: 600,
+                borderRadius: theme.radii.sm,
+                background: theme.colors.orangeLight,
+                color: theme.colors.primaryHover,
+                fontSize: theme.typography.sizes.xs,
+                fontWeight: theme.typography.weights.semibold,
               }}>
                 {sidemark}
               </span>
@@ -550,8 +551,8 @@ export function EntityPage(props: EntityPageConfig) {
 export function EPLabel({ children }: { children: React.ReactNode }) {
   return (
     <div style={{
-      fontSize: 10,
-      fontWeight: 500,
+      fontSize: theme.typography.sizes.xs,
+      fontWeight: theme.typography.weights.medium,
       letterSpacing: '1.5px',
       textTransform: 'uppercase',
       color: EP.labelColor,
@@ -573,9 +574,10 @@ export function EPCard({
   return (
     <div style={{
       background: EP.cardBg,
-      borderRadius: 12,
-      padding: '16px 18px',
-      marginBottom: 12,
+      borderRadius: theme.radii.xl,
+      padding: theme.spacing.lg,
+      marginBottom: theme.spacing.md,
+      boxShadow: theme.shadows.sm,
       ...style,
     }}>
       {children}
@@ -605,19 +607,19 @@ export function EPFooterButton({
         display: 'inline-flex',
         alignItems: 'center',
         gap: 6,
-        padding: '0 18px',
+        padding: `0 ${theme.spacing.lg}`,
         height: 36,
-        borderRadius: 8,
+        borderRadius: theme.radii.lg,
         border: 'none',
         fontFamily: 'inherit',
-        fontSize: 12,
-        fontWeight: 600,
+        fontSize: theme.typography.sizes.sm,
+        fontWeight: theme.typography.weights.semibold,
         letterSpacing: '0.5px',
         cursor: disabled ? 'not-allowed' : 'pointer',
         opacity: disabled ? 0.5 : 1,
         color: EP.footerText,
         background: variant === 'primary' ? EP.footerPrimary : EP.footerSecondaryBg,
-        transition: 'opacity 0.15s',
+        transition: `opacity ${theme.transitions.fast}`,
       }}
     >
       {icon}
