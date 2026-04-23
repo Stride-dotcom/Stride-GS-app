@@ -424,7 +424,11 @@ export function Orders() {
 
       {/* Detail panel — available from ALL tabs (orders, review, availability) */}
       {selectedOrder && (
-        <OrderDetailPanel order={selectedOrder} onClose={() => setSelectedOrder(null)} />
+        <OrderDetailPanel
+          order={selectedOrder}
+          onClose={() => setSelectedOrder(null)}
+          onUpdated={() => { refetch(); setSelectedOrder(null); }}
+        />
       )}
 
       {/* Create delivery order modal */}
