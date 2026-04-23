@@ -345,7 +345,7 @@ export function WillCallPage() {
       tabs={tabs}
       builtInTabs={{
         photos: { entityType: 'will_call', entityId: wc.wcNumber, tenantId: wc.clientSheetId },
-        docs:   { contextType: 'will_call', contextId: wc.wcNumber, tenantId: wc.clientSheetId },
+        docs:   { contextType: 'willcall', contextId: wc.wcNumber, tenantId: wc.clientSheetId },
         notes:  { entityType: 'will_call', entityId: wc.wcNumber },
         activity: { render: () => <ActivityTab entityId={wc.wcNumber} tenantId={wc.clientSheetId} /> },
       }}

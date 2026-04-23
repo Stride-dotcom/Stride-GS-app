@@ -52,7 +52,7 @@ export interface EntityPageTab {
   badgeCount?: number | null;
   /** Keep tab body mounted while inactive (e.g. Details with edit inputs). */
   keepMounted?: boolean;
-  render: (ctx: { active: boolean }) => React.ReactNode;
+  render?: (ctx: { active: boolean }) => React.ReactNode;
 }
 
 interface RelatedNotesEntity {
@@ -212,7 +212,7 @@ function useBuiltInEntityTabs(cfg: EntityPageBuiltInTabs | undefined): EntityPag
             <EntityHistory
               entityType={activityCfg.entityType}
               entityId={activityCfg.entityId}
-              tenantId={activityCfg.tenantId}
+              tenantId={activityCfg.tenantId ?? undefined}
             />
           ),
         });
@@ -517,7 +517,7 @@ export function EntityPage(props: EntityPageConfig) {
               aria-hidden={!isActive}
               style={{ display: isActive ? 'block' : 'none' }}
             >
-              {tab.render({ active: isActive })}
+              {tab.render?.({ active: isActive })}
             </div>
           );
         })}
