@@ -1,4 +1,10 @@
 /* ===================================================
+   StrideAPI.gs — v38.113.0 — 2026-04-23 PST — sendRawEmail endpoint for notify-new-order Edge Function
+   v38.113.0: NEW — sendRawEmail (POST) handler called by the notify-new-order Supabase Edge Function.
+              Accepts { to, subject, htmlBody } and sends via GmailApp. Token substitution and template
+              lookup now happen in the Edge Function; GAS is used only for GmailApp send capability.
+   =================================================== */
+/* ===================================================
    StrideAPI.gs — v38.112.0 — 2026-04-23 PST — Reference column inline-editable on Billing Report
    v38.112.0: handleUpdateBillingRow_ now accepts and writes payload.reference to
               the Billing_Ledger "Reference" column. Parity with sidemark/notes inline
@@ -5752,6 +5758,8 @@ function doPost(e) {
       // ─── Delivery Order Notifications ───
       case "notifyNewDeliveryOrder":
         return jsonResponse_(handleNotifyNewDeliveryOrder_(payload));
+      case "sendRawEmail":
+        return jsonResponse_(handleSendRawEmail_(payload));
 
       // ─── Client Intake ───
       case "sendIntakeInvitation":
@@ -24606,6 +24614,31 @@ function handleNotifyNewDeliveryOrder_(payload) {
 
   Logger.log("handleNotifyNewDeliveryOrder_: sent to " + notifEmails + " result=" + JSON.stringify(result));
   return result;
+}
+
+/**
+ * POST sendRawEmail — Send a pre-composed email via GmailApp.
+ * Called by the notify-new-order Supabase Edge Function, which handles
+ * template lookup and token substitution on the Supabase side.
+ * Payload: { to: string, subject: string, htmlBody: string }
+ */
+function handleSendRawEmail_(payload) {
+  var to       = String(payload.to       || "").trim();
+  var subject  = String(payload.subject  || "").trim();
+  var htmlBody = String(payload.htmlBody || "").trim();
+
+  if (!to || !subject || !htmlBody) {
+    return { success: false, error: "Missing required fields: to, subject, htmlBody" };
+  }
+
+  try {
+    GmailApp.sendEmail(to, subject, "", { htmlBody: htmlBody });
+    Logger.log("handleSendRawEmail_: sent to " + to + " — subject: " + subject.substring(0, 60));
+    return { success: true };
+  } catch (e) {
+    Logger.log("handleSendRawEmail_: failed — " + e.message);
+    return { success: false, error: e.message };
+  }
 }
 
 /**
