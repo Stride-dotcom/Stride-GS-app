@@ -1,5 +1,11 @@
 /* ===================================================
-   StrideAPI.gs — v38.118.0 — 2026-04-24 04:30 PM PST — Fix inventory shipment_folder_url sync
+   StrideAPI.gs — v38.119.0 — 2026-04-24 07:45 PM PST — Intake alert resolves {{STAFF_EMAILS}} token
+   v38.119.0: handleNotifyIntakeSubmitted_ now expands {{STAFF_EMAILS}} in the
+              INTAKE_SUBMITTED template's recipients column (same convention as
+              CLAIM_*, REPAIR_*, WILL_CALL_*). Token resolves from CB Settings
+              OWNER_EMAIL + NOTIFICATION_EMAILS. Literal addresses in the column
+              are kept and deduped against the expanded token. Fallback unchanged:
+              blank template column still uses the CB Settings pair directly.
    v38.118.0: FIX — api_fullClientSync_ inventory case now reads Shipment # RichText
               hyperlinks (per-row Drive folder URLs) and passes them to sbInventoryRow_.
               Previously only handleGetInventory_ read these; the sync path left
@@ -20623,35 +20629,66 @@ function handleNotifyIntakeSubmitted_(payload) {
     var reviewLink = APP_BASE_URL_ + "/settings?tab=clients&subtab=intakes"
                    + (intakeId ? "&intake=" + encodeURIComponent(intakeId) : "");
 
-    // Resolve the admin distribution list. Priority:
-    //   1. INTAKE_SUBMITTED template's `recipients` column (admin-editable)
-    //   2. CB Settings OWNER_EMAIL + NOTIFICATION_EMAILS
-    var sbTpl = null;
-    try { sbTpl = api_getTemplateFromSupabase_("INTAKE_SUBMITTED"); } catch (_) {}
-    var recipients = sbTpl && sbTpl.recipients ? String(sbTpl.recipients).trim() : "";
-
-    if (!recipients) {
+    // Resolve the admin distribution list. The INTAKE_SUBMITTED template
+    // uses the canonical {{STAFF_EMAILS}} token in its `recipients` column
+    // (same convention as CLAIM_*, REPAIR_*, WILL_CALL_*, SHIPMENT_RECEIVED
+    // — see email_templates). We resolve that token from CB Settings
+    // NOTIFICATION_EMAILS (+ OWNER_EMAIL) and ignore the per-client
+    // context because intake is pre-activation.
+    //
+    // Resolution order:
+    //   1. sbTpl.recipients   (template column, admin-editable from Settings
+    //                          → Email Templates). If it contains
+    //                          "{{STAFF_EMAILS}}", expand that token.
+    //                          Literal addresses in the column are kept as-is
+    //                          and merged alongside.
+    //   2. Fallback           If the template column is blank or resolves to
+    //                          empty, use CB Settings OWNER_EMAIL +
+    //                          NOTIFICATION_EMAILS directly.
+    function _resolveCbStaffEmails_() {
       try {
         var cbSsId = prop_("CB_SPREADSHEET_ID");
-        if (cbSsId) {
-          var cbSs = SpreadsheetApp.openById(cbSsId);
-          var cbSettingsSh = cbSs.getSheetByName("Settings");
-          if (cbSettingsSh) {
-            var kv = {};
-            var sData = cbSettingsSh.getDataRange().getValues();
-            for (var si = 1; si < sData.length; si++) {
-              var k = String(sData[si][0] || "").trim();
-              if (k) kv[k] = String(sData[si][1] || "").trim();
-            }
-            var owner = kv["OWNER_EMAIL"]  || "";
-            var notif = kv["NOTIFICATION_EMAILS"] || "";
-            recipients = [owner, notif].filter(function(x) { return !!x; }).join(",");
-          }
+        if (!cbSsId) return "";
+        var cbSs = SpreadsheetApp.openById(cbSsId);
+        var sh = cbSs.getSheetByName("Settings");
+        if (!sh) return "";
+        var kv = {};
+        var data = sh.getDataRange().getValues();
+        for (var i = 1; i < data.length; i++) {
+          var k = String(data[i][0] || "").trim();
+          if (k) kv[k] = String(data[i][1] || "").trim();
         }
-      } catch (settingsErr) {
-        Logger.log("handleNotifyIntakeSubmitted_ settings lookup failed: " + settingsErr);
+        return [kv["OWNER_EMAIL"] || "", kv["NOTIFICATION_EMAILS"] || ""]
+          .filter(function(x) { return !!x; }).join(",");
+      } catch (e) {
+        Logger.log("handleNotifyIntakeSubmitted_ CB settings lookup failed: " + e);
+        return "";
       }
     }
+
+    var sbTpl = null;
+    try { sbTpl = api_getTemplateFromSupabase_("INTAKE_SUBMITTED"); } catch (_) {}
+    var recipientsRaw = sbTpl && sbTpl.recipients ? String(sbTpl.recipients).trim() : "";
+    var staffEmails = _resolveCbStaffEmails_();
+
+    // Token expansion. {{STAFF_EMAILS}} → CB Settings staff list.
+    var recipients = recipientsRaw.replace(/\{\{\s*STAFF_EMAILS\s*\}\}/g, staffEmails);
+
+    // Fallback: if the template had nothing useful (blank or only a token
+    // that resolved to empty), use the CB staff list directly.
+    if (!recipients.trim() && staffEmails) recipients = staffEmails;
+
+    // Split, trim, dedupe, rejoin so we never send duplicates if the token
+    // and a literal overlap.
+    var seen = {};
+    recipients = recipients.split(",").map(function(e) { return e.trim(); })
+      .filter(function(e) {
+        if (!e) return false;
+        var k = e.toLowerCase();
+        if (seen[k]) return false;
+        seen[k] = 1;
+        return true;
+      }).join(",");
 
     if (!recipients) {
       Logger.log("handleNotifyIntakeSubmitted_: no recipients resolved — skipping email (in-app notification still fired via trigger)");
