@@ -10,7 +10,7 @@ import {
 import {
   Search, Download, ChevronUp, ChevronDown, ChevronRight, ArrowUpDown,
   Settings2, FileText, DollarSign, Send, Eye, ExternalLink,
-  CheckCircle, AlertTriangle, Loader2, Pencil, X, RefreshCw, Plus, Scale, CreditCard, Clock,
+  CheckCircle, AlertTriangle, Loader2, X, RefreshCw, Plus, Scale, CreditCard, Clock,
 } from 'lucide-react';
 import { ParityMonitor } from './ParityMonitor';
 import { BillingActivityTab } from '../components/billing/BillingActivityTab';
@@ -35,6 +35,7 @@ import {
   postQbExcelExport,
   postUpdateBillingRow,
   postUpdateQboStatus,
+  apiPost,
 } from '../lib/api';
 import type { BillingFilterParams, BillingResponse, BatchMutationResult } from '../lib/api';
 import {
@@ -144,36 +145,70 @@ function toCSV(rows: BillingRow[], fn: string) {
 
 // ─── Inline Editable Cell ───────────────────────────────────────────────────
 
+/**
+ * EditableCell — always-on inline input. No pencil toggle, no click-to-edit.
+ * Just type into the field; onBlur (or Enter) fires onChange to save.
+ *
+ * v38.121.0 — rewritten from the toggle-based pattern which was flaky:
+ *   - Pencil icon suggested something was editable but the click to enter
+ *     edit mode was inconsistent (table-row click handlers sometimes ate it,
+ *     and some users reported the state transition never firing).
+ *   - User feedback: "I don't want the pencil, just the field to type in."
+ * This version is always an <input> styled to blend in like a display cell
+ * until focused (then shows orange outline). Fewer states = fewer bugs.
+ */
 function EditableCell({ value, onChange, type = 'text', align, currency = true }: { value: string | number; onChange: (v: string) => void; type?: 'text' | 'number'; align?: 'right'; currency?: boolean }) {
-  const [editing, setEditing] = useState(false);
+  // Local draft state so the user can type freely without the parent re-rendering
+  // mid-keystroke. Resync when the upstream value changes (e.g. optimistic update).
   const [draft, setDraft] = useState(String(value));
-  const inputRef = useRef<HTMLInputElement>(null);
+  const [focused, setFocused] = useState(false);
+  // Resync draft to incoming value when NOT actively editing. Prevents typed
+  // input from being clobbered by realtime refetches while the user is typing.
+  useEffect(() => {
+    if (!focused) setDraft(String(value));
+  }, [value, focused]);
 
-  useEffect(() => { if (editing && inputRef.current) inputRef.current.focus(); }, [editing]);
+  const formatted = type === 'number'
+    ? (currency ? `$${Number(value || 0).toFixed(2)}` : String(Number(value || 0)))
+    : (String(value) || '');
 
-  if (!editing) {
-    return (
-      <div
-        onClick={() => { setDraft(String(value)); setEditing(true); }}
-        style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4, minHeight: 20, fontSize: 12, color: theme.colors.text, textAlign: align }}
-        title="Click to edit"
-      >
-        {type === 'number' ? (currency ? `$${Number(value).toFixed(2)}` : String(Number(value))) : (String(value) || '\u2014')}
-        <Pencil size={10} color={theme.colors.textMuted} style={{ opacity: 0.4, flexShrink: 0 }} />
-      </div>
-    );
-  }
+  // Display format when not focused (currency formatting, em-dash for empty)
+  // but once focused, show the raw draft so the user can edit naturally.
+  const shownValue = focused ? draft : (type === 'number' ? String(Number(value || 0)) : String(value || ''));
+
+  const commit = () => {
+    if (draft !== String(value)) onChange(draft);
+  };
 
   return (
     <input
-      ref={inputRef}
-      value={draft}
+      value={shownValue}
       onChange={e => setDraft(e.target.value)}
-      onBlur={() => { onChange(draft); setEditing(false); }}
-      onKeyDown={e => { if (e.key === 'Enter') { onChange(draft); setEditing(false); } if (e.key === 'Escape') setEditing(false); }}
+      onFocus={() => { setDraft(String(value)); setFocused(true); }}
+      onBlur={() => { setFocused(false); commit(); }}
+      onKeyDown={e => {
+        if (e.key === 'Enter') { (e.target as HTMLInputElement).blur(); }
+        if (e.key === 'Escape') { setDraft(String(value)); (e.target as HTMLInputElement).blur(); }
+      }}
+      onClick={e => e.stopPropagation()}  // don't trigger row-click expansion
       type={type}
       step={type === 'number' ? '0.01' : undefined}
-      style={{ width: '100%', padding: '2px 6px', fontSize: 12, border: `1px solid ${theme.colors.orange}`, borderRadius: 4, outline: 'none', fontFamily: 'inherit', textAlign: align, background: '#FFFBF5' }}
+      placeholder={type === 'number' ? '0' : '—'}
+      title={!focused && type !== 'number' ? formatted : undefined}
+      style={{
+        width: '100%',
+        padding: '2px 6px',
+        fontSize: 12,
+        // Invisible border when unfocused — looks like plain text.
+        // Orange on focus signals active edit.
+        border: focused ? `1px solid ${theme.colors.orange}` : '1px solid transparent',
+        borderRadius: 4,
+        outline: 'none',
+        fontFamily: 'inherit',
+        textAlign: align,
+        background: focused ? '#FFFBF5' : 'transparent',
+        color: theme.colors.text,
+      }}
     />
   );
 }
@@ -1244,11 +1279,35 @@ export function Billing() {
 
     // Client-side loop: each invoice generates a Drive PDF + email (~15-30s per group).
     // Server-side batch would exceed the 6-min Apps Script wall on 12+ clients.
+    //
+    // v38.121.0 perf optimizations:
+    //   1. Each createInvoice call sends deferSupabaseSync=true so the server
+    //      skips its per-invoice api_fullClientSync_ call (saves 1-5s each).
+    //      After the batch completes, we call syncClientBilling ONCE per
+    //      unique sourceSheetId.
+    //   2. Batch size warning at 20+ invoices — UI nudges user to split if
+    //      they're close to the 6-min Apps Script wall.
     const results: Array<CreateInvoiceResponse & { client: string }> = [];
     for (const s of preflightSkipped) {
       results.push({ success: false, client: s.id, error: s.reason });
     }
     setInvoiceBatch({ state: 'processing', total: invokable.length, processed: 0, succeeded: 0, failed: 0 });
+
+    // Soft-cap warning: 20 is safe; 30-40 is tight; 50+ likely times out.
+    if (invokable.length > 20) {
+      const proceed = window.confirm(
+        `You're about to create ${invokable.length} invoices in one batch.\n\n` +
+        `For best reliability, we recommend no more than 20 at a time — ` +
+        `the Apps Script backend has a 6-minute execution limit per invoice ` +
+        `and large batches can time out mid-flight.\n\n` +
+        `Continue anyway?`
+      );
+      if (!proceed) {
+        setInvoiceBatch({ state: 'idle', total: 0, processed: 0, succeeded: 0, failed: 0 });
+        return;
+      }
+    }
+
     const batchResult = await runBatchLoop<typeof invokable[0], CreateInvoiceResponse>({
       items: invokable.map(g => ({ id: g.client + (g.sidemark ? ` · ${g.sidemark}` : ''), item: g })),
       call: async (g) => {
@@ -1260,6 +1319,7 @@ export function Billing() {
             sidemark: g.sidemark || undefined,
             sourceSheetId: g.sourceSheetId,
             skipEmail: !invOptEmail,
+            deferSupabaseSync: true,  // v38.121.0 — batch sync fires once below
           } as any);
           if (res.data) {
             results.push({ ...res.data, client: g.client });
@@ -1280,6 +1340,16 @@ export function Billing() {
     });
     setInvoiceBatch({ state: 'complete', total: invokable.length, processed: invokable.length, succeeded: batchResult.succeeded, failed: batchResult.failed });
     setInvoiceBulkResult(batchResult);
+
+    // v38.121.0 — Now that all invoices are committed, fire a single Supabase
+    // billing sync per unique sourceSheetId. Saves N-1 syncs compared to
+    // pre-v38.121 behavior (one per invoice).
+    const uniqueSourceSheetIds = Array.from(new Set(invokable.map(g => g.sourceSheetId).filter(Boolean)));
+    await Promise.all(
+      uniqueSourceSheetIds.map(sid =>
+        apiPost('syncClientBilling', { clientSheetId: sid }).catch(() => null)
+      )
+    );
 
     // Session 69 — reveal failures: for every group that did NOT succeed, restore
     // its rows from the snapshot so the user sees the un-invoiced items return.
