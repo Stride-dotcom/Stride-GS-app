@@ -42,7 +42,7 @@ const ALL_STATUSES = ['Pending Quote', 'Quote Sent', 'Approved', 'Declined', 'In
 
 const DEFAULT_COL_ORDER = [
   'select', 'status', 'itemId', 'location', 'clientName', 'vendor',
-  'description', 'quoteAmount', 'approvedAmount', 'repairVendor', 'assignedTo',
+  'description', 'reference', 'quoteAmount', 'approvedAmount', 'repairVendor', 'assignedTo',
   'createdDate', 'quoteSentDate', 'sourceTaskId', 'completedDate', 'repairId', 'notes', 'actions',
 ];
 
@@ -59,7 +59,7 @@ const STATUS_CFG: Record<string, { bg: string; text: string }> = {
 const COL_LABELS: Record<string, string> = {
   repairId: 'Repair ID', sourceTaskId: 'Source Task', itemId: 'Item',
   location: 'Location',
-  clientName: 'Client', description: 'Description', status: 'Status',
+  clientName: 'Client', description: 'Description', reference: 'Reference', status: 'Status',
   quoteAmount: 'Quote $', approvedAmount: 'Approved $', repairVendor: 'Repair Tech',
   assignedTo: 'Assigned', createdDate: 'Created', quoteSentDate: 'Quote Sent',
   approvedDate: 'Approved Date', completedDate: 'Completed', notes: 'Notes',
@@ -74,8 +74,8 @@ function fmtMoney(n?: number) { if (n == null) return '\u2014'; return '$' + n.t
 function Badge({ t, c }: { t: string; c?: { bg: string; text: string } }) { const s = c || { bg: '#F3F4F6', text: '#6B7280' }; return <span style={{ display: 'inline-block', padding: '2px 10px', borderRadius: 12, fontSize: 11, fontWeight: 600, letterSpacing: '0.02em', background: s.bg, color: s.text, whiteSpace: 'nowrap' }}>{t}</span>; }
 
 function toCSV(rows: Repair[], fn: string) {
-  const h = 'Repair ID,Source Task,Item,Client,Description,Status,Quote Amount,Approved Amount,Vendor,Assigned,Created,Quote Sent,Approved,Completed,Notes';
-  const b = rows.map(r => [r.repairId, r.sourceTaskId || '', r.itemId, r.clientName, r.description, r.status, r.quoteAmount ?? '', r.approvedAmount ?? '', r.repairVendor || '', r.assignedTo || '', r.createdDate, r.quoteSentDate || '', r.approvedDate || '', r.completedDate || '', r.notes || ''].map(v => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n');
+  const h = 'Repair ID,Source Task,Item,Client,Description,Reference,Status,Quote Amount,Approved Amount,Vendor,Assigned,Created,Quote Sent,Approved,Completed,Notes';
+  const b = rows.map(r => [r.repairId, r.sourceTaskId || '', r.itemId, r.clientName, r.description, r.reference || '', r.status, r.quoteAmount ?? '', r.approvedAmount ?? '', r.repairVendor || '', r.assignedTo || '', r.createdDate, r.quoteSentDate || '', r.approvedDate || '', r.completedDate || '', r.notes || ''].map(v => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n');
   const bl = new Blob([h + '\n' + b], { type: 'text/csv' }); const a = document.createElement('a'); a.href = URL.createObjectURL(bl); a.download = fn; a.click();
 }
 
@@ -94,6 +94,7 @@ function cols() {
     col.accessor('clientName', { header: 'Client', size: 160, filterFn: mf, cell: i => <span style={{ fontWeight: 500, fontSize: 12 }}>{i.getValue()}</span> }),
     col.accessor('vendor', { id: 'vendor', header: 'Vendor', size: 130, cell: i => <span style={{ color: theme.colors.textSecondary, fontSize: 12 }}>{i.getValue() || '\u2014'}</span> }),
     col.accessor('description', { header: 'Description', size: 260, cell: i => <span style={{ color: theme.colors.textSecondary, fontSize: 12, maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'block' }}>{i.getValue()}</span> }),
+    col.accessor('reference', { header: 'Reference', size: 140, cell: i => <span style={{ color: theme.colors.textSecondary, fontSize: 12, maxWidth: 130, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'block' }}>{i.getValue() || '\u2014'}</span> }),
     col.accessor('quoteAmount', { header: 'Quote $', size: 90, cell: i => <span style={{ fontSize: 12, fontWeight: 600, color: i.getValue() ? theme.colors.text : theme.colors.textMuted }}>{fmtMoney(i.getValue())}</span> }),
     col.accessor('approvedAmount', { header: 'Approved $', size: 100, cell: i => <span style={{ fontSize: 12, fontWeight: 600, color: i.getValue() ? '#15803D' : theme.colors.textMuted }}>{fmtMoney(i.getValue())}</span> }),
     col.accessor('repairVendor', { header: 'Repair Tech', size: 140, cell: i => <span style={{ color: theme.colors.textSecondary, fontSize: 12 }}>{i.getValue() || '\u2014'}</span> }),

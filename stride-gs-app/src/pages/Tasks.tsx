@@ -75,7 +75,7 @@ const PRIORITY_CFG: Record<string, { bg: string; text: string }> = {
 const COL_LABELS: Record<string, string> = {
   taskId: 'Task ID', type: 'Type', status: 'Status', itemId: 'Item',
   clientName: 'Client', vendor: 'Vendor', description: 'Description',
-  location: 'Location', sidemark: 'Sidemark', assignedTo: 'Assigned',
+  location: 'Location', sidemark: 'Sidemark', reference: 'Reference', assignedTo: 'Assigned',
   created: 'Created', dueDate: 'Due Date', priority: 'Priority',
   completedAt: 'Completed', result: 'Result',
   taskNotes: 'Notes', svcCode: 'Service', billed: 'Billed',
@@ -84,7 +84,7 @@ const TOGGLEABLE = Object.keys(COL_LABELS);
 
 const DEFAULT_COL_ORDER = [
   'select', 'taskId', 'type', 'status', 'itemId', 'clientName', 'vendor',
-  'description', 'location', 'sidemark', 'assignedTo', 'created',
+  'description', 'location', 'sidemark', 'reference', 'assignedTo', 'created',
   'dueDate', 'priority', 'completedAt', 'result', 'taskNotes', 'svcCode', 'billed', 'actions',
 ];
 
@@ -104,8 +104,8 @@ function Badge({ t, c }: { t: string; c?: { bg: string; text: string } }) {
 }
 
 function toCSV(rows: Task[], fn: string) {
-  const h = 'Task ID,Type,Status,Item,Client,Vendor,Description,Location,Sidemark,Assigned,Created,Completed,Result,Notes,Svc Code,Billed';
-  const b = rows.map(r => [r.taskId, r.type, r.status, r.itemId, r.clientName, r.vendor, r.description, r.location, r.sidemark, r.assignedTo, r.created, r.completedAt || '', r.result || '', r.taskNotes || '', r.svcCode, r.billed ? 'Yes' : 'No'].map(v => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n');
+  const h = 'Task ID,Type,Status,Item,Client,Vendor,Description,Location,Sidemark,Reference,Assigned,Created,Completed,Result,Notes,Svc Code,Billed';
+  const b = rows.map(r => [r.taskId, r.type, r.status, r.itemId, r.clientName, r.vendor, r.description, r.location, r.sidemark, r.reference || '', r.assignedTo, r.created, r.completedAt || '', r.result || '', r.taskNotes || '', r.svcCode, r.billed ? 'Yes' : 'No'].map(v => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n');
   const bl = new Blob([h + '\n' + b], { type: 'text/csv' });
   const a = document.createElement('a'); a.href = URL.createObjectURL(bl); a.download = fn; a.click();
 }
@@ -129,6 +129,7 @@ function cols() {
     col.accessor('description', { header: 'Description', size: 240, cell: i => <span style={{ color: theme.colors.textSecondary, fontSize: 12, maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'block' }}>{i.getValue()}</span> }),
     col.accessor('location', { header: 'Location', size: 90, cell: i => <span style={{ fontSize: 12, fontFamily: 'monospace', color: theme.colors.textSecondary }}>{i.getValue()}</span> }),
     col.accessor('sidemark', { header: 'Sidemark', size: 180, cell: i => <span style={{ color: theme.colors.textSecondary, fontSize: 12, maxWidth: 170, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'block' }}>{i.getValue()}</span> }),
+    col.accessor('reference', { header: 'Reference', size: 140, cell: i => <span style={{ color: theme.colors.textSecondary, fontSize: 12, maxWidth: 130, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'block' }}>{i.getValue() || '\u2014'}</span> }),
     col.accessor('assignedTo', { header: 'Assigned', size: 90, filterFn: multiFilter, cell: i => <span style={{ fontSize: 12, color: i.getValue() ? theme.colors.text : theme.colors.textMuted }}>{i.getValue() || '\u2014'}</span> }),
     col.accessor('created', { header: 'Created', size: 100, cell: i => <span style={{ fontSize: 12, color: theme.colors.textSecondary }}>{fmt(i.getValue())}</span> }),
     col.accessor('dueDate', { header: 'Due Date', size: 100,

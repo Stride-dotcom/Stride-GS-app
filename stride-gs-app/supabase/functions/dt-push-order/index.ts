@@ -210,13 +210,10 @@ ${itemsXml}
 </service_orders>`;
 }
 
-// Resolve DT account name from tenant_id (reverse lookup in account_name_map)
+// Resolve DT account name from tenant_id (direct lookup in account_name_map: {sheetId → accountName})
 function resolveAccountName(tenantId: string | null, acctMap: Record<string, string>): string {
   if (!tenantId) return '';
-  for (const [key, val] of Object.entries(acctMap)) {
-    if (val === tenantId) return key;
-  }
-  return '';
+  return acctMap[tenantId] || '';
 }
 
 // Push a single order to DT. Returns {ok, body}.
