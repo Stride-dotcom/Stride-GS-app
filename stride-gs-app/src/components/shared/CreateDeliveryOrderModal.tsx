@@ -23,7 +23,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   X, Check, Loader2, CheckCircle2, MapPin, Truck,
-  ArrowRight, Wrench, Box, Plus, Trash2, CreditCard,
+  ArrowRight, Wrench, Box, Plus, Trash2, CreditCard, BookOpen, Search,
 } from 'lucide-react';
 import { AutocompleteSelect } from './AutocompleteSelect';
 import { theme } from '../../styles/theme';
@@ -38,6 +38,59 @@ import {
   type DeliveryAccessorial,
 } from '../../lib/supabaseQueries';
 import { supabase } from '../../lib/supabase';
+
+// ── Address Book helpers ─────────────────────────────────────────────────
+interface AddressBookContact {
+  id: string;
+  tenant_id: string;
+  contact_name: string;
+  address: string | null;
+  city: string | null;
+  state: string | null;
+  zip: string | null;
+  phone: string | null;
+  phone2: string | null;
+  email: string | null;
+  updated_at: string;
+}
+
+async function fetchAddressBookContacts(tenantId: string): Promise<AddressBookContact[]> {
+  if (!tenantId) return [];
+  const { data, error } = await supabase
+    .from('dt_address_book')
+    .select('*')
+    .eq('tenant_id', tenantId)
+    .order('contact_name', { ascending: true });
+  if (error || !data) return [];
+  return data as AddressBookContact[];
+}
+
+async function upsertAddressBookContact(contact: {
+  tenant_id: string;
+  contact_name: string;
+  address?: string;
+  city?: string;
+  state?: string;
+  zip?: string;
+  phone?: string;
+  phone2?: string;
+  email?: string;
+}): Promise<void> {
+  if (!contact.tenant_id || !contact.contact_name.trim()) return;
+  await supabase
+    .from('dt_address_book')
+    .upsert({
+      tenant_id: contact.tenant_id,
+      contact_name: contact.contact_name.trim(),
+      address: contact.address?.trim() || null,
+      city: contact.city?.trim() || null,
+      state: contact.state?.trim() || null,
+      zip: contact.zip?.trim() || null,
+      phone: contact.phone?.trim() || null,
+      phone2: contact.phone2?.trim() || null,
+      email: contact.email?.trim() || null,
+    }, { onConflict: 'tenant_id,contact_name,address' });
+}
 
 // Inventory class → cuFt volume. Matches StrideAPI.gs CLASS_CUFT lookup.
 // Used to populate dt_order_items.cubic_feet so the DT push payload can carry
@@ -110,6 +163,248 @@ function genUid(): string {
   return Math.random().toString(36).slice(2, 10);
 }
 
+// ── AddressFields sub-component ──────────────────────────────────────────
+// Inline definition — used for both pickup and delivery contact sections.
+// Includes address book autocomplete and browse functionality.
+interface AddressFieldsProps {
+  contactName: string;     setContactName: (v: string) => void;
+  address: string;         setAddress: (v: string) => void;
+  city: string;            setCity: (v: string) => void;
+  state: string;           setState: (v: string) => void;
+  zip: string;             setZip: (v: string) => void;
+  phone: string;           setPhone: (v: string) => void;
+  phone2: string;          setPhone2: (v: string) => void;
+  email: string;           setEmail: (v: string) => void;
+  input: React.CSSProperties;
+  label: React.CSSProperties;
+  contactLabel: string;
+  addressBook: AddressBookContact[];
+  onSelectContact: (c: AddressBookContact) => void;
+  zoneInfo?: {
+    loading: boolean;
+    zone: DeliveryZone | null;
+    mode: string;
+    isCallForQuote: boolean;
+    displayRate: number | null;
+  } | null;
+}
+
+function AddressFields({
+  contactName, setContactName,
+  address, setAddress,
+  city, setCity,
+  state, setState,
+  zip, setZip,
+  phone, setPhone,
+  phone2, setPhone2,
+  email, setEmail,
+  input, label,
+  contactLabel,
+  addressBook,
+  onSelectContact,
+  zoneInfo,
+}: AddressFieldsProps) {
+  const [showSuggestions, setShowSuggestions] = useState(false);
+  const [showBrowse, setShowBrowse] = useState(false);
+  const [browseSearch, setBrowseSearch] = useState('');
+
+  // Filter suggestions as user types
+  const suggestions = useMemo(() => {
+    if (!contactName.trim() || contactName.length < 2) return [];
+    const q = contactName.toLowerCase();
+    return addressBook.filter(c =>
+      c.contact_name.toLowerCase().includes(q)
+    ).slice(0, 8);
+  }, [contactName, addressBook]);
+
+  // Filter for browse modal
+  const browseFiltered = useMemo(() => {
+    if (!browseSearch.trim()) return addressBook;
+    const q = browseSearch.toLowerCase();
+    return addressBook.filter(c =>
+      c.contact_name.toLowerCase().includes(q)
+      || (c.address || '').toLowerCase().includes(q)
+      || (c.city || '').toLowerCase().includes(q)
+      || (c.phone || '').toLowerCase().includes(q)
+      || (c.email || '').toLowerCase().includes(q)
+    );
+  }, [browseSearch, addressBook]);
+
+  return (
+    <div style={{ display: 'grid', gap: 10 }}>
+      {/* Contact name with autocomplete */}
+      <div style={{ position: 'relative' }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
+          <label style={{ ...label, marginBottom: 0 }}>{contactLabel}</label>
+          {addressBook.length > 0 && (
+            <button
+              type="button"
+              onClick={() => setShowBrowse(true)}
+              style={{
+                background: 'none', border: 'none', cursor: 'pointer',
+                fontSize: 10, fontWeight: 600, color: theme.colors.primary,
+                display: 'flex', alignItems: 'center', gap: 3,
+              }}
+            >
+              <BookOpen size={10} /> Address Book
+            </button>
+          )}
+        </div>
+        <input
+          style={input}
+          value={contactName}
+          onChange={e => { setContactName(e.target.value); setShowSuggestions(true); }}
+          onFocus={() => setShowSuggestions(true)}
+          onBlur={() => setTimeout(() => setShowSuggestions(false), 200)}
+          placeholder="Full name"
+        />
+        {/* Autocomplete dropdown */}
+        {showSuggestions && suggestions.length > 0 && (
+          <div style={{
+            position: 'absolute', top: '100%', left: 0, right: 0, zIndex: 10,
+            background: '#fff', border: `1px solid ${theme.colors.border}`, borderRadius: 8,
+            boxShadow: '0 4px 12px rgba(0,0,0,0.1)', maxHeight: 200, overflowY: 'auto',
+            marginTop: 2,
+          }}>
+            {suggestions.map(c => (
+              <div
+                key={c.id}
+                onMouseDown={() => { onSelectContact(c); setShowSuggestions(false); }}
+                style={{
+                  padding: '8px 12px', cursor: 'pointer', fontSize: 12,
+                  borderBottom: `1px solid ${theme.colors.border}`,
+                }}
+                onMouseEnter={e => (e.currentTarget.style.background = '#FFF7ED')}
+                onMouseLeave={e => (e.currentTarget.style.background = '#fff')}
+              >
+                <div style={{ fontWeight: 600, color: theme.colors.text }}>{c.contact_name}</div>
+                <div style={{ fontSize: 11, color: theme.colors.textMuted, marginTop: 1 }}>
+                  {[c.address, c.city, c.state, c.zip].filter(Boolean).join(', ')}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Browse Address Book modal */}
+      {showBrowse && (
+        <>
+          <div onClick={() => setShowBrowse(false)} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.2)', zIndex: 300 }} />
+          <div style={{
+            position: 'fixed', top: '50%', left: '50%', transform: 'translate(-50%,-50%)',
+            width: 520, maxHeight: '70vh', background: '#fff', borderRadius: 12,
+            boxShadow: '0 16px 48px rgba(0,0,0,0.25)', zIndex: 301,
+            display: 'flex', flexDirection: 'column', overflow: 'hidden',
+          }}>
+            <div style={{
+              padding: '12px 16px', borderBottom: `1px solid ${theme.colors.border}`,
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 14, fontWeight: 700 }}>
+                <BookOpen size={14} color={theme.colors.primary} /> Address Book
+              </div>
+              <button onClick={() => setShowBrowse(false)} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4 }}>
+                <X size={16} />
+              </button>
+            </div>
+            <div style={{ padding: '10px 16px', borderBottom: `1px solid ${theme.colors.border}` }}>
+              <div style={{ position: 'relative' }}>
+                <Search size={13} style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: theme.colors.textMuted }} />
+                <input
+                  style={{ ...input, paddingLeft: 30 }}
+                  placeholder="Search contacts…"
+                  value={browseSearch}
+                  onChange={e => setBrowseSearch(e.target.value)}
+                  autoFocus
+                />
+              </div>
+            </div>
+            <div style={{ flex: 1, overflowY: 'auto' }}>
+              {browseFiltered.length === 0 ? (
+                <div style={{ padding: 20, textAlign: 'center', fontSize: 12, color: theme.colors.textMuted }}>
+                  {addressBook.length === 0 ? 'No saved contacts yet' : 'No matches'}
+                </div>
+              ) : (
+                browseFiltered.map(c => (
+                  <div
+                    key={c.id}
+                    onClick={() => { onSelectContact(c); setShowBrowse(false); }}
+                    style={{
+                      padding: '10px 16px', cursor: 'pointer',
+                      borderBottom: `1px solid ${theme.colors.border}`,
+                      fontSize: 12,
+                    }}
+                    onMouseEnter={e => (e.currentTarget.style.background = '#FFF7ED')}
+                    onMouseLeave={e => (e.currentTarget.style.background = '#fff')}
+                  >
+                    <div style={{ fontWeight: 600, color: theme.colors.text }}>{c.contact_name}</div>
+                    <div style={{ color: theme.colors.textMuted, marginTop: 2 }}>
+                      {[c.address, c.city, c.state, c.zip].filter(Boolean).join(', ')}
+                    </div>
+                    {(c.phone || c.email) && (
+                      <div style={{ color: theme.colors.textMuted, marginTop: 1, fontSize: 11 }}>
+                        {[c.phone, c.email].filter(Boolean).join(' · ')}
+                      </div>
+                    )}
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </>
+      )}
+
+      <div>
+        <label style={label}>Address</label>
+        <input style={input} value={address} onChange={e => setAddress(e.target.value)} placeholder="Street address" />
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 80px 100px', gap: 10 }}>
+        <div>
+          <label style={label}>City</label>
+          <input style={input} value={city} onChange={e => setCity(e.target.value)} placeholder="City" />
+        </div>
+        <div>
+          <label style={label}>State</label>
+          <input style={input} value={state} onChange={e => setState(e.target.value)} maxLength={2} placeholder="WA" />
+        </div>
+        <div>
+          <label style={label}>Zip</label>
+          <input style={input} value={zip} onChange={e => setZip(e.target.value)} maxLength={5} placeholder="00000" />
+          {zoneInfo && (
+            <div style={{ fontSize: 10, marginTop: 4, color: theme.colors.textMuted }}>
+              {zoneInfo.loading ? 'Looking up zone…' :
+                zoneInfo.zone ? (
+                  zoneInfo.isCallForQuote
+                    ? `Zone ${zoneInfo.zone.zone} — CALL FOR QUOTE`
+                    : `Zone ${zoneInfo.zone.zone} — ${zoneInfo.mode} $${(zoneInfo.displayRate ?? 0).toFixed(2)}`
+                ) : 'Zip not in service area'}
+            </div>
+          )}
+        </div>
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+        <div>
+          <label style={label}>Cell Phone Number</label>
+          <input style={input} value={phone} onChange={e => setPhone(e.target.value)} placeholder="(555) 555-1234" />
+        </div>
+        <div>
+          <label style={label}>Secondary Phone</label>
+          <input style={input} value={phone2} onChange={e => setPhone2(e.target.value)} placeholder="(555) 555-5678" />
+        </div>
+      </div>
+      <div>
+        <label style={label}>Email</label>
+        <input style={input} value={email} onChange={e => setEmail(e.target.value)} placeholder="email@example.com" />
+        <div style={{ fontSize: 10, color: theme.colors.textMuted, marginTop: 3 }}>
+          Separate multiple emails with commas
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Main Component ──────────────────────────────────────────────────────
 export function CreateDeliveryOrderModal({
   onClose,
   onSubmit,
@@ -169,6 +464,38 @@ export function CreateDeliveryOrderModal({
   useEffect(() => { if (autoClient && !clientName) setClientName(autoClient); }, [autoClient]);
   const clientSheetId = apiClients.find(c => c.name === clientName)?.spreadsheetId || '';
 
+  // ── Address Book ────────────────────────────────────────────────────────
+  const [addressBook, setAddressBook] = useState<AddressBookContact[]>([]);
+  useEffect(() => {
+    if (clientSheetId) {
+      fetchAddressBookContacts(clientSheetId).then(setAddressBook);
+    } else {
+      setAddressBook([]);
+    }
+  }, [clientSheetId]);
+
+  const fillPickupFromContact = (c: AddressBookContact) => {
+    setPickupContactName(c.contact_name);
+    setPickupAddress(c.address || '');
+    setPickupCity(c.city || '');
+    setPickupState(c.state || 'WA');
+    setPickupZip(c.zip || '');
+    setPickupPhone(c.phone || '');
+    setPickupPhone2(c.phone2 || '');
+    setPickupEmail(c.email || '');
+  };
+
+  const fillDeliveryFromContact = (c: AddressBookContact) => {
+    setDeliveryContactName(c.contact_name);
+    setDeliveryAddress(c.address || '');
+    setDeliveryCity(c.city || '');
+    setDeliveryState(c.state || 'WA');
+    setDeliveryZip(c.zip || '');
+    setDeliveryPhone(c.phone || '');
+    setDeliveryPhone2(c.phone2 || '');
+    setDeliveryEmail(c.email || '');
+  };
+
   // ── Schedule ───────────────────────────────────────────────────────────
   const [serviceDate, setServiceDate] = useState('');
   const [windowStart, setWindowStart] = useState('');
@@ -181,6 +508,7 @@ export function CreateDeliveryOrderModal({
   const [pickupState, setPickupState] = useState('WA');
   const [pickupZip, setPickupZip] = useState('');
   const [pickupPhone, setPickupPhone] = useState('');
+  const [pickupPhone2, setPickupPhone2] = useState('');
   const [pickupEmail, setPickupEmail] = useState('');
   const [pickupFreeItems, setPickupFreeItems] = useState<FreeItem[]>([
     { id: genUid(), description: '', quantity: 1 },
@@ -193,6 +521,7 @@ export function CreateDeliveryOrderModal({
   const [deliveryState, setDeliveryState] = useState('WA');
   const [deliveryZip, setDeliveryZip] = useState('');
   const [deliveryPhone, setDeliveryPhone] = useState('');
+  const [deliveryPhone2, setDeliveryPhone2] = useState('');
   const [deliveryEmail, setDeliveryEmail] = useState('');
 
   // ── Service-only description ───────────────────────────────────────────
@@ -201,8 +530,15 @@ export function CreateDeliveryOrderModal({
   // ── Inventory item selection (delivery + warehouse-source only) ────────
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set(preSelectedItemIds));
   const activeItems = useMemo(
-    () => liveItems.filter(i => i.status === 'Active' && (!clientName || i.clientName === clientName)),
-    [liveItems, clientName]
+    () => liveItems.filter(i => {
+      if (i.status !== 'Active') return false;
+      if (!clientName) return true;
+      // Match by name OR by sheet ID (covers cases where clientName hasn't resolved yet)
+      if (i.clientName === clientName) return true;
+      if (clientSheetId && i.clientId === clientSheetId) return true;
+      return false;
+    }),
+    [liveItems, clientName, clientSheetId]
   );
   const [itemSearch, setItemSearch] = useState('');
   const [itemSort, setItemSort] = useState<{ col: string; desc: boolean }>({ col: 'itemId', desc: false });
@@ -250,7 +586,7 @@ export function CreateDeliveryOrderModal({
   );
 
   // ── Billing ────────────────────────────────────────────────────────────
-  type BillingMethod = 'bill_to_client' | 'customer_collect' | 'prepaid';
+  type BillingMethod = 'bill_to_client' | 'customer_collect';
   const [billingMethod, setBillingMethod] = useState<BillingMethod>('bill_to_client');
 
   // ── Reference fields ───────────────────────────────────────────────────
@@ -399,24 +735,42 @@ export function CreateDeliveryOrderModal({
     itemsSource, selectedInvItems,
   ]);
 
+  // ── Order number generation ────────────────────────────────────────────
+  // Format: PREFIX-00001-ClientReference  (with -P/-D suffixes for P+D)
+  // PREFIX = first 3 uppercase chars of client name
+  // 00001  = global auto-increment from dt_order_number_seq
+  // ClientReference = the PO/Reference field value (spaces → dashes)
+  const generateOrderNumber = async (suffix?: string): Promise<string> => {
+    // Get prefix from client name (first 3 chars uppercase, fallback STR)
+    const prefix = clientName
+      ? clientName.replace(/[^A-Za-z]/g, '').slice(0, 3).toUpperCase() || 'STR'
+      : 'STR';
+
+    // Get next sequence number from Supabase
+    let seqNum = '00001';
+    try {
+      const { data, error } = await supabase.rpc('next_order_number');
+      if (!error && data) {
+        seqNum = data; // already zero-padded from the DB function
+      }
+    } catch {
+      // Fallback: timestamp-based if RPC fails
+      const now = new Date();
+      seqNum = String(now.getTime()).slice(-5);
+    }
+
+    // Build reference portion from PO Number (no spaces)
+    const ref = poNumber.trim().replace(/\s+/g, '-');
+
+    let orderNum = ref ? `${prefix}-${seqNum}-${ref}` : `${prefix}-${seqNum}`;
+    if (suffix) orderNum += `-${suffix}`;
+    return orderNum;
+  };
+
   // ── Submit ─────────────────────────────────────────────────────────────
-  const [submitting, setSubmitting] = useState(false);
+  const [, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [createResult, setCreateResult] = useState<{ dtIdentifier: string; linkedIdentifier?: string } | null>(null);
-
-  // Generate a client-side order number: STR-YYMMDD-HHMMSS-XX
-  const genDtIdentifier = (suffix?: string): string => {
-    const now = new Date();
-    const yy = String(now.getFullYear()).slice(2);
-    const mm = String(now.getMonth() + 1).padStart(2, '0');
-    const dd = String(now.getDate()).padStart(2, '0');
-    const hh = String(now.getHours()).padStart(2, '0');
-    const mi = String(now.getMinutes()).padStart(2, '0');
-    const ss = String(now.getSeconds()).padStart(2, '0');
-    const rand = Math.random().toString(36).slice(2, 4).toUpperCase();
-    const base = `STR-${yy}${mm}${dd}-${hh}${mi}${ss}-${rand}`;
-    return suffix ? `${base}-${suffix}` : base;
-  };
 
   const handleSubmit = async () => {
     if (!canSubmit) return;
@@ -442,6 +796,7 @@ export function CreateDeliveryOrderModal({
       po_number: poNumber.trim() || null,
       sidemark: sidemark.trim() || null,
       details: details.trim() || null,
+      order_notes: details.trim() || null,
       source: 'app',
       review_status: 'pending_review',
       created_by_user: authUid,
@@ -454,12 +809,9 @@ export function CreateDeliveryOrderModal({
     try {
       if (mode === 'pickup_and_delivery') {
         // Two linked orders — create BOTH in a single flow.
-        // Strategy: insert pickup row first (get its id), then insert delivery
-        // row with linked_order_id=pickup.id, then back-update pickup to set
-        // linked_order_id=delivery.id. This creates a bidirectional link.
-        const baseId = genDtIdentifier();
-        const pickupIdent = `${baseId}-P`;
-        const deliveryIdent = `${baseId}-D`;
+        // Generate order numbers before inserts
+        const pickupIdent = await generateOrderNumber('P');
+        const deliveryIdent = await generateOrderNumber('D');
 
         // 1) Insert pickup
         const { data: pickupRow, error: pErr } = await supabase
@@ -475,6 +827,7 @@ export function CreateDeliveryOrderModal({
             contact_state: pickupState.trim(),
             contact_zip: pickupZip.trim(),
             contact_phone: pickupPhone.trim() || null,
+            contact_phone2: pickupPhone2.trim() || null,
             contact_email: pickupEmail.trim() || null,
             base_delivery_fee: null,         // pickup leg not priced separately here
             order_total: null,
@@ -510,6 +863,7 @@ export function CreateDeliveryOrderModal({
             contact_state: deliveryState.trim(),
             contact_zip: deliveryZip.trim(),
             contact_phone: deliveryPhone.trim() || null,
+            contact_phone2: deliveryPhone2.trim() || null,
             contact_email: deliveryEmail.trim() || null,
             linked_order_id: pickupRow.id,
             // Pricing goes on the delivery leg (user-facing total)
@@ -569,13 +923,24 @@ export function CreateDeliveryOrderModal({
           dtIdentifier: deliveryRow.dt_identifier,
           reviewStatus: 'pending_review',
         });
+        // Auto-save contacts to address book — best-effort
+        upsertAddressBookContact({
+          tenant_id: clientSheetId, contact_name: pickupContactName,
+          address: pickupAddress, city: pickupCity, state: pickupState, zip: pickupZip,
+          phone: pickupPhone, phone2: pickupPhone2, email: pickupEmail,
+        }).catch(() => {});
+        upsertAddressBookContact({
+          tenant_id: clientSheetId, contact_name: deliveryContactName,
+          address: deliveryAddress, city: deliveryCity, state: deliveryState, zip: deliveryZip,
+          phone: deliveryPhone, phone2: deliveryPhone2, email: deliveryEmail,
+        }).catch(() => {});
         // Notify staff — best-effort, never block submit success
         supabase.functions.invoke('notify-new-order', {
           body: { orderId: deliveryRow.id, submittedBy: user?.email ?? 'Unknown' },
         }).catch(() => { /* notification failure is non-fatal */ });
       } else {
         // Single-order path (delivery / pickup / service_only)
-        const dtIdentifier = genDtIdentifier();
+        const dtIdentifier = await generateOrderNumber();
         const isPickup = mode === 'pickup';
         const isServiceOnly = mode === 'service_only';
 
@@ -585,6 +950,7 @@ export function CreateDeliveryOrderModal({
         const contactState = isPickup ? pickupState : deliveryState;
         const contactZip = isPickup ? pickupZip : deliveryZip;
         const contactPhone = isPickup ? pickupPhone : deliveryPhone;
+        const contactPhone2 = isPickup ? pickupPhone2 : deliveryPhone2;
         const contactEmail = isPickup ? pickupEmail : deliveryEmail;
 
         const { data: orderRow, error: orderErr } = await supabase
@@ -600,6 +966,7 @@ export function CreateDeliveryOrderModal({
             contact_state: contactState.trim(),
             contact_zip: contactZip.trim(),
             contact_phone: contactPhone.trim() || null,
+            contact_phone2: contactPhone2.trim() || null,
             contact_email: contactEmail.trim() || null,
             details: isServiceOnly
               ? `${serviceDescription.trim()}\n\n${details.trim()}`.trim()
@@ -676,6 +1043,14 @@ export function CreateDeliveryOrderModal({
           dtIdentifier: orderRow.dt_identifier,
           reviewStatus: 'pending_review',
         });
+        // Auto-save contact to address book — best-effort
+        if (contactName.trim()) {
+          upsertAddressBookContact({
+            tenant_id: clientSheetId, contact_name: contactName,
+            address: contactAddress, city: contactCity, state: contactState, zip: contactZip,
+            phone: contactPhone, phone2: contactPhone2, email: contactEmail,
+          }).catch(() => {});
+        }
         // Notify staff — best-effort, never block submit success
         supabase.functions.invoke('notify-new-order', {
           body: { orderId: orderRow.id, submittedBy: user?.email ?? 'Unknown' },
@@ -893,6 +1268,40 @@ export function CreateDeliveryOrderModal({
             />
           </div>
 
+          {/* Bill To — moved to step 2 right after Client */}
+          {mode !== 'service_only' && (
+            <div style={section}>
+              <div style={sectionTitle}>Bill To</div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                {([
+                  { value: 'bill_to_client' as BillingMethod, label: 'Bill to Client Account' },
+                  { value: 'customer_collect' as BillingMethod, label: 'Customer Collect' },
+                ] as const).map(opt => (
+                  <button
+                    key={opt.value}
+                    onClick={() => setBillingMethod(opt.value)}
+                    type="button"
+                    style={{
+                      padding: '12px 14px', borderRadius: 10,
+                      border: billingMethod === opt.value ? `2px solid ${theme.colors.primary}` : `1px solid ${theme.colors.border}`,
+                      background: billingMethod === opt.value ? '#FFF7ED' : '#fff',
+                      cursor: 'pointer', textAlign: 'left', fontFamily: 'inherit',
+                    }}
+                  >
+                    <div style={{ fontSize: 13, fontWeight: 700, color: billingMethod === opt.value ? theme.colors.primary : theme.colors.text }}>
+                      {opt.label}
+                    </div>
+                  </button>
+                ))}
+              </div>
+              {billingMethod === 'customer_collect' && (
+                <div style={{ marginTop: 8, padding: '8px 12px', background: '#FFFBF5', border: '1px solid #FED7AA', borderRadius: 8, fontSize: 11, color: '#92400E' }}>
+                  Customer Collect selected — a <strong>Collect via Stax</strong> button will appear after submit and on the order detail panel so staff can run the charge.
+                </div>
+              )}
+            </div>
+          )}
+
           {/* Items source toggle — only for delivery mode */}
           {mode === 'delivery' && (
             <div style={section}>
@@ -907,7 +1316,7 @@ export function CreateDeliveryOrderModal({
                     cursor: 'pointer', textAlign: 'left', fontFamily: 'inherit',
                   }}
                 >
-                  <div style={{ fontSize: 13, fontWeight: 700 }}>🏭 Stride Warehouse</div>
+                  <div style={{ fontSize: 13, fontWeight: 700 }}>Stride Warehouse</div>
                   <div style={{ fontSize: 11, color: theme.colors.textMuted, marginTop: 4 }}>
                     Pick from client inventory
                   </div>
@@ -921,7 +1330,7 @@ export function CreateDeliveryOrderModal({
                     cursor: 'pointer', textAlign: 'left', fontFamily: 'inherit',
                   }}
                 >
-                  <div style={{ fontSize: 13, fontWeight: 700 }}>📦 Requires Pickup</div>
+                  <div style={{ fontSize: 13, fontWeight: 700 }}>Requires Pickup</div>
                   <div style={{ fontSize: 11, color: theme.colors.textMuted, marginTop: 4 }}>
                     Items need to be picked up first
                   </div>
@@ -971,9 +1380,12 @@ export function CreateDeliveryOrderModal({
                 state={pickupState}                 setState={setPickupState}
                 zip={pickupZip}                     setZip={setPickupZip}
                 phone={pickupPhone}                 setPhone={setPickupPhone}
+                phone2={pickupPhone2}               setPhone2={setPickupPhone2}
                 email={pickupEmail}                 setEmail={setPickupEmail}
                 input={input} label={label}
                 contactLabel="Contact at pickup"
+                addressBook={addressBook}
+                onSelectContact={fillPickupFromContact}
                 zoneInfo={pickupZip.length === 5 ? {
                   loading: mode === 'pickup_and_delivery' ? pickupZoneLoading : zoneLoading,
                   zone: mode === 'pickup_and_delivery' ? pickupZone : zone,
@@ -1042,9 +1454,12 @@ export function CreateDeliveryOrderModal({
                 state={deliveryState}                 setState={setDeliveryState}
                 zip={deliveryZip}                     setZip={setDeliveryZip}
                 phone={deliveryPhone}                 setPhone={setDeliveryPhone}
+                phone2={deliveryPhone2}               setPhone2={setDeliveryPhone2}
                 email={deliveryEmail}                 setEmail={setDeliveryEmail}
                 input={input} label={label}
                 contactLabel={mode === 'service_only' ? 'On-site contact' : 'Recipient'}
+                addressBook={addressBook}
+                onSelectContact={fillDeliveryFromContact}
                 zoneInfo={deliveryZip.length === 5 ? {
                   loading: zoneLoading,
                   zone,
@@ -1077,7 +1492,7 @@ export function CreateDeliveryOrderModal({
                   }}>
                     {/* Column headers */}
                     <div style={{
-                      display: 'grid', gridTemplateColumns: '28px 100px 1fr 110px 70px 100px 90px 60px',
+                      display: 'grid', gridTemplateColumns: '28px 100px 50px 110px 1fr 100px 100px',
                       padding: '8px 12px', background: '#F5F2EE', position: 'sticky', top: 0, zIndex: 1,
                       borderBottom: `1px solid ${theme.colors.border}`,
                       fontSize: 10, fontWeight: 600, color: '#888', textTransform: 'uppercase', letterSpacing: '1px',
@@ -1085,13 +1500,12 @@ export function CreateDeliveryOrderModal({
                     }}>
                       <span />
                       {[
-                        { col: 'itemId', label: 'Item ID' },
-                        { col: 'description', label: 'Description' },
-                        { col: 'vendor', label: 'Vendor' },
-                        { col: 'cuFt', label: 'Vol' },
-                        { col: 'sidemark', label: 'Sidemark' },
-                        { col: 'location', label: 'Location' },
+                        { col: 'itemId', label: 'ID' },
                         { col: 'qty', label: 'Qty' },
+                        { col: 'vendor', label: 'Vendor' },
+                        { col: 'description', label: 'Description' },
+                        { col: 'sidemark', label: 'Sidemark' },
+                        { col: 'reference', label: 'Reference' },
                       ].map(c => (
                         <span
                           key={c.col}
@@ -1109,13 +1523,12 @@ export function CreateDeliveryOrderModal({
                     ) : (
                       filteredItems.map((item, idx) => {
                         const checked = selectedIds.has(item.itemId);
-                        const cuFt = classToCuFt(item.itemClass);
                         return (
                           <div
                             key={item.itemId}
                             onClick={() => toggleItem(item.itemId)}
                             style={{
-                              display: 'grid', gridTemplateColumns: '28px 100px 1fr 110px 70px 100px 90px 60px',
+                              display: 'grid', gridTemplateColumns: '28px 100px 50px 110px 1fr 100px 100px',
                               padding: '8px 12px', cursor: 'pointer', alignItems: 'center', gap: 4,
                               background: checked ? '#FFF7ED' : idx % 2 === 0 ? '#fff' : '#fafafa',
                               borderBottom: `1px solid ${theme.colors.borderLight || '#f0f0f0'}`,
@@ -1133,23 +1546,20 @@ export function CreateDeliveryOrderModal({
                             <span style={{ fontFamily: 'monospace', fontWeight: 600, color: theme.colors.primary, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                               {item.itemId}
                             </span>
-                            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: theme.colors.text }}>
-                              {item.description || '—'}
+                            <span style={{ whiteSpace: 'nowrap', color: theme.colors.textMuted }}>
+                              {item.qty ?? 1}
                             </span>
                             <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: theme.colors.textMuted }}>
                               {item.vendor || '—'}
                             </span>
-                            <span style={{ whiteSpace: 'nowrap', color: theme.colors.textMuted }}>
-                              {cuFt != null ? `${cuFt} cuFt` : '—'}
+                            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: theme.colors.text }}>
+                              {item.description || '—'}
                             </span>
                             <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: theme.colors.textMuted }}>
                               {item.sidemark || '—'}
                             </span>
                             <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: theme.colors.textMuted }}>
-                              {item.location || '—'}
-                            </span>
-                            <span style={{ whiteSpace: 'nowrap', color: theme.colors.textMuted }}>
-                              {item.qty ?? 1}
+                              {(item as any).reference || '—'}
                             </span>
                           </div>
                         );
@@ -1259,48 +1669,14 @@ export function CreateDeliveryOrderModal({
             </div>
           )}
 
-          {/* Billing — Bill To selection (session 85 / feature #3) */}
-          {mode !== 'service_only' && (
-            <div style={section}>
-              <div style={sectionTitle}>Bill To</div>
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10 }}>
-                {[
-                  { value: 'bill_to_client' as BillingMethod, label: 'Bill to Client',    desc: 'Invoice client monthly' },
-                  { value: 'customer_collect' as BillingMethod, label: 'Customer Collect',  desc: 'Driver collects at door' },
-                  { value: 'prepaid' as BillingMethod,          label: 'Prepaid',           desc: 'Payment already on file' },
-                ].map(opt => (
-                  <button
-                    key={opt.value}
-                    onClick={() => setBillingMethod(opt.value)}
-                    type="button"
-                    style={{
-                      padding: '10px 12px', borderRadius: 10,
-                      border: billingMethod === opt.value ? `2px solid ${theme.colors.primary}` : `1px solid ${theme.colors.border}`,
-                      background: billingMethod === opt.value ? '#FFF7ED' : '#fff',
-                      cursor: 'pointer', textAlign: 'left', fontFamily: 'inherit',
-                    }}
-                  >
-                    <div style={{ fontSize: 12, fontWeight: 700, color: billingMethod === opt.value ? theme.colors.primary : theme.colors.text }}>{opt.label}</div>
-                    <div style={{ fontSize: 10, color: theme.colors.textMuted, marginTop: 2 }}>{opt.desc}</div>
-                  </button>
-                ))}
-              </div>
-              {billingMethod === 'customer_collect' && (
-                <div style={{ marginTop: 8, padding: '8px 12px', background: '#FFFBF5', border: '1px solid #FED7AA', borderRadius: 8, fontSize: 11, color: '#92400E' }}>
-                  Customer Collect selected — a <strong>Collect via Stax</strong> button will appear after submit and on the order detail panel so staff can run the charge.
-                </div>
-              )}
-            </div>
-          )}
-
           {/* Reference (non-service_only) */}
           {mode !== 'service_only' && (
             <div style={section}>
               <div style={sectionTitle}>Reference</div>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 10 }}>
                 <div>
-                  <label style={label}>PO Number</label>
-                  <input style={input} value={poNumber} onChange={e => setPoNumber(e.target.value)} />
+                  <label style={label}>PO / Reference Number</label>
+                  <input style={input} value={poNumber} onChange={e => setPoNumber(e.target.value)} placeholder="Client reference (becomes part of order number)" />
                 </div>
                 <div>
                   <label style={label}>Sidemark</label>
@@ -1333,7 +1709,7 @@ export function CreateDeliveryOrderModal({
               border: `1px solid ${theme.colors.border}`,
             }}>
               <div style={{ fontSize: 11, fontWeight: 700, color: theme.colors.textMuted, marginBottom: 10, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-                Pricing Summary
+                Estimated Pricing Summary
               </div>
               {mode === 'pickup_and_delivery' ? (
                 <>
@@ -1388,14 +1764,12 @@ export function CreateDeliveryOrderModal({
                 marginTop: 10, paddingTop: 10, borderTop: `1px solid ${theme.colors.border}`,
                 fontSize: 15, fontWeight: 700,
               }}>
-                <span>Order Total</span>
+                <span>Estimated Total</span>
                 <span>{orderTotal != null ? `$${orderTotal.toFixed(2)}` : isCallForQuote ? 'Call for quote' : '—'}</span>
               </div>
-              {(isCallForQuote || isPickupCallForQuote || (mode === 'pickup_and_delivery' && (!pickupZone || pickupLegFee === 0))) && (
-                <div style={{ fontSize: 11, color: '#B45309', marginTop: 6, fontStyle: 'italic' }}>
-                  Staff will confirm final pricing during review.
-                </div>
-              )}
+              <div style={{ fontSize: 10, color: theme.colors.textMuted, marginTop: 6, fontStyle: 'italic' }}>
+                Rates shown are estimates. Final pricing will be confirmed by Stride staff during review.
+              </div>
             </div>
           )}
 
@@ -1423,121 +1797,37 @@ export function CreateDeliveryOrderModal({
         {/* Footer */}
         <div style={{
           padding: '14px 20px', borderTop: `1px solid ${theme.colors.border}`,
-          display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-          background: '#FAFAFA', flexShrink: 0,
+          display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 10, flexShrink: 0,
+          background: '#FAFAFA',
         }}>
-          <div style={{ fontSize: 11, color: theme.colors.textMuted }}>
-            Order will be reviewed by Stride staff before dispatch
-          </div>
-          <div style={{ display: 'flex', gap: 8 }}>
-            <button
-              onClick={onClose}
-              disabled={submitting}
-              style={{
-                padding: '9px 16px', borderRadius: 8,
-                border: `1px solid ${theme.colors.border}`, background: '#fff',
-                fontSize: 13, fontWeight: 500, color: theme.colors.text,
-                cursor: submitting ? 'not-allowed' : 'pointer', fontFamily: 'inherit',
-              }}
-            >
-              Cancel
-            </button>
-            <WriteButton
-              label={submitting ? 'Submitting…' : `Submit ${modeCards.find(c => c.mode === mode)?.label ?? 'Order'}`}
-              onClick={handleSubmit}
-              disabled={!canSubmit}
-              size="md"
-              icon={submitting ? <Loader2 size={14} className="spin" /> : undefined}
-            />
-          </div>
-        </div>
-      </div>
-    </>
-  );
-}
-
-// ── AddressFields sub-component ──────────────────────────────────────────
-interface AddressFieldsProps {
-  contactName: string; setContactName: (v: string) => void;
-  address: string; setAddress: (v: string) => void;
-  city: string; setCity: (v: string) => void;
-  state: string; setState: (v: string) => void;
-  zip: string; setZip: (v: string) => void;
-  phone: string; setPhone: (v: string) => void;
-  email: string; setEmail: (v: string) => void;
-  input: React.CSSProperties;
-  label: React.CSSProperties;
-  contactLabel: string;
-  zoneInfo?: {
-    loading: boolean;
-    zone: DeliveryZone | null;
-    mode: string;
-    isCallForQuote: boolean;
-    displayRate: number | null;
-  } | null;
-}
-
-function AddressFields(p: AddressFieldsProps) {
-  return (
-    <div style={{ display: 'grid', gap: 12 }}>
-      <div>
-        <label style={p.label}>{p.contactLabel}</label>
-        <input style={p.input} value={p.contactName} onChange={e => p.setContactName(e.target.value)} placeholder="Name" />
-      </div>
-      <div>
-        <label style={p.label}>Street Address</label>
-        <input style={p.input} value={p.address} onChange={e => p.setAddress(e.target.value)} placeholder="123 Main St" />
-      </div>
-      <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr', gap: 10 }}>
-        <div>
-          <label style={p.label}>City</label>
-          <input style={p.input} value={p.city} onChange={e => p.setCity(e.target.value)} />
-        </div>
-        <div>
-          <label style={p.label}>State</label>
-          <input style={p.input} value={p.state} onChange={e => p.setState(e.target.value.toUpperCase())} maxLength={2} />
-        </div>
-        <div>
-          <label style={p.label}>ZIP</label>
-          <input
+          <button
+            onClick={onClose}
+            type="button"
             style={{
-              ...p.input,
-              borderColor: p.zoneInfo?.zone && p.zoneInfo.zone.baseRate != null ? '#16A34A'
-                : p.zoneInfo?.isCallForQuote ? '#B45309'
-                : (p.input.borderColor ?? '#E5E7EB'),
+              padding: '9px 20px', borderRadius: 8,
+              border: `1px solid ${theme.colors.border}`,
+              background: '#fff', color: theme.colors.text,
+              fontSize: 13, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit',
             }}
-            value={p.zip}
-            onChange={e => p.setZip(e.target.value.replace(/\D/g, '').slice(0, 5))}
-            placeholder="98101"
+          >
+            Cancel
+          </button>
+          <WriteButton
+            onClick={handleSubmit}
+            disabled={!canSubmit}
+            label="Submit for Review"
+            variant="primary"
+            style={{
+              padding: '9px 24px', borderRadius: 8,
+              border: 'none',
+              background: canSubmit ? theme.colors.primary : theme.colors.border,
+              color: '#fff',
+              fontSize: 13, fontWeight: 600, cursor: canSubmit ? 'pointer' : 'not-allowed',
+              fontFamily: 'inherit',
+            }}
           />
         </div>
       </div>
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-        <div>
-          <label style={p.label}>Phone</label>
-          <input style={p.input} value={p.phone} onChange={e => p.setPhone(e.target.value)} placeholder="(555) 555-5555" />
-        </div>
-        <div>
-          <label style={p.label}>Email</label>
-          <input style={p.input} value={p.email} onChange={e => p.setEmail(e.target.value)} type="email" />
-        </div>
-      </div>
-      {p.zoneInfo && p.zip.length === 5 && (
-        <div style={{
-          padding: '8px 12px', borderRadius: 8, fontSize: 12,
-          background: p.zoneInfo.zone?.baseRate != null ? '#F0FDF4'
-            : p.zoneInfo.isCallForQuote ? '#FEF3C7' : '#F3F4F6',
-          color: p.zoneInfo.zone?.baseRate != null ? '#15803D'
-            : p.zoneInfo.isCallForQuote ? '#92400E' : '#6B7280',
-          display: 'flex', alignItems: 'center', gap: 6,
-        }}>
-          <MapPin size={12} />
-          {p.zoneInfo.loading ? 'Looking up zone…'
-            : !p.zoneInfo.zone ? `ZIP ${p.zip} not in service area — call for quote`
-            : p.zoneInfo.zone.baseRate == null ? `${p.zoneInfo.zone.city} (Zone ${p.zoneInfo.zone.zone}) — CALL FOR QUOTE`
-            : `${p.zoneInfo.zone.city} (Zone ${p.zoneInfo.zone.zone}) — ${p.zoneInfo.mode} rate $${p.zoneInfo.displayRate?.toFixed(2)}`}
-        </div>
-      )}
-    </div>
+    </>
   );
 }

@@ -138,6 +138,7 @@ function rowToService(row: ServiceRow): CatalogService {
     defaultSlaHours: null, defaultPriority: null,
     hasDedicatedPage: false, displayOrder: row.display_order,
     billIfPass: true, billIfFail: true, times: {},
+    staxItemId: null, qbItemId: null,
     createdAt: '', updatedAt: '',
   };
 }

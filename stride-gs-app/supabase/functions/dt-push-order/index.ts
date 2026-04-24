@@ -34,6 +34,7 @@ interface DtOrderRow {
   contact_state: string | null;
   contact_zip: string | null;
   contact_phone: string | null;
+  contact_phone2: string | null;
   contact_email: string | null;
   local_service_date: string | null;
   window_start_local: string | null;
@@ -42,11 +43,17 @@ interface DtOrderRow {
   sidemark: string | null;
   client_reference: string | null;
   details: string | null;
+  order_notes: string | null;
   service_time_minutes: number | null;
   review_status: string | null;
   pushed_to_dt_at: string | null;
   billing_method: string | null;
   order_total: number | null;
+  base_delivery_fee: number | null;
+  extra_items_count: number | null;
+  extra_items_fee: number | null;
+  accessorials_json: { code: string; quantity: number; rate: number; subtotal: number }[] | null;
+  accessorials_total: number | null;
 }
 
 interface DtOrderItemRow {
@@ -54,6 +61,9 @@ interface DtOrderItemRow {
   dt_item_code: string | null;
   description: string | null;
   quantity: number | null;
+  vendor: string | null;
+  class_name: string | null;
+  cubic_feet: number | null;
   extras: Record<string, unknown> | null;
 }
 
@@ -63,39 +73,117 @@ function xmlEscape(val: unknown): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;');
 }
 
-function buildOrderXml(order: DtOrderRow, items: DtOrderItemRow[], accountName: string, crossRefIdent?: string): string {
+// Build a rich item description: "Vendor | Description | SM: Sidemark | Ref: Reference"
+// For pickup legs, prefix with "PICK UP: "
+function buildItemDesc(it: DtOrderItemRow, isPickupLeg: boolean, sidemark?: string, reference?: string): string {
+  const parts: string[] = [];
+  if (it.vendor) parts.push(it.vendor);
+  if (it.description) parts.push(it.description);
+  if (sidemark) parts.push(`SM: ${sidemark}`);
+  if (reference) parts.push(`Ref: ${reference}`);
+  const base = parts.join(' | ') || it.description || '';
+  return isPickupLeg ? `PICK UP: ${base}` : base;
+}
+
+// Build the DT order description with billing info
+function buildOrderDescription(
+  order: DtOrderRow,
+  accountName: string,
+  crossRefIdent?: string,
+  linkedDeliveryInfo?: { identifier: string; contactName?: string; address?: string; city?: string; state?: string; zip?: string },
+): string {
+  const orderType = order.order_type || (order.is_pickup ? 'pickup' : 'delivery');
+  const descParts: string[] = [];
+
+  // For pickup legs of a pickup_and_delivery pair: show linked delivery info
+  if (orderType === 'pickup' && linkedDeliveryInfo) {
+    descParts.push(`LINKED DELIVERY: ${linkedDeliveryInfo.identifier}`);
+    const addrParts = [linkedDeliveryInfo.contactName, linkedDeliveryInfo.address,
+      [linkedDeliveryInfo.city, linkedDeliveryInfo.state, linkedDeliveryInfo.zip].filter(Boolean).join(' ')
+    ].filter(Boolean).join(', ');
+    if (addrParts) descParts.push(`Deliver to: ${addrParts}`);
+    descParts.push('');
+    descParts.push(`Bill To: ${accountName}`);
+    descParts.push('Charges Summary:');
+    descParts.push('(no charges — billed on delivery leg)');
+  } else {
+    // Cross-reference for linked orders
+    if (crossRefIdent) {
+      descParts.push(`[LINKED ORDER: ${crossRefIdent}]`);
+    }
+    if (orderType === 'service_only') {
+      descParts.push('[SERVICE-ONLY VISIT — NO ITEMS]');
+    }
+
+    // Billing info
+    const billTo = order.billing_method === 'customer_collect'
+      ? 'Collect from Customer'
+      : `${accountName}`;
+    descParts.push(`Bill To: ${billTo}`);
+    descParts.push('Charges Summary:');
+
+    // Itemized charges
+    if (order.base_delivery_fee != null && order.base_delivery_fee > 0) {
+      const feeLabel = order.is_pickup ? 'Pickup' : 'Delivery';
+      descParts.push(`${feeLabel} = $${Number(order.base_delivery_fee).toFixed(2)}`);
+    }
+    if (order.extra_items_fee != null && order.extra_items_fee > 0) {
+      descParts.push(`Extra Items (${order.extra_items_count || 0}) = $${Number(order.extra_items_fee).toFixed(2)}`);
+    }
+    if (order.accessorials_json && Array.isArray(order.accessorials_json)) {
+      for (const acc of order.accessorials_json) {
+        descParts.push(`${acc.code}${acc.quantity > 1 ? ` x${acc.quantity}` : ''} = $${Number(acc.subtotal).toFixed(2)}`);
+      }
+    }
+    if (order.order_total != null) {
+      descParts.push(`Total = $${Number(order.order_total).toFixed(2)}`);
+    }
+  }
+
+  // Append any user-entered details
+  if (order.details) {
+    descParts.push('');
+    descParts.push(order.details);
+  }
+
+  return descParts.join('\n').replace(/]]>/g, ']]]]><![CDATA[>');
+}
+
+function buildOrderXml(
+  order: DtOrderRow,
+  items: DtOrderItemRow[],
+  accountName: string,
+  crossRefIdent?: string,
+  linkedDeliveryInfo?: { identifier: string; contactName?: string; address?: string; city?: string; state?: string; zip?: string },
+): string {
   const nameParts = (order.contact_name || '').trim().split(/\s+/);
   const firstName = nameParts[0] || '';
   const lastName = nameParts.slice(1).join(' ') || '';
   const winStart = order.window_start_local ? order.window_start_local.slice(0, 5) : '';
   const winEnd = order.window_end_local ? order.window_end_local.slice(0, 5) : '';
   const orderType = order.order_type || (order.is_pickup ? 'pickup' : 'delivery');
-  const serviceType = orderType === 'pickup' ? 'Pick Up'
+  const serviceType = orderType === 'pickup' ? 'Pickup'
     : orderType === 'pickup_and_delivery' ? 'Delivery'
     : orderType === 'service_only' ? 'Service'
     : 'Delivery';
 
+  const isPickupLeg = orderType === 'pickup';
+
   const itemsXml = items.map((it) => {
-    const qty = Number(it.quantity) || 1;
-    return `    <item>\n      <item_id>${xmlEscape(it.dt_item_code || it.id)}</item_id>\n      <description>${xmlEscape(it.description || '')}</description>\n      <quantity>${qty}</quantity>\n    </item>`;
+    const qty = Math.abs(Number(it.quantity) || 1);
+    const desc = buildItemDesc(it, isPickupLeg, order.sidemark || undefined, order.client_reference || undefined);
+    const cubeVal = it.cubic_feet != null ? `\n      <cube>${it.cubic_feet}</cube>` : '';
+    return `    <item>\n      <item_id>${xmlEscape(it.dt_item_code || it.id)}</item_id>\n      <description>${xmlEscape(desc)}</description>\n      <quantity>${qty}</quantity>${cubeVal}\n    </item>`;
   }).join('\n');
 
-  // Build description with optional cross-reference note for linked pairs
-  const descParts: string[] = [];
-  if (crossRefIdent) {
-    descParts.push(`[LINKED ORDER: ${crossRefIdent}]`);
-  }
-  if (orderType === 'service_only') {
-    descParts.push('[SERVICE-ONLY VISIT — NO ITEMS]');
-  }
-  if (order.details) {
-    descParts.push(order.details);
-  }
-  const desc = descParts.join('\n\n').replace(/]]>/g, ']]]]><![CDATA[>');
+  const desc = buildOrderDescription(order, accountName, crossRefIdent, linkedDeliveryInfo);
+
+  // Build notes XML if order_notes exists
+  const notesXml = order.order_notes ? `\n    <notes count="1">\n      <note created_at="${new Date().toISOString()}" author="StrideApp" note_type="Public">\n        <![CDATA[${order.order_notes.replace(/]]>/g, ']]]]><![CDATA[>')}]]>\n      </note>\n    </notes>` : '';
 
   return `<?xml version="1.0" encoding="UTF-8"?>
-<orders>
-  <order>
+<service_orders>
+  <service_order>
     <number>${xmlEscape(order.dt_identifier)}</number>
     <account>${xmlEscape(accountName)}</account>
     <service_type>${xmlEscape(serviceType)}</service_type>
@@ -107,19 +195,19 @@ function buildOrderXml(order: DtOrderRow, items: DtOrderItemRow[], accountName: 
       <state>${xmlEscape(order.contact_state || '')}</state>
       <zip>${xmlEscape(order.contact_zip || '')}</zip>
       <phone1>${xmlEscape(order.contact_phone || '')}</phone1>
+      <phone2>${xmlEscape(order.contact_phone2 || '')}</phone2>
       <email>${xmlEscape(order.contact_email || '')}</email>
     </customer>
-    <request_date>${xmlEscape(order.local_service_date || '')}</request_date>
-    <request_window_start_time>${xmlEscape(winStart)}</request_window_start_time>
-    <request_window_end_time>${xmlEscape(winEnd)}</request_window_end_time>
+    <delivery_date>${xmlEscape(order.local_service_date || '')}</delivery_date>
+    <request_time_window_start>${xmlEscape(winStart)}</request_time_window_start>
+    <request_time_window_end>${xmlEscape(winEnd)}</request_time_window_end>
     <description><![CDATA[${desc}]]></description>
-    <po_number>${xmlEscape(order.po_number || '')}</po_number>
-    <sidemark>${xmlEscape(order.sidemark || '')}</sidemark>
+    <amount>${order.order_total != null ? Number(order.order_total).toFixed(2) : '0.00'}</amount>
     <items>
 ${itemsXml}
-    </items>
-  </order>
-</orders>`;
+    </items>${notesXml}
+  </service_order>
+</service_orders>`;
 }
 
 // Resolve DT account name from tenant_id (reverse lookup in account_name_map)
@@ -138,16 +226,21 @@ async function pushSingleOrder(
   accountName: string,
   postUrl: string,
   crossRefIdent?: string,
+  linkedDeliveryInfo?: { identifier: string; contactName?: string; address?: string; city?: string; state?: string; zip?: string },
 ): Promise<{ ok: boolean; body: string; errMsg?: string }> {
-  const xml = buildOrderXml(order, items, accountName, crossRefIdent);
-  console.log(`[dt-push-order] POST order=${order.dt_identifier} type=${order.order_type || 'delivery'} items=${items.length}${crossRefIdent ? ` crossRef=${crossRefIdent}` : ''}`);
+  const xml = buildOrderXml(order, items, accountName, crossRefIdent, linkedDeliveryInfo);
+  console.log(`[dt-push-order] POST order=${order.dt_identifier} type=${order.order_type || 'delivery'} items=${items.length} account=${accountName}${crossRefIdent ? ` crossRef=${crossRefIdent}` : ''}`);
+  console.log(`[dt-push-order] XML payload:\n${xml.slice(0, 800)}`);
   try {
+    // DT API expects XML as a form-encoded "data" parameter (per API docs v8.1)
+    const formBody = `data=${encodeURIComponent(xml)}`;
     const resp = await fetch(postUrl, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/xml' },
-      body: xml,
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: formBody,
     });
     const body = await resp.text();
+    console.log(`[dt-push-order] DT response status=${resp.status} body=${body.slice(0, 500)}`);
     const isSuccess = /<success>/i.test(body) && resp.ok;
     if (!isSuccess) {
       const errMatch = body.match(/<error[^>]*>([\s\S]*?)<\/error>/i) || body.match(/<message[^>]*>([\s\S]*?)<\/message>/i);
@@ -172,14 +265,19 @@ Deno.serve(async (req: Request) => {
     return new Response(JSON.stringify({ ok: false, error: 'Method not allowed' }), { status: 405, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
   }
 
+  const json = (body: unknown, status = 200) =>
+    new Response(JSON.stringify(body), { status, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
   let orderId: string;
   try {
     const body = await req.json();
     orderId = body.orderId;
     if (!orderId) throw new Error('orderId required');
   } catch (err) {
-    return new Response(JSON.stringify({ ok: false, error: (err as Error).message }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+    return json({ ok: false, error: (err as Error).message }, 400);
   }
+
+  try { // Top-level catch — any unhandled error returns 500 with details
 
   const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
   const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
@@ -188,7 +286,7 @@ Deno.serve(async (req: Request) => {
   // ── 1. Fetch primary order ────────────────────────────────────────────
   const { data: order, error: orderErr } = await supabase
     .from('dt_orders')
-    .select('id, tenant_id, dt_identifier, is_pickup, order_type, linked_order_id, contact_name, contact_address, contact_city, contact_state, contact_zip, contact_phone, contact_email, local_service_date, window_start_local, window_end_local, po_number, sidemark, client_reference, details, service_time_minutes, review_status, pushed_to_dt_at, billing_method, order_total')
+    .select('id, tenant_id, dt_identifier, is_pickup, order_type, linked_order_id, contact_name, contact_address, contact_city, contact_state, contact_zip, contact_phone, contact_phone2, contact_email, local_service_date, window_start_local, window_end_local, po_number, sidemark, client_reference, details, order_notes, service_time_minutes, review_status, pushed_to_dt_at, billing_method, order_total, base_delivery_fee, extra_items_count, extra_items_fee, accessorials_json, accessorials_total')
     .eq('id', orderId)
     .maybeSingle();
 
@@ -202,7 +300,7 @@ Deno.serve(async (req: Request) => {
   // ── 2. Fetch items for primary order ──────────────────────────────────
   const { data: items, error: itemsErr } = await supabase
     .from('dt_order_items')
-    .select('id, dt_item_code, description, quantity, extras')
+    .select('id, dt_item_code, description, quantity, vendor, class_name, cubic_feet, extras')
     .eq('dt_order_id', orderId);
 
   if (itemsErr) {
@@ -245,7 +343,7 @@ Deno.serve(async (req: Request) => {
     // Fetch the linked pickup order
     const { data: linkedOrder, error: linkedErr } = await supabase
       .from('dt_orders')
-      .select('id, tenant_id, dt_identifier, is_pickup, order_type, linked_order_id, contact_name, contact_address, contact_city, contact_state, contact_zip, contact_phone, contact_email, local_service_date, window_start_local, window_end_local, po_number, sidemark, client_reference, details, service_time_minutes, review_status, pushed_to_dt_at, billing_method, order_total')
+      .select('id, tenant_id, dt_identifier, is_pickup, order_type, linked_order_id, contact_name, contact_address, contact_city, contact_state, contact_zip, contact_phone, contact_phone2, contact_email, local_service_date, window_start_local, window_end_local, po_number, sidemark, client_reference, details, order_notes, service_time_minutes, review_status, pushed_to_dt_at, billing_method, order_total, base_delivery_fee, extra_items_count, extra_items_fee, accessorials_json, accessorials_total')
       .eq('id', orderTyped.linked_order_id)
       .maybeSingle();
 
@@ -255,13 +353,21 @@ Deno.serve(async (req: Request) => {
       if (!linkedTyped.pushed_to_dt_at) {
         const { data: linkedItems } = await supabase
           .from('dt_order_items')
-          .select('id, dt_item_code, description, quantity, extras')
+          .select('id, dt_item_code, description, quantity, vendor, class_name, cubic_feet, extras')
           .eq('dt_order_id', linkedTyped.id);
         const linkedItemsTyped = (linkedItems || []) as DtOrderItemRow[];
 
         const linkedPush = await pushSingleOrder(
           linkedTyped, linkedItemsTyped, accountName, postUrl,
           orderTyped.dt_identifier, // cross-ref points to the delivery
+          { // delivery info for the pickup leg's description
+            identifier: orderTyped.dt_identifier,
+            contactName: orderTyped.contact_name || undefined,
+            address: orderTyped.contact_address || undefined,
+            city: orderTyped.contact_city || undefined,
+            state: orderTyped.contact_state || undefined,
+            zip: orderTyped.contact_zip || undefined,
+          },
         );
 
         if (!linkedPush.ok) {
@@ -317,10 +423,20 @@ Deno.serve(async (req: Request) => {
   if (updateErr) console.warn(`[dt-push-order] DT push ok but local update failed: ${updateErr.message}`);
 
   console.log(`[dt-push-order] Success order=${orderTyped.dt_identifier}${linkedPushedIdentifier ? ` + linked=${linkedPushedIdentifier}` : ''}`);
-  return new Response(JSON.stringify({
+  return json({
     ok: true,
     dt_identifier: orderTyped.dt_identifier,
     linked_identifier: linkedPushedIdentifier,
-  }), { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+  });
+
+  } catch (unhandled) {
+    // Top-level catch — ensures we always return a JSON body, never a raw 500
+    console.error(`[dt-push-order] Unhandled error for orderId=${orderId}:`, unhandled);
+    return json({
+      ok: false,
+      error: `Internal error: ${(unhandled as Error).message || String(unhandled)}`,
+      stack: (unhandled as Error).stack?.slice(0, 300),
+    }, 500);
+  }
 });
                                                                                                                                                                                                                                                                                                                

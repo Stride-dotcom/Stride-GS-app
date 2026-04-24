@@ -87,11 +87,18 @@ export function ReviewQueueTab({ orders, loading, onRefetch, onOpenDetail }: Pro
     const { data, error } = await supabase.functions.invoke('dt-push-order', {
       body: { orderId },
     });
+    // Extract the detailed error from the response body when available
+    const result = data as { ok?: boolean; error?: string; responseBody?: string; dt_identifier?: string } | null;
     if (error) {
-      throw new Error(`Push failed: ${error.message || 'Edge Function error'}`);
+      // On non-2xx, supabase client puts generic msg in error but the actual
+      // DT error is in the response body (data). Prefer data.error if present.
+      const detailMsg = result?.error || error.message || 'Edge Function error';
+      const bodySnippet = result?.responseBody ? `\n\nDT response: ${result.responseBody.slice(0, 200)}` : '';
+      console.error('[dt-push] Push failed:', { orderId, detailMsg, responseBody: result?.responseBody });
+      throw new Error(`DT push failed: ${detailMsg}${bodySnippet}`);
     }
-    const result = data as { ok?: boolean; error?: string; dt_identifier?: string };
     if (result && result.ok === false) {
+      console.error('[dt-push] DT rejected order:', { orderId, error: result.error, responseBody: result.responseBody });
       throw new Error(result.error || 'Unknown DT push error');
     }
     return result?.dt_identifier || dtIdentifier;

@@ -6,8 +6,9 @@ import { CalendarTooltip } from './CalendarTooltip';
 function isCompleted(ev: CalendarEvent): boolean {
   const s = ev.details.status;
   if (!s) return false;
-  if (ev.type === 'task' || ev.type === 'repair') return s === 'Completed';
-  if (ev.type === 'willcall') return s === 'Released';
+  if (ev.type === 'task') return s === 'Completed';
+  if (ev.type === 'repair') return s === 'Complete';
+  if (ev.type === 'willcall') return s === 'Complete' || s === 'Released';
   return false;
 }
 

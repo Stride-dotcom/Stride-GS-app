@@ -14,6 +14,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { supabase } from '../lib/supabase';
 import { entityEvents } from '../lib/entityEvents';
 import { useAuth } from '../contexts/AuthContext';
+import { postQboSyncCatalogItem } from '../lib/api';
 
 // ─── Types ────────────────────────────────────────────────────────────────
 
@@ -59,6 +60,9 @@ export interface CatalogService {
   billIfPass: boolean;
   billIfFail: boolean;
   times: ClassTimes;            // minutes per unit by class
+  // External catalog IDs (hidden in UI, auto-synced)
+  staxItemId: string | null;
+  qbItemId: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -111,6 +115,9 @@ interface CatalogRow {
   l_time: number | null;
   xl_time: number | null;
   xxl_time: number | null;
+  // External catalog IDs
+  stax_item_id: string | null;
+  qb_item_id: string | null;
 }
 
 function rowToService(row: CatalogRow): CatalogService {
@@ -148,6 +155,8 @@ function rowToService(row: CatalogRow): CatalogService {
     displayOrder: row.display_order,
     billIfPass: row.bill_if_pass ?? true,
     billIfFail: row.bill_if_fail ?? true,
+    staxItemId: row.stax_item_id ?? null,
+    qbItemId: row.qb_item_id ?? null,
     times: {
       XS:  row.xs_time  ?? undefined,
       S:   row.s_time   ?? undefined,
@@ -209,6 +218,47 @@ function stringify(v: unknown): string {
   if (v === null || v === undefined) return '';
   if (typeof v === 'object') return JSON.stringify(v);
   return String(v);
+}
+
+// ─── External catalog sync (best-effort, non-blocking) ───────────────────
+
+const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL as string;
+
+async function syncToExternalCatalogs(service: CatalogService): Promise<void> {
+  // ── Stax (Edge Function) ──
+  try {
+    const resp = await fetch(`${SUPABASE_URL}/functions/v1/stax-catalog-sync`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${(await supabase.auth.getSession()).data.session?.access_token ?? ''}`,
+      },
+      body: JSON.stringify({ serviceId: service.id }),
+    });
+    const result = await resp.json();
+    if (result.ok) {
+      console.log(`[catalog-sync] Stax ${result.action}: ${service.code} → ${result.stax_item_id}`);
+    } else {
+      console.warn('[catalog-sync] Stax sync failed:', result.error);
+    }
+  } catch (err) {
+    console.warn('[catalog-sync] Stax sync error (non-fatal):', err);
+  }
+
+  // ── QBO (Apps Script) ──
+  try {
+    const result = await postQboSyncCatalogItem(
+      service.id,
+      service.code,
+      service.name,
+      service.qbItemId,
+    );
+    if (result.ok) {
+      console.log(`[catalog-sync] QBO ${result.data?.action}: ${service.code} → ${result.data?.qb_item_id}`);
+    }
+  } catch (err) {
+    console.warn('[catalog-sync] QBO sync error (non-fatal):', err);
+  }
 }
 
 // ─── Hook ─────────────────────────────────────────────────────────────────
@@ -278,6 +328,8 @@ export function useServiceCatalog(): UseServiceCatalogResult {
     }
     const created = rowToService(data as CatalogRow);
     setServices(prev => [...prev, created].sort((a, b) => a.displayOrder - b.displayOrder));
+    // Best-effort sync to Stax + QBO (non-blocking)
+    syncToExternalCatalogs(created).catch(() => {});
     return created;
   }, []);
 
@@ -356,6 +408,8 @@ export function useServiceCatalog(): UseServiceCatalogResult {
     }
 
     setServices(prev => prev.map(s => s.id === id ? after : s).sort((a, b) => a.displayOrder - b.displayOrder));
+    // Best-effort sync to Stax + QBO (non-blocking)
+    syncToExternalCatalogs(after).catch(() => {});
     return after;
   }, [services, user]);
 

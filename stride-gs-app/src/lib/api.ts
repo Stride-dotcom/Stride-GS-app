@@ -4604,6 +4604,27 @@ export function postUpdateQboStatus(
   );
 }
 
+// ─── QBO Catalog Sync ───────────────────────────────────────────────────────
+
+/**
+ * v38.118.0: Sync a service catalog item to QBO as a Service item.
+ * Creates or updates, stores qb_item_id back to Supabase.
+ */
+export function postQboSyncCatalogItem(
+  serviceId: string,
+  serviceCode: string,
+  serviceName: string,
+  qbItemId?: string | null,
+  signal?: AbortSignal
+) {
+  return apiPost<{ success: boolean; qb_item_id: string; action: 'created' | 'updated' }>(
+    'qboSyncCatalogItem',
+    { serviceId, serviceCode, serviceName, qbItemId } as unknown as Record<string, unknown>,
+    {},
+    { signal }
+  );
+}
+
 // ─── Intake Invitation Endpoints ─────────────────────────────────────────────
 
 /**

@@ -67,6 +67,8 @@ export function AddServiceModal({ existingCodes, nextDisplayOrder, onClose, onCr
       billIfPass: true,
       billIfFail: true,
       times: billing === 'class_based' ? times : {},
+      staxItemId: null,
+      qbItemId: null,
     };
     const created = await onCreate(input);
     setSaving(false);

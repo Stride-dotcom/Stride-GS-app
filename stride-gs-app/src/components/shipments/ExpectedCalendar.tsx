@@ -34,7 +34,7 @@ function startOfWeek(d: Date): Date {
 
 export function ExpectedCalendar() {
   const { isMobile } = useIsMobile();
-  const [view, setView] = useState<ViewMode>('month');
+  const [view, setView] = useState<ViewMode>('week');
   const [anchor, setAnchor] = useState<Date>(() => new Date());
   const [showAdd, setShowAdd] = useState(false);
   const [editingEvent, setEditingEvent] = useState<ExpectedShipment | null>(null);

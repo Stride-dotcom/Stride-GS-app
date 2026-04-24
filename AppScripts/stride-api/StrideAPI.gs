@@ -1,4 +1,12 @@
 /* ===================================================
+   StrideAPI.gs — v38.118.0 — 2026-04-24 04:30 PM PST — Fix inventory shipment_folder_url sync
+   v38.118.0: FIX — api_fullClientSync_ inventory case now reads Shipment # RichText
+              hyperlinks (per-row Drive folder URLs) and passes them to sbInventoryRow_.
+              Previously only handleGetInventory_ read these; the sync path left
+              shipment_folder_url blank, causing all legacy-imported items to resolve
+              to the same shipment-level folder. Also adds backfillShipmentFolderUrls()
+              one-time function to populate all existing items from sheet hyperlinks.
+   ===================================================
    StrideAPI.gs — v38.117.0 — 2026-04-23 PST — DT nightly status reconciliation trigger
    v38.117.0: NEW — dtSyncStatusesNightly() invokes the dt-sync-statuses Supabase
               Edge Function to pull latest delivery status from DispatchTrack for
@@ -4640,6 +4648,38 @@ function api_fullClientSync_(tenantId, entityTypes) {
           var invSheet = ss.getSheetByName("Inventory");
           if (invSheet) {
             var invRows = sheetToObjects_(invSheet);
+
+            // v38.106.0: Read per-row Drive URLs from Shipment # RichText hyperlinks.
+            // Mirrors the pattern in handleGetInventory_ — one source of truth per item.
+            var invShipUrlMap = {};
+            try {
+              var invHmap = api_getHeaderMap_(invSheet);
+              var invShipCol = invHmap["Shipment #"];
+              var invIdCol   = invHmap["Item ID"];
+              if (invShipCol && invIdCol) {
+                var invLastRow = api_getLastDataRow_(invSheet);
+                if (invLastRow >= 2) {
+                  var numInvRows = invLastRow - 1;
+                  var syncIdVals = invSheet.getRange(2, invIdCol, numInvRows, 1).getValues();
+                  var syncRtVals = invSheet.getRange(2, invShipCol, numInvRows, 1).getRichTextValues();
+                  for (var ri = 0; ri < numInvRows; ri++) {
+                    var rid = String(syncIdVals[ri][0] || "").trim();
+                    if (!rid) continue;
+                    var rtCell = syncRtVals[ri][0];
+                    var urlStr = rtCell ? (rtCell.getLinkUrl() || "") : "";
+                    if (!urlStr && rtCell) {
+                      var runs = rtCell.getRuns();
+                      for (var rj = 0; rj < runs.length; rj++) {
+                        var runUrl = runs[rj].getLinkUrl();
+                        if (runUrl) { urlStr = runUrl; break; }
+                      }
+                    }
+                    if (urlStr) invShipUrlMap[rid] = urlStr;
+                  }
+                }
+              }
+            } catch (rtErr) { /* non-fatal — URLs default to empty */ }
+
             var invSb = [];
             var invKeepIds = [];
             for (var i = 0; i < invRows.length; i++) {
@@ -4656,7 +4696,9 @@ function api_fullClientSync_(tenantId, entityTypes) {
                 reference: invRows[i]["Reference"], taskNotes: invRows[i]["Task Notes"],
                 // Phase B coverage fields — graceful when columns missing
                 declaredValue: invRows[i]["Declared Value"],
-                coverageOptionId: invRows[i]["Coverage Option"]
+                coverageOptionId: invRows[i]["Coverage Option"],
+                // v38.106.0: per-row Drive folder URL from Shipment # hyperlink
+                shipmentFolderUrl: invShipUrlMap[iid] || ""
               }));
             }
             supabaseBatchUpsert_("inventory", invSb);
@@ -6160,6 +6202,10 @@ function doPost(e) {
         return withAdminGuard_(callerEmail, function() { return jsonResponse_(handleQboSetupHeaders_()); });
       case "updateQboStatus":
         return withAdminGuard_(callerEmail, function() { return jsonResponse_(handleUpdateQboStatus_(payload)); });
+
+      // v38.118.0: Sync a service catalog item to QBO as a Service item
+      case "qboSyncCatalogItem":
+        return withAdminGuard_(callerEmail, function() { return jsonResponse_(handleQboSyncCatalogItem_(payload)); });
 
       default:
         return errorResponse_("Unknown POST action: " + action, "INVALID_ACTION");
@@ -33403,6 +33449,118 @@ function handleQboDisconnect_() {
 }
 
 /**
+ * v38.118.0 — POST qboSyncCatalogItem
+ * Creates or updates a QBO Service item from a service_catalog row.
+ * Stores the QBO Item ID back in service_catalog.qb_item_id via Supabase.
+ *
+ * Payload: { serviceCode, serviceName, qbItemId (optional — update if present) }
+ * Returns: { success, qb_item_id, action: 'created'|'updated' }
+ */
+function handleQboSyncCatalogItem_(payload) {
+  var code = String(payload.serviceCode || "").trim();
+  var name = String(payload.serviceName || "").trim();
+  var serviceId = String(payload.serviceId || "").trim();
+  if (!code || !name) throw new Error("serviceCode and serviceName are required");
+
+  var token = qbo_getValidToken_();
+  var realmId = prop_("QBO_REALM_ID");
+  var existingQbId = payload.qbItemId || null;
+  var action, qbItemId;
+
+  if (existingQbId) {
+    // ── Update existing QBO item ──
+    var updatePayload = {
+      Id: existingQbId,
+      Name: code,
+      Description: name,
+      Type: "Service",
+      Active: true
+    };
+    // QBO requires SyncToken for updates — fetch current item first
+    var current = qbo_apiRequest_("GET", "item/" + existingQbId, null, token, realmId);
+    if (current.success && current.data && current.data.Item) {
+      updatePayload.SyncToken = current.data.Item.SyncToken;
+      var updateResult = qbo_apiRequest_("POST", "item", updatePayload, token, realmId);
+      if (updateResult.success && updateResult.data && updateResult.data.Item) {
+        qbItemId = String(updateResult.data.Item.Id);
+        action = "updated";
+      } else {
+        throw new Error("QBO item update failed: " + (updateResult.error || JSON.stringify(updateResult)));
+      }
+    } else {
+      // Item not found in QBO — create new
+      existingQbId = null;
+    }
+  }
+
+  if (!existingQbId) {
+    // ── Check if item already exists by name ──
+    var query = "select * from Item where Name = '" + code.replace(/'/g, "\\'") + "' and Type = 'Service'";
+    var searchResult = qbo_apiRequest_("GET", "query?query=" + encodeURIComponent(query), null, token, realmId);
+    if (searchResult.success && searchResult.data && searchResult.data.QueryResponse &&
+        searchResult.data.QueryResponse.Item && searchResult.data.QueryResponse.Item.length > 0) {
+      // Found existing — update it
+      var existing = searchResult.data.QueryResponse.Item[0];
+      var updatePayload2 = {
+        Id: existing.Id,
+        SyncToken: existing.SyncToken,
+        Name: code,
+        Description: name,
+        Type: "Service",
+        Active: true
+      };
+      var updateResult2 = qbo_apiRequest_("POST", "item", updatePayload2, token, realmId);
+      if (updateResult2.success && updateResult2.data && updateResult2.data.Item) {
+        qbItemId = String(updateResult2.data.Item.Id);
+        action = "updated";
+      } else {
+        throw new Error("QBO item update failed: " + (updateResult2.error || JSON.stringify(updateResult2)));
+      }
+    } else {
+      // ── Create new QBO Service item ──
+      var createPayload = {
+        Name: code,
+        Description: name,
+        Type: "Service",
+        Active: true
+      };
+      var createResult = qbo_apiRequest_("POST", "item", createPayload, token, realmId);
+      if (createResult.success && createResult.data && createResult.data.Item) {
+        qbItemId = String(createResult.data.Item.Id);
+        action = "created";
+      } else {
+        throw new Error("QBO item create failed: " + (createResult.error || JSON.stringify(createResult)));
+      }
+    }
+  }
+
+  // ── Write qb_item_id back to Supabase ──
+  if (serviceId && qbItemId) {
+    try {
+      var sbUrl = prop_("SUPABASE_URL");
+      var sbKey = prop_("SUPABASE_SERVICE_ROLE_KEY");
+      if (sbUrl && sbKey) {
+        UrlFetchApp.fetch(sbUrl + "/rest/v1/service_catalog?id=eq." + serviceId, {
+          method: "patch",
+          headers: {
+            "apikey": sbKey,
+            "Authorization": "Bearer " + sbKey,
+            "Content-Type": "application/json",
+            "Prefer": "return=minimal"
+          },
+          payload: JSON.stringify({ qb_item_id: qbItemId }),
+          muteHttpExceptions: true
+        });
+      }
+    } catch (sbErr) {
+      Logger.log("qboSyncCatalogItem: Supabase write-back failed (non-fatal): " + sbErr);
+    }
+  }
+
+  return { success: true, qb_item_id: qbItemId, action: action };
+}
+
+/**
  * POST qboSetupHeaders — One-time setup: add QBO columns to Stax Customers tab
  * and Consolidated_Ledger. Safe to run multiple times (checks before adding).
  */
@@ -33782,4 +33940,94 @@ function dtSyncStatusesNow() {
   var result = dtSyncStatusesNightly();
   Logger.log("dtSyncStatusesNow result: " + JSON.stringify(result));
   return result;
+}
+
+// ============================================================
+// v38.106.0 — One-time backfill: populate shipment_folder_url
+// in Supabase from each Inventory row's Shipment # hyperlink.
+// Run from the Apps Script editor: Run > backfillShipmentFolderUrls
+// ============================================================
+function backfillShipmentFolderUrls() {
+  var cbId = prop_("CB_SPREADSHEET_ID");
+  if (!cbId) { Logger.log("backfill: no CB_SPREADSHEET_ID"); return; }
+  var cbSs = SpreadsheetApp.openById(cbId);
+  var sheet = cbSs.getSheetByName("Clients");
+  if (!sheet) { Logger.log("backfill: Clients sheet not found"); return; }
+
+  var data = sheet.getDataRange().getValues();
+  if (data.length < 2) return;
+  var headers = data[0].map(function(h) { return String(h || "").trim().toUpperCase(); });
+  var sidCol = headers.indexOf("CLIENT SPREADSHEET ID");
+  var activeCol = headers.indexOf("ACTIVE");
+  var nameCol = headers.indexOf("CLIENT NAME");
+  if (sidCol < 0) { Logger.log("backfill: CLIENT SPREADSHEET ID column not found"); return; }
+
+  var totalUpdated = 0, totalSkipped = 0, totalFailed = 0;
+
+  for (var i = 1; i < data.length; i++) {
+    var sid = String(data[i][sidCol] || "").trim();
+    if (!sid) continue;
+    var active = activeCol >= 0 ? data[i][activeCol] : true;
+    var isActive = !(active === false || active === "FALSE" || active === "No");
+    if (!isActive) continue;
+    var clientName = nameCol >= 0 ? String(data[i][nameCol] || "") : sid;
+
+    try {
+      var clientSs = SpreadsheetApp.openById(sid);
+      var invSheet = clientSs.getSheetByName("Inventory");
+      if (!invSheet) { totalSkipped++; continue; }
+
+      var hMap = api_getHeaderMap_(invSheet);
+      var shipCol = hMap["Shipment #"];
+      var idCol   = hMap["Item ID"];
+      if (!shipCol || !idCol) { totalSkipped++; continue; }
+
+      var lastRow = api_getLastDataRow_(invSheet);
+      if (lastRow < 2) { totalSkipped++; continue; }
+
+      var numRows = lastRow - 1;
+      var idVals = invSheet.getRange(2, idCol, numRows, 1).getValues();
+      var rtVals = invSheet.getRange(2, shipCol, numRows, 1).getRichTextValues();
+
+      var updates = [];
+      for (var r = 0; r < numRows; r++) {
+        var itemId = String(idVals[r][0] || "").trim();
+        if (!itemId) continue;
+
+        var rtCell = rtVals[r][0];
+        var url = rtCell ? (rtCell.getLinkUrl() || "") : "";
+        if (!url && rtCell) {
+          var runs = rtCell.getRuns();
+          for (var j = 0; j < runs.length; j++) {
+            var runUrl = runs[j].getLinkUrl();
+            if (runUrl) { url = runUrl; break; }
+          }
+        }
+
+        if (url) {
+          updates.push({
+            tenant_id: sid,
+            item_id: itemId,
+            shipment_folder_url: url,
+            updated_at: new Date().toISOString()
+          });
+        }
+      }
+
+      if (updates.length > 0) {
+        supabaseBatchUpsert_("inventory", updates);
+        totalUpdated += updates.length;
+        Logger.log("✓ " + clientName + ": " + updates.length + " items backfilled");
+      } else {
+        totalSkipped++;
+        Logger.log("– " + clientName + ": no hyperlinks found");
+      }
+
+    } catch (err) {
+      totalFailed++;
+      Logger.log("✗ " + clientName + ": " + err.message);
+    }
+  }
+
+  Logger.log("=== BACKFILL DONE === Updated: " + totalUpdated + " items | Skipped: " + totalSkipped + " | Failed: " + totalFailed);
 }
