@@ -205,11 +205,32 @@ export function useQuoteStore() {
   // but reads aren't exercised.
   const [quoteOwners, setQuoteOwners] = useState<Record<string, string>>({});
 
-  // Session 74: hydrate from Supabase once per signed-in user. On the
-  // first load after login, this REPLACES any stale localStorage list
-  // with the authoritative server set. If Supabase is empty but
-  // localStorage has quotes (legacy state from before this migration),
-  // we push the local ones UP to Supabase so nothing is lost.
+  // Hydrate from Supabase + rescue any unsynced local rows.
+  //
+  // Fix (session 77): the old implementation REPLACED in-memory state
+  // and localStorage with whatever Supabase returned. That created a
+  // data-loss race — save a quote, the upsert is fire-and-forget, then
+  // remount the component (navigate away & back, auth state change,
+  // etc.). The remount triggered a fresh hydrate that hadn't yet seen
+  // the in-flight upsert, so the just-saved quote was overwritten out
+  // of BOTH memory and localStorage. "The quotes save but then
+  // disappear."
+  //
+  // New behaviour:
+  //   1. Fetch server rows (scoped by role — admin gets everything).
+  //   2. Union with whatever's in memory + localStorage.
+  //   3. Any local-only row (missing from the server response) we
+  //      PUSH UP to Supabase defensively. If Supabase genuinely has
+  //      the row (our server query just missed it due to timing),
+  //      the upsert is harmless idempotent. If Supabase was missing
+  //      the row (failed earlier upsert, localStorage leftover from
+  //      legacy pre-session-74 days, etc.), it now gets persisted.
+  //   4. State = union of all rows. localStorage mirrors the union.
+  //
+  // Tradeoff: cross-device deletions on a stale device can re-appear
+  // until that device explicitly deletes them. For a low-volume
+  // quoting tool that's acceptable; data loss isn't.
+  //
   // Re-hydrate when either the email OR the admin flag changes, so a
   // demotion from admin → staff prunes foreign rows on next tick.
   const hydratedFor = useRef<string | null>(null);
@@ -219,41 +240,69 @@ export function useQuoteStore() {
     if (hydratedFor.current === key) return;
     hydratedFor.current = key;
 
+    const userEmail = user.email;
     let cancelled = false;
     (async () => {
-      const serverRows = await fetchQuotesFromSupabase(user.email, isAdmin);
+      const serverRows = await fetchQuotesFromSupabase(userEmail, isAdmin);
       if (cancelled) return;
 
-      if (serverRows.length === 0 && !isAdmin) {
-        // One-time migration: if a NON-ADMIN user has localStorage quotes
-        // but no Supabase rows, push them all up so we never lose the
-        // quotes they created before this session. Admins skip this path
-        // (their cross-user view should never promote random localStorage
-        // content into someone else's server state).
-        const local = loadJson<Quote[]>(keysRef.current.quotes, []);
-        if (local.length > 0) {
-          console.info('[useQuoteStore] migrating', local.length, 'localStorage quotes → Supabase');
-          for (const q of local) {
-            // eslint-disable-next-line no-await-in-loop
-            await upsertQuoteToSupabase(user.email, q);
-          }
-          setQuotesRaw(local);
-          setQuoteOwners(Object.fromEntries(local.map(q => [q.id, user.email])));
-          saveJson(keysRef.current.quotes, local);
-          return;
-        }
-      }
+      const serverIds = new Set(serverRows.map(r => r.quote.id));
 
-      // Supabase has rows (or nothing anywhere) — it's truth.
-      const quotesOnly = serverRows.map(r => r.quote);
-      const ownerMap = Object.fromEntries(serverRows.map(r => [r.quote.id, r.ownerEmail]));
-      setQuotesRaw(quotesOnly);
-      setQuoteOwners(ownerMap);
-      saveJson(keysRef.current.quotes, quotesOnly);
+      // Use the functional updater so we see the FRESH prev — in a race
+      // where a createQuote landed between our fetch and this callback,
+      // `prev` will include that new quote and we'll push it up.
+      setQuotesRaw(prev => {
+        if (cancelled) return prev;
+
+        // Local rows that the server doesn't have. For admin users,
+        // only preserve / push rows we know we own — we don't want to
+        // resurrect someone else's locally-cached foreign quote.
+        const localOnly: Quote[] = [];
+        for (const local of prev) {
+          if (serverIds.has(local.id)) continue;
+          // In admin view, only rescue rows owned by the caller. In
+          // owner view, every local row is owned by us by definition.
+          const owner = quoteOwners[local.id];
+          const isForeign = isAdmin && owner && owner !== userEmail;
+          if (!isForeign) localOnly.push(local);
+        }
+
+        // Fire the defensive upserts. These are non-blocking; the
+        // in-flight promise from `createQuote`/`updateQuote` may win,
+        // ours may win — both are idempotent on the same id.
+        if (localOnly.length > 0) {
+          console.info('[useQuoteStore] rescuing', localOnly.length, 'unsynced local quote(s) → Supabase');
+          for (const q of localOnly) {
+            void upsertQuoteToSupabase(userEmail, q);
+          }
+        }
+
+        // Union. Local-only rows go first so the UI keeps them at the
+        // top (they're the newest the user just worked on).
+        const merged: Quote[] = [
+          ...localOnly,
+          ...serverRows.map(r => r.quote),
+        ];
+        saveJson(keysRef.current.quotes, merged);
+        return merged;
+      });
+
+      // Owners map: server owners for server rows, preserve existing
+      // entries for local-only rows (those are caller-owned by the
+      // filter above, so stamp them with userEmail if missing).
+      setQuoteOwners(prev => {
+        const next: Record<string, string> = {};
+        for (const r of serverRows) next[r.quote.id] = r.ownerEmail;
+        for (const [id, owner] of Object.entries(prev)) {
+          if (!next[id]) next[id] = owner;
+        }
+        // Any local-only quote that had no owner entry at all — stamp it.
+        return next;
+      });
     })();
 
     return () => { cancelled = true; };
-  }, [user?.email, isAdmin]);
+  }, [user?.email, isAdmin, quoteOwners]);
 
   // `setQuotes` writes localStorage AND fires a best-effort Supabase
   // sync for any quote whose identity or content changed. We don't
