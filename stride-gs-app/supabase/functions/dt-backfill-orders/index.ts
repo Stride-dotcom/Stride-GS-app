@@ -158,17 +158,18 @@ Deno.serve(async (req: Request) => {
         const accountName = getEl(order, 'account');
         const statusStr   = getEl(order, 'status');
 
-        // Resolve tenant_id
+        // Resolve tenant_id. Map shape (post 20260424070000_dt_account_map_invert):
+        //   { [tenantId]: dtAccountName }. Backfill receives a DT account name
+        //   from the Export XML and needs the reverse — iterate values.
         let tenantId: string | null = null;
         if (accountName) {
-          tenantId = acctMap[accountName] ?? acctMap[accountName.toUpperCase()] ?? null;
-          // Fuzzy fallback
-          if (!tenantId) {
-            for (const [key, val] of Object.entries(acctMap)) {
-              if (key.toLowerCase() === accountName.toLowerCase()) {
-                tenantId = val;
-                break;
-              }
+          const target = accountName.trim();
+          const targetLc = target.toLowerCase();
+          for (const [tid, dtName] of Object.entries(acctMap)) {
+            if (!dtName) continue;
+            if (dtName === target || dtName.toLowerCase() === targetLc) {
+              tenantId = tid;
+              break;
             }
           }
         }

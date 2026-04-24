@@ -120,13 +120,18 @@ ${itemsXml}
 </orders>`;
 }
 
-// Resolve DT account name from tenant_id (reverse lookup in account_name_map)
+// Resolve DT account name from tenant_id. As of migration
+// 20260424070000_dt_account_map_invert the map is keyed by tenant_id, so this
+// is a direct lookup. Clients with no explicit mapping fall back to the
+// DT_DEFAULT_ACCOUNT constant — that way the push to DispatchTrack never
+// fails for "unmapped tenant", it just lands under the house account and
+// operations can reconcile from there.
+const DT_DEFAULT_ACCOUNT = 'STRIDE LOGISTICS';
+
 function resolveAccountName(tenantId: string | null, acctMap: Record<string, string>): string {
-  if (!tenantId) return '';
-  for (const [key, val] of Object.entries(acctMap)) {
-    if (val === tenantId) return key;
-  }
-  return '';
+  if (!tenantId) return DT_DEFAULT_ACCOUNT;
+  const explicit = acctMap[tenantId];
+  return (explicit && explicit.trim()) || DT_DEFAULT_ACCOUNT;
 }
 
 // Push a single order to DT. Returns {ok, body}.
@@ -227,10 +232,9 @@ Deno.serve(async (req: Request) => {
   const baseUrl = (creds.api_base_url as string || 'https://expressinstallation.dispatchtrack.com').replace(/\/$/, '');
   const acctMap = (creds.account_name_map || {}) as Record<string, string>;
   const accountName = resolveAccountName(orderTyped.tenant_id, acctMap);
-
-  if (!accountName) {
-    return new Response(JSON.stringify({ ok: false, error: `No DT account mapped for tenant_id "${orderTyped.tenant_id}". Add an entry to dt_credentials.account_name_map.` }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
-  }
+  // resolveAccountName is guaranteed non-empty (falls back to DT_DEFAULT_ACCOUNT),
+  // so we no longer error out on missing mapping — the house account absorbs
+  // anything unmapped and operators can reassign in DT's UI if needed.
 
   const postUrl = `${baseUrl}/orders/api/add_order?code=expressinstallation&api_key=${encodeURIComponent(apiKey)}`;
 

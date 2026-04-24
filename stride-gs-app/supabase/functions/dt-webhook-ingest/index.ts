@@ -167,12 +167,26 @@ Deno.serve(async (req: Request) => {
   }
 
   // ── 6. Resolve tenant_id from account name ────────────────────────────
+  // Map shape (post 20260424070000_dt_account_map_invert):
+  //   { [tenantId]: dtAccountName }  — many tenants may share one DT name.
+  // Webhook ingest needs the reverse direction (DT name → tenant). We build a
+  // lowercase-keyed inverse once per invocation; when multiple tenants share
+  // a DT account, the first tenant encountered wins (non-deterministic, but
+  // acceptable — the human-readable case is a house/parent account where the
+  // specific child doesn't matter for routing).
   let tenantId: string | null = null;
 
-  // Pass 1: exact match in account_name_map (admin-configured)
   if (creds.account_name_map && accountName) {
     const map = creds.account_name_map as Record<string, string>;
-    tenantId = map[accountName] ?? map[accountName.toLowerCase()] ?? null;
+    const target = accountName.trim();
+    const targetLc = target.toLowerCase();
+    for (const [tid, dtName] of Object.entries(map)) {
+      if (!dtName) continue;
+      if (dtName === target || dtName.toLowerCase() === targetLc) {
+        tenantId = tid;
+        break;
+      }
+    }
   }
 
   // Pass 2: fuzzy ILIKE against inventory.client_name (fallback)

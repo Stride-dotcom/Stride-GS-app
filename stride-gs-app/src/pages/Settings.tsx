@@ -193,6 +193,13 @@ function IntegrationsTab() {
   const [staxError, setStaxError] = useState<string | null>(null);
 
   // ── DispatchTrack account mapping ────────────────────────────────────────
+  // Shape of account_name_map (post 20260424070000_dt_account_map_invert):
+  //   { [tenantId /* spreadsheetId */]: dtAccountName }
+  // Each Stride client has at most one DT account; many clients may point at
+  // the same DT account string (intentionally — a single DT account often
+  // receives orders from a design firm AND its sub-brands). Clients with no
+  // entry fall back to DT_DEFAULT_ACCOUNT in the push-to-DT edge function.
+  const DT_DEFAULT_ACCOUNT = 'STRIDE LOGISTICS';
   type DtCredsRow = { id: string; api_base_url: string | null; account_name_map: Record<string, string> };
   const [dtCreds, setDtCreds] = useState<DtCredsRow | null>(null);
   const [dtCredsLoading, setDtCredsLoading] = useState(true);
@@ -213,11 +220,9 @@ function IntegrationsTab() {
       });
   }, []);
 
-  const getDtName = (spreadsheetId: string): string => {
-    if (!dtCreds?.account_name_map) return '';
-    const m = dtCreds.account_name_map;
-    return Object.keys(m).find(k => m[k] === spreadsheetId) || '';
-  };
+  // Direct lookup now that the map is keyed by tenant_id.
+  const getDtName = (spreadsheetId: string): string =>
+    dtCreds?.account_name_map?.[spreadsheetId] ?? '';
 
   const dtMissingCount = dtClients.filter(c => !getDtName(c.spreadsheetId)).length;
 
@@ -232,10 +237,11 @@ function IntegrationsTab() {
     const newName = dtEditValue.trim();
     setDtSaving(prev => ({ ...prev, [spreadsheetId]: true }));
     const newMap = { ...dtCreds.account_name_map };
-    // Remove any existing key pointing to this client
-    Object.keys(newMap).forEach(k => { if (newMap[k] === spreadsheetId) delete newMap[k]; });
-    // Add new entry if name is provided
-    if (newName) newMap[newName] = spreadsheetId;
+    // Set or clear the mapping for this tenant. Multiple tenants may share
+    // the same DT account string — that's the whole point of the new shape,
+    // so no dedup on value is performed.
+    if (newName) newMap[spreadsheetId] = newName;
+    else delete newMap[spreadsheetId];
     const { error } = await supabase.from('dt_credentials').update({ account_name_map: newMap }).eq('id', dtCreds.id);
     if (!error) {
       setDtCreds(prev => prev ? { ...prev, account_name_map: newMap } : prev);
@@ -461,7 +467,10 @@ function IntegrationsTab() {
               <Truck size={18} color={theme.colors.primary} />
               <div style={{ flex: 1 }}>
                 <div style={{ fontSize: 15, fontWeight: 700 }}>DispatchTrack Account Mapping</div>
-                <div style={{ fontSize: 11, color: theme.colors.textSecondary }}>Link each Stride client to their DispatchTrack customer account name</div>
+                <div style={{ fontSize: 11, color: theme.colors.textSecondary, lineHeight: 1.5 }}>
+                  Link each Stride client to their DispatchTrack customer account. Multiple clients may share the same DT account.
+                  Clients without an assignment default to <strong>{DT_DEFAULT_ACCOUNT}</strong> when pushed to DispatchTrack.
+                </div>
               </div>
               <button onClick={() => setDtOpen(false)} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4, color: theme.colors.textMuted }}><X size={18} /></button>
             </div>
@@ -472,7 +481,7 @@ function IntegrationsTab() {
               <div style={{ display: 'flex', background: '#fff', border: `1px solid ${theme.colors.border}`, borderRadius: 7, overflow: 'hidden', flexShrink: 0 }}>
                 {(['all', 'missing'] as const).map(f => (
                   <button key={f} onClick={() => setDtFilter(f)} style={{ padding: '5px 12px', fontSize: 11, fontWeight: 600, border: 'none', cursor: 'pointer', fontFamily: 'inherit', background: dtFilter === f ? theme.colors.primary : 'transparent', color: dtFilter === f ? '#fff' : theme.colors.textSecondary }}>
-                    {f === 'all' ? `All (${dtClients.length})` : `Missing (${dtMissingCount})`}
+                    {f === 'all' ? `All (${dtClients.length})` : `Using default (${dtMissingCount})`}
                   </button>
                 ))}
               </div>
@@ -500,7 +509,7 @@ function IntegrationsTab() {
 
               {dtDisplayClients.length === 0 ? (
                 <div style={{ padding: 40, textAlign: 'center', color: theme.colors.textMuted, fontSize: 13 }}>
-                  {dtFilter === 'missing' ? '🎉 All clients have a DT account linked' : 'No clients found'}
+                  {dtFilter === 'missing' ? `🎉 Every client has an explicit DT account linked` : 'No clients found'}
                 </div>
               ) : dtDisplayClients.map(client => {
                 const dtName = getDtName(client.spreadsheetId);
@@ -540,7 +549,7 @@ function IntegrationsTab() {
                           style={{ display: 'flex', alignItems: 'center', gap: 6, background: 'none', border: `1px dashed ${isMissing ? '#FECACA' : theme.colors.border}`, borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontFamily: 'inherit', width: '100%', textAlign: 'left' }}
                         >
                           {isMissing ? (
-                            <span style={{ fontSize: 12, color: '#9CA3AF', fontStyle: 'italic' }}>+ Add DT account name</span>
+                            <span style={{ fontSize: 12, color: '#9CA3AF', fontStyle: 'italic' }}>Default: {DT_DEFAULT_ACCOUNT} <span style={{ color: '#D1D5DB', fontStyle: 'normal', marginLeft: 4 }}>· click to override</span></span>
                           ) : (
                             <>
                               <span style={{ fontSize: 12, fontWeight: 500, color: theme.colors.text, flex: 1 }}>{dtName}</span>
@@ -555,7 +564,10 @@ function IntegrationsTab() {
                     {/* Status badge */}
                     <div>
                       {isMissing ? (
-                        <span style={{ fontSize: 10, fontWeight: 600, background: '#FEF2F2', color: '#DC2626', border: '1px solid #FECACA', borderRadius: 4, padding: '2px 7px' }}>Missing</span>
+                        <span
+                          title={`No explicit DT account set — deliveries will push to the ${DT_DEFAULT_ACCOUNT} account in DispatchTrack.`}
+                          style={{ fontSize: 10, fontWeight: 600, background: '#FFFBEB', color: '#B45309', border: '1px solid #FDE68A', borderRadius: 4, padding: '2px 7px' }}
+                        >Default</span>
                       ) : (
                         <span style={{ fontSize: 10, fontWeight: 600, background: '#F0FDF4', color: '#15803D', border: '1px solid #BBF7D0', borderRadius: 4, padding: '2px 7px', display: 'flex', alignItems: 'center', gap: 3 }}><CheckCircle2 size={9} /> Linked</span>
                       )}
@@ -567,8 +579,9 @@ function IntegrationsTab() {
 
             {/* Footer */}
             <div style={{ padding: '10px 20px', borderTop: `1px solid ${theme.colors.border}`, background: theme.colors.bgSubtle, flexShrink: 0 }}>
-              <div style={{ fontSize: 11, color: theme.colors.textMuted }}>
+              <div style={{ fontSize: 11, color: theme.colors.textMuted, lineHeight: 1.6 }}>
                 DT account names must match exactly as they appear in DispatchTrack (spelling and capitalization matter). Changes save immediately.
+                Two or more clients may be assigned the same DT account name — this is intentional when a single DT customer receives deliveries from multiple Stride accounts.
               </div>
             </div>
           </div>
