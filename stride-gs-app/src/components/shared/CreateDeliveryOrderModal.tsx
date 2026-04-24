@@ -831,7 +831,7 @@ export function CreateDeliveryOrderModal({
       <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.3)', zIndex: 200 }} />
       <div style={{
         position: 'fixed', top: '50%', left: '50%', transform: 'translate(-50%,-50%)',
-        width: 760, maxWidth: '95vw', maxHeight: '92vh',
+        width: 1100, maxWidth: '96vw', maxHeight: '94vh',
         background: '#fff', borderRadius: 16, zIndex: 201,
         boxShadow: '0 20px 60px rgba(0,0,0,0.3)',
         display: 'flex', flexDirection: 'column', overflow: 'hidden',
