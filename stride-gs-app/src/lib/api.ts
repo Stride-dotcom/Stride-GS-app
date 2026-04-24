@@ -3436,6 +3436,7 @@ export interface BatchTask {
   description: string;
   location: string;
   sidemark: string;
+  reference?: string;
   shipmentNumber: string;
   created: string;
   completedAt: string;
