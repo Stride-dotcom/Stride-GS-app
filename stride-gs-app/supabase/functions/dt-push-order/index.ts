@@ -45,6 +45,8 @@ interface DtOrderRow {
   service_time_minutes: number | null;
   review_status: string | null;
   pushed_to_dt_at: string | null;
+  billing_method: string | null;
+  order_total: number | null;
 }
 
 interface DtOrderItemRow {
@@ -94,7 +96,7 @@ function buildOrderXml(order: DtOrderRow, items: DtOrderItemRow[], accountName: 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <orders>
   <order>
-    <order_number>${xmlEscape(order.dt_identifier)}</order_number>
+    <number>${xmlEscape(order.dt_identifier)}</number>
     <account>${xmlEscape(accountName)}</account>
     <service_type>${xmlEscape(serviceType)}</service_type>
     <customer>
@@ -186,7 +188,7 @@ Deno.serve(async (req: Request) => {
   // ── 1. Fetch primary order ────────────────────────────────────────────
   const { data: order, error: orderErr } = await supabase
     .from('dt_orders')
-    .select('id, tenant_id, dt_identifier, is_pickup, order_type, linked_order_id, contact_name, contact_address, contact_city, contact_state, contact_zip, contact_phone, contact_email, local_service_date, window_start_local, window_end_local, po_number, sidemark, client_reference, details, service_time_minutes, review_status, pushed_to_dt_at')
+    .select('id, tenant_id, dt_identifier, is_pickup, order_type, linked_order_id, contact_name, contact_address, contact_city, contact_state, contact_zip, contact_phone, contact_email, local_service_date, window_start_local, window_end_local, po_number, sidemark, client_reference, details, service_time_minutes, review_status, pushed_to_dt_at, billing_method, order_total')
     .eq('id', orderId)
     .maybeSingle();
 
@@ -243,7 +245,7 @@ Deno.serve(async (req: Request) => {
     // Fetch the linked pickup order
     const { data: linkedOrder, error: linkedErr } = await supabase
       .from('dt_orders')
-      .select('id, tenant_id, dt_identifier, is_pickup, order_type, linked_order_id, contact_name, contact_address, contact_city, contact_state, contact_zip, contact_phone, contact_email, local_service_date, window_start_local, window_end_local, po_number, sidemark, client_reference, details, service_time_minutes, review_status, pushed_to_dt_at')
+      .select('id, tenant_id, dt_identifier, is_pickup, order_type, linked_order_id, contact_name, contact_address, contact_city, contact_state, contact_zip, contact_phone, contact_email, local_service_date, window_start_local, window_end_local, po_number, sidemark, client_reference, details, service_time_minutes, review_status, pushed_to_dt_at, billing_method, order_total')
       .eq('id', orderTyped.linked_order_id)
       .maybeSingle();
 
@@ -321,3 +323,4 @@ Deno.serve(async (req: Request) => {
     linked_identifier: linkedPushedIdentifier,
   }), { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
 });
+                                                                                                                                                                                                                                                                                                               
