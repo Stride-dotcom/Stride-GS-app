@@ -428,6 +428,33 @@ export function AuthProvider({ children }: { children: ReactNode }) {
               passwordChangeRef.current = false;
               recoveryRef.current = false;
             }
+            // Skip handleSession on TOKEN_REFRESHED *or* SIGNED_IN if we're already
+            // authenticated as the same user. Supabase fires both kinds of events
+            // when a tab regains focus / when its internal _recoverAndRefresh()
+            // re-validates the session (often TOKEN_REFRESHED on token rotation,
+            // sometimes SIGNED_IN on session recovery). Without this guard, every
+            // refocus calls handleSession → setAuthState({status:'authenticated',
+            // user:JSON.parse(cachedRaw)}) which produces a NEW user object
+            // reference. Every useAuth() consumer re-renders, every hook with
+            // `user` in its deps refires its fetch, and the WC/Shipment/etc.
+            // detail pages reload their entire data layer (~100 network requests).
+            //
+            // First-time login still flows through: handleSession ran from the
+            // initial getSession() bootstrap below (line ~350), so by the time
+            // SIGNED_IN fires for a fresh login, AUTH_CACHE_KEY is already populated.
+            // The auth-state change for the very first login is delivered via the
+            // signInWithPassword() path which sets state synchronously.
+            if (event === 'TOKEN_REFRESHED' || event === 'SIGNED_IN') {
+              try {
+                const cachedRaw = localStorage.getItem(AUTH_CACHE_KEY);
+                if (cachedRaw && session.user?.email) {
+                  const cached = JSON.parse(cachedRaw) as { email?: string };
+                  if (cached?.email?.toLowerCase() === session.user.email.toLowerCase()) {
+                    return; // same user — UI state unchanged
+                  }
+                }
+              } catch { /* corrupt cache — fall through to full handleSession */ }
+            }
             const source = event === 'USER_UPDATED' ? 'recovery' : 'password';
             handleSession(session, source);
           }

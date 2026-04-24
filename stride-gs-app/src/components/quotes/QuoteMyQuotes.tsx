@@ -1,5 +1,5 @@
 import { useState, useMemo } from 'react';
-import { Plus, Search, FileText, DollarSign, Clock, CheckCircle2 } from 'lucide-react';
+import { Plus, Search, FileText, DollarSign, Clock, CheckCircle2, RefreshCw, AlertTriangle } from 'lucide-react';
 import { theme } from '../../styles/theme';
 import { fmtDate } from '../../lib/constants';
 import { calcQuote } from '../../lib/quoteCalc';
@@ -37,7 +37,12 @@ export function QuoteMyQuotes({ store, onOpenBuilder }: Props) {
   const [ownerFilter, setOwnerFilter] = useState<string>('all');
 
   const { services, classes, coverageOptions } = store.catalog;
-  const { isAdminView, quoteOwners, currentUserEmail } = store;
+  const { isAdminView, quoteOwners, currentUserEmail, saveErrors, refetch } = store;
+  const [refreshing, setRefreshing] = useState(false);
+  const handleRefresh = async () => {
+    setRefreshing(true);
+    try { await refetch(); } finally { setRefreshing(false); }
+  };
 
   const quotesWithTotals = useMemo(() => {
     return store.quotes.map(q => ({
@@ -131,14 +136,48 @@ export function QuoteMyQuotes({ store, onOpenBuilder }: Props) {
             </span>
             <span style={{ fontSize: 12, color: v.colors.textMuted, marginLeft: 12 }}>{store.quotes.length} total · {filtered.length} shown</span>
           </div>
-          <button onClick={() => onOpenBuilder()} style={{
-            ...v.typography.buttonPrimary, display: 'flex', alignItems: 'center', gap: 8,
-            padding: '10px 24px', border: 'none', borderRadius: v.radius.button,
-            background: v.colors.accent, color: v.colors.textOnDark, cursor: 'pointer', fontFamily: 'inherit',
-          }}>
-            <Plus size={14} /> NEW QUOTE
-          </button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <button
+              onClick={handleRefresh}
+              disabled={refreshing}
+              title="Re-fetch quotes from Supabase. Use if another user just saved a quote you don't see yet."
+              style={{
+                display: 'flex', alignItems: 'center', gap: 6,
+                padding: '10px 16px', border: `1px solid ${v.colors.border}`, borderRadius: v.radius.button,
+                background: v.colors.bgWhite, color: v.colors.textSecondary,
+                cursor: refreshing ? 'wait' : 'pointer', fontFamily: 'inherit',
+                fontSize: 11, fontWeight: 600, letterSpacing: '1.5px', textTransform: 'uppercase',
+                opacity: refreshing ? 0.6 : 1,
+              }}
+            >
+              <RefreshCw size={13} />
+              {refreshing ? 'Refreshing…' : 'Refresh'}
+            </button>
+            <button onClick={() => onOpenBuilder()} style={{
+              ...v.typography.buttonPrimary, display: 'flex', alignItems: 'center', gap: 8,
+              padding: '10px 24px', border: 'none', borderRadius: v.radius.button,
+              background: v.colors.accent, color: v.colors.textOnDark, cursor: 'pointer', fontFamily: 'inherit',
+            }}>
+              <Plus size={14} /> NEW QUOTE
+            </button>
+          </div>
         </div>
+
+        {/* Save-error banner — aggregate count of quotes that hit an
+            RLS/auth/schema rejection on upsert. One-line summary with a
+            prompt to check the browser console for the exact error. */}
+        {Object.keys(saveErrors).length > 0 && (
+          <div role="alert" style={{
+            padding: '10px 14px', marginBottom: 14, borderRadius: 10,
+            background: '#FEF2F2', border: '1px solid #FCA5A5', color: '#B91C1C',
+            fontSize: 12, display: 'flex', alignItems: 'center', gap: 8,
+          }}>
+            <AlertTriangle size={14} />
+            {Object.keys(saveErrors).length === 1
+              ? `1 quote didn't save to the server. Check the browser console for details.`
+              : `${Object.keys(saveErrors).length} quotes didn't save to the server. Check the browser console for details.`}
+          </div>
+        )}
 
         {/* Search + filter row */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16, flexWrap: 'wrap' }}>
@@ -207,7 +246,17 @@ export function QuoteMyQuotes({ store, onOpenBuilder }: Props) {
                     <tr key={q.id} onClick={() => onOpenBuilder(q.id)} style={{ cursor: 'pointer', transition: 'background 0.15s' }}
                       onMouseEnter={e => (e.currentTarget.style.background = v.colors.bgPage)}
                       onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}>
-                      <td style={{ ...tdStyle, fontWeight: 600, color: v.colors.accent }}>{q.number}</td>
+                      <td style={{ ...tdStyle, fontWeight: 600, color: v.colors.accent }}>
+                        {q.number}
+                        {saveErrors[q.id] && (
+                          <span
+                            title={`Didn't save to server: ${saveErrors[q.id]}`}
+                            style={{ marginLeft: 6, display: 'inline-flex', verticalAlign: 'middle' }}
+                          >
+                            <AlertTriangle size={12} color="#B91C1C" />
+                          </span>
+                        )}
+                      </td>
                       <td style={{ ...tdStyle, fontWeight: 500 }}>{q.client || '—'}</td>
                       <td style={{ ...tdStyle, color: v.colors.textSecondary }}>{q.project || '—'}</td>
                       {isAdminView && (

@@ -92,7 +92,7 @@ async function fetchQuotesFromSupabase(
     ?.map(r => ({ quote: r.data, ownerEmail: r.owner_email })) ?? [];
 }
 
-async function upsertQuoteToSupabase(ownerEmail: string, q: Quote): Promise<void> {
+async function upsertQuoteToSupabase(ownerEmail: string, q: Quote): Promise<string | null> {
   const { error } = await supabase.from('quotes').upsert({
     id: q.id,
     owner_email: ownerEmail,
@@ -100,7 +100,15 @@ async function upsertQuoteToSupabase(ownerEmail: string, q: Quote): Promise<void
     status: q.status || null,
     data: q,
   });
-  if (error) console.warn('[useQuoteStore] Supabase upsert failed for', q.number, error.message);
+  if (error) {
+    // Loud on purpose — "save but then disappear" bugs traced back
+    // to this being a swallowed console.warn. If an RLS / auth / schema
+    // error rejects the write, we want it staring the operator in the
+    // face both in devtools and in the UI (via saveErrors in the store).
+    console.error('[useQuoteStore] Supabase upsert FAILED for', q.number, '—', error.message, error);
+    return error.message;
+  }
+  return null;
 }
 
 async function deleteQuoteFromSupabase(id: string): Promise<void> {
@@ -204,6 +212,10 @@ export function useQuoteStore() {
   // row is owned by `user.email`; the map is still populated for symmetry
   // but reads aren't exercised.
   const [quoteOwners, setQuoteOwners] = useState<Record<string, string>>({});
+  // Per-quote save error surfaced to the UI. Populated when an upsert
+  // rejects (RLS, schema, auth). Cleared when a subsequent save of the
+  // same id succeeds. Empty object means everything's in sync.
+  const [saveErrors, setSaveErrors] = useState<Record<string, string>>({});
 
   // Hydrate from Supabase + rescue any unsynced local rows.
   //
@@ -231,20 +243,11 @@ export function useQuoteStore() {
   // until that device explicitly deletes them. For a low-volume
   // quoting tool that's acceptable; data loss isn't.
   //
-  // Re-hydrate when either the email OR the admin flag changes, so a
-  // demotion from admin → staff prunes foreign rows on next tick.
-  const hydratedFor = useRef<string | null>(null);
-  useEffect(() => {
-    if (!user?.email) return;
-    const key = `${user.email}::${isAdmin ? 'admin' : 'owner'}`;
-    if (hydratedFor.current === key) return;
-    hydratedFor.current = key;
-
-    const userEmail = user.email;
-    let cancelled = false;
-    (async () => {
-      const serverRows = await fetchQuotesFromSupabase(userEmail, isAdmin);
-      if (cancelled) return;
+  // doHydrate is the fetch+merge+rescue routine. Extracted so we can
+  // also expose it as a manual refresh from the UI.
+  const doHydrate = useCallback(async (userEmail: string, asAdmin: boolean, cancelledRef?: { current: boolean }) => {
+      const serverRows = await fetchQuotesFromSupabase(userEmail, asAdmin);
+      if (cancelledRef?.current) return;
 
       const serverIds = new Set(serverRows.map(r => r.quote.id));
 
@@ -252,7 +255,7 @@ export function useQuoteStore() {
       // where a createQuote landed between our fetch and this callback,
       // `prev` will include that new quote and we'll push it up.
       setQuotesRaw(prev => {
-        if (cancelled) return prev;
+        if (cancelledRef?.current) return prev;
 
         // Local rows that the server doesn't have. For admin users,
         // only preserve / push rows we know we own — we don't want to
@@ -263,7 +266,7 @@ export function useQuoteStore() {
           // In admin view, only rescue rows owned by the caller. In
           // owner view, every local row is owned by us by definition.
           const owner = quoteOwners[local.id];
-          const isForeign = isAdmin && owner && owner !== userEmail;
+          const isForeign = asAdmin && owner && owner !== userEmail;
           if (!isForeign) localOnly.push(local);
         }
 
@@ -273,7 +276,14 @@ export function useQuoteStore() {
         if (localOnly.length > 0) {
           console.info('[useQuoteStore] rescuing', localOnly.length, 'unsynced local quote(s) → Supabase');
           for (const q of localOnly) {
-            void upsertQuoteToSupabase(userEmail, q);
+            void upsertQuoteToSupabase(userEmail, q).then(err => {
+              setSaveErrors(prev2 => {
+                const nextErr = { ...prev2 };
+                if (err) nextErr[q.id] = err;
+                else delete nextErr[q.id];
+                return nextErr;
+              });
+            });
           }
         }
 
@@ -296,13 +306,49 @@ export function useQuoteStore() {
         for (const [id, owner] of Object.entries(prev)) {
           if (!next[id]) next[id] = owner;
         }
-        // Any local-only quote that had no owner entry at all — stamp it.
         return next;
       });
-    })();
+  }, [isAdmin, quoteOwners]);
 
-    return () => { cancelled = true; };
-  }, [user?.email, isAdmin, quoteOwners]);
+  // Re-hydrate when either the email OR the admin flag changes, so a
+  // demotion from admin → staff prunes foreign rows on next tick.
+  const hydratedFor = useRef<string | null>(null);
+  useEffect(() => {
+    if (!user?.email) return;
+    const key = `${user.email}::${isAdmin ? 'admin' : 'owner'}`;
+    if (hydratedFor.current === key) return;
+    hydratedFor.current = key;
+
+    const cancelledRef = { current: false };
+    void doHydrate(user.email, isAdmin, cancelledRef);
+    return () => { cancelledRef.current = true; };
+  }, [user?.email, isAdmin, doHydrate]);
+
+  // Manual refetch — exposed to UI for a Refresh button. Also called
+  // from the realtime listener when we want to resync rather than
+  // patching state from a single row event.
+  const refetch = useCallback(() => {
+    if (!user?.email) return Promise.resolve();
+    return doHydrate(user.email, isAdmin);
+  }, [user?.email, isAdmin, doHydrate]);
+
+  // Realtime subscription on the quotes table. Admin view gets every
+  // row change; non-admin gets only their own rows (Postgres-side
+  // filter on owner_email, in addition to RLS). On any INSERT / UPDATE
+  // / DELETE we refetch — simpler than patching state per-event, and
+  // cheap at this volume (a handful of quotes, once in a while).
+  useEffect(() => {
+    if (!user?.email) return;
+    const channelName = `quotes_${user.email}_${isAdmin ? 'admin' : 'owner'}_${Math.random().toString(36).slice(2, 8)}`;
+    const filter = isAdmin ? undefined : `owner_email=eq.${user.email}`;
+    const ch = supabase
+      .channel(channelName)
+      .on('postgres_changes',
+        { event: '*', schema: 'public', table: 'quotes', ...(filter ? { filter } : {}) },
+        () => { void refetch(); })
+      .subscribe();
+    return () => { void supabase.removeChannel(ch); };
+  }, [user?.email, isAdmin, refetch]);
 
   // `setQuotes` writes localStorage AND fires a best-effort Supabase
   // sync for any quote whose identity or content changed. We don't
@@ -323,16 +369,27 @@ export function useQuoteStore() {
         // but skip the server write so we never clobber someone else's
         // row (RLS would reject it anyway — this just avoids the
         // console warning and the misleading success feedback).
+        const userEmail = user.email;
         for (const q of next) {
           const was = prevById.get(q.id);
           if (!was || was.updatedAt !== q.updatedAt) {
             const rowOwner = quoteOwners[q.id];
-            const isForeign = isAdmin && rowOwner && rowOwner !== user.email;
+            const isForeign = isAdmin && rowOwner && rowOwner !== userEmail;
             if (isForeign) {
               console.info('[useQuoteStore] skipping server write on foreign quote', q.number, '(owned by', rowOwner, ')');
               continue;
             }
-            void upsertQuoteToSupabase(user.email, q);
+            // Record the save result per-quote so the UI can show
+            // "⚠ Not saved to server" on the row when RLS (or anything
+            // else) rejects the write.
+            void upsertQuoteToSupabase(userEmail, q).then(err => {
+              setSaveErrors(prev => {
+                const nextErr = { ...prev };
+                if (err) nextErr[q.id] = err;
+                else delete nextErr[q.id];
+                return nextErr;
+              });
+            });
           }
         }
         // Delete anything that was there before and isn't now — but only
@@ -495,5 +552,12 @@ export function useQuoteStore() {
     quoteOwners,
     isAdminView: isAdmin,
     currentUserEmail: user?.email ?? '',
+    // Per-quote save error. Populated when an upsert hits RLS/auth/
+    // schema errors. UI can render a per-row warning when
+    // saveErrors[quote.id] is set.
+    saveErrors,
+    // Manual refresh — force a fresh fetch + merge + rescue. UI wires
+    // this to a "Refresh" button next to "+ NEW QUOTE".
+    refetch,
   };
 }
