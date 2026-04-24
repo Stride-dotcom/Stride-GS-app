@@ -31,24 +31,48 @@ function fmt$(n: number): string {
 export function QuoteMyQuotes({ store, onOpenBuilder }: Props) {
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<QuoteStatus | 'all'>('all');
+  // Admin-only: filter the list by the user who created the quote.
+  // 'all' = every user; '__me' = only the admin's own quotes; otherwise
+  // an exact owner_email match. Hidden for non-admins.
+  const [ownerFilter, setOwnerFilter] = useState<string>('all');
 
   const { services, classes, coverageOptions } = store.catalog;
+  const { isAdminView, quoteOwners, currentUserEmail } = store;
+
   const quotesWithTotals = useMemo(() => {
     return store.quotes.map(q => ({
       ...q,
       total: calcQuote(q, services, classes, coverageOptions).grandTotal,
+      ownerEmail: quoteOwners[q.id] || currentUserEmail,
     }));
-  }, [store.quotes, services, classes, coverageOptions]);
+  }, [store.quotes, services, classes, coverageOptions, quoteOwners, currentUserEmail]);
+
+  // Distinct owner emails for the dropdown — admin-only.
+  const ownerOptions = useMemo(() => {
+    if (!isAdminView) return [] as string[];
+    const set = new Set<string>();
+    for (const q of quotesWithTotals) if (q.ownerEmail) set.add(q.ownerEmail);
+    return Array.from(set).sort();
+  }, [isAdminView, quotesWithTotals]);
 
   const filtered = useMemo(() => {
     let list = quotesWithTotals;
     if (statusFilter !== 'all') list = list.filter(q => q.status === statusFilter);
+    if (isAdminView && ownerFilter !== 'all') {
+      const target = ownerFilter === '__me' ? currentUserEmail : ownerFilter;
+      list = list.filter(q => q.ownerEmail === target);
+    }
     if (search) {
       const s = search.toLowerCase();
-      list = list.filter(q => q.client.toLowerCase().includes(s) || q.number.toLowerCase().includes(s) || q.project.toLowerCase().includes(s));
+      list = list.filter(q =>
+        q.client.toLowerCase().includes(s) ||
+        q.number.toLowerCase().includes(s) ||
+        q.project.toLowerCase().includes(s) ||
+        (isAdminView && q.ownerEmail.toLowerCase().includes(s))
+      );
     }
     return list;
-  }, [quotesWithTotals, statusFilter, search]);
+  }, [quotesWithTotals, statusFilter, search, isAdminView, ownerFilter, currentUserEmail]);
 
   const stats = useMemo(() => ({
     drafts: store.quotes.filter(q => q.status === 'draft').length,
@@ -102,7 +126,9 @@ export function QuoteMyQuotes({ store, onOpenBuilder }: Props) {
         {/* Card header row: label + count + button */}
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
           <div>
-            <span style={{ fontSize: 10, fontWeight: 600, letterSpacing: '4px', color: v.colors.accent, textTransform: 'uppercase' }}>ALL QUOTES</span>
+            <span style={{ fontSize: 10, fontWeight: 600, letterSpacing: '4px', color: v.colors.accent, textTransform: 'uppercase' }}>
+              {isAdminView ? 'ALL USERS\u2019 QUOTES' : 'MY QUOTES'}
+            </span>
             <span style={{ fontSize: 12, color: v.colors.textMuted, marginLeft: 12 }}>{store.quotes.length} total · {filtered.length} shown</span>
           </div>
           <button onClick={() => onOpenBuilder()} style={{
@@ -127,6 +153,23 @@ export function QuoteMyQuotes({ store, onOpenBuilder }: Props) {
             <option value="draft">Draft</option><option value="sent">Sent</option><option value="accepted">Accepted</option>
             <option value="declined">Declined</option><option value="expired">Expired</option><option value="void">Void</option>
           </select>
+          {/* Admin-only owner filter. 'All users' is the default so
+              admins land on the full cross-user list; a "Mine only"
+              pseudo-option scopes back to their own drafts quickly. */}
+          {isAdminView && ownerOptions.length > 0 && (
+            <select
+              value={ownerFilter}
+              onChange={e => setOwnerFilter(e.target.value)}
+              style={{ ...pillInput, cursor: 'pointer' }}
+              title="Filter by quote creator"
+            >
+              <option value="all">All Users</option>
+              <option value="__me">Mine only ({currentUserEmail})</option>
+              {ownerOptions.filter(o => o !== currentUserEmail).map(o => (
+                <option key={o} value={o}>{o}</option>
+              ))}
+            </select>
+          )}
         </div>
 
         {/* Table or empty state */}
@@ -149,12 +192,17 @@ export function QuoteMyQuotes({ store, onOpenBuilder }: Props) {
             <table style={{ width: '100%', borderCollapse: 'collapse' }}>
               <thead><tr>
                 <th style={thStyle}>Quote #</th><th style={thStyle}>Client</th><th style={thStyle}>Project</th>
+                {isAdminView && <th style={thStyle}>Created By</th>}
                 <th style={thStyle}>Date</th><th style={thStyle}>Expires</th><th style={thStyle}>Status</th>
                 <th style={{ ...thStyle, textAlign: 'right' }}>Total</th>
               </tr></thead>
               <tbody>
                 {filtered.map(q => {
                   const sc = statusPill(q.status);
+                  // "Mine" vs "Not mine" styling hint so admins can
+                  // scan the list and quickly see which quotes are
+                  // someone else's work.
+                  const isForeign = isAdminView && q.ownerEmail !== currentUserEmail;
                   return (
                     <tr key={q.id} onClick={() => onOpenBuilder(q.id)} style={{ cursor: 'pointer', transition: 'background 0.15s' }}
                       onMouseEnter={e => (e.currentTarget.style.background = v.colors.bgPage)}
@@ -162,6 +210,14 @@ export function QuoteMyQuotes({ store, onOpenBuilder }: Props) {
                       <td style={{ ...tdStyle, fontWeight: 600, color: v.colors.accent }}>{q.number}</td>
                       <td style={{ ...tdStyle, fontWeight: 500 }}>{q.client || '—'}</td>
                       <td style={{ ...tdStyle, color: v.colors.textSecondary }}>{q.project || '—'}</td>
+                      {isAdminView && (
+                        <td style={{ ...tdStyle, color: isForeign ? v.colors.text : v.colors.textSecondary, fontWeight: isForeign ? 500 : 400 }}>
+                          {q.ownerEmail || '—'}
+                          {!isForeign && q.ownerEmail && (
+                            <span style={{ marginLeft: 6, fontSize: 10, color: v.colors.textMuted, fontWeight: 400, letterSpacing: '0.5px', textTransform: 'uppercase' }}>You</span>
+                          )}
+                        </td>
+                      )}
                       <td style={{ ...tdStyle, color: v.colors.textSecondary }}>{fmtDate(q.date)}</td>
                       <td style={{ ...tdStyle, color: v.colors.textSecondary }}>{fmtDate(q.expiration)}</td>
                       <td style={tdStyle}>

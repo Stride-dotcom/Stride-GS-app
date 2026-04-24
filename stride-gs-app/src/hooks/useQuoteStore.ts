@@ -57,17 +57,39 @@ interface QuoteRow {
   updated_at: string;
 }
 
-async function fetchQuotesFromSupabase(ownerEmail: string): Promise<Quote[]> {
-  const { data, error } = await supabase
+/**
+ * fetchQuotesFromSupabase — read rows from the `quotes` table.
+ *
+ * Non-admin users get their own rows only (scoped server-side via the
+ * `quotes_owner_read` RLS policy + an explicit owner_email filter for
+ * clarity + query-plan efficiency).
+ *
+ * Admins (`asAdmin=true`) get EVERY row — the admin Quote Tool view
+ * shows all users' quotes. Access is gated server-side by the
+ * `quotes_admin_read_all` RLS policy (migration 20260421180000); a
+ * non-admin passing asAdmin=true would just get back their own rows
+ * because RLS still intersects.
+ *
+ * Returns both the Quote doc AND the owner_email so the admin list can
+ * render a "Created by" column. The owner_email defaults to the caller
+ * in the non-admin path (every row we got back is ours by definition).
+ */
+async function fetchQuotesFromSupabase(
+  ownerEmail: string,
+  asAdmin: boolean,
+): Promise<Array<{ quote: Quote; ownerEmail: string }>> {
+  let query = supabase
     .from('quotes')
-    .select('data, updated_at')
-    .eq('owner_email', ownerEmail)
+    .select('data, owner_email, updated_at')
     .order('updated_at', { ascending: false });
+  if (!asAdmin) query = query.eq('owner_email', ownerEmail);
+  const { data, error } = await query;
   if (error) {
     console.warn('[useQuoteStore] Supabase fetch failed:', error.message);
     return [];
   }
-  return (data as Array<Pick<QuoteRow, 'data' | 'updated_at'>> | null)?.map(r => r.data) ?? [];
+  return (data as Array<Pick<QuoteRow, 'data' | 'owner_email' | 'updated_at'>> | null)
+    ?.map(r => ({ quote: r.data, ownerEmail: r.owner_email })) ?? [];
 }
 
 async function upsertQuoteToSupabase(ownerEmail: string, q: Quote): Promise<void> {
@@ -161,6 +183,7 @@ function catalogToServiceDef(c: CatalogService): ServiceDef {
 export function useQuoteStore() {
   const { user } = useAuth();
   const email = user?.email || '_anon';
+  const isAdmin = user?.role === 'admin';
   const keysRef = useRef({
     quotes: storageKey(email, 'list'),
     settings: storageKey(email, 'settings'),
@@ -175,28 +198,38 @@ export function useQuoteStore() {
 
   const [quotes, setQuotesRaw] = useState<Quote[]>(() => loadJson(keysRef.current.quotes, []));
   const [settings, setSettingsRaw] = useState<QuoteStoreSettings>(() => loadJson(keysRef.current.settings, DEFAULT_SETTINGS));
+  // id → owner_email map. Populated when admin hydrates the full set so
+  // the UI can display "Created by" and the write-through layer can tell
+  // the admin they're viewing someone else's quote. For non-admins every
+  // row is owned by `user.email`; the map is still populated for symmetry
+  // but reads aren't exercised.
+  const [quoteOwners, setQuoteOwners] = useState<Record<string, string>>({});
 
   // Session 74: hydrate from Supabase once per signed-in user. On the
   // first load after login, this REPLACES any stale localStorage list
   // with the authoritative server set. If Supabase is empty but
   // localStorage has quotes (legacy state from before this migration),
   // we push the local ones UP to Supabase so nothing is lost.
+  // Re-hydrate when either the email OR the admin flag changes, so a
+  // demotion from admin → staff prunes foreign rows on next tick.
   const hydratedFor = useRef<string | null>(null);
   useEffect(() => {
     if (!user?.email) return;
-    if (hydratedFor.current === user.email) return;
-    hydratedFor.current = user.email;
+    const key = `${user.email}::${isAdmin ? 'admin' : 'owner'}`;
+    if (hydratedFor.current === key) return;
+    hydratedFor.current = key;
 
     let cancelled = false;
     (async () => {
-      const serverQuotes = await fetchQuotesFromSupabase(user.email);
+      const serverRows = await fetchQuotesFromSupabase(user.email, isAdmin);
       if (cancelled) return;
 
-      if (serverQuotes.length === 0) {
-        // One-time migration: if the user has localStorage quotes but no
-        // Supabase rows, push them all up so we never lose the quotes they
-        // created before this session. After this block runs once per
-        // user, Supabase becomes the source of truth.
+      if (serverRows.length === 0 && !isAdmin) {
+        // One-time migration: if a NON-ADMIN user has localStorage quotes
+        // but no Supabase rows, push them all up so we never lose the
+        // quotes they created before this session. Admins skip this path
+        // (their cross-user view should never promote random localStorage
+        // content into someone else's server state).
         const local = loadJson<Quote[]>(keysRef.current.quotes, []);
         if (local.length > 0) {
           console.info('[useQuoteStore] migrating', local.length, 'localStorage quotes → Supabase');
@@ -205,18 +238,22 @@ export function useQuoteStore() {
             await upsertQuoteToSupabase(user.email, q);
           }
           setQuotesRaw(local);
+          setQuoteOwners(Object.fromEntries(local.map(q => [q.id, user.email])));
           saveJson(keysRef.current.quotes, local);
           return;
         }
       }
 
       // Supabase has rows (or nothing anywhere) — it's truth.
-      setQuotesRaw(serverQuotes);
-      saveJson(keysRef.current.quotes, serverQuotes);
+      const quotesOnly = serverRows.map(r => r.quote);
+      const ownerMap = Object.fromEntries(serverRows.map(r => [r.quote.id, r.ownerEmail]));
+      setQuotesRaw(quotesOnly);
+      setQuoteOwners(ownerMap);
+      saveJson(keysRef.current.quotes, quotesOnly);
     })();
 
     return () => { cancelled = true; };
-  }, [user?.email]);
+  }, [user?.email, isAdmin]);
 
   // `setQuotes` writes localStorage AND fires a best-effort Supabase
   // sync for any quote whose identity or content changed. We don't
@@ -232,21 +269,43 @@ export function useQuoteStore() {
         const nextById = new Map(next.map(q => [q.id, q]));
 
         // Upsert anything that's new or changed (by updatedAt).
+        // For admins, an in-memory edit of another user's quote is a
+        // read-only-ish view; we keep the local edit for responsiveness
+        // but skip the server write so we never clobber someone else's
+        // row (RLS would reject it anyway — this just avoids the
+        // console warning and the misleading success feedback).
         for (const q of next) {
           const was = prevById.get(q.id);
           if (!was || was.updatedAt !== q.updatedAt) {
+            const rowOwner = quoteOwners[q.id];
+            const isForeign = isAdmin && rowOwner && rowOwner !== user.email;
+            if (isForeign) {
+              console.info('[useQuoteStore] skipping server write on foreign quote', q.number, '(owned by', rowOwner, ')');
+              continue;
+            }
             void upsertQuoteToSupabase(user.email, q);
           }
         }
-        // Delete anything that was there before and isn't now.
+        // Delete anything that was there before and isn't now — but only
+        // if we actually own the row. Admin-side deletes of foreign rows
+        // are also rejected by RLS; bail out locally so the list stays
+        // consistent with server state after the next hydrate.
         for (const q of prev) {
-          if (!nextById.has(q.id)) void deleteQuoteFromSupabase(q.id);
+          if (!nextById.has(q.id)) {
+            const rowOwner = quoteOwners[q.id];
+            const isForeign = isAdmin && rowOwner && rowOwner !== user.email;
+            if (isForeign) {
+              console.info('[useQuoteStore] skipping server delete on foreign quote', q.number, '(owned by', rowOwner, ')');
+              continue;
+            }
+            void deleteQuoteFromSupabase(q.id);
+          }
         }
       }
 
       return next;
     });
-  }, [user?.email]);
+  }, [user?.email, isAdmin, quoteOwners]);
 
   const setSettings = useCallback((updater: QuoteStoreSettings | ((prev: QuoteStoreSettings) => QuoteStoreSettings)) => {
     setSettingsRaw(prev => {
@@ -279,9 +338,10 @@ export function useQuoteStore() {
   const createQuote = useCallback((): Quote => {
     const q = createBlankQuote(settings, catalog.classes, catalog.taxAreas);
     setQuotes(prev => [q, ...prev]);
+    setQuoteOwners(prev => ({ ...prev, [q.id]: user?.email || '_anon' }));
     setSettings(prev => ({ ...prev, nextQuoteNumber: prev.nextQuoteNumber + 1 }));
     return q;
-  }, [settings, catalog.classes, catalog.taxAreas, setQuotes, setSettings]);
+  }, [settings, catalog.classes, catalog.taxAreas, setQuotes, setSettings, user?.email]);
 
   const updateQuote = useCallback((id: string, patch: Partial<Quote>) => {
     setQuotes(prev => prev.map(q => q.id === id ? { ...q, ...patch, updatedAt: new Date().toISOString() } : q));
@@ -304,9 +364,12 @@ export function useQuoteStore() {
       updatedAt: new Date().toISOString(),
     };
     setQuotes(prev => [copy, ...prev]);
+    // Duplicates are always owned by the caller — admin duplicating
+    // another user's quote creates a fresh copy under their own email.
+    setQuoteOwners(prev => ({ ...prev, [copy.id]: user?.email || '_anon' }));
     setSettings(prev => ({ ...prev, nextQuoteNumber: prev.nextQuoteNumber + 1 }));
     return copy;
-  }, [quotes, settings, catalog.classes, catalog.taxAreas, setQuotes, setSettings]);
+  }, [quotes, settings, catalog.classes, catalog.taxAreas, setQuotes, setSettings, user?.email]);
 
   const setQuoteStatus = useCallback((id: string, status: QuoteStatus) => {
     updateQuote(id, { status });
@@ -360,5 +423,10 @@ export function useQuoteStore() {
     catalogSource,
     catalogLoading: sbCatalog.loading,
     catalogError: null as string | null,
+    // Admin-only helpers — empty map + false for non-admins, so
+    // consumers can unconditionally read the fields without branching.
+    quoteOwners,
+    isAdminView: isAdmin,
+    currentUserEmail: user?.email ?? '',
   };
 }
