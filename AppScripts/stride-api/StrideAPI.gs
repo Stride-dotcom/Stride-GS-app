@@ -1,4 +1,15 @@
 /* ===================================================
+   StrideAPI.gs — v38.117.0 — 2026-04-23 PST — DT nightly status reconciliation trigger
+   v38.117.0: NEW — dtSyncStatusesNightly() invokes the dt-sync-statuses Supabase
+              Edge Function to pull latest delivery status from DispatchTrack for
+              any order with dt_dispatch_id IS NOT NULL and a non-terminal status.
+              Paired with installDtSyncNightlyTrigger() which creates the daily
+              time-based trigger (2:15 AM PST). Feature #6 of delivery page
+              improvements — manual sync via the Orders page button; this handles
+              the unattended nightly reconciliation so orders are marked Completed
+              when DT reports delivery.
+   =================================================== */
+/* ===================================================
    StrideAPI.gs — v38.113.0 — 2026-04-23 PST — sendRawEmail endpoint for notify-new-order Edge Function
    v38.113.0: NEW — sendRawEmail (POST) handler called by the notify-new-order Supabase Edge Function.
               Accepts { to, subject, htmlBody } and sends via GmailApp. Token substitution and template
@@ -33295,4 +33306,99 @@ function handleEmailSignedAgreement_(payload) {
     Logger.log("handleEmailSignedAgreement_: GmailApp.sendEmail failed — " + e.message);
     return { success: false, error: "Failed to send receipt: " + e.message };
   }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DispatchTrack status reconciliation (v38.117.0, feature #6)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * dtSyncStatusesNightly — nightly job that pulls latest delivery status from
+ * DispatchTrack for every order we've pushed (dt_dispatch_id IS NOT NULL)
+ * that isn't yet in a terminal category. Invokes the dt-sync-statuses
+ * Supabase Edge Function, which owns the actual DT API call + status mapping.
+ *
+ * Set up via installDtSyncNightlyTrigger() — a once-daily time trigger
+ * at 2:15 AM PST so it runs after end-of-day route closeouts.
+ *
+ * Requires Script Properties: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY.
+ */
+function dtSyncStatusesNightly() {
+  var url = prop_("SUPABASE_URL");
+  var key = prop_("SUPABASE_SERVICE_ROLE_KEY");
+  if (!url || !key) {
+    Logger.log("dtSyncStatusesNightly: SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY missing — skipping");
+    return { ok: false, error: "config_missing" };
+  }
+
+  var endpoint = url.replace(/\/+$/, "") + "/functions/v1/dt-sync-statuses";
+  var options = {
+    method: "post",
+    contentType: "application/json",
+    headers: {
+      "Authorization": "Bearer " + key,
+      "apikey": key,
+    },
+    payload: JSON.stringify({ scope: "active" }),
+    muteHttpExceptions: true,
+  };
+
+  try {
+    var resp = UrlFetchApp.fetch(endpoint, options);
+    var code = resp.getResponseCode();
+    var body = resp.getContentText();
+    var parsed = null;
+    try { parsed = JSON.parse(body); } catch (_) { /* non-JSON */ }
+
+    if (code >= 200 && code < 300 && parsed && parsed.ok) {
+      Logger.log("dtSyncStatusesNightly: OK — checked=" + (parsed.checked || 0) +
+                 " updated=" + (parsed.updated || 0) +
+                 " completed=" + (parsed.completed || 0) +
+                 (parsed.note ? " note=" + parsed.note : ""));
+      if (parsed.errors && parsed.errors.length) {
+        Logger.log("dtSyncStatusesNightly: per-order errors (" + parsed.errors.length + "): " +
+                   parsed.errors.slice(0, 10).join(" | "));
+      }
+      return parsed;
+    } else {
+      Logger.log("dtSyncStatusesNightly: FAILED — HTTP " + code + " body=" + body.slice(0, 500));
+      return { ok: false, error: "http_" + code, body: body };
+    }
+  } catch (e) {
+    Logger.log("dtSyncStatusesNightly: exception — " + e.message);
+    return { ok: false, error: e.message };
+  }
+}
+
+/**
+ * installDtSyncNightlyTrigger — run once from the Apps Script editor to create
+ * the nightly time-based trigger. Removes any existing triggers for the same
+ * function first so repeated runs don't stack duplicates.
+ */
+function installDtSyncNightlyTrigger() {
+  var triggers = ScriptApp.getProjectTriggers();
+  for (var i = 0; i < triggers.length; i++) {
+    if (triggers[i].getHandlerFunction() === "dtSyncStatusesNightly") {
+      ScriptApp.deleteTrigger(triggers[i]);
+    }
+  }
+  ScriptApp.newTrigger("dtSyncStatusesNightly")
+    .timeBased()
+    .everyDays(1)
+    .atHour(2)
+    .nearMinute(15)
+    .inTimezone("America/Los_Angeles")
+    .create();
+  Logger.log("installDtSyncNightlyTrigger: daily trigger installed (02:15 PST).");
+  return { ok: true, installed: "dtSyncStatusesNightly" };
+}
+
+/**
+ * dtSyncStatusesNow — wrapper you can run on demand from the editor while
+ * debugging. Same code path as the nightly trigger, returned value logged.
+ */
+function dtSyncStatusesNow() {
+  var result = dtSyncStatusesNightly();
+  Logger.log("dtSyncStatusesNow result: " + JSON.stringify(result));
+  return result;
 }

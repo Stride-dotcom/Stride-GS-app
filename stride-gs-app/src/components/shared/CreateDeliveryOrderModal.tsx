@@ -23,13 +23,14 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   X, Check, Loader2, CheckCircle2, MapPin, Truck,
-  ArrowRight, Wrench, Box, Plus, Trash2,
+  ArrowRight, Wrench, Box, Plus, Trash2, CreditCard,
 } from 'lucide-react';
 import { AutocompleteSelect } from './AutocompleteSelect';
 import { theme } from '../../styles/theme';
 import { WriteButton } from './WriteButton';
 import { useAuth } from '../../contexts/AuthContext';
 import { useClients } from '../../hooks/useClients';
+import { useInventory } from '../../hooks/useInventory';
 import {
   fetchDeliveryZone,
   fetchDeliveryAccessorials,
@@ -37,6 +38,32 @@ import {
   type DeliveryAccessorial,
 } from '../../lib/supabaseQueries';
 import { supabase } from '../../lib/supabase';
+
+// Inventory class → cuFt volume. Matches StrideAPI.gs CLASS_CUFT lookup.
+// Used to populate dt_order_items.cubic_feet so the DT push payload can carry
+// total load volume per order.
+const CLASS_CUBIC_FEET: Record<string, number> = {
+  XS: 10, S: 25, M: 50, L: 75, XL: 110,
+};
+function classToCuFt(cls: string | undefined | null): number | null {
+  if (!cls) return null;
+  const key = String(cls).trim().toUpperCase();
+  return CLASS_CUBIC_FEET[key] ?? null;
+}
+// Expanded description for DT push: "Vendor — Description (Sidemark · Room)"
+// Falls back gracefully when optional bits aren't set.
+function buildItemDescription(i: { description?: string; vendor?: string; sidemark?: string; room?: string; itemId?: string }): string {
+  const parts: string[] = [];
+  if (i.vendor) parts.push(i.vendor);
+  if (i.description) parts.push(i.description);
+  const tail: string[] = [];
+  if (i.sidemark) tail.push(i.sidemark);
+  if (i.room) tail.push(i.room);
+  let base = parts.filter(Boolean).join(' — ');
+  if (!base) base = i.description || i.itemId || '';
+  if (tail.length) base += ` (${tail.join(' · ')})`;
+  return base;
+}
 
 type OrderMode = 'delivery' | 'pickup' | 'pickup_and_delivery' | 'service_only';
 type ItemsSource = 'warehouse' | 'pickup';
@@ -51,6 +78,8 @@ interface LiveItem {
   sidemark: string;
   status: string;
   qty?: number;
+  itemClass?: string;
+  room?: string;
   [k: string]: any;
 }
 
@@ -85,10 +114,25 @@ export function CreateDeliveryOrderModal({
   onClose,
   onSubmit,
   preSelectedItemIds = [],
-  liveItems = [],
+  liveItems: liveItemsProp = [],
 }: Props) {
   const { user } = useAuth();
   const isStaff = user?.role === 'staff' || user?.role === 'admin';
+
+  // If no liveItems were passed (modal opened from Orders page, not Inventory),
+  // pull our own inventory. useInventory auto-scopes to accessible clients.
+  const invHookResult = useInventory(liveItemsProp.length === 0);
+  const liveItems: LiveItem[] = useMemo(() => {
+    if (liveItemsProp.length > 0) return liveItemsProp;
+    return invHookResult.items.map(i => ({
+      itemId: i.itemId, clientName: i.clientName, clientId: i.clientId,
+      vendor: i.vendor || '', description: i.description || '',
+      location: i.location || '', sidemark: i.sidemark || '',
+      status: i.status, qty: i.qty,
+      itemClass: i.itemClass || '', room: i.room || '',
+    }));
+  }, [liveItemsProp, invHookResult.items]);
+  const invLoading = liveItemsProp.length === 0 && invHookResult.loading;
 
   // ── Mode selection (Step 0) ────────────────────────────────────────────
   const hasPreSelected = preSelectedItemIds.length > 0;
@@ -161,20 +205,35 @@ export function CreateDeliveryOrderModal({
     [liveItems, clientName]
   );
   const [itemSearch, setItemSearch] = useState('');
+  const [itemSort, setItemSort] = useState<{ col: string; desc: boolean }>({ col: 'itemId', desc: false });
   const filteredItems = useMemo(() => {
-    if (!itemSearch) return activeItems;
-    const q = itemSearch.toLowerCase();
-    return activeItems.filter(
-      i => i.itemId.toLowerCase().includes(q)
-        || (i.description || '').toLowerCase().includes(q)
-        || (i.vendor || '').toLowerCase().includes(q)
-        || (i.sidemark || '').toLowerCase().includes(q)
-    );
-  }, [activeItems, itemSearch]);
+    let list = activeItems;
+    if (itemSearch) {
+      const q = itemSearch.toLowerCase();
+      list = list.filter(
+        i => i.itemId.toLowerCase().includes(q)
+          || (i.description || '').toLowerCase().includes(q)
+          || (i.vendor || '').toLowerCase().includes(q)
+          || (i.sidemark || '').toLowerCase().includes(q)
+          || (i.location || '').toLowerCase().includes(q)
+          || (i.itemClass || '').toLowerCase().includes(q)
+      );
+    }
+    const sorted = [...list].sort((a, b) => {
+      const av = String((a as any)[itemSort.col] ?? '').toLowerCase();
+      const bv = String((b as any)[itemSort.col] ?? '').toLowerCase();
+      const cmp = av.localeCompare(bv, undefined, { numeric: true });
+      return itemSort.desc ? -cmp : cmp;
+    });
+    return sorted;
+  }, [activeItems, itemSearch, itemSort]);
   const selectedInvItems = useMemo(
     () => liveItems.filter(i => selectedIds.has(i.itemId)),
     [liveItems, selectedIds]
   );
+  const toggleItemSort = (col: string) => {
+    setItemSort(prev => prev.col === col ? { col, desc: !prev.desc } : { col, desc: false });
+  };
 
   const toggleItem = (id: string) => {
     setSelectedIds(prev => {
@@ -183,6 +242,16 @@ export function CreateDeliveryOrderModal({
       return n;
     });
   };
+
+  // Total cuFt for visible selection — helps the user see total load volume.
+  const totalSelectedCuFt = useMemo(
+    () => selectedInvItems.reduce((s, i) => s + (classToCuFt(i.itemClass) ?? 0) * (Number(i.qty) || 1), 0),
+    [selectedInvItems]
+  );
+
+  // ── Billing ────────────────────────────────────────────────────────────
+  type BillingMethod = 'bill_to_client' | 'customer_collect' | 'prepaid';
+  const [billingMethod, setBillingMethod] = useState<BillingMethod>('bill_to_client');
 
   // ── Reference fields ───────────────────────────────────────────────────
   const [poNumber, setPoNumber] = useState('');
@@ -377,6 +446,7 @@ export function CreateDeliveryOrderModal({
       review_status: 'pending_review',
       created_by_user: authUid,
       created_by_role: user?.role || 'client',
+      billing_method: billingMethod,
       // status_id intentionally omitted — app-created orders have no DT status
       // until they are approved and pushed to DT via the dt-push-order Edge Function.
     };
@@ -556,14 +626,32 @@ export function CreateDeliveryOrderModal({
 
         // Items
         if (mode === 'delivery' && itemsSource === 'warehouse' && selectedInvItems.length > 0) {
-          const itemRows = selectedInvItems.map(i => ({
-            dt_order_id: orderRow.id,
-            dt_item_code: i.itemId,
-            description: i.description || i.itemId,
-            quantity: Number(i.qty) || 1,
-            original_quantity: Number(i.qty) || 1,
-            extras: { vendor: i.vendor || null, sidemark: i.sidemark || null, location: i.location || null, source: 'inventory' },
-          }));
+          const itemRows = selectedInvItems.map(i => {
+            const cuFt = classToCuFt(i.itemClass);
+            const qty = Number(i.qty) || 1;
+            return {
+              dt_order_id: orderRow.id,
+              dt_item_code: i.itemId,
+              description: buildItemDescription({
+                description: i.description, vendor: i.vendor,
+                sidemark: i.sidemark, room: i.room, itemId: i.itemId,
+              }),
+              quantity: qty,
+              original_quantity: qty,
+              cubic_feet: cuFt != null ? cuFt * qty : null,
+              class_name: i.itemClass || null,
+              vendor: i.vendor || null,
+              room: i.room || null,
+              extras: {
+                vendor: i.vendor || null,
+                sidemark: i.sidemark || null,
+                location: i.location || null,
+                room: i.room || null,
+                className: i.itemClass || null,
+                source: 'inventory',
+              },
+            };
+          });
           const { error: iErr } = await supabase.from('dt_order_items').insert(itemRows);
           if (iErr) throw new Error(`Items insert failed: ${iErr.message}`);
         } else if (mode === 'pickup') {
@@ -673,6 +761,48 @@ export function CreateDeliveryOrderModal({
             <strong>Status:</strong> Pending Review<br />
             Stride staff will review this order and confirm pricing + availability before it's dispatched.
           </div>
+
+          {/* Stax payment — only when billing method is Customer Collect */}
+          {billingMethod === 'customer_collect' && (
+            <div style={{
+              background: '#FFFBF5', border: '1px solid #FED7AA',
+              borderRadius: 8, padding: 14, marginBottom: 16, textAlign: 'left',
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
+                <CreditCard size={14} color="#B45309" />
+                <span style={{ fontSize: 12, fontWeight: 600, color: '#92400E' }}>Customer Collect — Payment Due</span>
+              </div>
+              {orderTotal != null && (
+                <div style={{ fontSize: 20, fontWeight: 700, marginBottom: 10 }}>
+                  ${orderTotal.toFixed(2)}
+                </div>
+              )}
+              <button
+                onClick={() => {
+                  const orderNum = createResult.dtIdentifier || '';
+                  const params = new URLSearchParams();
+                  if (orderNum) {
+                    params.set('order', orderNum);
+                    params.set('notes', `Delivery ${orderNum}`);
+                  }
+                  if (orderTotal != null) params.set('amount', orderTotal.toFixed(2));
+                  window.open(`/stax-payment.html?${params.toString()}`, '_blank');
+                }}
+                style={{
+                  width: '100%', padding: '10px 16px', borderRadius: 8,
+                  border: 'none', background: theme.colors.orange, color: '#fff',
+                  fontSize: 13, fontWeight: 600, cursor: 'pointer',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+                }}
+              >
+                <CreditCard size={14} /> Collect via Stax
+              </button>
+              <div style={{ fontSize: 10, color: '#92400E', marginTop: 6 }}>
+                Opens Stax payment page in new tab. Customer pays directly; staff can mark paid from the order detail panel.
+              </div>
+            </div>
+          )}
+
           <button
             onClick={onClose}
             style={{
@@ -927,52 +1057,104 @@ export function CreateDeliveryOrderModal({
               {/* Items sub-section for delivery mode */}
               {mode === 'delivery' && itemsSource === 'warehouse' && (
                 <div style={{ marginTop: 14 }}>
-                  <div style={label}>Items (from inventory, {selectedInvItems.length} selected)</div>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 8, flexWrap: 'wrap' }}>
+                    <div style={label}>Items (from inventory, {selectedInvItems.length} selected{totalSelectedCuFt > 0 ? ` · ${totalSelectedCuFt} cuFt` : ''})</div>
+                    {invLoading && (
+                      <span style={{ fontSize: 11, color: theme.colors.textMuted, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                        <Loader2 size={12} className="spin" /> Loading inventory…
+                      </span>
+                    )}
+                  </div>
                   <input
                     style={{ ...input, marginBottom: 10 }}
-                    placeholder="Search items…"
+                    placeholder="Search by item ID, description, vendor, class, sidemark, location…"
                     value={itemSearch}
                     onChange={e => setItemSearch(e.target.value)}
                   />
                   <div style={{
-                    maxHeight: 200, overflowY: 'auto',
+                    maxHeight: 320, overflowY: 'auto', overflowX: 'auto',
                     border: `1px solid ${theme.colors.border}`, borderRadius: 8,
                   }}>
+                    {/* Column headers */}
+                    <div style={{
+                      display: 'grid', gridTemplateColumns: '28px 100px 1fr 110px 60px 70px 100px 90px 60px',
+                      padding: '8px 12px', background: '#F5F2EE', position: 'sticky', top: 0, zIndex: 1,
+                      borderBottom: `1px solid ${theme.colors.border}`,
+                      fontSize: 10, fontWeight: 600, color: '#888', textTransform: 'uppercase', letterSpacing: '1px',
+                      alignItems: 'center', gap: 4,
+                    }}>
+                      <span />
+                      {[
+                        { col: 'itemId', label: 'Item ID' },
+                        { col: 'description', label: 'Description' },
+                        { col: 'vendor', label: 'Vendor' },
+                        { col: 'itemClass', label: 'Class' },
+                        { col: 'cuFt', label: 'Vol' },
+                        { col: 'sidemark', label: 'Sidemark' },
+                        { col: 'location', label: 'Location' },
+                        { col: 'qty', label: 'Qty' },
+                      ].map(c => (
+                        <span
+                          key={c.col}
+                          onClick={() => toggleItemSort(c.col)}
+                          style={{ cursor: 'pointer', userSelect: 'none', whiteSpace: 'nowrap' }}
+                        >
+                          {c.label}{itemSort.col === c.col ? (itemSort.desc ? ' ↓' : ' ↑') : ''}
+                        </span>
+                      ))}
+                    </div>
                     {filteredItems.length === 0 ? (
                       <div style={{ padding: 16, textAlign: 'center', fontSize: 12, color: theme.colors.textMuted }}>
-                        {clientName ? 'No active items for this client' : 'Select a client to see items'}
+                        {clientName ? (invLoading ? 'Loading inventory…' : 'No active items for this client') : 'Select a client to see items'}
                       </div>
                     ) : (
-                      filteredItems.map(item => {
+                      filteredItems.map((item, idx) => {
                         const checked = selectedIds.has(item.itemId);
+                        const cuFt = classToCuFt(item.itemClass);
                         return (
                           <div
                             key={item.itemId}
                             onClick={() => toggleItem(item.itemId)}
                             style={{
-                              display: 'flex', alignItems: 'center', gap: 10,
-                              padding: '8px 12px', cursor: 'pointer',
-                              background: checked ? '#FFF7ED' : '#fff',
-                              borderBottom: `1px solid ${theme.colors.border}`,
+                              display: 'grid', gridTemplateColumns: '28px 100px 1fr 110px 60px 70px 100px 90px 60px',
+                              padding: '8px 12px', cursor: 'pointer', alignItems: 'center', gap: 4,
+                              background: checked ? '#FFF7ED' : idx % 2 === 0 ? '#fff' : '#fafafa',
+                              borderBottom: `1px solid ${theme.colors.borderLight || '#f0f0f0'}`,
+                              fontSize: 12,
                             }}
                           >
                             <div style={{
-                              width: 18, height: 18, borderRadius: 4,
+                              width: 16, height: 16, borderRadius: 3,
                               border: `2px solid ${checked ? theme.colors.primary : theme.colors.border}`,
                               background: checked ? theme.colors.primary : '#fff',
                               display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
                             }}>
-                              {checked && <Check size={12} color="#fff" />}
+                              {checked && <Check size={10} color="#fff" />}
                             </div>
-                            <div style={{ flex: 1, minWidth: 0 }}>
-                              <div style={{ fontSize: 13, fontWeight: 600 }}>
-                                <span style={{ fontFamily: 'monospace', color: theme.colors.primary }}>{item.itemId}</span>
-                                {item.vendor && <span style={{ color: theme.colors.textMuted, fontWeight: 400 }}> · {item.vendor}</span>}
-                              </div>
-                              <div style={{ fontSize: 11, color: theme.colors.textMuted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                {item.description}
-                              </div>
-                            </div>
+                            <span style={{ fontFamily: 'monospace', fontWeight: 600, color: theme.colors.primary, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                              {item.itemId}
+                            </span>
+                            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: theme.colors.text }}>
+                              {item.description || '—'}
+                            </span>
+                            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: theme.colors.textMuted }}>
+                              {item.vendor || '—'}
+                            </span>
+                            <span style={{ whiteSpace: 'nowrap', color: theme.colors.textMuted }}>
+                              {item.itemClass || '—'}
+                            </span>
+                            <span style={{ whiteSpace: 'nowrap', color: theme.colors.textMuted }}>
+                              {cuFt != null ? `${cuFt} cuFt` : '—'}
+                            </span>
+                            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: theme.colors.textMuted }}>
+                              {item.sidemark || '—'}
+                            </span>
+                            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: theme.colors.textMuted }}>
+                              {item.location || '—'}
+                            </span>
+                            <span style={{ whiteSpace: 'nowrap', color: theme.colors.textMuted }}>
+                              {item.qty ?? 1}
+                            </span>
                           </div>
                         );
                       })
@@ -1078,6 +1260,40 @@ export function CreateDeliveryOrderModal({
                   );
                 })}
               </div>
+            </div>
+          )}
+
+          {/* Billing — Bill To selection (session 85 / feature #3) */}
+          {mode !== 'service_only' && (
+            <div style={section}>
+              <div style={sectionTitle}>Bill To</div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10 }}>
+                {[
+                  { value: 'bill_to_client' as BillingMethod, label: 'Bill to Client',    desc: 'Invoice client monthly' },
+                  { value: 'customer_collect' as BillingMethod, label: 'Customer Collect',  desc: 'Driver collects at door' },
+                  { value: 'prepaid' as BillingMethod,          label: 'Prepaid',           desc: 'Payment already on file' },
+                ].map(opt => (
+                  <button
+                    key={opt.value}
+                    onClick={() => setBillingMethod(opt.value)}
+                    type="button"
+                    style={{
+                      padding: '10px 12px', borderRadius: 10,
+                      border: billingMethod === opt.value ? `2px solid ${theme.colors.primary}` : `1px solid ${theme.colors.border}`,
+                      background: billingMethod === opt.value ? '#FFF7ED' : '#fff',
+                      cursor: 'pointer', textAlign: 'left', fontFamily: 'inherit',
+                    }}
+                  >
+                    <div style={{ fontSize: 12, fontWeight: 700, color: billingMethod === opt.value ? theme.colors.primary : theme.colors.text }}>{opt.label}</div>
+                    <div style={{ fontSize: 10, color: theme.colors.textMuted, marginTop: 2 }}>{opt.desc}</div>
+                  </button>
+                ))}
+              </div>
+              {billingMethod === 'customer_collect' && (
+                <div style={{ marginTop: 8, padding: '8px 12px', background: '#FFFBF5', border: '1px solid #FED7AA', borderRadius: 8, fontSize: 11, color: '#92400E' }}>
+                  Customer Collect selected — a <strong>Collect via Stax</strong> button will appear after submit and on the order detail panel so staff can run the charge.
+                </div>
+              )}
             </div>
           )}
 

@@ -1,10 +1,10 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useCallback, useEffect } from 'react';
 import {
   useReactTable, getCoreRowModel, getSortedRowModel, getFilteredRowModel,
   flexRender, createColumnHelper,
   type SortingState, type FilterFn,
 } from '@tanstack/react-table';
-import { Search, RefreshCw, Download, Truck, Calendar, Plus, ClipboardCheck } from 'lucide-react';
+import { Search, RefreshCw, Download, Truck, Calendar, Plus, ClipboardCheck, X, ChevronUp, ChevronDown, ArrowUpDown, CloudDownload } from 'lucide-react';
 import { theme } from '../styles/theme';
 import { useOrders } from '../hooks/useOrders';
 import type { DtOrderForUI } from '../hooks/useOrders';
@@ -14,6 +14,10 @@ import { ReviewQueueTab } from '../components/shared/ReviewQueueTab';
 import { useVirtualRows } from '../hooks/useVirtualRows';
 import { useAuth } from '../contexts/AuthContext';
 import { AvailabilityCalendar } from '../components/availability/AvailabilityCalendar';
+import { MultiSelectFilter } from '../components/shared/MultiSelectFilter';
+import { useClients } from '../hooks/useClients';
+import { SyncBanner } from '../components/shared/SyncBanner';
+import { supabase } from '../lib/supabase';
 
 type OrdersTab = 'orders' | 'review' | 'availability';
 
@@ -42,7 +46,7 @@ const globalFilterFn: FilterFn<DtOrderForUI> = (row, _colId, value: string) => {
   if (!value) return true;
   const q = value.toLowerCase();
   const r = row.original;
-  return [r.dtIdentifier, r.contactName, r.contactAddress, r.contactCity, r.poNumber, r.sidemark, r.clientReference, r.clientName, r.statusName, r.source]
+  return [r.dtIdentifier, r.contactName, r.contactAddress, r.contactCity, r.poNumber, r.sidemark, r.clientReference, r.clientName, r.statusName, r.source, r.createdByName, r.createdByEmail]
     .some(v => v?.toLowerCase().includes(q));
 };
 globalFilterFn.autoRemove = (v: string) => !v;
@@ -60,11 +64,13 @@ function fmtDate(iso: string): string {
 // ─── Export ───────────────────────────────────────────────────────────────────
 
 function exportCsv(rows: DtOrderForUI[]) {
-  const headers = ['ID', 'Client', 'Status', 'Service Date', 'Contact', 'Address', 'City', 'State', 'PO #', 'Sidemark', 'Source', 'Last Synced'];
+  const headers = ['ID', 'Client', 'Status', 'Service Date', 'Contact', 'Address', 'City', 'State', 'PO #', 'Sidemark', 'Source', 'Submitted By', 'Submitter Email', 'Bill To', 'Last Synced'];
   const data = rows.map(r => [
     r.dtIdentifier, r.clientName, r.statusName, r.localServiceDate,
     r.contactName, r.contactAddress, r.contactCity, r.contactState,
-    r.poNumber, r.sidemark, r.source, r.lastSyncedAt,
+    r.poNumber, r.sidemark, r.source,
+    r.createdByName, r.createdByEmail, r.billingMethod,
+    r.lastSyncedAt,
   ]);
   const csv = [headers, ...data].map(row => row.map(c => `"${(c ?? '').replace(/"/g, '""')}"`).join(',')).join('\n');
   const blob = new Blob([csv], { type: 'text/csv' });
@@ -86,7 +92,7 @@ export function Orders() {
   // Read ?tab=review from hash on mount so email deep links auto-switch to the review tab
   const initialTab = (() => {
     try {
-      const hash = window.location.hash; // e.g. "#/orders?tab=review"
+      const hash = window.location.hash;
       if (hash.includes('tab=review') && isStaff) return 'review' as OrdersTab;
     } catch (_) {}
     return (isAdmin ? 'orders' : 'availability') as OrdersTab;
@@ -99,44 +105,73 @@ export function Orders() {
   const [selectedOrder, setSelectedOrder] = useState<DtOrderForUI | null>(null);
   const [categoryFilter, setCategoryFilter] = useState<string>('');
   const [showCreateModal, setShowCreateModal] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [syncingDt, setSyncingDt] = useState(false);
+  const [syncResult, setSyncResult] = useState<string | null>(null);
 
-  // Count of orders pending review (for the tab badge)
+  // Client filter — multi-select (single source of truth for what rows are visible)
+  const { clients } = useClients();
+  const clientNames = useMemo(() => clients.map(c => c.name).sort(), [clients]);
+  const dropdownClientNames = useMemo(() => {
+    if (user?.role === 'client' && user.accessibleClientNames?.length) {
+      const allowed = new Set(user.accessibleClientNames);
+      return clientNames.filter(n => allowed.has(n));
+    }
+    return clientNames;
+  }, [clientNames, user?.role, user?.accessibleClientNames]);
+
+  const [clientFilter, setClientFilter] = useState<string[]>([]);
+  useEffect(() => {
+    if (clientFilter.length > 0) return;
+    if (user?.role === 'client' && user.accessibleClientNames?.length) {
+      setClientFilter(user.accessibleClientNames);
+    } else if ((user?.role === 'admin' || user?.role === 'staff') && clientNames.length > 0) {
+      setClientFilter(clientNames);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.role, user?.accessibleClientNames?.length, clientNames.length]);
+
   const pendingReviewCount = useMemo(
     () => orders.filter(o => o.reviewStatus === 'pending_review' || o.reviewStatus === 'revision_requested').length,
     [orders]
   );
 
-  const filteredByCategory = useMemo(() => {
-    if (!categoryFilter) return orders;
-    return orders.filter(o => o.statusCategory === categoryFilter);
-  }, [orders, categoryFilter]);
+  const clientFilteredOrders = useMemo(() => {
+    if (clientFilter.length === 0) return [] as DtOrderForUI[];
+    const set = new Set(clientFilter);
+    return orders.filter(o => set.has(o.clientName));
+  }, [orders, clientFilter]);
 
-  // Category counts for filter pills
+  const filteredByCategory = useMemo(() => {
+    if (!categoryFilter) return clientFilteredOrders;
+    return clientFilteredOrders.filter(o => o.statusCategory === categoryFilter);
+  }, [clientFilteredOrders, categoryFilter]);
+
   const categoryCounts = useMemo(() => {
     const counts: Record<string, number> = {};
-    for (const o of orders) {
+    for (const o of clientFilteredOrders) {
       counts[o.statusCategory] = (counts[o.statusCategory] ?? 0) + 1;
     }
     return counts;
-  }, [orders]);
+  }, [clientFilteredOrders]);
 
   const columns = useMemo(() => [
     ch.accessor('dtIdentifier', {
-      header: 'Order ID',
-      cell: info => <span style={{ fontFamily: 'monospace', fontSize: 12, fontWeight: 600, color: theme.colors.primary }}>{info.getValue()}</span>,
+      header: 'Order ID', size: 150,
+      cell: info => <span style={{ fontFamily: 'monospace', fontSize: 12, fontWeight: 600, color: theme.colors.orange }}>{info.getValue()}</span>,
     }),
-    ...(user?.role !== 'client' ? [ch.accessor('clientName', { header: 'Client' })] : []),
+    ...(user?.role !== 'client' ? [ch.accessor('clientName', { header: 'Client', size: 160 })] : []),
     ch.accessor('statusCategory', {
-      header: 'Status',
+      header: 'Status', size: 120,
       cell: info => <StatusChip order={info.row.original} />,
     }),
     ch.accessor('localServiceDate', {
-      header: 'Service Date',
+      header: 'Service Date', size: 120,
       cell: info => fmtDate(info.getValue()),
     }),
-    ch.accessor('contactName', { header: 'Contact' }),
+    ch.accessor('contactName', { header: 'Contact', size: 140 }),
     ch.accessor('contactCity', {
-      header: 'City',
+      header: 'City', size: 140,
       cell: info => {
         const r = info.row.original;
         const parts = [r.contactCity, r.contactState].filter(Boolean);
@@ -144,15 +179,30 @@ export function Orders() {
       },
     }),
     ch.accessor('poNumber', {
-      header: 'PO #',
+      header: 'PO #', size: 100,
       cell: info => info.getValue() || '—',
     }),
     ch.accessor('sidemark', {
-      header: 'Sidemark',
+      header: 'Sidemark', size: 120,
       cell: info => info.getValue() || '—',
     }),
+    ch.accessor('createdByName', {
+      header: 'Submitted By', size: 180,
+      cell: info => {
+        const r = info.row.original;
+        if (!r.createdByName && !r.createdByEmail) return <span style={{ color: theme.colors.textMuted }}>—</span>;
+        return (
+          <div style={{ lineHeight: 1.2 }}>
+            <div style={{ fontSize: 12, fontWeight: 500 }}>{r.createdByName || r.createdByEmail}</div>
+            {r.createdByName && r.createdByEmail && (
+              <div style={{ fontSize: 10, color: theme.colors.textMuted }}>{r.createdByEmail}</div>
+            )}
+          </div>
+        );
+      },
+    }),
     ch.accessor('source', {
-      header: 'Source',
+      header: 'Source', size: 100,
       cell: info => info.getValue() || '—',
     }),
   ], [user?.role]);
@@ -171,6 +221,37 @@ export function Orders() {
 
   const { containerRef, virtualRows, rows, totalHeight, measureElement } = useVirtualRows(table);
 
+  const handleRefetch = useCallback(() => {
+    setRefreshing(true);
+    refetch();
+    setTimeout(() => setRefreshing(false), 600);
+  }, [refetch]);
+
+  // Manual DT status sync — calls dt-sync-statuses Edge Function to pull latest
+  // status + last_synced_at for every pushed order from DispatchTrack.
+  const handleDtSync = useCallback(async () => {
+    setSyncingDt(true);
+    setSyncResult(null);
+    try {
+      const { data, error: fnErr } = await supabase.functions.invoke('dt-sync-statuses', {
+        body: { scope: 'active' },
+      });
+      if (fnErr) {
+        setSyncResult(`Sync failed: ${fnErr.message}`);
+      } else {
+        const updated = (data as { updated?: number; checked?: number })?.updated ?? 0;
+        const checked = (data as { updated?: number; checked?: number })?.checked ?? 0;
+        setSyncResult(`Synced ${updated} of ${checked} orders from DispatchTrack.`);
+        refetch();
+      }
+    } catch (e) {
+      setSyncResult(`Sync failed: ${e instanceof Error ? e.message : 'Network error'}`);
+    } finally {
+      setSyncingDt(false);
+      setTimeout(() => setSyncResult(null), 6000);
+    }
+  }, [refetch]);
+
   const tabStyle = (tab: OrdersTab) => ({
     padding: '10px 18px',
     fontSize: 11,
@@ -188,15 +269,34 @@ export function Orders() {
     gap: 6,
   }) as React.CSSProperties;
 
+  const chip = (active: boolean): React.CSSProperties => ({
+    padding: '8px 16px', borderRadius: 100, fontSize: 11, fontWeight: 600,
+    letterSpacing: '1px', textTransform: 'uppercase', cursor: 'pointer',
+    border: active ? 'none' : '1px solid rgba(0,0,0,0.08)',
+    background: active ? '#1C1C1C' : '#fff', color: active ? '#fff' : '#666',
+    transition: 'all 0.15s', whiteSpace: 'nowrap', fontFamily: 'inherit',
+  });
+
+  const th: React.CSSProperties = {
+    padding: '14px 12px', textAlign: 'left', fontWeight: 600, fontSize: 10,
+    color: '#888', textTransform: 'uppercase', letterSpacing: '2px',
+    borderBottom: 'none', position: 'sticky', top: 0, background: '#fff', zIndex: 2,
+    cursor: 'pointer', userSelect: 'none', whiteSpace: 'nowrap',
+  };
+  const td: React.CSSProperties = {
+    padding: '10px 12px', borderBottom: `1px solid ${theme.colors.borderLight}`,
+    fontSize: 13, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+  };
+
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: '#F5F2EE', margin: '-28px -32px', padding: '28px 32px', fontFamily: theme.typography.fontFamily }}>
+    <div style={{ background: '#F5F2EE', margin: '-28px -32px', padding: '28px 32px', minHeight: '100%', fontFamily: theme.typography.fontFamily }}>
 
       {/* Page title + tab bar */}
-      <div style={{ flexShrink: 0, marginBottom: 16 }}>
+      <div style={{ marginBottom: 16 }}>
         <div style={{ fontSize: 20, fontWeight: 700, letterSpacing: '2px', color: '#1C1C1C', marginBottom: 12 }}>
           STRIDE LOGISTICS · {isAdmin ? 'ORDERS & DELIVERY' : 'DELIVERY'}
         </div>
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
           {isAdmin && (
             <button onClick={() => setActiveTab('orders')} style={tabStyle('orders')}>
               <Truck size={13} /> Orders
@@ -220,7 +320,6 @@ export function Orders() {
           <button onClick={() => setActiveTab('availability')} style={tabStyle('availability')}>
             <Calendar size={13} /> Availability
           </button>
-          {/* Create Delivery Order — visible on Orders or Review tabs */}
           {(activeTab === 'orders' || activeTab === 'review') && (
             <button
               onClick={() => setShowCreateModal(true)}
@@ -240,7 +339,7 @@ export function Orders() {
 
       {/* Availability tab */}
       {activeTab === 'availability' && (
-        <div style={{ flex: 1, overflow: 'auto', padding: 20 }}>
+        <div style={{ background: '#FFFFFF', borderRadius: 20, padding: 24, border: '1px solid rgba(0,0,0,0.04)' }}>
           <AvailabilityCalendar />
         </div>
       )}
@@ -256,173 +355,171 @@ export function Orders() {
       )}
 
       {/* Orders tab (admin only) */}
-      {activeTab === 'orders' && isAdmin && <>
+      {activeTab === 'orders' && isAdmin && (
+        <div style={{ background: '#FFFFFF', borderRadius: 20, padding: 24, border: '1px solid rgba(0,0,0,0.04)' }}>
 
-      {/* Dark KPI strip */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 16, marginBottom: 20, flexShrink: 0 }}>
-        {[
-          { label: 'Total Orders', value: orders.length, color: '#fff' },
-          { label: 'Open', value: categoryCounts.open ?? 0, color: '#60A5FA' },
-          { label: 'In Progress', value: categoryCounts.in_progress ?? 0, color: '#C084FC' },
-          { label: 'Completed', value: categoryCounts.completed ?? 0, color: '#4ADE80' },
-        ].map(c => (
-          <div key={c.label} style={{ background: '#1C1C1C', borderRadius: 20, padding: '20px 22px' }}>
-            <div style={{ fontSize: 10, fontWeight: 600, color: 'rgba(255,255,255,0.55)', textTransform: 'uppercase', letterSpacing: '2px', marginBottom: 10 }}>{c.label}</div>
-            <div style={{ fontSize: 28, fontWeight: 300, color: c.color, lineHeight: 1 }}>{c.value}</div>
-          </div>
-        ))}
-      </div>
+          <SyncBanner syncing={refreshing} label={clientFilter.length === 1 ? clientFilter[0] : clientFilter.length > 1 ? `${clientFilter.length} clients` : undefined} />
 
-      {/* Header bar */}
-      <div style={{ flexShrink: 0, marginBottom: 16 }}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10, marginBottom: 12 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            {!loading && <span style={{ fontSize: 11, fontWeight: 600, color: '#888', letterSpacing: '1px', textTransform: 'uppercase' }}>{rows.length} shown</span>}
+          {/* Client filter */}
+          <div style={{ display: 'flex', gap: 10, alignItems: 'flex-end', marginBottom: 12, flexWrap: 'wrap' }}>
+            <MultiSelectFilter label="Client" options={dropdownClientNames} selected={clientFilter} onChange={setClientFilter} placeholder="Select client(s)..." />
           </div>
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-            <button onClick={refetch} style={{ background: '#fff', border: '1px solid rgba(0,0,0,0.08)', borderRadius: 100, padding: '10px 18px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, fontWeight: 600, letterSpacing: '1.5px', textTransform: 'uppercase', color: '#666' }}>
-              <RefreshCw size={13} />Refresh
+
+          {/* Main toolbar */}
+          <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', marginBottom: 12 }}>
+            <div style={{ position: 'relative', flex: '1 1 220px', maxWidth: 320 }}>
+              <Search size={15} color={theme.colors.textMuted} style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)' }} />
+              <input
+                value={globalFilter}
+                onChange={e => setGlobalFilter(e.target.value)}
+                placeholder="Search all columns..."
+                style={{ width: '100%', padding: '10px 16px 10px 36px', fontSize: 13, border: '1px solid rgba(0,0,0,0.08)', borderRadius: 100, outline: 'none', background: '#fff', fontFamily: 'inherit', boxSizing: 'border-box' }}
+              />
+            </div>
+            <div style={{ flex: 1 }} />
+            <button onClick={handleDtSync} disabled={syncingDt} title="Pull latest statuses from DispatchTrack" style={{ padding: '7px 12px', fontSize: 12, fontWeight: 500, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: syncingDt ? 'wait' : 'pointer', display: 'flex', alignItems: 'center', gap: 4, fontFamily: 'inherit', color: syncingDt ? theme.colors.orange : theme.colors.textSecondary }}>
+              <CloudDownload size={14} style={syncingDt ? { animation: 'spin 1s linear infinite' } : undefined} />
+              {syncingDt ? 'Syncing…' : 'DT Sync'}
             </button>
-            <button onClick={() => exportCsv(rows.map(r => r.original))} style={{ background: '#fff', border: '1px solid rgba(0,0,0,0.08)', borderRadius: 100, padding: '10px 18px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, fontWeight: 600, letterSpacing: '1.5px', textTransform: 'uppercase', color: '#666' }}>
-              <Download size={13} />Export
+            <button onClick={() => exportCsv(rows.map(r => r.original))} style={{ padding: '7px 12px', fontSize: 12, fontWeight: 500, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4, fontFamily: 'inherit', color: theme.colors.textSecondary }}>
+              <Download size={14} /> Export
+            </button>
+            <button onClick={handleRefetch} title="Refresh data" style={{ padding: '7px 8px', fontSize: 12, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', display: 'flex', alignItems: 'center', color: (refreshing || loading) ? theme.colors.orange : theme.colors.textSecondary, transition: 'color 0.2s' }}>
+              <RefreshCw size={14} style={(refreshing || loading) ? { animation: 'spin 1s linear infinite' } : undefined} />
             </button>
           </div>
-        </div>
 
-        {/* Category filter pills */}
-        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
-          <button
-            onClick={() => setCategoryFilter('')}
-            style={{ padding: '8px 16px', borderRadius: 100, fontSize: 11, fontWeight: 600, letterSpacing: '1px', textTransform: 'uppercase', cursor: 'pointer', border: !categoryFilter ? 'none' : '1px solid rgba(0,0,0,0.08)', background: !categoryFilter ? '#1C1C1C' : '#fff', color: !categoryFilter ? '#fff' : '#666' }}
-          >
-            All ({orders.length})
-          </button>
-          {Object.entries(CATEGORY_CFG).map(([cat, cfg]) => {
-            const count = categoryCounts[cat] ?? 0;
-            if (count === 0) return null;
-            const active = categoryFilter === cat;
-            return (
-              <button
-                key={cat}
-                onClick={() => setCategoryFilter(active ? '' : cat)}
-                style={{ padding: '8px 16px', borderRadius: 100, fontSize: 11, fontWeight: 600, letterSpacing: '1px', textTransform: 'uppercase', cursor: 'pointer', border: active ? 'none' : '1px solid rgba(0,0,0,0.08)', background: active ? '#1C1C1C' : '#fff', color: active ? '#fff' : '#666' }}
-              >
-                {cfg.label} ({count})
+          {/* Category filter pills */}
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12, alignItems: 'center' }}>
+            <button onClick={() => setCategoryFilter('')} style={chip(!categoryFilter)}>
+              All ({clientFilteredOrders.length})
+            </button>
+            {Object.entries(CATEGORY_CFG).map(([cat, cfg]) => {
+              const count = categoryCounts[cat] ?? 0;
+              if (count === 0) return null;
+              const active = categoryFilter === cat;
+              return (
+                <button key={cat} onClick={() => setCategoryFilter(active ? '' : cat)} style={chip(active)}>
+                  {cfg.label} ({count})
+                </button>
+              );
+            })}
+            <div style={{ flex: 1 }} />
+            <span style={{ fontSize: 12, color: theme.colors.textMuted, alignSelf: 'center' }}>
+              Showing <strong>{rows.length}</strong> of <strong>{clientFilteredOrders.length}</strong> orders
+            </span>
+            {(categoryFilter || globalFilter || sorting.length > 0) && (
+              <button onClick={() => { setCategoryFilter(''); setGlobalFilter(''); setSorting([]); }} style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '4px 10px', borderRadius: 8, border: `1px solid ${theme.colors.border}`, background: '#fff', cursor: 'pointer', fontSize: 11, color: theme.colors.textSecondary, fontFamily: 'inherit', whiteSpace: 'nowrap' }}>
+                <X size={12} />Clear filters
               </button>
-            );
-          })}
-        </div>
+            )}
+          </div>
 
-        {/* Search */}
-        <div style={{ position: 'relative', maxWidth: 340 }}>
-          <Search size={14} style={{ position: 'absolute', left: 14, top: '50%', transform: 'translateY(-50%)', color: '#888' }} />
-          <input
-            value={globalFilter}
-            onChange={e => setGlobalFilter(e.target.value)}
-            placeholder="Search orders…"
-            style={{ width: '100%', padding: '10px 16px 10px 36px', border: '1px solid rgba(0,0,0,0.08)', borderRadius: 100, background: '#fff', fontSize: 13, outline: 'none', fontFamily: 'inherit', boxSizing: 'border-box' }}
-          />
-        </div>
-      </div>
+          {/* Sync result toast */}
+          {syncResult && (
+            <div style={{ marginBottom: 12, padding: '8px 14px', background: '#EFF6FF', border: '1px solid #BFDBFE', borderRadius: 8, fontSize: 12, color: '#1D4ED8' }}>
+              {syncResult}
+            </div>
+          )}
 
-      {/* Last fetched info */}
-      {lastFetched && (
-        <div style={{ padding: '4px 20px', fontSize: 11, color: theme.colors.textMuted, borderBottom: `1px solid ${theme.colors.border}`, flexShrink: 0, background: '#fafafa' }}>
-          Last updated: {lastFetched.toLocaleTimeString()}
-        </div>
-      )}
+          {lastFetched && !error && (
+            <div style={{ marginBottom: 8, fontSize: 11, color: theme.colors.textMuted }}>
+              Last updated: {lastFetched.toLocaleTimeString()}
+            </div>
+          )}
 
-      {/* Error */}
-      {error && (
-        <div style={{ margin: '16px 20px', padding: '10px 14px', background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: 8, fontSize: 13, color: '#DC2626' }}>
-          {error}
-        </div>
-      )}
+          {error && (
+            <div style={{ margin: '8px 0 12px', padding: '10px 14px', background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: 8, fontSize: 13, color: '#DC2626' }}>
+              {error}
+            </div>
+          )}
 
-      {/* Loading */}
-      {loading && !orders.length && (
-        <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: theme.colors.textMuted, fontSize: 14 }}>
-          Loading orders…
-        </div>
-      )}
+          {clientFilter.length === 0 && (
+            <div style={{ padding: '40px 20px', textAlign: 'center', color: '#9CA3AF', fontSize: 13 }}>
+              Select one or more clients to load data.
+            </div>
+          )}
 
-      {/* Empty state */}
-      {!loading && !error && orders.length === 0 && (
-        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 10, color: theme.colors.textMuted }}>
-          <Truck size={36} opacity={0.3} />
-          <div style={{ fontSize: 15, fontWeight: 600 }}>No orders yet</div>
-          <div style={{ fontSize: 13 }}>Orders will appear here once DispatchTrack webhook sync is configured.</div>
-        </div>
-      )}
+          {loading && !orders.length && clientFilter.length > 0 && (
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: 40, gap: 12 }}>
+              <div style={{ width: 32, height: 32, border: '3px solid #E5E7EB', borderTopColor: theme.colors.orange, borderRadius: '50%', animation: 'spin 0.8s linear infinite' }} />
+              <span style={{ fontSize: 13, color: theme.colors.textMuted }}>Loading orders...</span>
+            </div>
+          )}
 
-      {/* Table */}
-      {orders.length > 0 && (
-        <div ref={containerRef} style={{ flex: 1, overflowY: 'auto', overflowX: 'auto' }}>
-          <table style={{ width: '100%', borderCollapse: 'collapse', tableLayout: 'fixed', minWidth: 700 }}>
-            <thead style={{ position: 'sticky', top: 0, zIndex: 2, background: '#F5F2EE' }}>
-              {table.getHeaderGroups().map(hg => (
-                <tr key={hg.id}>
-                  {hg.headers.map(header => (
-                    <th
-                      key={header.id}
-                      onClick={header.column.getToggleSortingHandler()}
-                      style={{
-                        padding: '14px 12px', textAlign: 'left', fontSize: 10, fontWeight: 600,
-                        color: '#888', textTransform: 'uppercase', letterSpacing: '2px',
-                        borderBottom: 'none', cursor: header.column.getCanSort() ? 'pointer' : 'default',
-                        userSelect: 'none', whiteSpace: 'nowrap', background: '#F5F2EE',
-                      }}
-                    >
-                      {flexRender(header.column.columnDef.header, header.getContext())}
-                      {header.column.getIsSorted() === 'asc' ? ' ↑' : header.column.getIsSorted() === 'desc' ? ' ↓' : ''}
-                    </th>
-                  ))}
-                </tr>
-              ))}
-            </thead>
-            <tbody style={{ position: 'relative' }}>
-              {/* Virtual spacer top */}
-              {virtualRows.length > 0 && virtualRows[0].start > 0 && (
-                <tr><td colSpan={columns.length} style={{ height: virtualRows[0].start }} /></tr>
-              )}
-              {virtualRows.map(vr => {
-                const row = rows[vr.index];
-                if (!row) return null;
-                return (
-                  <tr
-                    key={row.id}
-                    ref={measureElement}
-                    onClick={() => setSelectedOrder(row.original)}
-                    style={{
-                      cursor: 'pointer', borderBottom: `1px solid ${theme.colors.border}`,
-                      background: vr.index % 2 === 0 ? '#ffffff' : '#fafafa',
-                      transition: 'background 0.1s',
-                    }}
-                    onMouseEnter={e => (e.currentTarget.style.background = '#f0f7ff')}
-                    onMouseLeave={e => (e.currentTarget.style.background = vr.index % 2 === 0 ? '#ffffff' : '#fafafa')}
-                  >
-                    {row.getVisibleCells().map(cell => (
-                      <td key={cell.id} style={{ padding: '10px 12px', fontSize: 13, color: theme.colors.text, verticalAlign: 'middle', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                      </td>
-                    ))}
-                  </tr>
-                );
-              })}
-              {/* Virtual spacer bottom */}
-              {virtualRows.length > 0 && (() => {
-                const last = virtualRows[virtualRows.length - 1];
-                const bottom = totalHeight - last.start - last.size;
-                return bottom > 0 ? <tr><td colSpan={columns.length} style={{ height: bottom }} /></tr> : null;
-              })()}
-            </tbody>
-          </table>
+          {!loading && !error && clientFilter.length > 0 && clientFilteredOrders.length === 0 && (
+            <div style={{ padding: 40, textAlign: 'center', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10, color: theme.colors.textMuted }}>
+              <Truck size={36} opacity={0.3} />
+              <div style={{ fontSize: 15, fontWeight: 600 }}>No orders for selected clients</div>
+              <div style={{ fontSize: 13 }}>Create a delivery order or pick a different client.</div>
+            </div>
+          )}
+
+          {/* Table */}
+          {clientFilter.length > 0 && clientFilteredOrders.length > 0 && (
+            <div style={{ border: `1px solid ${theme.colors.border}`, borderRadius: 12, overflow: 'hidden', background: '#fff' }}>
+              <div ref={containerRef} style={{ overflowY: 'auto', overflowX: 'auto', maxHeight: 'calc(100dvh - 360px)', WebkitOverflowScrolling: 'touch' }}>
+                <table style={{ width: '100%', borderCollapse: 'separate', borderSpacing: 0 }}>
+                  <thead>{table.getHeaderGroups().map(hg => (
+                    <tr key={hg.id}>
+                      {hg.headers.map(h => (
+                        <th
+                          key={h.id}
+                          style={{ ...th, width: h.getSize(), color: h.column.getIsSorted() ? theme.colors.orange : '#888' }}
+                          onClick={h.column.getCanSort() ? h.column.getToggleSortingHandler() : undefined}
+                        >
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                            {h.isPlaceholder ? null : flexRender(h.column.columnDef.header, h.getContext())}
+                            {h.column.getCanSort() && (
+                              h.column.getIsSorted() === 'asc' ? <ChevronUp size={13} color={theme.colors.orange} />
+                              : h.column.getIsSorted() === 'desc' ? <ChevronDown size={13} color={theme.colors.orange} />
+                              : <ArrowUpDown size={13} color={theme.colors.textMuted} />
+                            )}
+                          </div>
+                        </th>
+                      ))}
+                    </tr>
+                  ))}</thead>
+                  <tbody>
+                    {virtualRows.length > 0 && virtualRows[0].start > 0 && (
+                      <tr><td colSpan={columns.length} style={{ height: virtualRows[0].start }} /></tr>
+                    )}
+                    {virtualRows.map(vr => {
+                      const row = rows[vr.index];
+                      if (!row) return null;
+                      return (
+                        <tr
+                          key={row.id}
+                          ref={measureElement}
+                          onClick={() => setSelectedOrder(row.original)}
+                          style={{ cursor: 'pointer', transition: 'background 0.1s' }}
+                          onMouseEnter={e => (e.currentTarget.style.background = theme.colors.bgSubtle || '#f0f7ff')}
+                          onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                        >
+                          {row.getVisibleCells().map(cell => (
+                            <td key={cell.id} style={td}>
+                              {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                            </td>
+                          ))}
+                        </tr>
+                      );
+                    })}
+                    {virtualRows.length > 0 && (() => {
+                      const last = virtualRows[virtualRows.length - 1];
+                      const bottom = totalHeight - last.start - last.size;
+                      return bottom > 0 ? <tr><td colSpan={columns.length} style={{ height: bottom }} /></tr> : null;
+                    })()}
+                  </tbody>
+                </table>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', padding: '8px 16px', borderTop: `1px solid ${theme.colors.borderLight}`, fontSize: 12, color: theme.colors.textMuted }}>
+                {rows.length} row{rows.length !== 1 ? 's' : ''}
+              </div>
+            </div>
+          )}
         </div>
       )}
 
-      </>}
-
-      {/* Detail panel — available from ALL tabs (orders, review, availability) */}
       {selectedOrder && (
         <OrderDetailPanel
           order={selectedOrder}
@@ -431,18 +528,18 @@ export function Orders() {
         />
       )}
 
-      {/* Create delivery order modal */}
       {showCreateModal && (
         <CreateDeliveryOrderModal
           onClose={() => setShowCreateModal(false)}
           onSubmit={() => {
             setShowCreateModal(false);
             refetch();
-            // After creating, flip to Review Queue so the new order is visible
             if (canReview) setActiveTab('review');
           }}
         />
       )}
+
+      <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
     </div>
   );
 }

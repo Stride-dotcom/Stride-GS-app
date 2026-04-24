@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import {
   X, MapPin, Phone, Mail, Calendar, Clock, Package, FileText, Truck,
-  DollarSign, CheckCircle2, AlertCircle, Clock3, Pencil,
+  DollarSign, CheckCircle2, AlertCircle, Clock3, Pencil, CreditCard,
 } from 'lucide-react';
 import { theme } from '../../styles/theme';
 import { getPanelContainerStyle, panelBackdropStyle } from './panelStyles';
@@ -417,6 +417,94 @@ export function OrderDetailPanel({ order, onClose, onUpdated }: Props) {
                   {order.pricingNotes && (
                     <div style={{ fontSize: 11, color: theme.colors.textMuted, marginTop: 8, fontStyle: 'italic' }}>{order.pricingNotes}</div>
                   )}
+
+                  {/* Bill To / Stax payment (feature #3) */}
+                  <Field
+                    label="Billing Method"
+                    value={
+                      order.billingMethod === 'customer_collect' ? 'Customer Collect'
+                      : order.billingMethod === 'prepaid' ? 'Prepaid'
+                      : 'Bill to Client'
+                    }
+                    icon={<DollarSign size={11} />}
+                  />
+                  {order.billingMethod === 'customer_collect' && (
+                    <div style={{
+                      background: order.paymentCollected ? '#F0FDF4' : '#FFFBF5',
+                      border: `1px solid ${order.paymentCollected ? '#A7F3D0' : '#FED7AA'}`,
+                      borderRadius: 10, padding: 14, marginTop: 8,
+                    }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
+                        <DollarSign size={14} color={order.paymentCollected ? '#15803D' : '#B45309'} />
+                        <span style={{ fontSize: 12, fontWeight: 600, color: order.paymentCollected ? '#15803D' : '#92400E' }}>
+                          {order.paymentCollected ? 'Payment Collected' : 'Payment Required'}
+                        </span>
+                      </div>
+                      {!order.paymentCollected ? (
+                        <>
+                          {order.orderTotal != null && (
+                            <div style={{ fontSize: 20, fontWeight: 700, marginBottom: 10 }}>
+                              ${order.orderTotal.toFixed(2)}
+                            </div>
+                          )}
+                          <div style={{ display: 'flex', gap: 8 }}>
+                            <button
+                              onClick={() => {
+                                const orderNum = order.dtIdentifier || '';
+                                const params = new URLSearchParams();
+                                if (orderNum) {
+                                  params.set('order', orderNum);
+                                  params.set('notes', `Delivery ${orderNum}`);
+                                }
+                                if (order.orderTotal != null) params.set('amount', order.orderTotal.toFixed(2));
+                                window.open(`/stax-payment.html?${params.toString()}`, '_blank');
+                              }}
+                              style={{
+                                flex: 1, padding: '9px', fontSize: 12, fontWeight: 600,
+                                border: 'none', borderRadius: 8, background: theme.colors.orange,
+                                color: '#fff', cursor: 'pointer', fontFamily: 'inherit',
+                                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4,
+                              }}
+                            >
+                              <CreditCard size={14} /> Collect via Stax
+                            </button>
+                            <button
+                              onClick={async () => {
+                                const { error } = await supabase.from('dt_orders').update({
+                                  payment_collected: true,
+                                  payment_collected_at: new Date().toISOString(),
+                                  payment_notes: `Marked paid ${new Date().toLocaleDateString('en-US')}`,
+                                }).eq('id', order.id);
+                                if (!error) onUpdated?.();
+                              }}
+                              style={{
+                                padding: '9px 14px', fontSize: 12, fontWeight: 600,
+                                border: `1px solid ${theme.colors.border}`, borderRadius: 8,
+                                background: '#fff', color: theme.colors.text,
+                                cursor: 'pointer', fontFamily: 'inherit',
+                              }}
+                            >
+                              Mark Paid
+                            </button>
+                          </div>
+                          <div style={{ fontSize: 10, color: theme.colors.textMuted, marginTop: 8 }}>
+                            Opens Stax payment page in new tab. After collecting payment, tap "Mark Paid" to record it.
+                          </div>
+                        </>
+                      ) : (
+                        <>
+                          <div style={{ fontSize: 13, color: '#15803D' }}>
+                            Payment of ${order.orderTotal?.toFixed(2) || '0.00'} collected.
+                          </div>
+                          {order.paymentCollectedAt && (
+                            <div style={{ fontSize: 11, color: theme.colors.textMuted, marginTop: 4 }}>
+                              Collected: {new Date(order.paymentCollectedAt).toLocaleString()}
+                            </div>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  )}
                 </>
               )
             )}
@@ -444,7 +532,17 @@ export function OrderDetailPanel({ order, onClose, onUpdated }: Props) {
             ) : (
               order.reviewStatus && order.reviewStatus !== 'not_required' && (
                 <>
-                  {order.createdByRole && <Field label="Created By"   value={order.createdByRole} />}
+                  {(order.createdByName || order.createdByEmail) && (
+                    <Field
+                      label="Submitted By"
+                      value={
+                        order.createdByName && order.createdByEmail
+                          ? `${order.createdByName} · ${order.createdByEmail}`
+                          : order.createdByName || order.createdByEmail
+                      }
+                    />
+                  )}
+                  {order.createdByRole && <Field label="Submitter Role" value={order.createdByRole} />}
                   {order.reviewNotes   && <Field label="Review Notes" value={order.reviewNotes} />}
                   {order.reviewedAt    && <Field label="Reviewed At"  value={new Date(order.reviewedAt).toLocaleString()} />}
                   {order.pushedToDtAt  && <Field label="Pushed to DT" value={new Date(order.pushedToDtAt).toLocaleString()} />}
@@ -471,12 +569,24 @@ export function OrderDetailPanel({ order, onClose, onUpdated }: Props) {
                     background: idx % 2 === 0 ? '#f8f9fa' : '#fff',
                     border: `1px solid ${theme.colors.border}`,
                   }}>
-                    <div style={{ fontSize: 13, fontWeight: 600, color: theme.colors.text, marginBottom: 4 }}>
-                      {item.description || 'No description'}
+                    <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 8, marginBottom: 4 }}>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: theme.colors.text }}>
+                        {item.description || 'No description'}
+                      </div>
+                      {item.dtItemCode && (
+                        <span style={{ fontFamily: 'monospace', fontSize: 11, fontWeight: 600, color: theme.colors.orange, whiteSpace: 'nowrap' }}>
+                          {item.dtItemCode}
+                        </span>
+                      )}
                     </div>
-                    <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', fontSize: 12, color: theme.colors.textMuted }}>
-                      {item.dtItemCode        && <span><span style={{ fontWeight: 500 }}>SKU:</span> {item.dtItemCode}</span>}
+                    <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', fontSize: 12, color: theme.colors.textMuted }}>
                       {item.quantity != null  && <span><span style={{ fontWeight: 500 }}>Qty:</span> {item.quantity}</span>}
+                      {item.className        && <span><span style={{ fontWeight: 500 }}>Class:</span> {item.className}</span>}
+                      {item.cubicFeet != null && <span><span style={{ fontWeight: 500 }}>Vol:</span> {item.cubicFeet} cuFt</span>}
+                      {item.vendor           && <span><span style={{ fontWeight: 500 }}>Vendor:</span> {item.vendor}</span>}
+                      {item.sidemark         && <span><span style={{ fontWeight: 500 }}>Sidemark:</span> {item.sidemark}</span>}
+                      {item.location         && <span><span style={{ fontWeight: 500 }}>Location:</span> {item.location}</span>}
+                      {item.room             && <span><span style={{ fontWeight: 500 }}>Room:</span> {item.room}</span>}
                       {item.deliveredQuantity != null && (
                         <span>
                           <span style={{ fontWeight: 500 }}>Delivered:</span>{' '}
