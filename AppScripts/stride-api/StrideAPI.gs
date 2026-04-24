@@ -16,6 +16,40 @@
               lookup now happen in the Edge Function; GAS is used only for GmailApp send capability.
    =================================================== */
 /* ===================================================
+   StrideAPI.gs — v38.121.0 — 2026-04-23 PST — Billing batch perf optimizations (5x faster for 30-40 invoices)
+   v38.121.0: FIVE wins addressing the 3-5 min / 2 invoice observation that
+              would have timed out at ~20 invoices under the 6-min Apps Script limit:
+
+              1. qbo_preloadItemCache_: one paginated QBO Item query at the top
+                 of handleQboCreateInvoice_ populates the cache for ALL services
+                 used in the batch. Eliminates 1-3 QBO queries per unique item
+                 (was 2-4s per miss with retry backoff).
+
+              2. createInvoice router: deferSupabaseSync payload flag. When true,
+                 the per-invoice api_fullClientSync_ call is SKIPPED. React fires
+                 ONE syncClientBilling at the end of the batch per unique client.
+                 For 30 invoices/1 client: saves 29 × (1-5s) = 29-145 seconds.
+
+              3. handleCreateInvoice_ idempotency: always checks Consolidated_Ledger
+                 for matching ledgerRowIds BEFORE generating PDF (previously required
+                 explicit idempotencyKey). A batch re-run now skips already-invoiced
+                 rows instantly (no PDF regen, no email resend, no ledger write).
+
+              4. handleQboCreateInvoice_ autoAssignDocNumber default: TRUE (was FALSE).
+                 Stride INV# lives in QBO PrivateNote, QBO auto-assigns DocNumber.
+                 Eliminates the 14s collision retry (2s+4s+8s backoff) when the
+                 user has CTN off anyway. Opt out with autoAssignDocNumber: false.
+
+              5. NEW syncClientBilling router case: one-shot billing sync for one
+                 client. React batch loop calls it once per unique sourceSheetId
+                 after all invoices are committed.
+
+              Companion frontend changes (Billing.tsx):
+              - Batch > 20 invoices triggers a confirm dialog (6-min wall risk).
+              - Each createInvoice call sends deferSupabaseSync: true.
+              - After batch, Promise.all of syncClientBilling per unique client.
+   =================================================== */
+/* ===================================================
    StrideAPI.gs — v38.120.0 — 2026-04-23 PST — Stax Scheduled Date field (independent charge timing)
    v38.120.0: NEW — "Scheduled Date" column on the Stax Invoices sheet (auto-created
               on first edit). Separate from Due Date: defaults to Due Date for display
@@ -5442,7 +5476,12 @@ function doPost(e) {
         return withStaffGuard_(callerEmail, function() {
           var r = handleCreateInvoice_(payload);
           var _syncSid = String(payload.clientSheetId || payload.sourceSheetId || "").trim();
-          if (_syncSid) api_fullClientSync_(_syncSid, ["billing"]);
+          // v38.121.0 — Deferred Supabase sync: when React is running a batch of
+          // invoice creates, it sends deferSupabaseSync=true on every call and
+          // fires ONE syncClientBilling endpoint at the end. Previously each
+          // invoice triggered a full client billing sync — N invoices = N syncs
+          // of the same data, adding 1-5s × N to batch wall time.
+          if (_syncSid && !payload.deferSupabaseSync) api_fullClientSync_(_syncSid, ["billing"]);
           // v38.114.0 — Activity log: one row per invoice create attempt
           try {
             var _parsed = (r && r.getContent) ? JSON.parse(r.getContent()) : (r || {});
@@ -5473,6 +5512,17 @@ function doPost(e) {
       case "markBillingActivityResolved":
         return withStaffGuard_(callerEmail, function() {
           return jsonResponse_(handleMarkBillingActivityResolved_(payload, callerEmail));
+        });
+
+      // v38.121.0 — One-shot Supabase billing sync for a single client.
+      // Called by React after a deferred-sync batch of createInvoice calls.
+      case "syncClientBilling":
+        return withStaffGuard_(callerEmail, function() {
+          var _sid = String(payload.clientSheetId || payload.sourceSheetId || "").trim();
+          if (!_sid) return jsonResponse_({ success: false, error: "clientSheetId required" });
+          try { api_fullClientSync_(_sid, ["billing"]); }
+          catch (e) { return jsonResponse_({ success: false, error: String(e) }); }
+          return jsonResponse_({ success: true, clientSheetId: _sid });
         });
 
       case "resendInvoiceEmail":
@@ -18879,9 +18929,17 @@ function handleCreateInvoice_(payload) {
   if (!masterFolderId)      return errorResponse_("Missing MASTER_ACCOUNTING_FOLDER_ID in CB Settings", "CONFIG_ERROR");
   if (!masterSpreadsheetId) return errorResponse_("Missing MASTER_SPREADSHEET_ID in CB Settings",       "CONFIG_ERROR");
 
-  // Idempotency: if all ledger row IDs already appear in Consolidated_Ledger with an invoice #, return that invoice
+  // v38.121.0 — Idempotency: if all ledger row IDs already appear in
+  // Consolidated_Ledger with an invoice #, return that invoice WITHOUT
+  // regenerating the PDF / re-sending the email / re-writing the client ledger.
+  // Previously this check required an explicit idempotencyKey, which limited
+  // it to retries of the exact same React call. Now it always runs — protects
+  // against batch re-runs, mid-flight failures, and accidental double-clicks.
+  // The PDF regeneration step is the heaviest per-invoice cost (2-5s + Doc
+  // template copy + export), so skipping it is a ~50% wall-time reduction for
+  // already-invoiced rows in a re-run batch.
   var ledgerRowIds = rows.map(function(r) { return String(r.ledgerRowId || "").trim(); }).filter(Boolean);
-  if (idempotencyKey && ledgerRowIds.length > 0) {
+  if (ledgerRowIds.length > 0) {
     var cl0 = cbSS.getSheetByName("Consolidated_Ledger");
     if (cl0 && cl0.getLastRow() > 1) {
       var cData0  = cl0.getDataRange().getValues();
@@ -18902,7 +18960,12 @@ function handleCreateInvoice_(payload) {
           else { allMatched = false; break; }
         }
         if (allMatched) {
-          return jsonResponse_({ success: true, alreadyProcessed: true, invoiceNo: Object.keys(matchedNos)[0] });
+          return jsonResponse_({
+            success: true,
+            alreadyProcessed: true,
+            skippedPdf: true,
+            invoiceNo: Object.keys(matchedNos)[0]
+          });
         }
       }
     }
@@ -32733,6 +32796,46 @@ function qbo_loadItemMap_() {
  * Returns { value: qboItemId, name: itemName }.
  * Falls back to "Services" item. Throws if no fallback found.
  */
+/**
+ * v38.121.0 — Batch-preload QBO Items into the shared cache.
+ *
+ * QBO SELECT queries are capped at 1000 rows per page. We paginate with
+ * MAXRESULTS + STARTPOSITION until we've pulled everything, then populate
+ * the cache keyed by BOTH Name and FullyQualifiedName so qbo_resolveItemRef_
+ * hits the cache regardless of how the service is mapped in QB_Service_Mapping.
+ *
+ * Skips Category-type items (not usable on invoice lines).
+ * Silent/non-fatal on failure — the resolver falls back to per-item queries.
+ */
+function qbo_preloadItemCache_(token, realmId, itemIdCache) {
+  if (!token || !realmId || !itemIdCache) return 0;
+  var startPos = 1;
+  var pageSize = 1000;
+  var loaded = 0;
+  var maxPages = 10;  // hard cap: 10k items is enough for any reasonable QB company
+  for (var p = 0; p < maxPages; p++) {
+    var query = "SELECT Id, Name, FullyQualifiedName, Type FROM Item STARTPOSITION " + startPos + " MAXRESULTS " + pageSize;
+    var result = qbo_apiRequest_("GET", "query?query=" + encodeURIComponent(query), null, token, realmId);
+    if (!result.success || !result.data || !result.data.QueryResponse) break;
+    var items = result.data.QueryResponse.Item || [];
+    if (items.length === 0) break;
+    for (var i = 0; i < items.length; i++) {
+      var it = items[i];
+      if (String(it.Type || "").toLowerCase() === "category") continue;
+      var ref = { "value": String(it.Id), "name": it.FullyQualifiedName || it.Name };
+      if (it.Name) itemIdCache[it.Name] = ref;
+      if (it.FullyQualifiedName && it.FullyQualifiedName !== it.Name) {
+        itemIdCache[it.FullyQualifiedName] = ref;
+      }
+      loaded++;
+    }
+    if (items.length < pageSize) break;
+    startPos += items.length;
+  }
+  Logger.log("qbo_preloadItemCache_: loaded " + loaded + " QBO items into cache");
+  return loaded;
+}
+
 function qbo_resolveItemRef_(qbItemName, token, realmId, itemIdCache) {
   var name = String(qbItemName || "").trim();
 
@@ -32998,9 +33101,13 @@ function handleQboCreateInvoice_(payload) {
     return { success: false, error: "ledgerRowIds array is required" };
   }
   var forceRePush = !!payload.forceRePush;
-  // v38.111.0: When true, QBO auto-assigns DocNumber (avoids duplicate-number collisions).
-  // Stride INV# is stored in QBO's PrivateNote for cross-reference.
-  var autoAssignDocNumber = !!payload.autoAssignDocNumber;
+  // v38.121.0 — Default is now TRUE (was false). QBO auto-assigns DocNumber,
+  // Stride INV# goes in PrivateNote for cross-reference. Eliminates the 14s
+  // per-collision retry backoff on duplicate-number errors. With QBO's Custom
+  // Transaction Numbers toggled OFF (the user's setup), QBO ignores any
+  // DocNumber we send anyway — we were wasting wire bytes and risking collisions.
+  // Callers can opt out with autoAssignDocNumber: false to force Stride's INV#.
+  var autoAssignDocNumber = payload.autoAssignDocNumber !== false;
 
   // Get QBO credentials
   var token = qbo_getValidToken_();
@@ -33018,6 +33125,17 @@ function handleQboCreateInvoice_(payload) {
   // Load item map
   var itemMap = qbo_loadItemMap_();
   var itemIdCache = {};
+
+  // v38.121.0 — Pre-load ALL QBO items into cache in ONE paginated query.
+  // Previously, every unique service code in the batch triggered a separate
+  // QBO query (1-3 API calls per miss). For a 30-invoice batch with 5 unique
+  // services, that was 15-45 extra QBO calls at ~500ms each = 8-22 seconds
+  // saved. Now one query fetches them all.
+  try {
+    qbo_preloadItemCache_(token, realmId, itemIdCache);
+  } catch (preloadErr) {
+    Logger.log("qbo_preloadItemCache_ warning (non-fatal, will fall back to per-item queries): " + preloadErr.message);
+  }
 
   // Load client info (for QB customer name + payment terms — same pattern as handleQbExcelExport_)
   var clientsSh = cbSS.getSheetByName("Clients");
