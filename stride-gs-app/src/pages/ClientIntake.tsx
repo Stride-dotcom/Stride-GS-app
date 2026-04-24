@@ -35,7 +35,7 @@ import {
   type PublicCoverageNote,
 } from '../hooks/useClientIntake';
 import { generateSignedTcPdf } from '../lib/intakePdf';
-import { postEmailSignedAgreement } from '../lib/api';
+import { postEmailSignedAgreement, postNotifyIntakeSubmitted } from '../lib/api';
 
 // Style tokens — copied verbatim from PublicRates so the public-side
 // pages stay visually coherent without pulling the authed app's theme.
@@ -387,6 +387,32 @@ export function ClientIntake({ linkId }: Props) {
         setSubmitError(result.error);
       } else {
         setSubmitted(true);
+        // Fire-and-forget admin notification. Parallel channels:
+        //   1. Email to the Stride distribution list via GAS (handleNotifyIntakeSubmitted_)
+        //   2. In-app notification row per admin via the Supabase trigger
+        //      fired on client_intakes INSERT — so Justin's notification
+        //      bell lights up the moment the prospect submits.
+        // Both run async and never block the success screen; a transient
+        // GAS outage just means the in-app notification is the only channel
+        // that fired until the next intake.
+        void postNotifyIntakeSubmitted({
+          intakeId:          result.id,
+          businessName:      draft.businessName,
+          contactName:       draft.contactName,
+          contactEmail:      draft.email,
+          contactPhone:      draft.phone || undefined,
+          insuranceChoice:   draft.insuranceChoice || undefined,
+          declaredValue:     draft.insuranceChoice === 'stride_coverage' && draft.insuranceDeclaredValue
+            ? Number(draft.insuranceDeclaredValue)
+            : 0,
+          paymentAuthorized: draft.paymentAuthorized,
+          submittedAt:       new Date().toISOString(),
+        }).catch(err => {
+          // Best-effort only — log so a console warning is visible during QA
+          // but never surface to the prospect. The Supabase trigger is the
+          // guaranteed channel; this call is the fast-path.
+          console.warn('[intake] notifyIntakeSubmitted failed (non-blocking):', err);
+        });
       }
     } catch (e) {
       setSubmitError(e instanceof Error ? e.message : String(e));

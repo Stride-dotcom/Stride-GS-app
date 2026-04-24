@@ -4500,3 +4500,32 @@ export function postEmailSignedAgreement({
     { linkId, email, businessName } as unknown as Record<string, unknown>
   );
 }
+
+/**
+ * Notify the Stride admin distribution list when a prospect submits the
+ * intake form. Public endpoint (no staff guard) on the GAS side — the
+ * handler only ever emails the admin recipients resolved from the
+ * INTAKE_SUBMITTED template row (fallback: CB Settings OWNER_EMAIL +
+ * NOTIFICATION_EMAILS), never a user-supplied address.
+ *
+ * Called fire-and-forget from ClientIntake after the Supabase client_intakes
+ * INSERT succeeds. Failures are swallowed so a transient GAS outage can't
+ * block the prospect's success screen; the Supabase trigger also fires an
+ * in-app notification to every admin as a redundant channel.
+ */
+export function postNotifyIntakeSubmitted(payload: {
+  intakeId: string;
+  businessName: string;
+  contactName: string;
+  contactEmail: string;
+  contactPhone?: string;
+  insuranceChoice?: string;
+  declaredValue?: number;
+  paymentAuthorized: boolean;
+  submittedAt: string;
+}) {
+  return apiPost<{ success: boolean; emailed?: boolean; reason?: string }>(
+    'notifyIntakeSubmitted',
+    payload as unknown as Record<string, unknown>
+  );
+}
