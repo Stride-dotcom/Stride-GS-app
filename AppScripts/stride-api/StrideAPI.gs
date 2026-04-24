@@ -5,6 +5,23 @@
               lookup now happen in the Edge Function; GAS is used only for GmailApp send capability.
    =================================================== */
 /* ===================================================
+   StrideAPI.gs — v38.116.0 — 2026-04-23 PST — Complete autoCharge parity + post-write echo diagnostic
+   v38.116.0: Closes the last two gaps from the Bug 7 autoCharge saga:
+              (1) api_clientRowToPayload_ now reads Auto Charge from CB Clients —
+                  previously missing, causing the echo/read-back to return
+                  autoCharge=undefined. Any downstream code using the echo silently
+                  reverted autoCharge to false.
+              (2) api_writeClientSettings_ now writes AUTO_CHARGE=TRUE|FALSE to the
+                  client's own Settings tab — previously only the CB Clients row was
+                  updated, so client-bound scripts reading PAYMENT_TERMS etc. via
+                  api_readSettings_ got an empty AUTO_CHARGE key.
+              (3) handleUpdateClient_ post-write echo log now covers every feature
+                  flag + payment terms, surfacing silent field drops immediately.
+              Root cause is multi-layer field parity across 9 separate code paths.
+              A structural ClientFieldSchema fix is proposed in a separate branch —
+              this commit is the targeted fix for autoCharge specifically.
+   =================================================== */
+/* ===================================================
    StrideAPI.gs — v38.115.0 — 2026-04-23 PST — QBO duplicate-DocNumber auto-fallback
    v38.115.0: qbo_createInvoice_ now catches HTTP 400 "Duplicate Document Number" errors
               and retries automatically without DocNumber so QBO auto-assigns.
@@ -20629,8 +20646,17 @@ function handleUpdateClient_(payload) {
       if (phk) postHMap[phk] = ph;
     }
     echoRow = api_clientRowToPayload_(postData[targetRow - 1], postHMap);
+    // v38.116.0 — Echo every field so silent drops are visible. If any payload
+    // field was lost between the frontend send and the sheet write, it shows
+    // up here as a mismatch with the payload log above.
     Logger.log("handleUpdateClient_ POST-WRITE ECHO: sid=" + targetSheetId
       + " autoInspection=" + echoRow.autoInspection
+      + " autoCharge=" + echoRow.autoCharge
+      + " enableReceivingBilling=" + echoRow.enableReceivingBilling
+      + " enableShipmentEmail=" + echoRow.enableShipmentEmail
+      + " enableNotifications=" + echoRow.enableNotifications
+      + " separateBySidemark=" + echoRow.separateBySidemark
+      + " paymentTerms=" + JSON.stringify(echoRow.paymentTerms)
       + " shipmentNote=" + JSON.stringify(echoRow.shipmentNote));
   } catch (echoErr) {
     Logger.log("handleUpdateClient_ echo warning: " + echoErr);
@@ -20752,6 +20778,11 @@ function api_clientRowToPayload_(row, hMap) {
     enableNotifications:   col_("Enable Notifications") === true || String(col_("Enable Notifications")).toUpperCase() === "TRUE",
     autoInspection:        col_("Auto Inspection") === true || String(col_("Auto Inspection")).toUpperCase() === "TRUE",
     separateBySidemark:    col_("Separate By Sidemark") === true || String(col_("Separate By Sidemark")).toUpperCase() === "TRUE",
+    // v38.116.0 — autoCharge was missing from the echo/read-back path. Result: any code
+    // that called api_clientRowToPayload_ after a save got autoCharge=undefined, silently
+    // dropping the saved value downstream. Structural root cause is multi-layer field
+    // parity (see CLIENT_EDITABLE_FIELDS proposal) — this closes the gap for autoCharge.
+    autoCharge:            col_("Auto Charge") === true || String(col_("Auto Charge")).toUpperCase() === "TRUE",
     qbCustomerName:        String(col_("QB_CUSTOMER_NAME") || ""),
     staxCustomerId:        String(col_("Stax Customer ID") || ""),
     notes:                 String(col_("Notes") || ""),
@@ -20819,6 +20850,11 @@ function api_writeClientSettings_(ssId, clientName, payload, cbSsId,
   writeOrAppend_("ENABLE_NOTIFICATIONS",     payload.enableNotifications    !== false ? "TRUE" : "FALSE");
   writeOrAppend_("AUTO_INSPECTION",          payload.autoInspection         !== false ? "TRUE" : "FALSE");
   writeOrAppend_("SEPARATE_BY_SIDEMARK",     payload.separateBySidemark     === true  ? "TRUE" : "FALSE");
+  // v38.116.0 — AUTO_CHARGE propagation to client Settings tab. Previously only
+  // written to the CB Clients sheet; the client's own Settings tab never got
+  // the value, so any code that reads client Settings (api_readSettings_) got
+  // an empty AUTO_CHARGE key.
+  writeOrAppend_("AUTO_CHARGE",              payload.autoCharge             === true  ? "TRUE" : "FALSE");
 
   // Integrations
   if (payload.qbCustomerName)  writeOrAppend_("QB_CUSTOMER_NAME",  String(payload.qbCustomerName));

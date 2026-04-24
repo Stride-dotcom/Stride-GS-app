@@ -2480,6 +2480,9 @@ export interface UpdateClientPayload {
   folderId?: string;
   photosFolderId?: string;
   invoiceFolderId?: string;
+  /** v38.116.0 — webAppUrl parity fix. Editable in the modal but was missing
+   *  from UpdateClientPayload so edits silently dropped. */
+  webAppUrl?: string;
   syncToSheet?: boolean;       // Default true — push to client Settings tab
   parentClient?: string;
 }

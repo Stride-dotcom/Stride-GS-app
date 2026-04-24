@@ -2122,6 +2122,10 @@ export function Settings() {
           folderId: data.folderId,
           photosFolderId: data.photosFolderId,
           invoiceFolderId: data.invoiceFolderId,
+          // v38.116.0 — webAppUrl was editable in the modal but never propagated
+          // here, so edits appeared to save but didn't persist. Same pattern as
+          // Bug 7 autoCharge.
+          webAppUrl: data.webAppUrl,
           notes: data.notes,
           shipmentNote: data.shipmentNote,
         });
@@ -2151,6 +2155,8 @@ export function Settings() {
           folderId: data.folderId,
           photosFolderId: data.photosFolderId,
           invoiceFolderId: data.invoiceFolderId,
+          // v38.116.0 — webAppUrl parity fix (same pattern as autoCharge)
+          webAppUrl: data.webAppUrl,
           notes: data.notes,
           shipmentNote: data.shipmentNote,
           syncToSheet: true,
