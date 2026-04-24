@@ -6,6 +6,7 @@ import { getApiUrl, getApiToken, setApiCredentials, isApiConfigured, fetchHealth
 import type { BulkSyncResult } from '../lib/api';
 import type { EmailTemplate } from '../lib/api';
 import { entityEvents } from '../lib/entityEvents';
+import { buildClientPayload } from '../types/clientFields';
 import { TemplateEditor } from '../components/shared/TemplateEditor';
 import { useEmailTemplates } from '../hooks/useEmailTemplates';
 import { ConfirmDialog } from '../components/shared/ConfirmDialog';
@@ -2098,67 +2099,23 @@ export function Settings() {
         // reflects the change immediately. Especially important for reactivation —
         // operators need to see the client snap back into the active list so they
         // can continue setting up the account without waiting for a refetch.
+        // v38.117.0 — Build payload from CLIENT_FIELDS schema (single source of truth)
+        // instead of hand-maintained field list. Adding a field to CLIENT_FIELDS
+        // auto-propagates to BOTH the optimistic patch AND the API call.
+        // This eliminates the Bug 7 regression pattern (field missing from one path).
+        const schemaPayload = buildClientPayload(data as unknown as Record<string, unknown>, 'update');
+
         applyClientPatch(data.spreadsheetId, {
+          ...schemaPayload,
+          // ApiClient uses `name`/`email` aliases instead of `clientName`/`clientEmail`.
+          // Everything else in ApiClient matches the schema key names.
           name: data.clientName,
           email: data.clientEmail,
-          contactName: data.contactName,
-          phone: data.phone,
-          qbCustomerName: data.qbCustomerName,
-          staxCustomerId: data.staxCustomerId,
-          paymentTerms: data.paymentTerms,
-          freeStorageDays: Number(data.freeStorageDays),
-          discountStoragePct: Number(data.discountStoragePct),
-          discountServicesPct: Number(data.discountServicesPct),
-          enableReceivingBilling: data.enableReceivingBilling,
-          enableShipmentEmail: data.enableShipmentEmail,
-          enableNotifications: data.enableNotifications,
-          autoInspection: data.autoInspection,
-          separateBySidemark: data.separateBySidemark,
-          // Bug 7: autoCharge was missing here — edits to Auto Pay toggle
-          // didn't update local state, so reopening the dialog showed stale value.
-          autoCharge: data.autoCharge,
-          active: data.active,
-          parentClient: data.parentClient,
-          folderId: data.folderId,
-          photosFolderId: data.photosFolderId,
-          invoiceFolderId: data.invoiceFolderId,
-          // v38.116.0 — webAppUrl was editable in the modal but never propagated
-          // here, so edits appeared to save but didn't persist. Same pattern as
-          // Bug 7 autoCharge.
-          webAppUrl: data.webAppUrl,
-          notes: data.notes,
-          shipmentNote: data.shipmentNote,
         });
 
         const res = await postUpdateClient({
           spreadsheetId: data.spreadsheetId,
-          clientName: data.clientName,
-          clientEmail: data.clientEmail,
-          contactName: data.contactName,
-          phone: data.phone,
-          qbCustomerName: data.qbCustomerName,
-          staxCustomerId: data.staxCustomerId,
-          paymentTerms: data.paymentTerms,
-          freeStorageDays: Number(data.freeStorageDays),
-          discountStoragePct: Number(data.discountStoragePct),
-          discountServicesPct: Number(data.discountServicesPct),
-          enableReceivingBilling: data.enableReceivingBilling,
-          enableShipmentEmail: data.enableShipmentEmail,
-          enableNotifications: data.enableNotifications,
-          autoInspection: data.autoInspection,
-          separateBySidemark: data.separateBySidemark,
-          // Bug 7: autoCharge was missing from the API payload. Backend was
-          // ready to receive it — frontend just never sent it on edits.
-          autoCharge: data.autoCharge,
-          active: data.active,
-          parentClient: data.parentClient,
-          folderId: data.folderId,
-          photosFolderId: data.photosFolderId,
-          invoiceFolderId: data.invoiceFolderId,
-          // v38.116.0 — webAppUrl parity fix (same pattern as autoCharge)
-          webAppUrl: data.webAppUrl,
-          notes: data.notes,
-          shipmentNote: data.shipmentNote,
+          ...schemaPayload,
           syncToSheet: true,
         });
         setClientActionLoading(false);

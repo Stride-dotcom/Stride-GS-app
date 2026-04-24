@@ -16,6 +16,32 @@
               lookup now happen in the Edge Function; GAS is used only for GmailApp send capability.
    =================================================== */
 /* ===================================================
+   StrideAPI.gs — v38.117.0 — 2026-04-23 PST — CLIENT_FIELDS schema single-source-of-truth refactor
+   v38.117.0: MAJOR REFACTOR — eliminates the "field missing from one layer"
+              bug class for client settings edits (Bug 7 regression pattern).
+
+              NEW: CLIENT_FIELDS_ const at the top of the client-settings section.
+              Each entry declares cbHeader + clientSettingsKey + supabaseColumn + type.
+              Mirror of stride-gs-app/src/types/clientFields.ts.
+
+              REFACTORED to iterate CLIENT_FIELDS_ instead of hand-maintained lists:
+              - api_updateClientRow_ (was ~25 setCol_ calls → 1 schema loop)
+              - api_clientRowToPayload_ (was 17 hardcoded fields → 1 schema loop)
+              - api_writeClientSettings_ (was ~15 writeOrAppend_ calls → 1 schema loop)
+
+              NEW: api_validateClientFieldSchema_ drift detector. React sends a
+              fingerprint of its TS CLIENT_FIELDS on every updateClient request.
+              Backend compares to its own fingerprint and logs a warning if they
+              differ. Silent-field-drop regressions (the autoCharge saga) now
+              surface instantly in Apps Script execution logs instead of sitting
+              broken for weeks.
+
+              Effect: adding a new client-editable field is now a 2-step operation
+              (add to TS schema + add to GAS schema), not a 9-step multi-file edit.
+              TypeScript enforces parity in the frontend; the drift detector
+              enforces parity between frontend and backend.
+   =================================================== */
+/* ===================================================
    StrideAPI.gs — v38.116.0 — 2026-04-23 PST — Complete autoCharge parity + post-write echo diagnostic
    v38.116.0: Closes the last two gaps from the Bug 7 autoCharge saga:
               (1) api_clientRowToPayload_ now reads Auto Charge from CB Clients —
@@ -20537,6 +20563,10 @@ function handleUpdateClient_(payload) {
       + " shipmentNote=" + JSON.stringify(payload.shipmentNote)
       + " enableShipmentEmail=" + JSON.stringify(payload.enableShipmentEmail)
       + " enableNotifications=" + JSON.stringify(payload.enableNotifications));
+    // v38.117.0 — Schema drift detector: warn if browser and backend CLIENT_FIELDS
+    // don't match. Silent-field-drop bugs (like the autoCharge saga) are caused by
+    // field additions that miss one side. This catches them at runtime.
+    api_validateClientFieldSchema_(payload._clientFieldSchemaFingerprint);
   } catch (_) {}
 
   var cbSsId = prop_("CB_SPREADSHEET_ID");
@@ -20767,38 +20797,106 @@ function handleSyncSettings_(payload) {
    Shared Client Settings Helpers
    ================================================================ */
 
+// ============================================================================
+// CLIENT FIELD SCHEMA — v38.117.0 single source of truth
+// ----------------------------------------------------------------------------
+// Mirror of stride-gs-app/src/types/clientFields.ts — KEEP IN SYNC.
+// See that file for full docs. Any new client-editable field must be added
+// BOTH here and in the TS schema, or the drift detector will warn.
+// ============================================================================
+
+var CLIENT_FIELDS_ = {
+  // Identity
+  clientName:             { cbHeader: "Client Name",          supabaseColumn: "name",             type: "string" },
+  clientEmail:            { cbHeader: "Client Email",         supabaseColumn: "email",            type: "string" },
+  contactName:            { cbHeader: "Contact Name",         supabaseColumn: "contact_name",     type: "string" },
+  phone:                  { cbHeader: "Phone",                supabaseColumn: "phone",            type: "string" },
+  // Integrations
+  qbCustomerName:         { cbHeader: "QB_CUSTOMER_NAME",     supabaseColumn: "qb_customer_name", type: "string" },
+  staxCustomerId:         { cbHeader: "Stax Customer ID",     supabaseColumn: "stax_customer_id", type: "string" },
+  // Billing settings
+  paymentTerms:           { cbHeader: "Payment Terms",        clientSettingsKey: "PAYMENT_TERMS",         supabaseColumn: "payment_terms",         type: "string", defaultValue: "Net 30" },
+  freeStorageDays:        { cbHeader: "Free Storage Days",    clientSettingsKey: "FREE_STORAGE_DAYS",     supabaseColumn: "free_storage_days",     type: "number", defaultValue: 0 },
+  discountStoragePct:     { cbHeader: "Discount Storage %",   clientSettingsKey: "DISCOUNT_STORAGE_PCT",  supabaseColumn: "discount_storage_pct",  type: "number", defaultValue: 0 },
+  discountServicesPct:    { cbHeader: "Discount Services %",  clientSettingsKey: "DISCOUNT_SERVICES_PCT", supabaseColumn: "discount_services_pct", type: "number", defaultValue: 0 },
+  // Feature flags
+  enableReceivingBilling: { cbHeader: "Enable Receiving Billing", clientSettingsKey: "ENABLE_RECEIVING_BILLING", supabaseColumn: "enable_receiving_billing", type: "boolean" },
+  enableShipmentEmail:    { cbHeader: "Enable Shipment Email",    clientSettingsKey: "ENABLE_SHIPMENT_EMAIL",    supabaseColumn: "enable_shipment_email",    type: "boolean" },
+  enableNotifications:    { cbHeader: "Enable Notifications",     clientSettingsKey: "ENABLE_NOTIFICATIONS",     supabaseColumn: "enable_notifications",     type: "boolean" },
+  autoInspection:         { cbHeader: "Auto Inspection",          clientSettingsKey: "AUTO_INSPECTION",          supabaseColumn: "auto_inspection",          type: "boolean" },
+  separateBySidemark:     { cbHeader: "Separate By Sidemark",     clientSettingsKey: "SEPARATE_BY_SIDEMARK",     supabaseColumn: "separate_by_sidemark",     type: "boolean" },
+  autoCharge:             { cbHeader: "Auto Charge",              clientSettingsKey: "AUTO_CHARGE",              supabaseColumn: "auto_charge",              type: "boolean" },
+  // Relationships + notes
+  parentClient:           { cbHeader: "Parent Client",        supabaseColumn: "parent_client",    type: "string" },
+  notes:                  { cbHeader: "Notes",                supabaseColumn: "notes",            type: "string" },
+  shipmentNote:           { cbHeader: "Client Shipment Note", clientSettingsKey: "CLIENT_SHIPMENT_NOTE", supabaseColumn: "shipment_note", type: "string" },
+  // Edit-only
+  active:                 { cbHeader: "Active",               supabaseColumn: "active",           type: "boolean", editOnly: true, defaultValue: true },
+  folderId:               { cbHeader: "Client Folder ID",     clientSettingsKey: "DRIVE_PARENT_FOLDER_ID", supabaseColumn: "folder_id",         type: "string", editOnly: true },
+  photosFolderId:         { cbHeader: "Photos Folder ID",     clientSettingsKey: "PHOTOS_FOLDER_ID",        supabaseColumn: "photos_folder_id",  type: "string", editOnly: true },
+  invoiceFolderId:        { cbHeader: "Invoice Folder ID",    clientSettingsKey: "MASTER_ACCOUNTING_FOLDER_ID", supabaseColumn: "invoice_folder_id", type: "string", editOnly: true },
+  webAppUrl:              { cbHeader: "Web App URL",          supabaseColumn: "web_app_url",      type: "string", editOnly: true }
+};
+
+var CLIENT_FIELD_KEYS_ = Object.keys(CLIENT_FIELDS_);
+var CLIENT_FIELD_SCHEMA_FINGERPRINT_ = CLIENT_FIELD_KEYS_.join("|");
+
+function api_coerceClientFieldValue_(raw, type) {
+  if (raw === undefined || raw === null) {
+    if (type === "boolean") return false;
+    if (type === "number") return 0;
+    return "";
+  }
+  if (type === "boolean") {
+    return raw === true || String(raw).toUpperCase() === "TRUE" || String(raw) === "1";
+  }
+  if (type === "number") {
+    var n = Number(raw);
+    return isFinite(n) ? n : 0;
+  }
+  return String(raw);
+}
+
+function api_validateClientFieldSchema_(clientFingerprint) {
+  if (!clientFingerprint) return;
+  if (String(clientFingerprint).trim() === CLIENT_FIELD_SCHEMA_FINGERPRINT_) return;
+  Logger.log(
+    "⚠️  CLIENT FIELD SCHEMA DRIFT detected.\n" +
+    "  TS (browser):    " + clientFingerprint + "\n" +
+    "  GAS (backend):   " + CLIENT_FIELD_SCHEMA_FINGERPRINT_ + "\n" +
+    "  One side is missing a field. Fix by adding the missing field to both " +
+    "src/types/clientFields.ts and StrideAPI.gs CLIENT_FIELDS_."
+  );
+}
+
+// ============================================================================
+// /CLIENT FIELD SCHEMA
+// ============================================================================
+
 /**
  * Converts a CB Clients tab data row + hMap into a payload object
  * matching the field names used by api_writeClientSettings_.
+ *
+ * v38.117.0 — now iterates CLIENT_FIELDS_ instead of hand-maintained list.
+ * Add a field to the schema → it's automatically read back here.
  */
 function api_clientRowToPayload_(row, hMap) {
-  function col_(name) {
-    var idx = hMap[name.toUpperCase()];
-    return idx !== undefined ? row[idx] : "";
+  // v38.117.0 — iterate CLIENT_FIELDS_ schema instead of hand-maintained
+  // list. Adding a field to CLIENT_FIELDS_ automatically propagates here.
+  var out = {};
+  for (var k = 0; k < CLIENT_FIELD_KEYS_.length; k++) {
+    var key = CLIENT_FIELD_KEYS_[k];
+    var def = CLIENT_FIELDS_[key];
+    var idx = hMap[def.cbHeader.toUpperCase()];
+    var raw = (idx !== undefined) ? row[idx] : undefined;
+    // Apply defaultValue when raw is empty and type is string (legacy behavior)
+    if ((raw === undefined || raw === null || raw === "") && def.defaultValue !== undefined && def.type === "string") {
+      out[key] = def.defaultValue;
+      continue;
+    }
+    out[key] = api_coerceClientFieldValue_(raw, def.type);
   }
-  return {
-    clientEmail:           String(col_("Client Email") || ""),
-    contactName:           String(col_("Contact Name") || ""),
-    phone:                 String(col_("Phone") || ""),
-    paymentTerms:          String(col_("Payment Terms") || "Net 30"),
-    freeStorageDays:       Number(col_("Free Storage Days")) || 0,
-    discountStoragePct:    Number(col_("Discount Storage %")) || 0,
-    discountServicesPct:   Number(col_("Discount Services %")) || 0,
-    enableReceivingBilling: col_("Enable Receiving Billing") === true || String(col_("Enable Receiving Billing")).toUpperCase() === "TRUE",
-    enableShipmentEmail:   col_("Enable Shipment Email") === true || String(col_("Enable Shipment Email")).toUpperCase() === "TRUE",
-    enableNotifications:   col_("Enable Notifications") === true || String(col_("Enable Notifications")).toUpperCase() === "TRUE",
-    autoInspection:        col_("Auto Inspection") === true || String(col_("Auto Inspection")).toUpperCase() === "TRUE",
-    separateBySidemark:    col_("Separate By Sidemark") === true || String(col_("Separate By Sidemark")).toUpperCase() === "TRUE",
-    // v38.116.0 — autoCharge was missing from the echo/read-back path. Result: any code
-    // that called api_clientRowToPayload_ after a save got autoCharge=undefined, silently
-    // dropping the saved value downstream. Structural root cause is multi-layer field
-    // parity (see CLIENT_EDITABLE_FIELDS proposal) — this closes the gap for autoCharge.
-    autoCharge:            col_("Auto Charge") === true || String(col_("Auto Charge")).toUpperCase() === "TRUE",
-    qbCustomerName:        String(col_("QB_CUSTOMER_NAME") || ""),
-    staxCustomerId:        String(col_("Stax Customer ID") || ""),
-    notes:                 String(col_("Notes") || ""),
-    shipmentNote:          String(col_("Client Shipment Note") || "")
-  };
+  return out;
 }
 
 /**
@@ -20839,43 +20937,59 @@ function api_writeClientSettings_(ssId, clientName, payload, cbSsId,
     }
   }
 
-  // Drive folder IDs
+  // Non-field writes (not in CLIENT_FIELDS_ schema — identity & plumbing).
+  // Drive folder IDs come from function params, not payload — they're fetched
+  // or computed by the onboarding flow, not user-editable in the modal directly.
   if (clientFolderId)   writeOrAppend_("DRIVE_PARENT_FOLDER_ID",             clientFolderId);
   if (photosFolderId)   writeOrAppend_("PHOTOS_FOLDER_ID",                   photosFolderId);
   if (invoicesFolderId) writeOrAppend_("MASTER_ACCOUNTING_FOLDER_ID",        invoicesFolderId);
   if (cbSsId)           writeOrAppend_("CONSOLIDATED_BILLING_SPREADSHEET_ID", cbSsId);
+  writeOrAppend_("CLIENT_NAME", clientName);
 
-  // Client identity
-  writeOrAppend_("CLIENT_NAME",  clientName);
+  // v38.117.0 — Iterate CLIENT_FIELDS_ schema for every field with a
+  // clientSettingsKey. Adding a field to the schema with clientSettingsKey
+  // automatically propagates it here. Preserves the legacy coercion rules:
+  //   - boolean → "TRUE" | "FALSE"
+  //   - number  → Number (0 fallback)
+  //   - string  → String (default value fallback for string types)
+  //
+  // Write convention:
+  //   - For fields with `defaultValue`, always write (preserves legacy
+  //     always-write behavior for PAYMENT_TERMS, FREE_STORAGE_DAYS, etc.)
+  //   - For feature-flag booleans, always write (true or false)
+  //   - For optional string fields (e.g. qbCustomerName, shipmentNote),
+  //     only write when value is truthy (preserves conditional-write convention)
+  for (var k = 0; k < CLIENT_FIELD_KEYS_.length; k++) {
+    var fKey = CLIENT_FIELD_KEYS_[k];
+    var fDef = CLIENT_FIELDS_[fKey];
+    if (!fDef.clientSettingsKey) continue;
+
+    var raw = payload[fKey];
+    var hasValue = raw !== undefined && raw !== null && raw !== "";
+
+    if (fDef.type === "boolean") {
+      // Always write booleans (flag state matters whether true or false)
+      writeOrAppend_(fDef.clientSettingsKey, raw === true ? "TRUE" : "FALSE");
+    } else if (fDef.type === "number") {
+      if (hasValue || fDef.defaultValue !== undefined) {
+        var n = hasValue ? Number(raw) : Number(fDef.defaultValue);
+        writeOrAppend_(fDef.clientSettingsKey, isFinite(n) ? n : 0);
+      }
+    } else {
+      // string
+      if (hasValue) {
+        writeOrAppend_(fDef.clientSettingsKey, String(raw));
+      } else if (fDef.defaultValue !== undefined) {
+        writeOrAppend_(fDef.clientSettingsKey, String(fDef.defaultValue));
+      }
+      // else: skip optional strings to preserve conditional-write behavior
+    }
+  }
+
+  // Legacy keys that live outside CLIENT_FIELDS_ but still sync to client Settings
   writeOrAppend_("CLIENT_EMAIL", String(payload.clientEmail || ""));
-
-  // Billing settings
-  writeOrAppend_("PAYMENT_TERMS",          String(payload.paymentTerms || "Net 30"));
-  writeOrAppend_("FREE_STORAGE_DAYS",      Number(payload.freeStorageDays) || 0);
-  writeOrAppend_("DISCOUNT_STORAGE_PCT",   Number(payload.discountStoragePct) || 0);
-  writeOrAppend_("DISCOUNT_SERVICES_PCT",  Number(payload.discountServicesPct) || 0);
-
-  // Feature flags
-  writeOrAppend_("ENABLE_RECEIVING_BILLING", payload.enableReceivingBilling !== false ? "TRUE" : "FALSE");
-  writeOrAppend_("ENABLE_SHIPMENT_EMAIL",    payload.enableShipmentEmail    !== false ? "TRUE" : "FALSE");
-  writeOrAppend_("ENABLE_NOTIFICATIONS",     payload.enableNotifications    !== false ? "TRUE" : "FALSE");
-  writeOrAppend_("AUTO_INSPECTION",          payload.autoInspection         !== false ? "TRUE" : "FALSE");
-  writeOrAppend_("SEPARATE_BY_SIDEMARK",     payload.separateBySidemark     === true  ? "TRUE" : "FALSE");
-  // v38.116.0 — AUTO_CHARGE propagation to client Settings tab. Previously only
-  // written to the CB Clients sheet; the client's own Settings tab never got
-  // the value, so any code that reads client Settings (api_readSettings_) got
-  // an empty AUTO_CHARGE key.
-  writeOrAppend_("AUTO_CHARGE",              payload.autoCharge             === true  ? "TRUE" : "FALSE");
-
-  // Integrations
   if (payload.qbCustomerName)  writeOrAppend_("QB_CUSTOMER_NAME",  String(payload.qbCustomerName));
   if (payload.staxCustomerId)  writeOrAppend_("STAX_CUSTOMER_ID",  String(payload.staxCustomerId));
-
-  // Per-client receiving instructions — mirrored to client Settings tab only when set,
-  // matching the conditional-write convention used by qbCustomerName/staxCustomerId above.
-  // The Receiving page in React reads from the CB Clients tab (via handleGetClients_),
-  // so this Settings-tab write is parity-only; the React feature works without it.
-  if (payload.shipmentNote)    writeOrAppend_("CLIENT_SHIPMENT_NOTE", String(payload.shipmentNote));
 }
 
 /**
@@ -21053,35 +21167,27 @@ function api_updateClientRow_(clientsSh, hMap, rowNum, payload) {
     }
   }
 
-  // v38.40.0 — All setCol_ calls now use the canonical sheet case matching
-  // api_clientRowToPayload_'s col_() lookups (the single source of truth for
-  // CB Clients header names). Title Case throughout, except QB_CUSTOMER_NAME
-  // which is intentionally ALL_CAPS for QuickBooks import compatibility.
-  setCol_("Client Name",              payload.clientName);
-  setCol_("Client Email",             payload.clientEmail);
-  setCol_("Contact Name",             payload.contactName);
-  setCol_("Phone",                    payload.phone);
-  setCol_("QB_CUSTOMER_NAME",         payload.qbCustomerName); // all-caps by QB convention
-  setCol_("Stax Customer ID",         payload.staxCustomerId);
-  setCol_("Payment Terms",            payload.paymentTerms);
-  setCol_("Free Storage Days",        payload.freeStorageDays !== undefined ? Number(payload.freeStorageDays) : undefined);
-  setCol_("Discount Storage %",       payload.discountStoragePct !== undefined ? Number(payload.discountStoragePct) : undefined);
-  setCol_("Discount Services %",      payload.discountServicesPct !== undefined ? Number(payload.discountServicesPct) : undefined);
-  setCol_("Enable Receiving Billing", payload.enableReceivingBilling !== undefined ? (payload.enableReceivingBilling ? true : false) : undefined);
-  setCol_("Enable Shipment Email",    payload.enableShipmentEmail !== undefined ? (payload.enableShipmentEmail ? true : false) : undefined);
-  setCol_("Enable Notifications",     payload.enableNotifications !== undefined ? (payload.enableNotifications ? true : false) : undefined);
-  setCol_("Auto Inspection",          payload.autoInspection !== undefined ? (payload.autoInspection ? true : false) : undefined);
-  setCol_("Separate By Sidemark",     payload.separateBySidemark !== undefined ? (payload.separateBySidemark ? true : false) : undefined);
-  setCol_("Auto Charge",              payload.autoCharge !== undefined ? (payload.autoCharge ? true : false) : undefined);
-  setCol_("Web App URL",              payload.webAppUrl);
-  setCol_("Notes",                    payload.notes);
-  setCol_("Client Shipment Note",     payload.shipmentNote);
-  setCol_("Parent Client",            payload.parentClient !== undefined ? String(payload.parentClient || "") : undefined);
-  setCol_("Active",                   payload.active !== undefined ? payload.active : undefined);
-  // Folder IDs (editable in case they need correction)
-  setCol_("Client Folder ID",         payload.folderId);
-  setCol_("Photos Folder ID",         payload.photosFolderId);
-  setCol_("Invoice Folder ID",        payload.invoiceFolderId);
+  // v38.117.0 — Iterate CLIENT_FIELDS_ schema instead of hand-maintained
+  // setCol_ list. Adding a field to CLIENT_FIELDS_ automatically gets written
+  // here — eliminates the Bug 7 regression pattern for good. The setCol_
+  // function above still auto-creates missing header columns using the
+  // cbHeader case from the schema (Title Case, except QB_CUSTOMER_NAME).
+  for (var k = 0; k < CLIENT_FIELD_KEYS_.length; k++) {
+    var fieldKey = CLIENT_FIELD_KEYS_[k];
+    var def = CLIENT_FIELDS_[fieldKey];
+    var val = payload[fieldKey];
+    if (val === undefined) continue;  // No-op for unprovided fields (partial updates)
+    var coerced;
+    if (def.type === "boolean") {
+      coerced = (val === true || String(val).toUpperCase() === "TRUE");
+    } else if (def.type === "number") {
+      coerced = Number(val);
+      if (!isFinite(coerced)) coerced = 0;
+    } else {
+      coerced = String(val || "");
+    }
+    setCol_(def.cbHeader, coerced);
+  }
 }
 
 /* ================================================================

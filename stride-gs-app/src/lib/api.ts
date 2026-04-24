@@ -8,6 +8,8 @@
  *   - No CORS issues, no auth redirects, no proxy needed
  */
 
+import { CLIENT_FIELD_SCHEMA_FINGERPRINT } from '../types/clientFields';
+
 // ─── Configuration ───────────────────────────────────────────────────────────
 
 const API_URL_KEY = 'stride_api_url';
@@ -2507,9 +2509,14 @@ export function postUpdateClient(
   payload: UpdateClientPayload,
   signal?: AbortSignal
 ) {
+  // v38.117.0 — tag every updateClient request with the current TS schema
+  // fingerprint. The backend drift detector logs a warning if the fingerprint
+  // doesn't match its own CLIENT_FIELDS_ schema, surfacing schema drift
+  // before users experience silent field drops.
+  const taggedPayload = { ...payload, _clientFieldSchemaFingerprint: CLIENT_FIELD_SCHEMA_FINGERPRINT };
   return apiPost<UpdateClientResponse>(
     'updateClient',
-    payload as unknown as Record<string, unknown>,
+    taggedPayload as unknown as Record<string, unknown>,
     {},
     { signal }
   );
