@@ -1540,6 +1540,11 @@ export interface SupabaseDtOrderRow {
   created_by_user: string | null;
   created_by_role: string | null;
   pushed_to_dt_at: string | null;
+  // Billing
+  billing_method: string | null;
+  payment_collected: boolean | null;
+  payment_collected_at: string | null;
+  payment_notes: string | null;
   // Phase 2c — order type + linking
   order_type: string | null;
 }
@@ -1552,6 +1557,12 @@ export interface DtOrderItemForUI {
   deliveredQuantity: number | null;
   unitPrice: number | null;
   notes: string;
+  cubicFeet: number | null;
+  className: string;
+  vendor: string;
+  sidemark: string;
+  location: string;
+  room: string;
 }
 
 export interface DtOrderForUI {
@@ -1601,7 +1612,15 @@ export interface DtOrderForUI {
   reviewedBy: string | null;
   reviewedAt: string | null;
   createdByRole: string;
+  createdByUser: string | null;
+  createdByName: string;
+  createdByEmail: string;
   pushedToDtAt: string | null;
+  // Billing
+  billingMethod: 'bill_to_client' | 'customer_collect' | 'prepaid';
+  paymentCollected: boolean;
+  paymentCollectedAt: string | null;
+  paymentNotes: string;
   // Phase 2c — order type + linked pickup/delivery pair
   orderType: 'delivery' | 'pickup' | 'pickup_and_delivery' | 'service_only' | 'transfer';
   linkedOrderId: string | null;
@@ -1659,8 +1678,17 @@ export async function fetchDtOrdersFromSupabase(
   clientSheetId?: string
 ): Promise<DtOrderForUI[] | null> {
   try {
-    const statuses = await fetchDtStatusesFromSupabase();
+    const [statuses, profilesRes] = await Promise.all([
+      fetchDtStatusesFromSupabase(),
+      supabase.from('profiles').select('id,email,display_name'),
+    ]);
     const statusMap = new Map(statuses.map(s => [s.id, s]));
+    const profileMap = new Map<string, { email: string; displayName: string }>();
+    if (!profilesRes.error && profilesRes.data) {
+      for (const p of profilesRes.data) {
+        profileMap.set(p.id, { email: p.email ?? '', displayName: p.display_name ?? p.email ?? '' });
+      }
+    }
     let query = supabase
       .from('dt_orders')
       .select('*, dt_order_items(*)')
@@ -1702,15 +1730,24 @@ export async function fetchDtOrdersFromSupabase(
         source: row.source ?? '',
         lastSyncedAt: row.last_synced_at ?? '',
         clientName: (row.tenant_id ? clientNameMap[row.tenant_id] : null) ?? '',
-        items: (((row as unknown as Record<string, unknown>).dt_order_items as Array<Record<string, unknown>>) || []).map((item) => ({
-          id: String(item.id ?? ''),
-          dtItemCode: String(item.dt_item_code ?? ''),
-          description: String(item.description ?? ''),
-          quantity: item.quantity != null ? Number(item.quantity) : null,
-          deliveredQuantity: item.delivered_quantity != null ? Number(item.delivered_quantity) : null,
-          unitPrice: item.unit_price != null ? Number(item.unit_price) : null,
-          notes: String((item.extras as Record<string, unknown>)?.notes ?? ''),
-        })),
+        items: (((row as unknown as Record<string, unknown>).dt_order_items as Array<Record<string, unknown>>) || []).map((item) => {
+          const extras = (item.extras as Record<string, unknown>) || {};
+          return {
+            id: String(item.id ?? ''),
+            dtItemCode: String(item.dt_item_code ?? ''),
+            description: String(item.description ?? ''),
+            quantity: item.quantity != null ? Number(item.quantity) : null,
+            deliveredQuantity: item.delivered_quantity != null ? Number(item.delivered_quantity) : null,
+            unitPrice: item.unit_price != null ? Number(item.unit_price) : null,
+            notes: String(extras.notes ?? ''),
+            cubicFeet: item.cubic_feet != null ? Number(item.cubic_feet) : null,
+            className: String(item.class_name ?? extras.className ?? ''),
+            vendor: String(item.vendor ?? extras.vendor ?? ''),
+            sidemark: String(extras.sidemark ?? ''),
+            location: String(extras.location ?? ''),
+            room: String(item.room ?? extras.room ?? ''),
+          };
+        }),
         // Pricing
         baseDeliveryFee: row.base_delivery_fee != null ? Number(row.base_delivery_fee) : null,
         extraItemsCount: row.extra_items_count ?? 0,
@@ -1727,7 +1764,15 @@ export async function fetchDtOrdersFromSupabase(
         reviewedBy: row.reviewed_by,
         reviewedAt: row.reviewed_at,
         createdByRole: row.created_by_role ?? '',
+        createdByUser: row.created_by_user,
+        createdByName: (row.created_by_user ? profileMap.get(row.created_by_user)?.displayName : '') ?? '',
+        createdByEmail: (row.created_by_user ? profileMap.get(row.created_by_user)?.email : '') ?? '',
         pushedToDtAt: row.pushed_to_dt_at,
+        // Billing
+        billingMethod: (row.billing_method as DtOrderForUI['billingMethod']) ?? 'bill_to_client',
+        paymentCollected: row.payment_collected ?? false,
+        paymentCollectedAt: row.payment_collected_at,
+        paymentNotes: row.payment_notes ?? '',
         // Phase 2c — order type + linked pickup/delivery
         orderType: (row.order_type as DtOrderForUI['orderType']) ?? (row.is_pickup ? 'pickup' : 'delivery'),
         linkedOrderId: row.linked_order_id,
