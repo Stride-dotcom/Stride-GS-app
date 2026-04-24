@@ -1077,7 +1077,7 @@ export function CreateDeliveryOrderModal({
                   }}>
                     {/* Column headers */}
                     <div style={{
-                      display: 'grid', gridTemplateColumns: '28px 100px 1fr 110px 60px 70px 100px 90px 60px',
+                      display: 'grid', gridTemplateColumns: '28px 100px 1fr 110px 70px 100px 90px 60px',
                       padding: '8px 12px', background: '#F5F2EE', position: 'sticky', top: 0, zIndex: 1,
                       borderBottom: `1px solid ${theme.colors.border}`,
                       fontSize: 10, fontWeight: 600, color: '#888', textTransform: 'uppercase', letterSpacing: '1px',
@@ -1088,7 +1088,6 @@ export function CreateDeliveryOrderModal({
                         { col: 'itemId', label: 'Item ID' },
                         { col: 'description', label: 'Description' },
                         { col: 'vendor', label: 'Vendor' },
-                        { col: 'itemClass', label: 'Class' },
                         { col: 'cuFt', label: 'Vol' },
                         { col: 'sidemark', label: 'Sidemark' },
                         { col: 'location', label: 'Location' },
@@ -1116,7 +1115,7 @@ export function CreateDeliveryOrderModal({
                             key={item.itemId}
                             onClick={() => toggleItem(item.itemId)}
                             style={{
-                              display: 'grid', gridTemplateColumns: '28px 100px 1fr 110px 60px 70px 100px 90px 60px',
+                              display: 'grid', gridTemplateColumns: '28px 100px 1fr 110px 70px 100px 90px 60px',
                               padding: '8px 12px', cursor: 'pointer', alignItems: 'center', gap: 4,
                               background: checked ? '#FFF7ED' : idx % 2 === 0 ? '#fff' : '#fafafa',
                               borderBottom: `1px solid ${theme.colors.borderLight || '#f0f0f0'}`,
@@ -1139,9 +1138,6 @@ export function CreateDeliveryOrderModal({
                             </span>
                             <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: theme.colors.textMuted }}>
                               {item.vendor || '—'}
-                            </span>
-                            <span style={{ whiteSpace: 'nowrap', color: theme.colors.textMuted }}>
-                              {item.itemClass || '—'}
                             </span>
                             <span style={{ whiteSpace: 'nowrap', color: theme.colors.textMuted }}>
                               {cuFt != null ? `${cuFt} cuFt` : '—'}
