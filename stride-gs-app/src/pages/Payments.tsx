@@ -1454,27 +1454,32 @@ export function Payments() {
                         </label>
                       </td>
                       <td style={{ ...td, width: 50 }}>
-                        <input type="date" value={i.dueDate || ''} onClick={e => e.stopPropagation()}
+                        {/* v38.120.0 — Scheduled Date column: separate from Due Date.
+                            Defaults to Due Date display when user hasn't overridden.
+                            Editing saves to scheduledDate (sticks). Charge loop uses
+                            scheduledDate if set, else falls back to dueDate. */}
+                        <input type="date" value={i.scheduledDate || i.dueDate || ''} onClick={e => e.stopPropagation()}
                           onChange={(e) => {
                             const v = e.target.value;
-                            setInvoices(prev => prev.map(inv => inv.qbInvoice === i.qbInvoice ? { ...inv, dueDate: v } : inv));
+                            setInvoices(prev => prev.map(inv => inv.qbInvoice === i.qbInvoice ? { ...inv, scheduledDate: v } : inv));
                           }}
                           onBlur={async (e) => {
                             const newVal = e.target.value;
-                            if (!newVal || newVal === i.dueDate) return;
-                            const origDueDate = i.dueDate;
+                            const currentShown = i.scheduledDate || i.dueDate || '';
+                            if (!newVal || newVal === currentShown) return;
+                            const origScheduled = i.scheduledDate || '';
                             try {
-                              const res = await postUpdateStaxInvoice({ qbInvoiceNo: i.qbInvoice, dueDate: newVal });
+                              const res = await postUpdateStaxInvoice({ qbInvoiceNo: i.qbInvoice, scheduledDate: newVal });
                               if (!res.ok || !res.data?.success) {
-                                setInvoices(prev => prev.map(inv => inv.qbInvoice === i.qbInvoice ? { ...inv, dueDate: origDueDate } : inv));
+                                setInvoices(prev => prev.map(inv => inv.qbInvoice === i.qbInvoice ? { ...inv, scheduledDate: origScheduled } : inv));
                                 setError(res.error || res.data?.message || 'Update failed');
                               }
                             } catch (err) {
-                              setInvoices(prev => prev.map(inv => inv.qbInvoice === i.qbInvoice ? { ...inv, dueDate: origDueDate } : inv));
+                              setInvoices(prev => prev.map(inv => inv.qbInvoice === i.qbInvoice ? { ...inv, scheduledDate: origScheduled } : inv));
                               setError(String(err));
                             }
                           }}
-                          title="Change due date"
+                          title="Scheduled charge date — defaults to due date, override for a specific charge day"
                           style={{ padding: '2px 4px', fontSize: 11, border: `1px solid ${theme.colors.border}`, borderRadius: 4, fontFamily: 'inherit', width: 120 }} />
                       </td>
                       <td style={{ ...td, textAlign: 'right' }} onClick={e => e.stopPropagation()}>

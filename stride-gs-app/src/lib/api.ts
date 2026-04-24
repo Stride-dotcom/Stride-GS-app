@@ -3807,6 +3807,9 @@ export interface StaxInvoice {
   staxCustomerId: string;
   invoiceDate: string;
   dueDate: string;
+  /** v38.120.0 — Scheduled auto-charge date. Defaults to dueDate if empty.
+   *  Falls back to dueDate for display + charge timing when unset. */
+  scheduledDate?: string;
   amount: number;
   lineItemsJson: string;
   staxId: string;
@@ -4070,7 +4073,7 @@ export function postVoidStaxInvoice(params: { qbInvoiceNo: string; rowIndex?: nu
   return apiPost<{ success: boolean; qbInvoiceNo: string; previousStatus: string }>('voidStaxInvoice', params as Record<string, unknown>);
 }
 
-export function postUpdateStaxInvoice(params: { qbInvoiceNo: string; dueDate?: string; amount?: number; customer?: string; notes?: string }) {
+export function postUpdateStaxInvoice(params: { qbInvoiceNo: string; dueDate?: string; scheduledDate?: string; amount?: number; customer?: string; notes?: string }) {
   return apiPost<{ success: boolean; qbInvoiceNo: string; changed: string[]; message: string }>('updateStaxInvoice', params as Record<string, unknown>);
 }
 

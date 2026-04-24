@@ -16,6 +16,21 @@
               lookup now happen in the Edge Function; GAS is used only for GmailApp send capability.
    =================================================== */
 /* ===================================================
+   StrideAPI.gs — v38.120.0 — 2026-04-23 PST — Stax Scheduled Date field (independent charge timing)
+   v38.120.0: NEW — "Scheduled Date" column on the Stax Invoices sheet (auto-created
+              on first edit). Separate from Due Date: defaults to Due Date for display
+              and charge timing when blank; once user sets it, it sticks and drives
+              the auto-charge date. Due Date stays static per client payment terms.
+
+              Wired through the full stack:
+              - handleUpdateStaxInvoice_: accepts payload.scheduledDate, writes column
+              - handleGetStaxInvoices_: returns scheduledDate (empty means fallback)
+              - api_sbUpsertStaxInvoice_ + api_sbResyncStaxInvoice_: pass scheduled_date
+              - StaxAutoPay.gs _executeChargeRun: gate uses Scheduled Date || Due Date
+              - StaxAutoPay.gs _sbResyncAllStaxInvoices: mirrors Scheduled Date col
+              - Frontend StaxInvoice type + Payments.tsx Queue tab Scheduled column
+   =================================================== */
+/* ===================================================
    StrideAPI.gs — v38.119.0 — 2026-04-23 PST — Default Stax due date honors client payment terms
    v38.119.0: handleCreateStaxInvoices_ now looks up the client's Payment Terms
               from CB Clients (by QB Customer Name or Stax Customer ID) and uses
@@ -3110,6 +3125,9 @@ function api_sbUpsertStaxInvoice_(inv) {
     stax_customer_id:       inv.staxCustomerId || "",
     invoice_date:           inv.invoiceDate || "",
     due_date:               inv.dueDate || "",
+    // v38.120.0 — Scheduled Date: separate from Due Date, controls auto-charge timing.
+    // Null when user hasn't overridden; frontend/charge-loop fall back to due_date.
+    scheduled_date:         inv.scheduledDate || null,
     amount:                 Number(inv.amount || 0),
     line_items_json:        inv.lineItemsJson || "",
     stax_id:                inv.staxId || "",
@@ -3166,6 +3184,7 @@ function api_sbResyncStaxInvoice_(qbInvoiceNo) {
       if (String(rows[i]["QB Invoice #"] || "").trim() === String(qbInvoiceNo).trim()) {
         var r = rows[i];
         var staxCustId = String(r["Stax Customer ID"] || "");
+        var _schedRaw = r["Scheduled Date"];
         api_sbUpsertStaxInvoice_({
           rowIndex:        i + 2,
           qbInvoice:       String(r["QB Invoice #"] || ""),
@@ -3173,6 +3192,7 @@ function api_sbResyncStaxInvoice_(qbInvoiceNo) {
           staxCustomerId:  staxCustId,
           invoiceDate:     formatDate_(r["Invoice Date"]),
           dueDate:         formatDate_(r["Due Date"]),
+          scheduledDate:   _schedRaw ? formatDate_(_schedRaw) : "",
           amount:          toNum_(r["Total Amount"]) || 0,
           lineItemsJson:   String(r["Line Items JSON"] || ""),
           staxId:          String(r["Stax Invoice ID"] || ""),
@@ -26866,13 +26886,19 @@ function handleGetStaxInvoices_() {
   var rows = sheetToObjects_(sheet);
   var invoices = rows.map(function(r, idx) {
     var staxCustId = String(r["Stax Customer ID"] || "");
+    // v38.120.0 — Scheduled Date: defaults to Due Date for display + charge timing
+    // when the user hasn't set an explicit override. Column auto-created on first edit.
+    var dueDateFmt = formatDate_(r["Due Date"]);
+    var schedDateRaw = r["Scheduled Date"];
+    var schedDateFmt = schedDateRaw ? formatDate_(schedDateRaw) : "";
     return {
       rowIndex:     idx + 2, // 1-based sheet row (header is row 1)
       qbInvoice:    String(r["QB Invoice #"] || ""),
       customer:     String(r["QB Customer Name"] || ""),
       staxCustomerId: staxCustId,
       invoiceDate:  formatDate_(r["Invoice Date"]),
-      dueDate:      formatDate_(r["Due Date"]),
+      dueDate:      dueDateFmt,
+      scheduledDate: schedDateFmt,  // empty = fallback to dueDate on frontend
       amount:       toNum_(r["Total Amount"]) || 0,
       lineItemsJson: String(r["Line Items JSON"] || ""),
       staxId:       String(r["Stax Invoice ID"] || ""),
@@ -28391,6 +28417,28 @@ function handleUpdateStaxInvoice_(payload) {
     if (dd) {
       invSheet.getRange(foundRow + 1, 5).setValue(dd);
       changed.push("dueDate=" + dd);
+    }
+  }
+
+  // v38.120.0 — Scheduled Date (separate from Due Date). Controls when the
+  // StaxAutoPay charge loop fires for auto-charge. Defaults to Due Date if
+  // unset. Header auto-created in column 12+ if missing (non-destructive).
+  if (payload.scheduledDate !== undefined) {
+    var sd = String(payload.scheduledDate).trim();
+    if (sd) {
+      var hdrRow = invSheet.getRange(1, 1, 1, invSheet.getLastColumn()).getValues()[0];
+      var schedIdx = -1;
+      for (var h = 0; h < hdrRow.length; h++) {
+        if (String(hdrRow[h]).trim() === "Scheduled Date") { schedIdx = h; break; }
+      }
+      if (schedIdx < 0) {
+        // Auto-create the column at the end
+        var lastCol = invSheet.getLastColumn();
+        schedIdx = lastCol;
+        invSheet.getRange(1, lastCol + 1).setValue("Scheduled Date");
+      }
+      invSheet.getRange(foundRow + 1, schedIdx + 1).setValue(sd);
+      changed.push("scheduledDate=" + sd);
     }
   }
 

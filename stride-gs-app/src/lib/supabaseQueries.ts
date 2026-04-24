@@ -2505,6 +2505,8 @@ export async function fetchStaxInvoicesFromSupabase(): Promise<StaxInvoicesRespo
       staxCustomerId: r.stax_customer_id ?? '',
       invoiceDate: r.invoice_date ?? '',
       dueDate: r.due_date ?? '',
+      // v38.120.0 — scheduled_date: empty → frontend falls back to due_date for display + charge timing
+      scheduledDate: (r as unknown as { scheduled_date?: string | null }).scheduled_date ?? '',
       amount: r.amount ?? 0,
       lineItemsJson: r.line_items_json ?? '',
       staxId: r.stax_id ?? '',
