@@ -94,7 +94,7 @@ export default function App() {
           {/* Admin + client only */}
           <Route path="/claims" element={<RoleGuard allowed={['admin', 'client']}><Claims /></RoleGuard>} />
           {/* Admin only */}
-          <Route path="/orders" element={<Orders />} /> {/* All roles — Orders tab is admin-only inside, Availability tab is universal */}
+          <Route path="/orders" element={<RoleGuard allowed={['admin', 'client']}><Orders /></RoleGuard>} />
           <Route path="/billing" element={<RoleGuard allowed={['admin']}><Billing /></RoleGuard>} />
           <Route path="/payments" element={<RoleGuard allowed={['admin']}><Payments /></RoleGuard>} />
           <Route path="/marketing" element={<RoleGuard allowed={['admin']}><Marketing /></RoleGuard>} />

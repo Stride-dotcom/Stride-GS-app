@@ -798,13 +798,14 @@ export function CreateDeliveryOrderModal({
       details: details.trim() || null,
       order_notes: details.trim() || null,
       source: 'app',
-      review_status: 'pending_review',
+      review_status: user?.role === 'admin' ? 'approved' : 'pending_review',
       created_by_user: authUid,
       created_by_role: user?.role || 'client',
       billing_method: billingMethod,
       // status_id intentionally omitted — app-created orders have no DT status
       // until they are approved and pushed to DT via the dt-push-order Edge Function.
     };
+    const isAdminAutoApprove = user?.role === 'admin';
 
     try {
       if (mode === 'pickup_and_delivery') {
@@ -921,8 +922,14 @@ export function CreateDeliveryOrderModal({
         onSubmit?.({
           dtOrderId: deliveryRow.id,
           dtIdentifier: deliveryRow.dt_identifier,
-          reviewStatus: 'pending_review',
+          reviewStatus: isAdminAutoApprove ? 'approved' : 'pending_review',
         });
+        // Admin auto-push to DT — best-effort, order stays "approved" for retry if push fails
+        if (isAdminAutoApprove) {
+          supabase.functions.invoke('dt-push-order', {
+            body: { orderId: deliveryRow.id },
+          }).catch((err) => { console.warn('[delivery] Admin auto-push failed (non-fatal):', err); });
+        }
         // Auto-save contacts to address book — best-effort
         upsertAddressBookContact({
           tenant_id: clientSheetId, contact_name: pickupContactName,
@@ -1037,12 +1044,40 @@ export function CreateDeliveryOrderModal({
         }
         // service_only has no items — nothing to insert.
 
+        // Write delivery audit log entries for warehouse inventory items — best-effort
+        if (mode === 'delivery' && itemsSource === 'warehouse' && selectedInvItems.length > 0) {
+          const auditRows = selectedInvItems.map(i => ({
+            entity_type: 'inventory',
+            entity_id: i.itemId,
+            tenant_id: clientSheetId,
+            action: 'delivery_order_created',
+            changes: {
+              dt_order_id: orderRow.id,
+              dt_identifier: orderRow.dt_identifier,
+              contact_name: contactName.trim(),
+              service_date: serviceDate,
+              order_type: mode,
+            },
+            performed_by: user?.email || 'unknown',
+            source: 'app',
+          }));
+          supabase.from('entity_audit_log').insert(auditRows).then(({ error: aErr }) => {
+            if (aErr) console.warn('[delivery] Audit log insert failed (non-fatal):', aErr.message);
+          });
+        }
+
         setCreateResult({ dtIdentifier: orderRow.dt_identifier });
         onSubmit?.({
           dtOrderId: orderRow.id,
           dtIdentifier: orderRow.dt_identifier,
-          reviewStatus: 'pending_review',
+          reviewStatus: isAdminAutoApprove ? 'approved' : 'pending_review',
         });
+        // Admin auto-push to DT — best-effort, order stays "approved" for retry if push fails
+        if (isAdminAutoApprove) {
+          supabase.functions.invoke('dt-push-order', {
+            body: { orderId: orderRow.id },
+          }).catch((err) => { console.warn('[delivery] Admin auto-push failed (non-fatal):', err); });
+        }
         // Auto-save contact to address book — best-effort
         if (contactName.trim()) {
           upsertAddressBookContact({

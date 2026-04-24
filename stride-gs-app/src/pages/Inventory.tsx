@@ -2155,7 +2155,9 @@ export function Inventory() {
           {/* Right: action buttons */}
           <WriteButton label="Create Will Call" variant="ghost" size="sm" onClick={async () => { const guard = checkBatchClientGuard(selectedRows.map(r => r.original)); if (guard) { setBatchGuardClients(guard); setBatchGuardAction('Create Will Call'); return; } setShowWCModal(true); }} />
           <WriteButton label="Add to Will Call" variant="ghost" size="sm" onClick={async () => { const guard = checkBatchClientGuard(selectedRows.map(r => r.original)); if (guard) { setBatchGuardClients(guard); setBatchGuardAction('Add to Will Call'); return; } setShowAddToWCModal(true); }} />
-          <WriteButton label="Create Delivery" variant="ghost" size="sm" onClick={async () => { const guard = checkBatchClientGuard(selectedRows.map(r => r.original)); if (guard) { setBatchGuardClients(guard); setBatchGuardAction('Create Delivery'); return; } setShowDeliveryModal(true); }} />
+          {user?.role !== 'staff' && (
+            <WriteButton label="Create Delivery" variant="ghost" size="sm" onClick={async () => { const guard = checkBatchClientGuard(selectedRows.map(r => r.original)); if (guard) { setBatchGuardClients(guard); setBatchGuardAction('Create Delivery'); return; } setShowDeliveryModal(true); }} />
+          )}
           <WriteButton label="Create Task" variant="ghost" size="sm" onClick={async () => { const guard = checkBatchClientGuard(selectedRows.map(r => r.original)); if (guard) { setBatchGuardClients(guard); setBatchGuardAction('Create Task'); return; } setShowCreateTaskModal(true); }} />
           {(user?.role === 'staff' || user?.role === 'admin' || user?.isParent) && (
             <WriteButton label="Transfer" variant="ghost" size="sm" onClick={async () => { const guard = checkBatchClientGuard(selectedRows.map(r => r.original)); if (guard) { setBatchGuardClients(guard); setBatchGuardAction('Transfer'); return; } setShowTransferModal(true); }} />
@@ -2291,7 +2293,9 @@ export function Inventory() {
           liveItems={apiConfigured ? inventoryItems as any : undefined}
           onClose={() => { setShowDeliveryModal(false); setDetailActionItem(null); }}
           onSubmit={(data) => {
-            showToast(`Delivery request ${data.dtIdentifier} submitted for review`);
+            showToast(data.reviewStatus === 'approved'
+              ? `Delivery order ${data.dtIdentifier} approved — pushing to DT`
+              : `Delivery request ${data.dtIdentifier} submitted for review`);
             setRowSelection({});
             setDetailActionItem(null);
             setShowDeliveryModal(false);
@@ -2364,7 +2368,7 @@ export function Inventory() {
         actions={[
           { label: 'Create Task', icon: <ClipboardList size={16} />, onClick: () => setShowCreateTaskModal(true) },
           { label: 'Create Will Call', icon: <Package size={16} />, onClick: () => setShowWCModal(true) },
-          { label: 'Create Delivery', icon: <Truck size={16} />, onClick: () => setShowDeliveryModal(true) },
+          ...(user?.role !== 'staff' ? [{ label: 'Create Delivery', icon: <Truck size={16} />, onClick: () => setShowDeliveryModal(true) }] : []),
           { label: 'Request Repair', icon: <Wrench size={16} />, onClick: async () => {
             const sel = table.getSelectedRowModel().rows;
             if (sel.length === 0) { showToast('Select items first'); return; }

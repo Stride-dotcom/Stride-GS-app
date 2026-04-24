@@ -62,7 +62,6 @@ const STAFF_NAV = [
   { id: 'tasks', label: 'Tasks', path: '/tasks', icon: ClipboardList },
   { id: 'repairs', label: 'Repairs', path: '/repairs', icon: Wrench },
   { id: 'willcalls', label: 'Will Calls', path: '/will-calls', icon: Truck },
-  { id: 'orders', label: 'Delivery', path: '/orders', icon: Calendar },
   { id: 'scanner', label: 'QR Scanner', path: '/scanner', icon: ScanLine },
   { id: 'labels', label: 'Labels', path: '/labels', icon: Tag },
 ];
