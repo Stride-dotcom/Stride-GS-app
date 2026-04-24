@@ -1789,6 +1789,100 @@ export async function fetchDtOrdersFromSupabase(
   }
 }
 
+/** Fetch a single DT order by its Supabase UUID. Used by OrderPage. */
+export async function fetchDtOrderByIdFromSupabase(
+  orderId: string,
+  clientNameMap: ClientNameMap = {}
+): Promise<DtOrderForUI | null> {
+  try {
+    const statuses = await fetchDtStatusesFromSupabase();
+    const statusMap = new Map(statuses.map(s => [s.id, s]));
+    const { data, error } = await supabase
+      .from('dt_orders')
+      .select('*, dt_order_items(*)')
+      .eq('id', orderId)
+      .maybeSingle();
+    if (error || !data) return null;
+    const row = data as SupabaseDtOrderRow;
+    const status = row.status_id != null ? statusMap.get(row.status_id) : undefined;
+    return {
+      id: row.id,
+      tenantId: row.tenant_id,
+      dtIdentifier: row.dt_identifier,
+      dtDispatchId: row.dt_dispatch_id,
+      isPickup: row.is_pickup ?? false,
+      statusId: row.status_id,
+      statusCode: status?.code ?? '',
+      statusName: status?.name ?? '—',
+      statusColor: status?.color ?? '#94a3b8',
+      statusCategory: status?.category ?? 'open',
+      contactName: row.contact_name ?? '',
+      contactAddress: row.contact_address ?? '',
+      contactCity: row.contact_city ?? '',
+      contactState: row.contact_state ?? '',
+      contactZip: row.contact_zip ?? '',
+      contactPhone: row.contact_phone ?? '',
+      contactEmail: row.contact_email ?? '',
+      localServiceDate: row.local_service_date ?? '',
+      windowStartLocal: row.window_start_local ?? '',
+      windowEndLocal: row.window_end_local ?? '',
+      timezone: row.timezone,
+      poNumber: row.po_number ?? '',
+      sidemark: row.sidemark ?? '',
+      clientReference: row.client_reference ?? '',
+      details: row.details ?? '',
+      latestNotePreview: row.latest_note_preview ?? '',
+      source: row.source ?? '',
+      lastSyncedAt: row.last_synced_at ?? '',
+      clientName: (row.tenant_id ? clientNameMap[row.tenant_id] : null) ?? '',
+      items: (((row as unknown as Record<string, unknown>).dt_order_items as Array<Record<string, unknown>>) || []).map((item) => {
+        const extras = (item.extras as Record<string, unknown>) || {};
+        return {
+          id: String(item.id ?? ''),
+          dtItemCode: String(item.dt_item_code ?? ''),
+          description: String(item.description ?? ''),
+          quantity: item.quantity != null ? Number(item.quantity) : null,
+          deliveredQuantity: item.delivered_quantity != null ? Number(item.delivered_quantity) : null,
+          unitPrice: item.unit_price != null ? Number(item.unit_price) : null,
+          notes: String(extras.notes ?? ''),
+          cubicFeet: item.cubic_feet != null ? Number(item.cubic_feet) : null,
+          className: String(item.class_name ?? extras.className ?? ''),
+          vendor: String(item.vendor ?? extras.vendor ?? ''),
+          sidemark: String(extras.sidemark ?? ''),
+          location: String(extras.location ?? ''),
+          room: String(item.room ?? extras.room ?? ''),
+        };
+      }),
+      baseDeliveryFee: row.base_delivery_fee != null ? Number(row.base_delivery_fee) : null,
+      extraItemsCount: row.extra_items_count ?? 0,
+      extraItemsFee: row.extra_items_fee != null ? Number(row.extra_items_fee) : 0,
+      accessorials: Array.isArray(row.accessorials_json) ? row.accessorials_json : [],
+      accessorialsTotal: row.accessorials_total != null ? Number(row.accessorials_total) : 0,
+      fabricProtectionTotal: row.fabric_protection_total != null ? Number(row.fabric_protection_total) : 0,
+      orderTotal: row.order_total != null ? Number(row.order_total) : null,
+      pricingOverride: row.pricing_override ?? false,
+      pricingNotes: row.pricing_notes ?? '',
+      reviewStatus: row.review_status ?? 'not_required',
+      reviewNotes: row.review_notes ?? '',
+      reviewedBy: row.reviewed_by,
+      reviewedAt: row.reviewed_at,
+      createdByRole: row.created_by_role ?? '',
+      createdByUser: row.created_by_user,
+      createdByName: '',
+      createdByEmail: '',
+      pushedToDtAt: row.pushed_to_dt_at,
+      billingMethod: (row.billing_method as DtOrderForUI['billingMethod']) ?? 'bill_to_client',
+      paymentCollected: row.payment_collected ?? false,
+      paymentCollectedAt: row.payment_collected_at,
+      paymentNotes: row.payment_notes ?? '',
+      orderType: (row.order_type as DtOrderForUI['orderType']) ?? (row.is_pickup ? 'pickup' : 'delivery'),
+      linkedOrderId: row.linked_order_id,
+    };
+  } catch {
+    return null;
+  }
+}
+
 // ─── Delivery pricing fetchers (session 68) ───────────────────────────────
 
 /** Look up a single ZIP → zone/rate/service days. Returns null if not in the table. */

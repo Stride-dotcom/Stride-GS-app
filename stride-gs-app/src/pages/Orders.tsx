@@ -1,4 +1,5 @@
 import { useState, useMemo, useCallback, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
   useReactTable, getCoreRowModel, getSortedRowModel, getFilteredRowModel,
   flexRender, createColumnHelper,
@@ -8,7 +9,6 @@ import { Search, RefreshCw, Download, Truck, Calendar, Plus, ClipboardCheck, X, 
 import { theme } from '../styles/theme';
 import { useOrders } from '../hooks/useOrders';
 import type { DtOrderForUI } from '../hooks/useOrders';
-import { OrderDetailPanel } from '../components/shared/OrderDetailPanel';
 import { CreateDeliveryOrderModal } from '../components/shared/CreateDeliveryOrderModal';
 import { ReviewQueueTab } from '../components/shared/ReviewQueueTab';
 import { useVirtualRows } from '../hooks/useVirtualRows';
@@ -87,6 +87,7 @@ function exportCsv(rows: DtOrderForUI[]) {
 
 export function Orders() {
   const { user } = useAuth();
+  const navigate = useNavigate();
   const isAdmin = user?.role === 'admin';
   const isStaff = user?.role === 'staff' || user?.role === 'admin';
   const canReview = isStaff;
@@ -112,7 +113,6 @@ export function Orders() {
   const { orders, loading, error, refetch, lastFetched } = useOrders();
   const [globalFilter, setGlobalFilter] = useState('');
   const [sorting, setSorting] = useState<SortingState>([{ id: 'localServiceDate', desc: true }]);
-  const [selectedOrder, setSelectedOrder] = useState<DtOrderForUI | null>(null);
   const [categoryFilter, setCategoryFilter] = useState<string>('');
   const [statusFilter, setStatusFilter] = useState<string[]>([]);
   const [showCreateModal, setShowCreateModal] = useState(false);
@@ -383,7 +383,7 @@ export function Orders() {
           orders={orders}
           loading={loading}
           onRefetch={refetch}
-          onOpenDetail={(o) => setSelectedOrder(o)}
+          onOpenDetail={(o) => navigate(`/orders/${o.id}`)}
         />
       )}
 
@@ -536,7 +536,7 @@ export function Orders() {
                         <tr
                           key={row.id}
                           ref={measureElement}
-                          onClick={() => setSelectedOrder(row.original)}
+                          onClick={() => navigate(`/orders/${row.original.id}`)}
                           style={{ cursor: 'pointer', transition: 'background 0.1s' }}
                           onMouseEnter={e => (e.currentTarget.style.background = theme.colors.bgSubtle || '#f0f7ff')}
                           onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
@@ -565,14 +565,7 @@ export function Orders() {
         </div>
       )}
 
-      {selectedOrder && (
-        <OrderDetailPanel
-          order={selectedOrder}
-          onClose={() => setSelectedOrder(null)}
-          onUpdated={() => { refetch(); setSelectedOrder(null); }}
-        />
-      )}
-
+      {/* Create delivery order modal */}
       {showCreateModal && (
         <CreateDeliveryOrderModal
           onClose={() => setShowCreateModal(false)}
