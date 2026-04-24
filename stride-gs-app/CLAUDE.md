@@ -1,58 +1,74 @@
-# Stride GS App — React WMS Prototype
+# Stride GS App — Builder Instructions
 
-> **NOTE:** This is the React app-specific quick reference. The master project
-> reference is the root `CLAUDE.md`. For performance track status, see root
-> `CLAUDE.md` or `CURRENT_BUILD_STATUS.md`.
-
-> React frontend for the Stride Logistics GS Inventory system. Connects to Google Sheets backend via Apps Script API. This is a transitional app — the full Stride WMS web app (Supabase/React) is being built separately.
+> React frontend for Stride Logistics GS Inventory system. Google Sheets backend via Apps Script API + Supabase read cache + DispatchTrack delivery integration.
 
 **Owner:** Justin — Stride Logistics, Kent WA
 **Live:** https://www.mystridehub.com
 **Repo:** https://github.com/Stride-dotcom/Stride-GS-app
+**Supabase:** `uqplppugeickmamycpuz` — `https://uqplppugeickmamycpuz.supabase.co`
 
-## IMPORTANT: This is NOT the Stride WMS Web App
+## Do NOT use these skills
 
-Do NOT use these skills — they're for the separate Supabase web app:
-- `stride-wms-domain`
-- `stride-build-instructions`
+`stride-wms-domain`, `stride-build-instructions` — those are for the separate Stride WMS web app, not this project.
 
-This app uses: React + TypeScript + Vite + TanStack Table + Supabase (read cache + DT integration).
+---
 
-## Rules for Claude
+## Rules
 
-- **Read the backend reference** at `../CLAUDE.md` for full GS Inventory architecture, deployment instructions, and script details
-- **Read the build status** at `../Docs/Stride_GS_App_Build_Status.md` for what's built, what's next, and locked decisions
-- **DROPBOX SYNC WARNING:** This project is in a Dropbox-synced folder. Subagents must be READ-ONLY. Main chat does all file writes.
-- **TypeScript build must stay clean** — run `npx tsc --noEmit` to verify no type errors before finishing
-- **Never calculate billing in React** — all billing logic stays server-side in Apps Script
-- **Use existing components** — check `src/components/shared/` before creating new ones (WriteButton, BatchGuard, ActionTooltip, BatchProgress already exist)
-- **Use existing hooks** — check `src/hooks/` before creating new ones
-- **Follow the design system** — Stride orange (#E85D2D), Inter font, shadcn-inspired clean aesthetic
+### Must-do
+
+- **BRANCH FIRST.** `git checkout -b feat/<stream>/<desc>` from `source`. Streams: `feat/warehouse/*`, `feat/delivery/*`, `feat/fix/*`. Use `gh pr create --base source` then `gh pr merge --squash --delete-branch`. Never commit directly to `source` — Dropbox sync conflicts silently overwrite other builders' work.
+- **Deploy AFTER merge.** `git checkout source && git pull origin source` then deploy commands.
+- **Deploy before reporting done.** Execute via Bash, don't just describe.
+- **TypeScript must stay clean** — run `npx tsc --noEmit` (or `node node_modules/typescript/lib/tsc.js --noEmit`) before finishing.
+- **DROPBOX SYNC WARNING:** Main chat ONLY writes files. Subagents are READ-ONLY. Never `isolation: "worktree"`.
+- **Version header on every `.gs`/`.js` edit.** Patch bump for fixes, minor for features. PST timestamps.
+- **Header-based column mapping.** Use `getHeaderMap_()` / `headerMapFromRow_()`. Never positional indexes.
+- **Use existing components** — check `src/components/shared/` (60 components) before creating new ones.
+- **Use existing hooks** — check `src/hooks/` (61 hooks) before creating new ones.
+- **Follow the design system** — Stride orange (#E85D2D), Inter font, `theme.v2` tokens. See `_archive/Docs/Entity_Page_Design_Spec.md` for entity page design.
+- **Update BUILD_STATUS.md at end of session.**
+
+### Must-not-do
+
+- **Never use `getLastRow()` for insert positions** — use `getLastDataRow_()`.
+- **React never calculates billing.** All billing logic stays server-side in Apps Script.
+- **Never deploy from a worktree without merging to source first.** Silent reverts have broken the live app twice.
+- **Never edit `dist/` by hand.** Only `npm run build` writes there.
+- **Never edit the Master Price List sheet directly.** Use Price List page → inline edit → Sync to Sheet.
+- **Never commit `.env`, `.credentials.json`, or any secrets.**
+- **Never re-enable GitHub Actions `deploy.yml`/`ci.yml`** — renamed `*.disabled`, TLS transport issues unresolved.
+
+---
 
 ## Tech Stack
+
 - **Build:** Vite + React 18 + TypeScript
 - **Tables:** TanStack Table v8
 - **Icons:** Lucide React
-- **Router:** HashRouter (for GitHub Pages SPA compatibility)
+- **Router:** HashRouter (GitHub Pages SPA compatibility)
 - **State:** React hooks + TanStack Query patterns (useApiData)
-- **Deploy:** `npm run build` → `cd dist` → `git add -A && git commit -m "msg" && git push origin main --force`
+- **Supabase:** Read cache mirror of all entities + auth + DT integration + messaging + audit log
 
 ## Key Directories
+
 ```
 src/
 ├── components/
 │   ├── layout/          ← Sidebar, Header, AppLayout
-│   ├── shared/          ← Reusable: WriteButton, BatchGuard, ActionTooltip, Detail Panels
+│   ├── shared/          ← 60 reusable components (detail panels, modals, etc.)
 │   └── ui/              ← Base UI primitives
-├── hooks/               ← useApiData, useClients, useInventory, useTasks, etc.
+├── hooks/               ← 61 hooks (data, UI, billing, messaging, etc.)
 ├── lib/
 │   ├── api.ts           ← apiFetch<T>(), typed API functions
-│   └── mockData.ts      ← Mock/demo data (fallback when API unconfigured)
-├── pages/               ← Login, Dashboard, Inventory, Tasks, Repairs, WillCalls, Billing, Payments, Claims, Settings, Receiving
+│   ├── supabase.ts      ← Supabase client
+│   └── supabaseQueries.ts ← Read query helpers
+├── pages/               ← 33 page files (14 main + entity detail pages + job pages)
 └── types/               ← TypeScript type definitions
 ```
 
 ## API Connection
+
 - **Endpoint:** StrideAPI.gs deployed as "Execute as Me, Anyone can access"
 - **Auth:** Token via query parameter (`?token=xxx`)
 - **Config:** Settings → Integrations → API Connection (URL + token stored in localStorage)
@@ -61,26 +77,98 @@ src/
 
 ## Supabase
 
-- **Project:** `https://uqplppugeickmamycpuz.supabase.co`
-- **Migration files:** `supabase/migrations/YYYYMMDDHHMMSS_name.sql`
-- **Apply migrations:** via MCP tool `mcp__94cd3688-d1f9-4417-a61a-6e38b1d2b097` (see root `CLAUDE.md` Deploy Reference)
+- **Migration files:** `supabase/migrations/YYYYMMDDHHMMSS_name.sql` (57 migrations applied)
+- **Apply migrations:** MCP tool `apply_migration(project_id='uqplppugeickmamycpuz', name, query)`. Write the SQL file first (git source of truth), then apply via MCP.
 - **Client:** `src/lib/supabase.ts` — anon key in `.env` as `VITE_SUPABASE_URL` / `VITE_SUPABASE_ANON_KEY`
-- **Read queries:** `src/lib/supabaseQueries.ts`
+- **Edge Functions (6 deployed):** dt-backfill-orders, dt-push-order, dt-sync-statuses, dt-webhook-ingest, notify-new-order, stax-catalog-sync
 
-**Applied migrations:**
-| Migration | Tables |
+## Role-based access
+
+3 tiers: admin (full), staff (no billing/claims/payments/settings/delivery), client (own data only). Enforced in Sidebar nav arrays + `RoleGuard` route wrapper.
+
+---
+
+## Deploy Reference
+
+**Golden rule:** Web App deployments are frozen snapshots. `push-*` pushes source; `deploy-*` makes it live.
+
+All backend commands from `AppScripts/stride-client-inventory/`. React commands from `stride-gs-app/` (parent workspace, never a worktree).
+
+| Change touched… | Command | Live in |
+|---|---|---|
+| React (`src/**`) | `npm run deploy -- "what changed"` (build → push dist → commit source) | 1–2 min |
+| Supabase migration | MCP `apply_migration` | seconds |
+| StrideAPI.gs | `npm run push-api && npm run deploy-api` | ~20s |
+| Consolidated Billing | `npm run push-cb && npm run deploy-cb` | ~20s |
+| Client scripts (×49) | `npm run rollout && npm run deploy-clients` | 3–4 min |
+| Email/doc templates | Edit in app (Settings → Templates) | instant |
+| Service rates/catalog | Price List page → inline edit | instant |
+
+**React build safeguards:** `npm run build` routes through `scripts/build.js` (verify-entry → tsc → vite → sanity checks). `npm run build:raw` disables guards — emergency only.
+
+**All-at-once after a big session:**
+```bash
+cd AppScripts/stride-client-inventory
+npm run push-api && npm run deploy-api
+npm run rollout && npm run deploy-clients
+# Then React (from stride-gs-app/):
+npm run deploy -- "session summary"
+```
+
+---
+
+## Architecture (compact)
+
+```
+Master Price List     →  pricing, class map, email/invoice templates (Supabase-authoritative now)
+Consolidated Billing  →  storage charges, invoicing, client mgmt, QB export
+Client Inventory (×N) →  per-client sheet: Inventory, Shipments, Tasks, Repairs, Will_Calls, Billing_Ledger
+StrideAPI.gs          →  Web App doPost endpoint backing the React app
+React app             →  GitHub Pages, reads StrideAPI + Supabase cache
+Supabase              →  read cache mirror + DT delivery + messaging + audit log + auth
+```
+
+**Data flow:** GAS writes → Google Sheet (authoritative) → Supabase (best-effort write-through) → Realtime → React hooks refetch → UI updates in ~1–2s across all tabs.
+
+**Key invariant:** Supabase is a read cache, not authority. GAS writes are the execution authority. Never block a GAS write on a Supabase failure.
+
+---
+
+## Key reference docs (load on demand)
+
+| File | When to read |
 |---|---|
-| `20260403213925_phase3_read_cache_tables` | inventory, tasks, repairs, will_calls, shipments, billing |
-| `20260411120000_dt_phase1a_schema` | dt_statuses, dt_substatuses, dt_orders, dt_order_items, dt_order_history, dt_order_photos, dt_order_notes, dt_webhook_events, dt_credentials, dt_orders_quarantine, audit_log |
+| `BUILD_STATUS.md` | What's built, what changed recently, current versions |
+| `FEATURE_BACKLOG.md` | Features requested but not yet built |
+| `_archive/Docs/Entity_Page_Design_Spec.md` | Entity page redesign visual spec (locked) |
+| `_archive/Docs/DT_Integration_Build_Plan.md` | DispatchTrack integration plan + locked decisions |
+| `_archive/Docs/Archive/Architectural_Decisions_Log.md` | Full list of 53 architectural decisions |
+| `_archive/Docs/Archive/Session_History.md` | One-liner per builder session |
+| `_archive/Docs/REPO_STRUCTURE.md` | Branch model + deploy flow |
 
-**DispatchTrack integration:** Phase 1a schema live. Phase 1b Orders tab live (admin-only, commit `63207c2`). Phase 1c (webhook ingest) is next. Full plan: `../Docs/DT_Integration_Build_Plan.md`.
+---
 
-## Current Status
-See `../Docs/Stride_GS_App_Build_Status.md` for full status.
+## Deep Links — DO NOT BREAK
 
-**Current:** Phase 2B, 2C, and DT Phase 1b complete.
-- Phase 2B (commit `69d4405`): Tabbed Dashboard, 10s polling, row-click navigation
-- Phase 2C (commit `7328b56`): Optimistic UI — all status changes, field edits, creates
-- DT Phase 1b (commit `63207c2`): Orders tab — Supabase-backed, admin-only, empty until Phase 1c
+Email CTAs link to the React app and auto-open entity panels. **Always use query-param format with `&client=`:**
+```
+https://www.mystridehub.com/#/tasks?open=INSP-62391-1&client=<spreadsheetId>
+```
+Never route-style (`/#/tasks/INSP-62391-1`) — Gmail strips the `#` fragment. Without `&client=`, the detail panel never opens.
 
-**Next:** DispatchTrack Phase 1c (webhook ingest Edge Function). Needs DT API credentials + webhook secret.
+---
+
+## Billing schema (compact)
+
+**Service codes:** `STOR`, `RCVG`, `INSP`, `ASM`, `MNRTU`, `WC`, `REPAIR`, `PLLT`, `PICK`, `LABEL`, `DISP`, `RSTK`, `NO_ID`, `MULTI_INS`, `SIT`, `RUSH`.
+
+**Status values:** Billing: `Unbilled` → `Invoiced` → `Billed` | `Void`. Inventory: `Active` | `Released` | `On Hold` | `Transferred`. Tasks: `Open` | `In Progress` | `Completed` | `Failed` | `Cancelled`. Repairs: `Pending Quote` → `Quote Sent` → `Approved`/`Declined` → `In Progress` → `Completed`/`Failed`. Will Calls: `Pending` | `Scheduled` | `Partial` | `Released` | `Cancelled`.
+
+---
+
+## Project IDs
+
+- **Supabase:** `uqplppugeickmamycpuz`
+- **Stride API (Apps Script):** `134--evzE23rsA3CV_vEFQvZIQ86LE9boeSPBpGMYJ3pLbcW_Te6uqZ1M`
+- **Consolidated Billing:** `1o38NMWpP7FrdCyNLo5Yd-AwHlzcHr2PxZ_QyYwlF20_5ljx_bukOScJQ`
+- **GCP project:** `1011527166052` (higher Drive quotas)
