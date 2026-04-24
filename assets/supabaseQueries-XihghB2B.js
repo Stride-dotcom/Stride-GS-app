@@ -1,1 +1,0 @@
-import{o as e}from"./supabaseQueries-lxKYDNLk.js";export{e as fetchClientsFromSupabase};
