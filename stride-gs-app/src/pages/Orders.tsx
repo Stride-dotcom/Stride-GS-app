@@ -57,12 +57,21 @@ function fmtDate(iso: string): string {
   catch { return iso; }
 }
 
+/** Created-at is a full ISO timestamp (with time); render as short date + time. */
+function fmtDateTime(iso: string): string {
+  if (!iso) return '—';
+  try {
+    const d = new Date(iso);
+    return d.toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' });
+  } catch { return iso; }
+}
+
 // ─── Export ───────────────────────────────────────────────────────────────────
 
 function exportCsv(rows: DtOrderForUI[]) {
-  const headers = ['ID', 'Client', 'Status', 'Service Date', 'Contact', 'Address', 'City', 'State', 'PO #', 'Sidemark', 'Source', 'Last Synced'];
+  const headers = ['ID', 'Client', 'Status', 'Created', 'Service Date', 'Contact', 'Address', 'City', 'State', 'PO #', 'Sidemark', 'Source', 'Last Synced'];
   const data = rows.map(r => [
-    r.dtIdentifier, r.clientName, r.statusName, r.localServiceDate,
+    r.dtIdentifier, r.clientName, r.statusName, r.createdAt, r.localServiceDate,
     r.contactName, r.contactAddress, r.contactCity, r.contactState,
     r.poNumber, r.sidemark, r.source, r.lastSyncedAt,
   ]);
@@ -95,7 +104,10 @@ export function Orders() {
   const [activeTab, setActiveTab] = useState<OrdersTab>(initialTab);
   const { orders, loading, error, refetch, lastFetched } = useOrders();
   const [globalFilter, setGlobalFilter] = useState('');
-  const [sorting, setSorting] = useState<SortingState>([{ id: 'localServiceDate', desc: true }]);
+  // Default sort: newest-created first. Distinguishes order age from service
+  // date (which is when the delivery is scheduled, not when the order entered
+  // the system). A same-day rush booked this morning should land at the top.
+  const [sorting, setSorting] = useState<SortingState>([{ id: 'createdAt', desc: true }]);
   const [selectedOrder, setSelectedOrder] = useState<DtOrderForUI | null>(null);
   const [categoryFilter, setCategoryFilter] = useState<string>('');
   const [showCreateModal, setShowCreateModal] = useState(false);
@@ -106,19 +118,29 @@ export function Orders() {
     [orders]
   );
 
-  const filteredByCategory = useMemo(() => {
-    if (!categoryFilter) return orders;
-    return orders.filter(o => o.statusCategory === categoryFilter);
-  }, [orders, categoryFilter]);
+  // The main Orders tab excludes rows that still live in the Review Queue
+  // (pending_review / revision_requested). Those surface on the Review Queue
+  // tab only until a staffer approves them — at which point review_status
+  // flips to 'approved' and they appear here.
+  const ordersTabEligible = useMemo(
+    () => orders.filter(o => o.reviewStatus !== 'pending_review' && o.reviewStatus !== 'revision_requested'),
+    [orders]
+  );
 
-  // Category counts for filter pills
+  const filteredByCategory = useMemo(() => {
+    if (!categoryFilter) return ordersTabEligible;
+    return ordersTabEligible.filter(o => o.statusCategory === categoryFilter);
+  }, [ordersTabEligible, categoryFilter]);
+
+  // Category counts for filter pills — scoped to Orders-tab-eligible rows so
+  // the pill counts agree with what the table below actually shows.
   const categoryCounts = useMemo(() => {
     const counts: Record<string, number> = {};
-    for (const o of orders) {
+    for (const o of ordersTabEligible) {
       counts[o.statusCategory] = (counts[o.statusCategory] ?? 0) + 1;
     }
     return counts;
-  }, [orders]);
+  }, [ordersTabEligible]);
 
   const columns = useMemo(() => [
     ch.accessor('dtIdentifier', {
@@ -129,6 +151,11 @@ export function Orders() {
     ch.accessor('statusCategory', {
       header: 'Status',
       cell: info => <StatusChip order={info.row.original} />,
+    }),
+    ch.accessor('createdAt', {
+      header: 'Created',
+      cell: info => fmtDateTime(info.getValue()),
+      sortingFn: 'datetime',
     }),
     ch.accessor('localServiceDate', {
       header: 'Service Date',
@@ -261,7 +288,7 @@ export function Orders() {
       {/* Dark KPI strip */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 16, marginBottom: 20, flexShrink: 0 }}>
         {[
-          { label: 'Total Orders', value: orders.length, color: '#fff' },
+          { label: 'Total Orders', value: ordersTabEligible.length, color: '#fff' },
           { label: 'Open', value: categoryCounts.open ?? 0, color: '#60A5FA' },
           { label: 'In Progress', value: categoryCounts.in_progress ?? 0, color: '#C084FC' },
           { label: 'Completed', value: categoryCounts.completed ?? 0, color: '#4ADE80' },
@@ -295,7 +322,7 @@ export function Orders() {
             onClick={() => setCategoryFilter('')}
             style={{ padding: '8px 16px', borderRadius: 100, fontSize: 11, fontWeight: 600, letterSpacing: '1px', textTransform: 'uppercase', cursor: 'pointer', border: !categoryFilter ? 'none' : '1px solid rgba(0,0,0,0.08)', background: !categoryFilter ? '#1C1C1C' : '#fff', color: !categoryFilter ? '#fff' : '#666' }}
           >
-            All ({orders.length})
+            All ({ordersTabEligible.length})
           </button>
           {Object.entries(CATEGORY_CFG).map(([cat, cfg]) => {
             const count = categoryCounts[cat] ?? 0;

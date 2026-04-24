@@ -1436,6 +1436,11 @@ export interface DtOrderForUI {
   // Phase 2c — order type + linked pickup/delivery pair
   orderType: 'delivery' | 'pickup' | 'pickup_and_delivery' | 'service_only' | 'transfer';
   linkedOrderId: string | null;
+  // Provenance timestamp — when the dt_orders row was inserted into Supabase.
+  // Distinct from localServiceDate (when the delivery is scheduled) and
+  // lastSyncedAt (when DT last pushed an update). Used as the default sort key
+  // on the Orders tab so freshly-created orders surface at the top.
+  createdAt: string;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1562,6 +1567,7 @@ export async function fetchDtOrdersFromSupabase(
         // Phase 2c — order type + linked pickup/delivery
         orderType: (row.order_type as DtOrderForUI['orderType']) ?? (row.is_pickup ? 'pickup' : 'delivery'),
         linkedOrderId: row.linked_order_id,
+        createdAt: row.created_at,
       };
     });
   } catch {
