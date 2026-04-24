@@ -720,6 +720,7 @@ function _sbResyncAllStaxInvoices(ss) {
     var cStaxCust = col("Stax Customer ID");
     var cInvDate = col("Invoice Date");
     var cDueDate = col("Due Date");
+    var cSchedDate = col("Scheduled Date");  // v38.120.0 — optional column, auto-created on first edit
     var cAmount = col("Total Amount");
     var cLineItems = col("Line Items JSON");
     var cStaxId = col("Stax Invoice ID");
@@ -742,6 +743,9 @@ function _sbResyncAllStaxInvoices(ss) {
         stax_customer_id: staxCustId,
         invoice_date: cInvDate >= 0 ? _formatDateLoose(data[i][cInvDate]) : "",
         due_date: cDueDate >= 0 ? _formatDateLoose(data[i][cDueDate]) : "",
+        // v38.120.0 — Scheduled Date: when user has overridden it. Empty means
+        // "use due date" — charge loop handles the fallback.
+        scheduled_date: cSchedDate >= 0 && data[i][cSchedDate] ? _formatDateLoose(data[i][cSchedDate]) : null,
         amount: cAmount >= 0 ? Number(data[i][cAmount] || 0) : 0,
         line_items_json: cLineItems >= 0 ? String(data[i][cLineItems] || "") : "",
         stax_id: cStaxId >= 0 ? String(data[i][cStaxId] || "") : "",
@@ -2833,10 +2837,15 @@ function _executeChargeRun() {
   // v4.6.1 — Header-based lookup for Auto Charge column (fix for hardcoded
   // index 12 mismatching the actual sheet layout).
   var acColIdxExec = -1;
+  // v4.7.0 — Header-based lookup for Scheduled Date column. When set, the
+  // charge loop fires on Scheduled Date instead of Due Date. Empty → fallback.
+  var schedColIdxExec = -1;
   try {
     var hdrsExec = invData[0] || [];
     for (var hh2 = 0; hh2 < hdrsExec.length; hh2++) {
-      if (String(hdrsExec[hh2]).trim() === "Auto Charge") { acColIdxExec = hh2; break; }
+      var _hdrName = String(hdrsExec[hh2]).trim();
+      if (_hdrName === "Auto Charge") acColIdxExec = hh2;
+      else if (_hdrName === "Scheduled Date") schedColIdxExec = hh2;
     }
   } catch (_) {}
 
@@ -2851,6 +2860,11 @@ function _executeChargeRun() {
     var staxInvId  = String(colHValues[i][0]).trim();
     var staxCustId = String(invData[i + 1][2]).trim();
     var dueDate    = String(invData[i + 1][4]).trim();
+    // v4.7.0 — Scheduled Date override: when set, charge fires on this date
+    // instead of Due Date. Empty → fall back to dueDate for timing.
+    var schedDateRaw = (schedColIdxExec >= 0 && invData[i + 1].length > schedColIdxExec)
+      ? String(invData[i + 1][schedColIdxExec] || "").trim()
+      : "";
     var total      = parseFloat(invData[i + 1][5]);
     var docNum     = String(invData[i + 1][0]).trim();
     var custName   = String(invData[i + 1][1]).trim();
@@ -2866,8 +2880,10 @@ function _executeChargeRun() {
       continue;
     }
 
-    // Gate 3: due date must be parseable and on or before today
-    var dueDateFormatted = _parseDateForStax(dueDate);
+    // Gate 3: charge date must be parseable and on or before today.
+    // v4.7.0 — Prefer Scheduled Date (operator override) over Due Date.
+    var chargeDateSrc = schedDateRaw || dueDate;
+    var dueDateFormatted = _parseDateForStax(chargeDateSrc);
     if (!dueDateFormatted || dueDateFormatted > today) {
       stats.skippedFutureDue++;
       continue;
