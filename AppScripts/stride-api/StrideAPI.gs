@@ -16,6 +16,19 @@
               lookup now happen in the Edge Function; GAS is used only for GmailApp send capability.
    =================================================== */
 /* ===================================================
+   StrideAPI.gs — v38.118.0 — 2026-04-23 PST — Fix Stax invoice duplicate dedup (date + amount normalization)
+   v38.118.0: Dedup keys now normalize dates (Date object vs string) and amounts
+              (Number vs formatted string) before building the key. Previously
+              duplicates slipped through because sheet reads returned Date objects
+              while writes used ISO strings — `String(dateObj)` vs `String("04/23/2026")`
+              produced different keys for the same invoice.
+              NEW: stax_normalizeDate_ helper. Key format now:
+                docNum|normalizedName|amount.toFixed(2)|yyyy-MM-dd
+              Symmetrical fix in StaxAutoPay.gs _invoiceKey (same bug, two paths).
+              Companion "Deduplicate Invoices" menu action in StaxAutoPay to clean
+              up existing duplicates created before this fix.
+   =================================================== */
+/* ===================================================
    StrideAPI.gs — v38.117.0 — 2026-04-23 PST — CLIENT_FIELDS schema single-source-of-truth refactor
    v38.117.0: MAJOR REFACTOR — eliminates the "field missing from one layer"
               bug class for client settings edits (Bug 7 regression pattern).
@@ -27012,12 +27025,41 @@ function stax_normalizeName_(name) {
 }
 
 /**
- * Build a dedup key for an invoice: docNum|normalizedName|amount|date.
- * Mirrors StaxAutoPay.gs _invoiceKey().
+ * Normalize a date value to yyyy-MM-dd regardless of whether it's a Date
+ * object (from sheet read) or a string. Without this, dedup keys mismatched
+ * because `String(dateObj)` = "Thu Apr 23 2026 00:00:00 GMT..." while
+ * `String("04/23/2026")` = "04/23/2026" — same invoice, different keys.
+ */
+function stax_normalizeDate_(d) {
+  if (!d) return "";
+  if (d instanceof Date) {
+    if (isNaN(d.getTime())) return "";
+    return Utilities.formatDate(d, Session.getScriptTimeZone(), "yyyy-MM-dd");
+  }
+  var s = String(d).trim();
+  if (!s) return "";
+  // Try parsing — covers ISO strings, MM/DD/YYYY, etc.
+  var parsed = new Date(s);
+  if (!isNaN(parsed.getTime())) {
+    return Utilities.formatDate(parsed, Session.getScriptTimeZone(), "yyyy-MM-dd");
+  }
+  return s;
+}
+
+/**
+ * Build a dedup key for an invoice: docNum|normalizedName|amount|normalizedDate.
+ * v38.118.0 — now normalizes dates (Date object vs string) and amounts
+ * (Number vs string) so keys match across write paths. Previously duplicates
+ * slipped through because IIF import stored date as Date object and QB export
+ * auto-import stored it as string "04/23/2026".
  */
 function stax_invoiceKey_(docNum, name, amount, date) {
+  // Normalize amount: Number(raw).toFixed(2) collapses "50" / 50 / 50.00 / "$50.00" to the same string
+  var normAmount;
+  var n = Number(String(amount).replace(/[$,]/g, ""));
+  normAmount = isFinite(n) ? n.toFixed(2) : String(amount);
   return String(docNum).trim() + "|" + stax_normalizeName_(name) + "|" +
-         String(amount) + "|" + String(date).trim();
+         normAmount + "|" + stax_normalizeDate_(date);
 }
 
 /**

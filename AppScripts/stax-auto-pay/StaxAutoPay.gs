@@ -195,8 +195,67 @@ function onOpen() {
     .addItem('Disable Daily Auto-Charge', 'removeDailyTrigger')
     .addSeparator()
     .addItem('Validate Sheets', 'validateSheetsUI')
+    .addItem('Deduplicate Invoices', 'deduplicateInvoices')
     .addItem('Reset Operational Sheets...', 'resetOperationalSheets')
     .addToUi();
+}
+
+// ============================================================
+// DEDUPLICATE INVOICES — one-shot cleanup for rows created by both
+// the IIF Import path (StaxAutoPay) and the QB Export auto-import
+// path (StrideAPI.gs handleQbExport_) before the date-normalization
+// fix in v38.118.0. Keeps the OLDEST row (by row number) for each
+// unique dedup key; deletes the rest.
+// ============================================================
+function deduplicateInvoices() {
+  var ui = SpreadsheetApp.getUi();
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sh = ss.getSheetByName(SHEET_NAMES.INVOICES);
+  if (!sh) { ui.alert('Invoices sheet not found.'); return; }
+
+  var lr = sh.getLastRow();
+  if (lr < 2) { ui.alert('No invoice rows to dedupe.'); return; }
+
+  var data = sh.getDataRange().getValues();
+  var seen = {};            // key → first row (1-based) that had it
+  var rowsToDelete = [];    // rows to delete, descending
+
+  for (var r = 1; r < data.length; r++) {
+    var docNum = String(data[r][0] || '').trim();
+    if (!docNum) continue;  // skip blank invoice rows
+    // Skip rows already marked DELETED — they're tombstones
+    var status = String(data[r][8] || '').trim().toUpperCase();
+    if (status === 'DELETED') continue;
+
+    var key = _invoiceKey(docNum, String(data[r][1] || ''), data[r][5], data[r][3]);
+    if (seen[key] === undefined) {
+      seen[key] = r + 1;
+    } else {
+      // Duplicate — keep the older row (lower row number), delete this one
+      rowsToDelete.push(r + 1);
+    }
+  }
+
+  if (rowsToDelete.length === 0) {
+    ui.alert('No duplicates found.');
+    return;
+  }
+
+  var resp = ui.alert(
+    'Remove duplicates?',
+    'Found ' + rowsToDelete.length + ' duplicate invoice row(s). ' +
+    'The OLDEST copy of each is kept; extras will be deleted.\n\n' +
+    'This cannot be undone.\n\nContinue?',
+    ui.ButtonSet.YES_NO
+  );
+  if (resp !== ui.Button.YES) return;
+
+  // Delete descending so row indexes stay stable
+  rowsToDelete.sort(function(a, b) { return b - a; });
+  for (var d = 0; d < rowsToDelete.length; d++) {
+    sh.deleteRow(rowsToDelete[d]);
+  }
+  ui.alert('Removed ' + rowsToDelete.length + ' duplicate row(s).');
 }
 
 // ============================================================
@@ -2318,9 +2377,32 @@ function _writeInvoicesToTab(invoices) {
   return newRows.length;
 }
 
+/**
+ * Normalize a date value to yyyy-MM-dd regardless of whether it's a Date
+ * object (from sheet read) or a string. Without this, dedup keys mismatched
+ * across write paths — see StrideAPI.gs stax_normalizeDate_ for the same fix.
+ */
+function _normalizeDate(d) {
+  if (!d) return '';
+  if (d instanceof Date) {
+    if (isNaN(d.getTime())) return '';
+    return Utilities.formatDate(d, Session.getScriptTimeZone(), 'yyyy-MM-dd');
+  }
+  var s = String(d).trim();
+  if (!s) return '';
+  var parsed = new Date(s);
+  if (!isNaN(parsed.getTime())) {
+    return Utilities.formatDate(parsed, Session.getScriptTimeZone(), 'yyyy-MM-dd');
+  }
+  return s;
+}
+
 function _invoiceKey(docNum, name, amount, date) {
+  // Normalize amount: collapse Number/string/formatted to a consistent string
+  var n = Number(String(amount).replace(/[$,]/g, ''));
+  var normAmount = isFinite(n) ? n.toFixed(2) : String(amount);
   return String(docNum).trim() + '|' + _normalizeName(name) + '|' +
-         String(amount) + '|' + String(date).trim();
+         normAmount + '|' + _normalizeDate(date);
 }
 
 // ============================================================
