@@ -16,6 +16,18 @@
               lookup now happen in the Edge Function; GAS is used only for GmailApp send capability.
    =================================================== */
 /* ===================================================
+   StrideAPI.gs — v38.119.0 — 2026-04-23 PST — Default Stax due date honors client payment terms
+   v38.119.0: handleCreateStaxInvoices_ now looks up the client's Payment Terms
+              from CB Clients (by QB Customer Name or Stax Customer ID) and uses
+              them to compute the default Due Date when the IIF import didn't
+              provide one. Previously always +30 days regardless of Net 15 / Net 10
+              / Due on receipt terms, causing false "past-due" states.
+              Companion frontend changes: Payments page due-date inputs now
+              controlled + optimistic with error revert (mirrors Billing pattern).
+              stax_invoices realtime subscription wired through useSupabaseRealtime
+              → entityEvents → Payments page auto-refetch.
+   =================================================== */
+/* ===================================================
    StrideAPI.gs — v38.118.0 — 2026-04-23 PST — Fix Stax invoice duplicate dedup (date + amount normalization)
    v38.118.0: Dedup keys now normalize dates (Date object vs string) and amounts
               (Number vs formatted string) before building the key. Previously
@@ -28684,6 +28696,51 @@ function handleCreateStaxInvoices_(payload) {
     }
     if (!payUrlBase) payUrlBase = "https://app.staxpayments.com/#/bill/";
 
+    // v38.119.0 — Build qbCustomerName/staxCustomerId → paymentTerms lookup
+    // so due date defaults honor each client's terms (Net 15, Net 30, etc.)
+    // instead of the hardcoded +30 days. Prior behavior was a correctness bug:
+    // Net 15 clients got Net 30 defaults, making invoices appear overdue late.
+    var paymentTermsByQbName = {};
+    var paymentTermsByStaxId = {};
+    try {
+      var cbId_ = prop_("CB_SPREADSHEET_ID");
+      if (cbId_) {
+        var cbSS_ = SpreadsheetApp.openById(cbId_);
+        var clientsSh_ = cbSS_.getSheetByName("Clients");
+        if (clientsSh_ && clientsSh_.getLastRow() >= 2) {
+          var cbRows_ = clientsSh_.getDataRange().getValues();
+          var cbHdr_ = {};
+          for (var ch = 0; ch < cbRows_[0].length; ch++) {
+            cbHdr_[String(cbRows_[0][ch] || "").trim().toUpperCase()] = ch;
+          }
+          var qbNameIdx_ = cbHdr_["QB_CUSTOMER_NAME"];
+          var ptIdx_     = cbHdr_["PAYMENT TERMS"];
+          var sidIdx_    = cbHdr_["STAX CUSTOMER ID"];
+          var cnameIdx_  = cbHdr_["CLIENT NAME"];
+          if (ptIdx_ !== undefined) {
+            for (var cr = 1; cr < cbRows_.length; cr++) {
+              var pt_ = String(cbRows_[cr][ptIdx_] || "").trim();
+              if (!pt_) continue;
+              if (qbNameIdx_ !== undefined) {
+                var qn_ = String(cbRows_[cr][qbNameIdx_] || "").trim();
+                if (qn_) paymentTermsByQbName[stax_normalizeName_(qn_)] = pt_;
+              }
+              if (cnameIdx_ !== undefined) {
+                var cn_ = String(cbRows_[cr][cnameIdx_] || "").trim();
+                if (cn_) paymentTermsByQbName[stax_normalizeName_(cn_)] = pt_;
+              }
+              if (sidIdx_ !== undefined) {
+                var sid_ = String(cbRows_[cr][sidIdx_] || "").trim();
+                if (sid_) paymentTermsByStaxId[sid_] = pt_;
+              }
+            }
+          }
+        }
+      }
+    } catch (ptErr) {
+      Logger.log("handleCreateStaxInvoices_: paymentTerms lookup failed (non-blocking): " + ptErr.message);
+    }
+
     var stats = { total: 0, created: 0, skippedDupe: 0, skippedNoCustomer: 0, skippedInvalid: 0, apiErrors: 0 };
     var errorDetails = []; // v38.11.0: collect detailed error messages for UI display
 
@@ -28733,13 +28790,23 @@ function handleCreateStaxInvoices_(payload) {
       }
 
       // Build due date
+      // v38.119.0 — Honor client payment terms when Due Date is blank.
+      // Previously defaulted to invoice date + 30 days regardless of terms,
+      // which was wrong for Net 15 / Net 10 / Due on receipt clients.
       var dueDateFormatted = stax_parseDateForStax_(dueDate);
       if (!dueDateFormatted) {
         var invDateParsed = stax_parseDateForStax_(invDate);
         if (invDateParsed) {
-          var d30 = new Date(invDateParsed);
-          d30.setDate(d30.getDate() + 30);
-          dueDateFormatted = Utilities.formatDate(d30, Session.getScriptTimeZone(), "yyyy-MM-dd");
+          // Look up client's payment terms (falls back to Net 30 if not set)
+          var termsForClient = paymentTermsByStaxId[staxCustId]
+                            || paymentTermsByQbName[stax_normalizeName_(custName)]
+                            || "Net 30";
+          var termsMatch = String(termsForClient).toUpperCase().match(/NET\s*(\d+)/);
+          var daysToAdd = termsMatch ? parseInt(termsMatch[1], 10) : 0;
+          // "Due on receipt" / unknown → 0 days (due today)
+          var dDue = new Date(invDateParsed);
+          if (daysToAdd > 0) dDue.setDate(dDue.getDate() + daysToAdd);
+          dueDateFormatted = Utilities.formatDate(dDue, Session.getScriptTimeZone(), "yyyy-MM-dd");
         }
       }
 

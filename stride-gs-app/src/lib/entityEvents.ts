@@ -21,7 +21,9 @@ type EntityType =
   | 'email_template' | 'service_catalog' | 'quote_catalog'
   | 'expected_shipment' | 'delivery_zone'
   // v38.114.0 — Billing Activity Log audit trail
-  | 'billing_activity_log';
+  | 'billing_activity_log'
+  // v38.119.0 — Payments page live updates
+  | 'stax_invoice';
 
 type EntityEventCallback = (entityType: EntityType, entityId: string) => void;
 

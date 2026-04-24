@@ -26,6 +26,7 @@ import { InfoTooltip } from '../components/shared/InfoTooltip';
 import { BulkResultSummary } from '../components/shared/BulkResultSummary';
 import { BatchProgress, type BatchState } from '../components/shared/BatchProgress';
 import { runBatchLoop, mergePreflightSkips } from '../lib/batchLoop';
+import { entityEvents } from '../lib/entityEvents';
 import {
   fetchStaxInvoicesFromSupabase,
   fetchStaxChargeLogFromSupabase,
@@ -479,6 +480,18 @@ export function Payments() {
   }, []);
 
   useEffect(() => { loadData(); }, [loadData]);
+
+  // v38.119.0 — Realtime subscription: refetch Payments when stax_invoices changes
+  // in Supabase (another tab edits, backend write-through, etc.). Debounced via
+  // the central realtime channel + entityEvents bus. No polling.
+  useEffect(() => {
+    const unsub = entityEvents.subscribe((entityType) => {
+      if (entityType === 'stax_invoice') {
+        loadData();
+      }
+    });
+    return unsub;
+  }, [loadData]);
 
   // ─── Computed summary values ───
   const pendingInvoices = invoices.filter(i => i.status === 'PENDING' || i.status === 'Pending');
@@ -1158,21 +1171,51 @@ export function Payments() {
                       ${i.amount.toFixed(2)}
                     </td>
                     <td style={td}>
-                      <input type="date" defaultValue={i.dueDate}
+                      <input type="date" value={i.dueDate || ''}
+                        onChange={(e) => {
+                          // Controlled input — update local state immediately so the field shows the new value
+                          const v = e.target.value;
+                          setInvoices(prev => prev.map(inv => inv.qbInvoice === i.qbInvoice ? { ...inv, dueDate: v } : inv));
+                        }}
                         onBlur={async (e) => {
-                          if (e.target.value && e.target.value !== i.dueDate) {
-                            const res = await postUpdateStaxInvoice({ qbInvoiceNo: i.qbInvoice, dueDate: e.target.value });
-                            if (res.ok) { loadData(true); } else setError(res.error || 'Update failed');
+                          const newVal = e.target.value;
+                          // Skip if no change (setInvoices above already set the state, so compare to original)
+                          if (!newVal || newVal === i.dueDate) return;
+                          // Optimistic update already applied via onChange. Save to server.
+                          const origDueDate = i.dueDate;
+                          try {
+                            const res = await postUpdateStaxInvoice({ qbInvoiceNo: i.qbInvoice, dueDate: newVal });
+                            if (!res.ok || !res.data?.success) {
+                              // Revert on failure
+                              setInvoices(prev => prev.map(inv => inv.qbInvoice === i.qbInvoice ? { ...inv, dueDate: origDueDate } : inv));
+                              setError(res.error || res.data?.message || 'Update failed');
+                            }
+                          } catch (err) {
+                            setInvoices(prev => prev.map(inv => inv.qbInvoice === i.qbInvoice ? { ...inv, dueDate: origDueDate } : inv));
+                            setError(String(err));
                           }
                         }}
                         style={{ padding: '4px 8px', fontSize: 12, border: `1px solid ${theme.colors.border}`, borderRadius: 4, fontFamily: 'inherit' }} />
                     </td>
                     <td style={td}>
-                      <input defaultValue={i.notes}
+                      <input value={i.notes || ''}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          setInvoices(prev => prev.map(inv => inv.qbInvoice === i.qbInvoice ? { ...inv, notes: v } : inv));
+                        }}
                         onBlur={async (e) => {
-                          if (e.target.value !== i.notes) {
-                            const res = await postUpdateStaxInvoice({ qbInvoiceNo: i.qbInvoice, notes: e.target.value });
-                            if (res.ok) { loadData(true); } else setError(res.error || 'Update failed');
+                          const newVal = e.target.value;
+                          if (newVal === i.notes) return;
+                          const origNotes = i.notes;
+                          try {
+                            const res = await postUpdateStaxInvoice({ qbInvoiceNo: i.qbInvoice, notes: newVal });
+                            if (!res.ok || !res.data?.success) {
+                              setInvoices(prev => prev.map(inv => inv.qbInvoice === i.qbInvoice ? { ...inv, notes: origNotes } : inv));
+                              setError(res.error || res.data?.message || 'Update failed');
+                            }
+                          } catch (err) {
+                            setInvoices(prev => prev.map(inv => inv.qbInvoice === i.qbInvoice ? { ...inv, notes: origNotes } : inv));
+                            setError(String(err));
                           }
                         }}
                         placeholder="Notes..."
@@ -1411,11 +1454,24 @@ export function Payments() {
                         </label>
                       </td>
                       <td style={{ ...td, width: 50 }}>
-                        <input type="date" defaultValue={i.dueDate} onClick={e => e.stopPropagation()}
+                        <input type="date" value={i.dueDate || ''} onClick={e => e.stopPropagation()}
+                          onChange={(e) => {
+                            const v = e.target.value;
+                            setInvoices(prev => prev.map(inv => inv.qbInvoice === i.qbInvoice ? { ...inv, dueDate: v } : inv));
+                          }}
                           onBlur={async (e) => {
-                            if (e.target.value && e.target.value !== i.dueDate) {
-                              const res = await postUpdateStaxInvoice({ qbInvoiceNo: i.qbInvoice, dueDate: e.target.value });
-                              if (res.ok) { loadData(true); } else setError(res.error || 'Update failed');
+                            const newVal = e.target.value;
+                            if (!newVal || newVal === i.dueDate) return;
+                            const origDueDate = i.dueDate;
+                            try {
+                              const res = await postUpdateStaxInvoice({ qbInvoiceNo: i.qbInvoice, dueDate: newVal });
+                              if (!res.ok || !res.data?.success) {
+                                setInvoices(prev => prev.map(inv => inv.qbInvoice === i.qbInvoice ? { ...inv, dueDate: origDueDate } : inv));
+                                setError(res.error || res.data?.message || 'Update failed');
+                              }
+                            } catch (err) {
+                              setInvoices(prev => prev.map(inv => inv.qbInvoice === i.qbInvoice ? { ...inv, dueDate: origDueDate } : inv));
+                              setError(String(err));
                             }
                           }}
                           title="Change due date"
