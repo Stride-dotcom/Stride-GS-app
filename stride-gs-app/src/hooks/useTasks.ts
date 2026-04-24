@@ -82,6 +82,7 @@ function mapToAppTask(api: ApiTask): Task {
     description: api.description,
     location: api.location || undefined,
     sidemark: api.sidemark || undefined,
+    reference: api.reference || undefined,
     assignedTo: api.assignedTo || undefined,
     created: api.created,
     dueDate: api.dueDate || undefined,
@@ -226,6 +227,7 @@ export function useTasks(autoFetch = true, filterClientSheetId?: string | string
         description: b.description,
         location: b.location,
         sidemark: b.sidemark,
+        reference: b.reference || '',
         shipmentNumber: b.shipmentNumber,
         created: b.created,
         // v38.60.1 — batch now includes these (was hardcoded empty)
