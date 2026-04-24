@@ -58,7 +58,12 @@ export interface CoverageOption {
   included: boolean;    // true = free (Standard Valuation)
 }
 
-export type QuoteStatus = 'draft' | 'sent' | 'accepted' | 'declined' | 'expired' | 'void';
+// 'deleted' is the soft-delete marker. Kept on the row so cross-device
+// hydrate can propagate the deletion (the rescue logic preserves
+// local-only rows defensively, so a hard DELETE would get re-resurrected
+// from a stale device's localStorage on its next login). Deleted quotes
+// are filtered out of every UI surface.
+export type QuoteStatus = 'draft' | 'sent' | 'accepted' | 'declined' | 'expired' | 'void' | 'deleted';
 
 export interface ClassLine {
   classId: string;

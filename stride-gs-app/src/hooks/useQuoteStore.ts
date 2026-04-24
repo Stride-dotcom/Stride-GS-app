@@ -396,8 +396,17 @@ export function useQuoteStore() {
     setQuotes(prev => prev.map(q => q.id === id ? { ...q, ...patch, updatedAt: new Date().toISOString() } : q));
   }, [setQuotes]);
 
+  // Soft delete — flip status to 'deleted' and let the normal upsert
+  // path carry the change to Supabase. The row stays in local + server
+  // state so that a hydrate from another device with stale localStorage
+  // still sees the tombstone and won't resurrect the quote via the
+  // rescue-local-only-rows path. Every UI surface filters status ===
+  // 'deleted' out of the visible list, so this reads as a hard delete
+  // to the user.
   const deleteQuote = useCallback((id: string) => {
-    setQuotes(prev => prev.filter(q => q.id !== id));
+    setQuotes(prev => prev.map(q => q.id === id
+      ? { ...q, status: 'deleted' as const, updatedAt: new Date().toISOString() }
+      : q));
   }, [setQuotes]);
 
   const duplicateQuote = useCallback((id: string): Quote | null => {
@@ -426,7 +435,10 @@ export function useQuoteStore() {
 
   // ── Quote import/export (quotes only — catalog not exported anymore) ──
   const exportQuotes = useCallback((): string => {
-    return JSON.stringify({ quotes, settings, version: 2 }, null, 2);
+    // Exclude soft-deleted rows from the user-facing export so it
+    // matches what they see on-screen.
+    const live = quotes.filter(q => q.status !== 'deleted');
+    return JSON.stringify({ quotes: live, settings, version: 2 }, null, 2);
   }, [quotes, settings]);
 
   const importQuotes = useCallback((json: string): { imported: number; error?: string } => {
@@ -461,8 +473,14 @@ export function useQuoteStore() {
     setSettings(DEFAULT_SETTINGS);
   }, [setSettings]);
 
+  // Hide soft-deleted rows from every external consumer. The internal
+  // state still carries them so hydrate can compare IDs against server
+  // truth and propagate the tombstone across devices.
+  const visibleQuotes = useMemo(() => quotes.filter(q => q.status !== 'deleted'), [quotes]);
+
   return {
-    quotes, catalog, settings,
+    quotes: visibleQuotes,
+    catalog, settings,
     setQuotes, setCatalog, setSettings,
     createQuote, updateQuote, deleteQuote, duplicateQuote, setQuoteStatus,
     exportQuotes, importQuotes,
