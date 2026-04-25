@@ -92,6 +92,14 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
     category: string | null;
     taxable: boolean | null;
     flat_rate: number | null;
+    // v38.124.1 — class-based pricing. `billing` is "flat" or
+    // "class_based"; for class_based, `rates` is a jsonb keyed by
+    // class id (XS / S / M / L / XL — see classes table) with a
+    // numeric rate per class. Restocking, packaging, palletizing,
+    // and most warehouse services use this. We resolve the rate at
+    // line-add time using the repair's item class.
+    billing: string | null;
+    rates: Record<string, number | null> | null;
   };
   type TaxArea = { id: string; name: string; rate: number };
 
@@ -122,7 +130,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
     (async () => {
       const [catRes, taxRes] = await Promise.all([
         supabase.from('service_catalog')
-          .select('code, name, category, taxable, flat_rate')
+          .select('code, name, category, taxable, flat_rate, billing, rates')
           .in('category', ['Warehouse', 'Repair'])
           .eq('active', true)
           .order('category', { ascending: true })
@@ -150,6 +158,27 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // v38.124.1 — once the catalog finishes loading, back-fill rates on
+  // any line that still has an empty rate (the initial state was built
+  // at mount time before the catalog was available, so the default
+  // REPAIR line started with rate=''). Class-based lines pick up the
+  // class-resolved rate from resolveCatalogRate via the same path
+  // addLineFromCatalog uses. User-typed rates are NEVER overwritten.
+  useEffect(() => {
+    if (serviceCatalog.length === 0) return;
+    setQuoteLines(prev => prev.map(l => {
+      if (l.rate && l.rate !== '0') return l;        // user typed something, leave it
+      const entry = serviceCatalog.find(e => e.code === l.svcCode);
+      if (!entry) return l;
+      const filled = resolveCatalogRate(entry);
+      if (!filled) return l;                          // catalog has nothing usable
+      return { ...l, rate: filled, taxable: entry.taxable === true };
+    }));
+  // resolveCatalogRate closes over `repair.itemClass` + serviceCatalog;
+  // re-run if the class or catalog changes. setQuoteLines is stable.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [serviceCatalog, repair.itemClass]);
+
   // Live totals — recomputed on every keystroke; same math the server
   // re-runs on submit so what you see is what gets quoted.
   const totals = useMemo(() => {
@@ -170,6 +199,37 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
     return { subtotal, taxable, taxRate, taxAmount, grand, taxAreaName: area?.name || '' };
   }, [quoteLines, taxAreaId, taxAreas]);
 
+  // v38.124.1 — class-aware rate resolver. Mirrors the same logic the
+  // Quote Tool uses (`quoteCalc.ts`):
+  //   • billing='class_based' + repair has an itemClass → use rates[itemClass]
+  //   • Otherwise → use flat_rate (covers REPAIR + any non-class service)
+  //   • If the lookup yields nothing (item missing class, rate not set
+  //     in the catalog for that class) → return '' so the operator sees
+  //     the rate cell empty and types one in. Better than silently
+  //     showing $0.
+  // Returns a STRING because the line draft stores rate as a string for
+  // free typing. Bare numbers go through String() — empty stays empty.
+  function resolveCatalogRate(entry: CatalogEntry | undefined): string {
+    if (!entry) return '';
+    if (entry.billing === 'class_based' && repair.itemClass) {
+      const cls = String(repair.itemClass).trim();
+      const rate = entry.rates && entry.rates[cls];
+      if (rate != null && Number(rate) > 0) return String(rate);
+      // Try common case variants in case the catalog stores keys in a
+      // different case than the inventory column (e.g. "M" vs "m").
+      const upper = cls.toUpperCase();
+      const lower = cls.toLowerCase();
+      if (entry.rates) {
+        if (entry.rates[upper] != null && Number(entry.rates[upper]) > 0) return String(entry.rates[upper]);
+        if (entry.rates[lower] != null && Number(entry.rates[lower]) > 0) return String(entry.rates[lower]);
+      }
+      // Fall through to flat_rate (which is normally 0 for class-based,
+      // but a few catalog rows may have a sane fallback set).
+    }
+    if (entry.flat_rate != null && Number(entry.flat_rate) > 0) return String(entry.flat_rate);
+    return '';
+  }
+
   function addLineFromCatalog(code: string) {
     const entry = serviceCatalog.find(e => e.code === code);
     if (!entry) return;
@@ -177,7 +237,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
       svcCode: entry.code,
       svcName: entry.name || entry.code,
       qty: '1',
-      rate: entry.flat_rate != null ? String(entry.flat_rate) : '',
+      rate: resolveCatalogRate(entry),
       taxable: entry.taxable === true,
     }]);
   }
@@ -188,7 +248,10 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
     setQuoteLines(prev => prev.filter((_, i) => i !== idx));
   }
   // When the user changes an svcCode dropdown on an existing line, pull
-  // the new catalog entry's name + taxable + flat_rate. Keeps qty.
+  // the new catalog entry's name + taxable + class-aware rate. Switching
+  // services overwrites the rate (you picked a different service, so the
+  // old custom rate doesn't apply); subsequent manual edits to the rate
+  // input are preserved as before via updateLineField.
   function changeLineService(idx: number, code: string) {
     const entry = serviceCatalog.find(e => e.code === code);
     setQuoteLines(prev => prev.map((l, i) => i === idx ? {
@@ -196,9 +259,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
       svcCode: code,
       svcName: entry?.name || code,
       taxable: entry?.taxable === true,
-      // Only auto-fill the rate if the user hasn't typed one — preserves
-      // edits when they swap codes by accident.
-      rate: l.rate || (entry?.flat_rate != null ? String(entry.flat_rate) : ''),
+      rate: resolveCatalogRate(entry),
     } : l));
   }
 
