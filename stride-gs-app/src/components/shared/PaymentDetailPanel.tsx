@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useMemo } from 'react';
 import { X, CreditCard, FileText, Clock, CheckCircle2, XCircle, AlertCircle } from 'lucide-react';
 import { theme } from '../../styles/theme';
 import { WriteButton } from './WriteButton';
@@ -19,6 +19,7 @@ export interface PaymentInvoice {
   status: string;
   dueDate: string;
   created: string;
+  lineItemsJson?: string;
 }
 
 interface LineItem {
@@ -68,7 +69,20 @@ function Field({ label, value, mono }: { label: string; value?: string | number 
 export function PaymentDetailPanel({ invoice, onClose, charges, paymentMethod, onReset, onRetryCharge }: Props) {
   const { isMobile } = useIsMobile();
   const sc = STATUS_CFG[invoice.status] || { bg: '#F3F4F6', color: '#6B7280' };
-  const lineItems: LineItem[] = [];
+  const lineItems: LineItem[] = useMemo(() => {
+    if (!invoice.lineItemsJson) return [];
+    try {
+      const parsed = JSON.parse(invoice.lineItemsJson);
+      if (!Array.isArray(parsed)) return [];
+      return parsed.map((item: any) => ({
+        description: String(item.description || item.desc || ''),
+        svcCode: String(item.svcCode || item.svc_code || item.code || ''),
+        qty: Number(item.qty || item.quantity || 1),
+        rate: Number(item.rate || 0),
+        total: Number(item.total || item.amount || 0),
+      }));
+    } catch { return []; }
+  }, [invoice.lineItemsJson]);
   const chargeLog = charges || [];
   const payMethod = paymentMethod || 'No payment method on file';
 

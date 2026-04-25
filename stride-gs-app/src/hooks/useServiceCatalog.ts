@@ -227,11 +227,19 @@ const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL as string;
 async function syncToExternalCatalogs(service: CatalogService): Promise<void> {
   // ── Stax (Edge Function) ──
   try {
+    const accessToken = (await supabase.auth.getSession()).data.session?.access_token;
+    if (!accessToken) {
+      // Session expired — skip the sync rather than send an empty Bearer
+      // token (which the Edge Function rejects as 401 and pollutes logs).
+      // Realtime / next admin action will retrigger sync once auth recovers.
+      console.warn('[catalog-sync] Stax sync skipped: no active Supabase session');
+      return;
+    }
     const resp = await fetch(`${SUPABASE_URL}/functions/v1/stax-catalog-sync`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${(await supabase.auth.getSession()).data.session?.access_token ?? ''}`,
+        'Authorization': `Bearer ${accessToken}`,
       },
       body: JSON.stringify({ serviceId: service.id }),
     });
