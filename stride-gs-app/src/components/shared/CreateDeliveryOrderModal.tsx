@@ -1271,10 +1271,13 @@ export function CreateDeliveryOrderModal({
                       <CreditCard size={14} /> Collect via Stax
                     </button>
                     <WriteButton label="Mark Paid" variant="secondary" blockedReason={orderTotal == null ? 'No order total' : undefined} onClick={async () => {
+                      const nowIso = new Date().toISOString();
                       const { error } = await supabase.from('dt_orders').update({
-                        paid_at: new Date().toISOString(),
+                        paid_at: nowIso,
                         paid_amount: orderTotal,
                         paid_method: 'Stax',
+                        payment_collected: true,
+                        payment_collected_at: nowIso,
                       }).eq('id', createResult.orderId);
                       if (error) throw new Error(error.message);
                       setOrderPaid(true);
