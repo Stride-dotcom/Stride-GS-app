@@ -109,7 +109,7 @@ export function Orders() {
   const defaultTab: OrdersTab = isAdmin ? 'orders' : 'availability';
   const [tabRaw, setTabRaw] = useUrlState('tab', defaultTab);
   // Phase B (review-tab retirement): legacy ?tab=review URLs auto-redirect
-  // to ?tab=orders + needsReviewOnly=true so existing email deep-links
+  // to ?tab=orders + needsActionOnly=true so existing email deep-links
   // and bookmarks land on the equivalent filtered Orders view.
   const isLegacyReviewUrl = tabRaw === 'review' && canReview;
   const activeTab: OrdersTab | null = !user
@@ -124,7 +124,7 @@ export function Orders() {
   // pending_review or revision_requested. Toggled via the "Needs
   // Review · N" pill in the tab bar. Auto-enabled when arriving via
   // a legacy ?tab=review URL.
-  const [needsReviewOnly, setNeedsReviewOnly] = useState<boolean>(isLegacyReviewUrl);
+  const [needsActionOnly, setNeedsActionOnly] = useState<boolean>(isLegacyReviewUrl);
   // Once we redirect, rewrite the URL so the operator's bookmarks +
   // back-button history reflect the actual view (orders + filter).
   useEffect(() => {
@@ -171,8 +171,20 @@ export function Orders() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.role, user?.accessibleClientNames?.length, clientNames.length]);
 
-  const pendingReviewCount = useMemo(
-    () => orders.filter(o => o.reviewStatus === 'pending_review' || o.reviewStatus === 'revision_requested').length,
+  // Counts orders that need an admin to do something next: rows
+  // awaiting review (pending_review / revision_requested) AND rows
+  // that were approved by us but haven't yet been pushed to DT
+  // (the green-highlighted state). Drives the "Needs Action · N"
+  // pill in the tab bar — admin auto-approves their own orders so
+  // the older pending-review-only count was usually 0 + the pill
+  // never appeared.
+  const needsActionCount = useMemo(
+    () => orders.filter(o => {
+      if (o.reviewStatus === 'pending_review') return true;
+      if (o.reviewStatus === 'revision_requested') return true;
+      if (o.reviewStatus === 'approved' && !o.pushedToDtAt && o.source === 'app') return true;
+      return false;
+    }).length,
     [orders]
   );
 
@@ -203,15 +215,21 @@ export function Orders() {
     if (next.length !== statusFilter.length) setStatusFilter(next);
   }, [availableStatuses, statusFilter]);
 
-  // Apply needs-review filter on top of the category/status chain.
+  // Apply needs-action filter on top of the category/status chain.
   // Done after categoryFilter so the operator can stack: e.g. "show
-  // only K&M Interiors orders that need review".
+  // only K&M Interiors orders that need action". Same predicate as
+  // needsActionCount above — review-required AND approved-not-pushed
+  // both qualify so admin-auto-approved orders waiting on a push
+  // don't disappear from the filter.
   const filteredByNeedsReview = useMemo(() => {
-    if (!needsReviewOnly) return filteredByCategory;
-    return filteredByCategory.filter(o =>
-      o.reviewStatus === 'pending_review' || o.reviewStatus === 'revision_requested'
-    );
-  }, [filteredByCategory, needsReviewOnly]);
+    if (!needsActionOnly) return filteredByCategory;
+    return filteredByCategory.filter(o => {
+      if (o.reviewStatus === 'pending_review') return true;
+      if (o.reviewStatus === 'revision_requested') return true;
+      if (o.reviewStatus === 'approved' && !o.pushedToDtAt && o.source === 'app') return true;
+      return false;
+    });
+  }, [filteredByCategory, needsActionOnly]);
 
   const filteredByStatus = useMemo(() => {
     if (statusFilter.length === 0) return filteredByNeedsReview;
@@ -400,37 +418,39 @@ export function Orders() {
 
           {/* Phase B (review-tab retirement): the Review Queue lives
               inside the Orders list now. Pill toggles a filter that
-              narrows the table to pending_review + revision_requested
-              rows. Click the pill, scan the list, click any row to
-              open the detail page where every review action (Approve,
-              Reject, Edit Full Order, Push to DT) lives. */}
-          {canReview && pendingReviewCount > 0 && activeTab === 'orders' && (
+              narrows the table to rows that need an admin's next
+              action — pending_review, revision_requested, OR
+              approved-but-not-yet-pushed (the green-highlighted
+              rows). Click the pill, scan the list, click any row to
+              open the detail page where every relevant action
+              (Approve, Reject, Edit Full Order, Push to DT) lives. */}
+          {canReview && needsActionCount > 0 && activeTab === 'orders' && (
             <button
-              onClick={() => setNeedsReviewOnly(v => !v)}
-              title={needsReviewOnly
-                ? 'Showing only orders that need review. Click to clear.'
-                : 'Filter the list to orders that need review.'}
+              onClick={() => setNeedsActionOnly(v => !v)}
+              title={needsActionOnly
+                ? 'Showing only orders that need action. Click to clear.'
+                : 'Filter the list to orders that need an admin action: review pending, revision requested, or approved + waiting on a push to DT.'}
               style={{
                 display: 'inline-flex', alignItems: 'center', gap: 6,
                 padding: '8px 14px', borderRadius: 100,
-                border: needsReviewOnly ? 'none' : '1px solid #FCA5A5',
-                background: needsReviewOnly ? '#DC2626' : '#FEF2F2',
-                color: needsReviewOnly ? '#fff' : '#B91C1C',
+                border: needsActionOnly ? 'none' : '1px solid #FCA5A5',
+                background: needsActionOnly ? '#DC2626' : '#FEF2F2',
+                color: needsActionOnly ? '#fff' : '#B91C1C',
                 fontFamily: 'inherit', fontSize: 12, fontWeight: 700,
                 letterSpacing: '0.4px', textTransform: 'uppercase',
                 cursor: 'pointer',
               }}
             >
               <ClipboardCheck size={13} />
-              Needs Review
+              Needs Action
               <span style={{
-                background: needsReviewOnly ? 'rgba(255,255,255,0.25)' : '#DC2626',
+                background: needsActionOnly ? 'rgba(255,255,255,0.25)' : '#DC2626',
                 color: '#fff',
                 fontSize: 10, fontWeight: 700,
                 padding: '2px 8px', borderRadius: 10,
                 minWidth: 18, textAlign: 'center',
               }}>
-                {pendingReviewCount}
+                {needsActionCount}
               </span>
             </button>
           )}

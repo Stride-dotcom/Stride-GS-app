@@ -1769,10 +1769,32 @@ export async function fetchDtOrdersFromSupabase(
     if (error || !data) return null;
     return (data as SupabaseDtOrderRow[]).map(row => {
       const status = row.status_id != null ? statusMap.get(row.status_id) : undefined;
-      // Drafts override the DT-derived statusCategory so the existing
-      // category filter on the Orders page can include 'Drafts' as a
-      // valid option without piggybacking on a DT status code.
+      // Status derivation hierarchy (most specific wins):
+      //   1. Draft → "Draft" / category 'draft'
+      //   2. DT status known (pushed to DT) → use it verbatim
+      //   3. review_status carries the meaningful state for app-created
+      //      orders that haven't been pushed yet. The old "—" fallback
+      //      hid the fact that admin-auto-approved orders were just
+      //      sitting there waiting on a push.
       const isDraft = row.review_status === 'draft';
+      const hasDtStatus = !!status;
+      let appStatusName = '';
+      let appStatusCategory = 'open';
+      if (!isDraft && !hasDtStatus) {
+        switch (row.review_status) {
+          case 'pending_review':
+            appStatusName = 'Pending Review'; appStatusCategory = 'review'; break;
+          case 'revision_requested':
+            appStatusName = 'Revision Needed'; appStatusCategory = 'review'; break;
+          case 'rejected':
+            appStatusName = 'Rejected'; appStatusCategory = 'exception'; break;
+          case 'approved':
+            appStatusName = row.pushed_to_dt_at ? 'Awaiting DT Sync' : 'Ready to Push';
+            appStatusCategory = 'review'; break;
+          default:
+            appStatusName = '—';
+        }
+      }
       return {
         id: row.id,
         tenantId: row.tenant_id,
@@ -1781,9 +1803,9 @@ export async function fetchDtOrdersFromSupabase(
         isPickup: row.is_pickup ?? false,
         statusId: row.status_id,
         statusCode: isDraft ? 'draft' : (status?.code ?? ''),
-        statusName: isDraft ? 'Draft' : (status?.name ?? '—'),
+        statusName: isDraft ? 'Draft' : (status?.name ?? appStatusName),
         statusColor: isDraft ? '#6B7280' : (status?.color ?? '#94a3b8'),
-        statusCategory: isDraft ? 'draft' : (status?.category ?? 'open'),
+        statusCategory: isDraft ? 'draft' : (status?.category ?? appStatusCategory),
         contactName: row.contact_name ?? '',
         contactAddress: row.contact_address ?? '',
         contactCity: row.contact_city ?? '',
@@ -1874,6 +1896,20 @@ export async function fetchDtOrderByIdFromSupabase(
     const row = data as SupabaseDtOrderRow;
     const status = row.status_id != null ? statusMap.get(row.status_id) : undefined;
     const isDraft = row.review_status === 'draft';
+    // Same status-derivation hierarchy as the list query — see
+    // fetchDtOrdersFromSupabase for the rationale.
+    const hasDtStatus = !!status;
+    let appStatusName = '';
+    let appStatusCategory = 'open';
+    if (!isDraft && !hasDtStatus) {
+      switch (row.review_status) {
+        case 'pending_review':     appStatusName = 'Pending Review';   appStatusCategory = 'review';    break;
+        case 'revision_requested': appStatusName = 'Revision Needed';  appStatusCategory = 'review';    break;
+        case 'rejected':           appStatusName = 'Rejected';         appStatusCategory = 'exception'; break;
+        case 'approved':           appStatusName = row.pushed_to_dt_at ? 'Awaiting DT Sync' : 'Ready to Push'; appStatusCategory = 'review'; break;
+        default:                   appStatusName = '—';
+      }
+    }
     return {
       id: row.id,
       tenantId: row.tenant_id,
@@ -1882,9 +1918,9 @@ export async function fetchDtOrderByIdFromSupabase(
       isPickup: row.is_pickup ?? false,
       statusId: row.status_id,
       statusCode: isDraft ? 'draft' : (status?.code ?? ''),
-      statusName: isDraft ? 'Draft' : (status?.name ?? '—'),
+      statusName: isDraft ? 'Draft' : (status?.name ?? appStatusName),
       statusColor: isDraft ? '#6B7280' : (status?.color ?? '#94a3b8'),
-      statusCategory: isDraft ? 'draft' : (status?.category ?? 'open'),
+      statusCategory: isDraft ? 'draft' : (status?.category ?? appStatusCategory),
       contactName: row.contact_name ?? '',
       contactAddress: row.contact_address ?? '',
       contactCity: row.contact_city ?? '',
