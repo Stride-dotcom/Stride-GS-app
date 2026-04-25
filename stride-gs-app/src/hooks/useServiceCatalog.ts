@@ -9,6 +9,12 @@
  * Phase 2+ will extend this hook to feed the Quote Tool catalog tab,
  * Receiving add-on toggles, Task-type dropdowns, and Delivery service
  * pickers — all from this single source of truth.
+ *
+ * v2 2026-04-25 PST — adds delivery-only fields (delivery_rate_unit,
+ *                     visible_to_client, description, quote_required)
+ *                     so a row flagged show_as_delivery_service can be
+ *                     fully configured from the Price List page.
+ *                     Migration: 20260425030000_service_catalog_delivery_fields.
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { supabase } from '../lib/supabase';
@@ -26,6 +32,16 @@ export type ServiceBilling = 'class_based' | 'flat';
 export type ServiceUnit    = 'per_item' | 'per_day' | 'per_task' | 'per_hour';
 export type AutoApplyRule  = 'overweight' | 'no_id' | 'fragile' | 'oversized';
 export type ServicePriority = 'Normal' | 'High';
+/**
+ * How a service's flat_rate is interpreted when it is offered as a delivery
+ * add-on. Mirrors the CHECK constraint on service_catalog.delivery_rate_unit.
+ */
+export type DeliveryRateUnit =
+  | 'flat'       // one-time charge regardless of quantity / distance
+  | 'per_mile'   // multiplied by trip miles
+  | 'per_15min'  // multiplied by 15-minute service blocks
+  | 'plus_base'  // base + per-item add (handled in CreateDeliveryOrderModal)
+  | 'per_item';  // multiplied by item count
 
 export interface ClassRates {
   XS?: number; S?: number; M?: number; L?: number; XL?: number; XXL?: number;
@@ -63,6 +79,11 @@ export interface CatalogService {
   // External catalog IDs (hidden in UI, auto-synced)
   staxItemId: string | null;
   qbItemId: string | null;
+  // Delivery-only configuration (active when showAsDeliveryService is true)
+  deliveryRateUnit: DeliveryRateUnit;
+  visibleToClient: boolean;
+  description: string;
+  quoteRequired: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -118,6 +139,11 @@ interface CatalogRow {
   // External catalog IDs
   stax_item_id: string | null;
   qb_item_id: string | null;
+  // Delivery-only configuration
+  delivery_rate_unit: string | null;
+  visible_to_client: boolean | null;
+  description: string | null;
+  quote_required: boolean | null;
 }
 
 function rowToService(row: CatalogRow): CatalogService {
@@ -157,6 +183,10 @@ function rowToService(row: CatalogRow): CatalogService {
     billIfFail: row.bill_if_fail ?? true,
     staxItemId: row.stax_item_id ?? null,
     qbItemId: row.qb_item_id ?? null,
+    deliveryRateUnit: ((row.delivery_rate_unit as DeliveryRateUnit | null) ?? 'flat'),
+    visibleToClient: row.visible_to_client !== false,
+    description: row.description ?? '',
+    quoteRequired: row.quote_required === true,
     times: {
       XS:  row.xs_time  ?? undefined,
       S:   row.s_time   ?? undefined,
@@ -201,6 +231,10 @@ function serviceToRow(input: UpdateServiceInput): Record<string, unknown> {
     row.xl_time  = input.times.XL  ?? null;
     row.xxl_time = input.times.XXL ?? null;
   }
+  if (input.deliveryRateUnit !== undefined) row.delivery_rate_unit = input.deliveryRateUnit;
+  if (input.visibleToClient !== undefined)  row.visible_to_client  = input.visibleToClient;
+  if (input.description !== undefined)      row.description        = input.description;
+  if (input.quoteRequired !== undefined)    row.quote_required     = input.quoteRequired;
   return row;
 }
 
@@ -212,6 +246,7 @@ const AUDITABLE_SIMPLE_FIELDS: readonly (keyof CatalogService)[] = [
   'autoApplyRule', 'defaultSlaHours', 'defaultPriority',
   'hasDedicatedPage', 'displayOrder',
   'billIfPass', 'billIfFail',
+  'deliveryRateUnit', 'visibleToClient', 'description', 'quoteRequired',
 ] as const;
 
 function stringify(v: unknown): string {

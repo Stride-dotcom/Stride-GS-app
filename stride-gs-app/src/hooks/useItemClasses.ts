@@ -1,6 +1,12 @@
 /**
  * useItemClasses — CRUD for `public.item_classes` + realtime refresh.
  *
+ * v2 2026-04-25 PST — exposes `deliveryMinutes` so the Price List Classes
+ *                     section can edit dispatch routing time alongside
+ *                     storage size. Seeded values (XS=3, S=5, M=10, L=20,
+ *                     XL=30, XXL=45) live in migration 20260425000537.
+ *
+ *
  * The Quote Tool reads this table via useQuoteCatalog (which only exposes
  * id/name/order/active — the columns the tool needs). This hook exposes
  * the full row shape including `storage_size` so the Price List "Classes"
@@ -22,6 +28,8 @@ export interface ItemClass {
   id: string;
   name: string;
   storageSize: number;
+  /** Default dispatch minutes per item of this class — feeds delivery routing. */
+  deliveryMinutes: number;
   displayOrder: number;
   active: boolean;
   createdAt: string;
@@ -31,6 +39,7 @@ interface DbRow {
   id: string;
   name: string | null;
   storage_size: string | number | null;
+  delivery_minutes: number | null;
   display_order: number | null;
   active: boolean | null;
   created_at: string | null;
@@ -47,6 +56,7 @@ function rowToClass(r: DbRow): ItemClass {
     id: r.id,
     name: r.name ?? '',
     storageSize: num(r.storage_size),
+    deliveryMinutes: r.delivery_minutes ?? 0,
     displayOrder: r.display_order ?? 0,
     active: r.active !== false,
     createdAt: r.created_at ?? '',
@@ -58,7 +68,7 @@ export interface UseItemClassesResult {
   loading: boolean;
   error: string | null;
   refetch: () => Promise<void>;
-  update: (id: string, patch: Partial<Pick<ItemClass, 'name' | 'storageSize' | 'displayOrder' | 'active'>>) => Promise<boolean>;
+  update: (id: string, patch: Partial<Pick<ItemClass, 'name' | 'storageSize' | 'deliveryMinutes' | 'displayOrder' | 'active'>>) => Promise<boolean>;
 }
 
 export function useItemClasses(): UseItemClassesResult {
@@ -93,12 +103,13 @@ export function useItemClasses(): UseItemClassesResult {
     });
   }, [refetch]);
 
-  const update = useCallback(async (id: string, patch: Partial<Pick<ItemClass, 'name' | 'storageSize' | 'displayOrder' | 'active'>>): Promise<boolean> => {
+  const update = useCallback(async (id: string, patch: Partial<Pick<ItemClass, 'name' | 'storageSize' | 'deliveryMinutes' | 'displayOrder' | 'active'>>): Promise<boolean> => {
     const row: Record<string, unknown> = {};
-    if (patch.name !== undefined)          row.name          = patch.name;
-    if (patch.storageSize !== undefined)   row.storage_size  = patch.storageSize;
-    if (patch.displayOrder !== undefined)  row.display_order = patch.displayOrder;
-    if (patch.active !== undefined)        row.active        = patch.active;
+    if (patch.name !== undefined)             row.name             = patch.name;
+    if (patch.storageSize !== undefined)      row.storage_size     = patch.storageSize;
+    if (patch.deliveryMinutes !== undefined)  row.delivery_minutes = patch.deliveryMinutes;
+    if (patch.displayOrder !== undefined)     row.display_order    = patch.displayOrder;
+    if (patch.active !== undefined)           row.active           = patch.active;
     if (Object.keys(row).length === 0) return true;
     const { data, error: err } = await supabase
       .from('item_classes')

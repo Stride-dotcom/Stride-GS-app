@@ -1,7 +1,11 @@
 /**
  * ClassesTable — renders inside PriceList when the "Classes" category is
  * selected. Shows every row in public.item_classes with inline-edit for
- * name / storage size / active flag. Admin only.
+ * name / storage size / delivery minutes / active flag. Admin only.
+ *
+ * v2 2026-04-25 PST — added Delivery Time (min) column. The default per-
+ *   class minutes (XS=3, S=5, M=10, L=20, XL=30, XXL=45) feed dispatch
+ *   routing in CreateDeliveryOrderModal via fetchItemClassMinutes().
  *
  * Storage size is the authoritative cubic-foot value used by storage
  * billing (`STOR` rate × class.storage_size × item qty). Editing it here
@@ -23,6 +27,7 @@ interface Props {
 type Draft = {
   name: string;
   storageSize: string;
+  deliveryMinutes: string;
   active: boolean;
 };
 
@@ -30,6 +35,7 @@ function classToDraft(c: ItemClass): Draft {
   return {
     name: c.name,
     storageSize: c.storageSize > 0 ? String(c.storageSize) : '',
+    deliveryMinutes: c.deliveryMinutes > 0 ? String(c.deliveryMinutes) : '',
     active: c.active,
   };
 }
@@ -62,6 +68,7 @@ export function ClassesTable({ search }: Props) {
     const ok = await update(editingId, {
       name: draft.name.trim(),
       storageSize: draft.storageSize ? Number(draft.storageSize) : 0,
+      deliveryMinutes: draft.deliveryMinutes ? Number(draft.deliveryMinutes) : 0,
       active: draft.active,
     });
     setSaving(false);
@@ -78,8 +85,10 @@ export function ClassesTable({ search }: Props) {
         fontSize: 12, color: v2.colors.textSecondary,
       }}>
         Item classes feed storage billing: <strong>STOR × storage size × qty</strong>.
-        Edit the storage size to change the cubic-foot multiplier used by every future
-        storage run.
+        <span style={{ marginLeft: 6 }}>
+          Delivery Time (min) is the per-class dispatch minutes used to estimate
+          route durations on new delivery orders.
+        </span>
       </div>
 
       {error && (
@@ -105,7 +114,7 @@ export function ClassesTable({ search }: Props) {
           {/* Header row */}
           <div style={{
             display: 'grid',
-            gridTemplateColumns: '80px 1.4fr 120px 100px 150px',
+            gridTemplateColumns: '70px 1.3fr 110px 130px 90px 130px',
             gap: 12,
             padding: '12px 18px',
             background: v2.colors.bgCard,
@@ -116,6 +125,7 @@ export function ClassesTable({ search }: Props) {
             <div>Class</div>
             <div>Name</div>
             <div style={{ textAlign: 'right' }}>Storage Size</div>
+            <div style={{ textAlign: 'right' }}>Delivery Time (min)</div>
             <div style={{ textAlign: 'center' }}>Status</div>
             <div style={{ textAlign: 'right' }}>Actions</div>
           </div>
@@ -162,7 +172,7 @@ function ReadOnlyRow({ cls, onEdit }: { cls: ItemClass; onEdit: () => void }) {
       onClick={onEdit}
       style={{
         display: 'grid',
-        gridTemplateColumns: '80px 1.4fr 120px 100px 150px',
+        gridTemplateColumns: '70px 1.3fr 110px 130px 90px 130px',
         gap: 12,
         padding: '10px 18px',
         borderBottom: `1px solid ${v2.colors.border}`,
@@ -179,6 +189,9 @@ function ReadOnlyRow({ cls, onEdit }: { cls: ItemClass; onEdit: () => void }) {
       <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{cls.name}</div>
       <div style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums', fontWeight: 600 }}>
         {cls.storageSize > 0 ? `${cls.storageSize} cu ft` : '—'}
+      </div>
+      <div style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums', fontWeight: 600 }}>
+        {cls.deliveryMinutes > 0 ? `${cls.deliveryMinutes} min` : '—'}
       </div>
       <div style={{ textAlign: 'center' }}>
         <StatusPill active={cls.active} />
@@ -206,7 +219,7 @@ function EditableRow({ cls, draft, onDraftChange, onSave, onCancel, saving }: {
       borderBottom: `1px solid ${v2.colors.border}`,
       background: 'rgba(232,105,42,0.04)',
     }}>
-      <div style={{ display: 'grid', gridTemplateColumns: '80px 1.4fr 120px auto', gap: 12, alignItems: 'center' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: '70px 1.3fr 110px 130px auto', gap: 12, alignItems: 'center' }}>
         <div style={{ fontWeight: 700, letterSpacing: '0.5px', color: v2.colors.text }}>{cls.id}</div>
         <input value={draft.name} onChange={e => set('name', e.target.value)} style={inputStyle(v2)} placeholder="Class name" />
         <input
@@ -215,6 +228,13 @@ function EditableRow({ cls, draft, onDraftChange, onSave, onCancel, saving }: {
           style={{ ...inputStyle(v2), textAlign: 'right' }}
           placeholder="cu ft"
           inputMode="decimal"
+        />
+        <input
+          value={draft.deliveryMinutes}
+          onChange={e => set('deliveryMinutes', e.target.value.replace(/[^\d]/g, ''))}
+          style={{ ...inputStyle(v2), textAlign: 'right' }}
+          placeholder="min"
+          inputMode="numeric"
         />
         <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
           <button onClick={onSave} disabled={saving} style={{

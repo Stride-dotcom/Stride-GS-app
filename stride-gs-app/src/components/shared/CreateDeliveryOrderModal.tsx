@@ -1,5 +1,20 @@
 /**
- * CreateDeliveryOrderModal — Phase 2c (expanded) — v2 2026-04-25 PST
+ * CreateDeliveryOrderModal — Phase 2c (expanded) — v3 2026-04-25 PST
+ *   v3: Valuation coverage + service_catalog rewire —
+ *       • Required Valuation Coverage selector for delivery / pickup /
+ *         pickup+delivery modes (NOT service-only). Sources from
+ *         `coverage_options` via useCoverageOptions; defaults to Standard
+ *         ($0 flat). FND/FWD (percent_declared) reveals a required
+ *         declared-value input and rolls the resulting one-time charge
+ *         (rate% × declared) into the order total. Persists
+ *         coverage_option_id / declared_value / coverage_charge on every
+ *         insert path including the linked P+D delivery leg.
+ *       • Add-Ons list now reads from `service_catalog` filtered by
+ *         show_as_delivery_service=true, instead of the legacy
+ *         delivery_accessorials table. Catalog units (per_task /
+ *         per_item / per_hour / per_day) are mapped to the existing
+ *         accessorial rate-unit semantics so the rendering path is
+ *         unchanged.
  *   v2: Code-review fixes —
  *       • H3 admin auto-push to DT is now AWAITED, with failures surfaced as
  *         a banner on the success screen instead of swallowed in a fire-and-
@@ -48,12 +63,13 @@ import { useClients } from '../../hooks/useClients';
 import { useInventory } from '../../hooks/useInventory';
 import {
   fetchDeliveryZone,
-  fetchDeliveryAccessorials,
+  fetchDeliveryServicesFromCatalog,
   fetchItemClassMinutes,
   type DeliveryZone,
   type DeliveryAccessorial,
 } from '../../lib/supabaseQueries';
 import { supabase } from '../../lib/supabase';
+import { useCoverageOptions, type CoverageOption } from '../../hooks/useCoverageOptions';
 
 // ── Address Book helpers ─────────────────────────────────────────────────
 interface AddressBookContact {
@@ -660,12 +676,17 @@ export function CreateDeliveryOrderModal({
   const [selectedAccessorials, setSelectedAccessorials] = useState<Map<string, SelectedAccessorial>>(new Map());
 
   useEffect(() => {
-    fetchDeliveryAccessorials().then(data => {
+    // Source the add-on list from service_catalog (show_as_delivery_service).
+    // ADDL_ITEM is auto-computed via the existing extra-items math (every order
+    // gets 3 free, then $25 each), so we exclude it from the user-pickable list
+    // to avoid double-charging. The legacy EXTRA_ITEM exclusion is kept too in
+    // case any historical row carrying that code is still around.
+    fetchDeliveryServicesFromCatalog().then(data => {
       if (!data) return;
-      const base = data.filter(a => a.code !== 'EXTRA_ITEM'); // auto-computed
-      setAllAccessorials(base); // admin can add any
+      const base = data.filter(a => a.code !== 'ADDL_ITEM' && a.code !== 'EXTRA_ITEM');
+      setAllAccessorials(base);
       const filtered = base
-        .filter(a => a.availableForDelivery)             // delivery dropdown gate
+        .filter(a => a.availableForDelivery)             // catalog flag
         .filter(a => isStaff || a.visibleToClient);      // role gate
       setAccessorials(filtered);
     });
@@ -674,6 +695,61 @@ export function CreateDeliveryOrderModal({
   // ── Item class service time defaults ──────────────────────────────────
   const [classMinutesMap, setClassMinutesMap] = useState<Record<string, number>>({});
   useEffect(() => { fetchItemClassMinutes().then(setClassMinutesMap); }, []);
+
+  // ── Valuation coverage (delivery / pickup / P+D — NOT service-only) ───
+  // Required for any order that physically moves items. Mirrors the Quote
+  // Tool's coverage card semantics: a 'flat' option (Standard $0) is the
+  // default; 'percent_declared' options (FND/FWD) require the user to enter
+  // a declared value, with the resulting one-time charge rolled into the
+  // order total. The choice is persisted on dt_orders so the Review Queue
+  // and downstream reports can audit it.
+  const { options: coverageOptions } = useCoverageOptions();
+  // Filter to options that make sense at order-creation time:
+  //   • storage_added is a storage-billing tier — irrelevant to delivery
+  //     orders (storage is billed monthly via insurance_charges_log).
+  //   • per_lb (Standard Valuation, freight-style) is not currently used
+  //     for our market — left out so the radio list stays uncluttered.
+  // Keep flat (Standard) + percent_declared (FND, FWD) only.
+  const deliveryCoverageOptions = useMemo<CoverageOption[]>(() => {
+    return coverageOptions.filter(o =>
+      o.active && o.id !== 'storage_added' && (o.calcType === 'flat' || o.calcType === 'percent_declared')
+    );
+  }, [coverageOptions]);
+
+  const [coverageOptionId, setCoverageOptionId] = useState<string>('standard');
+  const [declaredValue, setDeclaredValue] = useState<string>(''); // string for input control
+
+  // Auto-correct selection if the chosen option disappears (e.g. admin
+  // deactivated it mid-session) — fall back to the first available row,
+  // preferring 'standard' if it's still there.
+  useEffect(() => {
+    if (deliveryCoverageOptions.length === 0) return;
+    const stillThere = deliveryCoverageOptions.some(o => o.id === coverageOptionId);
+    if (!stillThere) {
+      const std = deliveryCoverageOptions.find(o => o.id === 'standard');
+      setCoverageOptionId(std?.id ?? deliveryCoverageOptions[0].id);
+    }
+  }, [deliveryCoverageOptions, coverageOptionId]);
+
+  const selectedCoverage = useMemo(
+    () => deliveryCoverageOptions.find(o => o.id === coverageOptionId) ?? null,
+    [deliveryCoverageOptions, coverageOptionId]
+  );
+
+  // declared_value × coverage_rate% = one-time coverage charge.
+  // Matches `quoteCalc.ts` lines 117-130 for the Quote Tool — keeping the
+  // formula identical so an order created from a quote produces the same
+  // number you'd see on the quote PDF.
+  const coverageCharge = useMemo(() => {
+    if (!selectedCoverage) return 0;
+    if (selectedCoverage.calcType === 'flat') return selectedCoverage.rate;
+    if (selectedCoverage.calcType === 'percent_declared') {
+      const dv = parseFloat(declaredValue);
+      if (!Number.isFinite(dv) || dv <= 0) return 0;
+      return (selectedCoverage.rate / 100) * dv;
+    }
+    return 0;
+  }, [selectedCoverage, declaredValue]);
 
   const toggleAccessorial = (acc: DeliveryAccessorial, quantity: number = 1, forceRemove?: boolean) => {
     setSelectedAccessorials(prev => {
@@ -685,8 +761,14 @@ export function CreateDeliveryOrderModal({
         n.set(acc.code, { code: acc.code, quantity, subtotal: 0 });
       } else if (acc.rate != null) {
         let subtotal = 0;
-        if (acc.rateUnit === 'flat' || acc.rateUnit === 'plus_base') subtotal = acc.rate;
-        else if (acc.rateUnit === 'per_mile' || acc.rateUnit === 'per_15min' || acc.rateUnit === 'per_item') subtotal = acc.rate * quantity;
+        if (acc.rateUnit === 'flat' || acc.rateUnit === 'plus_base') {
+          subtotal = acc.rate;
+        } else {
+          // per_mile / per_15min / per_item / per_hour / per_day all multiply
+          // the unit rate by the user-entered quantity (miles / 15-min blocks
+          // / items / hours / days).
+          subtotal = acc.rate * quantity;
+        }
         n.set(acc.code, { code: acc.code, quantity, subtotal });
       }
       return n;
@@ -727,10 +809,13 @@ export function CreateDeliveryOrderModal({
     [selectedAccessorials]
   );
 
+  // Coverage applies to every order mode that physically moves items —
+  // delivery, pickup, and pickup_and_delivery. service_only is excluded by
+  // the surrounding `mode !== 'service_only'` checks in the JSX.
   const orderTotal = useMemo(() => {
     if (baseFee == null) return null;
-    return baseFee + pickupLegFee + extraItemsFee + accessorialsTotal;
-  }, [baseFee, pickupLegFee, extraItemsFee, accessorialsTotal]);
+    return baseFee + pickupLegFee + extraItemsFee + accessorialsTotal + coverageCharge;
+  }, [baseFee, pickupLegFee, extraItemsFee, accessorialsTotal, coverageCharge]);
 
   const isCallForQuote = zipForPricing.length === 5 && zone && zone.baseRate == null;
 
@@ -798,12 +883,20 @@ export function CreateDeliveryOrderModal({
       // For delivery-only with warehouse source, require item selection
       if (mode === 'delivery' && itemsSource === 'warehouse' && selectedInvItems.length === 0) return false;
     }
+    // Valuation coverage is required for any item-moving order. percent_declared
+    // tiers (FND/FWD) need a non-zero declared value so we can compute the
+    // one-time charge — block submit until the field is filled.
+    if (selectedCoverage?.calcType === 'percent_declared') {
+      const dv = parseFloat(declaredValue);
+      if (!Number.isFinite(dv) || dv <= 0) return false;
+    }
     return true;
   }, [
     clientSheetId, serviceDate, mode,
     deliveryContactName, deliveryAddress, deliveryCity, deliveryZip, serviceDescription,
     pickupContactName, pickupAddress, pickupCity, pickupZip, pickupFreeItems,
     itemsSource, selectedInvItems,
+    selectedCoverage, declaredValue,
   ]);
 
   // ── Order number generation ────────────────────────────────────────────
@@ -860,6 +953,21 @@ export function CreateDeliveryOrderModal({
       subtotal: a.subtotal,
     }));
 
+    // Coverage values get written to BOTH legs of a P+D pair (the pickup
+    // leg has its pricing rolled into the delivery leg, but the option/
+    // declared-value belong to the shipment as a whole — duplicating them
+    // means the Review Queue and reports never have to JOIN to the
+    // delivery leg to know what coverage was selected).
+    const coverageFields = mode === 'service_only'
+      ? { coverage_option_id: null, declared_value: null, coverage_charge: null }
+      : {
+          coverage_option_id: selectedCoverage?.id ?? null,
+          declared_value: selectedCoverage?.calcType === 'percent_declared'
+            ? (parseFloat(declaredValue) || 0)
+            : null,
+          coverage_charge: coverageCharge || 0,
+        };
+
     const commonFields = {
       tenant_id: clientSheetId,
       timezone: 'America/Los_Angeles',
@@ -912,6 +1020,7 @@ export function CreateDeliveryOrderModal({
             order_total: null,
             pricing_override: true,
             pricing_notes: 'Pickup leg of linked pickup+delivery — pricing rolled into delivery order.',
+            ...coverageFields,
           })
           .select('id, dt_identifier')
           .single();
@@ -955,6 +1064,7 @@ export function CreateDeliveryOrderModal({
             order_total: orderTotal,
             pricing_override: !!(isCallForQuote || isPickupCallForQuote),
             pricing_notes: pdPricingNotes,
+            ...coverageFields,
           })
           .select('id, dt_identifier')
           .single();
@@ -1099,6 +1209,7 @@ export function CreateDeliveryOrderModal({
               : isCallForQuote
                 ? 'Zone marked CALL FOR QUOTE — pricing requires manual review.'
                 : null,
+            ...coverageFields,
           })
           .select('id, dt_identifier')
           .single();
@@ -1792,6 +1903,82 @@ export function CreateDeliveryOrderModal({
             </div>
           )}
 
+          {/* Valuation Coverage — required for any item-moving order */}
+          {mode !== 'service_only' && deliveryCoverageOptions.length > 0 && (
+            <div style={section}>
+              <div style={sectionTitle}>
+                Valuation Coverage
+                <span style={{ fontSize: 10, fontWeight: 500, color: theme.colors.textMuted, marginLeft: 8, textTransform: 'none', letterSpacing: 0 }}>
+                  (required)
+                </span>
+              </div>
+              <div style={{ display: 'grid', gap: 8 }}>
+                {deliveryCoverageOptions.map(opt => {
+                  const selected = coverageOptionId === opt.id;
+                  const rateLabel =
+                    opt.calcType === 'flat'
+                      ? (opt.rate > 0 ? `$${opt.rate.toFixed(2)} flat` : 'Included — $0')
+                      : `${opt.rate.toFixed(2)}% of declared value`;
+                  return (
+                    <label
+                      key={opt.id}
+                      style={{
+                        display: 'flex', alignItems: 'flex-start', gap: 10, padding: '10px 12px',
+                        borderRadius: 8, cursor: 'pointer',
+                        border: `1px solid ${selected ? theme.colors.primary : theme.colors.border}`,
+                        background: selected ? '#FFF7ED' : '#fff',
+                      }}
+                    >
+                      <input
+                        type="radio"
+                        name="coverage"
+                        value={opt.id}
+                        checked={selected}
+                        onChange={() => setCoverageOptionId(opt.id)}
+                        style={{ marginTop: 2, accentColor: theme.colors.primary }}
+                      />
+                      <div style={{ flex: 1 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+                          <span style={{ fontSize: 13, fontWeight: 600, color: theme.colors.text }}>{opt.name}</span>
+                          <span style={{ fontSize: 12, color: theme.colors.textMuted }}>{rateLabel}</span>
+                        </div>
+                        {opt.note && (
+                          <div style={{ fontSize: 11, color: theme.colors.textMuted, marginTop: 3 }}>{opt.note}</div>
+                        )}
+                      </div>
+                    </label>
+                  );
+                })}
+              </div>
+              {selectedCoverage?.calcType === 'percent_declared' && (
+                <div style={{ marginTop: 12, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                  <div>
+                    <label style={label}>Declared Value ($) *</label>
+                    <input
+                      type="number"
+                      min={0}
+                      step={100}
+                      value={declaredValue}
+                      onChange={e => setDeclaredValue(e.target.value)}
+                      style={input}
+                      placeholder="e.g. 5000"
+                    />
+                  </div>
+                  <div>
+                    <label style={label}>Coverage Charge</label>
+                    <div style={{
+                      ...input,
+                      background: '#F9FAFB', display: 'flex', alignItems: 'center',
+                      fontWeight: 600, color: theme.colors.text,
+                    }}>
+                      {coverageCharge > 0 ? `$${coverageCharge.toFixed(2)}` : '—'}
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
           {/* Accessorials */}
           {accessorials.length > 0 && mode !== 'service_only' && (
             <div style={section}>
@@ -1807,7 +1994,7 @@ export function CreateDeliveryOrderModal({
                 {accessorials.map(acc => {
                   const selected = isAccessorialSelected(acc.code);
                   const current = selectedAccessorials.get(acc.code);
-                  const needsQuantity = acc.rateUnit === 'per_15min' || acc.rateUnit === 'per_mile' || acc.rateUnit === 'per_item';
+                  const needsQuantity = acc.rateUnit === 'per_15min' || acc.rateUnit === 'per_mile' || acc.rateUnit === 'per_item' || acc.rateUnit === 'per_hour' || acc.rateUnit === 'per_day';
                   const staffOnly = !acc.visibleToClient;
                   return (
                     <div key={acc.code} style={{
@@ -1839,6 +2026,8 @@ export function CreateDeliveryOrderModal({
                                 {acc.rateUnit === 'per_mile' && ' / mile'}
                                 {acc.rateUnit === 'per_15min' && ' / 15 min'}
                                 {acc.rateUnit === 'per_item' && ' / item'}
+                                {acc.rateUnit === 'per_hour' && ' / hour'}
+                                {acc.rateUnit === 'per_day' && ' / day'}
                                 {acc.rateUnit === 'plus_base' && ' + base'}
                               </span>
                             ) : null}
@@ -1954,6 +2143,17 @@ export function CreateDeliveryOrderModal({
                   </div>
                 );
               })}
+              {selectedCoverage && coverageCharge > 0 && (
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 4 }}>
+                  <span>
+                    Coverage ({selectedCoverage.name}
+                    {selectedCoverage.calcType === 'percent_declared' && declaredValue
+                      ? ` — ${selectedCoverage.rate.toFixed(2)}% × $${parseFloat(declaredValue).toFixed(0)}`
+                      : ''})
+                  </span>
+                  <span style={{ fontWeight: 500 }}>${coverageCharge.toFixed(2)}</span>
+                </div>
+              )}
               <div style={{
                 display: 'flex', justifyContent: 'space-between',
                 marginTop: 10, paddingTop: 10, borderTop: `1px solid ${theme.colors.border}`,
