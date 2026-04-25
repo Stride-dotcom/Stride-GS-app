@@ -146,7 +146,7 @@ Deno.serve(async (req: Request) => {
       '{{ITEM_COUNT}}':          String(itemCount ?? 0),
       '{{ORDER_TOTAL}}':         orderTotalDisplay,
       '{{SUBMITTED_BY}}':        submittedBy,
-      '{{REVIEW_LINK}}':         'https://www.mystridehub.com/#/orders?tab=review',
+      '{{REVIEW_LINK}}':         `https://www.mystridehub.com/#/delivery?open=${order.dt_identifier}&client=${order.tenant_id || ''}`,
       '{{APP_URL}}':             'https://www.mystridehub.com/#',
     };
 

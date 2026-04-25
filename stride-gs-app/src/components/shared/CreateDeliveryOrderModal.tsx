@@ -826,7 +826,8 @@ export function CreateDeliveryOrderModal({
   // ── Submit ─────────────────────────────────────────────────────────────
   const [, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
-  const [createResult, setCreateResult] = useState<{ dtIdentifier: string; linkedIdentifier?: string } | null>(null);
+  const [createResult, setCreateResult] = useState<{ dtIdentifier: string; linkedIdentifier?: string; orderId: string } | null>(null);
+  const [orderPaid, setOrderPaid] = useState(false);
 
   const handleSubmit = async () => {
     if (!canSubmit) return;
@@ -975,7 +976,7 @@ export function CreateDeliveryOrderModal({
           if (iErr) throw new Error(`Items insert failed: ${iErr.message}`);
         }
 
-        setCreateResult({ dtIdentifier: deliveryRow.dt_identifier, linkedIdentifier: pickupRow.dt_identifier });
+        setCreateResult({ dtIdentifier: deliveryRow.dt_identifier, linkedIdentifier: pickupRow.dt_identifier, orderId: deliveryRow.id });
         onSubmit?.({
           dtOrderId: deliveryRow.id,
           dtIdentifier: deliveryRow.dt_identifier,
@@ -1123,7 +1124,7 @@ export function CreateDeliveryOrderModal({
           });
         }
 
-        setCreateResult({ dtIdentifier: orderRow.dt_identifier });
+        setCreateResult({ dtIdentifier: orderRow.dt_identifier, orderId: orderRow.id });
         onSubmit?.({
           dtOrderId: orderRow.id,
           dtIdentifier: orderRow.dt_identifier,
@@ -1244,29 +1245,46 @@ export function CreateDeliveryOrderModal({
                   ${orderTotal.toFixed(2)}
                 </div>
               )}
-              <button
-                onClick={() => {
-                  const orderNum = createResult.dtIdentifier || '';
-                  const params = new URLSearchParams();
-                  if (orderNum) {
-                    params.set('order', orderNum);
-                    params.set('notes', `Delivery ${orderNum}`);
-                  }
-                  if (orderTotal != null) params.set('amount', orderTotal.toFixed(2));
-                  window.open(`/stax-payment.html?${params.toString()}`, '_blank');
-                }}
-                style={{
-                  width: '100%', padding: '10px 16px', borderRadius: 8,
-                  border: 'none', background: theme.colors.orange, color: '#fff',
-                  fontSize: 13, fontWeight: 600, cursor: 'pointer',
-                  display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
-                }}
-              >
-                <CreditCard size={14} /> Collect via Stax
-              </button>
-              <div style={{ fontSize: 10, color: '#92400E', marginTop: 6 }}>
-                Opens Stax payment page in new tab. Customer pays directly; staff can mark paid from the order detail panel.
-              </div>
+              {orderPaid ? (
+                <div style={{ fontSize: 13, color: '#15803D' }}>Payment of ${orderTotal != null ? orderTotal.toFixed(2) : '0.00'} collected and recorded.</div>
+              ) : (
+                <>
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    <button
+                      onClick={() => {
+                        const orderNum = createResult.dtIdentifier || '';
+                        const params = new URLSearchParams();
+                        if (orderNum) {
+                          params.set('order', orderNum);
+                          params.set('notes', `Delivery ${orderNum}`);
+                        }
+                        if (orderTotal != null) params.set('amount', orderTotal.toFixed(2));
+                        window.open(`/stax-payment.html?${params.toString()}`, '_blank');
+                      }}
+                      style={{
+                        flex: 1, padding: '10px 16px', borderRadius: 8,
+                        border: 'none', background: theme.colors.orange, color: '#fff',
+                        fontSize: 13, fontWeight: 600, cursor: 'pointer',
+                        display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+                      }}
+                    >
+                      <CreditCard size={14} /> Collect via Stax
+                    </button>
+                    <WriteButton label="Mark Paid" variant="secondary" blockedReason={orderTotal == null ? 'No order total' : undefined} onClick={async () => {
+                      const { error } = await supabase.from('dt_orders').update({
+                        paid_at: new Date().toISOString(),
+                        paid_amount: orderTotal,
+                        paid_method: 'Stax',
+                      }).eq('id', createResult.orderId);
+                      if (error) throw new Error(error.message);
+                      setOrderPaid(true);
+                    }} />
+                  </div>
+                  <div style={{ fontSize: 10, color: '#92400E', marginTop: 6 }}>
+                    Opens Stax payment page in new tab. After collecting payment, tap "Mark Paid" to record it.
+                  </div>
+                </>
+              )}
             </div>
           )}
 
