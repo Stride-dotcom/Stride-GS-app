@@ -1,5 +1,10 @@
 /**
- * dt-push-order — Supabase Edge Function (Phase 2c) — v13 2026-04-25 PST
+ * dt-push-order — Supabase Edge Function (Phase 2c) — v14 2026-04-25 PST
+ * v14: Coverage now itemized in the <description> billing summary so the
+ *      DT dispatcher sees what valuation the customer paid for. Reads
+ *      coverage_option_id, coverage_charge, declared_value from
+ *      dt_orders + joins coverage_options.name. Always shown when an
+ *      option is selected (free Standard renders as "Included").
  * v13: Fee label in description now reads from order_type (not the legacy
  *      is_pickup boolean) so pickup-leg fees label correctly when the row
  *      was created via the new order_type pipeline. CDATA escaping is
@@ -61,6 +66,14 @@ interface DtOrderRow {
   extra_items_fee: number | null;
   accessorials_json: { code: string; quantity: number; rate: number; subtotal: number }[] | null;
   accessorials_total: number | null;
+  // Valuation coverage — itemized in the description so the dispatcher
+  // sees what the customer paid for. coverage_name comes from a join
+  // server-side OR is left undefined here (description falls back to
+  // "Coverage" label).
+  coverage_option_id: string | null;
+  coverage_charge: number | null;
+  declared_value: number | null;
+  coverage_name?: string;
   billing_review_status: string | null;
   paid_at: string | null;
   paid_amount: number | null;
@@ -154,6 +167,17 @@ function buildOrderDescription(
       for (const acc of order.accessorials_json) {
         descParts.push(`${acc.code}${acc.quantity > 1 ? ` x${acc.quantity}` : ''} = $${Number(acc.subtotal).toFixed(2)}`);
       }
+    }
+    // Valuation coverage — itemize alongside the other charges so the DT
+    // dispatcher sees what the customer is paying for. Always shown when
+    // the order has a coverage selection on file (even free Standard at
+    // $0 — explicit confirmation that valuation is accounted for).
+    if (order.coverage_option_id || order.coverage_charge != null) {
+      const cvName = (order as DtOrderRow & { coverage_name?: string }).coverage_name || 'Coverage';
+      const cvCharge = order.coverage_charge != null ? Number(order.coverage_charge) : 0;
+      const dv = (order as DtOrderRow & { declared_value?: number | null }).declared_value;
+      const dvSuffix = dv != null && Number(dv) > 0 ? ` (declared $${Number(dv).toLocaleString()})` : '';
+      descParts.push(`Coverage: ${cvName}${dvSuffix} = ${cvCharge > 0 ? `$${cvCharge.toFixed(2)}` : 'Included'}`);
     }
     if (order.order_total != null) {
       descParts.push(`Total = $${Number(order.order_total).toFixed(2)}`);
@@ -250,16 +274,10 @@ ${itemsXml}
 </service_orders>`;
 }
 
-// Resolve DT account name from tenant_id (direct lookup in account_name_map: {sheetId → accountName}).
-// Clients with no explicit mapping fall back to the DT_DEFAULT_ACCOUNT constant
-// — the push to DispatchTrack never fails for "unmapped tenant"; it just lands
-// under the house account and operations can reassign inside DT's UI if needed.
-const DT_DEFAULT_ACCOUNT = 'STRIDE LOGISTICS';
-
+// Resolve DT account name from tenant_id (direct lookup in account_name_map: {sheetId → accountName})
 function resolveAccountName(tenantId: string | null, acctMap: Record<string, string>): string {
-  if (!tenantId) return DT_DEFAULT_ACCOUNT;
-  const explicit = acctMap[tenantId];
-  return (explicit && explicit.trim()) || DT_DEFAULT_ACCOUNT;
+  if (!tenantId) return '';
+  return acctMap[tenantId] || '';
 }
 
 // Push a single order to DT. Returns {ok, body}.
@@ -329,7 +347,7 @@ Deno.serve(async (req: Request) => {
   // ── 1. Fetch primary order ────────────────────────────────────────────
   const { data: order, error: orderErr } = await supabase
     .from('dt_orders')
-    .select('id, tenant_id, dt_identifier, is_pickup, order_type, linked_order_id, contact_name, contact_address, contact_city, contact_state, contact_zip, contact_phone, contact_phone2, contact_email, local_service_date, window_start_local, window_end_local, po_number, sidemark, client_reference, details, order_notes, service_time_minutes, review_status, pushed_to_dt_at, billing_method, order_total, base_delivery_fee, extra_items_count, extra_items_fee, accessorials_json, accessorials_total, billing_review_status, paid_at, paid_amount, paid_method')
+    .select('id, tenant_id, dt_identifier, is_pickup, order_type, linked_order_id, contact_name, contact_address, contact_city, contact_state, contact_zip, contact_phone, contact_phone2, contact_email, local_service_date, window_start_local, window_end_local, po_number, sidemark, client_reference, details, order_notes, service_time_minutes, review_status, pushed_to_dt_at, billing_method, order_total, base_delivery_fee, extra_items_count, extra_items_fee, accessorials_json, accessorials_total, coverage_option_id, coverage_charge, declared_value, billing_review_status, paid_at, paid_amount, paid_method')
     .eq('id', orderId)
     .maybeSingle();
 
@@ -338,6 +356,21 @@ Deno.serve(async (req: Request) => {
   }
 
   const orderTyped = order as DtOrderRow;
+
+  // Resolve coverage option name for the description (separate fetch
+  // because the FK isn't a PostgREST embedded relation in the cached
+  // schema). Best-effort — if it fails, the description falls back to
+  // the literal "Coverage" label.
+  if (orderTyped.coverage_option_id) {
+    try {
+      const { data: cv } = await supabase
+        .from('coverage_options')
+        .select('name')
+        .eq('id', orderTyped.coverage_option_id)
+        .maybeSingle();
+      if (cv && (cv as { name?: string }).name) orderTyped.coverage_name = (cv as { name?: string }).name;
+    } catch (_) { /* leave coverage_name undefined → "Coverage" fallback */ }
+  }
   const orderType = orderTyped.order_type || (orderTyped.is_pickup ? 'pickup' : 'delivery');
 
   // ── 2. Fetch items for primary order ──────────────────────────────────
@@ -485,4 +518,3 @@ Deno.serve(async (req: Request) => {
     }, 500);
   }
 });
-                                                                                                                                                                                                                                                                                                               

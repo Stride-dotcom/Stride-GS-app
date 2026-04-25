@@ -50,7 +50,7 @@
  * Multi-stop (>2 stops) is deferred; this modal handles 1 stop + an
  * optional linked pickup for the pickup_and_delivery mode.
  */
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   X, Check, Loader2, CheckCircle2, MapPin, Truck,
   ArrowRight, Wrench, Box, Plus, Trash2, CreditCard, BookOpen, Search,
@@ -174,6 +174,12 @@ interface Props {
   onSubmit?: (data: { dtOrderId: string; dtIdentifier: string; reviewStatus: string }) => void;
   preSelectedItemIds?: string[];
   liveItems?: LiveItem[];
+  /** When set, the modal opens in edit-an-existing-draft mode. Loads
+   *  the dt_orders row + its dt_order_items, prefills every form
+   *  field. Save Draft updates the row in place; Submit for Review
+   *  promotes it (replaces DRAFT-xxx with a real generated number +
+   *  flips review_status). */
+  editDraftId?: string | null;
 }
 
 // A free-text item entered on a pickup form (not linked to inventory)
@@ -443,6 +449,7 @@ export function CreateDeliveryOrderModal({
   onSubmit,
   preSelectedItemIds = [],
   liveItems: liveItemsProp = [],
+  editDraftId = null,
 }: Props) {
   const { user } = useAuth();
   const isStaff = user?.role === 'staff' || user?.role === 'admin';
@@ -1000,8 +1007,234 @@ export function CreateDeliveryOrderModal({
     return orderNum;
   };
 
+  // ── Draft state ────────────────────────────────────────────────────────
+  // Tracks the dt_orders.id we're editing. Set when the modal opens with
+  // editDraftId (load existing) OR after the first successful Save Draft
+  // on a new modal (so subsequent saves UPDATE instead of re-INSERT a
+  // second draft row).
+  const editingDraftRowIdRef = useRef<string | null>(editDraftId ?? null);
+  const [savingDraft, setSavingDraft] = useState(false);
+  const [draftSavedAt, setDraftSavedAt] = useState<Date | null>(null);
+  // Generates a DRAFT-<short-id> placeholder identifier. Random rather
+  // than sequenced — sequencing would burn real order numbers on every
+  // draft (gaps in the sequence are ugly). Short-id is collision-safe
+  // for the volume; UNIQUE(tenant_id, dt_identifier) catches any clash.
+  const genDraftIdent = (suffix?: string): string => {
+    const rand = Math.random().toString(36).slice(2, 8).toUpperCase();
+    return suffix ? `DRAFT-${rand}-${suffix}` : `DRAFT-${rand}`;
+  };
+
+  // Prefill the form from an existing draft when the modal opens with
+  // editDraftId. Loads dt_orders + dt_order_items + the auxiliary
+  // selections (selectedAccessorials, selectedIds), then overwrites the
+  // freshly-mounted state. Best-effort — on failure shows an error
+  // banner; user can either retry by reopening or cancel.
+  useEffect(() => {
+    if (!editDraftId) return;
+    let cancelled = false;
+    (async () => {
+      const { data: row, error } = await supabase
+        .from('dt_orders')
+        .select('*, dt_order_items(*)')
+        .eq('id', editDraftId)
+        .maybeSingle();
+      if (cancelled) return;
+      if (error || !row) {
+        setSubmitError(`Could not load draft: ${error?.message || 'not found'}`);
+        return;
+      }
+      const r = row as Record<string, unknown>;
+      // Restore high-level mode + source first so dependent UI mounts.
+      const ot = (r.order_type as string) || 'delivery';
+      setMode(ot === 'pickup' || ot === 'delivery' || ot === 'service_only' || ot === 'pickup_and_delivery' ? ot : 'delivery');
+      // (P+D drafts are not supported yet — early-return if encountered.)
+      if (ot === 'pickup_and_delivery') {
+        setSubmitError('Pickup+Delivery drafts can\'t be edited yet. Submit or discard this one and create a new order.');
+        return;
+      }
+      // Common fields
+      if (r.po_number)              setPoNumber(r.po_number as string);
+      if (r.sidemark)               setSidemark(r.sidemark as string);
+      if (r.details)                setDetails(r.details as string);
+      if (r.local_service_date)     setServiceDate(r.local_service_date as string);
+      if (r.window_start_local)     setWindowStart(r.window_start_local as string);
+      if (r.window_end_local)       setWindowEnd(r.window_end_local as string);
+      if (r.billing_method)         setBillingMethod(r.billing_method as BillingMethod);
+      if (r.service_time_minutes != null) setServiceTimeOverride(Number(r.service_time_minutes));
+      if (r.coverage_option_id)     setCoverageOptionId(r.coverage_option_id as string);
+      if (r.declared_value != null) setDeclaredValue(String(r.declared_value));
+      // Contacts — pickup vs delivery depending on mode
+      if (ot === 'pickup') {
+        if (r.contact_name)    setPickupContactName(r.contact_name as string);
+        if (r.contact_address) setPickupAddress(r.contact_address as string);
+        if (r.contact_city)    setPickupCity(r.contact_city as string);
+        if (r.contact_state)   setPickupState(r.contact_state as string);
+        if (r.contact_zip)     setPickupZip(r.contact_zip as string);
+        if (r.contact_phone)   setPickupPhone(r.contact_phone as string);
+        if (r.contact_phone2)  setPickupPhone2(r.contact_phone2 as string);
+        if (r.contact_email)   setPickupEmail(r.contact_email as string);
+      } else {
+        if (r.contact_name)    setDeliveryContactName(r.contact_name as string);
+        if (r.contact_address) setDeliveryAddress(r.contact_address as string);
+        if (r.contact_city)    setDeliveryCity(r.contact_city as string);
+        if (r.contact_state)   setDeliveryState(r.contact_state as string);
+        if (r.contact_zip)     setDeliveryZip(r.contact_zip as string);
+        if (r.contact_phone)   setDeliveryPhone(r.contact_phone as string);
+        if (r.contact_phone2)  setDeliveryPhone2(r.contact_phone2 as string);
+        if (r.contact_email)   setDeliveryEmail(r.contact_email as string);
+      }
+      // Items: warehouse-source selections come from dt_order_items
+      const items = Array.isArray(r.dt_order_items) ? (r.dt_order_items as Array<Record<string, unknown>>) : [];
+      const itemIds = items
+        .map(it => String(it.dt_item_code || it.description || '').trim())
+        .filter(Boolean);
+      if (itemIds.length > 0) setSelectedIds(new Set(itemIds));
+      // Accessorials JSON
+      const accs = Array.isArray(r.accessorials_json) ? (r.accessorials_json as Array<{ code: string; quantity: number; subtotal: number }>) : [];
+      if (accs.length > 0) {
+        const m = new Map<string, SelectedAccessorial>();
+        for (const a of accs) m.set(a.code, { code: a.code, quantity: a.quantity, subtotal: a.subtotal });
+        setSelectedAccessorials(m);
+      }
+      // Service description (service_only mode)
+      if (ot === 'service_only' && r.details) setServiceDescription(r.details as string);
+    })();
+    return () => { cancelled = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editDraftId]);
+
+  // ── Save Draft ─────────────────────────────────────────────────────────
+  // Persists the in-progress order as a dt_orders row with
+  // review_status='draft' and a DRAFT-xxx placeholder identifier. The
+  // operator can return to this draft from the Orders page (filter to
+  // Drafts → click the row → modal reopens with everything prefilled).
+  // Subsequent saves UPDATE the same row. On Submit for Review, the
+  // promote path replaces the placeholder identifier with a real
+  // generated number and flips review_status.
+  //
+  // P+D mode is intentionally not supported here yet — it requires two
+  // linked rows; a future iteration will handle the linked-pair save.
+  // The Save Draft button is disabled in P+D mode with a tooltip.
+  const canSaveDraft = !!clientSheetId && mode !== 'pickup_and_delivery';
+  const handleSaveDraft = async () => {
+    if (!canSaveDraft || savingDraft) return;
+    setSavingDraft(true);
+    setSubmitError(null);
+
+    try {
+      const { data: authData } = await supabase.auth.getUser();
+      const authUid = authData?.user?.id || null;
+
+      const accList = Array.from(selectedAccessorials.values()).map(a => ({
+        code: a.code,
+        quantity: a.quantity,
+        rate: accessorials.find(x => x.code === a.code)?.rate || 0,
+        subtotal: a.subtotal,
+      }));
+
+      // Pick the right contact set for the mode
+      const contact = mode === 'pickup' ? {
+        name: pickupContactName, address: pickupAddress, city: pickupCity, state: pickupState,
+        zip: pickupZip, phone: pickupPhone, phone2: pickupPhone2, email: pickupEmail,
+      } : {
+        name: deliveryContactName, address: deliveryAddress, city: deliveryCity, state: deliveryState,
+        zip: deliveryZip, phone: deliveryPhone, phone2: deliveryPhone2, email: deliveryEmail,
+      };
+
+      const payload: Record<string, unknown> = {
+        tenant_id: clientSheetId,
+        timezone: 'America/Los_Angeles',
+        local_service_date: serviceDate || null,
+        window_start_local: windowStart || null,
+        window_end_local: windowEnd || null,
+        po_number: poNumber.trim() || null,
+        sidemark: sidemark.trim() || null,
+        details: mode === 'service_only'
+          ? (serviceDescription.trim() ? serviceDescription.trim() : (details.trim() || null))
+          : (details.trim() || null),
+        source: 'app',
+        review_status: 'draft',
+        created_by_user: authUid,
+        created_by_role: user?.role || 'client',
+        billing_method: billingMethod,
+        service_time_minutes: effectiveServiceTime || null,
+        order_type: mode,
+        is_pickup: mode === 'pickup',
+        contact_name: contact.name.trim() || null,
+        contact_address: contact.address.trim() || null,
+        contact_city: contact.city.trim() || null,
+        contact_state: contact.state.trim() || null,
+        contact_zip: contact.zip.trim() || null,
+        contact_phone: contact.phone.trim() || null,
+        contact_phone2: contact.phone2.trim() || null,
+        contact_email: contact.email.trim() || null,
+        base_delivery_fee: baseFee != null ? baseFee : null,
+        extra_items_count: extraItemsCount,
+        extra_items_fee: extraItemsFee,
+        accessorials_json: accList.length > 0 ? accList : null,
+        accessorials_total: accessorialsTotal,
+        order_total: orderTotal,
+        coverage_option_id: selectedCoverage?.id ?? null,
+        declared_value: selectedCoverage?.calcType === 'percent_declared' ? (parseFloat(declaredValue) || null) : null,
+        coverage_charge: coverageCharge || 0,
+      };
+
+      if (editingDraftRowIdRef.current) {
+        // UPDATE existing draft row
+        const { error: upErr } = await supabase
+          .from('dt_orders')
+          .update(payload)
+          .eq('id', editingDraftRowIdRef.current);
+        if (upErr) throw new Error(`Draft update failed: ${upErr.message}`);
+        // Refresh dt_order_items: delete existing + reinsert (simple,
+        // safe — drafts aren't queried for reporting between saves).
+        await supabase.from('dt_order_items').delete().eq('dt_order_id', editingDraftRowIdRef.current);
+        if (mode === 'delivery' && itemsSource === 'warehouse' && selectedInvItems.length > 0) {
+          const itemRows = selectedInvItems.map(i => ({
+            dt_order_id: editingDraftRowIdRef.current,
+            dt_item_code: i.itemId,
+            description: i.description || '',
+            quantity: i.qty || 1,
+            vendor: i.vendor || null,
+            class_name: i.itemClass || null,
+            cubic_feet: classToCuFt(i.itemClass) ?? null,
+          }));
+          await supabase.from('dt_order_items').insert(itemRows);
+        }
+      } else {
+        // INSERT new draft row
+        const draftIdent = genDraftIdent();
+        const { data: row, error: insErr } = await supabase
+          .from('dt_orders')
+          .insert({ ...payload, dt_identifier: draftIdent })
+          .select('id')
+          .single();
+        if (insErr || !row) throw new Error(`Draft insert failed: ${insErr?.message}`);
+        editingDraftRowIdRef.current = (row as { id: string }).id;
+        // Insert items (delivery + warehouse source only)
+        if (mode === 'delivery' && itemsSource === 'warehouse' && selectedInvItems.length > 0) {
+          const itemRows = selectedInvItems.map(i => ({
+            dt_order_id: editingDraftRowIdRef.current,
+            dt_item_code: i.itemId,
+            description: i.description || '',
+            quantity: i.qty || 1,
+            vendor: i.vendor || null,
+            class_name: i.itemClass || null,
+            cubic_feet: classToCuFt(i.itemClass) ?? null,
+          }));
+          await supabase.from('dt_order_items').insert(itemRows);
+        }
+      }
+      setDraftSavedAt(new Date());
+    } catch (e) {
+      setSubmitError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSavingDraft(false);
+    }
+  };
+
   // ── Submit ─────────────────────────────────────────────────────────────
-  const [, setSubmitting] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [createResult, setCreateResult] = useState<{ dtIdentifier: string; linkedIdentifier?: string; orderId: string } | null>(null);
   const [orderPaid, setOrderPaid] = useState(false);
@@ -1010,6 +1243,103 @@ export function CreateDeliveryOrderModal({
     if (!canSubmit) return;
     setSubmitting(true);
     setSubmitError(null);
+
+    // Promote-an-existing-draft path. When the modal was opened on a
+    // draft (or auto-saved one mid-build), we UPDATE the existing row
+    // instead of INSERTing a new one — replaces the DRAFT-xxx
+    // placeholder identifier with a real generated number and flips
+    // review_status to pending_review (or approved for admin). Pickup+
+    // Delivery isn't supported for drafts yet, so this branch only
+    // runs for single-leg modes.
+    if (editingDraftRowIdRef.current && mode !== 'pickup_and_delivery') {
+      try {
+        const { data: authData2 } = await supabase.auth.getUser();
+        const authUid2 = authData2?.user?.id || null;
+        const accList2 = Array.from(selectedAccessorials.values()).map(a => ({
+          code: a.code, quantity: a.quantity,
+          rate: accessorials.find(x => x.code === a.code)?.rate || 0,
+          subtotal: a.subtotal,
+        }));
+        const contact = mode === 'pickup' ? {
+          name: pickupContactName, address: pickupAddress, city: pickupCity, state: pickupState,
+          zip: pickupZip, phone: pickupPhone, phone2: pickupPhone2, email: pickupEmail,
+        } : {
+          name: deliveryContactName, address: deliveryAddress, city: deliveryCity, state: deliveryState,
+          zip: deliveryZip, phone: deliveryPhone, phone2: deliveryPhone2, email: deliveryEmail,
+        };
+        const realIdent = await generateOrderNumber(mode === 'pickup' ? 'P' : undefined);
+        const promotePayload: Record<string, unknown> = {
+          dt_identifier: realIdent,
+          review_status: user?.role === 'admin' ? 'approved' : 'pending_review',
+          tenant_id: clientSheetId,
+          timezone: 'America/Los_Angeles',
+          local_service_date: serviceDate || null,
+          window_start_local: windowStart || null,
+          window_end_local: windowEnd || null,
+          po_number: poNumber.trim() || null,
+          sidemark: sidemark.trim() || null,
+          details: mode === 'service_only'
+            ? (serviceDescription.trim() ? serviceDescription.trim() : (details.trim() || null))
+            : (details.trim() || null),
+          billing_method: billingMethod,
+          service_time_minutes: effectiveServiceTime || null,
+          order_type: mode,
+          is_pickup: mode === 'pickup',
+          contact_name: contact.name.trim() || null,
+          contact_address: contact.address.trim() || null,
+          contact_city: contact.city.trim() || null,
+          contact_state: contact.state.trim() || null,
+          contact_zip: contact.zip.trim() || null,
+          contact_phone: contact.phone.trim() || null,
+          contact_phone2: contact.phone2.trim() || null,
+          contact_email: contact.email.trim() || null,
+          base_delivery_fee: baseFee != null ? baseFee : null,
+          extra_items_count: extraItemsCount,
+          extra_items_fee: extraItemsFee,
+          accessorials_json: accList2.length > 0 ? accList2 : null,
+          accessorials_total: accessorialsTotal,
+          order_total: orderTotal,
+          coverage_option_id: selectedCoverage?.id ?? null,
+          declared_value: selectedCoverage?.calcType === 'percent_declared' ? (parseFloat(declaredValue) || null) : null,
+          coverage_charge: coverageCharge || 0,
+          // Stamp who promoted it (may differ from original draft creator)
+          updated_by_user: authUid2,
+        };
+        const { data: promoted, error: promoteErr } = await supabase
+          .from('dt_orders')
+          .update(promotePayload)
+          .eq('id', editingDraftRowIdRef.current)
+          .select('id, dt_identifier, review_status')
+          .single();
+        if (promoteErr || !promoted) throw new Error(`Draft promote failed: ${promoteErr?.message || 'no row returned'}`);
+        // Refresh items
+        await supabase.from('dt_order_items').delete().eq('dt_order_id', editingDraftRowIdRef.current);
+        if (mode === 'delivery' && itemsSource === 'warehouse' && selectedInvItems.length > 0) {
+          const itemRows = selectedInvItems.map(i => ({
+            dt_order_id: editingDraftRowIdRef.current,
+            dt_item_code: i.itemId,
+            description: i.description || '',
+            quantity: i.qty || 1,
+            vendor: i.vendor || null,
+            class_name: i.itemClass || null,
+            cubic_feet: classToCuFt(i.itemClass) ?? null,
+          }));
+          await supabase.from('dt_order_items').insert(itemRows);
+        }
+        const promotedRow = promoted as { id: string; dt_identifier: string; review_status: string };
+        onSubmit?.({
+          dtOrderId: promotedRow.id,
+          dtIdentifier: promotedRow.dt_identifier,
+          reviewStatus: promotedRow.review_status,
+        });
+        onClose();
+        return;
+      } catch (e) {
+        setSubmitError(e instanceof Error ? e.message : String(e));
+        setSubmitting(false);
+        return;
+      }
+    }
 
     const { data: authData } = await supabase.auth.getUser();
     const authUid = authData?.user?.id || null;
@@ -1591,8 +1921,12 @@ export function CreateDeliveryOrderModal({
           (Cancel + Submit for Review) is never covered by the
           FloatingActionBar at the bottom of the page. The FAB's parent
           stacking context was winning the layer fight on tall screens
-          where the modal's bottom edge sits behind the FAB. */}
-      <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.3)', zIndex: 1000 }} />
+          where the modal's bottom edge sits behind the FAB.
+
+          Backdrop click does NOT close the modal — too easy to lose a
+          half-built order with one stray click. Operator must use
+          Cancel, Save Draft, or Submit for Review explicitly. */}
+      <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.3)', zIndex: 1000 }} />
       <div style={{
         position: 'fixed', top: '50%', left: '50%', transform: 'translate(-50%,-50%)',
         width: 1100, maxWidth: '96vw', maxHeight: '94vh',
@@ -2362,15 +2696,21 @@ export function CreateDeliveryOrderModal({
                   </div>
                 );
               })}
-              {selectedCoverage && coverageCharge > 0 && (
+              {/* Always show the coverage line — even when it's the
+                  free Standard tier ($0). Operators want explicit
+                  confirmation that valuation is accounted for in the
+                  total, not silently absent because it's free. */}
+              {selectedCoverage && (
                 <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 4 }}>
                   <span>
                     Coverage ({selectedCoverage.name}
                     {selectedCoverage.calcType === 'percent_declared' && declaredValue
                       ? ` — ${selectedCoverage.rate.toFixed(2)}% × $${parseFloat(declaredValue).toFixed(0)}`
-                      : ''})
+                      : selectedCoverage.calcType === 'percent_declared'
+                        ? ` — ${selectedCoverage.rate.toFixed(2)}% (declared value not set)`
+                        : ''})
                   </span>
-                  <span style={{ fontWeight: 500 }}>${coverageCharge.toFixed(2)}</span>
+                  <span style={{ fontWeight: 500 }}>{coverageCharge > 0 ? `$${coverageCharge.toFixed(2)}` : 'Included'}</span>
                 </div>
               )}
               <div style={{
@@ -2488,6 +2828,35 @@ export function CreateDeliveryOrderModal({
             )}
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
+            {/* Discard Draft — only when editing an existing draft.
+                Admin/staff only. Hard-deletes the row + its items. */}
+            {editingDraftRowIdRef.current && isStaff && (
+              <button
+                type="button"
+                onClick={async () => {
+                  if (!editingDraftRowIdRef.current) return;
+                  if (!confirm('Discard this draft? This cannot be undone.')) return;
+                  try {
+                    const id = editingDraftRowIdRef.current;
+                    await supabase.from('dt_order_items').delete().eq('dt_order_id', id);
+                    const { error } = await supabase.from('dt_orders').delete().eq('id', id);
+                    if (error) throw new Error(error.message);
+                    onClose();
+                  } catch (e) {
+                    setSubmitError(e instanceof Error ? e.message : String(e));
+                  }
+                }}
+                style={{
+                  padding: '9px 16px', borderRadius: 8,
+                  border: '1px solid #FCA5A5',
+                  background: '#FEF2F2', color: '#B91C1C',
+                  fontSize: 13, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit',
+                }}
+                title="Permanently delete this draft"
+              >
+                Discard Draft
+              </button>
+            )}
             <button
               onClick={onClose}
               type="button"
@@ -2500,10 +2869,43 @@ export function CreateDeliveryOrderModal({
             >
               Cancel
             </button>
+            <button
+              type="button"
+              onClick={handleSaveDraft}
+              disabled={!canSaveDraft || savingDraft || submitting}
+              title={
+                !canSaveDraft && !clientSheetId
+                  ? 'Pick a client first'
+                  : !canSaveDraft && mode === 'pickup_and_delivery'
+                    ? 'Pickup+Delivery drafts not yet supported — submit or cancel'
+                    : draftSavedAt
+                      ? `Last saved ${draftSavedAt.toLocaleTimeString()}`
+                      : 'Save what you have so far. Pick it back up later from the Orders → Drafts list.'
+              }
+              style={{
+                padding: '9px 18px', borderRadius: 8,
+                border: `1px solid ${theme.colors.border}`,
+                background: canSaveDraft && !savingDraft ? '#fff' : '#F9FAFB',
+                color: canSaveDraft ? theme.colors.text : theme.colors.textMuted,
+                fontSize: 13, fontWeight: 600,
+                cursor: canSaveDraft && !savingDraft ? 'pointer' : 'not-allowed',
+                fontFamily: 'inherit',
+                display: 'inline-flex', alignItems: 'center', gap: 6,
+              }}
+            >
+              {savingDraft ? <Loader2 size={13} className="spin" /> : null}
+              {savingDraft
+                ? 'Saving…'
+                : draftSavedAt
+                  ? `Saved ${draftSavedAt.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`
+                  : editingDraftRowIdRef.current
+                    ? 'Update Draft'
+                    : 'Save Draft'}
+            </button>
             <WriteButton
               onClick={handleSubmit}
               disabled={!canSubmit}
-              label="Submit for Review"
+              label={editingDraftRowIdRef.current ? 'Promote to Review' : 'Submit for Review'}
               variant="primary"
               style={{
                 padding: '9px 24px', borderRadius: 8,

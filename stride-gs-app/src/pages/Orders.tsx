@@ -25,6 +25,10 @@ type OrdersTab = 'orders' | 'review' | 'availability';
 // ─── Status chip ─────────────────────────────────────────────────────────────
 
 const CATEGORY_CFG: Record<string, { bg: string; color: string; label: string }> = {
+  // Drafts surface first in the legend so the operator sees them
+  // immediately when filtering. The chip is a soft gray to distinguish
+  // from any DT-derived status.
+  draft:       { bg: '#F3F4F6', color: '#6B7280', label: 'Draft' },
   open:        { bg: '#EFF6FF', color: '#1D4ED8', label: 'Open' },
   in_progress: { bg: '#EDE9FE', color: '#7C3AED', label: 'In Progress' },
   completed:   { bg: '#F0FDF4', color: '#15803D', label: 'Completed' },
@@ -112,10 +116,18 @@ export function Orders() {
   const setActiveTab = useCallback((next: OrdersTab) => setTabRaw(next), [setTabRaw]);
   const { orders, loading, error, refetch, lastFetched } = useOrders();
   const [globalFilter, setGlobalFilter] = useState('');
-  const [sorting, setSorting] = useState<SortingState>([{ id: 'localServiceDate', desc: true }]);
+  // Default sort: newest-created first. Drafts have no service_date so
+  // sorting by createdAt makes them surface alongside everything else
+  // instead of clumping at the bottom.
+  const [sorting, setSorting] = useState<SortingState>([{ id: 'createdAt', desc: true }]);
   const [categoryFilter, setCategoryFilter] = useState<string>('');
   const [statusFilter, setStatusFilter] = useState<string[]>([]);
   const [showCreateModal, setShowCreateModal] = useState(false);
+  // When set, the create modal opens in edit-existing-draft mode and
+  // loads the dt_orders row + items into all the form fields. Cleared
+  // on modal close so the next "+ New Delivery Order" button click
+  // gets a fresh blank form.
+  const [editDraftId, setEditDraftId] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [syncingDt, setSyncingDt] = useState(false);
   const [syncResult, setSyncResult] = useState<string | null>(null);
@@ -201,6 +213,26 @@ export function Orders() {
     ch.accessor('localServiceDate', {
       header: 'Service Date', size: 120,
       cell: info => fmtDate(info.getValue()),
+    }),
+    // Date Created — when the row was first written to dt_orders.
+    // Sortable; default sort newest-first. Shows the date + a faint
+    // time underneath so the operator can scan recent activity.
+    ch.accessor('createdAt', {
+      header: 'Date Created', size: 130,
+      cell: info => {
+        const v = info.getValue() as string;
+        if (!v) return <span style={{ color: theme.colors.textMuted }}>—</span>;
+        const d = new Date(v);
+        if (isNaN(d.getTime())) return v;
+        const dateStr = d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+        const timeStr = d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+        return (
+          <div style={{ lineHeight: 1.2 }}>
+            <div style={{ fontSize: 12 }}>{dateStr}</div>
+            <div style={{ fontSize: 10, color: theme.colors.textMuted }}>{timeStr}</div>
+          </div>
+        );
+      },
     }),
     ch.accessor('contactName', { header: 'Contact', size: 140 }),
     ch.accessor('contactCity', {
@@ -536,7 +568,18 @@ export function Orders() {
                         <tr
                           key={row.id}
                           ref={measureElement}
-                          onClick={() => navigate(`/orders/${row.original.id}`)}
+                          onClick={() => {
+                            // Drafts re-open in the create modal in
+                            // edit-draft mode so the operator can pick
+                            // up where they left off. Real orders go
+                            // to the standard detail page.
+                            if (row.original.reviewStatus === 'draft') {
+                              setEditDraftId(row.original.id);
+                              setShowCreateModal(true);
+                            } else {
+                              navigate(`/orders/${row.original.id}`);
+                            }
+                          }}
                           style={{ cursor: 'pointer', transition: 'background 0.1s' }}
                           onMouseEnter={e => (e.currentTarget.style.background = theme.colors.bgSubtle || '#f0f7ff')}
                           onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
@@ -565,12 +608,14 @@ export function Orders() {
         </div>
       )}
 
-      {/* Create delivery order modal */}
+      {/* Create / edit delivery order modal */}
       {showCreateModal && (
         <CreateDeliveryOrderModal
-          onClose={() => setShowCreateModal(false)}
+          editDraftId={editDraftId}
+          onClose={() => { setShowCreateModal(false); setEditDraftId(null); }}
           onSubmit={() => {
             setShowCreateModal(false);
+            setEditDraftId(null);
             refetch();
             if (canReview) setActiveTab('review');
           }}

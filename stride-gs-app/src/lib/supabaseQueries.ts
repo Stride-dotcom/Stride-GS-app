@@ -1670,6 +1670,12 @@ export interface DtOrderForUI {
   // Phase 2c — order type + linked pickup/delivery pair
   orderType: 'delivery' | 'pickup' | 'pickup_and_delivery' | 'service_only' | 'transfer';
   linkedOrderId: string | null;
+  // When the row was first written to dt_orders (Postgres-side
+  // created_at). Used as the default-newest sort on the Orders page
+  // and for the "Date Created" column. Distinct from
+  // localServiceDate, which is the operator-picked delivery day
+  // (often unset on drafts).
+  createdAt: string;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1751,7 +1757,11 @@ export async function fetchDtOrdersFromSupabase(
     let query = supabase
       .from('dt_orders')
       .select('*, dt_order_items(*)')
-      .order('local_service_date', { ascending: false });
+      // Default newest-first by created_at — matches the Orders page
+      // sort default and surfaces drafts (which have no service date)
+      // alongside everything else without the "drafts at the bottom"
+      // problem an order-by service_date would create.
+      .order('created_at', { ascending: false });
     if (clientSheetId) {
       query = query.eq('tenant_id', clientSheetId);
     }
@@ -1759,6 +1769,10 @@ export async function fetchDtOrdersFromSupabase(
     if (error || !data) return null;
     return (data as SupabaseDtOrderRow[]).map(row => {
       const status = row.status_id != null ? statusMap.get(row.status_id) : undefined;
+      // Drafts override the DT-derived statusCategory so the existing
+      // category filter on the Orders page can include 'Drafts' as a
+      // valid option without piggybacking on a DT status code.
+      const isDraft = row.review_status === 'draft';
       return {
         id: row.id,
         tenantId: row.tenant_id,
@@ -1766,10 +1780,10 @@ export async function fetchDtOrdersFromSupabase(
         dtDispatchId: row.dt_dispatch_id,
         isPickup: row.is_pickup ?? false,
         statusId: row.status_id,
-        statusCode: status?.code ?? '',
-        statusName: status?.name ?? '—',
-        statusColor: status?.color ?? '#94a3b8',
-        statusCategory: status?.category ?? 'open',
+        statusCode: isDraft ? 'draft' : (status?.code ?? ''),
+        statusName: isDraft ? 'Draft' : (status?.name ?? '—'),
+        statusColor: isDraft ? '#6B7280' : (status?.color ?? '#94a3b8'),
+        statusCategory: isDraft ? 'draft' : (status?.category ?? 'open'),
         contactName: row.contact_name ?? '',
         contactAddress: row.contact_address ?? '',
         contactCity: row.contact_city ?? '',
@@ -1835,6 +1849,7 @@ export async function fetchDtOrdersFromSupabase(
         // Phase 2c — order type + linked pickup/delivery
         orderType: (row.order_type as DtOrderForUI['orderType']) ?? (row.is_pickup ? 'pickup' : 'delivery'),
         linkedOrderId: row.linked_order_id,
+        createdAt: row.created_at ?? '',
       };
     });
   } catch {
@@ -1858,6 +1873,7 @@ export async function fetchDtOrderByIdFromSupabase(
     if (error || !data) return null;
     const row = data as SupabaseDtOrderRow;
     const status = row.status_id != null ? statusMap.get(row.status_id) : undefined;
+    const isDraft = row.review_status === 'draft';
     return {
       id: row.id,
       tenantId: row.tenant_id,
@@ -1865,10 +1881,10 @@ export async function fetchDtOrderByIdFromSupabase(
       dtDispatchId: row.dt_dispatch_id,
       isPickup: row.is_pickup ?? false,
       statusId: row.status_id,
-      statusCode: status?.code ?? '',
-      statusName: status?.name ?? '—',
-      statusColor: status?.color ?? '#94a3b8',
-      statusCategory: status?.category ?? 'open',
+      statusCode: isDraft ? 'draft' : (status?.code ?? ''),
+      statusName: isDraft ? 'Draft' : (status?.name ?? '—'),
+      statusColor: isDraft ? '#6B7280' : (status?.color ?? '#94a3b8'),
+      statusCategory: isDraft ? 'draft' : (status?.category ?? 'open'),
       contactName: row.contact_name ?? '',
       contactAddress: row.contact_address ?? '',
       contactCity: row.contact_city ?? '',
@@ -1930,6 +1946,7 @@ export async function fetchDtOrderByIdFromSupabase(
       paymentNotes: row.payment_notes ?? '',
       orderType: (row.order_type as DtOrderForUI['orderType']) ?? (row.is_pickup ? 'pickup' : 'delivery'),
       linkedOrderId: row.linked_order_id,
+      createdAt: row.created_at ?? '',
     };
   } catch {
     return null;
