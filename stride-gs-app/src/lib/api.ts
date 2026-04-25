@@ -4712,6 +4712,11 @@ export function postUpdateQboStatus(
 /**
  * v38.118.0: Sync a service catalog item to QBO as a Service item.
  * Creates or updates, stores qb_item_id back to Supabase.
+ *
+ * 2026-04-25 PST — short 8s timeout (vs the 90s default). The handler is a
+ * single QBO upsert; if it isn't responding inside 8s the run is wedged and
+ * we'd rather surface "QBO: timed out" so Stax-only success still flips the
+ * UI to "Synced". apiPost returns API_TIMEOUT_ERROR on abort.
  */
 export function postQboSyncCatalogItem(
   serviceId: string,
@@ -4724,7 +4729,7 @@ export function postQboSyncCatalogItem(
     'qboSyncCatalogItem',
     { serviceId, serviceCode, serviceName, qbItemId } as unknown as Record<string, unknown>,
     {},
-    { signal }
+    { signal, timeoutMs: 8_000 }
   );
 }
 
