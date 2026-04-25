@@ -1363,8 +1363,184 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
     <EntityHistory entityType="repair" entityId={repair.repairId} tenantId={repair.clientSheetId ?? undefined} />
   );
 
+  // v38.124.0 / repair-quote follow-up — render the Quote builder /
+  // summary in PAGE mode (RepairPage route). Previously the multi-line
+  // builder only mounted in the slide-out panel render path; the page
+  // route's pageFooter was just buttons, so the operator had no place
+  // to add prices. This tab makes it work in page mode too.
+  const renderRepairQuoteTab = () => {
+    const sLocal = effectiveStatus;
+    const isPending = isActive && !completed && sLocal === 'Pending Quote' && !submitResult;
+    const isLockedWithLines = isActive && (sLocal === 'Quote Sent' || sLocal === 'Approved')
+      && Array.isArray(repair.quoteLines) && repair.quoteLines.length > 0;
+    const isLockedLegacy = isActive && (sLocal === 'Quote Sent' || sLocal === 'Approved')
+      && !(Array.isArray(repair.quoteLines) && repair.quoteLines.length > 0);
+
+    return (
+      <div style={{ padding: 20 }}>
+        {/* Submit success card */}
+        {submitResult && submitResult.success && (
+          <div style={{ padding: '12px 14px', background: '#F0FDF4', border: '1px solid #86EFAC', borderRadius: 10, marginBottom: 16 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+              <CheckCircle2 size={16} color="#15803D" />
+              <span style={{ fontSize: 13, fontWeight: 600, color: '#15803D' }}>
+                {submitResult.skipped ? 'Quote already sent' : 'Quote sent successfully'}
+              </span>
+            </div>
+            <div style={{ fontSize: 12, color: '#166534', lineHeight: 1.5 }}>
+              {typeof submitResult.quoteSubtotal === 'number' ? (
+                <>
+                  {typeof submitResult.quoteLineCount === 'number' && (
+                    <div>Lines: <strong>{submitResult.quoteLineCount}</strong></div>
+                  )}
+                  <div>Subtotal: <strong>${submitResult.quoteSubtotal.toFixed(2)}</strong></div>
+                  {typeof submitResult.quoteTaxAmount === 'number' && submitResult.quoteTaxAmount > 0 && (
+                    <div>Tax: <strong>${submitResult.quoteTaxAmount.toFixed(2)}</strong></div>
+                  )}
+                  {typeof submitResult.quoteGrandTotal === 'number' && (
+                    <div>Customer total (incl. tax): <strong>${submitResult.quoteGrandTotal.toFixed(2)}</strong></div>
+                  )}
+                </>
+              ) : (
+                <div>Amount: <strong>${typeof submitResult.quoteAmount === 'number' ? submitResult.quoteAmount.toFixed(2) : submitResult.quoteAmount}</strong></div>
+              )}
+              <div>Email: {submitResult.emailSent ? '✓ Sent to client' : '✗ Not sent (check settings)'}</div>
+            </div>
+          </div>
+        )}
+
+        {/* Submit error */}
+        {submitError && (
+          <div style={{ marginBottom: 12, padding: '8px 12px', background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: 8, fontSize: 12, color: '#DC2626', display: 'flex', alignItems: 'flex-start', gap: 6 }}>
+            <AlertTriangle size={14} style={{ flexShrink: 0, marginTop: 1 }} />
+            <span>{submitError}</span>
+          </div>
+        )}
+
+        {/* Pending Quote → editable builder */}
+        {isPending && (
+          <>
+            <RepairQuoteBuilder
+              lines={quoteLines}
+              taxAreaId={taxAreaId}
+              taxAreas={taxAreas}
+              catalog={serviceCatalog}
+              totals={totals}
+              disabled={submitting}
+              onAddLine={addLineFromCatalog}
+              onChangeService={changeLineService}
+              onUpdateField={updateLineField}
+              onRemoveLine={removeLine}
+              onTaxAreaChange={setTaxAreaId}
+            />
+            <WriteButton
+              label={submitting ? 'Sending...' : 'Send Quote to Client'}
+              variant="primary"
+              icon={submitting ? <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} /> : <Send size={16} />}
+              style={{ width: '100%', padding: '10px', fontSize: 13, opacity: submitting ? 0.7 : 1, marginTop: 12 }}
+              disabled={submitting}
+              onClick={handleSendQuote}
+            />
+          </>
+        )}
+
+        {/* Quote Sent / Approved + has line items → read-only summary */}
+        {isLockedWithLines && (
+          <>
+            <RepairQuoteSummary
+              lines={repair.quoteLines!}
+              subtotal={repair.quoteSubtotal ?? 0}
+              taxAreaName={repair.quoteTaxAreaName ?? ''}
+              taxRate={repair.quoteTaxRate ?? 0}
+              taxAmount={repair.quoteTaxAmount ?? 0}
+              grandTotal={repair.quoteGrandTotal ?? 0}
+            />
+            {canStaffEdit && (
+              <button
+                onClick={handleVoidQuote}
+                disabled={submitting}
+                style={{
+                  marginTop: 10, width: '100%',
+                  padding: '8px 12px', fontSize: 12, fontWeight: 600,
+                  background: '#FFFFFF', color: '#B91C1C',
+                  border: '1px solid #FCA5A5', borderRadius: 8,
+                  cursor: submitting ? 'wait' : 'pointer',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+                  opacity: submitting ? 0.6 : 1,
+                }}
+                title="Reset to Pending Quote so you can rebuild the line items"
+              >
+                <Undo2 size={13} /> Void Quote (re-issue)
+              </button>
+            )}
+          </>
+        )}
+
+        {/* Legacy single-amount quote — no line items captured. Show
+            the old Quote Amount + a Void button so the operator can
+            re-issue with the new multi-line builder. */}
+        {isLockedLegacy && (
+          <div style={{ background: theme.colors.bgSubtle, borderRadius: 10, padding: 14 }}>
+            <div style={{ fontSize: 11, fontWeight: 500, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 6 }}>
+              Quote ({sLocal})
+            </div>
+            <div style={{ fontSize: 22, fontWeight: 700, color: theme.colors.text, marginBottom: 4 }}>
+              ${typeof repair.quoteAmount === 'number' ? repair.quoteAmount.toFixed(2) : '—'}
+            </div>
+            <div style={{ fontSize: 11, color: theme.colors.textMuted, lineHeight: 1.5, marginBottom: 12 }}>
+              This quote was sent before multi-line repair quotes shipped, so there's no line-item breakdown to show. Void it to rebuild with the new builder (line items + tax + grand total).
+            </div>
+            {canStaffEdit && (
+              <button
+                onClick={handleVoidQuote}
+                disabled={submitting}
+                style={{
+                  width: '100%', padding: '8px 12px', fontSize: 12, fontWeight: 600,
+                  background: '#FFFFFF', color: '#B91C1C',
+                  border: '1px solid #FCA5A5', borderRadius: 8,
+                  cursor: submitting ? 'wait' : 'pointer',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+                  opacity: submitting ? 0.6 : 1,
+                }}
+              >
+                <Undo2 size={13} /> Void Quote (re-issue with line items)
+              </button>
+            )}
+          </div>
+        )}
+
+        {/* Beyond Approved (In Progress / Complete / Cancelled / Declined)
+            — read-only display only. */}
+        {!isPending && !isLockedWithLines && !isLockedLegacy && !submitResult && (
+          Array.isArray(repair.quoteLines) && repair.quoteLines.length > 0 ? (
+            <RepairQuoteSummary
+              lines={repair.quoteLines}
+              subtotal={repair.quoteSubtotal ?? 0}
+              taxAreaName={repair.quoteTaxAreaName ?? ''}
+              taxRate={repair.quoteTaxRate ?? 0}
+              taxAmount={repair.quoteTaxAmount ?? 0}
+              grandTotal={repair.quoteGrandTotal ?? 0}
+            />
+          ) : (
+            <div style={{ padding: 20, textAlign: 'center', color: theme.colors.textMuted, fontSize: 13 }}>
+              {sLocal === 'Cancelled' || sLocal === 'Declined'
+                ? `Repair was ${sLocal}. No quote on file.`
+                : typeof repair.quoteAmount === 'number' && repair.quoteAmount > 0
+                  ? <>Quote: <strong style={{ color: theme.colors.text }}>${repair.quoteAmount.toFixed(2)}</strong> (legacy single-amount, no breakdown)</>
+                  : 'No quote on file yet.'}
+            </div>
+          )
+        )}
+      </div>
+    );
+  };
+
   const pageTabs = [
     { id: 'details',  label: 'Details',  keepMounted: true, render: renderDetailsTab },
+    // Quote tab — front-and-center for Pending Quote so the operator
+    // sees the line-item builder immediately on landing. Stays useful
+    // post-send too (read-only summary + Void).
+    { id: 'quote',    label: 'Quote',    render: renderRepairQuoteTab },
     { id: 'photos',   label: 'Photos',   badgeCount: rpPhotoCount, render: renderRepairPhotosTab },
     { id: 'docs',     label: 'Docs',     badgeCount: rpDocCount,   render: renderRepairDocsTab },
     { id: 'notes',    label: 'Notes',    badgeCount: rpNoteCount,  render: renderRepairNotesTab },
@@ -1453,7 +1629,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
         headerActions={headerActions}
         statusStrip={statusStrip}
         tabs={pageTabs as unknown as Parameters<typeof EntityPage>[0]['tabs']}
-        initialTabId="details"
+        initialTabId={effectiveStatus === 'Pending Quote' || effectiveStatus === 'Quote Sent' || effectiveStatus === 'Approved' ? 'quote' : 'details'}
         footer={pageFooter}
       />
     );
