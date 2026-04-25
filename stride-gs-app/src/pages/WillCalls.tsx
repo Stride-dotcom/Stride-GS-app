@@ -12,6 +12,7 @@ import {
   ChevronUp, ChevronDown, ArrowUpDown, Settings2, Package, RefreshCw,
 } from 'lucide-react';
 import { useVirtualRows } from '../hooks/useVirtualRows';
+import { useScrollRestoration } from '../hooks/useScrollRestoration';
 import { theme } from '../styles/theme';
 import { fmtDate } from '../lib/constants';
 import { WriteButton } from '../components/shared/WriteButton';
@@ -230,6 +231,8 @@ export function WillCalls() {
   });
 
   const { containerRef, virtualRows, rows: allRows, totalHeight } = useVirtualRows(table);
+  // Restore scroll position when navigating back from /will-calls/:id.
+  useScrollRestoration('willcalls', containerRef, allRows.length > 0);
 
   const selCount = Object.keys(rowSel).length;
 

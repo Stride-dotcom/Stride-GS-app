@@ -34,6 +34,7 @@ import {
   Wrench,
 } from 'lucide-react';
 import { useVirtualRows } from '../hooks/useVirtualRows';
+import { useScrollRestoration } from '../hooks/useScrollRestoration';
 import { theme } from '../styles/theme';
 import { fmtDate } from '../lib/constants';
 import { ItemDetailPanel } from '../components/shared/ItemDetailPanel';
@@ -1353,6 +1354,8 @@ export function Inventory() {
   }, [persistedStatusFilter, table]);
 
   const { containerRef, virtualRows, rows: allVirtualRows, totalHeight } = useVirtualRows(table);
+  // Restore scroll position when navigating back from /inventory/:id.
+  useScrollRestoration('inventory', containerRef, allVirtualRows.length > 0);
 
   // Session 72: row-display selector. Replaces the flaky drag-to-resize.
   // 'default' = viewport-fit (~10 rows). 'all' = render all rows unvirtualized

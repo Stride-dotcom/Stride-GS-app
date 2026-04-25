@@ -14,6 +14,7 @@ import {
   PackageOpen, FileText, RefreshCw,
 } from 'lucide-react';
 import { useVirtualRows } from '../hooks/useVirtualRows';
+import { useScrollRestoration } from '../hooks/useScrollRestoration';
 import { theme } from '../styles/theme';
 import { fmtDate } from '../lib/constants';
 import { WriteButton } from '../components/shared/WriteButton';
@@ -459,6 +460,8 @@ export function Shipments() {
   });
 
   const { containerRef, virtualRows, rows: allRows, totalHeight } = useVirtualRows(table);
+  // Restore scroll position when navigating back from /shipments/:id.
+  useScrollRestoration('shipments', containerRef, allRows.length > 0);
   const selectedRows = table.getSelectedRowModel().rows.map(r => r.original);
 
   // Time-based stats
