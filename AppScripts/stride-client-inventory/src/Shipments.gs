@@ -1,5 +1,15 @@
 /* ===================================================
-   Shipments.gs — v4.3.3 — 2026-04-17 PST — RECEIVED_DATE email token uses MM/dd/yyyy
+   Shipments.gs — v4.3.4 — 2026-04-25 PST — Receiving doc: self-healing schema guard for stale cached template
+   v4.3.4: completeShipment Receiving-PDF block now inspects the cached
+           template HTML returned by getDocTemplateHtml_(ss, "DOC_RECEIVING")
+           and forces fallback to the embedded v4.3.1 default whenever the
+           cached HTML is the pre-v4.3.0 schema (missing the "Reference"
+           column header, or still carrying "Class" / "Location" headers).
+           Without the guard the v4.3.1 row builder's 8 <td>s landed under
+           the old 7-or-9-column header, producing the misaligned Receiving
+           PDF Justin reported. Permanent cache-side fix is documented
+           inline at the call site.
+   v4.3.3: RECEIVED_DATE email token uses MM/dd/yyyy
    v4.3.2: SHIPMENT_RECEIVED email CTA ({{APP_DEEP_LINK}}) URL now appends
            `?client=<spreadsheetId>` to match the Tasks / Will Call / Repair
            deep-link format. Fixes user-reported "shipment detail page won't
@@ -422,8 +432,29 @@ if (flags.needsAsm) {
         "{{ITEMS_TABLE_ROWS}}": itemsTableRows,
         "{{TOTAL_ITEMS}}": String(rows.length)
       };
+      // v4.3.4: Self-healing schema guard. The v4.3.1 row builder emits 8
+      // columns (#, Item ID, Reference, Qty, Vendor, Description, Sidemark,
+      // Notes). If the cached template (Email_Template_Cache → Master
+      // Email_Templates) still holds the pre-v4.3.0 layout (with Class /
+      // Location headers and no Reference column), the row <td>s land
+      // under the wrong <th>s. Detect that by header signature and fall
+      // back to the embedded default which is always in sync with the row
+      // builder. Permanent fix: push the embedded HTML below into Master
+      // Email_Templates `DOC_RECEIVING` row col C, then run the per-client
+      // cache refresh (StrideClientRefreshPriceClassCache from the Stride
+      // menu, or StrideRemoteSyncCaches_ via remote-admin trigger).
       var rcvTemplateResult = getDocTemplateHtml_(ss, "DOC_RECEIVING");
-      var rcvHtml = resolveDocTokens_(rcvTemplateResult ? rcvTemplateResult.html : getDefaultDocHtml_("DOC_RECEIVING"), rcvTokens);
+      var rcvCachedHtml = rcvTemplateResult ? rcvTemplateResult.html : "";
+      var rcvCachedIsStale = rcvCachedHtml && (
+        rcvCachedHtml.indexOf(">Reference<") === -1 ||
+        rcvCachedHtml.indexOf(">Class<")     !== -1 ||
+        rcvCachedHtml.indexOf(">Location<")  !== -1
+      );
+      if (rcvCachedIsStale) {
+        Logger.log("[DOC_TEMPLATE] DOC_RECEIVING cached template is pre-v4.3.0 (missing Reference, has Class/Location) — using embedded fallback to keep columns aligned");
+      }
+      var rcvSourceHtml = (rcvTemplateResult && !rcvCachedIsStale) ? rcvTemplateResult.html : getDefaultDocHtml_("DOC_RECEIVING");
+      var rcvHtml = resolveDocTokens_(rcvSourceHtml, rcvTokens);
 
       // Create PDF via Google Doc with 0.25" margins and save to shipment folder
       var rcvPdfName = "Receiving_" + shipmentNo + "_" + clientNamePdf.replace(/[^a-zA-Z0-9]/g, "_") + ".pdf";
