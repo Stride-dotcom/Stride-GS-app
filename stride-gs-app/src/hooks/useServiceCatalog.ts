@@ -220,6 +220,28 @@ function stringify(v: unknown): string {
   return String(v);
 }
 
+// Fields that materially affect a Stax / QBO catalog item. UI-only
+// toggles (showInMatrix, displayOrder, showAsTask, …) are deliberately
+// excluded so a tab reorder or matrix-visibility flip doesn't trigger
+// two external API calls.
+const EXTERNAL_SYNC_FIELDS: readonly (keyof CatalogService)[] = [
+  'code', 'name', 'flatRate', 'rates', 'taxable', 'active', 'billing',
+] as const;
+
+function didExternalRelevantFieldsChange(
+  before: CatalogService,
+  after: CatalogService,
+): boolean {
+  return EXTERNAL_SYNC_FIELDS.some(f => {
+    const a = before[f];
+    const b = after[f];
+    if (typeof a === 'object' || typeof b === 'object') {
+      return JSON.stringify(a) !== JSON.stringify(b);
+    }
+    return a !== b;
+  });
+}
+
 // ─── External catalog sync (best-effort, non-blocking) ───────────────────
 
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL as string;
@@ -409,15 +431,32 @@ export function useServiceCatalog(): UseServiceCatalogResult {
       }
 
       if (auditRows.length > 0) {
-        await supabase.from('service_catalog_audit').insert(auditRows);
+        const { error: auditInsertErr } = await supabase
+          .from('service_catalog_audit')
+          .insert(auditRows);
+        if (auditInsertErr) {
+          // Surface the underlying message so RLS / constraint failures
+          // don't slip through silently. Audit failure is still
+          // non-fatal — we don't roll back the service update.
+          console.warn(
+            '[service_catalog_audit] insert rejected:',
+            auditInsertErr.message,
+            auditInsertErr,
+          );
+        }
       }
     } catch (auditErr) {
       console.warn('[service_catalog_audit] insert failed (non-fatal):', auditErr);
     }
 
     setServices(prev => prev.map(s => s.id === id ? after : s).sort((a, b) => a.displayOrder - b.displayOrder));
-    // Best-effort sync to Stax + QBO (non-blocking)
-    syncToExternalCatalogs(after).catch(() => {});
+    // Best-effort sync to Stax + QBO (non-blocking). Skip when only UI-only
+    // fields (showInMatrix, displayOrder, etc.) changed — Stax/QBO neither
+    // know nor care, and avoiding the round trip saves two network calls
+    // per save.
+    if (didExternalRelevantFieldsChange(before, after)) {
+      syncToExternalCatalogs(after).catch(() => {});
+    }
     return after;
   }, [services, user]);
 

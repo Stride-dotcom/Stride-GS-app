@@ -78,16 +78,18 @@ Deno.serve(async (req: Request) => {
     const service = svc as ServiceRow;
 
     // ── Build Stax item payload ──
-    // Use flat_rate if set (even if 0), otherwise average of class rates
-    let price = service.flat_rate != null ? Number(service.flat_rate) : 0;
-    if (service.flat_rate == null && service.rates) {
-      const vals = Object.values(service.rates).filter((v): v is number => typeof v === 'number' && v > 0);
-      if (vals.length > 0) price = vals.reduce((a, b) => a + b, 0) / vals.length;
-    }
+    // Only flat-billed services get a real price. Class-based services
+    // (RCVG, INSP, ASM, REPAIR, …) have per-class rates; pushing an averaged
+    // number to Stax is meaningless and confuses any operator who runs a Stax
+    // catalog report. Push them with price=0 and the class-based marker in
+    // details so they exist in Stax but no fictional price is implied.
+    const isFlat = service.billing === 'flat';
+    const price = isFlat && service.flat_rate != null ? Number(service.flat_rate) : 0;
+    const detailsSuffix = !isFlat ? ' (class-based — see Stride app for class rates)' : '';
 
     const staxPayload = {
       item: service.code,
-      details: service.name,
+      details: service.name + detailsSuffix,
       quantity: 1,
       price: price,
       is_default: false,

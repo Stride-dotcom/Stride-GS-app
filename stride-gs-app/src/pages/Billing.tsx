@@ -56,6 +56,13 @@ import { useQBO } from '../hooks/useQBO';
 import { useAuth } from '../contexts/AuthContext';
 import { postVoidManualCharge } from '../lib/api';
 
+// Drive folder for per-client IIF / billing exports. Pulled from env so
+// a folder relocation doesn't require a React deploy. Fallback ID is
+// the original folder this code shipped with.
+const IIF_FOLDER_ID = (import.meta.env.VITE_BILLING_IIF_FOLDER_ID as string | undefined)
+  || '1nN-9xm2SdR1_Sk603nmudWHhMxlaHElx';
+const IIF_FOLDER_URL = `https://drive.google.com/drive/folders/${IIF_FOLDER_ID}`;
+
 // ─── Types ──────────────────────────────────────────────────────────────────
 
 interface BillingRow {
@@ -896,7 +903,11 @@ export function Billing() {
   }, [showToast]);
 
   // ─── Columns ──────────────────────────────────────────────────────────────
-  const col = createColumnHelper<BillingRow>();
+  // createColumnHelper produces a fresh helper instance on every render
+  // unless memoized. Without this, the columns useMemo below captures a
+  // new col reference each render and any consumer that depends on
+  // column identity (memo comparators, ref equality in TanStack) churns.
+  const col = useMemo(() => createColumnHelper<BillingRow>(), []);
   const columns = useMemo(() => {
     const isEditable = isPreviewMode;
     return [
@@ -1016,7 +1027,13 @@ export function Billing() {
 
   // ─── Report summary stats ─────────────────────────────────────────────────
   const reportTotal = useMemo(() => reportData.reduce((s, r) => s + r.total, 0), [reportData]);
-  const reportClientCount = useMemo(() => new Set(reportData.map(r => r.client)).size, [reportData]);
+  // Distinct-count by clientSheetId (always unique per tenant) rather than
+  // display name; otherwise two distinct clients with the same name would
+  // collapse into one in the count.
+  const reportClientCount = useMemo(
+    () => new Set(reportData.map(r => r.clientSheetId || r.client)).size,
+    [reportData]
+  );
   const reportRowCount = reportData.length;
 
   const table = useReactTable({
@@ -1459,7 +1476,7 @@ export function Billing() {
           {showCols && <div style={{ position: 'absolute', top: '100%', right: 0, marginTop: 4, background: '#fff', border: `1px solid ${theme.colors.border}`, borderRadius: 10, padding: 8, zIndex: 50, boxShadow: '0 4px 20px rgba(0,0,0,0.1)', minWidth: 180 }}>{TOGGLEABLE.map(id => <label key={id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '5px 8px', fontSize: 12, cursor: 'pointer' }}><input type="checkbox" checked={colVis[id] !== false} onChange={() => setColVis(v => ({ ...v, [id]: v[id] === false }))} style={{ accentColor: theme.colors.orange }} />{COL_LABELS[id]}</label>)}</div>}
         </div>
         <button onClick={() => toCSV(isStorageTab ? previewRows : reportData, isStorageTab ? 'stride-storage-preview.csv' : 'stride-billing-report.csv')} style={{ padding: '7px 12px', fontSize: 12, fontWeight: 500, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4, fontFamily: 'inherit', color: theme.colors.textSecondary }}><Download size={14} /> Export xlsx</button>
-        <button onClick={() => window.open('https://drive.google.com/drive/folders/1nN-9xm2SdR1_Sk603nmudWHhMxlaHElx', '_blank')} title="Open exports folder in Google Drive" style={{ padding: '7px 12px', fontSize: 12, fontWeight: 500, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4, fontFamily: 'inherit', color: theme.colors.textSecondary }}><ExternalLink size={14} /> IIF Folder</button>
+        <button onClick={() => window.open(IIF_FOLDER_URL, '_blank')} title="Open exports folder in Google Drive" style={{ padding: '7px 12px', fontSize: 12, fontWeight: 500, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4, fontFamily: 'inherit', color: theme.colors.textSecondary }}><ExternalLink size={14} /> IIF Folder</button>
         {isReportTab && <button onClick={async () => {
           const sel = resolveSelectedRows();
           if (!sel.length) { setQbResult({ error: 'Select invoiced rows to export. Use the checkboxes to select rows first.' }); return; }
