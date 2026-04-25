@@ -1,6 +1,17 @@
 /**
  * dt-webhook-ingest — Supabase Edge Function
  *
+ * Version: v3 (2026-04-24 PST)
+ *   v3: Corrected ALERT_TYPE_TO_STATUS_ID to match dt_statuses seed
+ *       (Started=2, In_Transit=13, Unable_To_Start=4, Unable_To_Finish=5,
+ *        Service_Route_Finished=3). Added auto-Collected transition
+ *       (status 22) when Service_Route_Finished arrives on an already-paid
+ *       order, with proper error handling on the update. Added error
+ *       handling on quarantine insert and final mark-processed update.
+ *   v2: Confirmed DT tag names (Customer_Name, Customer_Address,
+ *       Customer_Primary_Phone, Customer_Email, Note); removed dead
+ *       Pictures-URL handling (DT does not send photo URLs in webhooks).
+ *
  * Receives real-time order event POSTs from DispatchTrack, validates the
  * shared-secret token, persists the raw event to dt_webhook_events, resolves
  * the DT account name to a Stride tenant_id, then upserts to dt_orders (or
@@ -26,13 +37,20 @@
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
-// ── DT status → dt_statuses.id map (mirrors Phase 1a seed) ───────────────
+// ── dt_statuses.id constants (must mirror dt_statuses seed) ──────────────
+// 0=Pushed to DT, 1=Scheduled, 2=Started, 3=Completed, 4=Unable to Start,
+// 5=Unable to Finish, 10=Pending Review, 11=Rejected, 12=Push Failed,
+// 13=In Transit, 20=Billing Review, 21=In Ledger, 22=Collected.
+const STATUS_COMPLETED = 3;
+const STATUS_COLLECTED = 22;
+
+// ── DT Alert_Type → dt_statuses.id map ───────────────────────────────────
 const ALERT_TYPE_TO_STATUS_ID: Record<string, number> = {
-  'Started':               1,  // in_transit
-  'In_Transit':            1,  // in_transit
-  'Unable_To_Start':       8,  // exception
-  'Unable_To_Finish':      8,  // exception
-  'Service_Route_Finished': 7, // arrived
+  'Started':                2,                  // in_progress  (Started)
+  'In_Transit':             13,                 // in_progress  (In Transit)
+  'Unable_To_Start':        4,                  // exception    (Unable to Start)
+  'Unable_To_Finish':       5,                  // exception    (Unable to Finish)
+  'Service_Route_Finished': STATUS_COMPLETED,   // completed    (Completed)
   // 'Notes' and 'Pictures' events don't change status — no entry here
 };
 
@@ -50,14 +68,13 @@ async function sha256hex(text: string): Promise<string> {
 /** Parse a DT time string "HH:MM" or "HH:MM:SS" into a Postgres time literal */
 function parseTimeStr(val: string | undefined): string | null {
   if (!val) return null;
-  // Accept "HH:MM", "HH:MM AM", "H:MM PM", "HH:MM:SS", etc.
-  // Normalise to "HH:MM:SS" for PG time column
+  // Only accepts 24h "HH:MM" or "HH:MM:SS". 12h with AM/PM is not supported;
+  // unknown formats return null and the caller stores nothing for that field.
   const cleaned = val.trim();
-  // Try simple "HH:MM" or "HH:MM:SS"
   if (/^\d{1,2}:\d{2}(:\d{2})?$/.test(cleaned)) {
     return cleaned.length <= 5 ? cleaned + ':00' : cleaned;
   }
-  return null; // unknown format — let caller store null
+  return null;
 }
 
 /** Safely coerce a string to an integer or null */
@@ -192,18 +209,24 @@ Deno.serve(async (req: Request) => {
   // ── 7. Quarantine if unmapped ──────────────────────────────────────────
   if (!tenantId) {
     console.warn(`[dt-webhook-ingest] Cannot map account="${accountName}" — quarantining`);
-    await supabase.from('dt_orders_quarantine').insert({
+    const { error: quarantineErr } = await supabase.from('dt_orders_quarantine').insert({
       received_at:    receivedAt,
       dt_identifier:  dtIdentifier,
       dt_dispatch_id: dtDispatchId,
       raw_payload:    payload,
       mapping_hint:   { account_name: accountName, event_type: eventType },
     });
+    if (quarantineErr) {
+      console.error('[dt-webhook-ingest] Quarantine insert error:', quarantineErr.message);
+    }
     // Mark the webhook event with the mapping failure
-    await supabase
+    const { error: markErr } = await supabase
       .from('dt_webhook_events')
       .update({ processing_error: `unmapped_account:${accountName}`, processed: false })
       .eq('idempotency_key', idempotencyKey);
+    if (markErr) {
+      console.warn('[dt-webhook-ingest] Failed to mark event with mapping error:', markErr.message);
+    }
 
     return new Response(
       JSON.stringify({ ok: true, quarantined: true, account: accountName }),
@@ -295,6 +318,40 @@ Deno.serve(async (req: Request) => {
 
   const orderId = orderRow?.id ?? null;
 
+  // ── 9b. Auto-transition Completed → Collected when order is paid ──────
+  // When DT reports Service_Route_Finished and the order has already been
+  // marked paid in Stride (paid_at IS NOT NULL), move it directly from
+  // Completed (3) to Collected (22) so the billing-review queue doesn't
+  // have to chase a manual second click.
+  if (eventType === 'Service_Route_Finished' && orderId) {
+    const { data: paidCheck, error: paidCheckErr } = await supabase
+      .from('dt_orders')
+      .select('paid_at')
+      .eq('id', orderId)
+      .maybeSingle();
+    if (paidCheckErr) {
+      console.warn(
+        `[dt-webhook-ingest] Auto-Collected: failed to read paid_at for order=${orderId}:`,
+        paidCheckErr.message
+      );
+    } else if (paidCheck?.paid_at) {
+      const { error: collectedErr } = await supabase
+        .from('dt_orders')
+        .update({ status_id: STATUS_COLLECTED })
+        .eq('id', orderId);
+      if (collectedErr) {
+        console.error(
+          `[dt-webhook-ingest] Auto-Collected update failed for order=${orderId} (${dtIdentifier}):`,
+          collectedErr.message
+        );
+      } else {
+        console.log(
+          `[dt-webhook-ingest] Auto-marked order=${orderId} (${dtIdentifier}) as Collected (completed + paid)`
+        );
+      }
+    }
+  }
+
   // ── 10. Handle Notes event ─────────────────────────────────────────────
   if (eventType === 'Notes' && orderId) {
     const noteBody = payload['Note'] ?? payload['note'] ?? payload['Driver_Note'] ?? '';
@@ -324,7 +381,7 @@ Deno.serve(async (req: Request) => {
   }
 
   // ── 12. Mark event processed ───────────────────────────────────────────
-  await supabase
+  const { error: processedErr } = await supabase
     .from('dt_webhook_events')
     .update({
       processed:    true,
@@ -332,6 +389,9 @@ Deno.serve(async (req: Request) => {
       tenant_id:    tenantId,
     })
     .eq('idempotency_key', idempotencyKey);
+  if (processedErr) {
+    console.warn('[dt-webhook-ingest] Failed to mark event processed:', processedErr.message);
+  }
 
   console.log(`[dt-webhook-ingest] Done — order=${dtIdentifier} tenant=${tenantId} orderId=${orderId}`);
 
