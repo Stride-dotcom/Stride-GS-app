@@ -1039,7 +1039,11 @@ export function CreateDeliveryOrderModal({
     const commonFields = {
       tenant_id: clientSheetId,
       timezone: 'America/Los_Angeles',
-      local_service_date: serviceDate,
+      // dt_orders.local_service_date is a date column. An empty string
+      // makes Postgres throw "invalid input syntax for type date" — has
+      // to be null when the operator hasn't picked a day. (Service date
+      // is no longer required at submit; we may write rows without one.)
+      local_service_date: serviceDate || null,
       window_start_local: windowStart || null,
       window_end_local: windowEnd || null,
       po_number: poNumber.trim() || null,
@@ -1343,7 +1347,7 @@ export function CreateDeliveryOrderModal({
               dt_order_id: orderRow.id,
               dt_identifier: orderRow.dt_identifier,
               contact_name: contactName.trim(),
-              service_date: serviceDate,
+              service_date: serviceDate || null,
               order_type: mode,
             },
             performed_by: user?.email || 'unknown',
