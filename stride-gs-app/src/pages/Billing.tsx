@@ -1,5 +1,6 @@
 import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import { useIsMobile } from '../hooks/useIsMobile';
+import { useUrlState } from '../hooks/useUrlState';
 import { createPortal } from 'react-dom';
 import {
   useReactTable, getCoreRowModel, getSortedRowModel, getFilteredRowModel,
@@ -306,7 +307,13 @@ export function Billing() {
   const { connected: qboConnected, pushInvoice: qboPushInvoice } = useQBO();
 
   // ─── Top-level tab state ──────────────────────────────────────────────────
-  const [activeTab, setActiveTab] = useState<'report' | 'storage' | 'review' | 'parity'>('report');
+  // Active tab persisted in URL (?tab=report|storage|review|parity) so back
+  // navigates between Billing tab visits.
+  type BillingTab = 'report' | 'storage' | 'review' | 'parity';
+  const VALID_BILLING_TABS: readonly BillingTab[] = ['report','storage','review','parity'] as const;
+  const [tabRaw, setTabRaw] = useUrlState('tab', 'report');
+  const activeTab: BillingTab = (VALID_BILLING_TABS as readonly string[]).includes(tabRaw) ? (tabRaw as BillingTab) : 'report';
+  const setActiveTab = (next: BillingTab) => setTabRaw(next);
 
   // ─── Service list from Master Price List (dynamic, not hardcoded) ─────────
   const { priceList } = usePricing(apiConfigured);

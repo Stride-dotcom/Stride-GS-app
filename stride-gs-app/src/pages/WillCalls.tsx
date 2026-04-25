@@ -32,6 +32,7 @@ import { SyncBanner } from '../components/shared/SyncBanner';
 import { useClients } from '../hooks/useClients';
 import { useClientFilterUrlSync } from '../hooks/useClientFilterUrlSync';
 import { useTablePreferences } from '../hooks/useTablePreferences';
+import { useUrlState } from '../hooks/useUrlState';
 import type { WillCall } from '../lib/types';
 import { useIsMobile } from '../hooks/useIsMobile';
 import { mobileChipsRow } from '../styles/mobileTable';
@@ -94,7 +95,6 @@ export function WillCalls() {
   const location = useLocation();
   const apiConfigured = isApiConfigured();
   useBatchData();
-  const pendingOpenRef = useRef<string | null>(null);
   // Deep-link: stash ?client= spreadsheet ID until apiClients loads, then resolve to name
   const deepLinkPendingTenantRef = useRef<string | null>(null);
 
@@ -137,7 +137,8 @@ export function WillCalls() {
   const { willCalls, loading: wcsLoading, refetch: refetchWCs, applyWcPatch, mergeWcPatch, clearWcPatch, addOptimisticWc, removeOptimisticWc } = useWillCalls(apiConfigured && clientFilter.length > 0, selectedSheetId);
 
   const columns = useMemo(() => cols(), []);
-  const [selectedWcId, setSelectedWcId] = useState<string | null>(null);
+  // selectedWcId in the URL (?open=WC_NUMBER) so back closes the panel.
+  const [selectedWcId, setSelectedWcId] = useUrlState('open', '');
   const selectedWC = useMemo(() => willCalls.find(w => w.wcNumber === selectedWcId) ?? null, [willCalls, selectedWcId]);
   (window as any).__openWCDetail = (w: WC) => setSelectedWcId(w.wcNumber);
 
@@ -149,13 +150,10 @@ export function WillCalls() {
     // Supabase-first; Effect 2 opens the pending row when data arrives.
     if (location.search) {
       const params = new URLSearchParams(location.search);
-      const openId = params.get('open');
       const clientIdParam = params.get('client');
-      if (openId) {
-        pendingOpenRef.current = openId;
-        window.history.replaceState({}, '', window.location.pathname + window.location.hash.split('?')[0]);
-        if (clientIdParam) deepLinkPendingTenantRef.current = clientIdParam;
-      }
+      // ?open= is consumed by useUrlState (selectedWcId); only ?client= needs
+      // capture here for filter scoping below.
+      if (clientIdParam) deepLinkPendingTenantRef.current = clientIdParam;
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -179,13 +177,8 @@ export function WillCalls() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [apiClients.length]);
 
-  // Effect 2: When will calls arrive, open the pending WC
-  useEffect(() => {
-    if (pendingOpenRef.current && willCalls.length > 0) {
-      const match = willCalls.find(w => w.wcNumber === pendingOpenRef.current);
-      if (match) { setSelectedWcId(match.wcNumber); pendingOpenRef.current = null; }
-    }
-  }, [willCalls]);
+  // (Effect 2 removed: selectedWcId is in the URL via useUrlState; the
+  // selectedWC derivation resolves automatically when willCalls arrives.)
   const { sorting, setSorting, colVis, setColVis, columnOrder, setColumnOrder, statusFilter: sf, toggleStatus, clearStatusFilter } = useTablePreferences('willcalls', [{ id: 'scheduledDate', desc: false }], {}, DEFAULT_COL_ORDER);
   const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([]);
   const [globalFilter, setGlobalFilter] = useState('');
@@ -588,8 +581,8 @@ export function WillCalls() {
       />
       <style>{`@keyframes slideUp { from { transform: translateY(100%); } to { transform: translateY(0); } } @keyframes spin { to { transform: rotate(360deg); } }`}</style>
       {batchGuardClients && <BatchGuard selectedClients={batchGuardClients} actionName={batchGuardAction} onDismiss={() => setBatchGuardClients(null)} />}
-      {selectedWC && <WillCallDetailPanel wc={selectedWC} onClose={() => setSelectedWcId(null)} onWcUpdated={refetchWCs} onNavigateToWc={(wcNumber) => {
-        setSelectedWcId(null);
+      {selectedWC && <WillCallDetailPanel wc={selectedWC} onClose={() => setSelectedWcId('')} onWcUpdated={refetchWCs} onNavigateToWc={(wcNumber) => {
+        setSelectedWcId('');
         // After refetch, set the new WC ID — derived selectedWC will auto-resolve once willCalls updates
         setTimeout(() => {
           setSelectedWcId(wcNumber);

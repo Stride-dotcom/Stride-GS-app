@@ -1,6 +1,7 @@
 import { useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import { useLocation } from 'react-router-dom';
 import { useTablePreferences } from '../hooks/useTablePreferences';
+import { useUrlState } from '../hooks/useUrlState';
 import { createPortal } from 'react-dom';
 import {
   useReactTable, getCoreRowModel, getSortedRowModel, getFilteredRowModel,
@@ -310,7 +311,6 @@ export function Shipments() {
   const location = useLocation();
   const hasApi = isApiConfigured();
   useBatchData();
-  const pendingOpenRef = useRef<string | null>(null);
   // Deep-link: stash ?client= spreadsheet ID until apiClients loads, then resolve to name
   const deepLinkPendingTenantRef = useRef<string | null>(null);
 
@@ -339,7 +339,11 @@ export function Shipments() {
   const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([]);
   const [rowSelection, setRowSelection] = useState<RowSelectionState>({});
   const [globalFilter, setGlobalFilter] = useState('');
-  const [selectedShipment, setSelectedShipment] = useState<ShipmentRow | null>(null);
+  // Open detail panel persisted in the URL (?open=SHIPMENT_NO) so back closes
+  // the panel. The previous useState held the entity object directly; we now
+  // hold the shipmentNo and derive the row from the data list, so the panel
+  // re-resolves correctly on cross-tab/back navigation as data updates.
+  const [selectedShipmentNo, setSelectedShipmentNo] = useUrlState('open', '');
   const { user } = useAuth();
 
   // Client-role users only see their own accounts in the dropdown — admin/staff see all.
@@ -366,17 +370,15 @@ export function Shipments() {
     // forces unscoped GAS (session 62). Data hook auto-fetches via
     // Supabase-first; Effect 2 opens the pending row when data arrives.
     if (state?.openShipmentId) {
-      pendingOpenRef.current = state.openShipmentId;
+      // Mirror legacy route-state into the URL so back works for those callers.
+      setSelectedShipmentNo(state.openShipmentId);
       window.history.replaceState({}, '');
     } else if (location.search) {
       const params = new URLSearchParams(location.search);
-      const openId = params.get('open');
       const clientIdParam = params.get('client');
-      if (openId) {
-        pendingOpenRef.current = openId;
-        window.history.replaceState({}, '', window.location.pathname + window.location.hash.split('?')[0]);
-        if (clientIdParam) deepLinkPendingTenantRef.current = clientIdParam;
-      }
+      // ?open= consumed by useUrlState (selectedShipmentNo); only ?client=
+      // needs capture for filter scope.
+      if (clientIdParam) deepLinkPendingTenantRef.current = clientIdParam;
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -431,13 +433,14 @@ export function Shipments() {
   // triggers useApiData refetch via Supabase-first path). A manual refetch() here
   // would force GAS (skipSupabaseCacheOnce) and hang the spinner on multi-client.
 
-  // Effect 2: When data arrives, open the pending shipment
-  useEffect(() => {
-    if (pendingOpenRef.current && data.length > 0) {
-      const match = data.find(s => s.shipmentNo === pendingOpenRef.current);
-      if (match) { setSelectedShipment(match); pendingOpenRef.current = null; }
-    }
-  }, [data]);
+  // selectedShipment is derived from selectedShipmentNo + the data list.
+  // Resolves automatically as data arrives — no pendingOpenRef needed.
+  const selectedShipment = useMemo(
+    () => (selectedShipmentNo ? data.find(s => s.shipmentNo === selectedShipmentNo) ?? null : null),
+    [selectedShipmentNo, data]
+  );
+  // (Effect 2 removed — selectedShipment is now derived above from
+  // selectedShipmentNo + data, no pendingOpenRef-style deferred set required.)
 
   // Dynamic lists
   const ALL_CARRIERS = useMemo(() => Array.from(new Set(data.map(r => r.carrier).filter(Boolean))).sort(), [data]);
@@ -468,7 +471,11 @@ export function Shipments() {
     setColumnFilters(f);
   }, [statusFilter, carrierFilter]);
 
-  const columns = useMemo(() => buildColumns(setSelectedShipment), []);
+  // buildColumns expects a (row) => void callback; adapt to push the URL
+  // state by ID. setSelectedShipmentNo identity is stable (useCallback inside
+  // useUrlState), so the empty deps array here is safe.
+  const openShipment = useCallback((row: ShipmentRow) => setSelectedShipmentNo(row.shipmentNo), [setSelectedShipmentNo]);
+  const columns = useMemo(() => buildColumns(openShipment), [openShipment]);
 
   const table = useReactTable({
     data,
@@ -655,7 +662,7 @@ export function Shipments() {
                   style={{ borderBottom: `1px solid ${theme.colors.borderSubtle}`, cursor: 'pointer', transition: 'background 0.1s', background: rowBg, borderLeft: isActivePanel ? `3px solid ${theme.colors.orange}` : '3px solid transparent' }}
                   onMouseEnter={e => { if (!isActivePanel) e.currentTarget.style.background = theme.colors.bgSubtle; const a = e.currentTarget.querySelector('.row-actions') as HTMLElement; if (a) a.style.opacity = '1'; }}
                   onMouseLeave={e => { e.currentTarget.style.background = rowBg; const a = e.currentTarget.querySelector('.row-actions') as HTMLElement; if (a) a.style.opacity = '0'; }}
-                  onClick={() => setSelectedShipment(row.original)}
+                  onClick={() => setSelectedShipmentNo(row.original.shipmentNo)}
                 >
                   {row.getVisibleCells().map(cell => (
                     <td key={cell.id} style={{ padding: '8px 12px', verticalAlign: 'middle' }} onClick={e => { if (cell.column.id === 'select') e.stopPropagation(); }}>
@@ -698,7 +705,7 @@ export function Shipments() {
       {selectedShipment && (
         <ShipmentDetailPanel
           shipment={selectedShipment}
-          onClose={() => setSelectedShipment(null)}
+          onClose={() => setSelectedShipmentNo('')}
           userRole={user?.role}
           isParent={user?.isParent}
           onItemsChanged={() => refetchShipments()}

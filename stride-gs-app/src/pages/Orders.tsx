@@ -1,4 +1,5 @@
 import { useState, useMemo } from 'react';
+import { useUrlState } from '../hooks/useUrlState';
 import {
   useReactTable, getCoreRowModel, getSortedRowModel, getFilteredRowModel,
   flexRender, createColumnHelper,
@@ -92,16 +93,21 @@ export function Orders() {
   const isStaff = user?.role === 'staff' || user?.role === 'admin';
   const canReview = isStaff;
 
-  // Read ?tab=review from hash on mount so email deep links auto-switch to the review tab
-  const initialTab = (() => {
-    try {
-      const hash = window.location.hash; // e.g. "#/orders?tab=review"
-      if (hash.includes('tab=review') && isStaff) return 'review' as OrdersTab;
-    } catch (_) {}
-    return (isAdmin ? 'orders' : 'availability') as OrdersTab;
-  })();
-
-  const [activeTab, setActiveTab] = useState<OrdersTab>(initialTab);
+  // Active tab persisted in the URL (?tab=orders|review|availability) so the
+  // browser back button cycles through tab visits the same way it does for
+  // route changes. Default tab depends on role: admin lands on Orders, staff
+  // and clients land on Availability. Email deep-links pre-select review by
+  // appending ?tab=review.
+  const defaultTab: OrdersTab = isAdmin ? 'orders' : 'availability';
+  const [tabRaw, setTab] = useUrlState('tab', defaultTab);
+  // Guard against URL-injected nonsense + role gating (a non-staff user
+  // shouldn't sit on the review tab even if a stale URL says so).
+  const activeTab: OrdersTab =
+    tabRaw === 'orders' && isAdmin                  ? 'orders'
+    : tabRaw === 'review' && canReview              ? 'review'
+    : tabRaw === 'availability'                     ? 'availability'
+    : defaultTab;
+  const setActiveTab = (next: OrdersTab) => setTab(next);
   const { orders, loading, error, refetch, lastFetched } = useOrders();
   const [globalFilter, setGlobalFilter] = useState('');
   // Default sort: newest-created first. Distinguishes order age from service

@@ -41,6 +41,7 @@ import { MultiSelectFilter } from '../components/shared/MultiSelectFilter';
 import { SyncBanner } from '../components/shared/SyncBanner';
 import { useClients } from '../hooks/useClients';
 import { useTablePreferences } from '../hooks/useTablePreferences';
+import { useUrlState } from '../hooks/useUrlState';
 import { SERVICE_CODES } from '../lib/constants';
 import type { Task } from '../lib/types';
 import { useIsMobile } from '../hooks/useIsMobile';
@@ -185,7 +186,6 @@ export function Tasks() {
   const navigate = useNavigate();
   const apiConfigured = isApiConfigured();
   useBatchData();
-  const pendingOpenRef = useRef<string | null>(null);
   // Deep-link: stash ?client= spreadsheet ID until apiClients loads, then resolve to name
   const deepLinkPendingTenantRef = useRef<string | null>(null);
 
@@ -229,7 +229,9 @@ export function Tasks() {
   const ALL_ASSIGNED = useMemo(() => [...new Set(tasks.map(t => t.assignedTo).filter(Boolean))].sort(), [tasks]);
 
   const columns = useMemo(() => cols(), []);
-  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  // selectedTaskId lives in the URL (?open=TASK_ID) so back/forward navigates
+  // detail-panel open/close instead of leaving the page entirely.
+  const [selectedTaskId, setSelectedTaskId] = useUrlState('open', '');
   const selectedTask = useMemo(() => tasks.find(t => t.taskId === selectedTaskId) ?? null, [tasks, selectedTaskId]);
   // Bridge for column cell access to component state
   (window as any).__openTaskDetail = (task: Task) => setSelectedTaskId(task.taskId);
@@ -249,17 +251,16 @@ export function Tasks() {
     // mount fetch already hits Supabase-first (~50ms). The Effect 2 below
     // opens the pending row once tasks arrive.
     if (state?.openTaskId) {
-      pendingOpenRef.current = state.openTaskId;
+      // Mirror old route-state navigation into the URL so the back button
+      // works for callers like the Inventory cross-link as well.
+      setSelectedTaskId(state.openTaskId);
       window.history.replaceState({}, '');
     } else if (location.search) {
       const params = new URLSearchParams(location.search);
-      const openId = params.get('open');
       const clientIdParam = params.get('client');
-      if (openId) {
-        pendingOpenRef.current = openId;
-        window.history.replaceState({}, '', window.location.pathname + window.location.hash.split('?')[0]);
-        if (clientIdParam) deepLinkPendingTenantRef.current = clientIdParam;
-      }
+      // ?open= is now consumed by useUrlState directly (selectedTaskId), so
+      // we only need to handle ?client= here for filter scope.
+      if (clientIdParam) deepLinkPendingTenantRef.current = clientIdParam;
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -285,13 +286,9 @@ export function Tasks() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [apiClients.length]);
 
-  // Effect 2: When tasks arrive, open the pending task
-  useEffect(() => {
-    if (pendingOpenRef.current && tasks.length > 0) {
-      const match = tasks.find(t => t.taskId === pendingOpenRef.current);
-      if (match) { setSelectedTaskId(match.taskId); pendingOpenRef.current = null; }
-    }
-  }, [tasks]);
+  // (Effect 2 removed: pendingOpenRef is gone. selectedTaskId already comes
+  // from the URL via useUrlState; selectedTask = tasks.find(...) resolves
+  // automatically when tasks arrives.)
 
   const { sorting, setSorting, colVis, setColVis, columnOrder, setColumnOrder, statusFilter: sf, toggleStatus, clearStatusFilter } = useTablePreferences('tasks', [{ id: 'priority', desc: false }, { id: 'dueDate', desc: false }], {}, DEFAULT_COL_ORDER);
   const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([]);
@@ -631,7 +628,7 @@ export function Tasks() {
       <style>{`@keyframes slideUp { from { transform: translateY(100%); } to { transform: translateY(0); } } @keyframes spin { to { transform: rotate(360deg); } }`}</style>
       {toast && createPortal(<div style={{ position: 'fixed', bottom: 80, left: '50%', transform: 'translateX(-50%)', background: '#1A1A1A', color: '#fff', padding: '10px 20px', borderRadius: 10, fontSize: 13, fontWeight: 600, zIndex: 9999, boxShadow: '0 4px 12px rgba(0,0,0,0.3)', animation: 'slideUp 0.2s ease-out' }}>{toast}</div>, document.body)}
       {batchGuardClients && <BatchGuard selectedClients={batchGuardClients} actionName={batchGuardAction} onDismiss={() => setBatchGuardClients(null)} />}
-      {selectedTask && <TaskDetailPanel task={selectedTask} onClose={() => setSelectedTaskId(null)} onTaskUpdated={refetchTasks} onNavigateToItem={(itemId) => { setSelectedTaskId(null); navigate('/inventory', { state: { openItemId: itemId } }); }} itemRepairs={repairs.filter(r => r.itemId === selectedTask.itemId)} applyTaskPatch={applyTaskPatch} mergeTaskPatch={mergeTaskPatch} clearTaskPatch={clearTaskPatch} addOptimisticTask={addOptimisticTask} removeOptimisticTask={removeOptimisticTask} addOptimisticRepair={addOptimisticRepair} removeOptimisticRepair={removeOptimisticRepair} />}
+      {selectedTask && <TaskDetailPanel task={selectedTask} onClose={() => setSelectedTaskId('')} onTaskUpdated={refetchTasks} onNavigateToItem={(itemId) => { setSelectedTaskId(''); navigate('/inventory', { state: { openItemId: itemId } }); }} itemRepairs={repairs.filter(r => r.itemId === selectedTask.itemId)} applyTaskPatch={applyTaskPatch} mergeTaskPatch={mergeTaskPatch} clearTaskPatch={clearTaskPatch} addOptimisticTask={addOptimisticTask} removeOptimisticTask={removeOptimisticTask} addOptimisticRepair={addOptimisticRepair} removeOptimisticRepair={removeOptimisticRepair} />}
       <FloatingActionMenu
         show={isMobile}
         actions={(() => {

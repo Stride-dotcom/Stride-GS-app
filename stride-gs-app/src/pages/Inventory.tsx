@@ -1,5 +1,6 @@
 import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import { useTablePreferences } from '../hooks/useTablePreferences';
+import { useUrlState } from '../hooks/useUrlState';
 import { createPortal } from 'react-dom';
 import {
   useReactTable,
@@ -640,7 +641,6 @@ export function Inventory() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.role, user?.accessibleClientNames?.length, clientNames.length]);
   const location = useLocation();
-  const pendingOpenRef = useRef<string | null>(null);
   const inventoryItems: InventoryItem[] = useMemo(() => {
     if (clientFilter.length === 0) return [];
     return liveItems.filter(i => clientFilter.includes(i.clientName));
@@ -680,7 +680,10 @@ export function Inventory() {
   }, [apiShipments]);
 
   // Detail panel & modals
-  const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
+  // Open detail panel persisted in the URL (?open=ITEM_ID) so the browser back
+  // button closes the panel and forward re-opens it. The previous useState +
+  // pendingOpenRef pattern deleted the URL param on mount, which broke back.
+  const [selectedItemId, setSelectedItemId] = useUrlState('open', '');
   const selectedItem = useMemo(() => liveItems.find(i => i.itemId === selectedItemId) ?? null, [liveItems, selectedItemId]);
 
   // Linked records for the selected item
@@ -776,16 +779,16 @@ export function Inventory() {
   useEffect(() => {
     let needsAutoLoad = false;
     // ?open=ITEM_ID[&client=<sheetId>] → open that item's detail panel when
-    // data loads. DeepLink components pass `client` from the calling panel so
-    // the target page can scope the filter without a Supabase round-trip.
-    // Supabase fallback kicks in when `client` is absent (older callers).
+    // data loads. The `open` param is now read by useUrlState (selectedItemId)
+    // directly, so we don't need to copy it into a ref or strip it from the
+    // URL — the detail panel renders as soon as liveItems contains a match.
+    // We still need `client` here to set the per-page filter scope, which is
+    // a separate concern handled below via apiClients lookup.
     const params = new URLSearchParams(location.search);
     const openId = params.get('open');
     const clientIdParam = params.get('client');
     if (openId) {
-      pendingOpenRef.current = openId;
       needsAutoLoad = true;
-      window.history.replaceState({}, '', window.location.pathname + window.location.hash.split('?')[0]);
 
       if (clientIdParam) {
         // Cheap synchronous path — we already know the client. Stash and let
@@ -850,13 +853,9 @@ export function Inventory() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [apiClients.length]);
 
-  // Effect 2: when items load, open the pending item
-  useEffect(() => {
-    if (pendingOpenRef.current && inventoryItems.length > 0) {
-      const match = inventoryItems.find(i => i.itemId === pendingOpenRef.current);
-      if (match) { setSelectedItemId(match.itemId); pendingOpenRef.current = null; }
-    }
-  }, [inventoryItems]);
+  // (Effect 2 removed: pendingOpenRef is gone — selectedItemId now derives
+  // directly from the URL via useUrlState, and the selectedItem useMemo
+  // resolves it against inventoryItems automatically once data arrives.)
 
   // Table state — column order persisted per user via useTablePreferences
   const { colVis: columnVisibility, setColVis: setColumnVisibility, sorting, setSorting, columnOrder, setColumnOrder, statusFilter: persistedStatusFilter, toggleStatus: togglePersistedStatus, clearStatusFilter: clearPersistedStatus } = useTablePreferences('inventory', [], {}, DEFAULT_COL_ORDER);
@@ -2199,7 +2198,7 @@ export function Inventory() {
       {selectedItem && (
         <ItemDetailPanel
           item={selectedItem}
-          onClose={() => setSelectedItemId(null)}
+          onClose={() => setSelectedItemId('')}
           photosFolderId={apiClients.find(c => c.spreadsheetId === selectedItem.clientId)?.photosFolderId}
           shipmentFolderUrl={selectedShipmentFolderUrl}
           linkedTasks={selectedLinkedTasks}
