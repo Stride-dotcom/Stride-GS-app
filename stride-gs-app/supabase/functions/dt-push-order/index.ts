@@ -1,5 +1,6 @@
 /**
- * dt-push-order — Supabase Edge Function (Phase 2c)
+ * dt-push-order — Supabase Edge Function (Phase 2c) — v12 2026-04-24 PST
+ * v12: Added <service_time> XML tag + paid status in description
  *
  * Pushes an approved order (and its linked pickup, if any) from dt_orders
  * to DispatchTrack via `POST /orders/api/add_order`. Called by the Review
@@ -54,6 +55,10 @@ interface DtOrderRow {
   extra_items_fee: number | null;
   accessorials_json: { code: string; quantity: number; rate: number; subtotal: number }[] | null;
   accessorials_total: number | null;
+  billing_review_status: string | null;
+  paid_at: string | null;
+  paid_amount: number | null;
+  paid_method: string | null;
 }
 
 interface DtOrderItemRow {
@@ -140,6 +145,16 @@ function buildOrderDescription(
     }
   }
 
+  // Append paid status if collected during order entry
+  if (order.paid_at && order.paid_amount != null) {
+    const paidDate = new Date(order.paid_at);
+    const mm = String(paidDate.getMonth() + 1).padStart(2, '0');
+    const dd = String(paidDate.getDate()).padStart(2, '0');
+    const yyyy = paidDate.getFullYear();
+    const method = order.paid_method || 'Stax';
+    descParts.push(`[PAID via ${method} — $${Number(order.paid_amount).toFixed(2)} collected ${mm}/${dd}/${yyyy}]`);
+  }
+
   // Append any user-entered details
   if (order.details) {
     descParts.push('');
@@ -202,7 +217,7 @@ function buildOrderXml(
     <request_time_window_start>${xmlEscape(winStart)}</request_time_window_start>
     <request_time_window_end>${xmlEscape(winEnd)}</request_time_window_end>
     <description><![CDATA[${desc}]]></description>
-    <amount>${order.order_total != null ? Number(order.order_total).toFixed(2) : '0.00'}</amount>
+    <amount>${order.order_total != null ? Number(order.order_total).toFixed(2) : '0.00'}</amount>${order.service_time_minutes != null && order.service_time_minutes > 0 ? `\n    <service_time>${order.service_time_minutes}</service_time>` : ''}
     <items>
 ${itemsXml}
     </items>${notesXml}
@@ -283,7 +298,7 @@ Deno.serve(async (req: Request) => {
   // ── 1. Fetch primary order ────────────────────────────────────────────
   const { data: order, error: orderErr } = await supabase
     .from('dt_orders')
-    .select('id, tenant_id, dt_identifier, is_pickup, order_type, linked_order_id, contact_name, contact_address, contact_city, contact_state, contact_zip, contact_phone, contact_phone2, contact_email, local_service_date, window_start_local, window_end_local, po_number, sidemark, client_reference, details, order_notes, service_time_minutes, review_status, pushed_to_dt_at, billing_method, order_total, base_delivery_fee, extra_items_count, extra_items_fee, accessorials_json, accessorials_total')
+    .select('id, tenant_id, dt_identifier, is_pickup, order_type, linked_order_id, contact_name, contact_address, contact_city, contact_state, contact_zip, contact_phone, contact_phone2, contact_email, local_service_date, window_start_local, window_end_local, po_number, sidemark, client_reference, details, order_notes, service_time_minutes, review_status, pushed_to_dt_at, billing_method, order_total, base_delivery_fee, extra_items_count, extra_items_fee, accessorials_json, accessorials_total, billing_review_status, paid_at, paid_amount, paid_method')
     .eq('id', orderId)
     .maybeSingle();
 
@@ -340,7 +355,7 @@ Deno.serve(async (req: Request) => {
     // Fetch the linked pickup order
     const { data: linkedOrder, error: linkedErr } = await supabase
       .from('dt_orders')
-      .select('id, tenant_id, dt_identifier, is_pickup, order_type, linked_order_id, contact_name, contact_address, contact_city, contact_state, contact_zip, contact_phone, contact_phone2, contact_email, local_service_date, window_start_local, window_end_local, po_number, sidemark, client_reference, details, order_notes, service_time_minutes, review_status, pushed_to_dt_at, billing_method, order_total, base_delivery_fee, extra_items_count, extra_items_fee, accessorials_json, accessorials_total')
+      .select('id, tenant_id, dt_identifier, is_pickup, order_type, linked_order_id, contact_name, contact_address, contact_city, contact_state, contact_zip, contact_phone, contact_phone2, contact_email, local_service_date, window_start_local, window_end_local, po_number, sidemark, client_reference, details, order_notes, service_time_minutes, review_status, pushed_to_dt_at, billing_method, order_total, base_delivery_fee, extra_items_count, extra_items_fee, accessorials_json, accessorials_total, billing_review_status, paid_at, paid_amount, paid_method')
       .eq('id', orderTyped.linked_order_id)
       .maybeSingle();
 
