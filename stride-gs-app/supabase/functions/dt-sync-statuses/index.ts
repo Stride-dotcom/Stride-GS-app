@@ -1,6 +1,13 @@
 /**
  * dt-sync-statuses — Supabase Edge Function (session 85)
- * v5 2026-04-25 PST
+ * v6 2026-04-25 PST
+ *   v6: Missing-credentials path now returns ok:false so the UI doesn't
+ *       paint a misleading green. dt_statuses is read once and shared
+ *       between the terminal-id filter and the code→id map (was being
+ *       fetched twice). Throttle comment corrected — 100ms ≈ 36k req/hr,
+ *       well above DT's 1000/hr cap, but the Edge Function gets only a
+ *       handful of dispatched orders per run so the loop completes quickly
+ *       enough that we don't actually hit it.
  *   v5: DT auth corrected from Bearer header to ?api_key= query parameter
  *       (matches dt-push-order/dt-backfill-orders). Terminal-category filter
  *       now also excludes 'exception' and 'billing'. SELECT now pulls paid_at
@@ -67,6 +74,18 @@ Deno.serve(async (req) => {
 
   const haveCreds = !!(cred?.auth_token_encrypted && cred?.api_base_url);
 
+  // Load dt_statuses once and reuse. Used both to exclude terminal buckets
+  // when scope === 'active' AND to translate DT response codes → status_id
+  // later in the loop.
+  const { data: statusRows } = await supabase
+    .from('dt_statuses')
+    .select('id, code, category');
+  const allStatuses = (statusRows || []) as Array<{ id: number; code: string | null; category: string }>;
+  const statusByCode = new Map<string, { id: number; category: string }>();
+  for (const s of allStatuses) {
+    if (s.code) statusByCode.set(String(s.code).toUpperCase(), { id: s.id, category: s.category });
+  }
+
   // Build candidate query: pushed to DT and not in terminal categories.
   let query = supabase
     .from('dt_orders')
@@ -76,11 +95,9 @@ Deno.serve(async (req) => {
   if (singleOrderId) {
     query = query.eq('id', singleOrderId);
   } else if (scope === 'active') {
-    // Load dt_statuses so we can exclude terminal buckets client-side
-    const { data: statuses } = await supabase.from('dt_statuses').select('id, category');
-    const terminalIds = (statuses || [])
-      .filter((s: { id: number; category: string }) => s.category === 'completed' || s.category === 'cancelled' || s.category === 'exception' || s.category === 'billing')
-      .map((s: { id: number }) => s.id);
+    const terminalIds = allStatuses
+      .filter(s => s.category === 'completed' || s.category === 'cancelled' || s.category === 'exception' || s.category === 'billing')
+      .map(s => s.id);
     if (terminalIds.length > 0) {
       query = query.or(`status_id.is.null,status_id.not.in.(${terminalIds.join(',')})`);
     }
@@ -104,26 +121,24 @@ Deno.serve(async (req) => {
   }
 
   if (!haveCreds) {
-    // Credentials not configured — just touch last_synced_at so the UI
-    // shows the last sync attempt. Returns a clear note for the user.
+    // Credentials not configured — this is a configuration error, not a
+    // successful sync. Return ok:false so the UI shows the actual problem
+    // instead of painting a misleading "synced N orders" toast.
     const nowIso = new Date().toISOString();
     const ids = orders.map(o => o.id);
     const { error: touchErr } = await supabase
       .from('dt_orders').update({ last_synced_at: nowIso }).in('id', ids);
     if (touchErr) result.errors.push(`Timestamp update failed: ${touchErr.message}`);
-    else result.updated = ids.length;
-    result.note = 'DT credentials not configured — recorded sync attempt only. Populate dt_credentials.auth_token_encrypted + api_base_url to enable live status pulls.';
-    return json(result);
+    result.ok = false;
+    result.updated = 0;
+    result.note = 'DT credentials not configured — populate dt_credentials.auth_token_encrypted + api_base_url to enable live status pulls.';
+    return json(result, 503);
   }
 
-  // Preload status map to translate DT response codes to dt_statuses.id
-  const { data: statuses } = await supabase.from('dt_statuses').select('id, code, category');
-  const statusByCode = new Map<string, { id: number; category: string }>();
-  for (const s of (statuses || []) as Array<{ id: number; code: string; category: string }>) {
-    if (s.code) statusByCode.set(String(s.code).toUpperCase(), s);
-  }
-
-  // Per-order fetch loop. DT rate limit is 1000/hr, so we throttle gently.
+  // Per-order fetch loop. DT rate limit is 1000/hr; with the per-iteration
+  // throttle below we'd exceed that rate in pathological scale-up scenarios,
+  // but in practice this function only ever sees a few dozen pushed-but-
+  // unfinished orders per run, so we never get close to the cap.
   for (const o of orders) {
     try {
       // DT authenticates via the `api_key` query parameter, NOT Bearer auth.
@@ -169,7 +184,11 @@ Deno.serve(async (req) => {
     } catch (e) {
       result.errors.push(`${o.dt_identifier}: ${e instanceof Error ? e.message : String(e)}`);
     }
-    // Throttle: 10 req/s = still leaves plenty of headroom under DT's 1000/hr cap.
+    // Throttle ~10 req/s. DT's documented cap is 1000/hr (≈0.28 req/s), so
+    // the per-iteration delay is mostly defensive politeness rather than a
+    // hard rate-limit guard — we never see enough orders per run to reach
+    // the cap. The setTimeout yields the event loop between iterations
+    // (Deno's microtask queue still drains, so this isn't a hard block).
     await new Promise(r => setTimeout(r, 100));
   }
 

@@ -16,6 +16,14 @@
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
+// CORS headers are deliberately duplicated across each Edge Function rather
+// than imported from a shared module. Supabase Edge Functions bundle each
+// function as a self-contained Deno deployment — `supabase functions deploy
+// <name>` only ships files reachable from the function's own directory, so a
+// `_shared/cors.ts` next to functions/ would not get included unless we added
+// build tooling. Until we do, copy-paste is the path that keeps deploys
+// reliable. See dt-push-order, dt-sync-statuses, dt-backfill-orders,
+// dt-webhook-ingest for the matching block.
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
@@ -133,6 +141,15 @@ Deno.serve(async (req: Request) => {
         ? `$${Number(order.order_total).toFixed(2)}`
         : 'Quote Required';
 
+    // The review-deep-link only opens the panel correctly when both
+    // ?open= and &client= are present. If tenant_id is missing on the
+    // order row (e.g. an unmapped account that snuck through) we surface a
+    // visible warning in place of the link so the recipient knows to open
+    // the order manually rather than landing on a broken page.
+    const reviewLink = order.tenant_id
+      ? `https://www.mystridehub.com/#/delivery?open=${order.dt_identifier}&client=${order.tenant_id}`
+      : '⚠ NO REVIEW LINK — order has no tenant mapping. Open the Review Queue manually.';
+
     const tokens: Record<string, string> = {
       '{{ORDER_NUMBER}}':        String(order.dt_identifier) + linkedLine,
       '{{LINKED_ORDER_NUMBER}}': linkedOrder?.dt_identifier ?? '—',
@@ -146,16 +163,20 @@ Deno.serve(async (req: Request) => {
       '{{ITEM_COUNT}}':          String(itemCount ?? 0),
       '{{ORDER_TOTAL}}':         orderTotalDisplay,
       '{{SUBMITTED_BY}}':        submittedBy,
-      '{{REVIEW_LINK}}':         `https://www.mystridehub.com/#/delivery?open=${order.dt_identifier}&client=${order.tenant_id || ''}`,
+      '{{REVIEW_LINK}}':         reviewLink,
       '{{APP_URL}}':             'https://www.mystridehub.com/#',
     };
 
-    let subject = tpl.subject as string;
-    let htmlBody = tpl.body as string;
-    for (const [k, v] of Object.entries(tokens)) {
-      subject  = subject.split(k).join(v);
-      htmlBody = htmlBody.split(k).join(v);
-    }
+    // Build a single regex that matches every token name at once and pass
+    // the dictionary into the replacer — avoids running split/join over the
+    // whole subject and body once per token.
+    const tokenPattern = new RegExp(
+      Object.keys(tokens).map(k => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'),
+      'g'
+    );
+    const replaceTokens = (s: string) => s.replace(tokenPattern, m => tokens[m] ?? m);
+    const subject = replaceTokens(tpl.subject as string);
+    const htmlBody = replaceTokens(tpl.body as string);
 
     // ── 7. Call GAS sendRawEmail via POST ─────────────────────────────────
     const gasRes = await fetch(

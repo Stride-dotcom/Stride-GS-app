@@ -1,7 +1,15 @@
 /**
  * dt-backfill-orders — Supabase Edge Function
  *
- * Version: v2 (2026-04-25 PST)
+ * Version: v3 (2026-04-25 PST)
+ *   v3: Line-item handling switched from delete+insert to a read-then-merge
+ *       pattern (UPDATE existing rows by SKU/description, INSERT only
+ *       genuinely new rows). The prior implementation blew away local edits
+ *       (class_name, room, cubic_feet, inventory_id, etc.) on every backfill
+ *       run; the new path leaves untouched rows alone and only writes the
+ *       columns we own. Pickup detection moved off a brittle
+ *       includes('pick up') string match to an explicit set of DT
+ *       service-type strings.
  *   v2: Status mapping is now built dynamically from dt_statuses at request
  *       time (the previous hardcoded STATUS_STRING_TO_ID map drifted from
  *       the live seed — e.g. 'finished' had been remapped). The map is
@@ -28,6 +36,22 @@ import { DOMParser } from 'https://esm.sh/@xmldom/xmldom@0.9.8';
 // ── Status mapping is built dynamically from dt_statuses at request time ──
 // (see statusMap below). Never hardcode IDs here — the seed has changed and
 // any local copy will silently drift.
+
+// DT service-type strings that signal a pickup leg. We compare against the
+// normalized (lowercased + whitespace-collapsed) value so casing or extra
+// whitespace from the DT XML doesn't slip through.
+const DT_PICKUP_SERVICE_TYPES: ReadonlySet<string> = new Set([
+  'pick up',
+  'pickup',
+  'customer pickup',
+  'will call',
+]);
+
+function isPickupServiceType(serviceType: string | null | undefined): boolean {
+  if (!serviceType) return false;
+  const norm = serviceType.toLowerCase().replace(/\s+/g, ' ').trim();
+  return DT_PICKUP_SERVICE_TYPES.has(norm);
+}
 
 function getStatusId(statusMap: Map<string, number>, statusStr: string): number | null {
   if (!statusStr) return null;
@@ -206,7 +230,7 @@ Deno.serve(async (req: Request) => {
         // Description / details
         const description = getEl(order, 'description');
         const serviceType = getEl(order, 'service_type');
-        const isPickup    = serviceType?.toLowerCase().includes('pick up') || false;
+        const isPickup    = isPickupServiceType(serviceType);
         const pieces      = parseInt(getEl(order, 'pieces')) || null;
 
         // Build upsert
@@ -248,13 +272,34 @@ Deno.serve(async (req: Request) => {
           } else {
             results.inserted++;
 
-            // ── Write line items ──────────────────────────────────────
+            // ── Merge line items (preserves local columns) ────────────
+            // The previous implementation deleted every row and re-inserted
+            // from DT, which obliterated locally-edited columns like
+            // class_name, room, cubic_feet, inventory_id every time.
+            //
+            // We can't ON CONFLICT here because dt_order_items has no
+            // UNIQUE constraint on (dt_order_id, dt_item_code), so do an
+            // explicit read-then-merge: load existing items once, then for
+            // each DT row either UPDATE the DT-sourced fields on a match
+            // (keyed on dt_item_code when present, else description) or
+            // INSERT a new row. We never touch unrelated rows, so existing
+            // local edits are left alone.
             if (upsertedOrder?.id) {
               const itemsEl = order.getElementsByTagName('items')[0];
               if (itemsEl) {
                 const itemEls = itemsEl.getElementsByTagName('item');
-                // Delete existing items for this order (full replace on backfill)
-                await supabase.from('dt_order_items').delete().eq('dt_order_id', upsertedOrder.id);
+                const { data: existingItems } = await supabase
+                  .from('dt_order_items')
+                  .select('id, dt_item_code, description')
+                  .eq('dt_order_id', upsertedOrder.id);
+                const byCode = new Map<string, string>();
+                const byDesc = new Map<string, string>();
+                for (const r of (existingItems || []) as Array<{ id: string; dt_item_code: string | null; description: string | null }>) {
+                  if (r.dt_item_code) byCode.set(r.dt_item_code, r.id);
+                  else if (r.description) byDesc.set(r.description, r.id);
+                }
+                const usedExistingIds = new Set<string>();
+
                 for (let j = 0; j < itemEls.length; j++) {
                   const item = itemEls[j];
                   const desc     = getEl(item, 'description');
@@ -265,16 +310,38 @@ Deno.serve(async (req: Request) => {
                   const unitAmt  = parseFloat(getEl(item, 'amount')) || null;
                   const itemNote = getEl(item, 'notes');
 
-                  await supabase.from('dt_order_items').insert({
-                    dt_order_id:        upsertedOrder.id,
-                    dt_item_code:       skuNum || null,
+                  // DT-sourced columns we own. Local columns (class_name,
+                  // class_code, inventory_id, etc.) are intentionally NOT
+                  // listed here so the UPDATE doesn't clobber them.
+                  const dtFields: Record<string, unknown> = {
                     description:        desc || null,
                     quantity:           qty,
                     original_quantity:  origQty,
                     delivered_quantity: delQty,
                     unit_price:         unitAmt,
                     extras:             itemNote ? { notes: itemNote } : null,
-                  });
+                  };
+
+                  let existingId: string | undefined;
+                  if (skuNum && byCode.has(skuNum) && !usedExistingIds.has(byCode.get(skuNum)!)) {
+                    existingId = byCode.get(skuNum)!;
+                  } else if (desc && byDesc.has(desc) && !usedExistingIds.has(byDesc.get(desc)!)) {
+                    existingId = byDesc.get(desc)!;
+                  }
+
+                  if (existingId) {
+                    usedExistingIds.add(existingId);
+                    await supabase
+                      .from('dt_order_items')
+                      .update(dtFields)
+                      .eq('id', existingId);
+                  } else {
+                    await supabase.from('dt_order_items').insert({
+                      dt_order_id:  upsertedOrder.id,
+                      dt_item_code: skuNum || null,
+                      ...dtFields,
+                    });
+                  }
                 }
               }
             }

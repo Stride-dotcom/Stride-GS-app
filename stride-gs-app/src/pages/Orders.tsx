@@ -91,16 +91,24 @@ export function Orders() {
   const isStaff = user?.role === 'staff' || user?.role === 'admin';
   const canReview = isStaff;
 
-  // Read ?tab=review from hash on mount so email deep links auto-switch to the review tab
-  const initialTab = (() => {
+  // Tab selection has to wait for auth to resolve — running the IIFE on the
+  // first render reads `isStaff`/`isAdmin` from a still-loading user object,
+  // which produced the wrong default (always 'availability') for staff/admin
+  // users on a hard refresh. We start with `null` and let the effect below
+  // pick the correct tab once `user` is populated.
+  const [activeTab, setActiveTab] = useState<OrdersTab | null>(null);
+  useEffect(() => {
+    if (activeTab !== null) return;        // already chosen — don't override user clicks
+    if (!user) return;                      // wait for auth to resolve
     try {
       const hash = window.location.hash;
-      if (hash.includes('tab=review') && isStaff) return 'review' as OrdersTab;
-    } catch (_) {}
-    return (isAdmin ? 'orders' : 'availability') as OrdersTab;
-  })();
-
-  const [activeTab, setActiveTab] = useState<OrdersTab>(initialTab);
+      if (hash.includes('tab=review') && isStaff) {
+        setActiveTab('review');
+        return;
+      }
+    } catch (_) { /* ignore */ }
+    setActiveTab(isAdmin ? 'orders' : 'availability');
+  }, [user, isAdmin, isStaff, activeTab]);
   const { orders, loading, error, refetch, lastFetched } = useOrders();
   const [globalFilter, setGlobalFilter] = useState('');
   const [sorting, setSorting] = useState<SortingState>([{ id: 'localServiceDate', desc: true }]);

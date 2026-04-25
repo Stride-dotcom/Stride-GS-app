@@ -104,6 +104,14 @@ export function ReviewQueueTab({ orders, loading, onRefetch, onOpenDetail }: Pro
     return result?.dt_identifier || dtIdentifier;
   };
 
+  // TODO(mobile-ux, code-review L5): replace the `confirm()` and `prompt()`
+  // browser dialogs used by handleApprove / handleReject / handlePushAll with
+  // the in-app modal primitives. Native `confirm` is awkward on mobile (small
+  // truncated text, no styling, blocks the JS thread) and `prompt` doesn't
+  // exist at all on some embedded webviews — both should be replaced with a
+  // ConfirmDialog / TextInputDialog from src/components/shared/ once those are
+  // available. Keeping the inline dialogs for now to avoid a deeper UX
+  // refactor on the same review-queue change.
   const handleApprove = async (order: DtOrderForUI) => {
     const isLinkedPair = order.orderType === 'pickup_and_delivery' && !!order.linkedOrderId;
     const confirmMsg = isLinkedPair
