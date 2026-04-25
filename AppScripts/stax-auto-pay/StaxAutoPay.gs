@@ -1,5 +1,22 @@
 // ============================================================
-// STAX AUTO-PAY TOOL — v4.6.1
+// STAX AUTO-PAY TOOL — v4.7.0
+// v4.7.0 (2026-04-25): Multi-tier client lookup. Customer matching for
+//         Auto Charge eligibility now tries 3 keys in order:
+//           1. Stax Customer ID (GUID) — bulletproof, matches the
+//              invoice's column-C value to a CB Clients "STAX CUSTOMER ID"
+//              column. No string fragility.
+//           2. QB_CUSTOMER_NAME — exact-match against CB Clients'
+//              QB_CUSTOMER_NAME column. Handles QB-tagged customer
+//              names with suffixes like "(ACH on File)" that don't
+//              appear in CB Clients' CLIENT NAME column.
+//           3. CLIENT NAME — original fallback for back-compat with
+//              CB rows that haven't filled in the other two columns.
+//         Eliminates UNKNOWN_CLIENT exceptions caused by name drift
+//         between QB and CB Clients (e.g. "K&M Interiors (ACH on File)"
+//         in QB vs "K&M Interiors" in CB Clients).
+//         Helper: _buildClientAutoChargeLookup_, _resolveClientAutoCharge_.
+//         Wired into both _prepareEligiblePendingInvoicesForChargeRun
+//         and _executeChargeRun.
 // v4.6.1 (2026-04-16 — hotfix): Auto Charge column now looked up by HEADER
 //         name, not hardcoded index 12, in both `_prepareEligiblePending` and
 //         `_executeChargeRun`. Prior behavior read the wrong cell when
@@ -495,6 +512,85 @@ function _formatTimestamp(date) {
 
 function _normalizeName(name) {
   return String(name).trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+// ============================================================
+// MULTI-TIER CLIENT LOOKUP (v4.7.0)
+// ============================================================
+//
+// Builds a 3-tier client lookup map from CB Clients tab. Used by
+// the autopay charge-eligibility gates to resolve which client
+// owns an invoice. The primary key is Stax Customer ID (GUID,
+// bulletproof); falls back to QB_CUSTOMER_NAME (handles QB-tagged
+// names like "K&M Interiors (ACH on File)" that don't appear in
+// CLIENT NAME); falls back finally to CLIENT NAME for back-compat
+// with rows that haven't been onboarded with the other columns.
+//
+// Returns null if CB Clients can't be read for any reason — caller
+// should treat it as "lookup unavailable, skip the gate".
+function _buildClientAutoChargeLookup_(cbSheet) {
+  if (!cbSheet) return null;
+  try {
+    var data = cbSheet.getDataRange().getValues();
+    if (data.length < 2) return null;
+    var hdr = data[0].map(function(h) { return String(h).trim().toUpperCase(); });
+    var nameIdx     = hdr.indexOf("CLIENT NAME");
+    var qbIdx       = hdr.indexOf("QB_CUSTOMER_NAME");
+    var staxIdIdx   = hdr.indexOf("STAX CUSTOMER ID");
+    var autoIdx     = hdr.indexOf("AUTO CHARGE");
+    if (autoIdx < 0) return null;       // can't determine eligibility without it
+    var byStaxId    = {};
+    var byQbName    = {};
+    var byClientName = {};
+    for (var r = 1; r < data.length; r++) {
+      var row = data[r];
+      var ac  = row[autoIdx];
+      var acBool = (ac === true || String(ac).toUpperCase() === "TRUE");
+      if (staxIdIdx >= 0) {
+        var sid = String(row[staxIdIdx] || "").trim();
+        if (sid) byStaxId[sid] = acBool;
+      }
+      if (qbIdx >= 0) {
+        var qb = String(row[qbIdx] || "").trim();
+        if (qb) byQbName[qb.toLowerCase()] = acBool;
+      }
+      if (nameIdx >= 0) {
+        var cn = String(row[nameIdx] || "").trim();
+        if (cn) byClientName[cn.toLowerCase()] = acBool;
+      }
+    }
+    return { byStaxId: byStaxId, byQbName: byQbName, byClientName: byClientName };
+  } catch (e) {
+    Logger.log("_buildClientAutoChargeLookup_ warning: " + e);
+    return null;
+  }
+}
+
+// Resolves Auto Charge for an invoice by trying the 3 lookup tiers
+// in order: Stax Customer ID → QB customer name → CB Client Name.
+// Returns:
+//   true       — client found, Auto Charge ON
+//   false      — client found, Auto Charge OFF (CLIENT_AUTO_DISABLED)
+//   undefined  — no tier matched (UNKNOWN_CLIENT)
+//
+// `lookups` is the object returned by _buildClientAutoChargeLookup_;
+// pass null to short-circuit to undefined (treats unavailable lookup
+// as "unknown" so the charge run logs a clear exception rather than
+// silently allowing an unguarded charge).
+function _resolveClientAutoCharge_(lookups, staxCustId, custName) {
+  if (!lookups) return undefined;
+  if (staxCustId) {
+    var bySid = lookups.byStaxId[String(staxCustId).trim()];
+    if (bySid !== undefined) return bySid;
+  }
+  if (custName) {
+    var lc = String(custName).trim().toLowerCase();
+    var byQb = lookups.byQbName[lc];
+    if (byQb !== undefined) return byQb;
+    var byCn = lookups.byClientName[lc];
+    if (byCn !== undefined) return byCn;
+  }
+  return undefined;
 }
 
 // ============================================================
@@ -1492,8 +1588,9 @@ function _createStaxInvoicesForRows_(options) {
   var colIChanged = false;
   var colKChanged = false;
 
-  // Build Client name → Auto Charge default map from CB Clients (same as charge loop)
-  var clientAutoChargeMap = {};
+  // v4.7.0 — 3-tier client lookup (Stax Customer ID → QB_CUSTOMER_NAME →
+  // CLIENT NAME). See _buildClientAutoChargeLookup_ for rationale.
+  var clientLookups = null;
   if (requireAutoCharge) {
     try {
       var cbId = PropertiesService.getScriptProperties().getProperty("CB_SPREADSHEET_ID");
@@ -1504,19 +1601,7 @@ function _createStaxInvoicesForRows_(options) {
       if (cbId) {
         var cbSS = SpreadsheetApp.openById(cbId);
         var cbSheet = cbSS.getSheetByName("Clients");
-        if (cbSheet) {
-          var cbData = cbSheet.getDataRange().getValues();
-          var cbHdr = cbData[0].map(function(h) { return String(h).trim().toUpperCase(); });
-          var cbNameIdx = cbHdr.indexOf("CLIENT NAME");
-          var cbAutoIdx = cbHdr.indexOf("AUTO CHARGE");
-          if (cbNameIdx >= 0 && cbAutoIdx >= 0) {
-            for (var ci = 1; ci < cbData.length; ci++) {
-              var cn = String(cbData[ci][cbNameIdx] || "").trim();
-              var ca = cbData[ci][cbAutoIdx];
-              if (cn) clientAutoChargeMap[cn.toLowerCase()] = (ca === true || String(ca).toUpperCase() === "TRUE");
-            }
-          }
-        }
+        clientLookups = _buildClientAutoChargeLookup_(cbSheet);
       }
     } catch (e) { Logger.log(logLabel + ": Auto Charge client lookup warning: " + e); }
   }
@@ -1629,8 +1714,11 @@ function _createStaxInvoicesForRows_(options) {
         continue;
       }
       if (!invoiceExplicitlyAuto) {
-        // Invoice has no explicit setting → use per-client default
-        var clientAC = custName ? clientAutoChargeMap[custName.toLowerCase()] : undefined;
+        // v4.7.0 — 3-tier client lookup: Stax Customer ID → QB_CUSTOMER_NAME
+        // → CLIENT NAME. Eliminates UNKNOWN_CLIENT for QB-tagged names like
+        // "K&M Interiors (ACH on File)" that don't appear in CB CLIENT NAME
+        // but DO appear in QB_CUSTOMER_NAME.
+        var clientAC = _resolveClientAutoCharge_(clientLookups, staxCustId, custName);
         if (clientAC === false) {
           stats.skippedClientAutoDisabled++;
           stats.skippedNotAuto++; // alias kept for back-compat
@@ -1643,7 +1731,7 @@ function _createStaxInvoicesForRows_(options) {
           stats.skippedUnknownClient++;
           stats.skippedNotAuto++; // alias kept for back-compat
           _logException(docNum, custName, staxCustId, total, dueDate,
-            '_prepareEligiblePending: UNKNOWN_CLIENT - Customer "' + custName + '" not found in CB Clients tab. Either add the client to CB Clients with an Auto Charge preference, or set this invoice\'s Auto Charge field explicitly.',
+            '_prepareEligiblePending: UNKNOWN_CLIENT - No CB Clients row matched. Tried Stax Customer ID "' + staxCustId + '", QB_CUSTOMER_NAME "' + custName + '", and CLIENT NAME "' + custName + '". Add a CB Clients row with one of those keys + an Auto Charge preference, OR set this invoice\'s Auto Charge field explicitly.',
             '');
           continue;
         }
@@ -2807,8 +2895,10 @@ function _executeChargeRun() {
   // Cache payment methods per customer to avoid redundant API calls
   var pmCache = {};
 
-  // Build client name → autoCharge map from CB Clients tab (same as prepare stage)
-  var clientAutoChargeMap = {};
+  // v4.7.0 — 3-tier client lookup (Stax Customer ID → QB_CUSTOMER_NAME →
+  // CLIENT NAME). Same shape as the prepare stage; see
+  // _buildClientAutoChargeLookup_ for the column-resolution rationale.
+  var clientLookupsExec = null;
   try {
     var cbId = PropertiesService.getScriptProperties().getProperty("CB_SPREADSHEET_ID");
     if (!cbId) {
@@ -2818,19 +2908,7 @@ function _executeChargeRun() {
     if (cbId) {
       var cbSS = SpreadsheetApp.openById(cbId);
       var cbSheet = cbSS.getSheetByName("Clients");
-      if (cbSheet) {
-        var cbData = cbSheet.getDataRange().getValues();
-        var cbHdr = cbData[0].map(function(h) { return String(h).trim().toUpperCase(); });
-        var cbNameIdx = cbHdr.indexOf("CLIENT NAME");
-        var cbAutoIdx = cbHdr.indexOf("AUTO CHARGE");
-        if (cbNameIdx >= 0 && cbAutoIdx >= 0) {
-          for (var ci = 1; ci < cbData.length; ci++) {
-            var cn = String(cbData[ci][cbNameIdx] || "").trim();
-            var ca = cbData[ci][cbAutoIdx];
-            if (cn) clientAutoChargeMap[cn.toLowerCase()] = (ca === true || String(ca).toUpperCase() === "TRUE");
-          }
-        }
-      }
+      clientLookupsExec = _buildClientAutoChargeLookup_(cbSheet);
     }
   } catch (e) { Logger.log("_executeChargeRun: Auto Charge client lookup warning: " + e); }
 
@@ -2903,7 +2981,8 @@ function _executeChargeRun() {
       continue;
     }
     if (!invoiceExplicitlyAuto) {
-      var clientAC = custName ? clientAutoChargeMap[custName.toLowerCase()] : undefined;
+      // v4.7.0 — 3-tier lookup. See _resolveClientAutoCharge_.
+      var clientAC = _resolveClientAutoCharge_(clientLookupsExec, staxCustId, custName);
       if (clientAC === false) {
         stats.skippedClientAutoDisabled++;
         _logException(docNum, custName, staxCustId, total, dueDate,
@@ -2914,7 +2993,7 @@ function _executeChargeRun() {
       if (clientAC === undefined) {
         stats.skippedUnknownClient++;
         _logException(docNum, custName, staxCustId, total, dueDate,
-          '_executeChargeRun: UNKNOWN_CLIENT - Customer "' + custName + '" not found in CB Clients tab. Either add the client to CB Clients with an Auto Charge preference, or set this invoice\'s Auto Charge field explicitly.',
+          '_executeChargeRun: UNKNOWN_CLIENT - No CB Clients row matched. Tried Stax Customer ID "' + staxCustId + '", QB_CUSTOMER_NAME "' + custName + '", and CLIENT NAME "' + custName + '". Add a CB Clients row with one of those keys + an Auto Charge preference, OR set this invoice\'s Auto Charge field explicitly.',
           payUrl + staxInvId);
         continue;
       }

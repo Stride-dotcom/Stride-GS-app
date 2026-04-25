@@ -4143,6 +4143,31 @@ export function postResetStaxInvoiceStatus(params: { qbInvoiceNo: string }) {
   return apiPost<{ success: boolean; qbInvoiceNo: string; previousStatus: string; newStatus: string }>('resetStaxInvoiceStatus', params as Record<string, unknown>);
 }
 
+// v38.124.0 — recover an orphan PENDING row whose invoice IS already in
+// Stax (e.g. dedup cleanup wiped the stax_id). Server calls Stax API to
+// find the matching invoice by meta.reference = qbInvoiceNo, writes the
+// Stax ID back, flips PENDING→CREATED. Optional staxInvoiceId for
+// disambiguation when multiple Stax invoices share the same reference.
+export interface LinkStaxInvoiceCandidate {
+  id: string;
+  total?: number;
+  status?: string;
+  sent_at?: string;
+}
+export function postLinkStaxInvoiceToExisting(params: { qbInvoiceNo: string; staxInvoiceId?: string }) {
+  return apiPost<{
+    success: boolean;
+    qbInvoiceNo?: string;
+    staxInvoiceId?: string;
+    newStatus?: string;
+    message?: string;
+    ambiguous?: boolean;
+    candidates?: LinkStaxInvoiceCandidate[];
+    error?: string;
+    errorCode?: string;
+  }>('linkStaxInvoiceToExisting', params as Record<string, unknown>);
+}
+
 export function postToggleAutoCharge(params: { invoiceNos: string[]; autoCharge: boolean }) {
   return apiPost<{ success: boolean; updated: number; autoCharge: boolean; message: string }>('toggleAutoCharge', params as Record<string, unknown>);
 }

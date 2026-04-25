@@ -1,5 +1,21 @@
 /* ===================================================
-   StrideAPI.gs — v38.123.0 — 2026-04-25 PST — Repair quotes: multi-line + tax-inclusive customer total + tax-exclusive QB rows
+   StrideAPI.gs — v38.124.0 — 2026-04-25 PST — Stax: cleaner customer name on Invoices sheet + linkStaxInvoiceToExisting recovery endpoint
+   v38.124.0: Two related Stax fixes.
+              (1) IIF→Stax Invoices write (handleQbExport_, ~line 18289)
+                  now stamps the Stax-side customer name (column C of
+                  Stax Customers tab) instead of the QB customer name
+                  (with parenthetical tags like "(ACH on File)" that
+                  break downstream string matching). Falls back to the
+                  QB name if Stax Customers row hasn't filled in the
+                  Stax name field. Eliminates one source of the
+                  UNKNOWN_CLIENT exception in autopay.
+              (2) New endpoint linkStaxInvoiceToExisting → admin tool
+                  to recover orphan PENDING rows whose invoice is
+                  already in Stax (e.g. dedup cleanup wiped the
+                  stax_id). Calls Stax API to find the invoice by
+                  meta.reference (= QB Invoice #), writes the Stax ID
+                  back, flips PENDING→CREATED. Replaces the manual
+                  SQL-poke fix with a button on the Review row.
    v38.123.0: handleSendRepairQuote_ accepts an array of quoteLines + tax fields
               (taxAreaId/Name, taxRate). Persists quote_lines_json + 6 totals
               columns (subtotal, taxable subtotal, tax area name/rate/amount,
@@ -6106,6 +6122,14 @@ function doPost(e) {
       case "resetStaxInvoiceStatus":
         return withAdminGuard_(callerEmail, function() {
           return handleResetStaxInvoiceStatus_(payload);
+        });
+      case "linkStaxInvoiceToExisting":
+        // v38.124.0 — recover an orphan PENDING row whose invoice is already
+        // in Stax. Calls Stax API to find the matching invoice by reference,
+        // writes the Stax ID back, flips PENDING→CREATED. Avoids the
+        // "I'll have to push it again" duplicate-creation trap.
+        return withAdminGuard_(callerEmail, function() {
+          return handleLinkStaxInvoiceToExisting_(payload);
         });
       case "sendStaxPayLink":
         return withAdminGuard_(callerEmail, function() {
@@ -18290,15 +18314,33 @@ function handleQbExport_(payload) {
     var staxSS = getStaxSpreadsheet_();
     var staxInvSheet = staxSS.getSheetByName("Invoices");
     if (staxInvSheet) {
-      // Build Stax Customer ID map from Customers tab
-      var staxCustMap = {};
+      // Build Stax Customer ID + cleaner-name map from Customers tab.
+      //
+      // v38.124.0 — also pull Stax Customer Name (column C). The QB-side
+      // name often carries a parenthetical tag like "K&M Interiors (ACH on File)"
+      // that QB users add to mark payment method. Stax stores the same
+      // customer under its real name "K&M Interiors". Writing the
+      // cleaner Stax name into the Stax Invoices sheet eliminates the
+      // downstream string-match mismatch in autopay (CB Clients
+      // doesn't carry the parenthetical either).
+      //
+      // Customers tab columns (per StaxAutoPay.gs schema):
+      //   A=QB Customer Name, B=Stax Company, C=Stax Customer Name,
+      //   D=Stax Customer ID, E=Email, F=Payment Method, G=Notes
+      var staxCustMap = {};       // normalized QB name → { staxId, staxName }
       var staxCustSheet = staxSS.getSheetByName("Customers");
       if (staxCustSheet) {
         var staxCustData = staxCustSheet.getDataRange().getValues();
         for (var sc = 1; sc < staxCustData.length; sc++) {
-          var scName = String(staxCustData[sc][0] || "").trim();
-          var scStaxId = String(staxCustData[sc][3] || "").trim();
-          if (scName && scStaxId) staxCustMap[stax_normalizeName_(scName)] = scStaxId;
+          var scName    = String(staxCustData[sc][0] || "").trim(); // QB name
+          var scStaxNm  = String(staxCustData[sc][2] || "").trim(); // Stax name
+          var scStaxId  = String(staxCustData[sc][3] || "").trim();
+          if (scName && scStaxId) {
+            staxCustMap[stax_normalizeName_(scName)] = {
+              staxId:   scStaxId,
+              staxName: scStaxNm  // may be empty — caller falls back to QB name
+            };
+          }
         }
       }
 
@@ -18337,24 +18379,31 @@ function handleQbExport_(payload) {
         if (existingKeySet[sKey]) { staxSkipped++; continue; }
         existingKeySet[sKey] = true;
 
-        // Look up Stax Customer ID
-        var sStaxCustId = staxCustMap[stax_normalizeName_(sInv.qbName)] || "";
+        // Look up Stax Customer ID + Stax-side customer name. v38.124.0:
+        // when the Stax customer record carries a clean name (without
+        // the "(ACH on File)" parenthetical that QB users tag onto
+        // their QB customer name), use that for the Stax Invoices sheet.
+        // Falls back to the QB name if the Stax Customers tab doesn't
+        // have a separate name column populated.
+        var sStaxLookup = staxCustMap[stax_normalizeName_(sInv.qbName)] || {};
+        var sStaxCustId = sStaxLookup.staxId || "";
+        var sCustomerForStax = sStaxLookup.staxName || sInv.qbName;
 
         var sLineJson = "";
         try { sLineJson = JSON.stringify(sLineItems); } catch (_) { sLineJson = "[]"; }
 
         staxNewRows.push([
-          sInvNo,           // QB Invoice #
-          sInv.qbName,      // QB Customer Name
-          sStaxCustId,      // Stax Customer ID (pre-filled!)
-          sInv.invDate,     // Invoice Date
-          sInv.dueDate,     // Due Date
-          sTotal,           // Total Amount
-          sLineJson,        // Line Items JSON
-          "",               // Stax Invoice ID (empty until pushed)
-          "PENDING",        // Status
-          nowStr,           // Created At
-          ""                // Notes
+          sInvNo,             // QB Invoice #
+          sCustomerForStax,   // Customer Name (Stax-side; falls back to QB name)
+          sStaxCustId,        // Stax Customer ID (pre-filled!)
+          sInv.invDate,       // Invoice Date
+          sInv.dueDate,       // Due Date
+          sTotal,             // Total Amount
+          sLineJson,          // Line Items JSON
+          "",                 // Stax Invoice ID (empty until pushed)
+          "PENDING",          // Status
+          nowStr,             // Created At
+          ""                  // Notes
         ]);
       }
 
@@ -30089,6 +30138,124 @@ function handleResetStaxInvoiceStatus_(payload) {
   try { api_sbResyncStaxInvoice_(qbInvoiceNo); } catch (_) {}
 
   return jsonResponse_({ success: true, qbInvoiceNo: qbInvoiceNo, previousStatus: currentStatus, newStatus: newStatus });
+}
+
+// ─── Endpoint 3d: linkStaxInvoiceToExisting (v38.124.0) ────────────────────
+//
+// Recovery tool for orphan rows: a PENDING row in the Stax Invoices
+// sheet with no Stax Invoice ID, but whose invoice IS already in Stax
+// (e.g. a dedup cleanup that wiped the stax_id, or an earlier push
+// that succeeded but the response was lost).
+//
+// Without this handler, the operator's only options are:
+//   (a) Push to Stax — creates a DUPLICATE invoice in Stax (bad)
+//   (b) Void — removes from autopay (loses the existing Stax invoice)
+//   (c) Manually update the sheet via direct edit (error-prone)
+//
+// What this does:
+//   1. Find the row by QB Invoice #.
+//   2. Reject if it already has a Stax ID (no recovery needed).
+//   3. Call Stax API to find the matching invoice via meta.reference =
+//      QB Invoice #. (Stax push tags every invoice with its QB# in
+//      meta.reference; see qbo_createInvoice_ + the stax push path.)
+//   4. If found, write the Stax Invoice ID + Stax customer ID, flip
+//      status PENDING → CREATED, append a Notes audit line.
+//   5. Mirror to Supabase.
+//
+// Returns the resolved Stax invoice ID + URL on success. If Stax has
+// MULTIPLE invoices with the same reference (rare — usually only when
+// the dedup happened mid-push), returns ALL candidates and asks the
+// operator to disambiguate by passing staxInvoiceId in the payload.
+function handleLinkStaxInvoiceToExisting_(payload) {
+  var qbInvoiceNo = String((payload || {}).qbInvoiceNo || "").trim();
+  if (!qbInvoiceNo) return errorResponse_("qbInvoiceNo is required", "MISSING_PARAM");
+  var explicitStaxId = String((payload || {}).staxInvoiceId || "").trim();
+
+  var ss = getStaxSpreadsheet_();
+  var invSheet = ss.getSheetByName("Invoices");
+  if (!invSheet) return errorResponse_("Invoices tab not found", "NOT_FOUND");
+
+  var invData = invSheet.getDataRange().getValues();
+  var foundRow = -1;
+  for (var i = 1; i < invData.length; i++) {
+    if (String(invData[i][0] || "").trim() === qbInvoiceNo) { foundRow = i; break; }
+  }
+  if (foundRow < 0) return errorResponse_("Invoice '" + qbInvoiceNo + "' not found on Stax Invoices sheet", "NOT_FOUND");
+
+  var existingStaxId = String(invData[foundRow][7] || "").trim();
+  if (existingStaxId && !explicitStaxId) {
+    return errorResponse_(
+      "Invoice already has Stax ID " + existingStaxId + " — nothing to link. " +
+      "Use resetStaxInvoiceStatus if status is wrong.",
+      "ALREADY_LINKED"
+    );
+  }
+
+  // Search Stax for the matching invoice. The push path sets
+  // meta.reference = QB Invoice #, so that's the lookup key.
+  var resolvedStaxId = explicitStaxId;
+  if (!resolvedStaxId) {
+    try {
+      // GET /invoice?memo=<qbInvoiceNo> — searches across the merchant's
+      // invoices. Then filter client-side to exact meta.reference match
+      // (memo search is fuzzy on Stax's side).
+      var searchRes = stax_apiRequest_("GET", "/invoice?memo=" + encodeURIComponent(qbInvoiceNo), null);
+      if (!searchRes.success) {
+        return errorResponse_("Stax API search failed: " + (searchRes.error || "Unknown"), "STAX_API_ERROR");
+      }
+      var hits = stax_extractArray_(searchRes.data);
+      var exactMatches = [];
+      for (var h = 0; h < hits.length; h++) {
+        var hit = hits[h] || {};
+        if (hit.meta && hit.meta.reference === qbInvoiceNo) {
+          exactMatches.push({ id: hit.id, total: hit.total, status: hit.status, sent_at: hit.sent_at });
+        }
+      }
+      if (exactMatches.length === 0) {
+        return errorResponse_(
+          "No matching Stax invoice found for " + qbInvoiceNo + ". " +
+          "Either the invoice was never pushed (use Push to Stax instead), or the Stax-side meta.reference doesn't match. " +
+          "If you can see the Stax Invoice ID in the Stax UI, pass it as staxInvoiceId.",
+          "NOT_FOUND_IN_STAX"
+        );
+      }
+      if (exactMatches.length > 1) {
+        // Multiple matches — let the caller disambiguate.
+        return jsonResponse_({
+          success: false,
+          ambiguous: true,
+          qbInvoiceNo: qbInvoiceNo,
+          candidates: exactMatches,
+          error: "Stax has " + exactMatches.length + " invoices tagged with this QB#. Re-call with staxInvoiceId to pick one.",
+          errorCode: "MULTIPLE_MATCHES"
+        });
+      }
+      resolvedStaxId = exactMatches[0].id;
+    } catch (e) {
+      return errorResponse_("Stax API lookup failed: " + e.message, "STAX_API_ERROR");
+    }
+  }
+
+  // Write back to the sheet: Stax Invoice ID (col 8), Status (col 9),
+  // Notes audit line (col 11).
+  invSheet.getRange(foundRow + 1, 8).setValue(resolvedStaxId);
+  invSheet.getRange(foundRow + 1, 9).setValue("CREATED");
+  var nowFmt = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm:ss");
+  invSheet.getRange(foundRow + 1, 11).setValue(
+    "Linked to existing Stax invoice " + resolvedStaxId + " via Stride Hub on " + nowFmt
+  );
+
+  try { CacheService.getScriptCache().remove("stax_invoices"); } catch (_) {}
+  try { stax_appendRunLog_(ss, "linkStaxInvoiceToExisting", "Linked QB#" + qbInvoiceNo + " → Stax " + resolvedStaxId, ""); } catch (_) {}
+  try { api_sbResyncStaxInvoice_(qbInvoiceNo); } catch (_) {}
+
+  return jsonResponse_({
+    success:        true,
+    qbInvoiceNo:    qbInvoiceNo,
+    staxInvoiceId:  resolvedStaxId,
+    newStatus:      "CREATED",
+    message:        "Linked " + qbInvoiceNo + " to existing Stax invoice " + resolvedStaxId
+  });
 }
 
 // ─── Endpoint 4: sendStaxPayLinks ───────────────────────────────────────────

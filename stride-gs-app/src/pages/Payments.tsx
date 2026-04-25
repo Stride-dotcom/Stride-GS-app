@@ -13,7 +13,7 @@ import {
   postPullStaxCustomers, postSyncStaxCustomers,
   postCreateStaxInvoices, postStaxRefreshCustomerIds, postChargeSingleInvoice,
   postSendStaxPayLinks, postSendStaxPayLink,
-  postCreateTestInvoice, postVoidStaxInvoice, postUpdateStaxInvoice, postDeleteStaxInvoice, postResetStaxInvoiceStatus, postToggleAutoCharge,
+  postCreateTestInvoice, postVoidStaxInvoice, postUpdateStaxInvoice, postDeleteStaxInvoice, postResetStaxInvoiceStatus, postToggleAutoCharge, postLinkStaxInvoiceToExisting,
   postBatchVoidStaxInvoices, postBatchDeleteStaxInvoices, type BatchMutationResult,
   fetchIIFFiles, postImportIIFFromDrive, type IIFFile,
   setNextFetchNoCache,
@@ -374,6 +374,18 @@ export function Payments() {
   const [syncing, setSyncing] = useState(false);
   const [custResult, setCustResult] = useState<string | null>(null);
 
+  // v38.124.0 — guard against the realtime-vs-typing race that caused
+  // inline edits to "save then revert". Every editable cell registers
+  // its key on focus and removes it on blur. The realtime subscription
+  // (below) skips loadData() while editing is in progress so the user's
+  // typed-but-unsaved value isn't stomped by a refetch fired by some
+  // other write. After the user blurs, the save fires; the save's own
+  // realtime callback then fires after the set has been cleared, and
+  // the refetch lands cleanly with the persisted value.
+  const editingFieldsRef = useRef(new Set<string>());
+  const beginEdit = (key: string) => editingFieldsRef.current.add(key);
+  const endEdit   = (key: string) => editingFieldsRef.current.delete(key);
+
   // ─── Phase 4: Financial operations state ───
   const [creatingInvoices, setCreatingInvoices] = useState(false);
   const [invoiceResult, setInvoiceResult] = useState<string | null>(null);
@@ -501,6 +513,13 @@ export function Payments() {
         entityType === 'stax_customer' ||
         entityType === 'stax_run_log'
       ) {
+        // v38.124.0 — skip the refetch if the user has any cell focused.
+        // Replacing `invoices` with server data while typing wipes the
+        // typed-but-unsaved value (the input is controlled, so the
+        // underlying state change resets the visible value too). The
+        // user's manual Refresh button still calls loadData(true)
+        // directly and bypasses this guard.
+        if (editingFieldsRef.current.size > 0) return;
         loadData();
       }
     });
@@ -1186,12 +1205,16 @@ export function Payments() {
                     </td>
                     <td style={td}>
                       <input type="date" value={i.dueDate || ''}
+                        onFocus={() => beginEdit(i.qbInvoice + ':dueDate')}
                         onChange={(e) => {
                           // Controlled input — update local state immediately so the field shows the new value
                           const v = e.target.value;
                           setInvoices(prev => prev.map(inv => inv.qbInvoice === i.qbInvoice ? { ...inv, dueDate: v } : inv));
                         }}
                         onBlur={async (e) => {
+                          // Clear the editing flag BEFORE the await so the realtime
+                          // refetch triggered by our save doesn't get blocked.
+                          endEdit(i.qbInvoice + ':dueDate');
                           const newVal = e.target.value;
                           // Skip if no change (setInvoices above already set the state, so compare to original)
                           if (!newVal || newVal === i.dueDate) return;
@@ -1213,11 +1236,13 @@ export function Payments() {
                     </td>
                     <td style={td}>
                       <input value={i.notes || ''}
+                        onFocus={() => beginEdit(i.qbInvoice + ':notes')}
                         onChange={(e) => {
                           const v = e.target.value;
                           setInvoices(prev => prev.map(inv => inv.qbInvoice === i.qbInvoice ? { ...inv, notes: v } : inv));
                         }}
                         onBlur={async (e) => {
+                          endEdit(i.qbInvoice + ':notes');
                           const newVal = e.target.value;
                           if (newVal === i.notes) return;
                           const origNotes = i.notes;
@@ -1236,12 +1261,49 @@ export function Payments() {
                         style={{ width: '100%', padding: '4px 8px', fontSize: 12, border: `1px solid ${theme.colors.border}`, borderRadius: 4, fontFamily: 'inherit', minWidth: 100 }} />
                     </td>
                     <td style={{ ...td, textAlign: 'right' }}>
-                      <button onClick={async () => {
-                        if (!confirm(`Delete ${i.qbInvoice}? It will be marked DELETED.`)) return;
-                        const res = await postDeleteStaxInvoice({ qbInvoiceNo: i.qbInvoice, rowIndex: i.rowIndex });
-                        if (res.ok && res.data?.success) { setReviewSelected(prev => prev.filter(x => x !== i.rowIndex)); loadData(true); }
-                        else setError(res.error || 'Delete failed');
-                      }} style={{ padding: '3px 8px', fontSize: 11, fontWeight: 500, border: `1px solid #FECACA`, borderRadius: 4, background: '#FEF2F2', cursor: 'pointer', color: '#DC2626', fontFamily: 'inherit' }}>Void</button>
+                      <div style={{ display: 'inline-flex', gap: 4 }}>
+                        {/* v38.124.0 — recovery for orphan rows whose invoice
+                            is already in Stax (e.g. dedup wiped the stax_id).
+                            Calls Stax API to find the matching invoice + flips
+                            PENDING→CREATED. Avoids the "I'll have to push it
+                            again" duplicate-creation trap. */}
+                        <button
+                          onClick={async () => {
+                            if (!confirm(`Look up ${i.qbInvoice} in Stax and link it? This avoids creating a duplicate. Use this when the invoice already exists in Stax but our system lost the link.`)) return;
+                            const res = await postLinkStaxInvoiceToExisting({ qbInvoiceNo: i.qbInvoice });
+                            if (res.ok && res.data?.success) {
+                              loadData(true);
+                            } else if (res.ok && res.data?.ambiguous && res.data.candidates) {
+                              const choices = res.data.candidates.map((c, idx) =>
+                                `${idx + 1}. ${c.id} — $${c.total ?? '?'} ${c.status ?? ''}`
+                              ).join('\n');
+                              const pick = prompt(
+                                `Multiple Stax invoices match this QB#. Which one?\n\n${choices}\n\nEnter number 1-${res.data.candidates.length}:`,
+                                '1'
+                              );
+                              const n = Number(pick) - 1;
+                              if (Number.isInteger(n) && n >= 0 && n < res.data.candidates.length) {
+                                const retry = await postLinkStaxInvoiceToExisting({
+                                  qbInvoiceNo: i.qbInvoice,
+                                  staxInvoiceId: res.data.candidates[n].id,
+                                });
+                                if (retry.ok && retry.data?.success) loadData(true);
+                                else setError(retry.error || retry.data?.error || 'Link failed');
+                              }
+                            } else {
+                              setError(res.error || res.data?.error || 'Link failed');
+                            }
+                          }}
+                          style={{ padding: '3px 8px', fontSize: 11, fontWeight: 500, border: `1px solid ${theme.colors.border}`, borderRadius: 4, background: '#fff', cursor: 'pointer', color: theme.colors.textSecondary, fontFamily: 'inherit' }}
+                          title="Already in Stax? Link this row to it instead of pushing again"
+                        >Link</button>
+                        <button onClick={async () => {
+                          if (!confirm(`Delete ${i.qbInvoice}? It will be marked DELETED.`)) return;
+                          const res = await postDeleteStaxInvoice({ qbInvoiceNo: i.qbInvoice, rowIndex: i.rowIndex });
+                          if (res.ok && res.data?.success) { setReviewSelected(prev => prev.filter(x => x !== i.rowIndex)); loadData(true); }
+                          else setError(res.error || 'Delete failed');
+                        }} style={{ padding: '3px 8px', fontSize: 11, fontWeight: 500, border: `1px solid #FECACA`, borderRadius: 4, background: '#FEF2F2', cursor: 'pointer', color: '#DC2626', fontFamily: 'inherit' }}>Void</button>
+                      </div>
                     </td>
                   </tr>
                   ); })}</tbody>
@@ -1473,11 +1535,13 @@ export function Payments() {
                             Editing saves to scheduledDate (sticks). Charge loop uses
                             scheduledDate if set, else falls back to dueDate. */}
                         <input type="date" value={i.scheduledDate || i.dueDate || ''} onClick={e => e.stopPropagation()}
+                          onFocus={() => beginEdit(i.qbInvoice + ':scheduledDate')}
                           onChange={(e) => {
                             const v = e.target.value;
                             setInvoices(prev => prev.map(inv => inv.qbInvoice === i.qbInvoice ? { ...inv, scheduledDate: v } : inv));
                           }}
                           onBlur={async (e) => {
+                            endEdit(i.qbInvoice + ':scheduledDate');
                             const newVal = e.target.value;
                             const currentShown = i.scheduledDate || i.dueDate || '';
                             if (!newVal || newVal === currentShown) return;
