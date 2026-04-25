@@ -25,6 +25,7 @@ import { MultiSelectFilter } from '../components/shared/MultiSelectFilter';
 import { SyncBanner } from '../components/shared/SyncBanner';
 import { useClients } from '../hooks/useClients';
 import { useClientFilterUrlSync } from '../hooks/useClientFilterUrlSync';
+import { useClientFilterPersisted } from '../hooks/useClientFilterPersisted';
 import { useIsMobile } from '../hooks/useIsMobile';
 import { useAuth } from '../contexts/AuthContext';
 
@@ -285,7 +286,9 @@ export function Shipments() {
   // Client list for MultiSelectFilter — declared before data hooks so clientFilter gates fetching
   const { clients, apiClients } = useClients();
   const clientNames = useMemo(() => clients.map(c => c.name).sort(), [clients]);
-  const [clientFilter, setClientFilter] = useState<string[]>([]);
+  // Persists across navigation: hydrates from URL ?client= → localStorage →
+  // role-default effect below.
+  const [clientFilter, setClientFilter] = useClientFilterPersisted('shipments', apiClients);
 
   const selectedSheetId = useMemo<string | string[] | undefined>(() => {
     if (clientFilter.length === 0) return undefined;

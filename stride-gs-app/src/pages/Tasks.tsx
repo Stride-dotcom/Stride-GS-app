@@ -19,6 +19,7 @@ import {
 } from 'lucide-react';
 import { useVirtualRows } from '../hooks/useVirtualRows';
 import { useClientFilterUrlSync } from '../hooks/useClientFilterUrlSync';
+import { useClientFilterPersisted } from '../hooks/useClientFilterPersisted';
 import { theme } from '../styles/theme';
 import { fmtDate } from '../lib/constants';
 import { useItemIndicators } from '../hooks/useItemIndicators';
@@ -191,7 +192,9 @@ export function Tasks() {
   // Client list for MultiSelectFilter — declared before data hooks so clientFilter gates fetching
   const { clients, apiClients } = useClients();
   const clientNames = useMemo(() => clients.map(c => c.name).sort(), [clients]);
-  const [clientFilter, setClientFilter] = useState<string[]>([]);
+  // Persists across navigation: hydrates from URL ?client= → localStorage →
+  // role-default effect below.
+  const [clientFilter, setClientFilter] = useClientFilterPersisted('tasks', apiClients);
   const { user } = useAuth();
   // Client-role users only see their own accounts in the dropdown — admin/staff see all.
   const dropdownClientNames = useMemo(() => {

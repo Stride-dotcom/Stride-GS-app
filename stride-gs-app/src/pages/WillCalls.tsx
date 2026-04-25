@@ -30,6 +30,7 @@ import { MultiSelectFilter } from '../components/shared/MultiSelectFilter';
 import { SyncBanner } from '../components/shared/SyncBanner';
 import { useClients } from '../hooks/useClients';
 import { useClientFilterUrlSync } from '../hooks/useClientFilterUrlSync';
+import { useClientFilterPersisted } from '../hooks/useClientFilterPersisted';
 import { useTablePreferences } from '../hooks/useTablePreferences';
 import type { WillCall } from '../lib/types';
 import { useIsMobile } from '../hooks/useIsMobile';
@@ -101,7 +102,9 @@ export function WillCalls() {
   // Client list for MultiSelectFilter — declared before data hooks so clientFilter gates fetching
   const { clients, apiClients } = useClients();
   const clientNames = useMemo(() => clients.map(c => c.name).sort(), [clients]);
-  const [clientFilter, setClientFilter] = useState<string[]>([]);
+  // Persists across navigation: hydrates from URL ?client= → localStorage →
+  // role-default effect below.
+  const [clientFilter, setClientFilter] = useClientFilterPersisted('willcalls', apiClients);
   const { user: authUser } = useAuth();
   // Client-role users only see their own accounts in the dropdown — admin/staff see all.
   const dropdownClientNames = useMemo(() => {
