@@ -372,6 +372,14 @@ export interface UseServiceCatalogResult {
    * qb_item_id show up in read-mode badges without an extra round-trip.
    */
   syncService: (id: string) => Promise<ExternalSyncResult | null>;
+  /**
+   * Background-sync failure message from the most recent create/update.
+   * Null when the last sync succeeded or no sync has run yet. The auto-sync
+   * after create/update is fire-and-forget, so failures used to silently
+   * hit only console; this lets the page render a visible warning banner.
+   */
+  syncError: string | null;
+  clearSyncError: () => void;
 }
 
 export function useServiceCatalog(): UseServiceCatalogResult {
@@ -379,6 +387,24 @@ export function useServiceCatalog(): UseServiceCatalogResult {
   const [services, setServices] = useState<CatalogService[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [syncError, setSyncError] = useState<string | null>(null);
+  const clearSyncError = useCallback(() => setSyncError(null), []);
+
+  // Helper: run the fire-and-forget sync but capture any failure message in
+  // syncError so the UI can surface it. Manual syncService bypasses this and
+  // returns the structured result directly.
+  const runBackgroundSync = useCallback(async (svc: CatalogService) => {
+    try {
+      const result = await syncToExternalCatalogs(svc);
+      if (result.errors.length > 0) {
+        setSyncError(`Catalog sync failed for ${svc.code} — ${result.errors.join(' · ')}`);
+      } else {
+        setSyncError(null);
+      }
+    } catch (err) {
+      setSyncError(`Catalog sync failed for ${svc.code} — ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }, []);
 
   const refetch = useCallback(async () => {
     setError(null);
@@ -428,10 +454,10 @@ export function useServiceCatalog(): UseServiceCatalogResult {
     }
     const created = rowToService(data as CatalogRow);
     setServices(prev => [...prev, created].sort((a, b) => a.displayOrder - b.displayOrder));
-    // Best-effort sync to Stax + QBO (non-blocking)
-    syncToExternalCatalogs(created).catch(() => {});
+    // Best-effort sync to Stax + QBO (non-blocking, surfaces failures via syncError)
+    void runBackgroundSync(created);
     return created;
-  }, []);
+  }, [runBackgroundSync]);
 
   // ── Update (with audit) ────────────────────────────────────────────────
   const updateService = useCallback(async (id: string, updates: UpdateServiceInput): Promise<CatalogService | null> => {
@@ -525,10 +551,10 @@ export function useServiceCatalog(): UseServiceCatalogResult {
     // know nor care, and avoiding the round trip saves two network calls
     // per save.
     if (didExternalRelevantFieldsChange(before, after)) {
-      syncToExternalCatalogs(after).catch(() => {});
+      void runBackgroundSync(after);
     }
     return after;
-  }, [services, user]);
+  }, [services, user, runBackgroundSync]);
 
   // ── Delete ─────────────────────────────────────────────────────────────
   const deleteService = useCallback(async (id: string): Promise<boolean> => {
@@ -594,5 +620,7 @@ export function useServiceCatalog(): UseServiceCatalogResult {
     deleteService,
     getAuditForService,
     syncService,
-  }), [services, loading, error, refetch, createService, updateService, deleteService, getAuditForService, syncService]);
+    syncError,
+    clearSyncError,
+  }), [services, loading, error, refetch, createService, updateService, deleteService, getAuditForService, syncService, syncError, clearSyncError]);
 }

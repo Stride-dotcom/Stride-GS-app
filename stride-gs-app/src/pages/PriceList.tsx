@@ -96,7 +96,7 @@ export function PriceList() {
   const v2 = theme.v2;
   const { user } = useAuth();
   const email = user?.email || '_anon';
-  const { services, loading, error, createService, updateService, deleteService, syncService } = useServiceCatalog();
+  const { services, loading, error, createService, updateService, deleteService, syncService, syncError, clearSyncError } = useServiceCatalog();
   const { zones: deliveryZones } = useDeliveryZones();
   const { classes: itemClasses } = useItemClasses();
   const { options: coverageOptions } = useCoverageOptions();
@@ -415,6 +415,28 @@ export function PriceList() {
           border: `1px solid ${syncResult.kind === 'ok' ? 'rgba(74,138,92,0.3)' : 'rgba(180,90,90,0.3)'}`,
           borderRadius: v2.radius.input, fontSize: 13,
         }}>{syncResult.message}</div>
+      )}
+      {syncError && (
+        <div style={{
+          padding: '12px 16px', marginBottom: 16,
+          background: 'rgba(217,119,6,0.10)', color: '#B45309',
+          border: '1px solid rgba(217,119,6,0.3)',
+          borderRadius: v2.radius.input, fontSize: 13,
+          display: 'flex', alignItems: 'flex-start', gap: 12,
+        }}>
+          <span style={{ flex: 1 }}>{syncError}</span>
+          <button
+            onClick={clearSyncError}
+            aria-label="Dismiss"
+            style={{
+              background: 'transparent', border: 'none', color: '#B45309',
+              cursor: 'pointer', padding: 0, lineHeight: 1, flexShrink: 0,
+              display: 'inline-flex', alignItems: 'center',
+            }}
+          >
+            <X size={14} />
+          </button>
+        </div>
       )}
 
       {/* ── Split panel ── */}
