@@ -1,5 +1,11 @@
 /**
- * dt-push-order — Supabase Edge Function (Phase 2c) — v14 2026-04-25 PST
+ * dt-push-order — Supabase Edge Function (Phase 2c) — v15 2026-04-25 PST
+ * v15: Driver-facing <notes> block now falls back to dt_orders.details
+ *      when order_notes is empty. Previously the modal's "Notes /
+ *      Special Instructions" field wrote only to details, which
+ *      surfaced in DT's dispatcher description but never reached
+ *      the driver app's notes pane. With this fallback the same
+ *      text appears in both views.
  * v14: Coverage now itemized in the <description> billing summary so the
  *      DT dispatcher sees what valuation the customer paid for. Reads
  *      coverage_option_id, coverage_charge, declared_value from
@@ -232,18 +238,18 @@ function buildOrderXml(
 
   const desc = buildOrderDescription(order, accountName, crossRefIdent, linkedDeliveryInfo);
 
-  // Build notes XML if order_notes exists.
-  //
-  // dt_orders has two free-text columns we surface to DT:
-  //   • details      → the operator-facing detail text. Mirrored into the
-  //                    <description> CDATA block (after the billing summary)
-  //                    so it shows on DT's primary order view.
-  //   • order_notes  → driver-facing public notes. Pushed as a <notes>/<note>
-  //                    element with note_type="Public" so they render in the
-  //                    DT driver app's notes pane.
-  // Both fields can carry user-typed content, so we run cdataEscape() on
-  // anything that lands inside a CDATA section.
-  const notesXml = order.order_notes ? `\n    <notes count="1">\n      <note created_at="${new Date().toISOString()}" author="StrideApp" note_type="Public">\n        <![CDATA[${cdataEscape(order.order_notes)}]]>\n      </note>\n    </notes>` : '';
+  // Build notes XML. dt_orders has two free-text columns; both surface to DT:
+  //   • details      → operator-facing detail text. Mirrored into the
+  //                    <description> CDATA block so it shows on DT's
+  //                    primary dispatcher view.
+  //   • order_notes  → driver-facing public notes. Pushed as <notes>/<note>
+  //                    with note_type="Public" so they render in the DT
+  //                    driver app's notes pane.
+  // The order modal currently only writes to `details`. To make sure the
+  // driver still sees those instructions, we fall back to `details` when
+  // `order_notes` is empty — same text ends up in both views.
+  const driverNotes = order.order_notes || order.details || '';
+  const notesXml = driverNotes ? `\n    <notes count="1">\n      <note created_at="${new Date().toISOString()}" author="StrideApp" note_type="Public">\n        <![CDATA[${cdataEscape(driverNotes)}]]>\n      </note>\n    </notes>` : '';
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <service_orders>
