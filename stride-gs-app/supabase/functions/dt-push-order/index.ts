@@ -250,10 +250,16 @@ ${itemsXml}
 </service_orders>`;
 }
 
-// Resolve DT account name from tenant_id (direct lookup in account_name_map: {sheetId → accountName})
+// Resolve DT account name from tenant_id (direct lookup in account_name_map: {sheetId → accountName}).
+// Clients with no explicit mapping fall back to the DT_DEFAULT_ACCOUNT constant
+// — the push to DispatchTrack never fails for "unmapped tenant"; it just lands
+// under the house account and operations can reassign inside DT's UI if needed.
+const DT_DEFAULT_ACCOUNT = 'STRIDE LOGISTICS';
+
 function resolveAccountName(tenantId: string | null, acctMap: Record<string, string>): string {
-  if (!tenantId) return '';
-  return acctMap[tenantId] || '';
+  if (!tenantId) return DT_DEFAULT_ACCOUNT;
+  const explicit = acctMap[tenantId];
+  return (explicit && explicit.trim()) || DT_DEFAULT_ACCOUNT;
 }
 
 // Push a single order to DT. Returns {ok, body}.

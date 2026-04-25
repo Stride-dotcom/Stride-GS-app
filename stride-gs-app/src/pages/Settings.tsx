@@ -9,6 +9,7 @@ import { entityEvents } from '../lib/entityEvents';
 import { buildClientPayload } from '../types/clientFields';
 import { TemplateEditor } from '../components/shared/TemplateEditor';
 import { useEmailTemplates } from '../hooks/useEmailTemplates';
+import { useUrlState } from '../hooks/useUrlState';
 import { ConfirmDialog } from '../components/shared/ConfirmDialog';
 import { useAuth } from '../contexts/AuthContext';
 import { AutocompleteInput } from '../components/shared/AutocompleteInput';
@@ -675,23 +676,17 @@ export function Settings() {
   const navigate = useNavigate();
   const { realUser, impersonateUser } = useAuth();
   const isAdmin = realUser?.role === 'admin';
-  const [tab, setTab] = useState<Tab>('general');
-  const [clientsSubTab, setClientsSubTab] = useState<'clients' | 'intakes'>('clients');
-
-  // Seed tab + clientsSubTab from URL query params on first mount.
-  // Used by the /#/intakes redirect and by "View in Intakes" deep-links.
-  useEffect(() => {
-    const hash = window.location.hash; // e.g. #/settings?tab=clients&subtab=intakes
-    const qStart = hash.indexOf('?');
-    if (qStart < 0) return;
-    const params = new URLSearchParams(hash.slice(qStart + 1));
-    const tabParam = params.get('tab');
-    const subtabParam = params.get('subtab');
-    if (tabParam && ['general','clients','users','pricing','emails','integrations','notifications','maintenance'].includes(tabParam)) {
-      setTab(tabParam as Tab);
-    }
-    if (subtabParam === 'intakes') setClientsSubTab('intakes');
-  }, []);
+  // Tab + sub-tab persisted in the URL so back/forward cycles tab visits and
+  // deep-link emails (?tab=clients&subtab=intakes&intake=<id>) work both on
+  // initial arrival AND on subsequent navigation. The valid-tab guards
+  // protect against stale or hand-rolled URLs.
+  const VALID_TABS: readonly Tab[] = ['general','clients','users','pricing','emails','integrations','notifications','maintenance'] as const;
+  const [tabRaw, setTabRaw] = useUrlState('tab', 'general');
+  const tab: Tab = (VALID_TABS as readonly string[]).includes(tabRaw) ? (tabRaw as Tab) : 'general';
+  const setTab = (next: Tab) => setTabRaw(next);
+  const [subtabRaw, setSubtabRaw] = useUrlState('subtab', '');
+  const clientsSubTab: 'clients' | 'intakes' = subtabRaw === 'intakes' ? 'intakes' : 'clients';
+  const setClientsSubTab = (next: 'clients' | 'intakes') => setSubtabRaw(next === 'intakes' ? 'intakes' : '');
 
   // Resend T&C — generate an intake link for an existing client and show email modal.
   const [resendTcLoading, setResendTcLoading] = useState<string | null>(null); // spreadsheetId

@@ -97,7 +97,25 @@ UI components: FloatingActionMenu, WriteButton, BatchGuard, ActionTooltip, Batch
 
 ---
 
-## Recent Changes (2026-04-24, this session)
+## Recent Changes (2026-04-25, session 80)
+
+### Back-button restores tab state across Orders / Settings / Billing
+- New `src/hooks/useUrlState.ts` — single-key URL search-param state hook built on `useSearchParams`. `[value, setValue] = useUrlState(key, default, { replace? })`. Default pushes a history entry; `replace: true` for transient state. Empty string deletes the param so URLs stay short.
+- `src/pages/Orders.tsx`, `src/pages/Billing.tsx`, `src/pages/Settings.tsx` — `activeTab` now lives in the URL via `useUrlState('tab', defaultTab)`. Settings also moves its `clientsSubTab` into `?subtab=`. Switching tabs pushes a history entry; back navigates to the prior tab. Email deep-links (`?tab=clients&subtab=intakes&intake=<id>`) survive subsequent navigation.
+- The five list pages (Inventory/Tasks/Repairs/WillCalls/Shipments) didn't need conversion because they already moved to standalone `/inventory/:id`-style routes — back-button handles those natively.
+
+### dt-push-order STRIDE LOGISTICS default fallback
+- `supabase/functions/dt-push-order/index.ts` — `resolveAccountName()` now returns `'STRIDE LOGISTICS'` when `acctMap[tenantId]` is empty/missing (was: returned `''` and the caller errored 400). Pushes never fail for unmapped tenants; orders land on the house account and ops can reassign in DT's UI. The caller's `if (!accountName)` early-return is now unreachable but kept for defense in depth.
+
+### Intake notification trigger — defensive EXCEPTION wrapper
+- New migration `20260425200000_intake_notification_trigger_safe.sql` — wraps the INSERT inside `notify_admins_on_intake_submit()` in `BEGIN/EXCEPTION WHEN OTHERS` so a notification failure cannot roll back the parent intake transaction. Today the trigger is owned by `postgres` (BYPASSRLS) so the unsafe version works fine, but a future RLS/constraint change won't silently drop intake rows. Notification becomes best-effort; intake row always lands.
+
+### Dropbox-corruption signpost
+- New `CLAUDE.md` at the Dropbox repo root (Dropbox-only file, gitignored locally) — directs any future Claude session that lands at the Dropbox path to switch to `C:\dev\Stride-GS-app`. Today's session burned ~30 min recovering git pack corruption that was caused by editing through Dropbox sync; the signpost prevents recurrence.
+
+---
+
+## Recent Changes (2026-04-24, prior session)
 
 ### Unified order status + edge function repairs (2026-04-24)
 - Migration `20260425020000_unified_order_status.sql` — expanded dt_statuses with 7 new statuses (pending_review, rejected, push_failed, in_transit, billing_review, in_ledger, collected), updated display_order, added push_error column

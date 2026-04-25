@@ -1,5 +1,6 @@
 import { useState, useMemo, useCallback, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useUrlState } from '../hooks/useUrlState';
 import {
   useReactTable, getCoreRowModel, getSortedRowModel, getFilteredRowModel,
   flexRender, createColumnHelper,
@@ -92,24 +93,23 @@ export function Orders() {
   const isStaff = user?.role === 'staff' || user?.role === 'admin';
   const canReview = isStaff;
 
-  // Tab selection has to wait for auth to resolve — running the IIFE on the
-  // first render reads `isStaff`/`isAdmin` from a still-loading user object,
-  // which produced the wrong default (always 'availability') for staff/admin
-  // users on a hard refresh. We start with `null` and let the effect below
-  // pick the correct tab once `user` is populated.
-  const [activeTab, setActiveTab] = useState<OrdersTab | null>(null);
-  useEffect(() => {
-    if (activeTab !== null) return;        // already chosen — don't override user clicks
-    if (!user) return;                      // wait for auth to resolve
-    try {
-      const hash = window.location.hash;
-      if (hash.includes('tab=review') && isStaff) {
-        setActiveTab('review');
-        return;
-      }
-    } catch (_) { /* ignore */ }
-    setActiveTab(isAdmin ? 'orders' : 'availability');
-  }, [user, isAdmin, isStaff, activeTab]);
+  // Active tab persisted in the URL (?tab=orders|review|availability) so the
+  // browser back button cycles through tab visits and shareable URLs reflect
+  // the user's exact view. Default depends on role: admin → orders, staff →
+  // availability. Email deep-links pre-select review by appending ?tab=review.
+  // The URL is the source of truth — `setActiveTab(x)` pushes a history entry,
+  // back/forward navigates between tab visits, no useEffect race needed.
+  const defaultTab: OrdersTab = isAdmin ? 'orders' : 'availability';
+  const [tabRaw, setTabRaw] = useUrlState('tab', defaultTab);
+  // Guard against URL-injected nonsense + role gating (a non-staff user
+  // shouldn't land on review even if a stale URL says so).
+  const activeTab: OrdersTab | null = !user
+    ? null  // still wait for auth to resolve so role gates are accurate
+    : tabRaw === 'orders' && isAdmin       ? 'orders'
+    : tabRaw === 'review' && canReview     ? 'review'
+    : tabRaw === 'availability'            ? 'availability'
+    : defaultTab;
+  const setActiveTab = useCallback((next: OrdersTab) => setTabRaw(next), [setTabRaw]);
   const { orders, loading, error, refetch, lastFetched } = useOrders();
   const [globalFilter, setGlobalFilter] = useState('');
   const [sorting, setSorting] = useState<SortingState>([{ id: 'localServiceDate', desc: true }]);
