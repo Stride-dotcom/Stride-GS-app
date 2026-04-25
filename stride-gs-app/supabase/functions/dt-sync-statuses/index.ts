@@ -1,6 +1,13 @@
 /**
  * dt-sync-statuses — Supabase Edge Function (session 85)
- * v4 2026-04-24 PST
+ * v5 2026-04-25 PST
+ *   v5: DT auth corrected from Bearer header to ?api_key= query parameter
+ *       (matches dt-push-order/dt-backfill-orders). Terminal-category filter
+ *       now also excludes 'exception' and 'billing'. SELECT now pulls paid_at
+ *       so the auto-Collected branch can fire when DT reports completion on
+ *       an already-paid order. Added a same-status guard so we don't churn
+ *       last_synced_at on rows whose status didn't change.
+ *   v4: prior version (Bearer auth, no auto-Collected, no same-status guard).
  *
  * Pulls latest delivery status from DispatchTrack for orders that have been
  * pushed (`dt_dispatch_id IS NOT NULL`) and are not yet in a terminal state.
@@ -19,7 +26,9 @@
  *   • When a DT order reports "Delivered" we flip:
  *       dt_orders.status_id       = <dt_statuses.id for category='completed'>
  *       dt_orders.last_synced_at  = now()
- *     The Orders table auto-refreshes via realtime.
+ *     If the order is already paid (paid_at IS NOT NULL) we jump straight to
+ *     Collected (status 22) so billing review doesn't have to chase a manual
+ *     second click. The Orders table auto-refreshes via realtime.
  */
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
