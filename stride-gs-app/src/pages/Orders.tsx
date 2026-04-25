@@ -11,7 +11,11 @@ import { theme } from '../styles/theme';
 import { useOrders } from '../hooks/useOrders';
 import type { DtOrderForUI } from '../hooks/useOrders';
 import { CreateDeliveryOrderModal } from '../components/shared/CreateDeliveryOrderModal';
-import { ReviewQueueTab } from '../components/shared/ReviewQueueTab';
+// ReviewQueueTab retired in Phase B — review actions live on the
+// Order Details page now. Pill in the tab bar filters the Orders list
+// to needs-review rows. Component file kept on disk in case we need to
+// revert; the import is dropped here so the type checker doesn't flag
+// it as unused.
 import { useVirtualRows } from '../hooks/useVirtualRows';
 import { useAuth } from '../contexts/AuthContext';
 import { AvailabilityCalendar } from '../components/availability/AvailabilityCalendar';
@@ -97,23 +101,37 @@ export function Orders() {
   const isStaff = user?.role === 'staff' || user?.role === 'admin';
   const canReview = isStaff;
 
-  // Active tab persisted in the URL (?tab=orders|review|availability) so the
-  // browser back button cycles through tab visits and shareable URLs reflect
-  // the user's exact view. Default depends on role: admin → orders, staff →
-  // availability. Email deep-links pre-select review by appending ?tab=review.
-  // The URL is the source of truth — `setActiveTab(x)` pushes a history entry,
-  // back/forward navigates between tab visits, no useEffect race needed.
+  // Active tab persisted in the URL (?tab=orders|availability) so the
+  // browser back button cycles through tab visits and shareable URLs
+  // reflect the user's exact view. Default depends on role: admin →
+  // orders, staff → availability.
+  // The URL is the source of truth — `setActiveTab(x)` pushes a history
+  // entry, back/forward navigates between tab visits, no useEffect race.
   const defaultTab: OrdersTab = isAdmin ? 'orders' : 'availability';
   const [tabRaw, setTabRaw] = useUrlState('tab', defaultTab);
-  // Guard against URL-injected nonsense + role gating (a non-staff user
-  // shouldn't land on review even if a stale URL says so).
+  // Phase B (review-tab retirement): legacy ?tab=review URLs auto-redirect
+  // to ?tab=orders + needsReviewOnly=true so existing email deep-links
+  // and bookmarks land on the equivalent filtered Orders view.
+  const isLegacyReviewUrl = tabRaw === 'review' && canReview;
   const activeTab: OrdersTab | null = !user
     ? null  // still wait for auth to resolve so role gates are accurate
+    : isLegacyReviewUrl                    ? 'orders'   // redirect target
     : tabRaw === 'orders' && isAdmin       ? 'orders'
-    : tabRaw === 'review' && canReview     ? 'review'
     : tabRaw === 'availability'            ? 'availability'
     : defaultTab;
   const setActiveTab = useCallback((next: OrdersTab) => setTabRaw(next), [setTabRaw]);
+  // "Needs Review" filter — replaces the standalone Review tab.
+  // When ON, filters the Orders table to rows where review_status is
+  // pending_review or revision_requested. Toggled via the "Needs
+  // Review · N" pill in the tab bar. Auto-enabled when arriving via
+  // a legacy ?tab=review URL.
+  const [needsReviewOnly, setNeedsReviewOnly] = useState<boolean>(isLegacyReviewUrl);
+  // Once we redirect, rewrite the URL so the operator's bookmarks +
+  // back-button history reflect the actual view (orders + filter).
+  useEffect(() => {
+    if (isLegacyReviewUrl) setTabRaw('orders');
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isLegacyReviewUrl]);
   const { orders, loading, error, refetch, lastFetched } = useOrders();
   const [globalFilter, setGlobalFilter] = useState('');
   // Default sort: newest-created first. Drafts have no service_date so
@@ -186,11 +204,21 @@ export function Orders() {
     if (next.length !== statusFilter.length) setStatusFilter(next);
   }, [availableStatuses, statusFilter]);
 
+  // Apply needs-review filter on top of the category/status chain.
+  // Done after categoryFilter so the operator can stack: e.g. "show
+  // only K&M Interiors orders that need review".
+  const filteredByNeedsReview = useMemo(() => {
+    if (!needsReviewOnly) return filteredByCategory;
+    return filteredByCategory.filter(o =>
+      o.reviewStatus === 'pending_review' || o.reviewStatus === 'revision_requested'
+    );
+  }, [filteredByCategory, needsReviewOnly]);
+
   const filteredByStatus = useMemo(() => {
-    if (statusFilter.length === 0) return filteredByCategory;
+    if (statusFilter.length === 0) return filteredByNeedsReview;
     const set = new Set(statusFilter);
-    return filteredByCategory.filter(o => set.has(o.statusName));
-  }, [filteredByCategory, statusFilter]);
+    return filteredByNeedsReview.filter(o => set.has(o.statusName));
+  }, [filteredByNeedsReview, statusFilter]);
 
   const categoryCounts = useMemo(() => {
     const counts: Record<string, number> = {};
@@ -367,25 +395,48 @@ export function Orders() {
               <Truck size={13} /> Orders
             </button>
           )}
-          {canReview && (
-            <button onClick={() => setActiveTab('review')} style={tabStyle('review')}>
-              <ClipboardCheck size={13} /> Review Queue
-              {pendingReviewCount > 0 && (
-                <span style={{
-                  background: activeTab === 'review' ? '#fff' : '#E85D2D',
-                  color: activeTab === 'review' ? '#1C1C1C' : '#fff',
-                  fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 10,
-                  marginLeft: 4, minWidth: 18, textAlign: 'center',
-                }}>
-                  {pendingReviewCount}
-                </span>
-              )}
-            </button>
-          )}
           <button onClick={() => setActiveTab('availability')} style={tabStyle('availability')}>
             <Calendar size={13} /> Availability
           </button>
-          {(activeTab === 'orders' || activeTab === 'review') && (
+
+          {/* Phase B (review-tab retirement): the Review Queue lives
+              inside the Orders list now. Pill toggles a filter that
+              narrows the table to pending_review + revision_requested
+              rows. Click the pill, scan the list, click any row to
+              open the detail page where every review action (Approve,
+              Reject, Edit Full Order, Push to DT) lives. */}
+          {canReview && pendingReviewCount > 0 && activeTab === 'orders' && (
+            <button
+              onClick={() => setNeedsReviewOnly(v => !v)}
+              title={needsReviewOnly
+                ? 'Showing only orders that need review. Click to clear.'
+                : 'Filter the list to orders that need review.'}
+              style={{
+                display: 'inline-flex', alignItems: 'center', gap: 6,
+                padding: '8px 14px', borderRadius: 100,
+                border: needsReviewOnly ? 'none' : '1px solid #FCA5A5',
+                background: needsReviewOnly ? '#DC2626' : '#FEF2F2',
+                color: needsReviewOnly ? '#fff' : '#B91C1C',
+                fontFamily: 'inherit', fontSize: 12, fontWeight: 700,
+                letterSpacing: '0.4px', textTransform: 'uppercase',
+                cursor: 'pointer',
+              }}
+            >
+              <ClipboardCheck size={13} />
+              Needs Review
+              <span style={{
+                background: needsReviewOnly ? 'rgba(255,255,255,0.25)' : '#DC2626',
+                color: '#fff',
+                fontSize: 10, fontWeight: 700,
+                padding: '2px 8px', borderRadius: 10,
+                minWidth: 18, textAlign: 'center',
+              }}>
+                {pendingReviewCount}
+              </span>
+            </button>
+          )}
+
+          {activeTab === 'orders' && (
             <button
               onClick={() => setShowCreateModal(true)}
               style={{
@@ -409,15 +460,13 @@ export function Orders() {
         </div>
       )}
 
-      {/* Review Queue tab (staff + admin) */}
-      {activeTab === 'review' && canReview && (
-        <ReviewQueueTab
-          orders={orders}
-          loading={loading}
-          onRefetch={refetch}
-          onOpenDetail={(o) => navigate(`/orders/${o.id}`)}
-        />
-      )}
+      {/* Review Queue tab — RETIRED in Phase B. Reviewers now use the
+          "Needs Review · N" pill in the tab bar to filter the Orders
+          list, then open any row to access Approve / Reject / Edit
+          Full Order / Push to DT directly from the detail page.
+          ReviewQueueTab import kept for now — easy revert if anything
+          regresses. Legacy ?tab=review URLs auto-redirect via the
+          activeTab logic above. */}
 
       {/* Orders tab (admin only) */}
       {activeTab === 'orders' && isAdmin && (
@@ -564,6 +613,16 @@ export function Orders() {
                     {virtualRows.map(vr => {
                       const row = rows[vr.index];
                       if (!row) return null;
+                      // Phase B — review-status row highlight. Rows that
+                      // need review get a 3px amber left border so they
+                      // catch the eye in the unfiltered list. Approved-
+                      // but-not-pushed get a faint green hint (next
+                      // useful action for the reviewer).
+                      const r = row.original;
+                      const needsReview = r.reviewStatus === 'pending_review' || r.reviewStatus === 'revision_requested';
+                      const needsPush = r.reviewStatus === 'approved' && !r.pushedToDtAt && r.source === 'app';
+                      const accent = needsReview ? '#F59E0B' : needsPush ? '#10B981' : 'transparent';
+                      const rowBg = needsReview ? '#FFFBEB' : 'transparent';
                       return (
                         <tr
                           key={row.id}
@@ -580,9 +639,13 @@ export function Orders() {
                               navigate(`/orders/${row.original.id}`);
                             }
                           }}
-                          style={{ cursor: 'pointer', transition: 'background 0.1s' }}
-                          onMouseEnter={e => (e.currentTarget.style.background = theme.colors.bgSubtle || '#f0f7ff')}
-                          onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                          style={{
+                            cursor: 'pointer', transition: 'background 0.1s',
+                            background: rowBg,
+                            boxShadow: accent !== 'transparent' ? `inset 3px 0 0 ${accent}` : undefined,
+                          }}
+                          onMouseEnter={e => (e.currentTarget.style.background = needsReview ? '#FEF3C7' : (theme.colors.bgSubtle || '#f0f7ff'))}
+                          onMouseLeave={e => (e.currentTarget.style.background = rowBg)}
                         >
                           {row.getVisibleCells().map(cell => (
                             <td key={cell.id} style={td}>
