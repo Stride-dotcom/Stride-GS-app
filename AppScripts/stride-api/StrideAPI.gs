@@ -1,5 +1,22 @@
 /* ===================================================
-   StrideAPI.gs — v38.124.0 — 2026-04-25 PST — Stax: cleaner customer name on Invoices sheet + linkStaxInvoiceToExisting recovery endpoint
+   StrideAPI.gs — v38.125.0 — 2026-04-25 PST — PDF generation: Docs API margin call now uses PT (was rejected EMU), Invoice routed through helper, Task header HTML widths
+   v38.125.0: PDF generation fixes for Invoice + Task Work Order.
+              (1) api_exportDocAsPdfBlob_ now sends margin magnitudes in PT
+                  (m * 72) with unit:"PT" — the Docs API Unit enum only
+                  accepts PT, so the prior EMU payload was silently 400ing
+                  and the underlying doc kept its template's intrinsic ~1in
+                  margins, leaking past the URL-param margins into the PDF.
+              (2) handleCreateInvoice_ legacy Drive-Doc path replaces its
+                  raw Drive ?export=pdf URL fetch with a call to
+                  api_exportDocAsPdfBlob_ so the Docs API margin update
+                  fires before export. Fixes the wide right-margin Justin
+                  reported on generated invoices.
+              (3) DOC_TASK_WORK_ORDER fallback HTML header table now sets
+                  width="60%" + align="left" on the logo/name <td> and
+                  width="40%" + align="right" on the title <td>. Without
+                  explicit widths the HTML→Docs converter centered the
+                  logo+name block; same-shape fix applied to the inventory
+                  fallback templates in Emails.gs v4.8.1.
    v38.124.0: Two related Stax fixes.
               (1) IIF→Stax Invoices write (handleQbExport_, ~line 18289)
                   now stamps the Stax-side customer name (column C of
@@ -19563,17 +19580,10 @@ function handleCreateInvoice_(payload) {
     body.replaceText("\\{\\{INVOICE_NOTES_BLOCK\\}\\}",  "");
     doc.saveAndClose();
 
-    // Export PDF (0.25" margins)
-    var pdfUrl = "https://docs.google.com/document/d/" + copyFile.getId() +
-      "/export?format=pdf&size=letter&portrait=true&fitw=true&top=0.25&bottom=0.25&left=0.25&right=0.25";
-    var pdfResp = UrlFetchApp.fetch(pdfUrl, {
-      headers: { Authorization: "Bearer " + ScriptApp.getOAuthToken() },
-      muteHttpExceptions: true
-    });
-    if (pdfResp.getResponseCode() !== 200) {
-      throw new Error("PDF export failed (" + pdfResp.getResponseCode() + ")");
-    }
-    var pdfBlob = pdfResp.getBlob().setName(docTitle + ".pdf");
+    // Export PDF (0.25" margins). Route through api_exportDocAsPdfBlob_ so the
+    // Docs API margin update fires before export — URL params alone let the
+    // template's intrinsic ~1in margins leak into the PDF on the right side.
+    var pdfBlob = api_exportDocAsPdfBlob_(copyFile.getId(), docTitle + ".pdf", 0.25);
 
     // Save to client Invoices folder
     if (!clientSS) clientSS = SpreadsheetApp.openById(sourceSheetId);
@@ -22375,15 +22385,18 @@ function api_createGoogleDocFromHtml_(title, html) {
 function api_exportDocAsPdfBlob_(docId, fileName, marginInches) {
   var m     = marginInches || 0.25;
   var token = ScriptApp.getOAuthToken();
-  // Set page margins via Docs API (non-fatal if fails)
+  // Set page margins via Docs API (non-fatal if fails).
+  // Docs API Unit enum only accepts "PT" (1 in = 72 pt) — "EMU" was rejected
+  // silently, leaving the document's intrinsic ~1in margins to leak through
+  // the PDF export despite the URL-param margins below.
   try {
-    var pts = Math.round(m * 914400); // inches → EMU
+    var pts = m * 72; // inches → points
     var marginPayload = { requests: [{ updateDocumentStyle: {
       documentStyle: {
-        marginTop:    { magnitude: pts, unit: "EMU" },
-        marginBottom: { magnitude: pts, unit: "EMU" },
-        marginLeft:   { magnitude: pts, unit: "EMU" },
-        marginRight:  { magnitude: pts, unit: "EMU" }
+        marginTop:    { magnitude: pts, unit: "PT" },
+        marginBottom: { magnitude: pts, unit: "PT" },
+        marginLeft:   { magnitude: pts, unit: "PT" },
+        marginRight:  { magnitude: pts, unit: "PT" }
       },
       fields: "marginTop,marginBottom,marginLeft,marginRight"
     }}]};
@@ -22587,7 +22600,7 @@ function api_generateTaskWorkOrderPdf_(ss, rowData, taskMap, settings, folderUrl
     // Default WO HTML — hardcoded fallback used ONLY when the template sheet
     // lookup returns null. Contains a "[FALLBACK]" indicator in the footer so
     // Justin can tell which source generated the PDF.
-    var defaultHtml = '<html><head><style>body{font-family:Arial,Helvetica,sans-serif;color:#1E293B;margin:0;padding:0;}table{border-collapse:collapse;width:8in;}</style></head><body><div style="width:8in;margin:0;"><table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-bottom:6px;"><tr><td style="vertical-align:middle;"><table cellpadding="0" cellspacing="0" border="0"><tr><td style="vertical-align:middle;padding-right:10px;"><img src="{{LOGO_URL}}" alt="Logo" style="height:38px;width:38px;" /></td><td style="vertical-align:middle;"><span style="font-size:20px;font-weight:bold;color:#1E293B;">Stride Logistics </span><span style="font-size:20px;font-weight:bold;color:#E85D2D;">WMS</span><br><span style="font-size:10px;color:#64748B;">Kent, WA &middot; whse@stridenw.com &middot; 206-550-1848</span></td></tr></table></td><td style="text-align:right;vertical-align:middle;"><div style="font-size:20px;font-weight:bold;color:#1E293B;">Work Order</div><div style="font-size:15px;font-weight:bold;color:#E85D2D;margin-top:2px;">{{TASK_ID}}</div></td></tr></table><table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-top:14px;margin-bottom:14px;"><tr><td style="width:50%;vertical-align:top;"><table cellpadding="0" cellspacing="0" border="0" style="width:100%;"><tr><td style="font-size:10px;color:#64748B;padding:2px 0;width:80px;font-weight:bold;">CLIENT</td><td style="font-size:12px;font-weight:bold;">{{CLIENT_NAME}}</td></tr>{{SIDEMARK_ROW}}</table></td><td style="width:50%;vertical-align:top;"><table cellpadding="0" cellspacing="0" border="0" style="width:100%;"><tr><td style="font-size:10px;color:#64748B;padding:2px 0;text-align:right;width:65px;font-weight:bold;">DATE</td><td style="font-size:12px;font-weight:bold;text-align:right;">{{DATE}}</td></tr><tr><td style="font-size:10px;color:#64748B;padding:2px 0;text-align:right;font-weight:bold;">STATUS</td><td style="font-size:12px;font-weight:bold;text-align:right;">{{STATUS}}</td></tr></table></td></tr></table><div style="background:#F8FAFC;border:1px solid #E2E8F0;padding:10px 12px;margin-bottom:14px;"><div style="font-size:9px;color:#64748B;font-weight:bold;margin-bottom:6px;">TASK DETAILS</div><table cellpadding="0" cellspacing="0" border="0" style="width:100%;"><tr><td style="font-size:10px;color:#64748B;padding:2px 0;width:100px;font-weight:bold;">Task Type</td><td style="font-size:12px;font-weight:bold;">{{TASK_TYPE}}</td></tr>{{NOTES_ROW}}{{PHOTOS_ROW}}</table></div><div style="font-size:9px;color:#64748B;font-weight:bold;margin-bottom:4px;">ITEM DETAILS</div><table width="100%" cellpadding="0" cellspacing="0" border="0" style="border:1px solid #E2E8F0;margin-bottom:16px;"><tr style="background:#E85D2D;"><th style="padding:5px 6px;font-size:9px;color:#fff;font-weight:bold;text-align:left;">Item ID</th><th style="padding:5px 6px;font-size:9px;color:#fff;font-weight:bold;text-align:center;width:30px;">Qty</th><th style="padding:5px 6px;font-size:9px;color:#fff;font-weight:bold;text-align:left;">Vendor</th><th style="padding:5px 6px;font-size:9px;color:#fff;font-weight:bold;text-align:left;">Description</th><th style="padding:5px 6px;font-size:9px;color:#fff;font-weight:bold;text-align:left;">Sidemark</th><th style="padding:5px 6px;font-size:9px;color:#fff;font-weight:bold;text-align:left;">Room</th></tr><tr><td style="padding:6px;font-size:11px;border-bottom:1px solid #E2E8F0;font-weight:bold;">{{ITEM_ID}}</td><td style="padding:6px;font-size:11px;border-bottom:1px solid #E2E8F0;text-align:center;">{{ITEM_QTY}}</td><td style="padding:6px;font-size:11px;border-bottom:1px solid #E2E8F0;">{{ITEM_VENDOR}}</td><td style="padding:6px;font-size:11px;border-bottom:1px solid #E2E8F0;">{{ITEM_DESC}}</td><td style="padding:6px;font-size:11px;border-bottom:1px solid #E2E8F0;">{{ITEM_SIDEMARK}}</td><td style="padding:6px;font-size:11px;border-bottom:1px solid #E2E8F0;">{{ITEM_ROOM}}</td></tr></table><div style="border:2px solid #1E293B;padding:14px;margin-bottom:14px;"><div style="font-size:11px;font-weight:bold;color:#1E293B;margin-bottom:10px;border-bottom:2px solid #E2E8F0;padding-bottom:5px;">WAREHOUSE USE ONLY</div><table width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td style="width:50%;padding-bottom:14px;"><div style="font-size:10px;font-weight:bold;color:#64748B;margin-bottom:4px;">Completed By</div><div style="border-bottom:1.5px solid #CBD5E1;height:22px;width:90%;"></div></td><td style="width:50%;padding-bottom:14px;"><div style="font-size:10px;font-weight:bold;color:#64748B;margin-bottom:4px;text-align:right;">Date</div><div style="border-bottom:1.5px solid #CBD5E1;height:22px;width:90%;margin-left:auto;"></div></td></tr></table><div style="margin-bottom:14px;"><div style="font-size:10px;font-weight:bold;color:#64748B;margin-bottom:6px;">Result</div>{{RESULT_OPTIONS_HTML}}</div><div><div style="font-size:10px;font-weight:bold;color:#64748B;margin-bottom:6px;">Notes</div><div style="border-bottom:1px solid #E2E8F0;height:18px;margin-bottom:6px;">&nbsp;</div><div style="border-bottom:1px solid #E2E8F0;height:18px;margin-bottom:6px;">&nbsp;</div><div style="border-bottom:1px solid #E2E8F0;height:18px;">&nbsp;</div></div></div><div style="text-align:center;font-size:9px;color:#94A3B8;border-top:1px solid #E2E8F0;padding-top:6px;">Stride Logistics &middot; 206-550-1848 &middot; whse@stridenw.com</div></div></body></html>';
+    var defaultHtml = '<html><head><style>body{font-family:Arial,Helvetica,sans-serif;color:#1E293B;margin:0;padding:0;}table{border-collapse:collapse;width:8in;}</style></head><body><div style="width:8in;margin:0;"><table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-bottom:6px;"><tr><td width="60%" align="left" style="vertical-align:middle;text-align:left;"><table cellpadding="0" cellspacing="0" border="0"><tr><td style="vertical-align:middle;padding-right:10px;"><img src="{{LOGO_URL}}" alt="Logo" style="height:38px;width:38px;" /></td><td style="vertical-align:middle;"><span style="font-size:20px;font-weight:bold;color:#1E293B;">Stride Logistics </span><span style="font-size:20px;font-weight:bold;color:#E85D2D;">WMS</span><br><span style="font-size:10px;color:#64748B;">Kent, WA &middot; whse@stridenw.com &middot; 206-550-1848</span></td></tr></table></td><td width="40%" align="right" style="text-align:right;vertical-align:middle;"><div style="font-size:20px;font-weight:bold;color:#1E293B;">Work Order</div><div style="font-size:15px;font-weight:bold;color:#E85D2D;margin-top:2px;">{{TASK_ID}}</div></td></tr></table><table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-top:14px;margin-bottom:14px;"><tr><td style="width:50%;vertical-align:top;"><table cellpadding="0" cellspacing="0" border="0" style="width:100%;"><tr><td style="font-size:10px;color:#64748B;padding:2px 0;width:80px;font-weight:bold;">CLIENT</td><td style="font-size:12px;font-weight:bold;">{{CLIENT_NAME}}</td></tr>{{SIDEMARK_ROW}}</table></td><td style="width:50%;vertical-align:top;"><table cellpadding="0" cellspacing="0" border="0" style="width:100%;"><tr><td style="font-size:10px;color:#64748B;padding:2px 0;text-align:right;width:65px;font-weight:bold;">DATE</td><td style="font-size:12px;font-weight:bold;text-align:right;">{{DATE}}</td></tr><tr><td style="font-size:10px;color:#64748B;padding:2px 0;text-align:right;font-weight:bold;">STATUS</td><td style="font-size:12px;font-weight:bold;text-align:right;">{{STATUS}}</td></tr></table></td></tr></table><div style="background:#F8FAFC;border:1px solid #E2E8F0;padding:10px 12px;margin-bottom:14px;"><div style="font-size:9px;color:#64748B;font-weight:bold;margin-bottom:6px;">TASK DETAILS</div><table cellpadding="0" cellspacing="0" border="0" style="width:100%;"><tr><td style="font-size:10px;color:#64748B;padding:2px 0;width:100px;font-weight:bold;">Task Type</td><td style="font-size:12px;font-weight:bold;">{{TASK_TYPE}}</td></tr>{{NOTES_ROW}}{{PHOTOS_ROW}}</table></div><div style="font-size:9px;color:#64748B;font-weight:bold;margin-bottom:4px;">ITEM DETAILS</div><table width="100%" cellpadding="0" cellspacing="0" border="0" style="border:1px solid #E2E8F0;margin-bottom:16px;"><tr style="background:#E85D2D;"><th style="padding:5px 6px;font-size:9px;color:#fff;font-weight:bold;text-align:left;">Item ID</th><th style="padding:5px 6px;font-size:9px;color:#fff;font-weight:bold;text-align:center;width:30px;">Qty</th><th style="padding:5px 6px;font-size:9px;color:#fff;font-weight:bold;text-align:left;">Vendor</th><th style="padding:5px 6px;font-size:9px;color:#fff;font-weight:bold;text-align:left;">Description</th><th style="padding:5px 6px;font-size:9px;color:#fff;font-weight:bold;text-align:left;">Sidemark</th><th style="padding:5px 6px;font-size:9px;color:#fff;font-weight:bold;text-align:left;">Room</th></tr><tr><td style="padding:6px;font-size:11px;border-bottom:1px solid #E2E8F0;font-weight:bold;">{{ITEM_ID}}</td><td style="padding:6px;font-size:11px;border-bottom:1px solid #E2E8F0;text-align:center;">{{ITEM_QTY}}</td><td style="padding:6px;font-size:11px;border-bottom:1px solid #E2E8F0;">{{ITEM_VENDOR}}</td><td style="padding:6px;font-size:11px;border-bottom:1px solid #E2E8F0;">{{ITEM_DESC}}</td><td style="padding:6px;font-size:11px;border-bottom:1px solid #E2E8F0;">{{ITEM_SIDEMARK}}</td><td style="padding:6px;font-size:11px;border-bottom:1px solid #E2E8F0;">{{ITEM_ROOM}}</td></tr></table><div style="border:2px solid #1E293B;padding:14px;margin-bottom:14px;"><div style="font-size:11px;font-weight:bold;color:#1E293B;margin-bottom:10px;border-bottom:2px solid #E2E8F0;padding-bottom:5px;">WAREHOUSE USE ONLY</div><table width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td style="width:50%;padding-bottom:14px;"><div style="font-size:10px;font-weight:bold;color:#64748B;margin-bottom:4px;">Completed By</div><div style="border-bottom:1.5px solid #CBD5E1;height:22px;width:90%;"></div></td><td style="width:50%;padding-bottom:14px;"><div style="font-size:10px;font-weight:bold;color:#64748B;margin-bottom:4px;text-align:right;">Date</div><div style="border-bottom:1.5px solid #CBD5E1;height:22px;width:90%;margin-left:auto;"></div></td></tr></table><div style="margin-bottom:14px;"><div style="font-size:10px;font-weight:bold;color:#64748B;margin-bottom:6px;">Result</div>{{RESULT_OPTIONS_HTML}}</div><div><div style="font-size:10px;font-weight:bold;color:#64748B;margin-bottom:6px;">Notes</div><div style="border-bottom:1px solid #E2E8F0;height:18px;margin-bottom:6px;">&nbsp;</div><div style="border-bottom:1px solid #E2E8F0;height:18px;margin-bottom:6px;">&nbsp;</div><div style="border-bottom:1px solid #E2E8F0;height:18px;">&nbsp;</div></div></div><div style="text-align:center;font-size:9px;color:#94A3B8;border-top:1px solid #E2E8F0;padding-top:6px;">Stride Logistics &middot; 206-550-1848 &middot; whse@stridenw.com</div></div></body></html>';
     // v38.11.0: Source indicator — if using the template sheet, the footer is
     // whatever the template has. If using the hardcoded fallback, the footer
     // includes "[FALLBACK]" so Justin can tell at a glance which source was used.
