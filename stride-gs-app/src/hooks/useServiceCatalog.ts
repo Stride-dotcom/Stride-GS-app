@@ -15,6 +15,13 @@
  *                     so a row flagged show_as_delivery_service can be
  *                     fully configured from the Price List page.
  *                     Migration: 20260425030000_service_catalog_delivery_fields.
+ *
+ * v3 2026-04-25 PST — exposes syncService(id) so the Price List can run
+ *                     a manual Stax + QBO sync per row (or in bulk for
+ *                     unsynced rows). syncToExternalCatalogs now returns
+ *                     a structured ExternalSyncResult instead of void so
+ *                     callers can render per-leg success / failure
+ *                     indicators.
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { supabase } from '../lib/supabase';
@@ -281,7 +288,18 @@ function didExternalRelevantFieldsChange(
 
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL as string;
 
-async function syncToExternalCatalogs(service: CatalogService): Promise<void> {
+export interface ExternalSyncResult {
+  staxOk: boolean;
+  qbOk: boolean;
+  /** Non-fatal failure messages (one per failed leg). Empty when both legs succeeded. */
+  errors: string[];
+}
+
+async function syncToExternalCatalogs(service: CatalogService): Promise<ExternalSyncResult> {
+  const errors: string[] = [];
+  let staxOk = false;
+  let qbOk = false;
+
   // ── Stax (Edge Function) ──
   try {
     const accessToken = (await supabase.auth.getSession()).data.session?.access_token;
@@ -290,24 +308,28 @@ async function syncToExternalCatalogs(service: CatalogService): Promise<void> {
       // token (which the Edge Function rejects as 401 and pollutes logs).
       // Realtime / next admin action will retrigger sync once auth recovers.
       console.warn('[catalog-sync] Stax sync skipped: no active Supabase session');
-      return;
-    }
-    const resp = await fetch(`${SUPABASE_URL}/functions/v1/stax-catalog-sync`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${accessToken}`,
-      },
-      body: JSON.stringify({ serviceId: service.id }),
-    });
-    const result = await resp.json();
-    if (result.ok) {
-      console.log(`[catalog-sync] Stax ${result.action}: ${service.code} → ${result.stax_item_id}`);
+      errors.push('Stax: session expired');
     } else {
-      console.warn('[catalog-sync] Stax sync failed:', result.error);
+      const resp = await fetch(`${SUPABASE_URL}/functions/v1/stax-catalog-sync`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify({ serviceId: service.id }),
+      });
+      const result = await resp.json();
+      if (result.ok) {
+        console.log(`[catalog-sync] Stax ${result.action}: ${service.code} → ${result.stax_item_id}`);
+        staxOk = true;
+      } else {
+        console.warn('[catalog-sync] Stax sync failed:', result.error);
+        errors.push(`Stax: ${result.error ?? 'unknown error'}`);
+      }
     }
   } catch (err) {
     console.warn('[catalog-sync] Stax sync error (non-fatal):', err);
+    errors.push(`Stax: ${err instanceof Error ? err.message : String(err)}`);
   }
 
   // ── QBO (Apps Script) ──
@@ -320,10 +342,16 @@ async function syncToExternalCatalogs(service: CatalogService): Promise<void> {
     );
     if (result.ok) {
       console.log(`[catalog-sync] QBO ${result.data?.action}: ${service.code} → ${result.data?.qb_item_id}`);
+      qbOk = true;
+    } else {
+      errors.push(`QBO: ${result.error ?? 'unknown error'}`);
     }
   } catch (err) {
     console.warn('[catalog-sync] QBO sync error (non-fatal):', err);
+    errors.push(`QBO: ${err instanceof Error ? err.message : String(err)}`);
   }
+
+  return { staxOk, qbOk, errors };
 }
 
 // ─── Hook ─────────────────────────────────────────────────────────────────
@@ -337,6 +365,13 @@ export interface UseServiceCatalogResult {
   updateService: (id: string, updates: UpdateServiceInput) => Promise<CatalogService | null>;
   deleteService: (id: string) => Promise<boolean>;
   getAuditForService: (serviceId: string) => Promise<CatalogAuditEntry[]>;
+  /**
+   * Manually push one row to Stax + QBO. Surfaces a structured result so
+   * callers can show success / failure indicators per leg.
+   * Refetches the catalog on completion so the new stax_item_id /
+   * qb_item_id show up in read-mode badges without an extra round-trip.
+   */
+  syncService: (id: string) => Promise<ExternalSyncResult | null>;
 }
 
 export function useServiceCatalog(): UseServiceCatalogResult {
@@ -509,6 +544,20 @@ export function useServiceCatalog(): UseServiceCatalogResult {
     return true;
   }, []);
 
+  // ── Manual sync to Stax + QBO ──────────────────────────────────────────
+  const syncService = useCallback(async (id: string): Promise<ExternalSyncResult | null> => {
+    const target = services.find(s => s.id === id);
+    if (!target) {
+      setError('Service not found in local cache');
+      return null;
+    }
+    const result = await syncToExternalCatalogs(target);
+    // Even when only one leg succeeded the row's stax_item_id / qb_item_id
+    // may have been set, so refetch unconditionally to refresh the badges.
+    await refetch();
+    return result;
+  }, [services, refetch]);
+
   // ── Fetch audit for one service ────────────────────────────────────────
   const getAuditForService = useCallback(async (serviceId: string): Promise<CatalogAuditEntry[]> => {
     const { data, error: err } = await supabase
@@ -544,5 +593,6 @@ export function useServiceCatalog(): UseServiceCatalogResult {
     updateService,
     deleteService,
     getAuditForService,
-  }), [services, loading, error, refetch, createService, updateService, deleteService, getAuditForService]);
+    syncService,
+  }), [services, loading, error, refetch, createService, updateService, deleteService, getAuditForService, syncService]);
 }

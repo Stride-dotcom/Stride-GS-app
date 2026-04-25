@@ -11,13 +11,20 @@
  *                     even when billing=flat so admins can set per-class
  *                     dispatch minutes. Read-mode surfaces "Quote",
  *                     "Hidden" badges when relevant.
+ *
+ * v3 2026-04-25 PST — adds Stax + QB sync status badges (green dot when
+ *                     a stax_item_id / qb_item_id is set, gray when not)
+ *                     and an optional manual sync button (RefreshCw)
+ *                     that calls onSync(id) and refreshes the badges
+ *                     when the sync completes.
  */
 import { useEffect, useMemo, useState } from 'react';
-import { Pencil, Trash2, Clock, Truck } from 'lucide-react';
+import { Pencil, Trash2, Clock, Truck, RefreshCw } from 'lucide-react';
 import { theme } from '../../styles/theme';
 import type {
   CatalogService, UpdateServiceInput, ServiceCategory, ServiceBilling,
   ServiceUnit, AutoApplyRule, ServicePriority, DeliveryRateUnit,
+  ExternalSyncResult,
 } from '../../hooks/useServiceCatalog';
 
 const CATEGORIES: ServiceCategory[] = [
@@ -45,6 +52,8 @@ interface ServiceRowProps {
   onSave: (id: string, updates: UpdateServiceInput) => Promise<CatalogService | null>;
   onDelete: (id: string) => Promise<boolean>;
   onToggleActive: (id: string, active: boolean) => Promise<void>;
+  /** Optional — manual Stax + QBO sync. Read-mode shows a refresh button when present. */
+  onSync?: (id: string) => Promise<ExternalSyncResult | null>;
 }
 
 function fmtUSD(n: number | undefined): string {
@@ -60,7 +69,7 @@ function unitLabel(unit: CatalogService['unit']): string {
 }
 
 export function ServiceRow({
-  service, editing, onEditClick, onCancel, onSave, onDelete, onToggleActive,
+  service, editing, onEditClick, onCancel, onSave, onDelete, onToggleActive, onSync,
 }: ServiceRowProps) {
   const v2 = theme.v2;
 
@@ -68,6 +77,24 @@ export function ServiceRow({
   const [saving, setSaving] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [validationError, setValidationError] = useState<string | null>(null);
+  const [syncing, setSyncing] = useState(false);
+  const [syncFlash, setSyncFlash] = useState<{ kind: 'ok' | 'err'; msg: string } | null>(null);
+
+  const handleSyncClick = async () => {
+    if (!onSync || syncing) return;
+    setSyncing(true);
+    setSyncFlash(null);
+    const result = await onSync(service.id);
+    setSyncing(false);
+    if (!result) {
+      setSyncFlash({ kind: 'err', msg: 'Sync failed' });
+    } else if (result.errors.length === 0) {
+      setSyncFlash({ kind: 'ok', msg: 'Synced' });
+    } else {
+      setSyncFlash({ kind: 'err', msg: result.errors.join(' · ') });
+    }
+    window.setTimeout(() => setSyncFlash(null), 4000);
+  };
 
   // Reset draft + confirm state whenever the underlying service changes or
   // we re-enter edit mode.
@@ -539,14 +566,56 @@ export function ServiceRow({
             background: t.bg, color: t.color, textTransform: 'uppercase',
           }}>{t.label}</span>
         ))}
+        <SyncBadge label="Stax" synced={!!service.staxItemId} />
+        <SyncBadge label="QB"   synced={!!service.qbItemId} />
+        {syncFlash && (
+          <span
+            title={syncFlash.msg}
+            style={{
+              fontSize: 9, fontWeight: 600, letterSpacing: '0.5px',
+              padding: '2px 7px', borderRadius: v2.radius.badge,
+              background: syncFlash.kind === 'ok' ? 'rgba(74,138,92,0.15)' : 'rgba(180,90,90,0.12)',
+              color: syncFlash.kind === 'ok' ? '#4A8A5C' : '#B45A5A',
+              textTransform: 'uppercase',
+              maxWidth: 180, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+            }}
+          >
+            {syncFlash.kind === 'ok' ? 'Synced ✓' : 'Sync failed'}
+          </span>
+        )}
       </div>
 
-      {/* Active toggle + Edit */}
+      {/* Active toggle + Sync + Edit */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
         <ActiveToggle
           checked={service.active}
           onChange={v => { void onToggleActive(service.id, v); }}
         />
+        {onSync && (
+          <button
+            onClick={() => { void handleSyncClick(); }}
+            disabled={syncing}
+            title={syncing ? 'Syncing…' : 'Push this row to Stax + QuickBooks'}
+            style={{
+              display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+              width: 30, height: 28, borderRadius: v2.radius.button,
+              background: 'transparent',
+              border: `1px solid ${v2.colors.border}`,
+              color: syncing ? v2.colors.textMuted : v2.colors.textSecondary,
+              cursor: syncing ? 'not-allowed' : 'pointer', fontFamily: 'inherit',
+              padding: 0,
+            }}
+            onMouseEnter={e => { if (!syncing) e.currentTarget.style.background = v2.colors.bgPage; }}
+            onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}
+          >
+            <RefreshCw
+              size={12}
+              style={syncing ? { animation: 'service-row-spin 0.8s linear infinite' } : undefined}
+            />
+          </button>
+        )}
+        {/* Local keyframes — kept inline to avoid touching global stylesheets. */}
+        <style>{`@keyframes service-row-spin { to { transform: rotate(360deg); } }`}</style>
         <button
           onClick={onEditClick}
           style={{
@@ -565,6 +634,29 @@ export function ServiceRow({
         </button>
       </div>
     </div>
+  );
+}
+
+function SyncBadge({ label, synced }: { label: string; synced: boolean }) {
+  const v2 = theme.v2;
+  return (
+    <span
+      title={synced ? `${label} catalog: synced` : `${label} catalog: not synced`}
+      style={{
+        display: 'inline-flex', alignItems: 'center', gap: 4,
+        fontSize: 9, fontWeight: 700, letterSpacing: '0.5px',
+        padding: '2px 7px', borderRadius: v2.radius.badge,
+        background: synced ? 'rgba(74,138,92,0.12)' : 'rgba(140,140,140,0.10)',
+        color: synced ? '#4A8A5C' : '#999',
+        textTransform: 'uppercase',
+      }}
+    >
+      <span style={{
+        width: 6, height: 6, borderRadius: '50%',
+        background: synced ? '#4A8A5C' : '#B0B0B0',
+      }} />
+      {label}
+    </span>
   );
 }
 
