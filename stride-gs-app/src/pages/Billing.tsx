@@ -1359,6 +1359,11 @@ export function Billing() {
       },
       onProgress: (done, total) => setInvoiceBatch(prev => ({ ...prev, processed: done, total })),
       preflightSkipped,
+      // v38.122.0 — invoice creates are mostly Drive/email I/O on the GAS
+      // side; running 3 in parallel typically cuts wall time ~2-3x with no
+      // backend contention. Increase cautiously — Apps Script can serialize
+      // doPost calls under load.
+      concurrency: 3,
     });
     setInvoiceBatch({ state: 'complete', total: invokable.length, processed: invokable.length, succeeded: batchResult.succeeded, failed: batchResult.failed });
     setInvoiceBulkResult(batchResult);

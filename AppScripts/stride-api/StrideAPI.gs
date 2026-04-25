@@ -1,4 +1,14 @@
 /* ===================================================
+   StrideAPI.gs — v38.122.0 — 2026-04-25 PST — handleCreateInvoice_ stamps today's PST date + returns it in response
+   v38.122.0: handleCreateInvoice_ invoice date now formats explicitly in
+              "America/Los_Angeles" instead of Session.getScriptTimeZone(), so
+              the date stamped on Billing_Ledger / invoice PDF is always
+              today's date in PST regardless of who owns the script. Also
+              now includes invoiceDate in the JSON response, letting the
+              React UI render the just-created invoice's date immediately
+              without waiting for a billing refetch round-trip.
+   =================================================== */
+/* ===================================================
    StrideAPI.gs — v38.119.0 — 2026-04-24 07:45 PM PST — Intake alert resolves {{STAFF_EMAILS}} token
    v38.119.0: handleNotifyIntakeSubmitted_ now expands {{STAFF_EMAILS}} in the
               INTAKE_SUBMITTED template's recipients column (same convention as
@@ -19027,8 +19037,11 @@ function handleCreateInvoice_(payload) {
   var invNo = api_nextInvoiceNo_(masterRpcUrl, masterRpcToken);
   if (!invNo) return errorResponse_("Master RPC returned no invoice number", "RPC_ERROR");
 
+  // v38.122.0 — Invoice date: today, in PST regardless of script timezone.
+  // Previously relied on Session.getScriptTimeZone(); explicit America/Los_Angeles
+  // guarantees consistent invoice dating even if the script timezone drifts.
   var invDate    = new Date();
-  var invDateStr = Utilities.formatDate(invDate, Session.getScriptTimeZone(), "MM/dd/yyyy");
+  var invDateStr = Utilities.formatDate(invDate, "America/Los_Angeles", "MM/dd/yyyy");
 
   // Get payment terms from client Settings
   var paymentTerms = "Due upon receipt";
@@ -19250,6 +19263,7 @@ function handleCreateInvoice_(payload) {
   return jsonResponse_({
     success:       true,
     invoiceNo:     invNo,
+    invoiceDate:   invDateStr,
     invoiceUrl:    invoiceUrl,
     emailStatus:   emailStatus,
     grandTotal:    grandTotal,
