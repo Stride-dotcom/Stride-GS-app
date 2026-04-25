@@ -18,6 +18,7 @@ import {
   Settings2, RefreshCw,
 } from 'lucide-react';
 import { useVirtualRows } from '../hooks/useVirtualRows';
+import { useScrollRestoration } from '../hooks/useScrollRestoration';
 import { useClientFilterUrlSync } from '../hooks/useClientFilterUrlSync';
 import { useClientFilterPersisted } from '../hooks/useClientFilterPersisted';
 import { theme } from '../styles/theme';
@@ -513,6 +514,8 @@ export function Tasks() {
   });
 
   const { containerRef, virtualRows, rows: allRows, totalHeight } = useVirtualRows(table);
+  // Restore scroll position when navigating back from /tasks/:id.
+  useScrollRestoration('tasks', containerRef, allRows.length > 0);
 
   const selCount = Object.keys(rowSel).length;
   useEffect(() => { const h = (e: MouseEvent) => { if (menuRef.current && !menuRef.current.contains(e.target as Node)) setShowCols(false); }; document.addEventListener('mousedown', h); return () => document.removeEventListener('mousedown', h); }, []);

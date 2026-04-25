@@ -99,6 +99,9 @@ UI components: FloatingActionMenu, WriteButton, BatchGuard, ActionTooltip, Batch
 
 ## Recent Changes (2026-04-25, session 80)
 
+### Scroll position restored on back-navigation
+- New `src/hooks/useScrollRestoration.ts` — saves a scrollable container's `scrollTop` to `sessionStorage` (per-page key) on scroll (rAF-throttled). Restores once `isReady` flips true so the virtualizer has measured the full content height. Wired into all 5 list pages (Inventory / Tasks / Repairs / WillCalls / Shipments). Closes the loop on back-nav: dropdown + filters + sort + scroll position all restore.
+
 ### Client dropdown persists across navigation
 - New `src/hooks/useClientFilterPersisted.ts` — drop-in replacement for `useState<string[]>([])` that persists each list page's client dropdown selection. Initial state precedence: URL `?client=` (resolved via apiClients, wins for email deep-links) → localStorage `stride_client_filter_<pageKey>` (last-used scope) → empty array (falls through to the page's role-default effect). Writes to localStorage on every change.
 - Wired into all 5 list pages: Inventory / Tasks / Repairs / WillCalls / Shipments. Fixes the "click into an entity, hit back, dropdown is reset to all clients" pain. Sort + status filter + column visibility were already persisted via `useTablePreferences`; this closes the gap on the dropdown that was still useState-only.
