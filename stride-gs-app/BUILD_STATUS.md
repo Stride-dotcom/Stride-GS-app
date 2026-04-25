@@ -99,6 +99,14 @@ UI components: FloatingActionMenu, WriteButton, BatchGuard, ActionTooltip, Batch
 
 ## Recent Changes (2026-04-24, this session)
 
+### Unified order status + edge function repairs (2026-04-24)
+- Migration `20260425020000_unified_order_status.sql` — expanded dt_statuses with 7 new statuses (pending_review, rejected, push_failed, in_transit, billing_review, in_ledger, collected), updated display_order, added push_error column
+- `dt-push-order` v13 — added `<custom_field_2>` deep link to DT XML payload (`supabase/functions/dt-push-order/index.ts`)
+- `dt-webhook-ingest` v3 — corrected status ID mapping, added auto-Collected logic with error handling, error handling on quarantine/mark-processed (`supabase/functions/dt-webhook-ingest/index.ts`)
+- `dt-sync-statuses` v4 — added exception+billing to terminal filter, paid_at in SELECT, same-status guard, auto-Collected logic (`supabase/functions/dt-sync-statuses/index.ts`)
+- Created CODE_MAP.md — comprehensive feature-to-file index for builder onboarding
+- Added doc update instructions to CLAUDE.md
+
 ### Stax + QBO catalog sync
 - New Edge Function `stax-catalog-sync` deployed — syncs service_catalog items to Stax on create/update
 - QBO sync via Apps Script `handleQboSyncCatalogItem_` — creates/updates QBO Service items

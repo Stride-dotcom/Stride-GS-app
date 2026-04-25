@@ -41,6 +41,20 @@
 
 ---
 
+## Doc Updates (end of session)
+
+Every builder session must update these docs before reporting done:
+
+**CODE_MAP.md** — Append entries for any new files created (pages, hooks, components, edge functions, migrations). If an existing feature area gained new files, add them to the existing section. Format: feature area → layer → file path.
+
+**BUILD_STATUS.md** — Update "Recent Changes" with a summary of what was built/fixed this session. Include file locations so future builders can find the code. Update version numbers in the "Current Versions" table if any system version changed. Check off completed items in "Pending User Actions" if resolved.
+
+**FEATURE_BACKLOG.md** — Check off any features that were completed this session. Add any new feature requests discussed with Justin that weren't built yet.
+
+**Session_History.md** (`_archive/Docs/Archive/`) — Add a one-liner for this session: date + compressed summary of everything touched.
+
+---
+
 ## Build Process
 
 Every change must go through this sequence before being shipped:
@@ -152,6 +166,7 @@ Supabase              →  read cache mirror + DT delivery + messaging + audit l
 
 | File | When to read |
 |---|---|
+| `CODE_MAP.md` | Feature → file location map. Read FIRST when debugging or building on existing features |
 | `BUILD_STATUS.md` | What's built, what changed recently, current versions |
 | `FEATURE_BACKLOG.md` | Features requested but not yet built |
 | `_archive/Docs/Entity_Page_Design_Spec.md` | Entity page redesign visual spec (locked) |
