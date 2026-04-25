@@ -48,6 +48,7 @@ function toPaymentInvoice(inv: StaxInvoice): PaymentInvoice {
     dueDate: inv.dueDate,
     status: inv.status,
     created: inv.createdAt,
+    lineItemsJson: inv.lineItemsJson,
   };
 }
 
