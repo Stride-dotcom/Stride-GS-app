@@ -174,12 +174,19 @@ interface Props {
   onSubmit?: (data: { dtOrderId: string; dtIdentifier: string; reviewStatus: string }) => void;
   preSelectedItemIds?: string[];
   liveItems?: LiveItem[];
-  /** When set, the modal opens in edit-an-existing-draft mode. Loads
+  /** When set, the modal opens in edit-an-existing-order mode. Loads
    *  the dt_orders row + its dt_order_items, prefills every form
-   *  field. Save Draft updates the row in place; Submit for Review
-   *  promotes it (replaces DRAFT-xxx with a real generated number +
-   *  flips review_status). */
-  editDraftId?: string | null;
+   *  field.
+   *
+   *  Behavior depends on the loaded row's review_status:
+   *    • 'draft' → Save Draft updates in place; Submit for Review
+   *      "promotes" the row (replaces DRAFT-xxx with a real generated
+   *      order number, flips review_status to pending_review/approved).
+   *    • anything else → Save Changes updates the row in place
+   *      (identifier + review_status preserved). Save Draft is
+   *      disabled (you can't downgrade a real order to a draft).
+   */
+  editOrderId?: string | null;
 }
 
 // A free-text item entered on a pickup form (not linked to inventory)
@@ -449,7 +456,7 @@ export function CreateDeliveryOrderModal({
   onSubmit,
   preSelectedItemIds = [],
   liveItems: liveItemsProp = [],
-  editDraftId = null,
+  editOrderId = null,
 }: Props) {
   const { user } = useAuth();
   const isStaff = user?.role === 'staff' || user?.role === 'admin';
@@ -1007,12 +1014,18 @@ export function CreateDeliveryOrderModal({
     return orderNum;
   };
 
-  // ── Draft state ────────────────────────────────────────────────────────
-  // Tracks the dt_orders.id we're editing. Set when the modal opens with
-  // editDraftId (load existing) OR after the first successful Save Draft
-  // on a new modal (so subsequent saves UPDATE instead of re-INSERT a
-  // second draft row).
-  const editingDraftRowIdRef = useRef<string | null>(editDraftId ?? null);
+  // ── Edit-existing-order state ──────────────────────────────────────────
+  // Tracks the dt_orders.id we're editing. Set when the modal opens
+  // with editOrderId (load existing — draft OR real order) OR after
+  // the first successful Save Draft on a new modal (so subsequent
+  // saves UPDATE instead of re-INSERTing a second row).
+  const editingDraftRowIdRef = useRef<string | null>(editOrderId ?? null);
+  // The review_status of the loaded row at prefill time. Drives the
+  // submit branch (draft → promote with new identifier + status flip;
+  // anything else → save-changes UPDATE preserving identifier + status)
+  // and the Save Draft button enabled state.
+  const originalReviewStatusRef = useRef<string | null>(null);
+  const [, forceUpdateForRefs] = useState(0);  // tick when refs change so labels re-render
   const [savingDraft, setSavingDraft] = useState(false);
   const [draftSavedAt, setDraftSavedAt] = useState<Date | null>(null);
   // Generates a DRAFT-<short-id> placeholder identifier. Random rather
@@ -1024,26 +1037,30 @@ export function CreateDeliveryOrderModal({
     return suffix ? `DRAFT-${rand}-${suffix}` : `DRAFT-${rand}`;
   };
 
-  // Prefill the form from an existing draft when the modal opens with
-  // editDraftId. Loads dt_orders + dt_order_items + the auxiliary
-  // selections (selectedAccessorials, selectedIds), then overwrites the
-  // freshly-mounted state. Best-effort — on failure shows an error
-  // banner; user can either retry by reopening or cancel.
+  // Prefill the form from an existing order (draft OR real) when the
+  // modal opens with editOrderId. Loads dt_orders + dt_order_items +
+  // the auxiliary selections (selectedAccessorials, selectedIds), then
+  // overwrites the freshly-mounted state. Best-effort — on failure
+  // shows an error banner; user can either retry by reopening or cancel.
   useEffect(() => {
-    if (!editDraftId) return;
+    if (!editOrderId) return;
     let cancelled = false;
     (async () => {
       const { data: row, error } = await supabase
         .from('dt_orders')
         .select('*, dt_order_items(*)')
-        .eq('id', editDraftId)
+        .eq('id', editOrderId)
         .maybeSingle();
       if (cancelled) return;
       if (error || !row) {
-        setSubmitError(`Could not load draft: ${error?.message || 'not found'}`);
+        setSubmitError(`Could not load order: ${error?.message || 'not found'}`);
         return;
       }
       const r = row as Record<string, unknown>;
+      // Capture the loaded row's review_status — drives whether
+      // submit promotes (draft → real order) or just saves changes.
+      originalReviewStatusRef.current = (r.review_status as string) || null;
+      forceUpdateForRefs(t => t + 1);
       // Restore high-level mode + source first so dependent UI mounts.
       const ot = (r.order_type as string) || 'delivery';
       setMode(ot === 'pickup' || ot === 'delivery' || ot === 'service_only' || ot === 'pickup_and_delivery' ? ot : 'delivery');
@@ -1101,7 +1118,7 @@ export function CreateDeliveryOrderModal({
     })();
     return () => { cancelled = true; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editDraftId]);
+  }, [editOrderId]);
 
   // ── Save Draft ─────────────────────────────────────────────────────────
   // Persists the in-progress order as a dt_orders row with
@@ -1115,7 +1132,15 @@ export function CreateDeliveryOrderModal({
   // P+D mode is intentionally not supported here yet — it requires two
   // linked rows; a future iteration will handle the linked-pair save.
   // The Save Draft button is disabled in P+D mode with a tooltip.
-  const canSaveDraft = !!clientSheetId && mode !== 'pickup_and_delivery';
+  // Also disabled when editing a non-draft order — you can't downgrade
+  // a real submitted/approved order back to a draft. Use Save Changes
+  // (the primary submit button) instead.
+  const isEditingRealOrder = !!editOrderId
+    && originalReviewStatusRef.current != null
+    && originalReviewStatusRef.current !== 'draft';
+  const canSaveDraft = !!clientSheetId
+    && mode !== 'pickup_and_delivery'
+    && !isEditingRealOrder;
   const handleSaveDraft = async () => {
     if (!canSaveDraft || savingDraft) return;
     setSavingDraft(true);
@@ -1244,14 +1269,19 @@ export function CreateDeliveryOrderModal({
     setSubmitting(true);
     setSubmitError(null);
 
-    // Promote-an-existing-draft path. When the modal was opened on a
-    // draft (or auto-saved one mid-build), we UPDATE the existing row
-    // instead of INSERTing a new one — replaces the DRAFT-xxx
-    // placeholder identifier with a real generated number and flips
-    // review_status to pending_review (or approved for admin). Pickup+
-    // Delivery isn't supported for drafts yet, so this branch only
-    // runs for single-leg modes.
+    // Edit-existing-row path. When the modal was opened on an existing
+    // draft (or auto-saved one mid-build), or on a real order via the
+    // OrderPage "Edit Full Order" button, we UPDATE the existing row
+    // instead of INSERTing a new one. Two sub-cases:
+    //   • original status = 'draft' → PROMOTE: replace DRAFT-xxx with
+    //     a real generated identifier + flip review_status to
+    //     pending_review (or approved for admin).
+    //   • original status = anything else → SAVE CHANGES: keep
+    //     identifier + review_status, just update the field values.
+    // Pickup+Delivery edits aren't supported here yet (linked-pair
+    // update is more complex; deferred).
     if (editingDraftRowIdRef.current && mode !== 'pickup_and_delivery') {
+      const wasDraft = originalReviewStatusRef.current === 'draft' || !originalReviewStatusRef.current;
       try {
         const { data: authData2 } = await supabase.auth.getUser();
         const authUid2 = authData2?.user?.id || null;
@@ -1267,10 +1297,7 @@ export function CreateDeliveryOrderModal({
           name: deliveryContactName, address: deliveryAddress, city: deliveryCity, state: deliveryState,
           zip: deliveryZip, phone: deliveryPhone, phone2: deliveryPhone2, email: deliveryEmail,
         };
-        const realIdent = await generateOrderNumber(mode === 'pickup' ? 'P' : undefined);
-        const promotePayload: Record<string, unknown> = {
-          dt_identifier: realIdent,
-          review_status: user?.role === 'admin' ? 'approved' : 'pending_review',
+        const editPayload: Record<string, unknown> = {
           tenant_id: clientSheetId,
           timezone: 'America/Los_Angeles',
           local_service_date: serviceDate || null,
@@ -1302,17 +1329,24 @@ export function CreateDeliveryOrderModal({
           coverage_option_id: selectedCoverage?.id ?? null,
           declared_value: selectedCoverage?.calcType === 'percent_declared' ? (parseFloat(declaredValue) || null) : null,
           coverage_charge: coverageCharge || 0,
-          // Stamp who promoted it (may differ from original draft creator)
           updated_by_user: authUid2,
         };
-        const { data: promoted, error: promoteErr } = await supabase
+        // Only the promote branch reassigns the identifier + bumps
+        // review_status. Save-changes leaves both alone — preserves
+        // pushed_to_dt_at semantics, audit history, etc.
+        if (wasDraft) {
+          editPayload.dt_identifier = await generateOrderNumber(mode === 'pickup' ? 'P' : undefined);
+          editPayload.review_status = user?.role === 'admin' ? 'approved' : 'pending_review';
+        }
+        const { data: saved, error: saveErr } = await supabase
           .from('dt_orders')
-          .update(promotePayload)
+          .update(editPayload)
           .eq('id', editingDraftRowIdRef.current)
           .select('id, dt_identifier, review_status')
           .single();
-        if (promoteErr || !promoted) throw new Error(`Draft promote failed: ${promoteErr?.message || 'no row returned'}`);
-        // Refresh items
+        if (saveErr || !saved) throw new Error(`${wasDraft ? 'Draft promote' : 'Order save'} failed: ${saveErr?.message || 'no row returned'}`);
+        // Refresh items (delete + reinsert is simpler than diff for
+        // the typical small item count).
         await supabase.from('dt_order_items').delete().eq('dt_order_id', editingDraftRowIdRef.current);
         if (mode === 'delivery' && itemsSource === 'warehouse' && selectedInvItems.length > 0) {
           const itemRows = selectedInvItems.map(i => ({
@@ -1326,11 +1360,11 @@ export function CreateDeliveryOrderModal({
           }));
           await supabase.from('dt_order_items').insert(itemRows);
         }
-        const promotedRow = promoted as { id: string; dt_identifier: string; review_status: string };
+        const savedRow = saved as { id: string; dt_identifier: string; review_status: string };
         onSubmit?.({
-          dtOrderId: promotedRow.id,
-          dtIdentifier: promotedRow.dt_identifier,
-          reviewStatus: promotedRow.review_status,
+          dtOrderId: savedRow.id,
+          dtIdentifier: savedRow.dt_identifier,
+          reviewStatus: savedRow.review_status,
         });
         onClose();
         return;
@@ -2828,9 +2862,11 @@ export function CreateDeliveryOrderModal({
             )}
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
-            {/* Discard Draft — only when editing an existing draft.
-                Admin/staff only. Hard-deletes the row + its items. */}
-            {editingDraftRowIdRef.current && isStaff && (
+            {/* Discard Draft — only when editing an existing draft
+                (NOT a real order). Admin/staff only. Hard-deletes the
+                row + its items. Real orders should be Voided through
+                their detail page, not deleted. */}
+            {editingDraftRowIdRef.current && isStaff && !isEditingRealOrder && (
               <button
                 type="button"
                 onClick={async () => {
@@ -2878,9 +2914,11 @@ export function CreateDeliveryOrderModal({
                   ? 'Pick a client first'
                   : !canSaveDraft && mode === 'pickup_and_delivery'
                     ? 'Pickup+Delivery drafts not yet supported — submit or cancel'
-                    : draftSavedAt
-                      ? `Last saved ${draftSavedAt.toLocaleTimeString()}`
-                      : 'Save what you have so far. Pick it back up later from the Orders → Drafts list.'
+                    : !canSaveDraft && isEditingRealOrder
+                      ? 'This is a real order, not a draft — use Save Changes instead. (Operators can\'t downgrade real orders back to drafts.)'
+                      : draftSavedAt
+                        ? `Last saved ${draftSavedAt.toLocaleTimeString()}`
+                        : 'Save what you have so far. Pick it back up later from the Orders → Drafts list.'
               }
               style={{
                 padding: '9px 18px', borderRadius: 8,
@@ -2905,7 +2943,13 @@ export function CreateDeliveryOrderModal({
             <WriteButton
               onClick={handleSubmit}
               disabled={!canSubmit}
-              label={editingDraftRowIdRef.current ? 'Promote to Review' : 'Submit for Review'}
+              label={
+                !editingDraftRowIdRef.current
+                  ? 'Submit for Review'
+                  : isEditingRealOrder
+                    ? 'Save Changes'
+                    : 'Promote to Review'
+              }
               variant="primary"
               style={{
                 padding: '9px 24px', borderRadius: 8,

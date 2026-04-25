@@ -22,6 +22,7 @@ import {
 } from '../components/shared/EntityPage';
 import { EntityHistory } from '../components/shared/EntityHistory';
 import { supabase } from '../lib/supabase';
+import { CreateDeliveryOrderModal } from '../components/shared/CreateDeliveryOrderModal';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -464,6 +465,17 @@ export function OrderPage() {
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
 
+  // Phase A — Edit Full Order: opens the same form the create flow uses
+  // (CreateDeliveryOrderModal in editOrderId mode). The detail page's
+  // inline Edit covers the common fields fast; the full-form modal is
+  // for everything else (mode change, items, accessorials, coverage).
+  const [showFullEditModal, setShowFullEditModal] = useState(false);
+  // Push-to-DT state — wires the existing dt-push-order Edge Function
+  // to the detail page footer so reviewers don't have to navigate to
+  // the Review queue.
+  const [pushingDt, setPushingDt] = useState(false);
+  const [pushDtError, setPushDtError] = useState<string | null>(null);
+
   useEffect(() => {
     if (order && !editing) setEdit(orderToEdit(order));
   }, [order, editing]);
@@ -617,6 +629,16 @@ export function OrderPage() {
 
   const footerContent = canReview && !editing ? (
     <>
+      {/* Edit Full Order — opens the create-order modal in edit mode
+          so the operator can change anything that the inline Edit
+          buttons don't cover (mode, items, accessorials, coverage,
+          billing method, service time, etc.). Same form the create
+          flow uses; one source of truth. */}
+      <EPFooterButton
+        label="Edit Full Order"
+        variant="secondary"
+        onClick={() => setShowFullEditModal(true)}
+      />
       {(order.reviewStatus === 'pending_review' || order.reviewStatus === 'revision_requested') && (
         <>
           <EPFooterButton
@@ -642,7 +664,33 @@ export function OrderPage() {
         </>
       )}
       {order.reviewStatus === 'approved' && !order.pushedToDtAt && (
-        <EPFooterButton label="Push to DT" variant="primary" onClick={() => { /* Phase 1c — DT push wired via Edge Function */ }} />
+        <EPFooterButton
+          label={pushingDt ? 'Pushing…' : 'Push to DT'}
+          variant="primary"
+          onClick={async () => {
+            // Reviewers can push from the detail page now (was Review
+            // tab only). Calls the dt-push-order Edge Function which
+            // owns the XML build + DT API call + audit log.
+            if (pushingDt) return;
+            setPushingDt(true);
+            setPushDtError(null);
+            try {
+              const { data, error: invokeErr } = await supabase.functions.invoke('dt-push-order', {
+                body: { orderId: order.id },
+              });
+              if (invokeErr) throw new Error(invokeErr.message);
+              const res = data as { ok?: boolean; error?: string } | null;
+              if (!res?.ok) throw new Error(res?.error || 'DT push failed');
+              const fresh = await fetchDtOrderByIdFromSupabase(order.id);
+              if (fresh) setLocalOrder(fresh);
+              refetch();
+            } catch (e) {
+              setPushDtError(e instanceof Error ? e.message : String(e));
+            } finally {
+              setPushingDt(false);
+            }
+          }}
+        />
       )}
     </>
   ) : null;
@@ -650,14 +698,45 @@ export function OrderPage() {
   const hasFooter = footerContent !== null && React.Children.count(footerContent) > 0;
 
   return (
-    <EntityPage
-      entityLabel="ORDER"
-      entityId={order.dtIdentifier || order.id.slice(0, 8).toUpperCase()}
-      statusBadge={statusBadge}
-      clientName={order.clientName || undefined}
-      tabs={tabs}
-      initialTabId="details"
-      footer={hasFooter ? footerContent : undefined}
-    />
+    <>
+      {pushDtError && (
+        <div role="alert" style={{
+          position: 'fixed', top: 16, left: '50%', transform: 'translateX(-50%)',
+          zIndex: 1100, padding: '10px 16px', background: '#FEF2F2',
+          border: '1px solid #FCA5A5', color: '#991B1B', borderRadius: 10,
+          fontSize: 13, maxWidth: 640, boxShadow: '0 8px 24px rgba(0,0,0,0.15)',
+        }}>
+          DT push failed: {pushDtError}
+          <button
+            onClick={() => setPushDtError(null)}
+            style={{ marginLeft: 12, background: 'none', border: 'none', cursor: 'pointer', color: '#991B1B', fontWeight: 700 }}
+          >×</button>
+        </div>
+      )}
+      <EntityPage
+        entityLabel="ORDER"
+        entityId={order.dtIdentifier || order.id.slice(0, 8).toUpperCase()}
+        statusBadge={statusBadge}
+        clientName={order.clientName || undefined}
+        tabs={tabs}
+        initialTabId="details"
+        footer={hasFooter ? footerContent : undefined}
+      />
+      {showFullEditModal && (
+        <CreateDeliveryOrderModal
+          editOrderId={order.id}
+          onClose={() => setShowFullEditModal(false)}
+          onSubmit={async () => {
+            setShowFullEditModal(false);
+            // Refetch the order so the page reflects whatever changed
+            // in the modal (status flip, identifier replacement on
+            // promote, fields, items, accessorials, coverage, etc.).
+            const fresh = await fetchDtOrderByIdFromSupabase(order.id);
+            if (fresh) setLocalOrder(fresh);
+            refetch();
+          }}
+        />
+      )}
+    </>
   );
 }

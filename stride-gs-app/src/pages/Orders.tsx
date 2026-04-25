@@ -127,7 +127,7 @@ export function Orders() {
   // loads the dt_orders row + items into all the form fields. Cleared
   // on modal close so the next "+ New Delivery Order" button click
   // gets a fresh blank form.
-  const [editDraftId, setEditDraftId] = useState<string | null>(null);
+  const [editOrderId, setEditOrderId] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [syncingDt, setSyncingDt] = useState(false);
   const [syncResult, setSyncResult] = useState<string | null>(null);
@@ -574,7 +574,7 @@ export function Orders() {
                             // up where they left off. Real orders go
                             // to the standard detail page.
                             if (row.original.reviewStatus === 'draft') {
-                              setEditDraftId(row.original.id);
+                              setEditOrderId(row.original.id);
                               setShowCreateModal(true);
                             } else {
                               navigate(`/orders/${row.original.id}`);
@@ -611,11 +611,11 @@ export function Orders() {
       {/* Create / edit delivery order modal */}
       {showCreateModal && (
         <CreateDeliveryOrderModal
-          editDraftId={editDraftId}
-          onClose={() => { setShowCreateModal(false); setEditDraftId(null); }}
+          editOrderId={editOrderId}
+          onClose={() => { setShowCreateModal(false); setEditOrderId(null); }}
           onSubmit={() => {
             setShowCreateModal(false);
-            setEditDraftId(null);
+            setEditOrderId(null);
             refetch();
             if (canReview) setActiveTab('review');
           }}
