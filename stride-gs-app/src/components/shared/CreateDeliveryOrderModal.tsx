@@ -34,6 +34,7 @@ import { useInventory } from '../../hooks/useInventory';
 import {
   fetchDeliveryZone,
   fetchDeliveryAccessorials,
+  fetchItemClassMinutes,
   type DeliveryZone,
   type DeliveryAccessorial,
 } from '../../lib/supabaseQueries';
@@ -640,23 +641,33 @@ export function CreateDeliveryOrderModal({
 
   // ── Accessorials (role-filtered) ───────────────────────────────────────
   const [accessorials, setAccessorials] = useState<DeliveryAccessorial[]>([]);
+  const [allAccessorials, setAllAccessorials] = useState<DeliveryAccessorial[]>([]);
   const [selectedAccessorials, setSelectedAccessorials] = useState<Map<string, SelectedAccessorial>>(new Map());
 
   useEffect(() => {
     fetchDeliveryAccessorials().then(data => {
       if (!data) return;
-      const filtered = data
-        .filter(a => a.code !== 'EXTRA_ITEM')           // auto-computed
-        .filter(a => isStaff || a.visibleToClient);     // role gate
+      const base = data.filter(a => a.code !== 'EXTRA_ITEM'); // auto-computed
+      setAllAccessorials(base); // admin can add any
+      const filtered = base
+        .filter(a => a.availableForDelivery)             // delivery dropdown gate
+        .filter(a => isStaff || a.visibleToClient);      // role gate
       setAccessorials(filtered);
     });
   }, [isStaff]);
 
-  const toggleAccessorial = (acc: DeliveryAccessorial, quantity: number = 1) => {
+  // ── Item class service time defaults ──────────────────────────────────
+  const [classMinutesMap, setClassMinutesMap] = useState<Record<string, number>>({});
+  useEffect(() => { fetchItemClassMinutes().then(setClassMinutesMap); }, []);
+
+  const toggleAccessorial = (acc: DeliveryAccessorial, quantity: number = 1, forceRemove?: boolean) => {
     setSelectedAccessorials(prev => {
       const n = new Map(prev);
-      if (n.has(acc.code) && quantity === 0) {
+      if (forceRemove || (n.has(acc.code) && quantity <= 0)) {
         n.delete(acc.code);
+      } else if (acc.quoteRequired) {
+        // Quote-required accessorials: $0 subtotal, added for tracking
+        n.set(acc.code, { code: acc.code, quantity, subtotal: 0 });
       } else if (acc.rate != null) {
         let subtotal = 0;
         if (acc.rateUnit === 'flat' || acc.rateUnit === 'plus_base') subtotal = acc.rate;
@@ -707,6 +718,51 @@ export function CreateDeliveryOrderModal({
   }, [baseFee, pickupLegFee, extraItemsFee, accessorialsTotal]);
 
   const isCallForQuote = zipForPricing.length === 5 && zone && zone.baseRate == null;
+
+  // ── Service time calculation ──────────────────────────────────────────
+  const [serviceTimeOverride, setServiceTimeOverride] = useState<number | null>(null);
+
+  // Auto-calc service time: sum item class minutes + accessorial service minutes
+  const calculatedServiceTime = useMemo(() => {
+    let total = 0;
+    // Item class minutes
+    if (mode === 'delivery' && itemsSource === 'warehouse') {
+      for (const item of selectedInvItems) {
+        const cls = item.itemClass?.toUpperCase() || '';
+        const qty = Number(item.qty) || 1;
+        total += (classMinutesMap[cls] || 0) * qty;
+      }
+    } else if (mode !== 'service_only') {
+      // Pickup / free-text items — use Medium (10 min) as fallback per item
+      for (const item of pickupFreeItems) {
+        if (!item.description.trim()) continue;
+        const qty = Math.max(1, Number(item.quantity) || 1);
+        total += (classMinutesMap['M'] || 10) * qty;
+      }
+    }
+    // Accessorial service minutes
+    for (const [code, sel] of selectedAccessorials) {
+      const acc = accessorials.find(a => a.code === code) || allAccessorials.find(a => a.code === code);
+      if (acc && !acc.quoteRequired) {
+        total += acc.serviceMinutes * sel.quantity;
+      }
+    }
+    return total;
+  }, [mode, itemsSource, selectedInvItems, pickupFreeItems, selectedAccessorials, classMinutesMap, accessorials, allAccessorials]);
+
+  const effectiveServiceTime = serviceTimeOverride ?? calculatedServiceTime;
+
+  // Total volume (cubic feet)
+  const totalVolume = useMemo(() => {
+    if (mode === 'delivery' && itemsSource === 'warehouse') {
+      return selectedInvItems.reduce((sum, i) => {
+        const cuFt = classToCuFt(i.itemClass);
+        const qty = Number(i.qty) || 1;
+        return sum + (cuFt != null ? cuFt * qty : 0);
+      }, 0);
+    }
+    return 0;
+  }, [mode, itemsSource, selectedInvItems]);
 
   // ── Validation ─────────────────────────────────────────────────────────
   const canSubmit = useMemo(() => {
@@ -802,6 +858,7 @@ export function CreateDeliveryOrderModal({
       created_by_user: authUid,
       created_by_role: user?.role || 'client',
       billing_method: billingMethod,
+      service_time_minutes: effectiveServiceTime || null,
       // status_id intentionally omitted — app-created orders have no DT status
       // until they are approved and pushed to DT via the dt-push-order Edge Function.
     };
@@ -1663,7 +1720,7 @@ export function CreateDeliveryOrderModal({
                         <input
                           type="checkbox"
                           checked={selected}
-                          onChange={() => toggleAccessorial(acc, needsQuantity ? (current?.quantity || 1) : 1)}
+                          onChange={() => selected ? toggleAccessorial(acc, 1, true) : toggleAccessorial(acc, needsQuantity ? 1 : 1)}
                         />
                         <div style={{ flex: 1 }}>
                           <div style={{ fontSize: 13, fontWeight: 600, display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -1673,7 +1730,11 @@ export function CreateDeliveryOrderModal({
                                 Staff
                               </span>
                             )}
-                            {acc.rate != null && (
+                            {acc.quoteRequired ? (
+                              <span style={{ color: '#B45309', fontWeight: 600, fontStyle: 'italic', marginLeft: 'auto', fontSize: 12 }}>
+                                Quote Required
+                              </span>
+                            ) : acc.rate != null ? (
                               <span style={{ color: theme.colors.textMuted, fontWeight: 400, marginLeft: 'auto' }}>
                                 ${acc.rate.toFixed(2)}
                                 {acc.rateUnit === 'per_mile' && ' / mile'}
@@ -1681,7 +1742,7 @@ export function CreateDeliveryOrderModal({
                                 {acc.rateUnit === 'per_item' && ' / item'}
                                 {acc.rateUnit === 'plus_base' && ' + base'}
                               </span>
-                            )}
+                            ) : null}
                           </div>
                           {acc.description && (
                             <div style={{ fontSize: 11, color: theme.colors.textMuted, marginTop: 2 }}>{acc.description}</div>
@@ -1808,6 +1869,61 @@ export function CreateDeliveryOrderModal({
             </div>
           )}
 
+          {/* ── Order Summary ───────────────────────────────────────────── */}
+          {mode !== 'service_only' && (
+            <div style={{
+              padding: 14, background: '#FFF7ED', borderRadius: 10,
+              border: `1px solid ${theme.colors.orangeLight || '#FED7AA'}`,
+            }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: theme.colors.orange, marginBottom: 10, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                Order Summary
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                <div style={{ fontSize: 12, color: theme.colors.textSecondary }}>
+                  <span style={{ fontWeight: 600 }}>Pieces:</span> {itemCount}
+                </div>
+                <div style={{ fontSize: 12, color: theme.colors.textSecondary }}>
+                  <span style={{ fontWeight: 600 }}>Volume:</span> {totalVolume > 0 ? `${totalVolume} cu ft` : '—'}
+                </div>
+                <div style={{ fontSize: 12, color: theme.colors.textSecondary, display: 'flex', alignItems: 'center', gap: 4 }}>
+                  <span style={{ fontWeight: 600 }}>Service Time:</span>
+                  {isStaff ? (
+                    <input
+                      type="number"
+                      min={0}
+                      value={serviceTimeOverride ?? calculatedServiceTime}
+                      onChange={e => {
+                        const v = e.target.value === '' ? null : parseInt(e.target.value, 10);
+                        setServiceTimeOverride(v === calculatedServiceTime ? null : v);
+                      }}
+                      style={{
+                        width: 50, padding: '2px 4px', fontSize: 12, border: `1px solid ${serviceTimeOverride != null ? theme.colors.orange : theme.colors.border}`,
+                        borderRadius: 4, textAlign: 'center', background: serviceTimeOverride != null ? '#FFF7ED' : '#fff',
+                      }}
+                    />
+                  ) : (
+                    <span>{effectiveServiceTime}</span>
+                  )}
+                  <span style={{ fontSize: 11, color: theme.colors.textMuted }}>min</span>
+                  {serviceTimeOverride != null && isStaff && (
+                    <button onClick={() => setServiceTimeOverride(null)} style={{ fontSize: 10, color: theme.colors.orange, background: 'none', border: 'none', cursor: 'pointer', textDecoration: 'underline', padding: 0 }}>reset</button>
+                  )}
+                </div>
+                <div style={{ fontSize: 12, color: theme.colors.textSecondary }}>
+                  <span style={{ fontWeight: 600 }}>Total:</span> {orderTotal != null ? `$${orderTotal.toFixed(2)}` : isCallForQuote ? 'Quote' : '—'}
+                </div>
+              </div>
+              {Array.from(selectedAccessorials.values()).some(a => {
+                const acc = accessorials.find(x => x.code === a.code) || allAccessorials.find(x => x.code === a.code);
+                return acc?.quoteRequired;
+              }) && (
+                <div style={{ fontSize: 11, color: '#B45309', marginTop: 8, fontStyle: 'italic' }}>
+                  ⚠ One or more services marked "Quote Required" — service time and pricing will be finalized during review.
+                </div>
+              )}
+            </div>
+          )}
+
           {mode === 'service_only' && (
             <div style={{
               padding: 14, background: '#F9FAFB', borderRadius: 10,
@@ -1866,3 +1982,4 @@ export function CreateDeliveryOrderModal({
     </>
   );
 }
+                                                                            
