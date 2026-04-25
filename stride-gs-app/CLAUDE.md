@@ -5,6 +5,7 @@
 **Owner:** Justin — Stride Logistics, Kent WA
 **Live:** https://www.mystridehub.com
 **Repo:** https://github.com/Stride-dotcom/Stride-GS-app
+**Local path:** `C:\dev\Stride-GS-app` (NOT in Dropbox — moved 2026-04-24 to prevent git corruption)
 **Supabase:** `uqplppugeickmamycpuz` — `https://uqplppugeickmamycpuz.supabase.co`
 
 ## Do NOT use these skills
@@ -17,11 +18,10 @@
 
 ### Must-do
 
-- **BRANCH FIRST.** `git checkout -b feat/<stream>/<desc>` from `source`. Streams: `feat/warehouse/*`, `feat/delivery/*`, `feat/fix/*`. Use `gh pr create --base source` then `gh pr merge --squash --delete-branch`. Never commit directly to `source` — Dropbox sync conflicts silently overwrite other builders' work.
+- **BRANCH FIRST.** `git checkout -b feat/<stream>/<desc>` from `source`. Streams: `feat/warehouse/*`, `feat/delivery/*`, `feat/fix/*`. Use `gh pr create --base source` then `gh pr merge --squash --delete-branch`. Never commit directly to `source`.
 - **Deploy AFTER merge.** `git checkout source && git pull origin source` then deploy commands.
 - **Deploy before reporting done.** Execute via Bash, don't just describe.
 - **TypeScript must stay clean** — run `npx tsc --noEmit` (or `node node_modules/typescript/lib/tsc.js --noEmit`) before finishing.
-- **DROPBOX SYNC WARNING:** Main chat ONLY writes files. Subagents are READ-ONLY. Never `isolation: "worktree"`.
 - **Version header on every `.gs`/`.js` edit.** Patch bump for fixes, minor for features. PST timestamps.
 - **Header-based column mapping.** Use `getHeaderMap_()` / `headerMapFromRow_()`. Never positional indexes.
 - **Use existing components** — check `src/components/shared/` (60 components) before creating new ones.
@@ -38,6 +38,20 @@
 - **Never edit the Master Price List sheet directly.** Use Price List page → inline edit → Sync to Sheet.
 - **Never commit `.env`, `.credentials.json`, or any secrets.**
 - **Never re-enable GitHub Actions `deploy.yml`/`ci.yml`** — renamed `*.disabled`, TLS transport issues unresolved.
+
+---
+
+## Build Process
+
+Every change must go through this sequence before being shipped:
+
+1. **Write changes** — edit source files in `C:\dev\Stride-GS-app\stride-gs-app\src\`
+2. **Type-check** — `node node_modules/typescript/lib/tsc.js --noEmit` (zero errors required)
+3. **Full build** — `npm run build` (catches real bundler/vite errors the type-check misses)
+4. **Code review** — spawn an Opus 4.7 subagent to review all diffs before committing
+5. **Only after review passes:** branch → commit → `gh pr create --base source` → `gh pr merge --squash --delete-branch` → deploy
+
+Do not skip steps. `tsc --noEmit` passing is not sufficient — always run `npm run build` to catch vite-level errors.
 
 ---
 
@@ -92,7 +106,7 @@ src/
 
 **Golden rule:** Web App deployments are frozen snapshots. `push-*` pushes source; `deploy-*` makes it live.
 
-All backend commands from `AppScripts/stride-client-inventory/`. React commands from `stride-gs-app/` (parent workspace, never a worktree).
+All backend commands from `C:\dev\Stride-GS-app\AppScripts\stride-client-inventory\`. React commands from `C:\dev\Stride-GS-app\stride-gs-app\` (never from a worktree).
 
 | Change touched… | Command | Live in |
 |---|---|---|
