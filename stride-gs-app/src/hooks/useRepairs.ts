@@ -71,6 +71,18 @@ function mapToAppRepair(api: ApiRepair): Repair {
     status,
     quoteAmount: api.quoteAmount ?? undefined,
     approvedAmount: api.finalAmount ?? undefined,
+    // Multi-line repair quote (v38.120.0) — undefined for legacy
+    // single-amount quotes. The detail panel renders the new builder
+    // when `quoteLines` is set, falls back to the single-input form
+    // when undefined.
+    quoteLines: Array.isArray(api.quoteLines) ? api.quoteLines : undefined,
+    quoteSubtotal:        api.quoteSubtotal ?? undefined,
+    quoteTaxableSubtotal: api.quoteTaxableSubtotal ?? undefined,
+    quoteTaxAreaId:       api.quoteTaxAreaId ?? undefined,
+    quoteTaxAreaName:     api.quoteTaxAreaName ?? undefined,
+    quoteTaxRate:         api.quoteTaxRate ?? undefined,
+    quoteTaxAmount:       api.quoteTaxAmount ?? undefined,
+    quoteGrandTotal:      api.quoteGrandTotal ?? undefined,
     repairVendor: api.repairVendor || undefined,
     assignedTo: api.createdBy || undefined,
     createdDate: api.createdDate,

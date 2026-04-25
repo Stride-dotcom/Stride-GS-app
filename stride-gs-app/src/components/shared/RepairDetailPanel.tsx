@@ -1,5 +1,5 @@
-import React, { useEffect, useState } from 'react';
-import { X, Wrench, Package, ClipboardList, CheckCircle2, XCircle, AlertTriangle, Send, Loader2, Truck, Play, Pencil, MapPin } from 'lucide-react';
+import React, { useEffect, useMemo, useState } from 'react';
+import { X, Wrench, Package, ClipboardList, CheckCircle2, XCircle, AlertTriangle, Send, Loader2, Truck, Play, Pencil, MapPin, Plus, Trash2, Undo2 } from 'lucide-react';
 import { TabbedDetailPanel, type TabbedDetailPanelTab } from './TabbedDetailPanel';
 import { EntityPage } from './EntityPage';
 import { DriveFoldersList, type DriveFolderLink } from './DriveFoldersList';
@@ -16,9 +16,10 @@ import { theme } from '../../styles/theme';
 import { fmtDate } from '../../lib/constants';
 import { WriteButton } from './WriteButton';
 import { ProcessingOverlay } from './ProcessingOverlay';
-import { postSendRepairQuote, postRespondToRepairQuote, postCompleteRepair, postStartRepair, postCancelRepair, postUpdateRepairNotes, postReopenRepair, postCorrectRepairResult, isApiConfigured } from '../../lib/api';
+import { postSendRepairQuote, postRespondToRepairQuote, postCompleteRepair, postStartRepair, postCancelRepair, postUpdateRepairNotes, postReopenRepair, postCorrectRepairResult, postVoidRepairQuote, isApiConfigured } from '../../lib/api';
 import { entityEvents } from '../../lib/entityEvents';
-import type { ApiRepair, SendRepairQuoteResponse, RespondToRepairQuoteResponse, CompleteRepairResponse, StartRepairResponse } from '../../lib/api';
+import type { ApiRepair, SendRepairQuoteResponse, RespondToRepairQuoteResponse, CompleteRepairResponse, StartRepairResponse, SendRepairQuoteLine } from '../../lib/api';
+import { supabase } from '../../lib/supabase';
 import { writeSyncFailed } from '../../lib/syncEvents';
 import { useAuth } from '../../contexts/AuthContext';
 
@@ -72,10 +73,134 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
   const [showResultPrompt, setShowResultPrompt] = useState<'fail' | null>(null);
   const [completed, setCompleted] = useState(false);
 
-  // Quote form state
-  const [quoteAmountInput, setQuoteAmountInput] = useState<string>(
-    repair.quoteAmount != null && repair.quoteAmount !== 0 ? String(repair.quoteAmount) : ''
-  );
+  // ─── Quote builder state (v38.120.0 multi-line) ──────────────────────────
+  // The Quote Tool model (already established for ad-hoc customer quotes)
+  // is reused here: pre-tax line items + a tax_areas dropdown + computed
+  // grand total. The customer-facing email shows the tax-INCLUSIVE total;
+  // the QB billing rows that get written on completion are PRE-tax (one
+  // per line) so QB doesn't double-tax.
+  type LineDraft = {
+    svcCode: string;
+    svcName: string;
+    qty: string;   // string in state for free typing; coerced on submit
+    rate: string;
+    taxable: boolean;
+  };
+  type CatalogEntry = {
+    code: string;
+    name: string;
+    category: string | null;
+    taxable: boolean | null;
+    flat_rate: number | null;
+  };
+  type TaxArea = { id: string; name: string; rate: number };
+
+  const initialLines: LineDraft[] = (() => {
+    if (Array.isArray(repair.quoteLines) && repair.quoteLines.length > 0) {
+      return repair.quoteLines.map(l => ({
+        svcCode: l.svcCode, svcName: l.svcName,
+        qty: String(l.qty), rate: String(l.rate),
+        taxable: l.taxable === true,
+      }));
+    }
+    // Pre-fill a single REPAIR line. If a quoteAmount was carried over
+    // from a legacy single-input draft, seed it as the rate.
+    const legacyRate = repair.quoteAmount != null && repair.quoteAmount > 0 ? String(repair.quoteAmount) : '';
+    return [{ svcCode: 'REPAIR', svcName: 'Repair', qty: '1', rate: legacyRate, taxable: true }];
+  })();
+  const [quoteLines, setQuoteLines] = useState<LineDraft[]>(initialLines);
+  const [taxAreaId, setTaxAreaId] = useState<string>(repair.quoteTaxAreaId || '');
+  const [serviceCatalog, setServiceCatalog] = useState<CatalogEntry[]>([]);
+  const [taxAreas, setTaxAreas] = useState<TaxArea[]>([]);
+
+  // Load service catalog + tax areas on mount. Catalog is filtered to
+  // Warehouse + Repair categories per spec — those are the codes that
+  // can legitimately ride on a repair quote alongside the actual repair
+  // charge (prep, restocking, fuel, packaging, etc.).
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const [catRes, taxRes] = await Promise.all([
+        supabase.from('service_catalog')
+          .select('code, name, category, taxable, flat_rate')
+          .in('category', ['Warehouse', 'Repair'])
+          .eq('active', true)
+          .order('category', { ascending: true })
+          .order('name', { ascending: true }),
+        supabase.from('tax_areas')
+          .select('id, name, rate')
+          .eq('active', true)
+          .order('name', { ascending: true }),
+      ]);
+      if (cancelled) return;
+      if (!catRes.error && Array.isArray(catRes.data)) {
+        setServiceCatalog(catRes.data as CatalogEntry[]);
+      }
+      if (!taxRes.error && Array.isArray(taxRes.data)) {
+        const list = taxRes.data as TaxArea[];
+        setTaxAreas(list);
+        // If the repair didn't carry a tax area selection (new quote) and
+        // we have areas, pick the first one as a sensible default — admin
+        // can switch before sending.
+        if (!taxAreaId && list.length > 0) setTaxAreaId(list[0].id);
+      }
+    })();
+    return () => { cancelled = true; };
+  // taxAreaId intentionally omitted — we only want to set the default once.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Live totals — recomputed on every keystroke; same math the server
+  // re-runs on submit so what you see is what gets quoted.
+  const totals = useMemo(() => {
+    const area = taxAreas.find(a => a.id === taxAreaId);
+    const taxRate = area ? Number(area.rate) || 0 : 0;
+    let subtotal = 0, taxable = 0;
+    for (const l of quoteLines) {
+      const q = Number(l.qty) || 0;
+      const r = Number(l.rate) || 0;
+      const amt = Math.round(q * r * 100) / 100;
+      subtotal += amt;
+      if (l.taxable) taxable += amt;
+    }
+    subtotal = Math.round(subtotal * 100) / 100;
+    taxable  = Math.round(taxable * 100) / 100;
+    const taxAmount = Math.round(taxable * (taxRate / 100) * 100) / 100;
+    const grand = Math.round((subtotal + taxAmount) * 100) / 100;
+    return { subtotal, taxable, taxRate, taxAmount, grand, taxAreaName: area?.name || '' };
+  }, [quoteLines, taxAreaId, taxAreas]);
+
+  function addLineFromCatalog(code: string) {
+    const entry = serviceCatalog.find(e => e.code === code);
+    if (!entry) return;
+    setQuoteLines(prev => [...prev, {
+      svcCode: entry.code,
+      svcName: entry.name || entry.code,
+      qty: '1',
+      rate: entry.flat_rate != null ? String(entry.flat_rate) : '',
+      taxable: entry.taxable === true,
+    }]);
+  }
+  function updateLineField(idx: number, field: keyof LineDraft, value: string | boolean) {
+    setQuoteLines(prev => prev.map((l, i) => i === idx ? { ...l, [field]: value } : l));
+  }
+  function removeLine(idx: number) {
+    setQuoteLines(prev => prev.filter((_, i) => i !== idx));
+  }
+  // When the user changes an svcCode dropdown on an existing line, pull
+  // the new catalog entry's name + taxable + flat_rate. Keeps qty.
+  function changeLineService(idx: number, code: string) {
+    const entry = serviceCatalog.find(e => e.code === code);
+    setQuoteLines(prev => prev.map((l, i) => i === idx ? {
+      ...l,
+      svcCode: code,
+      svcName: entry?.name || code,
+      taxable: entry?.taxable === true,
+      // Only auto-fill the rate if the user hasn't typed one — preserves
+      // edits when they swap codes by accident.
+      rate: l.rate || (entry?.flat_rate != null ? String(entry.flat_rate) : ''),
+    } : l));
+  }
 
   // Submit state (shared across actions)
   const [submitting, setSubmitting] = useState(false);
@@ -235,9 +360,31 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
   const handleSendQuote = async () => {
     setSubmitError(null);
 
-    const amount = parseFloat(quoteAmountInput);
-    if (isNaN(amount) || amount < 0) {
-      setSubmitError('Please enter a valid quote amount (0 or more).');
+    // ─── Validate the multi-line quote ──────────────────────────────────────
+    // Backend accepts either shape, but we always send the multi-line form
+    // from this UI. Client-side checks mirror server validation so the user
+    // sees errors inline instead of a round-trip 400.
+    if (quoteLines.length === 0) {
+      setSubmitError('Add at least one line to the quote.');
+      return;
+    }
+    const cleanLines: SendRepairQuoteLine[] = [];
+    for (const l of quoteLines) {
+      const code = l.svcCode.trim();
+      if (!code) { setSubmitError('Every line needs a service code.'); return; }
+      const q = Number(l.qty);
+      const r = Number(l.rate);
+      if (isNaN(q) || q <= 0) { setSubmitError(`Line "${code}" — qty must be greater than 0.`); return; }
+      if (isNaN(r) || r < 0)  { setSubmitError(`Line "${code}" — rate must be 0 or greater.`); return; }
+      cleanLines.push({ svcCode: code, svcName: l.svcName || code, qty: q, rate: r, taxable: l.taxable });
+    }
+    if (totals.subtotal <= 0) {
+      setSubmitError('Quote subtotal is $0 — set rates / qty before sending.');
+      return;
+    }
+    const taxArea = taxAreas.find(a => a.id === taxAreaId);
+    if (!taxArea && totals.taxable > 0) {
+      setSubmitError('Pick a tax area for the taxable lines.');
       return;
     }
 
@@ -245,40 +392,111 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
     const demoMode = !isApiConfigured() || !clientSheetId;
 
     if (demoMode) {
-      // Demo mode: simulate success
       setEffectiveStatus('Quote Sent');
       setSubmitResult({
-        success: true, repairId: repair.repairId, quoteAmount: amount,
-        emailSent: false, warnings: ['Demo mode — no API configured']
+        success: true, repairId: repair.repairId,
+        quoteAmount: totals.subtotal,
+        quoteSubtotal: totals.subtotal,
+        quoteTaxAmount: totals.taxAmount,
+        quoteGrandTotal: totals.grand,
+        quoteLineCount: cleanLines.length,
+        emailSent: false, warnings: ['Demo mode — no API configured'],
       });
       return;
     }
 
-    // Phase 2C: patch table row immediately
-    applyRepairPatch?.(repair.repairId, { status: 'Quote Sent', quoteAmount: amount });
+    applyRepairPatch?.(repair.repairId, {
+      status: 'Quote Sent',
+      quoteAmount: totals.subtotal,
+      quoteLines: cleanLines,
+      quoteSubtotal: totals.subtotal,
+      quoteTaxableSubtotal: totals.taxable,
+      quoteTaxAreaId: taxArea?.id || '',
+      quoteTaxAreaName: taxArea?.name || '',
+      quoteTaxRate: totals.taxRate,
+      quoteTaxAmount: totals.taxAmount,
+      quoteGrandTotal: totals.grand,
+    });
     setSubmitting(true);
     try {
       const resp = await postSendRepairQuote(
-        { repairId: repair.repairId, quoteAmount: amount },
+        {
+          repairId:    repair.repairId,
+          quoteLines:  cleanLines,
+          taxAreaId:   taxArea?.id || '',
+          taxAreaName: taxArea?.name || '',
+          taxRate:     totals.taxRate,
+        },
         clientSheetId
       );
       if (!resp.ok || !resp.data?.success) {
-        clearRepairPatch?.(repair.repairId); // rollback
+        clearRepairPatch?.(repair.repairId);
         const errMsg = resp.error || resp.data?.error || 'Failed to send repair quote. Please try again.';
         setSubmitError(errMsg);
-        void writeSyncFailed({ tenant_id: clientSheetId, entity_type: 'repair', entity_id: repair.repairId, action_type: 'send_repair_quote', requested_by: user?.email ?? '', request_id: resp.requestId, payload: { repairId: repair.repairId, quoteAmount: amount, clientName: repair.clientName, description: repair.description }, error_message: errMsg });
+        void writeSyncFailed({
+          tenant_id: clientSheetId, entity_type: 'repair', entity_id: repair.repairId,
+          action_type: 'send_repair_quote', requested_by: user?.email ?? '',
+          request_id: resp.requestId,
+          payload: {
+            repairId: repair.repairId, clientName: repair.clientName, description: repair.description,
+            grandTotal: totals.grand, lineCount: cleanLines.length,
+          },
+          error_message: errMsg,
+        });
       } else {
         setEffectiveStatus('Quote Sent');
-        // Don't clear the patch on success — let the 120s TTL handle it.
-        // Clearing immediately creates a window where the fresh fetch returns
-        // stale data (Supabase write-through delay) and the UI flickers back
-        // to the old status. The patch persists until real data matches.
         setSubmitResult(resp.data);
         onRepairUpdated?.();
       }
     } catch (err) {
-      clearRepairPatch?.(repair.repairId); // rollback
+      clearRepairPatch?.(repair.repairId);
       setSubmitError(err instanceof Error ? err.message : 'Network error. Please try again.');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  // ─── Void Quote ──────────────────────────────────────────────────────────
+  // Per spec answer #5, lines are locked once Approved. Admin must Void
+  // the quote first to make any changes — that resets the row to Pending
+  // Quote and clears all the persisted quote columns so the builder can
+  // start fresh.
+  const handleVoidQuote = async () => {
+    setSubmitError(null);
+    if (typeof window !== 'undefined' && !window.confirm(
+      'Void this quote? The customer will need a new quote. This cannot be undone.'
+    )) return;
+
+    const clientSheetId = repair.clientSheetId;
+    const demoMode = !isApiConfigured() || !clientSheetId;
+    if (demoMode) {
+      setEffectiveStatus('Pending Quote');
+      return;
+    }
+
+    setSubmitting(true);
+    try {
+      const resp = await postVoidRepairQuote({ repairId: repair.repairId }, clientSheetId);
+      if (!resp.ok || !resp.data?.success) {
+        setSubmitError(resp.error || resp.data?.error || 'Failed to void quote.');
+      } else {
+        // Reset local state so the builder is empty and ready.
+        setEffectiveStatus('Pending Quote');
+        setQuoteLines([{ svcCode: 'REPAIR', svcName: 'Repair', qty: '1', rate: '', taxable: true }]);
+        setSubmitResult(null);
+        setRespondResult(null);
+        applyRepairPatch?.(repair.repairId, {
+          status: 'Pending Quote',
+          quoteAmount: undefined, quoteLines: undefined,
+          quoteSubtotal: undefined, quoteTaxableSubtotal: undefined,
+          quoteTaxAreaId: undefined, quoteTaxAreaName: undefined,
+          quoteTaxRate: undefined, quoteTaxAmount: undefined,
+          quoteGrandTotal: undefined,
+        });
+        onRepairUpdated?.();
+      }
+    } catch (err) {
+      setSubmitError(err instanceof Error ? err.message : 'Network error voiding quote.');
     } finally {
       setSubmitting(false);
     }
@@ -901,28 +1119,65 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
                 <span>{submitError}</span>
               </div>
             )}
-            {/* Quote amount input */}
-            <div style={{ marginBottom: 10 }}>
-              <div style={{ fontSize: 11, fontWeight: 500, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 4 }}>Quote Amount ($)</div>
-              <input
-                type="number"
-                min="0"
-                step="0.01"
-                placeholder="0.00"
-                value={quoteAmountInput}
-                onChange={e => setQuoteAmountInput(e.target.value)}
-                disabled={submitting}
-                style={{ ...input, width: '100%', boxSizing: 'border-box' }}
-              />
-            </div>
+            <RepairQuoteBuilder
+              lines={quoteLines}
+              taxAreaId={taxAreaId}
+              taxAreas={taxAreas}
+              catalog={serviceCatalog}
+              totals={totals}
+              disabled={submitting}
+              onAddLine={addLineFromCatalog}
+              onChangeService={changeLineService}
+              onUpdateField={updateLineField}
+              onRemoveLine={removeLine}
+              onTaxAreaChange={setTaxAreaId}
+            />
             <WriteButton
               label={submitting ? 'Sending...' : 'Send Quote to Client'}
               variant="primary"
               icon={submitting ? <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} /> : <Send size={16} />}
-              style={{ width: '100%', padding: '10px', fontSize: 13, opacity: submitting ? 0.7 : 1 }}
+              style={{ width: '100%', padding: '10px', fontSize: 13, opacity: submitting ? 0.7 : 1, marginTop: 12 }}
               disabled={submitting}
               onClick={handleSendQuote}
             />
+          </div>
+        )}
+
+        {/* Quote Sent / Approved — read-only breakdown + Void escape hatch.
+            Per spec, lines are locked at Approved; admin must Void to edit.
+            Void available on Quote Sent too so admin can pull back a
+            mis-built quote before the customer responds. Hidden once a
+            repair starts (status=In Progress) — by then billing context
+            is in flight and editing the quote shouldn't happen here. */}
+        {isActive && (effectiveStatus === 'Quote Sent' || effectiveStatus === 'Approved')
+          && Array.isArray(repair.quoteLines) && repair.quoteLines.length > 0 && (
+          <div style={{ padding: '14px 20px', borderTop: `1px solid ${theme.colors.border}`, flexShrink: 0 }}>
+            <RepairQuoteSummary
+              lines={repair.quoteLines}
+              subtotal={repair.quoteSubtotal ?? 0}
+              taxAreaName={repair.quoteTaxAreaName ?? ''}
+              taxRate={repair.quoteTaxRate ?? 0}
+              taxAmount={repair.quoteTaxAmount ?? 0}
+              grandTotal={repair.quoteGrandTotal ?? 0}
+            />
+            {canStaffEdit && (
+              <button
+                onClick={handleVoidQuote}
+                disabled={submitting}
+                style={{
+                  marginTop: 10, width: '100%',
+                  padding: '8px 12px', fontSize: 12, fontWeight: 600,
+                  background: '#FFFFFF', color: '#B91C1C',
+                  border: '1px solid #FCA5A5', borderRadius: 8,
+                  cursor: submitting ? 'wait' : 'pointer',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+                  opacity: submitting ? 0.6 : 1,
+                }}
+                title="Reset to Pending Quote so you can rebuild the line items"
+              >
+                <Undo2 size={13} /> Void Quote (re-issue)
+              </button>
+            )}
           </div>
         )}
 
@@ -937,7 +1192,25 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
                 </span>
               </div>
               <div style={{ fontSize: 12, color: '#166534', lineHeight: 1.5 }}>
-                <div>Amount: <strong>${typeof submitResult.quoteAmount === 'number' ? submitResult.quoteAmount.toFixed(2) : submitResult.quoteAmount}</strong></div>
+                {/* v38.120.0 — show subtotal + tax + grand total when the
+                    backend returned the multi-line totals; fall back to
+                    a single Amount line for legacy single-amount quotes. */}
+                {typeof submitResult.quoteSubtotal === 'number' ? (
+                  <>
+                    {typeof submitResult.quoteLineCount === 'number' && (
+                      <div>Lines: <strong>{submitResult.quoteLineCount}</strong></div>
+                    )}
+                    <div>Subtotal: <strong>${submitResult.quoteSubtotal.toFixed(2)}</strong></div>
+                    {typeof submitResult.quoteTaxAmount === 'number' && submitResult.quoteTaxAmount > 0 && (
+                      <div>Tax: <strong>${submitResult.quoteTaxAmount.toFixed(2)}</strong></div>
+                    )}
+                    {typeof submitResult.quoteGrandTotal === 'number' && (
+                      <div>Customer total (incl. tax): <strong>${submitResult.quoteGrandTotal.toFixed(2)}</strong></div>
+                    )}
+                  </>
+                ) : (
+                  <div>Amount: <strong>${typeof submitResult.quoteAmount === 'number' ? submitResult.quoteAmount.toFixed(2) : submitResult.quoteAmount}</strong></div>
+                )}
                 <div>Email: {submitResult.emailSent ? '✓ Sent to client' : '✗ Not sent (check settings)'}</div>
               </div>
               {submitResult.warnings && submitResult.warnings.length > 0 && (
@@ -1215,5 +1488,278 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
       resizeKey="repair"
       defaultWidth={460}
     />
+  );
+}
+
+// ─── RepairQuoteBuilder ────────────────────────────────────────────────────
+//
+// Editable line-item table + tax-area dropdown + live totals. Parent
+// owns all state; this component is purely presentational so the parent
+// can validate + submit + reset without prop drilling.
+//
+// Layout: one row per line — Service (dropdown) | Qty | Rate | Tax flag
+// | Amount | Trash. Below: tax area dropdown + an "+ Add line" picker
+// + the totals strip (Subtotal / Tax / Grand Total). Customer total
+// (incl. tax) is the bold number — that's what they see on the email.
+//
+// Picker is a separate dropdown so adding a line is one click — instead
+// of "click + then pick the code from the new row's dropdown".
+function RepairQuoteBuilder(props: {
+  lines: Array<{ svcCode: string; svcName: string; qty: string; rate: string; taxable: boolean }>;
+  taxAreaId: string;
+  taxAreas: Array<{ id: string; name: string; rate: number }>;
+  catalog: Array<{ code: string; name: string; category: string | null; taxable: boolean | null; flat_rate: number | null }>;
+  totals: { subtotal: number; taxable: number; taxRate: number; taxAmount: number; grand: number; taxAreaName: string };
+  disabled: boolean;
+  onAddLine: (code: string) => void;
+  onChangeService: (idx: number, code: string) => void;
+  onUpdateField: (idx: number, field: 'svcCode' | 'svcName' | 'qty' | 'rate' | 'taxable', value: string | boolean) => void;
+  onRemoveLine: (idx: number) => void;
+  onTaxAreaChange: (id: string) => void;
+}) {
+  const { lines, taxAreaId, taxAreas, catalog, totals, disabled,
+          onChangeService, onUpdateField, onRemoveLine, onAddLine, onTaxAreaChange } = props;
+  const [pickerCode, setPickerCode] = useState<string>('');
+
+  // Sort the catalog so REPAIR / REPAIRS_HR are first (they're the
+  // primary repair charges) and Warehouse add-ons (PREP, RSTK, FUEL,
+  // PACKAGING, etc.) follow alphabetically. Makes the dropdown scan
+  // quick for the common case.
+  const orderedCatalog = useMemo(() => {
+    const isRepair = (c: { category: string | null }) => c.category === 'Repair';
+    return [...catalog].sort((a, b) => {
+      const ar = isRepair(a) ? 0 : 1;
+      const br = isRepair(b) ? 0 : 1;
+      if (ar !== br) return ar - br;
+      return (a.name || a.code).localeCompare(b.name || b.code);
+    });
+  }, [catalog]);
+
+  return (
+    <div style={{ marginBottom: 10 }}>
+      <div style={{ fontSize: 11, fontWeight: 500, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 6 }}>
+        Quote Line Items
+      </div>
+
+      {/* Header */}
+      <div style={{
+        display: 'grid',
+        gridTemplateColumns: 'minmax(120px, 1.6fr) 60px 86px 56px 80px 30px',
+        gap: 6,
+        fontSize: 10, fontWeight: 600, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.06em',
+        marginBottom: 6, padding: '0 4px',
+      }}>
+        <div>Service</div>
+        <div style={{ textAlign: 'right' }}>Qty</div>
+        <div style={{ textAlign: 'right' }}>Rate</div>
+        <div style={{ textAlign: 'center' }}>Tax</div>
+        <div style={{ textAlign: 'right' }}>Amount</div>
+        <div></div>
+      </div>
+
+      {/* Line rows */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+        {lines.map((l, idx) => {
+          const q = Number(l.qty) || 0;
+          const r = Number(l.rate) || 0;
+          const amt = Math.round(q * r * 100) / 100;
+          return (
+            <div key={idx} style={{
+              display: 'grid',
+              gridTemplateColumns: 'minmax(120px, 1.6fr) 60px 86px 56px 80px 30px',
+              gap: 6, alignItems: 'center',
+            }}>
+              <select
+                value={l.svcCode}
+                onChange={e => onChangeService(idx, e.target.value)}
+                disabled={disabled}
+                style={{ ...quoteInputCell, padding: '6px 6px' }}
+              >
+                {!orderedCatalog.find(c => c.code === l.svcCode) && (
+                  <option value={l.svcCode}>{l.svcName || l.svcCode}</option>
+                )}
+                {orderedCatalog.map(c => (
+                  <option key={c.code} value={c.code}>{c.name || c.code}</option>
+                ))}
+              </select>
+              <input
+                type="number" min="0" step="1"
+                value={l.qty}
+                onChange={e => onUpdateField(idx, 'qty', e.target.value)}
+                disabled={disabled}
+                style={{ ...quoteInputCell, textAlign: 'right' }}
+              />
+              <input
+                type="number" min="0" step="0.01"
+                value={l.rate}
+                onChange={e => onUpdateField(idx, 'rate', e.target.value)}
+                disabled={disabled}
+                placeholder="0.00"
+                style={{ ...quoteInputCell, textAlign: 'right' }}
+              />
+              <div style={{ textAlign: 'center' }}>
+                <input
+                  type="checkbox"
+                  checked={l.taxable}
+                  onChange={e => onUpdateField(idx, 'taxable', e.target.checked)}
+                  disabled={disabled}
+                  title="Apply sales tax to this line"
+                  style={{ accentColor: theme.colors.orange }}
+                />
+              </div>
+              <div style={{ textAlign: 'right', fontSize: 12, fontVariantNumeric: 'tabular-nums', color: theme.colors.text, fontWeight: 600 }}>
+                ${amt.toFixed(2)}
+              </div>
+              <button
+                onClick={() => onRemoveLine(idx)}
+                disabled={disabled || lines.length <= 1}
+                title={lines.length <= 1 ? 'A quote needs at least one line' : 'Remove this line'}
+                style={{
+                  background: 'none', border: 'none',
+                  cursor: disabled || lines.length <= 1 ? 'not-allowed' : 'pointer',
+                  color: lines.length <= 1 ? theme.colors.textMuted : '#B91C1C',
+                  padding: 4, borderRadius: 4,
+                  opacity: lines.length <= 1 ? 0.4 : 1,
+                }}
+              >
+                <Trash2 size={13} />
+              </button>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Add-line picker */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 8 }}>
+        <select
+          value={pickerCode}
+          onChange={e => setPickerCode(e.target.value)}
+          disabled={disabled}
+          style={{ ...quoteInputCell, flex: 1, padding: '6px 8px' }}
+        >
+          <option value="">+ Add a line item…</option>
+          {orderedCatalog.map(c => (
+            <option key={c.code} value={c.code}>{c.name || c.code}{c.taxable === false ? ' (non-tax)' : ''}</option>
+          ))}
+        </select>
+        <button
+          onClick={() => {
+            if (pickerCode) { onAddLine(pickerCode); setPickerCode(''); }
+          }}
+          disabled={disabled || !pickerCode}
+          style={{
+            padding: '6px 10px', fontSize: 11, fontWeight: 600,
+            background: pickerCode ? theme.colors.orange : theme.colors.bgMuted,
+            color: pickerCode ? '#fff' : theme.colors.textMuted,
+            border: 'none', borderRadius: 6,
+            cursor: disabled || !pickerCode ? 'not-allowed' : 'pointer',
+            display: 'flex', alignItems: 'center', gap: 4,
+          }}
+        >
+          <Plus size={12} /> Add
+        </button>
+      </div>
+
+      {/* Tax area + totals */}
+      <div style={{ marginTop: 12, padding: 10, background: theme.colors.bgSubtle, borderRadius: 8 }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+          <span style={{ fontSize: 11, fontWeight: 600, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+            Tax Area
+          </span>
+          <select
+            value={taxAreaId}
+            onChange={e => onTaxAreaChange(e.target.value)}
+            disabled={disabled}
+            style={{ ...quoteInputCell, maxWidth: 200, padding: '4px 6px', fontSize: 12 }}
+          >
+            {!taxAreas.find(a => a.id === taxAreaId) && taxAreaId && (
+              <option value={taxAreaId}>(unknown)</option>
+            )}
+            {taxAreas.map(a => (
+              <option key={a.id} value={a.id}>{a.name} ({Number(a.rate).toFixed(2)}%)</option>
+            ))}
+          </select>
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 4, fontSize: 12 }}>
+          <span style={{ color: theme.colors.textSecondary }}>Subtotal</span>
+          <span style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>${totals.subtotal.toFixed(2)}</span>
+          <span style={{ color: theme.colors.textSecondary }}>
+            Sales tax{totals.taxAreaName ? ` (${totals.taxAreaName} · ${totals.taxRate.toFixed(2)}%)` : ''}
+          </span>
+          <span style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>${totals.taxAmount.toFixed(2)}</span>
+          <span style={{ fontSize: 13, fontWeight: 700, color: theme.colors.text, paddingTop: 4, borderTop: `1px solid ${theme.colors.border}`, marginTop: 4 }}>
+            Customer total (incl. tax)
+          </span>
+          <span style={{ fontSize: 14, fontWeight: 700, color: theme.colors.orange, textAlign: 'right', paddingTop: 4, borderTop: `1px solid ${theme.colors.border}`, marginTop: 4, fontVariantNumeric: 'tabular-nums' }}>
+            ${totals.grand.toFixed(2)}
+          </span>
+        </div>
+        <div style={{ marginTop: 8, fontSize: 10, color: theme.colors.textMuted, lineHeight: 1.4 }}>
+          QB applies its own sales tax on the invoice. The amount above is what the customer sees on the quote email; the QB total may differ by a few cents due to rounding.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const quoteInputCell: React.CSSProperties = {
+  width: '100%',
+  padding: '6px 8px',
+  fontSize: 12,
+  border: `1px solid ${theme.colors.border}`,
+  borderRadius: 6,
+  outline: 'none',
+  fontFamily: 'inherit',
+  fontVariantNumeric: 'tabular-nums',
+  boxSizing: 'border-box',
+  background: '#fff',
+};
+
+// ─── RepairQuoteSummary ────────────────────────────────────────────────────
+//
+// Read-only render of the persisted quote — used on Quote Sent and
+// Approved statuses, where the lines are locked. Same totals strip as
+// the builder so the operator sees exactly what was sent.
+function RepairQuoteSummary(props: {
+  lines: Array<{ svcCode: string; svcName: string; qty: number; rate: number; taxable: boolean }>;
+  subtotal: number;
+  taxAreaName: string;
+  taxRate: number;
+  taxAmount: number;
+  grandTotal: number;
+}) {
+  const { lines, subtotal, taxAreaName, taxRate, taxAmount, grandTotal } = props;
+  return (
+    <div style={{ marginBottom: 10 }}>
+      <div style={{ fontSize: 11, fontWeight: 500, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 6 }}>
+        Quote (sent)
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 3, padding: 10, background: theme.colors.bgSubtle, borderRadius: 8 }}>
+        {lines.map((l, i) => (
+          <div key={i} style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 4, fontSize: 12, color: theme.colors.text }}>
+            <span>
+              {l.svcName || l.svcCode}
+              {l.qty > 1 && <span style={{ color: theme.colors.textMuted }}> × {l.qty}</span>}
+              {!l.taxable && <span style={{ marginLeft: 6, fontSize: 10, color: theme.colors.textMuted }}>(non-tax)</span>}
+            </span>
+            <span style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
+              ${(l.qty * l.rate).toFixed(2)}
+            </span>
+          </div>
+        ))}
+        <div style={{ marginTop: 6, paddingTop: 6, borderTop: `1px solid ${theme.colors.border}`, display: 'grid', gridTemplateColumns: '1fr auto', gap: 4, fontSize: 12 }}>
+          <span style={{ color: theme.colors.textSecondary }}>Subtotal</span>
+          <span style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>${subtotal.toFixed(2)}</span>
+          <span style={{ color: theme.colors.textSecondary }}>
+            Sales tax{taxAreaName ? ` (${taxAreaName} · ${Number(taxRate).toFixed(2)}%)` : ''}
+          </span>
+          <span style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>${taxAmount.toFixed(2)}</span>
+          <span style={{ fontSize: 13, fontWeight: 700, color: theme.colors.text }}>Customer total</span>
+          <span style={{ fontSize: 14, fontWeight: 700, color: theme.colors.orange, textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
+            ${grandTotal.toFixed(2)}
+          </span>
+        </div>
+      </div>
+    </div>
   );
 }

@@ -107,6 +107,19 @@ export type ServiceCode =
   | 'WCPU'
   | 'OTHER';
 
+/** One line item on a repair quote. svcCode comes from the
+ *  `service_catalog` table (filtered to Warehouse + Repair categories
+ *  on the picker). taxable is snapshotted from the catalog at quote
+ *  time so historical quotes' tax math is reproducible even after a
+ *  catalog flag flip. */
+export interface RepairQuoteLine {
+  svcCode: string;
+  svcName: string;
+  qty: number;
+  rate: number;
+  taxable: boolean;
+}
+
 export interface Repair {
   repairId: string;
   sourceTaskId?: string;
@@ -117,8 +130,25 @@ export interface Repair {
   vendor?: string;
   description: string;
   status: RepairStatus;
+  // quoteAmount stays as the PRE-TAX subtotal for back-compat — it
+  // equals the sum of all quoteLines line totals once the multi-line
+  // builder is in use. Legacy single-amount quotes have only this.
   quoteAmount?: number;
   approvedAmount?: number;
+  // ─── multi-line repair quote (session 80+) ───────────────────────────
+  // Set by the new RepairDetailPanel quote builder; persisted on the
+  // Repairs sheet as Quote Lines JSON + the 6 totals columns.
+  // Customer email shows tax-inclusive grandTotal in the hero.
+  // On completion, one billing row is written per line, each pre-tax,
+  // so QB applies its own sales tax without double-taxing.
+  quoteLines?: RepairQuoteLine[];
+  quoteSubtotal?: number;
+  quoteTaxableSubtotal?: number;
+  quoteTaxAreaId?: string;
+  quoteTaxAreaName?: string;
+  quoteTaxRate?: number;       // percent, e.g. 10.4
+  quoteTaxAmount?: number;
+  quoteGrandTotal?: number;
   repairVendor?: string;
   assignedTo?: string;
   createdDate: string; // ISO date

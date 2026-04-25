@@ -397,6 +397,25 @@ export interface ApiRepair {
   shipmentPhotosUrl?: string;
   inspectionPhotosUrl?: string;
   repairPhotosUrl?: string;
+  // Multi-line repair quote (v38.120.0+) — null/undefined for legacy
+  // single-amount quotes. Mapped from public.repairs.quote_lines_json
+  // via fetchRepairsFromSupabase + the GAS read path.
+  quoteLines?: ApiRepairQuoteLine[] | null;
+  quoteSubtotal?: number | null;
+  quoteTaxableSubtotal?: number | null;
+  quoteTaxAreaId?: string | null;
+  quoteTaxAreaName?: string | null;
+  quoteTaxRate?: number | null;
+  quoteTaxAmount?: number | null;
+  quoteGrandTotal?: number | null;
+}
+
+export interface ApiRepairQuoteLine {
+  svcCode: string;
+  svcName: string;
+  qty: number;
+  rate: number;
+  taxable: boolean;
 }
 
 export interface RepairsResponse {
@@ -1459,17 +1478,47 @@ export function postRequestRepairQuote(
   );
 }
 
-// ─── sendRepairQuote (Phase 7B #3) ───────────────────────────────────────────
+// ─── sendRepairQuote (Phase 7B #3 + multi-line v38.120.0) ────────────────────
+//
+// Two payload shapes — backend accepts either:
+//   (a) Multi-line  → quoteLines[] + tax fields (preferred). Backend
+//       recomputes all totals from lines + taxRate; client-supplied
+//       totals are ignored. Customer email shows tax-inclusive grand
+//       total; QB completion writes one row per line, each pre-tax.
+//   (b) Legacy      → single quoteAmount number. Backend synthesizes a
+//       one-line REPAIR quote with $0 tax. Kept so the old single-input
+//       UI keeps working through the transition.
+
+export interface SendRepairQuoteLine {
+  svcCode: string;
+  svcName: string;
+  qty: number;
+  rate: number;
+  taxable: boolean;
+}
 
 export interface SendRepairQuotePayload {
   repairId: string;
-  quoteAmount: number;
+  /** Legacy single-amount path. Provide either this OR quoteLines. */
+  quoteAmount?: number;
+  /** Multi-line path. Pre-tax line items; backend computes subtotal +
+   *  tax + grand total from the lines + tax rate. */
+  quoteLines?: SendRepairQuoteLine[];
+  taxAreaId?: string;
+  taxAreaName?: string;
+  /** Percent (e.g. 10.4 for 10.4%). Defaults to 0 if omitted. */
+  taxRate?: number;
 }
 
 export interface SendRepairQuoteResponse {
   success: boolean;
   repairId?: string;
+  /** Equals subtotal under the multi-line model. */
   quoteAmount?: number;
+  quoteSubtotal?: number;
+  quoteTaxAmount?: number;
+  quoteGrandTotal?: number;
+  quoteLineCount?: number;
   emailSent?: boolean;
   skipped?: boolean;
   message?: string;
@@ -1484,6 +1533,34 @@ export function postSendRepairQuote(
 ) {
   return apiPost<SendRepairQuoteResponse>(
     'sendRepairQuote',
+    payload as unknown as Record<string, unknown>,
+    { clientSheetId },
+    { signal }
+  );
+}
+
+// ─── voidRepairQuote (v38.120.0) ─────────────────────────────────────────────
+//
+// Reset a Quote Sent / Approved repair back to Pending Quote, clearing
+// all the persisted quote columns so the operator can build a fresh
+// multi-line quote and re-send. Per spec, this is the only way to edit
+// a quote after the customer has Approved.
+
+export interface VoidRepairQuotePayload { repairId: string }
+export interface VoidRepairQuoteResponse {
+  success: boolean;
+  repairId?: string;
+  status?: string;
+  error?: string;
+}
+
+export function postVoidRepairQuote(
+  payload: VoidRepairQuotePayload,
+  clientSheetId: string,
+  signal?: AbortSignal
+) {
+  return apiPost<VoidRepairQuoteResponse>(
+    'voidRepairQuote',
     payload as unknown as Record<string, unknown>,
     { clientSheetId },
     { signal }

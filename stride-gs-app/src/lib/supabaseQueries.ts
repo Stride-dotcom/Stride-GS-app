@@ -46,6 +46,7 @@ import type {
   StaxExceptionsResponse,
   StaxCustomersResponse,
   StaxRunLogResponse,
+  ApiRepairQuoteLine,
 } from './api';
 
 /** Map of clientSheetId → clientName for enriching Supabase rows */
@@ -433,6 +434,16 @@ interface SupabaseRepairRow {
   invoice_id: string | null;
   approved: boolean | null;
   billed: boolean | null;
+  // v38.120.0 — multi-line repair quote columns. quote_lines_json is
+  // jsonb on the server; arrives parsed.
+  quote_lines_json: unknown | null;
+  quote_subtotal: number | null;
+  quote_taxable_subtotal: number | null;
+  quote_tax_area_id: string | null;
+  quote_tax_area_name: string | null;
+  quote_tax_rate: number | null;
+  quote_tax_amount: number | null;
+  quote_grand_total: number | null;
 }
 
 export async function fetchRepairsFromSupabase(
@@ -485,6 +496,19 @@ export async function fetchRepairsFromSupabase(
       repairFolderUrl: row.repair_folder_url || '',
       shipmentFolderUrl: row.shipment_folder_url || '',
       taskFolderUrl: row.task_folder_url || '',
+      // v38.120.0 — multi-line repair quote fields. quote_lines_json is
+      // jsonb on the server, so it arrives as a parsed array. NULL on
+      // legacy rows is the back-compat sentinel.
+      quoteLines: Array.isArray(row.quote_lines_json)
+        ? (row.quote_lines_json as ApiRepairQuoteLine[])
+        : null,
+      quoteSubtotal:        row.quote_subtotal != null ? Number(row.quote_subtotal) : null,
+      quoteTaxableSubtotal: row.quote_taxable_subtotal != null ? Number(row.quote_taxable_subtotal) : null,
+      quoteTaxAreaId:       row.quote_tax_area_id || null,
+      quoteTaxAreaName:     row.quote_tax_area_name || null,
+      quoteTaxRate:         row.quote_tax_rate != null ? Number(row.quote_tax_rate) : null,
+      quoteTaxAmount:       row.quote_tax_amount != null ? Number(row.quote_tax_amount) : null,
+      quoteGrandTotal:      row.quote_grand_total != null ? Number(row.quote_grand_total) : null,
     }));
 
     // Session 69 Phase 4: overlay inventory fields (authoritative source)
@@ -1290,6 +1314,17 @@ export async function fetchRepairByIdFromSupabase(
       repairFolderUrl: row.repair_folder_url || '',
       shipmentFolderUrl: row.shipment_folder_url || '',
       taskFolderUrl: row.task_folder_url || '',
+      // v38.120.0 — multi-line quote (single-row fast path).
+      quoteLines: Array.isArray(row.quote_lines_json)
+        ? (row.quote_lines_json as ApiRepairQuoteLine[])
+        : null,
+      quoteSubtotal:        row.quote_subtotal != null ? Number(row.quote_subtotal) : null,
+      quoteTaxableSubtotal: row.quote_taxable_subtotal != null ? Number(row.quote_taxable_subtotal) : null,
+      quoteTaxAreaId:       row.quote_tax_area_id || null,
+      quoteTaxAreaName:     row.quote_tax_area_name || null,
+      quoteTaxRate:         row.quote_tax_rate != null ? Number(row.quote_tax_rate) : null,
+      quoteTaxAmount:       row.quote_tax_amount != null ? Number(row.quote_tax_amount) : null,
+      quoteGrandTotal:      row.quote_grand_total != null ? Number(row.quote_grand_total) : null,
     };
   } catch {
     return null;
@@ -1344,6 +1379,17 @@ export async function fetchRepairsByItemIdFromSupabase(
       repairFolderUrl: row.repair_folder_url || '',
       shipmentFolderUrl: row.shipment_folder_url || '',
       taskFolderUrl: row.task_folder_url || '',
+      // v38.120.0 — multi-line quote (by-item-id fast path).
+      quoteLines: Array.isArray(row.quote_lines_json)
+        ? (row.quote_lines_json as ApiRepairQuoteLine[])
+        : null,
+      quoteSubtotal:        row.quote_subtotal != null ? Number(row.quote_subtotal) : null,
+      quoteTaxableSubtotal: row.quote_taxable_subtotal != null ? Number(row.quote_taxable_subtotal) : null,
+      quoteTaxAreaId:       row.quote_tax_area_id || null,
+      quoteTaxAreaName:     row.quote_tax_area_name || null,
+      quoteTaxRate:         row.quote_tax_rate != null ? Number(row.quote_tax_rate) : null,
+      quoteTaxAmount:       row.quote_tax_amount != null ? Number(row.quote_tax_amount) : null,
+      quoteGrandTotal:      row.quote_grand_total != null ? Number(row.quote_grand_total) : null,
     }));
   } catch {
     return [];

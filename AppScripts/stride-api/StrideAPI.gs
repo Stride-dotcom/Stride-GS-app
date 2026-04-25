@@ -1,5 +1,21 @@
 /* ===================================================
-   StrideAPI.gs — v38.122.0 — 2026-04-25 PST — handleCreateInvoice_ stamps today's PST date + returns it in response
+   StrideAPI.gs — v38.123.0 — 2026-04-25 PST — Repair quotes: multi-line + tax-inclusive customer total + tax-exclusive QB rows
+   v38.123.0: handleSendRepairQuote_ accepts an array of quoteLines + tax fields
+              (taxAreaId/Name, taxRate). Persists quote_lines_json + 6 totals
+              columns (subtotal, taxable subtotal, tax area name/rate/amount,
+              grand total) onto the Repairs sheet via api_ensureColumn_.
+              Customer email shows tax-inclusive Grand Total in the hero +
+              new Quote Breakdown card with line items + tax math.
+              handleCompleteRepair_ now writes ONE billing row per quote line
+              (each pre-tax, with the line's taxable flag from service_catalog)
+              instead of a single REPAIR row. QB applies its own sales tax;
+              no double-taxing. Legacy repairs (no quote_lines_json) fall
+              through to the original single-row behaviour.
+              New endpoint voidRepairQuote → resets status to Pending Quote
+              and clears quote columns so admin can re-issue. (Per spec:
+              once Approved, lines are locked — admin must Void to edit.)
+              sbRepairRow_ + resyncEntityToSupabase_ carry the new columns
+              into the Supabase repairs cache.
    v38.122.0: handleCreateInvoice_ invoice date now formats explicitly in
               "America/Los_Angeles" instead of Session.getScriptTimeZone(), so
               the date stamped on Billing_Ledger / invoice PDF is always
@@ -3611,6 +3627,17 @@ function sbRepairRow_(tenantId, repair) {
     repair_folder_url:  String(repair.repairFolderUrl || ""),
     shipment_folder_url: String(repair.shipmentFolderUrl || ""),
     task_folder_url:    String(repair.taskFolderUrl || ""),
+    // v38.123.0 — multi-line repair quotes. quote_lines_json is the
+    // jsonb array; the 6 numeric columns are snapshotted totals.
+    // Null on legacy repairs that haven't been re-quoted yet.
+    quote_lines_json:       repair.quoteLines || null,
+    quote_subtotal:         repair.quoteSubtotal != null ? Number(repair.quoteSubtotal) : null,
+    quote_taxable_subtotal: repair.quoteTaxableSubtotal != null ? Number(repair.quoteTaxableSubtotal) : null,
+    quote_tax_area_id:      repair.quoteTaxAreaId || null,
+    quote_tax_area_name:    repair.quoteTaxAreaName ? String(repair.quoteTaxAreaName) : null,
+    quote_tax_rate:         repair.quoteTaxRate != null ? Number(repair.quoteTaxRate) : null,
+    quote_tax_amount:       repair.quoteTaxAmount != null ? Number(repair.quoteTaxAmount) : null,
+    quote_grand_total:      repair.quoteGrandTotal != null ? Number(repair.quoteGrandTotal) : null,
     updated_at:         new Date().toISOString()
   };
 }
@@ -4482,6 +4509,17 @@ function resyncEntityToSupabase_(entityType, tenantId, entityId) {
             }));
             break;
           case "repair":
+            // v38.123.0 — read the multi-line quote columns. Quote Lines
+            // JSON is stored as a JSON string on the sheet (Apps Script
+            // can't store arrays); parse defensively so a legacy or
+            // malformed cell falls back to null without breaking the
+            // whole resync.
+            var qLinesRaw = row["Quote Lines JSON"];
+            var qLines = null;
+            if (qLinesRaw) {
+              try { qLines = JSON.parse(String(qLinesRaw)); }
+              catch (_) { qLines = null; }
+            }
             upResult = supabaseUpsert_("repairs", sbRepairRow_(tenantId, {
               repairId: entityId, itemId: row["Item ID"], status: row["Status"],
               repairResult: row["Repair Result"], quoteAmount: row["Quote Amount"],
@@ -4493,7 +4531,15 @@ function resyncEntityToSupabase_(entityType, tenantId, entityId) {
               quoteSentDate: formatDate_(row["Quote Sent Date"]),
               scheduledDate: formatDate_(row["Scheduled Date"]),
               startDate: formatDate_(row["Start Date"]),
-              createdBy: row["Created By"] || ""
+              createdBy: row["Created By"] || "",
+              quoteLines:           qLines,
+              quoteSubtotal:        row["Quote Subtotal"],
+              quoteTaxableSubtotal: row["Quote Taxable Subtotal"],
+              quoteTaxAreaId:       row["Quote Tax Area ID"],
+              quoteTaxAreaName:     row["Quote Tax Area Name"],
+              quoteTaxRate:         row["Quote Tax Rate"],
+              quoteTaxAmount:       row["Quote Tax Amount"],
+              quoteGrandTotal:      row["Quote Grand Total"]
             }));
             break;
           case "will_call":
@@ -4919,6 +4965,14 @@ function api_fullClientSync_(tenantId, entityTypes) {
               ).trim();
               // Prefer Task Notes on repair row, else backfill from source task
               var rTaskNotes = String(repRows[n]["Task Notes"] || "").trim() || srcMeta.taskNotes || "";
+              // v38.123.0 — multi-line quote columns (parse JSON
+              // defensively; legacy rows have empty/null cell).
+              var rqLinesRaw = repRows[n]["Quote Lines JSON"];
+              var rqLines = null;
+              if (rqLinesRaw) {
+                try { rqLines = JSON.parse(String(rqLinesRaw)); }
+                catch (_) { rqLines = null; }
+              }
               repSb.push(sbRepairRow_(tenantId, {
                 repairId: rid, itemId: repRows[n]["Item ID"], status: repRows[n]["Status"],
                 repairResult: repRows[n]["Repair Result"], quoteAmount: repRows[n]["Quote Amount"],
@@ -4929,7 +4983,15 @@ function api_fullClientSync_(tenantId, entityTypes) {
                 completedDate: formatDate_(repRows[n]["Completed Date"]),
                 repairFolderUrl: repFolderUrls[rid] || "",
                 shipmentFolderUrl: repShipMap[rShipNo] || "",
-                taskFolderUrl: repTaskFolderUrls[rTaskId] || ""
+                taskFolderUrl: repTaskFolderUrls[rTaskId] || "",
+                quoteLines:           rqLines,
+                quoteSubtotal:        repRows[n]["Quote Subtotal"],
+                quoteTaxableSubtotal: repRows[n]["Quote Taxable Subtotal"],
+                quoteTaxAreaId:       repRows[n]["Quote Tax Area ID"],
+                quoteTaxAreaName:     repRows[n]["Quote Tax Area Name"],
+                quoteTaxRate:         repRows[n]["Quote Tax Rate"],
+                quoteTaxAmount:       repRows[n]["Quote Tax Amount"],
+                quoteGrandTotal:      repRows[n]["Quote Grand Total"]
               }));
             }
             supabaseBatchUpsert_("repairs", repSb);
@@ -5238,6 +5300,18 @@ function doPost(e) {
           api_notifySupabase_(r, { tenant_id: effectiveId, entity_type: "repair", entity_id: String(payload.repairId || ""), action_type: "respond_repair_quote", requested_by: callerEmail, request_id: String(payload.requestId || "") });
           api_writeThrough_(r, "repair", effectiveId, String(payload.repairId || ""));
           api_auditLog_("repair", String(payload.repairId || ""), effectiveId, "status_change", { decision: payload.decision || "", status: { new: payload.decision === "Approve" ? "Approved" : "Declined" } }, callerEmail);
+          return r;
+        });
+
+      case "voidRepairQuote":
+        // v38.123.0 — admin Void on a Quote Sent / Approved repair so the
+        // multi-line quote can be re-issued. Spec: lines are locked once
+        // Approved; Void is the only escape hatch (vs editing in place).
+        return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
+          var r = handleVoidRepairQuote_(effectiveId, payload);
+          invalidateClientCache_(effectiveId);
+          api_writeThrough_(r, "repair", effectiveId, String(payload.repairId || ""));
+          api_auditLog_("repair", String(payload.repairId || ""), effectiveId, "status_change", { status: { new: "Pending Quote" }, action: "void_repair_quote" }, callerEmail);
           return r;
         });
 
@@ -13987,16 +14061,82 @@ function handleRequestRepairQuote_(clientSheetId, payload, callerEmail) {
 function handleSendRepairQuote_(clientSheetId, payload) {
   if (!clientSheetId) return errorResponse_("clientSheetId is required", "INVALID_PARAMS");
   if (!payload || !payload.repairId) return errorResponse_("repairId is required in payload", "INVALID_PARAMS");
-  if (payload.quoteAmount === undefined || payload.quoteAmount === null) {
-    return errorResponse_("quoteAmount is required in payload", "INVALID_PARAMS");
+
+  var repairId = String(payload.repairId || "").trim();
+  if (!repairId) return errorResponse_("repairId must not be empty", "INVALID_PARAMS");
+
+  // ─── PARSE PAYLOAD — multi-line OR legacy single-amount ──────────────────
+  // New shape (preferred):
+  //   { repairId, quoteLines: [{ svcCode, svcName, qty, rate, taxable }],
+  //     taxAreaId, taxAreaName, taxRate }
+  // Legacy shape (back-compat for old React clients):
+  //   { repairId, quoteAmount }
+  // Server recomputes all totals from the lines + tax rate so the persisted
+  // numbers always match what we email — never trust client-supplied totals.
+  var hasLines = Array.isArray(payload.quoteLines) && payload.quoteLines.length > 0;
+  var quoteLines, taxAreaId, taxAreaName, taxRate;
+
+  if (hasLines) {
+    quoteLines = payload.quoteLines.map(function(l) {
+      var qty  = Number(l && l.qty);
+      var rate = Number(l && l.rate);
+      if (isNaN(qty)  || qty  < 0) qty  = 0;
+      if (isNaN(rate) || rate < 0) rate = 0;
+      return {
+        svcCode: String((l && l.svcCode) || "").trim(),
+        svcName: String((l && l.svcName) || "").trim(),
+        qty:     qty,
+        rate:    rate,
+        // Taxable is per-line — defaults from service catalog at the React
+        // layer, but stored on the line so completion + email render the
+        // right tax math even if the catalog flag flips later.
+        taxable: l && l.taxable === true
+      };
+    }).filter(function(l) { return l.svcCode; });
+    if (quoteLines.length === 0) {
+      return errorResponse_("quoteLines must contain at least one line with a non-empty svcCode", "INVALID_PARAMS");
+    }
+    taxAreaId   = String(payload.taxAreaId   || "").trim();
+    taxAreaName = String(payload.taxAreaName || "").trim();
+    taxRate     = Number(payload.taxRate);
+    if (isNaN(taxRate) || taxRate < 0) taxRate = 0;
+  } else {
+    if (payload.quoteAmount === undefined || payload.quoteAmount === null) {
+      return errorResponse_("Either quoteLines or quoteAmount is required in payload", "INVALID_PARAMS");
+    }
+    var legacyAmt = Number(payload.quoteAmount);
+    if (isNaN(legacyAmt) || legacyAmt < 0) return errorResponse_("quoteAmount must be a non-negative number", "INVALID_PARAMS");
+    // Synthesize a single REPAIR line from the legacy amount so downstream
+    // logic (persistence, email rendering, completion billing) doesn't need
+    // a parallel code path. Tax stays $0 for legacy callers.
+    quoteLines = [{
+      svcCode: "REPAIR",
+      svcName: "Repair",
+      qty:     1,
+      rate:    legacyAmt,
+      taxable: false  // legacy behaviour — QB applied tax based on its own
+                      // service definition, not from the row. Preserve that.
+    }];
+    taxAreaId   = "";
+    taxAreaName = "";
+    taxRate     = 0;
   }
 
-  var repairId    = String(payload.repairId || "").trim();
-  var quoteAmount = Number(payload.quoteAmount);
-  if (!repairId) return errorResponse_("repairId must not be empty", "INVALID_PARAMS");
-  if (isNaN(quoteAmount) || quoteAmount < 0) return errorResponse_("quoteAmount must be a non-negative number", "INVALID_PARAMS");
+  // ─── COMPUTE TOTALS (server-authoritative) ───────────────────────────────
+  var subtotal = 0, taxableSubtotal = 0;
+  for (var li = 0; li < quoteLines.length; li++) {
+    var line = quoteLines[li];
+    var lineTotal = Math.round(line.qty * line.rate * 100) / 100;
+    line.amount = lineTotal;  // attach for email rendering
+    subtotal += lineTotal;
+    if (line.taxable) taxableSubtotal += lineTotal;
+  }
+  subtotal        = Math.round(subtotal * 100) / 100;
+  taxableSubtotal = Math.round(taxableSubtotal * 100) / 100;
+  var taxAmount   = Math.round(taxableSubtotal * (taxRate / 100) * 100) / 100;
+  var grandTotal  = Math.round((subtotal + taxAmount) * 100) / 100;
 
-  // Open spreadsheet
+  // ─── OPEN SPREADSHEET ────────────────────────────────────────────────────
   var ss;
   try { ss = SpreadsheetApp.openById(clientSheetId); }
   catch (e) { return errorResponse_("Cannot open client spreadsheet: " + e.message, "NOT_FOUND"); }
@@ -14004,29 +14144,48 @@ function handleSendRepairQuote_(clientSheetId, payload) {
   var repSheet = ss.getSheetByName("Repairs");
   if (!repSheet) return errorResponse_("Repairs sheet not found in client spreadsheet", "SCHEMA_ERROR");
 
+  // Auto-create the new quote columns if missing (non-destructive — appends
+  // at the end of the header row, leaves existing columns untouched).
+  // Has to happen before we read the header map below.
+  api_ensureColumn_(repSheet, "Quote Lines JSON");
+  api_ensureColumn_(repSheet, "Quote Subtotal");
+  api_ensureColumn_(repSheet, "Quote Taxable Subtotal");
+  api_ensureColumn_(repSheet, "Quote Tax Area ID");
+  api_ensureColumn_(repSheet, "Quote Tax Area Name");
+  api_ensureColumn_(repSheet, "Quote Tax Rate");
+  api_ensureColumn_(repSheet, "Quote Tax Amount");
+  api_ensureColumn_(repSheet, "Quote Grand Total");
+
   var repMap = api_getHeaderMap_(repSheet);
   var idCol  = repMap["Repair ID"];
   if (!idCol) return errorResponse_("Repair ID column not found in Repairs sheet", "SCHEMA_ERROR");
 
-  // Find repair row (outside lock — read-only pre-check)
   var repRow = api_findRowById_(repSheet, idCol, repairId);
   if (repRow < 2) return errorResponse_("Repair not found: " + repairId, "NOT_FOUND");
 
-  // Read row data
   var rowData = repSheet.getRange(repRow, 1, 1, repSheet.getLastColumn()).getValues()[0];
   function getVal(h) { return repMap[h] ? String(rowData[repMap[h] - 1] || "").trim() : ""; }
 
-  // Idempotency check (outside lock — optimistic)
+  // Reject re-quote on a locked repair (per spec: once Approved, admin must
+  // Void the quote first to make changes).
+  var existingStatus = getVal("Status");
+  if (existingStatus === "Approved" || existingStatus === "Completed" || existingStatus === "In Progress") {
+    return errorResponse_(
+      "Cannot re-send a quote on a repair that is already " + existingStatus +
+      ". Void this quote first to make changes.",
+      "INVALID_STATE"
+    );
+  }
+
+  // Idempotency — same lines + same totals already sent → skip.
+  var existingLinesJson = getVal("Quote Lines JSON");
+  var newLinesJson = JSON.stringify(quoteLines);
   var quoteSentAt  = getVal("Quote Sent At");
-  var existingAmt  = getVal("Quote Amount");
-  if (quoteSentAt && String(existingAmt) === String(quoteAmount)) {
+  if (quoteSentAt && existingLinesJson === newLinesJson && Number(getVal("Quote Grand Total")) === grandTotal) {
     return jsonResponse_({ success: true, skipped: true, repairId: repairId, message: "Repair quote already sent (idempotency guard)" });
   }
 
   // Read settings before lock
-  // v38.90.0 — REPAIR_QUOTE email now goes to staff + client (was client only).
-  // Matches TASK_COMPLETE pattern so internal Stride distribution list sees
-  // every outgoing quote for record-keeping.
   var settings    = api_readSettings_(ss);
   var clientName  = String(settings["CLIENT_NAME"]         || "").trim();
   var clientEmail = String(settings["CLIENT_EMAIL"]        || "").trim();
@@ -14042,11 +14201,11 @@ function handleSendRepairQuote_(clientSheetId, payload) {
   var warnings = [];
 
   try {
-    // Re-check idempotency INSIDE lock (concurrent request guard)
+    // Re-check idempotency INSIDE lock (concurrent-request guard)
     var freshData = repSheet.getRange(repRow, 1, 1, repSheet.getLastColumn()).getValues()[0];
     function getFresh(h) { return repMap[h] ? String(freshData[repMap[h] - 1] || "").trim() : ""; }
     var freshQSA = getFresh("Quote Sent At");
-    if (freshQSA && String(getFresh("Quote Amount")) === String(quoteAmount)) {
+    if (freshQSA && getFresh("Quote Lines JSON") === newLinesJson && Number(getFresh("Quote Grand Total")) === grandTotal) {
       lock.releaseLock();
       return jsonResponse_({ success: true, skipped: true, repairId: repairId, message: "Repair quote already sent (concurrent request)" });
     }
@@ -14055,23 +14214,34 @@ function handleSendRepairQuote_(clientSheetId, payload) {
     var tz     = Session.getScriptTimeZone();
     var nowFmt = Utilities.formatDate(now, tz, "MM/dd/yyyy HH:mm:ss");
 
-    // ─── WRITE: Quote Amount ──────────────────────────────────────────────────
+    // ─── WRITE: legacy Quote Amount cell = subtotal (back-compat) ───────────
+    // Old reports / IIF exports / Task Board mirrors that read this column
+    // continue to work; under the new model it's just the pre-tax total.
     if (repMap["Quote Amount"]) {
-      repSheet.getRange(repRow, repMap["Quote Amount"]).setValue(quoteAmount);
+      repSheet.getRange(repRow, repMap["Quote Amount"]).setValue(subtotal);
     }
+    // ─── WRITE: new multi-line columns ──────────────────────────────────────
+    if (repMap["Quote Lines JSON"])       repSheet.getRange(repRow, repMap["Quote Lines JSON"]).setValue(newLinesJson);
+    if (repMap["Quote Subtotal"])         repSheet.getRange(repRow, repMap["Quote Subtotal"]).setValue(subtotal);
+    if (repMap["Quote Taxable Subtotal"]) repSheet.getRange(repRow, repMap["Quote Taxable Subtotal"]).setValue(taxableSubtotal);
+    if (repMap["Quote Tax Area ID"])      repSheet.getRange(repRow, repMap["Quote Tax Area ID"]).setValue(taxAreaId);
+    if (repMap["Quote Tax Area Name"])    repSheet.getRange(repRow, repMap["Quote Tax Area Name"]).setValue(taxAreaName);
+    if (repMap["Quote Tax Rate"])         repSheet.getRange(repRow, repMap["Quote Tax Rate"]).setValue(taxRate);
+    if (repMap["Quote Tax Amount"])       repSheet.getRange(repRow, repMap["Quote Tax Amount"]).setValue(taxAmount);
+    if (repMap["Quote Grand Total"])      repSheet.getRange(repRow, repMap["Quote Grand Total"]).setValue(grandTotal);
 
-    // ─── WRITE: Status → "Quote Sent" (only if was Pending Quote or empty) ────
+    // ─── WRITE: Status → "Quote Sent" (only if was Pending Quote or empty) ──
     var currentStatus = getFresh("Status");
     if (currentStatus === "Pending Quote" || currentStatus === "") {
       if (repMap["Status"]) repSheet.getRange(repRow, repMap["Status"]).setValue("Quote Sent");
     }
 
-    // ─── WRITE: Quote Sent Date (if not already set) ─────────────────────────
+    // ─── WRITE: Quote Sent Date (only if not already set — preserve original) ──
     if (repMap["Quote Sent Date"] && !getFresh("Quote Sent Date")) {
       repSheet.getRange(repRow, repMap["Quote Sent Date"]).setValue(now);
     }
 
-    // ─── STAMP idempotency marker (always last, ensures we don't double-send) ─
+    // ─── STAMP idempotency marker (always last) ──────────────────────────────
     if (repMap["Quote Sent At"]) {
       repSheet.getRange(repRow, repMap["Quote Sent At"]).setValue(nowFmt);
     }
@@ -14083,9 +14253,14 @@ function handleSendRepairQuote_(clientSheetId, payload) {
 
   try { lock.releaseLock(); } catch (_) {}
 
-  // ─── EMAIL (non-critical — outside lock) ──────────────────────────────────
-  // v38.90.0: recipients merged (staff + client). Send as long as at least
-  // one is configured — previously required clientEmail.
+  // ─── SUPABASE WRITE-THROUGH ──────────────────────────────────────────────
+  try {
+    resyncEntityToSupabase_("repair", clientSheetId, repairId);
+  } catch (sbErr) {
+    warnings.push("Supabase mirror failed (non-fatal): " + sbErr.message);
+  }
+
+  // ─── EMAIL (non-critical — outside lock) ─────────────────────────────────
   var emailSent = false;
   if (notifOn && allRecip) {
     try {
@@ -14094,48 +14269,66 @@ function handleSendRepairQuote_(clientSheetId, payload) {
       var vendor      = getVal("Repair Vendor") || getVal("Vendor");
       var repairNotes = getVal("Repair Notes");
       var taskNotes   = getVal("Task Notes");
-      var quoteAmtFmt = quoteAmount.toFixed(2);
 
-      // Build item table HTML for the email template
-      var itemClass   = getVal("Class");
-      var location    = getVal("Location");
-      var sidemark    = getVal("Sidemark");
-      var invItem     = api_findInventoryItem_(ss, itemId);
-      var qty         = invItem ? (invItem.qty || 1) : 1;
-      var reference   = invItem ? (invItem.reference || "") : getVal("Reference");
+      var itemClass = getVal("Class");
+      var location  = getVal("Location");
+      var sidemark  = getVal("Sidemark");
+      var invItem   = api_findInventoryItem_(ss, itemId);
+      var qty       = invItem ? (invItem.qty || 1) : 1;
+      var reference = invItem ? (invItem.reference || "") : getVal("Reference");
       var itemTableHtml = api_buildSingleItemTableHtml_(itemId, desc, vendor, itemClass, location, sidemark, qty, reference);
 
-      // v38.86.0: photos moved to Supabase Storage — the Drive fallback
-      // chain (Inventory Item ID hyperlink → Source Task → client PHOTOS
-      // folder) is retired. Deep-link straight to the Repair detail panel
-      // on the app; inspection photos are shown inline there via the
-      // EntityAttachments component.
       var photosUrl = api_buildEntityPhotosUrl_("repair", repairId, clientSheetId);
 
+      // Build the line-items HTML <tr> rows for the Quote Breakdown table
+      // in the email template ({{QUOTE_LINE_ITEMS_HTML}}).
+      var lineRowsHtml = "";
+      for (var lj = 0; lj < quoteLines.length; lj++) {
+        var ln = quoteLines[lj];
+        var nameCell = ln.svcName || ln.svcCode;
+        if (ln.taxable === false) nameCell += ' <span style="font-size:10px;color:#999;font-weight:400">(non-tax)</span>';
+        lineRowsHtml +=
+          '<tr style="border-bottom:1px solid #F0F0F0">' +
+            '<td align="left"  style="padding:10px 0;color:#1C1C1C">' + nameCell + '</td>' +
+            '<td align="right" style="padding:10px 0;color:#1C1C1C">' + ln.qty + '</td>' +
+            '<td align="right" style="padding:10px 0;color:#1C1C1C">$' + ln.rate.toFixed(2) + '</td>' +
+            '<td align="right" style="padding:10px 0;color:#1C1C1C">$' + ln.amount.toFixed(2) + '</td>' +
+          '</tr>';
+      }
+
+      var subtotalFmt   = subtotal.toFixed(2);
+      var taxAmountFmt  = taxAmount.toFixed(2);
+      var grandFmt      = grandTotal.toFixed(2);
+      var taxRateFmt    = (Math.round(taxRate * 100) / 100).toFixed(2) + "%";
+      var taxAreaLabel  = taxAreaName || "—";
+
       var emailResult = api_sendTemplateEmail_(settings, "REPAIR_QUOTE", allRecip,
-        "Repair Quote Ready: " + itemId + " $" + quoteAmtFmt,
+        "Repair Quote Ready: " + itemId + " $" + grandFmt,
         {
-          "{{ITEM_ID}}":          itemId       || "",
-          "{{CLIENT_NAME}}":      clientName   || "Client",
-          "{{DESCRIPTION}}":      desc         || "-",
-          "{{QUOTE_AMOUNT}}":     quoteAmtFmt,
-          "{{REPAIR_ID}}":        repairId,
-          "{{REPAIR_VENDOR}}":    vendor       || "-",
-          // v38.87.0/v38.88.0: merge sheet + entity_notes then HTML-convert.
-          // NOTES → repair's public notes. TASK_NOTES → source task's notes.
-          "{{NOTES}}":            api_notesPlainToHtml_(api_resolveNotesForEmail_("repair", repairId, repairNotes)) || "-",
-          "{{TASK_NOTES}}":       api_notesPlainToHtml_(api_resolveNotesForEmail_("task", getVal("Source Task"), taskNotes)) || "-",
-          "{{ITEM_TABLE_HTML}}":  itemTableHtml,
-          "{{PHOTOS_URL}}":       photosUrl,
-          "{{PHOTOS_BUTTON}}":    ""
+          "{{ITEM_ID}}":                itemId       || "",
+          "{{CLIENT_NAME}}":            clientName   || "Client",
+          "{{DESCRIPTION}}":            desc         || "-",
+          // Back-compat: {{QUOTE_AMOUNT}} = subtotal under the new model.
+          "{{QUOTE_AMOUNT}}":           subtotalFmt,
+          "{{REPAIR_ID}}":              repairId,
+          "{{REPAIR_VENDOR}}":          vendor       || "-",
+          "{{NOTES}}":                  api_notesPlainToHtml_(api_resolveNotesForEmail_("repair", repairId, repairNotes)) || "-",
+          "{{TASK_NOTES}}":             api_notesPlainToHtml_(api_resolveNotesForEmail_("task", getVal("Source Task"), taskNotes)) || "-",
+          "{{ITEM_TABLE_HTML}}":        itemTableHtml,
+          "{{PHOTOS_URL}}":             photosUrl,
+          "{{PHOTOS_BUTTON}}":          "",
+          // ─── new tokens for the Quote Breakdown card ───
+          "{{QUOTE_LINE_ITEMS_HTML}}":  lineRowsHtml,
+          "{{QUOTE_SUBTOTAL}}":         subtotalFmt,
+          "{{QUOTE_TAX_AREA_NAME}}":    taxAreaLabel,
+          "{{QUOTE_TAX_RATE}}":         taxRateFmt,
+          "{{QUOTE_TAX_AMOUNT}}":       taxAmountFmt,
+          "{{QUOTE_GRAND_TOTAL}}":      grandFmt
         },
         null, clientSheetId
       );
-      if (emailResult.success) {
-        emailSent = true;
-      } else {
-        warnings.push("Email not sent: " + emailResult.error);
-      }
+      if (emailResult.success) emailSent = true;
+      else warnings.push("Email not sent: " + emailResult.error);
     } catch (emailErr) {
       warnings.push("Email error (non-fatal): " + emailErr.message);
     }
@@ -14146,12 +14339,99 @@ function handleSendRepairQuote_(clientSheetId, payload) {
   }
 
   return jsonResponse_({
-    success:     true,
-    repairId:    repairId,
-    quoteAmount: quoteAmount,
-    emailSent:   emailSent,
-    warnings:    warnings.length > 0 ? warnings : undefined
+    success:         true,
+    repairId:        repairId,
+    quoteAmount:     subtotal,       // back-compat field name
+    quoteSubtotal:   subtotal,
+    quoteTaxAmount:  taxAmount,
+    quoteGrandTotal: grandTotal,
+    quoteLineCount:  quoteLines.length,
+    emailSent:       emailSent,
+    warnings:        warnings.length > 0 ? warnings : undefined
   });
+}
+
+/**
+ * handleVoidRepairQuote_ — admin tool for clearing a quote so it can be
+ * re-issued. Per the multi-line repair quote spec, once a quote is
+ * Approved (or beyond) the lines are locked. This endpoint is the
+ * "Void this quote to make changes" escape hatch wired up next to the
+ * builder UI on the Repair detail panel.
+ *
+ * What it does:
+ *   1. Sets Status = "Pending Quote".
+ *   2. Clears all the quote columns (Quote Amount, Quote Lines JSON,
+ *      the 6 totals, Quote Sent Date, Quote Sent At). Idempotency
+ *      marker is wiped so the next Send Quote can fire fresh.
+ *   3. Approved Date / Final Amount are also cleared (they stamp at
+ *      approval time and shouldn't survive a void).
+ *
+ * Does NOT delete the repair, billing rows (none yet — completion
+ * hasn't fired), or photos. Status flow: → Pending Quote → admin
+ * builds a new quote → Send Quote → Quote Sent → customer responds.
+ */
+function handleVoidRepairQuote_(clientSheetId, payload) {
+  if (!clientSheetId) return errorResponse_("clientSheetId is required", "INVALID_PARAMS");
+  if (!payload || !payload.repairId) return errorResponse_("repairId is required in payload", "INVALID_PARAMS");
+
+  var repairId = String(payload.repairId || "").trim();
+  if (!repairId) return errorResponse_("repairId must not be empty", "INVALID_PARAMS");
+
+  var ss;
+  try { ss = SpreadsheetApp.openById(clientSheetId); }
+  catch (e) { return errorResponse_("Cannot open client spreadsheet: " + e.message, "NOT_FOUND"); }
+
+  var repSheet = ss.getSheetByName("Repairs");
+  if (!repSheet) return errorResponse_("Repairs sheet not found", "SCHEMA_ERROR");
+
+  var repMap = api_getHeaderMap_(repSheet);
+  var idCol  = repMap["Repair ID"];
+  if (!idCol) return errorResponse_("Repair ID column not found", "SCHEMA_ERROR");
+
+  var repRow = api_findRowById_(repSheet, idCol, repairId);
+  if (repRow < 2) return errorResponse_("Repair not found: " + repairId, "NOT_FOUND");
+
+  // Read current status — refuse to void if completion already happened
+  // (would orphan billing rows). Approved is fine; that's the main use case.
+  var rowData = repSheet.getRange(repRow, 1, 1, repSheet.getLastColumn()).getValues()[0];
+  function getVal(h) { return repMap[h] ? String(rowData[repMap[h] - 1] || "").trim() : ""; }
+  var currentStatus = getVal("Status");
+  if (currentStatus === "Completed" || currentStatus === "In Progress") {
+    return errorResponse_("Cannot void a quote on a repair that is already " + currentStatus + ". Adjust the billing manually.", "INVALID_STATE");
+  }
+
+  var lock = LockService.getScriptLock();
+  try { lock.waitLock(15000); }
+  catch (_) { return errorResponse_("Could not acquire lock — another operation in progress. Try again.", "LOCK_ERROR"); }
+
+  try {
+    function clear(h) { if (repMap[h]) repSheet.getRange(repRow, repMap[h]).setValue(""); }
+    clear("Quote Amount");
+    clear("Quote Lines JSON");
+    clear("Quote Subtotal");
+    clear("Quote Taxable Subtotal");
+    clear("Quote Tax Area ID");
+    clear("Quote Tax Area Name");
+    clear("Quote Tax Rate");
+    clear("Quote Tax Amount");
+    clear("Quote Grand Total");
+    clear("Quote Sent Date");
+    clear("Quote Sent At");
+    clear("Approved Date");
+    clear("Final Amount");
+    clear("Approved");
+    if (repMap["Status"]) repSheet.getRange(repRow, repMap["Status"]).setValue("Pending Quote");
+  } catch (writeErr) {
+    try { lock.releaseLock(); } catch (_) {}
+    return jsonResponse_({ success: false, repairId: repairId, error: "Void failed: " + writeErr.message });
+  }
+
+  try { lock.releaseLock(); } catch (_) {}
+
+  try { resyncEntityToSupabase_("repair", clientSheetId, repairId); }
+  catch (_) { /* non-fatal */ }
+
+  return jsonResponse_({ success: true, repairId: repairId, status: "Pending Quote" });
 }
 
 // ─── Respond To Repair Quote Handler (Approve / Decline) ──────────────────────
@@ -14575,56 +14855,139 @@ function handleCompleteRepair_(clientSheetId, payload) {
     }
 
     // ─── BILLING (non-critical) ───────────────────────────────────────────────
+    // v38.123.0 — multi-line billing.
+    //
+    // If Quote Lines JSON is populated (new multi-line repair quotes
+    // shipped this session), write ONE billing row per line, each at
+    // its own pre-tax rate, each with its own svc_code from the
+    // service catalog. QB applies its own sales tax based on the
+    // service-item definition in QB; we never bake tax into the row
+    // itself, so QB doesn't double-tax.
+    //
+    // If Quote Lines JSON is empty (legacy repairs in flight predating
+    // this build), keep the original single-row behaviour: one REPAIR
+    // row at billingAmt.
     try {
       var billSheet = ss.getSheetByName("Billing_Ledger");
       if (!billSheet) {
         warnings.push("Billing_Ledger sheet not found — billing skipped");
       } else {
-        var missingRate = (billingAmt <= 0);
         var billMap = api_getHeaderMap_(billSheet);
-        var billRow = api_buildRow_(billMap, {
-          "Status":       "Unbilled",
-          "Invoice #":    "",
-          "Client":       clientName,
-          "Date":         now,
-          "Svc Code":     "REPAIR",
-          "Svc Name":     "Repair",
-          "Category":     "Services",
-          "Item ID":      itemId,
-          "Description":  desc,
-          "Class":        itemClass,
-          "Qty":          1,
-          "Rate":         missingRate ? 0 : billingAmt,
-          "Total":        missingRate ? "Missing Rate" : billingAmt,
-          "Task ID":      "",
-          "Repair ID":    repairId,
-          "Shipment #":   "",
-          "Item Notes":   (missingRate ? "MISSING RATE - " : "") + "Result: " + resultValue + (notes ? " | " + notes : ""),
-          "Ledger Row ID": "REPAIR-" + repairId
-        });
-        var billInsertRow = api_getLastDataRow_(billSheet) + 1;
-        billSheet.getRange(billInsertRow, 1, 1, billRow.length).setValues([billRow]);
-        billingCreated = true;
 
-        if (!missingRate) {
-          if (repMap["Billed"]) repSheet.getRange(repRow, repMap["Billed"]).setValue(true);
-        } else {
-          warnings.push("Billing amount is 0 — billing row created with Missing Rate flag (update Final Amount manually)");
-          if (repMap["Billing Exception"]) {
-            repSheet.getRange(repRow, repMap["Billing Exception"]).setValue("Missing Rate — amount needs update");
-          }
+        // Try to parse the multi-line quote off the freshly-read row.
+        var qLinesRaw = getFresh("Quote Lines JSON");
+        var qLines = null;
+        if (qLinesRaw) {
+          try { qLines = JSON.parse(qLinesRaw); }
+          catch (_) { qLines = null; }
         }
 
-        // v38.89.0 — BILLING WRITE-THROUGH. The router's api_writeThrough_
-        // call on the repair entity only re-syncs the Repairs row, not the
-        // new Billing_Ledger row. Before this fix, REPAIR billing rows
-        // appeared on the sheet but never landed in public.billing, so
-        // the Billing report (Supabase-first since session 74) didn't see
-        // them. Best-effort; never blocks the response.
-        try {
-          resyncEntityToSupabase_("billing", clientSheetId, "REPAIR-" + repairId);
-        } catch (sbErr) {
-          warnings.push("Billing Supabase write-through failed (non-fatal): " + sbErr.message);
+        if (Array.isArray(qLines) && qLines.length > 0) {
+          // ─── Multi-line path ────────────────────────────────────────────────
+          var allRows  = [];
+          var totalSum = 0;
+          for (var bi = 0; bi < qLines.length; bi++) {
+            var bl = qLines[bi] || {};
+            var blQty  = Number(bl.qty)  || 0;
+            var blRate = Number(bl.rate) || 0;
+            var blAmt  = Math.round(blQty * blRate * 100) / 100;
+            totalSum += blAmt;
+            // Service catalog category is informational on the ledger;
+            // default to "Services" so existing report filters still work.
+            // (If you want category-accurate reporting per line later,
+            // resolve via service_catalog lookup at quote build time and
+            // persist `category` on the line.)
+            var lineRow = api_buildRow_(billMap, {
+              "Status":       "Unbilled",
+              "Invoice #":    "",
+              "Client":       clientName,
+              "Date":         now,
+              "Svc Code":     String(bl.svcCode || "REPAIR"),
+              "Svc Name":     String(bl.svcName || bl.svcCode || "Repair"),
+              "Category":     "Services",
+              "Item ID":      itemId,
+              "Description":  desc,
+              "Class":        itemClass,
+              "Qty":          blQty,
+              "Rate":         blRate,
+              "Total":        blAmt,
+              "Task ID":      "",
+              "Repair ID":    repairId,
+              "Shipment #":   "",
+              "Item Notes":   "Repair line " + (bi + 1) + "/" + qLines.length + " | Result: " + resultValue + (notes ? " | " + notes : ""),
+              // Stable + unique per line so partial re-runs (if any
+              // ever fire) hit ON CONFLICT without dup'ing existing.
+              "Ledger Row ID": "REPAIR-" + repairId + "-" + (bi + 1)
+            });
+            allRows.push(lineRow);
+          }
+          var billInsertRow = api_getLastDataRow_(billSheet) + 1;
+          billSheet.getRange(billInsertRow, 1, allRows.length, allRows[0].length).setValues(allRows);
+          billingCreated = true;
+
+          if (totalSum > 0) {
+            if (repMap["Billed"]) repSheet.getRange(repRow, repMap["Billed"]).setValue(true);
+          } else {
+            warnings.push("All quote lines had 0 amount — rows written but Billed not set");
+          }
+
+          // Stamp Final Amount = pre-tax subtotal so legacy reports +
+          // dashboards that read this column see the right number.
+          // (Customer-facing tax-inclusive total lives in
+          // Quote Grand Total; not put on the ledger row.)
+          if (repMap["Final Amount"]) {
+            repSheet.getRange(repRow, repMap["Final Amount"]).setValue(Math.round(totalSum * 100) / 100);
+          }
+
+          // Supabase write-through — one resync per ledger_row_id.
+          for (var bsi = 0; bsi < qLines.length; bsi++) {
+            try {
+              resyncEntityToSupabase_("billing", clientSheetId, "REPAIR-" + repairId + "-" + (bsi + 1));
+            } catch (sbErr) {
+              warnings.push("Billing Supabase write-through (line " + (bsi + 1) + ") failed (non-fatal): " + sbErr.message);
+            }
+          }
+        } else {
+          // ─── Legacy single-row path ──────────────────────────────────────────
+          var missingRate = (billingAmt <= 0);
+          var billRow = api_buildRow_(billMap, {
+            "Status":       "Unbilled",
+            "Invoice #":    "",
+            "Client":       clientName,
+            "Date":         now,
+            "Svc Code":     "REPAIR",
+            "Svc Name":     "Repair",
+            "Category":     "Services",
+            "Item ID":      itemId,
+            "Description":  desc,
+            "Class":        itemClass,
+            "Qty":          1,
+            "Rate":         missingRate ? 0 : billingAmt,
+            "Total":        missingRate ? "Missing Rate" : billingAmt,
+            "Task ID":      "",
+            "Repair ID":    repairId,
+            "Shipment #":   "",
+            "Item Notes":   (missingRate ? "MISSING RATE - " : "") + "Result: " + resultValue + (notes ? " | " + notes : ""),
+            "Ledger Row ID": "REPAIR-" + repairId
+          });
+          var billInsertRow2 = api_getLastDataRow_(billSheet) + 1;
+          billSheet.getRange(billInsertRow2, 1, 1, billRow.length).setValues([billRow]);
+          billingCreated = true;
+
+          if (!missingRate) {
+            if (repMap["Billed"]) repSheet.getRange(repRow, repMap["Billed"]).setValue(true);
+          } else {
+            warnings.push("Billing amount is 0 — billing row created with Missing Rate flag (update Final Amount manually)");
+            if (repMap["Billing Exception"]) {
+              repSheet.getRange(repRow, repMap["Billing Exception"]).setValue("Missing Rate — amount needs update");
+            }
+          }
+
+          try {
+            resyncEntityToSupabase_("billing", clientSheetId, "REPAIR-" + repairId);
+          } catch (sbErr) {
+            warnings.push("Billing Supabase write-through failed (non-fatal): " + sbErr.message);
+          }
         }
       }
     } catch (billErr) {
