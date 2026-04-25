@@ -22,6 +22,14 @@
  *                     a structured ExternalSyncResult instead of void so
  *                     callers can render per-leg success / failure
  *                     indicators.
+ *
+ * v4 2026-04-25 PST — QBO leg timeout. The qboSyncCatalogItem GAS handler
+ *                     occasionally hangs past the default 90s apiPost
+ *                     watchdog, which made the whole sync UI sit in
+ *                     "Syncing…" forever and then flash "Sync failed" even
+ *                     when Stax succeeded. postQboSyncCatalogItem now
+ *                     forces an 8s timeout, so a wedged QBO leg surfaces
+ *                     as "QBO: <timeout msg>" while staxOk still flips.
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { supabase } from '../lib/supabase';
