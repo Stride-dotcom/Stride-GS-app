@@ -11,11 +11,10 @@ import { theme } from '../styles/theme';
 import { useOrders } from '../hooks/useOrders';
 import type { DtOrderForUI } from '../hooks/useOrders';
 import { CreateDeliveryOrderModal } from '../components/shared/CreateDeliveryOrderModal';
-// ReviewQueueTab retired in Phase B — review actions live on the
-// Order Details page now. Pill in the tab bar filters the Orders list
-// to needs-review rows. Component file kept on disk in case we need to
-// revert; the import is dropped here so the type checker doesn't flag
-// it as unused.
+// ReviewQueueTab retired in Phase B + file deleted in the follow-up.
+// Review actions live on the Order Details page now (Edit Full Order,
+// Approve, Reject, Push to DT — all inline). Pill in the tab bar
+// filters the Orders list to needs-review rows.
 import { useVirtualRows } from '../hooks/useVirtualRows';
 import { useAuth } from '../contexts/AuthContext';
 import { AvailabilityCalendar } from '../components/availability/AvailabilityCalendar';
@@ -460,13 +459,12 @@ export function Orders() {
         </div>
       )}
 
-      {/* Review Queue tab — RETIRED in Phase B. Reviewers now use the
-          "Needs Review · N" pill in the tab bar to filter the Orders
-          list, then open any row to access Approve / Reject / Edit
-          Full Order / Push to DT directly from the detail page.
-          ReviewQueueTab import kept for now — easy revert if anything
-          regresses. Legacy ?tab=review URLs auto-redirect via the
-          activeTab logic above. */}
+      {/* Review Queue tab — RETIRED in Phase B + ReviewQueueTab.tsx
+          deleted in the follow-up. Reviewers use the "Needs Review · N"
+          pill above to filter the list; review actions (Approve /
+          Reject / Edit Full Order / Push to DT) live on the Order
+          Details page. Legacy ?tab=review URLs auto-redirect via the
+          activeTab logic. */}
 
       {/* Orders tab (admin only) */}
       {activeTab === 'orders' && isAdmin && (

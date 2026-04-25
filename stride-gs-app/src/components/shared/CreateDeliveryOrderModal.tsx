@@ -1025,6 +1025,12 @@ export function CreateDeliveryOrderModal({
   // anything else → save-changes UPDATE preserving identifier + status)
   // and the Save Draft button enabled state.
   const originalReviewStatusRef = useRef<string | null>(null);
+  // For P+D edits: tracks the linked PICKUP leg's id so save/promote
+  // can UPDATE both rows in lockstep. Loaded by the prefill effect
+  // when the opened row is a 'pickup_and_delivery' delivery leg, OR
+  // populated after an INSERT in the P+D Save Draft path so subsequent
+  // saves UPDATE in place instead of re-INSERTing a duplicate pair.
+  const editingPickupRowIdRef = useRef<string | null>(null);
   const [, forceUpdateForRefs] = useState(0);  // tick when refs change so labels re-render
   const [savingDraft, setSavingDraft] = useState(false);
   const [draftSavedAt, setDraftSavedAt] = useState<Date | null>(null);
@@ -1064,11 +1070,6 @@ export function CreateDeliveryOrderModal({
       // Restore high-level mode + source first so dependent UI mounts.
       const ot = (r.order_type as string) || 'delivery';
       setMode(ot === 'pickup' || ot === 'delivery' || ot === 'service_only' || ot === 'pickup_and_delivery' ? ot : 'delivery');
-      // (P+D drafts are not supported yet — early-return if encountered.)
-      if (ot === 'pickup_and_delivery') {
-        setSubmitError('Pickup+Delivery drafts can\'t be edited yet. Submit or discard this one and create a new order.');
-        return;
-      }
       // Common fields
       if (r.po_number)              setPoNumber(r.po_number as string);
       if (r.sidemark)               setSidemark(r.sidemark as string);
@@ -1100,6 +1101,32 @@ export function CreateDeliveryOrderModal({
         if (r.contact_phone2)  setDeliveryPhone2(r.contact_phone2 as string);
         if (r.contact_email)   setDeliveryEmail(r.contact_email as string);
       }
+      // P+D — also load the linked pickup leg so the operator can
+      // edit BOTH contact sets + see the pickup items in context.
+      // The opened row is the DELIVERY leg (order_type=
+      // 'pickup_and_delivery' carries delivery contact + total
+      // pricing); linked_order_id points at the PICKUP leg.
+      if (ot === 'pickup_and_delivery' && r.linked_order_id) {
+        try {
+          const { data: pickupRow } = await supabase
+            .from('dt_orders')
+            .select('id, contact_name, contact_address, contact_city, contact_state, contact_zip, contact_phone, contact_phone2, contact_email')
+            .eq('id', r.linked_order_id as string)
+            .maybeSingle();
+          if (pickupRow && !cancelled) {
+            const p = pickupRow as Record<string, unknown>;
+            editingPickupRowIdRef.current = String(p.id || '');
+            if (p.contact_name)    setPickupContactName(p.contact_name as string);
+            if (p.contact_address) setPickupAddress(p.contact_address as string);
+            if (p.contact_city)    setPickupCity(p.contact_city as string);
+            if (p.contact_state)   setPickupState(p.contact_state as string);
+            if (p.contact_zip)     setPickupZip(p.contact_zip as string);
+            if (p.contact_phone)   setPickupPhone(p.contact_phone as string);
+            if (p.contact_phone2)  setPickupPhone2(p.contact_phone2 as string);
+            if (p.contact_email)   setPickupEmail(p.contact_email as string);
+          }
+        } catch (_) { /* tolerate — pickup leg edit will be unavailable */ }
+      }
       // Items: warehouse-source selections come from dt_order_items
       const items = Array.isArray(r.dt_order_items) ? (r.dt_order_items as Array<Record<string, unknown>>) : [];
       const itemIds = items
@@ -1129,18 +1156,16 @@ export function CreateDeliveryOrderModal({
   // promote path replaces the placeholder identifier with a real
   // generated number and flips review_status.
   //
-  // P+D mode is intentionally not supported here yet — it requires two
-  // linked rows; a future iteration will handle the linked-pair save.
-  // The Save Draft button is disabled in P+D mode with a tooltip.
-  // Also disabled when editing a non-draft order — you can't downgrade
-  // a real submitted/approved order back to a draft. Use Save Changes
-  // (the primary submit button) instead.
+  // Save Draft is disabled when editing a non-draft order — can't
+  // downgrade a real submitted/approved order back to a draft (use
+  // Save Changes / the primary submit instead). P+D drafts ARE now
+  // supported as of this turn; both legs save+update+promote in
+  // lockstep via the dedicated P+D branches in handleSaveDraft +
+  // handleSubmit.
   const isEditingRealOrder = !!editOrderId
     && originalReviewStatusRef.current != null
     && originalReviewStatusRef.current !== 'draft';
-  const canSaveDraft = !!clientSheetId
-    && mode !== 'pickup_and_delivery'
-    && !isEditingRealOrder;
+  const canSaveDraft = !!clientSheetId && !isEditingRealOrder;
   const handleSaveDraft = async () => {
     if (!canSaveDraft || savingDraft) return;
     setSavingDraft(true);
@@ -1157,6 +1182,132 @@ export function CreateDeliveryOrderModal({
         subtotal: a.subtotal,
       }));
 
+      // ── P+D Save Draft path ───────────────────────────────────────────
+      // Two linked rows. Mirrors the real-submit P+D path but with
+      // DRAFT-xxx-P / DRAFT-xxx-D placeholders + status='draft'. On
+      // re-save, both refs are populated → UPDATE both rows in place.
+      if (mode === 'pickup_and_delivery') {
+        const commonDraft: Record<string, unknown> = {
+          tenant_id: clientSheetId,
+          timezone: 'America/Los_Angeles',
+          local_service_date: serviceDate || null,
+          window_start_local: windowStart || null,
+          window_end_local: windowEnd || null,
+          po_number: poNumber.trim() || null,
+          sidemark: sidemark.trim() || null,
+          details: details.trim() || null,
+          source: 'app',
+          review_status: 'draft',
+          created_by_user: authUid,
+          created_by_role: user?.role || 'client',
+          billing_method: billingMethod,
+          service_time_minutes: effectiveServiceTime || null,
+          coverage_option_id: selectedCoverage?.id ?? null,
+          declared_value: selectedCoverage?.calcType === 'percent_declared' ? (parseFloat(declaredValue) || null) : null,
+          coverage_charge: coverageCharge || 0,
+        };
+        const pickupPayload: Record<string, unknown> = {
+          ...commonDraft,
+          order_type: 'pickup',
+          is_pickup: true,
+          contact_name: pickupContactName.trim() || null,
+          contact_address: pickupAddress.trim() || null,
+          contact_city: pickupCity.trim() || null,
+          contact_state: pickupState.trim() || null,
+          contact_zip: pickupZip.trim() || null,
+          contact_phone: pickupPhone.trim() || null,
+          contact_phone2: pickupPhone2.trim() || null,
+          contact_email: pickupEmail.trim() || null,
+          base_delivery_fee: null,
+          order_total: null,
+          pricing_override: true,
+          pricing_notes: 'Pickup leg of linked pickup+delivery — pricing rolled into delivery order.',
+        };
+        const deliveryPayload: Record<string, unknown> = {
+          ...commonDraft,
+          order_type: 'pickup_and_delivery',
+          is_pickup: false,
+          contact_name: deliveryContactName.trim() || null,
+          contact_address: deliveryAddress.trim() || null,
+          contact_city: deliveryCity.trim() || null,
+          contact_state: deliveryState.trim() || null,
+          contact_zip: deliveryZip.trim() || null,
+          contact_phone: deliveryPhone.trim() || null,
+          contact_phone2: deliveryPhone2.trim() || null,
+          contact_email: deliveryEmail.trim() || null,
+          base_delivery_fee: baseFee != null ? baseFee + pickupLegFee : null,
+          extra_items_count: extraItemsCount,
+          extra_items_fee: extraItemsFee,
+          accessorials_json: accList.length > 0 ? accList : null,
+          accessorials_total: accessorialsTotal,
+          order_total: orderTotal,
+        };
+
+        if (editingDraftRowIdRef.current && editingPickupRowIdRef.current) {
+          // UPDATE both rows in place
+          const upPickup = await supabase.from('dt_orders').update(pickupPayload).eq('id', editingPickupRowIdRef.current);
+          if (upPickup.error) throw new Error(`Draft pickup update failed: ${upPickup.error.message}`);
+          const upDelivery = await supabase.from('dt_orders').update(deliveryPayload).eq('id', editingDraftRowIdRef.current);
+          if (upDelivery.error) throw new Error(`Draft delivery update failed: ${upDelivery.error.message}`);
+          // Items live on the delivery leg only (the pickup leg's
+          // pricing is rolled into delivery; same convention as the
+          // real-submit path).
+          await supabase.from('dt_order_items').delete().eq('dt_order_id', editingDraftRowIdRef.current);
+          if (itemsSource === 'warehouse' && selectedInvItems.length > 0) {
+            const itemRows = selectedInvItems.map(i => ({
+              dt_order_id: editingDraftRowIdRef.current,
+              dt_item_code: i.itemId,
+              description: i.description || '',
+              quantity: i.qty || 1,
+              vendor: i.vendor || null,
+              class_name: i.itemClass || null,
+              cubic_feet: classToCuFt(i.itemClass) ?? null,
+            }));
+            await supabase.from('dt_order_items').insert(itemRows);
+          }
+        } else {
+          // INSERT new linked pair. Same pattern as the real-submit
+          // P+D path: pickup first, delivery with linked_order_id,
+          // then back-link pickup → delivery.
+          const baseRand = Math.random().toString(36).slice(2, 8).toUpperCase();
+          const pickupIdent = `DRAFT-${baseRand}-P`;
+          const deliveryIdent = `DRAFT-${baseRand}-D`;
+          const insP = await supabase
+            .from('dt_orders')
+            .insert({ ...pickupPayload, dt_identifier: pickupIdent })
+            .select('id').single();
+          if (insP.error || !insP.data) throw new Error(`Pickup draft insert failed: ${insP.error?.message}`);
+          const pickupId = (insP.data as { id: string }).id;
+          editingPickupRowIdRef.current = pickupId;
+          const insD = await supabase
+            .from('dt_orders')
+            .insert({ ...deliveryPayload, dt_identifier: deliveryIdent, linked_order_id: pickupId })
+            .select('id').single();
+          if (insD.error || !insD.data) throw new Error(`Delivery draft insert failed: ${insD.error?.message}`);
+          const deliveryId = (insD.data as { id: string }).id;
+          editingDraftRowIdRef.current = deliveryId;
+          // Back-link pickup → delivery for bidirectional navigation.
+          await supabase.from('dt_orders').update({ linked_order_id: deliveryId }).eq('id', pickupId);
+          // Items on delivery leg.
+          if (itemsSource === 'warehouse' && selectedInvItems.length > 0) {
+            const itemRows = selectedInvItems.map(i => ({
+              dt_order_id: deliveryId,
+              dt_item_code: i.itemId,
+              description: i.description || '',
+              quantity: i.qty || 1,
+              vendor: i.vendor || null,
+              class_name: i.itemClass || null,
+              cubic_feet: classToCuFt(i.itemClass) ?? null,
+            }));
+            await supabase.from('dt_order_items').insert(itemRows);
+          }
+        }
+        setDraftSavedAt(new Date());
+        setSavingDraft(false);
+        return;
+      }
+
+      // ── Single-leg Save Draft path (existing) ─────────────────────────
       // Pick the right contact set for the mode
       const contact = mode === 'pickup' ? {
         name: pickupContactName, address: pickupAddress, city: pickupCity, state: pickupState,
@@ -1271,15 +1422,116 @@ export function CreateDeliveryOrderModal({
 
     // Edit-existing-row path. When the modal was opened on an existing
     // draft (or auto-saved one mid-build), or on a real order via the
-    // OrderPage "Edit Full Order" button, we UPDATE the existing row
-    // instead of INSERTing a new one. Two sub-cases:
+    // OrderPage "Edit Full Order" button, we UPDATE the existing row(s)
+    // instead of INSERTing new ones. Two sub-cases on each leg:
     //   • original status = 'draft' → PROMOTE: replace DRAFT-xxx with
     //     a real generated identifier + flip review_status to
     //     pending_review (or approved for admin).
     //   • original status = anything else → SAVE CHANGES: keep
     //     identifier + review_status, just update the field values.
-    // Pickup+Delivery edits aren't supported here yet (linked-pair
-    // update is more complex; deferred).
+    // P+D edits update BOTH the pickup + delivery rows in lockstep
+    // via editingPickupRowIdRef + editingDraftRowIdRef.
+    if (editingDraftRowIdRef.current && mode === 'pickup_and_delivery' && editingPickupRowIdRef.current) {
+      const wasDraftPD = originalReviewStatusRef.current === 'draft' || !originalReviewStatusRef.current;
+      try {
+        const { data: authData2 } = await supabase.auth.getUser();
+        const authUid2 = authData2?.user?.id || null;
+        const accListPD = Array.from(selectedAccessorials.values()).map(a => ({
+          code: a.code, quantity: a.quantity,
+          rate: accessorials.find(x => x.code === a.code)?.rate || 0,
+          subtotal: a.subtotal,
+        }));
+        const commonEdit: Record<string, unknown> = {
+          tenant_id: clientSheetId,
+          timezone: 'America/Los_Angeles',
+          local_service_date: serviceDate || null,
+          window_start_local: windowStart || null,
+          window_end_local: windowEnd || null,
+          po_number: poNumber.trim() || null,
+          sidemark: sidemark.trim() || null,
+          details: details.trim() || null,
+          billing_method: billingMethod,
+          service_time_minutes: effectiveServiceTime || null,
+          coverage_option_id: selectedCoverage?.id ?? null,
+          declared_value: selectedCoverage?.calcType === 'percent_declared' ? (parseFloat(declaredValue) || null) : null,
+          coverage_charge: coverageCharge || 0,
+          updated_by_user: authUid2,
+        };
+        const pickupEdit: Record<string, unknown> = {
+          ...commonEdit,
+          order_type: 'pickup',
+          is_pickup: true,
+          contact_name: pickupContactName.trim() || null,
+          contact_address: pickupAddress.trim() || null,
+          contact_city: pickupCity.trim() || null,
+          contact_state: pickupState.trim() || null,
+          contact_zip: pickupZip.trim() || null,
+          contact_phone: pickupPhone.trim() || null,
+          contact_phone2: pickupPhone2.trim() || null,
+          contact_email: pickupEmail.trim() || null,
+        };
+        const deliveryEdit: Record<string, unknown> = {
+          ...commonEdit,
+          order_type: 'pickup_and_delivery',
+          is_pickup: false,
+          contact_name: deliveryContactName.trim() || null,
+          contact_address: deliveryAddress.trim() || null,
+          contact_city: deliveryCity.trim() || null,
+          contact_state: deliveryState.trim() || null,
+          contact_zip: deliveryZip.trim() || null,
+          contact_phone: deliveryPhone.trim() || null,
+          contact_phone2: deliveryPhone2.trim() || null,
+          contact_email: deliveryEmail.trim() || null,
+          base_delivery_fee: baseFee != null ? baseFee + pickupLegFee : null,
+          extra_items_count: extraItemsCount,
+          extra_items_fee: extraItemsFee,
+          accessorials_json: accListPD.length > 0 ? accListPD : null,
+          accessorials_total: accessorialsTotal,
+          order_total: orderTotal,
+        };
+        // Promote → both legs get fresh real identifiers + flip status.
+        if (wasDraftPD) {
+          pickupEdit.dt_identifier = await generateOrderNumber('P');
+          pickupEdit.review_status = user?.role === 'admin' ? 'approved' : 'pending_review';
+          deliveryEdit.dt_identifier = await generateOrderNumber('D');
+          deliveryEdit.review_status = user?.role === 'admin' ? 'approved' : 'pending_review';
+        }
+        const upP = await supabase.from('dt_orders').update(pickupEdit).eq('id', editingPickupRowIdRef.current);
+        if (upP.error) throw new Error(`Pickup leg ${wasDraftPD ? 'promote' : 'save'} failed: ${upP.error.message}`);
+        const { data: savedD, error: saveDErr } = await supabase
+          .from('dt_orders').update(deliveryEdit).eq('id', editingDraftRowIdRef.current)
+          .select('id, dt_identifier, review_status').single();
+        if (saveDErr || !savedD) throw new Error(`Delivery leg ${wasDraftPD ? 'promote' : 'save'} failed: ${saveDErr?.message || 'no row returned'}`);
+        // Refresh items on the delivery leg only (matches the create
+        // path: items live on the delivery leg, pickup leg has none).
+        await supabase.from('dt_order_items').delete().eq('dt_order_id', editingDraftRowIdRef.current);
+        if (itemsSource === 'warehouse' && selectedInvItems.length > 0) {
+          const itemRows = selectedInvItems.map(i => ({
+            dt_order_id: editingDraftRowIdRef.current,
+            dt_item_code: i.itemId,
+            description: i.description || '',
+            quantity: i.qty || 1,
+            vendor: i.vendor || null,
+            class_name: i.itemClass || null,
+            cubic_feet: classToCuFt(i.itemClass) ?? null,
+          }));
+          await supabase.from('dt_order_items').insert(itemRows);
+        }
+        const savedDelivery = savedD as { id: string; dt_identifier: string; review_status: string };
+        onSubmit?.({
+          dtOrderId: savedDelivery.id,
+          dtIdentifier: savedDelivery.dt_identifier,
+          reviewStatus: savedDelivery.review_status,
+        });
+        onClose();
+        return;
+      } catch (e) {
+        setSubmitError(e instanceof Error ? e.message : String(e));
+        setSubmitting(false);
+        return;
+      }
+    }
+
     if (editingDraftRowIdRef.current && mode !== 'pickup_and_delivery') {
       const wasDraft = originalReviewStatusRef.current === 'draft' || !originalReviewStatusRef.current;
       try {
@@ -2912,13 +3164,11 @@ export function CreateDeliveryOrderModal({
               title={
                 !canSaveDraft && !clientSheetId
                   ? 'Pick a client first'
-                  : !canSaveDraft && mode === 'pickup_and_delivery'
-                    ? 'Pickup+Delivery drafts not yet supported — submit or cancel'
-                    : !canSaveDraft && isEditingRealOrder
-                      ? 'This is a real order, not a draft — use Save Changes instead. (Operators can\'t downgrade real orders back to drafts.)'
-                      : draftSavedAt
-                        ? `Last saved ${draftSavedAt.toLocaleTimeString()}`
-                        : 'Save what you have so far. Pick it back up later from the Orders → Drafts list.'
+                  : !canSaveDraft && isEditingRealOrder
+                    ? 'This is a real order, not a draft — use Save Changes instead. (Operators can\'t downgrade real orders back to drafts.)'
+                    : draftSavedAt
+                      ? `Last saved ${draftSavedAt.toLocaleTimeString()}`
+                      : 'Save what you have so far. Pick it back up later from the Orders → Drafts list.'
               }
               style={{
                 padding: '9px 18px', borderRadius: 8,
