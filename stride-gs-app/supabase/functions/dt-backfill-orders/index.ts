@@ -1,6 +1,15 @@
 /**
  * dt-backfill-orders — Supabase Edge Function
  *
+ * Version: v2 (2026-04-25 PST)
+ *   v2: Status mapping is now built dynamically from dt_statuses at request
+ *       time (the previous hardcoded STATUS_STRING_TO_ID map drifted from
+ *       the live seed — e.g. 'finished' had been remapped). The map is
+ *       indexed by both `code` and `name` (lowercased) since DT status
+ *       strings come in either form. apiKey and the per-day `date` query
+ *       param are now wrapped in encodeURIComponent on the export URL.
+ *   v1: initial implementation.
+ *
  * Pulls orders from the DispatchTrack Export API for a date range and upserts
  * them into dt_orders. Used to backfill historical/upcoming orders so the
  * Orders tab has data before webhooks start flowing.

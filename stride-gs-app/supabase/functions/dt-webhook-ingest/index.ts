@@ -1,7 +1,17 @@
 /**
  * dt-webhook-ingest — Supabase Edge Function
  *
- * Version: v3 (2026-04-24 PST)
+ * Version: v4 (2026-04-25 PST)
+ *   v4: Body parsing now honors Content-Type — JSON bodies are JSON.parsed,
+ *       everything else falls back to x-www-form-urlencoded (previous
+ *       versions silently produced an empty payload for JSON). Fuzzy
+ *       account-name lookup now escapes ILIKE wildcards (%, _, \) so
+ *       account names containing those characters no longer over-match.
+ *       Retry-on-duplicate now distinguishes "already processed" (ack as
+ *       duplicate, current behavior) from "previously failed" (clear the
+ *       processing_error and retry the upsert) — fixes the case where a
+ *       transient dt_orders error left the row stuck because DT's retry
+ *       hit the idempotency key and was acked without re-running.
  *   v3: Corrected ALERT_TYPE_TO_STATUS_ID to match dt_statuses seed
  *       (Started=2, In_Transit=13, Unable_To_Start=4, Unable_To_Finish=5,
  *        Service_Route_Finished=3). Added auto-Collected transition
@@ -84,6 +94,11 @@ function toInt(val: string | undefined): number | null {
   return isNaN(n) ? null : n;
 }
 
+/** Escape PostgREST/PostgreSQL ILIKE wildcards so user input matches literally */
+function escapeLike(s: string): string {
+  return s.replace(/[\\%_]/g, '\\$&');
+}
+
 // ── Main handler ──────────────────────────────────────────────────────────
 Deno.serve(async (req: Request) => {
   const corsHeaders = {
@@ -134,12 +149,33 @@ Deno.serve(async (req: Request) => {
     return new Response('Unauthorized', { status: 401, headers: corsHeaders });
   }
 
-  // ── 4. Parse form-encoded body ─────────────────────────────────────────
-  const params = new URLSearchParams(rawBody);
-  // Flatten into a plain object for JSONB storage
+  // ── 4. Parse body — JSON if Content-Type says so, else form-urlencoded ─
+  // DT sends application/x-www-form-urlencoded today, but if the integration
+  // ever flips to JSON we don't want to silently produce an empty payload.
+  const contentType = req.headers.get('content-type')?.toLowerCase() ?? '';
   const payload: Record<string, string> = {};
-  for (const [key, val] of params.entries()) {
-    payload[key] = val;
+  if (contentType.includes('application/json')) {
+    try {
+      const parsed = JSON.parse(rawBody);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        for (const [key, val] of Object.entries(parsed as Record<string, unknown>)) {
+          if (val == null) continue;
+          payload[key] = typeof val === 'string' ? val : String(val);
+        }
+      } else {
+        console.warn('[dt-webhook-ingest] JSON body was not a plain object — ignoring');
+      }
+    } catch (e) {
+      console.warn(
+        '[dt-webhook-ingest] Content-Type: application/json but JSON.parse failed:',
+        (e as Error).message
+      );
+    }
+  } else {
+    const params = new URLSearchParams(rawBody);
+    for (const [key, val] of params.entries()) {
+      payload[key] = val;
+    }
   }
 
   const receivedAt   = new Date().toISOString();
@@ -162,16 +198,51 @@ Deno.serve(async (req: Request) => {
     });
 
   if (eventInsertErr) {
-    // UNIQUE violation on idempotency_key → duplicate delivery; safe to ack
+    // UNIQUE violation on idempotency_key → either a real duplicate delivery
+    // (already processed; safe to ack) or a retry of a previously-failed
+    // attempt (processed=false; we should re-run the pipeline).
     if (eventInsertErr.code === '23505') {
-      console.log('[dt-webhook-ingest] Duplicate event (idempotency_key conflict) — acking');
-      return new Response(
-        JSON.stringify({ ok: true, duplicate: true }),
-        { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      const { data: existing, error: lookupErr } = await supabase
+        .from('dt_webhook_events')
+        .select('processed, processing_error')
+        .eq('idempotency_key', idempotencyKey)
+        .maybeSingle();
+
+      if (lookupErr) {
+        console.error(
+          '[dt-webhook-ingest] Idempotency conflict lookup failed:',
+          lookupErr.message
+        );
+        return new Response('Internal Server Error', { status: 500, headers: corsHeaders });
+      }
+
+      if (existing?.processed) {
+        console.log('[dt-webhook-ingest] Duplicate event already processed — acking');
+        return new Response(
+          JSON.stringify({ ok: true, duplicate: true }),
+          { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+
+      // Previously-failed attempt — clear the prior error and fall through
+      // to re-run the rest of the pipeline against the existing row.
+      console.log(
+        `[dt-webhook-ingest] Retrying previously-failed event (prior_error=${existing?.processing_error ?? 'none'})`
       );
+      const { error: clearErr } = await supabase
+        .from('dt_webhook_events')
+        .update({ processing_error: null })
+        .eq('idempotency_key', idempotencyKey);
+      if (clearErr) {
+        console.warn(
+          '[dt-webhook-ingest] Failed to clear prior processing_error before retry:',
+          clearErr.message
+        );
+      }
+    } else {
+      console.error('[dt-webhook-ingest] Failed to insert webhook event:', eventInsertErr.message);
+      return new Response('Internal Server Error', { status: 500, headers: corsHeaders });
     }
-    console.error('[dt-webhook-ingest] Failed to insert webhook event:', eventInsertErr.message);
-    return new Response('Internal Server Error', { status: 500, headers: corsHeaders });
   }
 
   // If there's no order number we can't do anything useful — ack and move on
@@ -197,7 +268,7 @@ Deno.serve(async (req: Request) => {
     const { data: invMatch } = await supabase
       .from('inventory')
       .select('tenant_id, client_name')
-      .ilike('client_name', `%${accountName}%`)
+      .ilike('client_name', `%${escapeLike(accountName)}%`)
       .limit(1)
       .maybeSingle();
     if (invMatch?.tenant_id) {
