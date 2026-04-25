@@ -690,6 +690,11 @@ export function CreateDeliveryOrderModal({
   const [accessorials, setAccessorials] = useState<DeliveryAccessorial[]>([]);
   const [allAccessorials, setAllAccessorials] = useState<DeliveryAccessorial[]>([]);
   const [selectedAccessorials, setSelectedAccessorials] = useState<Map<string, SelectedAccessorial>>(new Map());
+  // Add-ons section collapsed by default — most orders don't use any
+  // add-ons and the long list crowds the form. Header shows the count
+  // of selected add-ons so the operator can see at a glance whether
+  // there's anything in there.
+  const [addonsExpanded, setAddonsExpanded] = useState(false);
 
   useEffect(() => {
     // Source the add-on list from service_catalog (show_as_delivery_service).
@@ -883,7 +888,9 @@ export function CreateDeliveryOrderModal({
   // ── Validation ─────────────────────────────────────────────────────────
   const canSubmit = useMemo(() => {
     if (!clientSheetId) return false;
-    if (!serviceDate) return false;
+    // serviceDate is intentionally NOT required at submit — operator
+    // can save the order without nailing down the day, then schedule it
+    // later from the order detail page.
     if (mode === 'service_only') {
       return !!(deliveryContactName.trim() && deliveryAddress.trim() && deliveryCity.trim() && deliveryZip.trim() && serviceDescription.trim());
     }
@@ -922,7 +929,7 @@ export function CreateDeliveryOrderModal({
     if (canSubmit) return [];
     const out: string[] = [];
     if (!clientSheetId) out.push('client');
-    if (!serviceDate) out.push('preferred service date');
+    // serviceDate omitted on purpose — not a hard requirement.
     if (mode === 'service_only') {
       if (!deliveryContactName.trim()) out.push('recipient name');
       if (!deliveryAddress.trim())     out.push('address');
@@ -1403,6 +1410,16 @@ export function CreateDeliveryOrderModal({
     display: 'block', fontSize: 11, fontWeight: 600, color: theme.colors.textMuted,
     marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.04em',
   };
+  // Selected-items summary table cells (peach-themed to match the
+  // surrounding panel that contains them).
+  const summaryTh: React.CSSProperties = {
+    padding: '6px 10px', textAlign: 'left',
+    fontSize: 10, fontWeight: 700, color: '#9A3412',
+    textTransform: 'uppercase', letterSpacing: '0.06em',
+  };
+  const summaryTd: React.CSSProperties = {
+    padding: '6px 10px', verticalAlign: 'middle',
+  };
   const section: React.CSSProperties = {
     marginBottom: 20, paddingBottom: 16, borderBottom: `1px solid ${theme.colors.border}`,
   };
@@ -1864,51 +1881,86 @@ export function CreateDeliveryOrderModal({
                   </div>
 
                   {/* Selected-items summary — always visible (whether the
-                      picker is expanded or collapsed). Shows what you've
-                      added to the order so you can confirm the contents
-                      without scrolling the picker. Each chip has an X to
-                      remove without re-opening the picker. */}
+                      picker is expanded or collapsed). Table format mirrors
+                      the picker columns so the operator can re-confirm
+                      what's on the order without cross-referencing.
+                      Trash icon per row removes without re-opening the
+                      picker. */}
                   {selectedInvItems.length > 0 && (
                     <div style={{
-                      marginBottom: 10, padding: 12,
+                      marginBottom: 10,
                       background: '#FFF7ED', border: '1px solid #FED7AA',
-                      borderRadius: 8,
+                      borderRadius: 8, overflow: 'hidden',
                     }}>
-                      <div style={{ fontSize: 10, fontWeight: 700, color: '#9A3412', textTransform: 'uppercase', letterSpacing: '1px', marginBottom: 8 }}>
+                      <div style={{
+                        padding: '10px 12px',
+                        fontSize: 10, fontWeight: 700, color: '#9A3412',
+                        textTransform: 'uppercase', letterSpacing: '1px',
+                        borderBottom: '1px solid #FED7AA',
+                      }}>
                         On this order ({selectedInvItems.length} {selectedInvItems.length === 1 ? 'item' : 'items'}{totalSelectedCuFt > 0 ? ` · ${totalSelectedCuFt} cuFt` : ''})
                       </div>
-                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                        {selectedInvItems.map(it => (
-                          <span
-                            key={it.itemId}
-                            title={it.description || ''}
-                            style={{
-                              display: 'inline-flex', alignItems: 'center', gap: 6,
-                              padding: '4px 6px 4px 10px',
-                              background: '#fff', border: '1px solid #FDBA74', borderRadius: 100,
-                              fontSize: 11, color: theme.colors.text,
-                              maxWidth: 280,
-                            }}
-                          >
-                            <span style={{ fontFamily: 'monospace', fontWeight: 700, color: theme.colors.primary }}>{it.itemId}</span>
-                            <span style={{ color: theme.colors.textMuted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 180 }}>
-                              {it.description || '—'}
-                            </span>
-                            <button
-                              type="button"
-                              onClick={() => toggleItem(it.itemId)}
-                              style={{
-                                display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-                                width: 18, height: 18, borderRadius: '50%',
-                                background: 'transparent', border: 'none', cursor: 'pointer',
-                                color: '#9A3412',
-                              }}
-                              title="Remove from order"
-                            >
-                              <X size={12} />
-                            </button>
-                          </span>
-                        ))}
+                      <div style={{ overflowX: 'auto' }}>
+                        <table style={{
+                          width: '100%', borderCollapse: 'collapse',
+                          fontSize: 12, color: theme.colors.text,
+                        }}>
+                          <thead>
+                            <tr style={{ background: '#FFEDD5' }}>
+                              <th style={{ ...summaryTh, width: 90 }}>Item ID</th>
+                              <th style={{ ...summaryTh, width: 50, textAlign: 'right' }}>Qty</th>
+                              <th style={{ ...summaryTh, width: 110 }}>Vendor</th>
+                              <th style={summaryTh}>Description</th>
+                              <th style={{ ...summaryTh, width: 110 }}>Sidemark</th>
+                              <th style={{ ...summaryTh, width: 110 }}>Reference</th>
+                              <th style={{ ...summaryTh, width: 32 }}></th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {selectedInvItems.map((it, idx) => (
+                              <tr
+                                key={it.itemId}
+                                style={{
+                                  background: idx % 2 === 0 ? '#FFFBF5' : '#FFF7ED',
+                                  borderTop: idx === 0 ? 'none' : '1px solid #FFEDD5',
+                                }}
+                              >
+                                <td style={{ ...summaryTd, fontFamily: 'monospace', fontWeight: 700, color: theme.colors.primary }}>
+                                  {it.itemId}
+                                </td>
+                                <td style={{ ...summaryTd, textAlign: 'right', color: theme.colors.textMuted }}>
+                                  {it.qty ?? 1}
+                                </td>
+                                <td style={{ ...summaryTd, color: theme.colors.textMuted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 110 }} title={it.vendor || ''}>
+                                  {it.vendor || '—'}
+                                </td>
+                                <td style={{ ...summaryTd, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={it.description || ''}>
+                                  {it.description || '—'}
+                                </td>
+                                <td style={{ ...summaryTd, color: theme.colors.textMuted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 110 }} title={it.sidemark || ''}>
+                                  {it.sidemark || '—'}
+                                </td>
+                                <td style={{ ...summaryTd, color: theme.colors.textMuted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 110 }} title={(it as { reference?: string }).reference || ''}>
+                                  {(it as { reference?: string }).reference || '—'}
+                                </td>
+                                <td style={{ ...summaryTd, textAlign: 'center' }}>
+                                  <button
+                                    type="button"
+                                    onClick={() => toggleItem(it.itemId)}
+                                    title="Remove from order"
+                                    style={{
+                                      background: 'transparent', border: 'none', cursor: 'pointer',
+                                      color: '#9A3412', padding: 4, borderRadius: 4,
+                                      display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                                    }}
+                                  >
+                                    <Trash2 size={13} />
+                                  </button>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
                       </div>
                     </div>
                   )}
@@ -2117,17 +2169,41 @@ export function CreateDeliveryOrderModal({
             </div>
           )}
 
-          {/* Accessorials */}
+          {/* Accessorials — collapsed by default */}
           {accessorials.length > 0 && mode !== 'service_only' && (
             <div style={section}>
-              <div style={sectionTitle}>
-                Add-Ons
-                {isStaff && (
-                  <span style={{ fontSize: 10, fontWeight: 500, color: theme.colors.textMuted, marginLeft: 8, textTransform: 'none', letterSpacing: 0 }}>
-                    (includes staff-only options)
-                  </span>
-                )}
-              </div>
+              <button
+                type="button"
+                onClick={() => setAddonsExpanded(v => !v)}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 6,
+                  width: '100%', padding: '4px 6px', borderRadius: 6,
+                  background: 'none', border: 'none', cursor: 'pointer',
+                  fontFamily: 'inherit', textAlign: 'left',
+                  marginBottom: addonsExpanded ? 12 : 0,
+                }}
+                title={addonsExpanded ? 'Hide the add-ons list' : 'Show the add-ons list'}
+              >
+                {addonsExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                <div style={{ ...sectionTitle, marginBottom: 0 }}>
+                  Add-Ons
+                  {selectedAccessorials.size > 0 && (
+                    <span style={{
+                      fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 100,
+                      background: theme.colors.primary, color: '#fff',
+                      textTransform: 'none', letterSpacing: 0,
+                    }}>
+                      {selectedAccessorials.size} selected
+                    </span>
+                  )}
+                  {isStaff && (
+                    <span style={{ fontSize: 10, fontWeight: 500, color: theme.colors.textMuted, marginLeft: 8, textTransform: 'none', letterSpacing: 0 }}>
+                      (includes staff-only options)
+                    </span>
+                  )}
+                </div>
+              </button>
+              {addonsExpanded && (
               <div style={{ display: 'grid', gap: 8 }}>
                 {accessorials.map(acc => {
                   const selected = isAccessorialSelected(acc.code);
@@ -2188,6 +2264,7 @@ export function CreateDeliveryOrderModal({
                   );
                 })}
               </div>
+              )}
             </div>
           )}
 
