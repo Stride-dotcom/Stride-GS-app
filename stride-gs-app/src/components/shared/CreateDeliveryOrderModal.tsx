@@ -1,5 +1,20 @@
 /**
- * CreateDeliveryOrderModal — Phase 2c (expanded)
+ * CreateDeliveryOrderModal — Phase 2c (expanded) — v2 2026-04-25 PST
+ *   v2: Code-review fixes —
+ *       • H3 admin auto-push to DT is now AWAITED, with failures surfaced as
+ *         a banner on the success screen instead of swallowed in a fire-and-
+ *         forget .catch().
+ *       • H4 P+D back-link update is now error-checked; a failure throws so
+ *         the user knows to retry rather than shipping a half-linked pair.
+ *       • H5 pickup-leg item rows now use POSITIVE quantities — the pickup
+ *         vs delivery distinction is carried by the parent order_type, not
+ *         by the sign of dt_order_items.quantity.
+ *       • H6 generateOrderNumber now THROWS on RPC failure instead of
+ *         falling back to a timestamp slice (which produced collision-prone,
+ *         non-monotonic identifiers).
+ *       • M9 dropped the duplicate `order_notes` write — dt_orders has a
+ *         single `details` column for free-text notes, and there was no
+ *         separate UI input feeding `order_notes`.
  *
  * Four order modes, selected up front:
  *   • delivery            → items leave Stride warehouse to a customer
@@ -802,18 +817,19 @@ export function CreateDeliveryOrderModal({
       ? clientName.replace(/[^A-Za-z]/g, '').slice(0, 3).toUpperCase() || 'STR'
       : 'STR';
 
-    // Get next sequence number from Supabase
-    let seqNum = '00001';
-    try {
-      const { data, error } = await supabase.rpc('next_order_number');
-      if (!error && data) {
-        seqNum = data; // already zero-padded from the DB function
-      }
-    } catch {
-      // Fallback: timestamp-based if RPC fails
-      const now = new Date();
-      seqNum = String(now.getTime()).slice(-5);
+    // Get next sequence number from Supabase. The previous version fell back
+    // to a timestamp slice on RPC failure, but that's collision-prone and
+    // produces non-monotonic numbers, so we now refuse to mint an order
+    // number when the RPC fails — the surrounding submit handler turns the
+    // throw into a visible error banner instead of silently writing a bad
+    // identifier.
+    const { data: seqData, error: seqErr } = await supabase.rpc('next_order_number');
+    if (seqErr || !seqData) {
+      throw new Error(
+        `Could not allocate order number (next_order_number RPC failed: ${seqErr?.message ?? 'no data returned'}). Try again, or contact support if the problem persists.`
+      );
     }
+    const seqNum: string = seqData; // already zero-padded from the DB function
 
     // Build reference portion from PO Number (no spaces)
     const ref = poNumber.trim().replace(/\s+/g, '-');
@@ -852,8 +868,12 @@ export function CreateDeliveryOrderModal({
       window_end_local: windowEnd || null,
       po_number: poNumber.trim() || null,
       sidemark: sidemark.trim() || null,
+      // dt_orders has a single `details` column for free-text notes. The legacy
+      // `order_notes` write was a duplicate of `details` from the same form
+      // field — there is no separate UI input — so we don't write a second
+      // copy. (The dt_order_notes table holds threaded staff/client notes
+      // and is unrelated to this column.)
       details: details.trim() || null,
-      order_notes: details.trim() || null,
       source: 'app',
       review_status: user?.role === 'admin' ? 'approved' : 'pending_review',
       created_by_user: authUid,
@@ -940,14 +960,27 @@ export function CreateDeliveryOrderModal({
           .single();
         if (dErr || !deliveryRow) throw new Error(`Delivery order insert failed: ${dErr?.message}`);
 
-        // 3) Backlink pickup → delivery for bidirectional navigation
-        await supabase.from('dt_orders')
+        // 3) Backlink pickup → delivery for bidirectional navigation. If this
+        //    fails the pickup row is left without a linked_order_id, which
+        //    breaks the Review Queue's "linked pair" detection — surface the
+        //    error so the user knows to retry rather than silently shipping a
+        //    half-linked pair.
+        const { error: backlinkErr } = await supabase.from('dt_orders')
           .update({ linked_order_id: deliveryRow.id })
           .eq('id', pickupRow.id);
+        if (backlinkErr) {
+          throw new Error(
+            `Pickup→delivery back-link failed: ${backlinkErr.message}. The two orders were created but the pickup leg is not linked back to the delivery leg.`
+          );
+        }
 
-        // 4) Insert items. Free-text items go on BOTH orders.
-        //    Pickup leg: prefix "PU: " + qty -1 (items inbound to warehouse).
-        //    Delivery leg: normal description + qty as entered.
+        // 4) Insert items. Free-text items go on BOTH orders with a positive
+        //    quantity on each leg — the pickup vs delivery distinction is
+        //    carried by the parent row's `order_type` ('pickup' vs
+        //    'pickup_and_delivery'), not by the sign of the item quantity.
+        //    The previous negative-quantity convention broke item-count
+        //    aggregations and made dt_order_items.quantity violate its
+        //    natural non-negative invariant.
         const pickupItemRows = pickupFreeItems
           .filter(i => i.description.trim())
           .flatMap(i => {
@@ -957,8 +990,8 @@ export function CreateDeliveryOrderModal({
                 dt_order_id: pickupRow.id,
                 dt_item_code: null,
                 description: `PU: ${i.description.trim()}`,
-                quantity: -qty,
-                original_quantity: -qty,
+                quantity: qty,
+                original_quantity: qty,
                 extras: { source: 'pickup_free_text' },
               },
               {
@@ -982,11 +1015,29 @@ export function CreateDeliveryOrderModal({
           dtIdentifier: deliveryRow.dt_identifier,
           reviewStatus: isAdminAutoApprove ? 'approved' : 'pending_review',
         });
-        // Admin auto-push to DT — best-effort, order stays "approved" for retry if push fails
+        // Admin auto-push to DT. We AWAIT the call (rather than fire-and-forget)
+        // so that DT rejections surface to the user as a visible warning on the
+        // success screen — previously the modal said "Submitted" even when DT
+        // bounced the payload, leaving silently-stuck orders. The order row
+        // itself stays in 'approved' state regardless, so the reviewer can
+        // retry the push from the Review Queue. The success screen still shows
+        // because the dt_orders insert succeeded — only the DT push failed.
         if (isAdminAutoApprove) {
-          supabase.functions.invoke('dt-push-order', {
-            body: { orderId: deliveryRow.id },
-          }).catch((err) => { console.warn('[delivery] Admin auto-push failed (non-fatal):', err); });
+          try {
+            const { data: pushData, error: pushErr } = await supabase.functions.invoke('dt-push-order', {
+              body: { orderId: deliveryRow.id },
+            });
+            const pushResult = pushData as { ok?: boolean; error?: string } | null;
+            if (pushErr || !pushResult?.ok) {
+              const msg = pushErr?.message ?? pushResult?.error ?? 'Unknown error';
+              console.warn('[delivery] Admin auto-push to DT failed:', msg);
+              setSubmitError(`Order created, but DT push failed: ${msg}. Retry from the Review Queue.`);
+            }
+          } catch (pushEx) {
+            const msg = pushEx instanceof Error ? pushEx.message : String(pushEx);
+            console.warn('[delivery] Admin auto-push to DT threw:', msg);
+            setSubmitError(`Order created, but DT push failed: ${msg}. Retry from the Review Queue.`);
+          }
         }
         // Auto-save contacts to address book — best-effort
         upsertAddressBookContact({
@@ -1130,11 +1181,25 @@ export function CreateDeliveryOrderModal({
           dtIdentifier: orderRow.dt_identifier,
           reviewStatus: isAdminAutoApprove ? 'approved' : 'pending_review',
         });
-        // Admin auto-push to DT — best-effort, order stays "approved" for retry if push fails
+        // Admin auto-push to DT. AWAITED so DT rejections surface to the user
+        // — see the matching block in the pickup_and_delivery branch above for
+        // the full rationale.
         if (isAdminAutoApprove) {
-          supabase.functions.invoke('dt-push-order', {
-            body: { orderId: orderRow.id },
-          }).catch((err) => { console.warn('[delivery] Admin auto-push failed (non-fatal):', err); });
+          try {
+            const { data: pushData, error: pushErr } = await supabase.functions.invoke('dt-push-order', {
+              body: { orderId: orderRow.id },
+            });
+            const pushResult = pushData as { ok?: boolean; error?: string } | null;
+            if (pushErr || !pushResult?.ok) {
+              const msg = pushErr?.message ?? pushResult?.error ?? 'Unknown error';
+              console.warn('[delivery] Admin auto-push to DT failed:', msg);
+              setSubmitError(`Order created, but DT push failed: ${msg}. Retry from the Review Queue.`);
+            }
+          } catch (pushEx) {
+            const msg = pushEx instanceof Error ? pushEx.message : String(pushEx);
+            console.warn('[delivery] Admin auto-push to DT threw:', msg);
+            setSubmitError(`Order created, but DT push failed: ${msg}. Retry from the Review Queue.`);
+          }
         }
         // Auto-save contact to address book — best-effort
         if (contactName.trim()) {
@@ -1229,6 +1294,19 @@ export function CreateDeliveryOrderModal({
             <strong>Status:</strong> Pending Review<br />
             Stride staff will review this order and confirm pricing + availability before it's dispatched.
           </div>
+          {/* DT push failure (admin auto-push only). The dt_orders row was
+              still created — only the DispatchTrack-side push failed — so the
+              user sees both the success state and a warning banner with the
+              actionable next step. */}
+          {submitError && (
+            <div style={{
+              background: '#FEE2E2', color: '#991B1B', padding: '10px 14px',
+              borderRadius: 8, fontSize: 12, marginBottom: 20, textAlign: 'left',
+              border: '1px solid #FCA5A5',
+            }}>
+              <strong>Heads up:</strong> {submitError}
+            </div>
+          )}
 
           {/* Stax payment — only when billing method is Customer Collect */}
           {billingMethod === 'customer_collect' && (

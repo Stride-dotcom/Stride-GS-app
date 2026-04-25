@@ -1,5 +1,11 @@
 /**
- * dt-push-order — Supabase Edge Function (Phase 2c) — v12 2026-04-24 PST
+ * dt-push-order — Supabase Edge Function (Phase 2c) — v13 2026-04-25 PST
+ * v13: Fee label in description now reads from order_type (not the legacy
+ *      is_pickup boolean) so pickup-leg fees label correctly when the row
+ *      was created via the new order_type pipeline. CDATA escaping is
+ *      centralized in cdataEscape() instead of being repeated inline.
+ *      Top-level error path no longer leaks stack traces to the response
+ *      body — stack is logged only.
  * v12: Added <service_time> XML tag + paid status in description
  *
  * Pushes an approved order (and its linked pickup, if any) from dt_orders
@@ -78,6 +84,13 @@ function xmlEscape(val: unknown): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;');
 }
 
+// Escape any "]]>" sequences inside text that will sit between <![CDATA[ ... ]]>.
+// "]]>" is the only sequence that prematurely terminates a CDATA section, so we
+// split it across two CDATA sections to keep the payload literal-safe.
+function cdataEscape(val: string): string {
+  return val.replace(/]]>/g, ']]]]><![CDATA[>');
+}
+
 // Build a rich item description: "Vendor | Description | SM: Sidemark | Ref: Reference"
 // For pickup legs, prefix with "PICK UP: "
 function buildItemDesc(it: DtOrderItemRow, isPickupLeg: boolean, sidemark?: string, reference?: string): string {
@@ -129,7 +142,9 @@ function buildOrderDescription(
 
     // Itemized charges
     if (order.base_delivery_fee != null && order.base_delivery_fee > 0) {
-      const feeLabel = order.is_pickup ? 'Pickup' : 'Delivery';
+      // Drive the label from order_type so rows created via the new pipeline
+      // (which leaves is_pickup unset) still label pickup fees correctly.
+      const feeLabel = orderType === 'pickup' ? 'Pickup' : 'Delivery';
       descParts.push(`${feeLabel} = $${Number(order.base_delivery_fee).toFixed(2)}`);
     }
     if (order.extra_items_fee != null && order.extra_items_fee > 0) {
@@ -161,7 +176,7 @@ function buildOrderDescription(
     descParts.push(order.details);
   }
 
-  return descParts.join('\n').replace(/]]>/g, ']]]]><![CDATA[>');
+  return cdataEscape(descParts.join('\n'));
 }
 
 function buildOrderXml(
@@ -193,8 +208,18 @@ function buildOrderXml(
 
   const desc = buildOrderDescription(order, accountName, crossRefIdent, linkedDeliveryInfo);
 
-  // Build notes XML if order_notes exists
-  const notesXml = order.order_notes ? `\n    <notes count="1">\n      <note created_at="${new Date().toISOString()}" author="StrideApp" note_type="Public">\n        <![CDATA[${order.order_notes.replace(/]]>/g, ']]]]><![CDATA[>')}]]>\n      </note>\n    </notes>` : '';
+  // Build notes XML if order_notes exists.
+  //
+  // dt_orders has two free-text columns we surface to DT:
+  //   • details      → the operator-facing detail text. Mirrored into the
+  //                    <description> CDATA block (after the billing summary)
+  //                    so it shows on DT's primary order view.
+  //   • order_notes  → driver-facing public notes. Pushed as a <notes>/<note>
+  //                    element with note_type="Public" so they render in the
+  //                    DT driver app's notes pane.
+  // Both fields can carry user-typed content, so we run cdataEscape() on
+  // anything that lands inside a CDATA section.
+  const notesXml = order.order_notes ? `\n    <notes count="1">\n      <note created_at="${new Date().toISOString()}" author="StrideApp" note_type="Public">\n        <![CDATA[${cdataEscape(order.order_notes)}]]>\n      </note>\n    </notes>` : '';
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <service_orders>
@@ -442,12 +467,15 @@ Deno.serve(async (req: Request) => {
   });
 
   } catch (unhandled) {
-    // Top-level catch — ensures we always return a JSON body, never a raw 500
-    console.error(`[dt-push-order] Unhandled error for orderId=${orderId}:`, unhandled);
+    // Top-level catch — ensures we always return a JSON body, never a raw 500.
+    // Stack trace is logged for ops debugging but never returned to the
+    // caller, since the response can be surfaced directly to client UIs.
+    const err = unhandled as Error;
+    console.error(`[dt-push-order] Unhandled error for orderId=${orderId}:`, err);
+    if (err?.stack) console.error(`[dt-push-order] Stack:`, err.stack);
     return json({
       ok: false,
-      error: `Internal error: ${(unhandled as Error).message || String(unhandled)}`,
-      stack: (unhandled as Error).stack?.slice(0, 300),
+      error: 'Internal error pushing order to DispatchTrack. Check function logs for details.',
     }, 500);
   }
 });

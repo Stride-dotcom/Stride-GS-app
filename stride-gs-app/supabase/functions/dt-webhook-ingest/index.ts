@@ -1,7 +1,13 @@
 /**
  * dt-webhook-ingest — Supabase Edge Function
  *
- * Version: v4 (2026-04-25 PST)
+ * Version: v5 (2026-04-25 PST)
+ *   v5: Fuzzy account-name lookup now requires exactly one match — ambiguous
+ *       hits (>1) quarantine instead of binding to the first row, preventing
+ *       cross-tenant data writes. parseTimeStr now accepts "HH:MM AM/PM" in
+ *       addition to 24h format. local_service_date is validated to YYYY-MM-DD
+ *       before being written to the date column (unparseable strings are
+ *       skipped rather than written raw).
  *   v4: Body parsing now honors Content-Type — JSON bodies are JSON.parsed,
  *       everything else falls back to x-www-form-urlencoded (previous
  *       versions silently produced an empty payload for JSON). Fuzzy
@@ -75,16 +81,42 @@ async function sha256hex(text: string): Promise<string> {
     .join('');
 }
 
-/** Parse a DT time string "HH:MM" or "HH:MM:SS" into a Postgres time literal */
+/** Parse a DT time string into a Postgres time literal.
+ *  Accepts "HH:MM" / "HH:MM:SS" (24h) or "HH:MM AM/PM" (12h).
+ *  Unknown formats return null and the caller stores nothing for that field. */
 function parseTimeStr(val: string | undefined): string | null {
   if (!val) return null;
-  // Only accepts 24h "HH:MM" or "HH:MM:SS". 12h with AM/PM is not supported;
-  // unknown formats return null and the caller stores nothing for that field.
   const cleaned = val.trim();
+  // 12h with AM/PM
+  const ampm = cleaned.match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+  if (ampm) {
+    let h = parseInt(ampm[1], 10);
+    const m = ampm[2];
+    const period = ampm[3].toUpperCase();
+    if (period === 'PM' && h !== 12) h += 12;
+    if (period === 'AM' && h === 12) h = 0;
+    return `${String(h).padStart(2, '0')}:${m}:00`;
+  }
+  // 24h
   if (/^\d{1,2}:\d{2}(:\d{2})?$/.test(cleaned)) {
     return cleaned.length <= 5 ? cleaned + ':00' : cleaned;
   }
   return null;
+}
+
+/** Validate/normalize a service-date string to YYYY-MM-DD. Returns null when
+ *  the input doesn't contain a parseable date — prevents writing raw DT
+ *  strings (e.g. "Tuesday, April 16") into a date column. */
+function parseServiceDate(val: string | undefined): string | null {
+  if (!val) return null;
+  const m = val.match(/(\d{4})-(\d{2})-(\d{2})/);
+  if (!m) return null;
+  // Sanity check the components actually form a real date
+  const yyyy = parseInt(m[1], 10);
+  const mm = parseInt(m[2], 10);
+  const dd = parseInt(m[3], 10);
+  if (mm < 1 || mm > 12 || dd < 1 || dd > 31) return null;
+  return `${m[1]}-${m[2]}-${m[3]}`;
 }
 
 /** Safely coerce a string to an integer or null */
@@ -263,29 +295,43 @@ Deno.serve(async (req: Request) => {
     tenantId = map[accountName] ?? map[accountName.toLowerCase()] ?? null;
   }
 
-  // Pass 2: fuzzy ILIKE against inventory.client_name (fallback)
+  // Pass 2: fuzzy ILIKE against inventory.client_name (fallback).
+  // Only accept a match when there's exactly one distinct tenant — multiple
+  // hits mean the account name is ambiguous and we'd risk binding the event
+  // to the wrong tenant. Quarantine instead.
+  let fuzzyAmbiguous = false;
   if (!tenantId && accountName) {
-    const { data: invMatch } = await supabase
+    const { data: invMatches } = await supabase
       .from('inventory')
       .select('tenant_id, client_name')
       .ilike('client_name', `%${escapeLike(accountName)}%`)
-      .limit(1)
-      .maybeSingle();
-    if (invMatch?.tenant_id) {
-      tenantId = invMatch.tenant_id;
+      .limit(2);
+    const distinctTenants = new Set(
+      (invMatches ?? [])
+        .map((r: { tenant_id: string | null }) => r.tenant_id)
+        .filter((t): t is string => !!t)
+    );
+    if (distinctTenants.size === 1) {
+      tenantId = [...distinctTenants][0];
       console.log(`[dt-webhook-ingest] Fuzzy-matched account="${accountName}" → tenant_id=${tenantId} via inventory`);
+    } else if (distinctTenants.size > 1) {
+      fuzzyAmbiguous = true;
+      console.warn(`[dt-webhook-ingest] Fuzzy match for account="${accountName}" was ambiguous (${distinctTenants.size} distinct tenants) — quarantining`);
     }
   }
 
   // ── 7. Quarantine if unmapped ──────────────────────────────────────────
   if (!tenantId) {
-    console.warn(`[dt-webhook-ingest] Cannot map account="${accountName}" — quarantining`);
+    const reason = fuzzyAmbiguous
+      ? `ambiguous_fuzzy_match:${accountName}`
+      : `unmapped_account:${accountName}`;
+    console.warn(`[dt-webhook-ingest] ${reason} — quarantining`);
     const { error: quarantineErr } = await supabase.from('dt_orders_quarantine').insert({
       received_at:    receivedAt,
       dt_identifier:  dtIdentifier,
       dt_dispatch_id: dtDispatchId,
       raw_payload:    payload,
-      mapping_hint:   { account_name: accountName, event_type: eventType },
+      mapping_hint:   { account_name: accountName, event_type: eventType, reason },
     });
     if (quarantineErr) {
       console.error('[dt-webhook-ingest] Quarantine insert error:', quarantineErr.message);
@@ -293,14 +339,14 @@ Deno.serve(async (req: Request) => {
     // Mark the webhook event with the mapping failure
     const { error: markErr } = await supabase
       .from('dt_webhook_events')
-      .update({ processing_error: `unmapped_account:${accountName}`, processed: false })
+      .update({ processing_error: reason, processed: false })
       .eq('idempotency_key', idempotencyKey);
     if (markErr) {
       console.warn('[dt-webhook-ingest] Failed to mark event with mapping error:', markErr.message);
     }
 
     return new Response(
-      JSON.stringify({ ok: true, quarantined: true, account: accountName }),
+      JSON.stringify({ ok: true, quarantined: true, account: accountName, reason }),
       { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     );
   }
@@ -347,8 +393,15 @@ Deno.serve(async (req: Request) => {
 
   // Date / time window — tag names not yet confirmed from DT Admin Available Tags.
   // Common DT conventions tried; inspect first webhook payload JSONB to confirm.
-  const serviceDate = payload['Service_Date'] ?? payload['Requested_Date'] ?? payload['Delivery_Date'] ?? payload['service_date'];
-  if (serviceDate) orderUpsert.local_service_date = serviceDate;
+  // local_service_date is a date column — validate before writing so a raw DT
+  // string (e.g. "Tuesday, April 16") doesn't blow up the upsert.
+  const serviceDateRaw = payload['Service_Date'] ?? payload['Requested_Date'] ?? payload['Delivery_Date'] ?? payload['service_date'];
+  const serviceDate = parseServiceDate(serviceDateRaw);
+  if (serviceDate) {
+    orderUpsert.local_service_date = serviceDate;
+  } else if (serviceDateRaw) {
+    console.warn(`[dt-webhook-ingest] Unparseable service date "${serviceDateRaw}" — skipping local_service_date`);
+  }
 
   const winStart = parseTimeStr(payload['Time_From'] ?? payload['Start_Time'] ?? payload['Window_Start'] ?? payload['window_start']);
   const winEnd   = parseTimeStr(payload['Time_To']   ?? payload['End_Time']   ?? payload['Window_End']   ?? payload['window_end']);
