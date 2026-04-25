@@ -54,6 +54,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import {
   X, Check, Loader2, CheckCircle2, MapPin, Truck,
   ArrowRight, Wrench, Box, Plus, Trash2, CreditCard, BookOpen, Search,
+  ChevronDown, ChevronRight, AlertTriangle,
 } from 'lucide-react';
 import { AutocompleteSelect } from './AutocompleteSelect';
 import { theme } from '../../styles/theme';
@@ -561,6 +562,21 @@ export function CreateDeliveryOrderModal({
 
   // ── Inventory item selection (delivery + warehouse-source only) ────────
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set(preSelectedItemIds));
+  // Collapse-toggle for the inventory list section. Defaults to expanded
+  // when there are no selections yet (you need to see the list to pick),
+  // collapsed once you've added items (you don't need the picker, you
+  // need to see what you've added). Operator can flip either way.
+  const [inventoryExpanded, setInventoryExpanded] = useState(true);
+  // Auto-collapse the picker the first time selections appear so the
+  // selected-items summary takes the focus. Doesn't fight subsequent
+  // manual toggles.
+  const collapsedAfterFirstSelection = React.useRef(false);
+  useEffect(() => {
+    if (selectedIds.size > 0 && !collapsedAfterFirstSelection.current) {
+      setInventoryExpanded(false);
+      collapsedAfterFirstSelection.current = true;
+    }
+  }, [selectedIds.size]);
   const activeItems = useMemo(
     () => liveItems.filter(i => {
       if (i.status !== 'Active') return false;
@@ -897,6 +913,51 @@ export function CreateDeliveryOrderModal({
     pickupContactName, pickupAddress, pickupCity, pickupZip, pickupFreeItems,
     itemsSource, selectedInvItems,
     selectedCoverage, declaredValue,
+  ]);
+
+  // What's blocking the submit, in human terms — shown next to the
+  // disabled Submit button so the operator doesn't have to scroll the
+  // form looking for an empty asterisked field.
+  const missingFields = useMemo(() => {
+    if (canSubmit) return [];
+    const out: string[] = [];
+    if (!clientSheetId) out.push('client');
+    if (!serviceDate) out.push('preferred service date');
+    if (mode === 'service_only') {
+      if (!deliveryContactName.trim()) out.push('recipient name');
+      if (!deliveryAddress.trim())     out.push('address');
+      if (!deliveryCity.trim())        out.push('city');
+      if (!deliveryZip.trim())         out.push('ZIP');
+      if (!serviceDescription.trim())  out.push('service description');
+    }
+    const needsPickup   = mode === 'pickup' || mode === 'pickup_and_delivery';
+    const needsDelivery = mode === 'delivery' || mode === 'pickup_and_delivery';
+    if (needsPickup) {
+      if (!pickupContactName.trim()) out.push('pickup contact');
+      if (!pickupAddress.trim())     out.push('pickup address');
+      if (!pickupCity.trim())        out.push('pickup city');
+      if (!pickupZip.trim())         out.push('pickup ZIP');
+      if (!pickupFreeItems.some(i => i.description.trim())) out.push('at least one pickup item');
+    }
+    if (needsDelivery) {
+      if (!deliveryContactName.trim()) out.push('recipient name');
+      if (!deliveryAddress.trim())     out.push('delivery address');
+      if (!deliveryCity.trim())        out.push('delivery city');
+      if (!deliveryZip.trim())         out.push('delivery ZIP');
+      if (mode === 'delivery' && itemsSource === 'warehouse' && selectedInvItems.length === 0) {
+        out.push('at least one item selected from inventory');
+      }
+    }
+    if (selectedCoverage?.calcType === 'percent_declared') {
+      const dv = parseFloat(declaredValue);
+      if (!Number.isFinite(dv) || dv <= 0) out.push('declared value (for the coverage tier)');
+    }
+    return out;
+  }, [
+    canSubmit, clientSheetId, serviceDate, mode,
+    deliveryContactName, deliveryAddress, deliveryCity, deliveryZip, serviceDescription,
+    pickupContactName, pickupAddress, pickupCity, pickupZip, pickupFreeItems,
+    itemsSource, selectedInvItems, selectedCoverage, declaredValue,
   ]);
 
   // ── Order number generation ────────────────────────────────────────────
@@ -1505,11 +1566,16 @@ export function CreateDeliveryOrderModal({
 
   return (
     <>
-      <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.3)', zIndex: 200 }} />
+      {/* z-index bumped from 200/201 to 1000/1001 so the modal footer
+          (Cancel + Submit for Review) is never covered by the
+          FloatingActionBar at the bottom of the page. The FAB's parent
+          stacking context was winning the layer fight on tall screens
+          where the modal's bottom edge sits behind the FAB. */}
+      <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.3)', zIndex: 1000 }} />
       <div style={{
         position: 'fixed', top: '50%', left: '50%', transform: 'translate(-50%,-50%)',
         width: 1100, maxWidth: '96vw', maxHeight: '94vh',
-        background: '#fff', borderRadius: 16, zIndex: 201,
+        background: '#fff', borderRadius: 16, zIndex: 1001,
         boxShadow: '0 20px 60px rgba(0,0,0,0.3)',
         display: 'flex', flexDirection: 'column', overflow: 'hidden',
       }}>
@@ -1774,14 +1840,84 @@ export function CreateDeliveryOrderModal({
               {/* Items sub-section for delivery mode */}
               {mode === 'delivery' && itemsSource === 'warehouse' && (
                 <div style={{ marginTop: 14 }}>
+                  {/* Header with collapse toggle */}
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 8, flexWrap: 'wrap' }}>
-                    <div style={label}>Items (from inventory, {selectedInvItems.length} selected{totalSelectedCuFt > 0 ? ` · ${totalSelectedCuFt} cuFt` : ''})</div>
-                    {invLoading && (
+                    <button
+                      type="button"
+                      onClick={() => setInventoryExpanded(v => !v)}
+                      style={{
+                        display: 'inline-flex', alignItems: 'center', gap: 6,
+                        padding: '4px 6px', borderRadius: 6,
+                        background: 'none', border: 'none', cursor: 'pointer',
+                        fontFamily: 'inherit', textAlign: 'left',
+                      }}
+                      title={inventoryExpanded ? 'Hide the inventory picker' : 'Show the inventory picker'}
+                    >
+                      {inventoryExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                      <span style={label}>Items (from inventory, {selectedInvItems.length} selected{totalSelectedCuFt > 0 ? ` · ${totalSelectedCuFt} cuFt` : ''})</span>
+                    </button>
+                    {invLoading && inventoryExpanded && (
                       <span style={{ fontSize: 11, color: theme.colors.textMuted, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
                         <Loader2 size={12} className="spin" /> Loading inventory…
                       </span>
                     )}
                   </div>
+
+                  {/* Selected-items summary — always visible (whether the
+                      picker is expanded or collapsed). Shows what you've
+                      added to the order so you can confirm the contents
+                      without scrolling the picker. Each chip has an X to
+                      remove without re-opening the picker. */}
+                  {selectedInvItems.length > 0 && (
+                    <div style={{
+                      marginBottom: 10, padding: 12,
+                      background: '#FFF7ED', border: '1px solid #FED7AA',
+                      borderRadius: 8,
+                    }}>
+                      <div style={{ fontSize: 10, fontWeight: 700, color: '#9A3412', textTransform: 'uppercase', letterSpacing: '1px', marginBottom: 8 }}>
+                        On this order ({selectedInvItems.length} {selectedInvItems.length === 1 ? 'item' : 'items'}{totalSelectedCuFt > 0 ? ` · ${totalSelectedCuFt} cuFt` : ''})
+                      </div>
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                        {selectedInvItems.map(it => (
+                          <span
+                            key={it.itemId}
+                            title={it.description || ''}
+                            style={{
+                              display: 'inline-flex', alignItems: 'center', gap: 6,
+                              padding: '4px 6px 4px 10px',
+                              background: '#fff', border: '1px solid #FDBA74', borderRadius: 100,
+                              fontSize: 11, color: theme.colors.text,
+                              maxWidth: 280,
+                            }}
+                          >
+                            <span style={{ fontFamily: 'monospace', fontWeight: 700, color: theme.colors.primary }}>{it.itemId}</span>
+                            <span style={{ color: theme.colors.textMuted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 180 }}>
+                              {it.description || '—'}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => toggleItem(it.itemId)}
+                              style={{
+                                display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                                width: 18, height: 18, borderRadius: '50%',
+                                background: 'transparent', border: 'none', cursor: 'pointer',
+                                color: '#9A3412',
+                              }}
+                              title="Remove from order"
+                            >
+                              <X size={12} />
+                            </button>
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Picker — only mounted when expanded so the modal
+                      doesn't waste vertical space when the operator's
+                      already done picking. */}
+                  {inventoryExpanded && (
+                  <>
                   <input
                     style={{ ...input, marginBottom: 10 }}
                     placeholder="Search by item ID, description, vendor, class, sidemark, location…"
@@ -1868,6 +2004,8 @@ export function CreateDeliveryOrderModal({
                       })
                     )}
                   </div>
+                  </>
+                  )}
                 </div>
               )}
 
@@ -2247,35 +2385,55 @@ export function CreateDeliveryOrderModal({
         {/* Footer */}
         <div style={{
           padding: '14px 20px', borderTop: `1px solid ${theme.colors.border}`,
-          display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 10, flexShrink: 0,
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexShrink: 0,
           background: '#FAFAFA',
         }}>
-          <button
-            onClick={onClose}
-            type="button"
-            style={{
-              padding: '9px 20px', borderRadius: 8,
-              border: `1px solid ${theme.colors.border}`,
-              background: '#fff', color: theme.colors.text,
-              fontSize: 13, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit',
-            }}
-          >
-            Cancel
-          </button>
-          <WriteButton
-            onClick={handleSubmit}
-            disabled={!canSubmit}
-            label="Submit for Review"
-            variant="primary"
-            style={{
-              padding: '9px 24px', borderRadius: 8,
-              border: 'none',
-              background: canSubmit ? theme.colors.primary : theme.colors.border,
-              color: '#fff',
-              fontSize: 13, fontWeight: 600, cursor: canSubmit ? 'pointer' : 'not-allowed',
-              fontFamily: 'inherit',
-            }}
-          />
+          {/* "What's missing" hint — shown on the left, only when the
+              submit button is disabled. Listing the empty required
+              fields here saves the operator from scrolling the form
+              hunting for an unset field. Empty when canSubmit=true so
+              the hint vanishes the moment the form is ready. */}
+          <div style={{ flex: 1, minWidth: 0 }}>
+            {missingFields.length > 0 && (
+              <div style={{
+                display: 'flex', alignItems: 'flex-start', gap: 8,
+                fontSize: 11, color: '#92400E', lineHeight: 1.5,
+              }}>
+                <AlertTriangle size={13} style={{ flexShrink: 0, marginTop: 2 }} />
+                <span>
+                  Still needed before submit: <strong>{missingFields.join(', ')}</strong>
+                </span>
+              </div>
+            )}
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
+            <button
+              onClick={onClose}
+              type="button"
+              style={{
+                padding: '9px 20px', borderRadius: 8,
+                border: `1px solid ${theme.colors.border}`,
+                background: '#fff', color: theme.colors.text,
+                fontSize: 13, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit',
+              }}
+            >
+              Cancel
+            </button>
+            <WriteButton
+              onClick={handleSubmit}
+              disabled={!canSubmit}
+              label="Submit for Review"
+              variant="primary"
+              style={{
+                padding: '9px 24px', borderRadius: 8,
+                border: 'none',
+                background: canSubmit ? theme.colors.primary : theme.colors.border,
+                color: '#fff',
+                fontSize: 13, fontWeight: 600, cursor: canSubmit ? 'pointer' : 'not-allowed',
+                fontFamily: 'inherit',
+              }}
+            />
+          </div>
         </div>
       </div>
     </>
