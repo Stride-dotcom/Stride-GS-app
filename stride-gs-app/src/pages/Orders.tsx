@@ -29,6 +29,8 @@ const CATEGORY_CFG: Record<string, { bg: string; color: string; label: string }>
   completed:   { bg: '#F0FDF4', color: '#15803D', label: 'Completed' },
   exception:   { bg: '#FEF2F2', color: '#DC2626', label: 'Exception' },
   cancelled:   { bg: '#F3F4F6', color: '#6B7280', label: 'Cancelled' },
+  review:      { bg: '#FFFBEB', color: '#B45309', label: 'Review' },
+  billing:     { bg: '#F0FDFA', color: '#0F766E', label: 'Billing' },
 };
 
 function StatusChip({ order }: { order: DtOrderForUI }) {
@@ -46,7 +48,7 @@ const globalFilterFn: FilterFn<DtOrderForUI> = (row, _colId, value: string) => {
   if (!value) return true;
   const q = value.toLowerCase();
   const r = row.original;
-  return [r.dtIdentifier, r.contactName, r.contactAddress, r.contactCity, r.poNumber, r.sidemark, r.clientReference, r.clientName, r.statusName, r.source, r.createdByName, r.createdByEmail]
+  return [r.dtIdentifier, r.contactName, r.contactAddress, r.contactCity, r.poNumber, r.sidemark, r.clientReference, r.clientName, r.statusName, r.source, r.createdByName, r.createdByEmail, r.contactPhone, r.contactEmail]
     .some(v => v?.toLowerCase().includes(q));
 };
 globalFilterFn.autoRemove = (v: string) => !v;
@@ -104,6 +106,7 @@ export function Orders() {
   const [sorting, setSorting] = useState<SortingState>([{ id: 'localServiceDate', desc: true }]);
   const [selectedOrder, setSelectedOrder] = useState<DtOrderForUI | null>(null);
   const [categoryFilter, setCategoryFilter] = useState<string>('');
+  const [statusFilter, setStatusFilter] = useState<string[]>([]);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [syncingDt, setSyncingDt] = useState(false);
@@ -146,6 +149,28 @@ export function Orders() {
     if (!categoryFilter) return clientFilteredOrders;
     return clientFilteredOrders.filter(o => o.statusCategory === categoryFilter);
   }, [clientFilteredOrders, categoryFilter]);
+
+  const availableStatuses = useMemo(() => {
+    const set = new Set<string>();
+    for (const o of filteredByCategory) {
+      if (o.statusName) set.add(o.statusName);
+    }
+    return Array.from(set).sort();
+  }, [filteredByCategory]);
+
+  // Drop any selected statuses no longer present in the available pool (e.g. after category change).
+  useEffect(() => {
+    if (statusFilter.length === 0) return;
+    const valid = new Set(availableStatuses);
+    const next = statusFilter.filter(s => valid.has(s));
+    if (next.length !== statusFilter.length) setStatusFilter(next);
+  }, [availableStatuses, statusFilter]);
+
+  const filteredByStatus = useMemo(() => {
+    if (statusFilter.length === 0) return filteredByCategory;
+    const set = new Set(statusFilter);
+    return filteredByCategory.filter(o => set.has(o.statusName));
+  }, [filteredByCategory, statusFilter]);
 
   const categoryCounts = useMemo(() => {
     const counts: Record<string, number> = {};
@@ -208,7 +233,7 @@ export function Orders() {
   ], [user?.role]);
 
   const table = useReactTable({
-    data: filteredByCategory,
+    data: filteredByStatus,
     columns,
     state: { sorting, globalFilter },
     onSortingChange: setSorting,
@@ -390,7 +415,7 @@ export function Orders() {
           </div>
 
           {/* Category filter pills */}
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12, alignItems: 'center' }}>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8, alignItems: 'center' }}>
             <button onClick={() => setCategoryFilter('')} style={chip(!categoryFilter)}>
               All ({clientFilteredOrders.length})
             </button>
@@ -404,12 +429,24 @@ export function Orders() {
                 </button>
               );
             })}
+          </div>
+
+          {/* Status dropdown (narrows within the selected category) */}
+          <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', marginBottom: 12 }}>
+            <MultiSelectFilter
+              label="Status"
+              options={availableStatuses}
+              selected={statusFilter}
+              onChange={setStatusFilter}
+              placeholder="All statuses"
+              disabled={availableStatuses.length === 0}
+            />
             <div style={{ flex: 1 }} />
             <span style={{ fontSize: 12, color: theme.colors.textMuted, alignSelf: 'center' }}>
               Showing <strong>{rows.length}</strong> of <strong>{clientFilteredOrders.length}</strong> orders
             </span>
-            {(categoryFilter || globalFilter || sorting.length > 0) && (
-              <button onClick={() => { setCategoryFilter(''); setGlobalFilter(''); setSorting([]); }} style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '4px 10px', borderRadius: 8, border: `1px solid ${theme.colors.border}`, background: '#fff', cursor: 'pointer', fontSize: 11, color: theme.colors.textSecondary, fontFamily: 'inherit', whiteSpace: 'nowrap' }}>
+            {(categoryFilter || statusFilter.length > 0 || globalFilter || sorting.length > 0) && (
+              <button onClick={() => { setCategoryFilter(''); setStatusFilter([]); setGlobalFilter(''); setSorting([]); }} style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '4px 10px', borderRadius: 8, border: `1px solid ${theme.colors.border}`, background: '#fff', cursor: 'pointer', fontSize: 11, color: theme.colors.textSecondary, fontFamily: 'inherit', whiteSpace: 'nowrap' }}>
                 <X size={12} />Clear filters
               </button>
             )}
