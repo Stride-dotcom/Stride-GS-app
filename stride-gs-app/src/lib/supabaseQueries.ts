@@ -1649,6 +1649,12 @@ export interface DeliveryAccessorial {
   active: boolean;
   /** Phase 2c — false means staff/admin-only (applied post-hoc by dispatch). */
   visibleToClient: boolean;
+  /** Minutes added to delivery service time when this accessorial is selected. */
+  serviceMinutes: number;
+  /** If true, price requires a quote — $0 subtotal, flagged in amber. */
+  quoteRequired: boolean;
+  /** If false, hidden from the delivery order dropdown (staff/admin apply post-hoc). */
+  availableForDelivery: boolean;
 }
 
 export interface FabricProtectionRate {
@@ -1853,6 +1859,9 @@ export async function fetchDeliveryAccessorials(): Promise<DeliveryAccessorial[]
       display_order: number;
       active: boolean;
       visible_to_client: boolean | null;
+      service_minutes: number | null;
+      quote_required: boolean | null;
+      available_for_delivery: boolean | null;
     }) => ({
       code: r.code,
       name: r.name,
@@ -1861,11 +1870,30 @@ export async function fetchDeliveryAccessorials(): Promise<DeliveryAccessorial[]
       description: r.description ?? '',
       displayOrder: r.display_order,
       active: r.active,
-      // Treat null as true for backward compatibility (column added in Phase 2c)
       visibleToClient: r.visible_to_client === null ? true : r.visible_to_client,
+      serviceMinutes: r.service_minutes ?? 0,
+      quoteRequired: r.quote_required ?? false,
+      availableForDelivery: r.available_for_delivery === null ? true : r.available_for_delivery,
     }));
   } catch {
     return null;
+  }
+}
+
+/** Fetch delivery_minutes per item class id → minutes map. */
+export async function fetchItemClassMinutes(): Promise<Record<string, number>> {
+  try {
+    const { data, error } = await supabase
+      .from('item_classes')
+      .select('id, delivery_minutes')
+      .eq('active', true);
+    if (error || !data) return {};
+    return Object.fromEntries(
+      (data as { id: string; delivery_minutes: number | null }[])
+        .map(r => [r.id, r.delivery_minutes ?? 0])
+    );
+  } catch {
+    return {};
   }
 }
 
