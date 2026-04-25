@@ -117,11 +117,12 @@ Deno.serve(async (req) => {
   // Per-order fetch loop. DT rate limit is 1000/hr, so we throttle gently.
   for (const o of orders) {
     try {
-      const url = `${String(cred.api_base_url).replace(/\/+$/, '')}/orders/api/get_order_status?order_id=${encodeURIComponent(String(o.dt_dispatch_id))}`;
+      // DT authenticates via the `api_key` query parameter, NOT Bearer auth.
+      // Match the pattern used in dt-push-order/dt-backfill-orders.
+      const url = `${String(cred.api_base_url).replace(/\/+$/, '')}/orders/api/get_order_status?code=expressinstallation&api_key=${encodeURIComponent(String(cred.auth_token_encrypted))}&order_id=${encodeURIComponent(String(o.dt_dispatch_id))}`;
       const resp = await fetch(url, {
         method: 'GET',
         headers: {
-          'Authorization': `Bearer ${cred.auth_token_encrypted}`,
           'Accept': 'application/json',
         },
       });

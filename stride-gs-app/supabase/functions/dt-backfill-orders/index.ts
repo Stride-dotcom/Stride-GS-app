@@ -16,26 +16,13 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import { DOMParser } from 'https://esm.sh/@xmldom/xmldom@0.9.8';
 
-// ── Status mapping from DT status strings to dt_statuses.id ────────────
-const STATUS_STRING_TO_ID: Record<string, number> = {
-  'entered':          0,
-  'in transit':       1,
-  'on delivery':      2,
-  'assigned':         3,
-  'on delivery out':  4,
-  'arrived at place': 5,
-  'transfer':         6,
-  'arrived':          7,
-  'finished':         7,  // Finished = Arrived/Completed
-  'exception':        8,
-  'deleted':          9,
-  'locked':           10,
-  'unlocked':         11,
-};
+// ── Status mapping is built dynamically from dt_statuses at request time ──
+// (see statusMap below). Never hardcode IDs here — the seed has changed and
+// any local copy will silently drift.
 
-function getStatusId(statusStr: string): number | null {
+function getStatusId(statusMap: Map<string, number>, statusStr: string): number | null {
   if (!statusStr) return null;
-  return STATUS_STRING_TO_ID[statusStr.toLowerCase().trim()] ?? null;
+  return statusMap.get(statusStr.toLowerCase().trim()) ?? null;
 }
 
 /** Get text content of a child element by tag name */
@@ -128,6 +115,18 @@ Deno.serve(async (req: Request) => {
   const baseUrl  = (creds.api_base_url || 'https://expressinstallation.dispatchtrack.com').replace(/\/$/, '');
   const acctMap  = (creds.account_name_map || {}) as Record<string, string>;
 
+  // Build status map dynamically from dt_statuses so we never drift from the
+  // live seed. Index by both `code` and `name` (lowercased) — DT status strings
+  // arrive in either form depending on the endpoint.
+  const { data: statusRows } = await supabase
+    .from('dt_statuses')
+    .select('id, code, name');
+  const statusMap = new Map<string, number>();
+  for (const s of (statusRows || []) as Array<{ id: number; code: string | null; name: string | null }>) {
+    if (s.code) statusMap.set(s.code.toLowerCase(), s.id);
+    if (s.name) statusMap.set(s.name.toLowerCase(), s.id);
+  }
+
   // ── Fetch orders for each date in range ────────────────────────────────
   const results = { inserted: 0, updated: 0, quarantined: 0, errors: [] as string[], dates_processed: 0 };
   let currentDate = startDate;
@@ -135,7 +134,7 @@ Deno.serve(async (req: Request) => {
 
   while (currentDate <= finalDate) {
     results.dates_processed++;
-    const exportUrl = `${baseUrl}/orders/api/export?code=expressinstallation&api_key=${apiKey}&date=${currentDate}`;
+    const exportUrl = `${baseUrl}/orders/api/export?code=expressinstallation&api_key=${encodeURIComponent(apiKey)}&date=${encodeURIComponent(currentDate)}`;
     console.log(`[dt-backfill] Fetching ${currentDate}...`);
 
     try {
@@ -225,7 +224,7 @@ Deno.serve(async (req: Request) => {
           load:                pieces,
         };
 
-        const statusId = getStatusId(statusStr);
+        const statusId = getStatusId(statusMap, statusStr);
         if (statusId !== null) upsertRow.status_id = statusId;
 
         if (tenantId) {

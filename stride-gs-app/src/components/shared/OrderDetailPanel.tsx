@@ -470,10 +470,19 @@ export function OrderDetailPanel({ order, onClose, onUpdated }: Props) {
                             </button>
                             <button
                               onClick={async () => {
+                                const nowIso = new Date().toISOString();
+                                // Write BOTH the legacy payment_collected* columns (read by
+                                // existing UI) and paid_at/paid_amount/paid_method (read by
+                                // dt-webhook-ingest, dt-sync-statuses, dt-push-order to
+                                // trigger auto-Collected). Keeping them in sync until the
+                                // legacy columns are retired.
                                 const { error } = await supabase.from('dt_orders').update({
                                   payment_collected: true,
-                                  payment_collected_at: new Date().toISOString(),
+                                  payment_collected_at: nowIso,
                                   payment_notes: `Marked paid ${new Date().toLocaleDateString('en-US')}`,
+                                  paid_at: nowIso,
+                                  paid_amount: order.orderTotal ?? null,
+                                  paid_method: 'manual',
                                 }).eq('id', order.id);
                                 if (!error) onUpdated?.();
                               }}
