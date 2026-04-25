@@ -99,6 +99,10 @@ UI components: FloatingActionMenu, WriteButton, BatchGuard, ActionTooltip, Batch
 
 ## Recent Changes (2026-04-25, session 80)
 
+### Client dropdown persists across navigation
+- New `src/hooks/useClientFilterPersisted.ts` — drop-in replacement for `useState<string[]>([])` that persists each list page's client dropdown selection. Initial state precedence: URL `?client=` (resolved via apiClients, wins for email deep-links) → localStorage `stride_client_filter_<pageKey>` (last-used scope) → empty array (falls through to the page's role-default effect). Writes to localStorage on every change.
+- Wired into all 5 list pages: Inventory / Tasks / Repairs / WillCalls / Shipments. Fixes the "click into an entity, hit back, dropdown is reset to all clients" pain. Sort + status filter + column visibility were already persisted via `useTablePreferences`; this closes the gap on the dropdown that was still useState-only.
+
 ### Back-button restores tab state across Orders / Settings / Billing
 - New `src/hooks/useUrlState.ts` — single-key URL search-param state hook built on `useSearchParams`. `[value, setValue] = useUrlState(key, default, { replace? })`. Default pushes a history entry; `replace: true` for transient state. Empty string deletes the param so URLs stay short.
 - `src/pages/Orders.tsx`, `src/pages/Billing.tsx`, `src/pages/Settings.tsx` — `activeTab` now lives in the URL via `useUrlState('tab', defaultTab)`. Settings also moves its `clientsSubTab` into `?subtab=`. Switching tabs pushes a history entry; back navigates to the prior tab. Email deep-links (`?tab=clients&subtab=intakes&intake=<id>`) survive subsequent navigation.

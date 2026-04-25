@@ -55,6 +55,7 @@ import { useItemNotes } from '../hooks/useItemNotes';
 import { useAutocomplete } from '../hooks/useAutocomplete';
 import { InlineEditableCell } from '../components/shared/InlineEditableCell';
 import { useClientFilterUrlSync } from '../hooks/useClientFilterUrlSync';
+import { useClientFilterPersisted } from '../hooks/useClientFilterPersisted';
 import { useTasks } from '../hooks/useTasks';
 import { useRepairs } from '../hooks/useRepairs';
 import { useWillCalls } from '../hooks/useWillCalls';
@@ -583,7 +584,10 @@ export function Inventory() {
   // Client list for MultiSelectFilter — declared before data hooks so clientFilter gates fetching
   const { apiClients, clients } = useClients(apiConfigured);
   const clientNames = useMemo(() => clients.map(c => c.name).sort(), [clients]);
-  const [clientFilter, setClientFilter] = useState<string[]>([]);
+  // Persists across navigation: hydrates from URL ?client= (deep-link), then
+  // localStorage (last-used scope), then falls through to the role-default
+  // effect below. Page key 'inventory' scopes the localStorage entry.
+  const [clientFilter, setClientFilter] = useClientFilterPersisted('inventory', apiClients);
 
   // Resolve selected client names → sheet IDs (string for single, string[] for multi)
   const selectedSheetId = useMemo<string | string[] | undefined>(() => {
