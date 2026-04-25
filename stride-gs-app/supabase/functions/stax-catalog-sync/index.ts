@@ -102,7 +102,8 @@ Deno.serve(async (req: Request) => {
 
     if (service.stax_item_id) {
       // ── Update existing ──
-      const resp = await fetch(`${STAX_API_BASE}/item/${service.stax_item_id}`, {
+      const putUrl = `${STAX_API_BASE}/item/${service.stax_item_id}`;
+      const resp = await fetch(putUrl, {
         method: 'PUT',
         headers: {
           'Authorization': `Bearer ${staxApiKey}`,
@@ -113,9 +114,15 @@ Deno.serve(async (req: Request) => {
       });
       if (!resp.ok) {
         const errText = await resp.text();
+        // Always log full Stax response body so failures are diagnosable from
+        // the Supabase Edge Function logs without re-running the request.
+        console.error(
+          `[stax-catalog-sync] PUT ${putUrl} failed (status=${resp.status}) for service ${service.code} (${service.id}). ` +
+          `Response body: ${errText}. Request payload: ${JSON.stringify(staxPayload)}`
+        );
         // If 404, item was deleted from Stax — create new
         if (resp.status === 404) {
-          const createResult = await createStaxItem(staxApiKey, staxPayload);
+          const createResult = await createStaxItem(staxApiKey, staxPayload, service);
           if (!createResult.ok) return jsonResp({ ok: false, error: createResult.error }, 500);
           staxItemId = createResult.id;
           action = 'created';
@@ -129,7 +136,7 @@ Deno.serve(async (req: Request) => {
       }
     } else {
       // ── Create new ──
-      const createResult = await createStaxItem(staxApiKey, staxPayload);
+      const createResult = await createStaxItem(staxApiKey, staxPayload, service);
       if (!createResult.ok) return jsonResp({ ok: false, error: createResult.error }, 500);
       staxItemId = createResult.id;
       action = 'created';
@@ -158,9 +165,11 @@ Deno.serve(async (req: Request) => {
 
 async function createStaxItem(
   apiKey: string,
-  payload: Record<string, unknown>
+  payload: Record<string, unknown>,
+  service?: Pick<ServiceRow, 'id' | 'code'>,
 ): Promise<{ ok: true; id: string } | { ok: false; error: string }> {
-  const resp = await fetch(`${STAX_API_BASE}/item`, {
+  const url = `${STAX_API_BASE}/item`;
+  const resp = await fetch(url, {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${apiKey}`,
@@ -171,10 +180,22 @@ async function createStaxItem(
   });
   if (!resp.ok) {
     const errText = await resp.text();
+    // Always log full Stax response body so failures are diagnosable from
+    // the Supabase Edge Function logs without re-running the request.
+    console.error(
+      `[stax-catalog-sync] POST ${url} failed (status=${resp.status})` +
+      (service ? ` for service ${service.code} (${service.id})` : '') +
+      `. Response body: ${errText}. Request payload: ${JSON.stringify(payload)}`
+    );
     return { ok: false, error: `Stax POST failed: ${resp.status} ${errText}` };
   }
   const body = await resp.json();
   if (!body.id) {
+    console.error(
+      `[stax-catalog-sync] POST ${url} returned 200 but no item id` +
+      (service ? ` for service ${service.code} (${service.id})` : '') +
+      `. Response body: ${JSON.stringify(body)}`
+    );
     return { ok: false, error: 'Stax returned no item id' };
   }
   return { ok: true, id: body.id };

@@ -3,18 +3,31 @@
  *
  * Minimal required fields: code, name, category, billing, unit.
  * Rates default to zeros; admin can fine-tune in the edit panel after.
+ *
+ * v2 2026-04-25 PST — surfaces "Offer as Delivery Service" toggle and
+ *                     delivery_rate_unit / visible_to_client /
+ *                     quote_required / description fields so an admin can
+ *                     spin up a delivery add-on directly from this modal.
  */
 import { useState } from 'react';
-import { X, Clock } from 'lucide-react';
+import { X, Clock, Truck } from 'lucide-react';
 import { theme } from '../../styles/theme';
 import type {
   NewServiceInput, ServiceCategory, ServiceBilling, ServiceUnit, ClassRates, ClassTimes,
+  DeliveryRateUnit,
 } from '../../hooks/useServiceCatalog';
 
 const CATEGORIES: ServiceCategory[] = ['Warehouse','Storage','Shipping','Assembly','Repair','Labor','Admin','Delivery'];
 const UNITS: ServiceUnit[]           = ['per_item','per_day','per_task','per_hour'];
 const BILLINGS: ServiceBilling[]     = ['class_based','flat'];
 const CLASSES = ['XS','S','M','L','XL','XXL'] as const;
+const DELIVERY_RATE_UNITS: { value: DeliveryRateUnit; label: string }[] = [
+  { value: 'flat',      label: 'Flat (one-time)' },
+  { value: 'per_mile',  label: 'Per mile' },
+  { value: 'per_15min', label: 'Per 15 minutes' },
+  { value: 'plus_base', label: 'Base + per item' },
+  { value: 'per_item',  label: 'Per item' },
+];
 
 interface AddServiceModalProps {
   existingCodes: Set<string>;
@@ -33,6 +46,12 @@ export function AddServiceModal({ existingCodes, nextDisplayOrder, onClose, onCr
   const [flatRate, setFlatRate] = useState(0);
   const [rates, setRates] = useState<ClassRates>({ XS: 0, S: 0, M: 0, L: 0, XL: 0, XXL: 0 });
   const [times, setTimes] = useState<ClassTimes>({});
+  // Delivery-only fields — only persisted when showAsDeliveryService is on.
+  const [showAsDeliveryService, setShowAsDeliveryService] = useState(false);
+  const [deliveryRateUnit, setDeliveryRateUnit] = useState<DeliveryRateUnit>('flat');
+  const [visibleToClient, setVisibleToClient] = useState(true);
+  const [quoteRequired, setQuoteRequired] = useState(false);
+  const [description, setDescription] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -57,7 +76,7 @@ export function AddServiceModal({ existingCodes, nextDisplayOrder, onClose, onCr
       active: true,
       showInMatrix: false,
       showAsTask: false,
-      showAsDeliveryService: false,
+      showAsDeliveryService,
       showAsReceivingAddon: false,
       autoApplyRule: null,
       defaultSlaHours: null,
@@ -66,9 +85,15 @@ export function AddServiceModal({ existingCodes, nextDisplayOrder, onClose, onCr
       displayOrder: nextDisplayOrder,
       billIfPass: true,
       billIfFail: true,
-      times: billing === 'class_based' ? times : {},
+      // Delivery rows benefit from per-class minutes for dispatch routing
+      // even when billed flat — let admins set them on creation.
+      times: (billing === 'class_based' || showAsDeliveryService) ? times : {},
       staxItemId: null,
       qbItemId: null,
+      deliveryRateUnit: showAsDeliveryService ? deliveryRateUnit : 'flat',
+      visibleToClient,
+      description: description.trim(),
+      quoteRequired: showAsDeliveryService ? quoteRequired : false,
     };
     const created = await onCreate(input);
     setSaving(false);
@@ -187,50 +212,129 @@ export function AddServiceModal({ existingCodes, nextDisplayOrder, onClose, onCr
           </div>
 
           {billing === 'class_based' && (
-            <>
-              <div style={{ marginTop: 18 }}>
-                <label style={labelStyle}>Class rates ($)</label>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 6 }}>
-                  {CLASSES.map(cls => (
-                    <div key={cls}>
-                      <div style={{ fontSize: 9, fontWeight: 700, letterSpacing: '1px', color: v2.colors.textMuted, marginBottom: 3, textAlign: 'center' }}>{cls}</div>
-                      <input
-                        type="number"
-                        step="0.01"
-                        style={{ ...inputStyle, padding: '8px 6px', textAlign: 'center', fontSize: 12 }}
-                        value={rates[cls] ?? 0}
-                        onChange={e => setRates({ ...rates, [cls]: Number(e.target.value) || 0 })}
-                      />
-                    </div>
-                  ))}
-                </div>
+            <div style={{ marginTop: 18 }}>
+              <label style={labelStyle}>Class rates ($)</label>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 6 }}>
+                {CLASSES.map(cls => (
+                  <div key={cls}>
+                    <div style={{ fontSize: 9, fontWeight: 700, letterSpacing: '1px', color: v2.colors.textMuted, marginBottom: 3, textAlign: 'center' }}>{cls}</div>
+                    <input
+                      type="number"
+                      step="0.01"
+                      style={{ ...inputStyle, padding: '8px 6px', textAlign: 'center', fontSize: 12 }}
+                      value={rates[cls] ?? 0}
+                      onChange={e => setRates({ ...rates, [cls]: Number(e.target.value) || 0 })}
+                    />
+                  </div>
+                ))}
               </div>
-              <div style={{ marginTop: 14 }}>
-                <label style={{ ...labelStyle, display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <Clock size={11} /> Service times (minutes)
-                </label>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 6 }}>
-                  {CLASSES.map(cls => (
-                    <div key={cls}>
-                      <div style={{ fontSize: 9, fontWeight: 700, letterSpacing: '1px', color: v2.colors.textMuted, marginBottom: 3, textAlign: 'center' }}>{cls}</div>
-                      <input
-                        type="number"
-                        min="0"
-                        step="1"
-                        style={{ ...inputStyle, padding: '8px 6px', textAlign: 'center', fontSize: 12 }}
-                        value={times[cls] ?? ''}
-                        placeholder="—"
-                        onChange={e => {
-                          const raw = e.target.value;
-                          setTimes({ ...times, [cls]: raw === '' ? undefined : (Number(raw) || 0) });
-                        }}
-                      />
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </>
+            </div>
           )}
+
+          {/* Service times: required for class_based, useful for delivery
+              services regardless of billing (dispatch routing minutes). */}
+          {(billing === 'class_based' || showAsDeliveryService) && (
+            <div style={{ marginTop: 14 }}>
+              <label style={{ ...labelStyle, display: 'flex', alignItems: 'center', gap: 6 }}>
+                <Clock size={11} /> Service times (minutes)
+              </label>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 6 }}>
+                {CLASSES.map(cls => (
+                  <div key={cls}>
+                    <div style={{ fontSize: 9, fontWeight: 700, letterSpacing: '1px', color: v2.colors.textMuted, marginBottom: 3, textAlign: 'center' }}>{cls}</div>
+                    <input
+                      type="number"
+                      min="0"
+                      step="1"
+                      style={{ ...inputStyle, padding: '8px 6px', textAlign: 'center', fontSize: 12 }}
+                      value={times[cls] ?? ''}
+                      placeholder="—"
+                      onChange={e => {
+                        const raw = e.target.value;
+                        setTimes({ ...times, [cls]: raw === '' ? undefined : (Number(raw) || 0) });
+                      }}
+                    />
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Delivery Service toggle + settings — exposed in the Create
+              Delivery Order modal when this is on. */}
+          <div style={{
+            marginTop: 18, padding: 14,
+            background: showAsDeliveryService ? 'rgba(232,93,45,0.06)' : v2.colors.bgWhite,
+            border: `1px solid ${showAsDeliveryService ? v2.colors.accentLight : v2.colors.border}`,
+            borderRadius: v2.radius.input,
+            transition: 'background 0.15s, border-color 0.15s',
+          }}>
+            <label style={{
+              display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer',
+              fontSize: 13, color: v2.colors.text, userSelect: 'none', fontWeight: 600,
+            }}>
+              <div
+                onClick={() => setShowAsDeliveryService(v => !v)}
+                style={{
+                  position: 'relative', width: 30, height: 18,
+                  background: showAsDeliveryService ? v2.colors.accent : '#D4D0CA',
+                  borderRadius: 100, transition: 'background 0.15s', flexShrink: 0,
+                }}
+              >
+                <div style={{
+                  position: 'absolute', top: 2, left: showAsDeliveryService ? 14 : 2,
+                  width: 14, height: 14, borderRadius: '50%', background: '#fff',
+                  transition: 'left 0.15s', boxShadow: '0 1px 3px rgba(0,0,0,0.2)',
+                }} />
+              </div>
+              <Truck size={13} style={{ color: showAsDeliveryService ? v2.colors.accent : v2.colors.textMuted }} />
+              <span>Offer as Delivery Service</span>
+            </label>
+            {showAsDeliveryService && (
+              <div style={{ marginTop: 14 }}>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                  <div>
+                    <label style={labelStyle}>Rate unit</label>
+                    <select
+                      style={inputStyle}
+                      value={deliveryRateUnit}
+                      onChange={e => setDeliveryRateUnit(e.target.value as DeliveryRateUnit)}
+                    >
+                      {DELIVERY_RATE_UNITS.map(o => (
+                        <option key={o.value} value={o.value}>{o.label}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'flex-end' }}>
+                    <div style={{
+                      display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8,
+                      width: '100%', paddingBottom: 4,
+                    }}>
+                      <CompactToggle
+                        label="Visible to Client"
+                        checked={visibleToClient}
+                        onChange={setVisibleToClient}
+                      />
+                      <CompactToggle
+                        label="Quote Required"
+                        checked={quoteRequired}
+                        onChange={setQuoteRequired}
+                      />
+                    </div>
+                  </div>
+                </div>
+                <div style={{ marginTop: 12 }}>
+                  <label style={labelStyle}>Description (shown next to the toggle)</label>
+                  <input
+                    style={inputStyle}
+                    value={description}
+                    placeholder="e.g. Add an extra crew member for heavy or stair-heavy moves"
+                    onChange={e => setDescription(e.target.value)}
+                  />
+                </div>
+              </div>
+            )}
+          </div>
 
           <div style={{ marginTop: 20, fontSize: 12, color: v2.colors.textMuted, lineHeight: 1.4 }}>
             You can refine surface flags, SLA defaults, and the auto-apply rule after creating the service.
@@ -279,5 +383,33 @@ export function AddServiceModal({ existingCodes, nextDisplayOrder, onClose, onCr
         </div>
       </div>
     </>
+  );
+}
+
+function CompactToggle({ label, checked, onChange }: {
+  label: string; checked: boolean; onChange: (v: boolean) => void;
+}) {
+  const v2 = theme.v2;
+  return (
+    <label style={{
+      display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer',
+      fontSize: 12, color: v2.colors.text, userSelect: 'none',
+    }}>
+      <div
+        onClick={() => onChange(!checked)}
+        style={{
+          position: 'relative', width: 28, height: 16,
+          background: checked ? v2.colors.accent : '#D4D0CA',
+          borderRadius: 100, transition: 'background 0.15s', flexShrink: 0,
+        }}
+      >
+        <div style={{
+          position: 'absolute', top: 2, left: checked ? 14 : 2,
+          width: 12, height: 12, borderRadius: '50%', background: '#fff',
+          transition: 'left 0.15s', boxShadow: '0 1px 3px rgba(0,0,0,0.2)',
+        }} />
+      </div>
+      <span>{label}</span>
+    </label>
   );
 }

@@ -1097,19 +1097,24 @@ export function Billing() {
       header: 'Client', size: 200,
       cell: i => {
         const row = i.row.original;
-        // Show Auto Pay badge if client has autopay enabled (autoCharge !== false + has staxCustomerId)
-        const hasAutoPay = row.autoCharge !== false && !!row.staxCustomerId;
+        const hasStax = !!row.staxCustomerId;
+        const hasAutoPay = row.autoCharge !== false && hasStax;
         return (
-          <span style={{ fontSize: 12, fontWeight: 500, display: 'inline-flex', alignItems: 'center' }}>
+          <span style={{ fontSize: 12, fontWeight: 500, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
             {i.getValue()}
+            {hasStax && (
+              <span title="Stax payment on file" style={{ display: 'inline-flex', flexShrink: 0 }}>
+                <CreditCard size={11} color="#15803D" />
+              </span>
+            )}
             {hasAutoPay && (
               <span
                 style={{
-                  marginLeft: 6, fontSize: 9, padding: '1px 5px', borderRadius: 4,
+                  marginLeft: 2, fontSize: 9, padding: '1px 5px', borderRadius: 4,
                   background: '#F0FDF4', color: '#15803D', fontWeight: 700,
                   whiteSpace: 'nowrap',
                 }}
-                title="Auto Pay enabled — this invoice can be charged automatically via Stax"
+                title="Auto Pay enabled"
               >
                 Auto Pay
               </span>
@@ -1354,6 +1359,11 @@ export function Billing() {
       },
       onProgress: (done, total) => setInvoiceBatch(prev => ({ ...prev, processed: done, total })),
       preflightSkipped,
+      // v38.122.0 — invoice creates are mostly Drive/email I/O on the GAS
+      // side; running 3 in parallel typically cuts wall time ~2-3x with no
+      // backend contention. Increase cautiously — Apps Script can serialize
+      // doPost calls under load.
+      concurrency: 3,
     });
     setInvoiceBatch({ state: 'complete', total: invokable.length, processed: invokable.length, succeeded: batchResult.succeeded, failed: batchResult.failed });
     setInvoiceBulkResult(batchResult);

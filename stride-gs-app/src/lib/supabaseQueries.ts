@@ -1643,7 +1643,14 @@ export interface DeliveryAccessorial {
   code: string;
   name: string;
   rate: number | null;
-  rateUnit: 'flat' | 'per_mile' | 'per_15min' | 'plus_base' | 'per_item';
+  /**
+   * Rate-unit set is the union of the legacy delivery_accessorials shapes
+   * (per_mile / per_15min / plus_base) and the service_catalog shapes
+   * (per_task / per_item / per_hour / per_day) so the modal can render both
+   * sources uniformly. `per_task` is mapped to 'flat' at fetch time —
+   * downstream code only needs to handle the unit values listed below.
+   */
+  rateUnit: 'flat' | 'per_mile' | 'per_15min' | 'plus_base' | 'per_item' | 'per_hour' | 'per_day';
   description: string;
   displayOrder: number;
   active: boolean;
@@ -1969,6 +1976,90 @@ export async function fetchDeliveryAccessorials(): Promise<DeliveryAccessorial[]
       quoteRequired: r.quote_required ?? false,
       availableForDelivery: r.available_for_delivery === null ? true : r.available_for_delivery,
     }));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Fetch the delivery-add-on rate card from `service_catalog`.
+ *
+ * Replaces `fetchDeliveryAccessorials` for the order-creation flow — the
+ * delivery_accessorials table is being phased out in favour of a single
+ * service_catalog source of truth for billable services. Rows are filtered
+ * by `show_as_delivery_service = true AND active = true`. The output is
+ * shaped to match `DeliveryAccessorial` so the modal doesn't need a
+ * second rendering path.
+ *
+ * v2 2026-04-25 PST — reads the new delivery-specific columns added in
+ * migration 20260425030000_service_catalog_delivery_fields:
+ *   • delivery_rate_unit overrides the generic `unit` — lets a flat-billed
+ *     row still render as per_mile / per_15min / plus_base in the modal.
+ *   • visible_to_client gates whether clients see the service.
+ *   • description is shown next to the toggle.
+ *   • quote_required no longer has to be inferred from rate == 0; admins
+ *     can flag a priced service as quote-only when an in-person estimate
+ *     is required.
+ *
+ * serviceMinutes still defaults to `m_time` (Medium-class minutes) — see
+ * useItemClasses for per-class dispatch routing minutes.
+ */
+export async function fetchDeliveryServicesFromCatalog(): Promise<DeliveryAccessorial[] | null> {
+  try {
+    const { data, error } = await supabase
+      .from('service_catalog')
+      .select('code, name, billing, flat_rate, unit, display_order, active, m_time, delivery_rate_unit, visible_to_client, description, quote_required')
+      .eq('show_as_delivery_service', true)
+      .eq('active', true)
+      .order('display_order');
+    if (error || !data) return null;
+    return data.map((r: {
+      code: string;
+      name: string;
+      billing: string | null;
+      flat_rate: number | string | null;
+      unit: string | null;
+      display_order: number | null;
+      active: boolean | null;
+      m_time: number | null;
+      delivery_rate_unit: string | null;
+      visible_to_client: boolean | null;
+      description: string | null;
+      quote_required: boolean | null;
+    }) => {
+      // Prefer delivery_rate_unit (admin-set, delivery-specific) over the
+      // generic service_catalog.unit. Fall back to mapping unit when
+      // delivery_rate_unit hasn't been customised on legacy rows.
+      const dru = (r.delivery_rate_unit ?? '').trim();
+      let rateUnit: DeliveryAccessorial['rateUnit'];
+      if (dru === 'per_mile' || dru === 'per_15min' || dru === 'plus_base' || dru === 'per_item') {
+        rateUnit = dru;
+      } else if (dru === 'flat') {
+        rateUnit = 'flat';
+      } else {
+        const unit = (r.unit ?? 'per_task') as string;
+        rateUnit =
+          unit === 'per_item' ? 'per_item' :
+          unit === 'per_hour' ? 'per_hour' :
+          unit === 'per_day'  ? 'per_day'  :
+          'flat';
+      }
+      const rate = r.flat_rate != null ? Number(r.flat_rate) : 0;
+      const quoteRequired = r.quote_required === true || (r.quote_required === null && rate === 0);
+      return {
+        code: r.code,
+        name: r.name,
+        rate,
+        rateUnit,
+        description: r.description ?? '',
+        displayOrder: r.display_order ?? 0,
+        active: r.active !== false,
+        visibleToClient: r.visible_to_client !== false,
+        serviceMinutes: r.m_time ?? 0,
+        quoteRequired,
+        availableForDelivery: true,
+      };
+    });
   } catch {
     return null;
   }

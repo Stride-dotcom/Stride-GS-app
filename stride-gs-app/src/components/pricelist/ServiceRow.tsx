@@ -2,13 +2,29 @@
  * ServiceRow — compact read-mode row + inline edit-mode form for one
  * service_catalog entry. Replaces the old ServiceCard + ServiceEditPanel
  * pair. Single edit-at-a-time is owned by the parent (PriceList.tsx).
+ *
+ * v2 2026-04-25 PST — adds a "Delivery Settings" panel that appears in
+ *                     edit mode whenever the row is flagged
+ *                     showAsDeliveryService (delivery_rate_unit /
+ *                     visible_to_client / quote_required / description).
+ *                     Service Times is also shown for delivery rows
+ *                     even when billing=flat so admins can set per-class
+ *                     dispatch minutes. Read-mode surfaces "Quote",
+ *                     "Hidden" badges when relevant.
+ *
+ * v3 2026-04-25 PST — adds Stax + QB sync status badges (green dot when
+ *                     a stax_item_id / qb_item_id is set, gray when not)
+ *                     and an optional manual sync button (RefreshCw)
+ *                     that calls onSync(id) and refreshes the badges
+ *                     when the sync completes.
  */
 import { useEffect, useMemo, useState } from 'react';
-import { Pencil, Trash2, Clock } from 'lucide-react';
+import { Pencil, Trash2, Clock, Truck, RefreshCw } from 'lucide-react';
 import { theme } from '../../styles/theme';
 import type {
   CatalogService, UpdateServiceInput, ServiceCategory, ServiceBilling,
-  ServiceUnit, AutoApplyRule, ServicePriority,
+  ServiceUnit, AutoApplyRule, ServicePriority, DeliveryRateUnit,
+  ExternalSyncResult,
 } from '../../hooks/useServiceCatalog';
 
 const CATEGORIES: ServiceCategory[] = [
@@ -20,6 +36,14 @@ const AUTO_RULES: AutoApplyRule[]    = ['overweight','no_id','fragile','oversize
 const PRIORITIES: ServicePriority[]  = ['Normal','High'];
 const CLASSES = ['XS','S','M','L','XL','XXL'] as const;
 
+const DELIVERY_RATE_UNITS: { value: DeliveryRateUnit; label: string }[] = [
+  { value: 'flat',      label: 'Flat (one-time)' },
+  { value: 'per_mile',  label: 'Per mile' },
+  { value: 'per_15min', label: 'Per 15 minutes' },
+  { value: 'plus_base', label: 'Base + per item' },
+  { value: 'per_item',  label: 'Per item' },
+];
+
 interface ServiceRowProps {
   service: CatalogService;
   editing: boolean;
@@ -28,6 +52,8 @@ interface ServiceRowProps {
   onSave: (id: string, updates: UpdateServiceInput) => Promise<CatalogService | null>;
   onDelete: (id: string) => Promise<boolean>;
   onToggleActive: (id: string, active: boolean) => Promise<void>;
+  /** Optional — manual Stax + QBO sync. Read-mode shows a refresh button when present. */
+  onSync?: (id: string) => Promise<ExternalSyncResult | null>;
 }
 
 function fmtUSD(n: number | undefined): string {
@@ -43,7 +69,7 @@ function unitLabel(unit: CatalogService['unit']): string {
 }
 
 export function ServiceRow({
-  service, editing, onEditClick, onCancel, onSave, onDelete, onToggleActive,
+  service, editing, onEditClick, onCancel, onSave, onDelete, onToggleActive, onSync,
 }: ServiceRowProps) {
   const v2 = theme.v2;
 
@@ -51,6 +77,24 @@ export function ServiceRow({
   const [saving, setSaving] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [validationError, setValidationError] = useState<string | null>(null);
+  const [syncing, setSyncing] = useState(false);
+  const [syncFlash, setSyncFlash] = useState<{ kind: 'ok' | 'err'; msg: string } | null>(null);
+
+  const handleSyncClick = async () => {
+    if (!onSync || syncing) return;
+    setSyncing(true);
+    setSyncFlash(null);
+    const result = await onSync(service.id);
+    setSyncing(false);
+    if (!result) {
+      setSyncFlash({ kind: 'err', msg: 'Sync failed' });
+    } else if (result.errors.length === 0) {
+      setSyncFlash({ kind: 'ok', msg: 'Synced' });
+    } else {
+      setSyncFlash({ kind: 'err', msg: result.errors.join(' · ') });
+    }
+    window.setTimeout(() => setSyncFlash(null), 4000);
+  };
 
   // Reset draft + confirm state whenever the underlying service changes or
   // we re-enter edit mode.
@@ -101,6 +145,10 @@ export function ServiceRow({
       billIfPass: draft.billIfPass,
       billIfFail: draft.billIfFail,
       times: draft.times,
+      deliveryRateUnit: draft.deliveryRateUnit,
+      visibleToClient: draft.visibleToClient,
+      description: draft.description,
+      quoteRequired: draft.quoteRequired,
     };
     const saved = await onSave(service.id, updates);
     setSaving(false);
@@ -192,58 +240,31 @@ export function ServiceRow({
           </div>
         </div>
 
-        {/* Rates + Times (class_based) OR flat rate */}
+        {/* Rates: class-grid for class_based, single flat input otherwise */}
         {draft.billing === 'class_based' ? (
-          <>
-            <div style={{ marginTop: 16 }}>
-              <label style={inlineLabel(v2)}>Class rates ($)</label>
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 8 }}>
-                {CLASSES.map(cls => (
-                  <div key={cls}>
-                    <div style={classHeaderStyle(v2)}>{cls}</div>
-                    <input
-                      type="number"
-                      step="0.01"
-                      style={{ ...inlineInput(v2), textAlign: 'center' }}
-                      value={draft.rates[cls] ?? 0}
-                      onChange={e => {
-                        const num = Number(e.target.value) || 0;
-                        const nextRates = { ...draft.rates, [cls]: num };
-                        // Mirror XXL rate into the dedicated column for DB parity.
-                        const nextXxl = cls === 'XXL' ? num : draft.xxlRate;
-                        setDraft({ ...draft, rates: nextRates, xxlRate: nextXxl });
-                      }}
-                    />
-                  </div>
-                ))}
-              </div>
+          <div style={{ marginTop: 16 }}>
+            <label style={inlineLabel(v2)}>Class rates ($)</label>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 8 }}>
+              {CLASSES.map(cls => (
+                <div key={cls}>
+                  <div style={classHeaderStyle(v2)}>{cls}</div>
+                  <input
+                    type="number"
+                    step="0.01"
+                    style={{ ...inlineInput(v2), textAlign: 'center' }}
+                    value={draft.rates[cls] ?? 0}
+                    onChange={e => {
+                      const num = Number(e.target.value) || 0;
+                      const nextRates = { ...draft.rates, [cls]: num };
+                      // Mirror XXL rate into the dedicated column for DB parity.
+                      const nextXxl = cls === 'XXL' ? num : draft.xxlRate;
+                      setDraft({ ...draft, rates: nextRates, xxlRate: nextXxl });
+                    }}
+                  />
+                </div>
+              ))}
             </div>
-            <div style={{ marginTop: 14 }}>
-              <label style={{ ...inlineLabel(v2), display: 'flex', alignItems: 'center', gap: 6 }}>
-                <Clock size={11} /> Service times (minutes)
-              </label>
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 8 }}>
-                {CLASSES.map(cls => (
-                  <div key={cls}>
-                    <div style={classHeaderStyle(v2)}>{cls}</div>
-                    <input
-                      type="number"
-                      min="0"
-                      step="1"
-                      style={{ ...inlineInput(v2), textAlign: 'center' }}
-                      value={draft.times[cls] ?? ''}
-                      placeholder="—"
-                      onChange={e => {
-                        const raw = e.target.value;
-                        const n = raw === '' ? undefined : (Number(raw) || 0);
-                        setDraft({ ...draft, times: { ...draft.times, [cls]: n } });
-                      }}
-                    />
-                  </div>
-                ))}
-              </div>
-            </div>
-          </>
+          </div>
         ) : (
           <div style={{ marginTop: 16 }}>
             <label style={inlineLabel(v2)}>Flat rate ($)</label>
@@ -254,6 +275,38 @@ export function ServiceRow({
               value={draft.flatRate}
               onChange={e => setDraft({ ...draft, flatRate: Number(e.target.value) || 0 })}
             />
+          </div>
+        )}
+
+        {/* Service times — class_based rows always need them (per-class
+            minutes). Delivery rows benefit from them too because the
+            CreateDeliveryOrderModal uses the per-class minutes for
+            dispatch routing duration even when the rate is flat. */}
+        {(draft.billing === 'class_based' || draft.showAsDeliveryService) && (
+          <div style={{ marginTop: 14 }}>
+            <label style={{ ...inlineLabel(v2), display: 'flex', alignItems: 'center', gap: 6 }}>
+              <Clock size={11} /> Service times (minutes)
+            </label>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 8 }}>
+              {CLASSES.map(cls => (
+                <div key={cls}>
+                  <div style={classHeaderStyle(v2)}>{cls}</div>
+                  <input
+                    type="number"
+                    min="0"
+                    step="1"
+                    style={{ ...inlineInput(v2), textAlign: 'center' }}
+                    value={draft.times[cls] ?? ''}
+                    placeholder="—"
+                    onChange={e => {
+                      const raw = e.target.value;
+                      const n = raw === '' ? undefined : (Number(raw) || 0);
+                      setDraft({ ...draft, times: { ...draft.times, [cls]: n } });
+                    }}
+                  />
+                </div>
+              ))}
+            </div>
           </div>
         )}
 
@@ -272,6 +325,66 @@ export function ServiceRow({
           <ToggleRow label="Bill if Pass"        checked={draft.billIfPass}            onChange={v => setDraft({ ...draft, billIfPass: v })} />
           <ToggleRow label="Bill if Fail"        checked={draft.billIfFail}            onChange={v => setDraft({ ...draft, billIfFail: v })} />
         </div>
+
+        {/* Delivery Settings — only relevant when this row is exposed in
+            the Create Delivery Order modal. */}
+        {draft.showAsDeliveryService && (
+          <div style={{
+            marginTop: 16, padding: 14,
+            background: 'rgba(232,93,45,0.06)',
+            border: `1px solid ${v2.colors.accentLight}`,
+            borderRadius: v2.radius.input,
+          }}>
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: 6,
+              fontSize: 11, fontWeight: 700, letterSpacing: '1.5px',
+              color: v2.colors.accent, textTransform: 'uppercase',
+              marginBottom: 12,
+            }}>
+              <Truck size={12} /> Delivery Settings
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+              <div>
+                <label style={inlineLabel(v2)}>Rate unit</label>
+                <select
+                  style={inlineInput(v2)}
+                  value={draft.deliveryRateUnit}
+                  onChange={e => setDraft({ ...draft, deliveryRateUnit: e.target.value as DeliveryRateUnit })}
+                >
+                  {DELIVERY_RATE_UNITS.map(o => (
+                    <option key={o.value} value={o.value}>{o.label}</option>
+                  ))}
+                </select>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'flex-end' }}>
+                <div style={{
+                  display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10,
+                  width: '100%', paddingBottom: 6,
+                }}>
+                  <ToggleRow
+                    label="Visible to Client"
+                    checked={draft.visibleToClient}
+                    onChange={v => setDraft({ ...draft, visibleToClient: v })}
+                  />
+                  <ToggleRow
+                    label="Quote Required"
+                    checked={draft.quoteRequired}
+                    onChange={v => setDraft({ ...draft, quoteRequired: v })}
+                  />
+                </div>
+              </div>
+            </div>
+            <div style={{ marginTop: 12 }}>
+              <label style={inlineLabel(v2)}>Description (shown next to the toggle)</label>
+              <input
+                style={inlineInput(v2)}
+                value={draft.description}
+                placeholder="e.g. Add an extra crew member for heavy or stair-heavy moves"
+                onChange={e => setDraft({ ...draft, description: e.target.value })}
+              />
+            </div>
+          </div>
+        )}
 
         {/* SLA + Priority + Auto-apply */}
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12, marginTop: 14 }}>
@@ -371,6 +484,12 @@ export function ServiceRow({
   if (service.showAsDeliveryService) tags.push({ label: 'Delivery',   bg: v2.colors.statusDraft.bg,    color: v2.colors.statusDraft.text });
   if (service.showAsReceivingAddon)  tags.push({ label: 'Add-on',     bg: v2.colors.accentLight,       color: v2.colors.accent });
   if (service.hasDedicatedPage)      tags.push({ label: 'Has Page',   bg: v2.colors.statusExpired.bg,  color: v2.colors.statusExpired.text });
+  if (service.showAsDeliveryService && service.quoteRequired) {
+    tags.push({ label: 'Quote',  bg: 'rgba(180,90,90,0.12)', color: '#B45A5A' });
+  }
+  if (service.showAsDeliveryService && !service.visibleToClient) {
+    tags.push({ label: 'Hidden', bg: 'rgba(120,120,120,0.15)', color: '#666' });
+  }
 
   return (
     <div style={{
@@ -447,14 +566,56 @@ export function ServiceRow({
             background: t.bg, color: t.color, textTransform: 'uppercase',
           }}>{t.label}</span>
         ))}
+        <SyncBadge label="Stax" synced={!!service.staxItemId} />
+        <SyncBadge label="QB"   synced={!!service.qbItemId} />
+        {syncFlash && (
+          <span
+            title={syncFlash.msg}
+            style={{
+              fontSize: 9, fontWeight: 600, letterSpacing: '0.5px',
+              padding: '2px 7px', borderRadius: v2.radius.badge,
+              background: syncFlash.kind === 'ok' ? 'rgba(74,138,92,0.15)' : 'rgba(180,90,90,0.12)',
+              color: syncFlash.kind === 'ok' ? '#4A8A5C' : '#B45A5A',
+              textTransform: 'uppercase',
+              maxWidth: 180, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+            }}
+          >
+            {syncFlash.kind === 'ok' ? 'Synced ✓' : 'Sync failed'}
+          </span>
+        )}
       </div>
 
-      {/* Active toggle + Edit */}
+      {/* Active toggle + Sync + Edit */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
         <ActiveToggle
           checked={service.active}
           onChange={v => { void onToggleActive(service.id, v); }}
         />
+        {onSync && (
+          <button
+            onClick={() => { void handleSyncClick(); }}
+            disabled={syncing}
+            title={syncing ? 'Syncing…' : 'Push this row to Stax + QuickBooks'}
+            style={{
+              display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+              width: 30, height: 28, borderRadius: v2.radius.button,
+              background: 'transparent',
+              border: `1px solid ${v2.colors.border}`,
+              color: syncing ? v2.colors.textMuted : v2.colors.textSecondary,
+              cursor: syncing ? 'not-allowed' : 'pointer', fontFamily: 'inherit',
+              padding: 0,
+            }}
+            onMouseEnter={e => { if (!syncing) e.currentTarget.style.background = v2.colors.bgPage; }}
+            onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}
+          >
+            <RefreshCw
+              size={12}
+              style={syncing ? { animation: 'service-row-spin 0.8s linear infinite' } : undefined}
+            />
+          </button>
+        )}
+        {/* Local keyframes — kept inline to avoid touching global stylesheets. */}
+        <style>{`@keyframes service-row-spin { to { transform: rotate(360deg); } }`}</style>
         <button
           onClick={onEditClick}
           style={{
@@ -473,6 +634,29 @@ export function ServiceRow({
         </button>
       </div>
     </div>
+  );
+}
+
+function SyncBadge({ label, synced }: { label: string; synced: boolean }) {
+  const v2 = theme.v2;
+  return (
+    <span
+      title={synced ? `${label} catalog: synced` : `${label} catalog: not synced`}
+      style={{
+        display: 'inline-flex', alignItems: 'center', gap: 4,
+        fontSize: 9, fontWeight: 700, letterSpacing: '0.5px',
+        padding: '2px 7px', borderRadius: v2.radius.badge,
+        background: synced ? 'rgba(74,138,92,0.12)' : 'rgba(140,140,140,0.10)',
+        color: synced ? '#4A8A5C' : '#999',
+        textTransform: 'uppercase',
+      }}
+    >
+      <span style={{
+        width: 6, height: 6, borderRadius: '50%',
+        background: synced ? '#4A8A5C' : '#B0B0B0',
+      }} />
+      {label}
+    </span>
   );
 }
 

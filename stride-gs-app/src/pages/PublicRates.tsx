@@ -139,6 +139,8 @@ function rowToService(row: ServiceRow): CatalogService {
     hasDedicatedPage: false, displayOrder: row.display_order,
     billIfPass: true, billIfFail: true, times: {},
     staxItemId: null, qbItemId: null,
+    deliveryRateUnit: 'flat', visibleToClient: true,
+    description: '', quoteRequired: false,
     createdAt: '', updatedAt: '',
   };
 }

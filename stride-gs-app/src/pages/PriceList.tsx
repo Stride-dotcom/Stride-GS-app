@@ -9,7 +9,7 @@
  * Data: public.service_catalog via useServiceCatalog (Supabase Realtime).
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Plus, Search, Tag, Download, Share2, Check, Copy, X, UploadCloud, ChevronDown, ChevronRight, ArrowUp, ArrowDown } from 'lucide-react';
+import { Plus, Search, Tag, Download, Share2, Check, Copy, X, UploadCloud, ChevronDown, ChevronRight, ArrowUp, ArrowDown, RefreshCw } from 'lucide-react';
 import { theme } from '../styles/theme';
 import { useServiceCatalog, type CatalogService, type ServiceCategory } from '../hooks/useServiceCatalog';
 import { ServiceRow } from '../components/pricelist/ServiceRow';
@@ -96,7 +96,7 @@ export function PriceList() {
   const v2 = theme.v2;
   const { user } = useAuth();
   const email = user?.email || '_anon';
-  const { services, loading, error, createService, updateService, deleteService } = useServiceCatalog();
+  const { services, loading, error, createService, updateService, deleteService, syncService, syncError, clearSyncError } = useServiceCatalog();
   const { zones: deliveryZones } = useDeliveryZones();
   const { classes: itemClasses } = useItemClasses();
   const { options: coverageOptions } = useCoverageOptions();
@@ -118,6 +118,8 @@ export function PriceList() {
   const [newShare, setNewShare] = useState<PriceListShare | null>(null);
   const [syncing, setSyncing] = useState(false);
   const [syncResult, setSyncResult] = useState<{ kind: 'ok'; message: string } | { kind: 'err'; message: string } | null>(null);
+  const [bulkSyncing, setBulkSyncing] = useState(false);
+  const [bulkSyncProgress, setBulkSyncProgress] = useState<{ done: number; total: number } | null>(null);
 
   // If the auth email changes mid-session (impersonation, sign-out + sign-in),
   // re-hydrate from the new key so we don't accidentally write one user's prefs
@@ -152,6 +154,45 @@ export function PriceList() {
       setSyncResult({ kind: 'err', message: res.error || 'Sync failed' });
     }
     setTimeout(() => setSyncResult(null), 6000);
+  };
+
+  // List of services not yet pushed to one or both external catalogs.
+  // Drives both the "Sync Unsynced (N)" header button and bulk handler.
+  const unsyncedServices = useMemo(
+    () => services.filter(s => s.active && (!s.staxItemId || !s.qbItemId)),
+    [services],
+  );
+
+  const handleSyncAllUnsynced = async () => {
+    if (bulkSyncing || unsyncedServices.length === 0) return;
+    setBulkSyncing(true);
+    setSyncResult(null);
+    setBulkSyncProgress({ done: 0, total: unsyncedServices.length });
+    let okCount = 0;
+    const errors: string[] = [];
+    for (let i = 0; i < unsyncedServices.length; i++) {
+      const s = unsyncedServices[i];
+      const result = await syncService(s.id);
+      if (result && result.errors.length === 0) {
+        okCount += 1;
+      } else if (result) {
+        errors.push(`${s.code}: ${result.errors.join(' · ')}`);
+      } else {
+        errors.push(`${s.code}: sync failed`);
+      }
+      setBulkSyncProgress({ done: i + 1, total: unsyncedServices.length });
+    }
+    setBulkSyncing(false);
+    setBulkSyncProgress(null);
+    if (errors.length === 0) {
+      setSyncResult({ kind: 'ok', message: `Synced ${okCount} service${okCount === 1 ? '' : 's'} to Stax + QuickBooks` });
+    } else {
+      setSyncResult({
+        kind: 'err',
+        message: `Synced ${okCount}, ${errors.length} failed — ${errors.slice(0, 3).join(' | ')}${errors.length > 3 ? ` (+${errors.length - 3} more)` : ''}`,
+      });
+    }
+    setTimeout(() => setSyncResult(null), 8000);
   };
 
   // Per-category counts for the sidebar
@@ -301,6 +342,29 @@ export function PriceList() {
             <UploadCloud size={14} /> {syncing ? 'Syncing…' : 'Sync to Sheet'}
           </button>
           <button
+            onClick={handleSyncAllUnsynced}
+            disabled={bulkSyncing || unsyncedServices.length === 0}
+            title={
+              unsyncedServices.length === 0
+                ? 'All active services are already synced to Stax + QuickBooks'
+                : `Push ${unsyncedServices.length} unsynced service${unsyncedServices.length === 1 ? '' : 's'} to Stax + QuickBooks`
+            }
+            style={{
+              ...ghostHeaderBtn(v2),
+              color: (bulkSyncing || unsyncedServices.length === 0) ? v2.colors.textMuted : v2.colors.text,
+              cursor: (bulkSyncing || unsyncedServices.length === 0) ? 'not-allowed' : 'pointer',
+            }}
+          >
+            <RefreshCw
+              size={14}
+              style={bulkSyncing ? { animation: 'pricelist-bulk-spin 0.8s linear infinite' } : undefined}
+            />
+            {bulkSyncing && bulkSyncProgress
+              ? `Syncing ${bulkSyncProgress.done}/${bulkSyncProgress.total}…`
+              : `Sync Unsynced${unsyncedServices.length ? ` (${unsyncedServices.length})` : ''}`}
+          </button>
+          <style>{`@keyframes pricelist-bulk-spin { to { transform: rotate(360deg); } }`}</style>
+          <button
             onClick={() => downloadPriceListExcel(services, deliveryZones, itemClasses, coverageOptions)}
             disabled={services.length === 0}
             title="Download a formatted Excel workbook of all services"
@@ -351,6 +415,28 @@ export function PriceList() {
           border: `1px solid ${syncResult.kind === 'ok' ? 'rgba(74,138,92,0.3)' : 'rgba(180,90,90,0.3)'}`,
           borderRadius: v2.radius.input, fontSize: 13,
         }}>{syncResult.message}</div>
+      )}
+      {syncError && (
+        <div style={{
+          padding: '12px 16px', marginBottom: 16,
+          background: 'rgba(217,119,6,0.10)', color: '#B45309',
+          border: '1px solid rgba(217,119,6,0.3)',
+          borderRadius: v2.radius.input, fontSize: 13,
+          display: 'flex', alignItems: 'flex-start', gap: 12,
+        }}>
+          <span style={{ flex: 1 }}>{syncError}</span>
+          <button
+            onClick={clearSyncError}
+            aria-label="Dismiss"
+            style={{
+              background: 'transparent', border: 'none', color: '#B45309',
+              cursor: 'pointer', padding: 0, lineHeight: 1, flexShrink: 0,
+              display: 'inline-flex', alignItems: 'center',
+            }}
+          >
+            <X size={14} />
+          </button>
+        </div>
       )}
 
       {/* ── Split panel ── */}
@@ -526,6 +612,7 @@ export function PriceList() {
                             onSave={updateService}
                             onDelete={deleteService}
                             onToggleActive={toggleActive}
+                            onSync={syncService}
                           />
                         ))}
                       </div>
