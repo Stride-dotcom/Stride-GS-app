@@ -1,5 +1,6 @@
 /**
  * dt-sync-statuses — Supabase Edge Function (session 85)
+ * v4 2026-04-24 PST
  *
  * Pulls latest delivery status from DispatchTrack for orders that have been
  * pushed (`dt_dispatch_id IS NOT NULL`) and are not yet in a terminal state.
@@ -22,6 +23,8 @@
  */
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+
+const STATUS_COLLECTED = 22;
 
 interface SyncBody {
   scope?: 'active' | 'all';
@@ -58,7 +61,7 @@ Deno.serve(async (req) => {
   // Build candidate query: pushed to DT and not in terminal categories.
   let query = supabase
     .from('dt_orders')
-    .select('id, dt_identifier, dt_dispatch_id, status_id, last_synced_at, tenant_id')
+    .select('id, dt_identifier, dt_dispatch_id, status_id, last_synced_at, tenant_id, paid_at')
     .not('dt_dispatch_id', 'is', null);
 
   if (singleOrderId) {
@@ -67,7 +70,7 @@ Deno.serve(async (req) => {
     // Load dt_statuses so we can exclude terminal buckets client-side
     const { data: statuses } = await supabase.from('dt_statuses').select('id, category');
     const terminalIds = (statuses || [])
-      .filter((s: { id: number; category: string }) => s.category === 'completed' || s.category === 'cancelled')
+      .filter((s: { id: number; category: string }) => s.category === 'completed' || s.category === 'cancelled' || s.category === 'exception' || s.category === 'billing')
       .map((s: { id: number }) => s.id);
     if (terminalIds.length > 0) {
       query = query.or(`status_id.is.null,status_id.not.in.(${terminalIds.join(',')})`);
@@ -134,8 +137,16 @@ Deno.serve(async (req) => {
         result.errors.push(`${o.dt_identifier}: unknown DT status "${dtStatusCode}"`);
         continue;
       }
+      let finalStatusId = match.id;
+      if (match.category === 'completed' && o.paid_at) {
+        finalStatusId = STATUS_COLLECTED;
+        console.log(`${o.dt_identifier}: completed + paid → auto-Collected (status_id=${STATUS_COLLECTED})`);
+      }
+      if (finalStatusId === o.status_id) {
+        continue;
+      }
       const patch: Record<string, unknown> = {
-        status_id: match.id,
+        status_id: finalStatusId,
         last_synced_at: new Date().toISOString(),
       };
       const { error: updErr } = await supabase.from('dt_orders').update(patch).eq('id', o.id);
