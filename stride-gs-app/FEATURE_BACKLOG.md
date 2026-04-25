@@ -31,10 +31,11 @@
 ## Search / Navigation
 
 - [ ] Global search expansion — add shipments, billing, claims entities + missing fields
+- [ ] Phase 2 of useUrlState — convert search input, status pill filters, and table sort state to URL params (right now they live in component state / localStorage — back-button doesn't restore them mid-session). Pattern: `useUrlState('q', '', { replace: true })` for search (push-suppressed so typing doesn't bloat history), `useUrlState('status', '')` for filter pills (push), `useUrlState<SortingState>('sort', [], { encoder: jsonEncoder })` for sort. Per-page, mostly mechanical.
+- [ ] Phase 3 of useUrlState — scroll restoration on back-nav. AppLayout-level hook that saves `scrollY` in `history.state` on scroll (replace) and restores on `popstate`. Tricky bit: TanStack-virtualized tables need restoration to wait until rows have measured.
 
 ## Infrastructure
 
-- [ ] GitHub clone out of Dropbox — move local clone to non-synced path to prevent write-conflict bugs
 - [ ] Sync delivery zones to MPL sheet tab (data in Supabase, no GAS consumer today)
 
 ## Known Bugs
