@@ -122,11 +122,18 @@ export function usePriceListShares() {
 
 /** Standalone fetch — no auth required. Used by PublicRates.tsx. */
 export async function fetchPublicShare(shareId: string): Promise<PriceListShare | null> {
+  // Filter explicitly here in addition to the public_read RLS policy. Two
+  // reasons: (1) makes the intent visible at the call site so future
+  // refactors don't drop the constraint; (2) lets us surface a clearer
+  // error path to the public page rather than relying on null-from-RLS.
   const { data, error } = await supabase
     .from('price_list_shares')
     .select('*')
     .eq('share_id', shareId)
+    .eq('active', true)
     .single();
   if (error || !data) return null;
-  return rowToShare(data as ShareRow);
+  const row = data as ShareRow;
+  if (row.expires_at && new Date(row.expires_at).getTime() < Date.now()) return null;
+  return rowToShare(row);
 }

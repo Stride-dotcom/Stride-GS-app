@@ -114,10 +114,12 @@ export function useBillingParityLog(limit = DEFAULT_LIMIT): UseBillingParityLogR
   useEffect(() => { void refetch(); }, [refetch]);
 
   // Realtime: prepend new rows as they land so the feed animates without
-  // a manual refresh. Unique channel per mount keeps concurrent admin
-  // sessions from colliding on the registry.
+  // a manual refresh. crypto.randomUUID() guarantees a strictly unique
+  // channel name per mount so concurrent admin sessions can't collide on
+  // the registry (Math.random had a non-zero collision rate that
+  // occasionally caused subscription leaks when two tabs opened at once).
   useEffect(() => {
-    const channelName = `billing_parity_log_rt_${Math.random().toString(36).slice(2, 10)}`;
+    const channelName = `billing_parity_log_rt_${crypto.randomUUID()}`;
     const channel = supabase
       .channel(channelName)
       .on('postgres_changes',

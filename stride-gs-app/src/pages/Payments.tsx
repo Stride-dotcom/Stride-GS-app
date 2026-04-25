@@ -36,6 +36,10 @@ import {
   isSupabaseCacheAvailable,
 } from '../lib/supabaseQueries';
 
+// Note: 'pipeline', 'mapping', and 'runlog' content blocks below are
+// not currently reachable via the TABS nav. Kept in place so the code
+// can be re-enabled by adding to the TABS array; removing entirely
+// would lose the Customer Mapping and Run Log features.
 type Tab = 'iif' | 'review' | 'invoices' | 'queue' | 'charges' | 'exceptions' | 'customers' | 'pipeline' | 'mapping' | 'runlog';
 
 /** Map API StaxInvoice → PaymentDetailPanel PaymentInvoice */
@@ -482,12 +486,21 @@ export function Payments() {
 
   useEffect(() => { loadData(); }, [loadData]);
 
-  // v38.119.0 — Realtime subscription: refetch Payments when stax_invoices changes
-  // in Supabase (another tab edits, backend write-through, etc.). Debounced via
-  // the central realtime channel + entityEvents bus. No polling.
+  // v38.119.0 — Realtime subscription: refetch Payments when any Stax
+  // mirror table changes in Supabase (another tab edits, backend
+  // write-through, etc.). Debounced via the central realtime channel +
+  // entityEvents bus. No polling. Originally only stax_invoice was
+  // wired, which left Charges / Exceptions / Customers / Run Log stale
+  // — now all five trigger a refetch.
   useEffect(() => {
     const unsub = entityEvents.subscribe((entityType) => {
-      if (entityType === 'stax_invoice') {
+      if (
+        entityType === 'stax_invoice' ||
+        entityType === 'stax_charge' ||
+        entityType === 'stax_exception' ||
+        entityType === 'stax_customer' ||
+        entityType === 'stax_run_log'
+      ) {
         loadData();
       }
     });
@@ -1704,7 +1717,6 @@ export function Payments() {
               if (res.ok && res.data) { setInvoiceResult(res.data.summary); setTab('invoices'); loadData(true); }
               else { setError(res.error || 'Create invoices failed'); }
             }} />
-            <WriteButton label="Set Payment Due Dates" variant="secondary" style={{ flex: 1, padding: '12px', fontSize: 13 }} onClick={async () => { /* Phase 2: wire to API */ }} />
           </div>
         </div>
       )}

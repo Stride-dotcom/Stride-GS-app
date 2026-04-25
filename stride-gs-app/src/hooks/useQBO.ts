@@ -66,10 +66,20 @@ export function useQBO(): UseQBOResult {
     }
   }, [isAdmin, refreshStatus]);
 
-  // Listen for postMessage from OAuth popup
+  // Listen for postMessage from OAuth popup.
+  // The Apps Script OAuth callback sends postMessage from script.google.com
+  // or from a Google web-app deployment domain (*.googleusercontent.com).
+  // Without origin validation, any tab that scripts a postMessage to our
+  // window could trigger a spurious "connected" refresh or inject an error
+  // string into the UI.
   useEffect(() => {
     const handler = (event: MessageEvent) => {
-      // Accept messages from any origin (popup is on a different domain — script.google.com)
+      const origin = event.origin || '';
+      const isTrusted =
+        origin === 'https://script.google.com' ||
+        origin.endsWith('.googleusercontent.com') ||
+        origin.endsWith('.google.com');
+      if (!isTrusted) return;
       if (event.data && typeof event.data === 'object' && 'success' in event.data) {
         if (event.data.success) {
           refreshStatus();

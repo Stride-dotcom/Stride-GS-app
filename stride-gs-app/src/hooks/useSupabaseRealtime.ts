@@ -81,6 +81,13 @@ export function useSupabaseRealtime() {
       // stax_invoices (v38.119.0) — Payments page live updates
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'stax_invoices' }, onRow('stax_invoice', 'qb_invoice_no'))
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'stax_invoices' }, onRow('stax_invoice', 'qb_invoice_no'))
+      // Billing code-review fix — Payments page also has Charge Log,
+      // Exceptions, Customers, and Run Log tabs. Without these subs the
+      // tabs stay stale until the user refetches manually.
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'stax_charges' },    onRow('stax_charge', 'id'))
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'stax_exceptions' }, onRow('stax_exception', 'id'))
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'stax_customers' },  onRow('stax_customer', 'id'))
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'stax_run_log' },    onRow('stax_run_log', 'id'))
       // clients
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'clients' }, onRow('client', 'spreadsheet_id'))
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'clients' }, onRow('client', 'spreadsheet_id'))
