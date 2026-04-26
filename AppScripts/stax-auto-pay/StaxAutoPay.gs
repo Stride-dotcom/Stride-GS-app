@@ -1,4 +1,14 @@
 // ============================================================
+// STAX AUTO-PAY TOOL — v4.7.5
+// v4.7.5 (2026-04-26): Daily trigger now fires in the 9:00-9:59 AM
+//         window to match the "Daily at 9:00 AM Pacific" label in
+//         the Payments app. Was .atHour(8) which fired around 8:27
+//         consistently — caused INV-097/098 to auto-charge an hour
+//         earlier than the operator expected.
+//         setupDailyTrigger now also auto-deletes any existing
+//         runChargesAuto trigger so re-running it from the menu
+//         cleanly resets the schedule (was a no-op + alert before).
+// ============================================================
 // STAX AUTO-PAY TOOL — v4.7.4
 // v4.7.4 (2026-04-26): Past-due safety buffer for newly-CREATED rows.
 //         Mirror of StrideAPI.gs v38.135.0. New helper
@@ -3753,32 +3763,40 @@ function _logChargeResult(docNum, staxInvId, staxCustId, custName, amount, statu
 // PHASE 3: DAILY TRIGGER MANAGEMENT
 // ============================================================
 
-// Sets up a daily time-driven trigger for runChargesAuto at ~8 AM.
-// Prevents duplicate triggers.
+// Sets up a daily time-driven trigger for runChargesAuto at ~9 AM.
+// v4.7.5 — Auto-replaces any existing trigger so the operator doesn't
+//          have to disable + re-enable to pick up an hour change. Was
+//          .atHour(8) which fired in the 8-9 AM window (Justin saw
+//          consistent 8:27 runs); now matches the "Daily at 9:00 AM
+//          Pacific" label in the Payments app.
 function setupDailyTrigger() {
   var ui = SpreadsheetApp.getUi();
 
-  // Check for existing trigger
+  // Remove any existing runChargesAuto triggers so re-running this from
+  // the menu cleanly resets the schedule.
   var triggers = ScriptApp.getProjectTriggers();
+  var removed = 0;
   for (var i = 0; i < triggers.length; i++) {
     if (triggers[i].getHandlerFunction() === 'runChargesAuto') {
-      ui.alert('Daily auto-charge trigger is already enabled.\n\n' +
-        'To reset it, first click "Disable Daily Auto-Charge", then re-enable.');
-      return;
+      ScriptApp.deleteTrigger(triggers[i]);
+      removed++;
     }
   }
 
-  // Create the trigger — runs daily between 8:00-9:00 AM in script timezone
+  // Create the trigger — runs daily between 9:00-9:59 AM in script timezone
   ScriptApp.newTrigger('runChargesAuto')
     .timeBased()
     .everyDays(1)
-    .atHour(8)
+    .atHour(9)
     .create();
 
-  _writeRunLog('setupDailyTrigger', 'Daily auto-charge trigger enabled (8 AM)', '');
+  _writeRunLog('setupDailyTrigger',
+    'Daily auto-charge trigger enabled (9 AM)' + (removed ? ' — replaced ' + removed + ' existing trigger(s)' : ''),
+    '');
 
   ui.alert('Daily auto-charge trigger enabled.\n\n' +
-    'runChargesAuto will run once daily between 8-9 AM.\n' +
+    'runChargesAuto will run once daily between 9:00-9:59 AM Pacific.\n' +
+    (removed ? '(Replaced ' + removed + ' existing trigger.)\n\n' : '') +
     'Make sure AUTO_CHARGE_ENABLED is set to TRUE in the Config tab.');
 }
 
