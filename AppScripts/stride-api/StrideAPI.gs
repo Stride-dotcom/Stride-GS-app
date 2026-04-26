@@ -1,5 +1,12 @@
 /* ===================================================
-   StrideAPI.gs — v38.132.0 — 2026-04-26 PST — Surface silent Supabase write failures in stax_run_log + Run Log sheet
+   StrideAPI.gs — v38.133.0 — 2026-04-26 PST — Hotfix: wire the v38.128.0 price-list sync endpoints into the POST dispatch
+   v38.133.0: HOTFIX — handleImportPriceListToSupabase_ and
+              handleSyncSingleServiceToSheet_ were only wired into the
+              GET dispatch in v38.128.0. The React UI calls both via
+              apiPost (POST), so both endpoints returned "Unknown POST
+              action" and the per-save sheet auto-sync silently failed
+              (errors swallowed by pushRowToSheet's console.warn).
+              Added matching cases in the doPost switch.
    v38.132.0: Better error logging for Supabase write-through. The
               scheduled_date PGRST204 schema-cache bug went unnoticed
               for days because supabaseBatchUpsert_'s outer try/catch
@@ -6608,6 +6615,13 @@ function doPost(e) {
       // v38.118.0: Sync a service catalog item to QBO as a Service item
       case "qboSyncCatalogItem":
         return withAdminGuard_(callerEmail, function() { return jsonResponse_(handleQboSyncCatalogItem_(payload)); });
+
+      // v38.128.0: Service catalog Sheet↔Supabase sync (POST so they ride
+      // the same dispatch as the React UI's apiPost calls).
+      case "importPriceListToSupabase":
+        return handleImportPriceListToSupabase_(payload, callerEmail);
+      case "syncSingleServiceToSheet":
+        return handleSyncSingleServiceToSheet_(payload, callerEmail);
 
       default:
         return errorResponse_("Unknown POST action: " + action, "INVALID_ACTION");
