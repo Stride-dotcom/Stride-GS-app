@@ -3475,12 +3475,13 @@ function api_sbResyncStaxInvoices_(qbInvoiceNos) {
  */
 function seedAllStaxToSupabase() {
   var ss = getStaxSpreadsheet_();
-  var report = { invoices: 0, charges: 0, exceptions: 0, customers: 0, runLog: 0 };
+  var report = { invoices: 0, charges: 0, exceptions: 0, customers: 0, runLog: 0, errors: [], headers: {} };
 
   // Invoices
   try {
     var invSheet = ss.getSheetByName("Invoices");
     if (invSheet) {
+      report.headers.invoices = invSheet.getRange(1, 1, 1, invSheet.getLastColumn()).getValues()[0];
       var rows = sheetToObjects_(invSheet);
       var invs = rows.map(function(r, idx) {
         var staxCustId = String(r["Stax Customer ID"] || "");
@@ -3505,12 +3506,13 @@ function seedAllStaxToSupabase() {
       api_sbBatchUpsertStaxInvoices_(invs);
       report.invoices = invs.length;
     }
-  } catch (e) { Logger.log("seed invoices err: " + e); }
+  } catch (e) { Logger.log("seed invoices err: " + e); report.errors.push("invoices: " + e); }
 
   // Charges (append-only)
   try {
     var chSheet = ss.getSheetByName("Charge Log");
     if (chSheet) {
+      report.headers.charges = chSheet.getRange(1, 1, 1, chSheet.getLastColumn()).getValues()[0];
       var cRows = sheetToObjects_(chSheet);
       var chargeRows = cRows.map(function(r) {
         return {
@@ -3528,12 +3530,13 @@ function seedAllStaxToSupabase() {
       supabaseBatchUpsert_("stax_charges", chargeRows);
       report.charges = chargeRows.length;
     }
-  } catch (e) { Logger.log("seed charges err: " + e); }
+  } catch (e) { Logger.log("seed charges err: " + e); report.errors.push("charges: " + e); }
 
   // Exceptions
   try {
     var exSheet = ss.getSheetByName("Exceptions");
     if (exSheet) {
+      report.headers.exceptions = exSheet.getRange(1, 1, 1, exSheet.getLastColumn()).getValues()[0];
       var eRows = sheetToObjects_(exSheet);
       var exceptionRows = eRows.map(function(r) {
         return {
@@ -3551,13 +3554,16 @@ function seedAllStaxToSupabase() {
       supabaseBatchUpsert_("stax_exceptions", exceptionRows);
       report.exceptions = exceptionRows.length;
     }
-  } catch (e) { Logger.log("seed exceptions err: " + e); }
+  } catch (e) { Logger.log("seed exceptions err: " + e); report.errors.push("exceptions: " + e); }
 
   // Customers
   try {
     var cuSheet = ss.getSheetByName("Customers");
     if (cuSheet) {
+      report.headers.customers = cuSheet.getRange(1, 1, 1, cuSheet.getLastColumn()).getValues()[0];
+      report.customersSheetRows = cuSheet.getLastRow() - 1;
       var uRows = sheetToObjects_(cuSheet);
+      report.customersFirstRowKeys = uRows.length > 0 ? Object.keys(uRows[0]) : [];
       var customerRows = uRows.map(function(r) {
         return {
           qb_name:       String(r["QB Customer Name"] || ""),
@@ -3573,7 +3579,7 @@ function seedAllStaxToSupabase() {
       supabaseBatchUpsert_("stax_customers", customerRows);
       report.customers = customerRows.length;
     }
-  } catch (e) { Logger.log("seed customers err: " + e); }
+  } catch (e) { Logger.log("seed customers err: " + e); report.errors.push("customers: " + e); }
 
   // Run Log
   try {
@@ -3591,7 +3597,7 @@ function seedAllStaxToSupabase() {
       supabaseBatchUpsert_("stax_run_log", runLogRows);
       report.runLog = runLogRows.length;
     }
-  } catch (e) { Logger.log("seed runLog err: " + e); }
+  } catch (e) { Logger.log("seed runLog err: " + e); report.errors.push("runLog: " + e); }
 
   Logger.log("seedAllStaxToSupabase complete: " + JSON.stringify(report));
   return report;
@@ -6264,6 +6270,14 @@ function doPost(e) {
         // "I'll have to push it again" duplicate-creation trap.
         return withAdminGuard_(callerEmail, function() {
           return handleLinkStaxInvoiceToExisting_(payload);
+        });
+      case "seedStaxCaches":
+        // v38.131.0 — admin-callable endpoint that runs seedAllStaxToSupabase()
+        // and returns the per-table row counts. Used to recover from a stale
+        // Supabase mirror without having to dig in the Apps Script editor.
+        return withAdminGuard_(callerEmail, function() {
+          var report = seedAllStaxToSupabase();
+          return jsonResponse_({ success: true, report: report });
         });
       case "sendStaxPayLink":
         return withAdminGuard_(callerEmail, function() {
