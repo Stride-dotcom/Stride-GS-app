@@ -892,7 +892,11 @@ function NewShipmentForm() {
 
   return (
     <div style={{ position: 'relative', background: '#F5F2EE', margin: '-28px -32px', padding: '28px 32px', minHeight: '100%' }}>
-      <ProcessingOverlay visible={submitting} message="Completing Shipment..." />
+      <ProcessingOverlay
+        visible={submitting}
+        message="Hold tight — completing your shipment"
+        subMessage="Adding items to inventory, generating the receiving doc, and emailing the client. This can take 10–20 seconds."
+      />
       <div style={{ marginBottom: 16, fontSize: 20, fontWeight: 700, letterSpacing: '2px', color: '#1C1C1C' }}>STRIDE LOGISTICS · RECEIVING</div>
       {/* Shipment Header */}
       <div style={{ background: '#fff', border: `1px solid ${theme.colors.border}`, borderRadius: isMobile ? 8 : 12, padding: isMobile ? 12 : 20, marginBottom: isMobile ? 10 : 16 }}>

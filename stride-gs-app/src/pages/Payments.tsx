@@ -663,7 +663,11 @@ export function Payments() {
       )}
       {chargeResult && <div style={{ padding: '8px 14px', marginBottom: 14, borderRadius: 8, background: chargeResult.includes('DRY RUN') ? '#FFFBEB' : '#F0FDF4', border: `1px solid ${chargeResult.includes('DRY RUN') ? '#FCD34D' : '#BBF7D0'}`, fontSize: 12, color: chargeResult.includes('DRY RUN') ? '#92400E' : '#166534', display: 'flex', alignItems: 'center', gap: 8 }}><CheckCircle2 size={14} /> {chargeResult} <button onClick={() => setChargeResult(null)} style={{ marginLeft: 'auto', background: 'none', border: 'none', cursor: 'pointer', color: chargeResult.includes('DRY RUN') ? '#92400E' : '#166534', fontSize: 16 }}>&times;</button></div>}
       {/* ProcessingOverlay for runningCharges removed — use Charge Selected instead */}
-      <ProcessingOverlay visible={creatingInvoices} message="Creating Stax invoices..." />
+      <ProcessingOverlay
+        visible={creatingInvoices}
+        message="Hold tight — creating your Stax invoices"
+        subMessage="Pushing invoices to Stax. This can take a few seconds per invoice."
+      />
 
       {/* Summary Cards */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 16, marginBottom: 24 }}>

@@ -71,6 +71,7 @@ import {
 } from '../../lib/supabaseQueries';
 import { supabase } from '../../lib/supabase';
 import { useCoverageOptions, type CoverageOption } from '../../hooks/useCoverageOptions';
+import { ProcessingOverlay } from './ProcessingOverlay';
 
 // ── Address Book helpers ─────────────────────────────────────────────────
 interface AddressBookContact {
@@ -2220,6 +2221,13 @@ export function CreateDeliveryOrderModal({
         boxShadow: '0 20px 60px rgba(0,0,0,0.3)',
         display: 'flex', flexDirection: 'column', overflow: 'hidden',
       }}>
+        <ProcessingOverlay
+          visible={submitting || savingDraft}
+          message={savingDraft ? 'Saving your draft' : 'Hold tight — creating your delivery order'}
+          subMessage={savingDraft
+            ? 'Just a moment.'
+            : 'We’re generating the order, calculating zones, and pushing to DispatchTrack. This can take 5–10 seconds.'}
+        />
         {/* Header */}
         <div style={{
           padding: '16px 20px', borderBottom: `1px solid ${theme.colors.border}`,

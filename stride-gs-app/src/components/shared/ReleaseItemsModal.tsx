@@ -50,7 +50,11 @@ export function ReleaseItemsModal({ itemIds, clientName, clientSheetId, onClose,
         boxShadow: '0 8px 40px rgba(0,0,0,0.15)', zIndex: 201, display: 'flex', flexDirection: 'column',
         fontFamily: theme.typography.fontFamily, overflow: 'hidden',
       }}>
-        <ProcessingOverlay visible={submitting} message="Releasing items..." />
+        <ProcessingOverlay
+          visible={submitting}
+          message="Hold tight — releasing your items"
+          subMessage="Updating inventory, billing, and notifying the client. You can leave this open."
+        />
 
         {/* Header */}
         <div style={{ padding: '16px 20px', borderBottom: `1px solid ${theme.colors.borderDefault}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
