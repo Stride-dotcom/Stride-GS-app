@@ -1,5 +1,16 @@
 /* ===================================================
-   StrideAPI.gs — v38.126.0 — 2026-04-25 PST — Stax link/dedup uses clean meta.invoiceNumber + composite-refKey back-compat
+   StrideAPI.gs — v38.127.0 — 2026-04-25 PST — Supabase-primary cutover for api_lookupRate_; sheet (Price_Cache) demoted to fallback
+   v38.127.0: api_lookupRate_ flipped from sheet-primary/Supabase-shadow to
+              Supabase-primary/sheet-fallback. service_catalog is now the
+              authoritative source for billing rates. Sheet read is retained
+              for parity logging + outage fallback (returns sheet result if
+              Supabase throws or returns null). Parity log + Logger tags
+              kept identical so the existing observability stack continues
+              to work; new PARITY_INFO sheet_missing breadcrumb covers the
+              expected steady-state case where a service was added via the
+              React PriceList without a Price_Cache push.
+              No call-site changes — return shape (rate/svcName/category/
+              billIfPass/billIfFail) is preserved.
    v38.126.0: Stax invoice linking / dedup robustness.
               (1) handlePushStaxInvoices_ now stamps meta.invoiceNumber =
                   docNum (e.g. "INV-000098") alongside the existing
@@ -11977,19 +11988,32 @@ function api_lookupRateFromSheet_(ss, svcCode, itemClass) {
  * are aggregate-useful even without an item identity.
  */
 function api_lookupRate_(ss, svcCode, itemClass, ctx) {
-  var sheetResult = api_lookupRateFromSheet_(ss, svcCode, itemClass);
-
+  // v38.127.0: Supabase-primary cutover. service_catalog is now the
+  // authoritative source for rates; sheet (Price_Cache) is fallback only,
+  // used when Supabase returns null OR throws (network / RLS / etc).
   var sbResult = null;
-  try { sbResult = api_lookupRateFromSupabase_(svcCode, itemClass); } catch (e) {
-    Logger.log("api_lookupRate_ Supabase shadow error (non-fatal): " + e);
+  var sbErr = null;
+  try {
+    sbResult = api_lookupRateFromSupabase_(svcCode, itemClass);
+  } catch (e) {
+    sbErr = e;
+    Logger.log("api_lookupRate_ Supabase error (will fall back to sheet): " + e);
   }
+
+  // Pull sheet result for fallback + parity log. Sheet read is cheap (Price_Cache
+  // is small, hot-cached), so the cost of always reading is negligible compared
+  // to the value of continued parity observability after cutover.
+  // Note: api_lookupRateFromSheet_ returns a zero-rate `defaults` object on
+  // miss (never null), so we use Number(rate) > 0 to detect an actual hit.
+  var sheetResult = api_lookupRateFromSheet_(ss, svcCode, itemClass);
+  var sheetHit = sheetResult && Number(sheetResult.rate || 0) > 0;
 
   var shRate = sheetResult ? Number(sheetResult.rate || 0) : 0;
   var sbRate = sbResult ? Number(sbResult.rate || 0) : 0;
   var diff = Math.abs(sbRate - shRate);
   var match = null;
 
-  if (sbResult && sheetResult) {
+  if (sbResult && sheetHit) {
     if (diff > 0.001) {
       match = false;
       Logger.log("PARITY_MISMATCH rate code=" + svcCode +
@@ -12001,13 +12025,21 @@ function api_lookupRate_(ss, svcCode, itemClass, ctx) {
       match = true;
       Logger.log("PARITY_OK rate code=" + svcCode +
                  " class=" + (itemClass || "") +
-                 " rate=" + shRate);
+                 " rate=" + sbRate);
     }
-  } else if (!sbResult && sheetResult && Number(sheetResult.rate) > 0) {
+  } else if (sbResult && !sheetHit) {
+    // Supabase has it, sheet doesn't — expected during steady-state if
+    // someone added a service via the React PriceList UI without re-pushing
+    // the Price_Cache. Not a parity error, but worth a breadcrumb.
+    Logger.log("PARITY_INFO sheet_missing code=" + svcCode +
+               " class=" + (itemClass || "") +
+               " supabase=" + sbRate);
+  } else if (!sbResult && sheetHit) {
     match = false;
     Logger.log("PARITY_MISMATCH supabase_missing code=" + svcCode +
                " class=" + (itemClass || "") +
-               " sheet=" + sheetResult.rate);
+               " sheet=" + sheetResult.rate +
+               (sbErr ? " (supabase_error=" + sbErr + ")" : ""));
   }
 
   // Structured log to Supabase (best-effort). Only writes when we have
@@ -12037,8 +12069,9 @@ function api_lookupRate_(ss, svcCode, itemClass, ctx) {
     } catch (_) { /* non-fatal */ }
   }
 
-  // ALWAYS use sheet — Supabase is shadow only.
-  return sheetResult;
+  // Supabase-primary: prefer sbResult; fall back to sheet on null/error
+  // so a Supabase outage can't take billing offline.
+  return sbResult || sheetResult;
 }
 
 /**

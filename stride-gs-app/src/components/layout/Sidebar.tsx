@@ -21,7 +21,6 @@ import {
   Mail,
   Calendar,
   Receipt,
-  BookOpen,
   MessageSquare,
   KeyRound,
 } from 'lucide-react';
@@ -46,7 +45,8 @@ const ADMIN_NAV = [
   { id: 'payments', label: 'Payments', path: '/payments', icon: CreditCard },
   { id: 'orders', label: 'Delivery', path: '/orders', icon: Calendar },
   { id: 'quotes', label: 'Quotes', path: '/quotes', icon: Receipt },
-  { id: 'pricelist', label: 'Price List', path: '/price-list', icon: BookOpen },
+  // Price List moved under Settings → Pricing tab (admin-only). Direct route
+  // /price-list still works for deep-linking and the Settings tab embeds it.
   { id: 'marketing', label: 'Marketing', path: '/marketing', icon: Mail },
   { id: 'scanner', label: 'QR Scanner', path: '/scanner', icon: ScanLine },
   { id: 'labels', label: 'Labels', path: '/labels', icon: Tag },
