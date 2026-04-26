@@ -97,6 +97,16 @@ UI components: FloatingActionMenu, WriteButton, BatchGuard, ActionTooltip, Batch
 
 ---
 
+## Recent Changes (2026-04-26, session 83)
+
+### Order revision/rejection emails
+- New Edge Function `notify-order-revision` — sends `ORDER_REVISION_REQUESTED` or `ORDER_REJECTED` email when a reviewer flags an order. Recipients = office distro (NOTIFICATION_EMAILS secret) + the order submitter (resolved from `dt_orders.created_by_user` → `profiles.email`), deduped case-insensitively. Mirrors `notify-new-order`'s pattern (template lookup → token substitution → GAS sendRawEmail). Token values are HTML-escaped before substitution.
+- Migration `20260426000000_order_revision_email_templates.sql` seeds two new `email_templates` rows. Both visually mirror `ORDER_REVIEW_REQUEST` (dark header, accent banner, detail table, footer) with action-specific colors: amber `#F59E0B` for revisions, red `#DC2626` for rejection. Editable in Settings → Email Templates the same as the rest.
+- `src/pages/OrderPage.tsx` — added "Request Revision" button next to existing "Reject". Both prompt for notes via `window.prompt`, persist `review_status + review_notes + reviewed_by + reviewed_at`, then invoke `notify-order-revision` (best-effort — failures log warn but don't unwind the status change).
+
+### dt-sync-statuses bug fix (v8)
+- Filter switched from `dt_dispatch_id IS NOT NULL` to `pushed_to_dt_at IS NOT NULL`. App-pushed orders never get a dispatch ID (DT's `add_order` response is just `<success>...</success>`), so the old filter skipped them — they stayed "Awaiting DT Sync" forever. Lookup now passes `dt_identifier` to DT's `service_order_id` query param (which the XML spec confirms accepts the human Order_Number). Falls back to `dt_dispatch_id` for legacy webhook-imported rows.
+
 ## Recent Changes (2026-04-25, session 82)
 
 ### DT order Completion view + sync-back

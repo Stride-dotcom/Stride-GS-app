@@ -704,6 +704,75 @@ export function OrderPage() {
     return () => { cancelled = true; };
   }, [order?.id, order?.lastSyncedAt]);
 
+  // Reject / Request Revision: prompts the reviewer for notes, persists
+  // review_status + review_notes + reviewed_at, then fires the
+  // notify-order-revision Edge Function which emails BOTH the office
+  // distro (NOTIFICATION_EMAILS secret) AND the order submitter
+  // (resolved server-side from created_by_user → profiles.email).
+  // Email send is best-effort: failures are logged via console.warn
+  // and do NOT unwind the review_status change. The status persisted
+  // either way; an ops re-send is a one-line edit-resend if needed.
+  const handleReviewAction = useCallback(async (action: 'revision_requested' | 'rejected') => {
+    if (!order) return;
+    const promptLabel = action === 'rejected'
+      ? 'Reason for rejecting (will be emailed to the submitter):'
+      : 'What revisions are needed? (will be emailed to the submitter):';
+    const notes = window.prompt(promptLabel, order.reviewNotes || '');
+    if (notes === null) return; // cancelled
+    setSaving(true);
+    setSaveError(null);
+    try {
+      const { data: authData } = await supabase.auth.getUser();
+      const reviewerUid = authData?.user?.id ?? null;
+      let reviewerName = 'Stride Reviewer';
+      if (reviewerUid) {
+        const { data: prof } = await supabase
+          .from('profiles')
+          .select('display_name, email')
+          .eq('id', reviewerUid)
+          .maybeSingle();
+        reviewerName = (prof?.display_name as string) || (prof?.email as string) || reviewerName;
+      }
+
+      const { error: updErr } = await supabase
+        .from('dt_orders')
+        .update({
+          review_status: action,
+          review_notes:  notes.trim() || null,
+          reviewed_by:   reviewerUid,
+          reviewed_at:   new Date().toISOString(),
+        })
+        .eq('id', order.id);
+      if (updErr) throw updErr;
+
+      // Best-effort email — don't unwind the status change on send fail.
+      try {
+        const { data, error: invokeErr } = await supabase.functions.invoke('notify-order-revision', {
+          body: {
+            orderId: order.id,
+            action,
+            reviewerName,
+            reviewNotes: notes.trim(),
+          },
+        });
+        if (invokeErr) console.warn('[OrderPage] notify-order-revision invoke error:', invokeErr.message);
+        else if (data && (data as { ok?: boolean }).ok === false) {
+          console.warn('[OrderPage] notify-order-revision returned ok:false', data);
+        }
+      } catch (e) {
+        console.warn('[OrderPage] notify-order-revision threw', e);
+      }
+
+      const fresh = await fetchDtOrderByIdFromSupabase(order.id);
+      if (fresh) setLocalOrder(fresh);
+      refetch();
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  }, [order, refetch]);
+
   // Phase A — Edit Full Order: opens the same form the create flow uses
   // (CreateDeliveryOrderModal in editOrderId mode). The detail page's
   // inline Edit covers the common fields fast; the full-form modal is
@@ -908,14 +977,14 @@ export function OrderPage() {
             }}
           />
           <EPFooterButton
+            label="Request Revision"
+            variant="secondary"
+            onClick={() => handleReviewAction('revision_requested')}
+          />
+          <EPFooterButton
             label="Reject"
             variant="secondary"
-            onClick={async () => {
-              await supabase.from('dt_orders').update({ review_status: 'rejected', reviewed_at: new Date().toISOString() }).eq('id', order.id);
-              const fresh = await fetchDtOrderByIdFromSupabase(order.id);
-              if (fresh) setLocalOrder(fresh);
-              refetch();
-            }}
+            onClick={() => handleReviewAction('rejected')}
           />
         </>
       )}
