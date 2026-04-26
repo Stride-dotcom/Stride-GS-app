@@ -97,6 +97,17 @@ UI components: FloatingActionMenu, WriteButton, BatchGuard, ActionTooltip, Batch
 
 ---
 
+## Recent Changes (2026-04-26, session 84)
+
+### Public Photo Share Gallery
+- New "Share" workflow on the shared Photos module — staff/admin can enter selection mode, pick photos, and generate a permanent public link that renders the chosen photos with an entity-aware header (item-level for inventory; job-level for shipments/will calls/tasks/repairs).
+- New migration `supabase/migrations/20260426090000_photo_shares.sql` — `photo_shares` table (`share_id`, `entity_type`, `entity_id`, `photo_ids`, `header` JSONB, `active`, `created_by[_name]`) + RLS policies that allow anon SELECT through active share rows for `photo_shares`, `item_photos`, and `storage.objects` in the `photos` bucket. GIN index on `photo_ids` for the join.
+- New hook `src/hooks/usePhotoShares.ts` — `createPhotoShare()` / `deactivatePhotoShare()` for staff; standalone `fetchPublicPhotoShare(shareId)` used by the public page.
+- New modal `src/components/media/PhotoShareDialog.tsx` — auto-creates the share on mount, shows the link with copy-to-clipboard.
+- New page `src/pages/PublicPhotoShare.tsx` — anon route `/#/shared/photos/:shareId` (hash-matched ahead of the auth gate in `App.tsx`). Renders entity header card, lightbox, photo flag chips. Fetches share row → loads `item_photos` rows by ID (preserving picked order) → signs storage URLs (1h TTL).
+- `PhotoGallery.tsx` / `PhotoGrid.tsx` — selection mode with checkbox overlays, accent ring on selected tiles, Cancel/Create-link action bar; existing quick-actions and lightbox suppressed in selection mode.
+- `entityHeader` prop threaded through `EntityAttachments` → `TabbedDetailPanel` → all 5 entity panels (`ItemDetailPanel`, `TaskDetailPanel`, `RepairDetailPanel`, `ShipmentDetailPanel`, `WillCallDetailPanel`). Each panel builds an item- or job-shaped header from the entity it owns.
+
 ## Recent Changes (2026-04-26, session 83)
 
 ### Order revision/rejection emails

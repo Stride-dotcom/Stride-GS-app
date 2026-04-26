@@ -1466,6 +1466,15 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
           tenantId: clientSheetId,
           itemId: task.itemId ? String(task.itemId) : null,
           enableSourceFilter: !!task.itemId,
+          entityHeader: {
+            kind: 'job' as const,
+            jobId: task.taskId,
+            jobLabel: `${task.type ?? 'Task'} ${task.taskId}`,
+            clientName: task.clientName ?? null,
+            date: task.dueDate ?? task.created ?? null,
+            reference: task.reference ?? null,
+            status: task.status ?? null,
+          },
         },
         docs: {
           contextType: 'task',

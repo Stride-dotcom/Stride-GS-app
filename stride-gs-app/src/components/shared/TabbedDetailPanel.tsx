@@ -84,6 +84,11 @@ export interface TabbedDetailPanelBuiltInTabs {
     /** v2026-04-22 — opt-in source-entity sub-tabs. The four migrating panels
      *  (Task/Repair/WC/Shipment) set this; legacy consumers leave it off. */
     enableSourceFilter?: boolean;
+    /** Snapshot of entity context (vendor/desc/qty or jobId/clientName/date)
+     *  frozen into a photo_shares row when the user creates a public share
+     *  link. Optional — when omitted the public page renders a generic
+     *  header. The shape is `PhotoShareHeader` from `usePhotoShares`. */
+    entityHeader?: import('../../hooks/usePhotoShares').PhotoShareHeader;
   };
   docs?: {
     contextType: DocumentContextType;
@@ -268,6 +273,7 @@ function useBuiltInTabs(cfg: TabbedDetailPanelBuiltInTabs | undefined): TabbedDe
             itemId={photosCfg.itemId ?? null}
             tenantId={photosCfg.tenantId ?? null}
             enableSourceFilter={photosCfg.enableSourceFilter}
+            entityHeader={photosCfg.entityHeader}
           />
         ),
       });

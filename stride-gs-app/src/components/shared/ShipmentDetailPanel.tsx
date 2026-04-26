@@ -389,6 +389,15 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
       entityType: 'shipment' as const,
       entityId: shipment.shipmentNo,
       tenantId: shipment.clientSheetId,
+      entityHeader: {
+        kind: 'job' as const,
+        jobId: shipment.shipmentNo,
+        jobLabel: `Shipment ${shipment.shipmentNo}`,
+        clientName: shipment.client ?? null,
+        date: shipment.receivedDate ?? null,
+        reference: shipment.tracking ?? null,
+        status: shipment.status ?? null,
+      },
     },
     docs: {
       contextType: 'shipment' as const,

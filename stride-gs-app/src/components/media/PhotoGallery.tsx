@@ -5,13 +5,15 @@
  * full lifecycle.
  */
 import { useCallback, useMemo, useState } from 'react';
-import { ImageIcon, AlertTriangle } from 'lucide-react';
+import { ImageIcon, AlertTriangle, Share2, X } from 'lucide-react';
 import { theme } from '../../styles/theme';
 import { usePhotos, type Photo, type EntityType, type PhotoType } from '../../hooks/usePhotos';
 import { PhotoGrid } from './PhotoGrid';
 import { PhotoUploadButton } from './PhotoUploadButton';
 import { PhotoLightbox } from './PhotoLightbox';
+import { PhotoShareDialog } from './PhotoShareDialog';
 import { EntitySourceTabs } from '../shared/EntitySourceTabs';
+import type { PhotoShareHeader } from '../../hooks/usePhotoShares';
 
 interface Props {
   entityType: EntityType;
@@ -33,6 +35,12 @@ interface Props {
    *  (e.g. Item panel with itemId rollup, or Task/Repair panels with item_id
    *  rollup). Default false so legacy callers (Claim) are byte-identical. */
   enableSourceFilter?: boolean;
+  /** Snapshot of entity context (vendor/desc/qty/ref or jobId/clientName/date)
+   *  captured when the user creates a public share link. Frozen into the
+   *  photo_shares row so the public gallery can render rich metadata without
+   *  ever querying entity tables. When omitted, sharing is still allowed but
+   *  the public page falls back to a generic header. */
+  entityHeader?: PhotoShareHeader;
 }
 
 export function PhotoGallery({
@@ -40,6 +48,7 @@ export function PhotoGallery({
   defaultPhotoType = 'general',
   readOnly, naked, title = 'Photos', compact,
   enableSourceFilter = false,
+  entityHeader,
 }: Props) {
   const [sourceFilter, setSourceFilter] = useState<string>('all');
   // Session 74: `setPrimaryPhoto` is still exported by usePhotos for
@@ -52,6 +61,31 @@ export function PhotoGallery({
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
+
+  // Selection mode for the public-share flow. The set is keyed by photo.id
+  // so it survives the source-tab filter swap (selected items stay selected
+  // even if the active filter would hide them; we surface the count and
+  // offer a Clear).
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
+  const [shareDialogOpen, setShareDialogOpen] = useState(false);
+
+  const enterSelection = useCallback(() => {
+    setSelectedIds(new Set());
+    setSelectionMode(true);
+  }, []);
+  const exitSelection = useCallback(() => {
+    setSelectionMode(false);
+    setSelectedIds(new Set());
+  }, []);
+  const toggleSelect = useCallback((photoId: string) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(photoId)) next.delete(photoId);
+      else next.add(photoId);
+      return next;
+    });
+  }, []);
 
   // Filtered list respects the source-entity sub-tab. When filtering is
   // disabled or set to 'all', this is the raw photos list (referentially
@@ -77,6 +111,20 @@ export function PhotoGallery({
     }
   }, [uploadPhoto, defaultPhotoType]);
 
+  const canShare = !readOnly && !!tenantId && !!entityId && photos.length > 0;
+  const selectedCount = selectedIds.size;
+
+  const shareInput = useMemo(() => {
+    if (!tenantId || !entityId) return null;
+    return {
+      tenantId,
+      entityType,
+      entityId,
+      photoIds: Array.from(selectedIds),
+      header: entityHeader ?? { kind: 'generic' as const },
+    };
+  }, [tenantId, entityType, entityId, selectedIds, entityHeader]);
+
   const content = (
     <>
       {/* Header + upload */}
@@ -87,8 +135,31 @@ export function PhotoGallery({
           fontSize: 10, fontWeight: 600, padding: '2px 8px', borderRadius: 100,
           background: theme.v2.colors.bgCard, color: theme.v2.colors.textMuted,
         }}>{photos.length}</span>
-        {!readOnly && (
-          <div style={{ marginLeft: 'auto', width: compact ? '100%' : undefined }}>
+        {!readOnly && !selectionMode && (
+          <div style={{
+            marginLeft: 'auto', display: 'flex', gap: 8, alignItems: 'center',
+            width: compact ? '100%' : undefined,
+            flexWrap: 'wrap', justifyContent: compact ? 'flex-start' : 'flex-end',
+          }}>
+            {canShare && (
+              <button
+                type="button"
+                onClick={enterSelection}
+                title="Select photos to share via public link"
+                style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 6,
+                  padding: '6px 12px',
+                  border: `1px solid ${theme.v2.colors.border}`,
+                  borderRadius: 8,
+                  background: '#fff',
+                  color: theme.v2.colors.text,
+                  fontSize: 12, fontWeight: 600,
+                  cursor: 'pointer', fontFamily: 'inherit',
+                }}
+              >
+                <Share2 size={13} /> Share
+              </button>
+            )}
             <PhotoUploadButton
               onUpload={handleUpload}
               uploading={uploading}
@@ -102,6 +173,64 @@ export function PhotoGallery({
           </div>
         )}
       </div>
+
+      {/* Selection-mode action bar — replaces the upload row while picking
+          photos to share. Counts only items currently selected; "Create link"
+          is gated on at least one selection. */}
+      {selectionMode && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 8,
+          padding: '8px 10px', marginBottom: 10,
+          borderRadius: 10,
+          background: `${theme.v2.colors.accent}10`,
+          border: `1px solid ${theme.v2.colors.accent}40`,
+          flexWrap: 'wrap',
+        }}>
+          <span style={{ fontSize: 12, fontWeight: 600, color: theme.v2.colors.text }}>
+            {selectedCount === 0
+              ? 'Select photos to share'
+              : `${selectedCount} selected`}
+          </span>
+          <div style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
+            <button
+              type="button"
+              onClick={exitSelection}
+              style={{
+                display: 'inline-flex', alignItems: 'center', gap: 4,
+                padding: '6px 10px',
+                border: `1px solid ${theme.v2.colors.border}`,
+                borderRadius: 8,
+                background: '#fff',
+                color: theme.v2.colors.textSecondary,
+                fontSize: 12, fontWeight: 600,
+                cursor: 'pointer', fontFamily: 'inherit',
+              }}
+            >
+              <X size={12} /> Cancel
+            </button>
+            <button
+              type="button"
+              disabled={selectedCount === 0}
+              onClick={() => setShareDialogOpen(true)}
+              style={{
+                display: 'inline-flex', alignItems: 'center', gap: 4,
+                padding: '6px 12px',
+                border: 'none', borderRadius: 8,
+                background: selectedCount === 0
+                  ? theme.v2.colors.border
+                  : theme.v2.colors.accent,
+                color: '#fff',
+                fontSize: 12, fontWeight: 600,
+                cursor: selectedCount === 0 ? 'not-allowed' : 'pointer',
+                fontFamily: 'inherit',
+                opacity: selectedCount === 0 ? 0.7 : 1,
+              }}
+            >
+              <Share2 size={12} /> Create link
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Error banners */}
       {(uploadError || error) && (
@@ -136,15 +265,19 @@ export function PhotoGallery({
         <PhotoGrid
           photos={filteredPhotos}
           compact={compact}
-          onPhotoClick={(_, i) => setLightboxIndex(i)}
+          onPhotoClick={selectionMode ? undefined : (_, i) => setLightboxIndex(i)}
           onToggleAttention={readOnly ? undefined : (p: Photo, next: boolean) => toggleNeedsAttention(p.id, next)}
           onToggleRepair={readOnly ? undefined : (p: Photo, next: boolean) => toggleRepair(p.id, next)}
           onDelete={readOnly ? undefined : (p: Photo) => deletePhoto(p.id)}
+          selectionMode={selectionMode}
+          selectedIds={selectedIds}
+          onToggleSelect={toggleSelect}
         />
       )}
 
-      {/* Lightbox — uses filtered list so arrow navigation respects the active filter */}
-      {lightboxIndex !== null && filteredPhotos[lightboxIndex] && (
+      {/* Lightbox — uses filtered list so arrow navigation respects the active
+          filter. Suppressed in selection mode so a tile click selects instead. */}
+      {!selectionMode && lightboxIndex !== null && filteredPhotos[lightboxIndex] && (
         <PhotoLightbox
           photos={filteredPhotos}
           startIndex={lightboxIndex}
@@ -153,6 +286,18 @@ export function PhotoGallery({
           onToggleAttention={(p: Photo, next: boolean) => toggleNeedsAttention(p.id, next)}
           onToggleRepair={(p: Photo, next: boolean) => toggleRepair(p.id, next)}
           onDelete={(p: Photo) => deletePhoto(p.id)}
+        />
+      )}
+
+      {/* Public-share dialog — handles createPhotoShare + shows the URL.
+          Closing it leaves the user in selection mode so they can adjust the
+          set and create another link if needed; the user explicitly cancels
+          via the action bar. */}
+      {shareDialogOpen && shareInput && selectedCount > 0 && (
+        <PhotoShareDialog
+          input={shareInput}
+          photoCount={selectedCount}
+          onClose={() => setShareDialogOpen(false)}
         />
       )}
     </>

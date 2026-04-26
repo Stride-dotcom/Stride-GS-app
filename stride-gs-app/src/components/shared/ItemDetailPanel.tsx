@@ -1378,6 +1378,21 @@ import type { InventoryItem as CoverageItemType } from '../../lib/types';
 import { DriveFoldersList, type DriveFolderLink } from './DriveFoldersList';
 
 function PhotosPanelProxy({ item, clientSheetId, driveFolders }: { item: any; clientSheetId: string | undefined; driveFolders?: DriveFolderLink[] }) {
+  // Snapshot of item context for any public photo-share link the user
+  // creates from this panel — frozen into the photo_shares row so the
+  // public gallery can render rich metadata without any auth hop.
+  const qtyNum = typeof item.qty === 'number'
+    ? item.qty
+    : (item.qty != null ? Number(item.qty) : null);
+  const entityHeader = {
+    kind: 'item' as const,
+    itemId: item.itemId ?? null,
+    vendor: item.vendor ?? null,
+    description: item.description ?? null,
+    quantity: Number.isFinite(qtyNum as number) ? (qtyNum as number) : null,
+    reference: item.reference ?? item.poNumber ?? null,
+    clientName: item.clientName ?? null,
+  };
   return (
     <div>
       <_PhotosPanel
@@ -1386,6 +1401,7 @@ function PhotosPanelProxy({ item, clientSheetId, driveFolders }: { item: any; cl
         itemId={item.itemId}
         tenantId={clientSheetId}
         enableSourceFilter
+        entityHeader={entityHeader}
       />
       {driveFolders && <DriveFoldersList folders={driveFolders} />}
     </div>

@@ -248,6 +248,21 @@ Standalone quote builder with PDF generation and Supabase-backed storage.
 
 ---
 
+## Photo Sharing
+
+Public photo share gallery — staff/admin pick photos via selection mode in the shared Photos module and generate a permanent public link. Public route is anon (no auth gate).
+
+| Layer | Files |
+|---|---|
+| Pages | `src/pages/PublicPhotoShare.tsx` (anon `/#/shared/photos/:shareId` — entity header card, lightbox, signed storage URLs) |
+| Hooks | `src/hooks/usePhotoShares.ts` (`createPhotoShare`, `deactivatePhotoShare`, standalone `fetchPublicPhotoShare`) |
+| Components | `src/components/media/PhotoShareDialog.tsx` (auto-creates share + copy-to-clipboard), `src/components/media/PhotoGallery.tsx` (selection mode + Share button), `src/components/media/PhotoGrid.tsx` (selection-mode props + checkbox overlay) |
+| Routing | `src/App.tsx` — hash-match `/^#\/shared\/photos\//` ahead of auth gate |
+| Threading | `src/components/shared/EntityAttachments.tsx`, `src/components/shared/TabbedDetailPanel.tsx`, plus `entityHeader` built in `Item/Task/Repair/Shipment/WillCallDetailPanel.tsx` |
+| Migrations | `20260426090000_photo_shares.sql` (`photo_shares` table + RLS allowing anon SELECT on `photo_shares`/`item_photos`/`storage.objects` through active share rows; GIN index on `photo_ids`) |
+
+---
+
 ## Special / Other
 
 | Page | Purpose |

@@ -32,6 +32,7 @@ import { QuoteTool } from './pages/QuoteTool';
 import { PriceList } from './pages/PriceList';
 import { Intakes } from './pages/Intakes';
 import { PublicRates } from './pages/PublicRates';
+import { PublicPhotoShare } from './pages/PublicPhotoShare';
 import { ClientIntake } from './pages/ClientIntake';
 import { MessagesPage } from './components/messages/MessagesPage';
 
@@ -50,6 +51,15 @@ export default function App() {
     ? window.location.hash.match(/^#\/rates\/([A-Za-z0-9_-]+)/)
     : null;
   if (ratesMatch) return <PublicRates shareId={ratesMatch[1]} />;
+
+  // Public photo gallery — same pre-auth pattern as /rates. Auth is gated
+  // entirely by the unguessable shareId + photo_shares.active flag, with
+  // RLS policies on item_photos and storage.objects pinning anon SELECT
+  // to photo IDs that belong to an active share.
+  const sharedPhotosMatch = typeof window !== 'undefined'
+    ? window.location.hash.match(/^#\/shared\/photos\/([A-Za-z0-9_-]+)/)
+    : null;
+  if (sharedPhotosMatch) return <PublicPhotoShare shareId={sharedPhotosMatch[1]} />;
 
   // Client intake wizard — public onboarding form gated only by the
   // magic linkId. Same pre-auth pattern as /rates.

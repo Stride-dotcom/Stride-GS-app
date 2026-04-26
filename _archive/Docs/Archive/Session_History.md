@@ -70,6 +70,8 @@
 
 ## 2026-04
 
+**2026-04-26 session — public photo share gallery:** Selection mode + Share button added to shared Photos module (`PhotoGallery.tsx`/`PhotoGrid.tsx`). New `PhotoShareDialog.tsx` creates a permanent public link. New `PublicPhotoShare.tsx` page (route `/shared/photos/:shareId`, no auth) renders entity-aware header (item-level for inventory, job-level for shipments/will calls/tasks/repairs) + lightbox + signed storage URLs (1h TTL). Supabase migration `20260426090000_photo_shares.sql` adds `photo_shares` table with RLS policies that gate anon SELECT on `item_photos` + `storage.objects` through active share rows. New `usePhotoShares` hook. `entityHeader` prop threaded through `EntityAttachments` → `TabbedDetailPanel` → all 5 entity detail panels. Branch `feat/photos/public-share-gallery`.
+
 **2026-04-26 session — retire per-item Drive folders:** Per-item Photos folders (created under PHOTOS_FOLDER_ID, named with Item ID) deprecated — never used (photos in Supabase) and confusing for clients. ItemDetailPanel.tsx: removed "Photos Folder" button. Apps Script: disabled per-item folder creation in `api_hyperlinkReceivedItems_`, `StrideFixMissingFolders`, `api_StrideFixMissingFolders`. New `StrideCleanupItemPhotoFolders_` (Utils.gs v3.5.0) under Stride Admin menu — dry-run + execute, trashes empty per-item folders, strips Inventory Item ID hyperlinks, reports non-empty to Cleanup_Report tab. StrideAPI.gs v38.130.0, Code.gs v4.7.0. PR #73.
 
 **2026-04-01 session 27:** Inline Item Editing + Auto-Generated Item IDs (v27.0.0). `updateInventoryItem` POST endpoint. 5 editable field components. Auto-ID counter in CB Settings as NEXT_ITEM_ID (80000 start). LockService protected. Settings → Maintenance admin-only toggle.

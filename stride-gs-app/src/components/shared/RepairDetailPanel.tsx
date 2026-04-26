@@ -1341,6 +1341,15 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
       tenantId: repair.clientSheetId,
       itemId: repair.itemId ? String(repair.itemId) : null,
       enableSourceFilter: !!repair.itemId,
+      entityHeader: {
+        kind: 'job' as const,
+        jobId: repair.repairId,
+        jobLabel: `Repair ${repair.repairId}`,
+        clientName: repair.clientName ?? null,
+        date: null,
+        reference: null,
+        status: repair.status ?? null,
+      },
     },
     docs: {
       contextType: 'repair' as const,

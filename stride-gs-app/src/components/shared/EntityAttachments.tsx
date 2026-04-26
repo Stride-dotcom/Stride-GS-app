@@ -34,6 +34,7 @@ import { usePhotos, type EntityType as PhotoEntityType } from '../../hooks/usePh
 import { useDocuments, type DocumentContextType } from '../../hooks/useDocuments';
 import { useEntityNotes, useEntityNotesRollup, type EntityNote } from '../../hooks/useEntityNotes';
 import { EntitySourceTabs, ENTITY_LABEL } from './EntitySourceTabs';
+import type { PhotoShareHeader } from '../../hooks/usePhotoShares';
 
 interface PhotosCfg {
   entityType: PhotoEntityType;
@@ -47,6 +48,10 @@ interface PhotosCfg {
    *  when the rollup spans multiple entity_types. Off by default so Claim
    *  and other legacy consumers stay byte-identical. */
   enableSourceFilter?: boolean;
+  /** Snapshot of entity context (vendor/desc/qty/ref or jobId/clientName/date)
+   *  captured into a photo_shares row when the user creates a public link.
+   *  Optional — when absent the public page falls back to a generic header. */
+  entityHeader?: PhotoShareHeader;
 }
 interface DocumentsCfg {
   contextType: DocumentContextType;
@@ -92,6 +97,7 @@ export function EntityAttachments({ photos, documents, notes, defaultOpen }: Pro
           tenantId={photos.tenantId}
           itemId={photos.itemId}
           enableSourceFilter={photos.enableSourceFilter}
+          entityHeader={photos.entityHeader}
         />
       )}
       {documents && (
@@ -180,7 +186,7 @@ function SectionHeader({
 }
 
 function PhotosSection({
-  entityType, entityId, tenantId, itemId, enableSourceFilter, defaultOpen,
+  entityType, entityId, tenantId, itemId, enableSourceFilter, entityHeader, defaultOpen,
 }: PhotosCfg & { defaultOpen: boolean }) {
   const [open, setOpen] = useState(defaultOpen);
   const { photos } = usePhotos({ entityType, entityId, tenantId, itemId });
@@ -200,6 +206,7 @@ function PhotosSection({
           tenantId={tenantId}
           itemId={itemId}
           enableSourceFilter={enableSourceFilter}
+          entityHeader={entityHeader}
           naked
           compact
         />
@@ -255,7 +262,7 @@ function DocumentsSection({
 // Shipment / Claim) still use it and see no difference. Purely additive.
 
 export function PhotosPanel({
-  entityType, entityId, tenantId, itemId, enableSourceFilter,
+  entityType, entityId, tenantId, itemId, enableSourceFilter, entityHeader,
 }: {
   entityType: PhotoEntityType;
   entityId: string | null | undefined;
@@ -266,6 +273,8 @@ export function PhotosPanel({
    *  the migrated tabbed panels pass this; legacy composition leaves it off
    *  so Claim's UI is byte-identical. */
   enableSourceFilter?: boolean;
+  /** Entity-header snapshot for public-share creation. Optional. */
+  entityHeader?: PhotoShareHeader;
 }) {
   return (
     <PhotoGallery
@@ -274,6 +283,7 @@ export function PhotosPanel({
       tenantId={tenantId}
       itemId={itemId}
       enableSourceFilter={enableSourceFilter}
+      entityHeader={entityHeader}
       naked
       compact
     />

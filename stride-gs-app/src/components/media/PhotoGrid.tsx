@@ -17,7 +17,7 @@
 import { useCallback, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
-  AlertTriangle, Wrench, MoreVertical, X, Loader2, Download, Trash2,
+  AlertTriangle, Wrench, MoreVertical, X, Loader2, Download, Trash2, Check,
 } from 'lucide-react';
 import { theme } from '../../styles/theme';
 import { useIsMobile } from '../../hooks/useIsMobile';
@@ -34,6 +34,12 @@ interface Props {
   onToggleAttention?: (photo: Photo, next: boolean) => Promise<boolean> | boolean;
   onToggleRepair?: (photo: Photo, next: boolean) => Promise<boolean> | boolean;
   onDelete?: (photo: Photo) => Promise<boolean> | boolean;
+  /** Selection mode — when true, tiles render a checkbox overlay and clicks
+   *  toggle membership in selectedIds instead of opening the lightbox. Quick
+   *  actions (3-dot menu, hover overlay) are also suppressed in this mode. */
+  selectionMode?: boolean;
+  selectedIds?: Set<string>;
+  onToggleSelect?: (photoId: string) => void;
 }
 
 // Session 74: PRIMARY_RING removed — "Make Primary" feature is gone.
@@ -50,6 +56,7 @@ function ringColor(p: Photo): string | null {
 export function PhotoGrid({
   photos, onPhotoClick, compact,
   onToggleAttention, onToggleRepair, onDelete,
+  selectionMode, selectedIds, onToggleSelect,
 }: Props) {
   const { isMobile, isTablet } = useIsMobile();
   const cols = isMobile ? 2 : compact ? 3 : 4;
@@ -58,7 +65,9 @@ export function PhotoGrid({
   const [actionPhoto, setActionPhoto] = useState<Photo | null>(null);
   const [hoverId, setHoverId] = useState<string | null>(null);
   const [pendingAction, setPendingAction] = useState<string | null>(null); // `${photoId}:${kind}`
-  const hasActions = !!(onToggleAttention || onToggleRepair || onDelete);
+  // In selection mode the per-photo quick-action UI is suppressed: the
+  // gallery is acting like a checkbox group, not an editor.
+  const hasActions = !selectionMode && !!(onToggleAttention || onToggleRepair || onDelete);
 
   // Inline handler used by desktop hover-overlay icons. Runs optimistically
   // (Realtime refetch will confirm) and keeps the overlay responsive by
@@ -91,26 +100,37 @@ export function PhotoGrid({
           const src = p.thumbnail_url || p.storage_url || '';
           const isHovered = hoverId === p.id;
           const showDesktopOverlay = hasActions && !isMobile && isHovered;
+          const isSelected = !!(selectionMode && selectedIds?.has(p.id));
+          // Selection-mode rings take precedence over flag rings so the
+          // checkbox state is unambiguous while picking photos to share.
+          const tileShadow = selectionMode
+            ? (isSelected
+                ? `0 0 0 4px ${theme.v2.colors.accent}, 0 2px 8px rgba(0,0,0,0.12)`
+                : '0 2px 8px rgba(0,0,0,0.06)')
+            : (ring ? `0 0 0 5px ${ring}, 0 2px 8px rgba(0,0,0,0.12)` : '0 2px 8px rgba(0,0,0,0.06)');
+          const handleTileClick = selectionMode
+            ? () => onToggleSelect?.(p.id)
+            : (onPhotoClick ? () => onPhotoClick(p, i) : undefined);
           return (
             <div
               key={p.id}
-              onClick={onPhotoClick ? () => onPhotoClick(p, i) : undefined}
+              onClick={handleTileClick}
               onMouseEnter={e => {
                 setHoverId(p.id);
-                if (onPhotoClick) e.currentTarget.style.transform = 'translateY(-2px)';
+                if (handleTileClick) e.currentTarget.style.transform = 'translateY(-2px)';
               }}
               onMouseLeave={e => {
                 setHoverId(prev => (prev === p.id ? null : prev));
-                if (onPhotoClick) e.currentTarget.style.transform = 'translateY(0)';
+                if (handleTileClick) e.currentTarget.style.transform = 'translateY(0)';
               }}
               style={{
                 position: 'relative',
                 aspectRatio: '1 / 1',
                 borderRadius: radius,
                 overflow: 'hidden',
-                cursor: onPhotoClick ? 'pointer' : 'default',
+                cursor: handleTileClick ? 'pointer' : 'default',
                 background: '#E5E7EB',
-                boxShadow: ring ? `0 0 0 5px ${ring}, 0 2px 8px rgba(0,0,0,0.12)` : '0 2px 8px rgba(0,0,0,0.06)',
+                boxShadow: tileShadow,
                 transition: 'transform 0.12s ease, box-shadow 0.12s ease',
               }}
             >
@@ -124,6 +144,28 @@ export function PhotoGrid({
               ) : (
                 <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: theme.v2.colors.textMuted, fontSize: 11 }}>
                   No preview
+                </div>
+              )}
+
+              {/* Selection checkbox — only in selection mode. The whole tile
+                  is also clickable, but rendering an explicit checkmark makes
+                  the affordance discoverable on touch devices. */}
+              {selectionMode && (
+                <div
+                  aria-hidden
+                  style={{
+                    position: 'absolute', top: 6, right: 6,
+                    width: 24, height: 24, borderRadius: '50%',
+                    background: isSelected ? theme.v2.colors.accent : 'rgba(255,255,255,0.85)',
+                    color: isSelected ? '#fff' : theme.v2.colors.textMuted,
+                    border: `2px solid ${isSelected ? theme.v2.colors.accent : 'rgba(255,255,255,0.95)'}`,
+                    boxShadow: '0 1px 4px rgba(0,0,0,0.25)',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    pointerEvents: 'none',
+                    zIndex: 4,
+                  }}
+                >
+                  {isSelected && <Check size={14} strokeWidth={3} />}
                 </div>
               )}
 
