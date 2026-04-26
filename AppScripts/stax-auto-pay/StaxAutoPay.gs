@@ -1,5 +1,21 @@
 // ============================================================
-// STAX AUTO-PAY TOOL — v4.7.1
+// STAX AUTO-PAY TOOL — v4.7.2
+// v4.7.2 (2026-04-26): Three fixes for the Stax→Supabase resync that
+//         was rolling back the entire batch when the Invoices sheet
+//         had any duplicate QB Invoice # rows (Postgres code 21000:
+//         "ON CONFLICT DO UPDATE command cannot affect row a second
+//         time").
+//           (1) _sbBatchUpsert dedupes rows by the on_conflict key
+//               BEFORE sending. Last occurrence wins, order preserved.
+//           (2) Failed chunks now retry row-by-row so a single bad
+//               row no longer kills the whole batch.
+//           (3) New _sbLogSyncError helper writes failed-upsert
+//               details into stax_run_log + the Run Log sheet so
+//               silent Supabase failures show up in the Payments app
+//               (mirror of StrideAPI.gs:sbLogSyncError_ from v38.132.0).
+//         Also fixed _sbResyncAllStaxInvoices' Auto Charge cell read
+//         which mis-interpreted the JS boolean false as autoCharge=true
+//         (same bug as StrideAPI.gs v38.129.0 in api_sbUpsertStaxInvoice_).
 // v4.7.1 (2026-04-25): Stamp meta.invoiceNumber = docNum on every Stax
 //         invoice pushed by the auto-pay path. Pairs with StrideAPI.gs
 //         v38.126.0 link-handler change so future links resolve by the
@@ -770,13 +786,40 @@ function _writeRunLog(funcName, summary, details) {
 // Never throws; never blocks a sheet write on Supabase failure.
 // ============================================================
 
-/** Batch upsert to a Supabase table. Best-effort, never throws. */
+/** Batch upsert to a Supabase table. Best-effort, never throws.
+ *
+ * v4.7.2 — De-duplicate rows by their on_conflict key BEFORE sending.
+ *          PostgreSQL rejects an entire UPSERT statement with code 21000
+ *          ("ON CONFLICT DO UPDATE command cannot affect row a second
+ *          time") if two rows in the batch share the same on_conflict
+ *          value. This was the source of the stax_invoices HTTP 500
+ *          Justin reported after running _sbResyncAllStaxInvoices —
+ *          the Invoices sheet had duplicate QB Invoice # rows and the
+ *          whole batch rolled back, so Supabase stayed empty.
+ *          Also adds row-by-row retry on chunk failure so a single
+ *          bad row no longer kills the whole batch, plus surfaces the
+ *          failure into stax_run_log + the Run Log sheet via
+ *          _sbLogSyncError so silent Supabase errors stop hiding.
+ */
 function _sbBatchUpsert(table, rows, conflictCol) {
   if (!rows || !rows.length) return;
   try {
     var url = PropertiesService.getScriptProperties().getProperty("SUPABASE_URL");
     var key = PropertiesService.getScriptProperties().getProperty("SUPABASE_SERVICE_ROLE_KEY");
     if (!url || !key) return;
+
+    // De-dupe by the on_conflict key (last occurrence wins, preserves order).
+    if (conflictCol) {
+      var keyCols = conflictCol.split(",").map(function(s) { return s.trim(); });
+      var seen = {};
+      var deduped = [];
+      for (var d = rows.length - 1; d >= 0; d--) {
+        var dk = keyCols.map(function(c) { return String(rows[d][c] == null ? "" : rows[d][c]); }).join("||");
+        if (!seen[dk]) { seen[dk] = true; deduped.unshift(rows[d]); }
+      }
+      rows = deduped;
+    }
+
     var CHUNK = 50;
     for (var i = 0; i < rows.length; i += CHUNK) {
       var chunk = rows.slice(i, i + CHUNK);
@@ -795,12 +838,83 @@ function _sbBatchUpsert(table, rows, conflictCol) {
       });
       var code = resp.getResponseCode();
       if (code < 200 || code >= 300) {
-        Logger.log("_sbBatchUpsert " + table + " HTTP " + code + ": " + resp.getContentText().substring(0, 300));
+        var errBody = resp.getContentText().substring(0, 500);
+        Logger.log("_sbBatchUpsert " + table + " chunk " + i + " HTTP " + code + ": " + errBody);
+        try { _sbLogSyncError(table, code, errBody, chunk.length, chunk[0]); } catch (logErr) {}
+        // Retry row-by-row to isolate bad rows so one duplicate doesn't
+        // wipe out the whole chunk.
+        for (var ri = 0; ri < chunk.length; ri++) {
+          try {
+            var singleResp = UrlFetchApp.fetch(postUrl, {
+              method: "POST",
+              headers: {
+                "Authorization": "Bearer " + key,
+                "apikey":        key,
+                "Content-Type":  "application/json",
+                "Prefer":        "resolution=merge-duplicates,return=minimal"
+              },
+              payload: JSON.stringify([chunk[ri]]),
+              muteHttpExceptions: true
+            });
+            var sc = singleResp.getResponseCode();
+            if (sc < 200 || sc >= 300) {
+              Logger.log("_sbBatchUpsert " + table + " row " + (i + ri) + " HTTP " + sc + ": " + singleResp.getContentText().substring(0, 300));
+            }
+          } catch (rowErr) { /* skip bad row */ }
+        }
       }
     }
   } catch (e) {
     Logger.log("_sbBatchUpsert " + table + " error (non-fatal): " + e);
+    try { _sbLogSyncError(table, 0, String(e), (rows && rows.length) || 0, rows && rows[0]); } catch (_) {}
   }
+}
+
+/**
+ * v4.7.2 — Companion to _sbBatchUpsert. Writes a Supabase write-failure
+ * row into stax_run_log + the Run Log sheet so silent failures show up
+ * in the Payments app's Run Log tab. Uses a direct REST POST (not
+ * _sbBatchUpsert) and short-circuits on stax_run_log itself to avoid
+ * loop risk. Mirror of StrideAPI.gs:sbLogSyncError_ from v38.132.0.
+ */
+function _sbLogSyncError(table, httpCode, errorBody, rowCount, sampleRow) {
+  if (table === "stax_run_log") return;
+  var url = PropertiesService.getScriptProperties().getProperty("SUPABASE_URL");
+  var key = PropertiesService.getScriptProperties().getProperty("SUPABASE_SERVICE_ROLE_KEY");
+  if (!url || !key) return;
+
+  var ts = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm:ss");
+  var summary = "_sbBatchUpsert " + table + " HTTP " + httpCode +
+                " (" + (rowCount || 0) + " rows): " +
+                String(errorBody || "").substring(0, 200);
+  var details = "";
+  try {
+    if (sampleRow) {
+      details = "sampleKeys=" + Object.keys(sampleRow).join(",") +
+                " | sample=" + JSON.stringify(sampleRow).substring(0, 400);
+    }
+  } catch (_) {}
+
+  var row = { timestamp: ts, fn: "_sbBatchUpsert", summary: summary, details: details };
+  try {
+    UrlFetchApp.fetch(url + "/rest/v1/stax_run_log?on_conflict=timestamp,fn,summary", {
+      method: "POST",
+      headers: {
+        "Authorization": "Bearer " + key,
+        "apikey":        key,
+        "Content-Type":  "application/json",
+        "Prefer":        "resolution=merge-duplicates,return=minimal"
+      },
+      payload: JSON.stringify([row]),
+      muteHttpExceptions: true
+    });
+  } catch (_) {}
+
+  try {
+    var ss = _getSpreadsheet();
+    var rlSheet = ss && ss.getSheetByName(SHEET_NAMES.RUN_LOG || "Run Log");
+    if (rlSheet) rlSheet.appendRow([ts, "_sbBatchUpsert", summary, details]);
+  } catch (_) {}
 }
 
 /**
@@ -855,7 +969,15 @@ function _sbResyncAllStaxInvoices(ss) {
         created_at_sheet: cCreated >= 0 ? _formatDateLoose(data[i][cCreated]) : "",
         notes: cNotes >= 0 ? String(data[i][cNotes] || "") : "",
         is_test: cIsTest >= 0 ? String(data[i][cIsTest] || "").toUpperCase() === "TRUE" : false,
-        auto_charge: cAutoCharge >= 0 ? !(String(data[i][cAutoCharge] || "").toUpperCase() === "FALSE" || String(data[i][cAutoCharge] || "").toUpperCase() === "NO" || String(data[i][cAutoCharge] || "").toUpperCase() === "OFF") : false,
+        // v4.7.2 — boolean false in the Sheet cell (native checkbox value)
+        // was misread as "default true" because `false || ""` evaluates to
+        // "" in JS. Mirror of StrideAPI.gs:stax_parseAutoCharge_.
+        auto_charge: (function(v) {
+          if (v === false) return false;
+          if (v === true) return true;
+          var s = String(v == null ? "" : v).toUpperCase();
+          return !(s === "FALSE" || s === "NO" || s === "OFF");
+        })(cAutoCharge >= 0 ? data[i][cAutoCharge] : true),
         payment_method_status: staxCustId ? "unknown" : "no_customer",
         updated_at: now
       });
