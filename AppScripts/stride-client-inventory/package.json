@@ -32,7 +32,9 @@
     "deploy-api": "node admin/update-deployments.mjs --api",
     "deploy-cb": "node admin/update-deployments.mjs --cb",
     "deploy-all": "node admin/update-deployments.mjs --all",
-    "push-templates": "node admin/push-templates.mjs"
+    "push-templates": "node admin/push-templates.mjs",
+    "clean-versions": "node admin/clean-versions.mjs",
+    "clean-versions:cb": "node admin/clean-versions.mjs --project=cb"
   },
   "dependencies": {
     "googleapis": "^144.0.0"

@@ -46,7 +46,13 @@ separateCache[sourceSheetId] = CB13_readSeparateBySidemarkSetting_(sourceSheetId
 separate = separateCache[sourceSheetId];
 }
 
-var key = separate ? (String(client) + "||" + String(sidemark || "")) : String(client);
+// v1.4.4 — Normalize sidemark for grouping so "Smith", "smith", and
+// " Smith " collapse into one invoice. Without this, a single typo
+// in casing/whitespace fragments the client's invoices. The first
+// original spelling encountered for a given normalized key is what
+// appears on the invoice (preserves the operator's preferred casing).
+var normSidemark = CB13_normalizeSidemark_(sidemark);
+var key = separate ? (String(client) + "||" + normSidemark) : String(client);
 
 if (!groupsByKey[key]) {
 groupsByKey[key] = {
@@ -61,6 +67,17 @@ groupsByKey[key].rows.push(row);
 }
 
 return groupOrder.map(function(k) { return groupsByKey[k]; });
+}
+
+/**
+ * v1.4.4: Normalize a sidemark for grouping. Lowercase + trim + collapse
+ * internal whitespace so "Smith", "smith", " Smith ", and "Smith  " all
+ * map to the same key. Display value on the invoice keeps the original
+ * spelling of the first-seen row.
+ */
+function CB13_normalizeSidemark_(s) {
+  if (s == null) return "";
+  return String(s).trim().toLowerCase().replace(/\s+/g, " ");
 }
 
 /**
