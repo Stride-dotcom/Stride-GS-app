@@ -1,5 +1,21 @@
 /* ===================================================
-   StrideAPI.gs — v38.128.0 — 2026-04-25 PST — Sheet→Supabase one-time import + per-save Supabase→Sheet single-row sync
+   StrideAPI.gs — v38.129.0 — 2026-04-26 PST — Fix Auto Charge boolean-FALSE detection in Stax sheet read paths
+   v38.129.0: Auto Charge column read bug. The Stax Invoices sheet's
+              "Auto Charge" cell can be a JS boolean false (Sheets returns
+              the native checkbox value), the string "FALSE"/"TRUE", or
+              blank. The prior pattern
+                String(r["Auto Charge"] || "").toUpperCase() === "FALSE"
+              is wrong: when the cell is the boolean false, `false || ""`
+              evaluates to "" (because false is falsy), the FALSE branch
+              never fires, and the row resolves to autoCharge=true.
+              Justin reported INV-000099 with cell value FALSE showing
+              up as Auto=ON in the Payments app.
+              Fix: new helper stax_parseAutoCharge_(v) that handles all
+              three shapes (true/false booleans, FALSE/NO/OFF strings,
+              blank → default true). Replaces 4 inline copies of the
+              broken expression in api_sbResyncStaxInvoice_,
+              api_sbResyncStaxInvoices_, api_sbBackfillStaxInvoices_,
+              and handleGetStaxInvoices_.
    v38.128.0: Two new admin-gated dispatch endpoints to support the
               service_catalog auto-sync flow:
               (1) handleImportPriceListToSupabase_ — one-time backfill
@@ -3278,6 +3294,19 @@ function api_ledgerCheckAvailable_(itemIds) {
 
 // ═══ Stax Supabase write-through helpers (session 69 / v38.59.0) ═══════════════
 
+// v38.127.0 — Auto Charge cell can be a JS boolean (Sheets returns the
+// native checkbox value), the string "FALSE"/"TRUE"/"NO"/"OFF", or
+// blank. The prior pattern `String(v || "").toUpperCase() === "FALSE"`
+// is wrong: when v === false (boolean), `false || ""` → "", so the
+// FALSE branch never fires and the row becomes autoCharge=true. That's
+// why INV-000099 (Auto Charge cell = FALSE) showed as ON in the app.
+function stax_parseAutoCharge_(v) {
+  if (v === false) return false;
+  if (v === true) return true;
+  var s = String(v == null ? "" : v).toUpperCase();
+  return !(s === "FALSE" || s === "NO" || s === "OFF");
+}
+
 /**
  * Upsert a single Stax invoice row (shape as returned by handleGetStaxInvoices_)
  * to public.stax_invoices. Best-effort, never throws.
@@ -3366,7 +3395,7 @@ function api_sbResyncStaxInvoice_(qbInvoiceNo) {
           createdAt:       formatDate_(r["Created At"]),
           notes:           String(r["Notes"] || ""),
           isTest:          String(r["Is Test"] || "").toUpperCase() === "TRUE",
-          autoCharge:      !(String(r["Auto Charge"] || "").toUpperCase() === "FALSE" || String(r["Auto Charge"] || "").toUpperCase() === "NO" || String(r["Auto Charge"] || "").toUpperCase() === "OFF"),
+          autoCharge:      stax_parseAutoCharge_(r["Auto Charge"]),
           paymentMethodStatus: staxCustId ? "unknown" : "no_customer"
         });
         break;
@@ -3405,7 +3434,7 @@ function api_sbResyncStaxInvoices_(qbInvoiceNos) {
         createdAt:       formatDate_(r["Created At"]),
         notes:           String(r["Notes"] || ""),
         isTest:          String(r["Is Test"] || "").toUpperCase() === "TRUE",
-        autoCharge:      !(String(r["Auto Charge"] || "").toUpperCase() === "FALSE" || String(r["Auto Charge"] || "").toUpperCase() === "NO" || String(r["Auto Charge"] || "").toUpperCase() === "OFF"),
+        autoCharge:      stax_parseAutoCharge_(r["Auto Charge"]),
         paymentMethodStatus: staxCustId ? "unknown" : "no_customer"
       });
     }
@@ -3442,7 +3471,7 @@ function seedAllStaxToSupabase() {
           createdAt:       formatDate_(r["Created At"]),
           notes:           String(r["Notes"] || ""),
           isTest:          String(r["Is Test"] || "").toUpperCase() === "TRUE",
-          autoCharge:      !(String(r["Auto Charge"] || "").toUpperCase() === "FALSE"),
+          autoCharge:      stax_parseAutoCharge_(r["Auto Charge"]),
           paymentMethodStatus: staxCustId ? "unknown" : "no_customer"
         };
       }).filter(function(x) { return x.qbInvoice; });
@@ -27949,7 +27978,7 @@ function handleGetStaxInvoices_() {
       createdAt:    formatDate_(r["Created At"]),
       notes:        String(r["Notes"] || ""),
       isTest:       String(r["Is Test"] || "").toUpperCase() === "TRUE",
-      autoCharge:   !(String(r["Auto Charge"] || "").toUpperCase() === "FALSE" || String(r["Auto Charge"] || "").toUpperCase() === "NO" || String(r["Auto Charge"] || "").toUpperCase() === "OFF"),
+      autoCharge:   stax_parseAutoCharge_(r["Auto Charge"]),
       paymentMethodStatus: staxCustId ? (pmStatusMap[staxCustId] || "unknown") : "no_customer"
     };
   });

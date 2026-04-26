@@ -394,6 +394,7 @@ export function Payments() {
   const [sendingPayLinks, setSendingPayLinks] = useState(false);
   const [payLinkResult, setPayLinkResult] = useState<string | null>(null);
   const [sendingPayLink, setSendingPayLink] = useState<string | null>(null); // QB# being sent
+  const [linkingInvoice, setLinkingInvoice] = useState<string | null>(null); // QB# being linked (Review tab)
   const [showResolvedExceptions, setShowResolvedExceptions] = useState(false);
   const [invoiceStatusFilter, setInvoiceStatusFilter] = useState<string>('CREATED');
   const [invoiceSortCol, setInvoiceSortCol] = useState<string>('');
@@ -1268,35 +1269,48 @@ export function Payments() {
                             PENDING→CREATED. Avoids the "I'll have to push it
                             again" duplicate-creation trap. */}
                         <button
+                          disabled={linkingInvoice === i.qbInvoice}
                           onClick={async () => {
                             if (!confirm(`Look up ${i.qbInvoice} in Stax and link it? This avoids creating a duplicate. Use this when the invoice already exists in Stax but our system lost the link.`)) return;
-                            const res = await postLinkStaxInvoiceToExisting({ qbInvoiceNo: i.qbInvoice });
-                            if (res.ok && res.data?.success) {
-                              loadData(true);
-                            } else if (res.ok && res.data?.ambiguous && res.data.candidates) {
-                              const choices = res.data.candidates.map((c, idx) =>
-                                `${idx + 1}. ${c.id} — $${c.total ?? '?'} ${c.status ?? ''}`
-                              ).join('\n');
-                              const pick = prompt(
-                                `Multiple Stax invoices match this QB#. Which one?\n\n${choices}\n\nEnter number 1-${res.data.candidates.length}:`,
-                                '1'
-                              );
-                              const n = Number(pick) - 1;
-                              if (Number.isInteger(n) && n >= 0 && n < res.data.candidates.length) {
-                                const retry = await postLinkStaxInvoiceToExisting({
-                                  qbInvoiceNo: i.qbInvoice,
-                                  staxInvoiceId: res.data.candidates[n].id,
-                                });
-                                if (retry.ok && retry.data?.success) loadData(true);
-                                else setError(retry.error || retry.data?.error || 'Link failed');
+                            setLinkingInvoice(i.qbInvoice);
+                            setError(null);
+                            setChargeResult(null);
+                            try {
+                              const res = await postLinkStaxInvoiceToExisting({ qbInvoiceNo: i.qbInvoice });
+                              if (res.ok && res.data?.success) {
+                                setChargeResult(`Linked ${i.qbInvoice} → Stax ${res.data.staxInvoiceId} (${res.data.newStatus})`);
+                                loadData(true);
+                              } else if (res.ok && res.data?.ambiguous && res.data.candidates) {
+                                const choices = res.data.candidates.map((c, idx) =>
+                                  `${idx + 1}. ${c.id} — $${c.total ?? '?'} ${c.status ?? ''}`
+                                ).join('\n');
+                                const pick = prompt(
+                                  `Multiple Stax invoices match this QB#. Which one?\n\n${choices}\n\nEnter number 1-${res.data.candidates.length}:`,
+                                  '1'
+                                );
+                                const n = Number(pick) - 1;
+                                if (Number.isInteger(n) && n >= 0 && n < res.data.candidates.length) {
+                                  const retry = await postLinkStaxInvoiceToExisting({
+                                    qbInvoiceNo: i.qbInvoice,
+                                    staxInvoiceId: res.data.candidates[n].id,
+                                  });
+                                  if (retry.ok && retry.data?.success) {
+                                    setChargeResult(`Linked ${i.qbInvoice} → Stax ${retry.data.staxInvoiceId}`);
+                                    loadData(true);
+                                  } else setError(retry.error || retry.data?.error || 'Link failed');
+                                }
+                              } else {
+                                setError(res.error || res.data?.error || 'Link failed');
                               }
-                            } else {
-                              setError(res.error || res.data?.error || 'Link failed');
+                            } finally {
+                              setLinkingInvoice(null);
                             }
                           }}
-                          style={{ padding: '3px 8px', fontSize: 11, fontWeight: 500, border: `1px solid ${theme.colors.border}`, borderRadius: 4, background: '#fff', cursor: 'pointer', color: theme.colors.textSecondary, fontFamily: 'inherit' }}
+                          style={{ padding: '3px 8px', fontSize: 11, fontWeight: 500, border: `1px solid ${theme.colors.border}`, borderRadius: 4, background: linkingInvoice === i.qbInvoice ? theme.colors.borderLight : '#fff', cursor: linkingInvoice === i.qbInvoice ? 'wait' : 'pointer', color: theme.colors.textSecondary, fontFamily: 'inherit', display: 'inline-flex', alignItems: 'center', gap: 4, opacity: linkingInvoice === i.qbInvoice ? 0.7 : 1 }}
                           title="Already in Stax? Link this row to it instead of pushing again"
-                        >Link</button>
+                        >
+                          {linkingInvoice === i.qbInvoice ? (<><Loader2 size={11} className="spin" /> Linking…</>) : 'Link'}
+                        </button>
                         <button onClick={async () => {
                           if (!confirm(`Delete ${i.qbInvoice}? It will be marked DELETED.`)) return;
                           const res = await postDeleteStaxInvoice({ qbInvoiceNo: i.qbInvoice, rowIndex: i.rowIndex });
