@@ -1,5 +1,11 @@
 // ============================================================
-// STAX AUTO-PAY TOOL — v4.7.0
+// STAX AUTO-PAY TOOL — v4.7.1
+// v4.7.1 (2026-04-25): Stamp meta.invoiceNumber = docNum on every Stax
+//         invoice pushed by the auto-pay path. Pairs with StrideAPI.gs
+//         v38.126.0 link-handler change so future links resolve by the
+//         clean bare invoice # rather than parsing the composite refKey.
+//         No behavior change to dedup (_checkForDuplicateInvoice still
+//         keys on refKey).
 // v4.7.0 (2026-04-25): Multi-tier client lookup. Customer matching for
 //         Auto Charge eligibility now tries 3 keys in order:
 //           1. Stax Customer ID (GUID) — bulletproof, matches the
@@ -1758,6 +1764,7 @@ function _createStaxInvoicesForRows_(options) {
         tax: total - subtotal,
         memo: memo,
         reference: refKey,
+        invoiceNumber: docNum,
         lineItems: lineItems
       }
     };

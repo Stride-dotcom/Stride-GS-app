@@ -1,5 +1,26 @@
 /* ===================================================
-   StrideAPI.gs — v38.125.0 — 2026-04-25 PST — PDF generation: Docs API margin call now uses PT (was rejected EMU), Invoice routed through helper, Task header HTML widths
+   StrideAPI.gs — v38.126.0 — 2026-04-25 PST — Stax link/dedup uses clean meta.invoiceNumber + composite-refKey back-compat
+   v38.126.0: Stax invoice linking / dedup robustness.
+              (1) handlePushStaxInvoices_ now stamps meta.invoiceNumber =
+                  docNum (e.g. "INV-000098") alongside the existing
+                  composite meta.reference ("QB#<docnum>|<name>|<total>|<date>").
+                  Gives the link/dedup paths a clean bare-invoice-# field
+                  to match against, while preserving the composite refKey
+                  for stax_checkDuplicate_ true-dedup semantics.
+              (2) handleLinkStaxInvoiceToExisting_ search now matches a
+                  candidate Stax invoice when ANY of these hold:
+                    (a) meta.invoiceNumber === qbInvoiceNo
+                    (b) meta.reference starts with "QB#<qbInvoiceNo>|"
+                        (back-compat for invoices pushed before v38.126.0)
+                    (c) meta.reference === qbInvoiceNo (original assumption)
+                  Fixes the "No matching Stax invoice found for INV-#####"
+                  error reported by Justin on INV-000097/098 that were
+                  pushed via the IIF→Stax path: those invoices have
+                  meta.reference = "QB#INV-000098|k&m interiors (ach on
+                  file)|190|2026-04-23", so the prior exact-equals check
+                  could never resolve.
+              (3) Dedupes candidate list by hit.id so a single Stax invoice
+                  matched by both rules doesn't appear twice.
    v38.125.0: PDF generation fixes for Invoice + Task Work Order.
               (1) api_exportDocAsPdfBlob_ now sends margin magnitudes in PT
                   (m * 72) with unit:"PT" — the Docs API Unit enum only
@@ -29469,6 +29490,7 @@ function handleCreateStaxInvoices_(payload) {
           tax: tax,
           memo: memo,
           reference: refKey,
+          invoiceNumber: docNum,
           lineItems: lineItems
         }
       };
@@ -30217,10 +30239,25 @@ function handleLinkStaxInvoiceToExisting_(payload) {
         return errorResponse_("Stax API search failed: " + (searchRes.error || "Unknown"), "STAX_API_ERROR");
       }
       var hits = stax_extractArray_(searchRes.data);
+      // v38.126.0 — Match by either:
+      //   (a) meta.invoiceNumber === qbInvoiceNo (clean field stamped on push v38.126.0+)
+      //   (b) meta.reference starts with "QB#<qbInvoiceNo>|" (back-compat for invoices
+      //       pushed before v38.126.0 — refKey is composite "QB#INV-#|name|total|date")
+      //   (c) meta.reference === qbInvoiceNo (exact, original assumption)
+      var refPrefix = "QB#" + qbInvoiceNo + "|";
       var exactMatches = [];
+      var seenIds = {};
       for (var h = 0; h < hits.length; h++) {
         var hit = hits[h] || {};
-        if (hit.meta && hit.meta.reference === qbInvoiceNo) {
+        var meta = hit.meta || {};
+        var matched = false;
+        if (meta.invoiceNumber && String(meta.invoiceNumber) === qbInvoiceNo) matched = true;
+        else if (meta.reference) {
+          var ref = String(meta.reference);
+          if (ref === qbInvoiceNo || ref.indexOf(refPrefix) === 0) matched = true;
+        }
+        if (matched && hit.id && !seenIds[hit.id]) {
+          seenIds[hit.id] = true;
           exactMatches.push({ id: hit.id, total: hit.total, status: hit.status, sent_at: hit.sent_at });
         }
       }
