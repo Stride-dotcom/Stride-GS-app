@@ -1,5 +1,23 @@
 /* ===================================================
-   StrideAPI.gs — v38.134.0 — 2026-04-26 PST — Close every Stax sheet→Supabase mirror gap
+   StrideAPI.gs — v38.135.0 — 2026-04-26 PST — Fast-fail rewrite of handleQboSyncCatalogItem_ + qbo_apiRequest_ retry override
+   v38.135.0: handleQboSyncCatalogItem_ used to hang far past the React
+              8s client timeout — it called qbo_getValidToken_() (an extra
+              companyinfo round-trip) plus up to two more qbo_apiRequest_
+              calls each running the default 3-attempt / 2s+4s+8s backoff.
+              QBO's UrlFetchApp ceiling is ~60s per attempt, so the
+              worst-case wall time was minutes, exceeding Apps Script's
+              6-min execution limit; the script was killed without
+              returning, which the React side saw as a hang.
+              Fix: (a) qbo_apiRequest_ now accepts an optional
+              { maxRetries, backoffMs } opts arg so latency-sensitive
+              callers can opt into a tighter retry budget without
+              changing behaviour for the rest of the QBO call sites;
+              (b) handleQboSyncCatalogItem_ drops qbo_getValidToken_
+              (qbo_apiRequest_ already refreshes on 401), uses
+              { maxRetries: 2, backoffMs: [400] } for every QBO call,
+              and runs a 6500ms watchdog before each network step that
+              throws a clear "QBO sync timed out" error rather than
+              issuing another doomed request.
    v38.134.0: Comprehensive close on all paths that mutated the Stax
               sheet without mirroring to Supabase, the root cause of
               the Payments app showing stale data after every action.
@@ -33909,12 +33927,17 @@ function qbo_refreshToken_() {
  * Make an authenticated QBO API request with auto-retry and token refresh.
  * Matches stax_apiRequest_ backoff pattern: 3 attempts, 2s/4s/8s.
  */
-function qbo_apiRequest_(method, path, payload, token, realmId) {
+function qbo_apiRequest_(method, path, payload, token, realmId, opts) {
+  // v38.134.0: optional opts override so latency-sensitive callers
+  // (e.g. handleQboSyncCatalogItem_, called inline from a React save with
+  // an 8s client timeout) can use a tighter retry budget than the default
+  // 3-attempt loop with up to 14s (2+4+8) of backoff. opts: { maxRetries, backoffMs }.
+  opts = opts || {};
   var baseUrl = "https://quickbooks.api.intuit.com/v3/company/" + realmId + "/";
   var url = baseUrl + path;
   var currentToken = token;
-  var backoffMs = [2000, 4000, 8000];
-  var maxRetries = 3;
+  var backoffMs = opts.backoffMs || [2000, 4000, 8000];
+  var maxRetries = (typeof opts.maxRetries === "number") ? opts.maxRetries : 3;
 
   for (var attempt = 0; attempt < maxRetries; attempt++) {
     try {
@@ -33960,13 +33983,15 @@ function qbo_apiRequest_(method, path, payload, token, realmId) {
         return { success: false, status: status, data: data, error: errMsg };
       }
 
-      // Retryable — backoff
+      // Retryable — backoff (skip if opts.backoffMs is empty / undefined slot)
       if (attempt < maxRetries - 1) {
-        Utilities.sleep(backoffMs[attempt]);
+        var sleepMs = backoffMs[attempt];
+        if (typeof sleepMs === "number" && sleepMs > 0) Utilities.sleep(sleepMs);
       }
     } catch (e) {
       if (attempt < maxRetries - 1) {
-        Utilities.sleep(backoffMs[attempt]);
+        var sleepMsCatch = backoffMs[attempt];
+        if (typeof sleepMsCatch === "number" && sleepMsCatch > 0) Utilities.sleep(sleepMsCatch);
       } else {
         return { success: false, status: 0, data: null, error: "Network error: " + e.message };
       }
@@ -34892,30 +34917,68 @@ function handleQboDisconnect_() {
  * Returns: { success, qb_item_id, action: 'created'|'updated' }
  */
 function handleQboSyncCatalogItem_(payload) {
+  // v38.134.0: fast-fail rewrite. Old version called qbo_getValidToken_()
+  // (one full companyinfo round-trip) plus up to two more qbo_apiRequest_
+  // calls, each with the default 3-attempt / 2s+4s+8s backoff. With QBO's
+  // 60s UrlFetchApp ceiling per attempt, worst-case wall time was
+  // ~3 × (3 × 60s + 6s) ≈ 9 minutes — past Apps Script's 6-minute kill
+  // limit, so the script terminated without responding. From the React
+  // side that looks like a hang (the 8s client timeout in postQboSyncCatalogItem
+  // fires long before).
+  // Fix:
+  //   1. Drop the qbo_getValidToken_() pre-validation. qbo_apiRequest_
+  //      already refreshes on 401, so the only true "token missing"
+  //      case is the property being unset — check that directly.
+  //   2. Pass { maxRetries: 2, backoffMs: [400] } to each call so each
+  //      QBO hop is at most 2 attempts with one 400ms sleep between them.
+  //   3. Watchdog before each network step: if we've already spent more
+  //      than WATCHDOG_MS, throw a clear "QBO timeout" error rather than
+  //      issuing another request. The watchdog only protects the *next*
+  //      hop — UrlFetchApp itself isn't cancellable, so a single QBO call
+  //      that stalls near the ~60s ceiling can still blow past the React
+  //      8s timeout. This guards against the multi-call cascade that was
+  //      the actual source of the hang.
+  var startedAt = Date.now();
+  var WATCHDOG_MS = 6500; // leave 1.5s headroom under the React 8s client timeout
+  var QBO_OPTS = { maxRetries: 2, backoffMs: [400] };
+
+  function watchdog_(label) {
+    var spent = Date.now() - startedAt;
+    if (spent > WATCHDOG_MS) {
+      throw new Error("QBO sync timed out after " + spent + "ms before " + label +
+        " (watchdog " + WATCHDOG_MS + "ms). QBO is responding slowly — try again in a moment.");
+    }
+  }
+
   var code = String(payload.serviceCode || "").trim();
   var name = String(payload.serviceName || "").trim();
   var serviceId = String(payload.serviceId || "").trim();
   if (!code || !name) throw new Error("serviceCode and serviceName are required");
 
-  var token = qbo_getValidToken_();
+  var token = prop_("QBO_ACCESS_TOKEN");
+  if (!token) throw new Error("Not connected to QuickBooks Online — please authorize in Settings → Integrations");
   var realmId = prop_("QBO_REALM_ID");
+  if (!realmId) throw new Error("QBO_REALM_ID missing — please re-authorize");
+
   var existingQbId = payload.qbItemId || null;
   var action, qbItemId;
 
   if (existingQbId) {
     // ── Update existing QBO item ──
-    var updatePayload = {
-      Id: existingQbId,
-      Name: code,
-      Description: name,
-      Type: "Service",
-      Active: true
-    };
+    watchdog_("GET item/" + existingQbId);
     // QBO requires SyncToken for updates — fetch current item first
-    var current = qbo_apiRequest_("GET", "item/" + existingQbId, null, token, realmId);
+    var current = qbo_apiRequest_("GET", "item/" + existingQbId, null, token, realmId, QBO_OPTS);
     if (current.success && current.data && current.data.Item) {
-      updatePayload.SyncToken = current.data.Item.SyncToken;
-      var updateResult = qbo_apiRequest_("POST", "item", updatePayload, token, realmId);
+      var updatePayload = {
+        Id: existingQbId,
+        SyncToken: current.data.Item.SyncToken,
+        Name: code,
+        Description: name,
+        Type: "Service",
+        Active: true
+      };
+      watchdog_("POST item (update by id)");
+      var updateResult = qbo_apiRequest_("POST", "item", updatePayload, token, realmId, QBO_OPTS);
       if (updateResult.success && updateResult.data && updateResult.data.Item) {
         qbItemId = String(updateResult.data.Item.Id);
         action = "updated";
@@ -34923,15 +34986,16 @@ function handleQboSyncCatalogItem_(payload) {
         throw new Error("QBO item update failed: " + (updateResult.error || JSON.stringify(updateResult)));
       }
     } else {
-      // Item not found in QBO — create new
+      // Item not found in QBO — fall through to create-or-search
       existingQbId = null;
     }
   }
 
   if (!existingQbId) {
     // ── Check if item already exists by name ──
+    watchdog_("GET query item by name");
     var query = "select * from Item where Name = '" + code.replace(/'/g, "\\'") + "' and Type = 'Service'";
-    var searchResult = qbo_apiRequest_("GET", "query?query=" + encodeURIComponent(query), null, token, realmId);
+    var searchResult = qbo_apiRequest_("GET", "query?query=" + encodeURIComponent(query), null, token, realmId, QBO_OPTS);
     if (searchResult.success && searchResult.data && searchResult.data.QueryResponse &&
         searchResult.data.QueryResponse.Item && searchResult.data.QueryResponse.Item.length > 0) {
       // Found existing — update it
@@ -34944,7 +35008,8 @@ function handleQboSyncCatalogItem_(payload) {
         Type: "Service",
         Active: true
       };
-      var updateResult2 = qbo_apiRequest_("POST", "item", updatePayload2, token, realmId);
+      watchdog_("POST item (update by name lookup)");
+      var updateResult2 = qbo_apiRequest_("POST", "item", updatePayload2, token, realmId, QBO_OPTS);
       if (updateResult2.success && updateResult2.data && updateResult2.data.Item) {
         qbItemId = String(updateResult2.data.Item.Id);
         action = "updated";
@@ -34959,7 +35024,8 @@ function handleQboSyncCatalogItem_(payload) {
         Type: "Service",
         Active: true
       };
-      var createResult = qbo_apiRequest_("POST", "item", createPayload, token, realmId);
+      watchdog_("POST item (create)");
+      var createResult = qbo_apiRequest_("POST", "item", createPayload, token, realmId, QBO_OPTS);
       if (createResult.success && createResult.data && createResult.data.Item) {
         qbItemId = String(createResult.data.Item.Id);
         action = "created";
