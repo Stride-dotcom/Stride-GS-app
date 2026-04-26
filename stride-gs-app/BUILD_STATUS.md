@@ -97,6 +97,18 @@ UI components: FloatingActionMenu, WriteButton, BatchGuard, ActionTooltip, Batch
 
 ---
 
+## Recent Changes (2026-04-26, session 84)
+
+### Public Photo Share Gallery
+- Every entity's Photos tab now has a Share button (admin/staff only). Click → enter selection mode → tick photos → "Share Selected Photos" opens `SharePhotosDialog` which POSTs a `photo_shares` row + shows a permanent copy-able public link (`#/shared/photos/:shareId`).
+- New no-auth public page `src/pages/PublicPhotoGallery.tsx` rendered by `App.tsx` when the URL hash matches `#/shared/photos/:shareId` (same pre-auth pattern as `/rates` and `/intake`). Switches between an item-level header (Item ID, Vendor, Description, Quantity, Reference) and a job-level header (Job ID, Client, Date, Reference) based on `entity_type` snapshot. Thumbnail grid → click for fullscreen lightbox (read-only). Per-photo download via fetch→blob. Refreshes signed URLs on visibility/focus so 1 h TTL doesn't break long-lived sessions.
+- New migration `supabase/migrations/20260426100000_photo_shares.sql` — `photo_shares` table + RLS that grants anon SELECT on (a) active photo_shares rows, (b) item_photos referenced by an active share, (c) `storage.objects` in the `photos` bucket whose name matches a referenced photo's storage_key/thumbnail_key. The storage policy is what unblocks `createSignedUrls()` for anon.
+- New hook `src/hooks/usePhotoShares.ts` — `usePhotoShares` (auth-required createPhotoShare) + standalone `fetchPublicPhotoShare`/`fetchSharedPhotos`/`buildPhotoShareUrl` for the anon page. Refreshes session JWT before insert so newly-promoted admins don't hit `insufficient_privilege` (mirrors `usePriceListShares` pattern).
+- Threaded `shareContext`/`shareTitle` through `EntityAttachments.PhotosPanel` → `TabbedDetailPanel.builtInTabs.photos` → wired at every detail panel call site (Item, Task, Repair, Will Call, Shipment) so each share carries entity-specific header context snapshot stamped at create time.
+
+### Pending user actions
+- Apply `20260426100000_photo_shares.sql` via MCP `apply_migration` (Supabase MCP not available in this builder session).
+
 ## Recent Changes (2026-04-26, session 83)
 
 ### Order revision/rejection emails

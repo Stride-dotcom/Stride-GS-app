@@ -1341,6 +1341,15 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
       tenantId: repair.clientSheetId,
       itemId: repair.itemId ? String(repair.itemId) : null,
       enableSourceFilter: !!repair.itemId,
+      shareContext: {
+        itemId: repair.itemId ? String(repair.itemId) : null,
+        vendor: repair.vendor,
+        description: repair.description,
+        jobId: repair.repairId,
+        clientName: repair.clientName,
+        date: repair.createdDate || null,
+      },
+      shareTitle: `Repair ${repair.repairId}`,
     },
     docs: {
       contextType: 'repair' as const,

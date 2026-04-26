@@ -1466,6 +1466,16 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
           tenantId: clientSheetId,
           itemId: task.itemId ? String(task.itemId) : null,
           enableSourceFilter: !!task.itemId,
+          shareContext: {
+            itemId: task.itemId ? String(task.itemId) : null,
+            vendor: task.vendor,
+            description: task.description,
+            jobId: task.taskId,
+            clientName: task.clientName,
+            date: task.dueDate || task.created,
+            reference: task.reference || null,
+          },
+          shareTitle: `Task ${task.taskId}`,
         },
         docs: {
           contextType: 'task',

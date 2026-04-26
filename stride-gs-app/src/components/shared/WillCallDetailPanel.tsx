@@ -1230,7 +1230,18 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
   const builtInTabsCfg = {
     // Will Call is a CONTAINER entity (multiple items). Photos/Notes
     // scoped to the WC itself — no item_id rollup (would mix items).
-    photos: { entityType: 'will_call' as const, entityId: wc.wcNumber, tenantId: clientSheetId },
+    photos: {
+      entityType: 'will_call' as const,
+      entityId: wc.wcNumber,
+      tenantId: clientSheetId,
+      shareContext: {
+        jobId: wc.wcNumber,
+        clientName: wc.clientName,
+        date: wc.scheduledDate || wc.actualPickupDate || wc.createdDate,
+        reference: wc.pickupParty || null,
+      },
+      shareTitle: `Will Call ${wc.wcNumber}`,
+    },
     docs:   { contextType: 'willcall' as const, contextId: wc.wcNumber, tenantId: clientSheetId },
     notes:  { entityType: 'will_call', entityId: wc.wcNumber },
     activity: { entityType: 'will_call', entityId: wc.wcNumber, tenantId: clientSheetId },

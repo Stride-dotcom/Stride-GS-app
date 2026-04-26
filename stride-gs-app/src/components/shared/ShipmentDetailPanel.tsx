@@ -389,6 +389,13 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
       entityType: 'shipment' as const,
       entityId: shipment.shipmentNo,
       tenantId: shipment.clientSheetId,
+      shareContext: {
+        jobId: shipment.shipmentNo,
+        clientName: shipment.client,
+        date: shipment.receivedDate,
+        reference: shipment.tracking || null,
+      },
+      shareTitle: `Shipment ${shipment.shipmentNo}`,
     },
     docs: {
       contextType: 'shipment' as const,

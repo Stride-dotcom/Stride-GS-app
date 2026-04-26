@@ -152,6 +152,19 @@ iMessage-style conversations attached to entities, with email/SMS bridging.
 
 ---
 
+## Photos / Media
+
+Shared Photos / Docs / Notes module mounted by every entity panel. Photo capture + thumbnail generation + Supabase storage; per-entity rollup; cross-entity item rollup; public share gallery for sending photos to external recipients.
+
+| Layer | Files |
+|---|---|
+| Pages | `src/pages/PublicPhotoGallery.tsx` (no-auth `#/shared/photos/:shareId`) |
+| Hooks | `src/hooks/usePhotos.ts`, `src/hooks/usePhotoShares.ts`, `src/hooks/useDocuments.ts`, `src/hooks/useEntityNotes.ts` |
+| Components | `src/components/media/PhotoGallery.tsx` (orchestrator with selection mode + Share button), `src/components/media/PhotoGrid.tsx`, `src/components/media/PhotoLightbox.tsx`, `src/components/media/PhotoUploadButton.tsx`, `src/components/media/MultiCapture.tsx`, `src/components/media/SharePhotosDialog.tsx`, `src/components/media/ReceivingRowMedia.tsx`, `src/components/shared/EntityAttachments.tsx` (PhotosPanel/DocumentsPanel/NotesPanel exports composed by every detail panel) |
+| Migrations | `20260419200000_media_messaging_infra.sql` (item_photos table + storage `photos` bucket), `20260426100000_photo_shares.sql` (photo_shares table + anon SELECT RLS on photo_shares / item_photos / storage.objects so anon can render shared photos via signed URLs) |
+
+---
+
 ## Client Onboarding
 
 Client intake form → admin review → onboarding → T&C signing → first sheet provision.

@@ -47,6 +47,7 @@ import { EntityHistory } from './EntityHistory';
 import { usePhotos, type EntityType as PhotoEntityType } from '../../hooks/usePhotos';
 import { useDocuments, type DocumentContextType } from '../../hooks/useDocuments';
 import { useEntityNotes } from '../../hooks/useEntityNotes';
+import type { PhotoShareHeaderContext } from '../../hooks/usePhotoShares';
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -84,6 +85,12 @@ export interface TabbedDetailPanelBuiltInTabs {
     /** v2026-04-22 — opt-in source-entity sub-tabs. The four migrating panels
      *  (Task/Repair/WC/Shipment) set this; legacy consumers leave it off. */
     enableSourceFilter?: boolean;
+    /** Snapshot of header fields stamped onto the public share record at create
+     *  time. Required for the Share Photos button to render a useful gallery
+     *  header when the recipient opens the link. */
+    shareContext?: PhotoShareHeaderContext;
+    /** Optional human-readable title shown on the public gallery page. */
+    shareTitle?: string;
   };
   docs?: {
     contextType: DocumentContextType;
@@ -268,6 +275,8 @@ function useBuiltInTabs(cfg: TabbedDetailPanelBuiltInTabs | undefined): TabbedDe
             itemId={photosCfg.itemId ?? null}
             tenantId={photosCfg.tenantId ?? null}
             enableSourceFilter={photosCfg.enableSourceFilter}
+            shareContext={photosCfg.shareContext}
+            shareTitle={photosCfg.shareTitle}
           />
         ),
       });

@@ -34,6 +34,7 @@ import { usePhotos, type EntityType as PhotoEntityType } from '../../hooks/usePh
 import { useDocuments, type DocumentContextType } from '../../hooks/useDocuments';
 import { useEntityNotes, useEntityNotesRollup, type EntityNote } from '../../hooks/useEntityNotes';
 import { EntitySourceTabs, ENTITY_LABEL } from './EntitySourceTabs';
+import type { PhotoShareHeaderContext } from '../../hooks/usePhotoShares';
 
 interface PhotosCfg {
   entityType: PhotoEntityType;
@@ -47,6 +48,11 @@ interface PhotosCfg {
    *  when the rollup spans multiple entity_types. Off by default so Claim
    *  and other legacy consumers stay byte-identical. */
   enableSourceFilter?: boolean;
+  /** Snapshot of header fields for the public share gallery (item or job
+   *  level fields). Each consumer panel passes whatever it knows. Optional. */
+  shareContext?: PhotoShareHeaderContext;
+  /** Optional title shown in the public gallery (e.g. "Order 12345 — Photos"). */
+  shareTitle?: string;
 }
 interface DocumentsCfg {
   contextType: DocumentContextType;
@@ -92,6 +98,8 @@ export function EntityAttachments({ photos, documents, notes, defaultOpen }: Pro
           tenantId={photos.tenantId}
           itemId={photos.itemId}
           enableSourceFilter={photos.enableSourceFilter}
+          shareContext={photos.shareContext}
+          shareTitle={photos.shareTitle}
         />
       )}
       {documents && (
@@ -180,7 +188,8 @@ function SectionHeader({
 }
 
 function PhotosSection({
-  entityType, entityId, tenantId, itemId, enableSourceFilter, defaultOpen,
+  entityType, entityId, tenantId, itemId, enableSourceFilter,
+  shareContext, shareTitle, defaultOpen,
 }: PhotosCfg & { defaultOpen: boolean }) {
   const [open, setOpen] = useState(defaultOpen);
   const { photos } = usePhotos({ entityType, entityId, tenantId, itemId });
@@ -200,6 +209,8 @@ function PhotosSection({
           tenantId={tenantId}
           itemId={itemId}
           enableSourceFilter={enableSourceFilter}
+          shareContext={shareContext}
+          shareTitle={shareTitle}
           naked
           compact
         />
@@ -256,6 +267,7 @@ function DocumentsSection({
 
 export function PhotosPanel({
   entityType, entityId, tenantId, itemId, enableSourceFilter,
+  shareContext, shareTitle,
 }: {
   entityType: PhotoEntityType;
   entityId: string | null | undefined;
@@ -266,6 +278,9 @@ export function PhotosPanel({
    *  the migrated tabbed panels pass this; legacy composition leaves it off
    *  so Claim's UI is byte-identical. */
   enableSourceFilter?: boolean;
+  /** Snapshot of header fields for the public share gallery. See PhotoGallery. */
+  shareContext?: PhotoShareHeaderContext;
+  shareTitle?: string;
 }) {
   return (
     <PhotoGallery
@@ -274,6 +289,8 @@ export function PhotosPanel({
       tenantId={tenantId}
       itemId={itemId}
       enableSourceFilter={enableSourceFilter}
+      shareContext={shareContext}
+      shareTitle={shareTitle}
       naked
       compact
     />

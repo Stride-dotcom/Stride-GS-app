@@ -1386,6 +1386,14 @@ function PhotosPanelProxy({ item, clientSheetId, driveFolders }: { item: any; cl
         itemId={item.itemId}
         tenantId={clientSheetId}
         enableSourceFilter
+        shareContext={{
+          itemId: item.itemId,
+          vendor: item.vendor,
+          description: item.description,
+          quantity: item.qty,
+          reference: item.reference || item.poNumber || null,
+        }}
+        shareTitle={`Item ${item.itemId}`}
       />
       {driveFolders && <DriveFoldersList folders={driveFolders} />}
     </div>

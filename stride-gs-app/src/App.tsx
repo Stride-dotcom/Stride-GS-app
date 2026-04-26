@@ -32,6 +32,7 @@ import { QuoteTool } from './pages/QuoteTool';
 import { PriceList } from './pages/PriceList';
 import { Intakes } from './pages/Intakes';
 import { PublicRates } from './pages/PublicRates';
+import { PublicPhotoGallery } from './pages/PublicPhotoGallery';
 import { ClientIntake } from './pages/ClientIntake';
 import { MessagesPage } from './components/messages/MessagesPage';
 
@@ -57,6 +58,14 @@ export default function App() {
     ? window.location.hash.match(/^#\/intake\/([A-Za-z0-9_-]+)/)
     : null;
   if (intakeMatch) return <ClientIntake linkId={intakeMatch[1]} />;
+
+  // Public photo gallery — anyone with the link can view a snapshot of
+  // selected photos for an entity (item / job). Anon Supabase reads gated
+  // by RLS in 20260426100000_photo_shares.sql.
+  const photoShareMatch = typeof window !== 'undefined'
+    ? window.location.hash.match(/^#\/shared\/photos\/([A-Za-z0-9_-]+)/)
+    : null;
+  if (photoShareMatch) return <PublicPhotoGallery shareId={photoShareMatch[1]} />;
 
   // Auth check in progress
   if (loading) return <LoadingScreen />;

@@ -17,7 +17,7 @@
 import { useCallback, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
-  AlertTriangle, Wrench, MoreVertical, X, Loader2, Download, Trash2,
+  AlertTriangle, Wrench, MoreVertical, X, Loader2, Download, Trash2, Check,
 } from 'lucide-react';
 import { theme } from '../../styles/theme';
 import { useIsMobile } from '../../hooks/useIsMobile';
@@ -34,6 +34,14 @@ interface Props {
   onToggleAttention?: (photo: Photo, next: boolean) => Promise<boolean> | boolean;
   onToggleRepair?: (photo: Photo, next: boolean) => Promise<boolean> | boolean;
   onDelete?: (photo: Photo) => Promise<boolean> | boolean;
+  /** When true, every tile renders a checkbox affordance and clicks toggle
+   *  selection instead of opening the lightbox. Hover/3-dot actions are
+   *  suppressed in this mode so the surface is single-purpose. */
+  selectionMode?: boolean;
+  /** IDs of currently-selected photos (used with selectionMode). */
+  selectedIds?: Set<string>;
+  /** Selection toggle callback (used with selectionMode). */
+  onToggleSelect?: (photo: Photo) => void;
 }
 
 // Session 74: PRIMARY_RING removed — "Make Primary" feature is gone.
@@ -50,6 +58,7 @@ function ringColor(p: Photo): string | null {
 export function PhotoGrid({
   photos, onPhotoClick, compact,
   onToggleAttention, onToggleRepair, onDelete,
+  selectionMode, selectedIds, onToggleSelect,
 }: Props) {
   const { isMobile, isTablet } = useIsMobile();
   const cols = isMobile ? 2 : compact ? 3 : 4;
@@ -58,7 +67,10 @@ export function PhotoGrid({
   const [actionPhoto, setActionPhoto] = useState<Photo | null>(null);
   const [hoverId, setHoverId] = useState<string | null>(null);
   const [pendingAction, setPendingAction] = useState<string | null>(null); // `${photoId}:${kind}`
-  const hasActions = !!(onToggleAttention || onToggleRepair || onDelete);
+  // In selectionMode, hover/3-dot/delete affordances are suppressed so the
+  // grid is single-purpose (pick photos to share). The flag chips stay
+  // visible so the sharer can see which photos are flagged before sending.
+  const hasActions = !selectionMode && !!(onToggleAttention || onToggleRepair || onDelete);
 
   // Inline handler used by desktop hover-overlay icons. Runs optimistically
   // (Realtime refetch will confirm) and keeps the overlay responsive by
@@ -91,26 +103,35 @@ export function PhotoGrid({
           const src = p.thumbnail_url || p.storage_url || '';
           const isHovered = hoverId === p.id;
           const showDesktopOverlay = hasActions && !isMobile && isHovered;
+          const isSelected = !!selectionMode && !!selectedIds?.has(p.id);
+          // Selection mode supersedes the lightbox click. Outside selection
+          // mode the tile opens the lightbox (when onPhotoClick is provided).
+          const handleTileClick = selectionMode
+            ? (onToggleSelect ? () => onToggleSelect(p) : undefined)
+            : (onPhotoClick ? () => onPhotoClick(p, i) : undefined);
+          // Selected tiles get an accent ring that supersedes the
+          // attention/repair ring so the user can see what they picked.
+          const tileRing = isSelected ? theme.v2.colors.accent : ring;
           return (
             <div
               key={p.id}
-              onClick={onPhotoClick ? () => onPhotoClick(p, i) : undefined}
+              onClick={handleTileClick}
               onMouseEnter={e => {
                 setHoverId(p.id);
-                if (onPhotoClick) e.currentTarget.style.transform = 'translateY(-2px)';
+                if (handleTileClick) e.currentTarget.style.transform = 'translateY(-2px)';
               }}
               onMouseLeave={e => {
                 setHoverId(prev => (prev === p.id ? null : prev));
-                if (onPhotoClick) e.currentTarget.style.transform = 'translateY(0)';
+                if (handleTileClick) e.currentTarget.style.transform = 'translateY(0)';
               }}
               style={{
                 position: 'relative',
                 aspectRatio: '1 / 1',
                 borderRadius: radius,
                 overflow: 'hidden',
-                cursor: onPhotoClick ? 'pointer' : 'default',
+                cursor: handleTileClick ? 'pointer' : 'default',
                 background: '#E5E7EB',
-                boxShadow: ring ? `0 0 0 5px ${ring}, 0 2px 8px rgba(0,0,0,0.12)` : '0 2px 8px rgba(0,0,0,0.06)',
+                boxShadow: tileRing ? `0 0 0 5px ${tileRing}, 0 2px 8px rgba(0,0,0,0.12)` : '0 2px 8px rgba(0,0,0,0.06)',
                 transition: 'transform 0.12s ease, box-shadow 0.12s ease',
               }}
             >
@@ -136,6 +157,30 @@ export function PhotoGrid({
                   <span style={chipStyle(REPAIR_RING)} title="Repair photo"><Wrench size={10} /> REPAIR</span>
                 )}
               </div>
+
+              {/* Selection checkbox — only rendered in selectionMode. Sits in
+                  the top-right corner; the entire tile is clickable to toggle
+                  so this is purely a visual indicator (pointerEvents: none). */}
+              {selectionMode && (
+                <div
+                  aria-hidden
+                  style={{
+                    position: 'absolute', top: 6, right: 6,
+                    width: 24, height: 24, borderRadius: 6,
+                    background: isSelected ? theme.v2.colors.accent : 'rgba(255,255,255,0.85)',
+                    color: '#fff',
+                    border: isSelected
+                      ? `1px solid ${theme.v2.colors.accent}`
+                      : '1px solid rgba(0,0,0,0.18)',
+                    boxShadow: '0 1px 3px rgba(0,0,0,0.15)',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    pointerEvents: 'none', zIndex: 4,
+                    transition: 'background 0.12s ease, border-color 0.12s ease',
+                  }}
+                >
+                  {isSelected && <Check size={16} strokeWidth={3} />}
+                </div>
+              )}
 
               {/* Mobile/tablet: always-visible 3-dot → bottom sheet.
                   Hidden on desktop where the hover overlay provides direct actions.
