@@ -71,6 +71,7 @@ import {
 } from '../../lib/supabaseQueries';
 import { supabase } from '../../lib/supabase';
 import { useCoverageOptions, type CoverageOption } from '../../hooks/useCoverageOptions';
+import { useItemClasses } from '../../hooks/useItemClasses';
 import { ProcessingOverlay } from './ProcessingOverlay';
 
 // ── Address Book helpers ─────────────────────────────────────────────────
@@ -126,16 +127,25 @@ async function upsertAddressBookContact(contact: {
     }, { onConflict: 'tenant_id,contact_name,address' });
 }
 
-// Inventory class → cuFt volume. Matches StrideAPI.gs CLASS_CUFT lookup.
-// Used to populate dt_order_items.cubic_feet so the DT push payload can carry
-// total load volume per order.
-const CLASS_CUBIC_FEET: Record<string, number> = {
-  XS: 10, S: 25, M: 50, L: 75, XL: 110,
-};
-function classToCuFt(cls: string | undefined | null): number | null {
-  if (!cls) return null;
-  const key = String(cls).trim().toUpperCase();
-  return CLASS_CUBIC_FEET[key] ?? null;
+// Inventory class codes ("XS", "M", "XL"…) ↔ Settings → Pricing → Classes
+// rows. The Supabase `item_classes` table stores names ("Extra Small",
+// "Medium", "XX-Large") + storage_size. Inventory rows store the short
+// code. We derive the code from the name once per render and build a
+// lookup so the modal's volume math stays synced with whatever the admin
+// set in Settings (was hardcoded XS=10 / S=25 / M=50 / L=75 / XL=110, no
+// XXL — drifted out of sync with the live values 5/15/45/75/100/150).
+function deriveClassCode(name: string): string {
+  // Take the first letter of every whitespace-separated token, then
+  // collapse a leading "XX-" into "XX" so "XX-Large" → "XXL". Keeps
+  // any future "Triple XL" / "Mini" additions roughly correct without
+  // a hardcoded reverse map. Codes always returned uppercase to match
+  // inventory.item_class storage.
+  const cleaned = name.replace(/^XX-/i, 'XX ').trim();
+  return cleaned
+    .split(/\s+/)
+    .map(w => w[0] ?? '')
+    .join('')
+    .toUpperCase();
 }
 // Expanded description for DT push: "Vendor — Description (Sidemark · Room)"
 // Falls back gracefully when optional bits aren't set.
@@ -461,6 +471,25 @@ export function CreateDeliveryOrderModal({
 }: Props) {
   const { user } = useAuth();
   const isStaff = user?.role === 'staff' || user?.role === 'admin';
+
+  // Live item-class storage sizes (was hardcoded — see deriveClassCode notes).
+  // useItemClasses subscribes to the same realtime feed Settings uses, so an
+  // admin tweaking M from 45→50 in Pricing immediately re-flows through
+  // every cuft calc on the open modal.
+  const { classes: itemClasses } = useItemClasses();
+  const cuFtByCode = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const c of itemClasses) {
+      if (!c.active) continue;
+      const code = deriveClassCode(c.name);
+      if (code && c.storageSize > 0) map.set(code, c.storageSize);
+    }
+    return map;
+  }, [itemClasses]);
+  const classToCuFt = (cls: string | undefined | null): number | null => {
+    if (!cls) return null;
+    return cuFtByCode.get(String(cls).trim().toUpperCase()) ?? null;
+  };
 
   // If no liveItems were passed (modal opened from Orders page, not Inventory),
   // pull our own inventory. useInventory auto-scopes to accessible clients.
