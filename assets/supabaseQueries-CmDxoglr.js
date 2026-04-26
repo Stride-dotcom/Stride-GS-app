@@ -1,1 +1,0 @@
-import{o as e}from"./supabaseQueries-BOoyJ4NK.js";export{e as fetchClientsFromSupabase};
