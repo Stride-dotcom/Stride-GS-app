@@ -97,6 +97,16 @@ UI components: FloatingActionMenu, WriteButton, BatchGuard, ActionTooltip, Batch
 
 ---
 
+## Recent Changes (2026-04-25, session 82)
+
+### DT order Completion view + sync-back
+- New migration `20260425230000_dt_sync_back_fields.sql` — adds completion columns to `dt_orders` (`started_at`, `finished_at`, `scheduled_at`, `driver_id`, `driver_name`, `truck_id`, `truck_name`, `service_unit`, `stop_number`, `actual_service_time_minutes`, `payment_collected`, `payment_notes`, `cod_amount`, `signature_captured_at`, `dt_status_code`, `dt_export_payload`); per-item delivery state to `dt_order_items` (`delivered`, `item_note`, `checked_quantity`, `location`, `return_codes`, `last_synced_at`); `lat`/`lng`/`source` on `dt_order_history`; allows `source='dt_export'` on `dt_order_notes`. Applied via MCP.
+- `dt-push-order` **v15** — driver-facing `<notes>` block falls back to `dt_orders.details` when `order_notes` is empty so the modal's "Notes / Special Instructions" reaches the DT driver app's notes pane.
+- `dt-sync-statuses` **v7** — replaced code-only `get_order_status` with `/orders/api/export.xml?service_order_id=…`. Mirrors back driver, truck, started/finished/scheduled, COD/payment, signature timestamp, per-item `delivered_quantity`/`item_note`/`return_codes`, full `order_history` timeline, and DT-side notes. Replace-on-sync scoped to `source='dt_export'` so app/webhook-authored rows survive.
+- New `src/pages/OrderPage.tsx` **Completion tab** — renders driver/vehicle, timing (scheduled/started/finished/actual), proof-of-delivery (COD, signature_captured_at), DT-side notes feed, and driver-activity timeline (with Google Maps lat/lng deep-link). Items tab now shows "Delivered" / "Short" badges, driver-posted item notes, and return codes.
+- New helpers in `src/lib/supabaseQueries.ts` — `fetchDtOrderHistory(dtOrderId)` and `fetchDtOrderNotes(dtOrderId)` returning `DtOrderHistoryEvent[]` / `DtSideNote[]`. Type extensions on `DtOrderForUI` + `DtOrderItemForUI` for the new sync-back columns.
+- **Pending**: photo sync. DT XML export does not return photo URLs; the JSON Beetrack API (`GET /api/external/v1/dispatches/:identifier`) does, under `form.img_url[]`. Needs a separate `X-AUTH-TOKEN` from DT support before wiring.
+
 ## Recent Changes (2026-04-25, session 80)
 
 ### Scroll position restored on back-navigation
@@ -154,6 +164,7 @@ UI components: FloatingActionMenu, WriteButton, BatchGuard, ActionTooltip, Batch
 
 ## Pending User Actions
 
+- [ ] **Get DT JSON-API X-AUTH-TOKEN** (Settings → Advanced Settings in DT, or email support@dispatchtrack.com) so the next session can wire photo sync via `/api/external/v1/dispatches/:identifier`. Add to a new `dt_credentials.rest_api_token` column.
 - [ ] Set `STAX_API_KEY` secret on stax-catalog-sync Edge Function in Supabase dashboard
 - [ ] Run `backfillShipmentFolderUrls()` from Apps Script editor (one-time)
 - [ ] Run `backfillActivityAllClientsNow()` for historical activity log seeding

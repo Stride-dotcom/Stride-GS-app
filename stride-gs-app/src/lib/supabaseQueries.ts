@@ -1593,6 +1593,21 @@ export interface SupabaseDtOrderRow {
   payment_notes: string | null;
   // Phase 2c — order type + linking
   order_type: string | null;
+  // DT sync-back (export.xml mirror) — populated by dt-sync-statuses v7+.
+  // Null until the order has been pushed and the next sync runs.
+  scheduled_at: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  signature_captured_at: string | null;
+  driver_id: number | null;
+  driver_name: string | null;
+  truck_id: number | null;
+  truck_name: string | null;
+  service_unit: string | null;
+  stop_number: number | null;
+  actual_service_time_minutes: number | null;
+  cod_amount: number | null;
+  dt_status_code: string | null;
 }
 
 export interface DtOrderItemForUI {
@@ -1609,6 +1624,12 @@ export interface DtOrderItemForUI {
   sidemark: string;
   location: string;
   room: string;
+  // DT sync-back per-item fields (populated by dt-sync-statuses v7+).
+  delivered: boolean | null;
+  itemNote: string;
+  checkedQuantity: number | null;
+  dtLocation: string;
+  returnCodes: string[] | null;
 }
 
 export interface DtOrderForUI {
@@ -1670,6 +1691,20 @@ export interface DtOrderForUI {
   // Phase 2c — order type + linked pickup/delivery pair
   orderType: 'delivery' | 'pickup' | 'pickup_and_delivery' | 'service_only' | 'transfer';
   linkedOrderId: string | null;
+  // DT sync-back (export.xml mirror) — see SupabaseDtOrderRow for source.
+  scheduledAt: string | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+  signatureCapturedAt: string | null;
+  driverId: number | null;
+  driverName: string;
+  truckId: number | null;
+  truckName: string;
+  serviceUnit: string;
+  stopNumber: number | null;
+  actualServiceTimeMinutes: number | null;
+  codAmount: number | null;
+  dtStatusCode: string;
   // When the row was first written to dt_orders (Postgres-side
   // created_at). Used as the default-newest sort on the Orders page
   // and for the "Date Created" column. Distinct from
@@ -1827,6 +1862,10 @@ export async function fetchDtOrdersFromSupabase(
         clientName: (row.tenant_id ? clientNameMap[row.tenant_id] : null) ?? '',
         items: (((row as unknown as Record<string, unknown>).dt_order_items as Array<Record<string, unknown>>) || []).map((item) => {
           const extras = (item.extras as Record<string, unknown>) || {};
+          const rawReturnCodes = item.return_codes;
+          let returnCodes: string[] | null = null;
+          if (Array.isArray(rawReturnCodes)) returnCodes = rawReturnCodes.map(String);
+          else if (typeof rawReturnCodes === 'string' && rawReturnCodes.trim()) returnCodes = [rawReturnCodes.trim()];
           return {
             id: String(item.id ?? ''),
             dtItemCode: String(item.dt_item_code ?? ''),
@@ -1841,6 +1880,11 @@ export async function fetchDtOrdersFromSupabase(
             sidemark: String(extras.sidemark ?? ''),
             location: String(extras.location ?? ''),
             room: String(item.room ?? extras.room ?? ''),
+            delivered: typeof item.delivered === 'boolean' ? item.delivered : null,
+            itemNote: String(item.item_note ?? ''),
+            checkedQuantity: item.checked_quantity != null ? Number(item.checked_quantity) : null,
+            dtLocation: String(item.location ?? ''),
+            returnCodes,
           };
         }),
         // Pricing
@@ -1872,6 +1916,20 @@ export async function fetchDtOrdersFromSupabase(
         orderType: (row.order_type as DtOrderForUI['orderType']) ?? (row.is_pickup ? 'pickup' : 'delivery'),
         linkedOrderId: row.linked_order_id,
         createdAt: row.created_at ?? '',
+        // DT sync-back
+        scheduledAt: row.scheduled_at,
+        startedAt: row.started_at,
+        finishedAt: row.finished_at,
+        signatureCapturedAt: row.signature_captured_at,
+        driverId: row.driver_id,
+        driverName: row.driver_name ?? '',
+        truckId: row.truck_id,
+        truckName: row.truck_name ?? '',
+        serviceUnit: row.service_unit ?? '',
+        stopNumber: row.stop_number,
+        actualServiceTimeMinutes: row.actual_service_time_minutes,
+        codAmount: row.cod_amount != null ? Number(row.cod_amount) : null,
+        dtStatusCode: row.dt_status_code ?? '',
       };
     });
   } catch {
@@ -1942,6 +2000,10 @@ export async function fetchDtOrderByIdFromSupabase(
       clientName: (row.tenant_id ? clientNameMap[row.tenant_id] : null) ?? '',
       items: (((row as unknown as Record<string, unknown>).dt_order_items as Array<Record<string, unknown>>) || []).map((item) => {
         const extras = (item.extras as Record<string, unknown>) || {};
+        const rawReturnCodes = item.return_codes;
+        let returnCodes: string[] | null = null;
+        if (Array.isArray(rawReturnCodes)) returnCodes = rawReturnCodes.map(String);
+        else if (typeof rawReturnCodes === 'string' && rawReturnCodes.trim()) returnCodes = [rawReturnCodes.trim()];
         return {
           id: String(item.id ?? ''),
           dtItemCode: String(item.dt_item_code ?? ''),
@@ -1956,6 +2018,11 @@ export async function fetchDtOrderByIdFromSupabase(
           sidemark: String(extras.sidemark ?? ''),
           location: String(extras.location ?? ''),
           room: String(item.room ?? extras.room ?? ''),
+          delivered: typeof item.delivered === 'boolean' ? item.delivered : null,
+          itemNote: String(item.item_note ?? ''),
+          checkedQuantity: item.checked_quantity != null ? Number(item.checked_quantity) : null,
+          dtLocation: String(item.location ?? ''),
+          returnCodes,
         };
       }),
       baseDeliveryFee: row.base_delivery_fee != null ? Number(row.base_delivery_fee) : null,
@@ -1983,10 +2050,92 @@ export async function fetchDtOrderByIdFromSupabase(
       orderType: (row.order_type as DtOrderForUI['orderType']) ?? (row.is_pickup ? 'pickup' : 'delivery'),
       linkedOrderId: row.linked_order_id,
       createdAt: row.created_at ?? '',
+      // DT sync-back
+      scheduledAt: row.scheduled_at,
+      startedAt: row.started_at,
+      finishedAt: row.finished_at,
+      signatureCapturedAt: row.signature_captured_at,
+      driverId: row.driver_id,
+      driverName: row.driver_name ?? '',
+      truckId: row.truck_id,
+      truckName: row.truck_name ?? '',
+      serviceUnit: row.service_unit ?? '',
+      stopNumber: row.stop_number,
+      actualServiceTimeMinutes: row.actual_service_time_minutes,
+      codAmount: row.cod_amount != null ? Number(row.cod_amount) : null,
+      dtStatusCode: row.dt_status_code ?? '',
     };
   } catch {
     return null;
   }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DT order history + DT-side notes (sync-back from dt-sync-statuses)
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface DtOrderHistoryEvent {
+  id: string;
+  code: number | null;
+  description: string;
+  happenedAt: string;
+  ownerId: number | null;
+  ownerName: string;
+  ownerType: string;
+  lat: number | null;
+  lng: number | null;
+  source: string;
+}
+
+export async function fetchDtOrderHistory(dtOrderId: string): Promise<DtOrderHistoryEvent[]> {
+  const { data, error } = await supabase
+    .from('dt_order_history')
+    .select('id, code, description, happened_at, owner_id, owner_name, owner_type, lat, lng, source')
+    .eq('dt_order_id', dtOrderId)
+    .order('happened_at', { ascending: false });
+  if (error || !data) return [];
+  return (data as Array<Record<string, unknown>>).map(r => ({
+    id:          String(r.id ?? ''),
+    code:        r.code != null ? Number(r.code) : null,
+    description: String(r.description ?? ''),
+    happenedAt:  String(r.happened_at ?? ''),
+    ownerId:     r.owner_id != null ? Number(r.owner_id) : null,
+    ownerName:   String(r.owner_name ?? ''),
+    ownerType:   String(r.owner_type ?? ''),
+    lat:         r.lat != null ? Number(r.lat) : null,
+    lng:         r.lng != null ? Number(r.lng) : null,
+    source:      String(r.source ?? ''),
+  }));
+}
+
+export interface DtSideNote {
+  id: string;
+  body: string;
+  authorName: string;
+  authorType: string;
+  visibility: string;
+  createdAtDt: string | null;
+  createdAt: string;
+  source: string;
+}
+
+export async function fetchDtOrderNotes(dtOrderId: string): Promise<DtSideNote[]> {
+  const { data, error } = await supabase
+    .from('dt_order_notes')
+    .select('id, body, author_name, author_type, visibility, created_at_dt, created_at, source')
+    .eq('dt_order_id', dtOrderId)
+    .order('created_at_dt', { ascending: false, nullsFirst: false });
+  if (error || !data) return [];
+  return (data as Array<Record<string, unknown>>).map(r => ({
+    id:          String(r.id ?? ''),
+    body:        String(r.body ?? ''),
+    authorName:  String(r.author_name ?? ''),
+    authorType:  String(r.author_type ?? ''),
+    visibility:  String(r.visibility ?? 'public'),
+    createdAtDt: r.created_at_dt ? String(r.created_at_dt) : null,
+    createdAt:   String(r.created_at ?? ''),
+    source:      String(r.source ?? ''),
+  }));
 }
 
 // ─── Delivery pricing fetchers (session 68) ───────────────────────────────

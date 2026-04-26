@@ -11,12 +11,22 @@ import {
   AlertCircle, Loader2, SearchX, Pencil, X,
   CheckCircle2, Clock3, DollarSign, MapPin, Phone,
   Mail, Calendar, Clock, Package, FileText, Truck,
+  User, PenLine, MessageSquare, Activity,
 } from 'lucide-react';
 import { theme } from '../styles/theme';
 import { useAuth } from '../contexts/AuthContext';
 import { useOrderDetail } from '../hooks/useOrderDetail';
-import { fetchDtOrderByIdFromSupabase } from '../lib/supabaseQueries';
-import type { DtOrderForUI, DtOrderItemForUI } from '../lib/supabaseQueries';
+import {
+  fetchDtOrderByIdFromSupabase,
+  fetchDtOrderHistory,
+  fetchDtOrderNotes,
+} from '../lib/supabaseQueries';
+import type {
+  DtOrderForUI,
+  DtOrderItemForUI,
+  DtOrderHistoryEvent,
+  DtSideNote,
+} from '../lib/supabaseQueries';
 import {
   EntityPage, EPCard, EPLabel, EPFooterButton, EntityPageTokens as EP,
 } from '../components/shared/EntityPage';
@@ -410,36 +420,244 @@ function ItemsTab({ items }: { items: DtOrderItemForUI[] }) {
   return (
     <EPCard>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-        {items.map((item, idx) => (
-          <div key={item.id || idx} style={{ padding: '12px 14px', borderRadius: 10, background: idx % 2 === 0 ? '#FAFAF9' : '#fff', border: `1px solid ${theme.colors.border}` }}>
-            <div style={{ fontSize: 13, fontWeight: 600, color: EP.textPrimary, marginBottom: 6 }}>
-              {item.description || 'No description'}
-            </div>
-            <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', fontSize: 12, color: EP.textSecondary }}>
-              {item.dtItemCode        && <span><span style={{ fontWeight: 600 }}>SKU:</span> {item.dtItemCode}</span>}
-              {item.quantity != null  && <span><span style={{ fontWeight: 600 }}>Qty:</span> {item.quantity}</span>}
-              {item.deliveredQuantity != null && (
-                <span>
-                  <span style={{ fontWeight: 600 }}>Delivered:</span>{' '}
-                  <span style={{ color: item.deliveredQuantity === item.quantity ? '#15803D' : '#B45309' }}>
-                    {item.deliveredQuantity}
+        {items.map((item, idx) => {
+          // Treat short-delivery as a flag worth highlighting. delivered=false
+          // explicitly OR a delivered_quantity below ordered quantity counts.
+          const orderedQty = item.quantity ?? 0;
+          const delQty = item.deliveredQuantity ?? null;
+          const explicitlyShort = item.delivered === false;
+          const qtyShort = delQty != null && orderedQty > 0 && delQty < orderedQty;
+          const fullyDelivered = item.delivered === true || (delQty != null && orderedQty > 0 && delQty >= orderedQty);
+          return (
+            <div key={item.id || idx} style={{ padding: '12px 14px', borderRadius: 10, background: idx % 2 === 0 ? '#FAFAF9' : '#fff', border: `1px solid ${theme.colors.border}` }}>
+              <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, marginBottom: 6 }}>
+                <div style={{ fontSize: 13, fontWeight: 600, color: EP.textPrimary, flex: 1, minWidth: 0 }}>
+                  {item.description || 'No description'}
+                </div>
+                {fullyDelivered && (
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11, fontWeight: 600, background: '#F0FDF4', color: '#15803D', padding: '2px 8px', borderRadius: 10, flexShrink: 0 }}>
+                    <CheckCircle2 size={11} /> Delivered
                   </span>
-                </span>
+                )}
+                {(explicitlyShort || qtyShort) && !fullyDelivered && (
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11, fontWeight: 600, background: '#FEF3C7', color: '#B45309', padding: '2px 8px', borderRadius: 10, flexShrink: 0 }}>
+                    <AlertCircle size={11} /> Short
+                  </span>
+                )}
+              </div>
+              <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', fontSize: 12, color: EP.textSecondary }}>
+                {item.dtItemCode        && <span><span style={{ fontWeight: 600 }}>SKU:</span> {item.dtItemCode}</span>}
+                {item.quantity != null  && <span><span style={{ fontWeight: 600 }}>Qty:</span> {item.quantity}</span>}
+                {item.deliveredQuantity != null && (
+                  <span>
+                    <span style={{ fontWeight: 600 }}>Delivered:</span>{' '}
+                    <span style={{ color: qtyShort ? '#B45309' : '#15803D' }}>
+                      {item.deliveredQuantity}
+                    </span>
+                  </span>
+                )}
+                {item.checkedQuantity != null && item.checkedQuantity !== item.deliveredQuantity && (
+                  <span><span style={{ fontWeight: 600 }}>Checked:</span> {item.checkedQuantity}</span>
+                )}
+                {item.dtLocation && (
+                  <span><span style={{ fontWeight: 600 }}>Location:</span> {item.dtLocation}</span>
+                )}
+                {item.unitPrice != null && item.unitPrice > 0 && (
+                  <span><span style={{ fontWeight: 600 }}>Amount:</span> ${item.unitPrice.toFixed(2)}</span>
+                )}
+              </div>
+              {item.itemNote && (
+                <div style={{ fontSize: 12, color: '#92400E', marginTop: 6, padding: '6px 8px', background: '#FFFBEB', borderRadius: 6, borderLeft: '3px solid #F59E0B' }}>
+                  <span style={{ fontWeight: 600 }}>Driver note:</span> {item.itemNote}
+                </div>
               )}
-              {item.unitPrice != null && item.unitPrice > 0 && (
-                <span><span style={{ fontWeight: 600 }}>Amount:</span> ${item.unitPrice.toFixed(2)}</span>
+              {item.returnCodes && item.returnCodes.length > 0 && (
+                <div style={{ fontSize: 11, color: '#991B1B', marginTop: 6, fontWeight: 500 }}>
+                  Return codes: {item.returnCodes.join(', ')}
+                </div>
+              )}
+              {item.notes && (
+                <div style={{ fontSize: 11, color: EP.textMuted, marginTop: 6, fontStyle: 'italic' }}>{item.notes}</div>
               )}
             </div>
-            {item.notes && (
-              <div style={{ fontSize: 11, color: EP.textMuted, marginTop: 6, fontStyle: 'italic' }}>{item.notes}</div>
-            )}
-          </div>
-        ))}
+          );
+        })}
       </div>
       <div style={{ fontSize: 11, color: EP.textMuted, marginTop: 12, fontStyle: 'italic' }}>
         Items can't be edited here — cancel and recreate the order to change items.
       </div>
     </EPCard>
+  );
+}
+
+// ── Completion tab content ───────────────────────────────────────────────────
+//
+// Shows the data that flows back from DispatchTrack via dt-sync-statuses
+// once an order has been pushed and worked on. Hidden entirely when the
+// order has no sync-back data (i.e. nothing has happened in DT yet).
+
+function fmtDateTime(iso: string | null): string {
+  if (!iso) return '—';
+  try { return new Date(iso).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }); }
+  catch { return iso; }
+}
+
+function fmtDuration(min: number | null): string {
+  if (min == null) return '—';
+  if (min < 60) return `${min} min`;
+  const h = Math.floor(min / 60);
+  const m = min % 60;
+  return m === 0 ? `${h}h` : `${h}h ${m}m`;
+}
+
+function CompletionTab({
+  order,
+  notes,
+  history,
+  loading,
+}: {
+  order: DtOrderForUI;
+  notes: DtSideNote[];
+  history: DtOrderHistoryEvent[];
+  loading: boolean;
+}) {
+  const hasCompletionData = !!(
+    order.startedAt || order.finishedAt || order.driverName || order.truckName ||
+    order.signatureCapturedAt || order.codAmount != null || order.dtStatusCode
+  );
+
+  if (!hasCompletionData && history.length === 0 && notes.length === 0) {
+    return (
+      <EPCard>
+        <div style={{ textAlign: 'center', color: EP.textMuted, fontSize: 13, padding: '24px 0' }}>
+          {loading
+            ? 'Loading completion data…'
+            : order.pushedToDtAt
+              ? 'No driver activity yet. Click "DT Sync" on the Orders page to pull the latest from DispatchTrack.'
+              : 'This order hasn\'t been pushed to DispatchTrack yet.'}
+        </div>
+      </EPCard>
+    );
+  }
+
+  // Variance vs estimate: DtOrderForUI doesn't currently expose
+  // service_time_minutes (operator-set estimate), so we only show the
+  // actual. If a future change surfaces the estimate we can compare
+  // here and badge over/under.
+  const actual = order.actualServiceTimeMinutes;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+
+      {/* Driver / truck */}
+      {(order.driverName || order.truckName || order.serviceUnit || order.stopNumber != null) && (
+        <EPCard>
+          <SectionTitle>Driver &amp; Vehicle</SectionTitle>
+          <Field label="Driver"       value={order.driverName || null} icon={<User size={11} />} />
+          <Field label="Truck"        value={order.truckName ? `${order.truckName}${order.truckId ? ` (#${order.truckId})` : ''}` : null} icon={<Truck size={11} />} />
+          <Field label="Service Unit" value={order.serviceUnit || null} />
+          <Field label="Stop #"       value={order.stopNumber != null ? String(order.stopNumber) : null} />
+        </EPCard>
+      )}
+
+      {/* Timing */}
+      <EPCard>
+        <SectionTitle>Timing</SectionTitle>
+        <Field label="Scheduled" value={fmtDateTime(order.scheduledAt)} icon={<Calendar size={11} />} />
+        <Field label="Started"   value={fmtDateTime(order.startedAt)}   icon={<Clock size={11} />} />
+        <Field label="Finished"  value={fmtDateTime(order.finishedAt)}  icon={<CheckCircle2 size={11} />} />
+        {actual != null && (
+          <Field
+            label="Actual Service Time"
+            value={fmtDuration(actual)}
+            icon={<Clock3 size={11} />}
+          />
+        )}
+        {order.dtStatusCode && (
+          <Field label="DT Status Code" value={order.dtStatusCode} />
+        )}
+      </EPCard>
+
+      {/* Payment / signature */}
+      {(order.codAmount != null || order.paymentCollected || order.signatureCapturedAt) && (
+        <EPCard>
+          <SectionTitle>Proof of Delivery</SectionTitle>
+          {order.codAmount != null && (
+            <Field label="COD Amount" value={fmtCurrency(order.codAmount)} icon={<DollarSign size={11} />} />
+          )}
+          {order.paymentCollected && (
+            <Field label="Payment Collected" value="Yes" icon={<DollarSign size={11} />} />
+          )}
+          {order.paymentNotes && (
+            <Field label="Payment Notes" value={order.paymentNotes} />
+          )}
+          {order.signatureCapturedAt && (
+            <Field label="Signature Captured" value={fmtDateTime(order.signatureCapturedAt)} icon={<PenLine size={11} />} />
+          )}
+        </EPCard>
+      )}
+
+      {/* DT-side notes (driver/dispatcher posted in DispatchTrack) */}
+      {notes.length > 0 && (
+        <EPCard>
+          <SectionTitle>
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+              <MessageSquare size={11} /> DT Notes ({notes.length})
+            </span>
+          </SectionTitle>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {notes.map((n) => (
+              <div key={n.id} style={{ padding: '8px 10px', background: '#F8FAFC', borderRadius: 8, border: `1px solid ${theme.colors.border}` }}>
+                <div style={{ fontSize: 12, color: EP.textPrimary, whiteSpace: 'pre-wrap' }}>{n.body}</div>
+                <div style={{ fontSize: 10, color: EP.textMuted, marginTop: 4 }}>
+                  {n.authorName || 'DispatchTrack'}
+                  {n.authorType && n.authorType !== 'system' ? ` · ${n.authorType}` : ''}
+                  {n.createdAtDt ? ` · ${fmtDateTime(n.createdAtDt)}` : ''}
+                </div>
+              </div>
+            ))}
+          </div>
+        </EPCard>
+      )}
+
+      {/* DT history timeline */}
+      {history.length > 0 && (
+        <EPCard>
+          <SectionTitle>
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+              <Activity size={11} /> Driver Activity ({history.length})
+            </span>
+          </SectionTitle>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {history.map((h) => (
+              <div key={h.id} style={{ display: 'flex', gap: 10, padding: '6px 0', borderBottom: `1px solid ${theme.colors.border}` }}>
+                <div style={{ fontSize: 11, color: EP.textMuted, flexShrink: 0, width: 100 }}>
+                  {fmtDateTime(h.happenedAt)}
+                </div>
+                <div style={{ fontSize: 12, color: EP.textPrimary, flex: 1 }}>
+                  {h.description || (h.code != null ? `Event ${h.code}` : 'Event')}
+                  {h.ownerName && (
+                    <span style={{ color: EP.textMuted, marginLeft: 6, fontSize: 11 }}>
+                      · {h.ownerName}
+                    </span>
+                  )}
+                  {(h.lat != null && h.lng != null) && (
+                    <a
+                      href={`https://www.google.com/maps?q=${h.lat},${h.lng}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      style={{ marginLeft: 6, fontSize: 11, color: EP.accent, textDecoration: 'none' }}
+                    >
+                      <MapPin size={10} style={{ verticalAlign: 'middle' }} /> map
+                    </a>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        </EPCard>
+      )}
+    </div>
   );
 }
 
@@ -464,6 +682,27 @@ export function OrderPage() {
   const [edit, setEdit] = useState<OrderEdit>(() => order ? orderToEdit(order) : orderToEdit({} as DtOrderForUI));
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+
+  // DT sync-back data — driver activity timeline + DT-side notes pulled
+  // from the cache columns the dt-sync-statuses Edge Function writes.
+  // Reload alongside the order so a Push-to-DT or DT Sync click refreshes
+  // both. Empty until first sync runs.
+  const [dtHistory, setDtHistory] = useState<DtOrderHistoryEvent[]>([]);
+  const [dtNotes, setDtNotes] = useState<DtSideNote[]>([]);
+  const [dtAuxLoading, setDtAuxLoading] = useState(false);
+  useEffect(() => {
+    if (!order?.id) return;
+    let cancelled = false;
+    setDtAuxLoading(true);
+    Promise.all([fetchDtOrderHistory(order.id), fetchDtOrderNotes(order.id)])
+      .then(([h, n]) => {
+        if (cancelled) return;
+        setDtHistory(h);
+        setDtNotes(n);
+      })
+      .finally(() => { if (!cancelled) setDtAuxLoading(false); });
+    return () => { cancelled = true; };
+  }, [order?.id, order?.lastSyncedAt]);
 
   // Phase A — Edit Full Order: opens the same form the create flow uses
   // (CreateDeliveryOrderModal in editOrderId mode). The detail page's
@@ -613,6 +852,23 @@ export function OrderPage() {
       label: 'Items',
       badgeCount: order.items?.length ?? 0,
       render: () => <ItemsTab items={order.items ?? []} />,
+    },
+    {
+      id: 'completion',
+      label: 'Completion',
+      // Badge surfaces "fresh" data the operator hasn't seen yet — for
+      // now we use the count of DT-side notes since those tend to flag
+      // exceptions that need attention (driver/dispatcher notes don't
+      // get posted unless something is worth saying).
+      badgeCount: dtNotes.length > 0 ? dtNotes.length : undefined,
+      render: () => (
+        <CompletionTab
+          order={order}
+          notes={dtNotes}
+          history={dtHistory}
+          loading={dtAuxLoading}
+        />
+      ),
     },
     {
       id: 'activity',

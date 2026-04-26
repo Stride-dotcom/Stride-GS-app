@@ -8,8 +8,8 @@
 
 - [ ] Delivery activity tracking on dispatch + complete (currently only fires on order creation)
 - [ ] Non-app-created delivery releases — auto-release inventory when DT completes orders created outside the app
-- [ ] POD photo ingestion from DT CDN to Supabase storage (Phase 2)
-- [ ] Bi-directional DT sync — polling API for status updates (Phase 2-3)
+- [ ] POD photo ingestion — needs DT REST `X-AUTH-TOKEN` (Settings → Advanced Settings or DT support). Then call `GET /api/external/v1/dispatches/:identifier`, write `form.img_url[]` into `dt_order_photos`, optionally fetch each into the `dt-pod-photos` storage bucket
+- [x] **Bi-directional DT sync — pulls full export.xml per active order into the cache (driver, truck, start/finish, COD, signature, items, history, notes). Shipped 2026-04-25 (session 82, PRs #61+#62).**
 
 ## Billing / Payments
 
