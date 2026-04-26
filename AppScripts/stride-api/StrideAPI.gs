@@ -1,5 +1,23 @@
 /* ===================================================
-   StrideAPI.gs — v38.130.0 — 2026-04-26 PST — Disable per-item Drive folder creation (deprecated)
+   StrideAPI.gs — v38.131.0 — 2026-04-26 PST — handleImportIIF_ now mirrors new invoice + exception rows to Supabase
+   v38.131.0: handleImportIIF_ wrote new rows to the Stax Invoices /
+              Exceptions sheets but did not call the Supabase write-
+              through helpers. Because the Payments app reads from
+              Supabase first (Session 69 cutover), every IIF import
+              left the React UI showing empty Review / Charge Queue /
+              Exceptions tabs even though the sheet had the rows —
+              Justin reported the page being empty after every reload.
+              Fix: collect the docNums of newly-appended invoice rows
+              and call api_sbResyncStaxInvoices_ at the end of the
+              invoice block; build the Supabase exception rows from
+              parsed.exceptions and call supabaseBatchUpsert_(
+              "stax_exceptions", ...) at the end of the exception
+              block. Both wrapped in try/catch — sheet write remains
+              the authoritative path and is never blocked by a
+              Supabase failure (per the read-cache invariant).
+              The same fix is implicitly applied to
+              handleImportIIFFromDrive_ since it delegates to
+              handleImportIIF_.
    v38.130.0: Per-item Drive folders (created under PHOTOS_FOLDER_ID and
               hyperlinked from Inventory.Item ID) are deprecated. They
               were never used for actual storage — photos live in
@@ -28362,6 +28380,7 @@ function handleImportIIF_(payload) {
     }
 
     var newRows = [];
+    var newQbInvoiceNos = [];
     for (var i = 0; i < parsed.invoices.length; i++) {
       var inv = parsed.invoices[i];
       var dedupKey = stax_invoiceKey_(inv.docNum, inv.name, inv.amount, inv.date);
@@ -28376,6 +28395,7 @@ function handleImportIIF_(payload) {
         inv.docNum, inv.name, "", inv.date, inv.dueDate, inv.amount,
         lineItemsJson, "", "PENDING", now, ""
       ]);
+      if (inv.docNum) newQbInvoiceNos.push(String(inv.docNum));
     }
 
     if (newRows.length > 0) {
@@ -28383,6 +28403,17 @@ function handleImportIIF_(payload) {
         .setValues(newRows);
     }
     invoicesAdded = newRows.length;
+
+    // v38.131.0 — Mirror the new invoice rows into Supabase so the
+    // Payments app sees them on the next page load. Without this,
+    // the React UI (which reads from Supabase first) showed empty
+    // Review/Charge Queue tabs after every IIF import even though
+    // the sheet had the rows. Best-effort, never throws.
+    if (newQbInvoiceNos.length > 0) {
+      try { api_sbResyncStaxInvoices_(newQbInvoiceNos); } catch (sbErr) {
+        Logger.log("handleImportIIF_ Supabase invoice mirror error (non-fatal): " + sbErr);
+      }
+    }
   }
 
   // ─── Write exceptions to Exceptions tab ───
@@ -28400,6 +28431,27 @@ function handleImportIIF_(payload) {
     excSheet.getRange(excSheet.getLastRow() + 1, 1, excRows.length, excRows[0].length)
       .setValues(excRows);
     exceptionsLogged = excRows.length;
+
+    // v38.131.0 — Also mirror new exceptions to Supabase. Same Payments
+    // app visibility issue as the invoice mirror above.
+    try {
+      var sbExcRows = parsed.exceptions.map(function(exc) {
+        return {
+          timestamp:        formatDate_(exc.timestamp),
+          qb_invoice_no:    String(exc.docNum || ""),
+          customer:         String(exc.name || ""),
+          stax_customer_id: String(exc.staxId || ""),
+          amount:           toNum_(exc.amount) || 0,
+          due_date:         formatDate_(exc.dueDate),
+          reason:           String(exc.reason || ""),
+          pay_link:         String(exc.link || ""),
+          resolved:         !!exc.resolved
+        };
+      });
+      if (sbExcRows.length > 0) supabaseBatchUpsert_("stax_exceptions", sbExcRows);
+    } catch (sbErr) {
+      Logger.log("handleImportIIF_ Supabase exception mirror error (non-fatal): " + sbErr);
+    }
   }
 
   // ─── Run Log ───
