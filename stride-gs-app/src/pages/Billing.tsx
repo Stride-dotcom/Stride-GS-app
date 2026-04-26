@@ -1948,7 +1948,7 @@ export function Billing() {
               const grp = selInvoiceGroups[0];
               if (grp.status !== 'Invoiced') return null;
               return (
-                <WriteButton label="Re-send Email" variant="ghost" size="sm" onClick={async () => {
+                <WriteButton label="Re-send Email" loadingText="Sending..." variant="ghost" size="sm" onClick={async () => {
                   const invNo = grp.invoiceNo;
                   const sheetId = grp.clientSheetId
                     || grp.sourceSheetId
