@@ -17,7 +17,7 @@
 import { useCallback, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
-  AlertTriangle, Wrench, MoreVertical, X, Loader2, Download, Trash2,
+  AlertTriangle, Wrench, MoreVertical, X, Loader2, Download, Trash2, Check,
 } from 'lucide-react';
 import { theme } from '../../styles/theme';
 import { useIsMobile } from '../../hooks/useIsMobile';
@@ -34,6 +34,13 @@ interface Props {
   onToggleAttention?: (photo: Photo, next: boolean) => Promise<boolean> | boolean;
   onToggleRepair?: (photo: Photo, next: boolean) => Promise<boolean> | boolean;
   onDelete?: (photo: Photo) => Promise<boolean> | boolean;
+  /** Selection mode (for the public-share picker).
+   *  When true, tiles render a checkbox overlay; tile click toggles selection
+   *  instead of firing onPhotoClick, and inline action overlays/menus are
+   *  suppressed so the row stays a pure picker. */
+  selectionMode?: boolean;
+  selectedIds?: Set<string>;
+  onToggleSelect?: (photoId: string) => void;
 }
 
 // Session 74: PRIMARY_RING removed — "Make Primary" feature is gone.
@@ -50,6 +57,7 @@ function ringColor(p: Photo): string | null {
 export function PhotoGrid({
   photos, onPhotoClick, compact,
   onToggleAttention, onToggleRepair, onDelete,
+  selectionMode, selectedIds, onToggleSelect,
 }: Props) {
   const { isMobile, isTablet } = useIsMobile();
   const cols = isMobile ? 2 : compact ? 3 : 4;
@@ -58,7 +66,9 @@ export function PhotoGrid({
   const [actionPhoto, setActionPhoto] = useState<Photo | null>(null);
   const [hoverId, setHoverId] = useState<string | null>(null);
   const [pendingAction, setPendingAction] = useState<string | null>(null); // `${photoId}:${kind}`
-  const hasActions = !!(onToggleAttention || onToggleRepair || onDelete);
+  // In selection mode, the action affordances are suppressed so the tile
+  // doesn't double as a multi-tool — selection should feel like a pure picker.
+  const hasActions = !selectionMode && !!(onToggleAttention || onToggleRepair || onDelete);
 
   // Inline handler used by desktop hover-overlay icons. Runs optimistically
   // (Realtime refetch will confirm) and keeps the overlay responsive by
@@ -91,27 +101,41 @@ export function PhotoGrid({
           const src = p.thumbnail_url || p.storage_url || '';
           const isHovered = hoverId === p.id;
           const showDesktopOverlay = hasActions && !isMobile && isHovered;
+          const isSelected = !!(selectionMode && selectedIds?.has(p.id));
+          // In selection mode the entire tile becomes the selection toggle —
+          // overlays/menus are already gated off above, and onPhotoClick is
+          // skipped so the lightbox doesn't fight the picker.
+          const handleTileClick = selectionMode
+            ? () => onToggleSelect?.(p.id)
+            : (onPhotoClick ? () => onPhotoClick(p, i) : undefined);
+          // Selected tiles get the orange accent ring; unselected dim slightly
+          // so the eye lands on the picks. Non-selection mode keeps the
+          // existing flag-color ring behavior unchanged.
+          const tileRing = selectionMode
+            ? (isSelected ? theme.v2.colors.accent : null)
+            : ring;
           return (
             <div
               key={p.id}
-              onClick={onPhotoClick ? () => onPhotoClick(p, i) : undefined}
+              onClick={handleTileClick}
               onMouseEnter={e => {
                 setHoverId(p.id);
-                if (onPhotoClick) e.currentTarget.style.transform = 'translateY(-2px)';
+                if (handleTileClick) e.currentTarget.style.transform = 'translateY(-2px)';
               }}
               onMouseLeave={e => {
                 setHoverId(prev => (prev === p.id ? null : prev));
-                if (onPhotoClick) e.currentTarget.style.transform = 'translateY(0)';
+                if (handleTileClick) e.currentTarget.style.transform = 'translateY(0)';
               }}
               style={{
                 position: 'relative',
                 aspectRatio: '1 / 1',
                 borderRadius: radius,
                 overflow: 'hidden',
-                cursor: onPhotoClick ? 'pointer' : 'default',
+                cursor: handleTileClick ? 'pointer' : 'default',
                 background: '#E5E7EB',
-                boxShadow: ring ? `0 0 0 5px ${ring}, 0 2px 8px rgba(0,0,0,0.12)` : '0 2px 8px rgba(0,0,0,0.06)',
-                transition: 'transform 0.12s ease, box-shadow 0.12s ease',
+                boxShadow: tileRing ? `0 0 0 5px ${tileRing}, 0 2px 8px rgba(0,0,0,0.12)` : '0 2px 8px rgba(0,0,0,0.06)',
+                transition: 'transform 0.12s ease, box-shadow 0.12s ease, opacity 0.12s ease',
+                opacity: selectionMode && !isSelected ? 0.7 : 1,
               }}
             >
               {src ? (
@@ -136,6 +160,29 @@ export function PhotoGrid({
                   <span style={chipStyle(REPAIR_RING)} title="Repair photo"><Wrench size={10} /> REPAIR</span>
                 )}
               </div>
+
+              {/* Selection checkbox — only rendered in selection mode. Always
+                  visible (not hover-gated) so touch users see the affordance.
+                  Tile-level click already toggles, so this badge is purely a
+                  visual indicator with pointerEvents disabled. */}
+              {selectionMode && (
+                <div
+                  aria-hidden
+                  style={{
+                    position: 'absolute', top: 6, right: 6, zIndex: 4,
+                    width: 26, height: 26, borderRadius: '50%',
+                    background: isSelected ? theme.v2.colors.accent : 'rgba(255,255,255,0.92)',
+                    color: isSelected ? '#fff' : theme.v2.colors.textMuted,
+                    border: `2px solid ${isSelected ? theme.v2.colors.accent : '#fff'}`,
+                    boxShadow: '0 2px 6px rgba(0,0,0,0.18)',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    pointerEvents: 'none',
+                    transition: 'background 0.12s ease, color 0.12s ease',
+                  }}
+                >
+                  {isSelected && <Check size={14} strokeWidth={3} />}
+                </div>
+              )}
 
               {/* Mobile/tablet: always-visible 3-dot → bottom sheet.
                   Hidden on desktop where the hover overlay provides direct actions.
