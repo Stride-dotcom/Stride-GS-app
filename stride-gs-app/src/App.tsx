@@ -33,6 +33,7 @@ import { PriceList } from './pages/PriceList';
 import { Intakes } from './pages/Intakes';
 import { PublicRates } from './pages/PublicRates';
 import { ClientIntake } from './pages/ClientIntake';
+import { PublicPhotoGallery } from './pages/PublicPhotoGallery';
 import { MessagesPage } from './components/messages/MessagesPage';
 
 /** Route guard — redirects to dashboard if user's role is not in the allowed list */
@@ -57,6 +58,13 @@ export default function App() {
     ? window.location.hash.match(/^#\/intake\/([A-Za-z0-9_-]+)/)
     : null;
   if (intakeMatch) return <ClientIntake linkId={intakeMatch[1]} />;
+
+  // Public photo-share gallery — anon-only view of a curated photo set.
+  // RLS on photo_shares + item_photos + storage gates the data.
+  const sharedPhotosMatch = typeof window !== 'undefined'
+    ? window.location.hash.match(/^#\/shared\/photos\/([A-Za-z0-9_-]+)/)
+    : null;
+  if (sharedPhotosMatch) return <PublicPhotoGallery shareId={sharedPhotosMatch[1]} />;
 
   // Auth check in progress
   if (loading) return <LoadingScreen />;

@@ -5,12 +5,13 @@
  * full lifecycle.
  */
 import { useCallback, useMemo, useState } from 'react';
-import { ImageIcon, AlertTriangle } from 'lucide-react';
+import { ImageIcon, AlertTriangle, Share2, X } from 'lucide-react';
 import { theme } from '../../styles/theme';
 import { usePhotos, type Photo, type EntityType, type PhotoType } from '../../hooks/usePhotos';
 import { PhotoGrid } from './PhotoGrid';
 import { PhotoUploadButton } from './PhotoUploadButton';
 import { PhotoLightbox } from './PhotoLightbox';
+import { PhotoShareDialog } from './PhotoShareDialog';
 import { EntitySourceTabs } from '../shared/EntitySourceTabs';
 
 interface Props {
@@ -53,6 +54,38 @@ export function PhotoGallery({
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
 
+  // ── Share-link selection mode ─────────────────────────────────────────
+  // When the user clicks Share, we enter selection mode: tile clicks
+  // toggle selection (instead of opening the lightbox), action overlays
+  // are suppressed, and a confirm-bar appears with Share / Cancel.
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [shareOpen, setShareOpen] = useState(false);
+
+  const toggleSelect = useCallback((photoId: string) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(photoId)) next.delete(photoId);
+      else next.add(photoId);
+      return next;
+    });
+  }, []);
+
+  const enterSelectionMode = useCallback(() => {
+    setSelectedIds(new Set());
+    setSelectionMode(true);
+  }, []);
+
+  const exitSelectionMode = useCallback(() => {
+    setSelectionMode(false);
+    setSelectedIds(new Set());
+  }, []);
+
+  // Sharing requires a tenantId to write the share row, and at least one
+  // selected photo. The Share button is only meaningful when there are
+  // photos to choose from, hence the `photos.length > 0` gate at render.
+  const canShare = !readOnly && !!entityId && !!tenantId;
+
   // Filtered list respects the source-entity sub-tab. When filtering is
   // disabled or set to 'all', this is the raw photos list (referentially
   // stable so no extra renders).
@@ -79,7 +112,7 @@ export function PhotoGallery({
 
   const content = (
     <>
-      {/* Header + upload */}
+      {/* Header + upload + share */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: compact ? 8 : 12, flexWrap: 'wrap' }}>
         <ImageIcon size={15} color={theme.v2.colors.accent} />
         <span style={{ fontSize: 13, fontWeight: 600 }}>{title}</span>
@@ -88,11 +121,28 @@ export function PhotoGallery({
           background: theme.v2.colors.bgCard, color: theme.v2.colors.textMuted,
         }}>{photos.length}</span>
         {!readOnly && (
-          <div style={{ marginLeft: 'auto', width: compact ? '100%' : undefined }}>
+          <div style={{ marginLeft: 'auto', display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+            {canShare && photos.length > 0 && !selectionMode && (
+              <button
+                type="button"
+                onClick={enterSelectionMode}
+                title="Share photos via public link"
+                style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 4,
+                  background: '#fff', color: theme.v2.colors.textSecondary,
+                  border: `1px solid ${theme.v2.colors.border}`,
+                  borderRadius: 8, padding: '5px 10px',
+                  fontSize: 12, fontWeight: 600, cursor: 'pointer',
+                  fontFamily: 'inherit',
+                }}
+              >
+                <Share2 size={13} /> Share
+              </button>
+            )}
             <PhotoUploadButton
               onUpload={handleUpload}
               uploading={uploading}
-              disabled={!entityId}
+              disabled={!entityId || selectionMode}
               compact
               onUploadOne={async (file) => {
                 const result = await uploadPhoto(file, defaultPhotoType);
@@ -102,6 +152,54 @@ export function PhotoGallery({
           </div>
         )}
       </div>
+
+      {/* Selection-mode action bar — only visible while picking photos. */}
+      {selectionMode && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap',
+          background: `${theme.v2.colors.accent}10`,
+          border: `1px solid ${theme.v2.colors.accent}40`,
+          borderRadius: 10, padding: '8px 12px', marginBottom: 10,
+        }}>
+          <span style={{ fontSize: 12, fontWeight: 600, color: theme.v2.colors.text }}>
+            {selectedIds.size === 0
+              ? 'Tap photos to include in the share link'
+              : `${selectedIds.size} photo${selectedIds.size === 1 ? '' : 's'} selected`}
+          </span>
+          <div style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
+            <button
+              type="button"
+              onClick={exitSelectionMode}
+              style={{
+                display: 'inline-flex', alignItems: 'center', gap: 4,
+                background: '#fff', color: theme.v2.colors.textSecondary,
+                border: `1px solid ${theme.v2.colors.border}`,
+                borderRadius: 8, padding: '5px 10px',
+                fontSize: 12, fontWeight: 600, cursor: 'pointer',
+                fontFamily: 'inherit',
+              }}
+            >
+              <X size={12} /> Cancel
+            </button>
+            <button
+              type="button"
+              onClick={() => setShareOpen(true)}
+              disabled={selectedIds.size === 0}
+              style={{
+                display: 'inline-flex', alignItems: 'center', gap: 4,
+                background: theme.v2.colors.accent, color: '#fff',
+                border: 'none', borderRadius: 8, padding: '5px 12px',
+                fontSize: 12, fontWeight: 600,
+                cursor: selectedIds.size === 0 ? 'default' : 'pointer',
+                opacity: selectedIds.size === 0 ? 0.5 : 1,
+                fontFamily: 'inherit',
+              }}
+            >
+              <Share2 size={12} /> Create link
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Error banners */}
       {(uploadError || error) && (
@@ -140,11 +238,15 @@ export function PhotoGallery({
           onToggleAttention={readOnly ? undefined : (p: Photo, next: boolean) => toggleNeedsAttention(p.id, next)}
           onToggleRepair={readOnly ? undefined : (p: Photo, next: boolean) => toggleRepair(p.id, next)}
           onDelete={readOnly ? undefined : (p: Photo) => deletePhoto(p.id)}
+          selectionMode={selectionMode}
+          selectedIds={selectedIds}
+          onToggleSelect={toggleSelect}
         />
       )}
 
-      {/* Lightbox — uses filtered list so arrow navigation respects the active filter */}
-      {lightboxIndex !== null && filteredPhotos[lightboxIndex] && (
+      {/* Lightbox — uses filtered list so arrow navigation respects the active filter.
+          Suppressed in selection mode so a tile click only toggles the picker. */}
+      {!selectionMode && lightboxIndex !== null && filteredPhotos[lightboxIndex] && (
         <PhotoLightbox
           photos={filteredPhotos}
           startIndex={lightboxIndex}
@@ -153,6 +255,23 @@ export function PhotoGallery({
           onToggleAttention={(p: Photo, next: boolean) => toggleNeedsAttention(p.id, next)}
           onToggleRepair={(p: Photo, next: boolean) => toggleRepair(p.id, next)}
           onDelete={(p: Photo) => deletePhoto(p.id)}
+        />
+      )}
+
+      {/* Share dialog — only renders when the user has confirmed a selection.
+          Closing it via Done leaves selection mode (the picker has already
+          done its job). Closing via X / backdrop just dismisses the modal so
+          the user can adjust their picks. */}
+      {shareOpen && entityId && tenantId && (
+        <PhotoShareDialog
+          entityType={entityType}
+          entityId={entityId}
+          tenantId={tenantId}
+          photoIds={Array.from(selectedIds)}
+          onClose={() => {
+            setShareOpen(false);
+            exitSelectionMode();
+          }}
         />
       )}
     </>
