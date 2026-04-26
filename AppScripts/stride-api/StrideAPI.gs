@@ -30279,6 +30279,8 @@ function handleCreateStaxInvoices_(payload) {
     // be applied after the batch write. Stored as 0-based offsets from
     // the header (matches `i` in the loop below).
     var newlyCreatedRowIdxs = [];
+
+    for (var i = 0; i < numRows; i++) {
       var status = String(colIValues[i][0]).trim().toUpperCase();
       var existingStaxId = String(colHValues[i][0]).trim();
 
