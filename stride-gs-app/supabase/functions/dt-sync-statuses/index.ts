@@ -1,6 +1,21 @@
 /**
- * dt-sync-statuses — Supabase Edge Function — v7 2026-04-25 PST
+ * dt-sync-statuses — Supabase Edge Function — v8 2026-04-25 PST
  *
+ * v8: Look up DT orders by `dt_identifier` instead of `dt_dispatch_id`.
+ *     Two reasons:
+ *       1. `dt-push-order` doesn't capture a dispatch ID from DT's
+ *          add_order response (DT returns only <success>...</success>),
+ *          so app-pushed orders have dt_dispatch_id IS NULL forever.
+ *          Until v7 they were filtered out and stayed "Awaiting DT
+ *          Sync" indefinitely.
+ *       2. The DT XML spec for /orders/api/export.xml takes
+ *          `service_order_id={Order_Number}` — that's the human
+ *          identifier (e.g. "MRS-00002"), not the numeric dispatch ID.
+ *          We always have dt_identifier on every row.
+ *     Filter: `pushed_to_dt_at IS NOT NULL` (instead of dt_dispatch_id).
+ *     URL: `service_order_id=${dt_identifier}`.
+ *
+ * v7:
  * v7: Switched from the code-only `/orders/api/get_order_status` endpoint
  *     to the rich `/orders/api/export.xml?service_order_id=…` per-order
  *     endpoint. We now mirror the full DT completion payload back into
@@ -61,10 +76,15 @@ Deno.serve(async (req) => {
     if (s.code) statusByCode.set(String(s.code).toUpperCase(), { id: s.id, category: s.category });
   }
 
+  // Active orders = ones we've pushed to DT. We previously required
+  // dt_dispatch_id to be set, but app-pushed orders never have one
+  // (DT's add_order response doesn't return it), so that filter
+  // skipped every order created in-app. Keying off pushed_to_dt_at
+  // covers both app-pushed AND webhook-imported rows.
   let query = supabase
     .from('dt_orders')
     .select('id, dt_identifier, dt_dispatch_id, status_id, last_synced_at, tenant_id, paid_at')
-    .not('dt_dispatch_id', 'is', null);
+    .not('pushed_to_dt_at', 'is', null);
 
   if (singleOrderId) {
     query = query.eq('id', singleOrderId);
@@ -109,7 +129,13 @@ Deno.serve(async (req) => {
 
   for (const o of orders) {
     try {
-      const url = `${baseUrl}/orders/api/export.xml?code=expressinstallation&api_key=${encodeURIComponent(apiKey)}&service_order_id=${encodeURIComponent(String(o.dt_dispatch_id))}`;
+      // DT's `service_order_id` parameter accepts the Order_Number
+      // (human identifier) per the XML API spec. Prefer dt_identifier;
+      // fall back to dt_dispatch_id for legacy webhook rows that may
+      // only have the numeric ID.
+      const lookupId = o.dt_identifier || (o.dt_dispatch_id != null ? String(o.dt_dispatch_id) : '');
+      if (!lookupId) { result.errors.push(`${o.id}: no dt_identifier or dt_dispatch_id`); continue; }
+      const url = `${baseUrl}/orders/api/export.xml?code=expressinstallation&api_key=${encodeURIComponent(apiKey)}&service_order_id=${encodeURIComponent(lookupId)}`;
       const resp = await fetch(url, { method: 'POST', headers: { 'Accept': 'application/xml' } });
       if (!resp.ok) { result.errors.push(`${o.dt_identifier}: HTTP ${resp.status}`); continue; }
       const xml = await resp.text();
