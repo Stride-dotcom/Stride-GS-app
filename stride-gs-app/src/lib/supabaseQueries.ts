@@ -2190,45 +2190,6 @@ export async function fetchAllDeliveryZones(): Promise<DeliveryZone[] | null> {
   }
 }
 
-/** Fetch the active accessorial rate card. */
-export async function fetchDeliveryAccessorials(): Promise<DeliveryAccessorial[] | null> {
-  try {
-    const { data, error } = await supabase
-      .from('delivery_accessorials')
-      .select('*')
-      .eq('active', true)
-      .order('display_order');
-    if (error || !data) return null;
-    return data.map((r: {
-      code: string;
-      name: string;
-      rate: number | null;
-      rate_unit: DeliveryAccessorial['rateUnit'];
-      description: string | null;
-      display_order: number;
-      active: boolean;
-      visible_to_client: boolean | null;
-      service_minutes: number | null;
-      quote_required: boolean | null;
-      available_for_delivery: boolean | null;
-    }) => ({
-      code: r.code,
-      name: r.name,
-      rate: r.rate != null ? Number(r.rate) : null,
-      rateUnit: r.rate_unit,
-      description: r.description ?? '',
-      displayOrder: r.display_order,
-      active: r.active,
-      visibleToClient: r.visible_to_client === null ? true : r.visible_to_client,
-      serviceMinutes: r.service_minutes ?? 0,
-      quoteRequired: r.quote_required ?? false,
-      availableForDelivery: r.available_for_delivery === null ? true : r.available_for_delivery,
-    }));
-  } catch {
-    return null;
-  }
-}
-
 /**
  * Fetch the delivery-add-on rate card from `service_catalog`.
  *

@@ -383,6 +383,31 @@ export function ServiceRow({
                 onChange={e => setDraft({ ...draft, description: e.target.value })}
               />
             </div>
+            {/* Included quantity — for "first N pieces included" overage
+                services like XTRA_PC. The delivery modal reads this
+                value live, so changing 3→5 here means the per-piece
+                charge won't kick in until the 6th piece without a code
+                change. NULL/blank disables the included-quantity logic
+                (charge fires on every piece). */}
+            <div style={{ marginTop: 12 }}>
+              <label style={inlineLabel(v2)}>Included pieces (charge applies after this count)</label>
+              <input
+                type="number"
+                min="0"
+                step="1"
+                style={{ ...inlineInput(v2), maxWidth: 200 }}
+                value={draft.includedQuantity ?? ''}
+                placeholder="leave blank if not a per-piece overage"
+                onChange={e => {
+                  const raw = e.target.value;
+                  setDraft({ ...draft, includedQuantity: raw === '' ? null : (Number(raw) || 0) });
+                }}
+              />
+              <div style={{ fontSize: 11, color: v2.colors.textMuted, marginTop: 6, lineHeight: 1.4 }}>
+                Used by the Create Delivery Order estimate. Example: set this to 5 on
+                XTRA_PC and the per-piece charge starts on the 6th piece.
+              </div>
+            </div>
           </div>
         )}
 
