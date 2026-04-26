@@ -1088,13 +1088,15 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
           <div style={{ padding: '12px 16px', paddingBottom: 'calc(env(safe-area-inset-bottom, 0px) + 12px)', display: 'flex', gap: 8 }}>
             <button
               onClick={() => handleResult('pass')}
-              style={{ flex: 1, height: 50, background: '#16A34A', color: '#fff', borderRadius: 12, border: 'none', fontSize: 15, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, minHeight: 44 }}
+              disabled={submitting}
+              style={{ flex: 1, height: 50, background: '#16A34A', color: '#fff', borderRadius: 12, border: 'none', fontSize: 15, fontWeight: 600, cursor: submitting ? 'progress' : 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, minHeight: 44, opacity: submitting ? 0.7 : 1 }}
             >
               <CheckCircle2 size={17} /> Pass
             </button>
             <button
               onClick={() => handleResult('fail')}
-              style={{ flex: 1, height: 50, background: 'none', color: '#DC2626', borderRadius: 12, border: '2px solid #DC2626', fontSize: 15, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, minHeight: 44 }}
+              disabled={submitting}
+              style={{ flex: 1, height: 50, background: 'none', color: '#DC2626', borderRadius: 12, border: '2px solid #DC2626', fontSize: 15, fontWeight: 600, cursor: submitting ? 'progress' : 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, minHeight: 44, opacity: submitting ? 0.7 : 1 }}
             >
               <XCircle size={17} /> Fail
             </button>
@@ -1378,10 +1380,10 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
       {/* Pass / Fail — once started */}
       {showPassFail && (
         <>
-          <button onClick={async () => handleResult('fail')} style={tkRed}>
+          <button onClick={async () => handleResult('fail')} disabled={submitting} style={{ ...tkRed, opacity: submitting ? 0.6 : 1, cursor: submitting ? 'progress' : 'pointer' }}>
             <XCircle size={13} /> Fail
           </button>
-          <button onClick={async () => handleResult('pass')} style={tkGreen}>
+          <button onClick={async () => handleResult('pass')} disabled={submitting} style={{ ...tkGreen, opacity: submitting ? 0.6 : 1, cursor: submitting ? 'progress' : 'pointer' }}>
             <CheckCircle2 size={13} /> Pass
           </button>
         </>

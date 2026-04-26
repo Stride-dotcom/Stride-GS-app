@@ -405,6 +405,7 @@ export function Payments() {
   const [invoiceSortCol, setInvoiceSortCol] = useState<string>('');
   const [invoiceSortDesc, setInvoiceSortDesc] = useState(false);
   const [voidingInvoice, setVoidingInvoice] = useState<string | null>(null);
+  const [deletingInvoice, setDeletingInvoice] = useState<string | null>(null);
   const [selectedInvoices, setSelectedInvoices] = useState<Set<number>>(new Set()); // rowIndex-based for duplicate QB# safety
   const [bulkProcessing, setBulkProcessing] = useState(false);
   const [bulkResult, setBulkResult] = useState<BatchMutationResult | null>(null);
@@ -1081,10 +1082,15 @@ export function Payments() {
                             if (res.ok && res.data?.success) { setChargeResult(`${i.qbInvoice} reset to ${res.data.newStatus}`); loadData(true); }
                             else { setError(res.error || 'Reset failed'); }
                           }}
-                          style={{ padding: '3px 8px', fontSize: 11, fontWeight: 500, border: `1px solid #3B82F6`, borderRadius: 4, background: '#EFF6FF', cursor: 'pointer', color: '#1D4ED8', fontFamily: 'inherit' }}
+                          style={{ padding: '3px 8px', fontSize: 11, fontWeight: 500, border: `1px solid #3B82F6`, borderRadius: 4, background: '#EFF6FF', cursor: voidingInvoice ? 'progress' : 'pointer', color: '#1D4ED8', fontFamily: 'inherit', display: 'inline-flex', alignItems: 'center', gap: 4, opacity: voidingInvoice && voidingInvoice !== i.qbInvoice ? 0.5 : 1 }}
                           title="Reset to re-enter charge workflow"
                         >
-                          Reset
+                          {voidingInvoice === i.qbInvoice ? (
+                            <>
+                              <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} />
+                              Resetting…
+                            </>
+                          ) : 'Reset'}
                         </button>
                       )}
                       {/* Void button — not on PAID or already VOIDED */}
@@ -1099,10 +1105,15 @@ export function Payments() {
                             if (res.ok && res.data?.success) { setChargeResult(`${i.qbInvoice} voided`); loadData(true); }
                             else { setError(res.error || 'Void failed'); }
                           }}
-                          style={{ padding: '3px 8px', fontSize: 11, fontWeight: 500, border: `1px solid ${theme.colors.border}`, borderRadius: 4, background: '#fff', cursor: 'pointer', color: theme.colors.textMuted, fontFamily: 'inherit' }}
+                          style={{ padding: '3px 8px', fontSize: 11, fontWeight: 500, border: `1px solid ${theme.colors.border}`, borderRadius: 4, background: '#fff', cursor: voidingInvoice ? 'progress' : 'pointer', color: theme.colors.textMuted, fontFamily: 'inherit', display: 'inline-flex', alignItems: 'center', gap: 4, opacity: voidingInvoice && voidingInvoice !== i.qbInvoice ? 0.5 : 1 }}
                           title="Void this invoice"
                         >
-                          {voidingInvoice === i.qbInvoice ? '...' : 'Void'}
+                          {voidingInvoice === i.qbInvoice ? (
+                            <>
+                              <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} />
+                              Voiding…
+                            </>
+                          ) : 'Void'}
                         </button>
                       )}
                       </div>
@@ -1188,8 +1199,9 @@ export function Payments() {
                   setCreatingInvoices(false);
                   if (res.ok) { loadData(true); setInvoiceResult(res.data?.updated || 'Refreshed'); }
                   else setError(res.error || 'Refresh failed');
-                }} disabled={creatingInvoices} style={{ marginLeft: 'auto', padding: '4px 12px', fontSize: 11, fontWeight: 600, border: `1px solid #D97706`, borderRadius: 6, background: '#FFFBEB', cursor: 'pointer', color: '#B45309', fontFamily: 'inherit', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: 4 }}>
-                  <RefreshCw size={11} /> Refresh Stax IDs
+                }} disabled={creatingInvoices} style={{ marginLeft: 'auto', padding: '4px 12px', fontSize: 11, fontWeight: 600, border: `1px solid #D97706`, borderRadius: 6, background: '#FFFBEB', cursor: creatingInvoices ? 'progress' : 'pointer', color: '#B45309', fontFamily: 'inherit', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: 4, opacity: creatingInvoices ? 0.7 : 1 }}>
+                  {creatingInvoices ? <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} /> : <RefreshCw size={11} />}
+                  {creatingInvoices ? 'Refreshing…' : 'Refresh Stax IDs'}
                 </button>
               </div>
             ) : null; })()}
@@ -1356,12 +1368,20 @@ export function Payments() {
                         >
                           {linkingInvoice === i.qbInvoice ? (<><Loader2 size={11} className="spin" /> Linking…</>) : 'Link'}
                         </button>
-                        <button onClick={async () => {
-                          if (!confirm(`Delete ${i.qbInvoice}? It will be marked DELETED.`)) return;
-                          const res = await postDeleteStaxInvoice({ qbInvoiceNo: i.qbInvoice, rowIndex: i.rowIndex });
-                          if (res.ok && res.data?.success) { setReviewSelected(prev => prev.filter(x => x !== i.rowIndex)); loadData(true); }
-                          else setError(res.error || 'Delete failed');
-                        }} style={{ padding: '3px 8px', fontSize: 11, fontWeight: 500, border: `1px solid #FECACA`, borderRadius: 4, background: '#FEF2F2', cursor: 'pointer', color: '#DC2626', fontFamily: 'inherit' }}>Void</button>
+                        <button
+                          disabled={deletingInvoice === i.qbInvoice}
+                          onClick={async () => {
+                            if (!confirm(`Delete ${i.qbInvoice}? It will be marked DELETED.`)) return;
+                            setDeletingInvoice(i.qbInvoice);
+                            try {
+                              const res = await postDeleteStaxInvoice({ qbInvoiceNo: i.qbInvoice, rowIndex: i.rowIndex });
+                              if (res.ok && res.data?.success) { setReviewSelected(prev => prev.filter(x => x !== i.rowIndex)); loadData(true); }
+                              else setError(res.error || 'Delete failed');
+                            } finally { setDeletingInvoice(null); }
+                          }}
+                          style={{ padding: '3px 8px', fontSize: 11, fontWeight: 500, border: `1px solid #FECACA`, borderRadius: 4, background: '#FEF2F2', cursor: deletingInvoice === i.qbInvoice ? 'progress' : 'pointer', color: '#DC2626', fontFamily: 'inherit', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                          {deletingInvoice === i.qbInvoice ? (<><Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} /> Voiding…</>) : 'Void'}
+                        </button>
                       </div>
                     </td>
                   </tr>
