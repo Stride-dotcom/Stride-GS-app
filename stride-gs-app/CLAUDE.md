@@ -8,6 +8,27 @@
 **Local path:** `C:\dev\Stride-GS-app` (NOT in Dropbox — moved 2026-04-24 to prevent git corruption)
 **Supabase:** `uqplppugeickmamycpuz` — `https://uqplppugeickmamycpuz.supabase.co`
 
+## New machine setup
+
+```bash
+git clone https://github.com/Stride-dotcom/Stride-GS-app.git C:\dev\Stride-GS-app
+cd C:\dev\Stride-GS-app\stride-gs-app && npm install
+```
+
+Then copy the 3 gitignored credential files from Dropbox into place:
+```
+Dropbox\Apps\GS Inventory\credentials\.credentials.json  →  AppScripts\stride-client-inventory\admin\
+Dropbox\Apps\GS Inventory\credentials\client_secret.json →  AppScripts\stride-client-inventory\admin\
+Dropbox\Apps\GS Inventory\credentials\.sync-config.json  →  AppScripts\stride-client-inventory\admin\
+```
+
+Then install AppScripts deps:
+```bash
+cd C:\dev\Stride-GS-app\AppScripts\stride-client-inventory && npm install
+```
+
+---
+
 ## Do NOT use these skills
 
 `stride-wms-domain`, `stride-build-instructions` — those are for the separate Stride WMS web app, not this project.

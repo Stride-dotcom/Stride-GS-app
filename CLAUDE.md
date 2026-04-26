@@ -20,6 +20,23 @@ C:\dev\Stride-GS-app\
 └── stride-gs-app\CLAUDE.md  ← same content, kept for IDE subdir opens
 ```
 
+## New machine setup
+
+```bash
+git clone https://github.com/Stride-dotcom/Stride-GS-app.git C:\dev\Stride-GS-app
+cd C:\dev\Stride-GS-app\stride-gs-app && npm install
+cd ..\AppScripts\stride-client-inventory && npm install
+```
+
+Then copy the 3 gitignored credential files from Dropbox into place:
+```
+Dropbox\Apps\GS Inventory\credentials\.credentials.json  →  AppScripts\stride-client-inventory\admin\
+Dropbox\Apps\GS Inventory\credentials\client_secret.json →  AppScripts\stride-client-inventory\admin\
+Dropbox\Apps\GS Inventory\credentials\.sync-config.json  →  AppScripts\stride-client-inventory\admin\
+```
+
+---
+
 ## Do NOT use these skills
 
 `stride-wms-domain`, `stride-build-instructions` — those are for the separate Stride WMS web app, not this project.
