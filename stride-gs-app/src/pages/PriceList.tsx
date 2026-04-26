@@ -9,7 +9,7 @@
  * Data: public.service_catalog via useServiceCatalog (Supabase Realtime).
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Plus, Search, Tag, Download, Share2, Check, Copy, X, UploadCloud, ChevronDown, ChevronRight, ArrowUp, ArrowDown, RefreshCw } from 'lucide-react';
+import { Plus, Search, Tag, Download, Share2, Check, Copy, X, ChevronDown, ChevronRight, ArrowUp, ArrowDown, RefreshCw } from 'lucide-react';
 import { theme } from '../styles/theme';
 import { useServiceCatalog, type CatalogService, type ServiceCategory } from '../hooks/useServiceCatalog';
 import { ServiceRow } from '../components/pricelist/ServiceRow';
@@ -22,7 +22,6 @@ import { usePriceListShares, type PriceListShare } from '../hooks/usePriceListSh
 import { useDeliveryZones } from '../hooks/useDeliveryZones';
 import { useItemClasses } from '../hooks/useItemClasses';
 import { useCoverageOptions } from '../hooks/useCoverageOptions';
-import { syncPriceListFromSupabase } from '../lib/api';
 import { useAuth } from '../contexts/AuthContext';
 
 // Persisted user prefs (per-email, mirrors useExpectedShipments's old pattern)
@@ -122,7 +121,6 @@ export function PriceList({ embedded = false }: PriceListProps = {}) {
   const [showAdd, setShowAdd] = useState(false);
   const [showShare, setShowShare] = useState(false);
   const [newShare, setNewShare] = useState<PriceListShare | null>(null);
-  const [syncing, setSyncing] = useState(false);
   const [syncResult, setSyncResult] = useState<{ kind: 'ok'; message: string } | { kind: 'err'; message: string } | null>(null);
   const [bulkSyncing, setBulkSyncing] = useState(false);
   const [bulkSyncProgress, setBulkSyncProgress] = useState<{ done: number; total: number } | null>(null);
@@ -146,21 +144,6 @@ export function PriceList({ embedded = false }: PriceListProps = {}) {
   useEffect(() => {
     savePrefs(email, { sortKey, sortDir, showInactive, collapsed: Array.from(collapsed) });
   }, [email, sortKey, sortDir, showInactive, collapsed]);
-
-  const handleSyncToSheet = async () => {
-    if (syncing) return;
-    setSyncing(true);
-    setSyncResult(null);
-    const res = await syncPriceListFromSupabase();
-    setSyncing(false);
-    if (res.ok && res.data) {
-      const d = res.data;
-      setSyncResult({ kind: 'ok', message: `Synced to Master Price List — ${d.updated} updated, ${d.appended} appended (${d.total_supabase} services)` });
-    } else {
-      setSyncResult({ kind: 'err', message: res.error || 'Sync failed' });
-    }
-    setTimeout(() => setSyncResult(null), 6000);
-  };
 
   // List of services not yet pushed to one or both external catalogs.
   // Drives both the "Sync Unsynced (N)" header button and bulk handler.
@@ -339,18 +322,6 @@ export function PriceList({ embedded = false }: PriceListProps = {}) {
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginLeft: embedded ? 'auto' : 0 }}>
           <button onClick={() => setShowShare(true)} style={ghostHeaderBtn(v2)}>
             <Share2 size={14} /> Share
-          </button>
-          <button
-            onClick={handleSyncToSheet}
-            disabled={syncing || services.length === 0}
-            title="Push current Supabase rates to the Master Price List sheet so GAS billing sees them"
-            style={{
-              ...ghostHeaderBtn(v2),
-              color: (syncing || services.length === 0) ? v2.colors.textMuted : v2.colors.text,
-              cursor: (syncing || services.length === 0) ? 'not-allowed' : 'pointer',
-            }}
-          >
-            <UploadCloud size={14} /> {syncing ? 'Syncing…' : 'Sync to Sheet'}
           </button>
           <button
             onClick={handleSyncAllUnsynced}

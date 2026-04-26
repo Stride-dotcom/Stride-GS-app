@@ -795,6 +795,44 @@ export function syncPriceListFromSupabase(signal?: AbortSignal) {
   return apiFetch<SyncPriceListResponse>('syncPriceListFromSupabase', undefined, { signal });
 }
 
+/**
+ * v38.128.0 — admin-only one-time backfill of the MPL Price_List sheet INTO
+ * Supabase service_catalog. Idempotent: existing codes are skipped (Supabase
+ * wins). Safe to re-run.
+ */
+export interface ImportPriceListResponse {
+  success: boolean;
+  total_sheet: number;
+  skipped: number;
+  inserted: number;
+  imported_at: string;
+}
+export function importPriceListToSupabase(signal?: AbortSignal) {
+  return apiPost<ImportPriceListResponse>('importPriceListToSupabase', {}, {}, { signal });
+}
+
+/**
+ * v38.128.0 — admin-only per-save push of ONE service row from Supabase into
+ * the MPL Price_List sheet. Called fire-and-forget by useServiceCatalog after
+ * each create/update so the sheet stays in sync. 8s timeout so a wedged GAS
+ * handler can't hang or stack on the UI.
+ */
+export interface SyncSingleServiceResponse {
+  success: boolean;
+  action: 'updated' | 'appended' | 'noop';
+  code: string;
+  reason?: string;
+  synced_at?: string;
+}
+export function syncSingleServiceToSheet(code: string, signal?: AbortSignal) {
+  return apiPost<SyncSingleServiceResponse>(
+    'syncSingleServiceToSheet',
+    { code },
+    {},
+    { signal, timeoutMs: 8_000 }
+  );
+}
+
 // ─── Pricing Parity Monitor (v38.81.0, admin-only) ──────────────────────────
 export type ParityClass = 'XS' | 'S' | 'M' | 'L' | 'XL' | 'XXL';
 export type ParityClassRates = Record<ParityClass, number>;
