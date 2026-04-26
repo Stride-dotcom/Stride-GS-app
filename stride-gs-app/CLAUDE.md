@@ -143,6 +143,23 @@ src/
 
 All backend commands from `C:\dev\Stride-GS-app\AppScripts\stride-client-inventory\`. React commands from `C:\dev\Stride-GS-app\stride-gs-app\` (never from a worktree).
 
+### First-time backend deploy setup (per builder / per fresh clone)
+
+The `npm run push-*` / `deploy-*` scripts read Apps Script API credentials from `AppScripts/stride-client-inventory/admin/.credentials.json` + `client_secret.json`. These are gitignored and **not** in the repo. Before the first deploy from a fresh `C:\dev\Stride-GS-app` checkout, the builder must:
+
+1. **Install deps:** `cd AppScripts/stride-client-inventory && npm install`
+2. **Copy credentials** from the Dropbox source-of-truth into `admin/`:
+   ```bash
+   cp "C:/Users/expre/Dropbox/Apps/GS Inventory/credentials/.credentials.json" \
+      "C:/dev/Stride-GS-app/AppScripts/stride-client-inventory/admin/.credentials.json"
+   cp "C:/Users/expre/Dropbox/Apps/GS Inventory/credentials/client_secret.json" \
+      "C:/dev/Stride-GS-app/AppScripts/stride-client-inventory/admin/client_secret.json"
+   ```
+   These files are local-only (in `.gitignore`). Never commit them.
+3. **If the access token has expired:** `npm run refresh-auth` (or `npm run setup` for a clean re-auth).
+
+After that, `push-api` / `deploy-api` / `push-stax` / `rollout` etc. all work directly. Builders should copy the credentials themselves and run the deploy commands rather than asking the user to do it manually.
+
 | Change touched… | Command | Live in |
 |---|---|---|
 | React (`src/**`) | `npm run deploy -- "what changed"` (build → push dist → commit source) | 1–2 min |
