@@ -70,6 +70,8 @@
 
 ## 2026-04
 
+**2026-04-26 session — retire per-item Drive folders:** Per-item Photos folders (created under PHOTOS_FOLDER_ID, named with Item ID) deprecated — never used (photos in Supabase) and confusing for clients. ItemDetailPanel.tsx: removed "Photos Folder" button. Apps Script: disabled per-item folder creation in `api_hyperlinkReceivedItems_`, `StrideFixMissingFolders`, `api_StrideFixMissingFolders`. New `StrideCleanupItemPhotoFolders_` (Utils.gs v3.5.0) under Stride Admin menu — dry-run + execute, trashes empty per-item folders, strips Inventory Item ID hyperlinks, reports non-empty to Cleanup_Report tab. StrideAPI.gs v38.130.0, Code.gs v4.7.0. PR #73.
+
 **2026-04-01 session 27:** Inline Item Editing + Auto-Generated Item IDs (v27.0.0). `updateInventoryItem` POST endpoint. 5 editable field components. Auto-ID counter in CB Settings as NEXT_ITEM_ID (80000 start). LockService protected. Settings → Maintenance admin-only toggle.
 
 **2026-04-01 session 28:** Custom Task Pricing (v28.3.0). Auto-repair on inspection fail REMOVED. Request Repair Quote endpoint + 4-surface UI. Email token audit. Full onEdit parity audit — 3 gaps fixed, `updateWillCall` endpoint added (v28.6.0). Free Receiving Toggle. Persistent Status Filters. Scanner + Move History rebuild. Billing Preview Mode + Commit to Ledger. Sidemark Color Highlighting. Mobile-Responsive Pages. StrideAPI.gs v28.6.0 deployed.
