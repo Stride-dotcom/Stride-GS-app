@@ -4,6 +4,7 @@ import { postBatchCreateTasks } from '../../lib/api';
 import type { InventoryItem, Task } from '../../lib/types';
 import { usePricing } from '../../hooks/usePricing';
 import { theme } from '../../styles/theme';
+import { ProcessingOverlay } from './ProcessingOverlay';
 
 interface Props {
   items: InventoryItem[];
@@ -163,7 +164,7 @@ export function CreateTaskModal({ items, clientSheetId, onClose, onSuccess, addO
 
   return (
     <>
-      <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.3)', zIndex: 200 }} />
+      <div onClick={loading ? undefined : onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.3)', zIndex: 200 }} />
       <div style={{
         position: 'fixed', top: '50%', left: '50%', transform: 'translate(-50%,-50%)',
         width: 420, maxWidth: '95vw', maxHeight: '85vh',
@@ -171,6 +172,11 @@ export function CreateTaskModal({ items, clientSheetId, onClose, onSuccess, addO
         zIndex: 201, fontFamily: theme.typography.fontFamily, overflow: 'hidden',
         display: 'flex', flexDirection: 'column',
       }}>
+        <ProcessingOverlay
+          visible={loading}
+          message={`Hold tight — creating ${selectedCodes.size > 1 ? 'tasks' : 'your task'}`}
+          subMessage="This usually takes a few seconds. You can leave this open."
+        />
 
         {/* Header */}
         <div style={{ padding: '14px 18px', borderBottom: `1px solid ${theme.colors.border}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexShrink: 0 }}>

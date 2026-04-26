@@ -31,11 +31,15 @@ interface Props {
   style?: React.CSSProperties;
   /** Size variant */
   size?: 'sm' | 'md';
+  /** Custom text shown next to spinner while loading (default: "Processing...") */
+  loadingText?: string;
+  /** Custom text shown briefly on success (default: "Done") */
+  successText?: string;
 }
 
 export function WriteButton({
   label, onClick, blockedReason, variant = 'secondary', icon,
-  disabled = false, style, size = 'md',
+  disabled = false, style, size = 'md', loadingText, successText,
 }: Props) {
   const [state, setState] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
   const [showTooltip, setShowTooltip] = useState(false);
@@ -89,8 +93,8 @@ export function WriteButton({
          state === 'success' ? '✓' :
          state === 'error' ? '✗' :
          icon}
-        {state === 'loading' ? 'Processing...' :
-         state === 'success' ? 'Done' :
+        {state === 'loading' ? (loadingText || 'Processing...') :
+         state === 'success' ? (successText || 'Done') :
          state === 'error' ? 'Failed' :
          label}
       </button>

@@ -1449,7 +1449,13 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
       belowId={belowIdContent}
       headerActions={headerActions}
       statusStrip={statusStrip}
-      overlay={<ProcessingOverlay visible={submitting || startTaskLoading} message={startTaskLoading ? 'Starting Task...' : 'Completing Task...'} />}
+      overlay={<ProcessingOverlay
+        visible={submitting || startTaskLoading}
+        message={startTaskLoading ? 'Starting your task' : 'Hold tight — completing your task'}
+        subMessage={startTaskLoading
+          ? 'Setting up the work order and folder.'
+          : 'Updating inventory, billing, and notifying the client. You can leave this open.'}
+      />}
       tabs={tabs}
       builtInTabs={{
         photos: {

@@ -7,6 +7,7 @@ import { isApiConfigured, postCreateClaim } from '../../lib/api';
 import { useClients } from '../../hooks/useClients';
 import { useAuth } from '../../contexts/AuthContext';
 import type { Claim } from '../../lib/types';
+import { ProcessingOverlay } from './ProcessingOverlay';
 
 interface Props {
   onClose: () => void;
@@ -149,14 +150,19 @@ export function CreateClaimModal({ onClose, onCreated, addOptimisticClaim, remov
 
   return (
     <>
-      <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.3)', zIndex: 150 }} />
+      <div onClick={loading ? undefined : onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.3)', zIndex: 150 }} />
       <div style={{
         position: 'fixed', top: '50%', left: '50%', transform: 'translate(-50%, -50%)',
         width: 580, maxWidth: '95vw', maxHeight: '90vh',
         background: '#fff', borderRadius: 20, boxShadow: '0 24px 60px rgba(0,0,0,0.25)',
         zIndex: 160, display: 'flex', flexDirection: 'column',
-        fontFamily: theme.typography.fontFamily,
+        fontFamily: theme.typography.fontFamily, overflow: 'hidden',
       }}>
+        <ProcessingOverlay
+          visible={loading}
+          message="Hold tight — filing your claim"
+          subMessage="Creating the claim record and Drive folder. Almost there."
+        />
         {/* Header */}
         <div style={{ padding: '16px 20px', borderBottom: `1px solid ${theme.colors.border}`, flexShrink: 0, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>

@@ -8,6 +8,7 @@ import type { CreateWillCallResponse } from '../../lib/api';
 import { useClients } from '../../hooks/useClients';
 import { useAuth } from '../../contexts/AuthContext';
 import type { WillCall } from '../../lib/types';
+import { ProcessingOverlay } from './ProcessingOverlay';
 
 interface Props {
   onClose: () => void;
@@ -175,13 +176,18 @@ export function CreateWillCallModal({ onClose, onSubmit, preSelectedItemIds = []
 
   return (
     <>
-      <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.3)', zIndex: 200 }} />
+      <div onClick={submitting ? undefined : onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.3)', zIndex: 200 }} />
       <div style={{
         position: 'fixed', top: '50%', left: '50%', transform: 'translate(-50%,-50%)',
         width: 640, maxWidth: '95vw', maxHeight: '90vh', background: '#fff', borderRadius: 20,
         boxShadow: '0 24px 60px rgba(0,0,0,0.25)', zIndex: 201, display: 'flex', flexDirection: 'column',
         fontFamily: theme.typography.fontFamily, overflow: 'hidden',
       }}>
+        <ProcessingOverlay
+          visible={submitting}
+          message="Hold tight — creating your will call"
+          subMessage="Generating the release doc and notifying the client. You can leave this open."
+        />
         {/* Header */}
         <div style={{ padding: '16px 20px', borderBottom: `1px solid ${theme.colors.border}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexShrink: 0 }}>
           <div>

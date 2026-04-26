@@ -62,7 +62,11 @@ export function AddToWillCallModal({ itemIds, clientName, clientSheetId, willCal
         boxShadow: '0 8px 40px rgba(0,0,0,0.15)', zIndex: 201, display: 'flex', flexDirection: 'column',
         fontFamily: theme.typography.fontFamily, overflow: 'hidden',
       }}>
-        <ProcessingOverlay visible={submitting} message="Adding items to will call..." />
+        <ProcessingOverlay
+          visible={submitting}
+          message="Hold tight — adding items to your will call"
+          subMessage="Updating inventory and the will call record."
+        />
 
         {/* Header */}
         <div style={{ padding: '16px 20px', borderBottom: `1px solid ${theme.colors.borderDefault}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexShrink: 0 }}>

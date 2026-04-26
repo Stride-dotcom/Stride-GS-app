@@ -1717,7 +1717,11 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
       belowId={belowIdContent}
       headerActions={headerActions}
       statusStrip={statusStrip}
-      overlay={<ProcessingOverlay visible={submitting} message="Processing..." />}
+      overlay={<ProcessingOverlay
+        visible={submitting}
+        message="Hold tight — saving your repair update"
+        subMessage="Updating the repair record and any linked billing. You can leave this open."
+      />}
       tabs={tabs}
       builtInTabs={builtInTabsCfg}
       footer={footer}

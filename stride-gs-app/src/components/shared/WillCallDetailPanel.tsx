@@ -1376,7 +1376,19 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
       belowId={belowIdContent}
       headerActions={headerActions}
       statusStrip={statusStrip}
-      overlay={<ProcessingOverlay visible={releasing || cancelling || removing} message={removing ? 'Removing items...' : cancelling ? 'Cancelling Will Call...' : 'Processing Release...'} />}
+      overlay={<ProcessingOverlay
+        visible={releasing || cancelling || removing}
+        message={
+          removing ? 'Removing items'
+          : cancelling ? 'Cancelling will call'
+          : 'Hold tight — processing your release'
+        }
+        subMessage={
+          removing ? 'Updating inventory and billing.'
+          : cancelling ? 'Putting items back on hold.'
+          : 'Releasing items, generating the doc, and notifying the client. You can leave this open.'
+        }
+      />}
       tabs={tabs}
       builtInTabs={builtInTabsCfg}
       footer={isMobile ? mobileFooter : footer}
