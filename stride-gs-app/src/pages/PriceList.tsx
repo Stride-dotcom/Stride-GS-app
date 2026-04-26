@@ -92,7 +92,13 @@ const CLASSES_CATEGORY  = 'Classes' as const;
 const COVERAGE_CATEGORY = 'Coverage' as const;
 type CategoryFilter = 'All' | ServiceCategory | typeof ZIP_CATEGORY | typeof CLASSES_CATEGORY | typeof COVERAGE_CATEGORY;
 
-export function PriceList() {
+interface PriceListProps {
+  // When true, suppresses the page-level header + the negative-margin bleed
+  // so the catalog can be embedded inside another page (e.g., Settings → Pricing).
+  embedded?: boolean;
+}
+
+export function PriceList({ embedded = false }: PriceListProps = {}) {
   const v2 = theme.v2;
   const { user } = useAuth();
   const email = user?.email || '_anon';
@@ -312,20 +318,25 @@ export function PriceList() {
       fontFamily: theme.typography.fontFamily,
       display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0,
       background: v2.colors.bgPage,
-      margin: '-28px -32px', padding: '28px 32px',
+      // Standalone (top-level route) bleeds past container padding; embedded
+      // mode renders flush so it stacks cleanly inside a Settings tab.
+      margin: embedded ? 0 : '-28px -32px',
+      padding: embedded ? 0 : '28px 32px',
     }}>
       {/* ── Header ── */}
       <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', marginBottom: 20, gap: 16, flexWrap: 'wrap' }}>
-        <div>
-          <div style={{ ...v2.typography.label, marginBottom: 4 }}>Stride Logistics</div>
-          <h1 style={{ margin: 0, fontSize: 28, fontWeight: 400, color: v2.colors.text, letterSpacing: '-0.5px' }}>
-            Price List
-          </h1>
-          <div style={{ fontSize: 13, color: v2.colors.textSecondary, marginTop: 6 }}>
-            Unified catalog of services, rates, and where they show up across the app.
+        {!embedded && (
+          <div>
+            <div style={{ ...v2.typography.label, marginBottom: 4 }}>Stride Logistics</div>
+            <h1 style={{ margin: 0, fontSize: 28, fontWeight: 400, color: v2.colors.text, letterSpacing: '-0.5px' }}>
+              Price List
+            </h1>
+            <div style={{ fontSize: 13, color: v2.colors.textSecondary, marginTop: 6 }}>
+              Unified catalog of services, rates, and where they show up across the app.
+            </div>
           </div>
-        </div>
-        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+        )}
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginLeft: embedded ? 'auto' : 0 }}>
           <button onClick={() => setShowShare(true)} style={ghostHeaderBtn(v2)}>
             <Share2 size={14} /> Share
           </button>

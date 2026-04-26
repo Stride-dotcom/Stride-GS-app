@@ -18,8 +18,8 @@ import { OnboardClientModal } from '../components/shared/OnboardClientModal';
 import type { OnboardClientFormData } from '../components/shared/OnboardClientModal';
 
 import { useClients } from '../hooks/useClients';
-import { usePricing } from '../hooks/usePricing';
 import { useLocations } from '../hooks/useLocations';
+import { PriceList } from './PriceList';
 import { useUsers } from '../hooks/useUsers';
 import type { ApiUser } from '../lib/api';
 import { theme } from '../styles/theme';
@@ -36,7 +36,7 @@ const TABS: { id: Tab; label: string; icon: any; desc: string }[] = [
   { id: 'general', label: 'General', icon: SettingsIcon, desc: 'System settings and preferences' },
   { id: 'clients', label: 'Clients', icon: Users, desc: 'Client accounts and onboarding' },
   { id: 'users', label: 'Users', icon: Shield, desc: 'User access and role management' },
-  { id: 'pricing', label: 'Pricing', icon: DollarSign, desc: 'Service rates and class maps' },
+  { id: 'pricing', label: 'Pricing', icon: DollarSign, desc: 'Service catalog, item classes, delivery zones, and coverage options' },
   { id: 'emails', label: 'Email Templates', icon: Mail, desc: 'All email & document templates — edit, preview, test send, sync' },
   { id: 'integrations', label: 'Integrations', icon: Globe, desc: 'QuickBooks, Stax, and external services' },
   { id: 'notifications', label: 'Notifications', icon: Bell, desc: 'Alert preferences and triggers' },
@@ -74,15 +74,6 @@ const SYSTEM_TEMPLATES = [
   { key: 'WELCOME_EMAIL', name: 'Welcome Email', desc: 'Sent to all client contacts when a new client ACCOUNT is created. Generic welcome — does NOT contain login credentials. Tokens: {{CLIENT_NAME}}, {{SPREADSHEET_URL}}, {{CLIENT_EMAIL}}, {{APP_URL}}' },
   { key: 'ONBOARDING_EMAIL', name: 'Onboarding / Getting Started', desc: 'Sent to each individual user when their account is activated. Contains their temporary password + login instructions. Tokens: {{CLIENT_NAME}}, {{LOGIN_URL}}, {{LOGIN_EMAIL}}, {{TEMP_PASSWORD}}, {{SPREADSHEET_URL}}, {{APP_URL}}. If {{TEMP_PASSWORD}} is not used in the body, a styled credentials block is prepended automatically.' },
   { key: 'CLIENT_INTAKE_INVITE', name: 'Client Intake Invitation', desc: 'Sent to a prospect when a new intake link is generated. Tokens: {{PROSPECT_NAME}}, {{INTAKE_LINK}}, {{EXPIRES_DATE}}' },
-];
-
-const MOCK_PRICING = [
-  { code: 'RCVG', name: 'Receiving', xs: 5, s: 8, m: 12, l: 20, xl: 35 },
-  { code: 'INSP', name: 'Inspection', xs: 5, s: 8, m: 12, l: 20, xl: 35 },
-  { code: 'ASM', name: 'Assembly', xs: 25, s: 35, m: 50, l: 70, xl: 100 },
-  { code: 'STOR', name: 'Storage (per day)', xs: 0.15, s: 0.25, m: 0.50, l: 0.75, xl: 1.10 },
-  { code: 'DLVR', name: 'Delivery', xs: 25, s: 35, m: 50, l: 85, xl: 120 },
-  { code: 'WCPU', name: 'Will Call Pickup', xs: 5, s: 10, m: 15, l: 20, xl: 25 },
 ];
 
 const card: React.CSSProperties = { background: '#fff', border: `1px solid ${theme.colors.border}`, borderRadius: 12, padding: 20, marginBottom: 16 };
@@ -768,7 +759,6 @@ export function Settings() {
   const [showInactiveClients, setShowInactiveClients] = useState(false);
   const apiConfigured = isApiConfigured();
   const { apiClients, loading: clientsLoading, error: clientsError, refetch: refetchClients, applyClientPatch, clearClientPatch } = useClients(apiConfigured && true, showInactiveClients);
-  const { priceList, classMap, loading: pricingLoading, error: pricingError, refetch: refetchPricing } = usePricing(apiConfigured && true);
   // Pre-fetch locations for sub-tabs
   useLocations(apiConfigured && true);
   // T&C signed-on-file status for client cards (admin view, Clients sub-tab)
@@ -3381,64 +3371,7 @@ export function Settings() {
             </>
           )}
 
-          {tab === 'pricing' && (() => {
-            const isLive = priceList.length > 0;
-            const displayPricing = isLive ? priceList.map(p => ({
-              code: String(p['Service Code'] || ''),
-              name: String(p['Service Name'] || ''),
-              xs: Number(p['XS Rate']) || 0,
-              s: Number(p['S Rate']) || 0,
-              m: Number(p['M Rate']) || 0,
-              l: Number(p['L Rate']) || 0,
-              xl: Number(p['XL Rate']) || 0,
-            })) : MOCK_PRICING;
-            const displayClasses = isLive ? classMap.map(c => ({
-              c: String(c.Class || ''),
-              vol: `${Number(c['Cubic Volume']) || 0} cu ft`,
-            })) : [{ c: 'XS', vol: '\u226410 cu ft' }, { c: 'S', vol: '11-25' }, { c: 'M', vol: '26-50' }, { c: 'L', vol: '51-75' }, { c: 'XL', vol: '76+' }];
-
-            return (
-              <div style={card}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                    <div style={sectionTitle}>Service Rates by Class</div>
-                    {isLive && <span style={{ fontSize: 9, padding: '2px 8px', borderRadius: 8, background: '#F0FDF4', color: '#15803D', fontWeight: 700, textTransform: 'uppercase' }}>Live</span>}
-                    {pricingLoading && <Loader2 size={14} style={{ animation: 'spin 1s linear infinite', color: theme.colors.textMuted }} />}
-                    {pricingError && <span style={{ fontSize: 10, color: '#DC2626' }}>{pricingError}</span>}
-                  </div>
-                  <div style={{ display: 'flex', gap: 8 }}>
-                    {isLive && <button onClick={refetchPricing} style={{ padding: '6px 10px', fontSize: 11, border: `1px solid ${theme.colors.border}`, borderRadius: 6, background: '#fff', cursor: 'pointer', fontFamily: 'inherit', color: theme.colors.textMuted }}><RefreshCw size={12} /></button>}
-                    <button onClick={() => alert('Coming soon — Edit rates')} style={{ padding: '6px 14px', fontSize: 12, fontWeight: 500, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', fontFamily: 'inherit', color: theme.colors.textSecondary }}>Edit Rates</button>
-                  </div>
-                </div>
-                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
-                  <thead><tr style={{ borderBottom: `2px solid ${theme.colors.border}` }}>
-                    <th style={{ padding: '8px 10px', textAlign: 'left', fontSize: 10, color: theme.colors.textMuted, textTransform: 'uppercase' }}>Code</th>
-                    <th style={{ padding: '8px 10px', textAlign: 'left', fontSize: 10, color: theme.colors.textMuted, textTransform: 'uppercase' }}>Service</th>
-                    {['XS', 'S', 'M', 'L', 'XL'].map(c => <th key={c} style={{ padding: '8px 10px', textAlign: 'right', fontSize: 10, color: theme.colors.textMuted, textTransform: 'uppercase' }}>{c}</th>)}
-                  </tr></thead>
-                  <tbody>{displayPricing.map(p => (
-                    <tr key={p.code} style={{ borderBottom: `1px solid ${theme.colors.borderLight}` }}>
-                      <td style={{ padding: '8px 10px', fontWeight: 600, fontFamily: 'monospace' }}>{p.code}</td>
-                      <td style={{ padding: '8px 10px', color: theme.colors.textSecondary }}>{p.name}</td>
-                      {[p.xs, p.s, p.m, p.l, p.xl].map((v, i) => <td key={i} style={{ padding: '8px 10px', textAlign: 'right' }}>${v.toFixed(2)}</td>)}
-                    </tr>
-                  ))}</tbody>
-                </table>
-                <div style={{ marginTop: 16 }}>
-                  <div style={sectionTitle}>Class Map</div>
-                  <div style={{ display: 'flex', gap: 12 }}>
-                    {displayClasses.map(x => (
-                      <div key={x.c} style={{ flex: 1, padding: '10px', background: theme.colors.bgSubtle, borderRadius: 8, textAlign: 'center' }}>
-                        <div style={{ fontSize: 16, fontWeight: 700 }}>{x.c}</div>
-                        <div style={{ fontSize: 10, color: theme.colors.textMuted, marginTop: 2 }}>{x.vol}</div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </div>
-            );
-          })()}
+          {tab === 'pricing' && <PriceList embedded />}
 
           {tab === 'emails' && (
             <>
