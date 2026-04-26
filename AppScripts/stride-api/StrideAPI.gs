@@ -1,5 +1,21 @@
 /* ===================================================
-   StrideAPI.gs — v38.131.0 — 2026-04-26 PST — handleImportIIF_ now mirrors new invoice + exception rows to Supabase
+   StrideAPI.gs — v38.132.0 — 2026-04-26 PST — Surface silent Supabase write failures in stax_run_log + Run Log sheet
+   v38.132.0: Better error logging for Supabase write-through. The
+              scheduled_date PGRST204 schema-cache bug went unnoticed
+              for days because supabaseBatchUpsert_'s outer try/catch
+              only Logger.log'd the failure. New helper
+              sbLogSyncError_(table, httpCode, errorBody, rowCount,
+              sampleRow) writes a row into stax_run_log and the Stax
+              sheet's Run Log tab so any future silent failure shows
+              up in the Payments app's Run Log tab and is queryable
+              via Supabase. Uses a direct REST POST (not
+              supabaseBatchUpsert_) and short-circuits on the
+              stax_run_log table itself to avoid loop risk. Called
+              from both the chunk-level and outer catch in
+              supabaseBatchUpsert_.
+              Also added admin-gated dispatcher case "seedStaxCaches"
+              (PR #75) so the seed function can be triggered remotely
+              without digging in the Apps Script editor.
    v38.131.0: handleImportIIF_ wrote new rows to the Stax Invoices /
               Exceptions sheets but did not call the Supabase write-
               through helpers. Because the Payments app reads from
@@ -2922,7 +2938,14 @@ function supabaseBatchUpsert_(table, rows) {
       });
       var code = resp.getResponseCode();
       if (code < 200 || code >= 300) {
-        Logger.log("supabaseBatchUpsert_ " + table + " chunk " + i + " HTTP " + code + ": " + resp.getContentText().substring(0, 500));
+        var errBody = resp.getContentText().substring(0, 500);
+        Logger.log("supabaseBatchUpsert_ " + table + " chunk " + i + " HTTP " + code + ": " + errBody);
+        // v38.132.0 — Surface this in stax_run_log so silent Supabase
+        // schema drift / RLS regressions are visible to operators
+        // without having to crack open the Apps Script execution log.
+        // The scheduled_date PGRST204 bug went unnoticed for days
+        // because this only Logger.log'd.
+        try { sbLogSyncError_(table, code, errBody, chunk.length, chunk[0]); } catch (logErr) {}
         // Retry failed chunk row-by-row to isolate bad rows
         for (var ri = 0; ri < chunk.length; ri++) {
           try {
@@ -2947,7 +2970,60 @@ function supabaseBatchUpsert_(table, rows) {
     }
   } catch (e) {
     Logger.log("supabaseBatchUpsert_ " + table + " error (non-fatal): " + e);
+    try { sbLogSyncError_(table, 0, String(e), (rows && rows.length) || 0, rows && rows[0]); } catch (_) {}
   }
+}
+
+/**
+ * v38.132.0 — Write a Supabase-write failure into the stax_run_log table
+ * (and the Stax sheet's Run Log tab) so the operator sees the error in
+ * the Payments app instead of buried in the Apps Script execution log.
+ * Uses a direct REST call rather than supabaseBatchUpsert_ to avoid any
+ * loop risk if the run_log write itself fails.
+ *
+ * Skips the run_log table itself to break the recursion explicitly even
+ * though we don't go through supabaseBatchUpsert_ here — defensive.
+ */
+function sbLogSyncError_(table, httpCode, errorBody, rowCount, sampleRow) {
+  if (table === "stax_run_log") return;
+  var url = prop_("SUPABASE_URL");
+  var key = prop_("SUPABASE_SERVICE_ROLE_KEY");
+  if (!url || !key) return;
+
+  var ts = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm:ss");
+  var summary = "_sbBatchUpsert " + table + " HTTP " + httpCode +
+                " (" + (rowCount || 0) + " rows): " +
+                String(errorBody || "").substring(0, 200);
+  var details = "";
+  try {
+    if (sampleRow) {
+      details = "sampleKeys=" + Object.keys(sampleRow).join(",") +
+                " | sample=" + JSON.stringify(sampleRow).substring(0, 400);
+    }
+  } catch (_) {}
+
+  var row = { timestamp: ts, fn: "_sbBatchUpsert", summary: summary, details: details };
+  try {
+    UrlFetchApp.fetch(url + "/rest/v1/stax_run_log?on_conflict=timestamp,fn,summary", {
+      method: "POST",
+      headers: {
+        "Authorization": "Bearer " + key,
+        "apikey":        key,
+        "Content-Type":  "application/json",
+        "Prefer":        "resolution=merge-duplicates,return=minimal"
+      },
+      payload: JSON.stringify([row]),
+      muteHttpExceptions: true
+    });
+  } catch (_) {}
+
+  // Also append to the Stax sheet's Run Log tab so the error survives
+  // even if Supabase itself is unreachable.
+  try {
+    var ss = getStaxSpreadsheet_();
+    var rlSheet = ss && ss.getSheetByName("Run Log");
+    if (rlSheet) rlSheet.appendRow([ts, "_sbBatchUpsert", summary, details]);
+  } catch (_) {}
 }
 
 /**
