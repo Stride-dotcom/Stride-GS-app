@@ -100,15 +100,23 @@ async function main() {
   }
 
   // Read local template files from both EMAIL TEMPLATES/ and Doc Templates/
-  const emailFiles = readdirSync(TEMPLATES_DIR)
-    .filter(f => f.endsWith('_corrected.txt'))
-    .map(f => ({ name: f, dir: TEMPLATES_DIR }));
+  // Both dirs are optional — only push what's locally present.
+  let emailFiles = [];
+  try {
+    emailFiles = readdirSync(TEMPLATES_DIR)
+      .filter(f => f.endsWith('_corrected.txt'))
+      .map(f => ({ name: f, dir: TEMPLATES_DIR }));
+  } catch (err) {
+    if (err.code !== 'ENOENT') console.warn(`[warn] ${TEMPLATES_DIR}: ${err.message}`);
+  }
   let docFiles = [];
   try {
     docFiles = readdirSync(DOC_TEMPLATES_DIR)
       .filter(f => f.startsWith('DOC_') && f.endsWith('.txt'))
       .map(f => ({ name: f, dir: DOC_TEMPLATES_DIR }));
-  } catch (_) {}
+  } catch (err) {
+    if (err.code !== 'ENOENT') console.warn(`[warn] ${DOC_TEMPLATES_DIR}: ${err.message}`);
+  }
   const localFiles = emailFiles.concat(docFiles);
   console.log(`Found ${emailFiles.length} email + ${docFiles.length} doc template files\n`);
 
