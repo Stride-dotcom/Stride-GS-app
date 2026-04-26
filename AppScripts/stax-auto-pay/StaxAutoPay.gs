@@ -1,4 +1,15 @@
 // ============================================================
+// STAX AUTO-PAY TOOL — v4.7.4
+// v4.7.4 (2026-04-26): Past-due safety buffer for newly-CREATED rows.
+//         Mirror of StrideAPI.gs v38.135.0. New helper
+//         _applyPastDueBuffer stamps Scheduled Date = today +
+//         AUTO_CHARGE_PAST_DUE_BUFFER_DAYS (default 1, Stax Config
+//         override) when _createStaxInvoicesForRows_ flips a row
+//         PENDING → CREATED with a past Due Date and no operator-set
+//         Scheduled Date. Doesn't overwrite explicit operator
+//         schedules. Charge loop already prefers Scheduled Date over
+//         Due Date, so the buffer defers without code changes there.
+// ============================================================
 // STAX AUTO-PAY TOOL — v4.7.3
 // v4.7.3 (2026-04-26): Close every Stax-sheet→Supabase mirror gap in
 //         the Auto-Pay UI handlers so the Payments React app stays
@@ -1155,6 +1166,58 @@ function _logException(docNum, name, staxId, amount, dueDate, reason, link) {
   } catch (_) {}
 }
 
+// v4.7.4 — Past-due safety buffer for newly-CREATED Stax invoices.
+// Mirror of StrideAPI.gs:stax_applyPastDueBuffer_. When a row transitions
+// PENDING → CREATED via the auto-pay push path AND its Due Date is already
+// in the past, defer the auto-charge by stamping Scheduled Date = today +
+// AUTO_CHARGE_PAST_DUE_BUFFER_DAYS (default 1, configurable via Stax
+// Config). Doesn't overwrite an operator-set Scheduled Date. Returns the
+// formatted date string written, or "" when no buffer was applied.
+function _applyPastDueBuffer(ss, invSheet, foundRow0Based, dueDateRaw) {
+  try {
+    var bufferDays = 1;
+    var configSheet = ss.getSheetByName(SHEET_NAMES.CONFIG || "Config");
+    if (configSheet) {
+      var cfgData = configSheet.getDataRange().getValues();
+      for (var i = 0; i < cfgData.length; i++) {
+        if (String(cfgData[i][0] || "").trim() === "AUTO_CHARGE_PAST_DUE_BUFFER_DAYS") {
+          var v = parseInt(cfgData[i][1], 10);
+          if (!isNaN(v) && v >= 0) bufferDays = v;
+          break;
+        }
+      }
+    }
+    if (bufferDays === 0) return "";
+
+    var todayStr = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd");
+    var dueStr = _parseDateForStax(dueDateRaw);
+    if (!dueStr || dueStr > todayStr) return "";
+
+    var hdrRow = invSheet.getRange(1, 1, 1, invSheet.getLastColumn()).getValues()[0];
+    var schedIdx = -1;
+    for (var h = 0; h < hdrRow.length; h++) {
+      if (String(hdrRow[h]).trim() === "Scheduled Date") { schedIdx = h; break; }
+    }
+    if (schedIdx < 0) {
+      var lastCol = invSheet.getLastColumn();
+      schedIdx = lastCol;
+      invSheet.getRange(1, lastCol + 1).setValue("Scheduled Date");
+    }
+
+    var existingSched = invSheet.getRange(foundRow0Based + 1, schedIdx + 1).getValue();
+    if (existingSched && String(existingSched).trim()) return "";
+
+    var d = new Date();
+    d.setDate(d.getDate() + bufferDays);
+    var newSched = Utilities.formatDate(d, Session.getScriptTimeZone(), "yyyy-MM-dd");
+    invSheet.getRange(foundRow0Based + 1, schedIdx + 1).setValue(newSched);
+    return newSched;
+  } catch (e) {
+    Logger.log("_applyPastDueBuffer error (non-fatal): " + e);
+    return "";
+  }
+}
+
 // v4.7.3 — Read the Customers tab and push every row to Supabase.
 // Convenience companion to _sbResyncAllStaxInvoices for handlers that
 // mutate the Customers tab (pullStaxCustomers, syncCustomers,
@@ -1805,6 +1868,8 @@ function _createStaxInvoicesForRows_(options) {
   var colHChanged = false;
   var colIChanged = false;
   var colKChanged = false;
+  // v4.7.4 — Track newly-CREATED rows for the past-due buffer pass.
+  var newlyCreatedRowIdxs = [];
 
   // v4.7.0 — 3-tier client lookup (Stax Customer ID → QB_CUSTOMER_NAME →
   // CLIENT NAME). See _buildClientAutoChargeLookup_ for rationale.
@@ -1991,6 +2056,7 @@ function _createStaxInvoicesForRows_(options) {
       colHChanged = true;
       colIChanged = true;
       colKChanged = true;
+      newlyCreatedRowIdxs.push(i);
       stats.skippedDupe++;
       continue;
     }
@@ -2009,6 +2075,7 @@ function _createStaxInvoicesForRows_(options) {
       }
       colHChanged = true;
       colIChanged = true;
+      newlyCreatedRowIdxs.push(i);
       stats.created++;
     } else {
       var errDetail = result.error || 'Unknown error';
@@ -2028,6 +2095,18 @@ function _createStaxInvoicesForRows_(options) {
   if (colHChanged) colHRange.setValues(colHValues);
   if (colIChanged) colIRange.setValues(colIValues);
   if (colKChanged) colKRange.setValues(colKValues);
+
+  // v4.7.4 — Past-due safety buffer for newly-CREATED rows. Same race
+  // protection as StrideAPI.gs handleCreateStaxInvoices_ — a PENDING row
+  // pushed when its Due Date is already past would otherwise be picked
+  // up by the next 9 AM auto-charge cron without operator review.
+  try {
+    for (var bi = 0; bi < newlyCreatedRowIdxs.length; bi++) {
+      var bIdx = newlyCreatedRowIdxs[bi];
+      var bDue = String(invData[bIdx + 1][4] || "").trim();
+      _applyPastDueBuffer(ss, invSheet, bIdx, bDue);
+    }
+  } catch (bufErr) { Logger.log(logLabel + ": _applyPastDueBuffer warning: " + bufErr); }
 
   // Summary
   var summary = stats.created + ' created, ' +

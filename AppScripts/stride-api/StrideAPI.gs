@@ -1,23 +1,29 @@
 /* ===================================================
-   StrideAPI.gs — v38.135.0 — 2026-04-26 PST — Fast-fail rewrite of handleQboSyncCatalogItem_ + qbo_apiRequest_ retry override
-   v38.135.0: handleQboSyncCatalogItem_ used to hang far past the React
-              8s client timeout — it called qbo_getValidToken_() (an extra
-              companyinfo round-trip) plus up to two more qbo_apiRequest_
-              calls each running the default 3-attempt / 2s+4s+8s backoff.
-              QBO's UrlFetchApp ceiling is ~60s per attempt, so the
-              worst-case wall time was minutes, exceeding Apps Script's
-              6-min execution limit; the script was killed without
-              returning, which the React side saw as a hang.
-              Fix: (a) qbo_apiRequest_ now accepts an optional
-              { maxRetries, backoffMs } opts arg so latency-sensitive
-              callers can opt into a tighter retry budget without
-              changing behaviour for the rest of the QBO call sites;
-              (b) handleQboSyncCatalogItem_ drops qbo_getValidToken_
-              (qbo_apiRequest_ already refreshes on 401), uses
-              { maxRetries: 2, backoffMs: [400] } for every QBO call,
-              and runs a 6500ms watchdog before each network step that
-              throws a clear "QBO sync timed out" error rather than
-              issuing another doomed request.
+   StrideAPI.gs — v38.136.0 — 2026-04-26 PST — Past-due safety buffer for newly-CREATED Stax invoices
+   v38.136.0: Auto-charge race protection. INV-097/098 were linked at
+              06:30 and auto-paid at 08:27 the same morning because
+              their Due Date was already past (2026-04-23) and no
+              Scheduled Date was set, so the daily 9 AM cron picked
+              them up before Justin could set a future schedule.
+              Fix: new helper stax_applyPastDueBuffer_ stamps
+              Scheduled Date = today + AUTO_CHARGE_PAST_DUE_BUFFER_DAYS
+              (default 1, configurable via Stax Config row) when a
+              row transitions PENDING → CREATED with a past Due Date
+              and no operator-set Scheduled Date.
+              Wired into:
+                - handleLinkStaxInvoiceToExisting_ (link path)
+                - handleCreateStaxInvoices_ (push path, both direct
+                  push and dedup-link branches)
+              StaxAutoPay.gs v4.7.4 mirrors the same protection in
+              the menu-driven createStaxInvoices / auto-charge prepare
+              stage via _applyPastDueBuffer.
+   v38.135.0: Fast-fail rewrite of handleQboSyncCatalogItem_ +
+              qbo_apiRequest_ retry override. handleQboSyncCatalogItem_
+              used to hang far past the React 8s client timeout. Fix:
+              qbo_apiRequest_ now accepts { maxRetries, backoffMs }
+              opts; handleQboSyncCatalogItem_ uses { maxRetries: 2,
+              backoffMs: [400] } and runs a 6500ms watchdog before
+              each network step.
    v38.134.0: Comprehensive close on all paths that mutated the Stax
               sheet without mirroring to Supabase, the root cause of
               the Payments app showing stale data after every action.
@@ -29384,6 +29390,77 @@ function stax_appendException_(ss, docNum, custName, staxCustId, amount, dueDate
 }
 
 /**
+ * v38.135.0 — Past-due safety buffer for newly-CREATED Stax invoices.
+ *
+ * Problem: when handleLinkStaxInvoiceToExisting_ or handleCreateStaxInvoices_
+ * flips a row PENDING → CREATED, the original Due Date carries over. If the
+ * Due Date is already in the past (common: IIF imports always have a Due
+ * Date in the recent past once the invoice has been sitting in the queue)
+ * the row becomes immediately eligible for the next 9 AM auto-charge run.
+ * Operators that want to verify the link before charging have a small race
+ * window — Justin's INV-000097/098 link at 06:30 → auto-paid at 08:27.
+ *
+ * Fix: when the row's Due Date is in the past AND no Scheduled Date is set,
+ * stamp Scheduled Date = today + AUTO_CHARGE_PAST_DUE_BUFFER_DAYS (default
+ * 1). The auto-charge loop already prefers Scheduled Date over Due Date for
+ * timing (StaxAutoPay.gs _executeChargeRun, gate 3), so this defers the
+ * charge to give the operator a window to review or adjust.
+ *
+ * Configurable via Stax Config row "AUTO_CHARGE_PAST_DUE_BUFFER_DAYS".
+ * Set to 0 to disable.
+ *
+ * Returns the formatted Scheduled Date string that was written (or "" when
+ * no buffer was applied).
+ */
+function stax_applyPastDueBuffer_(ss, invSheet, foundRow0Based, dueDateRaw) {
+  try {
+    var bufferDays = 1; // sensible default
+    var configSheet = ss.getSheetByName("Config");
+    if (configSheet) {
+      var cfgData = configSheet.getDataRange().getValues();
+      for (var i = 0; i < cfgData.length; i++) {
+        if (String(cfgData[i][0] || "").trim() === "AUTO_CHARGE_PAST_DUE_BUFFER_DAYS") {
+          var v = parseInt(cfgData[i][1], 10);
+          if (!isNaN(v) && v >= 0) bufferDays = v;
+          break;
+        }
+      }
+    }
+    if (bufferDays === 0) return "";
+
+    var todayStr = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd");
+    var dueStr = stax_parseDateForStax_(dueDateRaw);
+    if (!dueStr || dueStr > todayStr) return ""; // future-dated → safe already
+
+    // Find or create the Scheduled Date column header
+    var hdrRow = invSheet.getRange(1, 1, 1, invSheet.getLastColumn()).getValues()[0];
+    var schedIdx = -1;
+    for (var h = 0; h < hdrRow.length; h++) {
+      if (String(hdrRow[h]).trim() === "Scheduled Date") { schedIdx = h; break; }
+    }
+    if (schedIdx < 0) {
+      var lastCol = invSheet.getLastColumn();
+      schedIdx = lastCol;
+      invSheet.getRange(1, lastCol + 1).setValue("Scheduled Date");
+    }
+
+    // Don't overwrite an operator-set Scheduled Date.
+    var existingSched = invSheet.getRange(foundRow0Based + 1, schedIdx + 1).getValue();
+    if (existingSched && String(existingSched).trim()) return "";
+
+    // Compute today + bufferDays
+    var d = new Date();
+    d.setDate(d.getDate() + bufferDays);
+    var newSched = Utilities.formatDate(d, Session.getScriptTimeZone(), "yyyy-MM-dd");
+    invSheet.getRange(foundRow0Based + 1, schedIdx + 1).setValue(newSched);
+    return newSched;
+  } catch (e) {
+    Logger.log("stax_applyPastDueBuffer_ error (non-fatal): " + e);
+    return "";
+  }
+}
+
+/**
  * Append a row to the Charge Log tab in the Stax spreadsheet.
  */
 function stax_appendChargeLog_(ss, docNum, staxInvId, staxCustId, custName, amount, status, txnId, notes) {
@@ -30197,8 +30274,11 @@ function handleCreateStaxInvoices_(payload) {
     var colIValues = colIRange.getValues();
     var colKValues = colKRange.getValues();
     var colHChanged = false, colIChanged = false, colKChanged = false;
-
-    for (var i = 0; i < numRows; i++) {
+    // v38.135.0 — Track rows that just transitioned to CREATED (whether
+    // via direct push or dedup-link) so the past-due safety buffer can
+    // be applied after the batch write. Stored as 0-based offsets from
+    // the header (matches `i` in the loop below).
+    var newlyCreatedRowIdxs = [];
       var status = String(colIValues[i][0]).trim().toUpperCase();
       var existingStaxId = String(colHValues[i][0]).trim();
 
@@ -30294,6 +30374,7 @@ function handleCreateStaxInvoices_(payload) {
         colIValues[i][0] = "CREATED";
         colKValues[i][0] = "Linked to existing Stax invoice (duplicate protection)";
         colHChanged = true; colIChanged = true; colKChanged = true;
+        newlyCreatedRowIdxs.push(i);
         stats.skippedDupe++;
         continue;
       }
@@ -30304,6 +30385,7 @@ function handleCreateStaxInvoices_(payload) {
         colHValues[i][0] = createResult.data.id;
         colIValues[i][0] = "CREATED";
         colHChanged = true; colIChanged = true;
+        newlyCreatedRowIdxs.push(i);
         stats.created++;
       } else {
         var errMsg = createResult.error || "Unknown API error";
@@ -30321,6 +30403,21 @@ function handleCreateStaxInvoices_(payload) {
     if (colHChanged) colHRange.setValues(colHValues);
     if (colIChanged) colIRange.setValues(colIValues);
     if (colKChanged) colKRange.setValues(colKValues);
+
+    // v38.135.0 — Apply past-due safety buffer to every row that just
+    // transitioned to CREATED. Without this, a push of a PENDING row
+    // whose Due Date is already past (common: IIF imports with a Due
+    // Date of "today" run on a Monday morning, then sit until the user
+    // pushes them later in the week) becomes immediately auto-charge
+    // eligible at the next 9 AM cron — same race that paid INV-097/098
+    // before the operator could review.
+    try {
+      for (var bi = 0; bi < newlyCreatedRowIdxs.length; bi++) {
+        var bIdx = newlyCreatedRowIdxs[bi];
+        var bDue = invData[bIdx + 1][4];
+        stax_applyPastDueBuffer_(ss, invSheet, bIdx, bDue);
+      }
+    } catch (bufErr) { Logger.log("handleCreateStaxInvoices_ buffer apply warning: " + bufErr); }
 
     // v38.14.0: Set Auto Charge default from CB Clients Auto Charge column.
     // If client has Auto Charge = TRUE, the invoice defaults to Auto. Otherwise Manual.
@@ -31103,8 +31200,22 @@ function handleLinkStaxInvoiceToExisting_(payload) {
     "Linked to existing Stax invoice " + resolvedStaxId + " via Stride Hub on " + nowFmt
   );
 
+  // v38.135.0 — Apply past-due safety buffer. If this row's Due Date is
+  // already in the past, defer the auto-charge by AUTO_CHARGE_PAST_DUE_
+  // BUFFER_DAYS so the operator has a window to review or change the
+  // schedule. Justin's INV-097/098 link → 9 AM auto-charge race was the
+  // reason this exists.
+  var dueDateRaw = invData[foundRow][4];
+  var bufferedSched = stax_applyPastDueBuffer_(ss, invSheet, foundRow, dueDateRaw);
+  if (bufferedSched) {
+    var bufferNote = "Past-due Due Date detected — Scheduled Date set to " + bufferedSched + " to defer auto-charge (override on Charge Queue if needed).";
+    invSheet.getRange(foundRow + 1, 11).setValue(
+      "Linked to existing Stax invoice " + resolvedStaxId + " via Stride Hub on " + nowFmt + " | " + bufferNote
+    );
+  }
+
   try { CacheService.getScriptCache().remove("stax_invoices"); } catch (_) {}
-  try { stax_appendRunLog_(ss, "linkStaxInvoiceToExisting", "Linked QB#" + qbInvoiceNo + " → Stax " + resolvedStaxId, ""); } catch (_) {}
+  try { stax_appendRunLog_(ss, "linkStaxInvoiceToExisting", "Linked QB#" + qbInvoiceNo + " → Stax " + resolvedStaxId + (bufferedSched ? " (scheduled " + bufferedSched + ")" : ""), ""); } catch (_) {}
   try { api_sbResyncStaxInvoice_(qbInvoiceNo); } catch (_) {}
 
   return jsonResponse_({
@@ -31112,7 +31223,8 @@ function handleLinkStaxInvoiceToExisting_(payload) {
     qbInvoiceNo:    qbInvoiceNo,
     staxInvoiceId:  resolvedStaxId,
     newStatus:      "CREATED",
-    message:        "Linked " + qbInvoiceNo + " to existing Stax invoice " + resolvedStaxId
+    scheduledDate:  bufferedSched || undefined,
+    message:        "Linked " + qbInvoiceNo + " to existing Stax invoice " + resolvedStaxId + (bufferedSched ? " — auto-charge deferred to " + bufferedSched : "")
   });
 }
 
