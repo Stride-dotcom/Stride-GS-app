@@ -395,6 +395,11 @@ export function Payments() {
   const [payLinkResult, setPayLinkResult] = useState<string | null>(null);
   const [sendingPayLink, setSendingPayLink] = useState<string | null>(null); // QB# being sent
   const [linkingInvoice, setLinkingInvoice] = useState<string | null>(null); // QB# being linked (Review tab)
+  // v38.132.0 — list of dataset names whose Supabase fetch returned null on the
+  // last load. Distinguishes "empty data" from "fetch failed silently". Banner
+  // surfaces these so silent schema/RLS regressions don't turn into
+  // mysterious-empty-page bugs (the scheduled_date PGRST204 hid for days).
+  const [loadWarnings, setLoadWarnings] = useState<string[]>([]);
   const [showResolvedExceptions, setShowResolvedExceptions] = useState(false);
   const [invoiceStatusFilter, setInvoiceStatusFilter] = useState<string>('CREATED');
   const [invoiceSortCol, setInvoiceSortCol] = useState<string>('');
@@ -425,6 +430,7 @@ export function Payments() {
     if (noCache) setNextFetchNoCache();
     setRefreshing(true);
     setError(null);
+    setLoadWarnings([]);
     try {
       // Session 69 — Supabase-first for the 5 list datasets. Config stays GAS (live Script Properties).
       // When noCache=true (explicit refresh button), skip Supabase to get the freshest data.
@@ -438,6 +444,14 @@ export function Payments() {
           fetchStaxCustomersFromSupabase(),
           fetchStaxRunLogFromSupabase(),
         ]);
+        // Track which datasets returned null so the banner can surface
+        // silent failures (schema drift, RLS regressions, network errors).
+        const sbWarnings: string[] = [];
+        if (!sbInv) sbWarnings.push('invoices');
+        if (!sbCharges) sbWarnings.push('charges');
+        if (!sbExc) sbWarnings.push('exceptions');
+        if (!sbCust) sbWarnings.push('customers');
+        if (!sbLog) sbWarnings.push('run log');
         if (sbInv) setInvoices(sbInv.invoices);
         if (sbCharges) setCharges(sbCharges.charges);
         if (sbExc) setExceptions(sbExc.exceptions);
@@ -451,7 +465,7 @@ export function Payments() {
         }).catch(() => {});
         // If any Supabase table returned null, fall through to GAS for that specific dataset.
         // In practice the tables should be seeded before first production use.
-        if (!sbInv || !sbCharges || !sbExc || !sbCust || !sbLog) {
+        if (sbWarnings.length > 0) {
           const [invRes, chargeRes, excRes, custRes, logRes] = await Promise.all([
             !sbInv ? fetchStaxInvoices() : Promise.resolve({ ok: true, data: null } as any),
             !sbCharges ? fetchStaxChargeLog() : Promise.resolve({ ok: true, data: null } as any),
@@ -459,11 +473,28 @@ export function Payments() {
             !sbCust ? fetchStaxCustomers() : Promise.resolve({ ok: true, data: null } as any),
             !sbLog ? fetchStaxRunLog() : Promise.resolve({ ok: true, data: null } as any),
           ]);
-          if (invRes.ok && invRes.data) setInvoices(invRes.data.invoices);
-          if (chargeRes.ok && chargeRes.data) setCharges(chargeRes.data.charges);
-          if (excRes.ok && excRes.data) setExceptions(excRes.data.exceptions);
-          if (custRes.ok && custRes.data) setCustomers(custRes.data.customers);
-          if (logRes.ok && logRes.data) setRunLog(logRes.data.entries);
+          // Track which fallbacks ALSO failed — those are real data gaps the user
+          // needs to know about. If GAS recovered the dataset, drop it from the
+          // warning list (banner stays empty for the success cases).
+          const stillWarn: string[] = [];
+          if (!sbInv && !(invRes.ok && invRes.data)) stillWarn.push('invoices');
+          else if (invRes.ok && invRes.data) setInvoices(invRes.data.invoices);
+          if (!sbCharges && !(chargeRes.ok && chargeRes.data)) stillWarn.push('charges');
+          else if (chargeRes.ok && chargeRes.data) setCharges(chargeRes.data.charges);
+          if (!sbExc && !(excRes.ok && excRes.data)) stillWarn.push('exceptions');
+          else if (excRes.ok && excRes.data) setExceptions(excRes.data.exceptions);
+          if (!sbCust && !(custRes.ok && custRes.data)) stillWarn.push('customers');
+          else if (custRes.ok && custRes.data) setCustomers(custRes.data.customers);
+          if (!sbLog && !(logRes.ok && logRes.data)) stillWarn.push('run log');
+          else if (logRes.ok && logRes.data) setRunLog(logRes.data.entries);
+          // Show one warning per dataset that's actually still missing. If GAS
+          // covered everything, downgrade to a "Supabase mirror stale" notice
+          // so the operator knows to investigate without freaking out.
+          if (stillWarn.length > 0) {
+            setLoadWarnings(stillWarn);
+          } else {
+            setLoadWarnings([`Supabase mirror returned no data for: ${sbWarnings.join(', ')} — served from GAS fallback. Run seedAllStaxToSupabase to recover.`]);
+          }
         }
         setLastUpdated(new Date());
         return;
@@ -620,6 +651,16 @@ export function Payments() {
       <div style={{ background: '#FFFFFF', borderRadius: 20, padding: 24, border: '1px solid rgba(0,0,0,0.04)' }}>
 
       {error && <div style={{ padding: '8px 14px', marginBottom: 14, borderRadius: 8, background: '#FEF2F2', border: '1px solid #FECACA', fontSize: 12, color: '#DC2626' }}>{error}</div>}
+      {loadWarnings.length > 0 && (
+        <div style={{ padding: '10px 14px', marginBottom: 14, borderRadius: 8, background: '#FFFBEB', border: '1px solid #FCD34D', fontSize: 12, color: '#92400E', display: 'flex', alignItems: 'flex-start', gap: 8 }}>
+          <AlertTriangle size={14} style={{ flexShrink: 0, marginTop: 1 }} />
+          <div style={{ flex: 1 }}>
+            <strong>Data load warning:</strong>{' '}
+            {loadWarnings.length === 1 && loadWarnings[0].includes('Supabase mirror') ? loadWarnings[0] : `Failed to load: ${loadWarnings.join(', ')}. Check the browser console (F12) for the underlying error code, then re-run seedAllStaxToSupabase or apply any pending Supabase migration.`}
+          </div>
+          <button onClick={() => setLoadWarnings([])} style={{ marginLeft: 'auto', background: 'none', border: 'none', cursor: 'pointer', color: '#92400E', fontSize: 16 }}>&times;</button>
+        </div>
+      )}
       {chargeResult && <div style={{ padding: '8px 14px', marginBottom: 14, borderRadius: 8, background: chargeResult.includes('DRY RUN') ? '#FFFBEB' : '#F0FDF4', border: `1px solid ${chargeResult.includes('DRY RUN') ? '#FCD34D' : '#BBF7D0'}`, fontSize: 12, color: chargeResult.includes('DRY RUN') ? '#92400E' : '#166534', display: 'flex', alignItems: 'center', gap: 8 }}><CheckCircle2 size={14} /> {chargeResult} <button onClick={() => setChargeResult(null)} style={{ marginLeft: 'auto', background: 'none', border: 'none', cursor: 'pointer', color: chargeResult.includes('DRY RUN') ? '#92400E' : '#166534', fontSize: 16 }}>&times;</button></div>}
       {/* ProcessingOverlay for runningCharges removed — use Charge Selected instead */}
       <ProcessingOverlay visible={creatingInvoices} message="Creating Stax invoices..." />

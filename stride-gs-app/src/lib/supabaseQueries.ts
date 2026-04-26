@@ -2958,7 +2958,11 @@ interface SupabaseStaxInvoiceRow {
 export async function fetchStaxInvoicesFromSupabase(): Promise<StaxInvoicesResponse | null> {
   try {
     const { data, error } = await supabase.from('stax_invoices').select('*');
-    if (error || !data) return null;
+    if (error) {
+      console.error('[supabase] stax_invoices fetch failed:', error.code, error.message, error.details);
+      return null;
+    }
+    if (!data) return null;
     const invoices = (data as SupabaseStaxInvoiceRow[]).map(r => ({
       rowIndex: r.row_index ?? 0,
       qbInvoice: r.qb_invoice_no,
@@ -3003,7 +3007,11 @@ export async function fetchStaxChargeLogFromSupabase(): Promise<StaxChargeLogRes
       .select('*')
       .order('timestamp', { ascending: false })
       .limit(2000);
-    if (error || !data) return null;
+    if (error) {
+      console.error('[supabase] stax_charges fetch failed:', error.code, error.message, error.details);
+      return null;
+    }
+    if (!data) return null;
     const charges = (data as SupabaseStaxChargeRow[]).map(r => ({
       timestamp: r.timestamp ?? '',
       qbInvoice: r.qb_invoice_no ?? '',
@@ -3040,7 +3048,11 @@ export async function fetchStaxExceptionsFromSupabase(): Promise<StaxExceptionsR
       .select('*')
       .order('timestamp', { ascending: false })
       .limit(2000);
-    if (error || !data) return null;
+    if (error) {
+      console.error('[supabase] stax_exceptions fetch failed:', error.code, error.message, error.details);
+      return null;
+    }
+    if (!data) return null;
     const exceptions = (data as SupabaseStaxExceptionRow[]).map(r => ({
       timestamp: r.timestamp ?? '',
       qbInvoice: r.qb_invoice_no ?? '',
@@ -3072,7 +3084,11 @@ interface SupabaseStaxCustomerRow {
 export async function fetchStaxCustomersFromSupabase(): Promise<StaxCustomersResponse | null> {
   try {
     const { data, error } = await supabase.from('stax_customers').select('*');
-    if (error || !data) return null;
+    if (error) {
+      console.error('[supabase] stax_customers fetch failed:', error.code, error.message, error.details);
+      return null;
+    }
+    if (!data) return null;
     const customers = (data as SupabaseStaxCustomerRow[]).map(r => ({
       qbName: r.qb_name,
       staxCompany: r.stax_company ?? '',
@@ -3153,7 +3169,11 @@ export async function fetchStaxRunLogFromSupabase(): Promise<StaxRunLogResponse 
       .select('*')
       .order('timestamp', { ascending: false })
       .limit(500);
-    if (error || !data) return null;
+    if (error) {
+      console.error('[supabase] stax_run_log fetch failed:', error.code, error.message, error.details);
+      return null;
+    }
+    if (!data) return null;
     const entries = (data as SupabaseStaxRunLogRow[]).map(r => ({
       timestamp: r.timestamp ?? '',
       fn: r.fn ?? '',
