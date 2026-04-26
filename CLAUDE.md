@@ -9,6 +9,19 @@
 **Local path:** `C:\dev\Stride-GS-app` — this is the ONLY canonical location. Do NOT edit from Dropbox.
 **Supabase:** `uqplppugeickmamycpuz` — `https://uqplppugeickmamycpuz.supabase.co`
 
+---
+
+## ⚠️ CRITICAL: Branching Rules
+
+- **NEVER commit directly to `source`.** All work must happen on a feature branch.
+- Every builder creates their own branch off `source` (e.g. `fix/bug-name`, `feat/feature-name`).
+- When done: open a PR against `source`, get it reviewed, then squash-merge.
+- Before starting work: always `git checkout source && git pull origin source` to get latest.
+- If another builder's PR merges while you're working: rebase your branch (`git rebase source`) before opening your PR.
+- Multiple builders CAN work simultaneously — branches keep everyone's work isolated.
+
+---
+
 ## Repo layout
 
 ```
@@ -47,7 +60,7 @@ Dropbox\Apps\GS Inventory\credentials\.sync-config.json  →  AppScripts\stride-
 
 ### Must-do
 
-- **BRANCH FIRST.** `git checkout -b feat/<stream>/<desc>` from `source`. Streams: `feat/warehouse/*`, `feat/delivery/*`, `feat/fix/*`. Use `gh pr create --base source` then `gh pr merge --squash --delete-branch`. Never commit directly to `source`.
+- **BRANCH FIRST.** See [⚠️ CRITICAL: Branching Rules](#-critical-branching-rules) above. Stream prefixes used here: `feat/warehouse/*`, `feat/delivery/*`, `feat/fix/*`.
 - **Deploy AFTER merge.** `git checkout source && git pull origin source` then deploy commands.
 - **Deploy before reporting done.** Execute via Bash, don't just describe.
 - **TypeScript must stay clean** — run `npx tsc --noEmit` (or `node node_modules/typescript/lib/tsc.js --noEmit`) before finishing.
@@ -92,7 +105,7 @@ Every change must go through this sequence before being shipped:
 2. **Type-check** — `node node_modules/typescript/lib/tsc.js --noEmit` (zero errors required)
 3. **Full build** — `npm run build` (catches real bundler/vite errors the type-check misses)
 4. **Code review** — spawn an Opus 4.7 subagent to review all diffs before committing
-5. **Only after review passes:** branch → commit → `gh pr create --base source` → `gh pr merge --squash --delete-branch` → deploy
+5. **Only after review passes:** follow the [⚠️ CRITICAL: Branching Rules](#-critical-branching-rules) — branch → commit → `gh pr create --base source` → `gh pr merge --squash --delete-branch` → deploy
 
 Do not skip steps. `tsc --noEmit` passing is not sufficient — always run `npm run build` to catch vite-level errors.
 
