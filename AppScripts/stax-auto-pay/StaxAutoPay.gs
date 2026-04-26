@@ -1,5 +1,15 @@
 // ============================================================
-// STAX AUTO-PAY TOOL — v4.7.2
+// STAX AUTO-PAY TOOL — v4.7.3
+// v4.7.3 (2026-04-26): Close every Stax-sheet→Supabase mirror gap in
+//         the Auto-Pay UI handlers so the Payments React app stays
+//         in sync regardless of which menu action the operator runs.
+//           - pullStaxCustomers + autoPopulateCustomers + syncCustomers
+//             → _sbResyncAllStaxCustomers (new helper)
+//           - sendPayLinks + sendSinglePayLink + deduplicateInvoices
+//             → _sbResyncAllStaxInvoices
+//           - _logException → inline _sbBatchUpsert("stax_exceptions", …)
+//         Companion to StrideAPI.gs v38.133.0 which closes the same
+//         gaps on the React-API code path.
 // v4.7.2 (2026-04-26): Three fixes for the Stax→Supabase resync that
 //         was rolling back the entire batch when the Invoices sheet
 //         had any duplicate QB Invoice # rows (Postgres code 21000:
