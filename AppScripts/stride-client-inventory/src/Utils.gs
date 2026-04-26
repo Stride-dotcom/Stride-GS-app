@@ -1,5 +1,11 @@
 /* ===================================================
-   Utils.gs — v3.4.0 — 2026-03-31 11:30 AM PST
+   Utils.gs — v3.5.0 — 2026-04-26 PST — Cleanup Item Photo Folders + disable per-item folder creation
+   v3.5.0: New StrideCleanupItemPhotoFolders_ (dry-run + execute) trashes
+           empty per-item Drive folders under PHOTOS_FOLDER_ID and strips
+           the corresponding Inventory.Item ID hyperlinks. Non-empty
+           folders are skipped and reported on a Cleanup_Report tab.
+           Also disabled per-item folder creation in StrideFixMissingFolders.
+   v3.4.0: Prior — see git history.
    =================================================== */
 
 /* ============================================================
@@ -1393,15 +1399,9 @@ function StrideFixMissingFolders() {
           var idRt = inv.getRange(i, itemIdCol).getRichTextValue();
           var hasIdLink = idRt && idRt.getLinkUrl();
 
-          if (!hasIdLink) {
-            // Create item folder under photos folder
-            var itemFolderUrl = createItemFolder_(photosUrl, itemIdVal);
-            if (itemFolderUrl) {
-              var rt = SpreadsheetApp.newRichTextValue().setText(itemIdVal).setLinkUrl(itemFolderUrl).build();
-              inv.getRange(i, itemIdCol).setRichTextValue(rt);
-              fixed.inventory++;
-            }
-          }
+          // Per-item Drive folders deprecated — clients found them confusing
+          // and they were never used for actual storage (photos live in
+          // Supabase). Item ID hyperlinks intentionally left unset.
 
           // Check if Shipment # has a hyperlink
           var shipRt = inv.getRange(i, shipCol).getRichTextValue();
@@ -1774,4 +1774,119 @@ function StrideClearFilters() {
     if (filter) filter.remove();
   } catch (_) {}
   // silent — no popup
+}
+
+/* ============================================================
+   CLEANUP ITEM PHOTO FOLDERS
+   Per-item Drive folders (named with the Item ID, under
+   PHOTOS_FOLDER_ID) were created historically but never used —
+   all photos live in Supabase. Clients found the empty folders
+   confusing. This trashes empty per-item folders and strips the
+   Inventory Item ID hyperlinks. Non-empty folders are skipped
+   and reported.
+
+   Match strategy: a folder is considered "per-item" iff its name
+   exactly matches an Item ID currently in the Inventory tab.
+   Anything else (Shipment #, TASK-*, REPAIR-*, WC-*, etc.) is
+   left alone.
+   ============================================================ */
+
+function StrideCleanupItemPhotoFoldersDryRun() { StrideCleanupItemPhotoFolders_(false); }
+function StrideCleanupItemPhotoFoldersExecute() { StrideCleanupItemPhotoFolders_(true); }
+
+function StrideCleanupItemPhotoFolders_(execute) {
+  var ss = SpreadsheetApp.getActive();
+  var ui = SpreadsheetApp.getUi();
+  var photosId = getSetting_(ss, "PHOTOS_FOLDER_ID") || getSetting_(ss, "DRIVE_PARENT_FOLDER_ID");
+  if (!photosId) { ui.alert("PHOTOS_FOLDER_ID is not set in Settings."); return; }
+
+  var mode = execute ? "EXECUTE" : "DRY RUN";
+  var confirm = ui.alert(
+    "Cleanup Item Photo Folders — " + mode,
+    "Scans the parent Photos folder for subfolders whose name matches an Item ID in the Inventory tab. " +
+    "Empty matches will be moved to Trash; non-empty matches are left alone and logged.\n\n" +
+    (execute ? "This WILL trash empty folders and strip Item ID hyperlinks." : "DRY RUN — nothing will be modified.") +
+    "\n\nProceed?",
+    ui.ButtonSet.YES_NO);
+  if (confirm !== ui.Button.YES) return;
+
+  // Build set of Item IDs from Inventory
+  var inv = ss.getSheetByName(CI_SH.INVENTORY);
+  if (!inv || inv.getLastRow() < 2) { ui.alert("Inventory tab is empty or missing."); return; }
+  var invMap = getHeaderMap_(inv);
+  var itemIdCol = invMap["Item ID"];
+  if (!itemIdCol) { ui.alert("Item ID column not found on Inventory."); return; }
+  var lastRow = getLastDataRow_(inv);
+  var itemIdSet = {};
+  var itemIdRows = {}; // id -> [rowNumbers]
+  var idValues = inv.getRange(2, itemIdCol, lastRow - 1, 1).getValues();
+  for (var r = 0; r < idValues.length; r++) {
+    var v = String(idValues[r][0] || "").trim();
+    if (!v) continue;
+    itemIdSet[v] = true;
+    if (!itemIdRows[v]) itemIdRows[v] = [];
+    itemIdRows[v].push(r + 2);
+  }
+
+  // Walk parent Photos folder
+  var parent;
+  try { parent = DriveApp.getFolderById(photosId); }
+  catch (e) { ui.alert("Cannot open Photos folder: " + e.message); return; }
+
+  var report = [["Folder Name", "Folder ID", "Action", "File Count", "Subfolder Count", "Notes"]];
+  var trashed = 0, skippedNonEmpty = 0, hyperlinksStripped = 0;
+
+  var folders = parent.getFolders();
+  while (folders.hasNext()) {
+    var f = folders.next();
+    var name = f.getName();
+    if (!itemIdSet[name]) continue; // not a per-item folder
+
+    var fileCount = 0, subCount = 0;
+    var fIt = f.getFiles(); while (fIt.hasNext()) { fIt.next(); fileCount++; if (fileCount > 0) break; }
+    var sIt = f.getFolders(); while (sIt.hasNext()) { sIt.next(); subCount++; if (subCount > 0) break; }
+    var isEmpty = (fileCount === 0 && subCount === 0);
+
+    if (!isEmpty) {
+      report.push([name, f.getId(), "SKIP (non-empty)", fileCount, subCount, "Manual review"]);
+      skippedNonEmpty++;
+      continue;
+    }
+
+    if (execute) {
+      try {
+        f.setTrashed(true);
+        trashed++;
+        // Strip hyperlinks on Inventory rows for this Item ID
+        var rows = itemIdRows[name] || [];
+        for (var i = 0; i < rows.length; i++) {
+          var rt = SpreadsheetApp.newRichTextValue().setText(name).build();
+          inv.getRange(rows[i], itemIdCol).setRichTextValue(rt);
+          hyperlinksStripped++;
+        }
+        report.push([name, f.getId(), "TRASHED", 0, 0, "Hyperlinks stripped on " + rows.length + " row(s)"]);
+      } catch (err) {
+        report.push([name, f.getId(), "ERROR", 0, 0, String(err)]);
+      }
+    } else {
+      report.push([name, f.getId(), "WOULD TRASH", 0, 0, "Dry run"]);
+      trashed++; // count for summary
+    }
+  }
+
+  // Write report tab
+  var reportName = "Cleanup_Report";
+  var rs = ss.getSheetByName(reportName);
+  if (rs) rs.clear(); else rs = ss.insertSheet(reportName);
+  rs.getRange(1, 1, report.length, report[0].length).setValues(report);
+  rs.getRange(1, 1, 1, report[0].length).setFontWeight("bold");
+  rs.autoResizeColumns(1, report[0].length);
+
+  ui.alert(
+    "Cleanup " + mode + " complete",
+    (execute ? "Trashed: " : "Would trash: ") + trashed + "\n" +
+    "Skipped (non-empty): " + skippedNonEmpty + "\n" +
+    (execute ? "Hyperlinks stripped: " + hyperlinksStripped + "\n" : "") +
+    "\nFull report on the '" + reportName + "' tab.",
+    ui.ButtonSet.OK);
 }

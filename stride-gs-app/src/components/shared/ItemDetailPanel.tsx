@@ -866,7 +866,6 @@ export function ItemDetailPanel({
   // entry only included when its URL actually exists.
   const pageDriveFolders: DriveFolderLink[] = [
     ...(shipmentFolderUrl ? [{ label: `Shipment ${item.shipmentNumber || 'Folder'}`, url: shipmentFolderUrl }] : []),
-    ...(photosFolderId ? [{ label: 'Photos Folder', url: `https://drive.google.com/drive/folders/${photosFolderId}` }] : []),
     ...entityFolderButtons,
   ];
 
