@@ -1,5 +1,14 @@
 /* ===================================================
-   StrideAPI.gs — v38.129.0 — 2026-04-26 PST — Fix Auto Charge boolean-FALSE detection in Stax sheet read paths
+   StrideAPI.gs — v38.130.0 — 2026-04-26 PST — Disable per-item Drive folder creation (deprecated)
+   v38.130.0: Per-item Drive folders (created under PHOTOS_FOLDER_ID and
+              hyperlinked from Inventory.Item ID) are deprecated. They
+              were never used for actual storage — photos live in
+              Supabase — and clients found the empty folders confusing.
+              Removed creation calls in api_hyperlinkReceivedItems_
+              (intake flow) and api_StrideFixMissingFolders. Existing
+              folders cleaned up via StrideCleanupItemPhotoFolders_ in
+              the client inventory script.
+   v38.129.0: Fix Auto Charge boolean-FALSE detection in Stax sheet read paths
    v38.129.0: Auto Charge column read bug. The Stax Invoices sheet's
               "Auto Charge" cell can be a JS boolean false (Sheets returns
               the native checkbox value), the string "FALSE"/"TRUE", or
@@ -13367,20 +13376,7 @@ function api_hyperlinkReceivedItems_(ss, settings, invSheet, taskSheet, invInser
     var itemId = String(items[i].itemId || "").trim();
     if (!itemId) continue;
     try {
-      // Item ID → per-item folder
-      if (invItemIdCol && photosFolder) {
-        var itemFolderUrl = "";
-        try {
-          var itemIt = photosFolder.getFoldersByName(itemId);
-          var itemFolder = itemIt.hasNext() ? itemIt.next() : photosFolder.createFolder(itemId);
-          itemFolderUrl = "https://drive.google.com/drive/folders/" + itemFolder.getId();
-        } catch (folderErr) { /* leave blank */ }
-        if (itemFolderUrl) {
-          invSheet.getRange(row, invItemIdCol).setRichTextValue(
-            SpreadsheetApp.newRichTextValue().setText(itemId).setLinkUrl(itemFolderUrl).build()
-          );
-        }
-      }
+      // Per-item Drive folders deprecated — see StrideCleanupItemPhotoFolders.
       // Shipment # → shipment folder (canonical Shipments/<shipNo>)
       if (invShipCol && shipRichText) {
         invSheet.getRange(row, invShipCol).setRichTextValue(shipRichText);
@@ -27440,16 +27436,7 @@ function handleFixMissingFolders_(payload) {
         try {
           var itemIdVal = String(inv.getRange(i, itemIdCol).getValue() || "").trim();
           if (!itemIdVal) continue;
-          var idRt = inv.getRange(i, itemIdCol).getRichTextValue();
-          if (!idRt || !idRt.getLinkUrl()) {
-            var itemFolderUrl = api_createItemFolder_(photosUrl, itemIdVal);
-            if (itemFolderUrl) {
-              inv.getRange(i, itemIdCol).setRichTextValue(
-                SpreadsheetApp.newRichTextValue().setText(itemIdVal).setLinkUrl(itemFolderUrl).build()
-              );
-              fixed.inventory++;
-            }
-          }
+          // Per-item Drive folders deprecated.
           var shipRt = inv.getRange(i, shipCol).getRichTextValue();
           if (!shipRt || !shipRt.getLinkUrl()) {
             var shipVal = String(inv.getRange(i, shipCol).getValue() || "").trim();

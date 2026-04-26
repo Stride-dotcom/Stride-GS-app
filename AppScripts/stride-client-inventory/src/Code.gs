@@ -1,5 +1,9 @@
 /* ===================================================
-   Code.gs — v4.6.0 — 2026-04-10
+   Code.gs — v4.7.0 — 2026-04-26 PST — Add Cleanup Item Photo Folders menu items
+   v4.7.0: Stride Admin menu: added "Cleanup Item Photo Folders (dry run)"
+           and "(execute)" entries. Backed by StrideCleanupItemPhotoFolders_
+           in Utils.gs — trashes empty per-item Drive folders that were
+           historically created but never used (photos live in Supabase).
    v4.6.0: Inventory schema adds "Transfer Date" column (between Release Date and Status).
            Used by storage billing to split charges at the transfer cutover.
            Non-destructive — added to both fresh-setup invHeaders and runUpdateClientHeaders_'s invExpected.
@@ -314,6 +318,8 @@ function onOpen() {
     .addItem("Import Inventory", "StrideImportInventory")
     .addItem("Sync Autocomplete DB", "StrideSyncAutocompleteDB")
     .addItem("Fix Missing Folders & Links", "StrideFixMissingFolders")
+    .addItem("Cleanup Item Photo Folders (dry run)", "StrideCleanupItemPhotoFoldersDryRun")
+    .addItem("Cleanup Item Photo Folders (execute)", "StrideCleanupItemPhotoFoldersExecute")
     .addSeparator()
     // — Email & Docs —
     .addItem("Re-send Email", "StrideResendEmail")
