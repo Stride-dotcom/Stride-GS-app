@@ -1,5 +1,31 @@
 /* ===================================================
-   StrideAPI.gs — v38.133.0 — 2026-04-26 PST — Hotfix: wire the v38.128.0 price-list sync endpoints into the POST dispatch
+   StrideAPI.gs — v38.134.0 — 2026-04-26 PST — Close every Stax sheet→Supabase mirror gap
+   v38.134.0: Comprehensive close on all paths that mutated the Stax
+              sheet without mirroring to Supabase, the root cause of
+              the Payments app showing stale data after every action.
+              Pattern: each handler that writes to Invoices /
+              Customers / Exceptions / Charge Log now follows the
+              sheet write with the appropriate api_sb*Resync* call.
+              Also patched the two leaf appenders (stax_appendException_,
+              stax_appendChargeLog_) to mirror inline so any future
+              caller gets write-through for free.
+              Handlers patched:
+                - handleSaveStaxCustomerMapping_  → api_sbResyncStaxCustomers_
+                - handleAutoMatchStaxCustomers_   → api_sbResyncAllStaxCustomers_
+                - handlePullStaxCustomers_        → api_sbResyncAllStaxCustomers_
+                - handleSyncStaxCustomers_        → api_sbResyncAllStaxCustomers_
+                - handleStaxRefreshCustomerIds_   → api_sbResyncStaxInvoices_
+                - handleCreateStaxInvoices_       → api_sbResyncStaxInvoices_
+                - handleSendStaxPayLink_          → api_sbResyncStaxInvoice_
+                - handleSendStaxPayLinks_         → api_sbResyncStaxInvoices_
+              New helpers:
+                - api_sbResyncAllStaxCustomers_(): full Customers sheet
+                  → stax_customers upsert
+                - api_sbResyncStaxCustomers_(qbNames[]): subset by qb_name
+              Companion change in StaxAutoPay.gs v4.7.3 covers the
+              parallel UI handlers (pullStaxCustomers, syncCustomers,
+              autoPopulateCustomers, sendPayLinks, sendSinglePayLink,
+              deduplicateInvoices, _logException).
    v38.133.0: HOTFIX — handleImportPriceListToSupabase_ and
               handleSyncSingleServiceToSheet_ were only wired into the
               GET dispatch in v38.128.0. The React UI calls both via
@@ -7,6 +33,7 @@
               action" and the per-save sheet auto-sync silently failed
               (errors swallowed by pushRowToSheet's console.warn).
               Added matching cases in the doPost switch.
+   v38.132.0: Surface silent Supabase write failures in stax_run_log + Run Log sheet
    v38.132.0: Better error logging for Supabase write-through. The
               scheduled_date PGRST204 schema-cache bug went unnoticed
               for days because supabaseBatchUpsert_'s outer try/catch
