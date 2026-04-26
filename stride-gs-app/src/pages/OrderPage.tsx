@@ -841,6 +841,44 @@ export function OrderPage() {
       const { error: err } = await supabase.from('dt_orders').update(patch).eq('id', order.id);
       if (err) throw err;
 
+      // If the inline edit flipped review_status into a state that
+      // emails the submitter (revision_requested / rejected), fire the
+      // notify-order-revision Edge Function. The footer Reject /
+      // Request Revision buttons already do this, but operators can
+      // also reach the same states via the Review-Status dropdown
+      // inside the inline edit form — without this branch those would
+      // silently skip the email. Best-effort: a send failure logs warn
+      // but doesn't unwind the saved status.
+      const reviewActionable = (edit.reviewStatus === 'revision_requested' || edit.reviewStatus === 'rejected')
+        && edit.reviewStatus !== order.reviewStatus;
+      if (reviewActionable) {
+        let reviewerName = 'Stride Reviewer';
+        if (reviewerUid) {
+          const { data: prof } = await supabase
+            .from('profiles')
+            .select('display_name, email')
+            .eq('id', reviewerUid)
+            .maybeSingle();
+          reviewerName = (prof?.display_name as string) || (prof?.email as string) || reviewerName;
+        }
+        try {
+          const { data, error: invokeErr } = await supabase.functions.invoke('notify-order-revision', {
+            body: {
+              orderId: order.id,
+              action:  edit.reviewStatus,
+              reviewerName,
+              reviewNotes: edit.reviewNotes.trim(),
+            },
+          });
+          if (invokeErr) console.warn('[OrderPage] notify-order-revision invoke error:', invokeErr.message);
+          else if (data && (data as { ok?: boolean }).ok === false) {
+            console.warn('[OrderPage] notify-order-revision returned ok:false', data);
+          }
+        } catch (e) {
+          console.warn('[OrderPage] notify-order-revision threw', e);
+        }
+      }
+
       setEditing(false);
       // Refresh from Supabase so local copy reflects persisted data
       const fresh = await fetchDtOrderByIdFromSupabase(order.id);
