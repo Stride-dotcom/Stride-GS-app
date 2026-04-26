@@ -30,12 +30,21 @@
  *                     when Stax succeeded. postQboSyncCatalogItem now
  *                     forces an 8s timeout, so a wedged QBO leg surfaces
  *                     as "QBO: <timeout msg>" while staxOk still flips.
+ *
+ * v5 2026-04-25 PST — auto-sync to MPL Price_List sheet on every create /
+ *                     update. Replaces the manual "Sync to Sheet" button
+ *                     on PriceList. Pure fire-and-forget — failures land
+ *                     in console.warn only (sheet is a fallback cache for
+ *                     the Supabase-primary billing path; admin can run
+ *                     the full handleSyncPriceListFromSupabase_ from the
+ *                     Parity Monitor to recover). Skips the round trip
+ *                     when no sheet-mirrored field changed.
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { supabase } from '../lib/supabase';
 import { entityEvents } from '../lib/entityEvents';
 import { useAuth } from '../contexts/AuthContext';
-import { postQboSyncCatalogItem } from '../lib/api';
+import { postQboSyncCatalogItem, syncSingleServiceToSheet } from '../lib/api';
 
 // ─── Types ────────────────────────────────────────────────────────────────
 
@@ -292,6 +301,64 @@ function didExternalRelevantFieldsChange(
   });
 }
 
+// v38.128.0 — fields mirrored into the MPL Price_List sheet by the
+// syncSingleServiceToSheet GAS handler. UI-only fields and delivery-only
+// extensions are excluded so a tab reorder or delivery toggle doesn't
+// trigger a sheet round trip.
+//
+// `description` is intentionally omitted: the Price_List sheet has no
+// Description column today and handleSyncSingleServiceToSheet_ does not
+// setByHeader for it. Keep this list aligned with the GAS handler's
+// setByHeader call list when the sheet schema grows.
+const SHEET_SYNC_FIELDS: readonly (keyof CatalogService)[] = [
+  'code', 'name', 'category', 'active', 'billIfPass', 'billIfFail',
+  'showAsTask', 'taxable', 'unit', 'billing', 'flatRate', 'displayOrder',
+  'rates', 'xxlRate', 'times',
+] as const;
+
+function didSheetRelevantFieldsChange(
+  before: CatalogService,
+  after: CatalogService,
+): boolean {
+  return SHEET_SYNC_FIELDS.some(f => {
+    const a = before[f];
+    const b = after[f];
+    if (typeof a === 'object' || typeof b === 'object') {
+      return JSON.stringify(a) !== JSON.stringify(b);
+    }
+    return a !== b;
+  });
+}
+
+/**
+ * v38.128.0 — fire-and-forget per-row push to the MPL Price_List sheet so
+ * the sheet stays in sync as a fallback cache after every Supabase write.
+ *
+ * Deliberately NOT plumbed into syncError state: failures here are pure
+ * background telemetry. The sheet is a fallback for the Supabase-primary
+ * billing path, so a stale sheet row is recoverable (admin can run the
+ * full handleSyncPriceListFromSupabase_ from the Parity Monitor) and is
+ * not user-visible. Surfacing every transient GAS hiccup as a banner
+ * would only cause noise — console.warn is the right channel.
+ *
+ * No abort signal: the request intentionally outlives unmount so a save
+ * triggered just before the user navigates away still mirrors to the
+ * sheet. The 8s apiPost timeout prevents the request from leaking forever.
+ */
+function pushRowToSheet(code: string): void {
+  if (!code) return;
+  void syncSingleServiceToSheet(code).then(
+    (result) => {
+      if (!result.ok) {
+        console.warn(`[catalog-sheet-sync] ${code}: ${result.error ?? 'unknown error'}`);
+      }
+    },
+    (err) => {
+      console.warn(`[catalog-sheet-sync] ${code}:`, err);
+    },
+  );
+}
+
 // ─── External catalog sync (best-effort, non-blocking) ───────────────────
 
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL as string;
@@ -464,6 +531,9 @@ export function useServiceCatalog(): UseServiceCatalogResult {
     setServices(prev => [...prev, created].sort((a, b) => a.displayOrder - b.displayOrder));
     // Best-effort sync to Stax + QBO (non-blocking, surfaces failures via syncError)
     void runBackgroundSync(created);
+    // v38.128.0 — also push to the MPL Price_List sheet so the fallback
+    // cache covers the new row. Pure fire-and-forget (no syncError surface).
+    pushRowToSheet(created.code);
     return created;
   }, [runBackgroundSync]);
 
@@ -560,6 +630,12 @@ export function useServiceCatalog(): UseServiceCatalogResult {
     // per save.
     if (didExternalRelevantFieldsChange(before, after)) {
       void runBackgroundSync(after);
+    }
+    // v38.128.0 — fire-and-forget push to the MPL Price_List sheet.
+    // Skip when no sheet-mirrored field changed (e.g., only delivery-only
+    // toggles flipped) so we don't wake a GAS handler for nothing.
+    if (didSheetRelevantFieldsChange(before, after)) {
+      pushRowToSheet(after.code);
     }
     return after;
   }, [services, user, runBackgroundSync]);

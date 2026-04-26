@@ -1,5 +1,32 @@
 /* ===================================================
-   StrideAPI.gs — v38.127.0 — 2026-04-25 PST — Supabase-primary cutover for api_lookupRate_; sheet (Price_Cache) demoted to fallback
+   StrideAPI.gs — v38.128.0 — 2026-04-25 PST — Sheet→Supabase one-time import + per-save Supabase→Sheet single-row sync
+   v38.128.0: Two new admin-gated dispatch endpoints to support the
+              service_catalog auto-sync flow:
+              (1) handleImportPriceListToSupabase_ — one-time backfill
+                  reading the MPL Price_List sheet and inserting any
+                  codes not already present in Supabase service_catalog.
+                  Idempotent (skip-on-duplicate via Prefer:
+                  resolution=ignore-duplicates), rate-limited to 5/min,
+                  and returns {total_sheet, skipped, inserted, imported_at}.
+                  Supabase wins on conflicts so this never overwrites
+                  edits made through the React UI.
+              (2) handleSyncSingleServiceToSheet_ — per-save single-row
+                  push from Supabase to the Price_List sheet. Called
+                  fire-and-forget by useServiceCatalog after each
+                  create/update so the sheet stays in sync without
+                  the user having to click the manual sync button.
+                  Locates the existing row by code (case-normalized)
+                  and updates in place, or appends a new row when the
+                  code is missing. Invalidates the api_pricing
+                  CacheService entry. Rate-limited to 120/min for
+                  the per-save hot path (a bulk display-order shuffle
+                  could trip a tighter 60/min limit silently, since
+                  the React side swallows errors per spec). Returns
+                  noop (not error) when the code is missing from
+                  Supabase to keep fire-and-forget callers quiet.
+              Both functions reuse the column-header mapping convention
+              from handleSyncPriceListFromSupabase_, which remains the
+              source-of-truth for full Supabase→Sheet bulk pushes.
    v38.127.0: api_lookupRate_ flipped from sheet-primary/Supabase-shadow to
               Supabase-primary/sheet-fallback. service_catalog is now the
               authoritative source for billing rates. Sheet read is retained
@@ -5136,6 +5163,8 @@ function doGet(e) {
       case "getClients":      return handleGetClientsAuthed_(callerEmail, params.includeInactive === "1");
       case "getPricing":      return withActiveUserGuard_(callerEmail, function() { return handleGetPricing_(); });
       case "syncPriceListFromSupabase": return handleSyncPriceListFromSupabase_(params, callerEmail);
+      case "importPriceListToSupabase": return handleImportPriceListToSupabase_(params, callerEmail);
+      case "syncSingleServiceToSheet": return handleSyncSingleServiceToSheet_(params, callerEmail);
       case "getPricingParity": return withActiveUserGuard_(callerEmail, function() { return handleGetPricingParity_(); });
       case "getLocations":    return withActiveUserGuard_(callerEmail, function() { return handleGetLocations_(); });
       case "getPaymentTerms": return withActiveUserGuard_(callerEmail, function() { return handleGetPaymentTerms_(); });
@@ -8205,6 +8234,381 @@ function handleSyncPriceListFromSupabase_(params, callerEmail) {
     appended: appended,
     total_supabase: sbResp.length,
     synced_at: new Date().toISOString(),
+  });
+}
+
+/**
+ * handleImportPriceListToSupabase_ (v38.128.0) — one-time backfill of the
+ * Master Price List sheet INTO public.service_catalog. Reverse direction
+ * of handleSyncPriceListFromSupabase_.
+ *
+ * Strategy:
+ *   1. GET /rest/v1/service_catalog?select=code with service role key.
+ *   2. Build a Set of existing codes (case-normalized to upper).
+ *   3. Read MPL Price_List tab; for each row whose Service Code is NOT
+ *      in the existing set, build an insert payload.
+ *   4. Bulk POST the new rows to /rest/v1/service_catalog with
+ *      Prefer: return=minimal,resolution=ignore-duplicates so a race
+ *      between this import and a concurrent UI add doesn't error.
+ *   5. Skip (don't overwrite) rows whose code is already in Supabase —
+ *      Supabase edits take priority post-cutover (v38.127.0).
+ *
+ * Admin-only. Idempotent: re-running it after the first successful import
+ * will skip everything and report 0 inserted.
+ */
+function handleImportPriceListToSupabase_(params, callerEmail) {
+  try { rateLimit_("importPriceList_" + callerEmail, 5); } catch(e) { return errorResponse_(String(e.message), "RATE_LIMIT"); }
+
+  var callerLookup = lookupUser_(callerEmail);
+  if (!callerLookup.user)          return errorResponse_("Caller not found", "AUTH_ERROR");
+  if (!callerLookup.user.active)   return errorResponse_("Caller deactivated", "AUTH_ERROR");
+  if (callerLookup.user.role !== "admin") return errorResponse_("Admin only", "AUTH_ERROR");
+
+  var mplId = prop_("MASTER_PRICE_LIST_SPREADSHEET_ID");
+  if (!mplId) return errorResponse_("MASTER_PRICE_LIST_SPREADSHEET_ID not configured", "CONFIG_ERROR");
+
+  var sbUrl = prop_("SUPABASE_URL");
+  var sbKey = prop_("SUPABASE_SERVICE_ROLE_KEY") || prop_("SUPABASE_SERVICE_KEY");
+  if (!sbUrl || !sbKey) return errorResponse_("Supabase credentials missing", "CONFIG_ERROR");
+
+  // ── 1. Fetch existing codes from Supabase ───────────────────────────
+  var existingCodes = {};
+  try {
+    var existResp = UrlFetchApp.fetch(
+      sbUrl.replace(/\/+$/, "") + "/rest/v1/service_catalog?select=code",
+      {
+        method: "get",
+        headers: { apikey: sbKey, Authorization: "Bearer " + sbKey, Accept: "application/json" },
+        muteHttpExceptions: true,
+      }
+    );
+    if (existResp.getResponseCode() >= 300) {
+      return errorResponse_("Supabase fetch failed: " + existResp.getContentText().slice(0, 200), "SUPABASE_ERROR");
+    }
+    var existing = JSON.parse(existResp.getContentText());
+    if (Array.isArray(existing)) {
+      for (var ei = 0; ei < existing.length; ei++) {
+        var c = String((existing[ei] || {}).code || "").trim().toUpperCase();
+        if (c) existingCodes[c] = true;
+      }
+    }
+  } catch (fetchErr) {
+    return errorResponse_("Supabase fetch error: " + String(fetchErr), "SUPABASE_ERROR");
+  }
+
+  // ── 2. Read MPL Price_List sheet ────────────────────────────────────
+  var ss = SpreadsheetApp.openById(mplId);
+  var sheet = ss.getSheetByName("Price_List");
+  if (!sheet) return errorResponse_("Price_List tab not found in Master Price List", "CONFIG_ERROR");
+
+  var lastRow = sheet.getLastRow();
+  var lastCol = sheet.getLastColumn();
+  if (lastRow < 2 || lastCol < 1) {
+    return jsonResponse_({ success: true, total_sheet: 0, skipped: 0, inserted: 0, imported_at: new Date().toISOString() });
+  }
+
+  var headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0].map(function(h) { return String(h || "").trim(); });
+  var hMap = {};
+  for (var hi = 0; hi < headers.length; hi++) {
+    var normalized = headers[hi].toLowerCase().replace(/[_\s]+/g, " ").trim();
+    hMap[normalized] = hi;
+  }
+  function col(name) {
+    var key = name.toLowerCase().replace(/[_\s]+/g, " ").trim();
+    return (key in hMap) ? hMap[key] : -1;
+  }
+  function cellByHeader(row, name) {
+    var idx = col(name);
+    return idx === -1 ? "" : row[idx];
+  }
+  function numOrNull(v) {
+    if (v === "" || v == null) return null;
+    var n = Number(v);
+    return isNaN(n) ? null : n;
+  }
+  function boolFromCell_(v, defaultVal) {
+    if (v === "" || v == null) return defaultVal;
+    if (typeof v === "boolean") return v;
+    var s = String(v).trim().toUpperCase();
+    if (s === "TRUE" || s === "Y" || s === "YES" || s === "1") return true;
+    if (s === "FALSE" || s === "N" || s === "NO" || s === "0") return false;
+    return defaultVal;
+  }
+
+  var codeCol = col("service code"); if (codeCol === -1) codeCol = col("code");
+  if (codeCol === -1) return errorResponse_("Price_List is missing a Service Code column", "SCHEMA_ERROR");
+
+  var data = sheet.getRange(2, 1, lastRow - 1, lastCol).getValues();
+  var totalSheet = 0, skipped = 0;
+  var newRows = [];
+
+  for (var ri = 0; ri < data.length; ri++) {
+    var row = data[ri];
+    var code = String(row[codeCol] || "").trim().toUpperCase();
+    if (!code) continue;
+    totalSheet++;
+    if (existingCodes[code]) { skipped++; continue; }
+
+    // Build the insert payload. Mirror handleSyncPriceListFromSupabase_'s
+    // setByHeader call list, reversed.
+    var xs  = numOrNull(cellByHeader(row, "XS Rate"));
+    var s_  = numOrNull(cellByHeader(row, "S Rate"));
+    var m_  = numOrNull(cellByHeader(row, "M Rate"));
+    var l_  = numOrNull(cellByHeader(row, "L Rate"));
+    var xl_ = numOrNull(cellByHeader(row, "XL Rate"));
+    var xxl = numOrNull(cellByHeader(row, "XXL Rate"));
+    var rates = {};
+    if (xs  != null) rates.XS  = xs;
+    if (s_  != null) rates.S   = s_;
+    if (m_  != null) rates.M   = m_;
+    if (l_  != null) rates.L   = l_;
+    if (xl_ != null) rates.XL  = xl_;
+    if (xxl != null) rates.XXL = xxl;
+
+    var billingRaw = String(cellByHeader(row, "Billing") || "").trim().toLowerCase();
+    // Normalize sheet "class_based" / "flat" / blank → DB enum. Default to
+    // class_based when any per-class rate exists, else flat.
+    var billing = billingRaw === "flat" ? "flat"
+                : billingRaw === "class_based" ? "class_based"
+                : (xs != null || s_ != null || m_ != null || l_ != null || xl_ != null || xxl != null) ? "class_based"
+                : "flat";
+
+    var unit = String(cellByHeader(row, "Unit") || "").trim() || "per_item";
+
+    // null-safe: a legitimate Display Order of 0 (or Flat Rate of 0)
+    // must not be replaced by the fallback. `||` would treat 0 as falsy.
+    var dispOrder = numOrNull(cellByHeader(row, "Display Order"));
+    if (dispOrder == null) dispOrder = totalSheet * 10;
+    var flatRate  = numOrNull(cellByHeader(row, "Flat Rate"));
+    if (flatRate == null) flatRate = 0;
+
+    var payload = {
+      code: code,
+      name: String(cellByHeader(row, "Service Name") || code),
+      category: String(cellByHeader(row, "Category") || "Warehouse"),
+      billing: billing,
+      flat_rate: flatRate,
+      rates: rates,
+      xxl_rate: xxl != null ? xxl : 0,
+      unit: unit,
+      taxable: boolFromCell_(cellByHeader(row, "Taxable"), true),
+      active: boolFromCell_(cellByHeader(row, "Active"), true),
+      bill_if_pass: boolFromCell_(cellByHeader(row, "BillIfPASS"), true),
+      bill_if_fail: boolFromCell_(cellByHeader(row, "BillIfFAIL"), false),
+      show_as_task: boolFromCell_(cellByHeader(row, "Show In Task Type"), false),
+      display_order: dispOrder,
+      xs_time:  numOrNull(cellByHeader(row, "XS Time")),
+      s_time:   numOrNull(cellByHeader(row, "S Time")),
+      m_time:   numOrNull(cellByHeader(row, "M Time")),
+      l_time:   numOrNull(cellByHeader(row, "L Time")),
+      xl_time:  numOrNull(cellByHeader(row, "XL Time")),
+      xxl_time: numOrNull(cellByHeader(row, "XXL Time"))
+    };
+
+    newRows.push(payload);
+    // Mark code so a duplicate within the same sheet doesn't try to insert twice.
+    existingCodes[code] = true;
+  }
+
+  if (newRows.length === 0) {
+    return jsonResponse_({
+      success: true,
+      total_sheet: totalSheet,
+      skipped: skipped,
+      inserted: 0,
+      imported_at: new Date().toISOString()
+    });
+  }
+
+  // ── 3. Bulk insert into Supabase ────────────────────────────────────
+  var insertResp;
+  try {
+    insertResp = UrlFetchApp.fetch(
+      sbUrl.replace(/\/+$/, "") + "/rest/v1/service_catalog",
+      {
+        method: "post",
+        headers: {
+          apikey: sbKey,
+          Authorization: "Bearer " + sbKey,
+          "Content-Type": "application/json",
+          // ignore-duplicates: tolerate a race with a concurrent UI add of
+          // the same code; conflicting row stays as-is (still "skip" semantics).
+          Prefer: "return=minimal,resolution=ignore-duplicates"
+        },
+        payload: JSON.stringify(newRows),
+        muteHttpExceptions: true
+      }
+    );
+  } catch (insErr) {
+    return errorResponse_("Supabase insert error: " + String(insErr), "SUPABASE_ERROR");
+  }
+  var insertCode = insertResp.getResponseCode();
+  if (insertCode >= 300) {
+    return errorResponse_("Supabase insert failed (" + insertCode + "): " + insertResp.getContentText().slice(0, 300), "SUPABASE_ERROR");
+  }
+
+  return jsonResponse_({
+    success: true,
+    total_sheet: totalSheet,
+    skipped: skipped,
+    inserted: newRows.length,
+    imported_at: new Date().toISOString()
+  });
+}
+
+/**
+ * handleSyncSingleServiceToSheet_ (v38.128.0) — push ONE service row from
+ * Supabase service_catalog into the MPL Price_List sheet. Called fire-and-
+ * forget by the React Price List UI after every create/update so the sheet
+ * stays in sync as a fallback cache for the Supabase-primary billing path.
+ *
+ * Auth: same admin-only gate as handleSyncPriceListFromSupabase_. The full
+ * sheet sync stays as a recovery tool; this is the per-save hot path.
+ *
+ * Param: { code } — the code to fetch from Supabase and upsert into the sheet.
+ * If no row exists in Supabase for the code (e.g., deleted between save and
+ * sync), responds success=true with action="noop" so the client doesn't
+ * surface a noisy error.
+ */
+function handleSyncSingleServiceToSheet_(params, callerEmail) {
+  // 120/min: per-save hot path. Generous enough to absorb a bulk
+  // display-order shuffle (which fires N updates in quick succession)
+  // since the React caller swallows rate-limit errors per spec — we
+  // don't want silent sheet de-sync from a too-tight cap.
+  try { rateLimit_("syncOneRow_" + callerEmail, 120); } catch(e) { return errorResponse_(String(e.message), "RATE_LIMIT"); }
+
+  var callerLookup = lookupUser_(callerEmail);
+  if (!callerLookup.user)          return errorResponse_("Caller not found", "AUTH_ERROR");
+  if (!callerLookup.user.active)   return errorResponse_("Caller deactivated", "AUTH_ERROR");
+  if (callerLookup.user.role !== "admin") return errorResponse_("Admin only", "AUTH_ERROR");
+
+  var rawCode = String((params && params.code) || "").trim();
+  if (!rawCode) return errorResponse_("Missing code", "VALIDATION_ERROR");
+  var code = rawCode.toUpperCase();
+
+  var mplId = prop_("MASTER_PRICE_LIST_SPREADSHEET_ID");
+  if (!mplId) return errorResponse_("MASTER_PRICE_LIST_SPREADSHEET_ID not configured", "CONFIG_ERROR");
+
+  var sbUrl = prop_("SUPABASE_URL");
+  var sbKey = prop_("SUPABASE_SERVICE_ROLE_KEY") || prop_("SUPABASE_SERVICE_KEY");
+  if (!sbUrl || !sbKey) return errorResponse_("Supabase credentials missing", "CONFIG_ERROR");
+
+  // Fetch the single Supabase row.
+  var svc;
+  try {
+    var resp = UrlFetchApp.fetch(
+      sbUrl.replace(/\/+$/, "") + "/rest/v1/service_catalog?code=eq." + encodeURIComponent(code) + "&select=*&limit=1",
+      {
+        method: "get",
+        headers: { apikey: sbKey, Authorization: "Bearer " + sbKey, Accept: "application/json" },
+        muteHttpExceptions: true
+      }
+    );
+    if (resp.getResponseCode() >= 300) {
+      return errorResponse_("Supabase fetch failed: " + resp.getContentText().slice(0, 200), "SUPABASE_ERROR");
+    }
+    var arr = JSON.parse(resp.getContentText());
+    if (!Array.isArray(arr) || arr.length === 0) {
+      return jsonResponse_({ success: true, action: "noop", reason: "code_not_in_supabase", code: code });
+    }
+    svc = arr[0];
+  } catch (fetchErr) {
+    return errorResponse_("Supabase fetch error: " + String(fetchErr), "SUPABASE_ERROR");
+  }
+
+  var ss = SpreadsheetApp.openById(mplId);
+  var sheet = ss.getSheetByName("Price_List");
+  if (!sheet) return errorResponse_("Price_List tab not found in Master Price List", "CONFIG_ERROR");
+
+  var lastRow = sheet.getLastRow();
+  var lastCol = sheet.getLastColumn();
+  if (lastRow < 1 || lastCol < 1) return errorResponse_("Price_List appears empty (no header row)", "SCHEMA_ERROR");
+
+  var headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0].map(function(h) { return String(h || "").trim(); });
+  var hMap = {};
+  for (var hi = 0; hi < headers.length; hi++) {
+    var normalized = headers[hi].toLowerCase().replace(/[_\s]+/g, " ").trim();
+    hMap[normalized] = hi;
+  }
+  function col(name) {
+    var key = name.toLowerCase().replace(/[_\s]+/g, " ").trim();
+    return (key in hMap) ? hMap[key] : -1;
+  }
+  function setByHeader(row, name, value) {
+    var idx = col(name);
+    if (idx !== -1) row[idx] = value;
+  }
+
+  var codeCol = col("service code"); if (codeCol === -1) codeCol = col("code");
+  if (codeCol === -1) return errorResponse_("Price_List is missing a Service Code column", "SCHEMA_ERROR");
+
+  // Locate existing row (if any).
+  var existingRowSheetIdx = -1; // 1-indexed sheet row (0 = header)
+  var existingRowValues = null;
+  if (lastRow >= 2) {
+    var data = sheet.getRange(2, 1, lastRow - 1, lastCol).getValues();
+    for (var ri = 0; ri < data.length; ri++) {
+      var c = String(data[ri][codeCol] || "").trim().toUpperCase();
+      if (c === code) {
+        existingRowSheetIdx = ri + 2;
+        existingRowValues = data[ri];
+        break;
+      }
+    }
+  }
+
+  var targetRow = existingRowValues || new Array(lastCol).fill("");
+  var rates = (svc.rates && typeof svc.rates === "object") ? svc.rates : {};
+  var xsRate  = (rates.XS  != null) ? Number(rates.XS)  : "";
+  var sRate_  = (rates.S   != null) ? Number(rates.S)   : "";
+  var mRate_  = (rates.M   != null) ? Number(rates.M)   : "";
+  var lRate_  = (rates.L   != null) ? Number(rates.L)   : "";
+  var xlRate  = (rates.XL  != null) ? Number(rates.XL)  : "";
+  var xxlR    = (svc.xxl_rate != null) ? Number(svc.xxl_rate)
+                : (rates.XXL != null) ? Number(rates.XXL) : "";
+
+  setByHeader(targetRow, "Service Code",       code);
+  setByHeader(targetRow, "Service Name",       svc.name || "");
+  setByHeader(targetRow, "Category",           svc.category || "");
+  setByHeader(targetRow, "Active",             svc.active === false ? "FALSE" : "TRUE");
+  setByHeader(targetRow, "BillIfPASS",         svc.bill_if_pass === false ? "FALSE" : "TRUE");
+  setByHeader(targetRow, "BillIfFAIL",         svc.bill_if_fail === false ? "FALSE" : "TRUE");
+  setByHeader(targetRow, "Show In Task Type",  svc.show_as_task === true ? "TRUE" : "FALSE");
+  setByHeader(targetRow, "Taxable",            svc.taxable === false ? "FALSE" : "TRUE");
+  setByHeader(targetRow, "Unit",               svc.unit || "");
+  setByHeader(targetRow, "Billing",            svc.billing || "");
+  setByHeader(targetRow, "Flat Rate",          svc.flat_rate != null ? Number(svc.flat_rate) : "");
+  setByHeader(targetRow, "Display Order",      svc.display_order != null ? Number(svc.display_order) : "");
+  setByHeader(targetRow, "XS Rate",  xsRate);
+  setByHeader(targetRow, "S Rate",   sRate_);
+  setByHeader(targetRow, "M Rate",   mRate_);
+  setByHeader(targetRow, "L Rate",   lRate_);
+  setByHeader(targetRow, "XL Rate",  xlRate);
+  setByHeader(targetRow, "XXL Rate", xxlR);
+  setByHeader(targetRow, "XS Time",  svc.xs_time  != null ? Number(svc.xs_time)  : "");
+  setByHeader(targetRow, "S Time",   svc.s_time   != null ? Number(svc.s_time)   : "");
+  setByHeader(targetRow, "M Time",   svc.m_time   != null ? Number(svc.m_time)   : "");
+  setByHeader(targetRow, "L Time",   svc.l_time   != null ? Number(svc.l_time)   : "");
+  setByHeader(targetRow, "XL Time",  svc.xl_time  != null ? Number(svc.xl_time)  : "");
+  setByHeader(targetRow, "XXL Time", svc.xxl_time != null ? Number(svc.xxl_time) : "");
+
+  var action;
+  if (existingRowSheetIdx > 0) {
+    sheet.getRange(existingRowSheetIdx, 1, 1, lastCol).setValues([targetRow]);
+    action = "updated";
+  } else {
+    sheet.getRange(sheet.getLastRow() + 1, 1, 1, lastCol).setValues([targetRow]);
+    action = "appended";
+  }
+
+  // Invalidate the cached pricing read (handleGetPricing_ uses CacheService).
+  try { CacheService.getScriptCache().remove("api_pricing"); } catch (_) {}
+
+  return jsonResponse_({
+    success: true,
+    action: action,
+    code: code,
+    synced_at: new Date().toISOString()
   });
 }
 
