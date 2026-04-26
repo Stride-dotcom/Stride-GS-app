@@ -294,6 +294,16 @@ function deduplicateInvoices() {
   for (var d = 0; d < rowsToDelete.length; d++) {
     sh.deleteRow(rowsToDelete[d]);
   }
+
+  // v4.7.3 — Supabase only learns about row UPDATES (upserts on
+  // qb_invoice_no), not row DELETIONS. Without this resync, dedup'd
+  // rows would linger in Supabase as ghost entries. Full resync is
+  // overkill but safest — alternative would be DELETE …WHERE
+  // qb_invoice_no IN (…) and tracking which docNums were physically
+  // removed. Cheap enough at sheet sizes we operate at.
+  try { _sbResyncAllStaxInvoices(ss); }
+  catch (sbErr) { Logger.log("deduplicateInvoices Supabase mirror error (non-fatal): " + sbErr); }
+
   ui.alert('Removed ' + rowsToDelete.length + ' duplicate row(s).');
 }
 
@@ -1117,6 +1127,62 @@ function _logException(docNum, name, staxId, amount, dueDate, reason, link) {
   ];
 
   sheet.getRange(sheet.getLastRow() + 1, 1, 1, row.length).setValues([row]);
+
+  // v4.7.3 — mirror the new exception row to Supabase so the Payments
+  // app's Exceptions tab updates without a manual resync.
+  try {
+    _sbBatchUpsert("stax_exceptions", [{
+      timestamp:        timestamp,
+      qb_invoice_no:    String(docNum || ""),
+      customer:         String(name || ""),
+      stax_customer_id: String(staxId || ""),
+      amount:           Number(amount || 0),
+      due_date:         dueDate ? _formatDateLoose(dueDate) : "",
+      reason:           String(reason || ""),
+      pay_link:         String(link || ""),
+      resolved:         false
+    }], "timestamp,qb_invoice_no");
+  } catch (_) {}
+}
+
+// v4.7.3 — Read the Customers tab and push every row to Supabase.
+// Convenience companion to _sbResyncAllStaxInvoices for handlers that
+// mutate the Customers tab (pullStaxCustomers, syncCustomers,
+// autoPopulateCustomers, etc.).
+function _sbResyncAllStaxCustomers() {
+  try {
+    var ss = _getSpreadsheet();
+    var sheet = ss && ss.getSheetByName(SHEET_NAMES.CUSTOMERS || "Customers");
+    if (!sheet || sheet.getLastRow() < 2) return;
+    var data = sheet.getDataRange().getValues();
+    var headers = data[0].map(function(h) { return String(h).trim(); });
+    function col(name) { return headers.indexOf(name); }
+    var cQb = col("QB Customer Name");
+    var cCo = col("Stax Company");
+    var cNm = col("Stax Name");
+    var cId = col("Stax Customer ID");
+    var cEm = col("Email");
+    var cPm = col("Payment Method");
+    var cNt = col("Notes");
+    if (cQb < 0) return;
+    var nowIso = new Date().toISOString();
+    var rows = [];
+    for (var i = 1; i < data.length; i++) {
+      var qb = String(data[i][cQb] || "").trim();
+      if (!qb) continue;
+      rows.push({
+        qb_name:      qb,
+        stax_company: cCo >= 0 ? String(data[i][cCo] || "") : "",
+        stax_name:    cNm >= 0 ? String(data[i][cNm] || "") : "",
+        stax_id:      cId >= 0 ? String(data[i][cId] || "") : "",
+        email:        cEm >= 0 ? String(data[i][cEm] || "") : "",
+        pay_method:   cPm >= 0 ? String(data[i][cPm] || "") : "",
+        notes:        cNt >= 0 ? String(data[i][cNt] || "") : "",
+        updated_at:   nowIso
+      });
+    }
+    if (rows.length > 0) _sbBatchUpsert("stax_customers", rows, "qb_name");
+  } catch (e) { Logger.log("_sbResyncAllStaxCustomers error (non-fatal): " + e); }
 }
 
 // ============================================================
@@ -1284,6 +1350,10 @@ function pullStaxCustomers() {
       stats.apiErrors + ' API errors';
     _writeRunLog('pullStaxCustomers', summary, JSON.stringify(stats));
 
+    // v4.7.3 — full Customers tab rebuild → mirror to Supabase
+    try { _sbResyncAllStaxCustomers(); }
+    catch (sbErr) { Logger.log("pullStaxCustomers Supabase mirror error (non-fatal): " + sbErr); }
+
     ui.alert('Pull Customers Complete\n\n' +
       'Active Clients: ' + stats.total + '\n' +
       'With Stax ID: ' + stats.hasStaxId + '\n' +
@@ -1385,6 +1455,10 @@ function autoPopulateCustomers() {
 
   custSheet.getRange(custSheet.getLastRow() + 1, 1, newRows.length, newRows[0].length)
     .setValues(newRows);
+
+  // v4.7.3 — mirror the new rows to Supabase
+  try { _sbResyncAllStaxCustomers(); }
+  catch (sbErr) { Logger.log("autoPopulateCustomers Supabase mirror error (non-fatal): " + sbErr); }
 
   ui.alert('Added ' + newRows.length + ' new customer name(s) to the Customers tab.\n\n' +
     'Next: Match these to Stax customers by filling in the Stax Customer ID (column B)\n' +
@@ -1580,6 +1654,12 @@ function syncCustomers() {
                   stats.apiErrors + ' API errors';
 
     _writeRunLog('syncCustomers', summary, JSON.stringify(stats));
+
+    // v4.7.3 — Stax IDs / Payment Methods just got updated; mirror to Supabase
+    if (colDChanged || colFChanged) {
+      try { _sbResyncAllStaxCustomers(); }
+      catch (sbErr) { Logger.log("syncCustomers Supabase mirror error (non-fatal): " + sbErr); }
+    }
 
     ui.alert('Customer Sync Complete\n\n' +
       'Total: ' + stats.total + '\n' +
@@ -3841,6 +3921,12 @@ function sendPayLinks() {
     var summary = stats.sent + ' sent, ' + stats.failed + ' failed';
     _writeRunLog('sendPayLinks', summary, JSON.stringify(stats));
 
+    // v4.7.3 — mirror touched invoice rows to Supabase
+    if (colIChanged || colKChanged) {
+      try { _sbResyncAllStaxInvoices(ss); }
+      catch (sbErr) { Logger.log("sendPayLinks Supabase mirror error (non-fatal): " + sbErr); }
+    }
+
     ui.alert('Send Pay Links Complete\n\n' +
       'Total: ' + stats.total + '\n' +
       'Sent: ' + stats.sent + '\n' +
@@ -3942,6 +4028,9 @@ function sendSinglePayLink() {
     invSheet.getRange(foundRow + 1, 9).setValue('SENT');
     invSheet.getRange(foundRow + 1, 11).setValue('Pay link emailed ' + _formatTimestamp(new Date()));
     _writeRunLog('sendSinglePayLink', 'Sent pay link for #' + docNum + ' to ' + custName, '');
+    // v4.7.3 — mirror status flip to Supabase
+    try { _sbResyncAllStaxInvoices(ss); }
+    catch (sbErr) { Logger.log("sendSinglePayLink Supabase mirror error (non-fatal): " + sbErr); }
     ui.alert('Pay link sent for Invoice #' + docNum + ' (' + custName + ').');
   } else {
     ui.alert('Failed to send pay link for Invoice #' + docNum + '.\n\n' +

@@ -3467,6 +3467,70 @@ function api_sbBatchUpsertStaxInvoices_(invs) {
   supabaseBatchUpsert_("stax_invoices", rows);
 }
 
+// ─── Stax customers Supabase mirror helpers (v38.133.0) ───────────────────
+//
+// Mirrors api_sbResyncStaxInvoice_ / api_sbResyncStaxInvoices_ for the
+// Customers tab. Closes the gap where handlePullStaxCustomers_,
+// handleSyncStaxCustomers_, handleSaveStaxCustomerMapping_, and
+// handleAutoMatchStaxCustomers_ wrote to the sheet but never updated
+// the Supabase mirror — the Payments app's customer count then stayed
+// stale until someone happened to call seedAllStaxToSupabase manually.
+
+/** Read every row of the Customers tab and push them all to Supabase. */
+function api_sbResyncAllStaxCustomers_() {
+  try {
+    var ss = getStaxSpreadsheet_();
+    var sheet = ss.getSheetByName("Customers");
+    if (!sheet || sheet.getLastRow() < 2) return;
+    var rows = sheetToObjects_(sheet);
+    var nowIso = new Date().toISOString();
+    var customers = rows.map(function(r) {
+      return {
+        qb_name:      String(r["QB Customer Name"] || ""),
+        stax_company: String(r["Stax Company"] || ""),
+        stax_name:    String(r["Stax Name"] || ""),
+        stax_id:      String(r["Stax Customer ID"] || ""),
+        email:        String(r["Email"] || ""),
+        pay_method:   String(r["Payment Method"] || ""),
+        notes:        String(r["Notes"] || ""),
+        updated_at:   nowIso
+      };
+    }).filter(function(x) { return x.qb_name; });
+    if (customers.length > 0) supabaseBatchUpsert_("stax_customers", customers);
+  } catch (e) { Logger.log("api_sbResyncAllStaxCustomers_ error (non-fatal): " + e); }
+}
+
+/** Resync a specific subset of customer rows by qb_name. */
+function api_sbResyncStaxCustomers_(qbNames) {
+  if (!qbNames || !qbNames.length) return;
+  try {
+    var ss = getStaxSpreadsheet_();
+    var sheet = ss.getSheetByName("Customers");
+    if (!sheet || sheet.getLastRow() < 2) return;
+    var wanted = {};
+    for (var q = 0; q < qbNames.length; q++) wanted[String(qbNames[q] || "").trim()] = true;
+    var rows = sheetToObjects_(sheet);
+    var nowIso = new Date().toISOString();
+    var out = [];
+    for (var i = 0; i < rows.length; i++) {
+      var r = rows[i];
+      var qb = String(r["QB Customer Name"] || "").trim();
+      if (!qb || !wanted[qb]) continue;
+      out.push({
+        qb_name:      qb,
+        stax_company: String(r["Stax Company"] || ""),
+        stax_name:    String(r["Stax Name"] || ""),
+        stax_id:      String(r["Stax Customer ID"] || ""),
+        email:        String(r["Email"] || ""),
+        pay_method:   String(r["Payment Method"] || ""),
+        notes:        String(r["Notes"] || ""),
+        updated_at:   nowIso
+      });
+    }
+    if (out.length > 0) supabaseBatchUpsert_("stax_customers", out);
+  } catch (e) { Logger.log("api_sbResyncStaxCustomers_ error (non-fatal): " + e); }
+}
+
 /**
  * Re-fetch a single invoice row by QB# from the Stax sheet and push it up.
  * Convenience: when a handler mutates a row but doesn't have the full shape in hand.
@@ -28727,6 +28791,14 @@ function handleSaveStaxCustomerMapping_(payload) {
 
   stax_appendRunLog_(ss, "saveCustomerMapping", "Updated " + updated + ", added " + added + " customer mapping(s)", "");
 
+  // v38.133.0 — mirror affected customer rows to Supabase.
+  try {
+    var changedNames = mappings
+      .map(function(m) { return String((m && m.qbCustomerName) || "").trim(); })
+      .filter(function(n) { return !!n; });
+    if (changedNames.length > 0) api_sbResyncStaxCustomers_(changedNames);
+  } catch (sbErr) { Logger.log("handleSaveStaxCustomerMapping_ Supabase mirror error (non-fatal): " + sbErr); }
+
   return jsonResponse_({ success: true, updated: updated, added: added });
 }
 
@@ -28770,6 +28842,14 @@ function handleAutoMatchStaxCustomers_() {
   }
 
   stax_appendRunLog_(ss, "autoMatchCustomers", "Added " + newRows.length + " new customer(s), " + alreadyExisted + " already existed", "");
+
+  // v38.133.0 — mirror new rows to Supabase. Cheaper to resync the whole
+  // table since the sheet append doesn't tell us the canonical qb_name
+  // we'd need to filter by anyway.
+  if (newRows.length > 0) {
+    try { api_sbResyncAllStaxCustomers_(); }
+    catch (sbErr) { Logger.log("handleAutoMatchStaxCustomers_ Supabase mirror error (non-fatal): " + sbErr); }
+  }
 
   return jsonResponse_({ success: true, added: newRows.length, alreadyExisted: alreadyExisted });
 }
@@ -29035,6 +29115,11 @@ function handlePullStaxCustomers_() {
   // Invalidate Stax customers cache
   try { CacheService.getScriptCache().remove("stax_customers"); } catch (e) {}
 
+  // v38.133.0 — full sheet rebuild → mirror the entire Customers tab
+  // to Supabase so the Payments app reflects the new state.
+  try { api_sbResyncAllStaxCustomers_(); }
+  catch (sbErr) { Logger.log("handlePullStaxCustomers_ Supabase mirror error (non-fatal): " + sbErr); }
+
   return jsonResponse_({
     total: stats.total,
     withStaxId: stats.withStaxId,
@@ -29188,6 +29273,14 @@ function handleSyncStaxCustomers_() {
   // Invalidate Stax customers cache
   try { CacheService.getScriptCache().remove("stax_customers"); } catch (e) {}
 
+  // v38.133.0 — sheet columns D (Stax ID) + F (Payment Method) just got
+  // updated; mirror the whole Customers tab so the Payments app's
+  // verification states match.
+  if (colDChanged || colFChanged) {
+    try { api_sbResyncAllStaxCustomers_(); }
+    catch (sbErr) { Logger.log("handleSyncStaxCustomers_ Supabase mirror error (non-fatal): " + sbErr); }
+  }
+
   return jsonResponse_({
     verified: stats.verified,
     hasPayment: stats.hasPayment,
@@ -29214,6 +29307,21 @@ function stax_appendException_(ss, docNum, custName, staxCustId, amount, dueDate
   if (!sheet) return;
   var now = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm:ss");
   sheet.appendRow([now, docNum, custName, staxCustId || "", amount || "", dueDate || "", reason, payLink || "", ""]);
+  // v38.133.0 — also mirror to Supabase so the Payments app's Exceptions
+  // tab stays current. Best-effort, never throws.
+  try {
+    supabaseBatchUpsert_("stax_exceptions", [{
+      timestamp:        now,
+      qb_invoice_no:    String(docNum || ""),
+      customer:         String(custName || ""),
+      stax_customer_id: String(staxCustId || ""),
+      amount:           toNum_(amount) || 0,
+      due_date:         dueDate ? formatDate_(dueDate) : "",
+      reason:           String(reason || ""),
+      pay_link:         String(payLink || ""),
+      resolved:         false
+    }]);
+  } catch (sbErr) { Logger.log("stax_appendException_ Supabase mirror error (non-fatal): " + sbErr); }
 }
 
 /**
@@ -29224,6 +29332,21 @@ function stax_appendChargeLog_(ss, docNum, staxInvId, staxCustId, custName, amou
   if (!sheet) return;
   var now = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm:ss");
   sheet.appendRow([now, docNum, staxInvId, staxCustId, custName, amount, status, txnId || "", notes || ""]);
+  // v38.133.0 — mirror to Supabase so the Payments app's Charge Log
+  // updates without waiting for a manual resync.
+  try {
+    supabaseBatchUpsert_("stax_charges", [{
+      timestamp:        now,
+      qb_invoice_no:    String(docNum || ""),
+      stax_invoice_id:  String(staxInvId || ""),
+      stax_customer_id: String(staxCustId || ""),
+      customer:         String(custName || ""),
+      amount:           toNum_(amount) || 0,
+      status:           String(status || ""),
+      txn_id:           String(txnId || ""),
+      notes:            String(notes || "")
+    }]);
+  } catch (sbErr) { Logger.log("stax_appendChargeLog_ Supabase mirror error (non-fatal): " + sbErr); }
 }
 
 /**
@@ -29486,6 +29609,20 @@ function handleStaxRefreshCustomerIds_() {
 
   var numRows = invData.length - 1;
   var changed = stax_lookupCustomerIds_(ss, invSheet, invData, numRows);
+
+  // v38.133.0 — if Stax Customer IDs changed on any rows, mirror the
+  // whole Invoices tab to Supabase. We don't track which rows changed
+  // here, and a full resync is cheap (24 rows in current production).
+  if (changed) {
+    try {
+      var allDocNums = [];
+      for (var i = 1; i < invData.length; i++) {
+        var d = String(invData[i][0] || "").trim();
+        if (d) allDocNums.push(d);
+      }
+      if (allDocNums.length > 0) api_sbResyncStaxInvoices_(allDocNums);
+    } catch (sbErr) { Logger.log("handleStaxRefreshCustomerIds_ Supabase mirror error (non-fatal): " + sbErr); }
+  }
 
   return jsonResponse_({
     success: true,
@@ -30184,6 +30321,23 @@ function handleCreateStaxInvoices_(payload) {
       cache.remove("stax_exceptions");
       cache.remove("stax_runlog");
     } catch (e) {}
+
+    // v38.133.0 — push wrote Stax Invoice IDs / Status / Auto Charge
+    // back to the sheet for every processed row. Mirror them all so
+    // the Payments app sees the new CREATED rows in Charge Queue
+    // immediately. Iterate the post-write sheet state to capture
+    // every invoice, including dupes that got linked.
+    try {
+      var resyncDocNums = [];
+      var freshData = invSheet.getDataRange().getValues();
+      for (var rdi = 1; rdi < freshData.length; rdi++) {
+        var rdDoc = String(freshData[rdi][0] || "").trim();
+        if (!rdDoc) continue;
+        if (selectiveNos && !selectiveNos[rdDoc]) continue;
+        resyncDocNums.push(rdDoc);
+      }
+      if (resyncDocNums.length > 0) api_sbResyncStaxInvoices_(resyncDocNums);
+    } catch (sbErr) { Logger.log("handleCreateStaxInvoices_ Supabase mirror error (non-fatal): " + sbErr); }
 
     return jsonResponse_({
       created: stats.created,
@@ -30988,6 +31142,15 @@ function handleSendStaxPayLinks_() {
       cache.remove("stax_runlog");
     } catch (e) {}
 
+    // v38.133.0 — mirror every touched invoice row to Supabase so
+    // the Payments app reflects SENT / Notes updates immediately.
+    if (eligible.length > 0) {
+      try {
+        var touchedDocNums = eligible.map(function(e) { return e.docNum; }).filter(function(d) { return !!d; });
+        if (touchedDocNums.length > 0) api_sbResyncStaxInvoices_(touchedDocNums);
+      } catch (sbErr) { Logger.log("handleSendStaxPayLinks_ Supabase mirror error (non-fatal): " + sbErr); }
+    }
+
     return jsonResponse_({
       sent: stats.sent,
       failed: stats.failed,
@@ -31060,6 +31223,11 @@ function handleSendStaxPayLink_(payload) {
     cache.remove("stax_exceptions");
     cache.remove("stax_runlog");
   } catch (e) {}
+
+  // v38.133.0 — mirror status flip to Supabase. Without this the
+  // Payments app would show stale 'CHARGE_FAILED' until next reseed.
+  try { api_sbResyncStaxInvoice_(docNum); }
+  catch (sbErr) { Logger.log("handleSendStaxPayLink_ Supabase mirror error (non-fatal): " + sbErr); }
 
   return jsonResponse_({
     success: sendResult.success,
