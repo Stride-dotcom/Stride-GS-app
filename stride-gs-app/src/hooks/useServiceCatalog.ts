@@ -108,6 +108,8 @@ export interface CatalogService {
   visibleToClient: boolean;
   description: string;
   quoteRequired: boolean;
+  /** For "first N included" overage services like XTRA_PC. null = N/A. */
+  includedQuantity: number | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -168,6 +170,9 @@ interface CatalogRow {
   visible_to_client: boolean | null;
   description: string | null;
   quote_required: boolean | null;
+  // Per-piece overage charges (e.g. XTRA_PC) — pieces included in some
+  // base fee before this charge applies. NULL = not applicable.
+  included_quantity: number | null;
 }
 
 function rowToService(row: CatalogRow): CatalogService {
@@ -211,6 +216,7 @@ function rowToService(row: CatalogRow): CatalogService {
     visibleToClient: row.visible_to_client !== false,
     description: row.description ?? '',
     quoteRequired: row.quote_required === true,
+    includedQuantity: row.included_quantity ?? null,
     times: {
       XS:  row.xs_time  ?? undefined,
       S:   row.s_time   ?? undefined,
@@ -245,6 +251,7 @@ function serviceToRow(input: UpdateServiceInput): Record<string, unknown> {
   if (input.defaultPriority !== undefined)       row.default_priority = input.defaultPriority;
   if (input.hasDedicatedPage !== undefined)      row.has_dedicated_page = input.hasDedicatedPage;
   if (input.displayOrder !== undefined)          row.display_order = input.displayOrder;
+  if (input.includedQuantity !== undefined)      row.included_quantity = input.includedQuantity;
   if (input.billIfPass !== undefined)            row.bill_if_pass = input.billIfPass;
   if (input.billIfFail !== undefined)            row.bill_if_fail = input.billIfFail;
   if (input.times !== undefined) {

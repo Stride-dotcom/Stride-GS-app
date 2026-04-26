@@ -94,6 +94,7 @@ export function AddServiceModal({ existingCodes, nextDisplayOrder, onClose, onCr
       visibleToClient,
       description: description.trim(),
       quoteRequired: showAsDeliveryService ? quoteRequired : false,
+      includedQuantity: null,
     };
     const created = await onCreate(input);
     setSaving(false);

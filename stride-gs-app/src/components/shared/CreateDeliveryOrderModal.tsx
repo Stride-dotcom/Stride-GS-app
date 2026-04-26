@@ -72,6 +72,7 @@ import {
 import { supabase } from '../../lib/supabase';
 import { useCoverageOptions, type CoverageOption } from '../../hooks/useCoverageOptions';
 import { useItemClasses } from '../../hooks/useItemClasses';
+import { useServiceCatalog } from '../../hooks/useServiceCatalog';
 import { ProcessingOverlay } from './ProcessingOverlay';
 
 // ── Address Book helpers ─────────────────────────────────────────────────
@@ -213,8 +214,12 @@ interface SelectedAccessorial {
   subtotal: number;
 }
 
-const INCLUDED_ITEMS = 3;
-const EXTRA_ITEM_RATE = 25;
+// "Extra Piece" (per piece beyond the included quantity) used to be
+// hardcoded here as INCLUDED_ITEMS=3 + EXTRA_ITEM_RATE=$25. The values
+// now come from the XTRA_PC row in service_catalog so an admin can
+// retune both in Settings → Pricing → Delivery without a code change.
+// Constant is the lookup code only; the rate and threshold are live.
+const EXTRA_PIECE_CODE = 'XTRA_PC';
 
 function genUid(): string {
   return Math.random().toString(36).slice(2, 10);
@@ -477,6 +482,19 @@ export function CreateDeliveryOrderModal({
   // admin tweaking M from 45→50 in Pricing immediately re-flows through
   // every cuft calc on the open modal.
   const { classes: itemClasses } = useItemClasses();
+  // Extra-piece pricing comes from the XTRA_PC service. Falls back to
+  // the legacy hardcoded values (3 included, $25 each) only if the
+  // service row hasn't been seeded yet — in practice it's seeded by
+  // migration 20260426010000, so this never fires in production. The
+  // fallback keeps behavior stable for any environment that's mid-
+  // migration.
+  const { services: catalogServices } = useServiceCatalog();
+  const extraPieceService = useMemo(
+    () => catalogServices.find(s => s.code === EXTRA_PIECE_CODE && s.active),
+    [catalogServices],
+  );
+  const includedItems = extraPieceService?.includedQuantity ?? 3;
+  const extraItemRate = extraPieceService?.flatRate ?? 25;
   const cuFtByCode = useMemo(() => {
     const map = new Map<string, number>();
     for (const c of itemClasses) {
@@ -866,8 +884,8 @@ export function CreateDeliveryOrderModal({
     return pickupFreeItems.filter(i => i.description.trim()).reduce((sum, i) => sum + Math.max(1, Number(i.quantity) || 1), 0);
   }, [mode, itemsSource, selectedInvItems, pickupFreeItems]);
 
-  const extraItemsCount = Math.max(0, itemCount - INCLUDED_ITEMS);
-  const extraItemsFee = extraItemsCount * EXTRA_ITEM_RATE;
+  const extraItemsCount = Math.max(0, itemCount - includedItems);
+  const extraItemsFee = extraItemsCount * extraItemRate;
 
   const accessorialsTotal = useMemo(
     () => Array.from(selectedAccessorials.values()).reduce((s, a) => s + a.subtotal, 0),
@@ -3006,7 +3024,7 @@ export function CreateDeliveryOrderModal({
               )}
               {extraItemsCount > 0 && (
                 <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 4 }}>
-                  <span>Extra Items ({extraItemsCount} × $25)</span>
+                  <span>Extra Items ({extraItemsCount} × ${extraItemRate.toFixed(2)})</span>
                   <span style={{ fontWeight: 500 }}>${extraItemsFee.toFixed(2)}</span>
                 </div>
               )}

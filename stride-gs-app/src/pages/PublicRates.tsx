@@ -140,7 +140,7 @@ function rowToService(row: ServiceRow): CatalogService {
     billIfPass: true, billIfFail: true, times: {},
     staxItemId: null, qbItemId: null,
     deliveryRateUnit: 'flat', visibleToClient: true,
-    description: '', quoteRequired: false,
+    description: '', quoteRequired: false, includedQuantity: null,
     createdAt: '', updatedAt: '',
   };
 }
