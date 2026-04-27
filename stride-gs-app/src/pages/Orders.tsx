@@ -626,7 +626,13 @@ export function Orders() {
           {clientFilter.length > 0 && clientFilteredOrders.length > 0 && (
             <div style={{ border: `1px solid ${theme.colors.border}`, borderRadius: 12, overflow: 'hidden', background: '#fff' }}>
               <div ref={containerRef} style={{ overflowY: 'auto', overflowX: 'auto', maxHeight: 'calc(100dvh - 360px)', WebkitOverflowScrolling: 'touch' }}>
-                <table style={{ width: '100%', borderCollapse: 'separate', borderSpacing: 0 }}>
+                {/* tableLayout: 'fixed' locks column widths to the
+                    sizes resolved by TanStack's columnDef so virtualized
+                    rows can't drift the header alignment as they render
+                    longer/shorter content. Without this the browser was
+                    re-resolving auto-widths every paint, which made the
+                    header columns shift visibly as the user scrolled. */}
+                <table style={{ width: '100%', borderCollapse: 'separate', borderSpacing: 0, tableLayout: 'fixed' }}>
                   <thead>{table.getHeaderGroups().map(hg => (
                     <tr key={hg.id}>
                       {hg.headers.map(h => (
@@ -689,7 +695,14 @@ export function Orders() {
                           onMouseLeave={e => (e.currentTarget.style.background = rowBg)}
                         >
                           {row.getVisibleCells().map(cell => (
-                            <td key={cell.id} style={td}>
+                            // Each td needs the resolved column width so
+                            // tableLayout:'fixed' has something to honor;
+                            // overflow:'hidden' + textOverflow:'ellipsis'
+                            // truncate long values instead of expanding.
+                            <td
+                              key={cell.id}
+                              style={{ ...td, width: cell.column.getSize(), maxWidth: cell.column.getSize(), overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                            >
                               {flexRender(cell.column.columnDef.cell, cell.getContext())}
                             </td>
                           ))}
