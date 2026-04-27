@@ -1079,14 +1079,36 @@ export function OrderPage() {
               const { data, error: invokeErr } = await supabase.functions.invoke('dt-push-order', {
                 body: { orderId: order.id },
               });
-              if (invokeErr) throw new Error(invokeErr.message);
+              // supabase.functions.invoke surfaces a generic
+              // "Edge Function returned a non-2xx status code" on any
+              // non-2xx, hiding the actual { error } body the
+              // function returned. Pull the response body off the
+              // FunctionsHttpError context so the toast carries the
+              // real reason (e.g. "Order has no items", "DT API
+              // error: <message>", "Linked pickup push failed: …").
+              if (invokeErr) {
+                let detailed = invokeErr.message;
+                try {
+                  const ctx = (invokeErr as { context?: { json?: () => Promise<unknown>; status?: number } }).context;
+                  if (ctx?.json) {
+                    const body = await ctx.json() as { error?: string; responseBody?: string } | null;
+                    if (body?.error) {
+                      detailed = body.error;
+                      if (body.responseBody) detailed += ` (DT response: ${body.responseBody.slice(0, 200)})`;
+                    }
+                  }
+                } catch (_) { /* fall back to invokeErr.message */ }
+                throw new Error(detailed);
+              }
               const res = data as { ok?: boolean; error?: string } | null;
               if (!res?.ok) throw new Error(res?.error || 'DT push failed');
               const fresh = await fetchDtOrderByIdFromSupabase(order.id);
               if (fresh) setLocalOrder(fresh);
               refetch();
             } catch (e) {
-              setPushDtError(e instanceof Error ? e.message : String(e));
+              const msg = e instanceof Error ? e.message : String(e);
+              console.error('[OrderPage] DT push failed:', msg, e);
+              setPushDtError(msg);
             } finally {
               setPushingDt(false);
             }
@@ -1103,14 +1125,19 @@ export function OrderPage() {
       {pushDtError && (
         <div role="alert" style={{
           position: 'fixed', top: 16, left: '50%', transform: 'translateX(-50%)',
-          zIndex: 1100, padding: '10px 16px', background: '#FEF2F2',
+          zIndex: 1100, padding: '14px 18px', background: '#FEF2F2',
           border: '1px solid #FCA5A5', color: '#991B1B', borderRadius: 10,
-          fontSize: 13, maxWidth: 640, boxShadow: '0 8px 24px rgba(0,0,0,0.15)',
+          fontSize: 13, maxWidth: 720, boxShadow: '0 8px 24px rgba(0,0,0,0.15)',
+          display: 'flex', alignItems: 'flex-start', gap: 10,
         }}>
-          DT push failed: {pushDtError}
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontWeight: 700, marginBottom: 4 }}>DT push failed</div>
+            <div style={{ fontWeight: 400, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{pushDtError}</div>
+          </div>
           <button
             onClick={() => setPushDtError(null)}
-            style={{ marginLeft: 12, background: 'none', border: 'none', cursor: 'pointer', color: '#991B1B', fontWeight: 700 }}
+            style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#991B1B', fontWeight: 700, fontSize: 18, lineHeight: 1, padding: 0, flexShrink: 0 }}
+            aria-label="Dismiss"
           >×</button>
         </div>
       )}
