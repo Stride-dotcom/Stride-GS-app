@@ -84,28 +84,39 @@ export function IntakesPanel() {
       const refreshSheetId = (selected as IntakeRow & { clientSpreadsheetId?: string }).clientSpreadsheetId!;
       const warnings: string[] = [];
       try {
+        // Defensive: only include notification_contacts in the update when
+        // the submitted list is non-empty. An empty list almost certainly
+        // means the client clicked through without touching the section
+        // (pre-fill might have returned nothing for legacy rows). Writing
+        // [] would clobber the column; skipping the field leaves whatever
+        // was there. Note: actual warehouse alerts live in the client
+        // sheet's Settings.NOTIFICATION_EMAILS — that path is untouched
+        // either way.
+        const submittedContacts = selected.notificationContacts ?? [];
+        const updatePayload: Record<string, unknown> = {
+          name:           formData.clientName,
+          email:          formData.clientEmail,
+          contact_name:   formData.contactName,
+          phone:          formData.phone || null,
+          qb_customer_name: formData.qbCustomerName || null,
+          payment_terms:  formData.paymentTerms,
+          auto_inspection: formData.autoInspection,
+          auto_charge:     formData.autoCharge,
+          // Tax / cert (matches handleClientSubmit's create-mode write
+          // in Settings.tsx so the data flow is identical between
+          // create and refresh activations).
+          tax_exempt:           formData.taxExempt !== false,
+          tax_exempt_reason:    formData.taxExemptReason || 'Resale',
+          resale_cert_expires:  formData.resaleCertExpires || null,
+        };
+        if (submittedContacts.length > 0) {
+          updatePayload.notification_contacts = submittedContacts;
+        } else {
+          warnings.push('Notification contacts left unchanged (empty list submitted).');
+        }
         const { error: upErr } = await supabase
           .from('clients')
-          .update({
-            // Honor any edits the prospect made on the form. Don't touch
-            // operational fields like spreadsheet_id, folder ids, etc.
-            name:           formData.clientName,
-            email:          formData.clientEmail,
-            contact_name:   formData.contactName,
-            phone:          formData.phone || null,
-            qb_customer_name: formData.qbCustomerName || null,
-            payment_terms:  formData.paymentTerms,
-            auto_inspection: formData.autoInspection,
-            auto_charge:     formData.autoCharge,
-            // Notification contacts: REPLACE the list with what came in.
-            notification_contacts: selected.notificationContacts ?? [],
-            // Tax / cert (matches handleClientSubmit's create-mode write
-            // in Settings.tsx so the data flow is identical between
-            // create and refresh activations).
-            tax_exempt:           formData.taxExempt !== false,
-            tax_exempt_reason:    formData.taxExemptReason || 'Resale',
-            resale_cert_expires:  formData.resaleCertExpires || null,
-          })
+          .update(updatePayload)
           .eq('spreadsheet_id', refreshSheetId);
         if (upErr) {
           return { ok: false, error: 'Update failed: ' + upErr.message };
