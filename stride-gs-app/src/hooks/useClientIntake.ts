@@ -68,6 +68,13 @@ export interface IntakeSubmitPayload {
   // Step 5 — file paths (uploaded separately before submit)
   signedTcPdfPath?: string;
   resaleCertPath?: string;
+  /** Prospect indicated they are a wholesale customer (resale exemption).
+   *  Forwarded to clients.tax_exempt on activation. */
+  taxExempt?: boolean;
+  /** Resale / Out-of-state / Government / Non-profit / Other. */
+  taxExemptReason?: string;
+  /** Date the prospect's resale certificate expires. */
+  resaleCertExpires?: string;
   // Meta (captured in the browser)
   userAgent?: string;
 }
@@ -193,6 +200,9 @@ export async function submitIntake(payload: IntakeSubmitPayload): Promise<{ id: 
     initials:              payload.initials,
     signed_tc_pdf_path:    payload.signedTcPdfPath ?? null,
     resale_cert_path:      payload.resaleCertPath ?? null,
+    tax_exempt:            payload.taxExempt ?? null,
+    tax_exempt_reason:     payload.taxExemptReason ?? null,
+    resale_cert_expires:   payload.resaleCertExpires ?? null,
     user_agent:            payload.userAgent ?? (typeof navigator !== 'undefined' ? navigator.userAgent : null),
     submitted_at:          new Date().toISOString(),
   };

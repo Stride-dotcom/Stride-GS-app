@@ -50,6 +50,12 @@ export interface IntakeRow {
   initials: Record<string, string>;
   signedTcPdfPath: string | null;
   resaleCertPath: string | null;
+  /** Prospect's wholesale-customer answer. null = legacy intake (didn't ask). */
+  taxExempt: boolean | null;
+  /** Resale / Out-of-state / Government / Non-profit / Other. null when taxExempt is null/false. */
+  taxExemptReason: string | null;
+  /** ISO yyyy-mm-dd. */
+  resaleCertExpires: string | null;
   ipAddress: string | null;
   userAgent: string | null;
   submittedAt: string;
@@ -95,6 +101,9 @@ interface IntakeDbRow {
   initials: unknown;
   signed_tc_pdf_path: string | null;
   resale_cert_path: string | null;
+  tax_exempt: boolean | null;
+  tax_exempt_reason: string | null;
+  resale_cert_expires: string | null;
   ip_address: string | null;
   user_agent: string | null;
   submitted_at: string;
@@ -143,6 +152,9 @@ function rowToIntake(r: IntakeDbRow): IntakeRow {
     initials: (r.initials && typeof r.initials === 'object') ? r.initials as Record<string, string> : {},
     signedTcPdfPath: r.signed_tc_pdf_path,
     resaleCertPath: r.resale_cert_path,
+    taxExempt: r.tax_exempt,
+    taxExemptReason: r.tax_exempt_reason,
+    resaleCertExpires: r.resale_cert_expires,
     ipAddress: r.ip_address,
     userAgent: r.user_agent,
     submittedAt: r.submitted_at,
