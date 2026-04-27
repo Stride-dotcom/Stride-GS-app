@@ -34,6 +34,7 @@ import { Intakes } from './pages/Intakes';
 import { PublicRates } from './pages/PublicRates';
 import { ClientIntake } from './pages/ClientIntake';
 import { PublicPhotoGallery } from './pages/PublicPhotoGallery';
+import { PublicServiceRequest } from './pages/PublicServiceRequest';
 import { MessagesPage } from './components/messages/MessagesPage';
 
 /** Route guard — redirects to dashboard if user's role is not in the allowed list */
@@ -65,6 +66,14 @@ export default function App() {
     ? window.location.hash.match(/^#\/shared\/photos\/([A-Za-z0-9_-]+)/)
     : null;
   if (sharedPhotosMatch) return <PublicPhotoGallery shareId={sharedPhotosMatch[1]} />;
+
+  // Public service-request form — anon submission. RLS on dt_orders +
+  // dt_order_items restricts anon to INSERT-only with tenant_id IS NULL,
+  // source='public_form', review_status='pending_review'.
+  const serviceRequestMatch = typeof window !== 'undefined'
+    ? window.location.hash.match(/^#\/public\/service-request/)
+    : null;
+  if (serviceRequestMatch) return <PublicServiceRequest />;
 
   // Auth check in progress
   if (loading) return <LoadingScreen />;

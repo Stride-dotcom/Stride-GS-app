@@ -26,6 +26,7 @@ import { theme } from '../styles/theme';
 import { WriteButton } from '../components/shared/WriteButton';
 import { QBOConnect } from '../components/settings/QBOConnect';
 import { IntakesPanel } from '../components/settings/IntakesPanel';
+import { PublicFormSettings } from '../components/settings/PublicFormSettings';
 import { useClientTcStatus } from '../hooks/useClientTcStatus';
 import { IntakeEmailModal } from '../components/shared/IntakeEmailModal';
 import { supabase } from '../lib/supabase';
@@ -4165,15 +4166,7 @@ export function Settings() {
           })()}
 
           {tab === 'notifications' && (
-            <div style={card}>
-              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '48px 24px', textAlign: 'center' }}>
-                <Bell size={40} color={theme.colors.textMuted} style={{ marginBottom: 16, opacity: 0.4 }} />
-                <div style={{ fontSize: 18, fontWeight: 700, color: theme.colors.textPrimary, marginBottom: 6 }}>Notifications Coming Soon</div>
-                <div style={{ fontSize: 13, color: theme.colors.textMuted, maxWidth: 360, lineHeight: 1.5 }}>
-                  In-app and email notification preferences will be configurable here in a future update. You'll be able to choose which events trigger alerts and how they're delivered.
-                </div>
-              </div>
-            </div>
+            <PublicFormSettings />
           )}
         </div>
       </div>
