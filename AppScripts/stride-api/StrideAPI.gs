@@ -1,5 +1,18 @@
 /* ===================================================
-   StrideAPI.gs — v38.137.0 — 2026-04-26 PST — One-shot bulkResyncStaxCatalog helper
+   StrideAPI.gs — v38.138.0 — 2026-04-26 PST — Daily resale-cert expiry digest
+   v38.138.0: New runResaleCertExpiryCheck() — daily Apps Script trigger
+              that scans Supabase clients where tax_exempt=true and
+              resale_cert_expires is within RESALE_CERT_EXPIRY_WARN_DAYS
+              (Stax Config, default 60). Buckets results into
+              expired / ≤7d / ≤30d / ≤60d and emails an HTML digest to
+              OPS_NOTIFICATION_EMAIL (Script Property; falls back to
+              OWNER_EMAIL from CB Settings). Logs every run to
+              stax_run_log + the Stax sheet's Run Log tab so the
+              Payments app surfaces it. Trigger management via
+              setupResaleCertExpiryTrigger() (replaces any existing
+              trigger of the same handler — avoids the v4.7.4 dupe
+              trap) and removeResaleCertExpiryTrigger(). Both are
+              run-from-editor only (not menu-wired).
    v38.137.0: New editor-only helper bulkResyncStaxCatalog() that pulls
               every service_catalog row with a stax_item_id and PUTs it
               back to the Stax /item endpoint. Used after a SQL change
@@ -35757,4 +35770,253 @@ function backfillShipmentFolderUrls() {
   }
 
   Logger.log("=== BACKFILL DONE === Updated: " + totalUpdated + " items | Skipped: " + totalSkipped + " | Failed: " + totalFailed);
+}
+
+// ─── Resale-cert expiry digest (v38.138.0) ─────────────────────────────────
+//
+// Daily scan of Supabase `clients` for resale certificates expiring soon.
+// Run via setupResaleCertExpiryTrigger() — fires once a day at 8 AM script
+// timezone and emails an HTML digest to ops. Run-log entries are written
+// to stax_run_log + the Stax sheet's Run Log tab so the Payments app
+// surfaces every run and any failure.
+
+function _resaleCertReadConfigInt_(key, defaultVal) {
+  try {
+    var ss = getStaxSpreadsheet_();
+    var sh = ss && ss.getSheetByName("Config");
+    if (!sh) return defaultVal;
+    var data = sh.getDataRange().getValues();
+    for (var i = 0; i < data.length; i++) {
+      if (String(data[i][0] || "").trim() === key) {
+        var n = parseInt(String(data[i][1] || "").trim(), 10);
+        if (!isNaN(n) && n > 0) return n;
+        return defaultVal;
+      }
+    }
+  } catch (_) {}
+  return defaultVal;
+}
+
+function _resaleCertResolveOpsEmail_() {
+  var direct = prop_("OPS_NOTIFICATION_EMAIL");
+  if (direct) return direct;
+  try {
+    var cbSsId = prop_("CB_SPREADSHEET_ID");
+    if (!cbSsId) return "";
+    var sh = SpreadsheetApp.openById(cbSsId).getSheetByName("Settings");
+    if (!sh) return "";
+    var data = sh.getDataRange().getValues();
+    for (var i = 1; i < data.length; i++) {
+      if (String(data[i][0] || "").trim() === "OWNER_EMAIL") {
+        return String(data[i][1] || "").trim();
+      }
+    }
+  } catch (_) {}
+  return "";
+}
+
+function _resaleCertWriteRunLog_(fnName, summary, details) {
+  var ts = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm:ss");
+  try {
+    var url = prop_("SUPABASE_URL");
+    var key = prop_("SUPABASE_SERVICE_ROLE_KEY");
+    if (url && key) {
+      UrlFetchApp.fetch(url + "/rest/v1/stax_run_log", {
+        method: "POST",
+        headers: {
+          "Authorization": "Bearer " + key,
+          "apikey":        key,
+          "Content-Type":  "application/json",
+          "Prefer":        "return=minimal"
+        },
+        payload: JSON.stringify([{ timestamp: ts, fn: fnName, summary: summary, details: details || "" }]),
+        muteHttpExceptions: true
+      });
+    }
+  } catch (_) {}
+  try {
+    var ss = getStaxSpreadsheet_();
+    var rl = ss && ss.getSheetByName("Run Log");
+    if (rl) rl.appendRow([ts, fnName, summary, details || ""]);
+  } catch (_) {}
+}
+
+/**
+ * Daily scan: emails ops a digest of resale certs that are expired or
+ * expiring within RESALE_CERT_EXPIRY_WARN_DAYS days (Stax Config,
+ * default 60). Safe to run from the editor; intended to be wired
+ * to a daily time-based trigger via setupResaleCertExpiryTrigger().
+ */
+function runResaleCertExpiryCheck() {
+  var WARN_DAYS = _resaleCertReadConfigInt_("RESALE_CERT_EXPIRY_WARN_DAYS", 60);
+  var url = prop_("SUPABASE_URL");
+  var key = prop_("SUPABASE_SERVICE_ROLE_KEY");
+  if (!url || !key) {
+    _resaleCertWriteRunLog_("runResaleCertExpiryCheck",
+      "ABORT — SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY not set", "");
+    return;
+  }
+
+  var today = new Date();
+  var tz = Session.getScriptTimeZone();
+  var todayStr = Utilities.formatDate(today, tz, "yyyy-MM-dd");
+  var horizon = new Date(today.getTime() + WARN_DAYS * 86400000);
+  var horizonStr = Utilities.formatDate(horizon, tz, "yyyy-MM-dd");
+
+  var endpoint = url + "/rest/v1/clients" +
+    "?select=name,email,resale_cert_expires,resale_cert_url" +
+    "&tax_exempt=eq.true" +
+    "&resale_cert_expires=not.is.null" +
+    "&resale_cert_expires=lte." + horizonStr +
+    "&order=resale_cert_expires.asc";
+
+  var rows;
+  try {
+    var resp = UrlFetchApp.fetch(endpoint, {
+      method: "GET",
+      headers: { "Authorization": "Bearer " + key, "apikey": key },
+      muteHttpExceptions: true
+    });
+    var code = resp.getResponseCode();
+    if (code < 200 || code >= 300) {
+      _resaleCertWriteRunLog_("runResaleCertExpiryCheck",
+        "ABORT — Supabase GET HTTP " + code,
+        String(resp.getContentText() || "").substring(0, 400));
+      return;
+    }
+    rows = JSON.parse(resp.getContentText() || "[]");
+  } catch (e) {
+    _resaleCertWriteRunLog_("runResaleCertExpiryCheck",
+      "ABORT — exception during Supabase fetch", String(e));
+    return;
+  }
+
+  if (!rows || rows.length === 0) {
+    _resaleCertWriteRunLog_("runResaleCertExpiryCheck",
+      "OK — no certs expiring within " + WARN_DAYS + " days", "today=" + todayStr);
+    return;
+  }
+
+  function _daysBetween(a, b) {
+    return Math.floor((b.getTime() - a.getTime()) / 86400000);
+  }
+
+  var buckets = { expired: [], d7: [], d30: [], d60: [] };
+  for (var i = 0; i < rows.length; i++) {
+    var r = rows[i];
+    var expStr = String(r.resale_cert_expires || "").substring(0, 10);
+    if (!expStr) continue;
+    var parts = expStr.split("-");
+    var exp = new Date(parseInt(parts[0], 10), parseInt(parts[1], 10) - 1, parseInt(parts[2], 10));
+    var todayMid = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+    var days = _daysBetween(todayMid, exp);
+    var item = { name: r.name || "(unnamed)", email: r.email || "", expires: expStr, days: days };
+    if (days < 0) buckets.expired.push(item);
+    else if (days <= 7) buckets.d7.push(item);
+    else if (days <= 30) buckets.d30.push(item);
+    else buckets.d60.push(item);
+  }
+
+  var to = _resaleCertResolveOpsEmail_();
+  if (!to) {
+    _resaleCertWriteRunLog_("runResaleCertExpiryCheck",
+      "SKIP — no OPS_NOTIFICATION_EMAIL or OWNER_EMAIL resolved",
+      "expired=" + buckets.expired.length +
+      " d7="    + buckets.d7.length +
+      " d30="   + buckets.d30.length +
+      " d60="   + buckets.d60.length);
+    return;
+  }
+
+  function _renderRows(items) {
+    if (!items.length) return "<p style='color:#666;margin:4px 0 16px'>None.</p>";
+    var html = "<table cellspacing='0' cellpadding='6' border='1' style='border-collapse:collapse;border-color:#ddd;font-family:Arial,sans-serif;font-size:13px;margin:4px 0 16px'>" +
+      "<tr style='background:#f4f4f4'><th align='left'>Client</th><th align='left'>Email</th><th align='left'>Expires</th><th align='right'>Days</th></tr>";
+    for (var j = 0; j < items.length; j++) {
+      var it = items[j];
+      html += "<tr>" +
+        "<td>" + it.name + "</td>" +
+        "<td>" + it.email + "</td>" +
+        "<td>" + it.expires + "</td>" +
+        "<td align='right'>" + it.days + "</td>" +
+        "</tr>";
+    }
+    return html + "</table>";
+  }
+
+  var subject = "[Stride] Resale certs — " +
+    buckets.expired.length + " expired, " +
+    buckets.d7.length + " ≤7d, " +
+    buckets.d30.length + " ≤30d, " +
+    buckets.d60.length + " ≤" + WARN_DAYS + "d";
+
+  var body = "<div style='font-family:Arial,sans-serif;font-size:13px;color:#222'>" +
+    "<p>Daily resale-certificate scan for " + todayStr +
+    " (warn window: " + WARN_DAYS + " days).</p>" +
+    "<h3 style='color:#b00020;margin-bottom:0'>Expired (" + buckets.expired.length + ")</h3>" +
+    _renderRows(buckets.expired) +
+    "<h3 style='color:#d32f2f;margin-bottom:0'>Expiring ≤ 7 days (" + buckets.d7.length + ")</h3>" +
+    _renderRows(buckets.d7) +
+    "<h3 style='color:#ed6c02;margin-bottom:0'>Expiring ≤ 30 days (" + buckets.d30.length + ")</h3>" +
+    _renderRows(buckets.d30) +
+    "<h3 style='color:#1976d2;margin-bottom:0'>Expiring ≤ " + WARN_DAYS + " days (" + buckets.d60.length + ")</h3>" +
+    _renderRows(buckets.d60) +
+    "<p style='color:#666;font-size:12px;margin-top:24px'>" +
+    "Sent automatically by StrideAPI runResaleCertExpiryCheck." +
+    "</p></div>";
+
+  try {
+    MailApp.sendEmail({ to: to, subject: subject, htmlBody: body });
+  } catch (e) {
+    _resaleCertWriteRunLog_("runResaleCertExpiryCheck",
+      "FAIL — MailApp.sendEmail threw", String(e));
+    return;
+  }
+
+  _resaleCertWriteRunLog_("runResaleCertExpiryCheck",
+    "OK — digest emailed to " + to,
+    "expired=" + buckets.expired.length +
+    " d7="    + buckets.d7.length +
+    " d30="   + buckets.d30.length +
+    " d" + WARN_DAYS + "="   + buckets.d60.length);
+}
+
+/**
+ * Install the daily trigger for runResaleCertExpiryCheck. Replaces any
+ * existing trigger of the same handler so re-running is safe.
+ * Run from the Apps Script editor once.
+ */
+function setupResaleCertExpiryTrigger() {
+  var triggers = ScriptApp.getProjectTriggers();
+  var removed = 0;
+  for (var i = 0; i < triggers.length; i++) {
+    if (triggers[i].getHandlerFunction() === "runResaleCertExpiryCheck") {
+      ScriptApp.deleteTrigger(triggers[i]);
+      removed++;
+    }
+  }
+  ScriptApp.newTrigger("runResaleCertExpiryCheck")
+    .timeBased()
+    .everyDays(1)
+    .atHour(8)
+    .create();
+  _resaleCertWriteRunLog_("setupResaleCertExpiryTrigger",
+    "Daily resale-cert expiry trigger enabled (8 AM)" +
+    (removed ? " — replaced " + removed + " existing trigger(s)" : ""), "");
+  Logger.log("Trigger installed. Removed " + removed + " existing trigger(s).");
+}
+
+/** Removes the daily trigger for runResaleCertExpiryCheck. */
+function removeResaleCertExpiryTrigger() {
+  var triggers = ScriptApp.getProjectTriggers();
+  var removed = 0;
+  for (var i = 0; i < triggers.length; i++) {
+    if (triggers[i].getHandlerFunction() === "runResaleCertExpiryCheck") {
+      ScriptApp.deleteTrigger(triggers[i]);
+      removed++;
+    }
+  }
+  _resaleCertWriteRunLog_("removeResaleCertExpiryTrigger",
+    "Daily resale-cert expiry trigger disabled (removed " + removed + ")", "");
+  Logger.log("Removed " + removed + " trigger(s).");
 }
