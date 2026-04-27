@@ -1225,6 +1225,17 @@ export function CreateDeliveryOrderModal({
       // submit promotes (draft → real order) or just saves changes.
       originalReviewStatusRef.current = (r.review_status as string) || null;
       forceUpdateForRefs(t => t + 1);
+      // Restore the client selection from the saved tenant_id by
+      // resolving the matching apiClients name. Without this, the
+      // clientName state stayed empty and the modal blanked the
+      // Client field every time Edit Full Order opened — and
+      // because clientSheetId derives from clientName (line 578),
+      // every "Still needed before submit: client" check fired and
+      // Save Changes was disabled.
+      if (r.tenant_id) {
+        const matched = apiClients.find(c => c.spreadsheetId === r.tenant_id)?.name;
+        if (matched) setClientName(matched);
+      }
       // Restore high-level mode + source first so dependent UI mounts.
       const ot = (r.order_type as string) || 'delivery';
       setMode(ot === 'pickup' || ot === 'delivery' || ot === 'service_only' || ot === 'pickup_and_delivery' ? ot : 'delivery');
@@ -1702,9 +1713,9 @@ export function CreateDeliveryOrderModal({
         // Promote → both legs get fresh real identifiers + flip status.
         if (wasDraftPD) {
           pickupEdit.dt_identifier = await generateOrderNumber('P');
-          pickupEdit.review_status = user?.role === 'admin' ? 'approved' : 'pending_review';
+          pickupEdit.review_status = (user?.role === 'admin' || user?.role === 'staff') ? 'approved' : 'pending_review';
           deliveryEdit.dt_identifier = await generateOrderNumber('D');
-          deliveryEdit.review_status = user?.role === 'admin' ? 'approved' : 'pending_review';
+          deliveryEdit.review_status = (user?.role === 'admin' || user?.role === 'staff') ? 'approved' : 'pending_review';
         }
         const upP = await supabase.from('dt_orders').update(pickupEdit).eq('id', editingPickupRowIdRef.current);
         if (upP.error) throw new Error(`Pickup leg ${wasDraftPD ? 'promote' : 'save'} failed: ${upP.error.message}`);
@@ -1799,7 +1810,7 @@ export function CreateDeliveryOrderModal({
         // pushed_to_dt_at semantics, audit history, etc.
         if (wasDraft) {
           editPayload.dt_identifier = await generateOrderNumber(mode === 'pickup' ? 'P' : undefined);
-          editPayload.review_status = user?.role === 'admin' ? 'approved' : 'pending_review';
+          editPayload.review_status = (user?.role === 'admin' || user?.role === 'staff') ? 'approved' : 'pending_review';
         }
         const { data: saved, error: saveErr } = await supabase
           .from('dt_orders')
@@ -1902,7 +1913,7 @@ export function CreateDeliveryOrderModal({
       // and is unrelated to this column.)
       details: details.trim() || null,
       source: 'app',
-      review_status: user?.role === 'admin' ? 'approved' : 'pending_review',
+      review_status: (user?.role === 'admin' || user?.role === 'staff') ? 'approved' : 'pending_review',
       created_by_user: authUid,
       created_by_role: user?.role || 'client',
       billing_method: billingMethod,
@@ -1910,7 +1921,10 @@ export function CreateDeliveryOrderModal({
       // status_id intentionally omitted — app-created orders have no DT status
       // until they are approved and pushed to DT via the dt-push-order Edge Function.
     };
-    const isAdminAutoApprove = user?.role === 'admin';
+    // Admin AND staff bypass the review queue — they're submitting from
+    // inside the warehouse and the order is correct by construction.
+    // Only client-role submissions need pending_review.
+    const isAdminAutoApprove = user?.role === 'admin' || user?.role === 'staff';
 
     try {
       if (mode === 'pickup_and_delivery') {
