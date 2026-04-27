@@ -4,6 +4,7 @@ import { UserCog, Loader2, X } from 'lucide-react';
 import { theme } from '../../styles/theme';
 import { AutocompleteSelect } from './AutocompleteSelect';
 import { useUsers } from '../../hooks/useUsers';
+import { ProcessingOverlay } from './ProcessingOverlay';
 
 /**
  * BulkReassignModal — user picker for the Tasks bulk Reassign action.
@@ -63,8 +64,15 @@ export function BulkReassignModal({ open, taskCount, onCancel, onConfirm, proces
           maxWidth: 460,
           boxShadow: '0 24px 60px rgba(0,0,0,0.25)',
           fontFamily: 'inherit',
+          position: 'relative',
+          overflow: 'hidden',
         }}
       >
+        <ProcessingOverlay
+          visible={processing}
+          message="Hold tight — reassigning your selection"
+          subMessage="Updating each row. You can leave this open."
+        />
         {/* Header */}
         <div
           style={{

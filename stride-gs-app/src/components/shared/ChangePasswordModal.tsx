@@ -3,6 +3,7 @@ import { KeyRound, X } from 'lucide-react';
 import { theme } from '../../styles/theme';
 import { useAuth } from '../../contexts/AuthContext';
 import { BtnSpinner } from '../ui/BtnSpinner';
+import { ProcessingOverlay } from './ProcessingOverlay';
 
 interface ChangePasswordModalProps {
   onClose: () => void;
@@ -46,7 +47,7 @@ export function ChangePasswordModal({ onClose }: ChangePasswordModalProps) {
       position: 'fixed', inset: 0, zIndex: 1000,
       background: 'rgba(0,0,0,0.45)',
       display: 'flex', alignItems: 'center', justifyContent: 'center',
-    }} onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
+    }} onClick={e => { if (e.target === e.currentTarget && !loading) onClose(); }}>
       <div style={{
         background: '#fff',
         borderRadius: theme.radii.xl,
@@ -55,7 +56,13 @@ export function ChangePasswordModal({ onClose }: ChangePasswordModalProps) {
         padding: '28px 28px 24px',
         fontFamily: theme.typography.fontFamily,
         position: 'relative',
+        overflow: 'hidden',
       }}>
+        <ProcessingOverlay
+          visible={loading}
+          message="Hold tight — saving your password"
+          subMessage="Updating your account."
+        />
         {/* Header */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 20 }}>
           <div style={{

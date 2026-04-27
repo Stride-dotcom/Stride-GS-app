@@ -17,6 +17,7 @@ import { theme } from '../../styles/theme';
 import { useProfiles } from '../../hooks/useProfiles';
 import { useAuth } from '../../contexts/AuthContext';
 import type { SendMessageParams } from '../../hooks/useMessages';
+import { ProcessingOverlay } from '../shared/ProcessingOverlay';
 
 export interface ComposeRecipient {
   id: string;            // auth.users.id uuid (mirrored to cb_users.id)
@@ -129,7 +130,7 @@ export function ComposeMessageModal({ onClose, onSend, currentUserId }: Props) {
 
   return createPortal(
     <div
-      onClick={onClose}
+      onClick={sending ? undefined : onClose}
       style={{
         position: 'fixed', inset: 0, background: 'rgba(15,23,42,0.5)',
         zIndex: 2500, display: 'flex', justifyContent: 'center', alignItems: 'center',
@@ -147,8 +148,14 @@ export function ComposeMessageModal({ onClose, onSend, currentUserId }: Props) {
           overflow: 'hidden',
           boxShadow: '0 20px 60px rgba(0,0,0,0.25)',
           fontFamily: theme.typography.fontFamily,
+          position: 'relative',
         }}
       >
+        <ProcessingOverlay
+          visible={sending}
+          message="Hold tight — sending your message"
+          subMessage="Notifying recipients. You can leave this open."
+        />
         {/* Header */}
         <div style={{
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
