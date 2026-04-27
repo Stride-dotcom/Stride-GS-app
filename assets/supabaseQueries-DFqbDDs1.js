@@ -1,0 +1,1 @@
+import{o as e}from"./supabaseQueries-CPbbtXtS.js";export{e as fetchClientsFromSupabase};
