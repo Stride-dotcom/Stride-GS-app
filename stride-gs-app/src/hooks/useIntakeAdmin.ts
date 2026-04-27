@@ -56,6 +56,12 @@ export interface IntakeRow {
   taxExemptReason: string | null;
   /** ISO yyyy-mm-dd. */
   resaleCertExpires: string | null;
+  /** When set, this intake was submitted via a refresh link for an
+   *  existing client. Activation merges into the existing clients row
+   *  instead of running postOnboardClient. */
+  clientSpreadsheetId: string | null;
+  /** 'new' (first-time onboard) | 'refresh' (existing-client update). */
+  intakeMode: 'new' | 'refresh';
   ipAddress: string | null;
   userAgent: string | null;
   submittedAt: string;
@@ -104,6 +110,8 @@ interface IntakeDbRow {
   tax_exempt: boolean | null;
   tax_exempt_reason: string | null;
   resale_cert_expires: string | null;
+  client_spreadsheet_id: string | null;
+  intake_mode: string | null;
   ip_address: string | null;
   user_agent: string | null;
   submitted_at: string;
@@ -155,6 +163,8 @@ function rowToIntake(r: IntakeDbRow): IntakeRow {
     taxExempt: r.tax_exempt,
     taxExemptReason: r.tax_exempt_reason,
     resaleCertExpires: r.resale_cert_expires,
+    clientSpreadsheetId: r.client_spreadsheet_id,
+    intakeMode: (r.intake_mode === 'refresh' ? 'refresh' : 'new'),
     ipAddress: r.ip_address,
     userAgent: r.user_agent,
     submittedAt: r.submitted_at,
@@ -183,6 +193,11 @@ export interface GenerateLinkPayload {
   prospectName?: string;
   prospectEmail?: string;
   expiresAt?: string | null;
+  /** When set, the link is for an existing client (refresh mode). The
+   *  public ClientIntake page detects this and switches to "update on
+   *  file" copy + pre-filled fields; activation merges into the existing
+   *  clients row instead of creating a new one. */
+  clientSpreadsheetId?: string;
 }
 
 export interface UseIntakeAdminResult {
@@ -246,6 +261,7 @@ export function useIntakeAdmin(): UseIntakeAdminResult {
       expires_at:     payload.expiresAt ?? null,
       created_by:     userId,
       active:         true,
+      client_spreadsheet_id: payload.clientSpreadsheetId || null,
     };
     const { data, error: err } = await supabase
       .from('client_intake_links')

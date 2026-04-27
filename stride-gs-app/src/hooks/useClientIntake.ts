@@ -32,6 +32,34 @@ export interface IntakeLinkInfo {
   expiresAt: string | null;
   active: boolean;
   usedAt: string | null;
+  /** When set, this link is for an existing client (refresh mode). */
+  clientSpreadsheetId: string | null;
+}
+
+/** Pre-fill payload for refresh-mode intakes. Pulls from the existing
+ *  clients row + the most recent client_intakes row for that client.
+ *  All fields optional — form falls back to empty defaults when missing. */
+export interface RefreshPrefill {
+  spreadsheetId: string;
+  businessName: string;
+  contactName: string;
+  email: string;
+  phone: string;
+  businessAddress: string;
+  website: string;
+  billingContactName: string;
+  billingEmail: string;
+  billingAddress: string;
+  notificationContacts: Array<{ name?: string; email: string }>;
+  insuranceChoice: 'own_policy' | 'stride_coverage' | 'eis_coverage' | '';
+  insuranceDeclaredValue: string;
+  autoInspect: boolean;
+  paymentAuthorized: boolean;
+  taxExempt: boolean | null;
+  taxExemptReason: string;
+  resaleCertExpires: string;
+  resaleCertCurrentUrl: string;
+  resaleCertUploadedAt: string;
 }
 
 export interface IntakeSubmitPayload {
@@ -75,8 +103,74 @@ export interface IntakeSubmitPayload {
   taxExemptReason?: string;
   /** Date the prospect's resale certificate expires. */
   resaleCertExpires?: string;
+  /** Refresh-mode marker — set when the link's client_spreadsheet_id is
+   *  populated. Activation route diverges based on this. */
+  intakeMode?: 'new' | 'refresh';
+  clientSpreadsheetId?: string;
   // Meta (captured in the browser)
   userAgent?: string;
+}
+
+// Refresh-mode prefill — only used when the link references an existing
+// client. Reads the canonical clients row + the most-recent client_intakes
+// row (for fields like notification_contacts that historically only lived
+// on intake submissions). Best-effort; missing rows fall back to empty
+// strings so the form still renders.
+export async function fetchRefreshPrefill(spreadsheetId: string): Promise<RefreshPrefill | null> {
+  try {
+    const { data: client, error: clientErr } = await supabase
+      .from('clients')
+      .select('spreadsheet_id, name, email, contact_name, phone, qb_customer_name, auto_charge, auto_inspection, notification_contacts, tax_exempt, tax_exempt_reason, resale_cert_expires, resale_cert_url, resale_cert_uploaded_at')
+      .eq('spreadsheet_id', spreadsheetId)
+      .maybeSingle();
+    if (clientErr || !client) return null;
+
+    // Fall back to most recent intake for any field not on clients (business
+    // address, website, billing fields, insurance choice, declared value,
+    // notification contacts when clients.notification_contacts is null).
+    const { data: lastIntake } = await supabase
+      .from('client_intakes')
+      .select('business_address, website, billing_contact_name, billing_email, billing_address, notification_contacts, insurance_choice, insurance_declared_value, auto_inspect, payment_authorized')
+      .eq('client_spreadsheet_id', spreadsheetId)
+      .order('submitted_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    // Notification contacts: prefer the canonical clients column; fall back
+    // to the last intake's snapshot.
+    const contacts: Array<{ name?: string; email: string }> = (() => {
+      const fromClient = (client as { notification_contacts?: unknown }).notification_contacts;
+      if (Array.isArray(fromClient)) return fromClient as Array<{ name?: string; email: string }>;
+      const fromIntake = lastIntake?.notification_contacts;
+      if (Array.isArray(fromIntake)) return fromIntake as Array<{ name?: string; email: string }>;
+      return [];
+    })();
+
+    return {
+      spreadsheetId: client.spreadsheet_id,
+      businessName:        client.name || '',
+      contactName:         client.contact_name || '',
+      email:               client.email || '',
+      phone:               client.phone || '',
+      businessAddress:     lastIntake?.business_address || '',
+      website:             lastIntake?.website || '',
+      billingContactName:  lastIntake?.billing_contact_name || '',
+      billingEmail:        lastIntake?.billing_email || '',
+      billingAddress:      lastIntake?.billing_address || '',
+      notificationContacts: contacts,
+      insuranceChoice:     (lastIntake?.insurance_choice as RefreshPrefill['insuranceChoice']) || '',
+      insuranceDeclaredValue: lastIntake?.insurance_declared_value != null ? String(lastIntake.insurance_declared_value) : '',
+      autoInspect:         client.auto_inspection === true || lastIntake?.auto_inspect === true,
+      paymentAuthorized:   client.auto_charge === true || lastIntake?.payment_authorized === true,
+      taxExempt:           client.tax_exempt === false ? false : true,
+      taxExemptReason:     client.tax_exempt_reason || 'Resale',
+      resaleCertExpires:   client.resale_cert_expires || '',
+      resaleCertCurrentUrl: client.resale_cert_url || '',
+      resaleCertUploadedAt: client.resale_cert_uploaded_at || '',
+    };
+  } catch {
+    return null;
+  }
 }
 
 function linkRowToInfo(r: LinkRow): IntakeLinkInfo {
@@ -88,6 +182,7 @@ function linkRowToInfo(r: LinkRow): IntakeLinkInfo {
     expiresAt: r.expires_at,
     active: r.active !== false,
     usedAt: r.used_at,
+    clientSpreadsheetId: r.client_spreadsheet_id ?? null,
   };
 }
 
@@ -99,6 +194,7 @@ interface LinkRow {
   expires_at: string | null;
   active: boolean | null;
   used_at: string | null;
+  client_spreadsheet_id?: string | null;
 }
 
 export type LinkStatus = 'loading' | 'valid' | 'invalid' | 'expired';
@@ -203,6 +299,8 @@ export async function submitIntake(payload: IntakeSubmitPayload): Promise<{ id: 
     tax_exempt:            payload.taxExempt ?? null,
     tax_exempt_reason:     payload.taxExemptReason ?? null,
     resale_cert_expires:   payload.resaleCertExpires ?? null,
+    intake_mode:           payload.intakeMode || 'new',
+    client_spreadsheet_id: payload.clientSpreadsheetId || null,
     user_agent:            payload.userAgent ?? (typeof navigator !== 'undefined' ? navigator.userAgent : null),
     submitted_at:          new Date().toISOString(),
   };
