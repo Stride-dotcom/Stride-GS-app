@@ -6,11 +6,12 @@ import {
   flexRender, createColumnHelper,
   type SortingState, type FilterFn,
 } from '@tanstack/react-table';
-import { Search, RefreshCw, Download, Truck, Calendar, Plus, ClipboardCheck, X, ChevronUp, ChevronDown, ArrowUpDown, CloudDownload } from 'lucide-react';
+import { Search, RefreshCw, Download, Truck, Calendar, Plus, ClipboardCheck, X, ChevronUp, ChevronDown, ArrowUpDown, CloudDownload, Share2 } from 'lucide-react';
 import { theme } from '../styles/theme';
 import { useOrders } from '../hooks/useOrders';
 import type { DtOrderForUI } from '../hooks/useOrders';
 import { CreateDeliveryOrderModal } from '../components/shared/CreateDeliveryOrderModal';
+import { SharePublicPageDialog } from '../components/shared/SharePublicPageDialog';
 // ReviewQueueTab retired in Phase B + file deleted in the follow-up.
 // Review actions live on the Order Details page now (Edit Full Order,
 // Approve, Reject, Push to DT — all inline). Pill in the tab bar
@@ -140,6 +141,7 @@ export function Orders() {
   const [categoryFilter, setCategoryFilter] = useState<string>('');
   const [statusFilter, setStatusFilter] = useState<string[]>([]);
   const [showCreateModal, setShowCreateModal] = useState(false);
+  const [shareDialog, setShareDialog] = useState<null | 'orders' | 'availability'>(null);
   // When set, the create modal opens in edit-existing-draft mode and
   // loads the dt_orders row + items into all the form fields. Cleared
   // on modal close so the next "+ New Delivery Order" button click
@@ -455,20 +457,38 @@ export function Orders() {
             </button>
           )}
 
-          {activeTab === 'orders' && (
+          {/* Right-side actions (Share + tab-specific primary CTA) */}
+          <div style={{ marginLeft: 'auto', display: 'flex', gap: 8, alignItems: 'center' }}>
             <button
-              onClick={() => setShowCreateModal(true)}
+              type="button"
+              onClick={() => setShareDialog(activeTab === 'availability' ? 'availability' : 'orders')}
+              title="Share this page"
               style={{
-                marginLeft: 'auto', padding: '10px 18px', borderRadius: 100,
-                border: 'none', background: '#E85D2D', color: '#fff',
+                padding: '10px 16px', borderRadius: 100,
+                border: `1px solid ${theme.colors.border}`, background: '#fff',
+                color: theme.colors.textSecondary,
                 fontSize: 11, fontWeight: 600, letterSpacing: '1.5px', textTransform: 'uppercase',
-                cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6,
+                cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 6,
                 fontFamily: 'inherit',
               }}
             >
-              <Plus size={14} /> New Delivery
+              <Share2 size={13} /> Share
             </button>
-          )}
+            {activeTab === 'orders' && (
+              <button
+                onClick={() => setShowCreateModal(true)}
+                style={{
+                  padding: '10px 18px', borderRadius: 100,
+                  border: 'none', background: '#E85D2D', color: '#fff',
+                  fontSize: 11, fontWeight: 600, letterSpacing: '1.5px', textTransform: 'uppercase',
+                  cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6,
+                  fontFamily: 'inherit',
+                }}
+              >
+                <Plus size={14} /> New Delivery
+              </button>
+            )}
+          </div>
         </div>
       </div>
 
@@ -702,6 +722,22 @@ export function Orders() {
           }}
         />
       )}
+
+      {/* Share dialogs — one per shareable surface on this page. */}
+      <SharePublicPageDialog
+        open={shareDialog === 'orders'}
+        onClose={() => setShareDialog(null)}
+        title="Share Service Request Form"
+        url="https://mystridehub.com/#/public/service-request"
+        description="Share this link with customers so they can submit delivery, pickup, or service requests without logging in."
+      />
+      <SharePublicPageDialog
+        open={shareDialog === 'availability'}
+        onClose={() => setShareDialog(null)}
+        title="Share Availability Calendar"
+        url="https://mystridehub.com/availability.html"
+        description="Share the public availability calendar so customers can see open delivery slots."
+      />
 
       <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
     </div>
