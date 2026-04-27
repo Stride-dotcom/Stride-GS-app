@@ -7,6 +7,7 @@ import { useInventory } from '../../hooks/useInventory';
 import { useClients } from '../../hooks/useClients';
 import { isApiConfigured, postTransferItems, type TransferItemsResponse } from '../../lib/api';
 import type { InventoryItem } from '../../lib/types';
+import { ProcessingOverlay } from './ProcessingOverlay';
 
 interface Props {
   onClose: () => void;
@@ -142,13 +143,18 @@ export function TransferItemsModal({
 
   return (
     <>
-      <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.3)', zIndex: 200 }} />
+      <div onClick={loading ? undefined : onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.3)', zIndex: 200 }} />
       <div style={{
         position: 'fixed', top: '50%', left: '50%', transform: 'translate(-50%,-50%)',
         width: 600, maxWidth: '95vw', maxHeight: '90vh', background: '#fff', borderRadius: 20,
         boxShadow: '0 24px 60px rgba(0,0,0,0.25)', zIndex: 201, display: 'flex', flexDirection: 'column',
         fontFamily: theme.typography.fontFamily, overflow: 'hidden',
       }}>
+        <ProcessingOverlay
+          visible={loading}
+          message={`Hold tight — transferring ${selectedIds.size > 1 ? `${selectedIds.size} items` : 'your item'}`}
+          subMessage="Moving inventory rows, updating billing, and notifying both clients. You can leave this open."
+        />
         {/* Header */}
         <div style={{ padding: '16px 20px', borderBottom: `1px solid ${theme.colors.border}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexShrink: 0 }}>
           <div>
