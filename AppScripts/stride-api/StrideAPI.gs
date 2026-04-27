@@ -1,5 +1,13 @@
 /* ===================================================
-   StrideAPI.gs — v38.138.0 — 2026-04-26 PST — Daily resale-cert expiry digest
+   StrideAPI.gs — v38.138.1 — 2026-04-27 PST — sendRawEmail accepts optional replyTo
+   v38.138.1: handleSendRawEmail_ now accepts an optional `replyTo` field
+              on its payload and passes it through to GmailApp.sendEmail.
+              Used by the new notify-public-request Edge Function so the
+              internal alert email replies route back to the submitter
+              and the submitter's confirmation email replies route to
+              the configurable Stride contact. Existing callers
+              (notify-new-order, notify-order-revision) ignore the field
+              and behaviour is unchanged when replyTo is omitted.
    v38.138.0: New runResaleCertExpiryCheck() — daily Apps Script trigger
               that scans Supabase clients where tax_exempt=true and
               resale_cert_expires is within RESALE_CERT_EXPIRY_WARN_DAYS
@@ -26480,21 +26488,25 @@ function handleNotifyNewDeliveryOrder_(payload) {
 
 /**
  * POST sendRawEmail — Send a pre-composed email via GmailApp.
- * Called by the notify-new-order Supabase Edge Function, which handles
- * template lookup and token substitution on the Supabase side.
- * Payload: { to: string, subject: string, htmlBody: string }
+ * Called by the notify-new-order / notify-public-request Supabase Edge
+ * Functions, which handle template lookup and token substitution on the
+ * Supabase side.
+ * Payload: { to: string, subject: string, htmlBody: string, replyTo?: string }
  */
 function handleSendRawEmail_(payload) {
   var to       = String(payload.to       || "").trim();
   var subject  = String(payload.subject  || "").trim();
   var htmlBody = String(payload.htmlBody || "").trim();
+  var replyTo  = String(payload.replyTo  || "").trim();
 
   if (!to || !subject || !htmlBody) {
     return { success: false, error: "Missing required fields: to, subject, htmlBody" };
   }
 
   try {
-    GmailApp.sendEmail(to, subject, "", { htmlBody: htmlBody });
+    var opts = { htmlBody: htmlBody };
+    if (replyTo) opts.replyTo = replyTo;
+    GmailApp.sendEmail(to, subject, "", opts);
     Logger.log("handleSendRawEmail_: sent to " + to + " — subject: " + subject.substring(0, 60));
     return { success: true };
   } catch (e) {
