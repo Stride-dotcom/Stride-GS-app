@@ -1,5 +1,15 @@
 /**
- * dt-push-order — Supabase Edge Function (Phase 2c) — v15 2026-04-25 PST
+ * dt-push-order — Supabase Edge Function (Phase 2c) — v16 2026-04-26 PST
+ * v16: Restored the STRIDE LOGISTICS account fallback for unmapped
+ *      tenant_ids. The v15 rewrite accidentally dropped the
+ *      session-80 fix and reverted resolveAccountName() to the
+ *      strict pre-session-80 behaviour, which surfaced as 400 errors
+ *      ("No DT account mapped for tenant_id …") on every order
+ *      submitted by a client that hadn't been added to
+ *      account_name_map yet. Pushes now land on the house account
+ *      (STRIDE LOGISTICS) and ops can reassign in DT's UI; the early
+ *      `if (!accountName)` 400 path is now unreachable but kept as
+ *      defense-in-depth.
  * v15: Driver-facing <notes> block now falls back to dt_orders.details
  *      when order_notes is empty. Previously the modal's "Notes /
  *      Special Instructions" field wrote only to details, which
@@ -280,10 +290,18 @@ ${itemsXml}
 </service_orders>`;
 }
 
-// Resolve DT account name from tenant_id (direct lookup in account_name_map: {sheetId → accountName})
+// Resolve DT account name from tenant_id (direct lookup in
+// account_name_map: {sheetId → accountName}).
+//
+// Falls back to the house account `STRIDE LOGISTICS` when the
+// tenant isn't mapped — previously this returned '' and the caller
+// 400'd, which blocked every push for newly-onboarded clients that
+// hadn't been added to dt_credentials.account_name_map yet. The
+// fallback was originally added in session 80 and accidentally
+// dropped during the v15 rewrite; v16 restores it.
 function resolveAccountName(tenantId: string | null, acctMap: Record<string, string>): string {
-  if (!tenantId) return '';
-  return acctMap[tenantId] || '';
+  if (!tenantId) return 'STRIDE LOGISTICS';
+  return acctMap[tenantId] || 'STRIDE LOGISTICS';
 }
 
 // Push a single order to DT. Returns {ok, body}.
