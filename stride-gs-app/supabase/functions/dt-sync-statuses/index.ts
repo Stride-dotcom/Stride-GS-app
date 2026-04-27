@@ -1,7 +1,14 @@
 /**
- * dt-sync-statuses — Supabase Edge Function — v8 2026-04-25 PST
+ * dt-sync-statuses — Supabase Edge Function — v9 2026-04-27 PST
  *
- * v8: Look up DT orders by `dt_identifier` instead of `dt_dispatch_id`.
+ * v9: Dropped the `pushed_to_dt_at IS NOT NULL` filter. Older orders
+ *     with source='reconcile' (sheet-backfilled) and no
+ *     pushed_to_dt_at stamp were never being synced — they sat with
+ *     status_id NULL forever even though DT had a real status for
+ *     them. Now we sync any row with a dt_identifier that isn't
+ *     already in a terminal status.
+ *
+ * v8 2026-04-25 PST: Look up DT orders by `dt_identifier` instead of `dt_dispatch_id`.
  *     Two reasons:
  *       1. `dt-push-order` doesn't capture a dispatch ID from DT's
  *          add_order response (DT returns only <success>...</success>),
@@ -76,15 +83,13 @@ Deno.serve(async (req) => {
     if (s.code) statusByCode.set(String(s.code).toUpperCase(), { id: s.id, category: s.category });
   }
 
-  // Active orders = ones we've pushed to DT. We previously required
-  // dt_dispatch_id to be set, but app-pushed orders never have one
-  // (DT's add_order response doesn't return it), so that filter
-  // skipped every order created in-app. Keying off pushed_to_dt_at
-  // covers both app-pushed AND webhook-imported rows.
+  // v9: sync every row with a dt_identifier that isn't already in a
+  // terminal status. Drops the previous pushed_to_dt_at filter so
+  // legacy reconciled rows (source='reconcile') also pull statuses.
   let query = supabase
     .from('dt_orders')
     .select('id, dt_identifier, dt_dispatch_id, status_id, last_synced_at, tenant_id, paid_at')
-    .not('pushed_to_dt_at', 'is', null);
+    .not('dt_identifier', 'is', null);
 
   if (singleOrderId) {
     query = query.eq('id', singleOrderId);
