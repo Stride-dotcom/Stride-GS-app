@@ -1612,6 +1612,10 @@ export interface SupabaseDtOrderRow {
 
 export interface DtOrderItemForUI {
   id: string;
+  // FK to public.inventory.id when this line maps to a Stride inventory
+  // row; null for ad-hoc / free-text items. Used by OrderPage to drive
+  // the manual-release flow.
+  inventoryId: string | null;
   dtItemCode: string;
   description: string;
   quantity: number | null;
@@ -1868,6 +1872,7 @@ export async function fetchDtOrdersFromSupabase(
           else if (typeof rawReturnCodes === 'string' && rawReturnCodes.trim()) returnCodes = [rawReturnCodes.trim()];
           return {
             id: String(item.id ?? ''),
+            inventoryId: item.inventory_id ? String(item.inventory_id) : null,
             dtItemCode: String(item.dt_item_code ?? ''),
             description: String(item.description ?? ''),
             quantity: item.quantity != null ? Number(item.quantity) : null,
@@ -2006,6 +2011,7 @@ export async function fetchDtOrderByIdFromSupabase(
         else if (typeof rawReturnCodes === 'string' && rawReturnCodes.trim()) returnCodes = [rawReturnCodes.trim()];
         return {
           id: String(item.id ?? ''),
+          inventoryId: item.inventory_id ? String(item.inventory_id) : null,
           dtItemCode: String(item.dt_item_code ?? ''),
           description: String(item.description ?? ''),
           quantity: item.quantity != null ? Number(item.quantity) : null,
