@@ -17,6 +17,7 @@ import { useVirtualRows } from '../hooks/useVirtualRows';
 import { useScrollRestoration } from '../hooks/useScrollRestoration';
 import { theme } from '../styles/theme';
 import { fmtDate } from '../lib/constants';
+import { tanstackGlobalFilter } from '../lib/searchFilters';
 import { WriteButton } from '../components/shared/WriteButton';
 import { isApiConfigured } from '../lib/api';
 import type { ApiShipment } from '../lib/api';
@@ -457,6 +458,7 @@ export function Shipments() {
     enableMultiSort: true,
     getRowId: r => r.shipmentNo,
     enableRowSelection: true,
+    globalFilterFn: tanstackGlobalFilter as FilterFn<ShipmentRow>,
   });
 
   const { containerRef, virtualRows, rows: allRows, totalHeight } = useVirtualRows(table);

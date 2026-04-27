@@ -23,6 +23,7 @@ import { useClientFilterUrlSync } from '../hooks/useClientFilterUrlSync';
 import { useClientFilterPersisted } from '../hooks/useClientFilterPersisted';
 import { theme } from '../styles/theme';
 import { fmtDate } from '../lib/constants';
+import { tanstackGlobalFilter } from '../lib/searchFilters';
 import { useItemIndicators } from '../hooks/useItemIndicators';
 import { ItemIdBadges } from '../components/shared/ItemIdBadges';
 import { WriteButton } from '../components/shared/WriteButton';
@@ -511,6 +512,7 @@ export function Tasks() {
     getCoreRowModel: getCoreRowModel(), getSortedRowModel: getSortedRowModel(),
     getFilteredRowModel: getFilteredRowModel(),
     enableMultiSort: true,
+    globalFilterFn: tanstackGlobalFilter as FilterFn<Task>,
   });
 
   const { containerRef, virtualRows, rows: allRows, totalHeight } = useVirtualRows(table);
