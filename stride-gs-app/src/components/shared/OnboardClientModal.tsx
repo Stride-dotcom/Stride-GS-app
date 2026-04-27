@@ -602,6 +602,22 @@ export function OnboardClientModal({ mode = 'create', existingClient = null, all
             </div>
           )}
 
+          {/* Edit mode: Tax & Resale Certificate — Supabase-only fields
+              (tax_exempt, tax_exempt_reason, resale_cert_url, expiry).
+              Wholesale clients are exempt by default. WA DOR audit
+              requires the cert PDF on file. App alerts at <60 days. */}
+          {isEdit && data.spreadsheetId && (
+            <div style={sectionDivider}>
+              <div style={{ ...sectionHead, display: 'flex', alignItems: 'center', gap: 6 }}>
+                <FileText size={14} /> Tax &amp; Resale Certificate
+                <span style={{ fontSize: 10, fontWeight: 400, color: theme.colors.textMuted, marginLeft: 4 }}>
+                  Tax exemption + resale cert tracking
+                </span>
+              </div>
+              <TaxExemptBlock spreadsheetId={data.spreadsheetId} />
+            </div>
+          )}
+
           {/* Optional */}
           <div style={sectionDivider}>
             <div style={sectionHead}>Optional</div>
@@ -1121,6 +1137,284 @@ function InsuranceBlock({ tenantId, clientName }: { tenantId: string; clientName
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+/**
+ * TaxExemptBlock — per-client tax-exemption + resale-cert state.
+ *
+ * Reads/writes Supabase `clients` table directly (no Apps Script /
+ * sheet round-trip). These fields live in Supabase ONLY by design —
+ * the CB Clients sheet has historical three-way sync issues that we
+ * specifically want to avoid for new client metadata.
+ *
+ * Fields managed:
+ *   tax_exempt              — defaults true (most clients are wholesale)
+ *   tax_exempt_reason       — Resale / Out-of-state / Government / Non-profit / Other
+ *   resale_cert_url         — public URL of the cert PDF in resale-certs storage bucket
+ *   resale_cert_expires     — date the cert expires; expiry email cron alerts <60 days
+ *   resale_cert_uploaded_at — audit trail timestamp set on each upload
+ *
+ * Auto-saves on change (no separate Save button) — small atomic upsert
+ * per field minimizes the UX cost of forgetting to save.
+ */
+const TAX_EXEMPT_REASONS = [
+  'Resale',
+  'Out-of-state',
+  'Government',
+  'Non-profit',
+  'Other',
+] as const;
+
+function TaxExemptBlock({ spreadsheetId }: { spreadsheetId: string }) {
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState<string | null>(null); // field name being saved
+  const [savedFlash, setSavedFlash] = useState<string | null>(null);
+
+  const [taxExempt, setTaxExempt] = useState<boolean>(true);
+  const [reason, setReason] = useState<string>('Resale');
+  const [certUrl, setCertUrl] = useState<string>('');
+  const [certExpires, setCertExpires] = useState<string>('');
+  const [certUploadedAt, setCertUploadedAt] = useState<string>('');
+
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Load on mount
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      setLoading(true); setError(null);
+      const { data: row, error: err } = await supabase
+        .from('clients')
+        .select('tax_exempt, tax_exempt_reason, resale_cert_url, resale_cert_expires, resale_cert_uploaded_at')
+        .eq('spreadsheet_id', spreadsheetId)
+        .maybeSingle();
+      if (!alive) return;
+      if (err) {
+        setError(err.message);
+        setLoading(false);
+        return;
+      }
+      if (row) {
+        setTaxExempt(row.tax_exempt !== false);
+        setReason(row.tax_exempt_reason || 'Resale');
+        setCertUrl(row.resale_cert_url || '');
+        setCertExpires(row.resale_cert_expires || '');
+        setCertUploadedAt(row.resale_cert_uploaded_at || '');
+      }
+      setLoading(false);
+    })();
+    return () => { alive = false; };
+  }, [spreadsheetId]);
+
+  // Generic field-save helper. Optimistic + error rollback handled by caller.
+  const saveField = async (fieldKey: string, payload: Record<string, unknown>) => {
+    setSaving(fieldKey); setError(null);
+    const { error: err } = await supabase
+      .from('clients')
+      .update(payload)
+      .eq('spreadsheet_id', spreadsheetId);
+    setSaving(null);
+    if (err) {
+      setError(err.message);
+      return false;
+    }
+    setSavedFlash(fieldKey);
+    setTimeout(() => setSavedFlash(prev => prev === fieldKey ? null : prev), 1500);
+    return true;
+  };
+
+  const handleToggleExempt = async (next: boolean) => {
+    setTaxExempt(next);
+    const ok = await saveField('tax_exempt', { tax_exempt: next });
+    if (!ok) setTaxExempt(!next); // rollback
+  };
+
+  const handleReasonChange = async (next: string) => {
+    setReason(next);
+    const ok = await saveField('reason', { tax_exempt_reason: next });
+    if (!ok) {/* leave value; user can retry */}
+  };
+
+  const handleExpiryChange = async (next: string) => {
+    setCertExpires(next);
+    const ok = await saveField('expiry', { resale_cert_expires: next || null });
+    if (!ok) {/* leave value; user can retry */}
+  };
+
+  const handleCertUpload = async (file: File) => {
+    setSaving('upload'); setError(null);
+    try {
+      // Path: <spreadsheet_id>/<timestamp>-<filename>. Spreadsheet_id keeps
+      // each client's certs isolated; timestamp prefix avoids overwriting
+      // when the same filename is re-uploaded after a renewal.
+      const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+      const path = `${spreadsheetId}/${Date.now()}-${safeName}`;
+      const { error: upErr } = await supabase.storage
+        .from('resale-certs')
+        .upload(path, file, { upsert: false, contentType: file.type || 'application/pdf' });
+      if (upErr) throw upErr;
+
+      // Signed URL good for ~10 years (private bucket; admins access via app).
+      const { data: signed, error: signErr } = await supabase.storage
+        .from('resale-certs')
+        .createSignedUrl(path, 60 * 60 * 24 * 365 * 10);
+      if (signErr) throw signErr;
+      const url = signed?.signedUrl || '';
+      const nowIso = new Date().toISOString();
+
+      const { error: updErr } = await supabase
+        .from('clients')
+        .update({
+          resale_cert_url: url,
+          resale_cert_uploaded_at: nowIso,
+        })
+        .eq('spreadsheet_id', spreadsheetId);
+      if (updErr) throw updErr;
+
+      setCertUrl(url);
+      setCertUploadedAt(nowIso);
+      setSavedFlash('upload');
+      setTimeout(() => setSavedFlash(prev => prev === 'upload' ? null : prev), 1500);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(null);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  };
+
+  if (loading) {
+    return <div style={{ padding: 12, textAlign: 'center', color: theme.colors.textMuted, fontSize: 12 }}>Loading…</div>;
+  }
+
+  // Days until expiry — drives the warning chip
+  const daysUntilExpiry = certExpires ? Math.ceil((new Date(certExpires).getTime() - Date.now()) / (1000 * 60 * 60 * 24)) : null;
+  const expiryWarn = daysUntilExpiry !== null && daysUntilExpiry <= 60 && daysUntilExpiry >= 0;
+  const expiryExpired = daysUntilExpiry !== null && daysUntilExpiry < 0;
+
+  return (
+    <div style={{ background: theme.colors.bgSubtle, borderRadius: 10, padding: 14 }}>
+      {error && (
+        <div style={{ marginBottom: 10, padding: 8, borderRadius: 6, background: '#FEF2F2', border: '1px solid #FCA5A5', color: '#B91C1C', fontSize: 11 }}>
+          <AlertTriangle size={11} style={{ verticalAlign: '-1px', marginRight: 4 }} /> {error}
+        </div>
+      )}
+
+      {/* Tax Exempt toggle */}
+      <div style={{ marginBottom: 14 }}>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 13 }}>
+          <input
+            type="checkbox"
+            checked={taxExempt}
+            onChange={e => handleToggleExempt(e.target.checked)}
+            disabled={saving === 'tax_exempt'}
+            style={{ cursor: 'pointer' }}
+          />
+          <strong>Tax exempt (wholesale customer)</strong>
+          {saving === 'tax_exempt' && <Loader2 size={11} style={{ animation: 'spin 1s linear infinite', color: theme.colors.textMuted }} />}
+          {savedFlash === 'tax_exempt' && <CheckCircle size={11} style={{ color: '#15803D' }} />}
+        </label>
+        <div style={{ fontSize: 11, color: theme.colors.textMuted, marginTop: 4, marginLeft: 22 }}>
+          When checked, all sales tax is waived for this customer. Most clients are wholesale resellers (default).
+        </div>
+      </div>
+
+      {taxExempt && (
+        <>
+          {/* Reason dropdown */}
+          <div style={{ marginBottom: 14 }}>
+            <label style={lbl}>
+              <span>Exemption reason</span>
+              <InfoTooltip text="Required by WA DOR for audit. Most 3PL clients are 'Resale' (they buy from you to sell to their own customers)." />
+            </label>
+            <select
+              value={reason}
+              onChange={e => handleReasonChange(e.target.value)}
+              disabled={saving === 'reason'}
+              style={{ ...inp, padding: '8px 10px' }}
+            >
+              {TAX_EXEMPT_REASONS.map(r => <option key={r} value={r}>{r}</option>)}
+            </select>
+            {saving === 'reason' && <span style={{ fontSize: 10, color: theme.colors.textMuted, marginLeft: 6 }}>Saving…</span>}
+            {savedFlash === 'reason' && <span style={{ fontSize: 10, color: '#15803D', marginLeft: 6 }}>Saved</span>}
+          </div>
+
+          {/* Cert URL + upload */}
+          <div style={{ marginBottom: 14 }}>
+            <label style={lbl}>
+              <span>Resale certificate (PDF)</span>
+              <InfoTooltip text="The PDF the client provided showing their state-issued resale certificate. Required by WA DOR for audit. Stored privately; admin/staff can view via the link below." />
+            </label>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="application/pdf,image/*"
+              onChange={e => {
+                const f = e.target.files?.[0];
+                if (f) handleCertUpload(f);
+              }}
+              disabled={saving === 'upload'}
+              style={{ fontSize: 12 }}
+            />
+            {saving === 'upload' && (
+              <div style={{ fontSize: 11, color: theme.colors.textMuted, marginTop: 6 }}>
+                <Loader2 size={11} style={{ animation: 'spin 1s linear infinite', verticalAlign: '-1px', marginRight: 4 }} /> Uploading…
+              </div>
+            )}
+            {savedFlash === 'upload' && (
+              <div style={{ fontSize: 11, color: '#15803D', marginTop: 6 }}>
+                <CheckCircle size={11} style={{ verticalAlign: '-1px', marginRight: 4 }} /> Cert saved.
+              </div>
+            )}
+            {certUrl && (
+              <div style={{ fontSize: 11, color: theme.colors.textMuted, marginTop: 6, display: 'flex', alignItems: 'center', gap: 6 }}>
+                <FileText size={11} />
+                <a href={certUrl} target="_blank" rel="noopener noreferrer" style={{ color: theme.colors.orange }}>View current cert</a>
+                {certUploadedAt && (
+                  <span>· uploaded {new Date(certUploadedAt).toLocaleDateString()}</span>
+                )}
+              </div>
+            )}
+            {!certUrl && (
+              <div style={{ fontSize: 11, color: '#92400E', marginTop: 6 }}>
+                <AlertTriangle size={11} style={{ verticalAlign: '-1px', marginRight: 4 }} /> No cert on file. WA DOR requires the cert to claim wholesale exemption.
+              </div>
+            )}
+          </div>
+
+          {/* Cert expiry */}
+          <div style={{ marginBottom: 4 }}>
+            <label style={lbl}>
+              <span>Cert expiry date</span>
+              <InfoTooltip text="WA resale certificates are typically valid for 4 years from issue date. App alerts at <60 days." />
+            </label>
+            <input
+              type="date"
+              value={certExpires || ''}
+              onChange={e => handleExpiryChange(e.target.value)}
+              disabled={saving === 'expiry'}
+              style={{ ...inp, maxWidth: 220 }}
+            />
+            {saving === 'expiry' && <span style={{ fontSize: 10, color: theme.colors.textMuted, marginLeft: 6 }}>Saving…</span>}
+            {savedFlash === 'expiry' && <span style={{ fontSize: 10, color: '#15803D', marginLeft: 6 }}>Saved</span>}
+
+            {/* Expiry warning chip */}
+            {expiryExpired && (
+              <div style={{ display: 'inline-flex', alignItems: 'center', gap: 4, marginLeft: 10, padding: '3px 8px', borderRadius: 6, background: '#FEF2F2', color: '#B91C1C', fontSize: 11, fontWeight: 600 }}>
+                <AlertTriangle size={11} /> Expired {Math.abs(daysUntilExpiry!)} days ago
+              </div>
+            )}
+            {expiryWarn && (
+              <div style={{ display: 'inline-flex', alignItems: 'center', gap: 4, marginLeft: 10, padding: '3px 8px', borderRadius: 6, background: '#FEF3C7', color: '#92400E', fontSize: 11, fontWeight: 600 }}>
+                <AlertTriangle size={11} /> Expires in {daysUntilExpiry} days
+              </div>
+            )}
+          </div>
+        </>
+      )}
     </div>
   );
 }
