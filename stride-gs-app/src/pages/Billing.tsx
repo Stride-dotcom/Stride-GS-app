@@ -17,6 +17,7 @@ import { ParityMonitor } from './ParityMonitor';
 import { BillingActivityTab } from '../components/billing/BillingActivityTab';
 import { useVirtualRows } from '../hooks/useVirtualRows';
 import { theme } from '../styles/theme';
+import { BtnSpinner } from '../components/ui/BtnSpinner';
 import { fmtDate } from '../lib/constants';
 import { WriteButton } from '../components/shared/WriteButton';
 import { MultiSelectFilter } from '../components/shared/MultiSelectFilter';
@@ -1501,7 +1502,7 @@ export function Billing() {
           const invoicedRows = sel.filter(r => r.status === 'Invoiced');
           if (!invoicedRows.length) { setQbResult({ error: 'None of the selected rows are Invoiced. Create invoices first, then select the invoiced rows to export.' }); return; }
           await handleStaxIifExport(invoicedRows.map(r => r.ledgerRowId));
-        }} disabled={qbLoading} style={{ padding: '7px 12px', fontSize: 12, fontWeight: 600, border: '1px solid #7C3AED', borderRadius: 8, background: '#fff', cursor: qbLoading ? 'default' : 'pointer', display: 'flex', alignItems: 'center', gap: 4, fontFamily: 'inherit', color: '#7C3AED' }}><DollarSign size={14} /> {qbLoading ? 'Exporting...' : 'Stax IIF'}</button>}
+        }} disabled={qbLoading} style={{ padding: '7px 12px', fontSize: 12, fontWeight: 600, border: '1px solid #7C3AED', borderRadius: 8, background: '#fff', cursor: qbLoading ? 'progress' : 'pointer', display: 'flex', alignItems: 'center', gap: 4, fontFamily: 'inherit', color: '#7C3AED', opacity: qbLoading ? 0.7 : 1 }}>{qbLoading ? <BtnSpinner size={12} /> : <DollarSign size={14} />} {qbLoading ? 'Exporting…' : 'Stax IIF'}</button>}
         {isReportTab && <QBOPushButton
           getSelectedLedgerRowIds={() => {
             const sel = resolveSelectedRows();

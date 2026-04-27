@@ -19,7 +19,7 @@
  *                     when the sync completes.
  */
 import { useEffect, useMemo, useState } from 'react';
-import { Pencil, Trash2, Clock, Truck, RefreshCw } from 'lucide-react';
+import { Pencil, Trash2, Clock, Truck, RefreshCw, Loader2 } from 'lucide-react';
 import { theme } from '../../styles/theme';
 import type {
   CatalogService, UpdateServiceInput, ServiceCategory, ServiceBilling,
@@ -490,10 +490,12 @@ export function ServiceRow({
                 ...primaryBtn(v2),
                 background: isDirty ? v2.colors.accent : v2.colors.border,
                 color: isDirty ? '#fff' : v2.colors.textMuted,
-                cursor: (isDirty && !saving) ? 'pointer' : 'not-allowed',
-                opacity: saving ? 0.6 : 1,
+                cursor: saving ? 'progress' : (isDirty ? 'pointer' : 'not-allowed'),
+                opacity: saving ? 0.85 : 1,
+                display: 'inline-flex', alignItems: 'center', gap: 6,
               }}
             >
+              {saving && <Loader2 size={12} style={{ animation: 'service-row-spin 0.8s linear infinite' }} />}
               {saving ? 'Saving…' : 'Save Changes'}
             </button>
           </div>

@@ -14,6 +14,7 @@ import {
   User, PenLine, MessageSquare, Activity,
 } from 'lucide-react';
 import { theme } from '../styles/theme';
+import { BtnSpinner } from '../components/ui/BtnSpinner';
 import { useAuth } from '../contexts/AuthContext';
 import { useOrderDetail } from '../hooks/useOrderDetail';
 import {
@@ -396,7 +397,8 @@ function DetailsTab({
               <button onClick={onCancelEdit} disabled={saving} style={{ background: '#fff', color: EP.textPrimary, border: `1px solid ${theme.colors.border}`, cursor: saving ? 'not-allowed' : 'pointer', padding: '8px 16px', borderRadius: 8, fontSize: 13, fontWeight: 500, opacity: saving ? 0.6 : 1, fontFamily: 'inherit', display: 'inline-flex', alignItems: 'center', gap: 5 }}>
                 <X size={13} /> Cancel
               </button>
-              <button onClick={onSave} disabled={saving} style={{ background: EP.accent, color: '#fff', border: 'none', cursor: saving ? 'not-allowed' : 'pointer', padding: '8px 16px', borderRadius: 8, fontSize: 13, fontWeight: 600, opacity: saving ? 0.7 : 1, fontFamily: 'inherit' }}>
+              <button onClick={onSave} disabled={saving} style={{ background: EP.accent, color: '#fff', border: 'none', cursor: saving ? 'progress' : 'pointer', padding: '8px 16px', borderRadius: 8, fontSize: 13, fontWeight: 600, opacity: saving ? 0.85 : 1, fontFamily: 'inherit', display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                {saving && <BtnSpinner size={12} color="#fff" />}
                 {saving ? 'Saving…' : 'Save Changes'}
               </button>
             </div>

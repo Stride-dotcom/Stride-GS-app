@@ -1,5 +1,6 @@
 import { useState, useMemo } from 'react';
 import { X, Trash2 } from 'lucide-react';
+import { BtnSpinner } from '../ui/BtnSpinner';
 import { useClients } from '../../hooks/useClients';
 import { useAuth } from '../../contexts/AuthContext';
 import type { ExpectedShipment } from '../../hooks/useExpectedShipments';
@@ -286,8 +287,9 @@ export function AddExpectedModal({ onClose, onSave, editingEvent, onDelete }: Pr
             <button
               onClick={handleSave}
               disabled={!canSave || saving}
-              style={{ ...btnPrimary, opacity: (!canSave || saving) ? 0.5 : 1, cursor: (!canSave || saving) ? 'not-allowed' : 'pointer' }}
+              style={{ ...btnPrimary, opacity: saving ? 0.85 : (!canSave ? 0.5 : 1), cursor: saving ? 'progress' : (!canSave ? 'not-allowed' : 'pointer'), display: 'inline-flex', alignItems: 'center', gap: 6, justifyContent: 'center' }}
             >
+              {saving && <BtnSpinner size={12} color="#fff" />}
               {saving ? 'Saving\u2026' : (isEdit ? 'Save Changes' : 'Add to Calendar')}
             </button>
           </div>

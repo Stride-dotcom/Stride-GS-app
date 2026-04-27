@@ -4,6 +4,7 @@ import {
   DollarSign, CheckCircle2, AlertCircle, Clock3, Pencil, CreditCard,
 } from 'lucide-react';
 import { theme } from '../../styles/theme';
+import { BtnSpinner } from '../ui/BtnSpinner';
 import { getPanelContainerStyle, panelBackdropStyle } from './panelStyles';
 import { useIsMobile } from '../../hooks/useIsMobile';
 import { useResizablePanel } from '../../hooks/useResizablePanel';
@@ -650,8 +651,9 @@ export function OrderDetailPanel({ order, onClose, onUpdated }: Props) {
               <button
                 onClick={handleSave}
                 disabled={saving}
-                style={{ background: theme.colors.orange, color: '#fff', border: 'none', cursor: saving ? 'not-allowed' : 'pointer', padding: '8px 16px', borderRadius: 6, fontSize: 13, fontWeight: 600, opacity: saving ? 0.7 : 1 }}
+                style={{ background: theme.colors.orange, color: '#fff', border: 'none', cursor: saving ? 'progress' : 'pointer', padding: '8px 16px', borderRadius: 6, fontSize: 13, fontWeight: 600, opacity: saving ? 0.85 : 1, display: 'inline-flex', alignItems: 'center', gap: 6 }}
               >
+                {saving && <BtnSpinner size={12} color="#fff" />}
                 {saving ? 'Saving…' : 'Save Changes'}
               </button>
             </div>
