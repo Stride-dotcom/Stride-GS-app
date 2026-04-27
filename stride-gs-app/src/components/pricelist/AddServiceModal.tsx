@@ -12,6 +12,7 @@
 import { useState } from 'react';
 import { X, Clock, Truck, Loader2 } from 'lucide-react';
 import { theme } from '../../styles/theme';
+import { ProcessingOverlay } from '../shared/ProcessingOverlay';
 import type {
   NewServiceInput, ServiceCategory, ServiceBilling, ServiceUnit, ClassRates, ClassTimes,
   DeliveryRateUnit,
@@ -122,7 +123,7 @@ export function AddServiceModal({ existingCodes, nextDisplayOrder, onClose, onCr
 
   return (
     <>
-      <div onClick={onClose} style={{
+      <div onClick={saving ? undefined : onClose} style={{
         position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.3)', zIndex: 1000,
       }} />
       <div style={{
@@ -132,6 +133,11 @@ export function AddServiceModal({ existingCodes, nextDisplayOrder, onClose, onCr
         boxShadow: '0 16px 48px rgba(0,0,0,0.2)',
         fontFamily: theme.typography.fontFamily,
       }}>
+        <ProcessingOverlay
+          visible={saving}
+          message="Hold tight — adding the service"
+          subMessage="Saving to the catalog and pushing to Stax + QuickBooks. You can leave this open."
+        />
         {/* Header */}
         <div style={{
           padding: '20px 28px',

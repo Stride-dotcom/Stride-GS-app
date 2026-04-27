@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Calendar, Loader2, X } from 'lucide-react';
 import { theme } from '../../styles/theme';
+import { ProcessingOverlay } from './ProcessingOverlay';
 
 /**
  * BulkScheduleModal — date picker for the Will Calls bulk Schedule action.
@@ -55,8 +56,15 @@ export function BulkScheduleModal({ open, wcCount, onCancel, onConfirm, processi
           maxWidth: 460,
           boxShadow: '0 24px 60px rgba(0,0,0,0.25)',
           fontFamily: 'inherit',
+          position: 'relative',
+          overflow: 'hidden',
         }}
       >
+        <ProcessingOverlay
+          visible={processing}
+          message="Hold tight — scheduling your selection"
+          subMessage="Updating each row. You can leave this open."
+        />
         <div
           style={{
             display: 'flex',

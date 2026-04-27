@@ -6,6 +6,7 @@ import { InfoTooltip } from './InfoTooltip';
 import { usePaymentTerms } from '../../hooks/usePaymentTerms';
 import type { ApiClient } from '../../lib/api';
 import { DocumentList } from '../media/DocumentList';
+import { ProcessingOverlay } from './ProcessingOverlay';
 import { DocumentUploadButton } from '../media/DocumentUploadButton';
 import { useDocuments } from '../../hooks/useDocuments';
 import { useClientInsurance } from '../../hooks/useClientInsurance';
@@ -303,6 +304,13 @@ export function OnboardClientModal({ mode = 'create', existingClient = null, all
         zIndex: 201, display: 'flex', flexDirection: 'column', fontFamily: theme.typography.fontFamily,
         overflow: 'hidden',
       }}>
+        <ProcessingOverlay
+          visible={submitting}
+          message={isEdit ? 'Hold tight — saving the client' : 'Hold tight — onboarding the client'}
+          subMessage={isEdit
+            ? 'Updating Settings, syncing Drive folders, and pushing to Supabase. You can leave this open.'
+            : 'Creating Drive folders, the inventory sheet, and pushing initial settings. This can take 20–40 seconds.'}
+        />
 
         {/* Header */}
         <div style={{ padding: '16px 20px', borderBottom: `1px solid ${theme.colors.border}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexShrink: 0 }}>

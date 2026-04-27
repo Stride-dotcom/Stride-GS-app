@@ -1,6 +1,7 @@
 import { useState, useMemo } from 'react';
 import { X, Trash2 } from 'lucide-react';
 import { BtnSpinner } from '../ui/BtnSpinner';
+import { ProcessingOverlay } from '../shared/ProcessingOverlay';
 import { useClients } from '../../hooks/useClients';
 import { useAuth } from '../../contexts/AuthContext';
 import type { ExpectedShipment } from '../../hooks/useExpectedShipments';
@@ -142,7 +143,7 @@ export function AddExpectedModal({ onClose, onSave, editingEvent, onDelete }: Pr
 
   return (
     <div
-      onClick={onClose}
+      onClick={saving ? undefined : onClose}
       style={{
         position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)',
         zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center',
@@ -154,7 +155,13 @@ export function AddExpectedModal({ onClose, onSave, editingEvent, onDelete }: Pr
           background: '#F5F2EE', borderRadius: 20, padding: 28,
           width: 460, maxWidth: '90vw', maxHeight: '90vh', overflowY: 'auto',
           boxShadow: '0 20px 60px rgba(0,0,0,0.2)',
+          position: 'relative',
         }}>
+        <ProcessingOverlay
+          visible={saving}
+          message={isEdit ? 'Hold tight — saving the shipment' : 'Hold tight — adding the shipment'}
+          subMessage="Updating the shipping calendar. You can leave this open."
+        />
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
           <div style={{ fontSize: 20, fontWeight: 400, color: '#1C1C1C' }}>{isEdit ? 'Edit Shipment' : 'Add Shipment'}</div>
           <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4 }}>

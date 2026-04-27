@@ -9,6 +9,7 @@
 import React, { useState } from 'react';
 import { X, Send, Copy, CheckCircle2 } from 'lucide-react';
 import { BtnSpinner } from '../ui/BtnSpinner';
+import { ProcessingOverlay } from './ProcessingOverlay';
 import { theme } from '../../styles/theme';
 
 export interface IntakeEmailModalProps {
@@ -53,7 +54,7 @@ export function IntakeEmailModal({
 
   return (
     <div
-      onClick={onClose}
+      onClick={sending ? undefined : onClose}
       style={{
         position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)',
         zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center',
@@ -67,8 +68,14 @@ export function IntakeEmailModal({
           width: 'min(600px, 94vw)', maxHeight: '88vh',
           display: 'flex', flexDirection: 'column',
           boxShadow: '0 12px 48px rgba(0,0,0,0.22)',
+          position: 'relative', overflow: 'hidden',
         }}
       >
+        <ProcessingOverlay
+          visible={sending}
+          message="Hold tight — sending your email"
+          subMessage="Delivering the intake invitation. You can leave this open."
+        />
         {/* ── Header ── */}
         <div style={{
           padding: '16px 20px', borderBottom: `1px solid ${theme.colors.border}`,

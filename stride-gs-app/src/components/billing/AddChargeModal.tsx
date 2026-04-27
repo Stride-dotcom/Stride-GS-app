@@ -9,6 +9,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { X } from 'lucide-react';
 import { BtnSpinner } from '../ui/BtnSpinner';
+import { ProcessingOverlay } from '../shared/ProcessingOverlay';
 import { theme } from '../../styles/theme';
 import { useClients } from '../../hooks/useClients';
 import { useServiceCatalog, type CatalogService } from '../../hooks/useServiceCatalog';
@@ -184,7 +185,7 @@ export function AddChargeModal({ editing, defaultClientSheetId, onClose, onSaved
 
   return (
     <>
-      <div onClick={onClose} style={{
+      <div onClick={saving ? undefined : onClose} style={{
         position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', zIndex: 1000,
       }} />
       <div style={{
@@ -194,6 +195,11 @@ export function AddChargeModal({ editing, defaultClientSheetId, onClose, onSaved
         boxShadow: '0 20px 60px rgba(0,0,0,0.25)',
         fontFamily: theme.typography.fontFamily,
       }}>
+        <ProcessingOverlay
+          visible={saving}
+          message={isEdit ? 'Hold tight — saving your charge' : 'Hold tight — adding the charge'}
+          subMessage="Writing to the billing ledger and syncing to Supabase. You can leave this open."
+        />
         {/* Header */}
         <div style={{
           padding: '20px 28px',
