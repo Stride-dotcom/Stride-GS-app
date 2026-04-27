@@ -2067,6 +2067,28 @@ export function Settings() {
         setClientActionLoading(false);
         if (res.data?.success) {
           setOnboardResult(res.data);
+
+          // Tax exemption + resale cert fields (Supabase-only). Written after
+          // the client row exists so we can target it by spreadsheet_id.
+          // Cert PDF upload is deferred to Edit mode (TaxExemptBlock); only
+          // the answer-shape fields are saved here. Best-effort — never blocks
+          // the success return on a Supabase failure.
+          const newSheetId = res.data.clientSheetId;
+          if (newSheetId) {
+            try {
+              await supabase
+                .from('clients')
+                .update({
+                  tax_exempt: data.taxExempt !== false,
+                  tax_exempt_reason: data.taxExemptReason || 'Resale',
+                  resale_cert_expires: data.resaleCertExpires || null,
+                })
+                .eq('spreadsheet_id', newSheetId);
+            } catch (taxErr) {
+              console.warn('[onboard] tax fields save failed (non-blocking):', taxErr);
+            }
+          }
+
           refetchClients();
           // Session 69 — broadcast so every mounted useClients (dropdowns on other pages) refetches.
           entityEvents.emit('client', data.spreadsheetId || data.clientName || '');

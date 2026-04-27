@@ -41,6 +41,13 @@ export interface OnboardClientFormData {
   notes: string;
   // v38.37.0 — per-client receiving instruction shown as amber banner on Receiving page
   shipmentNote: string;
+  // Tax & resale (create-mode only — captured at intake, written to
+  // Supabase clients table after successful create. Edit mode uses
+  // the auto-saving TaxExemptBlock instead, so these aren't read in
+  // edit mode.)
+  taxExempt: boolean;
+  taxExemptReason: string;
+  resaleCertExpires: string;
   // Auto-generated (edit mode only)
   spreadsheetId: string;
   folderId: string;
@@ -120,6 +127,7 @@ function buildInitialData(existing: ApiClient | null): OnboardClientFormData {
       enableReceivingBilling: true, enableShipmentEmail: true,
       enableNotifications: true, autoInspection: true, separateBySidemark: false, autoCharge: false,
       active: true, parentClient: '', importInventoryUrl: '', notes: '', shipmentNote: '',
+      taxExempt: true, taxExemptReason: 'Resale', resaleCertExpires: '',
       spreadsheetId: '', folderId: '', photosFolderId: '', invoiceFolderId: '', webAppUrl: '',
     };
   }
@@ -145,6 +153,9 @@ function buildInitialData(existing: ApiClient | null): OnboardClientFormData {
     importInventoryUrl: '',
     notes: existing.notes || '',
     shipmentNote: existing.shipmentNote || '',
+    // Edit mode never reads these — TaxExemptBlock is the auto-saving editor.
+    // Defaults here are just for type completeness.
+    taxExempt: true, taxExemptReason: 'Resale', resaleCertExpires: '',
     spreadsheetId: existing.spreadsheetId || '',
     folderId: existing.folderId || '',
     photosFolderId: existing.photosFolderId || '',
@@ -615,6 +626,76 @@ export function OnboardClientModal({ mode = 'create', existingClient = null, all
                 </span>
               </div>
               <TaxExemptBlock spreadsheetId={data.spreadsheetId} />
+            </div>
+          )}
+
+          {/* Create mode: Tax exemption question (cert PDF upload deferred
+              to post-create Edit flow since the spreadsheet_id doesn't exist
+              yet). Captures exempt status / reason / expiry up front so it's
+              not forgotten. Written to Supabase clients table on success. */}
+          {!isEdit && (
+            <div style={sectionDivider}>
+              <div style={{ ...sectionHead, display: 'flex', alignItems: 'center', gap: 6 }}>
+                <FileText size={14} /> Tax &amp; Resale
+                <span style={{ fontSize: 10, fontWeight: 400, color: theme.colors.textMuted, marginLeft: 4 }}>
+                  Wholesale exemption + cert expiry
+                </span>
+              </div>
+
+              <div style={{ marginBottom: 14 }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 13 }}>
+                  <input
+                    type="checkbox"
+                    checked={data.taxExempt}
+                    onChange={e => set('taxExempt', e.target.checked)}
+                    style={{ cursor: 'pointer' }}
+                  />
+                  <strong>Tax exempt (wholesale customer)</strong>
+                </label>
+                <div style={{ fontSize: 11, color: theme.colors.textMuted, marginTop: 4, marginLeft: 22 }}>
+                  Most clients are wholesale resellers — leave checked. Uncheck only for direct-to-consumer customers.
+                </div>
+              </div>
+
+              {data.taxExempt && (
+                <>
+                  <div style={{ marginBottom: 14 }}>
+                    <label style={lbl}>
+                      <span>Exemption reason</span>
+                      <InfoTooltip text="Required by WA DOR for audit. 'Resale' covers the typical wholesale-reseller case." />
+                    </label>
+                    <select
+                      value={data.taxExemptReason}
+                      onChange={e => set('taxExemptReason', e.target.value)}
+                      style={{ ...inp, padding: '8px 10px' }}
+                    >
+                      {['Resale', 'Out-of-state', 'Government', 'Non-profit', 'Other'].map(r => (
+                        <option key={r} value={r}>{r}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div style={{ marginBottom: 14 }}>
+                    <label style={lbl}>
+                      <span>Cert expiry date (if known)</span>
+                      <InfoTooltip text="WA resale certs are typically valid 4 years from issue. Leave blank if you'll add it after uploading the PDF." />
+                    </label>
+                    <input
+                      type="date"
+                      value={data.resaleCertExpires}
+                      onChange={e => set('resaleCertExpires', e.target.value)}
+                      style={{ ...inp, maxWidth: 220 }}
+                    />
+                  </div>
+
+                  <div style={{ padding: 10, background: '#FFFBEB', border: '1px solid #FCD34D', borderRadius: 8, fontSize: 11, color: '#92400E', display: 'flex', alignItems: 'flex-start', gap: 6 }}>
+                    <Info size={12} style={{ flexShrink: 0, marginTop: 1 }} />
+                    <span>
+                      <strong>Cert PDF upload happens after create</strong> — once the client is created, click their row in Settings → Clients to open Edit mode, scroll to <em>Tax &amp; Resale Certificate</em>, and upload the PDF there. WA DOR requires the cert on file to legally claim exemption.
+                    </span>
+                  </div>
+                </>
+              )}
             </div>
           )}
 
