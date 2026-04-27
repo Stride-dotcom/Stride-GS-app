@@ -21,6 +21,7 @@ import { OnboardClientModal, type OnboardClientFormData, type OnboardSubmitResul
 import { IntakeEmailModal } from '../shared/IntakeEmailModal';
 import { postOnboardClient, postSendIntakeInvitation, apiFetch } from '../../lib/api';
 import type { EmailTemplate } from '../../lib/api';
+import { supabase } from '../../lib/supabase';
 
 type StatusFilter = IntakeRow['status'] | 'all';
 
@@ -110,6 +111,40 @@ export function IntakesPanel() {
         } catch (e) {
           warnings.push(`Intake doc copy error: ${e instanceof Error ? e.message : String(e)}`);
         }
+
+        // Copy the resale cert into the dedicated resale-certs bucket and
+        // stamp the signed URL on the new client row. The intake bucket
+        // copy above remains as audit trail; the client-facing cert lives
+        // in resale-certs alongside any future re-uploads from the admin
+        // edit flow.
+        if (selected.taxExempt !== false && selected.resaleCertPath) {
+          try {
+            const sourceBase = selected.resaleCertPath.split('/').pop() ?? `cert-${Date.now()}.pdf`;
+            const certDestKey = `${newClientSheetId}/${Date.now()}-${sourceBase}`;
+            const { error: copyErr } = await supabase.storage
+              .from('documents')
+              .copy(selected.resaleCertPath, certDestKey, { destinationBucket: 'resale-certs' });
+            if (copyErr && !/already exists/i.test(copyErr.message)) {
+              warnings.push(`Resale cert → resale-certs bucket: ${copyErr.message}`);
+            } else {
+              const { data: signed } = await supabase.storage
+                .from('resale-certs')
+                .createSignedUrl(certDestKey, 60 * 60 * 24 * 365 * 10);
+              if (signed?.signedUrl) {
+                await supabase
+                  .from('clients')
+                  .update({
+                    resale_cert_url: signed.signedUrl,
+                    resale_cert_uploaded_at: new Date().toISOString(),
+                  })
+                  .eq('spreadsheet_id', newClientSheetId);
+                warnings.push('Resale cert linked to client tax record.');
+              }
+            }
+          } catch (e) {
+            warnings.push(`Resale cert link error: ${e instanceof Error ? e.message : String(e)}`);
+          }
+        }
         // Seed the client_insurance row so the daily billing cron picks
         // the new client up on its next run (+30 days from today).
         try {
@@ -144,6 +179,13 @@ export function IntakesPanel() {
     // toggle. Previously hardcoded to true regardless of intake; now
     // defaults to off unless they checked the box on Step 3.
     autoInspection: intake.autoInspect === true,
+    // Forward the wholesale-exemption answer captured at intake. The
+    // OnboardClientModal Tax & Resale section reads these defaults;
+    // handleClientSubmit (Settings.tsx) writes them to clients table
+    // post-create. Cert PDF is copied separately by copyIntakeDocsToClient.
+    taxExempt:           intake.taxExempt !== false, // null → default to wholesale (most common); true → wholesale; false → end customer
+    taxExemptReason:     intake.taxExemptReason || 'Resale',
+    resaleCertExpires:   intake.resaleCertExpires || '',
     notes: [
       intake.notes,
       (intake.insuranceChoice === 'stride_coverage' || intake.insuranceChoice === 'eis_coverage')

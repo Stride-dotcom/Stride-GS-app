@@ -94,8 +94,17 @@ interface Draft {
   sectionInitials: Record<string, string>;
   // Step 4
   paymentAuthorized: boolean;
-  // Step 5
+  // Step 5 — Tax & documents
+  /** Prospect's wholesale-customer status. null = haven't answered yet
+   *  (forces an explicit choice before they can advance to review). */
+  taxExempt: boolean | null;
+  /** Resale / Out-of-state / Government / Non-profit / Other. Only meaningful when taxExempt = true. */
+  taxExemptReason: string;
   resaleCertFile: File | null;
+  /** ISO yyyy-mm-dd. Captured alongside the cert PDF — most state certs
+   *  expire after 4 years and the app warns at <60 days. Optional at
+   *  intake; admin can fill it in later from Settings → Edit Client. */
+  resaleCertExpires: string;
   otherFiles: File[];
 }
 
@@ -110,7 +119,10 @@ const EMPTY_DRAFT: Draft = {
   typedSignature: '',
   sectionInitials: {},
   paymentAuthorized: false,
+  taxExempt: null,
+  taxExemptReason: 'Resale',
   resaleCertFile: null,
+  resaleCertExpires: '',
   otherFiles: [],
 };
 
@@ -306,7 +318,10 @@ export function ClientIntake({ linkId }: Props) {
         return allInitialed && hasSig && hasInsurance && declaredOk;
       }
       case 4: return draft.paymentAuthorized;
-      case 5: return true; // documents optional
+      // Step 5: must answer wholesale Yes/No. If yes, cert PDF is
+      // strongly encouraged but not strictly required (prospect may not
+      // have the file handy; admin will follow up post-submit).
+      case 5: return draft.taxExempt !== null;
       case 6: return canSubmit;
       default: return true;
     }
@@ -383,6 +398,9 @@ export function ClientIntake({ linkId }: Props) {
         resaleCertPath:     resalePath,
         // Stash other-doc paths in signed_tc_pdf_path as a CSV for MVP.
         signedTcPdfPath:    otherPaths.length > 0 ? otherPaths.join(',') : undefined,
+        taxExempt:          draft.taxExempt ?? undefined,
+        taxExemptReason:    draft.taxExempt ? draft.taxExemptReason : undefined,
+        resaleCertExpires:  draft.taxExempt && draft.resaleCertExpires ? draft.resaleCertExpires : undefined,
       };
       const result = await submitIntake(payload);
       if ('error' in result) {
@@ -900,23 +918,107 @@ function StepDocuments({ draft, setDraft }: StepProps) {
     setDraft(d => ({ ...d, otherFiles: [...d.otherFiles, ...Array.from(files)] }));
   };
   const removeOther = (i: number) => setDraft(d => ({ ...d, otherFiles: d.otherFiles.filter((_, idx) => idx !== i) }));
+  const setExempt = (next: boolean) => setDraft(d => ({ ...d, taxExempt: next }));
+  const setReason = (next: string) => setDraft(d => ({ ...d, taxExemptReason: next }));
+  const setExpires = (next: string) => setDraft(d => ({ ...d, resaleCertExpires: next }));
 
   return (
     <div>
-      <StepTitle kicker="Step 5" title="Upload documents (optional)" />
+      <StepTitle kicker="Step 5" title="Tax status & documents" />
       <div style={{ fontSize: 13, color: TEXT_SEC, lineHeight: 1.6, marginBottom: 18 }}>
-        If your state requires a resale certificate for tax-exempt handling, upload it here. You can also attach any other documents relevant to your account (insurance cert, W-9, etc.).
+        Most of our clients resell our services to their own customers and are tax-exempt for that reason. Tell us how to handle sales tax for your account.
       </div>
 
-      <FileUploadBlock
-        label="Resale Certificate"
-        description="PDF or image — required if you claim sales-tax exemption."
-        file={draft.resaleCertFile}
-        onPick={pickResale}
-      />
+      {/* Wholesale yes/no */}
+      <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: '1.5px', color: TEXT_MUT, textTransform: 'uppercase', marginBottom: 10 }}>
+        Tax status
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 18 }}>
+        <label style={radioRow(draft.taxExempt === true)}>
+          <input
+            type="radio"
+            name="taxExempt"
+            checked={draft.taxExempt === true}
+            onChange={() => setExempt(true)}
+          />
+          <div>
+            <div style={{ fontWeight: 600, fontSize: 13 }}>Yes — we're a wholesale customer (resale exemption)</div>
+            <div style={{ fontSize: 11, color: TEXT_MUT, marginTop: 2 }}>
+              You're a reseller who provides our services to your own clients. Upload your state-issued resale certificate below.
+            </div>
+          </div>
+        </label>
+        <label style={radioRow(draft.taxExempt === false)}>
+          <input
+            type="radio"
+            name="taxExempt"
+            checked={draft.taxExempt === false}
+            onChange={() => setExempt(false)}
+          />
+          <div>
+            <div style={{ fontWeight: 600, fontSize: 13 }}>No — we're the end customer (tax applies)</div>
+            <div style={{ fontSize: 11, color: TEXT_MUT, marginTop: 2 }}>
+              Sales tax will be added to applicable services per WA state law.
+            </div>
+          </div>
+        </label>
+      </div>
 
-      <div style={{ marginTop: 18 }}>
-        <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: '1.5px', color: TEXT_MUT, textTransform: 'uppercase', marginBottom: 8 }}>Other documents</div>
+      {/* Wholesale-only sub-section: cert + expiry */}
+      {draft.taxExempt === true && (
+        <div style={{ background: BG_PAGE, borderRadius: 10, padding: 14, marginBottom: 18 }}>
+          <div style={{ marginBottom: 12 }}>
+            <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: '1.5px', color: TEXT_MUT, textTransform: 'uppercase', marginBottom: 6 }}>
+              Exemption reason
+            </div>
+            <select
+              value={draft.taxExemptReason}
+              onChange={e => setReason(e.target.value)}
+              style={{
+                width: '100%', padding: '10px 12px', fontSize: 13,
+                border: `1px solid ${BORDER}`, borderRadius: 8, fontFamily: 'inherit', background: '#fff',
+              }}
+            >
+              {['Resale', 'Out-of-state', 'Government', 'Non-profit', 'Other'].map(r => (
+                <option key={r} value={r}>{r}</option>
+              ))}
+            </select>
+          </div>
+
+          <FileUploadBlock
+            label="Resale Certificate"
+            description="PDF or image of your state-issued certificate. Required to legally claim wholesale exemption."
+            file={draft.resaleCertFile}
+            onPick={pickResale}
+          />
+
+          <div style={{ marginTop: 12 }}>
+            <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: '1.5px', color: TEXT_MUT, textTransform: 'uppercase', marginBottom: 6 }}>
+              Cert expires (if known)
+            </div>
+            <input
+              type="date"
+              value={draft.resaleCertExpires}
+              onChange={e => setExpires(e.target.value)}
+              style={{
+                padding: '10px 12px', fontSize: 13,
+                border: `1px solid ${BORDER}`, borderRadius: 8, fontFamily: 'inherit', background: '#fff',
+                maxWidth: 220,
+              }}
+            />
+            <div style={{ fontSize: 11, color: TEXT_MUT, marginTop: 4 }}>
+              Most state certs are valid for 4 years. Optional — leave blank if you're not sure.
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Other docs (always available) */}
+      <div style={{ marginTop: 4 }}>
+        <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: '1.5px', color: TEXT_MUT, textTransform: 'uppercase', marginBottom: 8 }}>Other documents (optional)</div>
+        <div style={{ fontSize: 12, color: TEXT_MUT, marginBottom: 10 }}>
+          Anything else relevant to your account — insurance certificate, W-9, etc.
+        </div>
         <label style={otherUploadBtn}>
           <Upload size={14} /> Upload file
           <input type="file" multiple style={{ display: 'none' }} onChange={e => pickOthers(e.target.files)} />
@@ -937,6 +1039,13 @@ function StepDocuments({ draft, setDraft }: StepProps) {
     </div>
   );
 }
+
+const radioRow = (selected: boolean): React.CSSProperties => ({
+  display: 'flex', alignItems: 'flex-start', gap: 12, padding: '12px 14px',
+  border: `1px solid ${selected ? '#E85D2D' : BORDER}`,
+  borderRadius: 10, cursor: 'pointer',
+  background: selected ? '#FFF8F4' : '#fff',
+});
 
 function StepReview({ draft, onJumpTo, sigDataUrl }: { draft: Draft; onJumpTo: (step: number) => void; sigDataUrl: string }) {
   const declared = Number(draft.insuranceDeclaredValue) || 0;
@@ -989,8 +1098,18 @@ function StepReview({ draft, onJumpTo, sigDataUrl }: { draft: Draft; onJumpTo: (
         <KV k="Authorized" v={draft.paymentAuthorized ? 'Yes — Paymnt.io setup confirmed' : 'Not confirmed'} />
       </ReviewCard>
 
-      <ReviewCard title="Documents" onEdit={() => onJumpTo(5)}>
-        <KV k="Resale cert" v={draft.resaleCertFile?.name || '—'} />
+      <ReviewCard title="Tax & Documents" onEdit={() => onJumpTo(5)}>
+        <KV k="Tax status" v={
+          draft.taxExempt === true ? `Wholesale exempt (${draft.taxExemptReason})`
+          : draft.taxExempt === false ? 'End customer — tax applies'
+          : '—'
+        } />
+        {draft.taxExempt === true && (
+          <>
+            <KV k="Resale cert" v={draft.resaleCertFile?.name || '— (will follow up)'} />
+            {draft.resaleCertExpires && <KV k="Cert expires" v={draft.resaleCertExpires} />}
+          </>
+        )}
         <KV k="Other files" v={draft.otherFiles.length > 0 ? draft.otherFiles.map(f => f.name).join(', ') : '—'} />
       </ReviewCard>
     </div>
