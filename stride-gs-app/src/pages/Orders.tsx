@@ -177,8 +177,14 @@ export function Orders() {
   // pill in the tab bar — admin auto-approves their own orders so
   // the older pending-review-only count was usually 0 + the pill
   // never appeared.
+  // Match the visible-orders pipeline: an order without a tenant
+  // (e.g. an orphan public_form submission whose client hasn't been
+  // resolved yet) can't be acted on from the table because the
+  // client filter excludes it. Counting it here was producing a
+  // pill that filtered to zero rows when clicked.
   const needsActionCount = useMemo(
     () => orders.filter(o => {
+      if (!o.tenantId) return false; // not visible in the orders table
       if (o.reviewStatus === 'pending_review') return true;
       if (o.reviewStatus === 'revision_requested') return true;
       if (o.reviewStatus === 'approved' && !o.pushedToDtAt && o.source === 'app') return true;
