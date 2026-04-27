@@ -10,6 +10,8 @@
 - [ ] Non-app-created delivery releases — auto-release inventory when DT completes orders created outside the app
 - [ ] POD photo ingestion — needs DT REST `X-AUTH-TOKEN` (Settings → Advanced Settings or DT support). Then call `GET /api/external/v1/dispatches/:identifier`, write `form.img_url[]` into `dt_order_photos`, optionally fetch each into the `dt-pod-photos` storage bucket
 - [x] **Bi-directional DT sync — pulls full export.xml per active order into the cache (driver, truck, start/finish, COD, signature, items, history, notes). Shipped 2026-04-25 (session 82, PRs #61+#62).**
+- [x] **Ad-hoc line items in delivery mode — free-text description/qty/weight/cuft alongside inventory items, with pricing counting both. Shipped 2026-04-27 (session 84, PR #106).**
+- [x] **Public service-request form at `/#/public/service-request` — anon submission lands in Review Queue with `source='public_form'`, sends submitter confirmation + internal alert email, recipient list configurable in Settings → Notifications. Shipped 2026-04-27 (session 84, PR #106).**
 
 ## Billing / Payments
 

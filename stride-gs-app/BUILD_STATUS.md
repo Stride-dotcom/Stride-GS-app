@@ -1,6 +1,6 @@
 # Stride GS App — Build Status
 
-> Last updated: 2026-04-24. Verified against actual codebase.
+> Last updated: 2026-04-27. Verified against actual codebase.
 
 ---
 
@@ -8,9 +8,9 @@
 
 | System | Version | Notes |
 |---|---|---|
-| React app (GitHub Pages) | Latest on `origin/main` | `npm run deploy` from source |
-| StrideAPI.gs | v38.118.0 | Web App deployment v387 |
-| Supabase | 57 migrations applied | 6 Edge Functions deployed |
+| React app (GitHub Pages) | Latest on `origin/source` | `npm run deploy` from source |
+| StrideAPI.gs | v38.135.1 | adds optional `replyTo` to handleSendRawEmail_ |
+| Supabase | 58 migrations applied | 7 Edge Functions deployed |
 | Client scripts | Rolled out to 49 active clients | Code.gs v4.6.0, Import.gs v4.3.0 |
 | StaxAutoPay.gs | v4.6.0 | Supabase write-through wired |
 
@@ -96,6 +96,22 @@ UI components: FloatingActionMenu, WriteButton, BatchGuard, ActionTooltip, Batch
 - QR Scanner + Labels (native React, Supabase-backed)
 
 ---
+
+## Recent Changes (2026-04-27, session 84)
+
+### Ad-hoc line items in delivery mode (Phase 1)
+- `src/components/shared/CreateDeliveryOrderModal.tsx` — delivery mode now supports ad-hoc/free-text line items alongside inventory items. Fields: description (required), quantity (required), weight (optional, lbs), cubic volume (optional, cuft). Persisted to `dt_order_items` with `inventory_id=NULL`, weight/cuft serialized into `extras` jsonb. Item count for zone-based pricing sums BOTH inventory and ad-hoc items so pricing stays correct on mixed orders.
+
+### Public service-request form (Phase 2)
+- New `src/pages/PublicServiceRequest.tsx` — anon form at `#/public/service-request` (matched in `App.tsx` BEFORE the auth gate, mirroring `/rates` and `/intake` patterns). Mirrors CreateDeliveryOrderModal layout with Stride-branded UI: contact info (name, company, phone, email) replaces the client-account selector; ONLY ad-hoc line items (no inventory access); full address fields, service date/time window, accessorials, order details/notes. Honeypot `website` field hidden via off-screen positioning silently shows the success screen on bot fill without DB writes. Submissions land in `dt_orders` with `tenant_id=NULL`, `source='public_form'`, `review_status='pending_review'` for staff triage from Orders → Review Queue.
+- New migration `20260427000000_public_service_request.sql` — drops/adds `dt_orders_source_check` to include `'public_form'`; adds `contact_company` column; adds partial unique index `dt_orders_public_form_identifier_uniq` on `(dt_identifier) WHERE tenant_id IS NULL AND source='public_form'` since PG treats NULL as distinct in standard UNIQUE; anon INSERT RLS on `dt_orders` + `dt_order_items` with strict WITH CHECK (tenant_id IS NULL + source='public_form' + review_status='pending_review'; items policy verifies parent order is itself pending public_form). No SELECT/UPDATE/DELETE granted to anon. Adds singleton `public_form_settings` table (id=1 PK with CHECK, alert_emails text[], reply_to_email) — admin-only RLS, ON CONFLICT DO NOTHING seed prevents anyone creating a second row. Seeds `PUBLIC_REQUEST_CONFIRMATION` (green) + `PUBLIC_REQUEST_ALERT` (orange) email_templates.
+- New Edge Function `supabase/functions/notify-public-request/index.ts` — invoked after the anon INSERT. Reads order/items/settings via service role, sends submitter confirmation with optional reply-to header + internal alert to the configured recipients. Token substitution shared via single regex. Graceful degrade: missing settings/templates/recipients log warnings and continue — order is always saved before email send.
+- New `src/components/settings/PublicFormSettings.tsx` — admin UI mounted in Settings → Notifications. Manages `public_form_settings.alert_emails` (text[] with add/remove + email validation) + `reply_to_email` (optional). Includes copyable PUBLIC_FORM_URL display. RLS restricts to admin role.
+- `AppScripts/stride-api/StrideAPI.gs` v38.135.1 — `handleSendRawEmail_` now accepts optional `replyTo` payload field. `if (replyTo) opts.replyTo = replyTo` preserves existing notify-new-order/notify-order-revision behavior unchanged.
+- Submit handler uses `crypto.randomUUID()` for SRF identifier generation with retry-on-23505 loop (3 attempts) to defend against the partial-index collision window. Item insert failure throws hard error since anon has no DELETE policy to roll back the order.
+- PR [#106](https://github.com/Stride-dotcom/Stride-GS-app/pull/106) **OPEN** — both phases on `feat/delivery/ad-hoc-line-items` (commits `631f0cf` + `b7893ac`). Per Justin's instruction: do not merge yet.
+
+**Deploy after merge:** apply migration via MCP → `supabase functions deploy notify-public-request` → `npm run push-api && npm run deploy-api` → `npm run deploy -- "..."` from stride-gs-app/.
 
 ## Recent Changes (2026-04-26, session 83)
 
