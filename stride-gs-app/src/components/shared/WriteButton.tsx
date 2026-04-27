@@ -81,19 +81,22 @@ export function WriteButton({
       <button onClick={handleClick} disabled={isDisabled} style={{
         padding: pad, fontSize: fs, fontWeight: 600, letterSpacing: '1.5px', textTransform: 'uppercase',
         border: c.border, borderRadius: 100,
-        background: state === 'success' ? '#15803D' : state === 'error' ? '#DC2626' : isDisabled ? theme.colors.bgMuted : c.bg,
-        color: state === 'success' || state === 'error' ? '#fff' : isDisabled ? theme.colors.textMuted : c.text,
-        cursor: isDisabled ? 'not-allowed' : 'pointer',
-        fontFamily: 'inherit', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5,
-        opacity: isDisabled && !blockedReason ? 0.5 : 1,
+        background: state === 'success' ? '#15803D' : state === 'error' ? '#DC2626' : state === 'loading' ? c.bg : isDisabled ? theme.colors.bgMuted : c.bg,
+        color: state === 'success' || state === 'error' ? '#fff' : state === 'loading' ? c.text : isDisabled ? theme.colors.textMuted : c.text,
+        cursor: state === 'loading' ? 'progress' : isDisabled ? 'not-allowed' : 'pointer',
+        fontFamily: 'inherit', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+        // Loading state stays opaque (so the spinner is visible) and pulses
+        // gently — disabled-but-not-loading dims to 0.5 to read as off.
+        opacity: state === 'loading' ? 1 : (isDisabled && !blockedReason ? 0.5 : 1),
+        animation: state === 'loading' ? 'writeBtnPulse 1.6s ease-in-out infinite' : undefined,
         transition: 'all 0.2s ease', minWidth: 80,
         ...style,
       }}>
-        {state === 'loading' ? <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} /> :
+        {state === 'loading' ? <Loader2 size={size === 'sm' ? 14 : 16} style={{ animation: 'spin 0.8s linear infinite', flexShrink: 0 }} /> :
          state === 'success' ? '✓' :
          state === 'error' ? '✗' :
          icon}
-        {state === 'loading' ? (loadingText || 'Processing...') :
+        {state === 'loading' ? (loadingText || 'Processing…') :
          state === 'success' ? (successText || 'Done') :
          state === 'error' ? 'Failed' :
          label}
@@ -112,7 +115,10 @@ export function WriteButton({
             borderTop: '5px solid #1A1A1A' }} />
         </div>
       )}
-      <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
+      <style>{`
+        @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+        @keyframes writeBtnPulse { 0%,100% { box-shadow: 0 0 0 0 rgba(232, 93, 45, 0.0); } 50% { box-shadow: 0 0 0 4px rgba(232, 93, 45, 0.18); } }
+      `}</style>
     </div>
   );
 }

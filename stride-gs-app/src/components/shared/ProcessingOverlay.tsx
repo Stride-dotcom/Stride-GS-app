@@ -59,12 +59,12 @@ export function ProcessingOverlay({
       style={{
         position: fullscreen ? 'fixed' : 'absolute',
         inset: 0,
-        // 50 keeps the overlay above content inside its stacking context but
-        // below toasts/banners. When fullscreen is true the overlay is
-        // intentionally rendered at the top of the page stacking context, so
-        // its low z-index is fine — there's nothing to compete with except
-        // the modal that owns it.
-        zIndex: 50,
+        // 500 sits above any in-modal dropdowns / popouts (which commonly
+        // run 10–300) but well below page-level banners (2000+) and global
+        // toasts. When `fullscreen` is true the overlay is rendered at the
+        // page level — 500 is still high enough since other fullscreen
+        // overlays/modals run at 1000+.
+        zIndex: 500,
         display: 'flex',
         flexDirection: 'column',
         alignItems: 'center',
