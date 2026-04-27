@@ -130,9 +130,43 @@ function addDays(dateStr: string, days: number): string {
   return d.toISOString().slice(0, 10);
 }
 
-export function createBlankQuote(settings: QuoteStoreSettings, classes: QuoteCatalog['classes'], taxAreas: QuoteCatalog['taxAreas']): Quote {
+/**
+ * Reserve the next quote number atomically across all users.
+ *
+ * Calls the `reserve_quote_number(prefix)` Postgres RPC, which uses
+ * `INSERT…ON CONFLICT DO UPDATE` on `public.quote_counters` to take
+ * a row lock and return the post-increment value. This replaces the
+ * old per-user `settings.nextQuoteNumber` counter that lived in
+ * localStorage and produced collisions any time two users (or one
+ * user on two devices) created quotes around the same time.
+ *
+ * Falls back to the local counter only when the RPC errors —
+ * intended for offline mode. In that path we still return a number
+ * but the caller should expect a possible collision; the upsert to
+ * Supabase will fail later and the operator will see the saveErrors
+ * indicator on the row.
+ */
+export async function reserveQuoteNumber(prefix: string, fallback: number): Promise<number> {
+  try {
+    const { data, error } = await supabase.rpc('reserve_quote_number', { p_prefix: prefix });
+    if (error) {
+      console.warn('[useQuoteStore] reserve_quote_number RPC failed, using local fallback —', error.message);
+      return fallback;
+    }
+    if (typeof data !== 'number' || !Number.isFinite(data)) {
+      console.warn('[useQuoteStore] reserve_quote_number returned non-numeric, using local fallback —', data);
+      return fallback;
+    }
+    return data;
+  } catch (e) {
+    console.warn('[useQuoteStore] reserve_quote_number threw, using local fallback —', e);
+    return fallback;
+  }
+}
+
+export function createBlankQuote(settings: QuoteStoreSettings, classes: QuoteCatalog['classes'], taxAreas: QuoteCatalog['taxAreas'], quoteNumberOverride?: number): Quote {
   const today = todayISO();
-  const num = settings.nextQuoteNumber;
+  const num = quoteNumberOverride ?? settings.nextQuoteNumber;
   const classLines: ClassLine[] = classes.filter(c => c.active).map(c => ({ classId: c.id, qty: 0 }));
   const defaultArea = taxAreas.find(a => a.id === settings.defaultTaxAreaId) ?? taxAreas[0];
   return {
@@ -445,12 +479,18 @@ export function useQuoteStore() {
 
   const catalogSource: 'supabase' | 'fallback' = sbCatalog.source;
 
-  // ── Quote CRUD (still localStorage) ─────────────────────────────────
-  const createQuote = useCallback((): Quote => {
-    const q = createBlankQuote(settings, catalog.classes, catalog.taxAreas);
+  // ── Quote CRUD ──────────────────────────────────────────────────────
+  // createQuote / duplicateQuote are async because the quote number is
+  // reserved server-side via reserveQuoteNumber() — a single global
+  // counter per prefix shared across all users. The local
+  // settings.nextQuoteNumber counter is kept as an offline fallback only
+  // and bumped opportunistically so it stays roughly in sync.
+  const createQuote = useCallback(async (): Promise<Quote> => {
+    const reserved = await reserveQuoteNumber(settings.quotePrefix, settings.nextQuoteNumber);
+    const q = createBlankQuote(settings, catalog.classes, catalog.taxAreas, reserved);
     setQuotes(prev => [q, ...prev]);
     setQuoteOwners(prev => ({ ...prev, [q.id]: user?.email || '_anon' }));
-    setSettings(prev => ({ ...prev, nextQuoteNumber: prev.nextQuoteNumber + 1 }));
+    setSettings(prev => ({ ...prev, nextQuoteNumber: Math.max(prev.nextQuoteNumber, reserved + 1) }));
     return q;
   }, [settings, catalog.classes, catalog.taxAreas, setQuotes, setSettings, user?.email]);
 
@@ -471,10 +511,11 @@ export function useQuoteStore() {
       : q));
   }, [setQuotes]);
 
-  const duplicateQuote = useCallback((id: string): Quote | null => {
+  const duplicateQuote = useCallback(async (id: string): Promise<Quote | null> => {
     const src = quotes.find(q => q.id === id);
     if (!src) return null;
-    const dup = createBlankQuote(settings, catalog.classes, catalog.taxAreas);
+    const reserved = await reserveQuoteNumber(settings.quotePrefix, settings.nextQuoteNumber);
+    const dup = createBlankQuote(settings, catalog.classes, catalog.taxAreas, reserved);
     const copy: Quote = {
       ...src,
       id: dup.id,
@@ -487,7 +528,7 @@ export function useQuoteStore() {
     // Duplicates are always owned by the caller — admin duplicating
     // another user's quote creates a fresh copy under their own email.
     setQuoteOwners(prev => ({ ...prev, [copy.id]: user?.email || '_anon' }));
-    setSettings(prev => ({ ...prev, nextQuoteNumber: prev.nextQuoteNumber + 1 }));
+    setSettings(prev => ({ ...prev, nextQuoteNumber: Math.max(prev.nextQuoteNumber, reserved + 1) }));
     return copy;
   }, [quotes, settings, catalog.classes, catalog.taxAreas, setQuotes, setSettings, user?.email]);
 

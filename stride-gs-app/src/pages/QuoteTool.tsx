@@ -23,11 +23,11 @@ export function QuoteTool() {
   const [activeTab, setActiveTab] = useState<QuoteTab>('my-quotes');
   const [editingQuoteId, setEditingQuoteId] = useState<string | null>(null);
 
-  const openBuilder = useCallback((quoteId?: string) => {
+  const openBuilder = useCallback(async (quoteId?: string) => {
     if (quoteId) {
       setEditingQuoteId(quoteId);
     } else {
-      const q = store.createQuote();
+      const q = await store.createQuote();
       setEditingQuoteId(q.id);
     }
     setActiveTab('builder');
