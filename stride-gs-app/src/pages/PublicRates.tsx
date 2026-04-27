@@ -609,24 +609,31 @@ export function PublicRates({ shareId }: Props) {
           )}
         </div>
 
-        {/* Class size legend for class-based tables (not shown on aux tabs) */}
-        {!isAuxTab && tabServices.some(s => s.billing === 'class_based') && (
+        {/* Class size legend for class-based tables (not shown on aux
+            tabs). Bands are derived from the live item_classes rows so
+            an admin retuning storage_size in Settings → Pricing →
+            Classes immediately reflects on this public page — no
+            hardcoded "≤10 cu ft" labels to drift. Each band reads "up
+            to N cu ft" using that class's own storage_size; the
+            largest class gets a "+" suffix. */}
+        {!isAuxTab && tabServices.some(s => s.billing === 'class_based') && classes.length > 0 && (
           <div style={{ background: BG_CARD, borderRadius: RADIUS, border: `1px solid ${BORDER}`, padding: '16px 24px' }}>
             <div style={{ fontSize: 10, fontWeight: 600, letterSpacing: '2px', textTransform: 'uppercase', color: TEXT_MUT, marginBottom: 12 }}>Size Guide</div>
             <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap' }}>
-              {[
-                { cls: 'XS', desc: 'Extra Small', cuft: '≤10 cu ft' },
-                { cls: 'S',  desc: 'Small',       cuft: '11–25 cu ft' },
-                { cls: 'M',  desc: 'Medium',       cuft: '26–50 cu ft' },
-                { cls: 'L',  desc: 'Large',        cuft: '51–75 cu ft' },
-                { cls: 'XL', desc: 'Extra Large',  cuft: '76–110 cu ft' },
-                { cls: 'XXL', desc: 'XXL',         cuft: '111+ cu ft' },
-              ].map(({ cls, desc, cuft }) => (
-                <div key={cls} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <span style={{ display: 'inline-block', padding: '2px 10px', borderRadius: 4, background: 'rgba(232,105,42,0.12)', color: ACCENT, fontSize: 11, fontWeight: 700 }}>{cls}</span>
-                  <span style={{ fontSize: 12, color: TEXT_MUT }}>{desc} · {cuft}</span>
-                </div>
-              ))}
+              {classes.map((c, i) => {
+                // Code is derived from the class name (matches the
+                // delivery modal's deriveClassCode helper):
+                //   "Extra Small" → "XS", "XX-Large" → "XXL".
+                const code = c.name.replace(/^XX-/i, 'XX ').trim().split(/\s+/).map(w => w[0] ?? '').join('').toUpperCase();
+                const isLargest = i === classes.length - 1;
+                const cuft = isLargest ? `${c.storageSize}+ cu ft` : `up to ${c.storageSize} cu ft`;
+                return (
+                  <div key={c.id} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span style={{ display: 'inline-block', padding: '2px 10px', borderRadius: 4, background: 'rgba(232,105,42,0.12)', color: ACCENT, fontSize: 11, fontWeight: 700 }}>{code}</span>
+                    <span style={{ fontSize: 12, color: TEXT_MUT }}>{c.name} · {cuft}</span>
+                  </div>
+                );
+              })}
             </div>
           </div>
         )}

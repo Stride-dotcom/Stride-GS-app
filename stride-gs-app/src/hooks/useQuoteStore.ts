@@ -19,7 +19,7 @@ import { supabase } from '../lib/supabase';
 import type {
   Quote, QuoteStatus, QuoteCatalog, QuoteStoreSettings, ClassLine, ServiceDef,
 } from '../lib/quoteTypes';
-import { DEFAULT_SERVICES, DEFAULT_SETTINGS } from '../lib/quoteDefaults';
+import { DEFAULT_SETTINGS } from '../lib/quoteDefaults';
 import { useQuoteCatalog } from './useQuoteCatalog';
 import type { CatalogService } from './useServiceCatalog';
 
@@ -148,7 +148,11 @@ export function createBlankQuote(settings: QuoteStoreSettings, classes: QuoteCat
     otherServices: {},
     discount: { type: 'percent', value: 0, reason: '' },
     taxEnabled: true,
-    taxRate: defaultArea?.rate ?? 10.4,
+    // No fallback rate. If tax_areas is empty the quote starts at 0%
+    // and the admin sees the obvious "$0 tax" line — that's a louder
+    // signal than the legacy 10.4% Kent literal silently drifting
+    // into a quote made before the catalog loaded.
+    taxRate: defaultArea?.rate ?? 0,
     taxAreaId: defaultArea?.id ?? '',
     coverage: { typeId: 'standard', declaredValue: 0, weightLbs: 0, costOverride: null },
     customerNotes: '', internalNotes: '',
@@ -423,12 +427,13 @@ export function useQuoteStore() {
 
   // ── Derived catalog — Supabase-first, DEFAULT_* fallback ────────────
   const services: ServiceDef[] = useMemo(() => {
-    if (sbCatalog.services.length > 0) {
-      return sbCatalog.services
-        .map(catalogToServiceDef)
-        .sort((a, b) => a.matrixOrder - b.matrixOrder);
-    }
-    return DEFAULT_SERVICES;
+    // Service catalog is loaded from Supabase only. Empty array is
+    // the explicit "not loaded yet" / "no services configured" state;
+    // the Quote Tool surfaces this as a load-error UI rather than
+    // billing against stale hardcoded literals.
+    return sbCatalog.services
+      .map(catalogToServiceDef)
+      .sort((a, b) => a.matrixOrder - b.matrixOrder);
   }, [sbCatalog.services]);
 
   const catalog: QuoteCatalog = useMemo(() => ({
