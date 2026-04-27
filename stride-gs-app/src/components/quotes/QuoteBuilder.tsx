@@ -61,9 +61,9 @@ export function QuoteBuilder({ store, quoteId, onBack }: Props) {
     updateQuote(quoteId, {});
     setDirty(false);
   }, [quoteId, updateQuote]);
-  const handleDuplicate = useCallback(() => {
+  const handleDuplicate = useCallback(async () => {
     if (!quoteId) return;
-    const dup = duplicateQuote(quoteId);
+    const dup = await duplicateQuote(quoteId);
     if (dup) showToast(`Duplicated as ${dup.number}`);
   }, [quoteId, duplicateQuote, showToast]);
   const handleVoid = useCallback(() => {
