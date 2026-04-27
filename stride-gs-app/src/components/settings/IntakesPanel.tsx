@@ -70,6 +70,87 @@ export function IntakesPanel() {
   }), [intakes]);
 
   const handleCreateClient = async (formData: OnboardClientFormData): Promise<OnboardSubmitResult> => {
+    // Refresh-mode activation: the intake was submitted via a link tagged
+    // with client_spreadsheet_id, so we MERGE into the existing clients
+    // row instead of running postOnboardClient (which would error on
+    // duplicate folder/sheet creation). The existing-client path:
+    //   1. Update clients row directly via Supabase (tax + cert fields,
+    //      notification_contacts replace).
+    //   2. Copy the new resale cert from the documents bucket into the
+    //      resale-certs bucket; update clients.resale_cert_url.
+    //   3. Mark the intake activated.
+    const isRefresh = !!(selected && (selected as IntakeRow & { clientSpreadsheetId?: string }).clientSpreadsheetId);
+    if (isRefresh && selected) {
+      const refreshSheetId = (selected as IntakeRow & { clientSpreadsheetId?: string }).clientSpreadsheetId!;
+      const warnings: string[] = [];
+      try {
+        const { error: upErr } = await supabase
+          .from('clients')
+          .update({
+            // Honor any edits the prospect made on the form. Don't touch
+            // operational fields like spreadsheet_id, folder ids, etc.
+            name:           formData.clientName,
+            email:          formData.clientEmail,
+            contact_name:   formData.contactName,
+            phone:          formData.phone || null,
+            qb_customer_name: formData.qbCustomerName || null,
+            payment_terms:  formData.paymentTerms,
+            auto_inspection: formData.autoInspection,
+            auto_charge:     formData.autoCharge,
+            // Notification contacts: REPLACE the list with what came in.
+            notification_contacts: selected.notificationContacts ?? [],
+            // Tax / cert (matches handleClientSubmit's create-mode write
+            // in Settings.tsx so the data flow is identical between
+            // create and refresh activations).
+            tax_exempt:           formData.taxExempt !== false,
+            tax_exempt_reason:    formData.taxExemptReason || 'Resale',
+            resale_cert_expires:  formData.resaleCertExpires || null,
+          })
+          .eq('spreadsheet_id', refreshSheetId);
+        if (upErr) {
+          return { ok: false, error: 'Update failed: ' + upErr.message };
+        }
+        warnings.push(`Updated existing client "${formData.clientName}" from refresh intake.`);
+
+        // Resale cert: same copy-to-resale-certs path as the new-client
+        // activation flow below.
+        if (selected.taxExempt !== false && selected.resaleCertPath) {
+          try {
+            const sourceBase = selected.resaleCertPath.split('/').pop() ?? `cert-${Date.now()}.pdf`;
+            const certDestKey = `${refreshSheetId}/${Date.now()}-${sourceBase}`;
+            const { error: copyErr } = await supabase.storage
+              .from('documents')
+              .copy(selected.resaleCertPath, certDestKey, { destinationBucket: 'resale-certs' });
+            if (copyErr && !/already exists/i.test(copyErr.message)) {
+              warnings.push(`Cert → resale-certs: ${copyErr.message}`);
+            } else {
+              const { data: signed } = await supabase.storage
+                .from('resale-certs')
+                .createSignedUrl(certDestKey, 60 * 60 * 24 * 365 * 10);
+              if (signed?.signedUrl) {
+                await supabase
+                  .from('clients')
+                  .update({
+                    resale_cert_url: signed.signedUrl,
+                    resale_cert_uploaded_at: new Date().toISOString(),
+                  })
+                  .eq('spreadsheet_id', refreshSheetId);
+                warnings.push('New resale cert linked to client tax record.');
+              }
+            }
+          } catch (e) {
+            warnings.push(`Cert link error: ${e instanceof Error ? e.message : String(e)}`);
+          }
+        }
+
+        await updateStatus(selected.id, 'activated');
+      } catch (e) {
+        return { ok: false, error: e instanceof Error ? e.message : String(e) };
+      }
+      return { ok: true, successMessage: `Client "${formData.clientName}" updated from refresh intake`, warnings };
+    }
+
+    // ── New-client activation (existing path) ────────────────────────
     const payload = {
       clientName:          formData.clientName,
       clientEmail:         formData.clientEmail,

@@ -30,9 +30,11 @@ import {
   submitIntake,
   fetchClientTcBody,
   fetchPublicCoverageNotes,
+  fetchRefreshPrefill,
   useSignatureCanvas,
   type IntakeSubmitPayload,
   type PublicCoverageNote,
+  type RefreshPrefill,
 } from '../hooks/useClientIntake';
 import { generateSignedTcPdf } from '../lib/intakePdf';
 import { postEmailSignedAgreement } from '../lib/api';
@@ -129,6 +131,13 @@ const EMPTY_DRAFT: Draft = {
 export function ClientIntake({ linkId }: Props) {
   const { status, link } = useIntakeLink(linkId);
 
+  // Refresh mode: link has client_spreadsheet_id → fetch existing data
+  // and pre-fill the draft. The form layout is identical; only copy and
+  // pre-filled values differ. Visual styling is intentionally unchanged.
+  const isRefresh = !!link?.clientSpreadsheetId;
+  const refreshSpreadsheetId = link?.clientSpreadsheetId || '';
+  const [refreshPrefill, setRefreshPrefill] = useState<RefreshPrefill | null>(null);
+
   const [step, setStep] = useState<number>(1);
   const [draft, setDraft] = useState<Draft>(EMPTY_DRAFT);
   const [submitting, setSubmitting] = useState(false);
@@ -159,6 +168,42 @@ export function ClientIntake({ linkId }: Props) {
       }));
     }
   }, [link]);
+
+  // Refresh mode: when the link has a client_spreadsheet_id, pull the
+  // existing client + last intake and pre-fill every editable field.
+  // Fields the prospect changes overwrite the existing record on save —
+  // we don't merge, so removing a notification contact actually removes it.
+  useEffect(() => {
+    if (!isRefresh || !refreshSpreadsheetId) return;
+    let cancelled = false;
+    void fetchRefreshPrefill(refreshSpreadsheetId).then(prefill => {
+      if (cancelled || !prefill) return;
+      setRefreshPrefill(prefill);
+      setDraft(d => ({
+        ...d,
+        businessName:        prefill.businessName || d.businessName,
+        contactName:         prefill.contactName  || d.contactName,
+        email:               prefill.email        || d.email,
+        phone:               prefill.phone        || d.phone,
+        businessAddress:     prefill.businessAddress || d.businessAddress,
+        website:             prefill.website         || d.website,
+        billingContactName:  prefill.billingContactName || d.billingContactName,
+        billingEmail:        prefill.billingEmail        || d.billingEmail,
+        billingAddress:      prefill.billingAddress      || d.billingAddress,
+        notificationContacts: prefill.notificationContacts.length > 0
+          ? prefill.notificationContacts.map(c => ({ name: c.name ?? '', email: c.email }))
+          : d.notificationContacts,
+        insuranceChoice:     (prefill.insuranceChoice || d.insuranceChoice) as Draft['insuranceChoice'],
+        insuranceDeclaredValue: prefill.insuranceDeclaredValue || d.insuranceDeclaredValue,
+        autoInspect:         prefill.autoInspect,
+        paymentAuthorized:   prefill.paymentAuthorized,
+        taxExempt:           prefill.taxExempt,
+        taxExemptReason:     prefill.taxExemptReason || d.taxExemptReason,
+        resaleCertExpires:   prefill.resaleCertExpires || d.resaleCertExpires,
+      }));
+    });
+    return () => { cancelled = true; };
+  }, [isRefresh, refreshSpreadsheetId]);
 
   // Load the T&C HTML + live coverage notes in parallel. The T&C body
   // contains {{COVERAGE_*_NOTE}} tokens that we interpolate at render
@@ -401,6 +446,8 @@ export function ClientIntake({ linkId }: Props) {
         taxExempt:          draft.taxExempt ?? undefined,
         taxExemptReason:    draft.taxExempt ? draft.taxExemptReason : undefined,
         resaleCertExpires:  draft.taxExempt && draft.resaleCertExpires ? draft.resaleCertExpires : undefined,
+        intakeMode:         isRefresh ? 'refresh' : 'new',
+        clientSpreadsheetId: isRefresh ? refreshSpreadsheetId : undefined,
       };
       const result = await submitIntake(payload);
       if ('error' in result) {
@@ -427,10 +474,25 @@ export function ClientIntake({ linkId }: Props) {
         <ProgressStrip current={step} />
       </div>
 
+      {/* Refresh-mode banner — only shown when the link is for an existing
+          client. Layout matches the rest of the form so styling stays
+          identical to the new-client intake. */}
+      {isRefresh && (
+        <div style={{ marginBottom: 16, padding: '12px 16px', background: '#FEF3C7', border: '1px solid #FCD34D', borderRadius: 12, fontSize: 13, color: '#78350F', display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+          <AlertTriangle size={14} style={{ flexShrink: 0, marginTop: 2 }} />
+          <div>
+            <strong style={{ fontWeight: 700 }}>Updating your account on file</strong>
+            <div style={{ marginTop: 2 }}>
+              We've pre-filled your information below. Please confirm everything is current, re-sign the Terms &amp; Conditions, and upload your latest resale certificate at Step 5. The information you submit here replaces what we have on file.
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Step card */}
       <div style={cardWrap}>
-        {step === 1 && <StepBusiness draft={draft} setDraft={setDraft} />}
-        {step === 2 && <StepBilling  draft={draft} setDraft={setDraft} />}
+        {step === 1 && <StepBusiness draft={draft} setDraft={setDraft} isRefresh={isRefresh} />}
+        {step === 2 && <StepBilling  draft={draft} setDraft={setDraft} isRefresh={isRefresh} />}
         {step === 3 && (
           <StepTerms
             draft={draft}
@@ -444,7 +506,7 @@ export function ClientIntake({ linkId }: Props) {
           />
         )}
         {step === 4 && <StepPayment draft={draft} setDraft={setDraft} />}
-        {step === 5 && <StepDocuments draft={draft} setDraft={setDraft} />}
+        {step === 5 && <StepDocuments draft={draft} setDraft={setDraft} isRefresh={isRefresh} refreshPrefill={refreshPrefill} />}
         {step === 6 && (
           <StepReview
             draft={draft}
@@ -556,10 +618,10 @@ function CenteredMessage({ children }: { children: React.ReactNode }) {
 
 // ─── Step components ─────────────────────────────────────────────────
 
-function StepBusiness({ draft, setDraft }: StepProps) {
+function StepBusiness({ draft, setDraft, isRefresh }: StepProps) {
   return (
     <div>
-      <StepTitle kicker="Step 1" title="Tell us about your business" />
+      <StepTitle kicker="Step 1" title={isRefresh ? 'Confirm your business info' : 'Tell us about your business'} />
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
         <Field label="Business name *" span={2}>
           <Input value={draft.businessName} onChange={v => setDraft(d => ({ ...d, businessName: v }))} placeholder="Acme Furniture Co." />
@@ -584,7 +646,7 @@ function StepBusiness({ draft, setDraft }: StepProps) {
   );
 }
 
-function StepBilling({ draft, setDraft }: StepProps) {
+function StepBilling({ draft, setDraft, isRefresh }: StepProps) {
   const add = () => setDraft(d => ({ ...d, notificationContacts: [...d.notificationContacts, { name: '', email: '' }] }));
   const setAt = (i: number, patch: Partial<NotifyContact>) => setDraft(d => ({
     ...d,
@@ -593,7 +655,12 @@ function StepBilling({ draft, setDraft }: StepProps) {
   const removeAt = (i: number) => setDraft(d => ({ ...d, notificationContacts: d.notificationContacts.filter((_, idx) => idx !== i) }));
   return (
     <div>
-      <StepTitle kicker="Step 2" title="Billing & warehouse alert emails" />
+      <StepTitle kicker="Step 2" title={isRefresh ? 'Confirm billing & alert contacts' : 'Billing & warehouse alert emails'} />
+      {isRefresh && (
+        <div style={{ marginBottom: 16, padding: '10px 14px', background: '#FFF', border: `1px solid ${BORDER}`, borderRadius: 10, fontSize: 12, color: TEXT_SEC }}>
+          <strong style={{ color: TEXT, fontWeight: 600 }}>Heads up:</strong> the contacts you submit here <em>replace</em> the current alert list — adding someone won't merge, removing someone won't keep them as a fallback.
+        </div>
+      )}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14, marginBottom: 18 }}>
         <Field label="Billing contact name">
           <Input value={draft.billingContactName} onChange={v => setDraft(d => ({ ...d, billingContactName: v }))} placeholder="Optional — defaults to main contact" />
@@ -911,7 +978,7 @@ function StepPayment({ draft, setDraft }: StepProps) {
   );
 }
 
-function StepDocuments({ draft, setDraft }: StepProps) {
+function StepDocuments({ draft, setDraft, isRefresh, refreshPrefill }: StepProps) {
   const pickResale = (f: File | null) => setDraft(d => ({ ...d, resaleCertFile: f }));
   const pickOthers = (files: FileList | null) => {
     if (!files) return;
@@ -984,6 +1051,23 @@ function StepDocuments({ draft, setDraft }: StepProps) {
               ))}
             </select>
           </div>
+
+          {/* Refresh mode: show what's currently on file before the upload
+              field so the prospect knows what they're replacing. */}
+          {isRefresh && refreshPrefill && (
+            <div style={{ marginBottom: 12, padding: '10px 14px', background: '#fff', border: `1px solid ${BORDER}`, borderRadius: 10, fontSize: 12, color: TEXT_SEC }}>
+              <div style={{ fontWeight: 700, color: TEXT, marginBottom: 4 }}>Currently on file</div>
+              {refreshPrefill.resaleCertCurrentUrl ? (
+                <div>
+                  Cert uploaded {refreshPrefill.resaleCertUploadedAt ? new Date(refreshPrefill.resaleCertUploadedAt).toLocaleDateString() : '(date unknown)'}
+                  {refreshPrefill.resaleCertExpires ? ` · expires ${refreshPrefill.resaleCertExpires}` : ''}
+                  . Upload a new copy below to replace it.
+                </div>
+              ) : (
+                <div>No cert on file yet — please upload one below to claim wholesale exemption.</div>
+              )}
+            </div>
+          )}
 
           <FileUploadBlock
             label="Resale Certificate"
@@ -1121,6 +1205,11 @@ function StepReview({ draft, onJumpTo, sigDataUrl }: { draft: Draft; onJumpTo: (
 interface StepProps {
   draft: Draft;
   setDraft: React.Dispatch<React.SetStateAction<Draft>>;
+  /** True when the link is for an existing client (refresh mode). Lets
+   *  step components swap copy ("Confirm" instead of "Tell us") and
+   *  reveal the "current cert on file" hint at Step 5. */
+  isRefresh?: boolean;
+  refreshPrefill?: RefreshPrefill | null;
 }
 
 function StepTitle({ kicker, title }: { kicker: string; title: string }) {

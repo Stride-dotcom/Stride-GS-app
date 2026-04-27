@@ -753,6 +753,63 @@ export function Settings() {
     }
   };
 
+  // Send Refresh Link — same flow as Resend T&C, but tags the link with
+  // client_spreadsheet_id so the public form switches to refresh mode
+  // (pre-filled fields, "update on file" copy, replace-not-merge contacts)
+  // and activation merges into the existing clients row.
+  const [refreshLinkLoading, setRefreshLinkLoading] = useState<string | null>(null);
+  const handleSendRefreshLink = async (client: ApiClient) => {
+    const email = client.email?.trim().toLowerCase();
+    if (!email || !client.spreadsheetId) return;
+    setRefreshLinkLoading(client.spreadsheetId);
+    try {
+      const { data: sess } = await supabase.auth.getSession();
+      const userId = sess.session?.user.id ?? null;
+      const { data, error: sbErr } = await supabase
+        .from('client_intake_links')
+        .insert({
+          prospect_name:         client.name,
+          prospect_email:        email,
+          expires_at:            null,
+          created_by:            userId,
+          active:                true,
+          client_spreadsheet_id: client.spreadsheetId,
+        })
+        .select('*')
+        .single();
+      if (sbErr || !data) return;
+      const linkRow = data as { link_id: string; expires_at: string | null };
+      const intakeUrl = `https://www.mystridehub.com/#/intake/${linkRow.link_id}`;
+      const expiresStr = linkRow.expires_at
+        ? new Date(linkRow.expires_at).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })
+        : 'no expiry date';
+
+      const tRes = await apiFetch<{ templates: Array<{ key: string; subject: string; bodyHtml: string }> }>('getEmailTemplates');
+      // Prefer the refresh-specific template; fall back to the new-client
+      // intake invite so the button still works before the seed migration
+      // runs in production.
+      const tmpl = (tRes.data?.templates ?? []).find(t => t.key === 'ACCOUNT_REFRESH_INVITATION')
+                ?? (tRes.data?.templates ?? []).find(t => t.key === 'CLIENT_INTAKE_INVITE');
+      const sub = (s: string) => s
+        .replace(/\{\{PROSPECT_NAME\}\}/g, client.name)
+        .replace(/\{\{CLIENT_NAME\}\}/g,   client.name)
+        .replace(/\{\{INTAKE_LINK\}\}/g,   intakeUrl)
+        .replace(/\{\{REFRESH_LINK\}\}/g,  intakeUrl)
+        .replace(/\{\{EXPIRES_DATE\}\}/g,  expiresStr);
+
+      setResendTcModal({
+        prospectName:  client.name,
+        prospectEmail: email,
+        intakeUrl,
+        linkId:        linkRow.link_id,
+        subject:       tmpl ? sub(tmpl.subject) : `Action needed — please update your Stride Logistics account on file`,
+        body:          tmpl ? sub(tmpl.bodyHtml) : `<p>Hi ${client.name},</p><p>We're updating our records and need you to confirm your information + upload a current resale certificate.</p><p><a href="${intakeUrl}">${intakeUrl}</a></p>`,
+      });
+    } finally {
+      setRefreshLinkLoading(null);
+    }
+  };
+
   const [clientSearch, setClientSearch] = useState('');
   const [userSearch, setUserSearch] = useState('');
   const [userSorting, setUserSorting] = useState<SortingState>([]);
@@ -2621,6 +2678,20 @@ export function Settings() {
                         >
                           {resendTcLoading === (c as ApiClient).spreadsheetId ? <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} /> : <Link2 size={11} />}
                           {tcMap.get((c.email || '').toLowerCase()) ? 'Re-send T&C' : 'Send T&C'}
+                        </button>
+                      )}
+                      {/* Send Refresh Link — refresh-mode intake for existing
+                          clients (prefilled fields, replace-not-merge contacts,
+                          cert renewal). Activation merges into existing client. */}
+                      {isLive && (c as ApiClient).email && (c as ApiClient).spreadsheetId && clientActive && (
+                        <button
+                          onClick={e => { e.stopPropagation(); void handleSendRefreshLink(c as ApiClient); }}
+                          disabled={refreshLinkLoading === (c as ApiClient).spreadsheetId}
+                          title={`Send a refresh-mode intake link to ${c.email} — pre-filled, asks for resale-cert renewal + T&C re-confirmation`}
+                          style={{ padding: '5px 10px', fontSize: 10, fontWeight: 600, border: `1px solid ${theme.colors.border}`, borderRadius: 6, background: '#fff', cursor: refreshLinkLoading === (c as ApiClient).spreadsheetId ? 'wait' : 'pointer', fontFamily: 'inherit', color: theme.colors.textSecondary, display: 'flex', alignItems: 'center', gap: 4, whiteSpace: 'nowrap' }}
+                        >
+                          {refreshLinkLoading === (c as ApiClient).spreadsheetId ? <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} /> : <RefreshCcw size={11} />}
+                          Refresh Link
                         </button>
                       )}
                       {/* Per-client Supabase sync — re-mirror this one client without running the full bulk sync */}
