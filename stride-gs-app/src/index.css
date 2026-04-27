@@ -84,6 +84,21 @@ input:focus, select:focus, textarea:focus {
   to { transform: translateX(0); }
 }
 
+/* Spinner rotation — used by every Loader2 icon across the app via
+ * `animation: spin 1s linear infinite`. Defined globally so spinners
+ * animate even when the component that historically defined the
+ * keyframe inline isn't mounted. Don't remove. */
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+
+/* Tailwind-style alias for callers that use animate-spin instead of
+ * the raw `animation: spin ...` shorthand. */
+.animate-spin {
+  animation: spin 1s linear infinite;
+}
+
 /* Syncing dot used on optimistic (TEMP-) calendar pills — pulses while the
  * GAS/Supabase write is in flight so users can tell pending from confirmed. */
 @keyframes stridePulse {

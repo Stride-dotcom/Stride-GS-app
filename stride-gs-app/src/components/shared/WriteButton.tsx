@@ -74,25 +74,37 @@ export function WriteButton({
   const pad = size === 'sm' ? '8px 16px' : '12px 24px';
   const fs = size === 'sm' ? 10 : 11;
 
+  // While loading, force the button background to the primary orange and
+  // text to white — even on the secondary/ghost variants. This solves two
+  // real bugs at once:
+  //   1. On secondary buttons, c.text was theme.colors.textSecondary (light
+  //      gray), so Loader2's currentColor inherit was barely visible —
+  //      users couldn't tell the spinner was even there.
+  //   2. The static "white background, light-gray text" treatment didn't
+  //      visually shift between idle and loading states, so it wasn't
+  //      obvious anything had changed when the user clicked.
+  const loadingBg = theme.colors.orange;
+  const loadingFg = '#fff';
+
   return (
     <div style={{ position: 'relative', display: 'inline-block' }}
       onMouseEnter={() => blockedReason && setShowTooltip(true)}
       onMouseLeave={() => setShowTooltip(false)}>
       <button onClick={handleClick} disabled={isDisabled} style={{
         padding: pad, fontSize: fs, fontWeight: 600, letterSpacing: '1.5px', textTransform: 'uppercase',
-        border: c.border, borderRadius: 100,
-        background: state === 'success' ? '#15803D' : state === 'error' ? '#DC2626' : state === 'loading' ? c.bg : isDisabled ? theme.colors.bgMuted : c.bg,
-        color: state === 'success' || state === 'error' ? '#fff' : state === 'loading' ? c.text : isDisabled ? theme.colors.textMuted : c.text,
+        border: state === 'loading' ? 'none' : c.border, borderRadius: 100,
+        background: state === 'success' ? '#15803D' : state === 'error' ? '#DC2626' : state === 'loading' ? loadingBg : isDisabled ? theme.colors.bgMuted : c.bg,
+        color: state === 'success' || state === 'error' ? '#fff' : state === 'loading' ? loadingFg : isDisabled ? theme.colors.textMuted : c.text,
         cursor: state === 'loading' ? 'progress' : isDisabled ? 'not-allowed' : 'pointer',
         fontFamily: 'inherit', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
         // Loading state stays opaque (so the spinner is visible) and pulses
         // gently — disabled-but-not-loading dims to 0.5 to read as off.
         opacity: state === 'loading' ? 1 : (isDisabled && !blockedReason ? 0.5 : 1),
         animation: state === 'loading' ? 'writeBtnPulse 1.6s ease-in-out infinite' : undefined,
-        transition: 'all 0.2s ease', minWidth: 80,
+        transition: 'background 0.2s ease, color 0.2s ease, border-color 0.2s ease', minWidth: 80,
         ...style,
       }}>
-        {state === 'loading' ? <Loader2 size={size === 'sm' ? 14 : 16} style={{ animation: 'spin 0.8s linear infinite', flexShrink: 0 }} /> :
+        {state === 'loading' ? <Loader2 size={size === 'sm' ? 14 : 16} color="#fff" style={{ animation: 'spin 0.8s linear infinite', flexShrink: 0 }} /> :
          state === 'success' ? '✓' :
          state === 'error' ? '✗' :
          icon}
