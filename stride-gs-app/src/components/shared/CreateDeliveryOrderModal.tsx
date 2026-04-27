@@ -190,11 +190,17 @@ interface Props {
   editOrderId?: string | null;
 }
 
-// A free-text item entered on a pickup form (not linked to inventory)
+// A free-text / ad-hoc item not linked to a warehouse inventory record.
+// Used by pickup, pickup_and_delivery (pickup leg), and delivery
+// (alongside warehouse inventory). weight + cubicFeet are optional —
+// only the delivery-mode UI exposes inputs for them, but the fields
+// live on the type so the same shape persists across modes.
 interface FreeItem {
   id: string;              // client-side uid for React key
   description: string;
   quantity: number;
+  weight?: number | null;       // lbs — optional, delivery mode only
+  cubicFeet?: number | null;    // cuFt — optional, delivery mode only
 }
 
 interface SelectedAccessorial {
@@ -496,6 +502,12 @@ export function CreateDeliveryOrderModal({
     if (mode === 'delivery' && hasPreSelected) {
       setItemsSource('warehouse');
     }
+    // Ad-hoc delivery items only apply to delivery mode — clear them
+    // when the operator switches away so a leftover row doesn't get
+    // accidentally persisted on a pickup/service order.
+    if (mode !== 'delivery') {
+      setDeliveryFreeItems([]);
+    }
   }, [mode, hasPreSelected]);
 
   // ── Client + service type ──────────────────────────────────────────────
@@ -561,6 +573,14 @@ export function CreateDeliveryOrderModal({
   const [pickupFreeItems, setPickupFreeItems] = useState<FreeItem[]>([
     { id: genUid(), description: '', quantity: 1 },
   ]);
+
+  // ── Delivery ad-hoc/free-text items (delivery mode only) ──────────────
+  // Allows mixing warehouse inventory items with one-off items that
+  // aren't tracked in inventory (e.g., contractor-supplied pieces, last-
+  // minute additions). Persists to dt_order_items with dt_item_code=null
+  // and extras.source='adhoc'. Empty by default — operator opts in by
+  // clicking "Add ad-hoc item".
+  const [deliveryFreeItems, setDeliveryFreeItems] = useState<FreeItem[]>([]);
 
   // ── Delivery contact (delivery / pickup_and_delivery / service_only) ───
   const [deliveryContactName, setDeliveryContactName] = useState('');
@@ -830,12 +850,24 @@ export function CreateDeliveryOrderModal({
 
   const isPickupCallForQuote = mode === 'pickup_and_delivery' && pickupZip.length === 5 && pickupZone && pickupZone.pickupRate == null;
 
-  // "Extra items" logic only applies when there are actual items
+  // "Extra items" logic only applies when there are actual items.
+  // For delivery mode, count BOTH warehouse inventory selections and
+  // ad-hoc free-text items together — they share the same "first 3
+  // included, $25 each after" pricing tier. For pickup / P+D modes,
+  // items live on pickupFreeItems; for service_only, no items at all.
+  // Inventory items count by row (matches pre-ad-hoc behavior); ad-hoc
+  // items count by quantity (matches pickup convention).
   const itemCount = useMemo(() => {
     if (mode === 'service_only') return 0;
-    if (mode === 'delivery' && itemsSource === 'warehouse') return selectedInvItems.length;
+    if (mode === 'delivery' && itemsSource === 'warehouse') {
+      const invCount = selectedInvItems.length;
+      const adhocCount = deliveryFreeItems
+        .filter(i => i.description.trim())
+        .reduce((s, i) => s + Math.max(1, Number(i.quantity) || 1), 0);
+      return invCount + adhocCount;
+    }
     return pickupFreeItems.filter(i => i.description.trim()).reduce((sum, i) => sum + Math.max(1, Number(i.quantity) || 1), 0);
-  }, [mode, itemsSource, selectedInvItems, pickupFreeItems]);
+  }, [mode, itemsSource, selectedInvItems, deliveryFreeItems, pickupFreeItems]);
 
   const extraItemsCount = Math.max(0, itemCount - INCLUDED_ITEMS);
   const extraItemsFee = extraItemsCount * EXTRA_ITEM_RATE;
@@ -868,6 +900,12 @@ export function CreateDeliveryOrderModal({
         const qty = Number(item.qty) || 1;
         total += (classMinutesMap[cls] || 0) * qty;
       }
+      // Delivery ad-hoc items have no class — fall back to Medium (10 min)
+      for (const item of deliveryFreeItems) {
+        if (!item.description.trim()) continue;
+        const qty = Math.max(1, Number(item.quantity) || 1);
+        total += (classMinutesMap['M'] || 10) * qty;
+      }
     } else if (mode !== 'service_only') {
       // Pickup / free-text items — use Medium (10 min) as fallback per item
       for (const item of pickupFreeItems) {
@@ -884,21 +922,29 @@ export function CreateDeliveryOrderModal({
       }
     }
     return total;
-  }, [mode, itemsSource, selectedInvItems, pickupFreeItems, selectedAccessorials, classMinutesMap, accessorials, allAccessorials]);
+  }, [mode, itemsSource, selectedInvItems, deliveryFreeItems, pickupFreeItems, selectedAccessorials, classMinutesMap, accessorials, allAccessorials]);
 
   const effectiveServiceTime = serviceTimeOverride ?? calculatedServiceTime;
 
-  // Total volume (cubic feet)
+  // Total volume (cubic feet) — sums inventory class-derived cuFt and
+  // any operator-entered cuFt on ad-hoc delivery items.
   const totalVolume = useMemo(() => {
     if (mode === 'delivery' && itemsSource === 'warehouse') {
-      return selectedInvItems.reduce((sum, i) => {
+      const invVol = selectedInvItems.reduce((sum, i) => {
         const cuFt = classToCuFt(i.itemClass);
         const qty = Number(i.qty) || 1;
         return sum + (cuFt != null ? cuFt * qty : 0);
       }, 0);
+      const adhocVol = deliveryFreeItems.reduce((sum, i) => {
+        if (!i.description.trim()) return sum;
+        const cuFt = Number(i.cubicFeet) || 0;
+        const qty = Math.max(1, Number(i.quantity) || 1);
+        return sum + cuFt * qty;
+      }, 0);
+      return invVol + adhocVol;
     }
     return 0;
-  }, [mode, itemsSource, selectedInvItems]);
+  }, [mode, itemsSource, selectedInvItems, deliveryFreeItems]);
 
   // ── Validation ─────────────────────────────────────────────────────────
   const canSubmit = useMemo(() => {
@@ -918,8 +964,14 @@ export function CreateDeliveryOrderModal({
     }
     if (needsDelivery) {
       if (!deliveryContactName.trim() || !deliveryAddress.trim() || !deliveryCity.trim() || !deliveryZip.trim()) return false;
-      // For delivery-only with warehouse source, require item selection
-      if (mode === 'delivery' && itemsSource === 'warehouse' && selectedInvItems.length === 0) return false;
+      // Delivery-only with warehouse source: require at least one item —
+      // either an inventory selection OR an ad-hoc free-text row with a
+      // non-empty description.
+      if (mode === 'delivery' && itemsSource === 'warehouse') {
+        const hasInv = selectedInvItems.length > 0;
+        const hasAdhoc = deliveryFreeItems.some(i => i.description.trim());
+        if (!hasInv && !hasAdhoc) return false;
+      }
     }
     // Valuation coverage is required for any item-moving order. percent_declared
     // tiers (FND/FWD) need a non-zero declared value so we can compute the
@@ -933,7 +985,7 @@ export function CreateDeliveryOrderModal({
     clientSheetId, serviceDate, mode,
     deliveryContactName, deliveryAddress, deliveryCity, deliveryZip, serviceDescription,
     pickupContactName, pickupAddress, pickupCity, pickupZip, pickupFreeItems,
-    itemsSource, selectedInvItems,
+    itemsSource, selectedInvItems, deliveryFreeItems,
     selectedCoverage, declaredValue,
   ]);
 
@@ -966,8 +1018,12 @@ export function CreateDeliveryOrderModal({
       if (!deliveryAddress.trim())     out.push('delivery address');
       if (!deliveryCity.trim())        out.push('delivery city');
       if (!deliveryZip.trim())         out.push('delivery ZIP');
-      if (mode === 'delivery' && itemsSource === 'warehouse' && selectedInvItems.length === 0) {
-        out.push('at least one item selected from inventory');
+      if (mode === 'delivery' && itemsSource === 'warehouse') {
+        const hasInv = selectedInvItems.length > 0;
+        const hasAdhoc = deliveryFreeItems.some(i => i.description.trim());
+        if (!hasInv && !hasAdhoc) {
+          out.push('at least one item (inventory or ad-hoc)');
+        }
       }
     }
     if (selectedCoverage?.calcType === 'percent_declared') {
@@ -979,7 +1035,7 @@ export function CreateDeliveryOrderModal({
     canSubmit, clientSheetId, serviceDate, mode,
     deliveryContactName, deliveryAddress, deliveryCity, deliveryZip, serviceDescription,
     pickupContactName, pickupAddress, pickupCity, pickupZip, pickupFreeItems,
-    itemsSource, selectedInvItems, selectedCoverage, declaredValue,
+    itemsSource, selectedInvItems, deliveryFreeItems, selectedCoverage, declaredValue,
   ]);
 
   // ── Order number generation ────────────────────────────────────────────
@@ -1128,12 +1184,44 @@ export function CreateDeliveryOrderModal({
           }
         } catch (_) { /* tolerate — pickup leg edit will be unavailable */ }
       }
-      // Items: warehouse-source selections come from dt_order_items
+      // Items split into two buckets when re-loading an order:
+      //   • Inventory-backed rows (dt_item_code non-null) → selectedIds
+      //     so the inventory picker shows them as selected.
+      //   • Ad-hoc rows (dt_item_code null, extras.source='adhoc') →
+      //     deliveryFreeItems, so the description / qty / weight / cuFt
+      //     inputs are repopulated. P+D pickup-leg free-text items
+      //     (extras.source='pickup_free_text') are NOT loaded here —
+      //     those live on the linked pickup row, not the delivery leg.
+      // Lenient: a row with dt_item_code null and no extras.source at all
+      // (e.g., legacy data predating the source tag) is treated as ad-hoc
+      // — better than dropping it on edit.
       const items = Array.isArray(r.dt_order_items) ? (r.dt_order_items as Array<Record<string, unknown>>) : [];
-      const itemIds = items
-        .map(it => String(it.dt_item_code || it.description || '').trim())
-        .filter(Boolean);
-      if (itemIds.length > 0) setSelectedIds(new Set(itemIds));
+      const inventoryIds: string[] = [];
+      const adhocRows: FreeItem[] = [];
+      for (const it of items) {
+        const code = it.dt_item_code != null ? String(it.dt_item_code).trim() : '';
+        const extras = (it.extras as Record<string, unknown>) || {};
+        const source = String(extras.source ?? '');
+        if (code) {
+          inventoryIds.push(code);
+        } else if (source === 'adhoc' || (!code && source !== 'pickup_free_text')) {
+          // cuFt: the canonical per-item value is in extras.cuft (set by
+          // buildDeliveryItemRows). dt_order_items.cubic_feet stores the
+          // total (cuFtPer * qty) for downstream load-volume math, so we
+          // can't fall back to it without dividing by qty — and even
+          // then it'd be a guess. Skip the fallback rather than corrupt
+          // the per-item value on round-trip.
+          adhocRows.push({
+            id: genUid(),
+            description: String(it.description ?? '').trim(),
+            quantity: Math.max(1, Number(it.quantity) || 1),
+            weight: extras.weight != null ? Number(extras.weight) : null,
+            cubicFeet: extras.cuft != null ? Number(extras.cuft) : null,
+          });
+        }
+      }
+      if (inventoryIds.length > 0) setSelectedIds(new Set(inventoryIds));
+      if (adhocRows.length > 0) setDeliveryFreeItems(adhocRows);
       // Accessorials JSON
       const accs = Array.isArray(r.accessorials_json) ? (r.accessorials_json as Array<{ code: string; quantity: number; subtotal: number }>) : [];
       if (accs.length > 0) {
@@ -1147,6 +1235,63 @@ export function CreateDeliveryOrderModal({
     return () => { cancelled = true; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editOrderId]);
+
+  // Build dt_order_items rows for a delivery-mode order. Combines the
+  // warehouse inventory selections with any operator-entered ad-hoc
+  // free-text items. Inventory rows carry dt_item_code + class metadata;
+  // ad-hoc rows have dt_item_code=null and stash optional weight/cuFt
+  // in the extras jsonb (with extras.source='adhoc' so the prefill
+  // effect can route them back to the right state bucket on reload).
+  const buildDeliveryItemRows = (orderId: string | null) => {
+    const rows: Array<Record<string, unknown>> = [];
+    for (const i of selectedInvItems) {
+      const cuFt = classToCuFt(i.itemClass);
+      const qty = Number(i.qty) || 1;
+      rows.push({
+        dt_order_id: orderId,
+        dt_item_code: i.itemId,
+        description: buildItemDescription({
+          description: i.description, vendor: i.vendor,
+          sidemark: i.sidemark, room: i.room, itemId: i.itemId,
+        }),
+        quantity: qty,
+        original_quantity: qty,
+        cubic_feet: cuFt != null ? cuFt * qty : null,
+        class_name: i.itemClass || null,
+        vendor: i.vendor || null,
+        room: i.room || null,
+        extras: {
+          vendor: i.vendor || null,
+          sidemark: i.sidemark || null,
+          location: i.location || null,
+          room: i.room || null,
+          className: i.itemClass || null,
+          source: 'inventory',
+        },
+      });
+    }
+    for (const i of deliveryFreeItems) {
+      const desc = i.description.trim();
+      if (!desc) continue;
+      const qty = Math.max(1, Number(i.quantity) || 1);
+      const w = i.weight != null && Number.isFinite(Number(i.weight)) ? Number(i.weight) : null;
+      const cuFtPer = i.cubicFeet != null && Number.isFinite(Number(i.cubicFeet)) ? Number(i.cubicFeet) : null;
+      rows.push({
+        dt_order_id: orderId,
+        dt_item_code: null,
+        description: desc,
+        quantity: qty,
+        original_quantity: qty,
+        cubic_feet: cuFtPer != null ? cuFtPer * qty : null,
+        extras: {
+          source: 'adhoc',
+          weight: w,
+          cuft: cuFtPer,
+        },
+      });
+    }
+    return rows;
+  };
 
   // ── Save Draft ─────────────────────────────────────────────────────────
   // Persists the in-progress order as a dt_orders row with
@@ -1366,17 +1511,11 @@ export function CreateDeliveryOrderModal({
         // Refresh dt_order_items: delete existing + reinsert (simple,
         // safe — drafts aren't queried for reporting between saves).
         await supabase.from('dt_order_items').delete().eq('dt_order_id', editingDraftRowIdRef.current);
-        if (mode === 'delivery' && itemsSource === 'warehouse' && selectedInvItems.length > 0) {
-          const itemRows = selectedInvItems.map(i => ({
-            dt_order_id: editingDraftRowIdRef.current,
-            dt_item_code: i.itemId,
-            description: i.description || '',
-            quantity: i.qty || 1,
-            vendor: i.vendor || null,
-            class_name: i.itemClass || null,
-            cubic_feet: classToCuFt(i.itemClass) ?? null,
-          }));
-          await supabase.from('dt_order_items').insert(itemRows);
+        if (mode === 'delivery' && itemsSource === 'warehouse') {
+          const itemRows = buildDeliveryItemRows(editingDraftRowIdRef.current);
+          if (itemRows.length > 0) {
+            await supabase.from('dt_order_items').insert(itemRows);
+          }
         }
       } else {
         // INSERT new draft row
@@ -1388,18 +1527,13 @@ export function CreateDeliveryOrderModal({
           .single();
         if (insErr || !row) throw new Error(`Draft insert failed: ${insErr?.message}`);
         editingDraftRowIdRef.current = (row as { id: string }).id;
-        // Insert items (delivery + warehouse source only)
-        if (mode === 'delivery' && itemsSource === 'warehouse' && selectedInvItems.length > 0) {
-          const itemRows = selectedInvItems.map(i => ({
-            dt_order_id: editingDraftRowIdRef.current,
-            dt_item_code: i.itemId,
-            description: i.description || '',
-            quantity: i.qty || 1,
-            vendor: i.vendor || null,
-            class_name: i.itemClass || null,
-            cubic_feet: classToCuFt(i.itemClass) ?? null,
-          }));
-          await supabase.from('dt_order_items').insert(itemRows);
+        // Insert items (delivery + warehouse source only — covers both
+        // warehouse inventory and ad-hoc free-text rows)
+        if (mode === 'delivery' && itemsSource === 'warehouse') {
+          const itemRows = buildDeliveryItemRows(editingDraftRowIdRef.current);
+          if (itemRows.length > 0) {
+            await supabase.from('dt_order_items').insert(itemRows);
+          }
         }
       }
       setDraftSavedAt(new Date());
@@ -1601,17 +1735,11 @@ export function CreateDeliveryOrderModal({
         // Refresh items (delete + reinsert is simpler than diff for
         // the typical small item count).
         await supabase.from('dt_order_items').delete().eq('dt_order_id', editingDraftRowIdRef.current);
-        if (mode === 'delivery' && itemsSource === 'warehouse' && selectedInvItems.length > 0) {
-          const itemRows = selectedInvItems.map(i => ({
-            dt_order_id: editingDraftRowIdRef.current,
-            dt_item_code: i.itemId,
-            description: i.description || '',
-            quantity: i.qty || 1,
-            vendor: i.vendor || null,
-            class_name: i.itemClass || null,
-            cubic_feet: classToCuFt(i.itemClass) ?? null,
-          }));
-          await supabase.from('dt_order_items').insert(itemRows);
+        if (mode === 'delivery' && itemsSource === 'warehouse') {
+          const itemRows = buildDeliveryItemRows(editingDraftRowIdRef.current);
+          if (itemRows.length > 0) {
+            await supabase.from('dt_order_items').insert(itemRows);
+          }
         }
         const savedRow = saved as { id: string; dt_identifier: string; review_status: string };
         onSubmit?.({
@@ -1907,36 +2035,14 @@ export function CreateDeliveryOrderModal({
           throw new Error(orderErr?.message || 'Failed to create order');
         }
 
-        // Items
-        if (mode === 'delivery' && itemsSource === 'warehouse' && selectedInvItems.length > 0) {
-          const itemRows = selectedInvItems.map(i => {
-            const cuFt = classToCuFt(i.itemClass);
-            const qty = Number(i.qty) || 1;
-            return {
-              dt_order_id: orderRow.id,
-              dt_item_code: i.itemId,
-              description: buildItemDescription({
-                description: i.description, vendor: i.vendor,
-                sidemark: i.sidemark, room: i.room, itemId: i.itemId,
-              }),
-              quantity: qty,
-              original_quantity: qty,
-              cubic_feet: cuFt != null ? cuFt * qty : null,
-              class_name: i.itemClass || null,
-              vendor: i.vendor || null,
-              room: i.room || null,
-              extras: {
-                vendor: i.vendor || null,
-                sidemark: i.sidemark || null,
-                location: i.location || null,
-                room: i.room || null,
-                className: i.itemClass || null,
-                source: 'inventory',
-              },
-            };
-          });
-          const { error: iErr } = await supabase.from('dt_order_items').insert(itemRows);
-          if (iErr) throw new Error(`Items insert failed: ${iErr.message}`);
+        // Items — delivery mode persists both warehouse-inventory and
+        // ad-hoc free-text rows via buildDeliveryItemRows.
+        if (mode === 'delivery' && itemsSource === 'warehouse') {
+          const itemRows = buildDeliveryItemRows(orderRow.id);
+          if (itemRows.length > 0) {
+            const { error: iErr } = await supabase.from('dt_order_items').insert(itemRows);
+            if (iErr) throw new Error(`Items insert failed: ${iErr.message}`);
+          }
         } else if (mode === 'pickup') {
           const freeRows = pickupFreeItems.filter(i => i.description.trim()).map(i => ({
             dt_order_id: orderRow.id,
@@ -2690,6 +2796,107 @@ export function CreateDeliveryOrderModal({
                   </div>
                   </>
                   )}
+
+                  {/* ── Ad-hoc / free-text items (delivery mode only) ────
+                      Lets the operator add items that aren't in inventory
+                      (contractor-supplied pieces, last-minute additions)
+                      alongside the warehouse selections above. Counted in
+                      the same "first 3 included, $25 each after" tier as
+                      inventory items. Persists with dt_item_code=null and
+                      extras.source='adhoc'. */}
+                  <div style={{ marginTop: 14 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 8, flexWrap: 'wrap' }}>
+                      <span style={{ ...label, display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                        Ad-hoc items
+                        <span style={{
+                          fontSize: 9, fontWeight: 700, padding: '2px 6px', borderRadius: 4,
+                          background: '#DBEAFE', color: '#1E40AF',
+                          textTransform: 'uppercase', letterSpacing: '0.5px',
+                        }}>
+                          Not in inventory
+                        </span>
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setDeliveryFreeItems(prev => [...prev, { id: genUid(), description: '', quantity: 1, weight: null, cubicFeet: null }])}
+                        style={{ background: 'none', border: 'none', color: theme.colors.primary, cursor: 'pointer', fontSize: 11, fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: 4 }}
+                      >
+                        <Plus size={11} /> Add ad-hoc item
+                      </button>
+                    </div>
+                    {deliveryFreeItems.length === 0 ? (
+                      <div style={{ padding: 10, fontSize: 11, color: theme.colors.textMuted, fontStyle: 'italic' }}>
+                        Optional — add free-text rows for items not tracked in inventory.
+                      </div>
+                    ) : (
+                      <div style={{
+                        background: '#EFF6FF', border: '1px solid #BFDBFE',
+                        borderRadius: 8, overflow: 'hidden',
+                      }}>
+                        <div style={{
+                          display: 'grid', gridTemplateColumns: '1fr 70px 80px 80px 32px',
+                          gap: 8, alignItems: 'center',
+                          padding: '8px 10px', background: '#DBEAFE',
+                          fontSize: 10, fontWeight: 700, color: '#1E40AF',
+                          textTransform: 'uppercase', letterSpacing: '1px',
+                        }}>
+                          <span>Description</span>
+                          <span style={{ textAlign: 'right' }}>Qty</span>
+                          <span style={{ textAlign: 'right' }}>Wt (lbs)</span>
+                          <span style={{ textAlign: 'right' }}>cuFt ea.</span>
+                          <span />
+                        </div>
+                        <div style={{ padding: 8, display: 'grid', gap: 6 }}>
+                          {deliveryFreeItems.map((item) => (
+                            <div key={item.id} style={{ display: 'grid', gridTemplateColumns: '1fr 70px 80px 80px 32px', gap: 8, alignItems: 'center' }}>
+                              <input
+                                style={input}
+                                placeholder="e.g., Custom-built side table"
+                                value={item.description}
+                                onChange={e => setDeliveryFreeItems(prev => prev.map(i => i.id === item.id ? { ...i, description: e.target.value } : i))}
+                              />
+                              <input
+                                style={{ ...input, textAlign: 'right' }}
+                                type="number" min={1}
+                                value={item.quantity}
+                                onChange={e => setDeliveryFreeItems(prev => prev.map(i => i.id === item.id ? { ...i, quantity: Math.max(1, parseInt(e.target.value) || 1) } : i))}
+                              />
+                              <input
+                                style={{ ...input, textAlign: 'right' }}
+                                type="number" min={0} step={1}
+                                placeholder="—"
+                                value={item.weight ?? ''}
+                                onChange={e => {
+                                  const raw = e.target.value;
+                                  const v = raw === '' ? null : Math.max(0, Number(raw) || 0);
+                                  setDeliveryFreeItems(prev => prev.map(i => i.id === item.id ? { ...i, weight: v } : i));
+                                }}
+                              />
+                              <input
+                                style={{ ...input, textAlign: 'right' }}
+                                type="number" min={0} step={1}
+                                placeholder="—"
+                                value={item.cubicFeet ?? ''}
+                                onChange={e => {
+                                  const raw = e.target.value;
+                                  const v = raw === '' ? null : Math.max(0, Number(raw) || 0);
+                                  setDeliveryFreeItems(prev => prev.map(i => i.id === item.id ? { ...i, cubicFeet: v } : i));
+                                }}
+                              />
+                              <button
+                                type="button"
+                                onClick={() => setDeliveryFreeItems(prev => prev.filter(i => i.id !== item.id))}
+                                title="Remove ad-hoc item"
+                                style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: '#1E3A8A', padding: 4, borderRadius: 4, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}
+                              >
+                                <Trash2 size={13} />
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
                 </div>
               )}
 
