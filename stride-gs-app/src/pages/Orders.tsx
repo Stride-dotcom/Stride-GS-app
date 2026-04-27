@@ -17,6 +17,7 @@ import { SharePublicPageDialog } from '../components/shared/SharePublicPageDialo
 // Approve, Reject, Push to DT — all inline). Pill in the tab bar
 // filters the Orders list to needs-review rows.
 import { useVirtualRows } from '../hooks/useVirtualRows';
+import { tanstackGlobalFilter } from '../lib/searchFilters';
 import { useAuth } from '../contexts/AuthContext';
 import { AvailabilityCalendar } from '../components/availability/AvailabilityCalendar';
 import { MultiSelectFilter } from '../components/shared/MultiSelectFilter';
@@ -52,15 +53,11 @@ function StatusChip({ order }: { order: DtOrderForUI }) {
 }
 
 // ─── Global filter ────────────────────────────────────────────────────────────
+// Search across every text field on the order (reference, notes, addresses,
+// review/payment/pricing notes, etc.) via the shared row-scanner so the
+// toolbar search behaves consistently with the other entity pages.
 
-const globalFilterFn: FilterFn<DtOrderForUI> = (row, _colId, value: string) => {
-  if (!value) return true;
-  const q = value.toLowerCase();
-  const r = row.original;
-  return [r.dtIdentifier, r.contactName, r.contactAddress, r.contactCity, r.poNumber, r.sidemark, r.clientReference, r.clientName, r.statusName, r.source, r.createdByName, r.createdByEmail, r.contactPhone, r.contactEmail]
-    .some(v => v?.toLowerCase().includes(q));
-};
-globalFilterFn.autoRemove = (v: string) => !v;
+const globalFilterFn = tanstackGlobalFilter as FilterFn<DtOrderForUI>;
 
 // ─── Column helper ────────────────────────────────────────────────────────────
 

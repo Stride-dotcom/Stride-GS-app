@@ -1,5 +1,8 @@
 /* ===================================================
-   UniversalSearch — v1.1.0 — 2026-04-22 10:00 AM PST
+   UniversalSearch — v1.2.0 — 2026-04-27 11:00 AM PST
+   - Added reference + notes (item, task, repair, internal,
+     WC item-level) to the search haystack so global ⌘K
+     finds entities by free-text fields, not just titles.
    =================================================== */
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { Search, Package, ClipboardList, Wrench, Truck, Users, X, Anchor } from 'lucide-react';
@@ -22,6 +25,10 @@ interface Result {
   id: string;
   title: string;
   subtitle: string;
+  // Free-text haystack — reference + notes + other fields the user might
+  // recognize but that don't fit on the visible subtitle line. Joined into
+  // a lowercased blob at index time so query matching stays cheap.
+  haystack: string;
   path: string;
   clientSheetId?: string;
 }
@@ -39,6 +46,10 @@ const TYPE_CONFIG: Record<ResultType, { icon: any; label: string; color: string;
 const ORDER: ResultType[] = ['inventory', 'task', 'repair', 'willcall', 'shipment', 'client'];
 const MAX_PER_GROUP = 3;
 
+function makeHaystack(...parts: Array<string | number | undefined | null>): string {
+  return parts.filter(p => p != null && p !== '').join(' \u241F ').toLowerCase();
+}
+
 function buildSearchIndex(
   inventoryItems: InventoryItem[],
   tasks: Task[],
@@ -53,6 +64,11 @@ function buildSearchIndex(
     id: i.itemId,
     title: `${i.itemId} — ${i.vendor}`,
     subtitle: `${i.description} · ${i.clientName} · ${i.sidemark}`,
+    haystack: makeHaystack(
+      i.reference, i.poNumber, i.notes, i.itemNotes, i.taskNotes,
+      i.trackingNumber, i.carrier, i.shipmentNumber, i.room, i.itemClass,
+      i.location, i.status, i.condition,
+    ),
     path: '/inventory',
     clientSheetId: i.clientId, // clientId == clientSheetId (mapped in useInventory)
   }));
@@ -62,6 +78,11 @@ function buildSearchIndex(
     id: t.taskId,
     title: `${t.taskId} — ${t.type}`,
     subtitle: `${t.description} · ${t.clientName}`,
+    haystack: makeHaystack(
+      t.reference, t.taskNotes, t.itemNotes, t.itemId, t.vendor,
+      t.sidemark, t.room, t.location, t.assignedTo, t.itemClass,
+      t.carrier, t.trackingNumber,
+    ),
     path: '/tasks',
     clientSheetId: t.clientSheetId,
   }));
@@ -71,6 +92,11 @@ function buildSearchIndex(
     id: r.repairId,
     title: `${r.repairId} — ${r.status}`,
     subtitle: `${r.description} · ${r.clientName}`,
+    haystack: makeHaystack(
+      r.reference, r.notes, r.internalNotes, r.itemId, r.vendor,
+      r.sidemark, r.room, r.location, r.repairVendor, r.assignedTo,
+      r.itemClass, r.carrier, r.trackingNumber, r.sourceTaskId,
+    ),
     path: '/repairs',
     clientSheetId: r.clientSheetId,
   }));
@@ -80,6 +106,15 @@ function buildSearchIndex(
     id: w.wcNumber,
     title: `${w.wcNumber} — ${w.pickupParty}`,
     subtitle: `${w.clientName} · ${w.status} · ${w.itemCount} items`,
+    haystack: makeHaystack(
+      w.notes, w.pickupPartyPhone, w.pickupPartyEmail, w.releasedBy,
+      // Surface item-level reference text on the parent WC — handy for
+      // finding a will call when the user remembers an item PO/reference
+      // rather than the WC number.
+      ...w.items.flatMap(it => [
+        it.reference, it.sidemark, it.room, it.shipmentNumber,
+      ]),
+    ),
     path: '/will-calls',
     clientSheetId: w.clientSheetId,
   }));
@@ -89,6 +124,7 @@ function buildSearchIndex(
     id: s.shipmentId,
     title: `${s.shipmentId} — ${s.carrier}`,
     subtitle: `${s.clientName} · ${s.trackingNumber} · ${s.itemCount} items`,
+    haystack: makeHaystack(s.notes, s.poNumber, s.trackingNumber, s.status),
     path: '/shipments',
     clientSheetId: s.clientId, // clientId == clientSheetId (mapped in useShipments)
   }));
@@ -105,6 +141,7 @@ function buildSearchIndex(
       id: name,
       title: name,
       subtitle: `${count} inventory items`,
+      haystack: makeHaystack(name, sheetId),
       path: '/inventory',
       clientSheetId: sheetId,
     });
@@ -138,7 +175,8 @@ export function UniversalSearch({ open, onClose }: Props) {
     return allResults.filter(r =>
       r.title.toLowerCase().includes(q) ||
       r.subtitle.toLowerCase().includes(q) ||
-      r.id.toLowerCase().includes(q),
+      r.id.toLowerCase().includes(q) ||
+      r.haystack.includes(q),
     );
   }, [query, allResults]);
 
@@ -205,7 +243,7 @@ export function UniversalSearch({ open, onClose }: Props) {
             value={query}
             onChange={e => setQuery(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder="Search items, tasks, repairs, will calls, shipments, clients..."
+            placeholder="Search by ID, name, reference, notes, sidemark…"
             style={{ flex: 1, border: 'none', outline: 'none', fontSize: 15, fontFamily: 'inherit', color: theme.colors.text }}
           />
           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>

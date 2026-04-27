@@ -37,6 +37,7 @@ import { useVirtualRows } from '../hooks/useVirtualRows';
 import { useScrollRestoration } from '../hooks/useScrollRestoration';
 import { theme } from '../styles/theme';
 import { fmtDate } from '../lib/constants';
+import { tanstackGlobalFilter } from '../lib/searchFilters';
 import { ItemDetailPanel } from '../components/shared/ItemDetailPanel';
 import { ItemIdBadges } from '../components/shared/ItemIdBadges';
 import { CreateWillCallModal } from '../components/shared/CreateWillCallModal';
@@ -1341,7 +1342,7 @@ export function Inventory() {
     getCoreRowModel: getCoreRowModel(),
     getSortedRowModel: getSortedRowModel(),
     getFilteredRowModel: getFilteredRowModel(),
-    globalFilterFn: 'includesString',
+    globalFilterFn: tanstackGlobalFilter as FilterFn<InventoryItem>,
   });
 
   // Restore persisted status filter on mount

@@ -14,6 +14,7 @@ import {
 import { useVirtualRows } from '../hooks/useVirtualRows';
 import { theme } from '../styles/theme';
 import { fmtDate } from '../lib/constants';
+import { tanstackGlobalFilter } from '../lib/searchFilters';
 import { ClaimDetailPanel } from '../components/shared/ClaimDetailPanel';
 import { CreateClaimModal } from '../components/shared/CreateClaimModal';
 import { WriteButton } from '../components/shared/WriteButton';
@@ -322,6 +323,7 @@ export function Claims() {
     initialState: { pagination: { pageSize: 50 } },
     getRowId: r => r.claimId,
     enableRowSelection: true,
+    globalFilterFn: tanstackGlobalFilter as FilterFn<Claim>,
   });
 
   const { containerRef, virtualRows, rows: allRows, totalHeight } = useVirtualRows(table);
