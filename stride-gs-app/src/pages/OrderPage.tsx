@@ -34,6 +34,7 @@ import {
 import { EntityHistory } from '../components/shared/EntityHistory';
 import { supabase } from '../lib/supabase';
 import { CreateDeliveryOrderModal } from '../components/shared/CreateDeliveryOrderModal';
+import { ReleaseItemsModal } from '../components/shared/ReleaseItemsModal';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -785,6 +786,11 @@ export function OrderPage() {
   // the Review queue.
   const [pushingDt, setPushingDt] = useState(false);
   const [pushDtError, setPushDtError] = useState<string | null>(null);
+  // Manual inventory release on completed delivery orders. Reuses
+  // ReleaseItemsModal (same flow Inventory.tsx uses), pre-selects all
+  // dt_order_items rows that have an inventory_id linkage, and defaults
+  // the release date to the delivery's finished_at.
+  const [showReleaseModal, setShowReleaseModal] = useState(false);
 
   useEffect(() => {
     if (order && !editing) setEdit(orderToEdit(order));
@@ -992,6 +998,29 @@ export function OrderPage() {
 
   // ── Footer ─────────────────────────────────────────────────────────────────
 
+  // Inventory items on this order that the manual-release flow can act
+  // on. dt_order_items.inventory_id is null for ad-hoc / free-text
+  // lines (filtered out — nothing in Stride inventory to flip from
+  // Active → Released for them). Dedup by inventory_id because two
+  // order lines can reference the same physical item (e.g. return +
+  // re-deliver pair); the modal's React keys + selection Set need
+  // unique inventory_ids, and you can only release a physical item
+  // once anyway.
+  const releasableItems = (() => {
+    const seen = new Set<string>();
+    const out: typeof order.items = [];
+    for (const it of order.items ?? []) {
+      if (!it.inventoryId || seen.has(it.inventoryId)) continue;
+      seen.add(it.inventoryId);
+      out.push(it);
+    }
+    return out;
+  })();
+  const canReleaseItems =
+    order.statusCategory === 'completed' &&
+    !!order.tenantId &&
+    releasableItems.length > 0;
+
   const footerContent = canReview && !editing ? (
     <>
       {/* Edit Full Order — opens the create-order modal in edit mode
@@ -1004,6 +1033,13 @@ export function OrderPage() {
         variant="secondary"
         onClick={() => setShowFullEditModal(true)}
       />
+      {canReleaseItems && (
+        <EPFooterButton
+          label="Release Items"
+          variant="primary"
+          onClick={() => setShowReleaseModal(true)}
+        />
+      )}
       {(order.reviewStatus === 'pending_review' || order.reviewStatus === 'revision_requested') && (
         <>
           <EPFooterButton
@@ -1096,6 +1132,30 @@ export function OrderPage() {
             // Refetch the order so the page reflects whatever changed
             // in the modal (status flip, identifier replacement on
             // promote, fields, items, accessorials, coverage, etc.).
+            const fresh = await fetchDtOrderByIdFromSupabase(order.id);
+            if (fresh) setLocalOrder(fresh);
+            refetch();
+          }}
+        />
+      )}
+      {showReleaseModal && order.tenantId && (
+        <ReleaseItemsModal
+          itemIds={releasableItems.map(it => it.inventoryId!)}
+          clientName={order.clientName || 'this client'}
+          clientSheetId={order.tenantId}
+          defaultReleaseDate={order.finishedAt ? order.finishedAt.slice(0, 10) : undefined}
+          selectableItems={releasableItems.map(it => ({
+            id: it.inventoryId!,
+            label: it.description || it.dtItemCode || 'Item',
+            sublabel: [
+              it.dtItemCode && `SKU ${it.dtItemCode}`,
+              it.quantity != null && `Qty ${it.quantity}`,
+            ].filter(Boolean).join(' · ') || undefined,
+          }))}
+          onClose={() => setShowReleaseModal(false)}
+          onSuccess={async () => {
+            // Refetch so the page reflects the released items (and any
+            // dt_orders mirror columns that change as a side effect).
             const fresh = await fetchDtOrderByIdFromSupabase(order.id);
             if (fresh) setLocalOrder(fresh);
             refetch();

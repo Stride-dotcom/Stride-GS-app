@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { X, CheckCircle2, AlertTriangle, CalendarDays } from 'lucide-react';
 import { theme } from '../../styles/theme';
 import { WriteButton } from './WriteButton';
@@ -6,28 +6,66 @@ import { ProcessingOverlay } from './ProcessingOverlay';
 import { postReleaseItems } from '../../lib/api';
 import type { ReleaseItemsResponse } from '../../lib/api';
 
+export interface ReleaseSelectableItem {
+  id: string;
+  label: string;
+  /** Optional secondary line (e.g. SKU / qty) */
+  sublabel?: string;
+}
+
 interface Props {
   itemIds: string[];
   clientName: string;
   clientSheetId: string;
   onClose: () => void;
   onSuccess: (result: ReleaseItemsResponse) => void;
+  /**
+   * Optional initial release date (YYYY-MM-DD). Defaults to today.
+   * OrderPage passes the delivery's finished_at so the operator
+   * doesn't have to retype it.
+   */
+  defaultReleaseDate?: string;
+  /**
+   * When provided, the modal renders a deselectable checkbox list of
+   * the items instead of a static preview line. itemIds is treated as
+   * the initial selection. The submit count + label reflect live
+   * selection. Backwards-compatible — Inventory.tsx omits this and
+   * keeps the static preview behavior.
+   */
+  selectableItems?: ReleaseSelectableItem[];
 }
 
-export function ReleaseItemsModal({ itemIds, clientName, clientSheetId, onClose, onSuccess }: Props) {
+export function ReleaseItemsModal({ itemIds, clientName, clientSheetId, onClose, onSuccess, defaultReleaseDate, selectableItems }: Props) {
   const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
-  const [releaseDate, setReleaseDate] = useState(today);
+  // defaultReleaseDate is only consumed by the initial render. The
+  // parent always closes + remounts the modal before refetching, so a
+  // mid-life change to finished_at won't be observed — that's fine.
+  const [releaseDate, setReleaseDate] = useState(defaultReleaseDate || today);
   const [notes, setNotes] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [result, setResult] = useState<ReleaseItemsResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set(itemIds));
+
+  const effectiveIds = useMemo(
+    () => (selectableItems ? Array.from(selectedIds) : itemIds),
+    [selectableItems, selectedIds, itemIds]
+  );
+
+  const toggleId = (id: string) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
 
   const handleSubmit = async () => {
-    if (!releaseDate) return;
+    if (!releaseDate || effectiveIds.length === 0) return;
     setSubmitting(true);
     setError(null);
     try {
-      const resp = await postReleaseItems({ itemIds, releaseDate, notes: notes.trim() || undefined }, clientSheetId);
+      const resp = await postReleaseItems({ itemIds: effectiveIds, releaseDate, notes: notes.trim() || undefined }, clientSheetId);
       if (resp.ok && resp.data?.success) {
         setResult(resp.data);
         onSuccess(resp.data);
@@ -61,7 +99,7 @@ export function ReleaseItemsModal({ itemIds, clientName, clientSheetId, onClose,
           <div>
             <div style={{ fontSize: 16, fontWeight: 600 }}>Release Items</div>
             <div style={{ fontSize: 12, color: theme.colors.textMuted, marginTop: 2 }}>
-              {itemIds.length} item{itemIds.length !== 1 ? 's' : ''} from {clientName}
+              {effectiveIds.length} item{effectiveIds.length !== 1 ? 's' : ''} from {clientName}
             </div>
           </div>
           <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4, color: theme.colors.textMuted }}>
@@ -135,10 +173,52 @@ export function ReleaseItemsModal({ itemIds, clientName, clientSheetId, onClose,
                 />
               </div>
 
-              {/* Item list preview */}
-              <div style={{ fontSize: 11, color: theme.colors.textMuted, marginBottom: 4 }}>
-                Items: {itemIds.slice(0, 10).join(', ')}{itemIds.length > 10 ? ` +${itemIds.length - 10} more` : ''}
-              </div>
+              {/* Item list — selectable checkboxes when caller passes
+                  selectableItems, otherwise a static preview. */}
+              {selectableItems ? (
+                <div style={{ marginBottom: 4 }}>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: theme.colors.textSecondary, textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 6 }}>
+                    Items to Release
+                  </div>
+                  <div style={{ maxHeight: 220, overflowY: 'auto', border: `1px solid ${theme.colors.borderDefault}`, borderRadius: 8 }}>
+                    {selectableItems.map((it, idx) => {
+                      const checked = selectedIds.has(it.id);
+                      return (
+                        <label
+                          key={it.id}
+                          style={{
+                            display: 'flex', alignItems: 'flex-start', gap: 10,
+                            padding: '8px 10px', cursor: 'pointer',
+                            borderBottom: idx < selectableItems.length - 1 ? `1px solid ${theme.colors.borderDefault}` : 'none',
+                            background: checked ? '#F0FDF4' : '#fff',
+                          }}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={() => toggleId(it.id)}
+                            style={{ marginTop: 3, accentColor: '#15803D' }}
+                          />
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ fontSize: 13, color: theme.colors.text, fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                              {it.label}
+                            </div>
+                            {it.sublabel && (
+                              <div style={{ fontSize: 11, color: theme.colors.textMuted, marginTop: 2 }}>
+                                {it.sublabel}
+                              </div>
+                            )}
+                          </div>
+                        </label>
+                      );
+                    })}
+                  </div>
+                </div>
+              ) : (
+                <div style={{ fontSize: 11, color: theme.colors.textMuted, marginBottom: 4 }}>
+                  Items: {itemIds.slice(0, 10).join(', ')}{itemIds.length > 10 ? ` +${itemIds.length - 10} more` : ''}
+                </div>
+              )}
             </>
           )}
         </div>
@@ -148,10 +228,10 @@ export function ReleaseItemsModal({ itemIds, clientName, clientSheetId, onClose,
           <WriteButton label={result ? 'Close' : 'Cancel'} variant="secondary" size="sm" onClick={onClose} />
           {!result && (
             <WriteButton
-              label={submitting ? 'Releasing...' : `Release ${itemIds.length} Item${itemIds.length !== 1 ? 's' : ''}`}
+              label={submitting ? 'Releasing...' : `Release ${effectiveIds.length} Item${effectiveIds.length !== 1 ? 's' : ''}`}
               variant="primary"
               size="sm"
-              disabled={!releaseDate || submitting}
+              disabled={!releaseDate || submitting || effectiveIds.length === 0}
               style={{ background: '#15803D' }}
               onClick={handleSubmit}
             />
