@@ -273,7 +273,22 @@ export async function uploadIntakeFile(linkId: string, file: File): Promise<stri
  * completed vs pending invitations.
  */
 export async function submitIntake(payload: IntakeSubmitPayload): Promise<{ id: string } | { error: string }> {
+  // Generate the row id client-side so we don't need RETURNING. The intake
+  // form runs anon (no auth — it's a public /intake/:linkId page), and the
+  // SELECT policy on client_intakes is staff-only by design — anon can
+  // INSERT but cannot SELECT. PostgREST's default `Prefer: return=representation`
+  // (which `.insert(row).select('id').single()` enables) does an
+  // INSERT...RETURNING which evaluates the SELECT policy on the new row.
+  // That fails for anon → the entire transaction rolls back with
+  // "new row violates row-level security policy". Generating the id here
+  // and using `Prefer: return=minimal` (the default when no .select() is
+  // chained) avoids the SELECT step entirely.
+  const intakeId = (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function')
+    ? crypto.randomUUID()
+    : `${Date.now().toString(16)}-${Math.random().toString(16).slice(2)}`;
+
   const row = {
+    id:                    intakeId,
     link_id:               payload.linkId,
     status:                'pending',
     business_name:         payload.businessName.trim(),
@@ -304,14 +319,8 @@ export async function submitIntake(payload: IntakeSubmitPayload): Promise<{ id: 
     user_agent:            payload.userAgent ?? (typeof navigator !== 'undefined' ? navigator.userAgent : null),
     submitted_at:          new Date().toISOString(),
   };
-  const { data, error } = await supabase
-    .from('client_intakes')
-    .insert(row)
-    .select('id')
-    .single();
-  if (error || !data) return { error: error?.message ?? 'Submit failed' };
-
-  const intakeId = (data as { id: string }).id;
+  const { error } = await supabase.from('client_intakes').insert(row);
+  if (error) return { error: error.message };
 
   // Best-effort link consumption marker — non-fatal if it fails (the
   // intake row is already persisted and the admin can see it). Anon
