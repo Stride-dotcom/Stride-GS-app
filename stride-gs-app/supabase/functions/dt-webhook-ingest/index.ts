@@ -1,6 +1,18 @@
 /**
  * dt-webhook-ingest — Supabase Edge Function
  *
+ * Version: v6 (2026-04-26 PST)
+ *   v6: account_name_map shape canonicalized to {tenant_id → name}.
+ *       Reverse-lookup at runtime: scan map for entries whose VALUE
+ *       matches the incoming Account; collect tenant_ids. Exactly
+ *       one match → use it. Many → fall through (don't bind to wrong
+ *       tenant). Unmapped → fall back to dt_credentials.house_tenant_id
+ *       (configured in Settings → DispatchTrack) so events tied to
+ *       brand-new or one-off DT accounts no longer block in
+ *       quarantine. Quarantine still fires when house_tenant_id is
+ *       null AND no fuzzy match was found — historical behaviour
+ *       preserved for envs that haven't opted in.
+ *
  * Version: v5 (2026-04-25 PST)
  *   v5: Fuzzy account-name lookup now requires exactly one match — ambiguous
  *       hits (>1) quarantine instead of binding to the first row, preventing
@@ -163,7 +175,7 @@ Deno.serve(async (req: Request) => {
 
   const { data: creds, error: credsError } = await supabase
     .from('dt_credentials')
-    .select('webhook_secret, account_name_map')
+    .select('webhook_secret, account_name_map, house_tenant_id')
     .maybeSingle();
 
   if (credsError) {
@@ -289,10 +301,29 @@ Deno.serve(async (req: Request) => {
   // ── 6. Resolve tenant_id from account name ────────────────────────────
   let tenantId: string | null = null;
 
-  // Pass 1: exact match in account_name_map (admin-configured)
+  // Pass 1: exact match in account_name_map (admin-configured).
+  //
+  // The map's canonical shape is {tenant_id → account_name}, which
+  // supports the many-to-one case (multiple Stride clients sharing
+  // a single DT account). To resolve an incoming webhook back to
+  // a tenant we invert at runtime: build a Map<accountName, tenant_id[]>
+  // and only resolve when there's exactly one tenant for the given
+  // name. Multiple matches → leave tenantId null and fall through
+  // to fuzzy/quarantine logic so we never bind an event to the
+  // wrong tenant.
   if (creds.account_name_map && accountName) {
     const map = creds.account_name_map as Record<string, string>;
-    tenantId = map[accountName] ?? map[accountName.toLowerCase()] ?? null;
+    const target = accountName.toLowerCase();
+    const matches: string[] = [];
+    for (const [tid, name] of Object.entries(map)) {
+      if (typeof name !== 'string') continue;
+      if (name.toLowerCase() === target) matches.push(tid);
+    }
+    if (matches.length === 1) {
+      tenantId = matches[0];
+    } else if (matches.length > 1) {
+      console.log(`[dt-webhook-ingest] account_name="${accountName}" matches ${matches.length} tenants — leaving tenantId null for fuzzy/quarantine resolution`);
+    }
   }
 
   // Pass 2: fuzzy ILIKE against inventory.client_name (fallback).
@@ -320,12 +351,23 @@ Deno.serve(async (req: Request) => {
     }
   }
 
-  // ── 7. Quarantine if unmapped ──────────────────────────────────────────
+  // ── 7. House-tenant fallback, then quarantine ─────────────────────────
+  // v6: if the admin has configured dt_credentials.house_tenant_id
+  // we bind the event there instead of quarantining. Pairs with the
+  // push-side "STRIDE LOGISTICS" account fallback so neither
+  // direction blocks on unknown accounts. We log the fallback so an
+  // ops audit can find house-bound events later.
+  const houseTenantId = (creds as { house_tenant_id?: string | null }).house_tenant_id ?? null;
+  if (!tenantId && houseTenantId && !fuzzyAmbiguous) {
+    tenantId = houseTenantId;
+    console.log(`[dt-webhook-ingest] account="${accountName}" unmapped — falling back to house tenant ${houseTenantId}`);
+  }
+
   if (!tenantId) {
     const reason = fuzzyAmbiguous
       ? `ambiguous_fuzzy_match:${accountName}`
       : `unmapped_account:${accountName}`;
-    console.warn(`[dt-webhook-ingest] ${reason} — quarantining`);
+    console.warn(`[dt-webhook-ingest] ${reason} — quarantining (no house_tenant_id configured or fuzzy was ambiguous)`);
     const { error: quarantineErr } = await supabase.from('dt_orders_quarantine').insert({
       received_at:    receivedAt,
       dt_identifier:  dtIdentifier,
