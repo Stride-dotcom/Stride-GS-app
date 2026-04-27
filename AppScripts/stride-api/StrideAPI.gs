@@ -1,5 +1,16 @@
 /* ===================================================
-   StrideAPI.gs — v38.136.0 — 2026-04-26 PST — Past-due safety buffer for newly-CREATED Stax invoices
+   StrideAPI.gs — v38.137.0 — 2026-04-26 PST — One-shot bulkResyncStaxCatalog helper
+   v38.137.0: New editor-only helper bulkResyncStaxCatalog() that pulls
+              every service_catalog row with a stax_item_id and PUTs it
+              back to the Stax /item endpoint. Used after a SQL change
+              that touches every row (e.g. flipping `taxable=false` on
+              all 64 services to align with the all-wholesale customer
+              base) so Stax's catalog reflects the new state without
+              requiring an operator to re-save each service in the UI.
+              Not wired into a dispatcher — runs only from the Apps
+              Script editor. Reads STAX_API_KEY from Script Properties
+              first, then falls back to the Stax sheet's Config tab.
+   v38.136.0: Past-due safety buffer for newly-CREATED Stax invoices
    v38.136.0: Auto-charge race protection. INV-097/098 were linked at
               06:30 and auto-paid at 08:27 the same morning because
               their Due Date was already past (2026-04-23) and no
@@ -3665,6 +3676,107 @@ function api_sbResyncStaxInvoices_(qbInvoiceNos) {
     }
     api_sbBatchUpsertStaxInvoices_(out);
   } catch (e) { Logger.log("api_sbResyncStaxInvoices_ error (non-fatal): " + e); }
+}
+
+/**
+ * v38.137.0 — One-shot bulk resync of every service_catalog row already
+ * in the Stax catalog. Run ONCE from the Apps Script editor after a
+ * SQL update that changes a column on every row (e.g. flipping
+ * `taxable = false` across the board). The per-save catalog sync only
+ * fires on operator edits in the React UI; bare SQL changes don't
+ * propagate without this.
+ *
+ * For each row with a non-null stax_item_id, issues
+ *   PUT https://apiprod.fattlabs.com/item/{stax_item_id}
+ * with the current service_catalog values (is_taxable, price, etc).
+ *
+ * Reports total / ok / fail counts in the Logger and returns the
+ * same shape so the editor's execution panel shows it.
+ */
+function bulkResyncStaxCatalog() {
+  var url = prop_("SUPABASE_URL");
+  var key = prop_("SUPABASE_SERVICE_ROLE_KEY");
+  var staxKey = prop_("STAX_API_KEY");
+  if (!url || !key) throw new Error("Missing SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY in script properties");
+  if (!staxKey) {
+    // Fall back to the Stax sheet's Config tab (where the current key lives).
+    try {
+      var ss = getStaxSpreadsheet_();
+      var configSheet = ss && ss.getSheetByName("Config");
+      if (configSheet) {
+        var cfg = configSheet.getDataRange().getValues();
+        for (var ci = 0; ci < cfg.length; ci++) {
+          if (String(cfg[ci][0] || "").trim() === "STAX_API_KEY") {
+            staxKey = String(cfg[ci][1] || "").trim();
+            break;
+          }
+        }
+      }
+    } catch (_) {}
+  }
+  if (!staxKey) throw new Error("Missing STAX_API_KEY (script property or Stax sheet Config)");
+
+  // Pull every row already in the Stax catalog.
+  var listResp = UrlFetchApp.fetch(
+    url + "/rest/v1/service_catalog?select=id,code,name,billing,flat_rate,taxable,active,stax_item_id&stax_item_id=not.is.null",
+    {
+      method: "GET",
+      headers: { "Authorization": "Bearer " + key, "apikey": key },
+      muteHttpExceptions: true
+    }
+  );
+  if (listResp.getResponseCode() < 200 || listResp.getResponseCode() >= 300) {
+    throw new Error("Supabase list failed HTTP " + listResp.getResponseCode() + ": " +
+      listResp.getContentText().substring(0, 300));
+  }
+  var services = JSON.parse(listResp.getContentText() || "[]");
+  Logger.log("bulkResyncStaxCatalog: pulling " + services.length + " catalog rows from Supabase");
+
+  var ok = 0, fail = 0;
+  var errors = [];
+  for (var i = 0; i < services.length; i++) {
+    var s = services[i];
+    var isFlat = s.billing === "flat";
+    var price = isFlat && s.flat_rate != null ? Number(s.flat_rate) : 0;
+    var detailsSuffix = !isFlat ? " (class-based — see Stride app for class rates)" : "";
+
+    var staxPayload = {
+      item: s.code,
+      details: (s.name || "") + detailsSuffix,
+      quantity: 1,
+      price: price,
+      is_default: false,
+      is_taxable: !!s.taxable,
+      in_inventory: false
+    };
+
+    try {
+      var putResp = UrlFetchApp.fetch("https://apiprod.fattlabs.com/item/" + encodeURIComponent(s.stax_item_id), {
+        method: "PUT",
+        headers: {
+          "Authorization": "Bearer " + staxKey,
+          "Content-Type": "application/json",
+          "Accept": "application/json"
+        },
+        payload: JSON.stringify(staxPayload),
+        muteHttpExceptions: true
+      });
+      var code = putResp.getResponseCode();
+      if (code >= 200 && code < 300) {
+        ok++;
+      } else {
+        fail++;
+        errors.push({ code: s.code, status: code, body: putResp.getContentText().substring(0, 200) });
+      }
+    } catch (e) {
+      fail++;
+      errors.push({ code: s.code, error: String(e) });
+    }
+  }
+
+  var report = { total: services.length, ok: ok, fail: fail, errors: errors };
+  Logger.log("bulkResyncStaxCatalog complete: " + JSON.stringify(report));
+  return report;
 }
 
 /**
