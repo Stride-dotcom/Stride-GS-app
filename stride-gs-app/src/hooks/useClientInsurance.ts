@@ -162,10 +162,19 @@ export function useClientInsurance(tenantId: string | undefined | null): UseClie
     if (!tenantId) return false;
     if (row) return false; // already seeded
 
-    let rate = 300;
+    // Insurance rate must come from service_catalog.INSURANCE — no
+    // fallback. If the row is missing or has a null flat_rate, refuse
+    // to seed; the admin needs to set the rate in Settings → Pricing
+    // first. Silently writing $300 (the legacy hardcoded default)
+    // would lock historical clients onto a stale rate the admin
+    // never approved.
     const { data: svc } = await supabase.from('service_catalog')
       .select('flat_rate').eq('code', 'INSURANCE').maybeSingle();
-    if (svc && typeof svc.flat_rate === 'number') rate = svc.flat_rate;
+    const rate = svc && typeof svc.flat_rate === 'number' ? svc.flat_rate : null;
+    if (rate == null) {
+      console.error('[useClientInsurance.seed] No INSURANCE rate in service_catalog — refusing to seed');
+      return false;
+    }
 
     const today = new Date();
     const next = new Date(today);

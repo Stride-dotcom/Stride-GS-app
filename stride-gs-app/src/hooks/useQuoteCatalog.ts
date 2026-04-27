@@ -17,7 +17,6 @@ import { entityEvents } from '../lib/entityEvents';
 import { useServiceCatalog, type CatalogService } from './useServiceCatalog';
 import type { ClassDef, TaxArea, CoverageOption, CoverageMethod } from '../lib/quoteTypes';
 import {
-  DEFAULT_CLASSES, DEFAULT_TAX_AREAS, DEFAULT_COVERAGE_OPTIONS,
 } from '../lib/quoteDefaults';
 
 interface ItemClassRow {
@@ -116,23 +115,25 @@ export function useQuoteCatalog(): UseQuoteCatalogResult {
       supabase.from('coverage_options').select('*').order('display_order', { ascending: true }),
     ]);
 
-    if (!classesRes.error && Array.isArray(classesRes.data) && classesRes.data.length > 0) {
-      setClasses((classesRes.data as ItemClassRow[]).map(rowToClass));
-    } else {
-      setClasses(DEFAULT_CLASSES);
-    }
-
-    if (!taxRes.error && Array.isArray(taxRes.data) && taxRes.data.length > 0) {
-      setTaxAreas((taxRes.data as TaxAreaRow[]).map(rowToTaxArea));
-    } else {
-      setTaxAreas(DEFAULT_TAX_AREAS);
-    }
-
-    if (!coverageRes.error && Array.isArray(coverageRes.data) && coverageRes.data.length > 0) {
-      setCoverageOptions((coverageRes.data as CoverageOptionRow[]).map(rowToCoverage));
-    } else {
-      setCoverageOptions(DEFAULT_COVERAGE_OPTIONS);
-    }
+    // Single source of truth = the price list. If the table is empty
+    // we render an empty array and let the consumer surface a
+    // "pricing data unavailable" state — silently using a hardcoded
+    // fallback is what got us out of sync in the past.
+    setClasses(
+      !classesRes.error && Array.isArray(classesRes.data)
+        ? (classesRes.data as ItemClassRow[]).map(rowToClass)
+        : []
+    );
+    setTaxAreas(
+      !taxRes.error && Array.isArray(taxRes.data)
+        ? (taxRes.data as TaxAreaRow[]).map(rowToTaxArea)
+        : []
+    );
+    setCoverageOptions(
+      !coverageRes.error && Array.isArray(coverageRes.data)
+        ? (coverageRes.data as CoverageOptionRow[]).map(rowToCoverage)
+        : []
+    );
 
     setLoading(false);
   }, []);

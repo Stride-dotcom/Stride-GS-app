@@ -418,15 +418,21 @@ export async function seedClientInsuranceFromIntake(
     return { seeded: false, error: 'declared_value_missing' };
   }
 
-  // Pull the current rate from service_catalog so historical clients
-  // can stay on today's rate even if the admin raises it later.
-  let monthlyRate = 300;
+  // Insurance rate comes from service_catalog.INSURANCE. No fallback:
+  // if the row is missing or has a null flat_rate, surface an error
+  // so the admin sets the rate in Settings → Pricing before seeding
+  // continues. The previous hardcoded $300 default could lock new
+  // clients onto a stale rate the admin never approved.
   const { data: svc } = await supabase
     .from('service_catalog')
     .select('flat_rate')
     .eq('code', 'INSURANCE')
     .maybeSingle();
-  if (svc && typeof svc.flat_rate === 'number') monthlyRate = svc.flat_rate;
+  const monthlyRate = svc && typeof svc.flat_rate === 'number' ? svc.flat_rate : null;
+  if (monthlyRate == null) {
+    console.error('[useIntakeAdmin] No INSURANCE rate in service_catalog — refusing to seed insurance');
+    return { seeded: false, error: 'insurance_rate_not_configured' };
+  }
 
   const today = new Date();
   const nextBilling = new Date(today);
