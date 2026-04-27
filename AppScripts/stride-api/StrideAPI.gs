@@ -35973,6 +35973,19 @@ function runResaleCertExpiryCheck() {
     return;
   }
 
+  // Self-send workaround: when the recipient resolves back to the script
+  // owner's mailbox (alias / forwarding), Gmail auto-marks the message as
+  // read. Find the thread we just sent and flip it to unread so it shows
+  // up bolded in the inbox/label.
+  try {
+    Utilities.sleep(2000); // let Gmail index the message
+    var threads = GmailApp.search('subject:"' + subject + '" newer_than:1d', 0, 5);
+    for (var t = 0; t < threads.length; t++) {
+      threads[t].moveToInbox();
+      threads[t].markUnread();
+    }
+  } catch (_) {}
+
   _resaleCertWriteRunLog_("runResaleCertExpiryCheck",
     "OK — digest emailed to " + to,
     "expired=" + buckets.expired.length +

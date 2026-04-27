@@ -45,6 +45,7 @@ async function main() {
     'https://www.googleapis.com/auth/drive',
     'https://www.googleapis.com/auth/documents',
     'https://mail.google.com/',
+    'https://www.googleapis.com/auth/script.send_mail',
     'https://www.googleapis.com/auth/script.external_request',
     'https://www.googleapis.com/auth/script.scriptapp',
     'https://www.googleapis.com/auth/script.deployments',  // v38.13.0: auto-deploy Web App during onboarding
