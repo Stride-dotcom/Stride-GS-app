@@ -1,5 +1,15 @@
 /* ===================================================
-   Import.gs — v4.4.0 — 2026-04-17 PST — IMP Shipments-tab hyperlinks reuse legacy photo URLs
+   Import.gs — v4.5.0 — 2026-04-26 PST — class-map fallbacks removed
+   v4.5.0: loadClassMapForImport_ no longer returns a hardcoded
+           {XS:10, S:25, M:50, L:75, XL:110} fallback when neither
+           Class_Cache nor Master Price List Class_Map is reachable.
+           The legacy literals had drifted out of sync with the live
+           values (M=45, XL=100, XXL=150) and silently downgraded XXL
+           items to XL during ingest, which then drove wrong STOR
+           rates × cuFt billing. New behaviour: return {} and let
+           sizeToClass_ leave Class blank — the import surfaces the
+           missing class instead of guessing. The Master/Class_Cache
+           is the only source of truth.
    v4.4.0: (a) Forward: Import no longer creates an empty IMP folder under
            Shipments/. The Shipments-tab Shipment # cell is hyperlinked directly
            to the first non-empty legacy photo URL collected from the imported
@@ -654,15 +664,34 @@ function sizeToClass_(cuFt, classMap) {
 }
 
 function loadClassMapForImport_(ss) {
+  // v4.5.0: no hardcoded fallbacks. Class_Cache (per-client) →
+  // Master Price List Class_Map are the only sources. If neither is
+  // reachable we return {} and let the importer leave Class blank —
+  // surfaces the misconfiguration rather than billing against
+  // guessed sizes.
   var cacheSh = ss.getSheetByName("Class_Cache");
-  if (!cacheSh) { var masterId = getSetting_(ss, CI_SETTINGS_KEYS.MASTER_SPREADSHEET_ID); if (masterId) { try { cacheSh = SpreadsheetApp.openById(masterId).getSheetByName("Class_Map"); } catch(_) {} } }
-  if (!cacheSh || cacheSh.getLastRow() < 2) return { "XS": 10, "S": 25, "M": 50, "L": 75, "XL": 110 };
-  var data = cacheSh.getDataRange().getValues(); var map = {};
+  if (!cacheSh) {
+    var masterId = getSetting_(ss, CI_SETTINGS_KEYS.MASTER_SPREADSHEET_ID);
+    if (masterId) { try { cacheSh = SpreadsheetApp.openById(masterId).getSheetByName("Class_Map"); } catch(_) {} }
+  }
+  if (!cacheSh || cacheSh.getLastRow() < 2) {
+    Logger.log("loadClassMapForImport_: no Class_Cache or Master Class_Map reachable — returning empty map. Items will import without a Class.");
+    return {};
+  }
+  var data = cacheSh.getDataRange().getValues();
+  var map = {};
   for (var i = 0; i < data[0].length; i++) map[String(data[0][i]).trim().toUpperCase()] = i;
-  var classCol = map["CLASS"], volCol = map["CUBIC VOLUME"] !== undefined ? map["CUBIC VOLUME"] : map["STORAGE SIZE"];
-  if (classCol === undefined || volCol === undefined) return { "XS": 10, "S": 25, "M": 50, "L": 75, "XL": 110 };
+  var classCol = map["CLASS"];
+  var volCol = map["CUBIC VOLUME"] !== undefined ? map["CUBIC VOLUME"] : map["STORAGE SIZE"];
+  if (classCol === undefined || volCol === undefined) {
+    Logger.log("loadClassMapForImport_: Class_Cache headers missing CLASS/CUBIC VOLUME/STORAGE SIZE — returning empty map.");
+    return {};
+  }
   var classMap = {};
-  for (var j = 1; j < data.length; j++) { var cls = String(data[j][classCol] || "").trim(); if (cls) classMap[cls] = Number(data[j][volCol]) || 0; }
+  for (var j = 1; j < data.length; j++) {
+    var cls = String(data[j][classCol] || "").trim();
+    if (cls) classMap[cls] = Number(data[j][volCol]) || 0;
+  }
   return classMap;
 }
 
