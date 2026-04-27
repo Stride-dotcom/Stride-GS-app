@@ -188,7 +188,7 @@ function IntegrationsTab() {
   const [staxError, setStaxError] = useState<string | null>(null);
 
   // ── DispatchTrack account mapping ────────────────────────────────────────
-  type DtCredsRow = { id: string; api_base_url: string | null; account_name_map: Record<string, string> };
+  type DtCredsRow = { id: string; api_base_url: string | null; account_name_map: Record<string, string>; house_tenant_id: string | null };
   const [dtCreds, setDtCreds] = useState<DtCredsRow | null>(null);
   const [dtCredsLoading, setDtCredsLoading] = useState(true);
   const [dtOpen, setDtOpen] = useState(false);
@@ -201,17 +201,23 @@ function IntegrationsTab() {
   const { apiClients: dtClients } = useClients(true);
 
   useEffect(() => {
-    supabase.from('dt_credentials').select('id, api_base_url, account_name_map').single()
+    supabase.from('dt_credentials').select('id, api_base_url, account_name_map, house_tenant_id').single()
       .then(({ data }) => {
         if (data) setDtCreds(data as DtCredsRow);
         setDtCredsLoading(false);
       });
   }, []);
 
+  // account_name_map shape is canonical {tenant_id → account_name}
+  // (fixed by migration 20260427000000). Multiple tenant_ids may
+  // hold the same account_name string — that's how parent/child
+  // sheets that bill to a single DT account get linked. The UI
+  // before this PR was reading/writing the inverted shape, which
+  // forced uniqueness on the name and blocked the multi-client
+  // case entirely.
   const getDtName = (spreadsheetId: string): string => {
     if (!dtCreds?.account_name_map) return '';
-    const m = dtCreds.account_name_map;
-    return Object.keys(m).find(k => m[k] === spreadsheetId) || '';
+    return dtCreds.account_name_map[spreadsheetId] ?? '';
   };
 
   const dtMissingCount = dtClients.filter(c => !getDtName(c.spreadsheetId)).length;
@@ -227,10 +233,15 @@ function IntegrationsTab() {
     const newName = dtEditValue.trim();
     setDtSaving(prev => ({ ...prev, [spreadsheetId]: true }));
     const newMap = { ...dtCreds.account_name_map };
-    // Remove any existing key pointing to this client
-    Object.keys(newMap).forEach(k => { if (newMap[k] === spreadsheetId) delete newMap[k]; });
-    // Add new entry if name is provided
-    if (newName) newMap[newName] = spreadsheetId;
+    if (newName) {
+      // Direct assignment — multiple tenant_ids can share the same
+      // newName, which is the whole point of this map. We're not
+      // enforcing uniqueness on either side.
+      newMap[spreadsheetId] = newName;
+    } else {
+      // Empty value clears the mapping for this client.
+      delete newMap[spreadsheetId];
+    }
     const { error } = await supabase.from('dt_credentials').update({ account_name_map: newMap }).eq('id', dtCreds.id);
     if (!error) {
       setDtCreds(prev => prev ? { ...prev, account_name_map: newMap } : prev);
@@ -239,6 +250,35 @@ function IntegrationsTab() {
       setDtSaveError(error.message);
     }
     setDtSaving(prev => { const n = { ...prev }; delete n[spreadsheetId]; return n; });
+  };
+
+  // Group clients by account name so the admin can see at a glance
+  // which tenants share a DT account (and that the many-to-one
+  // mapping actually took effect).
+  const dtNameUsageCount = (name: string): number => {
+    if (!name || !dtCreds?.account_name_map) return 0;
+    return Object.values(dtCreds.account_name_map).filter(v => v === name).length;
+  };
+
+  // House tenant — webhook events for unrecognized DT accounts bind
+  // here instead of quarantining. Pair with the push-side "STRIDE
+  // LOGISTICS" account fallback so neither direction ever blocks.
+  const [dtHouseSaving, setDtHouseSaving] = useState(false);
+  const [dtHouseError, setDtHouseError] = useState<string | null>(null);
+  const handleDtHouseSave = async (newHouseTenantId: string) => {
+    if (!dtCreds) return;
+    setDtHouseSaving(true);
+    setDtHouseError(null);
+    const { error } = await supabase
+      .from('dt_credentials')
+      .update({ house_tenant_id: newHouseTenantId || null })
+      .eq('id', dtCreds.id);
+    if (!error) {
+      setDtCreds(prev => prev ? { ...prev, house_tenant_id: newHouseTenantId || null } : prev);
+    } else {
+      setDtHouseError(error.message);
+    }
+    setDtHouseSaving(false);
   };
 
   const dtDisplayClients = dtClients
@@ -461,6 +501,31 @@ function IntegrationsTab() {
               <button onClick={() => setDtOpen(false)} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4, color: theme.colors.textMuted }}><X size={18} /></button>
             </div>
 
+            {/* House tenant — catches webhook events for unrecognized
+                DT accounts so nothing ever quarantines silently.
+                Pairs with the push-side STRIDE LOGISTICS fallback. */}
+            <div style={{ padding: '12px 20px', borderBottom: `1px solid ${theme.colors.border}`, background: '#FFFBEB', flexShrink: 0 }}>
+              <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: 1.2, textTransform: 'uppercase', color: '#92400E', marginBottom: 6 }}>House Tenant Fallback</div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                <select
+                  value={dtCreds?.house_tenant_id ?? ''}
+                  onChange={e => handleDtHouseSave(e.target.value)}
+                  disabled={dtHouseSaving || dtCredsLoading}
+                  style={{ flex: 1, minWidth: 240, padding: '6px 10px', fontSize: 12, border: `1px solid ${theme.colors.border}`, borderRadius: 7, background: '#fff', fontFamily: 'inherit' }}
+                >
+                  <option value="">— Quarantine unmapped events (default) —</option>
+                  {dtClients.map(c => (
+                    <option key={c.spreadsheetId} value={c.spreadsheetId}>{c.name}</option>
+                  ))}
+                </select>
+                {dtHouseSaving && <Loader2 size={12} style={{ animation: 'spin 1s linear infinite', color: theme.colors.textMuted }} />}
+              </div>
+              <div style={{ fontSize: 11, color: '#92400E', marginTop: 6, lineHeight: 1.5 }}>
+                Webhook events from DT accounts that don't match any client mapping will bind to this tenant instead of quarantining. Set this to your Stride internal client sheet so nothing ever blocks. Leave empty to keep the legacy quarantine behaviour.
+              </div>
+              {dtHouseError && <div style={{ fontSize: 11, color: '#DC2626', marginTop: 4 }}>{dtHouseError}</div>}
+            </div>
+
             {/* Toolbar */}
             <div style={{ padding: '10px 20px', borderBottom: `1px solid ${theme.colors.border}`, display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0, background: theme.colors.bgSubtle }}>
               {/* Filter tabs */}
@@ -539,6 +604,9 @@ function IntegrationsTab() {
                           ) : (
                             <>
                               <span style={{ fontSize: 12, fontWeight: 500, color: theme.colors.text, flex: 1 }}>{dtName}</span>
+                              {dtNameUsageCount(dtName) > 1 && (
+                                <span title={`${dtNameUsageCount(dtName)} clients share this DT account`} style={{ fontSize: 10, fontWeight: 600, background: '#EFF6FF', color: '#1D4ED8', border: '1px solid #BFDBFE', borderRadius: 10, padding: '1px 7px', flexShrink: 0 }}>×{dtNameUsageCount(dtName)}</span>
+                              )}
                               <Edit2 size={11} color={theme.colors.textMuted} style={{ flexShrink: 0 }} />
                             </>
                           )}
@@ -562,8 +630,8 @@ function IntegrationsTab() {
 
             {/* Footer */}
             <div style={{ padding: '10px 20px', borderTop: `1px solid ${theme.colors.border}`, background: theme.colors.bgSubtle, flexShrink: 0 }}>
-              <div style={{ fontSize: 11, color: theme.colors.textMuted }}>
-                DT account names must match exactly as they appear in DispatchTrack (spelling and capitalization matter). Changes save immediately.
+              <div style={{ fontSize: 11, color: theme.colors.textMuted, lineHeight: 1.5 }}>
+                DT account names must match exactly as they appear in DispatchTrack (spelling and capitalization matter). Multiple clients can share the same DT account — just enter the same name on each, and a ×N badge will appear next to it. Changes save immediately.
               </div>
             </div>
           </div>
