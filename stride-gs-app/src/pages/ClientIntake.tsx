@@ -505,13 +505,14 @@ export function ClientIntake({ linkId }: Props) {
             setSigHasInk={setSigHasInk}
           />
         )}
-        {step === 4 && <StepPayment draft={draft} setDraft={setDraft} />}
+        {step === 4 && <StepPayment draft={draft} setDraft={setDraft} isRefresh={isRefresh} />}
         {step === 5 && <StepDocuments draft={draft} setDraft={setDraft} isRefresh={isRefresh} refreshPrefill={refreshPrefill} />}
         {step === 6 && (
           <StepReview
             draft={draft}
             onJumpTo={setStep}
             sigDataUrl={draft.signatureType === 'drawn' ? sig.toDataURL() : ''}
+            isRefresh={isRefresh}
           />
         )}
       </div>
@@ -934,12 +935,32 @@ function StepTerms({ draft, setDraft, tcHtml, tcLoading, coverageNotes, sig, sig
   );
 }
 
-function StepPayment({ draft, setDraft }: StepProps) {
+function StepPayment({ draft, setDraft, isRefresh }: StepProps & { isRefresh?: boolean }) {
+  // Refresh-mode (existing client re-confirming) reframes this whole step
+  // around the assumption that they already have a card on file. The Paymnt.io
+  // link is still offered for anyone who wants to swap to a new card, but the
+  // primary action (the checkbox) is just a confirmation that what's on file
+  // is current.
   return (
     <div>
-      <StepTitle kicker="Step 4" title="Set up your payment method" />
+      <StepTitle
+        kicker="Step 4"
+        title={isRefresh ? 'Confirm your payment method' : 'Set up your payment method'}
+      />
       <div style={{ fontSize: 14, color: TEXT_SEC, lineHeight: 1.7, marginBottom: 18 }}>
-        Stride uses automatic payment for monthly invoices — after a 15-day review window, the card or bank account on file is charged. Set up your secure payment method with our merchant processor by clicking below. Your full payment info is stored by <strong>Paymnt.io</strong> and never seen by Stride.
+        {isRefresh ? (
+          <>
+            Stride uses automatic payment for monthly invoices — after a 15-day review window, the card or bank account on file is charged.
+            We already have a payment method on file for your account. If yours hasn't changed, simply check the box below to confirm.
+            If you need to update your card or bank account, click the button to manage it in <strong>Paymnt.io</strong>.
+          </>
+        ) : (
+          <>
+            Stride uses automatic payment for monthly invoices — after a 15-day review window, the card or bank account on file is charged.
+            Set up your secure payment method with our merchant processor by clicking below.
+            Your full payment info is stored by <strong>Paymnt.io</strong> and never seen by Stride.
+          </>
+        )}
       </div>
 
       <a
@@ -954,7 +975,7 @@ function StepPayment({ draft, setDraft }: StepProps) {
           textDecoration: 'none', boxShadow: '0 8px 24px rgba(232,105,42,0.28)',
         }}
       >
-        Set Up Payment Method <ExternalLink size={14} />
+        {isRefresh ? <>Update Payment Method</> : <>Set Up Payment Method</>} <ExternalLink size={14} />
       </a>
 
       <div style={{ background: BG_PAGE, borderRadius: 12, padding: 16, marginTop: 18, border: `1px solid ${BORDER}`, fontSize: 12, color: TEXT_MUT, lineHeight: 1.6 }}>
@@ -970,7 +991,10 @@ function StepPayment({ draft, setDraft }: StepProps) {
             style={{ marginTop: 3, accentColor: ACCENT, width: 16, height: 16 }}
           />
           <span style={{ fontSize: 13, color: TEXT, lineHeight: 1.5 }}>
-            I have completed the payment authorization setup on Paymnt.io and I authorize Stride Logistics to charge my payment method for monthly invoices per the terms in §3 of the agreement.
+            {isRefresh
+              ? <>My payment method on file is up to date, and I authorize Stride Logistics to continue charging it for monthly invoices per the terms in §3 of the agreement.</>
+              : <>I have completed the payment authorization setup on Paymnt.io and I authorize Stride Logistics to charge my payment method for monthly invoices per the terms in §3 of the agreement.</>
+            }
           </span>
         </label>
       </div>
@@ -1131,7 +1155,7 @@ const radioRow = (selected: boolean): React.CSSProperties => ({
   background: selected ? '#FFF8F4' : '#fff',
 });
 
-function StepReview({ draft, onJumpTo, sigDataUrl }: { draft: Draft; onJumpTo: (step: number) => void; sigDataUrl: string }) {
+function StepReview({ draft, onJumpTo, sigDataUrl, isRefresh }: { draft: Draft; onJumpTo: (step: number) => void; sigDataUrl: string; isRefresh?: boolean }) {
   const declared = Number(draft.insuranceDeclaredValue) || 0;
   const declaredMonthly = Math.max(300, Math.round((declared / 100000) * 300 * 100) / 100);
   const insuranceLabel = draft.insuranceChoice === 'own_policy'
@@ -1179,7 +1203,9 @@ function StepReview({ draft, onJumpTo, sigDataUrl }: { draft: Draft; onJumpTo: (
       </ReviewCard>
 
       <ReviewCard title="Payment" onEdit={() => onJumpTo(4)}>
-        <KV k="Authorized" v={draft.paymentAuthorized ? 'Yes — Paymnt.io setup confirmed' : 'Not confirmed'} />
+        <KV k="Authorized" v={draft.paymentAuthorized
+          ? (isRefresh ? 'Yes — payment method on file confirmed up to date' : 'Yes — Paymnt.io setup confirmed')
+          : 'Not confirmed'} />
       </ReviewCard>
 
       <ReviewCard title="Tax & Documents" onEdit={() => onJumpTo(5)}>
