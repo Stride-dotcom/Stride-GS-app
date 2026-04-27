@@ -1,5 +1,18 @@
 /**
- * CreateDeliveryOrderModal — Phase 2c (expanded) — v3 2026-04-25 PST
+ * CreateDeliveryOrderModal — Phase 2c (expanded) — v4 2026-04-26 PST
+ *   v4: Tax-exemption awareness (Task 8a). On client select, fetch
+ *       tax_exempt / reason / cert_expires / tax_rate_pct from
+ *       Supabase clients. Shows a green "✓ Tax-exempt" chip for
+ *       wholesale customers (the common case) or an amber "⚠ Tax
+ *       applies" chip for direct-to-consumer. When non-exempt, the
+ *       Pricing Summary adds a Subtotal + Sales Tax line above the
+ *       Estimated Total, and order_total is now grand-total
+ *       (subtotal + tax). Snapshots tax_amount / tax_rate_pct /
+ *       customer_tax_exempt onto every dt_orders insert/update so
+ *       the historical audit + future billing-ledger writer (Task
+ *       8b) has the values frozen at order-creation time. v1 does
+ *       not split per-line by service_catalog.taxable — the entire
+ *       DO is treated as one taxable delivery service.
  *   v3: Valuation coverage + service_catalog rewire —
  *       • Required Valuation Coverage selector for delivery / pickup /
  *         pickup+delivery modes (NOT service-only). Sources from
@@ -559,6 +572,41 @@ export function CreateDeliveryOrderModal({
   useEffect(() => { if (autoClient && !clientName) setClientName(autoClient); }, [autoClient]);
   const clientSheetId = apiClients.find(c => c.name === clientName)?.spreadsheetId || '';
 
+  // ── Tax info for the selected client (Task 8a) ──────────────────────────
+  // Most clients are wholesale resellers (tax_exempt=true) and pay no sales
+  // tax. For direct-to-consumer customers we compute tax = subtotal × rate
+  // and roll it into order_total. Snapshot the exemption + rate onto the
+  // dt_orders row so the historical audit shows what was applied at the
+  // moment of creation, even if the customer's status later changes.
+  interface ClientTaxInfo {
+    taxExempt: boolean;
+    taxExemptReason: string | null;
+    resaleCertExpires: string | null;
+    resaleCertUrl: string | null;
+    taxRatePct: number;
+  }
+  const [clientTaxInfo, setClientTaxInfo] = useState<ClientTaxInfo | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    if (!clientSheetId) { setClientTaxInfo(null); return; }
+    supabase.from('clients')
+      .select('tax_exempt, tax_exempt_reason, resale_cert_expires, resale_cert_url, tax_rate_pct')
+      .eq('spreadsheet_id', clientSheetId)
+      .maybeSingle()
+      .then(({ data }) => {
+        if (cancelled) return;
+        if (!data) { setClientTaxInfo(null); return; }
+        setClientTaxInfo({
+          taxExempt: data.tax_exempt !== false, // default true if missing
+          taxExemptReason: data.tax_exempt_reason || null,
+          resaleCertExpires: data.resale_cert_expires || null,
+          resaleCertUrl: data.resale_cert_url || null,
+          taxRatePct: data.tax_rate_pct != null ? Number(data.tax_rate_pct) : 10.1,
+        });
+      });
+    return () => { cancelled = true; };
+  }, [clientSheetId]);
+
   // ── Address Book ────────────────────────────────────────────────────────
   const [addressBook, setAddressBook] = useState<AddressBookContact[]>([]);
   useEffect(() => {
@@ -895,10 +943,29 @@ export function CreateDeliveryOrderModal({
   // Coverage applies to every order mode that physically moves items —
   // delivery, pickup, and pickup_and_delivery. service_only is excluded by
   // the surrounding `mode !== 'service_only'` checks in the JSX.
-  const orderTotal = useMemo(() => {
+  const subtotalBeforeTax = useMemo(() => {
     if (baseFee == null) return null;
     return baseFee + pickupLegFee + extraItemsFee + accessorialsTotal + coverageCharge;
   }, [baseFee, pickupLegFee, extraItemsFee, accessorialsTotal, coverageCharge]);
+
+  // Sales tax (Task 8a). For tax-exempt customers (the common case for this
+  // 3PL — most clients are wholesale resellers) tax is always 0 and the
+  // chip shows green. For non-exempt customers we apply the customer's
+  // saved rate to the entire pre-tax subtotal. v1 does NOT split per-line
+  // by service_catalog.taxable; the whole DO is treated as a taxable
+  // delivery service. Per-line gating lands with 8b (billing-ledger writer).
+  const taxAmount = useMemo(() => {
+    if (subtotalBeforeTax == null) return 0;
+    if (!clientTaxInfo || clientTaxInfo.taxExempt) return 0;
+    const rate = clientTaxInfo.taxRatePct;
+    if (!Number.isFinite(rate) || rate <= 0) return 0;
+    return subtotalBeforeTax * (rate / 100);
+  }, [subtotalBeforeTax, clientTaxInfo]);
+
+  const orderTotal = useMemo(() => {
+    if (subtotalBeforeTax == null) return null;
+    return subtotalBeforeTax + taxAmount;
+  }, [subtotalBeforeTax, taxAmount]);
 
   const isCallForQuote = zipForPricing.length === 5 && zone && zone.baseRate == null;
 
@@ -1468,6 +1535,16 @@ export function CreateDeliveryOrderModal({
     setSubmitting(true);
     setSubmitError(null);
 
+    // Tax snapshot fields written to every dt_orders insert/update so the
+    // order row is self-describing for audit + downstream billing (Task 8b).
+    // tax_amount is null (rather than 0) when the customer is exempt — the
+    // billing-ledger writer can short-circuit on null without doing math.
+    const taxFields = {
+      tax_amount: clientTaxInfo && !clientTaxInfo.taxExempt ? taxAmount : null,
+      tax_rate_pct: clientTaxInfo ? clientTaxInfo.taxRatePct : null,
+      customer_tax_exempt: clientTaxInfo ? clientTaxInfo.taxExempt : null,
+    };
+
     // Edit-existing-row path. When the modal was opened on an existing
     // draft (or auto-saved one mid-build), or on a real order via the
     // OrderPage "Edit Full Order" button, we UPDATE the existing row(s)
@@ -1536,6 +1613,7 @@ export function CreateDeliveryOrderModal({
           accessorials_json: accListPD.length > 0 ? accListPD : null,
           accessorials_total: accessorialsTotal,
           order_total: orderTotal,
+          ...taxFields,
         };
         // Promote → both legs get fresh real identifiers + flip status.
         if (wasDraftPD) {
@@ -1630,6 +1708,7 @@ export function CreateDeliveryOrderModal({
           declared_value: selectedCoverage?.calcType === 'percent_declared' ? (parseFloat(declaredValue) || null) : null,
           coverage_charge: coverageCharge || 0,
           updated_by_user: authUid2,
+          ...taxFields,
         };
         // Only the promote branch reassigns the identifier + bumps
         // review_status. Save-changes leaves both alone — preserves
@@ -1801,6 +1880,7 @@ export function CreateDeliveryOrderModal({
             pricing_override: !!(isCallForQuote || isPickupCallForQuote),
             pricing_notes: pdPricingNotes,
             ...coverageFields,
+            ...taxFields,
           })
           .select('id, dt_identifier')
           .single();
@@ -1946,6 +2026,7 @@ export function CreateDeliveryOrderModal({
                 ? 'Zone marked CALL FOR QUOTE — pricing requires manual review.'
                 : null,
             ...coverageFields,
+            ...taxFields,
           })
           .select('id, dt_identifier')
           .single();
@@ -2330,6 +2411,34 @@ export function CreateDeliveryOrderModal({
               onChange={setClientName}
               placeholder="Select client…"
             />
+            {clientName && clientTaxInfo && (
+              clientTaxInfo.taxExempt ? (
+                <div style={{
+                  marginTop: 8, padding: '8px 12px', borderRadius: 8,
+                  background: '#ECFDF5', border: '1px solid #A7F3D0',
+                  fontSize: 12, color: '#065F46', display: 'flex', alignItems: 'center', gap: 6,
+                }}>
+                  <span style={{ fontWeight: 700 }}>✓ Tax-exempt</span>
+                  <span>
+                    ({clientTaxInfo.taxExemptReason || 'Resale'}
+                    {clientTaxInfo.resaleCertExpires
+                      ? ` — cert valid through ${clientTaxInfo.resaleCertExpires}`
+                      : clientTaxInfo.resaleCertUrl
+                        ? ' — cert on file'
+                        : ' — no cert on file'})
+                  </span>
+                </div>
+              ) : (
+                <div style={{
+                  marginTop: 8, padding: '8px 12px', borderRadius: 8,
+                  background: '#FEF3C7', border: '1px solid #FCD34D',
+                  fontSize: 12, color: '#92400E', display: 'flex', alignItems: 'center', gap: 6,
+                }}>
+                  <span style={{ fontWeight: 700 }}>⚠ Tax applies</span>
+                  <span>({clientTaxInfo.taxRatePct.toFixed(3)}% sales tax — direct-to-consumer)</span>
+                </div>
+              )
+            )}
           </div>
 
           {/* Bill To — moved to step 2 right after Client */}
@@ -3053,6 +3162,22 @@ export function CreateDeliveryOrderModal({
                   </span>
                   <span style={{ fontWeight: 500 }}>{coverageCharge > 0 ? `$${coverageCharge.toFixed(2)}` : 'Included'}</span>
                 </div>
+              )}
+              {clientTaxInfo && !clientTaxInfo.taxExempt && subtotalBeforeTax != null && (
+                <>
+                  <div style={{
+                    display: 'flex', justifyContent: 'space-between',
+                    fontSize: 13, marginTop: 8, paddingTop: 8,
+                    borderTop: `1px dashed ${theme.colors.border}`,
+                  }}>
+                    <span>Subtotal</span>
+                    <span style={{ fontWeight: 500 }}>${subtotalBeforeTax.toFixed(2)}</span>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 4 }}>
+                    <span>Sales Tax ({clientTaxInfo.taxRatePct.toFixed(3)}%)</span>
+                    <span style={{ fontWeight: 500 }}>${taxAmount.toFixed(2)}</span>
+                  </div>
+                </>
               )}
               <div style={{
                 display: 'flex', justifyContent: 'space-between',
