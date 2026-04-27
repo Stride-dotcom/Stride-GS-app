@@ -8,6 +8,7 @@
  */
 import { useEffect, useMemo, useState } from 'react';
 import { X } from 'lucide-react';
+import { BtnSpinner } from '../ui/BtnSpinner';
 import { theme } from '../../styles/theme';
 import { useClients } from '../../hooks/useClients';
 import { useServiceCatalog, type CatalogService } from '../../hooks/useServiceCatalog';
@@ -393,12 +394,14 @@ export function AddChargeModal({ editing, defaultClientSheetId, onClose, onSaved
               background: canSave ? v2.colors.accent : v2.colors.border,
               border: 'none',
               color: canSave ? '#fff' : v2.colors.textMuted,
-              cursor: (canSave && !saving) ? 'pointer' : 'not-allowed',
+              cursor: saving ? 'progress' : (canSave ? 'pointer' : 'not-allowed'),
               fontSize: 11, fontWeight: 600, letterSpacing: '1.5px',
               textTransform: 'uppercase', fontFamily: 'inherit',
-              opacity: saving ? 0.6 : 1,
+              opacity: saving ? 0.85 : 1,
+              display: 'inline-flex', alignItems: 'center', gap: 6,
             }}
           >
+            {saving && <BtnSpinner size={11} color="#fff" />}
             {saving ? (isEdit ? 'Saving…' : 'Adding…') : (isEdit ? 'Save Changes' : 'Add Charge')}
           </button>
         </div>

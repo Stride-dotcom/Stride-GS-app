@@ -8,6 +8,7 @@
  */
 import React, { useState } from 'react';
 import { X, Send, Copy, CheckCircle2 } from 'lucide-react';
+import { BtnSpinner } from '../ui/BtnSpinner';
 import { theme } from '../../styles/theme';
 
 export interface IntakeEmailModalProps {
@@ -159,9 +160,9 @@ export function IntakeEmailModal({
           <button
             onClick={() => { void onSend(subject, templateBody); }}
             disabled={sending || !subject.trim()}
-            style={{ ...sendBtnStyle, opacity: sending || !subject.trim() ? 0.6 : 1, cursor: sending || !subject.trim() ? 'not-allowed' : 'pointer' }}
+            style={{ ...sendBtnStyle, opacity: sending ? 0.85 : (!subject.trim() ? 0.6 : 1), cursor: sending ? 'progress' : (!subject.trim() ? 'not-allowed' : 'pointer') }}
           >
-            <Send size={13} />
+            {sending ? <BtnSpinner size={13} color="#fff" /> : <Send size={13} />}
             {sending ? 'Sending…' : 'Send Email'}
           </button>
         </div>

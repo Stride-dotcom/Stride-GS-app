@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { KeyRound, X } from 'lucide-react';
 import { theme } from '../../styles/theme';
 import { useAuth } from '../../contexts/AuthContext';
+import { BtnSpinner } from '../ui/BtnSpinner';
 
 interface ChangePasswordModalProps {
   onClose: () => void;
@@ -157,9 +158,11 @@ export function ChangePasswordModal({ onClose }: ChangePasswordModalProps) {
                 background: loading ? theme.colors.textSecondary : theme.colors.orange,
                 border: 'none', borderRadius: theme.radii.md,
                 padding: '8px 18px', fontSize: 13, fontWeight: 600,
-                fontFamily: theme.typography.fontFamily, cursor: loading ? 'not-allowed' : 'pointer',
+                fontFamily: theme.typography.fontFamily, cursor: loading ? 'progress' : 'pointer',
                 color: '#fff',
+                display: 'inline-flex', alignItems: 'center', gap: 6,
               }}>
+                {loading && <BtnSpinner size={12} color="#fff" />}
                 {loading ? 'Saving…' : 'Save Password'}
               </button>
             </div>

@@ -9,7 +9,7 @@
  * Data: public.service_catalog via useServiceCatalog (Supabase Realtime).
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Plus, Search, Tag, Download, Share2, Check, Copy, X, ChevronDown, ChevronRight, ArrowUp, ArrowDown, RefreshCw } from 'lucide-react';
+import { Plus, Search, Tag, Download, Share2, Check, Copy, X, ChevronDown, ChevronRight, ArrowUp, ArrowDown, RefreshCw, Loader2 } from 'lucide-react';
 import { theme } from '../styles/theme';
 import { useServiceCatalog, type CatalogService, type ServiceCategory } from '../hooks/useServiceCatalog';
 import { ServiceRow } from '../components/pricelist/ServiceRow';
@@ -832,7 +832,8 @@ function PriceListShareModal({ createShare, onClose, onCreated }: {
 
         <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
           <button onClick={onClose} style={{ padding: '10px 20px', borderRadius: v2.radius.button, border: `1px solid ${v2.colors.border}`, background: 'transparent', color: v2.colors.textSecondary, fontSize: 11, fontWeight: 600, letterSpacing: '1.5px', textTransform: 'uppercase', cursor: 'pointer', fontFamily: 'inherit' }}>Cancel</button>
-          <button onClick={handleGenerate} disabled={saving || !canGenerate} style={{ padding: '10px 24px', borderRadius: v2.radius.button, border: 'none', background: (saving || !canGenerate) ? v2.colors.textMuted : v2.colors.accent, color: '#fff', fontSize: 11, fontWeight: 600, letterSpacing: '1.5px', textTransform: 'uppercase', cursor: (saving || !canGenerate) ? 'not-allowed' : 'pointer', fontFamily: 'inherit' }}>
+          <button onClick={handleGenerate} disabled={saving || !canGenerate} style={{ padding: '10px 24px', borderRadius: v2.radius.button, border: 'none', background: (saving || !canGenerate) ? v2.colors.textMuted : v2.colors.accent, color: '#fff', fontSize: 11, fontWeight: 600, letterSpacing: '1.5px', textTransform: 'uppercase', cursor: saving ? 'progress' : ((!canGenerate) ? 'not-allowed' : 'pointer'), fontFamily: 'inherit', display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+            {saving && <Loader2 size={12} style={{ animation: 'pricelist-bulk-spin 0.8s linear infinite' }} />}
             {saving ? 'Generating…' : 'Generate Link'}
           </button>
         </div>

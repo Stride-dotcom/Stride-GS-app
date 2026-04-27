@@ -834,9 +834,11 @@ export function OnboardClientModal({ mode = 'create', existingClient = null, all
                   </button>
                   <button
                     onClick={handleSubmitClick}
-                    style={{ padding: '9px 24px', fontSize: 13, fontWeight: 600, border: 'none', borderRadius: 8, background: theme.colors.orange, color: '#fff', cursor: 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', gap: 6 }}
+                    disabled={submitting}
+                    style={{ padding: '9px 24px', fontSize: 13, fontWeight: 600, border: 'none', borderRadius: 8, background: theme.colors.orange, color: '#fff', cursor: submitting ? 'progress' : 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', gap: 6, opacity: submitting ? 0.85 : 1 }}
                   >
-                    <Check size={15} /> Retry
+                    {submitting ? <Loader2 size={15} style={{ animation: 'spin 1s linear infinite' }} /> : <Check size={15} />}
+                    {submitting ? 'Retrying…' : 'Retry'}
                   </button>
                 </div>
               </>

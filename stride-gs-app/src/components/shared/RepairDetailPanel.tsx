@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { X, Wrench, Package, ClipboardList, CheckCircle2, XCircle, AlertTriangle, Send, Loader2, Truck, Play, Pencil, MapPin, Plus, Trash2, Undo2 } from 'lucide-react';
+import { BtnSpinner } from '../ui/BtnSpinner';
 import { TabbedDetailPanel, type TabbedDetailPanelTab } from './TabbedDetailPanel';
 import { EntityPage } from './EntityPage';
 import { DriveFoldersList, type DriveFolderLink } from './DriveFoldersList';
@@ -1642,33 +1643,45 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
               if (resp.ok && resp.data?.success) { setEffectiveStatus('Cancelled'); onRepairUpdated?.(); }
             } finally { setSubmitting(false); }
           }
-        }} style={rpLight}>Cancel Repair</button>
+        }} disabled={submitting} style={{ ...rpLight, opacity: submitting ? 0.6 : 1, cursor: submitting ? 'progress' : 'pointer' }}>
+          {submitting && <BtnSpinner size={11} />} Cancel Repair
+        </button>
       )}
       {/* Reopen — admin/staff on Complete or In Progress */}
       {canStaffEdit && (s === 'Complete' || s === 'In Progress') && (
-        <button onClick={handleReopenRepairClick} style={rpLight}>Reopen</button>
+        <button onClick={handleReopenRepairClick} disabled={submitting} style={{ ...rpLight, opacity: submitting ? 0.6 : 1, cursor: submitting ? 'progress' : 'pointer' }}>
+          {submitting && <BtnSpinner size={11} />} Reopen
+        </button>
       )}
       {/* State-aware primary actions */}
       {s === 'Pending Quote' && (
-        <button onClick={handleSendQuote} disabled={submitting} style={rpOrange}>
-          Send Quote
+        <button onClick={handleSendQuote} disabled={submitting} style={{ ...rpOrange, opacity: submitting ? 0.6 : 1, cursor: submitting ? 'progress' : 'pointer' }}>
+          {submitting && <BtnSpinner size={11} color="#fff" />} Send Quote
         </button>
       )}
       {s === 'Quote Sent' && (
         <>
-          <button onClick={() => handleRespond('Decline')} disabled={submitting} style={rpRed}>Decline</button>
-          <button onClick={() => handleRespond('Approve')} disabled={submitting} style={rpGreen}>Approve</button>
+          <button onClick={() => handleRespond('Decline')} disabled={submitting} style={{ ...rpRed, opacity: submitting ? 0.6 : 1, cursor: submitting ? 'progress' : 'pointer' }}>
+            {submitting && <BtnSpinner size={11} color="#fff" />} Decline
+          </button>
+          <button onClick={() => handleRespond('Approve')} disabled={submitting} style={{ ...rpGreen, opacity: submitting ? 0.6 : 1, cursor: submitting ? 'progress' : 'pointer' }}>
+            {submitting && <BtnSpinner size={11} color="#fff" />} Approve
+          </button>
         </>
       )}
       {s === 'Approved' && canStaffEdit && (
-        <button onClick={handleStartRepair} disabled={submitting} style={rpOrange}>
-          <Play size={13} /> Start Repair
+        <button onClick={handleStartRepair} disabled={submitting} style={{ ...rpOrange, opacity: submitting ? 0.6 : 1, cursor: submitting ? 'progress' : 'pointer' }}>
+          {submitting ? <BtnSpinner size={11} color="#fff" /> : <Play size={13} />} Start Repair
         </button>
       )}
       {s === 'In Progress' && (
         <>
-          <button onClick={async () => handleResult('fail')} disabled={submitting} style={rpRed}>Failed</button>
-          <button onClick={async () => handleResult('pass')} disabled={submitting} style={rpGreen}>Complete</button>
+          <button onClick={async () => handleResult('fail')} disabled={submitting} style={{ ...rpRed, opacity: submitting ? 0.6 : 1, cursor: submitting ? 'progress' : 'pointer' }}>
+            {submitting && <BtnSpinner size={11} color="#fff" />} Failed
+          </button>
+          <button onClick={async () => handleResult('pass')} disabled={submitting} style={{ ...rpGreen, opacity: submitting ? 0.6 : 1, cursor: submitting ? 'progress' : 'pointer' }}>
+            {submitting && <BtnSpinner size={11} color="#fff" />} Complete
+          </button>
         </>
       )}
       {/* Regenerate Work Order — In Progress / Complete */}

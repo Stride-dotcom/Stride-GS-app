@@ -1,5 +1,6 @@
 import React, { useState, useCallback, useMemo, useEffect } from 'react';
 import { X, Package, MapPin, CheckCircle2, XCircle, AlertTriangle, FolderOpen, Loader2, Play, ExternalLink, Truck, Wrench, Save, DollarSign, Pencil, FileText, MoreHorizontal } from 'lucide-react';
+import { BtnSpinner } from '../ui/BtnSpinner';
 import { FolderButton } from './FolderButton';
 import { DeepLink } from './DeepLink';
 import { TabbedDetailPanel, type TabbedDetailPanelTab } from './TabbedDetailPanel';
@@ -1091,14 +1092,14 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
               disabled={submitting}
               style={{ flex: 1, height: 50, background: '#16A34A', color: '#fff', borderRadius: 12, border: 'none', fontSize: 15, fontWeight: 600, cursor: submitting ? 'progress' : 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, minHeight: 44, opacity: submitting ? 0.7 : 1 }}
             >
-              <CheckCircle2 size={17} /> Pass
+              {submitting ? <BtnSpinner size={15} color="#fff" /> : <CheckCircle2 size={17} />} {submitting ? 'Working…' : 'Pass'}
             </button>
             <button
               onClick={() => handleResult('fail')}
               disabled={submitting}
               style={{ flex: 1, height: 50, background: 'none', color: '#DC2626', borderRadius: 12, border: '2px solid #DC2626', fontSize: 15, fontWeight: 600, cursor: submitting ? 'progress' : 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, minHeight: 44, opacity: submitting ? 0.7 : 1 }}
             >
-              <XCircle size={17} /> Fail
+              {submitting ? <BtnSpinner size={15} /> : <XCircle size={17} />} {submitting ? 'Working…' : 'Fail'}
             </button>
             <button
               onClick={() => setOverflowOpen(o => !o)}
@@ -1381,10 +1382,10 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
       {showPassFail && (
         <>
           <button onClick={async () => handleResult('fail')} disabled={submitting} style={{ ...tkRed, opacity: submitting ? 0.6 : 1, cursor: submitting ? 'progress' : 'pointer' }}>
-            <XCircle size={13} /> Fail
+            {submitting ? <BtnSpinner size={11} color="#fff" /> : <XCircle size={13} />} Fail
           </button>
           <button onClick={async () => handleResult('pass')} disabled={submitting} style={{ ...tkGreen, opacity: submitting ? 0.6 : 1, cursor: submitting ? 'progress' : 'pointer' }}>
-            <CheckCircle2 size={13} /> Pass
+            {submitting ? <BtnSpinner size={11} color="#fff" /> : <CheckCircle2 size={13} />} Pass
           </button>
         </>
       )}

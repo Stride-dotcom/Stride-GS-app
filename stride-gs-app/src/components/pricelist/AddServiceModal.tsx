@@ -10,7 +10,7 @@
  *                     spin up a delivery add-on directly from this modal.
  */
 import { useState } from 'react';
-import { X, Clock, Truck } from 'lucide-react';
+import { X, Clock, Truck, Loader2 } from 'lucide-react';
 import { theme } from '../../styles/theme';
 import type {
   NewServiceInput, ServiceCategory, ServiceBilling, ServiceUnit, ClassRates, ClassTimes,
@@ -374,13 +374,16 @@ export function AddServiceModal({ existingCodes, nextDisplayOrder, onClose, onCr
               background: canSubmit ? v2.colors.accent : v2.colors.border,
               border: 'none',
               color: canSubmit ? '#fff' : v2.colors.textMuted,
-              cursor: canSubmit ? 'pointer' : 'not-allowed',
+              cursor: saving ? 'progress' : (canSubmit ? 'pointer' : 'not-allowed'),
               fontSize: 11, fontWeight: 600, letterSpacing: '1.5px',
               textTransform: 'uppercase', fontFamily: 'inherit',
+              display: 'inline-flex', alignItems: 'center', gap: 6,
             }}
           >
+            {saving && <Loader2 size={12} style={{ animation: 'add-service-spin 0.8s linear infinite' }} />}
             {saving ? 'Creating…' : 'Create'}
           </button>
+          <style>{`@keyframes add-service-spin { to { transform: rotate(360deg); } }`}</style>
         </div>
       </div>
     </>

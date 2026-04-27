@@ -17,6 +17,7 @@
  */
 import { useMemo, useState } from 'react';
 import { Send, Trash2, Info, Lock, AlertTriangle } from 'lucide-react';
+import { BtnSpinner } from '../ui/BtnSpinner';
 import { theme } from '../../styles/theme';
 import { useAuth } from '../../contexts/AuthContext';
 import {
@@ -252,7 +253,7 @@ export function NotesSection({ entityType, entityId, itemId, composerOnly, initi
               fontFamily: 'inherit',
             }}
           >
-            <Send size={12} />
+            {sending ? <BtnSpinner size={12} color="#fff" /> : <Send size={12} />}
             {sending ? 'Saving…' : (isInternalMode ? 'Save internal' : 'Save')}
           </button>
         </div>

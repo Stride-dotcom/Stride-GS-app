@@ -23,6 +23,7 @@ import { PriceList } from './PriceList';
 import { useUsers } from '../hooks/useUsers';
 import type { ApiUser } from '../lib/api';
 import { theme } from '../styles/theme';
+import { BtnSpinner } from '../components/ui/BtnSpinner';
 import { WriteButton } from '../components/shared/WriteButton';
 import { QBOConnect } from '../components/settings/QBOConnect';
 import { IntakesPanel } from '../components/settings/IntakesPanel';
@@ -3160,8 +3161,9 @@ export function Settings() {
                           setEditSaving(false);
                           if (res.success) { setEditingUser(null); setDeleteConfirm(false); }
                           else { setEditError(res.error || 'Delete failed'); setDeleteConfirm(false); }
-                        }} disabled={editSaving} style={{ padding: '5px 12px', fontSize: 11, fontWeight: 600, border: 'none', borderRadius: 6, background: '#DC2626', color: '#fff', cursor: 'pointer', fontFamily: 'inherit' }}>
-                          Yes, Delete
+                        }} disabled={editSaving} style={{ padding: '5px 12px', fontSize: 11, fontWeight: 600, border: 'none', borderRadius: 6, background: '#DC2626', color: '#fff', cursor: editSaving ? 'progress' : 'pointer', fontFamily: 'inherit', display: 'inline-flex', alignItems: 'center', gap: 5, opacity: editSaving ? 0.85 : 1 }}>
+                          {editSaving && <BtnSpinner size={11} color="#fff" />}
+                          {editSaving ? 'Deleting…' : 'Yes, Delete'}
                         </button>
                         <button onClick={() => setDeleteConfirm(false)} style={{ padding: '5px 12px', fontSize: 11, border: `1px solid ${theme.colors.border}`, borderRadius: 6, background: '#fff', cursor: 'pointer', fontFamily: 'inherit', color: theme.colors.textSecondary }}>
                           No
