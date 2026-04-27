@@ -369,6 +369,7 @@ export function PublicServiceRequest() {
         // Contact (single-leg). For P+D, anon submission collapses to a
         // single dt_orders row — staff splits into linked pair on review.
         contact_name: contactSeed.name,
+        contact_company: contactCompany.trim() || null,
         contact_address: contactSeed.address || null,
         contact_city: contactSeed.city || null,
         contact_state: contactSeed.state || null,
@@ -435,6 +436,17 @@ export function PublicServiceRequest() {
       }
 
       setSuccess({ identifier: (orderRow as { dt_identifier: string }).dt_identifier });
+
+      // Fire-and-forget submitter confirmation + internal alert. The
+      // function uses the service role to read the order/items + the
+      // public_form_settings.alert_emails list and dispatches both
+      // emails via GAS sendRawEmail. We don't block the success state
+      // on it — failure to email shouldn't change what the submitter
+      // sees, and admins will see the order in the Review Queue
+      // regardless.
+      void supabase.functions
+        .invoke('notify-public-request', { body: { orderId: (orderRow as { id: string }).id } })
+        .catch(err => console.warn('[public-service-request] notify-public-request failed:', err));
     } catch (e) {
       setSubmitError(e instanceof Error ? e.message : String(e));
     } finally {
