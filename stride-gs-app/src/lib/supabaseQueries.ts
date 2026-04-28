@@ -1828,8 +1828,14 @@ export async function fetchDtOrdersFromSupabase(
           case 'rejected':
             appStatusName = 'Rejected'; appStatusCategory = 'exception'; break;
           case 'approved':
+            // Approved AND pushed → it's just waiting on the next DT
+            // sync to fill in a real status_id. That's not a "review"
+            // bucket anymore — nothing for a human to do. Show under
+            // OPEN. Approved-and-NOT-pushed still goes to review since
+            // a reviewer needs to click Push to DT.
             appStatusName = row.pushed_to_dt_at ? 'Awaiting DT Sync' : 'Ready to Push';
-            appStatusCategory = 'review'; break;
+            appStatusCategory = row.pushed_to_dt_at ? 'open' : 'review';
+            break;
           default:
             appStatusName = '—';
         }
@@ -1969,7 +1975,10 @@ export async function fetchDtOrderByIdFromSupabase(
         case 'pending_review':     appStatusName = 'Pending Review';   appStatusCategory = 'review';    break;
         case 'revision_requested': appStatusName = 'Revision Needed';  appStatusCategory = 'review';    break;
         case 'rejected':           appStatusName = 'Rejected';         appStatusCategory = 'exception'; break;
-        case 'approved':           appStatusName = row.pushed_to_dt_at ? 'Awaiting DT Sync' : 'Ready to Push'; appStatusCategory = 'review'; break;
+        case 'approved':
+          appStatusName = row.pushed_to_dt_at ? 'Awaiting DT Sync' : 'Ready to Push';
+          appStatusCategory = row.pushed_to_dt_at ? 'open' : 'review';
+          break;
         default:                   appStatusName = '—';
       }
     }
