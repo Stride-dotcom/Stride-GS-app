@@ -38,6 +38,7 @@ import {
 } from '../hooks/useClientIntake';
 import { generateSignedTcPdf } from '../lib/intakePdf';
 import { postEmailSignedAgreement } from '../lib/api';
+import { useIsMobile } from '../hooks/useIsMobile';
 
 // Style tokens — copied verbatim from PublicRates so the public-side
 // pages stay visually coherent without pulling the authed app's theme.
@@ -130,6 +131,11 @@ const EMPTY_DRAFT: Draft = {
 
 export function ClientIntake({ linkId }: Props) {
   const { status, link } = useIntakeLink(linkId);
+  // Mobile-aware shell padding. Phones get tighter outer + inner padding so
+  // input fields aren't squeezed by 24+28 = 52px of horizontal chrome.
+  const { isMobile } = useIsMobile();
+  const shellPadding = isMobile ? 12 : 24;
+  const cardPadding = isMobile ? 16 : 28;
 
   // Refresh mode: link has client_spreadsheet_id → fetch existing data
   // and pre-fill the draft. The form layout is identical; only copy and
@@ -463,7 +469,7 @@ export function ClientIntake({ linkId }: Props) {
   };
 
   return (
-    <div style={pageShell}>
+    <div style={{ ...pageShell, padding: shellPadding }}>
       <Header
         title="Client Onboarding"
         subtitle={link?.prospectName ? `Welcome, ${link.prospectName}` : undefined}
@@ -490,7 +496,7 @@ export function ClientIntake({ linkId }: Props) {
       )}
 
       {/* Step card */}
-      <div style={cardWrap}>
+      <div style={{ ...cardWrap, padding: cardPadding }}>
         {step === 1 && <StepBusiness draft={draft} setDraft={setDraft} isRefresh={isRefresh} />}
         {step === 2 && <StepBilling  draft={draft} setDraft={setDraft} isRefresh={isRefresh} />}
         {step === 3 && (
@@ -620,10 +626,11 @@ function CenteredMessage({ children }: { children: React.ReactNode }) {
 // ─── Step components ─────────────────────────────────────────────────
 
 function StepBusiness({ draft, setDraft, isRefresh }: StepProps) {
+  const { isMobile } = useIsMobile();
   return (
     <div>
       <StepTitle kicker="Step 1" title={isRefresh ? 'Confirm your business info' : 'Tell us about your business'} />
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: 14 }}>
         <Field label="Business name *" span={2}>
           <Input value={draft.businessName} onChange={v => setDraft(d => ({ ...d, businessName: v }))} placeholder="Acme Furniture Co." />
         </Field>
@@ -648,6 +655,7 @@ function StepBusiness({ draft, setDraft, isRefresh }: StepProps) {
 }
 
 function StepBilling({ draft, setDraft, isRefresh }: StepProps) {
+  const { isMobile } = useIsMobile();
   const add = () => setDraft(d => ({ ...d, notificationContacts: [...d.notificationContacts, { name: '', email: '' }] }));
   const setAt = (i: number, patch: Partial<NotifyContact>) => setDraft(d => ({
     ...d,
@@ -662,7 +670,7 @@ function StepBilling({ draft, setDraft, isRefresh }: StepProps) {
           <strong style={{ color: TEXT, fontWeight: 600 }}>Heads up:</strong> the contacts you submit here <em>replace</em> the current alert list — adding someone won't merge, removing someone won't keep them as a fallback.
         </div>
       )}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14, marginBottom: 18 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: 14, marginBottom: 18 }}>
         <Field label="Billing contact name">
           <Input value={draft.billingContactName} onChange={v => setDraft(d => ({ ...d, billingContactName: v }))} placeholder="Optional — defaults to main contact" />
         </Field>
@@ -704,13 +712,30 @@ function StepBilling({ draft, setDraft, isRefresh }: StepProps) {
             No additional alert emails — only the main contact above will receive warehouse alerts.
           </div>
         ) : (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: isMobile ? 12 : 8 }}>
             {draft.notificationContacts.map((c, i) => (
-              <div key={i} style={{ display: 'grid', gridTemplateColumns: '1fr 1.4fr auto', gap: 8, alignItems: 'center' }}>
+              <div key={i} style={{
+                display: 'grid',
+                // Phone: stack name + email vertically full-width, with a delete button on its own
+                // row (so the touch target isn't smashed against the email field). Desktop keeps
+                // the inline 3-col layout it had before.
+                gridTemplateColumns: isMobile ? '1fr' : '1fr 1.4fr auto',
+                gap: 8,
+                alignItems: isMobile ? 'stretch' : 'center',
+                background: isMobile ? BG_CARD : 'transparent',
+                padding: isMobile ? 10 : 0,
+                borderRadius: isMobile ? 10 : 0,
+                border: isMobile ? `1px solid ${BORDER}` : 'none',
+              }}>
                 <Input value={c.name} onChange={v => setAt(i, { name: v })} placeholder="Name (optional)" />
                 <Input type="email" value={c.email} onChange={v => setAt(i, { email: v })} placeholder="alerts@company.com" />
-                <button onClick={() => removeAt(i)} style={removeBtn} aria-label="Remove">
-                  <Trash2 size={13} />
+                <button onClick={() => removeAt(i)} style={{
+                  ...removeBtn,
+                  width: isMobile ? '100%' : 'auto',
+                  display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+                  fontSize: 12, padding: isMobile ? '8px 12px' : 8,
+                }} aria-label="Remove">
+                  <Trash2 size={13} />{isMobile ? <span>Remove</span> : null}
                 </button>
               </div>
             ))}
@@ -729,6 +754,7 @@ function StepTerms({ draft, setDraft, tcHtml, tcLoading, coverageNotes, sig, sig
   sigHasInk: boolean;
   setSigHasInk: (v: boolean) => void;
 }) {
+  const { isMobile } = useIsMobile();
   const sections = useMemo(() => parseTcSections(tcHtml ?? ''), [tcHtml]);
   return (
     <div>
@@ -745,7 +771,7 @@ function StepTerms({ draft, setDraft, tcHtml, tcLoading, coverageNotes, sig, sig
         <div style={{ fontSize: 12, color: TEXT_SEC, marginBottom: 10, lineHeight: 1.5 }}>
           This is for your goods while they sit in our warehouse (fire, water, burglary, acts of God, etc). Pick one. You can read the full terms in §2.B of the agreement below.
         </div>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: 10 }}>
           <InsuranceCard
             selected={draft.insuranceChoice === 'own_policy'}
             onSelect={() => setDraft(d => ({ ...d, insuranceChoice: 'own_policy' }))}
@@ -1388,9 +1414,24 @@ function ReviewCard({ title, onEdit, children }: { title: string; onEdit: () => 
 }
 
 function KV({ k, v }: { k: string; v: React.ReactNode }) {
+  const { isMobile } = useIsMobile();
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: '140px 1fr', gap: 10, fontSize: 13 }}>
-      <div style={{ color: TEXT_MUT, fontWeight: 500 }}>{k}</div>
+    <div style={{
+      display: 'grid',
+      // Phone: stack label above value with a tighter gap so review cards
+      // don't blow up vertically. Desktop keeps the side-by-side layout.
+      gridTemplateColumns: isMobile ? '1fr' : '140px 1fr',
+      gap: isMobile ? 2 : 10,
+      fontSize: 13,
+      paddingBottom: isMobile ? 6 : 0,
+    }}>
+      <div style={{
+        color: TEXT_MUT,
+        fontWeight: 500,
+        fontSize: isMobile ? 11 : 13,
+        textTransform: isMobile ? 'uppercase' : 'none',
+        letterSpacing: isMobile ? '0.5px' : 'normal',
+      }}>{k}</div>
       <div style={{ color: TEXT }}>{v || <span style={{ color: TEXT_MUT }}>—</span>}</div>
     </div>
   );
