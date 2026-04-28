@@ -1,5 +1,11 @@
 /**
- * dt-push-order — Supabase Edge Function (Phase 2c) — v16 2026-04-26 PST
+ * dt-push-order — Supabase Edge Function (Phase 2c) — v17 2026-04-27 PST
+ * v17: Items now include a <location> tag pulled from extras.location
+ *      (warehouse bin/shelf the inventory item is stored at). Lets
+ *      drivers/dispatchers see where the piece came from on the DT
+ *      side without having to cross-reference Stride.
+ *
+ * v16 2026-04-26 PST:
  * v16: Restored the STRIDE LOGISTICS account fallback for unmapped
  *      tenant_ids. The v15 rewrite accidentally dropped the
  *      session-80 fix and reverted resolveAccountName() to the
@@ -243,7 +249,15 @@ function buildOrderXml(
     const qty = Math.abs(Number(it.quantity) || 1);
     const desc = buildItemDesc(it, isPickupLeg, order.sidemark || undefined, order.client_reference || undefined);
     const cubeVal = it.cubic_feet != null ? `\n      <cube>${it.cubic_feet}</cube>` : '';
-    return `    <item>\n      <item_id>${xmlEscape(it.dt_item_code || it.id)}</item_id>\n      <description>${xmlEscape(desc)}</description>\n      <quantity>${qty}</quantity>${cubeVal}\n    </item>`;
+    // Warehouse location for the piece — drives where dispatch/
+    // drivers find it before loading. Stored on extras.location by
+    // the React modal when an inventory item is added to the order;
+    // we omit the tag entirely when no location is on file rather
+    // than emit an empty <location/> that DT might reject.
+    const extras = (it.extras || {}) as Record<string, unknown>;
+    const locationRaw = (extras.location ?? '') as string;
+    const locationVal = locationRaw ? `\n      <location>${xmlEscape(locationRaw)}</location>` : '';
+    return `    <item>\n      <item_id>${xmlEscape(it.dt_item_code || it.id)}</item_id>\n      <description>${xmlEscape(desc)}</description>\n      <quantity>${qty}</quantity>${cubeVal}${locationVal}\n    </item>`;
   }).join('\n');
 
   const desc = buildOrderDescription(order, accountName, crossRefIdent, linkedDeliveryInfo);
