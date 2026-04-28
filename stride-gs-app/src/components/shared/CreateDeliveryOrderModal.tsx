@@ -1183,6 +1183,11 @@ export function CreateDeliveryOrderModal({
   // anything else → save-changes UPDATE preserving identifier + status)
   // and the Save Draft button enabled state.
   const originalReviewStatusRef = useRef<string | null>(null);
+  // Captured during the edit-order load; consumed by the late-
+  // resolve effect below once apiClients populates so the Client
+  // field doesn't blank out when Edit Full Order opens before
+  // apiClients has loaded.
+  const pendingTenantIdRef = useRef<string | null>(null);
   // For P+D edits: tracks the linked PICKUP leg's id so save/promote
   // can UPDATE both rows in lockstep. Loaded by the prefill effect
   // when the opened row is a 'pickup_and_delivery' delivery leg, OR
@@ -1232,7 +1237,12 @@ export function CreateDeliveryOrderModal({
       // because clientSheetId derives from clientName (line 578),
       // every "Still needed before submit: client" check fired and
       // Save Changes was disabled.
+      //
+      // Stash the tenant_id so a follow-up effect can resolve it
+      // once apiClients finishes loading. Without that, opening
+      // Edit before clients arrived left the field blank forever.
       if (r.tenant_id) {
+        pendingTenantIdRef.current = r.tenant_id as string;
         const matched = apiClients.find(c => c.spreadsheetId === r.tenant_id)?.name;
         if (matched) setClientName(matched);
       }
@@ -1341,6 +1351,23 @@ export function CreateDeliveryOrderModal({
     return () => { cancelled = true; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editOrderId]);
+
+  // Late-resolve the client name when apiClients finishes loading
+  // AFTER the edit-order load already ran. The load effect above
+  // tries to match the tenant_id against apiClients on mount, but
+  // when the modal opens during the apiClients fetch the list is
+  // still empty and the match silently fails. This effect re-runs
+  // whenever apiClients changes; it stops trying once a name has
+  // been set so it doesn't fight operator edits.
+  useEffect(() => {
+    if (!pendingTenantIdRef.current || clientName) return;
+    if (apiClients.length === 0) return;
+    const matched = apiClients.find(c => c.spreadsheetId === pendingTenantIdRef.current)?.name;
+    if (matched) {
+      setClientName(matched);
+      pendingTenantIdRef.current = null;
+    }
+  }, [apiClients, clientName]);
 
   // ── Save Draft ─────────────────────────────────────────────────────────
   // Persists the in-progress order as a dt_orders row with
