@@ -1,0 +1,1 @@
+import{o as e}from"./supabaseQueries-CtUTraQN.js";export{e as fetchClientsFromSupabase};
