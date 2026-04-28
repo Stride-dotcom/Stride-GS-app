@@ -4796,20 +4796,29 @@ export function postSendIntakeInvitation({
 }
 
 /**
- * Email a signed-agreement receipt to the prospect from the public
- * intake success screen. No auth guard on the GAS side.
+ * Email a signed-agreement receipt to the prospect. Uses the Supabase
+ * INTAKE_RECEIPT_CLIENT template (editable in Settings → Email Templates).
+ * No auth guard on the GAS side — anti-abuse is via linkId verification.
+ *
+ * Called automatically from ClientIntake.tsx after a successful submit
+ * (so every prospect gets a record in their inbox without clicking),
+ * AND from the success-screen "Email me a copy" button as a manual resend.
  */
-export function postEmailSignedAgreement({
-  linkId,
-  email,
-  businessName,
-}: {
+export interface EmailSignedAgreementPayload {
   linkId: string;
   email: string;
   businessName: string;
-}) {
+  contactName?: string;
+  signedAt?: string;            // ISO string
+  insuranceChoice?: string;     // 'own_policy' | 'stride_coverage' | 'eis_coverage' | ''
+  declaredValue?: number;
+  autoInspect?: boolean;
+  intakeId?: string;            // Supabase UUID of the client_intakes row — used as reference number
+}
+
+export function postEmailSignedAgreement(payload: EmailSignedAgreementPayload) {
   return apiPost<{ success: boolean }>(
     'emailSignedAgreement',
-    { linkId, email, businessName } as unknown as Record<string, unknown>
+    payload as unknown as Record<string, unknown>
   );
 }

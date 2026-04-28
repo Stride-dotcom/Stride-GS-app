@@ -154,6 +154,9 @@ export function ClientIntake({ linkId }: Props) {
   const [capturedSignatureData, setCapturedSignatureData] = useState('');
   const [emailReceiptSending, setEmailReceiptSending] = useState(false);
   const [emailReceiptSent, setEmailReceiptSent] = useState(false);
+  // Stash the just-submitted intake's UUID so the "Email me a copy" manual
+  // resend button passes the same reference number as the auto-fired email.
+  const [submittedIntakeId, setSubmittedIntakeId] = useState<string | undefined>(undefined);
 
   // Signature pad + ink flag — MUST be declared before any conditional
   // return below. Prior bug (session 77): these hooks lived after the
@@ -277,9 +280,17 @@ export function ClientIntake({ linkId }: Props) {
       setEmailReceiptSending(true);
       try {
         await postEmailSignedAgreement({
-          linkId:       linkId,
-          email:        draft.email,
-          businessName: draft.businessName,
+          linkId,
+          email:           draft.email,
+          businessName:    draft.businessName,
+          contactName:     draft.contactName,
+          signedAt:        new Date().toISOString(),
+          insuranceChoice: draft.insuranceChoice || '',
+          declaredValue:   draft.insuranceChoice === 'stride_coverage' && draft.insuranceDeclaredValue
+            ? Number(draft.insuranceDeclaredValue)
+            : 0,
+          autoInspect:     draft.autoInspect,
+          intakeId:        submittedIntakeId,
         });
         setEmailReceiptSent(true);
       } finally {
@@ -307,8 +318,15 @@ export function ClientIntake({ linkId }: Props) {
             </ol>
           </div>
 
+          {/* Confirmation receipt is auto-emailed to the prospect on submit
+              (handleSubmit). The "Resend" button below is for cases where the
+              prospect wants a second copy or didn't receive the first. */}
+          <div style={{ fontSize: 12, color: TEXT_MUT, marginTop: 18, textAlign: 'center' }}>
+            We've emailed a copy of your signed agreement to <strong style={{ color: TEXT }}>{draft.email}</strong>. Check your inbox (and spam folder if you don't see it).
+          </div>
+
           {/* Agreement copy actions */}
-          <div style={{ display: 'flex', gap: 12, justifyContent: 'center', flexWrap: 'wrap', marginTop: 28 }}>
+          <div style={{ display: 'flex', gap: 12, justifyContent: 'center', flexWrap: 'wrap', marginTop: 18 }}>
             <button
               onClick={handleDownload}
               style={{
@@ -335,11 +353,11 @@ export function ClientIntake({ linkId }: Props) {
                 }}
               >
                 {emailReceiptSending ? <Loader2 size={15} style={{ animation: 'spin 1s linear infinite' }} /> : <Mail size={15} />}
-                {emailReceiptSending ? 'Sending…' : 'Email me a copy'}
+                {emailReceiptSending ? 'Sending…' : 'Resend the email'}
               </button>
             ) : (
               <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '11px 22px', fontSize: 13, color: '#15803D', fontFamily: FONT }}>
-                <CheckCircle2 size={15} /> Receipt sent to {draft.email}
+                <CheckCircle2 size={15} /> Resent to {draft.email}
               </div>
             )}
           </div>
@@ -460,6 +478,32 @@ export function ClientIntake({ linkId }: Props) {
         setSubmitError(result.error);
       } else {
         setSubmitted(true);
+        // Fire the client-receipt email automatically. Every prospect should
+        // get a record of what they signed in their own inbox without having
+        // to click a button. This is intentionally fire-and-forget — the
+        // intake row is already persisted, so a transient GAS failure here
+        // shouldn't block the success screen. The "Email me a copy" button
+        // on the success screen acts as a manual resend if this first send
+        // bounces (or if the user wants a second copy at a different address).
+        const receiptIntakeId = 'id' in result ? (result as { id?: string }).id : undefined;
+        void postEmailSignedAgreement({
+          linkId,
+          email:           draft.email,
+          businessName:    draft.businessName,
+          contactName:     draft.contactName,
+          signedAt:        new Date().toISOString(),
+          insuranceChoice: draft.insuranceChoice || '',
+          declaredValue:   draft.insuranceChoice === 'stride_coverage' && draft.insuranceDeclaredValue
+            ? Number(draft.insuranceDeclaredValue)
+            : 0,
+          autoInspect:     draft.autoInspect,
+          intakeId:        receiptIntakeId,
+        }).catch(err => {
+          // Logged for ops visibility; never surfaced to the prospect.
+          console.warn('[intake] auto-receipt email failed (non-blocking):', err);
+        });
+        // Also stash the intake id so the manual resend button can pass it.
+        if (receiptIntakeId) setSubmittedIntakeId(receiptIntakeId);
       }
     } catch (e) {
       setSubmitError(e instanceof Error ? e.message : String(e));

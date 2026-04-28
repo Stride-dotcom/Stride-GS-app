@@ -1,5 +1,17 @@
 /* ===================================================
-   StrideAPI.gs — v38.138.1 — 2026-04-27 PST — sendRawEmail accepts optional replyTo
+   StrideAPI.gs — v38.139.0 — 2026-04-28 PST — Intake receipt uses INTAKE_RECEIPT_CLIENT template
+   v38.139.0: handleEmailSignedAgreement_ replaced its hardcoded HTML with a
+              call to api_sendTemplateEmail_("INTAKE_RECEIPT_CLIENT", …) so
+              the office can edit copy from Settings → Email Templates without
+              a deploy. Tokens added: {{CONTACT_NAME}} {{SIGNED_DATE}}
+              {{INSURANCE_LABEL}} {{INSURANCE_DETAIL}} {{AUTO_INSPECT_LABEL}}
+              {{INTAKE_REF}}. Coverage label/detail strings mirror the
+              React form's success screen verbatim. Reference number is the
+              first 8 chars of the intake UUID (or link_id fallback). The
+              Supabase link-check now matches by `link_id` (the public token)
+              instead of `id`, fixing a long-standing 'Invalid linkId'
+              false-positive when the React caller passed the link short token.
+              Service-role property fallback added.
    v38.138.1: handleSendRawEmail_ now accepts an optional `replyTo` field
               on its payload and passes it through to GmailApp.sendEmail.
               Used by the new notify-public-request Edge Function so the
@@ -35533,28 +35545,32 @@ function handleEmailSignedAgreement_(payload) {
   var linkId       = String(payload.linkId       || "").trim();
   var email        = String(payload.email        || "").trim();
   var businessName = String(payload.businessName || "").trim();
+  var contactName  = String(payload.contactName  || "").trim();
+  var signedAt     = String(payload.signedAt     || "").trim();
+  var insurance    = String(payload.insuranceChoice || "").trim();
+  var declared     = Number(payload.declaredValue) || 0;
+  var autoInspect  = payload.autoInspect === true;
+  var intakeId     = String(payload.intakeId || "").trim();
 
   if (!linkId)  return { success: false, error: "Missing linkId" };
   if (!email)   return { success: false, error: "Missing email" };
 
-  // Basic email format check
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
     return { success: false, error: "Invalid email address: " + email };
   }
 
-  // Anti-abuse: verify linkId exists in Supabase before sending
+  // Anti-abuse: verify linkId exists in Supabase before sending. Best-effort
+  // — if Supabase is unreachable we still send (the prospect already submitted
+  // a real intake and is owed their receipt).
   var supabaseUrl = prop_("SUPABASE_URL");
-  var supabaseKey = prop_("SUPABASE_SERVICE_KEY");
+  var supabaseKey = prop_("SUPABASE_SERVICE_ROLE_KEY") || prop_("SUPABASE_SERVICE_KEY");
   if (supabaseUrl && supabaseKey) {
     try {
       var checkResp = UrlFetchApp.fetch(
-        supabaseUrl + "/rest/v1/client_intake_links?id=eq." + encodeURIComponent(linkId) + "&select=id",
+        supabaseUrl + "/rest/v1/client_intake_links?link_id=eq." + encodeURIComponent(linkId) + "&select=link_id",
         {
           method: "GET",
-          headers: {
-            "apikey": supabaseKey,
-            "Authorization": "Bearer " + supabaseKey
-          },
+          headers: { "apikey": supabaseKey, "Authorization": "Bearer " + supabaseKey },
           muteHttpExceptions: true
         }
       );
@@ -35564,46 +35580,66 @@ function handleEmailSignedAgreement_(payload) {
         return { success: false, error: "Invalid linkId" };
       }
     } catch (e) {
-      // Supabase check failed — log but continue sending (best-effort)
       Logger.log("handleEmailSignedAgreement_: Supabase link check failed — " + e.message + " — proceeding anyway");
     }
   }
 
-  var displayName = businessName || "your business";
-  var subject     = "Your Signed Agreement is on File — Stride Logistics";
-  var bodyHtml    = '<!DOCTYPE html>' +
-    '<html><head><meta charset="UTF-8"/>' +
-    '<style>body{margin:0;padding:0;background:#F5F2EE;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;}' +
-    '.wrap{max-width:520px;margin:32px auto;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,0.08);}' +
-    '.hdr{background:#1C1C1C;padding:28px 36px;text-align:center;}' +
-    '.hdr .lm{display:inline-block;width:44px;height:44px;background:#E8692A;border-radius:9px;line-height:44px;font-size:24px;font-weight:800;color:#fff;margin-bottom:12px;}' +
-    '.hdr h1{margin:0;color:#fff;font-size:18px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;}' +
-    '.body{padding:32px 36px;}' +
-    '.check{text-align:center;font-size:48px;margin:0 0 20px;}' +
-    '.msg{font-size:15px;color:#333;line-height:1.65;margin:0 0 20px;}' +
-    '.footer{background:#F5F2EE;padding:18px 36px;text-align:center;}' +
-    '.footer p{margin:0;font-size:12px;color:#999;}' +
-    '</style></head><body>' +
-    '<div class="wrap">' +
-    '<div class="hdr"><div class="lm">S</div>' +
-    '<h1>Agreement Received</h1></div>' +
-    '<div class="body">' +
-    '<div class="check">✅</div>' +
-    '<p class="msg">Hi ' + displayName + ',</p>' +
-    '<p class="msg">Your signed Warehousing &amp; Delivery Agreement is now on file with Stride Logistics. ' +
-    'We\'ll be in touch shortly to complete your onboarding.</p>' +
-    '<p class="msg" style="font-size:13px;color:#666;">If you have any questions, reply to this email or contact us at ' +
-    '<a href="mailto:info@stridelogistics.com" style="color:#E8692A;">info@stridelogistics.com</a>.</p>' +
-    '</div>' +
-    '<div class="footer"><p>Stride Logistics · Kent, WA</p></div>' +
-    '</div></body></html>';
+  // Build display tokens. Coverage labels mirror those used in the React
+  // intake form so the email reads identically to the success screen.
+  var insuranceLabel = "—";
+  var insuranceDetail = "—";
+  if (insurance === "own_policy") {
+    insuranceLabel  = "My own policy";
+    insuranceDetail = "I will maintain my own insurance and name Stride as additional insured.";
+  } else if (insurance === "stride_coverage" || insurance === "eis_coverage") {
+    insuranceLabel  = "Stride's policy";
+    var monthly = Math.max(300, Math.round((declared / 100000) * 300 * 100) / 100);
+    insuranceDetail = declared > 0
+      ? "Added to Stride's policy — $" + declared.toLocaleString() + " declared, $" + monthly.toFixed(2) + "/mo (per T&C §2.B, $300 minimum)."
+      : "Added to Stride's policy ($300/mo minimum, per T&C §2.B).";
+  }
 
+  var signedDateLabel = signedAt
+    ? new Date(signedAt).toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" })
+    : new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" });
+
+  // Reference number — first 8 chars of intake UUID, uppercased. Falls back
+  // to a short link-id fragment if the React caller didn't pass intakeId.
+  var refNum = (intakeId || linkId).replace(/-/g, "").substring(0, 8).toUpperCase();
+
+  var tokens = {
+    "{{BUSINESS_NAME}}":       businessName || "your business",
+    "{{CONTACT_NAME}}":        contactName || "there",
+    "{{CONTACT_EMAIL}}":       email,
+    "{{SIGNED_DATE}}":         signedDateLabel,
+    "{{INSURANCE_LABEL}}":     insuranceLabel,
+    "{{INSURANCE_DETAIL}}":    insuranceDetail,
+    "{{AUTO_INSPECT_LABEL}}":  autoInspect ? "Opted in" : "Not opted in",
+    "{{INTAKE_REF}}":          refNum
+  };
+
+  // Send via the canonical template-email helper. Reads INTAKE_RECEIPT_CLIENT
+  // from email_templates (Supabase-first, MPL fallback) so the office can
+  // edit copy from Settings → Email Templates without a deploy.
+  var settings = { MASTER_SPREADSHEET_ID: prop_("MASTER_PRICE_LIST_SPREADSHEET_ID") || "" };
   try {
-    GmailApp.sendEmail(email, subject, "", { htmlBody: bodyHtml });
-    Logger.log("handleEmailSignedAgreement_: receipt sent to " + email + " (linkId=" + linkId + ")");
+    var res = api_sendTemplateEmail_(
+      settings,
+      "INTAKE_RECEIPT_CLIENT",
+      email,
+      "Your Signed Agreement is on File — Stride Logistics",
+      tokens,
+      null,
+      null
+    );
+    if (!res || !res.success) {
+      Logger.log("handleEmailSignedAgreement_: api_sendTemplateEmail_ failed — " + JSON.stringify(res));
+      return { success: false, error: (res && res.error) || "send failed" };
+    }
+    Logger.log("handleEmailSignedAgreement_: receipt sent to " + email + " (linkId=" + linkId + ", ref=" + refNum + ")");
     return { success: true };
   } catch (e) {
-    Logger.log("handleEmailSignedAgreement_: GmailApp.sendEmail failed — " + e.message);
+    Logger.log("handleEmailSignedAgreement_: send threw — " + e.message);
     return { success: false, error: "Failed to send receipt: " + e.message };
   }
 }
