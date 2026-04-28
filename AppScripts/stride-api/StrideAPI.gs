@@ -1,5 +1,15 @@
 /* ===================================================
-   StrideAPI.gs — v38.139.0 — 2026-04-28 PST — Intake receipt uses INTAKE_RECEIPT_CLIENT template
+   StrideAPI.gs — v38.140.0 — 2026-04-27 PST — Receiving doc column order fix
+   v38.140.0: Receiving PDF row builder was emitting Class + Location
+              columns the DOC_RECEIVING template no longer has, so values
+              landed in wrong cells (Reference column showed Qty value,
+              etc.). Fixed row builder to match template header order:
+              # | Item ID | Qty | Vendor | Description | Sidemark | Reference | Notes
+              Template header row also reordered in DOC_RECEIVING.txt
+              (was Reference at column 3, now between Sidemark and Notes
+              per Justin's request). Supabase email_templates.body
+              updated in-place via SQL; pushed via npm run push-templates.
+   v38.139.0: Intake receipt uses INTAKE_RECEIPT_CLIENT template
    v38.139.0: handleEmailSignedAgreement_ replaced its hardcoded HTML with a
               call to api_sendTemplateEmail_("INTAKE_RECEIPT_CLIENT", …) so
               the office can edit copy from Settings → Email Templates without
@@ -13648,6 +13658,12 @@ function handleCompleteShipment_(clientSheetId, payload) {
           // v38.11.0: Doc-template-specific tokens that differ from email tokens.
           // The DOC_RECEIVING template has its own table with headers already in
           // the HTML, so {{ITEMS_TABLE_ROWS}} is just <tr> rows (no <table> wrapper).
+          //
+          // Column order MUST match DOC_RECEIVING.txt template headers:
+          //   # | Item ID | Qty | Vendor | Description | Sidemark | Reference | Notes
+          // Justin reported the prior layout had Reference in column 3 and
+          // emitted Class + Location in two columns the template didn't have,
+          // so values landed in the wrong cells.
           var e = api_esc_;
           var docRows = "";
           for (var di = 0; di < items.length; di++) {
@@ -13659,9 +13675,8 @@ function handleCompleteShipment_(clientSheetId, payload) {
               '<td style="padding:5px 6px;font-size:10px;border-bottom:1px solid #E2E8F0;text-align:center;">' + (it.qty || 1) + '</td>' +
               '<td style="padding:5px 6px;font-size:10px;border-bottom:1px solid #E2E8F0;">' + e(it.vendor || "") + '</td>' +
               '<td style="padding:5px 6px;font-size:10px;border-bottom:1px solid #E2E8F0;">' + e(it.description || "") + '</td>' +
-              '<td style="padding:5px 6px;font-size:10px;border-bottom:1px solid #E2E8F0;text-align:center;">' + e(it.class || "") + '</td>' +
-              '<td style="padding:5px 6px;font-size:10px;border-bottom:1px solid #E2E8F0;">' + e(it.location || "") + '</td>' +
               '<td style="padding:5px 6px;font-size:10px;border-bottom:1px solid #E2E8F0;">' + e(it.sidemark || "") + '</td>' +
+              '<td style="padding:5px 6px;font-size:10px;border-bottom:1px solid #E2E8F0;">' + e(it.reference || "") + '</td>' +
               '<td style="padding:5px 6px;font-size:10px;border-bottom:1px solid #E2E8F0;">' + e(it.notes || "") + '</td>' +
               '</tr>';
           }
