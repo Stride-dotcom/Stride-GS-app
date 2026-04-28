@@ -694,6 +694,7 @@ export function Billing() {
 
   // Create Invoice state
   const [showInvoiceModal, setShowInvoiceModal] = useState(false);
+  const [invOptPdf, setInvOptPdf] = useState(true);
   const [invOptEmail, setInvOptEmail] = useState(true);
   const [invOptQbo, setInvOptQbo] = useState(false);
   const [invOptStax, setInvOptStax] = useState(false);
@@ -1351,7 +1352,8 @@ export function Billing() {
             client: g.client,
             sidemark: g.sidemark || undefined,
             sourceSheetId: g.sourceSheetId,
-            skipEmail: !invOptEmail,
+            skipPdf: !invOptPdf,
+            skipEmail: !invOptPdf || !invOptEmail,  // can't email without PDF
             deferSupabaseSync: true,  // v38.121.0 — batch sync fires once below
           } as any);
           if (res.data) {
@@ -2039,11 +2041,20 @@ export function Billing() {
                         </div>
                       </label>
 
-                      {/* Send Email */}
-                      <label style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '10px 12px', border: `1px solid ${invOptEmail ? theme.colors.orange : theme.colors.border}`, borderRadius: 10, marginBottom: 8, background: invOptEmail ? '#FEF3EE' : '#fff', cursor: 'pointer' }}>
-                        <input type="checkbox" checked={invOptEmail} onChange={() => setInvOptEmail(!invOptEmail)} style={{ accentColor: theme.colors.orange, marginTop: 2, width: 16, height: 16, cursor: 'pointer' }} />
+                      {/* Generate PDF */}
+                      <label style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '10px 12px', border: `1px solid ${invOptPdf ? theme.colors.orange : theme.colors.border}`, borderRadius: 10, marginBottom: 8, background: invOptPdf ? '#FEF3EE' : '#fff', cursor: 'pointer' }}>
+                        <input type="checkbox" checked={invOptPdf} onChange={() => { const next = !invOptPdf; setInvOptPdf(next); if (!next) setInvOptEmail(false); }} style={{ accentColor: theme.colors.orange, marginTop: 2, width: 16, height: 16, cursor: 'pointer' }} />
                         <div style={{ flex: 1 }}>
-                          <div style={{ fontSize: 13, fontWeight: 600 }}>Send Email to Client</div>
+                          <div style={{ fontSize: 13, fontWeight: 600 }}>Generate PDF Invoice</div>
+                          <div style={{ fontSize: 11, color: '#64748B', marginTop: 2 }}>Create the PDF and save to the client's Invoice folder on Drive.</div>
+                        </div>
+                      </label>
+
+                      {/* Send Email */}
+                      <label style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '10px 12px', border: `1px solid ${invOptEmail && invOptPdf ? theme.colors.orange : theme.colors.border}`, borderRadius: 10, marginBottom: 8, background: invOptEmail && invOptPdf ? '#FEF3EE' : '#fff', cursor: invOptPdf ? 'pointer' : 'not-allowed', opacity: invOptPdf ? 1 : 0.5 }}>
+                        <input type="checkbox" checked={invOptEmail && invOptPdf} onChange={() => { if (invOptPdf) setInvOptEmail(!invOptEmail); }} disabled={!invOptPdf} style={{ accentColor: theme.colors.orange, marginTop: 2, width: 16, height: 16, cursor: invOptPdf ? 'pointer' : 'not-allowed' }} />
+                        <div style={{ flex: 1 }}>
+                          <div style={{ fontSize: 13, fontWeight: 600 }}>Send Email to Client {!invOptPdf && <span style={{ fontSize: 9, padding: '2px 6px', borderRadius: 4, background: '#FEF2F2', color: '#991B1B', fontWeight: 700, marginLeft: 6 }}>Requires PDF</span>}</div>
                           <div style={{ fontSize: 11, color: '#64748B', marginTop: 2 }}>Email the invoice PDF to the client's email on file.</div>
                         </div>
                       </label>

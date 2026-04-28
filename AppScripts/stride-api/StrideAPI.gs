@@ -20343,13 +20343,23 @@ function handleCreateInvoice_(payload) {
   var masterSS       = SpreadsheetApp.openById(masterSpreadsheetId);
   var masterSettings = api_readSettings_(masterSS);
   var templateDocId  = String(masterSettings["DOC_INVOICE_TEMPLATE_ID"] || "").trim();
-  if (!templateDocId) {
+  if (!templateDocId && !skipPdf) {
     return errorResponse_(
       "Missing DOC_INVOICE_TEMPLATE_ID in Master Price List Settings. Run 'Create Doc Templates' first.",
       "CONFIG_ERROR"
     );
   }
 
+  // v38.126.0 — skipPdf: when true, skip PDF generation + Drive upload entirely.
+  // The invoice record (Consolidated_Ledger + client Billing_Ledger) is still
+  // written, just without a PDF attachment. Allows operators to create the
+  // accounting record first and generate the PDF later (or not at all).
+  var skipPdf = payload.skipPdf === true;
+
+  var pdfFile;
+  var copyFile = null;
+
+  if (!skipPdf) {
   // v38.82.0 — Supabase-first path: if DOC_INVOICE has been migrated to HTML
   // (body contains {{LINE_ITEMS_HTML}} token), use the HTML flow. Otherwise
   // fall through to the legacy Drive Doc flow below. This lets admins opt in
@@ -20358,9 +20368,6 @@ function handleCreateInvoice_(payload) {
   var sbInvTpl = null;
   try { sbInvTpl = api_getTemplateFromSupabase_("DOC_INVOICE"); } catch (_) {}
   var useSbHtmlPath = sbInvTpl && sbInvTpl.body && sbInvTpl.body.indexOf("{{LINE_ITEMS_HTML}}") !== -1;
-
-  var pdfFile;
-  var copyFile = null;
 
   if (useSbHtmlPath) {
     try {
@@ -20449,9 +20456,11 @@ function handleCreateInvoice_(payload) {
     try { if (copyFile) copyFile.setTrashed(true); } catch (_) {}
   }
   } // end legacy Drive Doc path
+  } // end !skipPdf
 
   var invoiceUrl = pdfFile ? pdfFile.getUrl() : "";
   var warnings   = [];
+  if (skipPdf) warnings.push("PDF generation skipped (operator choice)");
 
   // Write rows to CB Consolidated_Ledger (dedup by ledgerRowId)
   var consolLedger = cbSS.getSheetByName("Consolidated_Ledger");
@@ -20506,9 +20515,9 @@ function handleCreateInvoice_(payload) {
     warnings.push("Ledger update warning: " + ledgerErr.message);
   }
 
-  // Email invoice to client (skippable via payload.skipEmail)
+  // Email invoice to client (skippable via payload.skipEmail or when PDF was skipped)
   var emailStatus = "Not Sent";
-  var skipEmail = payload.skipEmail === true;
+  var skipEmail = payload.skipEmail === true || skipPdf;
   if (skipEmail) {
     emailStatus = "Skipped";
   } else {
