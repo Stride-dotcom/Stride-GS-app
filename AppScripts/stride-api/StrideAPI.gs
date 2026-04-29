@@ -1,5 +1,16 @@
 /* ===================================================
-   StrideAPI.gs — v38.142.0 — 2026-04-29 PST — Drive→Supabase docs backfill tool
+   StrideAPI.gs — v38.142.1 — 2026-04-29 PST — Backfill: rename runner functions so Run dropdown shows them
+   v38.142.1: Apps Script's editor Run dropdown hides functions whose
+              names end in `_`. The previous version named the entry
+              point runBackfillDocsForClient_TEST_, which made it
+              invisible. Replaced with three visible runners:
+                runBackfillDocsDryRun
+                runBackfillDocsExecute
+                runBackfillDocsResetCursor
+              Target client ID is read from the BACKFILL_DOCS_CLIENT_ID
+              script property so we don't hardcode a sheet ID into the
+              source file.
+   v38.142.0: Drive→Supabase docs backfill tool
    v38.142.0: New admin-only POST action `backfillDocsFromDrive` that
               walks a client's DRIVE_PARENT_FOLDER_ID for the four
               entity subfolders (Shipments / Repairs / Will Calls /
@@ -36497,15 +36508,59 @@ function api_resetBackfillDocsCursor_(clientSheetId) {
 }
 
 /**
- * Editor entry point — call from the Apps Script IDE for a one-off run.
- * Re-invoke until result.done === true.
- *   runBackfillDocsForClient_TEST_("<clientSheetId>", { dryRun: true });
- *   runBackfillDocsForClient_TEST_("<clientSheetId>");  // executes
+ * Editor entry points — visible in the Apps Script Run dropdown
+ * (functions ending in `_` are hidden by Apps Script convention).
+ *
+ * USAGE:
+ *  1. Open Apps Script editor → set the client ID in BACKFILL_DOCS_CLIENT_ID_
+ *     below, then pick one of these from the Run dropdown:
+ *       - runBackfillDocsDryRun        → counts what would be copied (safe)
+ *       - runBackfillDocsExecute       → actually copies blobs to Supabase
+ *       - runBackfillDocsResetCursor   → clears resume state if a run hung
+ *  2. Re-run the same function until the log says { "done": true }.
+ *     Apps Script's 6-min execution limit is the reason for resumability.
+ *
+ * The constant lives in script properties so we don't hardcode a client
+ * ID into source. Set via Project Settings → Script properties:
+ *     BACKFILL_DOCS_CLIENT_ID = <client sheet ID>
  */
-function runBackfillDocsForClient_TEST_(clientSheetId, options) {
-  var r = api_backfillDocsFromDriveOneClient_(clientSheetId, options || {});
+function runBackfillDocsDryRun() {
+  var clientSheetId = _backfillDocsResolveClientId_();
+  if (!clientSheetId) return;
+  Logger.log("DRY RUN — backfill docs for " + clientSheetId);
+  var r = api_backfillDocsFromDriveOneClient_(clientSheetId, { dryRun: true });
   Logger.log(JSON.stringify(r, null, 2));
   return r;
+}
+
+function runBackfillDocsExecute() {
+  var clientSheetId = _backfillDocsResolveClientId_();
+  if (!clientSheetId) return;
+  Logger.log("EXECUTE — backfill docs for " + clientSheetId);
+  var r = api_backfillDocsFromDriveOneClient_(clientSheetId, { dryRun: false });
+  Logger.log(JSON.stringify(r, null, 2));
+  return r;
+}
+
+function runBackfillDocsResetCursor() {
+  var clientSheetId = _backfillDocsResolveClientId_();
+  if (!clientSheetId) return;
+  var r = api_resetBackfillDocsCursor_(clientSheetId);
+  Logger.log(JSON.stringify(r, null, 2));
+  return r;
+}
+
+/** Read the target client ID from script properties. */
+function _backfillDocsResolveClientId_() {
+  var id = String(PropertiesService.getScriptProperties().getProperty("BACKFILL_DOCS_CLIENT_ID") || "").trim();
+  if (!id) {
+    Logger.log("ERROR: Set the BACKFILL_DOCS_CLIENT_ID script property first.\n" +
+               "  Project Settings → Script properties → Add property\n" +
+               "  Property: BACKFILL_DOCS_CLIENT_ID\n" +
+               "  Value:    <the client's spreadsheet ID>");
+    return null;
+  }
+  return id;
 }
 
 /**
