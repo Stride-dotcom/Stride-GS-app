@@ -579,7 +579,11 @@ const ch = createColumnHelper<InventoryItem>();
  * put a hook inside a conditional block.
  */
 export function Inventory() {
-  const { isMobile } = useIsMobile();
+  const { isMobile, isTablet } = useIsMobile();
+  // Treat tablet (768–1023) as "compact" too — the desktop floating action
+  // bar is wide and blocks most of the visible row count on iPad-class
+  // viewports. Below 1024 → use the FAB instead.
+  const isCompactViewport = isMobile || isTablet;
   const apiConfigured = isApiConfigured();
   useBatchData();
 
@@ -2124,8 +2128,8 @@ export function Inventory() {
         {filteredCount} row{filteredCount !== 1 ? 's' : ''}
       </div>
 
-      {/* ── Floating Action Bar ── */}
-      {selectedRows.length > 0 && !isMobile && !selectedItem && (
+      {/* ── Floating Action Bar (desktop ≥1024px only) ── */}
+      {selectedRows.length > 0 && !isCompactViewport && !selectedItem && (
         <div className="no-print" style={{
           position: 'fixed', bottom: 24, left: '50%', transform: 'translateX(-50%)',
           background: theme.colors.textPrimary,
@@ -2372,19 +2376,55 @@ export function Inventory() {
       )}
       <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
       <FloatingActionMenu
-        show={isMobile}
-        actions={[
-          { label: 'Create Task', icon: <ClipboardList size={16} />, onClick: () => setShowCreateTaskModal(true) },
-          { label: 'Create Will Call', icon: <Package size={16} />, onClick: () => setShowWCModal(true) },
-          ...(user?.role !== 'staff' ? [{ label: 'Create Delivery', icon: <Truck size={16} />, onClick: () => setShowDeliveryModal(true) }] : []),
-          { label: 'Request Repair', icon: <Wrench size={16} />, onClick: async () => {
-            const sel = table.getSelectedRowModel().rows;
-            if (sel.length === 0) { showToast('Select items first'); return; }
-            const items = sel.map(r => r.original);
-            await handleBulkRequestRepairQuote(items.map(i => ({ itemId: i.itemId, clientId: i.clientId })));
-          }},
-          { label: 'Transfer', icon: <Truck size={16} />, onClick: () => setShowTransferModal(true) },
-        ] satisfies FABAction[]}
+        show={isCompactViewport && !selectedItem}
+        actions={(() => {
+          // FAB action set for mobile + tablet. Mirrors the desktop floating
+          // action bar so users on small viewports lose no functionality. We
+          // use the same checkBatchClientGuard / toast guards as the desktop
+          // bar — selection-required actions show a toast when nothing is
+          // selected rather than failing silently.
+          const requireSel = (label: string, run: () => void): (() => void) => () => {
+            if (selectedRows.length === 0) { showToast(`Select items first to ${label.toLowerCase()}`); return; }
+            const guard = checkBatchClientGuard(selectedRows.map(r => r.original));
+            if (guard) { setBatchGuardClients(guard); setBatchGuardAction(label); return; }
+            run();
+          };
+          const list: FABAction[] = [
+            { label: `Create Will Call${selectedRows.length ? ` (${selectedRows.length})` : ''}`, icon: <Package size={16} />, onClick: requireSel('Create Will Call', () => setShowWCModal(true)) },
+            { label: 'Add to Will Call', icon: <Package size={16} />, onClick: requireSel('Add to Will Call', () => setShowAddToWCModal(true)) },
+            ...(user?.role !== 'staff' ? [{ label: 'Create Delivery', icon: <Truck size={16} />, onClick: requireSel('Create Delivery', () => setShowDeliveryModal(true)) }] : []),
+            { label: 'Create Task', icon: <ClipboardList size={16} />, onClick: requireSel('Create Task', () => setShowCreateTaskModal(true)) },
+            ...((user?.role === 'staff' || user?.role === 'admin' || user?.isParent)
+              ? [{ label: 'Transfer', icon: <Truck size={16} />, onClick: requireSel('Transfer', () => setShowTransferModal(true)) }]
+              : []),
+            { label: 'Request Repair', icon: <Wrench size={16} />, onClick: requireSel('Request Repair', async () => {
+              const items = selectedRows.map(r => r.original);
+              await handleBulkRequestRepairQuote(items.map(i => ({ itemId: i.itemId, clientId: i.clientId })));
+              setRowSelection({});
+            }) },
+            ...((user?.role === 'staff' || user?.role === 'admin') ? [
+              { label: 'Release Items', icon: <Package size={16} />, onClick: () => {
+                if (selectedRows.length === 0) { showToast('Select items first to release'); return; }
+                const items = selectedRows.map(r => r.original);
+                const activeItems = items.filter(i => i.status === 'Active');
+                if (!activeItems.length) { showToast('No active items selected — only Active items can be released'); return; }
+                const guard = checkBatchClientGuard(activeItems);
+                if (guard) { setBatchGuardClients(guard); setBatchGuardAction('Release Items'); return; }
+                setShowReleaseModal(true);
+              } },
+              { label: 'Print Labels', icon: <Printer size={16} />, onClick: () => {
+                const ids = selectedRows.map(r => r.original.itemId).filter(Boolean);
+                if (!ids.length) { showToast('Select at least one item to print labels'); return; }
+                navigate(`/labels?ids=${encodeURIComponent(ids.join(','))}`);
+              } },
+            ] : []),
+            { label: 'Export Selected', icon: <Download size={16} />, onClick: () => {
+              if (selectedRows.length === 0) { showToast('Select items first to export'); return; }
+              doExportSelected();
+            } },
+          ];
+          return list;
+        })()}
       />
       </div>
     </div>

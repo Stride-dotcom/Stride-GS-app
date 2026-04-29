@@ -52,24 +52,40 @@ export function useItemNotes(itemIds: string[], enabled = true): UseItemNotesRes
       return;
     }
     setLoading(true);
-    // Fetch latest-first so the first row per entity_id wins. Supabase
-    // postgrest has no `DISTINCT ON`; the client-side reduce is trivial
-    // for the typical 100-200 row inventory view.
-    const { data, error } = await supabase
-      .from('entity_notes')
-      .select('entity_id,body,created_at')
-      .eq('entity_type', 'inventory')
-      .eq('visibility', 'public')
-      .in('entity_id', stableIds)
-      .order('created_at', { ascending: false });
+    // Chunk the IN list — PostgREST URLs cap around 8 KB. With "Show All"
+    // turned on the inventory page can render 2.4k+ items, which produced
+    // a single 17 KB GET that returned 400 Bad Request. 150 IDs/batch
+    // keeps each URL well under the limit (≤2 KB) while batching network
+    // round-trips. We Promise.all so the parallel fetches don't add
+    // perceptible latency on top of the single-query baseline.
+    const CHUNK = 150;
+    const chunks: string[][] = [];
+    for (let i = 0; i < stableIds.length; i += CHUNK) {
+      chunks.push(stableIds.slice(i, i + CHUNK));
+    }
+    type Row = { entity_id: string; body: string; created_at: string };
+    const results = await Promise.all(chunks.map(ids =>
+      supabase
+        .from('entity_notes')
+        .select('entity_id,body,created_at')
+        .eq('entity_type', 'inventory')
+        .eq('visibility', 'public')
+        .in('entity_id', ids)
+        .order('created_at', { ascending: false })
+    ));
 
     if (!mountedRef.current) return;
     setLoading(false);
-    if (error || !data) { setNotesByItemId({}); return; }
 
+    // Merge — first row wins per entity_id (rows are already DESC by
+    // created_at within each chunk, but a single id can only appear in
+    // one chunk so cross-chunk ordering doesn't matter).
     const out: Record<string, string> = {};
-    for (const row of data as Array<{ entity_id: string; body: string }>) {
-      if (!out[row.entity_id]) out[row.entity_id] = row.body;
+    for (const r of results) {
+      if (r.error || !r.data) continue;
+      for (const row of r.data as Row[]) {
+        if (!out[row.entity_id]) out[row.entity_id] = row.body;
+      }
     }
     setNotesByItemId(out);
   }, [enabled, stableIds]);
