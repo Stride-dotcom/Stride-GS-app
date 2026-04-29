@@ -16,7 +16,7 @@
  * fully backfilled simply bumps `skipped` and exits with done: true.
  */
 import { useState, useCallback, useMemo } from 'react';
-import { Database, FolderUp, CheckCircle2, AlertCircle, PlayCircle } from 'lucide-react';
+import { Database, FolderUp, CheckCircle2, AlertCircle, PlayCircle, ChevronDown, ChevronRight } from 'lucide-react';
 import { theme } from '../../styles/theme';
 import { BtnSpinner } from '../ui/BtnSpinner';
 import { postBackfillDocsFromDrive } from '../../lib/api';
@@ -55,6 +55,10 @@ export function BackfillDocsPanel({ apiClients, apiConfigured }: Props) {
   const [dryRun, setDryRun] = useState(true);
   const [progress, setProgress] = useState<Record<string, ClientProgress>>({});
   const [globalError, setGlobalError] = useState<string>('');
+  // Client list is collapsed by default to keep the maintenance tab compact.
+  // Auto-expands while a run is in flight so the operator can see progress
+  // tick across rows; auto-collapses again afterwards is the user's call.
+  const [expanded, setExpanded] = useState(false);
 
   const allSelected = selected.size === eligibleClients.length && eligibleClients.length > 0;
 
@@ -180,6 +184,7 @@ export function BackfillDocsPanel({ apiClients, apiConfigured }: Props) {
     }
     setGlobalError('');
     setRunning(true);
+    setExpanded(true); // surface progress automatically once a run starts
     // Reset state for the about-to-run set so re-runs don't show stale numbers.
     setProgress(prev => {
       const next = { ...prev };
@@ -271,13 +276,48 @@ export function BackfillDocsPanel({ apiClients, apiConfigured }: Props) {
         </button>
       </div>
 
-      {/* Client list */}
-      <div style={{ marginTop: 14, border: `1px solid ${theme.colors.borderLight}`, borderRadius: 10, overflow: 'hidden' }}>
+      {/* Collapsible header summarizing the picker state. Always visible
+          so the operator knows how many they've selected without expanding
+          the full client list. Click to expand/collapse the table below. */}
+      <button
+        onClick={() => setExpanded(v => !v)}
+        type="button"
+        style={{
+          marginTop: 14, width: '100%',
+          display: 'flex', alignItems: 'center', gap: 10,
+          padding: '10px 14px',
+          border: `1px solid ${theme.colors.borderLight}`,
+          borderRadius: expanded ? '10px 10px 0 0' : 10,
+          borderBottom: expanded ? 'none' : `1px solid ${theme.colors.borderLight}`,
+          background: theme.colors.bgSubtle,
+          cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left',
+          fontSize: 12, color: theme.colors.textPrimary,
+        }}
+        aria-expanded={expanded}
+      >
+        {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+        <span style={{ fontWeight: 600 }}>Clients</span>
+        <span style={{ color: theme.colors.textMuted, fontWeight: 400 }}>
+          ({selected.size} selected of {eligibleClients.length})
+        </span>
+        {!expanded && Object.keys(progress).length > 0 && (
+          <span style={{ marginLeft: 'auto', color: theme.colors.textMuted, fontSize: 11 }}>
+            {totals.done}/{selected.size} done · {totals.copied} copied
+          </span>
+        )}
+      </button>
+
+      {/* Client list — only rendered when expanded so collapsed state is
+          actually compact (a 60-row table still costs layout/paint even
+          with display:none). */}
+      {expanded && (
+      <div style={{ border: `1px solid ${theme.colors.borderLight}`, borderTop: 'none', borderRadius: '0 0 10px 10px', overflow: 'hidden', maxHeight: 480, overflowY: 'auto' }}>
         <div style={{
           display: 'grid', gridTemplateColumns: '32px 1fr 80px 80px 80px 80px 90px',
           padding: '10px 14px', background: theme.colors.bgSubtle,
           fontSize: 10, fontWeight: 700, color: theme.colors.textMuted,
           textTransform: 'uppercase', letterSpacing: '1px', borderBottom: `1px solid ${theme.colors.borderLight}`,
+          position: 'sticky', top: 0, zIndex: 1,
         }}>
           <div>
             <input
@@ -380,6 +420,7 @@ export function BackfillDocsPanel({ apiClients, apiConfigured }: Props) {
           })
         )}
       </div>
+      )}
 
       {/* Totals row */}
       {Object.keys(progress).length > 0 && (
