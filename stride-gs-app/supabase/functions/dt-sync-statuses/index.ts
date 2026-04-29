@@ -1,5 +1,22 @@
 /**
- * dt-sync-statuses — Supabase Edge Function — v9 2026-04-27 PST
+ * dt-sync-statuses — Supabase Edge Function — v10 2026-04-28 PST
+ *
+ * v10: POD photo ingestion. Parses the new <images count="N"> block
+ *      DT now includes in export.xml (admin enabled it via support
+ *      ticket on 2026-04-28). For each <image>:
+ *        • Stable id (32-hex hash from DT) is the dedupe key — DT
+ *          rotates the src/thumbnail URLs every 30 min but keeps id
+ *          stable, so we only fetch+upload bytes once.
+ *        • Captures the full-res src and the thumbnail to the
+ *          dt-pod-photos storage bucket (private; UI gets signed
+ *          URLs). Path: `{dt_order_id}/{dt_image_id}.jpg` and
+ *          `{dt_order_id}/thumb_{dt_image_id}.jpg`.
+ *        • Upserts dt_order_photos by (dt_order_id, dt_image_id);
+ *          fetch_attempts increments on retry, fetch_error captures
+ *          any reason a fetch failed.
+ *      Photo URLs from DT are public and expire 30 min after the
+ *      export call; we capture bytes inline so the URL expiry is
+ *      irrelevant to downstream consumers.
  *
  * v9: Dropped the `pushed_to_dt_at IS NOT NULL` filter. Older orders
  *     with source='reconcile' (sheet-backfilled) and no
@@ -251,6 +268,78 @@ Deno.serve(async (req) => {
         const { error: noteErr } = await supabase.from('dt_order_notes').insert(noteRows);
         if (noteErr) result.errors.push(`${o.dt_identifier} notes: ${noteErr.message}`);
       }
+
+      // ── dt_order_photos : ingest <images> from export ────────────────
+      // DT's photo URLs expire 30 min after this export call, so we
+      // fetch the bytes and upload to our durable storage NOW. Subsequent
+      // syncs skip fetch when storage_path is already set for the image.
+      for (const img of parsed.images) {
+        if (!img.id) continue;
+        const { data: existing } = await supabase
+          .from('dt_order_photos')
+          .select('id, storage_path, thumbnail_path, fetch_attempts')
+          .eq('dt_order_id', o.id)
+          .eq('dt_image_id', img.id)
+          .maybeSingle();
+        const existingRow = existing as { id: string; storage_path: string | null; thumbnail_path: string | null; fetch_attempts: number | null } | null;
+        if (existingRow?.storage_path && existingRow?.thumbnail_path) {
+          continue; // already captured
+        }
+        const fullPath  = `${o.id}/${img.id}.jpg`;
+        const thumbPath = `${o.id}/thumb_${img.id}.jpg`;
+        let storagePath: string | null = existingRow?.storage_path ?? null;
+        let thumbnailPath: string | null = existingRow?.thumbnail_path ?? null;
+        let fetchError: string | null = null;
+        let contentType: string | null = null;
+        let sizeBytes: number | null = null;
+        try {
+          if (!storagePath && img.src) {
+            const r = await fetch(img.src);
+            if (!r.ok) throw new Error(`full-res HTTP ${r.status}`);
+            const buf = new Uint8Array(await r.arrayBuffer());
+            contentType = r.headers.get('content-type') || 'image/jpeg';
+            sizeBytes   = buf.byteLength;
+            const { error: upErr } = await supabase.storage
+              .from('dt-pod-photos')
+              .upload(fullPath, buf, { contentType, upsert: true });
+            if (upErr) throw new Error(`storage upload (full): ${upErr.message}`);
+            storagePath = fullPath;
+          }
+          if (!thumbnailPath && img.thumbnail) {
+            const r = await fetch(img.thumbnail);
+            if (!r.ok) throw new Error(`thumb HTTP ${r.status}`);
+            const buf = new Uint8Array(await r.arrayBuffer());
+            const { error: upErr } = await supabase.storage
+              .from('dt-pod-photos')
+              .upload(thumbPath, buf, { contentType: r.headers.get('content-type') || 'image/jpeg', upsert: true });
+            if (upErr) throw new Error(`storage upload (thumb): ${upErr.message}`);
+            thumbnailPath = thumbPath;
+          }
+        } catch (fe) {
+          fetchError = fe instanceof Error ? fe.message : String(fe);
+        }
+        const photoRow: Record<string, unknown> = {
+          dt_order_id:      o.id,
+          dt_image_id:      img.id,
+          dt_image_name:    img.name,
+          dt_url:           img.src,
+          thumbnail_dt_url: img.thumbnail,
+          storage_path:     storagePath,
+          thumbnail_path:   thumbnailPath,
+          content_type:     contentType,
+          size_bytes:       sizeBytes,
+          captured_at:      toIso(img.created_at),
+          fetched_at:       fetchError ? null : new Date().toISOString(),
+          fetch_attempts:   (existingRow?.fetch_attempts ?? 0) + 1,
+          fetch_error:      fetchError,
+          kind:             'pod',
+        };
+        const { error: photoErr } = await supabase.from('dt_order_photos').upsert(photoRow, {
+          onConflict: 'dt_order_id,dt_image_id',
+        });
+        if (photoErr) result.errors.push(`${o.dt_identifier} photo ${img.id}: ${photoErr.message}`);
+        else if (fetchError) result.errors.push(`${o.dt_identifier} photo ${img.id}: ${fetchError}`);
+      }
     } catch (e) {
       result.errors.push(`${o.dt_identifier}: ${e instanceof Error ? e.message : String(e)}`);
     }
@@ -286,6 +375,14 @@ interface ParsedNote {
   note_type: string | null;
 }
 
+interface ParsedImage {
+  id: string | null;        // stable hash; dedupe key
+  name: string | null;      // filename
+  src: string | null;       // ephemeral full-res URL (30 min)
+  thumbnail: string | null; // ephemeral thumbnail URL (30 min)
+  created_at: string | null;// when the driver took the photo
+}
+
 interface ParsedItem {
   item_id: string | null;
   delivered: boolean | null;
@@ -313,6 +410,7 @@ interface ParsedExport {
   items: ParsedItem[];
   notes: ParsedNote[];
   history: ParsedHistoryEvent[];
+  images: ParsedImage[];
 }
 
 function parseExportOrder(xml: string): ParsedExport | null {
@@ -336,7 +434,31 @@ function parseExportOrder(xml: string): ParsedExport | null {
     items:                 parseItems(orderXml),
     notes:                 parseNotes(orderXml),
     history:               parseHistory(orderXml),
+    images:                parseImages(orderXml),
   };
+}
+
+// Parse the <images count="N"> block. DT shape:
+//   <images count="2">
+//     <image id="..." name="..." title="..." src="https://..."
+//            thumbnail="https://..." created_at="2026-04-27 11:32:51 -0700"/>
+//   </images>
+// Self-closing element with all data on attributes.
+function parseImages(xml: string): ParsedImage[] {
+  const block = section(xml, 'images') ?? '';
+  if (!block) return [];
+  const out: ParsedImage[] = [];
+  for (const a of attrs(block, 'image')) {
+    if (!a.id && !a.src) continue; // skip the wrapper or junk
+    out.push({
+      id:         a.id || null,
+      name:       a.name || null,
+      src:        a.src || null,
+      thumbnail:  a.thumbnail || null,
+      created_at: a.created_at || null,
+    });
+  }
+  return out;
 }
 
 function section(xml: string, tagName: string): string | null {

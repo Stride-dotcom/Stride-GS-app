@@ -21,12 +21,14 @@ import {
   fetchDtOrderByIdFromSupabase,
   fetchDtOrderHistory,
   fetchDtOrderNotes,
+  fetchDtOrderPhotos,
 } from '../lib/supabaseQueries';
 import type {
   DtOrderForUI,
   DtOrderItemForUI,
   DtOrderHistoryEvent,
   DtSideNote,
+  DtOrderPhoto,
 } from '../lib/supabaseQueries';
 import {
   EntityPage, EPCard, EPLabel, EPFooterButton, EntityPageTokens as EP,
@@ -517,11 +519,13 @@ function CompletionTab({
   order,
   notes,
   history,
+  photos,
   loading,
 }: {
   order: DtOrderForUI;
   notes: DtSideNote[];
   history: DtOrderHistoryEvent[];
+  photos: DtOrderPhoto[];
   loading: boolean;
 }) {
   const hasCompletionData = !!(
@@ -529,7 +533,7 @@ function CompletionTab({
     order.signatureCapturedAt || order.codAmount != null || order.dtStatusCode
   );
 
-  if (!hasCompletionData && history.length === 0 && notes.length === 0) {
+  if (!hasCompletionData && history.length === 0 && notes.length === 0 && photos.length === 0) {
     return (
       <EPCard>
         <div style={{ textAlign: 'center', color: EP.textMuted, fontSize: 13, padding: '24px 0' }}>
@@ -597,6 +601,47 @@ function CompletionTab({
           {order.signatureCapturedAt && (
             <Field label="Signature Captured" value={fmtDateTime(order.signatureCapturedAt)} icon={<PenLine size={11} />} />
           )}
+        </EPCard>
+      )}
+
+      {/* POD photos pulled from DT export.xml. Photo bytes live in
+          our dt-pod-photos storage bucket; signed URLs are issued
+          with a 1-hour TTL by fetchDtOrderPhotos. Click thumbnail
+          to open the full-res in a new tab. */}
+      {photos.length > 0 && (
+        <EPCard>
+          <SectionTitle>POD Photos ({photos.length})</SectionTitle>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))', gap: 10 }}>
+            {photos.map(p => (
+              <a
+                key={p.id}
+                href={p.fullUrl ?? '#'}
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{ display: 'block', borderRadius: 8, overflow: 'hidden', border: `1px solid ${theme.colors.border}`, background: '#FAFAF9', textDecoration: 'none', color: 'inherit' }}
+                title={p.capturedAt ? fmtDateTime(p.capturedAt) : p.dtImageName}
+                onClick={e => { if (!p.fullUrl) e.preventDefault(); }}
+              >
+                {p.thumbnailUrl ? (
+                  <img
+                    src={p.thumbnailUrl}
+                    alt={p.dtImageName}
+                    loading="lazy"
+                    style={{ width: '100%', height: 120, objectFit: 'cover', display: 'block' }}
+                  />
+                ) : (
+                  <div style={{ width: '100%', height: 120, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, color: EP.textMuted }}>
+                    {p.fetchError ? 'Fetch failed' : 'Loading…'}
+                  </div>
+                )}
+                {p.capturedAt && (
+                  <div style={{ fontSize: 10, color: EP.textMuted, padding: '4px 6px', borderTop: `1px solid ${theme.colors.border}` }}>
+                    {fmtDateTime(p.capturedAt)}
+                  </div>
+                )}
+              </a>
+            ))}
+          </div>
         </EPCard>
       )}
 
@@ -692,16 +737,22 @@ export function OrderPage() {
   // both. Empty until first sync runs.
   const [dtHistory, setDtHistory] = useState<DtOrderHistoryEvent[]>([]);
   const [dtNotes, setDtNotes] = useState<DtSideNote[]>([]);
+  const [dtPhotos, setDtPhotos] = useState<DtOrderPhoto[]>([]);
   const [dtAuxLoading, setDtAuxLoading] = useState(false);
   useEffect(() => {
     if (!order?.id) return;
     let cancelled = false;
     setDtAuxLoading(true);
-    Promise.all([fetchDtOrderHistory(order.id), fetchDtOrderNotes(order.id)])
-      .then(([h, n]) => {
+    Promise.all([
+      fetchDtOrderHistory(order.id),
+      fetchDtOrderNotes(order.id),
+      fetchDtOrderPhotos(order.id),
+    ])
+      .then(([h, n, p]) => {
         if (cancelled) return;
         setDtHistory(h);
         setDtNotes(n);
+        setDtPhotos(p);
       })
       .finally(() => { if (!cancelled) setDtAuxLoading(false); });
     return () => { cancelled = true; };
@@ -981,6 +1032,7 @@ export function OrderPage() {
           order={order}
           notes={dtNotes}
           history={dtHistory}
+          photos={dtPhotos}
           loading={dtAuxLoading}
         />
       ),
