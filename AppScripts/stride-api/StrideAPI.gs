@@ -1,5 +1,25 @@
 /* ===================================================
-   StrideAPI.gs — v38.140.0 — 2026-04-27 PST — Receiving doc column order fix
+   StrideAPI.gs — v38.141.0 — 2026-04-27 PST — Generated PDFs route to Supabase Storage; per-entity Drive folders deprecated
+   v38.141.0: Generated PDFs (DOC_RECEIVING, DOC_REPAIR_WORK_ORDER,
+              DOC_WILL_CALL_RELEASE) now upload to Supabase Storage and
+              insert a row in public.documents so they appear in the
+              entity's Docs tab alongside operator-uploaded files.
+              New helper api_uploadGeneratedPdfToSupabase_ uses the
+              existing service-role key to PUT into the documents bucket
+              and POST to /rest/v1/documents.
+              api_generateDocPdf_ accepts an optional entityCtx
+              ({tenantId, contextType, contextId, generatedByEmail}); when
+              present, Supabase replaces Drive as the storage destination.
+              Photos already moved to Supabase in earlier sessions; this
+              completes the migration. Per-entity Drive folder creation
+              disabled in: handleCompleteShipment_ (shipment),
+              handleSendRepairQuote_ (repair), handleStartRepair_
+              (repair), handleCreateWillCall_ (willcall),
+              handleProcessWillCallRelease_ (willcall), handleStartTask_
+              (task). Existing folders untouched; only new entities skip
+              creation. The api_StrideFixMissingFolders maintenance tool
+              still creates folders on demand if needed for legacy access.
+   v38.140.0: Receiving doc column order fix
    v38.140.0: Receiving PDF row builder was emitting Class + Location
               columns the DOC_RECEIVING template no longer has, so values
               landed in wrong cells (Reference column showed Qty value,
@@ -13577,33 +13597,15 @@ function handleCompleteShipment_(clientSheetId, payload) {
   // panels — without them folder buttons render disabled. Pulling this out of
   // the email block means disabling notifications no longer silently breaks
   // folder buttons. See api_hyperlinkReceivedItems_ below.
+  // v38.141.0: per-shipment Drive folder no longer created. Photos already
+  // moved to Supabase Storage; receiving PDF now lands in public.documents
+  // (Docs tab on the shipment detail panel). The folder served no purpose
+  // beyond "place to drop the PDF" and was generating empty folders that
+  // confused clients (same pattern as the per-item Photos folder cleanup).
+  // Shipment # cell hyperlink intentionally left unset; downstream code
+  // and React panels treat empty folder URL as "no Drive folder" and fall
+  // back to Supabase deep links.
   var shipFolderUrl = "";
-  try {
-    var shipSub = api_getOrCreateEntitySubfolder_(ss, "Shipments");
-    if (shipSub.folder) {
-      var existingIt = shipSub.folder.getFoldersByName(shipmentNo);
-      var newFolder = existingIt.hasNext() ? existingIt.next() : shipSub.folder.createFolder(shipmentNo);
-      shipFolderUrl = "https://drive.google.com/drive/folders/" + newFolder.getId();
-      // Hyperlink Shipment # cell on Shipments sheet
-      try {
-        var shipMap2 = api_getHeaderMap_(shipSheet);
-        var snCol = shipMap2["Shipment #"];
-        if (snCol) {
-          var shipLastRow2 = api_getLastDataRow_(shipSheet);
-          for (var ssi = shipLastRow2; ssi >= 2; ssi--) {
-            if (String(shipSheet.getRange(ssi, snCol).getValue() || "").trim() === shipmentNo) {
-              shipSheet.getRange(ssi, snCol).setRichTextValue(
-                SpreadsheetApp.newRichTextValue().setText(shipmentNo).setLinkUrl(shipFolderUrl).build()
-              );
-              break;
-            }
-          }
-        }
-      } catch (_) {}
-    }
-  } catch (folderErr) {
-    warnings.push("Shipment folder creation failed (non-fatal): " + folderErr.message);
-  }
 
   // Hyperlink Inventory Item IDs + Shipment #s + Task IDs for newly received items.
   // Uses PHOTOS_FOLDER_ID as parent for per-item / per-task folders so the React
@@ -13695,7 +13697,13 @@ function handleCompleteShipment_(clientSheetId, payload) {
               '<span style="font-weight:bold;color:#92400E;">Notes:</span> ' + api_notesPlainToHtml_(_pdfNotes) + '</div>'
             : "";
 
-          var pdfResult = api_generateDocPdf_(ss, "DOC_RECEIVING", "Receiving_" + shipmentNo + "_" + (clientName || "Client"), shipFolderUrl, pdfTokens);
+          var pdfResult = api_generateDocPdf_(
+            ss, "DOC_RECEIVING",
+            "Receiving_" + shipmentNo + "_" + (clientName || "Client"),
+            null, // folderUrl unused — Supabase Storage is the new home
+            pdfTokens,
+            { tenantId: clientSheetId, contextType: "shipment", contextId: shipmentNo, generatedByEmail: "" }
+          );
           if (pdfResult.blob) pdfBlob = pdfResult.blob;
           if (pdfResult.warning) warnings.push(pdfResult.warning);
         } catch (pdfErr) {
@@ -14750,24 +14758,150 @@ function api_findPdfInFolder_(folderUrl, prefix) {
   return null;
 }
 
-/** Generates a PDF from a doc template key, saves to folder, returns blob. Non-fatal. */
-function api_generateDocPdf_(ss, docTemplateKey, pdfFileName, folderUrl, tokens) {
+/**
+ * Upload a generated PDF blob to Supabase Storage AND insert a row into
+ * public.documents so it appears in the entity's Docs tab. Mirrors the
+ * useDocuments hook's storage-key pattern:
+ *   `{tenantId}/{contextType}-{contextId}/{ts}-{rand}-{filename}.pdf`
+ *
+ * Returns { ok, storageKey, error } — ok=true on full success (upload +
+ * row insert). Non-fatal: on any failure we log and return ok=false, the
+ * caller falls back to attaching the blob to the email anyway.
+ *
+ * contextType MUST match the documents.context_type CHECK constraint:
+ *   shipment | item | task | repair | willcall | claim | client
+ */
+function api_uploadGeneratedPdfToSupabase_(blob, tenantId, contextType, contextId, fileName, generatedByEmail) {
+  try {
+    if (!blob) return { ok: false, error: "No blob" };
+    var url = prop_("SUPABASE_URL");
+    var key = prop_("SUPABASE_SERVICE_ROLE_KEY");
+    if (!url || !key) return { ok: false, error: "SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY not configured" };
+    if (!tenantId || !contextType || !contextId) {
+      return { ok: false, error: "tenantId, contextType, contextId all required" };
+    }
+
+    var safeName = String(fileName || "document.pdf").replace(/[^a-zA-Z0-9._-]/g, "_").slice(-120);
+    if (!/\.pdf$/i.test(safeName)) safeName += ".pdf";
+    var ts = Date.now();
+    var rand = Utilities.getUuid().replace(/-/g, "").slice(0, 6);
+    var storageKey = String(tenantId) + "/" + contextType + "-" + String(contextId) + "/" + ts + "-" + rand + "-" + safeName;
+
+    // 1) Upload to Storage. Bucket: documents (must exist; created by
+    // session-73 setup). Use POST (not PUT) — Supabase Storage REST returns
+    // 409 if the object exists, but our timestamped key is unique so this
+    // shouldn't happen. x-upsert: true defends against retries anyway.
+    var bytes = blob.getBytes();
+    var uploadResp = UrlFetchApp.fetch(
+      url + "/storage/v1/object/documents/" + storageKey,
+      {
+        method: "POST",
+        headers: {
+          "Authorization": "Bearer " + key,
+          "apikey":        key,
+          "Content-Type":  blob.getContentType() || "application/pdf",
+          "x-upsert":      "true"
+        },
+        payload: bytes,
+        muteHttpExceptions: true
+      }
+    );
+    var uploadCode = uploadResp.getResponseCode();
+    if (uploadCode < 200 || uploadCode >= 300) {
+      Logger.log("api_uploadGeneratedPdfToSupabase_ upload HTTP " + uploadCode + ": " + uploadResp.getContentText().substring(0, 300));
+      return { ok: false, error: "Storage upload HTTP " + uploadCode };
+    }
+
+    // 2) Insert metadata row. RLS allows service-role to write to any
+    // tenant; the React Docs tab reads with anon role + tenant filter.
+    var rowResp = UrlFetchApp.fetch(url + "/rest/v1/documents", {
+      method: "POST",
+      headers: {
+        "Authorization": "Bearer " + key,
+        "apikey":        key,
+        "Content-Type":  "application/json",
+        "Prefer":        "return=minimal"
+      },
+      payload: JSON.stringify({
+        tenant_id:        tenantId,
+        context_type:     contextType,
+        context_id:       String(contextId),
+        storage_key:      storageKey,
+        file_name:        safeName,
+        file_size:        bytes.length,
+        mime_type:        "application/pdf",
+        uploaded_by:      null,
+        uploaded_by_name: generatedByEmail || "Stride WMS (auto)"
+      }),
+      muteHttpExceptions: true
+    });
+    var rowCode = rowResp.getResponseCode();
+    if (rowCode < 200 || rowCode >= 300) {
+      Logger.log("api_uploadGeneratedPdfToSupabase_ row insert HTTP " + rowCode + ": " + rowResp.getContentText().substring(0, 300));
+      // The blob is already uploaded — leave it; manual cleanup is
+      // cheap, but losing the email PDF is not.
+      return { ok: false, error: "documents row insert HTTP " + rowCode, storageKey: storageKey };
+    }
+
+    return { ok: true, storageKey: storageKey };
+  } catch (e) {
+    Logger.log("api_uploadGeneratedPdfToSupabase_ error (non-fatal): " + e);
+    return { ok: false, error: String(e) };
+  }
+}
+
+/**
+ * Generates a PDF from a doc template key and returns the blob.
+ *
+ * v38.141.0: storage strategy changed from "Drive folder" to "Supabase
+ * Storage + documents row" so generated PDFs appear in the entity's
+ * Docs tab alongside operator-uploaded files (and stop cluttering the
+ * Drive folder hierarchy that was deprecated when photos moved to
+ * Supabase).
+ *
+ * Pass `entityCtx = { tenantId, contextType, contextId, generatedByEmail }`
+ * to upload to Supabase. When omitted (legacy path) the function still
+ * generates the blob but does not write it anywhere — caller must
+ * handle attachment to email.
+ *
+ * `folderUrl` is now optional and intentionally ignored when entityCtx
+ * is provided. Kept in the signature for backwards compat with any
+ * legacy caller that still passes a folder URL.
+ */
+function api_generateDocPdf_(ss, docTemplateKey, pdfFileName, folderUrl, tokens, entityCtx) {
   try {
     var tmpl = api_getDocTemplateHtml_(ss, docTemplateKey);
     if (!tmpl || !tmpl.html) return { blob: null, warning: "No template found for " + docTemplateKey };
     var html = api_resolveDocTokens_(tmpl.html, tokens);
     var docId = api_createGoogleDocFromHtml_(pdfFileName, html);
     var pdfBlob = api_exportDocAsPdfBlob_(docId, pdfFileName + ".pdf", 0.25);
-    // Save to folder
-    if (folderUrl) {
+
+    // Storage strategy: Supabase first if entityCtx provided. Falls back
+    // to Drive folder ONLY if entityCtx is missing AND folderUrl is set
+    // (preserves existing behavior for legacy callers like Invoice PDF
+    // which still uses Drive for the QuickBooks export pipeline).
+    var sbWarning = null;
+    if (entityCtx && entityCtx.tenantId && entityCtx.contextType && entityCtx.contextId) {
+      var sb = api_uploadGeneratedPdfToSupabase_(
+        pdfBlob,
+        entityCtx.tenantId,
+        entityCtx.contextType,
+        entityCtx.contextId,
+        pdfFileName + ".pdf",
+        entityCtx.generatedByEmail || ""
+      );
+      if (!sb.ok) {
+        sbWarning = "Doc upload to Supabase failed (non-fatal — email still attached): " + (sb.error || "unknown");
+      }
+    } else if (folderUrl) {
       try {
         var fMatch = String(folderUrl).match(/[-\w]{25,}/);
         if (fMatch) DriveApp.getFolderById(fMatch[0]).createFile(pdfBlob);
-      } catch (saveErr) { Logger.log("api_generateDocPdf_ save error: " + saveErr); }
+      } catch (saveErr) { Logger.log("api_generateDocPdf_ Drive save error: " + saveErr); }
     }
     // Cleanup temp doc
     try { DriveApp.getFileById(docId).setTrashed(true); } catch (_) {}
-    return { blob: pdfBlob, warning: null };
+    return { blob: pdfBlob, warning: sbWarning };
   } catch (e) {
     Logger.log("api_generateDocPdf_ error: " + e);
     return { blob: null, warning: "PDF generation failed: " + e.message };
@@ -15499,11 +15633,9 @@ function handleRespondToRepairQuote_(clientSheetId, payload) {
       var pdfBlob = null;
       if (decision === "Approve") {
         try {
+          // v38.141.0: per-repair Drive folder no longer created — work
+          // order PDF lands in public.documents (Repair → Docs tab).
           var repairFolderUrl = "";
-          var parentFolderId = String(settings["DRIVE_PARENT_FOLDER_ID"] || settings["PHOTOS_FOLDER_ID"] || "").trim();
-          if (parentFolderId) {
-            repairFolderUrl = api_createItemFolder_("https://drive.google.com/drive/folders/" + parentFolderId, "REPAIR-" + repairId);
-          }
           // v38.60.0 — extend tokens to match DOC_REPAIR_WORK_ORDER template
           // (was missing row/item/results tokens — template rendered literal {{…}}).
           var _rqStatus      = "Approved";
@@ -15551,7 +15683,13 @@ function handleRespondToRepairQuote_(clientSheetId, payload) {
               '<span style="display:inline-block;margin-right:16px;font-size:11px;"><span style="display:inline-block;width:14px;height:14px;border:1.5px solid #94A3B8;border-radius:3px;vertical-align:middle;margin-right:4px;"></span> Unable to Repair</span>' +
               '<span style="display:inline-block;font-size:11px;"><span style="display:inline-block;width:14px;height:14px;border:1.5px solid #94A3B8;border-radius:3px;vertical-align:middle;margin-right:4px;"></span> Other</span>'
           };
-          var pdfResult = api_generateDocPdf_(ss, "DOC_REPAIR_WORK_ORDER", "Work_Order_" + repairId, repairFolderUrl, pdfTokens);
+          var pdfResult = api_generateDocPdf_(
+            ss, "DOC_REPAIR_WORK_ORDER",
+            "Work_Order_" + repairId,
+            null,
+            pdfTokens,
+            { tenantId: clientSheetId, contextType: "repair", contextId: repairId, generatedByEmail: "" }
+          );
           if (pdfResult.blob) pdfBlob = pdfResult.blob;
           if (pdfResult.warning) warnings.push(pdfResult.warning);
         } catch (pdfErr) {
@@ -16052,38 +16190,18 @@ function handleStartRepair_(clientSheetId, payload) {
     if (cStart)  repSheet.getRange(repRow, cStart).setValue(now);
   }
 
-  // v26.3.0: Create repair folder in Repairs/ subfolder (flat structure)
+  // v38.141.0: per-repair Drive folder no longer created — work order PDF
+  // lands in public.documents (Repair → Docs tab) and operator-uploaded
+  // files attach there too. Repair ID hyperlink intentionally left unset.
   var repairFolderUrl = "";
   var warnings = [];
-  try {
-    var repSub = api_getOrCreateEntitySubfolder_(ss, "Repairs");
-    if (repSub.folder) {
-      var rIt = repSub.folder.getFoldersByName(repairId);
-      var rFolder = rIt.hasNext() ? rIt.next() : repSub.folder.createFolder(repairId);
-      repairFolderUrl = "https://drive.google.com/drive/folders/" + rFolder.getId();
-      // Hyperlink Repair ID cell
-      if (cRepId) {
-        var repRt = SpreadsheetApp.newRichTextValue().setText(repairId).setLinkUrl(repairFolderUrl).build();
-        repSheet.getRange(repRow, cRepId).setRichTextValue(repRt);
-      }
-    } else {
-      warnings.push("No DRIVE_PARENT_FOLDER_ID — repair folder not created");
-    }
-  } catch (folderErr) {
-    Logger.log("handleStartRepair_ folder error: " + folderErr);
-    warnings.push("Folder creation failed: " + folderErr);
-  }
 
-  // v38.51.6 — Generate Work Order PDF into the canonical Repairs/<id> folder.
-  // Previously the PDF was generated at approve-time into a DIFFERENT folder
-  // (DRIVE_PARENT_FOLDER_ID/REPAIR-<id>) — clicking the Repair Folder button
-  // in React landed the user in an empty folder because the folder URL stored
-  // on the sheet / in Supabase points to Repairs/<id>. Now Start Repair is
-  // the authoritative PDF generation step: the tech starts the work, the PDF
-  // lands in the folder they're looking at.
+  // v38.141.0: PDF generation is now Supabase-backed (lands in
+  // public.documents → Docs tab). The previous gate on `repairFolderUrl`
+  // is dropped — generation always runs.
   var pdfGenerated = false;
   try {
-    if (repairFolderUrl) {
+    {
       var settings = api_readSettings_(ss);
       var clientName = String(settings["CLIENT_NAME"] || "").trim();
       var rowData = repSheet.getRange(repRow, 1, 1, repSheet.getLastColumn()).getValues()[0];
@@ -16162,17 +16280,19 @@ function handleStartRepair_(clientSheetId, payload) {
           '<span style="display:inline-block;margin-right:16px;font-size:11px;"><span style="display:inline-block;width:14px;height:14px;border:1.5px solid #94A3B8;border-radius:3px;vertical-align:middle;margin-right:4px;"></span> Unable to Repair</span>' +
           '<span style="display:inline-block;font-size:11px;"><span style="display:inline-block;width:14px;height:14px;border:1.5px solid #94A3B8;border-radius:3px;vertical-align:middle;margin-right:4px;"></span> Other</span>'
       };
-      // Remove any stale Work Order PDF from this folder so the fresh one is
-      // unambiguous (Start Repair can be retried; we always want the latest).
-      try {
-        var fId = repairFolderUrl.match(/[-\w]{25,}/);
-        if (fId) {
-          var rFolderObj = DriveApp.getFolderById(fId[0]);
-          var existing = rFolderObj.getFilesByName("Work_Order_" + repairId + ".pdf");
-          while (existing.hasNext()) existing.next().setTrashed(true);
-        }
-      } catch (_) {}
-      var pdfResult = api_generateDocPdf_(ss, "DOC_REPAIR_WORK_ORDER", "Work_Order_" + repairId, repairFolderUrl, pdfTokens);
+      // v38.141.0: PDFs now land in Supabase Storage / documents table
+      // instead of the Drive folder. We don't trash old versions — every
+      // run inserts a new row with a unique storage_key (timestamped),
+      // and the Docs tab shows them sorted by created_at desc so the
+      // most recent is on top. Operators can soft-delete stale ones from
+      // the UI if needed.
+      var pdfResult = api_generateDocPdf_(
+        ss, "DOC_REPAIR_WORK_ORDER",
+        "Work_Order_" + repairId,
+        null,
+        pdfTokens,
+        { tenantId: clientSheetId, contextType: "repair", contextId: repairId, generatedByEmail: "" }
+      );
       if (pdfResult.blob) pdfGenerated = true;
       if (pdfResult.warning) warnings.push(pdfResult.warning);
     }
@@ -16531,41 +16651,10 @@ function handleCreateWillCall_(clientSheetId, payload) {
             "{{LOGO_URL}}":        String(settings["LOGO_URL"] || "").trim()
         };
 
-        // Create WC Drive folder + hyperlink (PDF deferred to release time v29.5.0)
-        try {
-          // v26.3.0: Flat folder structure — WC folders in Will Calls/ subfolder
-          var wcFolderUrl = "";
-          var wcSub = api_getOrCreateEntitySubfolder_(ss, "Will Calls");
-          if (wcSub.folder) {
-            var wcIt = wcSub.folder.getFoldersByName(wcNumber);
-            var wcFolder = wcIt.hasNext() ? wcIt.next() : wcSub.folder.createFolder(wcNumber);
-            wcFolderUrl = "https://drive.google.com/drive/folders/" + wcFolder.getId();
-            // Hyperlink WC Number cell → folder
-            if (wcFolderUrl) {
-              try {
-                var wcSheet = ss.getSheetByName("Will_Calls");
-                var wcMap2 = api_getHeaderMap_(wcSheet);
-                var wcNumCol = wcMap2["WC Number"];
-                if (wcNumCol) {
-                  var wcLastRow = api_getLastDataRow_(wcSheet);
-                  for (var wri = wcLastRow; wri >= 2; wri--) {
-                    if (String(wcSheet.getRange(wri, wcNumCol).getValue() || "").trim() === wcNumber) {
-                      wcSheet.getRange(wri, wcNumCol).setRichTextValue(
-                        SpreadsheetApp.newRichTextValue().setText(wcNumber).setLinkUrl(wcFolderUrl).build()
-                      );
-                      break;
-                    }
-                  }
-                }
-              } catch (_) {}
-              // v38.86.0: PHOTOS_URL already points to the app deep-link
-              // (set in wcEmailTokens above). Drive folder kept for PDFs.
-            }
-          }
-          // PDF generation deferred to release time (v29.5.0) — items may change before release
-        } catch (wcFolderErr) {
-          warnings.push("Will Call folder creation failed (non-fatal): " + wcFolderErr.message);
-        }
+        // v38.141.0: per-WC Drive folder no longer created — release PDF
+        // (generated later in Process Release) lands in public.documents
+        // (Will Call → Docs tab). PDF generation here is deferred to
+        // release time as before; nothing to write yet.
 
         var emailResult = api_sendTemplateEmail_(settings, "WILL_CALL_CREATED", allRecip,
           "Will Call Created: " + wcNumber,
@@ -17008,26 +17097,17 @@ function handleProcessWcRelease_(clientSheetId, payload) {
         // Generate DOC_WILL_CALL_RELEASE PDF (v24.0.0)
         var relPdfBlob = null;
         try {
-          // Find WC folder URL from WC Number hyperlink
+          // v38.141.0: PDF goes to public.documents (Docs tab), not Drive.
+          // wcFolderUrl2 retained as a no-op for the api_generateDocPdf_
+          // signature; entityCtx below is what actually routes the upload.
           var wcFolderUrl2 = "";
-          var wcNumCol2 = wcMap["WC Number"];
-          if (wcNumCol2) {
-            var wcRt = wcSh.getRange(wcRow, wcNumCol2).getRichTextValue();
-            if (wcRt && wcRt.getLinkUrl()) wcFolderUrl2 = wcRt.getLinkUrl();
-          }
-          // v26.3.0: Flat folder structure fallback — Will Calls/ subfolder
-          if (!wcFolderUrl2) {
-            var wcSub2 = api_getOrCreateEntitySubfolder_(ss, "Will Calls");
-            if (wcSub2.folder) {
-              var wcIt2 = wcSub2.folder.getFoldersByName(wcNumber);
-              var wcF2 = wcIt2.hasNext() ? wcIt2.next() : wcSub2.folder.createFolder(wcNumber);
-              wcFolderUrl2 = "https://drive.google.com/drive/folders/" + wcF2.getId();
-            }
-          }
-          // v38.86.0: PHOTOS_URL already points to the app deep-link above.
-          // wcFolderUrl2 is still resolved so the release PDF gets filed
-          // into the correct Drive folder below.
-          var relPdfResult = api_generateDocPdf_(ss, "DOC_WILL_CALL_RELEASE", "Will_Call_" + wcNumber, wcFolderUrl2, releaseTokens);
+          var relPdfResult = api_generateDocPdf_(
+            ss, "DOC_WILL_CALL_RELEASE",
+            "Will_Call_" + wcNumber,
+            null,
+            releaseTokens,
+            { tenantId: clientSheetId, contextType: "willcall", contextId: wcNumber, generatedByEmail: "" }
+          );
           if (relPdfResult.blob) relPdfBlob = relPdfResult.blob;
           if (relPdfResult.warning) warnings.push(relPdfResult.warning);
         } catch (relPdfErr) {
@@ -17413,29 +17493,20 @@ function handleGenerateWcDoc_(clientSheetId, payload) {
       "{{COD}}":               isCod ? "Yes \u2014 $" + codAmount.toFixed(2) : "No"
     };
 
-    // Find or create WC folder
+    // v38.141.0: per-WC Drive folder no longer created. Release PDF
+    // lands in public.documents (Will Call → Docs tab). Existing
+    // WC Number hyperlinks are preserved if already set; we simply
+    // don't create new folders going forward.
     var wcFolderUrl = "";
-    var wcRt = wcSheet.getRange(wcRow, wcNumCol).getRichTextValue();
-    if (wcRt && wcRt.getLinkUrl()) wcFolderUrl = wcRt.getLinkUrl();
-    if (!wcFolderUrl) {
-      var wcSub = api_getOrCreateEntitySubfolder_(ss, "Will Calls");
-      if (wcSub.folder) {
-        var wcIt = wcSub.folder.getFoldersByName(wcNumber);
-        var wcF = wcIt.hasNext() ? wcIt.next() : wcSub.folder.createFolder(wcNumber);
-        wcFolderUrl = "https://drive.google.com/drive/folders/" + wcF.getId();
-        // Write folder URL back to WC Number cell as hyperlink
-        var newRt = SpreadsheetApp.newRichTextValue()
-          .setText(wcNumber)
-          .setLinkUrl(wcFolderUrl)
-          .build();
-        wcSheet.getRange(wcRow, wcNumCol).setRichTextValue(newRt);
-      }
-    }
-    // v38.86.0: PHOTOS_URL already points to the app deep-link above.
-    // wcFolderUrl is still resolved so the release PDF is filed correctly.
 
     // Generate PDF
-    var pdfResult = api_generateDocPdf_(ss, "DOC_WILL_CALL_RELEASE", "Will_Call_" + wcNumber, wcFolderUrl, tokens);
+    var pdfResult = api_generateDocPdf_(
+      ss, "DOC_WILL_CALL_RELEASE",
+      "Will_Call_" + wcNumber,
+      null,
+      tokens,
+      { tenantId: clientSheetId, contextType: "willcall", contextId: wcNumber, generatedByEmail: "" }
+    );
     if (!pdfResult.blob && pdfResult.warning) {
       return jsonResponse_({ success: false, error: pdfResult.warning });
     }
@@ -23008,24 +23079,11 @@ function handleStartTask_(clientSheetId, payload) {
       });
     }
 
-    // v26.3.0: Flat folder structure — task folders in Tasks/ subfolder (no shipment dependency)
-    var taskFolderUrl = existingFolderUrl; // reuse if partial run created it
-    if (!taskFolderUrl) {
-      var taskSub = api_getOrCreateEntitySubfolder_(ss, "Tasks");
-      if (taskSub.folder) {
-        try {
-          var tIt = taskSub.folder.getFoldersByName(taskId);
-          var tFolder = tIt.hasNext() ? tIt.next() : taskSub.folder.createFolder(taskId);
-          taskFolderUrl = "https://drive.google.com/drive/folders/" + tFolder.getId();
-        } catch (tfErr) { Logger.log("handleStartTask_ folder error: " + tfErr); }
-      }
-    }
-
-    // Hyperlink Task ID cell → task folder URL
-    if (taskFolderUrl) {
-      var taskRt = SpreadsheetApp.newRichTextValue().setText(taskId).setLinkUrl(taskFolderUrl).build();
-      tasksSheet.getRange(taskRowNum, idCol).setRichTextValue(taskRt);
-    }
+    // v38.141.0: per-task Drive folder no longer created. Task Work Order
+    // PDF was removed in v29.6.0; nothing left to file in Drive. Operator
+    // attachments live in public.documents (Task → Docs tab). Task ID
+    // hyperlinks intentionally left unset.
+    var taskFolderUrl = existingFolderUrl || ""; // preserve any pre-existing
 
     // Task Work Order PDF removed (v29.6.0) — only repairs generate work order docs
     var pdfCreated = false;
