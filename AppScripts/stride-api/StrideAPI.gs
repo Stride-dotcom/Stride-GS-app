@@ -1,5 +1,23 @@
 /* ===================================================
-   StrideAPI.gs — v38.141.0 — 2026-04-27 PST — Generated PDFs route to Supabase Storage; per-entity Drive folders deprecated
+   StrideAPI.gs — v38.142.0 — 2026-04-29 PST — Drive→Supabase docs backfill tool
+   v38.142.0: New admin-only POST action `backfillDocsFromDrive` that
+              walks a client's DRIVE_PARENT_FOLDER_ID for the four
+              entity subfolders (Shipments / Repairs / Will Calls /
+              Tasks) and copies every .pdf into Supabase Storage +
+              public.documents so historical PDFs surface in the Docs
+              tab on each entity panel.
+              Idempotent via existence check on
+              (tenant_id, context_type, context_id, file_name) — re-runs
+              never duplicate. Resumable via PropertiesService cursor
+              keyed on clientSheetId so Apps Script's 6-min execution
+              limit is non-fatal; admin polls until result.done === true.
+              Dry-run mode counts what would be copied without uploading.
+              Original Drive creation date is preserved as
+              documents.created_at so the Docs tab shows the historical
+              timestamp (the legacy PDF from 2025 doesn't show up dated
+              today). Editor entry point: runBackfillDocsForClient_TEST_.
+              Cursor reset endpoint also exposed for recovery.
+   v38.141.0: Generated PDFs route to Supabase Storage; per-entity Drive folders deprecated
    v38.141.0: Generated PDFs (DOC_RECEIVING, DOC_REPAIR_WORK_ORDER,
               DOC_WILL_CALL_RELEASE) now upload to Supabase Storage and
               insert a row in public.documents so they appear in the
@@ -6835,6 +6853,12 @@ function doPost(e) {
         return withAdminGuard_(callerEmail, function() { return jsonResponse_(handleQboDisconnect_()); });
       case "qboSetupHeaders":
         return withAdminGuard_(callerEmail, function() { return jsonResponse_(handleQboSetupHeaders_()); });
+
+      // v38.142.0: backfill historical Drive PDFs into Supabase / Docs tab.
+      // Resumable; admin polls until done===true. See
+      // api_backfillDocsFromDriveOneClient_ for the full spec.
+      case "backfillDocsFromDrive":
+        return withAdminGuard_(callerEmail, function() { return jsonResponse_(handleBackfillDocsFromDrive_(payload)); });
       case "updateQboStatus":
         return withAdminGuard_(callerEmail, function() { return jsonResponse_(handleUpdateQboStatus_(payload)); });
 
@@ -36162,4 +36186,341 @@ function removeResaleCertExpiryTrigger() {
   _resaleCertWriteRunLog_("removeResaleCertExpiryTrigger",
     "Daily resale-cert expiry trigger disabled (removed " + removed + ")", "");
   Logger.log("Removed " + removed + " trigger(s).");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// BACKFILL — copy historical Drive PDFs into Supabase Storage + documents table
+// so the entity Docs tab shows everything that ever existed in the Drive
+// folder hierarchy. v38.142.0.
+//
+// Walks each client's DRIVE_PARENT_FOLDER_ID for the four entity subfolders
+// (Shipments, Repairs, Will Calls, Tasks). For each per-entity subfolder
+// (named with the entity ID), copies every .pdf into Supabase. Idempotent
+// via a "(tenant_id, context_type, context_id, file_name)" existence check
+// so re-runs never duplicate.
+//
+// Apps Script has a 6-min execution limit; for clients with hundreds of
+// PDFs we resume across runs via a PropertiesService cursor keyed on
+// clientSheetId. The function returns when budget is exhausted; the next
+// call picks up where this one left off. When the entire client is done,
+// the cursor is cleared and totals are returned.
+//
+// Designed to be run two ways:
+//   1. From the Apps Script editor:
+//        runBackfillDocsForClient_TEST_("<clientSheetId>", { dryRun: true })
+//      Re-call until result.done === true.
+//   2. From the React app via the new POST `backfillDocsFromDrive` action.
+//
+// Dry-run mode counts what would be copied without uploading anything.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/** Wall-clock budget per execution. Leaves a margin under the 6-min limit. */
+var BACKFILL_DOCS_BUDGET_MS_ = 5 * 60 * 1000;
+
+/** Hard cap so we never spin forever if the cursor logic regresses. */
+var BACKFILL_DOCS_MAX_FILES_PER_RUN_ = 400;
+
+/** Map Drive entity-folder name → public.documents.context_type. */
+var BACKFILL_FOLDER_TO_CONTEXT_TYPE_ = {
+  "Shipments":   "shipment",
+  "Repairs":     "repair",
+  "Will Calls":  "willcall",
+  "Tasks":       "task"
+};
+
+/** Cursor key — one per client. Stored in script properties. */
+function backfillDocsCursorKey_(clientSheetId) {
+  return "doc_backfill_cursor_" + String(clientSheetId);
+}
+
+/**
+ * Has this PDF already been backfilled? Existence check on
+ * (tenant_id, context_type, context_id, file_name). Soft-deleted rows
+ * still count as "present" — operator can hard-delete then re-run if
+ * they want to recover a previously-removed PDF.
+ */
+function backfillDocs_alreadyExists_(tenantId, contextType, contextId, fileName) {
+  var url = prop_("SUPABASE_URL");
+  var key = prop_("SUPABASE_SERVICE_ROLE_KEY");
+  if (!url || !key) return false; // can't check, assume no
+  try {
+    var path = "/rest/v1/documents?select=id"
+      + "&tenant_id=eq."     + encodeURIComponent(tenantId)
+      + "&context_type=eq."  + encodeURIComponent(contextType)
+      + "&context_id=eq."    + encodeURIComponent(contextId)
+      + "&file_name=eq."     + encodeURIComponent(fileName)
+      + "&limit=1";
+    var resp = UrlFetchApp.fetch(url + path, {
+      method: "get",
+      headers: { "apikey": key, "Authorization": "Bearer " + key },
+      muteHttpExceptions: true
+    });
+    var code = resp.getResponseCode();
+    if (code < 200 || code >= 300) return false;
+    var rows = JSON.parse(resp.getContentText());
+    return Array.isArray(rows) && rows.length > 0;
+  } catch (_) {
+    return false;
+  }
+}
+
+/**
+ * Upload one Drive PDF to Supabase Storage + insert documents row.
+ * Preserves the Drive file's original creation date as documents.created_at
+ * so the Docs tab shows the historical timestamp instead of "today".
+ *
+ * Returns { ok, error }.
+ */
+function backfillDocs_uploadOne_(driveFile, tenantId, contextType, contextId) {
+  try {
+    var blob = driveFile.getBlob();
+    var fileName = String(driveFile.getName() || "document.pdf");
+    if (!/\.pdf$/i.test(fileName)) fileName += ".pdf";
+
+    var url = prop_("SUPABASE_URL");
+    var key = prop_("SUPABASE_SERVICE_ROLE_KEY");
+    if (!url || !key) return { ok: false, error: "Supabase creds missing" };
+
+    var safeName = fileName.replace(/[^a-zA-Z0-9._-]/g, "_").slice(-120);
+    var ts = driveFile.getDateCreated().getTime();
+    var rand = Utilities.getUuid().replace(/-/g, "").slice(0, 6);
+    var storageKey = String(tenantId) + "/" + contextType + "-" + String(contextId) + "/" + ts + "-" + rand + "-" + safeName;
+
+    // Upload to storage bucket `documents`.
+    var bytes = blob.getBytes();
+    var upResp = UrlFetchApp.fetch(url + "/storage/v1/object/documents/" + storageKey, {
+      method: "POST",
+      headers: {
+        "Authorization": "Bearer " + key,
+        "apikey":        key,
+        "Content-Type":  "application/pdf",
+        "x-upsert":      "true"
+      },
+      payload: bytes,
+      muteHttpExceptions: true
+    });
+    var upCode = upResp.getResponseCode();
+    if (upCode < 200 || upCode >= 300) {
+      return { ok: false, error: "storage HTTP " + upCode + ": " + upResp.getContentText().substring(0, 200) };
+    }
+
+    // Insert documents row, preserving original Drive timestamp.
+    var rowResp = UrlFetchApp.fetch(url + "/rest/v1/documents", {
+      method: "POST",
+      headers: {
+        "Authorization": "Bearer " + key,
+        "apikey":        key,
+        "Content-Type":  "application/json",
+        "Prefer":        "return=minimal"
+      },
+      payload: JSON.stringify({
+        tenant_id:        tenantId,
+        context_type:     contextType,
+        context_id:       String(contextId),
+        storage_key:      storageKey,
+        file_name:        safeName,
+        file_size:        bytes.length,
+        mime_type:        "application/pdf",
+        uploaded_by:      null,
+        uploaded_by_name: "Drive backfill (auto)",
+        created_at:       driveFile.getDateCreated().toISOString()
+      }),
+      muteHttpExceptions: true
+    });
+    var rowCode = rowResp.getResponseCode();
+    if (rowCode < 200 || rowCode >= 300) {
+      return { ok: false, error: "row HTTP " + rowCode + ": " + rowResp.getContentText().substring(0, 200) };
+    }
+
+    return { ok: true, storageKey: storageKey };
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+}
+
+/**
+ * Worker: walks one client's Drive structure, copies PDFs to Supabase,
+ * resumable via PropertiesService cursor. Returns:
+ *   {
+ *     ok, done, dryRun, clientSheetId, scanned, copied, skipped,
+ *     errored, errors: [...], cursor: { entityType, lastFolderId } | null
+ *   }
+ *
+ * Caller should re-invoke until `done === true`.
+ */
+function api_backfillDocsFromDriveOneClient_(clientSheetId, options) {
+  var opts = options || {};
+  var dryRun = !!opts.dryRun;
+  var startedAt = Date.now();
+  var counters = { scanned: 0, copied: 0, skipped: 0, errored: 0, errors: [] };
+  var props = PropertiesService.getScriptProperties();
+  var cursorKey = backfillDocsCursorKey_(clientSheetId);
+
+  var ss;
+  try { ss = SpreadsheetApp.openById(clientSheetId); }
+  catch (e) { return { ok: false, error: "Cannot open client sheet: " + e.message }; }
+
+  var settings = api_readSettings_(ss);
+  var parentId = String(settings["DRIVE_PARENT_FOLDER_ID"] || "").trim();
+  if (!parentId) return { ok: false, error: "DRIVE_PARENT_FOLDER_ID not set in client Settings" };
+
+  var parent;
+  try { parent = DriveApp.getFolderById(parentId); }
+  catch (e) { return { ok: false, error: "Cannot open Drive parent folder: " + e.message }; }
+
+  // Resume cursor: { entityIdx, lastEntityFolderId } where entityIdx indexes
+  // BACKFILL_FOLDER_NAMES_. lastEntityFolderId is the last per-entity
+  // subfolder we processed (so we can skip ahead to its sibling).
+  var entityNames = ["Shipments", "Repairs", "Will Calls", "Tasks"];
+  var savedCursor = null;
+  try {
+    var raw = props.getProperty(cursorKey);
+    if (raw) savedCursor = JSON.parse(raw);
+  } catch (_) {}
+  var entityIdx = savedCursor && typeof savedCursor.entityIdx === "number" ? savedCursor.entityIdx : 0;
+  var lastEntityFolderId = savedCursor && savedCursor.lastEntityFolderId || null;
+  var done = false;
+
+  for (; entityIdx < entityNames.length; entityIdx++) {
+    var entityName = entityNames[entityIdx];
+    var contextType = BACKFILL_FOLDER_TO_CONTEXT_TYPE_[entityName];
+
+    var entitySubfolder = null;
+    try {
+      var subIt = parent.getFoldersByName(entityName);
+      if (subIt.hasNext()) entitySubfolder = subIt.next();
+    } catch (_) {}
+    if (!entitySubfolder) {
+      lastEntityFolderId = null; // fresh start for next type
+      continue;
+    }
+
+    // Iterate per-entity folders. We can't seek directly to lastEntityFolderId
+    // without re-walking, so we skip until we find it then continue.
+    var perFolders = entitySubfolder.getFolders();
+    var skippingUntilFound = !!lastEntityFolderId;
+    while (perFolders.hasNext()) {
+      // Time / count budget check before each entity folder.
+      if (Date.now() - startedAt > BACKFILL_DOCS_BUDGET_MS_ ||
+          counters.copied + counters.skipped >= BACKFILL_DOCS_MAX_FILES_PER_RUN_) {
+        // Save cursor and bail.
+        props.setProperty(cursorKey, JSON.stringify({
+          entityIdx: entityIdx,
+          lastEntityFolderId: lastEntityFolderId
+        }));
+        return {
+          ok: true,
+          done: false,
+          dryRun: dryRun,
+          clientSheetId: clientSheetId,
+          scanned: counters.scanned, copied: counters.copied,
+          skipped: counters.skipped, errored: counters.errored,
+          errors: counters.errors.slice(0, 20),
+          cursor: { entityType: contextType, lastEntityFolderId: lastEntityFolderId }
+        };
+      }
+
+      var perFolder = perFolders.next();
+      if (skippingUntilFound) {
+        if (perFolder.getId() === lastEntityFolderId) skippingUntilFound = false;
+        continue;
+      }
+
+      var contextId = String(perFolder.getName() || "").trim();
+      if (!contextId) continue;
+
+      // List PDFs inside this per-entity folder.
+      try {
+        var files = perFolder.getFilesByType(MimeType.PDF);
+        while (files.hasNext()) {
+          var f = files.next();
+          counters.scanned++;
+          var fName = String(f.getName() || "").replace(/[^a-zA-Z0-9._-]/g, "_").slice(-120);
+          if (!/\.pdf$/i.test(fName)) fName += ".pdf";
+
+          if (backfillDocs_alreadyExists_(clientSheetId, contextType, contextId, fName)) {
+            counters.skipped++;
+            continue;
+          }
+          if (dryRun) {
+            counters.copied++; // count as "would copy"
+            continue;
+          }
+          var res = backfillDocs_uploadOne_(f, clientSheetId, contextType, contextId);
+          if (res.ok) counters.copied++;
+          else {
+            counters.errored++;
+            if (counters.errors.length < 50) {
+              counters.errors.push({
+                contextType: contextType, contextId: contextId,
+                fileName: fName, error: res.error
+              });
+            }
+          }
+        }
+      } catch (folderErr) {
+        counters.errored++;
+        counters.errors.push({
+          contextType: contextType, contextId: contextId,
+          fileName: "<folder iteration>", error: String(folderErr)
+        });
+      }
+
+      lastEntityFolderId = perFolder.getId();
+    }
+
+    // Done with this entity type — reset folder cursor for the next one.
+    lastEntityFolderId = null;
+  }
+
+  // Fully done: clear cursor.
+  props.deleteProperty(cursorKey);
+  done = true;
+
+  return {
+    ok: true, done: done, dryRun: dryRun,
+    clientSheetId: clientSheetId,
+    scanned: counters.scanned, copied: counters.copied,
+    skipped: counters.skipped, errored: counters.errored,
+    errors: counters.errors.slice(0, 20),
+    cursor: null
+  };
+}
+
+/**
+ * Reset the cursor for a client — useful if a previous run was aborted in
+ * a bad state and you want to re-scan from the top.
+ */
+function api_resetBackfillDocsCursor_(clientSheetId) {
+  PropertiesService.getScriptProperties().deleteProperty(backfillDocsCursorKey_(clientSheetId));
+  return { ok: true, cleared: clientSheetId };
+}
+
+/**
+ * Editor entry point — call from the Apps Script IDE for a one-off run.
+ * Re-invoke until result.done === true.
+ *   runBackfillDocsForClient_TEST_("<clientSheetId>", { dryRun: true });
+ *   runBackfillDocsForClient_TEST_("<clientSheetId>");  // executes
+ */
+function runBackfillDocsForClient_TEST_(clientSheetId, options) {
+  var r = api_backfillDocsFromDriveOneClient_(clientSheetId, options || {});
+  Logger.log(JSON.stringify(r, null, 2));
+  return r;
+}
+
+/**
+ * POST endpoint handler. Admin-only — checked by caller.
+ *   { action: "backfillDocsFromDrive", clientSheetId, dryRun? , reset? }
+ */
+function handleBackfillDocsFromDrive_(payload) {
+  var clientSheetId = String((payload && payload.clientSheetId) || "").trim();
+  if (!clientSheetId) return errorResponse_("clientSheetId required", "BAD_REQUEST");
+  if (payload && payload.reset) {
+    return successResponse_(api_resetBackfillDocsCursor_(clientSheetId));
+  }
+  var r = api_backfillDocsFromDriveOneClient_(clientSheetId, {
+    dryRun: !!(payload && payload.dryRun)
+  });
+  if (!r.ok) return errorResponse_(r.error || "Backfill failed", "BACKFILL_ERROR");
+  return successResponse_(r);
 }
