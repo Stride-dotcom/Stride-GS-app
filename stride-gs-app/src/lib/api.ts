@@ -3802,6 +3802,42 @@ export function postFixMissingFolders(
   );
 }
 
+// ─── Drive→Supabase doc backfill (admin) ─────────────────────────────────────
+//
+// Walks one client's DRIVE_PARENT_FOLDER_ID for the four entity subfolders
+// and uploads every PDF into Supabase Storage + public.documents so historical
+// PDFs surface in the Docs tab. Backed by handleBackfillDocsFromDrive_ in
+// StrideAPI.gs (v38.142.0). Resumable: caller polls until result.done === true.
+export interface BackfillDocsResponse {
+  ok: boolean;
+  done: boolean;
+  dryRun: boolean;
+  clientSheetId: string;
+  scanned: number;
+  copied: number;
+  skipped: number;
+  errored: number;
+  errors: Array<{ contextType: string; contextId: string; fileName: string; error: string }>;
+  cursor: { entityType: string; lastEntityFolderId: string | null } | null;
+}
+
+export function postBackfillDocsFromDrive(
+  clientSheetId: string,
+  opts: { dryRun?: boolean; reset?: boolean } = {},
+  signal?: AbortSignal
+) {
+  return apiPost<BackfillDocsResponse>(
+    'backfillDocsFromDrive',
+    {
+      clientSheetId,
+      dryRun: !!opts.dryRun,
+      reset:  !!opts.reset,
+    } as unknown as Record<string, unknown>,
+    {},
+    { signal, timeoutMs: API_POST_TIMEOUT_LONG_MS }
+  );
+}
+
 // ─── Auto-Generated Item IDs ─────────────────────────────────────────────────
 
 export interface AutoIdSettingResponse {

@@ -28,6 +28,7 @@ import { WriteButton } from '../components/shared/WriteButton';
 import { QBOConnect } from '../components/settings/QBOConnect';
 import { IntakesPanel } from '../components/settings/IntakesPanel';
 import { PublicFormSettings } from '../components/settings/PublicFormSettings';
+import { BackfillDocsPanel } from '../components/settings/BackfillDocsPanel';
 import { useClientTcStatus } from '../hooks/useClientTcStatus';
 import { IntakeEmailModal } from '../components/shared/IntakeEmailModal';
 import { supabase } from '../lib/supabase';
@@ -4086,6 +4087,9 @@ export function Settings() {
                     </button>
                   </div>
                 </div>
+
+                {/* Backfill historical Drive PDFs into Supabase Docs */}
+                <BackfillDocsPanel apiClients={apiClients} apiConfigured={apiConfigured} />
 
                 {/* Bulk Sync to Supabase */}
                 <div style={card}>
