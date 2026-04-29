@@ -2153,6 +2153,64 @@ export async function fetchDtOrderNotes(dtOrderId: string): Promise<DtSideNote[]
   }));
 }
 
+// ─── DT POD photos (sync-back from dt-sync-statuses v10) ─────────────────
+
+export interface DtOrderPhoto {
+  id: string;
+  dtImageId: string;
+  dtImageName: string;
+  capturedAt: string | null;
+  fullUrl: string | null;       // signed URL into dt-pod-photos bucket
+  thumbnailUrl: string | null;  // signed URL for the thumbnail
+  storagePath: string | null;   // raw path (debugging)
+  fetchError: string | null;
+}
+
+/**
+ * Fetch all POD photos for an order, returning signed URLs into the
+ * private dt-pod-photos bucket. The DT-side URLs expire 30 min after
+ * each export.xml call so we never link to them directly — the edge
+ * function captures bytes into storage and the UI reads from there.
+ */
+export async function fetchDtOrderPhotos(dtOrderId: string): Promise<DtOrderPhoto[]> {
+  const { data, error } = await supabase
+    .from('dt_order_photos')
+    .select('id, dt_image_id, dt_image_name, captured_at, storage_path, thumbnail_path, fetch_error')
+    .eq('dt_order_id', dtOrderId)
+    .order('captured_at', { ascending: true });
+  if (error || !data) return [];
+  // Generate one signed URL per asset. 1 hr TTL — long enough for the
+  // user to browse photos / open a lightbox without re-signing.
+  const out: DtOrderPhoto[] = [];
+  for (const r of data as Array<Record<string, unknown>>) {
+    let fullUrl: string | null = null;
+    let thumbnailUrl: string | null = null;
+    if (r.storage_path) {
+      const { data: signed } = await supabase.storage
+        .from('dt-pod-photos')
+        .createSignedUrl(String(r.storage_path), 3600);
+      if (signed?.signedUrl) fullUrl = signed.signedUrl;
+    }
+    if (r.thumbnail_path) {
+      const { data: signed } = await supabase.storage
+        .from('dt-pod-photos')
+        .createSignedUrl(String(r.thumbnail_path), 3600);
+      if (signed?.signedUrl) thumbnailUrl = signed.signedUrl;
+    }
+    out.push({
+      id:           String(r.id ?? ''),
+      dtImageId:    String(r.dt_image_id ?? ''),
+      dtImageName:  String(r.dt_image_name ?? ''),
+      capturedAt:   r.captured_at ? String(r.captured_at) : null,
+      fullUrl,
+      thumbnailUrl,
+      storagePath:  r.storage_path ? String(r.storage_path) : null,
+      fetchError:   r.fetch_error ? String(r.fetch_error) : null,
+    });
+  }
+  return out;
+}
+
 // ─── Delivery pricing fetchers (session 68) ───────────────────────────────
 
 /** Look up a single ZIP → zone/rate/service days. Returns null if not in the table. */
