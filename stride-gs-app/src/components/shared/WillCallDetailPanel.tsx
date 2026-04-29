@@ -1,6 +1,7 @@
 import React, { useState, useMemo, useCallback, useEffect, useRef } from 'react';
 import { X, Truck, Package, Calendar, Phone, User, DollarSign, CheckCircle2, CreditCard, FileText, Loader2, AlertTriangle, FolderOpen, Info, Pencil, Save, Play, MoreHorizontal } from 'lucide-react';
 import { useIsMobile } from '../../hooks/useIsMobile';
+import { FloatingActionMenu, type FABAction } from './FloatingActionMenu';
 import { FolderButton } from './FolderButton';
 import { DeepLink } from './DeepLink';
 import { TabbedDetailPanel, type TabbedDetailPanelTab } from './TabbedDetailPanel';
@@ -67,7 +68,8 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
   // Stage B — reopen (undo Release or undo Start)
   const [reopenLoading, setReopenLoading] = useState(false);
   const [reopenError, setReopenError] = useState<string | null>(null);
-  const { isMobile } = useIsMobile();
+  const { isMobile, isTablet } = useIsMobile();
+  const isCompactViewport = isMobile || isTablet;
   const [overflowOpen, setOverflowOpen] = useState(false);
   // v2026-04-22 — panel frame (backdrop, resize, header) is provided by
   // TabbedDetailPanel. Adapter focuses on entity-specific state + tab content.
@@ -1308,7 +1310,19 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
   const wcLight: React.CSSProperties = { ...pagePillBase, background: '#fff', color: theme.colors.text, border: `1px solid ${theme.colors.border}` };
   const wcRed: React.CSSProperties = { ...pagePillBase, background: '#B91C1C', color: '#fff' };
 
-  const pageFooter = (
+  // FAB actions mirror the inline pill row. removeMode is a temporary
+  // UI state with its own Cancel/Confirm pills; we keep those inline so
+  // the operator doesn't have to re-open the FAB to confirm.
+  const fabActions: FABAction[] = removeMode ? [] : [
+    { label: genDocLoading ? 'Regenerating…' : 'Pickup Doc', icon: <Play size={16} />, onClick: handleGenerateWcDoc },
+    { label: printLoading ? 'Loading…' : 'Release Doc', icon: <FileText size={16} />, onClick: handlePrintRelease },
+    ...(isActive && !cancelResult ? [{ label: cancelling ? 'Cancelling…' : 'Cancel WC', icon: <AlertTriangle size={16} />, onClick: handleCancelWC, color: '#B91C1C' }] : []),
+    ...(isActive && !releaseResult && !removeResult ? [{ label: 'Remove Items…', icon: <Package size={16} />, onClick: () => { setRemoveMode(true); setRemoveSelected(new Set()); setRemoveError(null); } }] : []),
+    ...(!isActive && (user?.role === 'admin' || user?.role === 'staff') ? [{ label: 'Reopen WC', icon: <Play size={16} />, onClick: handleReopenWc }] : []),
+    ...(canRelease && isActive && !releaseResult && !removeResult && releaseMode === 'none' && allItemIds.length > 1 ? [{ label: 'Release Some…', icon: <Truck size={16} />, onClick: () => { setPartialSelected(new Set(allItemIds)); setReleaseMode('partial'); }, color: theme.colors.orange }] : []),
+  ];
+
+  const pageFooter = isCompactViewport && !removeMode ? null : (
     <>
       {!removeMode && (
         <button onClick={handleGenerateWcDoc} disabled={genDocLoading} style={wcDark}>
@@ -1355,17 +1369,20 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
 
   if (renderAsPage) {
     return (
-      <EntityPage
-        entityLabel="Will Call"
-        entityId={wc.wcNumber}
-        clientName={wc.clientName}
-        statusBadge={belowIdContent}
-        headerActions={headerActions}
-        statusStrip={statusStrip}
-        tabs={pageTabs as unknown as Parameters<typeof EntityPage>[0]['tabs']}
-        initialTabId="details"
-        footer={pageFooter}
-      />
+      <>
+        <EntityPage
+          entityLabel="Will Call"
+          entityId={wc.wcNumber}
+          clientName={wc.clientName}
+          statusBadge={belowIdContent}
+          headerActions={headerActions}
+          statusStrip={statusStrip}
+          tabs={pageTabs as unknown as Parameters<typeof EntityPage>[0]['tabs']}
+          initialTabId="details"
+          footer={pageFooter}
+        />
+        <FloatingActionMenu show={isCompactViewport && !removeMode} actions={fabActions} />
+      </>
     );
   }
 

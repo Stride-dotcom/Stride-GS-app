@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useIsMobile } from '../../hooks/useIsMobile';
+import { FloatingActionMenu, type FABAction } from './FloatingActionMenu';
 import { Truck, Package, FileText, Mail, ClipboardList, LayoutList } from 'lucide-react';
 import { DeepLink } from './DeepLink';
 import { ItemIdBadges } from './ItemIdBadges';
@@ -75,7 +76,8 @@ const STATUS_CFG: Record<string, { bg: string; color: string }> = {
 export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onItemsChanged, renderAsPage }: Props) {
   // (I)(A)(R) indicators for every item row in the shipment items table.
   const { inspOpenItems, inspDoneItems, asmOpenItems, asmDoneItems, repairOpenItems, repairDoneItems, wcOpenItems, wcDoneItems } = useItemIndicators(shipment.clientSheetId);
-  const { isMobile } = useIsMobile();
+  const { isMobile, isTablet } = useIsMobile();
+  const isCompactViewport = isMobile || isTablet;
   const navigate = useNavigate();
   const sc = STATUS_CFG[shipment.status] || STATUS_CFG.Received;
   const isStaffAdmin = userRole === 'admin' || userRole === 'staff';
@@ -423,7 +425,18 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
   const darkPill: React.CSSProperties = { ...pagePillBase, background: '#1C1C1C', color: '#fff' };
   const orangePill: React.CSSProperties = { ...pagePillBase, background: theme.colors.orange, color: '#fff' };
   const hasItems = items.length > 0;
-  const pageFooter = (
+  // FAB action set mirrors the inline pill row. Used on phone + tablet
+  // viewports where the inline footer is suppressed below.
+  const fabActions: FABAction[] = [
+    { label: 'View Inventory', icon: <LayoutList size={16} />, onClick: () => navigate('/inventory', { state: { shipmentFilter: shipment.shipmentNo } }) },
+    ...(shipment.folderUrl ? [{ label: 'Folder', icon: <Truck size={16} />, onClick: () => window.open(shipment.folderUrl!, '_blank', 'noopener,noreferrer') }] : []),
+    { label: 'Receiving Doc', icon: <FileText size={16} />, onClick: () => { /* Phase 8 */ } },
+    { label: 'Resend Email', icon: <Mail size={16} />, onClick: () => { /* Phase 8 */ } },
+    ...(hasItems ? [{ label: 'Inspection', icon: <ClipboardList size={16} />, onClick: () => openAction('task') }] : []),
+    ...(hasItems && canTransfer ? [{ label: 'Transfer', icon: <Package size={16} />, onClick: () => openAction('transfer') }] : []),
+    ...(hasItems ? [{ label: 'Create WC', icon: <Truck size={16} />, onClick: () => openAction('wc'), color: theme.colors.orange }] : []),
+  ];
+  const pageFooter = isCompactViewport ? null : (
     <>
       <button onClick={() => { navigate('/inventory', { state: { shipmentFilter: shipment.shipmentNo } }); }} style={darkPill}>
         <LayoutList size={13} /> View Inventory
@@ -460,15 +473,18 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
   return (
     <>
       {renderAsPage ? (
-        <EntityPage
-          entityLabel="Shipment"
-          entityId={shipment.shipmentNo}
-          clientName={shipment.client}
-          statusBadge={<Badge t={shipment.status} bg={sc.bg} color={sc.color} />}
-          tabs={pageCustomTabs as unknown as Parameters<typeof EntityPage>[0]['tabs']}
-          initialTabId="details"
-          footer={pageFooter}
-        />
+        <>
+          <EntityPage
+            entityLabel="Shipment"
+            entityId={shipment.shipmentNo}
+            clientName={shipment.client}
+            statusBadge={<Badge t={shipment.status} bg={sc.bg} color={sc.color} />}
+            tabs={pageCustomTabs as unknown as Parameters<typeof EntityPage>[0]['tabs']}
+            initialTabId="details"
+            footer={pageFooter}
+          />
+          <FloatingActionMenu show={isCompactViewport} actions={fabActions} />
+        </>
       ) : (
         <TabbedDetailPanel
           title={shipment.shipmentNo}

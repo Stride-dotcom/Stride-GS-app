@@ -22,6 +22,7 @@ import { writeSyncFailed } from '../../lib/syncEvents';
 import { entityEvents } from '../../lib/entityEvents';
 import { useLocations } from '../../hooks/useLocations';
 import { useIsMobile } from '../../hooks/useIsMobile';
+import { FloatingActionMenu, type FABAction } from './FloatingActionMenu';
 import type { CompleteTaskResponse, StartTaskResponse } from '../../lib/api';
 import { useAuth } from '../../contexts/AuthContext';
 import { SERVICE_CODES } from '../../lib/constants';
@@ -75,7 +76,8 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
   const isInspection = task.type === 'INSP';
 
   const { user } = useAuth();
-  const { isMobile } = useIsMobile();
+  const { isMobile, isTablet } = useIsMobile();
+  const isCompactViewport = isMobile || isTablet;
 
   const [notes, setNotes] = useState(task.taskNotes || task.notes || '');
   const [overflowOpen, setOverflowOpen] = useState(false);
@@ -1341,7 +1343,19 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
 
   const showStart = isOpen && !completed && !isAlreadyStarted && !startTaskResult;
   const showPassFail = isOpen && !completed && (isAlreadyStarted || !!startTaskResult);
-  const pageFooter = (
+
+  // FAB actions mirror the inline pill row. Editing keeps the inline
+  // Cancel/Save row (only two pills, easy to reach). Pass/Fail also stays
+  // inline because choosing the result is the central UX of an in-progress
+  // task and shouldn't be hidden behind a tap.
+  const fabActions: FABAction[] = (isEditingTask || showPassFail) ? [] : [
+    ...(isOpen && !completed ? [{ label: 'Cancel Task', icon: <XCircle size={16} />, onClick: handleCancelTask }] : []),
+    ...(task.itemId && !repairStatus ? [{ label: repairRequesting ? 'Requesting…' : 'Repair Quote', icon: <Wrench size={16} />, onClick: () => void handleRequestRepair() }] : []),
+    ...(isOpen && !completed && !isEditingTask ? [{ label: 'Edit', icon: <Pencil size={16} />, onClick: () => setIsEditingTask(true) }] : []),
+    ...(showStart ? [{ label: startTaskLoading ? 'Starting…' : 'Start Task', icon: <Play size={16} />, onClick: () => handleStartTask(), color: theme.colors.orange }] : []),
+  ];
+
+  const pageFooter = isCompactViewport && !isEditingTask && !showPassFail ? null : (
     <>
       {/* Cancel Task — shown for open/in-progress */}
       {isOpen && !completed && (
@@ -1417,17 +1431,20 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
 
   if (renderAsPage) {
     return (
-      <EntityPage
-        entityLabel="Task"
-        entityId={task.taskId}
-        clientName={task.clientName}
-        statusBadge={belowIdContent}
-        headerActions={headerActions}
-        statusStrip={statusStrip}
-        tabs={pageTabs as unknown as Parameters<typeof EntityPage>[0]['tabs']}
-        initialTabId="details"
-        footer={pageFooter}
-      />
+      <>
+        <EntityPage
+          entityLabel="Task"
+          entityId={task.taskId}
+          clientName={task.clientName}
+          statusBadge={belowIdContent}
+          headerActions={headerActions}
+          statusStrip={statusStrip}
+          tabs={pageTabs as unknown as Parameters<typeof EntityPage>[0]['tabs']}
+          initialTabId="details"
+          footer={pageFooter}
+        />
+        <FloatingActionMenu show={isCompactViewport && !isEditingTask && !showPassFail} actions={fabActions} />
+      </>
     );
   }
 

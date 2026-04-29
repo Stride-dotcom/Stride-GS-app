@@ -17,6 +17,7 @@ import type { TabbedDetailPanelTab } from './TabbedDetailPanel';
 import { EntityPage } from './EntityPage';
 import { buildDeepLink } from '../../lib/deepLinks';
 import { useIsMobile } from '../../hooks/useIsMobile';
+import { FloatingActionMenu, type FABAction } from './FloatingActionMenu';
 import { usePhotos } from '../../hooks/usePhotos';
 import { useDocuments } from '../../hooks/useDocuments';
 import { useEntityNotes } from '../../hooks/useEntityNotes';
@@ -512,7 +513,11 @@ export function ItemDetailPanel({
   renderAsPage,
 }: Props) {
   // Panel frame + resize + backdrop are handled by TabbedDetailPanel now.
-  const { isMobile } = useIsMobile();
+  const { isMobile, isTablet } = useIsMobile();
+  // Compact viewports (phone + tablet) collapse the inline action footer
+  // into a small floating action button so the entity body isn't pinned
+  // behind a row of pills that ate ~half the visible screen on iPhone.
+  const isCompactViewport = isMobile || isTablet;
   const statusCfg: Record<string, { bg: string; color: string }> = {
     Active: { bg: '#F0FDF4', color: '#15803D' },
     Released: { bg: '#EFF6FF', color: '#1D4ED8' },
@@ -1271,7 +1276,20 @@ export function ItemDetailPanel({
   const orangePill: React.CSSProperties = { ...pagePillBase, background: theme.colors.orange, color: '#fff' };
   const lightPill: React.CSSProperties = { ...pagePillBase, background: '#fff', color: theme.colors.text, border: `1px solid ${theme.colors.border}` };
 
+  // FAB action set mirrors the desktop pill row. Used on compact
+  // viewports where the inline footer is suppressed below.
+  const fabActions: FABAction[] = isEditing ? [] : [
+    ...(onCreateTask ? [{ label: 'Create Task', icon: <ClipboardList size={16} />, onClick: onCreateTask }] : []),
+    ...(!repairStatus ? [{ label: repairRequesting ? 'Requesting…' : 'Repair Quote', icon: <Wrench size={16} />, onClick: () => void handleRequestRepair() }] : []),
+    ...(onCreateWillCall ? [{ label: 'Add to WC', icon: <Truck size={16} />, onClick: onCreateWillCall }] : []),
+    ...(onTransfer ? [{ label: 'Transfer', icon: <ExternalLink size={16} />, onClick: onTransfer }] : []),
+    ...(canEditBasic ? [{ label: 'Edit', icon: <Pencil size={16} />, onClick: handleEditStart, color: theme.colors.orange }] : []),
+  ];
+
   const pageFooter = isEditing ? (
+    // Editing mode keeps the inline Cancel + Save row even on compact
+    // viewports — only two buttons, easy to reach, and a FAB for "save"
+    // is awkward UX while the form is dirty.
     <>
       <button onClick={handleEditCancel} disabled={saving} style={lightPill}>Cancel</button>
       <button onClick={handleSave} disabled={saving} style={orangePill}>
@@ -1279,7 +1297,7 @@ export function ItemDetailPanel({
         {saving ? 'Saving…' : 'Save'}
       </button>
     </>
-  ) : (
+  ) : isCompactViewport ? null : (
     <>
       {onCreateTask && (
         <button onClick={onCreateTask} style={darkPill}>
@@ -1326,6 +1344,7 @@ export function ItemDetailPanel({
           initialTabId="details"
           footer={pageFooter}
         />
+        <FloatingActionMenu show={isCompactViewport && !isEditing} actions={fabActions} />
         <style>{`@keyframes slideIn { from { transform: translateX(100%); } to { transform: translateX(0); } }`}</style>
       </>
     );

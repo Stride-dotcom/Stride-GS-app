@@ -23,6 +23,8 @@ import type { ApiRepair, SendRepairQuoteResponse, RespondToRepairQuoteResponse, 
 import { supabase } from '../../lib/supabase';
 import { writeSyncFailed } from '../../lib/syncEvents';
 import { useAuth } from '../../contexts/AuthContext';
+import { useIsMobile } from '../../hooks/useIsMobile';
+import { FloatingActionMenu, type FABAction } from './FloatingActionMenu';
 
 import type { Repair } from '../../lib/types';
 interface Props {
@@ -56,6 +58,8 @@ const input: React.CSSProperties = { width: '100%', padding: '8px 10px', fontSiz
 
 export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepairPatch, clearRepairPatch, renderAsPage }: Props) {
   const { user } = useAuth();
+  const { isMobile, isTablet } = useIsMobile();
+  const isCompactViewport = isMobile || isTablet;
   // v2026-04-22 — panel frame handled by TabbedDetailPanel shell.
 
   // Derive effective status from submit result (optimistic update).
@@ -1630,7 +1634,37 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
 
   const s = effectiveStatus;
   const active = !['Complete', 'Cancelled', 'Declined'].includes(s);
-  const pageFooter = (
+
+  // FAB actions mirror the inline pill row exactly. Sub-prompts (the
+  // "Repair failed — what would you like to do?" branch) and success
+  // cards still render inline above the footer area; the FAB only
+  // surfaces the primary trigger buttons.
+  const cancelRepair = async () => {
+    const ok = typeof window !== 'undefined' && window.confirm('Cancel this repair?');
+    if (!ok) return;
+    try {
+      setSubmitting(true);
+      const resp = await (await import('../../lib/api')).postCancelRepair({ repairId: repair.repairId }, repair.clientSheetId);
+      if (resp.ok && resp.data?.success) { setEffectiveStatus('Cancelled'); onRepairUpdated?.(); }
+    } finally { setSubmitting(false); }
+  };
+  const fabActions: FABAction[] = [
+    ...(active ? [{ label: 'Cancel Repair', icon: <XCircle size={16} />, onClick: () => { void cancelRepair(); } }] : []),
+    ...(canStaffEdit && (s === 'Complete' || s === 'In Progress') ? [{ label: 'Reopen', icon: <Undo2 size={16} />, onClick: handleReopenRepairClick }] : []),
+    ...(s === 'Pending Quote' ? [{ label: 'Send Quote', icon: <Send size={16} />, onClick: handleSendQuote, color: theme.colors.orange }] : []),
+    ...(s === 'Quote Sent' ? [
+      { label: 'Decline', icon: <XCircle size={16} />, onClick: () => handleRespond('Decline'), color: '#B91C1C' },
+      { label: 'Approve', icon: <CheckCircle2 size={16} />, onClick: () => handleRespond('Approve'), color: '#15803D' },
+    ] : []),
+    ...(s === 'Approved' && canStaffEdit ? [{ label: 'Start Repair', icon: <Play size={16} />, onClick: handleStartRepair, color: theme.colors.orange }] : []),
+    ...(s === 'In Progress' ? [
+      { label: 'Failed', icon: <XCircle size={16} />, onClick: async () => handleResult('fail'), color: '#B91C1C' },
+      { label: 'Complete', icon: <CheckCircle2 size={16} />, onClick: async () => handleResult('pass'), color: '#15803D' },
+    ] : []),
+    ...((s === 'In Progress' || s === 'Complete') && canStaffEdit ? [{ label: 'Regenerate WO', icon: <Wrench size={16} />, onClick: handleStartRepair }] : []),
+  ];
+
+  const pageFooter = isCompactViewport ? null : (
     <>
       {/* Cancel Repair — active, not editing */}
       {active && (
@@ -1695,17 +1729,20 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
 
   if (renderAsPage) {
     return (
-      <EntityPage
-        entityLabel="Repair"
-        entityId={repair.repairId}
-        clientName={repair.clientName}
-        statusBadge={belowIdContent}
-        headerActions={headerActions}
-        statusStrip={statusStrip}
-        tabs={pageTabs as unknown as Parameters<typeof EntityPage>[0]['tabs']}
-        initialTabId={effectiveStatus === 'Pending Quote' || effectiveStatus === 'Quote Sent' || effectiveStatus === 'Approved' ? 'quote' : 'details'}
-        footer={pageFooter}
-      />
+      <>
+        <EntityPage
+          entityLabel="Repair"
+          entityId={repair.repairId}
+          clientName={repair.clientName}
+          statusBadge={belowIdContent}
+          headerActions={headerActions}
+          statusStrip={statusStrip}
+          tabs={pageTabs as unknown as Parameters<typeof EntityPage>[0]['tabs']}
+          initialTabId={effectiveStatus === 'Pending Quote' || effectiveStatus === 'Quote Sent' || effectiveStatus === 'Approved' ? 'quote' : 'details'}
+          footer={pageFooter}
+        />
+        <FloatingActionMenu show={isCompactViewport} actions={fabActions} />
+      </>
     );
   }
 
