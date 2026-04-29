@@ -1,5 +1,12 @@
 /* ===================================================
-   StrideAPI.gs — v38.142.1 — 2026-04-29 PST — Backfill: rename runner functions so Run dropdown shows them
+   StrideAPI.gs — v38.142.2 — 2026-04-29 PST — Backfill: fix successResponse_ regression in handler
+   v38.142.2: handleBackfillDocsFromDrive_ called successResponse_(...)
+              which doesn't exist in this codebase — every backfill run
+              from the React UI threw "ReferenceError: successResponse_
+              is not defined" with no work done. Replaced with the
+              standard pattern (handler returns plain { ok, ... }; the
+              router wraps it via jsonResponse_).
+   v38.142.1: Backfill: rename runner functions so Run dropdown shows them
    v38.142.1: Apps Script's editor Run dropdown hides functions whose
               names end in `_`. The previous version named the entry
               point runBackfillDocsForClient_TEST_, which made it
@@ -36564,18 +36571,21 @@ function _backfillDocsResolveClientId_() {
 }
 
 /**
- * POST endpoint handler. Admin-only — checked by caller.
+ * POST endpoint handler. Admin-only — checked by router via withAdminGuard_.
  *   { action: "backfillDocsFromDrive", clientSheetId, dryRun? , reset? }
+ *
+ * Returns a plain result object; the router wraps it in jsonResponse_.
+ * The original implementation referenced `successResponse_` which doesn't
+ * exist in this codebase (regression caught by Justin testing on Vida
+ * Design - Waymark).
  */
 function handleBackfillDocsFromDrive_(payload) {
   var clientSheetId = String((payload && payload.clientSheetId) || "").trim();
-  if (!clientSheetId) return errorResponse_("clientSheetId required", "BAD_REQUEST");
+  if (!clientSheetId) return { ok: false, error: "clientSheetId required" };
   if (payload && payload.reset) {
-    return successResponse_(api_resetBackfillDocsCursor_(clientSheetId));
+    return api_resetBackfillDocsCursor_(clientSheetId);
   }
-  var r = api_backfillDocsFromDriveOneClient_(clientSheetId, {
+  return api_backfillDocsFromDriveOneClient_(clientSheetId, {
     dryRun: !!(payload && payload.dryRun)
   });
-  if (!r.ok) return errorResponse_(r.error || "Backfill failed", "BACKFILL_ERROR");
-  return successResponse_(r);
 }
