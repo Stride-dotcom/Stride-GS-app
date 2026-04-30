@@ -37,6 +37,7 @@ import { EntityHistory } from '../components/shared/EntityHistory';
 import { supabase } from '../lib/supabase';
 import { CreateDeliveryOrderModal } from '../components/shared/CreateDeliveryOrderModal';
 import { ReleaseItemsModal } from '../components/shared/ReleaseItemsModal';
+import { generateOrderPdf } from '../lib/orderPdf';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -1073,8 +1074,21 @@ export function OrderPage() {
     !!order.tenantId &&
     releasableItems.length > 0;
 
+  // Print PDF button — always available (admin / staff / client) so
+  // anyone with permission to see the order can hand the customer a
+  // printed copy or save one for their own records.
+  const printButton = !editing ? (
+    <EPFooterButton
+      key="print-pdf"
+      label="Print PDF"
+      variant="secondary"
+      onClick={() => generateOrderPdf(order)}
+    />
+  ) : null;
+
   const footerContent = canReview && !editing ? (
     <>
+      {printButton}
       {/* Edit Full Order — opens the create-order modal in edit mode
           so the operator can change anything that the inline Edit
           buttons don't cover (mode, items, accessorials, coverage,
@@ -1168,7 +1182,7 @@ export function OrderPage() {
         />
       )}
     </>
-  ) : null;
+  ) : printButton;
 
   const hasFooter = footerContent !== null && React.Children.count(footerContent) > 0;
 

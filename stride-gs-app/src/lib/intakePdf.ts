@@ -84,6 +84,64 @@ export async function generateSignedTcPdf(params: SignedTcPdfParams): Promise<vo
   }, 450);
 }
 
+// ─── Unsigned preview ─────────────────────────────────────────────────────────
+
+/**
+ * generateTcPreviewPdf — opens a clean, branded preview of the full
+ * Warehousing & Delivery Agreement T&C in a new window so prospects can
+ * read or print before they sign. No initials, no signature block — a
+ * simple "PREVIEW" badge in the header makes it obvious this isn't a
+ * binding copy. Tokens like {{BUSINESS_NAME}} fall back to placeholder
+ * text so the doc reads sensibly without identifying anyone.
+ */
+export async function generateTcPreviewPdf(): Promise<void> {
+  const { data } = await supabase
+    .from('email_templates')
+    .select('body')
+    .eq('template_key', 'DOC_CLIENT_TC')
+    .single();
+
+  if (!data?.body) {
+    alert('Agreement template is not available. Please contact Stride Logistics for a copy.');
+    return;
+  }
+
+  const previewDate = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+
+  // Token substitution — use neutral placeholders so the unsigned
+  // preview reads as a generic copy of the agreement.
+  let body = data.body
+    .replace(/\{\{BUSINESS_NAME\}\}/g, '[Your Business Name]')
+    .replace(/\{\{CONTACT_NAME\}\}/g, '[Your Name]')
+    .replace(/\{\{SIGNED_DATE\}\}/g, esc(previewDate));
+  body = body.replace(/\{\{COVERAGE_[A-Z_]+_NOTE\}\}/g, '');
+
+  // Strip the data-tc-signature section so the preview doesn't hint at a
+  // signature flow that doesn't apply here.
+  body = stripSignatureSection(body);
+
+  const html = buildPreviewShell(body, previewDate);
+
+  const win = window.open('', '_blank');
+  if (!win) {
+    alert('Please allow pop-ups for this site, then try again.');
+    return;
+  }
+  win.document.open();
+  win.document.write(html);
+  win.document.close();
+  setTimeout(() => {
+    try { win.print(); } catch { /* user may have closed window */ }
+  }, 450);
+}
+
+function stripSignatureSection(body: string): string {
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(`<body>${body}</body>`, 'text/html');
+  doc.body.querySelectorAll('section[data-tc-signature]').forEach(el => el.remove());
+  return doc.body.innerHTML;
+}
+
 // ─── DOM injection ────────────────────────────────────────────────────────────
 
 function injectInitialsAndSignature(
@@ -357,6 +415,161 @@ function buildPrintShell(
       Stride Logistics · Express Installation Services Inc, DBA Stride Logistics · 19803 87th Ave S, Kent, WA 98031<br>
       info@stridenw.com · mystridehub.com<br>
       Electronically signed and legally binding under the federal ESIGN Act and Washington UETA.
+    </div>
+  </div>
+</body>
+</html>`;
+}
+
+function buildPreviewShell(body: string, previewDate: string): string {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Warehousing &amp; Delivery Agreement — Preview</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #F5F2EE;
+      color: #1C1C1C;
+      font-size: 13.5px;
+      line-height: 1.65;
+    }
+
+    .print-header {
+      background: #1C1C1C;
+      color: #fff;
+      padding: 18px 32px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .header-brand { display: flex; align-items: center; gap: 12px; }
+    .header-logo {
+      width: 38px; height: 38px; border-radius: 8px;
+      background: #E8692A;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 18px; font-weight: 900; color: #fff; letter-spacing: -1px;
+    }
+    .header-name { font-size: 15px; font-weight: 700; letter-spacing: 2.5px; }
+    .header-sub  { font-size: 10px; letter-spacing: 1.5px; color: rgba(255,255,255,0.5); margin-top: 2px; }
+    .header-meta { text-align: right; font-size: 12px; color: rgba(255,255,255,0.7); line-height: 1.5; }
+    .header-meta strong { color: #fff; font-size: 13px; }
+    .preview-badge {
+      display: inline-block;
+      margin-top: 4px;
+      padding: 2px 10px;
+      background: #E8692A;
+      color: #fff;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 1.2px;
+      border-radius: 100px;
+    }
+
+    .doc-body { max-width: 820px; margin: 0 auto; padding: 32px 24px 56px; }
+
+    .preview-banner {
+      background: #FFF7F0;
+      border: 1px dashed #E8692A;
+      border-radius: 12px;
+      padding: 14px 18px;
+      margin-bottom: 18px;
+      font-size: 12.5px;
+      color: #C05A20;
+      line-height: 1.55;
+    }
+    .preview-banner strong { color: #1C1C1C; }
+
+    section {
+      background: #fff;
+      border-radius: 14px;
+      padding: 22px 24px;
+      margin-bottom: 16px;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+    }
+    section[data-tc-intro] {
+      background: #FFF7F2;
+      border: 1px solid rgba(232,105,42,0.18);
+    }
+
+    h2 {
+      font-size: 17px; font-weight: 700; color: #1C1C1C;
+      margin-bottom: 14px; padding-bottom: 10px;
+      border-bottom: 1.5px solid #F0ECE6;
+    }
+    h3 {
+      font-size: 11px; font-weight: 700; text-transform: uppercase;
+      letter-spacing: 0.6px; color: #64748B;
+      margin: 14px 0 6px;
+    }
+    p { color: #334155; margin-bottom: 10px; font-size: 13px; }
+    p:last-of-type { margin-bottom: 0; }
+    a { color: #E8692A; text-decoration: none; }
+    strong { color: #1C1C1C; }
+
+    p[style*="border-left"] {
+      background: #FFF7F0 !important;
+      border-left: 3.5px solid #E8692A !important;
+      padding: 10px 14px !important;
+      margin: 10px 0 !important;
+      border-radius: 0 6px 6px 0 !important;
+      font-size: 13px !important;
+    }
+
+    p[style*="background:#F5F2EE"] {
+      background: #F5F2EE !important;
+      padding: 10px 14px !important;
+      border-radius: 8px !important;
+      margin: 6px 0 !important;
+      font-size: 12.5px !important;
+    }
+
+    .print-footer {
+      text-align: center; font-size: 10.5px; color: #94A3B8;
+      margin-top: 32px; padding-top: 18px;
+      border-top: 1px solid #E2E8F0; line-height: 1.6;
+    }
+
+    @media print {
+      body { background: #F5F2EE; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+      .print-header { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+      .preview-banner { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+      section { break-inside: avoid; }
+      @page { margin: 0.4in; size: letter; }
+    }
+  </style>
+</head>
+<body>
+  <div class="print-header">
+    <div class="header-brand">
+      <div class="header-logo">S</div>
+      <div>
+        <div class="header-name">STRIDE</div>
+        <div class="header-sub">LOGISTICS</div>
+      </div>
+    </div>
+    <div class="header-meta">
+      <div>Warehousing &amp; Delivery Agreement</div>
+      <div><strong>Terms &amp; Conditions</strong></div>
+      <div>Generated ${esc(previewDate)}</div>
+      <div class="preview-badge">PREVIEW · NOT SIGNED</div>
+    </div>
+  </div>
+  <div class="doc-body">
+    <div class="preview-banner">
+      <strong>This is a preview copy.</strong> Read it through, print or save as PDF, and bring questions back to the intake form when you're ready to sign. Your signed copy will be emailed to you when you complete onboarding.
+    </div>
+    ${body}
+    <div class="print-footer">
+      Stride Logistics · Express Installation Services Inc, DBA Stride Logistics · 19803 87th Ave S, Kent, WA 98031<br>
+      info@stridenw.com · mystridehub.com<br>
+      Terms &amp; Conditions — Preview copy. Not a binding agreement until signed.
     </div>
   </div>
 </body>
