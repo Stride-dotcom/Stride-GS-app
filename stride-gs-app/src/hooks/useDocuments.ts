@@ -72,6 +72,16 @@ function sanitizeTenantForPath(tenantId: string): string {
   return tenantId.replace(/[^a-zA-Z0-9-]/g, '-');
 }
 
+/**
+ * Sanitize a context ID (task/repair/will-call/shipment/etc.) for use as
+ * a Supabase Storage path segment. More permissive than the tenant rule —
+ * keeps `_` and `.` so real entity IDs survive — and collapses anything
+ * else (backticks, spaces, slashes from messy sheet imports) to `-`.
+ */
+function sanitizeContextForPath(contextId: string): string {
+  return contextId.replace(/[^a-zA-Z0-9._-]/g, '-');
+}
+
 export function useDocuments({
   contextType, contextId, tenantId, includeDeleted = false, enabled = true,
 }: UseDocumentsOptions): UseDocumentsResult {
@@ -111,7 +121,8 @@ export function useDocuments({
     const rand = Math.random().toString(36).slice(2, 8);
     const safeName = sanitizeName(file.name || `document-${ts}.pdf`);
     const safeTenant = sanitizeTenantForPath(effectiveTenantId);
-    const storageKey = `${safeTenant}/${contextType}-${contextId}/${ts}-${rand}-${safeName}`;
+    const safeContext = sanitizeContextForPath(contextId);
+    const storageKey = `${safeTenant}/${contextType}-${safeContext}/${ts}-${rand}-${safeName}`;
 
     const { error: upErr } = await supabase.storage.from(BUCKET).upload(storageKey, file, {
       contentType: file.type || 'application/octet-stream',
