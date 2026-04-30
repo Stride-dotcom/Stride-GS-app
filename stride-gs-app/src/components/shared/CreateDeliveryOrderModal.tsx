@@ -1,5 +1,15 @@
 /**
- * CreateDeliveryOrderModal — Phase 2c (expanded) — v4 2026-04-26 PST
+ * CreateDeliveryOrderModal — Phase 2c (expanded) — v5 2026-04-30 PST
+ *   v5: Customizable add-on charges. Every selected add-on now exposes
+ *       editable Qty + Rate inputs (catalog rate is the default, staff/
+ *       admin can override; clients can adjust qty only). Subtotal is
+ *       always qty × rate so flat-rate items like Disposal can be
+ *       charged for 40 pieces in one line. The per-order rate is
+ *       persisted in `accessorials_json[].rate` (the column already
+ *       carried this field — previously it was reset to the catalog
+ *       lookup at save time). A "Modified" badge surfaces overrides
+ *       to reviewers; old rows without a saved rate fall back to
+ *       subtotal/qty so the form still shows the effective rate.
  *   v4: Tax-exemption awareness (Task 8a). On client select, fetch
  *       tax_exempt / reason / cert_expires / tax_rate_pct from
  *       Supabase clients. Shows a green "✓ Tax-exempt" chip for
@@ -229,6 +239,10 @@ interface FreeItem {
 interface SelectedAccessorial {
   code: string;
   quantity: number;
+  // Per-order rate override. Defaults to the catalog rate but the
+  // operator can edit it on the order form (e.g. negotiated price,
+  // bulk discount). Subtotal is always quantity × rate.
+  rate: number;
   subtotal: number;
 }
 
@@ -895,29 +909,65 @@ export function CreateDeliveryOrderModal({
     return 0;
   }, [selectedCoverage, declaredValue]);
 
+  // Subtotal rule for ALL units is now qty × rate. Previously `flat` and
+  // `plus_base` ignored quantity entirely, so a flat $185 Disposal couldn't
+  // be charged for 40 pieces. With qty + rate both editable per-order, the
+  // simple multiplication covers every case (operator sets qty=1 for true
+  // flats, or qty=40 for the disposal example).
+  const computeSubtotal = (rate: number, quantity: number, quoteRequired: boolean) => {
+    if (quoteRequired) return 0;
+    return Math.max(0, rate) * Math.max(0, quantity);
+  };
+
   const toggleAccessorial = (acc: DeliveryAccessorial, quantity: number = 1, forceRemove?: boolean) => {
     setSelectedAccessorials(prev => {
       const n = new Map(prev);
       if (forceRemove || (n.has(acc.code) && quantity <= 0)) {
         n.delete(acc.code);
-      } else if (acc.quoteRequired) {
-        // Quote-required accessorials: $0 subtotal, added for tracking
-        n.set(acc.code, { code: acc.code, quantity, subtotal: 0 });
-      } else if (acc.rate != null) {
-        let subtotal = 0;
-        if (acc.rateUnit === 'flat' || acc.rateUnit === 'plus_base') {
-          subtotal = acc.rate;
-        } else {
-          // per_mile / per_15min / per_item / per_hour / per_day all multiply
-          // the unit rate by the user-entered quantity (miles / 15-min blocks
-          // / items / hours / days).
-          subtotal = acc.rate * quantity;
-        }
-        n.set(acc.code, { code: acc.code, quantity, subtotal });
+        return n;
       }
+      const rate = acc.rate ?? 0;
+      n.set(acc.code, {
+        code: acc.code,
+        quantity,
+        rate,
+        subtotal: computeSubtotal(rate, quantity, acc.quoteRequired),
+      });
       return n;
     });
   };
+
+  const updateAccessorialQty = (code: string, quantity: number) => {
+    setSelectedAccessorials(prev => {
+      const cur = prev.get(code);
+      if (!cur) return prev;
+      const acc = accessorials.find(a => a.code === code) || allAccessorials.find(a => a.code === code);
+      const quoteRequired = !!acc?.quoteRequired;
+      // Floor at 1 to match the UI input's min — qty=0 silently zeroes
+      // the subtotal which is confusing; if the user wants to drop the
+      // add-on entirely they uncheck it.
+      const q = Math.max(1, Math.floor(quantity));
+      const n = new Map(prev);
+      n.set(code, { ...cur, quantity: q, subtotal: computeSubtotal(cur.rate, q, quoteRequired) });
+      return n;
+    });
+  };
+
+  const updateAccessorialRate = (code: string, rate: number) => {
+    setSelectedAccessorials(prev => {
+      const cur = prev.get(code);
+      if (!cur) return prev;
+      const acc = accessorials.find(a => a.code === code) || allAccessorials.find(a => a.code === code);
+      // Quote-required rows stay at $0 subtotal until the reviewer actually
+      // sets a rate. Once a rate is entered, treat it as a normal charge.
+      const isQuotePending = !!acc?.quoteRequired && (!Number.isFinite(rate) || rate <= 0);
+      const r = Math.max(0, Number.isFinite(rate) ? rate : 0);
+      const n = new Map(prev);
+      n.set(code, { ...cur, rate: r, subtotal: computeSubtotal(r, cur.quantity, isQuotePending) });
+      return n;
+    });
+  };
+
   const isAccessorialSelected = (code: string) => selectedAccessorials.has(code);
 
   // ── Pricing calculation ────────────────────────────────────────────────
@@ -1338,11 +1388,17 @@ export function CreateDeliveryOrderModal({
           });
         if (adhoc.length > 0) setDeliveryFreeItems(adhoc);
       }
-      // Accessorials JSON
-      const accs = Array.isArray(r.accessorials_json) ? (r.accessorials_json as Array<{ code: string; quantity: number; subtotal: number }>) : [];
+      // Accessorials JSON. Older rows were saved without a per-order rate
+      // — fall back to qty>0 ? subtotal/qty : 0 so the rate input shows the
+      // effective rate that produced the saved subtotal.
+      const accs = Array.isArray(r.accessorials_json) ? (r.accessorials_json as Array<{ code: string; quantity: number; rate?: number; subtotal: number }>) : [];
       if (accs.length > 0) {
         const m = new Map<string, SelectedAccessorial>();
-        for (const a of accs) m.set(a.code, { code: a.code, quantity: a.quantity, subtotal: a.subtotal });
+        for (const a of accs) {
+          const qty = Number(a.quantity) || 0;
+          const rate = Number.isFinite(a.rate) ? Number(a.rate) : (qty > 0 ? Number(a.subtotal) / qty : 0);
+          m.set(a.code, { code: a.code, quantity: qty, rate, subtotal: Number(a.subtotal) || 0 });
+        }
         setSelectedAccessorials(m);
       }
       // Service description (service_only mode)
@@ -1400,7 +1456,7 @@ export function CreateDeliveryOrderModal({
       const accList = Array.from(selectedAccessorials.values()).map(a => ({
         code: a.code,
         quantity: a.quantity,
-        rate: accessorials.find(x => x.code === a.code)?.rate || 0,
+        rate: a.rate,
         subtotal: a.subtotal,
       }));
 
@@ -1685,7 +1741,7 @@ export function CreateDeliveryOrderModal({
         const authUid2 = authData2?.user?.id || null;
         const accListPD = Array.from(selectedAccessorials.values()).map(a => ({
           code: a.code, quantity: a.quantity,
-          rate: accessorials.find(x => x.code === a.code)?.rate || 0,
+          rate: a.rate,
           subtotal: a.subtotal,
         }));
         const commonEdit: Record<string, unknown> = {
@@ -1787,7 +1843,7 @@ export function CreateDeliveryOrderModal({
         const authUid2 = authData2?.user?.id || null;
         const accList2 = Array.from(selectedAccessorials.values()).map(a => ({
           code: a.code, quantity: a.quantity,
-          rate: accessorials.find(x => x.code === a.code)?.rate || 0,
+          rate: a.rate,
           subtotal: a.subtotal,
         }));
         const contact = mode === 'pickup' ? {
@@ -1902,7 +1958,7 @@ export function CreateDeliveryOrderModal({
     const accList = Array.from(selectedAccessorials.values()).map(a => ({
       code: a.code,
       quantity: a.quantity,
-      rate: accessorials.find(x => x.code === a.code)?.rate || 0,
+      rate: a.rate,
       subtotal: a.subtotal,
     }));
 
@@ -3275,8 +3331,22 @@ export function CreateDeliveryOrderModal({
                 {accessorials.map(acc => {
                   const selected = isAccessorialSelected(acc.code);
                   const current = selectedAccessorials.get(acc.code);
-                  const needsQuantity = acc.rateUnit === 'per_15min' || acc.rateUnit === 'per_mile' || acc.rateUnit === 'per_item' || acc.rateUnit === 'per_hour' || acc.rateUnit === 'per_day';
                   const staffOnly = !acc.visibleToClient;
+                  const catalogRate = acc.rate ?? 0;
+                  const currentRate = current?.rate ?? catalogRate;
+                  const rateOverridden = selected && !acc.quoteRequired && Math.abs(currentRate - catalogRate) > 0.0001;
+                  // Rate is editable for staff/admin only — clients see
+                  // the catalog rate locked. Qty is editable for everyone
+                  // once selected (so a client booking 40 disposals can
+                  // still set the count, but can't lower the unit price).
+                  const canEditRate = isStaff;
+                  const unitSuffix =
+                    acc.rateUnit === 'per_mile' ? ' / mile' :
+                    acc.rateUnit === 'per_15min' ? ' / 15 min' :
+                    acc.rateUnit === 'per_item' ? ' / item' :
+                    acc.rateUnit === 'per_hour' ? ' / hour' :
+                    acc.rateUnit === 'per_day' ? ' / day' :
+                    acc.rateUnit === 'plus_base' ? ' + base' : '';
                   return (
                     <div key={acc.code} style={{
                       padding: '10px 12px', borderRadius: 8,
@@ -3287,7 +3357,7 @@ export function CreateDeliveryOrderModal({
                         <input
                           type="checkbox"
                           checked={selected}
-                          onChange={() => selected ? toggleAccessorial(acc, 1, true) : toggleAccessorial(acc, needsQuantity ? 1 : 1)}
+                          onChange={() => selected ? toggleAccessorial(acc, 1, true) : toggleAccessorial(acc, 1)}
                         />
                         <div style={{ flex: 1 }}>
                           <div style={{ fontSize: 13, fontWeight: 600, display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -3297,36 +3367,71 @@ export function CreateDeliveryOrderModal({
                                 Staff
                               </span>
                             )}
-                            {acc.quoteRequired ? (
+                            {rateOverridden && (
+                              <span
+                                title={`Catalog rate: $${catalogRate.toFixed(2)}`}
+                                style={{ fontSize: 9, fontWeight: 700, padding: '1px 6px', borderRadius: 6, background: '#FEF3C7', color: '#92400E', textTransform: 'uppercase', letterSpacing: '0.5px' }}
+                              >
+                                Modified
+                              </span>
+                            )}
+                            {!selected && (acc.quoteRequired ? (
                               <span style={{ color: '#B45309', fontWeight: 600, fontStyle: 'italic', marginLeft: 'auto', fontSize: 12 }}>
                                 Quote Required
                               </span>
                             ) : acc.rate != null ? (
                               <span style={{ color: theme.colors.textMuted, fontWeight: 400, marginLeft: 'auto' }}>
-                                ${acc.rate.toFixed(2)}
-                                {acc.rateUnit === 'per_mile' && ' / mile'}
-                                {acc.rateUnit === 'per_15min' && ' / 15 min'}
-                                {acc.rateUnit === 'per_item' && ' / item'}
-                                {acc.rateUnit === 'per_hour' && ' / hour'}
-                                {acc.rateUnit === 'per_day' && ' / day'}
-                                {acc.rateUnit === 'plus_base' && ' + base'}
+                                ${acc.rate.toFixed(2)}{unitSuffix}
                               </span>
-                            ) : null}
+                            ) : null)}
                           </div>
                           {acc.description && (
                             <div style={{ fontSize: 11, color: theme.colors.textMuted, marginTop: 2 }}>{acc.description}</div>
                           )}
                         </div>
-                        {selected && needsQuantity && (
-                          <input
-                            type="number" min={1}
-                            value={current?.quantity || 1}
-                            onChange={e => toggleAccessorial(acc, Math.max(1, parseInt(e.target.value) || 1))}
-                            onClick={e => e.stopPropagation()}
-                            style={{ ...input, width: 72, padding: '4px 8px' }}
-                          />
-                        )}
                       </label>
+                      {selected && (
+                        <div
+                          style={{ display: 'flex', alignItems: 'flex-end', gap: 10, marginTop: 10, paddingTop: 10, borderTop: `1px dashed ${theme.colors.border}` }}
+                          onClick={e => e.stopPropagation()}
+                        >
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                            <span style={{ fontSize: 10, fontWeight: 700, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Qty</span>
+                            <input
+                              type="number" min={1} step={1}
+                              value={current?.quantity ?? 1}
+                              onChange={e => updateAccessorialQty(acc.code, Math.max(1, parseInt(e.target.value, 10) || 1))}
+                              style={{ ...input, width: 80, padding: '4px 8px' }}
+                            />
+                          </div>
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                            <span style={{ fontSize: 10, fontWeight: 700, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                              Rate{unitSuffix && <span style={{ fontWeight: 400, textTransform: 'none', letterSpacing: 0 }}>{unitSuffix}</span>}
+                            </span>
+                            <input
+                              type="number" min={0} step="0.01"
+                              value={Number.isFinite(currentRate) ? currentRate : 0}
+                              onChange={e => updateAccessorialRate(acc.code, parseFloat(e.target.value) || 0)}
+                              disabled={!canEditRate}
+                              title={canEditRate ? '' : 'Rate is locked to the catalog price for client-submitted orders.'}
+                              style={{
+                                ...input, width: 100, padding: '4px 8px',
+                                background: canEditRate ? '#fff' : '#F3F4F6',
+                                color: canEditRate ? theme.colors.text : theme.colors.textMuted,
+                                cursor: canEditRate ? 'text' : 'not-allowed',
+                              }}
+                            />
+                          </div>
+                          <div style={{ flex: 1, textAlign: 'right' }}>
+                            <div style={{ fontSize: 10, fontWeight: 700, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Subtotal</div>
+                            <div style={{ fontSize: 14, fontWeight: 700, color: theme.colors.text }}>
+                              {acc.quoteRequired && (current?.subtotal ?? 0) === 0
+                                ? <span style={{ color: '#B45309', fontStyle: 'italic', fontWeight: 600, fontSize: 12 }}>Quote Required</span>
+                                : `$${(current?.subtotal ?? 0).toFixed(2)}`}
+                            </div>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   );
                 })}

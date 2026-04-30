@@ -70,6 +70,8 @@
 
 ## 2026-04
 
+**2026-04-30 session 84 — customizable add-on charges on delivery orders:** CreateDeliveryOrderModal v5. Selected add-ons now expose editable Qty + Rate inputs (used in both order entry and Full Edit). Subtotal = qty × rate for ALL units (including `flat`/`plus_base`, which previously ignored qty). Catalog rate is the default; staff/admin can override; clients edit qty only with rate locked. "Modified" badge surfaces overrides. Quote-required add-ons stay $0 until staff sets a rate. Per-order rate persists in `dt_orders.accessorials_json[].rate` (column already existed; previously catalog rate was re-looked-up at save).
+
 **2026-04-26 session — retire per-item Drive folders:** Per-item Photos folders (created under PHOTOS_FOLDER_ID, named with Item ID) deprecated — never used (photos in Supabase) and confusing for clients. ItemDetailPanel.tsx: removed "Photos Folder" button. Apps Script: disabled per-item folder creation in `api_hyperlinkReceivedItems_`, `StrideFixMissingFolders`, `api_StrideFixMissingFolders`. New `StrideCleanupItemPhotoFolders_` (Utils.gs v3.5.0) under Stride Admin menu — dry-run + execute, trashes empty per-item folders, strips Inventory Item ID hyperlinks, reports non-empty to Cleanup_Report tab. StrideAPI.gs v38.130.0, Code.gs v4.7.0. PR #73.
 
 **2026-04-01 session 27:** Inline Item Editing + Auto-Generated Item IDs (v27.0.0). `updateInventoryItem` POST endpoint. 5 editable field components. Auto-ID counter in CB Settings as NEXT_ITEM_ID (80000 start). LockService protected. Settings → Maintenance admin-only toggle.

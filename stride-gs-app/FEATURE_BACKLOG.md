@@ -10,6 +10,7 @@
 - [ ] Non-app-created delivery releases — auto-release inventory when DT completes orders created outside the app
 - [ ] POD photo ingestion — needs DT REST `X-AUTH-TOKEN` (Settings → Advanced Settings or DT support). Then call `GET /api/external/v1/dispatches/:identifier`, write `form.img_url[]` into `dt_order_photos`, optionally fetch each into the `dt-pod-photos` storage bucket
 - [x] **Bi-directional DT sync — pulls full export.xml per active order into the cache (driver, truck, start/finish, COD, signature, items, history, notes). Shipped 2026-04-25 (session 82, PRs #61+#62).**
+- [x] **Customizable add-on charges — Qty + Rate editable per add-on on order entry / Full Edit. Catalog rate is the default; staff/admin can override; clients edit qty only. Shipped 2026-04-30 (session 84).**
 
 ## Billing / Payments
 
