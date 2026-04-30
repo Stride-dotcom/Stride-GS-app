@@ -1,5 +1,18 @@
 /* ===================================================
-   StrideAPI.gs — v38.142.2 — 2026-04-29 PST — Backfill: fix successResponse_ regression in handler
+   StrideAPI.gs — v38.142.3 — 2026-04-30 PST — WC create: defensive guard against self-duplicate match
+   v38.142.3: handleCreateWillCall_ duplicate check now skips any
+              row whose WC Number equals the wcNumber being created.
+              The check has always run BEFORE the sheet write so this
+              shouldn't matter in practice, but a stale deployment was
+              reporting "items already on active Will Calls" for items
+              the handler itself had just written. The exclusion makes
+              the function defensive against any future ordering
+              regression — the check can no longer match its own data
+              even if a refactor accidentally moves it below the write.
+              handleAddItemsToWillCall_ unchanged in behavior — the
+              same pre-write ordering is now called out in a comment;
+              no exclusion added there because an item already on the
+              target WC is a legit "duplicate-on-this-WC" error.
    v38.142.2: handleBackfillDocsFromDrive_ called successResponse_(...)
               which doesn't exist in this codebase — every backfill run
               from the React UI threw "ReferenceError: successResponse_
@@ -16554,7 +16567,12 @@ function handleCreateWillCall_(clientSheetId, payload) {
   }
 
   try {
-    // Check: none of these items already on active WC (inside lock)
+    // Check: none of these items already on active WC (inside lock).
+    // The check runs BEFORE the writes below — fail fast before
+    // committing any data. As a belt-and-suspenders against any future
+    // refactor that might flip the order, we also exclude the newly
+    // generated wcNumber from `activeWcNums` so the check can never
+    // match items it just wrote itself (v38.142.3).
     var wcSh   = ss.getSheetByName("Will_Calls");
     var wciSh  = ss.getSheetByName("WC_Items");
 
@@ -16565,7 +16583,7 @@ function handleCreateWillCall_(clientSheetId, payload) {
       for (var w = 1; w < wcData.length; w++) {
         var wSt = String(wcData[w][(wcHdrMap["Status"] || 1) - 1] || "").trim();
         var wNum = String(wcData[w][(wcHdrMap["WC Number"] || 1) - 1] || "").trim();
-        if (wSt === "Pending" || wSt === "Scheduled" || wSt === "Partial") {
+        if ((wSt === "Pending" || wSt === "Scheduled" || wSt === "Partial") && wNum !== wcNumber) {
           activeWcNums[wNum] = true;
         }
       }
@@ -16574,6 +16592,7 @@ function handleCreateWillCall_(clientSheetId, payload) {
       for (var wi = 1; wi < wciData.length; wi++) {
         var wiWcNum  = String(wciData[wi][(wciHdrMap["WC Number"] || 1) - 1] || "").trim();
         var wiItemId = String(wciData[wi][(wciHdrMap["Item ID"]   || 2) - 1] || "").trim();
+        if (wiWcNum === wcNumber) continue; // never match items on the WC we're creating
         if (activeWcNums[wiWcNum]) {
           for (var si = 0; si < enrichedItems.length; si++) {
             if (enrichedItems[si].itemId === wiItemId) {
@@ -17776,7 +17795,12 @@ function handleAddItemsToWillCall_(clientSheetId, payload) {
       return jsonResponse_({ success: false, error: "Cannot add items — will call status is " + currentStatus });
     }
 
-    // Duplicate check: none of these items already on an active WC
+    // Duplicate check: none of these items already on an active WC.
+    // MUST run BEFORE the writes below — running it after would match
+    // the rows we just wrote and reject every add as a self-duplicate.
+    // Unlike handleCreateWillCall_ we deliberately do NOT exclude the
+    // target wcNumber here: an item already on this same WC is a real
+    // duplicate-on-this-WC error, not a self-write match.
     if (wcSh.getLastRow() >= 2 && wciSh.getLastRow() >= 2) {
       var wcData   = wcSh.getDataRange().getValues();
       var activeWcNums = {};
