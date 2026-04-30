@@ -1,5 +1,21 @@
 /* ===================================================
-   StrideAPI.gs — v38.142.3 — 2026-04-30 PST — WC create: defensive guard against self-duplicate match
+   StrideAPI.gs — v38.142.4 — 2026-04-30 PST — Bulk Sync: populate will_calls.item_ids
+   v38.142.4: handleBulkSyncToSupabase_ was writing item_ids: [] on
+              every will_call it touched because the call to
+              sbWillCallRow_ omitted itemIds. The result: pressing
+              the per-client "Sync" button in Settings silently wiped
+              the inventory→WC linkage for that client, breaking the
+              "W" badge on inventory rows and the item Activity →
+              Will Calls panel even though the WC itself rendered.
+              Now mirrors api_fullClientSync_'s pattern (line ~5448):
+              read WC_Items, build WC Number → [itemId,...] map,
+              pass itemIds into sbWillCallRow_. Latent since the
+              item_ids column was added in v38.72.1; surfaced today
+              after a builder pressed Sync to repair an unrelated
+              cache miss.
+              Repair plan for clients hit by the old bug: a single
+              Sync run after this deploy restores the array from the
+              authoritative WC_Items sheet rows.
    v38.142.3: handleCreateWillCall_ duplicate check now skips any
               row whose WC Number equals the wcNumber being created.
               The check has always run BEFORE the sheet write so this
@@ -31988,6 +32004,25 @@ function handleBulkSyncToSupabase_(payload) {
           var wcRows = sheetToObjects_(wcSheet);
           var bkWcFolderUrls = api_readIdFolderUrls_(wcSheet, "WC Number");
           var bkWcShipMap = api_buildShipmentFolderMap_(ss);
+          // v38.142.4: build WC Number → [itemId, ...] map from WC_Items
+          // sheet, mirroring api_fullClientSync_ at line ~5448. Without
+          // this, sbWillCallRow_ writes item_ids: [] for every WC the
+          // bulk sync touches, wiping the linkage that powers the
+          // inventory "W" badge and the item Activity → Will Calls
+          // panel. Latent since v38.72.1.
+          var bkWcItemIdsMap = {};
+          var bkWciSheet = ss.getSheetByName("WC_Items");
+          if (bkWciSheet) {
+            var bkWciRows = sheetToObjects_(bkWciSheet);
+            for (var bkWi = 0; bkWi < bkWciRows.length; bkWi++) {
+              var bkWciWcn = String(bkWciRows[bkWi]["WC Number"] || "").trim();
+              var bkWciIid = String(bkWciRows[bkWi]["Item ID"] || "").trim();
+              if (bkWciWcn && bkWciIid) {
+                if (!bkWcItemIdsMap[bkWciWcn]) bkWcItemIdsMap[bkWciWcn] = [];
+                bkWcItemIdsMap[bkWciWcn].push(bkWciIid);
+              }
+            }
+          }
           var wcSb = [];
           var bkWcKeepIds = [];
           for (var m = 0; m < wcRows.length; m++) {
@@ -32001,7 +32036,8 @@ function handleBulkSyncToSupabase_(payload) {
               notes: wcRows[m]["Notes"], itemsCount: wcRows[m]["Items Count"],
               cod: wcRows[m]["COD"], codAmount: wcRows[m]["COD Amount"],
               wcFolderUrl: bkWcFolderUrls[wcn] || "",
-              shipmentFolderUrl: bkWcShipMap[String(wcRows[m]["Shipment #"] || "").trim()] || ""
+              shipmentFolderUrl: bkWcShipMap[String(wcRows[m]["Shipment #"] || "").trim()] || "",
+              itemIds: bkWcItemIdsMap[wcn] || []
             }));
           }
           supabaseBatchUpsert_("will_calls", wcSb);
