@@ -11,6 +11,8 @@ import { useResizablePanel } from '../../hooks/useResizablePanel';
 import { supabase } from '../../lib/supabase';
 import type { DtOrderForUI, DtOrderItemForUI } from '../../lib/supabaseQueries';
 import { createPortal } from 'react-dom';
+import { generateOrderPdf } from '../../lib/orderPdf';
+import { Printer } from 'lucide-react';
 
 // Human-readable labels + chip config for review workflow states
 const REVIEW_CFG: Record<string, { bg: string; color: string; label: string; icon: React.ReactNode }> = {
@@ -280,6 +282,15 @@ export function OrderDetailPanel({ order, onClose, onUpdated }: Props) {
             )}
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+            {!editing && (
+              <button
+                onClick={() => generateOrderPdf(order)}
+                title="Print PDF"
+                style={{ background: '#fff', color: theme.colors.text, border: `1px solid ${theme.colors.border}`, cursor: 'pointer', padding: '6px 10px', borderRadius: 6, fontSize: 12, fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: 4 }}
+              >
+                <Printer size={12} /> Print
+              </button>
+            )}
             {!editing && (
               <button
                 onClick={startEdit}

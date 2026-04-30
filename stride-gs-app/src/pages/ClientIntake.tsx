@@ -36,7 +36,7 @@ import {
   type PublicCoverageNote,
   type RefreshPrefill,
 } from '../hooks/useClientIntake';
-import { generateSignedTcPdf } from '../lib/intakePdf';
+import { generateSignedTcPdf, generateTcPreviewPdf } from '../lib/intakePdf';
 import { postEmailSignedAgreement } from '../lib/api';
 import { useIsMobile } from '../hooks/useIsMobile';
 
@@ -806,6 +806,26 @@ function StepTerms({ draft, setDraft, tcHtml, tcLoading, coverageNotes, sig, sig
       <div style={{ fontSize: 13, color: TEXT_SEC, lineHeight: 1.6, marginBottom: 16 }}>
         Please read each section and type your initials to acknowledge. A full signature at the bottom completes the agreement.
       </div>
+
+      {/* "Read it offline" escape hatch. Prospects often want to print
+          the T&C and read it away from a screen — or run it past a
+          partner/lawyer — before they commit. Renders the same
+          template as the signed PDF but with no initials/signature
+          block and a PREVIEW badge so it can't be mistaken for a
+          binding copy. */}
+      <button
+        type="button"
+        onClick={() => { void generateTcPreviewPdf(); }}
+        style={{
+          display: 'inline-flex', alignItems: 'center', gap: 8,
+          padding: '10px 18px', fontSize: 13, fontWeight: 600,
+          background: '#fff', color: TEXT,
+          border: `1.5px solid rgba(0,0,0,0.15)`, borderRadius: 100,
+          cursor: 'pointer', fontFamily: FONT, marginBottom: 18,
+        }}
+      >
+        <FileText size={15} /> View &amp; Print Full Agreement (PDF)
+      </button>
 
       {/* Property-in-storage coverage choice. (Handling valuation, the
           per-shipment $0.60/lb-vs-replacement tier selection, is
