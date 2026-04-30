@@ -96,15 +96,21 @@ export function Orders() {
   const navigate = useNavigate();
   const isAdmin = user?.role === 'admin';
   const isStaff = user?.role === 'staff' || user?.role === 'admin';
+  const isClient = user?.role === 'client';
+  // Anyone who can reach /orders should be able to see the Orders tab.
+  // Today that's admin + client (RoleGuard in App.tsx). Staff is excluded
+  // because the Delivery item isn't in STAFF_NAV — if that changes, this
+  // gate will pick them up automatically.
+  const canViewOrders = isAdmin || isClient;
   const canReview = isStaff;
 
   // Active tab persisted in the URL (?tab=orders|availability) so the
   // browser back button cycles through tab visits and shareable URLs
-  // reflect the user's exact view. Default depends on role: admin →
-  // orders, staff → availability.
+  // reflect the user's exact view. Default lands on Orders for anyone
+  // who can view it; otherwise Availability.
   // The URL is the source of truth — `setActiveTab(x)` pushes a history
   // entry, back/forward navigates between tab visits, no useEffect race.
-  const defaultTab: OrdersTab = isAdmin ? 'orders' : 'availability';
+  const defaultTab: OrdersTab = canViewOrders ? 'orders' : 'availability';
   const [tabRaw, setTabRaw] = useUrlState('tab', defaultTab);
   // Phase B (review-tab retirement): legacy ?tab=review URLs auto-redirect
   // to ?tab=orders + needsActionOnly=true so existing email deep-links
@@ -112,9 +118,9 @@ export function Orders() {
   const isLegacyReviewUrl = tabRaw === 'review' && canReview;
   const activeTab: OrdersTab | null = !user
     ? null  // still wait for auth to resolve so role gates are accurate
-    : isLegacyReviewUrl                    ? 'orders'   // redirect target
-    : tabRaw === 'orders' && isAdmin       ? 'orders'
-    : tabRaw === 'availability'            ? 'availability'
+    : isLegacyReviewUrl                          ? 'orders'   // redirect target
+    : tabRaw === 'orders' && canViewOrders       ? 'orders'
+    : tabRaw === 'availability'                  ? 'availability'
     : defaultTab;
   const setActiveTab = useCallback((next: OrdersTab) => setTabRaw(next), [setTabRaw]);
   // "Needs Review" filter — replaces the standalone Review tab.
@@ -412,7 +418,7 @@ export function Orders() {
           STRIDE LOGISTICS · {isAdmin ? 'ORDERS & DELIVERY' : 'DELIVERY'}
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-          {isAdmin && (
+          {canViewOrders && (
             <button onClick={() => setActiveTab('orders')} style={tabStyle('orders')}>
               <Truck size={13} /> Orders
             </button>
@@ -509,8 +515,9 @@ export function Orders() {
           Details page. Legacy ?tab=review URLs auto-redirect via the
           activeTab logic. */}
 
-      {/* Orders tab (admin only) */}
-      {activeTab === 'orders' && isAdmin && (
+      {/* Orders tab — admin sees all clients' orders; client sees their own
+          (filtered upstream by useOrders + accessibleClientNames). */}
+      {activeTab === 'orders' && canViewOrders && (
         <div style={{ background: '#FFFFFF', borderRadius: 20, padding: 24, border: '1px solid rgba(0,0,0,0.04)' }}>
 
           <SyncBanner syncing={refreshing} label={clientFilter.length === 1 ? clientFilter[0] : clientFilter.length > 1 ? `${clientFilter.length} clients` : undefined} />
@@ -532,10 +539,12 @@ export function Orders() {
               />
             </div>
             <div style={{ flex: 1 }} />
-            <button onClick={handleDtSync} disabled={syncingDt} title="Pull latest statuses from DispatchTrack" style={{ padding: '7px 12px', fontSize: 12, fontWeight: 500, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: syncingDt ? 'wait' : 'pointer', display: 'flex', alignItems: 'center', gap: 4, fontFamily: 'inherit', color: syncingDt ? theme.colors.orange : theme.colors.textSecondary }}>
-              <CloudDownload size={14} style={syncingDt ? { animation: 'spin 1s linear infinite' } : undefined} />
-              {syncingDt ? 'Syncing…' : 'DT Sync'}
-            </button>
+            {isAdmin && (
+              <button onClick={handleDtSync} disabled={syncingDt} title="Pull latest statuses from DispatchTrack" style={{ padding: '7px 12px', fontSize: 12, fontWeight: 500, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: syncingDt ? 'wait' : 'pointer', display: 'flex', alignItems: 'center', gap: 4, fontFamily: 'inherit', color: syncingDt ? theme.colors.orange : theme.colors.textSecondary }}>
+                <CloudDownload size={14} style={syncingDt ? { animation: 'spin 1s linear infinite' } : undefined} />
+                {syncingDt ? 'Syncing…' : 'DT Sync'}
+              </button>
+            )}
             <button onClick={() => exportCsv(rows.map(r => r.original))} style={{ padding: '7px 12px', fontSize: 12, fontWeight: 500, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4, fontFamily: 'inherit', color: theme.colors.textSecondary }}>
               <Download size={14} /> Export
             </button>
