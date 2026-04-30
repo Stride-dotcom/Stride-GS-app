@@ -62,6 +62,16 @@ function sanitizeName(name: string): string {
   return name.replace(/[^a-zA-Z0-9._-]/g, '_').slice(-120);
 }
 
+/**
+ * Sanitize a tenant (client spreadsheet) ID for use as a Supabase Storage
+ * path segment. Mirrors usePhotos.ts — same upload-only sanitization;
+ * getSignedUrl / deleteDocument read storage_key straight off the DB row
+ * and MUST NOT re-sanitize.
+ */
+function sanitizeTenantForPath(tenantId: string): string {
+  return tenantId.replace(/[^a-zA-Z0-9-]/g, '-');
+}
+
 export function useDocuments({
   contextType, contextId, tenantId, includeDeleted = false, enabled = true,
 }: UseDocumentsOptions): UseDocumentsResult {
@@ -100,7 +110,8 @@ export function useDocuments({
     const ts = Date.now();
     const rand = Math.random().toString(36).slice(2, 8);
     const safeName = sanitizeName(file.name || `document-${ts}.pdf`);
-    const storageKey = `${effectiveTenantId}/${contextType}-${contextId}/${ts}-${rand}-${safeName}`;
+    const safeTenant = sanitizeTenantForPath(effectiveTenantId);
+    const storageKey = `${safeTenant}/${contextType}-${contextId}/${ts}-${rand}-${safeName}`;
 
     const { error: upErr } = await supabase.storage.from(BUCKET).upload(storageKey, file, {
       contentType: file.type || 'application/octet-stream',
