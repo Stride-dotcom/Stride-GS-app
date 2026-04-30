@@ -402,24 +402,24 @@ export function useQuoteStore() {
         const nextById = new Map(next.map(q => [q.id, q]));
 
         // Upsert anything that's new or changed (by updatedAt).
-        // For admins, an in-memory edit of another user's quote is a
-        // read-only-ish view; we keep the local edit for responsiveness
-        // but skip the server write so we never clobber someone else's
-        // row (RLS would reject it anyway — this just avoids the
-        // console warning and the misleading success feedback).
+        //
+        // 2026-04-30 — Removed the "skip foreign-quote writes" guard that
+        // used to live here. It was a defensive client-side mirror of
+        // an old RLS rule that only allowed owners to write. PR #103
+        // loosened the RLS so admins can INSERT / UPDATE / DELETE any
+        // quote (so View-as could save). The client-side skip was
+        // never updated, so admin edits of another user's quote
+        // updated local state, never reached the server, and were
+        // overwritten on the next hydrate. Justin reported it as
+        // "edits don't save."
+        //
+        // Now: admins (or anyone the RLS allows) attempt the upsert;
+        // RLS still gates server-side. saveErrors surfaces any rejection
+        // on the row.
         const userEmail = user.email;
         for (const q of next) {
           const was = prevById.get(q.id);
           if (!was || was.updatedAt !== q.updatedAt) {
-            const rowOwner = quoteOwners[q.id];
-            const isForeign = isAdmin && rowOwner && rowOwner !== userEmail;
-            if (isForeign) {
-              console.info('[useQuoteStore] skipping server write on foreign quote', q.number, '(owned by', rowOwner, ')');
-              continue;
-            }
-            // Record the save result per-quote so the UI can show
-            // "⚠ Not saved to server" on the row when RLS (or anything
-            // else) rejects the write.
             void upsertQuoteToSupabase(userEmail, q).then(err => {
               setSaveErrors(prev => {
                 const nextErr = { ...prev };
@@ -430,18 +430,11 @@ export function useQuoteStore() {
             });
           }
         }
-        // Delete anything that was there before and isn't now — but only
-        // if we actually own the row. Admin-side deletes of foreign rows
-        // are also rejected by RLS; bail out locally so the list stays
-        // consistent with server state after the next hydrate.
+        // Delete anything that was there before and isn't now. Same
+        // history as the upsert path — the admin-foreign-row guard was
+        // removed once RLS allowed admin DELETE on any owner.
         for (const q of prev) {
           if (!nextById.has(q.id)) {
-            const rowOwner = quoteOwners[q.id];
-            const isForeign = isAdmin && rowOwner && rowOwner !== user.email;
-            if (isForeign) {
-              console.info('[useQuoteStore] skipping server delete on foreign quote', q.number, '(owned by', rowOwner, ')');
-              continue;
-            }
             void deleteQuoteFromSupabase(q.id);
           }
         }
@@ -449,7 +442,7 @@ export function useQuoteStore() {
 
       return next;
     });
-  }, [user?.email, isAdmin, quoteOwners]);
+  }, [user?.email]);
 
   const setSettings = useCallback((updater: QuoteStoreSettings | ((prev: QuoteStoreSettings) => QuoteStoreSettings)) => {
     setSettingsRaw(prev => {
