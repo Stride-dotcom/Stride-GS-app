@@ -124,6 +124,20 @@ function sanitizeTenantForPath(tenantId: string): string {
   return tenantId.replace(/[^a-zA-Z0-9-]/g, '-');
 }
 
+/**
+ * Sanitize an entity ID (task/repair/will-call/shipment/inventory ID) for
+ * use as a Supabase Storage path segment. Entity IDs can contain weird
+ * characters from sheet imports (backticks, spaces, slashes, etc.) that
+ * the storage backend rejects. More permissive than the tenant rule —
+ * keeps `_` and `.` because real entity IDs sometimes use them — and
+ * collapses everything else to `-`.
+ *
+ * Same upload-only rule as sanitizeTenantForPath: never re-apply on read.
+ */
+function sanitizeEntityForPath(entityId: string): string {
+  return entityId.replace(/[^a-zA-Z0-9._-]/g, '-');
+}
+
 export function usePhotos({ entityType, entityId, tenantId, enabled = true, itemId }: UsePhotosOptions): UsePhotosResult {
   const { user } = useAuth();
   const effectiveTenantId = tenantId ?? user?.clientSheetId ?? null;
@@ -225,7 +239,8 @@ export function usePhotos({ entityType, entityId, tenantId, enabled = true, item
     const rand = Math.random().toString(36).slice(2, 8);
     const safeName = sanitizeName(file.name || `photo-${ts}.jpg`);
     const safeTenant = sanitizeTenantForPath(effectiveTenantId);
-    const basePath = `${safeTenant}/${entityType}-${entityId}`;
+    const safeEntity = sanitizeEntityForPath(entityId);
+    const basePath = `${safeTenant}/${entityType}-${safeEntity}`;
     const storageKey = `${basePath}/${ts}-${rand}-${safeName}`;
     const thumbKey = `${basePath}/thumbs/${ts}-${rand}-${safeName}`;
 
