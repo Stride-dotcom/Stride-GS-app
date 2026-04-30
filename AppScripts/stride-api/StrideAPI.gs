@@ -1,5 +1,20 @@
 /* ===================================================
-   StrideAPI.gs — v38.142.4 — 2026-04-30 PST — Bulk Sync: populate will_calls.item_ids
+   StrideAPI.gs — v38.142.5 — 2026-04-30 PST — transferItems: sync tasks/repairs to Supabase
+   v38.142.5: handleTransferItems_ correctly cancelled source tasks
+              (status -> "Cancelled") and source repairs (status ->
+              "Complete") in the sheet, then copied them to the
+              destination's Tasks/Repairs sheets. But the router's
+              api_fullClientSync_ call only covered ["inventory",
+              "billing"] — so the React app showed stale "Open" tasks
+              on the source client (since Supabase still had the
+              pre-transfer rows) and missing tasks on the destination
+              (since the new rows were never upserted). Same for
+              repairs.
+              Fix: include "task" and "repair" in both fullClientSync
+              calls (source and destination tenants). The handler
+              itself didn't change — only the router-level sync
+              entity list. Mirrors how inventory + billing are
+              already handled in the same code path.
    v38.142.4: handleBulkSyncToSupabase_ was writing item_ids: [] on
               every will_call it touched because the call to
               sbWillCallRow_ omitted itemIds. The result: pressing
@@ -6150,8 +6165,13 @@ function doPost(e) {
           var r = handleTransferItems_(effectiveId, payload);
           invalidateClientCache_(effectiveId);
           api_notifySupabase_(r, { tenant_id: effectiveId, entity_type: "inventory", entity_id: "", action_type: "transfer_items", requested_by: callerEmail, request_id: String(payload.requestId || "") });
-          api_fullClientSync_(effectiveId, ["inventory", "billing"]);
-          if (destId) api_fullClientSync_(destId, ["inventory", "billing"]);
+          // v38.142.5: handleTransferItems_ also cancels source tasks/repairs and
+          // appends them to the destination, but the original sync list only
+          // covered inventory + billing — so the React app saw stale Open tasks
+          // on the source client and missing tasks on the destination. Include
+          // "task" and "repair" so both tenants' caches match the sheet truth.
+          api_fullClientSync_(effectiveId, ["inventory", "billing", "task", "repair"]);
+          if (destId) api_fullClientSync_(destId, ["inventory", "billing", "task", "repair"]);
           // Phase 2 — update ledger: tenant_id → dest, status → active.
           // The ID stays the same (transfers preserve Item ID across clients).
           try {
