@@ -78,14 +78,26 @@ export function CreateWillCallModal({ onClose, onSubmit, preSelectedItemIds = []
 
   const selectedItems = useMemo(() => allItems.filter(i => selectedIds.has(i.itemId)), [allItems, selectedIds]);
 
-  // Check selected items against existing active will calls (exclude optimistic TEMP entries)
+  // Check selected items against existing active will calls (exclude
+  // optimistic TEMP entries and the just-created WC).
+  // Once createResult.success is true the modal is on the success
+  // screen — the realtime/refetch cycle has just folded the brand-new
+  // WC into existingWillCalls, and re-running the conflict check
+  // would falsely flag every item as already on an active WC (the
+  // one we just successfully created). Bail out early in that case.
+  // Belt-and-suspenders: also skip the createResult.wcNumber row
+  // explicitly so a pre-success render between create and refetch
+  // can't slip through either.
   const wcConflicts = useMemo<WcConflictInfo[]>(() => {
+    if (createResult?.success) return [];
     if (!existingWillCalls?.length || !selectedIds.size) return [];
     const activeStatuses = new Set(['Pending', 'Scheduled', 'Partial']);
+    const justCreatedWcNumber = createResult?.wcNumber;
     const results: WcConflictInfo[] = [];
     const seen = new Set<string>(); // avoid duplicate warnings per item
     for (const wc of existingWillCalls) {
       if (wc.wcNumber.startsWith('TEMP-')) continue; // skip optimistic creates
+      if (justCreatedWcNumber && wc.wcNumber === justCreatedWcNumber) continue; // skip the WC we just created
       if (!activeStatuses.has(wc.status)) continue;
       for (const wcItem of (wc.items || [])) {
         if (wcItem.released) continue;
@@ -96,7 +108,7 @@ export function CreateWillCallModal({ onClose, onSubmit, preSelectedItemIds = []
       }
     }
     return results;
-  }, [existingWillCalls, selectedIds]);
+  }, [existingWillCalls, selectedIds, createResult]);
 
   const toggleItem = (id: string) => {
     setSelectedIds(prev => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n; });
