@@ -3584,8 +3584,8 @@ export function CreateDeliveryOrderModal({
                 <span>Estimated Total</span>
                 <span>{orderTotal != null ? `$${orderTotal.toFixed(2)}` : isCallForQuote ? 'Call for quote' : '—'}</span>
               </div>
-              <div style={{ fontSize: 10, color: theme.colors.textMuted, marginTop: 6, fontStyle: 'italic' }}>
-                Rates shown are estimates. Final pricing will be confirmed by Stride staff during review.
+              <div style={{ fontSize: 11, color: theme.colors.textMuted, marginTop: 8, fontStyle: 'italic', lineHeight: 1.45 }}>
+                Pricing is estimated based on the information provided. If additional assembly, labor, or special handling services are required at the time of delivery, rates may be adjusted accordingly.
               </div>
             </div>
           )}

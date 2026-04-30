@@ -320,13 +320,20 @@ function resolveAccountName(tenantId: string | null, acctMap: Record<string, str
 
 /**
  * Prune duplicate dt_order_items rows for one order. Same logical line
- * (same dt_item_code + description, or same description for ad-hoc rows)
  * collapses to the most-recently-updated row; older rows are deleted.
  *
- * dt_order_items has no UNIQUE constraint on (dt_order_id, dt_item_code,
- * description), and several historical write paths have produced duplicate
- * rows for the same line:
- *   • Modal edit-promote: delete-then-insert can leave duplicates if the
+ * Dedup key:
+ *   • dt_item_code when present (inventory-sourced rows). Same SKU on
+ *     the same order is the same physical item — even if descriptions
+ *     diverge between create-time (vendor-prefixed) and post-DT-sync
+ *     (the dispatch export shape).
+ *   • description (lowercased + whitespace-collapsed) when dt_item_code
+ *     is null (ad-hoc free-text rows). Same wording = same line.
+ *
+ * dt_order_items has no UNIQUE constraint on (dt_order_id, dt_item_code),
+ * and several historical write paths have produced duplicates for the
+ * same line:
+ *   • Modal edit-promote: delete-then-insert leaves duplicates if the
  *     ref pointing at the old order id is null/stale and the delete
  *     becomes a no-op against `dt_order_id IS NULL`.
  *   • dt-backfill-orders: matches existing items by dt_item_code OR
@@ -348,12 +355,20 @@ async function pruneDuplicateOrderItems(supabase: any, dtOrderId: string): Promi
       .eq('dt_order_id', dtOrderId);
     if (error || !data) return;
 
-    // Group by (dt_item_code || '') + '|' + (description || '').
-    // For each group with >1 row, mark all but the most-recently-updated
-    // (tiebreaker: latest created_at) as duplicates to delete.
+    const normDesc = (s: string | null) => (s ?? '').toLowerCase().replace(/\s+/g, ' ').trim();
     const groups = new Map<string, Array<{ id: string; updated_at: string | null; created_at: string | null }>>();
     for (const row of data as Array<{ id: string; dt_item_code: string | null; description: string | null; updated_at: string | null; created_at: string | null }>) {
-      const key = `${row.dt_item_code ?? ''}\x1f${row.description ?? ''}`;
+      const sku = (row.dt_item_code ?? '').trim();
+      // SKU rows group by SKU (different descriptions of the same item
+      // collapse). Ad-hoc rows group by normalized description.
+      const key = sku ? `sku:${sku}` : `desc:${normDesc(row.description)}`;
+      // Skip rows with no usable key — both columns null would otherwise
+      // collapse every such row into a single bucket and we'd delete
+      // legitimate-but-blank lines.
+      if (key === 'desc:') {
+        groups.set(`__id:${row.id}`, [row]);
+        continue;
+      }
       const arr = groups.get(key);
       if (arr) arr.push(row);
       else groups.set(key, [row]);

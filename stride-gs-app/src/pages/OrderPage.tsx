@@ -360,6 +360,9 @@ function DetailsTab({
               {order.pricingNotes && (
                 <div style={{ fontSize: 11, color: EP.textMuted, marginTop: 8, fontStyle: 'italic' }}>{order.pricingNotes}</div>
               )}
+              <div style={{ fontSize: 11, color: EP.textMuted, marginTop: 10, fontStyle: 'italic', lineHeight: 1.45 }}>
+                Pricing is estimated based on the information provided. If additional assembly, labor, or special handling services are required at the time of delivery, rates may be adjusted accordingly.
+              </div>
             </>
           )}
         </EPCard>
