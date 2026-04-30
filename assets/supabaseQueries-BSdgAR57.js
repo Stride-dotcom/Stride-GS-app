@@ -1,0 +1,1 @@
+import{o as e}from"./supabaseQueries-gVOPmZZ5.js";export{e as fetchClientsFromSupabase};
