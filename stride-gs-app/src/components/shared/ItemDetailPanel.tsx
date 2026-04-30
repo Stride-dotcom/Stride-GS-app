@@ -17,6 +17,7 @@ import type { TabbedDetailPanelTab } from './TabbedDetailPanel';
 import { EntityPage } from './EntityPage';
 import { buildDeepLink } from '../../lib/deepLinks';
 import { useIsMobile } from '../../hooks/useIsMobile';
+import { useAutocomplete } from '../../hooks/useAutocomplete';
 import { FloatingActionMenu, type FABAction } from './FloatingActionMenu';
 import { usePhotos } from '../../hooks/usePhotos';
 import { useDocuments } from '../../hooks/useDocuments';
@@ -108,6 +109,45 @@ function EditInput({ label, value, onChange, mono }: { label: string; value: str
     <div style={{ marginBottom: 8 }}>
       <div style={{ fontSize: 10, fontWeight: 500, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 2 }}>{label}</div>
       <input value={value} onChange={e => onChange(e.target.value)} style={{ ...editInputStyle, fontFamily: mono ? 'monospace' : 'inherit' }} />
+    </div>
+  );
+}
+
+/**
+ * Inline-edit field with a per-client suggestion dropdown. Wraps the
+ * AutocompleteInput primitive in the same label-on-top layout as
+ * EditInput so the rendered detail page stays visually consistent.
+ *
+ * Used for Vendor / Sidemark / Description on the item detail page —
+ * the three free-text fields that benefit most from autocomplete to
+ * prevent the duplicate-misspelling problem Justin hit on mobile
+ * (typing a new sidemark with no dropdown → spaces, capitalization,
+ * and typos all create separate "values" that filter as different
+ * groups). Suggestions come from useAutocomplete(clientSheetId)
+ * which is the same per-client Autocomplete_DB the inventory grid's
+ * inline-edit cells already use.
+ */
+function EditAutocomplete({
+  label, value, onChange, suggestions, placeholder,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  suggestions: string[];
+  placeholder?: string;
+}) {
+  return (
+    <div style={{ marginBottom: 8 }}>
+      <div style={{ fontSize: 10, fontWeight: 500, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 2 }}>{label}</div>
+      <AutocompleteInput
+        value={value}
+        onChange={onChange}
+        suggestions={suggestions}
+        placeholder={placeholder}
+        allowCustom
+        icon={false}
+        style={{ fontSize: 13 }}
+      />
     </div>
   );
 }
@@ -518,6 +558,13 @@ export function ItemDetailPanel({
   // into a small floating action button so the entity body isn't pinned
   // behind a row of pills that ate ~half the visible screen on iPhone.
   const isCompactViewport = isMobile || isTablet;
+
+  // Per-client autocomplete suggestions for Vendor / Sidemark / Description.
+  // Same source the inventory grid's inline-edit cells use; back-fills the
+  // gap on the detail page where Justin reported (mobile, editing sidemark)
+  // typing produced no dropdown so duplicates and misspellings slipped in.
+  const { vendors: vendorSuggestions, sidemarks: sidemarkSuggestions, descriptions: descriptionSuggestions }
+    = useAutocomplete(clientSheetId);
   const statusCfg: Record<string, { bg: string; color: string }> = {
     Active: { bg: '#F0FDF4', color: '#15803D' },
     Released: { bg: '#EFF6FF', color: '#1D4ED8' },
@@ -887,7 +934,7 @@ export function ItemDetailPanel({
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 16px' }}>
           {isEditing ? (
             <>
-              <EditInput label="Vendor" value={draft.vendor} onChange={v => setDraftField('vendor', v)} />
+              <EditAutocomplete label="Vendor" value={draft.vendor} onChange={v => setDraftField('vendor', v)} suggestions={vendorSuggestions} placeholder="Type vendor..." />
               {canEditStaff ? (
                 <EditSelect label="Class" value={draft.itemClass} options={classNames.length > 0 ? classNames : [draft.itemClass || '']} onChange={v => setDraftField('itemClass', v)} />
               ) : (
@@ -906,7 +953,7 @@ export function ItemDetailPanel({
               ) : (
                 <Field label="Qty" value={dv('qty')} />
               )}
-              <EditInput label="Sidemark" value={draft.sidemark} onChange={v => setDraftField('sidemark', v)} />
+              <EditAutocomplete label="Sidemark" value={draft.sidemark} onChange={v => setDraftField('sidemark', v)} suggestions={sidemarkSuggestions} placeholder="Type sidemark..." />
               <EditInput label="Room" value={draft.room} onChange={v => setDraftField('room', v)} />
             </>
           ) : (
@@ -926,7 +973,7 @@ export function ItemDetailPanel({
         <div style={{ marginTop: 4 }}>
           {isEditing ? (
             <>
-              <EditInput label="Description" value={draft.description} onChange={v => setDraftField('description', v)} />
+              <EditAutocomplete label="Description" value={draft.description} onChange={v => setDraftField('description', v)} suggestions={descriptionSuggestions} placeholder="Type description..." />
               <EditInput label="Reference" value={draft.reference} onChange={v => setDraftField('reference', v)} />
             </>
           ) : (
