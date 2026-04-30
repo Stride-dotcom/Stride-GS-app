@@ -1047,12 +1047,29 @@ export function Inventory() {
       header: 'Item ID', size: 120,
       cell: i => {
         const id = i.getValue();
+        // Item ID is the explicit affordance for opening detail. Row-body
+        // click no longer navigates — Justin reported that selecting
+        // checkboxes on long lists, missing one slightly, opened the
+        // detail page and clobbered the checkbox state on back-navigate.
+        // Clicking the ID (or the Eye icon) is the only way to open now.
         return (
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%' }}>
+          <div
+            className="item-id-cell"
+            onClick={e => { e.stopPropagation(); navigate(`/inventory/${id}`); }}
+            style={{
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%',
+              cursor: 'pointer',
+            }}
+            title="Open item detail"
+          >
             <span style={{
               fontFamily: 'monospace', fontSize: 12,
               fontWeight: theme.typography.weights.semibold,
-              color: theme.colors.textPrimary,
+              color: theme.colors.orange,
+              textDecoration: 'underline',
+              textUnderlineOffset: 2,
+              textDecorationColor: 'transparent',
+              transition: 'text-decoration-color 0.1s',
             }}>{id}</span>
             <ItemIdBadges itemId={id} inspOpenItems={inspOpenItems} inspDoneItems={inspDoneItems} asmOpenItems={asmOpenItems} asmDoneItems={asmDoneItems} repairOpenItems={repairOpenItems} repairDoneItems={repairDoneItems} wcOpenItems={wcOpenItems} wcDoneItems={wcDoneItems} dtOpenItems={dtOpenItems} dtDoneItems={dtDoneItems} />
           </div>
@@ -1539,6 +1556,12 @@ export function Inventory() {
         /* Session 72: row-hover actions via pure CSS — no React state,
            no useMemo rebuild, no per-hover cell re-renders. */
         .inv-row:hover .inv-row-actions { opacity: 1 !important; }
+
+        /* 2026-04-30 — Item ID cell is the only body affordance for
+           opening detail (row click no longer navigates). Underline
+           on hover gives a clear "this is a link" signal so users
+           don't keep trying to click the row. */
+        .item-id-cell:hover span { text-decoration-color: currentColor !important; }
 
         @media print {
           aside, .no-print, [data-no-print] { display: none !important; }
@@ -2044,18 +2067,22 @@ export function Inventory() {
                     key={row.id}
                     className={isPrinting ? undefined : 'inv-row'}
                     onClick={isPrinting ? undefined : (e => {
-                      // Match Tasks/Repairs/WillCalls/Shipments: single click
-                      // on row body navigates; clicks on checkbox or action
-                      // buttons keep their own behavior. Shift-click on the
-                      // row still range-selects via the checkbox column.
+                      // 2026-04-30 — row-body click no longer navigates.
+                      // Justin reported that on long select-many flows,
+                      // missing a checkbox by a few pixels opened the
+                      // detail page and the back button lost the entire
+                      // selection set. Now the only ways to open detail
+                      // are: click the Item ID (orange + underlines on
+                      // hover) or the Eye icon in the row-actions row.
+                      // Shift-click on the body still range-selects.
                       const t = e.target as HTMLElement;
-                      if (t.closest('input[type="checkbox"]') || t.closest('.row-actions')) return;
+                      if (t.closest('input[type="checkbox"]') || t.closest('.row-actions') || t.closest('.item-id-cell')) return;
                       if (e.shiftKey) { handleRowClick(e, row, idx); return; }
-                      navigate(`/inventory/${row.original.itemId}`);
+                      // Else: do nothing.
                     })}
                     style={{
                       background: rowBg,
-                      cursor: isPrinting ? undefined : 'pointer',
+                      cursor: isPrinting ? undefined : 'default',
                       transition: isPrinting ? undefined : 'background 0.08s',
                       borderLeft: !isPrinting && isActivePanel ? `3px solid ${theme.colors.orange}` : '3px solid transparent',
                     }}
@@ -2081,18 +2108,19 @@ export function Inventory() {
                     key={row.id}
                     className="inv-row"
                     onClick={e => {
-                      // Match Tasks/Repairs/WillCalls/Shipments: single click
-                      // on row body navigates; clicks on checkbox or action
-                      // buttons keep their own behavior. Shift-click still
-                      // range-selects (via existing handleRowClick flow).
+                      // 2026-04-30 — row-body click no longer navigates.
+                      // See the non-virtualized branch above for the full
+                      // rationale; this is the virtualized path used on
+                      // larger client lists. Same rule: only checkbox,
+                      // .row-actions, .item-id-cell, or shift-click do
+                      // anything. Body click is a no-op now.
                       const t = e.target as HTMLElement;
-                      if (t.closest('input[type="checkbox"]') || t.closest('.row-actions')) return;
+                      if (t.closest('input[type="checkbox"]') || t.closest('.row-actions') || t.closest('.item-id-cell')) return;
                       if (e.shiftKey) { handleRowClick(e, row, vRow.index); return; }
-                      navigate(`/inventory/${row.original.itemId}`);
                     }}
                     style={{
                       background: rowBg,
-                      cursor: 'pointer',
+                      cursor: 'default',
                       transition: 'background 0.08s',
                       borderLeft: isActivePanel ? `3px solid ${theme.colors.orange}` : '3px solid transparent',
                     }}
