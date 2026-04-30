@@ -255,6 +255,14 @@ function NewShipmentForm() {
   const filledItems = items.filter(i => i.itemId.trim() && i.description.trim());
 
   const update = useCallback((idx: number, field: keyof DockItem, value: string | number | boolean) => {
+    // Item ID is digits-only. Scrub anything else here (paste, IME, browser
+    // autofill, accidental ' / `) so a typo can never poison the row before
+    // it's submitted. Justin caught a leading apostrophe on Nip Tuck that
+    // broke task linking + RCVG billing — sanitizing at the write boundary
+    // is the cheapest defense.
+    if (field === 'itemId' && typeof value === 'string') {
+      value = value.replace(/\D+/g, '');
+    }
     setItems(prev => prev.map((item, i) => i === idx ? { ...item, [field]: value } : item));
   }, []);
 
@@ -377,6 +385,10 @@ function NewShipmentForm() {
           } else if (fld === 'itemClass') {
             const up = val.toUpperCase();
             row.itemClass = CLASSES.includes(up) ? up : row.itemClass;
+          } else if (fld === 'itemId') {
+            // Same digits-only rule as the manual input path. Excel pastes
+            // often carry stray quotes / spaces that would break linking.
+            row.itemId = val.replace(/\D+/g, '');
           } else {
             (row as Record<string, unknown>)[fld as string] = val;
           }
@@ -682,7 +694,25 @@ function NewShipmentForm() {
           );
         }
         return (
-          <input value={item.itemId} onChange={e => update(idx, 'itemId', e.target.value)} onPaste={e => handlePaste(e, idx, 'itemId')} placeholder="Item ID" style={{ ...cellInput, fontWeight: 600, fontFamily: 'monospace', fontSize: 11 }} />
+          <input
+            value={item.itemId}
+            onChange={e => update(idx, 'itemId', e.target.value)}
+            onPaste={e => handlePaste(e, idx, 'itemId')}
+            // Block non-digit keypresses up front so the user gets immediate
+            // feedback (the character literally doesn't appear) instead of
+            // typing something that gets silently scrubbed by the onChange
+            // sanitizer. Whitelist navigation/edit keys so backspace etc.
+            // still work.
+            onKeyDown={e => {
+              if (e.metaKey || e.ctrlKey || e.altKey) return;          // Cmd/Ctrl shortcuts
+              if (e.key.length > 1) return;                            // Arrows, Tab, Enter, Backspace, etc.
+              if (!/^[0-9]$/.test(e.key)) e.preventDefault();
+            }}
+            inputMode="numeric"
+            pattern="[0-9]*"
+            placeholder="Item ID"
+            style={{ ...cellInput, fontWeight: 600, fontFamily: 'monospace', fontSize: 11 }}
+          />
         );
       },
     }),
