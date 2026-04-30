@@ -97,6 +97,13 @@ UI components: FloatingActionMenu, WriteButton, BatchGuard, ActionTooltip, Batch
 
 ---
 
+## Recent Changes (2026-04-30, session 85)
+
+### Client access to delivery orders restored
+- `src/pages/Orders.tsx` — clients with `RoleGuard`-allowed access to `/orders` couldn't actually see the Orders tab or the "+ New Delivery" button. Three gates were hardcoded `isAdmin` only: tab default, URL→tab resolver, and tab-content render. Replaced with `canViewOrders = isAdmin || isClient`. DT Sync button kept admin-only. Existing client-name filter (lines 162-171) already restricts visible rows to `accessibleClientNames`, so no extra RLS work was needed.
+
+---
+
 ## Recent Changes (2026-04-30, session 84)
 
 ### Customizable add-on charges on delivery orders
