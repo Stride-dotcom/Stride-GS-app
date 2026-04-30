@@ -107,6 +107,23 @@ function sanitizeName(name: string): string {
   return name.replace(/[^a-zA-Z0-9._-]/g, '_').slice(-80);
 }
 
+/**
+ * Sanitize a tenant (client spreadsheet) ID for use as a Supabase Storage
+ * path segment. Google Drive IDs are alphanumeric with `_` and `-`, but
+ * the storage backend rejects keys whose first segment contains `_` for
+ * some clients with an "Invalid key" error — so we collapse anything
+ * outside [A-Za-z0-9-] to `-` before composing the path.
+ *
+ * Applied only at upload time, where the path is constructed. refetch /
+ * delete read `storage_key` straight off the DB row (which is whatever
+ * string was used when the photo was uploaded), so they don't need
+ * to re-sanitize and MUST NOT — doing so would break any photo whose
+ * key happens to differ.
+ */
+function sanitizeTenantForPath(tenantId: string): string {
+  return tenantId.replace(/[^a-zA-Z0-9-]/g, '-');
+}
+
 export function usePhotos({ entityType, entityId, tenantId, enabled = true, itemId }: UsePhotosOptions): UsePhotosResult {
   const { user } = useAuth();
   const effectiveTenantId = tenantId ?? user?.clientSheetId ?? null;
@@ -207,7 +224,8 @@ export function usePhotos({ entityType, entityId, tenantId, enabled = true, item
     const ts = Date.now();
     const rand = Math.random().toString(36).slice(2, 8);
     const safeName = sanitizeName(file.name || `photo-${ts}.jpg`);
-    const basePath = `${effectiveTenantId}/${entityType}-${entityId}`;
+    const safeTenant = sanitizeTenantForPath(effectiveTenantId);
+    const basePath = `${safeTenant}/${entityType}-${entityId}`;
     const storageKey = `${basePath}/${ts}-${rand}-${safeName}`;
     const thumbKey = `${basePath}/thumbs/${ts}-${rand}-${safeName}`;
 
