@@ -1304,8 +1304,11 @@ export function CreateDeliveryOrderModal({
       if (r.sidemark)               setSidemark(r.sidemark as string);
       if (r.details)                setDetails(r.details as string);
       if (r.local_service_date)     setServiceDate(r.local_service_date as string);
-      if (r.window_start_local)     setWindowStart(r.window_start_local as string);
-      if (r.window_end_local)       setWindowEnd(r.window_end_local as string);
+      // Postgres `time` columns serialize as 'HH:MM:SS' but the dropdown
+      // options use 'HH:MM' — slicing the seconds off lets the <select>
+      // match the saved value instead of falling back to "— None —".
+      if (r.window_start_local)     setWindowStart(String(r.window_start_local).slice(0, 5));
+      if (r.window_end_local)       setWindowEnd(String(r.window_end_local).slice(0, 5));
       if (r.billing_method)         setBillingMethod(r.billing_method as BillingMethod);
       if (r.service_time_minutes != null) setServiceTimeOverride(Number(r.service_time_minutes));
       if (r.coverage_option_id)     setCoverageOptionId(r.coverage_option_id as string);
