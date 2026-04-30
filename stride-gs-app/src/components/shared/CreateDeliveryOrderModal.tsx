@@ -190,6 +190,10 @@ type OrderMode = 'delivery' | 'pickup' | 'pickup_and_delivery' | 'service_only';
 type ItemsSource = 'warehouse' | 'pickup';
 
 interface LiveItem {
+  /** Postgres UUID of the source inventory row. Used to set
+   *  dt_order_items.inventory_id (UUID FK) so OrderPage can offer
+   *  Release Items on the resulting order. */
+  inventoryRowId?: string;
   itemId: string;
   clientName: string;
   clientId: string;
@@ -1537,6 +1541,7 @@ export function CreateDeliveryOrderModal({
           if (itemsSource === 'warehouse' && selectedInvItems.length > 0) {
             const itemRows = selectedInvItems.map(i => ({
               dt_order_id: editingDraftRowIdRef.current,
+              inventory_id: i.inventoryRowId ?? null,
               dt_item_code: i.itemId,
               description: i.description || '',
               quantity: i.qty || 1,
@@ -1573,6 +1578,7 @@ export function CreateDeliveryOrderModal({
           if (itemsSource === 'warehouse' && selectedInvItems.length > 0) {
             const itemRows = selectedInvItems.map(i => ({
               dt_order_id: deliveryId,
+              inventory_id: i.inventoryRowId ?? null,
               dt_item_code: i.itemId,
               description: i.description || '',
               quantity: i.qty || 1,
@@ -1642,6 +1648,7 @@ export function CreateDeliveryOrderModal({
         if (mode !== 'delivery' || itemsSource !== 'warehouse') return [] as Array<Record<string, unknown>>;
         const invRows = selectedInvItems.map(i => ({
           dt_order_id: orderId,
+          inventory_id: i.inventoryRowId ?? null,
           dt_item_code: i.itemId,
           description: i.description || '',
           quantity: i.qty || 1,
@@ -1815,6 +1822,7 @@ export function CreateDeliveryOrderModal({
         if (itemsSource === 'warehouse' && selectedInvItems.length > 0) {
           const itemRows = selectedInvItems.map(i => ({
             dt_order_id: editingDraftRowIdRef.current,
+            inventory_id: i.inventoryRowId ?? null,
             dt_item_code: i.itemId,
             description: i.description || '',
             quantity: i.qty || 1,
@@ -1912,6 +1920,7 @@ export function CreateDeliveryOrderModal({
         if (mode === 'delivery' && itemsSource === 'warehouse') {
           const invRows = selectedInvItems.map(i => ({
             dt_order_id: editingDraftRowIdRef.current,
+            inventory_id: i.inventoryRowId ?? null,
             dt_item_code: i.itemId,
             description: i.description || '',
             quantity: i.qty || 1,
@@ -2246,6 +2255,7 @@ export function CreateDeliveryOrderModal({
             const qty = Number(i.qty) || 1;
             return {
               dt_order_id: orderRow.id,
+              inventory_id: i.inventoryRowId ?? null,
               dt_item_code: i.itemId,
               description: buildItemDescription({
                 description: i.description, vendor: i.vendor,

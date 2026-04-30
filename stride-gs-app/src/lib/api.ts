@@ -275,6 +275,12 @@ export interface PaymentTermsResponse {
 
 /** Inventory item from a client sheet */
 export interface ApiInventoryItem {
+  /** Postgres UUID for the inventory row (distinct from itemId, the
+   *  human-readable Stride code). Populated when fetched via
+   *  fetchInventoryFromSupabase; absent on the legacy GAS payload.
+   *  Used by CreateDeliveryOrderModal to set dt_order_items.inventory_id
+   *  so OrderPage can offer Release Items on the resulting order. */
+  inventoryRowId?: string;
   itemId: string;
   clientName: string;
   clientSheetId: string;

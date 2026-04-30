@@ -318,6 +318,73 @@ function resolveAccountName(tenantId: string | null, acctMap: Record<string, str
   return acctMap[tenantId] || 'STRIDE LOGISTICS';
 }
 
+/**
+ * Prune duplicate dt_order_items rows for one order. Same logical line
+ * (same dt_item_code + description, or same description for ad-hoc rows)
+ * collapses to the most-recently-updated row; older rows are deleted.
+ *
+ * dt_order_items has no UNIQUE constraint on (dt_order_id, dt_item_code,
+ * description), and several historical write paths have produced duplicate
+ * rows for the same line:
+ *   • Modal edit-promote: delete-then-insert can leave duplicates if the
+ *     ref pointing at the old order id is null/stale and the delete
+ *     becomes a no-op against `dt_order_id IS NULL`.
+ *   • dt-backfill-orders: matches existing items by dt_item_code OR
+ *     description; if DT's export reformatted the description (vendor
+ *     prefix dropped, etc.) the match misses and a new row is inserted.
+ *
+ * Running this at the start of every push makes the operation idempotent
+ * — re-pushes never accumulate duplicates and DT never sees doubled items.
+ *
+ * Best-effort: any error logs and returns; the caller still proceeds with
+ * whatever the items table currently contains.
+ */
+// deno-lint-ignore no-explicit-any
+async function pruneDuplicateOrderItems(supabase: any, dtOrderId: string): Promise<void> {
+  try {
+    const { data, error } = await supabase
+      .from('dt_order_items')
+      .select('id, dt_item_code, description, updated_at, created_at')
+      .eq('dt_order_id', dtOrderId);
+    if (error || !data) return;
+
+    // Group by (dt_item_code || '') + '|' + (description || '').
+    // For each group with >1 row, mark all but the most-recently-updated
+    // (tiebreaker: latest created_at) as duplicates to delete.
+    const groups = new Map<string, Array<{ id: string; updated_at: string | null; created_at: string | null }>>();
+    for (const row of data as Array<{ id: string; dt_item_code: string | null; description: string | null; updated_at: string | null; created_at: string | null }>) {
+      const key = `${row.dt_item_code ?? ''}\x1f${row.description ?? ''}`;
+      const arr = groups.get(key);
+      if (arr) arr.push(row);
+      else groups.set(key, [row]);
+    }
+    const toDelete: string[] = [];
+    for (const arr of groups.values()) {
+      if (arr.length < 2) continue;
+      arr.sort((a, b) => {
+        const au = a.updated_at ?? a.created_at ?? '';
+        const bu = b.updated_at ?? b.created_at ?? '';
+        if (au !== bu) return au < bu ? 1 : -1; // newest first
+        return 0;
+      });
+      // Keep arr[0] (newest); delete the rest.
+      for (let i = 1; i < arr.length; i++) toDelete.push(arr[i].id);
+    }
+    if (toDelete.length === 0) return;
+    const { error: delErr } = await supabase
+      .from('dt_order_items')
+      .delete()
+      .in('id', toDelete);
+    if (delErr) {
+      console.warn(`[dt-push-order] dedup delete partial failure for ${dtOrderId}:`, delErr.message);
+    } else {
+      console.log(`[dt-push-order] pruned ${toDelete.length} duplicate item(s) on ${dtOrderId}`);
+    }
+  } catch (err) {
+    console.warn(`[dt-push-order] dedup threw for ${dtOrderId}:`, (err as Error).message);
+  }
+}
+
 // Push a single order to DT. Returns {ok, body}.
 async function pushSingleOrder(
   order: DtOrderRow,
@@ -411,6 +478,16 @@ Deno.serve(async (req: Request) => {
   }
   const orderType = orderTyped.order_type || (orderTyped.is_pickup ? 'pickup' : 'delivery');
 
+  // ── 1.5. Idempotent dedup: prune dt_order_items duplicates ────────────
+  // dt_order_items has no UNIQUE constraint on (dt_order_id, dt_item_code,
+  // description), and several historical write paths (modal edit-promote,
+  // dt-backfill description-merge) have produced duplicate rows for the
+  // same logical line. Doubled rows make push send each item twice to
+  // DispatchTrack. Before reading items, collapse any duplicate (dt_item_code,
+  // description) pairs for this order, keeping the most-recently-updated row.
+  // ad-hoc rows (dt_item_code = null) are deduped by description only.
+  await pruneDuplicateOrderItems(supabase, orderId);
+
   // ── 2. Fetch items for primary order ──────────────────────────────────
   const { data: items, error: itemsErr } = await supabase
     .from('dt_order_items')
@@ -465,6 +542,8 @@ Deno.serve(async (req: Request) => {
       const linkedTyped = linkedOrder as DtOrderRow;
       // Only push if not already pushed
       if (!linkedTyped.pushed_to_dt_at) {
+        // Same dedup the primary order gets — see pruneDuplicateOrderItems.
+        await pruneDuplicateOrderItems(supabase, linkedTyped.id);
         const { data: linkedItems } = await supabase
           .from('dt_order_items')
           .select('id, dt_item_code, description, quantity, vendor, class_name, cubic_feet, extras')

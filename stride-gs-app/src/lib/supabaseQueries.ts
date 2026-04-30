@@ -143,6 +143,11 @@ async function paginateAll<T>(
 // ─── Inventory ───────────────────────────────────────────────────────────────
 
 interface SupabaseInventoryRow {
+  // Postgres UUID PK on the inventory row. Distinct from item_id (the
+  // human-readable Stride code like "62216"); needed so dt_order_items
+  // can be FK-linked back to the actual inventory row that supplied
+  // the line. Populated for every row by the GAS sync paths.
+  id: string;
   tenant_id: string;
   item_id: string;
   description: string | null;
@@ -222,6 +227,12 @@ export async function fetchInventoryFromSupabase(
     if (!data) return null;
 
     const items: ApiInventoryItem[] = data.map(row => ({
+      // Inventory row UUID — surfaced so the Create Delivery Order modal
+      // can populate dt_order_items.inventory_id (UUID FK) when items
+      // are added from inventory. Without it, dt_order_items rows have
+      // no link back to the source inventory row, which broke the
+      // OrderPage Release Items button.
+      inventoryRowId: row.id,
       itemId: row.item_id,
       clientName: clientNameMap[row.tenant_id] || '',
       clientSheetId: row.tenant_id,

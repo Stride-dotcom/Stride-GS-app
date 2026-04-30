@@ -1060,11 +1060,21 @@ export function OrderPage() {
   // unique inventory_ids, and you can only release a physical item
   // once anyway.
   const releasableItems = (() => {
+    // Existing dt_order_items rows have dt_item_code populated
+    // (human-readable Item ID) but inventory_id (UUID FK) is null on
+    // any order created before that column was added. Fall back to
+    // dt_item_code so the Release Items button still appears for those
+    // orders, and so the GAS releaseItems endpoint — which matches by
+    // human-readable Item ID against the Inventory sheet — gets the
+    // identifier it can actually look up. The UUID inventory_id alone
+    // wouldn't match anything sheet-side anyway, so dt_item_code is
+    // the practical linkage key here.
     const seen = new Set<string>();
     const out: typeof order.items = [];
     for (const it of order.items ?? []) {
-      if (!it.inventoryId || seen.has(it.inventoryId)) continue;
-      seen.add(it.inventoryId);
+      const linkId = it.inventoryId || it.dtItemCode;
+      if (!linkId || seen.has(linkId)) continue;
+      seen.add(linkId);
       out.push(it);
     }
     return out;
@@ -1233,12 +1243,16 @@ export function OrderPage() {
       )}
       {showReleaseModal && order.tenantId && (
         <ReleaseItemsModal
-          itemIds={releasableItems.map(it => it.inventoryId!)}
+          // dt_item_code is the human-readable Item ID GAS releaseItems
+          // matches against in the Inventory sheet. inventoryId (UUID)
+          // is kept as a fallback only for rows that legitimately have
+          // no dt_item_code — see the releasableItems comment above.
+          itemIds={releasableItems.map(it => (it.dtItemCode || it.inventoryId)!)}
           clientName={order.clientName || 'this client'}
           clientSheetId={order.tenantId}
           defaultReleaseDate={order.finishedAt ? order.finishedAt.slice(0, 10) : undefined}
           selectableItems={releasableItems.map(it => ({
-            id: it.inventoryId!,
+            id: (it.dtItemCode || it.inventoryId)!,
             label: it.description || it.dtItemCode || 'Item',
             sublabel: [
               it.dtItemCode && `SKU ${it.dtItemCode}`,
