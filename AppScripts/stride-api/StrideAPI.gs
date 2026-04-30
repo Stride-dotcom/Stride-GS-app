@@ -1,5 +1,21 @@
 /* ===================================================
-   StrideAPI.gs — v38.142.5 — 2026-04-30 PST — transferItems: sync tasks/repairs to Supabase
+   StrideAPI.gs — v38.142.6 — 2026-04-30 PST — Inventory sync: stop wiping shipment_folder_url
+   v38.142.6: Two inventory write paths were calling sbInventoryRow_
+              without a shipmentFolderUrl field — handleBulkSyncToSupabase_
+              (the per-client Sync button) and resyncEntityToSupabase_'s
+              "inventory" case (every per-item resync). sbInventoryRow_
+              defaults missing shipmentFolderUrl to "", so each pass
+              wiped the URL that api_fullClientSync_ had stamped from
+              the per-row Shipment # hyperlink. Net effect: the Drive
+              folder button broke for any client right after a Sync,
+              and for individual items right after any inventory edit.
+              Both paths now read the per-row Shipment # RichText
+              hyperlink (same pattern as api_fullClientSync_ and
+              handleGetInventory_) and pass shipmentFolderUrl through.
+              Same class of regression as v38.142.4's will_calls.item_ids
+              wipe.
+              Repair: a single api_fullClientSync_ run on each affected
+              client repopulates the URLs from the authoritative sheet.
    v38.142.5: handleTransferItems_ correctly cancelled source tasks
               (status -> "Cancelled") and source repairs (status ->
               "Complete") in the sheet, then copied them to the
@@ -5069,6 +5085,29 @@ function resyncEntityToSupabase_(entityType, tenantId, entityId) {
         var upResult = null;
         switch (entityType) {
           case "inventory":
+            // v38.142.6: Read this row's Shipment # cell hyperlink so the
+            // resync preserves shipment_folder_url. Without this, every per-
+            // item resync was wiping the URL to "" (sbInventoryRow_ defaults
+            // missing shipmentFolderUrl to empty), so any inventory edit /
+            // status flip / etc. would silently break the Drive folder button
+            // for that item until the next api_fullClientSync_ ran.
+            var invShipFolderUrlResync = "";
+            try {
+              var invShipColResync = api_getHeaderMap_(sheet)["Shipment #"];
+              if (invShipColResync) {
+                var invShipRtResync = sheet.getRange(i + 2, invShipColResync).getRichTextValue();
+                if (invShipRtResync) {
+                  invShipFolderUrlResync = invShipRtResync.getLinkUrl() || "";
+                  if (!invShipFolderUrlResync) {
+                    var invShipRuns = invShipRtResync.getRuns();
+                    for (var iri = 0; iri < invShipRuns.length; iri++) {
+                      var iriUrl = invShipRuns[iri].getLinkUrl();
+                      if (iriUrl) { invShipFolderUrlResync = iriUrl; break; }
+                    }
+                  }
+                }
+              }
+            } catch (_) {}
             upResult = supabaseUpsert_("inventory", sbInventoryRow_(tenantId, {
               itemId: entityId, description: row["Description"], vendor: row["Vendor"],
               sidemark: row["Sidemark"], room: row["Room"], itemClass: row["Class"],
@@ -5082,6 +5121,7 @@ function resyncEntityToSupabase_(entityType, tenantId, entityId) {
               repairPhotosUrl: row["Repair Photos URL"],
               invoiceUrl: row["Invoice URL"],
               transferDate: formatDate_(row["Transfer Date"]),
+              shipmentFolderUrl: invShipFolderUrlResync,
               // Phase B coverage fields — graceful if columns not yet rolled
               declaredValue: row["Declared Value"],
               coverageOptionId: row["Coverage Option"]
@@ -31868,6 +31908,43 @@ function handleBulkSyncToSupabase_(payload) {
         var invSheet = ss.getSheetByName("Inventory");
         if (invSheet) {
           var invRows = sheetToObjects_(invSheet);
+          // v38.142.6: Read per-row Drive URLs from the Shipment # RichText
+          // hyperlink, mirroring api_fullClientSync_ at line ~5321. Without
+          // this map the call to sbInventoryRow_ below omitted shipmentFolderUrl
+          // entirely, defaulting it to "" — so every Sync click wiped the
+          // shipment_folder_url that api_fullClientSync_ had previously
+          // stamped, which broke the Drive folder button for the synced
+          // client until the next full sync ran. Same class of bug as the
+          // will_calls.item_ids regression in v38.142.4.
+          var bkInvShipUrlMap = {};
+          try {
+            var bkInvHmap = api_getHeaderMap_(invSheet);
+            var bkInvShipCol = bkInvHmap["Shipment #"];
+            var bkInvIdCol   = bkInvHmap["Item ID"];
+            if (bkInvShipCol && bkInvIdCol) {
+              var bkInvLastRow = api_getLastDataRow_(invSheet);
+              if (bkInvLastRow >= 2) {
+                var bkNumInvRows = bkInvLastRow - 1;
+                var bkInvIdVals = invSheet.getRange(2, bkInvIdCol,   bkNumInvRows, 1).getValues();
+                var bkInvRtVals = invSheet.getRange(2, bkInvShipCol, bkNumInvRows, 1).getRichTextValues();
+                for (var bri = 0; bri < bkNumInvRows; bri++) {
+                  var bkRid = String(bkInvIdVals[bri][0] || "").trim();
+                  if (!bkRid) continue;
+                  var bkRtCell = bkInvRtVals[bri][0];
+                  var bkUrlStr = bkRtCell ? (bkRtCell.getLinkUrl() || "") : "";
+                  if (!bkUrlStr && bkRtCell) {
+                    var bkRuns = bkRtCell.getRuns();
+                    for (var brj = 0; brj < bkRuns.length; brj++) {
+                      var bkRunUrl = bkRuns[brj].getLinkUrl();
+                      if (bkRunUrl) { bkUrlStr = bkRunUrl; break; }
+                    }
+                  }
+                  if (bkUrlStr) bkInvShipUrlMap[bkRid] = bkUrlStr;
+                }
+              }
+            }
+          } catch (_bkRtErr) { /* non-fatal — URLs default to empty */ }
+
           var invSb = [];
           var bkInvKeepIds = [];
           for (var i = 0; i < invRows.length; i++) {
@@ -31881,7 +31958,8 @@ function handleBulkSyncToSupabase_(payload) {
               receiveDate: formatDate_(invRows[i]["Receive Date"]), releaseDate: formatDate_(invRows[i]["Release Date"]),
               shipmentNumber: invRows[i]["Shipment #"], carrier: invRows[i]["Carrier"],
               trackingNumber: invRows[i]["Tracking #"], itemNotes: invRows[i]["Item Notes"],
-              reference: invRows[i]["Reference"], taskNotes: invRows[i]["Task Notes"]
+              reference: invRows[i]["Reference"], taskNotes: invRows[i]["Task Notes"],
+              shipmentFolderUrl: bkInvShipUrlMap[iid] || ""
             }));
           }
           supabaseBatchUpsert_("inventory", invSb);
