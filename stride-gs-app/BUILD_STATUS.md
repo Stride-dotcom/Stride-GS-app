@@ -97,6 +97,13 @@ UI components: FloatingActionMenu, WriteButton, BatchGuard, ActionTooltip, Batch
 
 ---
 
+## Recent Changes (2026-04-30, session 84)
+
+### Customizable add-on charges on delivery orders
+- `src/components/shared/CreateDeliveryOrderModal.tsx` v5 — every selected add-on now exposes editable Qty + Rate inputs in both the entry screen and the Full Edit screen (same component, used in both contexts). Subtotal recomputes live as qty × rate for ALL units (previously `flat`/`plus_base` ignored qty so a flat $185 Disposal could only ever be one line of $185). Rate defaults to the catalog price; staff/admin can override; clients see rate locked but can still change qty. A "Modified" badge surfaces overrides to reviewers. Quote-required add-ons stay at $0/"Quote Required" until staff enters a rate, at which point they become a normal charge. Per-order rate persists in `dt_orders.accessorials_json[].rate` (column already existed; previously the catalog rate was re-looked-up at save time, overwriting any future override).
+
+---
+
 ## Recent Changes (2026-04-26, session 83)
 
 ### Order revision/rejection emails
