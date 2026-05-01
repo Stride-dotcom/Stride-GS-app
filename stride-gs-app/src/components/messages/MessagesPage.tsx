@@ -78,40 +78,21 @@ export function MessagesPage() {
 
   const handleSend = async (body: string) => {
     if (!active) return;
-    // Session 74: bail if authUserId isn't resolved yet. Without it the
-    // "other party" detection below would mis-classify self as other and
-    // send the message to the wrong recipient (or no recipient at all).
     if (!authUserId) {
       console.warn('[MessagesPage] handleSend: authUserId not ready, ignoring send');
       return;
     }
-    // Recipient resolution: direct threads → the OTHER party's user id
-    // (key format is `direct:<uidA>:<uidB>` sorted-stable; pick whichever
-    // isn't self). Entity threads → we can't know recipients from the
-    // list alone, so we send to the last sender (the person currently
-    // talking to you). Minimum-viable send path; full recipient-picker
-    // UI lives in a separate follow-up component.
-    let recipientIds: string[] = [];
-    if (active.key.startsWith('direct:')) {
-      const parts = active.key.split(':'); // ['direct', uidA, uidB]
-      const [a, b] = [parts[1], parts[2]];
-      const other = a === authUserId ? b : a;
-      if (other) recipientIds = [other];
-    } else if (active.key.startsWith('group:')) {
-      // Reply to every member of the group except self. The key carries
-      // the canonical sorted participant set so we don't need to walk the
-      // thread to recover it.
-      const ids = active.key.slice('group:'.length).split(':').filter(Boolean);
-      recipientIds = ids.filter(u => u !== authUserId);
-    } else if (thread.length > 0) {
-      const lastOther = [...thread].reverse().find(m => m.senderId !== authUserId);
-      if (lastOther?.senderId) recipientIds = [lastOther.senderId];
-    }
+    // Session 89: thread keys are conversation UUIDs and the conversation
+    // already knows its participants — no more parsing direct: / group:
+    // string keys. Pass conversationId straight through so sendMessage
+    // skips the find-or-create RPC; recipientIds is just the participant
+    // list minus self for the message_recipients fan-out.
+    const recipientIds = active.participantUserIds.filter(u => u !== authUserId);
 
     await sendMessage({
       body,
+      conversationId: active.key,
       recipientIds,
-      threadId: active.threadId ?? undefined,
       entityType: active.entityType ?? undefined,
       entityId: active.entityId ?? undefined,
     });

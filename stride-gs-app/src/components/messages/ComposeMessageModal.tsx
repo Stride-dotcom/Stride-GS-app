@@ -51,11 +51,16 @@ export function ComposeMessageModal({ onClose, onSend, currentUserId }: Props) {
   // Map profiles → compose recipients, excluding the current user so they
   // can't message themselves.
   //
-  // Client-role users are restricted to admins + same-account coworkers so
-  // they can't start new threads with other clients or with staff directly.
-  // Staff/admin see everyone. This is a UI filter only — RLS still governs
-  // who can read/reply once a thread exists, so a staff member can still
-  // DM a client, and a client can reply to any thread they're already in.
+  // Visibility rules (Session 89):
+  //   • Admin: ALL users (no filter).
+  //   • Staff: ALL users — staff, admin, AND every client.
+  //   • Client: own-account coworkers (same `clientSheetId`) + ALL admin
+  //             + ALL staff. NOT other clients.
+  //
+  // This is a UI filter only — RLS still governs who can read/reply once
+  // a thread exists, so a staff member can DM a client, and a client can
+  // reply to any thread they're already on regardless of who started it.
+  const myRole = user?.role;
   const users = useMemo<ComposeRecipient[]>(() => {
     const base = profiles
       .filter(p => p.id !== currentUserId)
@@ -66,12 +71,14 @@ export function ComposeMessageModal({ onClose, onSend, currentUserId }: Props) {
         role: (p.role === 'admin' ? 'admin' : p.role === 'staff' ? 'staff' : 'client') as ComposeRecipient['role'],
         clientSheetId: p.clientSheetId,
       }));
-    if (!isClientRole) return base;
+    if (myRole === 'admin' || myRole === 'staff') return base;
+    // Client: admin + staff + same-tenant clients only.
     return base.filter(u =>
       u.role === 'admin' ||
+      u.role === 'staff' ||
       (u.role === 'client' && !!myClientSheetId && u.clientSheetId === myClientSheetId)
     );
-  }, [profiles, currentUserId, isClientRole, myClientSheetId]);
+  }, [profiles, currentUserId, myRole, myClientSheetId]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
