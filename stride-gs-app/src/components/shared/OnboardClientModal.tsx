@@ -1301,15 +1301,28 @@ function TaxExemptBlock({ spreadsheetId }: { spreadsheetId: string }) {
   }, [spreadsheetId]);
 
   // Generic field-save helper. Optimistic + error rollback handled by caller.
+  // Uses .select() so the response carries the row count — surfaces silent
+  // RLS no-ops as errors instead of letting them show as success. The
+  // clients table didn't have an authenticated UPDATE policy until the
+  // clients_authenticated_update_insert_delete_policies migration, so
+  // every "saved" tax/cert change historically wrote nothing — and the
+  // form looked successful while the value reverted on next open. With
+  // the policy in place AND this row-count check, a future RLS regression
+  // surfaces immediately as a visible error.
   const saveField = async (fieldKey: string, payload: Record<string, unknown>) => {
     setSaving(fieldKey); setError(null);
-    const { error: err } = await supabase
+    const { data, error: err } = await supabase
       .from('clients')
       .update(payload)
-      .eq('spreadsheet_id', spreadsheetId);
+      .eq('spreadsheet_id', spreadsheetId)
+      .select('spreadsheet_id');
     setSaving(null);
     if (err) {
       setError(err.message);
+      return false;
+    }
+    if (!data || data.length === 0) {
+      setError('Save did not affect any row — the database may have rejected the update. Please refresh and retry; if it persists, contact support.');
       return false;
     }
     setSavedFlash(fieldKey);
@@ -1356,14 +1369,22 @@ function TaxExemptBlock({ spreadsheetId }: { spreadsheetId: string }) {
       const url = signed?.signedUrl || '';
       const nowIso = new Date().toISOString();
 
-      const { error: updErr } = await supabase
+      const { data: updRows, error: updErr } = await supabase
         .from('clients')
         .update({
           resale_cert_url: url,
           resale_cert_uploaded_at: nowIso,
         })
-        .eq('spreadsheet_id', spreadsheetId);
+        .eq('spreadsheet_id', spreadsheetId)
+        .select('spreadsheet_id');
       if (updErr) throw updErr;
+      // Row-count check — same RLS-no-op guard as saveField above. A
+      // 0-row response means the storage upload landed but the URL
+      // never linked to the client; we surface that loudly instead
+      // of celebrating a partial success.
+      if (!updRows || updRows.length === 0) {
+        throw new Error('Cert uploaded to storage but the client row was not updated — likely an RLS issue. Refresh and retry.');
+      }
 
       setCertUrl(url);
       setCertUploadedAt(nowIso);
