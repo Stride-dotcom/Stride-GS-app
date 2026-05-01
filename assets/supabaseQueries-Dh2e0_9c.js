@@ -1,0 +1,1 @@
+import{o as e}from"./supabaseQueries-Fhi4C-_n.js";export{e as fetchClientsFromSupabase};
