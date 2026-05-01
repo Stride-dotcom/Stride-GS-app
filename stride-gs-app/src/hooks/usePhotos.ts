@@ -64,7 +64,11 @@ export interface UsePhotosResult {
   loading: boolean;
   error: string | null;
   refetch: () => Promise<void>;
-  uploadPhoto: (file: File, photoType?: PhotoType) => Promise<Photo | null>;
+  uploadPhoto: (
+    file: File,
+    photoType?: PhotoType,
+    override?: { entityType: EntityType; entityId: string },
+  ) => Promise<Photo | null>;
   setPrimaryPhoto: (photoId: string) => Promise<boolean>;
   toggleNeedsAttention: (photoId: string, needsAttention: boolean) => Promise<boolean>;
   toggleRepair: (photoId: string, isRepair: boolean) => Promise<boolean>;
@@ -228,8 +232,16 @@ export function usePhotos({ entityType, entityId, tenantId, enabled = true, item
     return () => { void supabase.removeChannel(channel); };
   }, [enabled, entityType, entityId, refetch]);
 
-  const uploadPhoto = useCallback(async (file: File, photoType: PhotoType = 'general'): Promise<Photo | null> => {
-    if (!effectiveTenantId || !entityId) {
+  const uploadPhoto = useCallback(async (
+    file: File,
+    photoType: PhotoType = 'general',
+    override?: { entityType: EntityType; entityId: string },
+  ): Promise<Photo | null> => {
+    // Override lets callers (e.g. an item-page Photos tab filtered to "Repair")
+    // direct the upload at a related entity instead of the hook's host entity.
+    const targetType: EntityType = override?.entityType ?? entityType;
+    const targetId = override?.entityId ?? entityId;
+    if (!effectiveTenantId || !targetId) {
       setError('Missing tenant or entity context');
       return null;
     }
@@ -239,8 +251,8 @@ export function usePhotos({ entityType, entityId, tenantId, enabled = true, item
     const rand = Math.random().toString(36).slice(2, 8);
     const safeName = sanitizeName(file.name || `photo-${ts}.jpg`);
     const safeTenant = sanitizeTenantForPath(effectiveTenantId);
-    const safeEntity = sanitizeEntityForPath(entityId);
-    const basePath = `${safeTenant}/${entityType}-${safeEntity}`;
+    const safeEntity = sanitizeEntityForPath(targetId);
+    const basePath = `${safeTenant}/${targetType}-${safeEntity}`;
     const storageKey = `${basePath}/${ts}-${rand}-${safeName}`;
     const thumbKey = `${basePath}/thumbs/${ts}-${rand}-${safeName}`;
 
@@ -272,13 +284,16 @@ export function usePhotos({ entityType, entityId, tenantId, enabled = true, item
     // reference this item. For entityType='inventory' the itemId IS the
     // entityId. For task/repair/etc., the caller passes parent itemId
     // via the hook option.
-    const resolvedItemId = (entityType === 'inventory' ? entityId : itemId) || null;
+    const resolvedItemId =
+      targetType === 'inventory' ? targetId
+      : entityType === 'inventory' ? entityId
+      : (itemId || null);
     const { data, error: insErr } = await supabase
       .from('item_photos')
       .insert({
         tenant_id: effectiveTenantId,
-        entity_type: entityType,
-        entity_id: entityId,
+        entity_type: targetType,
+        entity_id: targetId,
         item_id: resolvedItemId,
         storage_key: storageKey,
         storage_url: urlData.publicUrl,

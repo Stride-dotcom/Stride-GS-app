@@ -20,6 +20,8 @@ interface Props {
   accept?: string;
   /** Disable the button (e.g., during a parent-level upload). */
   disabled?: boolean;
+  /** Tooltip shown when disabled — surfaces *why* (e.g. ambiguous sub-tab target). */
+  disabledReason?: string;
   /** Upload-in-progress indicator shown on the primary button. */
   uploading?: boolean;
   /** Optional custom label; defaults to "Upload Photos". */
@@ -40,7 +42,7 @@ interface Props {
 
 export function PhotoUploadButton({
   onUpload, multiple = true, accept = 'image/*',
-  disabled, uploading, label = 'Upload Photos', compact,
+  disabled, disabledReason, uploading, label = 'Upload Photos', compact,
   onUploadOne, onBatchSaved,
 }: Props) {
   const inputRef = useRef<HTMLInputElement>(null);
@@ -80,6 +82,7 @@ export function PhotoUploadButton({
           type="button"
           onClick={() => inputRef.current?.click()}
           disabled={disabled || busy}
+          title={disabled && disabledReason ? disabledReason : undefined}
           style={primaryBtn(busy || !!disabled)}
         >
           {busy
