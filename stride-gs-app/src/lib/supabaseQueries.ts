@@ -1751,8 +1751,33 @@ export interface DeliveryAccessorial {
    * (per_task / per_item / per_hour / per_day) so the modal can render both
    * sources uniformly. `per_task` is mapped to 'flat' at fetch time —
    * downstream code only needs to handle the unit values listed below.
+   *
+   * NOTE — display label only. The actual billing math is driven by
+   * `billingMode` below; this string just sets the suffix shown next to
+   * the rate ("$45 / item", "$95 / hour"). Kept around for backward
+   * compat with the existing picker UI.
    */
   rateUnit: 'flat' | 'per_mile' | 'per_15min' | 'plus_base' | 'per_item' | 'per_hour' | 'per_day';
+  /**
+   * Drives the actual subtotal math for this service:
+   *   per_class — sum( classRates[item.itemClass] × item.qty ) over the
+   *               order's selected items. Quantity is implicit; the rate
+   *               varies per item class.
+   *   per_qty   — flat_rate × quantity. Quantity defaults to the order's
+   *               item count for "per item" services, or operator-entered
+   *               for hours/sqft/etc.
+   *   per_job   — flat_rate × 1, regardless of items. One-shot fee.
+   * Backed by service_catalog.billing_mode (migration
+   * service_catalog_billing_mode). Defaults to 'per_job' if the row is
+   * missing the column for any reason — safe fallback that won't double-
+   * charge.
+   */
+  billingMode: 'per_class' | 'per_qty' | 'per_job';
+  /**
+   * Per-item-class rates used when billingMode === 'per_class'. Mirrors
+   * service_catalog.rates with XXL spliced in from xxl_rate.
+   */
+  classRates: { XS: number; S: number; M: number; L: number; XL: number; XXL: number };
   description: string;
   displayOrder: number;
   active: boolean;
@@ -2301,7 +2326,9 @@ export async function fetchDeliveryServicesFromCatalog(): Promise<DeliveryAccess
   try {
     const { data, error } = await supabase
       .from('service_catalog')
-      .select('code, name, billing, flat_rate, unit, display_order, active, m_time, delivery_rate_unit, visible_to_client, description, quote_required')
+      // billing_mode + rates + xxl_rate added so the modal can do per-class
+      // and per-qty math instead of treating every add-on as flat × qty.
+      .select('code, name, billing, billing_mode, flat_rate, rates, xxl_rate, unit, display_order, active, m_time, delivery_rate_unit, visible_to_client, description, quote_required')
       .eq('show_as_delivery_service', true)
       .eq('active', true)
       .order('display_order');
@@ -2310,7 +2337,10 @@ export async function fetchDeliveryServicesFromCatalog(): Promise<DeliveryAccess
       code: string;
       name: string;
       billing: string | null;
+      billing_mode: string | null;
       flat_rate: number | string | null;
+      rates: Record<string, number> | null;
+      xxl_rate: number | string | null;
       unit: string | null;
       display_order: number | null;
       active: boolean | null;
@@ -2339,11 +2369,28 @@ export async function fetchDeliveryServicesFromCatalog(): Promise<DeliveryAccess
       }
       const rate = r.flat_rate != null ? Number(r.flat_rate) : 0;
       const quoteRequired = r.quote_required === true || (r.quote_required === null && rate === 0);
+      // billing_mode default — per_job is the safe fallback (single flat
+      // charge); won't overcharge if the column is somehow null.
+      const bm = r.billing_mode === 'per_class' || r.billing_mode === 'per_qty' || r.billing_mode === 'per_job'
+        ? r.billing_mode
+        : 'per_job';
+      const rawRates = (r.rates ?? {}) as Record<string, number>;
+      const xxl = Number(r.xxl_rate ?? 0);
+      const classRates = {
+        XS:  Number(rawRates.XS  ?? 0) || 0,
+        S:   Number(rawRates.S   ?? 0) || 0,
+        M:   Number(rawRates.M   ?? 0) || 0,
+        L:   Number(rawRates.L   ?? 0) || 0,
+        XL:  Number(rawRates.XL  ?? 0) || 0,
+        XXL: Number(rawRates.XXL ?? xxl) || 0,
+      };
       return {
         code: r.code,
         name: r.name,
         rate,
         rateUnit,
+        billingMode: bm,
+        classRates,
         description: r.description ?? '',
         displayOrder: r.display_order ?? 0,
         active: r.active !== false,
