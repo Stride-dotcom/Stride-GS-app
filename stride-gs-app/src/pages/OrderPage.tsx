@@ -1239,8 +1239,39 @@ export function OrderPage() {
                 } catch (_) { /* fall back to invokeErr.message */ }
                 throw new Error(detailed);
               }
-              const res = data as { ok?: boolean; error?: string } | null;
+              const res = data as { ok?: boolean; error?: string; dt_identifier?: string; linked_identifier?: string } | null;
               if (!res?.ok) throw new Error(res?.error || 'DT push failed');
+              // Audit: push_to_dt. Best-effort. Done client-side so the
+              // row is attributed to the authenticated user (the edge
+              // function runs under service role and doesn't see the
+              // caller's email). For P+D orders the edge function pushes
+              // both legs; we stamp an audit row on the linked pickup's
+              // dt_order_id too so its own Activity tab reflects the push.
+              void logDtOrderAudit({
+                orderId: order.id,
+                tenantId: order.tenantId,
+                action: 'push_to_dt',
+                changes: {
+                  dtIdentifier: res.dt_identifier ?? order.dtIdentifier,
+                  ...(res.linked_identifier ? { linkedIdentifier: res.linked_identifier } : {}),
+                  orderType: order.orderType,
+                  itemCount: order.items?.length ?? 0,
+                },
+                performedBy: user?.email ?? null,
+              });
+              if (res.linked_identifier && order.linkedOrderId) {
+                void logDtOrderAudit({
+                  orderId: order.linkedOrderId,
+                  tenantId: order.tenantId,
+                  action: 'push_to_dt',
+                  changes: {
+                    dtIdentifier: res.linked_identifier,
+                    linkedIdentifier: res.dt_identifier ?? order.dtIdentifier,
+                    pushedAlongsideDelivery: true,
+                  },
+                  performedBy: user?.email ?? null,
+                });
+              }
               const fresh = await fetchDtOrderByIdFromSupabase(order.id);
               if (fresh) setLocalOrder(fresh);
               refetch();
