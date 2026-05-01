@@ -1,0 +1,1 @@
+import{o as e}from"./supabaseQueries-DEoRU4ob.js";export{e as fetchClientsFromSupabase};

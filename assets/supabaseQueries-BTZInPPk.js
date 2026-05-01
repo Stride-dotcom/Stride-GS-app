@@ -1,1 +1,0 @@
-import{o as e}from"./supabaseQueries-DHzS-vLh.js";export{e as fetchClientsFromSupabase};
