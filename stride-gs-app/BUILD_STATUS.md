@@ -99,6 +99,12 @@ UI components: FloatingActionMenu, WriteButton, BatchGuard, ActionTooltip, Batch
 
 ## Recent Changes (2026-05-01, session 87)
 
+### Email CTA &client= precedence + fetcher fallback (real fix for "Task Not Found")
+- Symptom (after [#156](https://github.com/Stride-dotcom/Stride-GS-app/pull/156), [#159](https://github.com/Stride-dotcom/Stride-GS-app/pull/159), [#160](https://github.com/Stride-dotcom/Stride-GS-app/pull/160) had landed): inspection email CTA still landed on "Task Not Found" for INSP-62945-1 (Vida-Merit) and INSP-63026-1 (Vida-Waymark). Hard-refresh didn't help.
+- Real cause: `api_sendTemplateEmail_` in StrideAPI.gs built the `&client=` suffix from `settings["CLIENT_SPREADSHEET_ID"]` first and the explicit `clientSheetId` param last. Older client sheets don't have that setting populated, so the suffix came out empty → auto-injected "Open in Stride Hub" CTA shipped without a tenant. The frontend fetcher then ran with no `&client=` and the unscoped path (which already existed) failed because the row was visible only after admin RLS bypass — but the legacy GAS fallback also didn't resolve.
+- Fix server: reorder precedence so the authoritative `clientSheetId` param wins. Plus a final safety net that re-checks the chosen `ctaUrl` and appends `&client=` if it slipped through. StrideAPI.gs v38.142.7. Pushed + deployed (Web App v421).
+- Fix frontend: `fetchTaskByIdFromSupabase` — scoped lookup miss now falls through to unscoped fetch; when multiple rows match unscoped and we have a hint, prefer the matching tenant. Stale / wrong / missing `&client=` on old emails no longer dead-end. PR #162.
+
 ### Auth: block authenticated transition until JWT carries user_metadata
 - Symptom: even with the correct deep-link format, clicking an inspection email cold (e.g. INSP-63026-1) sometimes lands on "Task Not Found"; a manual refresh fixes it.
 - Root cause: `AuthContext` fired `supabase.auth.updateUser({role, clientSheetId})` fire-and-forget and immediately marked the user authenticated. The first `useTaskDetail → fetchTaskByIdFromSupabase` query could race a stale JWT whose `user_metadata` lacked role/clientSheetId. The `tasks_select_staff` RLS bypass keys off `user_metadata.role`; with that missing even admin lookups returned 0 rows → "not-found".
