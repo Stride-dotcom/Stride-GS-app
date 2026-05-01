@@ -1,47 +1,89 @@
 /**
- * useMessages — Supabase CRUD for public.messages + public.message_recipients.
+ * useMessages — Supabase CRUD for the conversations-model messaging stack.
  *
- * Session 74 rewrite: the original port was written against an INFERRED schema
- * that didn't match what actually shipped in the DB. Sends were silently
- * failing (0 rows in both tables) because the INSERTs referenced columns
- * that don't exist (`thread_id`, `entity_type`, `entity_id`, `sender_name`,
- * `recipient_id` as uuid, `recipient_name`) and omitted required ones
- * (`tenant_id`). This version is aligned with the real schema:
+ * Session 89 rebuild. Replaces every previous derived-from-recipients
+ * approach with the standard IM design that's been sitting half-wired
+ * in the schema since migration 20260422040000:
  *
- *   messages:
- *     id uuid PK, tenant_id text NOT NULL, sender_id uuid NOT NULL,
- *     subject text, body text NOT NULL, message_type text default 'message',
- *     priority text default 'normal',
- *     related_entity_type text, related_entity_id text,
- *     metadata jsonb, created_at timestamptz
+ *   public.conversations
+ *     id, kind ('dm'|'group'|'entity'), related_entity_type/id, tenant_id,
+ *     created_by, created_at, last_message_at
  *
- *   message_recipients:
- *     id uuid PK, message_id uuid NOT NULL,
- *     recipient_type text default 'user', recipient_id text NOT NULL,
- *     user_id uuid NOT NULL,
- *     is_read boolean, read_at timestamptz, is_archived boolean, created_at
+ *   public.conversation_participants
+ *     (conversation_id, user_id) PK, joined_at, last_read_at, is_archived
  *
- *   RLS:
- *     messages_insert_own   — sender_id must equal auth.uid()
- *     messages_select_*     — sender or recipient via message_recipients
- *     msg_recipients_insert_sender — parent message.sender_id must be auth.uid()
- *     msg_recipients_select_own    — user_id must equal auth.uid()
+ *   public.messages.conversation_id  → conversations.id  (set on every send)
  *
- *   profiles (for display names): id uuid, email, display_name, role
+ *   public.message_recipients         (kept — drives per-message Delivered /
+ *                                      Read receipts on MessageBubble)
  *
- * There is NO `thread_id` column on messages. Conversation grouping is
- * derived from (related_entity_type, related_entity_id) for entity-linked
- * threads and from the other-party user_id for direct DMs.
+ * Why the rebuild:
+ *
+ *   • The old approach derived "what conversation does this message belong
+ *     to?" from the recipient set visible to the current user. RLS only
+ *     showed each recipient their own row, so a 3-person message looked
+ *     like a `group:` thread to the sender but two separate `direct:`
+ *     threads to the recipients (each could only see themselves on the
+ *     recipient list). One message → three different threads, one per
+ *     viewer. iMessage-style consistent threading was impossible without
+ *     either loosening RLS or adding a real "conversation" entity.
+ *
+ *   • SendMessage's old INSERT…RETURNING `.select('*').single()` had to
+ *     pass every SELECT policy on `messages` at the moment of insert.
+ *     With participant-EXISTS subqueries on the policy stack and zero
+ *     conversation rows yet, the read could fail and the optimistic UI
+ *     was empty. Now: sender ensures their `conversation_participants`
+ *     row exists *before* the message INSERT (via SECURITY DEFINER RPC),
+ *     so `messages_select_via_conversation` succeeds at INSERT time
+ *     without needing to read back the message row at all — we only
+ *     fetch the id and refetch the inbox.
+ *
+ *   • Visibility rule — every user (admin/staff/client) sees only
+ *     messages they sent or received. The previous `messages_select_staff`
+ *     policy granted admin/staff full visibility into other people's
+ *     conversations; that's gone in the migration that ships with this
+ *     rebuild. Recipient picker filtering (admin/staff see all users in
+ *     the directory; clients see only own-tenant + staff/admin) lives
+ *     in React, not RLS — see ComposeMessageModal.
+ *
+ * Send flow:
+ *
+ *   1. Resolve a conversation_id. Three RPC calls map onto the three
+ *      conversation kinds:
+ *        • entity_type + entity_id  → find_or_create_entity_conversation
+ *        • recipient_ids            → find_or_create_dm_conversation
+ *        • caller already passed conversationId → use it directly
+ *      Both RPCs are SECURITY DEFINER and create participant rows for
+ *      every involved user atomically, so the next step's RLS check
+ *      will succeed for the sender.
+ *
+ *   2. INSERT into `messages` with conversation_id + sender_id + body +
+ *      related_entity_*. We round-trip just the id back via `.select('id')`.
+ *
+ *   3. INSERT non-sender recipients into `message_recipients`. These
+ *      drive the iMessage-style Delivered/Read receipts that MessageBubble
+ *      renders. The trigger `messages_touch_conversation` updates
+ *      `conversations.last_message_at` automatically.
+ *
+ *   4. Refetch the inbox so the conversation list + active thread both
+ *      pick up the new message immediately.
+ *
+ * Realtime:
+ *
+ *   Single channel subscribed to `messages` INSERT + `message_recipients`
+ *   UPDATE (read-receipt flips). RLS scopes both — we only get events for
+ *   conversations we're already in. Either event triggers a refetch.
  */
 import { createContext, createElement, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../contexts/AuthContext';
 
-// ─── Types ────────────────────────────────────────────────────────────────
+// ─── Public types ──────────────────────────────────────────────────────────
 
 export interface Message {
   id: string;
+  conversationId: string;
   tenantId: string;
   relatedEntityType: string | null;
   relatedEntityId: string | null;
@@ -50,64 +92,118 @@ export interface Message {
   messageType: string;
   priority: string;
   senderId: string;
-  senderName: string;       // resolved from profiles at load time
+  senderName: string;
   senderEmail: string;
   senderRole: string | null;
   createdAt: string;
-  /** Populated when loading a thread for the current user. */
+  /** Populated when the current user is a non-sender recipient of this message. */
   myRecipient?: {
     recipientId: string;
     isRead: boolean;
     readAt: string | null;
     isArchived: boolean;
   };
-  /** All user_ids on the message (current user + others). Used for direct-thread keying. */
+  /** Every participant on the message's conversation — used for thread
+   *  display and for the iMessage-style read-receipt aggregation. Pulled
+   *  from `conversation_participants`, so visible to every member of the
+   *  conversation regardless of who sent the message. */
   recipientUserIds: string[];
-  /** Per-recipient read state. Includes the sender's own row. RLS lets the
-   *  sender see all recipient rows for messages they sent (Session 74
-   *  msg_recipients_select_sender), so this is populated for sent messages
-   *  and used to render Delivered / Read receipts iMessage-style. */
+  /** Per-message read state for every non-sender recipient row visible
+   *  through `message_recipients` RLS (sender sees all rows on their own
+   *  messages; recipients see their own row). Drives MessageBubble's
+   *  Delivered / Read receipt rendering. */
   recipientReads: Array<{ userId: string; isRead: boolean; readAt: string | null }>;
 }
 
 export interface Conversation {
-  /** Synthesized: `entity:<type>:<id>` for entity-linked, `direct:<selfUid>:<otherUid>` for DMs,
-   *  or `msg:<messageId>` as a fallback when neither is available. */
+  /** Stable key — equal to `conversations.id` (UUID). Components compare
+   *  by string, no parsing. */
   key: string;
+  /** For entity threads only. */
   relatedEntityType: string | null;
   relatedEntityId: string | null;
-  /** Backwards-compat aliases for `relatedEntity*` — kept because MessagesPage
-   *  and other consumers were written against the earlier Conversation shape. */
+  /** Aliases — older consumers (MessagesPage / ThreadHeader) read these. */
   entityType: string | null;
   entityId: string | null;
-  /** Legacy: there is no `thread_id` column in the DB, so this is always null.
-   *  Retained so consumers that destructure it still compile. */
+  /** Legacy field — there is no `thread_id` column in the DB. Kept null
+   *  so existing destructures still compile. */
   threadId: string | null;
-  /** Display label — "RE: Repair RPR-0089" or the other party's name. */
+  /** Display label — entity threads → "RE: <type> <id>"; DM → other party
+   *  name; group → comma-joined participant names. Resolved against the
+   *  profile cache; falls back to "Message" if names aren't loaded yet. */
   title: string;
   lastMessagePreview: string;
   lastMessageAt: string;
   unreadCount: number;
+  /** All `conversation_participants` for this conversation (including
+   *  self). MessagesPage uses this to derive recipientIds for replies
+   *  without parsing the key string. */
+  participantUserIds: string[];
 }
 
 export interface SendMessageParams {
   body: string;
-  recipientIds: string[];       // auth.users.id uuids of target users
+  /** When the caller already knows the conversation (e.g. replying to an
+   *  open thread), pass it directly to skip the find-or-create RPC. */
+  conversationId?: string;
+  recipientIds: string[];
   recipientNames?: string[];
   subject?: string;
-  /** UI still uses entityType/entityId; we map them onto related_entity_*. */
+  /** entity-anchored thread (replaces threadId). */
   entityType?: string;
   entityId?: string;
-  /** Legacy alias from the earlier API — also mapped onto related_entity_*. */
+  /** Legacy param — silently ignored; kept so older callers compile. */
   threadId?: string;
   priority?: string;
   messageType?: string;
 }
 
+export interface UseMessagesResult {
+  authUserId: string | null;
+  conversations: Conversation[];
+  thread: Message[];
+  threadLoading: boolean;
+  loading: boolean;
+  unreadCount: number;
+  activeThreadKey: string | null;
+  openThread: (target: string | { entityType?: string; entityId?: string; otherUserId?: string; otherUserIds?: string[]; conversationId?: string }) => Promise<void>;
+  closeThread: () => void;
+  sendMessage: (params: SendMessageParams) => Promise<Message | null>;
+  markRead: (recipientRowId: string) => Promise<void>;
+  markAllReadInThread: () => Promise<void>;
+  archiveMessage: (recipientRowId: string) => Promise<void>;
+  /** Per-user soft-delete: archive every recipient row I have in the
+   *  conversation. The other party's copy is untouched. */
+  deleteConversation: (key: string) => Promise<boolean>;
+  refetch: () => Promise<void>;
+  latestUnreadIncoming: Message | null;
+  dismissBanner: (messageId: string) => void;
+}
+
 // ─── Row shapes ────────────────────────────────────────────────────────────
+
+interface ConversationRow {
+  id: string;
+  kind: 'dm' | 'group' | 'entity';
+  related_entity_type: string | null;
+  related_entity_id: string | null;
+  tenant_id: string | null;
+  created_by: string | null;
+  created_at: string;
+  last_message_at: string | null;
+}
+
+interface ParticipantRow {
+  conversation_id: string;
+  user_id: string;
+  joined_at: string;
+  last_read_at: string | null;
+  is_archived: boolean;
+}
 
 interface MessageRow {
   id: string;
+  conversation_id: string | null;
   tenant_id: string;
   sender_id: string;
   subject: string | null;
@@ -139,208 +235,84 @@ interface ProfileRow {
   role: string | null;
 }
 
-// ─── Helpers ───────────────────────────────────────────────────────────────
+// ─── Hook implementation ───────────────────────────────────────────────────
 
-function directKey(selfId: string, otherId: string): string {
-  // Stable key regardless of who initiated the thread.
-  return selfId < otherId ? `direct:${otherId}:${selfId}` : `direct:${selfId}:${otherId}`;
-}
-
-/** Stable group key from a participant set. Sort + join with colons so
- *  every member of the group derives the same key regardless of who's
- *  computing it. */
-function groupKey(participantIds: string[]): string {
-  return 'group:' + Array.from(new Set(participantIds)).sort().join(':');
-}
-
-/** Extract the "other party" user_id for a message viewed by the current user.
- *  Ignores self; prefers the first non-self recipient. */
-function otherPartyForMessage(m: Message, selfId: string): string | null {
-  if (m.senderId !== selfId) return m.senderId;
-  const others = m.recipientUserIds.filter(u => u !== selfId);
-  return others[0] ?? null;
-}
-
-/**
- * Session 74: thread keys MUST be stable across sender/receiver and across
- * every reply in the same conversation. One message = one key, determined
- * by the thread family, never by message id.
- *
- *   • entity conversation → `entity:<type>:<id>`
- *   • direct DM           → `direct:<uidA>:<uidB>` (sorted)
- *   • unkeyable           → null (caller must skip — do NOT bucket it
- *                           under its own message id, that produces one
- *                           conversation row per message)
- *
- * "Unkeyable" happens only for malformed rows (sender = self, zero
- * recipient rows visible) which shouldn't exist in normal use. The old
- * `msg:<id>` fallback is removed because it was the root cause of the
- * "every reply spawns a new chat" symptom: as soon as hydration dropped
- * the self-recipient row for any reason, the key collapsed to
- * msg:<new-message-id> and split the thread.
- */
-function keyForMessage(m: Message, selfId: string): string | null {
-  if (m.relatedEntityType && m.relatedEntityId) {
-    return `entity:${m.relatedEntityType}:${m.relatedEntityId}`;
-  }
-  // Compute the full participant set (sender + every recipient row we can see).
-  // For the SENDER, RLS lets them see all recipient rows on their own
-  // messages, so this is the full group. For RECIPIENTS, RLS only shows
-  // their own row + sender, so they'll fall through to the 1:1 branch and
-  // see it as a DM with the sender. (Real cross-recipient visibility for
-  // group messages requires an additional RLS policy — separate task.)
-  const all = Array.from(new Set([m.senderId, ...m.recipientUserIds]));
-  if (all.length >= 3) return groupKey(all);
-  const other = otherPartyForMessage(m, selfId);
-  if (other) return directKey(selfId, other);
-  return null;
-}
-
-// ─── Hook ──────────────────────────────────────────────────────────────────
-
-export interface UseMessagesResult {
-  /** Supabase auth uid of the currently signed-in user. Exposed so
-   *  consumers like MessagesPage can derive recipients / render bubbles
-   *  from the same auth source the hook uses — avoids a second
-   *  `supabase.auth.getSession()` race that caused sent bubbles to
-   *  render as the other party (or send to `undefined`) on first mount. */
-  authUserId: string | null;
-  conversations: Conversation[];
-  thread: Message[];
-  threadLoading: boolean;
-  loading: boolean;
-  unreadCount: number;
-  activeThreadKey: string | null;
-  openThread: (key: string | { entityType?: string; entityId?: string; otherUserId?: string; otherUserIds?: string[] }) => Promise<void>;
-  closeThread: () => void;
-  sendMessage: (params: SendMessageParams) => Promise<Message | null>;
-  markRead: (recipientRowId: string) => Promise<void>;
-  markAllReadInThread: () => Promise<void>;
-  archiveMessage: (recipientRowId: string) => Promise<void>;
-  /** Session 74: remove a whole conversation for the current user by
-   *  archiving every one of their recipient rows in that thread. RLS
-   *  guarantees we only affect our own rows. */
-  deleteConversation: (key: string) => Promise<boolean>;
-  refetch: () => Promise<void>;
-  /** The newest unread incoming message (for the top banner). Null if the
-   *  user has no unread messages. */
-  latestUnreadIncoming: Message | null;
-  /** Dismiss the banner for this specific message without marking read
-   *  (banner hides until another unread message arrives). */
-  dismissBanner: (messageId: string) => void;
-}
-
-/**
- * Internal implementation. Do not call directly from components — use the
- * `useMessages` export below which reads from <MessagesProvider>.
- *
- * Session 74: the hook was previously used from three separate mount
- * points (TopBar bell, AppLayout banner, MessagesPage). Each call created
- * a Supabase Realtime channel with the same name (`messages_inbox_<uid>`);
- * Supabase rejected the duplicates with CHANNEL_ERROR, which also meant
- * Realtime events only fired for one instance — or none. The fix is a
- * single shared instance via Context: MessagesProvider calls this impl
- * once, and every consumer reads from the same result.
- */
 function useMessagesImpl(): UseMessagesResult {
   const { user } = useAuth();
   const [authUserId, setAuthUserId] = useState<string | null>(null);
+  const [conversationRows, setConversationRows] = useState<ConversationRow[]>([]);
+  const [participantsByConv, setParticipantsByConv] = useState<Record<string, ParticipantRow[]>>({});
   const [messages, setMessages] = useState<Message[]>([]);
+  const [profilesByUid, setProfilesByUid] = useState<Record<string, ProfileRow>>({});
   const [loading, setLoading] = useState(true);
   const [thread, setThread] = useState<Message[]>([]);
   const [threadLoading, setThreadLoading] = useState(false);
   const [activeThreadKey, setActiveThreadKey] = useState<string | null>(null);
-  // Session 74: cache profiles by uid so the conversation list can resolve
-  // the OTHER party's display name + avatar even for threads where I've only
-  // sent messages (no received reply yet). Populated on every hydrate() call.
-  const [profilesByUid, setProfilesByUid] = useState<Record<string, ProfileRow>>({});
-  // Session 74: ref to the latest openThread so the realtime callback can
-  // reload the currently-open thread without re-subscribing on every
-  // identity change.
+
+  // Mirror activeThreadKey + openThread in refs so the realtime callback
+  // can read the latest values without re-subscribing on every change
+  // (which would cause same-name CHANNEL_ERROR collisions).
   const openThreadRef = useRef<((key: string) => Promise<void>) | null>(null);
-  // Session 74: activeThreadKey mirrored in a ref so the realtime handlers
-  // can read the current thread without forcing the channel to re-subscribe
-  // on every open/close (which caused CHANNEL_ERROR from the same-name
-  // channel collision).
   const activeThreadKeyRef = useRef<string | null>(null);
   useEffect(() => { activeThreadKeyRef.current = activeThreadKey; }, [activeThreadKey]);
 
-  // Resolve auth uid once per session change.
+  // Mirror `messages` in a ref so callbacks that run after `await refetch()`
+  // can see the freshly-loaded list synchronously. React state updates
+  // from refetch don't flush until the next render, so a closure that
+  // reads `messages` directly would still see the pre-refetch snapshot —
+  // visible as an empty thread on the first open of a brand-new
+  // conversation.
+  const messagesRef = useRef<Message[]>([]);
+  useEffect(() => { messagesRef.current = messages; }, [messages]);
+
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => {
       setAuthUserId(data.session?.user.id ?? null);
     });
   }, [user]);
 
-  // ── Helper: hydrate a set of messages with profile names + all recipients ──
-  const hydrate = useCallback(async (msgRows: MessageRow[], selfId: string): Promise<Message[]> => {
-    if (msgRows.length === 0) return [];
-    const msgIds = msgRows.map(m => m.id);
-
-    // All recipient rows for those messages — so we can find the "other party"
-    // on each message (direct-thread keying) and flag the current user's own
-    // recipient row for read/archive tracking.
-    const { data: rcpData } = await supabase
-      .from('message_recipients')
-      .select('*')
-      .in('message_id', msgIds);
-    const recipients = (rcpData ?? []) as RecipientRow[];
-
-    const recipsByMsg = new Map<string, RecipientRow[]>();
-    for (const r of recipients) {
-      const arr = recipsByMsg.get(r.message_id) ?? [];
-      arr.push(r);
-      recipsByMsg.set(r.message_id, arr);
-    }
-
-    // Profiles for sender + all recipient users (in one query).
-    const userIds = new Set<string>();
-    for (const m of msgRows) userIds.add(m.sender_id);
-    for (const r of recipients) userIds.add(r.user_id);
-    const profileMap = new Map<string, ProfileRow>();
-    if (userIds.size > 0) {
-      const { data: profData } = await supabase
-        .from('profiles')
-        .select('id, email, display_name, role')
-        .in('id', Array.from(userIds));
-      for (const p of (profData ?? []) as ProfileRow[]) profileMap.set(p.id, p);
-    }
-    // Update the shared profile cache so conversationsWithNames can resolve
-    // the OTHER party's name for direct threads (works even for threads
-    // where I've only sent messages and never received a reply).
-    if (profileMap.size > 0) {
-      setProfilesByUid(prev => {
-        const next = { ...prev };
-        profileMap.forEach((p, id) => { next[id] = p; });
-        return next;
-      });
-    }
-
-    return msgRows.map(m => {
-      const rcps = recipsByMsg.get(m.id) ?? [];
+  // Hydrate one set of message rows + recipients into the public Message
+  // shape. Pulls profile names + the per-conversation participant list so
+  // each Message carries the full participant set even when the caller is
+  // a non-sender recipient (the conversation_participants RLS makes the
+  // full roster visible to every participant, which is the whole reason
+  // we built this table).
+  const hydrateMessages = useCallback(async (
+    msgRows: MessageRow[],
+    recipientsByMsg: Map<string, RecipientRow[]>,
+    participantsByConvId: Map<string, ParticipantRow[]>,
+    selfId: string,
+    profileCache: Map<string, ProfileRow>,
+  ): Promise<Message[]> => {
+    return msgRows.map((msg): Message => {
+      const rcps = recipientsByMsg.get(msg.id) ?? [];
       const mine = rcps.find(r => r.user_id === selfId);
-      const profile = profileMap.get(m.sender_id);
+      const profile = profileCache.get(msg.sender_id);
+      const participants = msg.conversation_id
+        ? (participantsByConvId.get(msg.conversation_id) ?? []).map(p => p.user_id)
+        : Array.from(new Set([msg.sender_id, ...rcps.map(r => r.user_id)]));
       return {
-        id: m.id,
-        tenantId: m.tenant_id,
-        relatedEntityType: m.related_entity_type,
-        relatedEntityId: m.related_entity_id,
-        subject: m.subject,
-        body: m.body,
-        messageType: m.message_type ?? 'message',
-        priority: m.priority ?? 'normal',
-        senderId: m.sender_id,
+        id: msg.id,
+        conversationId: msg.conversation_id ?? '',
+        tenantId: msg.tenant_id,
+        relatedEntityType: msg.related_entity_type,
+        relatedEntityId: msg.related_entity_id,
+        subject: msg.subject,
+        body: msg.body,
+        messageType: msg.message_type ?? 'message',
+        priority: msg.priority ?? 'normal',
+        senderId: msg.sender_id,
         senderName: profile?.display_name || profile?.email || 'Unknown',
         senderEmail: profile?.email ?? '',
         senderRole: profile?.role ?? null,
-        createdAt: m.created_at,
-        recipientUserIds: rcps.map(r => r.user_id),
+        createdAt: msg.created_at,
+        recipientUserIds: participants,
         recipientReads: rcps.map(r => ({
           userId: r.user_id,
           isRead: !!r.is_read,
           readAt: r.read_at,
         })),
-        myRecipient: mine ? {
+        myRecipient: mine && mine.user_id !== msg.sender_id ? {
           recipientId: mine.id,
           isRead: !!mine.is_read,
           readAt: mine.read_at,
@@ -351,81 +323,156 @@ function useMessagesImpl(): UseMessagesResult {
   }, []);
 
   // ── Inbox load ──────────────────────────────────────────────────────────
+  // Three-step fan-out, all RLS-scoped:
+  //   1. Conversations I'm a participant of (via conversations_select).
+  //   2. Every participant row for those conversations (via
+  //      conv_participants_select — a participant can see all peers).
+  //   3. All messages in those conversations (via
+  //      messages_select_via_conversation) and their message_recipients
+  //      rows (read receipts). Empty sets are handled gracefully.
   const refetch = useCallback(async () => {
     if (!authUserId) return;
     setLoading(true);
 
-    // Fetch every message I can SEE via RLS (sender or recipient). Sending
-    // and receiving both make the message visible; joining on recipients is
-    // optional now because RLS already filters.
-    const { data: msgData, error: msgErr } = await supabase
-      .from('messages')
-      .select('*')
-      .order('created_at', { ascending: false })
-      .limit(500);
-    if (msgErr || !msgData) { setLoading(false); return; }
+    const { data: convData, error: convErr } = await supabase
+      .from('conversations')
+      .select('id, kind, related_entity_type, related_entity_id, tenant_id, created_by, created_at, last_message_at')
+      .order('last_message_at', { ascending: false, nullsFirst: false })
+      .limit(300);
+    if (convErr) {
+      console.warn('[useMessages] conversation fetch failed:', convErr);
+      setLoading(false);
+      return;
+    }
+    const convs = (convData ?? []) as ConversationRow[];
+    setConversationRows(convs);
+    const convIds = convs.map(c => c.id);
 
-    const hydrated = await hydrate(msgData as MessageRow[], authUserId);
-    // Drop messages where MY recipient row is archived (senders always keep
-    // theirs; archived is a per-user soft-delete on the inbox side).
-    const inbox = hydrated.filter(m => !m.myRecipient?.isArchived);
-    setMessages(inbox);
+    if (convIds.length === 0) {
+      setParticipantsByConv({});
+      setMessages([]);
+      setLoading(false);
+      return;
+    }
+
+    const [participantsRes, messagesRes] = await Promise.all([
+      supabase
+        .from('conversation_participants')
+        .select('conversation_id, user_id, joined_at, last_read_at, is_archived')
+        .in('conversation_id', convIds),
+      supabase
+        .from('messages')
+        .select('id, conversation_id, tenant_id, sender_id, subject, body, message_type, priority, related_entity_type, related_entity_id, metadata, created_at')
+        .in('conversation_id', convIds)
+        .order('created_at', { ascending: false })
+        .limit(2000),
+    ]);
+
+    if (participantsRes.error) {
+      console.warn('[useMessages] participant fetch failed:', participantsRes.error);
+    }
+    if (messagesRes.error) {
+      console.warn('[useMessages] messages fetch failed:', messagesRes.error);
+    }
+
+    const participantRows = (participantsRes.data ?? []) as ParticipantRow[];
+    const participantsByConvId = new Map<string, ParticipantRow[]>();
+    for (const p of participantRows) {
+      const arr = participantsByConvId.get(p.conversation_id) ?? [];
+      arr.push(p);
+      participantsByConvId.set(p.conversation_id, arr);
+    }
+    setParticipantsByConv(Object.fromEntries(participantsByConvId));
+
+    const msgRows = (messagesRes.data ?? []) as MessageRow[];
+
+    let recipientsByMsg = new Map<string, RecipientRow[]>();
+    if (msgRows.length > 0) {
+      const { data: rcpData } = await supabase
+        .from('message_recipients')
+        .select('id, message_id, recipient_type, recipient_id, user_id, is_read, read_at, is_archived, created_at')
+        .in('message_id', msgRows.map(m => m.id));
+      for (const r of (rcpData ?? []) as RecipientRow[]) {
+        const arr = recipientsByMsg.get(r.message_id) ?? [];
+        arr.push(r);
+        recipientsByMsg.set(r.message_id, arr);
+      }
+    }
+
+    // Profiles for every user we'll display: senders + every participant
+    // across every conversation. Fetched in one query.
+    const userIds = new Set<string>();
+    for (const m of msgRows) userIds.add(m.sender_id);
+    for (const p of participantRows) userIds.add(p.user_id);
+    const profileCache = new Map<string, ProfileRow>();
+    if (userIds.size > 0) {
+      const { data: profData } = await supabase
+        .from('profiles')
+        .select('id, email, display_name, role')
+        .in('id', Array.from(userIds));
+      for (const p of (profData ?? []) as ProfileRow[]) profileCache.set(p.id, p);
+    }
+    if (profileCache.size > 0) {
+      setProfilesByUid(prev => {
+        const next = { ...prev };
+        profileCache.forEach((p, id) => { next[id] = p; });
+        return next;
+      });
+    }
+
+    const hydrated = await hydrateMessages(msgRows, recipientsByMsg, participantsByConvId, authUserId, profileCache);
+    setMessages(hydrated);
     setLoading(false);
-  }, [authUserId, hydrate]);
+  }, [authUserId, hydrateMessages]);
 
   useEffect(() => { void refetch(); }, [refetch]);
 
-  // ── Realtime inbox refresh ──────────────────────────────────────────────
+  // ── Realtime ────────────────────────────────────────────────────────────
+  // One channel, one subscription. Server-side filters on UUID columns
+  // are unreliable on Supabase's replication stream, so we accept every
+  // event RLS lets through and refetch unconditionally — RLS already
+  // restricts what we see to our own conversations + recipient rows, so
+  // the noise floor is low.
   useEffect(() => {
     if (!authUserId) return;
-    // Session 74 fix: server-side postgres_changes filters on UUID columns
-    // are unreliable on Supabase's replication stream — the filter
-    // `user_id=eq.<uuid>` often silently matches nothing even with
-    // REPLICA IDENTITY FULL. Subscribe WITHOUT a filter and match
-    // client-side. RLS still prevents other users' rows from being
-    // streamed to us, so we only receive events we're allowed to see.
-    //
-    // Also: we refetch the thread view when a new incoming message
-    // belongs to the currently-open thread, so the receiver's open
-    // conversation updates instantly without a page refresh.
     const channel = supabase
       .channel(`messages_inbox_${authUserId}`)
+      .on('postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'messages' },
+        () => {
+          void refetch();
+          const activeKey = activeThreadKeyRef.current;
+          if (activeKey) void openThreadRef.current?.(activeKey);
+        })
       .on('postgres_changes',
         { event: '*', schema: 'public', table: 'message_recipients' },
         (payload) => {
           const row = (payload.new ?? payload.old) as { user_id?: string } | undefined;
           if (row?.user_id === authUserId) {
+            // My own row — new incoming message or my own read flip.
             void refetch();
-            // Reload the active thread if one is open — read the latest key
-            // from the ref so this handler doesn't need activeThreadKey as
-            // an effect dep (which would force the channel to re-subscribe
-            // on every open/close → same-name CHANNEL_ERROR collision).
+            const activeKey = activeThreadKeyRef.current;
+            if (activeKey) void openThreadRef.current?.(activeKey);
+          } else {
+            // Read-receipt flip on a message I sent (RLS lets me see
+            // peers' recipient rows on my own messages). Reload only the
+            // active thread so the Delivered/Read line updates without
+            // a full inbox refetch.
             const activeKey = activeThreadKeyRef.current;
             if (activeKey) void openThreadRef.current?.(activeKey);
           }
         })
       .on('postgres_changes',
-        { event: '*', schema: 'public', table: 'messages' },
-        (payload) => {
-          const row = (payload.new ?? payload.old) as { sender_id?: string } | undefined;
-          if (row?.sender_id === authUserId) {
-            void refetch();
-            const activeKey = activeThreadKeyRef.current;
-            if (activeKey) void openThreadRef.current?.(activeKey);
-          }
+        { event: '*', schema: 'public', table: 'conversation_participants' },
+        () => {
+          // New conversation we were just added to, or our own
+          // last_read_at flipped — refetch covers both.
+          void refetch();
         })
       .subscribe((status) => {
         if (status === 'SUBSCRIBED') {
-          console.log('[useMessages] Realtime subscribed');
-          // Session 74: catch-up refetch on (re)subscribe. If the channel
-          // was previously CLOSED (e.g. token refresh, laptop-sleep,
-          // intermittent network) events fired during the outage were
-          // not delivered. Refetch guarantees the inbox is current the
-          // moment realtime is back online — the user never sees stale
-          // state just because their WebSocket blinked.
+          // Catch up on anything we missed during channel setup.
           void refetch();
-          const activeKey = activeThreadKeyRef.current;
-          if (activeKey) void openThreadRef.current?.(activeKey);
         } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
           console.warn('[useMessages] Realtime status:', status);
         }
@@ -433,85 +480,78 @@ function useMessagesImpl(): UseMessagesResult {
     return () => { void supabase.removeChannel(channel); };
   }, [authUserId, refetch]);
 
-  // ── Derived conversation list ───────────────────────────────────────────
+  // ── Derived: conversation list ──────────────────────────────────────────
+  // One row per `conversations` row, decorated with the latest message
+  // preview + my unread count for that conversation.
   const conversations = useMemo<Conversation[]>(() => {
     if (!authUserId) return [];
-    const byKey = new Map<string, Conversation>();
 
+    // Bucket messages by conversation_id so we can pull last-preview +
+    // unread counts in one pass.
+    const msgsByConv = new Map<string, Message[]>();
     for (const m of messages) {
-      const key = keyForMessage(m, authUserId);
-      if (!key) continue;                          // skip unkeyable rows
-      const prev = byKey.get(key);
-      const mine = m.myRecipient;
-      const unread = mine && !mine.isRead ? 1 : 0;
+      if (!m.conversationId) continue;
+      const arr = msgsByConv.get(m.conversationId) ?? [];
+      arr.push(m);
+      msgsByConv.set(m.conversationId, arr);
+    }
 
-      // Title: entity threads get "RE: <type> <id>"; direct threads show the
-      // other party's name (resolved from senderName OR, for my own sends,
-      // the first non-self recipient's profile — which we already fetched).
-      let title: string;
-      if (m.relatedEntityType && m.relatedEntityId) {
-        title = `RE: ${m.relatedEntityType} ${m.relatedEntityId}`;
-      } else {
-        const other = otherPartyForMessage(m, authUserId);
-        // Prefer senderName when the message was FROM the other party.
-        title = m.senderId !== authUserId
-          ? (m.senderName || 'Message')
-          : (other ? `To ${other.slice(0, 6)}…` : 'Message');
-      }
+    return conversationRows
+      .map((c): Conversation | null => {
+        const convMessages = msgsByConv.get(c.id) ?? [];
+        const sorted = convMessages.slice().sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+        const latest = sorted[0];
+        const participants = participantsByConv[c.id] ?? [];
+        const myParticipant = participants.find(p => p.user_id === authUserId);
 
-      if (!prev || m.createdAt > prev.lastMessageAt) {
-        byKey.set(key, {
-          key,
-          relatedEntityType: m.relatedEntityType,
-          relatedEntityId: m.relatedEntityId,
-          entityType: m.relatedEntityType,
-          entityId: m.relatedEntityId,
+        // Filter out conversations I've archived (per-user soft delete).
+        if (myParticipant?.is_archived) return null;
+
+        const unread = sorted.reduce((n, m) => n + (m.myRecipient && !m.myRecipient.isRead ? 1 : 0), 0);
+        const participantUserIds = participants.map(p => p.user_id);
+
+        // Title resolution. Entity threads → "RE: <Type> <Id>". DMs →
+        // the other party's display name. Groups → comma-joined names.
+        let title: string;
+        if (c.related_entity_type && c.related_entity_id) {
+          title = `RE: ${c.related_entity_type} ${c.related_entity_id}`;
+        } else {
+          const others = participantUserIds.filter(u => u !== authUserId);
+          const names = others.map(u => {
+            const p = profilesByUid[u];
+            return p?.display_name || p?.email || `${u.slice(0, 6)}…`;
+          });
+          if (others.length === 0) {
+            title = 'You';
+          } else if (others.length === 1) {
+            title = names[0];
+          } else if (others.length <= 3) {
+            title = names.join(', ');
+          } else {
+            title = `${names.slice(0, 2).join(', ')} & ${names.length - 2} others`;
+          }
+        }
+
+        const lastMessageAt = latest?.createdAt ?? c.last_message_at ?? c.created_at;
+        const lastMessagePreview = latest?.body.slice(0, 140) ?? '';
+
+        return {
+          key: c.id,
+          relatedEntityType: c.related_entity_type,
+          relatedEntityId: c.related_entity_id,
+          entityType: c.related_entity_type,
+          entityId: c.related_entity_id,
           threadId: null,
           title,
-          lastMessagePreview: m.body.slice(0, 140),
-          lastMessageAt: m.createdAt,
-          unreadCount: (prev?.unreadCount ?? 0) + unread,
-        });
-      } else {
-        byKey.set(key, { ...prev, unreadCount: prev.unreadCount + unread });
-      }
-    }
-    return Array.from(byKey.values()).sort((a, b) => (a.lastMessageAt < b.lastMessageAt ? 1 : -1));
-  }, [messages, authUserId]);
-
-  // Resolve direct-thread titles to the OTHER party's display name.
-  // Session 74: instead of only picking names from RECEIVED messages (which
-  // left outbound-only threads showing a generic "Message" title), resolve
-  // the other party's uid from the key and look them up in the profile
-  // cache populated by hydrate().
-  const conversationsWithNames = useMemo(() => {
-    if (!authUserId) return conversations;
-    return conversations.map(c => {
-      if (c.key.startsWith('direct:')) {
-        const parts = c.key.split(':');
-        const [a, b] = [parts[1], parts[2]];
-        const otherUid = a === authUserId ? b : a;
-        if (!otherUid) return c;
-        const profile = profilesByUid[otherUid];
-        if (!profile) return c;
-        const name = profile.display_name || profile.email || c.title;
-        return { ...c, title: name };
-      }
-      if (c.key.startsWith('group:')) {
-        const ids = c.key.slice('group:'.length).split(':').filter(Boolean);
-        const others = ids.filter(u => u !== authUserId);
-        const names = others.map(u => {
-          const p = profilesByUid[u];
-          return p?.display_name || p?.email || `${u.slice(0, 6)}…`;
-        });
-        const title = names.length <= 3
-          ? names.join(', ')
-          : `${names.slice(0, 2).join(', ')} & ${names.length - 2} others`;
-        return { ...c, title };
-      }
-      return c;
-    });
-  }, [conversations, authUserId, profilesByUid]);
+          lastMessagePreview,
+          lastMessageAt,
+          unreadCount: unread,
+          participantUserIds,
+        };
+      })
+      .filter((c): c is Conversation => c !== null)
+      .sort((a, b) => (a.lastMessageAt < b.lastMessageAt ? 1 : -1));
+  }, [conversationRows, messages, participantsByConv, profilesByUid, authUserId]);
 
   const unreadCount = useMemo(
     () => messages.reduce((n, m) => n + (m.myRecipient && !m.myRecipient.isRead ? 1 : 0), 0),
@@ -519,126 +559,115 @@ function useMessagesImpl(): UseMessagesResult {
   );
 
   // ── Open a thread ───────────────────────────────────────────────────────
-  const openThread = useCallback(async (
-    target: string | { entityType?: string; entityId?: string; otherUserId?: string; otherUserIds?: string[] },
-  ) => {
-    if (!authUserId) return;
-    const key: string =
-      typeof target === 'string'
-        ? target
-        : target.entityType && target.entityId
-          ? `entity:${target.entityType}:${target.entityId}`
-          : target.otherUserIds && target.otherUserIds.filter(u => u !== authUserId).length > 1
-            ? groupKey([authUserId, ...target.otherUserIds])
-            : target.otherUserId
-              ? directKey(authUserId, target.otherUserId)
-              : target.otherUserIds && target.otherUserIds.length === 1
-                ? directKey(authUserId, target.otherUserIds[0])
-                : '';
-    if (!key) return;
-
-    setActiveThreadKey(key);
-    setThreadLoading(true);
-
-    // Session 74 fix: the previous direct-thread query used
-    // `.or(sender_id.eq.<self>, sender_id.eq.<other>)` — that leaks any
-    // message you sent to a THIRD party into the <self,other> thread
-    // because RLS only filters by "I'm on the recipient list", not "the
-    // other party is on the recipient list". Correct isolation requires
-    // verifying BOTH self AND other appear as recipients on the message.
-    //
-    // Approach:
-    //   • entity threads: filter on (related_entity_type, related_entity_id)
-    //     — that's already unambiguous
-    //   • direct threads: fetch candidate messages with sender IN (self,
-    //     other) AND related_entity_type IS NULL, then fetch all their
-    //     recipient rows and keep only those where BOTH self and other
-    //     appear as recipients.
-    let hydrated: Message[] = [];
+  // Two paths:
+  //   • String key (conversation UUID, or `entity:<type>:<id>` /
+  //     `direct:<a>:<b>` legacy formats from saved deep links) → resolve
+  //     to a conversation row, filter messages.
+  //   • Object form → translate to RPC arguments, find/create the
+  //     conversation, then load it.
+  const findConversationByKey = useCallback((key: string): ConversationRow | null => {
+    // New format: bare UUID → direct conversation_id lookup.
+    const direct = conversationRows.find(c => c.id === key);
+    if (direct) return direct;
+    // Legacy "entity:<type>:<id>" deep-link key → lookup by entity.
     if (key.startsWith('entity:')) {
       const parts = key.split(':');
-      const entityType = parts[1];
-      const entityId = parts.slice(2).join(':');
-      const { data, error } = await supabase
-        .from('messages')
-        .select('*')
-        .eq('related_entity_type', entityType)
-        .eq('related_entity_id', entityId)
-        .order('created_at', { ascending: true })
-        .limit(500);
-      if (error || !data) { setThread([]); setThreadLoading(false); return; }
-      hydrated = await hydrate(data as MessageRow[], authUserId);
-    } else if (key.startsWith('direct:')) {
-      const [, a, b] = key.split(':');
-      const other = a === authUserId ? b : a;
-      const { data: candData, error: candErr } = await supabase
-        .from('messages')
-        .select('*')
-        .is('related_entity_type', null)
-        .or(`sender_id.eq.${authUserId},sender_id.eq.${other}`)
-        .order('created_at', { ascending: true })
-        .limit(500);
-      if (candErr || !candData) { setThread([]); setThreadLoading(false); return; }
-      const candidates = candData as MessageRow[];
-      if (candidates.length === 0) { setThread([]); setThreadLoading(false); return; }
-      // Hydrate (fetches recipients + profile names for every candidate).
-      const hydratedCandidates = await hydrate(candidates, authUserId);
-      // Session 74 (tightened): keep ONLY messages where the participant
-      // set is exactly {self, other} — no third party, no partial rows.
-      //
-      //   participants = {senderId} ∪ recipientUserIds
-      //
-      // Must contain self. Must contain other. Must contain nothing else.
-      // This is strict 1:1 DM isolation; the earlier broad fallback
-      // admitted rows based on partial matches and caused messages from
-      // neighboring threads (e.g. sender-only messages missing their
-      // recipient row) to leak into the wrong bucket.
-      hydrated = hydratedCandidates.filter(m => {
-        const participants = new Set<string>([m.senderId, ...m.recipientUserIds]);
-        if (!participants.has(authUserId)) return false;
-        if (!participants.has(other)) return false;
-        // No extra participants allowed (for self-DM other === authUserId
-        // so size === 1 is valid; for regular DMs size must be exactly 2).
-        const expected = other === authUserId ? 1 : 2;
-        if (participants.size !== expected) return false;
-        return true;
-      });
-    } else if (key.startsWith('group:')) {
-      // Group thread: parse the sorted participant uid set from the key,
-      // fetch all DM-style messages where the sender is in the set, then
-      // keep only those whose full participant signature matches exactly
-      // (so a 4-person group doesn't pull in the 3-person subset's chat).
-      const targetIds = key.slice('group:'.length).split(':').filter(Boolean);
-      const targetSet = new Set(targetIds);
-      if (!targetSet.has(authUserId) || targetSet.size < 3) {
-        setThread([]); setThreadLoading(false); return;
+      const type = parts[1];
+      const id = parts.slice(2).join(':');
+      return conversationRows.find(c => c.related_entity_type === type && c.related_entity_id === id) ?? null;
+    }
+    return null;
+  }, [conversationRows]);
+
+  const openThread = useCallback(async (
+    target: string | { entityType?: string; entityId?: string; otherUserId?: string; otherUserIds?: string[]; conversationId?: string },
+  ) => {
+    if (!authUserId) return;
+
+    let conversationId: string | null = null;
+
+    if (typeof target === 'string') {
+      const conv = findConversationByKey(target);
+      conversationId = conv?.id ?? null;
+    } else if (target.conversationId) {
+      conversationId = target.conversationId;
+    } else if (target.entityType && target.entityId) {
+      // Find existing entity conversation in-memory. If absent, call the
+      // RPC (find-or-create) — user may be deep-linking to an entity
+      // they've never messaged about before.
+      const existing = conversationRows.find(c =>
+        c.related_entity_type === target.entityType && c.related_entity_id === target.entityId,
+      );
+      if (existing) {
+        conversationId = existing.id;
+      } else {
+        const tenantId = user?.clientSheetId || '_platform';
+        const { data: rpcId, error: rpcErr } = await supabase.rpc('find_or_create_entity_conversation', {
+          p_entity_type: target.entityType,
+          p_entity_id: target.entityId,
+          p_tenant_id: tenantId,
+          p_other_user_ids: [],
+        });
+        if (rpcErr) {
+          console.error('[useMessages] openThread entity RPC failed:', rpcErr);
+          return;
+        }
+        conversationId = rpcId as string;
+        await refetch();
       }
-      const { data: candData, error: candErr } = await supabase
-        .from('messages')
-        .select('*')
-        .is('related_entity_type', null)
-        .in('sender_id', Array.from(targetSet))
-        .order('created_at', { ascending: true })
-        .limit(500);
-      if (candErr || !candData) { setThread([]); setThreadLoading(false); return; }
-      const candidates = candData as MessageRow[];
-      if (candidates.length === 0) { setThread([]); setThreadLoading(false); return; }
-      const hydratedCandidates = await hydrate(candidates, authUserId);
-      hydrated = hydratedCandidates.filter(m => {
-        const participants = new Set<string>([m.senderId, ...m.recipientUserIds]);
-        if (participants.size !== targetSet.size) return false;
-        for (const u of targetSet) if (!participants.has(u)) return false;
-        return true;
+    } else {
+      // DM/group target — gather the participant set, look up locally,
+      // fall back to the RPC.
+      const others = target.otherUserIds && target.otherUserIds.length > 0
+        ? target.otherUserIds.filter(u => u !== authUserId)
+        : (target.otherUserId ? [target.otherUserId] : []);
+      if (others.length === 0) return;
+      const wantSet = new Set([authUserId, ...others]);
+      const existing = conversationRows.find(c => {
+        if (c.related_entity_type !== null) return false;
+        const ps = participantsByConv[c.id] ?? [];
+        if (ps.length !== wantSet.size) return false;
+        return ps.every(p => wantSet.has(p.user_id));
       });
+      if (existing) {
+        conversationId = existing.id;
+      } else {
+        const tenantId = user?.clientSheetId || '_platform';
+        const { data: rpcId, error: rpcErr } = await supabase.rpc('find_or_create_dm_conversation', {
+          p_other_user_ids: others,
+          p_tenant_id: tenantId,
+        });
+        if (rpcErr) {
+          console.error('[useMessages] openThread DM RPC failed:', rpcErr);
+          return;
+        }
+        conversationId = rpcId as string;
+        await refetch();
+      }
     }
 
-    setThread(hydrated);
-    setThreadLoading(false);
-  }, [authUserId, hydrate]);
+    if (!conversationId) {
+      setThread([]);
+      setActiveThreadKey(null);
+      return;
+    }
 
-  // Keep the ref pointing at the latest openThread so the Realtime
-  // callback above can reload the active thread without re-subscribing
-  // each time openThread's identity changes.
+    setActiveThreadKey(conversationId);
+    setThreadLoading(true);
+    // Read from messagesRef instead of the closure-captured `messages` —
+    // when openThread runs after `await refetch()` (the cold-create path
+    // for brand-new conversations), state hasn't flushed yet but the ref
+    // has been updated by refetch's setMessages. Reading the ref makes
+    // the new conversation's messages appear immediately rather than on
+    // the next realtime tick.
+    const source = messagesRef.current.length > 0 ? messagesRef.current : messages;
+    const matched = source
+      .filter(m => m.conversationId === conversationId)
+      .sort((a, b) => (a.createdAt < b.createdAt ? -1 : 1));
+    setThread(matched);
+    setThreadLoading(false);
+  }, [authUserId, messages, conversationRows, participantsByConv, findConversationByKey, refetch, user]);
+
   useEffect(() => { openThreadRef.current = (key: string) => openThread(key); }, [openThread]);
 
   const closeThread = useCallback(() => {
@@ -652,88 +681,141 @@ function useMessagesImpl(): UseMessagesResult {
     const body = params.body.trim();
     if (!body) return null;
 
-    // tenant_id is NOT NULL on messages. Use the caller's bound client tenant
-    // when available; otherwise '_platform' as a generic marker for
-    // staff/admin cross-tenant messages.
     const tenantId = user?.clientSheetId || '_platform';
 
-    // The UI passes `entityType/entityId` (or legacy `threadId`); map onto
-    // the schema's `related_entity_*`. Legacy threadId gets dropped since
-    // the DB has no thread_id column.
-    const relatedEntityType = params.entityType ?? null;
-    const relatedEntityId = params.entityId ?? null;
+    // 1. Resolve conversationId: caller-provided > entity > DM/group RPC.
+    let conversationId: string | null = params.conversationId ?? null;
+    if (!conversationId) {
+      if (params.entityType && params.entityId) {
+        const { data, error } = await supabase.rpc('find_or_create_entity_conversation', {
+          p_entity_type: params.entityType,
+          p_entity_id: params.entityId,
+          p_tenant_id: tenantId,
+          p_other_user_ids: params.recipientIds.filter(u => u !== authUserId),
+        });
+        if (error || !data) {
+          console.error('[useMessages] sendMessage entity RPC failed:', error);
+          return null;
+        }
+        conversationId = data as string;
+      } else if (params.recipientIds.length > 0) {
+        const others = params.recipientIds.filter(u => u !== authUserId);
+        if (others.length === 0) return null;
+        const { data, error } = await supabase.rpc('find_or_create_dm_conversation', {
+          p_other_user_ids: others,
+          p_tenant_id: tenantId,
+        });
+        if (error || !data) {
+          console.error('[useMessages] sendMessage DM RPC failed:', error);
+          return null;
+        }
+        conversationId = data as string;
+      } else {
+        console.warn('[useMessages] sendMessage: no conversationId / entityType / recipientIds');
+        return null;
+      }
+    }
 
-    // 1. Insert message (RLS: sender_id must equal auth.uid())
-    const { data: msgData, error: msgErr } = await supabase
+    // 2. INSERT the message. Only round-trip the id back; messages_select_via_conversation
+    //    succeeds at this point because the RPC guaranteed our participant
+    //    row exists.
+    const { data: inserted, error: msgErr } = await supabase
       .from('messages')
       .insert({
+        conversation_id: conversationId,
         tenant_id: tenantId,
         sender_id: authUserId,
         body,
         subject: params.subject ?? null,
         message_type: params.messageType ?? 'message',
         priority: params.priority ?? 'normal',
-        related_entity_type: relatedEntityType,
-        related_entity_id: relatedEntityId,
+        related_entity_type: params.entityType ?? null,
+        related_entity_id: params.entityId ?? null,
         metadata: {},
       })
-      .select('*')
+      .select('id')
       .single();
-    if (msgErr || !msgData) {
+    if (msgErr || !inserted) {
       console.error('[useMessages] sendMessage failed to insert into messages:', msgErr);
       return null;
     }
 
-    // 2. Insert recipient rows. Include self so the sender's own copy shows
-    //    up in their inbox/list (pre-read, pre-unarchived).
-    const recipientUserIds = Array.from(new Set([authUserId, ...params.recipientIds]));
-    const rcpRows = recipientUserIds.map(uid => ({
-      message_id: msgData.id,
-      recipient_type: 'user',
-      recipient_id: uid,                           // text mirror for NOT NULL constraint
-      user_id: uid,                                // uuid FK used by RLS
-      is_read: uid === authUserId,
-      read_at: uid === authUserId ? new Date().toISOString() : null,
-      is_archived: false,
-    }));
-    if (rcpRows.length > 0) {
+    // 3. INSERT recipient rows for every NON-SENDER participant. These
+    //    drive the per-message Delivered/Read receipts that MessageBubble
+    //    renders. We pull the participant list from local state — RPC
+    //    just seeded it, so it should be up-to-date after the next
+    //    refetch, but we may need a fallback to params.recipientIds
+    //    when the conversation was just created and local state hasn't
+    //    caught up yet.
+    let participantIds: string[] = participantsByConv[conversationId]?.map(p => p.user_id) ?? [];
+    if (participantIds.length === 0) {
+      // Brand-new conversation just created via RPC — rebuild from
+      // params (caller's `recipientIds` always includes everyone except
+      // the sender).
+      participantIds = Array.from(new Set([authUserId, ...params.recipientIds]));
+    }
+    const nonSender = participantIds.filter(u => u !== authUserId);
+    if (nonSender.length > 0) {
+      const rcpRows = nonSender.map(uid => ({
+        message_id: inserted.id,
+        recipient_type: 'user',
+        recipient_id: uid,
+        user_id: uid,
+        is_read: false,
+        read_at: null,
+        is_archived: false,
+      }));
       const { error: rcpErr } = await supabase.from('message_recipients').insert(rcpRows);
       if (rcpErr) {
-        console.error('[useMessages] sendMessage failed to insert recipients:', rcpErr);
-        // Message is orphaned without recipients — best-effort cleanup so
-        // sends are all-or-nothing from the user's perspective.
-        await supabase.from('messages').delete().eq('id', msgData.id);
-        return null;
+        // Don't fail the whole send — the message is already in the DB
+        // and visible via conversation_participants. Read receipts will
+        // just be missing for this row. Log + move on.
+        console.warn('[useMessages] sendMessage: failed to fan out message_recipients:', rcpErr);
       }
     }
 
-    // 3. Optimistic append to the current thread + refetch inbox so the
-    //    conversation list picks up the new row.
-    const [hydrated] = await hydrate([msgData as MessageRow], authUserId);
-    if (hydrated) {
-      setThread(prev => [...prev, hydrated]);
-      setMessages(prev => [hydrated, ...prev]);
-    }
-    // Fire-and-forget a broader refetch — Realtime should also trigger it,
-    // but this covers the 1-2 second RT lag.
-    void refetch();
-    return hydrated ?? null;
-  }, [authUserId, user, hydrate, refetch]);
+    // 4. Refetch + reload active thread.
+    await refetch();
+    const activeKey = activeThreadKeyRef.current;
+    if (activeKey) void openThreadRef.current?.(activeKey);
 
-  // ── Mark read / archive ─────────────────────────────────────────────────
+    // Minimal stub return — callers (MessagesPage.handleCompose) only
+    // check `if (msg)` to decide whether to navigate.
+    return {
+      id: inserted.id,
+      conversationId,
+      tenantId,
+      relatedEntityType: params.entityType ?? null,
+      relatedEntityId: params.entityId ?? null,
+      subject: params.subject ?? null,
+      body,
+      messageType: params.messageType ?? 'message',
+      priority: params.priority ?? 'normal',
+      senderId: authUserId,
+      senderName: '',
+      senderEmail: '',
+      senderRole: null,
+      createdAt: new Date().toISOString(),
+      recipientUserIds: participantIds,
+      recipientReads: [],
+    };
+  }, [authUserId, user, refetch, participantsByConv]);
+
+  // ── Read / archive ──────────────────────────────────────────────────────
   const markRead = useCallback(async (recipientRowId: string) => {
+    const now = new Date().toISOString();
     await supabase
       .from('message_recipients')
-      .update({ is_read: true, read_at: new Date().toISOString() })
+      .update({ is_read: true, read_at: now })
       .eq('id', recipientRowId);
     setMessages(prev => prev.map(m =>
       m.myRecipient?.recipientId === recipientRowId
-        ? { ...m, myRecipient: { ...m.myRecipient, isRead: true, readAt: new Date().toISOString() } }
+        ? { ...m, myRecipient: { ...m.myRecipient, isRead: true, readAt: now } }
         : m,
     ));
     setThread(prev => prev.map(m =>
       m.myRecipient?.recipientId === recipientRowId
-        ? { ...m, myRecipient: { ...m.myRecipient, isRead: true, readAt: new Date().toISOString() } }
+        ? { ...m, myRecipient: { ...m.myRecipient, isRead: true, readAt: now } }
         : m,
     ));
   }, []);
@@ -744,7 +826,17 @@ function useMessagesImpl(): UseMessagesResult {
       .filter((r): r is NonNullable<Message['myRecipient']> => !!r && !r.isRead);
     if (unread.length === 0) return;
     await Promise.all(unread.map(r => markRead(r.recipientId)));
-  }, [thread, markRead]);
+    // Also bump the participant's last_read_at — used by future
+    // unread-since-cursor optimizations.
+    const activeKey = activeThreadKeyRef.current;
+    if (activeKey && authUserId) {
+      await supabase
+        .from('conversation_participants')
+        .update({ last_read_at: new Date().toISOString() })
+        .eq('conversation_id', activeKey)
+        .eq('user_id', authUserId);
+    }
+  }, [thread, markRead, authUserId]);
 
   const archiveMessage = useCallback(async (recipientRowId: string) => {
     await supabase
@@ -754,41 +846,28 @@ function useMessagesImpl(): UseMessagesResult {
     setMessages(prev => prev.filter(m => m.myRecipient?.recipientId !== recipientRowId));
   }, []);
 
-  // Session 74: delete a whole conversation for the current user. We mark
-  // every one of the user's recipient rows in the thread as archived (RLS
-  // msg_recipients_update_own scopes to their own rows) and drop all of
-  // their matching messages from local state. The other party's copy is
-  // untouched — this is a per-user soft-delete, like iMessage.
   const deleteConversation = useCallback(async (key: string): Promise<boolean> => {
     if (!authUserId) return false;
-    const keep: Message[] = [];
-    const toArchive: string[] = [];
-    for (const m of messages) {
-      const mk = keyForMessage(m, authUserId);
-      if (mk && mk === key) {
-        if (m.myRecipient) toArchive.push(m.myRecipient.recipientId);
-      } else {
-        keep.push(m);
-      }
+    // Per-user soft-delete: flip is_archived on my conversation_participants
+    // row. The other party's copy is untouched.
+    const { error } = await supabase
+      .from('conversation_participants')
+      .update({ is_archived: true })
+      .eq('conversation_id', key)
+      .eq('user_id', authUserId);
+    if (error) {
+      console.error('[useMessages] deleteConversation failed:', error);
+      return false;
     }
-    if (toArchive.length > 0) {
-      const { error } = await supabase
-        .from('message_recipients')
-        .update({ is_archived: true })
-        .in('id', toArchive);
-      if (error) {
-        console.error('[useMessages] deleteConversation archive failed:', error);
-        return false;
-      }
+    if (activeThreadKey === key) {
+      setActiveThreadKey(null);
+      setThread([]);
     }
-    setMessages(keep);
-    if (activeThreadKey === key) { setActiveThreadKey(null); setThread([]); }
+    await refetch();
     return true;
-  }, [authUserId, messages, activeThreadKey]);
+  }, [authUserId, activeThreadKey, refetch]);
 
-  // Session 74: top-banner state. Tracks the set of messageIds the user
-  // has dismissed so the banner doesn't re-appear after they close it
-  // (unless a NEWER unread incoming message arrives).
+  // ── Top-banner state ────────────────────────────────────────────────────
   const [dismissedBannerIds, setDismissedBannerIds] = useState<Set<string>>(new Set());
   const dismissBanner = useCallback((messageId: string) => {
     setDismissedBannerIds(prev => {
@@ -798,17 +877,13 @@ function useMessagesImpl(): UseMessagesResult {
     });
   }, []);
 
-  // Find the single newest unread incoming message (not dismissed). The
-  // banner renders when this is non-null and the user isn't currently
-  // viewing the messages page (MessagesPage auto-marks-as-read which
-  // clears the unread flag and removes the banner anyway).
   const latestUnreadIncoming = useMemo<Message | null>(() => {
     if (!authUserId) return null;
     let newest: Message | null = null;
     for (const m of messages) {
-      if (m.senderId === authUserId) continue;                // only incoming
-      if (!m.myRecipient || m.myRecipient.isRead) continue;   // only unread
-      if (dismissedBannerIds.has(m.id)) continue;              // dismissed
+      if (m.senderId === authUserId) continue;
+      if (!m.myRecipient || m.myRecipient.isRead) continue;
+      if (dismissedBannerIds.has(m.id)) continue;
       if (!newest || m.createdAt > newest.createdAt) newest = m;
     }
     return newest;
@@ -816,7 +891,7 @@ function useMessagesImpl(): UseMessagesResult {
 
   return useMemo(() => ({
     authUserId,
-    conversations: conversationsWithNames,
+    conversations,
     thread,
     threadLoading,
     loading,
@@ -832,36 +907,29 @@ function useMessagesImpl(): UseMessagesResult {
     refetch,
     latestUnreadIncoming,
     dismissBanner,
-  }), [authUserId, conversationsWithNames, thread, threadLoading, loading, unreadCount, activeThreadKey,
+  }), [authUserId, conversations, thread, threadLoading, loading, unreadCount, activeThreadKey,
        openThread, closeThread, sendMessage, markRead, markAllReadInThread, archiveMessage,
        deleteConversation, refetch, latestUnreadIncoming, dismissBanner]);
 }
 
-// ─── Context + Provider + public hook ───────────────────────────────────────
-// Session 74: single-instance pattern. MessagesProvider (mount once in
-// AppLayout) calls useMessagesImpl and provides the result. The exported
-// `useMessages` hook reads from the Context so every consumer — the TopBar
-// bell, the MessageTopBanner, the MessagesPage itself — shares ONE hook
-// instance and ONE Supabase Realtime channel. Prevents the same-name
-// channel collisions that produced CHANNEL_ERROR.
+// ─── Provider + public hook ────────────────────────────────────────────────
+// Single shared instance pattern. AppLayout wraps the app in
+// <MessagesProvider> — every consumer (TopBar bell, banner, MessagesPage)
+// reads from the same Context, so there's exactly one Supabase Realtime
+// channel for the whole app and one inbox refetch per event.
 
 const MessagesContext = createContext<UseMessagesResult | null>(null);
 
 export function MessagesProvider({ children }: { children: ReactNode }) {
   const value = useMessagesImpl();
-  // createElement avoids needing this file to be .tsx. Equivalent to:
-  //   <MessagesContext.Provider value={value}>{children}</MessagesContext.Provider>
   return createElement(MessagesContext.Provider, { value }, children);
 }
 
 export function useMessages(): UseMessagesResult {
   const ctx = useContext(MessagesContext);
   if (!ctx) {
-    // Defensive: if a consumer mounts outside MessagesProvider we still
-    // return a usable result (just its own instance). This keeps edge
-    // cases like Storybook and isolated tests working without forcing
-    // every wrapping to include the provider. The cost is one channel
-    // per orphan consumer — functional, just not shared.
+    // Defensive fallback for orphan consumers (Storybook, isolated
+    // tests). Functional but unshared — costs one channel per consumer.
     // eslint-disable-next-line react-hooks/rules-of-hooks
     return useMessagesImpl();
   }
