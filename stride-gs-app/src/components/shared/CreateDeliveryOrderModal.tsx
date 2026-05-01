@@ -1588,7 +1588,18 @@ export function CreateDeliveryOrderModal({
           // Items live on the delivery leg only (the pickup leg's
           // pricing is rolled into delivery; same convention as the
           // real-submit path).
-          await supabase.from('dt_order_items').delete().eq('dt_order_id', editingDraftRowIdRef.current);
+          //
+          // throw on delete failure — RLS dropping this silently was
+          // the root cause of "edit doubles items every save" before
+          // the dt_order_items_delete_* policies landed (migration
+          // dt_order_items_delete_update_policies). If a future RLS
+          // change strips the policy again, this surface fails loudly
+          // instead of letting the subsequent insert pile on dups.
+          {
+            const { error: delErr } = await supabase.from('dt_order_items')
+              .delete().eq('dt_order_id', editingDraftRowIdRef.current);
+            if (delErr) throw new Error(`P+D draft items delete failed: ${delErr.message}`);
+          }
           if (itemsSource === 'warehouse' && selectedInvItems.length > 0) {
             const itemRows = selectedInvItems.map(i => ({
               dt_order_id: editingDraftRowIdRef.current,
@@ -1735,7 +1746,12 @@ export function CreateDeliveryOrderModal({
         if (upErr) throw new Error(`Draft update failed: ${upErr.message}`);
         // Refresh dt_order_items: delete existing + reinsert (simple,
         // safe — drafts aren't queried for reporting between saves).
-        await supabase.from('dt_order_items').delete().eq('dt_order_id', editingDraftRowIdRef.current);
+        // Throw on delete failure — see P+D branch above for context.
+        {
+          const { error: delErr } = await supabase.from('dt_order_items')
+            .delete().eq('dt_order_id', editingDraftRowIdRef.current);
+          if (delErr) throw new Error(`Single-leg draft items delete failed: ${delErr.message}`);
+        }
         const draftItems = buildDeliveryDraftItems(editingDraftRowIdRef.current);
         if (draftItems.length > 0) {
           await supabase.from('dt_order_items').insert(draftItems);
@@ -1869,7 +1885,12 @@ export function CreateDeliveryOrderModal({
         if (saveDErr || !savedD) throw new Error(`Delivery leg ${wasDraftPD ? 'promote' : 'save'} failed: ${saveDErr?.message || 'no row returned'}`);
         // Refresh items on the delivery leg only (matches the create
         // path: items live on the delivery leg, pickup leg has none).
-        await supabase.from('dt_order_items').delete().eq('dt_order_id', editingDraftRowIdRef.current);
+        // Throw on delete failure — see P+D branch above for context.
+        {
+          const { error: delErr } = await supabase.from('dt_order_items')
+            .delete().eq('dt_order_id', editingDraftRowIdRef.current);
+          if (delErr) throw new Error(`P+D promote items delete failed: ${delErr.message}`);
+        }
         if (itemsSource === 'warehouse' && selectedInvItems.length > 0) {
           const itemRows = selectedInvItems.map(i => ({
             dt_order_id: editingDraftRowIdRef.current,
@@ -1982,7 +2003,12 @@ export function CreateDeliveryOrderModal({
         // Refresh items (delete + reinsert is simpler than diff for
         // the typical small item count). Includes ad-hoc lines for
         // delivery mode alongside warehouse-inventory selections.
-        await supabase.from('dt_order_items').delete().eq('dt_order_id', editingDraftRowIdRef.current);
+        // Throw on delete failure — see P+D branch above for context.
+        {
+          const { error: delErr } = await supabase.from('dt_order_items')
+            .delete().eq('dt_order_id', editingDraftRowIdRef.current);
+          if (delErr) throw new Error(`Single-leg edit items delete failed: ${delErr.message}`);
+        }
         if (mode === 'delivery' && itemsSource === 'warehouse') {
           const invRows = selectedInvItems.map(i => ({
             dt_order_id: editingDraftRowIdRef.current,
