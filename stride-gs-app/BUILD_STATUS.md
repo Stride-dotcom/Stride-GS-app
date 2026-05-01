@@ -99,6 +99,11 @@ UI components: FloatingActionMenu, WriteButton, BatchGuard, ActionTooltip, Batch
 
 ## Recent Changes (2026-05-01, session 87)
 
+### Photo upload routes to the active source-filter sub-tab
+- Symptom: on the item Photos tab, switching the sub-filter to "Repair" and uploading still wrote the photo to the inventory item, not the repair.
+- Root cause: `PhotoGallery` hard-coded the upload target to the host entity (`entity_type='inventory'`, `entity_id=item.itemId`); the sub-filter only filtered display.
+- Fix: `usePhotos.uploadPhoto` accepts an optional `{entityType, entityId}` override (storage path + `item_photos` row stamp both honor it). `PhotoGallery` resolves the target from the active sub-tab using a new `relatedEntities` prop. Single match → upload routes to that entity; zero / multiple matches → button disabled with a tooltip. `ItemDetailPanel`'s `PhotosPanelProxy` threads `linkedTasks / linkedRepairs / linkedWillCalls / shipmentNumber` into the gallery. `PhotoUploadButton` gains a `disabledReason` tooltip prop. PR #158.
+
 ### Storage RLS tolerates `_` ↔ `-` in clientSheetId path prefix
 - Symptom: Hillary @ Nip Tuck (client role) couldn't see photos on inventory items in her own account; admin "login as" worked fine.
 - Root cause: `usePhotos` / `useDocuments` upload paths sanitize the tenant ID via `sanitizeTenantForPath` (replaces `_` with `-`), but the storage RLS policies (`photos_select_tenant`, `documents_select_tenant`) compared the raw JWT `clientSheetId` (with `_` preserved) against the sanitized path's first segment. Tenants whose ID contains `_` — Nip Tuck (`1_CINtvp...`) and ~10 others — got blocked from their own photos. Admin/staff bypassed via the role branch.
