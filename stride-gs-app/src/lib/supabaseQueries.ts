@@ -3242,15 +3242,20 @@ export async function fetchItemByIdFromSupabase(
   tenantScope?: string[],
 ): Promise<ApiInventoryItem | null> {
   try {
-    let q = supabase.from('inventory').select('*').eq('item_id', itemId);
+    // Read from the `inventory_live` view, which excludes status='Transferred'
+    // rows. The DB layer now guarantees we never see the historical/source
+    // row for a transferred item, so the "two rows per item_id" duplication
+    // can't trip up this lookup. The view is RLS-passthrough (security_invoker)
+    // so tenant restrictions still apply.
+    let q = supabase.from('inventory_live').select('*').eq('item_id', itemId);
     if (tenantScope && tenantScope.length > 0) {
       q = q.in('tenant_id', tenantScope);
     }
     const { data, error } = await q.limit(10);
     if (error || !data || data.length === 0) return null;
-    // Prefer the non-Transferred row when multiple tenants share an
-    // item_id. The "Transferred" row is the historical artifact; the
-    // live item is owned by the row whose status is anything else.
+    // Defense in depth: even though the view filters Transferred, prefer
+    // any non-Transferred row if multiple come back (e.g. legacy rows that
+    // pre-date the view).
     const rows = data as SupabaseInventoryRow[];
     const row = rows.find(r => r.status !== 'Transferred') || rows[0];
     return {

@@ -3255,6 +3255,73 @@ function sbLogSyncError_(table, httpCode, errorBody, rowCount, sampleRow) {
 }
 
 /**
+ * PATCH (UPDATE) rows in a Supabase table matching a filter. Best-effort,
+ * never throws. Returns { ok, code, error? }.
+ * @param {string} table - Supabase table name
+ * @param {string} filter - PostgREST filter string (e.g. "tenant_id=eq.xxx&item_id=eq.yyy")
+ * @param {Object} data - Object of column → new value
+ */
+function supabasePatch_(table, filter, data) {
+  try {
+    var url = prop_("SUPABASE_URL");
+    var key = prop_("SUPABASE_SERVICE_ROLE_KEY");
+    if (!url || !key) return { ok: false, code: 0, error: "SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY not configured" };
+    var resp = UrlFetchApp.fetch(url + "/rest/v1/" + table + "?" + filter, {
+      method: "PATCH",
+      headers: {
+        "Authorization": "Bearer " + key,
+        "apikey":        key,
+        "Content-Type":  "application/json",
+        "Prefer":        "return=minimal"
+      },
+      payload: JSON.stringify(data),
+      muteHttpExceptions: true
+    });
+    var code = resp.getResponseCode();
+    if (code < 200 || code >= 300) {
+      var errBody = resp.getContentText().substring(0, 300);
+      Logger.log("supabasePatch_ " + table + " HTTP " + code + ": " + errBody);
+      return { ok: false, code: code, error: "HTTP " + code + ": " + errBody };
+    }
+    return { ok: true, code: code };
+  } catch (e) {
+    Logger.log("supabasePatch_ " + table + " error (non-fatal): " + e);
+    return { ok: false, code: 0, error: String(e) };
+  }
+}
+
+/**
+ * SELECT rows from a Supabase table matching a filter. Best-effort, never
+ * throws. Returns { ok, rows: [...] }.
+ */
+function supabaseSelect_(table, filter, columns) {
+  try {
+    var url = prop_("SUPABASE_URL");
+    var key = prop_("SUPABASE_SERVICE_ROLE_KEY");
+    if (!url || !key) return { ok: false, rows: [] };
+    var sel = columns ? "&select=" + encodeURIComponent(columns) : "";
+    var resp = UrlFetchApp.fetch(url + "/rest/v1/" + table + "?" + filter + sel, {
+      method: "GET",
+      headers: {
+        "Authorization": "Bearer " + key,
+        "apikey":        key
+      },
+      muteHttpExceptions: true
+    });
+    var code = resp.getResponseCode();
+    if (code < 200 || code >= 300) {
+      Logger.log("supabaseSelect_ " + table + " HTTP " + code + ": " + resp.getContentText().substring(0, 300));
+      return { ok: false, rows: [] };
+    }
+    var parsed = JSON.parse(resp.getContentText() || "[]");
+    return { ok: true, rows: Array.isArray(parsed) ? parsed : [] };
+  } catch (e) {
+    Logger.log("supabaseSelect_ " + table + " error (non-fatal): " + e);
+    return { ok: false, rows: [] };
+  }
+}
+
+/**
  * Delete rows from a Supabase table matching a filter. Best-effort, never throws.
  * @param {string} table - Supabase table name
  * @param {string} filter - PostgREST filter string (e.g. "tenant_id=eq.xxx&item_id=eq.yyy")
@@ -3535,6 +3602,119 @@ function api_ledgerTransferTenant_(itemIds, newTenantId) {
   } catch (e) {
     Logger.log("api_ledgerTransferTenant_ error (non-fatal): " + e);
   }
+}
+
+/**
+ * Migrate Supabase auxiliary tables that the GS-side transfer doesn't touch
+ * (entity_notes, item_photos, will_calls), and stamp transfer provenance
+ * columns on the destination inventory row.
+ *
+ * Why this exists separately from handleTransferItems_: those tables are
+ * Supabase-only (no GS sheet equivalent) so the standard fullClientSync
+ * flow can't move them. This helper runs AFTER handleTransferItems_ +
+ * fullClientSync, so the destination inventory row is already present in
+ * Supabase when we PATCH transferred_from_tenant_id / transferred_at onto it.
+ *
+ * Each step is best-effort. Failures log + warn but don't roll back the
+ * transfer (the sheets / billing / tasks have already moved successfully).
+ *
+ * @param {string[]} itemIds
+ * @param {string}   sourceTenantId
+ * @param {string}   destTenantId
+ * @param {Date}     transferDate
+ * @returns {Object} { entityNotes, itemPhotos, willCallsCleaned, warnings }
+ */
+function api_postTransferSupabaseSideEffects_(itemIds, sourceTenantId, destTenantId, transferDate) {
+  var summary = { entityNotes: 0, itemPhotos: 0, willCallsCleaned: 0, warnings: [] };
+  if (!itemIds || !itemIds.length || !sourceTenantId || !destTenantId) return summary;
+
+  var inList = "(" + itemIds.map(function(id) { return encodeURIComponent(String(id).trim()); }).join(",") + ")";
+  var transferIso = transferDate ? new Date(transferDate).toISOString() : new Date().toISOString();
+
+  // 1. Stamp provenance on destination inventory row (transferred_from + transferred_at).
+  //    Used by audits / "where did this item come from" queries. Won't be
+  //    overwritten by future syncs — fullClientSync's payload doesn't touch
+  //    these columns, so PostgREST's merge-duplicates upsert leaves them.
+  try {
+    var invFilter = "tenant_id=eq." + encodeURIComponent(destTenantId) + "&item_id=in." + inList;
+    var invRes = supabasePatch_("inventory", invFilter, {
+      transferred_from_tenant_id: sourceTenantId,
+      transferred_at: transferIso
+    });
+    if (!invRes.ok) summary.warnings.push("inventory provenance PATCH: " + invRes.error);
+  } catch (e) { summary.warnings.push("inventory provenance: " + e); }
+
+  // 2. entity_notes — rewrite tenant_id from source to dest for notes
+  //    attached to the inventory item itself. Notes attached to tasks/
+  //    repairs follow their parent rows on the GS side and sync correctly
+  //    via fullClientSync.
+  try {
+    var notesFilter = "tenant_id=eq." + encodeURIComponent(sourceTenantId) +
+                      "&entity_type=eq.inventory&entity_id=in." + inList;
+    var notesRes = supabasePatch_("entity_notes", notesFilter, { tenant_id: destTenantId });
+    if (notesRes.ok) summary.entityNotes = 1; // success flag (PATCH return=minimal)
+    else summary.warnings.push("entity_notes migration: " + notesRes.error);
+  } catch (e) { summary.warnings.push("entity_notes: " + e); }
+
+  // 3. item_photos — rewrite tenant_id. Storage objects stay at the original
+  //    path; the photos_select_tenant RLS policy was extended to also allow
+  //    read access when an item_photos row's tenant_id matches the user's
+  //    clientSheetId, so the new tenant can still view the photos without
+  //    physically moving any objects. Item_id is unchanged.
+  try {
+    var photosFilter = "tenant_id=eq." + encodeURIComponent(sourceTenantId) +
+                       "&item_id=in." + inList;
+    var photosRes = supabasePatch_("item_photos", photosFilter, { tenant_id: destTenantId });
+    if (photosRes.ok) summary.itemPhotos = 1;
+    else summary.warnings.push("item_photos migration: " + photosRes.error);
+  } catch (e) { summary.warnings.push("item_photos: " + e); }
+
+  // 4. will_calls cleanup — for any open will-call on the source tenant
+  //    that has a transferred item in its item_ids jsonb array, strip the
+  //    item out. If the WC is left empty, mark it Cancelled. Pickup orders
+  //    don't auto-migrate to dest (the new owner can create their own WC
+  //    if they want) — this prevents a stale pickup against a tenant that
+  //    no longer owns the item.
+  try {
+    var openStatuses = "(Pending,Scheduled,Partial,pending,scheduled,partial)";
+    var wcFilter = "tenant_id=eq." + encodeURIComponent(sourceTenantId) +
+                   "&status=in." + openStatuses;
+    var wcSel = supabaseSelect_("will_calls", wcFilter, "id,wc_number,item_ids,item_count,status,notes");
+    if (wcSel.ok && wcSel.rows && wcSel.rows.length) {
+      var transferredSet = {};
+      itemIds.forEach(function(id) { transferredSet[String(id).trim()] = true; });
+      for (var w = 0; w < wcSel.rows.length; w++) {
+        var wc = wcSel.rows[w];
+        var ids = Array.isArray(wc.item_ids) ? wc.item_ids : [];
+        var keep = [];
+        var stripped = [];
+        for (var ii = 0; ii < ids.length; ii++) {
+          var id = String(ids[ii] || "").trim();
+          if (transferredSet[id]) stripped.push(id);
+          else if (id) keep.push(id);
+        }
+        if (!stripped.length) continue; // this WC didn't reference any transferred item
+        var patchBody = {
+          item_ids: keep,
+          item_count: keep.length
+        };
+        var noteSuffix = "Stripped " + stripped.length + " transferred item(s) [" +
+                        stripped.join(", ") + "] on " +
+                        Utilities.formatDate(transferDate || new Date(), "America/Los_Angeles", "yyyy-MM-dd");
+        patchBody.notes = (wc.notes ? wc.notes + " | " : "") + noteSuffix;
+        if (keep.length === 0) patchBody.status = "Cancelled";
+        var wcPatch = supabasePatch_(
+          "will_calls",
+          "id=eq." + encodeURIComponent(wc.id),
+          patchBody
+        );
+        if (wcPatch.ok) summary.willCallsCleaned++;
+        else summary.warnings.push("will_call " + wc.wc_number + " patch: " + wcPatch.error);
+      }
+    }
+  } catch (e) { summary.warnings.push("will_calls cleanup: " + e); }
+
+  return summary;
 }
 
 /**
@@ -6224,6 +6404,21 @@ function doPost(e) {
                 api_auditLog_("inventory", String(txIds[_tx]), effectiveId, "transfer", { status: { new: "Transferred" }, destinationTenant: destId }, callerEmail);
                 api_auditLog_("inventory", String(txIds[_tx]), destId, "transfer_in", { summary: "Item transferred in", sourceTenant: effectiveId }, callerEmail);
               }
+              // Supabase auxiliary tables that the GS-side transfer doesn't
+              // touch: entity_notes, item_photos (tenant rewrite), and
+              // will_calls (strip transferred items from open pickups).
+              // Also stamps transfer provenance (transferred_from_tenant_id,
+              // transferred_at) onto the destination inventory row. Runs
+              // AFTER fullClientSync so the destination row exists before
+              // we PATCH it. Best-effort — failures log but don't break
+              // the transfer.
+              try {
+                var transferDateForSb = rJsonTx.transferDate ? new Date(rJsonTx.transferDate) : new Date();
+                var sbSummary = api_postTransferSupabaseSideEffects_(txIds, effectiveId, destId, transferDateForSb);
+                if (sbSummary && sbSummary.warnings && sbSummary.warnings.length) {
+                  Logger.log("transferItems Supabase side-effects warnings: " + sbSummary.warnings.join(" | "));
+                }
+              } catch (sbErr) { Logger.log("api_postTransferSupabaseSideEffects_ error (non-fatal): " + sbErr); }
             }
           } catch (lerr) { Logger.log("transferItems ledger update error (non-fatal): " + lerr); }
           return r;
@@ -18509,6 +18704,7 @@ function handleTransferItems_(sourceClientSheetId, payload) {
     tasksTransferred:  tasksTransferred,
     repairsTransferred: repairsTransferred,
     emailSent:         emailSent,
+    transferDate:      transferDate ? Utilities.formatDate(transferDate, tz, "yyyy-MM-dd") : "",
     warnings:          warnings.length > 0 ? warnings : undefined
   });
 }
