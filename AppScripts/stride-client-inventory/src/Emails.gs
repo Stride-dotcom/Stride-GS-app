@@ -1,5 +1,6 @@
 /* ===================================================
-   Emails.gs — v4.8.1 — 2026-04-25 PST — Doc fallback header HTML: explicit widths so logo+name stays left
+   Emails.gs — v4.8.2 — 2026-05-01 PST — sendTemplateEmail_ self-heal also rewrites route-style /#/<entity>/<id> URLs to query-param form with &client=, defending future templates against the "Task Not Found" deep-link regression
+   v4.8.1: Doc fallback header HTML: explicit widths so logo+name stays left
    v4.8.1: getDefaultDocHtml_ — DOC_RECEIVING, DOC_TASK_WORK_ORDER,
            DOC_REPAIR_WORK_ORDER, DOC_WILL_CALL_RELEASE outer header tables
            now declare width="60%" align="left" on the logo/company-name
@@ -329,6 +330,16 @@ try {
   var _ssid = "";
   try { _ssid = String(ss.getId() || ""); } catch (_) {}
   if (_ssid) {
+    // Route-style → query-param: any /#/<entity>/<id> that slipped past
+    // (e.g. an older template, a hand-edited token) is rewritten to the
+    // /#/<entity>?open=<id>&client=<ssid> form before the trailing-quote
+    // self-heal below runs. Keeps email CTAs durable as templates evolve.
+    htmlBody = htmlBody.replace(
+      /(https?:\/\/[^"\s]*?mystridehub\.com\/#\/(shipments|tasks|repairs|will-calls|inventory|claims))\/([^"\s?#\/]+)/g,
+      function(_m, prefix, _entity, id) {
+        return prefix + "?open=" + id + "&client=" + encodeURIComponent(_ssid);
+      }
+    );
     htmlBody = htmlBody.replace(
       /(https?:\/\/[^"\s]*?mystridehub\.com\/#\/(?:shipments|tasks|repairs|will-calls|inventory|claims)\?open=[^"\s&]+)("|\s|<)/g,
       function(_m, urlPart, tail) {

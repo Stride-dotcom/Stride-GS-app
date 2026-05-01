@@ -1,5 +1,5 @@
 /* ===================================================
-   WillCalls.gs — v4.6.0 — 2026-04-22 PST — Fix sidemark+reference in items email table
+   WillCalls.gs — v4.6.1 — 2026-05-01 PST — WILL_CALL_CREATED / RELEASE deep links use query-param format with &client= (was route-style /#/will-calls/<id> which the React app rejects)
    v4.5.0: WILL_CALL_CREATED + WILL_CALL_RELEASE now emit {{SIDEMARK}} +
            {{SIDEMARK_HEADER}} tokens. Distinct Sidemarks collected by joining
            WC items to Inventory via Item ID (comma-joined when multiple
@@ -414,7 +414,7 @@ function StrideCreateWillCallCallback(formData) {
         "{{SIDEMARK}}": _wccSidemarks,
         "{{SIDEMARK_HEADER}}": buildSidemarkHeader_(_wccSidemarks),
         "__PDF_FOLDER_URL__": folderUrl || "",
-        "{{APP_DEEP_LINK}}": "https://www.mystridehub.com/#/will-calls/" + encodeURIComponent(wcNumber)
+        "{{APP_DEEP_LINK}}": "https://www.mystridehub.com/#/will-calls?open=" + encodeURIComponent(wcNumber) + "&client=" + encodeURIComponent(ss.getId())
       });
     }
   } catch (emailErr) {
@@ -784,7 +784,7 @@ function StrideProcessReleaseCallback(selectedIndices) {
         "{{NOTES}}": String(wcData[wcRow - 1][wcMap2["Notes"] - 1] || ""),
         "{{SIDEMARK}}": _wcrSidemarks,
         "{{SIDEMARK_HEADER}}": buildSidemarkHeader_(_wcrSidemarks),
-        "{{APP_DEEP_LINK}}": "https://www.mystridehub.com/#/will-calls/" + encodeURIComponent(wcNumber)
+        "{{APP_DEEP_LINK}}": "https://www.mystridehub.com/#/will-calls?open=" + encodeURIComponent(wcNumber) + "&client=" + encodeURIComponent(ss.getId())
       }, wcPdfBlob);
     }
   } catch (emailErr) {
