@@ -83,6 +83,7 @@ import { AutocompleteSelect } from './AutocompleteSelect';
 import { theme } from '../../styles/theme';
 import { WriteButton } from './WriteButton';
 import { useAuth } from '../../contexts/AuthContext';
+import { logDtOrderAudit } from '../../lib/dtOrderAudit';
 import { useClients } from '../../hooks/useClients';
 import { useInventory } from '../../hooks/useInventory';
 import {
@@ -1883,6 +1884,21 @@ export function CreateDeliveryOrderModal({
           await supabase.from('dt_order_items').insert(itemRows);
         }
         const savedDelivery = savedD as { id: string; dt_identifier: string; review_status: string };
+        // Audit: P+D edit-save / draft-promote. Best-effort.
+        void logDtOrderAudit({
+          orderId: savedDelivery.id,
+          tenantId: clientSheetId,
+          action: 'update',
+          changes: {
+            mode: 'pickup_and_delivery',
+            wasDraft: wasDraftPD,
+            dtIdentifier: savedDelivery.dt_identifier,
+            reviewStatus: savedDelivery.review_status,
+            itemCount: selectedInvItems.length,
+            orderTotal: orderTotal ?? null,
+          },
+          performedBy: user?.email ?? null,
+        });
         onSubmit?.({
           dtOrderId: savedDelivery.id,
           dtIdentifier: savedDelivery.dt_identifier,
@@ -2000,6 +2016,21 @@ export function CreateDeliveryOrderModal({
           }
         }
         const savedRow = saved as { id: string; dt_identifier: string; review_status: string };
+        // Audit: single-leg edit-save / draft-promote. Best-effort.
+        void logDtOrderAudit({
+          orderId: savedRow.id,
+          tenantId: clientSheetId,
+          action: 'update',
+          changes: {
+            mode,
+            wasDraft,
+            dtIdentifier: savedRow.dt_identifier,
+            reviewStatus: savedRow.review_status,
+            itemCount: itemCount ?? null,
+            orderTotal: orderTotal ?? null,
+          },
+          performedBy: user?.email ?? null,
+        });
         onSubmit?.({
           dtOrderId: savedRow.id,
           dtIdentifier: savedRow.dt_identifier,
@@ -2199,6 +2230,23 @@ export function CreateDeliveryOrderModal({
         }
 
         setCreateResult({ dtIdentifier: deliveryRow.dt_identifier, linkedIdentifier: pickupRow.dt_identifier, orderId: deliveryRow.id });
+        // Audit: P+D order created. Best-effort. (Push-to-DT is audited
+        // separately by the dt-push-order edge function once it lands.)
+        void logDtOrderAudit({
+          orderId: deliveryRow.id,
+          tenantId: clientSheetId,
+          action: 'create',
+          changes: {
+            mode: 'pickup_and_delivery',
+            dtIdentifier: deliveryRow.dt_identifier,
+            linkedIdentifier: pickupRow.dt_identifier,
+            reviewStatus: isAdminAutoApprove ? 'approved' : 'pending_review',
+            itemCount: selectedInvItems.length,
+            orderTotal: orderTotal ?? null,
+            autoApproved: isAdminAutoApprove,
+          },
+          performedBy: user?.email ?? null,
+        });
         onSubmit?.({
           dtOrderId: deliveryRow.id,
           dtIdentifier: deliveryRow.dt_identifier,
@@ -2391,6 +2439,24 @@ export function CreateDeliveryOrderModal({
         }
 
         setCreateResult({ dtIdentifier: orderRow.dt_identifier, orderId: orderRow.id });
+        // Audit: single-leg order created. Best-effort. The inventory-side
+        // 'delivery_order_created' rows above are per-item history;
+        // this one row is the dt_order's own audit entry that powers
+        // the OrderPage Activity tab.
+        void logDtOrderAudit({
+          orderId: orderRow.id,
+          tenantId: clientSheetId,
+          action: 'create',
+          changes: {
+            mode,
+            dtIdentifier: orderRow.dt_identifier,
+            reviewStatus: isAdminAutoApprove ? 'approved' : 'pending_review',
+            itemCount: itemCount ?? null,
+            orderTotal: orderTotal ?? null,
+            autoApproved: isAdminAutoApprove,
+          },
+          performedBy: user?.email ?? null,
+        });
         onSubmit?.({
           dtOrderId: orderRow.id,
           dtIdentifier: orderRow.dt_identifier,

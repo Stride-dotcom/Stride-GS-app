@@ -630,6 +630,50 @@ Deno.serve(async (req: Request) => {
 
   if (updateErr) console.warn(`[dt-push-order] DT push ok but local update failed: ${updateErr.message}`);
 
+  // ── 6b. Audit: push_to_dt — feeds the OrderPage Activity tab ──────────
+  // Best-effort. Includes the linked pickup identifier when this was a
+  // P+D push so the audit row reflects both legs going out together.
+  // No `performed_by` — the edge function runs under service role; the
+  // caller (the React Approve & Push flow) is identified by the absence
+  // of an email and source='edge'.
+  const auditRows: Record<string, unknown>[] = [{
+    entity_type: 'dt_order',
+    entity_id:   orderId,
+    tenant_id:   orderTyped.tenant_id,
+    action:      'push_to_dt',
+    changes: {
+      dtIdentifier: orderTyped.dt_identifier,
+      ...(linkedPushedIdentifier ? { linkedIdentifier: linkedPushedIdentifier } : {}),
+      orderType,
+      itemCount: itemsTyped.length,
+    },
+    performed_by: null,
+    source: 'edge',
+  }];
+  // If the linked pickup was pushed in this same call, also stamp an
+  // audit row on its own dt_order_id so its Activity tab reflects the
+  // push event independently.
+  if (linkedPushedIdentifier && orderTyped.linked_order_id) {
+    auditRows.push({
+      entity_type: 'dt_order',
+      entity_id:   orderTyped.linked_order_id,
+      tenant_id:   orderTyped.tenant_id,
+      action:      'push_to_dt',
+      changes: {
+        dtIdentifier: linkedPushedIdentifier,
+        linkedIdentifier: orderTyped.dt_identifier,
+        orderType: 'pickup',
+        pushedAlongsideDelivery: true,
+      },
+      performed_by: null,
+      source: 'edge',
+    });
+  }
+  const { error: auditErr } = await supabase
+    .from('entity_audit_log')
+    .insert(auditRows);
+  if (auditErr) console.warn(`[dt-push-order] audit insert failed (non-fatal): ${auditErr.message}`);
+
   console.log(`[dt-push-order] Success order=${orderTyped.dt_identifier}${linkedPushedIdentifier ? ` + linked=${linkedPushedIdentifier}` : ''}`);
   return json({
     ok: true,
