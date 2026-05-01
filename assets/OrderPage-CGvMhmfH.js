@@ -1,4 +1,4 @@
-import{$ as e,Dt as t,Et as n,H as r,It as i,L as a,Lt as o,Q as s,R as c,Ut as l,V as u,Vt as d,Z as f,d as p,et as ee,f as m,ft as h,i as g,k as _,l as v,m as te,n as ne,ot as y,p as re,pt as b,rt as x,t as ie,u as S,ut as C,wt as w,yt as T,z as E}from"./ReleaseItemsModal-BQz681Rt.js";import{K as D,d as ae,f as oe,p as se,u as O}from"./supabaseQueries-BE9YwPwG.js";import{t as k}from"./phone-ahoKW5We.js";import{t as ce}from"./search-x-BaCe2jkx.js";import{D as le,E as A,O as ue}from"./index-CNcPNfde.js";var de=w(`clock-3`,[[`circle`,{cx:`12`,cy:`12`,r:`10`,key:`1mglay`}],[`path`,{d:`M12 6v6h4`,key:`135r8i`}]]),j=l(d(),1);function fe(e){let{clients:t}=_(),[n,r]=(0,j.useState)(null),[i,a]=(0,j.useState)(`loading`),[o,s]=(0,j.useState)(null),c=(0,j.useRef)(null),l=(0,j.useRef)(0),u=(0,j.useMemo)(()=>{let e={};for(let n of t)e[n.id]=n.name;return e},[t]),d=(0,j.useRef)(u);d.current=u;let f=(0,j.useCallback)(async()=>{if(!e)return;c.current?.abort();let t=new AbortController;c.current=t;let n=++l.current;a(`loading`),s(null);try{let i=await O(e,d.current);if(t.signal.aborted||n!==l.current)return;if(!i){a(`not-found`);return}r(i),a(`loaded`)}catch(e){if(t.signal.aborted||n!==l.current)return;s(e instanceof Error?e.message:`Failed to load order`),a(`error`)}},[e]);return(0,j.useEffect)(()=>(f(),()=>{c.current?.abort()}),[f]),{order:n,status:i,error:o,refetch:f}}function pe(e){let t=he(e),n=window.open(``,`_blank`);if(!n){alert(`Please allow pop-ups for this site, then try again.`);return}n.document.open(),n.document.write(t),n.document.close(),setTimeout(()=>{try{n.print()}catch{}},450)}function M(e){return e==null?`—`:`$`+e.toLocaleString(`en-US`,{minimumFractionDigits:2,maximumFractionDigits:2})}function N(e){if(!e)return`—`;try{return new Date(e+`T00:00:00`).toLocaleDateString(`en-US`,{weekday:`short`,month:`short`,day:`numeric`,year:`numeric`})}catch{return e}}function P(e){if(!e)return`—`;try{return new Date(e).toLocaleString(`en-US`)}catch{return e}}function F(e,t,n){if(!e&&!t)return`—`;let r=e=>{let[t,n]=e.split(`:`),r=parseInt(t);if(Number.isNaN(r))return e;let i=r>=12?`PM`:`AM`;return r===0?r=12:r>12&&(r-=12),`${r}:${n} ${i}`};return[e&&r(e),t&&r(t)].filter(Boolean).join(` – `)+(n===`America/Los_Angeles`?` PT`:n?` (${n})`:``)}function I(e){return e==null?``:String(e).replace(/&/g,`&amp;`).replace(/</g,`&lt;`).replace(/>/g,`&gt;`).replace(/"/g,`&quot;`).replace(/'/g,`&#39;`)}function L(e,t){return!t||t===`—`?``:`<tr><th>${I(e)}</th><td>${I(t)}</td></tr>`}function R(e){let t=F(e.windowStartLocal,e.windowEndLocal,e.timezone),n=[L(`Service Date`,N(e.localServiceDate)),L(`Time Window`,t),L(`Order Type`,e.orderType?e.orderType.replace(/_/g,` `):null),L(`Scheduled`,P(e.scheduledAt)),L(`Started`,P(e.startedAt)),L(`Finished`,P(e.finishedAt))].filter(Boolean).join(``);return n?`<section><h2>Schedule</h2><table class="kv">${n}</table></section>`:``}function z(e){let t=[e.contactAddress,e.contactCity,e.contactState,e.contactZip].filter(Boolean).join(`, `),n=[L(`Name`,e.contactName),L(`Address`,t),L(`Phone`,e.contactPhone),L(`Email`,e.contactEmail)].filter(Boolean).join(``);return n?`<section><h2>${e.isPickup?`Pickup Contact`:`Delivery Contact`}</h2><table class="kv">${n}</table></section>`:``}function B(e){let t=[L(`PO Number`,e.poNumber),L(`Sidemark`,e.sidemark),L(`Client Reference`,e.clientReference),L(`Source`,e.source),e.dtDispatchId==null?``:L(`Dispatch ID`,String(e.dtDispatchId))].filter(Boolean).join(``),n=e.details?`<div class="notes-block"><div class="notes-label">Details / Notes</div><div class="notes-body">${I(e.details)}</div></div>`:``;return!t&&!n?``:`<section><h2>Order Details</h2>${t?`<table class="kv">${t}</table>`:``}${n}</section>`}function V(e){let t=[L(`Driver`,e.driverName),e.truckName?L(`Truck`,e.truckName):``,e.serviceUnit?L(`Service Unit`,e.serviceUnit):``,e.stopNumber==null?``:L(`Stop #`,String(e.stopNumber)),e.actualServiceTimeMinutes==null?``:L(`Service Time`,`${e.actualServiceTimeMinutes} min`),e.codAmount==null?``:L(`COD Amount`,M(e.codAmount)),e.signatureCapturedAt?L(`Signature Captured`,P(e.signatureCapturedAt)):``].filter(Boolean).join(``);return t?`<section><h2>Driver &amp; Route</h2><table class="kv">${t}</table></section>`:``}function me(e){return!e.items||e.items.length===0?`<section><h2>Items</h2><div class="empty">No items on this order.</div></section>`:`<section>
+import{$ as e,Dt as t,Et as n,H as r,It as i,L as a,Lt as o,Q as s,R as c,Ut as l,V as u,Vt as d,Z as f,d as p,et as ee,f as m,ft as h,i as g,k as _,l as v,m as te,n as ne,ot as y,p as re,pt as b,rt as x,t as ie,u as S,ut as C,wt as w,yt as T,z as E}from"./ReleaseItemsModal-BQz681Rt.js";import{K as D,d as ae,f as oe,p as se,u as O}from"./supabaseQueries-BE9YwPwG.js";import{t as k}from"./phone-ahoKW5We.js";import{t as ce}from"./search-x-BaCe2jkx.js";import{D as le,E as A,O as ue}from"./index-B0dJvcuy.js";var de=w(`clock-3`,[[`circle`,{cx:`12`,cy:`12`,r:`10`,key:`1mglay`}],[`path`,{d:`M12 6v6h4`,key:`135r8i`}]]),j=l(d(),1);function fe(e){let{clients:t}=_(),[n,r]=(0,j.useState)(null),[i,a]=(0,j.useState)(`loading`),[o,s]=(0,j.useState)(null),c=(0,j.useRef)(null),l=(0,j.useRef)(0),u=(0,j.useMemo)(()=>{let e={};for(let n of t)e[n.id]=n.name;return e},[t]),d=(0,j.useRef)(u);d.current=u;let f=(0,j.useCallback)(async()=>{if(!e)return;c.current?.abort();let t=new AbortController;c.current=t;let n=++l.current;a(`loading`),s(null);try{let i=await O(e,d.current);if(t.signal.aborted||n!==l.current)return;if(!i){a(`not-found`);return}r(i),a(`loaded`)}catch(e){if(t.signal.aborted||n!==l.current)return;s(e instanceof Error?e.message:`Failed to load order`),a(`error`)}},[e]);return(0,j.useEffect)(()=>(f(),()=>{c.current?.abort()}),[f]),{order:n,status:i,error:o,refetch:f}}function pe(e){let t=he(e),n=window.open(``,`_blank`);if(!n){alert(`Please allow pop-ups for this site, then try again.`);return}n.document.open(),n.document.write(t),n.document.close(),setTimeout(()=>{try{n.print()}catch{}},450)}function M(e){return e==null?`—`:`$`+e.toLocaleString(`en-US`,{minimumFractionDigits:2,maximumFractionDigits:2})}function N(e){if(!e)return`—`;try{return new Date(e+`T00:00:00`).toLocaleDateString(`en-US`,{weekday:`short`,month:`short`,day:`numeric`,year:`numeric`})}catch{return e}}function P(e){if(!e)return`—`;try{return new Date(e).toLocaleString(`en-US`)}catch{return e}}function F(e,t,n){if(!e&&!t)return`—`;let r=e=>{let[t,n]=e.split(`:`),r=parseInt(t);if(Number.isNaN(r))return e;let i=r>=12?`PM`:`AM`;return r===0?r=12:r>12&&(r-=12),`${r}:${n} ${i}`};return[e&&r(e),t&&r(t)].filter(Boolean).join(` – `)+(n===`America/Los_Angeles`?` PT`:n?` (${n})`:``)}function I(e){return e==null?``:String(e).replace(/&/g,`&amp;`).replace(/</g,`&lt;`).replace(/>/g,`&gt;`).replace(/"/g,`&quot;`).replace(/'/g,`&#39;`)}function L(e,t){return!t||t===`—`?``:`<tr><th>${I(e)}</th><td>${I(t)}</td></tr>`}function R(e){let t=F(e.windowStartLocal,e.windowEndLocal,e.timezone),n=[L(`Service Date`,N(e.localServiceDate)),L(`Time Window`,t),L(`Order Type`,e.orderType?e.orderType.replace(/_/g,` `):null),L(`Scheduled`,P(e.scheduledAt)),L(`Started`,P(e.startedAt)),L(`Finished`,P(e.finishedAt))].filter(Boolean).join(``);return n?`<section><h2>Schedule</h2><table class="kv">${n}</table></section>`:``}function z(e){let t=[e.contactAddress,e.contactCity,e.contactState,e.contactZip].filter(Boolean).join(`, `),n=[L(`Name`,e.contactName),L(`Address`,t),L(`Phone`,e.contactPhone),L(`Email`,e.contactEmail)].filter(Boolean).join(``);return n?`<section><h2>${e.isPickup?`Pickup Contact`:`Delivery Contact`}</h2><table class="kv">${n}</table></section>`:``}function B(e){let t=[L(`PO Number`,e.poNumber),L(`Sidemark`,e.sidemark),L(`Client Reference`,e.clientReference),L(`Source`,e.source),e.dtDispatchId==null?``:L(`Dispatch ID`,String(e.dtDispatchId))].filter(Boolean).join(``),n=e.details?`<div class="notes-block"><div class="notes-label">Details / Notes</div><div class="notes-body">${I(e.details)}</div></div>`:``;return!t&&!n?``:`<section><h2>Order Details</h2>${t?`<table class="kv">${t}</table>`:``}${n}</section>`}function V(e){let t=[L(`Driver`,e.driverName),e.truckName?L(`Truck`,e.truckName):``,e.serviceUnit?L(`Service Unit`,e.serviceUnit):``,e.stopNumber==null?``:L(`Stop #`,String(e.stopNumber)),e.actualServiceTimeMinutes==null?``:L(`Service Time`,`${e.actualServiceTimeMinutes} min`),e.codAmount==null?``:L(`COD Amount`,M(e.codAmount)),e.signatureCapturedAt?L(`Signature Captured`,P(e.signatureCapturedAt)):``].filter(Boolean).join(``);return t?`<section><h2>Driver &amp; Route</h2><table class="kv">${t}</table></section>`:``}function me(e){return!e.items||e.items.length===0?`<section><h2>Items</h2><div class="empty">No items on this order.</div></section>`:`<section>
     <h2>Items</h2>
     <table class="items">
       <thead>
@@ -34,32 +34,37 @@ import{$ as e,Dt as t,Et as n,H as r,It as i,L as a,Lt as o,Q as s,R as c,Ut as 
 
     body {
       font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-      background: #F5F2EE;
+      background: #fff;
       color: #1C1C1C;
       font-size: 12.5px;
       line-height: 1.55;
     }
 
+    /* Printer-friendly header — white background, dark text, no
+       ink-heavy block. Real Stride logo image (absolute URL so the
+       about:blank popup can fetch it from GitHub Pages). */
     .print-header {
-      background: #1C1C1C;
-      color: #fff;
-      padding: 18px 32px;
+      background: #fff;
+      color: #1C1C1C;
+      padding: 18px 32px 14px;
       display: flex;
       justify-content: space-between;
-      align-items: center;
+      align-items: flex-start;
+      border-bottom: 2px solid #1C1C1C;
+      max-width: 820px;
+      margin: 0 auto;
     }
     .header-brand { display: flex; align-items: center; gap: 12px; }
     .header-logo {
-      width: 38px; height: 38px; border-radius: 8px;
-      background: #E8692A;
-      display: flex; align-items: center; justify-content: center;
-      font-size: 18px; font-weight: 900; color: #fff; letter-spacing: -1px;
+      width: 44px; height: 44px;
+      object-fit: contain;
+      display: block;
     }
-    .header-name { font-size: 15px; font-weight: 700; letter-spacing: 2.5px; }
-    .header-sub  { font-size: 10px; letter-spacing: 1.5px; color: rgba(255,255,255,0.5); margin-top: 2px; }
-    .header-meta { text-align: right; font-size: 11px; color: rgba(255,255,255,0.7); line-height: 1.5; }
-    .header-meta strong { color: #fff; font-size: 13px; }
-    .header-id { color: #fff; font-size: 18px; font-weight: 700; letter-spacing: 0.5px; }
+    .header-name { font-size: 16px; font-weight: 800; letter-spacing: 2.5px; color: #1C1C1C; }
+    .header-sub  { font-size: 10px; letter-spacing: 1.5px; color: #64748B; margin-top: 2px; }
+    .header-meta { text-align: right; font-size: 11px; color: #64748B; line-height: 1.5; }
+    .header-meta strong { color: #1C1C1C; font-size: 13px; }
+    .header-id { color: #E8692A; font-size: 18px; font-weight: 700; letter-spacing: 0.5px; }
 
     .doc-body { max-width: 820px; margin: 0 auto; padding: 28px 24px 48px; }
 
@@ -181,8 +186,7 @@ import{$ as e,Dt as t,Et as n,H as r,It as i,L as a,Lt as o,Q as s,R as c,Ut as 
     }
 
     @media print {
-      body { background: #fff; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-      .print-header { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+      body { background: #fff; }
       section { break-inside: avoid; }
       table.items tr { break-inside: avoid; }
       @page { margin: 0.4in; size: letter; }
@@ -192,7 +196,7 @@ import{$ as e,Dt as t,Et as n,H as r,It as i,L as a,Lt as o,Q as s,R as c,Ut as 
 <body>
   <div class="print-header">
     <div class="header-brand">
-      <div class="header-logo">S</div>
+      <img class="header-logo" src="https://www.mystridehub.com/stride-logo.png" alt="Stride Logistics" />
       <div>
         <div class="header-name">STRIDE</div>
         <div class="header-sub">LOGISTICS</div>
