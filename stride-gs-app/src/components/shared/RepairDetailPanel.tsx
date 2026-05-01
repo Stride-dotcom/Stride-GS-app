@@ -72,7 +72,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
   const isActive = !['Complete', 'Cancelled', 'Declined'].includes(effectiveStatus);
 
   // (I)(A)(R) indicator badges for the Item card below.
-  const { inspOpenItems, inspDoneItems, asmOpenItems, asmDoneItems, repairOpenItems, repairDoneItems, wcOpenItems, wcDoneItems } = useItemIndicators(repair.clientSheetId);
+  const { inspOpenItems, inspDoneItems, inspFailedItems, asmOpenItems, asmDoneItems, repairOpenItems, repairDoneItems, wcOpenItems, wcDoneItems } = useItemIndicators(repair.clientSheetId);
 
   const [repairNotes, setRepairNotes] = useState(repair.repairNotes || '');
   const [showResultPrompt, setShowResultPrompt] = useState<'fail' | null>(null);
@@ -745,6 +745,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
                   itemId={repair.itemId}
                   inspOpenItems={inspOpenItems}
                   inspDoneItems={inspDoneItems}
+                  inspFailedItems={inspFailedItems}
                   asmOpenItems={asmOpenItems}
                   asmDoneItems={asmDoneItems}
                   repairOpenItems={repairOpenItems}

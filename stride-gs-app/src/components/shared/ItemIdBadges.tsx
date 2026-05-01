@@ -14,6 +14,8 @@ interface Props {
   inspOpenItems?: Set<string>;
   /** INSP tasks that are completed → green I */
   inspDoneItems?: Set<string>;
+  /** INSP tasks that completed with result=Fail → red I (overrides done/open) */
+  inspFailedItems?: Set<string>;
   /** ASM tasks that are open or in progress → orange A */
   asmOpenItems?: Set<string>;
   /** ASM tasks that are completed → green A */
@@ -41,26 +43,31 @@ const OPEN_BG = '#F97316';  // bold orange
 const OPEN_FG = '#fff';
 const DONE_BG = '#16A34A';  // bold green
 const DONE_FG = '#fff';
+const FAIL_BG = '#DC2626';  // bright red — failed inspection
+const FAIL_FG = '#fff';
 
-function Badge({ label, isOpen, title }: { label: string; isOpen: boolean; title: string }) {
+type BadgeState = 'open' | 'done' | 'failed';
+
+function Badge({ label, state, title }: { label: string; state: BadgeState; title: string }) {
+  const bg = state === 'failed' ? FAIL_BG : state === 'open' ? OPEN_BG : DONE_BG;
+  const fg = state === 'failed' ? FAIL_FG : state === 'open' ? OPEN_FG : DONE_FG;
+  const fontWeight = state === 'failed' ? 900 : 700;
   return (
-    <span
-      style={{ ...badgeStyle, background: isOpen ? OPEN_BG : DONE_BG, color: isOpen ? OPEN_FG : DONE_FG }}
-      title={title}
-    >{label}</span>
+    <span style={{ ...badgeStyle, background: bg, color: fg, fontWeight }} title={title}>{label}</span>
   );
 }
 
 export function ItemIdBadges({
   itemId,
-  inspOpenItems, inspDoneItems,
+  inspOpenItems, inspDoneItems, inspFailedItems,
   asmOpenItems, asmDoneItems,
   repairOpenItems, repairDoneItems,
   wcOpenItems, wcDoneItems,
   dtOpenItems, dtDoneItems,
 }: Props) {
-  const hasIOpen = inspOpenItems?.has(itemId) ?? false;
-  const hasIDone = !hasIOpen && (inspDoneItems?.has(itemId) ?? false);
+  const hasIFailed = inspFailedItems?.has(itemId) ?? false;
+  const hasIOpen = !hasIFailed && (inspOpenItems?.has(itemId) ?? false);
+  const hasIDone = !hasIFailed && !hasIOpen && (inspDoneItems?.has(itemId) ?? false);
 
   const hasAOpen = asmOpenItems?.has(itemId) ?? false;
   const hasADone = !hasAOpen && (asmDoneItems?.has(itemId) ?? false);
@@ -74,7 +81,7 @@ export function ItemIdBadges({
   const hasDOpen = dtOpenItems?.has(itemId) ?? false;
   const hasDDone = !hasDOpen && (dtDoneItems?.has(itemId) ?? false);
 
-  const hasI = hasIOpen || hasIDone;
+  const hasI = hasIFailed || hasIOpen || hasIDone;
   const hasA = hasAOpen || hasADone;
   const hasR = hasROpen || hasRDone;
   const hasW = hasWOpen || hasWDone;
@@ -83,11 +90,17 @@ export function ItemIdBadges({
   if (!hasI && !hasA && !hasR && !hasW && !hasD) return null;
   return (
     <span style={{ display: 'inline-flex', gap: 2, marginLeft: 4, flexShrink: 0 }}>
-      {hasI && <Badge label="I" isOpen={hasIOpen} title={hasIOpen ? 'Inspection in progress' : 'Inspection completed'} />}
-      {hasA && <Badge label="A" isOpen={hasAOpen} title={hasAOpen ? 'Assembly in progress' : 'Assembly completed'} />}
-      {hasR && <Badge label="R" isOpen={hasROpen} title={hasROpen ? 'Repair in progress' : 'Repair completed'} />}
-      {hasW && <Badge label="W" isOpen={hasWOpen} title={hasWOpen ? 'Will call in progress' : 'Will call released'} />}
-      {hasD && <Badge label="D" isOpen={hasDOpen} title={hasDOpen ? 'Delivery order scheduled' : 'Delivery order completed'} />}
+      {hasI && (
+        <Badge
+          label="I"
+          state={hasIFailed ? 'failed' : hasIOpen ? 'open' : 'done'}
+          title={hasIFailed ? 'Inspection failed' : hasIOpen ? 'Inspection in progress' : 'Inspection completed'}
+        />
+      )}
+      {hasA && <Badge label="A" state={hasAOpen ? 'open' : 'done'} title={hasAOpen ? 'Assembly in progress' : 'Assembly completed'} />}
+      {hasR && <Badge label="R" state={hasROpen ? 'open' : 'done'} title={hasROpen ? 'Repair in progress' : 'Repair completed'} />}
+      {hasW && <Badge label="W" state={hasWOpen ? 'open' : 'done'} title={hasWOpen ? 'Will call in progress' : 'Will call released'} />}
+      {hasD && <Badge label="D" state={hasDOpen ? 'open' : 'done'} title={hasDOpen ? 'Delivery order scheduled' : 'Delivery order completed'} />}
     </span>
   );
 }

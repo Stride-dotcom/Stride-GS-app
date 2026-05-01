@@ -631,6 +631,10 @@ export function Inventory() {
   // v38.72.0 Phase 3 — inline cell editing is admin/staff only (client-role
   // users see their own data but shouldn't mutate it from the table).
   const canEditInventory = user?.role === 'admin' || user?.role === 'staff';
+  // Clients can inline-edit a narrow whitelist (Room + Reference) so they can
+  // tag/organize their own inventory without being able to mutate operational
+  // fields. Admin/staff retain full edit rights.
+  const canEditClientFields = canEditInventory || user?.role === 'client';
 
   // Client-role users only see their own accounts in the dropdown — admin/staff see all.
   const dropdownClientNames = useMemo(() => {
@@ -953,9 +957,10 @@ export function Inventory() {
   }, [apiConfigured, showToast, refetch, addOptimisticRepair, removeOptimisticRepair]);
 
   // Session 71+: Build item-level task/repair/WC/DT indicator sets from already-loaded data
-  const { inspOpenItems, inspDoneItems, asmOpenItems, asmDoneItems, repairOpenItems, repairDoneItems, wcOpenItems, wcDoneItems, dtOpenItems, dtDoneItems } = useMemo(() => {
+  const { inspOpenItems, inspDoneItems, inspFailedItems, asmOpenItems, asmDoneItems, repairOpenItems, repairDoneItems, wcOpenItems, wcDoneItems, dtOpenItems, dtDoneItems } = useMemo(() => {
     const inspOpen = new Set<string>();
     const inspDone = new Set<string>();
+    const inspFailed = new Set<string>();
     const asmOpen = new Set<string>();
     const asmDone = new Set<string>();
     const repOpen = new Set<string>();
@@ -965,6 +970,7 @@ export function Inventory() {
       const code = (t.svcCode || t.type || '').toUpperCase();
       const done = t.status === 'Completed';
       if (code === 'INSP') {
+        if (done && (t.result ?? '').toLowerCase() === 'fail') inspFailed.add(t.itemId);
         if (done) { if (!inspOpen.has(t.itemId)) inspDone.add(t.itemId); }
         else { inspOpen.add(t.itemId); inspDone.delete(t.itemId); }
       } else if (code === 'ASM') {
@@ -1010,7 +1016,7 @@ export function Inventory() {
       }
     }
 
-    return { inspOpenItems: inspOpen, inspDoneItems: inspDone, asmOpenItems: asmOpen, asmDoneItems: asmDone, repairOpenItems: repOpen, repairDoneItems: repDone, wcOpenItems: wcOpen, wcDoneItems: wcDone, dtOpenItems: dtOpen, dtDoneItems: dtDone };
+    return { inspOpenItems: inspOpen, inspDoneItems: inspDone, inspFailedItems: inspFailed, asmOpenItems: asmOpen, asmDoneItems: asmDone, repairOpenItems: repOpen, repairDoneItems: repDone, wcOpenItems: wcOpen, wcDoneItems: wcDone, dtOpenItems: dtOpen, dtDoneItems: dtDone };
   }, [tasks, repairs, willCalls, orders]);
 
   // Latest public entity_note per visible item, batched so the Notes
@@ -1081,7 +1087,7 @@ export function Inventory() {
               textDecorationColor: 'transparent',
               transition: 'text-decoration-color 0.1s',
             }}>{id}</span>
-            <ItemIdBadges itemId={id} inspOpenItems={inspOpenItems} inspDoneItems={inspDoneItems} asmOpenItems={asmOpenItems} asmDoneItems={asmDoneItems} repairOpenItems={repairOpenItems} repairDoneItems={repairDoneItems} wcOpenItems={wcOpenItems} wcDoneItems={wcDoneItems} dtOpenItems={dtOpenItems} dtDoneItems={dtDoneItems} />
+            <ItemIdBadges itemId={id} inspOpenItems={inspOpenItems} inspDoneItems={inspDoneItems} inspFailedItems={inspFailedItems} asmOpenItems={asmOpenItems} asmDoneItems={asmDoneItems} repairOpenItems={repairOpenItems} repairDoneItems={repairDoneItems} wcOpenItems={wcOpenItems} wcDoneItems={wcDoneItems} dtOpenItems={dtOpenItems} dtDoneItems={dtDoneItems} />
           </div>
         );
       },
@@ -1106,7 +1112,7 @@ export function Inventory() {
           variant="text"
           applyItemPatch={applyItemPatch as (id: string, patch: Record<string, unknown>) => void}
           mergeItemPatch={mergeItemPatch as (id: string, patch: Record<string, unknown>) => void}
-          disabled={!canEditInventory}
+          disabled={!canEditClientFields}
           renderValue={v => <span style={{ fontSize: theme.typography.sizes.sm, color: theme.colors.textSecondary }}>{v || '—'}</span>}
         />
       ),
@@ -1242,7 +1248,7 @@ export function Inventory() {
           variant="text"
           applyItemPatch={applyItemPatch as (id: string, patch: Record<string, unknown>) => void}
           mergeItemPatch={mergeItemPatch as (id: string, patch: Record<string, unknown>) => void}
-          disabled={!canEditInventory}
+          disabled={!canEditClientFields}
           renderValue={v => <span style={{ fontSize: theme.typography.sizes.sm }}>{v || '—'}</span>}
         />
       ),
@@ -1347,7 +1353,7 @@ export function Inventory() {
       ),
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  ], [showToast, inspOpenItems, inspDoneItems, asmOpenItems, asmDoneItems, repairOpenItems, repairDoneItems, applyItemPatch, mergeItemPatch, canEditInventory, notesByItemId]);
+  ], [showToast, inspOpenItems, inspDoneItems, inspFailedItems, asmOpenItems, asmDoneItems, repairOpenItems, repairDoneItems, applyItemPatch, mergeItemPatch, canEditInventory, notesByItemId]);
 
   // When navigating from Shipments page, filter table to that shipment
   const tableData = useMemo(() => {

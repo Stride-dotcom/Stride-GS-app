@@ -105,7 +105,7 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
   const clientSheetId: string = task.clientSheetId || task.clientId || '';
 
   // (I)(A)(R) indicator badges on the Item field below — tenant-scoped.
-  const { inspOpenItems, inspDoneItems, asmOpenItems, asmDoneItems, repairOpenItems, repairDoneItems, wcOpenItems, wcDoneItems } = useItemIndicators(clientSheetId);
+  const { inspOpenItems, inspDoneItems, inspFailedItems, asmOpenItems, asmDoneItems, repairOpenItems, repairDoneItems, wcOpenItems, wcDoneItems } = useItemIndicators(clientSheetId);
 
   // Location autocomplete
   const { locationNames } = useLocations();
@@ -651,6 +651,7 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
                   itemId={task.itemId}
                   inspOpenItems={inspOpenItems}
                   inspDoneItems={inspDoneItems}
+                  inspFailedItems={inspFailedItems}
                   asmOpenItems={asmOpenItems}
                   asmDoneItems={asmDoneItems}
                   repairOpenItems={repairOpenItems}

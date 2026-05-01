@@ -15,6 +15,8 @@ export interface ItemIndicators {
   inspOpenItems: Set<string>;
   /** INSP tasks that are completed */
   inspDoneItems: Set<string>;
+  /** INSP tasks completed with result=Fail (red I, overrides done) */
+  inspFailedItems: Set<string>;
   /** ASM tasks that are open or in progress */
   asmOpenItems: Set<string>;
   /** ASM tasks that are completed */
@@ -31,7 +33,7 @@ export interface ItemIndicators {
 }
 
 const EMPTY: ItemIndicators = {
-  inspOpenItems: new Set(), inspDoneItems: new Set(),
+  inspOpenItems: new Set(), inspDoneItems: new Set(), inspFailedItems: new Set(),
   asmOpenItems: new Set(), asmDoneItems: new Set(),
   repairOpenItems: new Set(), repairDoneItems: new Set(),
   wcOpenItems: new Set(), wcDoneItems: new Set(),
@@ -66,6 +68,7 @@ export function useItemIndicators(clientSheetIds?: string | string[]): ItemIndic
     (async () => {
       const inspOpen = new Set<string>();
       const inspDone = new Set<string>();
+      const inspFailed = new Set<string>();
       const asmOpen = new Set<string>();
       const asmDone = new Set<string>();
       const repOpen = new Set<string>();
@@ -75,7 +78,7 @@ export function useItemIndicators(clientSheetIds?: string | string[]): ItemIndic
 
       try {
         // Fetch task indicators (INSP + ASM) with status for open/done split.
-        let tq = supabase.from('tasks').select('item_id, type, status');
+        let tq = supabase.from('tasks').select('item_id, type, status, result');
         if (Array.isArray(clientSheetIds) && clientSheetIds.length > 0) {
           tq = tq.in('tenant_id', clientSheetIds);
         } else if (typeof clientSheetIds === 'string') {
@@ -83,11 +86,13 @@ export function useItemIndicators(clientSheetIds?: string | string[]): ItemIndic
         }
         const { data: tasks } = await tq.range(0, 49999);
         if (tasks && !cancelled) {
-          for (const t of tasks as { item_id: string | null; type: string | null; status: string | null }[]) {
+          for (const t of tasks as { item_id: string | null; type: string | null; status: string | null; result: string | null }[]) {
             if (!t.item_id) continue;
             const done = TASK_DONE.has(t.status ?? '');
             const code = (t.type || '').toUpperCase();
             if (code === 'INSP' || code === 'INSPECTION') {
+              const failed = done && (t.result ?? '').toLowerCase() === 'fail';
+              if (failed) { inspFailed.add(t.item_id); }
               if (done) { if (!inspOpen.has(t.item_id)) inspDone.add(t.item_id); }
               else { inspOpen.add(t.item_id); inspDone.delete(t.item_id); }
             } else if (code === 'ASM' || code === 'ASSEMBLY') {
@@ -149,7 +154,7 @@ export function useItemIndicators(clientSheetIds?: string | string[]): ItemIndic
 
       if (!cancelled) {
         setData({
-          inspOpenItems: inspOpen, inspDoneItems: inspDone,
+          inspOpenItems: inspOpen, inspDoneItems: inspDone, inspFailedItems: inspFailed,
           asmOpenItems: asmOpen, asmDoneItems: asmDone,
           repairOpenItems: repOpen, repairDoneItems: repDone,
           wcOpenItems: wcOpen, wcDoneItems: wcDone,
