@@ -913,14 +913,41 @@ export function CreateDeliveryOrderModal({
     return 0;
   }, [selectedCoverage, declaredValue]);
 
-  // Subtotal rule for ALL units is now qty × rate. Previously `flat` and
-  // `plus_base` ignored quantity entirely, so a flat $185 Disposal couldn't
-  // be charged for 40 pieces. With qty + rate both editable per-order, the
-  // simple multiplication covers every case (operator sets qty=1 for true
-  // flats, or qty=40 for the disposal example).
-  const computeSubtotal = (rate: number, quantity: number, quoteRequired: boolean) => {
-    if (quoteRequired) return 0;
-    return Math.max(0, rate) * Math.max(0, quantity);
+  // Subtotal math per service_catalog.billing_mode:
+  //   per_class — sum( classRates[item.itemClass] × item.qty ) over the
+  //               order's selected inventory items. Quantity is implicit;
+  //               the rate varies by item class. The stored `quantity` /
+  //               `rate` fields are unused for this mode (kept for the
+  //               picker UI — they re-hydrate to defaults on mode flip).
+  //   per_qty   — flat_rate × quantity. Quantity is operator-editable for
+  //               every per_qty service (defaults to itemCount on toggle
+  //               so per-item services compute correctly without extra
+  //               clicks; operator can override for hours/sqft/etc.).
+  //   per_job   — flat_rate × 1, regardless of items. Quantity field is
+  //               hidden in the UI.
+  // Quote-required forces 0 until a real rate is entered (operator types
+  // the actual amount on the order form).
+  const computeAccessorialSubtotal = (
+    acc: DeliveryAccessorial | undefined,
+    sel: { quantity: number; rate: number } | { quantity: number; rate: number } | undefined,
+    items: typeof selectedInvItems,
+  ): number => {
+    if (!acc || !sel) return 0;
+    if (acc.quoteRequired && (!Number.isFinite(sel.rate) || sel.rate <= 0)) return 0;
+    if (acc.billingMode === 'per_class') {
+      let sum = 0;
+      for (const it of items) {
+        const cls = String(it.itemClass || 'M').toUpperCase() as keyof DeliveryAccessorial['classRates'];
+        const r = acc.classRates[cls] ?? 0;
+        sum += r * (Number(it.qty) || 1);
+      }
+      return Math.max(0, sum);
+    }
+    if (acc.billingMode === 'per_job') {
+      return Math.max(0, sel.rate);
+    }
+    // per_qty
+    return Math.max(0, sel.rate) * Math.max(0, sel.quantity);
   };
 
   const toggleAccessorial = (acc: DeliveryAccessorial, quantity: number = 1, forceRemove?: boolean) => {
@@ -931,12 +958,14 @@ export function CreateDeliveryOrderModal({
         return n;
       }
       const rate = acc.rate ?? 0;
-      n.set(acc.code, {
-        code: acc.code,
-        quantity,
-        rate,
-        subtotal: computeSubtotal(rate, quantity, acc.quoteRequired),
-      });
+      // Default qty depends on mode. per_qty + per-item services are most
+      // useful with qty seeded from itemCount so the operator doesn't have
+      // to manually count pieces — they can override if needed.
+      const defaultQty = acc.billingMode === 'per_qty' && (acc.rateUnit === 'per_item' || acc.rateUnit === 'flat')
+        ? Math.max(1, itemCount || quantity)
+        : quantity;
+      const sel = { code: acc.code, quantity: defaultQty, rate };
+      n.set(acc.code, { ...sel, subtotal: computeAccessorialSubtotal(acc, sel, selectedInvItems) });
       return n;
     });
   };
@@ -946,13 +975,13 @@ export function CreateDeliveryOrderModal({
       const cur = prev.get(code);
       if (!cur) return prev;
       const acc = accessorials.find(a => a.code === code) || allAccessorials.find(a => a.code === code);
-      const quoteRequired = !!acc?.quoteRequired;
       // Floor at 1 to match the UI input's min — qty=0 silently zeroes
       // the subtotal which is confusing; if the user wants to drop the
       // add-on entirely they uncheck it.
       const q = Math.max(1, Math.floor(quantity));
+      const sel = { ...cur, quantity: q };
       const n = new Map(prev);
-      n.set(code, { ...cur, quantity: q, subtotal: computeSubtotal(cur.rate, q, quoteRequired) });
+      n.set(code, { ...sel, subtotal: computeAccessorialSubtotal(acc, sel, selectedInvItems) });
       return n;
     });
   };
@@ -962,15 +991,36 @@ export function CreateDeliveryOrderModal({
       const cur = prev.get(code);
       if (!cur) return prev;
       const acc = accessorials.find(a => a.code === code) || allAccessorials.find(a => a.code === code);
-      // Quote-required rows stay at $0 subtotal until the reviewer actually
-      // sets a rate. Once a rate is entered, treat it as a normal charge.
-      const isQuotePending = !!acc?.quoteRequired && (!Number.isFinite(rate) || rate <= 0);
       const r = Math.max(0, Number.isFinite(rate) ? rate : 0);
+      const sel = { ...cur, rate: r };
       const n = new Map(prev);
-      n.set(code, { ...cur, rate: r, subtotal: computeSubtotal(r, cur.quantity, isQuotePending) });
+      n.set(code, { ...sel, subtotal: computeAccessorialSubtotal(acc, sel, selectedInvItems) });
       return n;
     });
   };
+
+  // Recompute per_class accessorial subtotals whenever the selected items
+  // change — class rates × items can only be answered with the current
+  // item list, so the cached subtotal in selectedAccessorials goes stale
+  // when items are added/removed/swapped. Cheap enough to run on every
+  // selection change; only writes when the resulting Map differs.
+  useEffect(() => {
+    setSelectedAccessorials(prev => {
+      let changed = false;
+      const n = new Map(prev);
+      for (const [code, cur] of prev) {
+        const acc = accessorials.find(a => a.code === code) || allAccessorials.find(a => a.code === code);
+        if (!acc || acc.billingMode !== 'per_class') continue;
+        const fresh = computeAccessorialSubtotal(acc, cur, selectedInvItems);
+        if (Math.abs(fresh - (cur.subtotal ?? 0)) > 0.001) {
+          n.set(code, { ...cur, subtotal: fresh });
+          changed = true;
+        }
+      }
+      return changed ? n : prev;
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedInvItems, accessorials, allAccessorials]);
 
   const isAccessorialSelected = (code: string) => selectedAccessorials.has(code);
 
@@ -3392,6 +3442,10 @@ export function CreateDeliveryOrderModal({
                               <span style={{ color: '#B45309', fontWeight: 600, fontStyle: 'italic', marginLeft: 'auto', fontSize: 12 }}>
                                 Quote Required
                               </span>
+                            ) : acc.billingMode === 'per_class' ? (
+                              <span style={{ color: theme.colors.textMuted, fontWeight: 400, marginLeft: 'auto', fontSize: 12 }}>
+                                Per class rate
+                              </span>
                             ) : acc.rate != null ? (
                               <span style={{ color: theme.colors.textMuted, fontWeight: 400, marginLeft: 'auto' }}>
                                 ${acc.rate.toFixed(2)}{unitSuffix}
@@ -3408,15 +3462,29 @@ export function CreateDeliveryOrderModal({
                           style={{ display: 'flex', alignItems: 'flex-end', gap: 10, marginTop: 10, paddingTop: 10, borderTop: `1px dashed ${theme.colors.border}` }}
                           onClick={e => e.stopPropagation()}
                         >
-                          <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                            <span style={{ fontSize: 10, fontWeight: 700, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Qty</span>
-                            <input
-                              type="number" min={1} step={1}
-                              value={current?.quantity ?? 1}
-                              onChange={e => updateAccessorialQty(acc.code, Math.max(1, parseInt(e.target.value, 10) || 1))}
-                              style={{ ...input, width: 80, padding: '4px 8px' }}
-                            />
-                          </div>
+                          {/* Qty input: only meaningful for per_qty services.
+                              per_class derives qty implicitly from selected
+                              items × class; per_job is always 1 (single fee).
+                              Show a small inline note instead so the operator
+                              knows why there's no input. */}
+                          {acc.billingMode === 'per_qty' ? (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                              <span style={{ fontSize: 10, fontWeight: 700, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Qty</span>
+                              <input
+                                type="number" min={1} step={1}
+                                value={current?.quantity ?? 1}
+                                onChange={e => updateAccessorialQty(acc.code, Math.max(1, parseInt(e.target.value, 10) || 1))}
+                                style={{ ...input, width: 80, padding: '4px 8px' }}
+                              />
+                            </div>
+                          ) : (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 80 }}>
+                              <span style={{ fontSize: 10, fontWeight: 700, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Qty</span>
+                              <span style={{ fontSize: 11, color: theme.colors.textMuted, fontStyle: 'italic', padding: '4px 0' }}>
+                                {acc.billingMode === 'per_class' ? 'per item × class' : 'per job'}
+                              </span>
+                            </div>
+                          )}
                           <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
                             <span style={{ fontSize: 10, fontWeight: 700, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
                               Rate{unitSuffix && <span style={{ fontWeight: 400, textTransform: 'none', letterSpacing: 0 }}>{unitSuffix}</span>}
@@ -3425,13 +3493,17 @@ export function CreateDeliveryOrderModal({
                               type="number" min={0} step="0.01"
                               value={Number.isFinite(currentRate) ? currentRate : 0}
                               onChange={e => updateAccessorialRate(acc.code, parseFloat(e.target.value) || 0)}
-                              disabled={!canEditRate}
-                              title={canEditRate ? '' : 'Rate is locked to the catalog price for client-submitted orders.'}
+                              disabled={!canEditRate || acc.billingMode === 'per_class'}
+                              title={
+                                acc.billingMode === 'per_class'
+                                  ? 'Rate is per-item-class — edit on the Price List page.'
+                                  : canEditRate ? '' : 'Rate is locked to the catalog price for client-submitted orders.'
+                              }
                               style={{
                                 ...input, width: 100, padding: '4px 8px',
-                                background: canEditRate ? '#fff' : '#F3F4F6',
-                                color: canEditRate ? theme.colors.text : theme.colors.textMuted,
-                                cursor: canEditRate ? 'text' : 'not-allowed',
+                                background: (canEditRate && acc.billingMode !== 'per_class') ? '#fff' : '#F3F4F6',
+                                color: (canEditRate && acc.billingMode !== 'per_class') ? theme.colors.text : theme.colors.textMuted,
+                                cursor: (canEditRate && acc.billingMode !== 'per_class') ? 'text' : 'not-allowed',
                               }}
                             />
                           </div>
