@@ -1,7 +1,6 @@
 import React, { useState, useCallback, useMemo, useEffect } from 'react';
-import { X, Package, MapPin, CheckCircle2, XCircle, AlertTriangle, FolderOpen, Loader2, Play, ExternalLink, Truck, Wrench, Save, DollarSign, Pencil, FileText, MoreHorizontal } from 'lucide-react';
+import { X, Package, MapPin, CheckCircle2, XCircle, AlertTriangle, FolderOpen, Loader2, Play, ExternalLink, Wrench, Save, DollarSign, Pencil, FileText, MoreHorizontal, RotateCcw } from 'lucide-react';
 import { BtnSpinner } from '../ui/BtnSpinner';
-import { FolderButton } from './FolderButton';
 import { DeepLink } from './DeepLink';
 import { TabbedDetailPanel, type TabbedDetailPanelTab } from './TabbedDetailPanel';
 import { EntityPage } from './EntityPage';
@@ -17,7 +16,8 @@ import { buildDeepLink } from '../../lib/deepLinks';
 import { theme } from '../../styles/theme';
 import { fmtDate, fmtDateTime } from '../../lib/constants';
 import { WriteButton } from './WriteButton';
-import { postCompleteTask, postStartTask, postUpdateTaskNotes, postUpdateTaskCustomPrice, postRequestRepairQuote, postCancelTask, postCorrectTaskResult, postReopenTask, postGenerateTaskWorkOrder, postUpdateInventoryItem, postUpdateTaskPriority, postUpdateTaskDueDate, isApiConfigured } from '../../lib/api';
+import { postCompleteTask, postStartTask, postUpdateTaskNotes, postUpdateTaskCustomPrice, postRequestRepairQuote, postCancelTask, postCorrectTaskResult, postReopenTask, postUpdateInventoryItem, postUpdateTaskPriority, postUpdateTaskDueDate, isApiConfigured } from '../../lib/api';
+import { generateTaskWorkOrderPdf } from '../../lib/workOrderPdf';
 import { writeSyncFailed } from '../../lib/syncEvents';
 import { entityEvents } from '../../lib/entityEvents';
 import { useLocations } from '../../hooks/useLocations';
@@ -560,25 +560,48 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
     setSubmitting(false);
   }, [apiConfigured, clientSheetId, task, applyTaskPatch, clearTaskPatch, onTaskUpdated, user]);
 
-  // ─── Stage B: Reopen link — admin/staff, Completed OR In Progress ───────────
-  const renderReopenLink = () => {
+  // ─── Reopen — admin/staff only; renders as a proper outlined action button.
+  // Earlier this was a plain underlined link, which read more like a footnote
+  // than an action. The button styling matches the secondary buttons used
+  // elsewhere in the panel (subdued slate border, danger-red text on hover)
+  // so it's discoverable without overpowering the main Pass/Fail or Close
+  // buttons. Mobile renders the same component; on the In-Progress mobile
+  // footer the action also surfaces in the ⋯ overflow menu (see mobileFooter
+  // below) so the bottom strip stays uncluttered.
+  const renderReopenButton = () => {
     if (!canReopen) return null;
     if (task.status !== 'Completed' && task.status !== 'In Progress') return null;
+    const label = task.status === 'Completed' ? 'Reopen task (undo Complete)' : 'Reopen task (undo Start)';
     return (
-      <div style={{ marginTop: 6, textAlign: 'center' }}>
+      <div style={{ marginTop: 8 }}>
         {reopenError && (
           <div style={{ fontSize: 11, color: '#DC2626', marginBottom: 6, padding: '4px 8px', background: '#FEF2F2', borderRadius: 6 }}>{reopenError}</div>
         )}
         <button
           onClick={handleReopen}
           disabled={reopenLoading}
-          style={{ fontSize: 11, color: '#DC2626', background: 'none', border: 'none', cursor: reopenLoading ? 'wait' : 'pointer', textDecoration: 'underline', padding: '2px 0', fontFamily: 'inherit' }}
+          style={{
+            display: 'inline-flex', alignItems: 'center', gap: 6,
+            padding: '8px 14px', fontSize: 12, fontWeight: 600,
+            border: `1px solid ${theme.colors.border}`,
+            borderRadius: 8,
+            background: '#fff',
+            color: '#DC2626',
+            cursor: reopenLoading ? 'wait' : 'pointer',
+            fontFamily: 'inherit',
+            opacity: reopenLoading ? 0.65 : 1,
+          }}
+          onMouseEnter={e => { if (!reopenLoading) e.currentTarget.style.borderColor = '#DC2626'; }}
+          onMouseLeave={e => { if (!reopenLoading) e.currentTarget.style.borderColor = theme.colors.border; }}
         >
-          {reopenLoading ? 'Reopening…' : (task.status === 'Completed' ? 'Reopen task (undo Complete)...' : 'Reopen task (undo Start)...')}
+          {reopenLoading ? <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} /> : <RotateCcw size={13} />}
+          {reopenLoading ? 'Reopening…' : label}
         </button>
       </div>
     );
   };
+  // Back-compat alias — older call sites referenced `renderReopenLink`.
+  const renderReopenLink = renderReopenButton;
 
   // ─── Correct-result widget (Fix 2) — admin/staff only, completed tasks ──────
   const currentResultForWidget = correctedResult || submitResult?.result || task.result;
@@ -671,14 +694,13 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
                 {task.sidemark && <span><strong style={{ color: theme.colors.text, fontWeight: 600 }}>Sidemark:</strong> {task.sidemark}</span>}
                 {task.reference && <span><strong style={{ color: theme.colors.text, fontWeight: 600 }}>Reference:</strong> {task.reference}</span>}
               </div>
-              {/* Drive Folder Buttons — only render when the URL exists. */}
+              {/* Action row — Work Order print + Cancelled pill.
+                  Drive folder buttons (Task Folder / Shipment Folder) live in the
+                  Photos/Docs tab under "Legacy Folders" — duplicating them here
+                  was noise. Started/Completed timestamps live in the Activity
+                  tab; the badge row at the top of the panel already shows the
+                  current status. */}
               <div style={{ display: 'flex', gap: 6, marginTop: 10, flexWrap: 'wrap', alignItems: 'center' }}>
-                {activeFolderUrl && (
-                  <FolderButton label="Task Folder" url={activeFolderUrl} icon={Wrench} />
-                )}
-                {activeShipmentFolderUrl && (
-                  <FolderButton label="Shipment Folder" url={activeShipmentFolderUrl} icon={Truck} />
-                )}
                 {isAlreadyStarted && canSeeCustomPrice && (
                   <WriteButton
                     label="Work Order"
@@ -686,21 +708,13 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
                     size="sm"
                     icon={<FileText size={13} />}
                     onClick={async () => {
-                      if (!apiConfigured || !clientSheetId) throw new Error('API not configured');
-                      const resp = await postGenerateTaskWorkOrder({ taskId: task.taskId }, clientSheetId);
-                      if (!resp.ok || !resp.data?.success) throw new Error(resp.error || resp.data?.error || 'PDF generation failed');
+                      // Client-side template render → print preview. The
+                      // template body (HTML + tokens) lives in
+                      // public.email_templates under DOC_TASK_WORK_ORDER;
+                      // see lib/workOrderPdf.ts for token mapping.
+                      await generateTaskWorkOrderPdf(task);
                     }}
                   />
-                )}
-                {isAlreadyStarted && (
-                  <span style={{ fontSize: 10, padding: '2px 8px', borderRadius: 8, background: '#F0FDF4', color: '#15803D', fontWeight: 600 }}>
-                    ✓ Started {fmtDateTime(task.startedAt || startTaskResult?.startedAt)}
-                  </span>
-                )}
-                {task.completedAt && (
-                  <span style={{ fontSize: 10, padding: '2px 8px', borderRadius: 8, background: '#EFF6FF', color: '#1D4ED8', fontWeight: 600 }}>
-                    ✓ Completed {fmtDateTime(task.completedAt)}
-                  </span>
                 )}
                 {task.cancelledAt && (
                   <span style={{ fontSize: 10, padding: '2px 8px', borderRadius: 8, background: '#F3F4F6', color: '#6B7280', fontWeight: 600 }}>
@@ -708,8 +722,6 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
                   </span>
                 )}
               </div>
-              {/* Stage B — Reopen link (admin/staff only, visible on In Progress + Completed) */}
-              {renderReopenLink()}
             </div>
           )}
 
@@ -971,9 +983,22 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
           border: `1px solid ${theme.colors.border}`,
           borderRadius: 12,
           boxShadow: '0 4px 20px rgba(0,0,0,0.18)',
-          minWidth: 160,
+          minWidth: 180,
           overflow: 'hidden',
         }}>
+          {/* Reopen — admin/staff only, applies to In Progress + Completed.
+              On the In-Progress footer this is the only place the action
+              shows on mobile (the strip is reserved for Pass/Fail). */}
+          {canReopen && (task.status === 'In Progress' || task.status === 'Completed') && (
+            <button
+              onClick={() => { setOverflowOpen(false); handleReopen(); }}
+              disabled={reopenLoading}
+              style={{ width: '100%', padding: '13px 16px', textAlign: 'left', background: 'none', border: 'none', borderBottom: `1px solid ${theme.colors.border}`, cursor: reopenLoading ? 'wait' : 'pointer', fontSize: 14, color: '#DC2626', fontFamily: 'inherit', display: 'flex', alignItems: 'center', gap: 8, opacity: reopenLoading ? 0.65 : 1 }}
+            >
+              {reopenLoading ? <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} /> : <RotateCcw size={14} />}
+              {reopenLoading ? 'Reopening…' : (task.status === 'Completed' ? 'Reopen Task (undo Complete)' : 'Reopen Task (undo Start)')}
+            </button>
+          )}
           <button
             onClick={handleCancelTask}
             style={{ width: '100%', padding: '13px 16px', textAlign: 'left', background: 'none', border: 'none', cursor: 'pointer', fontSize: 14, color: '#DC2626', fontFamily: 'inherit', display: 'flex', alignItems: 'center', gap: 8 }}

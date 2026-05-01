@@ -8,7 +8,6 @@ import { ItemIdBadges } from './ItemIdBadges';
 import { useItemIndicators } from '../../hooks/useItemIndicators';
 import { TabbedDetailPanel, type TabbedDetailPanelTab } from './TabbedDetailPanel';
 import { EntityPage } from './EntityPage';
-import { FolderButton } from './FolderButton';
 import { CreateTaskModal } from './CreateTaskModal';
 import { CreateWillCallModal } from './CreateWillCallModal';
 import { TransferItemsModal } from './TransferItemsModal';
@@ -202,7 +201,8 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
           to the sticky footer (Receiving Document, Resend Email, View in Inventory). */}
       {!renderAsPage && (
         <div style={{ display: 'flex', gap: 6, marginBottom: 16, flexWrap: 'wrap', alignItems: 'center' }}>
-          {shipment.folderUrl && <FolderButton label="Shipment Folder" url={shipment.folderUrl} icon={Truck} />}
+          {/* Shipment Folder button removed from the Details body — it's
+              still reachable from Photos/Docs → Legacy Folders. */}
           <button
             onClick={() => { onClose(); navigate('/inventory', { state: { shipmentFilter: shipment.shipmentNo } }); }}
             style={{ padding: '6px 12px', fontSize: 11, fontWeight: 500, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', fontFamily: 'inherit', color: theme.colors.textSecondary, display: 'flex', alignItems: 'center', gap: 4 }}
