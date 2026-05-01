@@ -967,7 +967,7 @@ function InsuranceBlock({ tenantId, clientName }: { tenantId: string; clientName
     if (row) setDraftDeclared(String(row.declaredValue));
   }, [row]);
 
-  const monthly = row ? Math.max(300, Math.round((row.declaredValue / 100000) * row.monthlyRatePer100k * 100) / 100) : 0;
+  const monthly = row ? Math.max(30, Math.round((row.declaredValue / 10000) * row.monthlyRatePer10k * 100) / 100) : 0;
 
   const handleSaveDeclared = async () => {
     const n = Number(draftDeclared);
@@ -1090,13 +1090,23 @@ function InsuranceBlock({ tenantId, clientName }: { tenantId: string; clientName
             ${monthly.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
           </div>
           <div style={{ fontSize: 10, color: theme.colors.textMuted, marginTop: 2 }}>
-            $300 min · ${row.monthlyRatePer100k}/$100K frozen rate
+            $30 min · ${row.monthlyRatePer10k}/$10K frozen rate
           </div>
         </div>
         <div>
           <div style={lbl}>Inception</div>
           <div style={{ fontSize: 14 }}>{row.inceptionDate}</div>
         </div>
+      </div>
+
+      {/* Billing-cycle disclaimer — clarifies the no-proration rule so
+          staff know what to tell the client. */}
+      <div style={{
+        marginBottom: 10, padding: '8px 10px',
+        background: '#FFFBEB', border: '1px solid #FDE68A', borderRadius: 8,
+        fontSize: 11, color: '#92400E', lineHeight: 1.4,
+      }}>
+        <strong>Heads up:</strong> Changes to declared value take effect on the next 30-day billing anniversary, not immediately. Mid-cycle edits are not prorated — the new rate first applies on <strong>{row.nextBillingDate}</strong>.
       </div>
 
       {/* Action row */}
@@ -1301,15 +1311,28 @@ function TaxExemptBlock({ spreadsheetId }: { spreadsheetId: string }) {
   }, [spreadsheetId]);
 
   // Generic field-save helper. Optimistic + error rollback handled by caller.
+  // Uses .select() so the response carries the row count — surfaces silent
+  // RLS no-ops as errors instead of letting them show as success. The
+  // clients table didn't have an authenticated UPDATE policy until the
+  // clients_authenticated_update_insert_delete_policies migration, so
+  // every "saved" tax/cert change historically wrote nothing — and the
+  // form looked successful while the value reverted on next open. With
+  // the policy in place AND this row-count check, a future RLS regression
+  // surfaces immediately as a visible error.
   const saveField = async (fieldKey: string, payload: Record<string, unknown>) => {
     setSaving(fieldKey); setError(null);
-    const { error: err } = await supabase
+    const { data, error: err } = await supabase
       .from('clients')
       .update(payload)
-      .eq('spreadsheet_id', spreadsheetId);
+      .eq('spreadsheet_id', spreadsheetId)
+      .select('spreadsheet_id');
     setSaving(null);
     if (err) {
       setError(err.message);
+      return false;
+    }
+    if (!data || data.length === 0) {
+      setError('Save did not affect any row — the database may have rejected the update. Please refresh and retry; if it persists, contact support.');
       return false;
     }
     setSavedFlash(fieldKey);
@@ -1356,14 +1379,22 @@ function TaxExemptBlock({ spreadsheetId }: { spreadsheetId: string }) {
       const url = signed?.signedUrl || '';
       const nowIso = new Date().toISOString();
 
-      const { error: updErr } = await supabase
+      const { data: updRows, error: updErr } = await supabase
         .from('clients')
         .update({
           resale_cert_url: url,
           resale_cert_uploaded_at: nowIso,
         })
-        .eq('spreadsheet_id', spreadsheetId);
+        .eq('spreadsheet_id', spreadsheetId)
+        .select('spreadsheet_id');
       if (updErr) throw updErr;
+      // Row-count check — same RLS-no-op guard as saveField above. A
+      // 0-row response means the storage upload landed but the URL
+      // never linked to the client; we surface that loudly instead
+      // of celebrating a partial success.
+      if (!updRows || updRows.length === 0) {
+        throw new Error('Cert uploaded to storage but the client row was not updated — likely an RLS issue. Refresh and retry.');
+      }
 
       setCertUrl(url);
       setCertUploadedAt(nowIso);

@@ -54,6 +54,20 @@ export type ServiceCategory =
   | 'Fabric Protection';
 export type ServiceBilling = 'class_based' | 'flat';
 export type ServiceUnit    = 'per_item' | 'per_day' | 'per_task' | 'per_hour';
+/**
+ * Billing math mode added in migration `service_catalog_billing_mode`.
+ * Drives the actual subtotal calc — replaces the cosmetic `unit` field
+ * for everything except display-suffix labels.
+ *
+ *   per_class — sum( rates[itemClass] × itemQty ) over the parent's items.
+ *   per_qty   — flat_rate × quantity (item count default; operator-editable).
+ *   per_job   — flat_rate × 1 regardless of items.
+ *
+ * The `billing` column is kept aligned automatically (per_class →
+ * class_based, per_qty/per_job → flat) by serviceToRow so legacy GAS
+ * billing paths that read `billing` continue to work unchanged.
+ */
+export type BillingMode = 'per_class' | 'per_qty' | 'per_job';
 export type AutoApplyRule  = 'overweight' | 'no_id' | 'fragile' | 'oversized';
 export type ServicePriority = 'Normal' | 'High';
 /**
@@ -80,7 +94,15 @@ export interface CatalogService {
   code: string;
   name: string;
   category: ServiceCategory;
+  /**
+   * Legacy enum (`class_based` | `flat`) read by GAS api_lookupRate_ and
+   * the existing React calcQuote. Source of truth for mode is now
+   * `billingMode` below; `billing` is derived from it on save and kept
+   * aligned so neither path breaks.
+   */
   billing: ServiceBilling;
+  /** New explicit mode — see BillingMode above. Source of truth on save. */
+  billingMode: BillingMode;
   rates: ClassRates;
   xxlRate: number;              // mirrored into rates.XXL; kept for DB parity
   flatRate: number;
@@ -136,6 +158,7 @@ interface CatalogRow {
   name: string;
   category: string;
   billing: string;
+  billing_mode: string | null;
   rates: Record<string, number> | null;
   flat_rate: number | string | null;
   unit: string;
@@ -187,12 +210,21 @@ function rowToService(row: CatalogRow): CatalogService {
     XL:  rawRates.XL  ?? 0,
     XXL: (rawRates.XXL ?? xxlRate) || 0,
   };
+  // Resolve billingMode from the new column; if absent (extremely old
+  // rows that pre-date the migration) infer from legacy `billing`. New
+  // saves always write both, so this fallback is for read-only safety.
+  const rawMode = (row.billing_mode ?? '').toLowerCase();
+  const billingMode: BillingMode =
+    rawMode === 'per_class' || rawMode === 'per_qty' || rawMode === 'per_job'
+      ? (rawMode as BillingMode)
+      : (row.billing === 'class_based' ? 'per_class' : 'per_job');
   return {
     id: row.id,
     code: row.code,
     name: row.name,
     category: row.category as ServiceCategory,
     billing: row.billing as ServiceBilling,
+    billingMode,
     rates: mergedRates,
     xxlRate,
     flatRate: Number(row.flat_rate ?? 0),
@@ -235,7 +267,19 @@ function serviceToRow(input: UpdateServiceInput): Record<string, unknown> {
   if (input.code !== undefined)                  row.code = input.code;
   if (input.name !== undefined)                  row.name = input.name;
   if (input.category !== undefined)              row.category = input.category;
-  if (input.billing !== undefined)               row.billing = input.billing;
+  // billing + billing_mode are kept aligned automatically. If the form
+  // sends billingMode, derive the legacy `billing` from it so GAS
+  // api_lookupRate_ (which still reads `billing`) gets the right
+  // class_based vs flat branch. If the form sends `billing` directly
+  // (legacy callers / tests), respect that and let the corresponding
+  // billing_mode default on the next read. New paths should send
+  // billingMode only.
+  if (input.billingMode !== undefined) {
+    row.billing_mode = input.billingMode;
+    row.billing = input.billingMode === 'per_class' ? 'class_based' : 'flat';
+  } else if (input.billing !== undefined) {
+    row.billing = input.billing;
+  }
   if (input.rates !== undefined)                 row.rates = input.rates;
   if (input.xxlRate !== undefined)               row.xxl_rate = input.xxlRate;
   if (input.flatRate !== undefined)              row.flat_rate = input.flatRate;
@@ -271,7 +315,8 @@ function serviceToRow(input: UpdateServiceInput): Record<string, unknown> {
 
 // Fields tracked by audit (rates + times are diffed specially below).
 const AUDITABLE_SIMPLE_FIELDS: readonly (keyof CatalogService)[] = [
-  'code', 'name', 'category', 'billing', 'flatRate', 'xxlRate', 'unit',
+  'code', 'name', 'category', 'billing', 'billingMode',
+  'flatRate', 'xxlRate', 'unit',
   'taxable', 'active', 'showInMatrix', 'showAsTask',
   'showAsDeliveryService', 'showAsReceivingAddon',
   'autoApplyRule', 'defaultSlaHours', 'defaultPriority',

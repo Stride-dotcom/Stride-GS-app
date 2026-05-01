@@ -15,7 +15,9 @@ import type { CatalogService } from '../hooks/useServiceCatalog';
 
 interface ServiceRow {
   id: string; code: string; name: string; category: string;
-  billing: string; rates: Record<string, number> | null;
+  billing: string;
+  billing_mode: string | null;
+  rates: Record<string, number> | null;
   flat_rate: number | null; xxl_rate: number | null;
   unit: string; taxable: boolean; active: boolean; display_order: number;
 }
@@ -120,10 +122,16 @@ function formatPublicCoverageRate(c: PublicCoverage): string {
 function rowToService(row: ServiceRow): CatalogService {
   const xxlRate = Number(row.xxl_rate ?? 0);
   const rawRates = (row.rates ?? {}) as Record<string, number>;
+  const rawMode = (row.billing_mode ?? '').toLowerCase();
+  const billingMode: CatalogService['billingMode'] =
+    rawMode === 'per_class' || rawMode === 'per_qty' || rawMode === 'per_job'
+      ? (rawMode as CatalogService['billingMode'])
+      : (row.billing === 'class_based' ? 'per_class' : 'per_job');
   return {
     id: row.id, code: row.code, name: row.name,
     category: row.category as CatalogService['category'],
     billing: row.billing as CatalogService['billing'],
+    billingMode,
     rates: {
       XS: rawRates.XS ?? 0, S: rawRates.S ?? 0, M: rawRates.M ?? 0,
       L: rawRates.L ?? 0, XL: rawRates.XL ?? 0,
@@ -432,7 +440,7 @@ export function PublicRates({ shareId }: Props) {
         serviceCategories.length > 0
           ? (supabase
               .from('service_catalog')
-              .select('id,code,name,category,billing,rates,flat_rate,xxl_rate,unit,taxable,active,display_order')
+              .select('id,code,name,category,billing,billing_mode,rates,flat_rate,xxl_rate,unit,taxable,active,display_order')
               .in('category', serviceCategories)
               .eq('active', true)
               .order('display_order', { ascending: true }) as unknown as Promise<{ data: ServiceRow[] | null; error: unknown }>)

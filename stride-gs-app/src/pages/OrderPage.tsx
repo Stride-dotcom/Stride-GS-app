@@ -11,7 +11,7 @@ import {
   AlertCircle, Loader2, SearchX, Pencil, X,
   CheckCircle2, Clock3, DollarSign, MapPin, Phone,
   Mail, Calendar, Clock, Package, FileText, Truck,
-  User, PenLine, MessageSquare, Activity,
+  User, PenLine, MessageSquare,
 } from 'lucide-react';
 import { theme } from '../styles/theme';
 import { BtnSpinner } from '../components/ui/BtnSpinner';
@@ -38,6 +38,7 @@ import { supabase } from '../lib/supabase';
 import { CreateDeliveryOrderModal } from '../components/shared/CreateDeliveryOrderModal';
 import { ReleaseItemsModal } from '../components/shared/ReleaseItemsModal';
 import { generateOrderPdf } from '../lib/orderPdf';
+import { logDtOrderAudit } from '../lib/dtOrderAudit';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -360,6 +361,9 @@ function DetailsTab({
               {order.pricingNotes && (
                 <div style={{ fontSize: 11, color: EP.textMuted, marginTop: 8, fontStyle: 'italic' }}>{order.pricingNotes}</div>
               )}
+              <div style={{ fontSize: 11, color: EP.textMuted, marginTop: 10, fontStyle: 'italic', lineHeight: 1.45 }}>
+                Pricing is estimated based on the information provided. If additional assembly, labor, or special handling services are required at the time of delivery, rates may be adjusted accordingly.
+              </div>
             </>
           )}
         </EPCard>
@@ -669,43 +673,12 @@ function CompletionTab({
         </EPCard>
       )}
 
-      {/* DT history timeline */}
-      {history.length > 0 && (
-        <EPCard>
-          <SectionTitle>
-            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-              <Activity size={11} /> Driver Activity ({history.length})
-            </span>
-          </SectionTitle>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-            {history.map((h) => (
-              <div key={h.id} style={{ display: 'flex', gap: 10, padding: '6px 0', borderBottom: `1px solid ${theme.colors.border}` }}>
-                <div style={{ fontSize: 11, color: EP.textMuted, flexShrink: 0, width: 100 }}>
-                  {fmtDateTime(h.happenedAt)}
-                </div>
-                <div style={{ fontSize: 12, color: EP.textPrimary, flex: 1 }}>
-                  {h.description || (h.code != null ? `Event ${h.code}` : 'Event')}
-                  {h.ownerName && (
-                    <span style={{ color: EP.textMuted, marginLeft: 6, fontSize: 11 }}>
-                      · {h.ownerName}
-                    </span>
-                  )}
-                  {(h.lat != null && h.lng != null) && (
-                    <a
-                      href={`https://www.google.com/maps?q=${h.lat},${h.lng}`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      style={{ marginLeft: 6, fontSize: 11, color: EP.accent, textDecoration: 'none' }}
-                    >
-                      <MapPin size={10} style={{ verticalAlign: 'middle' }} /> map
-                    </a>
-                  )}
-                </div>
-              </div>
-            ))}
-          </div>
-        </EPCard>
-      )}
+      {/* Driver Activity moved into the Activity tab. EntityHistory now
+          merges entity_audit_log (app actions) and dt_order_history
+          (DT-side driver events) into one chronological timeline with
+          App / Driver origin tags. The standalone Details-tab block
+          rendered the same dt_order_history rows here, so removing it
+          eliminates the duplicate timeline. */}
     </div>
   );
 }
@@ -800,6 +773,19 @@ export function OrderPage() {
         .eq('id', order.id);
       if (updErr) throw updErr;
 
+      // Audit: reviewer rejected or requested-revision. Best-effort.
+      void logDtOrderAudit({
+        orderId: order.id,
+        tenantId: order.tenantId,
+        action: action === 'rejected' ? 'reject' : 'revision_requested',
+        changes: {
+          reviewStatus: { old: order.reviewStatus, new: action },
+          reviewerName,
+          reviewNotes: notes.trim() || null,
+        },
+        performedBy: user?.email ?? null,
+      });
+
       // Best-effort email — don't unwind the status change on send fail.
       try {
         const { data, error: invokeErr } = await supabase.functions.invoke('notify-order-revision', {
@@ -826,7 +812,7 @@ export function OrderPage() {
     } finally {
       setSaving(false);
     }
-  }, [order, refetch]);
+  }, [order, refetch, user?.email]);
 
   // Phase A — Edit Full Order: opens the same form the create flow uses
   // (CreateDeliveryOrderModal in editOrderId mode). The detail page's
@@ -901,6 +887,44 @@ export function OrderPage() {
       const { error: err } = await supabase.from('dt_orders').update(patch).eq('id', order.id);
       if (err) throw err;
 
+      // Audit: inline edit save. Best-effort. Diff is coarse (which
+      // top-level fields changed); the patch object is the canonical
+      // record of what got written.
+      const changedFields: string[] = [];
+      if (edit.contactName     !== (order.contactName     ?? '')) changedFields.push('contactName');
+      if (edit.contactAddress  !== (order.contactAddress  ?? '')) changedFields.push('contactAddress');
+      if (edit.contactCity     !== (order.contactCity     ?? '')) changedFields.push('contactCity');
+      if (edit.contactState    !== (order.contactState    ?? '')) changedFields.push('contactState');
+      if (edit.contactZip      !== (order.contactZip      ?? '')) changedFields.push('contactZip');
+      if (edit.contactPhone    !== (order.contactPhone    ?? '')) changedFields.push('contactPhone');
+      if (edit.contactEmail    !== (order.contactEmail    ?? '')) changedFields.push('contactEmail');
+      if (edit.localServiceDate !== (order.localServiceDate ?? '')) changedFields.push('localServiceDate');
+      if (edit.windowStartLocal !== ((order.windowStartLocal ?? '').slice(0, 5))) changedFields.push('windowStartLocal');
+      if (edit.windowEndLocal   !== ((order.windowEndLocal   ?? '').slice(0, 5))) changedFields.push('windowEndLocal');
+      if (edit.poNumber        !== (order.poNumber        ?? '')) changedFields.push('poNumber');
+      if (edit.sidemark        !== (order.sidemark        ?? '')) changedFields.push('sidemark');
+      if (edit.clientReference !== (order.clientReference ?? '')) changedFields.push('clientReference');
+      if (edit.details         !== (order.details         ?? '')) changedFields.push('details');
+      if (edit.reviewStatus    !== order.reviewStatus)             changedFields.push('reviewStatus');
+      if (edit.reviewNotes     !== (order.reviewNotes     ?? '')) changedFields.push('reviewNotes');
+      if (pricingChanged)                                          changedFields.push('pricing');
+      void logDtOrderAudit({
+        orderId: order.id,
+        tenantId: order.tenantId,
+        action: 'update',
+        changes: {
+          fieldsChanged: changedFields,
+          ...(edit.reviewStatus !== order.reviewStatus
+            ? { reviewStatus: { old: order.reviewStatus, new: edit.reviewStatus } }
+            : {}),
+          ...(pricingChanged
+            ? { orderTotal: { old: order.orderTotal, new: newTotal },
+                baseDeliveryFee: { old: order.baseDeliveryFee, new: newBaseFee } }
+            : {}),
+        },
+        performedBy: user?.email ?? null,
+      });
+
       // If the inline edit flipped review_status into a state that
       // emails the submitter (revision_requested / rejected), fire the
       // notify-order-revision Edge Function. The footer Reject /
@@ -949,7 +973,7 @@ export function OrderPage() {
     } finally {
       setSaving(false);
     }
-  }, [order, edit, refetch]);
+  }, [order, edit, refetch, user?.email]);
 
   // ── Loading / error states ─────────────────────────────────────────────────
 
@@ -1060,11 +1084,21 @@ export function OrderPage() {
   // unique inventory_ids, and you can only release a physical item
   // once anyway.
   const releasableItems = (() => {
+    // Existing dt_order_items rows have dt_item_code populated
+    // (human-readable Item ID) but inventory_id (UUID FK) is null on
+    // any order created before that column was added. Fall back to
+    // dt_item_code so the Release Items button still appears for those
+    // orders, and so the GAS releaseItems endpoint — which matches by
+    // human-readable Item ID against the Inventory sheet — gets the
+    // identifier it can actually look up. The UUID inventory_id alone
+    // wouldn't match anything sheet-side anyway, so dt_item_code is
+    // the practical linkage key here.
     const seen = new Set<string>();
     const out: typeof order.items = [];
     for (const it of order.items ?? []) {
-      if (!it.inventoryId || seen.has(it.inventoryId)) continue;
-      seen.add(it.inventoryId);
+      const linkId = it.inventoryId || it.dtItemCode;
+      if (!linkId || seen.has(linkId)) continue;
+      seen.add(linkId);
       out.push(it);
     }
     return out;
@@ -1113,6 +1147,14 @@ export function OrderPage() {
             variant="primary"
             onClick={async () => {
               await supabase.from('dt_orders').update({ review_status: 'approved', reviewed_at: new Date().toISOString() }).eq('id', order.id);
+              // Audit: approve. Best-effort.
+              void logDtOrderAudit({
+                orderId: order.id,
+                tenantId: order.tenantId,
+                action: 'approve',
+                changes: { reviewStatus: { old: order.reviewStatus, new: 'approved' } },
+                performedBy: user?.email ?? null,
+              });
               const fresh = await fetchDtOrderByIdFromSupabase(order.id);
               if (fresh) setLocalOrder(fresh);
               refetch();
@@ -1166,8 +1208,39 @@ export function OrderPage() {
                 } catch (_) { /* fall back to invokeErr.message */ }
                 throw new Error(detailed);
               }
-              const res = data as { ok?: boolean; error?: string } | null;
+              const res = data as { ok?: boolean; error?: string; dt_identifier?: string; linked_identifier?: string } | null;
               if (!res?.ok) throw new Error(res?.error || 'DT push failed');
+              // Audit: push_to_dt. Best-effort. Done client-side so the
+              // row is attributed to the authenticated user (the edge
+              // function runs under service role and doesn't see the
+              // caller's email). For P+D orders the edge function pushes
+              // both legs; we stamp an audit row on the linked pickup's
+              // dt_order_id too so its own Activity tab reflects the push.
+              void logDtOrderAudit({
+                orderId: order.id,
+                tenantId: order.tenantId,
+                action: 'push_to_dt',
+                changes: {
+                  dtIdentifier: res.dt_identifier ?? order.dtIdentifier,
+                  ...(res.linked_identifier ? { linkedIdentifier: res.linked_identifier } : {}),
+                  orderType: order.orderType,
+                  itemCount: order.items?.length ?? 0,
+                },
+                performedBy: user?.email ?? null,
+              });
+              if (res.linked_identifier && order.linkedOrderId) {
+                void logDtOrderAudit({
+                  orderId: order.linkedOrderId,
+                  tenantId: order.tenantId,
+                  action: 'push_to_dt',
+                  changes: {
+                    dtIdentifier: res.linked_identifier,
+                    linkedIdentifier: res.dt_identifier ?? order.dtIdentifier,
+                    pushedAlongsideDelivery: true,
+                  },
+                  performedBy: user?.email ?? null,
+                });
+              }
               const fresh = await fetchDtOrderByIdFromSupabase(order.id);
               if (fresh) setLocalOrder(fresh);
               refetch();
@@ -1233,12 +1306,16 @@ export function OrderPage() {
       )}
       {showReleaseModal && order.tenantId && (
         <ReleaseItemsModal
-          itemIds={releasableItems.map(it => it.inventoryId!)}
+          // dt_item_code is the human-readable Item ID GAS releaseItems
+          // matches against in the Inventory sheet. inventoryId (UUID)
+          // is kept as a fallback only for rows that legitimately have
+          // no dt_item_code — see the releasableItems comment above.
+          itemIds={releasableItems.map(it => (it.dtItemCode || it.inventoryId)!)}
           clientName={order.clientName || 'this client'}
           clientSheetId={order.tenantId}
           defaultReleaseDate={order.finishedAt ? order.finishedAt.slice(0, 10) : undefined}
           selectableItems={releasableItems.map(it => ({
-            id: it.inventoryId!,
+            id: (it.dtItemCode || it.inventoryId)!,
             label: it.description || it.dtItemCode || 'Item',
             sublabel: [
               it.dtItemCode && `SKU ${it.dtItemCode}`,

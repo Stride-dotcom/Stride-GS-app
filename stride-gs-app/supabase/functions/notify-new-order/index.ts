@@ -146,8 +146,10 @@ Deno.serve(async (req: Request) => {
     // order row (e.g. an unmapped account that snuck through) we surface a
     // visible warning in place of the link so the recipient knows to open
     // the order manually rather than landing on a broken page.
+    // Route is /orders (the React App.tsx Route path); /delivery was a
+    // historical typo that left the link landing on a no-match page.
     const reviewLink = order.tenant_id
-      ? `https://www.mystridehub.com/#/delivery?open=${order.dt_identifier}&client=${order.tenant_id}`
+      ? `https://www.mystridehub.com/#/orders?open=${order.dt_identifier}&client=${order.tenant_id}`
       : '⚠ NO REVIEW LINK — order has no tenant mapping. Open the Review Queue manually.';
 
     const tokens: Record<string, string> = {

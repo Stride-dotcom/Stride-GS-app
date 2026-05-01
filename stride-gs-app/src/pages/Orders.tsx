@@ -1,5 +1,5 @@
-import { useState, useMemo, useCallback, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useState, useMemo, useCallback, useEffect, useRef } from 'react';
+import { useNavigate, useLocation } from 'react-router-dom';
 import { useUrlState } from '../hooks/useUrlState';
 import {
   useReactTable, getCoreRowModel, getSortedRowModel, getFilteredRowModel,
@@ -94,6 +94,14 @@ function exportCsv(rows: DtOrderForUI[]) {
 export function Orders() {
   const { user } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
+  // Deep-link refs — captured once on mount, consumed when the data they
+  // depend on (orders list, client list) finally loads. Using refs (not
+  // state) avoids re-render churn between mount and "data ready", and lets
+  // Effect 2 / Effect 3 below run only after their respective sources are
+  // populated. Mirrors Tasks.tsx's pattern.
+  const pendingOpenDtIdRef = useRef<string | null>(null);
+  const deepLinkPendingTenantRef = useRef<string | null>(null);
   const isAdmin = user?.role === 'admin';
   const isStaff = user?.role === 'staff' || user?.role === 'admin';
   const isClient = user?.role === 'client';
@@ -175,6 +183,56 @@ export function Orders() {
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.role, user?.accessibleClientNames?.length, clientNames.length]);
+
+  // ── Deep-link handler ──────────────────────────────────────────────────────
+  // notify-new-order emails build URLs like
+  //   /#/orders?open=<dt_identifier>&client=<tenant_id>
+  // Recipient lands on this list, we resolve the dt_identifier to the order's
+  // UUID via the already-loading orders list, then redirect to /orders/<uuid>
+  // (the OrderPage detail route, which is keyed by UUID — the human-readable
+  // dt_identifier alone won't match useParams). The &client= tenant ID is
+  // resolved against the client list so the filter chip is set correctly for
+  // back-navigation.
+
+  // Effect 1: capture ?open= and ?client= once on mount.
+  useEffect(() => {
+    if (!location.search) return;
+    const params = new URLSearchParams(location.search);
+    const openId = params.get('open');
+    const clientTid = params.get('client');
+    if (openId) pendingOpenDtIdRef.current = openId;
+    if (clientTid) deepLinkPendingTenantRef.current = clientTid;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Effect 2: when orders arrive, resolve dt_identifier → UUID and navigate
+  // to the OrderPage detail route. replace:true so the back button skips
+  // the intermediate Orders list entry. If the dt_identifier doesn't match
+  // any order the user can see (e.g. role/access filter excludes it), we
+  // leave them on the Orders list with a graceful no-op.
+  useEffect(() => {
+    const dtId = pendingOpenDtIdRef.current;
+    if (!dtId || loading || orders.length === 0) return;
+    const target = orders.find(o => o.dtIdentifier === dtId);
+    if (target) {
+      pendingOpenDtIdRef.current = null;
+      navigate(`/orders/${target.id}`, { replace: true });
+    }
+  }, [loading, orders, navigate]);
+
+  // Effect 3: resolve ?client= tenant ID to a client name and apply the
+  // filter, so a user clicking Back from the OrderPage lands on the
+  // pre-filtered Orders list rather than the full unfiltered table.
+  useEffect(() => {
+    const tid = deepLinkPendingTenantRef.current;
+    if (!tid || clients.length === 0) return;
+    const match = clients.find(c => c.id === tid);
+    if (match) {
+      setClientFilter([match.name]);
+      deepLinkPendingTenantRef.current = null;
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [clients.length]);
 
   // Counts orders that need an admin to do something next: rows
   // awaiting review (pending_review / revision_requested) AND rows

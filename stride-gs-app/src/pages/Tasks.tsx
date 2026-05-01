@@ -115,14 +115,18 @@ function toCSV(rows: Task[], fn: string) {
 
 const col = createColumnHelper<Task>();
 
-function cols() {
+function cols(navigate: (path: string) => void) {
   return [
     col.display({ id: 'select', header: ({ table }) => <input type="checkbox" checked={table.getIsAllPageRowsSelected()} onChange={table.getToggleAllPageRowsSelectedHandler()} style={{ cursor: 'pointer', accentColor: theme.colors.orange }} />, cell: ({ row }) => <input type="checkbox" checked={row.getIsSelected()} onChange={row.getToggleSelectedHandler()} style={{ cursor: 'pointer', accentColor: theme.colors.orange }} />, size: 40, enableSorting: false }),
     col.accessor('taskId', { header: 'Task ID', size: 100, cell: i => {
-      const url = i.row.original.taskFolderUrl;
       const val = i.getValue();
-      if (url) return <a href={url} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()} style={{ fontWeight: 600, fontSize: 12, color: theme.colors.orange, textDecoration: 'none' }} onMouseEnter={e => (e.currentTarget.style.textDecoration = 'underline')} onMouseLeave={e => (e.currentTarget.style.textDecoration = 'none')}>{val}</a>;
-      return <span style={{ fontWeight: 600, fontSize: 12, color: theme.colors.textMuted }}>{val}</span>;
+      const csid = i.row.original.clientSheetId;
+      return <span
+        style={{ fontWeight: 600, fontSize: 12, color: theme.colors.orange, cursor: 'pointer' }}
+        onClick={e => { e.stopPropagation(); navigate(`/tasks/${encodeURIComponent(val)}${csid ? `?client=${encodeURIComponent(csid)}` : ''}`); }}
+        onMouseEnter={e => (e.currentTarget.style.textDecoration = 'underline')}
+        onMouseLeave={e => (e.currentTarget.style.textDecoration = 'none')}
+      >{val}</span>;
     } }),
     col.accessor('type', { header: 'Type', size: 100, filterFn: multiFilter, cell: i => <Badge t={SERVICE_CODES[i.getValue() as keyof typeof SERVICE_CODES] || i.getValue()} c={TYPE_CFG[i.getValue()]} /> }),
     col.accessor('status', { header: 'Status', size: 100, filterFn: multiFilter, cell: i => <Badge t={i.getValue()} c={STATUS_CFG[i.getValue()]} /> }),
@@ -231,7 +235,7 @@ export function Tasks() {
   (window as any).__itemIndicators = itemIndicators.loaded ? itemIndicators : null;
   const ALL_ASSIGNED = useMemo(() => [...new Set(tasks.map(t => t.assignedTo).filter(Boolean))].sort(), [tasks]);
 
-  const columns = useMemo(() => cols(), []);
+  const columns = useMemo(() => cols(navigate), [navigate]);
   (window as any).__openTaskDetail = (task: Task) => navigate(`/tasks/${encodeURIComponent(task.taskId)}${task.clientSheetId ? `?client=${encodeURIComponent(task.clientSheetId)}` : ''}`);
   (window as any).__toggleTaskPriority = async (taskId: string, clientSheetId: string, currentPriority: string) => {
     if (!apiConfigured || !clientSheetId || user?.role === 'client') return;

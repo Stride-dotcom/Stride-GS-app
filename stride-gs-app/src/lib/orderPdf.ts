@@ -244,32 +244,37 @@ function buildOrderPrintShell(order: DtOrderForUI): string {
 
     body {
       font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-      background: #F5F2EE;
+      background: #fff;
       color: #1C1C1C;
       font-size: 12.5px;
       line-height: 1.55;
     }
 
+    /* Printer-friendly header — white background, dark text, no
+       ink-heavy block. Real Stride logo image (absolute URL so the
+       about:blank popup can fetch it from GitHub Pages). */
     .print-header {
-      background: #1C1C1C;
-      color: #fff;
-      padding: 18px 32px;
+      background: #fff;
+      color: #1C1C1C;
+      padding: 18px 32px 14px;
       display: flex;
       justify-content: space-between;
-      align-items: center;
+      align-items: flex-start;
+      border-bottom: 2px solid #1C1C1C;
+      max-width: 820px;
+      margin: 0 auto;
     }
     .header-brand { display: flex; align-items: center; gap: 12px; }
     .header-logo {
-      width: 38px; height: 38px; border-radius: 8px;
-      background: #E8692A;
-      display: flex; align-items: center; justify-content: center;
-      font-size: 18px; font-weight: 900; color: #fff; letter-spacing: -1px;
+      width: 44px; height: 44px;
+      object-fit: contain;
+      display: block;
     }
-    .header-name { font-size: 15px; font-weight: 700; letter-spacing: 2.5px; }
-    .header-sub  { font-size: 10px; letter-spacing: 1.5px; color: rgba(255,255,255,0.5); margin-top: 2px; }
-    .header-meta { text-align: right; font-size: 11px; color: rgba(255,255,255,0.7); line-height: 1.5; }
-    .header-meta strong { color: #fff; font-size: 13px; }
-    .header-id { color: #fff; font-size: 18px; font-weight: 700; letter-spacing: 0.5px; }
+    .header-name { font-size: 16px; font-weight: 800; letter-spacing: 2.5px; color: #1C1C1C; }
+    .header-sub  { font-size: 10px; letter-spacing: 1.5px; color: #64748B; margin-top: 2px; }
+    .header-meta { text-align: right; font-size: 11px; color: #64748B; line-height: 1.5; }
+    .header-meta strong { color: #1C1C1C; font-size: 13px; }
+    .header-id { color: #E8692A; font-size: 18px; font-weight: 700; letter-spacing: 0.5px; }
 
     .doc-body { max-width: 820px; margin: 0 auto; padding: 28px 24px 48px; }
 
@@ -391,8 +396,7 @@ function buildOrderPrintShell(order: DtOrderForUI): string {
     }
 
     @media print {
-      body { background: #fff; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-      .print-header { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+      body { background: #fff; }
       section { break-inside: avoid; }
       table.items tr { break-inside: avoid; }
       @page { margin: 0.4in; size: letter; }
@@ -402,7 +406,7 @@ function buildOrderPrintShell(order: DtOrderForUI): string {
 <body>
   <div class="print-header">
     <div class="header-brand">
-      <div class="header-logo">S</div>
+      <img class="header-logo" src="https://www.mystridehub.com/stride-logo.png" alt="Stride Logistics" />
       <div>
         <div class="header-name">STRIDE</div>
         <div class="header-sub">LOGISTICS</div>

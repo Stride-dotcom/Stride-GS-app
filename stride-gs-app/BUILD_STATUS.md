@@ -97,6 +97,13 @@ UI components: FloatingActionMenu, WriteButton, BatchGuard, ActionTooltip, Batch
 
 ---
 
+## Recent Changes (2026-04-30, session 86)
+
+### Task ID always clickable on Tasks page
+- `src/pages/Tasks.tsx` — Task ID column previously rendered as an orange Drive folder link only when `taskFolderUrl` was set, otherwise greyed-out unclickable text. Now always renders as an orange clickable link that navigates to `/tasks/${taskId}` (the in-app detail page). The Drive folder URL was legacy and shouldn't have gated clickability. `cols()` takes `navigate` parameter; useMemo deps updated to `[navigate]`. Repairs.tsx and WillCalls.tsx checked — neither uses the Drive-folder gating pattern, no changes needed. PR #145.
+
+---
+
 ## Recent Changes (2026-04-30, session 85)
 
 ### Client access to delivery orders restored

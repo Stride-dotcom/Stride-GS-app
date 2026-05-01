@@ -281,7 +281,7 @@ export function IntakesPanel() {
     notes: [
       intake.notes,
       (intake.insuranceChoice === 'stride_coverage' || intake.insuranceChoice === 'eis_coverage')
-        ? `Added to Stride policy${intake.insuranceDeclaredValue > 0 ? ` — declared $${intake.insuranceDeclaredValue.toLocaleString()}` : ''} ($300/mo per $100K declared value).`
+        ? `Added to Stride policy${intake.insuranceDeclaredValue > 0 ? ` — declared $${intake.insuranceDeclaredValue.toLocaleString()}` : ''} ($30/mo per $10K declared value).`
         : null,
       intake.insuranceChoice === 'own_policy' ? "Client's own policy — collect COI." : null,
     ].filter(Boolean).join(' '),
@@ -638,12 +638,27 @@ function IntakeReview({ intake, onCreateClient, onMarkReviewed, onReject, getFil
   const [rejectMode, setRejectMode] = useState(false);
   const [rejectReason, setRejectReason] = useState('');
   const isFinal = intake.status === 'activated' || intake.status === 'rejected';
+  // Refresh intakes carry a client_spreadsheet_id back from the link
+  // they were submitted through. The activation handler takes a
+  // different branch for these (UPDATE the existing client +
+  // copy the cert into resale-certs) — call that out in the button
+  // label so admins don't think they're about to create a duplicate.
+  // The same handler runs either way; only the surfaced text changes.
+  const isRefresh = !!intake.clientSpreadsheetId;
 
   return (
     <div style={{ padding: 20 }}>
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 18, paddingBottom: 16, borderBottom: `1px solid ${theme.colors.borderLight}` }}>
-        <button onClick={onCreateClient} disabled={isFinal} style={{ ...primaryActionBtn, opacity: isFinal ? 0.5 : 1, cursor: isFinal ? 'not-allowed' : 'pointer' }}>
-          <UserPlus size={13} /> Create Client from Intake
+        <button
+          onClick={onCreateClient}
+          disabled={isFinal}
+          style={{ ...primaryActionBtn, opacity: isFinal ? 0.5 : 1, cursor: isFinal ? 'not-allowed' : 'pointer' }}
+          title={isRefresh
+            ? 'Apply this refresh intake to the existing client — updates tax/insurance fields, copies any new resale cert into the client record, and marks the intake activated.'
+            : 'Create a new client record from this intake.'}
+        >
+          <UserPlus size={13} />
+          {isRefresh ? 'Apply Refresh to Client' : 'Create Client from Intake'}
         </button>
         <button onClick={onMarkReviewed} disabled={intake.status !== 'pending'} style={{ ...ghostBtn, opacity: intake.status !== 'pending' ? 0.4 : 1 }}>
           <Eye size={13} /> Mark Reviewed
@@ -714,7 +729,7 @@ function IntakeReview({ intake, onCreateClient, onMarkReviewed, onReject, getFil
           if (intake.insuranceChoice === 'own_policy') return "Client's own policy (collect COI at activation)";
           if (intake.insuranceChoice === 'stride_coverage' || intake.insuranceChoice === 'eis_coverage') {
             const dv = intake.insuranceDeclaredValue;
-            const monthly = Math.max(300, Math.round((dv / 100000) * 300 * 100) / 100);
+            const monthly = Math.max(30, Math.round((dv / 10000) * 30 * 100) / 100);
             return dv > 0
               ? `Added to Stride policy · $${dv.toLocaleString()} declared · $${monthly.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}/mo`
               : 'Added to Stride policy (declared value not captured — pre-session-77 intake)';

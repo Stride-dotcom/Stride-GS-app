@@ -25,7 +25,7 @@ export interface ClientInsuranceRow {
   clientName: string;
   coverageType: 'own_policy' | 'stride_coverage';
   declaredValue: number;
-  monthlyRatePer100k: number;
+  monthlyRatePer10k: number;
   inceptionDate: string;        // YYYY-MM-DD
   nextBillingDate: string;      // YYYY-MM-DD
   lastBilledAt: string | null;  // ISO timestamp
@@ -39,7 +39,7 @@ export interface InsuranceBillingHistoryRow {
   ledgerRowId: string | null;
   date: string;                 // YYYY-MM-DD (billing.date is text)
   status: string;               // Unbilled / Invoiced / Billed / Void
-  qty: number;                  // declared / 100000 snapshot at bill time
+  qty: number;                  // declared / 10000 snapshot at bill time (per-$10K basis)
   rate: number;                 // monthly charge
   total: number;                // same as rate for a 1-line INSURANCE row
   invoiceNumber: string | null;
@@ -52,7 +52,7 @@ interface InsuranceDbRow {
   client_name: string;
   coverage_type: string;
   declared_value: number | string;
-  monthly_rate_per_100k: number | string;
+  monthly_rate_per_10k: number | string;
   inception_date: string;
   next_billing_date: string;
   last_billed_at: string | null;
@@ -69,7 +69,7 @@ function rowToInsurance(r: InsuranceDbRow): ClientInsuranceRow {
     clientName: r.client_name,
     coverageType: (r.coverage_type as ClientInsuranceRow['coverageType']) ?? 'stride_coverage',
     declaredValue: Number(r.declared_value ?? 0) || 0,
-    monthlyRatePer100k: Number(r.monthly_rate_per_100k ?? 300) || 300,
+    monthlyRatePer10k: Number(r.monthly_rate_per_10k ?? 30) || 30,
     inceptionDate: r.inception_date,
     nextBillingDate: r.next_billing_date,
     lastBilledAt: r.last_billed_at,
@@ -165,9 +165,9 @@ export function useClientInsurance(tenantId: string | undefined | null): UseClie
     // Insurance rate must come from service_catalog.INSURANCE — no
     // fallback. If the row is missing or has a null flat_rate, refuse
     // to seed; the admin needs to set the rate in Settings → Pricing
-    // first. Silently writing $300 (the legacy hardcoded default)
-    // would lock historical clients onto a stale rate the admin
-    // never approved.
+    // first. Silently writing $30 (the current per-$10K hardcoded
+    // default) would lock historical clients onto a stale rate the
+    // admin never approved.
     const { data: svc } = await supabase.from('service_catalog')
       .select('flat_rate').eq('code', 'INSURANCE').maybeSingle();
     const rate = svc && typeof svc.flat_rate === 'number' ? svc.flat_rate : null;
@@ -189,7 +189,7 @@ export function useClientInsurance(tenantId: string | undefined | null): UseClie
       client_name:           '',
       coverage_type:         opts.coverageType ?? 'stride_coverage',
       declared_value:        opts.declaredValue,
-      monthly_rate_per_100k: rate,
+      monthly_rate_per_10k: rate,
       inception_date:        toDateStr(today),
       next_billing_date:     toDateStr(next),
       active:                true,

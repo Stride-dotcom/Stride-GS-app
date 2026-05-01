@@ -22,16 +22,23 @@ import { useEffect, useMemo, useState } from 'react';
 import { Pencil, Trash2, Clock, Truck, RefreshCw, Loader2 } from 'lucide-react';
 import { theme } from '../../styles/theme';
 import type {
-  CatalogService, UpdateServiceInput, ServiceCategory, ServiceBilling,
-  ServiceUnit, AutoApplyRule, ServicePriority, DeliveryRateUnit,
+  CatalogService, UpdateServiceInput, ServiceCategory, BillingMode,
+  AutoApplyRule, ServicePriority, DeliveryRateUnit,
   ExternalSyncResult,
 } from '../../hooks/useServiceCatalog';
 
 const CATEGORIES: ServiceCategory[] = [
   'Warehouse','Storage','Shipping','Assembly','Repair','Labor','Admin','Delivery','Fabric Protection',
 ];
-const UNITS: ServiceUnit[]           = ['per_item','per_day','per_task','per_hour'];
-const BILLINGS: ServiceBilling[]     = ['class_based','flat'];
+// Billing modes shown in the inline edit form. The legacy `billing`
+// column on service_catalog is kept aligned by serviceToRow (per_class
+// → class_based, per_qty/per_job → flat) so existing GAS billing paths
+// that read `billing` continue to work without changes.
+const BILLING_MODES: { value: BillingMode; label: string; help: string }[] = [
+  { value: 'per_class', label: 'Per class',    help: 'Sum( class rate × item qty ) over the parent’s items.' },
+  { value: 'per_qty',   label: 'Per quantity', help: 'Flat rate × quantity (item count, hours, sq ft, etc.).' },
+  { value: 'per_job',   label: 'Per job',      help: 'Single flat charge regardless of items.' },
+];
 const AUTO_RULES: AutoApplyRule[]    = ['overweight','no_id','fragile','oversized'];
 const PRIORITIES: ServicePriority[]  = ['Normal','High'];
 const CLASSES = ['XS','S','M','L','XL','XXL'] as const;
@@ -61,12 +68,9 @@ function fmtUSD(n: number | undefined): string {
   return n < 1 ? `$${n.toFixed(2)}` : `$${Math.round(n * 100) / 100}`;
 }
 
-function unitLabel(unit: CatalogService['unit']): string {
-  return unit === 'per_item' ? '/ item'
-    : unit === 'per_day' ? '/ day'
-    : unit === 'per_task' ? '/ task'
-    : '/ hour';
-}
+// (unitLabel removed in v3 of the Price List UI — the read-mode display
+// now derives its suffix from billingMode directly. Legacy `unit` is
+// kept as a column for backward-compat reads only.)
 
 export function ServiceRow({
   service, editing, onEditClick, onCancel, onSave, onDelete, onToggleActive, onSync,
@@ -123,14 +127,39 @@ export function ServiceRow({
     }
     setValidationError(null);
     setSaving(true);
+    // Validate before save: per_class requires non-zero rates somewhere;
+    // per_qty / per_job (when not quote-required) require a positive flat
+    // rate. Catches the configuration error of "set mode to per_class and
+    // forgot to fill the rate matrix" — which would silently bill $0 per
+    // item — before it leaks into the catalog.
+    const hasAnyClassRate = draft.billingMode === 'per_class'
+      ? Object.values(draft.rates).some(v => Number(v) > 0)
+      : true;
+    const hasFlatRate = draft.billingMode !== 'per_class'
+      ? Number(draft.flatRate) > 0 || draft.quoteRequired
+      : true;
+    if (!hasAnyClassRate) {
+      setValidationError('Per-class billing requires at least one non-zero class rate.');
+      return;
+    }
+    if (!hasFlatRate) {
+      setValidationError('Set a flat rate, or flag this service as Quote Required.');
+      return;
+    }
+
     const updates: UpdateServiceInput = {
       code: draft.code.trim().toUpperCase(),
       name: draft.name.trim(),
       category: draft.category,
-      billing: draft.billing,
+      // serviceToRow derives the legacy `billing` column from billingMode
+      // and writes both — keeps GAS api_lookupRate_ on the right branch.
+      billingMode: draft.billingMode,
       rates: draft.rates,
       flatRate: draft.flatRate,
-      unit: draft.unit,
+      // `unit` stays in the payload for read-only display compatibility
+      // (PublicRates / Excel exports show the suffix). Auto-aligned to
+      // the mode so the displayed label doesn't lie.
+      unit: draft.billingMode === 'per_job' ? 'per_task' : draft.unit,
       taxable: draft.taxable,
       active: draft.active,
       showInMatrix: draft.showInMatrix,
@@ -207,27 +236,20 @@ export function ServiceRow({
           </div>
         </div>
 
-        {/* Billing + Unit */}
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 110px', gap: 12, marginTop: 14 }}>
+        {/* Billing mode + Display order */}
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 110px', gap: 12, marginTop: 14 }}>
           <div>
-            <label style={inlineLabel(v2)}>Billing</label>
+            <label style={inlineLabel(v2)}>Billing mode</label>
             <select
               style={inlineInput(v2)}
-              value={draft.billing}
-              onChange={e => setDraft({ ...draft, billing: e.target.value as ServiceBilling })}
+              value={draft.billingMode}
+              onChange={e => setDraft({ ...draft, billingMode: e.target.value as BillingMode })}
             >
-              {BILLINGS.map(b => <option key={b} value={b}>{b === 'class_based' ? 'Class-based' : 'Flat rate'}</option>)}
+              {BILLING_MODES.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
             </select>
-          </div>
-          <div>
-            <label style={inlineLabel(v2)}>Unit</label>
-            <select
-              style={inlineInput(v2)}
-              value={draft.unit}
-              onChange={e => setDraft({ ...draft, unit: e.target.value as ServiceUnit })}
-            >
-              {UNITS.map(u => <option key={u} value={u}>{u.replace('per_', 'per ')}</option>)}
-            </select>
+            <div style={{ fontSize: 11, color: v2.colors.textMuted, marginTop: 4, lineHeight: 1.45 }}>
+              {BILLING_MODES.find(m => m.value === draft.billingMode)?.help}
+            </div>
           </div>
           <div>
             <label style={inlineLabel(v2)}>Display order</label>
@@ -240,8 +262,8 @@ export function ServiceRow({
           </div>
         </div>
 
-        {/* Rates: class-grid for class_based, single flat input otherwise */}
-        {draft.billing === 'class_based' ? (
+        {/* Rates: class-grid for per_class, single flat input otherwise */}
+        {draft.billingMode === 'per_class' ? (
           <div style={{ marginTop: 16 }}>
             <label style={inlineLabel(v2)}>Class rates ($)</label>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 8 }}>
@@ -275,14 +297,19 @@ export function ServiceRow({
               value={draft.flatRate}
               onChange={e => setDraft({ ...draft, flatRate: Number(e.target.value) || 0 })}
             />
+            <div style={{ fontSize: 11, color: v2.colors.textMuted, marginTop: 4 }}>
+              {draft.billingMode === 'per_qty'
+                ? 'Multiplied by item count (or operator-entered quantity for hours / sqft / etc.).'
+                : 'Charged once per parent regardless of items.'}
+            </div>
           </div>
         )}
 
-        {/* Service times — class_based rows always need them (per-class
+        {/* Service times — per_class rows always need them (per-class
             minutes). Delivery rows benefit from them too because the
             CreateDeliveryOrderModal uses the per-class minutes for
-            dispatch routing duration even when the rate is flat. */}
-        {(draft.billing === 'class_based' || draft.showAsDeliveryService) && (
+            dispatch routing duration regardless of billing mode. */}
+        {(draft.billingMode === 'per_class' || draft.showAsDeliveryService) && (
           <div style={{ marginTop: 14 }}>
             <label style={{ ...inlineLabel(v2), display: 'flex', alignItems: 'center', gap: 6 }}>
               <Clock size={11} /> Service times (minutes)
@@ -550,9 +577,11 @@ export function ServiceRow({
         }}>{service.category}</span>
       </div>
 
-      {/* Rates */}
+      {/* Rates — per_class shows class chips; per_qty / per_job show flat
+          rate with a mode-suffix label so the reader can tell at a glance
+          whether the fee scales with items. */}
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, alignItems: 'center' }}>
-        {service.billing === 'class_based' ? (
+        {service.billingMode === 'per_class' ? (
           CLASSES.map(cls => {
             const v = service.rates[cls];
             if (!v) return null;
@@ -568,7 +597,12 @@ export function ServiceRow({
             ...chipStyle(v2),
             background: v2.colors.accentLight, color: v2.colors.accent, fontWeight: 600,
           }}>
-            Flat: {fmtUSD(service.flatRate)} <span style={{ color: v2.colors.textMuted, marginLeft: 4 }}>{unitLabel(service.unit)}</span>
+            {service.quoteRequired && service.flatRate === 0
+              ? 'Quote on use'
+              : <>Flat: {fmtUSD(service.flatRate)}</>}
+            <span style={{ color: v2.colors.textMuted, marginLeft: 4 }}>
+              {service.billingMode === 'per_qty' ? '/ qty' : '/ job'}
+            </span>
           </span>
         )}
       </div>
