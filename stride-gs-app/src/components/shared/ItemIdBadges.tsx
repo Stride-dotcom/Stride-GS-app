@@ -35,8 +35,12 @@ interface Props {
 }
 
 const badgeStyle: React.CSSProperties = {
-  fontSize: 9, fontWeight: 700, borderRadius: 3, padding: '1px 3px',
+  fontSize: 9, fontWeight: 700, borderRadius: 3, padding: '1px 0',
   lineHeight: 1, fontFamily: 'Inter, system-ui, sans-serif',
+  // Fixed width keeps thin letters (I) the same square size as wider ones
+  // (W, D) so the badge row reads as a uniform pill strip.
+  display: 'inline-block', minWidth: 12, textAlign: 'center',
+  boxSizing: 'border-box',
 };
 
 const OPEN_BG = '#F97316';  // bold orange
