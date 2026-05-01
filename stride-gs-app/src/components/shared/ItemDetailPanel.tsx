@@ -1060,14 +1060,14 @@ export function ItemDetailPanel({
           suppressed there. */}
       {!renderAsPage && (
         <Section icon={FileText} title="Related" count={linkedTasks.length + linkedRepairs.length + linkedWillCalls.length || undefined}>
-          {(shipmentFolderUrl || photosFolderId) && (
+          {/* Shipment Folder removed from the Details/Related body — it
+              already appears under Photos/Docs → Legacy Folders. The
+              item-photos folder link stays here because it's the only way
+              to reach the legacy Drive photos for this specific item from
+              outside the Photos tab. */}
+          {photosFolderId && (
             <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 8 }}>
-              {shipmentFolderUrl && (
-                <FolderButton label={`Shipment ${item.shipmentNumber || 'Folder'}`} url={shipmentFolderUrl} icon={Truck} />
-              )}
-              {photosFolderId && (
-                <FolderButton label="Photos" url={`https://drive.google.com/drive/folders/${photosFolderId}`} icon={FolderOpen} />
-              )}
+              <FolderButton label="Photos" url={`https://drive.google.com/drive/folders/${photosFolderId}`} icon={FolderOpen} />
             </div>
           )}
 

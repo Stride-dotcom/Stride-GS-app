@@ -615,15 +615,12 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
                 {wc.notes && <div style={{ marginTop: 4, fontSize: 12, color: theme.colors.textSecondary }}><strong>Notes:</strong> {wc.notes}</div>}
               </>
             )}
-            {/* Drive Folder Buttons — suppressed in page mode (moved to Photos tab). */}
-            {!renderAsPage && (wc.wcFolderUrl || wc.shipmentFolderUrl) && (
+            {/* Drive Folder Buttons — suppressed in page mode (moved to
+                Photos tab). Shipment Folder also dropped from the Details
+                tab; it's still reachable from Photos/Docs → Legacy Folders. */}
+            {!renderAsPage && wc.wcFolderUrl && (
               <div style={{ display: 'flex', gap: 6, marginTop: 10, flexWrap: 'wrap' }}>
-                {wc.wcFolderUrl && (
-                  <FolderButton label="Will Call Folder" url={wc.wcFolderUrl} icon={FolderOpen} />
-                )}
-                {wc.shipmentFolderUrl && (
-                  <FolderButton label="Shipment Folder" url={wc.shipmentFolderUrl} icon={Truck} />
-                )}
+                <FolderButton label="Will Call Folder" url={wc.wcFolderUrl} icon={FolderOpen} />
               </div>
             )}
           </div>

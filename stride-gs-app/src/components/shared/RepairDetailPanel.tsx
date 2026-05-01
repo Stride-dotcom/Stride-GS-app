@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { X, Wrench, Package, ClipboardList, CheckCircle2, XCircle, AlertTriangle, Send, Loader2, Truck, Play, Pencil, MapPin, Plus, Trash2, Undo2 } from 'lucide-react';
+import { X, Wrench, Package, ClipboardList, CheckCircle2, XCircle, AlertTriangle, Send, Loader2, Play, Pencil, MapPin, Plus, Trash2, Undo2, FileText } from 'lucide-react';
 import { BtnSpinner } from '../ui/BtnSpinner';
 import { TabbedDetailPanel, type TabbedDetailPanelTab } from './TabbedDetailPanel';
 import { EntityPage } from './EntityPage';
@@ -18,6 +18,7 @@ import { fmtDate } from '../../lib/constants';
 import { WriteButton } from './WriteButton';
 import { ProcessingOverlay } from './ProcessingOverlay';
 import { postSendRepairQuote, postRespondToRepairQuote, postCompleteRepair, postStartRepair, postCancelRepair, postUpdateRepairNotes, postReopenRepair, postCorrectRepairResult, postVoidRepairQuote, isApiConfigured } from '../../lib/api';
+import { generateRepairWorkOrderPdf } from '../../lib/workOrderPdf';
 import { entityEvents } from '../../lib/entityEvents';
 import type { ApiRepair, SendRepairQuoteResponse, RespondToRepairQuoteResponse, CompleteRepairResponse, StartRepairResponse, SendRepairQuoteLine } from '../../lib/api';
 import { supabase } from '../../lib/supabase';
@@ -789,16 +790,36 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
                   Drive URL exists. Prior behaviour (grey disabled chip with
                   a tooltip) was noisy for legacy rows that will never have a
                   folder (pre-Drive entities, Supabase-only media flow). */}
-              {!renderAsPage && (repair.repairFolderUrl || repair.taskFolderUrl || repair.shipmentFolderUrl) && (
-                <div style={{ display: 'flex', gap: 6, marginTop: 10, flexWrap: 'wrap' }}>
+              {/* Drive Folder buttons — only the Repair Folder is shown on
+                  the Details tab. Task / Shipment folders are duplicates of
+                  what's listed in the Photos/Docs tab "Legacy Folders"
+                  section and clutter the Details tab; removed per Justin's
+                  cleanup pass.
+
+                  Work Order print button sits next to the Repair Folder so
+                  staff can grab a printable form straight from this view —
+                  same template (DOC_REPAIR_WORK_ORDER) the GAS generator
+                  uses, but rendered client-side via lib/workOrderPdf.ts.
+                  Gated to admin/staff (clients don't print warehouse
+                  forms) and only after the repair has been approved (no
+                  point printing a work order for a quote that hasn't been
+                  accepted yet). */}
+              {!renderAsPage && (repair.repairFolderUrl || ((user?.role === 'admin' || user?.role === 'staff') && (repair.status === 'Approved' || repair.status === 'In Progress' || repair.status === 'Complete'))) && (
+                <div style={{ display: 'flex', gap: 6, marginTop: 10, flexWrap: 'wrap', alignItems: 'center' }}>
                   {repair.repairFolderUrl && (
                     <FolderButton label="Repair Folder" url={repair.repairFolderUrl} icon={Wrench} />
                   )}
-                  {repair.taskFolderUrl && (
-                    <FolderButton label="Task Folder" url={repair.taskFolderUrl} icon={ClipboardList} />
-                  )}
-                  {repair.shipmentFolderUrl && (
-                    <FolderButton label="Shipment Folder" url={repair.shipmentFolderUrl} icon={Truck} />
+                  {(user?.role === 'admin' || user?.role === 'staff') &&
+                    (repair.status === 'Approved' || repair.status === 'In Progress' || repair.status === 'Complete') && (
+                    <WriteButton
+                      label="Work Order"
+                      variant="secondary"
+                      size="sm"
+                      icon={<FileText size={13} />}
+                      onClick={async () => {
+                        await generateRepairWorkOrderPdf(repair);
+                      }}
+                    />
                   )}
                 </div>
               )}
