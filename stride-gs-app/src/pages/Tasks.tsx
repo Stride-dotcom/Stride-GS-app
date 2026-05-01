@@ -128,7 +128,16 @@ function cols(navigate: (path: string) => void) {
         onMouseLeave={e => (e.currentTarget.style.textDecoration = 'none')}
       >{val}</span>;
     } }),
-    col.accessor('type', { header: 'Type', size: 100, filterFn: multiFilter, cell: i => <Badge t={SERVICE_CODES[i.getValue() as keyof typeof SERVICE_CODES] || i.getValue()} c={TYPE_CFG[i.getValue()]} /> }),
+    col.accessor('type', { header: 'Type', size: 100, filterFn: multiFilter, cell: i => {
+      // Tasks created with non-legacy service codes (LABEL, PLLT, PICK, etc.)
+      // get bucketed to type='OTHER' on the warehouse sheet but carry the
+      // real code in svcCode. Prefer svcCode for the badge text so the
+      // column reads as a service name, not a generic "OTHER".
+      const row = i.row.original as { type: string; svcCode?: string };
+      const code = (row.type === 'OTHER' && row.svcCode) ? row.svcCode : row.type;
+      const label = SERVICE_CODES[code as keyof typeof SERVICE_CODES] || code;
+      return <Badge t={label} c={TYPE_CFG[row.type]} />;
+    } }),
     col.accessor('status', { header: 'Status', size: 100, filterFn: multiFilter, cell: i => <Badge t={i.getValue()} c={STATUS_CFG[i.getValue()]} /> }),
     col.accessor('itemId', { header: 'Item', size: 110, cell: i => { const id = i.getValue(); const ind = (window as any).__itemIndicators; return <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}><span style={{ color: theme.colors.textSecondary, fontSize: 12 }}>{id}</span>{ind && <ItemIdBadges itemId={id} inspOpenItems={ind.inspOpenItems} inspDoneItems={ind.inspDoneItems} inspFailedItems={ind.inspFailedItems} asmOpenItems={ind.asmOpenItems} asmDoneItems={ind.asmDoneItems} repairOpenItems={ind.repairOpenItems} repairDoneItems={ind.repairDoneItems} wcOpenItems={ind.wcOpenItems} wcDoneItems={ind.wcDoneItems} />}</div>; } }),
     col.accessor('clientName', { header: 'Client', size: 160, filterFn: multiFilter, cell: i => <span style={{ fontWeight: 500, fontSize: 12 }}>{i.getValue()}</span> }),
