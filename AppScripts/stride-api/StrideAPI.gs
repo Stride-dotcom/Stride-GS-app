@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.142.6 — 2026-04-30 PST — Inventory sync: stop wiping shipment_folder_url
+   StrideAPI.gs — v38.142.7 — 2026-05-01 PST — api_sendTemplateEmail_ &client= precedence: prefer the explicit clientSheetId param over settings (which can be empty/stale on older sheets) so email CTAs always carry the correct tenant. Also a final safety net on the auto-injected CTA URL.
+   v38.142.6: Inventory sync: stop wiping shipment_folder_url
    v38.142.6: Two inventory write paths were calling sbInventoryRow_
               without a shipmentFolderUrl field — handleBulkSyncToSupabase_
               (the per-client Sync button) and resyncEntityToSupabase_'s
@@ -14827,10 +14828,16 @@ function api_sendTemplateEmail_(settings, templateKey, toEmail, fallbackSubject,
     var _appUrl = tokens["{{APP_URL}}"] || APP_BASE_URL_;
     var _clientSuffix = "";
     try {
-      var _cid = String(settings["CLIENT_SPREADSHEET_ID"] || settings["CONSOLIDATED_BILLING_SPREADSHEET_ID"] || "").trim();
-      // Fallback chain: tokens → passed clientSheetId param
+      // Prefer the explicit clientSheetId parameter — it's the authoritative
+      // tenant for the email being sent (the client spreadsheet whose Tasks/
+      // Repairs/etc. row triggered this send). Fall back to settings only when
+      // the caller didn't pass it. Previously the order was reversed and
+      // settings["CLIENT_SPREADSHEET_ID"] (which can be empty or stale on
+      // older sheets) won, producing emails with no &client= → "Task Not
+      // Found" when the recipient clicked the CTA.
+      var _cid = String(clientSheetId || "").trim();
+      if (!_cid) _cid = String(settings["CLIENT_SPREADSHEET_ID"] || settings["CONSOLIDATED_BILLING_SPREADSHEET_ID"] || "").trim();
       if (!_cid && tokens["{{CLIENT_SHEET_ID}}"]) _cid = String(tokens["{{CLIENT_SHEET_ID}}"]);
-      if (!_cid && clientSheetId) _cid = String(clientSheetId);
       if (_cid) _clientSuffix = "&client=" + encodeURIComponent(_cid);
     } catch (_) {}
     if (tokens["{{TASK_ID}}"] && !tokens["{{TASK_DEEP_LINK}}"])
@@ -14917,6 +14924,17 @@ function api_sendTemplateEmail_(settings, templateKey, toEmail, fallbackSubject,
       tokens["{{CLAIM_DEEP_LINK}}"] || ""
     ).trim();
     if (ctaUrl && ctaUrl.indexOf("http") === 0) {
+      // Final safety net: if the chosen ctaUrl ended up missing &client= (token
+      // wasn't refreshed, settings stale, etc.) and we know the tenant from the
+      // call site, append it here so the recipient never gets a broken CTA.
+      try {
+        if (clientSheetId && ctaUrl.indexOf("/#/") !== -1
+            && ctaUrl.indexOf("?open=") !== -1
+            && ctaUrl.indexOf("&client=") === -1
+            && ctaUrl.indexOf("?client=") === -1) {
+          ctaUrl = ctaUrl + "&client=" + encodeURIComponent(String(clientSheetId));
+        }
+      } catch (_) {}
       var ctaBtn = '<div style="text-align:center;margin:20px 0 8px;">' +
         '<a href="' + ctaUrl + '" style="display:inline-block;background:#E85D2D;color:#ffffff;' +
         'padding:11px 28px;border-radius:6px;text-decoration:none;font-weight:700;font-size:14px;' +
