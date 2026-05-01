@@ -886,6 +886,9 @@ function StepTerms({ draft, setDraft, tcHtml, tcLoading, coverageNotes, sig, sig
                   : <>Enter the dollar amount you want insured. Monthly charge: $30 per $10,000 declared, with a $30/month minimum.</>;
               })()}
             </div>
+            <div style={{ fontSize: 11, color: TEXT_MUT, marginTop: 8, fontStyle: 'italic', lineHeight: 1.4 }}>
+              Changes to your declared value take effect on the next billing cycle (every 30 days from activation). Mid-cycle changes are not prorated — the new rate applies starting at your next anniversary date.
+            </div>
           </div>
         )}
       </div>

@@ -1099,6 +1099,16 @@ function InsuranceBlock({ tenantId, clientName }: { tenantId: string; clientName
         </div>
       </div>
 
+      {/* Billing-cycle disclaimer — clarifies the no-proration rule so
+          staff know what to tell the client. */}
+      <div style={{
+        marginBottom: 10, padding: '8px 10px',
+        background: '#FFFBEB', border: '1px solid #FDE68A', borderRadius: 8,
+        fontSize: 11, color: '#92400E', lineHeight: 1.4,
+      }}>
+        <strong>Heads up:</strong> Changes to declared value take effect on the next 30-day billing anniversary, not immediately. Mid-cycle edits are not prorated — the new rate first applies on <strong>{row.nextBillingDate}</strong>.
+      </div>
+
       {/* Action row */}
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
         {editing ? (
