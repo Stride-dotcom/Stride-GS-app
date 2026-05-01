@@ -4,7 +4,7 @@
  * with legacy GAS fallback. Full task workflow parity with TaskDetailPanel.
  */
 import React, { useState, useCallback, useRef, useEffect } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { useTaskDetail } from '../hooks/useTaskDetail';
 import { TaskDetailPanel } from '../components/shared/TaskDetailPanel';
@@ -16,8 +16,10 @@ import { ArrowLeft, AlertCircle, SearchX, ShieldX, Loader2 } from 'lucide-react'
 export function TaskJobPage() {
   const { taskId } = useParams<{ taskId: string }>();
   const navigate = useNavigate();
+  const location = useLocation();
   useAuth(); // Ensure auth context is loaded (required for new-tab bootstrap)
-  const { task: fetchedTask, relatedRepairs, status, error, source, refetch } = useTaskDetail(taskId);
+  const clientHint = new URLSearchParams(location.search).get('client') || undefined;
+  const { task: fetchedTask, relatedRepairs, status, error, source, refetch } = useTaskDetail(taskId, clientHint);
 
   // Local optimistic state — standalone page manages its own state
   const [localTask, setLocalTask] = useState<ApiTask | null>(null);
@@ -51,7 +53,7 @@ export function TaskJobPage() {
     setTimeout(async () => {
       if (taskId) {
         // Try Supabase first for fast refresh
-        const fresh = await fetchTaskByIdFromSupabase(taskId);
+        const fresh = await fetchTaskByIdFromSupabase(taskId, undefined, clientHint || localTask?.clientSheetId);
         if (fresh) {
           setLocalTask(fresh);
         }
@@ -59,7 +61,7 @@ export function TaskJobPage() {
       setSaving(false);
       scheduleRefresh();
     }, 800);
-  }, [taskId, scheduleRefresh]);
+  }, [taskId, scheduleRefresh, clientHint, localTask?.clientSheetId]);
 
   // Optimistic patch functions for TaskDetailPanel
   const applyTaskPatch = useCallback((patchTaskId: string, patch: Partial<ApiTask>) => {

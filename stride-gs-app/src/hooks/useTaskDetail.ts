@@ -30,7 +30,7 @@ export interface UseTaskDetailResult {
   refetch: () => void;
 }
 
-export function useTaskDetail(taskId: string | undefined): UseTaskDetailResult {
+export function useTaskDetail(taskId: string | undefined, clientSheetIdHint?: string): UseTaskDetailResult {
   const { user } = useAuth();
   const { clients } = useClients();
   const [task, setTask] = useState<ApiTask | null>(null);
@@ -64,8 +64,10 @@ export function useTaskDetail(taskId: string | undefined): UseTaskDetailResult {
     setError(null);
 
     try {
-      // Step 1: Try Supabase (fast path) — pass map for client-name fallback
-      const sbTask = await fetchTaskByIdFromSupabase(taskId, clientNameMapRef.current);
+      // Step 1: Try Supabase (fast path) — pass map for client-name fallback.
+      // clientSheetIdHint disambiguates duplicate task_ids across tenants
+      // (occurs when an item is transferred between auto-inspect clients).
+      const sbTask = await fetchTaskByIdFromSupabase(taskId, clientNameMapRef.current, clientSheetIdHint);
 
       if (controller.signal.aborted || fetchId !== fetchCountRef.current) return;
 
@@ -174,7 +176,7 @@ export function useTaskDetail(taskId: string | undefined): UseTaskDetailResult {
       setError(err instanceof Error ? err.message : 'Failed to load task');
       setStatus('error');
     }
-  }, [taskId, user]);
+  }, [taskId, user, clientSheetIdHint]);
 
   useEffect(() => {
     fetchTask();

@@ -120,9 +120,10 @@ function cols(navigate: (path: string) => void) {
     col.display({ id: 'select', header: ({ table }) => <input type="checkbox" checked={table.getIsAllPageRowsSelected()} onChange={table.getToggleAllPageRowsSelectedHandler()} style={{ cursor: 'pointer', accentColor: theme.colors.orange }} />, cell: ({ row }) => <input type="checkbox" checked={row.getIsSelected()} onChange={row.getToggleSelectedHandler()} style={{ cursor: 'pointer', accentColor: theme.colors.orange }} />, size: 40, enableSorting: false }),
     col.accessor('taskId', { header: 'Task ID', size: 100, cell: i => {
       const val = i.getValue();
+      const csid = i.row.original.clientSheetId;
       return <span
         style={{ fontWeight: 600, fontSize: 12, color: theme.colors.orange, cursor: 'pointer' }}
-        onClick={e => { e.stopPropagation(); navigate(`/tasks/${val}`); }}
+        onClick={e => { e.stopPropagation(); navigate(`/tasks/${encodeURIComponent(val)}${csid ? `?client=${encodeURIComponent(csid)}` : ''}`); }}
         onMouseEnter={e => (e.currentTarget.style.textDecoration = 'underline')}
         onMouseLeave={e => (e.currentTarget.style.textDecoration = 'none')}
       >{val}</span>;
@@ -235,7 +236,7 @@ export function Tasks() {
   const ALL_ASSIGNED = useMemo(() => [...new Set(tasks.map(t => t.assignedTo).filter(Boolean))].sort(), [tasks]);
 
   const columns = useMemo(() => cols(navigate), [navigate]);
-  (window as any).__openTaskDetail = (task: Task) => navigate(`/tasks/${task.taskId}`);
+  (window as any).__openTaskDetail = (task: Task) => navigate(`/tasks/${encodeURIComponent(task.taskId)}${task.clientSheetId ? `?client=${encodeURIComponent(task.clientSheetId)}` : ''}`);
   (window as any).__toggleTaskPriority = async (taskId: string, clientSheetId: string, currentPriority: string) => {
     if (!apiConfigured || !clientSheetId || user?.role === 'client') return;
     const newPriority = currentPriority === 'High' ? 'Normal' : 'High';
@@ -250,14 +251,17 @@ export function Tasks() {
   useEffect(() => {
     const state = location.state as { openTaskId?: string; clientSheetId?: string } | null;
     if (state?.openTaskId) {
-      navigate(`/tasks/${state.openTaskId}`, { replace: true });
+      const q = state.clientSheetId ? `?client=${encodeURIComponent(state.clientSheetId)}` : '';
+      navigate(`/tasks/${encodeURIComponent(state.openTaskId)}${q}`, { replace: true });
       return;
     }
     if (location.search) {
       const params = new URLSearchParams(location.search);
       const openId = params.get('open');
+      const client = params.get('client');
       if (openId) {
-        navigate(`/tasks/${openId}`, { replace: true });
+        const q = client ? `?client=${encodeURIComponent(client)}` : '';
+        navigate(`/tasks/${encodeURIComponent(openId)}${q}`, { replace: true });
       }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -289,7 +293,12 @@ export function Tasks() {
     if (pendingOpenRef.current && tasks.length > 0) {
       const id = pendingOpenRef.current;
       const found = tasks.some(t => t.taskId === id);
-      if (found) { pendingOpenRef.current = null; navigate(`/tasks/${id}`); }
+      if (found) {
+        const t = tasks.find(x => x.taskId === id);
+        const q = t?.clientSheetId ? `?client=${encodeURIComponent(t.clientSheetId)}` : '';
+        pendingOpenRef.current = null;
+        navigate(`/tasks/${encodeURIComponent(id)}${q}`);
+      }
     }
   }, [tasks, navigate]);
 
@@ -597,7 +606,7 @@ export function Tasks() {
             })}</tr>)}</thead>
             <tbody>
               {virtualRows.length > 0 && <tr style={{ height: virtualRows[0].start }}><td colSpan={table.getVisibleFlatColumns().length} /></tr>}
-              {virtualRows.map(vRow => { const row = allRows[vRow.index]; const t = row.original; const isOverdue = !!t.dueDate && t.dueDate < TODAY && (t.status === 'Open' || t.status === 'In Progress'); const statusBg = row.getIsSelected() ? theme.colors.orangeLight : isOverdue ? '#FFF5F5' : t.status === 'Completed' ? '#F0FDF4' : (t.status === 'In Progress' || (t as any).startedAt) ? '#EFF6FF' : 'transparent'; return <tr key={row.id} style={{ transition: 'background 0.1s', background: statusBg, cursor: 'pointer', borderLeft: '3px solid transparent' }} onClick={(e) => { if (!(e.target as HTMLElement).closest('input[type="checkbox"]') && !(e.target as HTMLElement).closest('.row-actions')) navigate(`/tasks/${t.taskId}`); }} onMouseEnter={e => { if (!row.getIsSelected()) e.currentTarget.style.background = theme.colors.bgSubtle; const a = e.currentTarget.querySelector('.row-actions') as HTMLElement; if (a) a.style.opacity = '0.6'; }} onMouseLeave={e => { e.currentTarget.style.background = statusBg; const a = e.currentTarget.querySelector('.row-actions') as HTMLElement; if (a) a.style.opacity = '0'; }}>{row.getVisibleCells().map(cell => <td key={cell.id} style={{ ...td, ...(cell.column.id === 'select' ? { position: 'sticky' as const, left: 0, zIndex: 1, background: '#fff' } : {}) }}>{flexRender(cell.column.columnDef.cell, cell.getContext())}</td>)}</tr>; })}
+              {virtualRows.map(vRow => { const row = allRows[vRow.index]; const t = row.original; const isOverdue = !!t.dueDate && t.dueDate < TODAY && (t.status === 'Open' || t.status === 'In Progress'); const statusBg = row.getIsSelected() ? theme.colors.orangeLight : isOverdue ? '#FFF5F5' : t.status === 'Completed' ? '#F0FDF4' : (t.status === 'In Progress' || (t as any).startedAt) ? '#EFF6FF' : 'transparent'; return <tr key={row.id} style={{ transition: 'background 0.1s', background: statusBg, cursor: 'pointer', borderLeft: '3px solid transparent' }} onClick={(e) => { if (!(e.target as HTMLElement).closest('input[type="checkbox"]') && !(e.target as HTMLElement).closest('.row-actions')) navigate(`/tasks/${encodeURIComponent(t.taskId)}${t.clientSheetId ? `?client=${encodeURIComponent(t.clientSheetId)}` : ''}`); }} onMouseEnter={e => { if (!row.getIsSelected()) e.currentTarget.style.background = theme.colors.bgSubtle; const a = e.currentTarget.querySelector('.row-actions') as HTMLElement; if (a) a.style.opacity = '0.6'; }} onMouseLeave={e => { e.currentTarget.style.background = statusBg; const a = e.currentTarget.querySelector('.row-actions') as HTMLElement; if (a) a.style.opacity = '0'; }}>{row.getVisibleCells().map(cell => <td key={cell.id} style={{ ...td, ...(cell.column.id === 'select' ? { position: 'sticky' as const, left: 0, zIndex: 1, background: '#fff' } : {}) }}>{flexRender(cell.column.columnDef.cell, cell.getContext())}</td>)}</tr>; })}
               {virtualRows.length > 0 && <tr style={{ height: totalHeight - (virtualRows[virtualRows.length - 1].end) }}><td colSpan={table.getVisibleFlatColumns().length} /></tr>}
             </tbody>
           </table>
