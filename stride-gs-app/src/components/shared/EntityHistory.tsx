@@ -2,6 +2,13 @@
  * EntityHistory — Collapsible timeline of audit log entries for an entity.
  * Reads from Supabase entity_audit_log table.
  * Used in all detail panels (Item, Task, Repair, WillCall, Shipment).
+ *
+ * For dt_order entities, ALSO reads dt_order_history (DT export.xml driver
+ * events: started, delivered, signature captured, exception codes, etc.)
+ * and merges them into the same timeline. App-side events are tagged
+ * 'App' and DT-side events are tagged 'Driver' so the reader can tell
+ * who originated each entry. Replaces the standalone "Driver Activity"
+ * block on the OrderPage Details tab.
  */
 import { useState, useEffect } from 'react';
 import { ChevronDown, ChevronRight, Clock, User } from 'lucide-react';
@@ -15,6 +22,12 @@ interface AuditEntry {
   performed_by: string;
   performed_at: string;
   source: string;
+  /** 'app' for entity_audit_log rows, 'dt' for dt_order_history rows.
+   *  Drives the small "App / Driver" tag in the timeline UI. Distinct
+   *  from the underlying `source` text column on entity_audit_log
+   *  (which holds 'gas' / 'app' / 'edge' / 'backfill' values for
+   *  app-originated rows). */
+  origin: 'app' | 'dt';
 }
 
 interface Props {
@@ -37,6 +50,13 @@ const ACTION_LABELS: Record<string, { label: string; color: string }> = {
   transfer: { label: 'Transferred', color: '#0891B2' },
   assign: { label: 'Assigned', color: '#B45309' },
   status_change: { label: 'Status Changed', color: '#6D28D9' },
+  // dt_order app-side actions
+  approve:            { label: 'Approved',           color: '#15803D' },
+  reject:             { label: 'Rejected',           color: '#DC2626' },
+  revision_requested: { label: 'Revision Requested', color: '#B45309' },
+  push_to_dt:         { label: 'Pushed to DT',       color: '#0891B2' },
+  // dt_order DT-side driver event (synthesized when reading dt_order_history)
+  driver_event:       { label: 'Driver',             color: '#6D28D9' },
 };
 
 function formatTime(iso: string): string {
@@ -93,16 +113,54 @@ export function EntityHistory({ entityType, entityId, tenantId, defaultExpanded,
     setLoading(true);
     (async () => {
       try {
-        let query = supabase
-          .from('entity_audit_log')
-          .select('id, action, changes, performed_by, performed_at, source')
-          .eq('entity_type', entityType)
-          .eq('entity_id', entityId)
-          .order('performed_at', { ascending: false })
-          .limit(50);
-        if (tenantId) query = query.eq('tenant_id', tenantId);
-        const { data } = await query;
-        if (data) setEntries(data as AuditEntry[]);
+        // Pull both sources in parallel for dt_order entities; everyone
+        // else just reads entity_audit_log.
+        const auditPromise = (async () => {
+          let q = supabase
+            .from('entity_audit_log')
+            .select('id, action, changes, performed_by, performed_at, source')
+            .eq('entity_type', entityType)
+            .eq('entity_id', entityId)
+            .order('performed_at', { ascending: false })
+            .limit(100);
+          if (tenantId) q = q.eq('tenant_id', tenantId);
+          const { data } = await q;
+          return (data ?? []).map(r => ({ ...(r as Omit<AuditEntry, 'origin'>), origin: 'app' as const }));
+        })();
+
+        const dtHistoryPromise = entityType === 'dt_order'
+          ? (async () => {
+              const { data } = await supabase
+                .from('dt_order_history')
+                .select('id, code, description, owner_name, owner_type, happened_at, lat, lng')
+                .eq('dt_order_id', entityId)
+                .order('happened_at', { ascending: false })
+                .limit(100);
+              return (data ?? []).map((r: { id: string; code: number | null; description: string | null; owner_name: string | null; owner_type: string | null; happened_at: string; lat: number | null; lng: number | null }) => ({
+                id: `dt:${r.id}`,
+                action: 'driver_event',
+                changes: {
+                  // Use description as the primary label so each event
+                  // reads naturally ("On the way", "Delivered", etc.)
+                  // rather than every dt event saying "Driver".
+                  summary: r.description || 'Driver event',
+                  code: r.code ?? undefined,
+                  ownerType: r.owner_type ?? undefined,
+                },
+                performed_by: r.owner_name ?? '',
+                performed_at: r.happened_at,
+                source: 'dt_export',
+                origin: 'dt' as const,
+              }));
+            })()
+          : Promise.resolve([]);
+
+        const [appEntries, dtEntries] = await Promise.all([auditPromise, dtHistoryPromise]);
+        // Merge by performed_at desc — single timeline.
+        const merged: AuditEntry[] = [...appEntries, ...dtEntries].sort(
+          (a, b) => (a.performed_at < b.performed_at ? 1 : a.performed_at > b.performed_at ? -1 : 0)
+        );
+        setEntries(merged);
       } catch { /* best-effort */ }
       setLoading(false);
       setLoaded(true);
@@ -140,8 +198,17 @@ export function EntityHistory({ entityType, entityId, tenantId, defaultExpanded,
           )}
 
           {(actionFilter && actionFilter.length > 0 ? entries.filter(e => actionFilter.includes(e.action)) : entries).map(entry => {
-            const cfg = ACTION_LABELS[entry.action] || { label: entry.action, color: '#6B7280' };
-            const detail = renderChanges(entry.changes);
+            // For DT driver events the meaningful label is the dispatch
+            // description ("Delivered", "Started", etc.) — that beats
+            // a generic "DRIVER" prefix. Promote the summary into the
+            // label and skip rendering it again in detail.
+            const dtSummary = entry.origin === 'dt' && entry.changes && typeof entry.changes === 'object'
+              ? (entry.changes as { summary?: string }).summary
+              : undefined;
+            const cfg = dtSummary
+              ? { label: dtSummary, color: ACTION_LABELS.driver_event.color }
+              : (ACTION_LABELS[entry.action] || { label: entry.action, color: '#6B7280' });
+            const detail = dtSummary ? '' : renderChanges(entry.changes);
             return (
               <div key={entry.id} style={{
                 position: 'relative', paddingBottom: 12, marginBottom: 4,
@@ -163,6 +230,25 @@ export function EntityHistory({ entityType, entityId, tenantId, defaultExpanded,
                   {detail && (
                     <span style={{ fontSize: 11, color: theme.colors.textSecondary }}>
                       {detail}
+                    </span>
+                  )}
+                  {/* Origin tag — distinguishes app-driven actions
+                      (created / approved / pushed / etc.) from DT-side
+                      driver events (started / delivered / signature
+                      captured) so the timeline still tells you who did
+                      what when both sources are interleaved. Shown only
+                      when the entity is dt_order — other entities don't
+                      mix sources. */}
+                  {entityType === 'dt_order' && (
+                    <span style={{
+                      fontSize: 9, fontWeight: 700,
+                      padding: '1px 6px', borderRadius: 6,
+                      letterSpacing: '0.5px', textTransform: 'uppercase',
+                      background: entry.origin === 'dt' ? '#EDE9FE' : '#E0F2FE',
+                      color: entry.origin === 'dt' ? '#6D28D9' : '#0369A1',
+                      marginLeft: 'auto',
+                    }}>
+                      {entry.origin === 'dt' ? 'Driver' : 'App'}
                     </span>
                   )}
                 </div>
