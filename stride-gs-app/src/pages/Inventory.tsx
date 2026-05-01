@@ -643,18 +643,26 @@ export function Inventory() {
 
   // Session 77: auto-select every accessible client on mount so the
   // page auto-loads data without a manual dropdown pick.
-  //   - client-portal users get their own accessibleClientNames (they
-  //     usually only have 1-2 anyway).
+  //   - client-portal users get their own accessibleClientNames; we
+  //     ALWAYS overwrite — never trust a persisted filter from an
+  //     earlier session because a stale localStorage entry from a
+  //     prior staff login would otherwise leak the full tenant list
+  //     ("51 selected") into the dropdown.
   //   - admin/staff get the full dropdown list. They can still narrow.
   useEffect(() => {
-    if (clientFilter.length > 0) return;
     if (user?.role === 'client' && user.accessibleClientNames?.length) {
-      setClientFilter(user.accessibleClientNames);
-    } else if ((user?.role === 'admin' || user?.role === 'staff') && clientNames.length > 0) {
+      const accessible = user.accessibleClientNames;
+      const same = clientFilter.length === accessible.length
+        && clientFilter.every(n => accessible.includes(n));
+      if (!same) setClientFilter(accessible);
+      return;
+    }
+    if (clientFilter.length > 0) return;
+    if ((user?.role === 'admin' || user?.role === 'staff') && clientNames.length > 0) {
       setClientFilter(clientNames);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.role, user?.accessibleClientNames?.length, clientNames.length]);
+  }, [user?.role, user?.accessibleClientNames?.length, clientNames.length, clientFilter]);
   const location = useLocation();
   const pendingOpenRef = useRef<string | null>(null);
   const inventoryItems: InventoryItem[] = useMemo(() => {
@@ -1593,10 +1601,13 @@ export function Inventory() {
 
       <SyncBanner syncing={refreshing} label={clientFilter.length === 1 ? clientFilter[0] : clientFilter.length > 1 ? `${clientFilter.length} clients` : undefined} />
 
-      {/* Client Filter */}
-      <div className="no-print" style={{ display: 'flex', gap: 10, alignItems: 'flex-end', marginBottom: 12, flexWrap: 'wrap' }}>
-        <MultiSelectFilter label="Client" options={dropdownClientNames} selected={clientFilter} onChange={setClientFilter} placeholder="Select client(s)..." />
-      </div>
+      {/* Client Filter — staff/admin only. Client-role users have a single
+          tenant scope; the selector would expose the count of other tenants. */}
+      {user?.role !== 'client' && (
+        <div className="no-print" style={{ display: 'flex', gap: 10, alignItems: 'flex-end', marginBottom: 12, flexWrap: 'wrap' }}>
+          <MultiSelectFilter label="Client" options={dropdownClientNames} selected={clientFilter} onChange={setClientFilter} placeholder="Select client(s)..." />
+        </div>
+      )}
 
       {/* ── Toolbar ── */}
       <div className="no-print" style={{

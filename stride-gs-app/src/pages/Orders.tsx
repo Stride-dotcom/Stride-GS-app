@@ -175,14 +175,22 @@ export function Orders() {
 
   const [clientFilter, setClientFilter] = useState<string[]>([]);
   useEffect(() => {
-    if (clientFilter.length > 0) return;
+    // Client role: ALWAYS overwrite to accessibleClientNames so a stale
+    // filter can't leak the full tenant list ("51 selected") into the
+    // dropdown. Same pattern as the other list pages.
     if (user?.role === 'client' && user.accessibleClientNames?.length) {
-      setClientFilter(user.accessibleClientNames);
-    } else if ((user?.role === 'admin' || user?.role === 'staff') && clientNames.length > 0) {
+      const accessible = user.accessibleClientNames;
+      const same = clientFilter.length === accessible.length
+        && clientFilter.every(n => accessible.includes(n));
+      if (!same) setClientFilter(accessible);
+      return;
+    }
+    if (clientFilter.length > 0) return;
+    if ((user?.role === 'admin' || user?.role === 'staff') && clientNames.length > 0) {
       setClientFilter(clientNames);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.role, user?.accessibleClientNames?.length, clientNames.length]);
+  }, [user?.role, user?.accessibleClientNames?.length, clientNames.length, clientFilter]);
 
   // ── Deep-link handler ──────────────────────────────────────────────────────
   // notify-new-order emails build URLs like
@@ -580,10 +588,14 @@ export function Orders() {
 
           <SyncBanner syncing={refreshing} label={clientFilter.length === 1 ? clientFilter[0] : clientFilter.length > 1 ? `${clientFilter.length} clients` : undefined} />
 
-          {/* Client filter */}
-          <div style={{ display: 'flex', gap: 10, alignItems: 'flex-end', marginBottom: 12, flexWrap: 'wrap' }}>
-            <MultiSelectFilter label="Client" options={dropdownClientNames} selected={clientFilter} onChange={setClientFilter} placeholder="Select client(s)..." />
-          </div>
+          {/* Client filter — staff/admin only. Client-role users have a
+              single tenant scope; the selector would expose the count of
+              other tenants. */}
+          {user?.role !== 'client' && (
+            <div style={{ display: 'flex', gap: 10, alignItems: 'flex-end', marginBottom: 12, flexWrap: 'wrap' }}>
+              <MultiSelectFilter label="Client" options={dropdownClientNames} selected={clientFilter} onChange={setClientFilter} placeholder="Select client(s)..." />
+            </div>
+          )}
 
           {/* Main toolbar */}
           <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', marginBottom: 12 }}>

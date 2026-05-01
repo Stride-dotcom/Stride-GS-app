@@ -138,15 +138,22 @@ export function Repairs() {
   }, [clientNames, user?.role, user?.accessibleClientNames]);
   useEffect(() => {
     // Session 77: auto-load all accounts for admin/staff on mount.
-    // Client role stays scoped to its own accessibleClientNames.
-    if (clientFilter.length > 0) return;
+    // Client role: ALWAYS overwrite to accessibleClientNames so a stale
+    // persisted filter from a prior staff session can't leak the full
+    // tenant list ("51 selected") into the page.
     if (user?.role === 'client' && user.accessibleClientNames?.length) {
-      setClientFilter(user.accessibleClientNames);
-    } else if ((user?.role === 'admin' || user?.role === 'staff') && clientNames.length > 0) {
+      const accessible = user.accessibleClientNames;
+      const same = clientFilter.length === accessible.length
+        && clientFilter.every(n => accessible.includes(n));
+      if (!same) setClientFilter(accessible);
+      return;
+    }
+    if (clientFilter.length > 0) return;
+    if ((user?.role === 'admin' || user?.role === 'staff') && clientNames.length > 0) {
       setClientFilter(clientNames);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.role, user?.accessibleClientNames?.length, clientNames.length]);
+  }, [user?.role, user?.accessibleClientNames?.length, clientNames.length, clientFilter]);
 
   const selectedSheetId = useMemo<string | string[] | undefined>(() => {
     if (clientFilter.length === 0) return undefined;
@@ -411,10 +418,13 @@ export function Repairs() {
 
       <SyncBanner syncing={refreshing} label={clientFilter.length === 1 ? clientFilter[0] : clientFilter.length > 1 ? `${clientFilter.length} clients` : undefined} />
 
-      {/* Client Filter */}
-      <div style={{ display: 'flex', gap: 10, alignItems: 'flex-end', marginBottom: 12, flexWrap: 'wrap' }}>
-        <MultiSelectFilter label="Client" options={dropdownClientNames} selected={clientFilter} onChange={setClientFilter} placeholder="Select client(s)..." />
-      </div>
+      {/* Client Filter — staff/admin only. Client-role users have a single
+          tenant scope; the selector would expose the count of other tenants. */}
+      {user?.role !== 'client' && (
+        <div style={{ display: 'flex', gap: 10, alignItems: 'flex-end', marginBottom: 12, flexWrap: 'wrap' }}>
+          <MultiSelectFilter label="Client" options={dropdownClientNames} selected={clientFilter} onChange={setClientFilter} placeholder="Select client(s)..." />
+        </div>
+      )}
 
       <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', marginBottom: 12 }}>
         <div style={{ position: 'relative', flex: '1 1 200px', maxWidth: 320 }}><Search size={15} color={theme.colors.textMuted} style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)' }} /><input value={globalFilter} onChange={e => setGlobalFilter(e.target.value)} placeholder="Search repairs..." style={{ width: '100%', padding: '10px 16px 10px 36px', fontSize: 13, border: '1px solid rgba(0,0,0,0.08)', borderRadius: 100, outline: 'none', background: '#fff', fontFamily: 'inherit' }} /></div>

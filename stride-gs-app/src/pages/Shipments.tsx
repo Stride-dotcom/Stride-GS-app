@@ -324,15 +324,23 @@ export function Shipments() {
   }, [clientNames, user?.role, user?.accessibleClientNames]);
 
   // Auto-select all accessible clients on mount so the page loads data without a manual pick.
+  // Client role: ALWAYS overwrite to accessibleClientNames so a stale
+  // persisted filter from a prior staff session can't leak the full tenant
+  // list ("51 selected") into the page.
   useEffect(() => {
-    if (clientFilter.length > 0) return;
     if (user?.role === 'client' && user.accessibleClientNames?.length) {
-      setClientFilter(user.accessibleClientNames);
-    } else if ((user?.role === 'admin' || user?.role === 'staff') && clientNames.length > 0) {
+      const accessible = user.accessibleClientNames;
+      const same = clientFilter.length === accessible.length
+        && clientFilter.every(n => accessible.includes(n));
+      if (!same) setClientFilter(accessible);
+      return;
+    }
+    if (clientFilter.length > 0) return;
+    if ((user?.role === 'admin' || user?.role === 'staff') && clientNames.length > 0) {
       setClientFilter(clientNames);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.role, user?.accessibleClientNames?.length, clientNames.length]);
+  }, [user?.role, user?.accessibleClientNames?.length, clientNames.length, clientFilter]);
 
   // Effect 1: Route state OR ?open= query param → navigate directly to entity page.
   // ShipmentPage fetches its own data from Supabase by ID.
@@ -503,10 +511,13 @@ export function Shipments() {
 
       <SyncBanner syncing={refreshing} label={clientFilter.length === 1 ? clientFilter[0] : clientFilter.length > 1 ? `${clientFilter.length} clients` : undefined} />
 
-      {/* Client Filter */}
-      <div style={{ display: 'flex', gap: 10, alignItems: 'flex-end', marginBottom: 12, flexWrap: 'wrap' }}>
-        <MultiSelectFilter label="Client" options={dropdownClientNames} selected={clientFilter} onChange={setClientFilter} placeholder="Select client(s)..." />
-      </div>
+      {/* Client Filter — staff/admin only. Client-role users have a single
+          tenant scope; the selector would expose the count of other tenants. */}
+      {user?.role !== 'client' && (
+        <div style={{ display: 'flex', gap: 10, alignItems: 'flex-end', marginBottom: 12, flexWrap: 'wrap' }}>
+          <MultiSelectFilter label="Client" options={dropdownClientNames} selected={clientFilter} onChange={setClientFilter} placeholder="Select client(s)..." />
+        </div>
+      )}
 
       {/* Summary Cards */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 16, marginBottom: 24 }}>
