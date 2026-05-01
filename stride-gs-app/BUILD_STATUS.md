@@ -1,6 +1,6 @@
 # Stride GS App — Build Status
 
-> Last updated: 2026-04-24. Verified against actual codebase.
+> Last updated: 2026-05-01. Verified against actual codebase.
 
 ---
 
@@ -94,6 +94,16 @@ UI components: FloatingActionMenu, WriteButton, BatchGuard, ActionTooltip, Batch
 - Quote Tool with PDF generation
 - Expected operations calendar
 - QR Scanner + Labels (native React, Supabase-backed)
+
+---
+
+## Recent Changes (2026-05-01, session 87)
+
+### Task detail lookup scoped by tenant — fixes "Task Not Found" after transfer
+- Symptom: item 62630 was received under J Garner (auto-inspect), then transferred to Nip Tuck (also auto-inspect). Both tenants ended up with `INSP-62630-1` in their Tasks sheet (J Garner CANCELLED via Transfer.gs, Nip Tuck COMPLETED). Clicking either row showed "Task Not Found".
+- Root cause: task IDs are unique per-spreadsheet only (Tasks.gs `nextTaskCounter_` scans the local sheet). After transfer, both tenants hold rows with the same `task_id`. The detail fetch used `.eq('task_id', taskId).maybeSingle()`, which fails on duplicates.
+- Fix: `src/lib/supabaseQueries.ts` — `fetchTaskByIdFromSupabase` accepts an optional `clientSheetId` and adds `.eq('tenant_id', clientSheetId)` to disambiguate. With no hint, returns null on multi-row matches so `useTaskDetail`'s legacy GAS scan can resolve.
+- Nav plumbing: `src/pages/Tasks.tsx` row click, Task ID cell click, `__openTaskDetail`, `?open=` deep-link effect, and pending-open effect all now append `?client=<spreadsheetId>`. `src/pages/ItemPage.tsx` cross-link to tasks adds it. `src/pages/TaskPage.tsx` and `src/pages/TaskJobPage.tsx` parse `?client=` from URL and pass to `useTaskDetail` (new optional second arg). PR #156.
 
 ---
 
