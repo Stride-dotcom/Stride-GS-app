@@ -11,7 +11,7 @@ import {
   AlertCircle, Loader2, SearchX, Pencil, X,
   CheckCircle2, Clock3, DollarSign, MapPin, Phone,
   Mail, Calendar, Clock, Package, FileText, Truck,
-  User, PenLine, MessageSquare, Activity,
+  User, PenLine, MessageSquare,
 } from 'lucide-react';
 import { theme } from '../styles/theme';
 import { BtnSpinner } from '../components/ui/BtnSpinner';
@@ -673,43 +673,12 @@ function CompletionTab({
         </EPCard>
       )}
 
-      {/* DT history timeline */}
-      {history.length > 0 && (
-        <EPCard>
-          <SectionTitle>
-            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-              <Activity size={11} /> Driver Activity ({history.length})
-            </span>
-          </SectionTitle>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-            {history.map((h) => (
-              <div key={h.id} style={{ display: 'flex', gap: 10, padding: '6px 0', borderBottom: `1px solid ${theme.colors.border}` }}>
-                <div style={{ fontSize: 11, color: EP.textMuted, flexShrink: 0, width: 100 }}>
-                  {fmtDateTime(h.happenedAt)}
-                </div>
-                <div style={{ fontSize: 12, color: EP.textPrimary, flex: 1 }}>
-                  {h.description || (h.code != null ? `Event ${h.code}` : 'Event')}
-                  {h.ownerName && (
-                    <span style={{ color: EP.textMuted, marginLeft: 6, fontSize: 11 }}>
-                      · {h.ownerName}
-                    </span>
-                  )}
-                  {(h.lat != null && h.lng != null) && (
-                    <a
-                      href={`https://www.google.com/maps?q=${h.lat},${h.lng}`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      style={{ marginLeft: 6, fontSize: 11, color: EP.accent, textDecoration: 'none' }}
-                    >
-                      <MapPin size={10} style={{ verticalAlign: 'middle' }} /> map
-                    </a>
-                  )}
-                </div>
-              </div>
-            ))}
-          </div>
-        </EPCard>
-      )}
+      {/* Driver Activity moved into the Activity tab. EntityHistory now
+          merges entity_audit_log (app actions) and dt_order_history
+          (DT-side driver events) into one chronological timeline with
+          App / Driver origin tags. The standalone Details-tab block
+          rendered the same dt_order_history rows here, so removing it
+          eliminates the duplicate timeline. */}
     </div>
   );
 }
