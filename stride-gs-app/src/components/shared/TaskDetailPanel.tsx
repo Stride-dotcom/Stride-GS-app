@@ -12,7 +12,7 @@ import { PhotosPanel as _PhotosPanel, DocumentsPanel as _DocumentsPanel, NotesPa
 import { EntityHistory } from './EntityHistory';
 import { ItemIdBadges } from './ItemIdBadges';
 import { useItemIndicators } from '../../hooks/useItemIndicators';
-import { buildDeepLink } from '../../lib/deepLinks';
+import { buildDeepLinkUrl } from '../../lib/deepLinks';
 import { theme } from '../../styles/theme';
 import { fmtDate, fmtDateTime } from '../../lib/constants';
 import { WriteButton } from './WriteButton';
@@ -744,7 +744,7 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
                 if (!shipNo || isUrlLike) return <div style={{ fontSize: 13, color: theme.colors.textMuted }}>—</div>;
                 return (
                   <a
-                    href={buildDeepLink('shipments', shipNo, clientSheetId)}
+                    href={buildDeepLinkUrl('shipments', shipNo, clientSheetId)}
                     target="_blank"
                     rel="noopener noreferrer"
                     style={{ fontSize: 13, color: theme.colors.orange, fontWeight: 600, textDecoration: 'underline', display: 'inline-flex', alignItems: 'center', gap: 4 }}

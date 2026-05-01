@@ -19,6 +19,7 @@
 - Before starting work: always `git checkout source && git pull origin source` to get latest.
 - If another builder's PR merges while you're working: rebase your branch (`git rebase source`) before opening your PR.
 - Multiple builders CAN work simultaneously — branches keep everyone's work isolated.
+- **COMMIT EARLY, COMMIT OFTEN.** As soon as a file edit is in a working state, commit it on your feature branch — *before* running typecheck, build, code review, or any other long-running step. Uncommitted changes are evaporated by `git pull` / branch-switch / `npm run deploy` (which calls `git add -A` on the parent repo), and parallel builders WILL trigger one of those while you're mid-flight. We've lost hours of work to this; treat an uncommitted edit as already-deleted. Use `git stash` for genuinely experimental WIP — never as a substitute for committing.
 
 ---
 
@@ -101,13 +102,15 @@ Every builder session must update these docs before reporting done:
 
 Every change must go through this sequence before being shipped:
 
-1. **Write changes** — edit source files in `C:\dev\Stride-GS-app\stride-gs-app\src\`
-2. **Type-check** — `node node_modules/typescript/lib/tsc.js --noEmit` (zero errors required)
-3. **Full build** — `npm run build` (catches real bundler/vite errors the type-check misses)
-4. **Code review** — spawn an Opus 4.7 subagent to review all diffs before committing
-5. **Only after review passes:** follow the [⚠️ CRITICAL: Branching Rules](#-critical-branching-rules) — branch → commit → `gh pr create --base source` → `gh pr merge --squash --delete-branch` → deploy
+1. **Branch first** — `git checkout source && git pull origin source && git checkout -b feat/<stream>/<desc>`. Streams: `feat/warehouse/*`, `feat/delivery/*`, `feat/fix/*`. Never edit files on `source`.
+2. **Write changes** — edit source files in `C:\dev\Stride-GS-app\stride-gs-app\src\`
+3. **Commit immediately** — `git commit -am "..."`. Do this as soon as the edits compile in your head — *before* typecheck/build/review. A parallel builder's `git pull` or `npm run deploy` will erase any uncommitted file in your working tree without warning. See [⚠️ CRITICAL: Branching Rules](#-critical-branching-rules).
+4. **Type-check** — `node node_modules/typescript/lib/tsc.js --noEmit` (zero errors required). If it fails, fix and amend or add a commit — never leave the fix uncommitted.
+5. **Full build** — `npm run build` (catches real bundler/vite errors the type-check misses)
+6. **Code review** — spawn an Opus 4.7 subagent to review all diffs before merging
+7. **PR + merge + deploy** — `git push -u origin <branch>` → `gh pr create --base source` → `gh pr merge --squash --delete-branch` → `git checkout source && git pull` → `npm run deploy -- "what changed"`
 
-Do not skip steps. `tsc --noEmit` passing is not sufficient — always run `npm run build` to catch vite-level errors.
+Do not skip steps. `tsc --noEmit` passing is not sufficient — always run `npm run build` to catch vite-level errors. Steps 1 and 3 are the ones that historically get skipped and cause the most pain.
 
 ---
 
