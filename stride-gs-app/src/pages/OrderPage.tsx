@@ -38,6 +38,7 @@ import { supabase } from '../lib/supabase';
 import { CreateDeliveryOrderModal } from '../components/shared/CreateDeliveryOrderModal';
 import { ReleaseItemsModal } from '../components/shared/ReleaseItemsModal';
 import { generateOrderPdf } from '../lib/orderPdf';
+import { logDtOrderAudit } from '../lib/dtOrderAudit';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -803,6 +804,19 @@ export function OrderPage() {
         .eq('id', order.id);
       if (updErr) throw updErr;
 
+      // Audit: reviewer rejected or requested-revision. Best-effort.
+      void logDtOrderAudit({
+        orderId: order.id,
+        tenantId: order.tenantId,
+        action: action === 'rejected' ? 'reject' : 'revision_requested',
+        changes: {
+          reviewStatus: { old: order.reviewStatus, new: action },
+          reviewerName,
+          reviewNotes: notes.trim() || null,
+        },
+        performedBy: user?.email ?? null,
+      });
+
       // Best-effort email — don't unwind the status change on send fail.
       try {
         const { data, error: invokeErr } = await supabase.functions.invoke('notify-order-revision', {
@@ -829,7 +843,7 @@ export function OrderPage() {
     } finally {
       setSaving(false);
     }
-  }, [order, refetch]);
+  }, [order, refetch, user?.email]);
 
   // Phase A — Edit Full Order: opens the same form the create flow uses
   // (CreateDeliveryOrderModal in editOrderId mode). The detail page's
@@ -904,6 +918,44 @@ export function OrderPage() {
       const { error: err } = await supabase.from('dt_orders').update(patch).eq('id', order.id);
       if (err) throw err;
 
+      // Audit: inline edit save. Best-effort. Diff is coarse (which
+      // top-level fields changed); the patch object is the canonical
+      // record of what got written.
+      const changedFields: string[] = [];
+      if (edit.contactName     !== (order.contactName     ?? '')) changedFields.push('contactName');
+      if (edit.contactAddress  !== (order.contactAddress  ?? '')) changedFields.push('contactAddress');
+      if (edit.contactCity     !== (order.contactCity     ?? '')) changedFields.push('contactCity');
+      if (edit.contactState    !== (order.contactState    ?? '')) changedFields.push('contactState');
+      if (edit.contactZip      !== (order.contactZip      ?? '')) changedFields.push('contactZip');
+      if (edit.contactPhone    !== (order.contactPhone    ?? '')) changedFields.push('contactPhone');
+      if (edit.contactEmail    !== (order.contactEmail    ?? '')) changedFields.push('contactEmail');
+      if (edit.localServiceDate !== (order.localServiceDate ?? '')) changedFields.push('localServiceDate');
+      if (edit.windowStartLocal !== ((order.windowStartLocal ?? '').slice(0, 5))) changedFields.push('windowStartLocal');
+      if (edit.windowEndLocal   !== ((order.windowEndLocal   ?? '').slice(0, 5))) changedFields.push('windowEndLocal');
+      if (edit.poNumber        !== (order.poNumber        ?? '')) changedFields.push('poNumber');
+      if (edit.sidemark        !== (order.sidemark        ?? '')) changedFields.push('sidemark');
+      if (edit.clientReference !== (order.clientReference ?? '')) changedFields.push('clientReference');
+      if (edit.details         !== (order.details         ?? '')) changedFields.push('details');
+      if (edit.reviewStatus    !== order.reviewStatus)             changedFields.push('reviewStatus');
+      if (edit.reviewNotes     !== (order.reviewNotes     ?? '')) changedFields.push('reviewNotes');
+      if (pricingChanged)                                          changedFields.push('pricing');
+      void logDtOrderAudit({
+        orderId: order.id,
+        tenantId: order.tenantId,
+        action: 'update',
+        changes: {
+          fieldsChanged: changedFields,
+          ...(edit.reviewStatus !== order.reviewStatus
+            ? { reviewStatus: { old: order.reviewStatus, new: edit.reviewStatus } }
+            : {}),
+          ...(pricingChanged
+            ? { orderTotal: { old: order.orderTotal, new: newTotal },
+                baseDeliveryFee: { old: order.baseDeliveryFee, new: newBaseFee } }
+            : {}),
+        },
+        performedBy: user?.email ?? null,
+      });
+
       // If the inline edit flipped review_status into a state that
       // emails the submitter (revision_requested / rejected), fire the
       // notify-order-revision Edge Function. The footer Reject /
@@ -952,7 +1004,7 @@ export function OrderPage() {
     } finally {
       setSaving(false);
     }
-  }, [order, edit, refetch]);
+  }, [order, edit, refetch, user?.email]);
 
   // ── Loading / error states ─────────────────────────────────────────────────
 
@@ -1126,6 +1178,14 @@ export function OrderPage() {
             variant="primary"
             onClick={async () => {
               await supabase.from('dt_orders').update({ review_status: 'approved', reviewed_at: new Date().toISOString() }).eq('id', order.id);
+              // Audit: approve. Best-effort.
+              void logDtOrderAudit({
+                orderId: order.id,
+                tenantId: order.tenantId,
+                action: 'approve',
+                changes: { reviewStatus: { old: order.reviewStatus, new: 'approved' } },
+                performedBy: user?.email ?? null,
+              });
               const fresh = await fetchDtOrderByIdFromSupabase(order.id);
               if (fresh) setLocalOrder(fresh);
               refetch();
