@@ -99,6 +99,11 @@ UI components: FloatingActionMenu, WriteButton, BatchGuard, ActionTooltip, Batch
 
 ## Recent Changes (2026-05-01, session 87)
 
+### Auth: block authenticated transition until JWT carries user_metadata
+- Symptom: even with the correct deep-link format, clicking an inspection email cold (e.g. INSP-63026-1) sometimes lands on "Task Not Found"; a manual refresh fixes it.
+- Root cause: `AuthContext` fired `supabase.auth.updateUser({role, clientSheetId})` fire-and-forget and immediately marked the user authenticated. The first `useTaskDetail → fetchTaskByIdFromSupabase` query could race a stale JWT whose `user_metadata` lacked role/clientSheetId. The `tasks_select_staff` RLS bypass keys off `user_metadata.role`; with that missing even admin lookups returned 0 rows → "not-found".
+- Fix: `src/contexts/AuthContext.tsx` — both auth paths (cached fast-path + fresh GAS-verify) compare the live session JWT's `user_metadata` against the resolved user and only `await` `updateUser` when stale. Zero added latency when already in sync. PR #160.
+
 ### Email deep-link self-heal + WillCalls query-param fix
 - WillCalls.gs (CREATED + RELEASE emails) shipped route-style URLs `/#/will-calls/<id>` with no `&client=`, which the React detail lookup rejects. Switched to `?open=<id>&client=<ssid>` per CLAUDE.md "Deep Links — DO NOT BREAK".
 - Emails.gs `sendTemplateEmail_` gains a defensive self-heal that rewrites any leftover `/#/<entity>/<id>` URL (shipments|tasks|repairs|will-calls|inventory|claims) to query-param form with `&client=` before the existing missing-&client= patcher runs. Hand-edited templates can't ship the broken format.
