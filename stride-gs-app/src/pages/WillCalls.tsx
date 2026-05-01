@@ -116,27 +116,21 @@ export function WillCalls() {
     }
     return clientNames;
   }, [clientNames, authUser?.role, authUser?.accessibleClientNames]);
+  const filterInitRef = useRef(false);
   useEffect(() => {
-    // Session 77: auto-load all accounts on mount.
-    // - client role: ALWAYS overwrite to accessibleClientNames so a stale
-    //   persisted filter from a prior staff session can't leak the full
-    //   tenant list ("51 selected") into the page.
-    // - staff / admin: pre-select every client in the dropdown so the
-    //   page auto-loads all data instead of showing "Select one or more
-    //   clients to load data." The dropdown still lets them narrow down.
-    if (authUser?.role === 'client' && authUser.accessibleClientNames?.length) {
-      const accessible = authUser.accessibleClientNames;
-      const same = clientFilter.length === accessible.length
-        && clientFilter.every(n => accessible.includes(n));
-      if (!same) setClientFilter(accessible);
-      return;
-    }
-    if (clientFilter.length > 0) return;
-    if ((authUser?.role === 'admin' || authUser?.role === 'staff') && clientNames.length > 0) {
-      setClientFilter(clientNames);
+    // Session 77: ONE-TIME init — see Inventory.tsx for full notes.
+    if (filterInitRef.current) return;
+    if (!authUser?.role) return;
+    if (authUser.role === 'client' && authUser.accessibleClientNames?.length) {
+      setClientFilter(authUser.accessibleClientNames);
+      filterInitRef.current = true;
+    } else if (authUser.role === 'admin' || authUser.role === 'staff') {
+      if (clientNames.length === 0) return;
+      if (clientFilter.length === 0) setClientFilter(clientNames);
+      filterInitRef.current = true;
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [authUser?.role, authUser?.accessibleClientNames?.length, clientNames.length, clientFilter]);
+  }, [authUser?.role, authUser?.accessibleClientNames, clientNames.length]);
 
   const selectedSheetId = useMemo<string | string[] | undefined>(() => {
     if (clientFilter.length === 0) return undefined;

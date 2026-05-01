@@ -641,28 +641,30 @@ export function Inventory() {
     return clientNames;
   }, [clientNames, user?.role, user?.accessibleClientNames]);
 
-  // Session 77: auto-select every accessible client on mount so the
-  // page auto-loads data without a manual dropdown pick.
-  //   - client-portal users get their own accessibleClientNames; we
-  //     ALWAYS overwrite — never trust a persisted filter from an
-  //     earlier session because a stale localStorage entry from a
-  //     prior staff login would otherwise leak the full tenant list
-  //     ("51 selected") into the dropdown.
-  //   - admin/staff get the full dropdown list. They can still narrow.
+  // Session 77: auto-select on mount so the page auto-loads data without a
+  // manual dropdown pick. ONE-TIME init via a ref so subsequent user changes
+  // (clearing/narrowing the dropdown) are never overwritten.
+  //   - client role: ALWAYS force to accessibleClientNames once user loads,
+  //     even if the persisted filter already has values — defends against a
+  //     stale localStorage entry from a prior staff session that leaked the
+  //     full tenant list ("51 selected") into the dropdown.
+  //   - admin/staff: select all clientNames only if filter is empty (first
+  //     visit). Persisted localStorage selection is preserved; user-cleared
+  //     state stays cleared.
+  const filterInitRef = useRef(false);
   useEffect(() => {
-    if (user?.role === 'client' && user.accessibleClientNames?.length) {
-      const accessible = user.accessibleClientNames;
-      const same = clientFilter.length === accessible.length
-        && clientFilter.every(n => accessible.includes(n));
-      if (!same) setClientFilter(accessible);
-      return;
-    }
-    if (clientFilter.length > 0) return;
-    if ((user?.role === 'admin' || user?.role === 'staff') && clientNames.length > 0) {
-      setClientFilter(clientNames);
+    if (filterInitRef.current) return;
+    if (!user?.role) return;
+    if (user.role === 'client' && user.accessibleClientNames?.length) {
+      setClientFilter(user.accessibleClientNames);
+      filterInitRef.current = true;
+    } else if (user.role === 'admin' || user.role === 'staff') {
+      if (clientNames.length === 0) return; // wait for clients to load
+      if (clientFilter.length === 0) setClientFilter(clientNames);
+      filterInitRef.current = true;
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.role, user?.accessibleClientNames?.length, clientNames.length, clientFilter]);
+  }, [user?.role, user?.accessibleClientNames, clientNames.length]);
   const location = useLocation();
   const pendingOpenRef = useRef<string | null>(null);
   const inventoryItems: InventoryItem[] = useMemo(() => {

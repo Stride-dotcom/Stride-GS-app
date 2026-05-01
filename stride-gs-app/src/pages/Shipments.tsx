@@ -323,24 +323,25 @@ export function Shipments() {
     return clientNames;
   }, [clientNames, user?.role, user?.accessibleClientNames]);
 
-  // Auto-select all accessible clients on mount so the page loads data without a manual pick.
-  // Client role: ALWAYS overwrite to accessibleClientNames so a stale
-  // persisted filter from a prior staff session can't leak the full tenant
-  // list ("51 selected") into the page.
+  // Auto-select on mount via a ONE-TIME ref so subsequent user changes
+  // (clearing/narrowing the dropdown) are never overwritten.
+  //   - client role: ALWAYS force to accessibleClientNames once user loads
+  //     to defend against a stale persisted filter from a prior staff session.
+  //   - admin/staff: select all clientNames only if filter is empty.
+  const filterInitRef = useRef(false);
   useEffect(() => {
-    if (user?.role === 'client' && user.accessibleClientNames?.length) {
-      const accessible = user.accessibleClientNames;
-      const same = clientFilter.length === accessible.length
-        && clientFilter.every(n => accessible.includes(n));
-      if (!same) setClientFilter(accessible);
-      return;
-    }
-    if (clientFilter.length > 0) return;
-    if ((user?.role === 'admin' || user?.role === 'staff') && clientNames.length > 0) {
-      setClientFilter(clientNames);
+    if (filterInitRef.current) return;
+    if (!user?.role) return;
+    if (user.role === 'client' && user.accessibleClientNames?.length) {
+      setClientFilter(user.accessibleClientNames);
+      filterInitRef.current = true;
+    } else if (user.role === 'admin' || user.role === 'staff') {
+      if (clientNames.length === 0) return;
+      if (clientFilter.length === 0) setClientFilter(clientNames);
+      filterInitRef.current = true;
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.role, user?.accessibleClientNames?.length, clientNames.length, clientFilter]);
+  }, [user?.role, user?.accessibleClientNames, clientNames.length]);
 
   // Effect 1: Route state OR ?open= query param → navigate directly to entity page.
   // ShipmentPage fetches its own data from Supabase by ID.

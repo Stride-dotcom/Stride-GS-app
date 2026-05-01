@@ -210,25 +210,25 @@ export function Tasks() {
     }
     return clientNames;
   }, [clientNames, user?.role, user?.accessibleClientNames]);
+  // Session 77: ONE-TIME init via a ref so subsequent user changes
+  // (clearing/narrowing the dropdown) are never overwritten.
+  //   - client role: ALWAYS force to accessibleClientNames once user loads
+  //     to defend against a stale persisted filter from a prior staff session.
+  //   - admin/staff: select all clientNames only if filter is empty.
+  const filterInitRef = useRef(false);
   useEffect(() => {
-    // Session 77: auto-load all accounts for admin/staff on mount so
-    // the page doesn't show "Select one or more clients to load data."
-    // Client role: ALWAYS overwrite to accessibleClientNames so a stale
-    // persisted filter from a prior staff session can't leak the full
-    // tenant list ("51 selected") into the page.
-    if (user?.role === 'client' && user.accessibleClientNames?.length) {
-      const accessible = user.accessibleClientNames;
-      const same = clientFilter.length === accessible.length
-        && clientFilter.every(n => accessible.includes(n));
-      if (!same) setClientFilter(accessible);
-      return;
-    }
-    if (clientFilter.length > 0) return;
-    if ((user?.role === 'admin' || user?.role === 'staff') && clientNames.length > 0) {
-      setClientFilter(clientNames);
+    if (filterInitRef.current) return;
+    if (!user?.role) return;
+    if (user.role === 'client' && user.accessibleClientNames?.length) {
+      setClientFilter(user.accessibleClientNames);
+      filterInitRef.current = true;
+    } else if (user.role === 'admin' || user.role === 'staff') {
+      if (clientNames.length === 0) return;
+      if (clientFilter.length === 0) setClientFilter(clientNames);
+      filterInitRef.current = true;
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.role, user?.accessibleClientNames?.length, clientNames.length, clientFilter]);
+  }, [user?.role, user?.accessibleClientNames, clientNames.length]);
 
   const selectedSheetId = useMemo<string | string[] | undefined>(() => {
     if (clientFilter.length === 0) return undefined;
