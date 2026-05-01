@@ -1146,6 +1146,8 @@ export async function fetchTaskByIdFromSupabase(
     // Task IDs are unique per-client only — when an item is transferred
     // between auto-inspect clients, both sheets can hold the same INSP-<item>-1
     // ID. Scope by tenant_id when known so the right row resolves.
+    // Try the scoped query first when we have a hint — it disambiguates duplicate
+    // task_ids across tenants (transferred items, copied INSP counters).
     if (clientSheetId) {
       const { data, error } = await supabase
         .from('tasks')
@@ -1154,18 +1156,26 @@ export async function fetchTaskByIdFromSupabase(
         .eq('tenant_id', clientSheetId)
         .limit(1)
         .maybeSingle();
-      if (error || !data) return null;
-      return mapSupabaseTaskRow(data as SupabaseTaskRow, clientNameMap);
+      if (!error && data) return mapSupabaseTaskRow(data as SupabaseTaskRow, clientNameMap);
+      // Scoped miss — fall through to unscoped lookup. Covers email links whose
+      // &client= param was stale, missing, or pointing at the wrong tenant
+      // (e.g. an item that was transferred between tenants after the email).
     }
-    // No tenant hint: fetch up to a few matches; only return on unambiguous hit.
+    // Unscoped fetch: pull a few matches. If exactly one, use it. If multiple
+    // and we had a tenant hint, prefer the row matching the hint; otherwise
+    // bail so the caller's legacy fallback can disambiguate.
     const { data, error } = await supabase
       .from('tasks')
       .select('*')
       .eq('task_id', taskId)
       .limit(5);
     if (error || !data || data.length === 0) return null;
-    if (data.length > 1) return null; // ambiguous — caller should retry with clientSheetId
-    return mapSupabaseTaskRow(data[0] as SupabaseTaskRow, clientNameMap);
+    if (data.length === 1) return mapSupabaseTaskRow(data[0] as SupabaseTaskRow, clientNameMap);
+    if (clientSheetId) {
+      const hit = data.find(r => (r as SupabaseTaskRow).tenant_id === clientSheetId);
+      if (hit) return mapSupabaseTaskRow(hit as SupabaseTaskRow, clientNameMap);
+    }
+    return null; // ambiguous — caller falls back to legacy GAS scan
   } catch {
     return null;
   }
