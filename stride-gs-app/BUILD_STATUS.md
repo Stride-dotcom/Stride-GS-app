@@ -99,6 +99,11 @@ UI components: FloatingActionMenu, WriteButton, BatchGuard, ActionTooltip, Batch
 
 ## Recent Changes (2026-05-01, session 87)
 
+### Storage RLS tolerates `_` ↔ `-` in clientSheetId path prefix
+- Symptom: Hillary @ Nip Tuck (client role) couldn't see photos on inventory items in her own account; admin "login as" worked fine.
+- Root cause: `usePhotos` / `useDocuments` upload paths sanitize the tenant ID via `sanitizeTenantForPath` (replaces `_` with `-`), but the storage RLS policies (`photos_select_tenant`, `documents_select_tenant`) compared the raw JWT `clientSheetId` (with `_` preserved) against the sanitized path's first segment. Tenants whose ID contains `_` — Nip Tuck (`1_CINtvp...`) and ~10 others — got blocked from their own photos. Admin/staff bypassed via the role branch.
+- Fix: `supabase/migrations/20260501010000_storage_rls_underscore_dash_tolerance.sql` — policies now accept either the raw or underscore-stripped form. Verified as Hillary: visible photos bucket objects rose 188 → 280 (+92 for Nip Tuck alone). Migration applied via MCP. PR #157.
+
 ### Task detail lookup scoped by tenant — fixes "Task Not Found" after transfer
 - Symptom: item 62630 was received under J Garner (auto-inspect), then transferred to Nip Tuck (also auto-inspect). Both tenants ended up with `INSP-62630-1` in their Tasks sheet (J Garner CANCELLED via Transfer.gs, Nip Tuck COMPLETED). Clicking either row showed "Task Not Found".
 - Root cause: task IDs are unique per-spreadsheet only (Tasks.gs `nextTaskCounter_` scans the local sheet). After transfer, both tenants hold rows with the same `task_id`. The detail fetch used `.eq('task_id', taskId).maybeSingle()`, which fails on duplicates.
