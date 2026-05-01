@@ -1128,16 +1128,33 @@ function mapSupabaseTaskRow(row: SupabaseTaskRow, clientNameMap?: ClientNameMap)
  */
 export async function fetchTaskByIdFromSupabase(
   taskId: string,
-  clientNameMap?: ClientNameMap
+  clientNameMap?: ClientNameMap,
+  clientSheetId?: string
 ): Promise<ApiTask | null> {
   try {
+    // Task IDs are unique per-client only — when an item is transferred
+    // between auto-inspect clients, both sheets can hold the same INSP-<item>-1
+    // ID. Scope by tenant_id when known so the right row resolves.
+    if (clientSheetId) {
+      const { data, error } = await supabase
+        .from('tasks')
+        .select('*')
+        .eq('task_id', taskId)
+        .eq('tenant_id', clientSheetId)
+        .limit(1)
+        .maybeSingle();
+      if (error || !data) return null;
+      return mapSupabaseTaskRow(data as SupabaseTaskRow, clientNameMap);
+    }
+    // No tenant hint: fetch up to a few matches; only return on unambiguous hit.
     const { data, error } = await supabase
       .from('tasks')
       .select('*')
       .eq('task_id', taskId)
-      .maybeSingle();
-    if (error || !data) return null;
-    return mapSupabaseTaskRow(data as SupabaseTaskRow, clientNameMap);
+      .limit(5);
+    if (error || !data || data.length === 0) return null;
+    if (data.length > 1) return null; // ambiguous — caller should retry with clientSheetId
+    return mapSupabaseTaskRow(data[0] as SupabaseTaskRow, clientNameMap);
   } catch {
     return null;
   }

@@ -9,7 +9,7 @@
  * logic live in TaskDetailPanel — page just wires data in and routes out.
  */
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { AlertCircle, Loader2, SearchX, ShieldX } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { useTaskDetail } from '../hooks/useTaskDetail';
@@ -44,8 +44,13 @@ function PageState({ icon: Icon, color, title, body, actions }: {
 export function TaskPage() {
   const { taskId } = useParams<{ taskId: string }>();
   const navigate = useNavigate();
+  const location = useLocation();
   useAuth();
-  const { task: fetchedTask, relatedRepairs, status, error, refetch } = useTaskDetail(taskId);
+  // ?client=<spreadsheetId> disambiguates duplicate task_ids that exist when
+  // an item is transferred between auto-inspect clients (each tenant counter
+  // is independent so source + destination can both hold INSP-<item>-1).
+  const clientHint = new URLSearchParams(location.search).get('client') || undefined;
+  const { task: fetchedTask, relatedRepairs, status, error, refetch } = useTaskDetail(taskId, clientHint);
 
   // Local optimistic state — page manages its own copy so inline edits and
   // patch functions update immediately while the write propagates.
@@ -70,13 +75,13 @@ export function TaskPage() {
     setSaving(true);
     setTimeout(async () => {
       if (taskId) {
-        const fresh = await fetchTaskByIdFromSupabase(taskId);
+        const fresh = await fetchTaskByIdFromSupabase(taskId, undefined, clientHint || localTask?.clientSheetId);
         if (fresh) setLocalTask(fresh);
       }
       setSaving(false);
       scheduleRefresh();
     }, 800);
-  }, [taskId, scheduleRefresh]);
+  }, [taskId, scheduleRefresh, clientHint, localTask?.clientSheetId]);
 
   const applyTaskPatch = useCallback((patchTaskId: string, patch: Partial<ApiTask>) => {
     setLocalTask(prev => prev && prev.taskId === patchTaskId ? { ...prev, ...patch } : prev);

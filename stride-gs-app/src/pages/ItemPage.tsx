@@ -162,7 +162,7 @@ function ItemPageInner({ item, onRefetch }: { item: ApiInventoryItem; onRefetch:
   const handleNavigateToRecord = useCallback(
     (type: 'task' | 'repair' | 'willcall' | 'shipment', id: string) => {
       if (type === 'task') {
-        if (id) navigate(`/tasks/${encodeURIComponent(id)}`);
+        if (id) navigate(`/tasks/${encodeURIComponent(id)}${clientSheetId ? `?client=${encodeURIComponent(clientSheetId)}` : ''}`);
         else navigate('/tasks', { state: { clientSheetId } });
       } else if (type === 'repair') {
         if (id) navigate(`/repairs/${encodeURIComponent(id)}`);
