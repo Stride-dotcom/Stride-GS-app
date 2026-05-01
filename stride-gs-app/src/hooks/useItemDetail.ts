@@ -50,8 +50,13 @@ export function useItemDetail(itemId: string | undefined): UseItemDetailResult {
         return;
       }
 
-      // Access check — client role can only see items in their own tenant
-      if (user.role === 'client' && user.clientSheetId && result.clientSheetId !== user.clientSheetId) {
+      // Access check — client role can only see items in tenants they
+      // have access to. Use accessibleClientSheetIds (NOT just the
+      // primary clientSheetId) so parent clients with child accounts can
+      // open items belonging to any of their child tenants. Otherwise a
+      // parent like "Nip Tuck Remodeling" hits Access Denied on a child
+      // account's item even though the rest of the app shows it.
+      if (user.role === 'client' && !user.accessibleClientSheetIds.includes(result.clientSheetId)) {
         setStatus('access-denied');
         return;
       }
