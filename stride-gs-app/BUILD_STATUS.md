@@ -99,6 +99,12 @@ UI components: FloatingActionMenu, WriteButton, BatchGuard, ActionTooltip, Batch
 
 ## Recent Changes (2026-05-01, session 87)
 
+### Email deep-link self-heal + WillCalls query-param fix
+- WillCalls.gs (CREATED + RELEASE emails) shipped route-style URLs `/#/will-calls/<id>` with no `&client=`, which the React detail lookup rejects. Switched to `?open=<id>&client=<ssid>` per CLAUDE.md "Deep Links — DO NOT BREAK".
+- Emails.gs `sendTemplateEmail_` gains a defensive self-heal that rewrites any leftover `/#/<entity>/<id>` URL (shipments|tasks|repairs|will-calls|inventory|claims) to query-param form with `&client=` before the existing missing-&client= patcher runs. Hand-edited templates can't ship the broken format.
+- Investigation context: user reported "Task Not Found" from an INSP_EMAIL CTA for INSP-63026-1 (Vida-Waymark). The link format and the row are both fine; the proximate fix was [#156](https://github.com/Stride-dotcom/Stride-GS-app/pull/156)'s tenant-scoped fetcher (browser hard-refresh required to pick up the new bundle). This PR locks down the broader broken-link class.
+- Versions: WillCalls.gs v4.6.1, Emails.gs v4.8.2. PR #159. Rolled out to all 52 clients.
+
 ### Photo upload routes to the active source-filter sub-tab
 - Symptom: on the item Photos tab, switching the sub-filter to "Repair" and uploading still wrote the photo to the inventory item, not the repair.
 - Root cause: `PhotoGallery` hard-coded the upload target to the host entity (`entity_type='inventory'`, `entity_id=item.itemId`); the sub-filter only filtered display.
