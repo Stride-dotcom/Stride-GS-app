@@ -592,8 +592,24 @@ export function CreateDeliveryOrderModal({
   }, [preSelectedItemIds, liveItems]);
 
   const { clients: liveClients, apiClients } = useClients(true);
-  const [clientName, setClientName] = useState(autoClient);
-  useEffect(() => { if (autoClient && !clientName) setClientName(autoClient); }, [autoClient]);
+  // Client-role users can only place orders for their own account(s) — never
+  // for other tenants. Default to the user's own accessible client list and
+  // auto-select when there's just one.
+  const accessibleClientNames = useMemo(() => {
+    if (isStaff) return null; // null = no restriction
+    return new Set(user?.accessibleClientNames ?? []);
+  }, [isStaff, user?.accessibleClientNames]);
+  const initialClientName = useMemo(() => {
+    if (autoClient) return autoClient;
+    if (!isStaff && user?.accessibleClientNames?.length === 1) {
+      return user.accessibleClientNames[0]!;
+    }
+    return '';
+  }, [autoClient, isStaff, user?.accessibleClientNames]);
+  const [clientName, setClientName] = useState(initialClientName);
+  useEffect(() => {
+    if (!clientName && initialClientName) setClientName(initialClientName);
+  }, [initialClientName, clientName]);
   const clientSheetId = apiClients.find(c => c.name === clientName)?.spreadsheetId || '';
 
   // ── Tax info for the selected client (Task 8a) ──────────────────────────
@@ -2573,7 +2589,10 @@ export function CreateDeliveryOrderModal({
     return opts;
   }, []);
 
-  const clientNames = liveClients.map(c => c.name).sort();
+  const clientNames = liveClients
+    .map(c => c.name)
+    .filter(n => accessibleClientNames === null || accessibleClientNames.has(n))
+    .sort();
 
   // ── Success screen ─────────────────────────────────────────────────────
   if (createResult) {
@@ -2784,12 +2803,22 @@ export function CreateDeliveryOrderModal({
           {/* Client */}
           <div style={section}>
             <div style={sectionTitle}>Client</div>
-            <AutocompleteSelect
-              options={clientNames.map(n => ({ value: n, label: n }))}
-              value={clientName}
-              onChange={setClientName}
-              placeholder="Select client…"
-            />
+            {!isStaff && clientNames.length <= 1 ? (
+              <div style={{
+                padding: '10px 12px', borderRadius: 8,
+                background: theme.colors.bgSubtle, border: `1px solid ${theme.colors.borderSubtle}`,
+                fontSize: 14, fontWeight: 600, color: theme.colors.textPrimary,
+              }}>
+                {clientName || '—'}
+              </div>
+            ) : (
+              <AutocompleteSelect
+                options={clientNames.map(n => ({ value: n, label: n }))}
+                value={clientName}
+                onChange={setClientName}
+                placeholder="Select client…"
+              />
+            )}
             {clientName && clientTaxInfo && (
               clientTaxInfo.taxExempt ? (
                 <div style={{
