@@ -1029,7 +1029,7 @@ export function Inventory() {
     () => liveItems.map(i => i.itemId).filter(Boolean),
     [liveItems],
   );
-  const { notesByItemId } = useItemNotes(visibleItemIds, apiConfigured && clientFilter.length > 0);
+  const { notesByItemId, notesDetailByItemId } = useItemNotes(visibleItemIds, apiConfigured && clientFilter.length > 0);
 
   // Column definitions
   const columns = useMemo(() => [
@@ -1282,10 +1282,13 @@ export function Inventory() {
       },
     }),
 
-    // Notes — now reads the latest public entity_notes body first, falling
-    // back to the legacy inventory.item_notes string for rows that haven't
-    // been migrated (backwards compat). Long bodies truncated with ellipsis
-    // and a title tooltip so the full text is still discoverable.
+    // Notes — pulls the most recent public, non-system entity_note across
+    // every linked entity type (item / task / repair) for this item via
+    // the cross-entity batch hook. Cell shows `[TAG] body` truncated to
+    // 80 chars; the hover tooltip shows the top N notes with type tag +
+    // date so a glance reveals the workflow that generated each note.
+    // Falls back to the legacy `inventory.item_notes` string when no
+    // entity_note exists yet (rows pre-migration).
     ch.accessor('notes', {
       header: 'Notes', size: 200,
       cell: i => {
@@ -1295,9 +1298,21 @@ export function Inventory() {
         const display = latest || legacy || '';
         if (!display) return <span style={{ color: theme.colors.textMuted }}>—</span>;
         const truncated = display.length > 80 ? display.slice(0, 80) + '…' : display;
+        const detail = itemId ? notesDetailByItemId[itemId] : undefined;
+        // Tooltip: one line per note across entities, most-recent first,
+        // formatted "[TAG MM/DD] body". Falls back to the cell text when
+        // we have no breakdown (legacy item_notes path).
+        const tooltip = detail && detail.length > 0
+          ? detail.map(n => {
+              const d = new Date(n.createdAt);
+              const mm = String(d.getMonth() + 1).padStart(2, '0');
+              const dd = String(d.getDate()).padStart(2, '0');
+              return `[${n.typeTag} ${mm}/${dd}] ${n.body}`;
+            }).join('\n')
+          : display;
         return (
           <span
-            title={display}
+            title={tooltip}
             style={{
               fontSize: theme.typography.sizes.sm, color: theme.colors.textSecondary,
               display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
@@ -1353,7 +1368,7 @@ export function Inventory() {
       ),
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  ], [showToast, inspOpenItems, inspDoneItems, inspFailedItems, asmOpenItems, asmDoneItems, repairOpenItems, repairDoneItems, applyItemPatch, mergeItemPatch, canEditInventory, canEditClientFields, notesByItemId]);
+  ], [showToast, inspOpenItems, inspDoneItems, inspFailedItems, asmOpenItems, asmDoneItems, repairOpenItems, repairDoneItems, applyItemPatch, mergeItemPatch, canEditInventory, canEditClientFields, notesByItemId, notesDetailByItemId]);
 
   // When navigating from Shipments page, filter table to that shipment
   const tableData = useMemo(() => {
