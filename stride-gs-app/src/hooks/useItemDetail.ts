@@ -42,7 +42,17 @@ export function useItemDetail(itemId: string | undefined): UseItemDetailResult {
     setError(null);
 
     try {
-      const result = await fetchItemByIdFromSupabase(itemId, clientNameMapRef.current);
+      // Scope the lookup to the user's accessible tenants when they're a
+      // client. After a transfer, the same item_id has TWO rows in
+      // `inventory` (Transferred under the source tenant, Active under the
+      // destination). Without this scope, the unordered fetch can return
+      // the source-tenant row, whose tenant the user doesn't have access
+      // to — producing a spurious Access Denied. Staff/admin pass
+      // undefined and see whichever row is current.
+      const tenantScope = user.role === 'client'
+        ? user.accessibleClientSheetIds
+        : undefined;
+      const result = await fetchItemByIdFromSupabase(itemId, clientNameMapRef.current, tenantScope);
       if (seq !== fetchCountRef.current) return; // stale
 
       if (!result) {
@@ -50,12 +60,9 @@ export function useItemDetail(itemId: string | undefined): UseItemDetailResult {
         return;
       }
 
-      // Access check — client role can only see items in tenants they
-      // have access to. Use accessibleClientSheetIds (NOT just the
-      // primary clientSheetId) so parent clients with child accounts can
-      // open items belonging to any of their child tenants. Otherwise a
-      // parent like "Nip Tuck Remodeling" hits Access Denied on a child
-      // account's item even though the rest of the app shows it.
+      // Defense in depth — even with tenantScope applied, double-check the
+      // returned row's tenant against the user's accessible list. Catches
+      // any future regression where the scope param is dropped.
       if (user.role === 'client' && !user.accessibleClientSheetIds.includes(result.clientSheetId)) {
         setStatus('access-denied');
         return;

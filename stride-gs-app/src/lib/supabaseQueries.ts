@@ -3228,17 +3228,31 @@ interface SupabaseStaxRunLogRow {
  */
 export async function fetchItemByIdFromSupabase(
   itemId: string,
-  clientNameMap: ClientNameMap
+  clientNameMap: ClientNameMap,
+  /**
+   * Optional tenant filter (the user's accessibleClientSheetIds). When
+   * provided, only rows from these tenants are considered. Critical for
+   * transferred items: after a transfer, the same item_id exists as TWO
+   * rows in `inventory` — one Transferred row under the source tenant
+   * and one Active row under the destination tenant. Without scoping,
+   * the unordered fetch could return the source row whose tenant the
+   * current client user doesn't have access to, producing a spurious
+   * Access Denied. For staff/admin, leave undefined to fetch any tenant.
+   */
+  tenantScope?: string[],
 ): Promise<ApiInventoryItem | null> {
   try {
-    const { data, error } = await supabase
-      .from('inventory')
-      .select('*')
-      .eq('item_id', itemId)
-      .limit(1)
-      .maybeSingle();
-    if (error || !data) return null;
-    const row = data as SupabaseInventoryRow;
+    let q = supabase.from('inventory').select('*').eq('item_id', itemId);
+    if (tenantScope && tenantScope.length > 0) {
+      q = q.in('tenant_id', tenantScope);
+    }
+    const { data, error } = await q.limit(10);
+    if (error || !data || data.length === 0) return null;
+    // Prefer the non-Transferred row when multiple tenants share an
+    // item_id. The "Transferred" row is the historical artifact; the
+    // live item is owned by the row whose status is anything else.
+    const rows = data as SupabaseInventoryRow[];
+    const row = rows.find(r => r.status !== 'Transferred') || rows[0];
     return {
       itemId: row.item_id,
       clientName: clientNameMap[row.tenant_id] || '',
