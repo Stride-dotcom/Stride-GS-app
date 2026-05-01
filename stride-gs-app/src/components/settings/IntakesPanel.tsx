@@ -281,7 +281,7 @@ export function IntakesPanel() {
     notes: [
       intake.notes,
       (intake.insuranceChoice === 'stride_coverage' || intake.insuranceChoice === 'eis_coverage')
-        ? `Added to Stride policy${intake.insuranceDeclaredValue > 0 ? ` — declared $${intake.insuranceDeclaredValue.toLocaleString()}` : ''} ($300/mo per $100K declared value).`
+        ? `Added to Stride policy${intake.insuranceDeclaredValue > 0 ? ` — declared $${intake.insuranceDeclaredValue.toLocaleString()}` : ''} ($30/mo per $10K declared value).`
         : null,
       intake.insuranceChoice === 'own_policy' ? "Client's own policy — collect COI." : null,
     ].filter(Boolean).join(' '),
@@ -729,7 +729,7 @@ function IntakeReview({ intake, onCreateClient, onMarkReviewed, onReject, getFil
           if (intake.insuranceChoice === 'own_policy') return "Client's own policy (collect COI at activation)";
           if (intake.insuranceChoice === 'stride_coverage' || intake.insuranceChoice === 'eis_coverage') {
             const dv = intake.insuranceDeclaredValue;
-            const monthly = Math.max(300, Math.round((dv / 100000) * 300 * 100) / 100);
+            const monthly = Math.max(30, Math.round((dv / 10000) * 30 * 100) / 100);
             return dv > 0
               ? `Added to Stride policy · $${dv.toLocaleString()} declared · $${monthly.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}/mo`
               : 'Added to Stride policy (declared value not captured — pre-session-77 intake)';

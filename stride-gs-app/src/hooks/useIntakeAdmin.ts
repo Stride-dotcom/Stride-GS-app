@@ -474,7 +474,7 @@ export async function seedClientInsuranceFromIntake(
       client_name:           clientName,
       coverage_type:         'stride_coverage',
       declared_value:        declared,
-      monthly_rate_per_100k: monthlyRate,
+      monthly_rate_per_10k: monthlyRate,
       inception_date:        toDateStr(today),
       next_billing_date:     toDateStr(nextBilling),
       active:                true,

@@ -967,7 +967,7 @@ function InsuranceBlock({ tenantId, clientName }: { tenantId: string; clientName
     if (row) setDraftDeclared(String(row.declaredValue));
   }, [row]);
 
-  const monthly = row ? Math.max(300, Math.round((row.declaredValue / 100000) * row.monthlyRatePer100k * 100) / 100) : 0;
+  const monthly = row ? Math.max(30, Math.round((row.declaredValue / 10000) * row.monthlyRatePer10k * 100) / 100) : 0;
 
   const handleSaveDeclared = async () => {
     const n = Number(draftDeclared);
@@ -1090,7 +1090,7 @@ function InsuranceBlock({ tenantId, clientName }: { tenantId: string; clientName
             ${monthly.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
           </div>
           <div style={{ fontSize: 10, color: theme.colors.textMuted, marginTop: 2 }}>
-            $300 min · ${row.monthlyRatePer100k}/$100K frozen rate
+            $30 min · ${row.monthlyRatePer10k}/$10K frozen rate
           </div>
         </div>
         <div>

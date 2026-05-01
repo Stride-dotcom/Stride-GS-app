@@ -846,13 +846,13 @@ function StepTerms({ draft, setDraft, tcHtml, tcLoading, coverageNotes, sig, sig
             selected={draft.insuranceChoice === 'stride_coverage'}
             onSelect={() => setDraft(d => ({ ...d, insuranceChoice: 'stride_coverage' }))}
             title="Add me to Stride's policy"
-            body="Stride adds my property to its storage policy. Processing fee: $300/month per $100,000 declared value ($300/month minimum)."
+            body="Stride adds my property to its storage policy. Processing fee: $30/month per $10,000 declared value ($30/month minimum)."
           />
         </div>
 
         {/* Declared-value input — only shown when Stride coverage is
             selected. Feeds the daily billing cron, which bills
-            GREATEST($300, declared/$100K × rate) per month. */}
+            GREATEST($30, declared/$10K × rate) per month. */}
         {draft.insuranceChoice === 'stride_coverage' && (
           <div style={{ marginTop: 14, padding: 14, background: BG_CARD, border: `1px solid ${BORDER}`, borderRadius: 10 }}>
             <label style={{ display: 'block', fontSize: 12, fontWeight: 600, color: TEXT, marginBottom: 6 }}>
@@ -880,10 +880,10 @@ function StepTerms({ draft, setDraft, tcHtml, tcLoading, coverageNotes, sig, sig
             <div style={{ fontSize: 12, color: TEXT_MUT, marginTop: 8, lineHeight: 1.5 }}>
               {(() => {
                 const declared = Number(draft.insuranceDeclaredValue) || 0;
-                const monthly = Math.max(300, Math.round((declared / 100000) * 300 * 100) / 100);
+                const monthly = Math.max(30, Math.round((declared / 10000) * 30 * 100) / 100);
                 return declared > 0
-                  ? <>Your monthly charge: <strong style={{ color: TEXT }}>${monthly.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong> (per T&C §2.B — $300 minimum).</>
-                  : <>Enter the dollar amount you want insured. Monthly charge: $300 per $100,000 declared, with a $300/month minimum.</>;
+                  ? <>Your monthly charge: <strong style={{ color: TEXT }}>${monthly.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong> (per T&C §2.B — $30 minimum).</>
+                  : <>Enter the dollar amount you want insured. Monthly charge: $30 per $10,000 declared, with a $30/month minimum.</>;
               })()}
             </div>
           </div>
@@ -1247,7 +1247,7 @@ const radioRow = (selected: boolean): React.CSSProperties => ({
 
 function StepReview({ draft, onJumpTo, sigDataUrl, isRefresh }: { draft: Draft; onJumpTo: (step: number) => void; sigDataUrl: string; isRefresh?: boolean }) {
   const declared = Number(draft.insuranceDeclaredValue) || 0;
-  const declaredMonthly = Math.max(300, Math.round((declared / 100000) * 300 * 100) / 100);
+  const declaredMonthly = Math.max(30, Math.round((declared / 10000) * 30 * 100) / 100);
   const insuranceLabel = draft.insuranceChoice === 'own_policy'
     ? "Client's own policy"
     : draft.insuranceChoice === 'stride_coverage'
