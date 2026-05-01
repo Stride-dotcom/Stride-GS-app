@@ -255,7 +255,7 @@ function DocumentsSection({
 // Shipment / Claim) still use it and see no difference. Purely additive.
 
 export function PhotosPanel({
-  entityType, entityId, tenantId, itemId, enableSourceFilter,
+  entityType, entityId, tenantId, itemId, enableSourceFilter, relatedEntities,
 }: {
   entityType: PhotoEntityType;
   entityId: string | null | undefined;
@@ -266,6 +266,9 @@ export function PhotosPanel({
    *  the migrated tabbed panels pass this; legacy composition leaves it off
    *  so Claim's UI is byte-identical. */
   enableSourceFilter?: boolean;
+  /** Related task / repair / will-call / shipment ids so uploads from a
+   *  filtered sub-tab route to the right entity instead of the host item. */
+  relatedEntities?: Array<{ type: string; id: string }>;
 }) {
   return (
     <PhotoGallery
@@ -274,6 +277,7 @@ export function PhotosPanel({
       tenantId={tenantId}
       itemId={itemId}
       enableSourceFilter={enableSourceFilter}
+      relatedEntities={relatedEntities}
       naked
       compact
     />

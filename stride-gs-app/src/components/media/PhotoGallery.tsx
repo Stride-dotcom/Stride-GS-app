@@ -8,6 +8,8 @@ import { useCallback, useMemo, useState } from 'react';
 import { ImageIcon, AlertTriangle, Share2, X } from 'lucide-react';
 import { theme } from '../../styles/theme';
 import { usePhotos, type Photo, type EntityType, type PhotoType } from '../../hooks/usePhotos';
+
+type RelatedEntity = { type: string; id: string };
 import { PhotoGrid } from './PhotoGrid';
 import { PhotoUploadButton } from './PhotoUploadButton';
 import { PhotoLightbox } from './PhotoLightbox';
@@ -34,6 +36,12 @@ interface Props {
    *  (e.g. Item panel with itemId rollup, or Task/Repair panels with item_id
    *  rollup). Default false so legacy callers (Claim) are byte-identical. */
   enableSourceFilter?: boolean;
+  /** When the source filter selects a sub-tab (e.g. "Repair") that maps to a
+   *  related entity, uploads route to that entity instead of the host. Pass
+   *  the item's tasks / repairs / will-calls / shipment so the gallery knows
+   *  what targets are available. Ambiguous selections (multiple matches)
+   *  disable the upload button. */
+  relatedEntities?: RelatedEntity[];
 }
 
 export function PhotoGallery({
@@ -41,6 +49,7 @@ export function PhotoGallery({
   defaultPhotoType = 'general',
   readOnly, naked, title = 'Photos', compact,
   enableSourceFilter = false,
+  relatedEntities,
 }: Props) {
   const [sourceFilter, setSourceFilter] = useState<string>('all');
   // Session 74: `setPrimaryPhoto` is still exported by usePhotos for
@@ -94,12 +103,35 @@ export function PhotoGallery({
     return photos.filter(p => String(p.entity_type ?? '') === sourceFilter);
   }, [photos, enableSourceFilter, sourceFilter]);
 
+  // Resolve the upload target based on the active source-filter sub-tab.
+  // - 'all' or filter matching the host entity → upload to the host entity.
+  // - any other entity_type → look up matching related entities. If exactly
+  //   one, route uploads there; if zero or many, disable the button so the
+  //   photo can't land in the wrong place.
+  const uploadTarget = useMemo<
+    | { kind: 'ok'; override?: { entityType: EntityType; entityId: string } }
+    | { kind: 'disabled'; reason: string }
+  >(() => {
+    if (!enableSourceFilter || sourceFilter === 'all' || sourceFilter === '' || sourceFilter === entityType) {
+      return { kind: 'ok' };
+    }
+    const matches = (relatedEntities ?? []).filter(r => r.type === sourceFilter);
+    if (matches.length === 1) {
+      return { kind: 'ok', override: { entityType: sourceFilter as EntityType, entityId: matches[0].id } };
+    }
+    if (matches.length === 0) {
+      return { kind: 'disabled', reason: `No ${sourceFilter.replace('_', ' ')} on this item to upload to.` };
+    }
+    return { kind: 'disabled', reason: `Multiple ${sourceFilter.replace('_', ' ')}s — open the specific record to upload.` };
+  }, [enableSourceFilter, sourceFilter, entityType, relatedEntities]);
+
   const handleUpload = useCallback(async (files: File[]) => {
     if (!files.length) return;
+    if (uploadTarget.kind === 'disabled') { setUploadError(uploadTarget.reason); return; }
     setUploading(true); setUploadError(null);
     try {
       for (const f of files) {
-        const result = await uploadPhoto(f, defaultPhotoType);
+        const result = await uploadPhoto(f, defaultPhotoType, uploadTarget.override);
         if (!result) {
           setUploadError('Some photos failed to upload.');
           break;
@@ -108,7 +140,7 @@ export function PhotoGallery({
     } finally {
       setUploading(false);
     }
-  }, [uploadPhoto, defaultPhotoType]);
+  }, [uploadPhoto, defaultPhotoType, uploadTarget]);
 
   const content = (
     <>
@@ -142,10 +174,12 @@ export function PhotoGallery({
             <PhotoUploadButton
               onUpload={handleUpload}
               uploading={uploading}
-              disabled={!entityId || selectionMode}
+              disabled={!entityId || selectionMode || uploadTarget.kind === 'disabled'}
+              disabledReason={uploadTarget.kind === 'disabled' ? uploadTarget.reason : undefined}
               compact
               onUploadOne={async (file) => {
-                const result = await uploadPhoto(file, defaultPhotoType);
+                if (uploadTarget.kind === 'disabled') { setUploadError(uploadTarget.reason); return false; }
+                const result = await uploadPhoto(file, defaultPhotoType, uploadTarget.override);
                 return !!result;
               }}
             />

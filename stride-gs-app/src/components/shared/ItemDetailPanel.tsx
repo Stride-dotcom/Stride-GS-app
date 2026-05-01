@@ -1257,6 +1257,10 @@ export function ItemDetailPanel({
           item={item}
           clientSheetId={clientSheetId}
           driveFolders={renderAsPage ? pageDriveFolders : undefined}
+          itemTasks={linkedTasks}
+          itemRepairs={linkedRepairs}
+          itemWillCalls={linkedWillCalls}
+          shipmentNumber={item.shipmentNumber}
         />
       ),
     },
@@ -1443,7 +1447,23 @@ import { AutocompleteSelect } from './AutocompleteSelect';
 import type { InventoryItem as CoverageItemType } from '../../lib/types';
 import { DriveFoldersList, type DriveFolderLink } from './DriveFoldersList';
 
-function PhotosPanelProxy({ item, clientSheetId, driveFolders }: { item: any; clientSheetId: string | undefined; driveFolders?: DriveFolderLink[] }) {
+function PhotosPanelProxy({
+  item, clientSheetId, driveFolders, itemTasks, itemRepairs, itemWillCalls, shipmentNumber,
+}: {
+  item: any;
+  clientSheetId: string | undefined;
+  driveFolders?: DriveFolderLink[];
+  itemTasks?: LinkedRecord[];
+  itemRepairs?: LinkedRecord[];
+  itemWillCalls?: LinkedRecord[];
+  shipmentNumber?: string;
+}) {
+  const related = [
+    ...(itemTasks ?? []).map(t => ({ type: 'task', id: String(t.id || '') })).filter(r => r.id),
+    ...(itemRepairs ?? []).map(r => ({ type: 'repair', id: String(r.id || '') })).filter(r => r.id),
+    ...(itemWillCalls ?? []).map(w => ({ type: 'will_call', id: String(w.id || '') })).filter(r => r.id),
+    ...(shipmentNumber ? [{ type: 'shipment', id: String(shipmentNumber) }] : []),
+  ];
   return (
     <div>
       <_PhotosPanel
@@ -1452,6 +1472,7 @@ function PhotosPanelProxy({ item, clientSheetId, driveFolders }: { item: any; cl
         itemId={item.itemId}
         tenantId={clientSheetId}
         enableSourceFilter
+        relatedEntities={related}
       />
       {driveFolders && <DriveFoldersList folders={driveFolders} />}
     </div>
