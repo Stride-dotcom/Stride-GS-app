@@ -1,26 +1,36 @@
 /**
  * AddServiceModal — create a new service_catalog row.
  *
- * Minimal required fields: code, name, category, billing, unit.
+ * Minimal required fields: code, name, category, billing_mode.
  * Rates default to zeros; admin can fine-tune in the edit panel after.
  *
  * v2 2026-04-25 PST — surfaces "Offer as Delivery Service" toggle and
  *                     delivery_rate_unit / visible_to_client /
  *                     quote_required / description fields so an admin can
  *                     spin up a delivery add-on directly from this modal.
+ *
+ * v3 2026-04-30 PST — single Billing Mode dropdown replaces the legacy
+ *                     Billing + Unit selectors. The new field
+ *                     service_catalog.billing_mode is the source of
+ *                     truth for math; the legacy `billing` column is
+ *                     kept aligned automatically by serviceToRow so GAS
+ *                     api_lookupRate_ keeps working unchanged.
  */
 import { useState } from 'react';
 import { X, Clock, Truck, Loader2 } from 'lucide-react';
 import { theme } from '../../styles/theme';
 import { ProcessingOverlay } from '../shared/ProcessingOverlay';
 import type {
-  NewServiceInput, ServiceCategory, ServiceBilling, ServiceUnit, ClassRates, ClassTimes,
+  NewServiceInput, ServiceCategory, BillingMode, ClassRates, ClassTimes,
   DeliveryRateUnit,
 } from '../../hooks/useServiceCatalog';
 
 const CATEGORIES: ServiceCategory[] = ['Warehouse','Storage','Shipping','Assembly','Repair','Labor','Admin','Delivery'];
-const UNITS: ServiceUnit[]           = ['per_item','per_day','per_task','per_hour'];
-const BILLINGS: ServiceBilling[]     = ['class_based','flat'];
+const BILLING_MODES: { value: BillingMode; label: string; help: string }[] = [
+  { value: 'per_class', label: 'Per class',     help: 'Sum( class rate × item qty ) over the parent’s items.' },
+  { value: 'per_qty',   label: 'Per quantity',  help: 'Flat rate × quantity (item count, hours, sq ft, etc.).' },
+  { value: 'per_job',   label: 'Per job',       help: 'Single flat charge regardless of items.' },
+];
 const CLASSES = ['XS','S','M','L','XL','XXL'] as const;
 const DELIVERY_RATE_UNITS: { value: DeliveryRateUnit; label: string }[] = [
   { value: 'flat',      label: 'Flat (one-time)' },
@@ -42,8 +52,10 @@ export function AddServiceModal({ existingCodes, nextDisplayOrder, onClose, onCr
   const [code, setCode] = useState('');
   const [name, setName] = useState('');
   const [category, setCategory] = useState<ServiceCategory>('Warehouse');
-  const [billing, setBilling] = useState<ServiceBilling>('flat');
-  const [unit, setUnit] = useState<ServiceUnit>('per_item');
+  // billingMode is the source of truth. legacy `billing` column is
+  // derived in serviceToRow (per_class → class_based, per_qty/per_job
+  // → flat) so GAS api_lookupRate_ keeps reading the right branch.
+  const [billingMode, setBillingMode] = useState<BillingMode>('per_qty');
   const [flatRate, setFlatRate] = useState(0);
   const [rates, setRates] = useState<ClassRates>({ XS: 0, S: 0, M: 0, L: 0, XL: 0, XXL: 0 });
   const [times, setTimes] = useState<ClassTimes>({});
@@ -68,11 +80,18 @@ export function AddServiceModal({ existingCodes, nextDisplayOrder, onClose, onCr
       code: trimmedCode,
       name: name.trim(),
       category,
-      billing,
-      rates: billing === 'class_based' ? rates : {},
-      xxlRate: billing === 'class_based' ? (rates.XXL ?? 0) : 0,
-      flatRate: billing === 'flat' ? flatRate : 0,
-      unit,
+      // serviceToRow derives the legacy `billing` column from billingMode
+      // automatically; this value is just a placeholder for the local
+      // CatalogService shape. Read paths that touch `billing` continue
+      // working because the DB column is kept in sync.
+      billing: billingMode === 'per_class' ? 'class_based' : 'flat',
+      billingMode,
+      rates: billingMode === 'per_class' ? rates : {},
+      xxlRate: billingMode === 'per_class' ? (rates.XXL ?? 0) : 0,
+      flatRate: billingMode === 'per_class' ? 0 : flatRate,
+      // `unit` is now display-only — pick a sensible default per mode so
+      // legacy displays (PublicRates, Excel exports) still render a label.
+      unit: billingMode === 'per_job' ? 'per_task' : 'per_item',
       taxable: true,
       active: true,
       showInMatrix: false,
@@ -86,9 +105,9 @@ export function AddServiceModal({ existingCodes, nextDisplayOrder, onClose, onCr
       displayOrder: nextDisplayOrder,
       billIfPass: true,
       billIfFail: true,
-      // Delivery rows benefit from per-class minutes for dispatch routing
-      // even when billed flat — let admins set them on creation.
-      times: (billing === 'class_based' || showAsDeliveryService) ? times : {},
+      // Per-class minutes — useful for any class-priced service or any
+      // delivery row (dispatch routing reads these regardless of mode).
+      times: (billingMode === 'per_class' || showAsDeliveryService) ? times : {},
       staxItemId: null,
       qbItemId: null,
       deliveryRateUnit: showAsDeliveryService ? deliveryRateUnit : 'flat',
@@ -182,29 +201,26 @@ export function AddServiceModal({ existingCodes, nextDisplayOrder, onClose, onCr
             </div>
           </div>
 
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginTop: 16 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 12, marginTop: 16 }}>
             <div>
               <label style={labelStyle}>Category</label>
               <select style={inputStyle} value={category} onChange={e => setCategory(e.target.value as ServiceCategory)}>
                 {CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
               </select>
             </div>
-            <div>
-              <label style={labelStyle}>Unit</label>
-              <select style={inputStyle} value={unit} onChange={e => setUnit(e.target.value as ServiceUnit)}>
-                {UNITS.map(u => <option key={u} value={u}>{u.replace('per_', 'per ')}</option>)}
-              </select>
-            </div>
           </div>
 
-          <div style={{ display: 'grid', gridTemplateColumns: billing === 'flat' ? '1fr 1fr' : '1fr', gap: 12, marginTop: 16 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: billingMode === 'per_class' ? '1fr' : '1fr 1fr', gap: 12, marginTop: 16 }}>
             <div>
-              <label style={labelStyle}>Billing</label>
-              <select style={inputStyle} value={billing} onChange={e => setBilling(e.target.value as ServiceBilling)}>
-                {BILLINGS.map(b => <option key={b} value={b}>{b === 'class_based' ? 'Class-based' : 'Flat rate'}</option>)}
+              <label style={labelStyle}>Billing mode</label>
+              <select style={inputStyle} value={billingMode} onChange={e => setBillingMode(e.target.value as BillingMode)}>
+                {BILLING_MODES.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
               </select>
+              <div style={{ fontSize: 11, color: v2.colors.textMuted, marginTop: 4, lineHeight: 1.45 }}>
+                {BILLING_MODES.find(m => m.value === billingMode)?.help}
+              </div>
             </div>
-            {billing === 'flat' && (
+            {billingMode !== 'per_class' && (
               <div>
                 <label style={labelStyle}>Flat rate ($)</label>
                 <input
@@ -214,11 +230,16 @@ export function AddServiceModal({ existingCodes, nextDisplayOrder, onClose, onCr
                   value={flatRate}
                   onChange={e => setFlatRate(Number(e.target.value) || 0)}
                 />
+                <div style={{ fontSize: 11, color: v2.colors.textMuted, marginTop: 4 }}>
+                  {billingMode === 'per_qty'
+                    ? 'Multiplied by item count (or operator-entered quantity for hours / sqft / etc.).'
+                    : 'Charged once per parent regardless of items.'}
+                </div>
               </div>
             )}
           </div>
 
-          {billing === 'class_based' && (
+          {billingMode === 'per_class' && (
             <div style={{ marginTop: 18 }}>
               <label style={labelStyle}>Class rates ($)</label>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 6 }}>
@@ -238,9 +259,10 @@ export function AddServiceModal({ existingCodes, nextDisplayOrder, onClose, onCr
             </div>
           )}
 
-          {/* Service times: required for class_based, useful for delivery
-              services regardless of billing (dispatch routing minutes). */}
-          {(billing === 'class_based' || showAsDeliveryService) && (
+          {/* Service times: required for class_based (dispatch routing /
+              storage formula), useful for delivery services regardless
+              of billing mode (dispatch routing minutes). */}
+          {(billingMode === 'per_class' || showAsDeliveryService) && (
             <div style={{ marginTop: 14 }}>
               <label style={{ ...labelStyle, display: 'flex', alignItems: 'center', gap: 6 }}>
                 <Clock size={11} /> Service times (minutes)
