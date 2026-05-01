@@ -4,7 +4,7 @@
  * Phase 1b: read-only, admin only.
  */
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
-import { fetchDtOrdersFromSupabase, isSupabaseCacheAvailable } from '../lib/supabaseQueries';
+import { fetchDtOrdersFromSupabase } from '../lib/supabaseQueries';
 import type { DtOrderForUI, ClientNameMap } from '../lib/supabaseQueries';
 import { useClients } from './useClients';
 import { useClientFilter } from './useClientFilter';
@@ -45,12 +45,12 @@ export function useOrders(): UseOrdersResult {
     setError(null);
 
     try {
-      const available = await isSupabaseCacheAvailable();
-      if (!available) {
-        setError('Supabase connection unavailable');
-        return;
-      }
-
+      // Always query Supabase directly — orders have no GAS fallback. The
+      // isSupabaseCacheAvailable() gate returns false during impersonation
+      // (because cache-backed pages need GAS fallback for tenant scoping),
+      // but RLS already restricts staff/admin to see all orders and clients
+      // to see only their own, and clientSheetId scopes by tenant_id, so we
+      // skip the gate here.
       const result = await fetchDtOrdersFromSupabase(clientNameMap, clientSheetId);
       if (ctrl.signal.aborted) return;
       if (result !== null) {
