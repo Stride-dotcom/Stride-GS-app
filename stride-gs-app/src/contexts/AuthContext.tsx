@@ -206,14 +206,26 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         if (cachedRaw && loginSource !== 'recovery') {
           const cached = JSON.parse(cachedRaw) as AuthUser;
           if (cached?.email?.toLowerCase() === email.toLowerCase() && cached?.role) {
-            // Same user, valid cache — use it directly, no GAS roundtrip
+            // Same user, valid cache — use it directly, no GAS roundtrip.
+            // BUT: only mark authenticated once the Supabase JWT carries the
+            // matching role/clientSheetId in user_metadata. Otherwise the
+            // first data fetch can race a stale JWT and RLS denies (admin
+            // policy keys off `user_metadata.role`), surfacing as spurious
+            // "Task Not Found" / empty-list flashes. Cheap when already in
+            // sync (no network); ~one round-trip when it isn't.
+            const jwtMeta = (session.user.user_metadata ?? {}) as { role?: string; clientSheetId?: string };
+            const targetClientSheetId = cached.clientSheetId ?? '';
+            const inSync = jwtMeta.role === cached.role && (jwtMeta.clientSheetId ?? '') === targetClientSheetId;
+            if (!inSync) {
+              try {
+                await supabase.auth.updateUser({
+                  data: { role: cached.role, clientSheetId: targetClientSheetId },
+                });
+              } catch { /* best-effort — fall through and authenticate anyway */ }
+            }
             setCallerEmail(cached.email);
             setLoginPhase('success');
             setAuthState({ status: 'authenticated', user: cached });
-            // Fire-and-forget: sync role metadata (non-blocking)
-            supabase.auth.updateUser({
-              data: { role: cached.role, clientSheetId: cached.clientSheetId ?? '' },
-            }).catch(() => {});
             return;
           }
         }
@@ -264,12 +276,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // Cache resolved user for fast subsequent loads (display-only bootstrap)
       localStorage.setItem(AUTH_CACHE_KEY, JSON.stringify(user));
 
-      // Phase 1: Sync role + clientSheetId into Supabase user_metadata so RLS policies
-      // on gs_sync_events can grant admin/staff read-all access.
-      // Fire-and-forget — never block login on this.
-      supabase.auth.updateUser({
-        data: { role: user.role, clientSheetId: user.clientSheetId ?? '' },
-      }).catch(() => { /* best-effort */ });
+      // Sync role + clientSheetId into Supabase user_metadata so RLS policies
+      // can grant the right access. Awaited only when the JWT is stale —
+      // otherwise the first data fetch can race a stale JWT and RLS denies
+      // (e.g. tasks_select_staff keys off `user_metadata.role`).
+      try {
+        const jwtMeta = (session.user.user_metadata ?? {}) as { role?: string; clientSheetId?: string };
+        const targetClientSheetId = user.clientSheetId ?? '';
+        const inSync = jwtMeta.role === user.role && (jwtMeta.clientSheetId ?? '') === targetClientSheetId;
+        if (!inSync) {
+          await supabase.auth.updateUser({
+            data: { role: user.role, clientSheetId: targetClientSheetId },
+          });
+        }
+      } catch { /* best-effort */ }
 
       setCallerEmail(user.email);
       setLoginPhase('success');
