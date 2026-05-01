@@ -736,7 +736,12 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
               <div style={{ fontSize: 11, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: 0.3, marginBottom: 2 }}>Shipment</div>
               {(() => {
                 const shipNo = task.shipmentNumber || task.shipmentNo;
-                if (!shipNo) return <div style={{ fontSize: 13, color: theme.colors.textMuted }}>—</div>;
+                // Defensive: a few legacy rows in the warehouse sheet have
+                // a Drive URL pasted into the Shipment # cell instead of a
+                // shipment number. Treat URL-shaped values as missing so
+                // we don't render a broken hyperlink.
+                const isUrlLike = typeof shipNo === 'string' && /^https?:\/\//i.test(shipNo);
+                if (!shipNo || isUrlLike) return <div style={{ fontSize: 13, color: theme.colors.textMuted }}>—</div>;
                 return (
                   <a
                     href={buildDeepLink('shipments', shipNo, clientSheetId)}
@@ -1374,11 +1379,16 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
   // Cancel/Save row (only two pills, easy to reach). Pass/Fail also stays
   // inline because choosing the result is the central UX of an in-progress
   // task and shouldn't be hidden behind a tap.
+  const showReopenAction = canReopen && (task.status === 'Completed' || task.status === 'In Progress');
   const fabActions: FABAction[] = (isEditingTask || showPassFail) ? [] : [
     ...(isOpen && !completed ? [{ label: 'Cancel Task', icon: <XCircle size={16} />, onClick: handleCancelTask }] : []),
     ...(task.itemId && !repairStatus ? [{ label: repairRequesting ? 'Requesting…' : 'Repair Quote', icon: <Wrench size={16} />, onClick: () => void handleRequestRepair() }] : []),
     ...(isOpen && !completed && !isEditingTask ? [{ label: 'Edit', icon: <Pencil size={16} />, onClick: () => setIsEditingTask(true) }] : []),
     ...(showStart ? [{ label: startTaskLoading ? 'Starting…' : 'Start Task', icon: <Play size={16} />, onClick: () => handleStartTask(), color: theme.colors.orange }] : []),
+    // Reopen — admin/staff only. Surfaces here on Completed + In Progress
+    // so corrections are reachable from the page-mode FAB. The slide-out
+    // panel has its own Reopen button in the Details body / overflow menu.
+    ...(showReopenAction ? [{ label: reopenLoading ? 'Reopening…' : 'Reopen Task', icon: <RotateCcw size={16} />, onClick: handleReopen }] : []),
   ];
 
   const pageFooter = isCompactViewport && !isEditingTask && !showPassFail ? null : (
@@ -1428,6 +1438,16 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
             {submitting ? <BtnSpinner size={11} color="#fff" /> : <CheckCircle2 size={13} />} Pass
           </button>
         </>
+      )}
+      {/* Reopen — admin/staff, Completed or In Progress.
+          Page-mode previously had no way to undo a Complete/Start; the
+          slide-panel renders Reopen inline in the details body but
+          EntityPage uses this footer instead, so we surface it here. */}
+      {showReopenAction && !isEditingTask && !showPassFail && (
+        <button onClick={handleReopen} disabled={reopenLoading} style={{ ...tkLight, color: '#DC2626', opacity: reopenLoading ? 0.6 : 1, cursor: reopenLoading ? 'wait' : 'pointer' }}>
+          {reopenLoading ? <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} /> : <RotateCcw size={13} />}
+          {reopenLoading ? 'Reopening…' : 'Reopen Task'}
+        </button>
       )}
     </>
   );

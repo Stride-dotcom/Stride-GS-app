@@ -3,7 +3,6 @@ import type {
   TaskStatus,
   RepairStatus,
   WillCallStatus,
-  ServiceCode,
 } from './types';
 
 export const INVENTORY_STATUSES: InventoryStatus[] = [
@@ -33,7 +32,10 @@ export const WILL_CALL_STATUSES: WillCallStatus[] = [
   'Cancelled',
 ];
 
-export const SERVICE_CODES: Record<ServiceCode, string> = {
+// Indexed by both legacy ServiceCode bucket values *and* full svcCode values
+// (LABEL, PLLT, etc.). Tasks.tsx and detail panels look up by whichever code
+// is on the row, so both must resolve to a human-readable name.
+export const SERVICE_CODES: Record<string, string> = {
   RCVG: 'Receiving',
   INSP: 'Inspection',
   ASM: 'Assembly',
@@ -41,6 +43,17 @@ export const SERVICE_CODES: Record<ServiceCode, string> = {
   STOR: 'Storage',
   DLVR: 'Delivery',
   WCPU: 'Will Call Pickup',
+  WC: 'Will Call',
+  LABEL: 'Label',
+  PLLT: 'Palletize',
+  PICK: 'Pick',
+  DISP: 'Disposal',
+  RSTK: 'Restock',
+  MNRTU: 'Manual Return',
+  NO_ID: 'No ID',
+  MULTI_INS: 'Multi-Item Inspection',
+  SIT: 'Sit Service',
+  RUSH: 'Rush',
   OTHER: 'Other',
 };
 
