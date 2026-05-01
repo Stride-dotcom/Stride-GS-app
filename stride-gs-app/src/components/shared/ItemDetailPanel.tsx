@@ -10,6 +10,7 @@ import { theme } from '../../styles/theme';
 import { fmtDate } from '../../lib/constants';
 import { useReceivingAddons } from '../../hooks/useReceivingAddons';
 import { postUpdateInventoryItem, fetchItemMoveHistory, postRequestRepairQuote, postAddItemAddon, postRemoveItemAddon, isApiConfigured } from '../../lib/api';
+import { entityEvents } from '../../lib/entityEvents';
 import type { MoveHistoryEntry } from '../../lib/api';
 import type { InventoryItem, InventoryStatus } from '../../lib/types';
 import { TabbedDetailPanel } from './TabbedDetailPanel';
@@ -870,6 +871,12 @@ export function ItemDetailPanel({
         setIsEditing(false);
         onItemUpdated?.();
         setTimeout(() => setSaveSuccess(false), 3000);
+        // Tell every other consumer of inventory data that this row just
+        // changed. Without this, the Inventory list page shows stale values
+        // until either the next manual refresh or the realtime echo (which
+        // can lag a few seconds behind the GAS write — easy to navigate
+        // back before it lands). Mirrors the InlineEditableCell save path.
+        entityEvents.emit('inventory', item.itemId);
         // Note: do NOT clearItemPatch on success — patch stays until 120s TTL expires
         // (patch value == server value, so no visual difference when it expires)
       } else {
@@ -1726,6 +1733,10 @@ function ItemCoverageTab({
       }, item.clientSheetId || item.clientId);
       if (resp.ok && resp.data?.success) {
         setSaveSuccess(true);
+        // Tell every other inventory consumer this row changed (matches
+        // the main field-edit save path above). Without this, the list
+        // page shows stale coverage/declared-value until manual refresh.
+        entityEvents.emit('inventory', item.itemId);
         // Patch stays — 120s TTL will align with next refetch
         setTimeout(() => setSaveSuccess(false), 2500);
       } else {
