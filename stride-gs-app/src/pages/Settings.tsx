@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom';
 import { Settings as SettingsIcon, Users, DollarSign, Mail, Database, Globe, Bell, Plus, ChevronRight, CheckCircle2, AlertCircle, UserPlus, Shield, ToggleLeft, ToggleRight, Eye, EyeOff, Wifi, WifiOff, RefreshCw, Loader2, RefreshCcw, ExternalLink, Wrench, PlayCircle, Send, FolderSync, BookText, LogIn, Cloud, Edit2, Zap, ArrowUpDown, ChevronUp, ChevronDown, X, Truck, Link2, Search } from 'lucide-react';
 import { useReactTable, getCoreRowModel, getSortedRowModel, flexRender, type SortingState, type ColumnDef } from '@tanstack/react-table';
-import { getApiUrl, getApiToken, setApiCredentials, isApiConfigured, fetchHealth, postOnboardClient, postUpdateClient, postSyncSettings, postRefreshCaches, postFixMissingFolders, postTestSendClientTemplates, postTestSendClaimEmails, fetchAutoIdSetting, postUpdateAutoIdSetting, postResolveOnboardUser, fetchStaxConfig, postUpdateStaxConfig, apiPost, postSyncTemplatesToClients, postBulkSyncToSupabase, postPurgeInactiveFromSupabase, fetchClients, postFinishClientSetup, resyncUsersPreview, resyncUsers, resyncClientsPreview, resyncClients, setNextFetchNoCache, adminSetUserPassword, ensureUserInAuth, listMissingAuthUsers, postTestGenerateDoc, apiFetch, postSendIntakeInvitation } from '../lib/api';
+import { getApiUrl, getApiToken, setApiCredentials, isApiConfigured, fetchHealth, postOnboardClient, postUpdateClient, postSyncSettings, postRefreshCaches, postFixMissingFolders, postTestSendClientTemplates, postTestSendClaimEmails, fetchAutoIdSetting, postUpdateAutoIdSetting, postResolveOnboardUser, fetchStaxConfig, postUpdateStaxConfig, apiPost, postSyncTemplatesToClients, postBulkSyncToSupabase, postPurgeInactiveFromSupabase, fetchClients, postFinishClientSetup, resyncUsersPreview, resyncUsers, resyncClientsPreview, resyncClients, setNextFetchNoCache, adminSetUserPassword, ensureUserInAuth, listMissingAuthUsers, postTestGenerateDoc, apiFetch } from '../lib/api';
 import type { BulkSyncResult } from '../lib/api';
 import type { EmailTemplate } from '../lib/api';
 import { entityEvents } from '../lib/entityEvents';
@@ -32,6 +32,7 @@ import { BackfillDocsPanel } from '../components/settings/BackfillDocsPanel';
 import { useClientTcStatus } from '../hooks/useClientTcStatus';
 import { IntakeEmailModal } from '../components/shared/IntakeEmailModal';
 import { supabase } from '../lib/supabase';
+import { sendEmail } from '../lib/email';
 
 type Tab = 'general' | 'clients' | 'users' | 'pricing' | 'emails' | 'integrations' | 'notifications' | 'maintenance';
 
@@ -768,12 +769,24 @@ export function Settings() {
     if (!resendTcModal) return;
     setResendTcSending(true);
     try {
-      await postSendIntakeInvitation({
-        to:       resendTcModal.prospectEmail,
-        subject,
-        bodyHtml,
-        linkId:   resendTcModal.linkId,
+      // Migrated off the GAS sendIntakeInvitation handler onto the
+      // Supabase send-email edge function. Subject + body are pre-rendered
+      // by the modal so staff edits flow through; templateKey is recorded
+      // for audit. Idempotency by intake link id prevents accidental
+      // double-sends.
+      const result = await sendEmail({
+        templateKey:       'ACCOUNT_REFRESH_INVITATION',
+        to:                resendTcModal.prospectEmail,
+        subjectOverride:   subject,
+        htmlOverride:      bodyHtml,
+        idempotencyKey:    `account-refresh-invite:${resendTcModal.linkId}`,
+        relatedEntityType: 'intake_link',
+        relatedEntityId:   resendTcModal.linkId,
       });
+      if (!result.ok) {
+        console.error('[Settings] ACCOUNT_REFRESH_INVITATION send failed:', result.error);
+        alert(`Failed to send refresh invite: ${result.error ?? 'Unknown error'}`);
+      }
     } finally {
       setResendTcSending(false);
       setResendTcModal(null);
