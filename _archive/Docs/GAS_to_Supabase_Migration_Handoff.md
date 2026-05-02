@@ -14,21 +14,30 @@ Sheets entirely. Run the whole app on **Supabase + GitHub Pages**, with
 **Resend** for transactional email and edge functions for any
 server-side work. Move one slice at a time, never break production.
 
-**Where we are right now (2026-05-02, late afternoon):**
-- ✅ Email pipeline shipped (PR #168) + 3 templates migrated in earlier
-  session (PRs #169, #170, #172) + 3 more this session (PRs #174-176).
-- ✅ Recipient-token resolver — staff/admin/notification audiences
-  expand from `email_templates.recipients` automatically.
-- ✅ `notify-new-order` + `notify-public-request` no longer call GAS
-  sendRawEmail — both delegate to `send-email`.
-- ✅ New `send-onboarding-email` edge function for the admin Resend
-  Onboarding flow (Settings → Users).
-- ✅ CLAIM_STAFF_NOTIFY now fires React-side from CreateClaimModal.
-  GAS handler stripped (StrideAPI.gs v38.111.0).
-- ⏭️ Next batch: claim status emails (CLAIM_RECEIVED + CLAIM_DENIAL +
-  CLAIM_MORE_INFO + CLAIM_SETTLEMENT), order state emails
-  (ORDER_REJECTED + ORDER_REVISION_REQUESTED), then the cleanup PR
-  that deletes dead GAS handlers.
+**Where we are right now (2026-05-02, end of day):**
+- ✅ Session 90 shipped 9 PRs (#174–#182). GAS at v38.121.0 / Web App v424.
+- ✅ Every email handler that doesn't need temp-password generation or
+  attachments is now off GAS MailApp. All sends route through
+  `send-email` → Resend.
+- ✅ `notify-new-order`, `notify-public-request`, `notify-order-revision`
+  refactored to delegate sends to `send-email` (no more GAS sendRawEmail).
+- ✅ React-side fires for CLAIM_STAFF_NOTIFY, CLAIM_RECEIVED,
+  CLAIM_MORE_INFO, CLAIM_DENIAL, ACCOUNT_REFRESH_INVITATION.
+- ✅ New edge function `send-onboarding-email` for the admin Resend
+  Onboarding flow.
+- ✅ Cleanup PR removed ~383 lines of dead GAS handlers + matching
+  React API wrappers (PR #181).
+- ✅ `send-email` now supports `attachments` (PR #182) — unblocks the
+  next two big migrations.
+- ⏭️ Remaining migrations are larger and need attention:
+    1. **INSP_EMAIL** — fires inside GAS task-completion handler;
+       attaches Work Order PDF currently on Drive. Needs PDF source
+       solved (Drive → Supabase Storage, OR GAS posts base64 to send-email).
+    2. **ONBOARDING_EMAIL activation/temp-password path** — issues
+       temp passwords + credentials-block fallback. Resend path
+       already migrated; the credential-issuing path stays for now.
+    3. **CLAIM_SETTLEMENT** — server-generated PDF attachment, same
+       Drive-source issue as INSP_EMAIL.
 - ⏳ Billing engine port to Postgres is the **largest** future phase
   and gates retiring GAS entirely. Not started; needs shadow-test
   infra first (planned, not built).
@@ -75,23 +84,24 @@ server-side work. Move one slice at a time, never break production.
 | 3 | [#172](https://github.com/Stride-dotcom/Stride-GS-app/pull/172) | `INTAKE_SUBMITTED` + recipient-token resolver | ✅ Live | Foundational — unblocks every staff-broadcast template. |
 | 4 | [#174](https://github.com/Stride-dotcom/Stride-GS-app/pull/174) | `ORDER_REVIEW_REQUEST` + `PUBLIC_REQUEST_ALERT` + `PUBLIC_REQUEST_CONFIRMATION` | ✅ Live | `notify-new-order` + `notify-public-request` edge functions now delegate to `send-email` instead of GAS sendRawEmail. Idempotency by orderId. |
 | 5 | [#175](https://github.com/Stride-dotcom/Stride-GS-app/pull/175) | `ONBOARDING_EMAIL` (resend path) | ✅ Live | New `send-onboarding-email` edge function resolves user→client→tokens in Supabase. Settings → Users → Resend Onboarding. GAS handler retained for activation/temp-password path. |
-| 6 | [#176](https://github.com/Stride-dotcom/Stride-GS-app/pull/176) | `CLAIM_STAFF_NOTIFY` | ✅ Live | Fires React-side from CreateClaimModal after postCreateClaim succeeds. GAS-side send stripped (StrideAPI.gs v38.111.0, deployment v422). |
+| 6 | [#176](https://github.com/Stride-dotcom/Stride-GS-app/pull/176) | `CLAIM_STAFF_NOTIFY` | ✅ Live | Fires React-side from CreateClaimModal after postCreateClaim succeeds. GAS-side send stripped. |
+| 7 | [#178](https://github.com/Stride-dotcom/Stride-GS-app/pull/178) | `CLAIM_RECEIVED` + `CLAIM_MORE_INFO` + `CLAIM_DENIAL` | ✅ Live | CreateClaimModal + ClaimDetailPanel fire after their respective postX calls. GAS-side sends stripped. |
+| 8 | [#179](https://github.com/Stride-dotcom/Stride-GS-app/pull/179) | `ORDER_REJECTED` + `ORDER_REVISION_REQUESTED` | ✅ Live | `notify-order-revision` edge function delegates to send-email. Idempotency `${action}:${orderId}`. |
+| 9 | [#180](https://github.com/Stride-dotcom/Stride-GS-app/pull/180) | `ACCOUNT_REFRESH_INVITATION` | ✅ Live | Settings → Clients → Send Refresh Link. Modal-edit override path. |
+| 10 | [#181](https://github.com/Stride-dotcom/Stride-GS-app/pull/181) | (cleanup) — dead GAS handlers + React wrappers | ✅ Live | ~383 lines retired: sendIntakeInvitation, notifyIntakeSubmitted, sendOnboardingToUsers, emailSignedAgreement. StrideAPI.gs v38.121.0 / Web App v424. |
+| 11 | [#182](https://github.com/Stride-dotcom/Stride-GS-app/pull/182) | (infra) `send-email` attachments support | ✅ Live | Optional `attachments` array forwarded 1:1 to Resend. Unblocks INSP_EMAIL + CLAIM_SETTLEMENT. v5 deployed. |
 
-### Still on GAS (handlers untouched, React still calls them via apiPost):
+### Still on GAS
 
-The following templates still send via GAS. Each one is a small
-React-side migration once the resolver pattern is in place (which it
-now is).
+The remaining handlers are non-trivial — they involve PDF attachments
+sourced from Drive, server-side credential issuance, or are coupled
+to billing writes. They need their own design pass.
 
-| Template | Trigger | Recipients | Effort |
-|----------|---------|------------|--------|
-| `CLAIM_RECEIVED` / `CLAIM_DENIAL` / `CLAIM_MORE_INFO` / `CLAIM_SETTLEMENT` | Claim status changes | Single (claimant email) | Small batch (~1h) |
-| `ORDER_REJECTED` / `ORDER_REVISION_REQUESTED` | Order state changes | Single (client email) | Small (note: `notify-order-revision` edge function may already exist; check before duplicating) |
-| `ONBOARDING_EMAIL` (activation/temp-password path) | New client activation, password reset | Single | Larger — handler issues temp password + applies credentials-block fallback. Resend path is already migrated via `send-onboarding-email`. |
-| `INSP_EMAIL` | Inspection task completed (Pass/Fail) | Single (client email) | **Large — needs feature flag.** Coupled to GAS billing-write flow. |
-| `ACCOUNT_REFRESH_INVITATION` | Admin requests client account refresh | Single | Small |
-| `INTAKE_RECEIPT_CLIENT` (legacy GAS path) | (already migrated; GAS handler still exists but unused) | — | (cleanup) |
-| `CLIENT_INTAKE_INVITE` (legacy GAS path) | (already migrated; GAS handler still exists but unused) | — | (cleanup) |
+| Template | Trigger | Recipients | Why it's not done |
+|----------|---------|------------|---|
+| `INSP_EMAIL` | Inspection task completed (Pass/Fail) | Client + notification list | Fires inside the GAS task-completion handler that also writes billing rows. Attaches Work Order PDF from the Drive task folder. Migration needs: (a) move email fire to React after task-completion succeeds, (b) source the Work Order PDF (Drive→Storage migration OR GAS posts base64 to send-email). PDF infra is now in place (PR #182) — design pass needed for PDF source. |
+| `CLAIM_SETTLEMENT` | Settlement generated | Single (claimant) | Attaches server-generated settlement PDF (api_generateSettlementPdf_). Same Drive-source problem as INSP_EMAIL. PR #182 made the attachment path possible; PDF source is still GAS. |
+| `ONBOARDING_EMAIL` (activation / temp-password path) | New client activation, admin set-password | Single (user) | Handler generates a random temp password and applies a styled credentials-block fallback when the template doesn't include `{{TEMP_PASSWORD}}`. Migration touches credential-issuance, which is sensitive. Resend path is already migrated via `send-onboarding-email`. |
 
 After 3-4 more migrations, do a **cleanup PR** that deletes the dead
 GAS handlers (`sendIntakeInvitation`, `emailSignedAgreement`,

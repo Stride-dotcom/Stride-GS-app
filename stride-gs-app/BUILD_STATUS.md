@@ -9,8 +9,8 @@
 | System | Version | Notes |
 |---|---|---|
 | React app (GitHub Pages) | Latest on `origin/main` | `npm run deploy` from source |
-| StrideAPI.gs | v38.119.0 | Web App deployment v422 (CLAIM_STAFF_NOTIFY GAS-side stripped) |
-| Supabase | 57 migrations applied | 8 Edge Functions deployed (added `send-email`, `send-onboarding-email`) |
+| StrideAPI.gs | v38.121.0 | Web App deployment v424 (cleanup of dead email handlers) |
+| Supabase | 57 migrations applied | 9 Edge Functions deployed (`send-email` v5 with attachments, `send-onboarding-email` v1) |
 | Client scripts | Rolled out to 49 active clients | Code.gs v4.6.0, Import.gs v4.3.0 |
 | StaxAutoPay.gs | v4.6.0 | Supabase write-through wired |
 
@@ -113,6 +113,23 @@ UI components: FloatingActionMenu, WriteButton, BatchGuard, ActionTooltip, Batch
 - `CreateClaimModal.tsx` now fires `sendEmail({ templateKey: 'CLAIM_STAFF_NOTIFY', tokens, idempotencyKey })` after `postCreateClaim` succeeds. Recipients resolve from `email_templates.recipients` (`{{STAFF_EMAILS}}`).
 - `handleCreateClaim_` in StrideAPI.gs (v38.119.0) no longer sends CLAIM_STAFF_NOTIFY — keeping it would double-send. CLAIM_RECEIVED to claimant still on GAS for now.
 - Deployed: GAS push + deploy-api (Web App v422), then React `npm run deploy`.
+
+### PR #178 — claim status emails (CLAIM_RECEIVED + CLAIM_MORE_INFO + CLAIM_DENIAL)
+- CreateClaimModal also fires CLAIM_RECEIVED to the claimant after postCreateClaim. ClaimDetailPanel fires CLAIM_MORE_INFO after postRequestMoreInfo and CLAIM_DENIAL after postSendClaimDenial. All three GAS-side sends stripped (StrideAPI.gs v38.120.0). Web App v423.
+- CLAIM_SETTLEMENT stays on GAS — needs attachments (now landed in PR #182) AND the PDF source moved off Drive.
+
+### PR #179 — notify-order-revision routes through send-email
+- ORDER_REJECTED + ORDER_REVISION_REQUESTED no longer POST to GAS sendRawEmail. Edge function v3 ACTIVE; idempotency `${action}:${orderId}`.
+
+### PR #180 — ACCOUNT_REFRESH_INVITATION off GAS
+- Settings → Clients → Send Refresh Link now hits send-email with templateKey ACCOUNT_REFRESH_INVITATION. Same modal-edit override pattern as PR #169.
+
+### PR #181 — cleanup: dead GAS handlers + React wrappers
+- ~383 lines retired across StrideAPI.gs + api.ts. Handlers: sendIntakeInvitation, notifyIntakeSubmitted, sendOnboardingToUsers, emailSignedAgreement (all migrated earlier in the session). StrideAPI.gs v38.121.0, Web App v424.
+
+### PR #182 — send-email attachments support
+- Optional `attachments` array forwarded 1:1 to Resend (each item = `{filename, content (base64) | path (URL), contentType?}`). React wrapper (`src/lib/email.ts`) gets matching types. Edge function v5 ACTIVE.
+- Unblocks INSP_EMAIL + CLAIM_SETTLEMENT migrations (each still needs the PDF source moved off Drive before they can ship).
 
 ---
 
