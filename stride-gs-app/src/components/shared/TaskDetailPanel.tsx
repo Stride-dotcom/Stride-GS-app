@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useMemo, useEffect } from 'react';
-import { X, Package, MapPin, CheckCircle2, XCircle, AlertTriangle, FolderOpen, Loader2, Play, ExternalLink, Wrench, Save, DollarSign, Pencil, FileText, MoreHorizontal, RotateCcw } from 'lucide-react';
+import { X, Package, MapPin, CheckCircle2, XCircle, AlertTriangle, FolderOpen, Loader2, Play, ExternalLink, Wrench, Save, DollarSign, Pencil, FileText, MoreHorizontal, RotateCcw, Plus, Trash2 } from 'lucide-react';
 import { BtnSpinner } from '../ui/BtnSpinner';
 import { DeepLink } from './DeepLink';
 import { TabbedDetailPanel, type TabbedDetailPanelTab } from './TabbedDetailPanel';
@@ -27,6 +27,8 @@ import type { CompleteTaskResponse, StartTaskResponse } from '../../lib/api';
 import { useAuth } from '../../contexts/AuthContext';
 import { SERVICE_CODES } from '../../lib/constants';
 import { ProcessingOverlay } from './ProcessingOverlay';
+import { AddTaskServiceModal } from './AddTaskServiceModal';
+import { useTaskAddons } from '../../hooks/useTaskAddons';
 
 import type { Task, Repair, InventoryItem } from '../../lib/types';
 interface Props {
@@ -166,6 +168,17 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
 
   // Stage B — reopen (undo accidental Start or Complete)
   const canReopen = user?.role === 'admin' || user?.role === 'staff';
+
+  // Add-on services — staff/admin only. Rows live on public.task_addons
+  // until the task is completed; handleCompleteTask_ then writes one
+  // billing row per addon to the client Billing_Ledger sheet.
+  const canEditAddons = user?.role === 'admin' || user?.role === 'staff';
+  const { addons, addAddon, deleteAddon } = useTaskAddons(
+    canEditAddons ? task.taskId : null,
+    canEditAddons ? clientSheetId : null,
+  );
+  const [showAddServiceModal, setShowAddServiceModal] = useState(false);
+  const [addonDeletingId, setAddonDeletingId] = useState<string | null>(null);
   const [reopenLoading, setReopenLoading] = useState(false);
   const [reopenError, setReopenError] = useState<string | null>(null);
 
@@ -903,6 +916,112 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
             </div>
           )}
 
+          {/* Add-on Services — staff/admin only. Rows live on
+              public.task_addons and get flushed to Billing_Ledger by
+              handleCompleteTask_ on completion. */}
+          {canEditAddons && (
+            <div style={{ marginBottom: 16 }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <Plus size={14} color={theme.colors.orange} />
+                  <span style={{ fontSize: 12, fontWeight: 600 }}>Add-on Services</span>
+                  {addons.length > 0 && (
+                    <span style={{ fontSize: 11, color: theme.colors.textMuted }}>
+                      ({addons.length})
+                    </span>
+                  )}
+                </div>
+                {/* Desktop: inline button. Mobile: action lives in ⋯ overflow menu. */}
+                {!isMobile && isOpen && !completed && (
+                  <button
+                    onClick={() => setShowAddServiceModal(true)}
+                    style={{
+                      display: 'inline-flex', alignItems: 'center', gap: 4,
+                      padding: '5px 10px', fontSize: 12, fontWeight: 600,
+                      border: `1px solid ${theme.colors.border}`, borderRadius: 6,
+                      background: '#fff', color: theme.colors.text,
+                      cursor: 'pointer', fontFamily: 'inherit',
+                    }}
+                    onMouseEnter={e => { e.currentTarget.style.borderColor = theme.colors.orange; e.currentTarget.style.color = theme.colors.orange; }}
+                    onMouseLeave={e => { e.currentTarget.style.borderColor = theme.colors.border; e.currentTarget.style.color = theme.colors.text; }}
+                  >
+                    <Plus size={12} /> Add Service
+                  </button>
+                )}
+              </div>
+              {addons.length === 0 ? (
+                <div style={{ fontSize: 12, color: theme.colors.textMuted, padding: '6px 0' }}>
+                  No add-on services. {isOpen && !completed && 'Add extras (disposal, extra items) to bill on completion.'}
+                </div>
+              ) : (
+                <div style={{ border: `1px solid ${theme.colors.border}`, borderRadius: 8, overflow: 'hidden' }}>
+                  {addons.map((a, idx) => (
+                    <div
+                      key={a.id}
+                      style={{
+                        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                        padding: '8px 12px', fontSize: 12,
+                        background: idx % 2 === 0 ? '#fff' : theme.colors.bgSubtle,
+                        borderTop: idx === 0 ? 'none' : `1px solid ${theme.colors.border}`,
+                        gap: 8,
+                      }}
+                    >
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontWeight: 600, color: theme.colors.text }}>
+                          {a.serviceName} <span style={{ fontWeight: 400, color: theme.colors.textMuted }}>({a.serviceCode})</span>
+                        </div>
+                        <div style={{ fontSize: 11, color: theme.colors.textMuted, marginTop: 2 }}>
+                          Qty {a.quantity} × ${(a.rate ?? 0).toFixed(2)}
+                          {a.itemClass ? ` · Class ${a.itemClass}` : ''}
+                          {a.addedByName ? ` · added by ${a.addedByName}` : ''}
+                        </div>
+                      </div>
+                      <div style={{ fontSize: 13, fontWeight: 700, color: theme.colors.text, whiteSpace: 'nowrap' }}>
+                        ${(a.total ?? 0).toFixed(2)}
+                      </div>
+                      {isOpen && !completed && (
+                        <button
+                          onClick={async () => {
+                            if (!confirm(`Remove ${a.serviceName} from this task?`)) return;
+                            setAddonDeletingId(a.id);
+                            await deleteAddon(a.id);
+                            setAddonDeletingId(null);
+                          }}
+                          disabled={addonDeletingId === a.id}
+                          style={{
+                            background: 'none', border: 'none', padding: 4, cursor: 'pointer',
+                            color: addonDeletingId === a.id ? theme.colors.textMuted : '#DC2626',
+                            display: 'flex', alignItems: 'center',
+                          }}
+                          aria-label="Remove addon"
+                          title="Remove addon"
+                        >
+                          {addonDeletingId === a.id
+                            ? <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} />
+                            : <Trash2 size={13} />}
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                  {/* Total row */}
+                  <div style={{
+                    display: 'flex', justifyContent: 'space-between',
+                    padding: '8px 12px', fontSize: 12, fontWeight: 700,
+                    background: theme.colors.bgSubtle,
+                    borderTop: `1px solid ${theme.colors.border}`,
+                  }}>
+                    <span style={{ color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.04em', fontSize: 11 }}>
+                      Add-ons total
+                    </span>
+                    <span>
+                      ${addons.reduce((sum, a) => sum + (a.total ?? 0), 0).toFixed(2)}
+                    </span>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
         </div>
   );
 
@@ -1002,6 +1121,17 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
             >
               {reopenLoading ? <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} /> : <RotateCcw size={14} />}
               {reopenLoading ? 'Reopening…' : (task.status === 'Completed' ? 'Reopen Task (undo Complete)' : 'Reopen Task (undo Start)')}
+            </button>
+          )}
+          {/* Add Service — staff/admin only, open tasks only. Mobile entry
+              point for the addon picker (desktop has an inline button in
+              the Add-on Services section in the Details body). */}
+          {canEditAddons && isOpen && !completed && (
+            <button
+              onClick={() => { setOverflowOpen(false); setShowAddServiceModal(true); }}
+              style={{ width: '100%', padding: '13px 16px', textAlign: 'left', background: 'none', border: 'none', borderBottom: `1px solid ${theme.colors.border}`, cursor: 'pointer', fontSize: 14, color: theme.colors.text, fontFamily: 'inherit', display: 'flex', alignItems: 'center', gap: 8 }}
+            >
+              <Plus size={14} /> Add Service
             </button>
           )}
           <button
@@ -1475,6 +1605,15 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
     { id: 'activity', label: 'Activity', render: renderTaskActivityTab },
   ];
 
+  // Mounted in both shell branches so the picker overlays the panel/page.
+  const addServiceModal = showAddServiceModal && (
+    <AddTaskServiceModal
+      itemClass={task.itemClass || null}
+      onClose={() => setShowAddServiceModal(false)}
+      onSubmit={async input => { await addAddon(input); }}
+    />
+  );
+
   if (renderAsPage) {
     return (
       <>
@@ -1490,11 +1629,13 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
           footer={pageFooter}
         />
         <FloatingActionMenu show={isCompactViewport && !isEditingTask && !showPassFail} actions={fabActions} />
+        {addServiceModal}
       </>
     );
   }
 
   return (
+    <>
     <TabbedDetailPanel
       title={task.taskId}
       clientName={task.clientName}
@@ -1556,5 +1697,7 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
       resizeKey="task"
       defaultWidth={460}
     />
+    {addServiceModal}
+    </>
   );
 }
