@@ -14,13 +14,21 @@ Sheets entirely. Run the whole app on **Supabase + GitHub Pages**, with
 **Resend** for transactional email and edge functions for any
 server-side work. Move one slice at a time, never break production.
 
-**Where we are right now (2026-05-02):**
-- ✅ Email pipeline (Resend + `send-email` edge function + `email_sends`
-  audit log) shipped. Three handlers migrated off GAS.
-- ✅ Recipient-token resolver in the edge function — staff/admin/notification
-  audiences expand from `email_templates.recipients` automatically.
-- ⏭️ Next batch: 3 staff-broadcast templates + onboarding welcome
-  (each is ~15 min, all use the resolver). See "Up Next" section.
+**Where we are right now (2026-05-02, late afternoon):**
+- ✅ Email pipeline shipped (PR #168) + 3 templates migrated in earlier
+  session (PRs #169, #170, #172) + 3 more this session (PRs #174-176).
+- ✅ Recipient-token resolver — staff/admin/notification audiences
+  expand from `email_templates.recipients` automatically.
+- ✅ `notify-new-order` + `notify-public-request` no longer call GAS
+  sendRawEmail — both delegate to `send-email`.
+- ✅ New `send-onboarding-email` edge function for the admin Resend
+  Onboarding flow (Settings → Users).
+- ✅ CLAIM_STAFF_NOTIFY now fires React-side from CreateClaimModal.
+  GAS handler stripped (StrideAPI.gs v38.111.0).
+- ⏭️ Next batch: claim status emails (CLAIM_RECEIVED + CLAIM_DENIAL +
+  CLAIM_MORE_INFO + CLAIM_SETTLEMENT), order state emails
+  (ORDER_REJECTED + ORDER_REVISION_REQUESTED), then the cleanup PR
+  that deletes dead GAS handlers.
 - ⏳ Billing engine port to Postgres is the **largest** future phase
   and gates retiring GAS entirely. Not started; needs shadow-test
   infra first (planned, not built).
@@ -65,6 +73,9 @@ server-side work. Move one slice at a time, never break production.
 | 2 | [#170](https://github.com/Stride-dotcom/Stride-GS-app/pull/170) | `INTAKE_RECEIPT_CLIENT` | ✅ Live | Auto + manual receipt to prospect after intake submit. |
 | 2.1 | [#171](https://github.com/Stride-dotcom/Stride-GS-app/pull/171) | (rate fix in intakeReceipt helper) | ✅ Live | Updated $300 floor → $30 to match 2026-05-01 insurance rate change. |
 | 3 | [#172](https://github.com/Stride-dotcom/Stride-GS-app/pull/172) | `INTAKE_SUBMITTED` + recipient-token resolver | ✅ Live | Foundational — unblocks every staff-broadcast template. |
+| 4 | [#174](https://github.com/Stride-dotcom/Stride-GS-app/pull/174) | `ORDER_REVIEW_REQUEST` + `PUBLIC_REQUEST_ALERT` + `PUBLIC_REQUEST_CONFIRMATION` | ✅ Live | `notify-new-order` + `notify-public-request` edge functions now delegate to `send-email` instead of GAS sendRawEmail. Idempotency by orderId. |
+| 5 | [#175](https://github.com/Stride-dotcom/Stride-GS-app/pull/175) | `ONBOARDING_EMAIL` (resend path) | ✅ Live | New `send-onboarding-email` edge function resolves user→client→tokens in Supabase. Settings → Users → Resend Onboarding. GAS handler retained for activation/temp-password path. |
+| 6 | [#176](https://github.com/Stride-dotcom/Stride-GS-app/pull/176) | `CLAIM_STAFF_NOTIFY` | ✅ Live | Fires React-side from CreateClaimModal after postCreateClaim succeeds. GAS-side send stripped (StrideAPI.gs v38.111.0, deployment v422). |
 
 ### Still on GAS (handlers untouched, React still calls them via apiPost):
 
@@ -74,12 +85,9 @@ now is).
 
 | Template | Trigger | Recipients | Effort |
 |----------|---------|------------|--------|
-| `CLAIM_STAFF_NOTIFY` | Claim submitted | `{{STAFF_EMAILS}}` | Small (~15m) |
 | `CLAIM_RECEIVED` / `CLAIM_DENIAL` / `CLAIM_MORE_INFO` / `CLAIM_SETTLEMENT` | Claim status changes | Single (claimant email) | Small batch (~1h) |
-| `ORDER_REVIEW_REQUEST` | Client submits delivery order | `NOTIFICATION_EMAILS` | Small (already partially via `notify-new-order` edge function — see notes) |
-| `ORDER_REJECTED` / `ORDER_REVISION_REQUESTED` | Order state changes | Single (client email) | Small |
-| `PUBLIC_REQUEST_ALERT` | Public service request submitted | `PUBLIC_FORM_SETTINGS` | Small |
-| `ONBOARDING_EMAIL` | Admin onboards new client | Single (client contact email) | Small (~30m, modal-edit path like #169) |
+| `ORDER_REJECTED` / `ORDER_REVISION_REQUESTED` | Order state changes | Single (client email) | Small (note: `notify-order-revision` edge function may already exist; check before duplicating) |
+| `ONBOARDING_EMAIL` (activation/temp-password path) | New client activation, password reset | Single | Larger — handler issues temp password + applies credentials-block fallback. Resend path is already migrated via `send-onboarding-email`. |
 | `INSP_EMAIL` | Inspection task completed (Pass/Fail) | Single (client email) | **Large — needs feature flag.** Coupled to GAS billing-write flow. |
 | `ACCOUNT_REFRESH_INVITATION` | Admin requests client account refresh | Single | Small |
 | `INTAKE_RECEIPT_CLIENT` (legacy GAS path) | (already migrated; GAS handler still exists but unused) | — | (cleanup) |

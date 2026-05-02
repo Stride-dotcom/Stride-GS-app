@@ -1,6 +1,6 @@
 # Stride GS App — Build Status
 
-> Last updated: 2026-05-01. Verified against actual codebase.
+> Last updated: 2026-05-02. Verified against actual codebase.
 
 ---
 
@@ -9,8 +9,8 @@
 | System | Version | Notes |
 |---|---|---|
 | React app (GitHub Pages) | Latest on `origin/main` | `npm run deploy` from source |
-| StrideAPI.gs | v38.118.0 | Web App deployment v387 |
-| Supabase | 57 migrations applied | 6 Edge Functions deployed |
+| StrideAPI.gs | v38.119.0 | Web App deployment v422 (CLAIM_STAFF_NOTIFY GAS-side stripped) |
+| Supabase | 57 migrations applied | 8 Edge Functions deployed (added `send-email`, `send-onboarding-email`) |
 | Client scripts | Rolled out to 49 active clients | Code.gs v4.6.0, Import.gs v4.3.0 |
 | StaxAutoPay.gs | v4.6.0 | Supabase write-through wired |
 
@@ -94,6 +94,25 @@ UI components: FloatingActionMenu, WriteButton, BatchGuard, ActionTooltip, Batch
 - Quote Tool with PDF generation
 - Expected operations calendar
 - QR Scanner + Labels (native React, Supabase-backed)
+
+---
+
+## Recent Changes (2026-05-02, session 90 — GAS→Supabase email migration batch)
+
+### PR #174 — notify-new-order + notify-public-request route through send-email
+- Both edge functions previously POSTed rendered HTML to GAS sendRawEmail. They now hand off to the `send-email` edge function (Resend) — drops `GAS_API_URL` / `GAS_API_TOKEN` deps, gets idempotency + `email_sends` audit rows for free.
+- Idempotency keys: `order-review-request:<id>`, `public-request-confirm:<id>`, `public-request-alert:<id>`. Re-fires on the same order are deduped.
+- Files: `stride-gs-app/supabase/functions/notify-new-order/index.ts`, `stride-gs-app/supabase/functions/notify-public-request/index.ts`. Deployed v8 / v3.
+
+### PR #175 — ONBOARDING_EMAIL resend off GAS via send-onboarding-email
+- New edge function `stride-gs-app/supabase/functions/send-onboarding-email/index.ts` (v1) resolves user → client (via `cb_users` + `clients`) → tokens → `send-email`. Replaces the GAS `sendOnboardingToUsers` path.
+- Settings → Users → Resend Onboarding now calls the new function. Removed `postSendOnboardingToUsers` import from `Settings.tsx`.
+- The GAS handler stays alive for activation / password-reset (those issue temp passwords + need the credentials-block fallback).
+
+### PR #176 — CLAIM_STAFF_NOTIFY off GAS via React-side send-email
+- `CreateClaimModal.tsx` now fires `sendEmail({ templateKey: 'CLAIM_STAFF_NOTIFY', tokens, idempotencyKey })` after `postCreateClaim` succeeds. Recipients resolve from `email_templates.recipients` (`{{STAFF_EMAILS}}`).
+- `handleCreateClaim_` in StrideAPI.gs (v38.119.0) no longer sends CLAIM_STAFF_NOTIFY — keeping it would double-send. CLAIM_RECEIVED to claimant still on GAS for now.
+- Deployed: GAS push + deploy-api (Web App v422), then React `npm run deploy`.
 
 ---
 
