@@ -978,6 +978,7 @@ export async function fetchBillingFromSupabase(
  *   statusFilter          → status IN (...)
  *   svcFilter (codes)     → svc_code IN (...)
  *   sidemarkFilter        → sidemark IN (...)
+ *   categoryFilter        → category IN (...)
  *   endDate               → date <= endDate
  */
 export async function fetchBillingFromSupabaseFiltered(
@@ -1009,6 +1010,9 @@ export async function fetchBillingFromSupabaseFiltered(
     }
     if (filters.sidemarkFilter?.length) {
       query = query.in('sidemark', filters.sidemarkFilter);
+    }
+    if (filters.categoryFilter?.length) {
+      query = query.in('category', filters.categoryFilter);
     }
     if (filters.endDate) {
       query = query.lte('date', filters.endDate);

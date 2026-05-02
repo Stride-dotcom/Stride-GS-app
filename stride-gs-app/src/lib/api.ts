@@ -1019,6 +1019,12 @@ export interface BillingFilterParams {
   sidemarkFilter?: string[];
   endDate?: string;
   clientFilter?: string[];
+  /** Service category filter (e.g. ["Admin","Delivery"]). Added for the
+   *  Billing report Category MultiSelectFilter. Maps to billing.category
+   *  in the Supabase path. Passed through to GAS as a query param; the
+   *  GAS handler may ignore unknown params — Supabase is the primary
+   *  read path for billing. */
+  categoryFilter?: string[];
 }
 
 export function fetchBilling(signal?: AbortSignal, clientSheetId?: string, filters?: BillingFilterParams) {
@@ -1029,6 +1035,7 @@ export function fetchBilling(signal?: AbortSignal, clientSheetId?: string, filte
   if (filters?.sidemarkFilter?.length) extra.sidemarkFilter = filters.sidemarkFilter.join(',');
   if (filters?.endDate) extra.endDate = filters.endDate;
   if (filters?.clientFilter?.length) extra.clientFilter = filters.clientFilter.join(',');
+  if (filters?.categoryFilter?.length) extra.categoryFilter = filters.categoryFilter.join(',');
   return apiFetch<BillingResponse>('getBilling', Object.keys(extra).length ? extra : undefined, { signal });
 }
 
