@@ -82,6 +82,7 @@ export interface UseTaskAddonsResult {
   loading: boolean;
   error: string | null;
   addAddon: (input: AddTaskAddonInput) => Promise<TaskAddon | null>;
+  updateAddon: (id: string, patch: { quantity?: number; rate?: number | null }) => Promise<TaskAddon | null>;
   deleteAddon: (id: string) => Promise<boolean>;
   refetch: () => Promise<void>;
 }
@@ -174,12 +175,50 @@ export function useTaskAddons(
     return true;
   }, []);
 
+  /**
+   * Update qty and/or rate on an existing addon. Recomputes total
+   * server-side so the row's `total` column stays consistent. Used by
+   * BillingPreviewCard's inline qty/rate inputs.
+   */
+  const updateAddon = useCallback(async (
+    id: string,
+    patch: { quantity?: number; rate?: number | null },
+  ): Promise<TaskAddon | null> => {
+    const current = addons.find(a => a.id === id);
+    if (!current) return null;
+    const qty = patch.quantity != null ? Number(patch.quantity) : current.quantity;
+    const rate = patch.rate !== undefined
+      ? (patch.rate == null ? null : Number(patch.rate))
+      : current.rate;
+    const total = rate == null ? null : Math.round(qty * rate * 100) / 100;
+    const update: Record<string, unknown> = {
+      quantity: qty,
+      rate,
+      total,
+      updated_at: new Date().toISOString(),
+    };
+    const { data, error: err } = await supabase
+      .from('task_addons')
+      .update(update)
+      .eq('id', id)
+      .select('*')
+      .single();
+    if (err || !data) {
+      setError(err?.message ?? 'Failed to update service');
+      return null;
+    }
+    const updated = rowToAddon(data as AddonRow);
+    setAddons(prev => prev.map(a => (a.id === id ? updated : a)));
+    return updated;
+  }, [addons]);
+
   return useMemo(() => ({
     addons,
     loading,
     error,
     addAddon,
+    updateAddon,
     deleteAddon,
     refetch,
-  }), [addons, loading, error, addAddon, deleteAddon, refetch]);
+  }), [addons, loading, error, addAddon, updateAddon, deleteAddon, refetch]);
 }
