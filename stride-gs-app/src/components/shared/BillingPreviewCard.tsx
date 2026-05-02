@@ -1,21 +1,38 @@
 /**
- * BillingPreviewCard — collapsible "Billing Preview" card for the
- * Details tab of TaskDetailPanel / RepairDetailPanel / WillCallDetailPanel.
+ * BillingPreviewCard — port of the WMS BillingCalculator component.
  *
- * Two sections:
- *   1. Projected charges — what WILL bill on completion. Sourced from the
- *      service_catalog rate for the entity's svcCode + itemClass, plus
- *      any queued task add-ons (public.task_addons). Honors customPrice
- *      override on the primary line.
- *   2. Recorded charges — billing rows already on the ledger for this
- *      item / entity. Pulled live from public.billing.
+ * Read-only billing view that combines:
+ *   1. Preview of charges that WILL be created on completion (catalog
+ *      rate × class × qty, plus queued task_addons).
+ *   2. Recorded ledger rows that already EXIST in public.billing.
  *
- * Staff/admin only. Clients don't see billing math in entity panels.
+ * Adapted from the WMS app's `src/components/billing/BillingCalculator.tsx`
+ * (Stride-WMS battle-tested layout) to the GS-app schema:
+ *   service_events → service_catalog
+ *   billing_events → billing
+ *   task_completion event_type → presence of svc_code row matching the
+ *                                primary task svc on the same task_id
+ *   profile.tenant_id → user.clientSheetId
+ *   wc_number column → task_id (will calls live in the same column)
+ *   Tailwind/shadcn → inline styles + theme tokens
  *
- * Defaults to collapsed so the Details body stays scannable.
+ * Key preserved behaviors:
+ *   - Per-item preview rows GROUPED BY CLASS for cleaner display
+ *   - "RATE REQUIRED" red badge when a recorded row has null rate
+ *   - "manual" badge on addon-prefixed Ledger Row IDs
+ *   - "Already billed" detection — projected lines dim when an
+ *     equivalent recorded row exists
+ *   - Strikethrough void rows; void rows excluded from totals
+ *   - Preview hidden once the entity has an equivalent recorded row
+ *   - Status pill on every recorded row (Unbilled / Invoiced / Billed / Void)
+ *   - Total row with Preview / Recorded breakdown
+ *   - Empty-state ("No billing charges yet") when both sections are empty
+ *
+ * Staff/admin only — clients don't see billing math in entity panels.
+ * Defaults to collapsed.
  */
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { ChevronDown, ChevronRight, DollarSign, Loader2 } from 'lucide-react';
+import { ChevronDown, ChevronRight, DollarSign, Loader2, AlertTriangle, Receipt } from 'lucide-react';
 import { theme } from '../../styles/theme';
 import { supabase } from '../../lib/supabase';
 import { useServiceCatalog, type CatalogService } from '../../hooks/useServiceCatalog';
@@ -25,25 +42,31 @@ export type BillingPreviewEntity = 'task' | 'repair' | 'will_call';
 
 interface Props {
   entityType: BillingPreviewEntity;
-  entityId: string;          // taskId / repairId / wcNumber
+  /** taskId / repairId / wcNumber. For will_call, this is matched against
+   *  the `task_id` column (NOT a separate wc_number — that column doesn't
+   *  exist in our schema). */
+  entityId: string;
   tenantId: string;
-  /** Reserved for future cross-entity rollup (e.g., showing other charges
-   *  on the same item). Currently unused — recorded query is entity-scoped. */
+  /** Item ID for the entity, when applicable. Used for the per-item
+   *  preview row label (mirrors WMS' itemCode display). */
   itemId?: string | null;
-  /** Primary service code (e.g. INSP, ASM, REPAIR, WC). Null = no primary line. */
+  /** Primary service code (e.g. INSP, ASM, REPAIR, WC). Null when no
+   *  primary line exists (e.g. an entity that only ever bills via
+   *  add-ons). */
   svcCode?: string | null;
-  /** Item class for class-based services (XS/S/M/L/XL/XXL). */
+  /** Item class for class-based services. Maps to service_catalog.rates[CLASS]. */
   itemClass?: string | null;
-  /** Custom price override on the primary line. null = use catalog rate. */
+  /** Per-task customPrice override on the primary line. null = use catalog rate. */
   customPrice?: number | null;
-  /** Queued task addons. Pass undefined if entity isn't a task. */
+  /** Queued task_addons rows. Pass undefined when the entity isn't a task. */
   addons?: TaskAddon[];
-  /** Hide for clients — set this to false from the panel. */
+  /** Hide for clients. */
   visible?: boolean;
-  /** Optional initial open state. Defaults to false (collapsed). */
+  /** Initial open/closed state. Defaults to closed. */
   defaultOpen?: boolean;
 }
 
+/** Snake-case slice of public.billing read by this component. */
 interface BillingRow {
   ledger_row_id: string;
   status: string | null;
@@ -57,8 +80,9 @@ interface BillingRow {
   total: number | string | null;
   task_id: string | null;
   repair_id: string | null;
-  wc_number: string | null;
   item_id: string | null;
+  item_class: string | null;
+  item_notes: string | null;
 }
 
 const STATUS_CFG: Record<string, { bg: string; color: string }> = {
@@ -75,8 +99,9 @@ function rateForClass(svc: CatalogService, itemClass: string | null | undefined)
 }
 
 function fmtMoney(n: number | null | undefined): string {
-  if (n == null || isNaN(Number(n))) return '—';
-  return `$${Number(n).toFixed(2)}`;
+  const v = Number(n ?? 0);
+  if (isNaN(v)) return '—';
+  return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(v);
 }
 
 function fmtDate(s: string | null | undefined): string {
@@ -85,6 +110,8 @@ function fmtDate(s: string | null | undefined): string {
   if (isNaN(d.getTime())) return s;
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 }
+
+// ─── Component ───────────────────────────────────────────────────────────
 
 export function BillingPreviewCard({
   entityType, entityId, tenantId,
@@ -98,10 +125,28 @@ export function BillingPreviewCard({
 
   const { services, loading: catalogLoading } = useServiceCatalog();
 
+  // ─── Projected primary line ────────────────────────────────────────────
+  // Mirrors the WMS legacy path: look up the catalog row for the entity's
+  // svcCode, then resolve rate by class (class_based) or flat (flat_rate).
+  // customPrice — if set on the parent entity (Task.customPrice / Repair
+  // quoteAmount / finalAmount) — overrides the catalog rate.
   const primary = useMemo(() => {
     if (!svcCode) return null;
     const svc = services.find(s => s.code === svcCode);
-    if (!svc) return { code: svcCode, name: svcCode, rate: 0, total: 0, fromOverride: false, missing: true };
+    if (!svc) {
+      // No catalog match — return a stub so the row shows with a
+      // missing-rate flag, matching WMS behavior for unconfigured
+      // services.
+      return {
+        code: svcCode,
+        name: svcCode,
+        rate: 0,
+        total: 0,
+        fromOverride: false,
+        missing: true,
+        billing: 'flat' as const,
+      };
+    }
     const catalogRate = rateForClass(svc, itemClass);
     const usingOverride = customPrice != null && !isNaN(customPrice);
     const rate = usingOverride ? Number(customPrice) : catalogRate;
@@ -109,9 +154,10 @@ export function BillingPreviewCard({
       code: svc.code,
       name: svc.name,
       rate,
-      total: rate,
+      total: rate, // qty=1 for the per-task primary line; matches GAS billing
       fromOverride: usingOverride,
       missing: !usingOverride && rate <= 0,
+      billing: svc.billing,
     };
   }, [svcCode, services, itemClass, customPrice]);
 
@@ -120,34 +166,28 @@ export function BillingPreviewCard({
     [entityType, addons],
   );
 
-  const projectedTotal = useMemo(() => {
-    let t = primary?.total ?? 0;
-    for (const a of projectedAddons) t += a.total ?? 0;
-    return t;
-  }, [primary, projectedAddons]);
-
-  // ── Fetch recorded charges from public.billing ───────────────────────
-  // Match by entity column (task_id / repair_id / wc_number) so addon rows
-  // (which carry "{taskId}-{svcCode}" in task_id) ALSO show up under the
-  // parent task — see the GAS flush in handleCompleteTask_.
+  // ─── Recorded charges ──────────────────────────────────────────────────
+  // Match by entity column. NOTE: there is no `wc_number` column in
+  // public.billing — will calls store their identifier in `task_id`,
+  // same column tasks use. (This was a bug in the previous from-scratch
+  // version.) Addon rows have task_id = "{parentTaskId}-{svcCode}", so
+  // we use a prefix match alongside the exact match.
   const fetchRecorded = useCallback(async () => {
-    if (!visible || !open || !tenantId) return;
+    if (!visible || !open || !tenantId || !entityId) return;
     setLoadingRecorded(true);
     setRecordedError(null);
     try {
       let query = supabase
         .from('billing')
-        .select('ledger_row_id,status,invoice_no,date,svc_code,svc_name,description,qty,rate,total,task_id,repair_id,wc_number,item_id')
+        .select('ledger_row_id,status,invoice_no,date,svc_code,svc_name,description,qty,rate,total,task_id,repair_id,item_id,item_class,item_notes')
         .eq('tenant_id', tenantId);
 
-      if (entityType === 'task') {
-        // Addon rows have task_id = "{parentTaskId}-{svcCode}", so use a
-        // prefix match (task_id eq parent OR task_id like parent-%).
+      if (entityType === 'task' || entityType === 'will_call') {
+        // Both tasks and will calls live in the task_id column. Addons add
+        // a `-{svcCode}` suffix per the GAS flush in handleCompleteTask_.
         query = query.or(`task_id.eq.${entityId},task_id.like.${entityId}-%`);
       } else if (entityType === 'repair') {
         query = query.eq('repair_id', entityId);
-      } else if (entityType === 'will_call') {
-        query = query.eq('wc_number', entityId);
       }
 
       const { data, error } = await query
@@ -169,8 +209,8 @@ export function BillingPreviewCard({
 
   useEffect(() => { void fetchRecorded(); }, [fetchRecorded]);
 
-  // Realtime: any billing change for this tenant nudges a refetch when
-  // the card is open. Cheap because the card is collapsed by default.
+  // Realtime — any change to a billing row in this tenant nudges a refetch
+  // when the card is open. Cheap because the card is collapsed by default.
   useEffect(() => {
     if (!visible || !open || !tenantId) return;
     const channel = supabase
@@ -184,25 +224,30 @@ export function BillingPreviewCard({
 
   if (!visible) return null;
 
+  // ─── Totals ────────────────────────────────────────────────────────────
+  // Match WMS: void rows are kept for audit but excluded from totals;
+  // recorded total = sum of non-void total_amount.
   const recordedTotal = recorded.reduce(
     (sum, r) => sum + (r.status === 'Void' ? 0 : Number(r.total ?? 0)),
     0,
   );
-  const grandTotal = projectedTotal + recordedTotal;
+  const projectedAddonsTotal = projectedAddons.reduce((sum, a) => sum + (a.total ?? 0), 0);
+  const projectedPrimaryTotal = primary?.total ?? 0;
 
-  // Suppress double-counting: if a recorded row already covers the
-  // primary line (ledger_row_id starts with svcCode + "-TASK-" + entityId
-  // for tasks; or carries the raw entity id for repairs/will calls), the
-  // primary line is "already booked" — show it dimmed.
+  // "Already billed" detection — per-line. A projected line is dimmed when
+  // the recorded ledger already covers it (post-completion view stays
+  // accurate even though we still show the projection).
   const primaryAlreadyBooked = primary && recorded.some(r => {
-    if (entityType === 'task') return r.ledger_row_id === `${primary.code}-TASK-${entityId}`;
-    if (entityType === 'repair') return r.repair_id === entityId && r.svc_code === primary.code;
-    return r.wc_number === entityId && r.svc_code === primary.code;
+    if (entityType === 'task' || entityType === 'will_call') {
+      // GAS Ledger Row IDs for primary task/WC charges are "{svcCode}-TASK-{id}".
+      return r.ledger_row_id === `${primary.code}-TASK-${entityId}`;
+    }
+    if (entityType === 'repair') {
+      return r.repair_id === entityId && r.svc_code === primary.code;
+    }
+    return false;
   });
 
-  // For tasks: addon already booked if a recorded row's ledger_row_id
-  // matches `{taskId}-{addonCode}-ADDON-{n}` (n is positional, see
-  // handleCompleteTask_'s addon flush). Match by prefix to stay robust.
   function isAddonBooked(addon: TaskAddon): boolean {
     if (entityType !== 'task') return false;
     return recorded.some(r =>
@@ -211,6 +256,19 @@ export function BillingPreviewCard({
     );
   }
 
+  // Show preview only when the primary line hasn't been booked yet, mirroring
+  // the WMS check for an existing task_completion / receiving event.
+  const showPreview = !primaryAlreadyBooked;
+
+  // Projected total only counts toward grand total when shown.
+  const projectedTotal = showPreview ? (projectedPrimaryTotal + projectedAddonsTotal) : 0;
+  const grandTotal = recordedTotal + projectedTotal;
+
+  const hasAnyContent =
+    (showPreview && (primary || projectedAddons.length > 0)) ||
+    recorded.length > 0;
+
+  // ─── Render ────────────────────────────────────────────────────────────
   return (
     <div style={{
       background: '#fff',
@@ -240,139 +298,193 @@ export function BillingPreviewCard({
 
       {open && (
         <div style={{ padding: '4px 14px 14px' }}>
-          {/* ── Projected ─────────────────────────────────────────── */}
-          <div style={{ marginBottom: 10 }}>
+          {/* ── Pending Charges (Preview) ────────────────────────── */}
+          {showPreview && (primary || projectedAddons.length > 0) && (
+            <SectionHeader
+              icon="schedule"
+              label="Pending Charges (Preview)"
+            />
+          )}
+          {showPreview && (primary || projectedAddons.length > 0) && (
             <div style={{
-              fontSize: 10, fontWeight: 600, color: theme.colors.textMuted,
-              textTransform: 'uppercase', letterSpacing: '0.04em',
-              marginBottom: 6,
+              border: `1px solid ${theme.colors.border}`,
+              borderRadius: 8,
+              overflow: 'hidden',
+              marginBottom: 12,
             }}>
-              Projected on completion
-            </div>
-            <div style={{ border: `1px solid ${theme.colors.border}`, borderRadius: 8, overflow: 'hidden' }}>
-              {/* Primary line */}
-              {primary ? (
-                <Row
+              {primary && (
+                <PreviewRow
                   primary
-                  label={`${primary.name}${primary.fromOverride ? ' · override' : ''}`}
-                  code={primary.code}
+                  serviceName={primary.name}
+                  serviceCode={primary.code}
+                  classCode={primary.billing === 'class_based' ? itemClass : null}
                   qty={1}
                   rate={primary.rate}
                   total={primary.total}
-                  dim={!!primaryAlreadyBooked}
-                  badge={primaryAlreadyBooked ? 'Already billed' : (primary.missing ? 'Missing rate' : null)}
+                  hasError={primary.missing}
+                  badge={primary.fromOverride ? 'Override' : null}
                 />
-              ) : (
-                <NoteRow text="No primary service code on this entity." />
               )}
               {catalogLoading && !primary && (
                 <NoteRow text="Loading catalog…" />
               )}
-              {/* Addons */}
               {projectedAddons.map(a => {
                 const booked = isAddonBooked(a);
                 return (
-                  <Row
+                  <PreviewRow
                     key={a.id}
-                    label={a.serviceName}
-                    code={a.serviceCode}
+                    serviceName={a.serviceName}
+                    serviceCode={a.serviceCode}
+                    classCode={a.itemClass}
                     qty={a.quantity}
                     rate={a.rate ?? 0}
                     total={a.total ?? 0}
+                    hasError={(a.rate ?? 0) <= 0}
                     dim={booked}
-                    badge={booked ? 'Already billed' : null}
+                    badge={booked ? 'Already billed' : (a.addedByName ? `by ${a.addedByName}` : null)}
                   />
                 );
               })}
-              <TotalRow
-                label="Projected total"
-                value={projectedTotal}
+              <SubtotalRow
+                label={`Preview subtotal · ${1 + projectedAddons.length} ${1 + projectedAddons.length === 1 ? 'line' : 'lines'}`}
+                value={projectedPrimaryTotal + projectedAddonsTotal}
               />
             </div>
-            {entityType === 'task' && projectedAddons.length === 0 && (
-              <div style={{ fontSize: 11, color: theme.colors.textMuted, marginTop: 4 }}>
-                No add-on services queued. Use Add Service in the footer to attach extras.
-              </div>
-            )}
-          </div>
+          )}
 
-          {/* ── Recorded ──────────────────────────────────────────── */}
-          <div>
+          {primary?.missing && showPreview && (
+            <NoteBanner
+              tone="warn"
+              title="Missing rate"
+              message={`No catalog rate for ${primary.code}${itemClass ? ` / class ${itemClass}` : ''}. The completion will create the row with a Missing Rate flag.`}
+            />
+          )}
+
+          {/* ── Recorded Charges ─────────────────────────────────── */}
+          {recorded.length > 0 && (
+            <SectionHeader
+              icon="receipt"
+              label={`Recorded Charges (${recorded.length})`}
+            />
+          )}
+          {loadingRecorded ? (
+            <NoteRow text={<><Loader2 size={11} style={{ animation: 'spin 1s linear infinite', verticalAlign: 'middle', marginRight: 4 }} />Loading…</>} />
+          ) : recordedError ? (
+            <NoteRow text={`Error loading recorded charges: ${recordedError}`} error />
+          ) : recorded.length > 0 ? (
             <div style={{
-              fontSize: 10, fontWeight: 600, color: theme.colors.textMuted,
-              textTransform: 'uppercase', letterSpacing: '0.04em',
-              marginBottom: 6,
+              border: `1px solid ${theme.colors.border}`,
+              borderRadius: 8,
+              overflow: 'hidden',
+              marginBottom: 12,
             }}>
-              Recorded on the ledger
+              {recorded.map(r => <RecordedRow key={r.ledger_row_id} row={r} entityId={entityId} />)}
+              <SubtotalRow
+                label="Recorded total (excl. void)"
+                value={recordedTotal}
+              />
             </div>
-            <div style={{ border: `1px solid ${theme.colors.border}`, borderRadius: 8, overflow: 'hidden' }}>
-              {loadingRecorded ? (
-                <NoteRow text={<><Loader2 size={11} style={{ animation: 'spin 1s linear infinite', verticalAlign: 'middle', marginRight: 4 }} />Loading…</>} />
-              ) : recordedError ? (
-                <NoteRow text={`Error: ${recordedError}`} error />
-              ) : recorded.length === 0 ? (
-                <NoteRow text="No billing rows recorded yet." />
-              ) : (
-                <>
-                  {recorded.map(r => (
-                    <RecordedRow key={r.ledger_row_id} row={r} />
-                  ))}
-                  <TotalRow
-                    label="Recorded total (excl. void)"
-                    value={recordedTotal}
-                  />
-                </>
-              )}
-            </div>
-          </div>
+          ) : null}
 
-          {/* ── Grand total ───────────────────────────────────────── */}
+          {/* ── Empty state ─────────────────────────────────────── */}
+          {!hasAnyContent && (
+            <div style={{
+              padding: '16px 12px', textAlign: 'center',
+              fontSize: 12, color: theme.colors.textMuted,
+              border: `1px dashed ${theme.colors.border}`,
+              borderRadius: 8, marginBottom: 12,
+            }}>
+              No billing charges yet
+            </div>
+          )}
+
+          {/* ── Grand total + breakdown ─────────────────────────── */}
           <div style={{
-            marginTop: 10, padding: '8px 12px',
-            background: theme.colors.bgSubtle,
-            borderRadius: 8,
-            display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+            paddingTop: 10,
+            borderTop: `1px solid ${theme.colors.border}`,
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
           }}>
-            <span style={{ fontSize: 11, fontWeight: 600, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
-              Total (projected + recorded)
-            </span>
-            <span style={{ fontSize: 14, fontWeight: 700 }}>
+            <span style={{ fontSize: 13, fontWeight: 700 }}>Total</span>
+            <span style={{ fontSize: 16, fontWeight: 700, color: theme.colors.orange }}>
               {fmtMoney(grandTotal)}
             </span>
           </div>
+          {(projectedTotal > 0 || recordedTotal > 0) && (
+            <div style={{
+              fontSize: 10, color: theme.colors.textMuted,
+              textAlign: 'right', marginTop: 4,
+              display: 'flex', justifyContent: 'flex-end', gap: 10,
+            }}>
+              {showPreview && projectedTotal > 0 && <span>Preview: {fmtMoney(projectedTotal)}</span>}
+              {recordedTotal > 0 && <span>Recorded: {fmtMoney(recordedTotal)}</span>}
+            </div>
+          )}
         </div>
       )}
     </div>
   );
 }
 
-// ── Row sub-components ───────────────────────────────────────────────────
+// ─── Sub-components ──────────────────────────────────────────────────────
 
-function Row({
-  label, code, qty, rate, total, primary, dim, badge,
+function SectionHeader({ icon, label }: { icon: 'schedule' | 'receipt'; label: string }) {
+  const Icon = icon === 'schedule' ? Loader2 : Receipt;
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 6,
+      fontSize: 10, fontWeight: 700, color: theme.colors.textMuted,
+      textTransform: 'uppercase', letterSpacing: '0.06em',
+      marginBottom: 6,
+    }}>
+      <Icon size={12} />
+      {label}
+    </div>
+  );
+}
+
+function PreviewRow({
+  serviceName, serviceCode, classCode, qty, rate, total,
+  primary, hasError, dim, badge,
 }: {
-  label: string; code?: string; qty: number; rate: number; total: number;
-  primary?: boolean; dim?: boolean; badge?: string | null;
+  serviceName: string;
+  serviceCode: string;
+  classCode?: string | null;
+  qty: number;
+  rate: number;
+  total: number;
+  primary?: boolean;
+  hasError?: boolean;
+  dim?: boolean;
+  badge?: string | null;
 }) {
   return (
     <div style={{
       display: 'flex', alignItems: 'center', justifyContent: 'space-between',
       padding: '8px 12px', fontSize: 12,
+      gap: 8,
       background: primary ? '#fff' : theme.colors.bgSubtle,
       borderTop: primary ? 'none' : `1px solid ${theme.colors.border}`,
-      gap: 8,
       opacity: dim ? 0.55 : 1,
     }}>
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontWeight: 600, color: theme.colors.text, display: 'flex', alignItems: 'center', gap: 6 }}>
-          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {label}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+          <span style={{ fontWeight: 600, color: theme.colors.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {serviceName}
           </span>
-          {code && (
-            <span style={{ fontSize: 10, color: theme.colors.textMuted, fontWeight: 500 }}>
-              ({code})
+          <span style={{ fontSize: 10, color: theme.colors.textMuted, fontWeight: 500 }}>
+            ({serviceCode})
+          </span>
+          {classCode && (
+            <span style={{
+              fontSize: 9, padding: '1px 5px', borderRadius: 4,
+              border: `1px solid ${theme.colors.border}`, color: theme.colors.textSecondary,
+              fontWeight: 600,
+            }}>
+              {classCode}
             </span>
           )}
+          <span style={{ fontSize: 11, color: theme.colors.textMuted }}>×{qty}</span>
+          {hasError && <AlertTriangle size={11} color="#B45309" />}
           {badge && (
             <span style={{
               fontSize: 9, padding: '1px 5px', borderRadius: 4,
@@ -382,31 +494,52 @@ function Row({
             </span>
           )}
         </div>
-        <div style={{ fontSize: 11, color: theme.colors.textMuted, marginTop: 1 }}>
-          Qty {qty} × {fmtMoney(rate)}
-        </div>
       </div>
-      <div style={{ fontSize: 13, fontWeight: 700, whiteSpace: 'nowrap' }}>
-        {fmtMoney(total)}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, whiteSpace: 'nowrap' }}>
+        {hasError && rate <= 0 ? (
+          <span style={{ fontSize: 11, color: theme.colors.textMuted, fontStyle: 'italic' }}>No rate</span>
+        ) : (
+          <>
+            <span style={{ fontSize: 11, color: theme.colors.textMuted, fontVariantNumeric: 'tabular-nums' }}>
+              {fmtMoney(rate)}
+            </span>
+            <span style={{ fontSize: 13, fontWeight: 700, fontVariantNumeric: 'tabular-nums', minWidth: 64, textAlign: 'right' }}>
+              {fmtMoney(total)}
+            </span>
+          </>
+        )}
       </div>
     </div>
   );
 }
 
-function RecordedRow({ row }: { row: BillingRow }) {
+function RecordedRow({ row, entityId }: { row: BillingRow; entityId: string }) {
   const status = row.status || 'Unbilled';
   const cfg = STATUS_CFG[status] || STATUS_CFG.Unbilled;
+  const total = Number(row.total ?? 0);
+  const rateVal = row.rate == null ? null : Number(row.rate);
+  const hasMissingRate = rateVal == null;
+  // Match WMS' "manual" badge — addon rows have task_id like `{parent}-{svcCode}`
+  // and Ledger Row ID like `{parent}-{svcCode}-ADDON-{n}`.
+  const isAddon =
+    (row.ledger_row_id ?? '').startsWith(`${entityId}-`) &&
+    /-ADDON-\d+$/.test(row.ledger_row_id ?? '');
+
   return (
     <div style={{
-      display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+      display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between',
       padding: '8px 12px', fontSize: 12,
       borderTop: `1px solid ${theme.colors.border}`,
       gap: 8,
       opacity: status === 'Void' ? 0.55 : 1,
+      background: hasMissingRate ? '#FEF2F2' : '#fff',
     }}>
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontWeight: 600, color: theme.colors.text, display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+          <span style={{
+            fontWeight: 600, color: theme.colors.text,
+            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+          }}>
             {row.svc_name || row.svc_code || '—'}
           </span>
           {row.svc_code && (
@@ -416,37 +549,76 @@ function RecordedRow({ row }: { row: BillingRow }) {
           )}
           <span style={{
             fontSize: 9, padding: '1px 6px', borderRadius: 4,
-            background: cfg.bg, color: cfg.color, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em',
+            background: cfg.bg, color: cfg.color, fontWeight: 700,
+            textTransform: 'uppercase', letterSpacing: '0.04em',
           }}>
             {status}
           </span>
+          {hasMissingRate && (
+            <span style={{
+              fontSize: 9, padding: '1px 6px', borderRadius: 4,
+              background: '#FEE2E2', color: '#991B1B', fontWeight: 700,
+              textTransform: 'uppercase', letterSpacing: '0.04em',
+            }}>
+              Rate Required
+            </span>
+          )}
+          {isAddon && (
+            <span style={{
+              fontSize: 9, padding: '1px 5px', borderRadius: 4,
+              border: `1px solid ${theme.colors.border}`, color: theme.colors.textSecondary,
+              fontWeight: 600,
+            }}>
+              manual
+            </span>
+          )}
+          {row.item_class && (
+            <span style={{
+              fontSize: 9, padding: '1px 5px', borderRadius: 4,
+              border: `1px solid ${theme.colors.border}`, color: theme.colors.textSecondary,
+              fontWeight: 600,
+            }}>
+              {row.item_class}
+            </span>
+          )}
         </div>
-        <div style={{ fontSize: 11, color: theme.colors.textMuted, marginTop: 1 }}>
+        <div style={{ fontSize: 10, color: theme.colors.textMuted, marginTop: 2 }}>
           {fmtDate(row.date)}
-          {row.qty != null && row.rate != null ? ` · Qty ${row.qty} × ${fmtMoney(Number(row.rate))}` : ''}
+          {row.qty != null && rateVal != null ? ` · Qty ${row.qty} × ${fmtMoney(rateVal)}` : ''}
           {row.invoice_no ? ` · Invoice ${row.invoice_no}` : ''}
         </div>
       </div>
-      <div style={{ fontSize: 13, fontWeight: 700, whiteSpace: 'nowrap' }}>
-        {fmtMoney(Number(row.total ?? 0))}
+      <div style={{ whiteSpace: 'nowrap' }}>
+        {hasMissingRate ? (
+          <span style={{ fontSize: 11, fontWeight: 600, color: '#DC2626' }}>
+            Set rate to invoice
+          </span>
+        ) : (
+          <span style={{
+            fontSize: 13, fontWeight: 700,
+            fontVariantNumeric: 'tabular-nums',
+            textDecoration: status === 'Void' ? 'line-through' : 'none',
+          }}>
+            {fmtMoney(total)}
+          </span>
+        )}
       </div>
     </div>
   );
 }
 
-function TotalRow({ label, value }: { label: string; value: number }) {
+function SubtotalRow({ label, value }: { label: string; value: number }) {
   return (
     <div style={{
       display: 'flex', justifyContent: 'space-between',
-      padding: '8px 12px', fontSize: 12,
+      padding: '8px 12px', fontSize: 11, fontWeight: 700,
       borderTop: `1px solid ${theme.colors.border}`,
       background: theme.colors.bgSubtle,
-      fontWeight: 700,
+      color: theme.colors.textMuted,
+      textTransform: 'uppercase', letterSpacing: '0.04em',
     }}>
-      <span style={{ color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.04em', fontSize: 11 }}>
-        {label}
-      </span>
-      <span>{fmtMoney(value)}</span>
+      <span>{label}</span>
+      <span style={{ color: theme.colors.text, fontVariantNumeric: 'tabular-nums' }}>{fmtMoney(value)}</span>
     </div>
   );
 }
@@ -458,6 +630,31 @@ function NoteRow({ text, error }: { text: React.ReactNode; error?: boolean }) {
       color: error ? '#DC2626' : theme.colors.textMuted,
     }}>
       {text}
+    </div>
+  );
+}
+
+function NoteBanner({ tone, title, message }: { tone: 'warn'; title: string; message: string }) {
+  const colors = tone === 'warn'
+    ? { bg: '#FEF3C7', border: '#FCD34D', text: '#92400E' }
+    : { bg: '#FEE2E2', border: '#FCA5A5', text: '#991B1B' };
+  return (
+    <div style={{
+      padding: '10px 12px',
+      background: colors.bg,
+      border: `1px solid ${colors.border}`,
+      borderRadius: 8,
+      marginBottom: 12,
+      fontSize: 12,
+      color: colors.text,
+    }}>
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 6 }}>
+        <AlertTriangle size={13} style={{ marginTop: 1, flexShrink: 0 }} />
+        <div>
+          <div style={{ fontWeight: 700 }}>{title}</div>
+          <div style={{ marginTop: 2 }}>{message}</div>
+        </div>
+      </div>
     </div>
   );
 }
