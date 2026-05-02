@@ -918,35 +918,18 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
 
           {/* Add-on Services — staff/admin only. Rows live on
               public.task_addons and get flushed to Billing_Ledger by
-              handleCompleteTask_ on completion. */}
+              handleCompleteTask_ on completion. The "+ Add Service"
+              entry point is in the footer (desktop) / overflow menu
+              (mobile) — this section is read-only with per-row delete. */}
           {canEditAddons && (
             <div style={{ marginBottom: 16 }}>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <Plus size={14} color={theme.colors.orange} />
-                  <span style={{ fontSize: 12, fontWeight: 600 }}>Add-on Services</span>
-                  {addons.length > 0 && (
-                    <span style={{ fontSize: 11, color: theme.colors.textMuted }}>
-                      ({addons.length})
-                    </span>
-                  )}
-                </div>
-                {/* Desktop: inline button. Mobile: action lives in ⋯ overflow menu. */}
-                {!isMobile && isOpen && !completed && (
-                  <button
-                    onClick={() => setShowAddServiceModal(true)}
-                    style={{
-                      display: 'inline-flex', alignItems: 'center', gap: 4,
-                      padding: '5px 10px', fontSize: 12, fontWeight: 600,
-                      border: `1px solid ${theme.colors.border}`, borderRadius: 6,
-                      background: '#fff', color: theme.colors.text,
-                      cursor: 'pointer', fontFamily: 'inherit',
-                    }}
-                    onMouseEnter={e => { e.currentTarget.style.borderColor = theme.colors.orange; e.currentTarget.style.color = theme.colors.orange; }}
-                    onMouseLeave={e => { e.currentTarget.style.borderColor = theme.colors.border; e.currentTarget.style.color = theme.colors.text; }}
-                  >
-                    <Plus size={12} /> Add Service
-                  </button>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+                <Plus size={14} color={theme.colors.orange} />
+                <span style={{ fontSize: 12, fontWeight: 600 }}>Add-on Services</span>
+                {addons.length > 0 && (
+                  <span style={{ fontSize: 11, color: theme.colors.textMuted }}>
+                    ({addons.length})
+                  </span>
                 )}
               </div>
               {addons.length === 0 ? (
@@ -979,28 +962,32 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
                       <div style={{ fontSize: 13, fontWeight: 700, color: theme.colors.text, whiteSpace: 'nowrap' }}>
                         ${(a.total ?? 0).toFixed(2)}
                       </div>
-                      {isOpen && !completed && (
-                        <button
-                          onClick={async () => {
-                            if (!confirm(`Remove ${a.serviceName} from this task?`)) return;
-                            setAddonDeletingId(a.id);
-                            await deleteAddon(a.id);
-                            setAddonDeletingId(null);
-                          }}
-                          disabled={addonDeletingId === a.id}
-                          style={{
-                            background: 'none', border: 'none', padding: 4, cursor: 'pointer',
-                            color: addonDeletingId === a.id ? theme.colors.textMuted : '#DC2626',
-                            display: 'flex', alignItems: 'center',
-                          }}
-                          aria-label="Remove addon"
-                          title="Remove addon"
-                        >
-                          {addonDeletingId === a.id
-                            ? <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} />
-                            : <Trash2 size={13} />}
-                        </button>
-                      )}
+                      {/* Staff/admin can always remove an addon they added by
+                          mistake. After completion the parallel Billing_Ledger
+                          row is the source of truth, so removing the
+                          task_addons row here only cleans up the queue and
+                          doesn't unbill — voiding the actual billing line is
+                          handled in the Billing page. */}
+                      <button
+                        onClick={async () => {
+                          if (!confirm(`Remove ${a.serviceName} from this task?`)) return;
+                          setAddonDeletingId(a.id);
+                          await deleteAddon(a.id);
+                          setAddonDeletingId(null);
+                        }}
+                        disabled={addonDeletingId === a.id}
+                        style={{
+                          background: 'none', border: 'none', padding: 4, cursor: 'pointer',
+                          color: addonDeletingId === a.id ? theme.colors.textMuted : '#DC2626',
+                          display: 'flex', alignItems: 'center',
+                        }}
+                        aria-label="Remove addon"
+                        title="Remove addon"
+                      >
+                        {addonDeletingId === a.id
+                          ? <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} />
+                          : <Trash2 size={13} />}
+                      </button>
                     </div>
                   ))}
                   {/* Total row */}
@@ -1342,6 +1329,16 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
                     {startTaskLoading ? 'Creating folder & work order…' : 'Start Task'}
                   </button>
                 )}
+                {canEditAddons && !startTaskConflict && (
+                  <button
+                    onClick={() => setShowAddServiceModal(true)}
+                    style={{ width: '100%', padding: '7px', fontSize: 12, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: 'transparent', color: theme.colors.textSecondary, cursor: 'pointer', fontFamily: 'inherit', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}
+                    onMouseEnter={e => { e.currentTarget.style.borderColor = theme.colors.orange; e.currentTarget.style.color = theme.colors.orange; }}
+                    onMouseLeave={e => { e.currentTarget.style.borderColor = theme.colors.border; e.currentTarget.style.color = theme.colors.textSecondary; }}
+                  >
+                    <Plus size={12} /> Add Service
+                  </button>
+                )}
               </div>
             )}
             {startTaskResult?.success && !startTaskResult.noOp && (
@@ -1386,14 +1383,26 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
                   <WriteButton label="Pass" variant="primary" icon={<CheckCircle2 size={16} />} style={{ flex: 1, background: '#15803D', padding: '10px', fontSize: 13 }} onClick={async () => handleResult('pass')} />
                   <WriteButton label="Fail" variant="danger" icon={<XCircle size={16} />} style={{ flex: 1, padding: '10px', fontSize: 13 }} onClick={async () => handleResult('fail')} />
                 </div>
-                <button
-                  onClick={handleCancelTask}
-                  style={{ width: '100%', marginTop: 8, padding: '7px', fontSize: 12, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: 'transparent', color: theme.colors.textMuted, cursor: 'pointer', fontFamily: 'inherit' }}
-                  onMouseEnter={e => { e.currentTarget.style.borderColor = '#EF4444'; e.currentTarget.style.color = '#EF4444'; }}
-                  onMouseLeave={e => { e.currentTarget.style.borderColor = theme.colors.border; e.currentTarget.style.color = theme.colors.textMuted; }}
-                >
-                  Cancel Task
-                </button>
+                <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                  {canEditAddons && (
+                    <button
+                      onClick={() => setShowAddServiceModal(true)}
+                      style={{ flex: 1, padding: '7px', fontSize: 12, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: 'transparent', color: theme.colors.textSecondary, cursor: 'pointer', fontFamily: 'inherit', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}
+                      onMouseEnter={e => { e.currentTarget.style.borderColor = theme.colors.orange; e.currentTarget.style.color = theme.colors.orange; }}
+                      onMouseLeave={e => { e.currentTarget.style.borderColor = theme.colors.border; e.currentTarget.style.color = theme.colors.textSecondary; }}
+                    >
+                      <Plus size={12} /> Add Service
+                    </button>
+                  )}
+                  <button
+                    onClick={handleCancelTask}
+                    style={{ flex: 1, padding: '7px', fontSize: 12, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: 'transparent', color: theme.colors.textMuted, cursor: 'pointer', fontFamily: 'inherit' }}
+                    onMouseEnter={e => { e.currentTarget.style.borderColor = '#EF4444'; e.currentTarget.style.color = '#EF4444'; }}
+                    onMouseLeave={e => { e.currentTarget.style.borderColor = theme.colors.border; e.currentTarget.style.color = theme.colors.textMuted; }}
+                  >
+                    Cancel Task
+                  </button>
+                </div>
               </div>
             )}
           </div>
@@ -1513,6 +1522,9 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
   const fabActions: FABAction[] = (isEditingTask || showPassFail) ? [] : [
     ...(isOpen && !completed ? [{ label: 'Cancel Task', icon: <XCircle size={16} />, onClick: handleCancelTask }] : []),
     ...(task.itemId && !repairStatus ? [{ label: repairRequesting ? 'Requesting…' : 'Repair Quote', icon: <Wrench size={16} />, onClick: () => void handleRequestRepair() }] : []),
+    // Add Service — staff/admin only, open tasks only. Mobile entry
+    // point for the addon picker (desktop has a footer pill below).
+    ...(canEditAddons && isOpen && !completed ? [{ label: 'Add Service', icon: <Plus size={16} />, onClick: () => setShowAddServiceModal(true) }] : []),
     ...(isOpen && !completed && !isEditingTask ? [{ label: 'Edit', icon: <Pencil size={16} />, onClick: () => setIsEditingTask(true) }] : []),
     ...(showStart ? [{ label: startTaskLoading ? 'Starting…' : 'Start Task', icon: <Play size={16} />, onClick: () => handleStartTask(), color: theme.colors.orange }] : []),
     // Reopen — admin/staff only. Surfaces here on Completed + In Progress
@@ -1526,6 +1538,14 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
       {/* Cancel Task — shown for open/in-progress */}
       {isOpen && !completed && (
         <button onClick={handleCancelTask} style={tkLight}>Cancel Task</button>
+      )}
+      {/* Add Service — staff/admin, open tasks only. Lives in the footer
+          (desktop) so the inline Add-on Services section in the body
+          stays read-only. */}
+      {canEditAddons && isOpen && !completed && !isEditingTask && (
+        <button onClick={() => setShowAddServiceModal(true)} style={tkLight}>
+          <Plus size={13} /> Add Service
+        </button>
       )}
       {/* Request Repair Quote — quick-action pill when no repair yet */}
       {task.itemId && !repairStatus && (
