@@ -30,8 +30,13 @@ export interface SendEmailParams {
   replyTo?: string;
   /** {{KEY}} → value substitutions for subject + body. */
   tokens?: Record<string, string | number | null | undefined>;
-  /** Override the template's subject (rare). */
+  /** Override the template's subject (rare — usually the template owns it). */
   subjectOverride?: string;
+  /** Override the template's body. Use when the caller has pre-rendered
+   *  the HTML (e.g. a modal that lets staff edit the body before send).
+   *  The template body lookup is bypassed and this HTML is sent as-is;
+   *  token substitution still runs in case it contains {{…}} placeholders. */
+  htmlOverride?: string;
   /** Caller-supplied dedupe key. A prior 'sent' row with the same key
    *  short-circuits and returns its id without re-sending. */
   idempotencyKey?: string;
