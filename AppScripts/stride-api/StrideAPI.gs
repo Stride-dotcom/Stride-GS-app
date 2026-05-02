@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.143.1 — 2026-05-02 PST — Two cleanups in the will-call cancellation path. (1) handleBatchCancelWillCalls_ was re-reading the WC_Items snapshot inside its outer WC loop AND writing one setValue per cascaded item — for M WCs × N items, that's M sheet reads + M*N round-trips. New code reads WC_Items ONCE before the outer loop, accumulates cancel-row numbers across all WCs into wciCancelRows, and does a single bulk setValues over the contiguous range at the end (same recipe as #188; differs only in that this wciData is sliced from row 2 with no header, so sheet row R maps to wciData[R - 2]). (2) handleCancelWillCall_ no longer re-reads wciMap2/wciData2 to build the email items table — reuses the section-4 wciData snapshot since item-level fields don't change with cancellation.
+   StrideAPI.gs — v38.144.0 — 2026-05-02 PST — New `commitStorageRows` action: takes pre-computed STOR rows from the React Storage Charges tab (which now sources them from the Postgres `calculate_storage_charges` RPC) and writes them straight to each tenant's Billing_Ledger. Skips the read+compute phase that used to time out on big clients (e.g. Allison Lind Design). Each affected tenant gets a one-shot `api_fullClientSync_(.., ["billing"])` after the write so the React Billing list refreshes immediately. The original generateStorageCharges/previewStorageCharges actions stay intact for backward compatibility.
+   v38.143.1: Two cleanups in the will-call cancellation path. (1) handleBatchCancelWillCalls_ was re-reading the WC_Items snapshot inside its outer WC loop AND writing one setValue per cascaded item — for M WCs × N items, that's M sheet reads + M*N round-trips. New code reads WC_Items ONCE before the outer loop, accumulates cancel-row numbers across all WCs into wciCancelRows, and does a single bulk setValues over the contiguous range at the end (same recipe as #188; differs only in that this wciData is sliced from row 2 with no header, so sheet row R maps to wciData[R - 2]). (2) handleCancelWillCall_ no longer re-reads wciMap2/wciData2 to build the email items table — reuses the section-4 wciData snapshot since item-level fields don't change with cancellation.
    v38.143.0: Task add-on services. handleCompleteTask_ now flushes public.task_addons rows to the client Billing_Ledger after the primary service charge, one row per addon, snapshotting the rate captured at add-time. Ledger Row IDs are {taskId}-{svcCode}-ADDON-{n} for uniqueness; Task ID column carries {taskId}-{svcCode} per spec so unbilled reports distinguish the addon line from the parent. Each addon row also goes through resyncEntityToSupabase_ so the React Billing page sees it within ~1-2s. Fetch is via new api_fetchTaskAddons_ (GET /rest/v1/task_addons?tenant_id=eq.X&task_id=eq.Y&order=created_at.asc). Failures are non-fatal warnings so the primary task billing always lands. New table: public.task_addons (migration 20260502160000_task_addons.sql).
    v38.142.12: Class C bulk-write fix for handleStartTask_, handleCompleteTask_, handleCompleteRepair_. Each was doing 4-8 separate setValue() calls per request (one row across many columns), 500ms-2s each, totalling 5-15 sec of latency. Refactored each to mutate the in-memory rowData (already read once at function start) via a setRowVal_ helper that tracks modified columns, then write ONCE via setValues over the contiguous slice covering all touched columns. Untouched-but-in-slice columns write back their existing values from the snapshot so unrelated cells aren't clobbered. Single-row contiguous version of the same recipe used in #186/#187/#188. Also drops a now-redundant SpreadsheetApp.flush() inside handleCompleteTask_'s Custom Price branch — the bulk write at end-of-try makes it meaningless, and resyncEntityToSupabase_ flushes itself before reading. Each handler now responds in <2 sec.
    v38.142.11: Supabase write-through batch fix. api_writeThrough_ now dispatches to a new resyncEntitiesBatchToSupabase_ when called with 2+ entity IDs, doing ONE supabaseBatchUpsert_ instead of N per-row POSTs. The four batch-cancel/reassign handlers now pass succeededIds as an array so they get the batched path. For a 50-item release the writeThrough phase drops from ~10-25 sec (50 sequential POSTs) to ~0.5-1 sec (1 batched POST). For batch-cancel-20-tasks: ~4-10 sec → ~0.5 sec. Single-ID router cases unchanged. On batch failure or "clients" entity type, falls back to the existing per-row path so gs_sync_events still gets per-entity failure rows for the React FailedOperationsDrawer.
@@ -6791,6 +6792,26 @@ function doPost(e) {
       case "previewStorageCharges":
         return withStaffGuard_(callerEmail, function() {
           return handlePreviewStorageCharges_(payload);
+        });
+
+      case "commitStorageRows":
+        return withStaffGuard_(callerEmail, function() {
+          var r = handleCommitStorageRows_(payload);
+          // Mirror each affected tenant's billing back to Supabase
+          // so the React Billing list refreshes immediately. The
+          // payload's tenantIds set is the union of all per-row
+          // tenantId values.
+          try {
+            var seen = {};
+            (payload.rows || []).forEach(function(row) {
+              var tid = String((row && (row.tenantId || row.sourceSheetId)) || "").trim();
+              if (tid && !seen[tid]) {
+                seen[tid] = true;
+                api_fullClientSync_(tid, ["billing"]);
+              }
+            });
+          } catch (_) { /* non-fatal */ }
+          return r;
         });
 
       case "qbExport":
@@ -19678,6 +19699,221 @@ function handleGenerateStorageCharges_(payload) {
     success:          true,
     totalCreated:     totalCreated,
     clientsProcessed: clients.length,
+    skippedItems:     skipped.length > 0 ? skipped : undefined,
+    failedClients:    failed.length  > 0 ? failed  : undefined
+  });
+}
+
+// ─── Commit Storage Rows (pre-computed by Postgres) ─────────────────────────
+
+/**
+ * handleCommitStorageRows_ — write phase only. Takes rows already computed
+ * elsewhere (the React Storage tab feeds in the result of the
+ * `calculate_storage_charges` Postgres RPC) and appends them to each
+ * affected client's Billing_Ledger Sheet. Skips the slow read+compute
+ * phase that used to time out on big clients (e.g. Allison Lind Design).
+ *
+ * Mirrors the write half of handleGenerateStorageCharges_:
+ *   • Skip pending rows whose task id already matches a finalized
+ *     (Invoiced/Billed/Void) row — pre-computer should already have
+ *     done this dedup, but guard belt-and-suspenders.
+ *   • Delete existing Unbilled STOR rows in the period window AND any
+ *     Unbilled STOR row whose task id collides with a pending row.
+ *   • Bulk-write the remaining pending rows in one setValues per
+ *     client (Class C bulk-write recipe).
+ *   • Invalidate per-client cache + best-effort full client billing
+ *     resync to Supabase so the React table refreshes immediately.
+ *
+ * Payload shape:
+ *   {
+ *     periodStart: "YYYY-MM-DD",
+ *     periodEnd:   "YYYY-MM-DD",
+ *     rows: [
+ *       {
+ *         tenantId, clientName, itemId, description, itemClass,
+ *         sidemark, qty, rate, total, taskId, notes,
+ *         billableEnd: "YYYY-MM-DD", shipmentNo
+ *       }, ...
+ *     ]
+ *   }
+ *
+ * Returns counts identical to handleGenerateStorageCharges_ so the
+ * React commit handler can swap callers without UI changes.
+ */
+function handleCommitStorageRows_(payload) {
+  var rows = Array.isArray(payload && payload.rows) ? payload.rows : [];
+  var periodStartStr = String((payload && payload.periodStart) || "").trim();
+  var periodEndStr   = String((payload && payload.periodEnd)   || "").trim();
+
+  if (!rows.length) {
+    return jsonResponse_({ success: true, totalCreated: 0, clientsProcessed: 0, message: "No rows to commit" });
+  }
+  if (!periodStartStr || !periodEndStr) {
+    return errorResponse_("periodStart and periodEnd are required (YYYY-MM-DD)", "INVALID_PAYLOAD");
+  }
+
+  var startDate = api_normalizeDateToMidnight_(periodStartStr);
+  var endDate   = api_normalizeDateToMidnight_(periodEndStr);
+  if (!startDate || !endDate) return errorResponse_("Invalid period dates", "INVALID_PAYLOAD");
+  if (endDate.getTime() < startDate.getTime()) {
+    return errorResponse_("periodEnd must be on or after periodStart", "INVALID_PAYLOAD");
+  }
+
+  // Group rows by tenant id.
+  var byTenant = {};
+  for (var ri = 0; ri < rows.length; ri++) {
+    var row = rows[ri] || {};
+    var tid = String(row.tenantId || row.sourceSheetId || "").trim();
+    if (!tid) continue;
+    if (!byTenant[tid]) byTenant[tid] = [];
+    byTenant[tid].push(row);
+  }
+  var tenantIds = Object.keys(byTenant);
+  if (!tenantIds.length) {
+    return errorResponse_("No rows had a tenantId", "INVALID_PAYLOAD");
+  }
+
+  var totalCreated = 0;
+  var failed  = [];
+  var skipped = [];
+
+  tenantIds.forEach(function(tenantId) {
+    var clientRows = byTenant[tenantId];
+    var clientName = String((clientRows[0] && clientRows[0].clientName) || tenantId);
+
+    try {
+      var css  = SpreadsheetApp.openById(tenantId);
+      var blSh = css.getSheetByName("Billing_Ledger");
+      if (!blSh) {
+        failed.push(clientName + " (Billing_Ledger sheet not found)");
+        return;
+      }
+
+      var blHdr = api_getHeaderMap_(blSh);
+      var blCols = {
+        status:      blHdr["Status"],
+        invoice:     blHdr["Invoice #"],
+        client:      blHdr["Client"],
+        date:        blHdr["Date"],
+        svcCode:     blHdr["Svc Code"],
+        svcName:     blHdr["Svc Name"],
+        category:    blHdr["Category"],
+        itemId:      blHdr["Item ID"],
+        desc:        blHdr["Description"],
+        klass:       blHdr["Class"],
+        qty:         blHdr["Qty"],
+        rate:        blHdr["Rate"],
+        total:       blHdr["Total"],
+        taskId:      blHdr["Task ID"],
+        repairId:    blHdr["Repair ID"],
+        shipNo:      blHdr["Shipment #"],
+        notes:       blHdr["Item Notes"] !== undefined ? blHdr["Item Notes"] : blHdr["Notes"],
+        sidemark:    blHdr["Sidemark"],
+        ledgerRowId: blHdr["Ledger Row ID"] !== undefined ? blHdr["Ledger Row ID"] : blHdr["Ledger Entry ID"]
+      };
+
+      if (!blCols.status || !blCols.date || !blCols.svcCode || !blCols.total) {
+        failed.push(clientName + " (Billing_Ledger missing required columns: Status/Date/Svc Code/Total)");
+        return;
+      }
+
+      // Read existing rows once for dedup + delete decisions.
+      var blLastRow = api_getLastDataRow_(blSh);
+      var blAllData = (blLastRow >= 2)
+        ? blSh.getRange(2, 1, blLastRow - 1, blSh.getLastColumn()).getValues()
+        : [];
+
+      // Build set of finalized STOR task ids — pending rows whose task
+      // id matches one of these are skipped (already invoiced/billed).
+      var finalizedTaskIds = {};
+      for (var fi = 0; fi < blAllData.length; fi++) {
+        var fStatus = String(blAllData[fi][blCols.status - 1] || "").trim().toLowerCase();
+        if (fStatus !== "invoiced" && fStatus !== "billed" && fStatus !== "void") continue;
+        var fSvc = blCols.svcCode ? String(blAllData[fi][blCols.svcCode - 1] || "").trim().toUpperCase() : "";
+        if (fSvc !== "STOR") continue;
+        var fTid = blCols.taskId ? String(blAllData[fi][blCols.taskId - 1] || "").trim() : "";
+        if (fTid) finalizedTaskIds[fTid] = true;
+      }
+
+      // Filter pending rows: drop any whose task id is already finalized.
+      var pendingRowObjs = [];
+      var pendingTaskIds = {};
+      for (var pri = 0; pri < clientRows.length; pri++) {
+        var pr = clientRows[pri];
+        var ptid = String(pr.taskId || "").trim();
+        if (!ptid) continue;
+        if (finalizedTaskIds[ptid]) {
+          skipped.push(clientName + " / " + (pr.itemId || ptid) + " (already finalized)");
+          continue;
+        }
+        if (pendingTaskIds[ptid]) continue; // dedup within payload
+        pendingTaskIds[ptid] = true;
+        pendingRowObjs.push(pr);
+      }
+
+      // Delete Unbilled STOR rows in window AND any Unbilled STOR row
+      // whose task id collides with a pending row (clean-slate replace).
+      var rowsToDelete = [];
+      for (var di = blAllData.length - 1; di >= 0; di--) {
+        var dStatus = String(blAllData[di][blCols.status - 1] || "").trim().toLowerCase();
+        var dSvc    = String(blAllData[di][blCols.svcCode - 1] || "").trim().toUpperCase();
+        if (dSvc !== "STOR") continue;
+        if (dStatus !== "unbilled" && dStatus !== "") continue;
+        var dTid = blCols.taskId ? String(blAllData[di][blCols.taskId - 1] || "").trim() : "";
+        var collides = dTid && pendingTaskIds[dTid];
+        var dDate = blCols.date ? api_normalizeDateToMidnight_(blAllData[di][blCols.date - 1]) : null;
+        var inWindow = dDate && dDate.getTime() >= startDate.getTime() && dDate.getTime() <= endDate.getTime();
+        if (collides || inWindow) {
+          rowsToDelete.push(di + 2);
+        }
+      }
+      // Delete bottom-up.
+      for (var dri = 0; dri < rowsToDelete.length; dri++) {
+        blSh.deleteRow(rowsToDelete[dri]);
+      }
+
+      // Build the value matrix for one bulk setValues.
+      if (!pendingRowObjs.length) return;
+      var blWidth = blSh.getLastColumn();
+      var matrix = pendingRowObjs.map(function(p) {
+        var arr = new Array(blWidth).fill("");
+        if (blCols.status)     arr[blCols.status - 1]     = "Unbilled";
+        if (blCols.invoice)    arr[blCols.invoice - 1]    = "";
+        if (blCols.client)     arr[blCols.client - 1]     = String(p.clientName || clientName);
+        if (blCols.date)       arr[blCols.date - 1]       = api_normalizeDateToMidnight_(p.billableEnd) || endDate;
+        if (blCols.svcCode)    arr[blCols.svcCode - 1]    = "STOR";
+        if (blCols.svcName)    arr[blCols.svcName - 1]    = "Storage";
+        if (blCols.category)   arr[blCols.category - 1]   = "Storage Charges";
+        if (blCols.itemId)     arr[blCols.itemId - 1]     = String(p.itemId || "");
+        if (blCols.desc)       arr[blCols.desc - 1]       = String(p.description || "");
+        if (blCols.klass)      arr[blCols.klass - 1]      = String(p.itemClass || "").toUpperCase();
+        if (blCols.qty)        arr[blCols.qty - 1]        = Number(p.qty) || 0;
+        if (blCols.rate)       arr[blCols.rate - 1]       = Number(p.rate) || 0;
+        if (blCols.total)      arr[blCols.total - 1]      = Number(p.total) || 0;
+        if (blCols.taskId)     arr[blCols.taskId - 1]     = String(p.taskId || "");
+        if (blCols.repairId)   arr[blCols.repairId - 1]   = "";
+        if (blCols.shipNo)     arr[blCols.shipNo - 1]     = String(p.shipmentNo || "");
+        if (blCols.notes)      arr[blCols.notes - 1]      = String(p.notes || "");
+        if (blCols.sidemark)   arr[blCols.sidemark - 1]   = String(p.sidemark || "");
+        if (blCols.ledgerRowId) arr[blCols.ledgerRowId - 1] = String(p.taskId || "");
+        return arr;
+      });
+
+      var insertAt = api_getLastDataRow_(blSh) + 1;
+      blSh.getRange(insertAt, 1, matrix.length, blWidth).setValues(matrix);
+      totalCreated += matrix.length;
+
+      invalidateClientCache_(tenantId);
+    } catch (err) {
+      failed.push(clientName + " (" + (err && err.message ? err.message : String(err)) + ")");
+      Logger.log("handleCommitStorageRows_ error for " + clientName + ": " + err);
+    }
+  });
+
+  return jsonResponse_({
+    success:          true,
+    totalCreated:     totalCreated,
+    clientsProcessed: tenantIds.length,
     skippedItems:     skipped.length > 0 ? skipped : undefined,
     failedClients:    failed.length  > 0 ? failed  : undefined
   });
