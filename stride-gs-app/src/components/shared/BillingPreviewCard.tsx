@@ -1,72 +1,85 @@
 /**
- * BillingPreviewCard — port of the WMS BillingCalculator component.
+ * BillingPreviewCard — port of the WMS BillingCalculator, expanded to be
+ * the SINGLE place for billing controls on a task / repair / will call.
  *
- * Read-only billing view that combines:
- *   1. Preview of charges that WILL be created on completion (catalog
- *      rate × class × qty, plus queued task_addons).
- *   2. Recorded ledger rows that already EXIST in public.billing.
+ * Sections:
+ *   1. Projected — primary line (editable qty/rate) + queued add-ons
+ *      (editable qty/rate, deletable) + "+ Add Service" button.
+ *   2. Recorded — read-only ledger rows pulled from public.billing.
+ *   3. Total + breakdown footer.
  *
- * Adapted from the WMS app's `src/components/billing/BillingCalculator.tsx`
- * (Stride-WMS battle-tested layout) to the GS-app schema:
- *   service_events → service_catalog
- *   billing_events → billing
- *   task_completion event_type → presence of svc_code row matching the
- *                                primary task svc on the same task_id
- *   profile.tenant_id → user.clientSheetId
- *   wc_number column → task_id (will calls live in the same column)
- *   Tailwind/shadcn → inline styles + theme tokens
+ * Editing flow:
+ *   - Primary rate edits flow back to the parent via `onUpdatePrimaryRate`
+ *     (the parent persists — TaskDetailPanel writes to tasks.custom_price
+ *     via postUpdateTaskCustomPrice + Supabase mirror).
+ *   - Add-on add/update/delete flow back via `onAddAddon`, `onUpdateAddon`,
+ *     `onDeleteAddon` (parent calls useTaskAddons).
+ *   - Edits save on blur or after a 600ms debounce so each keystroke
+ *     doesn't fire a network call.
  *
- * Key preserved behaviors:
- *   - Per-item preview rows GROUPED BY CLASS for cleaner display
- *   - "RATE REQUIRED" red badge when a recorded row has null rate
- *   - "manual" badge on addon-prefixed Ledger Row IDs
- *   - "Already billed" detection — projected lines dim when an
- *     equivalent recorded row exists
- *   - Strikethrough void rows; void rows excluded from totals
- *   - Preview hidden once the entity has an equivalent recorded row
- *   - Status pill on every recorded row (Unbilled / Invoiced / Billed / Void)
- *   - Total row with Preview / Recorded breakdown
- *   - Empty-state ("No billing charges yet") when both sections are empty
+ * The card is the only billing UI on the entity panel — the previous
+ * "Add-on Services" section, Price Override field, and footer Add Service
+ * button were removed in favor of this consolidated card.
  *
  * Staff/admin only — clients don't see billing math in entity panels.
- * Defaults to collapsed.
+ *
+ * Schema mapping vs WMS source:
+ *   service_events → service_catalog (via useServiceCatalog)
+ *   billing_events → billing
+ *   addon-via-metadata → task_addons (own table, see useTaskAddons)
+ *   profile.tenant_id → user.clientSheetId
+ *   wc_number column → there is no wc_number column; will calls live in
+ *                      task_id like tasks do.
  */
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { ChevronDown, ChevronRight, DollarSign, Loader2, AlertTriangle, Receipt } from 'lucide-react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { ChevronDown, ChevronRight, DollarSign, Loader2, AlertTriangle, Receipt, Plus, Trash2 } from 'lucide-react';
 import { theme } from '../../styles/theme';
 import { supabase } from '../../lib/supabase';
 import { useServiceCatalog, type CatalogService } from '../../hooks/useServiceCatalog';
-import type { TaskAddon } from '../../hooks/useTaskAddons';
+import type { TaskAddon, AddTaskAddonInput } from '../../hooks/useTaskAddons';
+import { AddTaskServiceModal } from './AddTaskServiceModal';
 
 export type BillingPreviewEntity = 'task' | 'repair' | 'will_call';
 
 interface Props {
   entityType: BillingPreviewEntity;
-  /** taskId / repairId / wcNumber. For will_call, this is matched against
-   *  the `task_id` column (NOT a separate wc_number — that column doesn't
-   *  exist in our schema). */
+  /** taskId / repairId / wcNumber. Will calls share the task_id column. */
   entityId: string;
   tenantId: string;
-  /** Item ID for the entity, when applicable. Used for the per-item
-   *  preview row label (mirrors WMS' itemCode display). */
+  /** Reserved for future cross-entity rollup. Currently unused. */
   itemId?: string | null;
-  /** Primary service code (e.g. INSP, ASM, REPAIR, WC). Null when no
-   *  primary line exists (e.g. an entity that only ever bills via
-   *  add-ons). */
+  /** Primary service code (e.g. INSP, ASM, REPAIR, WC). Null = no primary line. */
   svcCode?: string | null;
-  /** Item class for class-based services. Maps to service_catalog.rates[CLASS]. */
+  /** Item class for class-based services (XS/S/M/L/XL/XXL). */
   itemClass?: string | null;
-  /** Per-task customPrice override on the primary line. null = use catalog rate. */
+  /**
+   * Per-task custom rate override on the primary line.
+   * Only NON-ZERO values count as overrides — `0`, `null`, and `undefined`
+   * all mean "no override; use catalog rate." This matches the WMS
+   * convention and avoids the prior bug where `customPrice = 0` flipped
+   * the whole primary line to a $0 charge.
+   */
   customPrice?: number | null;
-  /** Queued task_addons rows. Pass undefined when the entity isn't a task. */
+  /** Queued task addons (TaskDetailPanel only). */
   addons?: TaskAddon[];
   /** Hide for clients. */
   visible?: boolean;
   /** Initial open/closed state. Defaults to closed. */
   defaultOpen?: boolean;
+  /** When true, render qty/rate inputs + Add Service + delete buttons.
+   *  When false, the card is read-only (RepairDetailPanel / WillCallDetailPanel
+   *  for now, until those entities have endpoints to persist edits). */
+  editable?: boolean;
+  /** Persist primary rate. Pass `null` to clear the override. */
+  onUpdatePrimaryRate?: (rate: number | null) => Promise<unknown>;
+  /** Persist a new addon row. */
+  onAddAddon?: (input: AddTaskAddonInput) => Promise<unknown>;
+  /** Persist qty/rate edit on an existing addon. */
+  onUpdateAddon?: (id: string, patch: { quantity?: number; rate?: number | null }) => Promise<unknown>;
+  /** Delete an addon row. */
+  onDeleteAddon?: (id: string) => Promise<unknown>;
 }
 
-/** Snake-case slice of public.billing read by this component. */
 interface BillingRow {
   ledger_row_id: string;
   status: string | null;
@@ -91,6 +104,8 @@ const STATUS_CFG: Record<string, { bg: string; color: string }> = {
   Billed:   { bg: '#F0FDF4', color: '#15803D' },
   Void:     { bg: '#F3F4F6', color: '#6B7280' },
 };
+
+const SAVE_DEBOUNCE_MS = 600;
 
 function rateForClass(svc: CatalogService, itemClass: string | null | undefined): number {
   if (svc.billing === 'flat') return Number(svc.flatRate || 0);
@@ -117,61 +132,87 @@ export function BillingPreviewCard({
   entityType, entityId, tenantId,
   svcCode, itemClass, customPrice,
   addons, visible = true, defaultOpen = false,
+  editable = false,
+  onUpdatePrimaryRate, onAddAddon, onUpdateAddon, onDeleteAddon,
 }: Props) {
   const [open, setOpen] = useState(defaultOpen);
   const [recorded, setRecorded] = useState<BillingRow[]>([]);
   const [loadingRecorded, setLoadingRecorded] = useState(false);
   const [recordedError, setRecordedError] = useState<string | null>(null);
+  const [showAddModal, setShowAddModal] = useState(false);
 
   const { services, loading: catalogLoading } = useServiceCatalog();
 
-  // ─── Projected primary line ────────────────────────────────────────────
-  // Mirrors the WMS legacy path: look up the catalog row for the entity's
-  // svcCode, then resolve rate by class (class_based) or flat (flat_rate).
-  // customPrice — if set on the parent entity (Task.customPrice / Repair
-  // quoteAmount / finalAmount) — overrides the catalog rate.
+  // ─── Primary line ──────────────────────────────────────────────────────
+  // Only NON-ZERO customPrice counts as an override. `0`, `null`, and
+  // `undefined` all fall through to the catalog rate (fix for the prior
+  // bug where customPrice = 0 zeroed out the whole primary charge).
+  const hasOverride = customPrice != null && !isNaN(Number(customPrice)) && Number(customPrice) > 0;
+
   const primary = useMemo(() => {
     if (!svcCode) return null;
     const svc = services.find(s => s.code === svcCode);
     if (!svc) {
-      // No catalog match — return a stub so the row shows with a
-      // missing-rate flag, matching WMS behavior for unconfigured
-      // services.
-      return {
-        code: svcCode,
-        name: svcCode,
-        rate: 0,
-        total: 0,
-        fromOverride: false,
-        missing: true,
-        billing: 'flat' as const,
-      };
+      return { code: svcCode, name: svcCode, catalogRate: 0, billing: 'flat' as const, missing: true };
     }
-    const catalogRate = rateForClass(svc, itemClass);
-    const usingOverride = customPrice != null && !isNaN(customPrice);
-    const rate = usingOverride ? Number(customPrice) : catalogRate;
     return {
       code: svc.code,
       name: svc.name,
-      rate,
-      total: rate, // qty=1 for the per-task primary line; matches GAS billing
-      fromOverride: usingOverride,
-      missing: !usingOverride && rate <= 0,
+      catalogRate: rateForClass(svc, itemClass),
       billing: svc.billing,
+      missing: false,
     };
-  }, [svcCode, services, itemClass, customPrice]);
+  }, [svcCode, services, itemClass]);
 
+  const effectivePrimaryRate = hasOverride ? Number(customPrice) : (primary?.catalogRate ?? 0);
+
+  // Local edit state — synced from props on catalog/customPrice change so
+  // external updates (override cleared elsewhere, catalog edited) reflect.
+  const [primaryRateDraft, setPrimaryRateDraft] = useState(String(effectivePrimaryRate));
+  useEffect(() => {
+    setPrimaryRateDraft(String(effectivePrimaryRate));
+  }, [effectivePrimaryRate]);
+
+  const primaryRateNum = Number(primaryRateDraft);
+  const primaryRate = isNaN(primaryRateNum) ? 0 : primaryRateNum;
+  const primaryTotal = primaryRate; // qty=1 for the per-task primary line
+  const primaryIsOverride = primary && Math.abs(primaryRate - primary.catalogRate) > 0.0001;
+
+  const primarySaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const schedulePrimarySave = useCallback((newRate: number) => {
+    if (!editable || !onUpdatePrimaryRate || !primary) return;
+    if (primarySaveTimer.current) clearTimeout(primarySaveTimer.current);
+    primarySaveTimer.current = setTimeout(() => {
+      const isCatalog = Math.abs(newRate - primary.catalogRate) < 0.0001;
+      void onUpdatePrimaryRate(isCatalog ? null : newRate);
+    }, SAVE_DEBOUNCE_MS);
+  }, [editable, onUpdatePrimaryRate, primary]);
+
+  const flushPrimarySave = useCallback(() => {
+    if (!editable || !onUpdatePrimaryRate || !primary) return;
+    if (primarySaveTimer.current) {
+      clearTimeout(primarySaveTimer.current);
+      primarySaveTimer.current = null;
+    }
+    const isCatalog = Math.abs(primaryRate - primary.catalogRate) < 0.0001;
+    void onUpdatePrimaryRate(isCatalog ? null : primaryRate);
+  }, [editable, onUpdatePrimaryRate, primary, primaryRate]);
+
+  const resetPrimary = useCallback(() => {
+    if (!primary) return;
+    setPrimaryRateDraft(String(primary.catalogRate));
+    if (editable && onUpdatePrimaryRate) {
+      void onUpdatePrimaryRate(null);
+    }
+  }, [primary, editable, onUpdatePrimaryRate]);
+
+  // ─── Addons ────────────────────────────────────────────────────────────
   const projectedAddons = useMemo(
     () => (entityType === 'task' && addons) ? addons : [],
     [entityType, addons],
   );
 
   // ─── Recorded charges ──────────────────────────────────────────────────
-  // Match by entity column. NOTE: there is no `wc_number` column in
-  // public.billing — will calls store their identifier in `task_id`,
-  // same column tasks use. (This was a bug in the previous from-scratch
-  // version.) Addon rows have task_id = "{parentTaskId}-{svcCode}", so
-  // we use a prefix match alongside the exact match.
   const fetchRecorded = useCallback(async () => {
     if (!visible || !open || !tenantId || !entityId) return;
     setLoadingRecorded(true);
@@ -183,8 +224,6 @@ export function BillingPreviewCard({
         .eq('tenant_id', tenantId);
 
       if (entityType === 'task' || entityType === 'will_call') {
-        // Both tasks and will calls live in the task_id column. Addons add
-        // a `-{svcCode}` suffix per the GAS flush in handleCompleteTask_.
         query = query.or(`task_id.eq.${entityId},task_id.like.${entityId}-%`);
       } else if (entityType === 'repair') {
         query = query.eq('repair_id', entityId);
@@ -209,8 +248,6 @@ export function BillingPreviewCard({
 
   useEffect(() => { void fetchRecorded(); }, [fetchRecorded]);
 
-  // Realtime — any change to a billing row in this tenant nudges a refetch
-  // when the card is open. Cheap because the card is collapsed by default.
   useEffect(() => {
     if (!visible || !open || !tenantId) return;
     const channel = supabase
@@ -225,21 +262,14 @@ export function BillingPreviewCard({
   if (!visible) return null;
 
   // ─── Totals ────────────────────────────────────────────────────────────
-  // Match WMS: void rows are kept for audit but excluded from totals;
-  // recorded total = sum of non-void total_amount.
   const recordedTotal = recorded.reduce(
     (sum, r) => sum + (r.status === 'Void' ? 0 : Number(r.total ?? 0)),
     0,
   );
   const projectedAddonsTotal = projectedAddons.reduce((sum, a) => sum + (a.total ?? 0), 0);
-  const projectedPrimaryTotal = primary?.total ?? 0;
 
-  // "Already billed" detection — per-line. A projected line is dimmed when
-  // the recorded ledger already covers it (post-completion view stays
-  // accurate even though we still show the projection).
   const primaryAlreadyBooked = primary && recorded.some(r => {
     if (entityType === 'task' || entityType === 'will_call') {
-      // GAS Ledger Row IDs for primary task/WC charges are "{svcCode}-TASK-{id}".
       return r.ledger_row_id === `${primary.code}-TASK-${entityId}`;
     }
     if (entityType === 'repair') {
@@ -247,6 +277,10 @@ export function BillingPreviewCard({
     }
     return false;
   });
+
+  const showPreview = !primaryAlreadyBooked;
+  const projectedTotal = showPreview ? (primaryTotal + projectedAddonsTotal) : 0;
+  const grandTotal = recordedTotal + projectedTotal;
 
   function isAddonBooked(addon: TaskAddon): boolean {
     if (entityType !== 'task') return false;
@@ -256,172 +290,189 @@ export function BillingPreviewCard({
     );
   }
 
-  // Show preview only when the primary line hasn't been booked yet, mirroring
-  // the WMS check for an existing task_completion / receiving event.
-  const showPreview = !primaryAlreadyBooked;
-
-  // Projected total only counts toward grand total when shown.
-  const projectedTotal = showPreview ? (projectedPrimaryTotal + projectedAddonsTotal) : 0;
-  const grandTotal = recordedTotal + projectedTotal;
-
   const hasAnyContent =
     (showPreview && (primary || projectedAddons.length > 0)) ||
     recorded.length > 0;
 
-  // ─── Render ────────────────────────────────────────────────────────────
   return (
-    <div style={{
-      background: '#fff',
-      border: `1px solid ${theme.colors.border}`,
-      borderRadius: 14,
-      marginBottom: 16,
-      overflow: 'hidden',
-    }}>
-      <button
-        onClick={() => setOpen(o => !o)}
-        style={{
-          width: '100%',
-          display: 'flex', alignItems: 'center', gap: 8,
-          padding: '12px 14px',
-          background: 'none', border: 'none',
-          cursor: 'pointer', fontFamily: 'inherit',
-          textAlign: 'left',
-        }}
-      >
-        {open ? <ChevronDown size={14} color={theme.colors.textMuted} /> : <ChevronRight size={14} color={theme.colors.textMuted} />}
-        <DollarSign size={14} color={theme.colors.orange} />
-        <span style={{ fontSize: 12, fontWeight: 700, flex: 1 }}>Billing Preview</span>
-        <span style={{ fontSize: 12, color: theme.colors.textMuted, fontWeight: 600 }}>
-          {fmtMoney(grandTotal)}
-        </span>
-      </button>
+    <>
+      <div style={{
+        background: '#fff',
+        border: `1px solid ${theme.colors.border}`,
+        borderRadius: 14,
+        marginBottom: 16,
+        overflow: 'hidden',
+      }}>
+        <button
+          onClick={() => setOpen(o => !o)}
+          style={{
+            width: '100%',
+            display: 'flex', alignItems: 'center', gap: 8,
+            padding: '12px 14px',
+            background: 'none', border: 'none',
+            cursor: 'pointer', fontFamily: 'inherit',
+            textAlign: 'left',
+          }}
+        >
+          {open ? <ChevronDown size={14} color={theme.colors.textMuted} /> : <ChevronRight size={14} color={theme.colors.textMuted} />}
+          <DollarSign size={14} color={theme.colors.orange} />
+          <span style={{ fontSize: 12, fontWeight: 700, flex: 1 }}>Billing Preview</span>
+          <span style={{ fontSize: 12, color: theme.colors.textMuted, fontWeight: 600 }}>
+            {fmtMoney(grandTotal)}
+          </span>
+        </button>
 
-      {open && (
-        <div style={{ padding: '4px 14px 14px' }}>
-          {/* ── Pending Charges (Preview) ────────────────────────── */}
-          {showPreview && (primary || projectedAddons.length > 0) && (
-            <SectionHeader
-              icon="schedule"
-              label="Pending Charges (Preview)"
-            />
-          )}
-          {showPreview && (primary || projectedAddons.length > 0) && (
-            <div style={{
-              border: `1px solid ${theme.colors.border}`,
-              borderRadius: 8,
-              overflow: 'hidden',
-              marginBottom: 12,
-            }}>
-              {primary && (
-                <PreviewRow
-                  primary
-                  serviceName={primary.name}
-                  serviceCode={primary.code}
-                  classCode={primary.billing === 'class_based' ? itemClass : null}
-                  qty={1}
-                  rate={primary.rate}
-                  total={primary.total}
-                  hasError={primary.missing}
-                  badge={primary.fromOverride ? 'Override' : null}
-                />
-              )}
-              {catalogLoading && !primary && (
-                <NoteRow text="Loading catalog…" />
-              )}
-              {projectedAddons.map(a => {
-                const booked = isAddonBooked(a);
-                return (
-                  <PreviewRow
-                    key={a.id}
-                    serviceName={a.serviceName}
-                    serviceCode={a.serviceCode}
-                    classCode={a.itemClass}
-                    qty={a.quantity}
-                    rate={a.rate ?? 0}
-                    total={a.total ?? 0}
-                    hasError={(a.rate ?? 0) <= 0}
-                    dim={booked}
-                    badge={booked ? 'Already billed' : (a.addedByName ? `by ${a.addedByName}` : null)}
+        {open && (
+          <div style={{ padding: '4px 14px 14px' }}>
+            {/* ── Projected on completion ───────────────────────── */}
+            {showPreview && (primary || projectedAddons.length > 0 || (editable && entityType === 'task')) && (
+              <SectionHeader icon="schedule" label="Projected on completion" />
+            )}
+            {showPreview && (
+              <div style={{
+                border: `1px solid ${theme.colors.border}`,
+                borderRadius: 8,
+                overflow: 'hidden',
+                marginBottom: 12,
+              }}>
+                {primary && (
+                  <ProjectedRow
+                    primary
+                    serviceName={primary.name}
+                    serviceCode={primary.code}
+                    classCode={primary.billing === 'class_based' ? itemClass : null}
+                    qty={1}
+                    qtyEditable={false}
+                    rate={primaryRate}
+                    rateEditable={editable && !!onUpdatePrimaryRate}
+                    rateDraft={primaryRateDraft}
+                    onRateChange={(v) => {
+                      setPrimaryRateDraft(v);
+                      const num = Number(v);
+                      if (!isNaN(num)) schedulePrimarySave(num);
+                    }}
+                    onRateBlur={flushPrimarySave}
+                    total={primaryTotal}
+                    hasError={primary.missing && !primaryIsOverride}
+                    badge={primaryIsOverride ? 'Override' : null}
+                    onResetOverride={primaryIsOverride && editable ? resetPrimary : undefined}
+                    catalogRate={primary.catalogRate}
                   />
-                );
-              })}
-              <SubtotalRow
-                label={`Preview subtotal · ${1 + projectedAddons.length} ${1 + projectedAddons.length === 1 ? 'line' : 'lines'}`}
-                value={projectedPrimaryTotal + projectedAddonsTotal}
+                )}
+                {catalogLoading && !primary && <NoteRow text="Loading catalog…" />}
+                {projectedAddons.map(a => {
+                  const booked = isAddonBooked(a);
+                  return (
+                    <AddonRowEditable
+                      key={a.id}
+                      addon={a}
+                      editable={editable && !booked && !!onUpdateAddon}
+                      deletable={editable && !!onDeleteAddon}
+                      booked={booked}
+                      onUpdate={onUpdateAddon}
+                      onDelete={onDeleteAddon}
+                    />
+                  );
+                })}
+                {/* "+ Add Service" — staff/admin only, lives inside the
+                    projected section so all addon controls are in one place. */}
+                {editable && onAddAddon && entityType === 'task' && (
+                  <button
+                    onClick={() => setShowAddModal(true)}
+                    style={{
+                      width: '100%',
+                      padding: '8px 12px', fontSize: 12, fontWeight: 600,
+                      border: 'none', borderTop: `1px dashed ${theme.colors.border}`,
+                      background: '#fff', color: theme.colors.orange,
+                      cursor: 'pointer', fontFamily: 'inherit',
+                      display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+                    }}
+                    onMouseEnter={e => { e.currentTarget.style.background = theme.colors.bgSubtle; }}
+                    onMouseLeave={e => { e.currentTarget.style.background = '#fff'; }}
+                  >
+                    <Plus size={13} /> Add Service
+                  </button>
+                )}
+                <SubtotalRow
+                  label={`Projected subtotal · ${(primary ? 1 : 0) + projectedAddons.length} ${(primary ? 1 : 0) + projectedAddons.length === 1 ? 'line' : 'lines'}`}
+                  value={primaryTotal + projectedAddonsTotal}
+                />
+              </div>
+            )}
+
+            {primary?.missing && !primaryIsOverride && showPreview && (
+              <NoteBanner
+                tone="warn"
+                title="Missing rate"
+                message={`No catalog rate for ${primary.code}${itemClass ? ` / class ${itemClass}` : ''}. The completion will create the row with a Missing Rate flag.`}
               />
-            </div>
-          )}
+            )}
 
-          {primary?.missing && showPreview && (
-            <NoteBanner
-              tone="warn"
-              title="Missing rate"
-              message={`No catalog rate for ${primary.code}${itemClass ? ` / class ${itemClass}` : ''}. The completion will create the row with a Missing Rate flag.`}
-            />
-          )}
+            {/* ── Recorded on the ledger ─────────────────────────── */}
+            {recorded.length > 0 && (
+              <SectionHeader icon="receipt" label={`Recorded on the ledger (${recorded.length})`} />
+            )}
+            {loadingRecorded ? (
+              <NoteRow text={<><Loader2 size={11} style={{ animation: 'spin 1s linear infinite', verticalAlign: 'middle', marginRight: 4 }} />Loading…</>} />
+            ) : recordedError ? (
+              <NoteRow text={`Error loading recorded charges: ${recordedError}`} error />
+            ) : recorded.length > 0 ? (
+              <div style={{
+                border: `1px solid ${theme.colors.border}`,
+                borderRadius: 8,
+                overflow: 'hidden',
+                marginBottom: 12,
+              }}>
+                {recorded.map(r => <RecordedRow key={r.ledger_row_id} row={r} entityId={entityId} />)}
+                <SubtotalRow label="Recorded subtotal (excl. void)" value={recordedTotal} />
+              </div>
+            ) : null}
 
-          {/* ── Recorded Charges ─────────────────────────────────── */}
-          {recorded.length > 0 && (
-            <SectionHeader
-              icon="receipt"
-              label={`Recorded Charges (${recorded.length})`}
-            />
-          )}
-          {loadingRecorded ? (
-            <NoteRow text={<><Loader2 size={11} style={{ animation: 'spin 1s linear infinite', verticalAlign: 'middle', marginRight: 4 }} />Loading…</>} />
-          ) : recordedError ? (
-            <NoteRow text={`Error loading recorded charges: ${recordedError}`} error />
-          ) : recorded.length > 0 ? (
+            {!hasAnyContent && !editable && (
+              <div style={{
+                padding: '16px 12px', textAlign: 'center',
+                fontSize: 12, color: theme.colors.textMuted,
+                border: `1px dashed ${theme.colors.border}`,
+                borderRadius: 8, marginBottom: 12,
+              }}>
+                No billing charges yet
+              </div>
+            )}
+
+            {/* Grand total */}
             <div style={{
-              border: `1px solid ${theme.colors.border}`,
-              borderRadius: 8,
-              overflow: 'hidden',
-              marginBottom: 12,
+              paddingTop: 10,
+              borderTop: `1px solid ${theme.colors.border}`,
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
             }}>
-              {recorded.map(r => <RecordedRow key={r.ledger_row_id} row={r} entityId={entityId} />)}
-              <SubtotalRow
-                label="Recorded total (excl. void)"
-                value={recordedTotal}
-              />
+              <span style={{ fontSize: 13, fontWeight: 700 }}>Total (projected + recorded)</span>
+              <span style={{ fontSize: 16, fontWeight: 700, color: theme.colors.orange }}>
+                {fmtMoney(grandTotal)}
+              </span>
             </div>
-          ) : null}
-
-          {/* ── Empty state ─────────────────────────────────────── */}
-          {!hasAnyContent && (
-            <div style={{
-              padding: '16px 12px', textAlign: 'center',
-              fontSize: 12, color: theme.colors.textMuted,
-              border: `1px dashed ${theme.colors.border}`,
-              borderRadius: 8, marginBottom: 12,
-            }}>
-              No billing charges yet
-            </div>
-          )}
-
-          {/* ── Grand total + breakdown ─────────────────────────── */}
-          <div style={{
-            paddingTop: 10,
-            borderTop: `1px solid ${theme.colors.border}`,
-            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-          }}>
-            <span style={{ fontSize: 13, fontWeight: 700 }}>Total</span>
-            <span style={{ fontSize: 16, fontWeight: 700, color: theme.colors.orange }}>
-              {fmtMoney(grandTotal)}
-            </span>
+            {(projectedTotal > 0 || recordedTotal > 0) && (
+              <div style={{
+                fontSize: 10, color: theme.colors.textMuted,
+                textAlign: 'right', marginTop: 4,
+                display: 'flex', justifyContent: 'flex-end', gap: 10,
+              }}>
+                {showPreview && projectedTotal > 0 && <span>Projected: {fmtMoney(projectedTotal)}</span>}
+                {recordedTotal > 0 && <span>Recorded: {fmtMoney(recordedTotal)}</span>}
+              </div>
+            )}
           </div>
-          {(projectedTotal > 0 || recordedTotal > 0) && (
-            <div style={{
-              fontSize: 10, color: theme.colors.textMuted,
-              textAlign: 'right', marginTop: 4,
-              display: 'flex', justifyContent: 'flex-end', gap: 10,
-            }}>
-              {showPreview && projectedTotal > 0 && <span>Preview: {fmtMoney(projectedTotal)}</span>}
-              {recordedTotal > 0 && <span>Recorded: {fmtMoney(recordedTotal)}</span>}
-            </div>
-          )}
-        </div>
+        )}
+      </div>
+
+      {/* Add Service modal — only mounted on demand. */}
+      {showAddModal && onAddAddon && (
+        <AddTaskServiceModal
+          itemClass={itemClass || null}
+          onClose={() => setShowAddModal(false)}
+          onSubmit={async (input) => { await onAddAddon(input); }}
+        />
       )}
-    </div>
+    </>
   );
 }
 
@@ -442,72 +493,282 @@ function SectionHeader({ icon, label }: { icon: 'schedule' | 'receipt'; label: s
   );
 }
 
-function PreviewRow({
-  serviceName, serviceCode, classCode, qty, rate, total,
-  primary, hasError, dim, badge,
+const inputStyleCompact: React.CSSProperties = {
+  width: 70, padding: '4px 6px', fontSize: 12,
+  border: `1px solid ${theme.colors.border}`, borderRadius: 6,
+  outline: 'none', fontFamily: 'inherit',
+  textAlign: 'right',
+};
+
+function ProjectedRow({
+  serviceName, serviceCode, classCode,
+  qty, qtyEditable, qtyDraft, onQtyChange,
+  rate, rateEditable, rateDraft, onRateChange, onRateBlur,
+  total, primary, hasError, badge, onResetOverride, catalogRate,
 }: {
   serviceName: string;
   serviceCode: string;
   classCode?: string | null;
   qty: number;
+  qtyEditable?: boolean;
+  qtyDraft?: string;
+  onQtyChange?: (v: string) => void;
   rate: number;
+  rateEditable?: boolean;
+  rateDraft?: string;
+  onRateChange?: (v: string) => void;
+  onRateBlur?: () => void;
   total: number;
   primary?: boolean;
   hasError?: boolean;
-  dim?: boolean;
   badge?: string | null;
+  onResetOverride?: () => void;
+  catalogRate?: number;
 }) {
   return (
     <div style={{
-      display: 'flex', alignItems: 'center', justifyContent: 'space-between',
       padding: '8px 12px', fontSize: 12,
-      gap: 8,
       background: primary ? '#fff' : theme.colors.bgSubtle,
       borderTop: primary ? 'none' : `1px solid ${theme.colors.border}`,
-      opacity: dim ? 0.55 : 1,
     }}>
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-          <span style={{ fontWeight: 600, color: theme.colors.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {serviceName}
-          </span>
-          <span style={{ fontSize: 10, color: theme.colors.textMuted, fontWeight: 500 }}>
-            ({serviceCode})
-          </span>
-          {classCode && (
-            <span style={{
-              fontSize: 9, padding: '1px 5px', borderRadius: 4,
-              border: `1px solid ${theme.colors.border}`, color: theme.colors.textSecondary,
-              fontWeight: 600,
-            }}>
-              {classCode}
+      <div style={{
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        gap: 8, flexWrap: 'wrap',
+      }}>
+        <div style={{ flex: '1 1 180px', minWidth: 0 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+            <span style={{ fontWeight: 600, color: theme.colors.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {serviceName}
             </span>
-          )}
-          <span style={{ fontSize: 11, color: theme.colors.textMuted }}>×{qty}</span>
-          {hasError && <AlertTriangle size={11} color="#B45309" />}
-          {badge && (
-            <span style={{
-              fontSize: 9, padding: '1px 5px', borderRadius: 4,
-              background: '#FEF3C7', color: '#92400E', fontWeight: 600,
-            }}>
-              {badge}
+            <span style={{ fontSize: 10, color: theme.colors.textMuted, fontWeight: 500 }}>
+              ({serviceCode})
             </span>
-          )}
+            {classCode && (
+              <span style={{
+                fontSize: 9, padding: '1px 5px', borderRadius: 4,
+                border: `1px solid ${theme.colors.border}`, color: theme.colors.textSecondary,
+                fontWeight: 600,
+              }}>
+                {classCode}
+              </span>
+            )}
+            {badge && (
+              <span style={{
+                fontSize: 9, padding: '1px 5px', borderRadius: 4,
+                background: '#FEF3C7', color: '#92400E', fontWeight: 600,
+              }}>
+                {badge}
+              </span>
+            )}
+            {hasError && <AlertTriangle size={11} color="#B45309" />}
+          </div>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, whiteSpace: 'nowrap' }}>
+          <label style={{ fontSize: 10, color: theme.colors.textMuted, display: 'flex', alignItems: 'center', gap: 4 }}>
+            <span>Qty</span>
+            {qtyEditable && onQtyChange ? (
+              <input
+                type="number" min={0} step={1}
+                value={qtyDraft ?? String(qty)}
+                onChange={e => onQtyChange(e.target.value)}
+                style={{ ...inputStyleCompact, width: 50 }}
+              />
+            ) : (
+              <span style={{ fontSize: 12, fontWeight: 600, color: theme.colors.text, minWidth: 16, textAlign: 'right' }}>
+                {qty}
+              </span>
+            )}
+          </label>
+          <label style={{ fontSize: 10, color: theme.colors.textMuted, display: 'flex', alignItems: 'center', gap: 4 }}>
+            <span>Rate</span>
+            {rateEditable && onRateChange ? (
+              <span style={{ position: 'relative', display: 'inline-flex', alignItems: 'center' }}>
+                <span style={{ position: 'absolute', left: 6, fontSize: 11, color: theme.colors.textMuted, pointerEvents: 'none' }}>$</span>
+                <input
+                  type="number" min={0} step={0.01}
+                  value={rateDraft ?? String(rate)}
+                  onChange={e => onRateChange(e.target.value)}
+                  onBlur={onRateBlur}
+                  style={{ ...inputStyleCompact, paddingLeft: 14 }}
+                />
+              </span>
+            ) : (
+              <span style={{ fontSize: 12, fontWeight: 600, color: theme.colors.text }}>{fmtMoney(rate)}</span>
+            )}
+          </label>
+          <span style={{ fontSize: 13, fontWeight: 700, fontVariantNumeric: 'tabular-nums', minWidth: 64, textAlign: 'right' }}>
+            {fmtMoney(total)}
+          </span>
         </div>
       </div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, whiteSpace: 'nowrap' }}>
-        {hasError && rate <= 0 ? (
-          <span style={{ fontSize: 11, color: theme.colors.textMuted, fontStyle: 'italic' }}>No rate</span>
-        ) : (
-          <>
-            <span style={{ fontSize: 11, color: theme.colors.textMuted, fontVariantNumeric: 'tabular-nums' }}>
-              {fmtMoney(rate)}
+      {rateEditable && onResetOverride && catalogRate != null && (
+        <div style={{ marginTop: 4, fontSize: 10, color: theme.colors.textMuted, display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+          <span>Catalog: {fmtMoney(catalogRate)}</span>
+          <button
+            type="button"
+            onClick={onResetOverride}
+            style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', color: theme.colors.orange, fontSize: 10, fontWeight: 600, fontFamily: 'inherit' }}
+          >
+            Reset
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AddonRowEditable({
+  addon, editable, deletable, booked, onUpdate, onDelete,
+}: {
+  addon: TaskAddon;
+  editable: boolean;
+  deletable: boolean;
+  booked: boolean;
+  onUpdate?: (id: string, patch: { quantity?: number; rate?: number | null }) => Promise<unknown>;
+  onDelete?: (id: string) => Promise<unknown>;
+}) {
+  const [qtyDraft, setQtyDraft] = useState(String(addon.quantity));
+  const [rateDraft, setRateDraft] = useState(String(addon.rate ?? 0));
+  const [deleting, setDeleting] = useState(false);
+
+  useEffect(() => { setQtyDraft(String(addon.quantity)); }, [addon.quantity]);
+  useEffect(() => { setRateDraft(String(addon.rate ?? 0)); }, [addon.rate]);
+
+  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scheduleSave = useCallback((patch: { quantity?: number; rate?: number | null }) => {
+    if (!editable || !onUpdate) return;
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(() => { void onUpdate(addon.id, patch); }, SAVE_DEBOUNCE_MS);
+  }, [editable, onUpdate, addon.id]);
+
+  const flush = useCallback(() => {
+    if (!editable || !onUpdate) return;
+    if (saveTimer.current) {
+      clearTimeout(saveTimer.current);
+      saveTimer.current = null;
+    }
+    const qty = Number(qtyDraft);
+    const rate = Number(rateDraft);
+    void onUpdate(addon.id, {
+      quantity: isNaN(qty) ? addon.quantity : qty,
+      rate: isNaN(rate) ? addon.rate : rate,
+    });
+  }, [editable, onUpdate, addon.id, addon.quantity, addon.rate, qtyDraft, rateDraft]);
+
+  const qtyNum = Number(qtyDraft);
+  const rateNum = Number(rateDraft);
+  const liveQty = isNaN(qtyNum) ? addon.quantity : qtyNum;
+  const liveRate = isNaN(rateNum) ? Number(addon.rate ?? 0) : rateNum;
+  const liveTotal = Math.round(liveQty * liveRate * 100) / 100;
+
+  return (
+    <div style={{
+      padding: '8px 12px', fontSize: 12,
+      background: theme.colors.bgSubtle,
+      borderTop: `1px solid ${theme.colors.border}`,
+      opacity: booked ? 0.55 : 1,
+    }}>
+      <div style={{
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        gap: 8, flexWrap: 'wrap',
+      }}>
+        <div style={{ flex: '1 1 180px', minWidth: 0 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+            <span style={{ fontWeight: 600, color: theme.colors.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {addon.serviceName}
             </span>
-            <span style={{ fontSize: 13, fontWeight: 700, fontVariantNumeric: 'tabular-nums', minWidth: 64, textAlign: 'right' }}>
-              {fmtMoney(total)}
+            <span style={{ fontSize: 10, color: theme.colors.textMuted, fontWeight: 500 }}>
+              ({addon.serviceCode})
             </span>
-          </>
-        )}
+            {addon.itemClass && (
+              <span style={{
+                fontSize: 9, padding: '1px 5px', borderRadius: 4,
+                border: `1px solid ${theme.colors.border}`, color: theme.colors.textSecondary,
+                fontWeight: 600,
+              }}>
+                {addon.itemClass}
+              </span>
+            )}
+            {booked && (
+              <span style={{
+                fontSize: 9, padding: '1px 5px', borderRadius: 4,
+                background: '#FEF3C7', color: '#92400E', fontWeight: 600,
+              }}>
+                Already billed
+              </span>
+            )}
+          </div>
+          {addon.addedByName && (
+            <div style={{ fontSize: 10, color: theme.colors.textMuted, marginTop: 1 }}>
+              by {addon.addedByName}
+            </div>
+          )}
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, whiteSpace: 'nowrap' }}>
+          <label style={{ fontSize: 10, color: theme.colors.textMuted, display: 'flex', alignItems: 'center', gap: 4 }}>
+            <span>Qty</span>
+            {editable ? (
+              <input
+                type="number" min={0} step={1}
+                value={qtyDraft}
+                onChange={e => {
+                  setQtyDraft(e.target.value);
+                  const v = Number(e.target.value);
+                  if (!isNaN(v)) scheduleSave({ quantity: v });
+                }}
+                onBlur={flush}
+                style={{ ...inputStyleCompact, width: 50 }}
+              />
+            ) : (
+              <span style={{ fontSize: 12, fontWeight: 600, color: theme.colors.text }}>{addon.quantity}</span>
+            )}
+          </label>
+          <label style={{ fontSize: 10, color: theme.colors.textMuted, display: 'flex', alignItems: 'center', gap: 4 }}>
+            <span>Rate</span>
+            {editable ? (
+              <span style={{ position: 'relative', display: 'inline-flex', alignItems: 'center' }}>
+                <span style={{ position: 'absolute', left: 6, fontSize: 11, color: theme.colors.textMuted, pointerEvents: 'none' }}>$</span>
+                <input
+                  type="number" min={0} step={0.01}
+                  value={rateDraft}
+                  onChange={e => {
+                    setRateDraft(e.target.value);
+                    const v = Number(e.target.value);
+                    if (!isNaN(v)) scheduleSave({ rate: v });
+                  }}
+                  onBlur={flush}
+                  style={{ ...inputStyleCompact, paddingLeft: 14 }}
+                />
+              </span>
+            ) : (
+              <span style={{ fontSize: 12, fontWeight: 600, color: theme.colors.text }}>{fmtMoney(addon.rate ?? 0)}</span>
+            )}
+          </label>
+          <span style={{ fontSize: 13, fontWeight: 700, fontVariantNumeric: 'tabular-nums', minWidth: 64, textAlign: 'right' }}>
+            {fmtMoney(liveTotal)}
+          </span>
+          {deletable && onDelete && (
+            <button
+              onClick={async () => {
+                if (!confirm(`Remove ${addon.serviceName} from this task?`)) return;
+                setDeleting(true);
+                try { await onDelete(addon.id); } finally { setDeleting(false); }
+              }}
+              disabled={deleting}
+              style={{
+                background: 'none', border: 'none', padding: 4, cursor: 'pointer',
+                color: deleting ? theme.colors.textMuted : '#DC2626',
+                display: 'flex', alignItems: 'center',
+              }}
+              aria-label="Remove addon"
+              title="Remove addon"
+            >
+              {deleting
+                ? <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} />
+                : <Trash2 size={13} />}
+            </button>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -519,8 +780,6 @@ function RecordedRow({ row, entityId }: { row: BillingRow; entityId: string }) {
   const total = Number(row.total ?? 0);
   const rateVal = row.rate == null ? null : Number(row.rate);
   const hasMissingRate = rateVal == null;
-  // Match WMS' "manual" badge — addon rows have task_id like `{parent}-{svcCode}`
-  // and Ledger Row ID like `{parent}-{svcCode}-ADDON-{n}`.
   const isAddon =
     (row.ledger_row_id ?? '').startsWith(`${entityId}-`) &&
     /-ADDON-\d+$/.test(row.ledger_row_id ?? '');
