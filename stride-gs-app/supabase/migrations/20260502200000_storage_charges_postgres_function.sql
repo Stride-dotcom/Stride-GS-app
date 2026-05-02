@@ -168,21 +168,23 @@ BEGIN
     SELECT
       i.tenant_id,
       i.item_id,
-      COALESCE(i.description, '')      AS description,
-      COALESCE(i.vendor, '')           AS vendor,
-      COALESCE(i.sidemark, '')         AS sidemark,
-      COALESCE(i.item_class, '')       AS item_class,
-      i.receive_date,
-      i.release_date,
-      i.transfer_date,
-      LOWER(COALESCE(i.status, ''))    AS status,
-      COALESCE(i.shipment_number, '')  AS shipment_number,
-      COALESCE(i.location, '')         AS location,
-      c.name                           AS client_name,
-      COALESCE(c.free_storage_days, 0) AS free_storage_days,
-      COALESCE(c.discount_storage_pct, 0) AS discount_storage_pct,
-      ic.storage_size                  AS storage_size,
-      sc.rates                         AS stor_rates
+      COALESCE(i.description, '')                              AS description,
+      COALESCE(i.vendor, '')                                   AS vendor,
+      COALESCE(i.sidemark, '')                                 AS sidemark,
+      COALESCE(i.item_class, '')                               AS item_class,
+      -- inventory.{receive,release,transfer}_date are TEXT in the
+      -- mirror schema — empty string when absent. Cast safely.
+      NULLIF(NULLIF(TRIM(i.receive_date), ''),  'null')::date  AS receive_date,
+      NULLIF(NULLIF(TRIM(i.release_date), ''),  'null')::date  AS release_date,
+      NULLIF(NULLIF(TRIM(i.transfer_date), ''), 'null')::date  AS transfer_date,
+      LOWER(COALESCE(i.status, ''))                            AS status,
+      COALESCE(i.shipment_number, '')                          AS shipment_number,
+      COALESCE(i.location, '')                                 AS location,
+      c.name                                                   AS client_name,
+      COALESCE(c.free_storage_days, 0)                         AS free_storage_days,
+      COALESCE(c.discount_storage_pct, 0)                      AS discount_storage_pct,
+      ic.storage_size                                          AS storage_size,
+      sc.rates                                                 AS stor_rates
     FROM public.inventory i
     JOIN public.clients   c  ON c.tenant_id = i.tenant_id
     LEFT JOIN public.item_classes ic
@@ -193,9 +195,12 @@ BEGIN
     WHERE c.active = true
       AND (p_tenant_id IS NULL OR i.tenant_id = p_tenant_id)
       AND (p_sidemark  IS NULL OR LOWER(i.sidemark) = LOWER(p_sidemark))
-      AND i.receive_date IS NOT NULL
-      AND i.receive_date <= p_period_end
-      AND (i.release_date IS NULL OR i.release_date > p_period_start)
+      AND NULLIF(TRIM(i.receive_date), '') IS NOT NULL
+      AND NULLIF(TRIM(i.receive_date), '')::date <= p_period_end
+      AND (
+        NULLIF(TRIM(i.release_date), '') IS NULL
+        OR NULLIF(TRIM(i.release_date), '')::date > p_period_start
+      )
   LOOP
     v_status   := r.status;
     v_recv     := r.receive_date;
