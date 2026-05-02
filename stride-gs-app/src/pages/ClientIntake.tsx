@@ -37,7 +37,7 @@ import {
   type RefreshPrefill,
 } from '../hooks/useClientIntake';
 import { generateSignedTcPdf, generateTcPreviewPdf } from '../lib/intakePdf';
-import { postEmailSignedAgreement } from '../lib/api';
+import { sendIntakeReceipt } from '../lib/intakeReceipt';
 import { useIsMobile } from '../hooks/useIsMobile';
 
 // Style tokens — copied verbatim from PublicRates so the public-side
@@ -279,7 +279,13 @@ export function ClientIntake({ linkId }: Props) {
     const handleEmailReceipt = async () => {
       setEmailReceiptSending(true);
       try {
-        await postEmailSignedAgreement({
+        // Session 90 — migrated off the GAS `emailSignedAgreement` handler
+        // (which called MailApp via api_sendTemplateEmail_) onto the
+        // Supabase `send-email` edge function via the `sendIntakeReceipt`
+        // helper. The helper owns the token derivation that used to live
+        // in handleEmailSignedAgreement_ — insurance label/detail copy,
+        // signed-date formatting, INTAKE_REF derivation.
+        const result = await sendIntakeReceipt({
           linkId,
           email:           draft.email,
           businessName:    draft.businessName,
@@ -292,7 +298,13 @@ export function ClientIntake({ linkId }: Props) {
           autoInspect:     draft.autoInspect,
           intakeId:        submittedIntakeId,
         });
-        setEmailReceiptSent(true);
+        if (result.ok) {
+          setEmailReceiptSent(true);
+        } else {
+          // Surface inline so the prospect can retry; the success-screen
+          // button stays clickable.
+          console.warn('[intake] manual receipt resend failed:', result.error);
+        }
       } finally {
         setEmailReceiptSending(false);
       }
@@ -486,7 +498,14 @@ export function ClientIntake({ linkId }: Props) {
         // on the success screen acts as a manual resend if this first send
         // bounces (or if the user wants a second copy at a different address).
         const receiptIntakeId = 'id' in result ? (result as { id?: string }).id : undefined;
-        void postEmailSignedAgreement({
+        // Session 90 — migrated to the Resend pipeline via sendIntakeReceipt.
+        // Fire-and-forget; the intake row is already persisted so a
+        // transient send failure shouldn't block the success screen. The
+        // "Email me a copy" button on the success screen acts as the
+        // manual resend if this first send bounces. The edge function's
+        // idempotency key (intake-receipt:<linkId>:<refNum>) prevents
+        // the manual resend from double-sending.
+        void sendIntakeReceipt({
           linkId,
           email:           draft.email,
           businessName:    draft.businessName,
@@ -498,9 +517,12 @@ export function ClientIntake({ linkId }: Props) {
             : 0,
           autoInspect:     draft.autoInspect,
           intakeId:        receiptIntakeId,
+        }).then(r => {
+          if (!r.ok) {
+            console.warn('[intake] auto-receipt email failed (non-blocking):', r.error);
+          }
         }).catch(err => {
-          // Logged for ops visibility; never surfaced to the prospect.
-          console.warn('[intake] auto-receipt email failed (non-blocking):', err);
+          console.warn('[intake] auto-receipt email threw (non-blocking):', err);
         });
         // Also stash the intake id so the manual resend button can pass it.
         if (receiptIntakeId) setSubmittedIntakeId(receiptIntakeId);
