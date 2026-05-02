@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.142.12 — 2026-05-02 PST — Class C bulk-write fix for handleStartTask_, handleCompleteTask_, handleCompleteRepair_. Each was doing 4-8 separate setValue() calls per request (one row across many columns), 500ms-2s each, totalling 5-15 sec of latency. Refactored each to mutate the in-memory rowData (already read once at function start) via a setRowVal_ helper that tracks modified columns, then write ONCE via setValues over the contiguous slice covering all touched columns. Untouched-but-in-slice columns write back their existing values from the snapshot so unrelated cells aren't clobbered. Single-row contiguous version of the same recipe used in #186/#187/#188. Also drops a now-redundant SpreadsheetApp.flush() inside handleCompleteTask_'s Custom Price branch — the bulk write at end-of-try makes it meaningless, and resyncEntityToSupabase_ flushes itself before reading. Each handler now responds in <2 sec.
+   StrideAPI.gs — v38.143.0 — 2026-05-02 PST — Task add-on services. handleCompleteTask_ now flushes public.task_addons rows to the client Billing_Ledger after the primary service charge, one row per addon, snapshotting the rate captured at add-time. Ledger Row IDs are {taskId}-{svcCode}-ADDON-{n} for uniqueness; Task ID column carries {taskId}-{svcCode} per spec so unbilled reports distinguish the addon line from the parent. Each addon row also goes through resyncEntityToSupabase_ so the React Billing page sees it within ~1-2s. Fetch is via new api_fetchTaskAddons_ (GET /rest/v1/task_addons?tenant_id=eq.X&task_id=eq.Y&order=created_at.asc). Failures are non-fatal warnings so the primary task billing always lands. New table: public.task_addons (migration 20260502160000_task_addons.sql).
+   v38.142.12: Class C bulk-write fix for handleStartTask_, handleCompleteTask_, handleCompleteRepair_. Each was doing 4-8 separate setValue() calls per request (one row across many columns), 500ms-2s each, totalling 5-15 sec of latency. Refactored each to mutate the in-memory rowData (already read once at function start) via a setRowVal_ helper that tracks modified columns, then write ONCE via setValues over the contiguous slice covering all touched columns. Untouched-but-in-slice columns write back their existing values from the snapshot so unrelated cells aren't clobbered. Single-row contiguous version of the same recipe used in #186/#187/#188. Also drops a now-redundant SpreadsheetApp.flush() inside handleCompleteTask_'s Custom Price branch — the bulk write at end-of-try makes it meaningless, and resyncEntityToSupabase_ flushes itself before reading. Each handler now responds in <2 sec.
    v38.142.11: Supabase write-through batch fix. api_writeThrough_ now dispatches to a new resyncEntitiesBatchToSupabase_ when called with 2+ entity IDs, doing ONE supabaseBatchUpsert_ instead of N per-row POSTs. The four batch-cancel/reassign handlers now pass succeededIds as an array so they get the batched path. For a 50-item release the writeThrough phase drops from ~10-25 sec (50 sequential POSTs) to ~0.5-1 sec (1 batched POST). For batch-cancel-20-tasks: ~4-10 sec → ~0.5 sec. Single-ID router cases unchanged. On batch failure or "clients" entity type, falls back to the existing per-row path so gs_sync_events still gets per-entity failure rows for the React FailedOperationsDrawer.
    v38.142.10: handleCancelWillCall_ bulk-write performance fix matching the #186/#187 recipe. Old code did setValue("Cancelled") inside the loop over matching WC_Items rows — one ~500ms-2s round-trip per item. Cancelling a 20-item will call was a 1-2 minute hang. New code collects matched row numbers, finds the contiguous range covering them, and writes the Status column ONCE via setValues — initialized from the snapshot so untouched rows in the range keep their existing values. Cancel now completes in under 5 seconds regardless of WC size.
    v38.142.9: Same bulk-write performance fix applied to api_markClientLedgerInvoiced_ + Email Status update on Consolidated_Ledger inside handleCreateInvoice_. Old code did up to 4 setValue() calls per ledger row (status, invoice #, invoice date, invoice url) = up to 4N round-trips per invoice commit. A 200-line monthly invoice was 800 round-trips and frequently timed out. New code drops to constant 4 round-trips for the client Billing_Ledger update + 1 for the Email Status update on Consolidated_Ledger.
@@ -2284,6 +2285,34 @@ function supabaseUpsert_(table, data) {
     Logger.log("supabaseUpsert_ " + table + " error (non-fatal): " + e);
     return { ok: false, code: 0, error: String(e) };
   }
+}
+
+/**
+ * v38.142.13 — Fetch the public.task_addons rows for a given task. Returns
+ * a possibly-empty array sorted by created_at (matching the React panel's
+ * display order so the "ADDON-N" suffix in the resulting Ledger Row IDs is
+ * stable). Throws on transport / auth failures so the caller can warn.
+ */
+function api_fetchTaskAddons_(tenantId, taskId) {
+  var url = prop_("SUPABASE_URL");
+  var key = prop_("SUPABASE_SERVICE_ROLE_KEY");
+  if (!url || !key) throw new Error("SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY not configured");
+  var listUrl = url + "/rest/v1/task_addons"
+              + "?select=id,service_code,service_name,quantity,rate,item_class,total,added_by_name,created_at"
+              + "&tenant_id=eq." + encodeURIComponent(String(tenantId))
+              + "&task_id=eq." + encodeURIComponent(String(taskId))
+              + "&order=created_at.asc";
+  var resp = UrlFetchApp.fetch(listUrl, {
+    method: "GET",
+    headers: { "Authorization": "Bearer " + key, "apikey": key },
+    muteHttpExceptions: true
+  });
+  var code = resp.getResponseCode();
+  if (code < 200 || code >= 300) {
+    throw new Error("HTTP " + code + ": " + resp.getContentText().substring(0, 200));
+  }
+  try { return JSON.parse(resp.getContentText()) || []; }
+  catch (_) { return []; }
 }
 
 /**
@@ -14760,6 +14789,85 @@ function handleCompleteTask_(clientSheetId, payload) {
           } catch (billErr) {
             warnings.push("Billing write failed (non-fatal): " + billErr.message);
           }
+        }
+
+        // ─── ADD-ON SERVICES → flush task_addons → Billing_Ledger ────────────
+        // v38.142.13 — staff/admin add extra billable services to a task via
+        // the React panel; rows accumulate on public.task_addons until
+        // completion. Here we fetch the addon list and write one Billing_
+        // Ledger row per addon, snapshotting the rate that was captured at
+        // add time. Non-fatal: if Supabase is unreachable the primary task
+        // billing above still lands, and the addon rows can be replayed
+        // manually after fixing connectivity (see warnings).
+        try {
+          var addons = api_fetchTaskAddons_(clientSheetId, taskId);
+          if (addons && addons.length > 0) {
+            var addonBillSheet = ss.getSheetByName("Billing_Ledger");
+            if (!addonBillSheet) {
+              warnings.push("Billing_Ledger sheet not found — " + addons.length + " add-on(s) not billed");
+            } else {
+              var addonBillMap = api_getHeaderMap_(addonBillSheet);
+              for (var ai = 0; ai < addons.length; ai++) {
+                var ad = addons[ai];
+                var adCode = String(ad.service_code || "").trim();
+                if (!adCode) continue;
+                var adQty  = Number(ad.quantity || 1);
+                var adRate = (ad.rate == null || ad.rate === "") ? null : Number(ad.rate);
+                var adClass = String(ad.item_class || invItem.itemClass || "").trim();
+                // Snapshot held the rate; if missing fall back to current
+                // catalog so we don't silently bill $0.
+                if (adRate == null || isNaN(adRate)) {
+                  try {
+                    var fbRate = api_lookupRate_(ss, adCode, adClass, {
+                      itemId: itemId, clientName: clientName, tenantId: clientSheetId,
+                      qty: adQty, eventSource: "task_complete_addon",
+                      ledgerRowId: taskId + "-" + adCode + "-ADDON-" + (ai + 1)
+                    });
+                    adRate = fbRate.rate;
+                  } catch (_) { adRate = 0; }
+                }
+                var adMissingRate = !(adRate > 0);
+                var adTotal = adMissingRate ? "Missing Rate" : (adRate * adQty);
+                // Per spec: Task ID column carries the addon flavor
+                // ({TASK_ID}-{SERVICE_CODE}) so unbilled reports / invoices
+                // distinguish the addon line from the parent task line.
+                var addonTaskIdLabel = taskId + "-" + adCode;
+                var addonLedgerRowId = taskId + "-" + adCode + "-ADDON-" + (ai + 1);
+                var adRow = api_buildRow_(addonBillMap, {
+                  "Status":       "Unbilled",
+                  "Invoice #":    "",
+                  "Client":       clientName,
+                  "Date":         now,
+                  "Svc Code":     adCode,
+                  "Svc Name":     ad.service_name || adCode,
+                  "Category":     "",
+                  "Item ID":      itemId,
+                  "Description":  invItem.description,
+                  "Class":        adClass,
+                  "Qty":          adQty,
+                  "Rate":         adMissingRate ? 0 : adRate,
+                  "Total":        adTotal,
+                  "Task ID":      addonTaskIdLabel,
+                  "Repair ID":    "",
+                  "Shipment #":   shipNo,
+                  "Item Notes":   "Add-on" + (ad.added_by_name ? " by " + ad.added_by_name : "") + (adMissingRate ? " - MISSING RATE" : ""),
+                  "Ledger Row ID": addonLedgerRowId
+                });
+                var adInsertRow = api_getLastDataRow_(addonBillSheet) + 1;
+                addonBillSheet.getRange(adInsertRow, 1, 1, adRow.length).setValues([adRow]);
+                if (adMissingRate) {
+                  warnings.push("Add-on " + adCode + " billed with Missing Rate flag");
+                }
+                try {
+                  resyncEntityToSupabase_("billing", clientSheetId, addonLedgerRowId);
+                } catch (sbErr) {
+                  warnings.push("Add-on " + adCode + " Supabase write-through failed (non-fatal): " + sbErr.message);
+                }
+              }
+            }
+          }
+        } catch (addonErr) {
+          warnings.push("Add-on services flush failed (non-fatal): " + addonErr.message);
         }
 
         // ─── DISPOSAL → Release Date + Status = Released (non-critical) ─────
