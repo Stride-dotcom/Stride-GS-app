@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.142.10 — 2026-05-02 PST — handleCancelWillCall_ bulk-write performance fix matching the #186/#187 recipe. Old code did setValue("Cancelled") inside the loop over matching WC_Items rows — one ~500ms-2s round-trip per item. Cancelling a 20-item will call was a 1-2 minute hang. New code collects matched row numbers, finds the contiguous range covering them, and writes the Status column ONCE via setValues — initialized from the snapshot so untouched rows in the range keep their existing values. Cancel now completes in under 5 seconds regardless of WC size.
+   StrideAPI.gs — v38.142.11 — 2026-05-02 PST — Supabase write-through batch fix. api_writeThrough_ now dispatches to a new resyncEntitiesBatchToSupabase_ when called with 2+ entity IDs, doing ONE supabaseBatchUpsert_ instead of N per-row POSTs. The four batch-cancel/reassign handlers now pass succeededIds as an array so they get the batched path. For a 50-item release the writeThrough phase drops from ~10-25 sec (50 sequential POSTs) to ~0.5-1 sec (1 batched POST). For batch-cancel-20-tasks: ~4-10 sec → ~0.5 sec. Single-ID router cases unchanged. On batch failure or "clients" entity type, falls back to the existing per-row path so gs_sync_events still gets per-entity failure rows for the React FailedOperationsDrawer.
+   v38.142.10: handleCancelWillCall_ bulk-write performance fix matching the #186/#187 recipe. Old code did setValue("Cancelled") inside the loop over matching WC_Items rows — one ~500ms-2s round-trip per item. Cancelling a 20-item will call was a 1-2 minute hang. New code collects matched row numbers, finds the contiguous range covering them, and writes the Status column ONCE via setValues — initialized from the snapshot so untouched rows in the range keep their existing values. Cancel now completes in under 5 seconds regardless of WC size.
    v38.142.9: Same bulk-write performance fix applied to api_markClientLedgerInvoiced_ + Email Status update on Consolidated_Ledger inside handleCreateInvoice_. Old code did up to 4 setValue() calls per ledger row (status, invoice #, invoice date, invoice url) = up to 4N round-trips per invoice commit. A 200-line monthly invoice was 800 round-trips and frequently timed out. New code drops to constant 4 round-trips for the client Billing_Ledger update + 1 for the Email Status update on Consolidated_Ledger.
    v38.142.8: handleReleaseItems_ bulk-write performance fix: collect all per-row mutations into in-memory arrays then write each affected column ONCE via setValues over the contiguous range covering changed rows. Drops network round-trips from 3N (~3-5 minutes for a 50-item release, frequent timeouts) to 3 — release operation now completes in under 5 seconds regardless of item count.
    v38.142.7: api_sendTemplateEmail_ &client= precedence: prefer the explicit clientSheetId param over settings (which can be empty/stale on older sheets) so email CTAs always carry the correct tenant. Also a final safety net on the auto-injected CTA URL.
@@ -5449,6 +5450,277 @@ function resyncEntityToSupabase_(entityType, tenantId, entityId) {
 }
 
 /**
+ * v38.142.11 — Batch counterpart to resyncEntityToSupabase_. Used by
+ * api_writeThrough_ when called with an array of 2+ entity IDs.
+ *
+ * Old per-row path (still used for single IDs): N spreadsheet opens, N
+ * full-sheet reads, N supabaseUpsert_ POSTs. A 50-item release was ~10-25
+ * sec on the writeThrough phase alone, on top of the GAS sheet write.
+ *
+ * This path: open + read sheet ONCE, build all upsert rows in memory,
+ * single supabaseBatchUpsert_ call. supabaseBatchUpsert_ itself chunks at
+ * 50 + retries per-row on chunk failure, so robustness for big batches
+ * (up to ~1000 IDs) is inherited. Mirrors the row-building pattern from
+ * api_fullClientSync_ but filtered to only the requested IDs.
+ *
+ * Returns { ok, foundIds, notFoundIds, upsertCount, error? }. Caller
+ * (api_writeThrough_) falls back to the per-row path on ok=false so
+ * gs_sync_events still gets per-entity failure rows for the React
+ * FailedOperationsDrawer.
+ */
+function resyncEntitiesBatchToSupabase_(entityType, tenantId, entityIds) {
+  if (!tenantId) return { ok: false, error: "no tenantId" };
+  if (!Array.isArray(entityIds)) return { ok: false, error: "entityIds must be array" };
+
+  // Normalize + dedupe IDs (preserve order via first-seen).
+  var ids = [];
+  var idSeen = {};
+  for (var n = 0; n < entityIds.length; n++) {
+    var v = String(entityIds[n] || "").trim();
+    if (v && !idSeen[v]) { ids.push(v); idSeen[v] = true; }
+  }
+  if (ids.length === 0) return { ok: false, error: "no valid entityIds" };
+
+  var tabName, idCol, sbTable;
+  switch (entityType) {
+    case "inventory": tabName = "Inventory";       idCol = "Item ID";       sbTable = "inventory";  break;
+    case "task":      tabName = "Tasks";           idCol = "Task ID";       sbTable = "tasks";      break;
+    case "repair":    tabName = "Repairs";         idCol = "Repair ID";     sbTable = "repairs";    break;
+    case "will_call": tabName = "Will_Calls";      idCol = "WC Number";     sbTable = "will_calls"; break;
+    case "shipment":  tabName = "Shipments";       idCol = "Shipment #";    sbTable = "shipments";  break;
+    case "billing":   tabName = "Billing_Ledger";  idCol = "Ledger Row ID"; sbTable = "billing";    break;
+    default: return { ok: false, error: "unknown entityType: " + entityType };
+  }
+
+  try {
+    SpreadsheetApp.flush();
+    var ss = SpreadsheetApp.openById(tenantId);
+    var sheet = ss.getSheetByName(tabName);
+    if (!sheet) return { ok: false, error: tabName + " sheet not found" };
+
+    var rows = sheetToObjects_(sheet);
+    if (rows.length === 0) {
+      return { ok: false, error: tabName + " sheet is empty", notFoundIds: ids };
+    }
+
+    // Build id → row index for O(1) lookups.
+    var rowIdxById = {};
+    for (var rr = 0; rr < rows.length; rr++) {
+      var rid = String(rows[rr][idCol] || "").trim();
+      if (rid) rowIdxById[rid] = rr;
+    }
+
+    // Per-entity preprocessing — read URL/lookup maps ONCE for all IDs.
+    var taskFolderUrls = null;
+    var shipFolderMap  = null;
+    var invShipUrlMap  = null;
+    var shipFolderUrls = null;
+    var clientName     = "";
+    var invFieldsMaps  = null;
+
+    if (entityType === "inventory") {
+      // Mirrors api_fullClientSync_'s inventory case: build a per-item
+      // Shipment # folder URL map from rich text on the column. Can't use
+      // api_readIdFolderUrls_ here because the rich-text URL lives on the
+      // Shipment # column, not the Item ID column.
+      invShipUrlMap = {};
+      try {
+        var invHmap = api_getHeaderMap_(sheet);
+        var invShipCol = invHmap["Shipment #"];
+        var invIdCol   = invHmap["Item ID"];
+        if (invShipCol && invIdCol) {
+          var invLastRow = api_getLastDataRow_(sheet);
+          if (invLastRow >= 2) {
+            var numInvRows = invLastRow - 1;
+            var idVals = sheet.getRange(2, invIdCol, numInvRows, 1).getValues();
+            var rtVals = sheet.getRange(2, invShipCol, numInvRows, 1).getRichTextValues();
+            for (var ri = 0; ri < numInvRows; ri++) {
+              var iidR = String(idVals[ri][0] || "").trim();
+              if (!iidR) continue;
+              var rtCell = rtVals[ri][0];
+              var urlStr = rtCell ? (rtCell.getLinkUrl() || "") : "";
+              if (!urlStr && rtCell) {
+                var runs = rtCell.getRuns();
+                for (var rj = 0; rj < runs.length; rj++) {
+                  var runUrl = runs[rj].getLinkUrl();
+                  if (runUrl) { urlStr = runUrl; break; }
+                }
+              }
+              if (urlStr) invShipUrlMap[iidR] = urlStr;
+            }
+          }
+        }
+      } catch (rtErr) { /* non-fatal — URLs default to "" */ }
+    } else if (entityType === "task") {
+      taskFolderUrls = api_readIdFolderUrls_(sheet, "Task ID");
+      shipFolderMap = api_buildShipmentFolderMap_(ss);
+      try {
+        var stSheet = ss.getSheetByName("Settings");
+        if (stSheet) {
+          var stData = stSheet.getDataRange().getValues();
+          for (var si = 0; si < stData.length; si++) {
+            if (String(stData[si][0] || "").trim() === "CLIENT_NAME") {
+              clientName = String(stData[si][1] || "").trim();
+              break;
+            }
+          }
+        }
+      } catch (_) {}
+    } else if (entityType === "shipment") {
+      shipFolderUrls = api_readIdFolderUrls_(sheet, "Shipment #");
+    } else if (entityType === "billing") {
+      try { invFieldsMaps = api_buildInvFieldsByItemMap_(ss); } catch (_) {}
+    }
+
+    // Build upsert rows for matched IDs. Track not-found for failure logging.
+    var upsertRows = [];
+    var foundIds = [];
+    var notFoundIds = [];
+
+    for (var ii = 0; ii < ids.length; ii++) {
+      var id = ids[ii];
+      var rowIdx = rowIdxById[id];
+      if (rowIdx === undefined) { notFoundIds.push(id); continue; }
+      var row = rows[rowIdx];
+      var sb = null;
+
+      switch (entityType) {
+        case "inventory":
+          sb = sbInventoryRow_(tenantId, {
+            itemId: id, description: row["Description"], vendor: row["Vendor"],
+            sidemark: row["Sidemark"], room: row["Room"], itemClass: row["Class"],
+            qty: row["Qty"], location: row["Location"], status: row["Status"],
+            receiveDate: formatDate_(row["Receive Date"]), releaseDate: formatDate_(row["Release Date"]),
+            shipmentNumber: row["Shipment #"], carrier: row["Carrier"],
+            trackingNumber: row["Tracking #"], itemNotes: row["Item Notes"],
+            reference: row["Reference"], taskNotes: row["Task Notes"],
+            shipmentPhotosUrl: row["Shipment Photos URL"],
+            inspectionPhotosUrl: row["Inspection Photos URL"],
+            repairPhotosUrl: row["Repair Photos URL"],
+            invoiceUrl: row["Invoice URL"],
+            transferDate: formatDate_(row["Transfer Date"]),
+            shipmentFolderUrl: (invShipUrlMap && invShipUrlMap[id]) || "",
+            declaredValue: row["Declared Value"],
+            coverageOptionId: row["Coverage Option"]
+          });
+          break;
+        case "task":
+          var tShipNo = String(row["Shipment #"] || "").trim();
+          sb = sbTaskRow_(tenantId, {
+            taskId: id, itemId: row["Item ID"], svcCode: row["Svc Code"] || row["Type"],
+            status: row["Status"], result: row["Result"], description: row["Description"],
+            taskNotes: row["Task Notes"], itemNotes: row["Item Notes"],
+            customPrice: row["Custom Price"], created: formatDate_(row["Created"]),
+            completedAt: formatDate_(row["Completed At"]), assignedTo: row["Assigned To"],
+            location: row["Location"],
+            vendor: row["Vendor"] || "", sidemark: row["Sidemark"] || "",
+            shipmentNumber: tShipNo,
+            cancelledAt: formatDate_(row["Cancelled At"]),
+            startedAt: formatDate_(row["Started At"]),
+            billed: String(row["Billed"] || "").toLowerCase() === "true",
+            clientName: clientName,
+            taskFolderUrl: (taskFolderUrls && taskFolderUrls[id]) || "",
+            shipmentFolderUrl: (shipFolderMap && shipFolderMap[tShipNo]) || "",
+            dueDate: formatDate_(row["Due Date"]) || null,
+            priority: String(row["Priority"] || "Normal").trim() || "Normal"
+          });
+          break;
+        case "repair":
+          var qLinesRaw = row["Quote Lines JSON"];
+          var qLines = null;
+          if (qLinesRaw) {
+            try { qLines = JSON.parse(String(qLinesRaw)); }
+            catch (_) { qLines = null; }
+          }
+          sb = sbRepairRow_(tenantId, {
+            repairId: id, itemId: row["Item ID"], status: row["Status"],
+            repairResult: row["Repair Result"], quoteAmount: row["Quote Amount"],
+            finalAmount: row["Final Amount"], repairVendor: row["Repair Vendor"],
+            repairNotes: row["Repair Notes"], taskNotes: row["Task Notes"],
+            itemNotes: row["Item Notes"],
+            createdDate: formatDate_(row["Created Date"]),
+            completedDate: formatDate_(row["Completed Date"]),
+            quoteSentDate: formatDate_(row["Quote Sent Date"]),
+            scheduledDate: formatDate_(row["Scheduled Date"]),
+            startDate: formatDate_(row["Start Date"]),
+            createdBy: row["Created By"] || "",
+            quoteLines:           qLines,
+            quoteSubtotal:        row["Quote Subtotal"],
+            quoteTaxableSubtotal: row["Quote Taxable Subtotal"],
+            quoteTaxAreaId:       row["Quote Tax Area ID"],
+            quoteTaxAreaName:     row["Quote Tax Area Name"],
+            quoteTaxRate:         row["Quote Tax Rate"],
+            quoteTaxAmount:       row["Quote Tax Amount"],
+            quoteGrandTotal:      row["Quote Grand Total"]
+          });
+          break;
+        case "will_call":
+          sb = sbWillCallRow_(tenantId, {
+            wcNumber: id, status: row["Status"], pickupParty: row["Pickup Party"],
+            createdDate: formatDate_(row["Created Date"]),
+            estimatedPickupDate: formatDate_(row["Estimated Pickup Date"]),
+            notes: row["Notes"], itemsCount: row["Items Count"],
+            cod: row["COD"], codAmount: row["COD Amount"]
+          });
+          break;
+        case "shipment":
+          sb = sbShipmentRow_(tenantId, {
+            shipmentNumber: id, receiveDate: formatDate_(row["Receive Date"]),
+            itemCount: row["Item Count"], carrier: row["Carrier"],
+            trackingNumber: row["Tracking #"], notes: row["Shipment Notes"],
+            folderUrl: (shipFolderUrls && shipFolderUrls[id]) || ""
+          });
+          break;
+        case "billing":
+          var bSidemark = String(row["Sidemark"] || "").trim();
+          var bItemId   = String(row["Item ID"] || "").trim();
+          var sidemarkMap  = (invFieldsMaps && invFieldsMaps.sidemark) || {};
+          var referenceMap = (invFieldsMaps && invFieldsMaps.reference) || {};
+          if (!bSidemark && bItemId)  bSidemark  = sidemarkMap[bItemId]  || "";
+          var bReference = String(row["Reference"] || "").trim();
+          if (!bReference && bItemId) bReference = referenceMap[bItemId] || "";
+          sb = sbBillingRow_(tenantId, {
+            ledgerRowId: id, status: row["Status"], invoiceNo: row["Invoice #"],
+            clientName: row["Client"], date: formatDate_(row["Date"]),
+            svcCode: row["Svc Code"], svcName: row["Svc Name"], category: row["Category"],
+            itemId: row["Item ID"], description: row["Description"], itemClass: row["Class"],
+            qty: row["Qty"], rate: row["Rate"], total: row["Total"],
+            taskId: row["Task ID"], repairId: row["Repair ID"],
+            shipmentNumber: row["Shipment #"], itemNotes: row["Item Notes"],
+            invoiceDate: formatDate_(row["Invoice Date"]), invoiceUrl: row["Invoice URL"],
+            sidemark: bSidemark, reference: bReference
+          });
+          break;
+      }
+
+      if (sb) { upsertRows.push(sb); foundIds.push(id); }
+    }
+
+    // Log not-found IDs to gs_sync_events so they show up in the React drawer.
+    // Matches what the per-row path would have done for the same IDs.
+    for (var nf = 0; nf < notFoundIds.length; nf++) {
+      api_logSyncFailure_(tenantId, entityType, notFoundIds[nf],
+        String(entityType) + "_write_through",
+        "entity not found in " + tabName + " sheet");
+    }
+
+    if (upsertRows.length === 0) {
+      // All IDs not-found — already logged. Treat as ok=true so caller
+      // doesn't fall back to per-row (which would just re-log the same).
+      return { ok: true, foundIds: [], notFoundIds: notFoundIds, upsertCount: 0 };
+    }
+
+    // Single batch upsert. supabaseBatchUpsert_ chunks at 50 internally and
+    // retries per-row on chunk failure (errors logged via sbLogSyncError_).
+    supabaseBatchUpsert_(sbTable, upsertRows);
+    return { ok: true, foundIds: foundIds, notFoundIds: notFoundIds, upsertCount: upsertRows.length };
+  } catch (e) {
+    Logger.log("resyncEntitiesBatchToSupabase_ error (non-fatal): " + e);
+    return { ok: false, error: String(e) };
+  }
+}
+
+/**
  * Parse a handler's ContentService response; if successful, resync the entity
  * from the sheet to Supabase. Best-effort, never blocks the response.
  * @param {Object} r - ContentService response from a write handler
@@ -5513,6 +5785,30 @@ function api_writeThrough_(r, entityType, tenantId, entityId) {
 
     // Do the resync, capturing per-entity failures for gs_sync_events.
     var ids = Array.isArray(entityId) ? entityId : [entityId];
+
+    // v38.142.11 — Batch path: when 2+ IDs, do ONE supabaseBatchUpsert_ via
+    // resyncEntitiesBatchToSupabase_ instead of N per-row resyncs. Each
+    // per-row resync was a spreadsheet open + full-sheet read + single-row
+    // POST; for a 50-item release that was ~10-25 sec on the writeThrough
+    // phase alone, even after #186 fixed the GAS-side bulk write.
+    //
+    // "clients" stays per-row (different code path entirely — different
+    // sheet, different upsert helper). On batch failure, fall through to
+    // the per-row loop below so each ID still attempts + gets its own
+    // gs_sync_events row for the React FailedOperationsDrawer.
+    if (ids.length > 1 && entityType !== "clients") {
+      var batchResult;
+      try {
+        batchResult = resyncEntitiesBatchToSupabase_(entityType, tenantId, ids);
+      } catch (batchErr) {
+        batchResult = { ok: false, error: String(batchErr) };
+      }
+      if (batchResult && batchResult.ok) return;
+      Logger.log("api_writeThrough_ batch failed for " + entityType + ": " +
+        ((batchResult && batchResult.error) || "unknown") + " — falling back per-row");
+      // Fall through to the per-row loop below.
+    }
+
     for (var i = 0; i < ids.length; i++) {
       var id = String(ids[i] || "").trim();
       if (!id) continue;
@@ -24494,9 +24790,10 @@ function handleBatchCancelTasks_(clientSheetId, payload) {
   try { invalidateClientCache_(clientSheetId); } catch (_) {}
   try { api_bumpSummaryVersion_(); } catch (_) {}
 
-  // Per-row write-through for succeeded rows
-  for (var w = 0; w < succeededIds.length; w++) {
-    try { api_writeThrough_(result, "task", clientSheetId, succeededIds[w]); } catch (_) {}
+  // v38.142.11 — Pass the whole array to api_writeThrough_, which now batches
+  // 2+ IDs into a single supabaseBatchUpsert_ call instead of N per-row POSTs.
+  if (succeededIds.length > 0) {
+    try { api_writeThrough_(result, "task", clientSheetId, succeededIds); } catch (_) {}
   }
 
   result.message = "Cancelled " + result.succeeded + " task(s)" +
@@ -24569,8 +24866,9 @@ function handleBatchCancelRepairs_(clientSheetId, payload) {
   try { invalidateClientCache_(clientSheetId); } catch (_) {}
   try { api_bumpSummaryVersion_(); } catch (_) {}
 
-  for (var w = 0; w < succeededIds.length; w++) {
-    try { api_writeThrough_(result, "repair", clientSheetId, succeededIds[w]); } catch (_) {}
+  // v38.142.11 — Batch via array (see api_writeThrough_ + resyncEntitiesBatchToSupabase_).
+  if (succeededIds.length > 0) {
+    try { api_writeThrough_(result, "repair", clientSheetId, succeededIds); } catch (_) {}
   }
 
   result.message = "Cancelled " + result.succeeded + " repair(s)" +
@@ -24666,8 +24964,9 @@ function handleBatchCancelWillCalls_(clientSheetId, payload) {
   try { invalidateClientCache_(clientSheetId); } catch (_) {}
   try { api_bumpSummaryVersion_(); } catch (_) {}
 
-  for (var w = 0; w < succeededIds.length; w++) {
-    try { api_writeThrough_(result, "will_call", clientSheetId, succeededIds[w]); } catch (_) {}
+  // v38.142.11 — Batch via array (see api_writeThrough_ + resyncEntitiesBatchToSupabase_).
+  if (succeededIds.length > 0) {
+    try { api_writeThrough_(result, "will_call", clientSheetId, succeededIds); } catch (_) {}
   }
 
   result.message = "Cancelled " + result.succeeded + " will call(s)" +
@@ -24745,8 +25044,9 @@ function handleBatchReassignTasks_(clientSheetId, payload) {
   try { invalidateClientCache_(clientSheetId); } catch (_) {}
   try { api_bumpSummaryVersion_(); } catch (_) {}
 
-  for (var w = 0; w < succeededIds.length; w++) {
-    try { api_writeThrough_(result, "task", clientSheetId, succeededIds[w]); } catch (_) {}
+  // v38.142.11 — Batch via array (see api_writeThrough_ + resyncEntitiesBatchToSupabase_).
+  if (succeededIds.length > 0) {
+    try { api_writeThrough_(result, "task", clientSheetId, succeededIds); } catch (_) {}
   }
 
   result.message = "Reassigned " + result.succeeded + " task(s) to " + assignedTo +
