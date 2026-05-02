@@ -22,8 +22,13 @@ import { supabase } from './supabase';
 export interface SendEmailParams {
   /** Row in `email_templates` whose subject + body get used. */
   templateKey: string;
-  /** Recipient address(es). String or array — both accepted. */
-  to: string | string[];
+  /** Recipient address(es). String or array. When omitted, the edge
+   *  function resolves the template's `recipients` column instead —
+   *  with token expansion (`{{STAFF_EMAILS}}`, `NOTIFICATION_EMAILS`,
+   *  `PUBLIC_FORM_SETTINGS`, etc.). Use this for admin/staff broadcast
+   *  templates where the audience lives in the template config rather
+   *  than per-call. */
+  to?: string | string[];
   cc?: string[];
   bcc?: string[];
   /** Override the default reply-to (whse@stridenw.com). */

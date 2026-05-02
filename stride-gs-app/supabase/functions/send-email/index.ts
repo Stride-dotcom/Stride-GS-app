@@ -48,8 +48,11 @@ interface SendEmailBody {
    *  htmlOverride is also provided, the template body is bypassed but
    *  the key is still recorded on the email_sends row. */
   templateKey: string;
-  /** Recipient address(es). String or array — both accepted, normalized to array. */
-  to: string | string[];
+  /** Recipient address(es). String or array — both accepted, normalized
+   *  to array. When omitted, the function falls back to resolving the
+   *  template's `recipients` column (with token expansion — see
+   *  resolveRecipients()). At least one path must yield ≥1 recipient. */
+  to?: string | string[];
   cc?: string[];
   bcc?: string[];
   /** Override the default reply-to. */
@@ -89,8 +92,8 @@ Deno.serve(async (req: Request) => {
     return jsonError('Invalid JSON body', 400);
   }
 
-  if (!body.templateKey || !body.to || (Array.isArray(body.to) && body.to.length === 0)) {
-    return jsonError('templateKey and to are required', 400);
+  if (!body.templateKey) {
+    return jsonError('templateKey is required', 400);
   }
 
   const apiKey = Deno.env.get('RESEND_API_KEY');
@@ -143,13 +146,12 @@ Deno.serve(async (req: Request) => {
   }
 
   // ── Fetch template ──────────────────────────────────────────────────
-  // Even when the caller provides htmlOverride / subjectOverride, the
-  // template lookup runs to (a) validate the templateKey exists and
-  // (b) provide fallback subject/body when only one of the two
-  // overrides was supplied.
+  // Used to validate templateKey, provide subject/body fallbacks when
+  // overrides aren't supplied, AND (when `to` is omitted) to resolve
+  // the `recipients` column for templates whose audience lives in DB.
   const { data: template, error: tplErr } = await supabase
     .from('email_templates')
-    .select('subject, body')
+    .select('subject, body, recipients')
     .eq('template_key', body.templateKey)
     .maybeSingle();
   if (tplErr) {
@@ -174,8 +176,26 @@ Deno.serve(async (req: Request) => {
     subject = subject.replace(pattern, safeVal);
   }
 
-  // ── Insert pending log row ──────────────────────────────────────────
-  const toList = Array.isArray(body.to) ? body.to : [body.to];
+  // ── Recipient resolution ───────────────────────────────────────────
+  // Caller `to` always wins. When absent, we fall back to the template's
+  // `recipients` column and expand its tokens. See resolveRecipients()
+  // for the supported token vocabulary (matches the legacy GAS expansion
+  // so admin-edited template recipient strings keep working unchanged).
+  let toList: string[];
+  if (body.to) {
+    toList = Array.isArray(body.to) ? body.to : [body.to];
+  } else if (template.recipients && template.recipients.trim().length > 0) {
+    toList = await resolveRecipients(supabase, template.recipients);
+  } else {
+    toList = [];
+  }
+  // Drop empties + dedupe (case-insensitive). Done after both paths so
+  // overridden + token-resolved lists get the same treatment.
+  toList = dedupeEmails(toList);
+  if (toList.length === 0) {
+    return jsonError(`No recipients resolved (caller passed no 'to', template '${body.templateKey}' has no recipients column or it resolved to empty)`, 400);
+  }
+
   const replyTo = body.replyTo ?? DEFAULT_REPLY_TO;
 
   const { data: pending, error: insErr } = await supabase
@@ -264,6 +284,110 @@ Deno.serve(async (req: Request) => {
 
 function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// ─── Recipient resolution ──────────────────────────────────────────────────
+// Mirrors the legacy GAS recipient-resolution behavior so admin-edited
+// template `recipients` strings keep working without a schema migration.
+//
+// The `recipients` column holds a comma-separated mix of:
+//   • Literal email addresses     → kept as-is
+//   • {{TOKEN}} or bare TOKEN     → resolved against canonical Supabase
+//     sources via the table below.
+//
+// Supported tokens (matched case-insensitively; braces optional):
+//
+//   STAFF_EMAILS         → public.profiles.email WHERE role IN ('admin','staff') AND is_active
+//   ADMIN_EMAILS         → public.profiles.email WHERE role = 'admin' AND is_active
+//   NOTIFICATION_EMAILS  → process env (Edge Function secret of same name),
+//                          comma-split. Same source used by notify-new-order.
+//   PUBLIC_FORM_SETTINGS → public.public_form_settings.alert_emails (singleton row)
+//
+// Unrecognized strings that don't look like emails are dropped silently
+// (logged at warn) — better to miss one recipient than to bounce the
+// whole send on a typo'd token.
+type SBClient = ReturnType<typeof createClient>;
+
+async function resolveRecipients(supabase: SBClient, raw: string): Promise<string[]> {
+  const out: string[] = [];
+  for (const rawChunk of raw.split(',')) {
+    const chunk = rawChunk.trim();
+    if (!chunk) continue;
+
+    // Normalize {{TOKEN}} → TOKEN for matching.
+    const tokenMatch = chunk.match(/^\{\{\s*([A-Z_][A-Z0-9_]*)\s*\}\}$/);
+    const tokenName = tokenMatch ? tokenMatch[1].toUpperCase() : null;
+    const bareToken = /^[A-Z_][A-Z0-9_]*$/.test(chunk) ? chunk.toUpperCase() : null;
+    const token = tokenName ?? bareToken;
+
+    if (token) {
+      try {
+        const expanded = await expandToken(supabase, token);
+        for (const e of expanded) out.push(e);
+      } catch (err) {
+        console.warn(`[send-email] token '${token}' failed to expand:`, err);
+      }
+    } else if (chunk.includes('@')) {
+      out.push(chunk);
+    } else {
+      console.warn(`[send-email] dropping unknown recipient chunk:`, chunk);
+    }
+  }
+  return out;
+}
+
+async function expandToken(supabase: SBClient, token: string): Promise<string[]> {
+  switch (token) {
+    case 'STAFF_EMAILS': {
+      const { data } = await supabase
+        .from('profiles')
+        .select('email')
+        .in('role', ['admin', 'staff'])
+        .eq('is_active', true);
+      return ((data ?? []) as { email: string | null }[])
+        .map(r => r.email).filter((e): e is string => !!e);
+    }
+    case 'ADMIN_EMAILS': {
+      const { data } = await supabase
+        .from('profiles')
+        .select('email')
+        .eq('role', 'admin')
+        .eq('is_active', true);
+      return ((data ?? []) as { email: string | null }[])
+        .map(r => r.email).filter((e): e is string => !!e);
+    }
+    case 'NOTIFICATION_EMAILS': {
+      const raw = Deno.env.get('NOTIFICATION_EMAILS') ?? '';
+      return raw.split(',').map(s => s.trim()).filter(Boolean);
+    }
+    case 'PUBLIC_FORM_SETTINGS': {
+      const { data } = await supabase
+        .from('public_form_settings')
+        .select('alert_emails')
+        .limit(1)
+        .maybeSingle();
+      const arr = (data as { alert_emails: string[] | null } | null)?.alert_emails;
+      return Array.isArray(arr) ? arr.filter(Boolean) : [];
+    }
+    default:
+      console.warn(`[send-email] unknown recipient token: ${token}`);
+      return [];
+  }
+}
+
+/** Lowercase + dedupe; preserves first-seen casing of each unique address. */
+function dedupeEmails(list: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const e of list) {
+    const trimmed = e.trim();
+    if (!trimmed) continue;
+    const key = trimmed.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(trimmed);
+  }
+  return out;
 }
 
 function jsonOk(data: Record<string, unknown>, status = 200): Response {

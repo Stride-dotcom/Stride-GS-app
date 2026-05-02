@@ -22,7 +22,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { supabase } from '../lib/supabase';
-import { apiPost } from '../lib/api';
+import { sendEmail } from '../lib/email';
 
 export interface IntakeLinkInfo {
   id: string;
@@ -339,18 +339,53 @@ export async function submitIntake(payload: IntakeSubmitPayload): Promise<{ id: 
   // in_app_notifications; this call handles the email channel. Uses the
   // INTAKE_SUBMITTED template (editable in Settings → Email Templates).
   // Never awaited — prospect's success screen doesn't depend on it.
+  //
+  // Session 90 — migrated off the GAS `notifyIntakeSubmitted` handler
+  // (which called MailApp via api_sendTemplateEmail_) onto the Supabase
+  // `send-email` edge function. We pass NO `to` field — the edge
+  // function reads INTAKE_SUBMITTED's `recipients` column from
+  // email_templates ('{{STAFF_EMAILS}}') and resolves it against
+  // public.profiles WHERE role IN ('admin','staff') AND is_active. The
+  // entire token-derivation that used to live in handleNotifyIntakeSubmitted_
+  // (declared-value formatting, payment-authorized Y/N mapping, review-link
+  // construction) now happens here in React.
   try {
-    void apiPost('notifyIntakeSubmitted', {
-      intakeId,
-      businessName:      row.business_name,
-      contactName:       row.contact_name,
-      contactEmail:      row.email,
-      contactPhone:      row.phone ?? '',
-      submittedAt:       row.submitted_at,
-      insuranceChoice:   row.insurance_choice,
-      declaredValue:     row.insurance_declared_value,
-      paymentAuthorized: row.payment_authorized,
-    }).catch(() => { /* silent — admin still gets in-app notification */ });
+    const declaredNum = Number(row.insurance_declared_value) || 0;
+    const declaredFmt = '$' + declaredNum.toLocaleString('en-US', {
+      minimumFractionDigits: 2, maximumFractionDigits: 2,
+    });
+    const paymentLabel = row.payment_authorized === true
+      ? 'Yes'
+      : row.payment_authorized === false ? 'No' : '—';
+    const reviewLink =
+      'https://www.mystridehub.com/#/settings?tab=clients&subtab=intakes' +
+      (intakeId ? `&intake=${encodeURIComponent(intakeId)}` : '');
+
+    void sendEmail({
+      templateKey: 'INTAKE_SUBMITTED',
+      // No `to` — the edge function expands template.recipients
+      // ('{{STAFF_EMAILS}}') from public.profiles.
+      tokens: {
+        BUSINESS_NAME:      row.business_name      || 'unnamed business',
+        CONTACT_NAME:       row.contact_name       || 'unknown contact',
+        CONTACT_EMAIL:      row.email              || '—',
+        CONTACT_PHONE:      row.phone              || '—',
+        SUBMITTED_AT:       row.submitted_at,
+        INSURANCE_CHOICE:   row.insurance_choice   || '—',
+        DECLARED_VALUE:     declaredFmt,
+        PAYMENT_AUTHORIZED: paymentLabel,
+        REVIEW_LINK:        reviewLink,
+      },
+      idempotencyKey:    `intake-submitted:${intakeId}`,
+      relatedEntityType: 'client_intake',
+      relatedEntityId:   intakeId,
+    }).then(r => {
+      if (!r.ok) {
+        console.warn('[intake] admin notify email failed (non-blocking):', r.error);
+      }
+    }).catch(err => {
+      console.warn('[intake] admin notify email threw (non-blocking):', err);
+    });
   } catch (_) { /* never let a notify failure break the success screen */ }
 
   return { id: intakeId };
