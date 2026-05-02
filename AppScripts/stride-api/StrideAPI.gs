@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.142.11 — 2026-05-02 PST — Supabase write-through batch fix. api_writeThrough_ now dispatches to a new resyncEntitiesBatchToSupabase_ when called with 2+ entity IDs, doing ONE supabaseBatchUpsert_ instead of N per-row POSTs. The four batch-cancel/reassign handlers now pass succeededIds as an array so they get the batched path. For a 50-item release the writeThrough phase drops from ~10-25 sec (50 sequential POSTs) to ~0.5-1 sec (1 batched POST). For batch-cancel-20-tasks: ~4-10 sec → ~0.5 sec. Single-ID router cases unchanged. On batch failure or "clients" entity type, falls back to the existing per-row path so gs_sync_events still gets per-entity failure rows for the React FailedOperationsDrawer.
+   StrideAPI.gs — v38.142.12 — 2026-05-02 PST — Class C bulk-write fix for handleStartTask_, handleCompleteTask_, handleCompleteRepair_. Each was doing 4-8 separate setValue() calls per request (one row across many columns), 500ms-2s each, totalling 5-15 sec of latency. Refactored each to mutate the in-memory rowData (already read once at function start) via a setRowVal_ helper that tracks modified columns, then write ONCE via setValues over the contiguous slice covering all touched columns. Untouched-but-in-slice columns write back their existing values from the snapshot so unrelated cells aren't clobbered. Single-row contiguous version of the same recipe used in #186/#187/#188. Also drops a now-redundant SpreadsheetApp.flush() inside handleCompleteTask_'s Custom Price branch — the bulk write at end-of-try makes it meaningless, and resyncEntityToSupabase_ flushes itself before reading. Each handler now responds in <2 sec.
+   v38.142.11: Supabase write-through batch fix. api_writeThrough_ now dispatches to a new resyncEntitiesBatchToSupabase_ when called with 2+ entity IDs, doing ONE supabaseBatchUpsert_ instead of N per-row POSTs. The four batch-cancel/reassign handlers now pass succeededIds as an array so they get the batched path. For a 50-item release the writeThrough phase drops from ~10-25 sec (50 sequential POSTs) to ~0.5-1 sec (1 batched POST). For batch-cancel-20-tasks: ~4-10 sec → ~0.5 sec. Single-ID router cases unchanged. On batch failure or "clients" entity type, falls back to the existing per-row path so gs_sync_events still gets per-entity failure rows for the React FailedOperationsDrawer.
    v38.142.10: handleCancelWillCall_ bulk-write performance fix matching the #186/#187 recipe. Old code did setValue("Cancelled") inside the loop over matching WC_Items rows — one ~500ms-2s round-trip per item. Cancelling a 20-item will call was a 1-2 minute hang. New code collects matched row numbers, finds the contiguous range covering them, and writes the Status column ONCE via setValues — initialized from the snapshot so untouched rows in the range keep their existing values. Cancel now completes in under 5 seconds regardless of WC size.
    v38.142.9: Same bulk-write performance fix applied to api_markClientLedgerInvoiced_ + Email Status update on Consolidated_Ledger inside handleCreateInvoice_. Old code did up to 4 setValue() calls per ledger row (status, invoice #, invoice date, invoice url) = up to 4N round-trips per invoice commit. A 200-line monthly invoice was 800 round-trips and frequently timed out. New code drops to constant 4 round-trips for the client Billing_Ledger update + 1 for the Email Status update on Consolidated_Ledger.
    v38.142.8: handleReleaseItems_ bulk-write performance fix: collect all per-row mutations into in-memory arrays then write each affected column ONCE via setValues over the contiguous range covering changed rows. Drops network round-trips from 3N (~3-5 minutes for a 50-item release, frequent timeouts) to 3 — release operation now completes in under 5 seconds regardless of item count.
@@ -14631,11 +14632,27 @@ function handleCompleteTask_(clientSheetId, payload) {
     var tz  = Session.getScriptTimeZone();
     var nowFmt = Utilities.formatDate(now, tz, "MM/dd/yyyy HH:mm:ss");
 
+    // v38.142.12 — Class C bulk-write fix. Old code did up to 8 setValue
+    // round-trips per call (Status, Completed At, Result, Task Notes,
+    // Custom Price, Billed, Billing Exception, Completion Processed At),
+    // 500ms-2s each — total 5-15 sec of latency on the response. Now we
+    // mutate the in-memory rowData (read once at line 14579) via a
+    // setRowVal_ helper that tracks modified columns, then write ONCE via
+    // setValues over the contiguous slice at end-of-try. Untouched-but-
+    // in-slice columns write back their existing values from rowData so
+    // unrelated cells aren't clobbered.
+    var modifiedCols = [];
+    function setRowVal_(col, val) {
+      if (!col) return;
+      rowData[col - 1] = val;
+      modifiedCols.push(col);
+    }
+
     // ─── WRITE: Status, Completed At, Result, Task Notes ─────────────────────
-    if (taskMap["Status"])      taskSheet.getRange(taskRow, taskMap["Status"]).setValue("Completed");
-    if (taskMap["Completed At"]) taskSheet.getRange(taskRow, taskMap["Completed At"]).setValue(now);
-    if (result && taskMap["Result"]) taskSheet.getRange(taskRow, taskMap["Result"]).setValue(result);
-    if (taskNotes && taskMap["Task Notes"]) taskSheet.getRange(taskRow, taskMap["Task Notes"]).setValue(taskNotes);
+    if (taskMap["Status"])           setRowVal_(taskMap["Status"], "Completed");
+    if (taskMap["Completed At"])     setRowVal_(taskMap["Completed At"], now);
+    if (result && taskMap["Result"]) setRowVal_(taskMap["Result"], result);
+    if (taskNotes && taskMap["Task Notes"]) setRowVal_(taskMap["Task Notes"], taskNotes);
 
     // v32.x: Inline Custom Price override — write to Tasks sheet AND rowData
     // array so the downstream billing read picks it up in the same request.
@@ -14644,9 +14661,15 @@ function handleCompleteTask_(clientSheetId, payload) {
         warnings.push("Custom Price override ignored — Custom Price column missing on Tasks sheet. Run Update Headers on this client.");
       } else {
         var cpCellValue = (inlineCustomPrice === null) ? "" : inlineCustomPrice;
-        taskSheet.getRange(taskRow, taskMap["Custom Price"]).setValue(cpCellValue);
-        rowData[taskMap["Custom Price"] - 1] = cpCellValue;
-        SpreadsheetApp.flush();
+        // v38.142.12 — setRowVal_ updates rowData (so getVal("Custom Price")
+        // below sees the override) AND tracks the column for the bulk
+        // setValues at end-of-try. Old code did an immediate setValue +
+        // manual rowData update + SpreadsheetApp.flush() so downstream
+        // resyncEntityToSupabase_ saw the committed value; no longer
+        // needed because (a) the billing read in this function uses
+        // rowData, not the sheet, and (b) resyncEntityToSupabase_ calls
+        // SpreadsheetApp.flush() itself before reading.
+        setRowVal_(taskMap["Custom Price"], cpCellValue);
       }
     }
 
@@ -14712,13 +14735,12 @@ function handleCompleteTask_(clientSheetId, payload) {
               billingCreated = true;
 
               if (!missingRate) {
-                if (taskMap["Billed"]) taskSheet.getRange(taskRow, taskMap["Billed"]).setValue(true);
+                if (taskMap["Billed"]) setRowVal_(taskMap["Billed"], true);
               } else {
                 warnings.push("Missing rate for " + svcCode + "/" + invItem.itemClass + " — billing row created with Missing Rate flag");
                 if (taskMap["Billing Exception"]) {
-                  taskSheet.getRange(taskRow, taskMap["Billing Exception"]).setValue(
-                    "Missing Rate for " + svcCode + "/" + invItem.itemClass
-                  );
+                  setRowVal_(taskMap["Billing Exception"],
+                    "Missing Rate for " + svcCode + "/" + invItem.itemClass);
                 }
               }
 
@@ -14759,7 +14781,19 @@ function handleCompleteTask_(clientSheetId, payload) {
 
     // ─── STAMP idempotency marker (always last) ────────────────────────────
     if (taskMap["Completion Processed At"]) {
-      taskSheet.getRange(taskRow, taskMap["Completion Processed At"]).setValue(nowFmt);
+      setRowVal_(taskMap["Completion Processed At"], nowFmt);
+    }
+
+    // v38.142.12 — Single bulk setValues for the Tasks row, replacing the
+    // 5-8 individual setValue calls above with one round-trip. The slice
+    // covers minCol..maxCol of modifiedCols; intermediate untouched
+    // columns write back their existing values from the rowData snapshot.
+    if (modifiedCols.length > 0) {
+      modifiedCols.sort(function(a, b) { return a - b; });
+      var minCol = modifiedCols[0];
+      var maxCol = modifiedCols[modifiedCols.length - 1];
+      var sliceVals = rowData.slice(minCol - 1, maxCol);
+      taskSheet.getRange(taskRow, minCol, 1, maxCol - minCol + 1).setValues([sliceVals]);
     }
 
   } catch (writeErr) {
@@ -16556,16 +16590,34 @@ function handleCompleteRepair_(clientSheetId, payload) {
     var tz     = Session.getScriptTimeZone();
     var nowFmt = Utilities.formatDate(now, tz, "MM/dd/yyyy HH:mm:ss");
 
+    // v38.142.12 — Class C bulk-write fix. Old code did up to 8 setValue
+    // round-trips per call (Status, Completed Date, Repair Notes, Final
+    // Amount, possibly Billed, Final Amount again [multi-line totalSum],
+    // Billing Exception, Completion Processed At) — 500ms-2s each — total
+    // 5-15 sec of latency on the response. Now we mutate the in-memory
+    // rowData (read once at line 16487) via a setRowVal_ helper that
+    // tracks modified columns, then write ONCE via setValues over the
+    // contiguous slice at end-of-try. Email Sent At at line 16769 stays
+    // a standalone setValue: it fires AFTER lock release in a separate
+    // control flow, doesn't multiply, and shipping it inside the bulk
+    // write would re-acquire the lock unnecessarily.
+    var modifiedCols = [];
+    function setRowVal_(col, val) {
+      if (!col) return;
+      rowData[col - 1] = val;
+      modifiedCols.push(col);
+    }
+
     // ─── WRITE: Status, Completed Date, Notes, Final Amount override ─────────
-    if (repMap["Status"])         repSheet.getRange(repRow, repMap["Status"]).setValue("Complete");
+    if (repMap["Status"]) setRowVal_(repMap["Status"], "Complete");
     if (repMap["Completed Date"] && !getFresh("Completed Date")) {
-      repSheet.getRange(repRow, repMap["Completed Date"]).setValue(now);
+      setRowVal_(repMap["Completed Date"], now);
     }
     if (repairNotes !== null && repairNotes !== "" && repMap["Repair Notes"]) {
-      repSheet.getRange(repRow, repMap["Repair Notes"]).setValue(repairNotes);
+      setRowVal_(repMap["Repair Notes"], repairNotes);
     }
     if (payloadFinalAmt !== null && repMap["Final Amount"]) {
-      repSheet.getRange(repRow, repMap["Final Amount"]).setValue(payloadFinalAmt);
+      setRowVal_(repMap["Final Amount"], payloadFinalAmt);
     }
 
     // ─── BILLING (non-critical) ───────────────────────────────────────────────
@@ -16640,7 +16692,7 @@ function handleCompleteRepair_(clientSheetId, payload) {
           billingCreated = true;
 
           if (totalSum > 0) {
-            if (repMap["Billed"]) repSheet.getRange(repRow, repMap["Billed"]).setValue(true);
+            if (repMap["Billed"]) setRowVal_(repMap["Billed"], true);
           } else {
             warnings.push("All quote lines had 0 amount — rows written but Billed not set");
           }
@@ -16650,7 +16702,7 @@ function handleCompleteRepair_(clientSheetId, payload) {
           // (Customer-facing tax-inclusive total lives in
           // Quote Grand Total; not put on the ledger row.)
           if (repMap["Final Amount"]) {
-            repSheet.getRange(repRow, repMap["Final Amount"]).setValue(Math.round(totalSum * 100) / 100);
+            setRowVal_(repMap["Final Amount"], Math.round(totalSum * 100) / 100);
           }
 
           // Supabase write-through — one resync per ledger_row_id.
@@ -16689,11 +16741,11 @@ function handleCompleteRepair_(clientSheetId, payload) {
           billingCreated = true;
 
           if (!missingRate) {
-            if (repMap["Billed"]) repSheet.getRange(repRow, repMap["Billed"]).setValue(true);
+            if (repMap["Billed"]) setRowVal_(repMap["Billed"], true);
           } else {
             warnings.push("Billing amount is 0 — billing row created with Missing Rate flag (update Final Amount manually)");
             if (repMap["Billing Exception"]) {
-              repSheet.getRange(repRow, repMap["Billing Exception"]).setValue("Missing Rate — amount needs update");
+              setRowVal_(repMap["Billing Exception"], "Missing Rate — amount needs update");
             }
           }
 
@@ -16710,7 +16762,19 @@ function handleCompleteRepair_(clientSheetId, payload) {
 
     // ─── STAMP idempotency marker (always last) ────────────────────────────
     if (repMap["Completion Processed At"]) {
-      repSheet.getRange(repRow, repMap["Completion Processed At"]).setValue(nowFmt);
+      setRowVal_(repMap["Completion Processed At"], nowFmt);
+    }
+
+    // v38.142.12 — Single bulk setValues for the Repairs row, replacing
+    // up to 8 individual setValue calls above with one round-trip. The
+    // slice covers minCol..maxCol of modifiedCols; intermediate untouched
+    // columns write back their existing values from the rowData snapshot.
+    if (modifiedCols.length > 0) {
+      modifiedCols.sort(function(a, b) { return a - b; });
+      var minCol = modifiedCols[0];
+      var maxCol = modifiedCols[modifiedCols.length - 1];
+      var sliceVals = rowData.slice(minCol - 1, maxCol);
+      repSheet.getRange(repRow, minCol, 1, maxCol - minCol + 1).setValues([sliceVals]);
     }
 
   } catch (writeErr) {
@@ -23756,26 +23820,49 @@ function handleStartTask_(clientSheetId, payload) {
 
     // v26.3.0: Shipment # hyperlink removed — task folder is now independent of shipment folder
 
+    // v38.142.12 — Class C bulk-write fix. Old code did up to 4 setValue
+    // round-trips (Started At, Status, Start Task, Assigned To) per call,
+    // 500ms-2s each, making Start Task feel sluggish (5-15 sec). Now we
+    // mutate the in-memory rowData (read once at line 23708) and write
+    // ONCE via setValues over the contiguous slice covering all touched
+    // columns. Untouched-but-in-slice columns write back their existing
+    // values from rowData so unrelated cells aren't clobbered.
+    var modifiedCols = [];
+    function setRowVal_(col, val) {
+      if (!col) return;
+      rowData[col - 1] = val;
+      modifiedCols.push(col);
+    }
+
     // Stamp Started At
     var startedAtNow = new Date();
-    if (startedAtCol) tasksSheet.getRange(taskRowNum, startedAtCol).setValue(startedAtNow);
+    if (startedAtCol) setRowVal_(startedAtCol, startedAtNow);
 
-    // Set Status to "In Progress" — only if currently "Open"
+    // Set Status to "In Progress" — only if currently "Open" (currentStatus
+    // was read from rowData at line 23736; rowData[statusCol-1] hasn't been
+    // mutated since, so it's still the pre-call value).
     var statusCol = taskMap["Status"];
-    if (statusCol != null) {
-      var currentStatus = String(rowData[statusCol - 1] || "").trim();
-      if (currentStatus === "Open") {
-        tasksSheet.getRange(taskRowNum, statusCol).setValue("In Progress");
-      }
+    if (statusCol != null && currentStatus === "Open") {
+      setRowVal_(statusCol, "In Progress");
     }
 
     // v26.8.0: Keep Start Task checkbox checked (TRUE) — don't reset to FALSE
     var startTaskCol = taskMap["Start Task"];
-    if (startTaskCol) tasksSheet.getRange(taskRowNum, startTaskCol).setValue(true);
+    if (startTaskCol) setRowVal_(startTaskCol, true);
 
     // Write Assigned To — if provided and (field empty OR forceOverride)
     if (assignedToCol && assignedTo && (!existingAssignee || forceOverride)) {
-      tasksSheet.getRange(taskRowNum, assignedToCol).setValue(assignedTo);
+      setRowVal_(assignedToCol, assignedTo);
+    }
+
+    // Single setValues over the contiguous slice covering all modified
+    // columns. Replaces 1-4 individual setValue round-trips with 1.
+    if (modifiedCols.length > 0) {
+      modifiedCols.sort(function(a, b) { return a - b; });
+      var minCol = modifiedCols[0];
+      var maxCol = modifiedCols[modifiedCols.length - 1];
+      var sliceVals = rowData.slice(minCol - 1, maxCol);
+      tasksSheet.getRange(taskRowNum, minCol, 1, maxCol - minCol + 1).setValues([sliceVals]);
     }
 
     var warnings = [];
