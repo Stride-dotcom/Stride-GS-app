@@ -23,6 +23,61 @@
 
 ---
 
+## ⚠️ CRITICAL: Worktrees for parallel builders
+
+**Two builders sharing one working tree will overwrite each other's `HEAD`.** That's how 2026-05-02's misroute happened: builder A ran `git checkout -b fix/...` to start work; builder B then ran `git checkout feat/...` for theirs; A's next commit landed on B's branch because both shared one `HEAD`. Use git worktrees so each builder has an isolated `HEAD`, index, and working tree while sharing the same `.git` (objects, refs, remote).
+
+### Starting a session
+
+From the canonical clone, create a worktree named after your topic:
+
+```bash
+cd /c/dev/Stride-GS-app
+git fetch origin source
+git worktree add /c/dev/stride-<topic> source
+cd /c/dev/stride-<topic>
+git checkout -b fix/<scope>/<desc>
+```
+
+Each worktree has its own `HEAD`, index, and working tree. Git enforces that a given branch is checked out in at most ONE worktree, so two builders cannot accidentally land commits on the same branch.
+
+`<topic>` should be short and unique among active worktrees — anything that wouldn't collide. Examples: `stride-cancel-wc`, `stride-task-addons`, `stride-billing-fix`. Don't reuse names across active sessions.
+
+### Ending a session
+
+After your PR merges:
+
+```bash
+cd /c/dev/Stride-GS-app
+git worktree remove /c/dev/stride-<topic>
+```
+
+If you abandon work without merging, add `--force` to the remove. The `.git/worktrees/<topic>` admin folder is auto-cleaned.
+
+### Listing + pruning
+
+```bash
+git worktree list      # show all active worktrees
+git worktree prune     # garbage-collect stale worktree metadata
+```
+
+### What stays in the canonical clone
+
+`/c/dev/Stride-GS-app` itself is the canonical clone (where `.git` lives). Use it for:
+- One-off shell tasks (`git status`, `git log`, `git fetch`)
+- Source-of-truth `source` checkouts
+- Creating + removing worktrees
+
+Avoid doing feature work directly in the canonical clone when other builders may be active — go to a worktree instead.
+
+### npm scripts + worktrees
+
+`npm run deploy` (in `stride-gs-app/`) calls `git add -A` on the parent repo. With worktrees, each has its own index, so the `add -A` only stages files in *your* worktree — adjacent builders' WIP isn't swept up. Still: commit early, commit often.
+
+The GAS deploy scripts (`npm run push-api`, `npm run deploy-api` from `AppScripts/stride-client-inventory/`) work the same in any worktree — they read local file content and POST to Apps Script.
+
+---
+
 ## Repo layout
 
 ```
