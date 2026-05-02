@@ -2,16 +2,16 @@
  * notify-new-order — Supabase Edge Function
  *
  * Sends an ORDER_REVIEW_REQUEST email to staff when a client submits
- * a new delivery order. Reads order data + template from Supabase,
- * then calls GAS sendRawEmail to send via GmailApp.
+ * a new delivery order. Reads order data from Supabase, computes
+ * tokens, then calls the `send-email` edge function (Resend) to
+ * actually deliver the mail. No GAS involvement.
  *
  * Request:  POST { orderId: string, submittedBy?: string }
  * Response: { ok: boolean, error?: string }
  *
  * Required secrets (set in Supabase Dashboard → Edge Functions → Secrets):
  *   NOTIFICATION_EMAILS  — comma-separated recipient addresses
- *   GAS_API_URL          — StrideAPI.gs Web App URL
- *   GAS_API_TOKEN        — API_TOKEN Script Property value
+ *   (RESEND_API_KEY consumed downstream by send-email — not needed here)
  */
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
@@ -43,12 +43,12 @@ Deno.serve(async (req: Request) => {
       return json({ ok: false, error: 'orderId required' }, 400);
     }
 
-    const gasApiUrl     = Deno.env.get('GAS_API_URL') ?? '';
-    const gasApiToken   = Deno.env.get('GAS_API_TOKEN') ?? '';
     const notifEmails   = Deno.env.get('NOTIFICATION_EMAILS') ?? '';
+    const supabaseUrl   = Deno.env.get('SUPABASE_URL') ?? '';
+    const serviceKey    = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
 
-    if (!gasApiUrl || !gasApiToken || !notifEmails) {
-      console.error('[notify-new-order] Missing required secrets (GAS_API_URL / GAS_API_TOKEN / NOTIFICATION_EMAILS)');
+    if (!notifEmails || !supabaseUrl || !serviceKey) {
+      console.error('[notify-new-order] Missing required secrets (NOTIFICATION_EMAILS / SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY)');
       return json({ ok: false, error: 'Server misconfigured — missing secrets' }, 500);
     }
 
@@ -100,19 +100,7 @@ Deno.serve(async (req: Request) => {
       if (client?.name) clientName = client.name;
     }
 
-    // ── 5. Email template ─────────────────────────────────────────────────
-    const { data: tpl } = await supabase
-      .from('email_templates')
-      .select('subject, body')
-      .eq('template_key', 'ORDER_REVIEW_REQUEST')
-      .eq('active', true)
-      .single();
-
-    if (!tpl?.body) {
-      return json({ ok: false, error: 'ORDER_REVIEW_REQUEST template not found or inactive' }, 500);
-    }
-
-    // ── 6. Token substitution ─────────────────────────────────────────────
+    // ── 5. Token computation ──────────────────────────────────────────────
     const isPickupAndDelivery = !!order.linked_order_id;
     const orderTypeDisplay =
       isPickupAndDelivery               ? 'Pickup & Delivery'
@@ -153,50 +141,51 @@ Deno.serve(async (req: Request) => {
       : '⚠ NO REVIEW LINK — order has no tenant mapping. Open the Review Queue manually.';
 
     const tokens: Record<string, string> = {
-      '{{ORDER_NUMBER}}':        String(order.dt_identifier) + linkedLine,
-      '{{LINKED_ORDER_NUMBER}}': linkedOrder?.dt_identifier ?? '—',
-      '{{ORDER_TYPE}}':          orderTypeDisplay,
-      '{{CLIENT_NAME}}':         clientName,
-      '{{CONTACT_NAME}}':        order.contact_name ?? '',
-      '{{CONTACT_ADDRESS}}':     contactAddr,
-      '{{PICKUP_CONTACT}}':      linkedOrder?.contact_name ?? '—',
-      '{{PICKUP_ADDRESS}}':      pickupAddr || '—',
-      '{{SERVICE_DATE}}':        order.local_service_date ?? '',
-      '{{ITEM_COUNT}}':          String(itemCount ?? 0),
-      '{{ORDER_TOTAL}}':         orderTotalDisplay,
-      '{{SUBMITTED_BY}}':        submittedBy,
-      '{{REVIEW_LINK}}':         reviewLink,
-      '{{APP_URL}}':             'https://www.mystridehub.com/#',
+      ORDER_NUMBER:        String(order.dt_identifier) + linkedLine,
+      LINKED_ORDER_NUMBER: linkedOrder?.dt_identifier ?? '—',
+      ORDER_TYPE:          orderTypeDisplay,
+      CLIENT_NAME:         clientName,
+      CONTACT_NAME:        order.contact_name ?? '',
+      CONTACT_ADDRESS:     contactAddr,
+      PICKUP_CONTACT:      linkedOrder?.contact_name ?? '—',
+      PICKUP_ADDRESS:      pickupAddr || '—',
+      SERVICE_DATE:        order.local_service_date ?? '',
+      ITEM_COUNT:          String(itemCount ?? 0),
+      ORDER_TOTAL:         orderTotalDisplay,
+      SUBMITTED_BY:        submittedBy,
+      REVIEW_LINK:         reviewLink,
+      APP_URL:             'https://www.mystridehub.com/#',
     };
 
-    // Build a single regex that matches every token name at once and pass
-    // the dictionary into the replacer — avoids running split/join over the
-    // whole subject and body once per token.
-    const tokenPattern = new RegExp(
-      Object.keys(tokens).map(k => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'),
-      'g'
-    );
-    const replaceTokens = (s: string) => s.replace(tokenPattern, m => tokens[m] ?? m);
-    const subject = replaceTokens(tpl.subject as string);
-    const htmlBody = replaceTokens(tpl.body as string);
-
-    // ── 7. Call GAS sendRawEmail via POST ─────────────────────────────────
-    const gasRes = await fetch(
-      `${gasApiUrl}?token=${encodeURIComponent(gasApiToken)}&action=sendRawEmail`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ to: notifEmails, subject, htmlBody }),
+    // ── 6. Delegate send to send-email edge function (Resend) ─────────────
+    // send-email handles template lookup, token substitution, idempotency,
+    // and the `email_sends` audit row. We just hand off recipients +
+    // tokens. Idempotency by orderId prevents double-sends if the React
+    // caller retries.
+    const sendRes = await fetch(`${supabaseUrl}/functions/v1/send-email`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${serviceKey}`,
+        'apikey': serviceKey,
+        'Content-Type': 'application/json',
       },
-    );
-
-    const gasJson = await gasRes.json().catch(() => ({})) as Record<string, unknown>;
-    if (!gasJson.success) {
-      console.error('[notify-new-order] GAS sendRawEmail failed:', JSON.stringify(gasJson));
-      return json({ ok: false, error: 'Email send failed', detail: gasJson }, 502);
+      body: JSON.stringify({
+        templateKey: 'ORDER_REVIEW_REQUEST',
+        to: notifEmails.split(',').map(s => s.trim()).filter(Boolean),
+        tokens,
+        idempotencyKey: `order-review-request:${order.id}`,
+        relatedEntityType: 'dt_order',
+        relatedEntityId: order.id,
+        tenantId: order.tenant_id ?? undefined,
+      }),
+    });
+    const sendJson = await sendRes.json().catch(() => ({})) as Record<string, unknown>;
+    if (!sendJson.ok) {
+      console.error('[notify-new-order] send-email failed:', JSON.stringify(sendJson));
+      return json({ ok: false, error: 'Email send failed', detail: sendJson }, 502);
     }
 
-    console.log(`[notify-new-order] Sent for order ${order.dt_identifier} to ${notifEmails}`);
+    console.log(`[notify-new-order] Sent for order ${order.dt_identifier} (resend ${sendJson.resendEmailId})`);
     return json({ ok: true });
 
   } catch (err) {

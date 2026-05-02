@@ -7,18 +7,13 @@
  *      contact_email)
  *   2. PUBLIC_REQUEST_ALERT        → public_form_settings.alert_emails
  *
- * Both templates live in email_templates and the actual mail send is
- * delegated to GAS sendRawEmail (same pattern as notify-new-order /
- * notify-order-revision). The function uses the service role to read
- * the order, items, and settings — anon RLS prevents the form's own
+ * Both sends delegate to the `send-email` edge function (Resend) —
+ * no GAS involvement. The function uses the service role to read the
+ * order, items, and settings — anon RLS prevents the form's own
  * client from doing this.
  *
  * Request:  POST { orderId: string }
  * Response: { ok: boolean, sent?: { confirmation: boolean, alert: boolean }, error?: string }
- *
- * Required secrets:
- *   GAS_API_URL    — StrideAPI.gs Web App URL
- *   GAS_API_TOKEN  — API_TOKEN Script Property value
  */
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
@@ -41,11 +36,11 @@ Deno.serve(async (req: Request) => {
       return json({ ok: false, error: 'orderId required' }, 400);
     }
 
-    const gasApiUrl   = Deno.env.get('GAS_API_URL') ?? '';
-    const gasApiToken = Deno.env.get('GAS_API_TOKEN') ?? '';
+    const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? '';
+    const serviceKey  = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
 
-    if (!gasApiUrl || !gasApiToken) {
-      console.error('[notify-public-request] Missing GAS_API_URL or GAS_API_TOKEN');
+    if (!supabaseUrl || !serviceKey) {
+      console.error('[notify-public-request] Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY');
       return json({ ok: false, error: 'Server misconfigured' }, 500);
     }
 
@@ -89,15 +84,6 @@ Deno.serve(async (req: Request) => {
       : [];
     const replyTo: string | null = settings?.reply_to_email ?? null;
 
-    const { data: templates } = await supabase
-      .from('email_templates')
-      .select('template_key, subject, body')
-      .in('template_key', ['PUBLIC_REQUEST_CONFIRMATION', 'PUBLIC_REQUEST_ALERT'])
-      .eq('active', true);
-
-    const confirmTpl = templates?.find(t => t.template_key === 'PUBLIC_REQUEST_CONFIRMATION');
-    const alertTpl   = templates?.find(t => t.template_key === 'PUBLIC_REQUEST_ALERT');
-
     const serviceAddr = [
       order.contact_address, order.contact_city, order.contact_state, order.contact_zip,
     ].filter(Boolean).join(', ');
@@ -109,63 +95,55 @@ Deno.serve(async (req: Request) => {
       `https://www.mystridehub.com/#/orders?open=${order.dt_identifier}`;
 
     const tokens: Record<string, string> = {
-      '{{REQUEST_ID}}':       String(order.dt_identifier ?? ''),
-      '{{CONTACT_NAME}}':     String(order.contact_name ?? ''),
-      '{{CONTACT_COMPANY}}':  String(order.contact_company || '—'),
-      '{{CONTACT_PHONE}}':    String(order.contact_phone ?? ''),
-      '{{CONTACT_EMAIL}}':    String(order.contact_email ?? ''),
-      '{{SERVICE_DATE}}':     String(order.local_service_date ?? '—'),
-      '{{SERVICE_ADDRESS}}':  serviceAddr || '—',
-      '{{ITEM_COUNT}}':       String(itemCount ?? 0),
-      '{{NOTES}}':            String(order.details || '—'),
-      '{{REVIEW_LINK}}':      reviewLink,
-      '{{APP_URL}}':          'https://www.mystridehub.com/#',
+      REQUEST_ID:       String(order.dt_identifier ?? ''),
+      CONTACT_NAME:     String(order.contact_name ?? ''),
+      CONTACT_COMPANY:  String(order.contact_company || '—'),
+      CONTACT_PHONE:    String(order.contact_phone ?? ''),
+      CONTACT_EMAIL:    String(order.contact_email ?? ''),
+      SERVICE_DATE:     String(order.local_service_date ?? '—'),
+      SERVICE_ADDRESS:  serviceAddr || '—',
+      ITEM_COUNT:       String(itemCount ?? 0),
+      NOTES:            String(order.details || '—'),
+      REVIEW_LINK:      reviewLink,
+      APP_URL:          'https://www.mystridehub.com/#',
     };
 
-    const tokenPattern = new RegExp(
-      Object.keys(tokens).map(k => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'),
-      'g'
-    );
-    const replaceTokens = (s: string) => s.replace(tokenPattern, m => tokens[m] ?? m);
-
     let confirmationSent = false;
-    if (confirmTpl?.body && order.contact_email) {
-      const subject  = replaceTokens(confirmTpl.subject as string);
-      const htmlBody = replaceTokens(confirmTpl.body as string);
-      const r = await sendViaGas(gasApiUrl, gasApiToken, {
-        to: order.contact_email,
-        subject,
-        htmlBody,
+    if (order.contact_email) {
+      const r = await invokeSendEmail(supabaseUrl, serviceKey, {
+        templateKey: 'PUBLIC_REQUEST_CONFIRMATION',
+        to: [order.contact_email],
+        tokens,
         replyTo: replyTo || undefined,
+        idempotencyKey: `public-request-confirm:${order.id}`,
+        relatedEntityType: 'dt_order',
+        relatedEntityId: order.id,
       });
       confirmationSent = r.ok;
       if (!r.ok) {
         console.error('[notify-public-request] confirmation send failed:', r.detail);
       }
-    } else if (!order.contact_email) {
-      console.warn('[notify-public-request] no contact_email — skipping confirmation');
     } else {
-      console.warn('[notify-public-request] PUBLIC_REQUEST_CONFIRMATION template missing/inactive');
+      console.warn('[notify-public-request] no contact_email — skipping confirmation');
     }
 
     let alertSent = false;
-    if (alertTpl?.body && alertEmails.length > 0) {
-      const subject  = replaceTokens(alertTpl.subject as string);
-      const htmlBody = replaceTokens(alertTpl.body as string);
-      const r = await sendViaGas(gasApiUrl, gasApiToken, {
-        to: alertEmails.join(','),
-        subject,
-        htmlBody,
+    if (alertEmails.length > 0) {
+      const r = await invokeSendEmail(supabaseUrl, serviceKey, {
+        templateKey: 'PUBLIC_REQUEST_ALERT',
+        to: alertEmails,
+        tokens,
         replyTo: order.contact_email || undefined,
+        idempotencyKey: `public-request-alert:${order.id}`,
+        relatedEntityType: 'dt_order',
+        relatedEntityId: order.id,
       });
       alertSent = r.ok;
       if (!r.ok) {
         console.error('[notify-public-request] alert send failed:', r.detail);
       }
-    } else if (alertEmails.length === 0) {
-      console.warn('[notify-public-request] public_form_settings.alert_emails is empty — alert skipped');
     } else {
-      console.warn('[notify-public-request] PUBLIC_REQUEST_ALERT template missing/inactive');
+      console.warn('[notify-public-request] public_form_settings.alert_emails is empty — alert skipped');
     }
 
     return json({
@@ -179,22 +157,23 @@ Deno.serve(async (req: Request) => {
   }
 });
 
-async function sendViaGas(
-  url: string,
-  token: string,
-  payload: { to: string; subject: string; htmlBody: string; replyTo?: string },
+async function invokeSendEmail(
+  supabaseUrl: string,
+  serviceKey: string,
+  payload: Record<string, unknown>,
 ): Promise<{ ok: boolean; detail?: unknown }> {
   try {
-    const res = await fetch(
-      `${url}?token=${encodeURIComponent(token)}&action=sendRawEmail`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
+    const res = await fetch(`${supabaseUrl}/functions/v1/send-email`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${serviceKey}`,
+        'apikey': serviceKey,
+        'Content-Type': 'application/json',
       },
-    );
+      body: JSON.stringify(payload),
+    });
     const j = await res.json().catch(() => ({})) as Record<string, unknown>;
-    return { ok: !!j.success, detail: j };
+    return { ok: !!j.ok, detail: j };
   } catch (err) {
     return { ok: false, detail: String(err) };
   }
