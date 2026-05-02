@@ -35,6 +35,50 @@ cd C:\dev\Stride-GS-app\AppScripts\stride-client-inventory && npm install
 
 ---
 
+## ⚠️ CRITICAL: Worktrees for parallel builders
+
+**Two builders sharing one working tree will overwrite each other's `HEAD`.** That's how 2026-05-02's misroute happened: builder A ran `git checkout -b fix/...` to start work; builder B then ran `git checkout feat/...` for theirs; A's next commit landed on B's branch because both shared one `HEAD`. Use git worktrees so each builder has an isolated `HEAD`, index, and working tree while sharing the same `.git` (objects, refs, remote).
+
+### Starting a session
+
+From the canonical clone, create a worktree named after your topic:
+
+```bash
+cd /c/dev/Stride-GS-app
+git fetch origin source
+git worktree add /c/dev/stride-<topic> source
+cd /c/dev/stride-<topic>
+git checkout -b fix/<scope>/<desc>
+```
+
+Each worktree has its own `HEAD`, index, and working tree. Git enforces that a given branch is checked out in at most ONE worktree, so two builders cannot accidentally land commits on the same branch.
+
+`<topic>` should be short and unique among active worktrees. Examples: `stride-cancel-wc`, `stride-task-addons`. Don't reuse names across active sessions.
+
+### Ending a session
+
+After your PR merges:
+
+```bash
+cd /c/dev/Stride-GS-app
+git worktree remove /c/dev/stride-<topic>
+```
+
+Add `--force` if you abandoned work without merging.
+
+### Deploy still goes through `source`, not the worktree
+
+The Must-not-do "Never deploy from a worktree without merging to source first" still applies. After your PR merges, `cd /c/dev/Stride-GS-app && git checkout source && git pull origin source && npm run deploy ...`. Worktrees are for *building* in parallel; the canonical clone is for *deploying* the merged result.
+
+### Listing + pruning
+
+```bash
+git worktree list      # show all active worktrees
+git worktree prune     # garbage-collect stale worktree metadata
+```
+
+---
+
 ## Rules
 
 ### Must-do
