@@ -602,6 +602,13 @@
               for invoices stuck in "Failed" state due to DocNumber collisions.
    =================================================== */
 /* ===================================================
+   StrideAPI.gs — v38.121.0 — 2026-05-02 PST — Cleanup: dead email handlers removed
+   v38.121.0: Removed router cases + handler functions for sendIntakeInvitation,
+              notifyIntakeSubmitted, sendOnboardingToUsers, emailSignedAgreement —
+              all four migrated off GAS earlier this session (PRs #169-176, 180).
+              ~383 lines of dead code retired. The corresponding React API wrappers
+              in stride-gs-app/src/lib/api.ts also removed.
+   ===================================================
    StrideAPI.gs — v38.120.0 — 2026-05-02 PST — Claim status emails (RECEIVED/MORE_INFO/DENIAL) move to React
    v38.120.0: REMOVED inline CLAIM_RECEIVED, CLAIM_MORE_INFO, and CLAIM_DENIAL sends from
               handleCreateClaim_ / handleRequestMoreInfo_ / handleSendClaimDenial_. React callers
@@ -6790,13 +6797,8 @@ function doPost(e) {
           return handleResolveOnboardUser_(payload);
         });
 
-      // v38.100.0 — public endpoint (no staff guard) so the intake submission
-      // flow can fire-and-forget an admin-alert email right after the
-      // Supabase insert. Sender context = the prospect filling out the form,
-      // who has no login. The trigger on client_intakes already handles
-      // in-app notifications to admins; this covers the email channel.
-      case "notifyIntakeSubmitted":
-        return handleNotifyIntakeSubmitted_(payload);
+      // notifyIntakeSubmitted removed — replaced by the React caller invoking
+      // send-email directly with templateKey=INTAKE_SUBMITTED (PR #172).
 
       case "updateClient":
         return withStaffGuard_(callerEmail, function() {
@@ -7031,14 +7033,9 @@ function doPost(e) {
         return withAdminGuard_(callerEmail, function() {
           return handleSendWelcomeToUsers_(payload, callerEmail);
         });
-      // v38.110.0 — Per-user resend of the ONBOARDING email (getting-started
-      // guide). The Users-page "Send" button calls this instead of the welcome
-      // template; the welcome template is sent automatically on account
-      // creation, while onboarding is the one users want resent on demand.
-      case "sendOnboardingToUsers":
-        return withAdminGuard_(callerEmail, function() {
-          return handleSendOnboardingToUsers_(payload, callerEmail);
-        });
+      // sendOnboardingToUsers removed — replaced by the send-onboarding-email
+      // edge function (PR #175). React → Supabase → Resend, no GAS.
+
       // v38.70.0 — Admin escape hatch: set a user's Supabase Auth password.
       case "adminSetUserPassword":
         return handleAdminSetUserPassword_(payload, callerEmail);
@@ -7130,12 +7127,10 @@ function doPost(e) {
       case "sendRawEmail":
         return jsonResponse_(handleSendRawEmail_(payload));
 
-      // ─── Client Intake ───
-      case "sendIntakeInvitation":
-        return withAdminGuard_(callerEmail, function() { return handleSendIntakeInvitation_(payload); });
-      case "emailSignedAgreement":
-        // Public — no admin guard; prospect self-requests receipt after signing
-        return jsonResponse_(handleEmailSignedAgreement_(payload));
+      // sendIntakeInvitation + emailSignedAgreement removed — both migrated
+      // to the send-email edge function (PRs #169, #170, #180). React fires
+      // CLIENT_INTAKE_INVITE / INTAKE_RECEIPT_CLIENT / ACCOUNT_REFRESH_INVITATION
+      // directly via supabase.functions.invoke, no GAS hop.
 
       // ─── QBO Integration (admin-only writes) ───
       case "qboCreateInvoice":
@@ -22364,144 +22359,6 @@ function handleResolveOnboardUser_(payload) {
   }
 }
 
-/* ================================================================
-   v38.100.0: Intake submission admin alert
-   Called fire-and-forget from the public /intake/:linkId form AFTER the
-   prospect's data lands in public.client_intakes. Sends an admin-facing
-   email built from the INTAKE_SUBMITTED template (editable from
-   Settings → Email Templates). In-app notifications are handled
-   separately by the notify_admins_on_intake_submit() trigger.
-
-   PUBLIC endpoint — no staff guard. Callable by anon. Safe because it:
-     (a) only reads a template from Supabase,
-     (b) only emails the admin distribution list (never a user-supplied
-         address — notification recipients come from the template's
-         recipients field OR CB Settings OWNER_EMAIL + NOTIFICATION_EMAILS),
-     (c) ignores unknown/missing fields gracefully.
-   ================================================================ */
-
-function handleNotifyIntakeSubmitted_(payload) {
-  try {
-    payload = payload || {};
-    var businessName      = String(payload.businessName || "").trim() || "unnamed business";
-    var contactName       = String(payload.contactName  || "").trim() || "unknown contact";
-    var contactEmail      = String(payload.contactEmail || "").trim();
-    var contactPhone      = String(payload.contactPhone || "").trim();
-    var submittedAt       = String(payload.submittedAt  || new Date().toISOString());
-    var insuranceChoice   = String(payload.insuranceChoice || "").trim() || "—";
-    var declaredValueNum  = Number(payload.declaredValue) || 0;
-    var declaredValueFmt  = "$" + declaredValueNum.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-    var paymentAuthorized = payload.paymentAuthorized === true ? "Yes" : (payload.paymentAuthorized === false ? "No" : "—");
-    var intakeId          = String(payload.intakeId || "").trim();
-
-    // Review deep link — Settings page, Intakes subtab, pre-selects the row.
-    var reviewLink = APP_BASE_URL_ + "/settings?tab=clients&subtab=intakes"
-                   + (intakeId ? "&intake=" + encodeURIComponent(intakeId) : "");
-
-    // Resolve the admin distribution list. The INTAKE_SUBMITTED template
-    // uses the canonical {{STAFF_EMAILS}} token in its `recipients` column
-    // (same convention as CLAIM_*, REPAIR_*, WILL_CALL_*, SHIPMENT_RECEIVED
-    // — see email_templates). We resolve that token from CB Settings
-    // NOTIFICATION_EMAILS (+ OWNER_EMAIL) and ignore the per-client
-    // context because intake is pre-activation.
-    //
-    // Resolution order:
-    //   1. sbTpl.recipients   (template column, admin-editable from Settings
-    //                          → Email Templates). If it contains
-    //                          "{{STAFF_EMAILS}}", expand that token.
-    //                          Literal addresses in the column are kept as-is
-    //                          and merged alongside.
-    //   2. Fallback           If the template column is blank or resolves to
-    //                          empty, use CB Settings OWNER_EMAIL +
-    //                          NOTIFICATION_EMAILS directly.
-    function _resolveCbStaffEmails_() {
-      try {
-        var cbSsId = prop_("CB_SPREADSHEET_ID");
-        if (!cbSsId) return "";
-        var cbSs = SpreadsheetApp.openById(cbSsId);
-        var sh = cbSs.getSheetByName("Settings");
-        if (!sh) return "";
-        var kv = {};
-        var data = sh.getDataRange().getValues();
-        for (var i = 1; i < data.length; i++) {
-          var k = String(data[i][0] || "").trim();
-          if (k) kv[k] = String(data[i][1] || "").trim();
-        }
-        return [kv["OWNER_EMAIL"] || "", kv["NOTIFICATION_EMAILS"] || ""]
-          .filter(function(x) { return !!x; }).join(",");
-      } catch (e) {
-        Logger.log("handleNotifyIntakeSubmitted_ CB settings lookup failed: " + e);
-        return "";
-      }
-    }
-
-    var sbTpl = null;
-    try { sbTpl = api_getTemplateFromSupabase_("INTAKE_SUBMITTED"); } catch (_) {}
-    var recipientsRaw = sbTpl && sbTpl.recipients ? String(sbTpl.recipients).trim() : "";
-    var staffEmails = _resolveCbStaffEmails_();
-
-    // Token expansion. {{STAFF_EMAILS}} → CB Settings staff list.
-    var recipients = recipientsRaw.replace(/\{\{\s*STAFF_EMAILS\s*\}\}/g, staffEmails);
-
-    // Fallback: if the template had nothing useful (blank or only a token
-    // that resolved to empty), use the CB staff list directly.
-    if (!recipients.trim() && staffEmails) recipients = staffEmails;
-
-    // Split, trim, dedupe, rejoin so we never send duplicates if the token
-    // and a literal overlap.
-    var seen = {};
-    recipients = recipients.split(",").map(function(e) { return e.trim(); })
-      .filter(function(e) {
-        if (!e) return false;
-        var k = e.toLowerCase();
-        if (seen[k]) return false;
-        seen[k] = 1;
-        return true;
-      }).join(",");
-
-    if (!recipients) {
-      Logger.log("handleNotifyIntakeSubmitted_: no recipients resolved — skipping email (in-app notification still fired via trigger)");
-      return jsonResponse_({ success: true, emailed: false, reason: "no_recipients" });
-    }
-
-    var tokens = {
-      "{{BUSINESS_NAME}}":      businessName,
-      "{{CONTACT_NAME}}":       contactName,
-      "{{CONTACT_EMAIL}}":      contactEmail || "—",
-      "{{CONTACT_PHONE}}":      contactPhone || "—",
-      "{{SUBMITTED_AT}}":       submittedAt,
-      "{{INSURANCE_CHOICE}}":   insuranceChoice,
-      "{{DECLARED_VALUE}}":     declaredValueFmt,
-      "{{PAYMENT_AUTHORIZED}}": paymentAuthorized,
-      "{{REVIEW_LINK}}":        reviewLink
-    };
-
-    // Send. api_sendTemplateEmail_ handles Supabase-first template lookup,
-    // token replacement, APP_URL auto-inject, and the actual MailApp call.
-    var settings = { MASTER_SPREADSHEET_ID: prop_("MASTER_PRICE_LIST_SPREADSHEET_ID") || "" };
-    var res = api_sendTemplateEmail_(
-      settings,
-      "INTAKE_SUBMITTED",
-      recipients,
-      "📝 New Client Intake — " + businessName,
-      tokens,
-      null,
-      null
-    );
-
-    if (!res || !res.success) {
-      Logger.log("handleNotifyIntakeSubmitted_ send failed: " + JSON.stringify(res));
-      return jsonResponse_({ success: false, error: (res && res.error) || "send failed" });
-    }
-    return jsonResponse_({ success: true, emailed: true, recipients: recipients });
-  } catch (e) {
-    Logger.log("handleNotifyIntakeSubmitted_ outer error: " + e);
-    // Never throw on this path — admins still get the in-app notification
-    // via the trigger, and a failure here shouldn't break the prospect's
-    // success screen.
-    return jsonResponse_({ success: false, error: String(e) });
-  }
-}
 
 /* ================================================================
    Phase 7B #14: Update Client
@@ -27429,108 +27286,6 @@ function handleSendWelcomeToUsers_(payload, callerEmail) {
   return jsonResponse_({ success: true, sent: sent, failed: failed, total: userEmails.length, results: results });
 }
 
-/**
- * v38.110.0 — handleSendOnboardingToUsers_ — per-user resend of the
- * ONBOARDING email from the Users page. Mirrors handleSendWelcomeToUsers_
- * but calls handleSendOnboardingEmail_ so the user receives the
- * getting-started template (with login URL + LOGIN_EMAIL token populated)
- * instead of the generic welcome template.
- *
- * No tempPassword is generated — admins should use the separate
- * Set Password flow if they want to issue a new credential.
- *
- * Payload: { userEmails: string[] }
- * Returns: { success: true, sent: number, failed: number, results: [{email, ok, reason?, error?}] }
- */
-function handleSendOnboardingToUsers_(payload, callerEmail) {
-  var userEmails = Array.isArray(payload.userEmails) ? payload.userEmails : [];
-  if (userEmails.length === 0) return errorResponse_("userEmails array is required and must not be empty", "MISSING_PARAM");
-
-  var cbSsId = prop_("CB_SPREADSHEET_ID");
-  if (!cbSsId) return errorResponse_("CB_SPREADSHEET_ID not configured", "CONFIG_ERROR");
-
-  var cbSS;
-  try { cbSS = SpreadsheetApp.openById(cbSsId); }
-  catch (e) { return errorResponse_("Cannot open CB: " + e.message, "CONFIG_ERROR"); }
-
-  var usersSh = cbSS.getSheetByName("Users");
-  if (!usersSh) return errorResponse_("Users tab not found in CB", "NOT_FOUND");
-
-  var data = usersSh.getDataRange().getValues();
-  var hRow = data[0] || [];
-  var hMap = {};
-  for (var h = 0; h < hRow.length; h++) {
-    var k = String(hRow[h] || "").trim().toUpperCase();
-    if (k) hMap[k] = h;
-  }
-  var emailIdx = hMap["EMAIL"];
-  var roleIdx = hMap["ROLE"];
-  var ssIdIdx = hMap["CLIENT SPREADSHEET ID"];
-  if (emailIdx === undefined || ssIdIdx === undefined) {
-    return errorResponse_("Users tab missing required columns", "SCHEMA_ERROR");
-  }
-
-  // Build email → rowNum map.
-  var emailToRow = {};
-  for (var r = 1; r < data.length; r++) {
-    var rowEmail = String(data[r][emailIdx] || "").trim().toLowerCase();
-    if (rowEmail) emailToRow[rowEmail] = r + 1;
-  }
-
-  var results = [];
-  var sent = 0;
-  var failed = 0;
-
-  for (var i = 0; i < userEmails.length; i++) {
-    var targetEmail = String(userEmails[i] || "").trim().toLowerCase();
-    if (!targetEmail) {
-      results.push({ email: userEmails[i], ok: false, reason: "blank_email" });
-      failed++;
-      continue;
-    }
-
-    var rowNum = emailToRow[targetEmail];
-    if (!rowNum) {
-      results.push({ email: targetEmail, ok: false, reason: "user_not_found" });
-      failed++;
-      continue;
-    }
-
-    var userRow = data[rowNum - 1];
-    var userRole = roleIdx !== undefined ? String(userRow[roleIdx] || "").trim().toLowerCase() : "";
-    var userClientSheetIds = String(userRow[ssIdIdx] || "").trim();
-    var firstClientId = parseCSV_(userClientSheetIds)[0] || userClientSheetIds;
-
-    if (!firstClientId) {
-      results.push({ email: targetEmail, ok: false, reason: "no_client_sheet_id" });
-      failed++;
-      continue;
-    }
-
-    try {
-      var resp = handleSendOnboardingEmail_(firstClientId, {
-        recipient: targetEmail,
-        loginEmail: targetEmail
-        // tempPassword omitted — this is a resend, not a credential issue.
-      });
-      var json;
-      try { json = JSON.parse(resp.getContent()); } catch (_) { json = {}; }
-      if (json && json.success) {
-        results.push({ email: targetEmail, ok: true, sentTo: targetEmail, role: userRole });
-        sent++;
-      } else {
-        results.push({ email: targetEmail, ok: false, reason: "send_failed", error: (json && json.error) || "unknown" });
-        failed++;
-      }
-    } catch (err) {
-      results.push({ email: targetEmail, ok: false, reason: "exception", error: String(err.message || err) });
-      failed++;
-    }
-  }
-
-  Logger.log("handleSendOnboardingToUsers_: caller=" + callerEmail + " sent=" + sent + " failed=" + failed);
-  return jsonResponse_({ success: true, sent: sent, failed: failed, total: userEmails.length, results: results });
-}
 
 /**
  * v38.84.0 — Test-generate a document template as a PDF without touching
@@ -35989,150 +35744,7 @@ function handleQboGetCustomers_() {
 
 // ─── Client Intake Email Handlers ─────────────────────────────────────────────
 
-/**
- * POST sendIntakeInvitation — Admin sends the CLIENT_INTAKE_INVITE email to a
- * prospect after generating a new intake link. Token substitution is done
- * client-side; this handler just sends the pre-composed email.
- *
- * Payload: { to, subject, bodyHtml, linkId }
- *
- * Admin-guarded (withAdminGuard_). Logs the send in Apps Script execution log.
- */
-function handleSendIntakeInvitation_(payload) {
-  var to       = String(payload.to       || "").trim();
-  var subject  = String(payload.subject  || "").trim();
-  var bodyHtml = String(payload.bodyHtml || "").trim();
-  var linkId   = String(payload.linkId   || "").trim();
 
-  if (!to)       return jsonResponse_({ success: false, error: "Missing 'to' address" });
-  if (!subject)  return jsonResponse_({ success: false, error: "Missing email subject" });
-  if (!bodyHtml) return jsonResponse_({ success: false, error: "Missing email body" });
-
-  // Basic email format check
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) {
-    return jsonResponse_({ success: false, error: "Invalid 'to' address: " + to });
-  }
-
-  try {
-    GmailApp.sendEmail(to, subject, "", { htmlBody: bodyHtml });
-    Logger.log("handleSendIntakeInvitation_: sent intake invite to " + to + " (linkId=" + linkId + ")");
-    return jsonResponse_({ success: true, sentTo: to });
-  } catch (e) {
-    Logger.log("handleSendIntakeInvitation_: GmailApp.sendEmail failed — " + e.message);
-    return jsonResponse_({ success: false, error: "Failed to send email: " + e.message });
-  }
-}
-
-/**
- * POST emailSignedAgreement — Public endpoint (no admin guard).
- * Sends a simple confirmation receipt to a prospect after they sign the T&C
- * on the public intake form. Validates that the linkId actually exists in
- * Supabase client_intake_links as an anti-abuse guard.
- *
- * Payload: { linkId, email, businessName }
- */
-function handleEmailSignedAgreement_(payload) {
-  var linkId       = String(payload.linkId       || "").trim();
-  var email        = String(payload.email        || "").trim();
-  var businessName = String(payload.businessName || "").trim();
-  var contactName  = String(payload.contactName  || "").trim();
-  var signedAt     = String(payload.signedAt     || "").trim();
-  var insurance    = String(payload.insuranceChoice || "").trim();
-  var declared     = Number(payload.declaredValue) || 0;
-  var autoInspect  = payload.autoInspect === true;
-  var intakeId     = String(payload.intakeId || "").trim();
-
-  if (!linkId)  return { success: false, error: "Missing linkId" };
-  if (!email)   return { success: false, error: "Missing email" };
-
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-    return { success: false, error: "Invalid email address: " + email };
-  }
-
-  // Anti-abuse: verify linkId exists in Supabase before sending. Best-effort
-  // — if Supabase is unreachable we still send (the prospect already submitted
-  // a real intake and is owed their receipt).
-  var supabaseUrl = prop_("SUPABASE_URL");
-  var supabaseKey = prop_("SUPABASE_SERVICE_ROLE_KEY") || prop_("SUPABASE_SERVICE_KEY");
-  if (supabaseUrl && supabaseKey) {
-    try {
-      var checkResp = UrlFetchApp.fetch(
-        supabaseUrl + "/rest/v1/client_intake_links?link_id=eq." + encodeURIComponent(linkId) + "&select=link_id",
-        {
-          method: "GET",
-          headers: { "apikey": supabaseKey, "Authorization": "Bearer " + supabaseKey },
-          muteHttpExceptions: true
-        }
-      );
-      var rows = JSON.parse(checkResp.getContentText() || "[]");
-      if (!rows || rows.length === 0) {
-        Logger.log("handleEmailSignedAgreement_: linkId not found — " + linkId);
-        return { success: false, error: "Invalid linkId" };
-      }
-    } catch (e) {
-      Logger.log("handleEmailSignedAgreement_: Supabase link check failed — " + e.message + " — proceeding anyway");
-    }
-  }
-
-  // Build display tokens. Coverage labels mirror those used in the React
-  // intake form so the email reads identically to the success screen.
-  var insuranceLabel = "—";
-  var insuranceDetail = "—";
-  if (insurance === "own_policy") {
-    insuranceLabel  = "My own policy";
-    insuranceDetail = "I will maintain my own insurance and name Stride as additional insured.";
-  } else if (insurance === "stride_coverage" || insurance === "eis_coverage") {
-    insuranceLabel  = "Stride's policy";
-    var monthly = Math.max(300, Math.round((declared / 100000) * 300 * 100) / 100);
-    insuranceDetail = declared > 0
-      ? "Added to Stride's policy — $" + declared.toLocaleString() + " declared, $" + monthly.toFixed(2) + "/mo (per T&C §2.B, $300 minimum)."
-      : "Added to Stride's policy ($300/mo minimum, per T&C §2.B).";
-  }
-
-  var signedDateLabel = signedAt
-    ? new Date(signedAt).toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" })
-    : new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" });
-
-  // Reference number — first 8 chars of intake UUID, uppercased. Falls back
-  // to a short link-id fragment if the React caller didn't pass intakeId.
-  var refNum = (intakeId || linkId).replace(/-/g, "").substring(0, 8).toUpperCase();
-
-  var tokens = {
-    "{{BUSINESS_NAME}}":       businessName || "your business",
-    "{{CONTACT_NAME}}":        contactName || "there",
-    "{{CONTACT_EMAIL}}":       email,
-    "{{SIGNED_DATE}}":         signedDateLabel,
-    "{{INSURANCE_LABEL}}":     insuranceLabel,
-    "{{INSURANCE_DETAIL}}":    insuranceDetail,
-    "{{AUTO_INSPECT_LABEL}}":  autoInspect ? "Opted in" : "Not opted in",
-    "{{INTAKE_REF}}":          refNum
-  };
-
-  // Send via the canonical template-email helper. Reads INTAKE_RECEIPT_CLIENT
-  // from email_templates (Supabase-first, MPL fallback) so the office can
-  // edit copy from Settings → Email Templates without a deploy.
-  var settings = { MASTER_SPREADSHEET_ID: prop_("MASTER_PRICE_LIST_SPREADSHEET_ID") || "" };
-  try {
-    var res = api_sendTemplateEmail_(
-      settings,
-      "INTAKE_RECEIPT_CLIENT",
-      email,
-      "Your Signed Agreement is on File — Stride Logistics",
-      tokens,
-      null,
-      null
-    );
-    if (!res || !res.success) {
-      Logger.log("handleEmailSignedAgreement_: api_sendTemplateEmail_ failed — " + JSON.stringify(res));
-      return { success: false, error: (res && res.error) || "send failed" };
-    }
-    Logger.log("handleEmailSignedAgreement_: receipt sent to " + email + " (linkId=" + linkId + ", ref=" + refNum + ")");
-    return { success: true };
-  } catch (e) {
-    Logger.log("handleEmailSignedAgreement_: send threw — " + e.message);
-    return { success: false, error: "Failed to send receipt: " + e.message };
-  }
-}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // DispatchTrack status reconciliation (v38.117.0, feature #6)

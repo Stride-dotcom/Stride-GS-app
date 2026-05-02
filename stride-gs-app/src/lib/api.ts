@@ -3362,23 +3362,6 @@ export function postSendWelcomeToUsers(
 }
 
 /**
- * Per-user resend of the ONBOARDING email (getting-started guide).
- * Admin-only. No tempPassword issued — admins use Set Password separately
- * if they want to reset credentials. Backed by handleSendOnboardingToUsers_.
- */
-export function postSendOnboardingToUsers(
-  payload: SendWelcomeToUsersPayload,
-  signal?: AbortSignal
-) {
-  return apiPost<SendWelcomeToUsersResponse>(
-    'sendOnboardingToUsers',
-    payload as unknown as Record<string, unknown>,
-    undefined,
-    { signal }
-  );
-}
-
-/**
  * Admin escape hatch — set a user's Supabase Auth password directly.
  * Used when a client can't complete the self-serve Forgot Password flow.
  * StrideAPI handler: handleAdminSetUserPassword_ (admin-only).
@@ -4813,54 +4796,7 @@ export function postQboSyncCatalogItem(
   );
 }
 
-// ─── Intake Invitation Endpoints ─────────────────────────────────────────────
-
-/**
- * Send the CLIENT_INTAKE_INVITE email to a prospect after generating a link.
- * Admin-guarded on the GAS side. Token substitution is done client-side
- * before passing bodyHtml so the GAS handler just sends.
- */
-export function postSendIntakeInvitation({
-  to,
-  subject,
-  bodyHtml,
-  linkId,
-}: {
-  to: string;
-  subject: string;
-  bodyHtml: string;
-  linkId: string;
-}) {
-  return apiPost<{ success: boolean; sentTo: string }>(
-    'sendIntakeInvitation',
-    { to, subject, bodyHtml, linkId } as unknown as Record<string, unknown>
-  );
-}
-
-/**
- * Email a signed-agreement receipt to the prospect. Uses the Supabase
- * INTAKE_RECEIPT_CLIENT template (editable in Settings → Email Templates).
- * No auth guard on the GAS side — anti-abuse is via linkId verification.
- *
- * Called automatically from ClientIntake.tsx after a successful submit
- * (so every prospect gets a record in their inbox without clicking),
- * AND from the success-screen "Email me a copy" button as a manual resend.
- */
-export interface EmailSignedAgreementPayload {
-  linkId: string;
-  email: string;
-  businessName: string;
-  contactName?: string;
-  signedAt?: string;            // ISO string
-  insuranceChoice?: string;     // 'own_policy' | 'stride_coverage' | 'eis_coverage' | ''
-  declaredValue?: number;
-  autoInspect?: boolean;
-  intakeId?: string;            // Supabase UUID of the client_intakes row — used as reference number
-}
-
-export function postEmailSignedAgreement(payload: EmailSignedAgreementPayload) {
-  return apiPost<{ success: boolean }>(
-    'emailSignedAgreement',
-    payload as unknown as Record<string, unknown>
-  );
-}
+// Intake Invitation / Signed Agreement endpoints removed —
+// CLIENT_INTAKE_INVITE, ACCOUNT_REFRESH_INVITATION, INTAKE_RECEIPT_CLIENT,
+// and INTAKE_SUBMITTED all now fire React → send-email edge function
+// (Resend) directly. See PRs #169, #170, #172, #180.
