@@ -27,6 +27,8 @@ interface Props {
   entityType: BillingPreviewEntity;
   entityId: string;          // taskId / repairId / wcNumber
   tenantId: string;
+  /** Reserved for future cross-entity rollup (e.g., showing other charges
+   *  on the same item). Currently unused — recorded query is entity-scoped. */
   itemId?: string | null;
   /** Primary service code (e.g. INSP, ASM, REPAIR, WC). Null = no primary line. */
   svcCode?: string | null;
@@ -85,7 +87,7 @@ function fmtDate(s: string | null | undefined): string {
 }
 
 export function BillingPreviewCard({
-  entityType, entityId, tenantId, itemId,
+  entityType, entityId, tenantId,
   svcCode, itemClass, customPrice,
   addons, visible = true, defaultOpen = false,
 }: Props) {
