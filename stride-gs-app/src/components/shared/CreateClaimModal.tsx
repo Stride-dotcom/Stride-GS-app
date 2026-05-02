@@ -132,31 +132,46 @@ export function CreateClaimModal({ onClose, onCreated, addOptimisticClaim, remov
       // Remove optimistic placeholder — real claim will arrive via refetch in onCreated
       removeOptimisticClaim?.(tempClaimId);
 
-      // Notify staff via Resend. Best-effort — never block the success UX
-      // on a send failure. Recipients live in email_templates.recipients
-      // (`{{STAFF_EMAILS}}`), so `to` is omitted and the resolver expands.
-      // Idempotency by claimId prevents double-fires if the user double-clicks.
+      // Notify staff + acknowledge claimant via Resend. Best-effort —
+      // never block the success UX on a send failure. CLAIM_STAFF_NOTIFY
+      // resolves recipients from `email_templates.recipients`
+      // (`{{STAFF_EMAILS}}`); CLAIM_RECEIVED goes to the claimant's email
+      // if they provided one. Idempotency keys per claimId prevent
+      // double-fires on double-click.
       const claimId = res.data.claimId;
       const requestedAmtNum = requestedAmount ? parseFloat(requestedAmount) : null;
+      const claimTokens = {
+        CLAIM_NO: claimId,
+        CLAIM_ID: claimId,
+        CLAIMANT_NAME: primaryContactName.trim(),
+        PRIMARY_CONTACT_NAME: primaryContactName.trim(),
+        COMPANY_NAME: companyClientName.trim(),
+        COMPANY_CLIENT_NAME: companyClientName.trim(),
+        CLAIM_TYPE: claimType,
+        DATE_OPENED: todayIso,
+        ISSUE_DESCRIPTION: issueDescription.trim(),
+        CREATED_BY: user?.email ?? '',
+        REQUESTED_AMOUNT: requestedAmtNum != null ? `$${requestedAmtNum.toFixed(2)}` : 'Not specified',
+      };
       sendEmail({
         templateKey: 'CLAIM_STAFF_NOTIFY',
-        tokens: {
-          CLAIM_NO: claimId,
-          CLAIM_ID: claimId,
-          CLAIMANT_NAME: primaryContactName.trim(),
-          PRIMARY_CONTACT_NAME: primaryContactName.trim(),
-          COMPANY_NAME: companyClientName.trim(),
-          COMPANY_CLIENT_NAME: companyClientName.trim(),
-          CLAIM_TYPE: claimType,
-          DATE_OPENED: todayIso,
-          ISSUE_DESCRIPTION: issueDescription.trim(),
-          CREATED_BY: user?.email ?? '',
-          REQUESTED_AMOUNT: requestedAmtNum != null ? `$${requestedAmtNum.toFixed(2)}` : 'Not specified',
-        },
+        tokens: claimTokens,
         idempotencyKey: `claim-staff-notify:${claimId}`,
         relatedEntityType: 'claim',
         relatedEntityId: claimId,
       }).catch(err => console.warn('[CreateClaimModal] CLAIM_STAFF_NOTIFY send failed:', err));
+
+      const claimantEmail = email.trim();
+      if (claimantEmail) {
+        sendEmail({
+          templateKey: 'CLAIM_RECEIVED',
+          to: claimantEmail,
+          tokens: claimTokens,
+          idempotencyKey: `claim-received:${claimId}`,
+          relatedEntityType: 'claim',
+          relatedEntityId: claimId,
+        }).catch(err => console.warn('[CreateClaimModal] CLAIM_RECEIVED send failed:', err));
+      }
 
       setTimeout(() => onCreated(res.data!.claimId), 1200);
     } else {

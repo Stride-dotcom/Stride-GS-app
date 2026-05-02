@@ -602,6 +602,13 @@
               for invoices stuck in "Failed" state due to DocNumber collisions.
    =================================================== */
 /* ===================================================
+   StrideAPI.gs — v38.120.0 — 2026-05-02 PST — Claim status emails (RECEIVED/MORE_INFO/DENIAL) move to React
+   v38.120.0: REMOVED inline CLAIM_RECEIVED, CLAIM_MORE_INFO, and CLAIM_DENIAL sends from
+              handleCreateClaim_ / handleRequestMoreInfo_ / handleSendClaimDenial_. React callers
+              (CreateClaimModal, ClaimDetailPanel) now fire these via send-email (Resend).
+              Keeping the GAS paths would double-send. CLAIM_SETTLEMENT stays on GAS for now —
+              it attaches a server-generated PDF and send-email doesn't yet support attachments.
+   ===================================================
    StrideAPI.gs — v38.119.0 — 2026-05-02 PST — handleCreateClaim_ stops sending CLAIM_STAFF_NOTIFY
    v38.119.0: REMOVED inline CLAIM_STAFF_NOTIFY send from handleCreateClaim_. The React caller
               (CreateClaimModal.tsx) now fires this email via the send-email Supabase edge
@@ -26296,10 +26303,9 @@ function handleCreateClaim_(callerEmail, payload) {
     "{{CREATED_BY}}": callerEmail,
     "{{REQUESTED_AMOUNT}}": payload.requestedAmount != null ? "$" + Number(payload.requestedAmount).toFixed(2) : "Not specified"
   };
-  try { api_sendClaimEmail_(masterId, "CLAIM_RECEIVED", email, "Claim " + claimNo + " — Received", tokens, null); }
-  catch (e) { warnings.push("CLAIM_RECEIVED email: " + e.message); }
-  // CLAIM_STAFF_NOTIFY now fires from React (CreateClaimModal) via the
-  // send-email edge function. Keeping the GAS path would double-send.
+  // CLAIM_RECEIVED + CLAIM_STAFF_NOTIFY both fire from React
+  // (CreateClaimModal) via the send-email edge function. Keeping the GAS
+  // paths would double-send.
 
   // Write-through to Supabase claims cache (best-effort, reads fresh from sheet)
   resyncClaimToSupabase_(claimNo);
@@ -26379,15 +26385,9 @@ function handleRequestMoreInfo_(callerEmail, payload) {
   api_logClaimHistory_(db.historySheet, claimId, "MORE_INFO_REQUESTED",
     "More info requested by " + callerEmail + ": " + infoRequested.substring(0, 100), callerEmail, false, "");
 
-  var warnings = [];
-  try {
-    api_sendClaimEmail_(prop_("MASTER_PRICE_LIST_SPREADSHEET_ID") || "", "CLAIM_MORE_INFO",
-      String(claim["Email"] || "").trim(),
-      "Additional Information Needed — Claim " + claimId,
-      { "{{CLAIM_NO}}": claimId, "{{CLAIM_ID}}": claimId, "{{CLAIMANT_NAME}}": String(claim["Primary Contact Name"] || claim["Company / Client Name"] || ""), "{{COMPANY_CLIENT_NAME}}": String(claim["Company / Client Name"] || ""), "{{INFO_REQUESTED}}": infoRequested }, null);
-  } catch (e) { warnings.push("CLAIM_MORE_INFO email: " + e.message); }
-
-  return jsonResponse_({ success: true, newStatus: "Waiting on Info", warnings: warnings });
+  // CLAIM_MORE_INFO email now fires from React (ClaimDetailPanel) via
+  // the send-email edge function. Keeping the GAS path would double-send.
+  return jsonResponse_({ success: true, newStatus: "Waiting on Info", warnings: [] });
 }
 
 // ── POST: Send Denial ─────────────────────────────────────────────────────────
@@ -26403,15 +26403,10 @@ function handleSendClaimDenial_(callerEmail, payload) {
   api_updateClaimRow_(db.claims, claimId, { "Status": "Closed", "Outcome Type": "Denied", "Decision Explanation": decisionExplanation, "Date Closed": new Date() });
   api_logClaimHistory_(db.historySheet, claimId, "DENIED", "Claim denied by " + callerEmail + ". Decision: " + decisionExplanation.substring(0, 120), callerEmail, false, "");
 
-  var warnings = [];
-  try {
-    api_sendClaimEmail_(prop_("MASTER_PRICE_LIST_SPREADSHEET_ID") || "", "CLAIM_DENIAL",
-      String(claim["Email"] || "").trim(), "Claim " + claimId + " — Decision",
-      { "{{CLAIM_NO}}": claimId, "{{CLAIM_ID}}": claimId, "{{CLAIMANT_NAME}}": String(claim["Primary Contact Name"] || claim["Company / Client Name"] || ""), "{{COMPANY_CLIENT_NAME}}": String(claim["Company / Client Name"] || ""), "{{DECISION_EXPLANATION}}": decisionExplanation }, null);
-  } catch (e) { warnings.push("CLAIM_DENIAL email: " + e.message); }
-
+  // CLAIM_DENIAL email now fires from React (ClaimDetailPanel) via the
+  // send-email edge function. Keeping the GAS path would double-send.
   resyncClaimToSupabase_(claimId);
-  return jsonResponse_({ success: true, newStatus: "Closed", outcomeType: "Denied", warnings: warnings });
+  return jsonResponse_({ success: true, newStatus: "Closed", outcomeType: "Denied", warnings: [] });
 }
 
 // ── POST: Generate Settlement ─────────────────────────────────────────────────

@@ -24,6 +24,7 @@ import {
   postReopenClaim,
   postUpdateClaim,
 } from '../../lib/api';
+import { sendEmail } from '../../lib/email';
 import type {
   ApiClaimItem, ApiClaimHistoryEvent, ApiClaimFile,
 } from '../../lib/api';
@@ -289,9 +290,28 @@ export function ClaimDetailPanel({ claim: initialClaim, onClose, onUpdated, appl
     setActionError(null);
     // Phase 2C: optimistic patch — claims list shows "Waiting on Info" immediately
     applyClaimPatch?.(claim.claimId, { status: 'Waiting on Info' });
-    const res = await postRequestMoreInfo({ claimId: claim.claimId, infoRequested: infoRequested.trim() || undefined });
+    const trimmedInfo = infoRequested.trim();
+    const res = await postRequestMoreInfo({ claimId: claim.claimId, infoRequested: trimmedInfo || undefined });
     setActionLoading(false);
     if (res.ok) {
+      // Fire CLAIM_MORE_INFO via Resend. Best-effort.
+      const claimantEmail = (claim.email ?? '').trim();
+      if (claimantEmail) {
+        sendEmail({
+          templateKey: 'CLAIM_MORE_INFO',
+          to: claimantEmail,
+          tokens: {
+            CLAIM_NO: claim.claimId,
+            CLAIM_ID: claim.claimId,
+            CLAIMANT_NAME: claim.primaryContactName ?? claim.companyClientName ?? '',
+            COMPANY_CLIENT_NAME: claim.companyClientName ?? '',
+            INFO_REQUESTED: trimmedInfo,
+          },
+          idempotencyKey: `claim-more-info:${claim.claimId}:${Date.now()}`,
+          relatedEntityType: 'claim',
+          relatedEntityId: claim.claimId,
+        }).catch(err => console.warn('[ClaimDetailPanel] CLAIM_MORE_INFO send failed:', err));
+      }
       setShowInfoForm(false);
       setInfoRequested('');
       setActionSuccess('Status updated to Waiting on Info — email sent to claimant');
@@ -311,9 +331,28 @@ export function ClaimDetailPanel({ claim: initialClaim, onClose, onUpdated, appl
     setActionError(null);
     // Phase 2C: optimistic patch
     applyClaimPatch?.(claim.claimId, { status: 'Closed', outcomeType: 'Denied' });
-    const res = await postSendClaimDenial({ claimId: claim.claimId, decisionExplanation: denialExplanation.trim() });
+    const trimmedDenial = denialExplanation.trim();
+    const res = await postSendClaimDenial({ claimId: claim.claimId, decisionExplanation: trimmedDenial });
     setActionLoading(false);
     if (res.ok) {
+      // Fire CLAIM_DENIAL via Resend. Best-effort.
+      const claimantEmail = (claim.email ?? '').trim();
+      if (claimantEmail) {
+        sendEmail({
+          templateKey: 'CLAIM_DENIAL',
+          to: claimantEmail,
+          tokens: {
+            CLAIM_NO: claim.claimId,
+            CLAIM_ID: claim.claimId,
+            CLAIMANT_NAME: claim.primaryContactName ?? claim.companyClientName ?? '',
+            COMPANY_CLIENT_NAME: claim.companyClientName ?? '',
+            DECISION_EXPLANATION: trimmedDenial,
+          },
+          idempotencyKey: `claim-denial:${claim.claimId}`,
+          relatedEntityType: 'claim',
+          relatedEntityId: claim.claimId,
+        }).catch(err => console.warn('[ClaimDetailPanel] CLAIM_DENIAL send failed:', err));
+      }
       setShowDenialForm(false);
       setActionSuccess('Denial sent — claim closed');
       setClaim(prev => ({ ...prev, status: 'Closed', outcomeType: 'Denied' }));
