@@ -8,7 +8,7 @@
  *
  * Catalog filter: service_catalog where active=true AND show_as_task=true.
  */
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { X, Loader2 } from 'lucide-react';
 import { theme } from '../../styles/theme';
 import { useServiceCatalog, type CatalogService } from '../../hooks/useServiceCatalog';
@@ -43,19 +43,43 @@ export function AddTaskServiceModal({ itemClass, onClose, onSubmit }: Props) {
 
   const [serviceId, setServiceId] = useState('');
   const [quantity, setQuantity] = useState('1');
+  // Rate is a string so the operator can blank it out / type freely. The
+  // catalog auto-fill writes here whenever the service or itemClass
+  // changes; the operator can then override (e.g. negotiated labor rate).
+  const [rateInput, setRateInput] = useState('');
+  const [rateTouched, setRateTouched] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const selected = taskServices.find(s => s.id === serviceId) || null;
-  const rate = selected ? rateForClass(selected, itemClass) : 0;
+  const catalogRate = selected ? rateForClass(selected, itemClass) : 0;
+
+  // Auto-fill rate when the service / class changes — but only if the
+  // operator hasn't already typed an override. Reset the touched flag
+  // when the service changes so a fresh selection picks up its catalog
+  // rate even if a prior service had been overridden.
+  useEffect(() => {
+    setRateTouched(false);
+    setRateInput(selected ? String(catalogRate) : '');
+    // selected.id is the only signal we need; catalogRate change without
+    // a service change shouldn't retrigger (e.g. itemClass swap mid-form
+    // is rare, and re-applying the catalog there would clobber an
+    // intentional override).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected?.id]);
+
+  const rateNum = Number(rateInput);
+  const rate = isNaN(rateNum) ? 0 : rateNum;
   const qtyNum = Number(quantity) || 0;
   const total = qtyNum * rate;
+  const isOverride = rateTouched && Math.abs(rate - catalogRate) > 0.0001;
 
-  const canSubmit = !!selected && qtyNum > 0 && !submitting;
+  const canSubmit = !!selected && qtyNum > 0 && !submitting && !isNaN(rateNum) && rateInput.trim() !== '';
 
   const handleSubmit = async () => {
     if (!selected) { setError('Pick a service'); return; }
     if (!(qtyNum > 0)) { setError('Quantity must be greater than 0'); return; }
+    if (isNaN(rateNum)) { setError('Rate must be a number'); return; }
     setSubmitting(true);
     setError(null);
     try {
@@ -153,15 +177,41 @@ export function AddTaskServiceModal({ itemClass, onClose, onSubmit }: Props) {
               />
             </div>
             <div>
-              <div style={{ fontSize: 11, color: theme.colors.textMuted, fontWeight: 600, marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+              <div style={{ fontSize: 11, color: theme.colors.textMuted, fontWeight: 600, marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.04em', display: 'flex', alignItems: 'center', gap: 6 }}>
                 Rate
-              </div>
-              <div style={{ ...inputStyle, background: theme.colors.bgSubtle, color: theme.colors.text }}>
-                {selected ? `$${rate.toFixed(2)}` : '—'}
-                {selected && selected.billing === 'class_based' && (
-                  <span style={{ fontSize: 10, color: theme.colors.textMuted, marginLeft: 6 }}>
-                    (Class {itemClass || '—'})
+                {isOverride && (
+                  <span style={{ fontSize: 9, padding: '1px 6px', borderRadius: 4, background: '#FEF3C7', color: '#92400E', textTransform: 'none', letterSpacing: 0, fontWeight: 600 }}>
+                    Override
                   </span>
+                )}
+              </div>
+              <div style={{ position: 'relative' }}>
+                <span style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: theme.colors.textMuted, fontSize: 13, pointerEvents: 'none' }}>$</span>
+                <input
+                  type="number"
+                  min={0}
+                  step={0.01}
+                  value={rateInput}
+                  onChange={e => { setRateInput(e.target.value); setRateTouched(true); }}
+                  disabled={!selected || submitting}
+                  placeholder={selected ? '0.00' : '—'}
+                  style={{ ...inputStyle, paddingLeft: 22 }}
+                />
+              </div>
+              <div style={{ fontSize: 10, color: theme.colors.textMuted, marginTop: 3, display: 'flex', justifyContent: 'space-between', gap: 6 }}>
+                <span>
+                  {selected
+                    ? `Catalog: $${catalogRate.toFixed(2)}${selected.billing === 'class_based' ? ` (Class ${itemClass || '—'})` : ''}`
+                    : 'Pick a service first'}
+                </span>
+                {isOverride && (
+                  <button
+                    type="button"
+                    onClick={() => { setRateInput(String(catalogRate)); setRateTouched(false); }}
+                    style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', color: theme.colors.orange, fontSize: 10, fontWeight: 600, fontFamily: 'inherit' }}
+                  >
+                    Reset
+                  </button>
                 )}
               </div>
             </div>
