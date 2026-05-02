@@ -378,12 +378,19 @@ export function Billing() {
   const ALL_SERVICES = useMemo(
     () => services
       .filter(s => s.active && s.code)
-      .map(s => ({ code: s.code, name: s.name })),
+      .map(s => ({ code: s.code, name: s.name, category: String(s.category || '') })),
     [services],
   );
 
   // Non-storage services for billing report tab
   const NON_STOR_SERVICES = useMemo(() => ALL_SERVICES.filter(s => s.code !== 'STOR'), [ALL_SERVICES]);
+
+  // Distinct, non-empty service categories for the Category MultiSelectFilter.
+  // Sorted A-Z; only categories that have at least one active service show up.
+  const ALL_CATEGORIES = useMemo(
+    () => Array.from(new Set(NON_STOR_SERVICES.map(s => s.category).filter(Boolean))).sort(),
+    [NON_STOR_SERVICES],
+  );
 
   // id → name map for Supabase query enrichment; name → id for clientFilter lookup
   const clientNameMap = useMemo<ClientNameMap>(() => {
@@ -456,9 +463,31 @@ export function Billing() {
   const today = new Date().toISOString().slice(0, 10);
   const [rptClientFilter, setRptClientFilter] = useState<string[]>([]);
   const [rptSidemarkFilter, setRptSidemarkFilter] = useState<string[]>([]);
+  const [rptCategoryFilter, setRptCategoryFilter] = useState<string[]>([]);
   const [rptSvcFilter, setRptSvcFilter] = useState<string[]>([]);
   const [rptStatusFilter, setRptStatusFilter] = useState<string[]>(['Unbilled']);
   const [rptEndDate, setRptEndDate] = useState(today);
+
+  // Service dropdown options reactively narrow when categories are selected.
+  // Categories filter on service_catalog.category, so a chosen category like
+  // "Repair" shrinks the Service options to just REPAIR-category services.
+  // No selection → full NON_STOR_SERVICES list.
+  const SVC_OPTIONS_FOR_FILTER = useMemo(() => {
+    if (rptCategoryFilter.length === 0) return NON_STOR_SERVICES;
+    const cats = new Set(rptCategoryFilter);
+    return NON_STOR_SERVICES.filter(s => cats.has(s.category));
+  }, [NON_STOR_SERVICES, rptCategoryFilter]);
+
+  // When categories change, drop any service selections that are no longer
+  // visible in the filtered dropdown. Keeps the filter params consistent with
+  // what the user actually sees (no "selected service hidden behind category"
+  // ghost selections).
+  useEffect(() => {
+    if (rptSvcFilter.length === 0) return;
+    const visible = new Set(SVC_OPTIONS_FOR_FILTER.map(s => s.name));
+    const stillValid = rptSvcFilter.filter(n => visible.has(n));
+    if (stillValid.length !== rptSvcFilter.length) setRptSvcFilter(stillValid);
+  }, [SVC_OPTIONS_FOR_FILTER, rptSvcFilter]);
 
   // Client / sidemark options for the filters (derived from loaded data + known clients)
   // We'll keep a running list so they survive clears
@@ -517,6 +546,7 @@ export function Billing() {
         filters.svcFilter = rptSvcFilter.map(name => nameToCode.get(name) || name);
       }
       if (rptSidemarkFilter.length > 0) filters.sidemarkFilter = rptSidemarkFilter;
+      if (rptCategoryFilter.length > 0) filters.categoryFilter = rptCategoryFilter;
       if (rptEndDate) filters.endDate = rptEndDate;
       if (rptClientFilter.length > 0) filters.clientFilter = rptClientFilter;
 
@@ -549,11 +579,12 @@ export function Billing() {
       setReportError(err instanceof Error ? err.message : String(err));
     }
     setReportLoading(false);
-  }, [rptStatusFilter, rptSvcFilter, rptSidemarkFilter, rptEndDate, rptClientFilter, ALL_SERVICES, clientNameMap, mapBillingRows]);
+  }, [rptStatusFilter, rptSvcFilter, rptSidemarkFilter, rptCategoryFilter, rptEndDate, rptClientFilter, ALL_SERVICES, clientNameMap, mapBillingRows]);
 
   const clearReportFilters = useCallback(() => {
     setRptClientFilter([]);
     setRptSidemarkFilter([]);
+    setRptCategoryFilter([]);
     setRptSvcFilter([]);
     setRptStatusFilter(['Unbilled']);
     setRptEndDate(today);
@@ -1865,7 +1896,8 @@ export function Billing() {
             <div style={filterGridStyle}>
               <MultiSelectFilter label="Client" options={reportClients} selected={rptClientFilter} onChange={setRptClientFilter} placeholder={clientsLoading ? 'Loading clients…' : 'Select a client…'} />
               <MultiSelectFilter label="Sidemark" options={reportSidemarks} selected={rptSidemarkFilter} onChange={setRptSidemarkFilter} placeholder="All Sidemarks" />
-              <MultiSelectFilter label="Service" options={NON_STOR_SERVICES.map(s => s.name)} selected={rptSvcFilter} onChange={setRptSvcFilter} placeholder="All Services" />
+              <MultiSelectFilter label="Category" options={ALL_CATEGORIES} selected={rptCategoryFilter} onChange={setRptCategoryFilter} placeholder="All Categories" />
+              <MultiSelectFilter label="Service" options={SVC_OPTIONS_FOR_FILTER.map(s => s.name)} selected={rptSvcFilter} onChange={setRptSvcFilter} placeholder="All Services" />
               <MultiSelectFilter label="Status" options={ALL_STATUSES} selected={rptStatusFilter} onChange={setRptStatusFilter} placeholder="All Statuses" />
               <div>
                 <span style={dateLabelStyle}>End Date</span>
