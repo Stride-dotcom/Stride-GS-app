@@ -75,6 +75,17 @@ interface SendEmailBody {
   relatedEntityType?: string;
   relatedEntityId?: string;
   tenantId?: string;
+  /** Attachments. Each item must include `filename` and EITHER `content`
+   *  (base64-encoded string) OR `path` (publicly fetchable URL — Resend
+   *  fetches it server-side). Mirrors Resend's `attachments` field 1:1.
+   *  Use sparingly: every attachment counts against Resend's 40 MB-per-
+   *  send limit. */
+  attachments?: Array<{
+    filename: string;
+    content?: string;
+    path?: string;
+    contentType?: string;
+  }>;
 }
 
 Deno.serve(async (req: Request) => {
@@ -247,6 +258,12 @@ Deno.serve(async (req: Request) => {
         reply_to: replyTo,
         subject,
         html,
+        // Resend accepts attachments with `content` (base64) OR `path`
+        // (URL it fetches server-side). The shape mirrors Resend's API
+        // 1:1 so callers can pass either form transparently.
+        attachments: body.attachments && body.attachments.length > 0
+          ? body.attachments
+          : undefined,
         headers: {
           'List-Unsubscribe': '<mailto:unsubscribe@stridenw.com>',
           'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
