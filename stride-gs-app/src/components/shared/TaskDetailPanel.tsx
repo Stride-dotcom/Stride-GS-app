@@ -27,7 +27,6 @@ import type { CompleteTaskResponse, StartTaskResponse } from '../../lib/api';
 import { useAuth } from '../../contexts/AuthContext';
 import { SERVICE_CODES } from '../../lib/constants';
 import { ProcessingOverlay } from './ProcessingOverlay';
-import { AddTaskServiceModal } from './AddTaskServiceModal';
 import { useTaskAddons } from '../../hooks/useTaskAddons';
 import { BillingPreviewCard } from './BillingPreviewCard';
 
@@ -146,14 +145,14 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
     if (!resp.ok) { setDueDate(task.dueDate || ''); clearTaskPatch?.(task.taskId); }
   }, [apiConfigured, clientSheetId, task.taskId, task.dueDate, mergeTaskPatch, clearTaskPatch]);
 
-  // Edit/Save mode for task fields
-  // Custom Price Override is visible to staff + admin; hidden from clients
+  // Edit/Save mode for task fields. Custom Price was previously a separate
+  // field here; it now lives inside BillingPreviewCard's editable primary
+  // line and saves via postUpdateTaskCustomPrice on blur.
   const canSeeCustomPrice = user?.role === 'admin' || user?.role === 'staff';
   const [isEditingTask, setIsEditingTask] = useState(false);
   const [taskSaving, setTaskSaving] = useState(false);
   const [taskSaveSuccess, setTaskSaveSuccess] = useState(false);
   const [taskSaveError, setTaskSaveError] = useState<string | null>(null);
-  const [customPrice, setCustomPrice] = useState(task.customPrice != null ? String(task.customPrice) : '');
 
   // Repair quote state
   const [repairRequested, setRepairRequested] = useState(false);
@@ -172,14 +171,32 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
 
   // Add-on services — staff/admin only. Rows live on public.task_addons
   // until the task is completed; handleCompleteTask_ then writes one
-  // billing row per addon to the client Billing_Ledger sheet.
+  // billing row per addon to the client Billing_Ledger sheet. The "+ Add
+  // Service" entry point now lives inside BillingPreviewCard, not the
+  // footer or a separate inline section.
   const canEditAddons = user?.role === 'admin' || user?.role === 'staff';
-  const { addons, addAddon, deleteAddon } = useTaskAddons(
+  const { addons, addAddon, updateAddon, deleteAddon } = useTaskAddons(
     canEditAddons ? task.taskId : null,
     canEditAddons ? clientSheetId : null,
   );
-  const [showAddServiceModal, setShowAddServiceModal] = useState(false);
-  const [addonDeletingId, setAddonDeletingId] = useState<string | null>(null);
+
+  // Persist primary rate edits (from BillingPreviewCard's editable rate
+  // input) — null = clear override, number = set override. Mirrors what
+  // the legacy "Price Override" field did.
+  const handleUpdatePrimaryRate = useCallback(async (rate: number | null) => {
+    if (!apiConfigured || !clientSheetId || !task.taskId) return;
+    mergeTaskPatch?.(task.taskId, { customPrice: rate ?? undefined });
+    const resp = await postUpdateTaskCustomPrice(
+      { taskId: task.taskId, customPrice: rate },
+      clientSheetId,
+    );
+    if (!resp.ok) {
+      clearTaskPatch?.(task.taskId);
+    } else {
+      onTaskUpdated?.();
+    }
+  }, [apiConfigured, clientSheetId, task.taskId, mergeTaskPatch, clearTaskPatch, onTaskUpdated]);
+
   const [reopenLoading, setReopenLoading] = useState(false);
   const [reopenError, setReopenError] = useState<string | null>(null);
 
@@ -286,7 +303,6 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
     setNotes(task.taskNotes || task.notes || '');
     setLocation(task.location || '');
     setLocationQuery(task.location || '');
-    setCustomPrice(task.customPrice != null ? String(task.customPrice) : '');
     setTaskSaveError(null);
     setTaskSaveSuccess(false);
     setIsEditingTask(true);
@@ -296,7 +312,6 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
     setNotes(task.taskNotes || task.notes || '');
     setLocation(task.location || '');
     setLocationQuery(task.location || '');
-    setCustomPrice(task.customPrice != null ? String(task.customPrice) : '');
     setIsEditingTask(false);
     setTaskSaveError(null);
   }, [task]);
@@ -306,7 +321,6 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
     setTaskSaving(true);
     setTaskSaveError(null);
 
-    // Phase 2C: merge patch immediately so table reflects edits before server responds
     const patchData: Partial<Task> = {};
     const origNotes = task.taskNotes || task.notes || '';
     const origLocation = task.location || '';
@@ -314,62 +328,35 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
     const locationChanged = location !== origLocation;
     if (notesChanged) patchData.taskNotes = notes;
     if (locationChanged) patchData.location = location;
-    if (canSeeCustomPrice) {
-      const origPrice = task.customPrice != null ? String(task.customPrice) : '';
-      if (customPrice !== origPrice) {
-        const priceVal = customPrice.trim() === '' ? undefined : Number(customPrice);
-        if (priceVal !== undefined && isNaN(priceVal)) { setTaskSaveError('Invalid price'); setTaskSaving(false); return; }
-        patchData.customPrice = priceVal;
-      }
-    }
     if (Object.keys(patchData).length > 0) mergeTaskPatch?.(task.taskId, patchData);
 
     try {
-      // Save notes to Tasks sheet (entity-specific)
       if (notesChanged) {
         await postUpdateTaskNotes({ taskId: task.taskId, taskNotes: notes } as any, clientSheetId);
       }
-      // Save location to Inventory (single source of truth — fans out to Tasks/Repairs)
       if (locationChanged && task.itemId) {
         await postUpdateInventoryItem({ itemId: task.itemId, location } as any, clientSheetId);
       }
-      // Save custom price if changed (staff + admin)
-      if (canSeeCustomPrice && 'customPrice' in patchData) {
-        const priceVal = patchData.customPrice ?? null;
-        await postUpdateTaskCustomPrice({ taskId: task.taskId, customPrice: priceVal !== undefined ? priceVal : null }, clientSheetId);
-      }
-      // Field edits: patch stays until auto-expiry (server value == patch value)
       setIsEditingTask(false);
       setTaskSaveSuccess(true);
       setTimeout(() => setTaskSaveSuccess(false), 3000);
       onTaskUpdated?.();
     } catch {
-      clearTaskPatch?.(task.taskId); // rollback on error
+      clearTaskPatch?.(task.taskId);
       setTaskSaveError('Save failed — please try again');
     }
     setTaskSaving(false);
-  }, [apiConfigured, clientSheetId, task, notes, location, customPrice, canSeeCustomPrice, onTaskUpdated, mergeTaskPatch, clearTaskPatch]);
+  }, [apiConfigured, clientSheetId, task, notes, location, onTaskUpdated, mergeTaskPatch, clearTaskPatch]);
 
   // Session 74 optimistic-first: flip UI to completed immediately, fire
   // GAS in the background. See handleStartRepair for the pattern rationale.
   const callCompleteTask = async (result: 'Pass' | 'Fail') => {
     setSubmitError(null);
 
-    // v32.x: Inline Custom Price override — validate BEFORE flipping UI
-    // so an invalid value doesn't briefly show the completed state.
-    let inlineCustomPrice: number | null | undefined = undefined;
-    if (canSeeCustomPrice) {
-      if (customPrice.trim() !== '') {
-        const priceVal = Number(customPrice);
-        if (isNaN(priceVal)) {
-          setSubmitError('Invalid custom price — please fix or clear the field before completing.');
-          return;
-        }
-        inlineCustomPrice = priceVal;
-      } else if (task.customPrice != null) {
-        inlineCustomPrice = null; // user cleared an existing override
-      }
-    }
+    // Custom price (if any) is now persisted via BillingPreviewCard's
+    // editable rate input on blur — by the time the user clicks Pass/Fail,
+    // tasks.custom_price already reflects their override. handleCompleteTask_
+    // reads Custom Price from the sheet at completion time.
 
     // 1. OPTIMISTIC UI
     applyTaskPatch?.(task.taskId, {
@@ -415,7 +402,6 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
             // resync the inventory row to Supabase. Without this the mirror
             // was a no-op and the UI showed stale status until page refresh.
             ...(itemIdForPatch ? { itemId: itemIdForPatch } : {}),
-            ...(inlineCustomPrice !== undefined ? { customPrice: inlineCustomPrice } : {}),
           },
           clientSheetId
         );
@@ -796,30 +782,10 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
           </div>
           <Field label="Description" value={task.description} />
 
-          {/* Custom Price Override — staff + admin, open tasks only */}
-          {canSeeCustomPrice && isOpen && !completed && (
-            <div style={{ marginBottom: 16 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
-                <DollarSign size={14} color={theme.colors.orange} />
-                <span style={{ fontSize: 12, fontWeight: 600 }}>Price Override</span>
-              </div>
-              {isEditingTask ? (
-                <>
-                  <input type="number" min="0" step="0.01" value={customPrice} onChange={e => setCustomPrice(e.target.value)} placeholder="Leave empty for default rate" style={{ ...input }} />
-                  <div style={{ fontSize: 10, color: theme.colors.textMuted, marginTop: 3 }}>
-                    {customPrice ? `Task will bill at $${Number(customPrice).toFixed(2)}` : 'Default rate from Price List will be used'}
-                  </div>
-                </>
-              ) : (
-                <div style={{ fontSize: 13, color: customPrice ? theme.colors.text : theme.colors.textMuted }}>
-                  {customPrice ? `$${Number(customPrice).toFixed(2)}` : 'Default rate'}
-                </div>
-              )}
-            </div>
-          )}
-          {canSeeCustomPrice && task.customPrice != null && (!isOpen || completed) && (
-            <Field label="Price Override" value={`$${Number(task.customPrice).toFixed(2)}`} />
-          )}
+          {/* Custom price now lives in the BillingPreviewCard's editable
+              primary line, lower on the page. Removed the dedicated
+              "Price Override" section to avoid two places to set the
+              same value. */}
 
           {/* Location Update */}
           <div style={{ marginBottom: 16 }}>
@@ -917,102 +883,11 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
             </div>
           )}
 
-          {/* Add-on Services — staff/admin only. Rows live on
-              public.task_addons and get flushed to Billing_Ledger by
-              handleCompleteTask_ on completion. The "+ Add Service"
-              entry point is in the footer (desktop) / overflow menu
-              (mobile) — this section is read-only with per-row delete. */}
-          {canEditAddons && (
-            <div style={{ marginBottom: 16 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
-                <Plus size={14} color={theme.colors.orange} />
-                <span style={{ fontSize: 12, fontWeight: 600 }}>Add-on Services</span>
-                {addons.length > 0 && (
-                  <span style={{ fontSize: 11, color: theme.colors.textMuted }}>
-                    ({addons.length})
-                  </span>
-                )}
-              </div>
-              {addons.length === 0 ? (
-                <div style={{ fontSize: 12, color: theme.colors.textMuted, padding: '6px 0' }}>
-                  No add-on services. {isOpen && !completed && 'Add extras (disposal, extra items) to bill on completion.'}
-                </div>
-              ) : (
-                <div style={{ border: `1px solid ${theme.colors.border}`, borderRadius: 8, overflow: 'hidden' }}>
-                  {addons.map((a, idx) => (
-                    <div
-                      key={a.id}
-                      style={{
-                        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                        padding: '8px 12px', fontSize: 12,
-                        background: idx % 2 === 0 ? '#fff' : theme.colors.bgSubtle,
-                        borderTop: idx === 0 ? 'none' : `1px solid ${theme.colors.border}`,
-                        gap: 8,
-                      }}
-                    >
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={{ fontWeight: 600, color: theme.colors.text }}>
-                          {a.serviceName} <span style={{ fontWeight: 400, color: theme.colors.textMuted }}>({a.serviceCode})</span>
-                        </div>
-                        <div style={{ fontSize: 11, color: theme.colors.textMuted, marginTop: 2 }}>
-                          Qty {a.quantity} × ${(a.rate ?? 0).toFixed(2)}
-                          {a.itemClass ? ` · Class ${a.itemClass}` : ''}
-                          {a.addedByName ? ` · added by ${a.addedByName}` : ''}
-                        </div>
-                      </div>
-                      <div style={{ fontSize: 13, fontWeight: 700, color: theme.colors.text, whiteSpace: 'nowrap' }}>
-                        ${(a.total ?? 0).toFixed(2)}
-                      </div>
-                      {/* Staff/admin can always remove an addon they added by
-                          mistake. After completion the parallel Billing_Ledger
-                          row is the source of truth, so removing the
-                          task_addons row here only cleans up the queue and
-                          doesn't unbill — voiding the actual billing line is
-                          handled in the Billing page. */}
-                      <button
-                        onClick={async () => {
-                          if (!confirm(`Remove ${a.serviceName} from this task?`)) return;
-                          setAddonDeletingId(a.id);
-                          await deleteAddon(a.id);
-                          setAddonDeletingId(null);
-                        }}
-                        disabled={addonDeletingId === a.id}
-                        style={{
-                          background: 'none', border: 'none', padding: 4, cursor: 'pointer',
-                          color: addonDeletingId === a.id ? theme.colors.textMuted : '#DC2626',
-                          display: 'flex', alignItems: 'center',
-                        }}
-                        aria-label="Remove addon"
-                        title="Remove addon"
-                      >
-                        {addonDeletingId === a.id
-                          ? <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} />
-                          : <Trash2 size={13} />}
-                      </button>
-                    </div>
-                  ))}
-                  {/* Total row */}
-                  <div style={{
-                    display: 'flex', justifyContent: 'space-between',
-                    padding: '8px 12px', fontSize: 12, fontWeight: 700,
-                    background: theme.colors.bgSubtle,
-                    borderTop: `1px solid ${theme.colors.border}`,
-                  }}>
-                    <span style={{ color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.04em', fontSize: 11 }}>
-                      Add-ons total
-                    </span>
-                    <span>
-                      ${addons.reduce((sum, a) => sum + (a.total ?? 0), 0).toFixed(2)}
-                    </span>
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Billing Preview — staff/admin only. Collapsed by default;
-              shows projected charges (primary svc rate from catalog +
-              queued add-ons) and recorded ledger rows for this task. */}
+          {/* Billing Preview — staff/admin only. Single place for ALL
+              billing controls: editable primary rate, inline addon
+              qty/rate, "+ Add Service" button, recorded ledger rows. The
+              previous separate "Add-on Services" inline section and
+              Price Override field were folded in here. */}
           <BillingPreviewCard
             entityType="task"
             entityId={task.taskId}
@@ -1023,6 +898,11 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
             customPrice={task.customPrice != null ? Number(task.customPrice) : null}
             addons={addons}
             visible={canEditAddons}
+            editable={canEditAddons && isOpen && !completed}
+            onUpdatePrimaryRate={handleUpdatePrimaryRate}
+            onAddAddon={async (input) => { await addAddon(input); }}
+            onUpdateAddon={async (id, patch) => { await updateAddon(id, patch); }}
+            onDeleteAddon={async (id) => { await deleteAddon(id); }}
           />
 
         </div>
@@ -1126,17 +1006,8 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
               {reopenLoading ? 'Reopening…' : (task.status === 'Completed' ? 'Reopen Task (undo Complete)' : 'Reopen Task (undo Start)')}
             </button>
           )}
-          {/* Add Service — staff/admin only, open tasks only. Mobile entry
-              point for the addon picker (desktop has an inline button in
-              the Add-on Services section in the Details body). */}
-          {canEditAddons && isOpen && !completed && (
-            <button
-              onClick={() => { setOverflowOpen(false); setShowAddServiceModal(true); }}
-              style={{ width: '100%', padding: '13px 16px', textAlign: 'left', background: 'none', border: 'none', borderBottom: `1px solid ${theme.colors.border}`, cursor: 'pointer', fontSize: 14, color: theme.colors.text, fontFamily: 'inherit', display: 'flex', alignItems: 'center', gap: 8 }}
-            >
-              <Plus size={14} /> Add Service
-            </button>
-          )}
+          {/* "+ Add Service" lives inside BillingPreviewCard now, not the
+              overflow menu. */}
           <button
             onClick={handleCancelTask}
             style={{ width: '100%', padding: '13px 16px', textAlign: 'left', background: 'none', border: 'none', cursor: 'pointer', fontSize: 14, color: '#DC2626', fontFamily: 'inherit', display: 'flex', alignItems: 'center', gap: 8 }}
@@ -1345,16 +1216,6 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
                     {startTaskLoading ? 'Creating folder & work order…' : 'Start Task'}
                   </button>
                 )}
-                {canEditAddons && !startTaskConflict && (
-                  <button
-                    onClick={() => setShowAddServiceModal(true)}
-                    style={{ width: '100%', padding: '7px', fontSize: 12, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: 'transparent', color: theme.colors.textSecondary, cursor: 'pointer', fontFamily: 'inherit', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}
-                    onMouseEnter={e => { e.currentTarget.style.borderColor = theme.colors.orange; e.currentTarget.style.color = theme.colors.orange; }}
-                    onMouseLeave={e => { e.currentTarget.style.borderColor = theme.colors.border; e.currentTarget.style.color = theme.colors.textSecondary; }}
-                  >
-                    <Plus size={12} /> Add Service
-                  </button>
-                )}
               </div>
             )}
             {startTaskResult?.success && !startTaskResult.noOp && (
@@ -1400,16 +1261,6 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
                   <WriteButton label="Fail" variant="danger" icon={<XCircle size={16} />} style={{ flex: 1, padding: '10px', fontSize: 13 }} onClick={async () => handleResult('fail')} />
                 </div>
                 <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-                  {canEditAddons && (
-                    <button
-                      onClick={() => setShowAddServiceModal(true)}
-                      style={{ flex: 1, padding: '7px', fontSize: 12, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: 'transparent', color: theme.colors.textSecondary, cursor: 'pointer', fontFamily: 'inherit', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}
-                      onMouseEnter={e => { e.currentTarget.style.borderColor = theme.colors.orange; e.currentTarget.style.color = theme.colors.orange; }}
-                      onMouseLeave={e => { e.currentTarget.style.borderColor = theme.colors.border; e.currentTarget.style.color = theme.colors.textSecondary; }}
-                    >
-                      <Plus size={12} /> Add Service
-                    </button>
-                  )}
                   <button
                     onClick={handleCancelTask}
                     style={{ flex: 1, padding: '7px', fontSize: 12, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: 'transparent', color: theme.colors.textMuted, cursor: 'pointer', fontFamily: 'inherit' }}
@@ -1544,9 +1395,7 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
   const fabActions: FABAction[] = (isEditingTask || showPassFail) ? [] : [
     ...(isOpen && !completed ? [{ label: 'Cancel Task', icon: <XCircle size={16} />, onClick: handleCancelTask }] : []),
     ...(task.itemId && !repairStatus ? [{ label: repairRequesting ? 'Requesting…' : 'Repair Quote', icon: <Wrench size={16} />, onClick: () => void handleRequestRepair() }] : []),
-    // Add Service — staff/admin only, open tasks only. Mobile entry
-    // point for the addon picker (desktop has a footer pill below).
-    ...(canEditAddons && isOpen && !completed ? [{ label: 'Add Service', icon: <Plus size={16} />, onClick: () => setShowAddServiceModal(true) }] : []),
+    // "+ Add Service" lives inside the BillingPreviewCard now, not the FAB.
     ...(isOpen && !completed && !isEditingTask ? [{ label: 'Edit', icon: <Pencil size={16} />, onClick: () => setIsEditingTask(true) }] : []),
     ...(showStart ? [{ label: startTaskLoading ? 'Starting…' : 'Start Task', icon: <Play size={16} />, onClick: () => handleStartTask(), color: theme.colors.orange }] : []),
     // Reopen — admin/staff only. Surfaces here on Completed + In Progress
@@ -1561,14 +1410,8 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
       {isOpen && !completed && (
         <button onClick={handleCancelTask} style={tkLight}>Cancel Task</button>
       )}
-      {/* Add Service — staff/admin, open tasks only. Lives in the footer
-          (desktop) so the inline Add-on Services section in the body
-          stays read-only. */}
-      {canEditAddons && isOpen && !completed && !isEditingTask && (
-        <button onClick={() => setShowAddServiceModal(true)} style={tkLight}>
-          <Plus size={13} /> Add Service
-        </button>
-      )}
+      {/* "+ Add Service" lives inside BillingPreviewCard now, not in
+          the page footer. */}
       {/* Request Repair Quote — quick-action pill when no repair yet */}
       {task.itemId && !repairStatus && (
         <button
@@ -1648,13 +1491,8 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
   ];
 
   // Mounted in both shell branches so the picker overlays the panel/page.
-  const addServiceModal = showAddServiceModal && (
-    <AddTaskServiceModal
-      itemClass={task.itemClass || null}
-      onClose={() => setShowAddServiceModal(false)}
-      onSubmit={async input => { await addAddon(input); }}
-    />
-  );
+  // The Add Service modal now lives inside BillingPreviewCard, so the
+  // panel no longer needs to mount it itself.
 
   if (renderAsPage) {
     return (
@@ -1671,7 +1509,6 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
           footer={pageFooter}
         />
         <FloatingActionMenu show={isCompactViewport && !isEditingTask && !showPassFail} actions={fabActions} />
-        {addServiceModal}
       </>
     );
   }
@@ -1739,7 +1576,6 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
       resizeKey="task"
       defaultWidth={460}
     />
-    {addServiceModal}
     </>
   );
 }
