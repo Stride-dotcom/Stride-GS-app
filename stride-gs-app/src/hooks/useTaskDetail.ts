@@ -17,6 +17,7 @@ import {
 } from '../lib/supabaseQueries';
 import { fetchTaskById } from '../lib/api';
 import { useClients } from './useClients';
+import { entityEvents } from '../lib/entityEvents';
 import type { ApiTask, ApiRepair } from '../lib/api';
 
 export type TaskDetailStatus = 'loading' | 'loaded' | 'not-found' | 'access-denied' | 'error';
@@ -182,6 +183,20 @@ export function useTaskDetail(taskId: string | undefined, clientSheetIdHint?: st
     fetchTask();
     return () => { abortRef.current?.abort(); };
   }, [fetchTask]);
+
+  // Realtime: refetch when THIS task (or a repair on the same item) is
+  // updated cross-tab / cross-user. useSupabaseRealtime (mounted once in
+  // AppLayout) emits debounced events on every Supabase write to the
+  // mirror tables; we listen for our own type + id and refetch silently
+  // so the open panel stays in sync without the user touching anything.
+  useEffect(() => {
+    if (!taskId) return;
+    return entityEvents.subscribe((type, id) => {
+      if (type === 'task' && id === taskId) void fetchTask();
+      // Repair changes on the same item also affect relatedRepairs[].
+      if (type === 'repair' && task?.itemId) void fetchTask();
+    });
+  }, [taskId, fetchTask, task?.itemId]);
 
   return { task, relatedRepairs, status, error, source, refetch: fetchTask };
 }

@@ -15,6 +15,7 @@ import {
 } from '../lib/supabaseQueries';
 import { fetchRepairById } from '../lib/api';
 import { useClients } from './useClients';
+import { entityEvents } from '../lib/entityEvents';
 import type { ApiRepair } from '../lib/api';
 
 export type RepairDetailStatus = 'loading' | 'loaded' | 'not-found' | 'access-denied' | 'error';
@@ -142,6 +143,15 @@ export function useRepairDetail(repairId: string | undefined): UseRepairDetailRe
     fetchRepair();
     return () => { abortRef.current?.abort(); };
   }, [fetchRepair]);
+
+  // Realtime: refetch when this repair is updated cross-tab/cross-user.
+  // Hooks into the central `useSupabaseRealtime` channel via entityEvents.
+  useEffect(() => {
+    if (!repairId) return;
+    return entityEvents.subscribe((type, id) => {
+      if (type === 'repair' && id === repairId) void fetchRepair();
+    });
+  }, [repairId, fetchRepair]);
 
   return { repair, status, error, source, refetch: fetchRepair };
 }

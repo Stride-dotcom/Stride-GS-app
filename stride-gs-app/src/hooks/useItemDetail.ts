@@ -7,6 +7,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import { fetchItemByIdFromSupabase, type ClientNameMap } from '../lib/supabaseQueries';
 import { useClients } from './useClients';
+import { entityEvents } from '../lib/entityEvents';
 import type { ApiInventoryItem } from '../lib/api';
 
 export type ItemDetailStatus = 'loading' | 'loaded' | 'not-found' | 'access-denied' | 'error';
@@ -81,6 +82,20 @@ export function useItemDetail(itemId: string | undefined): UseItemDetailResult {
   useEffect(() => {
     fetchItem();
   }, [fetchItem, clients.length]); // clients.length triggers refetch once clients load
+
+  // Realtime: refetch when this inventory item changes cross-tab/user.
+  // useSupabaseRealtime emits debounced events on every Supabase mirror
+  // write; we listen for our own type + id and refetch silently so the
+  // open detail panel always reflects fresh state. Also reacts to
+  // task/repair/will_call writes against this item — they don't change
+  // the item row itself, but tabs in the panel that surface counts /
+  // related-entity status can pick up the change on the next render.
+  useEffect(() => {
+    if (!itemId) return;
+    return entityEvents.subscribe((type, id) => {
+      if (type === 'inventory' && id === itemId) void fetchItem();
+    });
+  }, [itemId, fetchItem]);
 
   return { item, status, error, refetch: fetchItem };
 }

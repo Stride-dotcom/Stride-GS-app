@@ -10,6 +10,7 @@ import { useAuth } from '../contexts/AuthContext';
 import { fetchWillCallByIdFromSupabase, type ClientNameMap } from '../lib/supabaseQueries';
 import { fetchWillCallById } from '../lib/api';
 import { useClients } from './useClients';
+import { entityEvents } from '../lib/entityEvents';
 import type { ApiWillCall } from '../lib/api';
 
 export type WillCallDetailStatus = 'loading' | 'loaded' | 'not-found' | 'access-denied' | 'error';
@@ -135,6 +136,15 @@ export function useWillCallDetail(wcNumber: string | undefined): UseWillCallDeta
     fetchWc();
     return () => { abortRef.current?.abort(); };
   }, [fetchWc]);
+
+  // Realtime: refetch when this will-call is updated cross-tab/cross-user.
+  // Hooks into the central `useSupabaseRealtime` channel via entityEvents.
+  useEffect(() => {
+    if (!wcNumber) return;
+    return entityEvents.subscribe((type, id) => {
+      if (type === 'will_call' && id === wcNumber) void fetchWc();
+    });
+  }, [wcNumber, fetchWc]);
 
   return { wc, status, error, source, refetch: fetchWc };
 }
