@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.143.0 — 2026-05-02 PST — Task add-on services. handleCompleteTask_ now flushes public.task_addons rows to the client Billing_Ledger after the primary service charge, one row per addon, snapshotting the rate captured at add-time. Ledger Row IDs are {taskId}-{svcCode}-ADDON-{n} for uniqueness; Task ID column carries {taskId}-{svcCode} per spec so unbilled reports distinguish the addon line from the parent. Each addon row also goes through resyncEntityToSupabase_ so the React Billing page sees it within ~1-2s. Fetch is via new api_fetchTaskAddons_ (GET /rest/v1/task_addons?tenant_id=eq.X&task_id=eq.Y&order=created_at.asc). Failures are non-fatal warnings so the primary task billing always lands. New table: public.task_addons (migration 20260502160000_task_addons.sql).
+   StrideAPI.gs — v38.143.1 — 2026-05-02 PST — Two cleanups in the will-call cancellation path. (1) handleBatchCancelWillCalls_ was re-reading the WC_Items snapshot inside its outer WC loop AND writing one setValue per cascaded item — for M WCs × N items, that's M sheet reads + M*N round-trips. New code reads WC_Items ONCE before the outer loop, accumulates cancel-row numbers across all WCs into wciCancelRows, and does a single bulk setValues over the contiguous range at the end (same recipe as #188; differs only in that this wciData is sliced from row 2 with no header, so sheet row R maps to wciData[R - 2]). (2) handleCancelWillCall_ no longer re-reads wciMap2/wciData2 to build the email items table — reuses the section-4 wciData snapshot since item-level fields don't change with cancellation.
+   v38.143.0: Task add-on services. handleCompleteTask_ now flushes public.task_addons rows to the client Billing_Ledger after the primary service charge, one row per addon, snapshotting the rate captured at add-time. Ledger Row IDs are {taskId}-{svcCode}-ADDON-{n} for uniqueness; Task ID column carries {taskId}-{svcCode} per spec so unbilled reports distinguish the addon line from the parent. Each addon row also goes through resyncEntityToSupabase_ so the React Billing page sees it within ~1-2s. Fetch is via new api_fetchTaskAddons_ (GET /rest/v1/task_addons?tenant_id=eq.X&task_id=eq.Y&order=created_at.asc). Failures are non-fatal warnings so the primary task billing always lands. New table: public.task_addons (migration 20260502160000_task_addons.sql).
    v38.142.12: Class C bulk-write fix for handleStartTask_, handleCompleteTask_, handleCompleteRepair_. Each was doing 4-8 separate setValue() calls per request (one row across many columns), 500ms-2s each, totalling 5-15 sec of latency. Refactored each to mutate the in-memory rowData (already read once at function start) via a setRowVal_ helper that tracks modified columns, then write ONCE via setValues over the contiguous slice covering all touched columns. Untouched-but-in-slice columns write back their existing values from the snapshot so unrelated cells aren't clobbered. Single-row contiguous version of the same recipe used in #186/#187/#188. Also drops a now-redundant SpreadsheetApp.flush() inside handleCompleteTask_'s Custom Price branch — the bulk write at end-of-try makes it meaningless, and resyncEntityToSupabase_ flushes itself before reading. Each handler now responds in <2 sec.
    v38.142.11: Supabase write-through batch fix. api_writeThrough_ now dispatches to a new resyncEntitiesBatchToSupabase_ when called with 2+ entity IDs, doing ONE supabaseBatchUpsert_ instead of N per-row POSTs. The four batch-cancel/reassign handlers now pass succeededIds as an array so they get the batched path. For a 50-item release the writeThrough phase drops from ~10-25 sec (50 sequential POSTs) to ~0.5-1 sec (1 batched POST). For batch-cancel-20-tasks: ~4-10 sec → ~0.5 sec. Single-ID router cases unchanged. On batch failure or "clients" entity type, falls back to the existing per-row path so gs_sync_events still gets per-entity failure rows for the React FailedOperationsDrawer.
    v38.142.10: handleCancelWillCall_ bulk-write performance fix matching the #186/#187 recipe. Old code did setValue("Cancelled") inside the loop over matching WC_Items rows — one ~500ms-2s round-trip per item. Cancelling a 20-item will call was a 1-2 minute hang. New code collects matched row numbers, finds the contiguous range covering them, and writes the Status column ONCE via setValues — initialized from the snapshot so untouched rows in the range keep their existing values. Cancel now completes in under 5 seconds regardless of WC size.
@@ -18481,21 +18482,27 @@ function handleCancelWillCall_(clientSheetId, payload) {
   }
 
   // ─── 5. Build items table for email (v38.64.0 — canonical 6-col builder) ───
+  // v38.142.13 — Reuse the wciMap/wciData read at the top of section 4
+  // instead of re-reading the same sheet. Item-level fields (Item ID, Qty,
+  // Vendor, Description, Sidemark) don't change due to cancellation, so the
+  // pre-write snapshot is identical to a fresh read. (Section 4's bulk
+  // setValues only touched the Status column, which we don't read here.)
+  // wciMap and wciData are var-declared inside section 4's `if` block but
+  // function-scoped via `var`, so they're visible here when the same gate
+  // condition holds.
   var itemsTableHtml = "";
   if (wciSh && wciSh.getLastRow() >= 2) {
-    var wciMap2 = api_getHeaderMap_(wciSh);
-    var wciData2 = wciSh.getDataRange().getValues();
     var _canRefMap = api_buildItemIdToReferenceMap_(ss);
     var cancelItemsForTable = [];
-    for (var j = 1; j < wciData2.length; j++) {
-      if (String(wciData2[j][(wciMap2["WC Number"] || 1) - 1] || "").trim() === wcNumber) {
-        var _iid = String(wciData2[j][(wciMap2["Item ID"] || 1) - 1] || "");
+    for (var j = 1; j < wciData.length; j++) {
+      if (String(wciData[j][(wciMap["WC Number"] || 1) - 1] || "").trim() === wcNumber) {
+        var _iid = String(wciData[j][(wciMap["Item ID"] || 1) - 1] || "");
         cancelItemsForTable.push({
           itemId:      _iid,
-          qty:         wciMap2["Qty"]         ? (wciData2[j][wciMap2["Qty"] - 1] || 1)                 : 1,
-          vendor:      wciMap2["Vendor"]      ? String(wciData2[j][wciMap2["Vendor"] - 1] || "")       : "",
-          description: wciMap2["Description"] ? String(wciData2[j][wciMap2["Description"] - 1] || "")  : "",
-          sidemark:    wciMap2["Sidemark"]    ? String(wciData2[j][wciMap2["Sidemark"] - 1] || "")     : "",
+          qty:         wciMap["Qty"]         ? (wciData[j][wciMap["Qty"] - 1] || 1)                 : 1,
+          vendor:      wciMap["Vendor"]      ? String(wciData[j][wciMap["Vendor"] - 1] || "")       : "",
+          description: wciMap["Description"] ? String(wciData[j][wciMap["Description"] - 1] || "")  : "",
+          sidemark:    wciMap["Sidemark"]    ? String(wciData[j][wciMap["Sidemark"] - 1] || "")     : "",
           reference:   _canRefMap[_iid] || ""
         });
       }
@@ -25113,6 +25120,19 @@ function handleBatchCancelWillCalls_(clientSheetId, payload) {
   var wciMap = wciSh ? api_getHeaderMap_(wciSh) : null;
   var wciNumCol = wciMap ? wciMap["WC Number"] : null;
   var wciStatusCol = wciMap ? wciMap["Status"] : null;
+
+  // v38.142.13 — Read the WC_Items snapshot ONCE (was being re-read inside
+  // the outer WC loop every iteration) and accumulate per-row cancel
+  // mutations across all WCs into wciCancelRows. Single bulk setValues at
+  // the end replaces M×N individual setValue round-trips (M WCs × N items
+  // each) with one. Same recipe as #188; differs only in that this wciData
+  // is sliced from row 2 (no header), so sheet row R maps to wciData[R - 2].
+  var wciData = null;
+  if (wciSh && wciNumCol && wciStatusCol && wciSh.getLastRow() >= 2) {
+    wciData = wciSh.getRange(2, 1, wciSh.getLastRow() - 1, wciSh.getLastColumn()).getValues();
+  }
+  var wciCancelRows = []; // sheet row numbers across ALL WCs needing Status="Cancelled"
+
   var succeededIds = [];
   var itemsCascaded = 0;
 
@@ -25135,15 +25155,16 @@ function handleBatchCancelWillCalls_(clientSheetId, payload) {
       // Write header status
       wcSh.getRange(wcRow, wcStatusCol).setValue("Cancelled");
 
-      // Cascade to WC_Items: Released stays Released, Cancelled stays Cancelled, others → Cancelled
-      if (wciSh && wciNumCol && wciStatusCol && wciSh.getLastRow() >= 2) {
-        var wciData = wciSh.getRange(2, 1, wciSh.getLastRow() - 1, wciSh.getLastColumn()).getValues();
+      // Cascade to WC_Items: collect rows to cancel into wciCancelRows; the
+      // single bulk setValues happens after the outer loop completes.
+      // Released stays Released, Cancelled stays Cancelled, others → Cancelled.
+      if (wciData) {
         for (var j = 0; j < wciData.length; j++) {
           var rowWcNum = String(wciData[j][wciNumCol - 1] || "").trim();
           if (rowWcNum !== wcNumber) continue;
           var itemStatus = String(wciData[j][wciStatusCol - 1] || "").trim();
           if (itemStatus === "Released" || itemStatus === "Cancelled") continue;
-          wciSh.getRange(j + 2, wciStatusCol).setValue("Cancelled");
+          wciCancelRows.push(j + 2); // sheet row = j + 2 (wciData starts at row 2)
           itemsCascaded++;
         }
       }
@@ -25153,6 +25174,28 @@ function handleBatchCancelWillCalls_(clientSheetId, payload) {
     } catch (rowErr) {
       api_batchError_(result, wcNumber, String(rowErr));
     }
+  }
+
+  // v38.142.13 — Single bulk setValues for WC_Items Status across ALL WCs.
+  // Same snapshot+slice recipe as #188; intermediate untouched rows in the
+  // contiguous range write back their existing values from wciData. A
+  // given WC_Items row belongs to exactly one parent WC, so wciCancelRows
+  // contains no duplicates regardless of how many WCs were processed.
+  if (wciData && wciCancelRows.length > 0) {
+    var minRow = wciCancelRows[0], maxRow = wciCancelRows[0];
+    for (var cc = 1; cc < wciCancelRows.length; cc++) {
+      if (wciCancelRows[cc] < minRow) minRow = wciCancelRows[cc];
+      if (wciCancelRows[cc] > maxRow) maxRow = wciCancelRows[cc];
+    }
+    var bcHeight = maxRow - minRow + 1;
+    var bcStatusWrites = new Array(bcHeight);
+    for (var bk = 0; bk < bcHeight; bk++) {
+      bcStatusWrites[bk] = [wciData[minRow - 2 + bk][wciStatusCol - 1]];
+    }
+    for (var bm = 0; bm < wciCancelRows.length; bm++) {
+      bcStatusWrites[wciCancelRows[bm] - minRow] = ["Cancelled"];
+    }
+    wciSh.getRange(minRow, wciStatusCol, bcHeight, 1).setValues(bcStatusWrites);
   }
 
   try { SpreadsheetApp.flush(); } catch (_) {}
