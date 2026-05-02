@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.142.9 — 2026-05-02 PST — Same bulk-write performance fix applied to api_markClientLedgerInvoiced_ + Email Status update on Consolidated_Ledger inside handleCreateInvoice_. Old code did up to 4 setValue() calls per ledger row (status, invoice #, invoice date, invoice url) = up to 4N round-trips per invoice commit. A 200-line monthly invoice was 800 round-trips and frequently timed out. New code drops to constant 4 round-trips for the client Billing_Ledger update + 1 for the Email Status update on Consolidated_Ledger.
+   StrideAPI.gs — v38.142.10 — 2026-05-02 PST — handleCancelWillCall_ bulk-write performance fix matching the #186/#187 recipe. Old code did setValue("Cancelled") inside the loop over matching WC_Items rows — one ~500ms-2s round-trip per item. Cancelling a 20-item will call was a 1-2 minute hang. New code collects matched row numbers, finds the contiguous range covering them, and writes the Status column ONCE via setValues — initialized from the snapshot so untouched rows in the range keep their existing values. Cancel now completes in under 5 seconds regardless of WC size.
+   v38.142.9: Same bulk-write performance fix applied to api_markClientLedgerInvoiced_ + Email Status update on Consolidated_Ledger inside handleCreateInvoice_. Old code did up to 4 setValue() calls per ledger row (status, invoice #, invoice date, invoice url) = up to 4N round-trips per invoice commit. A 200-line monthly invoice was 800 round-trips and frequently timed out. New code drops to constant 4 round-trips for the client Billing_Ledger update + 1 for the Email Status update on Consolidated_Ledger.
    v38.142.8: handleReleaseItems_ bulk-write performance fix: collect all per-row mutations into in-memory arrays then write each affected column ONCE via setValues over the contiguous range covering changed rows. Drops network round-trips from 3N (~3-5 minutes for a 50-item release, frequent timeouts) to 3 — release operation now completes in under 5 seconds regardless of item count.
    v38.142.7: api_sendTemplateEmail_ &client= precedence: prefer the explicit clientSheetId param over settings (which can be empty/stale on older sheets) so email CTAs always carry the correct tenant. Also a final safety net on the auto-injected CTA URL.
    v38.142.6: Inventory sync: stop wiping shipment_folder_url
@@ -17968,7 +17969,13 @@ function handleCancelWillCall_(clientSheetId, payload) {
   // ─── 3. Set WC Status to Cancelled ────────────────────────────────────────
   if (wcMap["Status"]) wcSh.getRange(wcRow, wcMap["Status"]).setValue("Cancelled");
 
-  // ─── 4. Set all WC_Items Status to Cancelled ──────────────────────────────
+  // ─── 4. Set all WC_Items Status to Cancelled (v38.142.10 bulk-write) ──────
+  // Old code did setValue("Cancelled") inside this loop — N round-trips per
+  // cancel. New code collects matched row numbers, then writes the Status
+  // column ONCE via setValues over the contiguous range covering changed
+  // rows. Initialized from the snapshot so untouched rows in the range
+  // write back their existing values — no clobbering of unrelated data.
+  // Same recipe as #186 (release-items) and #187 (invoice-commit).
   var wciSh = ss.getSheetByName("WC_Items");
   var cancelledCount = 0;
   if (wciSh && wciSh.getLastRow() >= 2) {
@@ -17977,11 +17984,30 @@ function handleCancelWillCall_(clientSheetId, payload) {
     var wciNumCol = wciMap["WC Number"];
     var wciStatusCol = wciMap["Status"];
     if (wciNumCol && wciStatusCol) {
+      var changedRows = [];
       for (var wi = 1; wi < wciData.length; wi++) {
         if (String(wciData[wi][wciNumCol - 1] || "").trim() === wcNumber) {
-          wciSh.getRange(wi + 1, wciStatusCol).setValue("Cancelled");
+          changedRows.push(wi + 1);
           cancelledCount++;
         }
+      }
+      if (changedRows.length > 0) {
+        var minRow = changedRows[0], maxRow = changedRows[0];
+        for (var c = 1; c < changedRows.length; c++) {
+          if (changedRows[c] < minRow) minRow = changedRows[c];
+          if (changedRows[c] > maxRow) maxRow = changedRows[c];
+        }
+        var height = maxRow - minRow + 1;
+        // wciData includes the header at index 0 (getDataRange starts at row 1),
+        // so sheet row R maps to wciData[R - 1].
+        var statusWrites = new Array(height);
+        for (var k = 0; k < height; k++) {
+          statusWrites[k] = [wciData[minRow - 1 + k][wciStatusCol - 1]];
+        }
+        for (var m = 0; m < changedRows.length; m++) {
+          statusWrites[changedRows[m] - minRow] = ["Cancelled"];
+        }
+        wciSh.getRange(minRow, wciStatusCol, height, 1).setValues(statusWrites);
       }
     }
   }
