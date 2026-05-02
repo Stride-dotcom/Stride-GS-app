@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom';
 import { Settings as SettingsIcon, Users, DollarSign, Mail, Database, Globe, Bell, Plus, ChevronRight, CheckCircle2, AlertCircle, UserPlus, Shield, ToggleLeft, ToggleRight, Eye, EyeOff, Wifi, WifiOff, RefreshCw, Loader2, RefreshCcw, ExternalLink, Wrench, PlayCircle, Send, FolderSync, BookText, LogIn, Cloud, Edit2, Zap, ArrowUpDown, ChevronUp, ChevronDown, X, Truck, Link2, Search } from 'lucide-react';
 import { useReactTable, getCoreRowModel, getSortedRowModel, flexRender, type SortingState, type ColumnDef } from '@tanstack/react-table';
-import { getApiUrl, getApiToken, setApiCredentials, isApiConfigured, fetchHealth, postOnboardClient, postUpdateClient, postSyncSettings, postRefreshCaches, postFixMissingFolders, postTestSendClientTemplates, postTestSendClaimEmails, fetchAutoIdSetting, postUpdateAutoIdSetting, postResolveOnboardUser, fetchStaxConfig, postUpdateStaxConfig, apiPost, postSyncTemplatesToClients, postBulkSyncToSupabase, postPurgeInactiveFromSupabase, fetchClients, postFinishClientSetup, postSendOnboardingToUsers, resyncUsersPreview, resyncUsers, resyncClientsPreview, resyncClients, setNextFetchNoCache, adminSetUserPassword, ensureUserInAuth, listMissingAuthUsers, postTestGenerateDoc, apiFetch, postSendIntakeInvitation } from '../lib/api';
+import { getApiUrl, getApiToken, setApiCredentials, isApiConfigured, fetchHealth, postOnboardClient, postUpdateClient, postSyncSettings, postRefreshCaches, postFixMissingFolders, postTestSendClientTemplates, postTestSendClaimEmails, fetchAutoIdSetting, postUpdateAutoIdSetting, postResolveOnboardUser, fetchStaxConfig, postUpdateStaxConfig, apiPost, postSyncTemplatesToClients, postBulkSyncToSupabase, postPurgeInactiveFromSupabase, fetchClients, postFinishClientSetup, resyncUsersPreview, resyncUsers, resyncClientsPreview, resyncClients, setNextFetchNoCache, adminSetUserPassword, ensureUserInAuth, listMissingAuthUsers, postTestGenerateDoc, apiFetch, postSendIntakeInvitation } from '../lib/api';
 import type { BulkSyncResult } from '../lib/api';
 import type { EmailTemplate } from '../lib/api';
 import { entityEvents } from '../lib/entityEvents';
@@ -1038,16 +1038,22 @@ export function Settings() {
     setSendingWelcomeEmail(userEmail);
     setSendWelcomeResult(null);
     try {
-      const res = await postSendOnboardingToUsers({ userEmails: [userEmail] });
-      if (res.ok && res.data?.success) {
-        const row = res.data.results[0];
+      const { data, error } = await supabase.functions.invoke<{
+        success: boolean;
+        sent: number;
+        failed: number;
+        results: Array<{ email: string; ok: boolean; reason?: string; error?: string }>;
+        error?: string;
+      }>('send-onboarding-email', { body: { userEmails: [userEmail] } });
+      if (!error && data?.success) {
+        const row = data.results[0];
         if (row?.ok) {
           setSendWelcomeResult({ email: userEmail, ok: true, message: `Onboarding email sent to ${userEmail}` });
         } else {
           setSendWelcomeResult({ email: userEmail, ok: false, message: `Send failed: ${row?.reason || row?.error || 'unknown'}` });
         }
       } else {
-        setSendWelcomeResult({ email: userEmail, ok: false, message: res.error || res.data?.error || 'Request failed' });
+        setSendWelcomeResult({ email: userEmail, ok: false, message: error?.message || data?.error || 'Request failed' });
       }
     } catch (err) {
       setSendWelcomeResult({ email: userEmail, ok: false, message: String(err) });
