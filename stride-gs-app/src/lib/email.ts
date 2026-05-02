@@ -48,6 +48,15 @@ export interface SendEmailParams {
   relatedEntityType?: string;
   relatedEntityId?: string;
   tenantId?: string;
+  /** Attachments. Each item must include `filename` and EITHER `content`
+   *  (base64-encoded string) OR `path` (publicly fetchable URL — Resend
+   *  fetches it server-side). 40 MB total per-send limit. */
+  attachments?: Array<{
+    filename: string;
+    content?: string;
+    path?: string;
+    contentType?: string;
+  }>;
 }
 
 export interface SendEmailResult {
