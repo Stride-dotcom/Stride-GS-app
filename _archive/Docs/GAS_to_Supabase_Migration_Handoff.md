@@ -445,5 +445,108 @@ log viewer.
 
 ---
 
+## 📋 Billing-page audit (added 2026-05-02 after Justin questions)
+
+Justin asked why insurance was missing from the Billing → Report Service
+filter dropdown, how insurance was being invoiced if auto-added monthly,
+and whether the filter could support category + service combos. Audit
+surfaced three actionable items + one significant discovery.
+
+### PR 1 ✅ — INSURANCE row seeded in service_catalog
+
+`service_catalog` was missing the `INSURANCE` row entirely. The
+2026-05-01 rate-change migration tried to UPDATE it but no row
+existed — silent no-op. The cron `insurance_bill_due()` writes
+billing rows with `svc_code='INSURANCE'` monthly, but those rows
+couldn't be filtered by name in any UI surface since the row didn't
+exist in service_catalog.
+
+Migration `20260502130000_seed_insurance_service_catalog.sql` seeds
+the row idempotently. Already in source via PR #183; live DB row
+verified.
+
+### PR 2 ⏭️ NEXT-SESSION — Billing services filter reads from Supabase
+
+`Billing.tsx` line 369 still does
+`const { priceList } = usePricing(apiConfigured);` — that's the
+GAS-backed hook. Master Price List uses `useServiceCatalog`
+(Supabase-native) but Billing never got swapped, so its filter:
+- doesn't see new services admins add via Settings → Pricing
+- adds an unnecessary GAS round-trip
+- caches behind the price list
+
+**Fix scope (~30 min):**
+- `src/pages/Billing.tsx`:
+  - line 52: swap `usePricing` import → `useServiceCatalog`
+  - line 369: `const { services } = useServiceCatalog();`
+  - lines 370–386: rewrite `ALL_SERVICES` memo to map `services`
+    (Supabase shape: `code`, `name`, `category`, `active`) instead of
+    `priceList` (GAS shape: `'Service Code'`, `'Service Name'`, `Active`)
+  - drop the hardcoded fallback list (lines 377–385) — `useServiceCatalog`
+    handles loading state correctly
+- Verify `nameToCode` map at line 491 still resolves
+- Typecheck + build + commit + PR + merge + deploy
+
+### PR 3 ⏳ FUTURE — Category + service combo filter
+
+`service_catalog.category` exists with 9 categories (Admin 3, Delivery
+13, Fabric Protection 11, Labor 5, Repair 2, Shipping 4, Storage 2,
+Warehouse 15, Assembly 0). `billing.category` is also already
+populated on write — no migration needed.
+
+**Fix scope (~1–2 hours):**
+- Add `Category` `MultiSelectFilter` next to existing `Service` filter
+  in `Billing.tsx` (~line 1770)
+- When categories selected, narrow Service dropdown options reactively
+- Extend `BillingFilterParams` (`lib/api.ts` + matching Supabase query
+  in `lib/supabaseQueries.ts → fetchBillingFromSupabaseFiltered`) with
+  `categoryFilter?: string[]`. WHERE clause: `category = ANY(...)`
+  when filter non-empty
+- Mirror in GAS fallback path (or skip — Supabase mirror is current,
+  GAS fallback rarely hits for billing reads)
+
+### 🔍 DISCOVERY — `billing_parity_log` is ALREADY shadow-running
+
+Major finding from this session. The shadow-mode parity infrastructure
+described as "future work" in this doc's billing-engine-port section
+**already exists and is actively running**.
+
+`public.billing_parity_log` as of 2026-05-02:
+- **64,288 rows** of side-by-side rate computations (sheet vs Supabase)
+- **Match rate: 95.94%** (61,677 matches / 2,611 mismatches)
+- **1,867 of those mismatches are from the last 7 days alone**
+- Each row: tenant_id, item_id, svc_code, item_class, sheet_rate,
+  supabase_rate, sheet_total, supabase_total, qty, match, delta,
+  event_source, billing_ledger_id, created_at
+
+**Implication for migration plan:** the billing-engine port phase is
+partially de-risked — dual-computation infra is wired. Before any
+flip-to-Supabase-authoritative, **investigate the 4% mismatch**.
+
+Useful starting query:
+```sql
+-- Mismatch distribution by service code (last 7 days)
+SELECT svc_code,
+       count(*) AS mismatches,
+       ROUND(AVG(ABS(supabase_total::numeric - sheet_total::numeric)), 2) AS avg_delta,
+       MAX(ABS(supabase_total::numeric - sheet_total::numeric)) AS max_delta
+FROM public.billing_parity_log
+WHERE match = false AND created_at > now() - interval '7 days'
+GROUP BY svc_code
+ORDER BY mismatches DESC;
+```
+
+If mismatches concentrate on a few svc_codes → fixable rule-by-rule.
+If spread broadly → deeper engine bug. Either way the answer is the
+gating question for the eventual cutover.
+
+A **billing parity dashboard** (admin-only Settings tab) would make
+this triagable: mismatch list, by-svc-code breakdown, delta histogram,
+optional "freeze parity → flip to Supabase authority per svc_code"
+admin control once mismatch count hits zero per code. Maybe the next
+real billing-related PR after PR 2 + PR 3 land.
+
+---
+
 End of handoff doc. Update the scoreboard + status TL;DR in this file
 when you ship more migrations.
