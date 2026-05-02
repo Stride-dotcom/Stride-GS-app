@@ -49,7 +49,7 @@ import {
 import type { ClientNameMap } from '../lib/supabaseQueries';
 import { useBilling } from '../hooks/useBilling';
 import { useClients } from '../hooks/useClients';
-import { usePricing } from '../hooks/usePricing';
+import { useServiceCatalog } from '../hooks/useServiceCatalog';
 import { BillingDetailPanel } from '../components/shared/BillingDetailPanel';
 import { useTablePreferences } from '../hooks/useTablePreferences';
 import { InfoTooltip } from '../components/shared/InfoTooltip';
@@ -365,25 +365,21 @@ export function Billing() {
   const activeTab: BillingTab = (VALID_BILLING_TABS as readonly string[]).includes(tabRaw) ? (tabRaw as BillingTab) : 'report';
   const setActiveTab = useCallback((next: BillingTab) => setTabRaw(next), [setTabRaw]);
 
-  // ─── Service list from Master Price List (dynamic, not hardcoded) ─────────
-  const { priceList } = usePricing(apiConfigured);
-  const ALL_SERVICES = useMemo(() => {
-    if (priceList.length) {
-      return priceList
-        .filter(r => r.Active)
-        .map(r => ({ code: String(r['Service Code'] || '').trim(), name: String(r['Service Name'] || '').trim() }))
-        .filter(s => s.code);
-    }
-    return [
-      { code: 'RCVG', name: 'Receiving' }, { code: 'INSP', name: 'Inspection' },
-      { code: 'ASM', name: 'Assembly' }, { code: 'REPAIR', name: 'Repair (Flat)' },
-      { code: 'PLLT', name: 'Palletize' }, { code: 'PICK', name: 'Pull Prep' },
-      { code: 'LABEL', name: 'Relabeling' }, { code: 'DISP', name: 'Disposal' },
-      { code: 'RSTK', name: 'Restock' }, { code: 'MNRTU', name: 'Minor Touch Up' },
-      { code: 'STOR', name: 'Storage' }, { code: 'WC', name: 'Will Call Release' },
-      { code: 'SIT', name: 'Sit Test' },
-    ];
-  }, [priceList]);
+  // ─── Service list from Master Price List (Supabase service_catalog) ─────────
+  // Reads directly from Supabase (Master Price List is fully Supabase-native;
+  // see Settings → Pricing). The previous implementation pulled this list
+  // through GAS via apiFetch('getPricing') — a leftover from when the price
+  // list was sheet-backed. Swapping to useServiceCatalog means new services
+  // admins add via Settings → Pricing show up in this dropdown immediately,
+  // INSURANCE (cron-billed monthly) is finally filterable, and we drop one
+  // unnecessary GAS round-trip on every Billing-page load.
+  const { services } = useServiceCatalog();
+  const ALL_SERVICES = useMemo(
+    () => services
+      .filter(s => s.active && s.code)
+      .map(s => ({ code: s.code, name: s.name })),
+    [services],
+  );
 
   // Non-storage services for billing report tab
   const NON_STOR_SERVICES = useMemo(() => ALL_SERVICES.filter(s => s.code !== 'STOR'), [ALL_SERVICES]);
