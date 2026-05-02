@@ -190,6 +190,13 @@ Deno.serve(async (req: Request) => {
   let resendStatus: number;
   let resendBody: { id?: string; message?: string; name?: string };
   try {
+    // Gmail and Outlook (Feb 2024+) require List-Unsubscribe headers on
+    // bulk + automated mail or they'll bias toward spam. We always include:
+    //   List-Unsubscribe: <mailto:unsubscribe@stridenw.com>
+    //   List-Unsubscribe-Post: List-Unsubscribe=One-Click
+    // The mailto target lands at a real Stride inbox; staff can manually
+    // remove the recipient from any future automated sends. (If/when an
+    // unsubscribe-management table lands, we'll switch to a URL form.)
     const resp = await fetch(RESEND_ENDPOINT, {
       method: 'POST',
       headers: {
@@ -204,6 +211,10 @@ Deno.serve(async (req: Request) => {
         reply_to: replyTo,
         subject,
         html,
+        headers: {
+          'List-Unsubscribe': '<mailto:unsubscribe@stridenw.com>',
+          'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
+        },
       }),
     });
     resendStatus = resp.status;
