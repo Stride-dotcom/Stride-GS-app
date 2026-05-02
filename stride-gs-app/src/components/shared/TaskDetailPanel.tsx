@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useMemo, useEffect } from 'react';
-import { X, Package, MapPin, CheckCircle2, XCircle, AlertTriangle, FolderOpen, Loader2, Play, ExternalLink, Wrench, Save, DollarSign, Pencil, FileText, MoreHorizontal, RotateCcw, Plus, Trash2 } from 'lucide-react';
+import { X, Package, MapPin, CheckCircle2, XCircle, AlertTriangle, FolderOpen, Loader2, Play, ExternalLink, Wrench, Save, Pencil, FileText, MoreHorizontal, RotateCcw } from 'lucide-react';
 import { BtnSpinner } from '../ui/BtnSpinner';
 import { DeepLink } from './DeepLink';
 import { TabbedDetailPanel, type TabbedDetailPanelTab } from './TabbedDetailPanel';
