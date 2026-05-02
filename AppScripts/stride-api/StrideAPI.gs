@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.142.8 — 2026-05-02 PST — handleReleaseItems_ bulk-write performance fix: collect all per-row mutations into in-memory arrays then write each affected column ONCE via setValues over the contiguous range covering changed rows. Drops network round-trips from 3N (~3-5 minutes for a 50-item release, frequent timeouts) to 3 — release operation now completes in under 5 seconds regardless of item count.
+   StrideAPI.gs — v38.142.9 — 2026-05-02 PST — Same bulk-write performance fix applied to api_markClientLedgerInvoiced_ + Email Status update on Consolidated_Ledger inside handleCreateInvoice_. Old code did up to 4 setValue() calls per ledger row (status, invoice #, invoice date, invoice url) = up to 4N round-trips per invoice commit. A 200-line monthly invoice was 800 round-trips and frequently timed out. New code drops to constant 4 round-trips for the client Billing_Ledger update + 1 for the Email Status update on Consolidated_Ledger.
+   v38.142.8: handleReleaseItems_ bulk-write performance fix: collect all per-row mutations into in-memory arrays then write each affected column ONCE via setValues over the contiguous range covering changed rows. Drops network round-trips from 3N (~3-5 minutes for a 50-item release, frequent timeouts) to 3 — release operation now completes in under 5 seconds regardless of item count.
    v38.142.7: api_sendTemplateEmail_ &client= precedence: prefer the explicit clientSheetId param over settings (which can be empty/stale on older sheets) so email CTAs always carry the correct tenant. Also a final safety net on the auto-injected CTA URL.
    v38.142.6: Inventory sync: stop wiping shipment_folder_url
    v38.142.6: Two inventory write paths were calling sbInventoryRow_
@@ -20693,17 +20694,61 @@ function api_markClientLedgerInvoiced_(clientSheetId, ledgerRowIds, invNo, invDa
     if (lid) rowByLedgerId[lid] = r + 1;
   }
 
-  var touched = 0;
+  // v38.142.9 — Bulk-write performance fix. Same root cause as
+  // handleReleaseItems_ v38.142.8: previously did UP TO 4 setValue() calls
+  // per ledger row (status, invoice #, invoice date, invoice url), each a
+  // ~500ms-2s round-trip to Google's backend. A 200-line invoice was 800
+  // round-trips → multi-minute wait, frequent timeouts on big monthly
+  // commits. New pattern collects all changed row numbers first, computes
+  // the contiguous range covering them, initializes per-column write
+  // arrays from the existing data snapshot (preserves untouched rows),
+  // then writes each affected column ONCE via setValues. Up to 4 round-
+  // trips total regardless of invoice size — the wait drops from minutes
+  // to seconds.
+  var changedRows = [];  // ordered list of rowNums (sheet 1-indexed)
   for (var i = 0; i < ledgerRowIds.length; i++) {
     var rowNum = rowByLedgerId[String(ledgerRowIds[i]).trim()];
-    if (!rowNum) continue;
-    sh.getRange(rowNum, idxStatus).setValue("Invoiced");
-    if (idxInvNo)   sh.getRange(rowNum, idxInvNo).setValue(invNo);
-    if (idxInvDate) sh.getRange(rowNum, idxInvDate).setValue(invDate);
-    if (idxInvUrl)  sh.getRange(rowNum, idxInvUrl).setValue(invUrl);
-    touched++;
+    if (rowNum) changedRows.push(rowNum);
   }
-  return touched;
+
+  if (changedRows.length === 0) return 0;
+
+  var minRow = changedRows[0], maxRow = changedRows[0];
+  for (var c = 1; c < changedRows.length; c++) {
+    if (changedRows[c] < minRow) minRow = changedRows[c];
+    if (changedRows[c] > maxRow) maxRow = changedRows[c];
+  }
+  var height = maxRow - minRow + 1;
+
+  // Initialize write arrays from the snapshot — untouched rows write back
+  // their original values, no clobbering.
+  var statusWrites  = new Array(height);
+  var invNoWrites   = idxInvNo   ? new Array(height) : null;
+  var invDateWrites = idxInvDate ? new Array(height) : null;
+  var invUrlWrites  = idxInvUrl  ? new Array(height) : null;
+  for (var k = 0; k < height; k++) {
+    var srcRow = data[minRow - 1 + k]; // data is 0-indexed including the header at row 0; sheet row N → data[N-1]
+    statusWrites[k]  = [srcRow[idxStatus - 1]];
+    if (invNoWrites)   invNoWrites[k]   = [srcRow[idxInvNo - 1]];
+    if (invDateWrites) invDateWrites[k] = [srcRow[idxInvDate - 1]];
+    if (invUrlWrites)  invUrlWrites[k]  = [srcRow[idxInvUrl - 1]];
+  }
+
+  // Overlay mutations only on the ledger rows we're invoicing.
+  for (var m = 0; m < changedRows.length; m++) {
+    var idx = changedRows[m] - minRow;
+    statusWrites[idx]  = ["Invoiced"];
+    if (invNoWrites)   invNoWrites[idx]   = [invNo];
+    if (invDateWrites) invDateWrites[idx] = [invDate];
+    if (invUrlWrites)  invUrlWrites[idx]  = [invUrl];
+  }
+
+  sh.getRange(minRow, idxStatus, height, 1).setValues(statusWrites);
+  if (invNoWrites)   sh.getRange(minRow, idxInvNo,   height, 1).setValues(invNoWrites);
+  if (invDateWrites) sh.getRange(minRow, idxInvDate, height, 1).setValues(invDateWrites);
+  if (invUrlWrites)  sh.getRange(minRow, idxInvUrl,  height, 1).setValues(invUrlWrites);
+
+  return changedRows.length;
 }
 
 /**
@@ -21043,16 +21088,37 @@ function handleCreateInvoice_(payload) {
     }
   }
 
-  // Update Email Status in Consolidated_Ledger
+  // Update Email Status in Consolidated_Ledger.
+  // v38.142.9 — Bulk-write fix to match the sibling change in
+  // api_markClientLedgerInvoiced_. Old loop did one setValue per matching
+  // row; for an invoice with many ledger rows on a long Consolidated_Ledger
+  // that's N round-trips. New pattern collects matching rows then writes
+  // the whole Email Status column slice ONCE with setValues. Bounded to
+  // 1 round-trip regardless of match count.
   try {
-    var cVals = consolLedger.getDataRange().getValues();
+    var cVals  = consolLedger.getDataRange().getValues();
     var escIdx = cVals[0].map(String).indexOf("Email Status");
     var einIdx = cVals[0].map(String).indexOf("Invoice #");
     if (escIdx !== -1 && einIdx !== -1) {
+      var matchRows = [];
       for (var ei = 1; ei < cVals.length; ei++) {
-        if (String(cVals[ei][einIdx] || "").trim() === invNo) {
-          consolLedger.getRange(ei + 1, escIdx + 1).setValue(emailStatus);
+        if (String(cVals[ei][einIdx] || "").trim() === invNo) matchRows.push(ei + 1);
+      }
+      if (matchRows.length > 0) {
+        var minE = matchRows[0], maxE = matchRows[0];
+        for (var em = 1; em < matchRows.length; em++) {
+          if (matchRows[em] < minE) minE = matchRows[em];
+          if (matchRows[em] > maxE) maxE = matchRows[em];
         }
+        var heightE = maxE - minE + 1;
+        var emailStatusWrites = new Array(heightE);
+        for (var ek = 0; ek < heightE; ek++) {
+          emailStatusWrites[ek] = [cVals[minE - 1 + ek][escIdx]];
+        }
+        for (var emm = 0; emm < matchRows.length; emm++) {
+          emailStatusWrites[matchRows[emm] - minE] = [emailStatus];
+        }
+        consolLedger.getRange(minE, escIdx + 1, heightE, 1).setValues(emailStatusWrites);
       }
     }
   } catch (_) {}
