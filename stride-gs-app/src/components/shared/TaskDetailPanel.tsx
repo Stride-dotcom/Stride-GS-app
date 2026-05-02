@@ -29,6 +29,7 @@ import { SERVICE_CODES } from '../../lib/constants';
 import { ProcessingOverlay } from './ProcessingOverlay';
 import { AddTaskServiceModal } from './AddTaskServiceModal';
 import { useTaskAddons } from '../../hooks/useTaskAddons';
+import { BillingPreviewCard } from './BillingPreviewCard';
 
 import type { Task, Repair, InventoryItem } from '../../lib/types';
 interface Props {
@@ -1008,6 +1009,21 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
               )}
             </div>
           )}
+
+          {/* Billing Preview — staff/admin only. Collapsed by default;
+              shows projected charges (primary svc rate from catalog +
+              queued add-ons) and recorded ledger rows for this task. */}
+          <BillingPreviewCard
+            entityType="task"
+            entityId={task.taskId}
+            tenantId={clientSheetId}
+            itemId={task.itemId ? String(task.itemId) : null}
+            svcCode={task.svcCode || task.serviceCode || task.type || null}
+            itemClass={task.itemClass || null}
+            customPrice={task.customPrice != null ? Number(task.customPrice) : null}
+            addons={addons}
+            visible={canEditAddons}
+          />
 
         </div>
   );
