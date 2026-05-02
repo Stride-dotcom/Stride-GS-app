@@ -68,6 +68,12 @@
 
 **2026-03-31 session 26:** Role-based access + per-user table persistence. 3-tier nav: admin=full, staff=7 items, client=7 items. `RoleGuard` in App.tsx. Settings admin-only. `useTablePreferences` keyed by user.email. Column drag-to-reorder on ALL 8 TanStack Table pages.
 
+## 2026-05
+
+**2026-05-02 session 90 — GAS→Supabase email migration batch:** Three PRs shipped against `source`. (1) [#174](https://github.com/Stride-dotcom/Stride-GS-app/pull/174) `notify-new-order` + `notify-public-request` edge functions stop POSTing to GAS sendRawEmail and now hand off to `send-email` (Resend); idempotency keys derived from order id. (2) [#175](https://github.com/Stride-dotcom/Stride-GS-app/pull/175) new `send-onboarding-email` edge function for the admin Resend Onboarding flow — resolves user → client via `cb_users` + `clients`, hands off to `send-email`. The credential-issuing GAS path stays. (3) [#176](https://github.com/Stride-dotcom/Stride-GS-app/pull/176) `CreateClaimModal.tsx` now fires CLAIM_STAFF_NOTIFY itself; GAS-side send stripped from `handleCreateClaim_` (StrideAPI.gs v38.119.0, Web App v422). All deployed. Handoff doc scoreboard + BUILD_STATUS updated.
+
+---
+
 ## 2026-04
 
 **2026-04-30 session 85 — client access to delivery orders restored:** Orders.tsx had three hardcoded `isAdmin` gates (tab default, URL→tab resolver, tab-content render) that hid the Orders tab and "+ New Delivery" button from client users even though `RoleGuard` permitted `client` on `/orders` + `/orders/:orderId`. Replaced with `canViewOrders = isAdmin || isClient`. DT Sync button kept admin-only. Existing accessibleClientNames filter (Orders.tsx:162-171) restricts visible rows so no RLS changes were needed.

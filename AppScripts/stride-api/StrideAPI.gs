@@ -602,12 +602,14 @@
               for invoices stuck in "Failed" state due to DocNumber collisions.
    =================================================== */
 /* ===================================================
-   StrideAPI.gs — v38.111.0 — 2026-05-02 PST — handleCreateClaim_ stops sending CLAIM_STAFF_NOTIFY
-   v38.111.0: REMOVED inline CLAIM_STAFF_NOTIFY send from handleCreateClaim_. The React caller
+   StrideAPI.gs — v38.119.0 — 2026-05-02 PST — handleCreateClaim_ stops sending CLAIM_STAFF_NOTIFY
+   v38.119.0: REMOVED inline CLAIM_STAFF_NOTIFY send from handleCreateClaim_. The React caller
               (CreateClaimModal.tsx) now fires this email via the send-email Supabase edge
               function (Resend) immediately after createClaim succeeds. Keeping the GAS path
               would double-send. CLAIM_RECEIVED to the claimant still ships via GAS for now
               (separate migration).
+   ===================================================
+   v38.111.0–v38.118.0: prior session entries — see git log for details.
    =================================================== */
 /* ===================================================
    StrideAPI.gs — v38.110.1 — 2026-04-23 PST — Fix email CTA deeplinks (table-strip + priority)
