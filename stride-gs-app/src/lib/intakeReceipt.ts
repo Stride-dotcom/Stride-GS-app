@@ -58,6 +58,13 @@ export async function sendIntakeReceipt(input: IntakeReceiptInput): Promise<Send
   //   stride_coverage → "Stride's policy" + monthly rate quote
   //   eis_coverage   → same as stride_coverage (legacy alias)
   //   anything else  → em-dash placeholder
+  //
+  // Rate (2026-05-01 change, migration 20260501175255_insurance_rate_per_10k):
+  //   $30/month per $10,000 declared, $30 monthly minimum.
+  //   Same effective 0.3%/mo rate the policy has always been; finer
+  //   granularity so small-declared-value clients aren't paying for the
+  //   $100k slab they don't fill. The Postgres cron uses the same math
+  //   (GREATEST(30, ROUND(declared/10000 × 30, 2))).
   let insuranceLabel = '—';
   let insuranceDetail = '—';
   if (insuranceChoice === 'own_policy') {
@@ -65,12 +72,10 @@ export async function sendIntakeReceipt(input: IntakeReceiptInput): Promise<Send
     insuranceDetail = 'I will maintain my own insurance and name Stride as additional insured.';
   } else if (insuranceChoice === 'stride_coverage' || insuranceChoice === 'eis_coverage') {
     insuranceLabel = "Stride's policy";
-    // T&C §2.B — minimum $300/mo; the rate scales with declared value
-    // at $300 per $100k. Round to cents.
-    const monthly = Math.max(300, Math.round((declared / 100000) * 300 * 100) / 100);
+    const monthly = Math.max(30, Math.round((declared / 10000) * 30 * 100) / 100);
     insuranceDetail = declared > 0
-      ? `Added to Stride's policy — $${declared.toLocaleString()} declared, $${monthly.toFixed(2)}/mo (per T&C §2.B, $300 minimum).`
-      : "Added to Stride's policy ($300/mo minimum, per T&C §2.B).";
+      ? `Added to Stride's policy — $${declared.toLocaleString()} declared, $${monthly.toFixed(2)}/mo (per T&C §2.B, $30 minimum).`
+      : "Added to Stride's policy ($30/mo minimum, per T&C §2.B).";
   }
 
   const signedAtDate = input.signedAt ? new Date(input.signedAt) : new Date();
