@@ -3,6 +3,7 @@ import { useAuth } from '../contexts/AuthContext';
 import { fetchShipmentByNoFromSupabase, fetchShipmentItemsFromSupabase, type ClientNameMap } from '../lib/supabaseQueries';
 import { fetchShipments, fetchShipmentItems } from '../lib/api';
 import { useClients } from './useClients';
+import { entityEvents } from '../lib/entityEvents';
 import type { ApiShipment, ApiShipmentItem } from '../lib/api';
 
 export type ShipmentDetailStatus = 'loading' | 'loaded' | 'not-found' | 'access-denied' | 'error';
@@ -155,6 +156,18 @@ export function useShipmentDetail(shipmentNo: string | undefined): UseShipmentDe
     fetchShipment();
     return () => { abortRef.current?.abort(); };
   }, [fetchShipment]);
+
+  // Realtime: refetch when this shipment OR any of its items change
+  // cross-tab/cross-user. Items are mirrored to `inventory` so we also
+  // listen for inventory events keyed by the items currently rendered.
+  useEffect(() => {
+    if (!shipmentNo) return;
+    const itemIds = new Set(items.map(it => it.itemId).filter(Boolean));
+    return entityEvents.subscribe((type, id) => {
+      if (type === 'shipment' && id === shipmentNo) void fetchShipment();
+      if (type === 'inventory' && itemIds.has(id)) void fetchShipment();
+    });
+  }, [shipmentNo, fetchShipment, items]);
 
   return { shipment, items, status, error, refetch: fetchShipment };
 }

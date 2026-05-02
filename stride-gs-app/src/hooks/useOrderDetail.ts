@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { fetchDtOrderByIdFromSupabase, type DtOrderForUI, type ClientNameMap } from '../lib/supabaseQueries';
 import { useClients } from './useClients';
+import { entityEvents } from '../lib/entityEvents';
 
 export type OrderDetailStatus = 'loading' | 'loaded' | 'not-found' | 'error';
 
@@ -59,6 +60,16 @@ export function useOrderDetail(orderId: string | undefined): UseOrderDetailResul
     fetchOrder();
     return () => { abortRef.current?.abort(); };
   }, [fetchOrder]);
+
+  // Realtime: refetch when this DT order is updated cross-tab/cross-user.
+  // Hooks into the central `useSupabaseRealtime` channel via entityEvents.
+  // The Supabase central channel emits dt_orders changes as type='order'.
+  useEffect(() => {
+    if (!orderId) return;
+    return entityEvents.subscribe((type, id) => {
+      if (type === 'order' && id === orderId) void fetchOrder();
+    });
+  }, [orderId, fetchOrder]);
 
   return { order, status, error, refetch: fetchOrder };
 }
