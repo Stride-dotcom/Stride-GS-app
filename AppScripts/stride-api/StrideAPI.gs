@@ -602,6 +602,14 @@
               for invoices stuck in "Failed" state due to DocNumber collisions.
    =================================================== */
 /* ===================================================
+   StrideAPI.gs — v38.111.0 — 2026-05-02 PST — handleCreateClaim_ stops sending CLAIM_STAFF_NOTIFY
+   v38.111.0: REMOVED inline CLAIM_STAFF_NOTIFY send from handleCreateClaim_. The React caller
+              (CreateClaimModal.tsx) now fires this email via the send-email Supabase edge
+              function (Resend) immediately after createClaim succeeds. Keeping the GAS path
+              would double-send. CLAIM_RECEIVED to the claimant still ships via GAS for now
+              (separate migration).
+   =================================================== */
+/* ===================================================
    StrideAPI.gs — v38.110.1 — 2026-04-23 PST — Fix email CTA deeplinks (table-strip + priority)
    v38.110.1: FIX — api_sendTemplateEmail_: (1) extend CTA-strip to cover <table>-wrapped buttons
               (all source templates use <table><tr><td align=center> wrapper; existing strip only
@@ -26288,10 +26296,8 @@ function handleCreateClaim_(callerEmail, payload) {
   };
   try { api_sendClaimEmail_(masterId, "CLAIM_RECEIVED", email, "Claim " + claimNo + " — Received", tokens, null); }
   catch (e) { warnings.push("CLAIM_RECEIVED email: " + e.message); }
-  if (config.notificationEmails) {
-    try { api_sendClaimEmail_(masterId, "CLAIM_STAFF_NOTIFY", config.notificationEmails, "New Claim " + claimNo + " — " + companyClientName, tokens, null); }
-    catch (e) { warnings.push("CLAIM_STAFF_NOTIFY email: " + e.message); }
-  }
+  // CLAIM_STAFF_NOTIFY now fires from React (CreateClaimModal) via the
+  // send-email edge function. Keeping the GAS path would double-send.
 
   // Write-through to Supabase claims cache (best-effort, reads fresh from sheet)
   resyncClaimToSupabase_(claimNo);

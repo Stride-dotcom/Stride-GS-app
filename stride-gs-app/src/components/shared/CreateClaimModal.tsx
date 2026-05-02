@@ -4,6 +4,7 @@ import { theme } from '../../styles/theme';
 import { AutocompleteSelect } from './AutocompleteSelect';
 import { WriteButton } from './WriteButton';
 import { isApiConfigured, postCreateClaim } from '../../lib/api';
+import { sendEmail } from '../../lib/email';
 import { useClients } from '../../hooks/useClients';
 import { useAuth } from '../../contexts/AuthContext';
 import type { Claim } from '../../lib/types';
@@ -130,6 +131,33 @@ export function CreateClaimModal({ onClose, onCreated, addOptimisticClaim, remov
       setSuccess(`${res.data.claimId} created — Drive folder ready`);
       // Remove optimistic placeholder — real claim will arrive via refetch in onCreated
       removeOptimisticClaim?.(tempClaimId);
+
+      // Notify staff via Resend. Best-effort — never block the success UX
+      // on a send failure. Recipients live in email_templates.recipients
+      // (`{{STAFF_EMAILS}}`), so `to` is omitted and the resolver expands.
+      // Idempotency by claimId prevents double-fires if the user double-clicks.
+      const claimId = res.data.claimId;
+      const requestedAmtNum = requestedAmount ? parseFloat(requestedAmount) : null;
+      sendEmail({
+        templateKey: 'CLAIM_STAFF_NOTIFY',
+        tokens: {
+          CLAIM_NO: claimId,
+          CLAIM_ID: claimId,
+          CLAIMANT_NAME: primaryContactName.trim(),
+          PRIMARY_CONTACT_NAME: primaryContactName.trim(),
+          COMPANY_NAME: companyClientName.trim(),
+          COMPANY_CLIENT_NAME: companyClientName.trim(),
+          CLAIM_TYPE: claimType,
+          DATE_OPENED: todayIso,
+          ISSUE_DESCRIPTION: issueDescription.trim(),
+          CREATED_BY: user?.email ?? '',
+          REQUESTED_AMOUNT: requestedAmtNum != null ? `$${requestedAmtNum.toFixed(2)}` : 'Not specified',
+        },
+        idempotencyKey: `claim-staff-notify:${claimId}`,
+        relatedEntityType: 'claim',
+        relatedEntityId: claimId,
+      }).catch(err => console.warn('[CreateClaimModal] CLAIM_STAFF_NOTIFY send failed:', err));
+
       setTimeout(() => onCreated(res.data!.claimId), 1200);
     } else {
       removeOptimisticClaim?.(tempClaimId); // rollback
