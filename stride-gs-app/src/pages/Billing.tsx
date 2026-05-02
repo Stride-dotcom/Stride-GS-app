@@ -37,6 +37,7 @@ import {
   postQbExcelExport,
   postUpdateBillingRow,
   postUpdateQboStatus,
+  postCommitStorageRows,
   apiPost,
 } from '../lib/api';
 import type { BillingFilterParams, BillingResponse, BatchMutationResult } from '../lib/api';
@@ -45,7 +46,6 @@ import {
   fetchBillingSidemarksFromSupabase,
   isSupabaseCacheAvailable,
   fetchStoragePreviewFromSupabase,
-  generateStorageChargesViaSupabase,
 } from '../lib/supabaseQueries';
 import type { ClientNameMap, StoragePreviewRow } from '../lib/supabaseQueries';
 import { useBilling } from '../hooks/useBilling';
@@ -728,32 +728,54 @@ export function Billing() {
   const handleCommitPreview = useCallback(async () => {
     setCommitLoading(true);
     try {
-      const onlyTenant = storClientFilter.length === 1
-        ? apiClients.find(c => c.name === storClientFilter[0])?.spreadsheetId ?? null
-        : null;
-      const onlySidemark = storSidemarkFilter.length === 1 ? storSidemarkFilter[0] : null;
+      if (!previewRows.length) {
+        setPreviewError('No rows to commit. Click Preview Storage first.');
+        setCommitLoading(false);
+        return;
+      }
 
-      const res = await generateStorageChargesViaSupabase({
-        tenantId: onlyTenant,
-        sidemark: onlySidemark,
+      // Hand the pre-computed rows to GAS so the GS-side Billing_Ledger
+      // gets the same writes (and triggers Supabase write-through). The
+      // commit endpoint skips the slow read+compute phase that used to
+      // time out on big clients.
+      const payloadRows = previewRows.map(r => ({
+        tenantId: r.sourceSheetId || r.clientSheetId || '',
+        clientName: r.client || r.clientName || '',
+        itemId: r.itemId,
+        description: r.description,
+        itemClass: r.itemClass,
+        sidemark: r.sidemark || '',
+        qty: r.qty,
+        rate: r.rate,
+        total: r.total,
+        taskId: r.taskId,
+        notes: r.notes,
+        billableEnd: r.date,
+        shipmentNo: r.shipmentNo,
+      })).filter(r => r.tenantId);
+
+      if (!payloadRows.length) {
+        setPreviewError('Preview rows are missing tenant ids — re-run Preview.');
+        setCommitLoading(false);
+        return;
+      }
+
+      const res = await postCommitStorageRows({
         periodStart: storStartDate,
         periodEnd: storEndDate,
+        rows: payloadRows,
       });
-      if (!res.ok) {
-        setPreviewError(res.error || 'Commit failed');
+      if (res.error || !res.data?.success) {
+        setPreviewError(res.data?.error || res.error || 'Commit failed');
       } else {
-        setCommitResult({
-          success: true,
-          totalCreated: res.result.totalCreated,
-          clientsProcessed: res.result.clientsAffected,
-        });
+        setCommitResult(res.data);
         refetchBilling();
       }
     } catch (err) {
       setPreviewError(`Commit error: ${err instanceof Error ? err.message : String(err)}`);
     }
     setCommitLoading(false);
-  }, [storStartDate, storEndDate, storClientFilter, storSidemarkFilter, apiClients, refetchBilling]);
+  }, [storStartDate, storEndDate, previewRows, refetchBilling]);
 
   // QB Export state
   const [qbLoading, setQbLoading] = useState(false);
