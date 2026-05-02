@@ -43,7 +43,10 @@ const DEFAULT_REPLY_TO = 'whse@stridenw.com';
 const RESEND_ENDPOINT = 'https://api.resend.com/emails';
 
 interface SendEmailBody {
-  /** Row in `email_templates` whose subject + body get used. */
+  /** Row in `email_templates` — required for audit purposes (it's the
+   *  canonical "what kind of email is this?" classifier). When
+   *  htmlOverride is also provided, the template body is bypassed but
+   *  the key is still recorded on the email_sends row. */
   templateKey: string;
   /** Recipient address(es). String or array — both accepted, normalized to array. */
   to: string | string[];
@@ -53,8 +56,15 @@ interface SendEmailBody {
   replyTo?: string;
   /** {{KEY}} → value substitutions applied to subject + body. */
   tokens?: Record<string, string | number | null | undefined>;
-  /** Override the template's subject (rare — usually the template owns it). */
+  /** Override the template's subject. Tokens still apply. */
   subjectOverride?: string;
+  /** Override the template's body. When provided, the template body
+   *  lookup is bypassed and this HTML is sent as-is (token substitution
+   *  still runs in case the override contains {{…}} placeholders). Use
+   *  case: callers like IntakesPanel let staff edit the body in a modal
+   *  before sending, so the per-send HTML may differ from the template
+   *  default. */
+  htmlOverride?: string;
   /** Caller-supplied dedupe key. If a prior send with this key is
    *  status='sent', the function returns that send id without re-sending. */
   idempotencyKey?: string;
@@ -133,6 +143,10 @@ Deno.serve(async (req: Request) => {
   }
 
   // ── Fetch template ──────────────────────────────────────────────────
+  // Even when the caller provides htmlOverride / subjectOverride, the
+  // template lookup runs to (a) validate the templateKey exists and
+  // (b) provide fallback subject/body when only one of the two
+  // overrides was supplied.
   const { data: template, error: tplErr } = await supabase
     .from('email_templates')
     .select('subject, body')
@@ -145,11 +159,13 @@ Deno.serve(async (req: Request) => {
     return jsonError(`Template '${body.templateKey}' not found`, 404);
   }
 
-  // ── Token replacement ──────────────────────────────────────────────
-  // Simple {{KEY}} substitution. Whitespace inside the braces is allowed
-  // ({{ KEY }}). Values coerce to string; null/undefined → empty.
+  // ── Body + subject resolution + token substitution ─────────────────
+  // Precedence: caller override > template default. Token substitution
+  // runs in either case so override strings can still contain {{…}}.
+  // Whitespace inside the braces is allowed; null/undefined values
+  // collapse to empty string.
   const tokens = body.tokens ?? {};
-  let html = template.body ?? '';
+  let html = body.htmlOverride ?? (template.body ?? '');
   let subject = body.subjectOverride ?? (template.subject ?? '');
   for (const [key, val] of Object.entries(tokens)) {
     const safeVal = val == null ? '' : String(val);

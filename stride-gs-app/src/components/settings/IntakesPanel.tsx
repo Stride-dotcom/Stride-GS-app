@@ -19,9 +19,10 @@ import { useIntakeAdmin, copyIntakeDocsToClient, seedClientInsuranceFromIntake, 
 void copyIntakeDocsToClient;
 import { OnboardClientModal, type OnboardClientFormData, type OnboardSubmitResult } from '../shared/OnboardClientModal';
 import { IntakeEmailModal } from '../shared/IntakeEmailModal';
-import { postOnboardClient, postSendIntakeInvitation, apiFetch } from '../../lib/api';
+import { postOnboardClient, apiFetch } from '../../lib/api';
 import type { EmailTemplate } from '../../lib/api';
 import { supabase } from '../../lib/supabase';
+import { sendEmail } from '../../lib/email';
 
 type StatusFilter = IntakeRow['status'] | 'all';
 
@@ -442,17 +443,37 @@ function GenerateLinkBlock({ links, generateLink, revokeLink }: {
     if (!modalFresh) return;
     setEmailSending(true);
     try {
-      await postSendIntakeInvitation({
-        to:       modalProspectEmail,
-        subject,
-        bodyHtml,
-        linkId:   modalFresh.linkId,
+      // Session 90 — migrated off the GAS `sendIntakeInvitation` handler
+      // (which called MailApp) onto the Supabase `send-email` edge function
+      // (which calls Resend). Subject + body are pre-rendered by the modal
+      // (so the staff edits flow through), but the templateKey is still
+      // recorded for audit so this row joins the rest of the email_sends
+      // history correctly.
+      //
+      // idempotencyKey ties the send to the intake link id — preventing
+      // accidental double-sends if the modal "Send" button is clicked
+      // twice or the request races a refresh.
+      const result = await sendEmail({
+        templateKey:       'CLIENT_INTAKE_INVITE',
+        to:                modalProspectEmail,
+        subjectOverride:   subject,
+        htmlOverride:      bodyHtml,
+        idempotencyKey:    `intake-invite:${modalFresh.linkId}`,
+        relatedEntityType: 'intake_link',
+        relatedEntityId:   modalFresh.linkId,
       });
+      if (!result.ok) {
+        // Surface the error inline; modal stays open so the admin can
+        // tweak the body or retry.
+        console.error('[IntakesPanel] Intake invite send failed:', result.error);
+        alert(`Failed to send invite: ${result.error ?? 'Unknown error'}`);
+        return;
+      }
     } finally {
       setEmailSending(false);
-      setEmailModalOpen(false);
-      setModalFresh(null);
     }
+    setEmailModalOpen(false);
+    setModalFresh(null);
   };
 
   const copy = (text: string) => {
