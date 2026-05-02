@@ -17,6 +17,7 @@ import { theme } from '../../styles/theme';
 import { fmtDate } from '../../lib/constants';
 import { WriteButton } from './WriteButton';
 import { ProcessingOverlay } from './ProcessingOverlay';
+import { BillingPreviewCard } from './BillingPreviewCard';
 import { postSendRepairQuote, postRespondToRepairQuote, postCompleteRepair, postStartRepair, postCancelRepair, postUpdateRepairNotes, postReopenRepair, postCorrectRepairResult, postVoidRepairQuote, isApiConfigured } from '../../lib/api';
 import { generateRepairWorkOrderPdf } from '../../lib/workOrderPdf';
 import { entityEvents } from '../../lib/entityEvents';
@@ -917,6 +918,21 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
           </div>
 
         {/* Photos + Notes now live in dedicated tabs via builtInTabs below. */}
+
+        {/* Billing Preview — staff/admin only. Shows the projected
+            REPAIR charge from the catalog plus any recorded ledger rows
+            for this repair. Repairs don't have addons today, so the
+            projected section is just the primary line. */}
+        <BillingPreviewCard
+          entityType="repair"
+          entityId={repair.repairId}
+          tenantId={repair.clientSheetId || ''}
+          itemId={repair.itemId ? String(repair.itemId) : null}
+          svcCode="REPAIR"
+          itemClass={repair.itemClass || null}
+          customPrice={repair.finalAmount != null ? Number(repair.finalAmount) : (repair.quoteAmount != null ? Number(repair.quoteAmount) : null)}
+          visible={canStaffEdit}
+        />
     </div>
   );
 

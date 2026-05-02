@@ -29,6 +29,7 @@ import { SERVICE_CODES } from '../../lib/constants';
 import { ProcessingOverlay } from './ProcessingOverlay';
 import { AddTaskServiceModal } from './AddTaskServiceModal';
 import { useTaskAddons } from '../../hooks/useTaskAddons';
+import { BillingPreviewCard } from './BillingPreviewCard';
 
 import type { Task, Repair, InventoryItem } from '../../lib/types';
 interface Props {
@@ -1009,6 +1010,21 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
             </div>
           )}
 
+          {/* Billing Preview — staff/admin only. Collapsed by default;
+              shows projected charges (primary svc rate from catalog +
+              queued add-ons) and recorded ledger rows for this task. */}
+          <BillingPreviewCard
+            entityType="task"
+            entityId={task.taskId}
+            tenantId={clientSheetId}
+            itemId={task.itemId ? String(task.itemId) : null}
+            svcCode={task.svcCode || task.serviceCode || task.type || null}
+            itemClass={task.itemClass || null}
+            customPrice={task.customPrice != null ? Number(task.customPrice) : null}
+            addons={addons}
+            visible={canEditAddons}
+          />
+
         </div>
   );
 
@@ -1493,12 +1509,18 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
   );
 
   // Page-mode footer — state-aware pill-styled buttons. Mirrors existing handlers.
+  // v2026-05-02: pills size to content + center as a group. Previously
+  // `flex: 1 1 0` stretched each pill to fill the EntityPage footer's
+  // 960px max-width container, so the row read as left-to-right strip
+  // instead of a centered cluster. Now pills sit at their natural width
+  // (with a minWidth floor for consistency) and the parent container's
+  // `justify-content: center` centers the group regardless of how many
+  // pills the current role/state shows.
   const pagePillBase: React.CSSProperties = {
     display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-    gap: 5, flex: '1 1 0',
+    gap: 5, flex: '0 0 auto',
     minWidth: isMobile ? 92 : 110,
-    maxWidth: isMobile ? 140 : 170,
-    padding: isMobile ? '8px 10px' : '10px 14px',
+    padding: isMobile ? '8px 14px' : '10px 18px',
     borderRadius: 10, border: 'none',
     fontFamily: 'inherit',
     fontSize: isMobile ? 11 : 12,

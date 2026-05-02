@@ -18,6 +18,7 @@ import { theme } from '../../styles/theme';
 import { fmtDate } from '../../lib/constants';
 import { WriteButton } from './WriteButton';
 import { ProcessingOverlay } from './ProcessingOverlay';
+import { BillingPreviewCard } from './BillingPreviewCard';
 import { postProcessWcRelease, postCancelWillCall, postRemoveItemsFromWillCall, postUpdateWillCall, postGenerateWcDoc, postReopenWillCall, fetchWcDocUrl, fetchWillCallById, isApiConfigured } from '../../lib/api';
 import { fetchWcItemsFromSupabase } from '../../lib/supabaseQueries';
 import { useClients } from '../../hooks/useClients';
@@ -947,6 +948,19 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
             )}
           </div>
 
+          {/* Billing Preview — staff/admin only. Will Call billing today
+              is one WC line per release; the preview shows projected WC
+              charges (catalog rate × line) plus any recorded ledger rows
+              tagged with this wc_number. itemClass is intentionally null
+              because a Will Call can span multiple item classes. */}
+          <BillingPreviewCard
+            entityType="will_call"
+            entityId={wc.wcNumber}
+            tenantId={clientSheetId || ''}
+            svcCode="WC"
+            itemClass={null}
+            visible={canRelease}
+          />
     </div>
   );
 
