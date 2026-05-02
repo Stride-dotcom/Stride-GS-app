@@ -2097,6 +2097,43 @@ export function postGenerateStorageCharges(
   );
 }
 
+// ─── Commit Storage Rows (write phase only — rows pre-computed by Postgres) ──
+// Pairs with Billing → Storage tab + the `calculate_storage_charges` Supabase
+// RPC. The RPC produces the rows (fast), this endpoint hands them to GAS for
+// the actual Billing_Ledger write so the GS-side ledger stays in sync.
+
+export interface CommitStorageRowsPayload {
+  periodStart: string;
+  periodEnd: string;
+  rows: Array<{
+    tenantId: string;
+    clientName: string;
+    itemId: string;
+    description: string;
+    itemClass: string;
+    sidemark: string;
+    qty: number;
+    rate: number;
+    total: number;
+    taskId: string;
+    notes: string;
+    billableEnd: string;       // YYYY-MM-DD — the Date column on the ledger row
+    shipmentNo: string;
+  }>;
+}
+
+export function postCommitStorageRows(
+  payload: CommitStorageRowsPayload,
+  signal?: AbortSignal
+) {
+  return apiPost<GenerateStorageChargesResponse>(
+    'commitStorageRows',
+    payload as unknown as Record<string, unknown>,
+    {},
+    { signal }
+  );
+}
+
 // ─── Preview Storage Charges (read-only) ────────────────────────────────────
 
 export interface PreviewStorageRow {

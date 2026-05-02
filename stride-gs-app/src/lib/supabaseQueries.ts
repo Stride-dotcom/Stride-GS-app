@@ -3431,3 +3431,143 @@ export async function fetchBillingActivityLog(
   }
 }
 
+// ─── Storage charges (Postgres RPC) ─────────────────────────────────────────
+//
+// Replaces postPreviewStorageCharges + postGenerateStorageCharges (GAS).
+// The Postgres functions live in the 2026-05-02 storage charges migration
+// and run against the Supabase mirror tables — finishes in seconds even for
+// thousands of items, where the GAS path was timing out.
+
+interface SupabaseStoragePreviewRow {
+  tenant_id: string;
+  client_name: string | null;
+  item_id: string;
+  description: string | null;
+  vendor: string | null;
+  sidemark: string | null;
+  item_class: string | null;
+  storage_size: number | null;
+  receive_date: string | null;
+  release_date: string | null;
+  free_days: number | null;
+  billable_start: string;
+  billable_end: string;
+  billable_days: number;
+  daily_rate: number;
+  total_charge: number;
+  task_id: string;
+  notes: string | null;
+  shipment_no: string | null;
+  location: string | null;
+}
+
+export interface StoragePreviewRow {
+  tenantId: string;
+  clientName: string;
+  itemId: string;
+  description: string;
+  vendor: string;
+  sidemark: string;
+  itemClass: string;
+  storageSize: number;
+  receiveDate: string;
+  releaseDate: string | null;
+  freeDays: number;
+  billableStart: string;
+  billableEnd: string;
+  billableDays: number;
+  dailyRate: number;
+  totalCharge: number;
+  taskId: string;
+  notes: string;
+  shipmentNo: string;
+  location: string;
+}
+
+/**
+ * Call public.calculate_storage_charges. Pass `null` for any unfiltered arg.
+ * Returns the full row set; client-side filtering by sidemark/client is the
+ * caller's responsibility for multi-select cases.
+ */
+export async function fetchStoragePreviewFromSupabase(args: {
+  tenantId?: string | null;
+  sidemark?: string | null;
+  periodStart: string;
+  periodEnd: string;
+}): Promise<StoragePreviewRow[] | null> {
+  try {
+    const { data, error } = await supabase.rpc('calculate_storage_charges', {
+      p_tenant_id: args.tenantId ?? null,
+      p_sidemark: args.sidemark ?? null,
+      p_period_start: args.periodStart,
+      p_period_end: args.periodEnd,
+    });
+    if (error || !data) return null;
+    const rows = data as SupabaseStoragePreviewRow[];
+    return rows.map(r => ({
+      tenantId: r.tenant_id,
+      clientName: r.client_name ?? '',
+      itemId: r.item_id,
+      description: r.description ?? '',
+      vendor: r.vendor ?? '',
+      sidemark: r.sidemark ?? '',
+      itemClass: r.item_class ?? '',
+      storageSize: Number(r.storage_size ?? 0),
+      receiveDate: r.receive_date ?? '',
+      releaseDate: r.release_date,
+      freeDays: Number(r.free_days ?? 0),
+      billableStart: r.billable_start,
+      billableEnd: r.billable_end,
+      billableDays: Number(r.billable_days),
+      dailyRate: Number(r.daily_rate),
+      totalCharge: Number(r.total_charge),
+      taskId: r.task_id,
+      notes: r.notes ?? '',
+      shipmentNo: r.shipment_no ?? '',
+      location: r.location ?? '',
+    }));
+  } catch {
+    return null;
+  }
+}
+
+export interface StorageGenerateResult {
+  totalCreated: number;
+  totalAmount: number;
+  clientsAffected: number;
+}
+
+/**
+ * Call public.generate_storage_charges. Writes Unbilled rows into
+ * public.billing for the (tenant?, sidemark?, period) triple. Returns
+ * counts. Admin-only — function raises if the JWT role isn't 'admin'.
+ */
+export async function generateStorageChargesViaSupabase(args: {
+  tenantId?: string | null;
+  sidemark?: string | null;
+  periodStart: string;
+  periodEnd: string;
+}): Promise<{ ok: true; result: StorageGenerateResult } | { ok: false; error: string }> {
+  try {
+    const { data, error } = await supabase.rpc('generate_storage_charges', {
+      p_tenant_id: args.tenantId ?? null,
+      p_sidemark: args.sidemark ?? null,
+      p_period_start: args.periodStart,
+      p_period_end: args.periodEnd,
+    });
+    if (error) return { ok: false, error: error.message || 'RPC failed' };
+    const rows = (data ?? []) as Array<{ total_created: number; total_amount: number; clients_affected: number }>;
+    const row = rows[0] ?? { total_created: 0, total_amount: 0, clients_affected: 0 };
+    return {
+      ok: true,
+      result: {
+        totalCreated: Number(row.total_created ?? 0),
+        totalAmount: Number(row.total_amount ?? 0),
+        clientsAffected: Number(row.clients_affected ?? 0),
+      },
+    };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+

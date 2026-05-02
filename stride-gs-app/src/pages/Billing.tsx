@@ -28,16 +28,16 @@ import { BulkResultSummary } from '../components/shared/BulkResultSummary';
 import { runBatchLoop } from '../lib/batchLoop';
 import {
   isApiConfigured,
-  postGenerateStorageCharges, type GenerateStorageChargesResponse,
+  type GenerateStorageChargesResponse,
   type UnbilledReportRow,
   postCreateInvoice, type CreateInvoiceResponse,
   postResendInvoiceEmail,
   fetchBilling,
-  postPreviewStorageCharges, type PreviewStorageRow,
   postQbExport,
   postQbExcelExport,
   postUpdateBillingRow,
   postUpdateQboStatus,
+  postCommitStorageRows,
   apiPost,
 } from '../lib/api';
 import type { BillingFilterParams, BillingResponse, BatchMutationResult } from '../lib/api';
@@ -45,8 +45,9 @@ import {
   fetchBillingFromSupabaseFiltered,
   fetchBillingSidemarksFromSupabase,
   isSupabaseCacheAvailable,
+  fetchStoragePreviewFromSupabase,
 } from '../lib/supabaseQueries';
-import type { ClientNameMap } from '../lib/supabaseQueries';
+import type { ClientNameMap, StoragePreviewRow } from '../lib/supabaseQueries';
 import { useBilling } from '../hooks/useBilling';
 import { useClients } from '../hooks/useClients';
 import { useServiceCatalog } from '../hooks/useServiceCatalog';
@@ -652,51 +653,118 @@ export function Billing() {
     setRowSel({});
 
     try {
-      const res = await postPreviewStorageCharges({
-        startDate: storStartDate,
-        endDate: storEndDate,
-        clientFilter: storClientFilter.length ? storClientFilter.join(',') : undefined,
-        sidemarkFilter: storSidemarkFilter.length ? storSidemarkFilter.join(',') : undefined,
+      // Pick a single tenant filter only when exactly one client is
+      // selected — Postgres can scan all tenants in one shot, so we
+      // fan out client-side instead of issuing N parallel RPCs for
+      // a multi-select. Same for sidemark.
+      const onlyTenant = storClientFilter.length === 1
+        ? apiClients.find(c => c.name === storClientFilter[0])?.spreadsheetId ?? null
+        : null;
+      const onlySidemark = storSidemarkFilter.length === 1 ? storSidemarkFilter[0] : null;
+
+      const sbRows = await fetchStoragePreviewFromSupabase({
+        tenantId: onlyTenant,
+        sidemark: onlySidemark,
+        periodStart: storStartDate,
+        periodEnd: storEndDate,
       });
-      if (res.error || !res.data?.success) {
-        setPreviewError(res.data?.error || res.error || 'Preview failed');
+      if (sbRows === null) {
+        setPreviewError('Preview failed (Supabase RPC unavailable)');
         setPreviewLoading(false);
         return;
       }
 
-      const rows = (res.data.rows ?? []).map((r: PreviewStorageRow) => ({
-        ledgerRowId: r.taskId, status: 'Preview', invoiceNo: '', client: r.client,
-        date: r.date.includes('-') ? r.date : r.date.slice(0,4)+'-'+r.date.slice(4,6)+'-'+r.date.slice(6,8),
-        svcCode: 'STOR', svcName: 'Storage', itemId: r.itemId,
-        description: r.description, itemClass: r.itemClass, qty: r.qty,
-        rate: r.rate, total: r.total, taskId: r.taskId, repairId: '',
-        shipmentNo: r.shipmentNo, notes: r.notes,
-        sourceSheetId: r.sourceSheetId, sidemark: r.sidemark,
+      // Client-side filter for multi-select cases the RPC ignored.
+      const clientSet = new Set(storClientFilter);
+      const sidemarkSet = new Set(storSidemarkFilter);
+      const filtered = sbRows.filter(r => {
+        if (storClientFilter.length > 1 && !clientSet.has(r.clientName)) return false;
+        if (storSidemarkFilter.length > 1 && !sidemarkSet.has(r.sidemark)) return false;
+        return true;
+      });
+
+      const rows: BillingRow[] = filtered.map((r: StoragePreviewRow) => ({
+        ledgerRowId: r.taskId,
+        status: 'Preview',
+        invoiceNo: '',
+        client: r.clientName,
+        clientSheetId: r.tenantId,
+        clientName: r.clientName,
+        date: r.billableEnd,             // already YYYY-MM-DD from Postgres
+        svcCode: 'STOR',
+        svcName: 'Storage',
+        itemId: r.itemId,
+        description: r.description,
+        itemClass: r.itemClass,
+        qty: r.billableDays,
+        rate: r.dailyRate,
+        total: r.totalCharge,
+        taskId: r.taskId,
+        repairId: '',
+        shipmentNo: r.shipmentNo,
+        notes: r.notes,
+        sourceSheetId: r.tenantId,
+        sidemark: r.sidemark,
       }));
 
       setPreviewRows(rows);
-      setPreviewTotalAmount(rows.reduce((s: number, r: BillingRow) => s + r.total, 0));
+      setPreviewTotalAmount(rows.reduce((s, r) => s + r.total, 0));
       setPreviewLoaded(true);
       setLastStorPreviewKey(currentStorKey);
-      // Track known options
       setStorKnownClients(prev => {
-        const fromRows = rows.map((r: BillingRow) => r.client);
+        const fromRows = rows.map(r => r.client);
         return [...new Set([...prev, ...fromRows])].sort();
       });
       setStorKnownSidemarks(prev => {
-        const fromRows = rows.map((r: BillingRow) => r.sidemark).filter(Boolean) as string[];
+        const fromRows = rows.map(r => r.sidemark).filter(Boolean) as string[];
         return [...new Set([...prev, ...fromRows])].sort();
       });
     } catch (err) {
       setPreviewError(`Preview error: ${err instanceof Error ? err.message : String(err)}`);
     }
     setPreviewLoading(false);
-  }, [storStartDate, storEndDate, storClientFilter, storSidemarkFilter, currentStorKey]);
+  }, [storStartDate, storEndDate, storClientFilter, storSidemarkFilter, apiClients, currentStorKey]);
 
   const handleCommitPreview = useCallback(async () => {
     setCommitLoading(true);
     try {
-      const res = await postGenerateStorageCharges({ startDate: storStartDate, endDate: storEndDate });
+      if (!previewRows.length) {
+        setPreviewError('No rows to commit. Click Preview Storage first.');
+        setCommitLoading(false);
+        return;
+      }
+
+      // Hand the pre-computed rows to GAS so the GS-side Billing_Ledger
+      // gets the same writes (and triggers Supabase write-through). The
+      // commit endpoint skips the slow read+compute phase that used to
+      // time out on big clients.
+      const payloadRows = previewRows.map(r => ({
+        tenantId: r.sourceSheetId || r.clientSheetId || '',
+        clientName: r.client || r.clientName || '',
+        itemId: r.itemId,
+        description: r.description,
+        itemClass: r.itemClass,
+        sidemark: r.sidemark || '',
+        qty: r.qty,
+        rate: r.rate,
+        total: r.total,
+        taskId: r.taskId,
+        notes: r.notes,
+        billableEnd: r.date,
+        shipmentNo: r.shipmentNo,
+      })).filter(r => r.tenantId);
+
+      if (!payloadRows.length) {
+        setPreviewError('Preview rows are missing tenant ids — re-run Preview.');
+        setCommitLoading(false);
+        return;
+      }
+
+      const res = await postCommitStorageRows({
+        periodStart: storStartDate,
+        periodEnd: storEndDate,
+        rows: payloadRows,
+      });
       if (res.error || !res.data?.success) {
         setPreviewError(res.data?.error || res.error || 'Commit failed');
       } else {
@@ -707,7 +775,7 @@ export function Billing() {
       setPreviewError(`Commit error: ${err instanceof Error ? err.message : String(err)}`);
     }
     setCommitLoading(false);
-  }, [storStartDate, storEndDate, refetchBilling]);
+  }, [storStartDate, storEndDate, previewRows, refetchBilling]);
 
   // QB Export state
   const [qbLoading, setQbLoading] = useState(false);
