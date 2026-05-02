@@ -412,6 +412,35 @@ export function Billing() {
     return map;
   }, [apiClients]);
 
+  // Bug fix 2026-05-02: invoice-grouping was always splitting by sidemark,
+  // even for clients with separate_by_sidemark=false. The fix: only include
+  // sidemark in the group key when the client has the flag enabled.
+  // sepBySidemarkBySheetId maps tenantId → boolean from apiClients. Defaults
+  // to false when the client isn't in the map (safer to consolidate than to
+  // split — a wrongly-consolidated invoice can be split, a wrongly-split
+  // invoice can't be auto-merged).
+  const sepBySidemarkBySheetId = useMemo<Record<string, boolean>>(() => {
+    const map: Record<string, boolean> = {};
+    for (const c of apiClients) {
+      if (c.spreadsheetId) map[c.spreadsheetId] = c.separateBySidemark ?? false;
+    }
+    return map;
+  }, [apiClients]);
+
+  // Single helper for "what's the invoice-group key for this row?". Used by
+  // every site that buckets billing rows by (client, optional sidemark) —
+  // the report tab, the review tab, the create-invoices button label, and
+  // the invoice-creation loop. Keeps grouping logic in one place so a
+  // future schema change (e.g. add a "separate by reference" flag) only
+  // touches this function.
+  const invoiceGroupKey = useCallback((row: { sourceSheetId?: string | null; client: string; sidemark?: string | null }): string => {
+    const tenantId = row.sourceSheetId || '';
+    const tenant = tenantId || row.client;
+    const sepFlag = tenantId ? (sepBySidemarkBySheetId[tenantId] ?? false) : false;
+    const sidemarkPart = sepFlag ? (row.sidemark || '') : '';
+    return tenant + '|' + sidemarkPart;
+  }, [sepBySidemarkBySheetId]);
+
   // ─── Billing Report Tab State ─────────────────────────────────────────────
   // Use useBilling(false) to avoid auto-fetch. We also keep it around for
   // re-send invoice email which needs liveRows to lookup clientSheetId.
@@ -1270,7 +1299,7 @@ export function Billing() {
     const selectedIdsByGroup: Record<string, string[]> = {};
     const allHiddenIds: string[] = [];
     for (const r of selRows) {
-      const key = (r.sourceSheetId || r.client) + '|' + (r.sidemark || '');
+      const key = invoiceGroupKey(r);
       if (!selectedIdsByGroup[key]) selectedIdsByGroup[key] = [];
       selectedIdsByGroup[key].push(r.ledgerRowId);
       allHiddenIds.push(r.ledgerRowId);
@@ -1282,8 +1311,10 @@ export function Billing() {
 
     const groups: Record<string, { client: string; sourceSheetId: string; sidemark: string; rows: UnbilledReportRow[] }> = {};
     for (const r of selRows) {
-      // Group by client + sidemark so SEPARATE_BY_SIDEMARK clients get one invoice per sidemark
-      const key = (r.sourceSheetId || r.client) + '|' + (r.sidemark || '');
+      // Group by client + (optional) sidemark via invoiceGroupKey, which only
+      // includes sidemark for clients with separate_by_sidemark=true. Clients
+      // without the flag get one consolidated invoice across all sidemarks.
+      const key = invoiceGroupKey(r);
       if (!groups[key]) groups[key] = { client: r.client, sourceSheetId: r.sourceSheetId || '', sidemark: r.sidemark || '', rows: [] };
       groups[key].rows.push({
         client: r.client, sidemark: r.sidemark || '', date: r.date,
@@ -1398,7 +1429,10 @@ export function Billing() {
         for (const g of invokable) {
           const label = g.client + (g.sidemark ? ` · ${g.sidemark}` : '');
           if (label === r.client) {
-            const key = (g.sourceSheetId || g.client) + '|' + (g.sidemark || '');
+            // Same key shape as the forward bucketing above (only includes
+            // sidemark when the client has separate_by_sidemark=true), so
+            // failed-group reconciliation matches the original group.
+            const key = invoiceGroupKey(g);
             failedGroupKeys.add(key);
             break;
           }
@@ -1998,7 +2032,10 @@ export function Billing() {
                 const selRows = resolveSelectedRows();
                 const groups: Record<string, { client: string; sidemark: string; rows: BillingRow[]; total: number }> = {};
                 selRows.forEach(r => {
-                  const key = (r.sourceSheetId || r.client) + '|' + (r.sidemark || '');
+                  // Review-tab grouping mirrors the create-invoice grouping
+                  // — clients without separate_by_sidemark see one row per
+                  // tenant; clients with it set see one row per (tenant, sidemark).
+                  const key = invoiceGroupKey(r);
                   if (!groups[key]) groups[key] = { client: r.client, sidemark: r.sidemark || '', rows: [], total: 0 };
                   groups[key].rows.push(r);
                   groups[key].total += r.total;
@@ -2110,7 +2147,7 @@ export function Billing() {
               <button onClick={() => { setShowInvoiceModal(false); setInvoiceResults(null); setInvoiceError(''); if (invoiceResults?.some(r => r.success)) { loadReport(); setRowSel({}); setInvoicedRowSel({}); } }} disabled={invoiceLoading} style={{ padding: '9px 18px', fontSize: 13, fontWeight: 500, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: invoiceLoading ? 'not-allowed' : 'pointer', fontFamily: 'inherit', color: theme.colors.textSecondary }}>{invoiceResults ? 'Done' : 'Cancel'}</button>
               {!invoiceResults && (
                 <WriteButton
-                  label={invoiceLoading ? 'Creating...' : `Create ${(() => { const s = resolveSelectedRows(); const g: Record<string, boolean> = {}; s.forEach(r => { g[(r.sourceSheetId || r.client) + '|' + (r.sidemark || '')] = true; }); return Object.keys(g).length; })()} Invoice${selCount > 0 ? 's' : ''}`}
+                  label={invoiceLoading ? 'Creating...' : `Create ${(() => { const s = resolveSelectedRows(); const g: Record<string, boolean> = {}; s.forEach(r => { g[invoiceGroupKey(r)] = true; }); return Object.keys(g).length; })()} Invoice${selCount > 0 ? 's' : ''}`}
                   variant="primary"
                   disabled={invoiceLoading || !selCount || !apiConfigured}
                   onClick={handleCreateInvoices}
