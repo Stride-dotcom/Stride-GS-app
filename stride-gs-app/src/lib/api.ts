@@ -2370,6 +2370,33 @@ export function postUpdateBillingRow(
   );
 }
 
+// ─── Void Invoice (sets every billing row matching invoiceNo to status=Void) ─
+
+export interface VoidInvoicePayload {
+  invoiceNo: string;
+  reason?: string;
+}
+
+export interface VoidInvoiceResponse {
+  success: boolean;
+  invoiceNo: string;
+  rowsVoided: number;
+  error?: string;
+}
+
+export function postVoidInvoice(
+  payload: VoidInvoicePayload,
+  clientSheetId: string,
+  signal?: AbortSignal
+) {
+  return apiPost<VoidInvoiceResponse>(
+    'voidInvoice',
+    payload as unknown as Record<string, unknown>,
+    { clientSheetId },
+    { signal }
+  );
+}
+
 // ─── Manual billing charges (v38.77.0) ──────────────────────────────────────
 
 export interface AddManualChargePayload {

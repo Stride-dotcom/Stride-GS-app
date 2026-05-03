@@ -59,7 +59,9 @@ import { QBOPushButton } from '../components/billing/QBOPushButton';
 import { AddChargeModal, type ManualChargeEditTarget } from '../components/billing/AddChargeModal';
 import { useQBO } from '../hooks/useQBO';
 import { useAuth } from '../contexts/AuthContext';
-import { postVoidManualCharge } from '../lib/api';
+import { postVoidManualCharge, postVoidInvoice } from '../lib/api';
+import { supabase } from '../lib/supabase';
+import { entityEvents } from '../lib/entityEvents';
 
 // Drive folder for per-client IIF / billing exports. Pulled from env so
 // a folder relocation doesn't require a React deploy. Fallback ID is
@@ -105,12 +107,41 @@ interface InvoiceGroup {
 
 const ALL_STATUSES = ['Unbilled', 'Invoiced', 'Billed', 'Void'];
 
-// ─── Invoice Review Mock Data ────────────────────────────────────────────────
+// ─── Invoice Review — types ──────────────────────────────────────────────────
 
-interface InvoiceReviewRow {
-  invNo: string; client: string; svcCode: string; svcName: string;
-  itemId: string; description: string; qty: number; rate: number; total: number;
-  action: 'pending' | 'approved' | 'voided';
+interface InvoiceReviewLine {
+  ledgerRowId: string;
+  invoiceNo: string;
+  status: string;
+  clientName: string;
+  clientSheetId: string;
+  date: string;          // service date
+  invoiceDate: string;   // when the invoice was created (preferred for display)
+  svcCode: string;
+  svcName: string;
+  itemId: string;
+  description: string;
+  itemClass: string;
+  qty: number;
+  rate: number;
+  total: number;
+  taskId: string;
+  repairId: string;
+  shipmentNumber: string;
+  notes: string;
+  invoiceUrl: string;
+}
+
+interface InvoiceReviewSummary {
+  invoiceNo: string;
+  clientName: string;
+  clientSheetId: string;
+  invoiceDate: string;
+  status: 'Invoiced' | 'Void' | 'Mixed';
+  total: number;
+  lineCount: number;
+  invoiceUrl: string;
+  lines: InvoiceReviewLine[];
 }
 
 const STATUS_CFG: Record<string, { bg: string; text: string }> = {
@@ -226,57 +257,433 @@ function EditableCell({ value, onChange, type = 'text', align, currency = true }
 }
 
 // ─── Invoice Review Tab ──────────────────────────────────────────────────────
+//
+// Real implementation: queries `billing` table directly from Supabase (no GAS
+// round-trip), groups by invoice_no, and renders an expandable summary list
+// with search / filter / sort. Replaces the previous mock-data stub.
+
+const REVIEW_INVOICE_STATUS_CFG: Record<string, { bg: string; text: string }> = {
+  Invoiced: { bg: '#EFF6FF', text: '#1D4ED8' },
+  Void:     { bg: '#F3F4F6', text: '#6B7280' },
+  Mixed:    { bg: '#FEF3C7', text: '#B45309' },
+};
 
 function InvoiceReviewTab() {
-  const [rows, setRows] = useState<InvoiceReviewRow[]>([]);
-  const reviewTh: React.CSSProperties = { padding: '8px 12px', textAlign: 'left', fontWeight: 500, fontSize: 10, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.05em', borderBottom: `2px solid ${theme.colors.border}`, whiteSpace: 'nowrap' };
-  const reviewTd: React.CSSProperties = { padding: '10px 12px', fontSize: 12, borderBottom: `1px solid ${theme.colors.borderLight}`, verticalAlign: 'middle' };
-  const ACTION_CFG: Record<string, { bg: string; text: string }> = { pending: { bg: '#FEF3C7', text: '#B45309' }, approved: { bg: '#F0FDF4', text: '#15803D' }, voided: { bg: '#F3F4F6', text: '#6B7280' } };
-  const pending = rows.filter(r => r.action === 'pending');
-  const approved = rows.filter(r => r.action === 'approved');
-  const total = approved.reduce((s, r) => s + r.total, 0);
+  const { user } = useAuth();
+  const isStaff = user?.role === 'admin' || user?.role === 'staff';
+  const [invoices, setInvoices] = useState<InvoiceReviewSummary[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [search, setSearch] = useState('');
+  const [clientFilter, setClientFilter] = useState<string>('all');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'Invoiced' | 'Void'>('all');
+  const [dateFrom, setDateFrom] = useState('');
+  const [dateTo, setDateTo] = useState('');
+  const [sortBy, setSortBy] = useState<'invoiceDate' | 'invoiceNo' | 'clientName' | 'total'>('invoiceDate');
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
+  const [voiding, setVoiding] = useState<string | null>(null);
+
+  const reload = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    const { data, error: err } = await supabase
+      .from('billing')
+      .select('ledger_row_id, invoice_no, status, client_name, tenant_id, date, invoice_date, svc_code, svc_name, item_id, description, item_class, qty, rate, total, task_id, repair_id, shipment_number, item_notes, invoice_url')
+      .in('status', ['Invoiced', 'Void'])
+      .not('invoice_no', 'is', null)
+      .order('invoice_date', { ascending: false });
+    if (err) { setError(err.message); setLoading(false); return; }
+    const lines: InvoiceReviewLine[] = (data || []).map(r => ({
+      ledgerRowId: String(r.ledger_row_id || ''),
+      invoiceNo:   String(r.invoice_no || ''),
+      status:      String(r.status || ''),
+      clientName:  String(r.client_name || ''),
+      clientSheetId: String(r.tenant_id || ''),
+      date:         String(r.date || ''),
+      invoiceDate:  String(r.invoice_date || ''),
+      svcCode:      String(r.svc_code || ''),
+      svcName:      String(r.svc_name || ''),
+      itemId:       String(r.item_id || ''),
+      description:  String(r.description || ''),
+      itemClass:    String(r.item_class || ''),
+      qty:          Number(r.qty || 0),
+      rate:         Number(r.rate || 0),
+      total:        Number(r.total || 0),
+      taskId:       String(r.task_id || ''),
+      repairId:     String(r.repair_id || ''),
+      shipmentNumber: String(r.shipment_number || ''),
+      notes:        String(r.item_notes || ''),
+      invoiceUrl:   String(r.invoice_url || ''),
+    }));
+    // Group by invoice_no
+    const groups = new Map<string, InvoiceReviewSummary>();
+    for (const ln of lines) {
+      if (!ln.invoiceNo) continue;
+      let g = groups.get(ln.invoiceNo);
+      if (!g) {
+        g = {
+          invoiceNo:    ln.invoiceNo,
+          clientName:   ln.clientName,
+          clientSheetId: ln.clientSheetId,
+          invoiceDate:  ln.invoiceDate || ln.date,
+          status:       (ln.status === 'Void' ? 'Void' : 'Invoiced'),
+          total:        0,
+          lineCount:    0,
+          invoiceUrl:   ln.invoiceUrl,
+          lines:        [],
+        };
+        groups.set(ln.invoiceNo, g);
+      }
+      g.total += ln.total;
+      g.lineCount += 1;
+      g.lines.push(ln);
+      if (!g.invoiceUrl && ln.invoiceUrl) g.invoiceUrl = ln.invoiceUrl;
+      // Mixed status: any line differing from the first defines it
+      if ((g.status === 'Invoiced' && ln.status === 'Void') ||
+          (g.status === 'Void' && ln.status === 'Invoiced')) {
+        g.status = 'Mixed';
+      }
+    }
+    setInvoices(Array.from(groups.values()));
+    setLoading(false);
+  }, []);
+
+  useEffect(() => { reload(); }, [reload]);
+
+  // Subscribe to billing realtime — when Void writes propagate, refresh
+  useEffect(() => {
+    return entityEvents.subscribe(type => {
+      if (type === 'billing') reload();
+    });
+  }, [reload]);
+
+  const clientOptions = useMemo(() => {
+    const set = new Set<string>();
+    for (const inv of invoices) if (inv.clientName) set.add(inv.clientName);
+    return Array.from(set).sort();
+  }, [invoices]);
+
+  const filteredSorted = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    let out = invoices.filter(inv => {
+      if (statusFilter !== 'all') {
+        if (statusFilter === 'Invoiced' && inv.status === 'Void') return false;
+        if (statusFilter === 'Void' && inv.status === 'Invoiced') return false;
+      }
+      if (clientFilter !== 'all' && inv.clientName !== clientFilter) return false;
+      if (dateFrom && inv.invoiceDate && inv.invoiceDate < dateFrom) return false;
+      if (dateTo && inv.invoiceDate && inv.invoiceDate > dateTo) return false;
+      if (q) {
+        const haystack = [
+          inv.invoiceNo, inv.clientName,
+          ...inv.lines.map(l => l.description),
+          ...inv.lines.map(l => l.itemId),
+        ].join(' ').toLowerCase();
+        if (!haystack.includes(q)) return false;
+      }
+      return true;
+    });
+    out = [...out].sort((a, b) => {
+      const dir = sortDir === 'asc' ? 1 : -1;
+      switch (sortBy) {
+        case 'invoiceDate': return (a.invoiceDate || '').localeCompare(b.invoiceDate || '') * dir;
+        case 'invoiceNo':   return a.invoiceNo.localeCompare(b.invoiceNo) * dir;
+        case 'clientName':  return a.clientName.localeCompare(b.clientName) * dir;
+        case 'total':       return (a.total - b.total) * dir;
+        default: return 0;
+      }
+    });
+    return out;
+  }, [invoices, search, clientFilter, statusFilter, dateFrom, dateTo, sortBy, sortDir]);
+
+  const totalSum = useMemo(() =>
+    filteredSorted.filter(i => i.status !== 'Void').reduce((s, i) => s + i.total, 0),
+    [filteredSorted]
+  );
+
+  const handleVoid = async (inv: InvoiceReviewSummary) => {
+    if (!isStaff) return;
+    const reason = window.prompt(`Void invoice ${inv.invoiceNo}? Optional reason:`, '');
+    if (reason === null) return; // user cancelled
+    setVoiding(inv.invoiceNo);
+    const res = await postVoidInvoice({ invoiceNo: inv.invoiceNo, reason }, inv.clientSheetId);
+    setVoiding(null);
+    if (!res.ok || !res.data?.success) {
+      alert('Void failed: ' + (res.error || res.data?.error || 'Unknown error'));
+      return;
+    }
+    await reload();
+  };
+
+  const toggleExpand = (invoiceNo: string) => {
+    setExpanded(prev => {
+      const next = new Set(prev);
+      if (next.has(invoiceNo)) next.delete(invoiceNo);
+      else next.add(invoiceNo);
+      return next;
+    });
+  };
+
+  const handleSort = (field: typeof sortBy) => {
+    if (sortBy === field) setSortDir(sortDir === 'asc' ? 'desc' : 'asc');
+    else { setSortBy(field); setSortDir(field === 'invoiceDate' || field === 'total' ? 'desc' : 'asc'); }
+  };
+
+  const reviewTh: React.CSSProperties = {
+    padding: '8px 12px', textAlign: 'left', fontWeight: 500, fontSize: 10,
+    color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.05em',
+    borderBottom: `2px solid ${theme.colors.border}`, whiteSpace: 'nowrap', userSelect: 'none',
+  };
+  const reviewTd: React.CSSProperties = {
+    padding: '10px 12px', fontSize: 12,
+    borderBottom: `1px solid ${theme.colors.borderLight}`, verticalAlign: 'middle',
+  };
+
+  const SortHead = ({ field, label, align }: { field: typeof sortBy; label: string; align?: 'right' | 'left' }) => (
+    <th
+      style={{ ...reviewTh, cursor: 'pointer', textAlign: align || 'left' }}
+      onClick={() => handleSort(field)}
+    >
+      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+        {label}
+        {sortBy === field
+          ? (sortDir === 'asc' ? <ChevronUp size={12} /> : <ChevronDown size={12} />)
+          : <ArrowUpDown size={11} style={{ opacity: 0.35 }} />}
+      </span>
+    </th>
+  );
+
+  const summaryCards = [
+    { label: 'Invoices', value: filteredSorted.length, color: '#60A5FA' },
+    { label: 'Total Billed', value: `$${totalSum.toFixed(2)}`, color: '#4ADE80' },
+    { label: 'Voided', value: filteredSorted.filter(i => i.status === 'Void').length, color: '#F87171' },
+  ];
+
   return (
     <div>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 16, marginBottom: 20 }}>
-        {[{ label: 'Pending Review', value: pending.length, color: '#FBBF24' }, { label: 'Approved', value: approved.length, color: '#4ADE80' }, { label: 'Approved Total', value: `$${total.toFixed(2)}`, color: '#E8692A' }].map(({ label, value, color }) => (
+        {summaryCards.map(({ label, value, color }) => (
           <div key={label} style={{ padding: '20px 22px', background: '#1C1C1C', borderRadius: 20 }}>
             <div style={{ fontSize: 10, fontWeight: 600, color: 'rgba(255,255,255,0.55)', textTransform: 'uppercase', letterSpacing: '2px', marginBottom: 10 }}>{label}</div>
             <div style={{ fontSize: 28, fontWeight: 300, color, lineHeight: 1 }}>{value}</div>
           </div>
         ))}
       </div>
-      <div style={{ background: '#fff', border: `1px solid ${theme.colors.border}`, borderRadius: 12, overflow: 'hidden' }}>
-        <div style={{ padding: '14px 16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: `1px solid ${theme.colors.borderLight}` }}>
-          <span style={{ fontSize: 14, fontWeight: 600 }}>Invoice Line Items for Review</span>
-          <WriteButton label="Approve All Pending" variant="primary" size="sm" onClick={async () => { setRows(prev => prev.map(r => r.action === 'pending' ? { ...r, action: 'approved' } : r)); }} />
+
+      {/* Filter / search bar */}
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'center', marginBottom: 12 }}>
+        <div style={{ position: 'relative', flex: '1 1 240px', maxWidth: 320 }}>
+          <Search size={14} color={theme.colors.textMuted} style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)' }} />
+          <input
+            type="text"
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            placeholder="Search invoice #, client, items…"
+            style={{ width: '100%', padding: '8px 12px 8px 32px', fontSize: 12, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', fontFamily: 'inherit' }}
+          />
         </div>
-        <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-          <thead><tr>{['Action', 'INV #', 'Client', 'Svc Code', 'Svc Name', 'Item ID', 'Description', 'Qty', 'Rate', 'Total'].map(h => <th key={h} style={{ ...reviewTh, ...(h === 'Description' ? { minWidth: 200 } : {}), ...(['Qty', 'Rate', 'Total'].includes(h) ? { textAlign: 'right' } : {}) }}>{h}</th>)}</tr></thead>
-          <tbody>
-            {rows.map((row, idx) => (
-              <tr key={idx} style={{ background: row.action === 'voided' ? '#FAFAFA' : 'transparent', opacity: row.action === 'voided' ? 0.6 : 1 }}>
-                <td style={{ ...reviewTd, minWidth: 180 }}>
-                  {row.action === 'pending' ? (
-                    <div style={{ display: 'flex', gap: 6 }}>
-                      <WriteButton label="Approve" variant="secondary" size="sm" onClick={async () => setRows(prev => prev.map((r, i) => i === idx ? { ...r, action: 'approved' } : r))} />
-                      <WriteButton label="Void" variant="danger" size="sm" onClick={async () => setRows(prev => prev.map((r, i) => i === idx ? { ...r, action: 'voided' } : r))} />
-                    </div>
-                  ) : <Badge t={row.action} c={ACTION_CFG[row.action]} />}
-                </td>
-                <td style={{ ...reviewTd, fontWeight: 600, fontSize: 12 }}>{row.invNo}</td>
-                <td style={reviewTd}>{row.client}</td>
-                <td style={reviewTd}><Badge t={row.svcCode} c={SVC_CFG[row.svcCode]} /></td>
-                <td style={{ ...reviewTd, color: theme.colors.textSecondary }}>{row.svcName}</td>
-                <td style={{ ...reviewTd, color: theme.colors.textSecondary }}>{row.itemId}</td>
-                <td style={{ ...reviewTd, color: theme.colors.textSecondary, maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{row.description}</td>
-                <td style={{ ...reviewTd, textAlign: 'right' }}>{row.qty}</td>
-                <td style={{ ...reviewTd, textAlign: 'right', color: theme.colors.textSecondary }}>${row.rate.toFixed(2)}</td>
-                <td style={{ ...reviewTd, textAlign: 'right', fontWeight: 600 }}>${row.total.toFixed(2)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <select
+          value={clientFilter}
+          onChange={e => setClientFilter(e.target.value)}
+          style={{ padding: '7px 10px', fontSize: 12, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', fontFamily: 'inherit' }}
+        >
+          <option value="all">All Clients</option>
+          {clientOptions.map(c => <option key={c} value={c}>{c}</option>)}
+        </select>
+        <select
+          value={statusFilter}
+          onChange={e => setStatusFilter(e.target.value as 'all' | 'Invoiced' | 'Void')}
+          style={{ padding: '7px 10px', fontSize: 12, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', fontFamily: 'inherit' }}
+        >
+          <option value="all">All Statuses</option>
+          <option value="Invoiced">Invoiced</option>
+          <option value="Void">Void</option>
+        </select>
+        <input
+          type="date"
+          value={dateFrom}
+          onChange={e => setDateFrom(e.target.value)}
+          title="Invoice date from"
+          style={{ padding: '7px 10px', fontSize: 12, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', fontFamily: 'inherit' }}
+        />
+        <span style={{ fontSize: 12, color: theme.colors.textMuted }}>to</span>
+        <input
+          type="date"
+          value={dateTo}
+          onChange={e => setDateTo(e.target.value)}
+          title="Invoice date to"
+          style={{ padding: '7px 10px', fontSize: 12, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', fontFamily: 'inherit' }}
+        />
+        <button
+          onClick={() => { setSearch(''); setClientFilter('all'); setStatusFilter('all'); setDateFrom(''); setDateTo(''); }}
+          style={{ padding: '7px 12px', fontSize: 12, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', fontFamily: 'inherit', display: 'inline-flex', alignItems: 'center', gap: 4 }}
+        >
+          <X size={12} /> Clear
+        </button>
+        <button
+          onClick={reload}
+          disabled={loading}
+          title="Refresh"
+          style={{ padding: '7px 12px', fontSize: 12, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: loading ? 'wait' : 'pointer', fontFamily: 'inherit', display: 'inline-flex', alignItems: 'center', gap: 4 }}
+        >
+          <RefreshCw size={12} style={{ animation: loading ? 'spin 1s linear infinite' : 'none' }} /> Refresh
+        </button>
       </div>
+
+      <div style={{ background: '#fff', border: `1px solid ${theme.colors.border}`, borderRadius: 12, overflow: 'hidden' }}>
+        {loading ? (
+          <div style={{ padding: 32, textAlign: 'center', color: theme.colors.textMuted, fontSize: 13 }}>
+            <Loader2 size={20} style={{ animation: 'spin 1s linear infinite', display: 'inline-block', verticalAlign: 'middle', marginRight: 8 }} />
+            Loading invoices…
+          </div>
+        ) : error ? (
+          <div style={{ padding: 24, textAlign: 'center', color: '#B91C1C', fontSize: 13 }}>
+            <AlertTriangle size={16} style={{ display: 'inline-block', verticalAlign: 'middle', marginRight: 6 }} />
+            Failed to load: {error}
+          </div>
+        ) : filteredSorted.length === 0 ? (
+          <div style={{ padding: 32, textAlign: 'center', color: theme.colors.textMuted, fontSize: 13 }}>
+            No invoices match the current filters.
+          </div>
+        ) : (
+          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+            <thead>
+              <tr>
+                <th style={{ ...reviewTh, width: 32 }}></th>
+                <SortHead field="invoiceNo" label="Invoice #" />
+                <SortHead field="clientName" label="Client" />
+                <SortHead field="invoiceDate" label="Invoice Date" />
+                <SortHead field="total" label="Total" align="right" />
+                <th style={{ ...reviewTh, textAlign: 'right' }}>Lines</th>
+                <th style={reviewTh}>Status</th>
+                <th style={{ ...reviewTh, textAlign: 'right' }}>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filteredSorted.map(inv => {
+                const isOpen = expanded.has(inv.invoiceNo);
+                const statusCfg = REVIEW_INVOICE_STATUS_CFG[inv.status];
+                return (
+                  <React.Fragment key={inv.invoiceNo}>
+                    <tr
+                      onClick={() => toggleExpand(inv.invoiceNo)}
+                      style={{ cursor: 'pointer', background: isOpen ? '#FFF7ED' : 'transparent' }}
+                    >
+                      <td style={{ ...reviewTd, textAlign: 'center' }}>
+                        {isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                      </td>
+                      <td style={{ ...reviewTd, fontWeight: 600 }}>
+                        <DeepLink kind="invoice" id={inv.invoiceNo} clientSheetId={inv.clientSheetId} showIcon={false} />
+                      </td>
+                      <td style={reviewTd}>{inv.clientName || '—'}</td>
+                      <td style={reviewTd}>{fmt(inv.invoiceDate) || '—'}</td>
+                      <td style={{ ...reviewTd, textAlign: 'right', fontWeight: 600 }}>${inv.total.toFixed(2)}</td>
+                      <td style={{ ...reviewTd, textAlign: 'right', color: theme.colors.textSecondary }}>{inv.lineCount}</td>
+                      <td style={reviewTd}><Badge t={inv.status} c={statusCfg} /></td>
+                      <td
+                        style={{ ...reviewTd, textAlign: 'right' }}
+                        onClick={e => e.stopPropagation()}
+                      >
+                        <div style={{ display: 'inline-flex', gap: 6, justifyContent: 'flex-end' }}>
+                          {inv.invoiceUrl && (
+                            <a
+                              href={inv.invoiceUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              title="Open invoice PDF"
+                              style={{ padding: '5px 10px', fontSize: 11, border: `1px solid ${theme.colors.border}`, borderRadius: 6, background: '#fff', color: theme.colors.text, textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: 4 }}
+                            >
+                              <ExternalLink size={11} /> PDF
+                            </a>
+                          )}
+                          {isStaff && inv.status !== 'Void' && (
+                            <WriteButton
+                              label={voiding === inv.invoiceNo ? 'Voiding…' : 'Void'}
+                              variant="danger"
+                              size="sm"
+                              disabled={voiding === inv.invoiceNo}
+                              onClick={async () => handleVoid(inv)}
+                            />
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                    {isOpen && (
+                      <tr>
+                        <td colSpan={8} style={{ padding: 0, background: '#F8FAFC' }}>
+                          <InvoiceReviewLineItems lines={inv.lines} clientSheetId={inv.clientSheetId} />
+                        </td>
+                      </tr>
+                    )}
+                  </React.Fragment>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function InvoiceReviewLineItems({ lines, clientSheetId }: { lines: InvoiceReviewLine[]; clientSheetId: string }) {
+  const subTh: React.CSSProperties = {
+    padding: '6px 10px', textAlign: 'left', fontWeight: 600, fontSize: 10,
+    color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.05em',
+    borderBottom: `1px solid ${theme.colors.borderLight}`, whiteSpace: 'nowrap', background: '#fff',
+  };
+  const subTd: React.CSSProperties = {
+    padding: '6px 10px', fontSize: 11, color: theme.colors.textSecondary, verticalAlign: 'top',
+  };
+  return (
+    <div style={{ padding: '8px 12px 12px 40px' }}>
+      <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+        <thead>
+          <tr>
+            <th style={subTh}>Svc</th>
+            <th style={subTh}>Service</th>
+            <th style={subTh}>Item</th>
+            <th style={subTh}>Description</th>
+            <th style={{ ...subTh, textAlign: 'right' }}>Qty</th>
+            <th style={{ ...subTh, textAlign: 'right' }}>Rate</th>
+            <th style={{ ...subTh, textAlign: 'right' }}>Total</th>
+            <th style={subTh}>Refs</th>
+            <th style={subTh}>Notes</th>
+          </tr>
+        </thead>
+        <tbody>
+          {lines.map(ln => (
+            <tr key={ln.ledgerRowId} style={{ borderTop: `1px solid ${theme.colors.borderLight}` }}>
+              <td style={subTd}>{ln.svcCode ? <Badge t={ln.svcCode} c={SVC_CFG[ln.svcCode]} /> : ''}</td>
+              <td style={subTd}>{ln.svcName || ''}</td>
+              <td style={subTd}>
+                {ln.itemId ? (
+                  <DeepLink kind="inventory" id={ln.itemId} clientSheetId={clientSheetId} showIcon={false} size="sm" />
+                ) : ''}
+              </td>
+              <td style={{ ...subTd, maxWidth: 260, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {ln.description || ''}
+              </td>
+              <td style={{ ...subTd, textAlign: 'right' }}>{ln.qty || ''}</td>
+              <td style={{ ...subTd, textAlign: 'right' }}>{ln.rate ? `$${ln.rate.toFixed(2)}` : ''}</td>
+              <td style={{ ...subTd, textAlign: 'right', fontWeight: 600, color: theme.colors.text }}>
+                {ln.total ? `$${ln.total.toFixed(2)}` : ''}
+              </td>
+              <td style={subTd}>
+                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                  {ln.taskId && <DeepLink kind="task" id={ln.taskId} showIcon={false} size="sm" />}
+                  {ln.repairId && <DeepLink kind="repair" id={ln.repairId} showIcon={false} size="sm" />}
+                  {ln.shipmentNumber && <DeepLink kind="shipment" id={ln.shipmentNumber} showIcon={false} size="sm" />}
+                </div>
+              </td>
+              <td style={{ ...subTd, maxWidth: 180, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {ln.notes || ''}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }

@@ -6974,6 +6974,33 @@ function doPost(e) {
           });
         });
 
+      case "voidInvoice":
+        return withStaffGuard_(callerEmail, function() {
+          return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
+            var r = handleVoidInvoice_(effectiveId, payload);
+            invalidateClientCache_(effectiveId);
+            // Sync billing back to Supabase so the React Invoice Review tab
+            // reflects the Void status without requiring a manual refresh.
+            api_fullClientSync_(effectiveId, ["billing"]);
+            try {
+              var _vIvJson = (r && r.getContent) ? JSON.parse(r.getContent()) : {};
+              api_auditLog_(
+                "billing",
+                String(payload.invoiceNo || ""),
+                effectiveId,
+                "void_invoice",
+                {
+                  invoiceNo:  String(payload.invoiceNo || ""),
+                  rowsVoided: _vIvJson.rowsVoided || 0,
+                  reason:     String(payload.reason || "").substring(0, 200)
+                },
+                callerEmail
+              );
+            } catch (_) { /* audit best-effort */ }
+            return r;
+          });
+        });
+
       case "batchCreateTasks":
         return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
           var r = handleBatchCreateTasks_(effectiveId, payload);
@@ -11894,6 +11921,64 @@ function handleVoidManualCharge_(clientSheetId, payload) {
     });
   } catch (err) {
     return errorResponse_("Failed to void manual charge: " + String(err), "SERVER_ERROR");
+  }
+}
+
+// ─── voidInvoice — sets every billing row matching invoiceNo to Void ───────
+
+function handleVoidInvoice_(clientSheetId, payload) {
+  if (!clientSheetId) return errorResponse_("clientSheetId is required", "MISSING_PARAM");
+  var invoiceNo = String((payload || {}).invoiceNo || "").trim();
+  if (!invoiceNo) return errorResponse_("invoiceNo is required", "INVALID_PARAMS");
+  var reason = String((payload || {}).reason || "").trim();
+
+  try {
+    var ss = SpreadsheetApp.openById(clientSheetId);
+    var sheet = ss.getSheetByName("Billing_Ledger");
+    if (!sheet) return errorResponse_("Billing_Ledger sheet not found", "SHEET_NOT_FOUND");
+
+    var hMap = api_getHeaderMap_(sheet);
+    var invCol = hMap["Invoice #"];
+    var statusCol = hMap["Status"];
+    var notesCol = hMap["Item Notes"] !== undefined ? hMap["Item Notes"] : hMap["Notes"];
+    if (!invCol || !statusCol) return errorResponse_("Invoice #/Status columns missing", "SCHEMA_ERROR");
+
+    var lastRow = api_getLastDataRow_(sheet);
+    if (lastRow < 2) return errorResponse_("Empty Billing_Ledger", "NOT_FOUND");
+
+    var allData = sheet.getRange(2, 1, lastRow - 1, sheet.getLastColumn()).getValues();
+    var voided = 0;
+    var skippedAlreadyVoid = 0;
+    var noteSuffix = reason
+      ? ("Voided: " + reason)
+      : ("Voided " + Utilities.formatDate(new Date(), ss.getSpreadsheetTimeZone() || "America/Los_Angeles", "yyyy-MM-dd"));
+
+    for (var i = 0; i < allData.length; i++) {
+      var rowInv = String(allData[i][invCol - 1] || "").trim();
+      if (rowInv !== invoiceNo) continue;
+      var rowStatus = String(allData[i][statusCol - 1] || "").trim();
+      if (rowStatus === "Void") { skippedAlreadyVoid++; continue; }
+      var rowNum = i + 2;
+      sheet.getRange(rowNum, statusCol).setValue("Void");
+      if (notesCol) {
+        var existing = String(allData[i][notesCol - 1] || "").trim();
+        sheet.getRange(rowNum, notesCol).setValue((existing ? existing + " | " : "") + noteSuffix);
+      }
+      voided++;
+    }
+
+    if (voided === 0 && skippedAlreadyVoid === 0) {
+      return errorResponse_("No rows found for invoice " + invoiceNo, "NOT_FOUND");
+    }
+
+    return jsonResponse_({
+      success: true,
+      invoiceNo: invoiceNo,
+      rowsVoided: voided,
+      alreadyVoid: skippedAlreadyVoid
+    });
+  } catch (err) {
+    return errorResponse_("Failed to void invoice: " + String(err), "SERVER_ERROR");
   }
 }
 
