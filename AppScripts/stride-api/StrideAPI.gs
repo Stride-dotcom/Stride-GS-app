@@ -36881,6 +36881,14 @@ function handleQboCreateInvoice_(payload) {
         parentContact = qbo_getCustomerContactInfo_(
           custResult.parentCustomerId, token, realmId, parentContactCache
         );
+        // Surface a per-invoice warning when the lookup failed — this whole
+        // change exists to fix a silent-failure bug, so we shouldn't
+        // re-introduce one. The push still proceeds (the invoice itself is
+        // created); operator just needs to know QBO will have empty bill-to.
+        if (!parentContact) {
+          resultEntry.warning = "Pushed without parent bill-to inherited (parent contact lookup failed for QBO customer " +
+                                custResult.parentCustomerId + "). The QBO invoice's email/address fields will be blank.";
+        }
       }
 
       // Build and push invoice
