@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.156.0 — 2026-05-03 PST — QBO sub-customer invoices now inherit BillEmail / BillAddr / ShipAddr from the parent customer record. QBO does NOT auto-inherit contact info on sub-customer invoices — every Customer:Sidemark push was landing in QBO with empty bill-to fields, so the QBO-side "Send invoice" action had nowhere to email it (Justin reported this). The QBO API's IsProject flag is read-only — we can't switch from sub-customers to Projects to fix it that way — so we explicitly inherit at push time instead. New helper qbo_getCustomerContactInfo_ fetches PrimaryEmailAddr / BillAddr / ShipAddr / PrimaryPhone via GET /customer/{id}; qbo_resolveCustomerAndSubJob_ now also returns parentCustomerId so the caller can do that lookup. handleQboPush_ holds a per-batch parentContactCache so a 50-line invoice with 4 sidemarks does 4 parent lookups, not 50; same-client follow-up invoices in the same batch are already warm. Inheritance is conditional per field — empty parent values don't write empty objects (which QBO interprets as a clear-the-field action). Parent customers (no sidemark, or separate_by_sidemark=false) are unchanged — they hit QBO with CustomerRef pointing at the parent, which already pulls contact info correctly.
+   StrideAPI.gs — v38.157.0 — 2026-05-03 PST — Hardened handleCreateInvoice_ against the half-write state that stuck Justin's NIPTUCK INV-000131 commit in Unbilled limbo. Four defenses + a recovery: (1) The markInvoiced step is no longer try/catch'd into a non-fatal warning. On any throw OR partial flip (some ledger row IDs didn't match a row on the client sheet), the Consolidated_Ledger insert is rolled back via deleteRows and an error response is returned (LEDGER_FLIP_FAILED / LEDGER_PARTIAL_FLIP). The Master RPC counter has already advanced, so a clean retry just gets the next invoice number. (2) Pre-write race detection: after grabbing invNo from the Master RPC, scan Consolidated_Ledger for the same number under a different (client, sidemark) tuple. If found, abort with INVOICE_NO_COLLISION before any writes — root-causes the Master `getNextInvoiceId` counter not being atomic across concurrent commits. (3) Idempotency-check hardening: the "all ledger rows already in Consolidated_Ledger" early-return now ALSO verifies the client Billing_Ledger has those rows flipped to Invoiced before declaring success. If only some are flipped (the half-write state we kept silently re-hitting), return HALF_WRITE_DETECTED with a clear repair instruction instead of "looks fine, alreadyProcessed=true". (4) New helpers `api_verifyClientLedgerFlipped_` and `api_isInvoiceNoSafe_` back the above checks. New admin entry `runRepairOrphanLedgerRows` reads a Script Property `REPAIR_ORPHAN_LEDGER_IDS` (comma-separated) and removes matching rows from Consolidated_Ledger so a stuck state can be cleaned up — idempotent, logs every removed row's invoice #, client, sidemark for audit. Run this once on the 18 NIPTUCK rows; future stuck states will be rare (idempotency check now refuses to mask them) but the function is general-purpose for any similar incident.
+   v38.156.0 — 2026-05-03 PST — QBO sub-customer invoices now inherit BillEmail / BillAddr / ShipAddr from the parent customer record. QBO does NOT auto-inherit contact info on sub-customer invoices — every Customer:Sidemark push was landing in QBO with empty bill-to fields, so the QBO-side "Send invoice" action had nowhere to email it (Justin reported this). The QBO API's IsProject flag is read-only — we can't switch from sub-customers to Projects to fix it that way — so we explicitly inherit at push time instead. New helper qbo_getCustomerContactInfo_ fetches PrimaryEmailAddr / BillAddr / ShipAddr / PrimaryPhone via GET /customer/{id}; qbo_resolveCustomerAndSubJob_ now also returns parentCustomerId so the caller can do that lookup. handleQboPush_ holds a per-batch parentContactCache so a 50-line invoice with 4 sidemarks does 4 parent lookups, not 50; same-client follow-up invoices in the same batch are already warm. Inheritance is conditional per field — empty parent values don't write empty objects (which QBO interprets as a clear-the-field action). Parent customers (no sidemark, or separate_by_sidemark=false) are unchanged — they hit QBO with CustomerRef pointing at the parent, which already pulls contact info correctly.
    v38.155.0 — 2026-05-03 PST — Drop the misleading "PDF generation skipped (operator choice)" warning that handleCreateInvoice_ unconditionally appended whenever skipPdf=true. The operator-facing Generate PDF checkbox was removed in PR #210; skipPdf is now React-controlled (true unless the operator opts into the email-attachment path), and the React side immediately generates the canonical PDF via jsPDF + Supabase Storage and PATCHes billing.invoice_url to the signed URL. So a PDF *is* being created on every commit — surfacing a "skipped" warning misled Justin into thinking invoices were missing PDFs. The warning push at handleCreateInvoice_ ~line 21937 is removed; the empty `warnings` array stays so the response shape doesn't drift for existing consumers.
    v38.154.0 — 2026-05-03 PST — Reference now joins Sidemark / Vendor / Description as an autocomplete-DB field. handleGetAutocomplete_ returns a `references` array on both code paths (Supabase first, sheet fallback). The companion Postgres migration relaxes the autocomplete_db CHECK to allow 'Reference', backfills 440 distinct references / 26 tenants from inventory + billing, and installs INSERT/UPDATE triggers on public.inventory + public.billing that auto-populate autocomplete_db whenever sidemark / vendor / description / reference values are written — eliminating the periodic-backfill cycle that surfaced Justin's "missing sidemarks" report earlier today. React side: useAutocomplete + InlineEditableCell + Inventory.tsx Reference column + ItemDetailPanel Reference field all switch from plain text to autocomplete-db variant.
    v38.153.0 — 2026-05-03 PST — Stax Customers sheet retired; CB Clients is the single source of truth for Stax Customer ID. Three Stax write paths (handleQbExport_ auto-push, handleImportIIF_, stax_lookupCustomerIds_ → Refresh Stax IDs button) all resolve via the new stax_buildClientStaxMap_() helper, which indexes CB Clients rows by Client Name, QB Customer Name, AND Stax Customer Name into the same record so divergent-name invoices match. Sheet-row dedup on Stax Invoices switches from the multi-field hash (docNum|name|amount|date) to the QB invoice number alone — Justin reported INV-000131 landing twice when a re-import drifted on amount/date even though the docNum was identical. Existing PENDING rows now UPDATE in place with the freshest customer / date / total / line items / Stax Customer ID; CREATED / PAID / VOIDED rows are left untouched (in-flight invoices must not be clobbered by a stale re-import). Rows that resolve to a client without a Stax Customer ID are now skipped and logged as a NO_CUSTOMER exception instead of inserted as half-populated PENDING rows. The Stax-side customer-name written into the Invoices sheet falls back through `entry.staxCustomerName (alias only) → clientInfo.staxCustomerName → invoice qbName`, preserving the pre-v38.153.0 behavior of writing the IIF's QB name when no explicit Stax-side alias is set on the client record. New admin entry point `runStaxSheetsCleanup` collapses existing duplicate clutter: Stax Invoices dedupes by QB invoice number, keeping the row with the strongest status (PAID > VOIDED > CHARGE_FAILED/SENT > CREATED > PENDING), then non-empty Stax Invoice ID, then most recent Created At; Stax Customers dedupes by (QB Name + Stax Customer ID), keeping the row with the most filled-in cells (fixes the Wignall x2 / Digs x7 ghosts Justin spotted). Reads `Stax Customer ID` from the standard CB Clients column.
@@ -21569,6 +21570,78 @@ function api_writeConsolidatedLedgerRow_(consolLedger, payload) {
  * Mark rows in client Billing_Ledger as Invoiced.
  * Writes Status=Invoiced, Invoice #, Invoice Date, Invoice URL.
  */
+/**
+ * v38.157.0 — Verify a client's Billing_Ledger has the expected invoice number
+ * stamped on the given ledger rows. Used by handleCreateInvoice_'s idempotency
+ * check to detect half-write state (Consolidated_Ledger has rows under invNo
+ * but the client sheet wasn't flipped). Read-only; throws never; degrades to
+ * "not flipped" on any error so the caller can surface the issue.
+ */
+function api_verifyClientLedgerFlipped_(clientSheetId, ledgerRowIds, expectedInvNo) {
+  try {
+    if (!clientSheetId || !ledgerRowIds || !ledgerRowIds.length) {
+      return { allFlipped: false, flipped: 0, error: "missing inputs" };
+    }
+    var ss = SpreadsheetApp.openById(clientSheetId);
+    var sh = ss.getSheetByName("Billing_Ledger");
+    if (!sh) return { allFlipped: false, flipped: 0, error: "Billing_Ledger sheet missing" };
+    var hdr = api_getHeaderMap_(sh);
+    var idxLid = hdr["Ledger Row ID"];
+    var idxInv = hdr["Invoice #"];
+    if (!idxLid || !idxInv) {
+      return { allFlipped: false, flipped: 0, error: "Ledger Row ID or Invoice # column missing" };
+    }
+    var data = sh.getDataRange().getValues();
+    var idSet = {};
+    for (var i = 0; i < ledgerRowIds.length; i++) {
+      idSet[String(ledgerRowIds[i]).trim()] = true;
+    }
+    var flipped = 0;
+    for (var r = 1; r < data.length; r++) {
+      var lid = String(data[r][idxLid - 1] || "").trim();
+      if (!idSet[lid]) continue;
+      var inv = String(data[r][idxInv - 1] || "").trim();
+      if (inv === String(expectedInvNo).trim()) flipped++;
+    }
+    return { allFlipped: flipped === ledgerRowIds.length, flipped: flipped, expected: ledgerRowIds.length };
+  } catch (e) {
+    return { allFlipped: false, flipped: 0, error: e.message };
+  }
+}
+
+/**
+ * v38.157.0 — Pre-write race-detection: after pulling an invoice number from
+ * the Master RPC, scan Consolidated_Ledger to see if that number is already
+ * in use by a different (client, sidemark) tuple. If yes, the RPC handed out
+ * a duplicate (the counter isn't atomic across concurrent calls) and a write
+ * here would create the orphan-ledger-row state that bit Justin on INV-000131.
+ * Returns true when the number is safe to use.
+ */
+function api_isInvoiceNoSafe_(consolLedger, invNo, expectedClient, expectedSidemark) {
+  try {
+    if (consolLedger.getLastRow() < 2) return true;
+    var data = consolLedger.getDataRange().getValues();
+    var hdr = api_getHeaderMap_(consolLedger);
+    var idxInv      = hdr["Invoice #"];
+    var idxClient   = hdr["Client"];
+    var idxSidemark = hdr["Sidemark"];
+    if (!idxInv) return true; // can't tell — let it proceed
+    var expC = String(expectedClient || "").trim().toUpperCase();
+    var expS = String(expectedSidemark || "").trim().toUpperCase();
+    for (var r = 1; r < data.length; r++) {
+      var rowInv = String(data[r][idxInv - 1] || "").trim();
+      if (rowInv !== invNo) continue;
+      var rowC = idxClient   ? String(data[r][idxClient - 1]   || "").trim().toUpperCase() : "";
+      var rowS = idxSidemark ? String(data[r][idxSidemark - 1] || "").trim().toUpperCase() : "";
+      if (rowC !== expC || rowS !== expS) return false; // collision with a different group
+    }
+    return true;
+  } catch (e) {
+    Logger.log("api_isInvoiceNoSafe_ check failed (allowing): " + e.message);
+    return true; // fail open — better to push than to block on a check error
+  }
+}
+
 function api_markClientLedgerInvoiced_(clientSheetId, ledgerRowIds, invNo, invDate, invUrl) {
   if (!ledgerRowIds || !ledgerRowIds.length) return 0;
   var ss = SpreadsheetApp.openById(clientSheetId);
@@ -21729,6 +21802,23 @@ function handleCreateInvoice_(payload) {
   var cbSS       = SpreadsheetApp.openById(cbId);
   var cbSettings = api_readSettings_(cbSS);
 
+  // v38.157.0 — Serialize Consolidated_Ledger reads + writes across the
+  // entire commit. Without a lock, two concurrent invoices could both pass
+  // the idempotency check + race-detection check, both write rows, and
+  // either one's rollback would chop the OTHER one's rows by row position
+  // (deleteRows works on current row numbers, not on the IDs we wrote).
+  // The serialization is bounded — Apps Script ScriptLock is per-script,
+  // so other API calls keep flowing. A 30s timeout matches the worst-case
+  // commit time observed (50-line invoice with PDF generation).
+  var commitLock = LockService.getScriptLock();
+  if (!commitLock.tryLock(30000)) {
+    return errorResponse_(
+      "Could not acquire commit lock within 30s — another invoice commit is running. Retry in a moment.",
+      "LOCK_TIMEOUT"
+    );
+  }
+  try {
+
   var masterRpcUrl        = String(cbSettings["MASTER_RPC_URL"]              || "").trim();
   var masterRpcToken      = String(cbSettings["MASTER_RPC_TOKEN"]             || "").trim();
   var masterFolderId      = String(cbSettings["MASTER_ACCOUNTING_FOLDER_ID"]  || "").trim();
@@ -21770,12 +21860,35 @@ function handleCreateInvoice_(payload) {
           else { allMatched = false; break; }
         }
         if (allMatched) {
-          return jsonResponse_({
-            success: true,
-            alreadyProcessed: true,
-            skippedPdf: true,
-            invoiceNo: Object.keys(matchedNos)[0]
-          });
+          // v38.157.0 — Verify the client Billing_Ledger has been flipped
+          // for those rows before declaring success. Without this check,
+          // a half-write state from a prior failed commit (Consolidated
+          // got the rows but client sheet flip failed → caught + swallowed
+          // as a warning) caused every retry to silent-success here, and
+          // the rows were stuck in Unbilled forever (Justin's NIPTUCK INV-
+          // 000131 saga). If we can prove the client sheet is consistent,
+          // treat as a real idempotent retry. Otherwise, surface the
+          // half-write so the operator can run runRepairOrphanLedgerRows
+          // and try again clean.
+          var matchedInvNo = Object.keys(matchedNos)[0];
+          var verifyResult = api_verifyClientLedgerFlipped_(sourceSheetId, ledgerRowIds, matchedInvNo);
+          if (verifyResult.allFlipped) {
+            return jsonResponse_({
+              success: true,
+              alreadyProcessed: true,
+              skippedPdf: true,
+              invoiceNo: matchedInvNo
+            });
+          }
+          return errorResponse_(
+            "HALF-WRITE STATE: invoice " + matchedInvNo + " exists in Consolidated_Ledger for all " +
+            ledgerRowIds.length + " ledger rows, but only " + verifyResult.flipped + " of them are " +
+            "flipped to Invoiced on the client sheet. A previous commit failed mid-write. " +
+            "Set the REPAIR_ORPHAN_LEDGER_IDS Script Property to the comma-separated ledger row IDs " +
+            "and run runRepairOrphanLedgerRows from the Apps Script editor to remove the orphan " +
+            "Consolidated_Ledger rows, then retry the invoice creation.",
+            "HALF_WRITE_DETECTED"
+          );
         }
       }
     }
@@ -21784,6 +21897,26 @@ function handleCreateInvoice_(payload) {
   // Get invoice number from Master RPC
   var invNo = api_nextInvoiceNo_(masterRpcUrl, masterRpcToken);
   if (!invNo) return errorResponse_("Master RPC returned no invoice number", "RPC_ERROR");
+
+  // v38.157.0 — RPC race detection. The Master `getNextInvoiceId` counter is
+  // read-then-write without an atomic transaction; two concurrent commits can
+  // both grab the same number (Justin reported INV-000131 going to two
+  // sidemark groups in the same batch). The React side serializes batches at
+  // concurrency=1 but that doesn't protect against multiple tabs / users /
+  // admin tools commitng in parallel. Catch a duplicate here BEFORE any
+  // sheet writes — better to abort and retry than to write orphan rows under
+  // a contested invoice number. The RPC counter has already advanced, so the
+  // retry will get a clean fresh number.
+  var consolLedgerForCheck = cbSS.getSheetByName("Consolidated_Ledger");
+  if (consolLedgerForCheck && !api_isInvoiceNoSafe_(consolLedgerForCheck, invNo, client, sidemark)) {
+    return errorResponse_(
+      "Invoice number collision: " + invNo + " was just assigned by the Master RPC but is already " +
+      "in use by a different client/sidemark group in Consolidated_Ledger. The RPC counter handed " +
+      "out a duplicate (concurrent-commit race). Retry the create — your retry will get the next " +
+      "invoice number from the Master RPC and proceed cleanly.",
+      "INVOICE_NO_COLLISION"
+    );
+  }
 
   // v38.122.0 — Invoice date: today, in PST regardless of script timezone.
   // Previously relied on Session.getScriptTimeZone(); explicit America/Los_Angeles
@@ -22010,9 +22143,18 @@ function handleCreateInvoice_(payload) {
     if (lid2) existingIds[lid2] = true;
   }
 
+  // v38.157.0 — Track the inserted row range so we can roll back on a
+  // downstream failure. Without rollback, a markInvoiced throw + caught-as-
+  // warning leaves orphan rows in Consolidated_Ledger and Unbilled rows on
+  // the client sheet — exactly the state Justin's NIPTUCK INV-000131 was
+  // stuck in for hours. Rollback isn't perfect (the Master RPC counter has
+  // already advanced) but it preserves data integrity: the invoice number
+  // is "wasted" on a clean retry, but no half-state is left behind.
+  var insertedRange = null;
   if (clRowsToInsert.length > 0) {
     var insertStart = api_getLastDataRow_(consolLedger) + 1;
     consolLedger.getRange(insertStart, 1, clRowsToInsert.length, ncolsCB).setValues(clRowsToInsert);
+    insertedRange = { start: insertStart, count: clRowsToInsert.length };
 
     // Hyperlink rich-text on Invoice # and Invoice URL columns. Single
     // batched setRichTextValues per column over the inserted slice.
@@ -22041,11 +22183,67 @@ function handleCreateInvoice_(payload) {
     }
   }
 
-  // Update client Billing_Ledger rows to Invoiced
+  // Update client Billing_Ledger rows to Invoiced.
+  //
+  // v38.157.0 — Was previously try/catch with the error swallowed into a
+  // warning. That made every failure here look like success to the React
+  // side, and the orphan Consolidated_Ledger rows then poisoned future
+  // retries via the idempotency early-return. Now: on any throw OR partial
+  // flip (some rows didn't match), roll back the Consolidated_Ledger insert
+  // and return a real error so the operator knows the invoice didn't take.
+  // v38.157.0 — Helper closure for rollback. If the deleteRows itself fails
+  // (read-only quota, lock contention bug, sheet deleted between insert and
+  // rollback), the orphan ledger IDs are pinned to a Script Property so an
+  // operator can later run runRepairOrphanLedgerRows. Without this the
+  // orphans would be findable only by manual SQL inspection — exactly the
+  // diagnostic burden this whole PR exists to eliminate.
+  function rollbackInsertedRange_() {
+    if (!insertedRange) return { ok: true };
+    try {
+      consolLedger.deleteRows(insertedRange.start, insertedRange.count);
+      return { ok: true };
+    } catch (rollbackErr) {
+      Logger.log("Consolidated_Ledger rollback failed (logging orphans for manual repair): " + rollbackErr.message);
+      try {
+        var orphanIds = ledgerRowIds.join(",");
+        var existing = String(PropertiesService.getScriptProperties().getProperty("ROLLBACK_FAILED_ORPHAN_LEDGER_IDS") || "").trim();
+        var combined = existing ? (existing + "," + orphanIds) : orphanIds;
+        PropertiesService.getScriptProperties().setProperty("ROLLBACK_FAILED_ORPHAN_LEDGER_IDS", combined);
+        PropertiesService.getScriptProperties().setProperty("ROLLBACK_FAILED_LAST_INVOICE_NO", String(invNo));
+        PropertiesService.getScriptProperties().setProperty("ROLLBACK_FAILED_LAST_AT", new Date().toISOString());
+      } catch (propErr) {
+        Logger.log("Could not pin orphan IDs to Script Properties: " + propErr.message);
+      }
+      return { ok: false, error: rollbackErr.message };
+    }
+  }
+
+  var marked = 0;
   try {
-    api_markClientLedgerInvoiced_(sourceSheetId, ledgerRowIds, invNo, invDate, invoiceUrl);
+    marked = api_markClientLedgerInvoiced_(sourceSheetId, ledgerRowIds, invNo, invDate, invoiceUrl);
   } catch (ledgerErr) {
-    warnings.push("Ledger update warning: " + ledgerErr.message);
+    var rb1 = rollbackInsertedRange_();
+    return errorResponse_(
+      "Client ledger flip failed (" + ledgerErr.message + ")." +
+      (rb1.ok
+        ? " Consolidated_Ledger insert was rolled back."
+        : " Consolidated_Ledger ROLLBACK ALSO FAILED (" + rb1.error + ") — orphan ledger IDs pinned to Script Property ROLLBACK_FAILED_ORPHAN_LEDGER_IDS for runRepairOrphanLedgerRows.") +
+      " The Master invoice counter has advanced — retrying will get the next invoice number and a clean commit.",
+      "LEDGER_FLIP_FAILED"
+    );
+  }
+  if (marked < ledgerRowIds.length) {
+    var rb2 = rollbackInsertedRange_();
+    return errorResponse_(
+      "Client ledger partial flip: " + marked + " of " + ledgerRowIds.length + " ledger rows " +
+      "were marked Invoiced (the rest didn't match any rows on the client Billing_Ledger sheet — " +
+      "possibly transferred or deleted between the unbilled-report read and the commit)." +
+      (rb2.ok
+        ? " Consolidated_Ledger insert was rolled back."
+        : " Consolidated_Ledger ROLLBACK ALSO FAILED (" + rb2.error + ") — orphan ledger IDs pinned to Script Property ROLLBACK_FAILED_ORPHAN_LEDGER_IDS for runRepairOrphanLedgerRows.") +
+      " Re-run Generate Unbilled Report and retry.",
+      "LEDGER_PARTIAL_FLIP"
+    );
   }
 
   // Email invoice to client (skippable via payload.skipEmail or when PDF was skipped)
@@ -22108,6 +22306,11 @@ function handleCreateInvoice_(payload) {
     lineItemCount: rows.length,
     warnings:      warnings.length ? warnings : undefined
   });
+  } finally {
+    // v38.157.0 — Always release the commit lock, regardless of success
+    // path or any of the early-return error responses inside the try.
+    try { commitLock.releaseLock(); } catch (_) {}
+  }
 }
 
 // ─── Phase 7B #12: Resend Invoice Email ───────────────────────────────────────
@@ -38225,4 +38428,93 @@ function countFilled_(row) {
     if (String(row[i] || "").trim()) n++;
   }
   return n;
+}
+
+/**
+ * v38.157.0 — runRepairOrphanLedgerRows: admin-only recovery for the half-write
+ * state that bit Justin's NIPTUCK INV-000131 commit. When `handleCreateInvoice_`
+ * wrote rows to Consolidated_Ledger but the client Billing_Ledger flip failed
+ * (and the failure was previously silently swallowed), the rows live as
+ * orphans — Consolidated says "Invoiced INV-XXX" but the client sheet still
+ * shows Unbilled with empty invoice_no. The new idempotency check refuses to
+ * silent-success on this state (returns HALF_WRITE_DETECTED) but the orphan
+ * rows still need to be removed before a clean retry can succeed.
+ *
+ * Usage:
+ *   1. Set Script Property `REPAIR_ORPHAN_LEDGER_IDS` to a comma-separated
+ *      list of ledger_row_id values that are orphaned (status=Unbilled on
+ *      client sheet, but present in Consolidated_Ledger with an invoice #).
+ *   2. Run this function from the Apps Script editor.
+ *   3. It deletes the matching rows from Consolidated_Ledger (bottom-up so
+ *      indices don't shift).
+ *   4. The next React-side Create Invoice attempt for those ledger rows
+ *      will find a clean state and commit normally.
+ *
+ * Idempotent — re-runs on already-cleaned rows are no-ops.
+ */
+function runRepairOrphanLedgerRows() {
+  var ledgerIdsCsv = String(PropertiesService.getScriptProperties().getProperty("REPAIR_ORPHAN_LEDGER_IDS") || "").trim();
+  if (!ledgerIdsCsv) {
+    Logger.log("runRepairOrphanLedgerRows: REPAIR_ORPHAN_LEDGER_IDS Script Property not set.\n" +
+               "  Set it to a comma-separated list of ledger_row_id values to remove from\n" +
+               "  Consolidated_Ledger, then re-run.");
+    return;
+  }
+  var ids = ledgerIdsCsv.split(",")
+    .map(function(s) { return String(s || "").trim(); })
+    .filter(function(s) { return s.length > 0; });
+  if (!ids.length) { Logger.log("runRepairOrphanLedgerRows: parsed list is empty"); return; }
+
+  var cbId = prop_("CB_SPREADSHEET_ID");
+  if (!cbId) { Logger.log("CB_SPREADSHEET_ID not set"); return; }
+  var cbSS = SpreadsheetApp.openById(cbId);
+  var sh = cbSS.getSheetByName("Consolidated_Ledger");
+  if (!sh) { Logger.log("Consolidated_Ledger sheet not found"); return; }
+
+  var data = sh.getDataRange().getValues();
+  var hdr = api_getHeaderMap_(sh);
+  var idxLid = hdr["Ledger Row ID"];
+  if (!idxLid) { Logger.log("Ledger Row ID column not found"); return; }
+
+  var idSet = {};
+  for (var i = 0; i < ids.length; i++) idSet[ids[i]] = true;
+
+  var matchedDetails = [];
+  var rowsToDelete = []; // 1-based sheet row numbers
+  for (var r = 1; r < data.length; r++) {
+    var lid = String(data[r][idxLid - 1] || "").trim();
+    if (!lid || !idSet[lid]) continue;
+    var sheetRow = r + 1;
+    rowsToDelete.push(sheetRow);
+    matchedDetails.push({
+      sheetRow: sheetRow,
+      ledgerRowId: lid,
+      invoiceNo: hdr["Invoice #"] ? String(data[r][hdr["Invoice #"] - 1] || "") : "",
+      client:    hdr["Client"]    ? String(data[r][hdr["Client"]    - 1] || "") : "",
+      sidemark:  hdr["Sidemark"]  ? String(data[r][hdr["Sidemark"]  - 1] || "") : ""
+    });
+  }
+
+  Logger.log("runRepairOrphanLedgerRows: input IDs=" + ids.length + ", matched rows=" + rowsToDelete.length);
+  matchedDetails.forEach(function(m) {
+    Logger.log("  → row " + m.sheetRow + " | " + m.invoiceNo + " | " + m.client + " | " +
+               m.sidemark + " | " + m.ledgerRowId);
+  });
+  if (!rowsToDelete.length) {
+    Logger.log("runRepairOrphanLedgerRows: nothing to do (no Consolidated_Ledger rows match the input IDs).");
+    return;
+  }
+
+  // Delete bottom-up so earlier-row deletes don't shift later indices
+  rowsToDelete.sort(function(a, b) { return b - a; });
+  var deleted = 0;
+  for (var d = 0; d < rowsToDelete.length; d++) {
+    try {
+      sh.deleteRow(rowsToDelete[d]);
+      deleted++;
+    } catch (e) {
+      Logger.log("  deleteRow " + rowsToDelete[d] + " failed: " + e.message);
+    }
+  }
+  Logger.log("runRepairOrphanLedgerRows complete: deleted " + deleted + " of " + rowsToDelete.length + " rows.");
 }
