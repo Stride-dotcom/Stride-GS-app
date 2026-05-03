@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
+import { useUrlState } from '../hooks/useUrlState';
 import { Upload, Users, FileText, Zap, AlertTriangle, Send, CheckCircle2, XCircle, RefreshCw, DollarSign, Activity, UploadCloud, Loader2, Search } from 'lucide-react';
 import { theme } from '../styles/theme';
 import { WriteButton } from '../components/shared/WriteButton';
@@ -21,7 +22,7 @@ import {
   type StaxCustomerRow, type StaxRunLogEntry,
 } from '../lib/api';
 import { AutocompleteSelect } from '../components/shared/AutocompleteSelect';
-import { InvoiceLink } from '../components/shared/InvoiceLink';
+import { DeepLink } from '../components/shared/DeepLink';
 import { ProcessingOverlay } from '../components/shared/ProcessingOverlay';
 import { InfoTooltip } from '../components/shared/InfoTooltip';
 import { BulkResultSummary } from '../components/shared/BulkResultSummary';
@@ -356,6 +357,26 @@ export function Payments() {
   const [selectedInvoice, setSelectedInvoice] = useState<PaymentInvoice | null>(null);
   const [selectedCustomer, setSelectedCustomer] = useState<StaxCustomer | null>(null);
 
+  // Deeplink: PaymentDetailPanel state lives in the URL as ?open=<qbInvoice>
+  // per the CLAUDE.md panel-deeplink convention. Refresh keeps the panel
+  // open; copying the URL gives someone a sharable handle to verify what
+  // happened on a specific invoice. No `&client=` here — Payments is
+  // admin-only and Stax invoice numbers are unique.
+  const [openInvoiceId, setOpenInvoiceId] = useUrlState('open', '');
+
+  // Open helper — keeps state + URL in sync. Pass the StaxInvoice directly;
+  // we do the toPaymentInvoice conversion here so all callers stay simple.
+  const openInvoiceWithUrl = useCallback((inv: StaxInvoice) => {
+    setSelectedInvoice(toPaymentInvoice(inv));
+    setOpenInvoiceId(inv.qbInvoice);
+  }, [setOpenInvoiceId]);
+
+  // Close helper — clears state + URL.
+  const closeInvoicePanel = useCallback(() => {
+    setSelectedInvoice(null);
+    setOpenInvoiceId('');
+  }, [setOpenInvoiceId]);
+
   // ─── Live data state ───
   const [invoices, setInvoices] = useState<StaxInvoice[]>([]);
   const [charges, setCharges] = useState<StaxCharge[]>([]);
@@ -531,6 +552,19 @@ export function Payments() {
   }, []);
 
   useEffect(() => { loadData(); }, [loadData]);
+
+  // Deeplink: when the URL has ?open=<qbInvoice> and invoices have loaded,
+  // auto-open the PaymentDetailPanel for that invoice. Runs on mount (after
+  // first invoices fetch) and any time the URL param changes (e.g. browser
+  // back/forward navigates between deeplinks). No-op if the param doesn't
+  // match any current invoice — keeps the URL handle but doesn't error.
+  useEffect(() => {
+    if (!openInvoiceId) return;
+    if (selectedInvoice && selectedInvoice.qbInvoice === openInvoiceId) return;
+    if (invoices.length === 0) return;
+    const match = invoices.find((i) => i.qbInvoice === openInvoiceId);
+    if (match) setSelectedInvoice(toPaymentInvoice(match));
+  }, [openInvoiceId, invoices, selectedInvoice]);
 
   // v38.119.0 — Realtime subscription: refetch Payments when any Stax
   // mirror table changes in Supabase (another tab edits, backend
@@ -1016,7 +1050,7 @@ export function Payments() {
                   <tr
                     key={i.qbInvoice}
                     style={{ transition: 'background 0.1s', cursor: 'pointer', opacity: (i.status || '').toUpperCase() === 'VOIDED' ? 0.5 : 1 }}
-                    onClick={() => setSelectedInvoice(toPaymentInvoice(i))}
+                    onClick={() => openInvoiceWithUrl(i)}
                     onMouseEnter={e => e.currentTarget.style.background = theme.colors.bgSubtle}
                     onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
                     title="Click to view invoice details"
@@ -1025,7 +1059,7 @@ export function Payments() {
                       <input type="checkbox" checked={selectedInvoices.has(i.rowIndex)} onChange={() => {}} style={{ cursor: 'pointer', accentColor: theme.colors.orange }} />
                     </td>
                     <td style={{ ...td, fontWeight: 600 }}>
-                      <InvoiceLink invoiceNo={i.qbInvoice} />
+                      <DeepLink kind="invoice" id={i.qbInvoice} size="sm" showIcon={false} />
                       {i.isTest && <span style={{ marginLeft: 6, display: 'inline-block', padding: '1px 6px', borderRadius: 8, fontSize: 9, fontWeight: 700, background: '#EDE9FE', color: '#7C3AED', verticalAlign: 'middle' }}>Test</span>}
                     </td>
                     <td style={{ ...td, fontWeight: 500 }}>{i.customer}{i.autoCharge !== false && <span style={{ marginLeft: 4, fontSize: 9, padding: '1px 5px', borderRadius: 4, background: '#F0FDF4', color: '#15803D', fontWeight: 700 }}>Auto Pay</span>}</td>
@@ -1238,7 +1272,7 @@ export function Payments() {
                       )}
                     </td>
                     <td style={{ ...td, fontWeight: 600 }}>
-                      <InvoiceLink invoiceNo={i.qbInvoice} />
+                      <DeepLink kind="invoice" id={i.qbInvoice} size="sm" showIcon={false} />
                       {i.isTest && <span style={{ marginLeft: 6, padding: '1px 5px', borderRadius: 6, fontSize: 9, fontWeight: 700, background: '#EDE9FE', color: '#7C3AED' }}>Test</span>}
                     </td>
                     <td style={td}>
@@ -1522,7 +1556,7 @@ export function Payments() {
                     return (
                       <tr key={i.qbInvoice} style={{ background: hasCustomer ? 'transparent' : '#FEF2F2' }}>
                         <td style={{ ...td, fontWeight: 600, width: 160 }}>
-                          <InvoiceLink invoiceNo={i.qbInvoice} />
+                          <DeepLink kind="invoice" id={i.qbInvoice} size="sm" showIcon={false} />
                           {i.isTest && <span style={{ marginLeft: 4, padding: '1px 5px', borderRadius: 6, fontSize: 9, fontWeight: 700, background: '#EDE9FE', color: '#7C3AED' }}>Test</span>}
                           <span style={{ marginLeft: 4, padding: '1px 5px', borderRadius: 6, fontSize: 9, fontWeight: 700, background: '#FEF3C7', color: '#92400E' }}>Pending Push</span>
                         </td>
@@ -1579,12 +1613,12 @@ export function Payments() {
                   </thead>
                   <tbody>{g.invoices.map(i => (
                     <tr key={i.qbInvoice} style={{ cursor: 'pointer' }}
-                      onClick={() => setSelectedInvoice(toPaymentInvoice(i))}
+                      onClick={() => openInvoiceWithUrl(i)}
                       onMouseEnter={e => e.currentTarget.style.background = theme.colors.bgSubtle}
                       onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
                     >
                       <td style={{ ...td, fontWeight: 600, width: 160 }}>
-                        <InvoiceLink invoiceNo={i.qbInvoice} />
+                        <DeepLink kind="invoice" id={i.qbInvoice} size="sm" showIcon={false} />
                         {i.isTest && <span style={{ marginLeft: 4, padding: '1px 5px', borderRadius: 6, fontSize: 9, fontWeight: 700, background: '#EDE9FE', color: '#7C3AED' }}>Test</span>}
                       </td>
                       <td style={{ ...td, fontWeight: 500 }}>{i.customer}{i.autoCharge !== false && <span style={{ marginLeft: 4, fontSize: 9, padding: '1px 5px', borderRadius: 4, background: '#F0FDF4', color: '#15803D', fontWeight: 700 }}>Auto Pay</span>}</td>
@@ -1931,7 +1965,7 @@ export function Payments() {
       {selectedInvoice && (
         <PaymentDetailPanel
           invoice={selectedInvoice}
-          onClose={() => setSelectedInvoice(null)}
+          onClose={closeInvoicePanel}
           charges={charges.filter(c => c.qbInvoice === selectedInvoice.qbInvoice).map(c => ({
             timestamp: c.timestamp, status: (c.status === 'SUCCESS' ? 'Success' : c.status === 'DECLINED' || c.status === 'API_ERROR' || c.status === 'NO_PAYMENT_METHOD' ? 'Failed' : 'Pending') as 'Success' | 'Failed' | 'Pending',
             txnId: c.txnId || '', notes: c.notes || c.status,
