@@ -14,7 +14,13 @@ Sheets entirely. Run the whole app on **Supabase + GitHub Pages**, with
 **Resend** for transactional email and edge functions for any
 server-side work. Move one slice at a time, never break production.
 
-**Where we are right now (2026-05-02, end of day):**
+**Where we are right now (2026-05-02, late EOD — superseded by sessions 91+):**
+- ✅ **Session 91 (perf sweep)** shipped 6 PRs fixing per-cell `setValue` antipattern across the GAS surface — all bulk-write operations now <5 sec regardless of batch size. PR [#188](https://github.com/Stride-dotcom/Stride-GS-app/pull/188) handleCancelWillCall_, [#190](https://github.com/Stride-dotcom/Stride-GS-app/pull/190) api_writeThrough_ batch (4 batch handlers + new resyncEntitiesBatchToSupabase_ — Supabase mirror is now batched too), [#191](https://github.com/Stride-dotcom/Stride-GS-app/pull/191) Class C handlers (start-task / complete-task / complete-repair), [#194](https://github.com/Stride-dotcom/Stride-GS-app/pull/194) bulk-cancel-WCs cascade. PRs #186 + #187 (release-items, invoice-commit) earlier in the day were the production fires that triggered the sweep. GAS now at v38.143.1 / Web App **v431**.
+- ✅ **Session 91 (process)** added per-builder worktree convention to CLAUDE.md ([#197](https://github.com/Stride-dotcom/Stride-GS-app/pull/197)) — `git worktree add -b ... source` per topic. Two HEAD-stomp incidents during this very session validated the need.
+- ✅ **Billing-page audit (2026-05-02) PR 1+2+3 all done.** PR [#183](https://github.com/Stride-dotcom/Stride-GS-app/pull/183) seed INSURANCE row, PR [#185](https://github.com/Stride-dotcom/Stride-GS-app/pull/185) services filter from Supabase, PR [#200](https://github.com/Stride-dotcom/Stride-GS-app/pull/200) Category MultiSelectFilter narrows Service dropdown reactively. The audit's open backlog is just the `billing_parity_log` 4% mismatch triage (gating the billing-engine port).
+- ✅ **Other parallel work shipped today:** [#189](https://github.com/Stride-dotcom/Stride-GS-app/pull/189) storage charges Postgres RPC + GAS commit-rows write-only (progress on long-term step 5), [#192](https://github.com/Stride-dotcom/Stride-GS-app/pull/192) separate_by_sidemark fix, [#193](https://github.com/Stride-dotcom/Stride-GS-app/pull/193)+[#195](https://github.com/Stride-dotcom/Stride-GS-app/pull/195) task add-on services, [#196](https://github.com/Stride-dotcom/Stride-GS-app/pull/196)+[#198](https://github.com/Stride-dotcom/Stride-GS-app/pull/198)+[#199](https://github.com/Stride-dotcom/Stride-GS-app/pull/199) BillingPreviewCard / BillingCalculator port.
+
+**Where session 90 left it (kept for context):**
 - ✅ Session 90 shipped 9 PRs (#174–#182). GAS at v38.121.0 / Web App v424.
 - ✅ Every email handler that doesn't need temp-password generation or
   attachments is now off GAS MailApp. All sends route through
@@ -465,45 +471,15 @@ Migration `20260502130000_seed_insurance_service_catalog.sql` seeds
 the row idempotently. Already in source via PR #183; live DB row
 verified.
 
-### PR 2 ⏭️ NEXT-SESSION — Billing services filter reads from Supabase
+### PR 2 ✅ — Billing services filter reads from Supabase
 
-`Billing.tsx` line 369 still does
-`const { priceList } = usePricing(apiConfigured);` — that's the
-GAS-backed hook. Master Price List uses `useServiceCatalog`
-(Supabase-native) but Billing never got swapped, so its filter:
-- doesn't see new services admins add via Settings → Pricing
-- adds an unnecessary GAS round-trip
-- caches behind the price list
+Shipped via PR [#185](https://github.com/Stride-dotcom/Stride-GS-app/pull/185). `Billing.tsx` swapped `usePricing` (GAS-backed) → `useServiceCatalog` (Supabase-native). New services added via Settings → Pricing now show up in the Report tab's Service filter immediately, INSURANCE is filterable (depended on PR 1's seed), and the page drops one GAS round-trip on every load.
 
-**Fix scope (~30 min):**
-- `src/pages/Billing.tsx`:
-  - line 52: swap `usePricing` import → `useServiceCatalog`
-  - line 369: `const { services } = useServiceCatalog();`
-  - lines 370–386: rewrite `ALL_SERVICES` memo to map `services`
-    (Supabase shape: `code`, `name`, `category`, `active`) instead of
-    `priceList` (GAS shape: `'Service Code'`, `'Service Name'`, `Active`)
-  - drop the hardcoded fallback list (lines 377–385) — `useServiceCatalog`
-    handles loading state correctly
-- Verify `nameToCode` map at line 491 still resolves
-- Typecheck + build + commit + PR + merge + deploy
+### PR 3 ✅ — Category + service combo filter
 
-### PR 3 ⏳ FUTURE — Category + service combo filter
+Shipped via PR [#200](https://github.com/Stride-dotcom/Stride-GS-app/pull/200). Added a `Category` `MultiSelectFilter` between `Sidemark` and `Service` on the Billing → Report tab. Selecting categories reactively narrows the Service dropdown — `SVC_OPTIONS_FOR_FILTER` filters `NON_STOR_SERVICES` by `s.category ∈ rptCategoryFilter`, with a `useEffect` that drops service selections that fall out of view when categories change (no ghost selections). `BillingFilterParams.categoryFilter?: string[]` flows through both the Supabase path (`.in('category', filters.categoryFilter)`) and the GAS path (URL param; handler may ignore — Supabase is primary). Filter row order is now: Client | Sidemark | Category | Service | Status.
 
-`service_catalog.category` exists with 9 categories (Admin 3, Delivery
-13, Fabric Protection 11, Labor 5, Repair 2, Shipping 4, Storage 2,
-Warehouse 15, Assembly 0). `billing.category` is also already
-populated on write — no migration needed.
-
-**Fix scope (~1–2 hours):**
-- Add `Category` `MultiSelectFilter` next to existing `Service` filter
-  in `Billing.tsx` (~line 1770)
-- When categories selected, narrow Service dropdown options reactively
-- Extend `BillingFilterParams` (`lib/api.ts` + matching Supabase query
-  in `lib/supabaseQueries.ts → fetchBillingFromSupabaseFiltered`) with
-  `categoryFilter?: string[]`. WHERE clause: `category = ANY(...)`
-  when filter non-empty
-- Mirror in GAS fallback path (or skip — Supabase mirror is current,
-  GAS fallback rarely hits for billing reads)
+`billing.category` is populated on every write and was already in the SELECT, so no schema/data migration was needed.
 
 ### 🔍 DISCOVERY — `billing_parity_log` is ALREADY shadow-running
 

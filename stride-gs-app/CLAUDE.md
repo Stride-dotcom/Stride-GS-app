@@ -41,19 +41,29 @@ cd C:\dev\Stride-GS-app\AppScripts\stride-client-inventory && npm install
 
 ### Starting a session
 
-From the canonical clone, create a worktree named after your topic:
+From the canonical clone, create a worktree on a new branch in one step:
 
 ```bash
 cd /c/dev/Stride-GS-app
 git fetch origin source
-git worktree add /c/dev/stride-<topic> source
+git worktree add -b fix/<scope>/<desc> /c/dev/stride-<topic> source
 cd /c/dev/stride-<topic>
-git checkout -b fix/<scope>/<desc>
 ```
 
-Each worktree has its own `HEAD`, index, and working tree. Git enforces that a given branch is checked out in at most ONE worktree, so two builders cannot accidentally land commits on the same branch.
+The `-b` form creates the new branch AND the worktree at `source`'s tip in one command. Don't omit `-b` and try to check out `source` directly — that fails with `'source' is already used by worktree at 'C:/dev/Stride-GS-app'` because the canonical clone has `source` checked out. Each branch can be in at most ONE worktree; that's the lock that prevents HEAD-stomping.
 
 `<topic>` should be short and unique among active worktrees. Examples: `stride-cancel-wc`, `stride-task-addons`. Don't reuse names across active sessions.
+
+### First time in a fresh worktree: install deps + .env
+
+`node_modules` is **not** shared between worktrees (only `.git` is). Run:
+
+```bash
+cd /c/dev/stride-<topic>/stride-gs-app && npm install --no-audit --no-fund
+cp /c/dev/Stride-GS-app/stride-gs-app/.env /c/dev/stride-<topic>/stride-gs-app/.env
+```
+
+npm's cache is shared, so install usually completes in <10 seconds. The `.env` copy is required — Vite silently inlines `VITE_SUPABASE_URL = undefined` without it and the production bundle crashes at module load. For GAS deploys also `cd AppScripts/stride-client-inventory && npm install`.
 
 ### Ending a session
 
