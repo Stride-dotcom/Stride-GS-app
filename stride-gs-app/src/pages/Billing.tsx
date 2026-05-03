@@ -282,7 +282,6 @@ function InvoiceReviewTab() {
   const [dateTo, setDateTo] = useState('');
   const [sortBy, setSortBy] = useState<'invoiceDate' | 'invoiceNo' | 'clientName' | 'total'>('invoiceDate');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
-  const [voiding, setVoiding] = useState<string | null>(null);
 
   const reload = useCallback(async () => {
     setLoading(true);
@@ -406,14 +405,34 @@ function InvoiceReviewTab() {
     if (!isStaff) return;
     const reason = window.prompt(`Void invoice ${inv.invoiceNo}? Optional reason:`, '');
     if (reason === null) return; // user cancelled
-    setVoiding(inv.invoiceNo);
-    const res = await postVoidInvoice({ invoiceNo: inv.invoiceNo, reason }, inv.clientSheetId);
-    setVoiding(null);
-    if (!res.ok || !res.data?.success) {
-      alert('Void failed: ' + (res.error || res.data?.error || 'Unknown error'));
-      return;
+
+    // Optimistic — flip the summary + every child line to Void immediately
+    // so the badge / counters / Total Billed update without waiting for the
+    // GAS round-trip. WriteButton's spinner still indicates work in flight;
+    // this just removes the "stale row sitting next to a spinning button"
+    // feel. On failure we restore the prior snapshot.
+    const prevInvoices = invoices;
+    setInvoices(prev => prev.map(i =>
+      i.invoiceNo === inv.invoiceNo
+        ? { ...i, status: 'Void' as const, lines: i.lines.map(l => ({ ...l, status: 'Void' })) }
+        : i
+    ));
+
+    try {
+      const res = await postVoidInvoice({ invoiceNo: inv.invoiceNo, reason }, inv.clientSheetId);
+      if (!res.ok || !res.data?.success) {
+        setInvoices(prevInvoices); // revert
+        // Throwing lets WriteButton's catch flip the button to the red ✗
+        // outcome state instead of the green ✓ Done flash.
+        throw new Error(res.error || res.data?.error || 'Unknown error');
+      }
+      // Reload from Supabase so we pick up the writeThrough echo (note text,
+      // updated_at, etc). Background only — UI is already correct optimistically.
+      reload();
+    } catch (err) {
+      setInvoices(prevInvoices);
+      throw err; // re-throw so WriteButton renders the failure state
     }
-    await reload();
   };
 
   const toggleExpand = (invoiceNo: string) => {
@@ -599,10 +618,11 @@ function InvoiceReviewTab() {
                           )}
                           {isStaff && inv.status !== 'Void' && (
                             <WriteButton
-                              label={voiding === inv.invoiceNo ? 'Voiding…' : 'Void'}
+                              label="Void"
+                              loadingText="Voiding…"
+                              successText="Voided"
                               variant="danger"
                               size="sm"
-                              disabled={voiding === inv.invoiceNo}
                               onClick={async () => handleVoid(inv)}
                             />
                           )}
