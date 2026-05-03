@@ -21,6 +21,7 @@ import {
   type StaxCustomerRow, type StaxRunLogEntry,
 } from '../lib/api';
 import { AutocompleteSelect } from '../components/shared/AutocompleteSelect';
+import { InvoiceLink } from '../components/shared/InvoiceLink';
 import { ProcessingOverlay } from '../components/shared/ProcessingOverlay';
 import { InfoTooltip } from '../components/shared/InfoTooltip';
 import { BulkResultSummary } from '../components/shared/BulkResultSummary';
@@ -1024,7 +1025,7 @@ export function Payments() {
                       <input type="checkbox" checked={selectedInvoices.has(i.rowIndex)} onChange={() => {}} style={{ cursor: 'pointer', accentColor: theme.colors.orange }} />
                     </td>
                     <td style={{ ...td, fontWeight: 600 }}>
-                      {i.qbInvoice}
+                      <InvoiceLink invoiceNo={i.qbInvoice} />
                       {i.isTest && <span style={{ marginLeft: 6, display: 'inline-block', padding: '1px 6px', borderRadius: 8, fontSize: 9, fontWeight: 700, background: '#EDE9FE', color: '#7C3AED', verticalAlign: 'middle' }}>Test</span>}
                     </td>
                     <td style={{ ...td, fontWeight: 500 }}>{i.customer}{i.autoCharge !== false && <span style={{ marginLeft: 4, fontSize: 9, padding: '1px 5px', borderRadius: 4, background: '#F0FDF4', color: '#15803D', fontWeight: 700 }}>Auto Pay</span>}</td>
@@ -1237,7 +1238,7 @@ export function Payments() {
                       )}
                     </td>
                     <td style={{ ...td, fontWeight: 600 }}>
-                      {i.qbInvoice}
+                      <InvoiceLink invoiceNo={i.qbInvoice} />
                       {i.isTest && <span style={{ marginLeft: 6, padding: '1px 5px', borderRadius: 6, fontSize: 9, fontWeight: 700, background: '#EDE9FE', color: '#7C3AED' }}>Test</span>}
                     </td>
                     <td style={td}>
@@ -1521,7 +1522,7 @@ export function Payments() {
                     return (
                       <tr key={i.qbInvoice} style={{ background: hasCustomer ? 'transparent' : '#FEF2F2' }}>
                         <td style={{ ...td, fontWeight: 600, width: 160 }}>
-                          {i.qbInvoice}
+                          <InvoiceLink invoiceNo={i.qbInvoice} />
                           {i.isTest && <span style={{ marginLeft: 4, padding: '1px 5px', borderRadius: 6, fontSize: 9, fontWeight: 700, background: '#EDE9FE', color: '#7C3AED' }}>Test</span>}
                           <span style={{ marginLeft: 4, padding: '1px 5px', borderRadius: 6, fontSize: 9, fontWeight: 700, background: '#FEF3C7', color: '#92400E' }}>Pending Push</span>
                         </td>
@@ -1583,7 +1584,7 @@ export function Payments() {
                       onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
                     >
                       <td style={{ ...td, fontWeight: 600, width: 160 }}>
-                        {i.qbInvoice}
+                        <InvoiceLink invoiceNo={i.qbInvoice} />
                         {i.isTest && <span style={{ marginLeft: 4, padding: '1px 5px', borderRadius: 6, fontSize: 9, fontWeight: 700, background: '#EDE9FE', color: '#7C3AED' }}>Test</span>}
                       </td>
                       <td style={{ ...td, fontWeight: 500 }}>{i.customer}{i.autoCharge !== false && <span style={{ marginLeft: 4, fontSize: 9, padding: '1px 5px', borderRadius: 4, background: '#F0FDF4', color: '#15803D', fontWeight: 700 }}>Auto Pay</span>}</td>
