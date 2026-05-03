@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.144.1 — 2026-05-02 PST — Bulk-write the Consolidated_Ledger appends in handleCreateInvoice_. Old code looped calling api_writeConsolidatedLedgerRow_ per row; that helper does 1 setValues + up to 2 setRichTextValue per row (Invoice # + Invoice URL hyperlinks), so ~3N round-trips for N rows. A 50-line invoice was ~150 round-trips on this step, undoing about half of v38.142.9's win on api_markClientLedgerInvoiced_. Since the appends are always contiguous (lastDataRow+1), we build the 2D array in memory and write it ONCE via setValues, then batch-set the hyperlink rich text per column with setRichTextValues. Total: 1 setValues + up to 2 setRichTextValues regardless of N. Combined with v38.142.9, a 50-row monthly invoice's sheet-write phase drops from ~2-3 min to ~5-10 sec.
+   StrideAPI.gs — v38.144.2 — 2026-05-02 PST — Invoice URL: when skipPdf=true (now the React-side default per the matching React PR), set invoice_url to the new /#/invoices/<invNo>?client=<sheetId> React route instead of leaving it empty. The React page renders the invoice from `billing` rows on demand and supports browser print → save-as-PDF for downloadable reference — replaces the Drive Doc PDF flow that was visually unreliable (Drive auto-reformatted templates) and added 3-8s of wall time to every invoice commit. Drive PDF path (skipPdf=false) keeps its existing URL for operators who opt back in at commit time.
+   v38.144.1: Bulk-write the Consolidated_Ledger appends in handleCreateInvoice_. Old code looped calling api_writeConsolidatedLedgerRow_ per row; that helper does 1 setValues + up to 2 setRichTextValue per row (Invoice # + Invoice URL hyperlinks), so ~3N round-trips for N rows. A 50-line invoice was ~150 round-trips on this step, undoing about half of v38.142.9's win on api_markClientLedgerInvoiced_. Since the appends are always contiguous (lastDataRow+1), we build the 2D array in memory and write it ONCE via setValues, then batch-set the hyperlink rich text per column with setRichTextValues. Total: 1 setValues + up to 2 setRichTextValues regardless of N. Combined with v38.142.9, a 50-row monthly invoice's sheet-write phase drops from ~2-3 min to ~5-10 sec.
    v38.144.0: New `commitStorageRows` action: takes pre-computed STOR rows from the React Storage Charges tab (which now sources them from the Postgres `calculate_storage_charges` RPC) and writes them straight to each tenant's Billing_Ledger. Skips the read+compute phase that used to time out on big clients (e.g. Allison Lind Design). Each affected tenant gets a one-shot `api_fullClientSync_(.., ["billing"])` after the write so the React Billing list refreshes immediately. The original generateStorageCharges/previewStorageCharges actions stay intact for backward compatibility.
    v38.143.1: Two cleanups in the will-call cancellation path. (1) handleBatchCancelWillCalls_ was re-reading the WC_Items snapshot inside its outer WC loop AND writing one setValue per cascaded item — for M WCs × N items, that's M sheet reads + M*N round-trips. New code reads WC_Items ONCE before the outer loop, accumulates cancel-row numbers across all WCs into wciCancelRows, and does a single bulk setValues over the contiguous range at the end (same recipe as #188; differs only in that this wciData is sliced from row 2 with no header, so sheet row R maps to wciData[R - 2]). (2) handleCancelWillCall_ no longer re-reads wciMap2/wciData2 to build the email items table — reuses the section-4 wciData snapshot since item-level fields don't change with cancellation.
    v38.143.0: Task add-on services. handleCompleteTask_ now flushes public.task_addons rows to the client Billing_Ledger after the primary service charge, one row per addon, snapshotting the rate captured at add-time. Ledger Row IDs are {taskId}-{svcCode}-ADDON-{n} for uniqueness; Task ID column carries {taskId}-{svcCode} per spec so unbilled reports distinguish the addon line from the parent. Each addon row also goes through resyncEntityToSupabase_ so the React Billing page sees it within ~1-2s. Fetch is via new api_fetchTaskAddons_ (GET /rest/v1/task_addons?tenant_id=eq.X&task_id=eq.Y&order=created_at.asc). Failures are non-fatal warnings so the primary task billing always lands. New table: public.task_addons (migration 20260502160000_task_addons.sql).
@@ -21754,7 +21755,17 @@ function handleCreateInvoice_(payload) {
   } // end legacy Drive Doc path
   } // end !skipPdf
 
-  var invoiceUrl = pdfFile ? pdfFile.getUrl() : "";
+  // v38.144.2 — When skipPdf is true (no Drive PDF generated), point the
+  // invoice URL at the React /#/invoices/:invoiceNo page instead of leaving
+  // it empty. The React page renders the invoice from `billing` rows on
+  // demand and supports browser print → save-as-PDF for downloadable
+  // reference. Drive PDF path (skipPdf=false) keeps its existing URL so
+  // the legacy email-attachment + Drive-link flow still works for operators
+  // who explicitly opt in to PDF generation at commit time.
+  var invoiceUrl = pdfFile
+    ? pdfFile.getUrl()
+    : (APP_BASE_URL_ + "/invoices/" + encodeURIComponent(invNo) +
+       "?client=" + encodeURIComponent(sourceSheetId));
   var warnings   = [];
   if (skipPdf) warnings.push("PDF generation skipped (operator choice)");
 
