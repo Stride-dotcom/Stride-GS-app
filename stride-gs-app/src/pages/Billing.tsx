@@ -2159,11 +2159,21 @@ export function Billing() {
       },
       onProgress: (done, total) => setInvoiceBatch(prev => ({ ...prev, processed: done, total })),
       preflightSkipped,
-      // v38.122.0 — invoice creates are mostly Drive/email I/O on the GAS
-      // side; running 3 in parallel typically cuts wall time ~2-3x with no
-      // backend contention. Increase cautiously — Apps Script can serialize
-      // doPost calls under load.
-      concurrency: 3,
+      // 2026-05-03: REVERTED v38.122.0's concurrency=3.
+      // The Master RPC getNextInvoiceId counter is read-then-write without
+      // a transaction, so two concurrent invoice creates can both grab the
+      // SAME invoice number (race condition). Seen on INV-000131: a
+      // separate-by-sidemark client submitted two groups (NORTON + NIPTUCK)
+      // within ~1.2s; both calls returned success + INV-000131; one set of
+      // 25 rows kept that number, the other 18 were left with invoice_date
+      // stamped but invoice_no='' and status='Unbilled'. The activity log
+      // showed both succeeding under the same number.
+      //
+      // Until the RPC counter is made atomic (locked on the Master Price
+      // List side), serializing here is the safe fix. Wall-time cost is
+      // ~2-3x for a multi-group batch — acceptable to avoid duplicate
+      // invoice numbers + the silent half-write recovery dance.
+      concurrency: 1,
     });
     setInvoiceBatch({ state: 'complete', total: invokable.length, processed: invokable.length, succeeded: batchResult.succeeded, failed: batchResult.failed });
     setInvoiceBulkResult(batchResult);
