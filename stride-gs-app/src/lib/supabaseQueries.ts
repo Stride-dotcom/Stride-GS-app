@@ -2516,6 +2516,10 @@ interface SupabaseClientRow {
   notes: string | null;
   shipment_note: string | null;
   active: boolean | null;
+  // v38.159.0 — Supabase-only billing contact fields
+  billing_contact_name: string | null;
+  billing_email: string | null;
+  billing_address: string | null;
 }
 
 export async function fetchClientsFromSupabase(
@@ -2554,6 +2558,9 @@ export async function fetchClientsFromSupabase(
       notes: row.notes ?? '',
       shipmentNote: row.shipment_note ?? '',
       active: row.active ?? true,
+      billingContactName: row.billing_contact_name ?? '',
+      billingEmail:       row.billing_email ?? '',
+      billingAddress:     row.billing_address ?? '',
     }));
 
     return { clients, count: clients.length };

@@ -19,6 +19,15 @@ export interface OnboardClientFormData {
   clientEmail: string;
   contactName: string;
   phone: string;
+  // v38.159.0 — Billing contact (Supabase-only). Distinct from
+  // clientEmail/contactName above which drive shipment alerts,
+  // inspection reports, and other operational notifications. These
+  // three fields drive the invoice email and the QBO BillEmail
+  // inheritance. Written directly to Supabase by the submit handler
+  // — no CB Clients sheet column, no GAS round-trip.
+  billingContactName: string;
+  billingEmail: string;
+  billingAddress: string;
   // Billing
   qbCustomerName: string;
   staxCustomerName: string;
@@ -124,6 +133,7 @@ function buildInitialData(existing: ApiClient | null): OnboardClientFormData {
   if (!existing) {
     return {
       clientName: '', clientEmail: '', contactName: '', phone: '',
+      billingContactName: '', billingEmail: '', billingAddress: '',
       qbCustomerName: '', staxCustomerName: '', staxCustomerId: '', paymentTerms: 'Net 30',
       freeStorageDays: '0', discountStoragePct: '0', discountServicesPct: '0',
       enableReceivingBilling: true, enableShipmentEmail: true,
@@ -138,6 +148,9 @@ function buildInitialData(existing: ApiClient | null): OnboardClientFormData {
     clientEmail: existing.email,
     contactName: existing.contactName || '',
     phone: existing.phone || '',
+    billingContactName: existing.billingContactName || '',
+    billingEmail:       existing.billingEmail       || '',
+    billingAddress:     existing.billingAddress     || '',
     qbCustomerName: existing.qbCustomerName || '',
     staxCustomerName: existing.staxCustomerName || '',
     staxCustomerId: existing.staxCustomerId || '',
@@ -349,11 +362,11 @@ export function OnboardClientModal({ mode = 'create', existingClient = null, all
               </div>
               <div>
                 <label style={lbl}>
-                  <span>Client Email *</span>
-                  <InfoTooltip text="Main contact email for this client. Shipment confirmations, invoices, and automated notifications are sent here. You can separate multiple addresses with commas." />
+                  <span>Notification Emails *</span>
+                  <InfoTooltip text="Recipients of shipment confirmations, inspection reports, status alerts, and other operational notifications. NOT used for invoices — those go to the Billing Email below. Separate multiple addresses with commas." />
                 </label>
                 <input type="email" value={data.clientEmail} onChange={e => set('clientEmail', e.target.value)}
-                  placeholder="billing@client.com" style={inp} />
+                  placeholder="ops@client.com, warehouse@client.com" style={inp} />
               </div>
               <div>
                 <label style={lbl}>
@@ -388,6 +401,41 @@ export function OnboardClientModal({ mode = 'create', existingClient = null, all
                 <div style={{ fontSize: 10, color: theme.colors.textMuted, marginTop: 3 }}>
                   If set, the parent account user can see this client&apos;s inventory alongside their own.
                 </div>
+              </div>
+            </div>
+          </div>
+
+          {/* v38.159.0 — Billing Contact (Supabase-only) */}
+          <div style={sectionDivider}>
+            <div style={sectionHead}>Billing Contact</div>
+            <div style={{ fontSize: 11, color: theme.colors.textMuted, marginBottom: 12, lineHeight: 1.5 }}>
+              Recipient of invoices and the QBO bill-to email. Distinct from the Notification Emails above (shipment alerts, inspection reports). If left blank, invoices fall back to the Notification Emails.
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+              <div>
+                <label style={lbl}>
+                  <span>Billing Contact Name</span>
+                  <InfoTooltip text="Name of the billing/AP contact at the client. Optional — used as the salutation on invoice emails when set." />
+                </label>
+                <input value={data.billingContactName} onChange={e => set('billingContactName', e.target.value)}
+                  placeholder="e.g., Accounts Payable" style={inp} />
+              </div>
+              <div>
+                <label style={lbl}>
+                  <span>Billing Email</span>
+                  <InfoTooltip text="Email address(es) that should receive invoices. Multi-recipient supported (comma-separated) for the Stride invoice email; QBO uses the first address only. Leave blank to fall back to Notification Emails above." />
+                </label>
+                <input type="email" value={data.billingEmail} onChange={e => set('billingEmail', e.target.value)}
+                  placeholder="ap@client.com" style={inp} />
+              </div>
+              <div style={{ gridColumn: '1 / -1' }}>
+                <label style={lbl}>
+                  <span>Billing Address</span>
+                  <InfoTooltip text="Optional — only set when the billing mailing address differs from the operational address. Currently informational; not yet used by the invoice flow." />
+                </label>
+                <textarea value={data.billingAddress} onChange={e => set('billingAddress', e.target.value)}
+                  placeholder="If different from the business address" rows={2}
+                  style={{ ...inp, fontFamily: 'inherit', resize: 'vertical' }} />
               </div>
             </div>
           </div>
