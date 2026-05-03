@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { useUrlState } from '../hooks/useUrlState';
-import { Upload, Users, FileText, Zap, AlertTriangle, Send, CheckCircle2, XCircle, RefreshCw, DollarSign, Activity, UploadCloud, Loader2, Search } from 'lucide-react';
+import { Upload, Users, FileText, Zap, AlertTriangle, Send, CheckCircle2, XCircle, RefreshCw, DollarSign, Activity, UploadCloud, Loader2, Search, CreditCard } from 'lucide-react';
 import { theme } from '../styles/theme';
 import { WriteButton } from '../components/shared/WriteButton';
 // PreChargeValidationModal removed — batch charging now done via Charge Selected button
@@ -8,10 +8,9 @@ import { PaymentDetailPanel, type PaymentInvoice } from '../components/shared/Pa
 import { CustomerVerificationPanel, type StaxCustomer } from '../components/shared/CustomerVerificationPanel';
 import {
   fetchStaxInvoices, fetchStaxChargeLog, fetchStaxExceptions,
-  fetchStaxCustomers, fetchStaxRunLog, fetchStaxConfig,
+  fetchStaxRunLog, fetchStaxConfig,
   postImportIIF, postResolveStaxException, postUpdateStaxConfig,
   postSaveStaxCustomerMapping, postAutoMatchStaxCustomers,
-  postPullStaxCustomers, postSyncStaxCustomers,
   postCreateStaxInvoices, postStaxRefreshCustomerIds, postChargeSingleInvoice,
   postSendStaxPayLinks, postSendStaxPayLink,
   postCreateTestInvoice, postVoidStaxInvoice, postUpdateStaxInvoice, postDeleteStaxInvoice, postResetStaxInvoiceStatus, postToggleAutoCharge, postLinkStaxInvoiceToExisting,
@@ -33,7 +32,7 @@ import {
   fetchStaxInvoicesFromSupabase,
   fetchStaxChargeLogFromSupabase,
   fetchStaxExceptionsFromSupabase,
-  fetchStaxCustomersFromSupabase,
+  fetchStaxCustomersFromClients,
   fetchStaxRunLogFromSupabase,
   isSupabaseCacheAvailable,
 } from '../lib/supabaseQueries';
@@ -392,9 +391,8 @@ export function Payments() {
   const [mappingSaving, setMappingSaving] = useState(false);
   const [autoMatching, setAutoMatching] = useState(false);
   const [mappingResult, setMappingResult] = useState<string | null>(null);
-  const [pulling, setPulling] = useState(false);
-  const [syncing, setSyncing] = useState(false);
-  const [custResult, setCustResult] = useState<string | null>(null);
+  // Pull/Sync state retired alongside the Stax Customers sheet — the
+  // Customers tab is now derived from the `clients` table.
 
   // v38.124.0 — guard against the realtime-vs-typing race that caused
   // inline edits to "save then revert". Every editable cell registers
@@ -457,14 +455,17 @@ export function Payments() {
     try {
       // Session 69 — Supabase-first for the 5 list datasets. Config stays GAS (live Script Properties).
       // When noCache=true (explicit refresh button), skip Supabase to get the freshest data.
+      // Customers are derived from `clients` (single source of truth) — the
+      // legacy `stax_customers` mirror was retired alongside the Stax Customers
+      // sheet. Even with noCache=true we serve from clients (it's already a
+      // 50ms read and there's no GAS endpoint to fall back to).
       const supabaseAvailable = !noCache && (await isSupabaseCacheAvailable());
       if (supabaseAvailable) {
-        // Load Supabase data first (fast ~50ms), config from GAS separately (slower)
         const [sbInv, sbCharges, sbExc, sbCust, sbLog] = await Promise.all([
           fetchStaxInvoicesFromSupabase(),
           fetchStaxChargeLogFromSupabase(),
           fetchStaxExceptionsFromSupabase(),
-          fetchStaxCustomersFromSupabase(),
+          fetchStaxCustomersFromClients(),
           fetchStaxRunLogFromSupabase(),
         ]);
         // Track which datasets returned null so the banner can surface
@@ -489,13 +490,16 @@ export function Payments() {
         // If any Supabase table returned null, fall through to GAS for that specific dataset.
         // In practice the tables should be seeded before first production use.
         if (sbWarnings.length > 0) {
-          const [invRes, chargeRes, excRes, custRes, logRes] = await Promise.all([
+          const [invRes, chargeRes, excRes, logRes] = await Promise.all([
             !sbInv ? fetchStaxInvoices() : Promise.resolve({ ok: true, data: null } as any),
             !sbCharges ? fetchStaxChargeLog() : Promise.resolve({ ok: true, data: null } as any),
             !sbExc ? fetchStaxExceptions() : Promise.resolve({ ok: true, data: null } as any),
-            !sbCust ? fetchStaxCustomers() : Promise.resolve({ ok: true, data: null } as any),
             !sbLog ? fetchStaxRunLog() : Promise.resolve({ ok: true, data: null } as any),
           ]);
+          // Customers no longer have a GAS fallback — they're derived from
+          // the clients table; if the Supabase miss happens we leave the
+          // list empty and surface it via the warnings banner below.
+          const custRes = { ok: true, data: null } as any;
           // Track which fallbacks ALSO failed — those are real data gaps the user
           // needs to know about. If GAS recovered the dataset, drop it from the
           // warning list (banner stays empty for the success cases).
@@ -523,24 +527,24 @@ export function Payments() {
         return;
       }
 
-      const [invRes, chargeRes, excRes, custRes, logRes, cfgRes] = await Promise.all([
+      const [invRes, chargeRes, excRes, sbCustNoCache, logRes, cfgRes] = await Promise.all([
         fetchStaxInvoices(),
         fetchStaxChargeLog(),
         fetchStaxExceptions(),
-        fetchStaxCustomers(),
+        fetchStaxCustomersFromClients(),
         fetchStaxRunLog(),
         fetchStaxConfig(),
       ]);
       if (invRes.ok && invRes.data) setInvoices(invRes.data.invoices);
       if (chargeRes.ok && chargeRes.data) setCharges(chargeRes.data.charges);
       if (excRes.ok && excRes.data) setExceptions(excRes.data.exceptions);
-      if (custRes.ok && custRes.data) setCustomers(custRes.data.customers);
+      if (sbCustNoCache) setCustomers(sbCustNoCache.customers);
       if (logRes.ok && logRes.data) setRunLog(logRes.data.entries);
       if (cfgRes.ok && cfgRes.data) {
         setAutoCharge(cfgRes.data.config.AUTO_CHARGE_ENABLED === true);
       }
       // Report first error encountered
-      const firstErr = [invRes, chargeRes, excRes, custRes, logRes, cfgRes].find(r => !r.ok);
+      const firstErr = [invRes, chargeRes, excRes, logRes, cfgRes].find(r => !r.ok);
       if (firstErr) setError(firstErr.error);
       setLastUpdated(new Date());
     } catch (err) {
@@ -769,17 +773,7 @@ export function Payments() {
             <span style={{ fontSize: 14, fontWeight: 600 }}>Stax Invoices</span>
             <div style={{ display: 'flex', gap: 8 }}>
               <span style={{ display: 'inline-flex', alignItems: 'center' }}>
-              <WriteButton label={syncing ? 'Syncing...' : 'Sync Customers'} variant="secondary" size="sm" disabled={syncing || creatingInvoices} icon={syncing ? <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} /> : <RefreshCw size={12} />} onClick={async () => {
-                setSyncing(true); setCustResult(null); setError(null);
-                const res = await postSyncStaxCustomers();
-                setSyncing(false);
-                if (res.ok && res.data) { setCustResult(`Sync: ${res.data.verified} verified, ${res.data.hasPayment} with payment`); loadData(true); }
-                else { setError(res.error || 'Sync customers failed'); }
-              }} />
-              <InfoTooltip text="Pulls the latest customer list from your Stax account and updates the local customer mapping table. Run this after adding or changing customers in Stax." size={12} />
-              </span>
-              <span style={{ display: 'inline-flex', alignItems: 'center' }}>
-              <WriteButton label={creatingInvoices ? 'Creating...' : 'Create Stax Invoices'} variant="primary" size="sm" disabled={creatingInvoices || syncing} icon={creatingInvoices ? <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} /> : <FileText size={12} />} onClick={async () => {
+              <WriteButton label={creatingInvoices ? 'Creating...' : 'Create Stax Invoices'} variant="primary" size="sm" disabled={creatingInvoices} icon={creatingInvoices ? <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} /> : <FileText size={12} />} onClick={async () => {
                 if (!confirm('Create Stax invoices for all PENDING rows?\n\nThis will call the Stax API to create invoices.')) return;
                 setCreatingInvoices(true); setInvoiceResult(null); setError(null);
                 const res = await postCreateStaxInvoices();
@@ -1836,58 +1830,64 @@ export function Payments() {
         <div style={{ ...card, padding: 0 }}>
           <div style={{ padding: '14px 16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: `1px solid ${theme.colors.borderLight}` }}>
             <span style={{ fontSize: 14, fontWeight: 600 }}>Stax Customers</span>
-            <div style={{ display: 'flex', gap: 6 }}>
-              <WriteButton label={pulling ? 'Pulling...' : 'Pull Customers (CB)'} variant="secondary" size="sm" disabled={pulling || syncing} icon={pulling ? <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} /> : <UploadCloud size={12} />} onClick={async () => {
-                setPulling(true); setCustResult(null); setError(null);
-                const res = await postPullStaxCustomers();
-                setPulling(false);
-                if (res.ok && res.data) {
-                  setCustResult(`Pull complete: ${res.data.withStaxId} with Stax ID, ${res.data.missingStaxId} missing, ${res.data.apiErrors} errors`);
-                  loadData(true);
-                } else { setError(res.error || 'Pull customers failed'); }
-              }} />
-              <WriteButton label={syncing ? 'Syncing...' : 'Sync with Stax'} variant="secondary" size="sm" disabled={pulling || syncing} icon={syncing ? <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} /> : <RefreshCw size={12} />} onClick={async () => {
-                setSyncing(true); setCustResult(null); setError(null);
-                const res = await postSyncStaxCustomers();
-                setSyncing(false);
-                if (res.ok && res.data) {
-                  const d = res.data;
-                  setCustResult(`Sync: ${d.verified} verified, ${d.hasPayment} with payment, ${d.foundByEmail} found by email, ${d.companyPushed} company names pushed${d.apiErrors ? ', ' + d.apiErrors + ' errors' : ''}`);
-                  loadData(true);
-                } else { setError(res.error || 'Sync customers failed'); }
-              }} />
-            </div>
+            <span style={{ fontSize: 11, color: theme.colors.textMuted }}>
+              Derived from clients with a Stax Customer ID \u2014 edit on the client record.
+            </span>
           </div>
           {customers.length === 0 ? (
-            <div style={{ padding: 24, textAlign: 'center', color: theme.colors.textMuted, fontSize: 13 }}>No customers yet</div>
+            <div style={{ padding: 24, textAlign: 'center', color: theme.colors.textMuted, fontSize: 13 }}>
+              No clients have a Stax Customer ID yet. Set one on the client record to surface them here.
+            </div>
           ) : (
             <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-              <thead><tr>{['QB Name', 'Stax Name', 'Stax ID', 'Email', 'Payment Method'].map(h => <th key={h} style={th}>{h}</th>)}</tr></thead>
-              <tbody>{customers.map(c => (
-                <tr
-                  key={c.qbName}
-                  style={{ cursor: 'pointer', transition: 'background 0.1s' }}
-                  onClick={() => setSelectedCustomer(toStaxCustomer(c))}
-                  onMouseEnter={e => e.currentTarget.style.background = theme.colors.bgSubtle}
-                  onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
-                  title="Click to verify customer"
-                >
-                  <td style={{ ...td, fontWeight: 600 }}>{c.qbName}</td>
-                  <td style={td}>{c.staxName}</td>
-                  <td style={{ ...td, fontFamily: 'monospace', fontSize: 11, color: theme.colors.textMuted }}>{c.staxId}</td>
-                  <td style={{ ...td, color: theme.colors.textSecondary }}>{c.email}</td>
-                  <td style={td}>{c.payMethod ? <span style={{ fontSize: 11, padding: '2px 8px', borderRadius: 6, background: '#F0FDF4', color: '#15803D', fontWeight: 500 }}>{c.payMethod}</span> : <span style={{ color: theme.colors.textMuted }}>{'\u2014'}</span>}</td>
-                </tr>
-              ))}</tbody>
+              <thead><tr>{['Client', 'Stax Customer Name', 'Stax ID', 'Email', 'Payment'].map(h => <th key={h} style={th}>{h}</th>)}</tr></thead>
+              <tbody>{customers.map(c => {
+                const isSelected = selectedCustomer?.qbName === c.qbName;
+                const autoPay = c.payMethod === 'Auto Pay';
+                const hasStax = !!c.staxId;
+                const aliasShown = c.staxName && c.staxName !== c.qbName ? c.staxName : '';
+                return (
+                  <tr
+                    key={c.qbName}
+                    style={{
+                      cursor: 'pointer',
+                      transition: 'background 0.1s',
+                      background: isSelected ? theme.colors.orangeLight : 'transparent',
+                      color: theme.colors.text,
+                    }}
+                    onClick={() => setSelectedCustomer(toStaxCustomer(c))}
+                    onMouseEnter={e => { if (!isSelected) e.currentTarget.style.background = theme.colors.bgSubtle; }}
+                    onMouseLeave={e => { if (!isSelected) e.currentTarget.style.background = 'transparent'; }}
+                    title="Click to view Stax details"
+                  >
+                    <td style={{ ...td, fontWeight: 600, color: theme.colors.text }}>{c.qbName}</td>
+                    <td style={{ ...td, color: aliasShown ? theme.colors.text : theme.colors.textMuted }}>
+                      {aliasShown || <span style={{ fontStyle: 'italic' }}>same as client</span>}
+                    </td>
+                    <td style={{ ...td, fontFamily: 'monospace', fontSize: 11, color: theme.colors.textSecondary }}>{c.staxId || '\u2014'}</td>
+                    <td style={{ ...td, color: theme.colors.textSecondary }}>{c.email || '\u2014'}</td>
+                    <td style={td}>
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                        {hasStax && (
+                          <span title="Stax payment on file" style={{ display: 'inline-flex' }}>
+                            <CreditCard size={12} color="#15803D" />
+                          </span>
+                        )}
+                        {autoPay && (
+                          <span style={{ fontSize: 10, padding: '1px 6px', borderRadius: 4, background: '#F0FDF4', color: '#15803D', fontWeight: 700, whiteSpace: 'nowrap' }}>
+                            Auto Pay
+                          </span>
+                        )}
+                        {!hasStax && <span style={{ color: theme.colors.textMuted }}>{'\u2014'}</span>}
+                      </span>
+                    </td>
+                  </tr>
+                );
+              })}</tbody>
             </table>
           )}
-          {custResult && (
-            <div style={{ padding: '8px 14px', margin: '0 16px', borderRadius: 8, background: '#F0FDF4', border: '1px solid #BBF7D0', fontSize: 12, color: '#166534' }}>
-              <CheckCircle2 size={13} style={{ verticalAlign: 'middle', marginRight: 6 }} />{custResult}
-            </div>
-          )}
           <div style={{ padding: '10px 16px', borderTop: `1px solid ${theme.colors.borderLight}`, fontSize: 11, color: theme.colors.textMuted }}>
-            Click a customer to view Stax details and payment methods
+            Click a row to view Stax details. Set the Stax Customer Name on the client record when the Stax-side name diverges from the client name.
           </div>
         </div>
       )}
