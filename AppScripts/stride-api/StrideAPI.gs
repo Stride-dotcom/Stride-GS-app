@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.148.0 — 2026-05-03 PST — Billing Total now manually editable. `handleUpdateBillingRow_` accepts an optional `payload.total` and, when provided, writes that value verbatim to the Total column instead of recomputing Rate × Qty. Lets staff hand-adjust a single invoice line for special-case pricing without having to back-solve a fake rate or qty (which other reports depend on staying canonical). Rate/Qty edits keep their existing recompute behavior — the override only kicks in when `total` is in the payload. React side adds an inline-editable Total cell on the Billing Report (Unbilled rows only) wired through the new field.
+   StrideAPI.gs — v38.149.0 — 2026-05-03 PST — Autocomplete migrated to Supabase. handleGetAutocomplete_ now reads public.autocomplete_db first; on a miss it falls back to the per-client Autocomplete_DB sheet AND fire-and-forgets a batch upsert to Supabase so the next React fetch hits the fast path. New runAutocompleteBackfill() admin function — walks every active client in CB Clients, opens the spreadsheet, and pushes existing Autocomplete_DB rows to Supabase. Run once after deploy. Idempotent (PK is tenant_id,field,value). New table: public.autocomplete_db (migration 20260503000000_autocomplete_db.sql) — staff/admin SELECT all, client SELECT own tenant, service role full. supabaseUpsert_ conflict map adds autocomplete_db -> tenant_id,field,value.
+   v38.148.0 — 2026-05-03 PST — Billing Total now manually editable. `handleUpdateBillingRow_` accepts an optional `payload.total` and, when provided, writes that value verbatim to the Total column instead of recomputing Rate × Qty. Lets staff hand-adjust a single invoice line for special-case pricing without having to back-solve a fake rate or qty (which other reports depend on staying canonical). Rate/Qty edits keep their existing recompute behavior — the override only kicks in when `total` is in the payload. React side adds an inline-editable Total cell on the Billing Report (Unbilled rows only) wired through the new field.
    v38.147.0 — 2026-05-03 PST — QBO push respects per-client `Separate By Sidemark` flag. `qbo_resolveCustomerAndSubJob_` was unconditionally splitting into a parent:sub-job pair whenever a sidemark existed on the invoice, even when the client's `separate_by_sidemark` flag was false — diverging from the IIF export path which gates on the same flag at line ~20841. Symptom: INV-000130 for Modern Design Sofa landed in QBO as "Modern Design Sofa:Reiner" even though that client's flag is off. Fix: thread `separateBySidemark` from `clientInfoMap` onto the per-invoice group during build, pass it into `qbo_resolveCustomerAndSubJob_`, and treat the sidemark as empty when the flag is false. Default-true on the new param keeps historical behavior for any caller that doesn't yet pass it.
    v38.146.0 — 2026-05-03 PST — Invoice Date now actually lands in the sheet + Supabase. (1) `api_markClientLedgerInvoiced_` was using exact-match `hdr["Invoice Date"]` / `hdr["Invoice #"]` / `hdr["Invoice URL"]` lookups; on client templates where any of those columns was missing, the bulk write silently skipped that column. Symptom: 264 Invoiced rows in Supabase had `invoice_date = ''` because the sheet column was never populated. Switched all three to `api_ensureColumn_` (case-insensitive, appends if missing) so client sheets self-heal on first invoice creation after the fix. idxLedgerId / idxStatus stay strict — those should never be missing. (2) `sbBillingRow_` now omits `invoice_date` from the upsert payload when the source value is empty. PostgREST merge-duplicates updates only fields present in the JSON, so omitting blanks preserves any backfilled value in Supabase. Without this, the SQL backfill of historical invoice_date would get clobbered on the next fullClientSync from any client whose sheet hadn't yet gained the column. Combined: future invoices stamp the date both places; historical Supabase rows can be SQL-backfilled from `billing_activity_log.performed_at` and won't be wiped on resync.
    v38.145.0 — 2026-05-02 PST — Two new actions + transfer follow-through. (1) `voidInvoice` action: sets every Billing_Ledger row matching invoiceNo to status=Void on the source client sheet, appends a "Voided: <reason>" note, then api_fullClientSync_(.., ['billing']) propagates the change to Supabase. Backs the new Invoice Review tab's per-invoice Void button. withStaffGuard + withClientIsolation, audit row written. (2) handleTransferItems_ now stamps the destination inventory row with transferred_from_tenant_id + transferred_at via new helper api_postTransferSupabaseSideEffects_, which also migrates entity_notes (entity_type='inventory') + item_photos rows from the source tenant to the destination tenant in Supabase, and strips transferred items from any open will_calls on the source tenant (cancels the WC if its item_ids becomes empty). New Supabase helpers supabasePatch_ + supabaseSelect_ added next to supabaseUpsert_/supabaseDelete_. handleTransferItems_ response now includes `transferDate` so the wrapper can use it. The DB-side companion view `inventory_live` (excludes status='Transferred') and the photos_select_tenant RLS policy update were already shipped via Supabase migrations earlier in the session — together they fix the Access Denied symptom on transferred items + close the orphaned-aux-table failure modes Justin flagged.
@@ -2268,7 +2269,8 @@ function supabaseUpsert_(table, data) {
                         stax_invoices: "qb_invoice_no", stax_customers: "qb_name",
                         stax_charges: "timestamp,qb_invoice_no,txn_id",
                         stax_exceptions: "timestamp,qb_invoice_no",
-                        stax_run_log: "timestamp,fn,summary" }[table] || "";
+                        stax_run_log: "timestamp,fn,summary",
+                        autocomplete_db: "tenant_id,field,value" }[table] || "";
     var postUrl = url + "/rest/v1/" + table;
     if (conflictCol) postUrl += "?on_conflict=" + conflictCol;
     var resp = UrlFetchApp.fetch(postUrl, {
@@ -3212,7 +3214,8 @@ function supabaseBatchUpsert_(table, rows) {
                         stax_invoices: "qb_invoice_no", stax_customers: "qb_name",
                         stax_charges: "timestamp,qb_invoice_no,txn_id",
                         stax_exceptions: "timestamp,qb_invoice_no",
-                        stax_run_log: "timestamp,fn,summary" }[table] || "";
+                        stax_run_log: "timestamp,fn,summary",
+                        autocomplete_db: "tenant_id,field,value" }[table] || "";
 
     // Supabase REST API handles arrays up to ~1000 rows; chunk at 50 for reliability
     var CHUNK = 50;
@@ -28646,8 +28649,49 @@ function handleTestSendClaimEmails_(callerEmail, payload) {
 
 /* ─────────────────────────────────────────────────────
    GET AUTOCOMPLETE — Per-client Autocomplete_DB values
+   v38.149.0: Supabase-first. Reads public.autocomplete_db; on a miss
+   (tenant not yet backfilled) reads the sheet AND lazily upserts every
+   row to Supabase as a side-effect, so the second hit is fast. The
+   React useAutocomplete hook also reads Supabase directly — this
+   endpoint is the bootstrap path for tenants that haven't been
+   backfilled, plus the fallback when Supabase reads fail.
    ───────────────────────────────────────────────────── */
 function handleGetAutocomplete_(clientSheetId, params) {
+  // 1. Try Supabase first.
+  try {
+    var url = prop_("SUPABASE_URL");
+    var key = prop_("SUPABASE_SERVICE_ROLE_KEY");
+    if (url && key) {
+      var sbUrl = url + "/rest/v1/autocomplete_db?select=field,value"
+                + "&tenant_id=eq." + encodeURIComponent(clientSheetId)
+                + "&limit=50000";
+      var sbResp = UrlFetchApp.fetch(sbUrl, {
+        method: "GET",
+        headers: { "Authorization": "Bearer " + key, "apikey": key },
+        muteHttpExceptions: true
+      });
+      if (sbResp.getResponseCode() >= 200 && sbResp.getResponseCode() < 300) {
+        var rows = JSON.parse(sbResp.getContentText() || "[]");
+        if (rows && rows.length > 0) {
+          var sb = { sidemarks: [], vendors: [], descriptions: [] };
+          for (var r = 0; r < rows.length; r++) {
+            var v = String(rows[r].value || "").trim();
+            if (!v) continue;
+            if (rows[r].field === "Sidemark") sb.sidemarks.push(v);
+            else if (rows[r].field === "Vendor") sb.vendors.push(v);
+            else if (rows[r].field === "Description") sb.descriptions.push(v);
+          }
+          var ci = function(a, b) { return a.toLowerCase().localeCompare(b.toLowerCase()); };
+          sb.sidemarks.sort(ci); sb.vendors.sort(ci); sb.descriptions.sort(ci);
+          return jsonResponse_(sb);
+        }
+      }
+    }
+  } catch (sbErr) {
+    Logger.log("handleGetAutocomplete_ Supabase read failed (non-fatal): " + sbErr.message);
+  }
+
+  // 2. Fall back to sheet read.
   var ss = SpreadsheetApp.openById(clientSheetId);
   var dbSh = ss.getSheetByName("Autocomplete_DB");
   if (!dbSh || dbSh.getLastRow() < 2) {
@@ -28655,15 +28699,88 @@ function handleGetAutocomplete_(clientSheetId, params) {
   }
   var data = dbSh.getRange(2, 1, dbSh.getLastRow() - 1, 2).getValues();
   var sidemarks = [], vendors = [], descriptions = [];
+  var upsertRows = [];
   for (var i = 0; i < data.length; i++) {
     var field = String(data[i][0] || "").trim();
-    var val = String(data[i][1] || "").trim();
-    if (!val) continue;
-    if (field === "Sidemark") sidemarks.push(val);
-    else if (field === "Vendor") vendors.push(val);
-    else if (field === "Description") descriptions.push(val);
+    var sval = String(data[i][1] || "").trim();
+    if (!sval) continue;
+    if (field === "Sidemark") sidemarks.push(sval);
+    else if (field === "Vendor") vendors.push(sval);
+    else if (field === "Description") descriptions.push(sval);
+    if (field === "Sidemark" || field === "Vendor" || field === "Description") {
+      upsertRows.push({ tenant_id: clientSheetId, field: field, value: sval });
+    }
   }
+
+  // 3. Lazy backfill — fire-and-forget upsert to Supabase so the next
+  //    React fetch hits the fast Supabase path.
+  if (upsertRows.length > 0) {
+    try { supabaseUpsert_("autocomplete_db", upsertRows); }
+    catch (e) { Logger.log("handleGetAutocomplete_ lazy backfill failed: " + e.message); }
+  }
+
   return jsonResponse_({ sidemarks: sidemarks, vendors: vendors, descriptions: descriptions });
+}
+
+/**
+ * runAutocompleteBackfill — admin function. Walks every active client
+ * in the CB Clients tab, opens each spreadsheet, reads its
+ * Autocomplete_DB tab, and upserts every row to public.autocomplete_db.
+ * Run ONCE from the Apps Script editor after deploying v38.149.0.
+ * Idempotent — re-running just merges duplicates via the
+ * (tenant_id, field, value) primary key.
+ */
+function runAutocompleteBackfill() {
+  var startedAt = new Date();
+  var cbId = prop_("CB_SPREADSHEET_ID");
+  if (!cbId) { Logger.log("CB_SPREADSHEET_ID not set"); return; }
+  var cbSS = SpreadsheetApp.openById(cbId);
+  var clientsSh = cbSS.getSheetByName("Clients");
+  if (!clientsSh) { Logger.log("CB Clients tab not found"); return; }
+
+  var rows = clientsSh.getDataRange().getValues();
+  var hdr = rows[0].map(function(h) { return String(h).trim().toUpperCase(); });
+  var idCol = hdr.indexOf("CLIENT SPREADSHEET ID");
+  var nameCol = hdr.indexOf("CLIENT NAME");
+  var activeCol = hdr.indexOf("ACTIVE");
+  if (idCol < 0) { Logger.log("CLIENT SPREADSHEET ID column not found"); return; }
+
+  var totalClients = 0, totalRows = 0, errors = 0;
+  for (var i = 1; i < rows.length; i++) {
+    var sid = String(rows[i][idCol] || "").trim();
+    var name = nameCol >= 0 ? String(rows[i][nameCol] || "").trim() : sid;
+    var active = activeCol >= 0 ? toBool_(rows[i][activeCol]) : true;
+    if (!sid || !active) continue;
+    totalClients++;
+    try {
+      var ss = SpreadsheetApp.openById(sid);
+      var sh = ss.getSheetByName("Autocomplete_DB");
+      if (!sh || sh.getLastRow() < 2) continue;
+      var data = sh.getRange(2, 1, sh.getLastRow() - 1, 2).getValues();
+      var batch = [];
+      for (var d = 0; d < data.length; d++) {
+        var f = String(data[d][0] || "").trim();
+        var v = String(data[d][1] || "").trim();
+        if (!v || (f !== "Sidemark" && f !== "Vendor" && f !== "Description")) continue;
+        batch.push({ tenant_id: sid, field: f, value: v });
+      }
+      if (batch.length > 0) {
+        var res = supabaseUpsert_("autocomplete_db", batch);
+        if (!res.ok) { errors++; Logger.log("[backfill] " + name + " HTTP " + res.code + ": " + (res.error || "")); }
+        else { totalRows += batch.length; Logger.log("[backfill] " + name + " ✓ " + batch.length + " rows"); }
+      }
+    } catch (e) { errors++; Logger.log("[backfill] " + name + " ERROR: " + e.message); }
+  }
+
+  var summary = "clients=" + totalClients + " rows=" + totalRows + " errors=" + errors;
+  Logger.log("runAutocompleteBackfill done: " + summary);
+  try {
+    supabaseUpsert_("stax_run_log", {
+      timestamp: new Date(startedAt).toISOString(),
+      fn: "runAutocompleteBackfill",
+      summary: summary
+    });
+  } catch (_) {}
 }
 
 /* ================================================================
