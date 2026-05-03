@@ -2033,6 +2033,8 @@ export interface AutocompleteResponse {
   sidemarks: string[];
   vendors: string[];
   descriptions: string[];
+  /** Optional — older GAS deploys may not include references. */
+  references?: string[];
 }
 
 export function fetchAutocomplete(clientSheetId: string, signal?: AbortSignal) {

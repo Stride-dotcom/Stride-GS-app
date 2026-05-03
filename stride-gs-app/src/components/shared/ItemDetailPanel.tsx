@@ -564,8 +564,12 @@ export function ItemDetailPanel({
   // Same source the inventory grid's inline-edit cells use; back-fills the
   // gap on the detail page where Justin reported (mobile, editing sidemark)
   // typing produced no dropdown so duplicates and misspellings slipped in.
-  const { vendors: vendorSuggestions, sidemarks: sidemarkSuggestions, descriptions: descriptionSuggestions }
-    = useAutocomplete(clientSheetId);
+  const {
+    vendors: vendorSuggestions,
+    sidemarks: sidemarkSuggestions,
+    descriptions: descriptionSuggestions,
+    references: referenceSuggestions,
+  } = useAutocomplete(clientSheetId);
   const statusCfg: Record<string, { bg: string; color: string }> = {
     Active: { bg: '#F0FDF4', color: '#15803D' },
     Released: { bg: '#EFF6FF', color: '#1D4ED8' },
@@ -981,7 +985,7 @@ export function ItemDetailPanel({
           {isEditing ? (
             <>
               <EditAutocomplete label="Description" value={draft.description} onChange={v => setDraftField('description', v)} suggestions={descriptionSuggestions} placeholder="Type description..." />
-              <EditInput label="Reference" value={draft.reference} onChange={v => setDraftField('reference', v)} />
+              <EditAutocomplete label="Reference" value={draft.reference} onChange={v => setDraftField('reference', v)} suggestions={referenceSuggestions} placeholder="Type reference..." />
             </>
           ) : (
             <>

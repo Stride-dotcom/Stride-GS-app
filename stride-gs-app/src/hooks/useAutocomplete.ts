@@ -1,6 +1,6 @@
 /**
- * useAutocomplete — Per-client Sidemark / Vendor / Description value lists
- * used by InlineEditableCell and intake/edit forms.
+ * useAutocomplete — Per-client Sidemark / Vendor / Description / Reference
+ * value lists used by InlineEditableCell and intake/edit forms.
  *
  * v2026-05-03 (session 92): Supabase-first. Reads `public.autocomplete_db`
  * directly and subscribes to realtime, with the GAS getAutocomplete
@@ -9,6 +9,11 @@
  * zero rows). The slow GAS round-trip used to be the only path; the
  * inflight-dedup + result cache below remain because the GAS fallback
  * still pays that cost on first hit.
+ *
+ * v2026-05-03b (session 94): added Reference. Schema CHECK now allows
+ * Reference; per-tenant backfill done from public.inventory.reference +
+ * public.billing.reference; an INSERT/UPDATE trigger on inventory +
+ * billing keeps autocomplete_db in sync going forward.
  */
 import { useState, useEffect, useRef } from 'react';
 import { supabase } from '../lib/supabase';
@@ -19,9 +24,10 @@ interface AutocompleteData {
   sidemarks: string[];
   vendors: string[];
   descriptions: string[];
+  references: string[];
 }
 
-const EMPTY: AutocompleteData = { sidemarks: [], vendors: [], descriptions: [] };
+const EMPTY: AutocompleteData = { sidemarks: [], vendors: [], descriptions: [], references: [] };
 
 const cache = new Map<string, AutocompleteData>();
 const inflight = new Map<string, Promise<ApiResponse<AutocompleteResponse>>>();
@@ -50,16 +56,19 @@ async function fetchFromSupabase(clientSheetId: string): Promise<AutocompleteDat
   const sidemarks: string[] = [];
   const vendors: string[] = [];
   const descriptions: string[] = [];
+  const references: string[] = [];
   for (const row of data as { field: string; value: string }[]) {
     if (!row.value) continue;
     if (row.field === 'Sidemark') sidemarks.push(row.value);
     else if (row.field === 'Vendor') vendors.push(row.value);
     else if (row.field === 'Description') descriptions.push(row.value);
+    else if (row.field === 'Reference') references.push(row.value);
   }
   sidemarks.sort(compareCi);
   vendors.sort(compareCi);
   descriptions.sort(compareCi);
-  return { sidemarks, vendors, descriptions };
+  references.sort(compareCi);
+  return { sidemarks, vendors, descriptions, references };
 }
 
 export function useAutocomplete(clientSheetId: string | undefined) {
@@ -85,7 +94,9 @@ export function useAutocomplete(clientSheetId: string | undefined) {
     (async () => {
       const sb = await fetchFromSupabase(clientSheetId);
       if (cancelled) return;
-      const sbCount = sb ? sb.sidemarks.length + sb.vendors.length + sb.descriptions.length : 0;
+      const sbCount = sb
+        ? sb.sidemarks.length + sb.vendors.length + sb.descriptions.length + sb.references.length
+        : 0;
       if (sb && sbCount > 0) {
         cache.set(clientSheetId, sb);
         setData(sb);
@@ -101,8 +112,15 @@ export function useAutocomplete(clientSheetId: string | undefined) {
         const resp = await dedupGasFetch(clientSheetId);
         if (cancelled) return;
         if (resp.ok && resp.data) {
-          cache.set(clientSheetId, resp.data);
-          setData(resp.data);
+          // Older GAS deploys don't return `references`; default to [].
+          const filled: AutocompleteData = {
+            sidemarks: resp.data.sidemarks,
+            vendors: resp.data.vendors,
+            descriptions: resp.data.descriptions,
+            references: resp.data.references ?? [],
+          };
+          cache.set(clientSheetId, filled);
+          setData(filled);
         }
       } finally {
         if (!cancelled) setLoading(false);

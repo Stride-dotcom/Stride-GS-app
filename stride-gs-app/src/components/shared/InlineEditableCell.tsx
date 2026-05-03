@@ -43,7 +43,7 @@ interface Props {
   disabled?: boolean;
   placeholder?: string;
   /** Autocomplete-db variant needs to know which suggestion list to pull. */
-  dbField?: 'vendors' | 'sidemarks' | 'descriptions';
+  dbField?: 'vendors' | 'sidemarks' | 'descriptions' | 'references';
 }
 
 export function InlineEditableCell({
@@ -77,11 +77,12 @@ export function InlineEditableCell({
       if (dbField === 'vendors') return ac.vendors;
       if (dbField === 'sidemarks') return ac.sidemarks;
       if (dbField === 'descriptions') return ac.descriptions;
+      if (dbField === 'references') return ac.references;
       return [];
     }
     if (variant === 'autocomplete-locations') return locs.locationNames;
     return [];
-  }, [variant, dbField, ac.vendors, ac.sidemarks, ac.descriptions, locs.locationNames]);
+  }, [variant, dbField, ac.vendors, ac.sidemarks, ac.descriptions, ac.references, locs.locationNames]);
 
   const filtered = useMemo<string[]>(() => {
     if (variant === 'text') return [];
