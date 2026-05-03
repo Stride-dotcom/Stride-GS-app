@@ -1,6 +1,6 @@
 # Stride GS App — Build Status
 
-> Last updated: 2026-05-02. Verified against actual codebase.
+> Last updated: 2026-05-02 (late EOD, session 91). Verified against actual codebase.
 
 ---
 
@@ -9,7 +9,7 @@
 | System | Version | Notes |
 |---|---|---|
 | React app (GitHub Pages) | Latest on `origin/main` | `npm run deploy` from source |
-| StrideAPI.gs | v38.121.0 | Web App deployment v424 (cleanup of dead email handlers) |
+| StrideAPI.gs | **v38.143.1** | **Web App deployment v431** (perf sweep: bulk-write + writeThrough batch + Class C; billing addons + category filter) |
 | Supabase | 57 migrations applied | 9 Edge Functions deployed (`send-email` v5 with attachments, `send-onboarding-email` v1) |
 | Client scripts | Rolled out to 49 active clients | Code.gs v4.6.0, Import.gs v4.3.0 |
 | StaxAutoPay.gs | v4.6.0 | Supabase write-through wired |
@@ -94,6 +94,56 @@ UI components: FloatingActionMenu, WriteButton, BatchGuard, ActionTooltip, Batch
 - Quote Tool with PDF generation
 - Expected operations calendar
 - QR Scanner + Labels (native React, Supabase-backed)
+
+---
+
+## Recent Changes (2026-05-02, session 91 — perf sweep + worktree convention + billing-page audit close)
+
+Late-day session that started as a single production fire (release-items timing out on multi-item orders) and turned into a full sweep of the per-cell `setValue`-in-loop antipattern across the GAS surface, plus closing out the billing-page audit's final follow-up. Two HEAD-stomp incidents from parallel-builder collisions in the canonical clone forced a process change: per-builder git worktrees, documented as a Critical Rule.
+
+### PR #186 — handleReleaseItems_ bulk-write
+- Production fire: releasing items on a 50+ item order was hitting GAS execution timeout (3 setValue() per item × 50 items × 500ms-2s/round-trip = 3-5 min). Refactored to collect all per-row mutations into in-memory arrays, compute the contiguous range covering changed rows, and write each affected column ONCE via `setValues`. Untouched-but-in-slice rows write back snapshot values so unrelated data isn't clobbered.
+- 50-item release: ~3-5 min → <5 sec. Constant time regardless of item count.
+- StrideAPI.gs v38.142.8, Web App v425.
+
+### PR #187 — handleCreateInvoice_ ledger updates bulk-write
+- Same antipattern in `api_markClientLedgerInvoiced_` + Email Status updates on Consolidated_Ledger inside `handleCreateInvoice_`. Up to 4 setValue() per ledger row × N rows on a monthly invoice (~200 lines = 800 round-trips, frequent timeouts).
+- New code: 4 round-trips for client Billing_Ledger update + 1 for Consolidated_Ledger Email Status, regardless of N. StrideAPI.gs v38.142.9, Web App v426.
+
+### PR #188 — handleCancelWillCall_ bulk-write (Class A)
+- Smaller-scale variant — cancellation set 1 setValue per WC_Items row in a loop. 20-item WC = 1-2 min hang (not a timeout; users assumed click hadn't registered). Same recipe applied to the WC_Items Status column. Note: `wciData` here uses `getDataRange()` so includes the header at index 0 — sheet row R maps to `wciData[R-1]` (vs PR #186's wciData sliced from row 2). Captured inline.
+- StrideAPI.gs v38.142.10, Web App v427.
+
+### PR #190 — api_writeThrough_ batch path (Supabase mirror)
+- Audit revealed every bulk handler also called `api_writeThrough_` afterward to mirror to Supabase, and that path was per-row: each ID = `SpreadsheetApp.openById` + `sheetToObjects_(sheet)` + linear scan + single-row `supabaseUpsert_` POST. So 50-item release-items had ~10-25 sec of writeThrough on top of the (already-fixed) sheet write.
+- New `resyncEntitiesBatchToSupabase_` opens the sheet ONCE, reads `sheetToObjects_` ONCE, builds an id→row map, constructs all upsert objects in memory (using the same `sb*Row_` helpers `api_fullClientSync_` uses), and fires a single `supabaseBatchUpsert_(table, rows)`. That helper already chunks at 50 + retries per-row on chunk failure, so robustness for big batches is inherited.
+- `api_writeThrough_` dispatches to the batch path when `ids.length > 1 && entityType !== "clients"`. Single-ID router cases (~25 sites) unchanged. On batch failure, falls back to the existing per-row loop so `gs_sync_events` still gets per-entity failure rows for the React FailedOperationsDrawer.
+- Updated 4 batch handlers (`handleBatchCancelTasks_`, `handleBatchCancelRepairs_`, `handleBatchCancelWillCalls_`, `handleBatchReassignTasks_`) to pass `succeededIds` as an array. `handleReleaseItems_` already passed an array — picks up the batched path automatically.
+- 50-item release writeThrough: ~10-25 sec → ~0.5-1 sec. batch-cancel-20-tasks: ~4-10 sec → ~0.5 sec.
+- StrideAPI.gs v38.142.11, Web App v428.
+
+### PR #191 — Class C handlers bulk-write
+- `handleStartTask_`, `handleCompleteTask_`, `handleCompleteRepair_` were each doing 4-8 separate setValue() calls per request (one row across many columns) — 5-15 sec of latency. Sluggish enough that staff thought clicks weren't registering and clicked again.
+- Refactored each: read full row once at function start (already happening), replace each `setValue` with `setRowVal_(col, val)` that mutates the in-memory rowData and tracks modified columns, then single `setValues` over the contiguous slice at end-of-try. Untouched-but-in-slice columns write back existing values from the snapshot.
+- Also dropped a now-redundant `SpreadsheetApp.flush()` inside `handleCompleteTask_`'s Custom Price branch (the bulk write at end-of-try makes it meaningless; `resyncEntityToSupabase_` flushes itself before reading). `handleCompleteRepair_`'s `Email Sent At` setValue stays standalone — fires AFTER lock release in a separate control flow, doesn't multiply.
+- Each handler now responds in <2 sec. StrideAPI.gs v38.142.12, Web App v429.
+
+### PR #194 — handleBatchCancelWillCalls_ cascade fix + handleCancelWillCall_ duplicate-read cleanup
+- Two cleanups picked from PR #188's "out of scope" list. (1) The bulk-cancel handler was re-reading the WC_Items snapshot inside its outer WC loop AND writing one setValue per cascaded item — for M WCs × N items, M reads + M·N round-trips. 5-WC × 20-item bulk cancel was ~60-180 sec. New code reads `wciData` ONCE before the outer loop, accumulates cancel-row sheet numbers across all WCs into `wciCancelRows`, single bulk setValues over the contiguous range at the end. Index-math note: this `wciData` is sliced from row 2 (no header), so sheet row R maps to `wciData[R - 2]` (differs from #188's `getDataRange()` form).
+- (2) `handleCancelWillCall_`'s section-5 email-table builder no longer re-reads the sheet into `wciMap2`/`wciData2` — reuses the section-4 `wciMap`/`wciData` snapshot. Item-level fields don't change with cancellation, so the pre-write snapshot is identical for the email table (which only reads Item ID, Qty, Vendor, Description, Sidemark — not Status).
+- StrideAPI.gs v38.143.1, Web App v431. (v38.143.0 was the parallel-shipped PR #193 task add-ons; my will-call cleanup landed on top as a patch bump.)
+
+### PR #197 — per-builder worktree convention (chore/docs)
+- Two HEAD-stomp incidents this session: builder A ran `git checkout -b ...` to start work, builder B then ran `git checkout ...` for theirs in the same canonical clone, A's next commit landed on B's branch because both shared one HEAD. Recovered by cherry-picking onto the right branch each time, but the second occurrence was while shipping THIS very PR — strong evidence the convention is needed.
+- Added "⚠️ CRITICAL: Worktrees for parallel builders" section to CLAUDE.md (and stride-gs-app/CLAUDE.md mirror). Convention: `git worktree add -b fix/<scope>/<desc> /c/dev/stride-<topic> source` per session. Each worktree has its own HEAD/index/working-tree, shared `.git`. Git enforces "one worktree per branch," so collisions become physically impossible. Documented session-end cleanup (`git worktree remove`), npm-install requirement (`node_modules` not shared), and the existing "Never deploy from a worktree without merging to source first" rule (worktrees are for *building* in parallel; canonical clone is for *deploying* the merged result).
+
+### PR #200 — Billing Category filter (closes billing-page audit PR 3)
+- Added a `Category` MultiSelectFilter between Sidemark and Service on the Billing → Report tab. Categories derive from `useServiceCatalog` (already swapped from `usePricing` in #185 / audit PR 2). Selecting categories reactively narrows the Service dropdown via `SVC_OPTIONS_FOR_FILTER`. A `useEffect` drops service selections that fall out of view when categories change (no ghost selections hiding behind a category narrow).
+- `BillingFilterParams.categoryFilter?: string[]` flows through both the Supabase path (`fetchBillingFromSupabaseFiltered` adds `.in('category', filters.categoryFilter)`) and the GAS path (URL param; handler may ignore — Supabase is primary read for billing). `billing.category` is already populated on every write, so no migration.
+- Closes the billing-page audit's last open follow-up. PR 1 (seed INSURANCE) shipped in #183, PR 2 (services from Supabase) in #185, PR 3 (this one) in #200.
+
+### Parallel work (other builders, same day)
+- PR #185 — services filter from Supabase (audit PR 2). PR #189 — storage charges Postgres RPC + GAS commit-rows write-only (progress on long-term step 5 of the migration plan). PR #192 — respect `client.separate_by_sidemark` on invoice grouping (was always splitting). PRs #193 + #195 — billable task add-on services (`task_addons` table + AddTaskServiceModal + completion flow folds addon rows into Billing_Ledger). PRs #196 + #198 + #199 — BillingPreviewCard / BillingCalculator port from WMS (collapsible preview card + footer pill alignment + task-billing consolidation).
 
 ---
 

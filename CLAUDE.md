@@ -29,19 +29,37 @@
 
 ### Starting a session
 
-From the canonical clone, create a worktree named after your topic:
+From the canonical clone, create a worktree on a new branch in one step:
 
 ```bash
 cd /c/dev/Stride-GS-app
 git fetch origin source
-git worktree add /c/dev/stride-<topic> source
+git worktree add -b fix/<scope>/<desc> /c/dev/stride-<topic> source
 cd /c/dev/stride-<topic>
-git checkout -b fix/<scope>/<desc>
 ```
 
-Each worktree has its own `HEAD`, index, and working tree. Git enforces that a given branch is checked out in at most ONE worktree, so two builders cannot accidentally land commits on the same branch.
+The `-b` form creates the new branch AND the worktree at `source`'s tip in one command. Don't omit `-b` and try to check out `source` directly — that fails with `'source' is already used by worktree at 'C:/dev/Stride-GS-app'` because the canonical clone has `source` checked out. Each branch can be in at most ONE worktree at a time; that's the lock that prevents HEAD-stomping in the first place.
 
-`<topic>` should be short and unique among active worktrees — anything that wouldn't collide. Examples: `stride-cancel-wc`, `stride-task-addons`, `stride-billing-fix`. Don't reuse names across active sessions.
+`<topic>` should be short and unique among active worktrees. Examples: `stride-cancel-wc`, `stride-task-addons`, `stride-billing-fix`. Don't reuse names across active sessions.
+
+### First time in a fresh worktree: install deps
+
+`node_modules` is **not** shared between worktrees (only `.git` is — that's by design). Before `tsc --noEmit` / `npm run build` / `npm run deploy` will work, install:
+
+```bash
+cd /c/dev/stride-<topic>/stride-gs-app && npm install --no-audit --no-fund
+cd /c/dev/stride-<topic>/AppScripts/stride-client-inventory && npm install --no-audit --no-fund   # only if you'll deploy GAS
+```
+
+npm's cache is shared across worktrees, so the second install in any worktree usually finishes in <10 seconds. `package-lock.json` is tracked, so the install is deterministic.
+
+If you'll touch the React app, also copy `.env` from the canonical clone (it's gitignored, so `git worktree add` doesn't carry it):
+
+```bash
+cp /c/dev/Stride-GS-app/stride-gs-app/.env /c/dev/stride-<topic>/stride-gs-app/.env
+```
+
+Without this, the production bundle silently inlines `VITE_SUPABASE_URL = undefined` and crashes at module load with `Uncaught Error: supabaseUrl is required.` (Caught in session 72 by a live-site error — the build itself doesn't fail.)
 
 ### Ending a session
 
