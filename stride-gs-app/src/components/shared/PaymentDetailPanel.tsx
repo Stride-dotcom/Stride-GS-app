@@ -2,6 +2,7 @@ import React, { useMemo } from 'react';
 import { X, CreditCard, FileText, Clock, CheckCircle2, XCircle, AlertCircle } from 'lucide-react';
 import { theme } from '../../styles/theme';
 import { WriteButton } from './WriteButton';
+import { InvoiceLink } from './InvoiceLink';
 import { getPanelContainerStyle, panelBackdropStyle } from './panelStyles';
 import { useIsMobile } from '../../hooks/useIsMobile';
 
@@ -97,7 +98,9 @@ export function PaymentDetailPanel({ invoice, onClose, charges, paymentMethod, o
         <div style={{ padding: '16px 20px', borderBottom: `1px solid ${theme.colors.border}`, flexShrink: 0 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
             <div>
-              <div style={{ fontSize: 18, fontWeight: 700 }}>{invoice.qbInvoice}</div>
+              <div style={{ fontSize: 18, fontWeight: 700 }}>
+                <InvoiceLink invoiceNo={invoice.qbInvoice} fontSize={18} bold />
+              </div>
               <div style={{ fontSize: 12, color: theme.colors.textSecondary, marginTop: 2 }}>{invoice.customer}</div>
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>

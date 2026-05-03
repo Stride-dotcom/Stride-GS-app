@@ -22,6 +22,7 @@ import { fmtDate } from '../lib/constants';
 import { tanstackGlobalFilter } from '../lib/searchFilters';
 import { WriteButton } from '../components/shared/WriteButton';
 import { MultiSelectFilter } from '../components/shared/MultiSelectFilter';
+import { InvoiceLink } from '../components/shared/InvoiceLink';
 import { SyncBanner } from '../components/shared/SyncBanner';
 import { BatchProgress, type BatchState } from '../components/shared/BatchProgress';
 import { BulkResultSummary } from '../components/shared/BulkResultSummary';
@@ -1066,7 +1067,12 @@ export function Billing() {
         if (v === 'Preview') return <span style={{ display: 'inline-block', padding: '2px 10px', borderRadius: 12, fontSize: 11, fontWeight: 600, background: '#FFFDE7', color: '#F59E0B', border: '1.5px dashed #F59E0B', whiteSpace: 'nowrap' }}>Preview</span>;
         return <Badge t={v} c={STATUS_CFG[v]} />;
       } }),
-      col.accessor('invoiceNo', { header: 'Invoice #', size: 110, cell: i => <span style={{ fontSize: 12, fontWeight: i.getValue() ? 600 : 400, color: i.getValue() ? theme.colors.text : theme.colors.textMuted }}>{i.getValue() || '\u2014'}</span> }),
+      col.accessor('invoiceNo', { header: 'Invoice #', size: 110, cell: i => (
+        <InvoiceLink
+          invoiceNo={i.getValue()}
+          clientSheetId={i.row.original.clientSheetId || i.row.original.sourceSheetId}
+        />
+      ) }),
       col.accessor('client', { header: 'Client', size: 160, filterFn: mf, cell: i => {
         const auto = i.row.original.autoCharge;
         const hasStax = !!i.row.original.staxCustomerId;
@@ -1234,7 +1240,13 @@ export function Billing() {
     }),
     invCol.accessor('invoiceNo', {
       header: 'Invoice #', size: 120,
-      cell: i => <span style={{ fontSize: 12, fontWeight: 700, color: theme.colors.text }}>{i.getValue()}</span>,
+      cell: i => (
+        <InvoiceLink
+          invoiceNo={i.getValue()}
+          clientSheetId={i.row.original.clientSheetId || i.row.original.sourceSheetId}
+          bold
+        />
+      ),
     }),
     invCol.accessor('client', {
       header: 'Client', size: 200,
