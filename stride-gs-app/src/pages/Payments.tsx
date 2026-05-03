@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { useUrlState } from '../hooks/useUrlState';
 import { Upload, Users, FileText, Zap, AlertTriangle, Send, CheckCircle2, XCircle, RefreshCw, DollarSign, Activity, UploadCloud, Loader2, Search, CreditCard } from 'lucide-react';
 import { theme } from '../styles/theme';
@@ -32,10 +32,11 @@ import {
   fetchStaxInvoicesFromSupabase,
   fetchStaxChargeLogFromSupabase,
   fetchStaxExceptionsFromSupabase,
-  fetchStaxCustomersFromClients,
   fetchStaxRunLogFromSupabase,
   isSupabaseCacheAvailable,
 } from '../lib/supabaseQueries';
+import { useClients } from '../hooks/useClients';
+import type { ApiClient } from '../lib/api';
 
 // Note: 'pipeline', 'mapping', and 'runlog' content blocks below are
 // not currently reachable via the TABS nav. Kept in place so the code
@@ -66,6 +67,37 @@ function toStaxCustomer(c: StaxCustomerRow): StaxCustomer {
     email: c.email,
     payMethod: c.payMethod,
   };
+}
+
+/**
+ * Derive Stax customers from the cached client list.
+ *
+ * Mirrors `fetchStaxCustomersFromClients` in supabaseQueries.ts but operates
+ * on the in-memory ApiClient[] from useClients. Active clients with a
+ * non-empty stax_customer_id are surfaced. payMethod is synthesized:
+ * "Auto Pay" when auto_charge=true, "Card on file" otherwise. Sorted by
+ * client name to keep the table stable when realtime invalidates the list.
+ */
+function clientsToStaxCustomers(clients: ApiClient[]): StaxCustomerRow[] {
+  return clients
+    .filter(c => c.active !== false && (c.staxCustomerId || '').trim().length > 0)
+    .map<StaxCustomerRow>(c => {
+      const staxId = String(c.staxCustomerId || '').trim();
+      const aliasName = String(c.staxCustomerName || '').trim();
+      return {
+        qbName: c.name,
+        staxCompany: aliasName,
+        staxName: aliasName || c.name,
+        staxId,
+        email: c.email || '',
+        // The upstream filter guarantees a non-empty staxId, so "Card on
+        // file" is always truthful here. If that filter ever loosens, this
+        // synthesis needs a third branch (empty payMethod when no Stax ID).
+        payMethod: c.autoCharge ? 'Auto Pay' : 'Card on file',
+        notes: '',
+      };
+    })
+    .sort((a, b) => a.qbName.localeCompare(b.qbName));
 }
 
 
@@ -380,8 +412,17 @@ export function Payments() {
   const [invoices, setInvoices] = useState<StaxInvoice[]>([]);
   const [charges, setCharges] = useState<StaxCharge[]>([]);
   const [exceptions, setExceptions] = useState<StaxException[]>([]);
-  const [customers, setCustomers] = useState<StaxCustomerRow[]>([]);
   const [runLog, setRunLog] = useState<StaxRunLogEntry[]>([]);
+
+  // v38.154.0 — Customers list is derived from the cached useClients hook
+  // (apiCache + entityEvents 'client' refetch + Supabase realtime). Sharing
+  // the cache with every other page that mounts useClients (Sidebar,
+  // Inventory dropdown, Billing, etc.) means the Payments page no longer
+  // re-fetches a clients query on every mount — second visit is instant,
+  // and a client-record edit anywhere in the app refreshes the Customers
+  // tab live without a manual reload.
+  const { apiClients } = useClients();
+  const customers = useMemo<StaxCustomerRow[]>(() => clientsToStaxCustomers(apiClients), [apiClients]);
   const [autoCharge, setAutoCharge] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -453,19 +494,18 @@ export function Payments() {
     setError(null);
     setLoadWarnings([]);
     try {
-      // Session 69 — Supabase-first for the 5 list datasets. Config stays GAS (live Script Properties).
+      // Session 69 — Supabase-first for the 4 list datasets. Config stays GAS (live Script Properties).
       // When noCache=true (explicit refresh button), skip Supabase to get the freshest data.
-      // Customers are derived from `clients` (single source of truth) — the
-      // legacy `stax_customers` mirror was retired alongside the Stax Customers
-      // sheet. Even with noCache=true we serve from clients (it's already a
-      // 50ms read and there's no GAS endpoint to fall back to).
+      // Customers are no longer fetched here — they derive from useClients
+      // (cached + realtime) above the loadData scope, so a Payments page
+      // remount returns instantly to the existing client cache instead of
+      // re-querying Supabase on every visit.
       const supabaseAvailable = !noCache && (await isSupabaseCacheAvailable());
       if (supabaseAvailable) {
-        const [sbInv, sbCharges, sbExc, sbCust, sbLog] = await Promise.all([
+        const [sbInv, sbCharges, sbExc, sbLog] = await Promise.all([
           fetchStaxInvoicesFromSupabase(),
           fetchStaxChargeLogFromSupabase(),
           fetchStaxExceptionsFromSupabase(),
-          fetchStaxCustomersFromClients(),
           fetchStaxRunLogFromSupabase(),
         ]);
         // Track which datasets returned null so the banner can surface
@@ -474,12 +514,10 @@ export function Payments() {
         if (!sbInv) sbWarnings.push('invoices');
         if (!sbCharges) sbWarnings.push('charges');
         if (!sbExc) sbWarnings.push('exceptions');
-        if (!sbCust) sbWarnings.push('customers');
         if (!sbLog) sbWarnings.push('run log');
         if (sbInv) setInvoices(sbInv.invoices);
         if (sbCharges) setCharges(sbCharges.charges);
         if (sbExc) setExceptions(sbExc.exceptions);
-        if (sbCust) setCustomers(sbCust.customers);
         if (sbLog) setRunLog(sbLog.entries);
         // Config from GAS — fire-and-forget, don't block render
         fetchStaxConfig().then(cfgRes => {
@@ -496,13 +534,6 @@ export function Payments() {
             !sbExc ? fetchStaxExceptions() : Promise.resolve({ ok: true, data: null } as any),
             !sbLog ? fetchStaxRunLog() : Promise.resolve({ ok: true, data: null } as any),
           ]);
-          // Customers no longer have a GAS fallback — they're derived from
-          // the clients table; if the Supabase miss happens we leave the
-          // list empty and surface it via the warnings banner below.
-          const custRes = { ok: true, data: null } as any;
-          // Track which fallbacks ALSO failed — those are real data gaps the user
-          // needs to know about. If GAS recovered the dataset, drop it from the
-          // warning list (banner stays empty for the success cases).
           const stillWarn: string[] = [];
           if (!sbInv && !(invRes.ok && invRes.data)) stillWarn.push('invoices');
           else if (invRes.ok && invRes.data) setInvoices(invRes.data.invoices);
@@ -510,13 +541,8 @@ export function Payments() {
           else if (chargeRes.ok && chargeRes.data) setCharges(chargeRes.data.charges);
           if (!sbExc && !(excRes.ok && excRes.data)) stillWarn.push('exceptions');
           else if (excRes.ok && excRes.data) setExceptions(excRes.data.exceptions);
-          if (!sbCust && !(custRes.ok && custRes.data)) stillWarn.push('customers');
-          else if (custRes.ok && custRes.data) setCustomers(custRes.data.customers);
           if (!sbLog && !(logRes.ok && logRes.data)) stillWarn.push('run log');
           else if (logRes.ok && logRes.data) setRunLog(logRes.data.entries);
-          // Show one warning per dataset that's actually still missing. If GAS
-          // covered everything, downgrade to a "Supabase mirror stale" notice
-          // so the operator knows to investigate without freaking out.
           if (stillWarn.length > 0) {
             setLoadWarnings(stillWarn);
           } else {
@@ -527,23 +553,22 @@ export function Payments() {
         return;
       }
 
-      const [invRes, chargeRes, excRes, sbCustNoCache, logRes, cfgRes] = await Promise.all([
+      const [invRes, chargeRes, excRes, logRes, cfgRes] = await Promise.all([
         fetchStaxInvoices(),
         fetchStaxChargeLog(),
         fetchStaxExceptions(),
-        fetchStaxCustomersFromClients(),
         fetchStaxRunLog(),
         fetchStaxConfig(),
       ]);
       if (invRes.ok && invRes.data) setInvoices(invRes.data.invoices);
       if (chargeRes.ok && chargeRes.data) setCharges(chargeRes.data.charges);
       if (excRes.ok && excRes.data) setExceptions(excRes.data.exceptions);
-      if (sbCustNoCache) setCustomers(sbCustNoCache.customers);
       if (logRes.ok && logRes.data) setRunLog(logRes.data.entries);
       if (cfgRes.ok && cfgRes.data) {
         setAutoCharge(cfgRes.data.config.AUTO_CHARGE_ENABLED === true);
       }
-      // Report first error encountered
+      // Report first error encountered. Customers come from useClients
+      // (cached) above the loadData scope — no GAS round-trip here.
       const firstErr = [invRes, chargeRes, excRes, logRes, cfgRes].find(r => !r.ok);
       if (firstErr) setError(firstErr.error);
       setLastUpdated(new Date());
@@ -578,11 +603,13 @@ export function Payments() {
   // — now all five trigger a refetch.
   useEffect(() => {
     const unsub = entityEvents.subscribe((entityType) => {
+      // v38.154.0 — 'stax_customer' was retired; useClients handles the
+      // 'client' entity event itself, so customer-list updates land here
+      // automatically via the apiClients memo without a Payments refetch.
       if (
         entityType === 'stax_invoice' ||
         entityType === 'stax_charge' ||
         entityType === 'stax_exception' ||
-        entityType === 'stax_customer' ||
         entityType === 'stax_run_log'
       ) {
         // v38.124.0 — skip the refetch if the user has any cell focused.
@@ -1254,7 +1281,7 @@ export function Payments() {
             {(() => { const noId = pending.filter(p => !p.staxCustomerId); return noId.length > 0 ? (
               <div style={{ padding: '10px 16px', background: '#FEF3C7', borderBottom: `1px solid #FDE68A`, display: 'flex', alignItems: 'center', gap: 8, fontSize: 12 }}>
                 <AlertTriangle size={14} color="#B45309" style={{ flexShrink: 0 }} />
-                <span style={{ color: '#92400E' }}><strong>{noId.length} invoice{noId.length > 1 ? 's' : ''}</strong> missing Stax Customer ID — add the customer mapping in Stax Customers tab, then refresh.</span>
+                <span style={{ color: '#92400E' }}><strong>{noId.length} invoice{noId.length > 1 ? 's' : ''}</strong> missing Stax Customer ID — set the Stax Customer ID on the client record, then click Refresh.</span>
                 <button onClick={async () => {
                   setCreatingInvoices(true);
                   const res = await postStaxRefreshCustomerIds();
@@ -1606,7 +1633,7 @@ export function Payments() {
                               onClick={() => handlePushOne(i.qbInvoice)}
                             />
                           ) : (
-                            <span style={{ fontSize: 11, color: '#DC2626' }} title="This customer has no Stax Customer ID mapping. Add it in the Customers tab or run Refresh Stax IDs.">
+                            <span style={{ fontSize: 11, color: '#DC2626' }} title="This customer has no Stax Customer ID set on the client record. Edit the client to add it, then run Refresh Stax IDs.">
                               Needs Customer
                             </span>
                           )}

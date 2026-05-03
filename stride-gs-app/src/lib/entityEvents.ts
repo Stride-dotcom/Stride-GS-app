@@ -25,9 +25,10 @@ type EntityType =
   // v38.119.0 — Payments page live updates
   | 'stax_invoice'
   // Billing code-review fix — extend Payments realtime past stax_invoices
-  // so the Charges/Exceptions/Customers/Run-Log tabs don't go stale until
-  // the operator manually refetches.
-  | 'stax_charge' | 'stax_exception' | 'stax_customer' | 'stax_run_log';
+  // so the Charges/Exceptions/Run-Log tabs don't go stale until the
+  // operator manually refetches. (v38.154.0: 'stax_customer' dropped —
+  // Customers tab derives from useClients, which has its own 'client' sub.)
+  | 'stax_charge' | 'stax_exception' | 'stax_run_log';
 
 type EntityEventCallback = (entityType: EntityType, entityId: string) => void;
 

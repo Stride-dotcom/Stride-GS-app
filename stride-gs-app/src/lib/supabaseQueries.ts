@@ -3229,53 +3229,11 @@ export async function fetchStaxCustomersFromSupabase(): Promise<StaxCustomersRes
   }
 }
 
-/**
- * Derive Stax customers from `clients` (single source of truth).
- *
- * Replaces the legacy `stax_customers` mirror — the Stax Customers sheet
- * was a per-name lookup table that drifted from CB Clients. The list of
- * "Stax Customers" is now whichever clients have a non-empty
- * `stax_customer_id` set on their CB Clients row.
- *
- * Returned rows fit `StaxCustomerRow` so existing call sites (test-invoice
- * autocomplete, payment-method panel lookup) keep working unchanged. The
- * `payMethod` field is synthesized: "Auto Pay" when `auto_charge=true`,
- * "Card on file" when only the Stax customer ID is present, otherwise
- * empty.
- */
-export async function fetchStaxCustomersFromClients(): Promise<StaxCustomersResponse | null> {
-  try {
-    const { data, error } = await supabase
-      .from('clients')
-      .select('name, email, stax_customer_id, stax_customer_name, auto_charge, active')
-      .eq('active', true)
-      .not('stax_customer_id', 'is', null)
-      .neq('stax_customer_id', '')
-      .order('name');
-    if (error) {
-      console.error('[supabase] clients-derived stax customers fetch failed:', error.code, error.message);
-      return null;
-    }
-    if (!data) return null;
-    const customers = data.map(r => {
-      const staxId = String(r.stax_customer_id || '');
-      const staxName = String(r.stax_customer_name || '').trim();
-      const autoCharge = r.auto_charge === true;
-      return {
-        qbName: String(r.name || ''),
-        staxCompany: staxName,
-        staxName: staxName || String(r.name || ''),
-        staxId,
-        email: String(r.email || ''),
-        payMethod: autoCharge ? 'Auto Pay' : (staxId ? 'Card on file' : ''),
-        notes: '',
-      };
-    });
-    return { customers, count: customers.length };
-  } catch {
-    return null;
-  }
-}
+// fetchStaxCustomersFromClients was retired in v38.154.0 — Payments.tsx
+// now derives the Stax customers list from the cached useClients hook
+// (apiCache + 'client' entityEvents + Supabase realtime), so a separate
+// per-mount Supabase query was redundant. The same shape is built in-page
+// by `clientsToStaxCustomers` against the in-memory ApiClient[].
 
 interface SupabaseStaxRunLogRow {
   timestamp: string | null;
