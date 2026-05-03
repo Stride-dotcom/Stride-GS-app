@@ -1,6 +1,7 @@
 import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import { useTablePreferences } from '../hooks/useTablePreferences';
 import { createPortal } from 'react-dom';
+import * as XLSX from 'xlsx';
 import {
   useReactTable,
   getCoreRowModel,
@@ -162,24 +163,59 @@ multiSelectFilter.autoRemove = (val: string[]) => !val || val.length === 0;
 const formatDate = (iso: string) => fmtDate(iso);
 
 
-function exportVisibleToCSV(tableRows: { getValue: (id: string) => unknown }[], visibleCols: { id: string; columnDef: { header?: unknown } }[], filename: string): void {
+/**
+ * 2026-05-03 — switched from CSV to .xlsx so Excel doesn't mangle item
+ * IDs that look numeric (leading zeros, exponent-shaped strings) and
+ * sidemarks/notes can hold commas without quoting drama. Uses the
+ * already-bundled `xlsx` package (also powers exportPriceListExcel).
+ *
+ * Numeric values land as numbers, dates as strings (we already get
+ * them as ISO/MM-DD-YYYY from the cell formatters), and the rest
+ * passes through as text.
+ */
+function exportVisibleToExcel(
+  tableRows: { getValue: (id: string) => unknown }[],
+  visibleCols: { id: string; columnDef: { header?: unknown } }[],
+  filename: string,
+): void {
   const SKIP = new Set(['select', 'actions']);
   const cols = visibleCols.filter(c => !SKIP.has(c.id));
-  const headerLine = cols.map(c => {
-    const h = typeof c.columnDef.header === 'string' ? c.columnDef.header : c.id;
-    return `"${h.replace(/"/g, '""')}"`;
-  }).join(',');
-  const body = tableRows.map(row =>
-    cols.map(col => {
-      const val = row.getValue(col.id);
-      return `"${String(val ?? '').replace(/"/g, '""')}"`;
-    }).join(',')
-  ).join('\n');
-  const blob = new Blob([headerLine + '\n' + body], { type: 'text/csv;charset=utf-8;' });
-  const url = URL.createObjectURL(blob);
-  const a = Object.assign(document.createElement('a'), { href: url, download: filename });
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(url), 100);
+  const headers = cols.map(c =>
+    typeof c.columnDef.header === 'string' ? c.columnDef.header : c.id
+  );
+
+  const aoa: unknown[][] = [headers];
+  for (const row of tableRows) {
+    aoa.push(cols.map(col => {
+      const v = row.getValue(col.id);
+      if (v == null) return '';
+      // Pass numbers through so Excel right-aligns + sums correctly.
+      if (typeof v === 'number' && Number.isFinite(v)) return v;
+      // Anything else stringifies — Excel keeps text columns as text,
+      // which prevents item-ID corruption (e.g. "00123" → 123).
+      return String(v);
+    }));
+  }
+
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  // Auto-size columns to the longest cell value in each column (capped
+  // so a long sidemark doesn't blow out the whole sheet).
+  const colWidths = headers.map((h, i) => {
+    let max = String(h).length;
+    for (let r = 1; r < aoa.length; r++) {
+      const cell = aoa[r][i];
+      const s = cell == null ? '' : String(cell);
+      if (s.length > max) max = s.length;
+    }
+    return { wch: Math.min(Math.max(max + 2, 8), 60) };
+  });
+  ws['!cols'] = colWidths;
+  // Freeze the header row.
+  ws['!freeze'] = { xSplit: 0, ySplit: 1 } as unknown as undefined;
+
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Inventory');
+  XLSX.writeFile(wb, filename);
 }
 
 // ─── StatusBadge ─────────────────────────────────────────────────────────────
@@ -885,6 +921,47 @@ export function Inventory() {
   const [showSidemarkFilter, setShowSidemarkFilter] = useState(false);
   const [sidemarkFilterRect, setSidemarkFilterRect] = useState<DOMRect | null>(null);
   const [isPrinting, setIsPrinting] = useState(false);
+  // When true, the print path renders only the rows that were selected
+  // at the time of the Print click. Toggled in handlePrint based on
+  // selection count.
+  const [printSelectedOnly, setPrintSelectedOnly] = useState(false);
+
+  // Fire window.print() AFTER the de-virtualized render commits. The
+  // old setTimeout(100) approach raced React's commit on big selections
+  // and printed a half-rendered virtualized DOM (header + tall empty
+  // spacers, no body rows). Listening for onafterprint also restores
+  // state more reliably than a timer that might fire before the user
+  // closes the dialog.
+  useEffect(() => {
+    if (!isPrinting) return;
+    let cancelled = false;
+    const restore = () => {
+      if (cancelled) return;
+      setIsPrinting(false);
+      setPrintSelectedOnly(false);
+      window.removeEventListener('afterprint', restore);
+    };
+    window.addEventListener('afterprint', restore);
+    // Two RAFs: first lets React commit the de-virtualized rows, second
+    // lets the browser lay them out. window.print() then captures the
+    // fully-rendered DOM.
+    const r1 = requestAnimationFrame(() => {
+      const r2 = requestAnimationFrame(() => {
+        if (cancelled) return;
+        try { window.print(); } catch (_) {}
+      });
+      // afterprint may not fire in some browsers (cancelled dialog) —
+      // schedule a defensive timeout to restore state anyway.
+      void r2;
+    });
+    const guard = setTimeout(restore, 30000);
+    return () => {
+      cancelled = true;
+      cancelAnimationFrame(r1);
+      clearTimeout(guard);
+      window.removeEventListener('afterprint', restore);
+    };
+  }, [isPrinting]);
 
   // Sidemark → background color map (recomputed when data or toggle changes)
   const sidemarkColorMap = useMemo(
@@ -1484,7 +1561,7 @@ export function Inventory() {
     }
   }
 
-  // Export helpers
+  // Export helpers — 2026-05-03: now .xlsx instead of .csv.
   function buildExportFilename(suffix = '') {
     const parts = ['inventory'];
     const clientFilter = (table.getColumn('clientName')?.getFilterValue() as string[] | undefined);
@@ -1492,27 +1569,31 @@ export function Inventory() {
     const smFilter = (table.getColumn('sidemark')?.getFilterValue() as string[] | undefined);
     if (smFilter?.length) parts.push(smFilter.map(s => s.replace(/[^a-zA-Z0-9]/g, '-')).join('_'));
     if (suffix) parts.push(suffix);
-    return parts.join('-') + '.csv';
+    return parts.join('-') + '.xlsx';
   }
 
   function doExportAll() {
-    exportVisibleToCSV(table.getFilteredRowModel().rows, table.getVisibleLeafColumns(), buildExportFilename('export'));
+    exportVisibleToExcel(table.getFilteredRowModel().rows, table.getVisibleLeafColumns(), buildExportFilename('export'));
   }
 
   function doExportSelected() {
-    exportVisibleToCSV(table.getSelectedRowModel().rows, table.getVisibleLeafColumns(), buildExportFilename('selected'));
+    exportVisibleToExcel(table.getSelectedRowModel().rows, table.getVisibleLeafColumns(), buildExportFilename('selected'));
   }
 
-  // Print handler — de-virtualizes table, prints, re-virtualizes
+  // Print — 2026-05-03 fix. Old version called window.print() inside a
+  // setTimeout 100ms after flipping isPrinting=true, but on large
+  // selections React's de-virtualization commit could land AFTER the
+  // print dialog opened, so the print preview captured the half-rendered
+  // virtualized table (header + a handful of rows + tall empty
+  // spacers). Now: flip isPrinting=true (and printSelectedOnly when
+  // there's a selection), let the useEffect below fire window.print()
+  // ONCE the new render commits, and use onafterprint to restore state.
+  // If rows are selected we restrict the print to those — matches user
+  // expectation of "select rows, then print" producing a focused doc.
   function handlePrint() {
+    const selectedCount = table.getSelectedRowModel().rows.length;
+    setPrintSelectedOnly(selectedCount > 0);
     setIsPrinting(true);
-    // Allow React to re-render with all rows before printing
-    requestAnimationFrame(() => {
-      setTimeout(() => {
-        window.print();
-        setIsPrinting(false);
-      }, 100);
-    });
   }
 
   // Active filter count (non-global)
@@ -1608,9 +1689,12 @@ export function Inventory() {
 
       {/* Print header — hidden on screen, visible in print */}
       <div className="print-header" style={{ display: 'none', marginBottom: 12 }}>
-        <div style={{ fontSize: 16, fontWeight: 700 }}>{printTitle}</div>
+        <div style={{ fontSize: 16, fontWeight: 700 }}>
+          {printTitle}
+          {printSelectedOnly && ` — ${selectedRows.length} selected`}
+        </div>
         <div style={{ fontSize: 11, color: '#666', marginTop: 2 }}>
-          Printed {new Date().toLocaleDateString('en-US')} — {filteredCount} items
+          Printed {new Date().toLocaleDateString('en-US')} — {printSelectedOnly ? selectedRows.length : filteredCount} items
         </div>
       </div>
 
@@ -2090,8 +2174,14 @@ export function Inventory() {
             ) : (isPrinting || (rowDisplay === 'all' && !isMobile)) ? (
               /* De-virtualized: render ALL rows (print OR "Show: All" mode).
                  In user-expanded mode we still attach row-level handlers so
-                 clicking rows / double-click-to-open-detail still works. */
-              allVirtualRows.map((row, idx) => {
+                 clicking rows / double-click-to-open-detail still works.
+                 When printing AND rows were selected at click-time, narrow
+                 to just those — gives users a focused doc instead of a
+                 hundred unfiltered pages. */
+              (isPrinting && printSelectedOnly
+                ? allVirtualRows.filter(r => r.getIsSelected())
+                : allVirtualRows
+              ).map((row, idx) => {
                 const isSelected = row.getIsSelected();
                 const isActivePanel = selectedItem?.itemId === row.original.itemId;
                 const smColor = colorSidemarks && row.original.sidemark ? sidemarkColorMap.get(normSidemark(row.original.sidemark)) : undefined;
