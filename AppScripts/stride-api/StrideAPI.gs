@@ -21802,6 +21802,23 @@ function handleCreateInvoice_(payload) {
   var cbSS       = SpreadsheetApp.openById(cbId);
   var cbSettings = api_readSettings_(cbSS);
 
+  // v38.157.0 — Serialize Consolidated_Ledger reads + writes across the
+  // entire commit. Without a lock, two concurrent invoices could both pass
+  // the idempotency check + race-detection check, both write rows, and
+  // either one's rollback would chop the OTHER one's rows by row position
+  // (deleteRows works on current row numbers, not on the IDs we wrote).
+  // The serialization is bounded — Apps Script ScriptLock is per-script,
+  // so other API calls keep flowing. A 30s timeout matches the worst-case
+  // commit time observed (50-line invoice with PDF generation).
+  var commitLock = LockService.getScriptLock();
+  if (!commitLock.tryLock(30000)) {
+    return errorResponse_(
+      "Could not acquire commit lock within 30s — another invoice commit is running. Retry in a moment.",
+      "LOCK_TIMEOUT"
+    );
+  }
+  try {
+
   var masterRpcUrl        = String(cbSettings["MASTER_RPC_URL"]              || "").trim();
   var masterRpcToken      = String(cbSettings["MASTER_RPC_TOKEN"]             || "").trim();
   var masterFolderId      = String(cbSettings["MASTER_ACCOUNTING_FOLDER_ID"]  || "").trim();
@@ -22174,30 +22191,57 @@ function handleCreateInvoice_(payload) {
   // retries via the idempotency early-return. Now: on any throw OR partial
   // flip (some rows didn't match), roll back the Consolidated_Ledger insert
   // and return a real error so the operator knows the invoice didn't take.
+  // v38.157.0 — Helper closure for rollback. If the deleteRows itself fails
+  // (read-only quota, lock contention bug, sheet deleted between insert and
+  // rollback), the orphan ledger IDs are pinned to a Script Property so an
+  // operator can later run runRepairOrphanLedgerRows. Without this the
+  // orphans would be findable only by manual SQL inspection — exactly the
+  // diagnostic burden this whole PR exists to eliminate.
+  function rollbackInsertedRange_() {
+    if (!insertedRange) return { ok: true };
+    try {
+      consolLedger.deleteRows(insertedRange.start, insertedRange.count);
+      return { ok: true };
+    } catch (rollbackErr) {
+      Logger.log("Consolidated_Ledger rollback failed (logging orphans for manual repair): " + rollbackErr.message);
+      try {
+        var orphanIds = ledgerRowIds.join(",");
+        var existing = String(PropertiesService.getScriptProperties().getProperty("ROLLBACK_FAILED_ORPHAN_LEDGER_IDS") || "").trim();
+        var combined = existing ? (existing + "," + orphanIds) : orphanIds;
+        PropertiesService.getScriptProperties().setProperty("ROLLBACK_FAILED_ORPHAN_LEDGER_IDS", combined);
+        PropertiesService.getScriptProperties().setProperty("ROLLBACK_FAILED_LAST_INVOICE_NO", String(invNo));
+        PropertiesService.getScriptProperties().setProperty("ROLLBACK_FAILED_LAST_AT", new Date().toISOString());
+      } catch (propErr) {
+        Logger.log("Could not pin orphan IDs to Script Properties: " + propErr.message);
+      }
+      return { ok: false, error: rollbackErr.message };
+    }
+  }
+
   var marked = 0;
   try {
     marked = api_markClientLedgerInvoiced_(sourceSheetId, ledgerRowIds, invNo, invDate, invoiceUrl);
   } catch (ledgerErr) {
-    if (insertedRange) {
-      try { consolLedger.deleteRows(insertedRange.start, insertedRange.count); }
-      catch (rollbackErr) { Logger.log("Consolidated_Ledger rollback failed: " + rollbackErr.message); }
-    }
+    var rb1 = rollbackInsertedRange_();
     return errorResponse_(
-      "Client ledger flip failed (" + ledgerErr.message + "). Consolidated_Ledger insert was rolled back. " +
-      "The Master invoice counter has advanced — retrying will get the next invoice number and a clean commit.",
+      "Client ledger flip failed (" + ledgerErr.message + ")." +
+      (rb1.ok
+        ? " Consolidated_Ledger insert was rolled back."
+        : " Consolidated_Ledger ROLLBACK ALSO FAILED (" + rb1.error + ") — orphan ledger IDs pinned to Script Property ROLLBACK_FAILED_ORPHAN_LEDGER_IDS for runRepairOrphanLedgerRows.") +
+      " The Master invoice counter has advanced — retrying will get the next invoice number and a clean commit.",
       "LEDGER_FLIP_FAILED"
     );
   }
   if (marked < ledgerRowIds.length) {
-    if (insertedRange) {
-      try { consolLedger.deleteRows(insertedRange.start, insertedRange.count); }
-      catch (rollbackErr) { Logger.log("Consolidated_Ledger rollback failed: " + rollbackErr.message); }
-    }
+    var rb2 = rollbackInsertedRange_();
     return errorResponse_(
       "Client ledger partial flip: " + marked + " of " + ledgerRowIds.length + " ledger rows " +
       "were marked Invoiced (the rest didn't match any rows on the client Billing_Ledger sheet — " +
-      "possibly transferred or deleted between the unbilled-report read and the commit). " +
-      "Consolidated_Ledger insert was rolled back. Re-run Generate Unbilled Report and retry.",
+      "possibly transferred or deleted between the unbilled-report read and the commit)." +
+      (rb2.ok
+        ? " Consolidated_Ledger insert was rolled back."
+        : " Consolidated_Ledger ROLLBACK ALSO FAILED (" + rb2.error + ") — orphan ledger IDs pinned to Script Property ROLLBACK_FAILED_ORPHAN_LEDGER_IDS for runRepairOrphanLedgerRows.") +
+      " Re-run Generate Unbilled Report and retry.",
       "LEDGER_PARTIAL_FLIP"
     );
   }
@@ -22262,6 +22306,11 @@ function handleCreateInvoice_(payload) {
     lineItemCount: rows.length,
     warnings:      warnings.length ? warnings : undefined
   });
+  } finally {
+    // v38.157.0 — Always release the commit lock, regardless of success
+    // path or any of the early-return error responses inside the try.
+    try { commitLock.releaseLock(); } catch (_) {}
+  }
 }
 
 // ─── Phase 7B #12: Resend Invoice Email ───────────────────────────────────────
