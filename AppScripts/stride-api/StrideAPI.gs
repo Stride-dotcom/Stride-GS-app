@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.158.0 — 2026-05-03 PST — QBO BillEmail inheritance falls back to CB Clients when the parent QBO customer record has no PrimaryEmailAddr. v38.156.0 added the QBO-side parent lookup but Justin's INV-000135 push still landed in QBO with an empty bill-to email — diagnosed: the parent QBO customer record didn't have a PrimaryEmailAddr set, so the fetch returned `billEmail: ""` and the per-field conditional skipped writing anything. CB Clients HAS the email (it's the same field staff use to send the Stride-side invoice), so add it as a fallback layer. handleQboCreateInvoice_'s clientInfoMap now also pulls Email + Phone from CB Clients; the per-invoice contact resolution prefers QBO parent's email, falls back to CB Clients email when QBO is empty. CB Clients email is often comma-separated (e.g. nip tuck has three recipients) — Invoice.BillEmail.Address validates as a single address on the QBO API, so we take the first email from the list. Operators can still CC additional recipients from the QBO Send dialog or set a comma-separated list on the parent QBO customer (which QBO accepts via its own UI flow). billAddr / shipAddr have no CB Clients equivalent so they only come from QBO. The "no contact info inherited" warning now distinguishes between "QBO parent had nothing AND CB Clients had nothing" (the only case it should fire now). Same fallback also covers the case where the Stax Customers tab never got the parent QBO ID populated (cachedParentQboId empty → parentCustomerId null → no QBO fetch at all) — CB Clients email lands on the invoice anyway.
+   StrideAPI.gs — v38.159.0 — 2026-05-03 PST — New billing_email field on clients (Supabase-only) is now the authoritative source for invoice emails. Justin pointed out that the existing `email` field is the alerts/shipment-notification list (Hillary, Allison, adavisdesign for nip tuck) — those people should NOT necessarily get invoices. New billing_contact_name / billing_email / billing_address columns live ONLY in Supabase (migration `clients_billing_contact_fields`); no CB Clients sheet column, no CLIENT_FIELDS_ entry, no writeSettingsToClientSheet sync. First step toward "stop using the sheet for fields the operator only edits via the app". Resolution order for QBO BillEmail (handleQboCreateInvoice_): Supabase billing_email → QBO parent customer's PrimaryEmailAddr → CB Clients alerts email (legacy fallback). Resolution order for invoice email (api_emailInvoice_): Supabase billing_email → CLIENT_EMAIL setting (legacy fallback). billing_email may be comma-separated for multi-recipient — Gmail accepts that; QBO's Invoice.BillEmail.Address only takes a single address so we pick the first email and operators CC additional recipients via the QBO Send dialog. The QBO push reads billing_email via a single batched supabaseSelect for all active clients (one call per push batch, not per invoice). Both resolution paths log to Apps Script console when they fall through to a legacy field — operators can audit which clients still need a billing_email set. The OnboardClientModal will get a new Billing Contact section in the same PR series so staff can populate billing_email per-client.
+   v38.158.0 — 2026-05-03 PST — QBO BillEmail inheritance falls back to CB Clients when the parent QBO customer record has no PrimaryEmailAddr. v38.156.0 added the QBO-side parent lookup but Justin's INV-000135 push still landed in QBO with an empty bill-to email — diagnosed: the parent QBO customer record didn't have a PrimaryEmailAddr set, so the fetch returned `billEmail: ""` and the per-field conditional skipped writing anything. CB Clients HAS the email (it's the same field staff use to send the Stride-side invoice), so add it as a fallback layer. handleQboCreateInvoice_'s clientInfoMap now also pulls Email + Phone from CB Clients; the per-invoice contact resolution prefers QBO parent's email, falls back to CB Clients email when QBO is empty. CB Clients email is often comma-separated (e.g. nip tuck has three recipients) — Invoice.BillEmail.Address validates as a single address on the QBO API, so we take the first email from the list. Operators can still CC additional recipients from the QBO Send dialog or set a comma-separated list on the parent QBO customer (which QBO accepts via its own UI flow). billAddr / shipAddr have no CB Clients equivalent so they only come from QBO. The "no contact info inherited" warning now distinguishes between "QBO parent had nothing AND CB Clients had nothing" (the only case it should fire now). Same fallback also covers the case where the Stax Customers tab never got the parent QBO ID populated (cachedParentQboId empty → parentCustomerId null → no QBO fetch at all) — CB Clients email lands on the invoice anyway.
    v38.157.0 — 2026-05-03 PST — Hardened handleCreateInvoice_ against the half-write state that stuck Justin's NIPTUCK INV-000131 commit in Unbilled limbo. Four defenses + a recovery: (1) The markInvoiced step is no longer try/catch'd into a non-fatal warning. On any throw OR partial flip (some ledger row IDs didn't match a row on the client sheet), the Consolidated_Ledger insert is rolled back via deleteRows and an error response is returned (LEDGER_FLIP_FAILED / LEDGER_PARTIAL_FLIP). The Master RPC counter has already advanced, so a clean retry just gets the next invoice number. (2) Pre-write race detection: after grabbing invNo from the Master RPC, scan Consolidated_Ledger for the same number under a different (client, sidemark) tuple. If found, abort with INVOICE_NO_COLLISION before any writes — root-causes the Master `getNextInvoiceId` counter not being atomic across concurrent commits. (3) Idempotency-check hardening: the "all ledger rows already in Consolidated_Ledger" early-return now ALSO verifies the client Billing_Ledger has those rows flipped to Invoiced before declaring success. If only some are flipped (the half-write state we kept silently re-hitting), return HALF_WRITE_DETECTED with a clear repair instruction instead of "looks fine, alreadyProcessed=true". (4) New helpers `api_verifyClientLedgerFlipped_` and `api_isInvoiceNoSafe_` back the above checks. New admin entry `runRepairOrphanLedgerRows` reads a Script Property `REPAIR_ORPHAN_LEDGER_IDS` (comma-separated) and removes matching rows from Consolidated_Ledger so a stuck state can be cleaned up — idempotent, logs every removed row's invoice #, client, sidemark for audit. Run this once on the 18 NIPTUCK rows; future stuck states will be rare (idempotency check now refuses to mask them) but the function is general-purpose for any similar incident.
    v38.156.0 — 2026-05-03 PST — QBO sub-customer invoices now inherit BillEmail / BillAddr / ShipAddr from the parent customer record. QBO does NOT auto-inherit contact info on sub-customer invoices — every Customer:Sidemark push was landing in QBO with empty bill-to fields, so the QBO-side "Send invoice" action had nowhere to email it (Justin reported this). The QBO API's IsProject flag is read-only — we can't switch from sub-customers to Projects to fix it that way — so we explicitly inherit at push time instead. New helper qbo_getCustomerContactInfo_ fetches PrimaryEmailAddr / BillAddr / ShipAddr / PrimaryPhone via GET /customer/{id}; qbo_resolveCustomerAndSubJob_ now also returns parentCustomerId so the caller can do that lookup. handleQboPush_ holds a per-batch parentContactCache so a 50-line invoice with 4 sidemarks does 4 parent lookups, not 50; same-client follow-up invoices in the same batch are already warm. Inheritance is conditional per field — empty parent values don't write empty objects (which QBO interprets as a clear-the-field action). Parent customers (no sidemark, or separate_by_sidemark=false) are unchanged — they hit QBO with CustomerRef pointing at the parent, which already pulls contact info correctly.
    v38.155.0 — 2026-05-03 PST — Drop the misleading "PDF generation skipped (operator choice)" warning that handleCreateInvoice_ unconditionally appended whenever skipPdf=true. The operator-facing Generate PDF checkbox was removed in PR #210; skipPdf is now React-controlled (true unless the operator opts into the email-attachment path), and the React side immediately generates the canonical PDF via jsPDF + Supabase Storage and PATCHes billing.invoice_url to the signed URL. So a PDF *is* being created on every commit — surfacing a "skipped" warning misled Justin into thinking invoices were missing PDFs. The warning push at handleCreateInvoice_ ~line 21937 is removed; the empty `warnings` array stays so the response shape doesn't drift for existing consumers.
@@ -21742,9 +21743,30 @@ function api_emailInvoice_(clientSheetId, invNo, pdfFile) {
   var clientEmail = String(settings["CLIENT_EMAIL"]          || "").trim();
   var clientName  = String(settings["CLIENT_NAME"]           || "").trim() || "Client";
   var staffEmails = String(settings["NOTIFICATION_EMAILS"]   || "").trim();
-  if (!clientEmail) throw new Error("Client has no CLIENT_EMAIL setting");
 
-  var allRecipients = clientEmail;
+  // v38.159.0 — Prefer the new Supabase-only billing_email when set.
+  // Same direction as the QBO BillEmail change: invoices go to the
+  // billing recipient(s), not the alerts list. CLIENT_EMAIL stays as
+  // the fallback so legacy clients without a billing_email keep
+  // working unchanged. billing_email may be comma-separated for
+  // multi-recipient — Gmail accepts that natively.
+  var billingEmail = "";
+  try {
+    var sbRows = supabaseSelect_(
+      "clients",
+      "spreadsheet_id=eq." + encodeURIComponent(clientSheetId),
+      "billing_email"
+    );
+    if (sbRows.ok && sbRows.rows.length > 0) {
+      billingEmail = String(sbRows.rows[0].billing_email || "").trim();
+    }
+  } catch (e) {
+    Logger.log("api_emailInvoice_ billing_email lookup failed (using CLIENT_EMAIL fallback): " + e.message);
+  }
+  var primaryRecipient = billingEmail || clientEmail;
+  if (!primaryRecipient) throw new Error("Client has no billing_email (Supabase) or CLIENT_EMAIL (sheet) — invoice cannot be sent");
+
+  var allRecipients = primaryRecipient;
   if (staffEmails) allRecipients += "," + staffEmails;
 
   GmailApp.sendEmail(allRecipients,
@@ -36873,9 +36895,42 @@ function handleQboCreateInvoice_(payload) {
         terms: clTermsIdx !== undefined ? String(clData[cli][clTermsIdx] || "").trim() : "",
         qbCustomerName: clQbIdx !== undefined ? String(clData[cli][clQbIdx] || "").trim() : "",
         email: clEmailIdx !== undefined ? String(clData[cli][clEmailIdx] || "").trim() : "",
-        phone: clPhoneIdx !== undefined ? String(clData[cli][clPhoneIdx] || "").trim() : ""
+        phone: clPhoneIdx !== undefined ? String(clData[cli][clPhoneIdx] || "").trim() : "",
+        // v38.159.0 — billing_email lives in Supabase only (no CB Clients
+        // sheet column). Filled in by the loop below from a single
+        // batched supabaseSelect call so we don't fan out one query per
+        // invoice. Empty string when no billing_email is set; callers
+        // fall back through to the alerts `email` field.
+        billingEmail: ""
       };
     }
+  }
+
+  // v38.159.0 — Batch-load billing_* fields from Supabase. The new
+  // billing_contact_name / billing_email / billing_address columns are
+  // Supabase-authoritative (no CB Clients sheet column, no CLIENT_FIELDS_
+  // entry, no writeSettingsToClientSheet sync). We read them once for
+  // every client in scope, key by Client Name (case-insensitive), and
+  // graft onto the existing clientInfoMap entries. One Supabase call,
+  // even for a 50-invoice batch.
+  try {
+    var billingSel = supabaseSelect_(
+      "clients",
+      "active=eq.true",
+      "name,billing_email,billing_contact_name,billing_address"
+    );
+    if (billingSel.ok) {
+      for (var bi = 0; bi < billingSel.rows.length; bi++) {
+        var br = billingSel.rows[bi];
+        var bnKey = String(br.name || "").trim().toUpperCase();
+        if (!bnKey || !clientInfoMap[bnKey]) continue;
+        clientInfoMap[bnKey].billingEmail        = String(br.billing_email        || "").trim();
+        clientInfoMap[bnKey].billingContactName  = String(br.billing_contact_name || "").trim();
+        clientInfoMap[bnKey].billingAddress      = String(br.billing_address      || "").trim();
+      }
+    }
+  } catch (sbBillingErr) {
+    Logger.log("handleQboCreateInvoice_ billing_email Supabase load failed (non-fatal): " + sbBillingErr.message);
   }
 
   // Read Consolidated_Ledger
@@ -37105,15 +37160,24 @@ function handleQboCreateInvoice_(payload) {
       }
       if (!custResult.isParent) {
         var cbInfoForGroup = clientInfoMap[String(group.clientName || "").toUpperCase()] || {};
-        // CB Clients email is often comma-separated (e.g. three recipients
-        // for nip tuck). QBO's Invoice.BillEmail.Address validates as a
-        // single address — pick the first one. QBO operators can send to
-        // additional CCs from the Send dialog, or set a comma-separated
-        // list on the parent QBO customer record (which QBO then accepts
-        // via its own UI flow even though the API would reject it here).
-        var cbEmail = String(cbInfoForGroup.email || "").split(",")[0].trim();
+        // v38.159.0 — Resolution order for the QBO BillEmail:
+        //   1. Supabase clients.billing_email (Supabase-only — what staff
+        //      sets in the new Settings modal billing section)
+        //   2. QBO parent customer record's PrimaryEmailAddr
+        //   3. CB Clients alerts/notifications email (legacy fallback —
+        //      this is the field that bit Justin: nip tuck's alerts go
+        //      to Hillary/Allison/adavisdesign, but invoices may need to
+        //      go elsewhere; only used when nothing else is set)
+        // Each source's value can be comma-separated; QBO's
+        // Invoice.BillEmail.Address validates as a single address, so we
+        // take the first email and trust operators to CC additional
+        // recipients from the QBO Send dialog if needed.
+        function pickFirstEmail_(s) { return String(s || "").split(",")[0].trim(); }
+        var sbBillingEmail = pickFirstEmail_(cbInfoForGroup.billingEmail);
+        var qboParentEmail = qboParentContact ? String(qboParentContact.billEmail || "").trim() : "";
+        var legacyAlertEmail = pickFirstEmail_(cbInfoForGroup.email);
         var cbPhone = String(cbInfoForGroup.phone || "").trim();
-        var resolvedEmail = (qboParentContact && qboParentContact.billEmail) || cbEmail;
+        var resolvedEmail = sbBillingEmail || qboParentEmail || legacyAlertEmail;
         var resolvedPhone = (qboParentContact && qboParentContact.billPhone) || cbPhone;
         if (resolvedEmail || (qboParentContact && (qboParentContact.billAddr || qboParentContact.shipAddr))) {
           parentContact = {

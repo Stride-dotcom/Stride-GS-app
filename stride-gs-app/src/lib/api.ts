@@ -216,6 +216,17 @@ export interface ApiClient {
   /** v38.37.0 — per-client receiving instruction rendered as amber banner on Receiving page */
   shipmentNote?: string;
   active: boolean;
+  /** v38.159.0 — Supabase-only billing contact fields. Distinct from the
+   *  `email` / `contactName` fields above which drive shipment alerts,
+   *  inspection reports, and other operational notifications. These three
+   *  fields drive invoice emails and the QBO BillEmail inheritance.
+   *  Written directly to Supabase by the OnboardClientModal Billing Contact
+   *  section — no CB Clients sheet column, no GAS round-trip. Empty/undefined
+   *  for clients that haven't had the new section filled in yet — invoice
+   *  paths fall back to the legacy `email` field in that case. */
+  billingContactName?: string;
+  billingEmail?: string;
+  billingAddress?: string;
 }
 
 export interface ClientsResponse {

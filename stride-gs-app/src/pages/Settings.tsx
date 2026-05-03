@@ -2176,6 +2176,11 @@ export function Settings() {
           // Cert PDF upload is deferred to Edit mode (TaxExemptBlock); only
           // the answer-shape fields are saved here. Best-effort — never blocks
           // the success return on a Supabase failure.
+          //
+          // v38.159.0 — Same pattern for the new billing contact fields.
+          // billing_contact_name / billing_email / billing_address are
+          // Supabase-only; writeSettingsToClientSheet doesn't sync them.
+          // Bundled into the same UPDATE so we make one call, not two.
           const newSheetId = res.data.clientSheetId;
           if (newSheetId) {
             try {
@@ -2185,10 +2190,13 @@ export function Settings() {
                   tax_exempt: data.taxExempt !== false,
                   tax_exempt_reason: data.taxExemptReason || 'Resale',
                   resale_cert_expires: data.resaleCertExpires || null,
+                  billing_contact_name: data.billingContactName || null,
+                  billing_email:        data.billingEmail        || null,
+                  billing_address:      data.billingAddress      || null,
                 })
                 .eq('spreadsheet_id', newSheetId);
             } catch (taxErr) {
-              console.warn('[onboard] tax fields save failed (non-blocking):', taxErr);
+              console.warn('[onboard] supabase-only fields save failed (non-blocking):', taxErr);
             }
           }
 
@@ -2221,6 +2229,15 @@ export function Settings() {
           // Everything else in ApiClient matches the schema key names.
           name: data.clientName,
           email: data.clientEmail,
+          // v38.159.0 — Supabase-only billing fields aren't in CLIENT_FIELDS
+          // (intentionally — they bypass the GAS sheet sync), so
+          // schemaPayload doesn't include them. Without this spread, the
+          // optimistic UI shows stale billing email/contact/address until
+          // the no-cache refetch lands ~1-2s later. Patch them explicitly
+          // so the UI updates instantly on save.
+          billingContactName: data.billingContactName || '',
+          billingEmail:       data.billingEmail        || '',
+          billingAddress:     data.billingAddress      || '',
         });
 
         const res = await postUpdateClient({
@@ -2231,6 +2248,26 @@ export function Settings() {
         setClientActionLoading(false);
         if (res.data?.success) {
           setUpdateResult(res.data);
+
+          // v38.159.0 — Persist Supabase-only billing contact fields after
+          // the GAS update succeeds. Same pattern as the create-mode tax
+          // fields above. Best-effort — never blocks the success return on
+          // a Supabase failure (the GAS-side legacy fields already landed).
+          if (data.spreadsheetId) {
+            try {
+              await supabase
+                .from('clients')
+                .update({
+                  billing_contact_name: data.billingContactName || null,
+                  billing_email:        data.billingEmail        || null,
+                  billing_address:      data.billingAddress      || null,
+                })
+                .eq('spreadsheet_id', data.spreadsheetId);
+            } catch (billingErr) {
+              console.warn('[update] billing contact save failed (non-blocking):', billingErr);
+            }
+          }
+
           // Force bypass GAS 600s cache — otherwise refetch returns stale data
           // and overwrites the optimistic patch, making changes appear to revert.
           setNextFetchNoCache();
