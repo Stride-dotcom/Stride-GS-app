@@ -796,6 +796,7 @@ function InvoiceLineItemsSubtable({ items }: { items: BillingRow[] }) {
             <th style={subTh}>Service</th>
             <th style={subTh}>Description</th>
             <th style={subTh}>Item ID</th>
+            <th style={subTh}>Sidemark</th>
             <th style={{ ...subTh, textAlign: 'right' }}>Qty</th>
             <th style={{ ...subTh, textAlign: 'right' }}>Rate</th>
             <th style={{ ...subTh, textAlign: 'right' }}>Total</th>
@@ -819,6 +820,9 @@ function InvoiceLineItemsSubtable({ items }: { items: BillingRow[] }) {
                   {r.description || ''}
                 </td>
                 <td style={subTd}>{r.itemId || ''}</td>
+                <td style={{ ...subTd, maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {r.sidemark || '—'}
+                </td>
                 <td style={{ ...subTd, textAlign: 'right' }}>{safeQty}</td>
                 <td style={{ ...subTd, textAlign: 'right' }}>{safeRate}</td>
                 <td style={{ ...subTd, textAlign: 'right', fontWeight: 600, color: theme.colors.text }}>{safeTotal}</td>
