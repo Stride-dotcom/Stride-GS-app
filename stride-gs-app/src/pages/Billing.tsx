@@ -1107,9 +1107,12 @@ export function Billing() {
     return [...new Set([...storKnownClients, ...fromData])].sort();
   }, [previewRows, storKnownClients]);
 
-  // Pre-fetch sidemarks from Supabase when storage client filter changes
+  // Pre-fetch sidemarks from Supabase when storage client filter changes.
+  // 2026-05-03: also clear when the filter empties, otherwise the
+  // dropdown carries stale cross-client values from the previous run
+  // (matches the rptClientFilter effect below).
   useEffect(() => {
-    if (!storClientFilter.length) return;
+    if (!storClientFilter.length) { setStorKnownSidemarks([]); return; }
     const tenantIds = storClientFilter
       .map(name => apiClients.find(c => c.name === name)?.spreadsheetId)
       .filter(Boolean) as string[];
@@ -1127,15 +1130,19 @@ export function Billing() {
     return [...new Set([...storKnownSidemarks, ...fromData])].sort();
   }, [previewRows, storKnownSidemarks]);
 
-  // Populate initial client/sidemark options from billing hook
+  // Populate initial client options from billing hook.
+  // 2026-05-03 fix: previously this also seeded `knownSidemarks` /
+  // `storKnownSidemarks` from EVERY tenant in liveRows — so the
+  // Sidemark filter dropdown listed every client's sidemarks, even
+  // when the user had a single client selected. Sidemark options now
+  // source ONLY from the per-tenant Supabase fetch below (scoped by
+  // rptClientFilter) so each client sees only their own values, the
+  // way the Inventory filter works.
   useEffect(() => {
     if (liveRows.length > 0) {
       const clients = [...new Set(liveRows.map(r => r.clientName))].filter(Boolean).sort();
-      const sidemarks = [...new Set(liveRows.map(r => r.sidemark).filter(Boolean) as string[])].sort();
       setKnownClients(prev => [...new Set([...prev, ...clients])].sort());
-      setKnownSidemarks(prev => [...new Set([...prev, ...sidemarks])].sort());
       setStorKnownClients(prev => [...new Set([...prev, ...clients])].sort());
-      setStorKnownSidemarks(prev => [...new Set([...prev, ...sidemarks])].sort());
     }
   }, [liveRows]);
 
