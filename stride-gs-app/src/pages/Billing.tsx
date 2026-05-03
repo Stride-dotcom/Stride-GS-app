@@ -129,6 +129,8 @@ interface InvoiceReviewLine {
   repairId: string;
   shipmentNumber: string;
   notes: string;
+  sidemark: string;
+  reference: string;
   invoiceUrl: string;
 }
 
@@ -141,6 +143,9 @@ interface InvoiceReviewSummary {
   total: number;
   lineCount: number;
   invoiceUrl: string;
+  /** Per-client Stax / autopay flags resolved from `clients` table. */
+  staxCustomerId: string | null;
+  autoCharge: boolean;
   lines: InvoiceReviewLine[];
 }
 
@@ -271,6 +276,22 @@ const REVIEW_INVOICE_STATUS_CFG: Record<string, { bg: string; text: string }> = 
 function InvoiceReviewTab() {
   const { user } = useAuth();
   const isStaff = user?.role === 'admin' || user?.role === 'staff';
+  // Per-client Stax / Auto Pay flags. Same source the Billing Report tab
+  // uses (apiClients → tenant_id keyed map). Used to render the green
+  // CreditCard icon + Auto Pay badge next to each invoice's client name.
+  const { apiClients } = useClients();
+  const clientPayInfoMap = useMemo<Record<string, { autoCharge: boolean; staxCustomerId: string }>>(() => {
+    const map: Record<string, { autoCharge: boolean; staxCustomerId: string }> = {};
+    for (const c of apiClients) {
+      if (c.spreadsheetId) {
+        map[c.spreadsheetId] = {
+          autoCharge: c.autoCharge ?? false,
+          staxCustomerId: c.staxCustomerId ?? '',
+        };
+      }
+    }
+    return map;
+  }, [apiClients]);
   const [invoices, setInvoices] = useState<InvoiceReviewSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -288,7 +309,7 @@ function InvoiceReviewTab() {
     setError(null);
     const { data, error: err } = await supabase
       .from('billing')
-      .select('ledger_row_id, invoice_no, status, client_name, tenant_id, date, invoice_date, svc_code, svc_name, item_id, description, item_class, qty, rate, total, task_id, repair_id, shipment_number, item_notes, invoice_url')
+      .select('ledger_row_id, invoice_no, status, client_name, tenant_id, date, invoice_date, svc_code, svc_name, item_id, description, item_class, qty, rate, total, task_id, repair_id, shipment_number, item_notes, sidemark, reference, invoice_url')
       .in('status', ['Invoiced', 'Void'])
       .not('invoice_no', 'is', null)
       .order('invoice_date', { ascending: false });
@@ -313,6 +334,8 @@ function InvoiceReviewTab() {
       repairId:     String(r.repair_id || ''),
       shipmentNumber: String(r.shipment_number || ''),
       notes:        String(r.item_notes || ''),
+      sidemark:     String(r.sidemark || ''),
+      reference:    String(r.reference || ''),
       invoiceUrl:   String(r.invoice_url || ''),
     }));
     // Group by invoice_no
@@ -321,6 +344,7 @@ function InvoiceReviewTab() {
       if (!ln.invoiceNo) continue;
       let g = groups.get(ln.invoiceNo);
       if (!g) {
+        const payInfo = clientPayInfoMap[ln.clientSheetId];
         g = {
           invoiceNo:    ln.invoiceNo,
           clientName:   ln.clientName,
@@ -330,6 +354,8 @@ function InvoiceReviewTab() {
           total:        0,
           lineCount:    0,
           invoiceUrl:   ln.invoiceUrl,
+          staxCustomerId: payInfo?.staxCustomerId || null,
+          autoCharge:   payInfo?.autoCharge ?? false,
           lines:        [],
         };
         groups.set(ln.invoiceNo, g);
@@ -346,7 +372,8 @@ function InvoiceReviewTab() {
     }
     setInvoices(Array.from(groups.values()));
     setLoading(false);
-  }, []);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [clientPayInfoMap]);
 
   useEffect(() => { reload(); }, [reload]);
 
@@ -374,10 +401,20 @@ function InvoiceReviewTab() {
       if (dateFrom && inv.invoiceDate && inv.invoiceDate < dateFrom) return false;
       if (dateTo && inv.invoiceDate && inv.invoiceDate > dateTo) return false;
       if (q) {
+        // Search every text field on the invoice + every line-item field
+        // staff might recognize: ledger ID, item ID, description, sidemark,
+        // reference, notes, vendor-equivalent (svc name/code), task / repair
+        // / shipment refs. Matches the spirit of the global Billing Report
+        // search but operates on the invoice-grouped projection so the user
+        // can find any line item that's already been invoiced (the symptom
+        // Justin reported — "we currently have to open every invoice").
         const haystack = [
-          inv.invoiceNo, inv.clientName,
-          ...inv.lines.map(l => l.description),
-          ...inv.lines.map(l => l.itemId),
+          inv.invoiceNo, inv.clientName, inv.invoiceDate, String(inv.total),
+          ...inv.lines.flatMap(l => [
+            l.ledgerRowId, l.itemId, l.description, l.sidemark, l.reference,
+            l.notes, l.svcCode, l.svcName, l.itemClass,
+            l.taskId, l.repairId, l.shipmentNumber,
+          ]),
         ].join(' ').toLowerCase();
         if (!haystack.includes(q)) return false;
       }
@@ -595,7 +632,28 @@ function InvoiceReviewTab() {
                       <td style={{ ...reviewTd, fontWeight: 600 }}>
                         <DeepLink kind="invoice" id={inv.invoiceNo} clientSheetId={inv.clientSheetId} showIcon={false} />
                       </td>
-                      <td style={reviewTd}>{inv.clientName || '—'}</td>
+                      <td style={reviewTd}>
+                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                          {inv.clientName || '—'}
+                          {inv.staxCustomerId && (
+                            <span title="Stax payment on file" style={{ display: 'inline-flex', flexShrink: 0 }}>
+                              <CreditCard size={11} color="#15803D" />
+                            </span>
+                          )}
+                          {inv.staxCustomerId && inv.autoCharge && (
+                            <span
+                              title="Auto Pay enabled"
+                              style={{
+                                marginLeft: 2, fontSize: 9, padding: '1px 5px', borderRadius: 4,
+                                background: '#F0FDF4', color: '#15803D', fontWeight: 700,
+                                whiteSpace: 'nowrap',
+                              }}
+                            >
+                              Auto Pay
+                            </span>
+                          )}
+                        </span>
+                      </td>
                       <td style={reviewTd}>{fmt(inv.invoiceDate) || '—'}</td>
                       <td style={{ ...reviewTd, textAlign: 'right', fontWeight: 600 }}>${inv.total.toFixed(2)}</td>
                       <td style={{ ...reviewTd, textAlign: 'right', color: theme.colors.textSecondary }}>{inv.lineCount}</td>
@@ -1789,8 +1847,49 @@ export function Billing() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   ], [expandedInvoices]);
 
+  // The default tanstack global filter only sees the invoice-group's own
+  // text fields (invoiceNo / client / etc) — NOT the line items inside it.
+  // Once a row is invoiced it becomes invisible to ledger-row search even
+  // though the user can clearly see the description / sidemark / reference
+  // they remember. Pre-filter the groups by walking each lineItem's text
+  // fields here so search behaves the same on Invoiced as on Unbilled.
+  const filteredInvoicedGroups = useMemo(() => {
+    const q = (globalFilter || '').trim().toLowerCase();
+    if (!q) return billingSections.invoicedGroups;
+    return billingSections.invoicedGroups.filter(g => {
+      // Group-level fields first (cheap path).
+      if (
+        (g.invoiceNo && g.invoiceNo.toLowerCase().includes(q)) ||
+        (g.client && g.client.toLowerCase().includes(q)) ||
+        (g.sidemark && g.sidemark.toLowerCase().includes(q)) ||
+        (g.invoiceDate && g.invoiceDate.toLowerCase().includes(q)) ||
+        (g.qboInvoiceId && g.qboInvoiceId.toLowerCase().includes(q))
+      ) return true;
+      // Walk every line-item text field — what staff actually search by
+      // (item ID / description / sidemark / reference / notes / svc /
+      // task / repair / shipment).
+      for (const li of g.lineItems) {
+        if (
+          (li.ledgerRowId && li.ledgerRowId.toLowerCase().includes(q)) ||
+          (li.itemId      && li.itemId.toLowerCase().includes(q)) ||
+          (li.description && li.description.toLowerCase().includes(q)) ||
+          (li.sidemark    && li.sidemark.toLowerCase().includes(q)) ||
+          (li.reference   && li.reference.toLowerCase().includes(q)) ||
+          (li.notes       && li.notes.toLowerCase().includes(q)) ||
+          (li.svcCode     && li.svcCode.toLowerCase().includes(q)) ||
+          (li.svcName     && li.svcName.toLowerCase().includes(q)) ||
+          (li.itemClass   && li.itemClass.toLowerCase().includes(q)) ||
+          (li.taskId      && li.taskId.toLowerCase().includes(q)) ||
+          (li.repairId    && li.repairId.toLowerCase().includes(q)) ||
+          (li.shipmentNo  && li.shipmentNo.toLowerCase().includes(q))
+        ) return true;
+      }
+      return false;
+    });
+  }, [billingSections.invoicedGroups, globalFilter]);
+
   const invoicedTable = useReactTable({
-    data: billingSections.invoicedGroups,
+    data: filteredInvoicedGroups,
     columns: invoiceSummaryColumns,
     state: { rowSelection: invoicedRowSel },
     onRowSelectionChange: setInvoicedRowSel,
