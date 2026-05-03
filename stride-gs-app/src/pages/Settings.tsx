@@ -2229,6 +2229,15 @@ export function Settings() {
           // Everything else in ApiClient matches the schema key names.
           name: data.clientName,
           email: data.clientEmail,
+          // v38.159.0 — Supabase-only billing fields aren't in CLIENT_FIELDS
+          // (intentionally — they bypass the GAS sheet sync), so
+          // schemaPayload doesn't include them. Without this spread, the
+          // optimistic UI shows stale billing email/contact/address until
+          // the no-cache refetch lands ~1-2s later. Patch them explicitly
+          // so the UI updates instantly on save.
+          billingContactName: data.billingContactName || '',
+          billingEmail:       data.billingEmail        || '',
+          billingAddress:     data.billingAddress      || '',
         });
 
         const res = await postUpdateClient({
