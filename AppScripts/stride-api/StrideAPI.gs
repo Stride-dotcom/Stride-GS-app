@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.145.0 — 2026-05-02 PST — Two new actions + transfer follow-through. (1) `voidInvoice` action: sets every Billing_Ledger row matching invoiceNo to status=Void on the source client sheet, appends a "Voided: <reason>" note, then api_fullClientSync_(.., ['billing']) propagates the change to Supabase. Backs the new Invoice Review tab's per-invoice Void button. withStaffGuard + withClientIsolation, audit row written. (2) handleTransferItems_ now stamps the destination inventory row with transferred_from_tenant_id + transferred_at via new helper api_postTransferSupabaseSideEffects_, which also migrates entity_notes (entity_type='inventory') + item_photos rows from the source tenant to the destination tenant in Supabase, and strips transferred items from any open will_calls on the source tenant (cancels the WC if its item_ids becomes empty). New Supabase helpers supabasePatch_ + supabaseSelect_ added next to supabaseUpsert_/supabaseDelete_. handleTransferItems_ response now includes `transferDate` so the wrapper can use it. The DB-side companion view `inventory_live` (excludes status='Transferred') and the photos_select_tenant RLS policy update were already shipped via Supabase migrations earlier in the session — together they fix the Access Denied symptom on transferred items + close the orphaned-aux-table failure modes Justin flagged.
+   StrideAPI.gs — v38.146.0 — 2026-05-03 PST — Invoice Date now actually lands in the sheet + Supabase. (1) `api_markClientLedgerInvoiced_` was using exact-match `hdr["Invoice Date"]` / `hdr["Invoice #"]` / `hdr["Invoice URL"]` lookups; on client templates where any of those columns was missing, the bulk write silently skipped that column. Symptom: 264 Invoiced rows in Supabase had `invoice_date = ''` because the sheet column was never populated. Switched all three to `api_ensureColumn_` (case-insensitive, appends if missing) so client sheets self-heal on first invoice creation after the fix. idxLedgerId / idxStatus stay strict — those should never be missing. (2) `sbBillingRow_` now omits `invoice_date` from the upsert payload when the source value is empty. PostgREST merge-duplicates updates only fields present in the JSON, so omitting blanks preserves any backfilled value in Supabase. Without this, the SQL backfill of historical invoice_date would get clobbered on the next fullClientSync from any client whose sheet hadn't yet gained the column. Combined: future invoices stamp the date both places; historical Supabase rows can be SQL-backfilled from `billing_activity_log.performed_at` and won't be wiped on resync.
+   v38.145.0 — 2026-05-02 PST — Two new actions + transfer follow-through. (1) `voidInvoice` action: sets every Billing_Ledger row matching invoiceNo to status=Void on the source client sheet, appends a "Voided: <reason>" note, then api_fullClientSync_(.., ['billing']) propagates the change to Supabase. Backs the new Invoice Review tab's per-invoice Void button. withStaffGuard + withClientIsolation, audit row written. (2) handleTransferItems_ now stamps the destination inventory row with transferred_from_tenant_id + transferred_at via new helper api_postTransferSupabaseSideEffects_, which also migrates entity_notes (entity_type='inventory') + item_photos rows from the source tenant to the destination tenant in Supabase, and strips transferred items from any open will_calls on the source tenant (cancels the WC if its item_ids becomes empty). New Supabase helpers supabasePatch_ + supabaseSelect_ added next to supabaseUpsert_/supabaseDelete_. handleTransferItems_ response now includes `transferDate` so the wrapper can use it. The DB-side companion view `inventory_live` (excludes status='Transferred') and the photos_select_tenant RLS policy update were already shipped via Supabase migrations earlier in the session — together they fix the Access Denied symptom on transferred items + close the orphaned-aux-table failure modes Justin flagged.
    v38.144.2: Invoice URL: when skipPdf=true (now the React-side default per the matching React PR), set invoice_url to the new /#/invoices/<invNo>?client=<sheetId> React route instead of leaving it empty. The React page renders the invoice from `billing` rows on demand and supports browser print → save-as-PDF for downloadable reference — replaces the Drive Doc PDF flow that was visually unreliable (Drive auto-reformatted templates) and added 3-8s of wall time to every invoice commit. Drive PDF path (skipPdf=false) keeps its existing URL for operators who opt back in at commit time.
    v38.144.1: Bulk-write the Consolidated_Ledger appends in handleCreateInvoice_. Old code looped calling api_writeConsolidatedLedgerRow_ per row; that helper does 1 setValues + up to 2 setRichTextValue per row (Invoice # + Invoice URL hyperlinks), so ~3N round-trips for N rows. A 50-line invoice was ~150 round-trips on this step, undoing about half of v38.142.9's win on api_markClientLedgerInvoiced_. Since the appends are always contiguous (lastDataRow+1), we build the 2D array in memory and write it ONCE via setValues, then batch-set the hyperlink rich text per column with setRichTextValues. Total: 1 setValues + up to 2 setRichTextValues regardless of N. Combined with v38.142.9, a 50-row monthly invoice's sheet-write phase drops from ~2-3 min to ~5-10 sec.
    v38.144.0: New `commitStorageRows` action: takes pre-computed STOR rows from the React Storage Charges tab (which now sources them from the Postgres `calculate_storage_charges` RPC) and writes them straight to each tenant's Billing_Ledger. Skips the read+compute phase that used to time out on big clients (e.g. Allison Lind Design). Each affected tenant gets a one-shot `api_fullClientSync_(.., ["billing"])` after the write so the React Billing list refreshes immediately. The original generateStorageCharges/previewStorageCharges actions stay intact for backward compatibility.
@@ -4566,7 +4567,7 @@ function sbShipmentRow_(tenantId, ship) {
  * Build a Supabase billing row from API response fields.
  */
 function sbBillingRow_(tenantId, row) {
-  return {
+  var out = {
     tenant_id:       tenantId,
     ledger_row_id:   String(row.ledgerRowId || ""),
     status:          String(row.status || "Unbilled"),
@@ -4586,12 +4587,22 @@ function sbBillingRow_(tenantId, row) {
     repair_id:       String(row.repairId || ""),
     shipment_number: String(row.shipmentNo || row.shipmentNumber || ""),
     item_notes:      String(row.itemNotes || ""),
-    invoice_date:    String(row.invoiceDate || ""),
     invoice_url:     String(row.invoiceUrl || ""),
     sidemark:        String(row.sidemark || ""),
     reference:       String(row.reference || ""),
     updated_at:      new Date().toISOString()
   };
+  // v38.146.0 — Only include invoice_date in the upsert payload when the
+  // sheet actually has a value. PostgREST's merge-duplicates Prefer header
+  // updates only fields present in the JSON, so omitting an empty
+  // invoice_date preserves whatever value Supabase already has. Without
+  // this, syncs from older client sheets (whose Billing_Ledger doesn't yet
+  // have an Invoice Date column populated) would clobber valid Supabase
+  // values back to "" on every resync. Once api_markClientLedgerInvoiced_
+  // self-heals each sheet (next invoice creation), the column populates
+  // and this branch falls through to write the real value.
+  if (row.invoiceDate) out.invoice_date = String(row.invoiceDate);
+  return out;
 }
 
 /**
@@ -21505,9 +21516,19 @@ function api_markClientLedgerInvoiced_(clientSheetId, ledgerRowIds, invNo, invDa
   var hdr         = api_getHeaderMap_(sh);
   var idxLedgerId = hdr["Ledger Row ID"];
   var idxStatus   = hdr["Status"] || hdr["Billing Status"];
-  var idxInvNo    = hdr["Invoice #"];
-  var idxInvDate  = hdr["Invoice Date"];
-  var idxInvUrl   = hdr["Invoice URL"];
+  // v38.146.0 — Invoice # / Invoice Date / Invoice URL columns weren't on
+  // every Billing_Ledger sheet (older client templates skipped some), so
+  // exact-match `hdr[]` lookups silently returned undefined and the bulk
+  // write below skipped those columns entirely. Symptom: Status, ledger ID,
+  // and any column that DID exist (Invoice URL on most sheets) wrote fine,
+  // but Invoice Date was blank for every Invoiced row. Switch to
+  // api_ensureColumn_ which is case-insensitive AND appends the column if
+  // missing — so this function self-heals client sheets the first time
+  // they invoice after the fix ships. idxLedgerId / idxStatus stay strict
+  // because those genuinely should never be missing.
+  var idxInvNo    = api_ensureColumn_(sh, "Invoice #");
+  var idxInvDate  = api_ensureColumn_(sh, "Invoice Date");
+  var idxInvUrl   = api_ensureColumn_(sh, "Invoice URL");
 
   if (!idxLedgerId) throw new Error("Billing_Ledger missing Ledger Row ID column");
   if (!idxStatus)   throw new Error("Billing_Ledger missing Status column");
