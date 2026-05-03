@@ -152,6 +152,8 @@ interface InvoiceReviewSummary {
   /** Per-client Stax / autopay flags resolved from `clients` table. */
   staxCustomerId: string | null;
   autoCharge: boolean;
+  /** Aggregated sidemark across all line items: '' (none), single value, or 'Multiple'. */
+  sidemark: string;
   lines: InvoiceReviewLine[];
 }
 
@@ -344,8 +346,11 @@ function InvoiceReviewTab() {
       reference:    String(r.reference || ''),
       invoiceUrl:   String(r.invoice_url || ''),
     }));
-    // Group by invoice_no
+    // Group by invoice_no. Sidemark is aggregated separately from a parallel
+    // map (Set<string> per invoice) so we can collapse to '' / single / 'Multiple'
+    // after the loop without mutating the summary on every line.
     const groups = new Map<string, InvoiceReviewSummary>();
+    const sidemarksByInvoice = new Map<string, Set<string>>();
     for (const ln of lines) {
       if (!ln.invoiceNo) continue;
       let g = groups.get(ln.invoiceNo);
@@ -362,19 +367,30 @@ function InvoiceReviewTab() {
           invoiceUrl:   ln.invoiceUrl,
           staxCustomerId: payInfo?.staxCustomerId || null,
           autoCharge:   payInfo?.autoCharge ?? false,
+          sidemark:     '',
           lines:        [],
         };
         groups.set(ln.invoiceNo, g);
+        sidemarksByInvoice.set(ln.invoiceNo, new Set());
       }
       g.total += ln.total;
       g.lineCount += 1;
       g.lines.push(ln);
       if (!g.invoiceUrl && ln.invoiceUrl) g.invoiceUrl = ln.invoiceUrl;
+      if (ln.sidemark) sidemarksByInvoice.get(ln.invoiceNo)!.add(ln.sidemark);
       // Mixed status: any line differing from the first defines it
       if ((g.status === 'Invoiced' && ln.status === 'Void') ||
           (g.status === 'Void' && ln.status === 'Invoiced')) {
         g.status = 'Mixed';
       }
+    }
+    // Collapse aggregated sidemark sets to display strings.
+    for (const [invNo, set] of sidemarksByInvoice) {
+      const g = groups.get(invNo);
+      if (!g) continue;
+      if (set.size === 0) g.sidemark = '';
+      else if (set.size === 1) g.sidemark = [...set][0];
+      else g.sidemark = 'Multiple';
     }
     setInvoices(Array.from(groups.values()));
     setLoading(false);
@@ -615,6 +631,7 @@ function InvoiceReviewTab() {
                 <th style={{ ...reviewTh, width: 32 }}></th>
                 <SortHead field="invoiceNo" label="Invoice #" />
                 <SortHead field="clientName" label="Client" />
+                <th style={reviewTh}>Sidemark</th>
                 <SortHead field="invoiceDate" label="Invoice Date" />
                 <SortHead field="total" label="Total" align="right" />
                 <th style={{ ...reviewTh, textAlign: 'right' }}>Lines</th>
@@ -660,6 +677,11 @@ function InvoiceReviewTab() {
                           )}
                         </span>
                       </td>
+                      <td style={{ ...reviewTd, maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {inv.sidemark === 'Multiple'
+                          ? <span style={{ fontStyle: 'italic', color: theme.colors.textMuted }}>Multiple</span>
+                          : (inv.sidemark || '—')}
+                      </td>
                       <td style={reviewTd}>{fmt(inv.invoiceDate) || '—'}</td>
                       <td style={{ ...reviewTd, textAlign: 'right', fontWeight: 600 }}>${inv.total.toFixed(2)}</td>
                       <td style={{ ...reviewTd, textAlign: 'right', color: theme.colors.textSecondary }}>{inv.lineCount}</td>
@@ -695,7 +717,7 @@ function InvoiceReviewTab() {
                     </tr>
                     {isOpen && (
                       <tr>
-                        <td colSpan={8} style={{ padding: 0, background: '#F8FAFC' }}>
+                        <td colSpan={9} style={{ padding: 0, background: '#F8FAFC' }}>
                           <InvoiceReviewLineItems lines={inv.lines} clientSheetId={inv.clientSheetId} />
                         </td>
                       </tr>
@@ -729,6 +751,7 @@ function InvoiceReviewLineItems({ lines, clientSheetId }: { lines: InvoiceReview
             <th style={subTh}>Service</th>
             <th style={subTh}>Item</th>
             <th style={subTh}>Description</th>
+            <th style={subTh}>Sidemark</th>
             <th style={{ ...subTh, textAlign: 'right' }}>Qty</th>
             <th style={{ ...subTh, textAlign: 'right' }}>Rate</th>
             <th style={{ ...subTh, textAlign: 'right' }}>Total</th>
@@ -748,6 +771,9 @@ function InvoiceReviewLineItems({ lines, clientSheetId }: { lines: InvoiceReview
               </td>
               <td style={{ ...subTd, maxWidth: 260, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 {ln.description || ''}
+              </td>
+              <td style={{ ...subTd, maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {ln.sidemark || '—'}
               </td>
               <td style={{ ...subTd, textAlign: 'right' }}>{ln.qty || ''}</td>
               <td style={{ ...subTd, textAlign: 'right' }}>{ln.rate ? `$${ln.rate.toFixed(2)}` : ''}</td>
