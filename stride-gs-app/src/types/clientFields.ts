@@ -53,6 +53,11 @@ export const CLIENT_FIELDS = {
 
   // ─── Integrations ────────────────────────────────────────────────────────
   qbCustomerName:         { cbHeader: 'QB_CUSTOMER_NAME',     supabaseColumn: 'qb_customer_name', type: 'string' },
+  /** Manual override for the Stax-side customer name when it differs from the
+   *  QB / Stride name (e.g. "Brian Paquette Interiors" in Stride vs "Brian
+   *  Paquette Interiors - active" in Stax). When set, the Stax push path uses
+   *  this for customer lookup so it doesn't create a duplicate Stax customer. */
+  staxCustomerName:       { cbHeader: 'Stax Customer Name',   supabaseColumn: 'stax_customer_name', type: 'string' },
   staxCustomerId:         { cbHeader: 'Stax Customer ID',     supabaseColumn: 'stax_customer_id', type: 'string' },
 
   // ─── Billing settings (also propagated to client's own Settings tab) ─────

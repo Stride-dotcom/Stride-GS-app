@@ -2510,6 +2510,7 @@ interface SupabaseClientRow {
   auto_charge: boolean | null;
   web_app_url: string | null;
   qb_customer_name: string | null;
+  stax_customer_name: string | null;
   stax_customer_id: string | null;
   parent_client: string | null;
   notes: string | null;
@@ -2547,6 +2548,7 @@ export async function fetchClientsFromSupabase(
       autoCharge: row.auto_charge ?? false,
       webAppUrl: row.web_app_url ?? '',
       qbCustomerName: row.qb_customer_name ?? '',
+      staxCustomerName: row.stax_customer_name ?? '',
       staxCustomerId: row.stax_customer_id ?? '',
       parentClient: row.parent_client ?? '',
       notes: row.notes ?? '',

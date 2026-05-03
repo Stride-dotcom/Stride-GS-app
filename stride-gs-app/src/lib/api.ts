@@ -206,6 +206,10 @@ export interface ApiClient {
   autoCharge: boolean;
   webAppUrl: string;
   qbCustomerName: string;
+  /** v38.151.0 — manual override when Stax's customer name differs from
+   *  the QB / Stride name. Used by the Stax push lookup so we don't create
+   *  duplicate Stax customers when the names diverge. */
+  staxCustomerName?: string;
   staxCustomerId: string;
   parentClient: string;
   notes: string;
@@ -2506,6 +2510,7 @@ export interface OnboardClientPayload {
   contactName?: string;
   phone?: string;
   qbCustomerName?: string;
+  staxCustomerName?: string;
   staxCustomerId?: string;
   paymentTerms?: string;
   freeStorageDays?: number;
@@ -2657,6 +2662,7 @@ export interface UpdateClientPayload {
   contactName?: string;
   phone?: string;
   qbCustomerName?: string;
+  staxCustomerName?: string;
   staxCustomerId?: string;
   paymentTerms?: string;
   freeStorageDays?: number;

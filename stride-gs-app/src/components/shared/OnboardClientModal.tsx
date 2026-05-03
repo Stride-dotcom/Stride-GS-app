@@ -21,6 +21,7 @@ export interface OnboardClientFormData {
   phone: string;
   // Billing
   qbCustomerName: string;
+  staxCustomerName: string;
   staxCustomerId: string;
   paymentTerms: string;
   freeStorageDays: string;
@@ -123,7 +124,7 @@ function buildInitialData(existing: ApiClient | null): OnboardClientFormData {
   if (!existing) {
     return {
       clientName: '', clientEmail: '', contactName: '', phone: '',
-      qbCustomerName: '', staxCustomerId: '', paymentTerms: 'Net 30',
+      qbCustomerName: '', staxCustomerName: '', staxCustomerId: '', paymentTerms: 'Net 30',
       freeStorageDays: '0', discountStoragePct: '0', discountServicesPct: '0',
       enableReceivingBilling: true, enableShipmentEmail: true,
       enableNotifications: true, autoInspection: true, separateBySidemark: false, autoCharge: false,
@@ -138,6 +139,7 @@ function buildInitialData(existing: ApiClient | null): OnboardClientFormData {
     contactName: existing.contactName || '',
     phone: existing.phone || '',
     qbCustomerName: existing.qbCustomerName || '',
+    staxCustomerName: existing.staxCustomerName || '',
     staxCustomerId: existing.staxCustomerId || '',
     paymentTerms: existing.paymentTerms || 'Net 30',
     freeStorageDays: String(existing.freeStorageDays ?? 0),
@@ -401,6 +403,14 @@ export function OnboardClientModal({ mode = 'create', existingClient = null, all
                 </label>
                 <input value={data.qbCustomerName} onChange={e => set('qbCustomerName', e.target.value)}
                   placeholder="Must match QB exactly" style={inp} />
+              </div>
+              <div>
+                <label style={lbl}>
+                  <span>Stax Customer Name</span>
+                  <InfoTooltip text="Optional override for when the Stax-side customer name is different from the QuickBooks name (e.g. 'Brian Paquette Interiors' in QB vs 'Brian Paquette Interiors - active' in Stax). Leave blank to default to the QuickBooks name. When set, the Stax push uses this to look up the existing customer instead of creating a duplicate." />
+                </label>
+                <input value={data.staxCustomerName} onChange={e => set('staxCustomerName', e.target.value)}
+                  placeholder="Defaults to QB name" style={inp} />
               </div>
               <div>
                 <label style={lbl}>

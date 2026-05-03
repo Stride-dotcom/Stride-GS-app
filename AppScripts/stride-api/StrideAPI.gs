@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.150.0 — 2026-05-03 PST — Stax `meta.reference` is now the bare invoice number. createStaxInvoices was building refKey as the composite "QB#<docnum>|<name>|<total>|<date>" and Stax's customer-portal UI was displaying that composite as the invoice number on the customer payment page (e.g. INV-000100 showed as "QB#INV-000100|brian paquette interiors - active|840|2026-05-03"). Invoice numbers are already unique by definition so the composite added zero dedup value over docNum alone. Now refKey = String(docNum).trim() — clean. Back-compat: handleLinkStaxInvoiceToExisting_ already matches three forms (meta.invoiceNumber === qbNo, meta.reference starts with "QB#<qbNo>|" for historical pushes, OR meta.reference === qbNo) so already-pushed composite-refKey invoices in Stax keep linking; new pushes use the clean bare number. stax_invoiceKey_ (the SHEET-side dedup used by IIF import + auto-charge) is unchanged — that's a different code path that prevents duplicate sheet rows and benefits from the multi-field uniqueness check.
+   StrideAPI.gs — v38.151.0 — 2026-05-03 PST — `Stax Customer Name` override on the client record + lookup wiring. New CLIENT_FIELDS_ entry `staxCustomerName` (CB Clients column "Stax Customer Name", Supabase column `clients.stax_customer_name`) lets staff pin the Stax-side customer name when it diverges from the QB name (e.g. "Brian Paquette Interiors" in QB / Stride vs "Brian Paquette Interiors - active" in Stax). Two lookup-path changes use it: (1) the Stax Customers tab now indexes staxCustMap by BOTH the QB name (col A) AND the Stax-side display name (col C) — same staxId either way — so the lookup at line ~20625 succeeds even when the invoice line carries the divergent name. (2) The createStaxInvoices auto-import threads `clientInfo.staxCustomerName` from CB Clients onto the per-row lookup chain (preferring it over qbName when set). Net effect: when the user sets `Stax Customer Name` on a client, the Stax push reuses the existing customer instead of creating a duplicate. Migration `clients_stax_customer_name_alias` adds the column.
+   v38.150.0 — 2026-05-03 PST — Stax `meta.reference` is now the bare invoice number. createStaxInvoices was building refKey as the composite "QB#<docnum>|<name>|<total>|<date>" and Stax's customer-portal UI was displaying that composite as the invoice number on the customer payment page (e.g. INV-000100 showed as "QB#INV-000100|brian paquette interiors - active|840|2026-05-03"). Invoice numbers are already unique by definition so the composite added zero dedup value over docNum alone. Now refKey = String(docNum).trim() — clean. Back-compat: handleLinkStaxInvoiceToExisting_ already matches three forms (meta.invoiceNumber === qbNo, meta.reference starts with "QB#<qbNo>|" for historical pushes, OR meta.reference === qbNo) so already-pushed composite-refKey invoices in Stax keep linking; new pushes use the clean bare number. stax_invoiceKey_ (the SHEET-side dedup used by IIF import + auto-charge) is unchanged — that's a different code path that prevents duplicate sheet rows and benefits from the multi-field uniqueness check.
    v38.149.0 — 2026-05-03 PST — Autocomplete migrated to Supabase. handleGetAutocomplete_ now reads public.autocomplete_db first; on a miss it falls back to the per-client Autocomplete_DB sheet AND fire-and-forgets a batch upsert to Supabase so the next React fetch hits the fast path. New runAutocompleteBackfill() admin function — walks every active client in CB Clients, opens the spreadsheet, and pushes existing Autocomplete_DB rows to Supabase. Run once after deploy. Idempotent (PK is tenant_id,field,value). New table: public.autocomplete_db (migration 20260503000000_autocomplete_db.sql) — staff/admin SELECT all, client SELECT own tenant, service role full. supabaseUpsert_ conflict map adds autocomplete_db -> tenant_id,field,value.
    v38.148.0 — 2026-05-03 PST — Billing Total now manually editable. `handleUpdateBillingRow_` accepts an optional `payload.total` and, when provided, writes that value verbatim to the Total column instead of recomputing Rate × Qty. Lets staff hand-adjust a single invoice line for special-case pricing without having to back-solve a fake rate or qty (which other reports depend on staying canonical). Rate/Qty edits keep their existing recompute behavior — the override only kicks in when `total` is in the payload. React side adds an inline-editable Total cell on the Billing Report (Unbilled rows only) wired through the new field.
    v38.147.0 — 2026-05-03 PST — QBO push respects per-client `Separate By Sidemark` flag. `qbo_resolveCustomerAndSubJob_` was unconditionally splitting into a parent:sub-job pair whenever a sidemark existed on the invoice, even when the client's `separate_by_sidemark` flag was false — diverging from the IIF export path which gates on the same flag at line ~20841. Symptom: INV-000130 for Modern Design Sofa landed in QBO as "Modern Design Sofa:Reiner" even though that client's flag is off. Fix: thread `separateBySidemark` from `clientInfoMap` onto the per-invoice group during build, pass it into `qbo_resolveCustomerAndSubJob_`, and treat the sidemark as empty when the flag is false. Default-true on the new param keeps historical behavior for any caller that doesn't yet pass it.
@@ -20361,12 +20362,18 @@ function handleQbExport_(payload) {
     var clTermsIdx = clHdr["PAYMENT TERMS"];
     var clQbIdx = clHdr["QB_CUSTOMER_NAME"];
     var clSepIdx = clHdr["SEPARATE BY SIDEMARK"];
+    var clStaxNameIdx = clHdr["STAX CUSTOMER NAME"];
     for (var cli = 1; cli < clData.length; cli++) {
       var clName = String(clData[cli][clNameIdx] || "").trim();
       if (!clName) continue;
       clientInfoMap[clName.toUpperCase()] = {
         terms: clTermsIdx !== undefined ? String(clData[cli][clTermsIdx] || "").trim() : "",
         qbCustomerName: clQbIdx !== undefined ? String(clData[cli][clQbIdx] || "").trim() : "",
+        // v38.151.0 — explicit Stax-side customer name override. Used to
+        // disambiguate when QB and Stax store the customer under different
+        // names (e.g. "Brian Paquette Interiors" vs "Brian Paquette
+        // Interiors - active"). Empty = fall back to qbCustomerName.
+        staxCustomerName: clStaxNameIdx !== undefined ? String(clData[cli][clStaxNameIdx] || "").trim() : "",
         separateBySidemark: clSepIdx !== undefined ? (clData[cli][clSepIdx] === true || String(clData[cli][clSepIdx]).toUpperCase() === "TRUE") : false
       };
     }
@@ -20564,7 +20571,17 @@ function handleQbExport_(payload) {
       // Customers tab columns (per StaxAutoPay.gs schema):
       //   A=QB Customer Name, B=Stax Company, C=Stax Customer Name,
       //   D=Stax Customer ID, E=Email, F=Payment Method, G=Notes
-      var staxCustMap = {};       // normalized QB name → { staxId, staxName }
+      // v38.151.0 — Index staxCustMap by BOTH the QB name (col A) AND the
+      // Stax-side display name (col C). When the two diverge (e.g. "Brian
+      // Paquette Interiors" in QB vs "Brian Paquette Interiors - active"
+      // in Stax), the lookup at line ~20625 used to miss whenever the
+      // invoice line carried the Stax-side name and the IIF carried the
+      // QB name — creating a duplicate Stax customer + invoice. Indexing
+      // both names → same record means lookup succeeds either way. Also
+      // accepts an explicit `Stax Customer Name` override from CB Clients
+      // (threaded through clientInfo below) for clients whose Stax record
+      // doesn't have col C populated yet.
+      var staxCustMap = {};       // normalized name (QB or Stax) → { staxId, staxName }
       var staxCustSheet = staxSS.getSheetByName("Customers");
       if (staxCustSheet) {
         var staxCustData = staxCustSheet.getDataRange().getValues();
@@ -20572,12 +20589,10 @@ function handleQbExport_(payload) {
           var scName    = String(staxCustData[sc][0] || "").trim(); // QB name
           var scStaxNm  = String(staxCustData[sc][2] || "").trim(); // Stax name
           var scStaxId  = String(staxCustData[sc][3] || "").trim();
-          if (scName && scStaxId) {
-            staxCustMap[stax_normalizeName_(scName)] = {
-              staxId:   scStaxId,
-              staxName: scStaxNm  // may be empty — caller falls back to QB name
-            };
-          }
+          if (!scStaxId) continue;
+          var entry = { staxId: scStaxId, staxName: scStaxNm };
+          if (scName)   staxCustMap[stax_normalizeName_(scName)]   = entry;
+          if (scStaxNm) staxCustMap[stax_normalizeName_(scStaxNm)] = entry;
         }
       }
 
@@ -20622,9 +20637,19 @@ function handleQbExport_(payload) {
         // their QB customer name), use that for the Stax Invoices sheet.
         // Falls back to the QB name if the Stax Customers tab doesn't
         // have a separate name column populated.
-        var sStaxLookup = staxCustMap[stax_normalizeName_(sInv.qbName)] || {};
+        // v38.151.0 — also prefer the explicit `staxCustomerName` from
+        // CB Clients when set, so when Stax stores the customer under a
+        // slightly different name (e.g. "Brian Paquette Interiors -
+        // active") the user can pin the lookup name on the client record
+        // and we'll find / reuse the existing Stax customer instead of
+        // creating a duplicate.
+        var sClientInfo = clientInfoMap[String(sInv.qbName || "").toUpperCase()] || {};
+        var sLookupName = sClientInfo.staxCustomerName || sInv.qbName;
+        var sStaxLookup = staxCustMap[stax_normalizeName_(sLookupName)]
+                       || staxCustMap[stax_normalizeName_(sInv.qbName)]
+                       || {};
         var sStaxCustId = sStaxLookup.staxId || "";
-        var sCustomerForStax = sStaxLookup.staxName || sInv.qbName;
+        var sCustomerForStax = sStaxLookup.staxName || sClientInfo.staxCustomerName || sInv.qbName;
 
         var sLineJson = "";
         try { sLineJson = JSON.stringify(sLineItems); } catch (_) { sLineJson = "[]"; }
@@ -20748,12 +20773,18 @@ function handleQbExcelExport_(payload) {
     var clTermsIdx = clHdr["PAYMENT TERMS"];
     var clQbIdx = clHdr["QB_CUSTOMER_NAME"];
     var clSepIdx = clHdr["SEPARATE BY SIDEMARK"];
+    var clStaxNameIdx = clHdr["STAX CUSTOMER NAME"];
     for (var cli = 1; cli < clData.length; cli++) {
       var clName = String(clData[cli][clNameIdx] || "").trim();
       if (!clName) continue;
       clientInfoMap[clName.toUpperCase()] = {
         terms: clTermsIdx !== undefined ? String(clData[cli][clTermsIdx] || "").trim() : "",
         qbCustomerName: clQbIdx !== undefined ? String(clData[cli][clQbIdx] || "").trim() : "",
+        // v38.151.0 — explicit Stax-side customer name override. Used to
+        // disambiguate when QB and Stax store the customer under different
+        // names (e.g. "Brian Paquette Interiors" vs "Brian Paquette
+        // Interiors - active"). Empty = fall back to qbCustomerName.
+        staxCustomerName: clStaxNameIdx !== undefined ? String(clData[cli][clStaxNameIdx] || "").trim() : "",
         separateBySidemark: clSepIdx !== undefined ? (clData[cli][clSepIdx] === true || String(clData[cli][clSepIdx]).toUpperCase() === "TRUE") : false
       };
     }
@@ -23666,6 +23697,7 @@ var CLIENT_FIELDS_ = {
   phone:                  { cbHeader: "Phone",                supabaseColumn: "phone",            type: "string" },
   // Integrations
   qbCustomerName:         { cbHeader: "QB_CUSTOMER_NAME",     supabaseColumn: "qb_customer_name", type: "string" },
+  staxCustomerName:       { cbHeader: "Stax Customer Name",   supabaseColumn: "stax_customer_name", type: "string" },
   staxCustomerId:         { cbHeader: "Stax Customer ID",     supabaseColumn: "stax_customer_id", type: "string" },
   // Billing settings
   paymentTerms:           { cbHeader: "Payment Terms",        clientSettingsKey: "PAYMENT_TERMS",         supabaseColumn: "payment_terms",         type: "string", defaultValue: "Net 30" },
@@ -30896,13 +30928,17 @@ function handleSyncStaxCustomers_() {
   // Invalidate Stax customers cache
   try { CacheService.getScriptCache().remove("stax_customers"); } catch (e) {}
 
-  // v38.133.0 — sheet columns D (Stax ID) + F (Payment Method) just got
-  // updated; mirror the whole Customers tab so the Payments app's
-  // verification states match.
-  if (colDChanged || colFChanged) {
-    try { api_sbResyncAllStaxCustomers_(); }
-    catch (sbErr) { Logger.log("handleSyncStaxCustomers_ Supabase mirror error (non-fatal): " + sbErr); }
-  }
+  // v38.151.0 — Mirror the whole Customers tab to Supabase on every sync,
+  // not just when col D / col F changed. Dropping the gate means the
+  // Payments page (which reads stax_customers from Supabase) stays in
+  // step with the sheet even when the sync only touched email / pay
+  // method / ID-by-name discovery — i.e. Justin's symptom of "customers
+  // tab always has to load" because the Supabase mirror was 2+ weeks
+  // stale (5 rows when the sheet had many more) is fixed for good.
+  // api_sbResyncAllStaxCustomers_ is idempotent; an upsert on every sync
+  // is cheap.
+  try { api_sbResyncAllStaxCustomers_(); }
+  catch (sbErr) { Logger.log("handleSyncStaxCustomers_ Supabase mirror error (non-fatal): " + sbErr); }
 
   return jsonResponse_({
     verified: stats.verified,
