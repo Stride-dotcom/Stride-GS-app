@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.157.0 — 2026-05-03 PST — Hardened handleCreateInvoice_ against the half-write state that stuck Justin's NIPTUCK INV-000131 commit in Unbilled limbo. Four defenses + a recovery: (1) The markInvoiced step is no longer try/catch'd into a non-fatal warning. On any throw OR partial flip (some ledger row IDs didn't match a row on the client sheet), the Consolidated_Ledger insert is rolled back via deleteRows and an error response is returned (LEDGER_FLIP_FAILED / LEDGER_PARTIAL_FLIP). The Master RPC counter has already advanced, so a clean retry just gets the next invoice number. (2) Pre-write race detection: after grabbing invNo from the Master RPC, scan Consolidated_Ledger for the same number under a different (client, sidemark) tuple. If found, abort with INVOICE_NO_COLLISION before any writes — root-causes the Master `getNextInvoiceId` counter not being atomic across concurrent commits. (3) Idempotency-check hardening: the "all ledger rows already in Consolidated_Ledger" early-return now ALSO verifies the client Billing_Ledger has those rows flipped to Invoiced before declaring success. If only some are flipped (the half-write state we kept silently re-hitting), return HALF_WRITE_DETECTED with a clear repair instruction instead of "looks fine, alreadyProcessed=true". (4) New helpers `api_verifyClientLedgerFlipped_` and `api_isInvoiceNoSafe_` back the above checks. New admin entry `runRepairOrphanLedgerRows` reads a Script Property `REPAIR_ORPHAN_LEDGER_IDS` (comma-separated) and removes matching rows from Consolidated_Ledger so a stuck state can be cleaned up — idempotent, logs every removed row's invoice #, client, sidemark for audit. Run this once on the 18 NIPTUCK rows; future stuck states will be rare (idempotency check now refuses to mask them) but the function is general-purpose for any similar incident.
+   StrideAPI.gs — v38.158.0 — 2026-05-03 PST — QBO BillEmail inheritance falls back to CB Clients when the parent QBO customer record has no PrimaryEmailAddr. v38.156.0 added the QBO-side parent lookup but Justin's INV-000135 push still landed in QBO with an empty bill-to email — diagnosed: the parent QBO customer record didn't have a PrimaryEmailAddr set, so the fetch returned `billEmail: ""` and the per-field conditional skipped writing anything. CB Clients HAS the email (it's the same field staff use to send the Stride-side invoice), so add it as a fallback layer. handleQboCreateInvoice_'s clientInfoMap now also pulls Email + Phone from CB Clients; the per-invoice contact resolution prefers QBO parent's email, falls back to CB Clients email when QBO is empty. CB Clients email is often comma-separated (e.g. nip tuck has three recipients) — Invoice.BillEmail.Address validates as a single address on the QBO API, so we take the first email from the list. Operators can still CC additional recipients from the QBO Send dialog or set a comma-separated list on the parent QBO customer (which QBO accepts via its own UI flow). billAddr / shipAddr have no CB Clients equivalent so they only come from QBO. The "no contact info inherited" warning now distinguishes between "QBO parent had nothing AND CB Clients had nothing" (the only case it should fire now). Same fallback also covers the case where the Stax Customers tab never got the parent QBO ID populated (cachedParentQboId empty → parentCustomerId null → no QBO fetch at all) — CB Clients email lands on the invoice anyway.
+   v38.157.0 — 2026-05-03 PST — Hardened handleCreateInvoice_ against the half-write state that stuck Justin's NIPTUCK INV-000131 commit in Unbilled limbo. Four defenses + a recovery: (1) The markInvoiced step is no longer try/catch'd into a non-fatal warning. On any throw OR partial flip (some ledger row IDs didn't match a row on the client sheet), the Consolidated_Ledger insert is rolled back via deleteRows and an error response is returned (LEDGER_FLIP_FAILED / LEDGER_PARTIAL_FLIP). The Master RPC counter has already advanced, so a clean retry just gets the next invoice number. (2) Pre-write race detection: after grabbing invNo from the Master RPC, scan Consolidated_Ledger for the same number under a different (client, sidemark) tuple. If found, abort with INVOICE_NO_COLLISION before any writes — root-causes the Master `getNextInvoiceId` counter not being atomic across concurrent commits. (3) Idempotency-check hardening: the "all ledger rows already in Consolidated_Ledger" early-return now ALSO verifies the client Billing_Ledger has those rows flipped to Invoiced before declaring success. If only some are flipped (the half-write state we kept silently re-hitting), return HALF_WRITE_DETECTED with a clear repair instruction instead of "looks fine, alreadyProcessed=true". (4) New helpers `api_verifyClientLedgerFlipped_` and `api_isInvoiceNoSafe_` back the above checks. New admin entry `runRepairOrphanLedgerRows` reads a Script Property `REPAIR_ORPHAN_LEDGER_IDS` (comma-separated) and removes matching rows from Consolidated_Ledger so a stuck state can be cleaned up — idempotent, logs every removed row's invoice #, client, sidemark for audit. Run this once on the 18 NIPTUCK rows; future stuck states will be rare (idempotency check now refuses to mask them) but the function is general-purpose for any similar incident.
    v38.156.0 — 2026-05-03 PST — QBO sub-customer invoices now inherit BillEmail / BillAddr / ShipAddr from the parent customer record. QBO does NOT auto-inherit contact info on sub-customer invoices — every Customer:Sidemark push was landing in QBO with empty bill-to fields, so the QBO-side "Send invoice" action had nowhere to email it (Justin reported this). The QBO API's IsProject flag is read-only — we can't switch from sub-customers to Projects to fix it that way — so we explicitly inherit at push time instead. New helper qbo_getCustomerContactInfo_ fetches PrimaryEmailAddr / BillAddr / ShipAddr / PrimaryPhone via GET /customer/{id}; qbo_resolveCustomerAndSubJob_ now also returns parentCustomerId so the caller can do that lookup. handleQboPush_ holds a per-batch parentContactCache so a 50-line invoice with 4 sidemarks does 4 parent lookups, not 50; same-client follow-up invoices in the same batch are already warm. Inheritance is conditional per field — empty parent values don't write empty objects (which QBO interprets as a clear-the-field action). Parent customers (no sidemark, or separate_by_sidemark=false) are unchanged — they hit QBO with CustomerRef pointing at the parent, which already pulls contact info correctly.
    v38.155.0 — 2026-05-03 PST — Drop the misleading "PDF generation skipped (operator choice)" warning that handleCreateInvoice_ unconditionally appended whenever skipPdf=true. The operator-facing Generate PDF checkbox was removed in PR #210; skipPdf is now React-controlled (true unless the operator opts into the email-attachment path), and the React side immediately generates the canonical PDF via jsPDF + Supabase Storage and PATCHes billing.invoice_url to the signed URL. So a PDF *is* being created on every commit — surfacing a "skipped" warning misled Justin into thinking invoices were missing PDFs. The warning push at handleCreateInvoice_ ~line 21937 is removed; the empty `warnings` array stays so the response shape doesn't drift for existing consumers.
    v38.154.0 — 2026-05-03 PST — Reference now joins Sidemark / Vendor / Description as an autocomplete-DB field. handleGetAutocomplete_ returns a `references` array on both code paths (Supabase first, sheet fallback). The companion Postgres migration relaxes the autocomplete_db CHECK to allow 'Reference', backfills 440 distinct references / 26 tenants from inventory + billing, and installs INSERT/UPDATE triggers on public.inventory + public.billing that auto-populate autocomplete_db whenever sidemark / vendor / description / reference values are written — eliminating the periodic-backfill cycle that surfaced Justin's "missing sidemarks" report earlier today. React side: useAutocomplete + InlineEditableCell + Inventory.tsx Reference column + ItemDetailPanel Reference field all switch from plain text to autocomplete-db variant.
@@ -36861,12 +36862,18 @@ function handleQboCreateInvoice_(payload) {
     var clNameIdx = clHdr["CLIENT NAME"];
     var clTermsIdx = clHdr["PAYMENT TERMS"];
     var clQbIdx = clHdr["QB_CUSTOMER_NAME"];
+    // v38.158.0 — also pull email + phone for the QBO BillEmail fallback
+    // (when the QBO parent customer record has no PrimaryEmailAddr set).
+    var clEmailIdx = clHdr["EMAIL"];
+    var clPhoneIdx = clHdr["PHONE"];
     for (var cli = 1; cli < clData.length; cli++) {
       var clName = String(clData[cli][clNameIdx] || "").trim();
       if (!clName) continue;
       clientInfoMap[clName.toUpperCase()] = {
         terms: clTermsIdx !== undefined ? String(clData[cli][clTermsIdx] || "").trim() : "",
-        qbCustomerName: clQbIdx !== undefined ? String(clData[cli][clQbIdx] || "").trim() : ""
+        qbCustomerName: clQbIdx !== undefined ? String(clData[cli][clQbIdx] || "").trim() : "",
+        email: clEmailIdx !== undefined ? String(clData[cli][clEmailIdx] || "").trim() : "",
+        phone: clPhoneIdx !== undefined ? String(clData[cli][clPhoneIdx] || "").trim() : ""
       };
     }
   }
@@ -37076,21 +37083,51 @@ function handleQboCreateInvoice_(payload) {
 
       // v38.156.0 — When this is a sub-customer push, fetch the parent's
       // BillEmail / BillAddr / ShipAddr so we can stamp them on the
-      // invoice payload. QBO doesn't auto-inherit on sub-customers, so
-      // the invoice would otherwise land with empty bill-to fields and
-      // QBO's "Send invoice" action would have nowhere to email it.
+      // invoice payload. QBO doesn't auto-inherit on sub-customers.
+      //
+      // v38.158.0 — Justin pushed INV-000135 to QBO and the Send dialog
+      // still showed an empty "To" field. Diagnosed: the parent QBO
+      // customer record didn't have a PrimaryEmailAddr set, so the
+      // QBO-only fetch returned empty billEmail and the per-field
+      // conditional skipped writing it. Stride's own CB Clients record
+      // already has the right email (it's the same address staff use to
+      // send the Stride-side invoice), so add it as a fallback. Also
+      // covers the case where the Stax Customers tab never got the
+      // parent QBO ID populated (cachedParentQboId empty → parentCustomerId
+      // null → no QBO fetch at all). billAddr / shipAddr have no CB Clients
+      // equivalent so they only come from QBO.
       var parentContact = null;
+      var qboParentContact = null;
       if (!custResult.isParent && custResult.parentCustomerId) {
-        parentContact = qbo_getCustomerContactInfo_(
+        qboParentContact = qbo_getCustomerContactInfo_(
           custResult.parentCustomerId, token, realmId, parentContactCache
         );
-        // Surface a per-invoice warning when the lookup failed — this whole
-        // change exists to fix a silent-failure bug, so we shouldn't
-        // re-introduce one. The push still proceeds (the invoice itself is
-        // created); operator just needs to know QBO will have empty bill-to.
+      }
+      if (!custResult.isParent) {
+        var cbInfoForGroup = clientInfoMap[String(group.clientName || "").toUpperCase()] || {};
+        // CB Clients email is often comma-separated (e.g. three recipients
+        // for nip tuck). QBO's Invoice.BillEmail.Address validates as a
+        // single address — pick the first one. QBO operators can send to
+        // additional CCs from the Send dialog, or set a comma-separated
+        // list on the parent QBO customer record (which QBO then accepts
+        // via its own UI flow even though the API would reject it here).
+        var cbEmail = String(cbInfoForGroup.email || "").split(",")[0].trim();
+        var cbPhone = String(cbInfoForGroup.phone || "").trim();
+        var resolvedEmail = (qboParentContact && qboParentContact.billEmail) || cbEmail;
+        var resolvedPhone = (qboParentContact && qboParentContact.billPhone) || cbPhone;
+        if (resolvedEmail || (qboParentContact && (qboParentContact.billAddr || qboParentContact.shipAddr))) {
+          parentContact = {
+            billEmail: resolvedEmail,
+            billAddr:  qboParentContact ? qboParentContact.billAddr : null,
+            shipAddr:  qboParentContact ? qboParentContact.shipAddr : null,
+            billPhone: resolvedPhone
+          };
+        }
+        // Warn only when we have NOTHING to inherit — neither QBO parent
+        // nor CB Clients had usable data. Push proceeds either way.
         if (!parentContact) {
-          resultEntry.warning = "Pushed without parent bill-to inherited (parent contact lookup failed for QBO customer " +
-                                custResult.parentCustomerId + "). The QBO invoice's email/address fields will be blank.";
+          resultEntry.warning = "Pushed without parent bill-to inherited (no email on QBO parent record OR CB Clients row for " +
+                                group.clientName + "). The QBO invoice's email field will be blank — set the email on the client record or the parent QBO customer to fix.";
         }
       }
 
