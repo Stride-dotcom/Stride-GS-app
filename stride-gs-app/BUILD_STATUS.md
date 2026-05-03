@@ -1,6 +1,6 @@
 # Stride GS App — Build Status
 
-> Last updated: 2026-05-02 (session 92 — transfer-system overhaul + Invoice Review tab). Verified against actual codebase.
+> Last updated: 2026-05-03 (session 93+ — Stax architectural cleanup). Verified against actual codebase.
 
 ---
 
@@ -9,7 +9,7 @@
 | System | Version | Notes |
 |---|---|---|
 | React app (GitHub Pages) | Latest on `origin/main` | `npm run deploy` from source |
-| StrideAPI.gs | **v38.145.0** | **Web App deployment v435** (voidInvoice action + transfer Supabase side-effects + supabasePatch_/supabaseSelect_ helpers) |
+| StrideAPI.gs | **v38.153.0** | **Web App deployment v443** (Stax Customers sheet retired; CB Clients single source of truth; dedup Stax Invoices by docNum; runStaxSheetsCleanup admin entry) |
 | Supabase | 60 migrations applied | inventory_live view + transfer_provenance columns + photos_select_tenant row-based fallback shipped this session |
 | Client scripts | Rolled out to 49 active clients | Code.gs v4.6.0, Import.gs v4.3.0 |
 | StaxAutoPay.gs | v4.6.0 | Supabase write-through wired |
@@ -94,6 +94,30 @@ UI components: FloatingActionMenu, WriteButton, BatchGuard, ActionTooltip, Batch
 - Quote Tool with PDF generation
 - Expected operations calendar
 - QR Scanner + Labels (native React, Supabase-backed)
+
+---
+
+## Recent Changes (2026-05-03, session 93 — Stax payments architectural cleanup)
+
+**Goal:** Retire the Stax Customers Google Sheet as a separate data source. The list of "Stax Customers" should be derived from CB Clients (`stax_customer_id IS NOT NULL`) — single source of truth. Fix the duplicate INV-000131 issue on Stax Invoices sheet.
+
+**Step 1 + 4 — React Customers tab refactor.** Payments → Customers tab now derives from `clients` directly via new `fetchStaxCustomersFromClients()` in `supabaseQueries.ts`. Renders the Billing Report's CreditCard + Auto Pay pill (driven by `auto_charge` + `stax_customer_id`). `Pull Customers (CB)`, `Sync With Stax`, `Sync Customers` buttons removed — no longer needed. Selected row gets explicit `orangeLight` background + `theme.colors.text` foreground so text stays readable through the slide-out's dim overlay (the prior `theme.colors.textMuted` was unreadable through the 20% black overlay). `pulling/syncing/custResult` state retired.
+
+**Step 2 — GAS lookup from CB Clients.** New `stax_buildClientStaxMap_()` helper indexes CB Clients by Client Name, QB Customer Name, AND Stax Customer Name into the same record so divergent-name invoices match. Three Stax write paths (`handleQbExport_` auto-push at line ~20570, `handleImportIIF_` at line ~30160, `stax_lookupCustomerIds_` for the Refresh Stax IDs button) now resolve via this helper. The Stax Customers sheet is no longer read on the IIF/push path. Rows that resolve to a client without a Stax Customer ID are now logged as a `NO_CUSTOMER` exception and skipped, instead of inserted as half-populated PENDING rows.
+
+**Step 3 — Dedup Stax Invoices by docNum.** Sheet-row dedup switches from the multi-field hash (`docNum|name|amount|date`) to the QB invoice number alone — fixes the duplicate INV-000131 issue Justin reported (re-import with a slightly drifted total/date built a different `stax_invoiceKey_`). Existing PENDING rows now UPDATE in place with the freshest customer / date / total / line items / Stax Customer ID; CREATED / PAID / VOIDED rows stay untouched.
+
+**Step 5 — Cleanup migration.** New admin entry `runStaxSheetsCleanup` collapses the existing duplicate clutter (idempotent). Stax Invoices: dedupes by docNum, prefers PAID > VOIDED > CHARGE_FAILED/SENT > CREATED > PENDING, then non-empty Stax Invoice ID, then most recent Created At. Stax Customers: dedupes by (QB Name + Stax Customer ID), keeps the row with the most filled-in cells. Run once from the Apps Script editor.
+
+**Files touched:**
+- `stride-gs-app/src/pages/Payments.tsx` (Customers tab + drop sync buttons)
+- `stride-gs-app/src/lib/supabaseQueries.ts` (`fetchStaxCustomersFromClients()`)
+- `AppScripts/stride-api/StrideAPI.gs` (v38.153.0)
+
+**Pending user action:**
+- [ ] Run `runStaxSheetsCleanup` once from Apps Script editor to collapse the existing INV-000131 / Wignall x2 / Digs x7 ghosts.
+
+PR: [#214](https://github.com/Stride-dotcom/Stride-GS-app/pull/214). StrideAPI.gs v38.153.0, Web App v443.
 
 ---
 
