@@ -2342,6 +2342,10 @@ export interface UpdateBillingRowPayload {
   description?: string;
   rate?: number;
   qty?: number;
+  /** v38.148.0 — manual Total override. When provided, GAS writes it verbatim
+   *  and skips the rate × qty recompute. Lets staff hand-adjust an invoice
+   *  line without touching rate/qty (which other reports depend on). */
+  total?: number;
   notes?: string;
   // v38.77.0 — only honoured by GAS when the row's ledgerRowId starts with "MANUAL-"
   svcCode?: string;

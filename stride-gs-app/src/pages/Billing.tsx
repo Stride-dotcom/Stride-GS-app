@@ -1518,6 +1518,7 @@ export function Billing() {
     else if (field === 'description') payload.description = value;
     else if (field === 'rate') payload.rate = parseFloat(value) || 0;
     else if (field === 'qty') payload.qty = parseFloat(value) || 1;
+    else if (field === 'total') payload.total = parseFloat(value) || 0;
     else if (field === 'notes') payload.notes = value;
     else return;
 
@@ -1529,6 +1530,13 @@ export function Billing() {
     } else if (field === 'qty') {
       const newQty = parseFloat(value) || 1;
       setReportData(prev => prev.map(r => r.ledgerRowId === row.ledgerRowId ? { ...r, qty: newQty, total: r.rate * newQty } : r));
+    } else if (field === 'total') {
+      // Manual override — write the typed total verbatim, leave rate/qty
+      // alone. Lets staff hand-adjust an invoice line for special-case
+      // pricing without touching the underlying rate/qty fields (which
+      // drive other reports).
+      const newTotal = parseFloat(value) || 0;
+      setReportData(prev => prev.map(r => r.ledgerRowId === row.ledgerRowId ? { ...r, total: newTotal } : r));
     } else {
       setReportData(prev => prev.map(r => r.ledgerRowId === row.ledgerRowId ? { ...r, [field]: value } : r));
     }
@@ -1643,7 +1651,15 @@ export function Billing() {
             : <span style={{ fontSize: 12, color: theme.colors.textSecondary }}>${i.getValue().toFixed(2)}</span>;
         },
       }),
-      col.accessor('total', { header: 'Total', size: 90, cell: i => <span style={{ fontSize: 12, fontWeight: 600, color: theme.colors.text }}>${i.getValue().toFixed(2)}</span> }),
+      col.accessor('total', {
+        header: 'Total', size: 90,
+        cell: i => {
+          const canEdit = isReportTab && i.row.original.status === 'Unbilled';
+          return canEdit
+            ? <EditableCell value={i.getValue()} type="number" align="right" onChange={v => saveReportField(i.row.original, 'total', v)} />
+            : <span style={{ fontSize: 12, fontWeight: 600, color: theme.colors.text }}>${i.getValue().toFixed(2)}</span>;
+        },
+      }),
       col.accessor('taskId', { header: 'Task', size: 90, cell: i => {
         const v = String(i.getValue() || '').trim();
         // Task IDs in billing rows can carry an addon suffix like

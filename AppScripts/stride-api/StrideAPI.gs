@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.147.0 — 2026-05-03 PST — QBO push respects per-client `Separate By Sidemark` flag. `qbo_resolveCustomerAndSubJob_` was unconditionally splitting into a parent:sub-job pair whenever a sidemark existed on the invoice, even when the client's `separate_by_sidemark` flag was false — diverging from the IIF export path which gates on the same flag at line ~20841. Symptom: INV-000130 for Modern Design Sofa landed in QBO as "Modern Design Sofa:Reiner" even though that client's flag is off. Fix: thread `separateBySidemark` from `clientInfoMap` onto the per-invoice group during build, pass it into `qbo_resolveCustomerAndSubJob_`, and treat the sidemark as empty when the flag is false. Default-true on the new param keeps historical behavior for any caller that doesn't yet pass it.
+   StrideAPI.gs — v38.148.0 — 2026-05-03 PST — Billing Total now manually editable. `handleUpdateBillingRow_` accepts an optional `payload.total` and, when provided, writes that value verbatim to the Total column instead of recomputing Rate × Qty. Lets staff hand-adjust a single invoice line for special-case pricing without having to back-solve a fake rate or qty (which other reports depend on staying canonical). Rate/Qty edits keep their existing recompute behavior — the override only kicks in when `total` is in the payload. React side adds an inline-editable Total cell on the Billing Report (Unbilled rows only) wired through the new field.
+   v38.147.0 — 2026-05-03 PST — QBO push respects per-client `Separate By Sidemark` flag. `qbo_resolveCustomerAndSubJob_` was unconditionally splitting into a parent:sub-job pair whenever a sidemark existed on the invoice, even when the client's `separate_by_sidemark` flag was false — diverging from the IIF export path which gates on the same flag at line ~20841. Symptom: INV-000130 for Modern Design Sofa landed in QBO as "Modern Design Sofa:Reiner" even though that client's flag is off. Fix: thread `separateBySidemark` from `clientInfoMap` onto the per-invoice group during build, pass it into `qbo_resolveCustomerAndSubJob_`, and treat the sidemark as empty when the flag is false. Default-true on the new param keeps historical behavior for any caller that doesn't yet pass it.
    v38.146.0 — 2026-05-03 PST — Invoice Date now actually lands in the sheet + Supabase. (1) `api_markClientLedgerInvoiced_` was using exact-match `hdr["Invoice Date"]` / `hdr["Invoice #"]` / `hdr["Invoice URL"]` lookups; on client templates where any of those columns was missing, the bulk write silently skipped that column. Symptom: 264 Invoiced rows in Supabase had `invoice_date = ''` because the sheet column was never populated. Switched all three to `api_ensureColumn_` (case-insensitive, appends if missing) so client sheets self-heal on first invoice creation after the fix. idxLedgerId / idxStatus stay strict — those should never be missing. (2) `sbBillingRow_` now omits `invoice_date` from the upsert payload when the source value is empty. PostgREST merge-duplicates updates only fields present in the JSON, so omitting blanks preserves any backfilled value in Supabase. Without this, the SQL backfill of historical invoice_date would get clobbered on the next fullClientSync from any client whose sheet hadn't yet gained the column. Combined: future invoices stamp the date both places; historical Supabase rows can be SQL-backfilled from `billing_activity_log.performed_at` and won't be wiped on resync.
    v38.145.0 — 2026-05-02 PST — Two new actions + transfer follow-through. (1) `voidInvoice` action: sets every Billing_Ledger row matching invoiceNo to status=Void on the source client sheet, appends a "Voided: <reason>" note, then api_fullClientSync_(.., ['billing']) propagates the change to Supabase. Backs the new Invoice Review tab's per-invoice Void button. withStaffGuard + withClientIsolation, audit row written. (2) handleTransferItems_ now stamps the destination inventory row with transferred_from_tenant_id + transferred_at via new helper api_postTransferSupabaseSideEffects_, which also migrates entity_notes (entity_type='inventory') + item_photos rows from the source tenant to the destination tenant in Supabase, and strips transferred items from any open will_calls on the source tenant (cancels the WC if its item_ids becomes empty). New Supabase helpers supabasePatch_ + supabaseSelect_ added next to supabaseUpsert_/supabaseDelete_. handleTransferItems_ response now includes `transferDate` so the wrapper can use it. The DB-side companion view `inventory_live` (excludes status='Transferred') and the photos_select_tenant RLS policy update were already shipped via Supabase migrations earlier in the session — together they fix the Access Denied symptom on transferred items + close the orphaned-aux-table failure modes Justin flagged.
    v38.144.2: Invoice URL: when skipPdf=true (now the React-side default per the matching React PR), set invoice_url to the new /#/invoices/<invNo>?client=<sheetId> React route instead of leaving it empty. The React page renders the invoice from `billing` rows on demand and supports browser print → save-as-PDF for downloadable reference — replaces the Drive Doc PDF flow that was visually unreliable (Drive auto-reformatted templates) and added 3-8s of wall time to every invoice commit. Drive PDF path (skipPdf=false) keeps its existing URL for operators who opt back in at commit time.
@@ -11604,10 +11605,16 @@ function handleUpdateBillingRow_(clientSheetId, payload) {
       }
     }
 
-    // Rate/Qty: recalculate Total = Rate × Qty
+    // Rate/Qty/Total: explicit Total override wins; otherwise recompute
+    // Total = Rate × Qty whenever rate or qty changed.
+    // v38.148.0 — payload.total now supported for hand-adjusted invoice
+    // lines (special-case pricing where staff shouldn't have to back-solve
+    // a fake rate or qty). When supplied, write Total verbatim and skip
+    // the multiplication entirely.
     var rateChanged = (payload.rate !== undefined);
     var qtyChanged = (payload.qty !== undefined);
-    if (rateChanged || qtyChanged) {
+    var totalChanged = (payload.total !== undefined);
+    if (rateChanged || qtyChanged || totalChanged) {
       var rateCol = hMap["Rate"];
       var qtyCol = hMap["Qty"];
       var totalCol = hMap["Total"];
@@ -11626,7 +11633,12 @@ function handleUpdateBillingRow_(clientSheetId, payload) {
         updated.qty = currentQty;
       }
 
-      var newTotal = Math.round(currentRate * currentQty * 100) / 100;
+      var newTotal;
+      if (totalChanged) {
+        newTotal = Math.round((Number(payload.total) || 0) * 100) / 100;
+      } else {
+        newTotal = Math.round(currentRate * currentQty * 100) / 100;
+      }
       if (totalCol) {
         sheet.getRange(matchRow, totalCol).setValue(newTotal);
         updated.total = newTotal;
