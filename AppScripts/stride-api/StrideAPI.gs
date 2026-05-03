@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.152.0 — 2026-05-03 PST — Billing inline edits actually persist now. handleUpdateBillingRow_ used hMap["X"] exact-match column lookups for every editable field (Sidemark, Reference, Description, Item Notes, Rate, Qty, Total, Svc Code/Name/Class). On Billing_Ledger templates that pre-date one of those columns, hMap[X] returned undefined and the write silently no-op'd — the React Billing Report's optimistic update would appear to take then revert on the next refetch because nothing landed in the sheet. Justin reported this for sidemark; the same bug affected every other field. Same class as the v38.146.0 Invoice Date fix. Switched all 10 column lookups to api_ensureColumn_ (case-insensitive, appends if missing) so client sheets self-heal on the first inline edit after the fix ships and the writeThrough mirror back to Supabase carries the new value.
+   StrideAPI.gs — v38.153.0 — 2026-05-03 PST — Stax Customers sheet retired; CB Clients is the single source of truth for Stax Customer ID. Three Stax write paths (handleQbExport_ auto-push, handleImportIIF_, stax_lookupCustomerIds_ → Refresh Stax IDs button) all resolve via the new stax_buildClientStaxMap_() helper, which indexes CB Clients rows by Client Name, QB Customer Name, AND Stax Customer Name into the same record so divergent-name invoices match. Sheet-row dedup on Stax Invoices switches from the multi-field hash (docNum|name|amount|date) to the QB invoice number alone — Justin reported INV-000131 landing twice when a re-import drifted on amount/date even though the docNum was identical. Existing PENDING rows now UPDATE in place with the freshest customer / date / total / line items / Stax Customer ID; CREATED / PAID / VOIDED rows are left untouched (in-flight invoices must not be clobbered by a stale re-import). Rows that resolve to a client without a Stax Customer ID are now skipped and logged as a NO_CUSTOMER exception instead of inserted as half-populated PENDING rows. New admin entry point `runStaxSheetsCleanup` dedupes the Stax Invoices sheet by QB invoice number (keeps the most-recently-resolved row per number, preferring CREATED > PENDING and any non-empty Stax Invoice ID) and the Stax Customers sheet by QB Name + Stax ID (fixes the Wignall x2 / Digs x7 ghosts Justin spotted). Reads `Stax Customer ID` from the standard CB Clients column.
+   v38.152.0 — 2026-05-03 PST — Billing inline edits actually persist now. handleUpdateBillingRow_ used hMap["X"] exact-match column lookups for every editable field (Sidemark, Reference, Description, Item Notes, Rate, Qty, Total, Svc Code/Name/Class). On Billing_Ledger templates that pre-date one of those columns, hMap[X] returned undefined and the write silently no-op'd — the React Billing Report's optimistic update would appear to take then revert on the next refetch because nothing landed in the sheet. Justin reported this for sidemark; the same bug affected every other field. Same class as the v38.146.0 Invoice Date fix. Switched all 10 column lookups to api_ensureColumn_ (case-insensitive, appends if missing) so client sheets self-heal on the first inline edit after the fix ships and the writeThrough mirror back to Supabase carries the new value.
    v38.151.0 — 2026-05-03 PST — `Stax Customer Name` override on the client record + lookup wiring. New CLIENT_FIELDS_ entry `staxCustomerName` (CB Clients column "Stax Customer Name", Supabase column `clients.stax_customer_name`) lets staff pin the Stax-side customer name when it diverges from the QB name (e.g. "Brian Paquette Interiors" in QB / Stride vs "Brian Paquette Interiors - active" in Stax). Two lookup-path changes use it: (1) the Stax Customers tab now indexes staxCustMap by BOTH the QB name (col A) AND the Stax-side display name (col C) — same staxId either way — so the lookup at line ~20625 succeeds even when the invoice line carries the divergent name. (2) The createStaxInvoices auto-import threads `clientInfo.staxCustomerName` from CB Clients onto the per-row lookup chain (preferring it over qbName when set). Net effect: when the user sets `Stax Customer Name` on a client, the Stax push reuses the existing customer instead of creating a duplicate. Migration `clients_stax_customer_name_alias` adds the column.
    v38.150.0 — 2026-05-03 PST — Stax `meta.reference` is now the bare invoice number. createStaxInvoices was building refKey as the composite "QB#<docnum>|<name>|<total>|<date>" and Stax's customer-portal UI was displaying that composite as the invoice number on the customer payment page (e.g. INV-000100 showed as "QB#INV-000100|brian paquette interiors - active|840|2026-05-03"). Invoice numbers are already unique by definition so the composite added zero dedup value over docNum alone. Now refKey = String(docNum).trim() — clean. Back-compat: handleLinkStaxInvoiceToExisting_ already matches three forms (meta.invoiceNumber === qbNo, meta.reference starts with "QB#<qbNo>|" for historical pushes, OR meta.reference === qbNo) so already-pushed composite-refKey invoices in Stax keep linking; new pushes use the clean bare number. stax_invoiceKey_ (the SHEET-side dedup used by IIF import + auto-charge) is unchanged — that's a different code path that prevents duplicate sheet rows and benefits from the multi-field uniqueness check.
    v38.149.0 — 2026-05-03 PST — Autocomplete migrated to Supabase. handleGetAutocomplete_ now reads public.autocomplete_db first; on a miss it falls back to the per-client Autocomplete_DB sheet AND fire-and-forgets a batch upsert to Supabase so the next React fetch hits the fast path. New runAutocompleteBackfill() admin function — walks every active client in CB Clients, opens the spreadsheet, and pushes existing Autocomplete_DB rows to Supabase. Run once after deploy. Idempotent (PK is tenant_id,field,value). New table: public.autocomplete_db (migration 20260503000000_autocomplete_db.sql) — staff/admin SELECT all, client SELECT own tenant, service role full. supabaseUpsert_ conflict map adds autocomplete_db -> tenant_id,field,value.
@@ -20569,60 +20570,28 @@ function handleQbExport_(payload) {
   // so they appear on the Payments Review tab immediately, no manual IIF upload needed.
   var staxImported = 0;
   var staxSkipped = 0;
+  var staxUpdated = 0;
   try {
     var staxSS = getStaxSpreadsheet_();
     var staxInvSheet = staxSS.getSheetByName("Invoices");
     if (staxInvSheet) {
-      // Build Stax Customer ID + cleaner-name map from Customers tab.
-      //
-      // v38.124.0 — also pull Stax Customer Name (column C). The QB-side
-      // name often carries a parenthetical tag like "K&M Interiors (ACH on File)"
-      // that QB users add to mark payment method. Stax stores the same
-      // customer under its real name "K&M Interiors". Writing the
-      // cleaner Stax name into the Stax Invoices sheet eliminates the
-      // downstream string-match mismatch in autopay (CB Clients
-      // doesn't carry the parenthetical either).
-      //
-      // Customers tab columns (per StaxAutoPay.gs schema):
-      //   A=QB Customer Name, B=Stax Company, C=Stax Customer Name,
-      //   D=Stax Customer ID, E=Email, F=Payment Method, G=Notes
-      // v38.151.0 — Index staxCustMap by BOTH the QB name (col A) AND the
-      // Stax-side display name (col C). When the two diverge (e.g. "Brian
-      // Paquette Interiors" in QB vs "Brian Paquette Interiors - active"
-      // in Stax), the lookup at line ~20625 used to miss whenever the
-      // invoice line carried the Stax-side name and the IIF carried the
-      // QB name — creating a duplicate Stax customer + invoice. Indexing
-      // both names → same record means lookup succeeds either way. Also
-      // accepts an explicit `Stax Customer Name` override from CB Clients
-      // (threaded through clientInfo below) for clients whose Stax record
-      // doesn't have col C populated yet.
-      var staxCustMap = {};       // normalized name (QB or Stax) → { staxId, staxName }
-      var staxCustSheet = staxSS.getSheetByName("Customers");
-      if (staxCustSheet) {
-        var staxCustData = staxCustSheet.getDataRange().getValues();
-        for (var sc = 1; sc < staxCustData.length; sc++) {
-          var scName    = String(staxCustData[sc][0] || "").trim(); // QB name
-          var scStaxNm  = String(staxCustData[sc][2] || "").trim(); // Stax name
-          var scStaxId  = String(staxCustData[sc][3] || "").trim();
-          if (!scStaxId) continue;
-          var entry = { staxId: scStaxId, staxName: scStaxNm };
-          if (scName)   staxCustMap[stax_normalizeName_(scName)]   = entry;
-          if (scStaxNm) staxCustMap[stax_normalizeName_(scStaxNm)] = entry;
-        }
-      }
+      // v38.153.0 — Stax Customers sheet retired. Stax Customer ID +
+      // canonical Stax customer name now resolve directly from CB Clients
+      // via stax_buildClientStaxMap_(). Same map is used by the IIF
+      // upload path and the Refresh Stax IDs button so all three flows
+      // share one source of truth.
+      var clientStaxMap = stax_buildClientStaxMap_();
 
-      // Build existing key set for dedup
+      // Build a sheet index keyed only by QB invoice number (no longer
+      // a multi-field hash — duplicates were slipping through whenever
+      // any field drifted between writes).
       var existingInvData = staxInvSheet.getDataRange().getValues();
-      var existingKeySet = {};
+      var existingByQbNo = {}; // docNum → 1-based row index
       for (var ei = 1; ei < existingInvData.length; ei++) {
-        var eKey = stax_invoiceKey_(
-          String(existingInvData[ei][0]), String(existingInvData[ei][1]),
-          existingInvData[ei][5], String(existingInvData[ei][3])
-        );
-        existingKeySet[eKey] = true;
+        var ek = String(existingInvData[ei][0] || "").trim();
+        if (ek && !existingByQbNo[ek]) existingByQbNo[ek] = ei + 1;
       }
 
-      // Build new rows from invoiceMap
       var staxNewRows = [];
       var nowStr = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm:ss");
       for (var si2 = 0; si2 < invoiceOrder.length; si2++) {
@@ -20641,43 +20610,69 @@ function handleQbExport_(payload) {
           });
         }
 
-        // Dedup check
-        var sKey = stax_invoiceKey_(sInvNo, sInv.qbName, sTotal, sInv.invDate);
-        if (existingKeySet[sKey]) { staxSkipped++; continue; }
-        existingKeySet[sKey] = true;
-
-        // Look up Stax Customer ID + Stax-side customer name. v38.124.0:
-        // when the Stax customer record carries a clean name (without
-        // the "(ACH on File)" parenthetical that QB users tag onto
-        // their QB customer name), use that for the Stax Invoices sheet.
-        // Falls back to the QB name if the Stax Customers tab doesn't
-        // have a separate name column populated.
-        // v38.151.0 — also prefer the explicit `staxCustomerName` from
-        // CB Clients when set, so when Stax stores the customer under a
-        // slightly different name (e.g. "Brian Paquette Interiors -
-        // active") the user can pin the lookup name on the client record
-        // and we'll find / reuse the existing Stax customer instead of
-        // creating a duplicate.
+        // Resolve Stax Customer ID + canonical Stax customer name from
+        // CB Clients. The invoice's qbName here came from
+        // clientInfo.qbCustomerName || client (Stride client name), so
+        // the map's QB-name AND client-name keys both hit.
         var sClientInfo = clientInfoMap[String(sInv.qbName || "").toUpperCase()] || {};
         var sLookupName = sClientInfo.staxCustomerName || sInv.qbName;
-        var sStaxLookup = staxCustMap[stax_normalizeName_(sLookupName)]
-                       || staxCustMap[stax_normalizeName_(sInv.qbName)]
-                       || {};
-        var sStaxCustId = sStaxLookup.staxId || "";
-        var sCustomerForStax = sStaxLookup.staxName || sClientInfo.staxCustomerName || sInv.qbName;
+        var sEntry = clientStaxMap[stax_normalizeName_(sLookupName)]
+                  || clientStaxMap[stax_normalizeName_(sInv.qbName)]
+                  || null;
+        var sStaxCustId = sEntry ? sEntry.staxCustomerId : "";
+        var sCustomerForStax = (sEntry && sEntry.staxCustomerName)
+          || sClientInfo.staxCustomerName
+          || sInv.qbName;
+
+        // Skip and log an exception when no Stax Customer ID can be
+        // resolved — pushing a row without one would just fail at
+        // /invoice and clutter the sheet with NO_CUSTOMER rows.
+        if (!sStaxCustId) {
+          try {
+            stax_appendException_(staxSS, sInvNo, sInv.qbName, "", sTotal, sInv.dueDate, "NO_CUSTOMER",
+              "No Stax Customer ID on the matching client record. Set one on CB Clients and re-export.");
+          } catch (excErr) { Logger.log("handleQbExport_ stax exception append failed (non-fatal): " + excErr.message); }
+          staxSkipped++;
+          continue;
+        }
 
         var sLineJson = "";
         try { sLineJson = JSON.stringify(sLineItems); } catch (_) { sLineJson = "[]"; }
 
+        var existingRow1 = existingByQbNo[sInvNo];
+        if (existingRow1) {
+          // UPDATE in place — only refresh if still PENDING. Don't
+          // clobber an in-flight CREATED/PAID/VOIDED row.
+          var rowVals = existingInvData[existingRow1 - 1];
+          var existingStatus = String(rowVals[8] || "").trim().toUpperCase();
+          if (existingStatus && existingStatus !== "PENDING") { staxSkipped++; continue; }
+          var updateRow = [
+            sInvNo,                                 // QB Invoice #
+            sCustomerForStax,                       // Customer
+            sStaxCustId,                            // Stax Customer ID
+            sInv.invDate,                           // Invoice Date
+            sInv.dueDate,                           // Due Date
+            sTotal,                                 // Total
+            sLineJson,                              // Line Items JSON
+            String(rowVals[7] || ""),               // Stax Invoice ID — preserve
+            "PENDING",                              // Status
+            String(rowVals[9] || nowStr),           // Created At — preserve
+            "Refreshed by QB export auto-push on " + nowStr  // Notes
+          ];
+          staxInvSheet.getRange(existingRow1, 1, 1, updateRow.length).setValues([updateRow]);
+          staxUpdated++;
+          continue;
+        }
+
         staxNewRows.push([
           sInvNo,             // QB Invoice #
-          sCustomerForStax,   // Customer Name (Stax-side; falls back to QB name)
-          sStaxCustId,        // Stax Customer ID (pre-filled!)
+          sCustomerForStax,   // Customer
+          sStaxCustId,        // Stax Customer ID (pre-filled)
           sInv.invDate,       // Invoice Date
           sInv.dueDate,       // Due Date
-          sTotal,             // Total Amount
+          sTotal,             // Total
           sLineJson,          // Line Items JSON
-          "",                 // Stax Invoice ID (empty until pushed)
+          "",                 // Stax Invoice ID
           "PENDING",          // Status
           nowStr,             // Created At
           ""                  // Notes
@@ -20702,6 +20697,7 @@ function handleQbExport_(payload) {
     fileName: fileName,
     fileUrl: file.getUrl(),
     staxImported: staxImported,
+    staxUpdated: staxUpdated,
     staxSkipped: staxSkipped
   });
 }
@@ -29986,11 +29982,69 @@ function stax_normalizeDate_(d) {
 }
 
 /**
+ * v38.153.0 — Build a normalized-name → { staxCustomerId, staxCustomerName,
+ * clientName } map from CB Clients. Single source of truth for the Stax
+ * customer ID lookup used by every Stax write path (IIF import, QB-export
+ * auto-push, Refresh Stax IDs). Replaces the legacy Stax Customers sheet,
+ * which drifted from CB Clients.
+ *
+ * Both the QB customer name (col Client Name) AND the Stax-side display
+ * name (col Stax Customer Name) index into the same record so lookups
+ * succeed when an IIF carries the divergent name (e.g. "Brian Paquette
+ * Interiors" in QB / Stride vs "Brian Paquette Interiors - active" in
+ * Stax). Returns {} on any error so callers degrade to "no Stax ID
+ * available" rather than throwing.
+ */
+function stax_buildClientStaxMap_() {
+  var out = {};
+  try {
+    var cbId = prop_("CB_SPREADSHEET_ID");
+    if (!cbId) return out;
+    var cbSS = SpreadsheetApp.openById(cbId);
+    var clientsSh = cbSS.getSheetByName("Clients");
+    if (!clientsSh || clientsSh.getLastRow() < 2) return out;
+    var data = clientsSh.getDataRange().getValues();
+    var hdr = {};
+    for (var h = 0; h < data[0].length; h++) {
+      hdr[String(data[0][h] || "").trim().toUpperCase()] = h;
+    }
+    var nameIdx = hdr["CLIENT NAME"];
+    var staxIdIdx = hdr["STAX CUSTOMER ID"];
+    var staxNameIdx = hdr["STAX CUSTOMER NAME"];
+    var qbNameIdx = hdr["QB_CUSTOMER_NAME"];
+    if (nameIdx === undefined || staxIdIdx === undefined) return out;
+    for (var r = 1; r < data.length; r++) {
+      var clientName = String(data[r][nameIdx] || "").trim();
+      var staxId = String(data[r][staxIdIdx] || "").trim();
+      if (!clientName || !staxId) continue;
+      var staxName = staxNameIdx !== undefined ? String(data[r][staxNameIdx] || "").trim() : "";
+      var qbName = qbNameIdx !== undefined ? String(data[r][qbNameIdx] || "").trim() : "";
+      var entry = {
+        staxCustomerId: staxId,
+        staxCustomerName: staxName || clientName,
+        clientName: clientName
+      };
+      out[stax_normalizeName_(clientName)] = entry;
+      if (staxName) out[stax_normalizeName_(staxName)] = entry;
+      if (qbName)   out[stax_normalizeName_(qbName)]   = entry;
+    }
+  } catch (e) {
+    Logger.log("stax_buildClientStaxMap_ failed (returning empty map): " + e.message);
+  }
+  return out;
+}
+
+/**
  * Build a dedup key for an invoice: docNum|normalizedName|amount|normalizedDate.
  * v38.118.0 — now normalizes dates (Date object vs string) and amounts
  * (Number vs string) so keys match across write paths. Previously duplicates
  * slipped through because IIF import stored date as Date object and QB export
  * auto-import stored it as string "04/23/2026".
+ *
+ * v38.153.0 — superseded for sheet-row dedup by qb_invoice_no alone (see
+ * handleImportIIF_ / handleQbExport_ Stax push). Retained for any callers
+ * that still need the multi-field hash, but new code should dedup on the
+ * invoice number.
  */
 function stax_invoiceKey_(docNum, name, amount, date) {
   // Normalize amount: Number(raw).toFixed(2) collapses "50" / 50 / 50.00 / "$50.00" to the same string
@@ -30187,39 +30241,100 @@ function handleImportIIF_(payload) {
     }
   }
 
-  // ─── Write invoices to Invoices tab (dedup by key) ───
+  // ─── Write invoices to Invoices tab ───
+  //
+  // v38.153.0 — Dedup by QB invoice number alone, not the multi-field hash
+  // (docNum|name|amount|date). Justin reported INV-000131 landing twice on
+  // the sheet because a re-import with a slightly different total/date built
+  // a different stax_invoiceKey_ even though the QB invoice number was
+  // identical. Invoice numbers are unique by definition; collapsing the
+  // dedup key to docNum makes the same QB invoice always map to the same
+  // row, and a re-import refreshes that row in place rather than spawning
+  // a duplicate.
+  //
+  // Resolution: when the QB invoice number already exists in PENDING state
+  // we UPDATE the existing row's customer / date / total / line items /
+  // Stax Customer ID. Rows already in CREATED / PAID / VOIDED stay
+  // untouched (an in-flight invoice should never get clobbered by a stale
+  // re-import). When the row doesn't exist we INSERT.
+  //
+  // Stax Customer ID resolves directly from CB Clients via
+  // stax_buildClientStaxMap_(). The Stax Customers sheet is no longer read.
   var invSheet = ss.getSheetByName("Invoices");
   var invoicesAdded = 0;
   var duplicatesSkipped = 0;
+  var invoicesUpdated = 0;
   if (invSheet) {
-    // Build set of existing keys
+    var clientStaxMap = stax_buildClientStaxMap_();
     var existing = invSheet.getDataRange().getValues();
-    var existingSet = {};
+    var existingByQbNo = {}; // docNum → 1-based row index in sheet
     for (var e = 1; e < existing.length; e++) {
-      var key = stax_invoiceKey_(
-        String(existing[e][0]), String(existing[e][1]),
-        existing[e][5], String(existing[e][3])
-      );
-      existingSet[key] = true;
+      var ek = String(existing[e][0] || "").trim();
+      if (ek && !existingByQbNo[ek]) existingByQbNo[ek] = e + 1;
     }
 
+    var now = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm:ss");
     var newRows = [];
-    var newQbInvoiceNos = [];
+    var touchedQbInvoiceNos = [];
     for (var i = 0; i < parsed.invoices.length; i++) {
       var inv = parsed.invoices[i];
-      var dedupKey = stax_invoiceKey_(inv.docNum, inv.name, inv.amount, inv.date);
-      if (existingSet[dedupKey]) { duplicatesSkipped++; continue; }
-      existingSet[dedupKey] = true;
+      var docNum = String(inv.docNum || "").trim();
+      if (!docNum) continue;
+
+      var lookupName = stax_normalizeName_(inv.name);
+      var clientEntry = clientStaxMap[lookupName] || null;
+      var resolvedStaxId = clientEntry ? clientEntry.staxCustomerId : "";
+      var resolvedName = clientEntry ? clientEntry.staxCustomerName : String(inv.name || "");
 
       var lineItemsJson = "";
       try { lineItemsJson = JSON.stringify(inv.lineItems); } catch (e2) { lineItemsJson = "[]"; }
 
-      var now = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm:ss");
+      var existingRow1 = existingByQbNo[docNum];
+      if (existingRow1) {
+        // UPDATE in place — only refresh editable fields and keep status if not PENDING
+        var rowVals = existing[existingRow1 - 1];
+        var existingStatus = String(rowVals[8] || "").trim().toUpperCase();
+        if (existingStatus && existingStatus !== "PENDING") {
+          duplicatesSkipped++;
+          continue;
+        }
+        var updateRow = [
+          docNum,                                 // QB Invoice #
+          resolvedName,                           // Customer
+          resolvedStaxId,                         // Stax Customer ID
+          inv.date,                               // Invoice Date
+          inv.dueDate,                            // Due Date
+          inv.amount,                             // Total
+          lineItemsJson,                          // Line Items JSON
+          String(rowVals[7] || ""),               // Stax Invoice ID — preserve
+          "PENDING",                              // Status
+          String(rowVals[9] || now),              // Created At — preserve
+          "Refreshed by IIF import on " + now     // Notes
+        ];
+        invSheet.getRange(existingRow1, 1, 1, updateRow.length).setValues([updateRow]);
+        invoicesUpdated++;
+        touchedQbInvoiceNos.push(docNum);
+        continue;
+      }
+
+      // No Stax Customer ID → log exception and skip insert (Stax push
+      // would fail anyway). The exception surfaces in the React
+      // Exceptions tab so staff can set the Stax Customer ID on the
+      // client record before re-importing.
+      if (!resolvedStaxId) {
+        try {
+          stax_appendException_(ss, docNum, String(inv.name || ""), "", inv.amount, inv.dueDate, "NO_CUSTOMER",
+            "No Stax Customer ID on the matching client record. Set one on CB Clients and re-import.");
+        } catch (excErr) { Logger.log("handleImportIIF_ exception append failed (non-fatal): " + excErr.message); }
+        duplicatesSkipped++;
+        continue;
+      }
+
       newRows.push([
-        inv.docNum, inv.name, "", inv.date, inv.dueDate, inv.amount,
+        docNum, resolvedName, resolvedStaxId, inv.date, inv.dueDate, inv.amount,
         lineItemsJson, "", "PENDING", now, ""
       ]);
-      if (inv.docNum) newQbInvoiceNos.push(String(inv.docNum));
+      touchedQbInvoiceNos.push(docNum);
     }
 
     if (newRows.length > 0) {
@@ -30228,13 +30343,11 @@ function handleImportIIF_(payload) {
     }
     invoicesAdded = newRows.length;
 
-    // v38.131.0 — Mirror the new invoice rows into Supabase so the
-    // Payments app sees them on the next page load. Without this,
-    // the React UI (which reads from Supabase first) showed empty
-    // Review/Charge Queue tabs after every IIF import even though
-    // the sheet had the rows. Best-effort, never throws.
-    if (newQbInvoiceNos.length > 0) {
-      try { api_sbResyncStaxInvoices_(newQbInvoiceNos); } catch (sbErr) {
+    // v38.131.0 — Mirror the touched invoice rows into Supabase so the
+    // Payments app sees them on the next page load. Best-effort, never
+    // throws.
+    if (touchedQbInvoiceNos.length > 0) {
+      try { api_sbResyncStaxInvoices_(touchedQbInvoiceNos); } catch (sbErr) {
         Logger.log("handleImportIIF_ Supabase invoice mirror error (non-fatal): " + sbErr);
       }
     }
@@ -30279,13 +30392,15 @@ function handleImportIIF_(payload) {
   }
 
   // ─── Run Log ───
-  var summary = "Imported " + fileName + ": " + invoicesAdded + " invoices added, " +
-                duplicatesSkipped + " duplicates skipped, " + exceptionsLogged + " exceptions";
+  var summary = "Imported " + fileName + ": " + invoicesAdded + " added, " +
+                invoicesUpdated + " updated, " + duplicatesSkipped + " skipped, " +
+                exceptionsLogged + " exceptions";
   stax_appendRunLog_(ss, "importIIF", summary, "File: " + fileName + ", Raw rows: " + parsed.rows.length);
 
   return jsonResponse_({
     success: true,
     invoicesAdded: invoicesAdded,
+    invoicesUpdated: invoicesUpdated,
     duplicatesSkipped: duplicatesSkipped,
     exceptionsLogged: exceptionsLogged,
     summary: summary
@@ -31298,38 +31413,28 @@ function stax_sendInvoiceEmail_(staxInvoiceId) {
 }
 
 /**
- * Look up Stax Customer IDs from the Customers tab for invoices missing them.
- * Mirrors StaxAutoPay.gs _lookupStaxCustomerIds().
- * Mutates invData in place (sets Stax Customer ID column) and returns changed flag.
+ * Fill missing Stax Customer IDs on the Invoices tab from CB Clients.
+ *
+ * v38.153.0 — single source of truth is `stax_buildClientStaxMap_()`
+ * (CB Clients column "Stax Customer ID"). The legacy Stax Customers
+ * sheet was retired; lookups now resolve directly off the client
+ * record. Mutates invData in place and returns whether any row changed.
  */
 function stax_lookupCustomerIds_(ss, invSheet, invData, numRows) {
-  // Build customer map from Customers tab
-  var custSheet = ss.getSheetByName("Customers");
-  var custMap = {};
-  if (custSheet) {
-    var custData = custSheet.getDataRange().getValues();
-    for (var c = 1; c < custData.length; c++) {
-      var qbName = String(custData[c][0] || "").trim();
-      var staxId = String(custData[c][3] || "").trim();
-      if (qbName && staxId) {
-        custMap[stax_normalizeName_(qbName)] = staxId;
-      }
-    }
-  }
+  var clientStaxMap = stax_buildClientStaxMap_();
 
-  // Fill in missing Stax Customer IDs on Invoices tab
   var colCRange = invSheet.getRange(2, 3, numRows, 1);
   var colCValues = colCRange.getValues();
   var changed = false;
 
   for (var i = 0; i < numRows; i++) {
-    if (!String(colCValues[i][0]).trim()) {
-      var qbCustName = stax_normalizeName_(invData[i + 1][1]);
-      if (custMap[qbCustName]) {
-        colCValues[i][0] = custMap[qbCustName];
-        invData[i + 1][2] = custMap[qbCustName]; // update in-memory too
-        changed = true;
-      }
+    if (String(colCValues[i][0]).trim()) continue;
+    var qbCustName = stax_normalizeName_(invData[i + 1][1]);
+    var entry = clientStaxMap[qbCustName];
+    if (entry && entry.staxCustomerId) {
+      colCValues[i][0] = entry.staxCustomerId;
+      invData[i + 1][2] = entry.staxCustomerId; // keep in-memory snapshot consistent
+      changed = true;
     }
   }
 
@@ -37873,4 +37978,132 @@ function handleBackfillDocsFromDrive_(payload) {
   return api_backfillDocsFromDriveOneClient_(clientSheetId, {
     dryRun: !!(payload && payload.dryRun)
   });
+}
+
+/**
+ * v38.153.0 — One-shot Stax sheets cleanup.
+ *
+ * Run this once from the Apps Script editor after deploying v38.153.0
+ * to collapse the existing duplicate clutter:
+ *
+ *   1. Stax Invoices: any QB invoice number with multiple rows is
+ *      collapsed to one row. Preference order:
+ *        a) any row whose Status is CREATED / PAID / CHARGE_FAILED /
+ *           VOIDED — these reflect work that already happened
+ *        b) the row with a non-empty Stax Invoice ID
+ *        c) the row with the most recent Created At timestamp
+ *      The chosen row stays in place; siblings are deleted bottom-up.
+ *
+ *   2. Stax Customers: any (QB Name + Stax Customer ID) pair with
+ *      multiple rows is collapsed to one row. Fixes the Wignall x2 /
+ *      Digs x7 ghosts spawned by the legacy Sync With Stax button.
+ *      The keeper is the row with the most data filled in (longest
+ *      concatenated string across all columns); ties break to the
+ *      first row.
+ *
+ * Idempotent. Never deletes a row when there is no clear duplicate.
+ * Logs a per-sheet summary; does not throw.
+ */
+function runStaxSheetsCleanup() {
+  var ss;
+  try { ss = getStaxSpreadsheet_(); }
+  catch (e) { Logger.log("runStaxSheetsCleanup: cannot open Stax spreadsheet: " + e.message); return; }
+
+  // ─── 1. Stax Invoices dedupe by QB invoice number ─────────────────────────
+  var invSheet = ss.getSheetByName("Invoices");
+  var invSummary = "Invoices: skipped (sheet not found)";
+  if (invSheet && invSheet.getLastRow() >= 2) {
+    var invData = invSheet.getDataRange().getValues();
+    var statusRank = { "PAID": 5, "VOIDED": 4, "CHARGE_FAILED": 3, "SENT": 3, "CREATED": 2, "PENDING": 1, "EXCEPTION": 1 };
+    // Group rows by QB invoice number (col 0)
+    var groups = {}; // docNum → [rowIndex, ...]
+    for (var r = 1; r < invData.length; r++) {
+      var d = String(invData[r][0] || "").trim();
+      if (!d) continue;
+      if (!groups[d]) groups[d] = [];
+      groups[d].push(r);
+    }
+    var rowsToDelete = []; // 1-based sheet row numbers
+    Object.keys(groups).forEach(function(docNum) {
+      var idxs = groups[docNum];
+      if (idxs.length < 2) return;
+      // Pick the keeper using the preference order above
+      var keeperIdx = idxs[0];
+      for (var k = 1; k < idxs.length; k++) {
+        var a = invData[keeperIdx];
+        var b = invData[idxs[k]];
+        var aRank = statusRank[String(a[8] || "").trim().toUpperCase()] || 0;
+        var bRank = statusRank[String(b[8] || "").trim().toUpperCase()] || 0;
+        if (bRank > aRank) { keeperIdx = idxs[k]; continue; }
+        if (bRank < aRank) continue;
+        var aStaxId = String(a[7] || "").trim();
+        var bStaxId = String(b[7] || "").trim();
+        if (bStaxId && !aStaxId) { keeperIdx = idxs[k]; continue; }
+        if (!bStaxId && aStaxId) continue;
+        var aCreated = String(a[9] || "");
+        var bCreated = String(b[9] || "");
+        if (bCreated > aCreated) keeperIdx = idxs[k];
+      }
+      idxs.forEach(function(rIdx) {
+        if (rIdx !== keeperIdx) rowsToDelete.push(rIdx + 1); // 1-based
+      });
+    });
+    rowsToDelete.sort(function(a, b) { return b - a; }); // bottom-up
+    for (var dr = 0; dr < rowsToDelete.length; dr++) {
+      try { invSheet.deleteRow(rowsToDelete[dr]); }
+      catch (delErr) { Logger.log("runStaxSheetsCleanup invoice deleteRow " + rowsToDelete[dr] + " failed: " + delErr.message); }
+    }
+    invSummary = "Invoices: " + Object.keys(groups).filter(function(d) { return groups[d].length > 1; }).length +
+                 " duplicate group(s) collapsed, " + rowsToDelete.length + " row(s) deleted";
+  }
+
+  // ─── 2. Stax Customers dedupe by (QB Name + Stax Customer ID) ─────────────
+  var custSheet = ss.getSheetByName("Customers");
+  var custSummary = "Customers: skipped (sheet not found)";
+  if (custSheet && custSheet.getLastRow() >= 2) {
+    var custData = custSheet.getDataRange().getValues();
+    // Cols per StaxAutoPay schema: A=QB Name, B=Stax Company, C=Stax Name,
+    // D=Stax ID, E=Email, F=Pay Method, G=Notes
+    var custGroups = {}; // qbName|staxId → [rowIndex, ...]
+    for (var cr = 1; cr < custData.length; cr++) {
+      var qbN = stax_normalizeName_(String(custData[cr][0] || ""));
+      var staxId = String(custData[cr][3] || "").trim();
+      if (!qbN && !staxId) continue;
+      var gkey = qbN + "|" + staxId;
+      if (!custGroups[gkey]) custGroups[gkey] = [];
+      custGroups[gkey].push(cr);
+    }
+    var custRowsToDelete = [];
+    Object.keys(custGroups).forEach(function(k) {
+      var idxs = custGroups[k];
+      if (idxs.length < 2) return;
+      // Keeper = row with the most non-empty cells (richest record); break ties by first row
+      var keeperIdx = idxs[0];
+      var keeperFill = countFilled_(custData[keeperIdx]);
+      for (var ki = 1; ki < idxs.length; ki++) {
+        var fi = countFilled_(custData[idxs[ki]]);
+        if (fi > keeperFill) { keeperIdx = idxs[ki]; keeperFill = fi; }
+      }
+      idxs.forEach(function(rIdx) {
+        if (rIdx !== keeperIdx) custRowsToDelete.push(rIdx + 1);
+      });
+    });
+    custRowsToDelete.sort(function(a, b) { return b - a; });
+    for (var cdr = 0; cdr < custRowsToDelete.length; cdr++) {
+      try { custSheet.deleteRow(custRowsToDelete[cdr]); }
+      catch (delErr) { Logger.log("runStaxSheetsCleanup customer deleteRow " + custRowsToDelete[cdr] + " failed: " + delErr.message); }
+    }
+    custSummary = "Customers: " + Object.keys(custGroups).filter(function(k) { return custGroups[k].length > 1; }).length +
+                  " duplicate group(s) collapsed, " + custRowsToDelete.length + " row(s) deleted";
+  }
+
+  Logger.log("runStaxSheetsCleanup complete. " + invSummary + ". " + custSummary + ".");
+}
+
+function countFilled_(row) {
+  var n = 0;
+  for (var i = 0; i < row.length; i++) {
+    if (String(row[i] || "").trim()) n++;
+  }
+  return n;
 }
