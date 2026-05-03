@@ -1111,13 +1111,31 @@ export function Payments() {
                           disabled={!!voidingInvoice}
                           onClick={async () => {
                             if (!confirm(`Reset invoice ${i.qbInvoice} back to ${i.staxId ? 'CREATED' : 'PENDING'}?\n\nThis re-enters it into the charge workflow so it can be retried.`)) return;
+                            const origStatus = i.status;
+                            // Optimistic — flip the row immediately so the UI doesn't sit
+                            // looking dead while the GAS round-trip lands.
+                            setInvoices(prev => prev.map(inv => inv.qbInvoice === i.qbInvoice
+                              ? { ...inv, status: i.staxId ? 'CREATED' : 'PENDING' } : inv));
                             setVoidingInvoice(i.qbInvoice); setError(null);
                             const res = await postResetStaxInvoiceStatus({ qbInvoiceNo: i.qbInvoice });
                             setVoidingInvoice(null);
-                            if (res.ok && res.data?.success) { setChargeResult(`${i.qbInvoice} reset to ${res.data.newStatus}`); loadData(true); }
-                            else { setError(res.error || 'Reset failed'); }
+                            if (res.ok && res.data?.success) { setChargeResult(`${i.qbInvoice} reset to ${res.data.newStatus}`); }
+                            else {
+                              // Revert
+                              setInvoices(prev => prev.map(inv => inv.qbInvoice === i.qbInvoice ? { ...inv, status: origStatus } : inv));
+                              setError(res.error || 'Reset failed');
+                            }
                           }}
-                          style={{ padding: '3px 8px', fontSize: 11, fontWeight: 500, border: `1px solid #3B82F6`, borderRadius: 4, background: '#EFF6FF', cursor: voidingInvoice ? 'progress' : 'pointer', color: '#1D4ED8', fontFamily: 'inherit', display: 'inline-flex', alignItems: 'center', gap: 4, opacity: voidingInvoice && voidingInvoice !== i.qbInvoice ? 0.5 : 1 }}
+                          style={{
+                            padding: '3px 8px', fontSize: 11, fontWeight: 500,
+                            border: `1px solid #3B82F6`, borderRadius: 4, background: '#EFF6FF',
+                            // Only the clicked button shows progress / spinner; the rest
+                            // just go disabled (not-allowed cursor) without the dim that
+                            // previously made the whole column look like it was in-flight.
+                            cursor: voidingInvoice === i.qbInvoice ? 'progress' : (voidingInvoice ? 'not-allowed' : 'pointer'),
+                            color: '#1D4ED8', fontFamily: 'inherit',
+                            display: 'inline-flex', alignItems: 'center', gap: 4,
+                          }}
                           title="Reset to re-enter charge workflow"
                         >
                           {voidingInvoice === i.qbInvoice ? (
@@ -1134,13 +1152,28 @@ export function Payments() {
                           disabled={!!voidingInvoice}
                           onClick={async () => {
                             if (!confirm(`Void invoice ${i.qbInvoice}?\n\nThis removes it from the active list. The row stays in the sheet for audit purposes. You cannot void PAID invoices.`)) return;
+                            const origStatus = i.status;
+                            // Optimistic — flip status to VOIDED so the row drops out of
+                            // the CREATED filter immediately. Was previously waiting on
+                            // loadData(true) which took 30-45s and looked broken.
+                            setInvoices(prev => prev.map(inv => inv.qbInvoice === i.qbInvoice ? { ...inv, status: 'VOIDED' } : inv));
                             setVoidingInvoice(i.qbInvoice); setError(null);
                             const res = await postVoidStaxInvoice({ qbInvoiceNo: i.qbInvoice });
                             setVoidingInvoice(null);
-                            if (res.ok && res.data?.success) { setChargeResult(`${i.qbInvoice} voided`); loadData(true); }
-                            else { setError(res.error || 'Void failed'); }
+                            if (res.ok && res.data?.success) { setChargeResult(`${i.qbInvoice} voided`); }
+                            else {
+                              // Revert
+                              setInvoices(prev => prev.map(inv => inv.qbInvoice === i.qbInvoice ? { ...inv, status: origStatus } : inv));
+                              setError(res.error || 'Void failed');
+                            }
                           }}
-                          style={{ padding: '3px 8px', fontSize: 11, fontWeight: 500, border: `1px solid ${theme.colors.border}`, borderRadius: 4, background: '#fff', cursor: voidingInvoice ? 'progress' : 'pointer', color: theme.colors.textMuted, fontFamily: 'inherit', display: 'inline-flex', alignItems: 'center', gap: 4, opacity: voidingInvoice && voidingInvoice !== i.qbInvoice ? 0.5 : 1 }}
+                          style={{
+                            padding: '3px 8px', fontSize: 11, fontWeight: 500,
+                            border: `1px solid ${theme.colors.border}`, borderRadius: 4, background: '#fff',
+                            cursor: voidingInvoice === i.qbInvoice ? 'progress' : (voidingInvoice ? 'not-allowed' : 'pointer'),
+                            color: theme.colors.textMuted, fontFamily: 'inherit',
+                            display: 'inline-flex', alignItems: 'center', gap: 4,
+                          }}
                           title="Void this invoice"
                         >
                           {voidingInvoice === i.qbInvoice ? (
@@ -1859,7 +1892,17 @@ export function Payments() {
         </div>
       )}
 
-      {tab === 'iif' && <IIFImportTab onImported={() => loadData(true)} />}
+      {tab === 'iif' && <IIFImportTab onImported={() => {
+        // After successful IIF import:
+        //   1. Auto-switch to the Invoices tab so the user sees their import
+        //      land instead of staring at the IIF drop zone.
+        //   2. Reload Supabase-first (false, not true). handleImportIIF_ in
+        //      GAS already mirrored the new rows via api_sbResyncStaxInvoices_,
+        //      so Supabase has them within a beat — no need to force the
+        //      slow GAS path that took 3–30s and felt like nothing happened.
+        setTab('invoices');
+        loadData(false);
+      }} />}
 
       {tab === 'runlog' && <RunLogTab entries={runLog} />}
 
