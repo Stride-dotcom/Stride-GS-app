@@ -26,6 +26,7 @@ const WillCallPage = React.lazy(() => import('./pages/WillCallPage').then(m => (
 const RepairPage = React.lazy(() => import('./pages/RepairPage').then(m => ({ default: m.RepairPage })));
 const ShipmentPage = React.lazy(() => import('./pages/ShipmentPage').then(m => ({ default: m.ShipmentPage })));
 const OrderPage = React.lazy(() => import('./pages/OrderPage').then(m => ({ default: m.OrderPage })));
+const InvoicePage = React.lazy(() => import('./pages/InvoicePage').then(m => ({ default: m.InvoicePage })));
 const DetailPanelMockup = React.lazy(() => import('./pages/DetailPanelMockup').then(m => ({ default: m.DetailPanelMockup })));
 import { Orders } from './pages/Orders';
 import { QuoteTool } from './pages/QuoteTool';
@@ -117,6 +118,10 @@ export default function App() {
           <Route path="/orders" element={<RoleGuard allowed={['admin', 'client']}><Orders /></RoleGuard>} />
           <Route path="/orders/:orderId" element={<RoleGuard allowed={['admin', 'client']}><React.Suspense fallback={<div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100%' }}>Loading...</div>}><OrderPage /></React.Suspense></RoleGuard>} />
           <Route path="/billing" element={<RoleGuard allowed={['admin']}><Billing /></RoleGuard>} />
+          {/* Printable invoice — admin/staff/client all allowed; RLS on `billing`
+              gates which invoices the user can actually load. Email-CTA pattern
+              passes `?client=<spreadsheetId>`, which scopes the query for admins. */}
+          <Route path="/invoices/:invoiceNo" element={<React.Suspense fallback={<div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100%' }}>Loading...</div>}><InvoicePage /></React.Suspense>} />
           <Route path="/payments" element={<RoleGuard allowed={['admin']}><Payments /></RoleGuard>} />
           <Route path="/marketing" element={<RoleGuard allowed={['admin']}><Marketing /></RoleGuard>} />
           <Route path="/quotes" element={<RoleGuard allowed={['admin']}><QuoteTool /></RoleGuard>} />

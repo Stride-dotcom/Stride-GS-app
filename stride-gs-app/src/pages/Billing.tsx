@@ -818,8 +818,15 @@ export function Billing() {
 
   // Create Invoice state
   const [showInvoiceModal, setShowInvoiceModal] = useState(false);
-  const [invOptPdf, setInvOptPdf] = useState(true);
-  const [invOptEmail, setInvOptEmail] = useState(true);
+  // 2026-05-02 — defaults flipped to false. New flow: invoice creation skips
+  // the Drive Doc PDF (Drive's auto-reformatting was hurting output quality)
+  // and the matching email. The invoice URL stored on the ledger now points at
+  // the React /#/invoices/:invoiceNo page, which renders from `billing` rows
+  // and supports browser print → save-as-PDF for downloadable reference.
+  // Operators can still re-check both boxes for the legacy Drive PDF + email
+  // path when needed.
+  const [invOptPdf, setInvOptPdf] = useState(false);
+  const [invOptEmail, setInvOptEmail] = useState(false);
   const [invOptQbo, setInvOptQbo] = useState(false);
   const [invOptStax, setInvOptStax] = useState(false);
   const invOptQb = false; // QB Export removed — checkbox no longer exists
