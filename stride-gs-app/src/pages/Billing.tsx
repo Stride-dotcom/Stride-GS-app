@@ -22,7 +22,7 @@ import { fmtDate } from '../lib/constants';
 import { tanstackGlobalFilter } from '../lib/searchFilters';
 import { WriteButton } from '../components/shared/WriteButton';
 import { MultiSelectFilter } from '../components/shared/MultiSelectFilter';
-import { InvoiceLink } from '../components/shared/InvoiceLink';
+import { DeepLink } from '../components/shared/DeepLink';
 import { SyncBanner } from '../components/shared/SyncBanner';
 import { BatchProgress, type BatchState } from '../components/shared/BatchProgress';
 import { BulkResultSummary } from '../components/shared/BulkResultSummary';
@@ -1068,9 +1068,12 @@ export function Billing() {
         return <Badge t={v} c={STATUS_CFG[v]} />;
       } }),
       col.accessor('invoiceNo', { header: 'Invoice #', size: 110, cell: i => (
-        <InvoiceLink
-          invoiceNo={i.getValue()}
+        <DeepLink
+          kind="invoice"
+          id={i.getValue()}
           clientSheetId={i.row.original.clientSheetId || i.row.original.sourceSheetId}
+          size="sm"
+          showIcon={false}
         />
       ) }),
       col.accessor('client', { header: 'Client', size: 160, filterFn: mf, cell: i => {
@@ -1100,7 +1103,15 @@ export function Billing() {
       col.accessor('date', { header: 'Date', size: 100, cell: i => <span style={{ fontSize: 12, color: theme.colors.textSecondary }}>{fmt(i.getValue())}</span> }),
       col.accessor('svcCode', { header: 'Svc Code', size: 90, filterFn: mf, cell: i => <Badge t={i.getValue()} c={SVC_CFG[i.getValue()]} /> }),
       col.accessor('svcName', { header: 'Service', size: 100, cell: i => <span style={{ fontSize: 12, color: theme.colors.textSecondary }}>{i.getValue()}</span> }),
-      col.accessor('itemId', { header: 'Item', size: 90, cell: i => <span style={{ fontSize: 12, color: theme.colors.textSecondary }}>{i.getValue()}</span> }),
+      col.accessor('itemId', { header: 'Item', size: 90, cell: i => (
+        <DeepLink
+          kind="inventory"
+          id={i.getValue()}
+          clientSheetId={i.row.original.clientSheetId || i.row.original.sourceSheetId}
+          size="sm"
+          showIcon={false}
+        />
+      ) }),
       col.accessor('description', { header: 'Description', size: 220, cell: i => {
         const canEdit = isReportTab && i.row.original.status === 'Unbilled';
         return canEdit
@@ -1128,7 +1139,23 @@ export function Billing() {
         },
       }),
       col.accessor('total', { header: 'Total', size: 90, cell: i => <span style={{ fontSize: 12, fontWeight: 600, color: theme.colors.text }}>${i.getValue().toFixed(2)}</span> }),
-      col.accessor('taskId', { header: 'Task', size: 90, cell: i => <span style={{ fontSize: 12, color: theme.colors.textMuted }}>{i.getValue() || '\u2014'}</span> }),
+      col.accessor('taskId', { header: 'Task', size: 90, cell: i => {
+        const v = String(i.getValue() || '').trim();
+        // Task IDs in billing rows can carry an addon suffix like
+        // INSP-12345-1-ADDON-2 (per the v38.143.0 task-addons feature).
+        // Strip the -ADDON-N tail before linking \u2014 the parent task panel
+        // shows the addon line in its Billing tab.
+        const linkId = v.replace(/-ADDON-\d+$/, '');
+        return (
+          <DeepLink
+            kind="task"
+            id={linkId}
+            clientSheetId={i.row.original.clientSheetId || i.row.original.sourceSheetId}
+            size="sm"
+            showIcon={false}
+          />
+        );
+      } }),
       col.accessor('notes', {
         header: 'Notes', size: 180,
         cell: i => {
@@ -1241,10 +1268,13 @@ export function Billing() {
     invCol.accessor('invoiceNo', {
       header: 'Invoice #', size: 120,
       cell: i => (
-        <InvoiceLink
-          invoiceNo={i.getValue()}
+        <DeepLink
+          kind="invoice"
+          id={i.getValue()}
           clientSheetId={i.row.original.clientSheetId || i.row.original.sourceSheetId}
-          bold
+          size="sm"
+          showIcon={false}
+          style={{ fontWeight: 700 }}
         />
       ),
     }),

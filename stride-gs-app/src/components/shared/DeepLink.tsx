@@ -24,7 +24,8 @@ export type DeepLinkKind =
   | 'task'
   | 'repair'
   | 'willcall'
-  | 'shipment';
+  | 'shipment'
+  | 'invoice';
 
 const KIND_TO_ROUTE: Record<DeepLinkKind, string> = {
   inventory: '/inventory',
@@ -32,10 +33,15 @@ const KIND_TO_ROUTE: Record<DeepLinkKind, string> = {
   repair: '/repairs',
   willcall: '/will-calls',
   shipment: '/shipments',
+  invoice: '/invoices',
 };
 
-/** Entities with standalone /:id pages — link directly, no ?open= needed */
-const STANDALONE_KINDS = new Set<DeepLinkKind>(['task', 'repair', 'willcall', 'shipment']);
+/** Entities with standalone /:id pages — link directly, no ?open= needed.
+ *  `invoice` joins the standalone set because /invoices/:invoiceNo (the
+ *  React InvoicePage shipped in PR #203) is a dedicated full-page view
+ *  that queries billing rows by invoice_no with RLS scoping — no client
+ *  filter needed. */
+const STANDALONE_KINDS = new Set<DeepLinkKind>(['task', 'repair', 'willcall', 'shipment', 'invoice']);
 
 export interface DeepLinkProps {
   kind: DeepLinkKind;
