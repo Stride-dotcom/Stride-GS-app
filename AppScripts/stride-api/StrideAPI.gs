@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.153.0 — 2026-05-03 PST — Stax Customers sheet retired; CB Clients is the single source of truth for Stax Customer ID. Three Stax write paths (handleQbExport_ auto-push, handleImportIIF_, stax_lookupCustomerIds_ → Refresh Stax IDs button) all resolve via the new stax_buildClientStaxMap_() helper, which indexes CB Clients rows by Client Name, QB Customer Name, AND Stax Customer Name into the same record so divergent-name invoices match. Sheet-row dedup on Stax Invoices switches from the multi-field hash (docNum|name|amount|date) to the QB invoice number alone — Justin reported INV-000131 landing twice when a re-import drifted on amount/date even though the docNum was identical. Existing PENDING rows now UPDATE in place with the freshest customer / date / total / line items / Stax Customer ID; CREATED / PAID / VOIDED rows are left untouched (in-flight invoices must not be clobbered by a stale re-import). Rows that resolve to a client without a Stax Customer ID are now skipped and logged as a NO_CUSTOMER exception instead of inserted as half-populated PENDING rows. The Stax-side customer-name written into the Invoices sheet falls back through `entry.staxCustomerName (alias only) → clientInfo.staxCustomerName → invoice qbName`, preserving the pre-v38.153.0 behavior of writing the IIF's QB name when no explicit Stax-side alias is set on the client record. New admin entry point `runStaxSheetsCleanup` collapses existing duplicate clutter: Stax Invoices dedupes by QB invoice number, keeping the row with the strongest status (PAID > VOIDED > CHARGE_FAILED/SENT > CREATED > PENDING), then non-empty Stax Invoice ID, then most recent Created At; Stax Customers dedupes by (QB Name + Stax Customer ID), keeping the row with the most filled-in cells (fixes the Wignall x2 / Digs x7 ghosts Justin spotted). Reads `Stax Customer ID` from the standard CB Clients column.
+   StrideAPI.gs — v38.154.0 — 2026-05-03 PST — Reference now joins Sidemark / Vendor / Description as an autocomplete-DB field. handleGetAutocomplete_ returns a `references` array on both code paths (Supabase first, sheet fallback). The companion Postgres migration relaxes the autocomplete_db CHECK to allow 'Reference', backfills 440 distinct references / 26 tenants from inventory + billing, and installs INSERT/UPDATE triggers on public.inventory + public.billing that auto-populate autocomplete_db whenever sidemark / vendor / description / reference values are written — eliminating the periodic-backfill cycle that surfaced Justin's "missing sidemarks" report earlier today. React side: useAutocomplete + InlineEditableCell + Inventory.tsx Reference column + ItemDetailPanel Reference field all switch from plain text to autocomplete-db variant.
+   v38.153.0 — 2026-05-03 PST — Stax Customers sheet retired; CB Clients is the single source of truth for Stax Customer ID. Three Stax write paths (handleQbExport_ auto-push, handleImportIIF_, stax_lookupCustomerIds_ → Refresh Stax IDs button) all resolve via the new stax_buildClientStaxMap_() helper, which indexes CB Clients rows by Client Name, QB Customer Name, AND Stax Customer Name into the same record so divergent-name invoices match. Sheet-row dedup on Stax Invoices switches from the multi-field hash (docNum|name|amount|date) to the QB invoice number alone — Justin reported INV-000131 landing twice when a re-import drifted on amount/date even though the docNum was identical. Existing PENDING rows now UPDATE in place with the freshest customer / date / total / line items / Stax Customer ID; CREATED / PAID / VOIDED rows are left untouched (in-flight invoices must not be clobbered by a stale re-import). Rows that resolve to a client without a Stax Customer ID are now skipped and logged as a NO_CUSTOMER exception instead of inserted as half-populated PENDING rows. The Stax-side customer-name written into the Invoices sheet falls back through `entry.staxCustomerName (alias only) → clientInfo.staxCustomerName → invoice qbName`, preserving the pre-v38.153.0 behavior of writing the IIF's QB name when no explicit Stax-side alias is set on the client record. New admin entry point `runStaxSheetsCleanup` collapses existing duplicate clutter: Stax Invoices dedupes by QB invoice number, keeping the row with the strongest status (PAID > VOIDED > CHARGE_FAILED/SENT > CREATED > PENDING), then non-empty Stax Invoice ID, then most recent Created At; Stax Customers dedupes by (QB Name + Stax Customer ID), keeping the row with the most filled-in cells (fixes the Wignall x2 / Digs x7 ghosts Justin spotted). Reads `Stax Customer ID` from the standard CB Clients column.
    v38.152.0 — 2026-05-03 PST — Billing inline edits actually persist now. handleUpdateBillingRow_ used hMap["X"] exact-match column lookups for every editable field (Sidemark, Reference, Description, Item Notes, Rate, Qty, Total, Svc Code/Name/Class). On Billing_Ledger templates that pre-date one of those columns, hMap[X] returned undefined and the write silently no-op'd — the React Billing Report's optimistic update would appear to take then revert on the next refetch because nothing landed in the sheet. Justin reported this for sidemark; the same bug affected every other field. Same class as the v38.146.0 Invoice Date fix. Switched all 10 column lookups to api_ensureColumn_ (case-insensitive, appends if missing) so client sheets self-heal on the first inline edit after the fix ships and the writeThrough mirror back to Supabase carries the new value.
    v38.151.0 — 2026-05-03 PST — `Stax Customer Name` override on the client record + lookup wiring. New CLIENT_FIELDS_ entry `staxCustomerName` (CB Clients column "Stax Customer Name", Supabase column `clients.stax_customer_name`) lets staff pin the Stax-side customer name when it diverges from the QB name (e.g. "Brian Paquette Interiors" in QB / Stride vs "Brian Paquette Interiors - active" in Stax). Two lookup-path changes use it: (1) the Stax Customers tab now indexes staxCustMap by BOTH the QB name (col A) AND the Stax-side display name (col C) — same staxId either way — so the lookup at line ~20625 succeeds even when the invoice line carries the divergent name. (2) The createStaxInvoices auto-import threads `clientInfo.staxCustomerName` from CB Clients onto the per-row lookup chain (preferring it over qbName when set). Net effect: when the user sets `Stax Customer Name` on a client, the Stax push reuses the existing customer instead of creating a duplicate. Migration `clients_stax_customer_name_alias` adds the column.
    v38.150.0 — 2026-05-03 PST — Stax `meta.reference` is now the bare invoice number. createStaxInvoices was building refKey as the composite "QB#<docnum>|<name>|<total>|<date>" and Stax's customer-portal UI was displaying that composite as the invoice number on the customer payment page (e.g. INV-000100 showed as "QB#INV-000100|brian paquette interiors - active|840|2026-05-03"). Invoice numbers are already unique by definition so the composite added zero dedup value over docNum alone. Now refKey = String(docNum).trim() — clean. Back-compat: handleLinkStaxInvoiceToExisting_ already matches three forms (meta.invoiceNumber === qbNo, meta.reference starts with "QB#<qbNo>|" for historical pushes, OR meta.reference === qbNo) so already-pushed composite-refKey invoices in Stax keep linking; new pushes use the clean bare number. stax_invoiceKey_ (the SHEET-side dedup used by IIF import + auto-charge) is unchanged — that's a different code path that prevents duplicate sheet rows and benefits from the multi-field uniqueness check.
@@ -28717,16 +28718,17 @@ function handleGetAutocomplete_(clientSheetId, params) {
       if (sbResp.getResponseCode() >= 200 && sbResp.getResponseCode() < 300) {
         var rows = JSON.parse(sbResp.getContentText() || "[]");
         if (rows && rows.length > 0) {
-          var sb = { sidemarks: [], vendors: [], descriptions: [] };
+          var sb = { sidemarks: [], vendors: [], descriptions: [], references: [] };
           for (var r = 0; r < rows.length; r++) {
             var v = String(rows[r].value || "").trim();
             if (!v) continue;
             if (rows[r].field === "Sidemark") sb.sidemarks.push(v);
             else if (rows[r].field === "Vendor") sb.vendors.push(v);
             else if (rows[r].field === "Description") sb.descriptions.push(v);
+            else if (rows[r].field === "Reference") sb.references.push(v);
           }
           var ci = function(a, b) { return a.toLowerCase().localeCompare(b.toLowerCase()); };
-          sb.sidemarks.sort(ci); sb.vendors.sort(ci); sb.descriptions.sort(ci);
+          sb.sidemarks.sort(ci); sb.vendors.sort(ci); sb.descriptions.sort(ci); sb.references.sort(ci);
           return jsonResponse_(sb);
         }
       }
@@ -28735,14 +28737,19 @@ function handleGetAutocomplete_(clientSheetId, params) {
     Logger.log("handleGetAutocomplete_ Supabase read failed (non-fatal): " + sbErr.message);
   }
 
-  // 2. Fall back to sheet read.
+  // 2. Fall back to sheet read. The per-client Autocomplete_DB tab
+  //    historically only carried Sidemark/Vendor/Description; we still
+  //    return Reference as [] from this path so the response shape is
+  //    stable. The Supabase trigger added in 2026-05-03 keeps Reference
+  //    populated going forward, so this branch only matters for
+  //    cold-start tenants whose mirror reads failed.
   var ss = SpreadsheetApp.openById(clientSheetId);
   var dbSh = ss.getSheetByName("Autocomplete_DB");
   if (!dbSh || dbSh.getLastRow() < 2) {
-    return jsonResponse_({ sidemarks: [], vendors: [], descriptions: [] });
+    return jsonResponse_({ sidemarks: [], vendors: [], descriptions: [], references: [] });
   }
   var data = dbSh.getRange(2, 1, dbSh.getLastRow() - 1, 2).getValues();
-  var sidemarks = [], vendors = [], descriptions = [];
+  var sidemarks = [], vendors = [], descriptions = [], references = [];
   var upsertRows = [];
   for (var i = 0; i < data.length; i++) {
     var field = String(data[i][0] || "").trim();
@@ -28751,7 +28758,8 @@ function handleGetAutocomplete_(clientSheetId, params) {
     if (field === "Sidemark") sidemarks.push(sval);
     else if (field === "Vendor") vendors.push(sval);
     else if (field === "Description") descriptions.push(sval);
-    if (field === "Sidemark" || field === "Vendor" || field === "Description") {
+    else if (field === "Reference") references.push(sval);
+    if (field === "Sidemark" || field === "Vendor" || field === "Description" || field === "Reference") {
       upsertRows.push({ tenant_id: clientSheetId, field: field, value: sval });
     }
   }
@@ -28763,7 +28771,12 @@ function handleGetAutocomplete_(clientSheetId, params) {
     catch (e) { Logger.log("handleGetAutocomplete_ lazy backfill failed: " + e.message); }
   }
 
-  return jsonResponse_({ sidemarks: sidemarks, vendors: vendors, descriptions: descriptions });
+  return jsonResponse_({
+    sidemarks: sidemarks,
+    vendors: vendors,
+    descriptions: descriptions,
+    references: references,
+  });
 }
 
 /**

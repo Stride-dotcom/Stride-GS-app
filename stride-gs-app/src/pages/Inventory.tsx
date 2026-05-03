@@ -1177,7 +1177,7 @@ export function Inventory() {
       cell: i => <span style={{ fontSize: theme.typography.sizes.sm }}>{i.getValue()}</span>,
     }),
 
-    // Reference — inline-editable free text
+    // Reference — inline-editable autocomplete from client Autocomplete_DB
     ch.accessor('reference', {
       header: 'Reference', size: 120,
       cell: i => (
@@ -1186,7 +1186,8 @@ export function Inventory() {
           itemId={i.row.original.itemId}
           clientSheetId={i.row.original.clientId}
           fieldKey="reference"
-          variant="text"
+          variant="autocomplete-db"
+          dbField="references"
           applyItemPatch={applyItemPatch as (id: string, patch: Record<string, unknown>) => void}
           mergeItemPatch={mergeItemPatch as (id: string, patch: Record<string, unknown>) => void}
           disabled={!canEditClientFields}
