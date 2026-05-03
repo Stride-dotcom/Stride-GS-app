@@ -1499,7 +1499,19 @@ export function Billing() {
   }, []);
 
   const saveReportField = useCallback(async (row: BillingRow, field: string, value: string) => {
-    if (!row.clientSheetId) return;
+    // Resolve clientSheetId — primary path is the row itself, but Supabase-
+    // sourced rows occasionally arrive without it (older mirror writes
+    // before tenant_id was always populated). Fall back to looking up the
+    // client by name so the save doesn't silently no-op the way it used to.
+    let targetSheetId = row.clientSheetId || row.sourceSheetId || '';
+    if (!targetSheetId && row.client) {
+      const match = apiClients.find(c => c.name === row.client);
+      if (match) targetSheetId = match.spreadsheetId;
+    }
+    if (!targetSheetId) {
+      showToast(`Save failed: couldn't resolve client sheet for ${row.client || row.ledgerRowId} — refresh and retry`);
+      return;
+    }
     const payload: Record<string, unknown> = { ledgerRowId: row.ledgerRowId };
     if (field === 'sidemark') payload.sidemark = value;
     else if (field === 'reference') payload.reference = value;
@@ -1521,14 +1533,22 @@ export function Billing() {
       setReportData(prev => prev.map(r => r.ledgerRowId === row.ledgerRowId ? { ...r, [field]: value } : r));
     }
 
-    // Backend persist
-    const resp = await postUpdateBillingRow(payload as any, row.clientSheetId);
+    // Backend persist — GAS writes the sheet, then writeThrough mirrors to
+    // Supabase so the next reload sees the new value. On failure we revert
+    // the optimistic local edit and surface a toast (was silently dropping
+    // saves when clientSheetId was missing on the row, since fixed above).
+    const resp = await postUpdateBillingRow(payload as any, targetSheetId);
     if (!resp.ok || !resp.data?.success) {
       // Revert
       setReportData(prev => prev.map(r => r.ledgerRowId === row.ledgerRowId ? oldRow : r));
       showToast('Save failed: ' + (resp.error || resp.data?.error || 'Unknown error'));
+    } else {
+      // Echo the local mutation to entityEvents so other consumers
+      // (Invoice Review tab, BatchDataContext) refetch from the now-updated
+      // Supabase mirror without waiting on the realtime push.
+      entityEvents.emit('billing', String(row.ledgerRowId));
     }
-  }, [showToast]);
+  }, [showToast, apiClients]);
 
   // ─── Columns ──────────────────────────────────────────────────────────────
   // createColumnHelper produces a fresh helper instance on every render

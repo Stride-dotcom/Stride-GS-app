@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.146.0 — 2026-05-03 PST — Invoice Date now actually lands in the sheet + Supabase. (1) `api_markClientLedgerInvoiced_` was using exact-match `hdr["Invoice Date"]` / `hdr["Invoice #"]` / `hdr["Invoice URL"]` lookups; on client templates where any of those columns was missing, the bulk write silently skipped that column. Symptom: 264 Invoiced rows in Supabase had `invoice_date = ''` because the sheet column was never populated. Switched all three to `api_ensureColumn_` (case-insensitive, appends if missing) so client sheets self-heal on first invoice creation after the fix. idxLedgerId / idxStatus stay strict — those should never be missing. (2) `sbBillingRow_` now omits `invoice_date` from the upsert payload when the source value is empty. PostgREST merge-duplicates updates only fields present in the JSON, so omitting blanks preserves any backfilled value in Supabase. Without this, the SQL backfill of historical invoice_date would get clobbered on the next fullClientSync from any client whose sheet hadn't yet gained the column. Combined: future invoices stamp the date both places; historical Supabase rows can be SQL-backfilled from `billing_activity_log.performed_at` and won't be wiped on resync.
+   StrideAPI.gs — v38.147.0 — 2026-05-03 PST — QBO push respects per-client `Separate By Sidemark` flag. `qbo_resolveCustomerAndSubJob_` was unconditionally splitting into a parent:sub-job pair whenever a sidemark existed on the invoice, even when the client's `separate_by_sidemark` flag was false — diverging from the IIF export path which gates on the same flag at line ~20841. Symptom: INV-000130 for Modern Design Sofa landed in QBO as "Modern Design Sofa:Reiner" even though that client's flag is off. Fix: thread `separateBySidemark` from `clientInfoMap` onto the per-invoice group during build, pass it into `qbo_resolveCustomerAndSubJob_`, and treat the sidemark as empty when the flag is false. Default-true on the new param keeps historical behavior for any caller that doesn't yet pass it.
+   v38.146.0 — 2026-05-03 PST — Invoice Date now actually lands in the sheet + Supabase. (1) `api_markClientLedgerInvoiced_` was using exact-match `hdr["Invoice Date"]` / `hdr["Invoice #"]` / `hdr["Invoice URL"]` lookups; on client templates where any of those columns was missing, the bulk write silently skipped that column. Symptom: 264 Invoiced rows in Supabase had `invoice_date = ''` because the sheet column was never populated. Switched all three to `api_ensureColumn_` (case-insensitive, appends if missing) so client sheets self-heal on first invoice creation after the fix. idxLedgerId / idxStatus stay strict — those should never be missing. (2) `sbBillingRow_` now omits `invoice_date` from the upsert payload when the source value is empty. PostgREST merge-duplicates updates only fields present in the JSON, so omitting blanks preserves any backfilled value in Supabase. Without this, the SQL backfill of historical invoice_date would get clobbered on the next fullClientSync from any client whose sheet hadn't yet gained the column. Combined: future invoices stamp the date both places; historical Supabase rows can be SQL-backfilled from `billing_activity_log.performed_at` and won't be wiped on resync.
    v38.145.0 — 2026-05-02 PST — Two new actions + transfer follow-through. (1) `voidInvoice` action: sets every Billing_Ledger row matching invoiceNo to status=Void on the source client sheet, appends a "Voided: <reason>" note, then api_fullClientSync_(.., ['billing']) propagates the change to Supabase. Backs the new Invoice Review tab's per-invoice Void button. withStaffGuard + withClientIsolation, audit row written. (2) handleTransferItems_ now stamps the destination inventory row with transferred_from_tenant_id + transferred_at via new helper api_postTransferSupabaseSideEffects_, which also migrates entity_notes (entity_type='inventory') + item_photos rows from the source tenant to the destination tenant in Supabase, and strips transferred items from any open will_calls on the source tenant (cancels the WC if its item_ids becomes empty). New Supabase helpers supabasePatch_ + supabaseSelect_ added next to supabaseUpsert_/supabaseDelete_. handleTransferItems_ response now includes `transferDate` so the wrapper can use it. The DB-side companion view `inventory_live` (excludes status='Transferred') and the photos_select_tenant RLS policy update were already shipped via Supabase migrations earlier in the session — together they fix the Access Denied symptom on transferred items + close the orphaned-aux-table failure modes Justin flagged.
    v38.144.2: Invoice URL: when skipPdf=true (now the React-side default per the matching React PR), set invoice_url to the new /#/invoices/<invNo>?client=<sheetId> React route instead of leaving it empty. The React page renders the invoice from `billing` rows on demand and supports browser print → save-as-PDF for downloadable reference — replaces the Drive Doc PDF flow that was visually unreliable (Drive auto-reformatted templates) and added 3-8s of wall time to every invoice commit. Drive PDF path (skipPdf=false) keeps its existing URL for operators who opt back in at commit time.
    v38.144.1: Bulk-write the Consolidated_Ledger appends in handleCreateInvoice_. Old code looped calling api_writeConsolidatedLedgerRow_ per row; that helper does 1 setValues + up to 2 setRichTextValue per row (Invoice # + Invoice URL hyperlinks), so ~3N round-trips for N rows. A 50-line invoice was ~150 round-trips on this step, undoing about half of v38.142.9's win on api_markClientLedgerInvoiced_. Since the appends are always contiguous (lastDataRow+1), we build the 2D array in memory and write it ONCE via setValues, then batch-set the hyperlink rich text per column with setRichTextValues. Total: 1 setValues + up to 2 setRichTextValues regardless of N. Combined with v38.142.9, a 50-row monthly invoice's sheet-write phase drops from ~2-3 min to ~5-10 sec.
@@ -35722,7 +35723,7 @@ function qbo_createCustomer_(displayName, token, realmId, parentId) {
  * Core customer/sub-job resolution. Searches mapping cache → QBO → creates if needed.
  * Returns { customerId: string, isParent: boolean }.
  */
-function qbo_resolveCustomerAndSubJob_(clientName, sidemark, token, realmId) {
+function qbo_resolveCustomerAndSubJob_(clientName, sidemark, token, realmId, separateBySidemark) {
   var ss = getStaxSpreadsheet_();
   var sheet = ss.getSheetByName("Customers");
   if (!sheet) throw new Error("Customers tab not found in Stax spreadsheet");
@@ -35751,6 +35752,17 @@ function qbo_resolveCustomerAndSubJob_(clientName, sidemark, token, realmId) {
 
   var normalizedClient = String(clientName || "").trim().toUpperCase();
   var normalizedSidemark = String(sidemark || "").trim();
+  // v38.147.0 — Respect the per-client `Separate By Sidemark` flag (mirrors
+  // the IIF-export behavior at line ~20841). When false, treat the line's
+  // sidemark as if it were absent so the invoice posts against the flat
+  // parent customer instead of being split into a parent:sub-job pair.
+  // Justin reported INV-000130 for Modern Design Sofa landed under
+  // "Modern Design Sofa:Reiner" even though that client has the flag off
+  // — IIF respected it but QBO direct push didn't. Default true to keep
+  // behavior unchanged for callers that don't know about the flag yet.
+  if (separateBySidemark === false && normalizedSidemark) {
+    normalizedSidemark = "";
+  }
   var hasSidemark = normalizedSidemark.length > 0;
 
   // --- Find cached parent row (col A matches, col I is blank) ---
@@ -36391,6 +36403,11 @@ function handleQboCreateInvoice_(payload) {
         strideInvoiceNumber: invNo,
         clientName: qbCustName,
         sidemark: sidemark,
+        // v38.147.0 — Carry the per-client separateBySidemark flag onto the
+        // invoice group so qbo_resolveCustomerAndSubJob_ can decide whether
+        // to split into a parent:sub-job pair. Default to true preserves
+        // historical behavior for callers that don't set this.
+        separateBySidemark: clientInfo.separateBySidemark !== false,
         invoiceDate: invDateStr,
         dueDate: dueDateStr,
         lineItems: [],
@@ -36448,8 +36465,12 @@ function handleQboCreateInvoice_(payload) {
         continue;
       }
 
-      // Resolve customer/sub-job
-      var custResult = qbo_resolveCustomerAndSubJob_(group.clientName, group.sidemark, token, realmId);
+      // Resolve customer/sub-job — pass separateBySidemark so when the
+      // client has the flag off, the line's sidemark is treated as empty
+      // and the invoice posts against the flat parent customer.
+      var custResult = qbo_resolveCustomerAndSubJob_(
+        group.clientName, group.sidemark, token, realmId, group.separateBySidemark
+      );
 
       // Build and push invoice
       // v38.111.0: Pass autoAssignDocNumber flag through to payload builder
