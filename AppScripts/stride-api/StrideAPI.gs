@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.155.0 — 2026-05-03 PST — Drop the misleading "PDF generation skipped (operator choice)" warning that handleCreateInvoice_ unconditionally appended whenever skipPdf=true. The operator-facing Generate PDF checkbox was removed in PR #210; skipPdf is now React-controlled (true unless the operator opts into the email-attachment path), and the React side immediately generates the canonical PDF via jsPDF + Supabase Storage and PATCHes billing.invoice_url to the signed URL. So a PDF *is* being created on every commit — surfacing a "skipped" warning misled Justin into thinking invoices were missing PDFs. The warning push at handleCreateInvoice_ ~line 21937 is removed; the empty `warnings` array stays so the response shape doesn't drift for existing consumers.
+   StrideAPI.gs — v38.156.0 — 2026-05-03 PST — QBO sub-customer invoices now inherit BillEmail / BillAddr / ShipAddr from the parent customer record. QBO does NOT auto-inherit contact info on sub-customer invoices — every Customer:Sidemark push was landing in QBO with empty bill-to fields, so the QBO-side "Send invoice" action had nowhere to email it (Justin reported this). The QBO API's IsProject flag is read-only — we can't switch from sub-customers to Projects to fix it that way — so we explicitly inherit at push time instead. New helper qbo_getCustomerContactInfo_ fetches PrimaryEmailAddr / BillAddr / ShipAddr / PrimaryPhone via GET /customer/{id}; qbo_resolveCustomerAndSubJob_ now also returns parentCustomerId so the caller can do that lookup. handleQboPush_ holds a per-batch parentContactCache so a 50-line invoice with 4 sidemarks does 4 parent lookups, not 50; same-client follow-up invoices in the same batch are already warm. Inheritance is conditional per field — empty parent values don't write empty objects (which QBO interprets as a clear-the-field action). Parent customers (no sidemark, or separate_by_sidemark=false) are unchanged — they hit QBO with CustomerRef pointing at the parent, which already pulls contact info correctly.
+   v38.155.0 — 2026-05-03 PST — Drop the misleading "PDF generation skipped (operator choice)" warning that handleCreateInvoice_ unconditionally appended whenever skipPdf=true. The operator-facing Generate PDF checkbox was removed in PR #210; skipPdf is now React-controlled (true unless the operator opts into the email-attachment path), and the React side immediately generates the canonical PDF via jsPDF + Supabase Storage and PATCHes billing.invoice_url to the signed URL. So a PDF *is* being created on every commit — surfacing a "skipped" warning misled Justin into thinking invoices were missing PDFs. The warning push at handleCreateInvoice_ ~line 21937 is removed; the empty `warnings` array stays so the response shape doesn't drift for existing consumers.
    v38.154.0 — 2026-05-03 PST — Reference now joins Sidemark / Vendor / Description as an autocomplete-DB field. handleGetAutocomplete_ returns a `references` array on both code paths (Supabase first, sheet fallback). The companion Postgres migration relaxes the autocomplete_db CHECK to allow 'Reference', backfills 440 distinct references / 26 tenants from inventory + billing, and installs INSERT/UPDATE triggers on public.inventory + public.billing that auto-populate autocomplete_db whenever sidemark / vendor / description / reference values are written — eliminating the periodic-backfill cycle that surfaced Justin's "missing sidemarks" report earlier today. React side: useAutocomplete + InlineEditableCell + Inventory.tsx Reference column + ItemDetailPanel Reference field all switch from plain text to autocomplete-db variant.
    v38.153.0 — 2026-05-03 PST — Stax Customers sheet retired; CB Clients is the single source of truth for Stax Customer ID. Three Stax write paths (handleQbExport_ auto-push, handleImportIIF_, stax_lookupCustomerIds_ → Refresh Stax IDs button) all resolve via the new stax_buildClientStaxMap_() helper, which indexes CB Clients rows by Client Name, QB Customer Name, AND Stax Customer Name into the same record so divergent-name invoices match. Sheet-row dedup on Stax Invoices switches from the multi-field hash (docNum|name|amount|date) to the QB invoice number alone — Justin reported INV-000131 landing twice when a re-import drifted on amount/date even though the docNum was identical. Existing PENDING rows now UPDATE in place with the freshest customer / date / total / line items / Stax Customer ID; CREATED / PAID / VOIDED rows are left untouched (in-flight invoices must not be clobbered by a stale re-import). Rows that resolve to a client without a Stax Customer ID are now skipped and logged as a NO_CUSTOMER exception instead of inserted as half-populated PENDING rows. The Stax-side customer-name written into the Invoices sheet falls back through `entry.staxCustomerName (alias only) → clientInfo.staxCustomerName → invoice qbName`, preserving the pre-v38.153.0 behavior of writing the IIF's QB name when no explicit Stax-side alias is set on the client record. New admin entry point `runStaxSheetsCleanup` collapses existing duplicate clutter: Stax Invoices dedupes by QB invoice number, keeping the row with the strongest status (PAID > VOIDED > CHARGE_FAILED/SENT > CREATED > PENDING), then non-empty Stax Invoice ID, then most recent Created At; Stax Customers dedupes by (QB Name + Stax Customer ID), keeping the row with the most filled-in cells (fixes the Wignall x2 / Digs x7 ghosts Justin spotted). Reads `Stax Customer ID` from the standard CB Clients column.
    v38.152.0 — 2026-05-03 PST — Billing inline edits actually persist now. handleUpdateBillingRow_ used hMap["X"] exact-match column lookups for every editable field (Sidemark, Reference, Description, Item Notes, Rate, Qty, Total, Svc Code/Name/Class). On Billing_Ledger templates that pre-date one of those columns, hMap[X] returned undefined and the write silently no-op'd — the React Billing Report's optimistic update would appear to take then revert on the next refetch because nothing landed in the sheet. Justin reported this for sidemark; the same bug affected every other field. Same class as the v38.146.0 Invoice Date fix. Switched all 10 column lookups to api_ensureColumn_ (case-insensitive, appends if missing) so client sheets self-heal on the first inline edit after the fix ships and the writeThrough mirror back to Supabase carries the new value.
@@ -36049,7 +36050,12 @@ function qbo_createCustomer_(displayName, token, realmId, parentId) {
 
 /**
  * Core customer/sub-job resolution. Searches mapping cache → QBO → creates if needed.
- * Returns { customerId: string, isParent: boolean }.
+ * Returns { customerId: string, isParent: boolean, parentCustomerId: string|null }.
+ *
+ * v38.156.0 — also returns `parentCustomerId` so callers can look up the
+ * parent's BillEmail / BillAddr and stamp it on the invoice. QBO does NOT
+ * inherit contact info from parent → sub-customer at invoice render, so
+ * we have to inherit explicitly at push time.
  */
 function qbo_resolveCustomerAndSubJob_(clientName, sidemark, token, realmId, separateBySidemark) {
   var ss = getStaxSpreadsheet_();
@@ -36125,7 +36131,7 @@ function qbo_resolveCustomerAndSubJob_(clientName, sidemark, token, realmId, sep
   // --- No sidemark: resolve parent only ---
   if (!hasSidemark) {
     if (cachedParentQboId) {
-      return { customerId: cachedParentQboId, isParent: true };
+      return { customerId: cachedParentQboId, isParent: true, parentCustomerId: null };
     }
 
     // Search QBO for parent
@@ -36143,12 +36149,12 @@ function qbo_resolveCustomerAndSubJob_(clientName, sidemark, token, realmId, sep
 
     // Cache parent row
     qbo_saveMappingRow_(sheet, data, parentRowIdx, clientName, "", parentId, "");
-    return { customerId: parentId, isParent: true };
+    return { customerId: parentId, isParent: true, parentCustomerId: null };
   }
 
   // --- Has sidemark: resolve parent + sub-job ---
   if (cachedSubJobQboId) {
-    return { customerId: cachedSubJobQboId, isParent: false };
+    return { customerId: cachedSubJobQboId, isParent: false, parentCustomerId: cachedParentQboId || null };
   }
 
   // Ensure we have the parent QBO ID
@@ -36186,7 +36192,41 @@ function qbo_resolveCustomerAndSubJob_(clientName, sidemark, token, realmId, sep
   // Cache sub-job row (separate row from parent)
   qbo_saveMappingRow_(sheet, data, subJobRowIdx, clientName, normalizedSidemark, resolvedParentId, subJobId);
 
-  return { customerId: subJobId, isParent: false };
+  return { customerId: subJobId, isParent: false, parentCustomerId: resolvedParentId };
+}
+
+/**
+ * v38.156.0 — Fetch a QBO customer's contact + address fields for inheriting
+ * onto sub-job invoices. QBO does NOT auto-inherit BillEmail/BillAddr from
+ * parent → sub-customer at invoice render time, so we explicitly populate
+ * those fields on the invoice payload from the parent customer's record.
+ *
+ * Returns null on lookup failure so the caller can degrade gracefully (push
+ * the invoice without the inherited contact info — same behavior as before).
+ *
+ * Cached per-batch by callers via the optional `cache` map (parentId → info)
+ * so a 50-line invoice with 4 sidemarks fires 4 lookups, not 50.
+ */
+function qbo_getCustomerContactInfo_(customerId, token, realmId, cache) {
+  if (!customerId) return null;
+  var key = String(customerId);
+  if (cache && cache[key]) return cache[key];
+  try {
+    var result = qbo_apiRequest_("GET", "customer/" + encodeURIComponent(key), null, token, realmId);
+    if (!result || !result.Customer) return null;
+    var c = result.Customer;
+    var info = {
+      billEmail: (c.PrimaryEmailAddr && c.PrimaryEmailAddr.Address) ? String(c.PrimaryEmailAddr.Address) : "",
+      billAddr: c.BillAddr || null,
+      shipAddr: c.ShipAddr || null,
+      billPhone: (c.PrimaryPhone && c.PrimaryPhone.FreeFormNumber) ? String(c.PrimaryPhone.FreeFormNumber) : ""
+    };
+    if (cache) cache[key] = info;
+    return info;
+  } catch (e) {
+    Logger.log("qbo_getCustomerContactInfo_ failed for customerId=" + key + ": " + e.message);
+    return null;
+  }
 }
 
 /**
@@ -36447,6 +36487,16 @@ function qbo_writeQboFailure_(strideInvoiceNumber, errorMsg, consolSh, consolVal
 function qbo_buildInvoicePayload_(invoiceData, customerQboId, itemMap, token, realmId, itemIdCache, options) {
   options = options || {};
   var autoAssign = !!options.autoAssignDocNumber;
+  // v38.156.0 — When the invoice's CustomerRef points at a sub-customer,
+  // QBO does NOT auto-pull BillEmail / BillAddr from the parent. Justin
+  // hit this on every Customer:Sidemark push: the invoice landed in QBO
+  // with empty bill-to email, so QBO had nowhere to send the invoice
+  // when staff hit "Send" from the QBO side. The caller resolves the
+  // parent's contact info via qbo_getCustomerContactInfo_ and passes it
+  // through `options.parentContactInfo`; we stamp it onto the payload
+  // here so the sub-customer invoice carries the parent's bill-to info.
+  // Null/missing parentContactInfo → keep historical no-op behavior.
+  var parentContactInfo = options.parentContactInfo || null;
 
   var lines = [];
   for (var li = 0; li < invoiceData.lineItems.length; li++) {
@@ -36481,6 +36531,22 @@ function qbo_buildInvoicePayload_(invoiceData, customerQboId, itemMap, token, re
   // Only set DocNumber when NOT in auto-assign mode — otherwise let QBO pick
   if (!autoAssign) {
     payload.DocNumber = invoiceData.strideInvoiceNumber;
+  }
+
+  // v38.156.0 — Inherit contact info from the parent customer record onto
+  // the invoice when this is a sub-customer push. Each field is set only
+  // when the parent actually has that field populated, so we never write
+  // empty objects (which QBO would interpret as a clear-the-field action).
+  if (parentContactInfo) {
+    if (parentContactInfo.billEmail) {
+      payload.BillEmail = { "Address": parentContactInfo.billEmail };
+    }
+    if (parentContactInfo.billAddr) {
+      payload.BillAddr = parentContactInfo.billAddr;
+    }
+    if (parentContactInfo.shipAddr) {
+      payload.ShipAddr = parentContactInfo.shipAddr;
+    }
   }
 
   return payload;
@@ -36764,6 +36830,11 @@ function handleQboCreateInvoice_(payload) {
   // Push each invoice to QBO
   var results = [];
   var pushedCount = 0, skippedCount = 0, failedCount = 0;
+  // v38.156.0 — parent customer contact-info cache for sub-job invoices,
+  // shared across the whole batch. A 50-line invoice with 4 sidemarks
+  // does 4 lookups instead of 50; a same-client follow-up batch is
+  // already warm.
+  var parentContactCache = {};
 
   for (var n = 0; n < invoiceNumbers.length; n++) {
     var invNum = invoiceNumbers[n];
@@ -36800,11 +36871,31 @@ function handleQboCreateInvoice_(payload) {
         group.clientName, group.sidemark, token, realmId, group.separateBySidemark
       );
 
+      // v38.156.0 — When this is a sub-customer push, fetch the parent's
+      // BillEmail / BillAddr / ShipAddr so we can stamp them on the
+      // invoice payload. QBO doesn't auto-inherit on sub-customers, so
+      // the invoice would otherwise land with empty bill-to fields and
+      // QBO's "Send invoice" action would have nowhere to email it.
+      var parentContact = null;
+      if (!custResult.isParent && custResult.parentCustomerId) {
+        parentContact = qbo_getCustomerContactInfo_(
+          custResult.parentCustomerId, token, realmId, parentContactCache
+        );
+        // Surface a per-invoice warning when the lookup failed — this whole
+        // change exists to fix a silent-failure bug, so we shouldn't
+        // re-introduce one. The push still proceeds (the invoice itself is
+        // created); operator just needs to know QBO will have empty bill-to.
+        if (!parentContact) {
+          resultEntry.warning = "Pushed without parent bill-to inherited (parent contact lookup failed for QBO customer " +
+                                custResult.parentCustomerId + "). The QBO invoice's email/address fields will be blank.";
+        }
+      }
+
       // Build and push invoice
       // v38.111.0: Pass autoAssignDocNumber flag through to payload builder
       var invoicePayload = qbo_buildInvoicePayload_(
         group, custResult.customerId, itemMap, token, realmId, itemIdCache,
-        { autoAssignDocNumber: autoAssignDocNumber }
+        { autoAssignDocNumber: autoAssignDocNumber, parentContactInfo: parentContact }
       );
       var pushResult = qbo_createInvoice_(invoicePayload, token, realmId);
 
