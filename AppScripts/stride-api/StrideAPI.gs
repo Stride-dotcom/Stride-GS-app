@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.151.0 — 2026-05-03 PST — `Stax Customer Name` override on the client record + lookup wiring. New CLIENT_FIELDS_ entry `staxCustomerName` (CB Clients column "Stax Customer Name", Supabase column `clients.stax_customer_name`) lets staff pin the Stax-side customer name when it diverges from the QB name (e.g. "Brian Paquette Interiors" in QB / Stride vs "Brian Paquette Interiors - active" in Stax). Two lookup-path changes use it: (1) the Stax Customers tab now indexes staxCustMap by BOTH the QB name (col A) AND the Stax-side display name (col C) — same staxId either way — so the lookup at line ~20625 succeeds even when the invoice line carries the divergent name. (2) The createStaxInvoices auto-import threads `clientInfo.staxCustomerName` from CB Clients onto the per-row lookup chain (preferring it over qbName when set). Net effect: when the user sets `Stax Customer Name` on a client, the Stax push reuses the existing customer instead of creating a duplicate. Migration `clients_stax_customer_name_alias` adds the column.
+   StrideAPI.gs — v38.152.0 — 2026-05-03 PST — Billing inline edits actually persist now. handleUpdateBillingRow_ used hMap["X"] exact-match column lookups for every editable field (Sidemark, Reference, Description, Item Notes, Rate, Qty, Total, Svc Code/Name/Class). On Billing_Ledger templates that pre-date one of those columns, hMap[X] returned undefined and the write silently no-op'd — the React Billing Report's optimistic update would appear to take then revert on the next refetch because nothing landed in the sheet. Justin reported this for sidemark; the same bug affected every other field. Same class as the v38.146.0 Invoice Date fix. Switched all 10 column lookups to api_ensureColumn_ (case-insensitive, appends if missing) so client sheets self-heal on the first inline edit after the fix ships and the writeThrough mirror back to Supabase carries the new value.
+   v38.151.0 — 2026-05-03 PST — `Stax Customer Name` override on the client record + lookup wiring. New CLIENT_FIELDS_ entry `staxCustomerName` (CB Clients column "Stax Customer Name", Supabase column `clients.stax_customer_name`) lets staff pin the Stax-side customer name when it diverges from the QB name (e.g. "Brian Paquette Interiors" in QB / Stride vs "Brian Paquette Interiors - active" in Stax). Two lookup-path changes use it: (1) the Stax Customers tab now indexes staxCustMap by BOTH the QB name (col A) AND the Stax-side display name (col C) — same staxId either way — so the lookup at line ~20625 succeeds even when the invoice line carries the divergent name. (2) The createStaxInvoices auto-import threads `clientInfo.staxCustomerName` from CB Clients onto the per-row lookup chain (preferring it over qbName when set). Net effect: when the user sets `Stax Customer Name` on a client, the Stax push reuses the existing customer instead of creating a duplicate. Migration `clients_stax_customer_name_alias` adds the column.
    v38.150.0 — 2026-05-03 PST — Stax `meta.reference` is now the bare invoice number. createStaxInvoices was building refKey as the composite "QB#<docnum>|<name>|<total>|<date>" and Stax's customer-portal UI was displaying that composite as the invoice number on the customer payment page (e.g. INV-000100 showed as "QB#INV-000100|brian paquette interiors - active|840|2026-05-03"). Invoice numbers are already unique by definition so the composite added zero dedup value over docNum alone. Now refKey = String(docNum).trim() — clean. Back-compat: handleLinkStaxInvoiceToExisting_ already matches three forms (meta.invoiceNumber === qbNo, meta.reference starts with "QB#<qbNo>|" for historical pushes, OR meta.reference === qbNo) so already-pushed composite-refKey invoices in Stax keep linking; new pushes use the clean bare number. stax_invoiceKey_ (the SHEET-side dedup used by IIF import + auto-charge) is unchanged — that's a different code path that prevents duplicate sheet rows and benefits from the multi-field uniqueness check.
    v38.149.0 — 2026-05-03 PST — Autocomplete migrated to Supabase. handleGetAutocomplete_ now reads public.autocomplete_db first; on a miss it falls back to the per-client Autocomplete_DB sheet AND fire-and-forgets a batch upsert to Supabase so the next React fetch hits the fast path. New runAutocompleteBackfill() admin function — walks every active client in CB Clients, opens the spreadsheet, and pushes existing Autocomplete_DB rows to Supabase. Run once after deploy. Idempotent (PK is tenant_id,field,value). New table: public.autocomplete_db (migration 20260503000000_autocomplete_db.sql) — staff/admin SELECT all, client SELECT own tenant, service role full. supabaseUpsert_ conflict map adds autocomplete_db -> tenant_id,field,value.
    v38.148.0 — 2026-05-03 PST — Billing Total now manually editable. `handleUpdateBillingRow_` accepts an optional `payload.total` and, when provided, writes that value verbatim to the Total column instead of recomputing Rate × Qty. Lets staff hand-adjust a single invoice line for special-case pricing without having to back-solve a fake rate or qty (which other reports depend on staying canonical). Rate/Qty edits keep their existing recompute behavior — the override only kicks in when `total` is in the payload. React side adds an inline-editable Total cell on the Billing Report (Unbilled rows only) wired through the new field.
@@ -11573,39 +11574,53 @@ function handleUpdateBillingRow_(clientSheetId, payload) {
     }
 
     // Apply updates
+    // v38.152.0 — Use api_ensureColumn_ for every editable column instead of
+    // hMap["X"] exact-match. Older Billing_Ledger templates were missing the
+    // Sidemark / Reference / Item Notes / Svc / Class headers, so the writes
+    // silently no-op'd — the React Billing Report's optimistic update would
+    // appear to take, then revert on the next refetch because the sheet
+    // never recorded the change. Same class of bug as Invoice Date in
+    // v38.146.0. ensureColumn is case-insensitive AND appends if missing,
+    // so client sheets self-heal on the first inline edit after this ships.
     var updated = {};
     var isManual = ledgerRowId.indexOf("MANUAL-") === 0;
-    if (payload.sidemark !== undefined && hMap["Sidemark"]) {
-      sheet.getRange(matchRow, hMap["Sidemark"]).setValue(String(payload.sidemark));
+    if (payload.sidemark !== undefined) {
+      var smCol = api_ensureColumn_(sheet, "Sidemark");
+      sheet.getRange(matchRow, smCol).setValue(String(payload.sidemark));
       updated.sidemark = String(payload.sidemark);
     }
-    // v38.112.0: reference is now inline-editable from the Billing Report.
-    if (payload.reference !== undefined && hMap["Reference"]) {
-      sheet.getRange(matchRow, hMap["Reference"]).setValue(String(payload.reference));
+    if (payload.reference !== undefined) {
+      var refColIdx = api_ensureColumn_(sheet, "Reference");
+      sheet.getRange(matchRow, refColIdx).setValue(String(payload.reference));
       updated.reference = String(payload.reference);
     }
-    if (payload.description !== undefined && hMap["Description"]) {
-      sheet.getRange(matchRow, hMap["Description"]).setValue(String(payload.description));
+    if (payload.description !== undefined) {
+      var descCol = api_ensureColumn_(sheet, "Description");
+      sheet.getRange(matchRow, descCol).setValue(String(payload.description));
       updated.description = String(payload.description);
     }
-    if (payload.notes !== undefined && hMap["Item Notes"]) {
-      sheet.getRange(matchRow, hMap["Item Notes"]).setValue(String(payload.notes));
+    if (payload.notes !== undefined) {
+      var notesCol = api_ensureColumn_(sheet, "Item Notes");
+      sheet.getRange(matchRow, notesCol).setValue(String(payload.notes));
       updated.notes = String(payload.notes);
     }
     // v38.77.0 — manual charges only: svcCode/svcName/itemClass are editable
     // because they were arbitrary at creation time. For task/item-derived
     // billing rows these come from the source entity and shouldn't drift.
     if (isManual) {
-      if (payload.svcCode !== undefined && hMap["Svc Code"]) {
-        sheet.getRange(matchRow, hMap["Svc Code"]).setValue(String(payload.svcCode));
+      if (payload.svcCode !== undefined) {
+        var svcCol = api_ensureColumn_(sheet, "Svc Code");
+        sheet.getRange(matchRow, svcCol).setValue(String(payload.svcCode));
         updated.svcCode = String(payload.svcCode);
       }
-      if (payload.svcName !== undefined && hMap["Svc Name"]) {
-        sheet.getRange(matchRow, hMap["Svc Name"]).setValue(String(payload.svcName));
+      if (payload.svcName !== undefined) {
+        var svcNameCol = api_ensureColumn_(sheet, "Svc Name");
+        sheet.getRange(matchRow, svcNameCol).setValue(String(payload.svcName));
         updated.svcName = String(payload.svcName);
       }
-      if (payload.itemClass !== undefined && hMap["Class"]) {
-        sheet.getRange(matchRow, hMap["Class"]).setValue(String(payload.itemClass));
+      if (payload.itemClass !== undefined) {
+        var classCol = api_ensureColumn_(sheet, "Class");
+        sheet.getRange(matchRow, classCol).setValue(String(payload.itemClass));
         updated.itemClass = String(payload.itemClass);
       }
     }
@@ -11620,19 +11635,21 @@ function handleUpdateBillingRow_(clientSheetId, payload) {
     var qtyChanged = (payload.qty !== undefined);
     var totalChanged = (payload.total !== undefined);
     if (rateChanged || qtyChanged || totalChanged) {
-      var rateCol = hMap["Rate"];
-      var qtyCol = hMap["Qty"];
-      var totalCol = hMap["Total"];
+      // Same ensure-column treatment for Rate / Qty / Total — older
+      // templates that lacked these wouldn't see the write either.
+      var rateCol = api_ensureColumn_(sheet, "Rate");
+      var qtyCol = api_ensureColumn_(sheet, "Qty");
+      var totalCol = api_ensureColumn_(sheet, "Total");
 
-      var currentRate = rateCol ? Number(sheet.getRange(matchRow, rateCol).getValue()) || 0 : 0;
-      var currentQty = qtyCol ? Number(sheet.getRange(matchRow, qtyCol).getValue()) || 1 : 1;
+      var currentRate = Number(sheet.getRange(matchRow, rateCol).getValue()) || 0;
+      var currentQty = Number(sheet.getRange(matchRow, qtyCol).getValue()) || 1;
 
-      if (rateChanged && rateCol) {
+      if (rateChanged) {
         currentRate = Number(payload.rate) || 0;
         sheet.getRange(matchRow, rateCol).setValue(currentRate);
         updated.rate = currentRate;
       }
-      if (qtyChanged && qtyCol) {
+      if (qtyChanged) {
         currentQty = Number(payload.qty) || 1;
         sheet.getRange(matchRow, qtyCol).setValue(currentQty);
         updated.qty = currentQty;
@@ -11644,10 +11661,8 @@ function handleUpdateBillingRow_(clientSheetId, payload) {
       } else {
         newTotal = Math.round(currentRate * currentQty * 100) / 100;
       }
-      if (totalCol) {
-        sheet.getRange(matchRow, totalCol).setValue(newTotal);
-        updated.total = newTotal;
-      }
+      sheet.getRange(matchRow, totalCol).setValue(newTotal);
+      updated.total = newTotal;
     }
 
     return jsonResponse_({
