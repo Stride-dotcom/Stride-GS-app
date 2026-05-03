@@ -90,6 +90,9 @@ function clientsToStaxCustomers(clients: ApiClient[]): StaxCustomerRow[] {
         staxName: aliasName || c.name,
         staxId,
         email: c.email || '',
+        // The upstream filter guarantees a non-empty staxId, so "Card on
+        // file" is always truthful here. If that filter ever loosens, this
+        // synthesis needs a third branch (empty payMethod when no Stax ID).
         payMethod: c.autoCharge ? 'Auto Pay' : 'Card on file',
         notes: '',
       };
