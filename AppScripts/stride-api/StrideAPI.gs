@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.144.0 — 2026-05-02 PST — New `commitStorageRows` action: takes pre-computed STOR rows from the React Storage Charges tab (which now sources them from the Postgres `calculate_storage_charges` RPC) and writes them straight to each tenant's Billing_Ledger. Skips the read+compute phase that used to time out on big clients (e.g. Allison Lind Design). Each affected tenant gets a one-shot `api_fullClientSync_(.., ["billing"])` after the write so the React Billing list refreshes immediately. The original generateStorageCharges/previewStorageCharges actions stay intact for backward compatibility.
+   StrideAPI.gs — v38.144.1 — 2026-05-02 PST — Bulk-write the Consolidated_Ledger appends in handleCreateInvoice_. Old code looped calling api_writeConsolidatedLedgerRow_ per row; that helper does 1 setValues + up to 2 setRichTextValue per row (Invoice # + Invoice URL hyperlinks), so ~3N round-trips for N rows. A 50-line invoice was ~150 round-trips on this step, undoing about half of v38.142.9's win on api_markClientLedgerInvoiced_. Since the appends are always contiguous (lastDataRow+1), we build the 2D array in memory and write it ONCE via setValues, then batch-set the hyperlink rich text per column with setRichTextValues. Total: 1 setValues + up to 2 setRichTextValues regardless of N. Combined with v38.142.9, a 50-row monthly invoice's sheet-write phase drops from ~2-3 min to ~5-10 sec.
+   v38.144.0: New `commitStorageRows` action: takes pre-computed STOR rows from the React Storage Charges tab (which now sources them from the Postgres `calculate_storage_charges` RPC) and writes them straight to each tenant's Billing_Ledger. Skips the read+compute phase that used to time out on big clients (e.g. Allison Lind Design). Each affected tenant gets a one-shot `api_fullClientSync_(.., ["billing"])` after the write so the React Billing list refreshes immediately. The original generateStorageCharges/previewStorageCharges actions stay intact for backward compatibility.
    v38.143.1: Two cleanups in the will-call cancellation path. (1) handleBatchCancelWillCalls_ was re-reading the WC_Items snapshot inside its outer WC loop AND writing one setValue per cascaded item — for M WCs × N items, that's M sheet reads + M*N round-trips. New code reads WC_Items ONCE before the outer loop, accumulates cancel-row numbers across all WCs into wciCancelRows, and does a single bulk setValues over the contiguous range at the end (same recipe as #188; differs only in that this wciData is sliced from row 2 with no header, so sheet row R maps to wciData[R - 2]). (2) handleCancelWillCall_ no longer re-reads wciMap2/wciData2 to build the email items table — reuses the section-4 wciData snapshot since item-level fields don't change with cancellation.
    v38.143.0: Task add-on services. handleCompleteTask_ now flushes public.task_addons rows to the client Billing_Ledger after the primary service charge, one row per addon, snapshotting the rate captured at add-time. Ledger Row IDs are {taskId}-{svcCode}-ADDON-{n} for uniqueness; Task ID column carries {taskId}-{svcCode} per spec so unbilled reports distinguish the addon line from the parent. Each addon row also goes through resyncEntityToSupabase_ so the React Billing page sees it within ~1-2s. Fetch is via new api_fetchTaskAddons_ (GET /rest/v1/task_addons?tenant_id=eq.X&task_id=eq.Y&order=created_at.asc). Failures are non-fatal warnings so the primary task billing always lands. New table: public.task_addons (migration 20260502160000_task_addons.sql).
    v38.142.12: Class C bulk-write fix for handleStartTask_, handleCompleteTask_, handleCompleteRepair_. Each was doing 4-8 separate setValue() calls per request (one row across many columns), 500ms-2s each, totalling 5-15 sec of latency. Refactored each to mutate the in-memory rowData (already read once at function start) via a setRowVal_ helper that tracks modified columns, then write ONCE via setValues over the contiguous slice covering all touched columns. Untouched-but-in-slice columns write back their existing values from the snapshot so unrelated cells aren't clobbered. Single-row contiguous version of the same recipe used in #186/#187/#188. Also drops a now-redundant SpreadsheetApp.flush() inside handleCompleteTask_'s Custom Price branch — the bulk write at end-of-try makes it meaningless, and resyncEntityToSupabase_ flushes itself before reading. Each handler now responds in <2 sec.
@@ -21757,15 +21758,24 @@ function handleCreateInvoice_(payload) {
   var warnings   = [];
   if (skipPdf) warnings.push("PDF generation skipped (operator choice)");
 
-  // Write rows to CB Consolidated_Ledger (dedup by ledgerRowId)
+  // Write rows to CB Consolidated_Ledger (dedup by ledgerRowId).
+  // v38.144.1 — Bulk-write the appends. Old code looped calling
+  // api_writeConsolidatedLedgerRow_ per row; that helper does 1 setValues
+  // + up to 2 setRichTextValue per row (Invoice # + Invoice URL hyperlinks),
+  // = ~3N round-trips for N rows. A 50-line invoice was ~150 round-trips
+  // here, undoing about half of v38.142.9's win on api_markClientLedgerInvoiced_.
+  // Since all new rows append contiguously after lastDataRow+1, we build
+  // the 2D array in memory and write it ONCE via setValues, then batch-set
+  // the hyperlink rich text per column with setRichTextValues. Total: 1
+  // setValues + up to 2 setRichTextValues, regardless of N.
   var consolLedger = cbSS.getSheetByName("Consolidated_Ledger");
   if (!consolLedger) consolLedger = cbSS.insertSheet("Consolidated_Ledger");
 
   var existingIds = {};
   if (consolLedger.getLastRow() > 1) {
     var cData = consolLedger.getDataRange().getValues();
-    var cHdr  = api_getHeaderMap_(consolLedger);
-    var cLid  = cHdr["Ledger Row ID"];
+    var cHdrEx = api_getHeaderMap_(consolLedger);
+    var cLid = cHdrEx["Ledger Row ID"];
     if (cLid) {
       for (var xi = 1; xi < cData.length; xi++) {
         var xid = String(cData[xi][cLid - 1] || "").trim();
@@ -21773,34 +21783,75 @@ function handleCreateInvoice_(payload) {
       }
     }
   }
+
+  var ncolsCB = consolLedger.getLastColumn() || 1;
+  var hdrCB = api_getHeaderMap_(consolLedger);
+  function setCB_(rowArr, name, val) {
+    var col = hdrCB[name];
+    if (col !== undefined && col >= 1 && col <= ncolsCB) {
+      rowArr[col - 1] = (val !== undefined && val !== null) ? val : "";
+    }
+  }
+  var clRowsToInsert = [];
   for (var ri2 = 0; ri2 < rows.length; ri2++) {
     var row2 = rows[ri2];
     var lid2 = String(row2.ledgerRowId || "").trim();
     if (lid2 && existingIds[lid2]) continue;
-    api_writeConsolidatedLedgerRow_(consolLedger, {
-      status:        "Invoiced",
-      invoiceNo:     invNo,
-      client:        row2.client      || client,
-      clientSheetId: sourceSheetId,
-      ledgerRowId:   lid2,
-      date:          row2.date        || "",
-      svcCode:       row2.svcCode     || "",
-      svcName:       row2.svcName     || "",
-      itemId:        row2.itemId      || "",
-      description:   row2.description || "",
-      klass:         row2.itemClass   || "",
-      qty:           row2.qty,
-      rate:          row2.rate,
-      total:         row2.total,
-      taskId:        row2.taskId      || "",
-      repairId:      row2.repairId    || "",
-      shipNo:        row2.shipmentNo  || "",
-      notes:         row2.notes       || "",
-      sidemark:      row2.sidemark    || "",
-      emailStatus:   "",
-      invoiceUrl:    invoiceUrl
-    });
+    var clRow = new Array(ncolsCB).fill("");
+    setCB_(clRow, "Status",          "Invoiced");
+    setCB_(clRow, "Invoice #",       invNo);
+    setCB_(clRow, "Client",          row2.client      || client);
+    setCB_(clRow, "Client Sheet ID", sourceSheetId);
+    setCB_(clRow, "Ledger Row ID",   lid2);
+    setCB_(clRow, "Date",            row2.date        || "");
+    setCB_(clRow, "Svc Code",        row2.svcCode     || "");
+    setCB_(clRow, "Svc Name",        row2.svcName     || "");
+    setCB_(clRow, "Item ID",         row2.itemId      || "");
+    setCB_(clRow, "Description",     row2.description || "");
+    setCB_(clRow, "Class",           row2.itemClass   || "");
+    setCB_(clRow, "Qty",             row2.qty   !== undefined ? row2.qty   : "");
+    setCB_(clRow, "Rate",            row2.rate  !== undefined ? row2.rate  : "");
+    setCB_(clRow, "Total",           row2.total !== undefined ? row2.total : "");
+    setCB_(clRow, "Task ID",         row2.taskId      || "");
+    setCB_(clRow, "Repair ID",       row2.repairId    || "");
+    setCB_(clRow, "Shipment #",      row2.shipmentNo  || "");
+    setCB_(clRow, "Item Notes",      row2.notes       || "");
+    setCB_(clRow, "Sidemark",        row2.sidemark    || "");
+    setCB_(clRow, "Email Status",    "");
+    setCB_(clRow, "Invoice URL",     invoiceUrl);
+    clRowsToInsert.push(clRow);
     if (lid2) existingIds[lid2] = true;
+  }
+
+  if (clRowsToInsert.length > 0) {
+    var insertStart = api_getLastDataRow_(consolLedger) + 1;
+    consolLedger.getRange(insertStart, 1, clRowsToInsert.length, ncolsCB).setValues(clRowsToInsert);
+
+    // Hyperlink rich-text on Invoice # and Invoice URL columns. Single
+    // batched setRichTextValues per column over the inserted slice.
+    var invUrlTrim = String(invoiceUrl || "").trim();
+    if (invUrlTrim) {
+      var invNoColCB = hdrCB["Invoice #"];
+      var invUrlColCB = hdrCB["Invoice URL"];
+      if (invNoColCB) {
+        try {
+          var invNoRTs = new Array(clRowsToInsert.length);
+          for (var rk1 = 0; rk1 < clRowsToInsert.length; rk1++) {
+            invNoRTs[rk1] = [SpreadsheetApp.newRichTextValue().setText(invNo).setLinkUrl(invUrlTrim).build()];
+          }
+          consolLedger.getRange(insertStart, invNoColCB, clRowsToInsert.length, 1).setRichTextValues(invNoRTs);
+        } catch (_) {}
+      }
+      if (invUrlColCB) {
+        try {
+          var invUrlRTs = new Array(clRowsToInsert.length);
+          for (var rk2 = 0; rk2 < clRowsToInsert.length; rk2++) {
+            invUrlRTs[rk2] = [SpreadsheetApp.newRichTextValue().setText("View Invoice").setLinkUrl(invUrlTrim).build()];
+          }
+          consolLedger.getRange(insertStart, invUrlColCB, clRowsToInsert.length, 1).setRichTextValues(invUrlRTs);
+        } catch (_) {}
+      }
+    }
   }
 
   // Update client Billing_Ledger rows to Invoiced
