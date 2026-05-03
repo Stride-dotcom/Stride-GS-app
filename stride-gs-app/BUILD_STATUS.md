@@ -1,6 +1,6 @@
 # Stride GS App — Build Status
 
-> Last updated: 2026-05-02 (late EOD, session 91). Verified against actual codebase.
+> Last updated: 2026-05-02 (session 92 — transfer-system overhaul + Invoice Review tab). Verified against actual codebase.
 
 ---
 
@@ -9,8 +9,8 @@
 | System | Version | Notes |
 |---|---|---|
 | React app (GitHub Pages) | Latest on `origin/main` | `npm run deploy` from source |
-| StrideAPI.gs | **v38.143.1** | **Web App deployment v431** (perf sweep: bulk-write + writeThrough batch + Class C; billing addons + category filter) |
-| Supabase | 57 migrations applied | 9 Edge Functions deployed (`send-email` v5 with attachments, `send-onboarding-email` v1) |
+| StrideAPI.gs | **v38.145.0** | **Web App deployment v435** (voidInvoice action + transfer Supabase side-effects + supabasePatch_/supabaseSelect_ helpers) |
+| Supabase | 60 migrations applied | inventory_live view + transfer_provenance columns + photos_select_tenant row-based fallback shipped this session |
 | Client scripts | Rolled out to 49 active clients | Code.gs v4.6.0, Import.gs v4.3.0 |
 | StaxAutoPay.gs | v4.6.0 | Supabase write-through wired |
 
@@ -94,6 +94,62 @@ UI components: FloatingActionMenu, WriteButton, BatchGuard, ActionTooltip, Batch
 - Quote Tool with PDF generation
 - Expected operations calendar
 - QR Scanner + Labels (native React, Supabase-backed)
+
+---
+
+## Recent Changes (2026-05-02, session 92 — transfer-system overhaul + Invoice Review tab + client inline edits)
+
+Session focused on closing out long-running transfer-related bug classes, enabling client-portal users to tag their own inventory, and replacing the Invoice Review stub with a real management view.
+
+### Transfer system overhaul (steps 1–3)
+
+Audit found the duplicate-row-per-tenant data model (every transferred item lives as a `Transferred` row under the source tenant + an `Active` row under the destination, sharing the same `item_id`) was the root cause of multiple recurring symptoms — Access Denied on detail pages, photos invisible to the new owner, notes orphaned, will-calls stale on the source. Three-layered fix landed together.
+
+- **Step 1 — `inventory_live` view + React rewire.** New `public.inventory_live` (security_invoker=true, excludes `status='Transferred'`). `fetchItemByIdFromSupabase` now reads from the view so the historical row can never reach the detail page. Tenant-scope param kept as defense in depth. `src/lib/supabaseQueries.ts`, `src/hooks/useItemDetail.ts`.
+- **Step 2 — GAS auxiliary-table migrations.** New `api_postTransferSupabaseSideEffects_` runs after `fullClientSync` inside the `transferItems` case handler. Migrates `entity_notes` (inventory-anchored) + `item_photos` rows from source tenant to destination, strips transferred items from any open `will_calls` on the source tenant (cancels the WC if its `item_ids` becomes empty). Storage RLS `photos_select_tenant` extended with a row-based OR clause so photos remain readable to the new tenant without physically moving objects. New `supabasePatch_` + `supabaseSelect_` helpers in `StrideAPI.gs`.
+- **Step 3 — Provenance columns.** `inventory.transferred_from_tenant_id` (text) + `transferred_at` (timestamptz), indexed. Stamped during step 2. Backfilled across **31 historical transfer pairs** in one DDL migration so notes / photos / provenance are correct for items already transferred (including 62596, 62632 confirmed for Nip Tuck Remodeling).
+- StrideAPI.gs v38.145.0, Web App v435. Migrations: `inventory_live_view_and_transfer_provenance`, `photos_storage_rls_via_item_photos_tenant`, `backfill_transferred_item_aux_tables`.
+
+### Invoice Review tab — real implementation (replaces empty stub)
+
+Tab was bound to `useState<InvoiceReviewRow[]>([])` and never fetched anything — pure stub. Replaced with a full invoice management view in `src/pages/Billing.tsx`:
+
+- **Read** Supabase-only: `billing` where `status IN ('Invoiced','Void') AND invoice_no IS NOT NULL`. RLS scopes for clients automatically. No GAS round-trip for the list.
+- **Group** by `invoice_no` into a summary list — client, invoice date, total $, line count, status badge, expand/collapse arrow. "Mixed" badge surfaces partial voids.
+- **Search** invoice #, client, item descriptions, item IDs.
+- **Filter** client dropdown, status (Invoiced/Void/All), invoice-date range, Clear button.
+- **Sort** Invoice #, Client, Invoice Date, Total — click header to toggle.
+- **Expand** to show all line items with svc badge, item DeepLink, description, qty/rate/total, refs to Task / Repair / Shipment (DeepLinks each), notes.
+- **Per-invoice actions:** PDF (opens `invoice_url` in new tab), Void (staff/admin only, optimistic update with revert-on-failure, custom `loadingText="Voiding…"` / `successText="Voided"` on WriteButton).
+- **Realtime:** subscribes to `entityEvents` so billing writes refresh the list automatically.
+
+New API + GAS: `postVoidInvoice` in `src/lib/api.ts`; `handleVoidInvoice_` + case route in `StrideAPI.gs` (withStaffGuard + withClientIsolation, fullClientSync after, audit row written). Sets every Billing_Ledger row matching `invoiceNo` to `Void`, appends a "Voided: <reason>" note.
+
+### Client-role inline edit on Inventory (Room + Reference)
+
+Added `canEditClientFields` predicate in `src/pages/Inventory.tsx` admitting `role==='client'` for the Room and Reference cells only. Operational fields (vendor, sidemark, description, location) stay admin/staff-only via the existing `canEditInventory` check. Critically the columns `useMemo` deps array also gained `canEditClientFields` — without it, the cells stayed disabled forever because the only deps signal (`canEditInventory`) doesn't change for client users.
+
+### ItemDetailPanel save → list refresh latency fix
+
+`ItemDetailPanel`'s two save handlers (field edits + coverage edits) called `postUpdateInventoryItem` but never fired `entityEvents.emit('inventory', itemId)`. Other consumers (`useInventory`, `BatchDataContext`) only learned about the change via the Supabase realtime echo, which lags the GAS write by several seconds. Easy to navigate back to the list before that lands and see stale values until manual refresh. Added the missing emit on both paths to match the `InlineEditableCell` pattern.
+
+### Inventory I/A/R/W/D badges — failed-inspection red I + uniform sizing
+
+`ItemIdBadges` gained a third `state` ('open'/'done'/'failed') for the I badge. When an INSP task is Completed with `result='Fail'`, the badge renders `#DC2626` with `fontWeight: 900` instead of green/orange. Plumbed through `useItemIndicators` (now also pulls `result` from tasks) and every consumer (Inventory, Tasks, Repairs, Dashboard pages + Item / Task / Repair / Shipment / Will Call detail panels). Also fixed thin-letter sizing — all five badges now sit in a fixed `minWidth: 12px` square with centered text so the strip reads uniform regardless of letter width.
+
+### Item access check — parent clients unblocked, transferred items resolve to live row
+
+`useItemDetail`'s access check compared `result.clientSheetId` against `user.clientSheetId` (single primary tenant), so parent-client accounts with multiple accessible tenants hit Access Denied on child-tenant items even though the rest of the app showed them. Switched to `user.accessibleClientSheetIds.includes(...)` matching every other detail hook's `hasAccess()` helper. Combined with the inventory_live view fix, this resolves the Hillary / Nip Tuck case fully.
+
+### Other small fixes
+
+- **Delivery Orders impersonation:** `useOrders` removed `isSupabaseCacheAvailable()` gate (which returns false during impersonation, surfacing a misleading "Supabase connection unavailable" error). Page is Supabase-only by design; RLS handles tenant scoping.
+- **CreateDeliveryOrderModal client picker:** filters to `user.accessibleClientNames` for non-staff and shows a read-only label when there's a single accessible client. Staff/admin keep the full list.
+- **Client filter dropdown leak:** Inventory / Tasks / Repairs / WillCalls / Shipments / Orders pages stopped showing "51 selected" to client-role users. ONE-TIME ref-guarded init: client role always force-overwrites `clientFilter` to `accessibleClientNames` on mount; staff/admin only auto-fill if empty so subsequent narrowing/clearing sticks.
+
+### Memory / docs
+
+- Updated `feedback_run_deployments.md` with explicit GAS deploy commands (`npm run push-api && npm run deploy-api`) so future sessions don't tell users to paste — landed because I made that mistake mid-session.
 
 ---
 
