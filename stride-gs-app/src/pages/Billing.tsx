@@ -2968,12 +2968,12 @@ export function Billing() {
                         </div>
                       </label>
 
-                      {/* Stax IIF Export */}
+                      {/* Send to Payments (queues invoices in Stax for auto-charge) */}
                       <label style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '10px 12px', border: `1px solid ${invOptStax ? theme.colors.orange : theme.colors.border}`, borderRadius: 10, marginBottom: 8, background: invOptStax ? '#FEF3EE' : '#fff', cursor: 'pointer' }}>
                         <input type="checkbox" checked={invOptStax} onChange={() => setInvOptStax(!invOptStax)} style={{ accentColor: theme.colors.orange, marginTop: 2, width: 16, height: 16, cursor: 'pointer' }} />
                         <div style={{ flex: 1 }}>
-                          <div style={{ fontSize: 13, fontWeight: 600 }}>Export Stax IIF</div>
-                          <div style={{ fontSize: 11, color: '#64748B', marginTop: 2 }}>Generate a Stax-compatible IIF file for payment processing.</div>
+                          <div style={{ fontSize: 13, fontWeight: 600 }}>Send to Payments</div>
+                          <div style={{ fontSize: 11, color: '#64748B', marginTop: 2 }}>Queue invoices in Stax for auto-charge. Appears on Payments &rarr; Batches within seconds.</div>
                         </div>
                       </label>
 
@@ -2984,7 +2984,7 @@ export function Billing() {
 
               {invoiceLoading && (
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: 20, justifyContent: 'center', color: theme.colors.textSecondary, fontSize: 13 }}>
-                  <Loader2 size={18} style={{ animation: 'spin 1s linear infinite' }} /> Creating invoices{invOptQbo ? ' & pushing to QBO' : ''}{invOptStax ? ' & exporting Stax IIF' : ''}... This may take a few minutes for large batches.
+                  <Loader2 size={18} style={{ animation: 'spin 1s linear infinite' }} /> Creating invoices{invOptQbo ? ' & pushing to QBO' : ''}{invOptStax ? ' & sending to Payments' : ''}... This may take a few minutes for large batches.
                 </div>
               )}
               {invoiceError && !invoiceLoading && (

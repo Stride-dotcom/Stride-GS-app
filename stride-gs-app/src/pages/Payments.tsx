@@ -1,7 +1,8 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { useUrlState } from '../hooks/useUrlState';
-import { Upload, Users, FileText, Zap, AlertTriangle, Send, CheckCircle2, XCircle, RefreshCw, DollarSign, Activity, UploadCloud, Loader2, Search, CreditCard } from 'lucide-react';
+import { Upload, Users, FileText, Zap, AlertTriangle, Send, CheckCircle2, XCircle, RefreshCw, DollarSign, Activity, UploadCloud, Loader2, Search, CreditCard, Layers } from 'lucide-react';
 import { theme } from '../styles/theme';
+import { BatchesTab } from '../components/payments/BatchesTab';
 import { WriteButton } from '../components/shared/WriteButton';
 // PreChargeValidationModal removed — batch charging now done via Charge Selected button
 import { PaymentDetailPanel, type PaymentInvoice } from '../components/shared/PaymentDetailPanel';
@@ -42,7 +43,7 @@ import type { ApiClient } from '../lib/api';
 // not currently reachable via the TABS nav. Kept in place so the code
 // can be re-enabled by adding to the TABS array; removing entirely
 // would lose the Customer Mapping and Run Log features.
-type Tab = 'iif' | 'review' | 'invoices' | 'queue' | 'charges' | 'exceptions' | 'customers' | 'pipeline' | 'mapping' | 'runlog';
+type Tab = 'batches' | 'iif' | 'review' | 'invoices' | 'queue' | 'charges' | 'exceptions' | 'customers' | 'pipeline' | 'mapping' | 'runlog';
 
 /** Map API StaxInvoice → PaymentDetailPanel PaymentInvoice */
 function toPaymentInvoice(inv: StaxInvoice): PaymentInvoice {
@@ -383,7 +384,7 @@ function RunLogTab({ entries }: { entries: StaxRunLogEntry[] }) {
 }
 
 export function Payments() {
-  const [tab, setTab] = useState<Tab>('iif');
+  const [tab, setTab] = useState<Tab>('batches');
   // showPreCharge, runningCharges, dryRun removed — charging now done via Charge Selected
   const [selectedInvoice, setSelectedInvoice] = useState<PaymentInvoice | null>(null);
   const [selectedCustomer, setSelectedCustomer] = useState<StaxCustomer | null>(null);
@@ -642,6 +643,7 @@ export function Payments() {
   const pendingCount = invoices.filter(i => (i.status || '').toUpperCase() === 'PENDING').length;
   const createdCount = invoices.filter(i => (i.status || '').toUpperCase() === 'CREATED').length;
   const TABS: { id: Tab; label: string; icon: any; count?: number }[] = [
+    { id: 'batches', label: 'Batches', icon: Layers },
     { id: 'iif', label: 'Import', icon: Upload },
     { id: 'review', label: 'Review', icon: FileText, count: pendingCount || undefined },
     { id: 'invoices', label: 'Invoices', icon: FileText },
@@ -1918,6 +1920,17 @@ export function Payments() {
           </div>
         </div>
       )}
+
+      {tab === 'batches' && <BatchesTab onJumpToReview={(batchId) => {
+        // v38.166.0 — let user filter Review tab to a specific batch by
+        // stashing the id in a query string the Review tab can read.
+        try {
+          const url = new URL(window.location.href);
+          url.searchParams.set('batch', batchId);
+          window.history.replaceState({}, '', url.toString());
+        } catch (_) { /* ignore */ }
+        setTab('review');
+      }} />}
 
       {tab === 'iif' && <IIFImportTab onImported={() => {
         // After successful IIF import:

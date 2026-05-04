@@ -2219,6 +2219,8 @@ export interface QbExportResponse {
   fileName?: string;
   fileUrl?: string;
   error?: string;
+  /** v38.166.0 — set when Supabase mirror + batch row write succeeded. */
+  batchId?: string | null;
 }
 
 export function postQbExport(
@@ -2230,6 +2232,60 @@ export function postQbExport(
     payload as unknown as Record<string, unknown>,
     {},
     { signal, timeoutMs: API_POST_TIMEOUT_LONG_MS }
+  );
+}
+
+// v38.166.0 — Stax Invoice Batches (read-only paginated list for Payments → Batches)
+
+export interface StaxInvoiceBatchRow {
+  batchId: string;
+  createdAt: string;
+  createdBy: string;
+  source: string;
+  invoiceCount: number;
+  lineCount: number;
+  totalAmount: number;
+  clientSummary: string;
+  notes: string;
+}
+
+export interface GetStaxInvoiceBatchesResponse {
+  success: boolean;
+  batches?: StaxInvoiceBatchRow[];
+  error?: string;
+}
+
+export function postGetStaxInvoiceBatches(
+  limit: number = 100,
+  signal?: AbortSignal,
+) {
+  return apiPost<GetStaxInvoiceBatchesResponse>(
+    'getStaxInvoiceBatches',
+    { limit } as Record<string, unknown>,
+    {},
+    { signal },
+  );
+}
+
+export interface RegenerateIifResponse {
+  success: boolean;
+  batchId?: string;
+  fileName?: string;
+  iifContent?: string;
+  invoiceCount?: number;
+  lineCount?: number;
+  error?: string;
+}
+
+export function postRegenerateIifForBatch(
+  batchId: string,
+  signal?: AbortSignal,
+) {
+  return apiPost<RegenerateIifResponse>(
+    'regenerateIifForBatch',
+    { batchId } as Record<string, unknown>,
+    {},
+    { signal, timeoutMs: API_POST_TIMEOUT_LONG_MS },
   );
 }
 

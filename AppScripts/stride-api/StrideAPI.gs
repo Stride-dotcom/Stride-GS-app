@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.165.0 — 2026-05-04 PST — Three hardenings to prevent the May 2026 WC-bug class from recurring. (1) supabaseBatchUpsert_ now shape-splits rows by their JSON key set before chunking. PostgREST rejects mixed-shape batches with PGRST102 ("All object keys must match"); the fall-through per-row retry path was correct but inefficient. Several sb*Row_ helpers conditionally include keys (sbBillingRow_ omits invoice_date when blank, etc.), so the fast batch path was failing for any client whose Billing_Ledger had a mix of invoiced + uninvoiced rows. Now each shape gets its own 50-row chunk loop. (2) api_fullClientSync_'s six entity branches (inventory / tasks / shipments / billing / will_calls / repairs) each replaced their bare `if (!key) continue;` with a tracked-skip pattern that calls new helper sbLogBlankIdSkips_ at the end of the case. Blank-key sheet rows now surface in stax_run_log with sheet name + row numbers so operators see them in the React FailedOperationsDrawer instead of disappearing into a `continue`. (3) New admin diagnostic runAuditMissingLedgerRowIds — read-only walk of every active client's six entity sheets, reporting blank-key rows. Quarterly safety net complementing the per-sync surfacing. Schema-side: companion migration 20260504200000_entity_id_nonempty_check_constraints.sql adds CHECK (col <> '') to all six entity-key columns so the next blank slip-through fails LOUD at INSERT.
+   StrideAPI.gs — v38.166.0 — 2026-05-04 PST — Stax invoice batches + auto-mirror to Supabase. Pre-v38.166.0 the "Stax IIF" button on the Billing page wrote rows to the Stax Invoices SHEET via auto-import (v38.21.0) but never called _sbResyncAllStaxInvoices, so the Supabase mirror was stale until something else triggered it — operators had to upload the same IIF on the Payments page just to fire the resync as a side effect. handleQbExport_ now calls _sbResyncAllStaxInvoices(getStaxSpreadsheet_()) right after the auto-import block so Payments → Review populates within ~1-2s of the Create Invoices click, no manual upload needed. Adds first-class batch concept: every qbExport invocation generates a batchId (BATCH-{timestamp}-{uuid6}) and writes one stax_invoice_batches row with totals + client summary, then PATCHes batch_id onto each freshly-mirrored stax_invoices row. Two new read endpoints: getStaxInvoiceBatches (paginated list for Payments → Batches view) and regenerateIifForBatch (rebuilds IIF text on demand from line_items_json — no file storage, generated fresh each request). Companion migration 20260504220000_stax_invoice_batches.sql adds the table + nullable batch_id FK. Drive IIF write left in place this PR — purely additive, removed in a follow-up after a few days of confidence.
+   v38.165.0 — 2026-05-04 PST — Three hardenings to prevent the May 2026 WC-bug class from recurring. (1) supabaseBatchUpsert_ now shape-splits rows by their JSON key set before chunking. PostgREST rejects mixed-shape batches with PGRST102 ("All object keys must match"); the fall-through per-row retry path was correct but inefficient. Several sb*Row_ helpers conditionally include keys (sbBillingRow_ omits invoice_date when blank, etc.), so the fast batch path was failing for any client whose Billing_Ledger had a mix of invoiced + uninvoiced rows. Now each shape gets its own 50-row chunk loop. (2) api_fullClientSync_'s six entity branches (inventory / tasks / shipments / billing / will_calls / repairs) each replaced their bare `if (!key) continue;` with a tracked-skip pattern that calls new helper sbLogBlankIdSkips_ at the end of the case. Blank-key sheet rows now surface in stax_run_log with sheet name + row numbers so operators see them in the React FailedOperationsDrawer instead of disappearing into a `continue`. (3) New admin diagnostic runAuditMissingLedgerRowIds — read-only walk of every active client's six entity sheets, reporting blank-key rows. Quarterly safety net complementing the per-sync surfacing. Schema-side: companion migration 20260504200000_entity_id_nonempty_check_constraints.sql adds CHECK (col <> '') to all six entity-key columns so the next blank slip-through fails LOUD at INSERT.
    v38.164.0 — 2026-05-04 PST — handleProcessWcRelease_ now stamps "Ledger Row ID": "WC-{itemId}-{wcNumber}" on every billing row it writes. Without this column, api_fullClientSync_ explicitly skipped the row (see billing case at line ~6068: `if (!lid) continue`), so since 2026-04-01 every non-COD WC release wrote rows to the Billing_Ledger sheet that never mirrored to Supabase — 13 WCs / ~84 items invisible on the React Billing page and impossible to invoice. Out of 7 billing-row write paths in this file (RCVG, RCVG addons, task complete, repair quote lines, repair primary, WC release, manual charge), WC release was the only one missing the ID. Format mirrors RCVG's `RCVG-{itemId}-{shipmentNo}` convention. New admin entry `runBackfillWcLedgerRowIds` walks every active client in CB Clients, scans Billing_Ledger for WC rows missing the ID, stamps `WC-{itemId}-{shipment#}` (bulk-write column), then api_fullClientSync_(.., ["billing"]) per tenant to mirror. Idempotent — only patches rows where the ID is currently blank. Run once from Apps Script editor after deploy.
    v38.163.0 — 2026-05-04 PST — Fixed `seedAllStaxToSupabase`'s Charge Log reader. The actual sheet headers (per the StaxAutoPay SHEET_NAMES schema) are "Customer Name" + "Stax Transaction ID", but the seed function looked up "Customer" + "Transaction ID" — always returned undefined → mirror seeded customer/txn_id as empty strings for every charge log row. Symptom: React Charge Log page shows blank Customer column + blank Transaction ID column for all 8 historical successful charges. Now reads the canonical names first, falls back to the legacy short form so manually-edited sheets still work. Companion StaxAutoPay.gs v4.7.6 fixes the same bug in `_sbResyncAllStaxCharges`. After deploy, run `seedAllStaxToSupabase` once to backfill the existing 8 rows.
    v38.162.0 — 2026-05-04 PST — handleCreateTestInvoice_ was the one Stax write path I missed in PR #214's "retire the Stax Customers sheet" sweep — it still read the deprecated sheet and reported NOT_FOUND for any client that exists in CB Clients but not the legacy mirror. Justin hit this trying to test the Stax webhook with a reactivated demo account ("Justin Demo Account") that is in CB Clients with a stax_customer_id but never had a row on the retired sheet. Migrated to stax_buildClientStaxMap_ — same helper handleQbExport_, handleImportIIF_, and stax_lookupCustomerIds_ all use. Lookup now succeeds when the client name matches Client Name, QB Customer Name, OR Stax Customer Name on the CB Clients row.
@@ -6944,6 +6945,16 @@ function doPost(e) {
       case "qbExport":
         return withStaffGuard_(callerEmail, function() {
           return handleQbExport_(payload);
+        });
+
+      case "getStaxInvoiceBatches":
+        return withStaffGuard_(callerEmail, function() {
+          return handleGetStaxInvoiceBatches_(payload);
+        });
+
+      case "regenerateIifForBatch":
+        return withStaffGuard_(callerEmail, function() {
+          return handleRegenerateIifForBatch_(payload);
         });
 
       case "qbExcelExport":
@@ -20535,6 +20546,15 @@ function handleQbExport_(payload) {
   var todayDate = new Date();
   var todayIifDate = api_qbFmtDate_(todayDate);
 
+  // v38.166.0 — Generate a batch_id for this invocation. Every invoice
+  // this call writes to Stax gets stamped with this id so Payments →
+  // Batches can group + retrieve them later. ISO timestamp prefix keeps
+  // batches sortable; UUID suffix prevents collisions across concurrent
+  // operators.
+  var batchTs = Utilities.formatDate(todayDate, Session.getScriptTimeZone(), "yyyyMMdd-HHmmss");
+  var batchSuffix = Utilities.getUuid().substring(0, 6).toUpperCase();
+  var batchId = "BATCH-" + batchTs + "-" + batchSuffix;
+
   // Collect invoiced rows
   var invoiceMap = {};
   var invoiceOrder = [];
@@ -20698,6 +20718,9 @@ function handleQbExport_(payload) {
       }
 
       var staxNewRows = [];
+      var batchInvoiceNos = [];   // v38.166.0 — collected for batch row + post-resync patch
+      var batchTotal = 0;
+      var batchClients = {};
       var nowStr = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm:ss");
       for (var si2 = 0; si2 < invoiceOrder.length; si2++) {
         var sInvNo = invoiceOrder[si2];
@@ -20766,6 +20789,10 @@ function handleQbExport_(payload) {
           ];
           staxInvSheet.getRange(existingRow1, 1, 1, updateRow.length).setValues([updateRow]);
           staxUpdated++;
+          // v38.166.0 — refreshed PENDING rows count toward this batch's footprint too.
+          batchInvoiceNos.push(sInvNo);
+          batchTotal += Number(sTotal || 0);
+          batchClients[sCustomerForStax || sInv.qbName || ""] = true;
           continue;
         }
 
@@ -20782,6 +20809,10 @@ function handleQbExport_(payload) {
           nowStr,             // Created At
           ""                  // Notes
         ]);
+        // v38.166.0 — track for batch row + post-resync patch
+        batchInvoiceNos.push(sInvNo);
+        batchTotal += Number(sTotal || 0);
+        batchClients[sCustomerForStax || sInv.qbName || ""] = true;
       }
 
       if (staxNewRows.length > 0) {
@@ -20795,6 +20826,69 @@ function handleQbExport_(payload) {
     // Non-blocking — IIF file was already saved to Drive successfully
   }
 
+  // v38.166.0 — Mirror Stax Invoices SHEET → Supabase + record batch row.
+  //
+  // Pre-v38.166.0 the Stax sheet got new rows here, but Supabase didn't —
+  // operators had to manually upload the same IIF on the Payments page,
+  // because the upload path is what called _sbResyncAllStaxInvoices. With
+  // this, the Review tab populates within ~1-2s of the Create Invoices
+  // click, no manual upload required.
+  //
+  // The batch row is written AFTER the resync so the freshly-mirrored
+  // stax_invoices rows can FK to it. Per-invoice batch_id stamping uses
+  // supabasePatch_ since the Stax sheet doesn't carry a Batch ID column
+  // (we keep the batch concept Supabase-only to avoid a sheet schema
+  // change — sheet stays the source of truth for invoice fields, batches
+  // are a read-side grouping).
+  var batchPersisted = false;
+  if (batchInvoiceNos.length > 0) {
+    try {
+      _sbResyncAllStaxInvoices(getStaxSpreadsheet_());
+    } catch (resyncErr) {
+      Logger.log("v38.166.0: _sbResyncAllStaxInvoices after auto-import failed (non-fatal): " + resyncErr.message);
+    }
+
+    try {
+      var clientNames = Object.keys(batchClients).filter(function(n) { return !!n; }).sort();
+      var clientSummary;
+      if (clientNames.length === 0) clientSummary = "";
+      else if (clientNames.length === 1) clientSummary = clientNames[0];
+      else if (clientNames.length <= 3) clientSummary = clientNames.join(", ");
+      else clientSummary = clientNames.slice(0, 2).join(", ") + " +" + (clientNames.length - 2) + " more";
+
+      var batchUpsertResult = supabaseUpsert_("stax_invoice_batches", {
+        batch_id: batchId,
+        created_at: new Date().toISOString(),
+        created_by: (function() {
+          try { return String(Session.getActiveUser().getEmail() || ""); } catch (_) { return ""; }
+        })(),
+        source: "billing_page",
+        invoice_count: batchInvoiceNos.length,
+        line_count: lineCount,
+        total_amount: Number(batchTotal.toFixed(2)),
+        client_summary: clientSummary,
+        notes: "Includes " + staxImported + " new + " + staxUpdated + " refreshed PENDING rows (" + staxSkipped + " skipped)"
+      });
+      if (batchUpsertResult && batchUpsertResult.ok !== false) batchPersisted = true;
+
+      // Stamp batch_id on each Supabase invoice row from this batch.
+      // PostgREST PATCH with qb_invoice_no=in.(...) so we do it in one
+      // call regardless of batch size.
+      if (batchPersisted && batchInvoiceNos.length > 0) {
+        var inFilter = "qb_invoice_no=in.(" + batchInvoiceNos.map(function(n) {
+          return '"' + String(n).replace(/"/g, '\\"') + '"';
+        }).join(",") + ")";
+        try {
+          supabasePatch_("stax_invoices", inFilter, { batch_id: batchId });
+        } catch (patchErr) {
+          Logger.log("v38.166.0: stax_invoices batch_id stamp failed (non-fatal): " + patchErr.message);
+        }
+      }
+    } catch (batchErr) {
+      Logger.log("v38.166.0: batch row upsert failed (non-fatal): " + batchErr.message);
+    }
+  }
+
   return jsonResponse_({
     success: true,
     invoiceCount: invoiceOrder.length,
@@ -20803,8 +20897,189 @@ function handleQbExport_(payload) {
     fileUrl: file.getUrl(),
     staxImported: staxImported,
     staxUpdated: staxUpdated,
-    staxSkipped: staxSkipped
+    staxSkipped: staxSkipped,
+    batchId: batchPersisted ? batchId : null
   });
+}
+
+/**
+ * v38.166.0 — handleGetStaxInvoiceBatches_
+ *
+ * Returns the most recent N stax_invoice_batches rows for the Payments →
+ * Batches view. Pure read from Supabase; no sheet access.
+ *
+ * Payload:
+ *   { limit?: number — default 100, capped at 500 }
+ *
+ * Returns: { success: true, batches: [{ batchId, createdAt, createdBy,
+ *   invoiceCount, lineCount, totalAmount, clientSummary, notes }, ...] }
+ */
+function handleGetStaxInvoiceBatches_(payload) {
+  var limit = Math.min(Math.max(Number((payload && payload.limit) || 100), 1), 500);
+  var url = prop_("SUPABASE_URL");
+  var key = prop_("SUPABASE_SERVICE_ROLE_KEY");
+  if (!url || !key) return errorResponse_("Supabase not configured", "CONFIG_ERROR");
+
+  try {
+    var resp = UrlFetchApp.fetch(
+      url + "/rest/v1/stax_invoice_batches?select=*&order=created_at.desc&limit=" + limit,
+      {
+        method: "GET",
+        headers: { "Authorization": "Bearer " + key, "apikey": key },
+        muteHttpExceptions: true
+      }
+    );
+    var code = resp.getResponseCode();
+    if (code < 200 || code >= 300) {
+      return errorResponse_("Supabase fetch failed: HTTP " + code + " " + resp.getContentText().substring(0, 300), "FETCH_ERROR");
+    }
+    var rows = JSON.parse(resp.getContentText() || "[]");
+    var batches = rows.map(function(r) {
+      return {
+        batchId: r.batch_id,
+        createdAt: r.created_at,
+        createdBy: r.created_by || "",
+        source: r.source || "",
+        invoiceCount: Number(r.invoice_count || 0),
+        lineCount: Number(r.line_count || 0),
+        totalAmount: Number(r.total_amount || 0),
+        clientSummary: r.client_summary || "",
+        notes: r.notes || ""
+      };
+    });
+    return jsonResponse_({ success: true, batches: batches });
+  } catch (e) {
+    return errorResponse_("Batch list error: " + e.message, "FETCH_ERROR");
+  }
+}
+
+/**
+ * v38.166.0 — handleRegenerateIifForBatch_
+ *
+ * Regenerates the IIF text for a previously-created batch by reading the
+ * persisted stax_invoices rows (with their line_items_json) and feeding
+ * them through the same IIF formatter used at export time. Pure
+ * read-then-format; no file write, no sheet read.
+ *
+ * Payload: { batchId: string }
+ *
+ * Returns: {
+ *   success: true,
+ *   batchId,
+ *   fileName,                     — suggested download filename
+ *   iifContent,                   — the full IIF text (LF line endings)
+ *   invoiceCount,
+ *   lineCount
+ * }
+ */
+function handleRegenerateIifForBatch_(payload) {
+  var batchId = String((payload && payload.batchId) || "").trim();
+  if (!batchId) return errorResponse_("batchId is required", "INVALID_PARAMS");
+
+  var url = prop_("SUPABASE_URL");
+  var key = prop_("SUPABASE_SERVICE_ROLE_KEY");
+  if (!url || !key) return errorResponse_("Supabase not configured", "CONFIG_ERROR");
+
+  // Fetch all invoices in this batch.
+  try {
+    var resp = UrlFetchApp.fetch(
+      url + "/rest/v1/stax_invoices?select=*&batch_id=eq." + encodeURIComponent(batchId) + "&order=created_at.asc",
+      {
+        method: "GET",
+        headers: { "Authorization": "Bearer " + key, "apikey": key },
+        muteHttpExceptions: true
+      }
+    );
+    var code = resp.getResponseCode();
+    if (code < 200 || code >= 300) {
+      return errorResponse_("Supabase fetch failed: HTTP " + code, "FETCH_ERROR");
+    }
+    var invoices = JSON.parse(resp.getContentText() || "[]");
+    if (!invoices.length) {
+      return errorResponse_("No invoices found for batch " + batchId, "NOT_FOUND");
+    }
+
+    // Load QB Service Mapping (same source handleQbExport_ uses) so we
+    // can resolve the QB account / item name per svc_code.
+    var cbId = prop_("CB_SPREADSHEET_ID");
+    if (!cbId) return errorResponse_("CB_SPREADSHEET_ID not configured", "CONFIG_ERROR");
+    var cbSS = SpreadsheetApp.openById(cbId);
+    var mappingSh = cbSS.getSheetByName("QB_Service_Mapping");
+    if (!mappingSh || mappingSh.getLastRow() < 2) {
+      return errorResponse_("QB_Service_Mapping sheet missing — needed to format IIF", "CONFIG_ERROR");
+    }
+    var mappingData = mappingSh.getDataRange().getValues();
+    var mapHdr = {};
+    mappingData[0].forEach(function(h, i) { mapHdr[String(h).trim().toUpperCase()] = i; });
+    var mapping = {};
+    for (var mi = 1; mi < mappingData.length; mi++) {
+      var mCode = String(mappingData[mi][mapHdr["SVC CODE"]] || "").trim().toUpperCase();
+      if (!mCode) continue;
+      mapping[mCode] = {
+        qbAccount: String(mappingData[mi][mapHdr["QB INCOME ACCOUNT"] !== undefined ? mapHdr["QB INCOME ACCOUNT"] : -1] || "").trim(),
+        qbItemName: mapHdr["QB ITEM NAME"] !== undefined ? String(mappingData[mi][mapHdr["QB ITEM NAME"]] || "").trim() : ""
+      };
+    }
+
+    // Build the IIF the same way handleQbExport_ does. line_items_json
+    // already carries name/memo/qty/rate/amount per line, so most of
+    // the per-line work is just re-formatting. svc_code-to-account
+    // mapping comes from QB_Service_Mapping; if a line's name doesn't
+    // resolve to a code we fall back to a generic income account.
+    var iifLines = [];
+    iifLines.push(["!TRNS","TRNSID","TRNSTYPE","DATE","ACCNT","NAME","CLASS","AMOUNT","DOCNUM","MEMO","CLEAR","TOPRINT","ADDR1","ADDR2","ADDR3","ADDR4","DUEDATE","TERMS","PAID"].join("\t"));
+    iifLines.push(["!SPL","SPLID","TRNSTYPE","DATE","ACCNT","NAME","AMOUNT","DOCNUM","MEMO","QNTY","PRICE","INVITEM","TAXABLE"].join("\t"));
+    iifLines.push("!ENDTRNS");
+    var lineCount = 0;
+    for (var ii = 0; ii < invoices.length; ii++) {
+      var inv = invoices[ii];
+      var lines;
+      try { lines = JSON.parse(inv.line_items_json || "[]"); } catch (_) { lines = []; }
+      if (!lines.length) continue;
+      var totalAmt = Number(inv.amount || 0);
+      iifLines.push([
+        "TRNS", "", "INVOICE", inv.invoice_date || "", "Accounts Receivable",
+        api_qbEsc_(inv.customer || ""), "", totalAmt.toFixed(2), api_qbEsc_(inv.qb_invoice_no || ""),
+        "Stride Logistics — " + (inv.qb_invoice_no || ""),
+        "N", "Y", "", "", "", "", inv.due_date || "", "", "N"
+      ].join("\t"));
+      for (var li = 0; li < lines.length; li++) {
+        var line = lines[li];
+        var memo = String(line.memo || line.name || "");
+        var qty = Number(line.qty || 1);
+        var rate = Number(line.rate || 0);
+        var lineTotal = Number(line.amount != null ? line.amount : (qty * rate));
+        // Best-effort svc-code lookup from the line name; fall back to "Storage Charges" / first mapped account.
+        var svcUpper = String(line.name || "").toUpperCase();
+        var svcMap = mapping[svcUpper] || mapping[svcUpper.replace(/\s+.*$/, "")] || null;
+        var qbAcct = (svcMap && svcMap.qbAccount) || "Stride Logistics Income";
+        var qbItem = (svcMap && svcMap.qbItemName) || line.name || "";
+        iifLines.push([
+          "SPL", "", "INVOICE", inv.invoice_date || "",
+          api_qbEsc_(qbAcct), api_qbEsc_(inv.customer || ""),
+          (lineTotal * -1).toFixed(2), api_qbEsc_(inv.qb_invoice_no || ""),
+          api_qbEsc_(memo), qty, rate.toFixed(2),
+          api_qbEsc_(qbItem), "N"
+        ].join("\t"));
+        lineCount++;
+      }
+      iifLines.push("ENDTRNS");
+    }
+    var iifContent = iifLines.join("\r\n");
+    var ts = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyyMMdd-HHmmss");
+    var fileName = "Stride_Stax_IIF_" + batchId + "_regen-" + ts + ".iif";
+
+    return jsonResponse_({
+      success: true,
+      batchId: batchId,
+      fileName: fileName,
+      iifContent: iifContent,
+      invoiceCount: invoices.length,
+      lineCount: lineCount
+    });
+  } catch (e) {
+    return errorResponse_("Regenerate IIF error: " + e.message, "REGEN_ERROR");
+  }
 }
 
 /** QB IIF date format helper (MM/DD/YYYY). Handles Date objects, ISO strings, and YYYYMMDD strings. */
