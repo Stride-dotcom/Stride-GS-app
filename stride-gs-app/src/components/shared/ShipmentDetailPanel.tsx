@@ -19,9 +19,8 @@ import type { ApiShipmentItem } from '../../lib/api';
 import { fetchShipmentItemsFromSupabase } from '../../lib/supabaseQueries';
 import type { InventoryItem } from '../../lib/types';
 import { DriveFoldersList, type DriveFolderLink } from './DriveFoldersList';
-import { usePhotos } from '../../hooks/usePhotos';
+import { usePhotoGraphRollup, useNoteGraphRollup, type RollupContext } from '../../hooks/useGraphRollup';
 import { useDocuments } from '../../hooks/useDocuments';
-import { useEntityNotes } from '../../hooks/useEntityNotes';
 import { PhotosPanel as _PhotosPanel, DocumentsPanel as _DocumentsPanel, NotesPanel as _NotesPanel } from './EntityAttachments';
 import { EntityHistory } from './EntityHistory';
 
@@ -313,21 +312,34 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
     </div>
   );
 
+  // v2026-05-04 — graph rollup. Container entity: photos/notes for the
+  // shipment itself + every photo/note on items in the shipment (catches
+  // each item's inspections, repairs, etc.). itemIds come from the loaded
+  // line-items list above.
+  const shItemIds = useMemo(
+    () => (items ?? []).map(it => String(it.itemId || '')).filter(Boolean),
+    [items],
+  );
+  const shRollupCtx = useMemo<RollupContext>(() => ({
+    tenantId: shipment.clientSheetId ?? null,
+    itemIds: shItemIds,
+    scopes: [{ entityType: 'shipment', entityId: shipment.shipmentNo }],
+  }), [shipment.clientSheetId, shipment.shipmentNo, shItemIds]);
+
   // Tab badge counts — uploaded-asset counts only. Drive folder URLs are
   // external links, not uploaded assets; they're intentionally NOT counted.
-  const { photos: shPhotos } = usePhotos({
-    entityType: 'shipment',
-    entityId: renderAsPage ? shipment.shipmentNo : null,
-    tenantId: shipment.clientSheetId ?? null,
-    enabled: !!renderAsPage,
-  });
+  const { photos: shPhotos } = usePhotoGraphRollup(
+    renderAsPage ? shRollupCtx : { tenantId: null, itemIds: [], scopes: [], enabled: false }
+  );
   const { documents: shDocs } = useDocuments({
     contextType: 'shipment',
     contextId: renderAsPage ? shipment.shipmentNo : '',
     tenantId: shipment.clientSheetId ?? null,
     enabled: !!renderAsPage,
   });
-  const { notes: shNotes } = useEntityNotes('shipment', renderAsPage ? shipment.shipmentNo : '');
+  const { notes: shNotes } = useNoteGraphRollup(
+    renderAsPage ? shRollupCtx : { tenantId: null, itemIds: [], scopes: [], enabled: false }
+  );
   const shPhotoCount = renderAsPage ? shPhotos.length : 0;
   const shDocCount   = renderAsPage ? shDocs.length   : 0;
   const shNoteCount  = renderAsPage ? shNotes.length  : 0;
@@ -344,6 +356,8 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
         entityType="shipment"
         entityId={shipment.shipmentNo}
         tenantId={shipment.clientSheetId}
+        enableSourceFilter
+        rollupCtx={shRollupCtx}
       />
       <DriveFoldersList folders={pageDriveFolders} />
     </div>
@@ -362,6 +376,8 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
     <_NotesPanel
       entityType="shipment"
       entityId={shipment.shipmentNo}
+      enableSourceFilter
+      rollupCtx={shRollupCtx}
       pinnedNote={{ label: 'Shipment Notes', text: shipment.notes }}
     />
   );
@@ -385,12 +401,14 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
   ];
 
   const builtInTabsCfg = {
-    // Shipments are CONTAINER entities — photos/notes scoped to the
-    // shipment itself, no item_id rollup (rollup would mix items).
+    // v2026-05-04: graph rollup folds in every line item's photos/notes so
+    // the slide-out matches what the page-mode Photos/Notes tabs render.
     photos: {
       entityType: 'shipment' as const,
       entityId: shipment.shipmentNo,
       tenantId: shipment.clientSheetId,
+      enableSourceFilter: true,
+      rollupCtx: shRollupCtx,
     },
     docs: {
       contextType: 'shipment' as const,
@@ -400,6 +418,8 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
     notes: {
       entityType: 'shipment',
       entityId: shipment.shipmentNo,
+      enableSourceFilter: true,
+      rollupCtx: shRollupCtx,
     },
     activity: {
       entityType: 'shipment',
