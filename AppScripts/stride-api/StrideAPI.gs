@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.172.0 — 2026-05-04 PST — handleCreateInvoice_ no longer collapses every Master RPC failure mode into the opaque "Master RPC returned no invoice number" — Justin hit this on a Brian Paquette invoice in a batch of 9 (8 succeeded). Root cause: api_nextInvoiceNo_ returned null on any non-shape-match (HTTP non-2xx, non-JSON body, {success:false} from the Master RPC, missing id field) and the caller printed a single generic message regardless of what actually failed. Two changes here: (1) api_nextInvoiceNo_ now throws a distinct descriptive Error per failure mode AND retries once with 1.5s backoff on transient cases (lock timeout, 5xx, non-JSON body, parse error). The Master `getNextInvoiceId` counter only advances on actual success — retry is safe. (2) handleCreateInvoice_ wraps the call in try/catch and surfaces the thrown message so operators see the real cause (e.g. "Master RPC error: Lock timeout — too many concurrent requests") and can act. Defense against future opacity: if the new path ever does return null without throwing, the legacy generic message remains as a final safety net.
+   StrideAPI.gs — v38.173.0 — 2026-05-04 PST — handleRequestRepairQuote_ enrichment bulk-read perf fix. The source-task lookup looped per-row calling taskSh.getRange(tr, col).getValue() — one round-trip to Google's API per Tasks-sheet row. For a client with a few hundred tasks the call pushed past the React fetch timeout (~30s); the optimistic UI flipped to "Request failed — please try again" while the server kept running and successfully wrote the repair row + sent the REPAIR_QUOTE_REQUEST email. Hope @ Lisa Sherry Interiors hit this on INSP-62942-1: she got the failure toast but staff received the alert email. Switched to a single bulk getRange().getValues() read + in-memory scan for both the Tasks-sheet and Shipments-sheet enrichment loops. ~one round-trip total instead of N — handler now returns in ~1-2s instead of 30+. Same perf pattern was likely the latent root cause of every "request failed but it actually worked" report on busy client sheets.
+   v38.172.0 — 2026-05-04 PST — handleCreateInvoice_ no longer collapses every Master RPC failure mode into the opaque "Master RPC returned no invoice number" — Justin hit this on a Brian Paquette invoice in a batch of 9 (8 succeeded). Root cause: api_nextInvoiceNo_ returned null on any non-shape-match (HTTP non-2xx, non-JSON body, {success:false} from the Master RPC, missing id field) and the caller printed a single generic message regardless of what actually failed. Two changes here: (1) api_nextInvoiceNo_ now throws a distinct descriptive Error per failure mode AND retries once with 1.5s backoff on transient cases (lock timeout, 5xx, non-JSON body, parse error). The Master `getNextInvoiceId` counter only advances on actual success — retry is safe. (2) handleCreateInvoice_ wraps the call in try/catch and surfaces the thrown message so operators see the real cause (e.g. "Master RPC error: Lock timeout — too many concurrent requests") and can act. Defense against future opacity: if the new path ever does return null without throwing, the legacy generic message remains as a final safety net.
    v38.171.0 — 2026-05-04 PST — Charge Queue date-format fix + IIF write hardening + auto-populate Scheduled Date. Three changes that together close the "scheduled dates revert on refresh" loop. (1) formatDate_ now strips a trailing "HH:MM[:SS]" from string cell values so a Due Date stored as "2026-05-18 00:00:00" reads back as "2026-05-18" — `<input type="date">` strictly requires YYYY-MM-DD, the legacy time-decorated form rendered empty in the picker AND broke the React onBlur equality guard so 5 of 7 Charge Queue saves quietly skipped this morning. (2) handleImportIIF_ + handleQbExport_ Stax-write blocks rebuilt around stax_invoiceCols_ — every column written via header lookup, no more 11-element positional arrays clobbering Scheduled Date / Auto Charge / Is Test on a sheet with extra columns. (3) Both insert paths and the IIF update path now auto-fill Scheduled Date = Due Date when blank, preserving any operator override — every new invoice has a real, displayable scheduled date out of the gate. New admin entry backfillStaxScheduledDates: one-click backfill of blank Scheduled Date cells from each row's Due Date for PENDING/CREATED/SENT/CHARGE_FAILED rows; idempotent, never overwrites operator-set values, ignores PAID/VOIDED/DELETED.
    v38.170.0 — 2026-05-04 PST — Sweep: every Stax Invoices write is now header-resolved. Justin's "I'm tired of patching hole after hole" — same class of bug (positional column indexes drifting when a column is inserted) was lurking in handleBatchVoidStaxInvoices_, handleBatchDeleteStaxInvoices_, handleDeleteStaxInvoice_, handleVoidStaxInvoice_, handleResetStaxInvoiceStatus_, handleLinkStaxInvoiceToExisting_, handleChargeSingleInvoice_, handleSendStaxPayLinks_, handleSendStaxPayLink_ — all wrote Status (col 9) and Notes (col 11) positionally. Now ALL of them resolve via stax_invoiceCols_(invSheet) (caches qb / customer / staxCustId / dueDate / amount / status / notes / staxId / autoCharge / scheduledDate / etc. via api_ensureColumn_). Same sweep covered handleUpdateEmailTemplate_ (Subject + HTML Body cols), qbo_saveMappingRow_ (QBO Customer ID / Sidemark / Sub-Job ID on Stax Customers), and handleSyncStaxCustomerIds_ (Stax Customer ID col). Net: zero positional writes remain on any user-facing entity sheet across StrideAPI.gs. Settings key/value sheets (col 1=Key, col 2=Value) left alone — stable layout, lower risk.
    v38.169.0 — 2026-05-04 PST — Stax invoice inline edits actually persist now. handleUpdateStaxInvoice_ used POSITIONAL columns (5=Due Date, 6=Amount, 9=Status, 11=Notes, 2=Customer) for every write while the read path (sheetToObjects_) used header names — once the Invoices sheet had a column inserted (Is Test, Scheduled Date, Auto Charge, Stax Invoice Link were appended at various times) the writes silently landed in the WRONG column and the React Charge Queue's optimistic update reverted on refresh. Same class as v38.152.0 / v38.167.0; same fix: every column lookup now goes through api_ensureColumn_ (case-insensitive, auto-appends if missing) — Due Date, Scheduled Date, Notes, Amount, Customer, Stax Customer ID, Status, QB Invoice #. handleToggleAutoCharge_ was case-sensitive on the "Auto Charge" header and silently appended a duplicate column on any case drift; switched to api_ensureColumn_. To prevent duplicate-column drift biting future writes, api_ensureColumn_ now returns the LAST matching column (mirroring sheetToObjects_'s last-write-wins semantics) — write and read agree on the same column even when duplicates already exist on a sheet.
@@ -16198,17 +16199,29 @@ function handleRequestRepairQuote_(clientSheetId, payload, callerEmail) {
     var srcShipmentFolderUrl = "";
     if (sourceTaskId) {
       try {
+        // v38.172.0 — bulk-read enrichment. The previous per-row getRange/
+        // getValue loop did O(N) round-trips to Google's API; for a Tasks
+        // sheet with a few hundred rows the request would routinely push
+        // past the React fetch timeout (~30s). The user saw "Request
+        // failed" while the server kept running and successfully wrote
+        // the repair + sent the email — exactly Hope @ Lisa Sherry's
+        // INSP-62942-1 report. Single bulk read of the data range, then
+        // in-memory scan, drops the enrichment to a single round-trip.
         var taskSh = ss.getSheetByName("Tasks");
         if (taskSh && taskSh.getLastRow() >= 2) {
           var tMap = api_getHeaderMap_(taskSh);
           var tIdCol = tMap["Task ID"];
           if (tIdCol) {
             var tLastRow = api_getLastDataRow_(taskSh);
-            for (var tr = 2; tr <= tLastRow; tr++) {
-              if (String(taskSh.getRange(tr, tIdCol).getValue() || "").trim() === sourceTaskId) {
-                if (tMap["Task Notes"])  srcTaskNotes  = String(taskSh.getRange(tr, tMap["Task Notes"]).getValue()  || "");
-                if (tMap["Shipment #"])  srcShipmentNo = String(taskSh.getRange(tr, tMap["Shipment #"]).getValue() || "").trim();
-                var tRt = taskSh.getRange(tr, tIdCol).getRichTextValue();
+            var tNotesCol = tMap["Task Notes"];
+            var tShipCol  = tMap["Shipment #"];
+            var tValues = taskSh.getRange(2, 1, tLastRow - 1, taskSh.getLastColumn()).getValues();
+            for (var tr = 0; tr < tValues.length; tr++) {
+              if (String(tValues[tr][tIdCol - 1] || "").trim() === sourceTaskId) {
+                if (tNotesCol) srcTaskNotes  = String(tValues[tr][tNotesCol - 1] || "");
+                if (tShipCol)  srcShipmentNo = String(tValues[tr][tShipCol - 1] || "").trim();
+                // Hyperlink lookup still needs a single targeted call.
+                var tRt = taskSh.getRange(tr + 2, tIdCol).getRichTextValue();
                 if (tRt && tRt.getLinkUrl()) srcTaskFolderUrl = tRt.getLinkUrl();
                 break;
               }
@@ -16222,9 +16235,10 @@ function handleRequestRepairQuote_(clientSheetId, payload, callerEmail) {
             var sIdCol = sMap["Shipment #"];
             if (sIdCol) {
               var sLastRow = api_getLastDataRow_(shipSh);
-              for (var sr = 2; sr <= sLastRow; sr++) {
-                if (String(shipSh.getRange(sr, sIdCol).getValue() || "").trim() === srcShipmentNo) {
-                  var sRt = shipSh.getRange(sr, sIdCol).getRichTextValue();
+              var sValues = shipSh.getRange(2, 1, sLastRow - 1, shipSh.getLastColumn()).getValues();
+              for (var sr = 0; sr < sValues.length; sr++) {
+                if (String(sValues[sr][sIdCol - 1] || "").trim() === srcShipmentNo) {
+                  var sRt = shipSh.getRange(sr + 2, sIdCol).getRichTextValue();
                   if (sRt && sRt.getLinkUrl()) srcShipmentFolderUrl = sRt.getLinkUrl();
                   break;
                 }
