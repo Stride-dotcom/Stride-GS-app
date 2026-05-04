@@ -268,7 +268,15 @@ function EditMode({
     };
   }, [inputRef]);
 
-  const showDropdown = variant !== 'text' && showSuggestions && anchorRect;
+  // Hide the dropdown when there's nothing useful to show — specifically the
+  // "no match" case (user typed a value the autocomplete pool doesn't contain).
+  // Pressing Enter still saves the typed value; we just stop floating an empty
+  // panel with a help string under the cell.
+  const hasDropdownContent =
+    filtered.length > 0 ||
+    loading ||
+    (poolSize === 0 && !loading);
+  const showDropdown = variant !== 'text' && showSuggestions && anchorRect && hasDropdownContent;
 
   return (
     <div ref={wrapperRef} onClick={e => e.stopPropagation()} style={{ position: 'relative' }}>
@@ -331,11 +339,6 @@ function EditMode({
               {variant === 'autocomplete-locations'
                 ? 'No locations configured yet — type a new one'
                 : 'No suggestions in this client\u2019s Autocomplete DB yet — type a new value'}
-            </div>
-          )}
-          {filtered.length === 0 && !loading && poolSize > 0 && draft && (
-            <div style={{ padding: '8px 10px', fontSize: 11, color: '#999', fontStyle: 'italic' }}>
-              No match — press Enter to save &ldquo;{draft}&rdquo;
             </div>
           )}
         </div>,
