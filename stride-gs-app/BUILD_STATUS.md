@@ -1,6 +1,6 @@
 # Stride GS App — Build Status
 
-> Last updated: 2026-05-03 (session 93+ — Stax architectural cleanup). Verified against actual codebase.
+> Last updated: 2026-05-04 (unified addons module). Verified against actual codebase.
 
 ---
 
@@ -8,11 +8,11 @@
 
 | System | Version | Notes |
 |---|---|---|
-| React app (GitHub Pages) | Latest on `origin/main` | `npm run deploy` from source |
-| StrideAPI.gs | **v38.153.0** | **Web App deployment v443** (Stax Customers sheet retired; CB Clients single source of truth; dedup Stax Invoices by docNum; runStaxSheetsCleanup admin entry) |
-| Supabase | 60 migrations applied | inventory_live view + transfer_provenance columns + photos_select_tenant row-based fallback shipped this session |
+| React app (GitHub Pages) | Latest on `origin/source` | `npm run deploy` from source |
+| StrideAPI.gs | **v38.173.0** | Polymorphic addons module — task/repair/will_call all flush via `api_writeAddonsToLedger_`. Latest in the v38.16x–v38.17x sweep on 2026-05-04. |
+| Supabase | 67+ migrations applied | `addons` table replaces empty `task_addons`; CHECK constraints + realtime enabled |
 | Client scripts | Rolled out to 49 active clients | Code.gs v4.6.0, Import.gs v4.3.0 |
-| StaxAutoPay.gs | v4.6.0 | Supabase write-through wired |
+| StaxAutoPay.gs | v4.7.6 | Charge Log Customer/Transaction header fix |
 
 ---
 
@@ -94,6 +94,38 @@ UI components: FloatingActionMenu, WriteButton, BatchGuard, ActionTooltip, Batch
 - Quote Tool with PDF generation
 - Expected operations calendar
 - QR Scanner + Labels (native React, Supabase-backed)
+
+---
+
+## Recent Changes (2026-05-04, unified addons module)
+
+**Goal:** Generalize the task-shaped `task_addons` system (shipped 2026-05-02 in PR #193, never used in prod) into a polymorphic addons module that plugs into any entity panel — tasks, repairs, will calls, and inventory — with one set of GAS + React code.
+
+**Step 1 — Schema (migration `unified_addons`).** Drops `public.task_addons` (verified empty in prod via `execute_sql` before drop) and creates `public.addons` keyed on `(tenant_id, parent_type, parent_id)` with CHECK constraints (parent_type in `task|repair|will_call|inventory`, parent_id non-empty), `billed`/`billed_at`/`ledger_row_id` columns for traceback + idempotency, RLS for staff/admin + service_role, and realtime enabled.
+
+**Step 2 — GAS materializer.** New `api_writeAddonsToLedger_(ss, parentType, parentId, ctx)` in StrideAPI.gs replaces the inline task-only addon flush. Reads unbilled rows from `public.addons` via REST, writes one Billing_Ledger row per addon (rate snapshotted at add time, falls back to current catalog if blank — same semantics as before), mirrors each row to Supabase via `resyncEntityToSupabase_`, then PATCHes the addon back to `billed=true` with the resulting `ledger_row_id` stamped. Idempotent — retries skip already-billed rows. Wired into `handleCompleteTask_` (replacing the inline flush), `handleCompleteRepair_`, and `handleProcessWcRelease_`. `api_fetchTaskAddons_` removed (subsumed). Per-parent column mapping: task → Task ID = `{parentId}-{svcCode}`, repair → Repair ID = `{parentId}-{svcCode}`, will_call → Shipment # = parentId, inventory → Item ID = parentId. Ledger Row ID format unchanged: `{parentId}-{svcCode}-ADDON-{n}`.
+
+**Step 3 — React hook + modal.** New `useEntityAddons(parentType, parentId, tenantId)` hook with the same CRUD + realtime shape as the old `useTaskAddons`, plus a `billed` flag check on `updateAddon` so already-materialized addons can't be edited. `useTaskAddons` reduced to a one-line compat alias delegating to `useEntityAddons('task', ...)` so the existing TaskDetailPanel call site is unchanged. `AddTaskServiceModal` gains an optional `parentType` prop that drives title copy and catalog filter (tasks keep the historical `show_as_task` gate; other entities show all active services).
+
+**Step 4 — BillingPreviewCard polymorphic addons.** Lifted the `entityType === 'task'` restriction at line 211 — projected addons now flow through for any entity type. Recorded fetch query broadened: repair now uses `repair_id.eq.X OR repair_id.like.X-%` (parallel to task's existing pattern) and will_call drops the `svc_code='WC'` filter so addon rows with non-WC service codes (Shipment # = wcNumber) show in the recorded panel. `isAddonBooked` simplified to check `addon.billed` first, then ledger_row_id pattern as fallback. The "+ Add Service" button is no longer task-only.
+
+**Step 5 — Wire into entity panels.** `RepairDetailPanel` and `WillCallDetailPanel` each pull addons via `useEntityAddons` and pass `addons` + `onAddAddon`/`onUpdateAddon`/`onDeleteAddon` into `BillingPreviewCard`. Editable while the entity is still open (Repair: not Complete/Cancelled. WC: in {Pending, Scheduled, Partial}). TaskDetailPanel unchanged — picks up the polymorphic path automatically via `useTaskAddons`'s new alias.
+
+**Files touched:**
+- `stride-gs-app/supabase/migrations/20260504170000_unified_addons.sql` (new)
+- `AppScripts/stride-api/StrideAPI.gs` (v38.173.0)
+- `stride-gs-app/src/hooks/useEntityAddons.ts` (new)
+- `stride-gs-app/src/hooks/useTaskAddons.ts` (compat alias)
+- `stride-gs-app/src/components/shared/AddTaskServiceModal.tsx`
+- `stride-gs-app/src/components/shared/BillingPreviewCard.tsx`
+- `stride-gs-app/src/components/shared/RepairDetailPanel.tsx`
+- `stride-gs-app/src/components/shared/WillCallDetailPanel.tsx`
+
+**Pending user action:**
+- [ ] Deploy GAS: `npm run push-api && npm run deploy-api` from `AppScripts/stride-client-inventory/`. (Migration already applied via MCP on 2026-05-04.)
+- [ ] Smoke test: open a repair detail panel → add a "Rush Repair" addon → mark Complete → confirm a Billing_Ledger row appears with Ledger Row ID `{repairId}-RUSH-ADDON-1` and the addon flips to billed=true. Repeat for a will call (release) and a task.
+
+**Step 2 deferral.** The follow-up work — making the billing pipeline Supabase-native so `handleCreateInvoice_` reads from `public.billing` instead of the client sheet — was explicitly scoped out per the handoff. Step 1 (this PR) keeps the existing client-sheet-as-authority pipeline; it's a half-day reversible change. Step 2 advances Decision #33 (out of Google) and is a separate strategic call.
 
 ---
 
