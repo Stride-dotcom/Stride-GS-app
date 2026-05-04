@@ -1380,6 +1380,7 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
       relatedEntities={task.itemId ? [{ type: 'inventory', id: String(task.itemId), label: `Item ${task.itemId}` }] : []}
       enableSourceFilter={!!task.itemId}
       itemId={task.itemId ? String(task.itemId) : null}
+      tenantId={clientSheetId ?? null}
       rollupCtx={tkRollupCtx}
       pinnedNote={{ label: 'Task Notes', text: task.taskNotes || task.notes }}
     />
@@ -1605,6 +1606,7 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
             : [],
           enableSourceFilter: !!task.itemId,
           itemId: task.itemId ? String(task.itemId) : null,
+          tenantId: clientSheetId ?? null,
           rollupCtx: {
             tenantId: clientSheetId ?? null,
             itemIds: task.itemId ? [String(task.itemId)] : [],

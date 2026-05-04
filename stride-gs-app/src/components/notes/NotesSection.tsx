@@ -31,6 +31,10 @@ interface Props {
    *  this note. Forwarded to useEntityNotes; null/undefined for container or
    *  OOS entity types (will_call/shipment/claim). */
   itemId?: string | null;
+  /** v2026-05-04 — entity's tenant id, stamped on inserts. Required for
+   *  admin/staff users to post on a client's tenant; otherwise the row is
+   *  saved with NULL tenant_id and disappears from rollup queries. */
+  tenantId?: string | null;
   /** v2026-04-22 — when true, only the composer renders (header + list are
    *  hidden). Used by NotesRollupView which supplies its own rollup list. */
   composerOnly?: boolean;
@@ -69,10 +73,10 @@ function colorForAuthor(key: string): string {
   return `hsl(${hue} 55% 50%)`;
 }
 
-export function NotesSection({ entityType, entityId, itemId, composerOnly, initialOrder = 'oldest' }: Props) {
+export function NotesSection({ entityType, entityId, itemId, tenantId, composerOnly, initialOrder = 'oldest' }: Props) {
   const v2 = theme.v2;
   const { user } = useAuth();
-  const { notes, loading, error, addNote, deleteNote } = useEntityNotes(entityType, entityId, itemId);
+  const { notes, loading, error, addNote, deleteNote } = useEntityNotes(entityType, entityId, itemId, tenantId);
 
   const [draft, setDraft] = useState('');
   const [visibility, setVisibility] = useState<NoteVisibility>('public');

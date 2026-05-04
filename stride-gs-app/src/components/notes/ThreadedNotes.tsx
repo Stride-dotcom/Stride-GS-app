@@ -79,9 +79,7 @@ function buildLabel(type: string, id: string, override?: string): string {
 }
 
 export function ThreadedNotes({
-  entityType, entityId, relatedEntities,
-  // tenantId is declared on the props for future server-filtered queries,
-  // but unused today — NotesSection reads tenant from the auth context.
+  entityType, entityId, relatedEntities, tenantId,
 }: ThreadedNotesProps) {
   // Deduplicate threads: primary first, then related that aren't
   // the same entity. Same type+id appearing in relatedEntities is
@@ -173,10 +171,13 @@ export function ThreadedNotes({
           subscription when the thread switches, so channels don't
           leak and the view resets to the new thread's messages. */}
       <div key={active.key} style={{ minWidth: 0 }}>
-        {/* NotesSection reads tenant_id from the authed user's context,
-            so we don't thread it here. `key` resets the component when
-            the active thread changes — clean Realtime channel swap. */}
-        <NotesSection entityType={active.type} entityId={active.id} />
+        {/* `key` resets the component when the active thread changes —
+            clean Realtime channel swap. */}
+        <NotesSection
+          entityType={active.type}
+          entityId={active.id}
+          tenantId={tenantId}
+        />
       </div>
     </div>
   );

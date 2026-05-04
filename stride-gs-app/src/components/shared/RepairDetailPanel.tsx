@@ -1444,6 +1444,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
       ],
       enableSourceFilter: !!repair.itemId,
       itemId: repair.itemId ? String(repair.itemId) : null,
+      tenantId: repair.clientSheetId ?? null,
       rollupCtx: rpRollupCtx,
     },
     activity: {
@@ -1505,6 +1506,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
       ]}
       enableSourceFilter={!!repair.itemId}
       itemId={repair.itemId ? String(repair.itemId) : null}
+      tenantId={repair.clientSheetId ?? null}
       rollupCtx={rpRollupCtx}
       pinnedNote={{ label: 'Repair Notes', text: repair.repairNotes }}
     />

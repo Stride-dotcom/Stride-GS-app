@@ -73,6 +73,10 @@ interface NotesCfg {
   enableSourceFilter?: boolean;
   /** Parent item_id; ignored unless enableSourceFilter=true. */
   itemId?: string | null;
+  /** v2026-05-04 — entity tenant id, stamped on note inserts. Required for
+   *  admin/staff posting on a client task; otherwise the row is saved with
+   *  NULL tenant_id and disappears from rollup queries. */
+  tenantId?: string | null;
   /** v2026-05-04 — graph rollup context. When provided AND
    *  enableSourceFilter is true, the rollup view reads from the multi-scope
    *  graph hook so notes from linked shipments / will calls / claim items
@@ -122,6 +126,7 @@ export function EntityAttachments({ photos, documents, notes, defaultOpen }: Pro
           relatedEntities={notes.relatedEntities}
           enableSourceFilter={notes.enableSourceFilter}
           itemId={notes.itemId}
+          tenantId={notes.tenantId}
           rollupCtx={notes.rollupCtx}
         />
       )}
@@ -345,7 +350,7 @@ export function DocumentsPanel({
 }
 
 export function NotesPanel({
-  entityType, entityId, relatedEntities, enableSourceFilter, itemId, pinnedNote, rollupCtx,
+  entityType, entityId, relatedEntities, enableSourceFilter, itemId, tenantId, pinnedNote, rollupCtx,
 }: {
   entityType: string;
   entityId: string;
@@ -358,6 +363,10 @@ export function NotesPanel({
   /** Parent item_id — required when enableSourceFilter=true for the rollup
    *  query. Ignored otherwise. */
   itemId?: string | null;
+  /** v2026-05-04 — entity tenant id, stamped on note inserts. Required for
+   *  admin/staff users so notes don't get NULL tenant_id and disappear
+   *  from rollup queries. */
+  tenantId?: string | null;
   /** v2026-04-23 — surface the entity's single-text "XxxNotes" field (which
    *  lives on the Details tab) as a pinned system entry at the top of the
    *  Notes tab so warehouse/admin staff see it in both places. Rendered only
@@ -368,6 +377,9 @@ export function NotesPanel({
    *  entity (shipment / WC / claim items) instead of just item_id matches. */
   rollupCtx?: RollupContext | null;
 }) {
+  // Graph rollup ctx already carries tenantId; fall back to the explicit
+  // prop or null for the legacy paths that don't take ctx.
+  const effectiveTenantId = rollupCtx?.tenantId ?? tenantId ?? null;
   const pinned = pinnedNote && pinnedNote.text && pinnedNote.text.trim()
     ? <PinnedSystemNote label={pinnedNote.label} text={pinnedNote.text} />
     : null;
@@ -389,6 +401,7 @@ export function NotesPanel({
           primaryEntityType={entityType}
           primaryEntityId={entityId}
           itemId={itemId ?? null}
+          tenantId={effectiveTenantId}
           rollupCtx={rollupCtx}
         />
       </div>
@@ -410,6 +423,7 @@ export function NotesPanel({
           primaryEntityType={entityType}
           primaryEntityId={entityId}
           itemId={itemId}
+          tenantId={effectiveTenantId}
         />
       </div>
     );
@@ -430,6 +444,7 @@ export function NotesPanel({
         entityType={entityType}
         entityId={entityId}
         relatedEntities={relatedEntities}
+        tenantId={effectiveTenantId}
       />
     </div>
   );
@@ -480,11 +495,12 @@ function PinnedSystemNote({ label, text }: { label: string; text: string }) {
  * new note always gets its item_id stamped via useEntityNotes.
  */
 function NotesRollupView({
-  primaryEntityType, primaryEntityId, itemId,
+  primaryEntityType, primaryEntityId, itemId, tenantId,
 }: {
   primaryEntityType: string;
   primaryEntityId: string;
   itemId: string;
+  tenantId?: string | null;
 }) {
   const { notes: rolled, loading: rollupLoading } = useEntityNotesRollup(itemId);
   const [filter, setFilter] = useState<string>('all');
@@ -536,6 +552,7 @@ function NotesRollupView({
           entityType={primaryEntityType}
           entityId={primaryEntityId}
           itemId={itemId}
+          tenantId={tenantId}
           composerOnly
         />
       </div>
@@ -552,11 +569,12 @@ function NotesRollupView({
  * authoritative for the host.
  */
 function NotesGraphRollupView({
-  primaryEntityType, primaryEntityId, itemId, rollupCtx,
+  primaryEntityType, primaryEntityId, itemId, tenantId, rollupCtx,
 }: {
   primaryEntityType: string;
   primaryEntityId: string;
   itemId: string | null;
+  tenantId?: string | null;
   rollupCtx: RollupContext;
 }) {
   const { notes: rolled, loading: rollupLoading } = useNoteGraphRollup(rollupCtx);
@@ -601,6 +619,7 @@ function NotesGraphRollupView({
           entityType={primaryEntityType}
           entityId={primaryEntityId}
           itemId={itemId ?? undefined}
+          tenantId={tenantId}
           composerOnly
         />
       </div>
@@ -645,8 +664,9 @@ function RollupNoteRow({ note }: { note: EntityNote }) {
 }
 
 function NotesSectionCollapsible({
-  entityType, entityId, relatedEntities, enableSourceFilter, itemId, rollupCtx, defaultOpen,
+  entityType, entityId, relatedEntities, enableSourceFilter, itemId, tenantId, rollupCtx, defaultOpen,
 }: NotesCfg & { defaultOpen: boolean }) {
+  const effectiveTenantId = rollupCtx?.tenantId ?? tenantId ?? null;
   const [open, setOpen] = useState(defaultOpen);
   // Count: graph rollup count when rollupCtx is set, else the primary
   // thread's note count. Both hooks are called unconditionally; the
@@ -677,6 +697,7 @@ function NotesSectionCollapsible({
             relatedEntities={relatedEntities}
             enableSourceFilter={true}
             itemId={itemId}
+            tenantId={effectiveTenantId}
             rollupCtx={rollupCtx}
           />
         ) : (
@@ -688,6 +709,7 @@ function NotesSectionCollapsible({
             entityType={entityType}
             entityId={entityId}
             relatedEntities={relatedEntities}
+            tenantId={effectiveTenantId}
           />
         )}
       </CollapsibleBody>

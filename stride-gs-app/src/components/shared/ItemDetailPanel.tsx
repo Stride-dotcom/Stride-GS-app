@@ -1320,6 +1320,7 @@ export function ItemDetailPanel({
         itemWillCalls={itemWillCalls}
         shipmentNumber={item.shipmentNumber}
         itemNotesText={item.itemNotes || item.notes}
+        tenantId={clientSheetId ?? null}
         rollupCtx={itemRollupCtx}
       />,
     },
@@ -1528,7 +1529,7 @@ function DocsPanelProxy({ itemId, clientSheetId, driveFolders }: { itemId: strin
 }
 
 function NotesPanelProxy({
-  itemId, itemTasks, itemRepairs, itemWillCalls, shipmentNumber, itemNotesText, rollupCtx,
+  itemId, itemTasks, itemRepairs, itemWillCalls, shipmentNumber, itemNotesText, tenantId, rollupCtx,
 }: {
   itemId: string;
   itemTasks: any[];
@@ -1536,6 +1537,7 @@ function NotesPanelProxy({
   itemWillCalls: any[];
   shipmentNumber?: string;
   itemNotesText?: string | null;
+  tenantId?: string | null;
   rollupCtx?: RollupContext | null;
 }) {
   const related = [
@@ -1551,6 +1553,7 @@ function NotesPanelProxy({
       relatedEntities={related}
       enableSourceFilter
       itemId={itemId}
+      tenantId={tenantId}
       rollupCtx={rollupCtx}
       pinnedNote={{ label: 'Item Notes', text: itemNotesText }}
     />
