@@ -243,29 +243,37 @@ function buildPrintShell(
       line-height: 1.65;
     }
 
-    /* ── Header ── */
+    /* ── Header ── light card on the cream page background, matches the
+       receiving / repair / will-call doc templates. No black bar. The
+       Stride logo PNG ships from /stride-logo.png in the React public
+       folder; we use an absolute URL because the print window is
+       about:blank and relative paths don't resolve there. */
     .print-header {
-      background: #1C1C1C;
-      color: #fff;
-      padding: 18px 32px;
+      max-width: 820px; margin: 0 auto;
+      padding: 24px 24px 16px;
       display: flex;
       justify-content: space-between;
       align-items: center;
+      gap: 16px;
     }
     .header-brand { display: flex; align-items: center; gap: 12px; }
-    .header-logo {
-      width: 38px; height: 38px; border-radius: 8px;
-      background: #E8692A;
-      display: flex; align-items: center; justify-content: center;
-      font-size: 18px; font-weight: 900; color: #fff; letter-spacing: -1px;
+    .header-logo { width: 38px; height: 38px; display: block; }
+    .header-name { font-size: 20px; font-weight: 700; color: #1E293B; line-height: 1.1; }
+    .header-name .accent { color: #E85D2D; }
+    .header-sub  { font-size: 10px; color: #64748B; margin-top: 3px; }
+    .header-meta { text-align: right; font-size: 12px; color: #475569; line-height: 1.5; }
+    .header-meta strong { color: #1C1C1C; font-size: 13px; }
+    .header-meta .doc-title {
+      font-size: 16px; font-weight: 700; color: #1C1C1C;
+      margin-bottom: 4px; letter-spacing: -0.01em;
     }
-    .header-name { font-size: 15px; font-weight: 700; letter-spacing: 2.5px; }
-    .header-sub  { font-size: 10px; letter-spacing: 1.5px; color: rgba(255,255,255,0.5); margin-top: 2px; }
-    .header-meta { text-align: right; font-size: 12px; color: rgba(255,255,255,0.7); line-height: 1.5; }
-    .header-meta strong { color: #fff; font-size: 13px; }
+    .header-divider {
+      max-width: 820px; margin: 0 auto 8px;
+      border-bottom: 1px solid #E2E8F0;
+    }
 
     /* ── Body container ── */
-    .doc-body { max-width: 820px; margin: 0 auto; padding: 32px 24px 56px; }
+    .doc-body { max-width: 820px; margin: 0 auto; padding: 16px 24px 56px; }
 
     /* ── Sections ── */
     section {
@@ -387,9 +395,9 @@ function buildPrintShell(
     /* ── Print overrides ── */
     @media print {
       body { background: #F5F2EE; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-      .print-header { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
       section { break-inside: avoid; }
       .sig-block { break-inside: avoid; }
+      .print-header { break-after: avoid; }
       @page { margin: 0.4in; size: letter; }
     }
   </style>
@@ -397,18 +405,19 @@ function buildPrintShell(
 <body>
   <div class="print-header">
     <div class="header-brand">
-      <div class="header-logo">S</div>
+      <img class="header-logo" src="${esc(window.location.origin)}/stride-logo.png" alt="Stride Logistics" />
       <div>
-        <div class="header-name">STRIDE</div>
-        <div class="header-sub">LOGISTICS</div>
+        <div class="header-name">Stride <span class="accent">Logistics</span></div>
+        <div class="header-sub">Kent, WA · accounting@stridenw.com · 206-550-1848</div>
       </div>
     </div>
     <div class="header-meta">
-      <div>Warehousing &amp; Delivery Agreement</div>
+      <div class="doc-title">Warehousing &amp; Delivery Agreement</div>
       <div><strong>${esc(businessName)}</strong> · ${esc(contactName)}</div>
       <div>Signed ${esc(signedDate)}</div>
     </div>
   </div>
+  <div class="header-divider"></div>
   <div class="doc-body">
     ${body}
     <div class="print-footer">
@@ -441,25 +450,31 @@ function buildPreviewShell(body: string, previewDate: string): string {
       line-height: 1.65;
     }
 
+    /* ── Header ── light header card matching the receiving / repair /
+       will-call doc templates. No black bar. */
     .print-header {
-      background: #1C1C1C;
-      color: #fff;
-      padding: 18px 32px;
+      max-width: 820px; margin: 0 auto;
+      padding: 24px 24px 16px;
       display: flex;
       justify-content: space-between;
       align-items: center;
+      gap: 16px;
     }
     .header-brand { display: flex; align-items: center; gap: 12px; }
-    .header-logo {
-      width: 38px; height: 38px; border-radius: 8px;
-      background: #E8692A;
-      display: flex; align-items: center; justify-content: center;
-      font-size: 18px; font-weight: 900; color: #fff; letter-spacing: -1px;
+    .header-logo { width: 38px; height: 38px; display: block; }
+    .header-name { font-size: 20px; font-weight: 700; color: #1E293B; line-height: 1.1; }
+    .header-name .accent { color: #E85D2D; }
+    .header-sub  { font-size: 10px; color: #64748B; margin-top: 3px; }
+    .header-meta { text-align: right; font-size: 12px; color: #475569; line-height: 1.5; }
+    .header-meta strong { color: #1C1C1C; font-size: 13px; }
+    .header-meta .doc-title {
+      font-size: 16px; font-weight: 700; color: #1C1C1C;
+      margin-bottom: 4px; letter-spacing: -0.01em;
     }
-    .header-name { font-size: 15px; font-weight: 700; letter-spacing: 2.5px; }
-    .header-sub  { font-size: 10px; letter-spacing: 1.5px; color: rgba(255,255,255,0.5); margin-top: 2px; }
-    .header-meta { text-align: right; font-size: 12px; color: rgba(255,255,255,0.7); line-height: 1.5; }
-    .header-meta strong { color: #fff; font-size: 13px; }
+    .header-divider {
+      max-width: 820px; margin: 0 auto 8px;
+      border-bottom: 1px solid #E2E8F0;
+    }
     .preview-badge {
       display: inline-block;
       margin-top: 4px;
@@ -472,7 +487,7 @@ function buildPreviewShell(body: string, previewDate: string): string {
       border-radius: 100px;
     }
 
-    .doc-body { max-width: 820px; margin: 0 auto; padding: 32px 24px 56px; }
+    .doc-body { max-width: 820px; margin: 0 auto; padding: 16px 24px 56px; }
 
     .preview-banner {
       background: #FFF7F0;
@@ -538,8 +553,9 @@ function buildPreviewShell(body: string, previewDate: string): string {
 
     @media print {
       body { background: #F5F2EE; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-      .print-header { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
       .preview-banner { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+      .preview-badge { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+      .print-header { break-after: avoid; }
       section { break-inside: avoid; }
       @page { margin: 0.4in; size: letter; }
     }
@@ -548,19 +564,20 @@ function buildPreviewShell(body: string, previewDate: string): string {
 <body>
   <div class="print-header">
     <div class="header-brand">
-      <div class="header-logo">S</div>
+      <img class="header-logo" src="${esc(window.location.origin)}/stride-logo.png" alt="Stride Logistics" />
       <div>
-        <div class="header-name">STRIDE</div>
-        <div class="header-sub">LOGISTICS</div>
+        <div class="header-name">Stride <span class="accent">Logistics</span></div>
+        <div class="header-sub">Kent, WA · accounting@stridenw.com · 206-550-1848</div>
       </div>
     </div>
     <div class="header-meta">
-      <div>Warehousing &amp; Delivery Agreement</div>
+      <div class="doc-title">Warehousing &amp; Delivery Agreement</div>
       <div><strong>Terms &amp; Conditions</strong></div>
       <div>Generated ${esc(previewDate)}</div>
       <div class="preview-badge">PREVIEW · NOT SIGNED</div>
     </div>
   </div>
+  <div class="header-divider"></div>
   <div class="doc-body">
     <div class="preview-banner">
       <strong>This is a preview copy.</strong> Read it through, print or save as PDF, and bring questions back to the intake form when you're ready to sign. Your signed copy will be emailed to you when you complete onboarding.
