@@ -667,9 +667,10 @@ export function Inventory() {
   // v38.72.0 Phase 3 — inline cell editing is admin/staff only (client-role
   // users see their own data but shouldn't mutate it from the table).
   const canEditInventory = user?.role === 'admin' || user?.role === 'staff';
-  // Clients can inline-edit a narrow whitelist (Room + Reference) so they can
-  // tag/organize their own inventory without being able to mutate operational
-  // fields. Admin/staff retain full edit rights.
+  // Clients can inline-edit a narrow whitelist (Room + Reference + Sidemark) so
+  // they can tag/organize their own inventory without being able to mutate
+  // operational fields. Sidemark is client-owned project data — they author
+  // it. Admin/staff retain full edit rights.
   const canEditClientFields = canEditInventory || user?.role === 'client';
 
   // Client-role users only see their own accounts in the dropdown — admin/staff see all.
@@ -1299,7 +1300,7 @@ export function Inventory() {
             dbField="sidemarks"
             applyItemPatch={applyItemPatch as (id: string, patch: Record<string, unknown>) => void}
             mergeItemPatch={mergeItemPatch as (id: string, patch: Record<string, unknown>) => void}
-            disabled={!canEditInventory}
+            disabled={!canEditClientFields}
             renderValue={v => (
               <span style={{
                 fontSize: theme.typography.sizes.sm, display: 'block',
