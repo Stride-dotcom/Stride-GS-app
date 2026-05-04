@@ -2672,6 +2672,27 @@ export function postFinishClientSetup(clientSheetId: string, signal?: AbortSigna
   );
 }
 
+// v38.181.0 — Manual deploy + paste replacement for the brittle automated
+// path. Operator deploys the bound Web App by hand in the Apps Script
+// editor, copies the URL, pastes it into the React UI; this handler just
+// validates + writes URL/Deployment ID to CB Clients. No script.googleapis.com
+// scope dance, so it never breaks.
+export interface SetClientWebAppDeploymentResponse {
+  success: boolean;
+  clientName?: string;
+  clientSheetId?: string;
+  webAppUrl?: string;
+  deploymentId?: string;
+  message?: string;
+  error?: string;
+}
+export function postSetClientWebAppDeployment(params: { clientSheetId: string; webAppUrl: string }) {
+  return apiPost<SetClientWebAppDeploymentResponse>(
+    'setClientWebAppDeployment',
+    params,
+  );
+}
+
 export interface RediscoverScriptIdsResponse {
   success: boolean;
   processed: number;
