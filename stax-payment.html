@@ -168,6 +168,35 @@
       height: 0;
       overflow: hidden;
     }
+
+    /* Auto-launch view: shown when ?auto=1 + valid amount is in the URL.
+       Skips the form-entry step entirely — the operator goes straight from
+       clicking "Collect via Stax" in the WMS to seeing this clean loading
+       state, then the Stax credit card modal opens on top. The order #,
+       customer name, and amount stay visible behind the modal so they
+       remain referenceable during checkout. */
+    #auto-launch-area { display: none; padding: 8px 0 4px; }
+    .auto-amount {
+      font-size: 38px; font-weight: 700; color: var(--text);
+      text-align: center; margin: 16px 0 6px; letter-spacing: -0.02em;
+    }
+    .auto-name {
+      font-size: 14px; font-weight: 600; color: var(--text);
+      text-align: center; margin-bottom: 6px;
+    }
+    .auto-status {
+      font-size: 11px; color: var(--text-muted);
+      text-align: center; letter-spacing: 1px; text-transform: uppercase;
+      font-weight: 600; margin: 18px 0 10px;
+    }
+    .spinner {
+      width: 28px; height: 28px; margin: 0 auto;
+      border: 3px solid var(--accent-border);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
   </style>
 </head>
 <body>
@@ -184,27 +213,44 @@
 
     <div id="order-badge-wrap"></div>
 
-    <label>Amount *</label>
-    <div class="amount-wrap">
-      <span class="dollar">$</span>
-      <input type="number" id="amount" placeholder="0.00" min="0.01" step="0.01" inputmode="decimal">
+    <!-- Form-entry view: shown by default. Hidden when ?auto=1 + valid
+         amount lets us skip straight to launching the Stax modal. -->
+    <div id="form-area">
+      <label>Amount *</label>
+      <div class="amount-wrap">
+        <span class="dollar">$</span>
+        <input type="number" id="amount" placeholder="0.00" min="0.01" step="0.01" inputmode="decimal">
+      </div>
+      <div class="err-msg" id="amount-err">Please enter a valid amount greater than $0.</div>
+
+      <label>Customer Name</label>
+      <input type="text" id="name" placeholder="Full name" autocomplete="name">
+
+      <label>Email</label>
+      <input type="email" id="email" placeholder="customer@email.com" autocomplete="email">
+      <div class="err-msg" id="email-err">Please enter a valid email address.</div>
+
+      <label>Order #</label>
+      <input type="text" id="order" placeholder="Order number">
+
+      <label>Notes</label>
+      <textarea id="notes" placeholder="Optional notes"></textarea>
+
+      <button id="launch-btn" onclick="launchPayment()">Take Payment</button>
     </div>
-    <div class="err-msg" id="amount-err">Please enter a valid amount greater than $0.</div>
 
-    <label>Customer Name</label>
-    <input type="text" id="name" placeholder="Full name" autocomplete="name">
+    <!-- Auto-launch view: shown when ?auto=1 + valid amount. The operator
+         arrives here from the WMS with everything pre-passed; this view
+         confirms what they're collecting and the Stax modal opens on top
+         within ~1s. The amount + customer name + order badge stay visible
+         behind the Stax modal during checkout for reference. -->
+    <div id="auto-launch-area">
+      <div class="auto-amount" id="auto-amount-text">$0.00</div>
+      <div class="auto-name" id="auto-name-text"></div>
+      <div class="auto-status">Opening secure checkout…</div>
+      <div class="spinner"></div>
+    </div>
 
-    <label>Email</label>
-    <input type="email" id="email" placeholder="customer@email.com" autocomplete="email">
-    <div class="err-msg" id="email-err">Please enter a valid email address.</div>
-
-    <label>Order #</label>
-    <input type="text" id="order" placeholder="Order number">
-
-    <label>Notes</label>
-    <textarea id="notes" placeholder="Optional notes"></textarea>
-
-    <button id="launch-btn" onclick="launchPayment()">Take Payment</button>
     <div class="footer">Powered by Stax · Stride Logistics WMS</div>
   </div>
 
@@ -212,14 +258,24 @@
   <div id="pay_now"></div>
 
   <script>
-    // Pre-fill Order # + Notes from URL params (?order=INV-1234&notes=Will+Call+WC-123)
-    // Stride WMS Will Call panel passes both — order goes in the badge
-    // + Order field; notes is pre-populated so the reference back to
-    // the WC is captured on the payment record.
+    // Pre-fill from URL params. The Will Call panel passes everything
+    // it already knows so the operator doesn't re-type anything:
+    //   ?order   → badge + Order # field + rides to Stax as customerCode
+    //   ?notes   → Notes field + rides to Stax as transaction notes
+    //   ?amount  → Amount field (COD amount on the Will Call)
+    //   ?name    → Customer Name field (pickup party / client name)
+    //   ?email   → Email field (when we have a billing email on file)
+    //   ?auto=1  → auto-launch the Stax credit card modal once the page
+    //              has rendered, skipping the form entry step
     (function () {
       var params = new URLSearchParams(window.location.search);
-      var orderParam = params.get('order');
-      var notesParam = params.get('notes');
+      var orderParam  = params.get('order');
+      var notesParam  = params.get('notes');
+      var amountParam = params.get('amount');
+      var nameParam   = params.get('name');
+      var emailParam  = params.get('email');
+      var autoParam   = params.get('auto');
+
       if (orderParam) {
         document.getElementById('order').value = orderParam;
         var badge = document.createElement('div');
@@ -227,9 +283,30 @@
         badge.textContent = 'Order: ' + orderParam; // textContent is XSS-safe
         document.getElementById('order-badge-wrap').appendChild(badge);
       }
-      if (notesParam) {
-        // Notes may come URL-encoded with spaces — URLSearchParams decodes them.
-        document.getElementById('notes').value = notesParam;
+      if (notesParam)  document.getElementById('notes').value  = notesParam;
+      if (amountParam) document.getElementById('amount').value = amountParam;
+      if (nameParam)   document.getElementById('name').value   = nameParam;
+      if (emailParam)  document.getElementById('email').value  = emailParam;
+
+      // Auto-launch when caller passed ?auto=1 AND amount is valid: hide
+      // the form-entry view, show the auto-launch confirmation view (so
+      // the operator sees what's being collected — amount, customer, order
+      // badge), and fire launchPayment() immediately. The Stax credit card
+      // modal opens on top of this confirmation view within ~0.5–1.5s
+      // (Stax checkout script load time over the network).
+      if (autoParam === '1') {
+        var amt = parseFloat(amountParam || '');
+        if (!isNaN(amt) && amt > 0) {
+          var formArea = document.getElementById('form-area');
+          var autoArea = document.getElementById('auto-launch-area');
+          document.getElementById('auto-amount-text').textContent = '$' + amt.toFixed(2);
+          document.getElementById('auto-name-text').textContent = nameParam || '';
+          formArea.style.display = 'none';
+          autoArea.style.display = 'block';
+          // Fire on next tick so the swap renders before the Stax script
+          // injection blocks paint. No artificial delay.
+          setTimeout(launchPayment, 0);
+        }
       }
     })();
 
@@ -241,6 +318,8 @@
       var amountRaw = parseFloat(document.getElementById('amount').value);
       var name      = document.getElementById('name').value.trim();
       var email     = document.getElementById('email').value.trim();
+      var orderNo   = document.getElementById('order').value.trim();
+      var notes     = document.getElementById('notes').value.trim();
 
       var valid = true;
       var amountErr = document.getElementById('amount-err');
@@ -282,8 +361,17 @@
       script.setAttribute('data-amount', amountRaw.toFixed(2));
       script.setAttribute('data-openOnLoad', 'true');
       script.setAttribute('data-displayConfirmation', 'true');
-      if (name)  script.setAttribute('data-name', name);
-      if (email) script.setAttribute('data-billingEmail', email);
+      if (name)    script.setAttribute('data-name', name);
+      if (email)   script.setAttribute('data-billingEmail', email);
+      // Push Order # + Notes into Stax so they ride along to the
+      // payment record. data-customerCode is the documented Stax
+      // attribute for an external reference. data-notes attaches a
+      // free-text memo. Both surface on the Stax-side transaction
+      // detail and on the webhook payload that hits stax-webhook for
+      // mark-paid back-sync. Unknown attributes are ignored by Stax —
+      // safe to send unconditionally.
+      if (orderNo) script.setAttribute('data-customerCode', orderNo);
+      if (notes)   script.setAttribute('data-notes', notes);
 
       script.onload  = function () { btn.disabled = false; btn.textContent = 'Take Payment'; };
       script.onerror = function () {
