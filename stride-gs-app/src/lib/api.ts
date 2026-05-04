@@ -4311,6 +4311,23 @@ export function postStaxRefreshCustomerIds() {
   return apiPost<{ success: boolean; updated: string }>('staxRefreshCustomerIds', {});
 }
 
+// v38.178.0 — re-fetches Stax payment-method status for all charge-eligible
+// invoices (PENDING/CREATED/SENT/CHARGE_FAILED). Stamps the result onto
+// stax_invoices.payment_method_status so the React "CC on file" pill is
+// accurate — and a card removed in Stax actually propagates back to us.
+// Pass qbInvoiceNos to limit to a subset; omit for "refresh everything".
+export interface RefreshStaxPaymentStatusResponse {
+  success: boolean;
+  customersChecked: number;
+  rowsUpdated: number;
+  refreshed: { has_pm?: number; no_pm?: number; no_customer?: number; unknown?: number };
+  errors?: string[];
+  message?: string;
+}
+export function postStaxRefreshPaymentStatus(params?: { qbInvoiceNos?: string[] }) {
+  return apiPost<RefreshStaxPaymentStatusResponse>('staxRefreshPaymentStatus', (params || {}) as Record<string, unknown>);
+}
+
 export interface RunStaxChargesResponse {
   eligible: number;
   paid: number;
