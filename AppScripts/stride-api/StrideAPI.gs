@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.179.0 — 2026-05-04 PST — Reactivating an item now auto-clears Release Date. handleUpdateInventoryItem_ flipping Status from "Released" → "Active" used to leave the Release Date column populated, which made the inventory row look like an active item that had simultaneously been released — confusing on filters / reports / Supabase mirrors. Justin asked for a clean way to undo an accidental release. Now: Status === "Active" → Release Date is cleared in the same write. Switching to "On Hold" / "Transferred" leaves the historic release date alone. Idempotent.
+   StrideAPI.gs — v38.180.0 — 2026-05-04 PST — New runOnboardingDiagnostic admin entry. The Finish Setup → handleFinishClientSetup_ flow on Ruegamer Design returned HTTP 403 ACCESS_TOKEN_SCOPE_INSUFFICIENT when calling script.googleapis.com/v1/projects/<bound>/versions, and standard re-auth recovery (revoke + re-grant) didn't trigger a consent prompt. Run this diagnostic to isolate whether the problem is (A) runtime token scope vs (B) live manifest content vs (C) cross-script authorization. Three checks side by side: (A) hits oauth2/v3/tokeninfo with the actual ScriptApp.getOAuthToken() output and dumps every granted scope sorted alphabetically — if script.deployments is missing here it means the manifest scope was never approved at runtime even if declared on paper. (B) calls projects.getContent on StrideAPI itself, parses the live appsscript file, and lists every oauthScope in the deployed manifest — if script.deployments is missing here, push-stride-api.mjs's merge logic isn't actually persisting it. (C) attempts versions.create against StrideAPI's OWN scriptId with the same token + headers used for client-targeted calls — if this succeeds while client-targeted calls fail, the bug is per-target authorization (Justin's token can manage StrideAPI but not the bound client scripts), confirming we need an architectural fix where the bound client scripts self-deploy via their own ScriptApp.getOAuthToken(). Read-only besides the diagnostic version creation in C (versions accumulate harmlessly). Output to Logger; operator runs once, copies the execution log, pastes back for analysis.
+   v38.179.0 — 2026-05-04 PST — Reactivating an item now auto-clears Release Date. handleUpdateInventoryItem_ flipping Status from "Released" → "Active" used to leave the Release Date column populated, which made the inventory row look like an active item that had simultaneously been released — confusing on filters / reports / Supabase mirrors. Justin asked for a clean way to undo an accidental release. Now: Status === "Active" → Release Date is cleared in the same write. Switching to "On Hold" / "Transferred" leaves the historic release date alone. Idempotent.
    v38.178.0 — 2026-05-04 PST — Auto Pay + Card-on-File now actually mean something. Three changes that together fix the issue Justin caught: (1) Per-invoice auto_charge inherits from the client-level "Auto Charge" setting on CB Clients instead of being hard-coded true on every new Stax invoice. clientInfoMap in handleQbExport_ + handleImportIIF_ both gain an autoCharge field read from the "AUTO CHARGE" header. INSERT path stamps the per-invoice cell + Supabase mirror with that value; UPDATE-PENDING path refreshes from current client setting (rows haven't been pushed yet, refresh is intended). Operators can still toggle per-invoice on Review/Charge Queue as a one-off override. Pre-v38.178.0 every row got auto_charge=true regardless of opt-out, so the Charge Queue checkbox was always pre-checked even for clients who didn't want auto-pay. (2) New helper stax_fetchPaymentMethodStatus_(staxCustomerId) calls GET /customer/:id/payment-method via the existing stax_apiRequest_ wrapper, parses with stax_getPaymentMethodLabel_, returns 'has_pm' | 'no_pm' | 'no_customer' | 'unknown'. handleQbExport_'s INSERT + UPDATE-PENDING paths now write the real status to public.stax_invoices.payment_method_status instead of the lazy 'unknown'. Per-call cache so M invoices for the same customer = 1 API hit. Pre-v38.178.0 the column was 'unknown' or 'no_customer' forever, so the React "CC on file" pill could not render. (3) New admin endpoint staxRefreshPaymentStatus + handleStaxRefreshPaymentStatus_ — re-fetches PM status for every charge-eligible row (PENDING/CREATED/SENT/CHARGE_FAILED), stamps via supabasePatch_ keyed on qb_invoice_no, returns counters per status. Optional payload.qbInvoiceNos filters to a subset. Idempotent. Backs the new "Refresh Cards" button on Review. Catches expired/removed cards that would otherwise fail at charge time without warning.
    v38.177.0 — 2026-05-04 PST — Unified addons module. The task-only `task_addons` system shipped 2026-05-02 (never used in prod) is replaced by a polymorphic `addons` table keyed on (parent_type, parent_id) supporting task / repair / will_call / inventory. New helper api_writeAddonsToLedger_(ss, parentType, parentId, ctx) replaces the inline task-addon flush in handleCompleteTask_ and now also fires from handleCompleteRepair_ and handleProcessWcRelease_ (one line each, after the primary billing write). The helper fetches unbilled addons via REST, writes one Billing_Ledger row per addon (rate snapshotted at add time, falls back to current catalog if blank), mirrors each row to public.billing via resyncEntityToSupabase_, then PATCHes the addon back to billed=true with the resulting ledger_row_id stamped — making retries idempotent. Ledger Row ID format mirrors the existing convention: {parentId}-{svcCode}-ADDON-{n}. Per-parent column mapping: task→Task ID="{parentId}-{svcCode}", repair→Repair ID="{parentId}-{svcCode}", will_call→Shipment #=parentId, inventory→Item ID=parentId. Companion migration 20260504170000_unified_addons.sql drops the empty task_addons table and creates `addons` with parent_type CHECK constraint, parent_id non-empty CHECK, RLS (staff/admin + service_role), and realtime enabled. Removed: api_fetchTaskAddons_ (subsumed by the new helper).
    v38.176.0 — 2026-05-04 PST — handleStartRepair_ Supabase enrichment bulk-read perf fix. Same anti-pattern + same root cause as v38.175.0, this time in the post-repair-create write-through. The Tasks-sheet (source-task lookup) and Inventory-sheet (item shipment# fallback) enrichment loops both did per-row getRange().getValue() calls — O(N) Google API round-trips. Switched both to a single getValues() bulk read. Sweep complete: zero remaining per-row getValue loops in any user-facing handler. The only other instance is handleFixMissingFolders_ (admin-only batch hyperlink repair) which has no bulk equivalent (setRichTextValue is per-cell) and is invoked manually.
@@ -39667,6 +39668,140 @@ function countFilled_(row) {
  * stax_invoice_batches are orphaned but harmless. New batches created via
  * v38.173.0+ wire up batch_id correctly end-to-end.
  */
+/**
+ * v38.180.0 — runOnboardingDiagnostic — read-only diagnostic for the Finish
+ * Setup OAuth-scope failure (Justin's Ruegamer Design 2026-05-04 incident).
+ *
+ * The failing call inside handleFinishClientSetup_ is:
+ *   UrlFetchApp.fetch("https://script.googleapis.com/v1/projects/<scriptId>/versions",
+ *                     { headers: { Authorization: "Bearer " + ScriptApp.getOAuthToken() } })
+ *
+ * Returns HTTP 403 ACCESS_TOKEN_SCOPE_INSUFFICIENT despite the manifest
+ * declaring "https://www.googleapis.com/auth/script.deployments". This
+ * function isolates the failure mode by running three checks side by side
+ * and dumping everything to Logger so the operator can see what's actually
+ * happening at runtime.
+ *
+ * Run from the Apps Script editor: function dropdown → runOnboardingDiagnostic
+ * → Run. Then View → Executions to see the log output.
+ *
+ * No write side effects. Safe to re-run. The cross-script versions.create
+ * call is harmless — creating a script version is idempotent (versions
+ * accumulate but never break anything; there's a generous Google quota).
+ */
+function runOnboardingDiagnostic() {
+  Logger.log("=== StrideAPI Onboarding Diagnostic — v38.180.0 ===");
+  Logger.log("Started: " + new Date().toISOString());
+  Logger.log("");
+
+  // ── Check A: actual scopes on the runtime token ──────────────────────
+  // Apps Script's manifest declares scopes; the runtime token may have a
+  // SUBSET if the deployer hasn't approved all of them. tokeninfo dumps the
+  // truth.
+  Logger.log("─── A. Runtime OAuth token scopes ───");
+  var token = "";
+  try {
+    token = ScriptApp.getOAuthToken();
+    Logger.log("ScriptApp.getOAuthToken() returned a " + token.length + "-char token (starts " + token.substring(0, 8) + "…)");
+    var tokenInfoRes = UrlFetchApp.fetch(
+      "https://www.googleapis.com/oauth2/v3/tokeninfo?access_token=" + encodeURIComponent(token),
+      { muteHttpExceptions: true }
+    );
+    Logger.log("tokeninfo HTTP " + tokenInfoRes.getResponseCode());
+    var tokenInfo = {};
+    try { tokenInfo = JSON.parse(tokenInfoRes.getContentText()); }
+    catch (_) { tokenInfo = { raw: tokenInfoRes.getContentText().substring(0, 400) }; }
+    var grantedScopes = String(tokenInfo.scope || "").split(/\s+/).filter(Boolean).sort();
+    Logger.log("Granted scopes (" + grantedScopes.length + "):");
+    grantedScopes.forEach(function(s) { Logger.log("  ✓ " + s); });
+    var hasDeployments = grantedScopes.indexOf("https://www.googleapis.com/auth/script.deployments") >= 0;
+    Logger.log("");
+    Logger.log("script.deployments scope on RUNTIME token: " + (hasDeployments ? "✓ PRESENT" : "✗ MISSING"));
+  } catch (tokenErr) {
+    Logger.log("tokeninfo lookup failed: " + (tokenErr && tokenErr.message ? tokenErr.message : tokenErr));
+  }
+  Logger.log("");
+
+  // ── Check B: live manifest content ────────────────────────────────────
+  // Even if the push script declares script.deployments, the live deployed
+  // manifest may not have it. Fetch self via the Apps Script API and read
+  // the appsscript file source directly.
+  Logger.log("─── B. Live manifest (StrideAPI's own appsscript.json) ───");
+  var SELF_SCRIPT_ID = "134--evzE23rsA3CV_vEFQvZIQ86LE9boeSPBpGMYJ3pLbcW_Te6uqZ1M";
+  try {
+    var contentRes = UrlFetchApp.fetch(
+      "https://script.googleapis.com/v1/projects/" + SELF_SCRIPT_ID + "/content",
+      {
+        method: "get",
+        headers: { "Authorization": "Bearer " + token },
+        muteHttpExceptions: true
+      }
+    );
+    Logger.log("projects.getContent HTTP " + contentRes.getResponseCode());
+    if (contentRes.getResponseCode() === 200) {
+      var contentData = JSON.parse(contentRes.getContentText());
+      var manifestFile = (contentData.files || []).find(function(f) { return f.name === "appsscript"; });
+      if (manifestFile && manifestFile.source) {
+        var manifestObj = JSON.parse(manifestFile.source);
+        var manifestScopes = (manifestObj.oauthScopes || []).slice().sort();
+        Logger.log("Manifest declares (" + manifestScopes.length + ") scopes:");
+        manifestScopes.forEach(function(s) { Logger.log("  • " + s); });
+        var manifestHasDeployments = manifestScopes.indexOf("https://www.googleapis.com/auth/script.deployments") >= 0;
+        Logger.log("");
+        Logger.log("script.deployments in MANIFEST: " + (manifestHasDeployments ? "✓ PRESENT" : "✗ MISSING"));
+      } else {
+        Logger.log("Could not find 'appsscript' file in projects.getContent response");
+      }
+    } else {
+      Logger.log("getContent body (first 600 chars): " + contentRes.getContentText().substring(0, 600));
+    }
+  } catch (contentErr) {
+    Logger.log("getContent failed: " + (contentErr && contentErr.message ? contentErr.message : contentErr));
+  }
+  Logger.log("");
+
+  // ── Check C: same-script versions.create test ─────────────────────────
+  // If this fails on StrideAPI's OWN scriptId with the same error, it's a
+  // scope problem. If it succeeds here but fails for client scriptIds, the
+  // problem is cross-script (the runtime token isn't authorized to manage
+  // OTHER scripts' deployments). Diagnostic versions accumulate harmlessly.
+  Logger.log("─── C. Same-script versions.create test ───");
+  Logger.log("Target: " + SELF_SCRIPT_ID + " (StrideAPI itself)");
+  try {
+    var versionRes = UrlFetchApp.fetch(
+      "https://script.googleapis.com/v1/projects/" + SELF_SCRIPT_ID + "/versions",
+      {
+        method: "post",
+        contentType: "application/json",
+        headers: { "Authorization": "Bearer " + token },
+        payload: JSON.stringify({ description: "Diagnostic — runOnboardingDiagnostic " + new Date().toISOString() }),
+        muteHttpExceptions: true
+      }
+    );
+    Logger.log("versions.create HTTP " + versionRes.getResponseCode());
+    var versionBody = versionRes.getContentText();
+    Logger.log("Body (first 600 chars): " + versionBody.substring(0, 600));
+    if (versionRes.getResponseCode() === 200) {
+      Logger.log("");
+      Logger.log("RESULT: Same-script versions.create SUCCEEDED.");
+      Logger.log("  → Scope IS sufficient for self-deploy.");
+      Logger.log("  → If client cross-script call fails, the issue is per-target authorization,");
+      Logger.log("    NOT scope. Architectural fix needed (have client scripts self-deploy).");
+    } else {
+      Logger.log("");
+      Logger.log("RESULT: Same-script versions.create FAILED.");
+      Logger.log("  → Even on its own scriptId, StrideAPI's runtime token can't create versions.");
+      Logger.log("  → The runtime token is missing script.deployments OR the project's GCP");
+      Logger.log("    enablement is wrong. Compare results from checks A + B above.");
+    }
+  } catch (versionErr) {
+    Logger.log("versions.create threw: " + (versionErr && versionErr.message ? versionErr.message : versionErr));
+  }
+  Logger.log("");
+  Logger.log("=== Diagnostic complete ===");
+  Logger.log("Copy this entire log and paste it back to the operator/Claude session for analysis.");
+}
+
 function runRepairOrphanStaxInvoices() {
   var staxSS;
   try { staxSS = getStaxSpreadsheet_(); }
