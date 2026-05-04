@@ -24,8 +24,13 @@ import type { EmailTemplate } from '../../lib/api';
 import { supabase } from '../../lib/supabase';
 import { sendEmail } from '../../lib/email';
 import { useClients } from '../../hooks/useClients';
+import { fetchAdminIntakeDrafts, type AdminIntakeDraft } from '../../hooks/useClientIntake';
 
-type StatusFilter = IntakeRow['status'] | 'all';
+// v38.179.0 — 'drafts' added so the operator can see in-progress intakes
+// (rows in client_intake_drafts that haven't been submitted yet). The
+// drafts view is a separate list+detail pane; submitted intakes live in
+// client_intakes and use the existing chips.
+type StatusFilter = IntakeRow['status'] | 'all' | 'drafts';
 
 const PAGE_FONT = theme.typography.fontFamily;
 const BASE_INTAKE_URL = 'https://www.mystridehub.com/#/intake/';
@@ -64,8 +69,35 @@ export function IntakesPanel() {
     [intakes, selectedId]
   );
 
-  if (!selectedId && filtered.length > 0) {
+  if (filter !== 'drafts' && !selectedId && filtered.length > 0) {
     setTimeout(() => setSelectedId(filtered[0].id), 0);
+  }
+
+  // v38.179.0 — Drafts list (in-progress intakes that haven't been submitted).
+  // Fetched lazily when the filter is set to 'drafts' so we don't pay the
+  // Supabase round-trip on every panel render. Realtime would be nice
+  // (live "Jenny is at step 4 right now…") but a manual refresh button
+  // covers the common case without subscribing.
+  const [drafts, setDrafts] = useState<AdminIntakeDraft[]>([]);
+  const [draftsLoading, setDraftsLoading] = useState(false);
+  const [draftsLoaded, setDraftsLoaded] = useState(false);
+  const [selectedDraftLinkId, setSelectedDraftLinkId] = useState<string | null>(null);
+  const refreshDrafts = async () => {
+    setDraftsLoading(true);
+    try {
+      const rows = await fetchAdminIntakeDrafts();
+      setDrafts(rows);
+      setDraftsLoaded(true);
+    } finally {
+      setDraftsLoading(false);
+    }
+  };
+  useEffect(() => {
+    if (filter === 'drafts' && !draftsLoaded) void refreshDrafts();
+  }, [filter, draftsLoaded]);
+
+  if (filter === 'drafts' && !selectedDraftLinkId && drafts.length > 0) {
+    setTimeout(() => setSelectedDraftLinkId(drafts[0].linkId), 0);
   }
 
   const counts = useMemo(() => ({
@@ -74,7 +106,8 @@ export function IntakesPanel() {
     reviewed: intakes.filter(i => i.status === 'reviewed').length,
     activated:intakes.filter(i => i.status === 'activated').length,
     rejected: intakes.filter(i => i.status === 'rejected').length,
-  }), [intakes]);
+    drafts:   drafts.length,
+  }), [intakes, drafts]);
 
   const handleCreateClient = async (formData: OnboardClientFormData): Promise<OnboardSubmitResult> => {
     // Refresh-mode activation: the intake was submitted via a link tagged
@@ -328,10 +361,26 @@ export function IntakesPanel() {
               <FilterChip label="Reviewed"   n={counts.reviewed}  active={filter === 'reviewed'}  onClick={() => setFilter('reviewed')} />
               <FilterChip label="Activated"  n={counts.activated} active={filter === 'activated'} onClick={() => setFilter('activated')} accent="success" />
               <FilterChip label="Rejected"   n={counts.rejected}  active={filter === 'rejected'}  onClick={() => setFilter('rejected')}  accent="danger" />
+              <FilterChip label="Drafts"     n={counts.drafts}    active={filter === 'drafts'}    onClick={() => setFilter('drafts')}    accent="info" />
             </div>
           </div>
           <div style={{ maxHeight: 560, overflowY: 'auto' }}>
-            {loading ? (
+            {filter === 'drafts' ? (
+              draftsLoading ? (
+                <div style={{ padding: 24, textAlign: 'center', color: theme.colors.textMuted, fontSize: 12 }}>Loading drafts…</div>
+              ) : drafts.length === 0 ? (
+                <div style={{ padding: 24, textAlign: 'center', color: theme.colors.textMuted, fontSize: 12 }}>No drafts in progress.</div>
+              ) : (
+                drafts.map(d => (
+                  <DraftListRow
+                    key={d.linkId}
+                    draft={d}
+                    selected={selectedDraftLinkId === d.linkId}
+                    onClick={() => setSelectedDraftLinkId(d.linkId)}
+                  />
+                ))
+              )
+            ) : loading ? (
               <div style={{ padding: 24, textAlign: 'center', color: theme.colors.textMuted, fontSize: 12 }}>Loading…</div>
             ) : filtered.length === 0 ? (
               <div style={{ padding: 24, textAlign: 'center', color: theme.colors.textMuted, fontSize: 12 }}>No intakes in this view.</div>
@@ -350,7 +399,19 @@ export function IntakesPanel() {
 
         {/* Right — review */}
         <main style={reviewShell}>
-          {selected ? (
+          {filter === 'drafts' ? (
+            (() => {
+              const selDraft = selectedDraftLinkId ? drafts.find(d => d.linkId === selectedDraftLinkId) ?? null : null;
+              if (!selDraft) {
+                return (
+                  <div style={{ padding: 40, textAlign: 'center', color: theme.colors.textMuted, fontSize: 13 }}>
+                    {drafts.length === 0 ? 'No drafts to inspect.' : 'Select a draft to inspect.'}
+                  </div>
+                );
+              }
+              return <DraftSnapshot draft={selDraft} onRefresh={refreshDrafts} />;
+            })()
+          ) : selected ? (
             <IntakeReview
               intake={selected}
               onCreateClient={() => setOnboardOpen(true)}
@@ -894,11 +955,12 @@ function DocumentLink({ label, path, getFileSignedUrl }: {
 
 function FilterChip({ label, n, active, onClick, accent }: {
   label: string; n: number; active: boolean; onClick: () => void;
-  accent?: 'success' | 'warning' | 'danger';
+  accent?: 'success' | 'warning' | 'danger' | 'info';
 }) {
   const palette = accent === 'success' ? { bg: 'rgba(74,138,92,0.14)', fg: '#15803D' }
     : accent === 'warning' ? { bg: '#FEF3C7', fg: '#92400E' }
     : accent === 'danger'  ? { bg: '#FEE2E2', fg: '#B91C1C' }
+    : accent === 'info'    ? { bg: '#DBEAFE', fg: '#1E40AF' }
     : { bg: theme.colors.bgSubtle, fg: theme.colors.textSecondary };
   return (
     <button
@@ -1046,3 +1108,159 @@ const thStyle: React.CSSProperties = {
 const tdStyle: React.CSSProperties = {
   padding: '8px 10px', verticalAlign: 'middle',
 };
+
+/* ──────────────────────────────────────────────────────────────────────
+ * v38.179.0 — Drafts sub-views
+ *
+ * DraftListRow: compact row matching IntakeListRow's visual style.
+ *   Shows business name (or "—" if unstarted), prospect name/email,
+ *   current step / 6, last-updated relative time.
+ *
+ * DraftSnapshot: read-only dump of every saved field so the operator
+ *   can see exactly how far the prospect got. Useful for diagnosing
+ *   silent submission failures (Jenny Ruegamer 2026-04-24 was the
+ *   driving incident).
+ * ────────────────────────────────────────────────────────────────────── */
+
+const STEP_LABELS: Record<number, string> = {
+  1: 'Business info',
+  2: 'Billing contact',
+  3: 'Terms & signature',
+  4: 'Payment setup',
+  5: 'Tax & documents',
+  6: 'Review & submit',
+};
+
+function DraftListRow({ draft, selected, onClick }: { draft: AdminIntakeDraft; selected: boolean; onClick: () => void }) {
+  const d = draft.draft as Record<string, unknown>;
+  const biz = String(d.businessName || '').trim() || '—';
+  const stepLabel = STEP_LABELS[draft.step] || `Step ${draft.step}`;
+  const updatedFmt = draft.updatedAt ? fmtDateTime(draft.updatedAt) : '—';
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        display: 'block', width: '100%', textAlign: 'left',
+        padding: '10px 14px',
+        background: selected ? theme.colors.bgSubtle : '#fff',
+        border: 'none',
+        borderBottom: `1px solid ${theme.colors.border}`,
+        cursor: 'pointer', fontFamily: PAGE_FONT,
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 8 }}>
+        <span style={{ fontSize: 13, fontWeight: 600, color: theme.colors.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {biz}
+        </span>
+        <span style={{ fontSize: 10, fontWeight: 700, color: theme.colors.orange, whiteSpace: 'nowrap' }}>
+          Step {draft.step}/6
+        </span>
+      </div>
+      <div style={{ fontSize: 11, color: theme.colors.textMuted, marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+        {draft.prospectName || draft.prospectEmail || draft.linkId}
+      </div>
+      <div style={{ fontSize: 10, color: theme.colors.textMuted, marginTop: 2 }}>
+        {stepLabel} · updated {updatedFmt}
+      </div>
+    </button>
+  );
+}
+
+function DraftSnapshot({ draft, onRefresh }: { draft: AdminIntakeDraft; onRefresh: () => void }) {
+  const d = draft.draft as Record<string, unknown>;
+  const fileHints = (d.__fileHints as { resaleCertFileName?: string; otherFileNames?: string[] }) || {};
+  const intakeUrl = `${window.location.origin}/#/intake/${draft.linkId}`;
+  const stepLabel = STEP_LABELS[draft.step] || `Step ${draft.step}`;
+
+  // Build a flat key/value rendering of every saved field, skipping the
+  // private __fileHints namespace and any keys whose value is empty.
+  const visible: Array<[string, string]> = [];
+  for (const [k, v] of Object.entries(d)) {
+    if (k === '__fileHints') continue;
+    if (v === null || v === undefined || v === '') continue;
+    let str: string;
+    if (Array.isArray(v)) {
+      if (v.length === 0) continue;
+      str = JSON.stringify(v);
+    } else if (typeof v === 'object') {
+      str = JSON.stringify(v);
+    } else {
+      str = String(v);
+    }
+    if (str.length > 800) str = str.slice(0, 800) + '… (truncated)';
+    visible.push([k, str]);
+  }
+
+  return (
+    <div style={{ padding: 20, fontFamily: PAGE_FONT }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12, marginBottom: 14 }}>
+        <div>
+          <div style={{ fontSize: 16, fontWeight: 700, color: theme.colors.text }}>
+            {String(d.businessName || '').trim() || draft.prospectName || '(unnamed draft)'}
+          </div>
+          <div style={{ fontSize: 12, color: theme.colors.textMuted, marginTop: 2 }}>
+            Step {draft.step}/6 · {stepLabel} · updated {fmtDateTime(draft.updatedAt)}
+          </div>
+          {draft.prospectEmail && (
+            <div style={{ fontSize: 12, color: theme.colors.textMuted, marginTop: 2 }}>
+              Invitation sent to {draft.prospectEmail}
+            </div>
+          )}
+        </div>
+        <button
+          onClick={onRefresh}
+          title="Re-fetch drafts list (catch new ones in progress)"
+          style={{
+            padding: '6px 10px', fontSize: 11, fontWeight: 600,
+            border: `1px solid ${theme.colors.border}`, borderRadius: 6,
+            background: '#fff', cursor: 'pointer',
+            color: theme.colors.textSecondary, fontFamily: 'inherit',
+          }}
+        >
+          Refresh
+        </button>
+      </div>
+
+      <div style={{ background: theme.colors.bgSubtle, padding: 10, borderRadius: 8, marginBottom: 14, fontSize: 11, color: theme.colors.textSecondary }}>
+        <div style={{ fontWeight: 700, marginBottom: 4, textTransform: 'uppercase', letterSpacing: 1 }}>Resume URL (same as the prospect's)</div>
+        <code style={{ wordBreak: 'break-all', display: 'block', marginBottom: 6 }}>{intakeUrl}</code>
+        <a href={intakeUrl} target="_blank" rel="noreferrer" style={{ color: theme.colors.orange, fontWeight: 600, fontSize: 11, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+          <ExternalLink size={11} /> Open prospect's link
+        </a>
+      </div>
+
+      {(fileHints.resaleCertFileName || (fileHints.otherFileNames && fileHints.otherFileNames.length > 0)) && (
+        <div style={{ background: '#FEF3C7', border: '1px solid #FCD34D', borderRadius: 8, padding: 10, marginBottom: 14, fontSize: 11, color: '#92400E' }}>
+          <div style={{ fontWeight: 700, marginBottom: 4 }}>Files prospect previously chose (not persisted)</div>
+          {fileHints.resaleCertFileName && <div>Resale cert: <code>{fileHints.resaleCertFileName}</code></div>}
+          {fileHints.otherFileNames && fileHints.otherFileNames.length > 0 && (
+            <div>Other: <code>{fileHints.otherFileNames.join(', ')}</code></div>
+          )}
+          <div style={{ marginTop: 4, fontStyle: 'italic' }}>The prospect will need to re-attach files when they resume.</div>
+        </div>
+      )}
+
+      <div style={{ fontSize: 11, fontWeight: 700, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 8 }}>
+        Saved fields ({visible.length})
+      </div>
+      <div style={{ border: `1px solid ${theme.colors.border}`, borderRadius: 8, overflow: 'hidden' }}>
+        {visible.length === 0 ? (
+          <div style={{ padding: 16, textAlign: 'center', color: theme.colors.textMuted, fontSize: 12 }}>
+            No fields saved yet — prospect opened the form but hasn't typed anything.
+          </div>
+        ) : (
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+            <tbody>
+              {visible.map(([k, v]) => (
+                <tr key={k} style={{ borderBottom: `1px solid ${theme.colors.borderLight}` }}>
+                  <td style={{ ...tdStyle, width: 180, fontWeight: 600, color: theme.colors.textMuted, verticalAlign: 'top' }}>{k}</td>
+                  <td style={{ ...tdStyle, fontFamily: 'monospace', wordBreak: 'break-word' }}>{v}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </div>
+  );
+}

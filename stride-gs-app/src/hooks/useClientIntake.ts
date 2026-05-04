@@ -591,3 +591,144 @@ export function useSignatureCanvas(): {
     },
   };
 }
+
+/* ============================================================
+ * v38.179.0 — Intake draft auto-save (Option 2)
+ *
+ * Pre-existing flow: form state lived in useState only — close the tab
+ * or refresh and everything evaporated, with zero server-side trace.
+ * (Justin caught this when Jenny Ruegamer reported failed submissions
+ * twice and we had no record of either attempt.)
+ *
+ * New flow:
+ *   • fetchIntakeDraft(linkId)   → load saved snapshot on form mount
+ *   • saveIntakeDraft(linkId, …) → debounced upsert as the prospect types
+ *   • deleteIntakeDraft(linkId)  → cleanup on successful submit
+ *
+ * File fields (resaleCertFile, otherFiles) are NOT persisted — File
+ * objects don't survive serialization, and there's no way to "remember"
+ * a chosen local file across browser sessions. The prospect re-attaches
+ * files when they resume. Everything else (text, booleans, signature
+ * base64, sectionInitials, notificationContacts) round-trips through
+ * JSONB.
+ * ============================================================ */
+
+export interface SavedIntakeDraft {
+  draft: Record<string, unknown>;
+  step: number;
+  updatedAt: string;
+}
+
+/**
+ * Strip non-serializable fields (File / FileList) before persisting. Returns
+ * a JSON-safe shallow clone. The caller's Draft type loses fidelity here —
+ * that's fine, the prospect re-attaches files on resume. We persist the
+ * file *names* as a hint so the resume UI can display "you uploaded
+ * resale.pdf last time — please re-attach if still applicable".
+ */
+function stripFiles(draft: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  let resaleHint = '';
+  const otherHints: string[] = [];
+  for (const [k, v] of Object.entries(draft)) {
+    if (v instanceof File) {
+      // Stash filename hint, drop the File object.
+      if (k === 'resaleCertFile') resaleHint = v.name;
+      continue;
+    }
+    if (Array.isArray(v) && v.length > 0 && v[0] instanceof File) {
+      if (k === 'otherFiles') {
+        for (const f of v as File[]) otherHints.push(f.name);
+      }
+      out[k] = [];
+      continue;
+    }
+    out[k] = v;
+  }
+  // Drop file slots themselves so the hydration step doesn't try to
+  // resurrect a File from a string (which would crash <input type=file>).
+  delete out.resaleCertFile;
+  delete out.otherFiles;
+  // Persist hints in a separate namespace so the resume screen can
+  // display "you previously attached: <names>".
+  out.__fileHints = { resaleCertFileName: resaleHint, otherFileNames: otherHints };
+  return out;
+}
+
+export async function fetchIntakeDraft(linkId: string): Promise<SavedIntakeDraft | null> {
+  if (!linkId) return null;
+  const { data, error } = await supabase
+    .from('client_intake_drafts')
+    .select('draft, step, updated_at')
+    .eq('link_id', linkId)
+    .maybeSingle();
+  if (error || !data) return null;
+  return {
+    draft: (data.draft as Record<string, unknown>) || {},
+    step: typeof data.step === 'number' ? data.step : 1,
+    updatedAt: String(data.updated_at || ''),
+  };
+}
+
+export async function saveIntakeDraft(linkId: string, draft: Record<string, unknown>, step: number): Promise<void> {
+  if (!linkId) return;
+  const stripped = stripFiles(draft);
+  const ua = typeof navigator !== 'undefined' ? navigator.userAgent : null;
+  // Best-effort upsert. Failures are non-fatal — the prospect can still
+  // submit; auto-save is a nice-to-have, not a blocker.
+  const { error } = await supabase
+    .from('client_intake_drafts')
+    .upsert(
+      { link_id: linkId, draft: stripped, step, user_agent: ua },
+      { onConflict: 'link_id' }
+    );
+  if (error) {
+    // eslint-disable-next-line no-console
+    console.warn('[intake-draft] save failed (non-fatal):', error.message);
+  }
+}
+
+export async function deleteIntakeDraft(linkId: string): Promise<void> {
+  if (!linkId) return;
+  // Best-effort cleanup — if it fails the row stays orphaned but the
+  // submitted client_intakes row is the source of truth so it's harmless.
+  await supabase.from('client_intake_drafts').delete().eq('link_id', linkId).then(
+    () => { /* ok */ },
+    (err) => console.warn('[intake-draft] delete failed (non-fatal):', err)
+  );
+}
+
+/**
+ * Admin-side: list every saved draft. Used by Settings → Clients →
+ * Intakes → Drafts sub-tab. Joins prospect_name + prospect_email from
+ * client_intake_links so the operator sees who's mid-form without an
+ * extra round-trip.
+ */
+export interface AdminIntakeDraft {
+  linkId: string;
+  prospectName: string | null;
+  prospectEmail: string | null;
+  step: number;
+  draft: Record<string, unknown>;
+  updatedAt: string;
+  createdAt: string;
+}
+export async function fetchAdminIntakeDrafts(): Promise<AdminIntakeDraft[]> {
+  const { data, error } = await supabase
+    .from('client_intake_drafts')
+    .select('link_id, step, draft, updated_at, created_at, client_intake_links!inner(prospect_name, prospect_email)')
+    .order('updated_at', { ascending: false });
+  if (error || !data) return [];
+  return (data as Array<Record<string, unknown>>).map((row) => {
+    const link = row.client_intake_links as { prospect_name?: string | null; prospect_email?: string | null } | null;
+    return {
+      linkId: String(row.link_id),
+      prospectName: link?.prospect_name ?? null,
+      prospectEmail: link?.prospect_email ?? null,
+      step: typeof row.step === 'number' ? row.step : 1,
+      draft: (row.draft as Record<string, unknown>) || {},
+      updatedAt: String(row.updated_at || ''),
+      createdAt: String(row.created_at || ''),
+    };
+  });
+}
