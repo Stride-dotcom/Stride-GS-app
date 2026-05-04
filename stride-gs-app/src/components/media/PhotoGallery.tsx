@@ -8,6 +8,7 @@ import { useCallback, useMemo, useState } from 'react';
 import { ImageIcon, AlertTriangle, Share2, X } from 'lucide-react';
 import { theme } from '../../styles/theme';
 import { usePhotos, type Photo, type EntityType, type PhotoType } from '../../hooks/usePhotos';
+import { usePhotoGraphRollup, type RollupContext } from '../../hooks/useGraphRollup';
 
 type RelatedEntity = { type: string; id: string };
 import { PhotoGrid } from './PhotoGrid';
@@ -42,6 +43,14 @@ interface Props {
    *  what targets are available. Ambiguous selections (multiple matches)
    *  disable the upload button. */
   relatedEntities?: RelatedEntity[];
+  /** v2026-05-04 — graph rollup. When supplied, the displayed photo list is
+   *  the multi-scope rollup result (item_ids ∪ entity scopes) instead of the
+   *  host-entity-scoped list from usePhotos. Mutations (upload / toggle /
+   *  delete) still flow through the host entity's usePhotos hook so they
+   *  land in the right (entity_type, entity_id, item_id) bucket; the rollup
+   *  picks them up via realtime. Pass null/undefined to keep the legacy
+   *  host-only behavior. */
+  rollupCtx?: RollupContext | null;
 }
 
 export function PhotoGallery({
@@ -50,15 +59,26 @@ export function PhotoGallery({
   readOnly, naked, title = 'Photos', compact,
   enableSourceFilter = false,
   relatedEntities,
+  rollupCtx,
 }: Props) {
   const [sourceFilter, setSourceFilter] = useState<string>('all');
   // Session 74: `setPrimaryPhoto` is still exported by usePhotos for
   // interface compatibility but no longer consumed here — the "Make
   // Primary" feature was removed from the UI.
-  const {
-    photos, loading, error,
-    uploadPhoto, toggleNeedsAttention, toggleRepair, deletePhoto,
-  } = usePhotos({ entityType, entityId, tenantId, itemId });
+  const useRollup = !!rollupCtx;
+  // When a rollup context is supplied, the read view comes from the rollup
+  // hook; mutations always go through the host hook so the (entity_type,
+  // entity_id, item_id) stamping rules in usePhotos.uploadPhoto stay
+  // authoritative. Realtime in the rollup hook picks the change up.
+  // The host hook is disabled in rollup mode — its mutation functions still
+  // work (they don't depend on `enabled`), but its read query and realtime
+  // subscription are skipped to avoid duplicate channels and wasted reads.
+  const hostHook = usePhotos({ entityType, entityId, tenantId, itemId, enabled: !useRollup });
+  const rollupHook = usePhotoGraphRollup(rollupCtx ?? { tenantId, itemIds: [], scopes: [], enabled: false });
+  const photos = useRollup ? rollupHook.photos : hostHook.photos;
+  const loading = useRollup ? rollupHook.loading : hostHook.loading;
+  const error = (useRollup ? rollupHook.error : null) ?? hostHook.error;
+  const { uploadPhoto, toggleNeedsAttention, toggleRepair, deletePhoto } = hostHook;
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);

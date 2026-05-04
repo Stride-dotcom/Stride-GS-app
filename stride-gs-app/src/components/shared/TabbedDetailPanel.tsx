@@ -47,6 +47,7 @@ import { EntityHistory } from './EntityHistory';
 import { usePhotos, type EntityType as PhotoEntityType } from '../../hooks/usePhotos';
 import { useDocuments, type DocumentContextType } from '../../hooks/useDocuments';
 import { useEntityNotes } from '../../hooks/useEntityNotes';
+import { usePhotoGraphRollup, useNoteGraphRollup, type RollupContext } from '../../hooks/useGraphRollup';
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -84,6 +85,8 @@ export interface TabbedDetailPanelBuiltInTabs {
     /** v2026-04-22 — opt-in source-entity sub-tabs. The four migrating panels
      *  (Task/Repair/WC/Shipment) set this; legacy consumers leave it off. */
     enableSourceFilter?: boolean;
+    /** v2026-05-04 — graph rollup context. Activates multi-scope rollup. */
+    rollupCtx?: RollupContext | null;
   };
   docs?: {
     contextType: DocumentContextType;
@@ -100,6 +103,8 @@ export interface TabbedDetailPanelBuiltInTabs {
     enableSourceFilter?: boolean;
     /** Parent item id for the rollup query. Ignored unless enableSourceFilter. */
     itemId?: string | null;
+    /** v2026-05-04 — graph rollup context. */
+    rollupCtx?: RollupContext | null;
   };
   /** Activity tab — accepts either a simple entityType/entityId pair (renders
    *  the default `<EntityHistory>`) OR a full render function (escape hatch
@@ -230,13 +235,21 @@ function useBuiltInTabs(cfg: TabbedDetailPanelBuiltInTabs | undefined): TabbedDe
   const activityCfg = cfg?.activity;
 
   // Call hooks unconditionally but pass disabled/empty when unused.
-  const { photos } = usePhotos({
+  // When the panel supplies a graph rollup context, badge counts come from
+  // the rollup hook (matches what the user sees inside the tab); otherwise
+  // they come from the host-entity-scoped hook.
+  const photosUseRollup = !!photosCfg?.rollupCtx;
+  const { photos: hostPhotos } = usePhotos({
     entityType: (photosCfg?.entityType ?? 'inventory') as PhotoEntityType,
     entityId: photosCfg?.entityId ?? null,
     tenantId: photosCfg?.tenantId ?? null,
     itemId: photosCfg?.itemId ?? null,
-    enabled: !!photosCfg?.entityId,
+    enabled: !!photosCfg?.entityId && !photosUseRollup,
   });
+  const { photos: rolledPhotos } = usePhotoGraphRollup(
+    photosCfg?.rollupCtx ?? { tenantId: null, itemIds: [], scopes: [], enabled: false }
+  );
+  const photos = photosUseRollup ? rolledPhotos : hostPhotos;
 
   const { documents } = useDocuments({
     contextType: (docsCfg?.contextType ?? 'item') as DocumentContextType,
@@ -248,10 +261,15 @@ function useBuiltInTabs(cfg: TabbedDetailPanelBuiltInTabs | undefined): TabbedDe
   // useEntityNotes takes positional args; when no notes config is provided,
   // we pass empty-string id so the hook's internal guard short-circuits the
   // query (mirrors the pattern the hook already uses for unmounted panels).
-  const { notes } = useEntityNotes(
+  const notesUseRollup = !!notesCfg?.rollupCtx;
+  const { notes: hostNotes } = useEntityNotes(
     notesCfg?.entityType ?? 'inventory',
-    notesCfg?.entityId ?? ''
+    notesUseRollup ? '' : (notesCfg?.entityId ?? '')
   );
+  const { notes: rolledNotes } = useNoteGraphRollup(
+    notesCfg?.rollupCtx ?? { tenantId: null, itemIds: [], scopes: [], enabled: false }
+  );
+  const notes = notesUseRollup ? rolledNotes : hostNotes;
 
   return useMemo(() => {
     const out: TabbedDetailPanelTab[] = [];
@@ -268,6 +286,7 @@ function useBuiltInTabs(cfg: TabbedDetailPanelBuiltInTabs | undefined): TabbedDe
             itemId={photosCfg.itemId ?? null}
             tenantId={photosCfg.tenantId ?? null}
             enableSourceFilter={photosCfg.enableSourceFilter}
+            rollupCtx={photosCfg.rollupCtx ?? null}
           />
         ),
       });
@@ -300,6 +319,7 @@ function useBuiltInTabs(cfg: TabbedDetailPanelBuiltInTabs | undefined): TabbedDe
             relatedEntities={notesCfg.relatedEntities}
             enableSourceFilter={notesCfg.enableSourceFilter}
             itemId={notesCfg.itemId ?? null}
+            rollupCtx={notesCfg.rollupCtx ?? null}
           />
         ),
       });

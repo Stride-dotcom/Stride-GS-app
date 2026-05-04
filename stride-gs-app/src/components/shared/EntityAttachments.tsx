@@ -33,6 +33,7 @@ import { NotesSection } from '../notes/NotesSection';
 import { usePhotos, type EntityType as PhotoEntityType } from '../../hooks/usePhotos';
 import { useDocuments, type DocumentContextType } from '../../hooks/useDocuments';
 import { useEntityNotes, useEntityNotesRollup, type EntityNote } from '../../hooks/useEntityNotes';
+import { useNoteGraphRollup, usePhotoGraphRollup, type RollupContext } from '../../hooks/useGraphRollup';
 import { EntitySourceTabs, ENTITY_LABEL } from './EntitySourceTabs';
 
 interface PhotosCfg {
@@ -47,6 +48,11 @@ interface PhotosCfg {
    *  when the rollup spans multiple entity_types. Off by default so Claim
    *  and other legacy consumers stay byte-identical. */
   enableSourceFilter?: boolean;
+  /** v2026-05-04 — graph rollup context. When provided, the gallery shows
+   *  every photo across the entity's neighborhood (linked shipments, will
+   *  calls, claim items, etc.). Mutations still target the host (entityType,
+   *  entityId). */
+  rollupCtx?: RollupContext | null;
 }
 interface DocumentsCfg {
   contextType: DocumentContextType;
@@ -67,6 +73,11 @@ interface NotesCfg {
   enableSourceFilter?: boolean;
   /** Parent item_id; ignored unless enableSourceFilter=true. */
   itemId?: string | null;
+  /** v2026-05-04 — graph rollup context. When provided AND
+   *  enableSourceFilter is true, the rollup view reads from the multi-scope
+   *  graph hook so notes from linked shipments / will calls / claim items
+   *  show up too. Composer still writes against the primary entity. */
+  rollupCtx?: RollupContext | null;
 }
 
 interface Props {
@@ -92,6 +103,7 @@ export function EntityAttachments({ photos, documents, notes, defaultOpen }: Pro
           tenantId={photos.tenantId}
           itemId={photos.itemId}
           enableSourceFilter={photos.enableSourceFilter}
+          rollupCtx={photos.rollupCtx}
         />
       )}
       {documents && (
@@ -110,6 +122,7 @@ export function EntityAttachments({ photos, documents, notes, defaultOpen }: Pro
           relatedEntities={notes.relatedEntities}
           enableSourceFilter={notes.enableSourceFilter}
           itemId={notes.itemId}
+          rollupCtx={notes.rollupCtx}
         />
       )}
     </div>
@@ -180,16 +193,27 @@ function SectionHeader({
 }
 
 function PhotosSection({
-  entityType, entityId, tenantId, itemId, enableSourceFilter, defaultOpen,
+  entityType, entityId, tenantId, itemId, enableSourceFilter, rollupCtx, defaultOpen,
 }: PhotosCfg & { defaultOpen: boolean }) {
   const [open, setOpen] = useState(defaultOpen);
-  const { photos } = usePhotos({ entityType, entityId, tenantId, itemId });
+  // Header count: when a rollup context is supplied, count reflects the
+  // graph rollup; otherwise the host-entity-scoped count. Both hooks are
+  // called unconditionally (rules of hooks) but the disabled side bails
+  // out without a network round-trip.
+  const { photos: hostPhotos } = usePhotos({
+    entityType, entityId, tenantId, itemId,
+    enabled: !rollupCtx,
+  });
+  const { photos: rollupPhotos } = usePhotoGraphRollup(
+    rollupCtx ?? { tenantId: null, itemIds: [], scopes: [], enabled: false }
+  );
+  const photoCount = rollupCtx ? rollupPhotos.length : hostPhotos.length;
   return (
     <section>
       <SectionHeader
         icon={<ImageIcon size={15} color={theme.colors.orange} />}
         label="Photos"
-        count={photos.length}
+        count={photoCount}
         open={open}
         onToggle={() => setOpen(o => !o)}
       />
@@ -200,6 +224,7 @@ function PhotosSection({
           tenantId={tenantId}
           itemId={itemId}
           enableSourceFilter={enableSourceFilter}
+          rollupCtx={rollupCtx}
           naked
           compact
         />
@@ -255,7 +280,7 @@ function DocumentsSection({
 // Shipment / Claim) still use it and see no difference. Purely additive.
 
 export function PhotosPanel({
-  entityType, entityId, tenantId, itemId, enableSourceFilter, relatedEntities,
+  entityType, entityId, tenantId, itemId, enableSourceFilter, relatedEntities, rollupCtx,
 }: {
   entityType: PhotoEntityType;
   entityId: string | null | undefined;
@@ -269,6 +294,8 @@ export function PhotosPanel({
   /** Related task / repair / will-call / shipment ids so uploads from a
    *  filtered sub-tab route to the right entity instead of the host item. */
   relatedEntities?: Array<{ type: string; id: string }>;
+  /** v2026-05-04 — graph rollup context. See PhotoGallery for semantics. */
+  rollupCtx?: RollupContext | null;
 }) {
   return (
     <PhotoGallery
@@ -278,6 +305,7 @@ export function PhotosPanel({
       itemId={itemId}
       enableSourceFilter={enableSourceFilter}
       relatedEntities={relatedEntities}
+      rollupCtx={rollupCtx}
       naked
       compact
     />
@@ -317,7 +345,7 @@ export function DocumentsPanel({
 }
 
 export function NotesPanel({
-  entityType, entityId, relatedEntities, enableSourceFilter, itemId, pinnedNote,
+  entityType, entityId, relatedEntities, enableSourceFilter, itemId, pinnedNote, rollupCtx,
 }: {
   entityType: string;
   entityId: string;
@@ -335,10 +363,37 @@ export function NotesPanel({
    *  Notes tab so warehouse/admin staff see it in both places. Rendered only
    *  when `text` is non-empty. */
   pinnedNote?: { label: string; text: string | null | undefined };
+  /** v2026-05-04 — graph rollup context. When provided alongside
+   *  enableSourceFilter, the rollup view pulls notes from every linked
+   *  entity (shipment / WC / claim items) instead of just item_id matches. */
+  rollupCtx?: RollupContext | null;
 }) {
   const pinned = pinnedNote && pinnedNote.text && pinnedNote.text.trim()
     ? <PinnedSystemNote label={pinnedNote.label} text={pinnedNote.text} />
     : null;
+
+  // Graph rollup wins when both enableSourceFilter and rollupCtx are set —
+  // it's a strict superset of the item_id-only rollup.
+  if (enableSourceFilter && rollupCtx) {
+    return (
+      <div>
+        <div style={{
+          fontSize: 11, fontWeight: 700, letterSpacing: '0.04em',
+          color: theme.colors.textMuted, textTransform: 'uppercase',
+          marginBottom: 10,
+        }}>
+          Threaded Notes
+        </div>
+        {pinned}
+        <NotesGraphRollupView
+          primaryEntityType={entityType}
+          primaryEntityId={entityId}
+          itemId={itemId ?? null}
+          rollupCtx={rollupCtx}
+        />
+      </div>
+    );
+  }
 
   if (enableSourceFilter && itemId) {
     return (
@@ -488,6 +543,71 @@ function NotesRollupView({
   );
 }
 
+/**
+ * NotesGraphRollupView — graph-aware version of NotesRollupView. Reads via
+ * useNoteGraphRollup so notes from linked shipments / will calls / claim
+ * items roll up alongside the item-centric notes. Composer still writes
+ * against the primary entity (whatever panel hosts this view), so the
+ * `entity_notes` row's (entity_type, entity_id, item_id) stamping stays
+ * authoritative for the host.
+ */
+function NotesGraphRollupView({
+  primaryEntityType, primaryEntityId, itemId, rollupCtx,
+}: {
+  primaryEntityType: string;
+  primaryEntityId: string;
+  itemId: string | null;
+  rollupCtx: RollupContext;
+}) {
+  const { notes: rolled, loading: rollupLoading } = useNoteGraphRollup(rollupCtx);
+  const [filter, setFilter] = useState<string>('all');
+
+  const sourceItems = useMemo(
+    () => rolled.map(n => ({ entity_type: n.entityType, _note: n })),
+    [rolled],
+  );
+  const visible: EntityNote[] = useMemo(
+    () => (filter === 'all' ? rolled : rolled.filter(n => n.entityType === filter)),
+    [rolled, filter],
+  );
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <EntitySourceTabs
+        items={sourceItems}
+        activeType={filter}
+        onChange={setFilter}
+        variant="note"
+      />
+
+      {rollupLoading && rolled.length === 0 ? (
+        <div style={{ fontSize: 12, color: theme.colors.textMuted, padding: '12px 0' }}>
+          Loading notes…
+        </div>
+      ) : visible.length === 0 ? (
+        <div style={{ fontSize: 12, color: theme.colors.textMuted, padding: '12px 0', fontStyle: 'italic' }}>
+          {filter === 'all'
+            ? 'No related notes yet.'
+            : `No ${ENTITY_LABEL[filter] ?? filter} notes here.`}
+        </div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {visible.map(n => <RollupNoteRow key={n.id} note={n} />)}
+        </div>
+      )}
+
+      <div style={{ borderTop: `1px solid ${theme.colors.border}`, paddingTop: 12, marginTop: 4 }}>
+        <NotesSection
+          entityType={primaryEntityType}
+          entityId={primaryEntityId}
+          itemId={itemId ?? undefined}
+          composerOnly
+        />
+      </div>
+    </div>
+  );
+}
+
 function RollupNoteRow({ note }: { note: EntityNote }) {
   const sourceLabel = ENTITY_LABEL[note.entityType] ?? note.entityType;
   const isInternal = note.visibility === 'internal';
@@ -525,33 +645,39 @@ function RollupNoteRow({ note }: { note: EntityNote }) {
 }
 
 function NotesSectionCollapsible({
-  entityType, entityId, relatedEntities, enableSourceFilter, itemId, defaultOpen,
+  entityType, entityId, relatedEntities, enableSourceFilter, itemId, rollupCtx, defaultOpen,
 }: NotesCfg & { defaultOpen: boolean }) {
   const [open, setOpen] = useState(defaultOpen);
-  // Count reflects only the PRIMARY thread's notes for the header
-  // badge — showing a combined cross-thread count would be misleading
-  // (other threads' notes are one pill-click away, not "on" this entity).
-  const { notes } = useEntityNotes(entityType, entityId);
+  // Count: graph rollup count when rollupCtx is set, else the primary
+  // thread's note count. Both hooks are called unconditionally; the
+  // disabled side returns empty without a network call.
+  const { notes: hostNotes } = useEntityNotes(entityType, entityId);
+  const { notes: rolledNotes } = useNoteGraphRollup(
+    rollupCtx ?? { tenantId: null, itemIds: [], scopes: [], enabled: false }
+  );
+  const noteCount = rollupCtx ? rolledNotes.length : hostNotes.length;
   return (
     <section>
       <SectionHeader
         icon={<StickyNote size={15} color={theme.colors.orange} />}
         label="Notes"
-        count={notes.length}
+        count={noteCount}
         open={open}
         onToggle={() => setOpen(o => !o)}
       />
       <CollapsibleBody open={open}>
-        {enableSourceFilter && itemId ? (
+        {enableSourceFilter && (rollupCtx || itemId) ? (
           // v2026-04-22: rollup view with source-entity sub-tabs + composer
-          // that writes to the primary entity. Stamps item_id on insert so
-          // the rollup refreshes via realtime.
+          // that writes to the primary entity. v2026-05-04: when rollupCtx
+          // is supplied, the read uses graph rollup (catches container
+          // notes too); otherwise falls back to item_id-only rollup.
           <NotesPanel
             entityType={entityType}
             entityId={entityId}
             relatedEntities={relatedEntities}
             enableSourceFilter={true}
             itemId={itemId}
+            rollupCtx={rollupCtx}
           />
         ) : (
           // Session 74: flat NotesSection replaced by ThreadedNotes. The

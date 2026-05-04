@@ -20,9 +20,8 @@ import { buildDeepLink } from '../../lib/deepLinks';
 import { useIsMobile } from '../../hooks/useIsMobile';
 import { useAutocomplete } from '../../hooks/useAutocomplete';
 import { FloatingActionMenu, type FABAction } from './FloatingActionMenu';
-import { usePhotos } from '../../hooks/usePhotos';
+import { usePhotoGraphRollup, useNoteGraphRollup, type RollupContext } from '../../hooks/useGraphRollup';
 import { useDocuments } from '../../hooks/useDocuments';
-import { useEntityNotes } from '../../hooks/useEntityNotes';
 
 export interface LinkedRecord {
   id: string;
@@ -589,20 +588,40 @@ export function ItemDetailPanel({
 
   // Tab badge counts — Photos / Docs / Notes. Drive folder URLs are external
   // links, not uploaded assets, and are intentionally NOT counted here.
-  const { photos: itemPhotos } = usePhotos({
-    entityType: 'inventory',
-    entityId: item.itemId ?? null,
-    tenantId: clientSheetId ?? null,
-    itemId: item.itemId ?? null,
-    enabled: renderAsPage && !!item.itemId,
-  });
+  // v2026-05-04 — graph rollup. Counts include photos/notes from every
+  // linked entity (tasks, repairs, the item's shipment, and any will calls
+  // that contain the item) so the badges match what the user sees inside.
+  const itemRollupCtx = useMemo<RollupContext | null>(() => {
+    if (!item.itemId) return null;
+    const scopes: Array<{ entityType: string; entityId: string }> = [];
+    if (item.shipmentNumber) scopes.push({ entityType: 'shipment', entityId: String(item.shipmentNumber) });
+    for (const wc of (linkedWillCalls ?? [])) {
+      const id = String((wc as { id?: string }).id ?? '');
+      if (id) scopes.push({ entityType: 'will_call', entityId: id });
+    }
+    return {
+      tenantId: clientSheetId ?? null,
+      itemIds: [item.itemId],
+      scopes,
+    };
+  }, [item.itemId, item.shipmentNumber, linkedWillCalls, clientSheetId]);
+
+  const { photos: itemPhotos } = usePhotoGraphRollup(
+    renderAsPage && itemRollupCtx
+      ? itemRollupCtx
+      : { tenantId: null, itemIds: [], scopes: [], enabled: false }
+  );
   const { documents: itemDocs } = useDocuments({
     contextType: 'item',
     contextId: item.itemId ?? '',
     tenantId: clientSheetId ?? null,
     enabled: renderAsPage && !!item.itemId,
   });
-  const { notes: itemNotesList } = useEntityNotes('inventory', renderAsPage ? (item.itemId ?? '') : '');
+  const { notes: itemNotesList } = useNoteGraphRollup(
+    renderAsPage && itemRollupCtx
+      ? itemRollupCtx
+      : { tenantId: null, itemIds: [], scopes: [], enabled: false }
+  );
   const photoCount = renderAsPage ? itemPhotos.length : 0;
   const docCount   = renderAsPage ? itemDocs.length   : 0;
   const noteCount  = renderAsPage ? itemNotesList.length : 0;
@@ -1272,6 +1291,7 @@ export function ItemDetailPanel({
           itemRepairs={linkedRepairs}
           itemWillCalls={linkedWillCalls}
           shipmentNumber={item.shipmentNumber}
+          rollupCtx={itemRollupCtx}
         />
       ),
     },
@@ -1300,6 +1320,7 @@ export function ItemDetailPanel({
         itemWillCalls={itemWillCalls}
         shipmentNumber={item.shipmentNumber}
         itemNotesText={item.itemNotes || item.notes}
+        rollupCtx={itemRollupCtx}
       />,
     },
     {
@@ -1460,7 +1481,7 @@ import type { InventoryItem as CoverageItemType } from '../../lib/types';
 import { DriveFoldersList, type DriveFolderLink } from './DriveFoldersList';
 
 function PhotosPanelProxy({
-  item, clientSheetId, driveFolders, itemTasks, itemRepairs, itemWillCalls, shipmentNumber,
+  item, clientSheetId, driveFolders, itemTasks, itemRepairs, itemWillCalls, shipmentNumber, rollupCtx,
 }: {
   item: any;
   clientSheetId: string | undefined;
@@ -1469,6 +1490,7 @@ function PhotosPanelProxy({
   itemRepairs?: LinkedRecord[];
   itemWillCalls?: LinkedRecord[];
   shipmentNumber?: string;
+  rollupCtx?: RollupContext | null;
 }) {
   const related = [
     ...(itemTasks ?? []).map(t => ({ type: 'task', id: String(t.id || '') })).filter(r => r.id),
@@ -1485,6 +1507,7 @@ function PhotosPanelProxy({
         tenantId={clientSheetId}
         enableSourceFilter
         relatedEntities={related}
+        rollupCtx={rollupCtx}
       />
       {driveFolders && <DriveFoldersList folders={driveFolders} />}
     </div>
@@ -1505,7 +1528,7 @@ function DocsPanelProxy({ itemId, clientSheetId, driveFolders }: { itemId: strin
 }
 
 function NotesPanelProxy({
-  itemId, itemTasks, itemRepairs, itemWillCalls, shipmentNumber, itemNotesText,
+  itemId, itemTasks, itemRepairs, itemWillCalls, shipmentNumber, itemNotesText, rollupCtx,
 }: {
   itemId: string;
   itemTasks: any[];
@@ -1513,6 +1536,7 @@ function NotesPanelProxy({
   itemWillCalls: any[];
   shipmentNumber?: string;
   itemNotesText?: string | null;
+  rollupCtx?: RollupContext | null;
 }) {
   const related = [
     ...itemTasks.map((t: any) => ({ type: 'task', id: String(t.taskId || ''), label: `Task ${t.taskId}` })).filter(r => r.id),
@@ -1527,6 +1551,7 @@ function NotesPanelProxy({
       relatedEntities={related}
       enableSourceFilter
       itemId={itemId}
+      rollupCtx={rollupCtx}
       pinnedNote={{ label: 'Item Notes', text: itemNotesText }}
     />
   );
