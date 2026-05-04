@@ -6,7 +6,7 @@
  * doesn't get written until the entity completes — this just queues
  * the add-on on public.addons.
  *
- * v38.173.0 — generalized for any entity type. The `parentType` prop
+ * v38.177.0 — generalized for any entity type. The `parentType` prop
  * controls (a) the title copy, (b) the catalog filter:
  *
  *   - 'task': service_catalog where active=true AND show_as_task=true

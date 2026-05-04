@@ -60,7 +60,7 @@ interface Props {
    * the whole primary line to a $0 charge.
    */
   customPrice?: number | null;
-  /** Queued addons for this entity (any parent_type). v38.173.0 — was
+  /** Queued addons for this entity (any parent_type). v38.177.0 — was
    *  task-only via TaskAddon[]; now polymorphic via EntityAddon[]. */
   addons?: EntityAddon[];
   /** Hide for clients. */
@@ -208,7 +208,7 @@ export function BillingPreviewCard({
   }, [primary, editable, onUpdatePrimaryRate]);
 
   // ─── Addons ────────────────────────────────────────────────────────────
-  // v38.173.0 — polymorphic. Addons now flow through to repair / will_call
+  // v38.177.0 — polymorphic. Addons now flow through to repair / will_call
   // panels too via the unified `addons` table. Unbilled rows show in the
   // projected section; billed rows display with a "Billed" badge but stay
   // visible so staff can see what was added before the entity completed.
@@ -235,7 +235,7 @@ export function BillingPreviewCard({
         // WC ledger rows + WC addon rows both stamp shipment_number=wcNumber
         // (per handleProcessWcRelease_ + api_writeAddonsToLedger_). Filter on
         // shipment_number alone so addon rows (svc_code != 'WC') are pulled
-        // in too. v38.173.0 — was `.eq('svc_code', 'WC')` which excluded
+        // in too. v38.177.0 — was `.eq('svc_code', 'WC')` which excluded
         // addons; widened so the recorded panel now shows them.
         query = query.eq('shipment_number', entityId);
       } else if (entityType === 'repair') {
@@ -399,7 +399,7 @@ export function BillingPreviewCard({
                 })}
                 {/* "+ Add Service" — staff/admin only, lives inside the
                     projected section so all addon controls are in one place.
-                    v38.173.0: shown for any entity type (was task-only). */}
+                    v38.177.0: shown for any entity type (was task-only). */}
                 {editable && onAddAddon && (
                   <button
                     onClick={() => setShowAddModal(true)}

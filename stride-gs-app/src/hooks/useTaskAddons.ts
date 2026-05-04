@@ -1,5 +1,5 @@
 /**
- * useTaskAddons — back-compat shim over useEntityAddons (v38.173.0).
+ * useTaskAddons — back-compat shim over useEntityAddons (v38.177.0).
  *
  * The task-only public.task_addons table was replaced by a polymorphic
  * public.addons table in 2026-05-04. This hook now delegates to

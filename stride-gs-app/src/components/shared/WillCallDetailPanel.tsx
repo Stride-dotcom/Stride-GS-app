@@ -194,7 +194,7 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
   const sc = STATUS_CFG[effectiveStatus] || STATUS_CFG.Pending;
   const isActive = ['Pending', 'Scheduled', 'Partial'].includes(effectiveStatus);
 
-  // ─── Add-on services (v38.173.0 unified addons) ─────────────────────────
+  // ─── Add-on services (v38.177.0 unified addons) ─────────────────────────
   // Rows accumulate on public.addons until handleProcessWcRelease_ flushes
   // them via api_writeAddonsToLedger_. Editable while the WC is still
   // active (Pending / Scheduled / Partial); locked once Released / Cancelled.
@@ -968,7 +968,7 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
               this WC plus recorded ledger rows. itemClass is intentionally
               null because a Will Call can span multiple item classes —
               class-based addons fall back to the rate the operator types
-              in the modal. v38.173.0: addons are now polymorphic and flush
+              in the modal. v38.177.0: addons are now polymorphic and flush
               on release via handleProcessWcRelease_. */}
           <BillingPreviewCard
             entityType="will_call"

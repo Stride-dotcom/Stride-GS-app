@@ -298,7 +298,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
   // ─── Stage B: Reopen + Result correction ────────────────────────────────
   const canStaffEdit = user?.role === 'admin' || user?.role === 'staff';
 
-  // ─── Add-on services (v38.173.0 unified addons) ─────────────────────────
+  // ─── Add-on services (v38.177.0 unified addons) ─────────────────────────
   // Rows accumulate on public.addons until handleCompleteRepair_ flushes
   // them via api_writeAddonsToLedger_. The "+ Add Service" button + inline
   // edits live inside BillingPreviewCard. Editable while the repair is
@@ -939,7 +939,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
 
         {/* Billing Preview — staff/admin only. Shows the projected
             REPAIR charge from the catalog plus any addons attached to
-            this repair plus any recorded ledger rows. v38.173.0:
+            this repair plus any recorded ledger rows. v38.177.0:
             addons are now polymorphic — staff can attach extras
             (parts pickup, materials, etc.) that flush to Billing_Ledger
             when handleCompleteRepair_ runs. */}

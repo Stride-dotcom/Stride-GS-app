@@ -9,7 +9,7 @@
 | System | Version | Notes |
 |---|---|---|
 | React app (GitHub Pages) | Latest on `origin/source` | `npm run deploy` from source |
-| StrideAPI.gs | **v38.173.0** | Polymorphic addons module — task/repair/will_call all flush via `api_writeAddonsToLedger_`. Latest in the v38.16x–v38.17x sweep on 2026-05-04. |
+| StrideAPI.gs | **v38.177.0** | Polymorphic addons module — task/repair/will_call all flush via `api_writeAddonsToLedger_`. Latest in the v38.16x–v38.17x sweep on 2026-05-04. |
 | Supabase | 67+ migrations applied | `addons` table replaces empty `task_addons`; CHECK constraints + realtime enabled |
 | Client scripts | Rolled out to 49 active clients | Code.gs v4.6.0, Import.gs v4.3.0 |
 | StaxAutoPay.gs | v4.7.6 | Charge Log Customer/Transaction header fix |
@@ -113,7 +113,7 @@ UI components: FloatingActionMenu, WriteButton, BatchGuard, ActionTooltip, Batch
 
 **Files touched:**
 - `stride-gs-app/supabase/migrations/20260504170000_unified_addons.sql` (new)
-- `AppScripts/stride-api/StrideAPI.gs` (v38.173.0)
+- `AppScripts/stride-api/StrideAPI.gs` (v38.177.0)
 - `stride-gs-app/src/hooks/useEntityAddons.ts` (new)
 - `stride-gs-app/src/hooks/useTaskAddons.ts` (compat alias)
 - `stride-gs-app/src/components/shared/AddTaskServiceModal.tsx`

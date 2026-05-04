@@ -1,7 +1,7 @@
 /**
  * useEntityAddons — Supabase CRUD for public.addons (polymorphic).
  *
- * v38.173.0. Replaces the task-shaped useTaskAddons hook. Same shape +
+ * v38.177.0. Replaces the task-shaped useTaskAddons hook. Same shape +
  * snapshotting semantics, but keys on (parent_type, parent_id) so any
  * entity (task / repair / will_call / inventory) can attach billable
  * add-on services. Materialized to Billing_Ledger by the GAS helper
