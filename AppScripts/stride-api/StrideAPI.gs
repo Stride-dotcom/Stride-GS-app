@@ -20825,6 +20825,11 @@ function handleQbExport_(payload) {
     var clQbIdx = clHdr["QB_CUSTOMER_NAME"];
     var clSepIdx = clHdr["SEPARATE BY SIDEMARK"];
     var clStaxNameIdx = clHdr["STAX CUSTOMER NAME"];
+    // v38.177.0 — client-level auto-pay setting. Per-invoice auto_charge
+    // now inherits from this instead of being hard-coded true on every
+    // new Stax invoice. Operators can still toggle per-invoice on the
+    // Review/Charge Queue tabs as a one-off override.
+    var clAutoIdx = clHdr["AUTO CHARGE"];
     for (var cli = 1; cli < clData.length; cli++) {
       var clName = String(clData[cli][clNameIdx] || "").trim();
       if (!clName) continue;
@@ -20836,7 +20841,8 @@ function handleQbExport_(payload) {
         // names (e.g. "Brian Paquette Interiors" vs "Brian Paquette
         // Interiors - active"). Empty = fall back to qbCustomerName.
         staxCustomerName: clStaxNameIdx !== undefined ? String(clData[cli][clStaxNameIdx] || "").trim() : "",
-        separateBySidemark: clSepIdx !== undefined ? (clData[cli][clSepIdx] === true || String(clData[cli][clSepIdx]).toUpperCase() === "TRUE") : false
+        separateBySidemark: clSepIdx !== undefined ? (clData[cli][clSepIdx] === true || String(clData[cli][clSepIdx]).toUpperCase() === "TRUE") : false,
+        autoCharge: clAutoIdx !== undefined && (clData[cli][clAutoIdx] === true || String(clData[cli][clAutoIdx]).toUpperCase() === "TRUE")
       };
     }
   }
@@ -21057,6 +21063,20 @@ function handleQbExport_(payload) {
       var staxSupabaseRows = [];  // v38.173.0 — direct mirror to public.stax_invoices, replacing the dead cross-project _sbResyncAllStaxInvoices call
       var nowIso = new Date().toISOString();
       var nowStr = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm:ss");
+
+      // v38.177.0 — per-call payment-method status cache. Many invoices in
+      // a single qbExport batch share a customer (M items per client per
+      // sidemark) — cache the Stax API result so we hit /payment-method
+      // ONCE per unique customer instead of once per invoice. Misses fall
+      // through to a real call. The cache lives only for this invocation.
+      var pmStatusCache = {};
+      function _pmStatusFor(staxId) {
+        if (!staxId) return "no_customer";
+        if (Object.prototype.hasOwnProperty.call(pmStatusCache, staxId)) return pmStatusCache[staxId];
+        var status = stax_fetchPaymentMethodStatus_(staxId);
+        pmStatusCache[staxId] = status;
+        return status;
+      }
       for (var si2 = 0; si2 < invoiceOrder.length; si2++) {
         var sInvNo = invoiceOrder[si2];
         var sInv = invoiceMap[sInvNo];
@@ -21118,6 +21138,15 @@ function handleQbExport_(payload) {
           // Auto-fill Scheduled Date if blank — preserve operator override.
           var existingSched = String(existingInvData[existingRow1 - 1][staxCols.scheduledDate - 1] || "").trim();
           if (!existingSched && sInv.dueDate) staxInvSheet.getRange(existingRow1, staxCols.scheduledDate).setValue(sInv.dueDate);
+          // v38.177.0 — refresh per-invoice Auto Charge from the client-level
+          // setting (CB Clients "Auto Charge" col). Only on PENDING rows since
+          // the existingStatus guard above gates the whole update branch on
+          // PENDING — operator's per-invoice toggle on Review hasn't kicked in
+          // for these yet, so refreshing the default is safe + intended.
+          var clientAutoChargeUpd = sClientInfo.autoCharge === true;
+          staxInvSheet.getRange(existingRow1, staxCols.autoCharge).setValue(clientAutoChargeUpd);
+          // v38.177.0 — real payment-method status from Stax API (cached).
+          var pmStatusUpd = _pmStatusFor(sStaxCustId);
           staxUpdated++;
           batchInvoiceNos.push(sInvNo);
           batchTotal += Number(sTotal || 0);
@@ -21137,8 +21166,8 @@ function handleQbExport_(payload) {
             status: "PENDING",
             notes: "Refreshed by QB export auto-push on " + nowStr,
             is_test: false,
-            auto_charge: true,
-            payment_method_status: sStaxCustId ? "unknown" : "no_customer",
+            auto_charge: clientAutoChargeUpd,
+            payment_method_status: pmStatusUpd,
             updated_at: nowIso
           });
           continue;
@@ -21158,6 +21187,17 @@ function handleQbExport_(payload) {
         staxInvSheet.getRange(newRow1, staxCols.createdAt).setValue(nowStr);
         // Auto-populate Scheduled Date so the Charge Queue is never blank.
         if (sInv.dueDate) staxInvSheet.getRange(newRow1, staxCols.scheduledDate).setValue(sInv.dueDate);
+        // v38.177.0 — inherit Auto Charge from CB Clients (client-level
+        // setting). Pre-v38.177.0 every row got auto_charge=true regardless
+        // of whether the client had auto-pay turned on, so the Charge Queue
+        // checkbox was always pre-checked even for clients who'd opted out.
+        var clientAutoChargeIns = sClientInfo.autoCharge === true;
+        staxInvSheet.getRange(newRow1, staxCols.autoCharge).setValue(clientAutoChargeIns);
+        // v38.177.0 — real payment-method status from Stax API (cached per
+        // unique customer in this call). Pre-v38.177.0 we wrote 'unknown'
+        // and never updated it, so the React "CC on file" pill literally
+        // could not render. Now it reflects what Stax actually has stored.
+        var pmStatusIns = _pmStatusFor(sStaxCustId);
         staxNewRows.push(sInvNo);
         batchInvoiceNos.push(sInvNo);
         batchTotal += Number(sTotal || 0);
@@ -21178,8 +21218,8 @@ function handleQbExport_(payload) {
           created_at_sheet: nowStr,
           notes: "",
           is_test: false,
-          auto_charge: true,
-          payment_method_status: sStaxCustId ? "unknown" : "no_customer",
+          auto_charge: clientAutoChargeIns,
+          payment_method_status: pmStatusIns,
           updated_at: nowIso
         });
       }
@@ -21544,6 +21584,11 @@ function handleQbExcelExport_(payload) {
     var clQbIdx = clHdr["QB_CUSTOMER_NAME"];
     var clSepIdx = clHdr["SEPARATE BY SIDEMARK"];
     var clStaxNameIdx = clHdr["STAX CUSTOMER NAME"];
+    // v38.177.0 — client-level auto-pay setting. Per-invoice auto_charge
+    // now inherits from this instead of being hard-coded true on every
+    // new Stax invoice. Operators can still toggle per-invoice on the
+    // Review/Charge Queue tabs as a one-off override.
+    var clAutoIdx = clHdr["AUTO CHARGE"];
     for (var cli = 1; cli < clData.length; cli++) {
       var clName = String(clData[cli][clNameIdx] || "").trim();
       if (!clName) continue;
@@ -21555,7 +21600,8 @@ function handleQbExcelExport_(payload) {
         // names (e.g. "Brian Paquette Interiors" vs "Brian Paquette
         // Interiors - active"). Empty = fall back to qbCustomerName.
         staxCustomerName: clStaxNameIdx !== undefined ? String(clData[cli][clStaxNameIdx] || "").trim() : "",
-        separateBySidemark: clSepIdx !== undefined ? (clData[cli][clSepIdx] === true || String(clData[cli][clSepIdx]).toUpperCase() === "TRUE") : false
+        separateBySidemark: clSepIdx !== undefined ? (clData[cli][clSepIdx] === true || String(clData[cli][clSepIdx]).toUpperCase() === "TRUE") : false,
+        autoCharge: clAutoIdx !== undefined && (clData[cli][clAutoIdx] === true || String(clData[cli][clAutoIdx]).toUpperCase() === "TRUE")
       };
     }
   }
@@ -31823,6 +31869,36 @@ function stax_apiRequest_(method, path, payload) {
   }
 
   return { success: false, status: 0, data: null, error: "Max retries exceeded" };
+}
+
+/**
+ * v38.177.0 — Resolve a Stax customer's payment-method status to one of the
+ * `stax_invoices.payment_method_status` enum values:
+ *   'has_pm'      — customer has at least one active (non-deleted/purged) PM
+ *   'no_pm'       — customer exists in Stax but has no active payment methods
+ *   'no_customer' — caller passed empty staxCustomerId
+ *   'unknown'     — Stax API call failed (network/auth/etc.) — don't write a
+ *                   misleading state, leave it as 'unknown' for retry later
+ *
+ * Lives in StrideAPI.gs (not StaxAutoPay.gs) because handleQbExport_ + the
+ * new handleRefreshStaxPaymentStatus_ admin action both run in StrideAPI's
+ * scope and Apps Script projects don't share globals (this is the same
+ * cross-project class-of-bug fixed in v38.173.0).
+ *
+ * @param {string} staxCustomerId
+ * @returns {'has_pm'|'no_pm'|'no_customer'|'unknown'}
+ */
+function stax_fetchPaymentMethodStatus_(staxCustomerId) {
+  if (!staxCustomerId) return "no_customer";
+  try {
+    var resp = stax_apiRequest_("GET", "/customer/" + encodeURIComponent(staxCustomerId) + "/payment-method", null);
+    if (!resp || !resp.success) return "unknown";
+    var label = stax_getPaymentMethodLabel_(resp.data);
+    return (label && label !== "None") ? "has_pm" : "no_pm";
+  } catch (e) {
+    Logger.log("stax_fetchPaymentMethodStatus_ error for " + staxCustomerId + ": " + (e && e.message ? e.message : e));
+    return "unknown";
+  }
 }
 
 /**
