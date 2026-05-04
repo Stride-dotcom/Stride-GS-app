@@ -7,9 +7,8 @@ import { DeepLink } from './DeepLink';
 import { TabbedDetailPanel, type TabbedDetailPanelTab } from './TabbedDetailPanel';
 import { EntityPage } from './EntityPage';
 import { DriveFoldersList, type DriveFolderLink } from './DriveFoldersList';
-import { usePhotos } from '../../hooks/usePhotos';
+import { usePhotoGraphRollup, useNoteGraphRollup, type RollupContext } from '../../hooks/useGraphRollup';
 import { useDocuments } from '../../hooks/useDocuments';
-import { useEntityNotes } from '../../hooks/useEntityNotes';
 import { PhotosPanel as _PhotosPanel, DocumentsPanel as _DocumentsPanel, NotesPanel as _NotesPanel } from './EntityAttachments';
 import { EntityHistory } from './EntityHistory';
 import { ItemIdBadges } from './ItemIdBadges';
@@ -1263,29 +1262,48 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
     { id: 'details', label: 'Details', keepMounted: true, render: renderDetailsTab },
   ];
 
+  // v2026-05-04 — graph rollup. Container entity: WC scope + photos/notes
+  // for every item assigned to the WC (catches inspection / repair photos
+  // for those items so the WC page surfaces them).
+  const wcRollupCtx = useMemo<RollupContext>(() => ({
+    tenantId: clientSheetId ?? null,
+    itemIds: allItemIds,
+    scopes: [{ entityType: 'will_call', entityId: wc.wcNumber }],
+  }), [clientSheetId, wc.wcNumber, allItemIds]);
+
   const builtInTabsCfg = {
-    // Will Call is a CONTAINER entity (multiple items). Photos/Notes
-    // scoped to the WC itself — no item_id rollup (would mix items).
-    photos: { entityType: 'will_call' as const, entityId: wc.wcNumber, tenantId: clientSheetId },
+    // v2026-05-04: rollup folds in line items so the slide-out matches
+    // the page-mode tab content.
+    photos: {
+      entityType: 'will_call' as const,
+      entityId: wc.wcNumber,
+      tenantId: clientSheetId,
+      enableSourceFilter: true,
+      rollupCtx: wcRollupCtx,
+    },
     docs:   { contextType: 'willcall' as const, contextId: wc.wcNumber, tenantId: clientSheetId },
-    notes:  { entityType: 'will_call', entityId: wc.wcNumber },
+    notes:  {
+      entityType: 'will_call',
+      entityId: wc.wcNumber,
+      enableSourceFilter: true,
+      rollupCtx: wcRollupCtx,
+    },
     activity: { entityType: 'will_call', entityId: wc.wcNumber, tenantId: clientSheetId },
   };
 
   // ── Page-mode enhancements ──
-  const { photos: wcPhotos } = usePhotos({
-    entityType: 'will_call',
-    entityId: renderAsPage ? wc.wcNumber : null,
-    tenantId: clientSheetId ?? null,
-    enabled: !!renderAsPage,
-  });
+  const { photos: wcPhotos } = usePhotoGraphRollup(
+    renderAsPage ? wcRollupCtx : { tenantId: null, itemIds: [], scopes: [], enabled: false }
+  );
   const { documents: wcDocsList } = useDocuments({
     contextType: 'willcall',
     contextId: renderAsPage ? wc.wcNumber : '',
     tenantId: clientSheetId ?? null,
     enabled: !!renderAsPage,
   });
-  const { notes: wcNotesList } = useEntityNotes('will_call', renderAsPage ? wc.wcNumber : '');
+  const { notes: wcNotesList } = useNoteGraphRollup(
+    renderAsPage ? wcRollupCtx : { tenantId: null, itemIds: [], scopes: [], enabled: false }
+  );
   const wcPhotoCount = renderAsPage ? wcPhotos.length : 0;
   const wcDocCount   = renderAsPage ? wcDocsList.length : 0;
   const wcNoteCount  = renderAsPage ? wcNotesList.length : 0;
@@ -1297,7 +1315,13 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
 
   const renderWcPhotosTab = () => (
     <div>
-      <_PhotosPanel entityType="will_call" entityId={wc.wcNumber} tenantId={clientSheetId} />
+      <_PhotosPanel
+        entityType="will_call"
+        entityId={wc.wcNumber}
+        tenantId={clientSheetId}
+        enableSourceFilter
+        rollupCtx={wcRollupCtx}
+      />
       <DriveFoldersList folders={wcDriveFolders} />
     </div>
   );
@@ -1311,6 +1335,8 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
     <_NotesPanel
       entityType="will_call"
       entityId={wc.wcNumber}
+      enableSourceFilter
+      rollupCtx={wcRollupCtx}
       pinnedNote={{ label: 'Will Call Notes', text: wc.notes }}
     />
   );
