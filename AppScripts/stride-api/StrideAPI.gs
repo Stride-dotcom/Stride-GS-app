@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.170.0 — 2026-05-04 PST — Sweep: every Stax Invoices write is now header-resolved. Justin's "I'm tired of patching hole after hole" — same class of bug (positional column indexes drifting when a column is inserted) was lurking in handleBatchVoidStaxInvoices_, handleBatchDeleteStaxInvoices_, handleDeleteStaxInvoice_, handleVoidStaxInvoice_, handleResetStaxInvoiceStatus_, handleLinkStaxInvoiceToExisting_, handleChargeSingleInvoice_, handleSendStaxPayLinks_, handleSendStaxPayLink_ — all wrote Status (col 9) and Notes (col 11) positionally. Now ALL of them resolve via stax_invoiceCols_(invSheet) (caches qb / customer / staxCustId / dueDate / amount / status / notes / staxId / autoCharge / scheduledDate / etc. via api_ensureColumn_). Same sweep covered handleUpdateEmailTemplate_ (Subject + HTML Body cols), qbo_saveMappingRow_ (QBO Customer ID / Sidemark / Sub-Job ID on Stax Customers), and handleSyncStaxCustomerIds_ (Stax Customer ID col). Net: zero positional writes remain on any user-facing entity sheet across StrideAPI.gs. Settings key/value sheets (col 1=Key, col 2=Value) left alone — stable layout, lower risk.
+   StrideAPI.gs — v38.171.0 — 2026-05-04 PST — Charge Queue date-format fix + IIF write hardening + auto-populate Scheduled Date. Three changes that together close the "scheduled dates revert on refresh" loop. (1) formatDate_ now strips a trailing "HH:MM[:SS]" from string cell values so a Due Date stored as "2026-05-18 00:00:00" reads back as "2026-05-18" — `<input type="date">` strictly requires YYYY-MM-DD, the legacy time-decorated form rendered empty in the picker AND broke the React onBlur equality guard so 5 of 7 Charge Queue saves quietly skipped this morning. (2) handleImportIIF_ + handleQbExport_ Stax-write blocks rebuilt around stax_invoiceCols_ — every column written via header lookup, no more 11-element positional arrays clobbering Scheduled Date / Auto Charge / Is Test on a sheet with extra columns. (3) Both insert paths and the IIF update path now auto-fill Scheduled Date = Due Date when blank, preserving any operator override — every new invoice has a real, displayable scheduled date out of the gate. New admin entry backfillStaxScheduledDates: one-click backfill of blank Scheduled Date cells from each row's Due Date for PENDING/CREATED/SENT/CHARGE_FAILED rows; idempotent, never overwrites operator-set values, ignores PAID/VOIDED/DELETED.
+   v38.170.0 — 2026-05-04 PST — Sweep: every Stax Invoices write is now header-resolved. Justin's "I'm tired of patching hole after hole" — same class of bug (positional column indexes drifting when a column is inserted) was lurking in handleBatchVoidStaxInvoices_, handleBatchDeleteStaxInvoices_, handleDeleteStaxInvoice_, handleVoidStaxInvoice_, handleResetStaxInvoiceStatus_, handleLinkStaxInvoiceToExisting_, handleChargeSingleInvoice_, handleSendStaxPayLinks_, handleSendStaxPayLink_ — all wrote Status (col 9) and Notes (col 11) positionally. Now ALL of them resolve via stax_invoiceCols_(invSheet) (caches qb / customer / staxCustId / dueDate / amount / status / notes / staxId / autoCharge / scheduledDate / etc. via api_ensureColumn_). Same sweep covered handleUpdateEmailTemplate_ (Subject + HTML Body cols), qbo_saveMappingRow_ (QBO Customer ID / Sidemark / Sub-Job ID on Stax Customers), and handleSyncStaxCustomerIds_ (Stax Customer ID col). Net: zero positional writes remain on any user-facing entity sheet across StrideAPI.gs. Settings key/value sheets (col 1=Key, col 2=Value) left alone — stable layout, lower risk.
    v38.169.0 — 2026-05-04 PST — Stax invoice inline edits actually persist now. handleUpdateStaxInvoice_ used POSITIONAL columns (5=Due Date, 6=Amount, 9=Status, 11=Notes, 2=Customer) for every write while the read path (sheetToObjects_) used header names — once the Invoices sheet had a column inserted (Is Test, Scheduled Date, Auto Charge, Stax Invoice Link were appended at various times) the writes silently landed in the WRONG column and the React Charge Queue's optimistic update reverted on refresh. Same class as v38.152.0 / v38.167.0; same fix: every column lookup now goes through api_ensureColumn_ (case-insensitive, auto-appends if missing) — Due Date, Scheduled Date, Notes, Amount, Customer, Stax Customer ID, Status, QB Invoice #. handleToggleAutoCharge_ was case-sensitive on the "Auto Charge" header and silently appended a duplicate column on any case drift; switched to api_ensureColumn_. To prevent duplicate-column drift biting future writes, api_ensureColumn_ now returns the LAST matching column (mirroring sheetToObjects_'s last-write-wins semantics) — write and read agree on the same column even when duplicates already exist on a sheet.
    v38.168.0 — 2026-05-04 PST — Inventory is the single source of truth for item-level fields now. New helper api_propagateItemFieldsToInventory_ takes (clientSheetId, itemId, {sidemark/reference/description/vendor/location/room/itemNotes/itemClass}) and writes back through handleUpdateInventoryItem_ — which already handles the Inventory write, the open-Tasks/Repairs fan-out, and Supabase write-through. handleUpdateBillingRow_ now calls it whenever a non-manual ledger row's Sidemark / Reference / Description is edited from the Billing Report — the same edit lands on the Inventory row and propagates to every other surface (Inventory grid, Tasks, Repairs, item detail panels, all Supabase mirrors). Manual charges are skipped (no inventory binding). This stops the cross-page drift Justin reported where a Billing Report sidemark edit didn't appear on Inventory or related task rows. The helper is reusable — wire it into any future entity handler that exposes item-level field edits.
    v38.167.0 — 2026-05-04 PST — Inventory inline edits actually persist now. handleUpdateInventoryItem_ used strict hmap[colName] lookups for every editable field (Vendor, Description, Reference, Sidemark, Room, Location, Class, Qty, Status, Item Notes, Declared Value, Coverage Option). On any client sheet whose header had different case or extra whitespace, the lookup returned undefined and the write silently no-op'd or rejected with SCHEMA_ERROR — the React optimistic patch took then reverted on the next refetch because nothing landed in the sheet. Justin reported this for sidemark; same class as v38.152.0's Billing fix. Switched the column resolution + the Tasks/Repairs fan-out (where missing Sidemark/Reference columns silently dropped propagation) to api_ensureColumn_ — case-insensitive, auto-appends if missing — so client sheets self-heal on the first inline edit after the fix ships and the writeThrough mirror back to Supabase carries the new value.
@@ -12469,7 +12470,19 @@ function formatDate_(val) {
     if (isNaN(val.getTime())) return "";
     return Utilities.formatDate(val, Session.getScriptTimeZone(), "yyyy-MM-dd");
   }
-  return String(val).trim();
+  // v38.171.0 — String values: trim, then strip any "HH:MM[:SS]" suffix so
+  // a cell holding "2026-05-18 00:00:00" reads back as "2026-05-18". The
+  // React Charge Queue uses `<input type="date">` which strictly requires
+  // YYYY-MM-DD; values with a trailing time were silently rejected, the
+  // input rendered empty, and the equality guard in the onBlur handler
+  // (newVal === currentShown) misfired against the time-decorated value
+  // → Scheduled Date saves quietly skipped. Justin reported 5 of 7
+  // Charge Queue rows refusing to save their scheduled date — every one
+  // had a "00:00:00" suffix on its Due Date cell.
+  var s = String(val).trim();
+  var dm = s.match(/^(\d{4}-\d{2}-\d{2})(?:[ T]\d{1,2}:\d{2}(?::\d{2})?)?$/);
+  if (dm) return dm[1];
+  return s;
 }
 
 /** v38.2.0: Full datetime formatter — used for Started At / Completed At where
@@ -12598,6 +12611,40 @@ function installCoverageColumns() {
     " column-writes, " + alreadyPresent + " already present, " + failed + " failed.";
   Logger.log(summary);
   for (var i = 0; i < log.length; i++) Logger.log(log[i]);
+  return summary;
+}
+
+/**
+ * v38.171.0 — Admin entry. Backfills any blank Scheduled Date cells on the
+ * Stax Invoices sheet to the row's Due Date for PENDING / CREATED / SENT /
+ * CHARGE_FAILED rows. Idempotent and never overwrites an operator-set
+ * value. Run once from the Apps Script editor after the v38.171.0 deploy
+ * to recover the dates Justin reported as cleared this morning.
+ *
+ * Visibility: no trailing underscore → appears in the Run dropdown.
+ */
+function backfillStaxScheduledDates() {
+  var ss = getStaxSpreadsheet_();
+  var sheet = ss.getSheetByName("Invoices");
+  if (!sheet) { Logger.log("Invoices tab not found"); return "Invoices tab not found"; }
+  var cols = stax_invoiceCols_(sheet);
+  var data = sheet.getDataRange().getValues();
+  var ELIGIBLE = { "PENDING": true, "CREATED": true, "SENT": true, "CHARGE_FAILED": true };
+  var filled = 0, skipped = 0, ineligible = 0;
+  for (var i = 1; i < data.length; i++) {
+    var status = String(data[i][cols.status - 1] || "").trim().toUpperCase();
+    if (!ELIGIBLE[status]) { ineligible++; continue; }
+    var sched = String(data[i][cols.scheduledDate - 1] || "").trim();
+    if (sched) { skipped++; continue; } // operator-set or already populated
+    var due = data[i][cols.dueDate - 1];
+    if (!due) { skipped++; continue; }
+    sheet.getRange(i + 1, cols.scheduledDate).setValue(due);
+    filled++;
+  }
+  try { CacheService.getScriptCache().remove("stax_invoices"); } catch (_) {}
+  var summary = "backfillStaxScheduledDates: filled " + filled + " rows, skipped " + skipped
+              + " (already set or no due date), ineligible " + ineligible + " (PAID/VOIDED/DELETED).";
+  Logger.log(summary);
   return summary;
 }
 
@@ -20820,13 +20867,16 @@ function handleQbExport_(payload) {
       // share one source of truth.
       var clientStaxMap = stax_buildClientStaxMap_();
 
-      // Build a sheet index keyed only by QB invoice number (no longer
-      // a multi-field hash — duplicates were slipping through whenever
-      // any field drifted between writes).
+      // v38.171.0 — header-resolved column indexes via stax_invoiceCols_.
+      // Same fix-class as the rest of the Stax sweep: row writes were
+      // positional 11-element arrays which would clobber the wrong fields
+      // once Scheduled Date / Auto Charge / Is Test got inserted at
+      // positions ≤ 11.
+      var staxCols = stax_invoiceCols_(staxInvSheet);
       var existingInvData = staxInvSheet.getDataRange().getValues();
       var existingByQbNo = {}; // docNum → 1-based row index
       for (var ei = 1; ei < existingInvData.length; ei++) {
-        var ek = String(existingInvData[ei][0] || "").trim();
+        var ek = String(existingInvData[ei][staxCols.qb - 1] || "").trim();
         if (ek && !existingByQbNo[ek]) existingByQbNo[ek] = ei + 1;
       }
 
@@ -20882,56 +20932,47 @@ function handleQbExport_(payload) {
 
         var existingRow1 = existingByQbNo[sInvNo];
         if (existingRow1) {
-          // UPDATE in place — only refresh if still PENDING. Don't
-          // clobber an in-flight CREATED/PAID/VOIDED row.
-          var rowVals = existingInvData[existingRow1 - 1];
-          var existingStatus = String(rowVals[8] || "").trim().toUpperCase();
+          // UPDATE in place via header lookup. Only refresh if still
+          // PENDING (don't clobber an in-flight CREATED/PAID/VOIDED row).
+          var existingStatus = String(existingInvData[existingRow1 - 1][staxCols.status - 1] || "").trim().toUpperCase();
           if (existingStatus && existingStatus !== "PENDING") { staxSkipped++; continue; }
-          var updateRow = [
-            sInvNo,                                 // QB Invoice #
-            sCustomerForStax,                       // Customer
-            sStaxCustId,                            // Stax Customer ID
-            sInv.invDate,                           // Invoice Date
-            sInv.dueDate,                           // Due Date
-            sTotal,                                 // Total
-            sLineJson,                              // Line Items JSON
-            String(rowVals[7] || ""),               // Stax Invoice ID — preserve
-            "PENDING",                              // Status
-            String(rowVals[9] || nowStr),           // Created At — preserve
-            "Refreshed by QB export auto-push on " + nowStr  // Notes
-          ];
-          staxInvSheet.getRange(existingRow1, 1, 1, updateRow.length).setValues([updateRow]);
+          staxInvSheet.getRange(existingRow1, staxCols.customer).setValue(sCustomerForStax);
+          staxInvSheet.getRange(existingRow1, staxCols.staxCustId).setValue(sStaxCustId);
+          staxInvSheet.getRange(existingRow1, staxCols.invoiceDate).setValue(sInv.invDate);
+          staxInvSheet.getRange(existingRow1, staxCols.dueDate).setValue(sInv.dueDate);
+          staxInvSheet.getRange(existingRow1, staxCols.amount).setValue(sTotal);
+          staxInvSheet.getRange(existingRow1, staxCols.lineItems).setValue(sLineJson);
+          staxInvSheet.getRange(existingRow1, staxCols.notes).setValue("Refreshed by QB export auto-push on " + nowStr);
+          // Auto-fill Scheduled Date if blank — preserve operator override.
+          var existingSched = String(existingInvData[existingRow1 - 1][staxCols.scheduledDate - 1] || "").trim();
+          if (!existingSched && sInv.dueDate) staxInvSheet.getRange(existingRow1, staxCols.scheduledDate).setValue(sInv.dueDate);
           staxUpdated++;
-          // v38.166.0 — refreshed PENDING rows count toward this batch's footprint too.
           batchInvoiceNos.push(sInvNo);
           batchTotal += Number(sTotal || 0);
           batchClients[sCustomerForStax || sInv.qbName || ""] = true;
           continue;
         }
 
-        staxNewRows.push([
-          sInvNo,             // QB Invoice #
-          sCustomerForStax,   // Customer
-          sStaxCustId,        // Stax Customer ID (pre-filled)
-          sInv.invDate,       // Invoice Date
-          sInv.dueDate,       // Due Date
-          sTotal,             // Total
-          sLineJson,          // Line Items JSON
-          "",                 // Stax Invoice ID
-          "PENDING",          // Status
-          nowStr,             // Created At
-          ""                  // Notes
-        ]);
-        // v38.166.0 — track for batch row + post-resync patch
+        // INSERT new row by writing each header-resolved cell — robust to
+        // any column added or reordered on the Stax Invoices sheet.
+        var newRow1 = staxInvSheet.getLastRow() + 1;
+        staxInvSheet.getRange(newRow1, staxCols.qb).setValue(sInvNo);
+        staxInvSheet.getRange(newRow1, staxCols.customer).setValue(sCustomerForStax);
+        staxInvSheet.getRange(newRow1, staxCols.staxCustId).setValue(sStaxCustId);
+        staxInvSheet.getRange(newRow1, staxCols.invoiceDate).setValue(sInv.invDate);
+        staxInvSheet.getRange(newRow1, staxCols.dueDate).setValue(sInv.dueDate);
+        staxInvSheet.getRange(newRow1, staxCols.amount).setValue(sTotal);
+        staxInvSheet.getRange(newRow1, staxCols.lineItems).setValue(sLineJson);
+        staxInvSheet.getRange(newRow1, staxCols.status).setValue("PENDING");
+        staxInvSheet.getRange(newRow1, staxCols.createdAt).setValue(nowStr);
+        // Auto-populate Scheduled Date so the Charge Queue is never blank.
+        if (sInv.dueDate) staxInvSheet.getRange(newRow1, staxCols.scheduledDate).setValue(sInv.dueDate);
+        staxNewRows.push(sInvNo);
         batchInvoiceNos.push(sInvNo);
         batchTotal += Number(sTotal || 0);
         batchClients[sCustomerForStax || sInv.qbName || ""] = true;
       }
 
-      if (staxNewRows.length > 0) {
-        staxInvSheet.getRange(staxInvSheet.getLastRow() + 1, 1, staxNewRows.length, staxNewRows[0].length)
-          .setValues(staxNewRows);
-      }
       staxImported = staxNewRows.length;
     }
   } catch (staxErr) {
@@ -31019,17 +31060,32 @@ function handleImportIIF_(payload) {
   var duplicatesSkipped = 0;
   var invoicesUpdated = 0;
   if (invSheet) {
+    // v38.171.0 — header-based column resolution. The prior implementation
+    // wrote 11-element positional arrays (cols 1..11), which would clobber
+    // any Scheduled Date / Auto Charge / Is Test columns inserted before
+    // col 12, OR write fields into the wrong column when headers got
+    // reordered. Plus Scheduled Date is now AUTO-POPULATED to the Due Date
+    // on insert (since Due Date itself is invoice-date + payment-terms via
+    // handleCreateStaxInvoices_ / IIF parse), so the Charge Queue date
+    // picker always has a concrete value and the daily auto-charge cron
+    // has something to gate on.
+    var cols = stax_invoiceCols_(invSheet);
     var clientStaxMap = stax_buildClientStaxMap_();
     var existing = invSheet.getDataRange().getValues();
     var existingByQbNo = {}; // docNum → 1-based row index in sheet
     for (var e = 1; e < existing.length; e++) {
-      var ek = String(existing[e][0] || "").trim();
+      var ek = String(existing[e][cols.qb - 1] || "").trim();
       if (ek && !existingByQbNo[ek]) existingByQbNo[ek] = e + 1;
     }
 
     var now = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm:ss");
-    var newRows = [];
     var touchedQbInvoiceNos = [];
+    var insertCount = 0;
+
+    function _setCell(row1, colIdx, value) {
+      invSheet.getRange(row1, colIdx).setValue(value);
+    }
+
     for (var i = 0; i < parsed.invoices.length; i++) {
       var inv = parsed.invoices[i];
       var docNum = String(inv.docNum || "").trim();
@@ -31038,8 +31094,6 @@ function handleImportIIF_(payload) {
       var lookupName = stax_normalizeName_(inv.name);
       var clientEntry = clientStaxMap[lookupName] || null;
       var resolvedStaxId = clientEntry ? clientEntry.staxCustomerId : "";
-      // Prefer an explicit Stax-side alias when set, otherwise carry through
-      // the IIF's QB name unchanged (matches pre-v38.153.0 semantics).
       var resolvedName = (clientEntry && clientEntry.staxCustomerName) || String(inv.name || "");
 
       var lineItemsJson = "";
@@ -31047,36 +31101,33 @@ function handleImportIIF_(payload) {
 
       var existingRow1 = existingByQbNo[docNum];
       if (existingRow1) {
-        // UPDATE in place — only refresh editable fields and keep status if not PENDING
-        var rowVals = existing[existingRow1 - 1];
-        var existingStatus = String(rowVals[8] || "").trim().toUpperCase();
+        // UPDATE in place via header lookup — only PENDING rows refresh.
+        // CRITICALLY: Scheduled Date / Auto Charge / Is Test / Stax Invoice
+        // ID are preserved (we don't write to them here). Prior positional
+        // setValues over cols 1..11 would have left those alone too, but a
+        // sheet with columns inserted at positions ≤11 would have had the
+        // wrong fields land in the wrong columns.
+        var existingStatus = String(existing[existingRow1 - 1][cols.status - 1] || "").trim().toUpperCase();
         if (existingStatus && existingStatus !== "PENDING") {
           duplicatesSkipped++;
           continue;
         }
-        var updateRow = [
-          docNum,                                 // QB Invoice #
-          resolvedName,                           // Customer
-          resolvedStaxId,                         // Stax Customer ID
-          inv.date,                               // Invoice Date
-          inv.dueDate,                            // Due Date
-          inv.amount,                             // Total
-          lineItemsJson,                          // Line Items JSON
-          String(rowVals[7] || ""),               // Stax Invoice ID — preserve
-          "PENDING",                              // Status
-          String(rowVals[9] || now),              // Created At — preserve
-          "Refreshed by IIF import on " + now     // Notes
-        ];
-        invSheet.getRange(existingRow1, 1, 1, updateRow.length).setValues([updateRow]);
+        _setCell(existingRow1, cols.customer,    resolvedName);
+        _setCell(existingRow1, cols.staxCustId,  resolvedStaxId);
+        _setCell(existingRow1, cols.invoiceDate, inv.date);
+        _setCell(existingRow1, cols.dueDate,     inv.dueDate);
+        _setCell(existingRow1, cols.amount,      inv.amount);
+        _setCell(existingRow1, cols.lineItems,   lineItemsJson);
+        _setCell(existingRow1, cols.notes,       "Refreshed by IIF import on " + now);
+        // Auto-fill Scheduled Date if blank (preserve operator override).
+        var existingSched = String(existing[existingRow1 - 1][cols.scheduledDate - 1] || "").trim();
+        if (!existingSched && inv.dueDate) _setCell(existingRow1, cols.scheduledDate, inv.dueDate);
         invoicesUpdated++;
         touchedQbInvoiceNos.push(docNum);
         continue;
       }
 
-      // No Stax Customer ID → log exception and skip insert (Stax push
-      // would fail anyway). The exception surfaces in the React
-      // Exceptions tab so staff can set the Stax Customer ID on the
-      // client record before re-importing.
+      // No Stax Customer ID → log exception and skip insert.
       if (!resolvedStaxId) {
         try {
           stax_appendException_(ss, docNum, String(inv.name || ""), "", inv.amount, inv.dueDate, "NO_CUSTOMER",
@@ -31086,18 +31137,28 @@ function handleImportIIF_(payload) {
         continue;
       }
 
-      newRows.push([
-        docNum, resolvedName, resolvedStaxId, inv.date, inv.dueDate, inv.amount,
-        lineItemsJson, "", "PENDING", now, ""
-      ]);
+      // INSERT new row via header lookup. Each column resolved + written
+      // independently so an extra column appended on the sheet doesn't
+      // shift the layout.
+      var newRow1 = invSheet.getLastRow() + 1;
+      _setCell(newRow1, cols.qb,            docNum);
+      _setCell(newRow1, cols.customer,      resolvedName);
+      _setCell(newRow1, cols.staxCustId,    resolvedStaxId);
+      _setCell(newRow1, cols.invoiceDate,   inv.date);
+      _setCell(newRow1, cols.dueDate,       inv.dueDate);
+      _setCell(newRow1, cols.amount,        inv.amount);
+      _setCell(newRow1, cols.lineItems,     lineItemsJson);
+      _setCell(newRow1, cols.status,        "PENDING");
+      _setCell(newRow1, cols.createdAt,     now);
+      // Auto-populate Scheduled Date so the Charge Queue is never blank.
+      // Operators can override on the page; the daily cron uses
+      // Scheduled Date || Due Date.
+      if (inv.dueDate) _setCell(newRow1, cols.scheduledDate, inv.dueDate);
+      insertCount++;
       touchedQbInvoiceNos.push(docNum);
     }
 
-    if (newRows.length > 0) {
-      invSheet.getRange(invSheet.getLastRow() + 1, 1, newRows.length, newRows[0].length)
-        .setValues(newRows);
-    }
-    invoicesAdded = newRows.length;
+    invoicesAdded = insertCount;
 
     // v38.131.0 — Mirror the touched invoice rows into Supabase so the
     // Payments app sees them on the next page load. Best-effort, never
