@@ -103,6 +103,9 @@ export interface TabbedDetailPanelBuiltInTabs {
     enableSourceFilter?: boolean;
     /** Parent item id for the rollup query. Ignored unless enableSourceFilter. */
     itemId?: string | null;
+    /** v2026-05-04 — entity tenant id, stamped on inserts so admin/staff
+     *  posting on a client task don't write NULL tenant_id rows. */
+    tenantId?: string | null;
     /** v2026-05-04 — graph rollup context. */
     rollupCtx?: RollupContext | null;
   };
@@ -319,6 +322,7 @@ function useBuiltInTabs(cfg: TabbedDetailPanelBuiltInTabs | undefined): TabbedDe
             relatedEntities={notesCfg.relatedEntities}
             enableSourceFilter={notesCfg.enableSourceFilter}
             itemId={notesCfg.itemId ?? null}
+            tenantId={notesCfg.tenantId ?? null}
             rollupCtx={notesCfg.rollupCtx ?? null}
           />
         ),

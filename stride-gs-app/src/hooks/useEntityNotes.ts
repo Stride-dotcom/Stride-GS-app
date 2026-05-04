@@ -119,7 +119,18 @@ export interface UseEntityNotesResult {
  * - For will_call/shipment/claim (container or out-of-scope), pass undefined
  *   (or null) and the insert stamps NULL — correct for container semantics.
  */
-export function useEntityNotes(entityType: string, entityId: string, itemId?: string | null): UseEntityNotesResult {
+export function useEntityNotes(
+  entityType: string,
+  entityId: string,
+  itemId?: string | null,
+  /** v2026-05-04 — explicit tenant id of the entity this note belongs to.
+   *  Falls back to the authed user's clientSheetId when omitted (legacy
+   *  behavior for client users posting on their own tenant). For admin /
+   *  staff posting on behalf of a client, the caller MUST pass tenantId
+   *  — otherwise the row is stamped with NULL tenant_id and disappears
+   *  from any rollup query that filters by tenant. */
+  tenantId?: string | null,
+): UseEntityNotesResult {
   const { user } = useAuth();
   const [notes, setNotes] = useState<EntityNote[]>([]);
   const [loading, setLoading] = useState(true);
@@ -184,14 +195,17 @@ export function useEntityNotes(entityType: string, entityId: string, itemId?: st
       stampedItemId = null;
     }
 
+    // v2026-05-04 — prefer the entity's tenant (passed in by the panel)
+    // over the user's bound clientSheetId. Notes belong to the entity's
+    // tenant, not the author's. Admin/staff posting on a client task
+    // would otherwise stamp NULL and the row would vanish from any
+    // tenant-scoped rollup query.
+    const stampedTenantId = tenantId ?? user?.clientSheetId ?? null;
+
     const { data, error: err } = await supabase
       .from('entity_notes')
       .insert({
-        // tenant_id: explicit so the row satisfies the tenant scoping RLS
-        // policy even before the column's DEFAULT trigger (if any) runs.
-        // Falls to null for admin/staff without a bound client — migration
-        // 2026-04-21 dropped the NOT NULL constraint.
-        tenant_id: user?.clientSheetId ?? null,
+        tenant_id: stampedTenantId,
         entity_type: entityType,
         entity_id: entityId,
         item_id: stampedItemId,
@@ -212,7 +226,7 @@ export function useEntityNotes(entityType: string, entityId: string, itemId?: st
     const note = rowToNote(data as NoteRow);
     setNotes(prev => [note, ...prev]);
     return note;
-  }, [entityType, entityId, user]);
+  }, [entityType, entityId, itemId, tenantId, user]);
 
   const deleteNote = useCallback(async (noteId: string): Promise<boolean> => {
     const { error: err } = await supabase

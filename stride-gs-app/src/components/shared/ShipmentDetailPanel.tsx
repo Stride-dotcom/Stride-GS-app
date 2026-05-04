@@ -377,6 +377,7 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
       entityType="shipment"
       entityId={shipment.shipmentNo}
       enableSourceFilter
+      tenantId={shipment.clientSheetId ?? null}
       rollupCtx={shRollupCtx}
       pinnedNote={{ label: 'Shipment Notes', text: shipment.notes }}
     />
@@ -419,6 +420,7 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
       entityType: 'shipment',
       entityId: shipment.shipmentNo,
       enableSourceFilter: true,
+      tenantId: shipment.clientSheetId ?? null,
       rollupCtx: shRollupCtx,
     },
     activity: {

@@ -1293,6 +1293,7 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
       entityType: 'will_call',
       entityId: wc.wcNumber,
       enableSourceFilter: true,
+      tenantId: clientSheetId ?? null,
       rollupCtx: wcRollupCtx,
     },
     activity: { entityType: 'will_call', entityId: wc.wcNumber, tenantId: clientSheetId },
@@ -1343,6 +1344,7 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
       entityType="will_call"
       entityId={wc.wcNumber}
       enableSourceFilter
+      tenantId={clientSheetId ?? null}
       rollupCtx={wcRollupCtx}
       pinnedNote={{ label: 'Will Call Notes', text: wc.notes }}
     />
