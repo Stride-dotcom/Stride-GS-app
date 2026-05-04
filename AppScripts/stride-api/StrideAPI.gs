@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.166.0 — 2026-05-04 PST — Stax invoice batches + auto-mirror to Supabase. Pre-v38.166.0 the "Stax IIF" button on the Billing page wrote rows to the Stax Invoices SHEET via auto-import (v38.21.0) but never called _sbResyncAllStaxInvoices, so the Supabase mirror was stale until something else triggered it — operators had to upload the same IIF on the Payments page just to fire the resync as a side effect. handleQbExport_ now calls _sbResyncAllStaxInvoices(getStaxSpreadsheet_()) right after the auto-import block so Payments → Review populates within ~1-2s of the Create Invoices click, no manual upload needed. Adds first-class batch concept: every qbExport invocation generates a batchId (BATCH-{timestamp}-{uuid6}) and writes one stax_invoice_batches row with totals + client summary, then PATCHes batch_id onto each freshly-mirrored stax_invoices row. Two new read endpoints: getStaxInvoiceBatches (paginated list for Payments → Batches view) and regenerateIifForBatch (rebuilds IIF text on demand from line_items_json — no file storage, generated fresh each request). Companion migration 20260504220000_stax_invoice_batches.sql adds the table + nullable batch_id FK. Drive IIF write left in place this PR — purely additive, removed in a follow-up after a few days of confidence.
+   StrideAPI.gs — v38.167.0 — 2026-05-04 PST — Inventory inline edits actually persist now. handleUpdateInventoryItem_ used strict hmap[colName] lookups for every editable field (Vendor, Description, Reference, Sidemark, Room, Location, Class, Qty, Status, Item Notes, Declared Value, Coverage Option). On any client sheet whose header had different case or extra whitespace, the lookup returned undefined and the write silently no-op'd or rejected with SCHEMA_ERROR — the React optimistic patch took then reverted on the next refetch because nothing landed in the sheet. Justin reported this for sidemark; same class as v38.152.0's Billing fix. Switched the column resolution + the Tasks/Repairs fan-out (where missing Sidemark/Reference columns silently dropped propagation) to api_ensureColumn_ — case-insensitive, auto-appends if missing — so client sheets self-heal on the first inline edit after the fix ships and the writeThrough mirror back to Supabase carries the new value.
+   v38.166.0 — 2026-05-04 PST — Stax invoice batches + auto-mirror to Supabase. Pre-v38.166.0 the "Stax IIF" button on the Billing page wrote rows to the Stax Invoices SHEET via auto-import (v38.21.0) but never called _sbResyncAllStaxInvoices, so the Supabase mirror was stale until something else triggered it — operators had to upload the same IIF on the Payments page just to fire the resync as a side effect. handleQbExport_ now calls _sbResyncAllStaxInvoices(getStaxSpreadsheet_()) right after the auto-import block so Payments → Review populates within ~1-2s of the Create Invoices click, no manual upload needed. Adds first-class batch concept: every qbExport invocation generates a batchId (BATCH-{timestamp}-{uuid6}) and writes one stax_invoice_batches row with totals + client summary, then PATCHes batch_id onto each freshly-mirrored stax_invoices row. Two new read endpoints: getStaxInvoiceBatches (paginated list for Payments → Batches view) and regenerateIifForBatch (rebuilds IIF text on demand from line_items_json — no file storage, generated fresh each request). Companion migration 20260504220000_stax_invoice_batches.sql adds the table + nullable batch_id FK. Drive IIF write left in place this PR — purely additive, removed in a follow-up after a few days of confidence.
    v38.165.0 — 2026-05-04 PST — Three hardenings to prevent the May 2026 WC-bug class from recurring. (1) supabaseBatchUpsert_ now shape-splits rows by their JSON key set before chunking. PostgREST rejects mixed-shape batches with PGRST102 ("All object keys must match"); the fall-through per-row retry path was correct but inefficient. Several sb*Row_ helpers conditionally include keys (sbBillingRow_ omits invoice_date when blank, etc.), so the fast batch path was failing for any client whose Billing_Ledger had a mix of invoiced + uninvoiced rows. Now each shape gets its own 50-row chunk loop. (2) api_fullClientSync_'s six entity branches (inventory / tasks / shipments / billing / will_calls / repairs) each replaced their bare `if (!key) continue;` with a tracked-skip pattern that calls new helper sbLogBlankIdSkips_ at the end of the case. Blank-key sheet rows now surface in stax_run_log with sheet name + row numbers so operators see them in the React FailedOperationsDrawer instead of disappearing into a `continue`. (3) New admin diagnostic runAuditMissingLedgerRowIds — read-only walk of every active client's six entity sheets, reporting blank-key rows. Quarterly safety net complementing the per-sync surfacing. Schema-side: companion migration 20260504200000_entity_id_nonempty_check_constraints.sql adds CHECK (col <> '') to all six entity-key columns so the next blank slip-through fails LOUD at INSERT.
    v38.164.0 — 2026-05-04 PST — handleProcessWcRelease_ now stamps "Ledger Row ID": "WC-{itemId}-{wcNumber}" on every billing row it writes. Without this column, api_fullClientSync_ explicitly skipped the row (see billing case at line ~6068: `if (!lid) continue`), so since 2026-04-01 every non-COD WC release wrote rows to the Billing_Ledger sheet that never mirrored to Supabase — 13 WCs / ~84 items invisible on the React Billing page and impossible to invoice. Out of 7 billing-row write paths in this file (RCVG, RCVG addons, task complete, repair quote lines, repair primary, WC release, manual charge), WC release was the only one missing the ID. Format mirrors RCVG's `RCVG-{itemId}-{shipmentNo}` convention. New admin entry `runBackfillWcLedgerRowIds` walks every active client in CB Clients, scans Billing_Ledger for WC rows missing the ID, stamps `WC-{itemId}-{shipment#}` (bulk-write column), then api_fullClientSync_(.., ["billing"]) per tenant to mirror. Idempotent — only patches rows where the ID is currently blank. Run once from Apps Script editor after deploy.
    v38.163.0 — 2026-05-04 PST — Fixed `seedAllStaxToSupabase`'s Charge Log reader. The actual sheet headers (per the StaxAutoPay SHEET_NAMES schema) are "Customer Name" + "Stax Transaction ID", but the seed function looked up "Customer" + "Transaction ID" — always returned undefined → mirror seeded customer/txn_id as empty strings for every charge log row. Symptom: React Charge Log page shows blank Customer column + blank Transaction ID column for all 8 historical successful charges. Now reads the canonical names first, falls back to the legacy short form so manually-edited sheets still work. Companion StaxAutoPay.gs v4.7.6 fixes the same bug in `_sbResyncAllStaxCharges`. After deploy, run `seedAllStaxToSupabase` once to backfill the existing 8 rows.
@@ -27061,12 +27062,14 @@ function handleUpdateInventoryItem_(clientSheetId, payload) {
     var idCol = hmap["Item ID"];
     if (!idCol) return errorResponse_("Item ID column not found", "SCHEMA_ERROR");
 
-    // Verify all target columns exist
-    for (var key2 in updates) {
-      var colName = FIELD_MAP[key2];
-      if (!hmap[colName]) return errorResponse_("Column not found: " + colName, "SCHEMA_ERROR");
-    }
-
+    // v38.158.0 — Inventory inline edits actually persist now. Same class of
+    // bug as v38.152.0 fixed for Billing: the strict `hmap[colName]` lookup
+    // returned undefined on any client sheet whose header had a different
+    // case / extra whitespace / a missing optional column (Reference, Item
+    // Notes, Coverage Option), so the React optimistic patch took then
+    // reverted on the next refetch because nothing landed in the sheet.
+    // Switched to api_ensureColumn_ — case-insensitive, appends if missing,
+    // so client sheets self-heal on the first inline edit after this ships.
     var lastRow = api_getLastDataRow_(sheet);
     if (lastRow < 2) return errorResponse_("Item not found: " + itemId, "NOT_FOUND");
 
@@ -27077,9 +27080,11 @@ function handleUpdateInventoryItem_(clientSheetId, payload) {
     }
     if (itemRowNum < 2) return errorResponse_("Item not found: " + itemId, "NOT_FOUND");
 
-    // Write each updated field
+    // Write each updated field — api_ensureColumn_ resolves the column
+    // case-insensitively (or appends it) so the write can never silently
+    // no-op due to header-casing drift.
     for (var key3 in updates) {
-      var col = hmap[FIELD_MAP[key3]];
+      var col = api_ensureColumn_(sheet, FIELD_MAP[key3]);
       sheet.getRange(itemRowNum, col).setValue(updates[key3]);
     }
 
@@ -27134,8 +27139,12 @@ function handleUpdateInventoryItem_(clientSheetId, payload) {
               if (tItem === itemId && !TASK_CLOSED[tStatus]) {
                 for (var syncHeader in fieldsToSync) {
                   if (syncHeader === "Status") continue; // Don't sync Inventory Status to Tasks
-                  var tCol = thmap[syncHeader];
-                  if (tCol) taskSheet.getRange(ti + 2, tCol).setValue(fieldsToSync[syncHeader]);
+                  // v38.158.0 — case-insensitive + auto-append so a Tasks
+                  // sheet missing Sidemark/Reference/Room still picks up the
+                  // edit (otherwise the inventory edit lands but the open
+                  // task row drifts and a later read can show stale data).
+                  var tCol = api_ensureColumn_(taskSheet, syncHeader);
+                  taskSheet.getRange(ti + 2, tCol).setValue(fieldsToSync[syncHeader]);
                 }
                 if (tTaskIdCol) {
                   var tidVal = String(tRows[ti][tTaskIdCol - 1] || "").trim();
@@ -27163,8 +27172,8 @@ function handleUpdateInventoryItem_(clientSheetId, payload) {
               if (rItem === itemId && !REPAIR_CLOSED[rStatus]) {
                 for (var syncHeader2 in fieldsToSync) {
                   if (syncHeader2 === "Status") continue; // Don't sync Inventory Status to Repairs
-                  var rCol = rhmap[syncHeader2];
-                  if (rCol) repairSheet.getRange(ri + 2, rCol).setValue(fieldsToSync[syncHeader2]);
+                  var rCol = api_ensureColumn_(repairSheet, syncHeader2);
+                  repairSheet.getRange(ri + 2, rCol).setValue(fieldsToSync[syncHeader2]);
                 }
                 if (rRepairIdCol) {
                   var ridVal = String(rRows[ri][rRepairIdCol - 1] || "").trim();
