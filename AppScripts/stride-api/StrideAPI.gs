@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.161.0 — 2026-05-04 PST — Critical fix to qbo_getCustomerContactInfo_ response-shape read. The helper added in v38.156.0 reads `result.Customer` from the qbo_apiRequest_ return value, but qbo_apiRequest_ wraps the body in `{ success, status, data, error }` (body lives at `.data`). The Customer field is at `result.data.Customer`, not `result.Customer`. The original read was always undefined → helper returned null on every call → QBO BillEmail inheritance has been silently no-op'd since PR #218. That explained Justin's INV-000135 push landing in QBO with empty bill-to email even after v38.156.0 + v38.158.0 fallback work, AND why runPullBillingContactsFromQbo (v38.160.0) reported "QBO customer fetch failed for Id <X>" on every client tested. One-character typo, weeks of broken behavior. Fix: read `result.data.Customer` and require `result.success` to also be truthy. With this in, the next QBO push for any sub-customer will inherit BillEmail from the parent record correctly, AND the bulk pull function will populate clients.billing_email + clients.billing_address from QBO for the ~50 active clients with null fields.
+   StrideAPI.gs — v38.162.0 — 2026-05-04 PST — handleCreateTestInvoice_ was the one Stax write path I missed in PR #214's "retire the Stax Customers sheet" sweep — it still read the deprecated sheet and reported NOT_FOUND for any client that exists in CB Clients but not the legacy mirror. Justin hit this trying to test the Stax webhook with a reactivated demo account ("Justin Demo Account") that is in CB Clients with a stax_customer_id but never had a row on the retired sheet. Migrated to stax_buildClientStaxMap_ — same helper handleQbExport_, handleImportIIF_, and stax_lookupCustomerIds_ all use. Lookup now succeeds when the client name matches Client Name, QB Customer Name, OR Stax Customer Name on the CB Clients row.
+   v38.161.0 — 2026-05-04 PST — Critical fix to qbo_getCustomerContactInfo_ response-shape read. The helper added in v38.156.0 reads `result.Customer` from the qbo_apiRequest_ return value, but qbo_apiRequest_ wraps the body in `{ success, status, data, error }` (body lives at `.data`). The Customer field is at `result.data.Customer`, not `result.Customer`. The original read was always undefined → helper returned null on every call → QBO BillEmail inheritance has been silently no-op'd since PR #218. That explained Justin's INV-000135 push landing in QBO with empty bill-to email even after v38.156.0 + v38.158.0 fallback work, AND why runPullBillingContactsFromQbo (v38.160.0) reported "QBO customer fetch failed for Id <X>" on every client tested. One-character typo, weeks of broken behavior. Fix: read `result.data.Customer` and require `result.success` to also be truthy. With this in, the next QBO push for any sub-customer will inherit BillEmail from the parent record correctly, AND the bulk pull function will populate clients.billing_email + clients.billing_address from QBO for the ~50 active clients with null fields.
    v38.160.0 — 2026-05-04 PST — New `runPullBillingContactsFromQbo` admin entry that bulk-pulls existing clients' billing email + address from QBO into Stride's `clients.billing_email` / `billing_address` (Supabase-only). Saves staff from typing the new Billing Contact section by hand for every active client. For each client where billing_email IS NULL, looks up the QBO customer by qb_customer_name (or name fallback) via qbo_searchCustomer_, fetches PrimaryEmailAddr / BillAddr / PrimaryPhone via qbo_getCustomerContactInfo_ (the helper added in v38.156.0), and PATCHes Supabase via supabasePatch_. billing_address is synthesized from QBO's BillAddr blob (Line1/Line2 + "City, State PostalCode"). billing_contact_name is NOT pulled — QBO GivenName/FamilyName don't reliably represent the AP contact, operator sets that. Idempotent: re-runs filter on `billing_email is.null` server-side; the per-field write check `&& !row.<field>` ensures operator-set values are never overwritten. Logs per-client decisions to the Apps Script execution log. New-client flow unchanged: intake form → onboard modal still drives clients.billing_* via the path shipped in PR #221 + #222.
    v38.159.0 — 2026-05-03 PST — New billing_email field on clients (Supabase-only) is now the authoritative source for invoice emails. Justin pointed out that the existing `email` field is the alerts/shipment-notification list (Hillary, Allison, adavisdesign for nip tuck) — those people should NOT necessarily get invoices. New billing_contact_name / billing_email / billing_address columns live ONLY in Supabase (migration `clients_billing_contact_fields`); no CB Clients sheet column, no CLIENT_FIELDS_ entry, no writeSettingsToClientSheet sync. First step toward "stop using the sheet for fields the operator only edits via the app". Resolution order for QBO BillEmail (handleQboCreateInvoice_): Supabase billing_email → QBO parent customer's PrimaryEmailAddr → CB Clients alerts email (legacy fallback). Resolution order for invoice email (api_emailInvoice_): Supabase billing_email → CLIENT_EMAIL setting (legacy fallback). billing_email may be comma-separated for multi-recipient — Gmail accepts that; QBO's Invoice.BillEmail.Address only takes a single address so we pick the first email and operators CC additional recipients via the QBO Send dialog. The QBO push reads billing_email via a single batched supabaseSelect for all active clients (one call per push batch, not per invoice). Both resolution paths log to Apps Script console when they fall through to a legacy field — operators can audit which clients still need a billing_email set. The OnboardClientModal will get a new Billing Contact section in the same PR series so staff can populate billing_email per-client.
    v38.158.0 — 2026-05-03 PST — QBO BillEmail inheritance falls back to CB Clients when the parent QBO customer record has no PrimaryEmailAddr. v38.156.0 added the QBO-side parent lookup but Justin's INV-000135 push still landed in QBO with an empty bill-to email — diagnosed: the parent QBO customer record didn't have a PrimaryEmailAddr set, so the fetch returned `billEmail: ""` and the per-field conditional skipped writing anything. CB Clients HAS the email (it's the same field staff use to send the Stride-side invoice), so add it as a fallback layer. handleQboCreateInvoice_'s clientInfoMap now also pulls Email + Phone from CB Clients; the per-invoice contact resolution prefers QBO parent's email, falls back to CB Clients email when QBO is empty. CB Clients email is often comma-separated (e.g. nip tuck has three recipients) — Invoice.BillEmail.Address validates as a single address on the QBO API, so we take the first email from the list. Operators can still CC additional recipients from the QBO Send dialog or set a comma-separated list on the parent QBO customer (which QBO accepts via its own UI flow). billAddr / shipAddr have no CB Clients equivalent so they only come from QBO. The "no contact info inherited" warning now distinguishes between "QBO parent had nothing AND CB Clients had nothing" (the only case it should fire now). Same fallback also covers the case where the Stax Customers tab never got the parent QBO ID populated (cachedParentQboId empty → parentCustomerId null → no QBO fetch at all) — CB Clients email lands on the invoice anyway.
@@ -32015,29 +32016,23 @@ function handleCreateTestInvoice_(payload) {
   try {
     var ss = getStaxSpreadsheet_();
 
-    // ── Look up Stax Customer ID from Customers tab ──
-    var custSheet = ss.getSheetByName("Customers");
-    var staxCustId = "";
-    if (custSheet) {
-      var custData = custSheet.getDataRange().getValues();
-      var matchCount = 0;
-      for (var c = 1; c < custData.length; c++) {
-        var qbName = String(custData[c][0] || "").trim();
-        if (stax_normalizeName_(qbName) === stax_normalizeName_(customer)) {
-          var candidateId = String(custData[c][3] || "").trim();
-          if (candidateId) {
-            staxCustId = candidateId;
-            matchCount++;
-          }
-        }
-      }
-      if (matchCount > 1) {
-        Logger.log("WARNING: handleCreateTestInvoice_ found " + matchCount +
-          " mapping rows for customer '" + customer + "'. Using first match: " + staxCustId);
-      }
-    }
+    // ── Look up Stax Customer ID ──
+    // v38.162.0 — was reading the deprecated Stax Customers sheet
+    // (retired in PR #214 / v38.153.0); migrated to the same
+    // stax_buildClientStaxMap_ helper that handleQbExport_,
+    // handleImportIIF_, and stax_lookupCustomerIds_ all use. Reads
+    // CB Clients (single source of truth) and indexes by Client Name,
+    // QB Customer Name, AND Stax Customer Name so divergent-name
+    // lookups still succeed.
+    var clientStaxMap = stax_buildClientStaxMap_();
+    var entry = clientStaxMap[stax_normalizeName_(customer)];
+    var staxCustId = entry ? entry.staxCustomerId : "";
     if (!staxCustId) {
-      return errorResponse_("Customer '" + customer + "' not found in Stax mapping or has no Stax Customer ID", "NOT_FOUND");
+      return errorResponse_(
+        "Customer '" + customer + "' not found on CB Clients with a Stax Customer ID. " +
+        "Set the Stax Customer ID on the client record first, then retry.",
+        "NOT_FOUND"
+      );
     }
 
     // ── Generate or validate QB Invoice # ──
