@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.159.0 — 2026-05-03 PST — New billing_email field on clients (Supabase-only) is now the authoritative source for invoice emails. Justin pointed out that the existing `email` field is the alerts/shipment-notification list (Hillary, Allison, adavisdesign for nip tuck) — those people should NOT necessarily get invoices. New billing_contact_name / billing_email / billing_address columns live ONLY in Supabase (migration `clients_billing_contact_fields`); no CB Clients sheet column, no CLIENT_FIELDS_ entry, no writeSettingsToClientSheet sync. First step toward "stop using the sheet for fields the operator only edits via the app". Resolution order for QBO BillEmail (handleQboCreateInvoice_): Supabase billing_email → QBO parent customer's PrimaryEmailAddr → CB Clients alerts email (legacy fallback). Resolution order for invoice email (api_emailInvoice_): Supabase billing_email → CLIENT_EMAIL setting (legacy fallback). billing_email may be comma-separated for multi-recipient — Gmail accepts that; QBO's Invoice.BillEmail.Address only takes a single address so we pick the first email and operators CC additional recipients via the QBO Send dialog. The QBO push reads billing_email via a single batched supabaseSelect for all active clients (one call per push batch, not per invoice). Both resolution paths log to Apps Script console when they fall through to a legacy field — operators can audit which clients still need a billing_email set. The OnboardClientModal will get a new Billing Contact section in the same PR series so staff can populate billing_email per-client.
+   StrideAPI.gs — v38.160.0 — 2026-05-04 PST — New `runPullBillingContactsFromQbo` admin entry that bulk-pulls existing clients' billing email + address from QBO into Stride's `clients.billing_email` / `billing_address` (Supabase-only). Saves staff from typing the new Billing Contact section by hand for every active client. For each client where billing_email IS NULL, looks up the QBO customer by qb_customer_name (or name fallback) via qbo_searchCustomer_, fetches PrimaryEmailAddr / BillAddr / PrimaryPhone via qbo_getCustomerContactInfo_ (the helper added in v38.156.0), and PATCHes Supabase via supabasePatch_. billing_address is synthesized from QBO's BillAddr blob (Line1/Line2 + "City, State PostalCode"). billing_contact_name is NOT pulled — QBO GivenName/FamilyName don't reliably represent the AP contact, operator sets that. Idempotent: re-runs filter on `billing_email is.null` server-side; the per-field write check `&& !row.<field>` ensures operator-set values are never overwritten. Logs per-client decisions to the Apps Script execution log. New-client flow unchanged: intake form → onboard modal still drives clients.billing_* via the path shipped in PR #221 + #222.
+   v38.159.0 — 2026-05-03 PST — New billing_email field on clients (Supabase-only) is now the authoritative source for invoice emails. Justin pointed out that the existing `email` field is the alerts/shipment-notification list (Hillary, Allison, adavisdesign for nip tuck) — those people should NOT necessarily get invoices. New billing_contact_name / billing_email / billing_address columns live ONLY in Supabase (migration `clients_billing_contact_fields`); no CB Clients sheet column, no CLIENT_FIELDS_ entry, no writeSettingsToClientSheet sync. First step toward "stop using the sheet for fields the operator only edits via the app". Resolution order for QBO BillEmail (handleQboCreateInvoice_): Supabase billing_email → QBO parent customer's PrimaryEmailAddr → CB Clients alerts email (legacy fallback). Resolution order for invoice email (api_emailInvoice_): Supabase billing_email → CLIENT_EMAIL setting (legacy fallback). billing_email may be comma-separated for multi-recipient — Gmail accepts that; QBO's Invoice.BillEmail.Address only takes a single address so we pick the first email and operators CC additional recipients via the QBO Send dialog. The QBO push reads billing_email via a single batched supabaseSelect for all active clients (one call per push batch, not per invoice). Both resolution paths log to Apps Script console when they fall through to a legacy field — operators can audit which clients still need a billing_email set. The OnboardClientModal will get a new Billing Contact section in the same PR series so staff can populate billing_email per-client.
    v38.158.0 — 2026-05-03 PST — QBO BillEmail inheritance falls back to CB Clients when the parent QBO customer record has no PrimaryEmailAddr. v38.156.0 added the QBO-side parent lookup but Justin's INV-000135 push still landed in QBO with an empty bill-to email — diagnosed: the parent QBO customer record didn't have a PrimaryEmailAddr set, so the fetch returned `billEmail: ""` and the per-field conditional skipped writing anything. CB Clients HAS the email (it's the same field staff use to send the Stride-side invoice), so add it as a fallback layer. handleQboCreateInvoice_'s clientInfoMap now also pulls Email + Phone from CB Clients; the per-invoice contact resolution prefers QBO parent's email, falls back to CB Clients email when QBO is empty. CB Clients email is often comma-separated (e.g. nip tuck has three recipients) — Invoice.BillEmail.Address validates as a single address on the QBO API, so we take the first email from the list. Operators can still CC additional recipients from the QBO Send dialog or set a comma-separated list on the parent QBO customer (which QBO accepts via its own UI flow). billAddr / shipAddr have no CB Clients equivalent so they only come from QBO. The "no contact info inherited" warning now distinguishes between "QBO parent had nothing AND CB Clients had nothing" (the only case it should fire now). Same fallback also covers the case where the Stax Customers tab never got the parent QBO ID populated (cachedParentQboId empty → parentCustomerId null → no QBO fetch at all) — CB Clients email lands on the invoice anyway.
    v38.157.0 — 2026-05-03 PST — Hardened handleCreateInvoice_ against the half-write state that stuck Justin's NIPTUCK INV-000131 commit in Unbilled limbo. Four defenses + a recovery: (1) The markInvoiced step is no longer try/catch'd into a non-fatal warning. On any throw OR partial flip (some ledger row IDs didn't match a row on the client sheet), the Consolidated_Ledger insert is rolled back via deleteRows and an error response is returned (LEDGER_FLIP_FAILED / LEDGER_PARTIAL_FLIP). The Master RPC counter has already advanced, so a clean retry just gets the next invoice number. (2) Pre-write race detection: after grabbing invNo from the Master RPC, scan Consolidated_Ledger for the same number under a different (client, sidemark) tuple. If found, abort with INVOICE_NO_COLLISION before any writes — root-causes the Master `getNextInvoiceId` counter not being atomic across concurrent commits. (3) Idempotency-check hardening: the "all ledger rows already in Consolidated_Ledger" early-return now ALSO verifies the client Billing_Ledger has those rows flipped to Invoiced before declaring success. If only some are flipped (the half-write state we kept silently re-hitting), return HALF_WRITE_DETECTED with a clear repair instruction instead of "looks fine, alreadyProcessed=true". (4) New helpers `api_verifyClientLedgerFlipped_` and `api_isInvoiceNoSafe_` back the above checks. New admin entry `runRepairOrphanLedgerRows` reads a Script Property `REPAIR_ORPHAN_LEDGER_IDS` (comma-separated) and removes matching rows from Consolidated_Ledger so a stuck state can be cleaned up — idempotent, logs every removed row's invoice #, client, sidemark for audit. Run this once on the 18 NIPTUCK rows; future stuck states will be rare (idempotency check now refuses to mask them) but the function is general-purpose for any similar incident.
    v38.156.0 — 2026-05-03 PST — QBO sub-customer invoices now inherit BillEmail / BillAddr / ShipAddr from the parent customer record. QBO does NOT auto-inherit contact info on sub-customer invoices — every Customer:Sidemark push was landing in QBO with empty bill-to fields, so the QBO-side "Send invoice" action had nowhere to email it (Justin reported this). The QBO API's IsProject flag is read-only — we can't switch from sub-customers to Projects to fix it that way — so we explicitly inherit at push time instead. New helper qbo_getCustomerContactInfo_ fetches PrimaryEmailAddr / BillAddr / ShipAddr / PrimaryPhone via GET /customer/{id}; qbo_resolveCustomerAndSubJob_ now also returns parentCustomerId so the caller can do that lookup. handleQboPush_ holds a per-batch parentContactCache so a 50-line invoice with 4 sidemarks does 4 parent lookups, not 50; same-client follow-up invoices in the same batch are already warm. Inheritance is conditional per field — empty parent values don't write empty objects (which QBO interprets as a clear-the-field action). Parent customers (no sidemark, or separate_by_sidemark=false) are unchanged — they hit QBO with CustomerRef pointing at the parent, which already pulls contact info correctly.
@@ -38618,4 +38619,160 @@ function runRepairOrphanLedgerRows() {
     }
   }
   Logger.log("runRepairOrphanLedgerRows complete: deleted " + deleted + " of " + rowsToDelete.length + " rows.");
+}
+
+/**
+ * v38.160.0 — runPullBillingContactsFromQbo: admin entry point.
+ *
+ * One-shot (re-runnable) bulk pull of billing contact info from QBO into
+ * Stride's `clients.billing_*` columns. Saves Justin from typing the
+ * Billing Contact section by hand for ~50 existing clients now that the
+ * fields exist (PR #221) but most rows are still null.
+ *
+ * For every active client where `clients.billing_email IS NULL`:
+ *   1. Look up the QBO customer by display name (qb_customer_name first,
+ *      then `name`) via `qbo_searchCustomer_`.
+ *   2. Fetch the QBO customer record's PrimaryEmailAddr / BillAddr /
+ *      PrimaryPhone via `qbo_getCustomerContactInfo_`.
+ *   3. UPDATE the Supabase `clients` row — only fields where the source
+ *      has data AND the target is currently null. Never overwrites
+ *      operator-set values.
+ *
+ * Idempotent: re-runs on already-populated rows skip in step 1 (filter
+ * on null) and at write time (only fill nulls). billing_address is
+ * synthesized from the QBO BillAddr blob (Line1 + City, State PostalCode)
+ * since clients.billing_address is plain text. billing_contact_name is
+ * NOT pulled — QBO's GivenName/FamilyName don't reliably represent the
+ * AP contact (operator sets that explicitly).
+ *
+ * Logs per-client decisions to the Apps Script execution log so the
+ * operator can see exactly what was written / skipped / not-found in QBO.
+ *
+ * Run from Apps Script editor → function dropdown → runPullBillingContactsFromQbo.
+ */
+function runPullBillingContactsFromQbo() {
+  // QBO connection. qbo_getValidToken_() returns the token STRING (throws
+  // on failure, with a refresh attempt inside). realmId comes from the
+  // Script Property the same call uses.
+  var token, realmId;
+  try {
+    token   = qbo_getValidToken_();
+    realmId = prop_("QBO_REALM_ID");
+    if (!token || !realmId) {
+      Logger.log("runPullBillingContactsFromQbo: QBO not connected. Connect via Settings → Integrations → QuickBooks first.");
+      return;
+    }
+  } catch (connErr) {
+    Logger.log("runPullBillingContactsFromQbo: QBO token error: " + connErr.message);
+    return;
+  }
+
+  // Fetch every active client missing billing_email. PostgREST `is.null`
+  // operator handles the SQL-side filter so we don't pull all 50+ rows
+  // when most are already populated on a re-run.
+  var sel = supabaseSelect_(
+    "clients",
+    "active=eq.true&billing_email=is.null",
+    "spreadsheet_id,name,qb_customer_name,billing_email,billing_address"
+  );
+  if (!sel.ok) {
+    Logger.log("runPullBillingContactsFromQbo: Supabase fetch failed.");
+    return;
+  }
+  if (!sel.rows || sel.rows.length === 0) {
+    Logger.log("runPullBillingContactsFromQbo: nothing to do — all active clients already have a billing_email set.");
+    return;
+  }
+
+  Logger.log("runPullBillingContactsFromQbo: scanning " + sel.rows.length + " client(s) with no billing_email...");
+
+  // QBO customer lookup cache — same parent customer might appear twice
+  // for clients with identical qb_customer_name (rare but possible). One
+  // search per unique name.
+  var qboCustCache = {};
+  function findQboCustomer_(displayName) {
+    if (!displayName) return null;
+    var key = String(displayName).trim();
+    if (qboCustCache.hasOwnProperty(key)) return qboCustCache[key];
+    var found = null;
+    try { found = qbo_searchCustomer_(key, token, realmId); }
+    catch (e) { Logger.log("  qbo_searchCustomer_ '" + key + "' failed: " + e.message); }
+    qboCustCache[key] = found;
+    return found;
+  }
+
+  function formatAddr_(addr) {
+    if (!addr) return "";
+    var parts = [];
+    if (addr.Line1) parts.push(String(addr.Line1).trim());
+    if (addr.Line2) parts.push(String(addr.Line2).trim());
+    var cityLine = [];
+    if (addr.City)                    cityLine.push(String(addr.City).trim());
+    if (addr.CountrySubDivisionCode)  cityLine.push(String(addr.CountrySubDivisionCode).trim());
+    if (addr.PostalCode)              cityLine.push(String(addr.PostalCode).trim());
+    if (cityLine.length) parts.push(cityLine.join(" ").replace(/\s+,\s+/g, ", "));
+    return parts.filter(function(p) { return p; }).join("\n");
+  }
+
+  var stats = { scanned: 0, found: 0, updated: 0, skipped: 0, notFoundInQbo: 0, errors: 0 };
+
+  for (var i = 0; i < sel.rows.length; i++) {
+    var row = sel.rows[i];
+    stats.scanned++;
+    var sheetId = String(row.spreadsheet_id || "").trim();
+    var lookupName = String(row.qb_customer_name || row.name || "").trim();
+    if (!sheetId || !lookupName) {
+      Logger.log("  [skip] missing spreadsheet_id or name on row");
+      stats.skipped++;
+      continue;
+    }
+
+    var custLite = findQboCustomer_(lookupName);
+    if (!custLite || !custLite.Id) {
+      Logger.log("  [not-found-in-qbo] '" + lookupName + "' — no QBO customer with that DisplayName");
+      stats.notFoundInQbo++;
+      continue;
+    }
+    stats.found++;
+
+    var info = qbo_getCustomerContactInfo_(custLite.Id, token, realmId, null);
+    if (!info) {
+      Logger.log("  [error] '" + lookupName + "' — QBO customer fetch failed for Id " + custLite.Id);
+      stats.errors++;
+      continue;
+    }
+
+    var qboEmail   = String(info.billEmail || "").trim();
+    var qboAddrFmt = formatAddr_(info.billAddr);
+    var patch = {};
+    if (qboEmail   && !row.billing_email)   patch.billing_email   = qboEmail;
+    if (qboAddrFmt && !row.billing_address) patch.billing_address = qboAddrFmt;
+
+    if (Object.keys(patch).length === 0) {
+      Logger.log("  [no-data] '" + lookupName + "' — QBO customer has no PrimaryEmailAddr to copy");
+      stats.skipped++;
+      continue;
+    }
+
+    var pres = supabasePatch_(
+      "clients",
+      "spreadsheet_id=eq." + encodeURIComponent(sheetId),
+      patch
+    );
+    if (pres.ok) {
+      Logger.log("  [updated] '" + lookupName + "' → " +
+                 Object.keys(patch).map(function(k) { return k + "=" + String(patch[k]).substring(0, 60); }).join(", "));
+      stats.updated++;
+    } else {
+      Logger.log("  [error] '" + lookupName + "' Supabase PATCH failed: " + (pres.error || "HTTP " + pres.code));
+      stats.errors++;
+    }
+  }
+
+  Logger.log("runPullBillingContactsFromQbo complete: scanned=" + stats.scanned +
+             ", found-in-qbo=" + stats.found +
+             ", updated=" + stats.updated +
+             ", not-found-in-qbo=" + stats.notFoundInQbo +
+             ", skipped=" + stats.skipped +
+             ", errors=" + stats.errors);
 }
