@@ -43,6 +43,10 @@ export interface OnboardClientFormData {
   autoInspection: boolean;
   separateBySidemark: boolean;
   autoCharge: boolean;
+  /** v2 — when ON, the intake form's Step 4 shows the "required" copy
+   *  variant. When OFF, Step 4 shows the "encouraged but not required"
+   *  variant (grandfathered terms-only clients). */
+  paymentMethodRequired: boolean;
   // Active
   active: boolean;
   // Parent/child
@@ -138,6 +142,7 @@ function buildInitialData(existing: ApiClient | null): OnboardClientFormData {
       freeStorageDays: '0', discountStoragePct: '0', discountServicesPct: '0',
       enableReceivingBilling: true, enableShipmentEmail: true,
       enableNotifications: true, autoInspection: true, separateBySidemark: false, autoCharge: false,
+      paymentMethodRequired: true,
       active: true, parentClient: '', importInventoryUrl: '', notes: '', shipmentNote: '',
       taxExempt: true, taxExemptReason: 'Resale', resaleCertExpires: '',
       spreadsheetId: '', folderId: '', photosFolderId: '', invoiceFolderId: '', webAppUrl: '',
@@ -164,6 +169,7 @@ function buildInitialData(existing: ApiClient | null): OnboardClientFormData {
     autoInspection: existing.autoInspection !== false,
     separateBySidemark: existing.separateBySidemark === true,
     autoCharge: existing.autoCharge === true,
+    paymentMethodRequired: (existing as ApiClient & { paymentMethodRequired?: boolean }).paymentMethodRequired !== false,
     active: existing.active !== false,
     parentClient: existing.parentClient || '',
     importInventoryUrl: '',
@@ -524,6 +530,7 @@ export function OnboardClientModal({ mode = 'create', existingClient = null, all
                 { key: 'autoInspection', label: 'Auto Inspection', desc: 'Auto-create INSP task on receive', tip: 'When ON, every item received automatically gets an inspection task created. Use for clients who require inspection on all incoming items. Leave OFF to create inspections manually as needed.' },
                 { key: 'separateBySidemark', label: 'Separate by Sidemark', desc: 'Invoice lines grouped by sidemark', tip: 'When ON, invoices are split into separate invoice documents per sidemark (one invoice per project/room). When OFF, all charges go on a single consolidated invoice.' },
                 { key: 'autoCharge', label: 'Auto Charge', desc: 'Auto-charge payments on due date', tip: 'When ON, Stax invoices for this client are automatically charged on their due date by the daily auto-charge trigger (9 AM Pacific). When OFF, invoices must be charged manually from the Payments page. Individual invoices can still override this setting.' },
+                { key: 'paymentMethodRequired', label: 'Card Required', desc: 'Card on file required at intake', tip: 'When ON, the client\'s intake form Step 4 shows the "required" copy variant — they must set up a payment method on Paymnt.io before submitting. When OFF, Step 4 shows the "encouraged but not required" variant — used for grandfathered terms-only clients with clean payment history. Defaults to ON for new clients; existing clients without a Stax customer ID were migrated to OFF.' },
               ] as const).map(f => (
                 <div key={f.key} onClick={() => set(f.key, !data[f.key])} style={toggleStyle(data[f.key])}>
                   <div>

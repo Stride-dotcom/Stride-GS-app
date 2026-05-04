@@ -2193,6 +2193,9 @@ export function Settings() {
                   billing_contact_name: data.billingContactName || null,
                   billing_email:        data.billingEmail        || null,
                   billing_address:      data.billingAddress      || null,
+                  // v2 — payment_method_required is Supabase-only (no GAS/CB Clients
+                  // sheet round-trip). Drives the intake form's Step 4 copy variant.
+                  payment_method_required: data.paymentMethodRequired,
                 })
                 .eq('spreadsheet_id', newSheetId);
             } catch (taxErr) {
@@ -2261,6 +2264,7 @@ export function Settings() {
                   billing_contact_name: data.billingContactName || null,
                   billing_email:        data.billingEmail        || null,
                   billing_address:      data.billingAddress      || null,
+                  payment_method_required: data.paymentMethodRequired,
                 })
                 .eq('spreadsheet_id', data.spreadsheetId);
             } catch (billingErr) {
