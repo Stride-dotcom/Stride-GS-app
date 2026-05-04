@@ -212,14 +212,24 @@
   <div id="pay_now"></div>
 
   <script>
-    // Pre-fill Order # + Notes from URL params (?order=INV-1234&notes=Will+Call+WC-123)
-    // Stride WMS Will Call panel passes both — order goes in the badge
-    // + Order field; notes is pre-populated so the reference back to
-    // the WC is captured on the payment record.
+    // Pre-fill from URL params. The Will Call panel passes everything
+    // it already knows so the operator doesn't re-type anything:
+    //   ?order   → badge + Order # field + rides to Stax as customerCode
+    //   ?notes   → Notes field + rides to Stax as transaction notes
+    //   ?amount  → Amount field (COD amount on the Will Call)
+    //   ?name    → Customer Name field (pickup party / client name)
+    //   ?email   → Email field (when we have a billing email on file)
+    //   ?auto=1  → auto-launch the Stax credit card modal once the page
+    //              has rendered, skipping the form entry step
     (function () {
       var params = new URLSearchParams(window.location.search);
-      var orderParam = params.get('order');
-      var notesParam = params.get('notes');
+      var orderParam  = params.get('order');
+      var notesParam  = params.get('notes');
+      var amountParam = params.get('amount');
+      var nameParam   = params.get('name');
+      var emailParam  = params.get('email');
+      var autoParam   = params.get('auto');
+
       if (orderParam) {
         document.getElementById('order').value = orderParam;
         var badge = document.createElement('div');
@@ -227,9 +237,22 @@
         badge.textContent = 'Order: ' + orderParam; // textContent is XSS-safe
         document.getElementById('order-badge-wrap').appendChild(badge);
       }
-      if (notesParam) {
-        // Notes may come URL-encoded with spaces — URLSearchParams decodes them.
-        document.getElementById('notes').value = notesParam;
+      if (notesParam)  document.getElementById('notes').value  = notesParam;
+      if (amountParam) document.getElementById('amount').value = amountParam;
+      if (nameParam)   document.getElementById('name').value   = nameParam;
+      if (emailParam)  document.getElementById('email').value  = emailParam;
+
+      // Auto-launch when caller passed ?auto=1 AND the amount is valid.
+      // Brief delay so the user sees the populated form (visual feedback
+      // that the Stride app passed the data through) before the Stax
+      // credit card modal opens on top of it. If the URL is missing key
+      // data, we leave the form visible so the operator can fill it in.
+      if (autoParam === '1') {
+        var amt = parseFloat(amountParam || '');
+        if (!isNaN(amt) && amt > 0) {
+          // 350ms — long enough to render but not annoying.
+          setTimeout(launchPayment, 350);
+        }
       }
     })();
 
@@ -241,6 +264,8 @@
       var amountRaw = parseFloat(document.getElementById('amount').value);
       var name      = document.getElementById('name').value.trim();
       var email     = document.getElementById('email').value.trim();
+      var orderNo   = document.getElementById('order').value.trim();
+      var notes     = document.getElementById('notes').value.trim();
 
       var valid = true;
       var amountErr = document.getElementById('amount-err');
@@ -282,8 +307,17 @@
       script.setAttribute('data-amount', amountRaw.toFixed(2));
       script.setAttribute('data-openOnLoad', 'true');
       script.setAttribute('data-displayConfirmation', 'true');
-      if (name)  script.setAttribute('data-name', name);
-      if (email) script.setAttribute('data-billingEmail', email);
+      if (name)    script.setAttribute('data-name', name);
+      if (email)   script.setAttribute('data-billingEmail', email);
+      // Push Order # + Notes into Stax so they ride along to the
+      // payment record. data-customerCode is the documented Stax
+      // attribute for an external reference. data-notes attaches a
+      // free-text memo. Both surface on the Stax-side transaction
+      // detail and on the webhook payload that hits stax-webhook for
+      // mark-paid back-sync. Unknown attributes are ignored by Stax —
+      // safe to send unconditionally.
+      if (orderNo) script.setAttribute('data-customerCode', orderNo);
+      if (notes)   script.setAttribute('data-notes', notes);
 
       script.onload  = function () { btn.disabled = false; btn.textContent = 'Take Payment'; };
       script.onerror = function () {

@@ -667,20 +667,27 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
                   <div style={{ display: 'flex', gap: 8 }}>
                     <button
                       onClick={() => {
-                        // Session 74: open the branded stax-payment.html
-                        // instead of the raw Stax hosted page. Pass the
-                        // WC number in BOTH ?order= (drives the badge +
-                        // Order # input) and ?notes= (so the reference
-                        // back to the Will Call is captured on the Stax
-                        // payment record). The page also pre-fills the
-                        // amount field if we pass one — wire codAmount
-                        // in for a one-click collection flow.
+                        // Pass everything we already know to the static
+                        // payment page so the operator doesn't re-enter it:
+                        //   ?order   → badge + Stax customerCode + Order # input
+                        //   ?notes   → pre-fills Notes field + rides to Stax
+                        //   ?amount  → COD amount, pre-fills + lets us skip the form
+                        //   ?name    → pickup party (or client name) for Stax billing name
+                        //   ?auto=1  → tells the page to auto-launch the Stax modal
+                        //              when amount is valid; user sees the form for
+                        //              ~300ms before the Stax credit card modal opens
                         const wcNum = wc.wcNumber || '';
                         const params = new URLSearchParams();
                         if (wcNum) {
                           params.set('order', wcNum);
                           params.set('notes', `Will Call ${wcNum}`);
                         }
+                        if (wc.codAmount != null && Number(wc.codAmount) > 0) {
+                          params.set('amount', Number(wc.codAmount).toFixed(2));
+                        }
+                        const billingName = (wc.pickupParty || wc.clientName || '').trim();
+                        if (billingName) params.set('name', billingName);
+                        params.set('auto', '1');
                         window.open(`/stax-payment.html?${params.toString()}`, '_blank');
                       }}
                       style={{ flex: 1, padding: '9px', fontSize: 12, fontWeight: 600, border: 'none', borderRadius: 8, background: theme.colors.orange, color: '#fff', cursor: 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}
