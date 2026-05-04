@@ -32,6 +32,9 @@ import {
   fetchPublicCoverageNotes,
   fetchRefreshPrefill,
   useSignatureCanvas,
+  fetchIntakeDraft,
+  saveIntakeDraft,
+  deleteIntakeDraft,
   type IntakeSubmitPayload,
   type PublicCoverageNote,
   type RefreshPrefill,
@@ -156,6 +159,15 @@ export function ClientIntake({ linkId }: Props) {
 
   const [step, setStep] = useState<number>(1);
   const [draft, setDraft] = useState<Draft>(EMPTY_DRAFT);
+  // v38.179.0 — draft auto-save / restore. `draftHydrated` flips true once
+  // we've checked Supabase for an existing draft (or confirmed none exists),
+  // so the auto-save effect doesn't fire with the initial EMPTY_DRAFT and
+  // overwrite a saved draft before we can read it.
+  const [draftHydrated, setDraftHydrated] = useState(false);
+  // Hint surface for re-attached files: when a saved draft is restored we
+  // remember the filenames the prospect originally uploaded so the file
+  // step can show "you previously attached resale.pdf — please re-attach".
+  const [draftFileHints, setDraftFileHints] = useState<{ resaleCertFileName?: string; otherFileNames?: string[] }>({});
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [submitted, setSubmitted] = useState(false);
@@ -187,6 +199,58 @@ export function ClientIntake({ linkId }: Props) {
       }));
     }
   }, [link]);
+
+  // v38.179.0 — Restore saved draft on mount. Only attempts once link is
+  // resolved (status==='valid') to avoid clobbering the EMPTY_DRAFT during
+  // the loading flicker. When a saved draft exists, hydrate every text /
+  // boolean / select field, plus the wizard step. File fields are NOT
+  // restored (File objects don't survive serialization) — instead we surface
+  // filename hints so step 5 can prompt "you previously attached X — please
+  // re-attach if still applicable".
+  useEffect(() => {
+    if (status !== 'valid' || draftHydrated || !linkId) return;
+    let cancelled = false;
+    void fetchIntakeDraft(linkId).then(saved => {
+      if (cancelled) return;
+      if (saved && saved.draft && Object.keys(saved.draft).length > 0) {
+        const d = saved.draft as Record<string, unknown>;
+        const hints = (d.__fileHints as { resaleCertFileName?: string; otherFileNames?: string[] }) || {};
+        setDraftFileHints(hints);
+        // Spread saved fields onto EMPTY_DRAFT so any new fields added
+        // since the draft was written keep their defaults instead of
+        // becoming undefined and tripping required-field validation.
+        setDraft(prev => ({
+          ...EMPTY_DRAFT,
+          ...prev,
+          ...(d as Partial<Draft>),
+          // Force file slots back to empty regardless of what's in the JSON
+          // (defensive — stripFiles already drops them, but a hand-crafted
+          // row could set a non-File value here and break <input type=file>).
+          resaleCertFile: null,
+          otherFiles: [],
+        }));
+        if (typeof saved.step === 'number' && saved.step >= 1 && saved.step <= 6) {
+          setStep(saved.step);
+        }
+      }
+      setDraftHydrated(true);
+    }).catch(() => { setDraftHydrated(true); });
+    return () => { cancelled = true; };
+  }, [status, draftHydrated, linkId]);
+
+  // v38.179.0 — Debounced auto-save of the draft on every change. Skips
+  // until hydration is complete (no overwriting a saved draft with the
+  // empty initial state) and skips after submit (no point persisting
+  // post-success state). 1500ms debounce — long enough to coalesce
+  // typing bursts, short enough that the prospect's data is durable
+  // within seconds. Network failures are non-fatal (log + swallow).
+  useEffect(() => {
+    if (!draftHydrated || submitted || !linkId) return;
+    const handle = setTimeout(() => {
+      void saveIntakeDraft(linkId, draft as unknown as Record<string, unknown>, step);
+    }, 1500);
+    return () => clearTimeout(handle);
+  }, [draft, step, draftHydrated, submitted, linkId]);
 
   // Refresh mode: when the link has a client_spreadsheet_id, pull the
   // existing client + last intake and pre-fill every editable field.
@@ -517,6 +581,11 @@ export function ClientIntake({ linkId }: Props) {
         setSubmitError(result.error);
       } else {
         setSubmitted(true);
+        // v38.179.0 — successful submission means the draft is no longer
+        // useful. Best-effort delete; failure is harmless (orphan row,
+        // no PII exposure beyond what the prospect already saw on the
+        // success screen).
+        void deleteIntakeDraft(linkId);
         // Fire the client-receipt email automatically. Every prospect should
         // get a record of what they signed in their own inbox without having
         // to click a button. This is intentionally fire-and-forget — the
