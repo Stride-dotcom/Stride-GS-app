@@ -1,24 +1,43 @@
 /**
  * AddTaskServiceModal — staff/admin pick a service from the catalog to
- * attach as a billable add-on to an open task. Rate snapshots from the
+ * attach as a billable add-on to an entity. Rate snapshots from the
  * catalog at the time of add (class_based services use the parent
  * item's class; flat services use flat_rate). The actual billing row
- * doesn't get written until the task is completed — this just queues
- * the add-on on public.task_addons.
+ * doesn't get written until the entity completes — this just queues
+ * the add-on on public.addons.
  *
- * Catalog filter: service_catalog where active=true AND show_as_task=true.
+ * v38.177.0 — generalized for any entity type. The `parentType` prop
+ * controls (a) the title copy, (b) the catalog filter:
+ *
+ *   - 'task': service_catalog where active=true AND show_as_task=true
+ *     (preserves the original task-only behavior).
+ *   - 'repair' | 'will_call' | 'inventory' | undefined:
+ *     service_catalog where active=true (show every active service).
+ *
+ * The component name is preserved for back-compat with the existing
+ * TaskDetailPanel call site, but new entity panels can pass parentType
+ * to get the right copy + filter.
  */
 import React, { useEffect, useMemo, useState } from 'react';
 import { X, Loader2 } from 'lucide-react';
 import { theme } from '../../styles/theme';
 import { useServiceCatalog, type CatalogService } from '../../hooks/useServiceCatalog';
 import type { AddTaskAddonInput } from '../../hooks/useTaskAddons';
+import type { EntityAddonParent } from '../../hooks/useEntityAddons';
 
 interface Props {
   itemClass?: string | null;
+  parentType?: EntityAddonParent;
   onClose: () => void;
   onSubmit: (input: AddTaskAddonInput) => Promise<unknown>;
 }
+
+const TITLE_BY_PARENT: Record<EntityAddonParent, string> = {
+  task: 'Add Service to Task',
+  repair: 'Add Service to Repair',
+  will_call: 'Add Service to Will Call',
+  inventory: 'Add Service to Item',
+};
 
 const inputStyle: React.CSSProperties = {
   width: '100%', padding: '8px 10px', fontSize: 13,
@@ -32,13 +51,17 @@ function rateForClass(svc: CatalogService, itemClass: string | null | undefined)
   return Number(svc.rates?.[k] ?? 0);
 }
 
-export function AddTaskServiceModal({ itemClass, onClose, onSubmit }: Props) {
+export function AddTaskServiceModal({ itemClass, parentType, onClose, onSubmit }: Props) {
   const { services, loading } = useServiceCatalog();
+  // For tasks, preserve the historical show_as_task gate. For other
+  // entity types the catalog has no parallel flag yet (and adding 4
+  // would force a schema decision per service), so show every active
+  // service and let the operator pick the right one.
   const taskServices = useMemo(
     () => services
-      .filter(s => s.active && s.showAsTask)
+      .filter(s => s.active && (parentType === 'task' || parentType === undefined ? s.showAsTask : true))
       .sort((a, b) => a.displayOrder - b.displayOrder),
-    [services],
+    [services, parentType],
   );
 
   const [serviceId, setServiceId] = useState('');
@@ -117,7 +140,7 @@ export function AddTaskServiceModal({ itemClass, onClose, onSubmit }: Props) {
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
           padding: '14px 18px', borderBottom: `1px solid ${theme.colors.border}`,
         }}>
-          <div style={{ fontSize: 15, fontWeight: 700 }}>Add Service to Task</div>
+          <div style={{ fontSize: 15, fontWeight: 700 }}>{parentType ? TITLE_BY_PARENT[parentType] : 'Add Service to Task'}</div>
           <button
             onClick={onClose}
             style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4, color: theme.colors.textMuted }}
@@ -156,7 +179,9 @@ export function AddTaskServiceModal({ itemClass, onClose, onSubmit }: Props) {
             </select>
             {!loading && taskServices.length === 0 && (
               <div style={{ fontSize: 11, color: theme.colors.textMuted, marginTop: 4 }}>
-                No catalog services flagged show_as_task.
+                {parentType === 'task' || parentType === undefined
+                  ? 'No catalog services flagged show_as_task.'
+                  : 'No active services in the catalog.'}
               </div>
             )}
           </div>

@@ -36,7 +36,7 @@ import { ChevronDown, ChevronRight, DollarSign, Loader2, AlertTriangle, Receipt,
 import { theme } from '../../styles/theme';
 import { supabase } from '../../lib/supabase';
 import { useServiceCatalog, type CatalogService } from '../../hooks/useServiceCatalog';
-import type { TaskAddon, AddTaskAddonInput } from '../../hooks/useTaskAddons';
+import type { EntityAddon, AddEntityAddonInput } from '../../hooks/useEntityAddons';
 import { AddTaskServiceModal } from './AddTaskServiceModal';
 
 export type BillingPreviewEntity = 'task' | 'repair' | 'will_call';
@@ -60,20 +60,20 @@ interface Props {
    * the whole primary line to a $0 charge.
    */
   customPrice?: number | null;
-  /** Queued task addons (TaskDetailPanel only). */
-  addons?: TaskAddon[];
+  /** Queued addons for this entity (any parent_type). v38.177.0 — was
+   *  task-only via TaskAddon[]; now polymorphic via EntityAddon[]. */
+  addons?: EntityAddon[];
   /** Hide for clients. */
   visible?: boolean;
   /** Initial open/closed state. Defaults to closed. */
   defaultOpen?: boolean;
   /** When true, render qty/rate inputs + Add Service + delete buttons.
-   *  When false, the card is read-only (RepairDetailPanel / WillCallDetailPanel
-   *  for now, until those entities have endpoints to persist edits). */
+   *  When false, the card is read-only. */
   editable?: boolean;
   /** Persist primary rate. Pass `null` to clear the override. */
   onUpdatePrimaryRate?: (rate: number | null) => Promise<unknown>;
   /** Persist a new addon row. */
-  onAddAddon?: (input: AddTaskAddonInput) => Promise<unknown>;
+  onAddAddon?: (input: AddEntityAddonInput) => Promise<unknown>;
   /** Persist qty/rate edit on an existing addon. */
   onUpdateAddon?: (id: string, patch: { quantity?: number; rate?: number | null }) => Promise<unknown>;
   /** Delete an addon row. */
@@ -208,9 +208,13 @@ export function BillingPreviewCard({
   }, [primary, editable, onUpdatePrimaryRate]);
 
   // ─── Addons ────────────────────────────────────────────────────────────
+  // v38.177.0 — polymorphic. Addons now flow through to repair / will_call
+  // panels too via the unified `addons` table. Unbilled rows show in the
+  // projected section; billed rows display with a "Billed" badge but stay
+  // visible so staff can see what was added before the entity completed.
   const projectedAddons = useMemo(
-    () => (entityType === 'task' && addons) ? addons : [],
-    [entityType, addons],
+    () => addons ?? [],
+    [addons],
   );
 
   // ─── Recorded charges ──────────────────────────────────────────────────
@@ -225,16 +229,18 @@ export function BillingPreviewCard({
         .eq('tenant_id', tenantId);
 
       if (entityType === 'task') {
+        // Primary task row OR addon rows whose Task ID is "{taskId}-{svcCode}".
         query = query.or(`task_id.eq.${entityId},task_id.like.${entityId}-%`);
       } else if (entityType === 'will_call') {
-        // WC ledger rows store the wcNumber in shipment_number (per
-        // handleProcessWcRelease_) with svc_code='WC' and an empty
-        // task_id. The previous filter (combined with task) on task_id
-        // never matched, so the recorded-rows panel was always empty
-        // for WCs even when the ledger had rows.
-        query = query.eq('svc_code', 'WC').eq('shipment_number', entityId);
+        // WC ledger rows + WC addon rows both stamp shipment_number=wcNumber
+        // (per handleProcessWcRelease_ + api_writeAddonsToLedger_). Filter on
+        // shipment_number alone so addon rows (svc_code != 'WC') are pulled
+        // in too. v38.177.0 — was `.eq('svc_code', 'WC')` which excluded
+        // addons; widened so the recorded panel now shows them.
+        query = query.eq('shipment_number', entityId);
       } else if (entityType === 'repair') {
-        query = query.eq('repair_id', entityId);
+        // Primary repair row OR addon rows whose Repair ID is "{repairId}-{svcCode}".
+        query = query.or(`repair_id.eq.${entityId},repair_id.like.${entityId}-%`);
       }
 
       const { data, error } = await query
@@ -296,10 +302,13 @@ export function BillingPreviewCard({
   const projectedTotal = showPreview ? (primaryTotal + projectedAddonsTotal) : 0;
   const grandTotal = recordedTotal + projectedTotal;
 
-  function isAddonBooked(addon: TaskAddon): boolean {
-    if (entityType !== 'task') return false;
+  // An addon is "booked" once api_writeAddonsToLedger_ has materialized
+  // it to Billing_Ledger. Detection: the addon row itself has billed=true
+  // (the most reliable signal), OR a recorded row matches the canonical
+  // ledger_row_id prefix `{entityId}-{svcCode}-ADDON-`.
+  function isAddonBooked(addon: EntityAddon): boolean {
+    if (addon.billed) return true;
     return recorded.some(r =>
-      r.task_id === `${entityId}-${addon.serviceCode}` ||
       (r.ledger_row_id ?? '').startsWith(`${entityId}-${addon.serviceCode}-ADDON-`)
     );
   }
@@ -389,8 +398,9 @@ export function BillingPreviewCard({
                   );
                 })}
                 {/* "+ Add Service" — staff/admin only, lives inside the
-                    projected section so all addon controls are in one place. */}
-                {editable && onAddAddon && entityType === 'task' && (
+                    projected section so all addon controls are in one place.
+                    v38.177.0: shown for any entity type (was task-only). */}
+                {editable && onAddAddon && (
                   <button
                     onClick={() => setShowAddModal(true)}
                     style={{
@@ -482,6 +492,7 @@ export function BillingPreviewCard({
       {showAddModal && onAddAddon && (
         <AddTaskServiceModal
           itemClass={itemClass || null}
+          parentType={entityType}
           onClose={() => setShowAddModal(false)}
           onSubmit={async (input) => { await onAddAddon(input); }}
         />
@@ -634,7 +645,7 @@ function ProjectedRow({
 function AddonRowEditable({
   addon, editable, deletable, booked, onUpdate, onDelete,
 }: {
-  addon: TaskAddon;
+  addon: EntityAddon;
   editable: boolean;
   deletable: boolean;
   booked: boolean;
@@ -764,7 +775,7 @@ function AddonRowEditable({
           {deletable && onDelete && (
             <button
               onClick={async () => {
-                if (!confirm(`Remove ${addon.serviceName} from this task?`)) return;
+                if (!confirm(`Remove ${addon.serviceName}?`)) return;
                 setDeleting(true);
                 try { await onDelete(addon.id); } finally { setDeleting(false); }
               }}

@@ -18,6 +18,7 @@ import { fmtDate, toDateInputValue } from '../../lib/constants';
 import { WriteButton } from './WriteButton';
 import { ProcessingOverlay } from './ProcessingOverlay';
 import { BillingPreviewCard } from './BillingPreviewCard';
+import { useEntityAddons } from '../../hooks/useEntityAddons';
 import { postSendRepairQuote, postRespondToRepairQuote, postCompleteRepair, postStartRepair, postCancelRepair, postUpdateRepairNotes, postReopenRepair, postCorrectRepairResult, postVoidRepairQuote, isApiConfigured } from '../../lib/api';
 import { generateRepairWorkOrderPdf } from '../../lib/workOrderPdf';
 import { entityEvents } from '../../lib/entityEvents';
@@ -296,6 +297,18 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
 
   // ─── Stage B: Reopen + Result correction ────────────────────────────────
   const canStaffEdit = user?.role === 'admin' || user?.role === 'staff';
+
+  // ─── Add-on services (v38.177.0 unified addons) ─────────────────────────
+  // Rows accumulate on public.addons until handleCompleteRepair_ flushes
+  // them via api_writeAddonsToLedger_. The "+ Add Service" button + inline
+  // edits live inside BillingPreviewCard. Editable while the repair is
+  // open (not yet Complete / Cancelled / Failed).
+  const repairCompleted = effectiveStatus === 'Complete' || effectiveStatus === 'Completed' || effectiveStatus === 'Cancelled';
+  const { addons: repairAddons, addAddon: addRepairAddon, updateAddon: updateRepairAddon, deleteAddon: deleteRepairAddon } = useEntityAddons(
+    canStaffEdit ? 'repair' : null,
+    canStaffEdit ? repair.repairId : null,
+    canStaffEdit ? (repair.clientSheetId || null) : null,
+  );
   const [reopenLoading, setReopenLoading] = useState(false);
   const [reopenError, setReopenError] = useState<string | null>(null);
   const [showCorrectRepairResult, setShowCorrectRepairResult] = useState(false);
@@ -925,9 +938,11 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
         {/* Photos + Notes now live in dedicated tabs via builtInTabs below. */}
 
         {/* Billing Preview — staff/admin only. Shows the projected
-            REPAIR charge from the catalog plus any recorded ledger rows
-            for this repair. Repairs don't have addons today, so the
-            projected section is just the primary line. */}
+            REPAIR charge from the catalog plus any addons attached to
+            this repair plus any recorded ledger rows. v38.177.0:
+            addons are now polymorphic — staff can attach extras
+            (parts pickup, materials, etc.) that flush to Billing_Ledger
+            when handleCompleteRepair_ runs. */}
         <BillingPreviewCard
           entityType="repair"
           entityId={repair.repairId}
@@ -936,7 +951,12 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
           svcCode="REPAIR"
           itemClass={repair.itemClass || null}
           customPrice={repair.finalAmount != null ? Number(repair.finalAmount) : (repair.quoteAmount != null ? Number(repair.quoteAmount) : null)}
+          addons={repairAddons}
           visible={canStaffEdit}
+          editable={canStaffEdit && !repairCompleted}
+          onAddAddon={async (input) => { await addRepairAddon(input); }}
+          onUpdateAddon={async (id, patch) => { await updateRepairAddon(id, patch); }}
+          onDeleteAddon={async (id) => { await deleteRepairAddon(id); }}
         />
     </div>
   );
