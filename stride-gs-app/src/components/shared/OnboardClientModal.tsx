@@ -94,6 +94,35 @@ interface Props {
    *  falls back to the empty-state defaults. Ignored in edit mode —
    *  edit always starts from `existingClient`. */
   initialData?: Partial<OnboardClientFormData>;
+  /** v2 — preview-then-save for refresh-mode intakes. When set in edit
+   *  mode, the modal overlays this intake's values onto the existing
+   *  client data so staff can see exactly what's pending before clicking
+   *  Save & Sync. The cert path inside also gets surfaced in
+   *  TaxExemptBlock as a "from intake" badge so staff know the cert
+   *  will land on save. Pass null/undefined for vanilla edit mode. */
+  pendingIntake?: PendingIntakeOverride | null;
+}
+
+/** Subset of IntakeRow fields the modal uses for preview overlay. */
+export interface PendingIntakeOverride {
+  id: string;
+  submittedAt: string;
+  contactName?: string | null;
+  email?: string | null;
+  phone?: string | null;
+  businessAddress?: string | null;
+  billingContactName?: string | null;
+  billingEmail?: string | null;
+  billingAddress?: string | null;
+  notificationContacts?: Array<{ name?: string; email: string }> | null;
+  autoInspect?: boolean | null;
+  taxExempt?: boolean | null;
+  taxExemptReason?: string | null;
+  resaleCertExpires?: string | null;
+  /** Storage path of the cert PDF in the documents bucket. Surfaced in
+   *  TaxExemptBlock as "Cert from intake — will be saved on Save & Sync".
+   *  Actual copy + URL stamp happens in the parent's onSubmit handler. */
+  resaleCertPath?: string | null;
 }
 
 // Simulated phase sequence shown during the 30-60s onboarding call. Advances on a
@@ -132,6 +161,27 @@ const sectionHead: React.CSSProperties = {
   fontSize: 13, fontWeight: 600, marginBottom: 12, color: theme.colors.orange,
 };
 const sectionDivider: React.CSSProperties = { marginBottom: 20 };
+
+/** Apply pending-intake values on top of an existing-client form snapshot.
+ *  Only fields that the intake submitted as non-null override the existing
+ *  values; null/undefined fields preserve what's on file. This is the
+ *  preview-then-save behavior for refresh-mode intakes. */
+function overlayPendingIntake(base: OnboardClientFormData, p: PendingIntakeOverride | null | undefined): OnboardClientFormData {
+  if (!p) return base;
+  return {
+    ...base,
+    contactName:        p.contactName ?? base.contactName,
+    clientEmail:        p.email ?? base.clientEmail,
+    phone:              p.phone ?? base.phone,
+    billingContactName: p.billingContactName ?? base.billingContactName,
+    billingEmail:       p.billingEmail ?? base.billingEmail,
+    billingAddress:     p.billingAddress ?? base.billingAddress,
+    autoInspection:     p.autoInspect ?? base.autoInspection,
+    taxExempt:          p.taxExempt ?? base.taxExempt,
+    taxExemptReason:    p.taxExemptReason ?? base.taxExemptReason,
+    resaleCertExpires:  p.resaleCertExpires ?? base.resaleCertExpires,
+  };
+}
 
 function buildInitialData(existing: ApiClient | null): OnboardClientFormData {
   if (!existing) {
@@ -186,13 +236,18 @@ function buildInitialData(existing: ApiClient | null): OnboardClientFormData {
   };
 }
 
-export function OnboardClientModal({ mode = 'create', existingClient = null, allClients = [], onClose, onSubmit, initialData }: Props) {
+export function OnboardClientModal({ mode = 'create', existingClient = null, allClients = [], onClose, onSubmit, initialData, pendingIntake = null }: Props) {
   const isEdit = mode === 'edit';
   const [data, setData] = useState<OnboardClientFormData>(() => {
     const base = buildInitialData(existingClient);
-    // Apply create-mode prefill (e.g. from a client_intakes row) on top
-    // of the blank defaults. Edit mode always wins over initialData so
-    // an operator can't accidentally clobber an existing client.
+    // Edit mode + pendingIntake: overlay the intake's submitted values on
+    // top of the existing client snapshot so the form previews exactly
+    // what'll be saved. Save & Sync commits these overlays.
+    if (isEdit && pendingIntake) {
+      return overlayPendingIntake(base, pendingIntake);
+    }
+    // Create mode + initialData: same overlay pattern from a partial
+    // OnboardClientFormData (legacy path).
     return isEdit || !initialData ? base : { ...base, ...initialData };
   });
 
@@ -353,6 +408,34 @@ export function OnboardClientModal({ mode = 'create', existingClient = null, all
 
         {/* Body */}
         <div style={{ flex: 1, overflowY: 'auto', padding: 20 }}>
+
+          {/* v2 — Pending-intake banner. When the modal opens via "Apply
+              Refresh to Client" on a refresh-mode intake, surface the
+              source intake date + the cert filename so staff understand
+              exactly what's about to be committed on Save & Sync. The
+              form fields above already reflect the merged preview. */}
+          {pendingIntake && isEdit && (
+            <div style={{
+              background: '#FFF7F0',
+              borderLeft: `3px solid ${theme.colors.orange}`,
+              padding: '12px 14px',
+              marginBottom: 18,
+              borderRadius: 4,
+              fontSize: 13,
+              color: theme.colors.text,
+            }}>
+              <div style={{ fontWeight: 700, marginBottom: 4 }}>
+                <Info size={13} style={{ marginRight: 6, verticalAlign: 'text-bottom' }} />
+                Reviewing changes from intake submitted {new Date(pendingIntake.submittedAt).toLocaleDateString()}
+              </div>
+              <div style={{ color: theme.colors.textSecondary, fontSize: 12, lineHeight: 1.5 }}>
+                The fields below are <strong>previewing</strong> the client's submitted updates. Click <strong>Save &amp; Sync</strong> at the bottom to apply them.
+                {pendingIntake.resaleCertPath && (
+                  <> A new resale certificate from this intake will be uploaded to the client record on save.</>
+                )}
+              </div>
+            </div>
+          )}
 
           {/* Client Info */}
           <div style={sectionDivider}>
@@ -698,7 +781,11 @@ export function OnboardClientModal({ mode = 'create', existingClient = null, all
                   Tax exemption + resale cert tracking
                 </span>
               </div>
-              <TaxExemptBlock spreadsheetId={data.spreadsheetId} />
+              <TaxExemptBlock
+                spreadsheetId={data.spreadsheetId}
+                pendingCertPath={pendingIntake?.resaleCertPath ?? null}
+                pendingCertExpires={pendingIntake?.resaleCertExpires ?? null}
+              />
             </div>
           )}
 
@@ -1333,7 +1420,20 @@ const TAX_EXEMPT_REASONS = [
   'Other',
 ] as const;
 
-function TaxExemptBlock({ spreadsheetId }: { spreadsheetId: string }) {
+function TaxExemptBlock({
+  spreadsheetId,
+  pendingCertPath = null,
+  pendingCertExpires = null,
+}: {
+  spreadsheetId: string;
+  /** v2 — when set, surface a "from intake" badge above the file picker
+   *  so staff know a cert is queued to land on Save & Sync. The actual
+   *  copy + URL stamp happens in the parent's onSubmit handler (in
+   *  IntakesPanel.handleCreateClient — refresh-mode branch). This block
+   *  itself doesn't write the pending cert; it just shows it. */
+  pendingCertPath?: string | null;
+  pendingCertExpires?: string | null;
+}) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState<string | null>(null); // field name being saved
@@ -1535,6 +1635,31 @@ function TaxExemptBlock({ spreadsheetId }: { spreadsheetId: string }) {
               <span>Resale certificate (PDF)</span>
               <InfoTooltip text="The PDF the client provided showing their state-issued resale certificate. Required by WA DOR for audit. Stored privately; admin/staff can view via the link below." />
             </label>
+            {/* v2 — pending cert from intake. Surfaces when the modal was
+                opened via "Apply Refresh to Client" on a refresh-mode
+                intake that included a cert PDF. The actual copy + URL
+                stamp happens in the parent's onSubmit (handleCreateClient
+                refresh branch); this block just shows what's queued. */}
+            {pendingCertPath && (
+              <div style={{
+                background: '#FFF7F0',
+                border: `1px dashed ${theme.colors.orange}`,
+                padding: '8px 10px',
+                borderRadius: 6,
+                fontSize: 12,
+                marginBottom: 8,
+                color: theme.colors.text,
+              }}>
+                <FileText size={12} style={{ verticalAlign: '-1px', marginRight: 4 }} />
+                <strong>Cert from intake — saves on Save &amp; Sync:</strong>{' '}
+                <span style={{ color: theme.colors.textSecondary }}>
+                  {pendingCertPath.split('/').pop()}
+                </span>
+                {pendingCertExpires && (
+                  <span style={{ color: theme.colors.textSecondary }}> · expires {pendingCertExpires}</span>
+                )}
+              </div>
+            )}
             <input
               ref={fileInputRef}
               type="file"
