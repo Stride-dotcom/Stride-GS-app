@@ -674,7 +674,23 @@ export function ClientIntake({ linkId }: Props) {
           />
         )}
         {step === 4 && <StepPayment draft={draft} setDraft={setDraft} isRefresh={isRefresh} refreshPrefill={refreshPrefill} />}
-        {step === 5 && <StepDocuments draft={draft} setDraft={setDraft} isRefresh={isRefresh} refreshPrefill={refreshPrefill} />}
+        {step === 5 && (
+          <>
+            {/* v38.179.0 — File hint banner when a draft was restored AND
+                the prospect had previously chosen files. File objects don't
+                survive serialization, so they need to re-attach. */}
+            {(draftFileHints.resaleCertFileName || (draftFileHints.otherFileNames && draftFileHints.otherFileNames.length > 0)) && (
+              <div style={{ background: '#FEF3C7', border: '1px solid #FCD34D', borderRadius: 8, padding: 12, marginBottom: 16, fontSize: 12, color: '#92400E' }}>
+                <strong>You started this earlier — please re-attach files:</strong>
+                {draftFileHints.resaleCertFileName && <div style={{ marginTop: 4 }}>Resale cert: <code>{draftFileHints.resaleCertFileName}</code></div>}
+                {draftFileHints.otherFileNames && draftFileHints.otherFileNames.length > 0 && (
+                  <div style={{ marginTop: 4 }}>Other documents: <code>{draftFileHints.otherFileNames.join(', ')}</code></div>
+                )}
+              </div>
+            )}
+            <StepDocuments draft={draft} setDraft={setDraft} isRefresh={isRefresh} refreshPrefill={refreshPrefill} />
+          </>
+        )}
         {step === 6 && (
           <StepReview
             draft={draft}

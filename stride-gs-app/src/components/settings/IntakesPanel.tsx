@@ -72,9 +72,6 @@ export function IntakesPanel() {
   if (filter !== 'drafts' && !selectedId && filtered.length > 0) {
     setTimeout(() => setSelectedId(filtered[0].id), 0);
   }
-  if (filter === 'drafts' && !selectedDraftLinkId && drafts.length > 0) {
-    setTimeout(() => setSelectedDraftLinkId(drafts[0].linkId), 0);
-  }
 
   // v38.179.0 — Drafts list (in-progress intakes that haven't been submitted).
   // Fetched lazily when the filter is set to 'drafts' so we don't pay the
@@ -98,6 +95,10 @@ export function IntakesPanel() {
   useEffect(() => {
     if (filter === 'drafts' && !draftsLoaded) void refreshDrafts();
   }, [filter, draftsLoaded]);
+
+  if (filter === 'drafts' && !selectedDraftLinkId && drafts.length > 0) {
+    setTimeout(() => setSelectedDraftLinkId(drafts[0].linkId), 0);
+  }
 
   const counts = useMemo(() => ({
     all:      intakes.length,
@@ -1134,8 +1135,7 @@ function DraftListRow({ draft, selected, onClick }: { draft: AdminIntakeDraft; s
   const d = draft.draft as Record<string, unknown>;
   const biz = String(d.businessName || '').trim() || '—';
   const stepLabel = STEP_LABELS[draft.step] || `Step ${draft.step}`;
-  const dt = draft.updatedAt ? new Date(draft.updatedAt) : null;
-  const updatedFmt = dt ? fmtDateTime(dt) : '—';
+  const updatedFmt = draft.updatedAt ? fmtDateTime(draft.updatedAt) : '—';
   return (
     <button
       onClick={onClick}
@@ -1199,7 +1199,7 @@ function DraftSnapshot({ draft, onRefresh }: { draft: AdminIntakeDraft; onRefres
             {String(d.businessName || '').trim() || draft.prospectName || '(unnamed draft)'}
           </div>
           <div style={{ fontSize: 12, color: theme.colors.textMuted, marginTop: 2 }}>
-            Step {draft.step}/6 · {stepLabel} · updated {fmtDateTime(new Date(draft.updatedAt))}
+            Step {draft.step}/6 · {stepLabel} · updated {fmtDateTime(draft.updatedAt)}
           </div>
           {draft.prospectEmail && (
             <div style={{ fontSize: 12, color: theme.colors.textMuted, marginTop: 2 }}>
