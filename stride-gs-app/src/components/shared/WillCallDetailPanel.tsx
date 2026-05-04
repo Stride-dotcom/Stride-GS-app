@@ -19,6 +19,7 @@ import { fmtDate, toDateInputValue } from '../../lib/constants';
 import { WriteButton } from './WriteButton';
 import { ProcessingOverlay } from './ProcessingOverlay';
 import { BillingPreviewCard } from './BillingPreviewCard';
+import { useEntityAddons } from '../../hooks/useEntityAddons';
 import { postProcessWcRelease, postCancelWillCall, postRemoveItemsFromWillCall, postUpdateWillCall, postGenerateWcDoc, postReopenWillCall, fetchWcDocUrl, fetchWillCallById, isApiConfigured } from '../../lib/api';
 import { fetchWcItemsFromSupabase } from '../../lib/supabaseQueries';
 import { useClients } from '../../hooks/useClients';
@@ -192,6 +193,16 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
   useEffect(() => { if (wc.status && wc.status !== effectiveStatus) setEffectiveStatus(wc.status); }, [wc.status]); // eslint-disable-line react-hooks/exhaustive-deps
   const sc = STATUS_CFG[effectiveStatus] || STATUS_CFG.Pending;
   const isActive = ['Pending', 'Scheduled', 'Partial'].includes(effectiveStatus);
+
+  // ─── Add-on services (v38.173.0 unified addons) ─────────────────────────
+  // Rows accumulate on public.addons until handleProcessWcRelease_ flushes
+  // them via api_writeAddonsToLedger_. Editable while the WC is still
+  // active (Pending / Scheduled / Partial); locked once Released / Cancelled.
+  const { addons: wcAddons, addAddon: addWcAddon, updateAddon: updateWcAddon, deleteAddon: deleteWcAddon } = useEntityAddons(
+    canRelease ? 'will_call' : null,
+    canRelease ? wc.wcNumber : null,
+    canRelease ? (clientSheetId || null) : null,
+  );
 
   // Parse split WC number from notes (format: "[Split → WC-XXXXX]")
   const splitWcNumber = useMemo(() => {
@@ -953,16 +964,24 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
 
           {/* Billing Preview — staff/admin only. Will Call billing today
               is one WC line per release; the preview shows projected WC
-              charges (catalog rate × line) plus any recorded ledger rows
-              tagged with this wc_number. itemClass is intentionally null
-              because a Will Call can span multiple item classes. */}
+              charges (catalog rate × line) plus any addons attached to
+              this WC plus recorded ledger rows. itemClass is intentionally
+              null because a Will Call can span multiple item classes —
+              class-based addons fall back to the rate the operator types
+              in the modal. v38.173.0: addons are now polymorphic and flush
+              on release via handleProcessWcRelease_. */}
           <BillingPreviewCard
             entityType="will_call"
             entityId={wc.wcNumber}
             tenantId={clientSheetId || ''}
             svcCode="WC"
             itemClass={null}
+            addons={wcAddons}
             visible={canRelease}
+            editable={canRelease && isActive}
+            onAddAddon={async (input) => { await addWcAddon(input); }}
+            onUpdateAddon={async (id, patch) => { await updateWcAddon(id, patch); }}
+            onDeleteAddon={async (id) => { await deleteWcAddon(id); }}
           />
     </div>
   );
