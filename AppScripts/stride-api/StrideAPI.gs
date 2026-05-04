@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.174.0 — 2026-05-04 PST — New admin entry runRepairOrphanStaxInvoices: recovers Supabase rows orphaned by the v38.166.0 – v38.172.0 cross-project bug. The Stax Invoices SHEET has all the rows; v38.173.0 fixed the bug for new batches but does nothing for the ones that were already created (Justin's BATCH-20260504-103404-289E48 with 8 invoices showing on Batches tab but Review empty). This admin entry opens the Stax spreadsheet via getStaxSpreadsheet_, reads every row from the Invoices tab, builds upsert objects via header-resolved columns (stax_invoiceCols_) + the canonical helpers (stax_parseAutoCharge_, fmtDateLoose), then calls supabaseBatchUpsert_("stax_invoices", rows) — idempotent, conflict-resolves on qb_invoice_no. After running once: every PENDING/CREATED/etc. row on the sheet appears in public.stax_invoices, Payments → Review populates, all charge-flow affordances (Push to Stax, scheduled date, auto-charge toggle) work because they always pointed at public.stax_invoices. Note: recovered rows have batch_id=NULL (the original v38.166.0 patch failed silently); the Batches tab → View on those orphan batch rows still won't filter, but the invoices are usable on Review/Charge Queue/Invoices tabs which read by qb_invoice_no, not batch_id. New batches created via v38.173.0+ wire up batch_id correctly.
+   StrideAPI.gs — v38.175.0 — 2026-05-04 PST — handleRequestRepairQuote_ enrichment bulk-read perf fix. The source-task lookup looped per-row calling taskSh.getRange(tr, col).getValue() — one round-trip to Google's API per Tasks-sheet row. For a client with a few hundred tasks the call pushed past the React fetch timeout (~30s); the optimistic UI flipped to "Request failed — please try again" while the server kept running and successfully wrote the repair row + sent the REPAIR_QUOTE_REQUEST email. Hope @ Lisa Sherry Interiors hit this on INSP-62942-1: she got the failure toast but staff received the alert email. Switched to a single bulk getRange().getValues() read + in-memory scan for both the Tasks-sheet and Shipments-sheet enrichment loops. ~one round-trip total instead of N — handler now returns in ~1-2s instead of 30+. Same perf pattern was likely the latent root cause of every "request failed but it actually worked" report on busy client sheets.
+   v38.174.0 — 2026-05-04 PST — New admin entry runRepairOrphanStaxInvoices: recovers Supabase rows orphaned by the v38.166.0 – v38.172.0 cross-project bug. The Stax Invoices SHEET has all the rows; v38.173.0 fixed the bug for new batches but does nothing for the ones that were already created (Justin's BATCH-20260504-103404-289E48 with 8 invoices showing on Batches tab but Review empty). This admin entry opens the Stax spreadsheet via getStaxSpreadsheet_, reads every row from the Invoices tab, builds upsert objects via header-resolved columns (stax_invoiceCols_) + the canonical helpers (stax_parseAutoCharge_, fmtDateLoose), then calls supabaseBatchUpsert_("stax_invoices", rows) — idempotent, conflict-resolves on qb_invoice_no. After running once: every PENDING/CREATED/etc. row on the sheet appears in public.stax_invoices, Payments → Review populates, all charge-flow affordances (Push to Stax, scheduled date, auto-charge toggle) work because they always pointed at public.stax_invoices. Note: recovered rows have batch_id=NULL (the original v38.166.0 patch failed silently); the Batches tab → View on those orphan batch rows still won't filter, but the invoices are usable on Review/Charge Queue/Invoices tabs which read by qb_invoice_no, not batch_id. New batches created via v38.173.0+ wire up batch_id correctly.
    v38.173.0 — 2026-05-04 PST — handleQbExport_ direct mirror to public.stax_invoices, replacing the dead _sbResyncAllStaxInvoices call. Justin reported: "Send to Payments" creates the batch row (Batches tab shows 8 invoices, $345) but Review tab is empty and clicking View on the batch shows "No invoices found". Root cause: v38.166.0 called `_sbResyncAllStaxInvoices(getStaxSpreadsheet_())` to mirror the Stax Invoices sheet to Supabase after the per-invoice writes — but that helper lives ONLY in StaxAutoPay.gs (a separate Apps Script project). Apps Script projects don't share globals without an explicit Library import, so every call threw `ReferenceError: _sbResyncAllStaxInvoices is not defined`, was swallowed by the surrounding try/catch, and only `Logger.log`'d. The IIF + sheet writes succeeded. The `stax_invoice_batches` row succeeded (different try block, uses StrideAPI's own supabaseUpsert_). The actual `stax_invoices` rows never made it. Fix: build a `staxSupabaseRows` array during the existing INSERT/UPDATE-PENDING loop (one upsert object per row written, mirroring StaxAutoPay's `_sbResyncAllStaxInvoices` shape exactly), then call StrideAPI's own `supabaseBatchUpsert_("stax_invoices", staxSupabaseRows)` — the helper at line 3197 already supports the table with `qb_invoice_no` as the conflict column. No cross-project call. No extra sheet read. The follow-up `supabasePatch_` to stamp `batch_id` on the freshly-mirrored rows now actually finds matches. End-to-end flow restored: Send to Payments → Stax Invoices sheet + public.stax_invoices written → Postgres realtime → Payments page useSupabaseRealtime hook → Review tab shows new PENDING rows within ~2-3s. Operators can then set scheduled date, toggle auto-charge, push to Stax — all the existing affordances work because they always pointed at public.stax_invoices, which finally has the data.
    v38.172.0 — 2026-05-04 PST — handleCreateInvoice_ no longer collapses every Master RPC failure mode into the opaque "Master RPC returned no invoice number" — Justin hit this on a Brian Paquette invoice in a batch of 9 (8 succeeded). Root cause: api_nextInvoiceNo_ returned null on any non-shape-match (HTTP non-2xx, non-JSON body, {success:false} from the Master RPC, missing id field) and the caller printed a single generic message regardless of what actually failed. Two changes here: (1) api_nextInvoiceNo_ now throws a distinct descriptive Error per failure mode AND retries once with 1.5s backoff on transient cases (lock timeout, 5xx, non-JSON body, parse error). The Master `getNextInvoiceId` counter only advances on actual success — retry is safe. (2) handleCreateInvoice_ wraps the call in try/catch and surfaces the thrown message so operators see the real cause (e.g. "Master RPC error: Lock timeout — too many concurrent requests") and can act. Defense against future opacity: if the new path ever does return null without throwing, the legacy generic message remains as a final safety net.
    v38.171.0 — 2026-05-04 PST — Charge Queue date-format fix + IIF write hardening + auto-populate Scheduled Date. Three changes that together close the "scheduled dates revert on refresh" loop. (1) formatDate_ now strips a trailing "HH:MM[:SS]" from string cell values so a Due Date stored as "2026-05-18 00:00:00" reads back as "2026-05-18" — `<input type="date">` strictly requires YYYY-MM-DD, the legacy time-decorated form rendered empty in the picker AND broke the React onBlur equality guard so 5 of 7 Charge Queue saves quietly skipped this morning. (2) handleImportIIF_ + handleQbExport_ Stax-write blocks rebuilt around stax_invoiceCols_ — every column written via header lookup, no more 11-element positional arrays clobbering Scheduled Date / Auto Charge / Is Test on a sheet with extra columns. (3) Both insert paths and the IIF update path now auto-fill Scheduled Date = Due Date when blank, preserving any operator override — every new invoice has a real, displayable scheduled date out of the gate. New admin entry backfillStaxScheduledDates: one-click backfill of blank Scheduled Date cells from each row's Due Date for PENDING/CREATED/SENT/CHARGE_FAILED rows; idempotent, never overwrites operator-set values, ignores PAID/VOIDED/DELETED.
@@ -16200,17 +16201,29 @@ function handleRequestRepairQuote_(clientSheetId, payload, callerEmail) {
     var srcShipmentFolderUrl = "";
     if (sourceTaskId) {
       try {
+        // v38.172.0 — bulk-read enrichment. The previous per-row getRange/
+        // getValue loop did O(N) round-trips to Google's API; for a Tasks
+        // sheet with a few hundred rows the request would routinely push
+        // past the React fetch timeout (~30s). The user saw "Request
+        // failed" while the server kept running and successfully wrote
+        // the repair + sent the email — exactly Hope @ Lisa Sherry's
+        // INSP-62942-1 report. Single bulk read of the data range, then
+        // in-memory scan, drops the enrichment to a single round-trip.
         var taskSh = ss.getSheetByName("Tasks");
         if (taskSh && taskSh.getLastRow() >= 2) {
           var tMap = api_getHeaderMap_(taskSh);
           var tIdCol = tMap["Task ID"];
           if (tIdCol) {
             var tLastRow = api_getLastDataRow_(taskSh);
-            for (var tr = 2; tr <= tLastRow; tr++) {
-              if (String(taskSh.getRange(tr, tIdCol).getValue() || "").trim() === sourceTaskId) {
-                if (tMap["Task Notes"])  srcTaskNotes  = String(taskSh.getRange(tr, tMap["Task Notes"]).getValue()  || "");
-                if (tMap["Shipment #"])  srcShipmentNo = String(taskSh.getRange(tr, tMap["Shipment #"]).getValue() || "").trim();
-                var tRt = taskSh.getRange(tr, tIdCol).getRichTextValue();
+            var tNotesCol = tMap["Task Notes"];
+            var tShipCol  = tMap["Shipment #"];
+            var tValues = taskSh.getRange(2, 1, tLastRow - 1, taskSh.getLastColumn()).getValues();
+            for (var tr = 0; tr < tValues.length; tr++) {
+              if (String(tValues[tr][tIdCol - 1] || "").trim() === sourceTaskId) {
+                if (tNotesCol) srcTaskNotes  = String(tValues[tr][tNotesCol - 1] || "");
+                if (tShipCol)  srcShipmentNo = String(tValues[tr][tShipCol - 1] || "").trim();
+                // Hyperlink lookup still needs a single targeted call.
+                var tRt = taskSh.getRange(tr + 2, tIdCol).getRichTextValue();
                 if (tRt && tRt.getLinkUrl()) srcTaskFolderUrl = tRt.getLinkUrl();
                 break;
               }
@@ -16224,9 +16237,10 @@ function handleRequestRepairQuote_(clientSheetId, payload, callerEmail) {
             var sIdCol = sMap["Shipment #"];
             if (sIdCol) {
               var sLastRow = api_getLastDataRow_(shipSh);
-              for (var sr = 2; sr <= sLastRow; sr++) {
-                if (String(shipSh.getRange(sr, sIdCol).getValue() || "").trim() === srcShipmentNo) {
-                  var sRt = shipSh.getRange(sr, sIdCol).getRichTextValue();
+              var sValues = shipSh.getRange(2, 1, sLastRow - 1, shipSh.getLastColumn()).getValues();
+              for (var sr = 0; sr < sValues.length; sr++) {
+                if (String(sValues[sr][sIdCol - 1] || "").trim() === srcShipmentNo) {
+                  var sRt = shipSh.getRange(sr + 2, sIdCol).getRichTextValue();
                   if (sRt && sRt.getLinkUrl()) srcShipmentFolderUrl = sRt.getLinkUrl();
                   break;
                 }
