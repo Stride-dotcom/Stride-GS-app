@@ -1,5 +1,7 @@
 /* ===================================================
-   StrideAPI.gs — v38.173.0 — 2026-05-04 PST — handleRequestRepairQuote_ enrichment bulk-read perf fix. The source-task lookup looped per-row calling taskSh.getRange(tr, col).getValue() — one round-trip to Google's API per Tasks-sheet row. For a client with a few hundred tasks the call pushed past the React fetch timeout (~30s); the optimistic UI flipped to "Request failed — please try again" while the server kept running and successfully wrote the repair row + sent the REPAIR_QUOTE_REQUEST email. Hope @ Lisa Sherry Interiors hit this on INSP-62942-1: she got the failure toast but staff received the alert email. Switched to a single bulk getRange().getValues() read + in-memory scan for both the Tasks-sheet and Shipments-sheet enrichment loops. ~one round-trip total instead of N — handler now returns in ~1-2s instead of 30+. Same perf pattern was likely the latent root cause of every "request failed but it actually worked" report on busy client sheets.
+   StrideAPI.gs — v38.175.0 — 2026-05-04 PST — handleRequestRepairQuote_ enrichment bulk-read perf fix. The source-task lookup looped per-row calling taskSh.getRange(tr, col).getValue() — one round-trip to Google's API per Tasks-sheet row. For a client with a few hundred tasks the call pushed past the React fetch timeout (~30s); the optimistic UI flipped to "Request failed — please try again" while the server kept running and successfully wrote the repair row + sent the REPAIR_QUOTE_REQUEST email. Hope @ Lisa Sherry Interiors hit this on INSP-62942-1: she got the failure toast but staff received the alert email. Switched to a single bulk getRange().getValues() read + in-memory scan for both the Tasks-sheet and Shipments-sheet enrichment loops. ~one round-trip total instead of N — handler now returns in ~1-2s instead of 30+. Same perf pattern was likely the latent root cause of every "request failed but it actually worked" report on busy client sheets.
+   v38.174.0 — 2026-05-04 PST — New admin entry runRepairOrphanStaxInvoices: recovers Supabase rows orphaned by the v38.166.0 – v38.172.0 cross-project bug. The Stax Invoices SHEET has all the rows; v38.173.0 fixed the bug for new batches but does nothing for the ones that were already created (Justin's BATCH-20260504-103404-289E48 with 8 invoices showing on Batches tab but Review empty). This admin entry opens the Stax spreadsheet via getStaxSpreadsheet_, reads every row from the Invoices tab, builds upsert objects via header-resolved columns (stax_invoiceCols_) + the canonical helpers (stax_parseAutoCharge_, fmtDateLoose), then calls supabaseBatchUpsert_("stax_invoices", rows) — idempotent, conflict-resolves on qb_invoice_no. After running once: every PENDING/CREATED/etc. row on the sheet appears in public.stax_invoices, Payments → Review populates, all charge-flow affordances (Push to Stax, scheduled date, auto-charge toggle) work because they always pointed at public.stax_invoices. Note: recovered rows have batch_id=NULL (the original v38.166.0 patch failed silently); the Batches tab → View on those orphan batch rows still won't filter, but the invoices are usable on Review/Charge Queue/Invoices tabs which read by qb_invoice_no, not batch_id. New batches created via v38.173.0+ wire up batch_id correctly.
+   v38.173.0 — 2026-05-04 PST — handleQbExport_ direct mirror to public.stax_invoices, replacing the dead _sbResyncAllStaxInvoices call. Justin reported: "Send to Payments" creates the batch row (Batches tab shows 8 invoices, $345) but Review tab is empty and clicking View on the batch shows "No invoices found". Root cause: v38.166.0 called `_sbResyncAllStaxInvoices(getStaxSpreadsheet_())` to mirror the Stax Invoices sheet to Supabase after the per-invoice writes — but that helper lives ONLY in StaxAutoPay.gs (a separate Apps Script project). Apps Script projects don't share globals without an explicit Library import, so every call threw `ReferenceError: _sbResyncAllStaxInvoices is not defined`, was swallowed by the surrounding try/catch, and only `Logger.log`'d. The IIF + sheet writes succeeded. The `stax_invoice_batches` row succeeded (different try block, uses StrideAPI's own supabaseUpsert_). The actual `stax_invoices` rows never made it. Fix: build a `staxSupabaseRows` array during the existing INSERT/UPDATE-PENDING loop (one upsert object per row written, mirroring StaxAutoPay's `_sbResyncAllStaxInvoices` shape exactly), then call StrideAPI's own `supabaseBatchUpsert_("stax_invoices", staxSupabaseRows)` — the helper at line 3197 already supports the table with `qb_invoice_no` as the conflict column. No cross-project call. No extra sheet read. The follow-up `supabasePatch_` to stamp `batch_id` on the freshly-mirrored rows now actually finds matches. End-to-end flow restored: Send to Payments → Stax Invoices sheet + public.stax_invoices written → Postgres realtime → Payments page useSupabaseRealtime hook → Review tab shows new PENDING rows within ~2-3s. Operators can then set scheduled date, toggle auto-charge, push to Stax — all the existing affordances work because they always pointed at public.stax_invoices, which finally has the data.
    v38.172.0 — 2026-05-04 PST — handleCreateInvoice_ no longer collapses every Master RPC failure mode into the opaque "Master RPC returned no invoice number" — Justin hit this on a Brian Paquette invoice in a batch of 9 (8 succeeded). Root cause: api_nextInvoiceNo_ returned null on any non-shape-match (HTTP non-2xx, non-JSON body, {success:false} from the Master RPC, missing id field) and the caller printed a single generic message regardless of what actually failed. Two changes here: (1) api_nextInvoiceNo_ now throws a distinct descriptive Error per failure mode AND retries once with 1.5s backoff on transient cases (lock timeout, 5xx, non-JSON body, parse error). The Master `getNextInvoiceId` counter only advances on actual success — retry is safe. (2) handleCreateInvoice_ wraps the call in try/catch and surfaces the thrown message so operators see the real cause (e.g. "Master RPC error: Lock timeout — too many concurrent requests") and can act. Defense against future opacity: if the new path ever does return null without throwing, the legacy generic message remains as a final safety net.
    v38.171.0 — 2026-05-04 PST — Charge Queue date-format fix + IIF write hardening + auto-populate Scheduled Date. Three changes that together close the "scheduled dates revert on refresh" loop. (1) formatDate_ now strips a trailing "HH:MM[:SS]" from string cell values so a Due Date stored as "2026-05-18 00:00:00" reads back as "2026-05-18" — `<input type="date">` strictly requires YYYY-MM-DD, the legacy time-decorated form rendered empty in the picker AND broke the React onBlur equality guard so 5 of 7 Charge Queue saves quietly skipped this morning. (2) handleImportIIF_ + handleQbExport_ Stax-write blocks rebuilt around stax_invoiceCols_ — every column written via header lookup, no more 11-element positional arrays clobbering Scheduled Date / Auto Charge / Is Test on a sheet with extra columns. (3) Both insert paths and the IIF update path now auto-fill Scheduled Date = Due Date when blank, preserving any operator override — every new invoice has a real, displayable scheduled date out of the gate. New admin entry backfillStaxScheduledDates: one-click backfill of blank Scheduled Date cells from each row's Due Date for PENDING/CREATED/SENT/CHARGE_FAILED rows; idempotent, never overwrites operator-set values, ignores PAID/VOIDED/DELETED.
    v38.170.0 — 2026-05-04 PST — Sweep: every Stax Invoices write is now header-resolved. Justin's "I'm tired of patching hole after hole" — same class of bug (positional column indexes drifting when a column is inserted) was lurking in handleBatchVoidStaxInvoices_, handleBatchDeleteStaxInvoices_, handleDeleteStaxInvoice_, handleVoidStaxInvoice_, handleResetStaxInvoiceStatus_, handleLinkStaxInvoiceToExisting_, handleChargeSingleInvoice_, handleSendStaxPayLinks_, handleSendStaxPayLink_ — all wrote Status (col 9) and Notes (col 11) positionally. Now ALL of them resolve via stax_invoiceCols_(invSheet) (caches qb / customer / staxCustId / dueDate / amount / status / notes / staxId / autoCharge / scheduledDate / etc. via api_ensureColumn_). Same sweep covered handleUpdateEmailTemplate_ (Subject + HTML Body cols), qbo_saveMappingRow_ (QBO Customer ID / Sidemark / Sub-Job ID on Stax Customers), and handleSyncStaxCustomerIds_ (Stax Customer ID col). Net: zero positional writes remain on any user-facing entity sheet across StrideAPI.gs. Settings key/value sheets (col 1=Key, col 2=Value) left alone — stable layout, lower risk.
@@ -20899,6 +20901,8 @@ function handleQbExport_(payload) {
       var batchInvoiceNos = [];   // v38.166.0 — collected for batch row + post-resync patch
       var batchTotal = 0;
       var batchClients = {};
+      var staxSupabaseRows = [];  // v38.173.0 — direct mirror to public.stax_invoices, replacing the dead cross-project _sbResyncAllStaxInvoices call
+      var nowIso = new Date().toISOString();
       var nowStr = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm:ss");
       for (var si2 = 0; si2 < invoiceOrder.length; si2++) {
         var sInvNo = invoiceOrder[si2];
@@ -20965,6 +20969,25 @@ function handleQbExport_(payload) {
           batchInvoiceNos.push(sInvNo);
           batchTotal += Number(sTotal || 0);
           batchClients[sCustomerForStax || sInv.qbName || ""] = true;
+          // v38.173.0 — accumulate Supabase mirror row for this UPDATE-in-place.
+          staxSupabaseRows.push({
+            qb_invoice_no: sInvNo,
+            row_index: existingRow1,
+            customer: sCustomerForStax || "",
+            stax_customer_id: sStaxCustId,
+            invoice_date: sInv.invDate,
+            due_date: sInv.dueDate,
+            scheduled_date: sInv.dueDate || null,
+            amount: Number(sTotal || 0),
+            line_items_json: sLineJson,
+            stax_id: "",
+            status: "PENDING",
+            notes: "Refreshed by QB export auto-push on " + nowStr,
+            is_test: false,
+            auto_charge: true,
+            payment_method_status: sStaxCustId ? "unknown" : "no_customer",
+            updated_at: nowIso
+          });
           continue;
         }
 
@@ -20986,6 +21009,26 @@ function handleQbExport_(payload) {
         batchInvoiceNos.push(sInvNo);
         batchTotal += Number(sTotal || 0);
         batchClients[sCustomerForStax || sInv.qbName || ""] = true;
+        // v38.173.0 — accumulate Supabase mirror row for this INSERT.
+        staxSupabaseRows.push({
+          qb_invoice_no: sInvNo,
+          row_index: newRow1,
+          customer: sCustomerForStax || "",
+          stax_customer_id: sStaxCustId,
+          invoice_date: sInv.invDate,
+          due_date: sInv.dueDate,
+          scheduled_date: sInv.dueDate || null,
+          amount: Number(sTotal || 0),
+          line_items_json: sLineJson,
+          stax_id: "",
+          status: "PENDING",
+          created_at_sheet: nowStr,
+          notes: "",
+          is_test: false,
+          auto_charge: true,
+          payment_method_status: sStaxCustId ? "unknown" : "no_customer",
+          updated_at: nowIso
+        });
       }
 
       staxImported = staxNewRows.length;
@@ -21011,10 +21054,24 @@ function handleQbExport_(payload) {
   // are a read-side grouping).
   var batchPersisted = false;
   if (batchInvoiceNos.length > 0) {
+    // v38.173.0 — Direct Supabase upsert of just the rows we wrote in this
+    // call, replacing the v38.166.0 `_sbResyncAllStaxInvoices(getStaxSpreadsheet_())`
+    // call. That helper lives ONLY in StaxAutoPay.gs (a separate Apps Script
+    // project) — Apps Script projects don't share globals without a Library
+    // import, so every previous call here threw `ReferenceError:
+    // _sbResyncAllStaxInvoices is not defined`, was swallowed by this try/catch,
+    // and the Stax sheet rows never mirrored to public.stax_invoices. Symptom:
+    // Payments → Batches showed the batch totals (the batch row write is in a
+    // DIFFERENT try block below and uses StrideAPI's own supabaseUpsert_, so
+    // it succeeded), but Review tab + per-invoice tab were always empty.
+    // The upsert objects mirror StaxAutoPay's _sbResyncAllStaxInvoices shape
+    // exactly, built from data already in memory — no extra sheet read.
     try {
-      _sbResyncAllStaxInvoices(getStaxSpreadsheet_());
+      if (staxSupabaseRows.length > 0) {
+        supabaseBatchUpsert_("stax_invoices", staxSupabaseRows);
+      }
     } catch (resyncErr) {
-      Logger.log("v38.166.0: _sbResyncAllStaxInvoices after auto-import failed (non-fatal): " + resyncErr.message);
+      Logger.log("v38.173.0: stax_invoices direct upsert failed (non-fatal): " + (resyncErr && resyncErr.message ? resyncErr.message : resyncErr));
     }
 
     try {
@@ -39212,6 +39269,132 @@ function countFilled_(row) {
  *
  * Idempotent — re-runs on already-cleaned rows are no-ops.
  */
+
+/**
+ * v38.174.0 — Wholesale Stax Invoices sheet → public.stax_invoices recovery.
+ *
+ * Backfills Supabase rows that were orphaned by the v38.166.0 –
+ * v38.172.0 cross-project bug (handleQbExport_ called the StaxAutoPay-only
+ * `_sbResyncAllStaxInvoices` helper, which threw ReferenceError silently
+ * — see v38.173.0). The Stax Invoices SHEET has all the rows; only the
+ * mirror to Supabase is missing.
+ *
+ * What it does:
+ *   1. Open the Stax spreadsheet via getStaxSpreadsheet_().
+ *   2. Read every row from the Invoices tab.
+ *   3. Build one upsert object per row (same shape as v38.173.0's inline
+ *      mirror + StaxAutoPay's _sbResyncAllStaxInvoices).
+ *   4. Call supabaseBatchUpsert_("stax_invoices", rows) — idempotent,
+ *      conflict-resolves on qb_invoice_no.
+ *
+ * Run once from the Apps Script editor after deploying v38.173.0+.
+ * Re-runnable: the operation is a pure upsert, so existing rows in
+ * Supabase get refreshed with the latest sheet values; missing rows get
+ * inserted. No deletes. NEVER touches the sheet.
+ *
+ * Note re. Batches tab: rows recovered by this function will have
+ * batch_id = NULL because the original handleQbExport_ patch failed
+ * silently. The Review/Charge Queue/Invoices tabs all read by qb_invoice_no
+ * + status, so all charge-flow affordances (push to Stax, set scheduled
+ * date, toggle auto-charge) work fully. Existing batch rows in
+ * stax_invoice_batches are orphaned but harmless. New batches created via
+ * v38.173.0+ wire up batch_id correctly end-to-end.
+ */
+function runRepairOrphanStaxInvoices() {
+  var staxSS;
+  try { staxSS = getStaxSpreadsheet_(); }
+  catch (e) {
+    Logger.log("runRepairOrphanStaxInvoices: cannot open Stax spreadsheet: " + (e && e.message ? e.message : e));
+    return;
+  }
+
+  var invSheet = staxSS.getSheetByName("Invoices");
+  if (!invSheet) {
+    Logger.log("runRepairOrphanStaxInvoices: 'Invoices' sheet not found on Stax spreadsheet.");
+    return;
+  }
+
+  var data = invSheet.getDataRange().getValues();
+  if (data.length <= 1) {
+    Logger.log("runRepairOrphanStaxInvoices: Invoices sheet has no data rows.");
+    return;
+  }
+
+  // Header-resolved column indexes via the canonical helper. Same source
+  // of truth as every other Stax sheet write path (see stax_invoiceCols_).
+  var cols = stax_invoiceCols_(invSheet);
+
+  function readCell(row, col1Based) {
+    return col1Based && col1Based > 0 ? row[col1Based - 1] : "";
+  }
+  function fmtDateLoose(v) {
+    if (!v) return "";
+    if (v instanceof Date) {
+      try { return Utilities.formatDate(v, Session.getScriptTimeZone(), "yyyy-MM-dd"); } catch (_) { return String(v); }
+    }
+    var s = String(v).trim();
+    if (!s) return "";
+    // Already YYYY-MM-DD or close to it — pass through.
+    if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.substring(0, 10);
+    // MM/DD/YYYY → YYYY-MM-DD.
+    var m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+    if (m) {
+      return m[3] + "-" + ("0" + m[1]).slice(-2) + "-" + ("0" + m[2]).slice(-2);
+    }
+    return s;
+  }
+
+  var nowIso = new Date().toISOString();
+  var rows = [];
+  for (var i = 1; i < data.length; i++) {
+    var r = data[i];
+    var qb = String(readCell(r, cols.qb) || "").trim();
+    if (!qb) continue;
+
+    var staxCustId = String(readCell(r, cols.staxCustId) || "").trim();
+    var status = String(readCell(r, cols.status) || "").trim();
+    var schedRaw = readCell(r, cols.scheduledDate);
+    var scheduled = schedRaw ? fmtDateLoose(schedRaw) : null;
+
+    rows.push({
+      qb_invoice_no: qb,
+      row_index: i + 1,
+      customer: String(readCell(r, cols.customer) || ""),
+      stax_customer_id: staxCustId,
+      invoice_date: fmtDateLoose(readCell(r, cols.invoiceDate)),
+      due_date: fmtDateLoose(readCell(r, cols.dueDate)),
+      scheduled_date: scheduled,
+      amount: Number(readCell(r, cols.amount) || 0),
+      line_items_json: String(readCell(r, cols.lineItems) || ""),
+      stax_id: String(readCell(r, cols.staxId) || ""),
+      status: status,
+      created_at_sheet: fmtDateLoose(readCell(r, cols.createdAt)),
+      notes: String(readCell(r, cols.notes) || ""),
+      is_test: String(readCell(r, cols.isTest) || "").toUpperCase() === "TRUE",
+      auto_charge: stax_parseAutoCharge_(readCell(r, cols.autoCharge)),
+      payment_method_status: staxCustId ? "unknown" : "no_customer",
+      updated_at: nowIso
+    });
+  }
+
+  if (!rows.length) {
+    Logger.log("runRepairOrphanStaxInvoices: no rows with QB Invoice # found — nothing to recover.");
+    return;
+  }
+
+  Logger.log("runRepairOrphanStaxInvoices: upserting " + rows.length + " row(s) to public.stax_invoices…");
+  try {
+    supabaseBatchUpsert_("stax_invoices", rows);
+    Logger.log("runRepairOrphanStaxInvoices: ✓ done. " + rows.length + " row(s) submitted to Supabase.\n" +
+               "  Refresh Payments → Review tab; PENDING rows will appear within ~2-3s.\n" +
+               "  Note: orphan batch rows in stax_invoice_batches stay (they have NULL batch_id\n" +
+               "  on the recovered invoices); ignore them. New batches created via v38.173.0+\n" +
+               "  wire up batch_id correctly.");
+  } catch (e) {
+    Logger.log("runRepairOrphanStaxInvoices: upsert failed: " + (e && e.message ? e.message : e));
+  }
+}
+
 function runRepairOrphanLedgerRows() {
   var ledgerIdsCsv = String(PropertiesService.getScriptProperties().getProperty("REPAIR_ORPHAN_LEDGER_IDS") || "").trim();
   if (!ledgerIdsCsv) {
