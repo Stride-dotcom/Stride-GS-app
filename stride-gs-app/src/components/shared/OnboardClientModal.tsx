@@ -1660,17 +1660,65 @@ function TaxExemptBlock({
                 )}
               </div>
             )}
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept="application/pdf,image/*"
-              onChange={e => {
-                const f = e.target.files?.[0];
-                if (f) handleCertUpload(f);
-              }}
-              disabled={saving === 'upload'}
-              style={{ fontSize: 12 }}
-            />
+            {/* v2 — when a cert is on file, lead with a clear status block
+                so the existing-cert state is unmistakable. The "Choose File"
+                input becomes a quieter "replace" affordance below. Pre-v2,
+                operators read "No file chosen" on the file picker as "no
+                cert is on file" even when one was — the existing-cert
+                indicator was a small grey link that got skimmed past. */}
+            {certUrl ? (
+              <div style={{
+                background: '#F0FDF4',
+                border: `1px solid #BBF7D0`,
+                borderRadius: 8,
+                padding: '10px 12px',
+                marginBottom: 8,
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, fontWeight: 600, color: '#15803D', marginBottom: 4 }}>
+                  <CheckCircle size={14} /> Resale certificate on file
+                </div>
+                <div style={{ fontSize: 11, color: theme.colors.textSecondary, marginBottom: 8 }}>
+                  {certUploadedAt && <>Uploaded {new Date(certUploadedAt).toLocaleDateString()}</>}
+                </div>
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                  <a href={certUrl} target="_blank" rel="noopener noreferrer"
+                    style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11, fontWeight: 600, color: theme.colors.orange, textDecoration: 'none', padding: '4px 10px', border: `1px solid ${theme.colors.orange}`, borderRadius: 6 }}>
+                    <FileText size={11} /> View cert
+                  </a>
+                  <label style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11, fontWeight: 600, color: theme.colors.textSecondary, cursor: 'pointer', padding: '4px 10px', border: `1px solid ${theme.colors.border}`, borderRadius: 6 }}>
+                    Replace
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      accept="application/pdf,image/*"
+                      onChange={e => {
+                        const f = e.target.files?.[0];
+                        if (f) handleCertUpload(f);
+                      }}
+                      disabled={saving === 'upload'}
+                      style={{ display: 'none' }}
+                    />
+                  </label>
+                </div>
+              </div>
+            ) : (
+              <>
+                <div style={{ fontSize: 11, color: '#92400E', marginBottom: 6 }}>
+                  <AlertTriangle size={11} style={{ verticalAlign: '-1px', marginRight: 4 }} /> No cert on file. WA DOR requires the cert to claim wholesale exemption.
+                </div>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="application/pdf,image/*"
+                  onChange={e => {
+                    const f = e.target.files?.[0];
+                    if (f) handleCertUpload(f);
+                  }}
+                  disabled={saving === 'upload'}
+                  style={{ fontSize: 12 }}
+                />
+              </>
+            )}
             {saving === 'upload' && (
               <div style={{ fontSize: 11, color: theme.colors.textMuted, marginTop: 6 }}>
                 <Loader2 size={11} style={{ animation: 'spin 1s linear infinite', verticalAlign: '-1px', marginRight: 4 }} /> Uploading…
@@ -1679,20 +1727,6 @@ function TaxExemptBlock({
             {savedFlash === 'upload' && (
               <div style={{ fontSize: 11, color: '#15803D', marginTop: 6 }}>
                 <CheckCircle size={11} style={{ verticalAlign: '-1px', marginRight: 4 }} /> Cert saved.
-              </div>
-            )}
-            {certUrl && (
-              <div style={{ fontSize: 11, color: theme.colors.textMuted, marginTop: 6, display: 'flex', alignItems: 'center', gap: 6 }}>
-                <FileText size={11} />
-                <a href={certUrl} target="_blank" rel="noopener noreferrer" style={{ color: theme.colors.orange }}>View current cert</a>
-                {certUploadedAt && (
-                  <span>· uploaded {new Date(certUploadedAt).toLocaleDateString()}</span>
-                )}
-              </div>
-            )}
-            {!certUrl && (
-              <div style={{ fontSize: 11, color: '#92400E', marginTop: 6 }}>
-                <AlertTriangle size={11} style={{ verticalAlign: '-1px', marginRight: 4 }} /> No cert on file. WA DOR requires the cert to claim wholesale exemption.
               </div>
             )}
           </div>
