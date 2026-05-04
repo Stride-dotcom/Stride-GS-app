@@ -1,4 +1,18 @@
 // ============================================================
+// STAX AUTO-PAY TOOL — v4.7.7
+// v4.7.7 (2026-05-04): Sweep — every Stax Invoices column lookup that
+//         the cron + manual buttons reach now goes through the new
+//         _staxInvoiceCols(invSheet) helper. Replaces hardcoded col 1
+//         (QB Invoice #), col 3 (Stax Customer ID), col 8 (Stax Invoice
+//         ID), col 9 (Status), col 11 (Notes), col 12 (Auto Charge)
+//         which silently misroute writes once a column is inserted/
+//         reordered. Mirrors the StrideAPI.gs v38.169-171 fix; same
+//         class as the bug Justin hit on the Payments page where Due
+//         Date and Auto Pay edits reverted on refresh. Touched:
+//         _createStaxInvoicesForRows_ (daily charge cron + push), the
+//         charge-loop status-flip block, sendPayLinks bulk, and
+//         sendSinglePayLink manual button.
+// ============================================================
 // STAX AUTO-PAY TOOL — v4.7.6
 // v4.7.6 (2026-05-04): Fix _sbResyncAllStaxCharges header lookup.
 //         The Charge Log sheet declares "Customer Name" and "Stax
@@ -237,6 +251,47 @@ var RETRYABLE_STATUS_CODES = [429, 500, 502, 503, 504];
  * if the script project became unbound during a push. This helper falls back
  * to openById using STAX_SPREADSHEET_ID from Script Properties.
  */
+/**
+ * v4.7.7 — Header-based column lookup for the Stax Invoices sheet.
+ * Returns 1-based column indexes for every field the cron + manual
+ * buttons read or write. Auto-appends any missing header (case-
+ * insensitive, last-match-wins so duplicate columns from past drift
+ * don't split write/read like the older `=== "Auto Charge"` compare
+ * did at line 1934). Mirrors StrideAPI.gs's stax_invoiceCols_.
+ */
+function _ensureColumn(sheet, headerName) {
+  var headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  var target = String(headerName || '').trim().toUpperCase();
+  var lastMatch = -1;
+  for (var i = 0; i < headers.length; i++) {
+    var existing = String(headers[i] || '').trim();
+    if (existing && existing.toUpperCase() === target) lastMatch = i + 1;
+  }
+  if (lastMatch > 0) return lastMatch;
+  var newCol = sheet.getLastColumn() + 1;
+  sheet.getRange(1, newCol).setValue(headerName);
+  return newCol;
+}
+
+function _staxInvoiceCols(invSheet) {
+  return {
+    qb:           _ensureColumn(invSheet, 'QB Invoice #'),
+    customer:     _ensureColumn(invSheet, 'QB Customer Name'),
+    staxCustId:   _ensureColumn(invSheet, 'Stax Customer ID'),
+    invoiceDate:  _ensureColumn(invSheet, 'Invoice Date'),
+    dueDate:      _ensureColumn(invSheet, 'Due Date'),
+    amount:       _ensureColumn(invSheet, 'Total Amount'),
+    lineItems:    _ensureColumn(invSheet, 'Line Items JSON'),
+    staxId:       _ensureColumn(invSheet, 'Stax Invoice ID'),
+    status:       _ensureColumn(invSheet, 'Status'),
+    createdAt:    _ensureColumn(invSheet, 'Created At'),
+    notes:        _ensureColumn(invSheet, 'Notes'),
+    isTest:       _ensureColumn(invSheet, 'Is Test'),
+    autoCharge:   _ensureColumn(invSheet, 'Auto Charge'),
+    scheduledDate: _ensureColumn(invSheet, 'Scheduled Date')
+  };
+}
+
 function _getSpreadsheet() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   if (ss) return ss;
@@ -1889,10 +1944,13 @@ function _createStaxInvoicesForRows_(options) {
   }
 
   var numRows = invData.length - 1;
-  var colCRange = invSheet.getRange(2, 3, numRows, 1);   // Stax Customer ID
-  var colHRange = invSheet.getRange(2, 8, numRows, 1);   // Stax Invoice ID
-  var colIRange = invSheet.getRange(2, 9, numRows, 1);   // Status
-  var colKRange = invSheet.getRange(2, 11, numRows, 1);  // Notes
+  // v4.7.7 — header-resolved column indexes; column 3/8/9/11 used to be
+  // hardcoded which drifted whenever a new column was inserted.
+  var _cols = _staxInvoiceCols(invSheet);
+  var colCRange = invSheet.getRange(2, _cols.staxCustId, numRows, 1);  // Stax Customer ID
+  var colHRange = invSheet.getRange(2, _cols.staxId,     numRows, 1);  // Stax Invoice ID
+  var colIRange = invSheet.getRange(2, _cols.status,     numRows, 1);  // Status
+  var colKRange = invSheet.getRange(2, _cols.notes,      numRows, 1);  // Notes
 
   var colCValues = colCRange.getValues();
   var colHValues = colHRange.getValues();
@@ -1962,27 +2020,27 @@ function _createStaxInvoicesForRows_(options) {
 
     stats.total++;
 
-    // Must have a Stax Customer ID
+    // v4.7.7 — read row fields by header-resolved column indexes so an
+    // inserted column upstream doesn't silently misalign the values.
+    var _row = invData[i + 1];
     if (!staxCustId) {
       _logException(
-        String(invData[i + 1][0]), String(invData[i + 1][1]),
-        '', invData[i + 1][5], String(invData[i + 1][4]),
+        String(_row[_cols.qb - 1]), String(_row[_cols.customer - 1]),
+        '', _row[_cols.amount - 1], String(_row[_cols.dueDate - 1]),
         logLabel + ': NO_CUSTOMER - No Stax Customer ID. Run Sync Customers first.', '');
       stats.skippedNoCustomer++;
       continue;
     }
 
-    // Build payload inputs
-    var docNum   = String(invData[i + 1][0]).trim();
-    var custName = String(invData[i + 1][1]).trim();
-    var invDate  = String(invData[i + 1][3]).trim();
-    var dueDate  = String(invData[i + 1][4]).trim();
-    var total    = parseFloat(invData[i + 1][5]);
-    var lineItemsRaw = String(invData[i + 1][6]).trim();
+    var docNum       = String(_row[_cols.qb - 1]).trim();
+    var custName     = String(_row[_cols.customer - 1]).trim();
+    var invDate      = String(_row[_cols.invoiceDate - 1]).trim();
+    var dueDate      = String(_row[_cols.dueDate - 1]).trim();
+    var total        = parseFloat(_row[_cols.amount - 1]);
+    var lineItemsRaw = String(_row[_cols.lineItems - 1]).trim();
 
-    // Validate total
     if (isNaN(total) || total <= 0) {
-      _logException(docNum, custName, staxCustId, invData[i + 1][5], dueDate,
+      _logException(docNum, custName, staxCustId, _row[_cols.amount - 1], dueDate,
         logLabel + ': INVALID_PAYLOAD - Total is zero, negative, or not a number', '');
       stats.skippedInvalid++;
       continue;
@@ -3211,11 +3269,16 @@ function _executeChargeRun() {
     return { stats: stats };
   }
 
-  // Read sheet columns once — candidate build is in-memory, no cell writes
+  // v4.7.7 — header-resolved column indexes; the prior hardcoded 8/9/11/2/4/5
+  // would silently misalign reads/writes the moment the Stax Invoices sheet
+  // got a column inserted (Is Test / Scheduled Date / Auto Charge / Stax
+  // Invoice Link were each appended at various times — same root cause as
+  // the Charge Queue scheduled-date revert bug Justin reported).
   var numRows = invData.length - 1;
-  var colHRange = invSheet.getRange(2, 8, numRows, 1);   // Stax Invoice ID
-  var colIRange = invSheet.getRange(2, 9, numRows, 1);   // Status
-  var colKRange = invSheet.getRange(2, 11, numRows, 1);  // Notes
+  var _cols = _staxInvoiceCols(invSheet);
+  var colHRange = invSheet.getRange(2, _cols.staxId, numRows, 1);   // Stax Invoice ID
+  var colIRange = invSheet.getRange(2, _cols.status, numRows, 1);   // Status
+  var colKRange = invSheet.getRange(2, _cols.notes,  numRows, 1);   // Notes
 
   var colHValues = colHRange.getValues();
   var colIValues = colIRange.getValues();
@@ -3244,20 +3307,12 @@ function _executeChargeRun() {
     }
   } catch (e) { Logger.log("_executeChargeRun: Auto Charge client lookup warning: " + e); }
 
-  // v4.6.1 — Header-based lookup for Auto Charge column (fix for hardcoded
-  // index 12 mismatching the actual sheet layout).
-  var acColIdxExec = -1;
-  // v4.7.0 — Header-based lookup for Scheduled Date column. When set, the
-  // charge loop fires on Scheduled Date instead of Due Date. Empty → fallback.
-  var schedColIdxExec = -1;
-  try {
-    var hdrsExec = invData[0] || [];
-    for (var hh2 = 0; hh2 < hdrsExec.length; hh2++) {
-      var _hdrName = String(hdrsExec[hh2]).trim();
-      if (_hdrName === "Auto Charge") acColIdxExec = hh2;
-      else if (_hdrName === "Scheduled Date") schedColIdxExec = hh2;
-    }
-  } catch (_) {}
+  // v4.7.7 — Auto Charge + Scheduled Date column indexes resolved via the
+  // shared _staxInvoiceCols helper (case-insensitive, last-match-wins,
+  // auto-appends if missing). Replaces the hand-rolled case-sensitive
+  // header scan that lived here.
+  var acColIdxExec = _cols.autoCharge - 1;        // 0-based for invData index
+  var schedColIdxExec = _cols.scheduledDate - 1;  // 0-based for invData index
 
   // ════════════════════════════════════════════════════════════════════
   // PHASE 2a — BUILD CANDIDATE LIST (no API calls, no row writes)
@@ -3266,18 +3321,16 @@ function _executeChargeRun() {
   for (var i = 0; i < numRows; i++) {
     stats.scannedTotal++;
 
+    // v4.7.7 — every read goes through _cols (header-resolved indexes).
+    var _rowExec = invData[i + 1];
     var rowStatus  = String(colIValues[i][0]).trim().toUpperCase();
     var staxInvId  = String(colHValues[i][0]).trim();
-    var staxCustId = String(invData[i + 1][2]).trim();
-    var dueDate    = String(invData[i + 1][4]).trim();
-    // v4.7.0 — Scheduled Date override: when set, charge fires on this date
-    // instead of Due Date. Empty → fall back to dueDate for timing.
-    var schedDateRaw = (schedColIdxExec >= 0 && invData[i + 1].length > schedColIdxExec)
-      ? String(invData[i + 1][schedColIdxExec] || "").trim()
-      : "";
-    var total      = parseFloat(invData[i + 1][5]);
-    var docNum     = String(invData[i + 1][0]).trim();
-    var custName   = String(invData[i + 1][1]).trim();
+    var staxCustId = String(_rowExec[_cols.staxCustId - 1] || '').trim();
+    var dueDate    = String(_rowExec[_cols.dueDate - 1] || '').trim();
+    var schedDateRaw = String(_rowExec[_cols.scheduledDate - 1] || '').trim();
+    var total      = parseFloat(_rowExec[_cols.amount - 1]);
+    var docNum     = String(_rowExec[_cols.qb - 1] || '').trim();
+    var custName   = String(_rowExec[_cols.customer - 1] || '').trim();
 
     // Gate 1: only CREATED rows
     if (rowStatus !== 'CREATED') {
@@ -3977,21 +4030,23 @@ function sendPayLinks() {
       return;
     }
 
-    // Find eligible invoices (CHARGE_FAILED with Stax Invoice ID)
+    // v4.7.7 — header-resolved column indexes (replaces hardcoded 0/1/5/7/8).
+    var _cols = _staxInvoiceCols(invSheet);
     var numRows = invData.length - 1;
     var eligible = [];
 
     for (var i = 0; i < numRows; i++) {
-      var status    = String(invData[i + 1][8]).trim().toUpperCase();
-      var staxInvId = String(invData[i + 1][7]).trim();
+      var _row = invData[i + 1];
+      var status    = String(_row[_cols.status - 1] || '').trim().toUpperCase();
+      var staxInvId = String(_row[_cols.staxId - 1] || '').trim();
 
       if (status === 'CHARGE_FAILED' && staxInvId) {
         eligible.push({
           rowIndex: i,
-          docNum: String(invData[i + 1][0]).trim(),
-          custName: String(invData[i + 1][1]).trim(),
+          docNum: String(_row[_cols.qb - 1] || '').trim(),
+          custName: String(_row[_cols.customer - 1] || '').trim(),
           staxInvId: staxInvId,
-          amount: invData[i + 1][5]
+          amount: _row[_cols.amount - 1]
         });
       }
     }
@@ -4015,9 +4070,9 @@ function sendPayLinks() {
       return;
     }
 
-    // Read columns for batch update
-    var colIRange = invSheet.getRange(2, 9, numRows, 1);   // Status
-    var colKRange = invSheet.getRange(2, 11, numRows, 1);  // Notes
+    // Read columns for batch update — header-resolved.
+    var colIRange = invSheet.getRange(2, _cols.status, numRows, 1);   // Status
+    var colKRange = invSheet.getRange(2, _cols.notes,  numRows, 1);   // Notes
     var colIValues = colIRange.getValues();
     var colKValues = colKRange.getValues();
     var colIChanged = false;
@@ -4122,11 +4177,13 @@ function sendSinglePayLink() {
   var staxInvId = '';
   var custName = '';
 
+  // v4.7.7 — header-resolved column indexes.
+  var _cols = _staxInvoiceCols(invSheet);
   for (var i = 1; i < invData.length; i++) {
-    if (String(invData[i][0]).trim() === docNum) {
+    if (String(invData[i][_cols.qb - 1]).trim() === docNum) {
       foundRow = i;
-      staxInvId = String(invData[i][7]).trim();
-      custName = String(invData[i][1]).trim();
+      staxInvId = String(invData[i][_cols.staxId - 1] || '').trim();
+      custName  = String(invData[i][_cols.customer - 1] || '').trim();
       break;
     }
   }
@@ -4155,9 +4212,9 @@ function sendSinglePayLink() {
   var sendResult = _sendInvoiceEmail(staxInvId);
 
   if (sendResult.success) {
-    // Update status
-    invSheet.getRange(foundRow + 1, 9).setValue('SENT');
-    invSheet.getRange(foundRow + 1, 11).setValue('Pay link emailed ' + _formatTimestamp(new Date()));
+    // Update status — header-resolved.
+    invSheet.getRange(foundRow + 1, _cols.status).setValue('SENT');
+    invSheet.getRange(foundRow + 1, _cols.notes).setValue('Pay link emailed ' + _formatTimestamp(new Date()));
     _writeRunLog('sendSinglePayLink', 'Sent pay link for #' + docNum + ' to ' + custName, '');
     // v4.7.3 — mirror status flip to Supabase
     try { _sbResyncAllStaxInvoices(ss); }
