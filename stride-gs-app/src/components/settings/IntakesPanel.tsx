@@ -23,6 +23,7 @@ import { postOnboardClient, apiFetch } from '../../lib/api';
 import type { EmailTemplate } from '../../lib/api';
 import { supabase } from '../../lib/supabase';
 import { sendEmail } from '../../lib/email';
+import { useClients } from '../../hooks/useClients';
 
 type StatusFilter = IntakeRow['status'] | 'all';
 
@@ -31,6 +32,11 @@ const BASE_INTAKE_URL = 'https://www.mystridehub.com/#/intake/';
 
 export function IntakesPanel() {
   const { intakes, links, loading, error, generateLink, revokeLink, updateStatus, getFileSignedUrl } = useIntakeAdmin();
+  // v2 — pull the canonical clients list so refresh-mode intakes can resolve
+  // their existing client record + open the modal in edit mode (rather than
+  // the scary "Onboard New Client" view that suggests duplicate creation).
+  // includeInactive=true so reactivation flows still work.
+  const { apiClients } = useClients(true, true);
   const [filter, setFilter] = useState<StatusFilter>('pending');
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [onboardOpen, setOnboardOpen] = useState(false);
@@ -360,14 +366,39 @@ export function IntakesPanel() {
         </main>
       </div>
 
-      {onboardOpen && selected && (
-        <OnboardClientModal
-          mode="create"
-          initialData={prefillFromIntake(selected)}
-          onClose={() => setOnboardOpen(false)}
-          onSubmit={handleCreateClient}
-        />
-      )}
+      {onboardOpen && selected && (() => {
+        // v2 — for refresh-mode intakes (existing client re-signing), open
+        // the modal in edit mode against the canonical clients row so the
+        // UI shows "Edit Client — {name}" instead of "Onboard New Client"
+        // and the Run Onboard button becomes Save. Submit logic in
+        // handleCreateClient still branches on isRefresh internally so the
+        // backend behavior is identical either way; this just stops the
+        // misleading scary modal copy from confusing operators.
+        const refreshSheetId = (selected as IntakeRow & { clientSpreadsheetId?: string }).clientSpreadsheetId || '';
+        const existingClient = refreshSheetId
+          ? apiClients.find(c => c.spreadsheetId === refreshSheetId) || null
+          : null;
+        if (existingClient) {
+          return (
+            <OnboardClientModal
+              mode="edit"
+              existingClient={existingClient}
+              allClients={apiClients}
+              onClose={() => setOnboardOpen(false)}
+              onSubmit={handleCreateClient}
+            />
+          );
+        }
+        return (
+          <OnboardClientModal
+            mode="create"
+            initialData={prefillFromIntake(selected)}
+            allClients={apiClients}
+            onClose={() => setOnboardOpen(false)}
+            onSubmit={handleCreateClient}
+          />
+        );
+      })()}
     </div>
   );
 }
