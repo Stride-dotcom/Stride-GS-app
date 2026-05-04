@@ -1626,6 +1626,15 @@ export function CreateDeliveryOrderModal({
               vendor: i.vendor || null,
               class_name: i.itemClass || null,
               cubic_feet: classToCuFt(i.itemClass) ?? null,
+              room: i.room || null,
+              extras: {
+                vendor: i.vendor || null,
+                sidemark: i.sidemark || null,
+                location: i.location || null,
+                room: i.room || null,
+                className: i.itemClass || null,
+                source: 'inventory',
+              },
             }));
             await supabase.from('dt_order_items').insert(itemRows);
           }
@@ -1663,6 +1672,15 @@ export function CreateDeliveryOrderModal({
               vendor: i.vendor || null,
               class_name: i.itemClass || null,
               cubic_feet: classToCuFt(i.itemClass) ?? null,
+              room: i.room || null,
+              extras: {
+                vendor: i.vendor || null,
+                sidemark: i.sidemark || null,
+                location: i.location || null,
+                room: i.room || null,
+                className: i.itemClass || null,
+                source: 'inventory',
+              },
             }));
             await supabase.from('dt_order_items').insert(itemRows);
           }
@@ -1733,7 +1751,15 @@ export function CreateDeliveryOrderModal({
           vendor: i.vendor || null,
           class_name: i.itemClass || null,
           cubic_feet: classToCuFt(i.itemClass) ?? null,
-          extras: { source: 'inventory' },
+          room: i.room || null,
+          extras: {
+            vendor: i.vendor || null,
+            sidemark: i.sidemark || null,
+            location: i.location || null,
+            room: i.room || null,
+            className: i.itemClass || null,
+            source: 'inventory',
+          },
         }));
         const adhocRows = deliveryFreeItems
           .filter(i => i.description.trim())
@@ -1917,6 +1943,15 @@ export function CreateDeliveryOrderModal({
             vendor: i.vendor || null,
             class_name: i.itemClass || null,
             cubic_feet: classToCuFt(i.itemClass) ?? null,
+            room: i.room || null,
+            extras: {
+              vendor: i.vendor || null,
+              sidemark: i.sidemark || null,
+              location: i.location || null,
+              room: i.room || null,
+              className: i.itemClass || null,
+              source: 'inventory',
+            },
           }));
           await supabase.from('dt_order_items').insert(itemRows);
         }
@@ -2035,7 +2070,15 @@ export function CreateDeliveryOrderModal({
             vendor: i.vendor || null,
             class_name: i.itemClass || null,
             cubic_feet: classToCuFt(i.itemClass) ?? null,
-            extras: { source: 'inventory' },
+            room: i.room || null,
+            extras: {
+              vendor: i.vendor || null,
+              sidemark: i.sidemark || null,
+              location: i.location || null,
+              room: i.room || null,
+              className: i.itemClass || null,
+              source: 'inventory',
+            },
           }));
           const adhocRows = deliveryFreeItems
             .filter(i => i.description.trim())
