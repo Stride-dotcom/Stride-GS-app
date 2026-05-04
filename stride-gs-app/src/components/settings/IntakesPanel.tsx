@@ -17,7 +17,7 @@ import { useIntakeAdmin, copyIntakeDocsToClient, seedClientInsuranceFromIntake, 
 // Reference for future wiring — keep the helper in the import graph
 // without tripping noUnusedLocals.
 void copyIntakeDocsToClient;
-import { OnboardClientModal, type OnboardClientFormData, type OnboardSubmitResult } from '../shared/OnboardClientModal';
+import { OnboardClientModal, type OnboardClientFormData, type OnboardSubmitResult, type PendingIntakeOverride } from '../shared/OnboardClientModal';
 import { IntakeEmailModal } from '../shared/IntakeEmailModal';
 import { postOnboardClient, apiFetch } from '../../lib/api';
 import type { EmailTemplate } from '../../lib/api';
@@ -367,23 +367,41 @@ export function IntakesPanel() {
       </div>
 
       {onboardOpen && selected && (() => {
-        // v2 — for refresh-mode intakes (existing client re-signing), open
-        // the modal in edit mode against the canonical clients row so the
-        // UI shows "Edit Client — {name}" instead of "Onboard New Client"
-        // and the Run Onboard button becomes Save. Submit logic in
-        // handleCreateClient still branches on isRefresh internally so the
-        // backend behavior is identical either way; this just stops the
-        // misleading scary modal copy from confusing operators.
+        // v2 — refresh-mode intake (existing client re-signing) opens the
+        // modal in edit mode + passes the intake's submitted values as
+        // pendingIntake so the form fields preview exactly what'll save.
+        // Banner at the top + cert badge in TaxExemptBlock surface the
+        // pending changes. The submit handler (handleCreateClient) still
+        // branches on isRefresh internally and runs the same UPDATE +
+        // cert copy logic on Save & Sync.
         const refreshSheetId = (selected as IntakeRow & { clientSpreadsheetId?: string }).clientSpreadsheetId || '';
         const existingClient = refreshSheetId
           ? apiClients.find(c => c.spreadsheetId === refreshSheetId) || null
           : null;
         if (existingClient) {
+          const pendingIntake: PendingIntakeOverride = {
+            id: selected.id,
+            submittedAt: selected.submittedAt,
+            contactName: selected.contactName,
+            email: selected.email,
+            phone: selected.phone,
+            businessAddress: selected.businessAddress,
+            billingContactName: selected.billingContactName,
+            billingEmail: selected.billingEmail,
+            billingAddress: selected.billingAddress,
+            notificationContacts: selected.notificationContacts,
+            autoInspect: selected.autoInspect,
+            taxExempt: selected.taxExempt,
+            taxExemptReason: selected.taxExemptReason,
+            resaleCertExpires: selected.resaleCertExpires,
+            resaleCertPath: selected.resaleCertPath,
+          };
           return (
             <OnboardClientModal
               mode="edit"
               existingClient={existingClient}
               allClients={apiClients}
+              pendingIntake={pendingIntake}
               onClose={() => setOnboardOpen(false)}
               onSubmit={handleCreateClient}
             />
