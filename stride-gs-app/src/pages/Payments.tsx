@@ -12,7 +12,7 @@ import {
   fetchStaxRunLog, fetchStaxConfig,
   postImportIIF, postResolveStaxException, postUpdateStaxConfig,
   postSaveStaxCustomerMapping, postAutoMatchStaxCustomers,
-  postCreateStaxInvoices, postStaxRefreshCustomerIds, postChargeSingleInvoice,
+  postCreateStaxInvoices, postStaxRefreshCustomerIds, postStaxRefreshPaymentStatus, postChargeSingleInvoice,
   postSendStaxPayLinks, postSendStaxPayLink,
   postCreateTestInvoice, postVoidStaxInvoice, postUpdateStaxInvoice, postDeleteStaxInvoice, postResetStaxInvoiceStatus, postToggleAutoCharge, postLinkStaxInvoiceToExisting,
   postBatchVoidStaxInvoices, postBatchDeleteStaxInvoices, type BatchMutationResult,
@@ -472,6 +472,8 @@ export function Payments() {
   const [bulkProcessing, setBulkProcessing] = useState(false);
   const [bulkResult, setBulkResult] = useState<BatchMutationResult | null>(null);
   const [bulkActionLabel, setBulkActionLabel] = useState<string>('');
+  // v38.178.0 — Refresh Cards button on Review tab.
+  const [refreshingCards, setRefreshingCards] = useState(false);
   const [chargeBatch, setChargeBatch] = useState<{ state: BatchState; total: number; processed: number; succeeded: number; failed: number; errorMessage?: string }>({
     state: 'idle', total: 0, processed: 0, succeeded: 0, failed: 0,
   });
@@ -1240,6 +1242,30 @@ export function Payments() {
                   }} style={{ accentColor: theme.colors.orange }} />
                   Select All
                 </label>
+                {/* v38.178.0 — Refresh Cards button. Calls Stax API per unique
+                    customer to update payment_method_status on every charge-
+                    eligible row. Catches expired/removed cards. */}
+                <button
+                  onClick={async () => {
+                    setRefreshingCards(true);
+                    setError(null);
+                    const res = await postStaxRefreshPaymentStatus();
+                    setRefreshingCards(false);
+                    if (res.ok && res.data) {
+                      const r = res.data.refreshed || {};
+                      const summary = `Cards refreshed — ${res.data.customersChecked} customer(s) checked, ${res.data.rowsUpdated} row(s) updated. ${r.has_pm || 0} on file, ${r.no_pm || 0} no card, ${r.no_customer || 0} no customer, ${r.unknown || 0} unknown.`;
+                      setInvoiceResult(summary);
+                      loadData(true);
+                    } else {
+                      setError(res.error || 'Refresh Cards failed');
+                    }
+                  }}
+                  disabled={refreshingCards || pending.length === 0}
+                  title="Re-check Stax payment-method status for every charge-eligible invoice. Catches removed/expired cards."
+                  style={{ padding: '6px 12px', fontSize: 11, fontWeight: 600, border: `1px solid ${theme.colors.border}`, borderRadius: 6, background: '#fff', cursor: refreshingCards || pending.length === 0 ? 'not-allowed' : 'pointer', color: theme.colors.textSecondary, fontFamily: 'inherit', display: 'flex', alignItems: 'center', gap: 4, opacity: refreshingCards || pending.length === 0 ? 0.6 : 1 }}>
+                  {refreshingCards ? <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} /> : <CreditCard size={11} />}
+                  {refreshingCards ? 'Refreshing…' : 'Refresh Cards'}
+                </button>
                 <WriteButton label={bulkProcessing ? 'Voiding...' : `Void (${reviewSelected.length})`} variant="secondary" size="sm" disabled={bulkProcessing || !reviewSelected.length}
                   style={{ borderColor: '#DC2626', color: '#DC2626' }}
                   onClick={async () => {

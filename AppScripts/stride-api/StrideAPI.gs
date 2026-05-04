@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.177.0 — 2026-05-04 PST — Unified addons module. The task-only `task_addons` system shipped 2026-05-02 (never used in prod) is replaced by a polymorphic `addons` table keyed on (parent_type, parent_id) supporting task / repair / will_call / inventory. New helper api_writeAddonsToLedger_(ss, parentType, parentId, ctx) replaces the inline task-addon flush in handleCompleteTask_ and now also fires from handleCompleteRepair_ and handleProcessWcRelease_ (one line each, after the primary billing write). The helper fetches unbilled addons via REST, writes one Billing_Ledger row per addon (rate snapshotted at add time, falls back to current catalog if blank), mirrors each row to public.billing via resyncEntityToSupabase_, then PATCHes the addon back to billed=true with the resulting ledger_row_id stamped — making retries idempotent. Ledger Row ID format mirrors the existing convention: {parentId}-{svcCode}-ADDON-{n}. Per-parent column mapping: task→Task ID="{parentId}-{svcCode}", repair→Repair ID="{parentId}-{svcCode}", will_call→Shipment #=parentId, inventory→Item ID=parentId. Companion migration 20260504170000_unified_addons.sql drops the empty task_addons table and creates `addons` with parent_type CHECK constraint, parent_id non-empty CHECK, RLS (staff/admin + service_role), and realtime enabled. Removed: api_fetchTaskAddons_ (subsumed by the new helper).
+   StrideAPI.gs — v38.178.0 — 2026-05-04 PST — Auto Pay + Card-on-File now actually mean something. Three changes that together fix the issue Justin caught: (1) Per-invoice auto_charge inherits from the client-level "Auto Charge" setting on CB Clients instead of being hard-coded true on every new Stax invoice. clientInfoMap in handleQbExport_ + handleImportIIF_ both gain an autoCharge field read from the "AUTO CHARGE" header. INSERT path stamps the per-invoice cell + Supabase mirror with that value; UPDATE-PENDING path refreshes from current client setting (rows haven't been pushed yet, refresh is intended). Operators can still toggle per-invoice on Review/Charge Queue as a one-off override. Pre-v38.178.0 every row got auto_charge=true regardless of opt-out, so the Charge Queue checkbox was always pre-checked even for clients who didn't want auto-pay. (2) New helper stax_fetchPaymentMethodStatus_(staxCustomerId) calls GET /customer/:id/payment-method via the existing stax_apiRequest_ wrapper, parses with stax_getPaymentMethodLabel_, returns 'has_pm' | 'no_pm' | 'no_customer' | 'unknown'. handleQbExport_'s INSERT + UPDATE-PENDING paths now write the real status to public.stax_invoices.payment_method_status instead of the lazy 'unknown'. Per-call cache so M invoices for the same customer = 1 API hit. Pre-v38.178.0 the column was 'unknown' or 'no_customer' forever, so the React "CC on file" pill could not render. (3) New admin endpoint staxRefreshPaymentStatus + handleStaxRefreshPaymentStatus_ — re-fetches PM status for every charge-eligible row (PENDING/CREATED/SENT/CHARGE_FAILED), stamps via supabasePatch_ keyed on qb_invoice_no, returns counters per status. Optional payload.qbInvoiceNos filters to a subset. Idempotent. Backs the new "Refresh Cards" button on Review. Catches expired/removed cards that would otherwise fail at charge time without warning.
+   v38.177.0 — 2026-05-04 PST — Unified addons module. The task-only `task_addons` system shipped 2026-05-02 (never used in prod) is replaced by a polymorphic `addons` table keyed on (parent_type, parent_id) supporting task / repair / will_call / inventory. New helper api_writeAddonsToLedger_(ss, parentType, parentId, ctx) replaces the inline task-addon flush in handleCompleteTask_ and now also fires from handleCompleteRepair_ and handleProcessWcRelease_ (one line each, after the primary billing write). The helper fetches unbilled addons via REST, writes one Billing_Ledger row per addon (rate snapshotted at add time, falls back to current catalog if blank), mirrors each row to public.billing via resyncEntityToSupabase_, then PATCHes the addon back to billed=true with the resulting ledger_row_id stamped — making retries idempotent. Ledger Row ID format mirrors the existing convention: {parentId}-{svcCode}-ADDON-{n}. Per-parent column mapping: task→Task ID="{parentId}-{svcCode}", repair→Repair ID="{parentId}-{svcCode}", will_call→Shipment #=parentId, inventory→Item ID=parentId. Companion migration 20260504170000_unified_addons.sql drops the empty task_addons table and creates `addons` with parent_type CHECK constraint, parent_id non-empty CHECK, RLS (staff/admin + service_role), and realtime enabled. Removed: api_fetchTaskAddons_ (subsumed by the new helper).
    v38.176.0 — 2026-05-04 PST — handleStartRepair_ Supabase enrichment bulk-read perf fix. Same anti-pattern + same root cause as v38.175.0, this time in the post-repair-create write-through. The Tasks-sheet (source-task lookup) and Inventory-sheet (item shipment# fallback) enrichment loops both did per-row getRange().getValue() calls — O(N) Google API round-trips. Switched both to a single getValues() bulk read. Sweep complete: zero remaining per-row getValue loops in any user-facing handler. The only other instance is handleFixMissingFolders_ (admin-only batch hyperlink repair) which has no bulk equivalent (setRichTextValue is per-cell) and is invoked manually.
    v38.175.0 — 2026-05-04 PST — handleRequestRepairQuote_ enrichment bulk-read perf fix. The source-task lookup looped per-row calling taskSh.getRange(tr, col).getValue() — one round-trip to Google's API per Tasks-sheet row. For a client with a few hundred tasks the call pushed past the React fetch timeout (~30s); the optimistic UI flipped to "Request failed — please try again" while the server kept running and successfully wrote the repair row + sent the REPAIR_QUOTE_REQUEST email. Hope @ Lisa Sherry Interiors hit this on INSP-62942-1: she got the failure toast but staff received the alert email. Switched to a single bulk getRange().getValues() read + in-memory scan for both the Tasks-sheet and Shipments-sheet enrichment loops. ~one round-trip total instead of N — handler now returns in ~1-2s instead of 30+. Same perf pattern was likely the latent root cause of every "request failed but it actually worked" report on busy client sheets.
    v38.174.0 — 2026-05-04 PST — New admin entry runRepairOrphanStaxInvoices: recovers Supabase rows orphaned by the v38.166.0 – v38.172.0 cross-project bug. The Stax Invoices SHEET has all the rows; v38.173.0 fixed the bug for new batches but does nothing for the ones that were already created (Justin's BATCH-20260504-103404-289E48 with 8 invoices showing on Batches tab but Review empty). This admin entry opens the Stax spreadsheet via getStaxSpreadsheet_, reads every row from the Invoices tab, builds upsert objects via header-resolved columns (stax_invoiceCols_) + the canonical helpers (stax_parseAutoCharge_, fmtDateLoose), then calls supabaseBatchUpsert_("stax_invoices", rows) — idempotent, conflict-resolves on qb_invoice_no. After running once: every PENDING/CREATED/etc. row on the sheet appears in public.stax_invoices, Payments → Review populates, all charge-flow affordances (Push to Stax, scheduled date, auto-charge toggle) work because they always pointed at public.stax_invoices. Note: recovered rows have batch_id=NULL (the original v38.166.0 patch failed silently); the Batches tab → View on those orphan batch rows still won't filter, but the invoices are usable on Review/Charge Queue/Invoices tabs which read by qb_invoice_no, not batch_id. New batches created via v38.173.0+ wire up batch_id correctly.
@@ -7643,6 +7644,10 @@ function doPost(e) {
       case "staxRefreshCustomerIds":
         return withAdminGuard_(callerEmail, function() {
           return handleStaxRefreshCustomerIds_();
+        });
+      case "staxRefreshPaymentStatus":
+        return withAdminGuard_(callerEmail, function() {
+          return handleStaxRefreshPaymentStatus_(payload);
         });
       case "runStaxCharges":
         return withAdminGuard_(callerEmail, function() {
@@ -20825,6 +20830,11 @@ function handleQbExport_(payload) {
     var clQbIdx = clHdr["QB_CUSTOMER_NAME"];
     var clSepIdx = clHdr["SEPARATE BY SIDEMARK"];
     var clStaxNameIdx = clHdr["STAX CUSTOMER NAME"];
+    // v38.178.0 — client-level auto-pay setting. Per-invoice auto_charge
+    // now inherits from this instead of being hard-coded true on every
+    // new Stax invoice. Operators can still toggle per-invoice on the
+    // Review/Charge Queue tabs as a one-off override.
+    var clAutoIdx = clHdr["AUTO CHARGE"];
     for (var cli = 1; cli < clData.length; cli++) {
       var clName = String(clData[cli][clNameIdx] || "").trim();
       if (!clName) continue;
@@ -20836,7 +20846,8 @@ function handleQbExport_(payload) {
         // names (e.g. "Brian Paquette Interiors" vs "Brian Paquette
         // Interiors - active"). Empty = fall back to qbCustomerName.
         staxCustomerName: clStaxNameIdx !== undefined ? String(clData[cli][clStaxNameIdx] || "").trim() : "",
-        separateBySidemark: clSepIdx !== undefined ? (clData[cli][clSepIdx] === true || String(clData[cli][clSepIdx]).toUpperCase() === "TRUE") : false
+        separateBySidemark: clSepIdx !== undefined ? (clData[cli][clSepIdx] === true || String(clData[cli][clSepIdx]).toUpperCase() === "TRUE") : false,
+        autoCharge: clAutoIdx !== undefined && (clData[cli][clAutoIdx] === true || String(clData[cli][clAutoIdx]).toUpperCase() === "TRUE")
       };
     }
   }
@@ -21057,6 +21068,20 @@ function handleQbExport_(payload) {
       var staxSupabaseRows = [];  // v38.173.0 — direct mirror to public.stax_invoices, replacing the dead cross-project _sbResyncAllStaxInvoices call
       var nowIso = new Date().toISOString();
       var nowStr = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm:ss");
+
+      // v38.178.0 — per-call payment-method status cache. Many invoices in
+      // a single qbExport batch share a customer (M items per client per
+      // sidemark) — cache the Stax API result so we hit /payment-method
+      // ONCE per unique customer instead of once per invoice. Misses fall
+      // through to a real call. The cache lives only for this invocation.
+      var pmStatusCache = {};
+      function _pmStatusFor(staxId) {
+        if (!staxId) return "no_customer";
+        if (Object.prototype.hasOwnProperty.call(pmStatusCache, staxId)) return pmStatusCache[staxId];
+        var status = stax_fetchPaymentMethodStatus_(staxId);
+        pmStatusCache[staxId] = status;
+        return status;
+      }
       for (var si2 = 0; si2 < invoiceOrder.length; si2++) {
         var sInvNo = invoiceOrder[si2];
         var sInv = invoiceMap[sInvNo];
@@ -21118,6 +21143,15 @@ function handleQbExport_(payload) {
           // Auto-fill Scheduled Date if blank — preserve operator override.
           var existingSched = String(existingInvData[existingRow1 - 1][staxCols.scheduledDate - 1] || "").trim();
           if (!existingSched && sInv.dueDate) staxInvSheet.getRange(existingRow1, staxCols.scheduledDate).setValue(sInv.dueDate);
+          // v38.178.0 — refresh per-invoice Auto Charge from the client-level
+          // setting (CB Clients "Auto Charge" col). Only on PENDING rows since
+          // the existingStatus guard above gates the whole update branch on
+          // PENDING — operator's per-invoice toggle on Review hasn't kicked in
+          // for these yet, so refreshing the default is safe + intended.
+          var clientAutoChargeUpd = sClientInfo.autoCharge === true;
+          staxInvSheet.getRange(existingRow1, staxCols.autoCharge).setValue(clientAutoChargeUpd);
+          // v38.178.0 — real payment-method status from Stax API (cached).
+          var pmStatusUpd = _pmStatusFor(sStaxCustId);
           staxUpdated++;
           batchInvoiceNos.push(sInvNo);
           batchTotal += Number(sTotal || 0);
@@ -21137,8 +21171,8 @@ function handleQbExport_(payload) {
             status: "PENDING",
             notes: "Refreshed by QB export auto-push on " + nowStr,
             is_test: false,
-            auto_charge: true,
-            payment_method_status: sStaxCustId ? "unknown" : "no_customer",
+            auto_charge: clientAutoChargeUpd,
+            payment_method_status: pmStatusUpd,
             updated_at: nowIso
           });
           continue;
@@ -21158,6 +21192,17 @@ function handleQbExport_(payload) {
         staxInvSheet.getRange(newRow1, staxCols.createdAt).setValue(nowStr);
         // Auto-populate Scheduled Date so the Charge Queue is never blank.
         if (sInv.dueDate) staxInvSheet.getRange(newRow1, staxCols.scheduledDate).setValue(sInv.dueDate);
+        // v38.178.0 — inherit Auto Charge from CB Clients (client-level
+        // setting). Pre-v38.178.0 every row got auto_charge=true regardless
+        // of whether the client had auto-pay turned on, so the Charge Queue
+        // checkbox was always pre-checked even for clients who'd opted out.
+        var clientAutoChargeIns = sClientInfo.autoCharge === true;
+        staxInvSheet.getRange(newRow1, staxCols.autoCharge).setValue(clientAutoChargeIns);
+        // v38.178.0 — real payment-method status from Stax API (cached per
+        // unique customer in this call). Pre-v38.178.0 we wrote 'unknown'
+        // and never updated it, so the React "CC on file" pill literally
+        // could not render. Now it reflects what Stax actually has stored.
+        var pmStatusIns = _pmStatusFor(sStaxCustId);
         staxNewRows.push(sInvNo);
         batchInvoiceNos.push(sInvNo);
         batchTotal += Number(sTotal || 0);
@@ -21178,8 +21223,8 @@ function handleQbExport_(payload) {
           created_at_sheet: nowStr,
           notes: "",
           is_test: false,
-          auto_charge: true,
-          payment_method_status: sStaxCustId ? "unknown" : "no_customer",
+          auto_charge: clientAutoChargeIns,
+          payment_method_status: pmStatusIns,
           updated_at: nowIso
         });
       }
@@ -21544,6 +21589,11 @@ function handleQbExcelExport_(payload) {
     var clQbIdx = clHdr["QB_CUSTOMER_NAME"];
     var clSepIdx = clHdr["SEPARATE BY SIDEMARK"];
     var clStaxNameIdx = clHdr["STAX CUSTOMER NAME"];
+    // v38.178.0 — client-level auto-pay setting. Per-invoice auto_charge
+    // now inherits from this instead of being hard-coded true on every
+    // new Stax invoice. Operators can still toggle per-invoice on the
+    // Review/Charge Queue tabs as a one-off override.
+    var clAutoIdx = clHdr["AUTO CHARGE"];
     for (var cli = 1; cli < clData.length; cli++) {
       var clName = String(clData[cli][clNameIdx] || "").trim();
       if (!clName) continue;
@@ -21555,7 +21605,8 @@ function handleQbExcelExport_(payload) {
         // names (e.g. "Brian Paquette Interiors" vs "Brian Paquette
         // Interiors - active"). Empty = fall back to qbCustomerName.
         staxCustomerName: clStaxNameIdx !== undefined ? String(clData[cli][clStaxNameIdx] || "").trim() : "",
-        separateBySidemark: clSepIdx !== undefined ? (clData[cli][clSepIdx] === true || String(clData[cli][clSepIdx]).toUpperCase() === "TRUE") : false
+        separateBySidemark: clSepIdx !== undefined ? (clData[cli][clSepIdx] === true || String(clData[cli][clSepIdx]).toUpperCase() === "TRUE") : false,
+        autoCharge: clAutoIdx !== undefined && (clData[cli][clAutoIdx] === true || String(clData[cli][clAutoIdx]).toUpperCase() === "TRUE")
       };
     }
   }
@@ -31826,6 +31877,36 @@ function stax_apiRequest_(method, path, payload) {
 }
 
 /**
+ * v38.178.0 — Resolve a Stax customer's payment-method status to one of the
+ * `stax_invoices.payment_method_status` enum values:
+ *   'has_pm'      — customer has at least one active (non-deleted/purged) PM
+ *   'no_pm'       — customer exists in Stax but has no active payment methods
+ *   'no_customer' — caller passed empty staxCustomerId
+ *   'unknown'     — Stax API call failed (network/auth/etc.) — don't write a
+ *                   misleading state, leave it as 'unknown' for retry later
+ *
+ * Lives in StrideAPI.gs (not StaxAutoPay.gs) because handleQbExport_ + the
+ * new handleRefreshStaxPaymentStatus_ admin action both run in StrideAPI's
+ * scope and Apps Script projects don't share globals (this is the same
+ * cross-project class-of-bug fixed in v38.173.0).
+ *
+ * @param {string} staxCustomerId
+ * @returns {'has_pm'|'no_pm'|'no_customer'|'unknown'}
+ */
+function stax_fetchPaymentMethodStatus_(staxCustomerId) {
+  if (!staxCustomerId) return "no_customer";
+  try {
+    var resp = stax_apiRequest_("GET", "/customer/" + encodeURIComponent(staxCustomerId) + "/payment-method", null);
+    if (!resp || !resp.success) return "unknown";
+    var label = stax_getPaymentMethodLabel_(resp.data);
+    return (label && label !== "None") ? "has_pm" : "no_pm";
+  } catch (e) {
+    Logger.log("stax_fetchPaymentMethodStatus_ error for " + staxCustomerId + ": " + (e && e.message ? e.message : e));
+    return "unknown";
+  }
+}
+
+/**
  * Parse Stax payment method response into human-readable label.
  * Mirrors StaxAutoPay.gs _getPaymentMethodLabel().
  * @param {Object} pmData - Stax API response from /customer/{id}/payment-method
@@ -32576,6 +32657,122 @@ function handleStaxRefreshCustomerIds_() {
   return jsonResponse_({
     success: true,
     updated: changed ? "Customer IDs refreshed" : "No changes needed — all IDs already matched",
+  });
+}
+
+/**
+ * v38.178.0 — POST staxRefreshPaymentStatus
+ *
+ * Re-fetches payment-method status from the Stax API for every invoice that
+ * is still in a charge-eligible state (PENDING / CREATED / SENT /
+ * CHARGE_FAILED) and stamps the result onto stax_invoices.payment_method_status
+ * in Supabase.
+ *
+ * Pre-v38.178.0 the column was set ONCE at invoice creation to "unknown"
+ * (or "no_customer") and never updated, so the React "CC on file" pill was
+ * effectively non-functional and a card removed in Stax never propagated
+ * back to our system.
+ *
+ * Per-call cache: many invoices share a customer; we hit /payment-method
+ * once per unique staxCustomerId, not once per row.
+ *
+ * Payload: optional { qbInvoiceNos?: string[] } — limits to a subset by
+ * invoice #. When omitted, refreshes every charge-eligible row.
+ *
+ * Returns: { success, refreshed: { has_pm, no_pm, no_customer, unknown },
+ *            customersChecked, rowsUpdated, errors[] }
+ *
+ * Idempotent. Safe to call repeatedly. Mirrors stax_invoices via
+ * supabasePatch_ keyed on qb_invoice_no — sheet rows are NOT touched
+ * (payment_method_status is a Supabase-only column; the sheet doesn't have
+ * an equivalent header).
+ */
+function handleStaxRefreshPaymentStatus_(payload) {
+  var ss = getStaxSpreadsheet_();
+  var invSheet = ss.getSheetByName("Invoices");
+  if (!invSheet) return errorResponse_("Invoices tab not found", "NOT_FOUND");
+
+  var invData = invSheet.getDataRange().getValues();
+  if (invData.length <= 1) return jsonResponse_({ success: true, customersChecked: 0, rowsUpdated: 0, refreshed: {}, message: "No invoices" });
+
+  var cols = stax_invoiceCols_(invSheet);
+  var refreshableStatuses = { "PENDING": true, "CREATED": true, "SENT": true, "CHARGE_FAILED": true };
+
+  // Optional filter to a specific list of invoice #s.
+  var filterSet = null;
+  if (payload && payload.qbInvoiceNos && payload.qbInvoiceNos.length) {
+    filterSet = {};
+    payload.qbInvoiceNos.forEach(function(n) { filterSet[String(n).trim()] = true; });
+  }
+
+  // Walk rows; collect (qbInvoiceNo, staxCustomerId, currentStatus) for
+  // each row that still needs a real PM check.
+  var rowsToCheck = [];
+  for (var i = 1; i < invData.length; i++) {
+    var qbNo = String(invData[i][cols.qb - 1] || "").trim();
+    if (!qbNo) continue;
+    if (filterSet && !filterSet[qbNo]) continue;
+    var status = String(invData[i][cols.status - 1] || "").trim().toUpperCase();
+    if (!refreshableStatuses[status]) continue;
+    var staxId = String(invData[i][cols.staxCustId - 1] || "").trim();
+    rowsToCheck.push({ qbNo: qbNo, staxId: staxId });
+  }
+
+  if (rowsToCheck.length === 0) {
+    return jsonResponse_({ success: true, customersChecked: 0, rowsUpdated: 0, refreshed: {}, message: "No charge-eligible rows to refresh" });
+  }
+
+  // Per-call PM cache — many invoices share a customer.
+  var pmCache = {};
+  function pmFor(staxId) {
+    if (!staxId) return "no_customer";
+    if (Object.prototype.hasOwnProperty.call(pmCache, staxId)) return pmCache[staxId];
+    pmCache[staxId] = stax_fetchPaymentMethodStatus_(staxId);
+    return pmCache[staxId];
+  }
+
+  // Resolve PM status per row, accumulate counters + per-row updates.
+  var counters = { has_pm: 0, no_pm: 0, no_customer: 0, unknown: 0 };
+  var updates = []; // [{ qbNo, status }]
+  for (var r = 0; r < rowsToCheck.length; r++) {
+    var pm = pmFor(rowsToCheck[r].staxId);
+    counters[pm] = (counters[pm] || 0) + 1;
+    updates.push({ qbNo: rowsToCheck[r].qbNo, status: pm });
+  }
+
+  // Patch Supabase per unique status group — one PostgREST call per status,
+  // not per row. qb_invoice_no=in.(...) filter handles the batch.
+  var rowsUpdated = 0;
+  var errors = [];
+  var byStatus = {};
+  updates.forEach(function(u) {
+    if (!byStatus[u.status]) byStatus[u.status] = [];
+    byStatus[u.status].push(u.qbNo);
+  });
+
+  Object.keys(byStatus).forEach(function(statusKey) {
+    var qbNos = byStatus[statusKey];
+    if (!qbNos.length) return;
+    var inFilter = "qb_invoice_no=in.(" + qbNos.map(function(n) {
+      return '"' + String(n).replace(/"/g, '\\"') + '"';
+    }).join(",") + ")";
+    try {
+      supabasePatch_("stax_invoices", inFilter, {
+        payment_method_status: statusKey,
+        updated_at: new Date().toISOString()
+      });
+      rowsUpdated += qbNos.length;
+    } catch (e) {
+      errors.push("PATCH for status=" + statusKey + " failed: " + (e && e.message ? e.message : e));
+    }
+  });
+
+  return jsonResponse_({
+    success: true,
+    customersChecked: Object.keys(pmCache).length,
+    rowsUpdated: rowsUpdated,
+    refreshed: counters,
+    errors: errors
   });
 }
 
