@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.171.0 — 2026-05-04 PST — Charge Queue date-format fix + IIF write hardening + auto-populate Scheduled Date. Three changes that together close the "scheduled dates revert on refresh" loop. (1) formatDate_ now strips a trailing "HH:MM[:SS]" from string cell values so a Due Date stored as "2026-05-18 00:00:00" reads back as "2026-05-18" — `<input type="date">` strictly requires YYYY-MM-DD, the legacy time-decorated form rendered empty in the picker AND broke the React onBlur equality guard so 5 of 7 Charge Queue saves quietly skipped this morning. (2) handleImportIIF_ + handleQbExport_ Stax-write blocks rebuilt around stax_invoiceCols_ — every column written via header lookup, no more 11-element positional arrays clobbering Scheduled Date / Auto Charge / Is Test on a sheet with extra columns. (3) Both insert paths and the IIF update path now auto-fill Scheduled Date = Due Date when blank, preserving any operator override — every new invoice has a real, displayable scheduled date out of the gate. New admin entry backfillStaxScheduledDates: one-click backfill of blank Scheduled Date cells from each row's Due Date for PENDING/CREATED/SENT/CHARGE_FAILED rows; idempotent, never overwrites operator-set values, ignores PAID/VOIDED/DELETED.
+   StrideAPI.gs — v38.172.0 — 2026-05-04 PST — handleCreateInvoice_ no longer collapses every Master RPC failure mode into the opaque "Master RPC returned no invoice number" — Justin hit this on a Brian Paquette invoice in a batch of 9 (8 succeeded). Root cause: api_nextInvoiceNo_ returned null on any non-shape-match (HTTP non-2xx, non-JSON body, {success:false} from the Master RPC, missing id field) and the caller printed a single generic message regardless of what actually failed. Two changes here: (1) api_nextInvoiceNo_ now throws a distinct descriptive Error per failure mode AND retries once with 1.5s backoff on transient cases (lock timeout, 5xx, non-JSON body, parse error). The Master `getNextInvoiceId` counter only advances on actual success — retry is safe. (2) handleCreateInvoice_ wraps the call in try/catch and surfaces the thrown message so operators see the real cause (e.g. "Master RPC error: Lock timeout — too many concurrent requests") and can act. Defense against future opacity: if the new path ever does return null without throwing, the legacy generic message remains as a final safety net.
+   v38.171.0 — 2026-05-04 PST — Charge Queue date-format fix + IIF write hardening + auto-populate Scheduled Date. Three changes that together close the "scheduled dates revert on refresh" loop. (1) formatDate_ now strips a trailing "HH:MM[:SS]" from string cell values so a Due Date stored as "2026-05-18 00:00:00" reads back as "2026-05-18" — `<input type="date">` strictly requires YYYY-MM-DD, the legacy time-decorated form rendered empty in the picker AND broke the React onBlur equality guard so 5 of 7 Charge Queue saves quietly skipped this morning. (2) handleImportIIF_ + handleQbExport_ Stax-write blocks rebuilt around stax_invoiceCols_ — every column written via header lookup, no more 11-element positional arrays clobbering Scheduled Date / Auto Charge / Is Test on a sheet with extra columns. (3) Both insert paths and the IIF update path now auto-fill Scheduled Date = Due Date when blank, preserving any operator override — every new invoice has a real, displayable scheduled date out of the gate. New admin entry backfillStaxScheduledDates: one-click backfill of blank Scheduled Date cells from each row's Due Date for PENDING/CREATED/SENT/CHARGE_FAILED rows; idempotent, never overwrites operator-set values, ignores PAID/VOIDED/DELETED.
    v38.170.0 — 2026-05-04 PST — Sweep: every Stax Invoices write is now header-resolved. Justin's "I'm tired of patching hole after hole" — same class of bug (positional column indexes drifting when a column is inserted) was lurking in handleBatchVoidStaxInvoices_, handleBatchDeleteStaxInvoices_, handleDeleteStaxInvoice_, handleVoidStaxInvoice_, handleResetStaxInvoiceStatus_, handleLinkStaxInvoiceToExisting_, handleChargeSingleInvoice_, handleSendStaxPayLinks_, handleSendStaxPayLink_ — all wrote Status (col 9) and Notes (col 11) positionally. Now ALL of them resolve via stax_invoiceCols_(invSheet) (caches qb / customer / staxCustId / dueDate / amount / status / notes / staxId / autoCharge / scheduledDate / etc. via api_ensureColumn_). Same sweep covered handleUpdateEmailTemplate_ (Subject + HTML Body cols), qbo_saveMappingRow_ (QBO Customer ID / Sidemark / Sub-Job ID on Stax Customers), and handleSyncStaxCustomerIds_ (Stax Customer ID col). Net: zero positional writes remain on any user-facing entity sheet across StrideAPI.gs. Settings key/value sheets (col 1=Key, col 2=Value) left alone — stable layout, lower risk.
    v38.169.0 — 2026-05-04 PST — Stax invoice inline edits actually persist now. handleUpdateStaxInvoice_ used POSITIONAL columns (5=Due Date, 6=Amount, 9=Status, 11=Notes, 2=Customer) for every write while the read path (sheetToObjects_) used header names — once the Invoices sheet had a column inserted (Is Test, Scheduled Date, Auto Charge, Stax Invoice Link were appended at various times) the writes silently landed in the WRONG column and the React Charge Queue's optimistic update reverted on refresh. Same class as v38.152.0 / v38.167.0; same fix: every column lookup now goes through api_ensureColumn_ (case-insensitive, auto-appends if missing) — Due Date, Scheduled Date, Notes, Amount, Customer, Stax Customer ID, Status, QB Invoice #. handleToggleAutoCharge_ was case-sensitive on the "Auto Charge" header and silently appended a duplicate column on any case drift; switched to api_ensureColumn_. To prevent duplicate-column drift biting future writes, api_ensureColumn_ now returns the LAST matching column (mirroring sheetToObjects_'s last-write-wins semantics) — write and read agree on the same column even when duplicates already exist on a sheet.
    v38.168.0 — 2026-05-04 PST — Inventory is the single source of truth for item-level fields now. New helper api_propagateItemFieldsToInventory_ takes (clientSheetId, itemId, {sidemark/reference/description/vendor/location/room/itemNotes/itemClass}) and writes back through handleUpdateInventoryItem_ — which already handles the Inventory write, the open-Tasks/Repairs fan-out, and Supabase write-through. handleUpdateBillingRow_ now calls it whenever a non-manual ledger row's Sidemark / Reference / Description is edited from the Billing Report — the same edit lands on the Inventory row and propagates to every other surface (Inventory grid, Tasks, Repairs, item detail panels, all Supabase mirrors). Manual charges are skipped (no inventory binding). This stops the cross-page drift Justin reported where a Billing Report sidemark edit didn't appear on Inventory or related task rows. The helper is reusable — wire it into any future entity handler that exposes item-level field edits.
@@ -21894,19 +21895,62 @@ function handleGenerateUnbilledReport_(payload) {
 
 /**
  * Get next invoice number from Master RPC (action=getNextInvoiceId).
+ * v38.172.0 — Surface RPC failure detail + 1 retry on transient.
+ *   Pre-v38.172.0 collapsed every non-success outcome (lock timeout, non-200,
+ *   non-JSON body, structured {success:false}) into a null return, leaving the
+ *   caller with the unhelpful "Master RPC returned no invoice number". Now
+ *   each failure mode throws a distinct, descriptive Error AND a single retry
+ *   with 1.5s backoff is attempted on transient cases (lock timeout, 5xx,
+ *   non-JSON body, parse error). Caller wraps in try/catch + propagates the
+ *   message. The Master counter only advances on actual success, so retry is
+ *   safe — a contested first call leaves the counter untouched.
  */
 function api_nextInvoiceNo_(rpcUrl, rpcToken) {
-  var resp = UrlFetchApp.fetch(rpcUrl, {
-    method: "post",
-    contentType: "application/json",
-    payload: JSON.stringify({ action: "getNextInvoiceId", token: rpcToken }),
-    muteHttpExceptions: true,
-    followRedirects: true
-  });
-  var code = resp.getResponseCode();
-  if (code < 200 || code >= 300) throw new Error("Master RPC invoice id failed (" + code + ")");
-  var obj = JSON.parse(resp.getContentText());
-  return obj.shipmentNo || obj.id || obj.invoiceId || null;
+  function callOnce_() {
+    var resp = UrlFetchApp.fetch(rpcUrl, {
+      method: "post",
+      contentType: "application/json",
+      payload: JSON.stringify({ action: "getNextInvoiceId", token: rpcToken }),
+      muteHttpExceptions: true,
+      followRedirects: true
+    });
+    var code = resp.getResponseCode();
+    var bodyText = resp.getContentText() || "";
+    if (code < 200 || code >= 300) {
+      var transient5xx = code >= 500 && code < 600;
+      var err = new Error("Master RPC HTTP " + code + ": " + bodyText.substring(0, 300));
+      err.transient = transient5xx;
+      throw err;
+    }
+    var obj;
+    try { obj = JSON.parse(bodyText); }
+    catch (e) {
+      var pe = new Error("Master RPC returned non-JSON: " + bodyText.substring(0, 300));
+      pe.transient = true;
+      throw pe;
+    }
+    if (obj && obj.success === false) {
+      var msg = String(obj.error || "(no error message returned)");
+      var se = new Error("Master RPC error: " + msg);
+      se.transient = /lock timeout|too many concurrent/i.test(msg);
+      throw se;
+    }
+    var id = obj && (obj.shipmentNo || obj.id || obj.invoiceId);
+    if (!id) {
+      throw new Error("Master RPC returned no id field: " + bodyText.substring(0, 300));
+    }
+    return id;
+  }
+
+  try {
+    return callOnce_();
+  } catch (e) {
+    if (e && e.transient) {
+      Utilities.sleep(1500);
+      return callOnce_();
+    }
+    throw e;
+  }
 }
 
 /**
@@ -22445,8 +22489,17 @@ function handleCreateInvoice_(payload) {
     }
   }
 
-  // Get invoice number from Master RPC
-  var invNo = api_nextInvoiceNo_(masterRpcUrl, masterRpcToken);
+  // Get invoice number from Master RPC. v38.172.0 — api_nextInvoiceNo_ now
+  // throws with a descriptive message on every failure mode (HTTP non-2xx,
+  // non-JSON body, {success:false} from RPC, missing id field) and retries
+  // once on transient cases (lock timeout, 5xx, parse error). Surface the
+  // actual cause to the operator instead of the legacy opaque string.
+  var invNo;
+  try {
+    invNo = api_nextInvoiceNo_(masterRpcUrl, masterRpcToken);
+  } catch (rpcErr) {
+    return errorResponse_(String(rpcErr && rpcErr.message ? rpcErr.message : rpcErr), "RPC_ERROR");
+  }
   if (!invNo) return errorResponse_("Master RPC returned no invoice number", "RPC_ERROR");
 
   // v38.157.0 — RPC race detection. The Master `getNextInvoiceId` counter is
