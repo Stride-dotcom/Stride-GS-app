@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.172.0 — 2026-05-04 PST — handleCreateInvoice_ no longer collapses every Master RPC failure mode into the opaque "Master RPC returned no invoice number" — Justin hit this on a Brian Paquette invoice in a batch of 9 (8 succeeded). Root cause: api_nextInvoiceNo_ returned null on any non-shape-match (HTTP non-2xx, non-JSON body, {success:false} from the Master RPC, missing id field) and the caller printed a single generic message regardless of what actually failed. Two changes here: (1) api_nextInvoiceNo_ now throws a distinct descriptive Error per failure mode AND retries once with 1.5s backoff on transient cases (lock timeout, 5xx, non-JSON body, parse error). The Master `getNextInvoiceId` counter only advances on actual success — retry is safe. (2) handleCreateInvoice_ wraps the call in try/catch and surfaces the thrown message so operators see the real cause (e.g. "Master RPC error: Lock timeout — too many concurrent requests") and can act. Defense against future opacity: if the new path ever does return null without throwing, the legacy generic message remains as a final safety net.
+   StrideAPI.gs — v38.173.0 — 2026-05-04 PST — handleQbExport_ direct mirror to public.stax_invoices, replacing the dead _sbResyncAllStaxInvoices call. Justin reported: "Send to Payments" creates the batch row (Batches tab shows 8 invoices, $345) but Review tab is empty and clicking View on the batch shows "No invoices found". Root cause: v38.166.0 called `_sbResyncAllStaxInvoices(getStaxSpreadsheet_())` to mirror the Stax Invoices sheet to Supabase after the per-invoice writes — but that helper lives ONLY in StaxAutoPay.gs (a separate Apps Script project). Apps Script projects don't share globals without an explicit Library import, so every call threw `ReferenceError: _sbResyncAllStaxInvoices is not defined`, was swallowed by the surrounding try/catch, and only `Logger.log`'d. The IIF + sheet writes succeeded. The `stax_invoice_batches` row succeeded (different try block, uses StrideAPI's own supabaseUpsert_). The actual `stax_invoices` rows never made it. Fix: build a `staxSupabaseRows` array during the existing INSERT/UPDATE-PENDING loop (one upsert object per row written, mirroring StaxAutoPay's `_sbResyncAllStaxInvoices` shape exactly), then call StrideAPI's own `supabaseBatchUpsert_("stax_invoices", staxSupabaseRows)` — the helper at line 3197 already supports the table with `qb_invoice_no` as the conflict column. No cross-project call. No extra sheet read. The follow-up `supabasePatch_` to stamp `batch_id` on the freshly-mirrored rows now actually finds matches. End-to-end flow restored: Send to Payments → Stax Invoices sheet + public.stax_invoices written → Postgres realtime → Payments page useSupabaseRealtime hook → Review tab shows new PENDING rows within ~2-3s. Operators can then set scheduled date, toggle auto-charge, push to Stax — all the existing affordances work because they always pointed at public.stax_invoices, which finally has the data.
+   v38.172.0 — 2026-05-04 PST — handleCreateInvoice_ no longer collapses every Master RPC failure mode into the opaque "Master RPC returned no invoice number" — Justin hit this on a Brian Paquette invoice in a batch of 9 (8 succeeded). Root cause: api_nextInvoiceNo_ returned null on any non-shape-match (HTTP non-2xx, non-JSON body, {success:false} from the Master RPC, missing id field) and the caller printed a single generic message regardless of what actually failed. Two changes here: (1) api_nextInvoiceNo_ now throws a distinct descriptive Error per failure mode AND retries once with 1.5s backoff on transient cases (lock timeout, 5xx, non-JSON body, parse error). The Master `getNextInvoiceId` counter only advances on actual success — retry is safe. (2) handleCreateInvoice_ wraps the call in try/catch and surfaces the thrown message so operators see the real cause (e.g. "Master RPC error: Lock timeout — too many concurrent requests") and can act. Defense against future opacity: if the new path ever does return null without throwing, the legacy generic message remains as a final safety net.
    v38.171.0 — 2026-05-04 PST — Charge Queue date-format fix + IIF write hardening + auto-populate Scheduled Date. Three changes that together close the "scheduled dates revert on refresh" loop. (1) formatDate_ now strips a trailing "HH:MM[:SS]" from string cell values so a Due Date stored as "2026-05-18 00:00:00" reads back as "2026-05-18" — `<input type="date">` strictly requires YYYY-MM-DD, the legacy time-decorated form rendered empty in the picker AND broke the React onBlur equality guard so 5 of 7 Charge Queue saves quietly skipped this morning. (2) handleImportIIF_ + handleQbExport_ Stax-write blocks rebuilt around stax_invoiceCols_ — every column written via header lookup, no more 11-element positional arrays clobbering Scheduled Date / Auto Charge / Is Test on a sheet with extra columns. (3) Both insert paths and the IIF update path now auto-fill Scheduled Date = Due Date when blank, preserving any operator override — every new invoice has a real, displayable scheduled date out of the gate. New admin entry backfillStaxScheduledDates: one-click backfill of blank Scheduled Date cells from each row's Due Date for PENDING/CREATED/SENT/CHARGE_FAILED rows; idempotent, never overwrites operator-set values, ignores PAID/VOIDED/DELETED.
    v38.170.0 — 2026-05-04 PST — Sweep: every Stax Invoices write is now header-resolved. Justin's "I'm tired of patching hole after hole" — same class of bug (positional column indexes drifting when a column is inserted) was lurking in handleBatchVoidStaxInvoices_, handleBatchDeleteStaxInvoices_, handleDeleteStaxInvoice_, handleVoidStaxInvoice_, handleResetStaxInvoiceStatus_, handleLinkStaxInvoiceToExisting_, handleChargeSingleInvoice_, handleSendStaxPayLinks_, handleSendStaxPayLink_ — all wrote Status (col 9) and Notes (col 11) positionally. Now ALL of them resolve via stax_invoiceCols_(invSheet) (caches qb / customer / staxCustId / dueDate / amount / status / notes / staxId / autoCharge / scheduledDate / etc. via api_ensureColumn_). Same sweep covered handleUpdateEmailTemplate_ (Subject + HTML Body cols), qbo_saveMappingRow_ (QBO Customer ID / Sidemark / Sub-Job ID on Stax Customers), and handleSyncStaxCustomerIds_ (Stax Customer ID col). Net: zero positional writes remain on any user-facing entity sheet across StrideAPI.gs. Settings key/value sheets (col 1=Key, col 2=Value) left alone — stable layout, lower risk.
    v38.169.0 — 2026-05-04 PST — Stax invoice inline edits actually persist now. handleUpdateStaxInvoice_ used POSITIONAL columns (5=Due Date, 6=Amount, 9=Status, 11=Notes, 2=Customer) for every write while the read path (sheetToObjects_) used header names — once the Invoices sheet had a column inserted (Is Test, Scheduled Date, Auto Charge, Stax Invoice Link were appended at various times) the writes silently landed in the WRONG column and the React Charge Queue's optimistic update reverted on refresh. Same class as v38.152.0 / v38.167.0; same fix: every column lookup now goes through api_ensureColumn_ (case-insensitive, auto-appends if missing) — Due Date, Scheduled Date, Notes, Amount, Customer, Stax Customer ID, Status, QB Invoice #. handleToggleAutoCharge_ was case-sensitive on the "Auto Charge" header and silently appended a duplicate column on any case drift; switched to api_ensureColumn_. To prevent duplicate-column drift biting future writes, api_ensureColumn_ now returns the LAST matching column (mirroring sheetToObjects_'s last-write-wins semantics) — write and read agree on the same column even when duplicates already exist on a sheet.
@@ -20885,6 +20886,8 @@ function handleQbExport_(payload) {
       var batchInvoiceNos = [];   // v38.166.0 — collected for batch row + post-resync patch
       var batchTotal = 0;
       var batchClients = {};
+      var staxSupabaseRows = [];  // v38.173.0 — direct mirror to public.stax_invoices, replacing the dead cross-project _sbResyncAllStaxInvoices call
+      var nowIso = new Date().toISOString();
       var nowStr = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm:ss");
       for (var si2 = 0; si2 < invoiceOrder.length; si2++) {
         var sInvNo = invoiceOrder[si2];
@@ -20951,6 +20954,25 @@ function handleQbExport_(payload) {
           batchInvoiceNos.push(sInvNo);
           batchTotal += Number(sTotal || 0);
           batchClients[sCustomerForStax || sInv.qbName || ""] = true;
+          // v38.173.0 — accumulate Supabase mirror row for this UPDATE-in-place.
+          staxSupabaseRows.push({
+            qb_invoice_no: sInvNo,
+            row_index: existingRow1,
+            customer: sCustomerForStax || "",
+            stax_customer_id: sStaxCustId,
+            invoice_date: sInv.invDate,
+            due_date: sInv.dueDate,
+            scheduled_date: sInv.dueDate || null,
+            amount: Number(sTotal || 0),
+            line_items_json: sLineJson,
+            stax_id: "",
+            status: "PENDING",
+            notes: "Refreshed by QB export auto-push on " + nowStr,
+            is_test: false,
+            auto_charge: true,
+            payment_method_status: sStaxCustId ? "unknown" : "no_customer",
+            updated_at: nowIso
+          });
           continue;
         }
 
@@ -20972,6 +20994,26 @@ function handleQbExport_(payload) {
         batchInvoiceNos.push(sInvNo);
         batchTotal += Number(sTotal || 0);
         batchClients[sCustomerForStax || sInv.qbName || ""] = true;
+        // v38.173.0 — accumulate Supabase mirror row for this INSERT.
+        staxSupabaseRows.push({
+          qb_invoice_no: sInvNo,
+          row_index: newRow1,
+          customer: sCustomerForStax || "",
+          stax_customer_id: sStaxCustId,
+          invoice_date: sInv.invDate,
+          due_date: sInv.dueDate,
+          scheduled_date: sInv.dueDate || null,
+          amount: Number(sTotal || 0),
+          line_items_json: sLineJson,
+          stax_id: "",
+          status: "PENDING",
+          created_at_sheet: nowStr,
+          notes: "",
+          is_test: false,
+          auto_charge: true,
+          payment_method_status: sStaxCustId ? "unknown" : "no_customer",
+          updated_at: nowIso
+        });
       }
 
       staxImported = staxNewRows.length;
@@ -20997,10 +21039,24 @@ function handleQbExport_(payload) {
   // are a read-side grouping).
   var batchPersisted = false;
   if (batchInvoiceNos.length > 0) {
+    // v38.173.0 — Direct Supabase upsert of just the rows we wrote in this
+    // call, replacing the v38.166.0 `_sbResyncAllStaxInvoices(getStaxSpreadsheet_())`
+    // call. That helper lives ONLY in StaxAutoPay.gs (a separate Apps Script
+    // project) — Apps Script projects don't share globals without a Library
+    // import, so every previous call here threw `ReferenceError:
+    // _sbResyncAllStaxInvoices is not defined`, was swallowed by this try/catch,
+    // and the Stax sheet rows never mirrored to public.stax_invoices. Symptom:
+    // Payments → Batches showed the batch totals (the batch row write is in a
+    // DIFFERENT try block below and uses StrideAPI's own supabaseUpsert_, so
+    // it succeeded), but Review tab + per-invoice tab were always empty.
+    // The upsert objects mirror StaxAutoPay's _sbResyncAllStaxInvoices shape
+    // exactly, built from data already in memory — no extra sheet read.
     try {
-      _sbResyncAllStaxInvoices(getStaxSpreadsheet_());
+      if (staxSupabaseRows.length > 0) {
+        supabaseBatchUpsert_("stax_invoices", staxSupabaseRows);
+      }
     } catch (resyncErr) {
-      Logger.log("v38.166.0: _sbResyncAllStaxInvoices after auto-import failed (non-fatal): " + resyncErr.message);
+      Logger.log("v38.173.0: stax_invoices direct upsert failed (non-fatal): " + (resyncErr && resyncErr.message ? resyncErr.message : resyncErr));
     }
 
     try {
