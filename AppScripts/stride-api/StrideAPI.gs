@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.163.0 — 2026-05-04 PST — Fixed `seedAllStaxToSupabase`'s Charge Log reader. The actual sheet headers (per the StaxAutoPay SHEET_NAMES schema) are "Customer Name" + "Stax Transaction ID", but the seed function looked up "Customer" + "Transaction ID" — always returned undefined → mirror seeded customer/txn_id as empty strings for every charge log row. Symptom: React Charge Log page shows blank Customer column + blank Transaction ID column for all 8 historical successful charges. Now reads the canonical names first, falls back to the legacy short form so manually-edited sheets still work. Companion StaxAutoPay.gs v4.7.6 fixes the same bug in `_sbResyncAllStaxCharges`. After deploy, run `seedAllStaxToSupabase` once to backfill the existing 8 rows.
+   StrideAPI.gs — v38.164.0 — 2026-05-04 PST — handleProcessWcRelease_ now stamps "Ledger Row ID": "WC-{itemId}-{wcNumber}" on every billing row it writes. Without this column, api_fullClientSync_ explicitly skipped the row (see billing case at line ~6068: `if (!lid) continue`), so since 2026-04-01 every non-COD WC release wrote rows to the Billing_Ledger sheet that never mirrored to Supabase — 13 WCs / ~84 items invisible on the React Billing page and impossible to invoice. Out of 7 billing-row write paths in this file (RCVG, RCVG addons, task complete, repair quote lines, repair primary, WC release, manual charge), WC release was the only one missing the ID. Format mirrors RCVG's `RCVG-{itemId}-{shipmentNo}` convention. New admin entry `runBackfillWcLedgerRowIds` walks every active client in CB Clients, scans Billing_Ledger for WC rows missing the ID, stamps `WC-{itemId}-{shipment#}` (bulk-write column), then api_fullClientSync_(.., ["billing"]) per tenant to mirror. Idempotent — only patches rows where the ID is currently blank. Run once from Apps Script editor after deploy.
+   v38.163.0 — 2026-05-04 PST — Fixed `seedAllStaxToSupabase`'s Charge Log reader. The actual sheet headers (per the StaxAutoPay SHEET_NAMES schema) are "Customer Name" + "Stax Transaction ID", but the seed function looked up "Customer" + "Transaction ID" — always returned undefined → mirror seeded customer/txn_id as empty strings for every charge log row. Symptom: React Charge Log page shows blank Customer column + blank Transaction ID column for all 8 historical successful charges. Now reads the canonical names first, falls back to the legacy short form so manually-edited sheets still work. Companion StaxAutoPay.gs v4.7.6 fixes the same bug in `_sbResyncAllStaxCharges`. After deploy, run `seedAllStaxToSupabase` once to backfill the existing 8 rows.
    v38.162.0 — 2026-05-04 PST — handleCreateTestInvoice_ was the one Stax write path I missed in PR #214's "retire the Stax Customers sheet" sweep — it still read the deprecated sheet and reported NOT_FOUND for any client that exists in CB Clients but not the legacy mirror. Justin hit this trying to test the Stax webhook with a reactivated demo account ("Justin Demo Account") that is in CB Clients with a stax_customer_id but never had a row on the retired sheet. Migrated to stax_buildClientStaxMap_ — same helper handleQbExport_, handleImportIIF_, and stax_lookupCustomerIds_ all use. Lookup now succeeds when the client name matches Client Name, QB Customer Name, OR Stax Customer Name on the CB Clients row.
    v38.161.0 — 2026-05-04 PST — Critical fix to qbo_getCustomerContactInfo_ response-shape read. The helper added in v38.156.0 reads `result.Customer` from the qbo_apiRequest_ return value, but qbo_apiRequest_ wraps the body in `{ success, status, data, error }` (body lives at `.data`). The Customer field is at `result.data.Customer`, not `result.Customer`. The original read was always undefined → helper returned null on every call → QBO BillEmail inheritance has been silently no-op'd since PR #218. That explained Justin's INV-000135 push landing in QBO with empty bill-to email even after v38.156.0 + v38.158.0 fallback work, AND why runPullBillingContactsFromQbo (v38.160.0) reported "QBO customer fetch failed for Id <X>" on every client tested. One-character typo, weeks of broken behavior. Fix: read `result.data.Customer` and require `result.success` to also be truthy. With this in, the next QBO push for any sub-customer will inherit BillEmail from the parent record correctly, AND the bulk pull function will populate clients.billing_email + clients.billing_address from QBO for the ~50 active clients with null fields.
    v38.160.0 — 2026-05-04 PST — New `runPullBillingContactsFromQbo` admin entry that bulk-pulls existing clients' billing email + address from QBO into Stride's `clients.billing_email` / `billing_address` (Supabase-only). Saves staff from typing the new Billing Contact section by hand for every active client. For each client where billing_email IS NULL, looks up the QBO customer by qb_customer_name (or name fallback) via qbo_searchCustomer_, fetches PrimaryEmailAddr / BillAddr / PrimaryPhone via qbo_getCustomerContactInfo_ (the helper added in v38.156.0), and PATCHes Supabase via supabasePatch_. billing_address is synthesized from QBO's BillAddr blob (Line1/Line2 + "City, State PostalCode"). billing_contact_name is NOT pulled — QBO GivenName/FamilyName don't reliably represent the AP contact, operator sets that. Idempotent: re-runs filter on `billing_email is.null` server-side; the per-field write check `&& !row.<field>` ensures operator-set values are never overwritten. Logs per-client decisions to the Apps Script execution log. New-client flow unchanged: intake form → onboard modal still drives clients.billing_* via the path shipped in PR #221 + #222.
@@ -17898,7 +17899,8 @@ function handleProcessWcRelease_(clientSheetId, payload) {
             "Task ID":     "",
             "Repair ID":   "",
             "Shipment #":  wcNumber,
-            "Item Notes":  ""
+            "Item Notes":  "",
+            "Ledger Row ID": "WC-" + bItem.itemId + "-" + wcNumber
           });
           var bilInsRow = api_getLastDataRow_(billingSheet) + 1;
           billingSheet.getRange(bilInsRow, 1, 1, bilRow.length).setValues([bilRow]);
@@ -38630,6 +38632,147 @@ function runRepairOrphanLedgerRows() {
     }
   }
   Logger.log("runRepairOrphanLedgerRows complete: deleted " + deleted + " of " + rowsToDelete.length + " rows.");
+}
+
+/**
+ * v38.164.0 — runBackfillWcLedgerRowIds: admin entry point.
+ *
+ * One-shot backfill for WC billing rows that landed in client Billing_Ledger
+ * sheets without a Ledger Row ID. handleProcessWcRelease_ pre-v38.164.0 wrote
+ * billing rows missing this column, and api_fullClientSync_'s billing case
+ * skips any row where it's blank — so those rows never mirrored to Supabase
+ * and the React Billing page can't see them.
+ *
+ * For every active client in CB Clients:
+ *   1. Open the spreadsheet, open Billing_Ledger.
+ *   2. Find rows where Svc Code = "WC" AND Ledger Row ID is blank.
+ *   3. Stamp Ledger Row ID = "WC-{itemId}-{shipment#}". Bulk write
+ *      the column in one setValues() call (mirrors the pattern used
+ *      by handleReleaseItems_ post-v38.150.0).
+ *   4. If any rows were patched, call api_fullClientSync_(tenantId,
+ *      ["billing"]) to mirror the now-keyed rows to Supabase.
+ *
+ * Idempotent: re-running is a no-op once every WC row has its ID. Only
+ * touches WC rows with a blank ID — never overwrites existing IDs.
+ *
+ * Logs per-tenant counts so the operator can verify the math.
+ *
+ * Run from Apps Script editor → function dropdown → runBackfillWcLedgerRowIds.
+ */
+function runBackfillWcLedgerRowIds() {
+  var startedAt = new Date();
+  var cbId = prop_("CB_SPREADSHEET_ID");
+  if (!cbId) { Logger.log("CB_SPREADSHEET_ID not set"); return; }
+  var cbSS = SpreadsheetApp.openById(cbId);
+  var clientsSh = cbSS.getSheetByName("Clients");
+  if (!clientsSh) { Logger.log("CB Clients tab not found"); return; }
+
+  var rows = clientsSh.getDataRange().getValues();
+  var hdr = rows[0].map(function(h) { return String(h).trim().toUpperCase(); });
+  var idCol = hdr.indexOf("CLIENT SPREADSHEET ID");
+  var nameCol = hdr.indexOf("CLIENT NAME");
+  var activeCol = hdr.indexOf("ACTIVE");
+  if (idCol < 0) { Logger.log("CLIENT SPREADSHEET ID column not found"); return; }
+
+  var totalClients = 0, totalPatched = 0, totalAlreadyOk = 0, errors = 0;
+
+  for (var i = 1; i < rows.length; i++) {
+    var sid = String(rows[i][idCol] || "").trim();
+    var cName = nameCol >= 0 ? String(rows[i][nameCol] || "").trim() : sid;
+    var active = activeCol >= 0 ? toBool_(rows[i][activeCol]) : true;
+    if (!sid || !active) continue;
+    totalClients++;
+
+    try {
+      var ss = SpreadsheetApp.openById(sid);
+      var billSh = ss.getSheetByName("Billing_Ledger");
+      if (!billSh || billSh.getLastRow() < 2) {
+        Logger.log("[wc-backfill] " + cName + " — no Billing_Ledger or empty");
+        continue;
+      }
+
+      var bMap = api_getHeaderMap_(billSh);
+      var lidCol = bMap["Ledger Row ID"];
+      var svcCodeCol = bMap["Svc Code"];
+      var itemIdCol = bMap["Item ID"];
+      var shipNoCol = bMap["Shipment #"];
+      if (!lidCol || !svcCodeCol || !itemIdCol || !shipNoCol) {
+        Logger.log("[wc-backfill] " + cName + " — required columns missing (lid=" + lidCol +
+                   " svc=" + svcCodeCol + " item=" + itemIdCol + " ship=" + shipNoCol + ")");
+        errors++;
+        continue;
+      }
+
+      var lastRow = billSh.getLastRow();
+      var data = billSh.getRange(2, 1, lastRow - 1, billSh.getLastColumn()).getValues();
+
+      // Collect (rowIndex, newId) pairs for WC rows missing an ID.
+      var patches = [];
+      var wcRowsTotal = 0;
+      for (var r = 0; r < data.length; r++) {
+        var svc = String(data[r][svcCodeCol - 1] || "").trim();
+        if (svc !== "WC") continue;
+        wcRowsTotal++;
+        var existingLid = String(data[r][lidCol - 1] || "").trim();
+        if (existingLid) continue;
+        var itemId = String(data[r][itemIdCol - 1] || "").trim();
+        var shipNo = String(data[r][shipNoCol - 1] || "").trim();
+        if (!itemId || !shipNo) {
+          Logger.log("[wc-backfill] " + cName + " row " + (r + 2) +
+                     " — WC row but missing item/ship (item=" + itemId + " ship=" + shipNo + ")");
+          continue;
+        }
+        patches.push({ rowIdx: r, newId: "WC-" + itemId + "-" + shipNo });
+      }
+
+      if (!patches.length) {
+        totalAlreadyOk += wcRowsTotal;
+        Logger.log("[wc-backfill] " + cName + " ✓ already clean (" + wcRowsTotal + " WC rows, all have IDs)");
+        continue;
+      }
+
+      // Bulk write: read the entire Ledger Row ID column for the data range,
+      // overlay our patches, write back once. Three round-trips total
+      // (read snapshot above, write column, fullClientSync) regardless of
+      // how many rows we're touching.
+      var height = data.length;
+      var lidWrites = new Array(height);
+      for (var k = 0; k < height; k++) {
+        lidWrites[k] = [data[k][lidCol - 1]];
+      }
+      for (var p = 0; p < patches.length; p++) {
+        lidWrites[patches[p].rowIdx] = [patches[p].newId];
+      }
+      billSh.getRange(2, lidCol, height, 1).setValues(lidWrites);
+      SpreadsheetApp.flush();
+
+      totalPatched += patches.length;
+      Logger.log("[wc-backfill] " + cName + " ✓ patched " + patches.length + " WC rows " +
+                 "(" + (wcRowsTotal - patches.length) + " already had IDs)");
+
+      // Mirror to Supabase. fullClientSync re-reads the sheet so it
+      // picks up the freshly stamped IDs.
+      try {
+        api_fullClientSync_(sid, ["billing"]);
+      } catch (syncErr) {
+        Logger.log("[wc-backfill] " + cName + " sync error (non-fatal): " + syncErr.message);
+      }
+    } catch (e) {
+      errors++;
+      Logger.log("[wc-backfill] " + cName + " ERROR: " + e.message);
+    }
+  }
+
+  var summary = "clients=" + totalClients + " patched=" + totalPatched +
+                " already_ok=" + totalAlreadyOk + " errors=" + errors;
+  Logger.log("runBackfillWcLedgerRowIds done: " + summary);
+  try {
+    supabaseUpsert_("stax_run_log", {
+      timestamp: new Date(startedAt).toISOString(),
+      fn: "runBackfillWcLedgerRowIds",
+      summary: summary
+    });
+  } catch (_) {}
 }
 
 /**
