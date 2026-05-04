@@ -1314,13 +1314,20 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
     task.shipmentNumber || null,
   );
   const tkRollupCtx = useMemo<RollupContext | null>(() => {
-    if (!renderAsPage || !taskItemIdStr) return null;
+    if (!renderAsPage) return null;
+    // For tasks without an itemId (rare — e.g. shipment-level tasks) the
+    // rollup degrades to a host-only scope so the page still surfaces task
+    // photos and the count badge stays accurate.
+    const itemIds = taskItemIdStr ? [taskItemIdStr] : [];
+    const scopes = taskItemIdStr
+      ? tkContainerScopes
+      : [{ entityType: 'task', entityId: task.taskId }];
     return {
       tenantId: clientSheetId ?? null,
-      itemIds: [taskItemIdStr],
-      scopes: tkContainerScopes,
+      itemIds,
+      scopes,
     };
-  }, [renderAsPage, taskItemIdStr, clientSheetId, tkContainerScopes]);
+  }, [renderAsPage, taskItemIdStr, task.taskId, clientSheetId, tkContainerScopes]);
 
   const { photos: tkPhotos } = usePhotoGraphRollup(
     tkRollupCtx ?? { tenantId: null, itemIds: [], scopes: [], enabled: false }
@@ -1334,9 +1341,9 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
     tenantId: clientSheetId ?? null,
     enabled: !!renderAsPage,
   });
-  const tkPhotoCount = renderAsPage && tkRollupCtx ? tkPhotos.length : 0;
+  const tkPhotoCount = renderAsPage ? tkPhotos.length : 0;
   const tkDocCount = renderAsPage ? tkDocs.length : 0;
-  const tkNoteCount = renderAsPage && tkRollupCtx ? tkNotes.length : 0;
+  const tkNoteCount = renderAsPage ? tkNotes.length : 0;
 
   const taskDriveFolders: DriveFolderLink[] = [
     ...(activeFolderUrl ? [{ label: `Task ${task.taskId}`, url: activeFolderUrl }] : []),
@@ -1575,13 +1582,15 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
           // v2026-05-04 — graph rollup also active in slide-out panel mode
           // so the same Shipment / WC / Item photos surface regardless of
           // whether the user opened the task as a page or a side panel.
-          rollupCtx: task.itemId
-            ? {
-                tenantId: clientSheetId ?? null,
-                itemIds: [String(task.itemId)],
-                scopes: tkContainerScopes,
-              }
-            : null,
+          // For orphan tasks (no itemId) we still pass a rollup ctx scoped
+          // to the task so the badge count stays correct.
+          rollupCtx: {
+            tenantId: clientSheetId ?? null,
+            itemIds: task.itemId ? [String(task.itemId)] : [],
+            scopes: task.itemId
+              ? tkContainerScopes
+              : [{ entityType: 'task', entityId: task.taskId }],
+          },
         },
         docs: {
           contextType: 'task',
@@ -1596,13 +1605,13 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
             : [],
           enableSourceFilter: !!task.itemId,
           itemId: task.itemId ? String(task.itemId) : null,
-          rollupCtx: task.itemId
-            ? {
-                tenantId: clientSheetId ?? null,
-                itemIds: [String(task.itemId)],
-                scopes: tkContainerScopes,
-              }
-            : null,
+          rollupCtx: {
+            tenantId: clientSheetId ?? null,
+            itemIds: task.itemId ? [String(task.itemId)] : [],
+            scopes: task.itemId
+              ? tkContainerScopes
+              : [{ entityType: 'task', entityId: task.taskId }],
+          },
         },
         activity: {
           entityType: 'task',

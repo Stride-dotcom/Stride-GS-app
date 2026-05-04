@@ -65,13 +65,16 @@ export function PhotoGallery({
   // Session 74: `setPrimaryPhoto` is still exported by usePhotos for
   // interface compatibility but no longer consumed here — the "Make
   // Primary" feature was removed from the UI.
-  const hostHook = usePhotos({ entityType, entityId, tenantId, itemId });
-  const rollupHook = usePhotoGraphRollup(rollupCtx ?? { tenantId, itemIds: [], scopes: [], enabled: false });
+  const useRollup = !!rollupCtx;
   // When a rollup context is supplied, the read view comes from the rollup
   // hook; mutations always go through the host hook so the (entity_type,
   // entity_id, item_id) stamping rules in usePhotos.uploadPhoto stay
   // authoritative. Realtime in the rollup hook picks the change up.
-  const useRollup = !!rollupCtx;
+  // The host hook is disabled in rollup mode — its mutation functions still
+  // work (they don't depend on `enabled`), but its read query and realtime
+  // subscription are skipped to avoid duplicate channels and wasted reads.
+  const hostHook = usePhotos({ entityType, entityId, tenantId, itemId, enabled: !useRollup });
+  const rollupHook = usePhotoGraphRollup(rollupCtx ?? { tenantId, itemIds: [], scopes: [], enabled: false });
   const photos = useRollup ? rollupHook.photos : hostHook.photos;
   const loading = useRollup ? rollupHook.loading : hostHook.loading;
   const error = (useRollup ? rollupHook.error : null) ?? hostHook.error;

@@ -129,6 +129,22 @@ function ctxKey(ctx: RollupContext): string {
   return `${ctx.tenantId ?? ''}::${ids}::${scopes}::${ctx.enabled === false ? '0' : '1'}`;
 }
 
+/**
+ * Short, stable digest of a ctxKey for the realtime channel name. Channel
+ * names need to be unique across hook instances on the same tenant — two
+ * panels open at once (e.g. Item + Task) routinely produce different
+ * scopes, and a naive `slice(0, 32)` of a tenant-prefixed key collides.
+ * Tiny FNV-1a, plenty for distinguishing scopes per tenant.
+ */
+function ctxDigest(s: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
+  }
+  return h.toString(36);
+}
+
 function rowToPhoto(r: PhotoRow): Photo {
   return {
     id: r.id,
@@ -261,7 +277,7 @@ export function usePhotoGraphRollup(ctx: RollupContext): PhotoRollupResult {
   useEffect(() => {
     if (!enabled || !ctx.tenantId) return;
     const channel = supabase
-      .channel(`item_photos_rollup:${ctx.tenantId}:${key.slice(0, 32)}`)
+      .channel(`item_photos_rollup:${ctx.tenantId}:${ctxDigest(key)}`)
       .on('postgres_changes',
         { event: '*', schema: 'public', table: 'item_photos', filter: `tenant_id=eq.${ctx.tenantId}` },
         () => { void refetch(); })
@@ -321,7 +337,7 @@ export function useNoteGraphRollup(ctx: RollupContext): NoteRollupResult {
   useEffect(() => {
     if (!enabled || !ctx.tenantId) return;
     const channel = supabase
-      .channel(`entity_notes_rollup:${ctx.tenantId}:${key.slice(0, 32)}`)
+      .channel(`entity_notes_rollup:${ctx.tenantId}:${ctxDigest(key)}`)
       .on('postgres_changes',
         { event: '*', schema: 'public', table: 'entity_notes', filter: `tenant_id=eq.${ctx.tenantId}` },
         () => { void refetch(); })

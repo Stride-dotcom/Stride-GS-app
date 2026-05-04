@@ -1410,14 +1410,16 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
     repairItemIdStr,
     repair.clientSheetId ?? null,
   );
-  const rpRollupCtx = useMemo<RollupContext | null>(() => {
-    if (!repairItemIdStr) return null;
-    return {
-      tenantId: repair.clientSheetId ?? null,
-      itemIds: [repairItemIdStr],
-      scopes: rpContainerScopes,
-    };
-  }, [repairItemIdStr, repair.clientSheetId, rpContainerScopes]);
+  const rpRollupCtx = useMemo<RollupContext>(() => ({
+    tenantId: repair.clientSheetId ?? null,
+    // Orphan repairs (no itemId — should be rare) degrade gracefully to a
+    // host-only scope so the photo / note rollup still finds the repair's
+    // own records.
+    itemIds: repairItemIdStr ? [repairItemIdStr] : [],
+    scopes: repairItemIdStr
+      ? rpContainerScopes
+      : [{ entityType: 'repair', entityId: repair.repairId }],
+  }), [repairItemIdStr, repair.repairId, repair.clientSheetId, rpContainerScopes]);
 
   const builtInTabsCfg = {
     photos: {
@@ -1453,9 +1455,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
 
   // ── Page-mode enhancements ──
   const { photos: rpPhotos } = usePhotoGraphRollup(
-    renderAsPage && rpRollupCtx
-      ? rpRollupCtx
-      : { tenantId: null, itemIds: [], scopes: [], enabled: false }
+    renderAsPage ? rpRollupCtx : { tenantId: null, itemIds: [], scopes: [], enabled: false }
   );
   const { documents: rpDocs } = useDocuments({
     contextType: 'repair',
@@ -1464,9 +1464,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
     enabled: !!renderAsPage,
   });
   const { notes: rpNotes } = useNoteGraphRollup(
-    renderAsPage && rpRollupCtx
-      ? rpRollupCtx
-      : { tenantId: null, itemIds: [], scopes: [], enabled: false }
+    renderAsPage ? rpRollupCtx : { tenantId: null, itemIds: [], scopes: [], enabled: false }
   );
   const rpPhotoCount = renderAsPage ? rpPhotos.length : 0;
   const rpDocCount   = renderAsPage ? rpDocs.length   : 0;
