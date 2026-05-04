@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.169.0 — 2026-05-04 PST — Stax invoice inline edits actually persist now. handleUpdateStaxInvoice_ used POSITIONAL columns (5=Due Date, 6=Amount, 9=Status, 11=Notes, 2=Customer) for every write while the read path (sheetToObjects_) used header names — once the Invoices sheet had a column inserted (Is Test, Scheduled Date, Auto Charge, Stax Invoice Link were appended at various times) the writes silently landed in the WRONG column and the React Charge Queue's optimistic update reverted on refresh. Same class as v38.152.0 / v38.167.0; same fix: every column lookup now goes through api_ensureColumn_ (case-insensitive, auto-appends if missing) — Due Date, Scheduled Date, Notes, Amount, Customer, Stax Customer ID, Status, QB Invoice #. handleToggleAutoCharge_ was case-sensitive on the "Auto Charge" header and silently appended a duplicate column on any case drift; switched to api_ensureColumn_. To prevent duplicate-column drift biting future writes, api_ensureColumn_ now returns the LAST matching column (mirroring sheetToObjects_'s last-write-wins semantics) — write and read agree on the same column even when duplicates already exist on a sheet.
+   StrideAPI.gs — v38.170.0 — 2026-05-04 PST — Sweep: every Stax Invoices write is now header-resolved. Justin's "I'm tired of patching hole after hole" — same class of bug (positional column indexes drifting when a column is inserted) was lurking in handleBatchVoidStaxInvoices_, handleBatchDeleteStaxInvoices_, handleDeleteStaxInvoice_, handleVoidStaxInvoice_, handleResetStaxInvoiceStatus_, handleLinkStaxInvoiceToExisting_, handleChargeSingleInvoice_, handleSendStaxPayLinks_, handleSendStaxPayLink_ — all wrote Status (col 9) and Notes (col 11) positionally. Now ALL of them resolve via stax_invoiceCols_(invSheet) (caches qb / customer / staxCustId / dueDate / amount / status / notes / staxId / autoCharge / scheduledDate / etc. via api_ensureColumn_). Same sweep covered handleUpdateEmailTemplate_ (Subject + HTML Body cols), qbo_saveMappingRow_ (QBO Customer ID / Sidemark / Sub-Job ID on Stax Customers), and handleSyncStaxCustomerIds_ (Stax Customer ID col). Net: zero positional writes remain on any user-facing entity sheet across StrideAPI.gs. Settings key/value sheets (col 1=Key, col 2=Value) left alone — stable layout, lower risk.
+   v38.169.0 — 2026-05-04 PST — Stax invoice inline edits actually persist now. handleUpdateStaxInvoice_ used POSITIONAL columns (5=Due Date, 6=Amount, 9=Status, 11=Notes, 2=Customer) for every write while the read path (sheetToObjects_) used header names — once the Invoices sheet had a column inserted (Is Test, Scheduled Date, Auto Charge, Stax Invoice Link were appended at various times) the writes silently landed in the WRONG column and the React Charge Queue's optimistic update reverted on refresh. Same class as v38.152.0 / v38.167.0; same fix: every column lookup now goes through api_ensureColumn_ (case-insensitive, auto-appends if missing) — Due Date, Scheduled Date, Notes, Amount, Customer, Stax Customer ID, Status, QB Invoice #. handleToggleAutoCharge_ was case-sensitive on the "Auto Charge" header and silently appended a duplicate column on any case drift; switched to api_ensureColumn_. To prevent duplicate-column drift biting future writes, api_ensureColumn_ now returns the LAST matching column (mirroring sheetToObjects_'s last-write-wins semantics) — write and read agree on the same column even when duplicates already exist on a sheet.
    v38.168.0 — 2026-05-04 PST — Inventory is the single source of truth for item-level fields now. New helper api_propagateItemFieldsToInventory_ takes (clientSheetId, itemId, {sidemark/reference/description/vendor/location/room/itemNotes/itemClass}) and writes back through handleUpdateInventoryItem_ — which already handles the Inventory write, the open-Tasks/Repairs fan-out, and Supabase write-through. handleUpdateBillingRow_ now calls it whenever a non-manual ledger row's Sidemark / Reference / Description is edited from the Billing Report — the same edit lands on the Inventory row and propagates to every other surface (Inventory grid, Tasks, Repairs, item detail panels, all Supabase mirrors). Manual charges are skipped (no inventory binding). This stops the cross-page drift Justin reported where a Billing Report sidemark edit didn't appear on Inventory or related task rows. The helper is reusable — wire it into any future entity handler that exposes item-level field edits.
    v38.167.0 — 2026-05-04 PST — Inventory inline edits actually persist now. handleUpdateInventoryItem_ used strict hmap[colName] lookups for every editable field (Vendor, Description, Reference, Sidemark, Room, Location, Class, Qty, Status, Item Notes, Declared Value, Coverage Option). On any client sheet whose header had different case or extra whitespace, the lookup returned undefined and the write silently no-op'd or rejected with SCHEMA_ERROR — the React optimistic patch took then reverted on the next refetch because nothing landed in the sheet. Justin reported this for sidemark; same class as v38.152.0's Billing fix. Switched the column resolution + the Tasks/Repairs fan-out (where missing Sidemark/Reference columns silently dropped propagation) to api_ensureColumn_ — case-insensitive, auto-appends if missing — so client sheets self-heal on the first inline edit after the fix ships and the writeThrough mirror back to Supabase carries the new value.
    v38.166.0 — 2026-05-04 PST — Stax invoice batches + auto-mirror to Supabase. Pre-v38.166.0 the "Stax IIF" button on the Billing page wrote rows to the Stax Invoices SHEET via auto-import (v38.21.0) but never called _sbResyncAllStaxInvoices, so the Supabase mirror was stale until something else triggered it — operators had to upload the same IIF on the Payments page just to fire the resync as a side effect. handleQbExport_ now calls _sbResyncAllStaxInvoices(getStaxSpreadsheet_()) right after the auto-import block so Payments → Review populates within ~1-2s of the Create Invoices click, no manual upload needed. Adds first-class batch concept: every qbExport invocation generates a batchId (BATCH-{timestamp}-{uuid6}) and writes one stax_invoice_batches row with totals + client summary, then PATCHes batch_id onto each freshly-mirrored stax_invoices row. Two new read endpoints: getStaxInvoiceBatches (paginated list for Payments → Batches view) and regenerateIifForBatch (rebuilds IIF text on demand from line_items_json — no file storage, generated fresh each request). Companion migration 20260504220000_stax_invoice_batches.sql adds the table + nullable batch_id FK. Drive IIF write left in place this PR — purely additive, removed in a follow-up after a few days of confidence.
@@ -12598,6 +12599,35 @@ function installCoverageColumns() {
   Logger.log(summary);
   for (var i = 0; i < log.length; i++) Logger.log(log[i]);
   return summary;
+}
+
+/**
+ * v38.170.0 — Cache of resolved column indexes for the Stax Invoices sheet,
+ * keyed by the canonical header name. Every Stax handler that writes a row
+ * field should resolve the column through this so a sheet column rearrange
+ * (Is Test / Scheduled Date / Auto Charge / Stax Invoice Link were each
+ * appended over time) cannot silently misroute writes to the wrong column.
+ *
+ * Returns 1-based column indexes. Auto-appends any missing header — same
+ * self-heal behavior as api_ensureColumn_.
+ */
+function stax_invoiceCols_(invSheet) {
+  return {
+    qb:           api_ensureColumn_(invSheet, "QB Invoice #"),
+    customer:     api_ensureColumn_(invSheet, "QB Customer Name"),
+    staxCustId:   api_ensureColumn_(invSheet, "Stax Customer ID"),
+    invoiceDate:  api_ensureColumn_(invSheet, "Invoice Date"),
+    dueDate:      api_ensureColumn_(invSheet, "Due Date"),
+    amount:       api_ensureColumn_(invSheet, "Total Amount"),
+    lineItems:    api_ensureColumn_(invSheet, "Line Items JSON"),
+    staxId:       api_ensureColumn_(invSheet, "Stax Invoice ID"),
+    status:       api_ensureColumn_(invSheet, "Status"),
+    createdAt:    api_ensureColumn_(invSheet, "Created At"),
+    notes:        api_ensureColumn_(invSheet, "Notes"),
+    isTest:       api_ensureColumn_(invSheet, "Is Test"),
+    autoCharge:   api_ensureColumn_(invSheet, "Auto Charge"),
+    scheduledDate: api_ensureColumn_(invSheet, "Scheduled Date")
+  };
 }
 
 function api_ensureColumn_(sheet, headerName) {
@@ -26479,11 +26509,12 @@ function handleBatchVoidStaxInvoices_(payload) {
     return jsonResponse_(result);
   }
 
+  var cols = stax_invoiceCols_(invSheet);
   var invData = invSheet.getDataRange().getValues();
   // Build lookup: qbInvoiceNo → rowIndex (1-based, like the sheet)
   var rowByNo = {};
   for (var r = 1; r < invData.length; r++) {
-    var qb = String(invData[r][0] || "").trim();
+    var qb = String(invData[r][cols.qb - 1] || "").trim();
     if (qb) rowByNo[qb] = r + 1;
   }
 
@@ -26493,13 +26524,13 @@ function handleBatchVoidStaxInvoices_(payload) {
     try {
       var row1 = rowByNo[id];
       if (!row1) { api_batchSkip_(result, id, "Not found"); continue; }
-      var currentStatus = String(invData[row1 - 1][8] || "").trim().toUpperCase();
+      var currentStatus = String(invData[row1 - 1][cols.status - 1] || "").trim().toUpperCase();
       if (currentStatus === "PAID") {
         api_batchSkip_(result, id, "Cannot void a PAID invoice — refund in Stax dashboard first");
         continue;
       }
-      invSheet.getRange(row1, 9).setValue("VOIDED");
-      invSheet.getRange(row1, 11).setValue("Voided from Stride Hub");
+      invSheet.getRange(row1, cols.status).setValue("VOIDED");
+      invSheet.getRange(row1, cols.notes).setValue("Voided from Stride Hub");
       result.succeeded++;
     } catch (rowErr) {
       api_batchError_(result, id, String(rowErr));
@@ -26540,10 +26571,11 @@ function handleBatchDeleteStaxInvoices_(payload) {
     return jsonResponse_(result);
   }
 
+  var cols = stax_invoiceCols_(invSheet);
   var invData = invSheet.getDataRange().getValues();
   var rowByNo = {};
   for (var r = 1; r < invData.length; r++) {
-    var qb = String(invData[r][0] || "").trim();
+    var qb = String(invData[r][cols.qb - 1] || "").trim();
     if (qb) rowByNo[qb] = r + 1;
   }
 
@@ -26553,13 +26585,13 @@ function handleBatchDeleteStaxInvoices_(payload) {
     try {
       var row1 = rowByNo[id];
       if (!row1) { api_batchSkip_(result, id, "Not found"); continue; }
-      var currentStatus = String(invData[row1 - 1][8] || "").trim().toUpperCase();
+      var currentStatus = String(invData[row1 - 1][cols.status - 1] || "").trim().toUpperCase();
       if (currentStatus !== "PENDING") {
         api_batchSkip_(result, id, "Can only delete PENDING invoices (current: " + currentStatus + ")");
         continue;
       }
-      invSheet.getRange(row1, 9).setValue("DELETED");
-      invSheet.getRange(row1, 11).setValue("Deleted from Stride Hub");
+      invSheet.getRange(row1, cols.status).setValue("DELETED");
+      invSheet.getRange(row1, cols.notes).setValue("Deleted from Stride Hub");
       result.succeeded++;
     } catch (rowErr) {
       api_batchError_(result, id, String(rowErr));
@@ -28437,14 +28469,18 @@ function handleUpdateEmailTemplate_(payload) {
       var masterSS = SpreadsheetApp.openById(masterSsId);
       var tmplSh = masterSS.getSheetByName("Email_Templates");
       if (tmplSh && tmplSh.getLastRow() >= 2) {
-        var data = tmplSh.getRange(2, 1, tmplSh.getLastRow() - 1, 1).getValues();
+        // Header-based column lookup — safe against drift in MPL Email_Templates.
+        var keyCol     = api_ensureColumn_(tmplSh, "Template Key");
+        var subjectCol = api_ensureColumn_(tmplSh, "Subject");
+        var bodyCol    = api_ensureColumn_(tmplSh, "HTML Body");
+        var data = tmplSh.getRange(2, keyCol, tmplSh.getLastRow() - 1, 1).getValues();
         var matchRow = -1;
         for (var i = 0; i < data.length; i++) {
           if (String(data[i][0] || "").trim() === templateKey) { matchRow = i + 2; break; }
         }
         if (matchRow >= 2) {
-          if (hasSubject) tmplSh.getRange(matchRow, 2).setValue(String(payload.subject));
-          if (hasBody)    tmplSh.getRange(matchRow, 3).setValue(String(payload.bodyHtml));
+          if (hasSubject) tmplSh.getRange(matchRow, subjectCol).setValue(String(payload.subject));
+          if (hasBody)    tmplSh.getRange(matchRow, bodyCol).setValue(String(payload.bodyHtml));
         }
       }
     }
@@ -31265,11 +31301,17 @@ function handleSaveStaxCustomerMapping_(payload) {
   var sheet = ss.getSheetByName("Customers");
   if (!sheet) return errorResponse_("Customers tab not found", "NOT_FOUND");
 
+  // Header-resolved column indexes for the Stax Customers tab. Switching
+  // away from positional col 1 / col 4 so a column insert / reorder doesn't
+  // silently misroute Stax Customer ID writes.
+  var qbNameCol     = api_ensureColumn_(sheet, "QB Customer Name");
+  var staxCustIdCol = api_ensureColumn_(sheet, "Stax Customer ID");
+
   var data = sheet.getDataRange().getValues();
   // Build lookup: normalized QB name → row index (1-based)
   var nameToRow = {};
   for (var i = 1; i < data.length; i++) {
-    var n = stax_normalizeName_(data[i][0]);
+    var n = stax_normalizeName_(data[i][qbNameCol - 1]);
     if (n) nameToRow[n] = i + 1;
   }
 
@@ -31283,8 +31325,7 @@ function handleSaveStaxCustomerMapping_(payload) {
     var existingRow = nameToRow[normalized];
 
     if (existingRow) {
-      // Update Stax Customer ID (column D = index 4, 1-based col 4)
-      sheet.getRange(existingRow, 4).setValue(staxId);
+      sheet.getRange(existingRow, staxCustIdCol).setValue(staxId);
       updated++;
     } else {
       // Append new row: QB Customer Name, Stax Company Name, Stax Customer Name, Stax Customer ID, Email, Payment Method, Notes
@@ -32427,27 +32468,28 @@ function handleDeleteStaxInvoice_(payload) {
   var invSheet = ss.getSheetByName("Invoices");
   if (!invSheet) return errorResponse_("Invoices tab not found", "NOT_FOUND");
 
+  var cols = stax_invoiceCols_(invSheet);
   var invData = invSheet.getDataRange().getValues();
   var foundRow = -1;
 
   // Prefer rowIndex (handles duplicates); fall back to QB# search
   if (rowIndex >= 2 && rowIndex <= invData.length) {
     foundRow = rowIndex - 1; // Convert to 0-based
-    qbInvoiceNo = qbInvoiceNo || String(invData[foundRow][0] || "").trim();
+    qbInvoiceNo = qbInvoiceNo || String(invData[foundRow][cols.qb - 1] || "").trim();
   } else {
     for (var i = 1; i < invData.length; i++) {
-      if (String(invData[i][0] || "").trim() === qbInvoiceNo) { foundRow = i; break; }
+      if (String(invData[i][cols.qb - 1] || "").trim() === qbInvoiceNo) { foundRow = i; break; }
     }
   }
   if (foundRow < 0) return errorResponse_("Invoice not found", "NOT_FOUND");
 
-  var currentStatus = String(invData[foundRow][8] || "").trim().toUpperCase();
+  var currentStatus = String(invData[foundRow][cols.status - 1] || "").trim().toUpperCase();
   if (currentStatus !== "PENDING") {
     return errorResponse_("Can only delete PENDING invoices (current: " + currentStatus + "). Use Void for CREATED invoices.", "INVALID_STATE");
   }
 
-  invSheet.getRange(foundRow + 1, 9).setValue("DELETED");
-  invSheet.getRange(foundRow + 1, 11).setValue("Deleted from Stride Hub");
+  invSheet.getRange(foundRow + 1, cols.status).setValue("DELETED");
+  invSheet.getRange(foundRow + 1, cols.notes).setValue("Deleted from Stride Hub");
 
   try { CacheService.getScriptCache().remove("stax_invoices"); } catch (e) {}
   stax_appendRunLog_(ss, "deleteStaxInvoice", "Deleted QB#" + qbInvoiceNo, "");
@@ -33225,6 +33267,7 @@ function handleChargeSingleInvoice_(payload) {
   var invSheet = ss.getSheetByName("Invoices");
   if (!invSheet) return errorResponse_("Invoices tab not found", "NOT_FOUND");
 
+  var cols = stax_invoiceCols_(invSheet);
   var invData = invSheet.getDataRange().getValues();
   var foundRow = -1;
   var staxInvId = "";
@@ -33235,17 +33278,17 @@ function handleChargeSingleInvoice_(payload) {
   var dueDate = "";
 
   for (var i = 1; i < invData.length; i++) {
-    var rowDocNum = String(invData[i][0] || "").trim();
-    var rowStaxId = String(invData[i][7] || "").trim();
+    var rowDocNum = String(invData[i][cols.qb - 1] || "").trim();
+    var rowStaxId = String(invData[i][cols.staxId - 1] || "").trim();
 
     if ((qbInvoiceNo && rowDocNum === qbInvoiceNo) ||
         (staxInvoiceId && rowStaxId === staxInvoiceId)) {
       foundRow = i;
       docNum     = rowDocNum;
-      custName   = String(invData[i][1] || "").trim();
-      staxCustId = String(invData[i][2] || "").trim();
-      dueDate    = invData[i][4];
-      totalRaw   = invData[i][5];
+      custName   = String(invData[i][cols.customer - 1] || "").trim();
+      staxCustId = String(invData[i][cols.staxCustId - 1] || "").trim();
+      dueDate    = invData[i][cols.dueDate - 1];
+      totalRaw   = invData[i][cols.amount - 1];
       staxInvId  = rowStaxId;
       break;
     }
@@ -33278,16 +33321,16 @@ function handleChargeSingleInvoice_(payload) {
   var staxStatus = String(invCheck.data.status || "").toUpperCase();
   if (staxStatus === "PAID") {
     // Update sheet to reflect
-    invSheet.getRange(foundRow + 1, 9).setValue("PAID");
-    invSheet.getRange(foundRow + 1, 11).setValue("Already paid in Stax");
+    invSheet.getRange(foundRow + 1, cols.status).setValue("PAID");
+    invSheet.getRange(foundRow + 1, cols.notes).setValue("Already paid in Stax");
     try { CacheService.getScriptCache().remove("stax_invoices"); } catch (e) {}
     return jsonResponse_({ success: true, status: "ALREADY_PAID", transactionId: "", message: "Invoice was already paid in Stax" });
   }
 
   var balanceCheck = parseFloat(invCheck.data.balance_due);
   if (!isNaN(balanceCheck) && balanceCheck <= 0) {
-    invSheet.getRange(foundRow + 1, 9).setValue("PAID");
-    invSheet.getRange(foundRow + 1, 11).setValue("Balance due is zero in Stax");
+    invSheet.getRange(foundRow + 1, cols.status).setValue("PAID");
+    invSheet.getRange(foundRow + 1, cols.notes).setValue("Balance due is zero in Stax");
     try { CacheService.getScriptCache().remove("stax_invoices"); } catch (e) {}
     return jsonResponse_({ success: true, status: "ALREADY_PAID", transactionId: "", message: "Invoice balance is zero" });
   }
@@ -33297,8 +33340,8 @@ function handleChargeSingleInvoice_(payload) {
   if (!pm.found) {
     stax_appendChargeLog_(ss, docNum, staxInvId, staxCustId, custName, totalRaw, "NO_PAYMENT_METHOD", "", pm.error || "");
     stax_appendException_(ss, docNum, custName, staxCustId, totalRaw, dueDate, "NO_PAYMENT_METHOD", payUrlBase + staxInvId);
-    invSheet.getRange(foundRow + 1, 9).setValue("CHARGE_FAILED");
-    invSheet.getRange(foundRow + 1, 11).setValue("No payment method on file");
+    invSheet.getRange(foundRow + 1, cols.status).setValue("CHARGE_FAILED");
+    invSheet.getRange(foundRow + 1, cols.notes).setValue("No payment method on file");
     try { CacheService.getScriptCache().remove("stax_invoices"); } catch (e) {}
     return errorResponse_("No payment method on file for this customer", "NO_PAYMENT_METHOD");
   }
@@ -33322,25 +33365,25 @@ function handleChargeSingleInvoice_(payload) {
 
   // SAFEGUARD 3: Write charge-attempt marker
   var now = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm:ss");
-  invSheet.getRange(foundRow + 1, 11).setValue("CHARGE_ATTEMPT|" + now);
+  invSheet.getRange(foundRow + 1, cols.notes).setValue("CHARGE_ATTEMPT|" + now);
 
   // EXECUTE CHARGE
   var chargeResult = stax_chargeInvoice_(staxInvId, pm.methodId);
 
   if (chargeResult.success) {
-    invSheet.getRange(foundRow + 1, 9).setValue("PAID");
-    invSheet.getRange(foundRow + 1, 11).setValue("Paid via " + pm.methodId + " | txn: " + chargeResult.transactionId);
+    invSheet.getRange(foundRow + 1, cols.status).setValue("PAID");
+    invSheet.getRange(foundRow + 1, cols.notes).setValue("Paid via " + pm.methodId + " | txn: " + chargeResult.transactionId);
     stax_appendChargeLog_(ss, docNum, staxInvId, staxCustId, custName, totalRaw, "SUCCESS", chargeResult.transactionId, "");
     stax_appendRunLog_(ss, "chargeSingleInvoice", "Charged QB#" + docNum + " — txn: " + chargeResult.transactionId, "");
   } else if (chargeResult.partial) {
-    invSheet.getRange(foundRow + 1, 9).setValue("CHARGE_FAILED");
-    invSheet.getRange(foundRow + 1, 11).setValue("Partial payment: " + chargeResult.error);
+    invSheet.getRange(foundRow + 1, cols.status).setValue("CHARGE_FAILED");
+    invSheet.getRange(foundRow + 1, cols.notes).setValue("Partial payment: " + chargeResult.error);
     stax_appendChargeLog_(ss, docNum, staxInvId, staxCustId, custName, totalRaw, "PARTIAL", chargeResult.transactionId, chargeResult.error);
     stax_appendException_(ss, docNum, custName, staxCustId, totalRaw, dueDate, "PARTIAL", payUrlBase + staxInvId);
   } else {
     var chargeStatus = chargeResult.declined ? "DECLINED" : "API_ERROR";
-    invSheet.getRange(foundRow + 1, 9).setValue("CHARGE_FAILED");
-    invSheet.getRange(foundRow + 1, 11).setValue(chargeStatus + ": " + String(chargeResult.error || "").substring(0, 200));
+    invSheet.getRange(foundRow + 1, cols.status).setValue("CHARGE_FAILED");
+    invSheet.getRange(foundRow + 1, cols.notes).setValue(chargeStatus + ": " + String(chargeResult.error || "").substring(0, 200));
     stax_appendChargeLog_(ss, docNum, staxInvId, staxCustId, custName, totalRaw, chargeStatus, "", chargeResult.error);
     stax_appendException_(ss, docNum, custName, staxCustId, totalRaw, dueDate, chargeStatus, payUrlBase + staxInvId);
   }
@@ -33397,26 +33440,27 @@ function handleVoidStaxInvoice_(payload) {
   var invSheet = ss.getSheetByName("Invoices");
   if (!invSheet) return errorResponse_("Invoices tab not found", "NOT_FOUND");
 
+  var cols = stax_invoiceCols_(invSheet);
   var invData = invSheet.getDataRange().getValues();
   var foundRow = -1;
 
   if (rowIndex >= 2 && rowIndex <= invData.length) {
     foundRow = rowIndex - 1;
-    qbInvoiceNo = qbInvoiceNo || String(invData[foundRow][0] || "").trim();
+    qbInvoiceNo = qbInvoiceNo || String(invData[foundRow][cols.qb - 1] || "").trim();
   } else {
     for (var i = 1; i < invData.length; i++) {
-      if (String(invData[i][0] || "").trim() === qbInvoiceNo) { foundRow = i; break; }
+      if (String(invData[i][cols.qb - 1] || "").trim() === qbInvoiceNo) { foundRow = i; break; }
     }
   }
   if (foundRow < 0) return errorResponse_("Invoice not found", "NOT_FOUND");
 
-  var currentStatus = String(invData[foundRow][8] || "").trim().toUpperCase();
+  var currentStatus = String(invData[foundRow][cols.status - 1] || "").trim().toUpperCase();
   if (currentStatus === "PAID") {
     return errorResponse_("Cannot void a PAID invoice — refund in Stax dashboard first", "INVALID_STATE");
   }
 
-  invSheet.getRange(foundRow + 1, 9).setValue("VOIDED");
-  invSheet.getRange(foundRow + 1, 11).setValue("Voided from Stride Hub");
+  invSheet.getRange(foundRow + 1, cols.status).setValue("VOIDED");
+  invSheet.getRange(foundRow + 1, cols.notes).setValue("Voided from Stride Hub");
 
   // Invalidate cache
   try { CacheService.getScriptCache().remove("stax_invoices"); } catch (e) {}
@@ -33497,19 +33541,20 @@ function handleResetStaxInvoiceStatus_(payload) {
   var invSheet = ss.getSheetByName("Invoices");
   if (!invSheet) return errorResponse_("Invoices tab not found", "NOT_FOUND");
 
+  var cols = stax_invoiceCols_(invSheet);
   var invData = invSheet.getDataRange().getValues();
   var foundRow = -1;
   var hasStaxId = false;
   for (var i = 1; i < invData.length; i++) {
-    if (String(invData[i][0] || "").trim() === qbInvoiceNo) {
+    if (String(invData[i][cols.qb - 1] || "").trim() === qbInvoiceNo) {
       foundRow = i;
-      hasStaxId = !!String(invData[i][7] || "").trim();
+      hasStaxId = !!String(invData[i][cols.staxId - 1] || "").trim();
       break;
     }
   }
   if (foundRow < 0) return errorResponse_("Invoice '" + qbInvoiceNo + "' not found", "NOT_FOUND");
 
-  var currentStatus = String(invData[foundRow][8] || "").trim().toUpperCase();
+  var currentStatus = String(invData[foundRow][cols.status - 1] || "").trim().toUpperCase();
   if (currentStatus === "PAID") {
     return errorResponse_("Cannot reset a PAID invoice", "INVALID_STATE");
   }
@@ -33519,8 +33564,8 @@ function handleResetStaxInvoiceStatus_(payload) {
 
   // Reset to CREATED if it already has a Stax ID, PENDING otherwise
   var newStatus = hasStaxId ? "CREATED" : "PENDING";
-  invSheet.getRange(foundRow + 1, 9).setValue(newStatus);
-  invSheet.getRange(foundRow + 1, 11).setValue("Reset from " + currentStatus + " to " + newStatus + " via Stride Hub");
+  invSheet.getRange(foundRow + 1, cols.status).setValue(newStatus);
+  invSheet.getRange(foundRow + 1, cols.notes).setValue("Reset from " + currentStatus + " to " + newStatus + " via Stride Hub");
 
   try { CacheService.getScriptCache().remove("stax_invoices"); } catch (e) {}
   stax_appendRunLog_(ss, "resetInvoiceStatus", "Reset QB#" + qbInvoiceNo + ": " + currentStatus + " → " + newStatus, "");
@@ -33566,14 +33611,15 @@ function handleLinkStaxInvoiceToExisting_(payload) {
   var invSheet = ss.getSheetByName("Invoices");
   if (!invSheet) return errorResponse_("Invoices tab not found", "NOT_FOUND");
 
+  var cols = stax_invoiceCols_(invSheet);
   var invData = invSheet.getDataRange().getValues();
   var foundRow = -1;
   for (var i = 1; i < invData.length; i++) {
-    if (String(invData[i][0] || "").trim() === qbInvoiceNo) { foundRow = i; break; }
+    if (String(invData[i][cols.qb - 1] || "").trim() === qbInvoiceNo) { foundRow = i; break; }
   }
   if (foundRow < 0) return errorResponse_("Invoice '" + qbInvoiceNo + "' not found on Stax Invoices sheet", "NOT_FOUND");
 
-  var existingStaxId = String(invData[foundRow][7] || "").trim();
+  var existingStaxId = String(invData[foundRow][cols.staxId - 1] || "").trim();
   if (existingStaxId && !explicitStaxId) {
     return errorResponse_(
       "Invoice already has Stax ID " + existingStaxId + " — nothing to link. " +
@@ -33642,12 +33688,11 @@ function handleLinkStaxInvoiceToExisting_(payload) {
     }
   }
 
-  // Write back to the sheet: Stax Invoice ID (col 8), Status (col 9),
-  // Notes audit line (col 11).
-  invSheet.getRange(foundRow + 1, 8).setValue(resolvedStaxId);
-  invSheet.getRange(foundRow + 1, 9).setValue("CREATED");
+  // Write back to the sheet via header-resolved columns (header drift safe).
+  invSheet.getRange(foundRow + 1, cols.staxId).setValue(resolvedStaxId);
+  invSheet.getRange(foundRow + 1, cols.status).setValue("CREATED");
   var nowFmt = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm:ss");
-  invSheet.getRange(foundRow + 1, 11).setValue(
+  invSheet.getRange(foundRow + 1, cols.notes).setValue(
     "Linked to existing Stax invoice " + resolvedStaxId + " via Stride Hub on " + nowFmt
   );
 
@@ -33656,11 +33701,11 @@ function handleLinkStaxInvoiceToExisting_(payload) {
   // BUFFER_DAYS so the operator has a window to review or change the
   // schedule. Justin's INV-097/098 link → 9 AM auto-charge race was the
   // reason this exists.
-  var dueDateRaw = invData[foundRow][4];
+  var dueDateRaw = invData[foundRow][cols.dueDate - 1];
   var bufferedSched = stax_applyPastDueBuffer_(ss, invSheet, foundRow, dueDateRaw);
   if (bufferedSched) {
     var bufferNote = "Past-due Due Date detected — Scheduled Date set to " + bufferedSched + " to defer auto-charge (override on Charge Queue if needed).";
-    invSheet.getRange(foundRow + 1, 11).setValue(
+    invSheet.getRange(foundRow + 1, cols.notes).setValue(
       "Linked to existing Stax invoice " + resolvedStaxId + " via Stride Hub on " + nowFmt + " | " + bufferNote
     );
   }
@@ -33697,6 +33742,7 @@ function handleSendStaxPayLinks_() {
     var invSheet = ss.getSheetByName("Invoices");
     if (!invSheet) return errorResponse_("Invoices tab not found", "NOT_FOUND");
 
+    var cols = stax_invoiceCols_(invSheet);
     var invData = invSheet.getDataRange().getValues();
     if (invData.length <= 1) return jsonResponse_({ sent: 0, failed: 0, total: 0, summary: "No invoices" });
 
@@ -33705,15 +33751,15 @@ function handleSendStaxPayLinks_() {
     // Find eligible invoices (CHARGE_FAILED with Stax Invoice ID)
     var eligible = [];
     for (var i = 0; i < numRows; i++) {
-      var status = String(invData[i + 1][8] || "").trim().toUpperCase();
-      var staxInvId = String(invData[i + 1][7] || "").trim();
+      var status = String(invData[i + 1][cols.status - 1] || "").trim().toUpperCase();
+      var staxInvId = String(invData[i + 1][cols.staxId - 1] || "").trim();
       if (status === "CHARGE_FAILED" && staxInvId) {
         eligible.push({
           rowIndex: i,
-          docNum: String(invData[i + 1][0] || "").trim(),
-          custName: String(invData[i + 1][1] || "").trim(),
+          docNum: String(invData[i + 1][cols.qb - 1] || "").trim(),
+          custName: String(invData[i + 1][cols.customer - 1] || "").trim(),
           staxInvId: staxInvId,
-          amount: invData[i + 1][5]
+          amount: invData[i + 1][cols.amount - 1]
         });
       }
     }
@@ -33723,8 +33769,8 @@ function handleSendStaxPayLinks_() {
     }
 
     // Read columns for batch update
-    var colIRange = invSheet.getRange(2, 9, numRows, 1); // Status
-    var colKRange = invSheet.getRange(2, 11, numRows, 1); // Notes
+    var colIRange = invSheet.getRange(2, cols.status, numRows, 1); // Status
+    var colKRange = invSheet.getRange(2, cols.notes, numRows, 1);  // Notes
     var colIValues = colIRange.getValues();
     var colKValues = colKRange.getValues();
     var colIChanged = false, colKChanged = false;
@@ -33804,6 +33850,7 @@ function handleSendStaxPayLink_(payload) {
   var invSheet = ss.getSheetByName("Invoices");
   if (!invSheet) return errorResponse_("Invoices tab not found", "NOT_FOUND");
 
+  var cols = stax_invoiceCols_(invSheet);
   var invData = invSheet.getDataRange().getValues();
   var foundRow = -1;
   var staxInvId = "";
@@ -33811,14 +33858,14 @@ function handleSendStaxPayLink_(payload) {
   var custName = "";
 
   for (var i = 1; i < invData.length; i++) {
-    var rowDocNum = String(invData[i][0] || "").trim();
-    var rowStaxId = String(invData[i][7] || "").trim();
+    var rowDocNum = String(invData[i][cols.qb - 1] || "").trim();
+    var rowStaxId = String(invData[i][cols.staxId - 1] || "").trim();
 
     if ((qbInvoiceNo && rowDocNum === qbInvoiceNo) ||
         (staxInvoiceId && rowStaxId === staxInvoiceId)) {
       foundRow = i;
       docNum    = rowDocNum;
-      custName  = String(invData[i][1] || "").trim();
+      custName  = String(invData[i][cols.customer - 1] || "").trim();
       staxInvId = rowStaxId;
       break;
     }
@@ -33831,8 +33878,8 @@ function handleSendStaxPayLink_(payload) {
   var now = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm:ss");
 
   if (sendResult.success) {
-    invSheet.getRange(foundRow + 1, 9).setValue("SENT");
-    invSheet.getRange(foundRow + 1, 11).setValue("Pay link emailed " + now);
+    invSheet.getRange(foundRow + 1, cols.status).setValue("SENT");
+    invSheet.getRange(foundRow + 1, cols.notes).setValue("Pay link emailed " + now);
     stax_appendRunLog_(ss, "sendStaxPayLink", "Sent for QB#" + docNum + " (" + custName + ")", "");
   } else {
     stax_appendException_(ss, docNum, custName, "", "", "", "SEND_FAILED", "");
@@ -36934,17 +36981,27 @@ function qbo_getCustomerContactInfo_(customerId, token, realmId, cache) {
  * Only writes cols H/I/J (indices 7/8/9). Never touches A-G.
  */
 function qbo_saveMappingRow_(sheet, data, existingRowIdx, clientName, sidemark, parentQboId, subJobQboId) {
+  // Header-based column resolution — safe if Stax Customers tab gets columns
+  // inserted / reordered. The prior hardcoded col 8/9/10 layout would write
+  // to the wrong column on any sheet drift, with no error surfaced.
+  var qboCustIdCol = api_ensureColumn_(sheet, "QBO Customer ID");
+  var sidemarkCol  = api_ensureColumn_(sheet, "Sidemark");
+  var qboSubJobCol = api_ensureColumn_(sheet, "QBO Sub-Job ID");
   if (existingRowIdx >= 1) {
     // Update existing row (existingRowIdx is 0-based in data array → sheet row = idx + 1)
     var sheetRow = existingRowIdx + 1;
-    sheet.getRange(sheetRow, 8).setValue(parentQboId);   // Col H
-    sheet.getRange(sheetRow, 9).setValue(sidemark);       // Col I
-    sheet.getRange(sheetRow, 10).setValue(subJobQboId);   // Col J
+    sheet.getRange(sheetRow, qboCustIdCol).setValue(parentQboId);
+    sheet.getRange(sheetRow, sidemarkCol).setValue(sidemark);
+    sheet.getRange(sheetRow, qboSubJobCol).setValue(subJobQboId);
   } else {
-    // Append new row — fill col A with clientName, cols H/I/J with QBO data
-    // Cols B-G left empty (Stax manages those separately)
-    var newRow = [clientName, "", "", "", "", "", "", parentQboId, sidemark, subJobQboId];
-    sheet.appendRow(newRow);
+    // Append new row at the next free position — write the three QBO fields
+    // by header lookup so a custom client column layout doesn't shift them.
+    var clientNameCol = api_ensureColumn_(sheet, "Client Name");
+    var newSheetRow = sheet.getLastRow() + 1;
+    sheet.getRange(newSheetRow, clientNameCol).setValue(clientName);
+    sheet.getRange(newSheetRow, qboCustIdCol).setValue(parentQboId);
+    sheet.getRange(newSheetRow, sidemarkCol).setValue(sidemark);
+    sheet.getRange(newSheetRow, qboSubJobCol).setValue(subJobQboId);
   }
 }
 
