@@ -8,6 +8,8 @@ import { DriveFoldersList, type DriveFolderLink } from './DriveFoldersList';
 import { usePhotos } from '../../hooks/usePhotos';
 import { useDocuments } from '../../hooks/useDocuments';
 import { useEntityNotes } from '../../hooks/useEntityNotes';
+import { usePhotoGraphRollup, useNoteGraphRollup, type RollupContext } from '../../hooks/useGraphRollup';
+import { useItemContainerScopes } from '../../hooks/useEntityNeighbors';
 import { PhotosPanel as _PhotosPanel, DocumentsPanel as _DocumentsPanel, NotesPanel as _NotesPanel } from './EntityAttachments';
 import { EntityHistory } from './EntityHistory';
 import { ItemIdBadges } from './ItemIdBadges';
@@ -1302,23 +1304,41 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
   const footer = isMobile ? mobileFooter : desktopFooter;
 
   // ── Page-mode enhancements (drive folders in Photos, tab counters, pill footer) ──
-  const { photos: tkPhotos } = usePhotos({
-    entityType: 'task',
-    entityId: renderAsPage ? task.taskId : null,
-    tenantId: clientSheetId ?? null,
-    itemId: task.itemId ? String(task.itemId) : null,
-    enabled: !!renderAsPage,
-  });
+  // v2026-05-04: rollup context — task page surfaces every photo/note tied to
+  // the parent item AND its container memberships (shipment + will calls).
+  // shipmentNumber comes off the task row directly; WCs are looked up via
+  // the will_calls JSONB index against task.itemId. Claims deferred until
+  // a claim_items mirror lands.
+  const taskItemIdStr = task.itemId ? String(task.itemId) : null;
+  const { scopes: tkContainerScopes } = useItemContainerScopes(
+    taskItemIdStr,
+    clientSheetId ?? null,
+    task.shipmentNumber || null,
+  );
+  const tkRollupCtx = useMemo<RollupContext | null>(() => {
+    if (!renderAsPage || !taskItemIdStr) return null;
+    return {
+      tenantId: clientSheetId ?? null,
+      itemIds: [taskItemIdStr],
+      scopes: tkContainerScopes,
+    };
+  }, [renderAsPage, taskItemIdStr, clientSheetId, tkContainerScopes]);
+
+  const { photos: tkPhotos } = usePhotoGraphRollup(
+    tkRollupCtx ?? { tenantId: null, itemIds: [], scopes: [], enabled: false }
+  );
+  const { notes: tkNotes } = useNoteGraphRollup(
+    tkRollupCtx ?? { tenantId: null, itemIds: [], scopes: [], enabled: false }
+  );
   const { documents: tkDocs } = useDocuments({
     contextType: 'task',
     contextId: renderAsPage ? task.taskId : '',
     tenantId: clientSheetId ?? null,
     enabled: !!renderAsPage,
   });
-  const { notes: tkNotes } = useEntityNotes('task', renderAsPage ? task.taskId : '');
-  const tkPhotoCount = renderAsPage ? tkPhotos.length : 0;
+  const tkPhotoCount = renderAsPage && tkRollupCtx ? tkPhotos.length : 0;
   const tkDocCount = renderAsPage ? tkDocs.length : 0;
-  const tkNoteCount = renderAsPage ? tkNotes.length : 0;
+  const tkNoteCount = renderAsPage && tkRollupCtx ? tkNotes.length : 0;
 
   const taskDriveFolders: DriveFolderLink[] = [
     ...(activeFolderUrl ? [{ label: `Task ${task.taskId}`, url: activeFolderUrl }] : []),
@@ -1333,6 +1353,7 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
         tenantId={clientSheetId}
         itemId={task.itemId ? String(task.itemId) : null}
         enableSourceFilter={!!task.itemId}
+        rollupCtx={tkRollupCtx}
       />
       <DriveFoldersList folders={taskDriveFolders} />
     </div>
@@ -1354,6 +1375,7 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
       relatedEntities={task.itemId ? [{ type: 'inventory', id: String(task.itemId), label: `Item ${task.itemId}` }] : []}
       enableSourceFilter={!!task.itemId}
       itemId={task.itemId ? String(task.itemId) : null}
+      rollupCtx={tkRollupCtx}
       pinnedNote={{ label: 'Task Notes', text: task.taskNotes || task.notes }}
     />
   );
@@ -1552,6 +1574,16 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
           tenantId: clientSheetId,
           itemId: task.itemId ? String(task.itemId) : null,
           enableSourceFilter: !!task.itemId,
+          // v2026-05-04 — graph rollup also active in slide-out panel mode
+          // so the same Shipment / WC / Item photos surface regardless of
+          // whether the user opened the task as a page or a side panel.
+          rollupCtx: task.itemId
+            ? {
+                tenantId: clientSheetId ?? null,
+                itemIds: [String(task.itemId)],
+                scopes: tkContainerScopes,
+              }
+            : null,
         },
         docs: {
           contextType: 'task',
@@ -1566,6 +1598,13 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
             : [],
           enableSourceFilter: !!task.itemId,
           itemId: task.itemId ? String(task.itemId) : null,
+          rollupCtx: task.itemId
+            ? {
+                tenantId: clientSheetId ?? null,
+                itemIds: [String(task.itemId)],
+                scopes: tkContainerScopes,
+              }
+            : null,
         },
         activity: {
           entityType: 'task',
