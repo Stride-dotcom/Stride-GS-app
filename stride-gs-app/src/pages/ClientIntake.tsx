@@ -95,8 +95,16 @@ interface Draft {
   typedSignature: string;
   // drawnSignature captured via canvas ref on demand
   sectionInitials: Record<string, string>;
-  // Step 4
+  // Step 4 — Payment setup
+  /** Final authorization checkbox at the bottom of the step. Whether
+   *  this represents past-due-only or full autopay is determined by
+   *  autopayElected. */
   paymentAuthorized: boolean;
+  /** v2 model: explicit autopay opt-in. null = unanswered, true = enrolled,
+   *  false = terms billing (charge only past-due). */
+  autopayElected: boolean | null;
+  /** Acknowledgment of the 3% credit-card processor fee disclosure. */
+  acknowledged3pctCcFee: boolean;
   // Step 5 — Tax & documents
   /** Prospect's wholesale-customer status. null = haven't answered yet
    *  (forces an explicit choice before they can advance to review). */
@@ -122,6 +130,8 @@ const EMPTY_DRAFT: Draft = {
   typedSignature: '',
   sectionInitials: {},
   paymentAuthorized: false,
+  autopayElected: null,
+  acknowledged3pctCcFee: false,
   taxExempt: null,
   taxExemptReason: 'Resale',
   resaleCertFile: null,
@@ -206,6 +216,10 @@ export function ClientIntake({ linkId }: Props) {
         insuranceDeclaredValue: prefill.insuranceDeclaredValue || d.insuranceDeclaredValue,
         autoInspect:         prefill.autoInspect,
         paymentAuthorized:   prefill.paymentAuthorized,
+        // v2 — prefill the autopay radio with the client's current setting
+        // so refresh-mode visits land on "you currently are enrolled in
+        // autopay, confirm or change" rather than an unanswered radio.
+        autopayElected:      prefill.autopayCurrent,
         taxExempt:           prefill.taxExempt,
         taxExemptReason:     prefill.taxExemptReason || d.taxExemptReason,
         resaleCertExpires:   prefill.resaleCertExpires || d.resaleCertExpires,
@@ -398,7 +412,14 @@ export function ClientIntake({ linkId }: Props) {
           || (Number(draft.insuranceDeclaredValue) > 0);
         return allInitialed && hasSig && hasInsurance && declaredOk;
       }
-      case 4: return draft.paymentAuthorized;
+      case 4: {
+        // v2 — must pick autopay or terms, ack the 3% CC fee, and check
+        // the final authorization. The autopay choice gates the auth
+        // text so the user can't authorize without first deciding.
+        return draft.autopayElected !== null
+          && draft.acknowledged3pctCcFee
+          && draft.paymentAuthorized;
+      }
       // Step 5: must answer wholesale Yes/No. If yes, cert PDF is
       // strongly encouraged but not strictly required (prospect may not
       // have the file handy; admin will follow up post-submit).
@@ -484,6 +505,12 @@ export function ClientIntake({ linkId }: Props) {
         resaleCertExpires:  draft.taxExempt && draft.resaleCertExpires ? draft.resaleCertExpires : undefined,
         intakeMode:         isRefresh ? 'refresh' : 'new',
         clientSpreadsheetId: isRefresh ? refreshSpreadsheetId : undefined,
+        // v2 — autopay opt-in model
+        autopayElected:     draft.autopayElected ?? undefined,
+        acknowledged3pctCcFee: draft.acknowledged3pctCcFee,
+        paymentMethodRequiredSnapshot: refreshPrefill?.paymentMethodRequired,
+        bodySha256:         tcHtml ? await sha256Hex(tcHtml) : undefined,
+        submissionSource:   isRefresh ? 'intake_preference_update' : 'intake_full',
       };
       const result = await submitIntake(payload);
       if ('error' in result) {
@@ -577,7 +604,7 @@ export function ClientIntake({ linkId }: Props) {
             setSigHasInk={setSigHasInk}
           />
         )}
-        {step === 4 && <StepPayment draft={draft} setDraft={setDraft} isRefresh={isRefresh} />}
+        {step === 4 && <StepPayment draft={draft} setDraft={setDraft} isRefresh={isRefresh} refreshPrefill={refreshPrefill} />}
         {step === 5 && <StepDocuments draft={draft} setDraft={setDraft} isRefresh={isRefresh} refreshPrefill={refreshPrefill} />}
         {step === 6 && (
           <StepReview
@@ -1050,54 +1077,130 @@ function StepTerms({ draft, setDraft, tcHtml, tcLoading, coverageNotes, sig, sig
   );
 }
 
-function StepPayment({ draft, setDraft, isRefresh }: StepProps & { isRefresh?: boolean }) {
-  // Refresh-mode (existing client re-confirming) reframes this whole step
-  // around the assumption that they already have a card on file. The Paymnt.io
-  // link is still offered for anyone who wants to swap to a new card, but the
-  // primary action (the checkbox) is just a confirmation that what's on file
-  // is current.
+function StepPayment({ draft, setDraft, isRefresh, refreshPrefill }: StepProps & { isRefresh?: boolean }) {
+  // v2 — autopay opt-in model. Three things happen on this step:
+  //   1. Payment-method setup via Paymnt.io (required for non-grandfathered;
+  //      encouraged-not-required for clients with payment_method_required=false).
+  //   2. Autopay vs Terms radio.
+  //   3. 3% credit-card fee disclosure + final authorization checkbox.
+  //
+  // Variants:
+  //   • New client                                        → "required" copy
+  //   • Refresh-mode, payment_method_required=true        → "required" copy + current state
+  //   • Refresh-mode, payment_method_required=false       → "encouraged" copy + skip option
+  //
+  // The "encouraged" variant exists so we don't surprise long-tenured terms-
+  // only clients with a sudden card-on-file requirement they've never had.
+  const required = !isRefresh || (refreshPrefill?.paymentMethodRequired !== false);
+  const currentAutopay = isRefresh ? (refreshPrefill?.autopayCurrent === true) : null;
+
+  const setAutopay = (v: boolean) => setDraft(d => ({ ...d, autopayElected: v }));
+
   return (
     <div>
       <StepTitle
         kicker="Step 4"
-        title={isRefresh ? 'Confirm your payment method' : 'Set up your payment method'}
+        title={isRefresh ? 'Confirm your payment preferences' : 'Set up payments'}
       />
+
+      {/* Lead paragraph adapts to the variant. */}
       <div style={{ fontSize: 14, color: TEXT_SEC, lineHeight: 1.7, marginBottom: 18 }}>
-        {isRefresh ? (
+        {required ? (
           <>
-            Stride uses automatic payment for monthly invoices — after a 15-day review window, the card or bank account on file is charged.
-            We already have a payment method on file for your account. If yours hasn't changed, simply check the box below to confirm.
-            If you need to update your card or bank account, click the button to manage it in <strong>Paymnt.io</strong>.
+            We keep a payment method on file with our processor (<strong>Paymnt.io</strong>) — it's how we charge monthly invoices and the safety net if anything goes past due. Your full card or bank info stays with Paymnt.io; we never see it.
           </>
         ) : (
           <>
-            Stride uses automatic payment for monthly invoices — after a 15-day review window, the card or bank account on file is charged.
-            Set up your secure payment method with our merchant processor by clicking below.
-            Your full payment info is stored by <strong>Paymnt.io</strong> and never seen by Stride.
+            You've been with us long enough that we don't require a payment method on file — keep paying on terms if that's working. Adding a card or ACH on file is optional, just an upgrade so we can charge a missed invoice instead of letting it hit a late fee.
           </>
+        )}
+        {isRefresh && currentAutopay !== null && (
+          <div style={{ background: '#FFF7F0', borderLeft: `3px solid ${ACCENT}`, padding: '10px 14px', marginTop: 12, borderRadius: 4, fontSize: 13, color: TEXT }}>
+            <strong>Current setting:</strong> {currentAutopay ? 'Autopay is ON' : 'Autopay is OFF (terms billing)'}. Confirm or change below.
+          </div>
         )}
       </div>
 
-      <a
-        href={PAYMENT_LINK}
-        target="_blank"
-        rel="noopener noreferrer"
-        style={{
-          display: 'inline-flex', alignItems: 'center', gap: 10,
-          padding: '14px 24px', borderRadius: 100,
-          background: ACCENT, color: '#fff',
-          fontSize: 13, fontWeight: 700, letterSpacing: '1.5px', textTransform: 'uppercase',
-          textDecoration: 'none', boxShadow: '0 8px 24px rgba(232,105,42,0.28)',
-        }}
-      >
-        {isRefresh ? <>Update Payment Method</> : <>Set Up Payment Method</>} <ExternalLink size={14} />
-      </a>
+      {/* Paymnt.io setup button + 3% CC fee disclosure */}
+      <div style={{ background: BG_PAGE, borderRadius: 12, padding: 18, marginBottom: 18, border: `1px solid ${BORDER}` }}>
+        <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: '1.5px', color: TEXT_MUT, textTransform: 'uppercase', marginBottom: 8 }}>
+          {required ? 'Payment method' : 'Payment method (optional)'}
+        </div>
+        <div style={{ fontSize: 13, color: TEXT_SEC, lineHeight: 1.6, marginBottom: 14 }}>
+          We accept <strong>credit cards, debit cards, and ACH bank transfers</strong>.
+          <br />
+          <span style={{ display: 'inline-block', marginTop: 6 }}>
+            <strong>Heads up:</strong> credit-card payments incur a <strong>3% processing fee</strong> charged by the bank — not by us. Debit and ACH have no fee.
+          </span>
+        </div>
 
-      <div style={{ background: BG_PAGE, borderRadius: 12, padding: 16, marginTop: 18, border: `1px solid ${BORDER}`, fontSize: 12, color: TEXT_MUT, lineHeight: 1.6 }}>
-        <strong style={{ color: TEXT }}>Your payment info is secure.</strong> Stride never sees or stores your full card or bank details. You can update your payment method any time via the Paymnt.io portal.
+        <a
+          href={PAYMENT_LINK}
+          target="_blank"
+          rel="noopener noreferrer"
+          style={{
+            display: 'inline-flex', alignItems: 'center', gap: 10,
+            padding: '12px 22px', borderRadius: 100,
+            background: ACCENT, color: '#fff',
+            fontSize: 12, fontWeight: 700, letterSpacing: '1.5px', textTransform: 'uppercase',
+            textDecoration: 'none', boxShadow: '0 8px 24px rgba(232,105,42,0.28)',
+          }}
+        >
+          {isRefresh ? <>Update Payment Method</> : <>Set Up Payment Method</>} <ExternalLink size={14} />
+        </a>
+
+        <div style={{ marginTop: 14 }}>
+          <label style={{ display: 'flex', alignItems: 'flex-start', gap: 10, cursor: 'pointer', fontSize: 12, color: TEXT_SEC }}>
+            <input
+              type="checkbox"
+              checked={draft.acknowledged3pctCcFee}
+              onChange={e => setDraft(d => ({ ...d, acknowledged3pctCcFee: e.target.checked }))}
+              style={{ marginTop: 2, accentColor: ACCENT, width: 14, height: 14 }}
+            />
+            <span>I understand credit-card payments incur a 3% processing fee charged by the bank.</span>
+          </label>
+        </div>
       </div>
 
-      <div style={{ marginTop: 22 }}>
+      {/* Autopay vs Terms radio */}
+      <div style={{ marginBottom: 18 }}>
+        <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: '1.5px', color: TEXT_MUT, textTransform: 'uppercase', marginBottom: 10 }}>
+          How would you like to pay?
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <label style={radioRow(draft.autopayElected === true)}>
+            <input
+              type="radio"
+              name="autopay"
+              checked={draft.autopayElected === true}
+              onChange={() => setAutopay(true)}
+            />
+            <div>
+              <div style={{ fontWeight: 600, fontSize: 13 }}>Autopay — charge my method on file on the invoice's due date</div>
+              <div style={{ fontSize: 11, color: TEXT_MUT, marginTop: 2 }}>
+                After your 15-day review window closes, we charge automatically. Never miss a due date, never accrue late fees.
+              </div>
+            </div>
+          </label>
+          <label style={radioRow(draft.autopayElected === false)}>
+            <input
+              type="radio"
+              name="autopay"
+              checked={draft.autopayElected === false}
+              onChange={() => setAutopay(false)}
+            />
+            <div>
+              <div style={{ fontWeight: 600, fontSize: 13 }}>Terms — I'll pay each invoice manually</div>
+              <div style={{ fontSize: 11, color: TEXT_MUT, marginTop: 2 }}>
+                You pay by the date on each invoice. If a balance goes past due (7-day grace), we'll charge the method on file as a safety net to avoid late fees.
+              </div>
+            </div>
+          </label>
+        </div>
+      </div>
+
+      {/* Final authorization — copy adapts to autopay choice */}
+      <div>
         <label style={{ display: 'flex', alignItems: 'flex-start', gap: 10, cursor: 'pointer', padding: '12px 14px', background: draft.paymentAuthorized ? ORANGE_SOFT : '#fff', border: `1px solid ${draft.paymentAuthorized ? ACCENT : BORDER}`, borderRadius: 12 }}>
           <input
             type="checkbox"
@@ -1106,10 +1209,15 @@ function StepPayment({ draft, setDraft, isRefresh }: StepProps & { isRefresh?: b
             style={{ marginTop: 3, accentColor: ACCENT, width: 16, height: 16 }}
           />
           <span style={{ fontSize: 13, color: TEXT, lineHeight: 1.5 }}>
-            {isRefresh
-              ? <>My payment method on file is up to date, and I authorize Stride Logistics to continue charging it for monthly invoices per the terms in §3 of the agreement.</>
-              : <>I have completed the payment authorization setup on Paymnt.io and I authorize Stride Logistics to charge my payment method for monthly invoices per the terms in §3 of the agreement.</>
-            }
+            {draft.autopayElected === true && (
+              <>I authorize Stride Logistics to charge my payment method on file on the due date of each monthly invoice, per the terms in §3 of the agreement.</>
+            )}
+            {draft.autopayElected === false && (
+              <>I authorize Stride Logistics to charge my payment method on file for any past-due balance plus accrued late fees after the 7-day grace period, per the terms in §3 of the agreement.</>
+            )}
+            {draft.autopayElected === null && (
+              <>Choose autopay or terms above to see the authorization text.</>
+            )}
           </span>
         </label>
       </div>
@@ -1527,6 +1635,21 @@ function KV({ k, v }: { k: string; v: React.ReactNode }) {
 }
 
 // ─── Utilities ───────────────────────────────────────────────────────
+
+/**
+ * SHA-256 hex digest of a UTF-8 string. Used to fingerprint the exact
+ * T&C body the prospect signed (Decision #21 — body hash-tracking, not
+ * named versions). Result is stored in client_intakes.body_sha256 and
+ * compared against the current template hash on subsequent visits to
+ * decide full-flow vs preference-only-flow.
+ */
+async function sha256Hex(input: string): Promise<string> {
+  const bytes = new TextEncoder().encode(input);
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  return Array.from(new Uint8Array(digest))
+    .map(b => b.toString(16).padStart(2, '0'))
+    .join('');
+}
 
 function replaceTokens(html: string, draft: Draft, coverageNotes: PublicCoverageNote[] = []): string {
   // Build a lookup of coverage-option id → note so the T&C tokens

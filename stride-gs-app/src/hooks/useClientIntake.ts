@@ -55,6 +55,12 @@ export interface RefreshPrefill {
   insuranceDeclaredValue: string;
   autoInspect: boolean;
   paymentAuthorized: boolean;
+  /** v2 model — current autopay state from clients.auto_charge. true =
+   *  enrolled, false = terms billing. Drives the Step 4 radio prefill. */
+  autopayCurrent: boolean;
+  /** v2 model — clients.payment_method_required snapshot. Drives Step 4
+   *  copy variant: true = "required", false = "encouraged". */
+  paymentMethodRequired: boolean;
   taxExempt: boolean | null;
   taxExemptReason: string;
   resaleCertExpires: string;
@@ -93,6 +99,26 @@ export interface IntakeSubmitPayload {
   initials: Record<string, string>; // { storage: 'ABC', ... }
   // Step 4
   paymentAuthorized: boolean;
+  /** v2 model — explicit autopay opt-in (separate from paymentAuthorized
+   *  which is the past-due-safety-net authorization). When true: Stride
+   *  charges the card on each invoice's due date. When false: terms billing
+   *  (charge only if past due past the grace period). */
+  autopayElected?: boolean;
+  /** Acknowledgment of the 3% credit-card processing fee disclosure on
+   *  Step 4 of the form. Captured separately so we can prove the
+   *  prospect saw it specifically. */
+  acknowledged3pctCcFee?: boolean;
+  /** Snapshot of clients.payment_method_required at sign time. Tells us
+   *  later whether this signature was under "card required" or
+   *  "card encouraged" rules. */
+  paymentMethodRequiredSnapshot?: boolean;
+  /** SHA-256 of the exact T&C body the prospect saw + signed. Per
+   *  Decision #21 — drives the form's full-flow vs preference-only-flow
+   *  detection on subsequent visits. */
+  bodySha256?: string;
+  /** Origin of this submission. 'intake_full' = new client, 'intake_preference_update'
+   *  = existing client refresh, 'staff_override' = staff-initiated change. */
+  submissionSource?: 'intake_full' | 'intake_preference_update' | 'staff_override';
   // Step 5 — file paths (uploaded separately before submit)
   signedTcPdfPath?: string;
   resaleCertPath?: string;
@@ -120,7 +146,7 @@ export async function fetchRefreshPrefill(spreadsheetId: string): Promise<Refres
   try {
     const { data: client, error: clientErr } = await supabase
       .from('clients')
-      .select('spreadsheet_id, name, email, contact_name, phone, qb_customer_name, auto_charge, auto_inspection, notification_contacts, tax_exempt, tax_exempt_reason, resale_cert_expires, resale_cert_url, resale_cert_uploaded_at')
+      .select('spreadsheet_id, name, email, contact_name, phone, qb_customer_name, auto_charge, payment_method_required, auto_inspection, notification_contacts, tax_exempt, tax_exempt_reason, resale_cert_expires, resale_cert_url, resale_cert_uploaded_at')
       .eq('spreadsheet_id', spreadsheetId)
       .maybeSingle();
     if (clientErr || !client) return null;
@@ -162,6 +188,8 @@ export async function fetchRefreshPrefill(spreadsheetId: string): Promise<Refres
       insuranceDeclaredValue: lastIntake?.insurance_declared_value != null ? String(lastIntake.insurance_declared_value) : '',
       autoInspect:         client.auto_inspection === true || lastIntake?.auto_inspect === true,
       paymentAuthorized:   client.auto_charge === true || lastIntake?.payment_authorized === true,
+      autopayCurrent:      client.auto_charge === true,
+      paymentMethodRequired: client.payment_method_required !== false,  // default true if null
       taxExempt:           client.tax_exempt === false ? false : true,
       taxExemptReason:     client.tax_exempt_reason || 'Resale',
       resaleCertExpires:   client.resale_cert_expires || '',
@@ -318,9 +346,40 @@ export async function submitIntake(payload: IntakeSubmitPayload): Promise<{ id: 
     client_spreadsheet_id: payload.clientSpreadsheetId || null,
     user_agent:            payload.userAgent ?? (typeof navigator !== 'undefined' ? navigator.userAgent : null),
     submitted_at:          new Date().toISOString(),
+    // v2 model fields — see IntakeSubmitPayload doc comments
+    body_sha256:                       payload.bodySha256 ?? null,
+    autopay_elected:                   payload.autopayElected ?? null,
+    payment_method_required_snapshot:  payload.paymentMethodRequiredSnapshot ?? null,
+    acknowledged_3pct_cc_fee:          payload.acknowledged3pctCcFee ?? false,
+    submission_source:                 payload.submissionSource ||
+                                       (payload.intakeMode === 'refresh' ? 'intake_preference_update' : 'intake_full'),
   };
   const { error } = await supabase.from('client_intakes').insert(row);
   if (error) return { error: error.message };
+
+  // Auto-apply for refresh-mode submissions (Decision #28). Service-role
+  // edge function reads the just-inserted intake row, applies its values
+  // to the existing clients row, copies the resale cert, and stamps
+  // status='auto_applied'. Anon role can't UPDATE clients under RLS, so
+  // the edge function is the only path. Best-effort — if it fails, the
+  // intake still lands in the queue and staff can manually activate.
+  if ((payload.intakeMode || 'new') === 'refresh' && payload.clientSpreadsheetId) {
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (session?.access_token) headers['Authorization'] = `Bearer ${session.access_token}`;
+      const projectUrl = (import.meta.env.VITE_SUPABASE_URL || '').replace(/\/$/, '');
+      if (projectUrl) {
+        await fetch(`${projectUrl}/functions/v1/apply-intake-on-submit`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ intakeId, clientSpreadsheetId: payload.clientSpreadsheetId }),
+        }).catch((e) => console.warn('[intake] auto-apply edge function failed (non-fatal):', e));
+      }
+    } catch (e) {
+      console.warn('[intake] auto-apply invocation error (non-fatal):', e);
+    }
+  }
 
   // Best-effort link consumption marker — non-fatal if it fails (the
   // intake row is already persisted and the admin can see it). Anon
