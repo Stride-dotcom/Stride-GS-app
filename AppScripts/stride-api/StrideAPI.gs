@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.168.0 — 2026-05-04 PST — Inventory is the single source of truth for item-level fields now. New helper api_propagateItemFieldsToInventory_ takes (clientSheetId, itemId, {sidemark/reference/description/vendor/location/room/itemNotes/itemClass}) and writes back through handleUpdateInventoryItem_ — which already handles the Inventory write, the open-Tasks/Repairs fan-out, and Supabase write-through. handleUpdateBillingRow_ now calls it whenever a non-manual ledger row's Sidemark / Reference / Description is edited from the Billing Report — the same edit lands on the Inventory row and propagates to every other surface (Inventory grid, Tasks, Repairs, item detail panels, all Supabase mirrors). Manual charges are skipped (no inventory binding). This stops the cross-page drift Justin reported where a Billing Report sidemark edit didn't appear on Inventory or related task rows. The helper is reusable — wire it into any future entity handler that exposes item-level field edits.
+   StrideAPI.gs — v38.169.0 — 2026-05-04 PST — Stax invoice inline edits actually persist now. handleUpdateStaxInvoice_ used POSITIONAL columns (5=Due Date, 6=Amount, 9=Status, 11=Notes, 2=Customer) for every write while the read path (sheetToObjects_) used header names — once the Invoices sheet had a column inserted (Is Test, Scheduled Date, Auto Charge, Stax Invoice Link were appended at various times) the writes silently landed in the WRONG column and the React Charge Queue's optimistic update reverted on refresh. Same class as v38.152.0 / v38.167.0; same fix: every column lookup now goes through api_ensureColumn_ (case-insensitive, auto-appends if missing) — Due Date, Scheduled Date, Notes, Amount, Customer, Stax Customer ID, Status, QB Invoice #. handleToggleAutoCharge_ was case-sensitive on the "Auto Charge" header and silently appended a duplicate column on any case drift; switched to api_ensureColumn_. To prevent duplicate-column drift biting future writes, api_ensureColumn_ now returns the LAST matching column (mirroring sheetToObjects_'s last-write-wins semantics) — write and read agree on the same column even when duplicates already exist on a sheet.
+   v38.168.0 — 2026-05-04 PST — Inventory is the single source of truth for item-level fields now. New helper api_propagateItemFieldsToInventory_ takes (clientSheetId, itemId, {sidemark/reference/description/vendor/location/room/itemNotes/itemClass}) and writes back through handleUpdateInventoryItem_ — which already handles the Inventory write, the open-Tasks/Repairs fan-out, and Supabase write-through. handleUpdateBillingRow_ now calls it whenever a non-manual ledger row's Sidemark / Reference / Description is edited from the Billing Report — the same edit lands on the Inventory row and propagates to every other surface (Inventory grid, Tasks, Repairs, item detail panels, all Supabase mirrors). Manual charges are skipped (no inventory binding). This stops the cross-page drift Justin reported where a Billing Report sidemark edit didn't appear on Inventory or related task rows. The helper is reusable — wire it into any future entity handler that exposes item-level field edits.
    v38.167.0 — 2026-05-04 PST — Inventory inline edits actually persist now. handleUpdateInventoryItem_ used strict hmap[colName] lookups for every editable field (Vendor, Description, Reference, Sidemark, Room, Location, Class, Qty, Status, Item Notes, Declared Value, Coverage Option). On any client sheet whose header had different case or extra whitespace, the lookup returned undefined and the write silently no-op'd or rejected with SCHEMA_ERROR — the React optimistic patch took then reverted on the next refetch because nothing landed in the sheet. Justin reported this for sidemark; same class as v38.152.0's Billing fix. Switched the column resolution + the Tasks/Repairs fan-out (where missing Sidemark/Reference columns silently dropped propagation) to api_ensureColumn_ — case-insensitive, auto-appends if missing — so client sheets self-heal on the first inline edit after the fix ships and the writeThrough mirror back to Supabase carries the new value.
    v38.166.0 — 2026-05-04 PST — Stax invoice batches + auto-mirror to Supabase. Pre-v38.166.0 the "Stax IIF" button on the Billing page wrote rows to the Stax Invoices SHEET via auto-import (v38.21.0) but never called _sbResyncAllStaxInvoices, so the Supabase mirror was stale until something else triggered it — operators had to upload the same IIF on the Payments page just to fire the resync as a side effect. handleQbExport_ now calls _sbResyncAllStaxInvoices(getStaxSpreadsheet_()) right after the auto-import block so Payments → Review populates within ~1-2s of the Create Invoices click, no manual upload needed. Adds first-class batch concept: every qbExport invocation generates a batchId (BATCH-{timestamp}-{uuid6}) and writes one stax_invoice_batches row with totals + client summary, then PATCHes batch_id onto each freshly-mirrored stax_invoices row. Two new read endpoints: getStaxInvoiceBatches (paginated list for Payments → Batches view) and regenerateIifForBatch (rebuilds IIF text on demand from line_items_json — no file storage, generated fresh each request). Companion migration 20260504220000_stax_invoice_batches.sql adds the table + nullable batch_id FK. Drive IIF write left in place this PR — purely additive, removed in a follow-up after a few days of confidence.
    v38.165.0 — 2026-05-04 PST — Three hardenings to prevent the May 2026 WC-bug class from recurring. (1) supabaseBatchUpsert_ now shape-splits rows by their JSON key set before chunking. PostgREST rejects mixed-shape batches with PGRST102 ("All object keys must match"); the fall-through per-row retry path was correct but inefficient. Several sb*Row_ helpers conditionally include keys (sbBillingRow_ omits invoice_date when blank, etc.), so the fast batch path was failing for any client whose Billing_Ledger had a mix of invoiced + uninvoiced rows. Now each shape gets its own 50-row chunk loop. (2) api_fullClientSync_'s six entity branches (inventory / tasks / shipments / billing / will_calls / repairs) each replaced their bare `if (!key) continue;` with a tracked-skip pattern that calls new helper sbLogBlankIdSkips_ at the end of the case. Blank-key sheet rows now surface in stax_run_log with sheet name + row numbers so operators see them in the React FailedOperationsDrawer instead of disappearing into a `continue`. (3) New admin diagnostic runAuditMissingLedgerRowIds — read-only walk of every active client's six entity sheets, reporting blank-key rows. Quarterly safety net complementing the per-sync surfacing. Schema-side: companion migration 20260504200000_entity_id_nonempty_check_constraints.sql adds CHECK (col <> '') to all six entity-key columns so the next blank slip-through fails LOUD at INSERT.
@@ -12600,15 +12601,23 @@ function installCoverageColumns() {
 }
 
 function api_ensureColumn_(sheet, headerName) {
-  // Build a case-insensitive index of existing headers
+  // Build a case-insensitive index of existing headers. When duplicates exist
+  // (a known artifact of the pre-v38.169.0 Auto Charge case-sensitive append
+  // bug, and similar drift in other sheets), prefer the LAST matching column
+  // so this helper agrees with sheetToObjects_, whose obj[header]=row[j] loop
+  // also has last-write-wins semantics. If they disagreed, writes would land
+  // on column A while reads reflected stale column B → "edit reverts on
+  // refresh" — exactly the symptom Justin reported on Payments.
   var headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
   var targetUpper = String(headerName || "").trim().toUpperCase();
+  var lastMatch = -1;
   for (var i = 0; i < headers.length; i++) {
     var existing = String(headers[i] || "").trim();
     if (existing && existing.toUpperCase() === targetUpper) {
-      return i + 1; // 1-based column index — use the existing column, whatever its case
+      lastMatch = i + 1; // 1-based — keep walking; last wins
     }
   }
+  if (lastMatch > 0) return lastMatch;
   // Column genuinely missing — append with the caller's canonical case
   var newCol = sheet.getLastColumn() + 1;
   sheet.getRange(1, newCol).setValue(headerName);
@@ -32296,58 +32305,66 @@ function handleUpdateStaxInvoice_(payload) {
   var invSheet = ss.getSheetByName("Invoices");
   if (!invSheet) return errorResponse_("Invoices tab not found", "NOT_FOUND");
 
+  // v38.169.0 — every column resolution is now header-based via
+  // api_ensureColumn_ (case-insensitive, auto-appends if missing). The prior
+  // code used positional indexes (col 5 = Due Date, col 6 = Amount, col 9 =
+  // Status, col 11 = Notes) which silently wrote to the WRONG column once
+  // the Stax Invoices sheet had a column inserted or reordered (Is Test was
+  // added later, plus Scheduled Date / Auto Charge / Stax Invoice Link
+  // appended at various times). The read path uses sheetToObjects_ keyed on
+  // headers, so writes that landed on the wrong column appeared to revert
+  // on refresh — exactly the "Due Date didn't save" / "Auto Pay box reverts"
+  // symptom Justin reported.
+  var qbCol     = api_ensureColumn_(invSheet, "QB Invoice #");
+  var customerCol = api_ensureColumn_(invSheet, "QB Customer Name");
+  var staxCustIdCol = api_ensureColumn_(invSheet, "Stax Customer ID");
+  var dueDateCol  = api_ensureColumn_(invSheet, "Due Date");
+  var amountCol   = api_ensureColumn_(invSheet, "Total Amount");
+  var statusCol   = api_ensureColumn_(invSheet, "Status");
+  var notesCol    = api_ensureColumn_(invSheet, "Notes");
+
   var invData = invSheet.getDataRange().getValues();
   var foundRow = -1;
   for (var i = 1; i < invData.length; i++) {
-    if (String(invData[i][0] || "").trim() === qbInvoiceNo) { foundRow = i; break; }
+    if (String(invData[i][qbCol - 1] || "").trim() === qbInvoiceNo) { foundRow = i; break; }
   }
   if (foundRow < 0) return errorResponse_("Invoice '" + qbInvoiceNo + "' not found", "NOT_FOUND");
 
-  var currentStatus = String(invData[foundRow][8] || "").trim().toUpperCase();
+  var currentStatus = String(invData[foundRow][statusCol - 1] || "").trim().toUpperCase();
   if (currentStatus !== "PENDING" && currentStatus !== "CREATED") {
     return errorResponse_("Can only edit PENDING or CREATED invoices (current: " + currentStatus + ")", "INVALID_STATE");
   }
 
   var changed = [];
 
-  // Due Date (col 5) — always editable
+  // Due Date — always editable
   if (payload.dueDate !== undefined) {
     var dd = String(payload.dueDate).trim();
     if (dd) {
-      invSheet.getRange(foundRow + 1, 5).setValue(dd);
+      invSheet.getRange(foundRow + 1, dueDateCol).setValue(dd);
       changed.push("dueDate=" + dd);
     }
   }
 
   // v38.120.0 — Scheduled Date (separate from Due Date). Controls when the
   // StaxAutoPay charge loop fires for auto-charge. Defaults to Due Date if
-  // unset. Header auto-created in column 12+ if missing (non-destructive).
+  // unset. Header auto-created if missing (non-destructive).
   if (payload.scheduledDate !== undefined) {
     var sd = String(payload.scheduledDate).trim();
     if (sd) {
-      var hdrRow = invSheet.getRange(1, 1, 1, invSheet.getLastColumn()).getValues()[0];
-      var schedIdx = -1;
-      for (var h = 0; h < hdrRow.length; h++) {
-        if (String(hdrRow[h]).trim() === "Scheduled Date") { schedIdx = h; break; }
-      }
-      if (schedIdx < 0) {
-        // Auto-create the column at the end
-        var lastCol = invSheet.getLastColumn();
-        schedIdx = lastCol;
-        invSheet.getRange(1, lastCol + 1).setValue("Scheduled Date");
-      }
-      invSheet.getRange(foundRow + 1, schedIdx + 1).setValue(sd);
+      var schedCol = api_ensureColumn_(invSheet, "Scheduled Date");
+      invSheet.getRange(foundRow + 1, schedCol).setValue(sd);
       changed.push("scheduledDate=" + sd);
     }
   }
 
-  // Notes (col 11) — always editable
+  // Notes — always editable
   if (payload.notes !== undefined) {
-    invSheet.getRange(foundRow + 1, 11).setValue(String(payload.notes));
+    invSheet.getRange(foundRow + 1, notesCol).setValue(String(payload.notes));
     changed.push("notes");
   }
 
-  // Amount (col 6) — PENDING only (locked after push to Stax)
+  // Amount — PENDING only (locked after push to Stax)
   if (payload.amount !== undefined) {
     if (currentStatus !== "PENDING") {
       return errorResponse_("Cannot change amount on a CREATED invoice — it's already in Stax", "INVALID_STATE");
@@ -32355,18 +32372,18 @@ function handleUpdateStaxInvoice_(payload) {
     var amt = Number(payload.amount);
     if (isNaN(amt) || amt <= 0) return errorResponse_("Amount must be > 0", "INVALID_PAYLOAD");
     amt = Math.round(amt * 100) / 100;
-    invSheet.getRange(foundRow + 1, 6).setValue(amt);
+    invSheet.getRange(foundRow + 1, amountCol).setValue(amt);
     changed.push("amount=" + amt);
   }
 
-  // Customer (col 2) — PENDING only
+  // Customer — PENDING only
   if (payload.customer !== undefined) {
     if (currentStatus !== "PENDING") {
       return errorResponse_("Cannot change customer on a CREATED invoice — it's already in Stax", "INVALID_STATE");
     }
     var cust = String(payload.customer).trim();
     if (!cust) return errorResponse_("Customer name cannot be empty", "INVALID_PAYLOAD");
-    invSheet.getRange(foundRow + 1, 2).setValue(cust);
+    invSheet.getRange(foundRow + 1, customerCol).setValue(cust);
 
     // Also try to fill Stax Customer ID from Customers tab
     var custSheet = ss.getSheetByName("Customers");
@@ -32375,7 +32392,7 @@ function handleUpdateStaxInvoice_(payload) {
       for (var c = 1; c < custData.length; c++) {
         if (stax_normalizeName_(String(custData[c][0] || "")) === stax_normalizeName_(cust)) {
           var sid = String(custData[c][3] || "").trim();
-          if (sid) { invSheet.getRange(foundRow + 1, 3).setValue(sid); break; }
+          if (sid) { invSheet.getRange(foundRow + 1, staxCustIdCol).setValue(sid); break; }
         }
       }
     }
@@ -33430,16 +33447,15 @@ function handleToggleAutoCharge_(payload) {
   var invSheet = ss.getSheetByName("Invoices");
   if (!invSheet) return errorResponse_("Invoices tab not found", "NOT_FOUND");
 
-  // Find or create Auto Charge column
-  var headers = invSheet.getRange(1, 1, 1, invSheet.getLastColumn()).getValues()[0];
-  var acCol = -1;
-  for (var h = 0; h < headers.length; h++) {
-    if (String(headers[h]).trim() === "Auto Charge") { acCol = h + 1; break; }
-  }
-  if (acCol < 0) {
-    acCol = headers.length + 1;
-    invSheet.getRange(1, acCol).setValue("Auto Charge");
-  }
+  // v38.169.0 — header lookup is now case-insensitive via api_ensureColumn_.
+  // The prior `String(headers[h]).trim() === "Auto Charge"` compare appended
+  // a duplicate "Auto Charge" column whenever the existing header had any
+  // case drift (e.g. "AUTO CHARGE", "auto charge"), and the read path
+  // (sheetToObjects_) picked the first matching key — which on duplicate
+  // columns can resolve to the OLD stale one, producing the "Auto Pay box
+  // reverts on refresh" symptom.
+  var acCol = api_ensureColumn_(invSheet, "Auto Charge");
+  var qbCol = api_ensureColumn_(invSheet, "QB Invoice #");
 
   var invData = invSheet.getDataRange().getValues();
   var targetSet = {};
@@ -33447,7 +33463,7 @@ function handleToggleAutoCharge_(payload) {
 
   var updated = 0;
   for (var i = 1; i < invData.length; i++) {
-    var qb = String(invData[i][0] || "").trim();
+    var qb = String(invData[i][qbCol - 1] || "").trim();
     if (targetSet[qb]) {
       invSheet.getRange(i + 1, acCol).setValue(newVal);
       updated++;
