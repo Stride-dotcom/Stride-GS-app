@@ -93,6 +93,7 @@ interface BillingRow {
   total: number | string | null;
   task_id: string | null;
   repair_id: string | null;
+  shipment_number: string | null;
   item_id: string | null;
   item_class: string | null;
   item_notes: string | null;
@@ -220,11 +221,18 @@ export function BillingPreviewCard({
     try {
       let query = supabase
         .from('billing')
-        .select('ledger_row_id,status,invoice_no,date,svc_code,svc_name,description,qty,rate,total,task_id,repair_id,item_id,item_class,item_notes')
+        .select('ledger_row_id,status,invoice_no,date,svc_code,svc_name,description,qty,rate,total,task_id,repair_id,shipment_number,item_id,item_class,item_notes')
         .eq('tenant_id', tenantId);
 
-      if (entityType === 'task' || entityType === 'will_call') {
+      if (entityType === 'task') {
         query = query.or(`task_id.eq.${entityId},task_id.like.${entityId}-%`);
+      } else if (entityType === 'will_call') {
+        // WC ledger rows store the wcNumber in shipment_number (per
+        // handleProcessWcRelease_) with svc_code='WC' and an empty
+        // task_id. The previous filter (combined with task) on task_id
+        // never matched, so the recorded-rows panel was always empty
+        // for WCs even when the ledger had rows.
+        query = query.eq('svc_code', 'WC').eq('shipment_number', entityId);
       } else if (entityType === 'repair') {
         query = query.eq('repair_id', entityId);
       }
@@ -269,8 +277,14 @@ export function BillingPreviewCard({
   const projectedAddonsTotal = projectedAddons.reduce((sum, a) => sum + (a.total ?? 0), 0);
 
   const primaryAlreadyBooked = primary && recorded.some(r => {
-    if (entityType === 'task' || entityType === 'will_call') {
+    if (entityType === 'task') {
       return r.ledger_row_id === `${primary.code}-TASK-${entityId}`;
+    }
+    if (entityType === 'will_call') {
+      // WC ledger rows use ledger_row_id="WC-{itemId}-{wcNumber}" — one row
+      // per released item. Any matching row means at least some items are
+      // booked; the recorded panel below shows the per-item breakdown.
+      return r.svc_code === primary.code && r.shipment_number === entityId;
     }
     if (entityType === 'repair') {
       return r.repair_id === entityId && r.svc_code === primary.code;

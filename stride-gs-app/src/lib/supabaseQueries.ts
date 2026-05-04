@@ -694,6 +694,48 @@ export async function fetchWillCallsFromSupabase(
         // non-fatal — WC list still works without items; detail panel will
         // either show empty items or React can re-fetch from GAS if needed.
       }
+
+      // v2 — itemIds + inventory fallback for WCs whose will_call_items
+      // rows aren't populated in Supabase. The will_call_items mirror
+      // has gaps (no GAS write path populates that table consistently
+      // for newly-released WCs), so without this fallback wc.items
+      // stays empty and the detail panel shows a "loading items"
+      // flash while enriching via a separate fetch. Mirrors the
+      // single-WC fetcher's fallback at line ~1277. Per Invariant #27,
+      // inventory is the source of truth for item-level fields; itemIds
+      // is just the membership list.
+      try {
+        const wcsNeedingFallback = willCalls.filter(w => w.items.length === 0 && Array.isArray(w.itemIds) && w.itemIds.length > 0);
+        if (wcsNeedingFallback.length > 0) {
+          const invMap = await _fetchInvFieldMap(clientSheetId);
+          for (const wc of wcsNeedingFallback) {
+            const ids = wc.itemIds || [];
+            wc.items = ids.map(id => {
+              const inv = invMap[id];
+              return {
+                wcNumber: wc.wcNumber,
+                itemId: id,
+                qty: inv?.qty ?? 1,
+                vendor: inv?.vendor || '',
+                description: inv?.description || '',
+                itemClass: inv?.itemClass || '',
+                location: inv?.location || '',
+                sidemark: inv?.sidemark || '',
+                room: inv?.room || '',
+                wcFee: null,
+                released: false,
+                status: inv?.status || '',
+              };
+            });
+            if (!wc.shipmentFolderUrl && ids.length > 0) {
+              const inv = invMap[ids[0]];
+              if (inv?.shipmentFolderUrl) wc.shipmentFolderUrl = inv.shipmentFolderUrl;
+            }
+          }
+        }
+      } catch {
+        // non-fatal — same downstream behavior as before this fallback ran
+      }
     }
 
     return {
