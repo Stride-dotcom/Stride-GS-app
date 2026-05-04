@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.167.0 — 2026-05-04 PST — Inventory inline edits actually persist now. handleUpdateInventoryItem_ used strict hmap[colName] lookups for every editable field (Vendor, Description, Reference, Sidemark, Room, Location, Class, Qty, Status, Item Notes, Declared Value, Coverage Option). On any client sheet whose header had different case or extra whitespace, the lookup returned undefined and the write silently no-op'd or rejected with SCHEMA_ERROR — the React optimistic patch took then reverted on the next refetch because nothing landed in the sheet. Justin reported this for sidemark; same class as v38.152.0's Billing fix. Switched the column resolution + the Tasks/Repairs fan-out (where missing Sidemark/Reference columns silently dropped propagation) to api_ensureColumn_ — case-insensitive, auto-appends if missing — so client sheets self-heal on the first inline edit after the fix ships and the writeThrough mirror back to Supabase carries the new value.
+   StrideAPI.gs — v38.168.0 — 2026-05-04 PST — Inventory is the single source of truth for item-level fields now. New helper api_propagateItemFieldsToInventory_ takes (clientSheetId, itemId, {sidemark/reference/description/vendor/location/room/itemNotes/itemClass}) and writes back through handleUpdateInventoryItem_ — which already handles the Inventory write, the open-Tasks/Repairs fan-out, and Supabase write-through. handleUpdateBillingRow_ now calls it whenever a non-manual ledger row's Sidemark / Reference / Description is edited from the Billing Report — the same edit lands on the Inventory row and propagates to every other surface (Inventory grid, Tasks, Repairs, item detail panels, all Supabase mirrors). Manual charges are skipped (no inventory binding). This stops the cross-page drift Justin reported where a Billing Report sidemark edit didn't appear on Inventory or related task rows. The helper is reusable — wire it into any future entity handler that exposes item-level field edits.
+   v38.167.0 — 2026-05-04 PST — Inventory inline edits actually persist now. handleUpdateInventoryItem_ used strict hmap[colName] lookups for every editable field (Vendor, Description, Reference, Sidemark, Room, Location, Class, Qty, Status, Item Notes, Declared Value, Coverage Option). On any client sheet whose header had different case or extra whitespace, the lookup returned undefined and the write silently no-op'd or rejected with SCHEMA_ERROR — the React optimistic patch took then reverted on the next refetch because nothing landed in the sheet. Justin reported this for sidemark; same class as v38.152.0's Billing fix. Switched the column resolution + the Tasks/Repairs fan-out (where missing Sidemark/Reference columns silently dropped propagation) to api_ensureColumn_ — case-insensitive, auto-appends if missing — so client sheets self-heal on the first inline edit after the fix ships and the writeThrough mirror back to Supabase carries the new value.
    v38.166.0 — 2026-05-04 PST — Stax invoice batches + auto-mirror to Supabase. Pre-v38.166.0 the "Stax IIF" button on the Billing page wrote rows to the Stax Invoices SHEET via auto-import (v38.21.0) but never called _sbResyncAllStaxInvoices, so the Supabase mirror was stale until something else triggered it — operators had to upload the same IIF on the Payments page just to fire the resync as a side effect. handleQbExport_ now calls _sbResyncAllStaxInvoices(getStaxSpreadsheet_()) right after the auto-import block so Payments → Review populates within ~1-2s of the Create Invoices click, no manual upload needed. Adds first-class batch concept: every qbExport invocation generates a batchId (BATCH-{timestamp}-{uuid6}) and writes one stax_invoice_batches row with totals + client summary, then PATCHes batch_id onto each freshly-mirrored stax_invoices row. Two new read endpoints: getStaxInvoiceBatches (paginated list for Payments → Batches view) and regenerateIifForBatch (rebuilds IIF text on demand from line_items_json — no file storage, generated fresh each request). Companion migration 20260504220000_stax_invoice_batches.sql adds the table + nullable batch_id FK. Drive IIF write left in place this PR — purely additive, removed in a follow-up after a few days of confidence.
    v38.165.0 — 2026-05-04 PST — Three hardenings to prevent the May 2026 WC-bug class from recurring. (1) supabaseBatchUpsert_ now shape-splits rows by their JSON key set before chunking. PostgREST rejects mixed-shape batches with PGRST102 ("All object keys must match"); the fall-through per-row retry path was correct but inefficient. Several sb*Row_ helpers conditionally include keys (sbBillingRow_ omits invoice_date when blank, etc.), so the fast batch path was failing for any client whose Billing_Ledger had a mix of invoiced + uninvoiced rows. Now each shape gets its own 50-row chunk loop. (2) api_fullClientSync_'s six entity branches (inventory / tasks / shipments / billing / will_calls / repairs) each replaced their bare `if (!key) continue;` with a tracked-skip pattern that calls new helper sbLogBlankIdSkips_ at the end of the case. Blank-key sheet rows now surface in stax_run_log with sheet name + row numbers so operators see them in the React FailedOperationsDrawer instead of disappearing into a `continue`. (3) New admin diagnostic runAuditMissingLedgerRowIds — read-only walk of every active client's six entity sheets, reporting blank-key rows. Quarterly safety net complementing the per-sync surfacing. Schema-side: companion migration 20260504200000_entity_id_nonempty_check_constraints.sql adds CHECK (col <> '') to all six entity-key columns so the next blank slip-through fails LOUD at INSERT.
    v38.164.0 — 2026-05-04 PST — handleProcessWcRelease_ now stamps "Ledger Row ID": "WC-{itemId}-{wcNumber}" on every billing row it writes. Without this column, api_fullClientSync_ explicitly skipped the row (see billing case at line ~6068: `if (!lid) continue`), so since 2026-04-01 every non-COD WC release wrote rows to the Billing_Ledger sheet that never mirrored to Supabase — 13 WCs / ~84 items invisible on the React Billing page and impossible to invoice. Out of 7 billing-row write paths in this file (RCVG, RCVG addons, task complete, repair quote lines, repair primary, WC release, manual charge), WC release was the only one missing the ID. Format mirrors RCVG's `RCVG-{itemId}-{shipmentNo}` convention. New admin entry `runBackfillWcLedgerRowIds` walks every active client in CB Clients, scans Billing_Ledger for WC rows missing the ID, stamps `WC-{itemId}-{shipment#}` (bulk-write column), then api_fullClientSync_(.., ["billing"]) per tenant to mirror. Idempotent — only patches rows where the ID is currently blank. Run once from Apps Script editor after deploy.
@@ -11782,6 +11783,25 @@ function handleUpdateBillingRow_(clientSheetId, payload) {
       updated.total = newTotal;
     }
 
+    // v38.168.0 — Item-level fields edited from the Billing Report flow back
+    // to Inventory so every other surface (Tasks/Repairs/WC/entity panels)
+    // sees the same value. Skip manual charges — those rows aren't tied to
+    // an Inventory item and a stray itemId on a manual charge shouldn't
+    // overwrite an unrelated inventory row.
+    if (!isManual) {
+      var itemIdCol = api_ensureColumn_(sheet, "Item ID");
+      var billingItemId = String(sheet.getRange(matchRow, itemIdCol).getValue() || "").trim();
+      var itemFields = {};
+      if (payload.sidemark    !== undefined) itemFields.sidemark    = String(payload.sidemark);
+      if (payload.reference   !== undefined) itemFields.reference   = String(payload.reference);
+      if (payload.description !== undefined) itemFields.description = String(payload.description);
+      var hasFields = false;
+      for (var __k in itemFields) { if (itemFields.hasOwnProperty(__k)) { hasFields = true; break; } }
+      if (billingItemId && hasFields) {
+        api_propagateItemFieldsToInventory_(clientSheetId, billingItemId, itemFields, "billing:" + ledgerRowId);
+      }
+    }
+
     return jsonResponse_({
       success: true,
       ledgerRowId: ledgerRowId,
@@ -11803,6 +11823,59 @@ function handleUpdateBillingRow_(clientSheetId, payload) {
  * populate the billing.sidemark mirror column even though Billing_Ledger
  * doesn't carry sidemark itself (decision #18).
  */
+/**
+ * v38.168.0 — Item-level field propagation back to Inventory.
+ *
+ * Inventory is the canonical source of truth for item-level fields
+ * (Sidemark, Reference, Description, Vendor, Location, Room, Item Notes,
+ * Class). When those fields are edited on a downstream entity row
+ * (Billing_Ledger / Tasks / Repairs / Will_Calls), they must also write
+ * back to Inventory so:
+ *   • the Inventory grid reflects the change immediately,
+ *   • handleUpdateInventoryItem_'s built-in fan-out propagates to every
+ *     other open entity row referencing the same Item ID (Tasks + Repairs),
+ *   • the Supabase write-through mirrors land everywhere consistently.
+ *
+ * `fields` is an object keyed by inventory-payload names (sidemark, reference,
+ * description, vendor, location, room, itemNotes, itemClass). Only the keys
+ * present are propagated. `itemId` is the Inventory Item ID this entity row
+ * is bound to. Best-effort: an Inventory miss (manual charges, free text
+ * entries) is logged and silently dropped — the originating entity write
+ * has already succeeded by the time this is called.
+ */
+function api_propagateItemFieldsToInventory_(clientSheetId, itemId, fields, sourceTag) {
+  try {
+    var trimmedId = String(itemId || "").trim();
+    if (!trimmedId) return;
+    var payload = { itemId: trimmedId };
+    var keys = ["sidemark", "reference", "description", "vendor", "location", "room", "itemNotes", "itemClass"];
+    var any = false;
+    for (var i = 0; i < keys.length; i++) {
+      var k = keys[i];
+      if (fields && fields.hasOwnProperty(k) && fields[k] !== undefined) {
+        payload[k] = fields[k];
+        any = true;
+      }
+    }
+    if (!any) return;
+    var resp = handleUpdateInventoryItem_(clientSheetId, payload);
+    var ok = false;
+    try {
+      // handleUpdateInventoryItem_ returns a TextOutput-shaped response. Decode
+      // its JSON body just enough to log success/failure for diagnosis.
+      var body = (resp && typeof resp.getContent === "function") ? resp.getContent() : "";
+      ok = body && body.indexOf('"success":true') !== -1;
+    } catch (_) {}
+    Logger.log("api_propagateItemFieldsToInventory_(" + (sourceTag || "?") + ", item=" + trimmedId
+      + ", fields=" + JSON.stringify(payload) + ") → " + (ok ? "ok" : "fail"));
+  } catch (err) {
+    // Never throw out of propagation — the originating entity write is the
+    // user's primary expectation; a follow-on Inventory write-back is a
+    // best-effort consistency move.
+    Logger.log("api_propagateItemFieldsToInventory_ threw: " + err);
+  }
+}
+
 function api_lookupSidemarkForItemId_(ss, itemId) {
   if (!ss || !itemId) return "";
   try {
