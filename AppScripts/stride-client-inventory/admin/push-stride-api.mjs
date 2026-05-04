@@ -48,7 +48,19 @@ async function main() {
     'https://www.googleapis.com/auth/script.send_mail',
     'https://www.googleapis.com/auth/script.external_request',
     'https://www.googleapis.com/auth/script.scriptapp',
-    'https://www.googleapis.com/auth/script.deployments',  // v38.13.0: auto-deploy Web App during onboarding
+    // v38.13.0: script.deployments — for projects.deployments.create/update
+    // (the second half of the Web App deploy flow).
+    'https://www.googleapis.com/auth/script.deployments',
+    // v38.181.0: script.projects — required for projects.getContent +
+    // projects.versions.create (the FIRST half of the deploy flow).
+    // Without this, handleFinishClientSetup_'s versions.create call fails
+    // with HTTP 403 ACCESS_TOKEN_SCOPE_INSUFFICIENT before we ever reach
+    // the deployment step. Confirmed via runOnboardingDiagnostic 2026-05-04
+    // (Justin's Ruegamer Design incident): runtime token had
+    // script.deployments but versions.create still 403'd because that
+    // endpoint specifically requires script.projects. Different endpoints,
+    // different scopes — easy to miss when adding scopes incrementally.
+    'https://www.googleapis.com/auth/script.projects',
     'https://www.googleapis.com/auth/userinfo.email',
   ];
   const manifestJson = manifest ? JSON.parse(manifest.source) : { timeZone: 'America/Los_Angeles', exceptionLogging: 'STACKDRIVER', runtimeVersion: 'V8' };
