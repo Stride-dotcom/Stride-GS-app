@@ -263,6 +263,14 @@ export function IntakesPanel() {
     clientEmail:  intake.email,
     contactName:  intake.contactName,
     phone:        intake.phone ?? '',
+    // v38.160.0 — Carry the intake's Billing Contact section through to
+    // the onboard modal. Previously the fields were collected at intake
+    // but admin had to retype during onboard. Now they auto-populate.
+    // handleClientSubmit's post-create Supabase update lands them on
+    // clients.billing_* so the QBO push + invoice email paths use them.
+    billingContactName: intake.billingContactName ?? '',
+    billingEmail:       intake.billingEmail       ?? '',
+    billingAddress:     intake.billingAddress     ?? '',
     qbCustomerName: intake.businessName,
     paymentTerms: 'Net 30',
     freeStorageDays: '0',
