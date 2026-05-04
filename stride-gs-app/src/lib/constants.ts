@@ -91,6 +91,25 @@ export const ITEM_CLASSES = [
   'Other',
 ] as const;
 
+/**
+ * Normalize a date-or-datetime string to the strict `YYYY-MM-DD` form that
+ * `<input type="date">` requires. The browser silently rejects values like
+ * `"2026-05-18 00:00:00"` (renders empty), and our equality guards then
+ * misfire because the user-typed value never matches the time-decorated
+ * fallback. Use this everywhere a sheet/Supabase date column is fed into a
+ * date picker AND in the equality check that decides whether to fire a save.
+ *
+ * Returns "" on empty / unparseable inputs so the picker shows its placeholder.
+ */
+export function toDateInputValue(d?: string | null): string {
+  if (!d) return '';
+  const raw = String(d).trim();
+  if (!raw) return '';
+  // Already date-only (no time component) → return as-is if it looks like ISO.
+  const ymd = /^(\d{4}-\d{2}-\d{2})/.exec(raw);
+  return ymd ? ymd[1] : '';
+}
+
 /** Format ISO date (YYYY-MM-DD) or datetime (YYYY-MM-DD HH:mm:ss) to MM/DD/YYYY */
 export function fmtDate(d?: string | null): string {
   if (!d) return '\u2014';

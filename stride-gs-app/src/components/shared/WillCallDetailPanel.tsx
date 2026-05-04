@@ -15,7 +15,7 @@ import { EntityHistory } from './EntityHistory';
 import { ItemIdBadges } from './ItemIdBadges';
 import { useItemIndicators } from '../../hooks/useItemIndicators';
 import { theme } from '../../styles/theme';
-import { fmtDate } from '../../lib/constants';
+import { fmtDate, toDateInputValue } from '../../lib/constants';
 import { WriteButton } from './WriteButton';
 import { ProcessingOverlay } from './ProcessingOverlay';
 import { BillingPreviewCard } from './BillingPreviewCard';
@@ -238,7 +238,8 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
   const handleEditStart = useCallback(() => {
     setEditPickupParty(wc.pickupParty || '');
     setEditPhone(wc.pickupPartyPhone || '');
-    setEditDate(wc.scheduledDate || '');
+    // Normalize for `<input type="date">` — strict YYYY-MM-DD only.
+    setEditDate(toDateInputValue(wc.scheduledDate));
     setEditNotes(wc.notes || '');
     setEditCod(!!wc.cod);
     setEditCodAmount(wc.codAmount != null ? String(wc.codAmount) : '');
@@ -289,7 +290,9 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
     let changed = false;
     if (editPickupParty !== (wc.pickupParty || '')) { payload.pickupParty = editPickupParty; changed = true; }
     if (editPhone !== (wc.pickupPartyPhone || '')) { payload.pickupPhone = editPhone; changed = true; }
-    if (editDate !== (wc.scheduledDate || '')) { payload.estimatedPickupDate = editDate; changed = true; }
+    // Compare normalized forms — wc.scheduledDate may carry a "00:00:00"
+    // suffix from older sheets while editDate is always YYYY-MM-DD.
+    if (editDate !== toDateInputValue(wc.scheduledDate)) { payload.estimatedPickupDate = editDate; changed = true; }
     if (editNotes !== (wc.notes || '')) { payload.notes = editNotes; changed = true; }
     if (editCod !== !!wc.cod) { payload.cod = editCod; changed = true; }
     const origAmt = wc.codAmount != null ? String(wc.codAmount) : '';

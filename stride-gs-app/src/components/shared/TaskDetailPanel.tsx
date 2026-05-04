@@ -14,7 +14,7 @@ import { ItemIdBadges } from './ItemIdBadges';
 import { useItemIndicators } from '../../hooks/useItemIndicators';
 import { buildDeepLinkUrl } from '../../lib/deepLinks';
 import { theme } from '../../styles/theme';
-import { fmtDate, fmtDateTime } from '../../lib/constants';
+import { fmtDate, fmtDateTime, toDateInputValue } from '../../lib/constants';
 import { WriteButton } from './WriteButton';
 import { postCompleteTask, postStartTask, postUpdateTaskNotes, postUpdateTaskCustomPrice, postRequestRepairQuote, postCancelTask, postCorrectTaskResult, postReopenTask, postUpdateInventoryItem, postUpdateTaskPriority, postUpdateTaskDueDate, isApiConfigured } from '../../lib/api';
 import { generateTaskWorkOrderPdf } from '../../lib/workOrderPdf';
@@ -121,10 +121,12 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
   // Priority + Due Date — auto-save on change
   const canEditPriority = user?.role === 'admin' || user?.role === 'staff';
   const [priority, setPriority] = useState<'High' | 'Normal'>(task.priority === 'High' ? 'High' : 'Normal');
-  const [dueDate, setDueDate] = useState<string>(task.dueDate || '');
+  // Normalize for `<input type="date">` — strict YYYY-MM-DD only, otherwise
+  // browsers reject the value and the equality guard misfires.
+  const [dueDate, setDueDate] = useState<string>(toDateInputValue(task.dueDate));
   useEffect(() => {
     setPriority(task.priority === 'High' ? 'High' : 'Normal');
-    setDueDate(task.dueDate || '');
+    setDueDate(toDateInputValue(task.dueDate));
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [task.taskId]);
 
@@ -142,7 +144,7 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
     setDueDate(newDate);
     mergeTaskPatch?.(task.taskId, { dueDate: newDate || undefined });
     const resp = await postUpdateTaskDueDate({ taskId: task.taskId, dueDate: newDate || null }, clientSheetId);
-    if (!resp.ok) { setDueDate(task.dueDate || ''); clearTaskPatch?.(task.taskId); }
+    if (!resp.ok) { setDueDate(toDateInputValue(task.dueDate)); clearTaskPatch?.(task.taskId); }
   }, [apiConfigured, clientSheetId, task.taskId, task.dueDate, mergeTaskPatch, clearTaskPatch]);
 
   // Edit/Save mode for task fields. Custom Price was previously a separate
