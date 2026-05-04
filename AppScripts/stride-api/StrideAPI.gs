@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.164.0 — 2026-05-04 PST — handleProcessWcRelease_ now stamps "Ledger Row ID": "WC-{itemId}-{wcNumber}" on every billing row it writes. Without this column, api_fullClientSync_ explicitly skipped the row (see billing case at line ~6068: `if (!lid) continue`), so since 2026-04-01 every non-COD WC release wrote rows to the Billing_Ledger sheet that never mirrored to Supabase — 13 WCs / ~84 items invisible on the React Billing page and impossible to invoice. Out of 7 billing-row write paths in this file (RCVG, RCVG addons, task complete, repair quote lines, repair primary, WC release, manual charge), WC release was the only one missing the ID. Format mirrors RCVG's `RCVG-{itemId}-{shipmentNo}` convention. New admin entry `runBackfillWcLedgerRowIds` walks every active client in CB Clients, scans Billing_Ledger for WC rows missing the ID, stamps `WC-{itemId}-{shipment#}` (bulk-write column), then api_fullClientSync_(.., ["billing"]) per tenant to mirror. Idempotent — only patches rows where the ID is currently blank. Run once from Apps Script editor after deploy.
+   StrideAPI.gs — v38.165.0 — 2026-05-04 PST — Three hardenings to prevent the May 2026 WC-bug class from recurring. (1) supabaseBatchUpsert_ now shape-splits rows by their JSON key set before chunking. PostgREST rejects mixed-shape batches with PGRST102 ("All object keys must match"); the fall-through per-row retry path was correct but inefficient. Several sb*Row_ helpers conditionally include keys (sbBillingRow_ omits invoice_date when blank, etc.), so the fast batch path was failing for any client whose Billing_Ledger had a mix of invoiced + uninvoiced rows. Now each shape gets its own 50-row chunk loop. (2) api_fullClientSync_'s six entity branches (inventory / tasks / shipments / billing / will_calls / repairs) each replaced their bare `if (!key) continue;` with a tracked-skip pattern that calls new helper sbLogBlankIdSkips_ at the end of the case. Blank-key sheet rows now surface in stax_run_log with sheet name + row numbers so operators see them in the React FailedOperationsDrawer instead of disappearing into a `continue`. (3) New admin diagnostic runAuditMissingLedgerRowIds — read-only walk of every active client's six entity sheets, reporting blank-key rows. Quarterly safety net complementing the per-sync surfacing. Schema-side: companion migration 20260504200000_entity_id_nonempty_check_constraints.sql adds CHECK (col <> '') to all six entity-key columns so the next blank slip-through fails LOUD at INSERT.
+   v38.164.0 — 2026-05-04 PST — handleProcessWcRelease_ now stamps "Ledger Row ID": "WC-{itemId}-{wcNumber}" on every billing row it writes. Without this column, api_fullClientSync_ explicitly skipped the row (see billing case at line ~6068: `if (!lid) continue`), so since 2026-04-01 every non-COD WC release wrote rows to the Billing_Ledger sheet that never mirrored to Supabase — 13 WCs / ~84 items invisible on the React Billing page and impossible to invoice. Out of 7 billing-row write paths in this file (RCVG, RCVG addons, task complete, repair quote lines, repair primary, WC release, manual charge), WC release was the only one missing the ID. Format mirrors RCVG's `RCVG-{itemId}-{shipmentNo}` convention. New admin entry `runBackfillWcLedgerRowIds` walks every active client in CB Clients, scans Billing_Ledger for WC rows missing the ID, stamps `WC-{itemId}-{shipment#}` (bulk-write column), then api_fullClientSync_(.., ["billing"]) per tenant to mirror. Idempotent — only patches rows where the ID is currently blank. Run once from Apps Script editor after deploy.
    v38.163.0 — 2026-05-04 PST — Fixed `seedAllStaxToSupabase`'s Charge Log reader. The actual sheet headers (per the StaxAutoPay SHEET_NAMES schema) are "Customer Name" + "Stax Transaction ID", but the seed function looked up "Customer" + "Transaction ID" — always returned undefined → mirror seeded customer/txn_id as empty strings for every charge log row. Symptom: React Charge Log page shows blank Customer column + blank Transaction ID column for all 8 historical successful charges. Now reads the canonical names first, falls back to the legacy short form so manually-edited sheets still work. Companion StaxAutoPay.gs v4.7.6 fixes the same bug in `_sbResyncAllStaxCharges`. After deploy, run `seedAllStaxToSupabase` once to backfill the existing 8 rows.
    v38.162.0 — 2026-05-04 PST — handleCreateTestInvoice_ was the one Stax write path I missed in PR #214's "retire the Stax Customers sheet" sweep — it still read the deprecated sheet and reported NOT_FOUND for any client that exists in CB Clients but not the legacy mirror. Justin hit this trying to test the Stax webhook with a reactivated demo account ("Justin Demo Account") that is in CB Clients with a stax_customer_id but never had a row on the retired sheet. Migrated to stax_buildClientStaxMap_ — same helper handleQbExport_, handleImportIIF_, and stax_lookupCustomerIds_ all use. Lookup now succeeds when the client name matches Client Name, QB Customer Name, OR Stax Customer Name on the CB Clients row.
    v38.161.0 — 2026-05-04 PST — Critical fix to qbo_getCustomerContactInfo_ response-shape read. The helper added in v38.156.0 reads `result.Customer` from the qbo_apiRequest_ return value, but qbo_apiRequest_ wraps the body in `{ success, status, data, error }` (body lives at `.data`). The Customer field is at `result.data.Customer`, not `result.Customer`. The original read was always undefined → helper returned null on every call → QBO BillEmail inheritance has been silently no-op'd since PR #218. That explained Justin's INV-000135 push landing in QBO with empty bill-to email even after v38.156.0 + v38.158.0 fallback work, AND why runPullBillingContactsFromQbo (v38.160.0) reported "QBO customer fetch failed for Id <X>" on every client tested. One-character typo, weeks of broken behavior. Fix: read `result.data.Customer` and require `result.success` to also be truthy. With this in, the next QBO push for any sub-customer will inherit BillEmail from the parent record correctly, AND the bulk pull function will populate clients.billing_email + clients.billing_address from QBO for the ~50 active clients with null fields.
@@ -3232,8 +3233,50 @@ function supabaseBatchUpsert_(table, rows) {
                         stax_run_log: "timestamp,fn,summary",
                         autocomplete_db: "tenant_id,field,value" }[table] || "";
 
-    // Supabase REST API handles arrays up to ~1000 rows; chunk at 50 for reliability
+    // v38.165.0 — Shape-split before chunking. PostgREST rejects a batch
+    // where rows don't share an identical JSON key set with PGRST102
+    // ("All object keys must match"). Several sb*Row_ helpers conditionally
+    // include keys (e.g. sbBillingRow_ omits invoice_date when blank, per
+    // v38.146.0 to avoid clobbering Supabase's value with a sheet blank);
+    // mixing those rows in one POST always fails the batch and falls
+    // through to per-row retry. That works but wastes round-trips. Group
+    // rows by key shape so each chunk passes PostgREST's validation on
+    // the first try. Within a shape, chunk at 50 for size safety.
+    var shapeBuckets = {};
+    var shapeOrder = [];
+    for (var sbi = 0; sbi < rows.length; sbi++) {
+      var keys = Object.keys(rows[sbi]).sort();
+      var shapeKey = keys.join("|");
+      if (!shapeBuckets[shapeKey]) {
+        shapeBuckets[shapeKey] = [];
+        shapeOrder.push(shapeKey);
+      }
+      shapeBuckets[shapeKey].push(rows[sbi]);
+    }
+
     var CHUNK = 50;
+    for (var sbo = 0; sbo < shapeOrder.length; sbo++) {
+      var shapeRows = shapeBuckets[shapeOrder[sbo]];
+      _supabaseBatchPostChunks_(table, shapeRows, conflictCol, CHUNK);
+    }
+    return;
+  } catch (e) {
+    Logger.log("supabaseBatchUpsert_ " + table + " error (non-fatal): " + e);
+    try { sbLogSyncError_(table, 0, String(e), (rows && rows.length) || 0, rows && rows[0]); } catch (_) {}
+  }
+}
+
+/**
+ * Internal: post one homogeneous-shape row group in CHUNK-sized POSTs.
+ * Extracted from supabaseBatchUpsert_ in v38.165.0 so the shape-split
+ * loop can reuse the chunk-and-retry logic per shape group.
+ */
+function _supabaseBatchPostChunks_(table, rows, conflictCol, CHUNK) {
+  if (!rows || !rows.length) return;
+  try {
+    var url = prop_("SUPABASE_URL");
+    var key = prop_("SUPABASE_SERVICE_ROLE_KEY");
+    if (!url || !key) return;
     for (var i = 0; i < rows.length; i += CHUNK) {
       var chunk = rows.slice(i, i + CHUNK);
       var postUrl = url + "/rest/v1/" + table;
@@ -3336,6 +3379,38 @@ function sbLogSyncError_(table, httpCode, errorBody, rowCount, sampleRow) {
     var ss = getStaxSpreadsheet_();
     var rlSheet = ss && ss.getSheetByName("Run Log");
     if (rlSheet) rlSheet.appendRow([ts, "_sbBatchUpsert", summary, details]);
+  } catch (_) {}
+}
+
+/**
+ * v38.165.0 — Surface silent blank-key skips during api_fullClientSync_.
+ *
+ * Each entity branch in fullClientSync skips sheet rows whose primary-key
+ * column (Ledger Row ID, Task ID, etc.) is blank. Pre-v38.165.0 those
+ * skips were a bare `continue;` — invisible to the operator. The May 2026
+ * WC bug spent ~5 weeks in production hidden behind exactly this pattern.
+ *
+ * This helper logs a single summary line per (tenant, entity) pair when
+ * any skips occurred, AND writes a stax_run_log row so the React
+ * FailedOperationsDrawer surfaces it.
+ *
+ * Idempotent / safe to call with an empty list (no-op).
+ *
+ * @param {string} tenantId
+ * @param {string} entityType   e.g. "billing", "tasks"
+ * @param {string} sheetName    human-readable sheet name for the log line
+ * @param {string} idColName    e.g. "Ledger Row ID"
+ * @param {number[]} sheetRows  1-based sheet row numbers that were skipped
+ */
+function sbLogBlankIdSkips_(tenantId, entityType, sheetName, idColName, sheetRows) {
+  if (!sheetRows || !sheetRows.length) return;
+  var preview = sheetRows.slice(0, 10).join(",") + (sheetRows.length > 10 ? ",…" : "");
+  var msg = "fullClientSync skipped " + sheetRows.length + " " + entityType +
+            " row(s) on " + sheetName + " with blank " + idColName +
+            " (rows " + preview + ")";
+  Logger.log("[blank-id-skip] " + tenantId + ": " + msg);
+  try {
+    sbLogSyncError_(entityType, 0, msg, sheetRows.length, { tenant_id: tenantId });
   } catch (_) {}
 }
 
@@ -5967,9 +6042,10 @@ function api_fullClientSync_(tenantId, entityTypes) {
 
             var invSb = [];
             var invKeepIds = [];
+            var invBlankSkips = [];
             for (var i = 0; i < invRows.length; i++) {
               var iid = String(invRows[i]["Item ID"] || "").trim();
-              if (!iid) continue;
+              if (!iid) { invBlankSkips.push(i + 2); continue; }
               invKeepIds.push(iid);
               invSb.push(sbInventoryRow_(tenantId, {
                 itemId: iid, description: invRows[i]["Description"], vendor: invRows[i]["Vendor"],
@@ -5988,6 +6064,7 @@ function api_fullClientSync_(tenantId, entityTypes) {
             }
             supabaseBatchUpsert_("inventory", invSb);
             supabaseDeleteStaleRows_("inventory", tenantId, invKeepIds, "item_id");
+            sbLogBlankIdSkips_(tenantId, "inventory", "Inventory", "Item ID", invBlankSkips);
           }
           break;
         case "task":
@@ -5999,9 +6076,10 @@ function api_fullClientSync_(tenantId, entityTypes) {
             var shipFolderMap = api_buildShipmentFolderMap_(ss);
             var taskSb = [];
             var taskKeepIds = [];
+            var taskBlankSkips = [];
             for (var j = 0; j < taskRows.length; j++) {
               var tid = String(taskRows[j]["Task ID"] || "").trim();
-              if (!tid) continue;
+              if (!tid) { taskBlankSkips.push(j + 2); continue; }
               taskKeepIds.push(tid);
               var tShipNo = String(taskRows[j]["Shipment #"] || "").trim();
               taskSb.push(sbTaskRow_(tenantId, {
@@ -6025,6 +6103,7 @@ function api_fullClientSync_(tenantId, entityTypes) {
             }
             supabaseBatchUpsert_("tasks", taskSb);
             supabaseDeleteStaleRows_("tasks", tenantId, taskKeepIds, "task_id");
+            sbLogBlankIdSkips_(tenantId, "tasks", "Tasks", "Task ID", taskBlankSkips);
           }
           break;
         case "shipment":
@@ -6035,9 +6114,10 @@ function api_fullClientSync_(tenantId, entityTypes) {
             var shipFolderUrls = api_readIdFolderUrls_(shipSheet, "Shipment #");
             var shipSb = [];
             var shipKeepIds = [];
+            var shipBlankSkips = [];
             for (var k = 0; k < shipRows.length; k++) {
               var sn = String(shipRows[k]["Shipment #"] || "").trim();
-              if (!sn) continue;
+              if (!sn) { shipBlankSkips.push(k + 2); continue; }
               shipKeepIds.push(sn);
               shipSb.push(sbShipmentRow_(tenantId, {
                 shipmentNumber: sn, receiveDate: formatDate_(shipRows[k]["Receive Date"]),
@@ -6048,6 +6128,7 @@ function api_fullClientSync_(tenantId, entityTypes) {
             }
             supabaseBatchUpsert_("shipments", shipSb);
             supabaseDeleteStaleRows_("shipments", tenantId, shipKeepIds, "shipment_number");
+            sbLogBlankIdSkips_(tenantId, "shipments", "Shipments", "Shipment #", shipBlankSkips);
           }
           break;
         case "billing":
@@ -6062,9 +6143,10 @@ function api_fullClientSync_(tenantId, entityTypes) {
             var referenceMap = (_invFields && _invFields.reference) || {};
             var billSb = [];
             var billKeepIds = [];
+            var billBlankSkips = [];
             for (var l = 0; l < billRows.length; l++) {
               var lid = String(billRows[l]["Ledger Row ID"] || "").trim();
-              if (!lid) continue;
+              if (!lid) { billBlankSkips.push(l + 2); continue; }
               billKeepIds.push(lid);
               var bFcsItemId = String(billRows[l]["Item ID"] || "").trim();
               var bFcsSidemark = String(billRows[l]["Sidemark"] || "").trim() || (bFcsItemId ? (sidemarkMap[bFcsItemId] || "") : "");
@@ -6083,6 +6165,7 @@ function api_fullClientSync_(tenantId, entityTypes) {
             }
             supabaseBatchUpsert_("billing", billSb);
             supabaseDeleteStaleRows_("billing", tenantId, billKeepIds, "ledger_row_id");
+            sbLogBlankIdSkips_(tenantId, "billing", "Billing_Ledger", "Ledger Row ID", billBlankSkips);
           }
           break;
         case "will_call":
@@ -6108,9 +6191,10 @@ function api_fullClientSync_(tenantId, entityTypes) {
             }
             var wcSb = [];
             var wcKeepIds = [];
+            var wcBlankSkips = [];
             for (var m = 0; m < wcRows.length; m++) {
               var wcn = String(wcRows[m]["WC Number"] || "").trim();
-              if (!wcn) continue;
+              if (!wcn) { wcBlankSkips.push(m + 2); continue; }
               wcKeepIds.push(wcn);
               wcSb.push(sbWillCallRow_(tenantId, {
                 wcNumber: wcn, status: wcRows[m]["Status"], pickupParty: wcRows[m]["Pickup Party"],
@@ -6125,6 +6209,7 @@ function api_fullClientSync_(tenantId, entityTypes) {
             }
             supabaseBatchUpsert_("will_calls", wcSb);
             supabaseDeleteStaleRows_("will_calls", tenantId, wcKeepIds, "wc_number");
+            sbLogBlankIdSkips_(tenantId, "will_calls", "Will_Calls", "WC Number", wcBlankSkips);
           }
           break;
         case "repair":
@@ -6172,9 +6257,10 @@ function api_fullClientSync_(tenantId, entityTypes) {
 
             var repSb = [];
             var repKeepIds = [];
+            var repBlankSkips = [];
             for (var n = 0; n < repRows.length; n++) {
               var rid = String(repRows[n]["Repair ID"] || "").trim();
-              if (!rid) continue;
+              if (!rid) { repBlankSkips.push(n + 2); continue; }
               repKeepIds.push(rid);
               var rTaskId = String(repRows[n]["Source Task ID"] || repRows[n]["Task ID"] || "").trim();
               var srcMeta = repTaskMeta[rTaskId] || {};
@@ -6219,6 +6305,7 @@ function api_fullClientSync_(tenantId, entityTypes) {
             }
             supabaseBatchUpsert_("repairs", repSb);
             supabaseDeleteStaleRows_("repairs", tenantId, repKeepIds, "repair_id");
+            sbLogBlankIdSkips_(tenantId, "repairs", "Repairs", "Repair ID", repBlankSkips);
           }
           break;
       }
@@ -38771,6 +38858,118 @@ function runBackfillWcLedgerRowIds() {
       timestamp: new Date(startedAt).toISOString(),
       fn: "runBackfillWcLedgerRowIds",
       summary: summary
+    });
+  } catch (_) {}
+}
+
+/**
+ * v38.165.0 — runAuditMissingLedgerRowIds: admin diagnostic.
+ *
+ * Walks every active client in CB Clients and reports on any sheet rows
+ * whose entity-key column is blank — billing (Ledger Row ID), tasks
+ * (Task ID), repairs (Repair ID), will_calls (WC Number), shipments
+ * (Shipment #), inventory (Item ID). Read-only.
+ *
+ * Why: post-fix safety net for the May 2026 WC bug class. With the
+ * sbLogBlankIdSkips_ surfacing now wired into api_fullClientSync_, any
+ * fresh blank-id rows show up in stax_run_log on the next sync — but
+ * this one-shot is the bulk-audit complement that catches what's already
+ * sitting in the sheets without waiting for a sync. Run quarterly or
+ * after any PR that touches the ~12 paths that write to entity sheets.
+ *
+ * Logs per-tenant per-entity counts to the Apps Script execution log
+ * AND aggregates a single stax_run_log entry for the React Failed
+ * Operations drawer.
+ *
+ * Run from Apps Script editor → function dropdown → runAuditMissingLedgerRowIds.
+ */
+function runAuditMissingLedgerRowIds() {
+  var startedAt = new Date();
+  var cbId = prop_("CB_SPREADSHEET_ID");
+  if (!cbId) { Logger.log("CB_SPREADSHEET_ID not set"); return; }
+  var cbSS = SpreadsheetApp.openById(cbId);
+  var clientsSh = cbSS.getSheetByName("Clients");
+  if (!clientsSh) { Logger.log("CB Clients tab not found"); return; }
+
+  var rows = clientsSh.getDataRange().getValues();
+  var hdr = rows[0].map(function(h) { return String(h).trim().toUpperCase(); });
+  var idCol = hdr.indexOf("CLIENT SPREADSHEET ID");
+  var nameCol = hdr.indexOf("CLIENT NAME");
+  var activeCol = hdr.indexOf("ACTIVE");
+  if (idCol < 0) { Logger.log("CLIENT SPREADSHEET ID column not found"); return; }
+
+  // Each entry: { sheet: "Billing_Ledger", col: "Ledger Row ID", entity: "billing" }
+  var checks = [
+    { sheet: "Billing_Ledger", col: "Ledger Row ID", entity: "billing" },
+    { sheet: "Tasks",          col: "Task ID",       entity: "tasks" },
+    { sheet: "Repairs",        col: "Repair ID",     entity: "repairs" },
+    { sheet: "Will_Calls",     col: "WC Number",     entity: "will_calls" },
+    { sheet: "Shipments",      col: "Shipment #",    entity: "shipments" },
+    { sheet: "Inventory",      col: "Item ID",       entity: "inventory" }
+  ];
+
+  var totalClients = 0;
+  var totalBlanks = 0;
+  var perEntityTotals = {};
+  var findings = [];  // { client, sheet, blank, totalRows, sampleRows }
+
+  for (var i = 1; i < rows.length; i++) {
+    var sid = String(rows[i][idCol] || "").trim();
+    var cName = nameCol >= 0 ? String(rows[i][nameCol] || "").trim() : sid;
+    var active = activeCol >= 0 ? toBool_(rows[i][activeCol]) : true;
+    if (!sid || !active) continue;
+    totalClients++;
+
+    var ss;
+    try { ss = SpreadsheetApp.openById(sid); }
+    catch (openErr) {
+      Logger.log("[audit] " + cName + " — open failed: " + openErr.message);
+      continue;
+    }
+
+    for (var c = 0; c < checks.length; c++) {
+      var chk = checks[c];
+      var sh = ss.getSheetByName(chk.sheet);
+      if (!sh || sh.getLastRow() < 2) continue;
+      var hMap = api_getHeaderMap_(sh);
+      var keyColIdx = hMap[chk.col];
+      if (!keyColIdx) {
+        Logger.log("[audit] " + cName + " " + chk.sheet + " — \"" + chk.col + "\" column missing");
+        continue;
+      }
+      var data = sh.getRange(2, keyColIdx, sh.getLastRow() - 1, 1).getValues();
+      var blankRows = [];
+      for (var r = 0; r < data.length; r++) {
+        if (!String(data[r][0] || "").trim()) blankRows.push(r + 2);  // 1-based sheet row
+      }
+      if (blankRows.length) {
+        totalBlanks += blankRows.length;
+        perEntityTotals[chk.entity] = (perEntityTotals[chk.entity] || 0) + blankRows.length;
+        findings.push({
+          client: cName, sheet: chk.sheet, blank: blankRows.length,
+          totalRows: data.length, sampleRows: blankRows.slice(0, 10)
+        });
+        Logger.log("[audit] " + cName + " " + chk.sheet + " — " + blankRows.length +
+                   " blank " + chk.col + " (rows " + blankRows.slice(0, 10).join(",") +
+                   (blankRows.length > 10 ? ",…" : "") + " of " + data.length + ")");
+      }
+    }
+  }
+
+  var perEntityStr = Object.keys(perEntityTotals).map(function(e) {
+    return e + "=" + perEntityTotals[e];
+  }).join(" ") || "all-clean";
+  var summary = "clients=" + totalClients + " total_blank=" + totalBlanks +
+                " (" + perEntityStr + ")";
+  Logger.log("runAuditMissingLedgerRowIds done: " + summary);
+
+  // Single stax_run_log row for the operator UI.
+  try {
+    supabaseUpsert_("stax_run_log", {
+      timestamp: new Date(startedAt).toISOString(),
+      fn: "runAuditMissingLedgerRowIds",
+      summary: summary,
+      details: JSON.stringify(findings).substring(0, 4000)
     });
   } catch (_) {}
 }
