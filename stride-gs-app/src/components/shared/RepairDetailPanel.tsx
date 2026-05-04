@@ -4,9 +4,9 @@ import { BtnSpinner } from '../ui/BtnSpinner';
 import { TabbedDetailPanel, type TabbedDetailPanelTab } from './TabbedDetailPanel';
 import { EntityPage } from './EntityPage';
 import { DriveFoldersList, type DriveFolderLink } from './DriveFoldersList';
-import { usePhotos } from '../../hooks/usePhotos';
 import { useDocuments } from '../../hooks/useDocuments';
-import { useEntityNotes } from '../../hooks/useEntityNotes';
+import { usePhotoGraphRollup, useNoteGraphRollup, type RollupContext } from '../../hooks/useGraphRollup';
+import { useItemContainerScopes } from '../../hooks/useEntityNeighbors';
 import { PhotosPanel as _PhotosPanel, DocumentsPanel as _DocumentsPanel, NotesPanel as _NotesPanel } from './EntityAttachments';
 import { EntityHistory } from './EntityHistory';
 import { FolderButton } from './FolderButton';
@@ -1402,6 +1402,23 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
     { id: 'details', label: 'Details', keepMounted: true, render: renderDetailsTab },
   ];
 
+  // v2026-05-04 — graph rollup. Repair rows don't carry shipment_number;
+  // useItemContainerScopes resolves it from the inventory mirror (and also
+  // looks up will_call memberships).
+  const repairItemIdStr = repair.itemId ? String(repair.itemId) : null;
+  const { scopes: rpContainerScopes } = useItemContainerScopes(
+    repairItemIdStr,
+    repair.clientSheetId ?? null,
+  );
+  const rpRollupCtx = useMemo<RollupContext | null>(() => {
+    if (!repairItemIdStr) return null;
+    return {
+      tenantId: repair.clientSheetId ?? null,
+      itemIds: [repairItemIdStr],
+      scopes: rpContainerScopes,
+    };
+  }, [repairItemIdStr, repair.clientSheetId, rpContainerScopes]);
+
   const builtInTabsCfg = {
     photos: {
       entityType: 'repair' as const,
@@ -1409,6 +1426,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
       tenantId: repair.clientSheetId,
       itemId: repair.itemId ? String(repair.itemId) : null,
       enableSourceFilter: !!repair.itemId,
+      rollupCtx: rpRollupCtx,
     },
     docs: {
       contextType: 'repair' as const,
@@ -1424,6 +1442,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
       ],
       enableSourceFilter: !!repair.itemId,
       itemId: repair.itemId ? String(repair.itemId) : null,
+      rollupCtx: rpRollupCtx,
     },
     activity: {
       entityType: 'repair',
@@ -1433,20 +1452,22 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
   };
 
   // ── Page-mode enhancements ──
-  const { photos: rpPhotos } = usePhotos({
-    entityType: 'repair',
-    entityId: renderAsPage ? repair.repairId : null,
-    tenantId: repair.clientSheetId ?? null,
-    itemId: repair.itemId ? String(repair.itemId) : null,
-    enabled: !!renderAsPage,
-  });
+  const { photos: rpPhotos } = usePhotoGraphRollup(
+    renderAsPage && rpRollupCtx
+      ? rpRollupCtx
+      : { tenantId: null, itemIds: [], scopes: [], enabled: false }
+  );
   const { documents: rpDocs } = useDocuments({
     contextType: 'repair',
     contextId: renderAsPage ? repair.repairId : '',
     tenantId: repair.clientSheetId ?? null,
     enabled: !!renderAsPage,
   });
-  const { notes: rpNotes } = useEntityNotes('repair', renderAsPage ? repair.repairId : '');
+  const { notes: rpNotes } = useNoteGraphRollup(
+    renderAsPage && rpRollupCtx
+      ? rpRollupCtx
+      : { tenantId: null, itemIds: [], scopes: [], enabled: false }
+  );
   const rpPhotoCount = renderAsPage ? rpPhotos.length : 0;
   const rpDocCount   = renderAsPage ? rpDocs.length   : 0;
   const rpNoteCount  = renderAsPage ? rpNotes.length  : 0;
@@ -1465,6 +1486,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
         tenantId={repair.clientSheetId}
         itemId={repair.itemId ? String(repair.itemId) : null}
         enableSourceFilter={!!repair.itemId}
+        rollupCtx={rpRollupCtx}
       />
       <DriveFoldersList folders={repairDriveFolders} />
     </div>
@@ -1485,6 +1507,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
       ]}
       enableSourceFilter={!!repair.itemId}
       itemId={repair.itemId ? String(repair.itemId) : null}
+      rollupCtx={rpRollupCtx}
       pinnedNote={{ label: 'Repair Notes', text: repair.repairNotes }}
     />
   );

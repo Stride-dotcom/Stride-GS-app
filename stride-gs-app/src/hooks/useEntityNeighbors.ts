@@ -46,50 +46,75 @@ export function useItemContainerScopes(
   shipmentHint?: string | null,
 ): ContainerScopeResult {
   const [wcNumbers, setWcNumbers] = useState<string[]>([]);
+  const [resolvedShipment, setResolvedShipment] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const mountedRef = useRef(true);
   useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false; }; }, []);
 
   useEffect(() => {
-    if (!itemId || !tenantId) { setWcNumbers([]); return; }
+    if (!itemId || !tenantId) {
+      setWcNumbers([]);
+      setResolvedShipment(null);
+      return;
+    }
     let cancelled = false;
     setLoading(true);
     void (async () => {
-      // will_calls.item_ids is jsonb. The `cs` (contains) operator
-      // performs a JSONB containment check using the GIN index, which
-      // is the right shape for "does this array contain X".
-      const { data, error } = await supabase
+      // Run WC + shipment lookups in parallel. Shipment lookup is a no-op
+      // when the caller already passed a shipmentHint (Task panel does).
+      // WC lookup uses the JSONB GIN index on will_calls.item_ids.
+      const wcPromise = supabase
         .from('will_calls')
         .select('wc_number, item_ids')
         .eq('tenant_id', tenantId)
         .contains('item_ids', JSON.stringify([itemId]));
+      const shipmentPromise = shipmentHint
+        ? Promise.resolve({ data: null, error: null })
+        : supabase
+            .from('inventory')
+            .select('shipment_number')
+            .eq('tenant_id', tenantId)
+            .eq('item_id', itemId)
+            .maybeSingle();
+      const [wcRes, shipRes] = await Promise.all([wcPromise, shipmentPromise]);
       if (cancelled || !mountedRef.current) return;
-      if (error) {
-        console.warn('[useItemContainerScopes] will_calls lookup failed', error);
+      if (wcRes.error) {
+        console.warn('[useItemContainerScopes] will_calls lookup failed', wcRes.error);
         setWcNumbers([]);
-        setLoading(false);
-        return;
+      } else {
+        const numbers = (wcRes.data ?? [])
+          .map((r: { wc_number?: string | null }) => r.wc_number ?? '')
+          .filter((s: string) => !!s);
+        setWcNumbers(numbers);
       }
-      const numbers = (data ?? [])
-        .map((r: { wc_number?: string | null }) => r.wc_number ?? '')
-        .filter((s: string) => !!s);
-      setWcNumbers(numbers);
+      if (!shipmentHint) {
+        if (shipRes.error) {
+          console.warn('[useItemContainerScopes] inventory shipment lookup failed', shipRes.error);
+          setResolvedShipment(null);
+        } else {
+          const num = (shipRes.data as { shipment_number?: string | null } | null)?.shipment_number ?? null;
+          setResolvedShipment(num && num.trim() ? num : null);
+        }
+      } else {
+        setResolvedShipment(null);
+      }
       setLoading(false);
     })();
     return () => { cancelled = true; };
-  }, [itemId, tenantId]);
+  }, [itemId, tenantId, shipmentHint]);
 
   return useMemo(() => {
     const scopes: RollupScope[] = [];
-    if (shipmentHint) {
-      scopes.push({ entityType: 'shipment', entityId: shipmentHint });
+    const shipmentNumber = shipmentHint || resolvedShipment;
+    if (shipmentNumber) {
+      scopes.push({ entityType: 'shipment', entityId: shipmentNumber });
     }
     for (const wc of wcNumbers) {
       scopes.push({ entityType: 'will_call', entityId: wc });
     }
     // Claim direction left out until claim_items mirror lands.
     return { scopes, loading };
-  }, [shipmentHint, wcNumbers, loading]);
+  }, [shipmentHint, resolvedShipment, wcNumbers, loading]);
 }
 
 /**
