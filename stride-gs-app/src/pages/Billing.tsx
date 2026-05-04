@@ -11,10 +11,11 @@ import {
 import {
   Search, Download, ChevronUp, ChevronDown, ChevronRight, ArrowUpDown,
   Settings2, FileText, DollarSign, Send, Eye, ExternalLink,
-  CheckCircle, AlertTriangle, Loader2, X, RefreshCw, Plus, Scale, CreditCard, Clock,
+  CheckCircle, AlertTriangle, Loader2, X, RefreshCw, Plus, Scale, CreditCard, Clock, ShieldCheck,
 } from 'lucide-react';
 import { ParityMonitor } from './ParityMonitor';
 import { BillingActivityTab } from '../components/billing/BillingActivityTab';
+import { BillingCoverageTab } from '../components/billing/BillingCoverageTab';
 import { useVirtualRows } from '../hooks/useVirtualRows';
 import { theme } from '../styles/theme';
 import { BtnSpinner } from '../components/ui/BtnSpinner';
@@ -879,11 +880,11 @@ export function Billing() {
   const { connected: qboConnected, pushInvoice: qboPushInvoice } = useQBO();
 
   // ─── Top-level tab state ──────────────────────────────────────────────────
-  // Active tab persisted in the URL (?tab=report|storage|review|parity|activity)
+  // Active tab persisted in the URL (?tab=report|storage|review|parity|activity|coverage)
   // so back/forward navigates between tab visits and shareable URLs reflect
   // the user's exact view.
-  type BillingTab = 'report' | 'storage' | 'review' | 'parity' | 'activity';
-  const VALID_BILLING_TABS: readonly BillingTab[] = ['report','storage','review','parity','activity'] as const;
+  type BillingTab = 'report' | 'storage' | 'review' | 'parity' | 'activity' | 'coverage';
+  const VALID_BILLING_TABS: readonly BillingTab[] = ['report','storage','review','parity','activity','coverage'] as const;
   const [tabRaw, setTabRaw] = useUrlState('tab', 'report');
   const activeTab: BillingTab = (VALID_BILLING_TABS as readonly string[]).includes(tabRaw) ? (tabRaw as BillingTab) : 'report';
   const setActiveTab = useCallback((next: BillingTab) => setTabRaw(next), [setTabRaw]);
@@ -2633,7 +2634,13 @@ export function Billing() {
         <button onClick={() => setActiveTab('review')} style={tabChip(activeTab === 'review')}><DollarSign size={14} /> Invoice Review</button>
         <button onClick={() => setActiveTab('activity')} style={tabChip(activeTab === 'activity')}><Clock size={14} /> Activity</button>
         <button onClick={() => setActiveTab('parity')} style={tabChip(activeTab === 'parity')}><Scale size={14} /> Rate Parity</button>
+        <button onClick={() => setActiveTab('coverage')} style={tabChip(activeTab === 'coverage')}><ShieldCheck size={14} /> Coverage Audit</button>
       </div>
+
+      {/* ═══════════════════════════════════════════════════════════════════════
+          TAB: Coverage Audit — every billable event vs the ledger
+         ═══════════════════════════════════════════════════════════════════════ */}
+      {activeTab === 'coverage' && <BillingCoverageTab />}
 
       {/* ═══════════════════════════════════════════════════════════════════════
           TAB: Rate Parity — MPL sheet vs Supabase service catalog diff
