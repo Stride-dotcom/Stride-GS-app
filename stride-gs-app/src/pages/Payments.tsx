@@ -1332,11 +1332,20 @@ export function Payments() {
                       {i.isTest && <span style={{ marginLeft: 6, padding: '1px 5px', borderRadius: 6, fontSize: 9, fontWeight: 700, background: '#EDE9FE', color: '#7C3AED' }}>Test</span>}
                     </td>
                     <td style={td}>
-                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 12 }}>
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 12, flexWrap: 'wrap' }}>
                         {i.staxCustomerId ? (
                           <>
                             <span style={{ color: '#15803D', fontSize: 10 }}>✓</span>
                             <span style={{ fontWeight: 500 }}>{i.customer}</span>
+                            {/* Auto Pay pill — matches Charge Queue / Invoices tab pattern. Defaults to on for new PENDING rows. */}
+                            {i.autoCharge !== false && (
+                              <span title="Will be charged automatically on the scheduled date" style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 9, padding: '1px 5px', borderRadius: 4, background: '#F0FDF4', color: '#15803D', fontWeight: 700 }}>
+                                <CreditCard size={9} /> Auto Pay
+                              </span>
+                            )}
+                            {i.autoCharge === false && (
+                              <span title="Auto-charge is OFF — this invoice must be charged manually" style={{ fontSize: 9, padding: '1px 5px', borderRadius: 4, background: '#FEF3C7', color: '#B45309', fontWeight: 700 }}>Manual</span>
+                            )}
                             {i.paymentMethodStatus === 'has_pm' && <span style={{ fontSize: 9, padding: '1px 5px', borderRadius: 4, background: '#F0FDF4', color: '#15803D', fontWeight: 700 }}>CC on file</span>}
                             {i.paymentMethodStatus === 'no_pm' && <span style={{ fontSize: 9, padding: '1px 5px', borderRadius: 4, background: '#FEF3C7', color: '#B45309', fontWeight: 700 }}>No PM</span>}
                           </>
