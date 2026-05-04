@@ -1,4 +1,16 @@
 // ============================================================
+// STAX AUTO-PAY TOOL — v4.7.6
+// v4.7.6 (2026-05-04): Fix _sbResyncAllStaxCharges header lookup.
+//         The Charge Log sheet declares "Customer Name" and "Stax
+//         Transaction ID" headers (per SHEET_NAMES schema), but the
+//         resync was looking for "Customer" / "Transaction ID" —
+//         always returned -1 → empty values pushed to Supabase →
+//         React Charge Log page rendered Customer + Transaction ID
+//         columns blank. Now uses colAny() helper that tries the
+//         canonical header first then falls back to the legacy short
+//         form so manually-edited sheets still work. Companion
+//         StrideAPI.gs v38.163.0 fixes the same typo in seed func.
+// ============================================================
 // STAX AUTO-PAY TOOL — v4.7.5
 // v4.7.5 (2026-04-26): Daily trigger now fires in the 9:00-9:59 AM
 //         window to match the "Daily at 9:00 AM Pacific" label in
@@ -1039,15 +1051,27 @@ function _sbResyncAllStaxCharges(ss) {
     var data = sheet.getDataRange().getValues();
     if (data.length <= 1) return;
     var headers = data[0].map(function(h) { return String(h).trim(); });
+    // v4.7.6 — schema declares "Customer Name" + "Stax Transaction ID",
+    // earlier code looked for "Customer" / "Transaction ID" (always
+    // returned -1 → empty values pushed to Supabase, blank columns in
+    // the React Charge Log). Try canonical name first, fall back to the
+    // legacy short form if the sheet was manually edited.
     function col(name) { return headers.indexOf(name); }
+    function colAny(/* names... */) {
+      for (var i = 0; i < arguments.length; i++) {
+        var idx = headers.indexOf(arguments[i]);
+        if (idx >= 0) return idx;
+      }
+      return -1;
+    }
     var cTs = col("Timestamp");
     var cQb = col("QB Invoice #");
     var cStaxInv = col("Stax Invoice ID");
     var cStaxCust = col("Stax Customer ID");
-    var cCust = col("Customer");
+    var cCust = colAny("Customer Name", "Customer");
     var cAmount = col("Amount");
     var cStatus = col("Status");
-    var cTxn = col("Transaction ID");
+    var cTxn = colAny("Stax Transaction ID", "Transaction ID");
     var cNotes = col("Notes");
     var rows = [];
     // Limit to the tail 1000 rows — no need to re-upsert ancient entries each run
