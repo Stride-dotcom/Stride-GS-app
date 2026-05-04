@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.176.0 — 2026-05-04 PST — handleStartRepair_ Supabase enrichment bulk-read perf fix. Same anti-pattern + same root cause as v38.175.0, this time in the post-repair-create write-through. The Tasks-sheet (source-task lookup) and Inventory-sheet (item shipment# fallback) enrichment loops both did per-row getRange().getValue() calls — O(N) Google API round-trips. Switched both to a single getValues() bulk read. Sweep complete: zero remaining per-row getValue loops in any user-facing handler. The only other instance is handleFixMissingFolders_ (admin-only batch hyperlink repair) which has no bulk equivalent (setRichTextValue is per-cell) and is invoked manually.
+   StrideAPI.gs — v38.177.0 — 2026-05-04 PST — Unified addons module. The task-only `task_addons` system shipped 2026-05-02 (never used in prod) is replaced by a polymorphic `addons` table keyed on (parent_type, parent_id) supporting task / repair / will_call / inventory. New helper api_writeAddonsToLedger_(ss, parentType, parentId, ctx) replaces the inline task-addon flush in handleCompleteTask_ and now also fires from handleCompleteRepair_ and handleProcessWcRelease_ (one line each, after the primary billing write). The helper fetches unbilled addons via REST, writes one Billing_Ledger row per addon (rate snapshotted at add time, falls back to current catalog if blank), mirrors each row to public.billing via resyncEntityToSupabase_, then PATCHes the addon back to billed=true with the resulting ledger_row_id stamped — making retries idempotent. Ledger Row ID format mirrors the existing convention: {parentId}-{svcCode}-ADDON-{n}. Per-parent column mapping: task→Task ID="{parentId}-{svcCode}", repair→Repair ID="{parentId}-{svcCode}", will_call→Shipment #=parentId, inventory→Item ID=parentId. Companion migration 20260504170000_unified_addons.sql drops the empty task_addons table and creates `addons` with parent_type CHECK constraint, parent_id non-empty CHECK, RLS (staff/admin + service_role), and realtime enabled. Removed: api_fetchTaskAddons_ (subsumed by the new helper).
+   v38.176.0 — 2026-05-04 PST — handleStartRepair_ Supabase enrichment bulk-read perf fix. Same anti-pattern + same root cause as v38.175.0, this time in the post-repair-create write-through. The Tasks-sheet (source-task lookup) and Inventory-sheet (item shipment# fallback) enrichment loops both did per-row getRange().getValue() calls — O(N) Google API round-trips. Switched both to a single getValues() bulk read. Sweep complete: zero remaining per-row getValue loops in any user-facing handler. The only other instance is handleFixMissingFolders_ (admin-only batch hyperlink repair) which has no bulk equivalent (setRichTextValue is per-cell) and is invoked manually.
    v38.175.0 — 2026-05-04 PST — handleRequestRepairQuote_ enrichment bulk-read perf fix. The source-task lookup looped per-row calling taskSh.getRange(tr, col).getValue() — one round-trip to Google's API per Tasks-sheet row. For a client with a few hundred tasks the call pushed past the React fetch timeout (~30s); the optimistic UI flipped to "Request failed — please try again" while the server kept running and successfully wrote the repair row + sent the REPAIR_QUOTE_REQUEST email. Hope @ Lisa Sherry Interiors hit this on INSP-62942-1: she got the failure toast but staff received the alert email. Switched to a single bulk getRange().getValues() read + in-memory scan for both the Tasks-sheet and Shipments-sheet enrichment loops. ~one round-trip total instead of N — handler now returns in ~1-2s instead of 30+. Same perf pattern was likely the latent root cause of every "request failed but it actually worked" report on busy client sheets.
    v38.174.0 — 2026-05-04 PST — New admin entry runRepairOrphanStaxInvoices: recovers Supabase rows orphaned by the v38.166.0 – v38.172.0 cross-project bug. The Stax Invoices SHEET has all the rows; v38.173.0 fixed the bug for new batches but does nothing for the ones that were already created (Justin's BATCH-20260504-103404-289E48 with 8 invoices showing on Batches tab but Review empty). This admin entry opens the Stax spreadsheet via getStaxSpreadsheet_, reads every row from the Invoices tab, builds upsert objects via header-resolved columns (stax_invoiceCols_) + the canonical helpers (stax_parseAutoCharge_, fmtDateLoose), then calls supabaseBatchUpsert_("stax_invoices", rows) — idempotent, conflict-resolves on qb_invoice_no. After running once: every PENDING/CREATED/etc. row on the sheet appears in public.stax_invoices, Payments → Review populates, all charge-flow affordances (Push to Stax, scheduled date, auto-charge toggle) work because they always pointed at public.stax_invoices. Note: recovered rows have batch_id=NULL (the original v38.166.0 patch failed silently); the Batches tab → View on those orphan batch rows still won't filter, but the invoices are usable on Review/Charge Queue/Invoices tabs which read by qb_invoice_no, not batch_id. New batches created via v38.173.0+ wire up batch_id correctly.
    v38.173.0 — 2026-05-04 PST — handleQbExport_ direct mirror to public.stax_invoices, replacing the dead _sbResyncAllStaxInvoices call. Justin reported: "Send to Payments" creates the batch row (Batches tab shows 8 invoices, $345) but Review tab is empty and clicking View on the batch shows "No invoices found". Root cause: v38.166.0 called `_sbResyncAllStaxInvoices(getStaxSpreadsheet_())` to mirror the Stax Invoices sheet to Supabase after the per-invoice writes — but that helper lives ONLY in StaxAutoPay.gs (a separate Apps Script project). Apps Script projects don't share globals without an explicit Library import, so every call threw `ReferenceError: _sbResyncAllStaxInvoices is not defined`, was swallowed by the surrounding try/catch, and only `Logger.log`'d. The IIF + sheet writes succeeded. The `stax_invoice_batches` row succeeded (different try block, uses StrideAPI's own supabaseUpsert_). The actual `stax_invoices` rows never made it. Fix: build a `staxSupabaseRows` array during the existing INSERT/UPDATE-PENDING loop (one upsert object per row written, mirroring StaxAutoPay's `_sbResyncAllStaxInvoices` shape exactly), then call StrideAPI's own `supabaseBatchUpsert_("stax_invoices", staxSupabaseRows)` — the helper at line 3197 already supports the table with `qb_invoice_no` as the conflict column. No cross-project call. No extra sheet read. The follow-up `supabasePatch_` to stamp `batch_id` on the freshly-mirrored rows now actually finds matches. End-to-end flow restored: Send to Payments → Stax Invoices sheet + public.stax_invoices written → Postgres realtime → Payments page useSupabaseRealtime hook → Review tab shows new PENDING rows within ~2-3s. Operators can then set scheduled date, toggle auto-charge, push to Stax — all the existing affordances work because they always pointed at public.stax_invoices, which finally has the data.
@@ -2325,31 +2326,196 @@ function supabaseUpsert_(table, data) {
 }
 
 /**
- * v38.142.13 — Fetch the public.task_addons rows for a given task. Returns
- * a possibly-empty array sorted by created_at (matching the React panel's
- * display order so the "ADDON-N" suffix in the resulting Ledger Row IDs is
- * stable). Throws on transport / auth failures so the caller can warn.
+ * v38.177.0 — Polymorphic addons → Billing_Ledger materializer. Replaces
+ * the task-only api_fetchTaskAddons_ + inline flush in handleCompleteTask_
+ * with a single helper that any entity completion handler can call.
+ *
+ * Reads unbilled rows from public.addons WHERE (tenant_id, parent_type,
+ * parent_id) AND billed=false, writes one Billing_Ledger row per addon to
+ * the client sheet, then PATCHes the addon back to billed=true with the
+ * resulting ledger_row_id stamped for traceback.
+ *
+ * Idempotent: any addon already billed=true is skipped, so a retry after
+ * a partial-fail is safe.
+ *
+ * Ledger Row ID format mirrors the existing task_addons convention:
+ *   {parentId}-{svcCode}-ADDON-{n}
+ * where n is 1-indexed across the unbilled set returned for this parent.
+ *
+ * Per-parent-type column mapping:
+ *   task       → Task ID = "{parentId}-{svcCode}", Item ID/Description/
+ *                Class/Shipment # from ctx (caller passes invItem context)
+ *   repair     → Repair ID = "{parentId}-{svcCode}", item context from ctx
+ *   will_call  → Shipment # = parentId; Task/Repair IDs blank
+ *   inventory  → Item ID = parentId; Task/Repair/Shipment blank
+ *
+ * @param {Spreadsheet} ss client spreadsheet
+ * @param {string} parentType  'task'|'repair'|'will_call'|'inventory'
+ * @param {string} parentId    entity id (taskId / repairId / wcNumber / itemId)
+ * @param {object} ctx         { clientName, itemId?, description?, itemClass?,
+ *                               shipmentNo?, now?, warnings? (array) }
+ * @return { written: int, skipped: int, errors: string[] }
  */
-function api_fetchTaskAddons_(tenantId, taskId) {
+function api_writeAddonsToLedger_(ss, parentType, parentId, ctx) {
+  var result = { written: 0, skipped: 0, errors: [] };
+  if (!parentType || !parentId) {
+    result.errors.push("api_writeAddonsToLedger_: parentType and parentId are required");
+    return result;
+  }
+  parentType = String(parentType);
+  parentId = String(parentId);
+
   var url = prop_("SUPABASE_URL");
   var key = prop_("SUPABASE_SERVICE_ROLE_KEY");
-  if (!url || !key) throw new Error("SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY not configured");
-  var listUrl = url + "/rest/v1/task_addons"
-              + "?select=id,service_code,service_name,quantity,rate,item_class,total,added_by_name,created_at"
-              + "&tenant_id=eq." + encodeURIComponent(String(tenantId))
-              + "&task_id=eq." + encodeURIComponent(String(taskId))
-              + "&order=created_at.asc";
-  var resp = UrlFetchApp.fetch(listUrl, {
-    method: "GET",
-    headers: { "Authorization": "Bearer " + key, "apikey": key },
-    muteHttpExceptions: true
-  });
-  var code = resp.getResponseCode();
-  if (code < 200 || code >= 300) {
-    throw new Error("HTTP " + code + ": " + resp.getContentText().substring(0, 200));
+  if (!url || !key) {
+    result.errors.push("SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY not configured");
+    return result;
   }
-  try { return JSON.parse(resp.getContentText()) || []; }
-  catch (_) { return []; }
+
+  var clientSheetId = ss.getId();
+  var clientName = (ctx && ctx.clientName) || "";
+  var ctxItemId = (ctx && ctx.itemId) || "";
+  var ctxDescription = (ctx && ctx.description) || "";
+  var ctxItemClass = (ctx && ctx.itemClass) || "";
+  var ctxShipmentNo = (ctx && ctx.shipmentNo) || "";
+  var now = (ctx && ctx.now) || new Date();
+  var warnings = (ctx && ctx.warnings) || null;
+
+  // ── 1. Fetch unbilled addons for this parent ─────────────────────────────
+  var listUrl = url + "/rest/v1/addons"
+              + "?select=id,service_code,service_name,quantity,rate,item_class,total,added_by_name,created_at"
+              + "&tenant_id=eq." + encodeURIComponent(clientSheetId)
+              + "&parent_type=eq." + encodeURIComponent(parentType)
+              + "&parent_id=eq." + encodeURIComponent(parentId)
+              + "&billed=eq.false"
+              + "&order=created_at.asc";
+  var addons;
+  try {
+    var resp = UrlFetchApp.fetch(listUrl, {
+      method: "GET",
+      headers: { "Authorization": "Bearer " + key, "apikey": key },
+      muteHttpExceptions: true
+    });
+    var code = resp.getResponseCode();
+    if (code < 200 || code >= 300) {
+      throw new Error("HTTP " + code + ": " + resp.getContentText().substring(0, 200));
+    }
+    addons = JSON.parse(resp.getContentText()) || [];
+  } catch (fetchErr) {
+    result.errors.push("Add-on fetch failed: " + fetchErr.message);
+    if (warnings) warnings.push("Add-on services fetch failed (non-fatal): " + fetchErr.message);
+    return result;
+  }
+  if (!addons.length) return result;
+
+  // ── 2. Materialize each addon into Billing_Ledger ────────────────────────
+  var billSheet = ss.getSheetByName("Billing_Ledger");
+  if (!billSheet) {
+    var msg = "Billing_Ledger sheet not found — " + addons.length + " add-on(s) for " + parentType + " " + parentId + " not billed";
+    result.errors.push(msg);
+    if (warnings) warnings.push(msg);
+    return result;
+  }
+  var billMap = api_getHeaderMap_(billSheet);
+
+  for (var ai = 0; ai < addons.length; ai++) {
+    var ad = addons[ai];
+    var adCode = String(ad.service_code || "").trim();
+    if (!adCode) { result.skipped++; continue; }
+
+    var adQty = Number(ad.quantity || 1);
+    var adRate = (ad.rate == null || ad.rate === "") ? null : Number(ad.rate);
+    var adClass = String(ad.item_class || ctxItemClass || "").trim();
+
+    // Snapshot held the rate; if missing fall back to current catalog so
+    // we don't silently bill $0.
+    if (adRate == null || isNaN(adRate)) {
+      try {
+        var fbRate = api_lookupRate_(ss, adCode, adClass, {
+          itemId: ctxItemId, clientName: clientName, tenantId: clientSheetId,
+          qty: adQty, eventSource: parentType + "_complete_addon",
+          ledgerRowId: parentId + "-" + adCode + "-ADDON-" + (ai + 1)
+        });
+        adRate = fbRate.rate;
+      } catch (_) { adRate = 0; }
+    }
+    var adMissingRate = !(adRate > 0);
+    var adTotal = adMissingRate ? "Missing Rate" : (adRate * adQty);
+    var ledgerRowId = parentId + "-" + adCode + "-ADDON-" + (ai + 1);
+
+    var fields = {
+      "Status":       "Unbilled",
+      "Invoice #":    "",
+      "Client":       clientName,
+      "Date":         now,
+      "Svc Code":     adCode,
+      "Svc Name":     ad.service_name || adCode,
+      "Category":     "",
+      "Item ID":      ctxItemId || (parentType === "inventory" ? parentId : ""),
+      "Description":  ctxDescription,
+      "Class":        adClass,
+      "Qty":          adQty,
+      "Rate":         adMissingRate ? 0 : adRate,
+      "Total":        adTotal,
+      "Task ID":      parentType === "task"   ? (parentId + "-" + adCode) : "",
+      "Repair ID":    parentType === "repair" ? (parentId + "-" + adCode) : "",
+      "Shipment #":   parentType === "will_call" ? parentId : ctxShipmentNo,
+      "Item Notes":   "Add-on" + (ad.added_by_name ? " by " + ad.added_by_name : "") + (adMissingRate ? " - MISSING RATE" : ""),
+      "Ledger Row ID": ledgerRowId
+    };
+
+    try {
+      var row = api_buildRow_(billMap, fields);
+      var insRow = api_getLastDataRow_(billSheet) + 1;
+      billSheet.getRange(insRow, 1, 1, row.length).setValues([row]);
+      result.written++;
+      if (adMissingRate && warnings) {
+        warnings.push("Add-on " + adCode + " billed with Missing Rate flag");
+      }
+    } catch (writeErr) {
+      result.errors.push("Add-on " + adCode + " sheet write failed: " + writeErr.message);
+      if (warnings) warnings.push("Add-on " + adCode + " sheet write failed: " + writeErr.message);
+      continue;
+    }
+
+    // Mirror to Supabase billing table
+    try {
+      resyncEntityToSupabase_("billing", clientSheetId, ledgerRowId);
+    } catch (sbErr) {
+      result.errors.push("Add-on " + adCode + " Supabase write-through failed: " + sbErr.message);
+      if (warnings) warnings.push("Add-on " + adCode + " Supabase write-through failed (non-fatal): " + sbErr.message);
+    }
+
+    // Mark addon billed=true with ledger_row_id stamp for traceback +
+    // idempotency. Failure here doesn't roll back the ledger row — the
+    // BILLED flip is best-effort; the next call will skip it because the
+    // billed=eq.false filter at fetch time excludes already-flipped rows.
+    try {
+      var patchUrl = url + "/rest/v1/addons?id=eq." + encodeURIComponent(ad.id);
+      var patchBody = JSON.stringify({
+        billed: true,
+        billed_at: new Date().toISOString(),
+        ledger_row_id: ledgerRowId,
+        updated_at: new Date().toISOString()
+      });
+      UrlFetchApp.fetch(patchUrl, {
+        method: "patch",
+        contentType: "application/json",
+        headers: {
+          "Authorization": "Bearer " + key,
+          "apikey": key,
+          "Prefer": "return=minimal"
+        },
+        payload: patchBody,
+        muteHttpExceptions: true
+      });
+    } catch (patchErr) {
+      // Non-fatal — the ledger row is committed; flip will be retried on
+      // next completion call.
+      if (warnings) warnings.push("Add-on " + adCode + " billed-flag PATCH failed (non-fatal): " + patchErr.message);
+    }
+  }
+  return result;
 }
 
 /**
@@ -15226,81 +15392,22 @@ function handleCompleteTask_(clientSheetId, payload) {
           }
         }
 
-        // ─── ADD-ON SERVICES → flush task_addons → Billing_Ledger ────────────
-        // v38.142.13 — staff/admin add extra billable services to a task via
-        // the React panel; rows accumulate on public.task_addons until
-        // completion. Here we fetch the addon list and write one Billing_
-        // Ledger row per addon, snapshotting the rate that was captured at
-        // add time. Non-fatal: if Supabase is unreachable the primary task
-        // billing above still lands, and the addon rows can be replayed
-        // manually after fixing connectivity (see warnings).
+        // ─── ADD-ON SERVICES → unified addons module ─────────────────────────
+        // v38.177.0 — task addons now flow through the polymorphic
+        // api_writeAddonsToLedger_ helper that also serves repairs / will
+        // calls / inventory. See the helper for snapshotting + idempotency
+        // semantics. Non-fatal: errors land in warnings and the primary
+        // task billing above always commits.
         try {
-          var addons = api_fetchTaskAddons_(clientSheetId, taskId);
-          if (addons && addons.length > 0) {
-            var addonBillSheet = ss.getSheetByName("Billing_Ledger");
-            if (!addonBillSheet) {
-              warnings.push("Billing_Ledger sheet not found — " + addons.length + " add-on(s) not billed");
-            } else {
-              var addonBillMap = api_getHeaderMap_(addonBillSheet);
-              for (var ai = 0; ai < addons.length; ai++) {
-                var ad = addons[ai];
-                var adCode = String(ad.service_code || "").trim();
-                if (!adCode) continue;
-                var adQty  = Number(ad.quantity || 1);
-                var adRate = (ad.rate == null || ad.rate === "") ? null : Number(ad.rate);
-                var adClass = String(ad.item_class || invItem.itemClass || "").trim();
-                // Snapshot held the rate; if missing fall back to current
-                // catalog so we don't silently bill $0.
-                if (adRate == null || isNaN(adRate)) {
-                  try {
-                    var fbRate = api_lookupRate_(ss, adCode, adClass, {
-                      itemId: itemId, clientName: clientName, tenantId: clientSheetId,
-                      qty: adQty, eventSource: "task_complete_addon",
-                      ledgerRowId: taskId + "-" + adCode + "-ADDON-" + (ai + 1)
-                    });
-                    adRate = fbRate.rate;
-                  } catch (_) { adRate = 0; }
-                }
-                var adMissingRate = !(adRate > 0);
-                var adTotal = adMissingRate ? "Missing Rate" : (adRate * adQty);
-                // Per spec: Task ID column carries the addon flavor
-                // ({TASK_ID}-{SERVICE_CODE}) so unbilled reports / invoices
-                // distinguish the addon line from the parent task line.
-                var addonTaskIdLabel = taskId + "-" + adCode;
-                var addonLedgerRowId = taskId + "-" + adCode + "-ADDON-" + (ai + 1);
-                var adRow = api_buildRow_(addonBillMap, {
-                  "Status":       "Unbilled",
-                  "Invoice #":    "",
-                  "Client":       clientName,
-                  "Date":         now,
-                  "Svc Code":     adCode,
-                  "Svc Name":     ad.service_name || adCode,
-                  "Category":     "",
-                  "Item ID":      itemId,
-                  "Description":  invItem.description,
-                  "Class":        adClass,
-                  "Qty":          adQty,
-                  "Rate":         adMissingRate ? 0 : adRate,
-                  "Total":        adTotal,
-                  "Task ID":      addonTaskIdLabel,
-                  "Repair ID":    "",
-                  "Shipment #":   shipNo,
-                  "Item Notes":   "Add-on" + (ad.added_by_name ? " by " + ad.added_by_name : "") + (adMissingRate ? " - MISSING RATE" : ""),
-                  "Ledger Row ID": addonLedgerRowId
-                });
-                var adInsertRow = api_getLastDataRow_(addonBillSheet) + 1;
-                addonBillSheet.getRange(adInsertRow, 1, 1, adRow.length).setValues([adRow]);
-                if (adMissingRate) {
-                  warnings.push("Add-on " + adCode + " billed with Missing Rate flag");
-                }
-                try {
-                  resyncEntityToSupabase_("billing", clientSheetId, addonLedgerRowId);
-                } catch (sbErr) {
-                  warnings.push("Add-on " + adCode + " Supabase write-through failed (non-fatal): " + sbErr.message);
-                }
-              }
-            }
-          }
+          api_writeAddonsToLedger_(ss, "task", taskId, {
+            clientName: clientName,
+            itemId: itemId,
+            description: invItem.description,
+            itemClass: invItem.itemClass,
+            shipmentNo: shipNo,
+            now: now,
+            warnings: warnings
+          });
         } catch (addonErr) {
           warnings.push("Add-on services flush failed (non-fatal): " + addonErr.message);
         }
@@ -17316,6 +17423,23 @@ function handleCompleteRepair_(clientSheetId, payload) {
       warnings.push("Billing write failed (non-fatal): " + billErr.message);
     }
 
+    // ─── ADD-ON SERVICES → unified addons module ─────────────────────────────
+    // v38.177.0 — flush any addons attached to this repair via the polymorphic
+    // helper. Non-fatal: errors land in warnings; primary REPAIR billing above
+    // always commits.
+    try {
+      api_writeAddonsToLedger_(ss, "repair", repairId, {
+        clientName: clientName,
+        itemId: itemId,
+        description: desc,
+        itemClass: itemClass,
+        now: now,
+        warnings: warnings
+      });
+    } catch (addonErr) {
+      warnings.push("Add-on services flush failed (non-fatal): " + addonErr.message);
+    }
+
     // ─── STAMP idempotency marker (always last) ────────────────────────────
     if (repMap["Completion Processed At"]) {
       setRowVal_(repMap["Completion Processed At"], nowFmt);
@@ -18277,6 +18401,24 @@ function handleProcessWcRelease_(clientSheetId, payload) {
 
     } else {
       if (wcStatusCol) wcSh.getRange(wcRow, wcStatusCol).setValue("Released");
+    }
+
+    // ─── ADD-ON SERVICES → unified addons module ───────────────────────────
+    // v38.177.0 — flush any addons attached to this will call. WC addons
+    // are at the WC level (not per item), so item context is intentionally
+    // empty; the helper writes Shipment # = wcNumber so the React
+    // BillingPreviewCard's recorded query (filter shipment_number=wcNumber)
+    // surfaces them. Non-fatal: COD WCs that intentionally skip primary
+    // billing still get any addons recorded, since addons are explicit
+    // operator actions distinct from the COD-skip-ledger decision.
+    try {
+      api_writeAddonsToLedger_(ss, "will_call", wcNumber, {
+        clientName: clientName,
+        now: now,
+        warnings: warnings
+      });
+    } catch (addonErr) {
+      warnings.push("Add-on services flush failed (non-fatal): " + addonErr.message);
     }
 
   } catch (writeErr) {
