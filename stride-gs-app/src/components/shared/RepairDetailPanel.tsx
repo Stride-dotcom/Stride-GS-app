@@ -14,7 +14,7 @@ import { DeepLink } from './DeepLink';
 import { ItemIdBadges } from './ItemIdBadges';
 import { useItemIndicators } from '../../hooks/useItemIndicators';
 import { theme } from '../../styles/theme';
-import { fmtDate } from '../../lib/constants';
+import { fmtDate, toDateInputValue } from '../../lib/constants';
 import { WriteButton } from './WriteButton';
 import { ProcessingOverlay } from './ProcessingOverlay';
 import { BillingPreviewCard } from './BillingPreviewCard';
@@ -355,14 +355,16 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
   // ─── Edit mode for repair fields (Repair Tech, Scheduled Date, Start Date) ──
   const [isEditing, setIsEditing] = useState(false);
   const [editRepairVendor, setEditRepairVendor] = useState(repair.repairVendor || '');
-  const [editScheduledDate, setEditScheduledDate] = useState(repair.scheduledDate || '');
-  const [editStartDate, setEditStartDate] = useState(repair.startDate || '');
+  // Normalize for `<input type="date">` — strict YYYY-MM-DD only, otherwise
+  // browsers reject the value and the equality guard misfires.
+  const [editScheduledDate, setEditScheduledDate] = useState(toDateInputValue(repair.scheduledDate));
+  const [editStartDate, setEditStartDate] = useState(toDateInputValue(repair.startDate));
   const [editSaving, setEditSaving] = useState(false);
   const [editError, setEditError] = useState<string | null>(null);
   useEffect(() => {
     setEditRepairVendor(repair.repairVendor || '');
-    setEditScheduledDate(repair.scheduledDate || '');
-    setEditStartDate(repair.startDate || '');
+    setEditScheduledDate(toDateInputValue(repair.scheduledDate));
+    setEditStartDate(toDateInputValue(repair.startDate));
   }, [repair.repairVendor, repair.scheduledDate, repair.startDate]);
 
   // ─── Save Repair Fields (Repair Tech, Scheduled Date, Start Date) ──────────
@@ -374,8 +376,11 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
     try {
       const payload: Record<string, unknown> = { repairId: repair.repairId };
       if (editRepairVendor !== (repair.repairVendor || '')) payload.repairVendor = editRepairVendor;
-      if (editScheduledDate !== (repair.scheduledDate || '')) payload.scheduledDate = editScheduledDate || null;
-      if (editStartDate !== (repair.startDate || '')) payload.startDate = editStartDate || null;
+      // Compare normalized forms — repair.scheduledDate / startDate may
+      // carry a "00:00:00" suffix from older sheets, while the edit values
+      // are always YYYY-MM-DD.
+      if (editScheduledDate !== toDateInputValue(repair.scheduledDate)) payload.scheduledDate = editScheduledDate || null;
+      if (editStartDate !== toDateInputValue(repair.startDate)) payload.startDate = editStartDate || null;
       if (Object.keys(payload).length > 1) {
         const res = await postUpdateRepairNotes(payload as any, clientSheetId);
         if (!res.ok || !res.data?.success) {
@@ -853,16 +858,16 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
                 </div>
                 <div>
                   <div style={{ fontSize: 10, fontWeight: 500, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 4 }}>Scheduled Date</div>
-                  <input type="date" value={editScheduledDate?.slice(0, 10) || ''} onChange={e => setEditScheduledDate(e.target.value)} style={input} />
+                  <input type="date" value={editScheduledDate} onChange={e => setEditScheduledDate(e.target.value)} style={input} />
                 </div>
                 <div>
                   <div style={{ fontSize: 10, fontWeight: 500, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 4 }}>Start Date</div>
-                  <input type="date" value={editStartDate?.slice(0, 10) || ''} onChange={e => setEditStartDate(e.target.value)} style={input} />
+                  <input type="date" value={editStartDate} onChange={e => setEditStartDate(e.target.value)} style={input} />
                 </div>
               </div>
               {editError && <div style={{ color: '#DC2626', fontSize: 11, marginTop: 8 }}>{editError}</div>}
               <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 12 }}>
-                <button onClick={() => { setIsEditing(false); setEditError(null); setEditRepairVendor(repair.repairVendor || ''); setEditScheduledDate(repair.scheduledDate || ''); setEditStartDate(repair.startDate || ''); }} style={{ padding: '6px 14px', fontSize: 12, borderRadius: 8, border: `1px solid ${theme.colors.border}`, background: '#fff', cursor: 'pointer', fontFamily: 'inherit' }}>Cancel</button>
+                <button onClick={() => { setIsEditing(false); setEditError(null); setEditRepairVendor(repair.repairVendor || ''); setEditScheduledDate(toDateInputValue(repair.scheduledDate)); setEditStartDate(toDateInputValue(repair.startDate)); }} style={{ padding: '6px 14px', fontSize: 12, borderRadius: 8, border: `1px solid ${theme.colors.border}`, background: '#fff', cursor: 'pointer', fontFamily: 'inherit' }}>Cancel</button>
                 <button onClick={handleEditSave} disabled={editSaving} style={{ padding: '6px 14px', fontSize: 12, borderRadius: 8, border: 'none', background: theme.colors.orange, color: '#fff', cursor: 'pointer', fontWeight: 600, fontFamily: 'inherit', opacity: editSaving ? 0.6 : 1 }}>{editSaving ? 'Saving...' : 'Save'}</button>
               </div>
             </div>
