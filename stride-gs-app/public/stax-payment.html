@@ -168,6 +168,35 @@
       height: 0;
       overflow: hidden;
     }
+
+    /* Auto-launch view: shown when ?auto=1 + valid amount is in the URL.
+       Skips the form-entry step entirely — the operator goes straight from
+       clicking "Collect via Stax" in the WMS to seeing this clean loading
+       state, then the Stax credit card modal opens on top. The order #,
+       customer name, and amount stay visible behind the modal so they
+       remain referenceable during checkout. */
+    #auto-launch-area { display: none; padding: 8px 0 4px; }
+    .auto-amount {
+      font-size: 38px; font-weight: 700; color: var(--text);
+      text-align: center; margin: 16px 0 6px; letter-spacing: -0.02em;
+    }
+    .auto-name {
+      font-size: 14px; font-weight: 600; color: var(--text);
+      text-align: center; margin-bottom: 6px;
+    }
+    .auto-status {
+      font-size: 11px; color: var(--text-muted);
+      text-align: center; letter-spacing: 1px; text-transform: uppercase;
+      font-weight: 600; margin: 18px 0 10px;
+    }
+    .spinner {
+      width: 28px; height: 28px; margin: 0 auto;
+      border: 3px solid var(--accent-border);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
   </style>
 </head>
 <body>
@@ -184,27 +213,44 @@
 
     <div id="order-badge-wrap"></div>
 
-    <label>Amount *</label>
-    <div class="amount-wrap">
-      <span class="dollar">$</span>
-      <input type="number" id="amount" placeholder="0.00" min="0.01" step="0.01" inputmode="decimal">
+    <!-- Form-entry view: shown by default. Hidden when ?auto=1 + valid
+         amount lets us skip straight to launching the Stax modal. -->
+    <div id="form-area">
+      <label>Amount *</label>
+      <div class="amount-wrap">
+        <span class="dollar">$</span>
+        <input type="number" id="amount" placeholder="0.00" min="0.01" step="0.01" inputmode="decimal">
+      </div>
+      <div class="err-msg" id="amount-err">Please enter a valid amount greater than $0.</div>
+
+      <label>Customer Name</label>
+      <input type="text" id="name" placeholder="Full name" autocomplete="name">
+
+      <label>Email</label>
+      <input type="email" id="email" placeholder="customer@email.com" autocomplete="email">
+      <div class="err-msg" id="email-err">Please enter a valid email address.</div>
+
+      <label>Order #</label>
+      <input type="text" id="order" placeholder="Order number">
+
+      <label>Notes</label>
+      <textarea id="notes" placeholder="Optional notes"></textarea>
+
+      <button id="launch-btn" onclick="launchPayment()">Take Payment</button>
     </div>
-    <div class="err-msg" id="amount-err">Please enter a valid amount greater than $0.</div>
 
-    <label>Customer Name</label>
-    <input type="text" id="name" placeholder="Full name" autocomplete="name">
+    <!-- Auto-launch view: shown when ?auto=1 + valid amount. The operator
+         arrives here from the WMS with everything pre-passed; this view
+         confirms what they're collecting and the Stax modal opens on top
+         within ~1s. The amount + customer name + order badge stay visible
+         behind the Stax modal during checkout for reference. -->
+    <div id="auto-launch-area">
+      <div class="auto-amount" id="auto-amount-text">$0.00</div>
+      <div class="auto-name" id="auto-name-text"></div>
+      <div class="auto-status">Opening secure checkout…</div>
+      <div class="spinner"></div>
+    </div>
 
-    <label>Email</label>
-    <input type="email" id="email" placeholder="customer@email.com" autocomplete="email">
-    <div class="err-msg" id="email-err">Please enter a valid email address.</div>
-
-    <label>Order #</label>
-    <input type="text" id="order" placeholder="Order number">
-
-    <label>Notes</label>
-    <textarea id="notes" placeholder="Optional notes"></textarea>
-
-    <button id="launch-btn" onclick="launchPayment()">Take Payment</button>
     <div class="footer">Powered by Stax · Stride Logistics WMS</div>
   </div>
 
@@ -242,16 +288,24 @@
       if (nameParam)   document.getElementById('name').value   = nameParam;
       if (emailParam)  document.getElementById('email').value  = emailParam;
 
-      // Auto-launch when caller passed ?auto=1 AND the amount is valid.
-      // Brief delay so the user sees the populated form (visual feedback
-      // that the Stride app passed the data through) before the Stax
-      // credit card modal opens on top of it. If the URL is missing key
-      // data, we leave the form visible so the operator can fill it in.
+      // Auto-launch when caller passed ?auto=1 AND amount is valid: hide
+      // the form-entry view, show the auto-launch confirmation view (so
+      // the operator sees what's being collected — amount, customer, order
+      // badge), and fire launchPayment() immediately. The Stax credit card
+      // modal opens on top of this confirmation view within ~0.5–1.5s
+      // (Stax checkout script load time over the network).
       if (autoParam === '1') {
         var amt = parseFloat(amountParam || '');
         if (!isNaN(amt) && amt > 0) {
-          // 350ms — long enough to render but not annoying.
-          setTimeout(launchPayment, 350);
+          var formArea = document.getElementById('form-area');
+          var autoArea = document.getElementById('auto-launch-area');
+          document.getElementById('auto-amount-text').textContent = '$' + amt.toFixed(2);
+          document.getElementById('auto-name-text').textContent = nameParam || '';
+          formArea.style.display = 'none';
+          autoArea.style.display = 'block';
+          // Fire on next tick so the swap renders before the Stax script
+          // injection blocks paint. No artificial delay.
+          setTimeout(launchPayment, 0);
         }
       }
     })();
