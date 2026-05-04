@@ -200,6 +200,13 @@ Deno.serve(async (req: Request) => {
   } else {
     toList = [];
   }
+  // v2026-05-04: split comma/semicolon-joined strings into individual
+  // addresses. Several caller-facing fields (e.g. prospect_email,
+  // notification list strings) store multiple emails as a single string;
+  // Resend rejects "a@x.com, b@y.com" as a single recipient with a
+  // 422 validation_error. Apply this AFTER the array-or-string normalize
+  // above so both shapes get split.
+  toList = toList.flatMap(s => s.split(/[,;]/));
   // Drop empties + dedupe (case-insensitive). Done after both paths so
   // overridden + token-resolved lists get the same treatment.
   toList = dedupeEmails(toList);
