@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.187.0 — 2026-05-05 PST — Stax-side dates ISO yyyy-MM-dd everywhere. Justin caught the Charge Queue Scheduled column rendering blank again — same symptom as v38.171.0 even though that commit fixed read-side normalization. Root cause: api_qbCalcDueDate_/api_qbFmtDate_ produce MM/dd/yyyy because the IIF file format requires it, and handleQbExport_ + handleImportIIF_ wrote the same MM/dd/yyyy string straight into the Stax Invoices SHEET cells AND the Supabase mirror. `<input type="date">` strictly requires yyyy-MM-dd; both "2026-05-10 00:00:00" (timestamp from Sheets-style serialization) AND "05/20/2026" (US format from QB) silently render empty AND poison the React onBlur equality guard so saves look like they revert. Mixed corpus in Supabase confirmed via direct SELECT: INV-000099 had due_date="2026-05-10 00:00:00", INV-001010 had due_date="2026-05-20" + scheduled_date="05/20/2026". Two-sided fix. (1) Backend: new api_isoDate_(v) helper coerces Date objects, ISO timestamps, and US-format strings to yyyy-MM-dd. handleQbExport_'s INSERT + UPDATE-PENDING branches now run sInv.invDate / sInv.dueDate through it before every Stax-sheet setValue + every Supabase mirror push. handleImportIIF_'s same two branches pass inv.date / inv.dueDate through it. handleUpdateStaxInvoice_'s payload.dueDate + payload.scheduledDate run through it too (no-op on already-ISO React input, defensive against legacy clients). The IIF FILE OUTPUT stays MM/dd/yyyy — only Stax-side persistence is touched. (2) Frontend: fetchStaxInvoicesFromSupabase + fetchStaxExceptionsFromSupabase normalize due_date / scheduled_date via a shared isoDateOnly() at read time, so any pre-fix dirty rows in Supabase still render correctly until a one-time UPDATE cleans them up.
+   StrideAPI.gs — v38.188.0 — 2026-05-05 PST — Bulk-void affordance for Unbilled Billing_Ledger rows. Pre-v38.188 the only ways to remove an Unbilled row from the Report were (a) invoice it (and then voidInvoice the whole invoice) or (b) edit the sheet by hand — the per-row Void button only existed for already-voided MANUAL- rows. Operators couldn't undo a mistakenly-committed RCVG/WC/task addon without contaminating an invoice they'd then need to issue and void. New action `voidUnbilledRows` + handleVoidUnbilledRows_(clientSheetId, payload) accepts a `{ledgerRowIds[], reason?}` shape, reads the client's Billing_Ledger once via bulk getValues, indexes by Ledger Row ID, and for each requested ID flips Status from "Unbilled" → "Void" and stamps "Voided: <reason>" (or "Voided <date>") into Item Notes. Strict guard: only "Unbilled" rows are accepted — Invoiced/Billed rows are surfaced in `rejected[]` with their currentStatus so the React UI can warn the operator about selection drift; already-Voided rows are silently skipped; missing IDs go to `skippedNotFound`. Router wraps the call in withStaffGuard_ + withClientIsolation_, calls api_fullClientSync_(.., ['billing']) so Supabase realtime drops the rows from the React Billing list within ~1-2s, writes one audit log entry per call (capped at 50 IDs in the payload). React side: new postVoidUnbilledRows() + Billing.tsx "Void Selected" button (red, only enabled when ≥1 Unbilled row is selected) + confirmation modal with optional reason input. The modal groups the selection by sourceSheetId and fans out one server call per tenant — operators can void rows across multiple clients in one click.
+   v38.187.0 — 2026-05-05 PST — Stax-side dates ISO yyyy-MM-dd everywhere. Justin caught the Charge Queue Scheduled column rendering blank again — same symptom as v38.171.0 even though that commit fixed read-side normalization. Root cause: api_qbCalcDueDate_/api_qbFmtDate_ produce MM/dd/yyyy because the IIF file format requires it, and handleQbExport_ + handleImportIIF_ wrote the same MM/dd/yyyy string straight into the Stax Invoices SHEET cells AND the Supabase mirror. `<input type="date">` strictly requires yyyy-MM-dd; both "2026-05-10 00:00:00" (timestamp from Sheets-style serialization) AND "05/20/2026" (US format from QB) silently render empty AND poison the React onBlur equality guard so saves look like they revert. Mixed corpus in Supabase confirmed via direct SELECT: INV-000099 had due_date="2026-05-10 00:00:00", INV-001010 had due_date="2026-05-20" + scheduled_date="05/20/2026". Two-sided fix. (1) Backend: new api_isoDate_(v) helper coerces Date objects, ISO timestamps, and US-format strings to yyyy-MM-dd. handleQbExport_'s INSERT + UPDATE-PENDING branches now run sInv.invDate / sInv.dueDate through it before every Stax-sheet setValue + every Supabase mirror push. handleImportIIF_'s same two branches pass inv.date / inv.dueDate through it. handleUpdateStaxInvoice_'s payload.dueDate + payload.scheduledDate run through it too (no-op on already-ISO React input, defensive against legacy clients). The IIF FILE OUTPUT stays MM/dd/yyyy — only Stax-side persistence is touched. (2) Frontend: fetchStaxInvoicesFromSupabase + fetchStaxExceptionsFromSupabase normalize due_date / scheduled_date via a shared isoDateOnly() at read time, so any pre-fix dirty rows in Supabase still render correctly until a one-time UPDATE cleans them up.
    v38.186.0 — 2026-05-04 PST — Multi-key clientInfoMap in handleQbExport_ so per-invoice auto_charge inherits correctly when a client's QB Customer Name differs from their Client Name. Justin caught Allison Lind Design's INV-000139/140 had auto_charge=true but client.auto_charge=false; the v38.178.0 inheritance code looked up clientInfoMap[sInv.qbName] but the map was keyed only on Client Name ("Allison Lind Design"), and qbName was actually QB Customer Name ("Allison Lind Interiors"), so the lookup missed → sClientInfo was {} → the per-invoice flag fell back to the v38.21.0 hard-coded true even though the client setting was false. Map is now keyed by all three name variants (Client Name + QB Customer Name + Stax Customer Name) pointing at the same record — same pattern stax_buildClientStaxMap_ has used for months. The 2 stuck rows from before this fix were backfilled via direct SQL (UPDATE stax_invoices SET auto_charge = clients.auto_charge WHERE PENDING/CREATED AND the values diverge).
    v38.185.0 — 2026-05-04 PST — Code-review follow-ups for the v38.182-184 billing perf series. (1) rollbackByInvoiceNo_ on Consolidated_Ledger now groups consecutive descending row numbers into one deleteRows(start, count) per run, replacing the per-row deleteRows loop that did N+1 round-trips. A 100-row contiguous rollback was ~10s of GAS round-trips (close to the 15s rbLock timeout); grouped form is one call. Fragmented rollbacks (rare — only when concurrent appends interleaved) typically collapse to <5 calls. The descending iteration order is preserved so deletes only shift rows above our remaining work. Companion React change in same v38.185 series: Billing.tsx adds a useRef-backed synchronous submit gate to close the rapid-double-click window where two clicks in the same React tick (≤16ms) would both pass the React-state-based billingBatch.active guard and spawn two parallel batches with overlapping invoicingLedgerIds.
    v38.183.0 — 2026-05-04 PST — handleCreateInvoice_ commit-lock scope reduction. v38.182.0 made invoice numbering atomic via Postgres SEQUENCE and unblocked concurrency=3 on the React side, but the speedup was only modest (~10-30%) because the outer LockService.getScriptLock still wrapped the entire ~5-10s function — including api_markClientLedgerInvoiced_, the per-tenant client Billing_Ledger flip that's the biggest non-CB cost (1-3s per invoice). This PR shrinks the lock to just the CB append + RT writes phase (~500ms-1s), then explicitly releases via a new releaseCommitLockOnce_ helper. Client-Billing_Ledger flip now runs OUTSIDE the lock — different invoices touch different client sheets, so they don't conflict. The old position-based rollback (consolLedger.deleteRows(insertedRange.start, insertedRange.count)) is replaced by an ID-based rollbackByInvoiceNo_() that finds rows by Invoice # column value and deletes bottom-up, robust to concurrent CB appends. Email Status update gets its own brief re-lock when email actually fires (opt-in only); for the typical skipEmail=true path the CB append pre-fills "Skipped" so no post-flip update is needed. Net wall-time impact for a 5-client storage batch: previously ~30-40s with concurrency=3 + atomic counter, now ~12-18s — true 3x speedup. The Master invoice counter race is already gone (v38.182.0); this PR closes the remaining serialization bottleneck.
@@ -7322,6 +7323,38 @@ function doPost(e) {
           });
         });
 
+      case "voidUnbilledRows":
+        return withStaffGuard_(callerEmail, function() {
+          return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
+            var r = handleVoidUnbilledRows_(effectiveId, payload);
+            invalidateClientCache_(effectiveId);
+            // Mirror the Status flip to Supabase so the Billing Report drops
+            // the voided rows on the next refetch (or sooner via realtime).
+            api_fullClientSync_(effectiveId, ["billing"]);
+            try {
+              var _vUrJson = (r && r.getContent) ? JSON.parse(r.getContent()) : {};
+              var _ids = Array.isArray((payload || {}).ledgerRowIds) ? payload.ledgerRowIds : [];
+              api_auditLog_(
+                "billing",
+                _ids.length > 0 ? String(_ids[0]) : "",
+                effectiveId,
+                "void_unbilled_rows",
+                {
+                  ledgerRowIds: _ids.slice(0, 50), // cap audit row payload
+                  totalRequested: _ids.length,
+                  voided: _vUrJson.voided || 0,
+                  skippedAlreadyVoid: _vUrJson.skippedAlreadyVoid || 0,
+                  skippedNotFound: _vUrJson.skippedNotFound || 0,
+                  rejectedCount: Array.isArray(_vUrJson.rejected) ? _vUrJson.rejected.length : 0,
+                  reason: String((payload || {}).reason || "").substring(0, 200)
+                },
+                callerEmail
+              );
+            } catch (_) { /* audit best-effort */ }
+            return r;
+          });
+        });
+
       case "batchCreateTasks":
         return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
           var r = handleBatchCreateTasks_(effectiveId, payload);
@@ -12415,6 +12448,96 @@ function handleVoidInvoice_(clientSheetId, payload) {
     });
   } catch (err) {
     return errorResponse_("Failed to void invoice: " + String(err), "SERVER_ERROR");
+  }
+}
+
+// ─── voidUnbilledRows — bulk-void a set of Unbilled Billing_Ledger rows ───
+//
+// Bulk counterpart to handleVoidManualCharge_, intended for the new
+// "Void Selected" affordance on the Billing → Report tab when the operator
+// has multiple Unbilled rows selected. Differs from voidInvoice in two ways:
+// (a) keyed by Ledger Row ID (the row's UUID-shape primary key), not invoice
+// number — invoice #'s are only assigned at billing time so they don't exist
+// for Unbilled rows; (b) only flips rows whose current Status is "Unbilled",
+// to keep this strictly an "undo before invoice" operation. Already-Voided
+// rows are skipped silently; Invoiced/Billed rows are rejected (operator
+// should use voidInvoice for those, which preserves invoice context).
+//
+// Payload shape: { ledgerRowIds: string[], reason?: string }
+// Returns: { success, voided, skippedAlreadyVoid, skippedNotFound, rejected }
+function handleVoidUnbilledRows_(clientSheetId, payload) {
+  if (!clientSheetId) return errorResponse_("clientSheetId is required", "MISSING_PARAM");
+  var p = payload || {};
+  var ids = Array.isArray(p.ledgerRowIds) ? p.ledgerRowIds : [];
+  ids = ids.map(function(s) { return String(s || "").trim(); }).filter(function(s) { return s.length > 0; });
+  if (ids.length === 0) return errorResponse_("ledgerRowIds is required (non-empty array)", "INVALID_PARAMS");
+  var reason = String(p.reason || "").trim();
+
+  try {
+    var ss = SpreadsheetApp.openById(clientSheetId);
+    var sheet = ss.getSheetByName("Billing_Ledger");
+    if (!sheet) return errorResponse_("Billing_Ledger sheet not found", "SHEET_NOT_FOUND");
+
+    var hMap = api_getHeaderMap_(sheet);
+    var idCol = hMap["Ledger Row ID"];
+    var statusCol = hMap["Status"];
+    var notesCol = hMap["Item Notes"] !== undefined ? hMap["Item Notes"] : hMap["Notes"];
+    if (!idCol || !statusCol) return errorResponse_("Ledger Row ID / Status columns missing", "SCHEMA_ERROR");
+
+    var lastRow = api_getLastDataRow_(sheet);
+    if (lastRow < 2) return errorResponse_("Empty Billing_Ledger", "NOT_FOUND");
+
+    var allData = sheet.getRange(2, 1, lastRow - 1, sheet.getLastColumn()).getValues();
+
+    // Index every row by Ledger Row ID for O(1) per-id lookup. The Billing_Ledger
+    // append path stamps a unique ID per row (RCVG-/WC-/MANUAL-/etc.) so dupes
+    // are not expected — last-write-wins if any drift sneaks in.
+    var rowByLrid = {};
+    for (var i = 0; i < allData.length; i++) {
+      var lrid = String(allData[i][idCol - 1] || "").trim();
+      if (lrid) rowByLrid[lrid] = i; // 0-based index into allData
+    }
+
+    var voided = 0;
+    var skippedAlreadyVoid = 0;
+    var skippedNotFound = 0;
+    var rejected = []; // { ledgerRowId, currentStatus } for non-Unbilled hits
+    var noteSuffix = reason
+      ? ("Voided: " + reason)
+      : ("Voided " + Utilities.formatDate(new Date(), ss.getSpreadsheetTimeZone() || "America/Los_Angeles", "yyyy-MM-dd"));
+
+    for (var k = 0; k < ids.length; k++) {
+      var ledgerRowId = ids[k];
+      if (!Object.prototype.hasOwnProperty.call(rowByLrid, ledgerRowId)) {
+        skippedNotFound++;
+        continue;
+      }
+      var rowIdx = rowByLrid[ledgerRowId];
+      var rowStatus = String(allData[rowIdx][statusCol - 1] || "").trim();
+      if (rowStatus === "Void") { skippedAlreadyVoid++; continue; }
+      if (rowStatus !== "Unbilled") {
+        rejected.push({ ledgerRowId: ledgerRowId, currentStatus: rowStatus || "(blank)" });
+        continue;
+      }
+      var rowNum = rowIdx + 2;
+      sheet.getRange(rowNum, statusCol).setValue("Void");
+      if (notesCol) {
+        var existing = String(allData[rowIdx][notesCol - 1] || "").trim();
+        sheet.getRange(rowNum, notesCol).setValue((existing ? existing + " | " : "") + noteSuffix);
+      }
+      voided++;
+    }
+
+    return jsonResponse_({
+      success: true,
+      voided: voided,
+      skippedAlreadyVoid: skippedAlreadyVoid,
+      skippedNotFound: skippedNotFound,
+      rejected: rejected,
+      message: voided + " of " + ids.length + " row(s) voided"
+    });
+  } catch (err) {
+    return errorResponse_("Failed to void unbilled rows: " + String(err), "SERVER_ERROR");
   }
 }
 

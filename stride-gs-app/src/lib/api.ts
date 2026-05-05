@@ -2530,6 +2530,37 @@ export function postVoidManualCharge(
   );
 }
 
+// ─── Bulk void Unbilled rows (v38.188.0) ─────────────────────────────────────
+//
+// Backs the "Void Selected" affordance on Billing → Report when one or more
+// Unbilled rows are checked. Server enforces "Unbilled-only" — Invoiced or
+// Billed rows are returned in `rejected` instead of being silently skipped,
+// so the UI can warn the operator if their selection drifted.
+
+export interface VoidUnbilledRowsResponse {
+  success: boolean;
+  voided: number;
+  skippedAlreadyVoid: number;
+  skippedNotFound: number;
+  rejected: { ledgerRowId: string; currentStatus: string }[];
+  message?: string;
+  error?: string;
+}
+
+export function postVoidUnbilledRows(
+  ledgerRowIds: string[],
+  clientSheetId: string,
+  reason?: string,
+  signal?: AbortSignal,
+) {
+  return apiPost<VoidUnbilledRowsResponse>(
+    'voidUnbilledRows',
+    { ledgerRowIds, reason: reason || '' },
+    { clientSheetId },
+    { signal },
+  );
+}
+
 // ─── v38.114.0: Billing Activity — Mark Resolved ─────────────────────────────
 
 export function postMarkBillingActivityResolved(

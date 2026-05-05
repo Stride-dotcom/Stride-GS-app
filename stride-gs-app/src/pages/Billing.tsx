@@ -11,7 +11,7 @@ import {
 import {
   Search, Download, ChevronUp, ChevronDown, ChevronRight, ArrowUpDown,
   Settings2, FileText, DollarSign, Send, Eye, ExternalLink,
-  CheckCircle, AlertTriangle, Loader2, X, RefreshCw, Plus, Scale, CreditCard, Clock, ShieldCheck,
+  CheckCircle, AlertTriangle, Loader2, X, RefreshCw, Plus, Scale, CreditCard, Clock, ShieldCheck, Ban,
 } from 'lucide-react';
 import { ParityMonitor } from './ParityMonitor';
 import { BillingActivityTab } from '../components/billing/BillingActivityTab';
@@ -61,7 +61,7 @@ import { AddChargeModal, type ManualChargeEditTarget } from '../components/billi
 import { useQBO } from '../hooks/useQBO';
 import { useAuth } from '../contexts/AuthContext';
 import { useBillingBatch, type BatchInvoiceResult } from '../contexts/BillingBatchContext';
-import { postVoidManualCharge, postVoidInvoice } from '../lib/api';
+import { postVoidManualCharge, postVoidInvoice, postVoidUnbilledRows } from '../lib/api';
 import { supabase } from '../lib/supabase';
 import { entityEvents } from '../lib/entityEvents';
 import {
@@ -1409,6 +1409,14 @@ export function Billing() {
   const [invoiceResults, setInvoiceResults] = useState<Array<CreateInvoiceResponse & { client: string }> | null>(null);
   const [invoiceError, setInvoiceError] = useState('');
 
+  // v38.188.0 — "Void Selected" modal state. Backs the bulk-void affordance on
+  // the Billing → Report tab (Unbilled rows only). Multi-tenant aware: a single
+  // confirm fans out one postVoidUnbilledRows call per (sourceSheetId) group.
+  const [showVoidModal, setShowVoidModal] = useState(false);
+  const [voidReason, setVoidReason] = useState('');
+  const [voidLoading, setVoidLoading] = useState(false);
+  const [voidResult, setVoidResult] = useState<{ ok: boolean; voided: number; rejected: number; notFound: number; alreadyVoid: number; perGroup: { client: string; voided: number; error?: string }[] } | null>(null);
+
   // ─── Table state ──────────────────────────────────────────────────────────
   const { sorting, setSorting, colVis, setColVis, columnOrder, setColumnOrder } = useTablePreferences('billing', [{ id: 'date', desc: true }], {}, DEFAULT_COL_ORDER, ['Unbilled']);
   const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([]);
@@ -2120,6 +2128,89 @@ export function Billing() {
     setQbExcelLoading(false);
   };
 
+  // v38.188.0 — Void selected Unbilled rows. The selection can span multiple
+  // tenants (operators commonly filter by client but it's not required), so
+  // group by sourceSheetId first and fan out one postVoidUnbilledRows call
+  // per group. Optimistically remove rows on success — the server-side
+  // api_fullClientSync_(.., ['billing']) writes Void to Supabase, and the
+  // followup loadReport(true) refetches without cache to confirm.
+  const handleVoidSelected = async () => {
+    const selRows = resolveSelectedRows();
+    const unbilledRows = selRows.filter(r => r.status === 'Unbilled');
+    if (!unbilledRows.length) return;
+
+    setVoidLoading(true);
+    setVoidResult(null);
+
+    // Group by sourceSheetId. A selection without a sourceSheetId would be
+    // a data bug, but we surface it as a per-group error rather than throwing.
+    const groups: Record<string, { client: string; ids: string[] }> = {};
+    for (const r of unbilledRows) {
+      const sid = r.sourceSheetId || '';
+      if (!groups[sid]) groups[sid] = { client: r.client, ids: [] };
+      groups[sid].ids.push(r.ledgerRowId);
+    }
+
+    const reason = voidReason.trim();
+    const perGroup: { client: string; voided: number; error?: string }[] = [];
+    let totalVoided = 0;
+    let totalRejected = 0;
+    let totalNotFound = 0;
+    let totalAlreadyVoid = 0;
+    const successfulIds: string[] = [];
+
+    for (const [sid, g] of Object.entries(groups)) {
+      if (!sid) {
+        perGroup.push({ client: g.client, voided: 0, error: 'Row missing sourceSheetId' });
+        continue;
+      }
+      const res = await postVoidUnbilledRows(g.ids, sid, reason || undefined);
+      if (res.error || !res.data?.success) {
+        perGroup.push({ client: g.client, voided: 0, error: res.data?.error || res.error || 'Void failed' });
+        continue;
+      }
+      const data = res.data;
+      perGroup.push({ client: g.client, voided: data.voided });
+      totalVoided += data.voided;
+      totalRejected += data.rejected.length;
+      totalNotFound += data.skippedNotFound;
+      totalAlreadyVoid += data.skippedAlreadyVoid;
+      // Only the rows that ACTUALLY flipped to Void should disappear from the
+      // table — rejected rows (e.g. status drifted to Invoiced between the
+      // selection and the call) need to stay visible so the operator can see
+      // why the count was lower than they selected.
+      const flippedSet = new Set(g.ids);
+      for (const r of data.rejected) flippedSet.delete(r.ledgerRowId);
+      // skippedNotFound: row not in sheet at all — not a "still Unbilled" case.
+      // Server returned indices; we don't know which IDs hit that branch from
+      // the response shape, so we conservatively only hide rows we know flipped.
+      // For the bulk path, treat (sent - rejected - already-void) as flipped.
+      // Already-Voided rows are also fine to remove (they were Void before; the
+      // table already shouldn't show them under the Unbilled filter anyway).
+      const aliveAfter = g.ids.filter(id => flippedSet.has(id));
+      successfulIds.push(...aliveAfter);
+    }
+
+    if (successfulIds.length > 0) {
+      setReportData(prev => prev.filter(r => !successfulIds.includes(r.ledgerRowId)));
+      hideUnbilled(successfulIds);
+      setRowSel({});
+    }
+
+    setVoidLoading(false);
+    setVoidResult({
+      ok: perGroup.every(g => !g.error),
+      voided: totalVoided,
+      rejected: totalRejected,
+      notFound: totalNotFound,
+      alreadyVoid: totalAlreadyVoid,
+      perGroup,
+    });
+
+    // Force-refresh the report so the table reconciles with Supabase truth.
+    if (reportLoaded) void loadReport(true);
+  };
+
   // v38.185.0 — Synchronous re-submit gate. The React-state-based
   // `billingBatch.active` check below catches the common case of clicking
   // again *after* a batch is in flight, but it doesn't catch the rapid
@@ -2687,6 +2778,34 @@ export function Billing() {
           }}
           onResult={(msg) => setQboResult(msg)}
         />}
+        {isReportTab && (() => {
+          // v38.188.0 — Void Selected button. Surfaces only when at least one
+          // Unbilled row is selected. Invoiced rows in the same selection are
+          // ignored (the existing per-invoice Void button handles those).
+          const sel = resolveSelectedRows();
+          const unbilledCount = sel.filter(r => r.status === 'Unbilled').length;
+          const disabled = unbilledCount === 0;
+          return (
+            <button
+              onClick={() => { setVoidReason(''); setVoidResult(null); setShowVoidModal(true); }}
+              disabled={disabled}
+              title={disabled ? 'Select one or more Unbilled rows to void' : `Void ${unbilledCount} Unbilled row${unbilledCount !== 1 ? 's' : ''}`}
+              style={{
+                padding: '7px 12px', fontSize: 12, fontWeight: 600,
+                border: `1px solid ${disabled ? theme.colors.border : '#DC2626'}`,
+                borderRadius: 8,
+                background: '#fff',
+                cursor: disabled ? 'not-allowed' : 'pointer',
+                display: 'flex', alignItems: 'center', gap: 4,
+                fontFamily: 'inherit',
+                color: disabled ? theme.colors.textMuted : '#DC2626',
+                opacity: disabled ? 0.6 : 1,
+              }}
+            >
+              <Ban size={14} /> Void Selected{unbilledCount > 0 ? ` (${unbilledCount})` : ''}
+            </button>
+          );
+        })()}
       </div>
 
       {/* Row count */}
@@ -3379,6 +3498,113 @@ export function Billing() {
                   disabled={invoiceLoading || !selCount || !apiConfigured || billingBatch.active}
                   onClick={handleCreateInvoices}
                 />
+              )}
+            </div>
+          </div>
+        </>,
+        document.body
+      )}
+
+      {/* v38.188.0 — Void Selected confirmation modal */}
+      {showVoidModal && createPortal(
+        <>
+          <div
+            onClick={() => !voidLoading && (setShowVoidModal(false), setVoidResult(null), setVoidReason(''))}
+            style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.3)', zIndex: 200 }}
+          />
+          <div style={{ position: 'fixed', top: '50%', left: '50%', transform: 'translate(-50%,-50%)', width: 520, maxWidth: '95vw', maxHeight: '85vh', background: '#fff', borderRadius: 16, boxShadow: '0 8px 40px rgba(0,0,0,0.15)', zIndex: 201, fontFamily: theme.typography.fontFamily, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+            <div style={{ padding: '18px 24px', borderBottom: `1px solid ${theme.colors.border}` }}>
+              <div style={{ fontSize: 16, fontWeight: 700, color: '#991B1B', display: 'flex', alignItems: 'center', gap: 8 }}>
+                <Ban size={18} /> Void Selected Rows
+              </div>
+              {!voidResult && (() => {
+                const sel = resolveSelectedRows();
+                const unbilledRows = sel.filter(r => r.status === 'Unbilled');
+                const ignoredCount = sel.length - unbilledRows.length;
+                const total = unbilledRows.reduce((s, r) => s + r.total, 0);
+                return (
+                  <div style={{ fontSize: 12, color: theme.colors.textMuted, marginTop: 4 }}>
+                    {unbilledRows.length} Unbilled row{unbilledRows.length !== 1 ? 's' : ''} &middot; ${total.toFixed(2)} total
+                    {ignoredCount > 0 && <span style={{ marginLeft: 6, color: '#B45309' }}>({ignoredCount} non-Unbilled row{ignoredCount !== 1 ? 's' : ''} will be ignored)</span>}
+                  </div>
+                );
+              })()}
+            </div>
+
+            <div style={{ padding: '18px 24px', flex: 1, overflowY: 'auto', minHeight: 0 }}>
+              {!voidResult && !voidLoading && (
+                <>
+                  <div style={{ fontSize: 13, color: theme.colors.textSecondary, lineHeight: 1.5, marginBottom: 14 }}>
+                    Voided rows are flagged on the client&apos;s Billing_Ledger and removed from the Unbilled report. They can&apos;t be invoiced. This action is reversible only by editing the sheet directly.
+                  </div>
+                  <label style={{ display: 'block', fontSize: 12, fontWeight: 600, color: theme.colors.textSecondary, marginBottom: 6 }}>Reason (optional)</label>
+                  <input
+                    type="text"
+                    value={voidReason}
+                    onChange={(e) => setVoidReason(e.target.value)}
+                    placeholder="e.g. duplicate intake, billed elsewhere"
+                    maxLength={200}
+                    style={{ width: '100%', padding: '8px 12px', fontSize: 13, border: `1px solid ${theme.colors.border}`, borderRadius: 8, outline: 'none', fontFamily: 'inherit' }}
+                  />
+                  <div style={{ fontSize: 11, color: theme.colors.textMuted, marginTop: 6 }}>Appended to each row&apos;s Item Notes for the audit trail.</div>
+                </>
+              )}
+
+              {voidLoading && (
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '40px 0', color: theme.colors.textSecondary, fontSize: 13 }}>
+                  <Loader2 size={18} style={{ marginRight: 8 }} className="spin" /> Voiding rows…
+                </div>
+              )}
+
+              {voidResult && (
+                <>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: voidResult.ok ? '#15803D' : '#B45309', marginBottom: 10, display: 'flex', alignItems: 'center', gap: 6 }}>
+                    {voidResult.ok ? <CheckCircle size={16} /> : <AlertTriangle size={16} />}
+                    {voidResult.voided} row{voidResult.voided !== 1 ? 's' : ''} voided
+                    {voidResult.rejected > 0 && <span>&middot; {voidResult.rejected} rejected</span>}
+                    {voidResult.alreadyVoid > 0 && <span>&middot; {voidResult.alreadyVoid} already void</span>}
+                    {voidResult.notFound > 0 && <span>&middot; {voidResult.notFound} not found</span>}
+                  </div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    {voidResult.perGroup.map((g, i) => (
+                      <div key={i} style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 10px', background: g.error ? '#FEF2F2' : '#F9FAFB', borderRadius: 6, fontSize: 12 }}>
+                        <span style={{ fontWeight: 500 }}>{g.client}</span>
+                        <span style={{ color: g.error ? '#991B1B' : theme.colors.textSecondary }}>
+                          {g.error ? g.error : `${g.voided} voided`}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              )}
+            </div>
+
+            <div style={{ padding: '14px 24px', borderTop: `1px solid ${theme.colors.border}`, display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
+              {!voidResult ? (
+                <>
+                  <button
+                    onClick={() => { setShowVoidModal(false); setVoidReason(''); }}
+                    disabled={voidLoading}
+                    style={{ padding: '7px 14px', fontSize: 13, fontWeight: 500, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: voidLoading ? 'not-allowed' : 'pointer', color: theme.colors.textSecondary, fontFamily: 'inherit' }}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleVoidSelected}
+                    disabled={voidLoading}
+                    style={{ padding: '7px 14px', fontSize: 13, fontWeight: 600, border: '1px solid #DC2626', borderRadius: 8, background: '#DC2626', cursor: voidLoading ? 'progress' : 'pointer', color: '#fff', fontFamily: 'inherit', display: 'flex', alignItems: 'center', gap: 6 }}
+                  >
+                    {voidLoading ? <Loader2 size={13} className="spin" /> : <Ban size={13} />}
+                    {voidLoading ? 'Voiding…' : 'Void Rows'}
+                  </button>
+                </>
+              ) : (
+                <button
+                  onClick={() => { setShowVoidModal(false); setVoidResult(null); setVoidReason(''); }}
+                  style={{ padding: '7px 14px', fontSize: 13, fontWeight: 600, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', color: theme.colors.textPrimary, fontFamily: 'inherit' }}
+                >
+                  Close
+                </button>
               )}
             </div>
           </div>
