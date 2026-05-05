@@ -1348,6 +1348,12 @@ export function Billing() {
 
   // Create Invoice state
   const [showInvoiceModal, setShowInvoiceModal] = useState(false);
+  // 2026-05-04 — invoiceMode lets the same Create Invoice modal serve both
+  // the Report tab (invoice already-committed Unbilled rows) and the Storage
+  // tab (commit preview rows to the ledger AND invoice them in one flow).
+  // 'storage' mode prepends a postCommitStorageRows call before the
+  // existing per-group postCreateInvoice loop. Same modal copy + result UI.
+  const [invoiceMode, setInvoiceMode] = useState<'report' | 'storage'>('report');
   // 2026-05-02 — defaults flipped to false. New flow: invoice creation skips
   // the Drive Doc PDF (Drive's auto-reformatting was hurting output quality)
   // and the matching email. The invoice URL stored on the ledger now points at
@@ -1646,18 +1652,26 @@ export function Billing() {
         </span>;
       } }),
       col.accessor('sidemark', { header: 'Sidemark', size: 140, filterFn: mf, cell: i => {
-        const canEdit = isReportTab && i.row.original.status === 'Unbilled';
-        return canEdit
-          ? <EditableCell value={i.getValue() || ''} onChange={v => saveReportField(i.row.original, 'sidemark', v)} />
-          : <span style={{ fontSize: 12, color: theme.colors.textSecondary }}>{i.getValue() || '\u2014'}</span>;
+        // Editable: report-tab Unbilled rows OR storage-tab preview rows.
+        // Storage edits update local previewRows via updatePreviewRow so the
+        // commit + invoice loop carries the operator's value through to the
+        // ledger row write (matters because clients with separate_by_sidemark
+        // group invoices by sidemark \u2014 picking the right value here decides
+        // which invoice the row lands on).
+        const canEditReport = isReportTab && i.row.original.status === 'Unbilled';
+        const canEditStorage = isPreviewMode;
+        if (canEditReport) return <EditableCell value={i.getValue() || ''} onChange={v => saveReportField(i.row.original, 'sidemark', v)} />;
+        if (canEditStorage) return <EditableCell value={i.getValue() || ''} onChange={v => updatePreviewRow(i.row.original.ledgerRowId, 'sidemark', v)} />;
+        return <span style={{ fontSize: 12, color: theme.colors.textSecondary }}>{i.getValue() || '\u2014'}</span>;
       } }),
       col.accessor('reference', {
         header: 'Reference', size: 130, filterFn: mf,
         cell: i => {
-          const canEdit = isReportTab && i.row.original.status === 'Unbilled';
-          return canEdit
-            ? <EditableCell value={i.getValue() || ''} onChange={v => saveReportField(i.row.original, 'reference', v)} />
-            : <span style={{ fontSize: 12, color: theme.colors.textSecondary, fontFamily: 'monospace' }}>{i.getValue() || '\u2014'}</span>;
+          const canEditReport = isReportTab && i.row.original.status === 'Unbilled';
+          const canEditStorage = isPreviewMode;
+          if (canEditReport) return <EditableCell value={i.getValue() || ''} onChange={v => saveReportField(i.row.original, 'reference', v)} />;
+          if (canEditStorage) return <EditableCell value={i.getValue() || ''} onChange={v => updatePreviewRow(i.row.original.ledgerRowId, 'reference', v)} />;
+          return <span style={{ fontSize: 12, color: theme.colors.textSecondary, fontFamily: 'monospace' }}>{i.getValue() || '\u2014'}</span>;
         },
       }),
       col.accessor('date', { header: 'Date', size: 100, cell: i => <span style={{ fontSize: 12, color: theme.colors.textSecondary }}>{fmt(i.getValue())}</span> }),
@@ -2049,6 +2063,67 @@ export function Billing() {
 
     setInvoiceLoading(true);
     setInvoiceError('');
+
+    // 2026-05-04 — Storage tab path. Preview rows haven't been written to
+    // any client Billing_Ledger yet; commit them first so the createInvoice
+    // calls below find rows to flip to Invoiced. The commit endpoint groups
+    // by tenant + does ONE bulk setValues per client, so this stays fast
+    // even on hundred-row monthly storage runs (the typical case Justin
+    // flagged). Skipping this step is the entire point of the streamlined
+    // workflow — replaces the old "Commit to Ledger then go to Report tab
+    // then re-select then Create Invoice" 4-step dance.
+    if (invoiceMode === 'storage') {
+      const payloadRows = selRows.map(r => ({
+        tenantId: r.sourceSheetId || r.clientSheetId || '',
+        clientName: r.client || r.clientName || '',
+        itemId: r.itemId,
+        description: r.description,
+        itemClass: r.itemClass,
+        sidemark: r.sidemark || '',
+        qty: r.qty,
+        rate: r.rate,
+        total: r.total,
+        taskId: r.taskId,
+        notes: r.notes,
+        billableEnd: r.date,
+        shipmentNo: r.shipmentNo,
+      })).filter(r => r.tenantId);
+
+      if (!payloadRows.length) {
+        setInvoiceError('Selected rows are missing tenant ids — re-run Preview Storage.');
+        setInvoiceLoading(false);
+        return;
+      }
+
+      try {
+        const commitRes = await postCommitStorageRows({
+          periodStart: storStartDate,
+          periodEnd: storEndDate,
+          rows: payloadRows,
+        });
+        if (commitRes.error || !commitRes.data?.success) {
+          setInvoiceError(commitRes.data?.error || commitRes.error || 'Commit to ledger failed — invoices not created');
+          setInvoiceLoading(false);
+          return;
+        }
+        // Stash the commit result so the storage-tab banner shows "X rows
+        // committed" after the modal closes (matches the legacy two-step
+        // affordance).
+        setCommitResult(commitRes.data);
+        if (commitRes.data?.failedClients?.length) {
+          // Non-fatal — commit went through for other clients; surface the
+          // partial-failure list in the modal so the operator can retry just
+          // those clients via the legacy Commit to Ledger button.
+          setInvoiceError(
+            `Some clients failed to commit and will be skipped: ${commitRes.data.failedClients.join('; ')}`
+          );
+        }
+      } catch (err) {
+        setInvoiceError(`Commit error: ${err instanceof Error ? err.message : String(err)} — invoices not created`);
+        setInvoiceLoading(false);
+        return;
+      }
+    }
 
     // Session 69 — optimistic hide: remove selected rows from the on-screen report
     // immediately so the table feels instant. Snapshot so we can restore on failure.
@@ -2810,19 +2885,49 @@ export function Billing() {
                     </div>
                   </div>
                 </div>
-                <div style={{ display: 'flex', gap: 8 }}>
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                   {commitResult ? (
                     <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 14px', background: '#F0FDF4', border: '1px solid #BBF7D0', borderRadius: 8, fontSize: 12, color: '#15803D', fontWeight: 600 }}>
                       <CheckCircle size={14} /> {commitResult.totalCreated} rows committed to ledger
                     </div>
                   ) : (
-                    <WriteButton
-                      label={commitLoading ? 'Committing...' : 'Commit to Ledger'}
-                      variant="primary"
-                      icon={commitLoading ? <Loader2 size={14} className="animate-spin" /> : <CheckCircle size={14} />}
-                      disabled={commitLoading || !previewRows.length}
-                      onClick={handleCommitPreview}
-                    />
+                    <>
+                      {/* 2026-05-04 — Streamlined "Create Invoice" path. Same
+                          modal as the Report tab; the storage-mode flag in
+                          handleCreateInvoices triggers postCommitStorageRows
+                          before the per-group postCreateInvoice loop, so one
+                          click does both steps. Replaces the legacy
+                          "commit then re-select on Report tab" 4-step flow. */}
+                      <WriteButton
+                        label="Create Invoice"
+                        variant="primary"
+                        icon={<Send size={13} />}
+                        disabled={!previewRows.length || invoiceLoading || commitLoading}
+                        onClick={() => {
+                          // Use ALL preview rows by default. If the user has a
+                          // subset selected we honor that — the modal subtitle
+                          // shows the count. Use the table API so the selection
+                          // tracks the current sort/filter view (a manual
+                          // rowSel = {0:true,...} would diverge if sort/filter
+                          // changed the underlying TanStack row ids).
+                          const haveSelection = table.getSelectedRowModel().rows.length > 0;
+                          if (!haveSelection) {
+                            table.toggleAllRowsSelected(true);
+                          }
+                          setInvoiceMode('storage');
+                          setInvoiceResults(null);
+                          setInvoiceError('');
+                          setShowInvoiceModal(true);
+                        }}
+                      />
+                      <WriteButton
+                        label={commitLoading ? 'Committing...' : 'Commit to Ledger'}
+                        variant="ghost"
+                        icon={commitLoading ? <Loader2 size={14} className="animate-spin" /> : <CheckCircle size={14} />}
+                        disabled={commitLoading || !previewRows.length}
+                        onClick={handleCommitPreview}
+                      />
+                    </>
                   )}
                   <button onClick={() => { setPreviewLoaded(false); setPreviewRows([]); setRowSel({}); setCommitResult(null); setPreviewError(''); }} style={{ padding: '6px 14px', fontSize: 12, fontWeight: 600, border: 'none', borderRadius: 8, background: '#fff', cursor: 'pointer', fontFamily: 'inherit', color: theme.colors.textSecondary, display: 'flex', alignItems: 'center', gap: 4, boxShadow: '0 1px 3px rgba(0,0,0,0.08)' }}><X size={13} /> Dismiss</button>
                 </div>
@@ -2869,14 +2974,23 @@ export function Billing() {
               );
             })()}
 
-            {/* Create Invoice button (report tab only, for unbilled rows) */}
-            {activeTab === 'report' && (
+            {/* Create Invoice button — Report tab uses 'report' mode (rows
+                already on the ledger, just flip to Invoiced). Storage tab
+                uses 'storage' mode which commits the preview rows to the
+                ledger before invoicing — one click replaces the legacy
+                two-step flow. */}
+            {(activeTab === 'report' || activeTab === 'storage') && (
               <WriteButton
                 label="Create Invoice"
                 variant="ghost"
                 size="sm"
                 icon={<Send size={13} />}
-                onClick={async () => { setInvoiceResults(null); setInvoiceError(''); setShowInvoiceModal(true); }}
+                onClick={async () => {
+                  setInvoiceMode(activeTab === 'storage' ? 'storage' : 'report');
+                  setInvoiceResults(null);
+                  setInvoiceError('');
+                  setShowInvoiceModal(true);
+                }}
               />
             )}
 
@@ -2890,13 +3004,18 @@ export function Billing() {
       {/* ─── Create Invoices Modal ────────────────────────────────────────── */}
       {showInvoiceModal && createPortal(
         <>
-          <div onClick={() => !invoiceLoading && (setShowInvoiceModal(false), setInvoiceResults(null), setInvoiceError(''))} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.3)', zIndex: 200 }} />
+          <div onClick={() => !invoiceLoading && (setShowInvoiceModal(false), setInvoiceResults(null), setInvoiceError(''), setInvoiceMode('report'))} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.3)', zIndex: 200 }} />
           <div style={{ position: 'fixed', top: '50%', left: '50%', transform: 'translate(-50%,-50%)', width: 540, maxWidth: '95vw', maxHeight: '85vh', background: '#fff', borderRadius: 16, boxShadow: '0 8px 40px rgba(0,0,0,0.15)', zIndex: 201, fontFamily: theme.typography.fontFamily, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
             <div style={{ padding: '18px 24px', borderBottom: `1px solid ${theme.colors.border}` }}>
               <div style={{ fontSize: 16, fontWeight: 700 }}>Create & Send Invoices</div>
               <div style={{ fontSize: 12, color: theme.colors.textMuted, marginTop: 2 }}>
-                {selCount} selected row{selCount !== 1 ? 's' : ''} &middot; ${selectionTotal.toFixed(2)} total
+                {selCount} {invoiceMode === 'storage' ? 'storage' : 'selected'} row{selCount !== 1 ? 's' : ''} &middot; ${selectionTotal.toFixed(2)} total
               </div>
+              {invoiceMode === 'storage' && (
+                <div style={{ marginTop: 8, padding: '6px 10px', background: '#FFFBEB', border: '1px solid #FDE68A', borderRadius: 6, fontSize: 11, color: '#92400E' }}>
+                  Storage rows will be committed to each client&apos;s ledger and invoiced in one step.
+                </div>
+              )}
             </div>
             <div style={{ padding: '18px 24px', flex: 1, overflowY: 'auto', minHeight: 0 }}>
               {!invoiceResults && !invoiceLoading && (() => {
@@ -3011,7 +3130,30 @@ export function Billing() {
               )}
             </div>
             <div style={{ padding: '14px 24px', borderTop: `1px solid ${theme.colors.border}`, display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
-              <button onClick={() => { setShowInvoiceModal(false); setInvoiceResults(null); setInvoiceError(''); if (invoiceResults?.some(r => r.success)) { loadReport(); setRowSel({}); setInvoicedRowSel({}); } }} disabled={invoiceLoading} style={{ padding: '9px 18px', fontSize: 13, fontWeight: 500, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: invoiceLoading ? 'not-allowed' : 'pointer', fontFamily: 'inherit', color: theme.colors.textSecondary }}>{invoiceResults ? 'Done' : 'Cancel'}</button>
+              <button onClick={() => {
+                const wasStorage = invoiceMode === 'storage';
+                const anySuccess = invoiceResults?.some(r => r.success);
+                setShowInvoiceModal(false);
+                setInvoiceResults(null);
+                setInvoiceError('');
+                setInvoiceMode('report');
+                if (anySuccess) {
+                  loadReport();
+                  setRowSel({});
+                  setInvoicedRowSel({});
+                  if (wasStorage) {
+                    // Storage path: those preview rows are now committed +
+                    // invoiced. Clear the preview banner so the user sees a
+                    // clean slate; the Storage tab list will repopulate on
+                    // the next Preview Storage click (the Postgres
+                    // calculate_storage_charges RPC excludes already-
+                    // invoiced periods).
+                    setPreviewLoaded(false);
+                    setPreviewRows([]);
+                    setCommitResult(null);
+                  }
+                }
+              }} disabled={invoiceLoading} style={{ padding: '9px 18px', fontSize: 13, fontWeight: 500, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: invoiceLoading ? 'not-allowed' : 'pointer', fontFamily: 'inherit', color: theme.colors.textSecondary }}>{invoiceResults ? 'Done' : 'Cancel'}</button>
               {!invoiceResults && (
                 <WriteButton
                   label={invoiceLoading ? 'Creating...' : `Create ${(() => { const s = resolveSelectedRows(); const g: Record<string, boolean> = {}; s.forEach(r => { g[invoiceGroupKey(r)] = true; }); return Object.keys(g).length; })()} Invoice${selCount > 0 ? 's' : ''}`}
