@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.188.0 — 2026-05-05 PST — Bulk-void affordance for Unbilled Billing_Ledger rows. Pre-v38.188 the only ways to remove an Unbilled row from the Report were (a) invoice it (and then voidInvoice the whole invoice) or (b) edit the sheet by hand — the per-row Void button only existed for already-voided MANUAL- rows. Operators couldn't undo a mistakenly-committed RCVG/WC/task addon without contaminating an invoice they'd then need to issue and void. New action `voidUnbilledRows` + handleVoidUnbilledRows_(clientSheetId, payload) accepts a `{ledgerRowIds[], reason?}` shape, reads the client's Billing_Ledger once via bulk getValues, indexes by Ledger Row ID, and for each requested ID flips Status from "Unbilled" → "Void" and stamps "Voided: <reason>" (or "Voided <date>") into Item Notes. Strict guard: only "Unbilled" rows are accepted — Invoiced/Billed rows are surfaced in `rejected[]` with their currentStatus so the React UI can warn the operator about selection drift; already-Voided rows are silently skipped; missing IDs go to `skippedNotFound`. Router wraps the call in withStaffGuard_ + withClientIsolation_, calls api_fullClientSync_(.., ['billing']) so Supabase realtime drops the rows from the React Billing list within ~1-2s, writes one audit log entry per call (capped at 50 IDs in the payload). React side: new postVoidUnbilledRows() + Billing.tsx "Void Selected" button (red, only enabled when ≥1 Unbilled row is selected) + confirmation modal with optional reason input. The modal groups the selection by sourceSheetId and fans out one server call per tenant — operators can void rows across multiple clients in one click.
+   StrideAPI.gs — v38.189.0 — 2026-05-05 PST — Two transfer-flow fixes that together close the lost-revenue gap on transferred items. (1) Bulk inventory sync was silently dropping 5 fields on every fullClientSync: shipment_photos_url, inspection_photos_url, repair_photos_url, invoice_url, transfer_date. The single-item resync path at line 5654 always passed them; the bulk loop at line 6237 didn't. sbInventoryRow_ falls back to "" when fields are undefined, so each sync wiped the destination column. Confirmed via SQL: 0 of 5,658 inventory rows had any of the five populated, including all 31 confirmed-transferred items (transfer_date blank everywhere). Without transfer_date populated, handleGenerateStorageCharges_ couldn't do its source/destination cutover split — source rows skipped entirely, destination treated like a fresh receive with full free-days credit, both sides under-billed. Fix: pass all five fields in the bulk-sync sbInventoryRow_ payload. (2) New storage backfill block in handleTransferItems_ between the billing void/copy and tasks sections. For each transferred item, generate Unbilled STOR rows on the DESTINATION ledger covering receive_date → transfer_date - 1, applying destination's free_storage_days and storage discount. Rate = class cuFt × XL rate × destination discount, same formula handleGenerateStorageCharges_ uses. Dedup against any STOR rows on either source or destination ledger that are already Invoiced/Billed (Void rows don't count — payment never happened so days are still owed). Independent of the Transfer Date sheet-write fix above: uses the local `transferDate` variable, not the sheet cell. Distinct Ledger Row ID prefix `STOR-TRANSFER-{itemId}-{startISO}-{endISO}` lets monthly storage-gen recognize and skip these rows during its delete-and-rebuild loop. New admin entry runBackfillTransferStorageCharges walks every active CB client, pulls all transfer-destination rows from Supabase via inventory.transferred_at, and runs the same backfill logic for items that transferred before this PR shipped. Idempotent — checks for existing STOR-TRANSFER-* rows on the destination ledger and skips items already backfilled. Run once from the Apps Script editor after deploy.
+   v38.188.0 — 2026-05-05 PST — Bulk-void affordance for Unbilled Billing_Ledger rows. Pre-v38.188 the only ways to remove an Unbilled row from the Report were (a) invoice it (and then voidInvoice the whole invoice) or (b) edit the sheet by hand — the per-row Void button only existed for already-voided MANUAL- rows. Operators couldn't undo a mistakenly-committed RCVG/WC/task addon without contaminating an invoice they'd then need to issue and void. New action `voidUnbilledRows` + handleVoidUnbilledRows_(clientSheetId, payload) accepts a `{ledgerRowIds[], reason?}` shape, reads the client's Billing_Ledger once via bulk getValues, indexes by Ledger Row ID, and for each requested ID flips Status from "Unbilled" → "Void" and stamps "Voided: <reason>" (or "Voided <date>") into Item Notes. Strict guard: only "Unbilled" rows are accepted — Invoiced/Billed rows are surfaced in `rejected[]` with their currentStatus so the React UI can warn the operator about selection drift; already-Voided rows are silently skipped; missing IDs go to `skippedNotFound`. Router wraps the call in withStaffGuard_ + withClientIsolation_, calls api_fullClientSync_(.., ['billing']) so Supabase realtime drops the rows from the React Billing list within ~1-2s, writes one audit log entry per call (capped at 50 IDs in the payload). React side: new postVoidUnbilledRows() + Billing.tsx "Void Selected" button (red, only enabled when ≥1 Unbilled row is selected) + confirmation modal with optional reason input. The modal groups the selection by sourceSheetId and fans out one server call per tenant — operators can void rows across multiple clients in one click.
    v38.187.0 — 2026-05-05 PST — Stax-side dates ISO yyyy-MM-dd everywhere. Justin caught the Charge Queue Scheduled column rendering blank again — same symptom as v38.171.0 even though that commit fixed read-side normalization. Root cause: api_qbCalcDueDate_/api_qbFmtDate_ produce MM/dd/yyyy because the IIF file format requires it, and handleQbExport_ + handleImportIIF_ wrote the same MM/dd/yyyy string straight into the Stax Invoices SHEET cells AND the Supabase mirror. `<input type="date">` strictly requires yyyy-MM-dd; both "2026-05-10 00:00:00" (timestamp from Sheets-style serialization) AND "05/20/2026" (US format from QB) silently render empty AND poison the React onBlur equality guard so saves look like they revert. Mixed corpus in Supabase confirmed via direct SELECT: INV-000099 had due_date="2026-05-10 00:00:00", INV-001010 had due_date="2026-05-20" + scheduled_date="05/20/2026". Two-sided fix. (1) Backend: new api_isoDate_(v) helper coerces Date objects, ISO timestamps, and US-format strings to yyyy-MM-dd. handleQbExport_'s INSERT + UPDATE-PENDING branches now run sInv.invDate / sInv.dueDate through it before every Stax-sheet setValue + every Supabase mirror push. handleImportIIF_'s same two branches pass inv.date / inv.dueDate through it. handleUpdateStaxInvoice_'s payload.dueDate + payload.scheduledDate run through it too (no-op on already-ISO React input, defensive against legacy clients). The IIF FILE OUTPUT stays MM/dd/yyyy — only Stax-side persistence is touched. (2) Frontend: fetchStaxInvoicesFromSupabase + fetchStaxExceptionsFromSupabase normalize due_date / scheduled_date via a shared isoDateOnly() at read time, so any pre-fix dirty rows in Supabase still render correctly until a one-time UPDATE cleans them up.
    v38.186.0 — 2026-05-04 PST — Multi-key clientInfoMap in handleQbExport_ so per-invoice auto_charge inherits correctly when a client's QB Customer Name differs from their Client Name. Justin caught Allison Lind Design's INV-000139/140 had auto_charge=true but client.auto_charge=false; the v38.178.0 inheritance code looked up clientInfoMap[sInv.qbName] but the map was keyed only on Client Name ("Allison Lind Design"), and qbName was actually QB Customer Name ("Allison Lind Interiors"), so the lookup missed → sClientInfo was {} → the per-invoice flag fell back to the v38.21.0 hard-coded true even though the client setting was false. Map is now keyed by all three name variants (Client Name + QB Customer Name + Stax Customer Name) pointing at the same record — same pattern stax_buildClientStaxMap_ has used for months. The 2 stuck rows from before this fix were backfilled via direct SQL (UPDATE stax_invoices SET auto_charge = clients.auto_charge WHERE PENDING/CREATED AND the values diverge).
    v38.185.0 — 2026-05-04 PST — Code-review follow-ups for the v38.182-184 billing perf series. (1) rollbackByInvoiceNo_ on Consolidated_Ledger now groups consecutive descending row numbers into one deleteRows(start, count) per run, replacing the per-row deleteRows loop that did N+1 round-trips. A 100-row contiguous rollback was ~10s of GAS round-trips (close to the 15s rbLock timeout); grouped form is one call. Fragmented rollbacks (rare — only when concurrent appends interleaved) typically collapse to <5 calls. The descending iteration order is preserved so deletes only shift rows above our remaining work. Companion React change in same v38.185 series: Billing.tsx adds a useRef-backed synchronous submit gate to close the rapid-double-click window where two clicks in the same React tick (≤16ms) would both pass the React-state-based billingBatch.active guard and spawn two parallel batches with overlapping invoicingLedgerIds.
@@ -6242,6 +6243,18 @@ function api_fullClientSync_(tenantId, entityTypes) {
                 shipmentNumber: invRows[i]["Shipment #"], carrier: invRows[i]["Carrier"],
                 trackingNumber: invRows[i]["Tracking #"], itemNotes: invRows[i]["Item Notes"],
                 reference: invRows[i]["Reference"], taskNotes: invRows[i]["Task Notes"],
+                // v38.189.0 — These five fields were silently being blanked on every
+                // bulk sync because this loop forgot to pass them. sbInventoryRow_
+                // expects them and falls back to "" when undefined, so each
+                // fullClientSync wiped them. Confirmed via SQL: 0 of 5,658 inventory
+                // rows had any of the five populated, including 31 confirmed-transferred
+                // items (transfer_date blank everywhere). Single-item sync path at
+                // line 5654 always passed them — this bulk path is the gap.
+                shipmentPhotosUrl:   invRows[i]["Shipment Photos URL"],
+                inspectionPhotosUrl: invRows[i]["Inspection Photos URL"],
+                repairPhotosUrl:     invRows[i]["Repair Photos URL"],
+                invoiceUrl:          invRows[i]["Invoice URL"],
+                transferDate:        formatDate_(invRows[i]["Transfer Date"]),
                 // Phase B coverage fields — graceful when columns missing
                 declaredValue: invRows[i]["Declared Value"],
                 coverageOptionId: invRows[i]["Coverage Option"],
@@ -19892,6 +19905,197 @@ function handleTransferItems_(sourceClientSheetId, payload) {
     warnings.push("Billing_Ledger sheets not found on source or destination — billing rows not transferred");
   }
 
+  // ── 2.5 STORAGE BACKFILL — bill destination for the holding period ─────────
+  //
+  // Scenario this exists for: items arrive under "Needs ID Holding" (or the wrong
+  // account) at the start of one billing month and don't get attributed to the
+  // real customer until the next month. The monthly storage-gen run won't catch
+  // those days because (a) the holding account has very high free-storage-days
+  // and never bills, and (b) post-transfer the source-side cutover is still
+  // attributed to the (non-paying) holding account. So the entire holding
+  // window is lost revenue unless an operator manually creates one-off rows.
+  //
+  // Solution: at transfer time, generate Unbilled STOR rows on the DESTINATION
+  // covering receive_date → transfer_date - 1, applying destination's free days
+  // and storage discount. Dedup against periods already PAID (Invoiced/Billed)
+  // on either source or destination — voided periods are fair game because
+  // payment never happened.
+  //
+  // Independent of the Transfer Date sheet-write fix above: we use the local
+  // `transferDate` variable, not the sheet cell, so this works even when the
+  // bulk sync's old field omission left transfer_date empty in Supabase.
+  var storageBackfillRows = 0;
+  if (destBilling) {
+    try {
+      var destSettingsForStor = destSettings; // alias, already loaded above
+      var destFreeDays = Number(destSettingsForStor["FREE_STORAGE_DAYS"] || 0) || 0;
+      var destClassVols = api_loadClassVolumes_(destSS);
+
+      var sbInvHdr = api_getHeaderMap_(srcInv);
+      var sbInvItem  = sbInvHdr["Item ID"];
+      var sbInvRecv  = sbInvHdr["Receive Date"];
+      var sbInvClass = sbInvHdr["Class"];
+      var sbInvDesc  = sbInvHdr["Description"];
+      var sbInvShip  = sbInvHdr["Shipment #"];
+
+      var destBlMap2 = api_getHeaderMap_(destBilling);
+      var srcBlMap2  = api_getHeaderMap_(srcBilling);
+
+      // Collect already-PAID STOR ranges per item across both ledgers.
+      // Format mirrors the dedup logic in handleGenerateStorageCharges_:
+      // Map itemId → [{ start: Date, end: Date }]. Only Invoiced/Billed rows
+      // count — Void rows were never paid so we can re-bill those days.
+      var paidRangesByItem = {};
+      function _collectPaid(blSheet, blMap) {
+        if (!blSheet) return;
+        var iCol = blMap["Item ID"];
+        var sCol = blMap["Status"];
+        var svcCol = blMap["Svc Code"];
+        var taskCol = blMap["Task ID"];
+        if (!iCol || !sCol || !svcCol) return;
+        var lr = api_getLastDataRow_(blSheet);
+        if (lr < 2) return;
+        var data = blSheet.getRange(2, 1, lr - 1, blSheet.getLastColumn()).getValues();
+        for (var pi = 0; pi < data.length; pi++) {
+          var pSvc = String(data[pi][svcCol - 1] || "").trim().toUpperCase();
+          if (pSvc !== "STOR") continue;
+          var pStatus = String(data[pi][sCol - 1] || "").trim().toLowerCase();
+          if (pStatus !== "invoiced" && pStatus !== "billed") continue;
+          var pItem = String(data[pi][iCol - 1] || "").trim();
+          if (!pItem || itemIds.indexOf(pItem) === -1) continue;
+          if (!taskCol) continue;
+          var pTask = String(data[pi][taskCol - 1] || "").trim();
+          // Task ID format: STOR-{itemId}-{yyyy-mm-dd}-{yyyy-mm-dd}
+          var afterPrefix = pTask.substring(("STOR-" + pItem + "-").length);
+          var parts = afterPrefix.split("-");
+          if (parts.length < 6) continue;
+          var pStart = api_normalizeDateToMidnight_(parts[0] + "-" + parts[1] + "-" + parts[2]);
+          var pEnd   = api_normalizeDateToMidnight_(parts[3] + "-" + parts[4] + "-" + parts[5]);
+          if (!pStart || !pEnd) continue;
+          if (!paidRangesByItem[pItem]) paidRangesByItem[pItem] = [];
+          paidRangesByItem[pItem].push({ start: pStart, end: pEnd });
+        }
+      }
+      _collectPaid(srcBilling, srcBlMap2);
+      _collectPaid(destBilling, destBlMap2);
+
+      // Reload source inventory data fresh — the rows we marked Transferred
+      // above might have stale getValues snapshots.
+      var sbDestBlHeaders = destBilling.getRange(1, 1, 1, destBilling.getLastColumn()).getValues()[0];
+      var sbDestBlWidth = sbDestBlHeaders.length;
+      var sbDestBlMap = destBlMap2;
+      var sbCutoff = api_addDays_(transferDate, -1); // last day to bill on holding side
+
+      var sbAppendRows = [];
+      for (var sbI = 0; sbI < rowsToCopy.length; sbI++) {
+        var sbInvRow = rowsToCopy[sbI];
+        var sbItemId = sbInvItem ? String(sbInvRow[sbInvItem - 1] || "").trim() : "";
+        if (!sbItemId) continue;
+        var sbRecv = sbInvRecv ? api_normalizeDateToMidnight_(sbInvRow[sbInvRecv - 1]) : null;
+        if (!sbRecv) continue;
+        if (sbRecv.getTime() > sbCutoff.getTime()) continue; // received same day as transfer or later — nothing to backfill
+        var sbClass = sbInvClass ? String(sbInvRow[sbInvClass - 1] || "").trim().toUpperCase() : "";
+        if (!sbClass) continue;
+        var sbDesc  = sbInvDesc ? String(sbInvRow[sbInvDesc - 1] || "").trim() : "";
+        var sbShip  = sbInvShip ? String(sbInvRow[sbInvShip - 1] || "").trim() : "";
+
+        // Apply destination's free days from receive_date — held days inside
+        // the free window are not billable.
+        var sbBillableStart = api_addDays_(sbRecv, destFreeDays);
+        if (sbBillableStart.getTime() > sbCutoff.getTime()) continue;
+
+        // Subtract paid periods. Same algorithm as handleGenerateStorageCharges_.
+        var sbPeriods = [{ start: sbBillableStart, end: sbCutoff }];
+        var paid = paidRangesByItem[sbItemId];
+        if (paid && paid.length) {
+          for (var paidIdx = 0; paidIdx < paid.length; paidIdx++) {
+            var pRange = paid[paidIdx];
+            var nextPeriods = [];
+            for (var pIdx = 0; pIdx < sbPeriods.length; pIdx++) {
+              var per = sbPeriods[pIdx];
+              if (pRange.end.getTime() < per.start.getTime() || pRange.start.getTime() > per.end.getTime()) {
+                nextPeriods.push(per); // no overlap
+              } else {
+                if (per.start.getTime() < pRange.start.getTime()) {
+                  nextPeriods.push({ start: per.start, end: api_addDays_(pRange.start, -1) });
+                }
+                if (per.end.getTime() > pRange.end.getTime()) {
+                  nextPeriods.push({ start: api_addDays_(pRange.end, 1), end: per.end });
+                }
+              }
+            }
+            sbPeriods = nextPeriods;
+          }
+        }
+        if (!sbPeriods.length) continue; // fully paid already
+
+        // Look up STOR rate for the class. Mirrors handleGenerateStorageCharges_.
+        var sbRateInfo = api_lookupRate_(destSS, "STOR", sbClass, {
+          itemId: sbItemId, clientName: destClientName, tenantId: destId,
+          eventSource: "transfer_storage_backfill"
+        });
+        var sbBaseRate = sbRateInfo.rate || 0;
+        var sbCubic = Number(destClassVols[sbClass] || 0) || 0;
+        var sbRawRate = sbBaseRate * sbCubic;
+        if (sbRawRate <= 0) {
+          warnings.push("STOR backfill skipped for " + sbItemId + " — no rate for class " + sbClass);
+          continue;
+        }
+        var sbRate = api_applyDiscount_(destSettings, sbRawRate, "Storage Charges");
+        sbRate = Math.round(sbRate * 100) / 100;
+
+        for (var sbP = 0; sbP < sbPeriods.length; sbP++) {
+          var sbPer = sbPeriods[sbP];
+          var sbDays = api_dateDiffDaysInclusive_(sbPer.start, sbPer.end);
+          if (sbDays <= 0) continue;
+          var sbTotal = Math.round(sbRate * sbDays * 100) / 100;
+          var sbTaskIdValue = api_buildStorTaskId_(sbItemId, sbPer.start, sbPer.end);
+          // Use a TRANSFER-distinct Ledger Row ID so monthly storage-gen's
+          // delete-and-rebuild loop (which only looks at unbilled STOR rows
+          // matching its own task IDs) won't clobber these. The Task ID still
+          // uses the canonical STOR-{itemId}-{start}-{end} so dedup against
+          // paid ranges keeps working on subsequent transfers.
+          var sbLedgerId = "STOR-TRANSFER-" + sbItemId + "-" +
+            Utilities.formatDate(sbPer.start, tz, "yyyyMMdd") + "-" +
+            Utilities.formatDate(sbPer.end,   tz, "yyyyMMdd");
+          var sbNotes = "Storage backfill on transfer (held by " + sourceClientName + " " +
+            api_formatMMDDYY_(sbPer.start) + " to " + api_formatMMDDYY_(sbPer.end) +
+            ", " + sbDays + " day(s))";
+
+          var sbRow = new Array(sbDestBlWidth).fill("");
+          if (sbDestBlMap["Status"])      sbRow[sbDestBlMap["Status"] - 1]      = "Unbilled";
+          if (sbDestBlMap["Invoice #"])   sbRow[sbDestBlMap["Invoice #"] - 1]   = "";
+          if (sbDestBlMap["Client"])      sbRow[sbDestBlMap["Client"] - 1]      = destClientName;
+          if (sbDestBlMap["Date"])        sbRow[sbDestBlMap["Date"] - 1]        = sbPer.end;
+          if (sbDestBlMap["Svc Code"])    sbRow[sbDestBlMap["Svc Code"] - 1]    = "STOR";
+          if (sbDestBlMap["Svc Name"])    sbRow[sbDestBlMap["Svc Name"] - 1]    = "Storage";
+          if (sbDestBlMap["Item ID"])     sbRow[sbDestBlMap["Item ID"] - 1]     = sbItemId;
+          if (sbDestBlMap["Description"]) sbRow[sbDestBlMap["Description"] - 1] = sbDesc;
+          if (sbDestBlMap["Class"])       sbRow[sbDestBlMap["Class"] - 1]       = sbClass;
+          if (sbDestBlMap["Qty"])         sbRow[sbDestBlMap["Qty"] - 1]         = sbDays;
+          if (sbDestBlMap["Rate"])        sbRow[sbDestBlMap["Rate"] - 1]        = sbRate;
+          if (sbDestBlMap["Total"])       sbRow[sbDestBlMap["Total"] - 1]       = sbTotal;
+          if (sbDestBlMap["Task ID"])     sbRow[sbDestBlMap["Task ID"] - 1]     = sbTaskIdValue;
+          if (sbDestBlMap["Shipment #"])  sbRow[sbDestBlMap["Shipment #"] - 1]  = sbShip;
+          var sbNotesCol = sbDestBlMap["Item Notes"] !== undefined ? sbDestBlMap["Item Notes"] : sbDestBlMap["Notes"];
+          if (sbNotesCol)                 sbRow[sbNotesCol - 1] = sbNotes;
+          var sbLrCol = sbDestBlMap["Ledger Row ID"] !== undefined ? sbDestBlMap["Ledger Row ID"] : sbDestBlMap["Ledger Entry ID"];
+          if (sbLrCol)                    sbRow[sbLrCol - 1] = sbLedgerId;
+
+          sbAppendRows.push(sbRow);
+        }
+      }
+
+      if (sbAppendRows.length) {
+        var sbDestLast = api_getLastDataRow_(destBilling);
+        destBilling.getRange(sbDestLast + 1, 1, sbAppendRows.length, sbDestBlWidth).setValues(sbAppendRows);
+        storageBackfillRows = sbAppendRows.length;
+      }
+    } catch (sbErr) {
+      warnings.push("Storage backfill on transfer failed (non-fatal): " + sbErr);
+    }
+  }
+
   // ── 3. TASKS (Active only) ────────────────────────────────────────────────
   var srcTasks  = srcSS.getSheetByName("Tasks");
   var destTasks = destSS.getSheetByName("Tasks");
@@ -20064,6 +20268,7 @@ function handleTransferItems_(sourceClientSheetId, payload) {
     copiedItems:       rowsToCopy.length,
     voidedLedgerRows:  voidedLedgerRows,
     createdLedgerRows: createdLedgerRows,
+    storageBackfillRows: storageBackfillRows,
     tasksTransferred:  tasksTransferred,
     repairsTransferred: repairsTransferred,
     emailSent:         emailSent,
@@ -40838,4 +41043,256 @@ function runPullBillingContactsFromQbo() {
              ", not-found-in-qbo=" + stats.notFoundInQbo +
              ", skipped=" + stats.skipped +
              ", errors=" + stats.errors);
+}
+
+/**
+ * v38.189.0 — Backfill missing storage charges for items that were already
+ * transferred before transfer-time storage backfill shipped.
+ *
+ * Walks every active client in CB Clients (these are the potential DESTINATION
+ * tenants). For each, scans Inventory for rows where transferred_from_tenant_id
+ * is set in Supabase (i.e. they're a transfer destination), then runs the same
+ * receive_date → transfer_date - 1 backfill logic that handleTransferItems_
+ * now does inline. Idempotent — checks for existing STOR-TRANSFER-* rows on
+ * the destination ledger and skips items already backfilled. Run once from
+ * the Apps Script editor after deploy. Read source-side info from CB so we
+ * can resolve sourceClientName + receive dates.
+ *
+ * Skip cases:
+ *   - Item has no Receive Date or Class on its (destination) Inventory row
+ *   - Storage rate lookup returns 0 for the class
+ *   - All days fall inside destination's free-storage window
+ *   - Period already covered by an Invoiced/Billed STOR row on either ledger
+ *   - A STOR-TRANSFER-{itemId}-... row already exists on destination ledger
+ *
+ * Run from the Apps Script editor: Run → runBackfillTransferStorageCharges
+ */
+function runBackfillTransferStorageCharges() {
+  var startedAt = new Date();
+  Logger.log("runBackfillTransferStorageCharges starting at " + startedAt.toISOString());
+
+  var url = prop_("SUPABASE_URL");
+  var key = prop_("SUPABASE_SERVICE_ROLE_KEY");
+  if (!url || !key) { Logger.log("Supabase config missing"); return; }
+
+  // Pull every transfer-destination row from Supabase. transferred_at is the
+  // canonical signal — it's only set on rows that came in via transferItems.
+  var sbResp = UrlFetchApp.fetch(
+    url + "/rest/v1/inventory?select=tenant_id,item_id,transferred_from_tenant_id,transferred_at,receive_date,item_class,description,shipment_number,status&transferred_at=not.is.null",
+    {
+      method: "get",
+      headers: {
+        apikey: key,
+        Authorization: "Bearer " + key
+      },
+      muteHttpExceptions: true
+    }
+  );
+  if (sbResp.getResponseCode() !== 200) {
+    Logger.log("Supabase select failed: " + sbResp.getResponseCode() + " " + sbResp.getContentText());
+    return;
+  }
+  var transferredRows;
+  try { transferredRows = JSON.parse(sbResp.getContentText()); }
+  catch (e) { Logger.log("Supabase response not JSON: " + e); return; }
+  Logger.log("Found " + transferredRows.length + " destination-side transferred rows in Supabase");
+
+  // Build CB client name + spreadsheet ID lookup.
+  var cbId = prop_("CB_SPREADSHEET_ID");
+  if (!cbId) { Logger.log("CB_SPREADSHEET_ID not set"); return; }
+  var cbSS = SpreadsheetApp.openById(cbId);
+  var cbSheet = cbSS.getSheetByName("Clients");
+  var cbData = cbSheet.getDataRange().getValues();
+  var cbHdr = cbData[0].map(function(h) { return String(h).trim(); });
+  var cbIdCol = cbHdr.indexOf("Client Spreadsheet ID");
+  var cbNameCol = cbHdr.indexOf("Client Name");
+  var cbActiveCol = cbHdr.indexOf("Active");
+  var clientByTenant = {};
+  for (var ci = 1; ci < cbData.length; ci++) {
+    var sid = String(cbData[ci][cbIdCol] || "").trim();
+    if (!sid) continue;
+    clientByTenant[sid] = {
+      name: String(cbData[ci][cbNameCol] || "").trim(),
+      active: !(cbData[ci][cbActiveCol] === false || cbData[ci][cbActiveCol] === "FALSE" || cbData[ci][cbActiveCol] === "No")
+    };
+  }
+
+  // Group transferred rows by destination tenant for one-pass-per-tenant work.
+  var byDest = {};
+  for (var ti = 0; ti < transferredRows.length; ti++) {
+    var row = transferredRows[ti];
+    if (!row.transferred_from_tenant_id) continue; // need both sides
+    var dt = row.tenant_id;
+    if (!byDest[dt]) byDest[dt] = [];
+    byDest[dt].push(row);
+  }
+
+  var totalCreated = 0;
+  var totalSkipped = 0;
+  var perDest = [];
+
+  for (var destTenantId in byDest) {
+    if (!Object.prototype.hasOwnProperty.call(byDest, destTenantId)) continue;
+    var destInfo = clientByTenant[destTenantId];
+    if (!destInfo || !destInfo.active) {
+      Logger.log("  skip dest " + destTenantId + " — not active");
+      continue;
+    }
+    var items = byDest[destTenantId];
+    Logger.log("Dest " + destInfo.name + " (" + destTenantId + "): " + items.length + " items to consider");
+
+    var destSS;
+    try { destSS = SpreadsheetApp.openById(destTenantId); }
+    catch (e) { Logger.log("  cannot open dest sheet: " + e); continue; }
+    var destBilling = destSS.getSheetByName("Billing_Ledger");
+    if (!destBilling) { Logger.log("  no Billing_Ledger on dest"); continue; }
+    var destSettings = api_readSettings_(destSS);
+    var destFreeDays = Number(destSettings["FREE_STORAGE_DAYS"] || 0) || 0;
+    var destClassVols = api_loadClassVolumes_(destSS);
+    var destBlMap = api_getHeaderMap_(destBilling);
+    var destBlHeaders = destBilling.getRange(1, 1, 1, destBilling.getLastColumn()).getValues()[0];
+    var destBlWidth = destBlHeaders.length;
+
+    // Pre-scan destination ledger for existing STOR-TRANSFER-* rows (for idempotency)
+    // and for any Invoiced/Billed STOR ranges to dedup against.
+    var alreadyBackfilledByItem = {};
+    var paidRangesByItem = {};
+    var lrIdCol = destBlMap["Ledger Row ID"] !== undefined ? destBlMap["Ledger Row ID"] : destBlMap["Ledger Entry ID"];
+    var iCol = destBlMap["Item ID"];
+    var sCol = destBlMap["Status"];
+    var svcCol = destBlMap["Svc Code"];
+    var taskCol = destBlMap["Task ID"];
+    if (iCol && sCol && svcCol) {
+      var lr = api_getLastDataRow_(destBilling);
+      if (lr >= 2) {
+        var blData = destBilling.getRange(2, 1, lr - 1, destBilling.getLastColumn()).getValues();
+        for (var bi = 0; bi < blData.length; bi++) {
+          var bSvc = String(blData[bi][svcCol - 1] || "").trim().toUpperCase();
+          if (bSvc !== "STOR") continue;
+          var bItem = String(blData[bi][iCol - 1] || "").trim();
+          if (!bItem) continue;
+          var bLrid = lrIdCol ? String(blData[bi][lrIdCol - 1] || "").trim() : "";
+          if (bLrid.indexOf("STOR-TRANSFER-" + bItem) === 0) {
+            alreadyBackfilledByItem[bItem] = true;
+          }
+          var bStatus = String(blData[bi][sCol - 1] || "").trim().toLowerCase();
+          if (bStatus === "invoiced" || bStatus === "billed") {
+            var bTask = taskCol ? String(blData[bi][taskCol - 1] || "").trim() : "";
+            var afterPrefix = bTask.substring(("STOR-" + bItem + "-").length);
+            var parts = afterPrefix.split("-");
+            if (parts.length >= 6) {
+              var pStart = api_normalizeDateToMidnight_(parts[0] + "-" + parts[1] + "-" + parts[2]);
+              var pEnd   = api_normalizeDateToMidnight_(parts[3] + "-" + parts[4] + "-" + parts[5]);
+              if (pStart && pEnd) {
+                if (!paidRangesByItem[bItem]) paidRangesByItem[bItem] = [];
+                paidRangesByItem[bItem].push({ start: pStart, end: pEnd });
+              }
+            }
+          }
+        }
+      }
+    }
+
+    var destAppendRows = [];
+    var destSkipped = 0;
+    for (var ii = 0; ii < items.length; ii++) {
+      var rec = items[ii];
+      if (alreadyBackfilledByItem[rec.item_id]) { destSkipped++; continue; }
+      var sourceInfo = clientByTenant[rec.transferred_from_tenant_id];
+      var sourceClientName = sourceInfo ? sourceInfo.name : "(unknown)";
+      var receiveDate = api_normalizeDateToMidnight_(rec.receive_date);
+      var transferDateLocal = api_normalizeDateToMidnight_(rec.transferred_at);
+      if (!receiveDate || !transferDateLocal) { destSkipped++; continue; }
+      var cutoff = api_addDays_(transferDateLocal, -1);
+      if (receiveDate.getTime() > cutoff.getTime()) { destSkipped++; continue; }
+      var billableStart = api_addDays_(receiveDate, destFreeDays);
+      if (billableStart.getTime() > cutoff.getTime()) { destSkipped++; continue; }
+
+      var periods = [{ start: billableStart, end: cutoff }];
+      var paid = paidRangesByItem[rec.item_id];
+      if (paid && paid.length) {
+        for (var paidIdx = 0; paidIdx < paid.length; paidIdx++) {
+          var pRange = paid[paidIdx];
+          var nextPeriods = [];
+          for (var pIdx = 0; pIdx < periods.length; pIdx++) {
+            var per = periods[pIdx];
+            if (pRange.end.getTime() < per.start.getTime() || pRange.start.getTime() > per.end.getTime()) {
+              nextPeriods.push(per);
+            } else {
+              if (per.start.getTime() < pRange.start.getTime()) nextPeriods.push({ start: per.start, end: api_addDays_(pRange.start, -1) });
+              if (per.end.getTime() > pRange.end.getTime())     nextPeriods.push({ start: api_addDays_(pRange.end, 1), end: per.end });
+            }
+          }
+          periods = nextPeriods;
+        }
+      }
+      if (!periods.length) { destSkipped++; continue; }
+
+      var klass = String(rec.item_class || "").trim().toUpperCase();
+      if (!klass) { destSkipped++; continue; }
+      var rateInfo = api_lookupRate_(destSS, "STOR", klass, {
+        itemId: rec.item_id, clientName: destInfo.name, tenantId: destTenantId,
+        eventSource: "transfer_storage_backfill_admin"
+      });
+      var baseRate = rateInfo.rate || 0;
+      var cubic = Number(destClassVols[klass] || 0) || 0;
+      var rawRate = baseRate * cubic;
+      if (rawRate <= 0) { destSkipped++; continue; }
+      var rate = api_applyDiscount_(destSettings, rawRate, "Storage Charges");
+      rate = Math.round(rate * 100) / 100;
+
+      var tz = destSS.getSpreadsheetTimeZone() || "America/Los_Angeles";
+      for (var pp = 0; pp < periods.length; pp++) {
+        var per2 = periods[pp];
+        var days = api_dateDiffDaysInclusive_(per2.start, per2.end);
+        if (days <= 0) continue;
+        var total = Math.round(rate * days * 100) / 100;
+        var taskIdValue = api_buildStorTaskId_(rec.item_id, per2.start, per2.end);
+        var ledgerId = "STOR-TRANSFER-" + rec.item_id + "-" +
+          Utilities.formatDate(per2.start, tz, "yyyyMMdd") + "-" +
+          Utilities.formatDate(per2.end,   tz, "yyyyMMdd");
+        var notes = "Storage backfill on transfer (held by " + sourceClientName + " " +
+          api_formatMMDDYY_(per2.start) + " to " + api_formatMMDDYY_(per2.end) +
+          ", " + days + " day(s)) [admin backfill]";
+        var rowOut = new Array(destBlWidth).fill("");
+        if (destBlMap["Status"])      rowOut[destBlMap["Status"] - 1]      = "Unbilled";
+        if (destBlMap["Client"])      rowOut[destBlMap["Client"] - 1]      = destInfo.name;
+        if (destBlMap["Date"])        rowOut[destBlMap["Date"] - 1]        = per2.end;
+        if (destBlMap["Svc Code"])    rowOut[destBlMap["Svc Code"] - 1]    = "STOR";
+        if (destBlMap["Svc Name"])    rowOut[destBlMap["Svc Name"] - 1]    = "Storage";
+        if (destBlMap["Item ID"])     rowOut[destBlMap["Item ID"] - 1]     = rec.item_id;
+        if (destBlMap["Description"]) rowOut[destBlMap["Description"] - 1] = String(rec.description || "");
+        if (destBlMap["Class"])       rowOut[destBlMap["Class"] - 1]       = klass;
+        if (destBlMap["Qty"])         rowOut[destBlMap["Qty"] - 1]         = days;
+        if (destBlMap["Rate"])        rowOut[destBlMap["Rate"] - 1]        = rate;
+        if (destBlMap["Total"])       rowOut[destBlMap["Total"] - 1]       = total;
+        if (destBlMap["Task ID"])     rowOut[destBlMap["Task ID"] - 1]     = taskIdValue;
+        if (destBlMap["Shipment #"])  rowOut[destBlMap["Shipment #"] - 1]  = String(rec.shipment_number || "");
+        var nCol = destBlMap["Item Notes"] !== undefined ? destBlMap["Item Notes"] : destBlMap["Notes"];
+        if (nCol)                     rowOut[nCol - 1] = notes;
+        if (lrIdCol)                  rowOut[lrIdCol - 1] = ledgerId;
+        destAppendRows.push(rowOut);
+      }
+    }
+
+    if (destAppendRows.length) {
+      var lastRow = api_getLastDataRow_(destBilling);
+      destBilling.getRange(lastRow + 1, 1, destAppendRows.length, destBlWidth).setValues(destAppendRows);
+      Logger.log("  appended " + destAppendRows.length + " STOR-TRANSFER row(s) to " + destInfo.name);
+      totalCreated += destAppendRows.length;
+      try { api_fullClientSync_(destTenantId, ["billing"]); } catch (e) { Logger.log("  fullClientSync failed: " + e); }
+    }
+    totalSkipped += destSkipped;
+    perDest.push({ dest: destInfo.name, created: destAppendRows.length, skipped: destSkipped });
+  }
+
+  Logger.log("=== runBackfillTransferStorageCharges complete ===");
+  Logger.log("  total rows created: " + totalCreated);
+  Logger.log("  total items skipped: " + totalSkipped);
+  Logger.log("  per-destination summary:");
+  for (var pdi = 0; pdi < perDest.length; pdi++) {
+    var pd = perDest[pdi];
+    Logger.log("    " + pd.dest + ": +" + pd.created + " row(s), " + pd.skipped + " skipped");
+  }
+  Logger.log("  elapsed: " + ((new Date().getTime() - startedAt.getTime()) / 1000).toFixed(1) + "s");
 }
