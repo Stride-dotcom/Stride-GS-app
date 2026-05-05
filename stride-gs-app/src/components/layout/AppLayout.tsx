@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { Outlet, useLocation } from 'react-router-dom';
 import { Sidebar } from './Sidebar';
 import { TopBar } from './TopBar';
+import { BillingBatchToast } from './BillingBatchToast';
 import { theme } from '../../styles/theme';
 import { useIsMobile } from '../../hooks/useIsMobile';
 import { useFailedOperations } from '../../hooks/useFailedOperations';
@@ -196,6 +197,12 @@ export function AppLayout() {
           <Outlet />
         </main>
       </div>
+      {/* App-level invoice batch toast — visible from any page so the
+          operator can kick off invoicing on Billing, navigate to
+          Inventory / Tasks, and still see "X of N created" floating in
+          the corner until the batch completes. State lives in
+          BillingBatchContext; this component just renders. */}
+      <BillingBatchToast />
     </div>
     </MessagesProvider>
   );

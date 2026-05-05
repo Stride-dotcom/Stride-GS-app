@@ -97,6 +97,47 @@ UI components: FloatingActionMenu, WriteButton, BatchGuard, ActionTooltip, Batch
 
 ---
 
+## Recent Changes (2026-05-04, background invoice batches + UX)
+
+**Goal:** Stop blocking the UI during invoice creation. The blocking modal-with-spinner pattern made multi-client batches feel like a hostage situation — operators had to sit on the Billing page for 30+ seconds. After v38.183.0's lock-scope reduction made the per-invoice path fast enough, the UX overhang was the next obvious cleanup.
+
+**What changed (React-only, no GAS / no migration):**
+
+- **New `BillingBatchContext`** (`src/contexts/BillingBatchContext.tsx`) — App-level provider that owns the in-flight batch state: progress, succeeded/failed counts, in-progress ledger row IDs, results. Lives in `main.tsx` outside the route tree, so the state survives any page unmount or remount. Methods: `startBatch`, `recordInvoice` (per-invoice progress), `finishBatch`, `dismissResults`.
+
+- **New `BillingBatchToast`** (`src/components/layout/BillingBatchToast.tsx`) — Bottom-right floating toast rendered in `AppLayout`. Shows "Creating N invoices… X/N done" while active, "✓ N invoices created" on full success (auto-dismiss after 6s), or "⚠ X of N — Y failed [View]" on partial failure with a click-through details modal. Visible from any page, so the operator can kick off an invoice batch on Billing then navigate to Inventory / Tasks and still watch the toast.
+
+- **`Billing.tsx` `handleCreateInvoices` refactored.** Sequence now:
+  1. Synchronous preflight (resolve rows, group by client+sidemark, optional storage commit, 20-invoice cap warning).
+  2. On preflight success: `billingBatch.startBatch(...)` registers the batch, `setInvoiceStartedAt(Date.now())` flips the modal body to a green "✓ Invoice batch started!" confirmation, and a `setTimeout(2000)` schedules modal auto-close.
+  3. The async `runBatchLoop` continues running. Inside the per-invoice `call`, `billingBatch.recordInvoice(...)` updates progress + drains the ledger ID from `invoicingLedgerIds` as each invoice completes.
+  4. After the loop finishes: `billingBatch.finishBatch(results)` flips `active=false` and stamps `lastResults` for the toast's completion summary.
+
+  The async chain doesn't get cancelled when Billing.tsx unmounts mid-batch — the JS runtime keeps the in-flight fetches and their `await` chains alive, and the context setters they call point at the App-level provider (which doesn't unmount). State updates that target Billing-local setters (e.g. `setReportData`) become no-ops after unmount, which is the desired behavior.
+
+- **Per-row "Invoicing…" optimistic badge.** `Billing.tsx` Status column renderer checks `billingBatch.invoicingLedgerIds.has(row.ledgerRowId)` — when true, renders an animated pulse pill instead of the real status. Once the per-invoice POST returns and `recordInvoice` removes the IDs, the badge clears and the row falls back to its real `Invoiced` status from the writeThrough mirror.
+
+- **Re-submit guard.** Submit button label flips to "Batch in progress — wait" + disabled while `billingBatch.active === true`. Avoids two concurrent batches stomping each other (overlapping optimistic hides, conflicting result UIs).
+
+- **`pulse` keyframe** added to `index.css` for the badge + Started-state confirmation icon. Distinct from the existing `stridePulse` (which scales as well as fades) — `pulse` just gently breathes opacity.
+
+**What survives:** page navigation within the app (Billing → Inventory mid-batch is fine; the toast keeps tracking, and coming back to Billing shows the live in-progress state).
+
+**What does NOT survive:** a full page refresh / browser tab close. The browser cancels in-flight fetches. Surviving that requires persisting the queue to Supabase + a background worker; out of scope here.
+
+**Files touched:**
+- `stride-gs-app/src/contexts/BillingBatchContext.tsx` (new)
+- `stride-gs-app/src/components/layout/BillingBatchToast.tsx` (new)
+- `stride-gs-app/src/main.tsx` (wrap App in `<BillingBatchProvider>`)
+- `stride-gs-app/src/components/layout/AppLayout.tsx` (render `<BillingBatchToast />`)
+- `stride-gs-app/src/pages/Billing.tsx` (handleCreateInvoices refactor + Status column badge + Submit guard)
+- `stride-gs-app/src/index.css` (pulse keyframe)
+
+**Pending user action:**
+- [ ] Smoke test: kick off a 5+ invoice batch → confirm modal closes after the green "Started!" confirmation (~2s) → verify rows show animated "Invoicing…" pill → navigate to Inventory or Tasks → toast in bottom-right keeps updating. Come back to Billing — if any rows still in flight, "Invoicing…" pills still show; if all done, rows show real Invoiced status. Toast shows "✓ 5 invoices created" and auto-dismisses after a few seconds.
+
+---
+
 ## Recent Changes (2026-05-04, commit-lock scope reduction)
 
 **Goal:** Unlock the rest of the parallelism the v38.182.0 atomic counter set up. v38.182.0 made the Master RPC race go away and let Billing.tsx restore concurrency=3, but the per-call wall-time barely budged because `handleCreateInvoice_`'s outer `LockService.getScriptLock` still wrapped the entire ~5-10s function. Concurrent calls just queued at the GAS lock instead of the Master RPC. This PR shrinks the lock to just the CB append phase and refactors the per-tenant flip for safe concurrent execution.
