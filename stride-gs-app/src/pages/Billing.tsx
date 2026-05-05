@@ -60,6 +60,7 @@ import { QBOPushButton } from '../components/billing/QBOPushButton';
 import { AddChargeModal, type ManualChargeEditTarget } from '../components/billing/AddChargeModal';
 import { useQBO } from '../hooks/useQBO';
 import { useAuth } from '../contexts/AuthContext';
+import { useBillingBatch, type BatchInvoiceResult } from '../contexts/BillingBatchContext';
 import { postVoidManualCharge, postVoidInvoice } from '../lib/api';
 import { supabase } from '../lib/supabase';
 import { entityEvents } from '../lib/entityEvents';
@@ -1370,6 +1371,14 @@ export function Billing() {
   const [invOptStax, setInvOptStax] = useState(false);
   const invOptQb = false; // QB Export removed — checkbox no longer exists
   const [invoiceLoading, setInvoiceLoading] = useState(false);
+  // v38.184.0 — When set, the modal renders the "Started!" confirmation
+  // (instead of the loading spinner) and auto-closes ~2s later. Distinct
+  // from invoiceLoading which is only true during the synchronous preflight
+  // (validation, group build, storage commit). Once preflight succeeds and
+  // the batch is registered with billingBatch, invoiceLoading flips to
+  // false and invoiceStartedAt flips to a timestamp — the modal shows the
+  // green confirmation, the bottom-right toast takes over progress display.
+  const [invoiceStartedAt, setInvoiceStartedAt] = useState<number | null>(null);
   const [invoiceBatch, setInvoiceBatch] = useState<{ state: BatchState; total: number; processed: number; succeeded: number; failed: number }>({
     state: 'idle', total: 0, processed: 0, succeeded: 0, failed: 0,
   });
@@ -1394,6 +1403,14 @@ export function Billing() {
   //     that depend on showToast / loadReport are defined further down,
   //     after those identifiers exist.
   const { user } = useAuth();
+  // v38.184.0 — Background invoice batches. Modal closes ~2s after Submit
+  // ("Started!" confirmation), the rest of the batch runs in JS-runtime
+  // background driven by the context's state setters (which stay alive
+  // even if the operator navigates to Inventory / Tasks mid-batch). The
+  // bottom-right toast (in AppLayout) reads from this context. The Status
+  // column's per-row "Invoicing…" badge reads `invoicingLedgerIds` from
+  // the same context.
+  const billingBatch = useBillingBatch();
   const canManageManualCharges = user?.role === 'admin' || user?.role === 'staff';
   const [showAddCharge, setShowAddCharge] = useState(false);
   const [editingManualCharge, setEditingManualCharge] = useState<ManualChargeEditTarget | null>(null);
@@ -1628,8 +1645,32 @@ export function Billing() {
         enableSorting: false,
       }),
       col.accessor('ledgerRowId', { header: 'Ledger ID', size: 100, cell: i => <span style={{ fontWeight: 600, fontSize: 12 }}>{i.getValue()}</span> }),
-      col.accessor('status', { header: 'Status', size: 100, filterFn: mf, cell: i => {
+      col.accessor('status', { header: 'Status', size: 110, filterFn: mf, cell: i => {
         const v = i.getValue();
+        // v38.184.0 — Optimistic "Invoicing…" badge. While a batch is in
+        // flight, rows whose ledger_row_id is in invoicingLedgerIds render
+        // an animated pill instead of their real status. Once the per-row
+        // postCreateInvoice POST returns, billingBatch.recordInvoice removes
+        // the ID from the set and the row falls back to its real status
+        // from the writeThrough mirror (which by then says "Invoiced").
+        const lid = i.row.original.ledgerRowId;
+        if (lid && billingBatch.invoicingLedgerIds.has(lid)) {
+          return (
+            <span
+              style={{
+                display: 'inline-flex', alignItems: 'center', gap: 4,
+                padding: '2px 10px', borderRadius: 12, fontSize: 11, fontWeight: 600,
+                background: '#FFFBEB', color: '#92400E', border: '1.5px solid #FDE68A',
+                whiteSpace: 'nowrap',
+                animation: 'pulse 1.5s ease-in-out infinite',
+              }}
+              title="Invoice creation in progress — flips to Invoiced on commit"
+            >
+              <Loader2 size={10} style={{ animation: 'spin 1s linear infinite' }} />
+              Invoicing…
+            </span>
+          );
+        }
         if (v === 'Preview') return <span style={{ display: 'inline-block', padding: '2px 10px', borderRadius: 12, fontSize: 11, fontWeight: 600, background: '#FFFDE7', color: '#F59E0B', border: '1.5px dashed #F59E0B', whiteSpace: 'nowrap' }}>Preview</span>;
         return <Badge t={v} c={STATUS_CFG[v]} />;
       } }),
@@ -1780,7 +1821,7 @@ export function Billing() {
         },
       }),
     ];
-  }, [isPreviewMode, isReportTab, col, updatePreviewRow, saveReportField]);
+  }, [isPreviewMode, isReportTab, col, updatePreviewRow, saveReportField, billingBatch.invoicingLedgerIds]);
 
   // ─── Report summary stats ─────────────────────────────────────────────────
   const reportTotal = useMemo(() => reportData.reduce((s, r) => s + r.total, 0), [reportData]);
@@ -2061,6 +2102,15 @@ export function Billing() {
     const selRows = resolveSelectedRows();
     if (!selRows.length) return;
 
+    // v38.184.0 — Block re-submit while a batch is already in flight.
+    // The toast in AppLayout shows the active batch's progress; another
+    // Submit click while one is running could cause overlapping optimistic
+    // hides and conflicting result UIs. Surface a clear error.
+    if (billingBatch.active) {
+      setInvoiceError('Another invoice batch is still processing — wait for it to finish (see the bottom-right progress toast).');
+      return;
+    }
+
     setInvoiceLoading(true);
     setInvoiceError('');
 
@@ -2201,6 +2251,38 @@ export function Billing() {
       }
     }
 
+    // v38.184.0 — Preflight is done. Mark the batch active in App-level
+    // context so the bottom-right toast (rendered in AppLayout) takes
+    // over progress display, transition the modal to its "Started!"
+    // confirmation state, and schedule auto-close. The remaining work in
+    // this function is async and continues running in the background even
+    // if the operator navigates away — the JS runtime keeps the in-flight
+    // fetches + their await chains alive, and the state setters that drive
+    // the toast point at billingBatch (App-level provider, doesn't unmount).
+    const allLedgerIdsForBatch: string[] = [];
+    for (const g of invokable) {
+      for (const r of g.rows) {
+        if (r.ledgerRowId) allLedgerIdsForBatch.push(r.ledgerRowId);
+      }
+    }
+    billingBatch.startBatch({
+      total: invokable.length,
+      invoicingLedgerIds: allLedgerIdsForBatch,
+    });
+    setInvoiceLoading(false);
+    setInvoiceStartedAt(Date.now());
+    setInvoiceError('');
+    // Auto-close the modal after a short confirmation window so the
+    // operator can immediately continue working. The actual batch work
+    // continues running in the background (this async function doesn't
+    // await its remaining chain from the caller's perspective — the
+    // caller already moved on; the body keeps executing on its own).
+    setTimeout(() => {
+      setShowInvoiceModal(false);
+      setInvoiceStartedAt(null);
+      setInvoiceMode('report');
+    }, 2000);
+
     // Captures inputs for the post-commit Supabase PDF generation pass
     // (session 93). Filled inside the call() closure where g.rows /
     // g.sourceSheetId are in scope; processed after syncClientBilling.
@@ -2234,9 +2316,20 @@ export function Billing() {
             skipEmail: !invOptEmail,
             deferSupabaseSync: true,  // v38.121.0 — batch sync fires once below
           } as any);
+          // v38.184.0 — record per-invoice progress in the App-level
+          // BillingBatchContext so the bottom-right toast updates live and
+          // the optimistic "Invoicing…" badge clears on the rows we own.
+          const groupLedgerIds = g.rows.map(r => r.ledgerRowId).filter(Boolean) as string[];
           if (res.data) {
             results.push({ ...res.data, client: g.client });
-            if (!res.data.success) return { ok: false, error: res.data.error || 'Server returned success=false' };
+            if (!res.data.success) {
+              billingBatch.recordInvoice({
+                ok: false,
+                ledgerRowIds: groupLedgerIds,
+                result: { client: g.client, success: false, error: res.data.error || 'Server returned success=false' },
+              });
+              return { ok: false, error: res.data.error || 'Server returned success=false' };
+            }
             // Capture data we need for the post-commit PDF pass.
             if (res.data.invoiceNo && g.sourceSheetId) {
               pdfQueue.push({
@@ -2248,14 +2341,30 @@ export function Billing() {
                 rows: g.rows,
               });
             }
+            billingBatch.recordInvoice({
+              ok: true,
+              ledgerRowIds: groupLedgerIds,
+              result: { client: g.client, success: true, invoiceNo: res.data.invoiceNo },
+            });
             return { ok: true, data: res.data };
           }
           const err = res.error || 'Unknown error';
           results.push({ success: false, client: g.client, error: err });
+          billingBatch.recordInvoice({
+            ok: false,
+            ledgerRowIds: groupLedgerIds,
+            result: { client: g.client, success: false, error: err },
+          });
           return { ok: false, error: err };
         } catch (err: unknown) {
           const msg = String(err);
           results.push({ success: false, client: g.client, error: msg });
+          const groupLedgerIdsErr = g.rows.map(r => r.ledgerRowId).filter(Boolean) as string[];
+          billingBatch.recordInvoice({
+            ok: false,
+            ledgerRowIds: groupLedgerIdsErr,
+            result: { client: g.client, success: false, error: msg },
+          });
           return { ok: false, error: msg };
         }
       },
@@ -2398,6 +2507,21 @@ export function Billing() {
     setInvoiceResults(results);
     setInvoiceLoading(false);
     refetchBilling();
+
+    // v38.184.0 — Stamp the batch as complete in App-level context. The
+    // bottom-right toast (rendered in AppLayout) reads `lastResults` and
+    // shows the success / mixed-failure summary. preflightSkipped entries
+    // are already in `results` (preflightSkipped pushed into `results` at
+    // line ~2200). billingBatch.recordInvoice was called for each invokable
+    // group inside the batch loop; finishBatch drains any stragglers in
+    // invoicingLedgerIds and flips active=false.
+    const batchResultsForCtx: BatchInvoiceResult[] = results.map(r => ({
+      client: r.client,
+      success: !!r.success,
+      invoiceNo: r.invoiceNo,
+      error: r.error,
+    }));
+    billingBatch.finishBatch(batchResultsForCtx);
 
     // Post-creation exports & QBO push (only if invoices succeeded)
     if (results.some(r => r.success) && (invOptQbo || invOptStax || invOptQb)) {
@@ -3107,10 +3231,25 @@ export function Billing() {
 
               {invoiceLoading && (
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: 20, justifyContent: 'center', color: theme.colors.textSecondary, fontSize: 13 }}>
-                  <Loader2 size={18} style={{ animation: 'spin 1s linear infinite' }} /> Creating invoices{invOptQbo ? ' & pushing to QBO' : ''}{invOptStax ? ' & sending to Payments' : ''}... This may take a few minutes for large batches.
+                  <Loader2 size={18} style={{ animation: 'spin 1s linear infinite' }} /> Preparing batch{invoiceMode === 'storage' ? ' (committing storage rows to ledgers)' : ''}…
                 </div>
               )}
-              {invoiceError && !invoiceLoading && (
+              {/* v38.184.0 — "Started!" confirmation. The modal stays open
+                  for ~2s so the operator sees a clear acknowledgement, then
+                  auto-closes; the bottom-right toast in AppLayout takes
+                  over progress display. The remaining batch work runs in
+                  the JS background and continues even if the operator
+                  navigates away. */}
+              {invoiceStartedAt !== null && !invoiceLoading && (
+                <div style={{ padding: 20, background: '#F0FDF4', border: '1px solid #BBF7D0', borderRadius: 12, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8, textAlign: 'center' }}>
+                  <CheckCircle size={28} color="#16A34A" style={{ animation: 'pulse 1.5s ease-in-out infinite' }} />
+                  <div style={{ fontSize: 14, fontWeight: 700, color: '#166534' }}>Invoice batch started!</div>
+                  <div style={{ fontSize: 12, color: '#166534', maxWidth: 380 }}>
+                    Processing in the background. You can continue working — the bottom-right toast will track progress, and the rows you selected will show <strong>Invoicing&hellip;</strong> until each invoice commits.
+                  </div>
+                </div>
+              )}
+              {invoiceError && !invoiceLoading && invoiceStartedAt === null && (
                 <div style={{ padding: 12, background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: 10, fontSize: 12, color: '#991B1B', marginBottom: 12 }}><AlertTriangle size={14} style={{ marginRight: 6 }} />{invoiceError}</div>
               )}
               {invoiceResults && !invoiceLoading && (
@@ -3158,11 +3297,15 @@ export function Billing() {
                   }
                 }
               }} disabled={invoiceLoading} style={{ padding: '9px 18px', fontSize: 13, fontWeight: 500, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: invoiceLoading ? 'not-allowed' : 'pointer', fontFamily: 'inherit', color: theme.colors.textSecondary }}>{invoiceResults ? 'Done' : 'Cancel'}</button>
-              {!invoiceResults && (
+              {!invoiceResults && invoiceStartedAt === null && (
                 <WriteButton
-                  label={invoiceLoading ? 'Creating...' : `Create ${(() => { const s = resolveSelectedRows(); const g: Record<string, boolean> = {}; s.forEach(r => { g[invoiceGroupKey(r)] = true; }); return Object.keys(g).length; })()} Invoice${selCount > 0 ? 's' : ''}`}
+                  label={invoiceLoading
+                    ? 'Preparing…'
+                    : billingBatch.active
+                      ? 'Batch in progress — wait'
+                      : `Create ${(() => { const s = resolveSelectedRows(); const g: Record<string, boolean> = {}; s.forEach(r => { g[invoiceGroupKey(r)] = true; }); return Object.keys(g).length; })()} Invoice${selCount > 0 ? 's' : ''}`}
                   variant="primary"
-                  disabled={invoiceLoading || !selCount || !apiConfigured}
+                  disabled={invoiceLoading || !selCount || !apiConfigured || billingBatch.active}
                   onClick={handleCreateInvoices}
                 />
               )}
