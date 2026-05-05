@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.185.0 — 2026-05-04 PST — Code-review follow-ups for the v38.182-184 billing perf series. (1) rollbackByInvoiceNo_ on Consolidated_Ledger now groups consecutive descending row numbers into one deleteRows(start, count) per run, replacing the per-row deleteRows loop that did N+1 round-trips. A 100-row contiguous rollback was ~10s of GAS round-trips (close to the 15s rbLock timeout); grouped form is one call. Fragmented rollbacks (rare — only when concurrent appends interleaved) typically collapse to <5 calls. The descending iteration order is preserved so deletes only shift rows above our remaining work. Companion React change in same v38.185 series: Billing.tsx adds a useRef-backed synchronous submit gate to close the rapid-double-click window where two clicks in the same React tick (≤16ms) would both pass the React-state-based billingBatch.active guard and spawn two parallel batches with overlapping invoicingLedgerIds.
+   StrideAPI.gs — v38.186.0 — 2026-05-04 PST — Multi-key clientInfoMap in handleQbExport_ so per-invoice auto_charge inherits correctly when a client's QB Customer Name differs from their Client Name. Justin caught Allison Lind Design's INV-000139/140 had auto_charge=true but client.auto_charge=false; the v38.178.0 inheritance code looked up clientInfoMap[sInv.qbName] but the map was keyed only on Client Name ("Allison Lind Design"), and qbName was actually QB Customer Name ("Allison Lind Interiors"), so the lookup missed → sClientInfo was {} → the per-invoice flag fell back to the v38.21.0 hard-coded true even though the client setting was false. Map is now keyed by all three name variants (Client Name + QB Customer Name + Stax Customer Name) pointing at the same record — same pattern stax_buildClientStaxMap_ has used for months. The 2 stuck rows from before this fix were backfilled via direct SQL (UPDATE stax_invoices SET auto_charge = clients.auto_charge WHERE PENDING/CREATED AND the values diverge).
+   v38.185.0 — 2026-05-04 PST — Code-review follow-ups for the v38.182-184 billing perf series. (1) rollbackByInvoiceNo_ on Consolidated_Ledger now groups consecutive descending row numbers into one deleteRows(start, count) per run, replacing the per-row deleteRows loop that did N+1 round-trips. A 100-row contiguous rollback was ~10s of GAS round-trips (close to the 15s rbLock timeout); grouped form is one call. Fragmented rollbacks (rare — only when concurrent appends interleaved) typically collapse to <5 calls. The descending iteration order is preserved so deletes only shift rows above our remaining work. Companion React change in same v38.185 series: Billing.tsx adds a useRef-backed synchronous submit gate to close the rapid-double-click window where two clicks in the same React tick (≤16ms) would both pass the React-state-based billingBatch.active guard and spawn two parallel batches with overlapping invoicingLedgerIds.
    v38.183.0 — 2026-05-04 PST — handleCreateInvoice_ commit-lock scope reduction. v38.182.0 made invoice numbering atomic via Postgres SEQUENCE and unblocked concurrency=3 on the React side, but the speedup was only modest (~10-30%) because the outer LockService.getScriptLock still wrapped the entire ~5-10s function — including api_markClientLedgerInvoiced_, the per-tenant client Billing_Ledger flip that's the biggest non-CB cost (1-3s per invoice). This PR shrinks the lock to just the CB append + RT writes phase (~500ms-1s), then explicitly releases via a new releaseCommitLockOnce_ helper. Client-Billing_Ledger flip now runs OUTSIDE the lock — different invoices touch different client sheets, so they don't conflict. The old position-based rollback (consolLedger.deleteRows(insertedRange.start, insertedRange.count)) is replaced by an ID-based rollbackByInvoiceNo_() that finds rows by Invoice # column value and deletes bottom-up, robust to concurrent CB appends. Email Status update gets its own brief re-lock when email actually fires (opt-in only); for the typical skipEmail=true path the CB append pre-fills "Skipped" so no post-flip update is needed. Net wall-time impact for a 5-client storage batch: previously ~30-40s with concurrency=3 + atomic counter, now ~12-18s — true 3x speedup. The Master invoice counter race is already gone (v38.182.0); this PR closes the remaining serialization bottleneck.
    v38.182.0 — 2026-05-04 PST — Atomic invoice numbering on Postgres. The Master sheet RPC's `getNextInvoiceId` action was read-then-write without a transaction lock — two concurrent createInvoice calls could grab the same number (caused the INV-000131 NIPTUCK + NORTON duplicate on 2026-05-03). v38.157.0 hardened the half-write recovery; Billing.tsx pinned the per-group invoice loop to concurrency=1 as a workaround. New `public.next_invoice_no()` Postgres function backed by `public.invoice_no_seq` SEQUENCE is atomic by design — nextval is concurrency-safe with no transient failure modes. api_nextInvoiceNo_ becomes a thin wrapper calling api_nextInvoiceNoSupabase_; the legacy rpcUrl/rpcToken params are kept for signature compatibility but ignored. Companion React change: Billing.tsx bumps concurrency from 1 back to 3 in handleCreateInvoices's runBatchLoop. Primary win: the entire INV-XXXXXX duplicate-number bug class is gone. Speedup is modest (~10-30%) because handleCreateInvoice_'s outer LockService.getScriptLock still serializes the Consolidated_Ledger commit phase — true 3x parallelism requires refactoring that lock to per-tenant scope, which is a separate follow-up. The Master RPC counter is left in place but inert (other callers like getNextShipmentNo continue to use it; only invoice numbering migrated). Sequence seeded at 1000 with 850+ headroom over the highest committed invoice (INV-000144 as of 2026-05-04). Companion migration 20260504220000_invoice_no_atomic_counter.sql.
    v38.181.0 — 2026-05-04 PST — New `setClientWebAppDeployment` action + handleSetClientWebAppDeployment_ handler. Replaces the brittle handleFinishClientSetup_ flow that calls script.googleapis.com/v1/projects/<scriptId>/versions to programmatically create Web App deployments. The runOnboardingDiagnostic added in v38.180.0 confirmed the failure mode: even after declaring `https://www.googleapis.com/auth/script.projects` in the manifest, Google's OAuth verification gate silently strips that scope from grants for unverified apps. Token gets script.deployments + 9 others but never script.projects, so projects.versions.create returns HTTP 403 ACCESS_TOKEN_SCOPE_INSUFFICIENT every time. Path A pivot: stop fighting Google's scope rules. The new handler accepts `{clientSheetId, webAppUrl}`, validates the URL shape (must match https://script.google.com/macros/s/<id>/exec), extracts the deployment ID from the path, and writes both to CB Clients via api_ensureColumn_ (self-healing case-insensitive append-if-missing). Zero Apps Script REST API calls. The React UI surfaces a guided 3-step modal: (1) deep-link button "Open Bound Script" that opens the client's spreadsheet → Extensions → Apps Script in a new tab; (2) inline instructions to Deploy → New deployment → Web App → Deploy and copy the URL; (3) paste box for the URL → Save. Operator burden is ~30 seconds per new client onboard, but the path NEVER breaks because there's no scope dance, no manifest filter, no API verification gate to trip on. handleFinishClientSetup_ stays in place for legacy compatibility but the React UI primarily uses the new path now.
@@ -20858,17 +20859,30 @@ function handleQbExport_(payload) {
     for (var cli = 1; cli < clData.length; cli++) {
       var clName = String(clData[cli][clNameIdx] || "").trim();
       if (!clName) continue;
-      clientInfoMap[clName.toUpperCase()] = {
+      var clQbName = clQbIdx !== undefined ? String(clData[cli][clQbIdx] || "").trim() : "";
+      var clStaxNm = clStaxNameIdx !== undefined ? String(clData[cli][clStaxNameIdx] || "").trim() : "";
+      var clRecord = {
         terms: clTermsIdx !== undefined ? String(clData[cli][clTermsIdx] || "").trim() : "",
-        qbCustomerName: clQbIdx !== undefined ? String(clData[cli][clQbIdx] || "").trim() : "",
+        qbCustomerName: clQbName,
         // v38.151.0 — explicit Stax-side customer name override. Used to
         // disambiguate when QB and Stax store the customer under different
         // names (e.g. "Brian Paquette Interiors" vs "Brian Paquette
         // Interiors - active"). Empty = fall back to qbCustomerName.
-        staxCustomerName: clStaxNameIdx !== undefined ? String(clData[cli][clStaxNameIdx] || "").trim() : "",
+        staxCustomerName: clStaxNm,
         separateBySidemark: clSepIdx !== undefined ? (clData[cli][clSepIdx] === true || String(clData[cli][clSepIdx]).toUpperCase() === "TRUE") : false,
         autoCharge: clAutoIdx !== undefined && (clData[cli][clAutoIdx] === true || String(clData[cli][clAutoIdx]).toUpperCase() === "TRUE")
       };
+      // v38.186.0 — multi-key the map so callers can look up by ANY of
+      // the three name variants. Allison Lind Design has Client Name
+      // "Allison Lind Design" but QB Customer Name "Allison Lind Interiors";
+      // Consolidated_Ledger writes the QB name, so a lookup keyed only on
+      // Client Name missed → sClientInfo was {} → autoCharge fell back
+      // to the v38.21.0 hard-coded true even though the client setting
+      // was false. INV-000139/140 hit this. Same pattern as
+      // stax_buildClientStaxMap_ which has been multi-keyed for months.
+      clientInfoMap[clName.toUpperCase()] = clRecord;
+      if (clQbName) clientInfoMap[clQbName.toUpperCase()] = clRecord;
+      if (clStaxNm) clientInfoMap[clStaxNm.toUpperCase()] = clRecord;
     }
   }
 
@@ -21617,17 +21631,30 @@ function handleQbExcelExport_(payload) {
     for (var cli = 1; cli < clData.length; cli++) {
       var clName = String(clData[cli][clNameIdx] || "").trim();
       if (!clName) continue;
-      clientInfoMap[clName.toUpperCase()] = {
+      var clQbName = clQbIdx !== undefined ? String(clData[cli][clQbIdx] || "").trim() : "";
+      var clStaxNm = clStaxNameIdx !== undefined ? String(clData[cli][clStaxNameIdx] || "").trim() : "";
+      var clRecord = {
         terms: clTermsIdx !== undefined ? String(clData[cli][clTermsIdx] || "").trim() : "",
-        qbCustomerName: clQbIdx !== undefined ? String(clData[cli][clQbIdx] || "").trim() : "",
+        qbCustomerName: clQbName,
         // v38.151.0 — explicit Stax-side customer name override. Used to
         // disambiguate when QB and Stax store the customer under different
         // names (e.g. "Brian Paquette Interiors" vs "Brian Paquette
         // Interiors - active"). Empty = fall back to qbCustomerName.
-        staxCustomerName: clStaxNameIdx !== undefined ? String(clData[cli][clStaxNameIdx] || "").trim() : "",
+        staxCustomerName: clStaxNm,
         separateBySidemark: clSepIdx !== undefined ? (clData[cli][clSepIdx] === true || String(clData[cli][clSepIdx]).toUpperCase() === "TRUE") : false,
         autoCharge: clAutoIdx !== undefined && (clData[cli][clAutoIdx] === true || String(clData[cli][clAutoIdx]).toUpperCase() === "TRUE")
       };
+      // v38.186.0 — multi-key the map so callers can look up by ANY of
+      // the three name variants. Allison Lind Design has Client Name
+      // "Allison Lind Design" but QB Customer Name "Allison Lind Interiors";
+      // Consolidated_Ledger writes the QB name, so a lookup keyed only on
+      // Client Name missed → sClientInfo was {} → autoCharge fell back
+      // to the v38.21.0 hard-coded true even though the client setting
+      // was false. INV-000139/140 hit this. Same pattern as
+      // stax_buildClientStaxMap_ which has been multi-keyed for months.
+      clientInfoMap[clName.toUpperCase()] = clRecord;
+      if (clQbName) clientInfoMap[clQbName.toUpperCase()] = clRecord;
+      if (clStaxNm) clientInfoMap[clStaxNm.toUpperCase()] = clRecord;
     }
   }
 

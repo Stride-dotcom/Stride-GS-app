@@ -1245,29 +1245,52 @@ export function Billing() {
         return true;
       });
 
-      const rows: BillingRow[] = filtered.map((r: StoragePreviewRow) => ({
-        ledgerRowId: r.taskId,
-        status: 'Preview',
-        invoiceNo: '',
-        client: r.clientName,
-        clientSheetId: r.tenantId,
-        clientName: r.clientName,
-        date: r.billableEnd,             // already YYYY-MM-DD from Postgres
-        svcCode: 'STOR',
-        svcName: 'Storage',
-        itemId: r.itemId,
-        description: r.description,
-        itemClass: r.itemClass,
-        qty: r.billableDays,
-        rate: r.dailyRate,
-        total: r.totalCharge,
-        taskId: r.taskId,
-        repairId: '',
-        shipmentNo: r.shipmentNo,
-        notes: r.notes,
-        sourceSheetId: r.tenantId,
-        sidemark: r.sidemark,
-      }));
+      // v38.186.0 — index apiClients by tenantId/name once so each preview
+      // row can pick up the client's `autoCharge` + `staxCustomerId` and
+      // the Client column renderer (line ~1686) can paint the Auto Pay
+      // and CC-on-file pills. Without these the storage preview shows a
+      // bare client name with no payment-method indicator, so the operator
+      // can't tell at a glance who needs to be pushed to Payments vs.
+      // billed manually with Net-N terms.
+      const clientByTenant = new Map<string, typeof apiClients[number]>();
+      const clientByName = new Map<string, typeof apiClients[number]>();
+      for (const c of apiClients) {
+        if (c.spreadsheetId) clientByTenant.set(c.spreadsheetId, c);
+        if (c.name) clientByName.set(c.name.toLowerCase(), c);
+      }
+      const rows: BillingRow[] = filtered.map((r: StoragePreviewRow) => {
+        const client = clientByTenant.get(r.tenantId)
+          || clientByName.get((r.clientName || '').toLowerCase())
+          || null;
+        return {
+          ledgerRowId: r.taskId,
+          status: 'Preview',
+          invoiceNo: '',
+          client: r.clientName,
+          clientSheetId: r.tenantId,
+          clientName: r.clientName,
+          date: r.billableEnd,             // already YYYY-MM-DD from Postgres
+          svcCode: 'STOR',
+          svcName: 'Storage',
+          itemId: r.itemId,
+          description: r.description,
+          itemClass: r.itemClass,
+          qty: r.billableDays,
+          rate: r.dailyRate,
+          total: r.totalCharge,
+          taskId: r.taskId,
+          repairId: '',
+          shipmentNo: r.shipmentNo,
+          notes: r.notes,
+          sourceSheetId: r.tenantId,
+          sidemark: r.sidemark,
+          // Plumb client-level payment-method state. The Client column
+          // renderer treats both as optional (only shows the pill when
+          // truthy), so unmatched rows degrade gracefully.
+          autoCharge: client?.autoCharge ?? false,
+          staxCustomerId: client?.staxCustomerId ?? '',
+        };
+      });
 
       setPreviewRows(rows);
       setPreviewTotalAmount(rows.reduce((s, r) => s + r.total, 0));
@@ -2544,6 +2567,17 @@ export function Billing() {
     setInvoiceResults(results);
     setInvoiceLoading(false);
     refetchBilling();
+    // v38.186.0 — `refetchBilling()` only refreshes the underlying
+    // `liveRows` from useBilling; the report table renders `reportData`,
+    // which is populated separately by `loadReport()`. Without this call
+    // the optimistic hide at line ~2219 is the ONLY thing removing
+    // invoiced rows from the visible table — and if the user clicks
+    // Refresh manually before the optimistic hide settles (or hits an
+    // error path), the rows stay visible until they hit Refresh. Calling
+    // loadReport(true) here forces a no-cache reload so the table
+    // reflects the post-invoice Status='Invoiced' rows immediately
+    // (which the default 'Unbilled' status filter will then filter out).
+    if (reportLoaded) void loadReport(true);
 
     // v38.184.0 — Stamp the batch as complete in App-level context. The
     // bottom-right toast (rendered in AppLayout) reads `lastResults` and
