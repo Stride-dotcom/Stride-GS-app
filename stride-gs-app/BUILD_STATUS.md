@@ -1,6 +1,6 @@
 # Stride GS App — Build Status
 
-> Last updated: 2026-05-04 (unified addons module). Verified against actual codebase.
+> Last updated: 2026-05-04 (multi-tenant RLS access fix). Verified against actual codebase.
 
 ---
 
@@ -10,7 +10,7 @@
 |---|---|---|
 | React app (GitHub Pages) | Latest on `origin/source` | `npm run deploy` from source |
 | StrideAPI.gs | **v38.177.0** | Polymorphic addons module — task/repair/will_call all flush via `api_writeAddonsToLedger_`. Latest in the v38.16x–v38.17x sweep on 2026-05-04. |
-| Supabase | 67+ migrations applied | `addons` table replaces empty `task_addons`; CHECK constraints + realtime enabled |
+| Supabase | 68+ migrations applied | Multi-tenant RLS access (`user_has_tenant_access` helper) — clients with multiple tenant assignments can now read entity rows + storage objects across all accessible tenants |
 | Client scripts | Rolled out to 49 active clients | Code.gs v4.6.0, Import.gs v4.3.0 |
 | StaxAutoPay.gs | v4.7.6 | Charge Log Customer/Transaction header fix |
 
@@ -94,6 +94,27 @@ UI components: FloatingActionMenu, WriteButton, BatchGuard, ActionTooltip, Batch
 - Quote Tool with PDF generation
 - Expected operations calendar
 - QR Scanner + Labels (native React, Supabase-backed)
+
+---
+
+## Recent Changes (2026-05-04, multi-tenant RLS access fix)
+
+**Bug:** A client user assigned to 3 tenants reported "Item not found" errors when clicking entity deeplinks. Root cause: every client-facing RLS policy across `inventory`, `tasks`, `repairs`, `will_calls`, `will_call_items`, `shipments`, `billing`, `claims`, `clients`, `client_insurance`, `entity_notes`, `entity_audit_log`, `documents`, `email_sends`, `item_photos`, `move_history`, `autocomplete_db`, `dt_address_book`, `dt_orders` (+ all `dt_order_*` children), `expected_shipments`, `photo_shares`, plus 4 storage policies (`documents`, `dt-pod-photos`, `invoices`, `photos` buckets) compared `tenant_id` against the JWT's single primary `clientSheetId`. The React layer correctly issued `.in('tenant_id', accessibleClientSheetIds)` for multi-tenant fetches, but RLS filtered the rows out before they reached React — so `useItemDetail` / `useTaskDetail` / etc. saw empty results and surfaced "not found." React access checks at the panel level never ran because the row never came back.
+
+**Fix:**
+
+- **Migration `multi_tenant_rls_access`** (`supabase/migrations/20260504210000_multi_tenant_rls_access.sql`): two new helper functions — `public.user_has_tenant_access(text)` for `tenant_id`-style columns and `public.user_has_tenant_access_storage(text)` for storage paths (handles the `_`→`-` substitution Supabase storage uses) — that return true if the input matches the user's primary JWT `clientSheetId` OR appears in the JWT's `accessibleClientSheetIds` array. Defaults to empty array when missing, so single-tenant users keep working with the legacy primary check. Every affected policy DROPped + CREATEd to call the helper, names preserved. Service-role + staff/admin paths unchanged.
+
+- **AuthContext.tsx:** the metadata-sync `inSync` check (cached + full-verify paths) now also compares `accessibleClientSheetIds` and `childClientSheetIds` against the JWT, and the `supabase.auth.updateUser({ data })` call writes both arrays into `user_metadata`. New `arraysEqualOrderless` helper avoids re-firing `updateUser` on every page load when GAS returns the array in a different order. Single-tenant users see no behavior change.
+
+**Why this is safe to ship without a backfill:** for client users who don't immediately log in, the new RLS helper falls back to the primary `clientSheetId` check (their JWT still works for their primary tenant). On their next login the AuthContext writes the full array into metadata and the secondary tenants light up automatically. Multi-tenant users who do log in immediately after deploy get the fix on next page-fetch.
+
+**Files touched:**
+- `stride-gs-app/supabase/migrations/20260504210000_multi_tenant_rls_access.sql` (new)
+- `stride-gs-app/src/contexts/AuthContext.tsx`
+
+**Pending user action:**
+- [ ] Smoke test: have the affected multi-tenant client log in, switch tenants in the UI, and click a deeplink to an item in their secondary/tertiary tenant — should load instead of "not found." Migration is already live (applied via MCP).
 
 ---
 

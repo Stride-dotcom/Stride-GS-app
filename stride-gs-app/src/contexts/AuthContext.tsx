@@ -93,6 +93,21 @@ export function useAuth(): AuthContextValue {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
+/**
+ * Set-style equality for two string[] (order-independent). Used by the
+ * user_metadata in-sync check so the AuthContext doesn't refire updateUser
+ * on every page load just because GAS returned the accessibleClientSheetIds
+ * array in a different order. Tiny inputs (≤ a handful of elements per user),
+ * so the O(N²) form is fine and avoids a dependency.
+ */
+function arraysEqualOrderless(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false;
+  for (const v of a) {
+    if (!b.includes(v)) return false;
+  }
+  return true;
+}
+
 function getDisplayName(email: string, fullName?: string): string {
   if (fullName && fullName.trim()) return fullName.trim();
   const local = email.split('@')[0];
@@ -208,18 +223,37 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           if (cached?.email?.toLowerCase() === email.toLowerCase() && cached?.role) {
             // Same user, valid cache — use it directly, no GAS roundtrip.
             // BUT: only mark authenticated once the Supabase JWT carries the
-            // matching role/clientSheetId in user_metadata. Otherwise the
-            // first data fetch can race a stale JWT and RLS denies (admin
-            // policy keys off `user_metadata.role`), surfacing as spurious
-            // "Task Not Found" / empty-list flashes. Cheap when already in
-            // sync (no network); ~one round-trip when it isn't.
-            const jwtMeta = (session.user.user_metadata ?? {}) as { role?: string; clientSheetId?: string };
+            // matching role/clientSheetId/accessibleClientSheetIds in
+            // user_metadata. Otherwise the first data fetch can race a stale
+            // JWT and RLS denies (admin policy keys off `user_metadata.role`,
+            // and the multi-tenant `user_has_tenant_access` helper from
+            // migration `multi_tenant_rls_access` keys off
+            // `user_metadata.accessibleClientSheetIds`), surfacing as
+            // spurious "Task Not Found" flashes — including the deeplink-
+            // not-found bug for users assigned to multiple tenants. Cheap
+            // when already in sync (no network); ~one round-trip when not.
+            const jwtMeta = (session.user.user_metadata ?? {}) as {
+              role?: string;
+              clientSheetId?: string;
+              accessibleClientSheetIds?: string[];
+              childClientSheetIds?: string[];
+            };
             const targetClientSheetId = cached.clientSheetId ?? '';
-            const inSync = jwtMeta.role === cached.role && (jwtMeta.clientSheetId ?? '') === targetClientSheetId;
+            const targetAccessible = cached.accessibleClientSheetIds ?? [];
+            const targetChildren = cached.childClientSheetIds ?? [];
+            const inSync = jwtMeta.role === cached.role
+              && (jwtMeta.clientSheetId ?? '') === targetClientSheetId
+              && arraysEqualOrderless(jwtMeta.accessibleClientSheetIds ?? [], targetAccessible)
+              && arraysEqualOrderless(jwtMeta.childClientSheetIds ?? [], targetChildren);
             if (!inSync) {
               try {
                 await supabase.auth.updateUser({
-                  data: { role: cached.role, clientSheetId: targetClientSheetId },
+                  data: {
+                    role: cached.role,
+                    clientSheetId: targetClientSheetId,
+                    accessibleClientSheetIds: targetAccessible,
+                    childClientSheetIds: targetChildren,
+                  },
                 });
               } catch { /* best-effort — fall through and authenticate anyway */ }
             }
@@ -276,17 +310,35 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // Cache resolved user for fast subsequent loads (display-only bootstrap)
       localStorage.setItem(AUTH_CACHE_KEY, JSON.stringify(user));
 
-      // Sync role + clientSheetId into Supabase user_metadata so RLS policies
-      // can grant the right access. Awaited only when the JWT is stale —
-      // otherwise the first data fetch can race a stale JWT and RLS denies
-      // (e.g. tasks_select_staff keys off `user_metadata.role`).
+      // Sync role + clientSheetId + accessibleClientSheetIds into Supabase
+      // user_metadata so RLS policies can grant the right access. Awaited
+      // only when the JWT is stale — otherwise the first data fetch can
+      // race a stale JWT and RLS denies (e.g. tasks_select_staff keys off
+      // `user_metadata.role`; the multi-tenant `user_has_tenant_access`
+      // helper from migration `multi_tenant_rls_access` keys off
+      // `user_metadata.accessibleClientSheetIds`).
       try {
-        const jwtMeta = (session.user.user_metadata ?? {}) as { role?: string; clientSheetId?: string };
+        const jwtMeta = (session.user.user_metadata ?? {}) as {
+          role?: string;
+          clientSheetId?: string;
+          accessibleClientSheetIds?: string[];
+          childClientSheetIds?: string[];
+        };
         const targetClientSheetId = user.clientSheetId ?? '';
-        const inSync = jwtMeta.role === user.role && (jwtMeta.clientSheetId ?? '') === targetClientSheetId;
+        const targetAccessible = user.accessibleClientSheetIds ?? [];
+        const targetChildren = user.childClientSheetIds ?? [];
+        const inSync = jwtMeta.role === user.role
+          && (jwtMeta.clientSheetId ?? '') === targetClientSheetId
+          && arraysEqualOrderless(jwtMeta.accessibleClientSheetIds ?? [], targetAccessible)
+          && arraysEqualOrderless(jwtMeta.childClientSheetIds ?? [], targetChildren);
         if (!inSync) {
           await supabase.auth.updateUser({
-            data: { role: user.role, clientSheetId: targetClientSheetId },
+            data: {
+              role: user.role,
+              clientSheetId: targetClientSheetId,
+              accessibleClientSheetIds: targetAccessible,
+              childClientSheetIds: targetChildren,
+            },
           });
         }
       } catch { /* best-effort */ }
