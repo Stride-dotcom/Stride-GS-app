@@ -1172,9 +1172,21 @@ export function OrderPage() {
           />
         </>
       )}
-      {order.reviewStatus === 'approved' && !order.pushedToDtAt && (
+      {/* v2026-05-04: Republish-to-DT support. Ashok confirmed DT's
+          add_order is upsert-by-identifier, so re-posting the same
+          order_number with an updated payload replaces the order in DT.
+          We surface the affordance whenever the order has been edited
+          since the last push (updated_at > pushed_to_dt_at) — operators
+          get a one-click way to propagate item add/remove + field edits.
+          The same button does first-time push when pushedToDtAt is null. */}
+      {order.reviewStatus === 'approved' && (() => {
+        const everPushed = !!order.pushedToDtAt;
+        const stale = everPushed && !!order.updatedAt && new Date(order.updatedAt).getTime() > new Date(order.pushedToDtAt!).getTime();
+        if (everPushed && !stale) return null;
+        const label = pushingDt ? 'Pushing…' : (everPushed ? 'Republish to DT' : 'Push to DT');
+        return (
         <EPFooterButton
-          label={pushingDt ? 'Pushing…' : 'Push to DT'}
+          label={label}
           variant="primary"
           onClick={async () => {
             // Reviewers can push from the detail page now (was Review
@@ -1253,7 +1265,8 @@ export function OrderPage() {
             }
           }}
         />
-      )}
+        );
+      })()}
     </>
   ) : printButton;
 
