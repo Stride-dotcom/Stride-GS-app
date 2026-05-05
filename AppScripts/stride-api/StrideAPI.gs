@@ -20858,17 +20858,30 @@ function handleQbExport_(payload) {
     for (var cli = 1; cli < clData.length; cli++) {
       var clName = String(clData[cli][clNameIdx] || "").trim();
       if (!clName) continue;
-      clientInfoMap[clName.toUpperCase()] = {
+      var clQbName = clQbIdx !== undefined ? String(clData[cli][clQbIdx] || "").trim() : "";
+      var clStaxNm = clStaxNameIdx !== undefined ? String(clData[cli][clStaxNameIdx] || "").trim() : "";
+      var clRecord = {
         terms: clTermsIdx !== undefined ? String(clData[cli][clTermsIdx] || "").trim() : "",
-        qbCustomerName: clQbIdx !== undefined ? String(clData[cli][clQbIdx] || "").trim() : "",
+        qbCustomerName: clQbName,
         // v38.151.0 — explicit Stax-side customer name override. Used to
         // disambiguate when QB and Stax store the customer under different
         // names (e.g. "Brian Paquette Interiors" vs "Brian Paquette
         // Interiors - active"). Empty = fall back to qbCustomerName.
-        staxCustomerName: clStaxNameIdx !== undefined ? String(clData[cli][clStaxNameIdx] || "").trim() : "",
+        staxCustomerName: clStaxNm,
         separateBySidemark: clSepIdx !== undefined ? (clData[cli][clSepIdx] === true || String(clData[cli][clSepIdx]).toUpperCase() === "TRUE") : false,
         autoCharge: clAutoIdx !== undefined && (clData[cli][clAutoIdx] === true || String(clData[cli][clAutoIdx]).toUpperCase() === "TRUE")
       };
+      // v38.186.0 — multi-key the map so callers can look up by ANY of
+      // the three name variants. Allison Lind Design has Client Name
+      // "Allison Lind Design" but QB Customer Name "Allison Lind Interiors";
+      // Consolidated_Ledger writes the QB name, so a lookup keyed only on
+      // Client Name missed → sClientInfo was {} → autoCharge fell back
+      // to the v38.21.0 hard-coded true even though the client setting
+      // was false. INV-000139/140 hit this. Same pattern as
+      // stax_buildClientStaxMap_ which has been multi-keyed for months.
+      clientInfoMap[clName.toUpperCase()] = clRecord;
+      if (clQbName) clientInfoMap[clQbName.toUpperCase()] = clRecord;
+      if (clStaxNm) clientInfoMap[clStaxNm.toUpperCase()] = clRecord;
     }
   }
 
@@ -21617,17 +21630,30 @@ function handleQbExcelExport_(payload) {
     for (var cli = 1; cli < clData.length; cli++) {
       var clName = String(clData[cli][clNameIdx] || "").trim();
       if (!clName) continue;
-      clientInfoMap[clName.toUpperCase()] = {
+      var clQbName = clQbIdx !== undefined ? String(clData[cli][clQbIdx] || "").trim() : "";
+      var clStaxNm = clStaxNameIdx !== undefined ? String(clData[cli][clStaxNameIdx] || "").trim() : "";
+      var clRecord = {
         terms: clTermsIdx !== undefined ? String(clData[cli][clTermsIdx] || "").trim() : "",
-        qbCustomerName: clQbIdx !== undefined ? String(clData[cli][clQbIdx] || "").trim() : "",
+        qbCustomerName: clQbName,
         // v38.151.0 — explicit Stax-side customer name override. Used to
         // disambiguate when QB and Stax store the customer under different
         // names (e.g. "Brian Paquette Interiors" vs "Brian Paquette
         // Interiors - active"). Empty = fall back to qbCustomerName.
-        staxCustomerName: clStaxNameIdx !== undefined ? String(clData[cli][clStaxNameIdx] || "").trim() : "",
+        staxCustomerName: clStaxNm,
         separateBySidemark: clSepIdx !== undefined ? (clData[cli][clSepIdx] === true || String(clData[cli][clSepIdx]).toUpperCase() === "TRUE") : false,
         autoCharge: clAutoIdx !== undefined && (clData[cli][clAutoIdx] === true || String(clData[cli][clAutoIdx]).toUpperCase() === "TRUE")
       };
+      // v38.186.0 — multi-key the map so callers can look up by ANY of
+      // the three name variants. Allison Lind Design has Client Name
+      // "Allison Lind Design" but QB Customer Name "Allison Lind Interiors";
+      // Consolidated_Ledger writes the QB name, so a lookup keyed only on
+      // Client Name missed → sClientInfo was {} → autoCharge fell back
+      // to the v38.21.0 hard-coded true even though the client setting
+      // was false. INV-000139/140 hit this. Same pattern as
+      // stax_buildClientStaxMap_ which has been multi-keyed for months.
+      clientInfoMap[clName.toUpperCase()] = clRecord;
+      if (clQbName) clientInfoMap[clQbName.toUpperCase()] = clRecord;
+      if (clStaxNm) clientInfoMap[clStaxNm.toUpperCase()] = clRecord;
     }
   }
 
