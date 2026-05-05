@@ -97,9 +97,14 @@ export function useSupabaseRealtime() {
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'claims' }, onRow('claim', 'claim_id'))
       // move_history (Phase 2) — append-only audit log for Scanner moves + transfers
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'move_history' }, onRow('move_history', 'id'))
-      // dt_orders (Phase 2) — DispatchTrack orders surfaced in Orders tab
+      // dt_orders (Phase 2) — DispatchTrack orders surfaced in Orders tab.
+      // v2026-05-04: DELETE handler added so the Inventory page's (D)
+      // badge clears when an order is hard-deleted. Without this the
+      // badge persists until manual refresh because useOrders never
+      // refetches on the absent UPDATE/INSERT event.
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'dt_orders' }, onRow('order', 'order_id'))
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'dt_orders' }, onRow('order', 'order_id'))
+      .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'dt_orders' }, onRow('order', 'order_id'))
       // Session 74: folded catalog/reference table channels into this
       // central channel. Previously each of these hooks opened its own
       // Supabase Realtime channel (useEmailTemplates, useServiceCatalog,
