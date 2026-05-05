@@ -1339,6 +1339,10 @@ export function CreateDeliveryOrderModal({
       const { data: row, error } = await supabase
         .from('dt_orders')
         .select('*, dt_order_items(*)')
+        // v2026-05-04 — DT→App reconcile soft-marks items removed by DT.
+        // Edit modal hides those so the operator never republishes a
+        // ghost line item to DT after editing.
+        .is('dt_order_items.removed_at', null)
         .eq('id', editOrderId)
         .maybeSingle();
       if (cancelled) return;

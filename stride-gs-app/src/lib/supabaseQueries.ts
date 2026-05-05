@@ -1923,7 +1923,11 @@ export async function fetchDtOrdersFromSupabase(
     }
     let query = supabase
       .from('dt_orders')
+      // v2026-05-04: dt_order_items.removed_at filter — soft-removed
+      // rows (e.g. lines DT no longer carries) are kept for audit but
+      // hidden from the active items list.
       .select('*, dt_order_items(*)')
+      .is('dt_order_items.removed_at', null)
       // Default newest-first by created_at — matches the Orders page
       // sort default and surfaces drafts (which have no service date)
       // alongside everything else without the "drafts at the bottom"
@@ -2086,7 +2090,11 @@ export async function fetchDtOrderByIdFromSupabase(
     const statusMap = new Map(statuses.map(s => [s.id, s]));
     const { data, error } = await supabase
       .from('dt_orders')
+      // v2026-05-04: dt_order_items.removed_at filter — soft-removed
+      // rows (e.g. lines DT no longer carries) are kept for audit but
+      // hidden from the active items list.
       .select('*, dt_order_items(*)')
+      .is('dt_order_items.removed_at', null)
       .eq('id', orderId)
       .maybeSingle();
     if (error || !data) return null;
