@@ -97,6 +97,27 @@ UI components: FloatingActionMenu, WriteButton, BatchGuard, ActionTooltip, Batch
 
 ---
 
+## Recent Changes (2026-05-04, storage billing → one-click invoice)
+
+**Goal:** Eliminate the legacy "Commit to Ledger then re-select on Report tab then Create Invoice" 4-step storage workflow. Replace with a single Create Invoice button on the Storage tab that does both in one click.
+
+**What changed (React-only, no GAS):**
+
+- **`Billing.tsx`** — new `invoiceMode: 'report' | 'storage'` state. Storage tab gains a primary "Create Invoice" button in the preview banner (next to the legacy "Commit to Ledger") and on the floating selection bar. Both open the existing Create Invoice modal with `invoiceMode='storage'`. Modal subtitle adds a yellow inline note: "Storage rows will be committed to each client's ledger and invoiced in one step."
+- **`handleCreateInvoices`** — when `invoiceMode === 'storage'`, prepends a `postCommitStorageRows` call before the existing per-(client, sidemark) `postCreateInvoice` loop. The preview rows already carry `ledgerRowId = taskId` (matching what GAS stamps on the sheet), so the post-commit invoice loop finds the rows it needs to flip without any reshape. Failures during the commit phase abort cleanly with an error in the modal; partial commits surface failed clients in the same banner.
+- **Inline editing on storage preview** — Sidemark + Reference are now editable on storage preview rows alongside the existing Rate / Qty / Notes editors. Important for `separate_by_sidemark=true` clients: the operator's sidemark edit decides which invoice the row lands on (group key uses the operator-provided value, not the inventory row's stale field).
+- **Modal close handler** — when a storage-mode invoice succeeds, the preview banner is cleared (`previewLoaded=false`, `previewRows=[]`, `commitResult=null`) so the user lands on a clean slate. Clicking Preview Storage again won't re-surface the just-invoiced periods (the Postgres `calculate_storage_charges` RPC excludes already-invoiced periods).
+
+**Performance note:** pure React orchestration — same end-to-end GAS work as the legacy two-button flow, just chained without a manual click in between. The bigger speed-up (atomic invoice numbering on Postgres → unlock `concurrency=3` in the per-group invoice loop, ~3x faster on multi-client batches) is tracked as a follow-up PR.
+
+**Files touched:**
+- `stride-gs-app/src/pages/Billing.tsx`
+
+**Pending user action:**
+- [ ] Smoke test: Storage tab → Preview Storage → click "Create Invoice" → confirm modal options (PDF, email, QBO push, Send to Payments) → submit → confirm invoices land in the Report tab + are properly grouped by sidemark for clients with `separate_by_sidemark=true`.
+
+---
+
 ## Recent Changes (2026-05-04, multi-tenant RLS access fix)
 
 **Bug:** A client user assigned to 3 tenants reported "Item not found" errors when clicking entity deeplinks. Root cause: every client-facing RLS policy across `inventory`, `tasks`, `repairs`, `will_calls`, `will_call_items`, `shipments`, `billing`, `claims`, `clients`, `client_insurance`, `entity_notes`, `entity_audit_log`, `documents`, `email_sends`, `item_photos`, `move_history`, `autocomplete_db`, `dt_address_book`, `dt_orders` (+ all `dt_order_*` children), `expected_shipments`, `photo_shares`, plus 4 storage policies (`documents`, `dt-pod-photos`, `invoices`, `photos` buckets) compared `tenant_id` against the JWT's single primary `clientSheetId`. The React layer correctly issued `.in('tenant_id', accessibleClientSheetIds)` for multi-tenant fetches, but RLS filtered the rows out before they reached React — so `useItemDetail` / `useTaskDetail` / etc. saw empty results and surfaced "not found." React access checks at the panel level never ran because the row never came back.

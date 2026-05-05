@@ -1652,18 +1652,26 @@ export function Billing() {
         </span>;
       } }),
       col.accessor('sidemark', { header: 'Sidemark', size: 140, filterFn: mf, cell: i => {
-        const canEdit = isReportTab && i.row.original.status === 'Unbilled';
-        return canEdit
-          ? <EditableCell value={i.getValue() || ''} onChange={v => saveReportField(i.row.original, 'sidemark', v)} />
-          : <span style={{ fontSize: 12, color: theme.colors.textSecondary }}>{i.getValue() || '\u2014'}</span>;
+        // Editable: report-tab Unbilled rows OR storage-tab preview rows.
+        // Storage edits update local previewRows via updatePreviewRow so the
+        // commit + invoice loop carries the operator's value through to the
+        // ledger row write (matters because clients with separate_by_sidemark
+        // group invoices by sidemark \u2014 picking the right value here decides
+        // which invoice the row lands on).
+        const canEditReport = isReportTab && i.row.original.status === 'Unbilled';
+        const canEditStorage = isPreviewMode;
+        if (canEditReport) return <EditableCell value={i.getValue() || ''} onChange={v => saveReportField(i.row.original, 'sidemark', v)} />;
+        if (canEditStorage) return <EditableCell value={i.getValue() || ''} onChange={v => updatePreviewRow(i.row.original.ledgerRowId, 'sidemark', v)} />;
+        return <span style={{ fontSize: 12, color: theme.colors.textSecondary }}>{i.getValue() || '\u2014'}</span>;
       } }),
       col.accessor('reference', {
         header: 'Reference', size: 130, filterFn: mf,
         cell: i => {
-          const canEdit = isReportTab && i.row.original.status === 'Unbilled';
-          return canEdit
-            ? <EditableCell value={i.getValue() || ''} onChange={v => saveReportField(i.row.original, 'reference', v)} />
-            : <span style={{ fontSize: 12, color: theme.colors.textSecondary, fontFamily: 'monospace' }}>{i.getValue() || '\u2014'}</span>;
+          const canEditReport = isReportTab && i.row.original.status === 'Unbilled';
+          const canEditStorage = isPreviewMode;
+          if (canEditReport) return <EditableCell value={i.getValue() || ''} onChange={v => saveReportField(i.row.original, 'reference', v)} />;
+          if (canEditStorage) return <EditableCell value={i.getValue() || ''} onChange={v => updatePreviewRow(i.row.original.ledgerRowId, 'reference', v)} />;
+          return <span style={{ fontSize: 12, color: theme.colors.textSecondary, fontFamily: 'monospace' }}>{i.getValue() || '\u2014'}</span>;
         },
       }),
       col.accessor('date', { header: 'Date', size: 100, cell: i => <span style={{ fontSize: 12, color: theme.colors.textSecondary }}>{fmt(i.getValue())}</span> }),
