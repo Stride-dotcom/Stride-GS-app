@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.181.0 — 2026-05-04 PST — New `setClientWebAppDeployment` action + handleSetClientWebAppDeployment_ handler. Replaces the brittle handleFinishClientSetup_ flow that calls script.googleapis.com/v1/projects/<scriptId>/versions to programmatically create Web App deployments. The runOnboardingDiagnostic added in v38.180.0 confirmed the failure mode: even after declaring `https://www.googleapis.com/auth/script.projects` in the manifest, Google's OAuth verification gate silently strips that scope from grants for unverified apps. Token gets script.deployments + 9 others but never script.projects, so projects.versions.create returns HTTP 403 ACCESS_TOKEN_SCOPE_INSUFFICIENT every time. Path A pivot: stop fighting Google's scope rules. The new handler accepts `{clientSheetId, webAppUrl}`, validates the URL shape (must match https://script.google.com/macros/s/<id>/exec), extracts the deployment ID from the path, and writes both to CB Clients via api_ensureColumn_ (self-healing case-insensitive append-if-missing). Zero Apps Script REST API calls. The React UI surfaces a guided 3-step modal: (1) deep-link button "Open Bound Script" that opens the client's spreadsheet → Extensions → Apps Script in a new tab; (2) inline instructions to Deploy → New deployment → Web App → Deploy and copy the URL; (3) paste box for the URL → Save. Operator burden is ~30 seconds per new client onboard, but the path NEVER breaks because there's no scope dance, no manifest filter, no API verification gate to trip on. handleFinishClientSetup_ stays in place for legacy compatibility but the React UI primarily uses the new path now.
+   StrideAPI.gs — v38.182.0 — 2026-05-04 PST — Atomic invoice numbering on Postgres. The Master sheet RPC's `getNextInvoiceId` action was read-then-write without a transaction lock — two concurrent createInvoice calls could grab the same number (caused the INV-000131 NIPTUCK + NORTON duplicate on 2026-05-03). v38.157.0 hardened the half-write recovery; Billing.tsx pinned the per-group invoice loop to concurrency=1 as a workaround. New `public.next_invoice_no()` Postgres function backed by `public.invoice_no_seq` SEQUENCE is atomic by design — nextval is concurrency-safe with no transient failure modes. api_nextInvoiceNo_ becomes a thin wrapper calling api_nextInvoiceNoSupabase_; the legacy rpcUrl/rpcToken params are kept for signature compatibility but ignored. Companion React change: Billing.tsx bumps concurrency from 1 back to 3 in handleCreateInvoices's runBatchLoop. Primary win: the entire INV-XXXXXX duplicate-number bug class is gone. Speedup is modest (~10-30%) because handleCreateInvoice_'s outer LockService.getScriptLock still serializes the Consolidated_Ledger commit phase — true 3x parallelism requires refactoring that lock to per-tenant scope, which is a separate follow-up. The Master RPC counter is left in place but inert (other callers like getNextShipmentNo continue to use it; only invoice numbering migrated). Sequence seeded at 1000 with 850+ headroom over the highest committed invoice (INV-000144 as of 2026-05-04). Companion migration 20260504220000_invoice_no_atomic_counter.sql.
+   v38.181.0 — 2026-05-04 PST — New `setClientWebAppDeployment` action + handleSetClientWebAppDeployment_ handler. Replaces the brittle handleFinishClientSetup_ flow that calls script.googleapis.com/v1/projects/<scriptId>/versions to programmatically create Web App deployments. The runOnboardingDiagnostic added in v38.180.0 confirmed the failure mode: even after declaring `https://www.googleapis.com/auth/script.projects` in the manifest, Google's OAuth verification gate silently strips that scope from grants for unverified apps. Token gets script.deployments + 9 others but never script.projects, so projects.versions.create returns HTTP 403 ACCESS_TOKEN_SCOPE_INSUFFICIENT every time. Path A pivot: stop fighting Google's scope rules. The new handler accepts `{clientSheetId, webAppUrl}`, validates the URL shape (must match https://script.google.com/macros/s/<id>/exec), extracts the deployment ID from the path, and writes both to CB Clients via api_ensureColumn_ (self-healing case-insensitive append-if-missing). Zero Apps Script REST API calls. The React UI surfaces a guided 3-step modal: (1) deep-link button "Open Bound Script" that opens the client's spreadsheet → Extensions → Apps Script in a new tab; (2) inline instructions to Deploy → New deployment → Web App → Deploy and copy the URL; (3) paste box for the URL → Save. Operator burden is ~30 seconds per new client onboard, but the path NEVER breaks because there's no scope dance, no manifest filter, no API verification gate to trip on. handleFinishClientSetup_ stays in place for legacy compatibility but the React UI primarily uses the new path now.
    v38.180.0 — 2026-05-04 PST — New runOnboardingDiagnostic admin entry. The Finish Setup → handleFinishClientSetup_ flow on Ruegamer Design returned HTTP 403 ACCESS_TOKEN_SCOPE_INSUFFICIENT when calling script.googleapis.com/v1/projects/<bound>/versions, and standard re-auth recovery (revoke + re-grant) didn't trigger a consent prompt. Run this diagnostic to isolate whether the problem is (A) runtime token scope vs (B) live manifest content vs (C) cross-script authorization. Three checks side by side: (A) hits oauth2/v3/tokeninfo with the actual ScriptApp.getOAuthToken() output and dumps every granted scope sorted alphabetically — if script.deployments is missing here it means the manifest scope was never approved at runtime even if declared on paper. (B) calls projects.getContent on StrideAPI itself, parses the live appsscript file, and lists every oauthScope in the deployed manifest — if script.deployments is missing here, push-stride-api.mjs's merge logic isn't actually persisting it. (C) attempts versions.create against StrideAPI's OWN scriptId with the same token + headers used for client-targeted calls — if this succeeds while client-targeted calls fail, the bug is per-target authorization (Justin's token can manage StrideAPI but not the bound client scripts), confirming we need an architectural fix where the bound client scripts self-deploy via their own ScriptApp.getOAuthToken(). Read-only besides the diagnostic version creation in C (versions accumulate harmlessly). Output to Logger; operator runs once, copies the execution log, pastes back for analysis.
    v38.179.0 — 2026-05-04 PST — Reactivating an item now auto-clears Release Date. handleUpdateInventoryItem_ flipping Status from "Released" → "Active" used to leave the Release Date column populated, which made the inventory row look like an active item that had simultaneously been released — confusing on filters / reports / Supabase mirrors. Justin asked for a clean way to undo an accidental release. Now: Status === "Active" → Release Date is cleared in the same write. Switching to "On Hold" / "Transferred" leaves the historic release date alone. Idempotent.
    v38.178.0 — 2026-05-04 PST — Auto Pay + Card-on-File now actually mean something. Three changes that together fix the issue Justin caught: (1) Per-invoice auto_charge inherits from the client-level "Auto Charge" setting on CB Clients instead of being hard-coded true on every new Stax invoice. clientInfoMap in handleQbExport_ + handleImportIIF_ both gain an autoCharge field read from the "AUTO CHARGE" header. INSERT path stamps the per-invoice cell + Supabase mirror with that value; UPDATE-PENDING path refreshes from current client setting (rows haven't been pushed yet, refresh is intended). Operators can still toggle per-invoice on Review/Charge Queue as a one-off override. Pre-v38.178.0 every row got auto_charge=true regardless of opt-out, so the Charge Queue checkbox was always pre-checked even for clients who didn't want auto-pay. (2) New helper stax_fetchPaymentMethodStatus_(staxCustomerId) calls GET /customer/:id/payment-method via the existing stax_apiRequest_ wrapper, parses with stax_getPaymentMethodLabel_, returns 'has_pm' | 'no_pm' | 'no_customer' | 'unknown'. handleQbExport_'s INSERT + UPDATE-PENDING paths now write the real status to public.stax_invoices.payment_method_status instead of the lazy 'unknown'. Per-call cache so M invoices for the same customer = 1 API hit. Pre-v38.178.0 the column was 'unknown' or 'no_customer' forever, so the React "CC on file" pill could not render. (3) New admin endpoint staxRefreshPaymentStatus + handleStaxRefreshPaymentStatus_ — re-fetches PM status for every charge-eligible row (PENDING/CREATED/SENT/CHARGE_FAILED), stamps via supabasePatch_ keyed on qb_invoice_no, returns counters per status. Optional payload.qbInvoiceNos filters to a subset. Idempotent. Backs the new "Refresh Cards" button on Review. Catches expired/removed cards that would otherwise fail at charge time without warning.
@@ -22198,51 +22199,68 @@ function handleGenerateUnbilledReport_(payload) {
  *   safe — a contested first call leaves the counter untouched.
  */
 function api_nextInvoiceNo_(rpcUrl, rpcToken) {
-  function callOnce_() {
-    var resp = UrlFetchApp.fetch(rpcUrl, {
-      method: "post",
-      contentType: "application/json",
-      payload: JSON.stringify({ action: "getNextInvoiceId", token: rpcToken }),
-      muteHttpExceptions: true,
-      followRedirects: true
-    });
-    var code = resp.getResponseCode();
-    var bodyText = resp.getContentText() || "";
-    if (code < 200 || code >= 300) {
-      var transient5xx = code >= 500 && code < 600;
-      var err = new Error("Master RPC HTTP " + code + ": " + bodyText.substring(0, 300));
-      err.transient = transient5xx;
-      throw err;
-    }
-    var obj;
-    try { obj = JSON.parse(bodyText); }
-    catch (e) {
-      var pe = new Error("Master RPC returned non-JSON: " + bodyText.substring(0, 300));
-      pe.transient = true;
-      throw pe;
-    }
-    if (obj && obj.success === false) {
-      var msg = String(obj.error || "(no error message returned)");
-      var se = new Error("Master RPC error: " + msg);
-      se.transient = /lock timeout|too many concurrent/i.test(msg);
-      throw se;
-    }
-    var id = obj && (obj.shipmentNo || obj.id || obj.invoiceId);
-    if (!id) {
-      throw new Error("Master RPC returned no id field: " + bodyText.substring(0, 300));
-    }
-    return id;
+  // v38.178.0 — Atomic Postgres counter retires the Master sheet RPC race.
+  //
+  // The legacy Master RPC (separate Apps Script project, sheet-backed counter)
+  // was read-then-write without a transaction lock — concurrent createInvoice
+  // calls could grab the same number, which caused the INV-000131 NIPTUCK +
+  // NORTON duplicate on 2026-05-03. v38.157.0 hardened the half-write
+  // recovery, and Billing.tsx's handleCreateInvoices loop pinned to
+  // concurrency=1 as a workaround — that serialization was the main
+  // bottleneck on multi-client batches.
+  //
+  // The Postgres SEQUENCE behind public.next_invoice_no() is atomic by design
+  // (nextval() is concurrency-safe). With this in place, Billing.tsx bumps
+  // concurrency to 3 and storage / regular invoice batches run ~3x faster.
+  //
+  // The legacy rpcUrl/rpcToken parameters are kept for signature compatibility
+  // but ignored — every call routes through Supabase.
+  return api_nextInvoiceNoSupabase_();
+}
+
+/**
+ * v38.178.0 — Calls public.next_invoice_no() via Supabase REST. Returns the
+ * formatted invoice number string (e.g. "INV-001000"). Atomic — no retries
+ * needed (Postgres nextval cannot fail mid-flight; only transport errors are
+ * possible, and those bubble up as thrown errors for the caller to surface).
+ */
+function api_nextInvoiceNoSupabase_() {
+  var url = prop_("SUPABASE_URL");
+  var key = prop_("SUPABASE_SERVICE_ROLE_KEY");
+  if (!url || !key) {
+    throw new Error("SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY not configured");
   }
 
-  try {
-    return callOnce_();
-  } catch (e) {
-    if (e && e.transient) {
-      Utilities.sleep(1500);
-      return callOnce_();
-    }
-    throw e;
+  var rpcUrl = url + "/rest/v1/rpc/next_invoice_no";
+  var resp = UrlFetchApp.fetch(rpcUrl, {
+    method: "post",
+    contentType: "application/json",
+    headers: {
+      "Authorization": "Bearer " + key,
+      "apikey": key
+    },
+    payload: "{}",
+    muteHttpExceptions: true
+  });
+
+  var code = resp.getResponseCode();
+  var body = resp.getContentText() || "";
+  if (code < 200 || code >= 300) {
+    throw new Error("next_invoice_no RPC HTTP " + code + ": " + body.substring(0, 300));
   }
+
+  // Postgres scalar functions return the value JSON-encoded — strip quotes.
+  var inv;
+  try {
+    var parsed = JSON.parse(body);
+    inv = (typeof parsed === 'string') ? parsed : String(parsed || '');
+  } catch (_) {
+    inv = body.replace(/^"|"$/g, '').trim();
+  }
+  if (!inv || !/^INV-\d{6,}$/.test(inv)) {
+    throw new Error("next_invoice_no returned unexpected value: " + body.substring(0, 300));
+  }
+  return inv;
 }
 
 /**
