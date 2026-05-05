@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.180.0 — 2026-05-04 PST — New runOnboardingDiagnostic admin entry. The Finish Setup → handleFinishClientSetup_ flow on Ruegamer Design returned HTTP 403 ACCESS_TOKEN_SCOPE_INSUFFICIENT when calling script.googleapis.com/v1/projects/<bound>/versions, and standard re-auth recovery (revoke + re-grant) didn't trigger a consent prompt. Run this diagnostic to isolate whether the problem is (A) runtime token scope vs (B) live manifest content vs (C) cross-script authorization. Three checks side by side: (A) hits oauth2/v3/tokeninfo with the actual ScriptApp.getOAuthToken() output and dumps every granted scope sorted alphabetically — if script.deployments is missing here it means the manifest scope was never approved at runtime even if declared on paper. (B) calls projects.getContent on StrideAPI itself, parses the live appsscript file, and lists every oauthScope in the deployed manifest — if script.deployments is missing here, push-stride-api.mjs's merge logic isn't actually persisting it. (C) attempts versions.create against StrideAPI's OWN scriptId with the same token + headers used for client-targeted calls — if this succeeds while client-targeted calls fail, the bug is per-target authorization (Justin's token can manage StrideAPI but not the bound client scripts), confirming we need an architectural fix where the bound client scripts self-deploy via their own ScriptApp.getOAuthToken(). Read-only besides the diagnostic version creation in C (versions accumulate harmlessly). Output to Logger; operator runs once, copies the execution log, pastes back for analysis.
+   StrideAPI.gs — v38.181.0 — 2026-05-04 PST — New `setClientWebAppDeployment` action + handleSetClientWebAppDeployment_ handler. Replaces the brittle handleFinishClientSetup_ flow that calls script.googleapis.com/v1/projects/<scriptId>/versions to programmatically create Web App deployments. The runOnboardingDiagnostic added in v38.180.0 confirmed the failure mode: even after declaring `https://www.googleapis.com/auth/script.projects` in the manifest, Google's OAuth verification gate silently strips that scope from grants for unverified apps. Token gets script.deployments + 9 others but never script.projects, so projects.versions.create returns HTTP 403 ACCESS_TOKEN_SCOPE_INSUFFICIENT every time. Path A pivot: stop fighting Google's scope rules. The new handler accepts `{clientSheetId, webAppUrl}`, validates the URL shape (must match https://script.google.com/macros/s/<id>/exec), extracts the deployment ID from the path, and writes both to CB Clients via api_ensureColumn_ (self-healing case-insensitive append-if-missing). Zero Apps Script REST API calls. The React UI surfaces a guided 3-step modal: (1) deep-link button "Open Bound Script" that opens the client's spreadsheet → Extensions → Apps Script in a new tab; (2) inline instructions to Deploy → New deployment → Web App → Deploy and copy the URL; (3) paste box for the URL → Save. Operator burden is ~30 seconds per new client onboard, but the path NEVER breaks because there's no scope dance, no manifest filter, no API verification gate to trip on. handleFinishClientSetup_ stays in place for legacy compatibility but the React UI primarily uses the new path now.
+   v38.180.0 — 2026-05-04 PST — New runOnboardingDiagnostic admin entry. The Finish Setup → handleFinishClientSetup_ flow on Ruegamer Design returned HTTP 403 ACCESS_TOKEN_SCOPE_INSUFFICIENT when calling script.googleapis.com/v1/projects/<bound>/versions, and standard re-auth recovery (revoke + re-grant) didn't trigger a consent prompt. Run this diagnostic to isolate whether the problem is (A) runtime token scope vs (B) live manifest content vs (C) cross-script authorization. Three checks side by side: (A) hits oauth2/v3/tokeninfo with the actual ScriptApp.getOAuthToken() output and dumps every granted scope sorted alphabetically — if script.deployments is missing here it means the manifest scope was never approved at runtime even if declared on paper. (B) calls projects.getContent on StrideAPI itself, parses the live appsscript file, and lists every oauthScope in the deployed manifest — if script.deployments is missing here, push-stride-api.mjs's merge logic isn't actually persisting it. (C) attempts versions.create against StrideAPI's OWN scriptId with the same token + headers used for client-targeted calls — if this succeeds while client-targeted calls fail, the bug is per-target authorization (Justin's token can manage StrideAPI but not the bound client scripts), confirming we need an architectural fix where the bound client scripts self-deploy via their own ScriptApp.getOAuthToken(). Read-only besides the diagnostic version creation in C (versions accumulate harmlessly). Output to Logger; operator runs once, copies the execution log, pastes back for analysis.
    v38.179.0 — 2026-05-04 PST — Reactivating an item now auto-clears Release Date. handleUpdateInventoryItem_ flipping Status from "Released" → "Active" used to leave the Release Date column populated, which made the inventory row look like an active item that had simultaneously been released — confusing on filters / reports / Supabase mirrors. Justin asked for a clean way to undo an accidental release. Now: Status === "Active" → Release Date is cleared in the same write. Switching to "On Hold" / "Transferred" leaves the historic release date alone. Idempotent.
    v38.178.0 — 2026-05-04 PST — Auto Pay + Card-on-File now actually mean something. Three changes that together fix the issue Justin caught: (1) Per-invoice auto_charge inherits from the client-level "Auto Charge" setting on CB Clients instead of being hard-coded true on every new Stax invoice. clientInfoMap in handleQbExport_ + handleImportIIF_ both gain an autoCharge field read from the "AUTO CHARGE" header. INSERT path stamps the per-invoice cell + Supabase mirror with that value; UPDATE-PENDING path refreshes from current client setting (rows haven't been pushed yet, refresh is intended). Operators can still toggle per-invoice on Review/Charge Queue as a one-off override. Pre-v38.178.0 every row got auto_charge=true regardless of opt-out, so the Charge Queue checkbox was always pre-checked even for clients who didn't want auto-pay. (2) New helper stax_fetchPaymentMethodStatus_(staxCustomerId) calls GET /customer/:id/payment-method via the existing stax_apiRequest_ wrapper, parses with stax_getPaymentMethodLabel_, returns 'has_pm' | 'no_pm' | 'no_customer' | 'unknown'. handleQbExport_'s INSERT + UPDATE-PENDING paths now write the real status to public.stax_invoices.payment_method_status instead of the lazy 'unknown'. Per-call cache so M invoices for the same customer = 1 API hit. Pre-v38.178.0 the column was 'unknown' or 'no_customer' forever, so the React "CC on file" pill could not render. (3) New admin endpoint staxRefreshPaymentStatus + handleStaxRefreshPaymentStatus_ — re-fetches PM status for every charge-eligible row (PENDING/CREATED/SENT/CHARGE_FAILED), stamps via supabasePatch_ keyed on qb_invoice_no, returns counters per status. Optional payload.qbInvoiceNos filters to a subset. Idempotent. Backs the new "Refresh Cards" button on Review. Catches expired/removed cards that would otherwise fail at charge time without warning.
    v38.177.0 — 2026-05-04 PST — Unified addons module. The task-only `task_addons` system shipped 2026-05-02 (never used in prod) is replaced by a polymorphic `addons` table keyed on (parent_type, parent_id) supporting task / repair / will_call / inventory. New helper api_writeAddonsToLedger_(ss, parentType, parentId, ctx) replaces the inline task-addon flush in handleCompleteTask_ and now also fires from handleCompleteRepair_ and handleProcessWcRelease_ (one line each, after the primary billing write). The helper fetches unbilled addons via REST, writes one Billing_Ledger row per addon (rate snapshotted at add time, falls back to current catalog if blank), mirrors each row to public.billing via resyncEntityToSupabase_, then PATCHes the addon back to billed=true with the resulting ledger_row_id stamped — making retries idempotent. Ledger Row ID format mirrors the existing convention: {parentId}-{svcCode}-ADDON-{n}. Per-parent column mapping: task→Task ID="{parentId}-{svcCode}", repair→Repair ID="{parentId}-{svcCode}", will_call→Shipment #=parentId, inventory→Item ID=parentId. Companion migration 20260504170000_unified_addons.sql drops the empty task_addons table and creates `addons` with parent_type CHECK constraint, parent_id non-empty CHECK, RLS (staff/admin + service_role), and realtime enabled. Removed: api_fetchTaskAddons_ (subsumed by the new helper).
@@ -7473,6 +7474,20 @@ function doPost(e) {
       case "finishClientSetup":
         return withStaffGuard_(callerEmail, function() {
           var r = handleFinishClientSetup_(payload);
+          api_writeThrough_(r, "clients", null, payload.spreadsheetId);
+          return r;
+        });
+
+      // v38.181.0 — manual deploy + paste UX. handleFinishClientSetup_'s
+      // automated Apps Script API path requires the script.projects scope
+      // which Google's verification gate silently strips for unverified
+      // OAuth apps. Rather than fight that, we let the operator deploy the
+      // bound Web App by hand in the editor and paste the URL into React;
+      // this handler just parses + writes the URL/Deployment ID to CB
+      // Clients (no script.googleapis.com call). Durable: no scope dance.
+      case "setClientWebAppDeployment":
+        return withStaffGuard_(callerEmail, function() {
+          var r = handleSetClientWebAppDeployment_(payload);
           api_writeThrough_(r, "clients", null, payload.spreadsheetId);
           return r;
         });
@@ -24495,6 +24510,108 @@ function handleFinishClientSetup_(payload) {
   } catch (err) {
     return errorResponse_("Finish Setup failed: " + err.message, "DEPLOY_ERROR");
   }
+}
+
+/**
+ * v38.181.0 — handleSetClientWebAppDeployment_
+ *
+ * Manual-deploy + paste handler. The automated handleFinishClientSetup_
+ * path calls script.googleapis.com to create versions/deployments, which
+ * requires the `script.projects` scope. Google's OAuth verification gate
+ * silently strips that scope from unverified apps, leaving every onboard
+ * stuck on HTTP 403 ACCESS_TOKEN_SCOPE_INSUFFICIENT (Justin's Ruegamer
+ * Design 2026-05-04 incident).
+ *
+ * Workaround: the operator deploys the Web App in the bound script editor
+ * by hand (Deploy → New deployment → Web App → Deploy), copies the URL
+ * shown, and pastes it into the React UI. This handler validates the URL
+ * shape, extracts the deployment ID from the path, writes both to CB
+ * Clients via api_ensureColumn_ (auto-creates columns if missing — same
+ * helper used everywhere else now), and returns success.
+ *
+ * Net effect: 30 seconds of operator time per onboard, but never breaks
+ * because no Apps Script REST API call is made.
+ *
+ * Payload: { clientSheetId: string, webAppUrl: string }
+ *   clientSheetId — the client's Spreadsheet ID, used to find the row
+ *                   in CB Clients.
+ *   webAppUrl     — the URL the operator copied from the Deploy dialog.
+ *                   Must match `https://script.google.com/macros/s/<id>/exec`
+ *                   shape; the deployment ID is extracted from <id>.
+ *
+ * Returns: { success, clientName, clientSheetId, webAppUrl, deploymentId }
+ */
+function handleSetClientWebAppDeployment_(payload) {
+  var clientSheetId = String(payload.clientSheetId || "").trim();
+  var webAppUrl = String(payload.webAppUrl || "").trim();
+
+  if (!clientSheetId) return errorResponse_("clientSheetId is required", "MISSING_PARAM");
+  if (!webAppUrl) return errorResponse_("webAppUrl is required", "MISSING_PARAM");
+
+  // Validate URL shape + extract deployment ID. Stax/Drive/etc URLs
+  // would silently slip through a permissive check; be strict.
+  var urlMatch = webAppUrl.match(/^https:\/\/script\.google\.com\/macros\/s\/([A-Za-z0-9_-]+)\/exec(\?.*)?$/);
+  if (!urlMatch) {
+    return errorResponse_(
+      "URL doesn't match the Web App format. Expected: https://script.google.com/macros/s/<deployment_id>/exec — got: " + webAppUrl.substring(0, 100),
+      "INVALID_URL"
+    );
+  }
+  var deploymentId = urlMatch[1];
+  // Reconstruct the canonical URL (drops any query string the operator
+  // might have copied accidentally) so what we store is exactly what we'd
+  // generate ourselves.
+  var canonicalUrl = "https://script.google.com/macros/s/" + deploymentId + "/exec";
+
+  // Find the client row in CB Clients
+  var cbId = prop_("CB_SPREADSHEET_ID");
+  if (!cbId) return errorResponse_("CB_SPREADSHEET_ID not configured", "CONFIG_ERROR");
+  var cbSS = SpreadsheetApp.openById(cbId);
+  var clientsSh = cbSS.getSheetByName("Clients");
+  if (!clientsSh) return errorResponse_("CB Clients tab not found", "CONFIG_ERROR");
+
+  var clientsData = clientsSh.getDataRange().getValues();
+  var idCol = -1;
+  var nameCol = -1;
+  var headers = clientsData[0];
+  for (var h = 0; h < headers.length; h++) {
+    var hk = String(headers[h] || "").trim().toUpperCase();
+    if (hk === "CLIENT SPREADSHEET ID") idCol = h;
+    if (hk === "CLIENT NAME") nameCol = h;
+  }
+  if (idCol < 0) return errorResponse_("CB Clients missing 'Client Spreadsheet ID' column", "CONFIG_ERROR");
+
+  var clientRowNum = -1;
+  var clientName = "";
+  for (var r = 1; r < clientsData.length; r++) {
+    if (String(clientsData[r][idCol] || "").trim() === clientSheetId) {
+      clientRowNum = r + 1; // 1-based sheet row
+      clientName = nameCol >= 0 ? String(clientsData[r][nameCol] || "").trim() : "";
+      break;
+    }
+  }
+  if (clientRowNum < 0) {
+    return errorResponse_("Client not found in CB Clients tab for spreadsheet " + clientSheetId, "NOT_FOUND");
+  }
+
+  // Write URL + Deployment ID via api_ensureColumn_ (handles case-drift,
+  // auto-appends if missing — same self-healing pattern used across the
+  // Stax inline-edit fixes and the v38.166.0 stax_invoiceCols_ helper).
+  var webUrlCol = api_ensureColumn_(clientsSh, "Web App URL");
+  var deployIdCol = api_ensureColumn_(clientsSh, "Deployment ID");
+  clientsSh.getRange(clientRowNum, webUrlCol).setValue(canonicalUrl);
+  clientsSh.getRange(clientRowNum, deployIdCol).setValue(deploymentId);
+
+  Logger.log("handleSetClientWebAppDeployment_: " + clientName + " (" + clientSheetId + ") → " + canonicalUrl);
+
+  return jsonResponse_({
+    success: true,
+    clientName: clientName,
+    clientSheetId: clientSheetId,
+    webAppUrl: canonicalUrl,
+    deploymentId: deploymentId,
+    message: "Web App URL and Deployment ID saved to CB Clients."
+  });
 }
 
 /**

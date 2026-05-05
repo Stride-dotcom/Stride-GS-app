@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom';
 import { Settings as SettingsIcon, Users, DollarSign, Mail, Database, Globe, Bell, Plus, ChevronRight, CheckCircle2, AlertCircle, UserPlus, Shield, ToggleLeft, ToggleRight, Eye, EyeOff, Wifi, WifiOff, RefreshCw, Loader2, RefreshCcw, ExternalLink, Wrench, PlayCircle, Send, FolderSync, BookText, LogIn, Cloud, Edit2, Zap, ArrowUpDown, ChevronUp, ChevronDown, X, Truck, Link2, Search } from 'lucide-react';
 import { useReactTable, getCoreRowModel, getSortedRowModel, flexRender, type SortingState, type ColumnDef } from '@tanstack/react-table';
-import { getApiUrl, getApiToken, setApiCredentials, isApiConfigured, fetchHealth, postOnboardClient, postUpdateClient, postSyncSettings, postRefreshCaches, postFixMissingFolders, postTestSendClientTemplates, postTestSendClaimEmails, fetchAutoIdSetting, postUpdateAutoIdSetting, postResolveOnboardUser, fetchStaxConfig, postUpdateStaxConfig, apiPost, postSyncTemplatesToClients, postBulkSyncToSupabase, postPurgeInactiveFromSupabase, fetchClients, postFinishClientSetup, resyncUsersPreview, resyncUsers, resyncClientsPreview, resyncClients, setNextFetchNoCache, adminSetUserPassword, ensureUserInAuth, listMissingAuthUsers, postTestGenerateDoc, apiFetch } from '../lib/api';
+import { getApiUrl, getApiToken, setApiCredentials, isApiConfigured, fetchHealth, postOnboardClient, postUpdateClient, postSyncSettings, postRefreshCaches, postFixMissingFolders, postTestSendClientTemplates, postTestSendClaimEmails, fetchAutoIdSetting, postUpdateAutoIdSetting, postResolveOnboardUser, fetchStaxConfig, postUpdateStaxConfig, apiPost, postSyncTemplatesToClients, postBulkSyncToSupabase, postPurgeInactiveFromSupabase, fetchClients, postFinishClientSetup, postSetClientWebAppDeployment, resyncUsersPreview, resyncUsers, resyncClientsPreview, resyncClients, setNextFetchNoCache, adminSetUserPassword, ensureUserInAuth, listMissingAuthUsers, postTestGenerateDoc, apiFetch } from '../lib/api';
 import type { BulkSyncResult } from '../lib/api';
 import type { EmailTemplate } from '../lib/api';
 import { entityEvents } from '../lib/entityEvents';
@@ -1601,6 +1601,16 @@ export function Settings() {
   const [welcomeEmailResult, setWelcomeEmailResult] = useState<{ clientName: string; ok: boolean; error?: string } | null>(null);
   const [finishSetupLoading, setFinishSetupLoading] = useState<string | null>(null);
   const [finishSetupResult, setFinishSetupResult] = useState<{ clientName: string; ok: boolean; message?: string; error?: string; webAppUrl?: string } | null>(null);
+  // v38.181.0 — manual deploy + paste UX. The automated finishClientSetup
+  // path can fail with HTTP 403 ACCESS_TOKEN_SCOPE_INSUFFICIENT when
+  // Google's OAuth verification gate strips the script.projects scope.
+  // This modal lets the operator deploy the bound Web App by hand in the
+  // editor and paste the URL — never breaks because it doesn't call the
+  // Apps Script REST API.
+  const [manualSetupClient, setManualSetupClient] = useState<ApiClient | null>(null);
+  const [manualSetupUrl, setManualSetupUrl] = useState('');
+  const [manualSetupSaving, setManualSetupSaving] = useState(false);
+  const [manualSetupError, setManualSetupError] = useState('');
   const [purgeInactiveLoading, setPurgeInactiveLoading] = useState(false);
   const [purgeInactiveResult, setPurgeInactiveResult] = useState<{ purgedCount: number; purged: Array<{ name: string; purge?: { purged: boolean; details?: Record<string, number | string>; failCount?: number } }> } | null>(null);
   const [purgeInactiveError, setPurgeInactiveError] = useState('');
@@ -2084,6 +2094,58 @@ export function Settings() {
       setFinishSetupResult({ clientName: client.name, ok: false, error: err instanceof Error ? err.message : String(err) });
     } finally {
       setFinishSetupLoading(null);
+    }
+  }
+
+  /**
+   * v38.181.0 — Save the operator-pasted Web App URL to CB Clients via the
+   * setClientWebAppDeployment endpoint. No Apps Script REST API calls; the
+   * handler just validates URL shape, extracts the deployment ID, and writes
+   * both to CB. Replaces the automated path that requires script.projects
+   * scope (which Google silently strips for unverified OAuth apps).
+   */
+  async function handleSaveManualWebAppUrl() {
+    if (!manualSetupClient || !manualSetupClient.spreadsheetId) return;
+    const url = manualSetupUrl.trim();
+    if (!url) {
+      setManualSetupError('Paste the Web App URL from the deploy dialog.');
+      return;
+    }
+    // Client-side shape check matching the GAS-side validator. Catches typos
+    // and pasting the spreadsheet URL by mistake before round-tripping.
+    if (!/^https:\/\/script\.google\.com\/macros\/s\/[A-Za-z0-9_-]+\/exec(\?.*)?$/.test(url)) {
+      setManualSetupError("URL doesn't match the Web App format. Should look like https://script.google.com/macros/s/<long-id>/exec");
+      return;
+    }
+    setManualSetupSaving(true);
+    setManualSetupError('');
+    try {
+      const res = await postSetClientWebAppDeployment({
+        clientSheetId: manualSetupClient.spreadsheetId,
+        webAppUrl: url,
+      });
+      if (res.ok && res.data?.success) {
+        // Optimistic patch: hide the "Finish Setup" button immediately.
+        if (res.data.webAppUrl) {
+          applyClientPatch(manualSetupClient.spreadsheetId, { webAppUrl: res.data.webAppUrl });
+        }
+        setFinishSetupResult({
+          clientName: manualSetupClient.name,
+          ok: true,
+          message: res.data.message || 'Web App URL saved',
+          webAppUrl: res.data.webAppUrl,
+        });
+        setManualSetupClient(null);
+        setManualSetupUrl('');
+        setNextFetchNoCache();
+        refetchClients();
+      } else {
+        setManualSetupError(res.data?.error || res.error || 'Save failed');
+      }
+    } catch (err: unknown) {
+      setManualSetupError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setManualSetupSaving(false);
     }
   }
 
@@ -2730,18 +2792,24 @@ export function Settings() {
                       </div>
                     </div>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0, marginLeft: 8 }}>
-                      {/* Finish Setup button — shown only during onboarding (Web App URL missing) */}
+                      {/* Finish Setup button — shown only during onboarding
+                          (Web App URL missing). v38.181.0: opens the manual
+                          paste modal instead of calling the brittle automated
+                          path that requires script.projects scope (silently
+                          stripped by Google's verification gate). */}
                       {isLive && (c as ApiClient).spreadsheetId && !(c as ApiClient).webAppUrl && (
                         <button
-                          onClick={e => { e.stopPropagation(); handleFinishSetup(c as ApiClient); }}
-                          disabled={finishSetupLoading === (c as ApiClient).spreadsheetId}
-                          title="Web App URL missing — click to deploy and finish onboarding"
-                          style={{ padding: '5px 10px', fontSize: 10, fontWeight: 700, border: '1px solid #F59E0B', borderRadius: 6, background: '#FEF3C7', cursor: finishSetupLoading === (c as ApiClient).spreadsheetId ? 'wait' : 'pointer', fontFamily: 'inherit', color: '#92400E', display: 'flex', alignItems: 'center', gap: 4, whiteSpace: 'nowrap' }}
+                          onClick={e => {
+                            e.stopPropagation();
+                            setManualSetupClient(c as ApiClient);
+                            setManualSetupUrl('');
+                            setManualSetupError('');
+                          }}
+                          title="Web App URL missing — click to walk through manual deploy + paste"
+                          style={{ padding: '5px 10px', fontSize: 10, fontWeight: 700, border: '1px solid #F59E0B', borderRadius: 6, background: '#FEF3C7', cursor: 'pointer', fontFamily: 'inherit', color: '#92400E', display: 'flex', alignItems: 'center', gap: 4, whiteSpace: 'nowrap' }}
                         >
-                          {finishSetupLoading === (c as ApiClient).spreadsheetId
-                            ? <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} />
-                            : <Zap size={11} />}
-                          {finishSetupLoading === (c as ApiClient).spreadsheetId ? 'Finishing…' : 'Finish Setup'}
+                          <Zap size={11} />
+                          Finish Setup
                         </button>
                       )}
                       {isLive && (c as ApiClient).spreadsheetId && (
@@ -4486,6 +4554,100 @@ export function Settings() {
               >
                 {setPasswordLoading && <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} />}
                 {setPasswordLoading ? 'Setting\u2026' : 'Set Password'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* v38.181.0 \u2014 Manual Web App deploy + paste modal. Replaces the
+          brittle automated finishClientSetup path that requires the
+          script.projects scope (silently stripped by Google's OAuth
+          verification gate). Operator deploys the bound Web App by hand,
+          copies the URL, and pastes it here \u2014 no Apps Script REST API
+          calls, never breaks. */}
+      {manualSetupClient && (
+        <div
+          onClick={() => { if (!manualSetupSaving) { setManualSetupClient(null); setManualSetupUrl(''); setManualSetupError(''); } }}
+          style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: 16 }}
+        >
+          <div onClick={e => e.stopPropagation()} style={{ background: '#fff', borderRadius: 14, padding: 24, maxWidth: 560, width: '100%', maxHeight: '90vh', overflowY: 'auto', boxShadow: '0 8px 32px rgba(0,0,0,0.2)', fontFamily: theme.typography.fontFamily }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12 }}>
+              <div>
+                <div style={{ fontSize: 16, fontWeight: 700, color: theme.colors.text }}>Complete onboarding</div>
+                <div style={{ fontSize: 13, color: theme.colors.textMuted, marginTop: 2 }}>{manualSetupClient.name}</div>
+              </div>
+              <button
+                onClick={() => { if (!manualSetupSaving) { setManualSetupClient(null); setManualSetupUrl(''); setManualSetupError(''); } }}
+                disabled={manualSetupSaving}
+                style={{ background: 'none', border: 'none', cursor: manualSetupSaving ? 'wait' : 'pointer', padding: 4, color: theme.colors.textMuted }}
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <p style={{ fontSize: 12, color: theme.colors.textSecondary, marginBottom: 18, lineHeight: 1.5 }}>
+              The Apps Script REST API can't auto-deploy this Web App due to a Google OAuth scope restriction. Deploy it by hand in the Apps Script editor (one-time, ~30 seconds) and paste the URL here. We'll save it to CB Clients.
+            </p>
+
+            <div style={{ background: theme.colors.bgSubtle, borderRadius: 10, padding: 14, marginBottom: 14 }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 6 }}>Step 1 \u2014 open the bound script</div>
+              <button
+                onClick={() => window.open(`https://docs.google.com/spreadsheets/d/${manualSetupClient.spreadsheetId}/edit`, '_blank')}
+                style={{ padding: '8px 14px', fontSize: 12, fontWeight: 600, border: `1px solid ${theme.colors.orange}`, borderRadius: 6, background: '#fff', cursor: 'pointer', color: theme.colors.orange, fontFamily: 'inherit', display: 'inline-flex', alignItems: 'center', gap: 6 }}
+              >
+                <ExternalLink size={12} /> Open {manualSetupClient.name}'s spreadsheet
+              </button>
+              <div style={{ fontSize: 11, color: theme.colors.textMuted, marginTop: 8 }}>
+                In the spreadsheet, click <strong>Extensions \u2192 Apps Script</strong>.
+              </div>
+            </div>
+
+            <div style={{ background: theme.colors.bgSubtle, borderRadius: 10, padding: 14, marginBottom: 14 }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 6 }}>Step 2 \u2014 deploy the Web App</div>
+              <ol style={{ margin: 0, paddingLeft: 20, fontSize: 12, color: theme.colors.textSecondary, lineHeight: 1.7 }}>
+                <li>In the script editor, click <strong>Deploy \u2192 New deployment</strong> (top right).</li>
+                <li>Click the gear icon next to "Select type" \u2192 choose <strong>Web App</strong>.</li>
+                <li>Description: <code style={{ background: '#fff', padding: '1px 6px', borderRadius: 4 }}>Stride client web app</code></li>
+                <li>Execute as: <strong>Me</strong></li>
+                <li>Who has access: <strong>Anyone</strong></li>
+                <li>Click <strong>Deploy</strong>. Approve permissions if prompted.</li>
+                <li>Copy the <strong>Web App URL</strong> shown in the success dialog.</li>
+              </ol>
+            </div>
+
+            <div>
+              <div style={{ fontSize: 11, fontWeight: 700, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 6 }}>Step 3 \u2014 paste the URL here</div>
+              <input
+                type="url"
+                value={manualSetupUrl}
+                onChange={e => { setManualSetupUrl(e.target.value); if (manualSetupError) setManualSetupError(''); }}
+                onKeyDown={e => { if (e.key === 'Enter' && !manualSetupSaving) handleSaveManualWebAppUrl(); }}
+                placeholder="https://script.google.com/macros/s/.../exec"
+                disabled={manualSetupSaving}
+                autoFocus
+                style={{ width: '100%', padding: '10px 12px', fontSize: 13, border: `1px solid ${manualSetupError ? '#DC2626' : theme.colors.border}`, borderRadius: 8, fontFamily: 'monospace', outline: 'none', boxSizing: 'border-box' }}
+              />
+              {manualSetupError && (
+                <div style={{ marginTop: 6, fontSize: 12, color: '#DC2626' }}>{manualSetupError}</div>
+              )}
+            </div>
+
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 18 }}>
+              <button
+                onClick={() => { setManualSetupClient(null); setManualSetupUrl(''); setManualSetupError(''); }}
+                disabled={manualSetupSaving}
+                style={{ padding: '9px 18px', fontSize: 13, fontWeight: 500, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: manualSetupSaving ? 'wait' : 'pointer', fontFamily: 'inherit', color: theme.colors.textSecondary }}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleSaveManualWebAppUrl}
+                disabled={manualSetupSaving || !manualSetupUrl.trim()}
+                style={{ padding: '9px 18px', fontSize: 13, fontWeight: 600, border: 'none', borderRadius: 8, background: manualSetupSaving || !manualSetupUrl.trim() ? '#C8BFB4' : theme.colors.orange, color: '#fff', cursor: manualSetupSaving ? 'wait' : !manualSetupUrl.trim() ? 'not-allowed' : 'pointer', fontFamily: 'inherit', display: 'inline-flex', alignItems: 'center', gap: 6 }}
+              >
+                {manualSetupSaving && <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} />}
+                {manualSetupSaving ? 'Saving\u2026' : 'Save'}
               </button>
             </div>
           </div>
