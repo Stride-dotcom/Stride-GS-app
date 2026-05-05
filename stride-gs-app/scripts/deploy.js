@@ -65,6 +65,37 @@ function hasStagedChanges(cwd) {
   }
 }
 
+/**
+ * Push with auto-retry for the Windows schannel TLS hiccup that has bitten
+ * the last several deploys. Symptoms:
+ *
+ *     RPC failed; curl 56 schannel: failed to read data from server:
+ *     SEC_E_MESSAGE_ALTERED (0x8009030f) - The message or signature
+ *     supplied for verification has been altered
+ *     send-pack: unexpected disconnect while reading sideband packet
+ *
+ * The first push usually fails on the ~3MB dist bundle. Retry with a
+ * larger postBuffer and HTTP/1.1 forced (HTTP/2 over schannel is the
+ * unstable combo) and it always goes through. We try the fast path first
+ * (most networks are fine) and only fall back when it errors.
+ *
+ * `args` is the args to `git push` (e.g. ['origin', 'main', '--force']).
+ */
+function pushWithRetry(args, cwd) {
+  const cmd = `git push ${args.join(' ')}`;
+  console.log(`\n[deploy] $ ${cmd}  (in ${cwd.split(/[\\/]/).slice(-2).join('/')})`);
+  try {
+    execSync(cmd, { cwd, stdio: 'inherit', shell: true });
+    return;
+  } catch (firstErr) {
+    console.log('[deploy] push failed (likely Windows schannel TLS) — retrying with postBuffer + HTTP/1.1…');
+    const retryCmd = `git -c http.postBuffer=524288000 -c http.version=HTTP/1.1 push ${args.join(' ')}`;
+    console.log(`[deploy] $ ${retryCmd}`);
+    execSync(retryCmd, { cwd, stdio: 'inherit', shell: true });
+    console.log('[deploy] ✓ retry succeeded');
+  }
+}
+
 // ── Step 1: Build ──────────────────────────────────────────────────────────
 console.log('\n╔══════════════════════════════════════════╗');
 console.log('║  stride-gs-app deploy                    ║');
@@ -80,7 +111,7 @@ run('git add -A', distDir);
 // Commit only if there are staged changes (idempotent if nothing changed)
 if (hasStagedChanges(distDir)) {
   run(`git commit -m "Deploy: ${message}"`, distDir);
-  run('git push origin main --force', distDir);
+  pushWithRetry(['origin', 'main', '--force'], distDir);
   console.log('[deploy] ✓ bundle pushed to GitHub Pages (origin/main)');
 } else {
   console.log('[deploy] bundle: nothing new to commit in dist/');
@@ -97,7 +128,7 @@ if (hasUncommittedChanges(parentDir)) {
 
   if (hasStagedChanges(parentDir)) {
     run(`git commit -m "deploy(react): ${message}"`, parentDir);
-    run('git push origin source', parentDir);
+    pushWithRetry(['origin', 'source'], parentDir);
     console.log('[deploy] ✓ source committed and pushed to origin/source');
   } else {
     console.log('[deploy] source: staged but nothing to commit (already clean)');
@@ -112,7 +143,7 @@ if (hasUncommittedChanges(parentDir)) {
     ).toString().trim();
     if (parseInt(ahead, 10) > 0) {
       console.log(`[deploy] source: ${ahead} commit(s) ahead of origin — pushing`);
-      run('git push origin source', parentDir);
+      pushWithRetry(['origin', 'source'], parentDir);
     }
   } catch (_) { /* ignore */ }
 }
