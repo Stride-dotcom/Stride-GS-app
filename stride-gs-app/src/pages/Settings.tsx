@@ -30,6 +30,7 @@ import { IntakesPanel } from '../components/settings/IntakesPanel';
 import { PublicFormSettings } from '../components/settings/PublicFormSettings';
 import { BackfillDocsPanel } from '../components/settings/BackfillDocsPanel';
 import { useClientTcStatus } from '../hooks/useClientTcStatus';
+import { useClientTcSendHistory, formatTcSendTitle } from '../hooks/useClientTcSendHistory';
 import { IntakeEmailModal } from '../components/shared/IntakeEmailModal';
 import { supabase } from '../lib/supabase';
 import { sendEmail } from '../lib/email';
@@ -863,6 +864,9 @@ export function Settings() {
   useLocations(apiConfigured && true);
   // T&C signed-on-file status for client cards (admin view, Clients sub-tab)
   const { tcMap } = useClientTcStatus();
+  // Last refresh-invite send timestamp per client — drives the hover
+  // tooltip on the Send / Re-send T&C button so staff don't double-send.
+  const { sendMap: tcSendMap } = useClientTcSendHistory();
 
   // Users tab
   const { users, loading: usersLoading, error: usersError, addUser, updateUser, deleteUser, refetch: refetchUsers } = useUsers();
@@ -2808,17 +2812,22 @@ export function Settings() {
                           Replaces the prior 'Send T&C' button which generated a
                           blank new-client-style link — never the right flow for
                           someone who already has an account. */}
-                      {isLive && (c as ApiClient).email && (c as ApiClient).spreadsheetId && clientActive && (
-                        <button
-                          onClick={e => { e.stopPropagation(); void handleSendRefreshLink(c as ApiClient); }}
-                          disabled={refreshLinkLoading === (c as ApiClient).spreadsheetId}
-                          title={`Send refresh-mode intake link to ${c.email} — pre-filled, asks for T&C re-sign + resale-cert renewal`}
-                          style={{ padding: '5px 10px', fontSize: 10, fontWeight: 600, border: `1px solid ${theme.colors.border}`, borderRadius: 6, background: '#fff', cursor: refreshLinkLoading === (c as ApiClient).spreadsheetId ? 'wait' : 'pointer', fontFamily: 'inherit', color: theme.colors.textSecondary, display: 'flex', alignItems: 'center', gap: 4, whiteSpace: 'nowrap' }}
-                        >
-                          {refreshLinkLoading === (c as ApiClient).spreadsheetId ? <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} /> : <Link2 size={11} />}
-                          {tcMap.get((c.email || '').toLowerCase()) ? 'Re-send T&C' : 'Send T&C'}
-                        </button>
-                      )}
+                      {isLive && (c as ApiClient).email && (c as ApiClient).spreadsheetId && clientActive && (() => {
+                        const sendRec = tcSendMap.get((c.email || '').toLowerCase());
+                        const lastSentLine = formatTcSendTitle(sendRec) ?? 'Never sent';
+                        const title = `Send refresh-mode intake link to ${c.email}\n${lastSentLine}`;
+                        return (
+                          <button
+                            onClick={e => { e.stopPropagation(); void handleSendRefreshLink(c as ApiClient); }}
+                            disabled={refreshLinkLoading === (c as ApiClient).spreadsheetId}
+                            title={title}
+                            style={{ padding: '5px 10px', fontSize: 10, fontWeight: 600, border: `1px solid ${theme.colors.border}`, borderRadius: 6, background: '#fff', cursor: refreshLinkLoading === (c as ApiClient).spreadsheetId ? 'wait' : 'pointer', fontFamily: 'inherit', color: theme.colors.textSecondary, display: 'flex', alignItems: 'center', gap: 4, whiteSpace: 'nowrap' }}
+                          >
+                            {refreshLinkLoading === (c as ApiClient).spreadsheetId ? <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} /> : <Link2 size={11} />}
+                            {tcMap.get((c.email || '').toLowerCase()) ? 'Re-send T&C' : 'Send T&C'}
+                          </button>
+                        );
+                      })()}
                       {/* Per-client Supabase sync — re-mirror this one client without running the full bulk sync */}
                       {isLive && (c as ApiClient).spreadsheetId && clientActive && (
                         <button
