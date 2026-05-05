@@ -349,10 +349,14 @@ function resolveAccountName(tenantId: string | null, acctMap: Record<string, str
 // deno-lint-ignore no-explicit-any
 async function pruneDuplicateOrderItems(supabase: any, dtOrderId: string): Promise<void> {
   try {
+    // v2026-05-04: Skip removed rows. Including them risked the
+    // newest-wins sort below preferring a soft-deleted row (whose
+    // updated_at got bumped at removal time) over its active duplicate.
     const { data, error } = await supabase
       .from('dt_order_items')
       .select('id, dt_item_code, description, updated_at, created_at')
-      .eq('dt_order_id', dtOrderId);
+      .eq('dt_order_id', dtOrderId)
+      .is('removed_at', null);
     if (error || !data) return;
 
     const normDesc = (s: string | null) => (s ?? '').toLowerCase().replace(/\s+/g, ' ').trim();
@@ -504,10 +508,14 @@ Deno.serve(async (req: Request) => {
   await pruneDuplicateOrderItems(supabase, orderId);
 
   // ── 2. Fetch items for primary order ──────────────────────────────────
+  // v2026-05-04: Filter removed_at IS NULL so soft-removed items (either
+  // by app-side edit or DT→App sync) don't get re-pushed back to DT on
+  // a republish. A republish should reflect Stride's current state.
   const { data: items, error: itemsErr } = await supabase
     .from('dt_order_items')
     .select('id, dt_item_code, description, quantity, vendor, class_name, cubic_feet, extras')
-    .eq('dt_order_id', orderId);
+    .eq('dt_order_id', orderId)
+    .is('removed_at', null);
 
   if (itemsErr) {
     return new Response(JSON.stringify({ ok: false, error: `Items fetch failed: ${itemsErr.message}` }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
@@ -555,50 +563,52 @@ Deno.serve(async (req: Request) => {
 
     if (!linkedErr && linkedOrder) {
       const linkedTyped = linkedOrder as DtOrderRow;
-      // Only push if not already pushed
-      if (!linkedTyped.pushed_to_dt_at) {
-        // Same dedup the primary order gets — see pruneDuplicateOrderItems.
-        await pruneDuplicateOrderItems(supabase, linkedTyped.id);
-        const { data: linkedItems } = await supabase
-          .from('dt_order_items')
-          .select('id, dt_item_code, description, quantity, vendor, class_name, cubic_feet, extras')
-          .eq('dt_order_id', linkedTyped.id);
-        const linkedItemsTyped = (linkedItems || []) as DtOrderItemRow[];
+      // v2026-05-04: Lifted the "skip if already pushed" guard. DT's
+      // add_order is upsert-by-identifier (Ashok confirmed): re-posting
+      // the same order_number with an updated payload replaces the
+      // existing order in DT. Without this, the pickup leg's edits
+      // (item add/remove, time-window change, address fix) never
+      // propagated after the first push.
+      // Same dedup the primary order gets — see pruneDuplicateOrderItems.
+      await pruneDuplicateOrderItems(supabase, linkedTyped.id);
+      const { data: linkedItems } = await supabase
+        .from('dt_order_items')
+        .select('id, dt_item_code, description, quantity, vendor, class_name, cubic_feet, extras')
+        .eq('dt_order_id', linkedTyped.id)
+        .is('removed_at', null);
+      const linkedItemsTyped = (linkedItems || []) as DtOrderItemRow[];
 
-        const linkedPush = await pushSingleOrder(
-          linkedTyped, linkedItemsTyped, accountName, postUrl,
-          orderTyped.dt_identifier, // cross-ref points to the delivery
-          { // delivery info for the pickup leg's description
-            identifier: orderTyped.dt_identifier,
-            contactName: orderTyped.contact_name || undefined,
-            address: orderTyped.contact_address || undefined,
-            city: orderTyped.contact_city || undefined,
-            state: orderTyped.contact_state || undefined,
-            zip: orderTyped.contact_zip || undefined,
-          },
-        );
+      const linkedPush = await pushSingleOrder(
+        linkedTyped, linkedItemsTyped, accountName, postUrl,
+        orderTyped.dt_identifier, // cross-ref points to the delivery
+        { // delivery info for the pickup leg's description
+          identifier: orderTyped.dt_identifier,
+          contactName: orderTyped.contact_name || undefined,
+          address: orderTyped.contact_address || undefined,
+          city: orderTyped.contact_city || undefined,
+          state: orderTyped.contact_state || undefined,
+          zip: orderTyped.contact_zip || undefined,
+        },
+      );
 
-        if (!linkedPush.ok) {
-          return new Response(JSON.stringify({
-            ok: false,
-            error: `Linked pickup push failed: ${linkedPush.errMsg}`,
-            responseBody: linkedPush.body.slice(0, 500),
-          }), { status: 502, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
-        }
-
-        await supabase
-          .from('dt_orders')
-          .update({
-            pushed_to_dt_at: new Date().toISOString(),
-            source: 'app',
-            last_synced_at: new Date().toISOString(),
-          })
-          .eq('id', linkedTyped.id);
-
-        linkedPushedIdentifier = linkedTyped.dt_identifier;
-      } else {
-        linkedPushedIdentifier = linkedTyped.dt_identifier;
+      if (!linkedPush.ok) {
+        return new Response(JSON.stringify({
+          ok: false,
+          error: `Linked pickup push failed: ${linkedPush.errMsg}`,
+          responseBody: linkedPush.body.slice(0, 500),
+        }), { status: 502, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       }
+
+      await supabase
+        .from('dt_orders')
+        .update({
+          pushed_to_dt_at: new Date().toISOString(),
+          source: 'app',
+          last_synced_at: new Date().toISOString(),
+        })
+        .eq('id', linkedTyped.id);
+
+      linkedPushedIdentifier = linkedTyped.dt_identifier;
     }
   }
 

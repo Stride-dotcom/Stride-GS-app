@@ -1790,6 +1790,9 @@ export interface DtOrderForUI {
   createdByName: string;
   createdByEmail: string;
   pushedToDtAt: string | null;
+  /** Last DB-update timestamp. Used by the Order page to detect "edited
+   *  since last DT push" and surface the Republish-to-DT affordance. */
+  updatedAt: string | null;
   // Billing
   billingMethod: 'bill_to_client' | 'customer_collect' | 'prepaid';
   paymentCollected: boolean;
@@ -2050,6 +2053,7 @@ export async function fetchDtOrdersFromSupabase(
         createdByName: (row.created_by_user ? profileMap.get(row.created_by_user)?.displayName : '') ?? '',
         createdByEmail: (row.created_by_user ? profileMap.get(row.created_by_user)?.email : '') ?? '',
         pushedToDtAt: row.pushed_to_dt_at,
+        updatedAt: row.updated_at,
         // Billing
         billingMethod: (row.billing_method as DtOrderForUI['billingMethod']) ?? 'bill_to_client',
         paymentCollected: row.payment_collected ?? false,
@@ -2194,6 +2198,7 @@ export async function fetchDtOrderByIdFromSupabase(
       createdByName: '',
       createdByEmail: '',
       pushedToDtAt: row.pushed_to_dt_at,
+      updatedAt: row.updated_at,
       billingMethod: (row.billing_method as DtOrderForUI['billingMethod']) ?? 'bill_to_client',
       paymentCollected: row.payment_collected ?? false,
       paymentCollectedAt: row.payment_collected_at,
