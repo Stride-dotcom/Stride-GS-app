@@ -9,8 +9,8 @@
 | System | Version | Notes |
 |---|---|---|
 | React app (GitHub Pages) | Latest on `origin/source` | `npm run deploy` from source |
-| StrideAPI.gs | **v38.177.0** | Polymorphic addons module — task/repair/will_call all flush via `api_writeAddonsToLedger_`. Latest in the v38.16x–v38.17x sweep on 2026-05-04. |
-| Supabase | 68+ migrations applied | Multi-tenant RLS access (`user_has_tenant_access` helper) — clients with multiple tenant assignments can now read entity rows + storage objects across all accessible tenants |
+| StrideAPI.gs | **v38.182.0** | Atomic Postgres invoice counter retires the Master sheet RPC race (eliminates the INV-XXXXXX duplicate-number bug class). |
+| Supabase | 69+ migrations applied | `public.next_invoice_no()` Postgres SEQUENCE replaces the Master sheet RPC counter for invoice numbering. Multi-tenant RLS access (`user_has_tenant_access` helper) — clients with multiple tenant assignments can now read entity rows + storage objects across all accessible tenants. |
 | Client scripts | Rolled out to 49 active clients | Code.gs v4.6.0, Import.gs v4.3.0 |
 | StaxAutoPay.gs | v4.7.6 | Charge Log Customer/Transaction header fix |
 
@@ -94,6 +94,33 @@ UI components: FloatingActionMenu, WriteButton, BatchGuard, ActionTooltip, Batch
 - Quote Tool with PDF generation
 - Expected operations calendar
 - QR Scanner + Labels (native React, Supabase-backed)
+
+---
+
+## Recent Changes (2026-05-04, atomic invoice counter)
+
+**Goal:** Retire the Master sheet RPC counter race that caused the INV-000131 duplicate (2026-05-03) and forced Billing.tsx to pin its invoice loop at `concurrency=1`. Move invoice numbering to a Postgres atomic SEQUENCE.
+
+**Root cause recap:** `api_nextInvoiceNo_` called a separate Apps Script project's `getNextInvoiceId` action — that handler reads-then-writes a counter on the Master Price List sheet without a transaction lock. Two concurrent createInvoice calls could both observe the same counter value, both increment, both return the same number. INV-000131 hit it: NORTON + NIPTUCK submitted within ~1.2s, both got INV-000131, the second commit's row-position-based rollback then chopped the wrong rows. v38.157.0 added half-write recovery; the workaround was to serialize the entire React-side loop.
+
+**Fix:**
+
+- **Migration `invoice_no_atomic_counter`** (`supabase/migrations/20260504220000_invoice_no_atomic_counter.sql`): creates `public.invoice_no_seq` SEQUENCE seeded at 1000 (currently MAX invoice = INV-000144; 850+ headroom is well past anything the Master RPC could plausibly have queued). New `public.next_invoice_no()` SQL function returns `'INV-' || LPAD(nextval(seq), 6, '0')` — atomic by design, concurrency-safe, no transient failure modes. Companion `public.peek_invoice_no_seq()` for diagnostics. Both functions GRANTed to authenticated + service_role.
+
+- **StrideAPI.gs v38.182.0:** `api_nextInvoiceNo_` becomes a thin wrapper around the new `api_nextInvoiceNoSupabase_` helper. Legacy `rpcUrl/rpcToken` parameters kept for signature compat but ignored. The Master RPC counter is left in place but inert (other callers like `getNextShipmentNo` continue to use it; only invoice numbering migrated).
+
+- **Billing.tsx:** `handleCreateInvoices` runBatchLoop bumps `concurrency` from 1 back to 3.
+
+**Speedup expectation:** modest, ~10-30% wall-time reduction on multi-client batches. The dominant cost is `handleCreateInvoice_`'s outer `LockService.getScriptLock` for the Consolidated_Ledger commit phase — that still serializes per-invoice. True 3x parallelism requires refactoring that lock to per-tenant scope, which is a separate follow-up. The primary win of THIS PR is **eliminating the duplicate-number bug class entirely**.
+
+**Files touched:**
+- `stride-gs-app/supabase/migrations/20260504220000_invoice_no_atomic_counter.sql` (new)
+- `AppScripts/stride-api/StrideAPI.gs` (v38.182.0)
+- `stride-gs-app/src/pages/Billing.tsx`
+
+**Pending user action:**
+- [ ] Deploy GAS: `npm run push-api && npm run deploy-api` from `AppScripts/stride-client-inventory/` after merge. (Migration already applied via MCP.)
+- [ ] Smoke test: create 2-3 invoices in quick succession (e.g. multi-client storage batch) → confirm distinct INV-001000+ numbers, no duplicates, no LOCK_TIMEOUT errors. The first new invoice ships at INV-001000 (the gap from INV-000144 → INV-001000 is intentional headroom).
 
 ---
 
