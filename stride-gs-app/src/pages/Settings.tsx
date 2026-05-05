@@ -765,7 +765,7 @@ export function Settings() {
   } | null>(null);
   const [resendTcSending, setResendTcSending] = useState(false);
 
-  const handleResendTcSend = async (subject: string, bodyHtml: string) => {
+  const handleResendTcSend = async (subject: string, bodyHtml: string, bcc: string[]) => {
     if (!resendTcModal) return;
     setResendTcSending(true);
     try {
@@ -774,9 +774,12 @@ export function Settings() {
       // by the modal so staff edits flow through; templateKey is recorded
       // for audit. Idempotency by intake link id prevents accidental
       // double-sends.
+      // bcc is populated by the modal's "Send me a copy" checkbox (default
+      // on) so the sending staff member gets a paper trail of every invite.
       const result = await sendEmail({
         templateKey:       'ACCOUNT_REFRESH_INVITATION',
         to:                resendTcModal.prospectEmail,
+        bcc:               bcc.length > 0 ? bcc : undefined,
         subjectOverride:   subject,
         htmlOverride:      bodyHtml,
         idempotencyKey:    `account-refresh-invite:${resendTcModal.linkId}`,
@@ -2991,6 +2994,7 @@ export function Settings() {
                   intakeUrl={resendTcModal.intakeUrl}
                   templateSubject={resendTcModal.subject}
                   templateBody={resendTcModal.body}
+                  senderEmail={realUser?.email ?? null}
                   onSend={handleResendTcSend}
                   onCopyLink={() => setResendTcModal(null)}
                   onClose={() => setResendTcModal(null)}

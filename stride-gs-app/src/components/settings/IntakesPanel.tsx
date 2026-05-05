@@ -23,6 +23,7 @@ import { postOnboardClient, apiFetch } from '../../lib/api';
 import type { EmailTemplate } from '../../lib/api';
 import { supabase } from '../../lib/supabase';
 import { sendEmail } from '../../lib/email';
+import { useAuth } from '../../contexts/AuthContext';
 import { useClients } from '../../hooks/useClients';
 import { fetchAdminIntakeDrafts, type AdminIntakeDraft } from '../../hooks/useClientIntake';
 
@@ -489,6 +490,7 @@ function GenerateLinkBlock({ links, generateLink, revokeLink }: {
   generateLink: ReturnType<typeof useIntakeAdmin>['generateLink'];
   revokeLink: ReturnType<typeof useIntakeAdmin>['revokeLink'];
 }) {
+  const { realUser } = useAuth();
   const [open, setOpen] = useState(false);
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
@@ -557,7 +559,7 @@ function GenerateLinkBlock({ links, generateLink, revokeLink }: {
     };
   };
 
-  const handleSendEmail = async (subject: string, bodyHtml: string) => {
+  const handleSendEmail = async (subject: string, bodyHtml: string, bcc: string[]) => {
     if (!modalFresh) return;
     setEmailSending(true);
     try {
@@ -571,9 +573,12 @@ function GenerateLinkBlock({ links, generateLink, revokeLink }: {
       // idempotencyKey ties the send to the intake link id — preventing
       // accidental double-sends if the modal "Send" button is clicked
       // twice or the request races a refresh.
+      // bcc is populated by the modal's "Send me a copy" checkbox so the
+      // sending staff member gets a paper trail of every invite.
       const result = await sendEmail({
         templateKey:       'CLIENT_INTAKE_INVITE',
         to:                modalProspectEmail,
+        bcc:               bcc.length > 0 ? bcc : undefined,
         subjectOverride:   subject,
         htmlOverride:      bodyHtml,
         idempotencyKey:    `intake-invite:${modalFresh.linkId}`,
@@ -717,6 +722,7 @@ function GenerateLinkBlock({ links, generateLink, revokeLink }: {
           intakeUrl={url(modalFresh.linkId)}
           templateSubject={modal.subject}
           templateBody={modal.body}
+          senderEmail={realUser?.email ?? null}
           onSend={handleSendEmail}
           onCopyLink={() => setEmailModalOpen(false)}
           onClose={() => setEmailModalOpen(false)}
