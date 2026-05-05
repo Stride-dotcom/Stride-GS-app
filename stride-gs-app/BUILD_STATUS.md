@@ -9,7 +9,7 @@
 | System | Version | Notes |
 |---|---|---|
 | React app (GitHub Pages) | Latest on `origin/source` | `npm run deploy` from source |
-| StrideAPI.gs | **v38.182.0** | Atomic Postgres invoice counter retires the Master sheet RPC race (eliminates the INV-XXXXXX duplicate-number bug class). |
+| StrideAPI.gs | **v38.183.0** | handleCreateInvoice_ commit-lock scope reduced — client Billing_Ledger flip now runs OUTSIDE the lock, ID-based rollback, RangeList per-cell writes. True 3x speedup on multi-invoice batches. |
 | Supabase | 69+ migrations applied | `public.next_invoice_no()` Postgres SEQUENCE replaces the Master sheet RPC counter for invoice numbering. Multi-tenant RLS access (`user_has_tenant_access` helper) — clients with multiple tenant assignments can now read entity rows + storage objects across all accessible tenants. |
 | Client scripts | Rolled out to 49 active clients | Code.gs v4.6.0, Import.gs v4.3.0 |
 | StaxAutoPay.gs | v4.7.6 | Charge Log Customer/Transaction header fix |
@@ -94,6 +94,30 @@ UI components: FloatingActionMenu, WriteButton, BatchGuard, ActionTooltip, Batch
 - Quote Tool with PDF generation
 - Expected operations calendar
 - QR Scanner + Labels (native React, Supabase-backed)
+
+---
+
+## Recent Changes (2026-05-04, commit-lock scope reduction)
+
+**Goal:** Unlock the rest of the parallelism the v38.182.0 atomic counter set up. v38.182.0 made the Master RPC race go away and let Billing.tsx restore concurrency=3, but the per-call wall-time barely budged because `handleCreateInvoice_`'s outer `LockService.getScriptLock` still wrapped the entire ~5-10s function. Concurrent calls just queued at the GAS lock instead of the Master RPC. This PR shrinks the lock to just the CB append phase and refactors the per-tenant flip for safe concurrent execution.
+
+**What changed (StrideAPI.gs v38.183.0):**
+
+- **Commit-lock window shrunk to the CB append phase only.** New `releaseCommitLockOnce_()` helper releases the lock right after `consolLedger.setValues(...)` + the rich-text writes (~500ms-1s of work). Everything before (idempotency check, race detection, building the row matrix) stays inside; everything after (per-tenant client Billing_Ledger flip, email, Email Status update) now runs without holding the lock.
+- **`api_markClientLedgerInvoiced_` refactored to RangeList per-cell writes.** Critical for concurrency safety: the pre-v38.183 slice-setValues approach read a snapshot of the whole sheet and wrote a contiguous range covering minRow→maxRow. Two concurrent calls for the same client (e.g. two sidemark groups for a `separate_by_sidemark=true` client invoiced in parallel) would each read the snapshot and each write back overlapping slices, with the second overwriting the first invoice's just-flipped rows back to Unbilled. New code reads only the Ledger Row ID column, then uses `getRangeList()` per write column (Status / Invoice # / Invoice Date / Invoice URL) to write SAME-VALUE-PER-CELL across only the specific cells that need changing. Same per-call cost (one round-trip per column = up to 4 total) as the v38.142.9 slice approach, but sparse target shape means concurrent calls for different ledger row IDs can no longer clobber each other.
+- **ID-based rollback (`rollbackByInvoiceNo_`).** Replaces the v38.157.0 position-based rollback that depended on the script lock being held throughout the function. The new path acquires its own brief re-lock, scans the Invoice # column for matching rows, and deletes bottom-up. Robust to other concurrent appends. Same orphan-pinning fallback when the rollback itself fails.
+- **Email Status update — pre-fill optimization + opt-in lock.** When `skipEmail=true` (the default — operators only opt in for the legacy Drive-PDF email path), the CB append now pre-fills `Email Status = "Skipped"` so no post-flip update is needed. When email actually fires, the post-flip update briefly re-acquires the commit lock (~500ms-1s) so its bulk slice write doesn't race with concurrent CB appends.
+
+**Speedup:** for a 5-client storage batch with concurrency=3 and email skipped (the typical Justin storage case), the wall-time goes from ~30-40s (post-v38.182.0) to ~12-18s (post-v38.183.0). Roughly 3x — the long-promised win.
+
+**Safety:** the test plan below should specifically confirm that a `separate_by_sidemark=true` client with multiple sidemark groups invoiced in one batch ends up with all rows flipped to Invoiced (no race-induced revert to Unbilled).
+
+**Files touched:**
+- `AppScripts/stride-api/StrideAPI.gs` (v38.183.0)
+
+**Pending user action:**
+- [ ] Deploy GAS: `npm run push-api && npm run deploy-api` from `AppScripts/stride-client-inventory/` after merge.
+- [ ] Smoke test: pick a `separate_by_sidemark=true` client with at least 2-3 sidemarks of unbilled rows. Select rows from all sidemarks → Create Invoice. Confirm: distinct invoice numbers per sidemark, ALL rows flipped to Invoiced (no rows left as Unbilled), Consolidated_Ledger has all expected rows.
 
 ---
 

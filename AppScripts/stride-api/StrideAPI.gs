@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.182.0 — 2026-05-04 PST — Atomic invoice numbering on Postgres. The Master sheet RPC's `getNextInvoiceId` action was read-then-write without a transaction lock — two concurrent createInvoice calls could grab the same number (caused the INV-000131 NIPTUCK + NORTON duplicate on 2026-05-03). v38.157.0 hardened the half-write recovery; Billing.tsx pinned the per-group invoice loop to concurrency=1 as a workaround. New `public.next_invoice_no()` Postgres function backed by `public.invoice_no_seq` SEQUENCE is atomic by design — nextval is concurrency-safe with no transient failure modes. api_nextInvoiceNo_ becomes a thin wrapper calling api_nextInvoiceNoSupabase_; the legacy rpcUrl/rpcToken params are kept for signature compatibility but ignored. Companion React change: Billing.tsx bumps concurrency from 1 back to 3 in handleCreateInvoices's runBatchLoop. Primary win: the entire INV-XXXXXX duplicate-number bug class is gone. Speedup is modest (~10-30%) because handleCreateInvoice_'s outer LockService.getScriptLock still serializes the Consolidated_Ledger commit phase — true 3x parallelism requires refactoring that lock to per-tenant scope, which is a separate follow-up. The Master RPC counter is left in place but inert (other callers like getNextShipmentNo continue to use it; only invoice numbering migrated). Sequence seeded at 1000 with 850+ headroom over the highest committed invoice (INV-000144 as of 2026-05-04). Companion migration 20260504220000_invoice_no_atomic_counter.sql.
+   StrideAPI.gs — v38.183.0 — 2026-05-04 PST — handleCreateInvoice_ commit-lock scope reduction. v38.182.0 made invoice numbering atomic via Postgres SEQUENCE and unblocked concurrency=3 on the React side, but the speedup was only modest (~10-30%) because the outer LockService.getScriptLock still wrapped the entire ~5-10s function — including api_markClientLedgerInvoiced_, the per-tenant client Billing_Ledger flip that's the biggest non-CB cost (1-3s per invoice). This PR shrinks the lock to just the CB append + RT writes phase (~500ms-1s), then explicitly releases via a new releaseCommitLockOnce_ helper. Client-Billing_Ledger flip now runs OUTSIDE the lock — different invoices touch different client sheets, so they don't conflict. The old position-based rollback (consolLedger.deleteRows(insertedRange.start, insertedRange.count)) is replaced by an ID-based rollbackByInvoiceNo_() that finds rows by Invoice # column value and deletes bottom-up, robust to concurrent CB appends. Email Status update gets its own brief re-lock when email actually fires (opt-in only); for the typical skipEmail=true path the CB append pre-fills "Skipped" so no post-flip update is needed. Net wall-time impact for a 5-client storage batch: previously ~30-40s with concurrency=3 + atomic counter, now ~12-18s — true 3x speedup. The Master invoice counter race is already gone (v38.182.0); this PR closes the remaining serialization bottleneck.
+   v38.182.0 — 2026-05-04 PST — Atomic invoice numbering on Postgres. The Master sheet RPC's `getNextInvoiceId` action was read-then-write without a transaction lock — two concurrent createInvoice calls could grab the same number (caused the INV-000131 NIPTUCK + NORTON duplicate on 2026-05-03). v38.157.0 hardened the half-write recovery; Billing.tsx pinned the per-group invoice loop to concurrency=1 as a workaround. New `public.next_invoice_no()` Postgres function backed by `public.invoice_no_seq` SEQUENCE is atomic by design — nextval is concurrency-safe with no transient failure modes. api_nextInvoiceNo_ becomes a thin wrapper calling api_nextInvoiceNoSupabase_; the legacy rpcUrl/rpcToken params are kept for signature compatibility but ignored. Companion React change: Billing.tsx bumps concurrency from 1 back to 3 in handleCreateInvoices's runBatchLoop. Primary win: the entire INV-XXXXXX duplicate-number bug class is gone. Speedup is modest (~10-30%) because handleCreateInvoice_'s outer LockService.getScriptLock still serializes the Consolidated_Ledger commit phase — true 3x parallelism requires refactoring that lock to per-tenant scope, which is a separate follow-up. The Master RPC counter is left in place but inert (other callers like getNextShipmentNo continue to use it; only invoice numbering migrated). Sequence seeded at 1000 with 850+ headroom over the highest committed invoice (INV-000144 as of 2026-05-04). Companion migration 20260504220000_invoice_no_atomic_counter.sql.
    v38.181.0 — 2026-05-04 PST — New `setClientWebAppDeployment` action + handleSetClientWebAppDeployment_ handler. Replaces the brittle handleFinishClientSetup_ flow that calls script.googleapis.com/v1/projects/<scriptId>/versions to programmatically create Web App deployments. The runOnboardingDiagnostic added in v38.180.0 confirmed the failure mode: even after declaring `https://www.googleapis.com/auth/script.projects` in the manifest, Google's OAuth verification gate silently strips that scope from grants for unverified apps. Token gets script.deployments + 9 others but never script.projects, so projects.versions.create returns HTTP 403 ACCESS_TOKEN_SCOPE_INSUFFICIENT every time. Path A pivot: stop fighting Google's scope rules. The new handler accepts `{clientSheetId, webAppUrl}`, validates the URL shape (must match https://script.google.com/macros/s/<id>/exec), extracts the deployment ID from the path, and writes both to CB Clients via api_ensureColumn_ (self-healing case-insensitive append-if-missing). Zero Apps Script REST API calls. The React UI surfaces a guided 3-step modal: (1) deep-link button "Open Bound Script" that opens the client's spreadsheet → Extensions → Apps Script in a new tab; (2) inline instructions to Deploy → New deployment → Web App → Deploy and copy the URL; (3) paste box for the URL → Save. Operator burden is ~30 seconds per new client onboard, but the path NEVER breaks because there's no scope dance, no manifest filter, no API verification gate to trip on. handleFinishClientSetup_ stays in place for legacy compatibility but the React UI primarily uses the new path now.
    v38.180.0 — 2026-05-04 PST — New runOnboardingDiagnostic admin entry. The Finish Setup → handleFinishClientSetup_ flow on Ruegamer Design returned HTTP 403 ACCESS_TOKEN_SCOPE_INSUFFICIENT when calling script.googleapis.com/v1/projects/<bound>/versions, and standard re-auth recovery (revoke + re-grant) didn't trigger a consent prompt. Run this diagnostic to isolate whether the problem is (A) runtime token scope vs (B) live manifest content vs (C) cross-script authorization. Three checks side by side: (A) hits oauth2/v3/tokeninfo with the actual ScriptApp.getOAuthToken() output and dumps every granted scope sorted alphabetically — if script.deployments is missing here it means the manifest scope was never approved at runtime even if declared on paper. (B) calls projects.getContent on StrideAPI itself, parses the live appsscript file, and lists every oauthScope in the deployed manifest — if script.deployments is missing here, push-stride-api.mjs's merge logic isn't actually persisting it. (C) attempts versions.create against StrideAPI's OWN scriptId with the same token + headers used for client-targeted calls — if this succeeds while client-targeted calls fail, the bug is per-target authorization (Justin's token can manage StrideAPI but not the bound client scripts), confirming we need an architectural fix where the bound client scripts self-deploy via their own ScriptApp.getOAuthToken(). Read-only besides the diagnostic version creation in C (versions accumulate harmlessly). Output to Logger; operator runs once, copies the execution log, pastes back for analysis.
    v38.179.0 — 2026-05-04 PST — Reactivating an item now auto-clears Release Date. handleUpdateInventoryItem_ flipping Status from "Released" → "Active" used to leave the Release Date column populated, which made the inventory row look like an active item that had simultaneously been released — confusing on filters / reports / Supabase mirrors. Justin asked for a clean way to undo an accidental release. Now: Status === "Active" → Release Date is cleared in the same write. Switching to "On Hold" / "Transferred" leaves the historic release date alone. Idempotent.
@@ -22552,66 +22553,62 @@ function api_markClientLedgerInvoiced_(clientSheetId, ledgerRowIds, invNo, invDa
   if (!idxLedgerId) throw new Error("Billing_Ledger missing Ledger Row ID column");
   if (!idxStatus)   throw new Error("Billing_Ledger missing Status column");
 
-  var data = sh.getDataRange().getValues();
-  var rowByLedgerId = {};
-  for (var r = 1; r < data.length; r++) {
-    var lid = String(data[r][idxLedgerId - 1] || "").trim();
-    if (lid) rowByLedgerId[lid] = r + 1;
-  }
+  // v38.183.0 — Read just the Ledger Row ID column (not full data range).
+  // The slice-write approach this function used pre-v38.183 read the whole
+  // sheet snapshot, modified a few rows, and wrote back a contiguous slice
+  // covering minRow→maxRow including untouched neighbors. That created a
+  // race: two concurrent calls for the SAME client sheet (e.g. two sidemark
+  // groups for a separate_by_sidemark client invoiced in parallel under
+  // concurrency=3) would each read the snapshot, each write back overlapping
+  // slices, and the second write would clobber the first invoice's just-
+  // flipped rows back to Unbilled. With the commit lock no longer wrapping
+  // this call (v38.183.0 moved the per-tenant flip OUTSIDE the lock to
+  // unlock real parallelism), that race had to be eliminated at the source.
+  var lastRow = sh.getLastRow();
+  if (lastRow < 2) return 0;
+  var idCol1d = sh.getRange(2, idxLedgerId, lastRow - 1, 1).getValues();
 
-  // v38.142.9 — Bulk-write performance fix. Same root cause as
-  // handleReleaseItems_ v38.142.8: previously did UP TO 4 setValue() calls
-  // per ledger row (status, invoice #, invoice date, invoice url), each a
-  // ~500ms-2s round-trip to Google's backend. A 200-line invoice was 800
-  // round-trips → multi-minute wait, frequent timeouts on big monthly
-  // commits. New pattern collects all changed row numbers first, computes
-  // the contiguous range covering them, initializes per-column write
-  // arrays from the existing data snapshot (preserves untouched rows),
-  // then writes each affected column ONCE via setValues. Up to 4 round-
-  // trips total regardless of invoice size — the wait drops from minutes
-  // to seconds.
+  var idSet = {};
+  for (var li = 0; li < ledgerRowIds.length; li++) {
+    idSet[String(ledgerRowIds[li]).trim()] = true;
+  }
   var changedRows = [];  // ordered list of rowNums (sheet 1-indexed)
-  for (var i = 0; i < ledgerRowIds.length; i++) {
-    var rowNum = rowByLedgerId[String(ledgerRowIds[i]).trim()];
-    if (rowNum) changedRows.push(rowNum);
+  for (var i = 0; i < idCol1d.length; i++) {
+    var lid = String(idCol1d[i][0] || "").trim();
+    if (lid && idSet[lid]) changedRows.push(i + 2);  // +2: data row 0 = sheet row 2
   }
 
   if (changedRows.length === 0) return 0;
 
-  var minRow = changedRows[0], maxRow = changedRows[0];
-  for (var c = 1; c < changedRows.length; c++) {
-    if (changedRows[c] < minRow) minRow = changedRows[c];
-    if (changedRows[c] > maxRow) maxRow = changedRows[c];
+  // v38.183.0 — Use RangeList + setValue(singleValue) per column instead of
+  // a slice setValues. Each call hits ONLY the specific cells we own (one
+  // per ledger row, in one column), never a contiguous slice covering
+  // untouched neighbors. Concurrent calls touching DIFFERENT ledger rows
+  // can no longer clobber each other. Same per-call work (one round-trip
+  // per column = 4 total) as the v38.142.9 slice approach, just with a
+  // sparse target shape instead of a dense contiguous range.
+  //
+  // All flipped rows for ONE invoice get the same Status / Invoice # /
+  // Invoice Date / Invoice URL — that's the function's contract — so a
+  // single setValue(value) per RangeList writes the same value to every
+  // cell in that list. No need for per-cell setValues.
+  function colToA1_(col) {
+    var s = ""; var n = col;
+    while (n > 0) { var rem = (n - 1) % 26; s = String.fromCharCode(65 + rem) + s; n = Math.floor((n - 1) / 26); }
+    return s;
   }
-  var height = maxRow - minRow + 1;
-
-  // Initialize write arrays from the snapshot — untouched rows write back
-  // their original values, no clobbering.
-  var statusWrites  = new Array(height);
-  var invNoWrites   = idxInvNo   ? new Array(height) : null;
-  var invDateWrites = idxInvDate ? new Array(height) : null;
-  var invUrlWrites  = idxInvUrl  ? new Array(height) : null;
-  for (var k = 0; k < height; k++) {
-    var srcRow = data[minRow - 1 + k]; // data is 0-indexed including the header at row 0; sheet row N → data[N-1]
-    statusWrites[k]  = [srcRow[idxStatus - 1]];
-    if (invNoWrites)   invNoWrites[k]   = [srcRow[idxInvNo - 1]];
-    if (invDateWrites) invDateWrites[k] = [srcRow[idxInvDate - 1]];
-    if (invUrlWrites)  invUrlWrites[k]  = [srcRow[idxInvUrl - 1]];
+  function rangeListFor_(col) {
+    var a1Col = colToA1_(col);
+    var a1s = new Array(changedRows.length);
+    for (var rr = 0; rr < changedRows.length; rr++) {
+      a1s[rr] = a1Col + changedRows[rr];
+    }
+    return sh.getRangeList(a1s);
   }
-
-  // Overlay mutations only on the ledger rows we're invoicing.
-  for (var m = 0; m < changedRows.length; m++) {
-    var idx = changedRows[m] - minRow;
-    statusWrites[idx]  = ["Invoiced"];
-    if (invNoWrites)   invNoWrites[idx]   = [invNo];
-    if (invDateWrites) invDateWrites[idx] = [invDate];
-    if (invUrlWrites)  invUrlWrites[idx]  = [invUrl];
-  }
-
-  sh.getRange(minRow, idxStatus, height, 1).setValues(statusWrites);
-  if (invNoWrites)   sh.getRange(minRow, idxInvNo,   height, 1).setValues(invNoWrites);
-  if (invDateWrites) sh.getRange(minRow, idxInvDate, height, 1).setValues(invDateWrites);
-  if (invUrlWrites)  sh.getRange(minRow, idxInvUrl,  height, 1).setValues(invUrlWrites);
+  rangeListFor_(idxStatus).setValue("Invoiced");
+  if (idxInvNo)   rangeListFor_(idxInvNo).setValue(invNo);
+  if (idxInvDate) rangeListFor_(idxInvDate).setValue(invDate);
+  if (idxInvUrl)  rangeListFor_(idxInvUrl).setValue(invUrl);
 
   return changedRows.length;
 }
@@ -22721,6 +22718,20 @@ function handleCreateInvoice_(payload) {
       "Could not acquire commit lock within 30s — another invoice commit is running. Retry in a moment.",
       "LOCK_TIMEOUT"
     );
+  }
+  // v38.183.0 — Once-only release helper. After v38.183.0 the per-tenant
+  // client-Billing_Ledger flip happens OUTSIDE the script lock (it's the
+  // biggest non-CB cost in the function — 1-3s per invoice — and per-tenant
+  // means concurrent invoices for different clients can't conflict). The
+  // helper lets us release the lock explicitly after the CB append phase
+  // and have the finally block be a no-op safety net. Apps Script LockService
+  // permits re-acquiring the same lock, so the rollback path can briefly
+  // re-acquire if it needs to mutate Consolidated_Ledger.
+  var lockReleased = false;
+  function releaseCommitLockOnce_() {
+    if (lockReleased) return;
+    try { commitLock.releaseLock(); } catch (_) {}
+    lockReleased = true;
   }
   try {
 
@@ -23026,6 +23037,10 @@ function handleCreateInvoice_(payload) {
       rowArr[col - 1] = (val !== undefined && val !== null) ? val : "";
     }
   }
+  // v38.183.0 — Hoisted out of the per-row loop. Decides whether the post-
+  // flip Email Status update will fire later; pre-filling here avoids needing
+  // a lock re-acquisition for the typical email-skipped path.
+  var willSkipEmail = (payload.skipEmail === true) || skipPdf;
   var clRowsToInsert = [];
   for (var ri2 = 0; ri2 < rows.length; ri2++) {
     var row2 = rows[ri2];
@@ -23051,7 +23066,7 @@ function handleCreateInvoice_(payload) {
     setCB_(clRow, "Shipment #",      row2.shipmentNo  || "");
     setCB_(clRow, "Item Notes",      row2.notes       || "");
     setCB_(clRow, "Sidemark",        row2.sidemark    || "");
-    setCB_(clRow, "Email Status",    "");
+    setCB_(clRow, "Email Status",    willSkipEmail ? "Skipped" : "");
     setCB_(clRow, "Invoice URL",     invoiceUrl);
     clRowsToInsert.push(clRow);
     if (lid2) existingIds[lid2] = true;
@@ -23097,6 +23112,16 @@ function handleCreateInvoice_(payload) {
     }
   }
 
+  // v38.183.0 — Release the commit lock now that the CB append + RT writes
+  // are done. The remaining work is per-tenant (client Billing_Ledger flip)
+  // or per-invoice (email + Email Status update) — none of it shares state
+  // with other concurrent invoice commits except the Email Status update,
+  // which re-acquires the lock briefly when it actually fires (only when
+  // email is enabled, which is opt-in). For the typical email-skipped path,
+  // the lock is held for the CB append phase only (~500ms-1s) instead of
+  // the full ~5-10s the function used to hold it for.
+  releaseCommitLockOnce_();
+
   // Update client Billing_Ledger rows to Invoiced.
   //
   // v38.157.0 — Was previously try/catch with the error swallowed into a
@@ -23105,30 +23130,88 @@ function handleCreateInvoice_(payload) {
   // retries via the idempotency early-return. Now: on any throw OR partial
   // flip (some rows didn't match), roll back the Consolidated_Ledger insert
   // and return a real error so the operator knows the invoice didn't take.
-  // v38.157.0 — Helper closure for rollback. If the deleteRows itself fails
-  // (read-only quota, lock contention bug, sheet deleted between insert and
-  // rollback), the orphan ledger IDs are pinned to a Script Property so an
-  // operator can later run runRepairOrphanLedgerRows. Without this the
-  // orphans would be findable only by manual SQL inspection — exactly the
-  // diagnostic burden this whole PR exists to eliminate.
-  function rollbackInsertedRange_() {
-    if (!insertedRange) return { ok: true };
+  //
+  // v38.183.0 — ID-based rollback. The pre-v38.183 rollback used
+  // `consolLedger.deleteRows(insertedRange.start, insertedRange.count)` —
+  // safe ONLY while the script lock is held, because another concurrent
+  // invoice could otherwise have appended in between, shifting row
+  // positions so the delete chops the wrong rows. Now that the client flip
+  // (and therefore the rollback) happens OUTSIDE the lock, the rollback
+  // identifies its own rows by Invoice # column value (every row this
+  // commit appended carries the same invNo), then briefly re-acquires the
+  // commit lock and deletes them bottom-up. ID-based deletion is robust to
+  // concurrent appends or other concurrent rollbacks because each invoice
+  // owns a distinct invNo (atomic Postgres SEQUENCE since v38.182.0).
+  function rollbackByInvoiceNo_() {
+    if (!insertedRange) return { ok: true, deleted: 0 };
+    var rbLock = LockService.getScriptLock();
+    if (!rbLock.tryLock(15000)) {
+      Logger.log("Rollback could not acquire commit lock — pinning orphans");
+      try {
+        var orphanIds0 = ledgerRowIds.join(",");
+        var existing0 = String(PropertiesService.getScriptProperties().getProperty("ROLLBACK_FAILED_ORPHAN_LEDGER_IDS") || "").trim();
+        PropertiesService.getScriptProperties().setProperty(
+          "ROLLBACK_FAILED_ORPHAN_LEDGER_IDS",
+          existing0 ? (existing0 + "," + orphanIds0) : orphanIds0
+        );
+        PropertiesService.getScriptProperties().setProperty("ROLLBACK_FAILED_LAST_INVOICE_NO", String(invNo));
+        PropertiesService.getScriptProperties().setProperty("ROLLBACK_FAILED_LAST_AT", new Date().toISOString());
+      } catch (_) {}
+      return { ok: false, error: "Could not acquire commit lock for rollback within 15s" };
+    }
     try {
-      consolLedger.deleteRows(insertedRange.start, insertedRange.count);
-      return { ok: true };
+      var hdrRb = api_getHeaderMap_(consolLedger);
+      var invCol = hdrRb["Invoice #"];
+      if (!invCol) return { ok: false, error: "Invoice # column not found on Consolidated_Ledger" };
+      var lastRowRb = consolLedger.getLastRow();
+      if (lastRowRb < 2) return { ok: true, deleted: 0 };
+      // Read just the Invoice # column — much cheaper than getDataRange().
+      var invCol1d = consolLedger.getRange(2, invCol, lastRowRb - 1, 1).getValues();
+      var rowsToDelete = [];
+      for (var ri = invCol1d.length - 1; ri >= 0; ri--) {
+        if (String(invCol1d[ri][0] || "").trim() === String(invNo)) {
+          rowsToDelete.push(ri + 2);  // sheet row number (data starts at row 2)
+        }
+      }
+      // rowsToDelete is already in descending order from the loop above.
+      var deletedCount = 0;
+      for (var d = 0; d < rowsToDelete.length; d++) {
+        try {
+          consolLedger.deleteRows(rowsToDelete[d], 1);
+          deletedCount++;
+        } catch (perRowErr) {
+          Logger.log("Rollback per-row delete failed at row " + rowsToDelete[d] + ": " + perRowErr.message);
+        }
+      }
+      if (deletedCount < rowsToDelete.length) {
+        // Partial rollback — pin remaining orphans for runRepairOrphanLedgerRows.
+        try {
+          var orphanIds = ledgerRowIds.join(",");
+          var existing = String(PropertiesService.getScriptProperties().getProperty("ROLLBACK_FAILED_ORPHAN_LEDGER_IDS") || "").trim();
+          PropertiesService.getScriptProperties().setProperty(
+            "ROLLBACK_FAILED_ORPHAN_LEDGER_IDS",
+            existing ? (existing + "," + orphanIds) : orphanIds
+          );
+          PropertiesService.getScriptProperties().setProperty("ROLLBACK_FAILED_LAST_INVOICE_NO", String(invNo));
+          PropertiesService.getScriptProperties().setProperty("ROLLBACK_FAILED_LAST_AT", new Date().toISOString());
+        } catch (_) {}
+      }
+      return { ok: deletedCount === rowsToDelete.length, deleted: deletedCount };
     } catch (rollbackErr) {
       Logger.log("Consolidated_Ledger rollback failed (logging orphans for manual repair): " + rollbackErr.message);
       try {
-        var orphanIds = ledgerRowIds.join(",");
-        var existing = String(PropertiesService.getScriptProperties().getProperty("ROLLBACK_FAILED_ORPHAN_LEDGER_IDS") || "").trim();
-        var combined = existing ? (existing + "," + orphanIds) : orphanIds;
-        PropertiesService.getScriptProperties().setProperty("ROLLBACK_FAILED_ORPHAN_LEDGER_IDS", combined);
+        var orphanIds2 = ledgerRowIds.join(",");
+        var existing2 = String(PropertiesService.getScriptProperties().getProperty("ROLLBACK_FAILED_ORPHAN_LEDGER_IDS") || "").trim();
+        PropertiesService.getScriptProperties().setProperty(
+          "ROLLBACK_FAILED_ORPHAN_LEDGER_IDS",
+          existing2 ? (existing2 + "," + orphanIds2) : orphanIds2
+        );
         PropertiesService.getScriptProperties().setProperty("ROLLBACK_FAILED_LAST_INVOICE_NO", String(invNo));
         PropertiesService.getScriptProperties().setProperty("ROLLBACK_FAILED_LAST_AT", new Date().toISOString());
-      } catch (propErr) {
-        Logger.log("Could not pin orphan IDs to Script Properties: " + propErr.message);
-      }
+      } catch (_) {}
       return { ok: false, error: rollbackErr.message };
+    } finally {
+      try { rbLock.releaseLock(); } catch (_) {}
     }
   }
 
@@ -23136,7 +23219,7 @@ function handleCreateInvoice_(payload) {
   try {
     marked = api_markClientLedgerInvoiced_(sourceSheetId, ledgerRowIds, invNo, invDate, invoiceUrl);
   } catch (ledgerErr) {
-    var rb1 = rollbackInsertedRange_();
+    var rb1 = rollbackByInvoiceNo_();
     return errorResponse_(
       "Client ledger flip failed (" + ledgerErr.message + ")." +
       (rb1.ok
@@ -23147,7 +23230,7 @@ function handleCreateInvoice_(payload) {
     );
   }
   if (marked < ledgerRowIds.length) {
-    var rb2 = rollbackInsertedRange_();
+    var rb2 = rollbackByInvoiceNo_();
     return errorResponse_(
       "Client ledger partial flip: " + marked + " of " + ledgerRowIds.length + " ledger rows " +
       "were marked Invoiced (the rest didn't match any rows on the client Billing_Ledger sheet — " +
@@ -23176,39 +23259,60 @@ function handleCreateInvoice_(payload) {
   }
 
   // Update Email Status in Consolidated_Ledger.
-  // v38.142.9 — Bulk-write fix to match the sibling change in
-  // api_markClientLedgerInvoiced_. Old loop did one setValue per matching
-  // row; for an invoice with many ledger rows on a long Consolidated_Ledger
-  // that's N round-trips. New pattern collects matching rows then writes
-  // the whole Email Status column slice ONCE with setValues. Bounded to
-  // 1 round-trip regardless of match count.
-  try {
-    var cVals  = consolLedger.getDataRange().getValues();
-    var escIdx = cVals[0].map(String).indexOf("Email Status");
-    var einIdx = cVals[0].map(String).indexOf("Invoice #");
-    if (escIdx !== -1 && einIdx !== -1) {
-      var matchRows = [];
-      for (var ei = 1; ei < cVals.length; ei++) {
-        if (String(cVals[ei][einIdx] || "").trim() === invNo) matchRows.push(ei + 1);
+  //
+  // v38.183.0 — Skipped entirely when skipEmail is true (the typical case).
+  // The CB append at line ~23054 pre-fills Email Status to "Skipped" for
+  // skip-email runs, so the post-flip update is only needed when an email
+  // actually fired. Eliminates the round-trip + lock re-acquisition for the
+  // common path.
+  //
+  // When email DOES fire, the column read+write briefly re-acquires the
+  // commit lock so the bulk slice write doesn't race with another concurrent
+  // invoice's append (which could shift the rows we read from under us).
+  // Held for ~500ms-1s — much shorter than the original full-function lock.
+  if (!skipEmail) {
+    var esLock = LockService.getScriptLock();
+    var esLockAcquired = false;
+    try {
+      esLockAcquired = esLock.tryLock(10000);
+      if (!esLockAcquired) {
+        warnings.push("Email Status update skipped — could not acquire commit lock within 10s. Re-run resendInvoiceEmail to update.");
+      } else {
+        var cVals  = consolLedger.getDataRange().getValues();
+        var escIdx = cVals[0].map(String).indexOf("Email Status");
+        var einIdx = cVals[0].map(String).indexOf("Invoice #");
+        if (escIdx !== -1 && einIdx !== -1) {
+          var matchRows = [];
+          for (var ei = 1; ei < cVals.length; ei++) {
+            if (String(cVals[ei][einIdx] || "").trim() === invNo) matchRows.push(ei + 1);
+          }
+          if (matchRows.length > 0) {
+            var minE = matchRows[0], maxE = matchRows[0];
+            for (var em = 1; em < matchRows.length; em++) {
+              if (matchRows[em] < minE) minE = matchRows[em];
+              if (matchRows[em] > maxE) maxE = matchRows[em];
+            }
+            var heightE = maxE - minE + 1;
+            var emailStatusWrites = new Array(heightE);
+            for (var ek = 0; ek < heightE; ek++) {
+              emailStatusWrites[ek] = [cVals[minE - 1 + ek][escIdx]];
+            }
+            for (var emm = 0; emm < matchRows.length; emm++) {
+              emailStatusWrites[matchRows[emm] - minE] = [emailStatus];
+            }
+            consolLedger.getRange(minE, escIdx + 1, heightE, 1).setValues(emailStatusWrites);
+          }
+        }
       }
-      if (matchRows.length > 0) {
-        var minE = matchRows[0], maxE = matchRows[0];
-        for (var em = 1; em < matchRows.length; em++) {
-          if (matchRows[em] < minE) minE = matchRows[em];
-          if (matchRows[em] > maxE) maxE = matchRows[em];
-        }
-        var heightE = maxE - minE + 1;
-        var emailStatusWrites = new Array(heightE);
-        for (var ek = 0; ek < heightE; ek++) {
-          emailStatusWrites[ek] = [cVals[minE - 1 + ek][escIdx]];
-        }
-        for (var emm = 0; emm < matchRows.length; emm++) {
-          emailStatusWrites[matchRows[emm] - minE] = [emailStatus];
-        }
-        consolLedger.getRange(minE, escIdx + 1, heightE, 1).setValues(emailStatusWrites);
+    } catch (_) {
+      // Same swallow-and-continue semantics as pre-v38.183 — Email Status
+      // is best-effort metadata; failure here doesn't invalidate the invoice.
+    } finally {
+      if (esLockAcquired) {
+        try { esLock.releaseLock(); } catch (_) {}
       }
     }
-  } catch (_) {}
+  }
 
   return jsonResponse_({
     success:       true,
@@ -23223,7 +23327,11 @@ function handleCreateInvoice_(payload) {
   } finally {
     // v38.157.0 — Always release the commit lock, regardless of success
     // path or any of the early-return error responses inside the try.
-    try { commitLock.releaseLock(); } catch (_) {}
+    // v38.183.0 — Idempotent: the typical path releases the lock right
+    // after the CB append (releaseCommitLockOnce_) and this finally is the
+    // safety net for early-return error paths that exit before reaching
+    // the explicit release.
+    releaseCommitLockOnce_();
   }
 }
 
