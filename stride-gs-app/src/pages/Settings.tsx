@@ -1599,7 +1599,10 @@ export function Settings() {
   const [syncAutocompProgress, setSyncAutocompProgress] = useState<{ done: number; total: number; current: string } | null>(null);
   const [welcomeEmailLoading, setWelcomeEmailLoading] = useState<string | null>(null);
   const [welcomeEmailResult, setWelcomeEmailResult] = useState<{ clientName: string; ok: boolean; error?: string } | null>(null);
-  const [finishSetupLoading, setFinishSetupLoading] = useState<string | null>(null);
+  // finishSetupResult is still used to surface the toast after the manual
+  // paste flow saves successfully (see handleSaveManualWebAppUrl). The
+  // legacy finishSetupLoading state was removed in v38.181.0 along with
+  // the automated handleFinishSetup that no longer wires to any UI.
   const [finishSetupResult, setFinishSetupResult] = useState<{ clientName: string; ok: boolean; message?: string; error?: string; webAppUrl?: string } | null>(null);
   // v38.181.0 — manual deploy + paste UX. The automated finishClientSetup
   // path can fail with HTTP 403 ACCESS_TOKEN_SCOPE_INSUFFICIENT when
@@ -2061,41 +2064,13 @@ export function Settings() {
     }
   }
 
-  /**
-   * Finish Setup — recovery action for clients where onboarding partially completed.
-   * Re-runs Web App deploy + trigger install via finishClientSetup endpoint.
-   */
-  async function handleFinishSetup(client: ApiClient) {
-    if (!client.spreadsheetId) return;
-    setFinishSetupLoading(client.spreadsheetId);
-    setFinishSetupResult(null);
-    try {
-      const res = await postFinishClientSetup(client.spreadsheetId);
-      if (res.ok && res.data?.success) {
-        setFinishSetupResult({
-          clientName: client.name,
-          ok: true,
-          message: res.data.message || 'Setup complete',
-          webAppUrl: res.data.webAppUrl,
-        });
-        // Optimistic: patch the client's webAppUrl locally so the Finish Setup
-        // button disappears immediately without waiting for the refetch
-        if (res.data.webAppUrl) {
-          applyClientPatch(client.spreadsheetId, { webAppUrl: res.data.webAppUrl });
-        }
-        // Force no-cache refetch to pick up all server-side changes
-        setNextFetchNoCache();
-        refetchClients();
-      } else {
-        const errMsg = res.data?.error || res.error || 'Finish Setup failed';
-        setFinishSetupResult({ clientName: client.name, ok: false, error: errMsg });
-      }
-    } catch (err: unknown) {
-      setFinishSetupResult({ clientName: client.name, ok: false, error: err instanceof Error ? err.message : String(err) });
-    } finally {
-      setFinishSetupLoading(null);
-    }
-  }
+  // handleFinishSetup (the automated path) was removed in v38.181.0 — it
+  // hit Google's OAuth verification gate every time. The "Finish Setup"
+  // button now opens a manual paste modal that saves via
+  // handleSaveManualWebAppUrl. The legacy postFinishClientSetup +
+  // finishClientSetup GAS handler stay in api.ts / StrideAPI.gs for
+  // potential future use (e.g. if Stride ever gets verified) but have
+  // no React caller.
 
   /**
    * v38.181.0 — Save the operator-pasted Web App URL to CB Clients via the
