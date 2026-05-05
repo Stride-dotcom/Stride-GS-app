@@ -153,7 +153,7 @@ Dropbox\Apps\GS Inventory\credentials\.sync-config.json  →  AppScripts\stride-
 - **Never edit `dist/` by hand.** Only `npm run build` writes there.
 - **Never edit the Master Price List sheet directly.** Use Price List page → inline edit → Sync to Sheet.
 - **Never commit `.env`, `.credentials.json`, or any secrets.**
-- **Never re-enable GitHub Actions `deploy.yml`/`ci.yml`** — renamed `*.disabled`, TLS transport issues unresolved.
+- **Never re-enable GitHub Actions `deploy.yml`/`ci.yml`** — renamed `*.disabled`. (CI runners hit the same Windows schannel TLS instability the local deploy script now retries around — but reactivating CI for it is a separate project.)
 
 ---
 
@@ -253,6 +253,8 @@ Never deploy from a worktree.
 | Service rates/catalog | Price List page → inline edit | instant |
 
 **React build safeguards:** `npm run build` routes through `scripts/build.js` (verify-entry → tsc → vite → sanity checks). `npm run build:raw` disables guards — emergency only.
+
+**Windows schannel TLS retry:** `scripts/deploy.js`'s `pushWithRetry` helper auto-retries any failing `git push` with `-c http.postBuffer=524288000 -c http.version=HTTP/1.1` — the recurring `SEC_E_MESSAGE_ALTERED (0x8009030f)` failure on the ~3MB bundle push has been reproducible enough that retry is built in. If you ever need to push manually (e.g. a recovery from a partial deploy), use the same flags.
 
 **All-at-once after a big session:**
 ```bash
