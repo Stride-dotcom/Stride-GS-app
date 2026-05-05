@@ -2097,16 +2097,42 @@ export function Billing() {
     setQbExcelLoading(false);
   };
 
+  // v38.185.0 — Synchronous re-submit gate. The React-state-based
+  // `billingBatch.active` check below catches the common case of clicking
+  // again *after* a batch is in flight, but it doesn't catch the rapid
+  // double-click case where two click events fire in the same React tick
+  // (≤16ms): both handlers read `billingBatch.active === false` because
+  // setState is asynchronous, both pass preflight, both call startBatch,
+  // and the second clobbers the first's invoicingLedgerIds + total.
+  // useRef gives us a synchronously-readable flag that flips before any
+  // await, closing the double-click window completely.
+  const submitLockRef = useRef(false);
+
   // ─── Create Invoices from Selected Rows ────────────────────────────────────
   const handleCreateInvoices = async () => {
     const selRows = resolveSelectedRows();
     if (!selRows.length) return;
+
+    // v38.185.0 — Atomic gate: flip the ref synchronously before any await.
+    // If a second click hits before the first reaches its await, the second
+    // bails immediately with the same error message the React-state guard
+    // below shows. The ref releases in the early-return paths AND in the
+    // `setTimeout` after `startBatch` succeeds (where the modal closes and
+    // the batch is genuinely launched — at that point the React-state guard
+    // has had time to flip and the lock can release without re-opening the
+    // double-click window).
+    if (submitLockRef.current) {
+      setInvoiceError('Already submitting — wait for the batch to start.');
+      return;
+    }
+    submitLockRef.current = true;
 
     // v38.184.0 — Block re-submit while a batch is already in flight.
     // The toast in AppLayout shows the active batch's progress; another
     // Submit click while one is running could cause overlapping optimistic
     // hides and conflicting result UIs. Surface a clear error.
     if (billingBatch.active) {
+      submitLockRef.current = false;
       setInvoiceError('Another invoice batch is still processing — wait for it to finish (see the bottom-right progress toast).');
       return;
     }
@@ -2142,6 +2168,7 @@ export function Billing() {
       if (!payloadRows.length) {
         setInvoiceError('Selected rows are missing tenant ids — re-run Preview Storage.');
         setInvoiceLoading(false);
+        submitLockRef.current = false;
         return;
       }
 
@@ -2154,6 +2181,7 @@ export function Billing() {
         if (commitRes.error || !commitRes.data?.success) {
           setInvoiceError(commitRes.data?.error || commitRes.error || 'Commit to ledger failed — invoices not created');
           setInvoiceLoading(false);
+          submitLockRef.current = false;
           return;
         }
         // Stash the commit result so the storage-tab banner shows "X rows
@@ -2171,6 +2199,7 @@ export function Billing() {
       } catch (err) {
         setInvoiceError(`Commit error: ${err instanceof Error ? err.message : String(err)} — invoices not created`);
         setInvoiceLoading(false);
+        submitLockRef.current = false;
         return;
       }
     }
@@ -2247,6 +2276,7 @@ export function Billing() {
       );
       if (!proceed) {
         setInvoiceBatch({ state: 'idle', total: 0, processed: 0, succeeded: 0, failed: 0 });
+        submitLockRef.current = false;
         return;
       }
     }
@@ -2269,6 +2299,13 @@ export function Billing() {
       total: invokable.length,
       invoicingLedgerIds: allLedgerIdsForBatch,
     });
+    // v38.185.0 — Release the synchronous submit gate now that startBatch
+    // has fired. From here on the React-state guard (`billingBatch.active`)
+    // catches re-submits — the batch is genuinely launched, the toast is
+    // showing, and the React render that flips active=true is moments
+    // away. The previous double-click window (before startBatch ran) is
+    // now closed by submitLockRef.
+    submitLockRef.current = false;
     setInvoiceLoading(false);
     setInvoiceStartedAt(Date.now());
     setInvoiceError('');
