@@ -107,6 +107,25 @@ export function skipSupabaseCacheOnce(): void {
   _skipNextSupabase = true;
 }
 
+// Normalize any plausible date string to YYYY-MM-DD. Handles legacy Stax
+// rows where due_date / scheduled_date were written as "2026-05-10 00:00:00"
+// (timestamp from older formatDate_) or "05/20/2026" (US format from
+// api_qbFmtDate_). <input type="date"> strictly requires YYYY-MM-DD; any
+// other shape silently renders empty and breaks the onBlur equality guard
+// on the Charge Queue.
+function isoDateOnly(s: string | null | undefined): string {
+  if (!s) return '';
+  const v = String(s).trim();
+  if (!v) return '';
+  // YYYY-MM-DD or YYYY-MM-DD HH:MM[:SS] / YYYY-MM-DDTHH:MM... → first 10
+  const iso = v.match(/^(\d{4}-\d{2}-\d{2})/);
+  if (iso) return iso[1];
+  // MM/DD/YYYY or M/D/YYYY (US)
+  const us = v.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+  if (us) return `${us[3]}-${us[1].padStart(2, '0')}-${us[2].padStart(2, '0')}`;
+  return v;
+}
+
 // ─── Pagination helper ──────────────────────────────────────────────────────
 //
 // Supabase projects enforce a server-side `max_rows` cap (default: 1000) that
@@ -3142,10 +3161,10 @@ export async function fetchStaxInvoicesFromSupabase(): Promise<StaxInvoicesRespo
       qbInvoice: r.qb_invoice_no,
       customer: r.customer ?? '',
       staxCustomerId: r.stax_customer_id ?? '',
-      invoiceDate: r.invoice_date ?? '',
-      dueDate: r.due_date ?? '',
+      invoiceDate: isoDateOnly(r.invoice_date),
+      dueDate: isoDateOnly(r.due_date),
       // v38.120.0 — scheduled_date: empty → frontend falls back to due_date for display + charge timing
-      scheduledDate: (r as unknown as { scheduled_date?: string | null }).scheduled_date ?? '',
+      scheduledDate: isoDateOnly((r as unknown as { scheduled_date?: string | null }).scheduled_date),
       amount: r.amount ?? 0,
       lineItemsJson: r.line_items_json ?? '',
       staxId: r.stax_id ?? '',
@@ -3233,7 +3252,7 @@ export async function fetchStaxExceptionsFromSupabase(): Promise<StaxExceptionsR
       customer: r.customer ?? '',
       staxCustomerId: r.stax_customer_id ?? '',
       amount: r.amount ?? 0,
-      dueDate: r.due_date ?? '',
+      dueDate: isoDateOnly(r.due_date),
       reason: r.reason ?? '',
       payLink: r.pay_link ?? '',
       resolved: r.resolved ?? false,

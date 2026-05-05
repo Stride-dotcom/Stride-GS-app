@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.186.0 — 2026-05-04 PST — Multi-key clientInfoMap in handleQbExport_ so per-invoice auto_charge inherits correctly when a client's QB Customer Name differs from their Client Name. Justin caught Allison Lind Design's INV-000139/140 had auto_charge=true but client.auto_charge=false; the v38.178.0 inheritance code looked up clientInfoMap[sInv.qbName] but the map was keyed only on Client Name ("Allison Lind Design"), and qbName was actually QB Customer Name ("Allison Lind Interiors"), so the lookup missed → sClientInfo was {} → the per-invoice flag fell back to the v38.21.0 hard-coded true even though the client setting was false. Map is now keyed by all three name variants (Client Name + QB Customer Name + Stax Customer Name) pointing at the same record — same pattern stax_buildClientStaxMap_ has used for months. The 2 stuck rows from before this fix were backfilled via direct SQL (UPDATE stax_invoices SET auto_charge = clients.auto_charge WHERE PENDING/CREATED AND the values diverge).
+   StrideAPI.gs — v38.187.0 — 2026-05-05 PST — Stax-side dates ISO yyyy-MM-dd everywhere. Justin caught the Charge Queue Scheduled column rendering blank again — same symptom as v38.171.0 even though that commit fixed read-side normalization. Root cause: api_qbCalcDueDate_/api_qbFmtDate_ produce MM/dd/yyyy because the IIF file format requires it, and handleQbExport_ + handleImportIIF_ wrote the same MM/dd/yyyy string straight into the Stax Invoices SHEET cells AND the Supabase mirror. `<input type="date">` strictly requires yyyy-MM-dd; both "2026-05-10 00:00:00" (timestamp from Sheets-style serialization) AND "05/20/2026" (US format from QB) silently render empty AND poison the React onBlur equality guard so saves look like they revert. Mixed corpus in Supabase confirmed via direct SELECT: INV-000099 had due_date="2026-05-10 00:00:00", INV-001010 had due_date="2026-05-20" + scheduled_date="05/20/2026". Two-sided fix. (1) Backend: new api_isoDate_(v) helper coerces Date objects, ISO timestamps, and US-format strings to yyyy-MM-dd. handleQbExport_'s INSERT + UPDATE-PENDING branches now run sInv.invDate / sInv.dueDate through it before every Stax-sheet setValue + every Supabase mirror push. handleImportIIF_'s same two branches pass inv.date / inv.dueDate through it. handleUpdateStaxInvoice_'s payload.dueDate + payload.scheduledDate run through it too (no-op on already-ISO React input, defensive against legacy clients). The IIF FILE OUTPUT stays MM/dd/yyyy — only Stax-side persistence is touched. (2) Frontend: fetchStaxInvoicesFromSupabase + fetchStaxExceptionsFromSupabase normalize due_date / scheduled_date via a shared isoDateOnly() at read time, so any pre-fix dirty rows in Supabase still render correctly until a one-time UPDATE cleans them up.
+   v38.186.0 — 2026-05-04 PST — Multi-key clientInfoMap in handleQbExport_ so per-invoice auto_charge inherits correctly when a client's QB Customer Name differs from their Client Name. Justin caught Allison Lind Design's INV-000139/140 had auto_charge=true but client.auto_charge=false; the v38.178.0 inheritance code looked up clientInfoMap[sInv.qbName] but the map was keyed only on Client Name ("Allison Lind Design"), and qbName was actually QB Customer Name ("Allison Lind Interiors"), so the lookup missed → sClientInfo was {} → the per-invoice flag fell back to the v38.21.0 hard-coded true even though the client setting was false. Map is now keyed by all three name variants (Client Name + QB Customer Name + Stax Customer Name) pointing at the same record — same pattern stax_buildClientStaxMap_ has used for months. The 2 stuck rows from before this fix were backfilled via direct SQL (UPDATE stax_invoices SET auto_charge = clients.auto_charge WHERE PENDING/CREATED AND the values diverge).
    v38.185.0 — 2026-05-04 PST — Code-review follow-ups for the v38.182-184 billing perf series. (1) rollbackByInvoiceNo_ on Consolidated_Ledger now groups consecutive descending row numbers into one deleteRows(start, count) per run, replacing the per-row deleteRows loop that did N+1 round-trips. A 100-row contiguous rollback was ~10s of GAS round-trips (close to the 15s rbLock timeout); grouped form is one call. Fragmented rollbacks (rare — only when concurrent appends interleaved) typically collapse to <5 calls. The descending iteration order is preserved so deletes only shift rows above our remaining work. Companion React change in same v38.185 series: Billing.tsx adds a useRef-backed synchronous submit gate to close the rapid-double-click window where two clicks in the same React tick (≤16ms) would both pass the React-state-based billingBatch.active guard and spawn two parallel batches with overlapping invoicingLedgerIds.
    v38.183.0 — 2026-05-04 PST — handleCreateInvoice_ commit-lock scope reduction. v38.182.0 made invoice numbering atomic via Postgres SEQUENCE and unblocked concurrency=3 on the React side, but the speedup was only modest (~10-30%) because the outer LockService.getScriptLock still wrapped the entire ~5-10s function — including api_markClientLedgerInvoiced_, the per-tenant client Billing_Ledger flip that's the biggest non-CB cost (1-3s per invoice). This PR shrinks the lock to just the CB append + RT writes phase (~500ms-1s), then explicitly releases via a new releaseCommitLockOnce_ helper. Client-Billing_Ledger flip now runs OUTSIDE the lock — different invoices touch different client sheets, so they don't conflict. The old position-based rollback (consolLedger.deleteRows(insertedRange.start, insertedRange.count)) is replaced by an ID-based rollbackByInvoiceNo_() that finds rows by Invoice # column value and deletes bottom-up, robust to concurrent CB appends. Email Status update gets its own brief re-lock when email actually fires (opt-in only); for the typical skipEmail=true path the CB append pre-fills "Skipped" so no post-flip update is needed. Net wall-time impact for a 5-client storage batch: previously ~30-40s with concurrency=3 + atomic counter, now ~12-18s — true 3x speedup. The Master invoice counter race is already gone (v38.182.0); this PR closes the remaining serialization bottleneck.
    v38.182.0 — 2026-05-04 PST — Atomic invoice numbering on Postgres. The Master sheet RPC's `getNextInvoiceId` action was read-then-write without a transaction lock — two concurrent createInvoice calls could grab the same number (caused the INV-000131 NIPTUCK + NORTON duplicate on 2026-05-03). v38.157.0 hardened the half-write recovery; Billing.tsx pinned the per-group invoice loop to concurrency=1 as a workaround. New `public.next_invoice_no()` Postgres function backed by `public.invoice_no_seq` SEQUENCE is atomic by design — nextval is concurrency-safe with no transient failure modes. api_nextInvoiceNo_ becomes a thin wrapper calling api_nextInvoiceNoSupabase_; the legacy rpcUrl/rpcToken params are kept for signature compatibility but ignored. Companion React change: Billing.tsx bumps concurrency from 1 back to 3 in handleCreateInvoices's runBatchLoop. Primary win: the entire INV-XXXXXX duplicate-number bug class is gone. Speedup is modest (~10-30%) because handleCreateInvoice_'s outer LockService.getScriptLock still serializes the Consolidated_Ledger commit phase — true 3x parallelism requires refactoring that lock to per-tenant scope, which is a separate follow-up. The Master RPC counter is left in place but inert (other callers like getNextShipmentNo continue to use it; only invoice numbering migrated). Sequence seeded at 1000 with 850+ headroom over the highest committed invoice (INV-000144 as of 2026-05-04). Companion migration 20260504220000_invoice_no_atomic_counter.sql.
@@ -12682,6 +12683,40 @@ function formatDate_(val) {
   return s;
 }
 
+/**
+ * Coerce any plausible date input to ISO `yyyy-MM-dd`. Handles:
+ *   - Date objects → tz-formatted yyyy-MM-dd
+ *   - "yyyy-MM-dd" or "yyyy-MM-dd HH:mm[:ss]" / "yyyy-MM-ddTHH:mm..." → first 10
+ *   - "MM/dd/yyyy" or "M/d/yyyy" (US, what api_qbFmtDate_ produces) → reordered ISO
+ *   - "" / null / undefined → ""
+ *
+ * Used at every point we hand a date to a Stax sheet cell or the Supabase
+ * mirror. Stax's React Charge Queue uses `<input type="date">`, which strictly
+ * requires yyyy-MM-dd; legacy MM/dd/yyyy and "yyyy-MM-dd 00:00:00" both
+ * silently render empty AND poison the onBlur equality guard so saves skip.
+ * Keeping the IIF file output untouched (api_qbFmtDate_ continues to emit
+ * MM/dd/yyyy because that's what QuickBooks expects) — only Stax-side writes
+ * funnel through this helper.
+ */
+function api_isoDate_(v) {
+  if (!v) return "";
+  if (Object.prototype.toString.call(v) === "[object Date]") {
+    if (isNaN(v.getTime())) return "";
+    return Utilities.formatDate(v, Session.getScriptTimeZone(), "yyyy-MM-dd");
+  }
+  var s = String(v).trim();
+  if (!s) return "";
+  var iso = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (iso) return iso[1] + "-" + iso[2] + "-" + iso[3];
+  var us = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+  if (us) {
+    var mm = us[1].length === 1 ? "0" + us[1] : us[1];
+    var dd = us[2].length === 1 ? "0" + us[2] : us[2];
+    return us[3] + "-" + mm + "-" + dd;
+  }
+  return s;
+}
+
 /** v38.2.0: Full datetime formatter — used for Started At / Completed At where
  *  the UI needs mm/dd/yyyy hh:mm display. Returns "yyyy-MM-dd HH:mm:ss" in the
  *  script's local timezone. Falls back to raw string if input is already text. */
@@ -21167,16 +21202,22 @@ function handleQbExport_(payload) {
           // PENDING (don't clobber an in-flight CREATED/PAID/VOIDED row).
           var existingStatus = String(existingInvData[existingRow1 - 1][staxCols.status - 1] || "").trim().toUpperCase();
           if (existingStatus && existingStatus !== "PENDING") { staxSkipped++; continue; }
+          // v38.187.0 — ISO yyyy-MM-dd for every Stax-side write so React's
+          // <input type="date"> can actually render the value. Source dates
+          // (sInv.invDate / sInv.dueDate) come from api_qbFmtDate_ in the
+          // QB IIF format MM/dd/yyyy — the IIF file itself stays MM/dd/yyyy.
+          var sInvDateIso = api_isoDate_(sInv.invDate);
+          var sDueDateIso = api_isoDate_(sInv.dueDate);
           staxInvSheet.getRange(existingRow1, staxCols.customer).setValue(sCustomerForStax);
           staxInvSheet.getRange(existingRow1, staxCols.staxCustId).setValue(sStaxCustId);
-          staxInvSheet.getRange(existingRow1, staxCols.invoiceDate).setValue(sInv.invDate);
-          staxInvSheet.getRange(existingRow1, staxCols.dueDate).setValue(sInv.dueDate);
+          staxInvSheet.getRange(existingRow1, staxCols.invoiceDate).setValue(sInvDateIso);
+          staxInvSheet.getRange(existingRow1, staxCols.dueDate).setValue(sDueDateIso);
           staxInvSheet.getRange(existingRow1, staxCols.amount).setValue(sTotal);
           staxInvSheet.getRange(existingRow1, staxCols.lineItems).setValue(sLineJson);
           staxInvSheet.getRange(existingRow1, staxCols.notes).setValue("Refreshed by QB export auto-push on " + nowStr);
           // Auto-fill Scheduled Date if blank — preserve operator override.
           var existingSched = String(existingInvData[existingRow1 - 1][staxCols.scheduledDate - 1] || "").trim();
-          if (!existingSched && sInv.dueDate) staxInvSheet.getRange(existingRow1, staxCols.scheduledDate).setValue(sInv.dueDate);
+          if (!existingSched && sDueDateIso) staxInvSheet.getRange(existingRow1, staxCols.scheduledDate).setValue(sDueDateIso);
           // v38.178.0 — refresh per-invoice Auto Charge from the client-level
           // setting (CB Clients "Auto Charge" col). Only on PENDING rows since
           // the existingStatus guard above gates the whole update branch on
@@ -21196,9 +21237,9 @@ function handleQbExport_(payload) {
             row_index: existingRow1,
             customer: sCustomerForStax || "",
             stax_customer_id: sStaxCustId,
-            invoice_date: sInv.invDate,
-            due_date: sInv.dueDate,
-            scheduled_date: sInv.dueDate || null,
+            invoice_date: sInvDateIso,
+            due_date: sDueDateIso,
+            scheduled_date: sDueDateIso || null,
             amount: Number(sTotal || 0),
             line_items_json: sLineJson,
             stax_id: "",
@@ -21215,17 +21256,19 @@ function handleQbExport_(payload) {
         // INSERT new row by writing each header-resolved cell — robust to
         // any column added or reordered on the Stax Invoices sheet.
         var newRow1 = staxInvSheet.getLastRow() + 1;
+        var sInvDateIsoIns = api_isoDate_(sInv.invDate);
+        var sDueDateIsoIns = api_isoDate_(sInv.dueDate);
         staxInvSheet.getRange(newRow1, staxCols.qb).setValue(sInvNo);
         staxInvSheet.getRange(newRow1, staxCols.customer).setValue(sCustomerForStax);
         staxInvSheet.getRange(newRow1, staxCols.staxCustId).setValue(sStaxCustId);
-        staxInvSheet.getRange(newRow1, staxCols.invoiceDate).setValue(sInv.invDate);
-        staxInvSheet.getRange(newRow1, staxCols.dueDate).setValue(sInv.dueDate);
+        staxInvSheet.getRange(newRow1, staxCols.invoiceDate).setValue(sInvDateIsoIns);
+        staxInvSheet.getRange(newRow1, staxCols.dueDate).setValue(sDueDateIsoIns);
         staxInvSheet.getRange(newRow1, staxCols.amount).setValue(sTotal);
         staxInvSheet.getRange(newRow1, staxCols.lineItems).setValue(sLineJson);
         staxInvSheet.getRange(newRow1, staxCols.status).setValue("PENDING");
         staxInvSheet.getRange(newRow1, staxCols.createdAt).setValue(nowStr);
         // Auto-populate Scheduled Date so the Charge Queue is never blank.
-        if (sInv.dueDate) staxInvSheet.getRange(newRow1, staxCols.scheduledDate).setValue(sInv.dueDate);
+        if (sDueDateIsoIns) staxInvSheet.getRange(newRow1, staxCols.scheduledDate).setValue(sDueDateIsoIns);
         // v38.178.0 — inherit Auto Charge from CB Clients (client-level
         // setting). Pre-v38.178.0 every row got auto_charge=true regardless
         // of whether the client had auto-pay turned on, so the Charge Queue
@@ -21247,9 +21290,9 @@ function handleQbExport_(payload) {
           row_index: newRow1,
           customer: sCustomerForStax || "",
           stax_customer_id: sStaxCustId,
-          invoice_date: sInv.invDate,
-          due_date: sInv.dueDate,
-          scheduled_date: sInv.dueDate || null,
+          invoice_date: sInvDateIsoIns,
+          due_date: sDueDateIsoIns,
+          scheduled_date: sDueDateIsoIns || null,
           amount: Number(sTotal || 0),
           line_items_json: sLineJson,
           stax_id: "",
@@ -31750,16 +31793,20 @@ function handleImportIIF_(payload) {
           duplicatesSkipped++;
           continue;
         }
+        // v38.187.0 — Stax-side dates are ISO yyyy-MM-dd; IIF parser still
+        // emits MM/dd/yyyy because that's what the IIF file format requires.
+        var invDateIsoUpd = api_isoDate_(inv.date);
+        var dueDateIsoUpd = api_isoDate_(inv.dueDate);
         _setCell(existingRow1, cols.customer,    resolvedName);
         _setCell(existingRow1, cols.staxCustId,  resolvedStaxId);
-        _setCell(existingRow1, cols.invoiceDate, inv.date);
-        _setCell(existingRow1, cols.dueDate,     inv.dueDate);
+        _setCell(existingRow1, cols.invoiceDate, invDateIsoUpd);
+        _setCell(existingRow1, cols.dueDate,     dueDateIsoUpd);
         _setCell(existingRow1, cols.amount,      inv.amount);
         _setCell(existingRow1, cols.lineItems,   lineItemsJson);
         _setCell(existingRow1, cols.notes,       "Refreshed by IIF import on " + now);
         // Auto-fill Scheduled Date if blank (preserve operator override).
         var existingSched = String(existing[existingRow1 - 1][cols.scheduledDate - 1] || "").trim();
-        if (!existingSched && inv.dueDate) _setCell(existingRow1, cols.scheduledDate, inv.dueDate);
+        if (!existingSched && dueDateIsoUpd) _setCell(existingRow1, cols.scheduledDate, dueDateIsoUpd);
         invoicesUpdated++;
         touchedQbInvoiceNos.push(docNum);
         continue;
@@ -31779,11 +31826,13 @@ function handleImportIIF_(payload) {
       // independently so an extra column appended on the sheet doesn't
       // shift the layout.
       var newRow1 = invSheet.getLastRow() + 1;
+      var invDateIsoIns = api_isoDate_(inv.date);
+      var dueDateIsoIns = api_isoDate_(inv.dueDate);
       _setCell(newRow1, cols.qb,            docNum);
       _setCell(newRow1, cols.customer,      resolvedName);
       _setCell(newRow1, cols.staxCustId,    resolvedStaxId);
-      _setCell(newRow1, cols.invoiceDate,   inv.date);
-      _setCell(newRow1, cols.dueDate,       inv.dueDate);
+      _setCell(newRow1, cols.invoiceDate,   invDateIsoIns);
+      _setCell(newRow1, cols.dueDate,       dueDateIsoIns);
       _setCell(newRow1, cols.amount,        inv.amount);
       _setCell(newRow1, cols.lineItems,     lineItemsJson);
       _setCell(newRow1, cols.status,        "PENDING");
@@ -31791,7 +31840,7 @@ function handleImportIIF_(payload) {
       // Auto-populate Scheduled Date so the Charge Queue is never blank.
       // Operators can override on the page; the daily cron uses
       // Scheduled Date || Due Date.
-      if (inv.dueDate) _setCell(newRow1, cols.scheduledDate, inv.dueDate);
+      if (dueDateIsoIns) _setCell(newRow1, cols.scheduledDate, dueDateIsoIns);
       insertCount++;
       touchedQbInvoiceNos.push(docNum);
     }
@@ -33224,8 +33273,11 @@ function handleUpdateStaxInvoice_(payload) {
   var changed = [];
 
   // Due Date — always editable
+  // v38.187.0 — coerce to ISO yyyy-MM-dd. React's <input type="date"> sends
+  // ISO already, but the same handler is reachable from other paths and
+  // legacy clients; api_isoDate_ is a no-op on already-ISO input.
   if (payload.dueDate !== undefined) {
-    var dd = String(payload.dueDate).trim();
+    var dd = api_isoDate_(payload.dueDate);
     if (dd) {
       invSheet.getRange(foundRow + 1, dueDateCol).setValue(dd);
       changed.push("dueDate=" + dd);
@@ -33236,7 +33288,7 @@ function handleUpdateStaxInvoice_(payload) {
   // StaxAutoPay charge loop fires for auto-charge. Defaults to Due Date if
   // unset. Header auto-created if missing (non-destructive).
   if (payload.scheduledDate !== undefined) {
-    var sd = String(payload.scheduledDate).trim();
+    var sd = api_isoDate_(payload.scheduledDate);
     if (sd) {
       var schedCol = api_ensureColumn_(invSheet, "Scheduled Date");
       invSheet.getRange(foundRow + 1, schedCol).setValue(sd);
