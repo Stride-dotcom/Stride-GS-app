@@ -210,19 +210,91 @@ Deno.serve(async (req) => {
       if (updErr) { result.errors.push(`${o.dt_identifier}: ${updErr.message}`); continue; }
       result.updated += 1;
 
-      // ── dt_order_items (match by dt_item_code) ──────────────────────
+      // ── dt_order_items reconcile ─────────────────────────────────────
+      // Three-way merge keyed on dt_item_code:
+      //   • Both sides present → UPDATE driver-facing fields (delivered
+      //     quantities, location, item_note, return codes).
+      //   • DT has it, Stride doesn't → INSERT a new row stamped
+      //     extras.added_by='dt_sync'. Description + quantity carry over
+      //     from the DT export so the operator can identify the addition.
+      //   • Stride has it, DT doesn't → soft-mark removed_at + removed_source.
+      //     We never hard-delete: keeps billing/audit history intact and
+      //     leaves a trail if a DT-side delete was unintended.
+      //
+      // The "Stride has it, DT doesn't" branch only fires when DT actually
+      // returned an items block. An empty <items/> on a service-only or
+      // not-yet-loaded DT order would otherwise nuke every line locally —
+      // we treat empty-from-DT as "no changes" rather than "all removed".
       if (parsed.items.length > 0) {
+        const dtItemIds = new Set(
+          parsed.items.map(it => it.item_id).filter((s): s is string => !!s)
+        );
+
+        // Snapshot current Stride rows for this order (active only — we
+        // ignore already-removed rows so DT can re-add a code without us
+        // un-removing the historical row).
+        const { data: localRows } = await supabase
+          .from('dt_order_items')
+          .select('id, dt_item_code, extras')
+          .eq('dt_order_id', o.id)
+          .is('removed_at', null);
+        const localByCode = new Map<string, { id: string; extras: Record<string, unknown> | null }>();
+        for (const r of (localRows ?? []) as Array<{ id: string; dt_item_code: string | null; extras: Record<string, unknown> | null }>) {
+          if (r.dt_item_code) localByCode.set(r.dt_item_code, { id: r.id, extras: r.extras });
+        }
+
+        // UPDATE matching + INSERT new
         for (const it of parsed.items) {
           if (!it.item_id) continue;
-          await supabase.from('dt_order_items').update({
-            delivered:          it.delivered,
-            delivered_quantity: it.delivered_quantity,
-            item_note:          it.item_note,
-            checked_quantity:   it.checked_quantity,
-            location:           it.location,
-            return_codes:       it.return_codes,
-            last_synced_at:     new Date().toISOString(),
-          }).eq('dt_order_id', o.id).eq('dt_item_code', it.item_id);
+          const local = localByCode.get(it.item_id);
+          if (local) {
+            await supabase.from('dt_order_items').update({
+              delivered:          it.delivered,
+              delivered_quantity: it.delivered_quantity,
+              item_note:          it.item_note,
+              checked_quantity:   it.checked_quantity,
+              location:           it.location,
+              return_codes:       it.return_codes,
+              last_synced_at:     new Date().toISOString(),
+            }).eq('id', local.id);
+          } else {
+            // Insert: DT introduced this line outside our app. Stamp
+            // extras.added_by so downstream surfaces (Order page badges,
+            // billing review) can flag it for an operator double-check.
+            const insErr = (await supabase.from('dt_order_items').insert({
+              dt_order_id:        o.id,
+              dt_item_code:       it.item_id,
+              description:        it.description,
+              quantity:           it.quantity,
+              original_quantity:  it.quantity,
+              delivered:          it.delivered,
+              delivered_quantity: it.delivered_quantity,
+              item_note:          it.item_note,
+              checked_quantity:   it.checked_quantity,
+              location:           it.location,
+              return_codes:       it.return_codes,
+              extras:             { added_by: 'dt_sync', added_at: new Date().toISOString() },
+              last_synced_at:     new Date().toISOString(),
+            })).error;
+            if (insErr) result.errors.push(`${o.dt_identifier} item insert ${it.item_id}: ${insErr.message}`);
+          }
+        }
+
+        // Soft-remove Stride-only items (DT no longer carries them).
+        const orphanIds: string[] = [];
+        for (const [code, row] of localByCode) {
+          if (!dtItemIds.has(code)) orphanIds.push(row.id);
+        }
+        if (orphanIds.length > 0) {
+          const { error: rmErr } = await supabase
+            .from('dt_order_items')
+            .update({
+              removed_at:     new Date().toISOString(),
+              removed_source: 'dt_sync',
+              last_synced_at: new Date().toISOString(),
+            })
+            .in('id', orphanIds);
+          if (rmErr) result.errors.push(`${o.dt_identifier} item remove: ${rmErr.message}`);
         }
       }
 
@@ -385,6 +457,11 @@ interface ParsedImage {
 
 interface ParsedItem {
   item_id: string | null;
+  /** v11 — captured for the reconcile path so DT-side item additions
+   *  produce a usable Stride row (we'd otherwise insert with NULL
+   *  description and the operator wouldn't know what got added). */
+  description: string | null;
+  quantity: number | null;
   delivered: boolean | null;
   delivered_quantity: number | null;
   item_note: string | null;
@@ -565,6 +642,8 @@ function parseItems(xml: string): ParsedItem[] {
   const inners = allSections(itemsBlock, 'item');
   return inners.map((inner) => ({
     item_id:            tag(inner, 'item_id'),
+    description:        tag(inner, 'description'),
+    quantity:           toNum(tag(inner, 'quantity')),
     delivered:          toBool(tag(inner, 'delivered')),
     delivered_quantity: toNum(tag(inner, 'delivered_quantity')),
     item_note:          tag(inner, 'item_note'),
