@@ -18,7 +18,11 @@ export interface IntakeEmailModalProps {
   intakeUrl: string;
   templateSubject: string;  // pre-substituted
   templateBody: string;     // pre-substituted HTML
-  onSend: (subject: string, bodyHtml: string) => Promise<void>;
+  /** v2026-05-04 — when set, the modal shows a "Send me a copy" checkbox
+   *  (default on) that BCCs this address on the outbound. The send handler
+   *  receives the bcc list as a third argument. */
+  senderEmail?: string | null;
+  onSend: (subject: string, bodyHtml: string, bcc: string[]) => Promise<void>;
   onCopyLink: () => void;   // copy URL and dismiss
   onClose: () => void;
   sending: boolean;
@@ -32,6 +36,7 @@ export function IntakeEmailModal({
   intakeUrl,
   templateSubject,
   templateBody,
+  senderEmail,
   onSend,
   onCopyLink,
   onClose,
@@ -39,6 +44,9 @@ export function IntakeEmailModal({
 }: IntakeEmailModalProps) {
   const [subject, setSubject] = useState(templateSubject);
   const [copied, setCopied] = useState(false);
+  // Default-on so staff get a paper trail by default. They can uncheck per-send
+  // if they want to skip the cc'd copy on a particular invite.
+  const [sendMeCopy, setSendMeCopy] = useState(true);
 
   const copyLink = () => {
     void navigator.clipboard.writeText(intakeUrl).then(() => {
@@ -165,7 +173,10 @@ export function IntakeEmailModal({
             Copy Link Only
           </button>
           <button
-            onClick={() => { void onSend(subject, templateBody); }}
+            onClick={() => {
+              const bcc = (sendMeCopy && senderEmail) ? [senderEmail] : [];
+              void onSend(subject, templateBody, bcc);
+            }}
             disabled={sending || !subject.trim()}
             style={{ ...sendBtnStyle, opacity: sending ? 0.85 : (!subject.trim() ? 0.6 : 1), cursor: sending ? 'progress' : (!subject.trim() ? 'not-allowed' : 'pointer') }}
           >
@@ -173,6 +184,27 @@ export function IntakeEmailModal({
             {sending ? 'Sending…' : 'Send Email'}
           </button>
         </div>
+        {/* "Send me a copy" — sits just below the footer so it's adjacent to
+            the Send button without crowding it. Hidden when no senderEmail
+            is provided (callers that don't pass it opt out of the affordance). */}
+        {senderEmail && (
+          <div style={{
+            padding: '0 20px 14px', display: 'flex', alignItems: 'center', gap: 8,
+            fontSize: 12, color: theme.colors.textSecondary, flexShrink: 0,
+          }}>
+            <input
+              id="intake-email-bcc"
+              type="checkbox"
+              checked={sendMeCopy}
+              onChange={e => setSendMeCopy(e.target.checked)}
+              disabled={sending}
+              style={{ cursor: sending ? 'default' : 'pointer' }}
+            />
+            <label htmlFor="intake-email-bcc" style={{ cursor: sending ? 'default' : 'pointer' }}>
+              Send me a copy <span style={{ color: theme.colors.textMuted }}>({senderEmail})</span>
+            </label>
+          </div>
+        )}
       </div>
     </div>
   );
