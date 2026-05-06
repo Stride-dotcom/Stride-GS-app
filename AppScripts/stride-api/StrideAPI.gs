@@ -41903,3 +41903,341 @@ function runReleaseInvoicesForReissue() {
   Logger.log("Next step: Billing → Create Invoices in the React app, per affected client.");
   Logger.log("════════════════════════════════════════════════════════════");
 }
+
+/**
+ * v38.193.0 (Phase C4) — Nightly billing anomaly sweep.
+ *
+ * Run from the Apps Script editor (Select function → runBillingAnomalySweep
+ * → Run) or wire up a daily time-driven trigger via Edit → Triggers in the
+ * editor. The trigger setup is left as a manual operator step on purpose —
+ * we don't want push-api / deploy-api to silently install a trigger that
+ * starts emailing Justin.
+ *
+ * Five checks against the last 30 days of activity. All checks short-circuit
+ * if Supabase is unreachable; the function never throws (best-effort) and
+ * always returns a structured summary so a future React UI can render it.
+ *
+ *   1. Duplicate invoice_create activity entries (same invoice_no on
+ *      ≥2 success rows in billing_activity_log). The pre-v38.182 RPC
+ *      counter race had this signature; the atomic Postgres SEQUENCE
+ *      makes it impossible to recur, but the sweep still surfaces it
+ *      so a future regression won't be missed.
+ *   2. Count mismatch between billing rows and stax_invoices line items
+ *      for the same invoice number. A mismatch here means CB and Stax
+ *      diverged — usually a half-failed invoice or a v38.193 bug #5
+ *      regression where handleVoidInvoice_ removed CB rows but Stax
+ *      still shows the line items.
+ *   3. Mixed-sidemark rows on a single invoice for a client whose
+ *      separate_by_sidemark = true. The C3 assertion now blocks this
+ *      at create time; sweep covers historical drift.
+ *   4. Stale-Void pattern: a billing row with status = Void whose
+ *      ledger_row_id appears in some stax_invoices.line_items_json
+ *      element. Bug #4 / #9's fingerprint. The B2 pre-commit assertion
+ *      blocks this going forward.
+ *   5. Storage anomalies: STOR rows with negative qty/total (math
+ *      bug or manual edit). Duplicate-row check kept lightweight —
+ *      the real per-item-month dedup is enforced by handleGenerateStorageCharges_'s
+ *      Ledger Row ID format.
+ *
+ * If any anomalies are found, sends Justin a single summary email; clean
+ * sweeps are silent (Logger only) so the daily inbox isn't noisy.
+ */
+function runBillingAnomalySweep() {
+  var startTime = new Date();
+  var sbUrl = prop_("SUPABASE_URL");
+  var sbKey = prop_("SUPABASE_SERVICE_ROLE_KEY");
+  var WINDOW_DAYS = 30;
+  var cutoff = new Date(Date.now() - WINDOW_DAYS * 86400000);
+  var cutoffISO = cutoff.toISOString();
+  var cutoffDate = cutoffISO.slice(0, 10);
+
+  if (!sbUrl || !sbKey) {
+    Logger.log("runBillingAnomalySweep: Supabase credentials missing — aborting");
+    return { success: false, error: "Supabase credentials not configured" };
+  }
+
+  function sbGet_(path) {
+    var resp = UrlFetchApp.fetch(sbUrl + path, {
+      method: "GET",
+      headers: {
+        "Authorization": "Bearer " + sbKey,
+        "apikey": sbKey,
+        "Accept": "application/json"
+      },
+      muteHttpExceptions: true
+    });
+    var code = resp.getResponseCode();
+    if (code < 200 || code >= 300) {
+      throw new Error("Supabase " + path.split("?")[0] + " HTTP " + code + ": " + resp.getContentText().substring(0, 200));
+    }
+    return JSON.parse(resp.getContentText());
+  }
+
+  var anomalies = {
+    duplicateInvoiceCreates: [],
+    countMismatch: [],
+    mixedSidemark: [],
+    voidRowsInStax: [],
+    storageNegative: []
+  };
+  var checkErrors = [];
+
+  // Check 1 — duplicate invoice_create entries
+  try {
+    var actLog = sbGet_("/rest/v1/billing_activity_log?action=eq.invoice_create&status=eq.success&performed_at=gte." + encodeURIComponent(cutoffISO) + "&select=invoice_no,client_name,performed_at,performed_by&order=performed_at.asc");
+    var byInv = {};
+    for (var i = 0; i < actLog.length; i++) {
+      var e = actLog[i];
+      var key = String(e.invoice_no || "(blank)");
+      if (!byInv[key]) byInv[key] = [];
+      byInv[key].push(e);
+    }
+    for (var k in byInv) {
+      if (byInv[k].length > 1) {
+        var entries = byInv[k];
+        var perfSet = {};
+        for (var pi = 0; pi < entries.length; pi++) perfSet[String(entries[pi].performed_by || "")] = true;
+        anomalies.duplicateInvoiceCreates.push({
+          invoiceNo: k,
+          count: entries.length,
+          clientName: entries[0].client_name || "",
+          firstAt: entries[0].performed_at,
+          lastAt: entries[entries.length - 1].performed_at,
+          performers: Object.keys(perfSet)
+        });
+      }
+    }
+  } catch (e1) { checkErrors.push("check1: " + e1.message); }
+
+  // Check 2 — billing row count vs stax_invoices.line_items_json count
+  // Pull recent stax invoices once; reused by Check 4.
+  var staxInvs = [];
+  try {
+    staxInvs = sbGet_("/rest/v1/stax_invoices?created_at=gte." + encodeURIComponent(cutoffISO) + "&select=qb_invoice_no,line_items_json,created_at");
+    if (staxInvs.length > 0) {
+      var invNumbers = [];
+      for (var i = 0; i < staxInvs.length; i++) {
+        if (staxInvs[i].qb_invoice_no) invNumbers.push(String(staxInvs[i].qb_invoice_no));
+      }
+      var billingCountByInv = {};
+      // Chunked IN filter — 100 invoice numbers per request. PostgREST URL
+      // length is bounded around 8KB; 100 × ~10 chars = 1KB headroom.
+      for (var off = 0; off < invNumbers.length; off += 100) {
+        var chunk = invNumbers.slice(off, off + 100);
+        var inFilter = chunk.map(function(s) { return '"' + s + '"'; }).join(",");
+        var rows = sbGet_("/rest/v1/billing?invoice_no=in.(" + encodeURIComponent(inFilter) + ")&status=eq.Invoiced&select=invoice_no");
+        for (var ri = 0; ri < rows.length; ri++) {
+          var inv = String(rows[ri].invoice_no || "");
+          billingCountByInv[inv] = (billingCountByInv[inv] || 0) + 1;
+        }
+      }
+      for (var i = 0; i < staxInvs.length; i++) {
+        var sInv = staxInvs[i];
+        var staxCount = Array.isArray(sInv.line_items_json) ? sInv.line_items_json.length : 0;
+        var billingCount = billingCountByInv[String(sInv.qb_invoice_no || "")] || 0;
+        if (staxCount !== billingCount) {
+          anomalies.countMismatch.push({
+            invoiceNo: sInv.qb_invoice_no,
+            staxLineCount: staxCount,
+            billingRowCount: billingCount,
+            createdAt: sInv.created_at
+          });
+        }
+      }
+    }
+  } catch (e2) { checkErrors.push("check2: " + e2.message); }
+
+  // Check 3 — mixed sidemarks for separate_by_sidemark=true clients
+  try {
+    var sbsClients = sbGet_("/rest/v1/clients?separate_by_sidemark=eq.true&select=spreadsheet_id,name");
+    if (sbsClients.length > 0) {
+      var sbsTenantName = {};
+      var sbsTenantList = [];
+      for (var i = 0; i < sbsClients.length; i++) {
+        sbsTenantName[sbsClients[i].spreadsheet_id] = sbsClients[i].name;
+        sbsTenantList.push('"' + sbsClients[i].spreadsheet_id + '"');
+      }
+      var tenantInFilter = sbsTenantList.join(",");
+      var c3Rows = sbGet_("/rest/v1/billing?status=eq.Invoiced&tenant_id=in.(" + encodeURIComponent(tenantInFilter) + ")&invoice_date=gte." + cutoffDate + "&select=tenant_id,invoice_no,sidemark");
+      var sidemarksByInv = {};
+      for (var i = 0; i < c3Rows.length; i++) {
+        var r = c3Rows[i];
+        if (!r.invoice_no) continue;
+        var key = r.tenant_id + "|" + r.invoice_no;
+        if (!sidemarksByInv[key]) sidemarksByInv[key] = { tenantId: r.tenant_id, invoiceNo: r.invoice_no, sidemarks: {} };
+        sidemarksByInv[key].sidemarks[String(r.sidemark || "")] = true;
+      }
+      for (var key in sidemarksByInv) {
+        var sm = sidemarksByInv[key];
+        var distinct = Object.keys(sm.sidemarks);
+        if (distinct.length > 1) {
+          anomalies.mixedSidemark.push({
+            tenantId: sm.tenantId,
+            clientName: sbsTenantName[sm.tenantId] || "",
+            invoiceNo: sm.invoiceNo,
+            distinctSidemarks: distinct.length,
+            sidemarks: distinct
+          });
+        }
+      }
+    }
+  } catch (e3) { checkErrors.push("check3: " + e3.message); }
+
+  // Check 4 — stale-Void rows whose ledger_row_id appears in stax line_items_json
+  try {
+    var voidRows = sbGet_("/rest/v1/billing?status=eq.Void&created_at=gte." + encodeURIComponent(cutoffISO) + "&select=tenant_id,invoice_no,ledger_row_id");
+    if (voidRows.length > 0 && staxInvs.length > 0) {
+      // Build a Set of all ledger_row_ids across all stax line items.
+      // Avoids O(N×M) comparison; one O(M) pass over staxInvs.line_items_json.
+      var lidToStaxInvs = {};
+      for (var si = 0; si < staxInvs.length; si++) {
+        var li = staxInvs[si].line_items_json;
+        if (!Array.isArray(li)) continue;
+        for (var lj = 0; lj < li.length; lj++) {
+          var lid = li[lj] && (li[lj].ledger_row_id || li[lj].ledgerRowId);
+          if (!lid) continue;
+          var lidKey = String(lid);
+          if (!lidToStaxInvs[lidKey]) lidToStaxInvs[lidKey] = [];
+          lidToStaxInvs[lidKey].push(staxInvs[si].qb_invoice_no);
+        }
+      }
+      for (var vi = 0; vi < voidRows.length; vi++) {
+        var vr = voidRows[vi];
+        if (!vr.ledger_row_id) continue;
+        var hits = lidToStaxInvs[String(vr.ledger_row_id)];
+        if (hits && hits.length > 0) {
+          anomalies.voidRowsInStax.push({
+            tenantId: vr.tenant_id,
+            ledgerRowId: vr.ledger_row_id,
+            voidedOnInvoice: vr.invoice_no || null,
+            staxInvoices: hits
+          });
+        }
+      }
+    }
+  } catch (e4) { checkErrors.push("check4: " + e4.message); }
+
+  // Check 5 — storage rows with negative qty/total
+  try {
+    var storRows = sbGet_("/rest/v1/billing?svc_code=eq.STOR&created_at=gte." + encodeURIComponent(cutoffISO) + "&select=tenant_id,invoice_no,ledger_row_id,item_id,qty,total,date,status");
+    for (var i = 0; i < storRows.length; i++) {
+      var s = storRows[i];
+      var qty = Number(s.qty);
+      var total = Number(s.total);
+      var qtyBad = !isNaN(qty) && qty < 0;
+      var totalBad = !isNaN(total) && total < 0;
+      if (qtyBad || totalBad) {
+        anomalies.storageNegative.push({
+          tenantId: s.tenant_id,
+          ledgerRowId: s.ledger_row_id,
+          itemId: s.item_id,
+          invoiceNo: s.invoice_no || null,
+          qty: s.qty,
+          total: s.total,
+          status: s.status
+        });
+      }
+    }
+  } catch (e5) { checkErrors.push("check5: " + e5.message); }
+
+  // Format report
+  var totalCount = 0;
+  for (var key in anomalies) totalCount += (anomalies[key] || []).length;
+  var elapsedMs = (new Date()) - startTime;
+
+  Logger.log("════════════════════════════════════════════════════════════");
+  Logger.log("Billing Anomaly Sweep — " + new Date().toISOString());
+  Logger.log("Window: " + WINDOW_DAYS + " days (since " + cutoffISO + ")");
+  Logger.log("Elapsed: " + elapsedMs + "ms");
+  Logger.log("Total anomalies: " + totalCount);
+  Logger.log("");
+  Logger.log("  Duplicate invoice_create entries:  " + anomalies.duplicateInvoiceCreates.length);
+  Logger.log("  Count mismatch (billing vs stax):  " + anomalies.countMismatch.length);
+  Logger.log("  Mixed-sidemark invoices:           " + anomalies.mixedSidemark.length);
+  Logger.log("  Void rows present in stax:         " + anomalies.voidRowsInStax.length);
+  Logger.log("  Storage rows w/ negative values:   " + anomalies.storageNegative.length);
+  if (checkErrors.length > 0) {
+    Logger.log("");
+    Logger.log("  Check errors (degraded coverage):");
+    for (var ci = 0; ci < checkErrors.length; ci++) Logger.log("    - " + checkErrors[ci]);
+  }
+  Logger.log("════════════════════════════════════════════════════════════");
+
+  // Send email if any anomalies (clean sweeps are Logger-only — keeps the
+  // operator's inbox quiet on green nights)
+  if (totalCount > 0) {
+    try {
+      var html = anomalySweepEmailHtml_(anomalies, totalCount, WINDOW_DAYS, cutoffISO, elapsedMs, checkErrors);
+      MailApp.sendEmail({
+        to: "justin@stridenw.com",
+        subject: "[Stride] Billing anomaly sweep: " + totalCount + " finding(s)",
+        htmlBody: html
+      });
+      Logger.log("Email sent to justin@stridenw.com.");
+    } catch (mailErr) {
+      Logger.log("MailApp.sendEmail failed (anomalies still logged above): " + mailErr.message);
+    }
+  }
+
+  return {
+    success: true,
+    totalCount: totalCount,
+    elapsedMs: elapsedMs,
+    windowDays: WINDOW_DAYS,
+    anomalies: anomalies,
+    checkErrors: checkErrors
+  };
+}
+
+function anomalySweepEmailHtml_(anomalies, totalCount, windowDays, cutoffISO, elapsedMs, checkErrors) {
+  function esc(s) {
+    return String(s == null ? "" : s)
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+  function section_(title, rows, render) {
+    if (!rows || rows.length === 0) return "";
+    var html = "<h3 style='font-family:Inter,sans-serif;color:#222;margin-top:24px'>" + esc(title) + " (" + rows.length + ")</h3>";
+    html += "<table style='border-collapse:collapse;font-family:Inter,sans-serif;font-size:13px;width:100%'>";
+    var sample = rows.slice(0, 20);
+    for (var i = 0; i < sample.length; i++) {
+      html += "<tr style='border-bottom:1px solid #eee'><td style='padding:6px 8px;vertical-align:top'>" + render(sample[i]) + "</td></tr>";
+    }
+    if (rows.length > sample.length) {
+      html += "<tr><td style='padding:6px 8px;color:#888'>… and " + (rows.length - sample.length) + " more</td></tr>";
+    }
+    html += "</table>";
+    return html;
+  }
+  var body = "";
+  body += "<div style='font-family:Inter,sans-serif;color:#222;max-width:760px'>";
+  body += "<h2 style='color:#E85D2D'>Billing Anomaly Sweep — " + totalCount + " finding(s)</h2>";
+  body += "<p style='color:#555'>Window: last " + windowDays + " days (since " + esc(cutoffISO) + ").  Elapsed: " + elapsedMs + "ms.</p>";
+
+  body += section_("Duplicate invoice_create entries", anomalies.duplicateInvoiceCreates, function(d) {
+    return "<b>" + esc(d.invoiceNo) + "</b> — " + esc(d.clientName) + " — " + d.count + "× between " + esc(d.firstAt) + " and " + esc(d.lastAt) + "<br><span style='color:#777'>performers: " + esc((d.performers || []).join(", ")) + "</span>";
+  });
+  body += section_("Count mismatch (billing rows vs stax line_items_json)", anomalies.countMismatch, function(d) {
+    return "<b>" + esc(d.invoiceNo) + "</b> — billing rows: " + d.billingRowCount + ", stax line items: " + d.staxLineCount + " (created " + esc(d.createdAt) + ")";
+  });
+  body += section_("Mixed-sidemark invoices (separate_by_sidemark=true clients)", anomalies.mixedSidemark, function(d) {
+    return "<b>" + esc(d.invoiceNo) + "</b> — " + esc(d.clientName) + " — " + d.distinctSidemarks + " sidemarks: " + esc((d.sidemarks || []).join(", "));
+  });
+  body += section_("Stale-Void rows present in Stax line_items_json", anomalies.voidRowsInStax, function(d) {
+    return "<b>" + esc(d.ledgerRowId) + "</b> — voided on " + esc(d.voidedOnInvoice || "(none)") + ", but appears in stax invoices: " + esc((d.staxInvoices || []).join(", "));
+  });
+  body += section_("Storage rows with negative qty/total", anomalies.storageNegative, function(d) {
+    return "<b>" + esc(d.ledgerRowId) + "</b> — item " + esc(d.itemId) + ", qty=" + esc(d.qty) + ", total=" + esc(d.total) + " (status=" + esc(d.status) + ")";
+  });
+
+  if (checkErrors && checkErrors.length > 0) {
+    body += "<h3 style='font-family:Inter,sans-serif;color:#a00;margin-top:24px'>Check errors</h3>";
+    body += "<ul>";
+    for (var i = 0; i < checkErrors.length; i++) body += "<li>" + esc(checkErrors[i]) + "</li>";
+    body += "</ul>";
+  }
+
+  body += "<p style='color:#777;font-size:11px;margin-top:24px'>Run from Apps Script editor → Select function → runBillingAnomalySweep → Run.  Wire as a daily 6am trigger via Edit → Triggers if you want this automated.</p>";
+  body += "</div>";
+  return body;
+}
