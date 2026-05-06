@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.191.0 — 2026-05-05 PST — QBO push: Customer:Sidemark splitting was forced on for EVERY client because the per-client `separateBySidemark` flag was never actually populated on handleQboPush_'s clientInfoMap. The CB Clients column read for "SEPARATE BY SIDEMARK" was missing — only terms / qbCustomerName / email / phone / billingEmail were loaded — so `clientInfo.separateBySidemark` was always undefined. Combined with the per-invoice group's `clientInfo.separateBySidemark !== false` coalescing, undefined flipped to true and qbo_resolveCustomerAndSubJob_ unconditionally split into parent:sub-job pairs whenever a sidemark existed on the line, breaking the per-client opt-in promise from v38.147.0 (which only ever shipped half — the call-site plumbing, not the column source). Two fixes: (1) read `clHdr["SEPARATE BY SIDEMARK"]` and stamp the boolean onto every clientInfoMap entry using the same idiom the IIF path at line ~21260 uses (defaults false on missing column / non-explicit-TRUE cell); (2) flip the per-invoice-group coalescing from `!== false` (undefined→true) to `=== true` (undefined→false) so a stale lookup or future clientInfo gap can't re-introduce the same regression. Result matches the IIF export gate at line ~22153: only clients with an explicit TRUE in the CB Clients "Separate By Sidemark" column post as Customer:Sidemark sub-jobs in QBO; everyone else lands on the flat parent customer.
+   StrideAPI.gs — v38.192.0 — 2026-05-05 PST — One-shot admin entry runReleaseInvoicesForReissue for the v38.182 race cleanup. Four invoices the pre-fix duplicate-number race left in the wild (Digs INV-000115 / Mary Kenngott INV-000129 / Nip Tuck INV-000131 + INV-000135) need to be released back to Unbilled across all three storage layers (client Billing_Ledger sheet, CB Consolidated_Ledger sheet, public.billing Supabase mirror) so they can be re-issued split-by-sidemark per v38.191.0. handleVoidInvoice_ flips rows to a terminal "Void" state — appropriate when work won't be re-billed but wrong here. Hardcodes the four (clientSheetId, invoiceNo, expectedRows) tuples — verified via direct Supabase query before push — so the operator can't accidentally release the wrong scope. Per invoice: (1) flips matching client Billing_Ledger rows from Invoiced/Void → Unbilled, clears Invoice #/Date/URL, appends a release-trail note to Item Notes (RangeList writes for concurrent-safety, same shape as api_markClientLedgerInvoiced_); (2) deletes matching CB Consolidated_Ledger rows using the v38.183 grouped-descending-deleteRows pattern from rollbackByInvoiceNo_; (3) queues api_fullClientSync_(clientSheetId, ['billing']) so public.billing reflects the released state within ~1-2s and the rows reappear on the next Create Invoices preview. Idempotent — Status filter requires Invoiced or Void so anything already Unbilled is a no-op. Run from Apps Script editor → Select function → runReleaseInvoicesForReissue → Run, then read the execution log for per-invoice released/deleted/expected counts. Pre-condition: operator has already voided each invoice in Stax + QBO; function never touches either external system, only fixes internal ledger state so re-issue produces a clean replacement under a fresh atomic-counter invoice number.
+   v38.191.0 — 2026-05-05 PST — QBO push: Customer:Sidemark splitting was forced on for EVERY client because the per-client `separateBySidemark` flag was never actually populated on handleQboPush_'s clientInfoMap. The CB Clients column read for "SEPARATE BY SIDEMARK" was missing — only terms / qbCustomerName / email / phone / billingEmail were loaded — so `clientInfo.separateBySidemark` was always undefined. Combined with the per-invoice group's `clientInfo.separateBySidemark !== false` coalescing, undefined flipped to true and qbo_resolveCustomerAndSubJob_ unconditionally split into parent:sub-job pairs whenever a sidemark existed on the line, breaking the per-client opt-in promise from v38.147.0 (which only ever shipped half — the call-site plumbing, not the column source). Two fixes: (1) read `clHdr["SEPARATE BY SIDEMARK"]` and stamp the boolean onto every clientInfoMap entry using the same idiom the IIF path at line ~21260 uses (defaults false on missing column / non-explicit-TRUE cell); (2) flip the per-invoice-group coalescing from `!== false` (undefined→true) to `=== true` (undefined→false) so a stale lookup or future clientInfo gap can't re-introduce the same regression. Result matches the IIF export gate at line ~22153: only clients with an explicit TRUE in the CB Clients "Separate By Sidemark" column post as Customer:Sidemark sub-jobs in QBO; everyone else lands on the flat parent customer.
    v38.190.0 — 2026-05-05 PST — Audit log for batchCreateTasks. Every other task action (start, complete, cancel, correct_result, reopen, updateNotes/Price/Due/Priority) writes one row to entity_audit_log via api_auditLog_, but the create path was the lone gap — tasks materialized on the React Activity tab with no "Created" event because no audit row ever existed. Now the batchCreateTasks router calls api_auditLogBatch_ with one {entity_type:"task", entity_id:<taskId>, tenant_id, action:"create", changes:{summary:"Task created", svcCodes}, performed_by:callerEmail, source:"gas"} row per ID returned by handleBatchCreateTasks_. Best-effort: failure logs but never blocks the user response. The audit insert fires after api_fullClientSync_ so the React EntityHistory realtime sub picks it up at the same time the new task row appears in the list.
    v38.189.0 — 2026-05-05 PST — Two transfer-flow fixes that together close the lost-revenue gap on transferred items. (1) Bulk inventory sync was silently dropping 5 fields on every fullClientSync: shipment_photos_url, inspection_photos_url, repair_photos_url, invoice_url, transfer_date. The single-item resync path at line 5654 always passed them; the bulk loop at line 6237 didn't. sbInventoryRow_ falls back to "" when fields are undefined, so each sync wiped the destination column. Confirmed via SQL: 0 of 5,658 inventory rows had any of the five populated, including all 31 confirmed-transferred items (transfer_date blank everywhere). Without transfer_date populated, handleGenerateStorageCharges_ couldn't do its source/destination cutover split — source rows skipped entirely, destination treated like a fresh receive with full free-days credit, both sides under-billed. Fix: pass all five fields in the bulk-sync sbInventoryRow_ payload. (2) New storage backfill block in handleTransferItems_ between the billing void/copy and tasks sections. For each transferred item, generate Unbilled STOR rows on the DESTINATION ledger covering receive_date → transfer_date - 1, applying destination's free_storage_days and storage discount. Rate = class cuFt × XL rate × destination discount, same formula handleGenerateStorageCharges_ uses. Dedup against any STOR rows on either source or destination ledger that are already Invoiced/Billed (Void rows don't count — payment never happened so days are still owed). Independent of the Transfer Date sheet-write fix above: uses the local `transferDate` variable, not the sheet cell. Distinct Ledger Row ID prefix `STOR-TRANSFER-{itemId}-{startISO}-{endISO}` lets monthly storage-gen recognize and skip these rows during its delete-and-rebuild loop. New admin entry runBackfillTransferStorageCharges walks every active CB client, pulls all transfer-destination rows from Supabase via inventory.transferred_at, and runs the same backfill logic for items that transferred before this PR shipped. Idempotent — checks for existing STOR-TRANSFER-* rows on the destination ledger and skips items already backfilled. Run once from the Apps Script editor after deploy.
    v38.188.0 — 2026-05-05 PST — Bulk-void affordance for Unbilled Billing_Ledger rows. Pre-v38.188 the only ways to remove an Unbilled row from the Report were (a) invoice it (and then voidInvoice the whole invoice) or (b) edit the sheet by hand — the per-row Void button only existed for already-voided MANUAL- rows. Operators couldn't undo a mistakenly-committed RCVG/WC/task addon without contaminating an invoice they'd then need to issue and void. New action `voidUnbilledRows` + handleVoidUnbilledRows_(clientSheetId, payload) accepts a `{ledgerRowIds[], reason?}` shape, reads the client's Billing_Ledger once via bulk getValues, indexes by Ledger Row ID, and for each requested ID flips Status from "Unbilled" → "Void" and stamps "Voided: <reason>" (or "Voided <date>") into Item Notes. Strict guard: only "Unbilled" rows are accepted — Invoiced/Billed rows are surfaced in `rejected[]` with their currentStatus so the React UI can warn the operator about selection drift; already-Voided rows are silently skipped; missing IDs go to `skippedNotFound`. Router wraps the call in withStaffGuard_ + withClientIsolation_, calls api_fullClientSync_(.., ['billing']) so Supabase realtime drops the rows from the React Billing list within ~1-2s, writes one audit log entry per call (capped at 50 IDs in the payload). React side: new postVoidUnbilledRows() + Billing.tsx "Void Selected" button (red, only enabled when ≥1 Unbilled row is selected) + confirmation modal with optional reason input. The modal groups the selection by sourceSheetId and fans out one server call per tenant — operators can void rows across multiple clients in one click.
@@ -41413,4 +41414,204 @@ function runProbe_(baseUrl, realmId, accessToken, query, minorVersion) {
   } catch (e) {
     Logger.log('EXCEPTION: ' + e.message);
   }
+}
+
+// ─── runReleaseInvoicesForReissue ─────────────────────────────────────────
+//
+// One-shot admin entry that releases an invoice's billing rows back to
+// Unbilled state across all three systems (client Billing_Ledger sheet, CB
+// Consolidated_Ledger sheet, public.billing Supabase mirror) so the
+// affected work can be re-issued cleanly under a fresh invoice number.
+//
+// Built specifically for the v38.182 race-condition cleanup (2026-05-05):
+// four invoices on three clients (Digs INV-000115, Mary Kenngott INV-000129,
+// Nip Tuck INV-000131 + INV-000135) carry rows from two intended sidemark
+// groups each, so they need to be voided and re-issued split-by-sidemark
+// the way v38.191's separate_by_sidemark intends. The duplicate-number
+// race itself is dead since v38.182 (atomic Postgres SEQUENCE counter);
+// this function only cleans up the four invoices it left in the wild.
+//
+// Per-invoice this does:
+//   1. Client Billing_Ledger → for every row whose Invoice # matches and
+//      Status is Invoiced or Void, flip Status to Unbilled, clear Invoice
+//      #/Invoice Date/Invoice URL, append a release note to Item Notes.
+//   2. CB Consolidated_Ledger → delete every row whose Invoice # matches.
+//      Uses the same descending-loop / grouped-deleteRows pattern as the
+//      in-flight rollbackByInvoiceNo_ closure inside handleCreateInvoice_
+//      (v38.183 — minimizes Sheets round-trips for runs of consecutive
+//      rows).
+//   3. api_fullClientSync_(clientSheetId, ['billing']) → resyncs the
+//      client's billing rows into Supabase so public.billing reflects the
+//      released state within ~1-2s. Without this, the React Billing report
+//      keeps the rows pinned to the old invoice number for ~minutes
+//      (until the next write triggers a sync) and they don't appear on
+//      the next Create Invoices preview.
+//
+// Pre-condition (operator's responsibility, not enforced here):
+//   - Stax invoice for each invoice_no has been voided in the Stax
+//     dashboard (otherwise the May 18 auto-charge fires anyway).
+//   - QBO invoice for each invoice_no has been voided in QuickBooks
+//     (otherwise the books still show the bad invoice).
+// This function NEVER touches Stax or QBO directly. It only fixes the
+// internal ledger state so re-issue produces a clean replacement.
+//
+// Safety:
+//   - Idempotent. Re-running on already-released rows is a no-op (the row
+//     filter requires status === Invoiced || status === Void, so anything
+//     already at Unbilled is skipped silently).
+//   - Logs each invoice's row counts (released / cb-deleted / failed) so
+//     the operator can verify against the SQL preview that produced the
+//     scope. Discrepancies → STOP, do not run Create Invoices.
+//   - The four (clientSheetId, invoiceNo) pairs are hardcoded below to
+//     prevent accidentally releasing the wrong invoice. Edit the array
+//     and re-push if a different scope is needed in the future.
+function runReleaseInvoicesForReissue() {
+  // SCOPE — confirmed via direct Supabase query (2026-05-05):
+  //   3 clients × 4 invoices × 55 rows × $1,735 total
+  var jobs = [
+    { clientSheetId: '1XwlmHro_A1OR1YL3yUK4AV_Ppt4yqApHzRWxfoVIazM', invoiceNo: 'INV-000115', expectedRows:  3, clientLabel: 'Digs Furniture' },
+    { clientSheetId: '1nC0afgfk5KFyPdoK82sxGZeG7kcsA3uRNUI_a2l0Lbg', invoiceNo: 'INV-000129', expectedRows:  9, clientLabel: 'Mary Kenngott Design' },
+    { clientSheetId: '1_CINtvpNLs1pSD7kkh5-dbccM-jF7s1B4vQBkjA5eUc', invoiceNo: 'INV-000131', expectedRows: 25, clientLabel: 'Nip Tuck Remodeling' },
+    { clientSheetId: '1_CINtvpNLs1pSD7kkh5-dbccM-jF7s1B4vQBkjA5eUc', invoiceNo: 'INV-000135', expectedRows: 18, clientLabel: 'Nip Tuck Remodeling' }
+  ];
+
+  var cbId = prop_("CB_SPREADSHEET_ID");
+  if (!cbId) { Logger.log("CB_SPREADSHEET_ID not set — abort"); return; }
+  var cbSS = SpreadsheetApp.openById(cbId);
+  var consolLedger = cbSS.getSheetByName("Consolidated_Ledger");
+  if (!consolLedger) { Logger.log("Consolidated_Ledger sheet not found in CB — abort"); return; }
+
+  Logger.log("════════════════════════════════════════════════════════════");
+  Logger.log("runReleaseInvoicesForReissue — releasing " + jobs.length + " invoices");
+  Logger.log("════════════════════════════════════════════════════════════");
+
+  var totalsReleased = 0;
+  var totalsCbDeleted = 0;
+
+  for (var ji = 0; ji < jobs.length; ji++) {
+    var job = jobs[ji];
+    Logger.log("");
+    Logger.log("───── " + job.invoiceNo + "  (" + job.clientLabel + ", expected " + job.expectedRows + " rows) ─────");
+
+    // (1) Client Billing_Ledger flip — Invoiced/Void → Unbilled, clear Invoice columns.
+    var releasedCount = 0;
+    try {
+      var ss = SpreadsheetApp.openById(job.clientSheetId);
+      var sh = ss.getSheetByName("Billing_Ledger");
+      if (!sh) {
+        Logger.log("  ⚠ client Billing_Ledger sheet not found — skipping client-side flip");
+      } else {
+        var hdr = api_getHeaderMap_(sh);
+        var idxStatus  = hdr["Status"] || hdr["Billing Status"];
+        var idxInvNo   = api_ensureColumn_(sh, "Invoice #");
+        var idxInvDate = api_ensureColumn_(sh, "Invoice Date");
+        var idxInvUrl  = api_ensureColumn_(sh, "Invoice URL");
+        var idxNotes   = hdr["Item Notes"] !== undefined ? hdr["Item Notes"] : hdr["Notes"];
+        if (!idxStatus || !idxInvNo) {
+          Logger.log("  ⚠ Status or Invoice # column missing — cannot flip rows");
+        } else {
+          var lastRow = api_getLastDataRow_(sh);
+          if (lastRow >= 2) {
+            var data = sh.getRange(2, 1, lastRow - 1, sh.getLastColumn()).getValues();
+            var changedRows = [];
+            for (var i = 0; i < data.length; i++) {
+              var rowInv = String(data[i][idxInvNo - 1] || "").trim();
+              if (rowInv !== job.invoiceNo) continue;
+              var rowStatus = String(data[i][idxStatus - 1] || "").trim();
+              if (rowStatus !== "Invoiced" && rowStatus !== "Void") continue;
+              changedRows.push(i + 2);  // 1-indexed sheet row
+            }
+            if (changedRows.length > 0) {
+              // Use RangeList for sparse, concurrent-safe writes (same pattern
+              // as api_markClientLedgerInvoiced_ post-v38.183).
+              function colA1_(col) { var s = ""; var n = col; while (n > 0) { var rem = (n-1) % 26; s = String.fromCharCode(65+rem) + s; n = Math.floor((n-1)/26); } return s; }
+              var statusA1s = changedRows.map(function(r) { return colA1_(idxStatus) + r; });
+              var invNoA1s  = changedRows.map(function(r) { return colA1_(idxInvNo)  + r; });
+              var invDtA1s  = idxInvDate ? changedRows.map(function(r) { return colA1_(idxInvDate) + r; }) : null;
+              var invUrlA1s = idxInvUrl  ? changedRows.map(function(r) { return colA1_(idxInvUrl)  + r; }) : null;
+              sh.getRangeList(statusA1s).setValue("Unbilled");
+              sh.getRangeList(invNoA1s).setValue("");
+              if (invDtA1s)  sh.getRangeList(invDtA1s).setValue("");
+              if (invUrlA1s) sh.getRangeList(invUrlA1s).setValue("");
+              if (idxNotes) {
+                // Append a release note per-row (notes vary, so do per-cell setValues).
+                var noteSuffix = "Released from " + job.invoiceNo + " for re-issue (v38.182 race cleanup)";
+                for (var ci = 0; ci < changedRows.length; ci++) {
+                  var rNum = changedRows[ci];
+                  var existing = String(data[rNum - 2][idxNotes - 1] || "").trim();
+                  sh.getRange(rNum, idxNotes).setValue((existing ? existing + " | " : "") + noteSuffix);
+                }
+              }
+              releasedCount = changedRows.length;
+            }
+          }
+          Logger.log("  ✓ client sheet: released " + releasedCount + " rows (" + (releasedCount === job.expectedRows ? "matches expected" : "EXPECTED " + job.expectedRows + " — review!") + ")");
+        }
+      }
+    } catch (clientErr) {
+      Logger.log("  ✗ client sheet flip threw: " + clientErr.message);
+    }
+
+    // (2) CB Consolidated_Ledger delete — same logic as rollbackByInvoiceNo_,
+    // grouped descending deletes for fewer round-trips.
+    var cbDeleted = 0;
+    try {
+      var hdrCb = api_getHeaderMap_(consolLedger);
+      var idxCbInv = hdrCb["Invoice #"];
+      if (!idxCbInv) {
+        Logger.log("  ⚠ CB Consolidated_Ledger missing Invoice # column — skipping CB delete");
+      } else {
+        var cbLast = consolLedger.getLastRow();
+        if (cbLast >= 2) {
+          var cbInvCol = consolLedger.getRange(2, idxCbInv, cbLast - 1, 1).getValues();
+          var rowsToDelete = [];
+          for (var ri = cbInvCol.length - 1; ri >= 0; ri--) {
+            if (String(cbInvCol[ri][0] || "").trim() === job.invoiceNo) {
+              rowsToDelete.push(ri + 2);
+            }
+          }
+          var di = 0;
+          while (di < rowsToDelete.length) {
+            var runEnd = rowsToDelete[di];
+            var runStart = runEnd;
+            var runLen = 1;
+            while (di + runLen < rowsToDelete.length && rowsToDelete[di + runLen] === runStart - 1) {
+              runStart -= 1; runLen += 1;
+            }
+            try {
+              consolLedger.deleteRows(runStart, runLen);
+              cbDeleted += runLen;
+            } catch (perRunErr) {
+              Logger.log("    ✗ CB delete run " + runStart + ".." + runEnd + " failed: " + perRunErr.message);
+            }
+            di += runLen;
+          }
+        }
+      }
+      Logger.log("  ✓ CB Consolidated_Ledger: deleted " + cbDeleted + " rows");
+    } catch (cbErr) {
+      Logger.log("  ✗ CB delete threw: " + cbErr.message);
+    }
+
+    // (3) Mirror to Supabase. api_fullClientSync_ pulls the client's full
+    // billing snapshot from the now-flipped Billing_Ledger sheet and upserts
+    // into public.billing — flipped rows land as Unbilled, deleted CB rows
+    // don't matter (Supabase mirrors client sheet, not CB).
+    try {
+      api_fullClientSync_(job.clientSheetId, ["billing"]);
+      Logger.log("  ✓ Supabase resync queued for " + job.clientLabel);
+    } catch (syncErr) {
+      Logger.log("  ✗ Supabase resync threw: " + syncErr.message + " — run api_fullClientSync_ manually for " + job.clientSheetId);
+    }
+
+    totalsReleased += releasedCount;
+    totalsCbDeleted += cbDeleted;
+  }
+
+  Logger.log("");
+  Logger.log("════════════════════════════════════════════════════════════");
+  Logger.log("DONE.  " + totalsReleased + " rows released to Unbilled.  " + totalsCbDeleted + " CB rows deleted.");
+  Logger.log("Expected total rows: 55 (Digs 3 + Mary Kenngott 9 + Nip Tuck NORTON 25 + Nip Tuck NIPTUCK 18).");
+  Logger.log("Next step: Billing → Create Invoices in the React app, per affected client.");
+  Logger.log("════════════════════════════════════════════════════════════");
 }
