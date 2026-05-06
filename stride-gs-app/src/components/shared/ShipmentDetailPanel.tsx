@@ -1,8 +1,8 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useIsMobile } from '../../hooks/useIsMobile';
 import { FloatingActionMenu, type FABAction } from './FloatingActionMenu';
-import { Truck, Package, FileText, Mail, ClipboardList, LayoutList } from 'lucide-react';
+import { Truck, Package, FileText, Mail, ClipboardList, LayoutList, Pencil, Save, Loader2 } from 'lucide-react';
 import { DeepLink } from './DeepLink';
 import { ItemIdBadges } from './ItemIdBadges';
 import { useItemIndicators } from '../../hooks/useItemIndicators';
@@ -13,10 +13,12 @@ import { CreateWillCallModal } from './CreateWillCallModal';
 import { TransferItemsModal } from './TransferItemsModal';
 import { WriteButton } from './WriteButton';
 import { theme } from '../../styles/theme';
-import { fmtDate } from '../../lib/constants';
+import { fmtDate, toDateInputValue } from '../../lib/constants';
 import { fetchShipmentItems } from '../../lib/api';
 import type { ApiShipmentItem } from '../../lib/api';
 import { fetchShipmentItemsFromSupabase } from '../../lib/supabaseQueries';
+import { supabase } from '../../lib/supabase';
+import { entityEvents } from '../../lib/entityEvents';
 import type { InventoryItem } from '../../lib/types';
 import { DriveFoldersList, type DriveFolderLink } from './DriveFoldersList';
 import { usePhotoGraphRollup, useNoteGraphRollup, type RollupContext } from '../../hooks/useGraphRollup';
@@ -24,7 +26,6 @@ import { useDocuments } from '../../hooks/useDocuments';
 import { PhotosPanel as _PhotosPanel, DocumentsPanel as _DocumentsPanel, NotesPanel as _NotesPanel } from './EntityAttachments';
 import { EntityHistory } from './EntityHistory';
 import { InlineEditableCell } from './InlineEditableCell';
-import { entityEvents } from '../../lib/entityEvents';
 
 /**
  * Phase 7A-7 + 2026-04-22 tabbed migration.
@@ -138,10 +139,10 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
   }, [shipment.clientSheetId, shipment.shipmentNo, itemsFetched]);
 
   // ── Inline-edit patch overlay (sidemark / reference cells) ─────────────
-  // Mirrors useInventory's pattern: optimistic patch keyed by itemId with
-  // a TTL fallback, merged into the displayed items via useMemo. Persists
-  // for the panel's lifetime so the user sees the new value immediately
-  // and it survives until the row is re-fetched.
+  // Mirrors useInventory's pattern: optimistic patch keyed by itemId,
+  // merged into the displayed items via useMemo. Persists for the panel's
+  // lifetime so the user sees the new value immediately and it survives
+  // until the row is re-fetched.
   const [itemPatches, setItemPatches] = useState<Record<string, Partial<ShipmentItem>>>({});
   const applyShipmentItemPatch = (itemId: string, patch: Record<string, unknown>) => {
     setItemPatches(prev => ({
@@ -193,6 +194,123 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
     });
   }, [shipment.clientSheetId, shipment.shipmentNo, items]);
 
+  // ─── Edit mode (staff/admin only) ────────────────────────────────────────
+  // Edits the four cache fields directly on public.shipments — there's no
+  // GAS-side updateShipment endpoint and these aren't authoritative on a
+  // sheet anyway (carrier/tracking/notes are Supabase-only metadata; the
+  // receive_date is on the client Inventory sheet too but the Supabase
+  // mirror gets re-synced on the next inventory write, so editing the
+  // mirror in isolation is fine for the React display path).
+  //
+  // Optimistic-overrides pattern (mirrors ItemDetailPanel) — `optimistic`
+  // values shadow the prop until either the parent's refetch arrives with
+  // the canonical state OR the user re-opens the panel.
+  type ShipmentDraft = {
+    carrier: string;
+    tracking: string;
+    receivedDate: string;  // YYYY-MM-DD for <input type="date">
+    notes: string;
+  };
+  const makeDraft = useCallback((): ShipmentDraft => ({
+    carrier: shipment.carrier || '',
+    tracking: shipment.tracking || '',
+    receivedDate: toDateInputValue(shipment.receivedDate),
+    notes: shipment.notes || '',
+  }), [shipment]);
+
+  const [isEditing, setIsEditing] = useState(false);
+  const [draft, setDraft] = useState<ShipmentDraft>(makeDraft);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [saveSuccess, setSaveSuccess] = useState(false);
+  const [optimistic, setOptimistic] = useState<Partial<ShipmentDraft> | null>(null);
+
+  // Clear optimistic overrides when shipment id changes (panel re-used for
+  // a different shipment) so the new shipment's prop values render clean.
+  const lastShipmentNoRef = useRef(shipment.shipmentNo);
+  useEffect(() => {
+    if (shipment.shipmentNo !== lastShipmentNoRef.current) {
+      lastShipmentNoRef.current = shipment.shipmentNo;
+      setOptimistic(null);
+      setIsEditing(false);
+    }
+  }, [shipment.shipmentNo]);
+
+  const setDraftField = useCallback(<K extends keyof ShipmentDraft>(field: K, value: ShipmentDraft[K]) => {
+    setDraft(prev => ({ ...prev, [field]: value }));
+  }, []);
+
+  const handleEditStart = useCallback(() => {
+    setDraft(makeDraft());
+    setSaveError(null);
+    setSaveSuccess(false);
+    setIsEditing(true);
+  }, [makeDraft]);
+
+  const handleEditCancel = useCallback(() => {
+    setIsEditing(false);
+    setSaveError(null);
+  }, []);
+
+  const handleSave = useCallback(async () => {
+    if (!shipment.clientSheetId || !shipment.shipmentNo) return;
+    const original = makeDraft();
+    // Build patch of only changed fields (so we don't write unchanged values
+    // back unnecessarily — keeps updated_at meaningful).
+    const patch: Record<string, string | null> = {};
+    if (draft.carrier !== original.carrier) patch.carrier = draft.carrier.trim();
+    if (draft.tracking !== original.tracking) patch.tracking_number = draft.tracking.trim();
+    if (draft.receivedDate !== original.receivedDate) patch.receive_date = draft.receivedDate || null;
+    if (draft.notes !== original.notes) patch.notes = draft.notes.trim();
+
+    if (Object.keys(patch).length === 0) {
+      setIsEditing(false);
+      return;
+    }
+
+    // Optimistic — paint edits immediately so closing edit mode doesn't
+    // briefly flash old values during the network round-trip.
+    const overrides: Partial<ShipmentDraft> = {
+      carrier: draft.carrier.trim(),
+      tracking: draft.tracking.trim(),
+      receivedDate: draft.receivedDate,
+      notes: draft.notes.trim(),
+    };
+    setOptimistic(overrides);
+
+    setSaving(true);
+    setSaveError(null);
+    try {
+      const { error } = await supabase
+        .from('shipments')
+        .update(patch)
+        .eq('tenant_id', shipment.clientSheetId)
+        .eq('shipment_number', shipment.shipmentNo);
+      if (error) throw error;
+      setSaveSuccess(true);
+      setIsEditing(false);
+      setTimeout(() => setSaveSuccess(false), 3000);
+      // Realtime echo will flow back through useShipmentDetail and replace
+      // the optimistic overrides with the canonical row state. Emit so other
+      // consumers (Shipments list, anywhere else) refetch immediately rather
+      // than waiting on the central Supabase channel debounce.
+      entityEvents.emit('shipment', shipment.shipmentNo);
+    } catch (err) {
+      // Rollback the optimistic overrides on failure
+      setOptimistic(null);
+      setSaveError(err instanceof Error ? err.message : 'Save failed — please try again');
+    }
+    setSaving(false);
+  }, [shipment.clientSheetId, shipment.shipmentNo, draft, makeDraft]);
+
+  // Display helper: optimistic override > shipment prop > fallback
+  const dv = useCallback((field: keyof ShipmentDraft): string => {
+    if (optimistic && optimistic[field] !== undefined) return String(optimistic[field]);
+    if (field === 'tracking') return shipment.tracking || '';
+    if (field === 'receivedDate') return shipment.receivedDate || '';
+    return (shipment as unknown as Record<string, string>)[field] || '';
+  }, [shipment, optimistic]);
+
   // Item selection for quick actions
   const [selectedItemIds, setSelectedItemIds] = useState<Set<string>>(new Set());
   const [showCreateTask, setShowCreateTask] = useState(false);
@@ -236,21 +354,96 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
 
   // ─── Tabs ────────────────────────────────────────────────────────────────
 
+  const editInput: React.CSSProperties = {
+    width: '100%', padding: '7px 10px', fontSize: 13,
+    border: `1px solid ${theme.colors.border}`, borderRadius: 6,
+    outline: 'none', fontFamily: 'inherit',
+    background: '#fff', boxSizing: 'border-box',
+  };
+  const editLabel: React.CSSProperties = {
+    fontSize: 10, fontWeight: 500, color: theme.colors.textMuted,
+    textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 4,
+    display: 'block',
+  };
+
   const renderDetailsTab = () => (
     <>
       <div style={{ background: theme.colors.bgSubtle, border: `1px solid ${theme.colors.border}`, borderRadius: 10, padding: 14, marginBottom: 16 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}>
           <Truck size={14} color={theme.colors.orange} />
           <span style={{ fontSize: 12, fontWeight: 600 }}>Shipment Details</span>
+          {saveSuccess && !isEditing && (
+            <span style={{ marginLeft: 'auto', fontSize: 10, fontWeight: 600, color: '#15803D' }}>✓ Saved</span>
+          )}
         </div>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 14px' }}>
-          <Field label="Carrier" value={shipment.carrier} />
-          <Field label="Tracking #" value={shipment.tracking} mono />
-          <Field label="Received Date" value={fmtDate(shipment.receivedDate)} />
-          <Field label="Created By" value={shipment.createdBy} />
-          <Field label="Total Items" value={shipment.totalItems} />
-        </div>
-        {shipment.notes && <Field label="Notes" value={shipment.notes} />}
+
+        {isEditing && isStaffAdmin ? (
+          <>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px 14px', marginBottom: 10 }}>
+              <div>
+                <label style={editLabel}>Carrier</label>
+                <input
+                  type="text"
+                  value={draft.carrier}
+                  onChange={e => setDraftField('carrier', e.target.value)}
+                  disabled={saving}
+                  placeholder="e.g. UPS, FedEx, Sun Delivery"
+                  style={editInput}
+                />
+              </div>
+              <div>
+                <label style={editLabel}>Tracking #</label>
+                <input
+                  type="text"
+                  value={draft.tracking}
+                  onChange={e => setDraftField('tracking', e.target.value)}
+                  disabled={saving}
+                  style={{ ...editInput, fontFamily: 'monospace' }}
+                />
+              </div>
+              <div>
+                <label style={editLabel}>Received Date</label>
+                <input
+                  type="date"
+                  value={draft.receivedDate}
+                  onChange={e => setDraftField('receivedDate', e.target.value)}
+                  disabled={saving}
+                  style={editInput}
+                />
+              </div>
+              <div>
+                <Field label="Created By" value={shipment.createdBy} />
+              </div>
+            </div>
+            <div>
+              <label style={editLabel}>Notes</label>
+              <textarea
+                value={draft.notes}
+                onChange={e => setDraftField('notes', e.target.value)}
+                disabled={saving}
+                rows={3}
+                placeholder="Damage notes, special instructions, etc."
+                style={{ ...editInput, resize: 'vertical', minHeight: 64 }}
+              />
+            </div>
+            {saveError && (
+              <div style={{ marginTop: 10, padding: '8px 10px', borderRadius: 6, background: '#FEF2F2', color: '#B91C1C', fontSize: 12 }}>
+                {saveError}
+              </div>
+            )}
+          </>
+        ) : (
+          <>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 14px' }}>
+              <Field label="Carrier" value={dv('carrier')} />
+              <Field label="Tracking #" value={dv('tracking')} mono />
+              <Field label="Received Date" value={fmtDate(dv('receivedDate'))} />
+              <Field label="Created By" value={shipment.createdBy} />
+              <Field label="Total Items" value={shipment.totalItems} />
+            </div>
+            {dv('notes') && <Field label="Notes" value={dv('notes')} />}
+          </>
+        )}
       </div>
 
       {/* Folder + utility button row — suppressed in page mode. Drive folder
@@ -532,6 +725,7 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
   // FAB action set mirrors the inline pill row. Used on phone + tablet
   // viewports where the inline footer is suppressed below.
   const fabActions: FABAction[] = [
+    ...(isStaffAdmin && !isEditing ? [{ label: 'Edit', icon: <Pencil size={16} />, onClick: handleEditStart }] : []),
     { label: 'View Inventory', icon: <LayoutList size={16} />, onClick: () => navigate('/inventory', { state: { shipmentFilter: shipment.shipmentNo } }) },
     ...(shipment.folderUrl ? [{ label: 'Folder', icon: <Truck size={16} />, onClick: () => window.open(shipment.folderUrl!, '_blank', 'noopener,noreferrer') }] : []),
     { label: 'Receiving Doc', icon: <FileText size={16} />, onClick: () => { /* Phase 8 */ } },
@@ -540,8 +734,25 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
     ...(hasItems && canTransfer ? [{ label: 'Transfer', icon: <Package size={16} />, onClick: () => openAction('transfer') }] : []),
     ...(hasItems ? [{ label: 'Create WC', icon: <Truck size={16} />, onClick: () => openAction('wc'), color: theme.colors.orange }] : []),
   ];
-  const pageFooter = isCompactViewport ? null : (
+  const pageFooter = isCompactViewport ? null : isEditing ? (
+    // Edit mode owns the footer entirely — Save + Cancel only, so the
+    // operator can't accidentally fire one of the action buttons mid-edit.
     <>
+      <button onClick={handleSave} disabled={saving} style={{ ...orangePill, cursor: saving ? 'wait' : 'pointer', opacity: saving ? 0.85 : 1 }}>
+        {saving ? <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} /> : <Save size={13} />}
+        {saving ? 'Saving…' : 'Save'}
+      </button>
+      <button onClick={handleEditCancel} disabled={saving} style={{ ...darkPill, background: '#F1F5F9', color: '#475569', cursor: saving ? 'wait' : 'pointer' }}>
+        Cancel
+      </button>
+    </>
+  ) : (
+    <>
+      {isStaffAdmin && (
+        <button onClick={handleEditStart} style={{ ...darkPill, background: '#F1F5F9', color: '#1E293B' }}>
+          <Pencil size={13} /> Edit
+        </button>
+      )}
       <button onClick={() => { navigate('/inventory', { state: { shipmentFilter: shipment.shipmentNo } }); }} style={darkPill}>
         <LayoutList size={13} /> View Inventory
       </button>
@@ -600,11 +811,48 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
           resizeKey="shipment"
           defaultWidth={460}
           footer={isMobile ? (
-            <div style={{ padding: '12px 16px', paddingBottom: `calc(env(safe-area-inset-bottom, 0px) + 12px)` }}>
-              <button onClick={onClose} style={{ width: '100%', padding: '14px 0', fontSize: 15, fontWeight: 600, border: 'none', borderRadius: 10, background: '#F1F5F9', cursor: 'pointer', fontFamily: 'inherit', color: '#475569' }}>Done</button>
+            isEditing ? (
+              // Mobile edit mode — full-width Save + condensed Cancel, same
+              // shape as ItemDetailPanel's mobile edit footer.
+              <div style={{ padding: '12px 16px', display: 'flex', gap: 10, paddingBottom: `calc(env(safe-area-inset-bottom, 0px) + 12px)` }}>
+                <button onClick={handleSave} disabled={saving} style={{ flex: 1, padding: '14px 0', fontSize: 15, fontWeight: 600, border: 'none', borderRadius: 10, background: theme.colors.orange, color: '#fff', cursor: saving ? 'wait' : 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, fontFamily: 'inherit' }}>
+                  {saving ? <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} /> : <Save size={16} />}
+                  {saving ? 'Saving…' : 'Save'}
+                </button>
+                <button onClick={handleEditCancel} disabled={saving} style={{ flex: '0 0 auto', padding: '14px 20px', fontSize: 15, fontWeight: 600, border: 'none', borderRadius: 10, background: '#F1F5F9', color: '#475569', cursor: saving ? 'wait' : 'pointer', fontFamily: 'inherit' }}>
+                  Cancel
+                </button>
+              </div>
+            ) : (
+              <div style={{ padding: '12px 16px', display: 'flex', gap: 10, paddingBottom: `calc(env(safe-area-inset-bottom, 0px) + 12px)` }}>
+                {isStaffAdmin && (
+                  <button onClick={handleEditStart} style={{ flex: '0 0 auto', padding: '14px 20px', fontSize: 15, fontWeight: 600, border: 'none', borderRadius: 10, background: '#F1F5F9', color: '#1E293B', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6, fontFamily: 'inherit' }}>
+                    <Pencil size={16} /> Edit
+                  </button>
+                )}
+                <button onClick={onClose} style={{ flex: 1, padding: '14px 0', fontSize: 15, fontWeight: 600, border: 'none', borderRadius: 10, background: '#F1F5F9', cursor: 'pointer', fontFamily: 'inherit', color: '#475569' }}>Done</button>
+              </div>
+            )
+          ) : isEditing ? (
+            // Desktop slide-out edit footer — Save + Cancel pair.
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button onClick={handleSave} disabled={saving} style={{ flex: 1, padding: '10px', fontSize: 13, fontWeight: 600, border: 'none', borderRadius: 8, background: theme.colors.orange, color: '#fff', cursor: saving ? 'wait' : 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, fontFamily: 'inherit' }}>
+                {saving ? <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} /> : <Save size={14} />}
+                {saving ? 'Saving…' : 'Save'}
+              </button>
+              <button onClick={handleEditCancel} disabled={saving} style={{ flex: '0 0 auto', padding: '10px 16px', fontSize: 13, fontWeight: 600, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', color: theme.colors.textSecondary, cursor: saving ? 'wait' : 'pointer', fontFamily: 'inherit' }}>
+                Cancel
+              </button>
             </div>
           ) : (
-            <button onClick={onClose} style={{ width: '100%', padding: '10px', fontSize: 13, fontWeight: 600, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', fontFamily: 'inherit', color: theme.colors.textSecondary }}>Close</button>
+            <div style={{ display: 'flex', gap: 8 }}>
+              {isStaffAdmin && (
+                <button onClick={handleEditStart} style={{ flex: '0 0 auto', padding: '10px 14px', fontSize: 13, fontWeight: 600, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', color: theme.colors.textSecondary, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6, fontFamily: 'inherit' }}>
+                  <Pencil size={14} /> Edit
+                </button>
+              )}
+              <button onClick={onClose} style={{ flex: 1, padding: '10px', fontSize: 13, fontWeight: 600, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', fontFamily: 'inherit', color: theme.colors.textSecondary }}>Close</button>
+            </div>
           )}
         />
       )}
