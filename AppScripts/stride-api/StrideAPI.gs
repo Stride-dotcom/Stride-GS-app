@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.197.0 — 2026-05-06 PST — Persistent QBO push jobs (qbo_push_jobs table) so the operator can leave the Billing page or refresh the browser mid-push without losing the result UI. handleQboCreateInvoice_ now accepts an optional `jobId` param; when set, it PATCHes public.qbo_push_jobs throughout the loop — status='running' + total_count + invoice_nos at entry, every 5 invoices with running succeeded/failed/skipped counts + per-invoice results, and a terminal status='succeeded'/'partial'/'failed' + finished_at + final results at the end. The push itself is unchanged for callers that don't supply jobId (admin scripts, legacy tests). Companion Supabase migration `qbo_push_jobs` creates the table (id uuid PK, status enum CHECK, ledger_row_ids text[], invoice_nos text[], counts, jsonb results, force_re_push, initiated_by, source) with staff/admin RLS + service_role bypass + realtime publication so the React App-level QboPushJobsContext observes every PATCH live. New helper api_patchQboPushJob_(jobId, patch) wraps the PostgREST PATCH with Prefer=return=minimal; best-effort, never blocks the QBO push on a Supabase outage. Companion React PR mounts QboPushJobsContext at AppLayout, renders a bottom-right toast that survives navigation, queries `created_at >= NOW() - 30 minutes OR finished_at IS NULL` on App mount to rehydrate any in-flight or recently-finished jobs, and wires both the QBO Push toolbar button and the Create Invoices "Push to QuickBooks Online" checkbox to start jobs through the context.
+   StrideAPI.gs — v38.197.1 — 2026-05-06 PST — api_markClientLedgerInvoiced_ assertion now handles duplicate Ledger Row IDs on the client sheet. The task completion flow can leave a Voided row from a prior completion AND append a fresh Unbilled row with the SAME Ledger Row ID after a reopen + re-completion. The v38.193.0 single-pass assertion iterated all matching rows and threw on the FIRST non-Unbilled match — even when a valid Unbilled row sat on the very next line. Symptom: Justin's Vida Design - Merit invoice (56 rows) failed because INSP-TASK-INSP-62840-1 had row 24 (Void) and row 25 (Unbilled); React picker correctly read Supabase last-write-wins (Unbilled) but the assertion saw the Void first. New shape: bucket all matching rows by Ledger Row ID, then for each picker ID prefer the FIRST Unbilled match. Only flag a violation if NO Unbilled row exists for that picker ID — the actual stale-Void condition the original v38.193 fix was meant to catch. The Void duplicates are left untouched (they're stale audit trail; cleanup is a separate follow-up to handleCompleteTask_ to un-void instead of append).
+   v38.197.0 — 2026-05-06 PST — Persistent QBO push jobs (qbo_push_jobs table) so the operator can leave the Billing page or refresh the browser mid-push without losing the result UI. handleQboCreateInvoice_ now accepts an optional `jobId` param; when set, it PATCHes public.qbo_push_jobs throughout the loop — status='running' + total_count + invoice_nos at entry, every 5 invoices with running succeeded/failed/skipped counts + per-invoice results, and a terminal status='succeeded'/'partial'/'failed' + finished_at + final results at the end. The push itself is unchanged for callers that don't supply jobId (admin scripts, legacy tests). Companion Supabase migration `qbo_push_jobs` creates the table (id uuid PK, status enum CHECK, ledger_row_ids text[], invoice_nos text[], counts, jsonb results, force_re_push, initiated_by, source) with staff/admin RLS + service_role bypass + realtime publication so the React App-level QboPushJobsContext observes every PATCH live. New helper api_patchQboPushJob_(jobId, patch) wraps the PostgREST PATCH with Prefer=return=minimal; best-effort, never blocks the QBO push on a Supabase outage. Companion React PR mounts QboPushJobsContext at AppLayout, renders a bottom-right toast that survives navigation, queries `created_at >= NOW() - 30 minutes OR finished_at IS NULL` on App mount to rehydrate any in-flight or recently-finished jobs, and wires both the QBO Push toolbar button and the Create Invoices "Push to QuickBooks Online" checkbox to start jobs through the context.
    v38.196.0 — 2026-05-06 PST — QBO push: handle qb_customer_name in "Parent:Sub" format on cache-cold path. INV-001153 (Vida Design - Waymark, qb_customer_name="Vida Design:Waymark") failed with `QBO customer create failed: HTTP 400: Invalid String. The String may contain unsupported or illegal chars — Element contains invalid characters. Vida Design:Waymark`. Root cause: qbo_resolveCustomerAndSubJob_ passed clientName ("Vida Design:Waymark") straight to qbo_createCustomer_ as DisplayName when no cache row existed yet. QBO reserves the colon for parent:sub notation in DisplayName and rejects any literal colon. Pre-fix this only manifested on cache-cold pushes — Roche Bobois:PDX worked because its parent + sub IDs were already populated in the Stax Customers sheet from prior pushes (cache hit, no QBO create call). Vida Design:Waymark had never been pushed so it fell through to qbo_createCustomer_(fullName) → 400. Fix: new qbo_resolveQbParentSubName_ helper splits the qb_customer_name on the LAST colon, resolves the parent ("Vida Design") via qbo_searchCustomer_ + qbo_createCustomer_(name, parentId=null), then resolves the sub ("Waymark") via qbo_searchSubJob_ + qbo_createCustomer_(name, parentId=parent's QBO ID). Cache layout re-uses the existing parent-row shape: column H stores the parent QBO ID, column J stores the sub QBO ID, column I (sidemark) stays blank — so future calls hit a single row and return fast. The early-return path bypasses the row-level sidemark sub-job creation entirely: when qb_customer_name already encodes the destination sub-customer, stacking another sub-job from sidemark would produce parent:sub:sidemark (3 levels), not the operator's intent. For clients with a flat qb_customer_name (no colon), the existing logic path is unchanged.
    v38.195.1 — 2026-05-06 PST — runBackfillQboPushedAtFromCb chunk-size fix. v38.195.0's first run on prod found 173 invoices with QBO Invoice ID populated then aborted with "Limit Exceeded: URLFetch URL Length" on the first PATCH. Root cause: 200 invoice numbers per chunk × ~18 chars each (after `"…"` quoting + encodeURIComponent's `%22` for each quote) = ~3.6KB URL — past Apps Script UrlFetchApp's ~2KB cap. Reduced CHUNK to 30 (~540 chars per chunk + ~120 of base URL + the qbo_pushed_at filter ≈ 660 total) for comfortable margin. PostgREST itself handles longer URLs; UrlFetchApp is the tighter constraint. Same idempotency semantics: only updates rows where qbo_pushed_at IS NULL so re-runs and the v38.194 hook from fresh pushes never collide. 173 IDs → 6 chunks → ~6 round-trips total, ~1-2s.
    v38.195.0 — 2026-05-06 PST — One-shot backfill admin entry runBackfillQboPushedAtFromCb. The v38.194.0 invoice_tracking migration's backfill set qbo_pushed_at = stax_pushed_at = stax_invoices.created_at for all 79 invoices that existed in stax_invoices — conflating two independent push paths (handleQbExport_ writes to stax_invoices on the IIF/Stax route; handleQboCreateInvoice_ writes the QBO Invoice ID to the CB Consolidated_Ledger sheet on the direct-QBO route, with no Stax involvement). Result on the React Billing Report: QBO and Payments columns showed identical timestamps for the 79 IIF-pushed invoices, AND showed em-dash for the ~97 invoices that were pushed direct-to-QBO without going through Stax. Reset the conflated qbo_pushed_at values to NULL via direct SQL (Supabase MCP) before this commit; this admin function then walks CB Consolidated_Ledger, collects every distinct Invoice # whose "QBO Invoice ID" column is non-empty (the canonical source of truth — qbo_writeQboInvoiceId_ stamps it after every successful handleQboCreateInvoice_ push), and PATCHes invoice_tracking.qbo_pushed_at = NOW() in chunked PostgREST in.(...) round-trips (200 IDs per chunk; idempotent — only updates rows where qbo_pushed_at IS NULL so a re-run never overwrites a real push timestamp from the v38.194 hook). The timestamp is a backfill marker rather than the actual push time (the CB sheet doesn't capture push time); going forward the v38.194 hook continues to stamp the real timestamp on every fresh push. Run once from the Apps Script editor → Select function → runBackfillQboPushedAtFromCb → Run.
@@ -23448,17 +23449,48 @@ function api_markClientLedgerInvoiced_(clientSheetId, ledgerRowIds, invNo, invDa
   for (var li = 0; li < ledgerRowIds.length; li++) {
     idSet[String(ledgerRowIds[li]).trim()] = true;
   }
-  var changedRows = [];  // ordered list of rowNums (sheet 1-indexed)
-  var statusViolations = [];  // rows that matched by ID but failed Status check
+
+  // v38.197.1 — Handle duplicate Ledger Row IDs on the client sheet. The
+  // task-completion flow can leave behind a Voided row from a prior
+  // completion AND append a fresh Unbilled row with the SAME Ledger Row ID
+  // when the task gets reopened + re-completed. The pre-v38.197.1 single-
+  // pass loop iterated all rows, hit the Void duplicate first, and threw
+  // PRE_COMMIT_STATUS_ASSERTION even though a perfectly valid Unbilled
+  // row sat on the very next line of the sheet. Symptom: Justin's Vida
+  // Design - Merit invoice (56 rows) failed because INSP-TASK-INSP-62840-1
+  // had row 24 (Void) and row 25 (Unbilled) — the React picker correctly
+  // reads Supabase last-write-wins (Unbilled) but the assertion saw Void
+  // first.
+  //
+  // New shape: bucket all matching rows by Ledger Row ID, then for each
+  // picker ID prefer the FIRST Unbilled match. Only flag a violation if
+  // NO Unbilled row exists for that picker ID — that's the actual stale-
+  // Void condition the original v38.193 fix was meant to catch.
+  var rowsByLid = {};
   for (var i = 0; i < dataRange.length; i++) {
     var lid = String(dataRange[i][idxLedgerId - 1] || "").trim();
     if (!lid || !idSet[lid]) continue;
     var rowStatus = String(dataRange[i][idxStatus - 1] || "").trim();
-    if (rowStatus !== "Unbilled") {
-      statusViolations.push({ ledgerRowId: lid, currentStatus: rowStatus || "(blank)", row: i + 2 });
-      continue;
+    if (!rowsByLid[lid]) rowsByLid[lid] = [];
+    rowsByLid[lid].push({ rowNum: i + 2, status: rowStatus });
+  }
+
+  var changedRows = [];
+  var statusViolations = [];
+  for (var li2 = 0; li2 < ledgerRowIds.length; li2++) {
+    var pickerLid = String(ledgerRowIds[li2]).trim();
+    var matches = rowsByLid[pickerLid];
+    if (!matches || matches.length === 0) continue; // ID not on sheet — silent skip (existing behavior)
+    var unbilled = null;
+    for (var mi = 0; mi < matches.length; mi++) {
+      if (matches[mi].status === "Unbilled") { unbilled = matches[mi]; break; }
     }
-    changedRows.push(i + 2);  // +2: data row 0 = sheet row 2
+    if (unbilled) {
+      changedRows.push(unbilled.rowNum);
+    } else {
+      var sampleStatuses = matches.slice(0, 3).map(function(m) { return m.status || "(blank)"; }).join("/");
+      statusViolations.push({ ledgerRowId: pickerLid, currentStatus: sampleStatuses });
+    }
   }
 
   if (statusViolations.length > 0) {
@@ -23472,7 +23504,7 @@ function api_markClientLedgerInvoiced_(clientSheetId, ledgerRowIds, invNo, invDa
     var more = statusViolations.length > 5 ? " (+" + (statusViolations.length - 5) + " more)" : "";
     throw new Error(
       "PRE_COMMIT_STATUS_ASSERTION: " + statusViolations.length + " of " + ledgerRowIds.length +
-      " row(s) are no longer Status=Unbilled on the client sheet. The invoice was NOT created. " +
+      " row(s) have NO Status=Unbilled match on the client sheet. The invoice was NOT created. " +
       "Refresh the Billing Report and retry — the offending rows have been voided, invoiced, " +
       "or reopened since you opened the picker. Conflicting rows: " + sample + more
     );
