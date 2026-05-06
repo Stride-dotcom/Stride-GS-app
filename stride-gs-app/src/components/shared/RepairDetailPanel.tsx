@@ -59,7 +59,7 @@ function Field({ label, value, mono }: { label: string; value?: string | number 
 
 const input: React.CSSProperties = { width: '100%', padding: '8px 10px', fontSize: 13, border: `1px solid ${theme.colors.border}`, borderRadius: 8, outline: 'none', fontFamily: 'inherit' };
 
-export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepairPatch, clearRepairPatch, renderAsPage }: Props) {
+export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepairPatch, mergeRepairPatch, clearRepairPatch, renderAsPage }: Props) {
   const { user } = useAuth();
   const { isMobile, isTablet } = useIsMobile();
   const isCompactViewport = isMobile || isTablet;
@@ -388,23 +388,42 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
     setEditError(null);
     try {
       const payload: Record<string, unknown> = { repairId: repair.repairId };
-      if (editRepairVendor !== (repair.repairVendor || '')) payload.repairVendor = editRepairVendor;
+      // Patch covers fields on ApiRepair (scheduledDate / startDate aren't on
+      // the local `Repair` type, but useRepairs spreads patches loosely so
+      // the wider shape works at runtime).
+      const patch: Record<string, unknown> = {};
+      if (editRepairVendor !== (repair.repairVendor || '')) {
+        payload.repairVendor = editRepairVendor;
+        patch.repairVendor = editRepairVendor;
+      }
       // Compare normalized forms — repair.scheduledDate / startDate may
       // carry a "00:00:00" suffix from older sheets, while the edit values
       // are always YYYY-MM-DD.
-      if (editScheduledDate !== toDateInputValue(repair.scheduledDate)) payload.scheduledDate = editScheduledDate || null;
-      if (editStartDate !== toDateInputValue(repair.startDate)) payload.startDate = editStartDate || null;
+      if (editScheduledDate !== toDateInputValue(repair.scheduledDate)) {
+        payload.scheduledDate = editScheduledDate || null;
+        patch.scheduledDate = editScheduledDate || undefined;
+      }
+      if (editStartDate !== toDateInputValue(repair.startDate)) {
+        payload.startDate = editStartDate || null;
+        patch.startDate = editStartDate || undefined;
+      }
       if (Object.keys(payload).length > 1) {
+        // Optimistic — paint edits before the round-trip so closing edit
+        // mode doesn't briefly flash old values.
+        mergeRepairPatch?.(repair.repairId, patch as Partial<Repair>);
         const res = await postUpdateRepairNotes(payload as any, clientSheetId);
         if (!res.ok || !res.data?.success) {
+          clearRepairPatch?.(repair.repairId);
           setEditError(res.error || 'Save failed');
           setEditSaving(false);
           return;
         }
+        entityEvents.emit('repair', repair.repairId);
       }
       setIsEditing(false);
       onRepairUpdated?.();
     } catch (err) {
+      clearRepairPatch?.(repair.repairId);
       setEditError(err instanceof Error ? err.message : 'Save failed');
     }
     setEditSaving(false);
@@ -421,21 +440,27 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
       return;
     }
     setSavingNotes(true);
+    // Optimistic — paint notes into local state immediately so the field
+    // doesn't briefly flash old content during the GAS round-trip.
+    mergeRepairPatch?.(repair.repairId, { repairNotes } as Partial<Repair>);
     try {
       const resp = await postUpdateRepairNotes(
         { repairId: repair.repairId, repairNotes },
         clientSheetId
       );
       if (!resp.ok || !resp.data?.success) {
+        clearRepairPatch?.(repair.repairId);
         setSubmitError(resp.error || resp.data?.error || 'Failed to save notes. Please try again.');
       } else {
         setSavedRepairNotes(repairNotes);
         setNotesSavedAt(Date.now());
+        entityEvents.emit('repair', repair.repairId);
         onRepairUpdated?.();
         // Clear "Saved" indicator after a few seconds
         setTimeout(() => setNotesSavedAt(n => (n && Date.now() - n >= 2500) ? null : n), 3000);
       }
     } catch (err) {
+      clearRepairPatch?.(repair.repairId);
       setSubmitError(err instanceof Error ? err.message : 'Network error. Please try again.');
     } finally {
       setSavingNotes(false);

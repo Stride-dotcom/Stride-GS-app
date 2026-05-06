@@ -14,7 +14,6 @@ import { useAuth } from '../contexts/AuthContext';
 import { useRepairDetail } from '../hooks/useRepairDetail';
 import { RepairDetailPanel } from '../components/shared/RepairDetailPanel';
 import { theme } from '../styles/theme';
-import { fetchRepairByIdFromSupabase } from '../lib/supabaseQueries';
 import type { ApiRepair } from '../lib/api';
 
 const backBtnStyle: React.CSSProperties = {
@@ -49,14 +48,22 @@ export function RepairPage() {
   const [localRepair, setLocalRepair] = useState<ApiRepair | null>(null);
   const [saving, setSaving] = useState(false);
   const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // See TaskPage.tsx — guards optimistic state from being clobbered by a
+  // stale fetch fired between the GAS save returning and Supabase
+  // write-through completing.
+  const lastMutationAtRef = useRef<number>(0);
+  const OPTIMISTIC_GUARD_MS = 6000;
 
   useEffect(() => {
-    if (fetchedRepair && !saving) setLocalRepair(fetchedRepair);
+    if (!fetchedRepair) return;
+    if (saving) return;
+    if (Date.now() - lastMutationAtRef.current < OPTIMISTIC_GUARD_MS) return;
+    setLocalRepair(fetchedRepair);
   }, [fetchedRepair, saving]);
 
   const scheduleRefresh = useCallback(() => {
     if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
-    refreshTimerRef.current = setTimeout(() => { refetch(); }, 1500);
+    refreshTimerRef.current = setTimeout(() => { refetch(); }, 2500);
   }, [refetch]);
 
   useEffect(() => {
@@ -64,20 +71,19 @@ export function RepairPage() {
   }, []);
 
   const handleRepairUpdated = useCallback(() => {
-    setSaving(true);
-    setTimeout(async () => {
-      if (repairId) {
-        const fresh = await fetchRepairByIdFromSupabase(repairId, {});
-        if (fresh) setLocalRepair(fresh);
-      }
-      setSaving(false);
-      scheduleRefresh();
-    }, 800);
-  }, [repairId, scheduleRefresh]);
+    lastMutationAtRef.current = Date.now();
+    scheduleRefresh();
+  }, [scheduleRefresh]);
 
   const applyRepairPatch = useCallback((patchRepairId: string, patch: Partial<ApiRepair>) => {
     setLocalRepair(prev => prev && prev.repairId === patchRepairId ? { ...prev, ...patch } : prev);
+    lastMutationAtRef.current = Date.now();
     setSaving(true);
+  }, []);
+
+  const mergeRepairPatch = useCallback((patchRepairId: string, patch: Partial<ApiRepair>) => {
+    setLocalRepair(prev => prev && prev.repairId === patchRepairId ? { ...prev, ...patch } : prev);
+    lastMutationAtRef.current = Date.now();
   }, []);
 
   const clearRepairPatch = useCallback((_patchRepairId: string) => {
@@ -115,6 +121,7 @@ export function RepairPage() {
       onRepairUpdated={handleRepairUpdated}
       onNavigateToItem={(itemId) => navigate(`/inventory/${encodeURIComponent(itemId)}`)}
       applyRepairPatch={applyRepairPatch}
+      mergeRepairPatch={mergeRepairPatch}
       clearRepairPatch={clearRepairPatch}
     />
   );

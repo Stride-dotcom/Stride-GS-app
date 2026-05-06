@@ -9,7 +9,6 @@ import { useAuth } from '../contexts/AuthContext';
 import { useTaskDetail } from '../hooks/useTaskDetail';
 import { TaskDetailPanel } from '../components/shared/TaskDetailPanel';
 import { theme } from '../styles/theme';
-import { fetchTaskByIdFromSupabase } from '../lib/supabaseQueries';
 import type { ApiTask } from '../lib/api';
 import { ArrowLeft, AlertCircle, SearchX, ShieldX, Loader2 } from 'lucide-react';
 
@@ -25,20 +24,28 @@ export function TaskJobPage() {
   const [localTask, setLocalTask] = useState<ApiTask | null>(null);
   const [saving, setSaving] = useState(false);
   const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // See TaskPage.tsx — guards optimistic state from being clobbered by a
+  // stale fetch fired before Supabase write-through completes.
+  const lastMutationAtRef = useRef<number>(0);
+  const OPTIMISTIC_GUARD_MS = 6000;
 
-  // Sync fetched task into local state
+  // Sync fetched task into local state, but skip while saving or within the
+  // optimistic guard window so we don't paint stale data over a recent edit.
   useEffect(() => {
-    if (fetchedTask && !saving) {
-      setLocalTask(fetchedTask);
-    }
+    if (!fetchedTask) return;
+    if (saving) return;
+    if (Date.now() - lastMutationAtRef.current < OPTIMISTIC_GUARD_MS) return;
+    setLocalTask(fetchedTask);
   }, [fetchedTask, saving]);
 
-  // Delayed Supabase re-fetch after a write to confirm sync
+  // Delayed re-fetch after a write — safety net so the optimistic state is
+  // eventually replaced by authoritative server data once the write-through
+  // has had time to land.
   const scheduleRefresh = useCallback(() => {
     if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
     refreshTimerRef.current = setTimeout(() => {
       refetch();
-    }, 1500);
+    }, 2500);
   }, [refetch]);
 
   // Cleanup timer
@@ -46,31 +53,21 @@ export function TaskJobPage() {
     return () => { if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current); };
   }, []);
 
-  // Optimistic task update handler — called after write actions
   const handleTaskUpdated = useCallback(() => {
-    setSaving(true);
-    // Brief delay to let write-through land, then re-fetch
-    setTimeout(async () => {
-      if (taskId) {
-        // Try Supabase first for fast refresh
-        const fresh = await fetchTaskByIdFromSupabase(taskId, undefined, clientHint || localTask?.clientSheetId);
-        if (fresh) {
-          setLocalTask(fresh);
-        }
-      }
-      setSaving(false);
-      scheduleRefresh();
-    }, 800);
-  }, [taskId, scheduleRefresh, clientHint, localTask?.clientSheetId]);
+    lastMutationAtRef.current = Date.now();
+    scheduleRefresh();
+  }, [scheduleRefresh]);
 
   // Optimistic patch functions for TaskDetailPanel
   const applyTaskPatch = useCallback((patchTaskId: string, patch: Partial<ApiTask>) => {
     setLocalTask(prev => prev && prev.taskId === patchTaskId ? { ...prev, ...patch } : prev);
+    lastMutationAtRef.current = Date.now();
     setSaving(true);
   }, []);
 
   const mergeTaskPatch = useCallback((patchTaskId: string, patch: Partial<ApiTask>) => {
     setLocalTask(prev => prev && prev.taskId === patchTaskId ? { ...prev, ...patch } : prev);
+    lastMutationAtRef.current = Date.now();
   }, []);
 
   const clearTaskPatch = useCallback((_patchTaskId: string) => {

@@ -850,6 +850,31 @@ export function OrderPage() {
     if (!order) return;
     setSaving(true);
     setSaveError(null);
+
+    // Optimistic — paint the edited values into local state immediately so
+    // the inline form's "Save" doesn't visibly flash old data while we
+    // round-trip to Supabase and back. DtOrderForUI uses '' (not null) for
+    // empty fields, so trim() the edited values directly.
+    const optimisticOrder: DtOrderForUI = {
+      ...order,
+      contactName:       edit.contactName.trim(),
+      contactAddress:    edit.contactAddress.trim(),
+      contactCity:       edit.contactCity.trim(),
+      contactState:      edit.contactState.trim(),
+      contactZip:        edit.contactZip.trim(),
+      contactPhone:      edit.contactPhone.trim(),
+      contactEmail:      edit.contactEmail.trim(),
+      localServiceDate:  edit.localServiceDate,
+      windowStartLocal:  edit.windowStartLocal,
+      windowEndLocal:    edit.windowEndLocal,
+      poNumber:          edit.poNumber.trim(),
+      sidemark:          edit.sidemark.trim(),
+      clientReference:   edit.clientReference.trim(),
+      details:           edit.details.trim(),
+      reviewStatus:      edit.reviewStatus,
+      reviewNotes:       edit.reviewNotes.trim(),
+    };
+
     try {
       const { data: authData } = await supabase.auth.getUser();
       const reviewerUid = authData?.user?.id ?? null;
@@ -882,7 +907,13 @@ export function OrderPage() {
         patch.order_total       = newTotal;
         patch.base_delivery_fee = newBaseFee;
         patch.pricing_override  = true;
+        optimisticOrder.orderTotal      = newTotal;
+        optimisticOrder.baseDeliveryFee = newBaseFee;
       }
+
+      // Apply the optimistic version BEFORE the network round-trip — the
+      // user sees their edits the instant they hit Save.
+      setLocalOrder(optimisticOrder);
 
       const { error: err } = await supabase.from('dt_orders').update(patch).eq('id', order.id);
       if (err) throw err;

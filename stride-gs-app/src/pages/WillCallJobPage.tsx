@@ -10,7 +10,6 @@ import { useAuth } from '../contexts/AuthContext';
 import { useWillCallDetail } from '../hooks/useWillCallDetail';
 import { WillCallDetailPanel } from '../components/shared/WillCallDetailPanel';
 import { theme } from '../styles/theme';
-import { fetchWillCallByIdFromSupabase } from '../lib/supabaseQueries';
 import type { ApiWillCall } from '../lib/api';
 import type { WillCall } from '../lib/types';
 import { ArrowLeft, AlertCircle, SearchX, ShieldX, Loader2 } from 'lucide-react';
@@ -26,14 +25,20 @@ export function WillCallJobPage() {
   const [localWc, setLocalWc] = useState<ApiWillCall | null>(null);
   const [saving, setSaving] = useState(false);
   const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // See TaskPage.tsx — guards optimistic state from being clobbered.
+  const lastMutationAtRef = useRef<number>(0);
+  const OPTIMISTIC_GUARD_MS = 6000;
 
   useEffect(() => {
-    if (fetchedWc && !saving) setLocalWc(fetchedWc);
+    if (!fetchedWc) return;
+    if (saving) return;
+    if (Date.now() - lastMutationAtRef.current < OPTIMISTIC_GUARD_MS) return;
+    setLocalWc(fetchedWc);
   }, [fetchedWc, saving]);
 
   const scheduleRefresh = useCallback(() => {
     if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
-    refreshTimerRef.current = setTimeout(() => { refetch(); }, 1500);
+    refreshTimerRef.current = setTimeout(() => { refetch(); }, 2500);
   }, [refetch]);
 
   useEffect(() => {
@@ -41,25 +46,20 @@ export function WillCallJobPage() {
   }, []);
 
   const handleWcUpdated = useCallback(() => {
-    setSaving(true);
-    setTimeout(async () => {
-      if (wcNumber) {
-        const fresh = await fetchWillCallByIdFromSupabase(wcNumber);
-        if (fresh) setLocalWc(prev => prev ? { ...prev, ...fresh } : fresh);
-      }
-      setSaving(false);
-      scheduleRefresh();
-    }, 800);
-  }, [wcNumber, scheduleRefresh]);
+    lastMutationAtRef.current = Date.now();
+    scheduleRefresh();
+  }, [scheduleRefresh]);
 
   // Optimistic patch functions
   const applyWcPatch = useCallback((wcNum: string, patch: Partial<WillCall>) => {
     setLocalWc(prev => prev && prev.wcNumber === wcNum ? { ...prev, ...patch } as ApiWillCall : prev);
+    lastMutationAtRef.current = Date.now();
     setSaving(true);
   }, []);
 
   const mergeWcPatch = useCallback((wcNum: string, patch: Partial<WillCall>) => {
     setLocalWc(prev => prev && prev.wcNumber === wcNum ? { ...prev, ...patch } as ApiWillCall : prev);
+    lastMutationAtRef.current = Date.now();
   }, []);
 
   const clearWcPatch = useCallback((_wcNum: string) => {

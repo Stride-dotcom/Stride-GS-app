@@ -15,7 +15,6 @@ import { useAuth } from '../contexts/AuthContext';
 import { useTaskDetail } from '../hooks/useTaskDetail';
 import { TaskDetailPanel } from '../components/shared/TaskDetailPanel';
 import { theme } from '../styles/theme';
-import { fetchTaskByIdFromSupabase } from '../lib/supabaseQueries';
 import type { ApiTask } from '../lib/api';
 
 const backBtnStyle: React.CSSProperties = {
@@ -57,14 +56,25 @@ export function TaskPage() {
   const [localTask, setLocalTask] = useState<ApiTask | null>(null);
   const [saving, setSaving] = useState(false);
   const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Tracks the last time a local mutation (edit save) happened. Used to keep
+  // optimistic state visible while GAS write-through propagates to Supabase
+  // (~1-3s). Without this guard, an immediate refetch can overwrite the
+  // optimistic value with stale data and the user sees their edit "disappear".
+  const lastMutationAtRef = useRef<number>(0);
+  const OPTIMISTIC_GUARD_MS = 6000;
 
   useEffect(() => {
-    if (fetchedTask && !saving) setLocalTask(fetchedTask);
+    if (!fetchedTask) return;
+    // Skip overwriting localTask while a save is in flight or just landed —
+    // protects optimistic patches from being clobbered by a stale fetch.
+    if (saving) return;
+    if (Date.now() - lastMutationAtRef.current < OPTIMISTIC_GUARD_MS) return;
+    setLocalTask(fetchedTask);
   }, [fetchedTask, saving]);
 
   const scheduleRefresh = useCallback(() => {
     if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
-    refreshTimerRef.current = setTimeout(() => { refetch(); }, 1500);
+    refreshTimerRef.current = setTimeout(() => { refetch(); }, 2500);
   }, [refetch]);
 
   useEffect(() => {
@@ -72,24 +82,22 @@ export function TaskPage() {
   }, []);
 
   const handleTaskUpdated = useCallback(() => {
-    setSaving(true);
-    setTimeout(async () => {
-      if (taskId) {
-        const fresh = await fetchTaskByIdFromSupabase(taskId, undefined, clientHint || localTask?.clientSheetId);
-        if (fresh) setLocalTask(fresh);
-      }
-      setSaving(false);
-      scheduleRefresh();
-    }, 800);
-  }, [taskId, scheduleRefresh, clientHint, localTask?.clientSheetId]);
+    // Optimistic state in localTask is already up-to-date via mergeTaskPatch.
+    // Don't immediately fetch from Supabase — write-through hasn't completed
+    // yet and we'd show stale data. Schedule a delayed refresh as safety net.
+    lastMutationAtRef.current = Date.now();
+    scheduleRefresh();
+  }, [scheduleRefresh]);
 
   const applyTaskPatch = useCallback((patchTaskId: string, patch: Partial<ApiTask>) => {
     setLocalTask(prev => prev && prev.taskId === patchTaskId ? { ...prev, ...patch } : prev);
+    lastMutationAtRef.current = Date.now();
     setSaving(true);
   }, []);
 
   const mergeTaskPatch = useCallback((patchTaskId: string, patch: Partial<ApiTask>) => {
     setLocalTask(prev => prev && prev.taskId === patchTaskId ? { ...prev, ...patch } : prev);
+    lastMutationAtRef.current = Date.now();
   }, []);
 
   const clearTaskPatch = useCallback((_patchTaskId: string) => {

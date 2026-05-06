@@ -10,7 +10,6 @@ import { useAuth } from '../contexts/AuthContext';
 import { useRepairDetail } from '../hooks/useRepairDetail';
 import { RepairDetailPanel } from '../components/shared/RepairDetailPanel';
 import { theme } from '../styles/theme';
-import { fetchRepairByIdFromSupabase } from '../lib/supabaseQueries';
 import type { ApiRepair } from '../lib/api';
 import { ArrowLeft, AlertCircle, SearchX, ShieldX, Loader2 } from 'lucide-react';
 
@@ -24,14 +23,20 @@ export function RepairJobPage() {
   const [localRepair, setLocalRepair] = useState<ApiRepair | null>(null);
   const [saving, setSaving] = useState(false);
   const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // See TaskPage.tsx — guards optimistic state from being clobbered.
+  const lastMutationAtRef = useRef<number>(0);
+  const OPTIMISTIC_GUARD_MS = 6000;
 
   useEffect(() => {
-    if (fetchedRepair && !saving) setLocalRepair(fetchedRepair);
+    if (!fetchedRepair) return;
+    if (saving) return;
+    if (Date.now() - lastMutationAtRef.current < OPTIMISTIC_GUARD_MS) return;
+    setLocalRepair(fetchedRepair);
   }, [fetchedRepair, saving]);
 
   const scheduleRefresh = useCallback(() => {
     if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
-    refreshTimerRef.current = setTimeout(() => { refetch(); }, 1500);
+    refreshTimerRef.current = setTimeout(() => { refetch(); }, 2500);
   }, [refetch]);
 
   useEffect(() => {
@@ -39,24 +44,19 @@ export function RepairJobPage() {
   }, []);
 
   const handleRepairUpdated = useCallback(() => {
-    setSaving(true);
-    setTimeout(async () => {
-      if (repairId) {
-        const fresh = await fetchRepairByIdFromSupabase(repairId);
-        if (fresh) setLocalRepair(prev => prev ? { ...prev, ...fresh } : fresh);
-      }
-      setSaving(false);
-      scheduleRefresh();
-    }, 800);
-  }, [repairId, scheduleRefresh]);
+    lastMutationAtRef.current = Date.now();
+    scheduleRefresh();
+  }, [scheduleRefresh]);
 
   const applyRepairPatch = useCallback((rId: string, patch: Partial<ApiRepair>) => {
     setLocalRepair(prev => prev && prev.repairId === rId ? { ...prev, ...patch } : prev);
+    lastMutationAtRef.current = Date.now();
     setSaving(true);
   }, []);
 
   const mergeRepairPatch = useCallback((rId: string, patch: Partial<ApiRepair>) => {
     setLocalRepair(prev => prev && prev.repairId === rId ? { ...prev, ...patch } : prev);
+    lastMutationAtRef.current = Date.now();
   }, []);
 
   const clearRepairPatch = useCallback((_rId: string) => {

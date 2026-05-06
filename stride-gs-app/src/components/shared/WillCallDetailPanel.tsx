@@ -61,7 +61,7 @@ function Field({ label, value, icon: Icon }: { label: string; value?: string | n
   </div>;
 }
 
-export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNavigateToWc, applyWcPatch, clearWcPatch, applyItemPatch, renderAsPage }: Props) {
+export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNavigateToWc, applyWcPatch, mergeWcPatch, clearWcPatch, applyItemPatch, renderAsPage }: Props) {
   const { user } = useAuth();
   // Clients are not allowed to release items or set release dates — that
   // decision belongs to warehouse staff. Gate every Release-related action.
@@ -297,37 +297,50 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
     setEditSaveError(null);
 
     const payload: Record<string, unknown> = { wcNumber: wc.wcNumber };
+    // Build a parallel patch matching WillCall field names so we can update
+    // local state immediately. Server payload uses estimatedPickupDate /
+    // pickupPhone keys; UI reads scheduledDate / pickupPartyPhone — translate.
+    const patch: Partial<WillCall> = {};
     let changed = false;
-    if (editPickupParty !== (wc.pickupParty || '')) { payload.pickupParty = editPickupParty; changed = true; }
-    if (editPhone !== (wc.pickupPartyPhone || '')) { payload.pickupPhone = editPhone; changed = true; }
+    if (editPickupParty !== (wc.pickupParty || '')) { payload.pickupParty = editPickupParty; patch.pickupParty = editPickupParty; changed = true; }
+    if (editPhone !== (wc.pickupPartyPhone || '')) { payload.pickupPhone = editPhone; patch.pickupPartyPhone = editPhone; changed = true; }
     // Compare normalized forms — wc.scheduledDate may carry a "00:00:00"
     // suffix from older sheets while editDate is always YYYY-MM-DD.
-    if (editDate !== toDateInputValue(wc.scheduledDate)) { payload.estimatedPickupDate = editDate; changed = true; }
-    if (editNotes !== (wc.notes || '')) { payload.notes = editNotes; changed = true; }
-    if (editCod !== !!wc.cod) { payload.cod = editCod; changed = true; }
+    if (editDate !== toDateInputValue(wc.scheduledDate)) { payload.estimatedPickupDate = editDate; patch.scheduledDate = editDate; changed = true; }
+    if (editNotes !== (wc.notes || '')) { payload.notes = editNotes; patch.notes = editNotes; changed = true; }
+    if (editCod !== !!wc.cod) { payload.cod = editCod; (patch as any).cod = editCod; changed = true; }
     const origAmt = wc.codAmount != null ? String(wc.codAmount) : '';
     if (editCodAmount !== origAmt) {
-      payload.codAmount = editCodAmount.trim() === '' ? 0 : parseFloat(editCodAmount);
+      const codAmountNum = editCodAmount.trim() === '' ? 0 : parseFloat(editCodAmount);
+      payload.codAmount = codAmountNum;
+      (patch as any).codAmount = codAmountNum;
       changed = true;
     }
 
     if (!changed) { setIsEditing(false); setEditSaving(false); return; }
 
+    // Optimistic — paint edits into local state before the API round-trip so
+    // the panel doesn't briefly revert to old values when edit mode closes.
+    mergeWcPatch?.(wc.wcNumber, patch);
+
     try {
       const resp = await postUpdateWillCall(payload as any, clientSheetId);
       if (!resp.ok || !resp.data?.success) {
+        clearWcPatch?.(wc.wcNumber);
         setEditSaveError(resp.error || resp.data?.error || 'Save failed');
       } else {
         setIsEditing(false);
         setEditSaveSuccess(true);
         setTimeout(() => setEditSaveSuccess(false), 3000);
+        entityEvents.emit('will_call', wc.wcNumber);
         onWcUpdated?.();
       }
     } catch {
+      clearWcPatch?.(wc.wcNumber);
       setEditSaveError('Network error — please try again');
     }
     setEditSaving(false);
-  }, [apiConfigured, clientSheetId, wc, editPickupParty, editPhone, editDate, editNotes, editCod, editCodAmount, onWcUpdated]);
+  }, [apiConfigured, clientSheetId, wc, editPickupParty, editPhone, editDate, editNotes, editCod, editCodAmount, onWcUpdated, mergeWcPatch, clearWcPatch]);
 
   const inputStyle: React.CSSProperties = { width: '100%', padding: '6px 10px', fontSize: 13, border: `1px solid ${theme.colors.border}`, borderRadius: 6, outline: 'none', fontFamily: 'inherit' };
 
