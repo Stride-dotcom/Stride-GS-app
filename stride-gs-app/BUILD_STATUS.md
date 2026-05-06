@@ -1,6 +1,6 @@
 # Stride GS App — Build Status
 
-> Last updated: 2026-05-05 (dup-number race incident triage + cleanup helper). Verified against actual codebase. **A billing-system hardening pass is queued for the next builder session — see "Open billing-system hardening backlog" near the bottom and the handoff at `BILLING_HARDENING_HANDOFF.md` in Justin's Dropbox.**
+> Last updated: 2026-05-05 (billing hardening pass — bugs #3-#9 closed, anomaly sweep, Re-issue button). Verified against actual codebase.
 
 ---
 
@@ -8,8 +8,8 @@
 
 | System | Version | Notes |
 |---|---|---|
-| React app (GitHub Pages) | Latest on `origin/source` | `npm run deploy` from source |
-| StrideAPI.gs | **v38.192.0** | One-shot admin entry `runReleaseInvoicesForReissue` for the v38.182 race cleanup. Releases the four pre-fix dup-number-race invoices (Digs INV-000115 / Mary Kenngott INV-000129 / Nip Tuck INV-000131 + INV-000135) back to Unbilled across client Billing_Ledger sheet + CB Consolidated_Ledger + Supabase. Idempotent. **Already executed once 2026-05-05; keep as historical reference, do not re-run.** Earlier today: v38.190 added missing audit-log row on `batchCreateTasks`; v38.191 made `handleQboPush_` respect per-client `separate_by_sidemark` flag. |
+| React app (GitHub Pages) | Latest on `origin/source` | `npm run deploy` from source. Latest bundle: `index-B2pd9yhv.js`. |
+| StrideAPI.gs | **v38.193.0** (deployed v486) | Billing hardening pass closing bugs #3-#9 from the 2026-05-04 dup-number incident triage. Six discrete changes: (B2) pre-commit Status assertion in `api_markClientLedgerInvoiced_` blocks stale-Void rows from being re-flipped to Invoiced; (B3) `handleVoidInvoice_` now mirrors the Void on CB Consolidated_Ledger via new `api_deleteCbRowsByInvoiceNo_`; (B4) `api_voidBillingRowsWhere_` (reopen-task / reopen-repair) calls `api_deleteCbRowsByLedgerIds_` for defense-in-depth; (C3) server-side sidemark-uniqueness assertion in `handleCreateInvoice_` reads `clients.separate_by_sidemark` from Supabase and rejects mixed-sidemark payloads; (C4) new `runBillingAnomalySweep` admin function — 5 checks against last 30 days, emails Justin if findings; (D) new `handleReissueInvoice_` + `reissueInvoice` action backing the Re-issue button on Billing → Invoices. Earlier 2026-05-05 work: v38.192 admin-entry `runReleaseInvoicesForReissue` cleanup helper, v38.190 batchCreateTasks audit log, v38.191 QBO push `separate_by_sidemark` fix. |
 | Supabase | 69+ migrations applied | `public.next_invoice_no()` Postgres SEQUENCE replaces the Master sheet RPC counter for invoice numbering. Multi-tenant RLS access (`user_has_tenant_access` helper) — clients with multiple tenant assignments can now read entity rows + storage objects across all accessible tenants. |
 | Client scripts | Rolled out to 49 active clients | Code.gs v4.6.0, Import.gs v4.3.0 |
 | StaxAutoPay.gs | v4.7.6 | Charge Log Customer/Transaction header fix |
@@ -97,7 +97,43 @@ UI components: FloatingActionMenu, WriteButton, BatchGuard, ActionTooltip, Batch
 
 ---
 
-## Recent Changes (2026-05-05, dup-number race incident — triage, cleanup, hardening backlog)
+## Recent Changes (2026-05-05, billing hardening pass — bugs #3-#9 closed)
+
+**Trigger:** `BILLING_HARDENING_HANDOFF.md` from the prior dup-number cleanup session. Five cousin bugs + three detection gaps + one missing UI affordance, all blocking Justin's re-run of Create Invoices for Nip Tuck Remodeling and Mary Kenngott Design.
+
+**Audit (Phase A — 4 parallel Explore agents):** confirmed `handleCreateInvoice_` row-pick → write window for stale-Status drift; mapped every site that flips billing rows to Void (`handleVoidInvoice_`, `handleVoidUnbilledRows_`, `handleVoidManualCharge_`, `api_voidBillingRowsWhere_` via `handleReopenTask_` / `handleReopenRepair_`, `handleTransferItems_`); confirmed `handleGenerateStorageCharges_` math is sound (free-days + transfer-date split + discount + class-rate lookup); verified all three QBO/IIF push paths now correctly read `separate_by_sidemark` post-v38.191; surfaced one cousin gap (`handleImportIIF_` doesn't inherit per-client `auto_charge` on new rows) and one dead-code instance (`handleQbExcelExport_` reads AUTO CHARGE but never uses it).
+
+**Six fixes shipped (StrideAPI.gs v38.193.0, deployment v486; React bundle `index-B2pd9yhv.js`):**
+
+- **B2 — pre-commit Status assertion (Bug #4 + gap #9).** `api_markClientLedgerInvoiced_` now reads the Status column in the same `getValues()` as Ledger Row ID and refuses to flip rows whose Status drifted from "Unbilled" between React picking the row (from Supabase mirror) and GAS writing it. Throws `PRE_COMMIT_STATUS_ASSERTION` so `handleCreateInvoice_`'s existing catch path rolls back the CB append. Closes the chain that produced INV-000135 billing the legitimately-Voided `INSP-TASK-INSP-62630-1` row on 2026-05-03.
+
+- **B3 + B4 — CB Consolidated_Ledger symmetry on void + reopen flows (Bugs #5 + #7).** Two new helpers — `api_deleteCbRowsByInvoiceNo_` and `api_deleteCbRowsByLedgerIds_` — placed near `api_markClientLedgerInvoiced_`. Both use the descending-grouped-`deleteRows` pattern from the `rollbackByInvoiceNo_` closure. Wired into `handleVoidInvoice_` (returns `cbRowsDeleted` in response) and `api_voidBillingRowsWhere_` (defense-in-depth — current Unbilled-only guard means CB is normally empty for these IDs). Pre-fix: voiding an invoice via the React UI flipped client sheet to Void but left CB rows tied to the voided invoice number stuck at Status=Invoiced, drifting QBO/IIF reconciliation.
+
+- **C3 — server-side sidemark-uniqueness assertion (Bug #3 defense-in-depth).** `handleCreateInvoice_` now reads `clients.separate_by_sidemark` from Supabase REST and rejects payloads with mixed sidemarks for `true` clients (`SIDEMARK_VIOLATION`). React-side fix landed 2026-05-02 in `Billing.tsx`; this GAS-side guard catches a future React regression OR a hand-crafted payload (admin tool, scripted retry). Fails open on Supabase outage so a momentary outage can't block invoicing.
+
+- **C4 — `runBillingAnomalySweep` admin function (gap #10).** Five checks against the last 30 days: duplicate `invoice_create` entries (the pre-v38.182 RPC race fingerprint), billing rows ≠ stax_invoices.line_items_json count for same invoice_no, mixed sidemarks for `separate_by_sidemark=true` clients, stale-Void rows whose `ledger_row_id` appears in `stax_invoices.line_items_json`, STOR rows with negative qty/total. Sends `justin@stridenw.com` an HTML summary if findings; clean sweeps are Logger-only. Trigger setup left as a manual operator step on purpose — never auto-installed.
+
+- **D — Re-issue button (Bug #6).** New `handleReissueInvoice_` + `reissueInvoice` router action. Releases an invoice's billing rows back to Status=Unbilled, removes matching CB rows, queues `api_fullClientSync_(["billing"])`, writes one entity_audit_log entry. Idempotent. Replaces tonight's `runReleaseInvoicesForReissue` one-shot with a first-class API action — future race / operator-error cleanup is now one click instead of an emergency GAS push. Companion React: new `postReissueInvoice` in `lib/api.ts` + Re-issue button next to Void on the Invoices tab (staff/admin only) with explicit pre-condition confirm dialog (operator must void Stax/QBO first — endpoint doesn't touch external systems).
+
+**Pre-flight (Phase E) results — all green:**
+- E1 client config (Supabase): Digs Furniture (separate_by_sidemark=false), Mary Kenngott Design (true), Nip Tuck Remodeling (true) — all active. Matches the cleanup expectations.
+- E2 released rows ready: Nip Tuck = 42 rows / $980 (NIPTUCK + NORTON); Mary Kenngott = 9 rows / $565 (POPLAWSKI + TWISP-BROWN). Matches the handoff predictions exactly.
+- E3 stale Void rows: only the legitimately-Voided `INSP-TASK-INSP-62630-1` remains (correct — task was reopened 5/1).
+- E4 duplicate invoice_create sweep: only the historical 2026-05-02/05-03 race events on INV-000131 (3×) and INV-000129 (2×); these triggered this work, not a regression. Atomic SEQUENCE prevents recurrence.
+
+**Verdict: GREEN to re-run** Create Invoices for Nip Tuck + Mary Kenngott. Predicted invoice numbers (continuing today's sequence — last was INV-001128): Nip Tuck NORTON ≈ INV-001129 ($565), Nip Tuck NIPTUCK ≈ INV-001130 ($415), Mary Kenngott POPLAWSKI + Mary Kenngott TWISP-BROWN ≈ INV-001131 + INV-001132 (split $565).
+
+**Files touched:** `AppScripts/stride-api/StrideAPI.gs` (v38.192.0 → v38.193.0), `stride-gs-app/src/lib/api.ts` (new `postReissueInvoice` + extended `VoidInvoiceResponse`), `stride-gs-app/src/pages/Billing.tsx` (handleReissue + Re-issue button on Invoices tab).
+
+**Pending user action (post-deploy):**
+- [ ] Justin: re-run Create Invoices for Nip Tuck Remodeling (will produce 2 invoices — NORTON + NIPTUCK — under fresh atomic-counter numbers)
+- [ ] Justin: re-run Create Invoices for Mary Kenngott Design (will produce 2 invoices — POPLAWSKI + TWISP-BROWN)
+- [ ] Justin: send the drafted Nip Tuck + Mary Kenngott customer emails after the new invoices are issued
+- [ ] Justin (optional): wire the daily 6am `runBillingAnomalySweep` time-driven trigger via Apps Script editor → Edit → Triggers
+
+---
+
+## Earlier Changes (2026-05-05, dup-number race incident — triage, cleanup, hardening backlog)
 
 **Trigger:** Nip Tuck Remodeling contact emailed flagging that invoice INV-000135 was a duplicate of lines 1-18 on INV-000131. Investigation confirmed the duplicate AND surfaced two cousin bugs that the v38.182 fix on Mon didn't reach.
 
