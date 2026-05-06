@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.195.1 — 2026-05-06 PST — runBackfillQboPushedAtFromCb chunk-size fix. v38.195.0's first run on prod found 173 invoices with QBO Invoice ID populated then aborted with "Limit Exceeded: URLFetch URL Length" on the first PATCH. Root cause: 200 invoice numbers per chunk × ~18 chars each (after `"…"` quoting + encodeURIComponent's `%22` for each quote) = ~3.6KB URL — past Apps Script UrlFetchApp's ~2KB cap. Reduced CHUNK to 30 (~540 chars per chunk + ~120 of base URL + the qbo_pushed_at filter ≈ 660 total) for comfortable margin. PostgREST itself handles longer URLs; UrlFetchApp is the tighter constraint. Same idempotency semantics: only updates rows where qbo_pushed_at IS NULL so re-runs and the v38.194 hook from fresh pushes never collide. 173 IDs → 6 chunks → ~6 round-trips total, ~1-2s.
+   StrideAPI.gs — v38.196.0 — 2026-05-06 PST — QBO push: handle qb_customer_name in "Parent:Sub" format on cache-cold path. INV-001153 (Vida Design - Waymark, qb_customer_name="Vida Design:Waymark") failed with `QBO customer create failed: HTTP 400: Invalid String. The String may contain unsupported or illegal chars — Element contains invalid characters. Vida Design:Waymark`. Root cause: qbo_resolveCustomerAndSubJob_ passed clientName ("Vida Design:Waymark") straight to qbo_createCustomer_ as DisplayName when no cache row existed yet. QBO reserves the colon for parent:sub notation in DisplayName and rejects any literal colon. Pre-fix this only manifested on cache-cold pushes — Roche Bobois:PDX worked because its parent + sub IDs were already populated in the Stax Customers sheet from prior pushes (cache hit, no QBO create call). Vida Design:Waymark had never been pushed so it fell through to qbo_createCustomer_(fullName) → 400. Fix: new qbo_resolveQbParentSubName_ helper splits the qb_customer_name on the LAST colon, resolves the parent ("Vida Design") via qbo_searchCustomer_ + qbo_createCustomer_(name, parentId=null), then resolves the sub ("Waymark") via qbo_searchSubJob_ + qbo_createCustomer_(name, parentId=parent's QBO ID). Cache layout re-uses the existing parent-row shape: column H stores the parent QBO ID, column J stores the sub QBO ID, column I (sidemark) stays blank — so future calls hit a single row and return fast. The early-return path bypasses the row-level sidemark sub-job creation entirely: when qb_customer_name already encodes the destination sub-customer, stacking another sub-job from sidemark would produce parent:sub:sidemark (3 levels), not the operator's intent. For clients with a flat qb_customer_name (no colon), the existing logic path is unchanged.
+   v38.195.1 — 2026-05-06 PST — runBackfillQboPushedAtFromCb chunk-size fix. v38.195.0's first run on prod found 173 invoices with QBO Invoice ID populated then aborted with "Limit Exceeded: URLFetch URL Length" on the first PATCH. Root cause: 200 invoice numbers per chunk × ~18 chars each (after `"…"` quoting + encodeURIComponent's `%22` for each quote) = ~3.6KB URL — past Apps Script UrlFetchApp's ~2KB cap. Reduced CHUNK to 30 (~540 chars per chunk + ~120 of base URL + the qbo_pushed_at filter ≈ 660 total) for comfortable margin. PostgREST itself handles longer URLs; UrlFetchApp is the tighter constraint. Same idempotency semantics: only updates rows where qbo_pushed_at IS NULL so re-runs and the v38.194 hook from fresh pushes never collide. 173 IDs → 6 chunks → ~6 round-trips total, ~1-2s.
    v38.195.0 — 2026-05-06 PST — One-shot backfill admin entry runBackfillQboPushedAtFromCb. The v38.194.0 invoice_tracking migration's backfill set qbo_pushed_at = stax_pushed_at = stax_invoices.created_at for all 79 invoices that existed in stax_invoices — conflating two independent push paths (handleQbExport_ writes to stax_invoices on the IIF/Stax route; handleQboCreateInvoice_ writes the QBO Invoice ID to the CB Consolidated_Ledger sheet on the direct-QBO route, with no Stax involvement). Result on the React Billing Report: QBO and Payments columns showed identical timestamps for the 79 IIF-pushed invoices, AND showed em-dash for the ~97 invoices that were pushed direct-to-QBO without going through Stax. Reset the conflated qbo_pushed_at values to NULL via direct SQL (Supabase MCP) before this commit; this admin function then walks CB Consolidated_Ledger, collects every distinct Invoice # whose "QBO Invoice ID" column is non-empty (the canonical source of truth — qbo_writeQboInvoiceId_ stamps it after every successful handleQboCreateInvoice_ push), and PATCHes invoice_tracking.qbo_pushed_at = NOW() in chunked PostgREST in.(...) round-trips (200 IDs per chunk; idempotent — only updates rows where qbo_pushed_at IS NULL so a re-run never overwrites a real push timestamp from the v38.194 hook). The timestamp is a backfill marker rather than the actual push time (the CB sheet doesn't capture push time); going forward the v38.194 hook continues to stamp the real timestamp on every fresh push. Run once from the Apps Script editor → Select function → runBackfillQboPushedAtFromCb → Run.
    v38.194.0 — 2026-05-05 PST — Invoice Review overhaul backend hooks. Companion migration `invoice_tracking` creates public.invoice_tracking — a per-invoice tracking ledger keyed on invoice_no with separate qbo_pushed_at + stax_pushed_at timestamps + an auto_charge snapshot taken at create time. Five GAS-side hooks tie the existing handlers to the new table. (Step 4) handleCreateInvoice_ now POSTs to public.invoice_tracking right before the success return, snapshotting auto_charge from public.clients via Supabase REST (defaults to false on missing/outage). On-conflict: merge-duplicates so the v38.157 half-write recovery path can re-enter without erroring. invoiceDateStr (MM/dd/yyyy) is converted to ISO yyyy-MM-dd for the Postgres date column. (Step 3a) handleQboCreateInvoice_ collects pushedInvoiceNos from results[] after the per-invoice push loop and PATCHes invoice_tracking.qbo_pushed_at = now() in one PostgREST `invoice_no=in.(...)` round-trip regardless of batch size. (Step 3b) handleQbExport_ does the same with batchInvoiceNos for stax_pushed_at, right after the existing supabaseBatchUpsert_("stax_invoices", ...) call so the IIF auto-import + tracking stamp travel together. (Cleanup) handleVoidInvoice_ + handleReissueInvoice_ both call the new api_deleteInvoiceTrackingRow_(invoiceNo) helper after their existing CB cleanup so a voided/re-issued invoice doesn't appear in the React Invoice Review tab with stale push state. The voided rows remain on Billing → Report (Status=Void) and the client Billing_Ledger sheet for historical reference; Invoice Review is the active-invoice working surface. All Supabase writes are best-effort: a CB cleanup failure or Supabase outage logs but never blocks the primary operation, and the 30-day runBillingAnomalySweep would surface any orphans. Companion React PR rewires the Invoice Review tab to query invoice_tracking (sortable columns, multi-select bulk push, realtime subscriptions, autopay filter) and wires Payments to surface stax_pushed_at.
    v38.193.0 — 2026-05-05 PST — Billing system hardening pass: closes bugs #3-#9 from the 2026-05-04 incident triage and adds defense-in-depth so the cousin chains can't recur. Six discrete changes in one ship — splitting the surface area at all three storage layers (client Billing_Ledger sheet, CB Consolidated_Ledger sheet, public.billing Supabase mirror) so each fix is independently auditable. (Bug #4 + gap #9, B2) api_markClientLedgerInvoiced_ now reads the Status column in the same getValues() as Ledger Row ID and refuses to flip rows whose Status drifted from Unbilled between React picking and GAS writing. Pre-fix matched only by ledgerRowId and unconditionally setValue("Invoiced") — exactly the chain that produced INV-000135 billing the legitimately-Voided INSP-TASK-INSP-62630-1 row on 2026-05-03 after Justin reopened the task on 2026-05-01. The window from React reading the Unbilled list (Supabase mirror) to GAS writing here is multi-second; in that window a concurrent reopen / void / invoice can change Status. Throws PRE_COMMIT_STATUS_ASSERTION on violation so handleCreateInvoice_'s existing catch path rolls back the CB append; operator sees the offending row IDs + their current Status in the error message. (Bug #5, B3) handleVoidInvoice_ now mirrors the Void on CB Consolidated_Ledger via new helper api_deleteCbRowsByInvoiceNo_(invoiceNo) — same descending-grouped-deleteRows pattern as the rollbackByInvoiceNo_ closure inside handleCreateInvoice_. Pre-fix the function only flipped client-sheet rows to Void, leaving CB rows tied to the now-voided invoice number stuck at Status=Invoiced; QBO/IIF exports build line items from CB so the orphans would re-push and reconciliation between client sheet, CB, and Stax would silently drift. Best-effort: a CB-cleanup failure is logged but doesn't fail the void itself; the next anomaly sweep would surface any stragglers. Returns cbRowsDeleted in the response. (Bug #7, B4) api_voidBillingRowsWhere_ (the helper used by handleReopenTask_ + handleReopenRepair_) now also calls api_deleteCbRowsByLedgerIds_(voidedIds) after the client-sheet flips. The current Unbilled-only guard inside the helper means CB is normally empty for these IDs (CB only contains Invoiced rows); this is defense-in-depth so any future code path that voids an Invoiced row through the helper keeps CB in sync. (Bug #3 / Phase C3) Server-side sidemark consistency assertion in handleCreateInvoice_, mirroring v38.191.0's QBO push fix. The React-side fix landed in Billing.tsx 2026-05-02 ("invoice-grouping was always splitting by sidemark, even for clients with separate_by_sidemark=false"); this GAS-side guard catches a future React regression OR a hand-crafted payload (admin tool, scripted retry) that bypasses the per-client flag. Reads the flag from public.clients via Supabase REST — same source React uses — and refuses any payload where (a) separate_by_sidemark=true but rows contain ≥2 distinct sidemarks, or (b) the payload-level sidemark doesn't match the row sidemark. Fails open on Supabase outage so a momentary outage can't block invoicing; React grouping remains the primary line of defense. (Phase C4) New runBillingAnomalySweep admin entry — five checks against the last 30 days of activity, run from the Apps Script editor or wired as a daily 6am time-driven trigger (manual operator step on purpose, never auto-installed). (1) Duplicate invoice_create entries — same invoice_no on ≥2 success rows in billing_activity_log, the pre-v38.182 RPC race fingerprint. (2) Count mismatch between billing rows and stax_invoices.line_items_json for the same invoice_no — catches CB/Stax divergence. (3) Mixed-sidemark rows on a single invoice for separate_by_sidemark=true clients — the C3 assertion blocks this at create time, sweep covers historical drift. (4) Stale-Void pattern: a billing row with status=Void whose ledger_row_id appears in some stax_invoices.line_items_json element — Bug #4's fingerprint. (5) STOR rows with negative qty/total — math bug or manual edit. Sends Justin a single email summary if any anomalies; clean sweeps are Logger-only so the inbox isn't noisy. Best-effort: each check is independent and a Supabase failure on one degrades coverage rather than aborting the sweep. (Phase D) New handleReissueInvoice_ + reissueInvoice router action backing the new "Re-issue" button on Billing → Invoices. Replaces tonight's runReleaseInvoicesForReissue one-shot with a first-class API action so future race / operator-error cleanup is one click instead of an emergency GAS push. Idempotent: finds rows by Invoice #, skips rows already at Status=Unbilled, flips Invoiced/Void → Unbilled, clears Invoice # / Invoice Date / Invoice URL, appends "Re-issued via UI YYYY-MM-DD: <reason>" to Item Notes (sparse RangeList writes for concurrent-safety). Calls api_deleteCbRowsByInvoiceNo_ for the CB sweep, queues api_fullClientSync_(["billing"]) for Supabase, writes one entity_audit_log row per invoice (not per ledger_row_id — keeps audit readable on 50-line invoices). Pre-condition (operator responsibility, not enforced): if the invoice was already pushed to Stax/QBO, void it there first — the handler only fixes internal ledger state. Companion React commit: postReissueInvoice in lib/api.ts + Re-issue button next to Void on the Invoices tab (staff/admin only) with explicit pre-condition confirm dialog.
@@ -38684,6 +38685,80 @@ function qbo_createCustomer_(displayName, token, realmId, parentId) {
  * inherit contact info from parent → sub-customer at invoice render, so
  * we have to inherit explicitly at push time.
  */
+/**
+ * v38.196.0 — Resolve a qb_customer_name in "Parent:Sub" format to the
+ * corresponding QBO sub-customer ID, creating either side if missing.
+ *
+ * Cache layout in the Stax Customers sheet (re-uses the existing parent-row
+ * shape; row identified by full "Parent:Sub" name with empty Sidemark):
+ *   - Column H ("QBO Customer ID")  → parent QBO ID  (e.g. Vida Design)
+ *   - Column J ("QBO Sub-Job ID")   → sub  QBO ID  (e.g. Vida Design:Waymark)
+ * Cache hit returns immediately. Cache miss calls qbo_searchCustomer_
+ * (parent) + qbo_searchSubJob_ (sub under parent) and creates either side
+ * via qbo_createCustomer_ if not found. Returns the SUB id as customerId
+ * (that's where invoices post) plus the parent id for BillEmail / BillAddr
+ * inheritance (qbo_getCustomerContactInfo_).
+ */
+function qbo_resolveQbParentSubName_(sheet, data, fullName, parentName, subName,
+                                       COL_QB_NAME, COL_QBO_PARENT_ID, COL_SIDEMARK, COL_QBO_SUBJOB_ID,
+                                       token, realmId) {
+  var normalizedFull = String(fullName).trim().toUpperCase();
+
+  // Cache scan: parent-row match on full name with empty sidemark.
+  var cachedRowIdx = -1;
+  var cachedParentQboId = "";
+  var cachedSubQboId = "";
+  for (var i = 1; i < data.length; i++) {
+    var rowName = String(data[i][COL_QB_NAME] || "").trim().toUpperCase();
+    if (rowName !== normalizedFull) continue;
+    var rowSidemark = String(data[i][COL_SIDEMARK] || "").trim();
+    if (rowSidemark) continue; // skip sidemark sub-job rows
+    cachedRowIdx = i;
+    cachedParentQboId = String(data[i][COL_QBO_PARENT_ID] || "").trim();
+    cachedSubQboId    = String(data[i][COL_QBO_SUBJOB_ID]   || "").trim();
+    break;
+  }
+
+  if (cachedParentQboId && cachedSubQboId) {
+    return { customerId: cachedSubQboId, isParent: false, parentCustomerId: cachedParentQboId };
+  }
+
+  // Resolve parent (e.g. "Vida Design")
+  var parentId = cachedParentQboId;
+  if (!parentId) {
+    var parentCust = qbo_searchCustomer_(parentName, token, realmId);
+    if (parentCust) {
+      parentId = String(parentCust.Id);
+    } else {
+      var newParent = qbo_createCustomer_(parentName, token, realmId, null);
+      if (newParent.error === "DUPLICATE_NAME") {
+        throw new Error("QBO duplicate parent customer '" + parentName + "': " + newParent.message + " — resolve in QBO directly");
+      }
+      parentId = String(newParent.Id);
+    }
+  }
+
+  // Resolve sub-customer under parent (e.g. "Waymark")
+  var subId = cachedSubQboId;
+  if (!subId) {
+    var subCust = qbo_searchSubJob_(subName, parentId, token, realmId);
+    if (subCust) {
+      subId = String(subCust.Id);
+    } else {
+      var newSub = qbo_createCustomer_(subName, token, realmId, parentId);
+      if (newSub.error === "DUPLICATE_NAME") {
+        throw new Error("QBO duplicate sub-customer '" + subName + "' under '" + parentName + "': " + newSub.message + " — resolve in QBO directly");
+      }
+      subId = String(newSub.Id);
+    }
+  }
+
+  // Cache: store both IDs on the parent row so future calls hit fast.
+  qbo_saveMappingRow_(sheet, data, cachedRowIdx, fullName, "", parentId, subId);
+
+  return { customerId: subId, isParent: false, parentCustomerId: parentId };
+}
+
 function qbo_resolveCustomerAndSubJob_(clientName, sidemark, token, realmId, separateBySidemark) {
   var ss = getStaxSpreadsheet_();
   var sheet = ss.getSheetByName("Customers");
@@ -38697,6 +38772,31 @@ function qbo_resolveCustomerAndSubJob_(clientName, sidemark, token, realmId, sep
   var COL_QBO_PARENT_ID = 7;
   var COL_SIDEMARK = 8;
   var COL_QBO_SUBJOB_ID = 9;
+
+  // 2026-05-06 — qb_customer_name with parent:sub format (e.g., "Vida Design:Waymark"
+  // or "Roche Bobois:PDX"). The Stride client is mapped to an existing QBO
+  // sub-customer; the colon is QBO's parent:sub notation. We MUST split it
+  // before talking to QBO — Customer/create rejects any DisplayName containing
+  // a colon ("Invalid String. The String may contain unsupported or illegal
+  // chars"). Pre-fix this manifested only on cache-cold pushes: Roche Bobois:PDX
+  // worked because its parent + sub IDs were cached from a prior push (cache
+  // hit, no QBO create call). Vida Design:Waymark erred because no cache row
+  // existed yet → fell through to qbo_createCustomer_(fullName) → 400.
+  //
+  // For these clients the row-level sidemark is intentionally ignored even
+  // when separate_by_sidemark = true: qb_customer_name already identifies the
+  // destination sub-customer, and stacking a sidemark sub-job on top would
+  // produce parent:sub:sidemark — three levels deep, not the operator's
+  // intent (they set up the parent:sub mapping to BE the destination).
+  var nameColonIdx = String(clientName || "").lastIndexOf(":");
+  if (nameColonIdx > 0) {
+    var qbParentName = String(clientName).substring(0, nameColonIdx).trim();
+    var qbSubName    = String(clientName).substring(nameColonIdx + 1).trim();
+    if (qbParentName && qbSubName) {
+      return qbo_resolveQbParentSubName_(sheet, data, clientName, qbParentName, qbSubName,
+        COL_QB_NAME, COL_QBO_PARENT_ID, COL_SIDEMARK, COL_QBO_SUBJOB_ID, token, realmId);
+    }
+  }
 
   // Ensure columns exist (sheet may not have enough columns yet)
   var lastCol = sheet.getLastColumn();
