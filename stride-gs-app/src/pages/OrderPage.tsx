@@ -749,6 +749,14 @@ export function OrderPage() {
     if (notes === null) return; // cancelled
     setSaving(true);
     setSaveError(null);
+
+    // Optimistic — paint the new review status / notes immediately so the
+    // footer banner and the badge in the header flip without waiting for
+    // the Supabase round-trip + read-back.
+    const prevReviewStatus = order.reviewStatus;
+    const prevReviewNotes = order.reviewNotes;
+    setLocalOrder(prev => prev ? { ...prev, reviewStatus: action, reviewNotes: notes.trim() } : prev);
+
     try {
       const { data: authData } = await supabase.auth.getUser();
       const reviewerUid = authData?.user?.id ?? null;
@@ -808,6 +816,8 @@ export function OrderPage() {
       if (fresh) setLocalOrder(fresh);
       refetch();
     } catch (err) {
+      // Roll back optimistic patch on failure.
+      setLocalOrder(prev => prev ? { ...prev, reviewStatus: prevReviewStatus, reviewNotes: prevReviewNotes } : prev);
       setSaveError(err instanceof Error ? err.message : String(err));
     } finally {
       setSaving(false);

@@ -4,7 +4,9 @@ import { theme } from '../../styles/theme';
 import { WriteButton } from './WriteButton';
 import { ProcessingOverlay } from './ProcessingOverlay';
 import { postReleaseItems } from '../../lib/api';
+import { entityEvents } from '../../lib/entityEvents';
 import type { ReleaseItemsResponse } from '../../lib/api';
+import type { InventoryItem } from '../../lib/types';
 
 export interface ReleaseSelectableItem {
   id: string;
@@ -33,9 +35,17 @@ interface Props {
    * keeps the static preview behavior.
    */
   selectableItems?: ReleaseSelectableItem[];
+  /**
+   * Optimistic patch hooks from useInventory. When passed, the modal
+   * flips each released item's status to 'Released' (with the chosen
+   * release date) BEFORE the GAS round-trip so the parent table reflects
+   * the change instantly. Rolls back on failure.
+   */
+  applyItemPatch?: (itemId: string, patch: Partial<InventoryItem>) => void;
+  clearItemPatch?: (itemId: string) => void;
 }
 
-export function ReleaseItemsModal({ itemIds, clientName, clientSheetId, onClose, onSuccess, defaultReleaseDate, selectableItems }: Props) {
+export function ReleaseItemsModal({ itemIds, clientName, clientSheetId, onClose, onSuccess, defaultReleaseDate, selectableItems, applyItemPatch, clearItemPatch }: Props) {
   const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
   // defaultReleaseDate is only consumed by the initial render. The
   // parent always closes + remounts the modal before refetching, so a
@@ -64,15 +74,30 @@ export function ReleaseItemsModal({ itemIds, clientName, clientSheetId, onClose,
     if (!releaseDate || effectiveIds.length === 0) return;
     setSubmitting(true);
     setError(null);
+
+    // Optimistic — flip each selected item to Released with the chosen
+    // date so the parent inventory table updates immediately. Rolled
+    // back below if the GAS write fails.
+    if (applyItemPatch) {
+      for (const id of effectiveIds) {
+        applyItemPatch(id, { status: 'Released', releaseDate });
+      }
+    }
+
     try {
       const resp = await postReleaseItems({ itemIds: effectiveIds, releaseDate, notes: notes.trim() || undefined }, clientSheetId);
       if (resp.ok && resp.data?.success) {
         setResult(resp.data);
+        // Tell other consumers (Inventory list realtime subscribers) about
+        // the writes so they refetch from Supabase once write-through lands.
+        for (const id of effectiveIds) entityEvents.emit('inventory', id);
         onSuccess(resp.data);
       } else {
+        if (clearItemPatch) for (const id of effectiveIds) clearItemPatch(id);
         setError(resp.error || resp.data?.error || 'Failed to release items');
       }
     } catch (err) {
+      if (clearItemPatch) for (const id of effectiveIds) clearItemPatch(id);
       setError(String(err));
     } finally {
       setSubmitting(false);

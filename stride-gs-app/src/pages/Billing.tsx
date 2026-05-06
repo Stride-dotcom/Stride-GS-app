@@ -1572,15 +1572,22 @@ export function Billing() {
 
   const handleVoidManualCharge = useCallback(async (row: BillingRow) => {
     if (!row.clientSheetId || !row.ledgerRowId.startsWith('MANUAL-')) return;
+    // Optimistic — drop the row from the report immediately so the table
+    // updates without waiting for the GAS round-trip + reload. Reverted
+    // below if the void fails.
+    const snapshot: BillingRow | undefined = reportData.find(r => r.ledgerRowId === row.ledgerRowId);
+    setReportData(prev => prev.filter(r => r.ledgerRowId !== row.ledgerRowId));
+    setSelectedBillingRow(null);
     const res = await postVoidManualCharge(row.ledgerRowId, row.clientSheetId);
     if (res.ok && res.data?.success) {
       showToast(`Charge voided — ${row.svcName}`);
-      setSelectedBillingRow(null);
       if (reportLoaded) void loadReport(true);
     } else {
+      // Restore the row at its original position to avoid drifting sort order.
+      if (snapshot) setReportData(prev => [...prev, snapshot]);
       showToast(res.error || res.data?.error || 'Void failed');
     }
-  }, [reportLoaded, loadReport, showToast]);
+  }, [reportData, reportLoaded, loadReport, showToast]);
 
   const openEditManualCharge = useCallback((row: BillingRow) => {
     setEditingManualCharge({

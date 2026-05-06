@@ -2489,6 +2489,8 @@ export function Inventory() {
           clientSheetId={detailActionItem?.clientId || selectedRows[0]?.original.clientId || ''}
           onClose={() => { setShowReleaseModal(false); setDetailActionItem(null); }}
           onSuccess={() => { showToast('Items released'); setRowSelection({}); setDetailActionItem(null); refetch(); }}
+          applyItemPatch={applyItemPatch}
+          clearItemPatch={clearItemPatch}
         />
       )}
 
