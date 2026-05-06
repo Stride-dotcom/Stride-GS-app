@@ -61,6 +61,7 @@ import { AddChargeModal, type ManualChargeEditTarget } from '../components/billi
 import { useQBO } from '../hooks/useQBO';
 import { useAuth } from '../contexts/AuthContext';
 import { useBillingBatch, type BatchInvoiceResult } from '../contexts/BillingBatchContext';
+import { useQboPushJobs } from '../contexts/QboPushJobsContext';
 import { postVoidManualCharge, postVoidInvoice, postVoidUnbilledRows, postReissueInvoice } from '../lib/api';
 import { supabase } from '../lib/supabase';
 import { entityEvents } from '../lib/entityEvents';
@@ -935,6 +936,7 @@ export function Billing() {
   // column's per-row "Invoicing…" badge reads `invoicingLedgerIds` from
   // the same context.
   const billingBatch = useBillingBatch();
+  const qboPushJobs = useQboPushJobs();
   const canManageManualCharges = user?.role === 'admin' || user?.role === 'staff';
   const [showAddCharge, setShowAddCharge] = useState(false);
   const [editingManualCharge, setEditingManualCharge] = useState<ManualChargeEditTarget | null>(null);
@@ -2320,28 +2322,24 @@ export function Billing() {
       const invoicedLedgerIds = selRows.map(r => r.ledgerRowId).filter(Boolean);
 
       if (invOptQbo && invoicedLedgerIds.length) {
-        try {
-          const qboRes = await qboPushInvoice(invoicedLedgerIds);
-          if (qboRes) {
-            const details = (qboRes.results || []).map((r: any) => ({
-              strideInvoiceNumber: r.strideInvoiceNumber || '',
-              error: r.error || undefined,
-              success: r.success || false,
-              qboInvoiceId: r.qboInvoiceId || undefined,
-            }));
-            if (qboRes.success && qboRes.failedCount === 0) {
-              setQboResult({ success: `${qboRes.pushedCount} invoice(s) pushed to QBO`, details });
-            } else {
-              // Include retryIds so user can retry without re-selecting
-              setQboResult({
-                error: qboRes.error || `${qboRes.failedCount} invoice(s) failed to push to QBO`,
-                details,
-                retryIds: invoicedLedgerIds,
-              });
-            }
-          }
-        } catch (e) {
-          setQboResult({ error: 'QBO Push failed: ' + String(e), retryIds: invoicedLedgerIds });
+        // v38.197.0 — QBO push runs through the persistent QboPushJobsContext
+        // so progress + result are visible even if the operator navigates
+        // away or refreshes the browser. We don't await this; the toast
+        // takes over from here.
+        const startedJobId = await qboPushJobs.startJob({
+          ledgerRowIds: invoicedLedgerIds,
+          source: 'create_flow',
+          autoAssignDocNumber: true,
+        });
+        if (!startedJobId) {
+          setQboResult({
+            error: 'Failed to queue QBO push — see browser console. Invoices were created successfully; you can retry the QBO push from the toolbar.',
+            retryIds: invoicedLedgerIds,
+          });
+        } else {
+          setQboResult({
+            success: `QBO push queued — see the toast in the bottom-right for live progress (it persists if you navigate away).`,
+          });
         }
       }
       if (invOptStax) {

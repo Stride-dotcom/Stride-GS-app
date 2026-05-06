@@ -5005,11 +5005,22 @@ export function postQboCreateInvoice(
   ledgerRowIds: string[],
   forceRePush: boolean = false,
   autoAssignDocNumber: boolean = false,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  /**
+   * v38.197.0 — Optional `qbo_push_jobs.id`. When set, GAS PATCHes the job
+   * throughout its push loop (status='running' on entry, every 5 invoices
+   * with running counts, terminal status + final results at the end). React
+   * subscribes to realtime on qbo_push_jobs via QboPushJobsContext, so the
+   * App-level toast stays accurate even when this fetch is cancelled by
+   * navigation / refresh.
+   */
+  jobId?: string,
 ) {
+  const payload: Record<string, unknown> = { ledgerRowIds, forceRePush, autoAssignDocNumber };
+  if (jobId) payload.jobId = jobId;
   return apiPost<QboCreateInvoiceResponse>(
     'qboCreateInvoice',
-    { ledgerRowIds, forceRePush, autoAssignDocNumber } as unknown as Record<string, unknown>,
+    payload,
     {},
     { signal, timeoutMs: API_POST_TIMEOUT_LONG_MS }
   );

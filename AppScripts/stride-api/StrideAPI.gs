@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.196.0 — 2026-05-06 PST — QBO push: handle qb_customer_name in "Parent:Sub" format on cache-cold path. INV-001153 (Vida Design - Waymark, qb_customer_name="Vida Design:Waymark") failed with `QBO customer create failed: HTTP 400: Invalid String. The String may contain unsupported or illegal chars — Element contains invalid characters. Vida Design:Waymark`. Root cause: qbo_resolveCustomerAndSubJob_ passed clientName ("Vida Design:Waymark") straight to qbo_createCustomer_ as DisplayName when no cache row existed yet. QBO reserves the colon for parent:sub notation in DisplayName and rejects any literal colon. Pre-fix this only manifested on cache-cold pushes — Roche Bobois:PDX worked because its parent + sub IDs were already populated in the Stax Customers sheet from prior pushes (cache hit, no QBO create call). Vida Design:Waymark had never been pushed so it fell through to qbo_createCustomer_(fullName) → 400. Fix: new qbo_resolveQbParentSubName_ helper splits the qb_customer_name on the LAST colon, resolves the parent ("Vida Design") via qbo_searchCustomer_ + qbo_createCustomer_(name, parentId=null), then resolves the sub ("Waymark") via qbo_searchSubJob_ + qbo_createCustomer_(name, parentId=parent's QBO ID). Cache layout re-uses the existing parent-row shape: column H stores the parent QBO ID, column J stores the sub QBO ID, column I (sidemark) stays blank — so future calls hit a single row and return fast. The early-return path bypasses the row-level sidemark sub-job creation entirely: when qb_customer_name already encodes the destination sub-customer, stacking another sub-job from sidemark would produce parent:sub:sidemark (3 levels), not the operator's intent. For clients with a flat qb_customer_name (no colon), the existing logic path is unchanged.
+   StrideAPI.gs — v38.197.0 — 2026-05-06 PST — Persistent QBO push jobs (qbo_push_jobs table) so the operator can leave the Billing page or refresh the browser mid-push without losing the result UI. handleQboCreateInvoice_ now accepts an optional `jobId` param; when set, it PATCHes public.qbo_push_jobs throughout the loop — status='running' + total_count + invoice_nos at entry, every 5 invoices with running succeeded/failed/skipped counts + per-invoice results, and a terminal status='succeeded'/'partial'/'failed' + finished_at + final results at the end. The push itself is unchanged for callers that don't supply jobId (admin scripts, legacy tests). Companion Supabase migration `qbo_push_jobs` creates the table (id uuid PK, status enum CHECK, ledger_row_ids text[], invoice_nos text[], counts, jsonb results, force_re_push, initiated_by, source) with staff/admin RLS + service_role bypass + realtime publication so the React App-level QboPushJobsContext observes every PATCH live. New helper api_patchQboPushJob_(jobId, patch) wraps the PostgREST PATCH with Prefer=return=minimal; best-effort, never blocks the QBO push on a Supabase outage. Companion React PR mounts QboPushJobsContext at AppLayout, renders a bottom-right toast that survives navigation, queries `created_at >= NOW() - 30 minutes OR finished_at IS NULL` on App mount to rehydrate any in-flight or recently-finished jobs, and wires both the QBO Push toolbar button and the Create Invoices "Push to QuickBooks Online" checkbox to start jobs through the context.
+   v38.196.0 — 2026-05-06 PST — QBO push: handle qb_customer_name in "Parent:Sub" format on cache-cold path. INV-001153 (Vida Design - Waymark, qb_customer_name="Vida Design:Waymark") failed with `QBO customer create failed: HTTP 400: Invalid String. The String may contain unsupported or illegal chars — Element contains invalid characters. Vida Design:Waymark`. Root cause: qbo_resolveCustomerAndSubJob_ passed clientName ("Vida Design:Waymark") straight to qbo_createCustomer_ as DisplayName when no cache row existed yet. QBO reserves the colon for parent:sub notation in DisplayName and rejects any literal colon. Pre-fix this only manifested on cache-cold pushes — Roche Bobois:PDX worked because its parent + sub IDs were already populated in the Stax Customers sheet from prior pushes (cache hit, no QBO create call). Vida Design:Waymark had never been pushed so it fell through to qbo_createCustomer_(fullName) → 400. Fix: new qbo_resolveQbParentSubName_ helper splits the qb_customer_name on the LAST colon, resolves the parent ("Vida Design") via qbo_searchCustomer_ + qbo_createCustomer_(name, parentId=null), then resolves the sub ("Waymark") via qbo_searchSubJob_ + qbo_createCustomer_(name, parentId=parent's QBO ID). Cache layout re-uses the existing parent-row shape: column H stores the parent QBO ID, column J stores the sub QBO ID, column I (sidemark) stays blank — so future calls hit a single row and return fast. The early-return path bypasses the row-level sidemark sub-job creation entirely: when qb_customer_name already encodes the destination sub-customer, stacking another sub-job from sidemark would produce parent:sub:sidemark (3 levels), not the operator's intent. For clients with a flat qb_customer_name (no colon), the existing logic path is unchanged.
    v38.195.1 — 2026-05-06 PST — runBackfillQboPushedAtFromCb chunk-size fix. v38.195.0's first run on prod found 173 invoices with QBO Invoice ID populated then aborted with "Limit Exceeded: URLFetch URL Length" on the first PATCH. Root cause: 200 invoice numbers per chunk × ~18 chars each (after `"…"` quoting + encodeURIComponent's `%22` for each quote) = ~3.6KB URL — past Apps Script UrlFetchApp's ~2KB cap. Reduced CHUNK to 30 (~540 chars per chunk + ~120 of base URL + the qbo_pushed_at filter ≈ 660 total) for comfortable margin. PostgREST itself handles longer URLs; UrlFetchApp is the tighter constraint. Same idempotency semantics: only updates rows where qbo_pushed_at IS NULL so re-runs and the v38.194 hook from fresh pushes never collide. 173 IDs → 6 chunks → ~6 round-trips total, ~1-2s.
    v38.195.0 — 2026-05-06 PST — One-shot backfill admin entry runBackfillQboPushedAtFromCb. The v38.194.0 invoice_tracking migration's backfill set qbo_pushed_at = stax_pushed_at = stax_invoices.created_at for all 79 invoices that existed in stax_invoices — conflating two independent push paths (handleQbExport_ writes to stax_invoices on the IIF/Stax route; handleQboCreateInvoice_ writes the QBO Invoice ID to the CB Consolidated_Ledger sheet on the direct-QBO route, with no Stax involvement). Result on the React Billing Report: QBO and Payments columns showed identical timestamps for the 79 IIF-pushed invoices, AND showed em-dash for the ~97 invoices that were pushed direct-to-QBO without going through Stax. Reset the conflated qbo_pushed_at values to NULL via direct SQL (Supabase MCP) before this commit; this admin function then walks CB Consolidated_Ledger, collects every distinct Invoice # whose "QBO Invoice ID" column is non-empty (the canonical source of truth — qbo_writeQboInvoiceId_ stamps it after every successful handleQboCreateInvoice_ push), and PATCHes invoice_tracking.qbo_pushed_at = NOW() in chunked PostgREST in.(...) round-trips (200 IDs per chunk; idempotent — only updates rows where qbo_pushed_at IS NULL so a re-run never overwrites a real push timestamp from the v38.194 hook). The timestamp is a backfill marker rather than the actual push time (the CB sheet doesn't capture push time); going forward the v38.194 hook continues to stamp the real timestamp on every fresh push. Run once from the Apps Script editor → Select function → runBackfillQboPushedAtFromCb → Run.
    v38.194.0 — 2026-05-05 PST — Invoice Review overhaul backend hooks. Companion migration `invoice_tracking` creates public.invoice_tracking — a per-invoice tracking ledger keyed on invoice_no with separate qbo_pushed_at + stax_pushed_at timestamps + an auto_charge snapshot taken at create time. Five GAS-side hooks tie the existing handlers to the new table. (Step 4) handleCreateInvoice_ now POSTs to public.invoice_tracking right before the success return, snapshotting auto_charge from public.clients via Supabase REST (defaults to false on missing/outage). On-conflict: merge-duplicates so the v38.157 half-write recovery path can re-enter without erroring. invoiceDateStr (MM/dd/yyyy) is converted to ISO yyyy-MM-dd for the Postgres date column. (Step 3a) handleQboCreateInvoice_ collects pushedInvoiceNos from results[] after the per-invoice push loop and PATCHes invoice_tracking.qbo_pushed_at = now() in one PostgREST `invoice_no=in.(...)` round-trip regardless of batch size. (Step 3b) handleQbExport_ does the same with batchInvoiceNos for stax_pushed_at, right after the existing supabaseBatchUpsert_("stax_invoices", ...) call so the IIF auto-import + tracking stamp travel together. (Cleanup) handleVoidInvoice_ + handleReissueInvoice_ both call the new api_deleteInvoiceTrackingRow_(invoiceNo) helper after their existing CB cleanup so a voided/re-issued invoice doesn't appear in the React Invoice Review tab with stale push state. The voided rows remain on Billing → Report (Status=Void) and the client Billing_Ledger sheet for historical reference; Invoice Review is the active-invoice working surface. All Supabase writes are best-effort: a CB cleanup failure or Supabase outage logs but never blocks the primary operation, and the 30-day runBillingAnomalySweep would surface any orphans. Companion React PR rewires the Invoice Review tab to query invoice_tracking (sortable columns, multi-select bulk push, realtime subscriptions, autopay filter) and wires Payments to surface stax_pushed_at.
@@ -39351,12 +39352,51 @@ function qbo_createInvoice_(invoicePayload, token, realmId) {
  * POST qboCreateInvoice — Push selected invoices to QBO.
  * payload: { ledgerRowIds: string[], forceRePush?: boolean }
  */
+/**
+ * v38.197.0 — PATCH a row in public.qbo_push_jobs by id. Backs the persistent
+ * QBO push toast in the React App layout (QboPushJobsContext). Best-effort:
+ * Supabase outage logs but never blocks the QBO push itself.
+ *
+ * Caller passes an object of fields to set; we wrap with the
+ * Supabase REST headers + Prefer=return=minimal so the response is empty.
+ */
+function api_patchQboPushJob_(jobId, patch) {
+  if (!jobId || !patch) return;
+  var sbUrl = prop_("SUPABASE_URL");
+  var sbKey = prop_("SUPABASE_SERVICE_ROLE_KEY");
+  if (!sbUrl || !sbKey) return;
+  try {
+    UrlFetchApp.fetch(
+      sbUrl + "/rest/v1/qbo_push_jobs?id=eq." + encodeURIComponent(jobId),
+      {
+        method: "PATCH",
+        headers: {
+          "Authorization": "Bearer " + sbKey,
+          "apikey":        sbKey,
+          "Content-Type":  "application/json",
+          "Prefer":        "return=minimal"
+        },
+        payload: JSON.stringify(patch),
+        muteHttpExceptions: true
+      }
+    );
+  } catch (e) {
+    Logger.log("api_patchQboPushJob_ error (non-fatal): " + e);
+  }
+}
+
 function handleQboCreateInvoice_(payload) {
   var ledgerRowIds = payload.ledgerRowIds;
   if (!ledgerRowIds || !Array.isArray(ledgerRowIds) || ledgerRowIds.length === 0) {
     return { success: false, error: "ledgerRowIds array is required" };
   }
   var forceRePush = !!payload.forceRePush;
+  // v38.197.0 — Optional jobId from React's QboPushJobsContext. When set, the
+  // function PATCHes public.qbo_push_jobs throughout the loop so the App-level
+  // toast stays accurate even if the operator navigates away or refreshes the
+  // browser. The push itself runs regardless of jobId — backward-compatible
+  // for any caller that doesn't supply one (legacy tests, admin scripts).
+  var jobId = String(payload.jobId || "").trim() || null;
   // v38.121.0 — Default is now TRUE (was false). QBO auto-assigns DocNumber,
   // Stride INV# goes in PrivateNote for cross-reference. Eliminates the 14s
   // per-collision retry backoff on duplicate-number errors. With QBO's Custom
@@ -39624,7 +39664,25 @@ function handleQboCreateInvoice_(payload) {
 
   var invoiceNumbers = Object.keys(invoiceGroups);
   if (invoiceNumbers.length === 0) {
+    if (jobId) {
+      api_patchQboPushJob_(jobId, {
+        status: "failed",
+        finished_at: new Date().toISOString(),
+        error_message: "No matching Invoiced rows found for the selected ledger row IDs"
+      });
+    }
     return { success: false, error: "No matching Invoiced rows found for the selected ledger row IDs" };
+  }
+
+  // v38.197.0 — Mark the job as running with the resolved invoice list. React
+  // toast flips from "Starting…" to "Pushing N invoices…" via realtime.
+  if (jobId) {
+    api_patchQboPushJob_(jobId, {
+      status: "running",
+      started_at: new Date().toISOString(),
+      total_count: invoiceNumbers.length,
+      invoice_nos: invoiceNumbers
+    });
   }
 
   // Push each invoice to QBO
@@ -39759,10 +39817,41 @@ function handleQboCreateInvoice_(payload) {
 
     results.push(resultEntry);
 
+    // v38.197.0 — Incremental progress checkpoint. Every 5 invoices, PATCH
+    // the job with current counts + results so the React toast can render
+    // "Pushed 5 of 17, 1 failed" in flight. Final PATCH happens after the
+    // loop with the full result set; this is just for live progress.
+    if (jobId && (n + 1) % 5 === 0) {
+      api_patchQboPushJob_(jobId, {
+        succeeded_count: pushedCount,
+        failed_count: failedCount,
+        skipped_count: skippedCount,
+        results: results
+      });
+    }
+
     // Rate limit delay between invoices
     if (n < invoiceNumbers.length - 1) {
       Utilities.sleep(200);
     }
+  }
+
+  // v38.197.0 — Final job state. status='succeeded' (all pushed),
+  // 'partial' (some pushed, some failed), 'failed' (zero pushed).
+  if (jobId) {
+    var finalStatus = (failedCount === 0)
+      ? "succeeded"
+      : (pushedCount > 0 ? "partial" : "failed");
+    api_patchQboPushJob_(jobId, {
+      status: finalStatus,
+      finished_at: new Date().toISOString(),
+      total_count: invoiceNumbers.length,
+      succeeded_count: pushedCount,
+      failed_count: failedCount,
+      skipped_count: skippedCount,
+      results: results,
+      invoice_nos: invoiceNumbers
+    });
   }
 
   // v38.194.0 (Invoice Review overhaul, Step 3a) — Stamp qbo_pushed_at on
