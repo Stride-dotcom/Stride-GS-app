@@ -7339,6 +7339,23 @@ function doPost(e) {
           });
         });
 
+      case "reissueInvoice":
+        // v38.193.0 (Phase D) — One-click invoice re-issue across all
+        // three storage layers. Releases client Billing_Ledger rows back
+        // to Unbilled, deletes CB Consolidated_Ledger rows, queues
+        // Supabase resync. Operator follows up with the existing Create
+        // Invoices flow against the released rows.
+        return withStaffGuard_(callerEmail, function() {
+          return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
+            // handleReissueInvoice_ does its own client-sheet flip, CB cleanup,
+            // and Supabase resync internally; the audit log is also written
+            // inside the handler so it includes the full ledgerRowIds list.
+            var r = handleReissueInvoice_(effectiveId, payload, callerEmail);
+            invalidateClientCache_(effectiveId);
+            return r;
+          });
+        });
+
       case "voidUnbilledRows":
         return withStaffGuard_(callerEmail, function() {
           return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
@@ -12511,6 +12528,175 @@ function handleVoidInvoice_(clientSheetId, payload) {
     });
   } catch (err) {
     return errorResponse_("Failed to void invoice: " + String(err), "SERVER_ERROR");
+  }
+}
+
+// ─── reissueInvoice — full unwind of an invoice across all 3 storage layers ─
+
+/**
+ * v38.193.0 (Phase D) — One-click invoice re-issue.
+ *
+ * The 2026-05-04 incident required a custom one-shot admin function
+ * (runReleaseInvoicesForReissue) to walk back four pre-fix invoices
+ * across all three storage layers. This handler exposes the same
+ * operation as a first-class API action so future race / operator-error
+ * cleanup is one click instead of an emergency GAS push.
+ *
+ * Sequence (idempotent — safe to retry):
+ *   1. Find every client Billing_Ledger row whose Invoice # matches.
+ *      Skip rows already at Status=Unbilled (already released). Flip
+ *      Invoiced/Void → Unbilled, clear Invoice # / Invoice Date /
+ *      Invoice URL, append "Re-issued via UI YYYY-MM-DD: <reason>"
+ *      to Item Notes. Uses RangeList sparse writes (concurrent-safe,
+ *      same shape as api_markClientLedgerInvoiced_).
+ *   2. Delete matching CB Consolidated_Ledger rows by Invoice #
+ *      (api_deleteCbRowsByInvoiceNo_).
+ *   3. Queue api_fullClientSync_ so public.billing reflects the
+ *      released rows for the React Report tab.
+ *
+ * Differs from handleVoidInvoice_ in step 1: that function flips to
+ * terminal "Void", this one releases back to "Unbilled" so the rows
+ * appear on the next Create Invoices preview.
+ *
+ * Caller is expected to follow up with the existing Create Invoices
+ * flow against the released rows (Billing → Report → filter the
+ * client → Create Invoices). The handler does NOT attempt to re-create
+ * the invoice automatically — operator chooses sidemark grouping etc.
+ *
+ * Pre-condition (operator responsibility, not enforced here): if the
+ * invoice was already pushed to Stax/QBO, void it on those external
+ * systems first. This handler only fixes internal ledger state.
+ *
+ * Payload: { invoiceNo: string, reason?: string }
+ * Returns: { success, invoiceNo, rowsReleased, cbRowsDeleted,
+ *           ledgerRowIds[], message }
+ */
+function handleReissueInvoice_(clientSheetId, payload, callerEmail) {
+  if (!clientSheetId) return errorResponse_("clientSheetId is required", "MISSING_PARAM");
+  var invoiceNo = String((payload || {}).invoiceNo || "").trim();
+  if (!invoiceNo) return errorResponse_("invoiceNo is required", "INVALID_PARAMS");
+  var reason = String((payload || {}).reason || "").trim();
+  var todayStr = Utilities.formatDate(new Date(), "America/Los_Angeles", "yyyy-MM-dd");
+  var noteSuffix = "Re-issued via UI " + todayStr + (reason ? ": " + reason : "");
+
+  try {
+    var ss = SpreadsheetApp.openById(clientSheetId);
+    var sheet = ss.getSheetByName("Billing_Ledger");
+    if (!sheet) return errorResponse_("Billing_Ledger sheet not found", "SHEET_NOT_FOUND");
+
+    var hMap         = api_getHeaderMap_(sheet);
+    var idxStatus    = hMap["Status"];
+    var idxInv       = hMap["Invoice #"];
+    var idxLedgerId  = hMap["Ledger Row ID"];
+    var idxNotes     = hMap["Item Notes"] !== undefined ? hMap["Item Notes"] : hMap["Notes"];
+    var idxInvDate   = api_ensureColumn_(sheet, "Invoice Date");
+    var idxInvUrl    = api_ensureColumn_(sheet, "Invoice URL");
+    if (!idxStatus || !idxInv) return errorResponse_("Invoice #/Status columns missing", "SCHEMA_ERROR");
+
+    var lastRow = api_getLastDataRow_(sheet);
+    if (lastRow < 2) return errorResponse_("Empty Billing_Ledger", "NOT_FOUND");
+
+    var allData = sheet.getRange(2, 1, lastRow - 1, sheet.getLastColumn()).getValues();
+    var changedRows = [];
+    var ledgerRowIds = [];
+    var skippedAlreadyUnbilled = 0;
+    for (var i = 0; i < allData.length; i++) {
+      var rowInv = String(allData[i][idxInv - 1] || "").trim();
+      if (rowInv !== invoiceNo) continue;
+      var rowStatus = String(allData[i][idxStatus - 1] || "").trim();
+      if (rowStatus === "Unbilled") { skippedAlreadyUnbilled++; continue; }
+      changedRows.push(i + 2);
+      if (idxLedgerId) {
+        var lid = String(allData[i][idxLedgerId - 1] || "").trim();
+        if (lid) ledgerRowIds.push(lid);
+      }
+    }
+
+    if (changedRows.length === 0 && skippedAlreadyUnbilled === 0) {
+      return errorResponse_("No rows found for invoice " + invoiceNo, "NOT_FOUND");
+    }
+
+    // Sparse writes — same shape as api_markClientLedgerInvoiced_, so
+    // concurrent invoices touching different rows can't clobber each
+    // other.
+    if (changedRows.length > 0) {
+      function colToA1_(col) {
+        var s = ""; var n = col;
+        while (n > 0) { var rem = (n - 1) % 26; s = String.fromCharCode(65 + rem) + s; n = Math.floor((n - 1) / 26); }
+        return s;
+      }
+      function rangeListFor_(col) {
+        var a1Col = colToA1_(col);
+        var a1s = new Array(changedRows.length);
+        for (var rr = 0; rr < changedRows.length; rr++) a1s[rr] = a1Col + changedRows[rr];
+        return sheet.getRangeList(a1s);
+      }
+      rangeListFor_(idxStatus).setValue("Unbilled");
+      rangeListFor_(idxInv).clearContent();
+      if (idxInvDate) rangeListFor_(idxInvDate).clearContent();
+      if (idxInvUrl)  rangeListFor_(idxInvUrl).clearContent();
+      // Item Notes is per-row append, not a uniform write — do it cell-by-cell
+      if (idxNotes) {
+        for (var ci = 0; ci < changedRows.length; ci++) {
+          var sheetRow = changedRows[ci];
+          var existing = String(allData[sheetRow - 2][idxNotes - 1] || "").trim();
+          var combined = existing ? (existing + " | " + noteSuffix) : noteSuffix;
+          sheet.getRange(sheetRow, idxNotes).setValue(combined);
+        }
+      }
+    }
+
+    // Step 2 — CB cleanup
+    var cbCleanup = { deleted: 0 };
+    try {
+      cbCleanup = api_deleteCbRowsByInvoiceNo_(invoiceNo);
+    } catch (cbErr) {
+      Logger.log("handleReissueInvoice_: CB cleanup failed for " + invoiceNo + ": " + cbErr.message);
+      cbCleanup = { deleted: 0, error: String(cbErr.message || cbErr) };
+    }
+
+    // Step 3 — Supabase resync (best-effort)
+    try {
+      api_fullClientSync_(clientSheetId, ["billing"]);
+    } catch (syncErr) {
+      Logger.log("handleReissueInvoice_: Supabase resync failed (non-fatal): " + syncErr.message);
+    }
+
+    // Audit — one entry per invoice with summary, not per-row (avoids audit
+    // log spam on a 50-line invoice). entity_audit_log convention is one
+    // event per logical operation; the ledgerRowIds list is in details.
+    try {
+      api_auditLog_(
+        "billing",
+        invoiceNo,
+        clientSheetId,
+        "reissue_invoice",
+        {
+          invoiceNo: invoiceNo,
+          rowsReleased: changedRows.length,
+          cbRowsDeleted: cbCleanup.deleted || 0,
+          ledgerRowIds: ledgerRowIds,
+          reason: reason,
+          alreadyUnbilledSkipped: skippedAlreadyUnbilled
+        },
+        callerEmail
+      );
+    } catch (_) { /* audit best-effort */ }
+
+    return jsonResponse_({
+      success: true,
+      invoiceNo: invoiceNo,
+      rowsReleased: changedRows.length,
+      alreadyUnbilledSkipped: skippedAlreadyUnbilled,
+      cbRowsDeleted: cbCleanup.deleted || 0,
+      cbCleanupError: cbCleanup.error || null,
+      ledgerRowIds: ledgerRowIds,
+      message: changedRows.length + " row(s) released to Unbilled" +
+               (cbCleanup.deleted ? "; " + cbCleanup.deleted + " CB row(s) removed" : "") +
+               ". Run Create Invoices to re-bill."
+    });
+  } catch (err) {
+    return errorResponse_("Failed to re-issue invoice: " + String(err), "SERVER_ERROR");
   }
 }
 
