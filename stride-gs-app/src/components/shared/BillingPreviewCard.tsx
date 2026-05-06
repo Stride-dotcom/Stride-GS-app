@@ -60,6 +60,15 @@ interface Props {
    * the whole primary line to a $0 charge.
    */
   customPrice?: number | null;
+  /**
+   * For will_call entityType: the items being released. Required for the
+   * primary projection because WC bills one row per item with rate keyed
+   * on each item's class — passing `itemClass` alone (singular) gives a
+   * $0 projection because catalog WC rates are class-banded (XS/S/M/L/XL/XXL)
+   * and the panel passes itemClass=null since a WC can span classes.
+   * Ignored for task/repair which use the singular itemClass path.
+   */
+  wcItems?: { itemId: string; itemClass?: string | null }[];
   /** Queued addons for this entity (any parent_type). v38.177.0 — was
    *  task-only via TaskAddon[]; now polymorphic via EntityAddon[]. */
   addons?: EntityAddon[];
@@ -131,7 +140,7 @@ function fmtDate(s: string | null | undefined): string {
 
 export function BillingPreviewCard({
   entityType, entityId, tenantId,
-  svcCode, itemClass, customPrice,
+  svcCode, itemClass, customPrice, wcItems,
   addons, visible = true, defaultOpen = false,
   editable = false,
   onUpdatePrimaryRate, onAddAddon, onUpdateAddon, onDeleteAddon,
@@ -176,8 +185,39 @@ export function BillingPreviewCard({
 
   const primaryRateNum = Number(primaryRateDraft);
   const primaryRate = isNaN(primaryRateNum) ? 0 : primaryRateNum;
-  const primaryTotal = primaryRate; // qty=1 for the per-task primary line
   const primaryIsOverride = primary && Math.abs(primaryRate - primary.catalogRate) > 0.0001;
+
+  // ── Will Call: per-item × class projection ──────────────────────────────
+  // Tasks/Repairs bill one row at qty=1 with a single class; WCs bill one
+  // row PER ITEM with rate keyed on each item's class. The catalog WC rates
+  // are class-banded (XS/S/M/L/XL/XXL), so passing itemClass=null returns 0
+  // — that's why the preview was rendering "$0.00" for every WC. When the
+  // caller passes wcItems we sum across the items here so the preview
+  // matches what handleProcessWcRelease_ will actually write.
+  const isWillCall = entityType === 'will_call';
+  const wcProjection = useMemo(() => {
+    if (!isWillCall || !wcItems || wcItems.length === 0) return null;
+    const svc = services.find(s => s.code === (svcCode ?? ''));
+    if (!svc) return null;
+    let total = 0;
+    let priced = 0;
+    for (const it of wcItems) {
+      const r = rateForClass(svc, it.itemClass ?? null);
+      total += r;
+      if (r > 0) priced += 1;
+    }
+    return { total, count: wcItems.length, priced };
+  }, [isWillCall, wcItems, services, svcCode]);
+
+  // For WC: qty = item count, total = summed per-item rate, rate = avg per item
+  // (display only — actual ledger rows are still one-per-item with class rate).
+  // For task/repair: existing "qty=1, rate=primaryRate" model is preserved.
+  const primaryDisplayQty = isWillCall && wcProjection ? wcProjection.count : 1;
+  const primaryDisplayTotal = isWillCall && wcProjection ? wcProjection.total : primaryRate;
+  const primaryDisplayRate  = isWillCall && wcProjection
+    ? (wcProjection.count > 0 ? wcProjection.total / wcProjection.count : 0)
+    : primaryRate;
+  const primaryTotal = primaryDisplayTotal;
 
   const primarySaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const schedulePrimarySave = useCallback((newRate: number) => {
@@ -361,25 +401,27 @@ export function BillingPreviewCard({
                 {primary && (
                   <ProjectedRow
                     primary
-                    serviceName={primary.name}
+                    serviceName={isWillCall && wcProjection
+                      ? `${primary.name} · ${wcProjection.count} item${wcProjection.count !== 1 ? 's' : ''}`
+                      : primary.name}
                     serviceCode={primary.code}
-                    classCode={primary.billing === 'class_based' ? itemClass : null}
-                    qty={1}
+                    classCode={isWillCall ? null : (primary.billing === 'class_based' ? itemClass : null)}
+                    qty={primaryDisplayQty}
                     qtyEditable={false}
-                    rate={primaryRate}
-                    rateEditable={editable && !!onUpdatePrimaryRate}
-                    rateDraft={primaryRateDraft}
+                    rate={primaryDisplayRate}
+                    rateEditable={!isWillCall && editable && !!onUpdatePrimaryRate}
+                    rateDraft={isWillCall ? String(primaryDisplayRate) : primaryRateDraft}
                     onRateChange={(v) => {
                       setPrimaryRateDraft(v);
                       const num = Number(v);
                       if (!isNaN(num)) schedulePrimarySave(num);
                     }}
                     onRateBlur={flushPrimarySave}
-                    total={primaryTotal}
+                    total={primaryDisplayTotal}
                     hasError={primary.missing && !primaryIsOverride}
-                    badge={primaryIsOverride ? 'Override' : null}
-                    onResetOverride={primaryIsOverride && editable ? resetPrimary : undefined}
-                    catalogRate={primary.catalogRate}
+                    badge={isWillCall ? null : (primaryIsOverride ? 'Override' : null)}
+                    onResetOverride={!isWillCall && primaryIsOverride && editable ? resetPrimary : undefined}
+                    catalogRate={isWillCall ? primaryDisplayRate : primary.catalogRate}
                   />
                 )}
                 {catalogLoading && !primary && <NoteRow text="Loading catalog…" />}

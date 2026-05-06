@@ -168,13 +168,19 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
     })();
   }, [wcProp.wcNumber, wcProp.items, apiConfigured, clientSheetId]);
 
-  // Merge prop data with enriched data — enriched fills gaps, prop takes priority for non-empty
+  // Merge prop data with enriched data — enriched fills gaps, prop takes priority for non-empty.
+  // Note: useWillCallDetail returns ApiWillCall (which uses `itemsCount`), but the panel's
+  // WillCall type expects `itemCount`. Read both — whichever side populated wins.
   const wc = useMemo(() => {
     if (!enrichedData) return wcProp;
+    const propItemsCount = (wcProp as any).itemsCount;
+    const propItemCount = (wcProp as any).itemCount;
+    const enrichedItemsCount = (enrichedData as any).itemsCount;
+    const enrichedItemCount = (enrichedData as any).itemCount;
     return {
       ...wcProp,
       items: (wcProp.items?.length ? wcProp.items : enrichedData.items) || [],
-      itemCount: wcProp.itemCount || enrichedData.itemCount || 0,
+      itemCount: propItemCount || propItemsCount || enrichedItemCount || enrichedItemsCount || 0,
       pickupPartyPhone: wcProp.pickupPartyPhone || enrichedData.pickupPartyPhone,
       scheduledDate: wcProp.scheduledDate || enrichedData.scheduledDate,
       notes: wcProp.notes || enrichedData.notes,
@@ -184,6 +190,10 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
       shipmentFolderUrl: wcProp.shipmentFolderUrl || enrichedData.shipmentFolderUrl,
     };
   }, [wcProp, enrichedData]);
+
+  // Single source of truth for "how many items in this WC" — used by every render
+  // site that displays a count. Falls back through itemCount → itemsCount → items.length.
+  const resolvedItemCount = (wc as any).itemCount || (wc as any).itemsCount || wc.items?.length || 0;
 
   const [effectiveStatus, setEffectiveStatus] = useState<string>(wc.status);
   // Sync with incoming wc prop — parent may update via optimistic patch or refetch.
@@ -602,7 +612,7 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
                   <input type="date" value={editDate} onChange={e => setEditDate(e.target.value)} style={inputStyle} />
                 </div>
                 <div>
-                  <Field label="Items" value={`${wc.itemCount} items`} icon={Package} />
+                  <Field label="Items" value={`${resolvedItemCount} items`} icon={Package} />
                 </div>
                 <div style={{ gridColumn: '1 / -1' }}>
                   <label style={{ fontSize: 10, fontWeight: 500, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.04em', display: 'block', marginBottom: 3 }}>Notes</label>
@@ -627,7 +637,7 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
                   <Field label="Pickup Party" value={wc.pickupParty} icon={User} />
                   <Field label="Phone" value={wc.pickupPartyPhone} icon={Phone} />
                   <Field label="Estimated Pickup Date" value={fmtDate(wc.scheduledDate)} icon={Calendar} />
-                  <Field label="Items" value={`${wc.itemCount} items`} icon={Package} />
+                  <Field label="Items" value={`${resolvedItemCount} items`} icon={Package} />
                   <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginBottom: 10 }}>
                     <DollarSign size={14} color={theme.colors.textMuted} style={{ marginTop: 2 }} />
                     <div>
@@ -913,7 +923,7 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
           {/* Items — pinned to the bottom of the content stack (session 70 follow-up)
               so long rosters don't push Pickup Details / Activity out of view. */}
           <div style={{ marginBottom: 16 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}><Package size={14} color={theme.colors.orange} /><span style={{ fontSize: 12, fontWeight: 600 }}>Items ({wc.items?.length || wc.itemCount || 0})</span></div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}><Package size={14} color={theme.colors.orange} /><span style={{ fontSize: 12, fontWeight: 600 }}>Items ({resolvedItemCount})</span></div>
             {wc.items && wc.items.length > 0 ? (
               <div style={{ border: `1px solid ${theme.colors.border}`, borderRadius: 10, overflow: 'hidden' }}>
                 <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
@@ -995,6 +1005,12 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
             tenantId={clientSheetId || ''}
             svcCode="WC"
             itemClass={null}
+            // Pass items so the projection sums per-item × class rate.
+            // Released items already paid → exclude (matches handleProcessWcRelease_
+            // which only writes ledger rows for items being released this run).
+            wcItems={(wc.items || [])
+              .filter((it: any) => !it.released)
+              .map((it: any) => ({ itemId: it.itemId, itemClass: it.itemClass || null }))}
             addons={wcAddons}
             visible={canRelease}
             editable={canRelease && isActive}
