@@ -22992,16 +22992,56 @@ function api_markClientLedgerInvoiced_(clientSheetId, ledgerRowIds, invNo, invDa
   // unlock real parallelism), that race had to be eliminated at the source.
   var lastRow = sh.getLastRow();
   if (lastRow < 2) return 0;
-  var idCol1d = sh.getRange(2, idxLedgerId, lastRow - 1, 1).getValues();
+  // v38.193.0 (Bug #4 + #9 — pre-commit Status assertion). Read Ledger Row ID
+  // AND Status in one pass so we can refuse to flip rows whose Status drifted
+  // between React picking them and this function flipping them. Pre-v38.193
+  // we matched only by Ledger Row ID and unconditionally setValue("Invoiced"),
+  // which silently overwrote Void/Invoiced rows back to Invoiced — exactly
+  // the chain that produced INV-000135 billing the legitimately-Voided
+  // INSP-TASK-INSP-62630-1 row on 2026-05-03 after Justin reopened the task
+  // on 2026-05-01. The window between React reading the Unbilled list (from
+  // Supabase mirror) and GAS writing here is multi-second; in that window
+  // a concurrent reopen / void / invoice can change Status. The fix shifts
+  // the contract from "trust React's row pick" to "verify on the live
+  // client sheet immediately before write" — closer to the write than the
+  // picker. If any matched row has Status !== "Unbilled" we throw so
+  // handleCreateInvoice_'s rollback path can unwind the CB rows it just
+  // appended and surface the conflicting row IDs to the operator.
+  var dataWidth = Math.max(idxLedgerId, idxStatus);
+  var dataRange = sh.getRange(2, 1, lastRow - 1, dataWidth).getValues();
 
   var idSet = {};
   for (var li = 0; li < ledgerRowIds.length; li++) {
     idSet[String(ledgerRowIds[li]).trim()] = true;
   }
   var changedRows = [];  // ordered list of rowNums (sheet 1-indexed)
-  for (var i = 0; i < idCol1d.length; i++) {
-    var lid = String(idCol1d[i][0] || "").trim();
-    if (lid && idSet[lid]) changedRows.push(i + 2);  // +2: data row 0 = sheet row 2
+  var statusViolations = [];  // rows that matched by ID but failed Status check
+  for (var i = 0; i < dataRange.length; i++) {
+    var lid = String(dataRange[i][idxLedgerId - 1] || "").trim();
+    if (!lid || !idSet[lid]) continue;
+    var rowStatus = String(dataRange[i][idxStatus - 1] || "").trim();
+    if (rowStatus !== "Unbilled") {
+      statusViolations.push({ ledgerRowId: lid, currentStatus: rowStatus || "(blank)", row: i + 2 });
+      continue;
+    }
+    changedRows.push(i + 2);  // +2: data row 0 = sheet row 2
+  }
+
+  if (statusViolations.length > 0) {
+    // Throw a structured error so handleCreateInvoice_ can roll back the CB
+    // append and surface the conflicting rows. Cap the per-error sample at
+    // 5 entries — the full list is in the thrown message but we want the
+    // common case (1-2 stale rows) to render readably in the operator UI.
+    var sample = statusViolations.slice(0, 5).map(function(v) {
+      return v.ledgerRowId + " (Status=" + v.currentStatus + ")";
+    }).join(", ");
+    var more = statusViolations.length > 5 ? " (+" + (statusViolations.length - 5) + " more)" : "";
+    throw new Error(
+      "PRE_COMMIT_STATUS_ASSERTION: " + statusViolations.length + " of " + ledgerRowIds.length +
+      " row(s) are no longer Status=Unbilled on the client sheet. The invoice was NOT created. " +
+      "Refresh the Billing Report and retry — the offending rows have been voided, invoiced, " +
+      "or reopened since you opened the picker. Conflicting rows: " + sample + more
+    );
   }
 
   if (changedRows.length === 0) return 0;
