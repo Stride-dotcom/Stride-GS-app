@@ -23320,6 +23320,81 @@ function handleCreateInvoice_(payload) {
     }
   }
 
+  // v38.193.0 (Bug #3 / Phase C3) — Server-side sidemark consistency assertion.
+  // Bug #3 was the invoice-generation TWIN of v38.191.0's QBO push fix:
+  // Digs Furniture (separate_by_sidemark=false) had her 2026-05-02 batch
+  // split into 7 single-sidemark invoices instead of one consolidated.
+  // Root cause was on the React side and was repaired in Billing.tsx
+  // 2026-05-02 ("invoice-grouping was always splitting by sidemark, even
+  // for clients with separate_by_sidemark=false"). This block adds a GAS-
+  // side guard so a future React regression OR a hand-crafted payload
+  // (admin tool, scripted retry, etc.) can't bypass the per-client flag:
+  //
+  //   - separate_by_sidemark = TRUE   → every row in the payload MUST share
+  //                                     the same sidemark, AND the payload-
+  //                                     level sidemark must match. Mixed
+  //                                     sidemarks → SIDEMARK_VIOLATION.
+  //   - separate_by_sidemark = FALSE  → no constraint (mixed sidemarks fine).
+  //
+  // Reads the flag from the public.clients Supabase table — same source
+  // React uses, so a mismatch here means real config drift, not a stale
+  // CB Clients sheet read. Falls back to false on any read error so a
+  // Supabase outage can't block invoicing.
+  try {
+    var sbUrl = prop_("SUPABASE_URL");
+    var sbKey = prop_("SUPABASE_SERVICE_ROLE_KEY");
+    if (sbUrl && sbKey) {
+      var clientResp = UrlFetchApp.fetch(
+        sbUrl + "/rest/v1/clients?spreadsheet_id=eq." + encodeURIComponent(sourceSheetId) +
+        "&select=separate_by_sidemark",
+        {
+          method: "GET",
+          headers: { "Authorization": "Bearer " + sbKey, "apikey": sbKey },
+          muteHttpExceptions: true
+        }
+      );
+      if (clientResp.getResponseCode() === 200) {
+        var clientArr = JSON.parse(clientResp.getContentText());
+        if (clientArr && clientArr.length > 0 && clientArr[0].separate_by_sidemark === true) {
+          // Flag is TRUE — all rows must share the same sidemark.
+          var rowSidemarks = {};
+          for (var si = 0; si < rows.length; si++) {
+            var rsm = String(rows[si].sidemark || "").trim();
+            rowSidemarks[rsm] = true;
+          }
+          var distinctSidemarks = Object.keys(rowSidemarks);
+          if (distinctSidemarks.length > 1) {
+            return errorResponse_(
+              "SIDEMARK_VIOLATION: client " + client + " has separate_by_sidemark=true but the " +
+              "invoice payload contains " + distinctSidemarks.length + " distinct sidemarks: " +
+              JSON.stringify(distinctSidemarks) + ". Split this batch by sidemark on the React side " +
+              "and resubmit one invoice per sidemark group.",
+              "SIDEMARK_VIOLATION"
+            );
+          }
+          // Single distinct sidemark in the row set — verify it matches the
+          // payload-level sidemark stamped on the invoice header. A drift
+          // here would land the wrong sidemark string on the PDF / email
+          // / Consolidated_Ledger row.
+          var rowSm = distinctSidemarks[0] || "";
+          if (rowSm && sidemark && rowSm !== sidemark) {
+            return errorResponse_(
+              "SIDEMARK_VIOLATION: client " + client + " has separate_by_sidemark=true but the " +
+              "payload-level sidemark (" + JSON.stringify(sidemark) + ") doesn't match the row " +
+              "sidemark (" + JSON.stringify(rowSm) + "). Re-send with matching sidemark.",
+              "SIDEMARK_VIOLATION"
+            );
+          }
+        }
+        // separate_by_sidemark=false (or null) → no constraint, accept any mix.
+      }
+    }
+  } catch (sbErr) {
+    Logger.log("handleCreateInvoice_ sidemark assertion read failed (allowing): " + sbErr.message);
+    // Fail open — Supabase outage shouldn't block invoicing. The React
+    // grouping logic is the primary line of defense; this is belt-and-suspenders.
+  }
+
   // Open CB sheet + read settings
   var cbId = prop_("CB_SPREADSHEET_ID");
   if (!cbId) return errorResponse_("CB_SPREADSHEET_ID not configured", "CONFIG_ERROR");
