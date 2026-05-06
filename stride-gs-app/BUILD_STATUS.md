@@ -1,6 +1,6 @@
 # Stride GS App — Build Status
 
-> Last updated: 2026-05-05 (billing hardening pass — bugs #3-#9 closed, anomaly sweep, Re-issue button). Verified against actual codebase.
+> Last updated: 2026-05-05 (Invoice Review overhaul — invoice_tracking + push-status columns + bulk push). Verified against actual codebase.
 
 ---
 
@@ -8,9 +8,9 @@
 
 | System | Version | Notes |
 |---|---|---|
-| React app (GitHub Pages) | Latest on `origin/source` | `npm run deploy` from source. Latest bundle: `index-B2pd9yhv.js`. |
-| StrideAPI.gs | **v38.193.0** (deployed v486) | Billing hardening pass closing bugs #3-#9 from the 2026-05-04 dup-number incident triage. Six discrete changes: (B2) pre-commit Status assertion in `api_markClientLedgerInvoiced_` blocks stale-Void rows from being re-flipped to Invoiced; (B3) `handleVoidInvoice_` now mirrors the Void on CB Consolidated_Ledger via new `api_deleteCbRowsByInvoiceNo_`; (B4) `api_voidBillingRowsWhere_` (reopen-task / reopen-repair) calls `api_deleteCbRowsByLedgerIds_` for defense-in-depth; (C3) server-side sidemark-uniqueness assertion in `handleCreateInvoice_` reads `clients.separate_by_sidemark` from Supabase and rejects mixed-sidemark payloads; (C4) new `runBillingAnomalySweep` admin function — 5 checks against last 30 days, emails Justin if findings; (D) new `handleReissueInvoice_` + `reissueInvoice` action backing the Re-issue button on Billing → Invoices. Earlier 2026-05-05 work: v38.192 admin-entry `runReleaseInvoicesForReissue` cleanup helper, v38.190 batchCreateTasks audit log, v38.191 QBO push `separate_by_sidemark` fix. |
-| Supabase | 69+ migrations applied | `public.next_invoice_no()` Postgres SEQUENCE replaces the Master sheet RPC counter for invoice numbering. Multi-tenant RLS access (`user_has_tenant_access` helper) — clients with multiple tenant assignments can now read entity rows + storage objects across all accessible tenants. |
+| React app (GitHub Pages) | Latest on `origin/source` | `npm run deploy` from source. Latest bundle: `index-C2xeMz3s.js`. |
+| StrideAPI.gs | **v38.194.0** (deployed v487) | Invoice Review overhaul backend hooks. New `public.invoice_tracking` table with per-invoice push-state ledger (`qbo_pushed_at`, `stax_pushed_at`, `auto_charge` snapshot). `handleCreateInvoice_` upserts on commit; `handleQboCreateInvoice_` + `handleQbExport_` PATCH the corresponding push timestamp on success; `handleVoidInvoice_` + `handleReissueInvoice_` delete the tracking row. Companion React rewrites the Invoice Review tab to read from `invoice_tracking` with sortable columns, multi-select bulk push, and realtime subscription. v38.193 hardening pass remains in place (B2 pre-commit Status assertion, B3+B4 CB symmetry, C3 sidemark uniqueness, C4 anomaly sweep, D Re-issue button). |
+| Supabase | 70+ migrations applied | New `public.invoice_tracking` table (PR #285) — per-invoice push-state ledger with `qbo_pushed_at`, `stax_pushed_at`, `auto_charge` snapshot. RLS staff/admin only + service_role bypass. Realtime publication enabled. 176 historical invoices backfilled. `public.next_invoice_no()` Postgres SEQUENCE replaces the Master sheet RPC counter for invoice numbering. Multi-tenant RLS access (`user_has_tenant_access` helper) — clients with multiple tenant assignments can now read entity rows + storage objects across all accessible tenants. |
 | Client scripts | Rolled out to 49 active clients | Code.gs v4.6.0, Import.gs v4.3.0 |
 | StaxAutoPay.gs | v4.7.6 | Charge Log Customer/Transaction header fix |
 
@@ -97,7 +97,35 @@ UI components: FloatingActionMenu, WriteButton, BatchGuard, ActionTooltip, Batch
 
 ---
 
-## Recent Changes (2026-05-05, billing hardening pass — bugs #3-#9 closed)
+## Recent Changes (2026-05-05, Invoice Review overhaul — invoice_tracking + new tab UI)
+
+**Trigger:** Build plan from Justin: "All tracking in Supabase only, per invoice_no, separate QBO + Stax timestamps, sortable columns, multi-select bulk push, realtime, autopay filter."
+
+**Five steps shipped (StrideAPI.gs v38.193 → v38.194 / Web App v487; React bundle `index-C2xeMz3s.js`):**
+
+- **Step 1 — Migration `invoice_tracking`** ([supabase/migrations/20260505000001_invoice_tracking.sql](supabase/migrations/20260505000001_invoice_tracking.sql)). New `public.invoice_tracking` table PK on `invoice_no`, columns: `tenant_id`, `client_name`, `invoice_date`, `total`, `line_count`, `auto_charge`, `created_at`, `qbo_pushed_at`, `stax_pushed_at`. RLS staff/admin via JWT user_metadata.role + service_role bypass. Realtime publication enabled. Backfill: 176 invoices from billing where status=Invoiced; `qbo_pushed_at` + `stax_pushed_at` proxied from existing `stax_invoices.created_at` for the 79 already-pushed invoices (new pushes refine to per-path timestamps).
+
+- **Step 4 — Auto-populate on create.** `handleCreateInvoice_` POSTs to `invoice_tracking` right before the success return. `auto_charge` is snapshotted from `public.clients` via Supabase REST at create time so historical invoices keep their original Stax-eligibility regardless of later flag flips. Upsert on `invoice_no` merge-duplicates so the v38.157 half-write recovery path can re-enter.
+
+- **Step 3a — QBO push hook.** `handleQboCreateInvoice_` collects `pushedInvoiceNos` from `results[]` after the per-invoice loop and PATCHes `qbo_pushed_at = now()` in one PostgREST round-trip via `invoice_no=in.(...)`.
+
+- **Step 3b — Stax push hook.** `handleQbExport_` does the same with `batchInvoiceNos` for `stax_pushed_at`, right after the existing `supabaseBatchUpsert_("stax_invoices", ...)` so the IIF auto-import + tracking stamp travel together.
+
+- **Cleanup hook.** New helper `api_deleteInvoiceTrackingRow_(invoiceNo)` called from `handleVoidInvoice_` + `handleReissueInvoice_` after their existing CB cleanup so voided/re-issued invoices disappear from the Invoice Review tab. The voided rows still appear on Billing → Report (Status=Void) for historical reference.
+
+- **Step 2 — Invoice Review tab rewrite.** `Billing.tsx` `InvoiceReviewTab` now reads from `invoice_tracking`. New columns (all sortable via header click): checkbox, expand-arrow, Invoice #, Client (with Auto Pay icon), Invoice Date, Total, Items, Created, QBO ✓+date | —, Stax ✓+date | n/a | —, Actions. Filters: search, client dropdown, push-status (All / Not pushed to QBO / Not pushed to Stax), Auto Pay only toggle, date range. Bulk action bar (sticky when ≥1 selected): Push to QBO (N), Push to Stax (N — gated when not all selected are auto_charge=true), Void (N), Clear selection. Single-row Re-issue + Void retained from v38.193. Line items lazy-fetched on row expand. Realtime subscription on `invoice_tracking` so multi-operator pushes propagate live. Optimistic timestamp stamps with rollback on error.
+
+- **Step 5 — Payments page Stax push status visibility.** Deferred by design. Existing Payments → Review tab already lists pushed invoices via `stax_invoices` (whose presence implies a Stax push). `invoice_tracking` is queryable from anywhere in React; a follow-up can add an explicit "first pushed at" column if Justin wants the timestamp inline next to the existing Stax invoice list.
+
+**Pending user actions:**
+- [ ] Hard-refresh https://www.mystridehub.com (Cmd/Ctrl+Shift+R) to pick up `index-C2xeMz3s.js`
+- [ ] Verify the new Invoice Review tab on Billing renders with checkbox, sortable columns, push-status columns, and the bulk action bar appears when 1+ invoices are checked
+- [ ] Try a Push to QBO on a non-pushed invoice — green check should appear within ~1s
+- [ ] (From v38.193) Re-run Create Invoices for Nip Tuck Remodeling + Mary Kenngott Design
+
+---
+
+## Earlier Changes (2026-05-05, billing hardening pass — bugs #3-#9 closed)
 
 **Trigger:** `BILLING_HARDENING_HANDOFF.md` from the prior dup-number cleanup session. Five cousin bugs + three detection gaps + one missing UI affordance, all blocking Justin's re-run of Create Invoices for Nip Tuck Remodeling and Mary Kenngott Design.
 
