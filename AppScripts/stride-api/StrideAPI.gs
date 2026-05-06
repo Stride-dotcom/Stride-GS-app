@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.192.0 — 2026-05-05 PST — One-shot admin entry runReleaseInvoicesForReissue for the v38.182 race cleanup. Four invoices the pre-fix duplicate-number race left in the wild (Digs INV-000115 / Mary Kenngott INV-000129 / Nip Tuck INV-000131 + INV-000135) need to be released back to Unbilled across all three storage layers (client Billing_Ledger sheet, CB Consolidated_Ledger sheet, public.billing Supabase mirror) so they can be re-issued split-by-sidemark per v38.191.0. handleVoidInvoice_ flips rows to a terminal "Void" state — appropriate when work won't be re-billed but wrong here. Hardcodes the four (clientSheetId, invoiceNo, expectedRows) tuples — verified via direct Supabase query before push — so the operator can't accidentally release the wrong scope. Per invoice: (1) flips matching client Billing_Ledger rows from Invoiced/Void → Unbilled, clears Invoice #/Date/URL, appends a release-trail note to Item Notes (RangeList writes for concurrent-safety, same shape as api_markClientLedgerInvoiced_); (2) deletes matching CB Consolidated_Ledger rows using the v38.183 grouped-descending-deleteRows pattern from rollbackByInvoiceNo_; (3) queues api_fullClientSync_(clientSheetId, ['billing']) so public.billing reflects the released state within ~1-2s and the rows reappear on the next Create Invoices preview. Idempotent — Status filter requires Invoiced or Void so anything already Unbilled is a no-op. Run from Apps Script editor → Select function → runReleaseInvoicesForReissue → Run, then read the execution log for per-invoice released/deleted/expected counts. Pre-condition: operator has already voided each invoice in Stax + QBO; function never touches either external system, only fixes internal ledger state so re-issue produces a clean replacement under a fresh atomic-counter invoice number.
+   StrideAPI.gs — v38.193.0 — 2026-05-05 PST — Billing system hardening pass: closes bugs #3-#9 from the 2026-05-04 incident triage and adds defense-in-depth so the cousin chains can't recur. Six discrete changes in one ship — splitting the surface area at all three storage layers (client Billing_Ledger sheet, CB Consolidated_Ledger sheet, public.billing Supabase mirror) so each fix is independently auditable. (Bug #4 + gap #9, B2) api_markClientLedgerInvoiced_ now reads the Status column in the same getValues() as Ledger Row ID and refuses to flip rows whose Status drifted from Unbilled between React picking and GAS writing. Pre-fix matched only by ledgerRowId and unconditionally setValue("Invoiced") — exactly the chain that produced INV-000135 billing the legitimately-Voided INSP-TASK-INSP-62630-1 row on 2026-05-03 after Justin reopened the task on 2026-05-01. The window from React reading the Unbilled list (Supabase mirror) to GAS writing here is multi-second; in that window a concurrent reopen / void / invoice can change Status. Throws PRE_COMMIT_STATUS_ASSERTION on violation so handleCreateInvoice_'s existing catch path rolls back the CB append; operator sees the offending row IDs + their current Status in the error message. (Bug #5, B3) handleVoidInvoice_ now mirrors the Void on CB Consolidated_Ledger via new helper api_deleteCbRowsByInvoiceNo_(invoiceNo) — same descending-grouped-deleteRows pattern as the rollbackByInvoiceNo_ closure inside handleCreateInvoice_. Pre-fix the function only flipped client-sheet rows to Void, leaving CB rows tied to the now-voided invoice number stuck at Status=Invoiced; QBO/IIF exports build line items from CB so the orphans would re-push and reconciliation between client sheet, CB, and Stax would silently drift. Best-effort: a CB-cleanup failure is logged but doesn't fail the void itself; the next anomaly sweep would surface any stragglers. Returns cbRowsDeleted in the response. (Bug #7, B4) api_voidBillingRowsWhere_ (the helper used by handleReopenTask_ + handleReopenRepair_) now also calls api_deleteCbRowsByLedgerIds_(voidedIds) after the client-sheet flips. The current Unbilled-only guard inside the helper means CB is normally empty for these IDs (CB only contains Invoiced rows); this is defense-in-depth so any future code path that voids an Invoiced row through the helper keeps CB in sync. (Bug #3 / Phase C3) Server-side sidemark consistency assertion in handleCreateInvoice_, mirroring v38.191.0's QBO push fix. The React-side fix landed in Billing.tsx 2026-05-02 ("invoice-grouping was always splitting by sidemark, even for clients with separate_by_sidemark=false"); this GAS-side guard catches a future React regression OR a hand-crafted payload (admin tool, scripted retry) that bypasses the per-client flag. Reads the flag from public.clients via Supabase REST — same source React uses — and refuses any payload where (a) separate_by_sidemark=true but rows contain ≥2 distinct sidemarks, or (b) the payload-level sidemark doesn't match the row sidemark. Fails open on Supabase outage so a momentary outage can't block invoicing; React grouping remains the primary line of defense. (Phase C4) New runBillingAnomalySweep admin entry — five checks against the last 30 days of activity, run from the Apps Script editor or wired as a daily 6am time-driven trigger (manual operator step on purpose, never auto-installed). (1) Duplicate invoice_create entries — same invoice_no on ≥2 success rows in billing_activity_log, the pre-v38.182 RPC race fingerprint. (2) Count mismatch between billing rows and stax_invoices.line_items_json for the same invoice_no — catches CB/Stax divergence. (3) Mixed-sidemark rows on a single invoice for separate_by_sidemark=true clients — the C3 assertion blocks this at create time, sweep covers historical drift. (4) Stale-Void pattern: a billing row with status=Void whose ledger_row_id appears in some stax_invoices.line_items_json element — Bug #4's fingerprint. (5) STOR rows with negative qty/total — math bug or manual edit. Sends Justin a single email summary if any anomalies; clean sweeps are Logger-only so the inbox isn't noisy. Best-effort: each check is independent and a Supabase failure on one degrades coverage rather than aborting the sweep. (Phase D) New handleReissueInvoice_ + reissueInvoice router action backing the new "Re-issue" button on Billing → Invoices. Replaces tonight's runReleaseInvoicesForReissue one-shot with a first-class API action so future race / operator-error cleanup is one click instead of an emergency GAS push. Idempotent: finds rows by Invoice #, skips rows already at Status=Unbilled, flips Invoiced/Void → Unbilled, clears Invoice # / Invoice Date / Invoice URL, appends "Re-issued via UI YYYY-MM-DD: <reason>" to Item Notes (sparse RangeList writes for concurrent-safety). Calls api_deleteCbRowsByInvoiceNo_ for the CB sweep, queues api_fullClientSync_(["billing"]) for Supabase, writes one entity_audit_log row per invoice (not per ledger_row_id — keeps audit readable on 50-line invoices). Pre-condition (operator responsibility, not enforced): if the invoice was already pushed to Stax/QBO, void it there first — the handler only fixes internal ledger state. Companion React commit: postReissueInvoice in lib/api.ts + Re-issue button next to Void on the Invoices tab (staff/admin only) with explicit pre-condition confirm dialog.
+   v38.192.0 — 2026-05-05 PST — One-shot admin entry runReleaseInvoicesForReissue for the v38.182 race cleanup. Four invoices the pre-fix duplicate-number race left in the wild (Digs INV-000115 / Mary Kenngott INV-000129 / Nip Tuck INV-000131 + INV-000135) need to be released back to Unbilled across all three storage layers (client Billing_Ledger sheet, CB Consolidated_Ledger sheet, public.billing Supabase mirror) so they can be re-issued split-by-sidemark per v38.191.0. handleVoidInvoice_ flips rows to a terminal "Void" state — appropriate when work won't be re-billed but wrong here. Hardcodes the four (clientSheetId, invoiceNo, expectedRows) tuples — verified via direct Supabase query before push — so the operator can't accidentally release the wrong scope. Per invoice: (1) flips matching client Billing_Ledger rows from Invoiced/Void → Unbilled, clears Invoice #/Date/URL, appends a release-trail note to Item Notes (RangeList writes for concurrent-safety, same shape as api_markClientLedgerInvoiced_); (2) deletes matching CB Consolidated_Ledger rows using the v38.183 grouped-descending-deleteRows pattern from rollbackByInvoiceNo_; (3) queues api_fullClientSync_(clientSheetId, ['billing']) so public.billing reflects the released state within ~1-2s and the rows reappear on the next Create Invoices preview. Idempotent — Status filter requires Invoiced or Void so anything already Unbilled is a no-op. Run from Apps Script editor → Select function → runReleaseInvoicesForReissue → Run, then read the execution log for per-invoice released/deleted/expected counts. Pre-condition: operator has already voided each invoice in Stax + QBO; function never touches either external system, only fixes internal ledger state so re-issue produces a clean replacement under a fresh atomic-counter invoice number.
    v38.191.0 — 2026-05-05 PST — QBO push: Customer:Sidemark splitting was forced on for EVERY client because the per-client `separateBySidemark` flag was never actually populated on handleQboPush_'s clientInfoMap. The CB Clients column read for "SEPARATE BY SIDEMARK" was missing — only terms / qbCustomerName / email / phone / billingEmail were loaded — so `clientInfo.separateBySidemark` was always undefined. Combined with the per-invoice group's `clientInfo.separateBySidemark !== false` coalescing, undefined flipped to true and qbo_resolveCustomerAndSubJob_ unconditionally split into parent:sub-job pairs whenever a sidemark existed on the line, breaking the per-client opt-in promise from v38.147.0 (which only ever shipped half — the call-site plumbing, not the column source). Two fixes: (1) read `clHdr["SEPARATE BY SIDEMARK"]` and stamp the boolean onto every clientInfoMap entry using the same idiom the IIF path at line ~21260 uses (defaults false on missing column / non-explicit-TRUE cell); (2) flip the per-invoice-group coalescing from `!== false` (undefined→true) to `=== true` (undefined→false) so a stale lookup or future clientInfo gap can't re-introduce the same regression. Result matches the IIF export gate at line ~22153: only clients with an explicit TRUE in the CB Clients "Separate By Sidemark" column post as Customer:Sidemark sub-jobs in QBO; everyone else lands on the flat parent customer.
    v38.190.0 — 2026-05-05 PST — Audit log for batchCreateTasks. Every other task action (start, complete, cancel, correct_result, reopen, updateNotes/Price/Due/Priority) writes one row to entity_audit_log via api_auditLog_, but the create path was the lone gap — tasks materialized on the React Activity tab with no "Created" event because no audit row ever existed. Now the batchCreateTasks router calls api_auditLogBatch_ with one {entity_type:"task", entity_id:<taskId>, tenant_id, action:"create", changes:{summary:"Task created", svcCodes}, performed_by:callerEmail, source:"gas"} row per ID returned by handleBatchCreateTasks_. Best-effort: failure logs but never blocks the user response. The audit insert fires after api_fullClientSync_ so the React EntityHistory realtime sub picks it up at the same time the new task row appears in the list.
    v38.189.0 — 2026-05-05 PST — Two transfer-flow fixes that together close the lost-revenue gap on transferred items. (1) Bulk inventory sync was silently dropping 5 fields on every fullClientSync: shipment_photos_url, inspection_photos_url, repair_photos_url, invoice_url, transfer_date. The single-item resync path at line 5654 always passed them; the bulk loop at line 6237 didn't. sbInventoryRow_ falls back to "" when fields are undefined, so each sync wiped the destination column. Confirmed via SQL: 0 of 5,658 inventory rows had any of the five populated, including all 31 confirmed-transferred items (transfer_date blank everywhere). Without transfer_date populated, handleGenerateStorageCharges_ couldn't do its source/destination cutover split — source rows skipped entirely, destination treated like a fresh receive with full free-days credit, both sides under-billed. Fix: pass all five fields in the bulk-sync sbInventoryRow_ payload. (2) New storage backfill block in handleTransferItems_ between the billing void/copy and tasks sections. For each transferred item, generate Unbilled STOR rows on the DESTINATION ledger covering receive_date → transfer_date - 1, applying destination's free_storage_days and storage discount. Rate = class cuFt × XL rate × destination discount, same formula handleGenerateStorageCharges_ uses. Dedup against any STOR rows on either source or destination ledger that are already Invoiced/Billed (Void rows don't count — payment never happened so days are still owed). Independent of the Transfer Date sheet-write fix above: uses the local `transferDate` variable, not the sheet cell. Distinct Ledger Row ID prefix `STOR-TRANSFER-{itemId}-{startISO}-{endISO}` lets monthly storage-gen recognize and skip these rows during its delete-and-rebuild loop. New admin entry runBackfillTransferStorageCharges walks every active CB client, pulls all transfer-destination rows from Supabase via inventory.transferred_at, and runs the same backfill logic for items that transferred before this PR shipped. Idempotent — checks for existing STOR-TRANSFER-* rows on the destination ledger and skips items already backfilled. Run once from the Apps Script editor after deploy.
@@ -7339,6 +7340,23 @@ function doPost(e) {
           });
         });
 
+      case "reissueInvoice":
+        // v38.193.0 (Phase D) — One-click invoice re-issue across all
+        // three storage layers. Releases client Billing_Ledger rows back
+        // to Unbilled, deletes CB Consolidated_Ledger rows, queues
+        // Supabase resync. Operator follows up with the existing Create
+        // Invoices flow against the released rows.
+        return withStaffGuard_(callerEmail, function() {
+          return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
+            // handleReissueInvoice_ does its own client-sheet flip, CB cleanup,
+            // and Supabase resync internally; the audit log is also written
+            // inside the handler so it includes the full ledgerRowIds list.
+            var r = handleReissueInvoice_(effectiveId, payload, callerEmail);
+            invalidateClientCache_(effectiveId);
+            return r;
+          });
+        });
+
       case "voidUnbilledRows":
         return withStaffGuard_(callerEmail, function() {
           return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
@@ -12480,14 +12498,206 @@ function handleVoidInvoice_(clientSheetId, payload) {
       return errorResponse_("No rows found for invoice " + invoiceNo, "NOT_FOUND");
     }
 
+    // v38.193.0 (Bug #5) — Mirror the void on CB Consolidated_Ledger.
+    // Pre-fix this function only flipped client-sheet rows to Void, leaving
+    // CB rows tied to the now-voided invoice number stuck at Status=Invoiced.
+    // QBO/IIF exports build line items from CB, so the orphans would re-push
+    // on the next export and reconciliation between client sheet, CB, and
+    // Stax would silently drift. Best-effort: a CB-cleanup failure is logged
+    // but doesn't fail the void itself — the client sheet flip already
+    // happened above and the operator will see a reconciliation warning on
+    // the next anomaly sweep (runBillingAnomalySweep) if any rows were left
+    // behind.
+    var cbCleanup = { deleted: 0 };
+    try {
+      cbCleanup = api_deleteCbRowsByInvoiceNo_(invoiceNo);
+      if (cbCleanup && cbCleanup.locked) {
+        Logger.log("handleVoidInvoice_: CB cleanup deferred — could not acquire lock for " + invoiceNo);
+      }
+    } catch (cbErr) {
+      Logger.log("handleVoidInvoice_: CB cleanup failed for " + invoiceNo + ": " + cbErr.message);
+      cbCleanup = { deleted: 0, error: String(cbErr.message || cbErr) };
+    }
+
     return jsonResponse_({
       success: true,
       invoiceNo: invoiceNo,
       rowsVoided: voided,
-      alreadyVoid: skippedAlreadyVoid
+      alreadyVoid: skippedAlreadyVoid,
+      cbRowsDeleted: cbCleanup.deleted || 0,
+      cbCleanupError: cbCleanup.error || null
     });
   } catch (err) {
     return errorResponse_("Failed to void invoice: " + String(err), "SERVER_ERROR");
+  }
+}
+
+// ─── reissueInvoice — full unwind of an invoice across all 3 storage layers ─
+
+/**
+ * v38.193.0 (Phase D) — One-click invoice re-issue.
+ *
+ * The 2026-05-04 incident required a custom one-shot admin function
+ * (runReleaseInvoicesForReissue) to walk back four pre-fix invoices
+ * across all three storage layers. This handler exposes the same
+ * operation as a first-class API action so future race / operator-error
+ * cleanup is one click instead of an emergency GAS push.
+ *
+ * Sequence (idempotent — safe to retry):
+ *   1. Find every client Billing_Ledger row whose Invoice # matches.
+ *      Skip rows already at Status=Unbilled (already released). Flip
+ *      Invoiced/Void → Unbilled, clear Invoice # / Invoice Date /
+ *      Invoice URL, append "Re-issued via UI YYYY-MM-DD: <reason>"
+ *      to Item Notes. Uses RangeList sparse writes (concurrent-safe,
+ *      same shape as api_markClientLedgerInvoiced_).
+ *   2. Delete matching CB Consolidated_Ledger rows by Invoice #
+ *      (api_deleteCbRowsByInvoiceNo_).
+ *   3. Queue api_fullClientSync_ so public.billing reflects the
+ *      released rows for the React Report tab.
+ *
+ * Differs from handleVoidInvoice_ in step 1: that function flips to
+ * terminal "Void", this one releases back to "Unbilled" so the rows
+ * appear on the next Create Invoices preview.
+ *
+ * Caller is expected to follow up with the existing Create Invoices
+ * flow against the released rows (Billing → Report → filter the
+ * client → Create Invoices). The handler does NOT attempt to re-create
+ * the invoice automatically — operator chooses sidemark grouping etc.
+ *
+ * Pre-condition (operator responsibility, not enforced here): if the
+ * invoice was already pushed to Stax/QBO, void it on those external
+ * systems first. This handler only fixes internal ledger state.
+ *
+ * Payload: { invoiceNo: string, reason?: string }
+ * Returns: { success, invoiceNo, rowsReleased, cbRowsDeleted,
+ *           ledgerRowIds[], message }
+ */
+function handleReissueInvoice_(clientSheetId, payload, callerEmail) {
+  if (!clientSheetId) return errorResponse_("clientSheetId is required", "MISSING_PARAM");
+  var invoiceNo = String((payload || {}).invoiceNo || "").trim();
+  if (!invoiceNo) return errorResponse_("invoiceNo is required", "INVALID_PARAMS");
+  var reason = String((payload || {}).reason || "").trim();
+  var todayStr = Utilities.formatDate(new Date(), "America/Los_Angeles", "yyyy-MM-dd");
+  var noteSuffix = "Re-issued via UI " + todayStr + (reason ? ": " + reason : "");
+
+  try {
+    var ss = SpreadsheetApp.openById(clientSheetId);
+    var sheet = ss.getSheetByName("Billing_Ledger");
+    if (!sheet) return errorResponse_("Billing_Ledger sheet not found", "SHEET_NOT_FOUND");
+
+    var hMap         = api_getHeaderMap_(sheet);
+    var idxStatus    = hMap["Status"];
+    var idxInv       = hMap["Invoice #"];
+    var idxLedgerId  = hMap["Ledger Row ID"];
+    var idxNotes     = hMap["Item Notes"] !== undefined ? hMap["Item Notes"] : hMap["Notes"];
+    var idxInvDate   = api_ensureColumn_(sheet, "Invoice Date");
+    var idxInvUrl    = api_ensureColumn_(sheet, "Invoice URL");
+    if (!idxStatus || !idxInv) return errorResponse_("Invoice #/Status columns missing", "SCHEMA_ERROR");
+
+    var lastRow = api_getLastDataRow_(sheet);
+    if (lastRow < 2) return errorResponse_("Empty Billing_Ledger", "NOT_FOUND");
+
+    var allData = sheet.getRange(2, 1, lastRow - 1, sheet.getLastColumn()).getValues();
+    var changedRows = [];
+    var ledgerRowIds = [];
+    var skippedAlreadyUnbilled = 0;
+    for (var i = 0; i < allData.length; i++) {
+      var rowInv = String(allData[i][idxInv - 1] || "").trim();
+      if (rowInv !== invoiceNo) continue;
+      var rowStatus = String(allData[i][idxStatus - 1] || "").trim();
+      if (rowStatus === "Unbilled") { skippedAlreadyUnbilled++; continue; }
+      changedRows.push(i + 2);
+      if (idxLedgerId) {
+        var lid = String(allData[i][idxLedgerId - 1] || "").trim();
+        if (lid) ledgerRowIds.push(lid);
+      }
+    }
+
+    if (changedRows.length === 0 && skippedAlreadyUnbilled === 0) {
+      return errorResponse_("No rows found for invoice " + invoiceNo, "NOT_FOUND");
+    }
+
+    // Sparse writes — same shape as api_markClientLedgerInvoiced_, so
+    // concurrent invoices touching different rows can't clobber each
+    // other.
+    if (changedRows.length > 0) {
+      function colToA1_(col) {
+        var s = ""; var n = col;
+        while (n > 0) { var rem = (n - 1) % 26; s = String.fromCharCode(65 + rem) + s; n = Math.floor((n - 1) / 26); }
+        return s;
+      }
+      function rangeListFor_(col) {
+        var a1Col = colToA1_(col);
+        var a1s = new Array(changedRows.length);
+        for (var rr = 0; rr < changedRows.length; rr++) a1s[rr] = a1Col + changedRows[rr];
+        return sheet.getRangeList(a1s);
+      }
+      rangeListFor_(idxStatus).setValue("Unbilled");
+      rangeListFor_(idxInv).clearContent();
+      if (idxInvDate) rangeListFor_(idxInvDate).clearContent();
+      if (idxInvUrl)  rangeListFor_(idxInvUrl).clearContent();
+      // Item Notes is per-row append, not a uniform write — do it cell-by-cell
+      if (idxNotes) {
+        for (var ci = 0; ci < changedRows.length; ci++) {
+          var sheetRow = changedRows[ci];
+          var existing = String(allData[sheetRow - 2][idxNotes - 1] || "").trim();
+          var combined = existing ? (existing + " | " + noteSuffix) : noteSuffix;
+          sheet.getRange(sheetRow, idxNotes).setValue(combined);
+        }
+      }
+    }
+
+    // Step 2 — CB cleanup
+    var cbCleanup = { deleted: 0 };
+    try {
+      cbCleanup = api_deleteCbRowsByInvoiceNo_(invoiceNo);
+    } catch (cbErr) {
+      Logger.log("handleReissueInvoice_: CB cleanup failed for " + invoiceNo + ": " + cbErr.message);
+      cbCleanup = { deleted: 0, error: String(cbErr.message || cbErr) };
+    }
+
+    // Step 3 — Supabase resync (best-effort)
+    try {
+      api_fullClientSync_(clientSheetId, ["billing"]);
+    } catch (syncErr) {
+      Logger.log("handleReissueInvoice_: Supabase resync failed (non-fatal): " + syncErr.message);
+    }
+
+    // Audit — one entry per invoice with summary, not per-row (avoids audit
+    // log spam on a 50-line invoice). entity_audit_log convention is one
+    // event per logical operation; the ledgerRowIds list is in details.
+    try {
+      api_auditLog_(
+        "billing",
+        invoiceNo,
+        clientSheetId,
+        "reissue_invoice",
+        {
+          invoiceNo: invoiceNo,
+          rowsReleased: changedRows.length,
+          cbRowsDeleted: cbCleanup.deleted || 0,
+          ledgerRowIds: ledgerRowIds,
+          reason: reason,
+          alreadyUnbilledSkipped: skippedAlreadyUnbilled
+        },
+        callerEmail
+      );
+    } catch (_) { /* audit best-effort */ }
+
+    return jsonResponse_({
+      success: true,
+      invoiceNo: invoiceNo,
+      rowsReleased: changedRows.length,
+      alreadyUnbilledSkipped: skippedAlreadyUnbilled,
+      cbRowsDeleted: cbCleanup.deleted || 0,
+      cbCleanupError: cbCleanup.error || null,
+      ledgerRowIds: ledgerRowIds,
+      message: changedRows.length + " row(s) released to Unbilled" +
+               (cbCleanup.deleted ? "; " + cbCleanup.deleted + " CB row(s) removed" : "") +
+               ". Run Create Invoices to re-bill."
+    });
+  } catch (err) {
+    return errorResponse_("Failed to re-issue invoice: " + String(err), "SERVER_ERROR");
   }
 }
 
@@ -22953,6 +23163,139 @@ function api_isInvoiceNoSafe_(consolLedger, invNo, expectedClient, expectedSidem
   }
 }
 
+/**
+ * v38.193.0 — CB Consolidated_Ledger cleanup by Invoice #. Used by
+ * handleVoidInvoice_ (Bug #5) and handleReissueInvoice_ to keep CB in sync
+ * with client Billing_Ledger when an invoice is voided. Without this,
+ * voiding an invoice in the React UI left CB rows tied to the voided
+ * invoice number — counts diverge between client sheet, CB, and Stax.
+ *
+ * Mirrors the rollbackByInvoiceNo_ closure inside handleCreateInvoice_:
+ * brief lock, read just the Invoice # column, find rows in descending
+ * order, group consecutive runs into single deleteRows(start, count)
+ * calls. Returns { deleted, locked, error } — `locked` true if it
+ * couldn't acquire the commit lock within 15s.
+ *
+ * Returns 0 deleted (not an error) if the invoice has no CB rows. That's
+ * the expected state for invoices that were aborted mid-creation or
+ * already cleaned up by a prior void.
+ */
+function api_deleteCbRowsByInvoiceNo_(invoiceNo) {
+  if (!invoiceNo) return { deleted: 0 };
+  var cbId = prop_("CB_SPREADSHEET_ID");
+  if (!cbId) throw new Error("CB_SPREADSHEET_ID not configured");
+  var cbSS = SpreadsheetApp.openById(cbId);
+  var consol = cbSS.getSheetByName("Consolidated_Ledger");
+  if (!consol) throw new Error("Consolidated_Ledger sheet not found");
+
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(15000)) {
+    return { deleted: 0, locked: true, error: "Could not acquire commit lock within 15s" };
+  }
+  try {
+    var hdr    = api_getHeaderMap_(consol);
+    var invCol = hdr["Invoice #"];
+    if (!invCol) throw new Error("Invoice # column not found on Consolidated_Ledger");
+    var lastRow = consol.getLastRow();
+    if (lastRow < 2) return { deleted: 0 };
+    var invCol1d = consol.getRange(2, invCol, lastRow - 1, 1).getValues();
+    var rowsToDelete = [];
+    for (var ri = invCol1d.length - 1; ri >= 0; ri--) {
+      if (String(invCol1d[ri][0] || "").trim() === String(invoiceNo)) {
+        rowsToDelete.push(ri + 2);
+      }
+    }
+    var deletedCount = 0;
+    var di = 0;
+    while (di < rowsToDelete.length) {
+      var runEnd = rowsToDelete[di];
+      var runStart = runEnd;
+      var runLen = 1;
+      while (di + runLen < rowsToDelete.length && rowsToDelete[di + runLen] === runStart - 1) {
+        runStart -= 1;
+        runLen += 1;
+      }
+      try {
+        consol.deleteRows(runStart, runLen);
+        deletedCount += runLen;
+      } catch (perRunErr) {
+        Logger.log("api_deleteCbRowsByInvoiceNo_ run delete failed at rows " + runStart + ".." + runEnd + ": " + perRunErr.message);
+      }
+      di += runLen;
+    }
+    return { deleted: deletedCount, expected: rowsToDelete.length };
+  } finally {
+    try { lock.releaseLock(); } catch (_) {}
+  }
+}
+
+/**
+ * v38.193.0 — CB Consolidated_Ledger cleanup by Ledger Row ID. Used by
+ * api_voidBillingRowsWhere_ (Bug #7 — task reopen / repair reopen) to
+ * remove CB rows whose ledger_row_id is in the voided set. Returns 0 if
+ * none of the IDs have CB entries (the expected case for Unbilled-only
+ * voids — CB only contains Invoiced rows). Defense-in-depth so any
+ * future code path that voids an Invoiced row through this helper
+ * keeps CB in sync.
+ *
+ * Same lock + descending-grouped-deleteRows pattern as the by-invoice
+ * variant above.
+ */
+function api_deleteCbRowsByLedgerIds_(ledgerRowIds) {
+  if (!ledgerRowIds || !ledgerRowIds.length) return { deleted: 0 };
+  var cbId = prop_("CB_SPREADSHEET_ID");
+  if (!cbId) throw new Error("CB_SPREADSHEET_ID not configured");
+  var cbSS = SpreadsheetApp.openById(cbId);
+  var consol = cbSS.getSheetByName("Consolidated_Ledger");
+  if (!consol) throw new Error("Consolidated_Ledger sheet not found");
+
+  var idSet = {};
+  for (var li = 0; li < ledgerRowIds.length; li++) {
+    var k = String(ledgerRowIds[li] || "").trim();
+    if (k) idSet[k] = true;
+  }
+  if (Object.keys(idSet).length === 0) return { deleted: 0 };
+
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(15000)) {
+    return { deleted: 0, locked: true, error: "Could not acquire commit lock within 15s" };
+  }
+  try {
+    var hdr    = api_getHeaderMap_(consol);
+    var lidCol = hdr["Ledger Row ID"];
+    if (!lidCol) throw new Error("Ledger Row ID column not found on Consolidated_Ledger");
+    var lastRow = consol.getLastRow();
+    if (lastRow < 2) return { deleted: 0 };
+    var lidCol1d = consol.getRange(2, lidCol, lastRow - 1, 1).getValues();
+    var rowsToDelete = [];
+    for (var ri = lidCol1d.length - 1; ri >= 0; ri--) {
+      var lid = String(lidCol1d[ri][0] || "").trim();
+      if (lid && idSet[lid]) rowsToDelete.push(ri + 2);
+    }
+    var deletedCount = 0;
+    var di = 0;
+    while (di < rowsToDelete.length) {
+      var runEnd = rowsToDelete[di];
+      var runStart = runEnd;
+      var runLen = 1;
+      while (di + runLen < rowsToDelete.length && rowsToDelete[di + runLen] === runStart - 1) {
+        runStart -= 1;
+        runLen += 1;
+      }
+      try {
+        consol.deleteRows(runStart, runLen);
+        deletedCount += runLen;
+      } catch (perRunErr) {
+        Logger.log("api_deleteCbRowsByLedgerIds_ run delete failed at rows " + runStart + ".." + runEnd + ": " + perRunErr.message);
+      }
+      di += runLen;
+    }
+    return { deleted: deletedCount, expected: rowsToDelete.length };
+  } finally {
+    try { lock.releaseLock(); } catch (_) {}
+  }
+}
+
 function api_markClientLedgerInvoiced_(clientSheetId, ledgerRowIds, invNo, invDate, invUrl) {
   if (!ledgerRowIds || !ledgerRowIds.length) return 0;
   var ss = SpreadsheetApp.openById(clientSheetId);
@@ -22992,16 +23335,56 @@ function api_markClientLedgerInvoiced_(clientSheetId, ledgerRowIds, invNo, invDa
   // unlock real parallelism), that race had to be eliminated at the source.
   var lastRow = sh.getLastRow();
   if (lastRow < 2) return 0;
-  var idCol1d = sh.getRange(2, idxLedgerId, lastRow - 1, 1).getValues();
+  // v38.193.0 (Bug #4 + #9 — pre-commit Status assertion). Read Ledger Row ID
+  // AND Status in one pass so we can refuse to flip rows whose Status drifted
+  // between React picking them and this function flipping them. Pre-v38.193
+  // we matched only by Ledger Row ID and unconditionally setValue("Invoiced"),
+  // which silently overwrote Void/Invoiced rows back to Invoiced — exactly
+  // the chain that produced INV-000135 billing the legitimately-Voided
+  // INSP-TASK-INSP-62630-1 row on 2026-05-03 after Justin reopened the task
+  // on 2026-05-01. The window between React reading the Unbilled list (from
+  // Supabase mirror) and GAS writing here is multi-second; in that window
+  // a concurrent reopen / void / invoice can change Status. The fix shifts
+  // the contract from "trust React's row pick" to "verify on the live
+  // client sheet immediately before write" — closer to the write than the
+  // picker. If any matched row has Status !== "Unbilled" we throw so
+  // handleCreateInvoice_'s rollback path can unwind the CB rows it just
+  // appended and surface the conflicting row IDs to the operator.
+  var dataWidth = Math.max(idxLedgerId, idxStatus);
+  var dataRange = sh.getRange(2, 1, lastRow - 1, dataWidth).getValues();
 
   var idSet = {};
   for (var li = 0; li < ledgerRowIds.length; li++) {
     idSet[String(ledgerRowIds[li]).trim()] = true;
   }
   var changedRows = [];  // ordered list of rowNums (sheet 1-indexed)
-  for (var i = 0; i < idCol1d.length; i++) {
-    var lid = String(idCol1d[i][0] || "").trim();
-    if (lid && idSet[lid]) changedRows.push(i + 2);  // +2: data row 0 = sheet row 2
+  var statusViolations = [];  // rows that matched by ID but failed Status check
+  for (var i = 0; i < dataRange.length; i++) {
+    var lid = String(dataRange[i][idxLedgerId - 1] || "").trim();
+    if (!lid || !idSet[lid]) continue;
+    var rowStatus = String(dataRange[i][idxStatus - 1] || "").trim();
+    if (rowStatus !== "Unbilled") {
+      statusViolations.push({ ledgerRowId: lid, currentStatus: rowStatus || "(blank)", row: i + 2 });
+      continue;
+    }
+    changedRows.push(i + 2);  // +2: data row 0 = sheet row 2
+  }
+
+  if (statusViolations.length > 0) {
+    // Throw a structured error so handleCreateInvoice_ can roll back the CB
+    // append and surface the conflicting rows. Cap the per-error sample at
+    // 5 entries — the full list is in the thrown message but we want the
+    // common case (1-2 stale rows) to render readably in the operator UI.
+    var sample = statusViolations.slice(0, 5).map(function(v) {
+      return v.ledgerRowId + " (Status=" + v.currentStatus + ")";
+    }).join(", ");
+    var more = statusViolations.length > 5 ? " (+" + (statusViolations.length - 5) + " more)" : "";
+    throw new Error(
+      "PRE_COMMIT_STATUS_ASSERTION: " + statusViolations.length + " of " + ledgerRowIds.length +
+      " row(s) are no longer Status=Unbilled on the client sheet. The invoice was NOT created. " +
+      "Refresh the Billing Report and retry — the offending rows have been voided, invoiced, " +
+      "or reopened since you opened the picker. Conflicting rows: " + sample + more
+    );
   }
 
   if (changedRows.length === 0) return 0;
@@ -23122,6 +23505,81 @@ function handleCreateInvoice_(payload) {
         "MIXED_CLIENTS"
       );
     }
+  }
+
+  // v38.193.0 (Bug #3 / Phase C3) — Server-side sidemark consistency assertion.
+  // Bug #3 was the invoice-generation TWIN of v38.191.0's QBO push fix:
+  // Digs Furniture (separate_by_sidemark=false) had her 2026-05-02 batch
+  // split into 7 single-sidemark invoices instead of one consolidated.
+  // Root cause was on the React side and was repaired in Billing.tsx
+  // 2026-05-02 ("invoice-grouping was always splitting by sidemark, even
+  // for clients with separate_by_sidemark=false"). This block adds a GAS-
+  // side guard so a future React regression OR a hand-crafted payload
+  // (admin tool, scripted retry, etc.) can't bypass the per-client flag:
+  //
+  //   - separate_by_sidemark = TRUE   → every row in the payload MUST share
+  //                                     the same sidemark, AND the payload-
+  //                                     level sidemark must match. Mixed
+  //                                     sidemarks → SIDEMARK_VIOLATION.
+  //   - separate_by_sidemark = FALSE  → no constraint (mixed sidemarks fine).
+  //
+  // Reads the flag from the public.clients Supabase table — same source
+  // React uses, so a mismatch here means real config drift, not a stale
+  // CB Clients sheet read. Falls back to false on any read error so a
+  // Supabase outage can't block invoicing.
+  try {
+    var sbUrl = prop_("SUPABASE_URL");
+    var sbKey = prop_("SUPABASE_SERVICE_ROLE_KEY");
+    if (sbUrl && sbKey) {
+      var clientResp = UrlFetchApp.fetch(
+        sbUrl + "/rest/v1/clients?spreadsheet_id=eq." + encodeURIComponent(sourceSheetId) +
+        "&select=separate_by_sidemark",
+        {
+          method: "GET",
+          headers: { "Authorization": "Bearer " + sbKey, "apikey": sbKey },
+          muteHttpExceptions: true
+        }
+      );
+      if (clientResp.getResponseCode() === 200) {
+        var clientArr = JSON.parse(clientResp.getContentText());
+        if (clientArr && clientArr.length > 0 && clientArr[0].separate_by_sidemark === true) {
+          // Flag is TRUE — all rows must share the same sidemark.
+          var rowSidemarks = {};
+          for (var si = 0; si < rows.length; si++) {
+            var rsm = String(rows[si].sidemark || "").trim();
+            rowSidemarks[rsm] = true;
+          }
+          var distinctSidemarks = Object.keys(rowSidemarks);
+          if (distinctSidemarks.length > 1) {
+            return errorResponse_(
+              "SIDEMARK_VIOLATION: client " + client + " has separate_by_sidemark=true but the " +
+              "invoice payload contains " + distinctSidemarks.length + " distinct sidemarks: " +
+              JSON.stringify(distinctSidemarks) + ". Split this batch by sidemark on the React side " +
+              "and resubmit one invoice per sidemark group.",
+              "SIDEMARK_VIOLATION"
+            );
+          }
+          // Single distinct sidemark in the row set — verify it matches the
+          // payload-level sidemark stamped on the invoice header. A drift
+          // here would land the wrong sidemark string on the PDF / email
+          // / Consolidated_Ledger row.
+          var rowSm = distinctSidemarks[0] || "";
+          if (rowSm && sidemark && rowSm !== sidemark) {
+            return errorResponse_(
+              "SIDEMARK_VIOLATION: client " + client + " has separate_by_sidemark=true but the " +
+              "payload-level sidemark (" + JSON.stringify(sidemark) + ") doesn't match the row " +
+              "sidemark (" + JSON.stringify(rowSm) + "). Re-send with matching sidemark.",
+              "SIDEMARK_VIOLATION"
+            );
+          }
+        }
+        // separate_by_sidemark=false (or null) → no constraint, accept any mix.
+      }
+    }
+  } catch (sbErr) {
+    Logger.log("handleCreateInvoice_ sidemark assertion read failed (allowing): " + sbErr.message);
+    // Fail open — Supabase outage shouldn't block invoicing. The React
+    // grouping logic is the primary line of defense; this is belt-and-suspenders.
   }
 
   // Open CB sheet + read settings
@@ -26927,6 +27385,23 @@ function api_voidBillingRowsWhere_(ss, predicate, reason) {
       sheet.getRange(2 + i, notesCol).setValue(prevNotes ? (prevNotes + " " + stamped) : stamped);
     }
     out.voided.push(ledgerId || ("row" + (i + 2)));
+  }
+  // v38.193.0 (Bug #7) — Mirror the void on CB Consolidated_Ledger so a
+  // reopen of a task/repair whose billing row somehow made it to CB (the
+  // current Unbilled-only guard above keeps CB-resident rows out, but
+  // defense in depth) doesn't leave an orphan that handleCreateInvoice_
+  // could later sweep onto a fresh invoice. Expected to be a no-op in the
+  // current code path because CB only contains Invoiced rows and the loop
+  // above only touches Unbilled. Best-effort, never blocks the void.
+  if (out.voided.length > 0) {
+    try {
+      var cbCleanup = api_deleteCbRowsByLedgerIds_(out.voided);
+      if (cbCleanup && cbCleanup.deleted > 0) {
+        Logger.log("api_voidBillingRowsWhere_: removed " + cbCleanup.deleted + " orphan CB row(s) for " + out.voided.length + " voided ledger ID(s)");
+      }
+    } catch (cbErr) {
+      Logger.log("api_voidBillingRowsWhere_ CB cleanup failed (non-fatal): " + cbErr.message);
+    }
   }
   return out;
 }
@@ -41614,4 +42089,342 @@ function runReleaseInvoicesForReissue() {
   Logger.log("Expected total rows: 55 (Digs 3 + Mary Kenngott 9 + Nip Tuck NORTON 25 + Nip Tuck NIPTUCK 18).");
   Logger.log("Next step: Billing → Create Invoices in the React app, per affected client.");
   Logger.log("════════════════════════════════════════════════════════════");
+}
+
+/**
+ * v38.193.0 (Phase C4) — Nightly billing anomaly sweep.
+ *
+ * Run from the Apps Script editor (Select function → runBillingAnomalySweep
+ * → Run) or wire up a daily time-driven trigger via Edit → Triggers in the
+ * editor. The trigger setup is left as a manual operator step on purpose —
+ * we don't want push-api / deploy-api to silently install a trigger that
+ * starts emailing Justin.
+ *
+ * Five checks against the last 30 days of activity. All checks short-circuit
+ * if Supabase is unreachable; the function never throws (best-effort) and
+ * always returns a structured summary so a future React UI can render it.
+ *
+ *   1. Duplicate invoice_create activity entries (same invoice_no on
+ *      ≥2 success rows in billing_activity_log). The pre-v38.182 RPC
+ *      counter race had this signature; the atomic Postgres SEQUENCE
+ *      makes it impossible to recur, but the sweep still surfaces it
+ *      so a future regression won't be missed.
+ *   2. Count mismatch between billing rows and stax_invoices line items
+ *      for the same invoice number. A mismatch here means CB and Stax
+ *      diverged — usually a half-failed invoice or a v38.193 bug #5
+ *      regression where handleVoidInvoice_ removed CB rows but Stax
+ *      still shows the line items.
+ *   3. Mixed-sidemark rows on a single invoice for a client whose
+ *      separate_by_sidemark = true. The C3 assertion now blocks this
+ *      at create time; sweep covers historical drift.
+ *   4. Stale-Void pattern: a billing row with status = Void whose
+ *      ledger_row_id appears in some stax_invoices.line_items_json
+ *      element. Bug #4 / #9's fingerprint. The B2 pre-commit assertion
+ *      blocks this going forward.
+ *   5. Storage anomalies: STOR rows with negative qty/total (math
+ *      bug or manual edit). Duplicate-row check kept lightweight —
+ *      the real per-item-month dedup is enforced by handleGenerateStorageCharges_'s
+ *      Ledger Row ID format.
+ *
+ * If any anomalies are found, sends Justin a single summary email; clean
+ * sweeps are silent (Logger only) so the daily inbox isn't noisy.
+ */
+function runBillingAnomalySweep() {
+  var startTime = new Date();
+  var sbUrl = prop_("SUPABASE_URL");
+  var sbKey = prop_("SUPABASE_SERVICE_ROLE_KEY");
+  var WINDOW_DAYS = 30;
+  var cutoff = new Date(Date.now() - WINDOW_DAYS * 86400000);
+  var cutoffISO = cutoff.toISOString();
+  var cutoffDate = cutoffISO.slice(0, 10);
+
+  if (!sbUrl || !sbKey) {
+    Logger.log("runBillingAnomalySweep: Supabase credentials missing — aborting");
+    return { success: false, error: "Supabase credentials not configured" };
+  }
+
+  function sbGet_(path) {
+    var resp = UrlFetchApp.fetch(sbUrl + path, {
+      method: "GET",
+      headers: {
+        "Authorization": "Bearer " + sbKey,
+        "apikey": sbKey,
+        "Accept": "application/json"
+      },
+      muteHttpExceptions: true
+    });
+    var code = resp.getResponseCode();
+    if (code < 200 || code >= 300) {
+      throw new Error("Supabase " + path.split("?")[0] + " HTTP " + code + ": " + resp.getContentText().substring(0, 200));
+    }
+    return JSON.parse(resp.getContentText());
+  }
+
+  var anomalies = {
+    duplicateInvoiceCreates: [],
+    countMismatch: [],
+    mixedSidemark: [],
+    voidRowsInStax: [],
+    storageNegative: []
+  };
+  var checkErrors = [];
+
+  // Check 1 — duplicate invoice_create entries
+  try {
+    var actLog = sbGet_("/rest/v1/billing_activity_log?action=eq.invoice_create&status=eq.success&performed_at=gte." + encodeURIComponent(cutoffISO) + "&select=invoice_no,client_name,performed_at,performed_by&order=performed_at.asc");
+    var byInv = {};
+    for (var i = 0; i < actLog.length; i++) {
+      var e = actLog[i];
+      var key = String(e.invoice_no || "(blank)");
+      if (!byInv[key]) byInv[key] = [];
+      byInv[key].push(e);
+    }
+    for (var k in byInv) {
+      if (byInv[k].length > 1) {
+        var entries = byInv[k];
+        var perfSet = {};
+        for (var pi = 0; pi < entries.length; pi++) perfSet[String(entries[pi].performed_by || "")] = true;
+        anomalies.duplicateInvoiceCreates.push({
+          invoiceNo: k,
+          count: entries.length,
+          clientName: entries[0].client_name || "",
+          firstAt: entries[0].performed_at,
+          lastAt: entries[entries.length - 1].performed_at,
+          performers: Object.keys(perfSet)
+        });
+      }
+    }
+  } catch (e1) { checkErrors.push("check1: " + e1.message); }
+
+  // Check 2 — billing row count vs stax_invoices.line_items_json count
+  // Pull recent stax invoices once; reused by Check 4.
+  var staxInvs = [];
+  try {
+    staxInvs = sbGet_("/rest/v1/stax_invoices?created_at=gte." + encodeURIComponent(cutoffISO) + "&select=qb_invoice_no,line_items_json,created_at");
+    if (staxInvs.length > 0) {
+      var invNumbers = [];
+      for (var i = 0; i < staxInvs.length; i++) {
+        if (staxInvs[i].qb_invoice_no) invNumbers.push(String(staxInvs[i].qb_invoice_no));
+      }
+      var billingCountByInv = {};
+      // Chunked IN filter — 100 invoice numbers per request. PostgREST URL
+      // length is bounded around 8KB; 100 × ~10 chars = 1KB headroom.
+      for (var off = 0; off < invNumbers.length; off += 100) {
+        var chunk = invNumbers.slice(off, off + 100);
+        var inFilter = chunk.map(function(s) { return '"' + s + '"'; }).join(",");
+        var rows = sbGet_("/rest/v1/billing?invoice_no=in.(" + encodeURIComponent(inFilter) + ")&status=eq.Invoiced&select=invoice_no");
+        for (var ri = 0; ri < rows.length; ri++) {
+          var inv = String(rows[ri].invoice_no || "");
+          billingCountByInv[inv] = (billingCountByInv[inv] || 0) + 1;
+        }
+      }
+      for (var i = 0; i < staxInvs.length; i++) {
+        var sInv = staxInvs[i];
+        var staxCount = Array.isArray(sInv.line_items_json) ? sInv.line_items_json.length : 0;
+        var billingCount = billingCountByInv[String(sInv.qb_invoice_no || "")] || 0;
+        if (staxCount !== billingCount) {
+          anomalies.countMismatch.push({
+            invoiceNo: sInv.qb_invoice_no,
+            staxLineCount: staxCount,
+            billingRowCount: billingCount,
+            createdAt: sInv.created_at
+          });
+        }
+      }
+    }
+  } catch (e2) { checkErrors.push("check2: " + e2.message); }
+
+  // Check 3 — mixed sidemarks for separate_by_sidemark=true clients
+  try {
+    var sbsClients = sbGet_("/rest/v1/clients?separate_by_sidemark=eq.true&select=spreadsheet_id,name");
+    if (sbsClients.length > 0) {
+      var sbsTenantName = {};
+      var sbsTenantList = [];
+      for (var i = 0; i < sbsClients.length; i++) {
+        sbsTenantName[sbsClients[i].spreadsheet_id] = sbsClients[i].name;
+        sbsTenantList.push('"' + sbsClients[i].spreadsheet_id + '"');
+      }
+      var tenantInFilter = sbsTenantList.join(",");
+      var c3Rows = sbGet_("/rest/v1/billing?status=eq.Invoiced&tenant_id=in.(" + encodeURIComponent(tenantInFilter) + ")&invoice_date=gte." + cutoffDate + "&select=tenant_id,invoice_no,sidemark");
+      var sidemarksByInv = {};
+      for (var i = 0; i < c3Rows.length; i++) {
+        var r = c3Rows[i];
+        if (!r.invoice_no) continue;
+        var key = r.tenant_id + "|" + r.invoice_no;
+        if (!sidemarksByInv[key]) sidemarksByInv[key] = { tenantId: r.tenant_id, invoiceNo: r.invoice_no, sidemarks: {} };
+        sidemarksByInv[key].sidemarks[String(r.sidemark || "")] = true;
+      }
+      for (var key in sidemarksByInv) {
+        var sm = sidemarksByInv[key];
+        var distinct = Object.keys(sm.sidemarks);
+        if (distinct.length > 1) {
+          anomalies.mixedSidemark.push({
+            tenantId: sm.tenantId,
+            clientName: sbsTenantName[sm.tenantId] || "",
+            invoiceNo: sm.invoiceNo,
+            distinctSidemarks: distinct.length,
+            sidemarks: distinct
+          });
+        }
+      }
+    }
+  } catch (e3) { checkErrors.push("check3: " + e3.message); }
+
+  // Check 4 — stale-Void rows whose ledger_row_id appears in stax line_items_json
+  try {
+    var voidRows = sbGet_("/rest/v1/billing?status=eq.Void&created_at=gte." + encodeURIComponent(cutoffISO) + "&select=tenant_id,invoice_no,ledger_row_id");
+    if (voidRows.length > 0 && staxInvs.length > 0) {
+      // Build a Set of all ledger_row_ids across all stax line items.
+      // Avoids O(N×M) comparison; one O(M) pass over staxInvs.line_items_json.
+      var lidToStaxInvs = {};
+      for (var si = 0; si < staxInvs.length; si++) {
+        var li = staxInvs[si].line_items_json;
+        if (!Array.isArray(li)) continue;
+        for (var lj = 0; lj < li.length; lj++) {
+          var lid = li[lj] && (li[lj].ledger_row_id || li[lj].ledgerRowId);
+          if (!lid) continue;
+          var lidKey = String(lid);
+          if (!lidToStaxInvs[lidKey]) lidToStaxInvs[lidKey] = [];
+          lidToStaxInvs[lidKey].push(staxInvs[si].qb_invoice_no);
+        }
+      }
+      for (var vi = 0; vi < voidRows.length; vi++) {
+        var vr = voidRows[vi];
+        if (!vr.ledger_row_id) continue;
+        var hits = lidToStaxInvs[String(vr.ledger_row_id)];
+        if (hits && hits.length > 0) {
+          anomalies.voidRowsInStax.push({
+            tenantId: vr.tenant_id,
+            ledgerRowId: vr.ledger_row_id,
+            voidedOnInvoice: vr.invoice_no || null,
+            staxInvoices: hits
+          });
+        }
+      }
+    }
+  } catch (e4) { checkErrors.push("check4: " + e4.message); }
+
+  // Check 5 — storage rows with negative qty/total
+  try {
+    var storRows = sbGet_("/rest/v1/billing?svc_code=eq.STOR&created_at=gte." + encodeURIComponent(cutoffISO) + "&select=tenant_id,invoice_no,ledger_row_id,item_id,qty,total,date,status");
+    for (var i = 0; i < storRows.length; i++) {
+      var s = storRows[i];
+      var qty = Number(s.qty);
+      var total = Number(s.total);
+      var qtyBad = !isNaN(qty) && qty < 0;
+      var totalBad = !isNaN(total) && total < 0;
+      if (qtyBad || totalBad) {
+        anomalies.storageNegative.push({
+          tenantId: s.tenant_id,
+          ledgerRowId: s.ledger_row_id,
+          itemId: s.item_id,
+          invoiceNo: s.invoice_no || null,
+          qty: s.qty,
+          total: s.total,
+          status: s.status
+        });
+      }
+    }
+  } catch (e5) { checkErrors.push("check5: " + e5.message); }
+
+  // Format report
+  var totalCount = 0;
+  for (var key in anomalies) totalCount += (anomalies[key] || []).length;
+  var elapsedMs = (new Date()) - startTime;
+
+  Logger.log("════════════════════════════════════════════════════════════");
+  Logger.log("Billing Anomaly Sweep — " + new Date().toISOString());
+  Logger.log("Window: " + WINDOW_DAYS + " days (since " + cutoffISO + ")");
+  Logger.log("Elapsed: " + elapsedMs + "ms");
+  Logger.log("Total anomalies: " + totalCount);
+  Logger.log("");
+  Logger.log("  Duplicate invoice_create entries:  " + anomalies.duplicateInvoiceCreates.length);
+  Logger.log("  Count mismatch (billing vs stax):  " + anomalies.countMismatch.length);
+  Logger.log("  Mixed-sidemark invoices:           " + anomalies.mixedSidemark.length);
+  Logger.log("  Void rows present in stax:         " + anomalies.voidRowsInStax.length);
+  Logger.log("  Storage rows w/ negative values:   " + anomalies.storageNegative.length);
+  if (checkErrors.length > 0) {
+    Logger.log("");
+    Logger.log("  Check errors (degraded coverage):");
+    for (var ci = 0; ci < checkErrors.length; ci++) Logger.log("    - " + checkErrors[ci]);
+  }
+  Logger.log("════════════════════════════════════════════════════════════");
+
+  // Send email if any anomalies (clean sweeps are Logger-only — keeps the
+  // operator's inbox quiet on green nights)
+  if (totalCount > 0) {
+    try {
+      var html = anomalySweepEmailHtml_(anomalies, totalCount, WINDOW_DAYS, cutoffISO, elapsedMs, checkErrors);
+      MailApp.sendEmail({
+        to: "justin@stridenw.com",
+        subject: "[Stride] Billing anomaly sweep: " + totalCount + " finding(s)",
+        htmlBody: html
+      });
+      Logger.log("Email sent to justin@stridenw.com.");
+    } catch (mailErr) {
+      Logger.log("MailApp.sendEmail failed (anomalies still logged above): " + mailErr.message);
+    }
+  }
+
+  return {
+    success: true,
+    totalCount: totalCount,
+    elapsedMs: elapsedMs,
+    windowDays: WINDOW_DAYS,
+    anomalies: anomalies,
+    checkErrors: checkErrors
+  };
+}
+
+function anomalySweepEmailHtml_(anomalies, totalCount, windowDays, cutoffISO, elapsedMs, checkErrors) {
+  function esc(s) {
+    return String(s == null ? "" : s)
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+  function section_(title, rows, render) {
+    if (!rows || rows.length === 0) return "";
+    var html = "<h3 style='font-family:Inter,sans-serif;color:#222;margin-top:24px'>" + esc(title) + " (" + rows.length + ")</h3>";
+    html += "<table style='border-collapse:collapse;font-family:Inter,sans-serif;font-size:13px;width:100%'>";
+    var sample = rows.slice(0, 20);
+    for (var i = 0; i < sample.length; i++) {
+      html += "<tr style='border-bottom:1px solid #eee'><td style='padding:6px 8px;vertical-align:top'>" + render(sample[i]) + "</td></tr>";
+    }
+    if (rows.length > sample.length) {
+      html += "<tr><td style='padding:6px 8px;color:#888'>… and " + (rows.length - sample.length) + " more</td></tr>";
+    }
+    html += "</table>";
+    return html;
+  }
+  var body = "";
+  body += "<div style='font-family:Inter,sans-serif;color:#222;max-width:760px'>";
+  body += "<h2 style='color:#E85D2D'>Billing Anomaly Sweep — " + totalCount + " finding(s)</h2>";
+  body += "<p style='color:#555'>Window: last " + windowDays + " days (since " + esc(cutoffISO) + ").  Elapsed: " + elapsedMs + "ms.</p>";
+
+  body += section_("Duplicate invoice_create entries", anomalies.duplicateInvoiceCreates, function(d) {
+    return "<b>" + esc(d.invoiceNo) + "</b> — " + esc(d.clientName) + " — " + d.count + "× between " + esc(d.firstAt) + " and " + esc(d.lastAt) + "<br><span style='color:#777'>performers: " + esc((d.performers || []).join(", ")) + "</span>";
+  });
+  body += section_("Count mismatch (billing rows vs stax line_items_json)", anomalies.countMismatch, function(d) {
+    return "<b>" + esc(d.invoiceNo) + "</b> — billing rows: " + d.billingRowCount + ", stax line items: " + d.staxLineCount + " (created " + esc(d.createdAt) + ")";
+  });
+  body += section_("Mixed-sidemark invoices (separate_by_sidemark=true clients)", anomalies.mixedSidemark, function(d) {
+    return "<b>" + esc(d.invoiceNo) + "</b> — " + esc(d.clientName) + " — " + d.distinctSidemarks + " sidemarks: " + esc((d.sidemarks || []).join(", "));
+  });
+  body += section_("Stale-Void rows present in Stax line_items_json", anomalies.voidRowsInStax, function(d) {
+    return "<b>" + esc(d.ledgerRowId) + "</b> — voided on " + esc(d.voidedOnInvoice || "(none)") + ", but appears in stax invoices: " + esc((d.staxInvoices || []).join(", "));
+  });
+  body += section_("Storage rows with negative qty/total", anomalies.storageNegative, function(d) {
+    return "<b>" + esc(d.ledgerRowId) + "</b> — item " + esc(d.itemId) + ", qty=" + esc(d.qty) + ", total=" + esc(d.total) + " (status=" + esc(d.status) + ")";
+  });
+
+  if (checkErrors && checkErrors.length > 0) {
+    body += "<h3 style='font-family:Inter,sans-serif;color:#a00;margin-top:24px'>Check errors</h3>";
+    body += "<ul>";
+    for (var i = 0; i < checkErrors.length; i++) body += "<li>" + esc(checkErrors[i]) + "</li>";
+    body += "</ul>";
+  }
+
+  body += "<p style='color:#777;font-size:11px;margin-top:24px'>Run from Apps Script editor → Select function → runBillingAnomalySweep → Run.  Wire as a daily 6am trigger via Edit → Triggers if you want this automated.</p>";
+  body += "</div>";
+  return body;
 }
