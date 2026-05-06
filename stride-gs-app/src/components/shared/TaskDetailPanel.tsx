@@ -268,7 +268,10 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
     setRepairRequesting(true);
     setRepairRequestError(null);
 
-    // Phase 2C: insert temp repair row immediately
+    // Phase 2C: insert temp repair row immediately. clientSheetId on the
+    // temp is required for the useRepairs auto-reconcile signature
+    // (sourceTaskId|itemId|clientSheetId) to match the real row when it
+    // arrives — without it, the temp would never auto-drop.
     const tempRepairId = `TEMP-${Date.now()}`;
     if (addOptimisticRepair) {
       addOptimisticRepair({
@@ -276,6 +279,7 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
         sourceTaskId: task.taskId,
         itemId: task.itemId,
         clientId: clientSheetId,
+        clientSheetId,
         clientName: task.clientName,
         description: task.description || '',
         status: 'Pending Quote',
@@ -286,9 +290,14 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
     try {
       const resp = await postRequestRepairQuote({ itemId: task.itemId, sourceTaskId: task.taskId }, clientSheetId);
       if (resp.ok && resp.data?.success) {
-        // Set repairRequested BEFORE removing optimistic to avoid a render gap
         setRepairRequested(true);
-        removeOptimisticRepair?.(tempRepairId); // remove temp; refetch loads real repair
+        // Don't removeOptimisticRepair on success — useRepairs auto-reconcile
+        // drops the temp once the real row lands. Eager removal creates a
+        // 1-3s gap where the (R) badge disappears off the inventory item
+        // until the GAS write-through propagates to Supabase. Emit a
+        // realtime-style event so every consumer (useRepairs everywhere,
+        // useItemIndicators on detail panels) refetches promptly.
+        entityEvents.emit('repair', task.itemId);
         onTaskUpdated?.();
       } else {
         removeOptimisticRepair?.(tempRepairId); // rollback

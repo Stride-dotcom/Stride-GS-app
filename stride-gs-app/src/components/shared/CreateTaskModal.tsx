@@ -5,6 +5,7 @@ import type { InventoryItem, Task } from '../../lib/types';
 import { usePricing } from '../../hooks/usePricing';
 import { theme } from '../../styles/theme';
 import { ProcessingOverlay } from './ProcessingOverlay';
+import { entityEvents } from '../../lib/entityEvents';
 
 interface Props {
   items: InventoryItem[];
@@ -136,8 +137,13 @@ export function CreateTaskModal({ items, clientSheetId, onClose, onSuccess, addO
       );
       if (res.data?.success) {
         const r = res.data;
-        // Remove temp rows — refetch will load real task IDs
-        tempIds.forEach(id => removeOptimisticTask?.(id));
+        // Don't remove the temps here — useTasks.auto-reconcile drops them
+        // when the real tasks arrive (matched by type|itemId|clientSheetId
+        // signature). Eager removal creates a 1-3s gap where the temp
+        // tasks vanish from the Tasks list AND the (I) / (A) badges drop
+        // off the inventory rows until the GAS write-through propagates.
+        // Realtime fan-out via entityEvents.emit triggers the refetch.
+        for (const tid of (r.taskIds ?? [])) entityEvents.emit('task', tid);
         setResult({ created: r.created, skippedCount: r.skipped?.length ?? 0, taskIds: r.taskIds ?? [] });
         onSuccess(r.taskIds ?? []);
       } else {

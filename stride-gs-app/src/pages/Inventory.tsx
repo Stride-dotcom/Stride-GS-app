@@ -993,14 +993,19 @@ export function Inventory() {
     if (!eligible.length) { setRepairQuoteBulkResult({ success: true, processed: preflightSkipped.length, succeeded: 0, failed: 0, skipped: preflightSkipped, errors: [], message: 'All items skipped' }); return; }
 
     // Optimistic: add a temp Pending Quote repair row per item so Inventory / Repairs views see it immediately.
-    // Temp IDs (REPAIR-TEMP-...) are replaced by real IDs on refetch.
+    // TEMP- prefix is required so useRepairs auto-reconcile drops them once
+    // the real rows land via refetch (matched by sourceTaskId|itemId|
+    // clientSheetId). The legacy REPAIR-TEMP- prefix didn't match the
+    // auto-reconcile filter, which forced an eager manual remove and caused
+    // (R) badge flicker on inventory rows.
     const now = Date.now();
     const tempIds: string[] = [];
     for (const it of eligible) {
-      const tempId = `REPAIR-TEMP-${it.itemId}-${now}`;
+      const tempId = `TEMP-REPAIR-${it.itemId}-${now}`;
       tempIds.push(tempId);
       addOptimisticRepair({
         repairId: tempId,
+        sourceTaskId: '', // bulk path — no source task
         itemId: it.itemId,
         clientId: csId,
         clientSheetId: csId,
@@ -1018,8 +1023,11 @@ export function Inventory() {
         skipped: [], errors: eligible.map(i => ({ id: i.itemId, reason: resp.error || 'Request failed' })),
         message: resp.error || 'Batch request failed',
       };
-      // Clear all temps — real repairs come from refetch
-      for (const tid of tempIds) removeOptimisticRepair(tid);
+      // On batch failure, drop every temp; on partial / full success, let
+      // useRepairs auto-reconcile drop temps as their real twins arrive so
+      // the (R) badge stays lit through the GAS → Supabase propagation gap.
+      const allFailed = !resp.ok || (serverResult.succeeded === 0 && serverResult.failed > 0);
+      if (allFailed) for (const tid of tempIds) removeOptimisticRepair(tid);
       setRepairQuoteBulkResult(mergePreflightSkips(serverResult, preflightSkipped));
       refetch();
       // Session 74: emit a repair entity event per affected item so the

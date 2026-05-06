@@ -7,6 +7,7 @@ import { postCreateWillCall, isApiConfigured } from '../../lib/api';
 import type { CreateWillCallResponse } from '../../lib/api';
 import { useClients } from '../../hooks/useClients';
 import { useAuth } from '../../contexts/AuthContext';
+import { entityEvents } from '../../lib/entityEvents';
 import type { WillCall } from '../../lib/types';
 import { ProcessingOverlay } from './ProcessingOverlay';
 
@@ -172,8 +173,17 @@ export function CreateWillCallModal({ onClose, onSubmit, preSelectedItemIds = []
         removeOptimisticWc?.(tempWcNum); // rollback
         setSubmitError(resp.error || resp.data?.error || 'Failed to create will call. Please try again.');
       } else {
-        removeOptimisticWc?.(tempWcNum); // remove temp; refetch loads real WC
+        // Don't remove the temp here — useWillCalls.auto-reconcile drops it
+        // automatically when the real WC arrives via refetch (matched by
+        // clientSheetId|pickupParty|scheduledDate signature). Removing the
+        // temp eagerly creates a 1-3s gap where the WC vanishes from the
+        // list AND the (W) badges drop off the items it covers, until the
+        // GAS write-through finishes propagating to Supabase.
         setCreateResult(resp.data);
+        // Tell every other consumer (Inventory badges via useItemIndicators,
+        // Will Calls page list, Dashboard) to refetch from Supabase. The
+        // first refetch lands within 1-3s once write-through completes.
+        entityEvents.emit('will_call', resp.data.wcNumber || '');
         onSubmit?.({ client, pickupParty, items: [...selectedIds], wcNumber: resp.data.wcNumber });
       }
     } catch (err) {
