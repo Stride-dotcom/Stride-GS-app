@@ -25,6 +25,7 @@ import { usePhotoGraphRollup, useNoteGraphRollup, type RollupContext } from '../
 import { useDocuments } from '../../hooks/useDocuments';
 import { PhotosPanel as _PhotosPanel, DocumentsPanel as _DocumentsPanel, NotesPanel as _NotesPanel } from './EntityAttachments';
 import { EntityHistory } from './EntityHistory';
+import { InlineEditableCell } from './InlineEditableCell';
 
 /**
  * Phase 7A-7 + 2026-04-22 tabbed migration.
@@ -136,6 +137,62 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
 
     return () => { cancelled = true; };
   }, [shipment.clientSheetId, shipment.shipmentNo, itemsFetched]);
+
+  // ── Inline-edit patch overlay (sidemark / reference cells) ─────────────
+  // Mirrors useInventory's pattern: optimistic patch keyed by itemId,
+  // merged into the displayed items via useMemo. Persists for the panel's
+  // lifetime so the user sees the new value immediately and it survives
+  // until the row is re-fetched.
+  const [itemPatches, setItemPatches] = useState<Record<string, Partial<ShipmentItem>>>({});
+  const applyShipmentItemPatch = (itemId: string, patch: Record<string, unknown>) => {
+    setItemPatches(prev => ({
+      ...prev,
+      [itemId]: { ...(prev[itemId] ?? {}), ...(patch as Partial<ShipmentItem>) },
+    }));
+  };
+  // mergeItemPatch is the rollback path the cell uses on save failure —
+  // semantics match useInventory's mergeItemPatch (overlay the rollback
+  // values on top of any existing patch entries).
+  const mergeShipmentItemPatch = applyShipmentItemPatch;
+
+  const mergedItems = useMemo<ShipmentItem[]>(() => {
+    if (Object.keys(itemPatches).length === 0) return items;
+    return items.map(it => {
+      const p = itemPatches[it.itemId];
+      return p ? { ...it, ...p } : it;
+    });
+  }, [items, itemPatches]);
+
+  // Listen for entityEvents 'inventory' fired by InlineEditableCell after a
+  // successful save. When one of OUR shipment items is the target, refresh
+  // the whole shipment items query so the patch overlay can be cleared and
+  // any GAS-side side-effects (vendor-prefix normalization, downstream
+  // task/repair fan-out updates surfacing on the description column, etc.)
+  // land. Falls back to keeping the optimistic patch on stale tabs.
+  useEffect(() => {
+    if (!shipment.clientSheetId) return;
+    const ourItemIds = new Set(items.map(i => i.itemId));
+    return entityEvents.subscribe(async (entityType, entityId) => {
+      if (entityType !== 'inventory' || !ourItemIds.has(entityId)) return;
+      try {
+        const sbResult = await fetchShipmentItemsFromSupabase(shipment.clientSheetId!, shipment.shipmentNo);
+        if (sbResult && sbResult.items.length > 0) {
+          setItems(sbResult.items.map(i => ({
+            itemId: i.itemId, vendor: i.vendor || '', description: i.description,
+            itemClass: i.itemClass, qty: i.qty, location: i.location, sidemark: i.sidemark || '',
+            reference: (i as { reference?: string }).reference || '',
+          })));
+          // Drop the patch entry for the touched item — server now authoritative.
+          setItemPatches(prev => {
+            if (!(entityId in prev)) return prev;
+            const next = { ...prev };
+            delete next[entityId];
+            return next;
+          });
+        }
+      } catch { /* keep optimistic patch as the visible truth */ }
+    });
+  }, [shipment.clientSheetId, shipment.shipmentNo, items]);
 
   // ─── Edit mode (staff/admin only) ────────────────────────────────────────
   // Edits the four cache fields directly on public.shipments — there's no
@@ -469,7 +526,7 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
               <th style={{ padding: '6px 10px', textAlign: 'left', fontSize: 10, color: theme.colors.textMuted, textTransform: 'uppercase' }}>Reference</th>
               <th style={{ padding: '6px 10px', textAlign: 'left', fontSize: 10, color: theme.colors.textMuted, textTransform: 'uppercase' }}>Tasks</th>
             </tr></thead>
-            <tbody>{items.map((item, idx) => (
+            <tbody>{mergedItems.map((item, idx) => (
               <tr key={idx} style={{
                 borderBottom: `1px solid ${theme.colors.borderLight}`,
                 background: selectedItemIds.has(item.itemId) ? '#FFF7F4' : undefined,
@@ -489,8 +546,32 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
                 <td style={{ padding: '6px 10px', color: theme.colors.textSecondary, maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.vendor || <span style={{ color: theme.colors.textMuted }}>{'\u2014'}</span>}</td>
                 <td style={{ padding: '6px 10px', color: theme.colors.textSecondary, maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.description}</td>
                 <td style={{ padding: '6px 10px', fontFamily: 'monospace', color: theme.colors.textSecondary }}>{item.location}</td>
-                <td style={{ padding: '6px 10px', color: theme.colors.textSecondary, maxWidth: 100, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.sidemark || <span style={{ color: theme.colors.textMuted }}>{'\u2014'}</span>}</td>
-                <td style={{ padding: '6px 10px', color: theme.colors.textSecondary, maxWidth: 100, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.reference || <span style={{ color: theme.colors.textMuted }}>{'\u2014'}</span>}</td>
+                <td style={{ padding: '6px 10px', maxWidth: 120, color: theme.colors.textSecondary }}>
+                  <InlineEditableCell
+                    value={item.sidemark || ''}
+                    itemId={item.itemId}
+                    clientSheetId={shipment.clientSheetId || ''}
+                    fieldKey="sidemark"
+                    variant="autocomplete-db"
+                    dbField="sidemarks"
+                    applyItemPatch={applyShipmentItemPatch}
+                    mergeItemPatch={mergeShipmentItemPatch}
+                    renderValue={v => <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'block' }}>{v || <span style={{ color: theme.colors.textMuted }}>{'\u2014'}</span>}</span>}
+                  />
+                </td>
+                <td style={{ padding: '6px 10px', maxWidth: 120, color: theme.colors.textSecondary }}>
+                  <InlineEditableCell
+                    value={item.reference || ''}
+                    itemId={item.itemId}
+                    clientSheetId={shipment.clientSheetId || ''}
+                    fieldKey="reference"
+                    variant="autocomplete-db"
+                    dbField="references"
+                    applyItemPatch={applyShipmentItemPatch}
+                    mergeItemPatch={mergeShipmentItemPatch}
+                    renderValue={v => <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'block' }}>{v || <span style={{ color: theme.colors.textMuted }}>{'\u2014'}</span>}</span>}
+                  />
+                </td>
                 <td style={{ padding: '6px 10px' }}>
                   {item.needsInspection && <span style={{ display: 'inline-block', padding: '1px 6px', borderRadius: 8, fontSize: 9, fontWeight: 600, background: '#FEF3EE', color: '#E85D2D', marginRight: 3 }}>INSP</span>}
                   {item.needsAssembly && <span style={{ display: 'inline-block', padding: '1px 6px', borderRadius: 8, fontSize: 9, fontWeight: 600, background: '#F0FDF4', color: '#15803D' }}>ASM</span>}
