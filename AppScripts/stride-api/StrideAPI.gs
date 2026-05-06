@@ -12480,11 +12480,34 @@ function handleVoidInvoice_(clientSheetId, payload) {
       return errorResponse_("No rows found for invoice " + invoiceNo, "NOT_FOUND");
     }
 
+    // v38.193.0 (Bug #5) — Mirror the void on CB Consolidated_Ledger.
+    // Pre-fix this function only flipped client-sheet rows to Void, leaving
+    // CB rows tied to the now-voided invoice number stuck at Status=Invoiced.
+    // QBO/IIF exports build line items from CB, so the orphans would re-push
+    // on the next export and reconciliation between client sheet, CB, and
+    // Stax would silently drift. Best-effort: a CB-cleanup failure is logged
+    // but doesn't fail the void itself — the client sheet flip already
+    // happened above and the operator will see a reconciliation warning on
+    // the next anomaly sweep (runBillingAnomalySweep) if any rows were left
+    // behind.
+    var cbCleanup = { deleted: 0 };
+    try {
+      cbCleanup = api_deleteCbRowsByInvoiceNo_(invoiceNo);
+      if (cbCleanup && cbCleanup.locked) {
+        Logger.log("handleVoidInvoice_: CB cleanup deferred — could not acquire lock for " + invoiceNo);
+      }
+    } catch (cbErr) {
+      Logger.log("handleVoidInvoice_: CB cleanup failed for " + invoiceNo + ": " + cbErr.message);
+      cbCleanup = { deleted: 0, error: String(cbErr.message || cbErr) };
+    }
+
     return jsonResponse_({
       success: true,
       invoiceNo: invoiceNo,
       rowsVoided: voided,
-      alreadyVoid: skippedAlreadyVoid
+      alreadyVoid: skippedAlreadyVoid,
+      cbRowsDeleted: cbCleanup.deleted || 0,
+      cbCleanupError: cbCleanup.error || null
     });
   } catch (err) {
     return errorResponse_("Failed to void invoice: " + String(err), "SERVER_ERROR");
@@ -22953,6 +22976,139 @@ function api_isInvoiceNoSafe_(consolLedger, invNo, expectedClient, expectedSidem
   }
 }
 
+/**
+ * v38.193.0 — CB Consolidated_Ledger cleanup by Invoice #. Used by
+ * handleVoidInvoice_ (Bug #5) and handleReissueInvoice_ to keep CB in sync
+ * with client Billing_Ledger when an invoice is voided. Without this,
+ * voiding an invoice in the React UI left CB rows tied to the voided
+ * invoice number — counts diverge between client sheet, CB, and Stax.
+ *
+ * Mirrors the rollbackByInvoiceNo_ closure inside handleCreateInvoice_:
+ * brief lock, read just the Invoice # column, find rows in descending
+ * order, group consecutive runs into single deleteRows(start, count)
+ * calls. Returns { deleted, locked, error } — `locked` true if it
+ * couldn't acquire the commit lock within 15s.
+ *
+ * Returns 0 deleted (not an error) if the invoice has no CB rows. That's
+ * the expected state for invoices that were aborted mid-creation or
+ * already cleaned up by a prior void.
+ */
+function api_deleteCbRowsByInvoiceNo_(invoiceNo) {
+  if (!invoiceNo) return { deleted: 0 };
+  var cbId = prop_("CB_SPREADSHEET_ID");
+  if (!cbId) throw new Error("CB_SPREADSHEET_ID not configured");
+  var cbSS = SpreadsheetApp.openById(cbId);
+  var consol = cbSS.getSheetByName("Consolidated_Ledger");
+  if (!consol) throw new Error("Consolidated_Ledger sheet not found");
+
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(15000)) {
+    return { deleted: 0, locked: true, error: "Could not acquire commit lock within 15s" };
+  }
+  try {
+    var hdr    = api_getHeaderMap_(consol);
+    var invCol = hdr["Invoice #"];
+    if (!invCol) throw new Error("Invoice # column not found on Consolidated_Ledger");
+    var lastRow = consol.getLastRow();
+    if (lastRow < 2) return { deleted: 0 };
+    var invCol1d = consol.getRange(2, invCol, lastRow - 1, 1).getValues();
+    var rowsToDelete = [];
+    for (var ri = invCol1d.length - 1; ri >= 0; ri--) {
+      if (String(invCol1d[ri][0] || "").trim() === String(invoiceNo)) {
+        rowsToDelete.push(ri + 2);
+      }
+    }
+    var deletedCount = 0;
+    var di = 0;
+    while (di < rowsToDelete.length) {
+      var runEnd = rowsToDelete[di];
+      var runStart = runEnd;
+      var runLen = 1;
+      while (di + runLen < rowsToDelete.length && rowsToDelete[di + runLen] === runStart - 1) {
+        runStart -= 1;
+        runLen += 1;
+      }
+      try {
+        consol.deleteRows(runStart, runLen);
+        deletedCount += runLen;
+      } catch (perRunErr) {
+        Logger.log("api_deleteCbRowsByInvoiceNo_ run delete failed at rows " + runStart + ".." + runEnd + ": " + perRunErr.message);
+      }
+      di += runLen;
+    }
+    return { deleted: deletedCount, expected: rowsToDelete.length };
+  } finally {
+    try { lock.releaseLock(); } catch (_) {}
+  }
+}
+
+/**
+ * v38.193.0 — CB Consolidated_Ledger cleanup by Ledger Row ID. Used by
+ * api_voidBillingRowsWhere_ (Bug #7 — task reopen / repair reopen) to
+ * remove CB rows whose ledger_row_id is in the voided set. Returns 0 if
+ * none of the IDs have CB entries (the expected case for Unbilled-only
+ * voids — CB only contains Invoiced rows). Defense-in-depth so any
+ * future code path that voids an Invoiced row through this helper
+ * keeps CB in sync.
+ *
+ * Same lock + descending-grouped-deleteRows pattern as the by-invoice
+ * variant above.
+ */
+function api_deleteCbRowsByLedgerIds_(ledgerRowIds) {
+  if (!ledgerRowIds || !ledgerRowIds.length) return { deleted: 0 };
+  var cbId = prop_("CB_SPREADSHEET_ID");
+  if (!cbId) throw new Error("CB_SPREADSHEET_ID not configured");
+  var cbSS = SpreadsheetApp.openById(cbId);
+  var consol = cbSS.getSheetByName("Consolidated_Ledger");
+  if (!consol) throw new Error("Consolidated_Ledger sheet not found");
+
+  var idSet = {};
+  for (var li = 0; li < ledgerRowIds.length; li++) {
+    var k = String(ledgerRowIds[li] || "").trim();
+    if (k) idSet[k] = true;
+  }
+  if (Object.keys(idSet).length === 0) return { deleted: 0 };
+
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(15000)) {
+    return { deleted: 0, locked: true, error: "Could not acquire commit lock within 15s" };
+  }
+  try {
+    var hdr    = api_getHeaderMap_(consol);
+    var lidCol = hdr["Ledger Row ID"];
+    if (!lidCol) throw new Error("Ledger Row ID column not found on Consolidated_Ledger");
+    var lastRow = consol.getLastRow();
+    if (lastRow < 2) return { deleted: 0 };
+    var lidCol1d = consol.getRange(2, lidCol, lastRow - 1, 1).getValues();
+    var rowsToDelete = [];
+    for (var ri = lidCol1d.length - 1; ri >= 0; ri--) {
+      var lid = String(lidCol1d[ri][0] || "").trim();
+      if (lid && idSet[lid]) rowsToDelete.push(ri + 2);
+    }
+    var deletedCount = 0;
+    var di = 0;
+    while (di < rowsToDelete.length) {
+      var runEnd = rowsToDelete[di];
+      var runStart = runEnd;
+      var runLen = 1;
+      while (di + runLen < rowsToDelete.length && rowsToDelete[di + runLen] === runStart - 1) {
+        runStart -= 1;
+        runLen += 1;
+      }
+      try {
+        consol.deleteRows(runStart, runLen);
+        deletedCount += runLen;
+      } catch (perRunErr) {
+        Logger.log("api_deleteCbRowsByLedgerIds_ run delete failed at rows " + runStart + ".." + runEnd + ": " + perRunErr.message);
+      }
+      di += runLen;
+    }
+    return { deleted: deletedCount, expected: rowsToDelete.length };
+  } finally {
+    try { lock.releaseLock(); } catch (_) {}
+  }
+}
+
 function api_markClientLedgerInvoiced_(clientSheetId, ledgerRowIds, invNo, invDate, invUrl) {
   if (!ledgerRowIds || !ledgerRowIds.length) return 0;
   var ss = SpreadsheetApp.openById(clientSheetId);
@@ -26967,6 +27123,23 @@ function api_voidBillingRowsWhere_(ss, predicate, reason) {
       sheet.getRange(2 + i, notesCol).setValue(prevNotes ? (prevNotes + " " + stamped) : stamped);
     }
     out.voided.push(ledgerId || ("row" + (i + 2)));
+  }
+  // v38.193.0 (Bug #7) — Mirror the void on CB Consolidated_Ledger so a
+  // reopen of a task/repair whose billing row somehow made it to CB (the
+  // current Unbilled-only guard above keeps CB-resident rows out, but
+  // defense in depth) doesn't leave an orphan that handleCreateInvoice_
+  // could later sweep onto a fresh invoice. Expected to be a no-op in the
+  // current code path because CB only contains Invoiced rows and the loop
+  // above only touches Unbilled. Best-effort, never blocks the void.
+  if (out.voided.length > 0) {
+    try {
+      var cbCleanup = api_deleteCbRowsByLedgerIds_(out.voided);
+      if (cbCleanup && cbCleanup.deleted > 0) {
+        Logger.log("api_voidBillingRowsWhere_: removed " + cbCleanup.deleted + " orphan CB row(s) for " + out.voided.length + " voided ledger ID(s)");
+      }
+    } catch (cbErr) {
+      Logger.log("api_voidBillingRowsWhere_ CB cleanup failed (non-fatal): " + cbErr.message);
+    }
   }
   return out;
 }
