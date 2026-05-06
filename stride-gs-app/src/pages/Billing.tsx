@@ -61,7 +61,7 @@ import { AddChargeModal, type ManualChargeEditTarget } from '../components/billi
 import { useQBO } from '../hooks/useQBO';
 import { useAuth } from '../contexts/AuthContext';
 import { useBillingBatch, type BatchInvoiceResult } from '../contexts/BillingBatchContext';
-import { postVoidManualCharge, postVoidInvoice, postVoidUnbilledRows, postReissueInvoice } from '../lib/api';
+import { postVoidManualCharge, postVoidInvoice, postVoidUnbilledRows, postReissueInvoice, postQboCreateInvoice } from '../lib/api';
 import { supabase } from '../lib/supabase';
 import { entityEvents } from '../lib/entityEvents';
 import {
@@ -142,22 +142,10 @@ interface InvoiceReviewLine {
   invoiceUrl: string;
 }
 
-interface InvoiceReviewSummary {
-  invoiceNo: string;
-  clientName: string;
-  clientSheetId: string;
-  invoiceDate: string;
-  status: 'Invoiced' | 'Void' | 'Mixed';
-  total: number;
-  lineCount: number;
-  invoiceUrl: string;
-  /** Per-client Stax / autopay flags resolved from `clients` table. */
-  staxCustomerId: string | null;
-  autoCharge: boolean;
-  /** Aggregated sidemark across all line items: '' (none), single value, or 'Multiple'. */
-  sidemark: string;
-  lines: InvoiceReviewLine[];
-}
+// InvoiceReviewSummary was retired with the v38.194.0 rewrite — the new tab
+// reads from public.invoice_tracking and uses InvoiceTrackingRow defined
+// alongside InvoiceReviewTab. InvoiceReviewLine (above) is still used for
+// the lazy-fetched line item subtable.
 
 const STATUS_CFG: Record<string, { bg: string; text: string }> = {
   Unbilled: { bg: '#FEF3C7', text: '#B45309' },
@@ -271,137 +259,130 @@ function EditableCell({ value, onChange, type = 'text', align, currency = true }
   );
 }
 
-// ─── Invoice Review Tab ──────────────────────────────────────────────────────
+// ─── Invoice Review Tab (v38.194.0 rewrite) ─────────────────────────────────
 //
-// Real implementation: queries `billing` table directly from Supabase (no GAS
-// round-trip), groups by invoice_no, and renders an expandable summary list
-// with search / filter / sort. Replaces the previous mock-data stub.
+// Reads from public.invoice_tracking — the per-invoice tracking ledger
+// introduced in v38.194.0. One row per invoice with separate qbo_pushed_at +
+// stax_pushed_at timestamps + an auto_charge snapshot taken at create time.
+// Line items lazy-fetched on expand. Realtime subscription on
+// invoice_tracking so multi-operator pushes propagate live.
+//
+// Decisions locked from the build plan (not in code, in design):
+//   - Track per invoice_no, not per billing row
+//   - QBO + Stax are independent push paths with separate timestamps
+//   - All invoices → QBO; only auto_charge clients → Stax
+//   - auto_charge snapshotted from clients at create time (not live-read)
+//   - Sortable columns via header click
+//   - Optimistic updates (push timestamps stamp locally, rollback on error)
+//   - Realtime subscription for cross-user live state
+//   - Bulk push via checkboxes; Stax-eligible only when ALL selected are
+//     auto_charge=true (strict gate, mirrors the user's spec)
 
-const REVIEW_INVOICE_STATUS_CFG: Record<string, { bg: string; text: string }> = {
-  Invoiced: { bg: '#EFF6FF', text: '#1D4ED8' },
-  Void:     { bg: '#F3F4F6', text: '#6B7280' },
-  Mixed:    { bg: '#FEF3C7', text: '#B45309' },
-};
+interface InvoiceTrackingRow {
+  invoiceNo: string;
+  tenantId: string;
+  clientName: string;
+  invoiceDate: string | null;
+  total: number;
+  lineCount: number;
+  autoCharge: boolean;
+  createdAt: string;
+  qboPushedAt: string | null;
+  staxPushedAt: string | null;
+  /** Resolved on demand from the first billing row's invoice_url. */
+  invoiceUrl?: string | null;
+}
+
+type SortField =
+  | 'invoiceNo' | 'clientName' | 'invoiceDate' | 'total'
+  | 'lineCount' | 'createdAt' | 'qboPushedAt' | 'staxPushedAt';
+
+type StatusFilter = 'all' | 'not_qbo' | 'not_stax';
+
+function toTrackingRow(r: Record<string, unknown>): InvoiceTrackingRow {
+  return {
+    invoiceNo:    String(r.invoice_no || ''),
+    tenantId:     String(r.tenant_id || ''),
+    clientName:   String(r.client_name || ''),
+    invoiceDate:  r.invoice_date ? String(r.invoice_date) : null,
+    total:        Number(r.total || 0),
+    lineCount:    Number(r.line_count || 0),
+    autoCharge:   Boolean(r.auto_charge),
+    createdAt:    String(r.created_at || ''),
+    qboPushedAt:  r.qbo_pushed_at ? String(r.qbo_pushed_at) : null,
+    staxPushedAt: r.stax_pushed_at ? String(r.stax_pushed_at) : null,
+  };
+}
+
+function fmtPushedAt(iso: string | null): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  // YYYY-MM-DD for readability without the time noise
+  return d.toISOString().slice(0, 10);
+}
 
 function InvoiceReviewTab() {
   const { user } = useAuth();
   const isStaff = user?.role === 'admin' || user?.role === 'staff';
-  // Per-client Stax / Auto Pay flags. Same source the Billing Report tab
-  // uses (apiClients → tenant_id keyed map). Used to render the green
-  // CreditCard icon + Auto Pay badge next to each invoice's client name.
-  const { apiClients } = useClients();
-  const clientPayInfoMap = useMemo<Record<string, { autoCharge: boolean; staxCustomerId: string }>>(() => {
-    const map: Record<string, { autoCharge: boolean; staxCustomerId: string }> = {};
-    for (const c of apiClients) {
-      if (c.spreadsheetId) {
-        map[c.spreadsheetId] = {
-          autoCharge: c.autoCharge ?? false,
-          staxCustomerId: c.staxCustomerId ?? '',
-        };
-      }
-    }
-    return map;
-  }, [apiClients]);
-  const [invoices, setInvoices] = useState<InvoiceReviewSummary[]>([]);
+
+  const [invoices, setInvoices] = useState<InvoiceTrackingRow[]>([]);
+  const [linesByInvoice, setLinesByInvoice] = useState<Record<string, InvoiceReviewLine[]>>({});
+  const [pdfUrlByInvoice, setPdfUrlByInvoice] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [selected, setSelected] = useState<Set<string>>(new Set());
   const [search, setSearch] = useState('');
   const [clientFilter, setClientFilter] = useState<string>('all');
-  const [statusFilter, setStatusFilter] = useState<'all' | 'Invoiced' | 'Void'>('all');
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
-  const [sortBy, setSortBy] = useState<'invoiceDate' | 'invoiceNo' | 'clientName' | 'total'>('invoiceDate');
+  const [pushFilter, setPushFilter] = useState<StatusFilter>('all');
+  const [autopayOnly, setAutopayOnly] = useState(false);
+  const [sortBy, setSortBy] = useState<SortField>('createdAt');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
+  const [bulkBusy, setBulkBusy] = useState<'qbo' | 'stax' | 'void' | null>(null);
 
   const reload = useCallback(async () => {
     setLoading(true);
     setError(null);
     const { data, error: err } = await supabase
-      .from('billing')
-      .select('ledger_row_id, invoice_no, status, client_name, tenant_id, date, invoice_date, svc_code, svc_name, item_id, description, item_class, qty, rate, total, task_id, repair_id, shipment_number, item_notes, sidemark, reference, invoice_url')
-      .in('status', ['Invoiced', 'Void'])
-      .not('invoice_no', 'is', null)
-      .order('invoice_date', { ascending: false });
+      .from('invoice_tracking')
+      .select('*')
+      .order('created_at', { ascending: false });
     if (err) { setError(err.message); setLoading(false); return; }
-    const lines: InvoiceReviewLine[] = (data || []).map(r => ({
-      ledgerRowId: String(r.ledger_row_id || ''),
-      invoiceNo:   String(r.invoice_no || ''),
-      status:      String(r.status || ''),
-      clientName:  String(r.client_name || ''),
-      clientSheetId: String(r.tenant_id || ''),
-      date:         String(r.date || ''),
-      invoiceDate:  String(r.invoice_date || ''),
-      svcCode:      String(r.svc_code || ''),
-      svcName:      String(r.svc_name || ''),
-      itemId:       String(r.item_id || ''),
-      description:  String(r.description || ''),
-      itemClass:    String(r.item_class || ''),
-      qty:          Number(r.qty || 0),
-      rate:         Number(r.rate || 0),
-      total:        Number(r.total || 0),
-      taskId:       String(r.task_id || ''),
-      repairId:     String(r.repair_id || ''),
-      shipmentNumber: String(r.shipment_number || ''),
-      notes:        String(r.item_notes || ''),
-      sidemark:     String(r.sidemark || ''),
-      reference:    String(r.reference || ''),
-      invoiceUrl:   String(r.invoice_url || ''),
-    }));
-    // Group by invoice_no. Sidemark is aggregated separately from a parallel
-    // map (Set<string> per invoice) so we can collapse to '' / single / 'Multiple'
-    // after the loop without mutating the summary on every line.
-    const groups = new Map<string, InvoiceReviewSummary>();
-    const sidemarksByInvoice = new Map<string, Set<string>>();
-    for (const ln of lines) {
-      if (!ln.invoiceNo) continue;
-      let g = groups.get(ln.invoiceNo);
-      if (!g) {
-        const payInfo = clientPayInfoMap[ln.clientSheetId];
-        g = {
-          invoiceNo:    ln.invoiceNo,
-          clientName:   ln.clientName,
-          clientSheetId: ln.clientSheetId,
-          invoiceDate:  ln.invoiceDate || ln.date,
-          status:       (ln.status === 'Void' ? 'Void' : 'Invoiced'),
-          total:        0,
-          lineCount:    0,
-          invoiceUrl:   ln.invoiceUrl,
-          staxCustomerId: payInfo?.staxCustomerId || null,
-          autoCharge:   payInfo?.autoCharge ?? false,
-          sidemark:     '',
-          lines:        [],
-        };
-        groups.set(ln.invoiceNo, g);
-        sidemarksByInvoice.set(ln.invoiceNo, new Set());
-      }
-      g.total += ln.total;
-      g.lineCount += 1;
-      g.lines.push(ln);
-      if (!g.invoiceUrl && ln.invoiceUrl) g.invoiceUrl = ln.invoiceUrl;
-      if (ln.sidemark) sidemarksByInvoice.get(ln.invoiceNo)!.add(ln.sidemark);
-      // Mixed status: any line differing from the first defines it
-      if ((g.status === 'Invoiced' && ln.status === 'Void') ||
-          (g.status === 'Void' && ln.status === 'Invoiced')) {
-        g.status = 'Mixed';
-      }
-    }
-    // Collapse aggregated sidemark sets to display strings.
-    for (const [invNo, set] of sidemarksByInvoice) {
-      const g = groups.get(invNo);
-      if (!g) continue;
-      if (set.size === 0) g.sidemark = '';
-      else if (set.size === 1) g.sidemark = [...set][0];
-      else g.sidemark = 'Multiple';
-    }
-    setInvoices(Array.from(groups.values()));
+    setInvoices((data || []).map(toTrackingRow));
     setLoading(false);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [clientPayInfoMap]);
+  }, []);
 
   useEffect(() => { reload(); }, [reload]);
 
-  // Subscribe to billing realtime — when Void writes propagate, refresh
+  // Realtime subscription on invoice_tracking. Multi-operator pushes
+  // propagate live: when another user clicks Push to QBO, this tab's
+  // green check appears within ~1s without refresh.
+  useEffect(() => {
+    const channel = supabase
+      .channel('invoice_tracking_review')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'invoice_tracking' }, payload => {
+        const evt = payload.eventType;
+        if (evt === 'INSERT' && payload.new) {
+          const row = toTrackingRow(payload.new as Record<string, unknown>);
+          setInvoices(prev => [row, ...prev.filter(p => p.invoiceNo !== row.invoiceNo)]);
+        } else if (evt === 'UPDATE' && payload.new) {
+          const row = toTrackingRow(payload.new as Record<string, unknown>);
+          setInvoices(prev => prev.map(p => p.invoiceNo === row.invoiceNo ? row : p));
+        } else if (evt === 'DELETE' && payload.old) {
+          const inv = String((payload.old as Record<string, unknown>).invoice_no || '');
+          if (inv) setInvoices(prev => prev.filter(p => p.invoiceNo !== inv));
+        }
+      })
+      .subscribe();
+    return () => { supabase.removeChannel(channel); };
+  }, []);
+
+  // Cross-tab refresh signal — when the existing Re-issue / Void flows write
+  // through entityEvents, just refetch (cheap). The realtime path above
+  // covers most cases but entityEvents catches gaps.
   useEffect(() => {
     return entityEvents.subscribe(type => {
       if (type === 'billing') reload();
@@ -417,29 +398,16 @@ function InvoiceReviewTab() {
   const filteredSorted = useMemo(() => {
     const q = search.trim().toLowerCase();
     let out = invoices.filter(inv => {
-      if (statusFilter !== 'all') {
-        if (statusFilter === 'Invoiced' && inv.status === 'Void') return false;
-        if (statusFilter === 'Void' && inv.status === 'Invoiced') return false;
-      }
       if (clientFilter !== 'all' && inv.clientName !== clientFilter) return false;
       if (dateFrom && inv.invoiceDate && inv.invoiceDate < dateFrom) return false;
       if (dateTo && inv.invoiceDate && inv.invoiceDate > dateTo) return false;
+      if (pushFilter === 'not_qbo' && inv.qboPushedAt) return false;
+      if (pushFilter === 'not_stax' && inv.staxPushedAt) return false;
+      if (autopayOnly && !inv.autoCharge) return false;
       if (q) {
-        // Search every text field on the invoice + every line-item field
-        // staff might recognize: ledger ID, item ID, description, sidemark,
-        // reference, notes, vendor-equivalent (svc name/code), task / repair
-        // / shipment refs. Matches the spirit of the global Billing Report
-        // search but operates on the invoice-grouped projection so the user
-        // can find any line item that's already been invoiced (the symptom
-        // Justin reported — "we currently have to open every invoice").
-        const haystack = [
-          inv.invoiceNo, inv.clientName, inv.invoiceDate, String(inv.total),
-          ...inv.lines.flatMap(l => [
-            l.ledgerRowId, l.itemId, l.description, l.sidemark, l.reference,
-            l.notes, l.svcCode, l.svcName, l.itemClass,
-            l.taskId, l.repairId, l.shipmentNumber,
-          ]),
-        ].join(' ').toLowerCase();
+        const haystack = [inv.invoiceNo, inv.clientName, inv.invoiceDate, String(inv.total)]
+          .join(' ')
+          .toLowerCase();
         if (!haystack.includes(q)) return false;
       }
       return true;
@@ -447,61 +415,221 @@ function InvoiceReviewTab() {
     out = [...out].sort((a, b) => {
       const dir = sortDir === 'asc' ? 1 : -1;
       switch (sortBy) {
-        case 'invoiceDate': return (a.invoiceDate || '').localeCompare(b.invoiceDate || '') * dir;
-        case 'invoiceNo':   return a.invoiceNo.localeCompare(b.invoiceNo) * dir;
-        case 'clientName':  return a.clientName.localeCompare(b.clientName) * dir;
-        case 'total':       return (a.total - b.total) * dir;
+        case 'invoiceNo':    return a.invoiceNo.localeCompare(b.invoiceNo) * dir;
+        case 'clientName':   return a.clientName.localeCompare(b.clientName) * dir;
+        case 'invoiceDate':  return (a.invoiceDate || '').localeCompare(b.invoiceDate || '') * dir;
+        case 'total':        return (a.total - b.total) * dir;
+        case 'lineCount':    return (a.lineCount - b.lineCount) * dir;
+        case 'createdAt':    return (a.createdAt || '').localeCompare(b.createdAt || '') * dir;
+        case 'qboPushedAt':  return (a.qboPushedAt || '').localeCompare(b.qboPushedAt || '') * dir;
+        case 'staxPushedAt': return (a.staxPushedAt || '').localeCompare(b.staxPushedAt || '') * dir;
         default: return 0;
       }
     });
     return out;
-  }, [invoices, search, clientFilter, statusFilter, dateFrom, dateTo, sortBy, sortDir]);
+  }, [invoices, search, clientFilter, dateFrom, dateTo, pushFilter, autopayOnly, sortBy, sortDir]);
 
-  const totalSum = useMemo(() =>
-    filteredSorted.filter(i => i.status !== 'Void').reduce((s, i) => s + i.total, 0),
-    [filteredSorted]
+  // Selection helpers — only count visible (filtered) rows toward "all selected"
+  const visibleInvoiceNos = useMemo(() => filteredSorted.map(i => i.invoiceNo), [filteredSorted]);
+  const allVisibleSelected = visibleInvoiceNos.length > 0 && visibleInvoiceNos.every(n => selected.has(n));
+  const someVisibleSelected = visibleInvoiceNos.some(n => selected.has(n)) && !allVisibleSelected;
+  const selectedInvoices = useMemo(
+    () => filteredSorted.filter(i => selected.has(i.invoiceNo)),
+    [filteredSorted, selected]
   );
+  const allSelectedAreAutopay = selectedInvoices.length > 0 && selectedInvoices.every(i => i.autoCharge);
 
-  const handleVoid = async (inv: InvoiceReviewSummary) => {
-    if (!isStaff) return;
-    const reason = window.prompt(`Void invoice ${inv.invoiceNo}? Optional reason:`, '');
-    if (reason === null) return; // user cancelled
+  const totalSum = useMemo(() => filteredSorted.reduce((s, i) => s + i.total, 0), [filteredSorted]);
+  const summaryCards = [
+    { label: 'Invoices', value: filteredSorted.length, color: '#60A5FA' },
+    { label: 'Total Billed', value: `$${totalSum.toFixed(2)}`, color: '#4ADE80' },
+    { label: 'Pending QBO', value: filteredSorted.filter(i => !i.qboPushedAt).length, color: '#F59E0B' },
+    { label: 'Pending Stax', value: filteredSorted.filter(i => i.autoCharge && !i.staxPushedAt).length, color: '#A78BFA' },
+  ];
 
-    // Optimistic — flip the summary + every child line to Void immediately
-    // so the badge / counters / Total Billed update without waiting for the
-    // GAS round-trip. WriteButton's spinner still indicates work in flight;
-    // this just removes the "stale row sitting next to a spinning button"
-    // feel. On failure we restore the prior snapshot.
-    const prevInvoices = invoices;
-    setInvoices(prev => prev.map(i =>
-      i.invoiceNo === inv.invoiceNo
-        ? { ...i, status: 'Void' as const, lines: i.lines.map(l => ({ ...l, status: 'Void' })) }
-        : i
-    ));
+  const toggleExpand = useCallback(async (invoiceNo: string) => {
+    const isCurrentlyOpen = expanded.has(invoiceNo);
+    setExpanded(prev => {
+      const next = new Set(prev);
+      if (next.has(invoiceNo)) next.delete(invoiceNo);
+      else next.add(invoiceNo);
+      return next;
+    });
+    if (isCurrentlyOpen) return; // closing — no fetch needed
+    if (linesByInvoice[invoiceNo]) return; // already cached
+    // Lazy-fetch billing lines for this invoice
+    const { data, error: err } = await supabase
+      .from('billing')
+      .select('ledger_row_id, invoice_no, status, client_name, tenant_id, date, invoice_date, svc_code, svc_name, item_id, description, item_class, qty, rate, total, task_id, repair_id, shipment_number, item_notes, sidemark, reference, invoice_url')
+      .eq('invoice_no', invoiceNo);
+    if (err || !data) return;
+    const lines: InvoiceReviewLine[] = data.map(r => ({
+      ledgerRowId:   String(r.ledger_row_id || ''),
+      invoiceNo:     String(r.invoice_no || ''),
+      status:        String(r.status || ''),
+      clientName:    String(r.client_name || ''),
+      clientSheetId: String(r.tenant_id || ''),
+      date:          String(r.date || ''),
+      invoiceDate:   String(r.invoice_date || ''),
+      svcCode:       String(r.svc_code || ''),
+      svcName:       String(r.svc_name || ''),
+      itemId:        String(r.item_id || ''),
+      description:   String(r.description || ''),
+      itemClass:     String(r.item_class || ''),
+      qty:           Number(r.qty || 0),
+      rate:          Number(r.rate || 0),
+      total:         Number(r.total || 0),
+      taskId:        String(r.task_id || ''),
+      repairId:      String(r.repair_id || ''),
+      shipmentNumber: String(r.shipment_number || ''),
+      notes:         String(r.item_notes || ''),
+      sidemark:      String(r.sidemark || ''),
+      reference:     String(r.reference || ''),
+      invoiceUrl:    String(r.invoice_url || ''),
+    }));
+    setLinesByInvoice(prev => ({ ...prev, [invoiceNo]: lines }));
+    const firstUrl = lines.find(l => l.invoiceUrl)?.invoiceUrl;
+    if (firstUrl) setPdfUrlByInvoice(prev => ({ ...prev, [invoiceNo]: firstUrl }));
+  }, [expanded, linesByInvoice]);
 
-    try {
-      const res = await postVoidInvoice({ invoiceNo: inv.invoiceNo, reason }, inv.clientSheetId);
-      if (!res.ok || !res.data?.success) {
-        setInvoices(prevInvoices); // revert
-        // Throwing lets WriteButton's catch flip the button to the red ✗
-        // outcome state instead of the green ✓ Done flash.
-        throw new Error(res.error || res.data?.error || 'Unknown error');
-      }
-      // Reload from Supabase so we pick up the writeThrough echo (note text,
-      // updated_at, etc). Background only — UI is already correct optimistically.
-      reload();
-    } catch (err) {
-      setInvoices(prevInvoices);
-      throw err; // re-throw so WriteButton renders the failure state
+  const handleSort = (field: SortField) => {
+    if (sortBy === field) setSortDir(sortDir === 'asc' ? 'desc' : 'asc');
+    else {
+      setSortBy(field);
+      // Numeric / date columns default desc; text columns default asc
+      const desc = field === 'total' || field === 'lineCount' || field === 'invoiceDate' ||
+                   field === 'createdAt' || field === 'qboPushedAt' || field === 'staxPushedAt';
+      setSortDir(desc ? 'desc' : 'asc');
     }
   };
 
-  // v38.193.0 (Phase D) — One-click Re-issue. Releases the invoice's billing
-  // rows back to Unbilled and removes the matching CB rows so the operator
-  // can re-create a corrected invoice via Create Invoices. The pre-flight
-  // confirm asks the operator to confirm Stax/QBO has already been voided —
-  // this handler doesn't touch external systems.
-  const handleReissue = async (inv: InvoiceReviewSummary) => {
+  const toggleSelect = (invoiceNo: string) => {
+    setSelected(prev => {
+      const next = new Set(prev);
+      if (next.has(invoiceNo)) next.delete(invoiceNo);
+      else next.add(invoiceNo);
+      return next;
+    });
+  };
+
+  const toggleSelectAllVisible = () => {
+    setSelected(prev => {
+      const next = new Set(prev);
+      if (allVisibleSelected) {
+        for (const n of visibleInvoiceNos) next.delete(n);
+      } else {
+        for (const n of visibleInvoiceNos) next.add(n);
+      }
+      return next;
+    });
+  };
+
+  // Fetch ledger_row_ids for a set of invoice_nos. Used by bulk push handlers.
+  const fetchLedgerRowIdsForInvoices = async (invoiceNos: string[]): Promise<{ rowIds: string[]; byInvoice: Record<string, string[]> }> => {
+    if (invoiceNos.length === 0) return { rowIds: [], byInvoice: {} };
+    const { data, error: err } = await supabase
+      .from('billing')
+      .select('ledger_row_id, invoice_no')
+      .in('invoice_no', invoiceNos)
+      .eq('status', 'Invoiced');
+    if (err) throw new Error(`Failed to fetch ledger row IDs: ${err.message}`);
+    const byInvoice: Record<string, string[]> = {};
+    const rowIds: string[] = [];
+    for (const r of data || []) {
+      const lid = String(r.ledger_row_id || '');
+      const inv = String(r.invoice_no || '');
+      if (!lid || !inv) continue;
+      rowIds.push(lid);
+      if (!byInvoice[inv]) byInvoice[inv] = [];
+      byInvoice[inv].push(lid);
+    }
+    return { rowIds, byInvoice };
+  };
+
+  // Push to QBO. Optimistically stamp qbo_pushed_at locally for immediate
+  // visual feedback. Server-side handleQboCreateInvoice_ stamps the same
+  // column via PostgREST, and the realtime subscription will echo it back —
+  // the optimistic write + the realtime echo converge on the same value.
+  const handleBulkPushQbo = async (invoiceNos: string[]) => {
+    if (!isStaff || invoiceNos.length === 0) return;
+    if (!window.confirm(`Push ${invoiceNos.length} invoice(s) to QBO?`)) return;
+    setBulkBusy('qbo');
+    const optimisticAt = new Date().toISOString();
+    const prevSnapshot = invoices;
+    setInvoices(prev => prev.map(i => invoiceNos.includes(i.invoiceNo) ? { ...i, qboPushedAt: optimisticAt } : i));
+    try {
+      const { rowIds } = await fetchLedgerRowIdsForInvoices(invoiceNos);
+      if (rowIds.length === 0) throw new Error('No Invoiced billing rows found for the selected invoices.');
+      const res = await postQboCreateInvoice(rowIds, false, true);
+      if (!res.ok || !res.data?.success) {
+        throw new Error(res.error || res.data?.error || 'QBO push failed');
+      }
+      setSelected(new Set());
+    } catch (err) {
+      setInvoices(prevSnapshot);
+      // eslint-disable-next-line no-alert
+      window.alert(`Push to QBO failed: ${(err as Error).message}`);
+    } finally {
+      setBulkBusy(null);
+    }
+  };
+
+  const handleBulkPushStax = async (invoiceNos: string[]) => {
+    if (!isStaff || invoiceNos.length === 0) return;
+    if (!window.confirm(`Push ${invoiceNos.length} invoice(s) to Stax?`)) return;
+    setBulkBusy('stax');
+    const optimisticAt = new Date().toISOString();
+    const prevSnapshot = invoices;
+    setInvoices(prev => prev.map(i => invoiceNos.includes(i.invoiceNo) ? { ...i, staxPushedAt: optimisticAt } : i));
+    try {
+      const { rowIds } = await fetchLedgerRowIdsForInvoices(invoiceNos);
+      if (rowIds.length === 0) throw new Error('No Invoiced billing rows found for the selected invoices.');
+      const res = await postQbExport({ source: 'selected', ledgerRowIds: rowIds });
+      if (!res.ok || !res.data?.success) {
+        throw new Error(res.error || res.data?.error || 'Stax push failed');
+      }
+      setSelected(new Set());
+    } catch (err) {
+      setInvoices(prevSnapshot);
+      // eslint-disable-next-line no-alert
+      window.alert(`Push to Stax failed: ${(err as Error).message}`);
+    } finally {
+      setBulkBusy(null);
+    }
+  };
+
+  const handleBulkVoid = async (selectedSummaries: InvoiceTrackingRow[]) => {
+    if (!isStaff || selectedSummaries.length === 0) return;
+    const reason = window.prompt(`Void ${selectedSummaries.length} invoice(s)? Optional reason:`, '');
+    if (reason === null) return;
+    setBulkBusy('void');
+    const prevSnapshot = invoices;
+    setInvoices(prev => prev.filter(i => !selected.has(i.invoiceNo)));
+    try {
+      let failures = 0;
+      for (const inv of selectedSummaries) {
+        try {
+          const res = await postVoidInvoice({ invoiceNo: inv.invoiceNo, reason }, inv.tenantId);
+          if (!res.ok || !res.data?.success) failures++;
+        } catch {
+          failures++;
+        }
+      }
+      setSelected(new Set());
+      if (failures > 0) {
+        // eslint-disable-next-line no-alert
+        window.alert(`${failures} of ${selectedSummaries.length} void(s) failed. Refreshing.`);
+        setInvoices(prevSnapshot);
+        reload();
+      }
+    } finally {
+      setBulkBusy(null);
+    }
+  };
+
+  // Single-row Re-issue handler (kept from v38.193). Operates on
+  // InvoiceTrackingRow shape now instead of InvoiceReviewSummary.
+  const handleReissue = async (inv: InvoiceTrackingRow) => {
     if (!isStaff) return;
     const ok = window.confirm(
       `Re-issue invoice ${inv.invoiceNo}?\n\n` +
@@ -514,17 +642,12 @@ function InvoiceReviewTab() {
     if (!ok) return;
     const reason = window.prompt(`Optional reason (will be appended to Item Notes):`, '');
     if (reason === null) return;
-
-    // Optimistic — drop the invoice from the local list. If the call fails,
-    // restore. The rows will reappear on Billing → Report once the data
-    // reloads (they're now Unbilled and ungrouped from the invoice).
-    const prevInvoices = invoices;
-    setInvoices(prev => prev.filter(i => i.invoiceNo !== inv.invoiceNo));
-
+    const prev = invoices;
+    setInvoices(p => p.filter(i => i.invoiceNo !== inv.invoiceNo));
     try {
-      const res = await postReissueInvoice({ invoiceNo: inv.invoiceNo, reason }, inv.clientSheetId);
+      const res = await postReissueInvoice({ invoiceNo: inv.invoiceNo, reason }, inv.tenantId);
       if (!res.ok || !res.data?.success) {
-        setInvoices(prevInvoices);
+        setInvoices(prev);
         throw new Error(res.error || res.data?.error || 'Unknown error');
       }
       const d = res.data;
@@ -535,25 +658,28 @@ function InvoiceReviewTab() {
         (d.cbRowsDeleted ? `, ${d.cbRowsDeleted} CB row(s) removed` : '') +
         `.\n\nGo to Billing → Report to find the released rows, then Create Invoices.`
       );
-      reload();
     } catch (err) {
-      setInvoices(prevInvoices);
-      throw err; // WriteButton renders the failure state
+      setInvoices(prev);
+      throw err;
     }
   };
 
-  const toggleExpand = (invoiceNo: string) => {
-    setExpanded(prev => {
-      const next = new Set(prev);
-      if (next.has(invoiceNo)) next.delete(invoiceNo);
-      else next.add(invoiceNo);
-      return next;
-    });
-  };
-
-  const handleSort = (field: typeof sortBy) => {
-    if (sortBy === field) setSortDir(sortDir === 'asc' ? 'desc' : 'asc');
-    else { setSortBy(field); setSortDir(field === 'invoiceDate' || field === 'total' ? 'desc' : 'asc'); }
+  const handleSingleVoid = async (inv: InvoiceTrackingRow) => {
+    if (!isStaff) return;
+    const reason = window.prompt(`Void invoice ${inv.invoiceNo}? Optional reason:`, '');
+    if (reason === null) return;
+    const prev = invoices;
+    setInvoices(p => p.filter(i => i.invoiceNo !== inv.invoiceNo));
+    try {
+      const res = await postVoidInvoice({ invoiceNo: inv.invoiceNo, reason }, inv.tenantId);
+      if (!res.ok || !res.data?.success) {
+        setInvoices(prev);
+        throw new Error(res.error || res.data?.error || 'Unknown error');
+      }
+    } catch (err) {
+      setInvoices(prev);
+      throw err;
+    }
   };
 
   const reviewTh: React.CSSProperties = {
@@ -566,7 +692,7 @@ function InvoiceReviewTab() {
     borderBottom: `1px solid ${theme.colors.borderLight}`, verticalAlign: 'middle',
   };
 
-  const SortHead = ({ field, label, align }: { field: typeof sortBy; label: string; align?: 'right' | 'left' }) => (
+  const SortHead = ({ field, label, align }: { field: SortField; label: string; align?: 'right' | 'left' }) => (
     <th
       style={{ ...reviewTh, cursor: 'pointer', textAlign: align || 'left' }}
       onClick={() => handleSort(field)}
@@ -580,15 +706,9 @@ function InvoiceReviewTab() {
     </th>
   );
 
-  const summaryCards = [
-    { label: 'Invoices', value: filteredSorted.length, color: '#60A5FA' },
-    { label: 'Total Billed', value: `$${totalSum.toFixed(2)}`, color: '#4ADE80' },
-    { label: 'Voided', value: filteredSorted.filter(i => i.status === 'Void').length, color: '#F87171' },
-  ];
-
   return (
     <div>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 16, marginBottom: 20 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 16, marginBottom: 20 }}>
         {summaryCards.map(({ label, value, color }) => (
           <div key={label} style={{ padding: '20px 22px', background: '#1C1C1C', borderRadius: 20 }}>
             <div style={{ fontSize: 10, fontWeight: 600, color: 'rgba(255,255,255,0.55)', textTransform: 'uppercase', letterSpacing: '2px', marginBottom: 10 }}>{label}</div>
@@ -605,7 +725,7 @@ function InvoiceReviewTab() {
             type="text"
             value={search}
             onChange={e => setSearch(e.target.value)}
-            placeholder="Search invoice #, client, items…"
+            placeholder="Search invoice #, client…"
             style={{ width: '100%', padding: '8px 12px 8px 32px', fontSize: 12, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', fontFamily: 'inherit' }}
           />
         </div>
@@ -618,14 +738,24 @@ function InvoiceReviewTab() {
           {clientOptions.map(c => <option key={c} value={c}>{c}</option>)}
         </select>
         <select
-          value={statusFilter}
-          onChange={e => setStatusFilter(e.target.value as 'all' | 'Invoiced' | 'Void')}
+          value={pushFilter}
+          onChange={e => setPushFilter(e.target.value as StatusFilter)}
+          title="Filter by push status"
           style={{ padding: '7px 10px', fontSize: 12, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', fontFamily: 'inherit' }}
         >
           <option value="all">All Statuses</option>
-          <option value="Invoiced">Invoiced</option>
-          <option value="Void">Void</option>
+          <option value="not_qbo">Not pushed to QBO</option>
+          <option value="not_stax">Not pushed to Stax</option>
         </select>
+        <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, color: theme.colors.text, cursor: 'pointer', userSelect: 'none' }}>
+          <input
+            type="checkbox"
+            checked={autopayOnly}
+            onChange={e => setAutopayOnly(e.target.checked)}
+            style={{ cursor: 'pointer' }}
+          />
+          Auto Pay only
+        </label>
         <input
           type="date"
           value={dateFrom}
@@ -642,7 +772,7 @@ function InvoiceReviewTab() {
           style={{ padding: '7px 10px', fontSize: 12, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', fontFamily: 'inherit' }}
         />
         <button
-          onClick={() => { setSearch(''); setClientFilter('all'); setStatusFilter('all'); setDateFrom(''); setDateTo(''); }}
+          onClick={() => { setSearch(''); setClientFilter('all'); setPushFilter('all'); setAutopayOnly(false); setDateFrom(''); setDateTo(''); }}
           style={{ padding: '7px 12px', fontSize: 12, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', fontFamily: 'inherit', display: 'inline-flex', alignItems: 'center', gap: 4 }}
         >
           <X size={12} /> Clear
@@ -656,6 +786,57 @@ function InvoiceReviewTab() {
           <RefreshCw size={12} style={{ animation: loading ? 'spin 1s linear infinite' : 'none' }} /> Refresh
         </button>
       </div>
+
+      {/* Bulk action bar — sticky when ≥1 selected */}
+      {isStaff && selected.size > 0 && (
+        <div style={{
+          padding: '10px 14px', marginBottom: 12, background: '#FFF7ED',
+          border: `1px solid ${theme.colors.orange}`, borderRadius: 10,
+          display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap'
+        }}>
+          <span style={{ fontSize: 13, fontWeight: 600, color: theme.colors.text }}>
+            {selectedInvoices.length} invoice(s) selected
+          </span>
+          <span style={{ flex: 1 }} />
+          <WriteButton
+            label={`Push to QBO (${selectedInvoices.length})`}
+            loadingText="Pushing…"
+            successText="Pushed"
+            variant="primary"
+            size="sm"
+            onClick={() => handleBulkPushQbo(selectedInvoices.map(i => i.invoiceNo))}
+            blockedReason={bulkBusy && bulkBusy !== 'qbo' ? 'Another action in progress' : null}
+          />
+          <WriteButton
+            label={`Push to Stax (${selectedInvoices.filter(i => i.autoCharge).length})`}
+            loadingText="Pushing…"
+            successText="Pushed"
+            variant="secondary"
+            size="sm"
+            blockedReason={
+              !allSelectedAreAutopay
+                ? 'All selected invoices must have Auto Pay enabled to push to Stax'
+                : (bulkBusy && bulkBusy !== 'stax' ? 'Another action in progress' : null)
+            }
+            onClick={() => handleBulkPushStax(selectedInvoices.filter(i => i.autoCharge).map(i => i.invoiceNo))}
+          />
+          <WriteButton
+            label={`Void (${selectedInvoices.length})`}
+            loadingText="Voiding…"
+            successText="Voided"
+            variant="danger"
+            size="sm"
+            onClick={() => handleBulkVoid(selectedInvoices)}
+            blockedReason={bulkBusy && bulkBusy !== 'void' ? 'Another action in progress' : null}
+          />
+          <button
+            onClick={() => setSelected(new Set())}
+            style={{ padding: '5px 10px', fontSize: 11, border: `1px solid ${theme.colors.border}`, borderRadius: 6, background: '#fff', cursor: 'pointer', fontFamily: 'inherit' }}
+          >
+            Clear selection
+          </button>
+        </div>
+      )}
 
       <div style={{ background: '#fff', border: `1px solid ${theme.colors.border}`, borderRadius: 12, overflow: 'hidden' }}>
         {loading ? (
@@ -676,72 +857,101 @@ function InvoiceReviewTab() {
           <table style={{ width: '100%', borderCollapse: 'collapse' }}>
             <thead>
               <tr>
-                <th style={{ ...reviewTh, width: 32 }}></th>
+                <th style={{ ...reviewTh, width: 32 }}>
+                  <input
+                    type="checkbox"
+                    checked={allVisibleSelected}
+                    ref={el => { if (el) el.indeterminate = someVisibleSelected; }}
+                    onChange={toggleSelectAllVisible}
+                    title={allVisibleSelected ? 'Deselect all visible' : 'Select all visible'}
+                    style={{ cursor: 'pointer' }}
+                  />
+                </th>
+                <th style={{ ...reviewTh, width: 28 }}></th>
                 <SortHead field="invoiceNo" label="Invoice #" />
                 <SortHead field="clientName" label="Client" />
-                <th style={reviewTh}>Sidemark</th>
                 <SortHead field="invoiceDate" label="Invoice Date" />
                 <SortHead field="total" label="Total" align="right" />
-                <th style={{ ...reviewTh, textAlign: 'right' }}>Lines</th>
-                <th style={reviewTh}>Status</th>
+                <SortHead field="lineCount" label="Items" align="right" />
+                <SortHead field="createdAt" label="Created" />
+                <SortHead field="qboPushedAt" label="QBO" />
+                <SortHead field="staxPushedAt" label="Stax" />
                 <th style={{ ...reviewTh, textAlign: 'right' }}>Actions</th>
               </tr>
             </thead>
             <tbody>
               {filteredSorted.map(inv => {
                 const isOpen = expanded.has(inv.invoiceNo);
-                const statusCfg = REVIEW_INVOICE_STATUS_CFG[inv.status];
+                const isSelected = selected.has(inv.invoiceNo);
+                const lines = linesByInvoice[inv.invoiceNo];
+                const pdfUrl = pdfUrlByInvoice[inv.invoiceNo];
                 return (
                   <React.Fragment key={inv.invoiceNo}>
                     <tr
+                      style={{
+                        cursor: 'pointer',
+                        background: isOpen ? '#FFF7ED' : (isSelected ? '#FFF8F2' : 'transparent'),
+                      }}
                       onClick={() => toggleExpand(inv.invoiceNo)}
-                      style={{ cursor: 'pointer', background: isOpen ? '#FFF7ED' : 'transparent' }}
                     >
+                      <td style={{ ...reviewTd, textAlign: 'center' }} onClick={e => e.stopPropagation()}>
+                        <input
+                          type="checkbox"
+                          checked={isSelected}
+                          onChange={() => toggleSelect(inv.invoiceNo)}
+                          style={{ cursor: 'pointer' }}
+                        />
+                      </td>
                       <td style={{ ...reviewTd, textAlign: 'center' }}>
                         {isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
                       </td>
                       <td style={{ ...reviewTd, fontWeight: 600 }}>
-                        <DeepLink kind="invoice" id={inv.invoiceNo} clientSheetId={inv.clientSheetId} showIcon={false} />
+                        <DeepLink kind="invoice" id={inv.invoiceNo} clientSheetId={inv.tenantId} showIcon={false} />
                       </td>
                       <td style={reviewTd}>
                         <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
                           {inv.clientName || '—'}
-                          {inv.staxCustomerId && (
-                            <span title="Stax payment on file" style={{ display: 'inline-flex', flexShrink: 0 }}>
+                          {inv.autoCharge && (
+                            <span title="Auto Pay enabled (snapshot at invoice creation)" style={{ display: 'inline-flex', flexShrink: 0 }}>
                               <CreditCard size={11} color="#15803D" />
-                            </span>
-                          )}
-                          {inv.staxCustomerId && inv.autoCharge && (
-                            <span
-                              title="Auto Pay enabled"
-                              style={{
-                                marginLeft: 2, fontSize: 9, padding: '1px 5px', borderRadius: 4,
-                                background: '#F0FDF4', color: '#15803D', fontWeight: 700,
-                                whiteSpace: 'nowrap',
-                              }}
-                            >
-                              Auto Pay
                             </span>
                           )}
                         </span>
                       </td>
-                      <td style={{ ...reviewTd, maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {inv.sidemark === 'Multiple'
-                          ? <span style={{ fontStyle: 'italic', color: theme.colors.textMuted }}>Multiple</span>
-                          : (inv.sidemark || '—')}
-                      </td>
-                      <td style={reviewTd}>{fmt(inv.invoiceDate) || '—'}</td>
+                      <td style={reviewTd}>{fmt(inv.invoiceDate || '') || '—'}</td>
                       <td style={{ ...reviewTd, textAlign: 'right', fontWeight: 600 }}>${inv.total.toFixed(2)}</td>
                       <td style={{ ...reviewTd, textAlign: 'right', color: theme.colors.textSecondary }}>{inv.lineCount}</td>
-                      <td style={reviewTd}><Badge t={inv.status} c={statusCfg} /></td>
+                      <td style={reviewTd}>{fmt(inv.createdAt) || '—'}</td>
+                      <td style={reviewTd}>
+                        {inv.qboPushedAt ? (
+                          <span title={`Pushed ${inv.qboPushedAt}`} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, color: '#15803D' }}>
+                            <CheckCircle size={12} />
+                            <span style={{ fontSize: 11 }}>{fmtPushedAt(inv.qboPushedAt)}</span>
+                          </span>
+                        ) : (
+                          <span style={{ color: theme.colors.textMuted, fontSize: 11 }}>—</span>
+                        )}
+                      </td>
+                      <td style={reviewTd}>
+                        {inv.staxPushedAt ? (
+                          <span title={`Pushed ${inv.staxPushedAt}`} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, color: '#15803D' }}>
+                            <CheckCircle size={12} />
+                            <span style={{ fontSize: 11 }}>{fmtPushedAt(inv.staxPushedAt)}</span>
+                          </span>
+                        ) : !inv.autoCharge ? (
+                          <span title="Not auto-pay — Stax push not applicable" style={{ color: theme.colors.textMuted, fontSize: 11 }}>n/a</span>
+                        ) : (
+                          <span style={{ color: theme.colors.textMuted, fontSize: 11 }}>—</span>
+                        )}
+                      </td>
                       <td
                         style={{ ...reviewTd, textAlign: 'right' }}
                         onClick={e => e.stopPropagation()}
                       >
                         <div style={{ display: 'inline-flex', gap: 6, justifyContent: 'flex-end' }}>
-                          {inv.invoiceUrl && (
+                          {pdfUrl && (
                             <a
-                              href={inv.invoiceUrl}
+                              href={pdfUrl}
                               target="_blank"
                               rel="noopener noreferrer"
                               title="Open invoice PDF"
@@ -750,7 +960,7 @@ function InvoiceReviewTab() {
                               <ExternalLink size={11} /> PDF
                             </a>
                           )}
-                          {isStaff && inv.status !== 'Void' && (
+                          {isStaff && (
                             <>
                               <WriteButton
                                 label="Re-issue"
@@ -766,7 +976,7 @@ function InvoiceReviewTab() {
                                 successText="Voided"
                                 variant="danger"
                                 size="sm"
-                                onClick={async () => handleVoid(inv)}
+                                onClick={async () => handleSingleVoid(inv)}
                               />
                             </>
                           )}
@@ -775,8 +985,15 @@ function InvoiceReviewTab() {
                     </tr>
                     {isOpen && (
                       <tr>
-                        <td colSpan={9} style={{ padding: 0, background: '#F8FAFC' }}>
-                          <InvoiceReviewLineItems lines={inv.lines} clientSheetId={inv.clientSheetId} />
+                        <td colSpan={11} style={{ padding: 0, background: '#F8FAFC' }}>
+                          {lines ? (
+                            <InvoiceReviewLineItems lines={lines} clientSheetId={inv.tenantId} />
+                          ) : (
+                            <div style={{ padding: 16, textAlign: 'center', color: theme.colors.textMuted, fontSize: 12 }}>
+                              <Loader2 size={14} style={{ animation: 'spin 1s linear infinite', display: 'inline-block', verticalAlign: 'middle', marginRight: 6 }} />
+                              Loading line items…
+                            </div>
+                          )}
                         </td>
                       </tr>
                     )}
