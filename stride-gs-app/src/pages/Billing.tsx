@@ -61,7 +61,7 @@ import { AddChargeModal, type ManualChargeEditTarget } from '../components/billi
 import { useQBO } from '../hooks/useQBO';
 import { useAuth } from '../contexts/AuthContext';
 import { useBillingBatch, type BatchInvoiceResult } from '../contexts/BillingBatchContext';
-import { postVoidManualCharge, postVoidInvoice, postVoidUnbilledRows } from '../lib/api';
+import { postVoidManualCharge, postVoidInvoice, postVoidUnbilledRows, postReissueInvoice } from '../lib/api';
 import { supabase } from '../lib/supabase';
 import { entityEvents } from '../lib/entityEvents';
 import {
@@ -496,6 +496,52 @@ function InvoiceReviewTab() {
     }
   };
 
+  // v38.193.0 (Phase D) — One-click Re-issue. Releases the invoice's billing
+  // rows back to Unbilled and removes the matching CB rows so the operator
+  // can re-create a corrected invoice via Create Invoices. The pre-flight
+  // confirm asks the operator to confirm Stax/QBO has already been voided —
+  // this handler doesn't touch external systems.
+  const handleReissue = async (inv: InvoiceReviewSummary) => {
+    if (!isStaff) return;
+    const ok = window.confirm(
+      `Re-issue invoice ${inv.invoiceNo}?\n\n` +
+      `This releases ${inv.lineCount} line item(s) ($${inv.total.toFixed(2)}) ` +
+      `back to Unbilled and removes the invoice from CB Consolidated_Ledger. ` +
+      `Run Create Invoices afterwards to re-bill.\n\n` +
+      `Pre-condition: if this invoice was already pushed to Stax/QBO, void it ` +
+      `there FIRST. This action only fixes internal ledger state.`
+    );
+    if (!ok) return;
+    const reason = window.prompt(`Optional reason (will be appended to Item Notes):`, '');
+    if (reason === null) return;
+
+    // Optimistic — drop the invoice from the local list. If the call fails,
+    // restore. The rows will reappear on Billing → Report once the data
+    // reloads (they're now Unbilled and ungrouped from the invoice).
+    const prevInvoices = invoices;
+    setInvoices(prev => prev.filter(i => i.invoiceNo !== inv.invoiceNo));
+
+    try {
+      const res = await postReissueInvoice({ invoiceNo: inv.invoiceNo, reason }, inv.clientSheetId);
+      if (!res.ok || !res.data?.success) {
+        setInvoices(prevInvoices);
+        throw new Error(res.error || res.data?.error || 'Unknown error');
+      }
+      const d = res.data;
+      // eslint-disable-next-line no-alert
+      window.alert(
+        `Invoice ${inv.invoiceNo} re-issued.\n\n` +
+        `${d.rowsReleased ?? 0} row(s) released to Unbilled` +
+        (d.cbRowsDeleted ? `, ${d.cbRowsDeleted} CB row(s) removed` : '') +
+        `.\n\nGo to Billing → Report to find the released rows, then Create Invoices.`
+      );
+      reload();
+    } catch (err) {
+      setInvoices(prevInvoices);
+      throw err; // WriteButton renders the failure state
+    }
+  };
+
   const toggleExpand = (invoiceNo: string) => {
     setExpanded(prev => {
       const next = new Set(prev);
@@ -705,14 +751,24 @@ function InvoiceReviewTab() {
                             </a>
                           )}
                           {isStaff && inv.status !== 'Void' && (
-                            <WriteButton
-                              label="Void"
-                              loadingText="Voiding…"
-                              successText="Voided"
-                              variant="danger"
-                              size="sm"
-                              onClick={async () => handleVoid(inv)}
-                            />
+                            <>
+                              <WriteButton
+                                label="Re-issue"
+                                loadingText="Re-issuing…"
+                                successText="Released"
+                                variant="secondary"
+                                size="sm"
+                                onClick={async () => handleReissue(inv)}
+                              />
+                              <WriteButton
+                                label="Void"
+                                loadingText="Voiding…"
+                                successText="Voided"
+                                variant="danger"
+                                size="sm"
+                                onClick={async () => handleVoid(inv)}
+                              />
+                            </>
                           )}
                         </div>
                       </td>

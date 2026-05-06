@@ -2458,6 +2458,12 @@ export interface VoidInvoiceResponse {
   success: boolean;
   invoiceNo: string;
   rowsVoided: number;
+  alreadyVoid?: number;
+  // v38.193.0 — server now also deletes matching CB Consolidated_Ledger rows
+  // so client sheet, CB, and Stax stay in sync. Optional for backward
+  // compatibility with any caller that ignores them.
+  cbRowsDeleted?: number;
+  cbCleanupError?: string | null;
   error?: string;
 }
 
@@ -2468,6 +2474,49 @@ export function postVoidInvoice(
 ) {
   return apiPost<VoidInvoiceResponse>(
     'voidInvoice',
+    payload as unknown as Record<string, unknown>,
+    { clientSheetId },
+    { signal }
+  );
+}
+
+// ─── Re-issue Invoice (v38.193.0 — Phase D) ──────────────────────────────────
+//
+// Releases an invoice's billing rows back to Status=Unbilled across all three
+// storage layers (client Billing_Ledger sheet, CB Consolidated_Ledger,
+// public.billing Supabase mirror) so the operator can re-create a corrected
+// invoice via the existing Create Invoices flow. Differs from voidInvoice in
+// that voidInvoice flips to terminal Void; reissueInvoice flips back to
+// Unbilled with a "Re-issued via UI" note appended to Item Notes.
+//
+// Pre-condition (operator responsibility): if the invoice was already pushed
+// to Stax/QBO, void it on those external systems first. The server does NOT
+// touch Stax/QBO from this endpoint.
+
+export interface ReissueInvoicePayload {
+  invoiceNo: string;
+  reason?: string;
+}
+
+export interface ReissueInvoiceResponse {
+  success: boolean;
+  invoiceNo: string;
+  rowsReleased: number;
+  alreadyUnbilledSkipped?: number;
+  cbRowsDeleted?: number;
+  cbCleanupError?: string | null;
+  ledgerRowIds?: string[];
+  message?: string;
+  error?: string;
+}
+
+export function postReissueInvoice(
+  payload: ReissueInvoicePayload,
+  clientSheetId: string,
+  signal?: AbortSignal
+) {
+  return apiPost<ReissueInvoiceResponse>(
+    'reissueInvoice',
     payload as unknown as Record<string, unknown>,
     { clientSheetId },
     { signal }
