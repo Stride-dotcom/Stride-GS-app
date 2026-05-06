@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.197.1 — 2026-05-06 PST — api_markClientLedgerInvoiced_ assertion now handles duplicate Ledger Row IDs on the client sheet. The task completion flow can leave a Voided row from a prior completion AND append a fresh Unbilled row with the SAME Ledger Row ID after a reopen + re-completion. The v38.193.0 single-pass assertion iterated all matching rows and threw on the FIRST non-Unbilled match — even when a valid Unbilled row sat on the very next line. Symptom: Justin's Vida Design - Merit invoice (56 rows) failed because INSP-TASK-INSP-62840-1 had row 24 (Void) and row 25 (Unbilled); React picker correctly read Supabase last-write-wins (Unbilled) but the assertion saw the Void first. New shape: bucket all matching rows by Ledger Row ID, then for each picker ID prefer the FIRST Unbilled match. Only flag a violation if NO Unbilled row exists for that picker ID — the actual stale-Void condition the original v38.193 fix was meant to catch. The Void duplicates are left untouched (they're stale audit trail; cleanup is a separate follow-up to handleCompleteTask_ to un-void instead of append).
+   StrideAPI.gs — v38.198.0 — 2026-05-06 PST — Root-cause fix for the duplicate-billing-row bug v38.197.1 worked around. New helper api_writeBillingRowIdempotent_(billSheet, billMap, ledgerRowId, fields) replaces every "build row + setValues at lastDataRow+1" append with a Ledger Row ID lookup followed by one of: in-place un-void (Status=Void match → refresh fields, flip Status to Unbilled, blank Invoice # / Date / URL), in-place idempotent update (Status=Unbilled match → refresh fields), skip with warning (Status=Invoiced/Billed match → caller surfaces "void the invoice first"), or append (no match). Used in handleCompleteTask_ (single-row), handleCompleteRepair_ (multi-line + legacy single-row paths), and handleProcessWcRelease_ (per-item WC fees) — every billing-row-creating completion handler that uses a deterministic Ledger Row ID. Pre-fix all three appended unconditionally, so a reopen + re-complete cycle (or a cancel + re-release for WC) produced two rows with the same Ledger Row ID: one Voided in place by api_voidBillingRowsWhere_, one Unbilled appended by the re-completion. Symptom: Justin's Vida Design - Merit invoice failed because INSP-TASK-INSP-62840-1 had row 24 (Void) + row 25 (Unbilled). v38.197.1 made the assertion tolerate the bad state by preferring the Unbilled match; this commit prevents the bad state from being created in the first place. Existing duplicates from past cycles are NOT auto-collapsed by this commit (they're correctly handled by the v38.197.1 assertion + the new helper's "prefer Unbilled, then Void" matching); a separate cleanup pass can collapse them later if desired.
+   v38.197.1 — 2026-05-06 PST — api_markClientLedgerInvoiced_ assertion now handles duplicate Ledger Row IDs on the client sheet. The task completion flow can leave a Voided row from a prior completion AND append a fresh Unbilled row with the SAME Ledger Row ID after a reopen + re-completion. The v38.193.0 single-pass assertion iterated all matching rows and threw on the FIRST non-Unbilled match — even when a valid Unbilled row sat on the very next line. Symptom: Justin's Vida Design - Merit invoice (56 rows) failed because INSP-TASK-INSP-62840-1 had row 24 (Void) and row 25 (Unbilled); React picker correctly read Supabase last-write-wins (Unbilled) but the assertion saw the Void first. New shape: bucket all matching rows by Ledger Row ID, then for each picker ID prefer the FIRST Unbilled match. Only flag a violation if NO Unbilled row exists for that picker ID — the actual stale-Void condition the original v38.193 fix was meant to catch. The Void duplicates are left untouched (they're stale audit trail; cleanup is a separate follow-up to handleCompleteTask_ to un-void instead of append).
    v38.197.0 — 2026-05-06 PST — Persistent QBO push jobs (qbo_push_jobs table) so the operator can leave the Billing page or refresh the browser mid-push without losing the result UI. handleQboCreateInvoice_ now accepts an optional `jobId` param; when set, it PATCHes public.qbo_push_jobs throughout the loop — status='running' + total_count + invoice_nos at entry, every 5 invoices with running succeeded/failed/skipped counts + per-invoice results, and a terminal status='succeeded'/'partial'/'failed' + finished_at + final results at the end. The push itself is unchanged for callers that don't supply jobId (admin scripts, legacy tests). Companion Supabase migration `qbo_push_jobs` creates the table (id uuid PK, status enum CHECK, ledger_row_ids text[], invoice_nos text[], counts, jsonb results, force_re_push, initiated_by, source) with staff/admin RLS + service_role bypass + realtime publication so the React App-level QboPushJobsContext observes every PATCH live. New helper api_patchQboPushJob_(jobId, patch) wraps the PostgREST PATCH with Prefer=return=minimal; best-effort, never blocks the QBO push on a Supabase outage. Companion React PR mounts QboPushJobsContext at AppLayout, renders a bottom-right toast that survives navigation, queries `created_at >= NOW() - 30 minutes OR finished_at IS NULL` on App mount to rehydrate any in-flight or recently-finished jobs, and wires both the QBO Push toolbar button and the Create Invoices "Push to QuickBooks Online" checkbox to start jobs through the context.
    v38.196.0 — 2026-05-06 PST — QBO push: handle qb_customer_name in "Parent:Sub" format on cache-cold path. INV-001153 (Vida Design - Waymark, qb_customer_name="Vida Design:Waymark") failed with `QBO customer create failed: HTTP 400: Invalid String. The String may contain unsupported or illegal chars — Element contains invalid characters. Vida Design:Waymark`. Root cause: qbo_resolveCustomerAndSubJob_ passed clientName ("Vida Design:Waymark") straight to qbo_createCustomer_ as DisplayName when no cache row existed yet. QBO reserves the colon for parent:sub notation in DisplayName and rejects any literal colon. Pre-fix this only manifested on cache-cold pushes — Roche Bobois:PDX worked because its parent + sub IDs were already populated in the Stax Customers sheet from prior pushes (cache hit, no QBO create call). Vida Design:Waymark had never been pushed so it fell through to qbo_createCustomer_(fullName) → 400. Fix: new qbo_resolveQbParentSubName_ helper splits the qb_customer_name on the LAST colon, resolves the parent ("Vida Design") via qbo_searchCustomer_ + qbo_createCustomer_(name, parentId=null), then resolves the sub ("Waymark") via qbo_searchSubJob_ + qbo_createCustomer_(name, parentId=parent's QBO ID). Cache layout re-uses the existing parent-row shape: column H stores the parent QBO ID, column J stores the sub QBO ID, column I (sidemark) stays blank — so future calls hit a single row and return fast. The early-return path bypasses the row-level sidemark sub-job creation entirely: when qb_customer_name already encodes the destination sub-customer, stacking another sub-job from sidemark would produce parent:sub:sidemark (3 levels), not the operator's intent. For clients with a flat qb_customer_name (no colon), the existing logic path is unchanged.
    v38.195.1 — 2026-05-06 PST — runBackfillQboPushedAtFromCb chunk-size fix. v38.195.0's first run on prod found 173 invoices with QBO Invoice ID populated then aborted with "Limit Exceeded: URLFetch URL Length" on the first PATCH. Root cause: 200 invoice numbers per chunk × ~18 chars each (after `"…"` quoting + encodeURIComponent's `%22` for each quote) = ~3.6KB URL — past Apps Script UrlFetchApp's ~2KB cap. Reduced CHUNK to 30 (~540 chars per chunk + ~120 of base URL + the qbo_pushed_at filter ≈ 660 total) for comfortable margin. PostgREST itself handles longer URLs; UrlFetchApp is the tighter constraint. Same idempotency semantics: only updates rows where qbo_pushed_at IS NULL so re-runs and the v38.194 hook from fresh pushes never collide. 173 IDs → 6 chunks → ~6 round-trips total, ~1-2s.
@@ -14306,6 +14307,109 @@ function api_buildRow_(headerMap, obj) {
   return row;
 }
 
+/**
+ * v38.198.0 — Idempotent Billing_Ledger row write keyed on Ledger Row ID.
+ *
+ * Pre-fix all completion handlers (handleCompleteTask_, handleCompleteRepair_,
+ * handleProcessWcRelease_) appended a fresh row at lastDataRow+1 every time.
+ * That meant a reopen → re-complete cycle produced TWO rows with the same
+ * Ledger Row ID: one Voided (from the reopen flip-in-place via
+ * api_voidBillingRowsWhere_) and one Unbilled (from the re-completion
+ * append). The duplicate state silently bloated the sheet, broke the
+ * v38.193.0 pre-commit assertion (worked around in v38.197.1), and could
+ * double-bill if a future bug picked the wrong duplicate to invoice.
+ *
+ * This helper checks for an existing row with the given Ledger Row ID first:
+ *   - Status = 'Void'                → un-void in place: refresh ALL fields,
+ *                                      flip Status → 'Unbilled', clear
+ *                                      Invoice # / Date / URL.
+ *   - Status = 'Unbilled'            → in-place update (idempotent retry).
+ *   - Status = 'Invoiced' / 'Billed' → skip (don't double-bill an already-
+ *                                      committed row).
+ *   - No existing row                → append at lastDataRow+1.
+ *
+ * If duplicates already exist on the sheet from prior reopen+re-complete
+ * cycles (the corruption v38.197.1 had to work around): prefer the FIRST
+ * Unbilled match, then the FIRST Void match, then the first match. The
+ * other duplicates stay on the sheet as audit trail until a cleanup pass
+ * collapses them.
+ *
+ * Returns { action, rowNum, prevStatus } where action ∈
+ * {'inserted', 'unvoided', 'updated', 'skipped_invoiced'} so callers can
+ * log warnings or trigger Supabase resync as appropriate.
+ *
+ * Caller-provided fields win; the helper enforces Status='Unbilled' and
+ * blanks Invoice # / Date / URL when un-voiding so a stale invoice
+ * reference from a prior cycle doesn't leak through.
+ */
+function api_writeBillingRowIdempotent_(billSheet, billMap, ledgerRowId, fields) {
+  var lidCol    = billMap["Ledger Row ID"];
+  var statusCol = billMap["Status"];
+  var lid       = String(ledgerRowId || "").trim();
+
+  // Schema sanity: without Ledger Row ID we can't dedupe, so fall through
+  // to legacy append-only behavior.
+  if (!lidCol || !statusCol || !lid) {
+    var rowAppend0 = api_buildRow_(billMap, fields);
+    var insertAt0 = api_getLastDataRow_(billSheet) + 1;
+    billSheet.getRange(insertAt0, 1, 1, rowAppend0.length).setValues([rowAppend0]);
+    return { action: "inserted", rowNum: insertAt0, prevStatus: null };
+  }
+
+  var lastRow = api_getLastDataRow_(billSheet);
+  if (lastRow < 2) {
+    var rowFresh = api_buildRow_(billMap, fields);
+    billSheet.getRange(2, 1, 1, rowFresh.length).setValues([rowFresh]);
+    return { action: "inserted", rowNum: 2, prevStatus: null };
+  }
+
+  var lidCol1d    = billSheet.getRange(2, lidCol,    lastRow - 1, 1).getValues();
+  var statusCol1d = billSheet.getRange(2, statusCol, lastRow - 1, 1).getValues();
+
+  var matches = [];
+  for (var i = 0; i < lidCol1d.length; i++) {
+    if (String(lidCol1d[i][0] || "").trim() === lid) {
+      matches.push({ rowNum: i + 2, status: String(statusCol1d[i][0] || "").trim() });
+    }
+  }
+
+  if (matches.length === 0) {
+    var rowNew = api_buildRow_(billMap, fields);
+    var insertAt = lastRow + 1;
+    billSheet.getRange(insertAt, 1, 1, rowNew.length).setValues([rowNew]);
+    return { action: "inserted", rowNum: insertAt, prevStatus: null };
+  }
+
+  var target = null;
+  for (var mi = 0; mi < matches.length; mi++) {
+    if (matches[mi].status === "Unbilled") { target = matches[mi]; break; }
+  }
+  if (!target) {
+    for (var mi2 = 0; mi2 < matches.length; mi2++) {
+      if (matches[mi2].status === "Void") { target = matches[mi2]; break; }
+    }
+  }
+  if (!target) target = matches[0];
+
+  if (target.status === "Invoiced" || target.status === "Billed") {
+    return { action: "skipped_invoiced", rowNum: target.rowNum, prevStatus: target.status };
+  }
+
+  fields["Status"] = "Unbilled";
+  if (billMap["Invoice #"])    fields["Invoice #"]    = "";
+  if (billMap["Invoice Date"]) fields["Invoice Date"] = "";
+  if (billMap["Invoice URL"])  fields["Invoice URL"]  = "";
+
+  var rowUpdate = api_buildRow_(billMap, fields);
+  billSheet.getRange(target.rowNum, 1, 1, rowUpdate.length).setValues([rowUpdate]);
+
+  return {
+    action:     target.status === "Void" ? "unvoided" : "updated",
+    rowNum:     target.rowNum,
+    prevStatus: target.status
+  };
+}
+
 /** Finds last row with data (skips empty rows from validations). */
 function api_getLastDataRow_(sheet) {
   var data = sheet.getDataRange().getValues();
@@ -15803,7 +15907,13 @@ function handleCompleteTask_(clientSheetId, payload) {
               var missingRate = (!hasCustomPrice && appliedRate <= 0);
               var total = missingRate ? "Missing Rate" : appliedRate;
               var billMap = api_getHeaderMap_(billSheet);
-              var billRow = api_buildRow_(billMap, {
+              // v38.198.0 — Idempotent write keyed on Ledger Row ID. If the
+              // task was previously completed (and reopened, voiding the
+              // prior billing row in place), this un-voids that row instead
+              // of appending a duplicate. Pre-fix the duplicate broke the
+              // v38.193.0 pre-commit assertion in api_markClientLedgerInvoiced_.
+              var billLedgerRowId = svcCode + "-TASK-" + taskId;
+              var billWriteResult = api_writeBillingRowIdempotent_(billSheet, billMap, billLedgerRowId, {
                 "Status":       "Unbilled",
                 "Invoice #":    "",
                 "Client":       clientName,
@@ -15821,10 +15931,12 @@ function handleCompleteTask_(clientSheetId, payload) {
                 "Repair ID":    "",
                 "Shipment #":   shipNo,
                 "Item Notes":   (missingRate ? "MISSING RATE - " : "") + result + (taskNotes ? " - " + taskNotes : ""),
-                "Ledger Row ID": svcCode + "-TASK-" + taskId
+                "Ledger Row ID": billLedgerRowId
               });
-              var billInsertRow = api_getLastDataRow_(billSheet) + 1;
-              billSheet.getRange(billInsertRow, 1, 1, billRow.length).setValues([billRow]);
+              if (billWriteResult.action === "skipped_invoiced") {
+                warnings.push("Billing row " + billLedgerRowId + " already Status=" + billWriteResult.prevStatus +
+                              " — not overwritten. Void/re-issue that invoice first if you need to re-bill.");
+              }
               billingCreated = true;
 
               if (!missingRate) {
@@ -17776,7 +17888,13 @@ function handleCompleteRepair_(clientSheetId, payload) {
 
         if (Array.isArray(qLines) && qLines.length > 0) {
           // ─── Multi-line path ────────────────────────────────────────────────
-          var allRows  = [];
+          // v38.198.0 — Per-line idempotent writes. The previous bulk
+          // setValues append produced duplicate Ledger Row IDs whenever the
+          // operator re-completed a repair after a reopen (the prior lines
+          // were Voided in place by api_voidBillingRowsWhere_; the bulk
+          // append landed a fresh set of Unbilled rows next to the Void
+          // ones). Per-line write_idempotent gives us un-void semantics so
+          // re-completion lands on the SAME rows in place.
           var totalSum = 0;
           for (var bi = 0; bi < qLines.length; bi++) {
             var bl = qLines[bi] || {};
@@ -17786,10 +17904,8 @@ function handleCompleteRepair_(clientSheetId, payload) {
             totalSum += blAmt;
             // Service catalog category is informational on the ledger;
             // default to "Services" so existing report filters still work.
-            // (If you want category-accurate reporting per line later,
-            // resolve via service_catalog lookup at quote build time and
-            // persist `category` on the line.)
-            var lineRow = api_buildRow_(billMap, {
+            var lineLedgerRowId = "REPAIR-" + repairId + "-" + (bi + 1);
+            var lineWriteResult = api_writeBillingRowIdempotent_(billSheet, billMap, lineLedgerRowId, {
               "Status":       "Unbilled",
               "Invoice #":    "",
               "Client":       clientName,
@@ -17807,14 +17923,13 @@ function handleCompleteRepair_(clientSheetId, payload) {
               "Repair ID":    repairId,
               "Shipment #":   "",
               "Item Notes":   "Repair line " + (bi + 1) + "/" + qLines.length + " | Result: " + resultValue + (notes ? " | " + notes : ""),
-              // Stable + unique per line so partial re-runs (if any
-              // ever fire) hit ON CONFLICT without dup'ing existing.
-              "Ledger Row ID": "REPAIR-" + repairId + "-" + (bi + 1)
+              "Ledger Row ID": lineLedgerRowId
             });
-            allRows.push(lineRow);
+            if (lineWriteResult.action === "skipped_invoiced") {
+              warnings.push("Repair line " + (bi + 1) + " (" + lineLedgerRowId + ") already Status=" +
+                            lineWriteResult.prevStatus + " — not overwritten. Void the invoice first to re-bill.");
+            }
           }
-          var billInsertRow = api_getLastDataRow_(billSheet) + 1;
-          billSheet.getRange(billInsertRow, 1, allRows.length, allRows[0].length).setValues(allRows);
           billingCreated = true;
 
           if (totalSum > 0) {
@@ -17842,7 +17957,9 @@ function handleCompleteRepair_(clientSheetId, payload) {
         } else {
           // ─── Legacy single-row path ──────────────────────────────────────────
           var missingRate = (billingAmt <= 0);
-          var billRow = api_buildRow_(billMap, {
+          // v38.198.0 — Idempotent write — see api_writeBillingRowIdempotent_.
+          var legacyLedgerRowId = "REPAIR-" + repairId;
+          var legacyWriteResult = api_writeBillingRowIdempotent_(billSheet, billMap, legacyLedgerRowId, {
             "Status":       "Unbilled",
             "Invoice #":    "",
             "Client":       clientName,
@@ -17860,10 +17977,12 @@ function handleCompleteRepair_(clientSheetId, payload) {
             "Repair ID":    repairId,
             "Shipment #":   "",
             "Item Notes":   (missingRate ? "MISSING RATE - " : "") + "Result: " + resultValue + (notes ? " | " + notes : ""),
-            "Ledger Row ID": "REPAIR-" + repairId
+            "Ledger Row ID": legacyLedgerRowId
           });
-          var billInsertRow2 = api_getLastDataRow_(billSheet) + 1;
-          billSheet.getRange(billInsertRow2, 1, 1, billRow.length).setValues([billRow]);
+          if (legacyWriteResult.action === "skipped_invoiced") {
+            warnings.push("Billing row " + legacyLedgerRowId + " already Status=" + legacyWriteResult.prevStatus +
+                          " — not overwritten. Void the invoice first if you need to re-bill.");
+          }
           billingCreated = true;
 
           if (!missingRate) {
@@ -18755,7 +18874,12 @@ function handleProcessWcRelease_(clientSheetId, payload) {
         var bilMap = api_getHeaderMap_(billingSheet);
         for (var bb = 0; bb < releasingItems.length; bb++) {
           var bItem = releasingItems[bb];
-          var bilRow = api_buildRow_(bilMap, {
+          // v38.198.0 — Idempotent write keyed on Ledger Row ID. WC release
+          // can be re-run after a cancel + re-release; the prior WC billing
+          // row would be voided in place by the cancel flow, and pre-fix
+          // the re-release appended a duplicate Unbilled row.
+          var wcLedgerRowId = "WC-" + bItem.itemId + "-" + wcNumber;
+          var wcWriteResult = api_writeBillingRowIdempotent_(billingSheet, bilMap, wcLedgerRowId, {
             "Status":      "Unbilled",
             "Invoice #":   "",
             "Client":      clientName,
@@ -18773,10 +18897,12 @@ function handleProcessWcRelease_(clientSheetId, payload) {
             "Repair ID":   "",
             "Shipment #":  wcNumber,
             "Item Notes":  "",
-            "Ledger Row ID": "WC-" + bItem.itemId + "-" + wcNumber
+            "Ledger Row ID": wcLedgerRowId
           });
-          var bilInsRow = api_getLastDataRow_(billingSheet) + 1;
-          billingSheet.getRange(bilInsRow, 1, 1, bilRow.length).setValues([bilRow]);
+          if (wcWriteResult.action === "skipped_invoiced") {
+            warnings.push("WC billing row " + wcLedgerRowId + " already Status=" + wcWriteResult.prevStatus +
+                          " — not overwritten. Void the invoice first if you need to re-bill.");
+          }
         }
       } else {
         warnings.push("Billing_Ledger sheet not found — WC billing rows not written");
