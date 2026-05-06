@@ -114,6 +114,8 @@ git worktree prune     # garbage-collect stale worktree metadata
 - **Never edit the Master Price List sheet directly.** Use Price List page → inline edit → Sync to Sheet.
 - **Never commit `.env`, `.credentials.json`, or any secrets.**
 - **Never re-enable GitHub Actions `deploy.yml`/`ci.yml`** — renamed `*.disabled`, TLS transport issues unresolved.
+- **Never regress the v38.182 atomic invoice-number counter.** `next_invoice_no()` Postgres SEQUENCE is the only thing standing between the system and the dup-number race repeating (the race that produced INV-000115 / 129 / 131 / 135 in the 2026-05-02→03 incident). Any "fallback to Master sheet counter" / "read-then-write" path is a regression. If you need a different numbering scheme (separate per-tenant sequences, etc.), build a NEW atomic source — don't reach back to the racy one.
+- **Never commit a billing path that picks an `Invoiced` or `Void` row onto a new invoice.** The 2026-05-05 incident traced one stale-Void row (`INSP-TASK-INSP-62630-1`, voided 5/1 by a task reopen) being re-billed on a 5/3 invoice. The pre-commit Unbilled re-check (item #9 in `BUILD_STATUS.md` hardening backlog) is the prevention; until it ships, manually verify Unbilled status of every picked row before any new `handleCreateInvoice_` call site.
 
 ---
 
@@ -287,6 +289,33 @@ Never route-style (`/#/tasks/INSP-62391-1`) — Gmail strips the `#` fragment. W
 **Service codes:** `STOR`, `RCVG`, `INSP`, `ASM`, `MNRTU`, `WC`, `REPAIR`, `PLLT`, `PICK`, `LABEL`, `DISP`, `RSTK`, `NO_ID`, `MULTI_INS`, `SIT`, `RUSH`.
 
 **Status values:** Billing: `Unbilled` → `Invoiced` → `Billed` | `Void`. Inventory: `Active` | `Released` | `On Hold` | `Transferred`. Tasks: `Open` | `In Progress` | `Completed` | `Failed` | `Cancelled`. Repairs: `Pending Quote` → `Quote Sent` → `Approved`/`Declined` → `In Progress` → `Completed`/`Failed`. Will Calls: `Pending` | `Scheduled` | `Partial` | `Released` | `Cancelled`.
+
+**Three-storage-layer model — writes to billing must touch all three:**
+
+```
+Client Billing_Ledger sheet (per-tenant)   ← SOURCE OF TRUTH for that client's rows
+        │  writeThrough on every action
+        ▼
+public.billing (Supabase mirror)            ← React reads from here
+
+Independent, parallel:
+CB Consolidated_Ledger sheet                ← single sheet, all clients combined
+                                              accounting aggregation, drives QBO push / IIF
+```
+
+Several open billing bugs (see `BUILD_STATUS.md` "Open billing-system hardening backlog") are because one of these three writes was forgotten. Every billing-touching change must explicitly handle all three or document why one is intentionally skipped.
+
+---
+
+## Billing incident context (2026-05-05 — read before touching billing code)
+
+A customer-reported duplicate-invoice incident on 2026-05-05 cleaned up four pre-fix dup-number-race invoices and surfaced a hardening backlog. Reading `BUILD_STATUS.md` "Recent Changes (2026-05-05)" + "Open billing-system hardening backlog" is mandatory before any billing-path PR.
+
+**Quick reference:**
+- Root cause race fixed Mon 2026-05-04 in v38.182.0 (atomic Postgres `next_invoice_no()` SEQUENCE)
+- 5 cousin bugs (#3-#7) + 3 detection gaps (#8-#10) **still open** — see backlog table in `BUILD_STATUS.md`
+- One-shot cleanup function `runReleaseInvoicesForReissue` (StrideAPI.gs end of file, v38.192.0) was executed once 2026-05-05; **do not re-run** — kept as a reference template for the eventual generalized re-issue tool
+- Detailed handoff for the planned hardening session lives in Justin's Dropbox at `Apps\GS Inventory\BILLING_HARDENING_HANDOFF.md` — paste verbatim into a fresh session to start the audit + fixes
 
 ---
 

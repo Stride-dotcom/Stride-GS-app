@@ -1,6 +1,6 @@
 # Stride GS App — Build Status
 
-> Last updated: 2026-05-04 (multi-tenant RLS access fix). Verified against actual codebase.
+> Last updated: 2026-05-05 (dup-number race incident triage + cleanup helper). Verified against actual codebase. **A billing-system hardening pass is queued for the next builder session — see "Open billing-system hardening backlog" near the bottom and the handoff at `BILLING_HARDENING_HANDOFF.md` in Justin's Dropbox.**
 
 ---
 
@@ -9,7 +9,7 @@
 | System | Version | Notes |
 |---|---|---|
 | React app (GitHub Pages) | Latest on `origin/source` | `npm run deploy` from source |
-| StrideAPI.gs | **v38.183.0** | handleCreateInvoice_ commit-lock scope reduced — client Billing_Ledger flip now runs OUTSIDE the lock, ID-based rollback, RangeList per-cell writes. True 3x speedup on multi-invoice batches. |
+| StrideAPI.gs | **v38.192.0** | One-shot admin entry `runReleaseInvoicesForReissue` for the v38.182 race cleanup. Releases the four pre-fix dup-number-race invoices (Digs INV-000115 / Mary Kenngott INV-000129 / Nip Tuck INV-000131 + INV-000135) back to Unbilled across client Billing_Ledger sheet + CB Consolidated_Ledger + Supabase. Idempotent. **Already executed once 2026-05-05; keep as historical reference, do not re-run.** Earlier today: v38.190 added missing audit-log row on `batchCreateTasks`; v38.191 made `handleQboPush_` respect per-client `separate_by_sidemark` flag. |
 | Supabase | 69+ migrations applied | `public.next_invoice_no()` Postgres SEQUENCE replaces the Master sheet RPC counter for invoice numbering. Multi-tenant RLS access (`user_has_tenant_access` helper) — clients with multiple tenant assignments can now read entity rows + storage objects across all accessible tenants. |
 | Client scripts | Rolled out to 49 active clients | Code.gs v4.6.0, Import.gs v4.3.0 |
 | StaxAutoPay.gs | v4.7.6 | Charge Log Customer/Transaction header fix |
@@ -94,6 +94,66 @@ UI components: FloatingActionMenu, WriteButton, BatchGuard, ActionTooltip, Batch
 - Quote Tool with PDF generation
 - Expected operations calendar
 - QR Scanner + Labels (native React, Supabase-backed)
+
+---
+
+## Recent Changes (2026-05-05, dup-number race incident — triage, cleanup, hardening backlog)
+
+**Trigger:** Nip Tuck Remodeling contact emailed flagging that invoice INV-000135 was a duplicate of lines 1-18 on INV-000131. Investigation confirmed the duplicate AND surfaced two cousin bugs that the v38.182 fix on Mon didn't reach.
+
+**What was confirmed:**
+
+The 2026-05-03 invoice batch hit the `getNextInvoiceId` race that v38.182.0 fixed Monday, but the bad invoices were generated **the day before the fix landed** (race timestamp 17:57:41 + 17:57:42 UTC, 1.18s apart, both successfully assigned INV-000131). A third "INV-000131" attempt at 22:40 UTC + a fresh INV-000135 at 23:19 UTC followed as Justin tried to manually recover. Net: customer received two PDFs containing 18 overlapping NIPTUCK line items totaling $450 that should have been on one invoice.
+
+Same race also bit two other clients earlier (KC's batches): Digs Furniture INV-000115 (2.2s race, never pushed to Stax/QBO so no customer harm — but KC manually rebuilt one consolidated QB invoice covering all the line items) and Mary Kenngott INV-000129 (3.1s race, sent via QBO so customer-facing). Today's KC batch (130+ invoices, INV-001000 → INV-001128) ran post-fix with zero duplicates — atomic counter is holding.
+
+**What got cleaned up:**
+
+- **New StrideAPI.gs admin entry `runReleaseInvoicesForReissue` (v38.192.0)** — hardcodes the four affected (clientSheetId, invoiceNo) pairs, releases their billing rows back to Unbilled across all three storage layers (client Billing_Ledger sheet via RangeList sparse writes; CB Consolidated_Ledger via grouped-descending-deleteRows à la `rollbackByInvoiceNo_`; public.billing via `api_fullClientSync_`). Idempotent. Already executed once 2026-05-05 — 54 of 55 expected rows released, 1 row correctly stayed Void (legitimately voided 5/1 when Justin reopened the INSP-62630-1 inspection task). **Keep as historical reference; do not re-run.**
+
+- **Stax + QBO voids** — operator-handled outside this session. Nip Tuck INV-000131 + INV-000135 voided. Mary Kenngott INV-000129 pending Justin's QBO void. Digs is closed by KC's manual QB consolidation invoice (3 freshly-released INV-000115 rows pending terminal Void via the React Billing → Report → Void Selected path).
+
+- **Customer email drafts ready** — Nip Tuck (acknowledges duplicate + flags second issue: 7 NORTON line items truncated off original PDF; corrected NIPTUCK total $415 not $450 because of the legitimate INSP-62630-1 reopen-void), Mary Kenngott ($565 split into POPLAWSKI + TWISP-BROWN), Digs (template KC fills with QBO doc#).
+
+**Verified clean:** Digs's April storage invoice INV-001044 ($87 / 3 items) cross-checked against actual inventory — every Digs item that crossed the 7-day grace into April is on the bill. 11 items released within grace (no charge by design — `DIGS DOES NOT COVER STORAGE FOR CLIENT AFTER 7 DAY GRACE PERIOD UNLESS AUTHORIZED`); 4 items received 4/27-4/30 still in grace, will appear on May. Storage generator is working correctly for Digs.
+
+**Files touched (this session):**
+- `AppScripts/stride-api/StrideAPI.gs` (v38.190.0 → v38.191.0 → v38.192.0; one new admin function appended at end)
+- React side untouched — fixes for the open hardening backlog (below) are deferred to the next session
+
+**What's still open** — see "Open billing-system hardening backlog" below.
+
+**Pending user action:**
+- [ ] Justin: void Mary Kenngott INV-000129 in QBO + send drafted email
+- [ ] Justin: void the 3 Digs INV-000115 rows via React Billing → Report → filter Digs Unbilled → Void Selected → reason "Already paid via KC manual QB consolidation 2026-05-02"
+- [ ] Justin: send updated Nip Tuck email ($415 not $450)
+- [ ] Justin: spawn next builder session with `BILLING_HARDENING_HANDOFF.md` (in Dropbox `Apps\GS Inventory\`) to ship the 5-bug hardening pass before re-running Create Invoices for Nip Tuck + Mary Kenngott
+
+---
+
+## Open billing-system hardening backlog (queued for next session)
+
+The race itself is dead since v38.182, but the dup-number incident exposed five cousin bugs and three detection gaps. **All blocking** the Nip Tuck + Mary Kenngott re-run. Plan in `BILLING_HARDENING_HANDOFF.md`.
+
+| # | Bug | Where | Severity |
+|---|---|---|---|
+| 3 | Invoice **generation** force-splits by sidemark even when `clients.separate_by_sidemark = false` (twin of v38.191 QBO-push fix, different code path) | `handleCreateInvoice_` and/or `Billing.tsx` `handleCreateInvoices` | **HIGH** — caused Digs's 7-invoice burst |
+| 4 | Stale-Void rows get swept onto new invoices | `handleCreateInvoice_` Unbilled-row picker | **HIGH** — billed customer for a reopen-voided $35 inspection on INV-000135 |
+| 5 | `handleVoidInvoice_` only voids client sheet, not CB Consolidated_Ledger | `StrideAPI.gs` ~line 12437 | MEDIUM — orphans counts diverge between systems |
+| 6 | `handleVoidInvoice_` flips rows to terminal Void with no re-issue path | `StrideAPI.gs` ~line 12437 | MEDIUM — forced tonight's manual GAS one-shot recovery |
+| 7 | Reopen-task workflow voids client sheet billing but not CB | Search `handleReopenTask_` / `handleCorrectTaskResult_` | HIGH — root cause of bug #4 |
+
+**Detection gaps:**
+
+| # | Gap | Fix |
+|---|---|---|
+| 8 | No reconciliation between billing-table line count and `stax_invoices.line_items_json` | Post-create assertion: refuse to push if mismatch |
+| 9 | No pre-commit re-check that picked rows are still Unbilled | Pre-commit assertion in `handleCreateInvoice_` (closes #4) |
+| 10 | No nightly anomaly sweep / admin email | `runBillingAnomalySweep` admin function, last-30-day check |
+
+**Other deferred items:**
+- One-click Re-issue button on the React Billing → Invoices tab (replaces manual GAS one-shot for future incidents)
+- Fold the v38.192 `runReleaseInvoicesForReissue` admin entry into a generalized "release any invoice's rows" tool (currently hardcoded to the 4 specific invoices from this incident)
 
 ---
 
