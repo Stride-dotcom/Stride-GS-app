@@ -41296,3 +41296,79 @@ function runBackfillTransferStorageCharges() {
   }
   Logger.log("  elapsed: " + ((new Date().getTime() - startedAt.getTime()) / 1000).toFixed(1) + "s");
 }
+
+// ── QBO Sales Order Probe (read-only diagnostic) ─────────────────────────
+// Run: probeSalesOrderEntity() → View > Executions / Logs
+//
+// Auth helper used: qbo_getValidToken_() — returns a valid access token,
+// auto-refreshing via qbo_refreshToken_() when the cached one is stale.
+// Realm property: QBO_REALM_ID (read via prop_() in the rest of the file;
+// kept as PropertiesService.getScriptProperties().getProperty here so the
+// probe stands alone if pasted into a fresh script).
+
+function probeSalesOrderEntity() {
+  var accessToken;
+  try {
+    accessToken = qbo_getValidToken_();
+  } catch (e) {
+    Logger.log('FAIL: qbo_getValidToken_ threw: ' + e.message);
+    return;
+  }
+  var realmId = PropertiesService.getScriptProperties().getProperty('QBO_REALM_ID');
+
+  if (!accessToken || !realmId) {
+    Logger.log('FAIL: Missing accessToken or realmId.');
+    return;
+  }
+
+  var baseUrl = 'https://quickbooks.api.intuit.com';
+
+  Logger.log('--- TEST 1: SalesOrder query (no minorversion) ---');
+  runProbe_(baseUrl, realmId, accessToken, 'SELECT * FROM SalesOrder MAXRESULTS 1', null);
+
+  Logger.log('--- TEST 2: SalesOrder query (minorversion=75) ---');
+  runProbe_(baseUrl, realmId, accessToken, 'SELECT * FROM SalesOrder MAXRESULTS 1', 75);
+
+  Logger.log('--- TEST 3: Count open SOs ---');
+  runProbe_(baseUrl, realmId, accessToken, "SELECT COUNT(*) FROM SalesOrder WHERE TxnStatus = 'Open'", 75);
+
+  Logger.log('--- TEST 4 (sanity): Customer query, confirms auth works ---');
+  runProbe_(baseUrl, realmId, accessToken, 'SELECT COUNT(*) FROM Customer', null);
+}
+
+function runProbe_(baseUrl, realmId, accessToken, query, minorVersion) {
+  var url = baseUrl + '/v3/company/' + realmId + '/query'
+    + '?query=' + encodeURIComponent(query)
+    + (minorVersion ? '&minorversion=' + minorVersion : '');
+
+  var options = {
+    method: 'get',
+    headers: {
+      'Authorization': 'Bearer ' + accessToken,
+      'Accept': 'application/json'
+    },
+    muteHttpExceptions: true
+  };
+
+  try {
+    var response = UrlFetchApp.fetch(url, options);
+    var code = response.getResponseCode();
+    var body = response.getContentText();
+    Logger.log('Status: ' + code);
+    Logger.log('Body (first 500 chars): ' + body.substring(0, 500));
+
+    if (code === 200) {
+      var json = JSON.parse(body);
+      var results = json.QueryResponse || {};
+      Logger.log('VERDICT: SUCCESS — keys: ' + JSON.stringify(Object.keys(results)));
+    } else if (code === 400) {
+      Logger.log('VERDICT: 400 — entity likely not recognized for this realm');
+    } else if (code === 401 || code === 403) {
+      Logger.log('VERDICT: AUTH — token expired or scope insufficient');
+    } else {
+      Logger.log('VERDICT: Unexpected status ' + code);
+    }
+  } catch (e) {
+    Logger.log('EXCEPTION: ' + e.message);
+  }
+}
