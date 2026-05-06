@@ -181,6 +181,8 @@ Same race also bit two other clients earlier (KC's batches): Digs Furniture INV-
 
 **Verified clean:** Digs's April storage invoice INV-001044 ($87 / 3 items) cross-checked against actual inventory — every Digs item that crossed the 7-day grace into April is on the bill. 11 items released within grace (no charge by design — `DIGS DOES NOT COVER STORAGE FOR CLIENT AFTER 7 DAY GRACE PERIOD UNLESS AUTHORIZED`); 4 items received 4/27-4/30 still in grace, will appear on May. Storage generator is working correctly for Digs.
 
+**Cross-corpus reconciliation (2026-05-06 follow-up):** scanned all 79 real-customer rows in `stax_invoices` (excluding tonight's 4 cleanup targets and demo data) — zero line-count or dollar-total mismatches against the billing table. Separately scanned for the bug #3 over-split signature (`separate_by_sidemark=false` clients with multiple same-day invoices each carrying a single sidemark) and surfaced one additional case beyond Digs: **Ligne Roset INV-000124 + INV-000125 on 2026-05-02** (17 RCVG rows blank-sidemark + 1 RCVG row sidemark "Martinez", $255 combined). Same root cause + same recovery as Digs — KC manually consolidated into one QB invoice; Stride-side rows stay `Status=Invoiced`, **no cleanup needed**, no inclusion in any release/regenerate scope. Confirmed with Justin 2026-05-06. Today's batch (INV-001000 → INV-001128) showed zero over-split signatures, confirming the React-side fix held; the v38.193 GAS-side assertion now blocks any future regression at the source.
+
 **Files touched (this session):**
 - `AppScripts/stride-api/StrideAPI.gs` (v38.190.0 → v38.191.0 → v38.192.0; one new admin function appended at end)
 - React side untouched — fixes for the open hardening backlog (below) are deferred to the next session
