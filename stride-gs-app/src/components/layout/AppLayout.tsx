@@ -3,6 +3,7 @@ import { Outlet, useLocation } from 'react-router-dom';
 import { Sidebar } from './Sidebar';
 import { TopBar } from './TopBar';
 import { BillingBatchToast } from './BillingBatchToast';
+import { QboPushJobsToast } from '../shared/QboPushJobsToast';
 import { theme } from '../../styles/theme';
 import { useIsMobile } from '../../hooks/useIsMobile';
 import { useFailedOperations } from '../../hooks/useFailedOperations';
@@ -203,6 +204,11 @@ export function AppLayout() {
           the corner until the batch completes. State lives in
           BillingBatchContext; this component just renders. */}
       <BillingBatchToast />
+      {/* App-level QBO push job toast — same pattern as BillingBatchToast.
+          Survives navigation + browser refresh: state is persisted in
+          public.qbo_push_jobs and rehydrated from realtime + an initial
+          query on mount (last 30 minutes of jobs). */}
+      <QboPushJobsToast />
     </div>
     </MessagesProvider>
   );
