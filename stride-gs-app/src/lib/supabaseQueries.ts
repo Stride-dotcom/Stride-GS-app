@@ -1301,9 +1301,14 @@ export async function fetchWillCallByIdFromSupabase(
 
     // Eagerly load items from will_call_items + inventory overlay so the
     // detail page renders with items on first paint (no "Loading items…"
-    // delay while GAS enriches). Mirrors the pattern used by the WC-list
-    // Supabase fetcher above (~line 612). Per invariant #27, item-level
-    // fields come from inventory at read time.
+    // delay while GAS enriches). Per invariant #27, item-level fields
+    // come from inventory at read time.
+    //
+    // 2026-05-06: switched from `_fetchInvFieldMap` (which paginates EVERY
+    // inventory row for the tenant — multi-second on big tenants) to a
+    // targeted `.in('item_id', itemIds)` query (~50ms). The full-tenant
+    // paginate was the actual cause of the "items still load" flash
+    // Justin reported even after the GAS roundtrip was removed.
     if (row.tenant_id) {
       try {
         const { data: itemRows } = await supabase
@@ -1311,8 +1316,48 @@ export async function fetchWillCallByIdFromSupabase(
           .select('*')
           .eq('wc_number', wcNumber)
           .eq('tenant_id', row.tenant_id);
-        if (itemRows && itemRows.length > 0) {
-          const invMap = await _fetchInvFieldMap(row.tenant_id);
+
+        const haveItemRows = !!(itemRows && itemRows.length > 0);
+        const idsToFetch = haveItemRows
+          ? (itemRows as SupabaseWillCallItemRow[]).map(r => r.item_id).filter(Boolean) as string[]
+          : itemIds;
+
+        // Single targeted inventory fetch covering both branches below.
+        type InvOverlay = {
+          vendor: string; description: string; itemClass: string;
+          location: string; sidemark: string; room: string;
+          qty: number; status: string; shipmentFolderUrl: string;
+        };
+        const invMap: Record<string, InvOverlay> = {};
+        if (idsToFetch.length > 0) {
+          const { data: invRows } = await supabase
+            .from('inventory')
+            .select('item_id, vendor, description, item_class, location, sidemark, room, qty, status, shipment_folder_url')
+            .eq('tenant_id', row.tenant_id)
+            .in('item_id', idsToFetch);
+          for (const r of (invRows ?? []) as Array<{
+            item_id: string | null; vendor: string | null; description: string | null;
+            item_class: string | null; location: string | null; sidemark: string | null;
+            room: string | null; qty: number | null; status: string | null;
+            shipment_folder_url: string | null;
+          }>) {
+            if (r.item_id) {
+              invMap[r.item_id] = {
+                vendor: r.vendor || '',
+                description: r.description || '',
+                itemClass: r.item_class || '',
+                location: r.location || '',
+                sidemark: r.sidemark || '',
+                room: r.room || '',
+                qty: r.qty ?? 1,
+                status: r.status || '',
+                shipmentFolderUrl: r.shipment_folder_url || '',
+              };
+            }
+          }
+        }
+
+        if (haveItemRows) {
           wc.items = (itemRows as SupabaseWillCallItemRow[]).map(r => {
             const inv = r.item_id ? invMap[r.item_id] : null;
             return {
@@ -1336,8 +1381,9 @@ export async function fetchWillCallByIdFromSupabase(
             if (inv?.shipmentFolderUrl) wc.shipmentFolderUrl = inv.shipmentFolderUrl;
           }
         } else if (itemIds.length > 0) {
-          // Legacy WC (pre-will_call_items table) — build items from itemIds + inv overlay
-          const invMap = await _fetchInvFieldMap(row.tenant_id);
+          // Legacy WC (pre-will_call_items table) — build items from itemIds + inv overlay.
+          // This is the path 100% of recent WCs land on (will_call_items has been empty
+          // since v38.103.0).
           wc.items = itemIds.map(id => {
             const inv = invMap[id];
             return {
@@ -1355,6 +1401,10 @@ export async function fetchWillCallByIdFromSupabase(
               status: inv?.status || '',
             };
           });
+          if (!wc.shipmentFolderUrl) {
+            const inv = invMap[itemIds[0]];
+            if (inv?.shipmentFolderUrl) wc.shipmentFolderUrl = inv.shipmentFolderUrl;
+          }
         }
       } catch {
         // non-fatal — GAS fallback in useWillCallDetail fills in later
