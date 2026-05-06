@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.194.0 — 2026-05-05 PST — Invoice Review overhaul backend hooks. Companion migration `invoice_tracking` creates public.invoice_tracking — a per-invoice tracking ledger keyed on invoice_no with separate qbo_pushed_at + stax_pushed_at timestamps + an auto_charge snapshot taken at create time. Five GAS-side hooks tie the existing handlers to the new table. (Step 4) handleCreateInvoice_ now POSTs to public.invoice_tracking right before the success return, snapshotting auto_charge from public.clients via Supabase REST (defaults to false on missing/outage). On-conflict: merge-duplicates so the v38.157 half-write recovery path can re-enter without erroring. invoiceDateStr (MM/dd/yyyy) is converted to ISO yyyy-MM-dd for the Postgres date column. (Step 3a) handleQboCreateInvoice_ collects pushedInvoiceNos from results[] after the per-invoice push loop and PATCHes invoice_tracking.qbo_pushed_at = now() in one PostgREST `invoice_no=in.(...)` round-trip regardless of batch size. (Step 3b) handleQbExport_ does the same with batchInvoiceNos for stax_pushed_at, right after the existing supabaseBatchUpsert_("stax_invoices", ...) call so the IIF auto-import + tracking stamp travel together. (Cleanup) handleVoidInvoice_ + handleReissueInvoice_ both call the new api_deleteInvoiceTrackingRow_(invoiceNo) helper after their existing CB cleanup so a voided/re-issued invoice doesn't appear in the React Invoice Review tab with stale push state. The voided rows remain on Billing → Report (Status=Void) and the client Billing_Ledger sheet for historical reference; Invoice Review is the active-invoice working surface. All Supabase writes are best-effort: a CB cleanup failure or Supabase outage logs but never blocks the primary operation, and the 30-day runBillingAnomalySweep would surface any orphans. Companion React PR rewires the Invoice Review tab to query invoice_tracking (sortable columns, multi-select bulk push, realtime subscriptions, autopay filter) and wires Payments to surface stax_pushed_at.
+   StrideAPI.gs — v38.195.0 — 2026-05-06 PST — One-shot backfill admin entry runBackfillQboPushedAtFromCb. The v38.194.0 invoice_tracking migration's backfill set qbo_pushed_at = stax_pushed_at = stax_invoices.created_at for all 79 invoices that existed in stax_invoices — conflating two independent push paths (handleQbExport_ writes to stax_invoices on the IIF/Stax route; handleQboCreateInvoice_ writes the QBO Invoice ID to the CB Consolidated_Ledger sheet on the direct-QBO route, with no Stax involvement). Result on the React Billing Report: QBO and Payments columns showed identical timestamps for the 79 IIF-pushed invoices, AND showed em-dash for the ~97 invoices that were pushed direct-to-QBO without going through Stax. Reset the conflated qbo_pushed_at values to NULL via direct SQL (Supabase MCP) before this commit; this admin function then walks CB Consolidated_Ledger, collects every distinct Invoice # whose "QBO Invoice ID" column is non-empty (the canonical source of truth — qbo_writeQboInvoiceId_ stamps it after every successful handleQboCreateInvoice_ push), and PATCHes invoice_tracking.qbo_pushed_at = NOW() in chunked PostgREST in.(...) round-trips (200 IDs per chunk; idempotent — only updates rows where qbo_pushed_at IS NULL so a re-run never overwrites a real push timestamp from the v38.194 hook). The timestamp is a backfill marker rather than the actual push time (the CB sheet doesn't capture push time); going forward the v38.194 hook continues to stamp the real timestamp on every fresh push. Run once from the Apps Script editor → Select function → runBackfillQboPushedAtFromCb → Run.
+   v38.194.0 — 2026-05-05 PST — Invoice Review overhaul backend hooks. Companion migration `invoice_tracking` creates public.invoice_tracking — a per-invoice tracking ledger keyed on invoice_no with separate qbo_pushed_at + stax_pushed_at timestamps + an auto_charge snapshot taken at create time. Five GAS-side hooks tie the existing handlers to the new table. (Step 4) handleCreateInvoice_ now POSTs to public.invoice_tracking right before the success return, snapshotting auto_charge from public.clients via Supabase REST (defaults to false on missing/outage). On-conflict: merge-duplicates so the v38.157 half-write recovery path can re-enter without erroring. invoiceDateStr (MM/dd/yyyy) is converted to ISO yyyy-MM-dd for the Postgres date column. (Step 3a) handleQboCreateInvoice_ collects pushedInvoiceNos from results[] after the per-invoice push loop and PATCHes invoice_tracking.qbo_pushed_at = now() in one PostgREST `invoice_no=in.(...)` round-trip regardless of batch size. (Step 3b) handleQbExport_ does the same with batchInvoiceNos for stax_pushed_at, right after the existing supabaseBatchUpsert_("stax_invoices", ...) call so the IIF auto-import + tracking stamp travel together. (Cleanup) handleVoidInvoice_ + handleReissueInvoice_ both call the new api_deleteInvoiceTrackingRow_(invoiceNo) helper after their existing CB cleanup so a voided/re-issued invoice doesn't appear in the React Invoice Review tab with stale push state. The voided rows remain on Billing → Report (Status=Void) and the client Billing_Ledger sheet for historical reference; Invoice Review is the active-invoice working surface. All Supabase writes are best-effort: a CB cleanup failure or Supabase outage logs but never blocks the primary operation, and the 30-day runBillingAnomalySweep would surface any orphans. Companion React PR rewires the Invoice Review tab to query invoice_tracking (sortable columns, multi-select bulk push, realtime subscriptions, autopay filter) and wires Payments to surface stax_pushed_at.
    v38.193.0 — 2026-05-05 PST — Billing system hardening pass: closes bugs #3-#9 from the 2026-05-04 incident triage and adds defense-in-depth so the cousin chains can't recur. Six discrete changes in one ship — splitting the surface area at all three storage layers (client Billing_Ledger sheet, CB Consolidated_Ledger sheet, public.billing Supabase mirror) so each fix is independently auditable. (Bug #4 + gap #9, B2) api_markClientLedgerInvoiced_ now reads the Status column in the same getValues() as Ledger Row ID and refuses to flip rows whose Status drifted from Unbilled between React picking and GAS writing. Pre-fix matched only by ledgerRowId and unconditionally setValue("Invoiced") — exactly the chain that produced INV-000135 billing the legitimately-Voided INSP-TASK-INSP-62630-1 row on 2026-05-03 after Justin reopened the task on 2026-05-01. The window from React reading the Unbilled list (Supabase mirror) to GAS writing here is multi-second; in that window a concurrent reopen / void / invoice can change Status. Throws PRE_COMMIT_STATUS_ASSERTION on violation so handleCreateInvoice_'s existing catch path rolls back the CB append; operator sees the offending row IDs + their current Status in the error message. (Bug #5, B3) handleVoidInvoice_ now mirrors the Void on CB Consolidated_Ledger via new helper api_deleteCbRowsByInvoiceNo_(invoiceNo) — same descending-grouped-deleteRows pattern as the rollbackByInvoiceNo_ closure inside handleCreateInvoice_. Pre-fix the function only flipped client-sheet rows to Void, leaving CB rows tied to the now-voided invoice number stuck at Status=Invoiced; QBO/IIF exports build line items from CB so the orphans would re-push and reconciliation between client sheet, CB, and Stax would silently drift. Best-effort: a CB-cleanup failure is logged but doesn't fail the void itself; the next anomaly sweep would surface any stragglers. Returns cbRowsDeleted in the response. (Bug #7, B4) api_voidBillingRowsWhere_ (the helper used by handleReopenTask_ + handleReopenRepair_) now also calls api_deleteCbRowsByLedgerIds_(voidedIds) after the client-sheet flips. The current Unbilled-only guard inside the helper means CB is normally empty for these IDs (CB only contains Invoiced rows); this is defense-in-depth so any future code path that voids an Invoiced row through the helper keeps CB in sync. (Bug #3 / Phase C3) Server-side sidemark consistency assertion in handleCreateInvoice_, mirroring v38.191.0's QBO push fix. The React-side fix landed in Billing.tsx 2026-05-02 ("invoice-grouping was always splitting by sidemark, even for clients with separate_by_sidemark=false"); this GAS-side guard catches a future React regression OR a hand-crafted payload (admin tool, scripted retry) that bypasses the per-client flag. Reads the flag from public.clients via Supabase REST — same source React uses — and refuses any payload where (a) separate_by_sidemark=true but rows contain ≥2 distinct sidemarks, or (b) the payload-level sidemark doesn't match the row sidemark. Fails open on Supabase outage so a momentary outage can't block invoicing; React grouping remains the primary line of defense. (Phase C4) New runBillingAnomalySweep admin entry — five checks against the last 30 days of activity, run from the Apps Script editor or wired as a daily 6am time-driven trigger (manual operator step on purpose, never auto-installed). (1) Duplicate invoice_create entries — same invoice_no on ≥2 success rows in billing_activity_log, the pre-v38.182 RPC race fingerprint. (2) Count mismatch between billing rows and stax_invoices.line_items_json for the same invoice_no — catches CB/Stax divergence. (3) Mixed-sidemark rows on a single invoice for separate_by_sidemark=true clients — the C3 assertion blocks this at create time, sweep covers historical drift. (4) Stale-Void pattern: a billing row with status=Void whose ledger_row_id appears in some stax_invoices.line_items_json element — Bug #4's fingerprint. (5) STOR rows with negative qty/total — math bug or manual edit. Sends Justin a single email summary if any anomalies; clean sweeps are Logger-only so the inbox isn't noisy. Best-effort: each check is independent and a Supabase failure on one degrades coverage rather than aborting the sweep. (Phase D) New handleReissueInvoice_ + reissueInvoice router action backing the new "Re-issue" button on Billing → Invoices. Replaces tonight's runReleaseInvoicesForReissue one-shot with a first-class API action so future race / operator-error cleanup is one click instead of an emergency GAS push. Idempotent: finds rows by Invoice #, skips rows already at Status=Unbilled, flips Invoiced/Void → Unbilled, clears Invoice # / Invoice Date / Invoice URL, appends "Re-issued via UI YYYY-MM-DD: <reason>" to Item Notes (sparse RangeList writes for concurrent-safety). Calls api_deleteCbRowsByInvoiceNo_ for the CB sweep, queues api_fullClientSync_(["billing"]) for Supabase, writes one entity_audit_log row per invoice (not per ledger_row_id — keeps audit readable on 50-line invoices). Pre-condition (operator responsibility, not enforced): if the invoice was already pushed to Stax/QBO, void it there first — the handler only fixes internal ledger state. Companion React commit: postReissueInvoice in lib/api.ts + Re-issue button next to Void on the Invoices tab (staff/admin only) with explicit pre-condition confirm dialog.
    v38.192.0 — 2026-05-05 PST — One-shot admin entry runReleaseInvoicesForReissue for the v38.182 race cleanup. Four invoices the pre-fix duplicate-number race left in the wild (Digs INV-000115 / Mary Kenngott INV-000129 / Nip Tuck INV-000131 + INV-000135) need to be released back to Unbilled across all three storage layers (client Billing_Ledger sheet, CB Consolidated_Ledger sheet, public.billing Supabase mirror) so they can be re-issued split-by-sidemark per v38.191.0. handleVoidInvoice_ flips rows to a terminal "Void" state — appropriate when work won't be re-billed but wrong here. Hardcodes the four (clientSheetId, invoiceNo, expectedRows) tuples — verified via direct Supabase query before push — so the operator can't accidentally release the wrong scope. Per invoice: (1) flips matching client Billing_Ledger rows from Invoiced/Void → Unbilled, clears Invoice #/Date/URL, appends a release-trail note to Item Notes (RangeList writes for concurrent-safety, same shape as api_markClientLedgerInvoiced_); (2) deletes matching CB Consolidated_Ledger rows using the v38.183 grouped-descending-deleteRows pattern from rollbackByInvoiceNo_; (3) queues api_fullClientSync_(clientSheetId, ['billing']) so public.billing reflects the released state within ~1-2s and the rows reappear on the next Create Invoices preview. Idempotent — Status filter requires Invoiced or Void so anything already Unbilled is a no-op. Run from Apps Script editor → Select function → runReleaseInvoicesForReissue → Run, then read the execution log for per-invoice released/deleted/expected counts. Pre-condition: operator has already voided each invoice in Stax + QBO; function never touches either external system, only fixes internal ledger state so re-issue produces a clean replacement under a fresh atomic-counter invoice number.
    v38.191.0 — 2026-05-05 PST — QBO push: Customer:Sidemark splitting was forced on for EVERY client because the per-client `separateBySidemark` flag was never actually populated on handleQboPush_'s clientInfoMap. The CB Clients column read for "SEPARATE BY SIDEMARK" was missing — only terms / qbCustomerName / email / phone / billingEmail were loaded — so `clientInfo.separateBySidemark` was always undefined. Combined with the per-invoice group's `clientInfo.separateBySidemark !== false` coalescing, undefined flipped to true and qbo_resolveCustomerAndSubJob_ unconditionally split into parent:sub-job pairs whenever a sidemark existed on the line, breaking the per-client opt-in promise from v38.147.0 (which only ever shipped half — the call-site plumbing, not the column source). Two fixes: (1) read `clHdr["SEPARATE BY SIDEMARK"]` and stamp the boolean onto every clientInfoMap entry using the same idiom the IIF path at line ~21260 uses (defaults false on missing column / non-explicit-TRUE cell); (2) flip the per-invoice-group coalescing from `!== false` (undefined→true) to `=== true` (undefined→false) so a stale lookup or future clientInfo gap can't re-introduce the same regression. Result matches the IIF export gate at line ~22153: only clients with an explicit TRUE in the CB Clients "Separate By Sidemark" column post as Customer:Sidemark sub-jobs in QBO; everyone else lands on the flat parent customer.
@@ -42626,4 +42627,105 @@ function anomalySweepEmailHtml_(anomalies, totalCount, windowDays, cutoffISO, el
   body += "<p style='color:#777;font-size:11px;margin-top:24px'>Run from Apps Script editor → Select function → runBillingAnomalySweep → Run.  Wire as a daily 6am trigger via Edit → Triggers if you want this automated.</p>";
   body += "</div>";
   return body;
+}
+
+/**
+ * v38.195.0 — One-shot backfill: stamp invoice_tracking.qbo_pushed_at for
+ * invoices that were pushed to QBO before the v38.194 hook started writing
+ * this column. The canonical source of truth for "this invoice has been
+ * pushed to QBO" is the Consolidated_Ledger sheet's "QBO Invoice ID" column
+ * (qbo_writeQboInvoiceId_ stamps it after every successful handleQboCreateInvoice_
+ * push). Pre-v38.194 those pushes never touched Supabase, so the React
+ * Billing Report's QBO indicator showed em-dash for every historical invoice.
+ *
+ * This function:
+ *   1. Reads CB Consolidated_Ledger
+ *   2. Collects every distinct Invoice # whose QBO Invoice ID column is non-empty
+ *   3. PATCHes invoice_tracking.qbo_pushed_at = NOW() for those invoices
+ *      (only where qbo_pushed_at IS NULL — never overwrites a real timestamp
+ *      stamped by the v38.194 hook)
+ *
+ * The timestamp is a backfill marker, not the actual push time — the CB
+ * sheet doesn't capture push time. Going forward, handleQboCreateInvoice_'s
+ * v38.194 hook stamps the real push timestamp.
+ *
+ * Run once from the Apps Script editor → Select function → runBackfillQboPushedAtFromCb
+ * → Run. Idempotent — safe to re-run; skips invoices already stamped.
+ */
+function runBackfillQboPushedAtFromCb() {
+  var startTime = new Date();
+  var cbId = prop_("CB_SPREADSHEET_ID");
+  if (!cbId) { Logger.log("CB_SPREADSHEET_ID not configured"); return; }
+  var cbSS = SpreadsheetApp.openById(cbId);
+  var consol = cbSS.getSheetByName("Consolidated_Ledger");
+  if (!consol) { Logger.log("Consolidated_Ledger sheet not found"); return; }
+
+  var hdr = api_getHeaderMap_(consol);
+  var invCol = hdr["Invoice #"];
+  var qboCol = hdr["QBO Invoice ID"];
+  if (!invCol) { Logger.log("Invoice # column not found"); return; }
+  if (!qboCol) { Logger.log("QBO Invoice ID column not found — has the column ever been populated?"); return; }
+
+  var lastRow = consol.getLastRow();
+  if (lastRow < 2) { Logger.log("Consolidated_Ledger empty"); return; }
+
+  // Read just the two columns we need.
+  var data = consol.getRange(2, 1, lastRow - 1, consol.getLastColumn()).getValues();
+  var seen = {};
+  var invoiceNos = [];
+  for (var i = 0; i < data.length; i++) {
+    var inv = String(data[i][invCol - 1] || "").trim();
+    var qboId = String(data[i][qboCol - 1] || "").trim();
+    if (!inv || !qboId) continue;
+    if (seen[inv]) continue;
+    seen[inv] = true;
+    invoiceNos.push(inv);
+  }
+
+  Logger.log("Found " + invoiceNos.length + " distinct invoice(s) with QBO Invoice ID populated.");
+  if (invoiceNos.length === 0) {
+    Logger.log("Nothing to backfill.");
+    return;
+  }
+
+  var sbUrl = prop_("SUPABASE_URL");
+  var sbKey = prop_("SUPABASE_SERVICE_ROLE_KEY");
+  if (!sbUrl || !sbKey) { Logger.log("Supabase credentials not configured"); return; }
+
+  // PATCH in chunks of 200 invoice numbers per request. PostgREST URL length
+  // is bounded; 200 × ~12 chars = 2.4KB, well under 8KB.
+  var nowIso = new Date().toISOString();
+  var patched = 0;
+  for (var off = 0; off < invoiceNos.length; off += 200) {
+    var chunk = invoiceNos.slice(off, off + 200);
+    var inFilter = chunk.map(function(n) {
+      return '"' + String(n).replace(/"/g, '\\"') + '"';
+    }).join(",");
+    // Only update rows where qbo_pushed_at IS NULL — never overwrite a real
+    // timestamp stamped by the v38.194 hook on a fresh push.
+    var url = sbUrl + "/rest/v1/invoice_tracking?invoice_no=in.(" + encodeURIComponent(inFilter) +
+              ")&qbo_pushed_at=is.null";
+    var resp = UrlFetchApp.fetch(url, {
+      method: "PATCH",
+      headers: {
+        "Authorization": "Bearer " + sbKey,
+        "apikey":        sbKey,
+        "Content-Type":  "application/json",
+        "Prefer":        "return=representation"
+      },
+      payload: JSON.stringify({ qbo_pushed_at: nowIso }),
+      muteHttpExceptions: true
+    });
+    var code = resp.getResponseCode();
+    if (code >= 200 && code < 300) {
+      try {
+        var rows = JSON.parse(resp.getContentText() || "[]");
+        patched += (rows && rows.length) || 0;
+      } catch (_) { /* shape may not be array on Prefer=minimal etc. */ }
+      Logger.log("  Chunk " + (off / 200 + 1) + ": HTTP " + code + ", " + chunk.length + " ID(s) targeted.");
+    } else {
+      Logger.log("  Chunk " + (off / 200 + 1) + " FAILED: HTTP " + code + " — " + resp.getContentText().substring(0, 200));
+    }
+  }
+  Logger.log("Done. Patched " + patched + " row(s). Elapsed: " + (new Date() - startTime) + "ms.");
 }
