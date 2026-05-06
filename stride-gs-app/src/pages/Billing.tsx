@@ -2463,22 +2463,36 @@ export function Billing() {
               <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: isMobile ? 700 : undefined }}>
                 <thead>{invoicedTable.getHeaderGroups().map(hg => (
                   <tr key={hg.id}>
-                    {hg.headers.map(h => (
+                    {hg.headers.map(h => {
+                      const sorted = h.column.getIsSorted();
+                      const sortIdx = h.column.getSortIndex();
+                      const sortingLen = invoicedTable.getState().sorting.length;
+                      return (
                       <th
                         key={h.id}
-                        style={{ ...th, width: h.getSize(), color: h.column.getIsSorted() ? theme.colors.orange : theme.colors.textMuted, cursor: h.column.getCanSort() ? 'pointer' : 'default' }}
+                        style={{ ...th, width: h.getSize(), color: sorted ? theme.colors.orange : theme.colors.textMuted, cursor: h.column.getCanSort() ? 'pointer' : 'default' }}
                         onClick={h.column.getCanSort() ? (e: React.MouseEvent) => h.column.toggleSorting(undefined, e.shiftKey) : undefined}
                       >
                         <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
                           {h.isPlaceholder ? null : flexRender(h.column.columnDef.header, h.getContext())}
                           {h.column.getCanSort() && (
-                            h.column.getIsSorted() === 'asc' ? <ChevronUp size={13} color={theme.colors.orange} /> :
-                            h.column.getIsSorted() === 'desc' ? <ChevronDown size={13} color={theme.colors.orange} /> :
+                            sorted === 'asc' ? <ChevronUp size={13} color={theme.colors.orange} /> :
+                            sorted === 'desc' ? <ChevronDown size={13} color={theme.colors.orange} /> :
                             <ArrowUpDown size={13} color={theme.colors.textMuted} />
+                          )}
+                          {sortingLen > 1 && sorted && (
+                            <span style={{
+                              fontSize: 10, color: theme.colors.orange,
+                              background: theme.colors.orangeLight,
+                              borderRadius: '50%', width: 14, height: 14,
+                              display: 'flex', alignItems: 'center', justifyContent: 'center',
+                              fontWeight: 700, flexShrink: 0,
+                            }}>{sortIdx + 1}</span>
                           )}
                         </div>
                       </th>
-                    ))}
+                      );
+                    })}
                   </tr>
                 ))}</thead>
                 <tbody>
@@ -2552,6 +2566,8 @@ export function Billing() {
                   <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: isMobile ? 700 : undefined }}>
                     <thead>{table.getHeaderGroups().map(hg => <tr key={hg.id}>{hg.headers.map(h => {
                       const isDragTarget = dragOverColId === h.id && dragColId !== h.id;
+                      const sorted = h.column.getIsSorted();
+                      const sortIdx = h.column.getSortIndex();
                       return <th key={h.id}
                         draggable={h.id !== 'select' && h.id !== 'actions'}
                         onDragStart={e => { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', h.id); setDragColId(h.id); }}
@@ -2564,9 +2580,9 @@ export function Billing() {
                           }
                           setDragColId(null); setDragOverColId(null);
                         }}
-                        style={{ ...th, width: h.getSize(), color: h.column.getIsSorted() ? theme.colors.orange : theme.colors.textMuted, cursor: h.id !== 'select' && h.id !== 'actions' ? 'grab' : 'default', background: isDragTarget ? theme.colors.orangeLight : '#fff', borderLeft: isDragTarget ? `2px solid ${theme.colors.orange}` : undefined }}
+                        style={{ ...th, width: h.getSize(), color: sorted ? theme.colors.orange : theme.colors.textMuted, cursor: h.id !== 'select' && h.id !== 'actions' ? 'grab' : 'default', background: isDragTarget ? theme.colors.orangeLight : '#fff', borderLeft: isDragTarget ? `2px solid ${theme.colors.orange}` : undefined }}
                         onClick={h.column.getCanSort() ? (e: React.MouseEvent) => h.column.toggleSorting(undefined, e.shiftKey) : undefined}
-                      ><div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>{h.isPlaceholder ? null : flexRender(h.column.columnDef.header, h.getContext())}{h.column.getCanSort() && (h.column.getIsSorted() === 'asc' ? <ChevronUp size={13} color={theme.colors.orange} /> : h.column.getIsSorted() === 'desc' ? <ChevronDown size={13} color={theme.colors.orange} /> : <ArrowUpDown size={13} color={theme.colors.textMuted} />)}</div></th>;
+                      ><div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>{h.isPlaceholder ? null : flexRender(h.column.columnDef.header, h.getContext())}{h.column.getCanSort() && (sorted === 'asc' ? <ChevronUp size={13} color={theme.colors.orange} /> : sorted === 'desc' ? <ChevronDown size={13} color={theme.colors.orange} /> : <ArrowUpDown size={13} color={theme.colors.textMuted} />)}{sorting.length > 1 && sorted && (<span style={{ fontSize: 10, color: theme.colors.orange, background: theme.colors.orangeLight, borderRadius: '50%', width: 14, height: 14, display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700, flexShrink: 0 }}>{sortIdx + 1}</span>)}</div></th>;
                     })}</tr>)}</thead>
                     <tbody>
                       {virtualRows.length > 0 && <tr style={{ height: virtualRows[0].start }}><td colSpan={table.getVisibleFlatColumns().length} /></tr>}
