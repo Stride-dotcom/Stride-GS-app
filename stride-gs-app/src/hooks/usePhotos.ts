@@ -219,18 +219,30 @@ export function usePhotos({ entityType, entityId, tenantId, enabled = true, item
   useEffect(() => { void refetch(); }, [refetch]);
 
   // Realtime — refetch on any INSERT/UPDATE/DELETE matching our scope.
+  // The query in `refetch` uses one of two filters:
+  //   • rollup mode  (entityType==='inventory' OR caller passed itemId): item_id
+  //   • entity mode  (no rollup): entity_type + entity_id
+  // The realtime filter MUST mirror the query — previously it always used
+  // entity_id, so an Item detail panel watching by item_id never picked up
+  // a photo uploaded against a child task / repair, and the new row only
+  // appeared after a manual refresh.
   useEffect(() => {
     if (!enabled || !entityId) return;
+    const rollupItemId = entityType === 'inventory' ? entityId : (itemId || null);
+    const filter = rollupItemId
+      ? `item_id=eq.${rollupItemId}`
+      : `entity_id=eq.${entityId}`;
+    const scopeKey = rollupItemId ? `item_${rollupItemId}` : `${entityType}_${entityId}`;
     const channel = supabase
-      .channel(`item_photos_${entityType}_${entityId}`)
+      .channel(`item_photos_${scopeKey}`)
       .on(
         'postgres_changes',
-        { event: '*', schema: 'public', table: 'item_photos', filter: `entity_id=eq.${entityId}` },
+        { event: '*', schema: 'public', table: 'item_photos', filter },
         () => { void refetch(); },
       )
       .subscribe();
     return () => { void supabase.removeChannel(channel); };
-  }, [enabled, entityType, entityId, refetch]);
+  }, [enabled, entityType, entityId, itemId, refetch]);
 
   const uploadPhoto = useCallback(async (
     file: File,

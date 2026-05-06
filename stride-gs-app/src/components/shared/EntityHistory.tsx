@@ -10,7 +10,7 @@
  * who originated each entry. Replaces the standalone "Driver Activity"
  * block on the OrderPage Details tab.
  */
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { ChevronDown, ChevronRight, Clock, User } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
 import { theme } from '../../styles/theme';
@@ -107,65 +107,97 @@ export function EntityHistory({ entityType, entityId, tenantId, defaultExpanded,
   const [entries, setEntries] = useState<AuditEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [loaded, setLoaded] = useState(false);
+  const mountedRef = useRef(true);
+  useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false; }; }, []);
 
+  // Pull both sources in parallel for dt_order entities; everyone else just
+  // reads entity_audit_log. Extracted into a callback so the realtime
+  // subscription below can reuse it on every INSERT echo.
+  const loadEntries = useCallback(async () => {
+    if (!entityId) return;
+    try {
+      const auditPromise = (async () => {
+        let q = supabase
+          .from('entity_audit_log')
+          .select('id, action, changes, performed_by, performed_at, source')
+          .eq('entity_type', entityType)
+          .eq('entity_id', entityId)
+          .order('performed_at', { ascending: false })
+          .limit(100);
+        if (tenantId) q = q.eq('tenant_id', tenantId);
+        const { data } = await q;
+        return (data ?? []).map(r => ({ ...(r as Omit<AuditEntry, 'origin'>), origin: 'app' as const }));
+      })();
+
+      const dtHistoryPromise = entityType === 'dt_order'
+        ? (async () => {
+            const { data } = await supabase
+              .from('dt_order_history')
+              .select('id, code, description, owner_name, owner_type, happened_at, lat, lng')
+              .eq('dt_order_id', entityId)
+              .order('happened_at', { ascending: false })
+              .limit(100);
+            return (data ?? []).map((r: { id: string; code: number | null; description: string | null; owner_name: string | null; owner_type: string | null; happened_at: string; lat: number | null; lng: number | null }) => ({
+              id: `dt:${r.id}`,
+              action: 'driver_event',
+              changes: {
+                summary: r.description || 'Driver event',
+                code: r.code ?? undefined,
+                ownerType: r.owner_type ?? undefined,
+              },
+              performed_by: r.owner_name ?? '',
+              performed_at: r.happened_at,
+              source: 'dt_export',
+              origin: 'dt' as const,
+            }));
+          })()
+        : Promise.resolve([]);
+
+      const [appEntries, dtEntries] = await Promise.all([auditPromise, dtHistoryPromise]);
+      const merged: AuditEntry[] = [...appEntries, ...dtEntries].sort(
+        (a, b) => (a.performed_at < b.performed_at ? 1 : a.performed_at > b.performed_at ? -1 : 0)
+      );
+      if (mountedRef.current) setEntries(merged);
+    } catch { /* best-effort */ }
+  }, [entityType, entityId, tenantId]);
+
+  // Initial load when the section is expanded.
   useEffect(() => {
     if (!expanded || loaded || !entityId) return;
     setLoading(true);
-    (async () => {
-      try {
-        // Pull both sources in parallel for dt_order entities; everyone
-        // else just reads entity_audit_log.
-        const auditPromise = (async () => {
-          let q = supabase
-            .from('entity_audit_log')
-            .select('id, action, changes, performed_by, performed_at, source')
-            .eq('entity_type', entityType)
-            .eq('entity_id', entityId)
-            .order('performed_at', { ascending: false })
-            .limit(100);
-          if (tenantId) q = q.eq('tenant_id', tenantId);
-          const { data } = await q;
-          return (data ?? []).map(r => ({ ...(r as Omit<AuditEntry, 'origin'>), origin: 'app' as const }));
-        })();
+    void loadEntries().finally(() => {
+      if (mountedRef.current) {
+        setLoading(false);
+        setLoaded(true);
+      }
+    });
+  }, [expanded, loaded, entityId, loadEntries]);
 
-        const dtHistoryPromise = entityType === 'dt_order'
-          ? (async () => {
-              const { data } = await supabase
-                .from('dt_order_history')
-                .select('id, code, description, owner_name, owner_type, happened_at, lat, lng')
-                .eq('dt_order_id', entityId)
-                .order('happened_at', { ascending: false })
-                .limit(100);
-              return (data ?? []).map((r: { id: string; code: number | null; description: string | null; owner_name: string | null; owner_type: string | null; happened_at: string; lat: number | null; lng: number | null }) => ({
-                id: `dt:${r.id}`,
-                action: 'driver_event',
-                changes: {
-                  // Use description as the primary label so each event
-                  // reads naturally ("On the way", "Delivered", etc.)
-                  // rather than every dt event saying "Driver".
-                  summary: r.description || 'Driver event',
-                  code: r.code ?? undefined,
-                  ownerType: r.owner_type ?? undefined,
-                },
-                performed_by: r.owner_name ?? '',
-                performed_at: r.happened_at,
-                source: 'dt_export',
-                origin: 'dt' as const,
-              }));
-            })()
-          : Promise.resolve([]);
-
-        const [appEntries, dtEntries] = await Promise.all([auditPromise, dtHistoryPromise]);
-        // Merge by performed_at desc — single timeline.
-        const merged: AuditEntry[] = [...appEntries, ...dtEntries].sort(
-          (a, b) => (a.performed_at < b.performed_at ? 1 : a.performed_at > b.performed_at ? -1 : 0)
-        );
-        setEntries(merged);
-      } catch { /* best-effort */ }
-      setLoading(false);
-      setLoaded(true);
-    })();
-  }, [expanded, loaded, entityType, entityId, tenantId]);
+  // Realtime — refetch when a new audit log row matching this entity lands.
+  // Without this, creating a will-call / task / repair / etc. doesn't surface
+  // the "Created" event in the Activity tab until the user manually refreshes.
+  // Subscription only attaches once the user has expanded the section (and
+  // therefore loaded the initial list), so we don't burn channels on collapsed
+  // panels. For dt_order entities we also listen on dt_order_history so
+  // driver events stream in live.
+  useEffect(() => {
+    if (!loaded || !entityId) return;
+    const channel = supabase.channel(`entity_audit_log_${entityType}_${entityId}`);
+    channel.on(
+      'postgres_changes',
+      { event: 'INSERT', schema: 'public', table: 'entity_audit_log', filter: `entity_id=eq.${entityId}` },
+      () => { void loadEntries(); },
+    );
+    if (entityType === 'dt_order') {
+      channel.on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'dt_order_history', filter: `dt_order_id=eq.${entityId}` },
+        () => { void loadEntries(); },
+      );
+    }
+    channel.subscribe();
+    return () => { void supabase.removeChannel(channel); };
+  }, [loaded, entityType, entityId, loadEntries]);
 
   return (
     <div style={{ marginBottom: 16 }}>

@@ -110,6 +110,24 @@ export function useDocuments({
 
   useEffect(() => { void refetch(); }, [refetch]);
 
+  // Realtime — refetch on any INSERT/UPDATE/DELETE matching our scope.
+  // Without this, a parent that hosts both an upload button (via one
+  // useDocuments instance) and a list view (via another instance) only
+  // updates the instance whose `uploadDocument` ran. The list silently
+  // misses new rows until the user refreshes.
+  useEffect(() => {
+    if (!enabled || !contextId) return;
+    const channel = supabase
+      .channel(`documents_${contextType}_${contextId}`)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'documents', filter: `context_id=eq.${contextId}` },
+        () => { void refetch(); },
+      )
+      .subscribe();
+    return () => { void supabase.removeChannel(channel); };
+  }, [enabled, contextType, contextId, refetch]);
+
   const uploadDocument = useCallback(async (file: File): Promise<DocumentRow | null> => {
     if (!effectiveTenantId || !contextId) {
       setError('Missing tenant or context');
@@ -146,8 +164,14 @@ export function useDocuments({
       .select('*')
       .single();
     if (insErr || !data) { setError(insErr?.message || 'Insert failed'); return null; }
-    await refetch();
-    return data as DocumentRow;
+    // Optimistic — prepend the new row so this instance's UI shows the doc
+    // immediately. Other useDocuments instances on the same context get the
+    // same row via the realtime subscription above. Belt-and-suspenders
+    // refetch fires too, so any race / dropped channel still resolves.
+    const newRow = data as DocumentRow;
+    setDocuments(prev => prev.find(d => d.id === newRow.id) ? prev : [newRow, ...prev]);
+    void refetch();
+    return newRow;
   }, [effectiveTenantId, contextType, contextId, user?.email, refetch]);
 
   const getSignedUrl = useCallback(async (storageKey: string, expiresInSeconds: number = DEFAULT_SIGNED_URL_TTL): Promise<string | null> => {
