@@ -296,6 +296,67 @@ interface AddressFieldsProps {
   } | null;
 }
 
+/**
+ * Inline rate cell used inside the pricing summary. Renders the dollar
+ * amount as a static span for clients (read-only); for staff/admin it
+ * renders a small numeric input plus a "reset" link when overridden.
+ * The override state lives on the parent — this is purely a view +
+ * change handler.
+ *
+ *   value:    the effective rate (already includes any override)
+ *   override: null when the rate is auto-computed, a number when manual
+ *   negative: prepends a "-" sign for the bundle-discount line
+ */
+function RateOverrideCell({
+  value, override, onChange, canEdit, negative,
+}: {
+  value: number;
+  override: number | null;
+  onChange: (next: number | null) => void;
+  canEdit: boolean;
+  negative?: boolean;
+}) {
+  if (!canEdit) {
+    return <span style={{ fontWeight: 500 }}>{negative ? '-' : ''}${value.toFixed(2)}</span>;
+  }
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontWeight: 500 }}>
+      {negative ? '-' : ''}$
+      <input
+        type="number" min={0} step="0.01"
+        value={Number.isFinite(value) ? value : 0}
+        onChange={e => {
+          const raw = e.target.value;
+          if (raw === '') { onChange(null); return; }
+          const n = parseFloat(raw);
+          onChange(Number.isFinite(n) ? n : null);
+        }}
+        title={override != null ? 'Manual rate — click reset to use the auto-computed rate' : 'Edit to override the auto-computed rate'}
+        style={{
+          width: 88, padding: '3px 6px', fontSize: 13, fontWeight: 500,
+          border: `1px solid ${override != null ? '#E8692A' : '#D1D5DB'}`,
+          borderRadius: 4, textAlign: 'right',
+          background: override != null ? '#FFF7ED' : '#fff',
+          fontFamily: 'inherit', outline: 'none',
+        }}
+      />
+      {override != null && (
+        <button
+          type="button"
+          onClick={() => onChange(null)}
+          style={{
+            fontSize: 10, color: '#E8692A', background: 'none', border: 'none',
+            cursor: 'pointer', textDecoration: 'underline', padding: 0, fontFamily: 'inherit',
+          }}
+          title="Use the auto-computed rate"
+        >
+          reset
+        </button>
+      )}
+    </span>
+  );
+}
+
 function AddressFields({
   contactName, setContactName,
   address, setAddress,
@@ -1092,27 +1153,77 @@ export function CreateDeliveryOrderModal({
   // both use the same baseRate as a delivery in that zone. The bundle
   // discount (PD_DISCOUNT in service_catalog) makes P+D cheaper than
   // running two separate orders.
+  //
+  // Per-order rate overrides (admin/staff only). When set, they replace
+  // the zone-derived auto rate. Used for the rare case where a quoted
+  // rate doesn't match the zone (custom deal, surge pricing, etc.).
+  // Hydrated on edit-load below by comparing the saved
+  // base_delivery_fee against the zone-derived auto value. Clients
+  // never see the edit affordance.
+  const [baseFeeOverride, setBaseFeeOverride] = useState<number | null>(null);
+  const [pickupLegFeeOverride, setPickupLegFeeOverride] = useState<number | null>(null);
+  const [bundleDiscountOverride, setBundleDiscountOverride] = useState<number | null>(null);
+  // Set in the edit-load effect, consumed by the hydration effect that
+  // runs once the zone (and pickupZone for P+D) finishes resolving.
+  const savedBaseDeliveryFeeRef = useRef<number | null>(null);
+
   const baseFee = useMemo(() => {
+    if (baseFeeOverride != null) return baseFeeOverride;
     if (!zone) return null;
     return zone.baseRate;
-  }, [zone]);
+  }, [zone, baseFeeOverride]);
 
   // pickupLegFee: for P+D, charge the pickup zone's baseRate (same as a
   // delivery in that zone). PD_DISCOUNT below offsets this for the bundle.
   const pickupLegFee = useMemo(() => {
+    if (pickupLegFeeOverride != null) return pickupLegFeeOverride;
     if (mode !== 'pickup_and_delivery') return 0;
     if (!pickupZone) return 0;
     return pickupZone.baseRate ?? 0;
-  }, [mode, pickupZone]);
+  }, [mode, pickupZone, pickupLegFeeOverride]);
 
   // P+D bundle discount — flat amount pulled from service_catalog so staff
   // can tune it from the Price List page without a code deploy. Only
   // applied to pickup_and_delivery orders.
   const bundleDiscount = useMemo(() => {
+    if (bundleDiscountOverride != null) return bundleDiscountOverride;
     if (mode !== 'pickup_and_delivery') return 0;
     const svc = catalogServices.find(s => s.code === 'PD_DISCOUNT' && s.active);
     return Number(svc?.flatRate ?? 0);
-  }, [mode, catalogServices]);
+  }, [mode, catalogServices, bundleDiscountOverride]);
+
+  // Hydrate the base-fee override on edit-load. Compares the saved
+  // base_delivery_fee against the zone-derived auto value once the
+  // zone(s) have loaded; if they disagree, the difference becomes the
+  // override so the displayed pricing matches the saved order_total
+  // — and any subsequent save preserves the manual rate. P+D attributes
+  // the entire delta to baseFeeOverride (we don't know the original
+  // split between base / pickup leg from a single column).
+  useEffect(() => {
+    const saved = savedBaseDeliveryFeeRef.current;
+    if (saved == null) return;
+    if (baseFeeOverride != null) return;
+    if (mode === 'pickup_and_delivery') {
+      const autoBase = zone?.baseRate ?? null;
+      const autoPickup = pickupZone?.baseRate ?? null;
+      if (autoBase == null || autoPickup == null) return;
+      if (Math.abs(saved - (autoBase + autoPickup)) > 0.01) {
+        setBaseFeeOverride(saved - autoPickup);
+        savedBaseDeliveryFeeRef.current = null;
+      } else {
+        savedBaseDeliveryFeeRef.current = null;
+      }
+    } else {
+      const autoBase = zone?.baseRate ?? null;
+      if (autoBase == null) return;
+      if (Math.abs(saved - autoBase) > 0.01) {
+        setBaseFeeOverride(saved);
+        savedBaseDeliveryFeeRef.current = null;
+      } else {
+        savedBaseDeliveryFeeRef.current = null;
+      }
+    }
+  }, [zone, pickupZone, mode, baseFeeOverride]);
 
   const isPickupCallForQuote = mode === 'pickup_and_delivery' && pickupZip.length === 5 && pickupZone && pickupZone.baseRate == null;
 
@@ -1426,6 +1537,10 @@ export function CreateDeliveryOrderModal({
       // Capture the loaded row's review_status — drives whether
       // submit promotes (draft → real order) or just saves changes.
       originalReviewStatusRef.current = (r.review_status as string) || null;
+      // Stash the saved base_delivery_fee for the override-hydration
+      // effect below — it can't run yet because the zone hasn't loaded.
+      const savedBaseFee = r.base_delivery_fee != null ? Number(r.base_delivery_fee) : null;
+      savedBaseDeliveryFeeRef.current = Number.isFinite(savedBaseFee) ? savedBaseFee : null;
       forceUpdateForRefs(t => t + 1);
       // Restore the client selection from the saved tenant_id by
       // resolving the matching apiClients name. Without this, the
@@ -2365,7 +2480,8 @@ export function CreateDeliveryOrderModal({
             accessorials_json: accList,
             accessorials_total: accessorialsTotal,
             order_total: orderTotal,
-            pricing_override: !!(isCallForQuote || isPickupCallForQuote || isPieceCountOverLimit),
+            pricing_override: !!(isCallForQuote || isPickupCallForQuote || isPieceCountOverLimit
+              || baseFeeOverride != null || pickupLegFeeOverride != null || bundleDiscountOverride != null),
             pricing_notes: [pdPricingNotes, isPieceCountOverLimit ? `Item count ${itemCount} exceeds ${MAX_PIECES}-piece auto-pricing limit — custom quote required.` : null].filter(Boolean).join(' | ') || null,
             ...coverageFields,
             ...taxFields,
@@ -2524,7 +2640,8 @@ export function CreateDeliveryOrderModal({
             accessorials_json: accList,
             accessorials_total: accessorialsTotal,
             order_total: isServiceOnly ? accessorialsTotal || null : orderTotal,
-            pricing_override: isServiceOnly || isCallForQuote || (!isServiceOnly && isPieceCountOverLimit),
+            pricing_override: isServiceOnly || isCallForQuote || (!isServiceOnly && isPieceCountOverLimit)
+              || baseFeeOverride != null || pickupLegFeeOverride != null || bundleDiscountOverride != null,
             pricing_notes: isServiceOnly
               ? 'Service-only visit — no items. Staff to confirm service fee during review.'
               : [
@@ -3915,21 +4032,30 @@ export function CreateDeliveryOrderModal({
               {mode === 'pickup_and_delivery' ? (
                 <>
                   {baseFee != null && (
-                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 4 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 4, alignItems: 'center' }}>
                       <span>Delivery Fee{zone ? ` (Zone ${zone.zone})` : ''}</span>
-                      <span style={{ fontWeight: 500 }}>${baseFee.toFixed(2)}</span>
+                      <RateOverrideCell
+                        value={baseFee} override={baseFeeOverride} onChange={setBaseFeeOverride}
+                        canEdit={isStaff}
+                      />
                     </div>
                   )}
                   {pickupLegFee > 0 && (
-                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 4 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 4, alignItems: 'center' }}>
                       <span>Pickup Fee{pickupZone ? ` (Zone ${pickupZone.zone})` : ''}</span>
-                      <span style={{ fontWeight: 500 }}>${pickupLegFee.toFixed(2)}</span>
+                      <RateOverrideCell
+                        value={pickupLegFee} override={pickupLegFeeOverride} onChange={setPickupLegFeeOverride}
+                        canEdit={isStaff}
+                      />
                     </div>
                   )}
                   {bundleDiscount > 0 && (
-                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 4, color: '#047857' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 4, color: '#047857', alignItems: 'center' }}>
                       <span>Bundle Discount</span>
-                      <span style={{ fontWeight: 500 }}>-${bundleDiscount.toFixed(2)}</span>
+                      <RateOverrideCell
+                        value={bundleDiscount} override={bundleDiscountOverride} onChange={setBundleDiscountOverride}
+                        canEdit={isStaff} negative
+                      />
                     </div>
                   )}
                   {isPickupCallForQuote && (
@@ -3945,9 +4071,12 @@ export function CreateDeliveryOrderModal({
                 </>
               ) : (
                 baseFee != null && (
-                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 4 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 4, alignItems: 'center' }}>
                     <span>{mode === 'pickup' ? 'Base Pickup Fee' : 'Base Delivery Fee'}</span>
-                    <span style={{ fontWeight: 500 }}>${baseFee.toFixed(2)}</span>
+                    <RateOverrideCell
+                      value={baseFee} override={baseFeeOverride} onChange={setBaseFeeOverride}
+                      canEdit={isStaff}
+                    />
                   </div>
                 )
               )}
