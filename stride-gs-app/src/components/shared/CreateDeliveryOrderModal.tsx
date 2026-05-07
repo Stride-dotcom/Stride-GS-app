@@ -249,6 +249,14 @@ interface SelectedAccessorial {
   // bulk discount). Subtotal is always quantity × rate.
   rate: number;
   subtotal: number;
+  // Free-text describing what the client needs (e.g. "assemble bed
+  // only"). Captured on client-submitted orders so staff can price
+  // the work during review. Persisted in accessorials_json.
+  clientNotes?: string;
+  // Marks the line as awaiting staff pricing — set whenever a non-
+  // staff user added the accessorial. Rate/subtotal are forced to 0
+  // for these; staff fill them in on the Edit Full Order pass.
+  quotePending?: boolean;
 }
 
 // "Extra Piece" (per piece beyond the included quantity) used to be
@@ -981,8 +989,24 @@ export function CreateDeliveryOrderModal({
       const defaultQty = acc.billingMode === 'per_qty' && (acc.rateUnit === 'per_item' || acc.rateUnit === 'flat')
         ? Math.max(1, itemCount || quantity)
         : quantity;
+      // Client-submitted accessorials are quote-pending: rate/subtotal
+      // forced to 0, staff price the line during review.
+      if (!isStaff) {
+        n.set(acc.code, { code: acc.code, quantity: defaultQty, rate: 0, subtotal: 0, quotePending: true, clientNotes: '' });
+        return n;
+      }
       const sel = { code: acc.code, quantity: defaultQty, rate };
       n.set(acc.code, { ...sel, subtotal: computeAccessorialSubtotal(acc, sel, selectedInvItems) });
+      return n;
+    });
+  };
+
+  const updateAccessorialNotes = (code: string, notes: string) => {
+    setSelectedAccessorials(prev => {
+      const cur = prev.get(code);
+      if (!cur) return prev;
+      const n = new Map(prev);
+      n.set(code, { ...cur, clientNotes: notes });
       return n;
     });
   };
@@ -1492,13 +1516,17 @@ export function CreateDeliveryOrderModal({
       // Accessorials JSON. Older rows were saved without a per-order rate
       // — fall back to qty>0 ? subtotal/qty : 0 so the rate input shows the
       // effective rate that produced the saved subtotal.
-      const accs = Array.isArray(r.accessorials_json) ? (r.accessorials_json as Array<{ code: string; quantity: number; rate?: number; subtotal: number }>) : [];
+      const accs = Array.isArray(r.accessorials_json) ? (r.accessorials_json as Array<{ code: string; quantity: number; rate?: number; subtotal: number; clientNotes?: string | null; quotePending?: boolean }>) : [];
       if (accs.length > 0) {
         const m = new Map<string, SelectedAccessorial>();
         for (const a of accs) {
           const qty = Number(a.quantity) || 0;
           const rate = Number.isFinite(a.rate) ? Number(a.rate) : (qty > 0 ? Number(a.subtotal) / qty : 0);
-          m.set(a.code, { code: a.code, quantity: qty, rate, subtotal: Number(a.subtotal) || 0 });
+          m.set(a.code, {
+            code: a.code, quantity: qty, rate, subtotal: Number(a.subtotal) || 0,
+            clientNotes: a.clientNotes ?? '',
+            quotePending: !!a.quotePending,
+          });
         }
         setSelectedAccessorials(m);
       }
@@ -1559,6 +1587,8 @@ export function CreateDeliveryOrderModal({
         quantity: a.quantity,
         rate: a.rate,
         subtotal: a.subtotal,
+        clientNotes: a.clientNotes ?? null,
+        quotePending: !!a.quotePending,
       }));
 
       // ── P+D Save Draft path ───────────────────────────────────────────
@@ -1889,6 +1919,8 @@ export function CreateDeliveryOrderModal({
           code: a.code, quantity: a.quantity,
           rate: a.rate,
           subtotal: a.subtotal,
+          clientNotes: a.clientNotes ?? null,
+          quotePending: !!a.quotePending,
         }));
         const commonEdit: Record<string, unknown> = {
           tenant_id: clientSheetId,
@@ -2021,6 +2053,8 @@ export function CreateDeliveryOrderModal({
           code: a.code, quantity: a.quantity,
           rate: a.rate,
           subtotal: a.subtotal,
+          clientNotes: a.clientNotes ?? null,
+          quotePending: !!a.quotePending,
         }));
         const contact = mode === 'pickup' ? {
           name: pickupContactName, address: pickupAddress, city: pickupCity, state: pickupState,
@@ -3649,7 +3683,7 @@ export function CreateDeliveryOrderModal({
                           )}
                         </div>
                       </label>
-                      {selected && (
+                      {selected && isStaff && (
                         <div
                           style={{ display: 'flex', alignItems: 'flex-end', gap: 10, marginTop: 10, paddingTop: 10, borderTop: `1px dashed ${theme.colors.border}` }}
                           onClick={e => e.stopPropagation()}
@@ -3706,6 +3740,47 @@ export function CreateDeliveryOrderModal({
                                 ? <span style={{ color: '#B45309', fontStyle: 'italic', fontWeight: 600, fontSize: 12 }}>Quote Required</span>
                                 : `$${(current?.subtotal ?? 0).toFixed(2)}`}
                             </div>
+                          </div>
+                        </div>
+                      )}
+                      {selected && !isStaff && (
+                        <div
+                          style={{ marginTop: 10, paddingTop: 10, borderTop: `1px dashed ${theme.colors.border}`, display: 'flex', flexDirection: 'column', gap: 8 }}
+                          onClick={e => e.stopPropagation()}
+                        >
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                            {acc.billingMode === 'per_qty' && (
+                              <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                                <span style={{ fontSize: 10, fontWeight: 700, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Qty</span>
+                                <input
+                                  type="number" min={1} step={1}
+                                  value={current?.quantity ?? 1}
+                                  onChange={e => updateAccessorialQty(acc.code, Math.max(1, parseInt(e.target.value, 10) || 1))}
+                                  style={{ ...input, width: 80, padding: '4px 8px' }}
+                                />
+                              </div>
+                            )}
+                            <span style={{
+                              fontSize: 10, fontWeight: 700, padding: '3px 8px', borderRadius: 6,
+                              background: '#FEF3C7', color: '#92400E', textTransform: 'uppercase', letterSpacing: '0.5px',
+                            }}>
+                              Quote pending
+                            </span>
+                            <span style={{ fontSize: 11, color: theme.colors.textMuted, fontStyle: 'italic' }}>
+                              Our team will review your order and add pricing for this service. You can check back after approval for the final rate.
+                            </span>
+                          </div>
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                            <span style={{ fontSize: 10, fontWeight: 700, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                              Instructions for our team
+                            </span>
+                            <textarea
+                              value={current?.clientNotes ?? ''}
+                              onChange={e => updateAccessorialNotes(acc.code, e.target.value)}
+                              placeholder={`Describe what you need — e.g., "${acc.code === 'ASSEMBLY' ? 'assemble bed frame only' : 'specific scope, room, or items this should apply to'}"`}
+                              rows={2}
+                              style={{ ...input, padding: '6px 8px', resize: 'vertical', minHeight: 48, fontFamily: 'inherit' }}
+                            />
                           </div>
                         </div>
                       )}
@@ -3815,13 +3890,21 @@ export function CreateDeliveryOrderModal({
               )}
               {Array.from(selectedAccessorials.values()).map(a => {
                 const acc = accessorials.find(x => x.code === a.code);
+                const isQuotePending = !!a.quotePending;
                 return (
                   <div key={a.code} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 4 }}>
                     <span>{acc?.name}{a.quantity > 1 ? ` × ${a.quantity}` : ''}</span>
-                    <span style={{ fontWeight: 500 }}>${a.subtotal.toFixed(2)}</span>
+                    <span style={{ fontWeight: 500, color: isQuotePending ? '#B45309' : undefined, fontStyle: isQuotePending ? 'italic' : undefined }}>
+                      {isQuotePending ? 'Quote pending' : `$${a.subtotal.toFixed(2)}`}
+                    </span>
                   </div>
                 );
               })}
+              {Array.from(selectedAccessorials.values()).some(a => a.quotePending) && (
+                <div style={{ fontSize: 11, color: theme.colors.textMuted, marginTop: 6, fontStyle: 'italic', lineHeight: 1.45 }}>
+                  Services marked "Quote pending" will be priced by our team during review.
+                </div>
+              )}
               {/* Always show the coverage line — even when it's the
                   free Standard tier ($0). Operators want explicit
                   confirmation that valuation is accounted for in the
