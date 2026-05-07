@@ -357,41 +357,43 @@ export async function submitIntake(payload: IntakeSubmitPayload): Promise<{ id: 
   const { error } = await supabase.from('client_intakes').insert(row);
   if (error) return { error: error.message };
 
-  // Auto-apply for refresh-mode submissions (Decision #28). Service-role
-  // edge function reads the just-inserted intake row, applies its values
-  // to the existing clients row, copies the resale cert, and stamps
-  // status='auto_applied'. Anon role can't UPDATE clients under RLS, so
-  // the edge function is the only path. Best-effort — if it fails, the
-  // intake still lands in the queue and staff can manually activate.
-  if ((payload.intakeMode || 'new') === 'refresh' && payload.clientSpreadsheetId) {
-    try {
-      const { data: { session } } = await supabase.auth.getSession();
-      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-      if (session?.access_token) headers['Authorization'] = `Bearer ${session.access_token}`;
-      const projectUrl = (import.meta.env.VITE_SUPABASE_URL || '').replace(/\/$/, '');
-      if (projectUrl) {
-        await fetch(`${projectUrl}/functions/v1/apply-intake-on-submit`, {
-          method: 'POST',
-          headers,
-          body: JSON.stringify({ intakeId, clientSpreadsheetId: payload.clientSpreadsheetId }),
-        }).catch((e) => console.warn('[intake] auto-apply edge function failed (non-fatal):', e));
-      }
-    } catch (e) {
-      console.warn('[intake] auto-apply invocation error (non-fatal):', e);
-    }
-  }
-
-  // Best-effort link consumption marker — non-fatal if it fails (the
-  // intake row is already persisted and the admin can see it). Anon
-  // role can't UPDATE links under RLS, so this relies on an admin-run
-  // reconciler OR the marker will be set when the admin marks the
-  // intake reviewed. For now we log + swallow.
+  // Always call apply-intake-on-submit. Two responsibilities:
+  //   - Deactivate the intake link (active=false, used_at=now) via the
+  //     service-role edge function. Anon can't UPDATE client_intake_links
+  //     under RLS, so this is the only path. Without this, the link stays
+  //     active=true and the resign-reminder cron keeps finding it as a
+  //     usable link for the prospect's eventual clients row.
+  //   - For refresh-mode intakes, also propagate the prospect's values
+  //     onto the existing clients row (Decision #28 auto-apply path),
+  //     including stamping last_intake_body_sha256 so the resign cron
+  //     stops emailing them.
+  //
+  // For new-client intakes, only the link-deactivation half runs;
+  // IntakesPanel.handleCreateClient stamps the hash + propagates the
+  // rest when the admin activates.
+  //
+  // Best-effort — if the edge function call fails, the intake row is
+  // already persisted and an admin can manually activate from the
+  // queue (which now also stamps the hash via IntakesPanel).
   try {
-    await supabase
-      .from('client_intake_links')
-      .update({ used_at: new Date().toISOString() })
-      .eq('link_id', payload.linkId);
-  } catch (_) { /* anon UPDATE blocked by RLS; admin reconciles */ }
+    const { data: { session } } = await supabase.auth.getSession();
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (session?.access_token) headers['Authorization'] = `Bearer ${session.access_token}`;
+    const projectUrl = (import.meta.env.VITE_SUPABASE_URL || '').replace(/\/$/, '');
+    if (projectUrl) {
+      await fetch(`${projectUrl}/functions/v1/apply-intake-on-submit`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          intakeId,
+          linkId: payload.linkId,
+          clientSpreadsheetId: payload.clientSpreadsheetId || undefined,
+        }),
+      }).catch((e) => console.warn('[intake] apply-intake-on-submit failed (non-fatal):', e));
+    }
+  } catch (e) {
+    console.warn('[intake] apply-intake-on-submit invocation error (non-fatal):', e);
+  }
 
   // Fire-and-forget admin email alert. The Supabase AFTER-INSERT trigger
   // already queued in-app notifications for every admin via

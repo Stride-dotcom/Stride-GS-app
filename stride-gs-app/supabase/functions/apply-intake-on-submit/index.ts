@@ -1,25 +1,35 @@
 /**
- * apply-intake-on-submit — auto-apply refresh-mode intake submissions.
+ * apply-intake-on-submit — post-submission cleanup for ALL intake modes.
  *
- * Per Decision #28: when an existing client submits the intake form
- * (intake_mode='refresh' or 'preference_update'), their settings should
- * land on the clients row immediately — not after a staff click. This
- * function does that activation server-side.
+ * Two responsibilities:
  *
- * Anon role can't UPDATE clients (RLS), so the form's submitIntake
- * inserts the client_intakes row as anon, then calls this function which
- * runs with service_role and propagates the values.
+ * 1. Always: deactivate the intake link the prospect just used. Anon role
+ *    can't UPDATE client_intake_links under RLS, so the form's
+ *    submitIntake delegates that flip to this service-role function.
+ *    Without this step, the link stayed active=true after submission, and
+ *    the resign-reminder cron kept finding it as a usable link for
+ *    clients with stale hashes — causing repeat emails to clients who'd
+ *    already completed their intake (the 2026-05-07 bug).
  *
- * Mirrors the logic in IntakesPanel.tsx's refresh-mode activation block
- * (the manual "Create Client from Intake" button) so the data flow is
- * identical — we're just triggering it automatically.
+ * 2. Refresh-mode only (Decision #28): when an existing client submits a
+ *    refresh / preference_update intake, propagate their values onto the
+ *    clients row immediately — not after a staff click. Mirrors the
+ *    legacy IntakesPanel "Create Client from Intake" refresh branch.
+ *    Includes the last_intake_body_sha256 stamp the resign-cron uses.
  *
- * Request:  POST { intakeId: string, clientSpreadsheetId: string }
- * Response: { success: true } or { success: false, error: string }
+ * For new-client intakes (no clientSpreadsheetId yet), only step 1 runs;
+ * step 2 happens later in IntakesPanel.handleCreateClient when an admin
+ * activates the intake.
  *
- * Idempotent: if the intake is already auto_applied or activated, returns
- * success without re-running the propagation. Status 'pending' or
- * 'submitted' moves to 'auto_applied'.
+ * Request:  POST { intakeId: string, clientSpreadsheetId?: string, linkId?: string }
+ *           If linkId omitted, falls back to the intake row's link_id column.
+ * Response: { success: true, linkDeactivated, refreshApplied, ... } or
+ *           { success: false, error }
+ *
+ * Idempotent: if the intake is already auto_applied or activated, the
+ * refresh propagation is skipped but the link deactivation still runs
+ * (cheap, ensures links from earlier sessions where the deactivation was
+ * lost still get cleaned up).
  */
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
@@ -38,8 +48,9 @@ Deno.serve(async (req: Request) => {
     const body = await req.json().catch(() => ({}));
     const intakeId = String(body.intakeId || '').trim();
     const clientSpreadsheetId = String(body.clientSpreadsheetId || '').trim();
-    if (!intakeId || !clientSpreadsheetId) {
-      return json({ success: false, error: 'intakeId and clientSpreadsheetId are required' }, 400);
+    const explicitLinkId = String(body.linkId || '').trim();
+    if (!intakeId) {
+      return json({ success: false, error: 'intakeId is required' }, 400);
     }
 
     const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? '';
@@ -61,19 +72,53 @@ Deno.serve(async (req: Request) => {
       return json({ success: false, error: `intake not found: ${intakeErr?.message || intakeId}` }, 404);
     }
 
-    // 2. Idempotency: if already applied, no-op.
-    if (intake.status === 'auto_applied' || intake.status === 'activated') {
-      return json({ success: true, alreadyApplied: true });
+    // 2. ALWAYS deactivate the intake link the prospect just used. Single-
+    // shot links: prospect submitted, link is now consumed. Anon role
+    // can't do this UPDATE under RLS so this is the only path. Best-
+    // effort — a failure is logged but doesn't block the rest. Resolve
+    // linkId from explicit param, else from the intake row's link_id
+    // column (always populated when the intake came in via a hosted link).
+    const linkId = explicitLinkId || String(intake.link_id || '').trim();
+    let linkDeactivated = false;
+    if (linkId) {
+      try {
+        const { error: linkErr } = await supabase
+          .from('client_intake_links')
+          .update({ active: false, used_at: new Date().toISOString() })
+          .eq('link_id', linkId);
+        if (linkErr) {
+          console.warn('[apply-intake-on-submit] link deactivation failed (non-fatal):', linkErr.message);
+        } else {
+          linkDeactivated = true;
+        }
+      } catch (e) {
+        console.warn('[apply-intake-on-submit] link deactivation threw (non-fatal):', e);
+      }
     }
 
-    // 3. Refresh-mode only — new-client intakes still need staff review.
+    // 3. Refresh-mode propagation gate. New-client intakes (intake_mode='new')
+    // need a staff click to activate via IntakesPanel because postOnboardClient
+    // creates the client sheet/folder structure — service role can't do that.
+    // For those, we stop here (link is already deactivated above).
     const isRefresh = intake.intake_mode === 'refresh' ||
                       intake.submission_source === 'intake_preference_update';
-    if (!isRefresh) {
-      return json({ success: false, error: 'auto-apply only supports refresh-mode intakes' }, 400);
+    if (!isRefresh || !clientSpreadsheetId) {
+      return json({
+        success: true,
+        linkDeactivated,
+        refreshApplied: false,
+        reason: isRefresh ? 'no clientSpreadsheetId provided' : 'new-client intake — admin will activate via IntakesPanel',
+      });
     }
 
-    // 4. Verify the target client exists and matches the linked spreadsheet.
+    // 4. Idempotency on the propagation half: if already applied, skip.
+    // Link deactivation above still ran (idempotent itself — repeat
+    // updates to active=false are no-ops).
+    if (intake.status === 'auto_applied' || intake.status === 'activated') {
+      return json({ success: true, linkDeactivated, refreshApplied: false, alreadyApplied: true });
+    }
+
+    // 5. Verify the target client exists and matches the linked spreadsheet.
     const { data: client, error: clientErr } = await supabase
       .from('clients')
       .select('spreadsheet_id, tenant_id, name')
@@ -171,6 +216,8 @@ Deno.serve(async (req: Request) => {
 
     return json({
       success: true,
+      linkDeactivated,
+      refreshApplied: true,
       clientSpreadsheetId,
       certWarnings,
     });

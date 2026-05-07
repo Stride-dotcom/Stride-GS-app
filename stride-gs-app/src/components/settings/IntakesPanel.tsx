@@ -149,6 +149,15 @@ export function IntakesPanel() {
           tax_exempt:           formData.taxExempt !== false,
           tax_exempt_reason:    formData.taxExemptReason || 'Resale',
           resale_cert_expires:  formData.resaleCertExpires || null,
+          // 2026-05-07 — stamp the T&C hash + reset reminder state so the
+          // resign-reminder cron stops finding this client as eligible.
+          // The intake row carries the exact hash the prospect signed; if
+          // the T&C body has changed since they submitted, the cron will
+          // (correctly) flag them as needing to re-sign on the next pass.
+          last_intake_body_sha256:  selected.bodySha256 ?? null,
+          last_intake_submitted_at: selected.submittedAt,
+          last_intake_reminder_at:  null,
+          intake_reminder_snooze_until: null,
         };
         if (submittedContacts.length > 0) {
           updatePayload.notification_contacts = submittedContacts;
@@ -196,6 +205,22 @@ export function IntakesPanel() {
         }
 
         await updateStatus(selected.id, 'activated');
+        // 2026-05-07 — deactivate the intake link the prospect used so
+        // the resign-reminder cron can't pick it up next pass. Anon
+        // submitIntake's apply-intake-on-submit call already does this
+        // for refresh-mode auto-applies; this branch covers the manual
+        // admin path (where an admin clicks "Apply Refresh Intake"
+        // before the auto-apply edge function ran, or after a failure).
+        if (selected.linkId) {
+          try {
+            await supabase
+              .from('client_intake_links')
+              .update({ active: false, used_at: new Date().toISOString() })
+              .eq('link_id', selected.linkId);
+          } catch (e) {
+            warnings.push(`Link deactivation failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`);
+          }
+        }
       } catch (e) {
         return { ok: false, error: e instanceof Error ? e.message : String(e) };
       }
@@ -291,6 +316,50 @@ export function IntakesPanel() {
           }
         } catch (e) {
           warnings.push(`Insurance seed error: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
+      // 2026-05-07 — stamp the T&C hash + reset reminder state on the
+      // newly-created clients row. The new-client onboard flow couldn't
+      // do this from apply-intake-on-submit because the clients row
+      // didn't exist yet at submit time (the spreadsheet/folder is
+      // built by postOnboardClient above). Without this stamp, the
+      // resign-reminder cron sees null hash → mismatch → emails the
+      // brand-new client immediately. (Bug surfaced 2026-05-07 with
+      // Rambeau Design + Ruegamer Design hitting the cron the day
+      // after activation.)
+      if (newClientSheetId) {
+        try {
+          const { error: hashErr } = await supabase
+            .from('clients')
+            .update({
+              last_intake_body_sha256:    selected.bodySha256 ?? null,
+              last_intake_submitted_at:   selected.submittedAt,
+              last_intake_reminder_at:    null,
+              intake_reminder_snooze_until: null,
+            })
+            .eq('spreadsheet_id', newClientSheetId);
+          if (hashErr) {
+            warnings.push(`Intake hash stamp failed (non-fatal): ${hashErr.message}`);
+          }
+        } catch (e) {
+          warnings.push(`Intake hash stamp threw: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
+      // 2026-05-07 — deactivate the intake link the prospect used.
+      // Single-shot links: prospect submitted, link is consumed.
+      // submitIntake's apply-intake-on-submit call SHOULD have done
+      // this, but for new-client intakes that path is best-effort and
+      // historically silently failed under anon RLS. Belt-and-
+      // suspenders here so the cron doesn't keep finding this link
+      // as a usable resign target.
+      if (selected.linkId) {
+        try {
+          await supabase
+            .from('client_intake_links')
+            .update({ active: false, used_at: new Date().toISOString() })
+            .eq('link_id', selected.linkId);
+        } catch (e) {
+          warnings.push(`Link deactivation failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`);
         }
       }
       await updateStatus(selected.id, 'activated');

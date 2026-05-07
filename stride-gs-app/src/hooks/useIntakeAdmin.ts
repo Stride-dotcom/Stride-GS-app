@@ -69,6 +69,11 @@ export interface IntakeRow {
   reviewedAt: string | null;
   activatedAt: string | null;
   notes: string | null;
+  /** SHA-256 hex of the exact T&C body the prospect saw + signed.
+   *  Stamped onto clients.last_intake_body_sha256 at activation so the
+   *  resign-reminder cron stops finding the client as eligible. Pre-2026-05
+   *  intakes may be null. */
+  bodySha256: string | null;
 }
 
 export interface IntakeLinkRow {
@@ -119,6 +124,7 @@ interface IntakeDbRow {
   reviewed_at: string | null;
   activated_at: string | null;
   notes: string | null;
+  body_sha256: string | null;
 }
 
 interface IntakeLinkDbRow {
@@ -172,6 +178,7 @@ function rowToIntake(r: IntakeDbRow): IntakeRow {
     reviewedAt: r.reviewed_at,
     activatedAt: r.activated_at,
     notes: r.notes,
+    bodySha256: r.body_sha256,
   };
 }
 
