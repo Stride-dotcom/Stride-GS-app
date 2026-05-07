@@ -1220,6 +1220,45 @@ export function OrderPage() {
                 changes: { reviewStatus: { old: order.reviewStatus, new: 'approved' } },
                 performedBy: user?.email ?? null,
               });
+              // Notify the client. Best-effort — never block the approve.
+              // Recipient priority: order contact email → submitter's
+              // profile email. Skip silently if neither is available.
+              try {
+                let to = (order.contactEmail || '').trim();
+                if (!to) to = (order.createdByEmail || '').trim();
+                if (!to && order.createdByUser) {
+                  const { data: prof } = await supabase
+                    .from('profiles')
+                    .select('email')
+                    .eq('id', order.createdByUser)
+                    .maybeSingle();
+                  to = String(prof?.email || '').trim();
+                }
+                if (to) {
+                  const hasPricedExtras = Array.isArray(order.accessorials)
+                    && (order.accessorials as Array<{ subtotal?: number; quotePending?: boolean }>)
+                      .some(a => !a.quotePending && Number(a.subtotal) > 0);
+                  const pricingNote = hasPricedExtras
+                    ? "We've added pricing for the services you requested. You can view the updated total on your order."
+                    : '';
+                  const appDeepLink = `https://www.mystridehub.com/#/orders/${encodeURIComponent(order.id)}`;
+                  void supabase.functions.invoke('send-email', {
+                    body: {
+                      templateKey: 'DELIVERY_ORDER_APPROVED',
+                      to,
+                      tokens: {
+                        ORDER_ID:      order.dtIdentifier || order.id,
+                        CONTACT_NAME:  order.contactName || 'there',
+                        PRICING_NOTE:  pricingNote,
+                        APP_DEEP_LINK: appDeepLink,
+                      },
+                      idempotencyKey: `delivery-order-approved:${order.id}`,
+                    },
+                  });
+                }
+              } catch (e) {
+                console.warn('[OrderPage] DELIVERY_ORDER_APPROVED send failed (non-fatal)', e);
+              }
               const fresh = await fetchDtOrderByIdFromSupabase(order.id);
               if (fresh) setLocalOrder(fresh);
               refetch();
