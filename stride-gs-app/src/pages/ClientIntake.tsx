@@ -815,7 +815,10 @@ function StepBusiness({ draft, setDraft, isRefresh }: StepProps) {
         <Field label="Contact name *">
           <Input value={draft.contactName} onChange={v => setDraft(d => ({ ...d, contactName: v }))} placeholder="Jane Doe" />
         </Field>
-        <Field label="Email *">
+        <Field
+          label="Your email *"
+          helper="This is your primary contact email. We'll use it to send you a copy of this signed agreement and to create your account login. One email address only."
+        >
           <Input type="email" value={draft.email} onChange={v => setDraft(d => ({ ...d, email: v }))} placeholder="jane@acme.com" />
         </Field>
         <Field label="Phone">
@@ -852,7 +855,10 @@ function StepBilling({ draft, setDraft, isRefresh }: StepProps) {
         <Field label="Billing contact name">
           <Input value={draft.billingContactName} onChange={v => setDraft(d => ({ ...d, billingContactName: v }))} placeholder="Optional — defaults to main contact" />
         </Field>
-        <Field label="Billing email">
+        <Field
+          label="Billing email"
+          helper="Invoices and billing statements will be sent to this address. This can be different from your primary email — great for sending directly to your accounting team."
+        >
           <Input type="email" value={draft.billingEmail} onChange={v => setDraft(d => ({ ...d, billingEmail: v }))} placeholder="billing@acme.com" />
         </Field>
         <Field label="Billing address" span={2}>
@@ -877,7 +883,7 @@ function StepBilling({ draft, setDraft, isRefresh }: StepProps) {
           Warehouse Alert Emails
         </div>
         <div style={{ fontSize: 12, color: TEXT_SEC, marginBottom: 12, lineHeight: 1.55 }}>
-          These email addresses will receive automated notifications about warehouse activity — receiving confirmations, shipment updates, task completions, and other alerts.
+          These email addresses will receive automated notifications about your account — receiving confirmations, delivery updates, inspection reports, and more. Each email listed here will also get a login to your client portal so they can view inventory and submit requests.
         </div>
 
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', marginBottom: 8 }}>
@@ -1555,11 +1561,14 @@ function StepTitle({ kicker, title }: { kicker: string; title: string }) {
   );
 }
 
-function Field({ label, children, span }: { label: string; children: React.ReactNode; span?: 1 | 2 }) {
+function Field({ label, children, span, helper }: { label: string; children: React.ReactNode; span?: 1 | 2; helper?: React.ReactNode }) {
   return (
     <div style={{ gridColumn: span === 2 ? 'span 2' : undefined }}>
       <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: '1.5px', color: TEXT_MUT, textTransform: 'uppercase', marginBottom: 6 }}>{label}</div>
       {children}
+      {helper && (
+        <div style={{ fontSize: 11.5, color: TEXT_SEC, marginTop: 6, lineHeight: 1.5 }}>{helper}</div>
+      )}
     </div>
   );
 }
