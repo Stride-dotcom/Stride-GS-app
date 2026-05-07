@@ -157,14 +157,31 @@ export function QuoteBuilder({ store, quoteId, onBack }: Props) {
           <QuoteOtherServices quote={quote} services={store.catalog.services} onChange={handleChange} />
           <QuoteDiscountCard quote={quote} onChange={handleChange} />
           <QuoteCoverageCard quote={quote} coverageOptions={store.catalog.coverageOptions} onChange={handleChange} />
-          {/* Notes */}
+          {/* Notes — public field gets the visual emphasis because it's
+              the riskier one (the customer sees it on the PDF). The
+              warm amber wrap + warning strip + bold label make it
+              hard to mistake for the internal field. Internal stays
+              plain on purpose; staff-only is the safe default. */}
           <div style={{ background: v.colors.bgCard, borderRadius: v.radius.card, padding: v.card.padding }}>
             <div style={{ ...v.typography.cardTitle, color: v.colors.text, marginBottom: 16 }}>Notes</div>
             <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: 14 }}>
-              <div>
-                <label style={{ ...v.typography.label, display: 'block', marginBottom: 6 }}>CUSTOMER NOTES (VISIBLE ON QUOTE)</label>
+              <div style={{
+                border: '2px solid #B8842B', background: 'rgba(184,132,43,0.06)',
+                borderRadius: v.radius.input, padding: 10,
+              }}>
+                <div style={{
+                  display: 'inline-block', marginBottom: 8, padding: '3px 10px',
+                  background: '#B8842B', color: '#fff', borderRadius: 4,
+                  fontSize: 10, fontWeight: 700, letterSpacing: '1px',
+                }}>
+                  👁 VISIBLE TO CUSTOMER
+                </div>
+                <label style={{ ...v.typography.label, display: 'block', marginBottom: 6, color: '#7A5818', fontWeight: 700 }}>
+                  CUSTOMER NOTES (PRINTS ON THE QUOTE)
+                </label>
                 <textarea value={quote.customerNotes} onChange={e => handleChange({ customerNotes: e.target.value })}
-                  rows={3} style={{ width: '100%', padding: '10px 14px', fontSize: 13, border: `1px solid ${v.colors.border}`, borderRadius: v.radius.input, fontFamily: 'inherit', outline: 'none', resize: 'vertical', boxSizing: 'border-box', background: v.colors.bgWhite }} />
+                  rows={3} placeholder="Anything you write here will appear on the quote sent to the customer."
+                  style={{ width: '100%', padding: '10px 14px', fontSize: 13, border: `1px solid #B8842B`, borderRadius: v.radius.input, fontFamily: 'inherit', outline: 'none', resize: 'vertical', boxSizing: 'border-box', background: v.colors.bgWhite }} />
               </div>
               <div>
                 <label style={{ ...v.typography.label, display: 'block', marginBottom: 6 }}>INTERNAL NOTES (NOT SHOWN ON QUOTE)</label>
