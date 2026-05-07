@@ -582,6 +582,12 @@ export function CreateDeliveryOrderModal({
 }: Props) {
   const { user } = useAuth();
   const isStaff = user?.role === 'staff' || user?.role === 'admin';
+  // Admin-only privileges. Staff can review/approve and price client
+  // accessorial lines, but only admin can hand-edit the auto-computed
+  // fees in the pricing summary (delivery/pickup/bundle/extra-items
+  // dollar amounts) — that's a "modify-this-specific-order" override
+  // and we want a clear paper trail of who can do it.
+  const isAdmin = user?.role === 'admin';
 
   // Live item-class storage sizes (was hardcoded — see deriveClassCode notes).
   // useItemClasses subscribes to the same realtime feed Settings uses, so an
@@ -1163,9 +1169,13 @@ export function CreateDeliveryOrderModal({
   const [baseFeeOverride, setBaseFeeOverride] = useState<number | null>(null);
   const [pickupLegFeeOverride, setPickupLegFeeOverride] = useState<number | null>(null);
   const [bundleDiscountOverride, setBundleDiscountOverride] = useState<number | null>(null);
+  const [extraItemsFeeOverride, setExtraItemsFeeOverride] = useState<number | null>(null);
   // Set in the edit-load effect, consumed by the hydration effect that
   // runs once the zone (and pickupZone for P+D) finishes resolving.
   const savedBaseDeliveryFeeRef = useRef<number | null>(null);
+  // Saved extra-items fee — applied as an override when it differs
+  // from the auto-computed extraItemsFeeAuto on the loaded items.
+  const savedExtraItemsFeeRef = useRef<number | null>(null);
 
   const baseFee = useMemo(() => {
     if (baseFeeOverride != null) return baseFeeOverride;
@@ -1313,7 +1323,26 @@ export function CreateDeliveryOrderModal({
   // get loaded once and unloaded twice from the operator's perspective, so
   // the per-piece fee is doubled.
   const extraItemsLegMultiplier = mode === 'pickup_and_delivery' ? 2 : 1;
-  const extraItemsFee = extraItemsCount * extraItemRate * extraItemsLegMultiplier;
+  const extraItemsFeeAuto = extraItemsCount * extraItemRate * extraItemsLegMultiplier;
+  const extraItemsFee = extraItemsFeeOverride ?? extraItemsFeeAuto;
+
+  // Hydrate the extra-items-fee override on edit-load: if the saved
+  // fee differs from what we'd auto-compute on the loaded items, the
+  // delta becomes an admin override so the displayed total matches
+  // the saved order_total. Same shape as the base-fee hydration
+  // effect; runs once items finish loading.
+  useEffect(() => {
+    const saved = savedExtraItemsFeeRef.current;
+    if (saved == null) return;
+    if (extraItemsFeeOverride != null) return;
+    // Don't lock in an override before items have loaded — extraItemsFeeAuto
+    // is 0 on a fresh open until selectedIds + pickupFreeItems hydrate.
+    if (extraItemsCount === 0 && saved > 0) return;
+    if (Math.abs(saved - extraItemsFeeAuto) > 0.01) {
+      setExtraItemsFeeOverride(saved);
+    }
+    savedExtraItemsFeeRef.current = null;
+  }, [extraItemsFeeAuto, extraItemsCount, extraItemsFeeOverride]);
 
   // Hard cap: orders over MAX_PIECES need a custom quote. Above this volume
   // the per-piece tier doesn't reflect the labor / truck-space reality —
@@ -1527,12 +1556,16 @@ export function CreateDeliveryOrderModal({
   // PREFIX = first 3 uppercase chars of client name
   // 00001  = global auto-increment from dt_order_number_seq
   // ClientReference = the PO/Reference field value (spaces → dashes)
-  const generateOrderNumber = async (suffix?: string): Promise<string> => {
-    // Get prefix from client name (first 3 chars uppercase, fallback STR)
+  //
+  // Shared private helper: pulls the next sequence number once and
+  // builds a base identifier. P+D callers then append -P and -D in
+  // lockstep so both legs share the same MRS-NNNNN root and the pair
+  // is easy to spot in any list. Single-leg callers append their own
+  // suffix (or none).
+  const buildOrderNumberBase = async (): Promise<string> => {
     const prefix = clientName
       ? clientName.replace(/[^A-Za-z]/g, '').slice(0, 3).toUpperCase() || 'STR'
       : 'STR';
-
     // Get next sequence number from Supabase. The previous version fell back
     // to a timestamp slice on RPC failure, but that's collision-prone and
     // produces non-monotonic numbers, so we now refuse to mint an order
@@ -1546,13 +1579,23 @@ export function CreateDeliveryOrderModal({
       );
     }
     const seqNum: string = seqData; // already zero-padded from the DB function
-
-    // Build reference portion from PO Number (no spaces)
     const ref = poNumber.trim().replace(/\s+/g, '-');
+    return ref ? `${prefix}-${seqNum}-${ref}` : `${prefix}-${seqNum}`;
+  };
 
-    let orderNum = ref ? `${prefix}-${seqNum}-${ref}` : `${prefix}-${seqNum}`;
-    if (suffix) orderNum += `-${suffix}`;
-    return orderNum;
+  const generateOrderNumber = async (suffix?: string): Promise<string> => {
+    const base = await buildOrderNumberBase();
+    return suffix ? `${base}-${suffix}` : base;
+  };
+
+  // P+D pair generator. ONE call to next_order_number → both legs get
+  // the same MRS-NNNNN root. Fixes the 2026-05-07 incident where each
+  // pair burned through two sequence numbers (e.g. MRS-00046-P paired
+  // with MRS-00047-D) — visually disconnected in the orders list and
+  // confusing for staff trying to spot the pair.
+  const generateLinkedOrderNumbers = async (): Promise<{ pickup: string; delivery: string }> => {
+    const base = await buildOrderNumberBase();
+    return { pickup: `${base}-P`, delivery: `${base}-D` };
   };
 
   // ── Edit-existing-order state ──────────────────────────────────────────
@@ -1620,6 +1663,14 @@ export function CreateDeliveryOrderModal({
       // effect below — it can't run yet because the zone hasn't loaded.
       const savedBaseFee = r.base_delivery_fee != null ? Number(r.base_delivery_fee) : null;
       savedBaseDeliveryFeeRef.current = Number.isFinite(savedBaseFee) ? savedBaseFee : null;
+      // Hydrate the extra-items override if the saved fee differs
+      // from the auto-computed value. Set straight to state because
+      // there's no zone dependency — extraItemsFee is purely a
+      // function of itemCount × rate × legMultiplier, and we know
+      // those at load time once items hydrate. Done in a second
+      // useEffect below to wait for items.
+      const savedExtraFee = r.extra_items_fee != null ? Number(r.extra_items_fee) : null;
+      savedExtraItemsFeeRef.current = Number.isFinite(savedExtraFee) ? savedExtraFee : null;
       forceUpdateForRefs(t => t + 1);
       // Restore the client selection from the saved tenant_id by
       // resolving the matching apiClients name. Without this, the
@@ -2200,10 +2251,12 @@ export function CreateDeliveryOrderModal({
           ...taxFields,
         };
         // Promote → both legs get fresh real identifiers + flip status.
+        // ONE seq increment for the pair so -P and -D share the same root.
         if (wasDraftPD) {
-          pickupEdit.dt_identifier = await generateOrderNumber('P');
+          const pair = await generateLinkedOrderNumbers();
+          pickupEdit.dt_identifier = pair.pickup;
           pickupEdit.review_status = (user?.role === 'admin' || user?.role === 'staff') ? 'approved' : 'pending_review';
-          deliveryEdit.dt_identifier = await generateOrderNumber('D');
+          deliveryEdit.dt_identifier = pair.delivery;
           deliveryEdit.review_status = (user?.role === 'admin' || user?.role === 'staff') ? 'approved' : 'pending_review';
         }
         const upP = await supabase.from('dt_orders').update(pickupEdit).eq('id', editingPickupRowIdRef.current);
@@ -2492,8 +2545,9 @@ export function CreateDeliveryOrderModal({
       if (mode === 'pickup_and_delivery') {
         // Two linked orders — create BOTH in a single flow.
         // Generate order numbers before inserts
-        const pickupIdent = await generateOrderNumber('P');
-        const deliveryIdent = await generateOrderNumber('D');
+        const pair = await generateLinkedOrderNumbers();
+        const pickupIdent = pair.pickup;
+        const deliveryIdent = pair.delivery;
 
         // 1) Insert pickup
         const { data: pickupRow, error: pErr } = await supabase
@@ -2558,7 +2612,7 @@ export function CreateDeliveryOrderModal({
             accessorials_total: accessorialsTotal,
             order_total: orderTotal,
             pricing_override: !!(isCallForQuote || isPickupCallForQuote || isPieceCountOverLimit
-              || baseFeeOverride != null || pickupLegFeeOverride != null || bundleDiscountOverride != null),
+              || baseFeeOverride != null || pickupLegFeeOverride != null || bundleDiscountOverride != null || extraItemsFeeOverride != null),
             pricing_notes: [pdPricingNotes, isPieceCountOverLimit ? `Item count ${itemCount} exceeds ${MAX_PIECES}-piece auto-pricing limit — custom quote required.` : null].filter(Boolean).join(' | ') || null,
             ...coverageFields,
             ...taxFields,
@@ -2700,7 +2754,7 @@ export function CreateDeliveryOrderModal({
             accessorials_total: accessorialsTotal,
             order_total: isServiceOnly ? accessorialsTotal || null : orderTotal,
             pricing_override: isServiceOnly || isCallForQuote || (!isServiceOnly && isPieceCountOverLimit)
-              || baseFeeOverride != null || pickupLegFeeOverride != null || bundleDiscountOverride != null,
+              || baseFeeOverride != null || pickupLegFeeOverride != null || bundleDiscountOverride != null || extraItemsFeeOverride != null,
             pricing_notes: isServiceOnly
               ? 'Service-only visit — no items. Staff to confirm service fee during review.'
               : [
@@ -4098,7 +4152,7 @@ export function CreateDeliveryOrderModal({
                       <span>Delivery Fee{zone ? ` (Zone ${zone.zone})` : ''}</span>
                       <RateOverrideCell
                         value={baseFee} override={baseFeeOverride} onChange={setBaseFeeOverride}
-                        canEdit={isStaff}
+                        canEdit={isAdmin}
                       />
                     </div>
                   )}
@@ -4107,7 +4161,7 @@ export function CreateDeliveryOrderModal({
                       <span>Pickup Fee{pickupZone ? ` (Zone ${pickupZone.zone})` : ''}</span>
                       <RateOverrideCell
                         value={pickupLegFee} override={pickupLegFeeOverride} onChange={setPickupLegFeeOverride}
-                        canEdit={isStaff}
+                        canEdit={isAdmin}
                       />
                     </div>
                   )}
@@ -4143,9 +4197,12 @@ export function CreateDeliveryOrderModal({
                 )
               )}
               {extraItemsCount > 0 && (
-                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 4 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 4, alignItems: 'center' }}>
                   <span>Extra Items ({extraItemsCount} × ${extraItemRate.toFixed(2)}{extraItemsLegMultiplier > 1 ? ` × ${extraItemsLegMultiplier} legs` : ''})</span>
-                  <span style={{ fontWeight: 500 }}>${extraItemsFee.toFixed(2)}</span>
+                  <RateOverrideCell
+                    value={extraItemsFee} override={extraItemsFeeOverride} onChange={setExtraItemsFeeOverride}
+                    canEdit={isAdmin}
+                  />
                 </div>
               )}
               {Array.from(selectedAccessorials.values()).map(a => {
