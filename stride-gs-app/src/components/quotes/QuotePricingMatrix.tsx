@@ -128,10 +128,15 @@ export function QuotePricingMatrix({ quote, services, classes, onChange }: Props
   const td: React.CSSProperties = {
     padding: '10px 8px', textAlign: 'center', borderBottom: `1px solid ${v.table.rowBorder}`, fontSize: 13,
   };
+  // Native number-spinner arrows scale with the input's font-size +
+  // height. At the old fontSize:13 / padding:6px the up/down chevrons
+  // rendered ~6px tall — genuinely hard to click. Bumped to
+  // fontSize:16 + taller padding so the browser draws bigger,
+  // tappable spinners.
   const qtyInput: React.CSSProperties = {
-    width: 56, textAlign: 'center', padding: '6px',
+    width: 72, textAlign: 'center', padding: '10px 6px',
     border: `1px solid ${v.colors.border}`, borderRadius: v.radius.input,
-    fontSize: 13, fontWeight: 600, fontFamily: 'inherit',
+    fontSize: 16, fontWeight: 600, fontFamily: 'inherit',
     background: v.colors.bgWhite,
   };
 
@@ -248,7 +253,7 @@ export function QuotePricingMatrix({ quote, services, classes, onChange }: Props
                               onClick={e => e.stopPropagation()}
                               disabled={!selected && classQty === 0}
                               style={{
-                                ...qtyInput, width: 50,
+                                ...qtyInput, width: 64,
                                 opacity: selected ? 1 : 0.55,
                               }}
                               title={selected

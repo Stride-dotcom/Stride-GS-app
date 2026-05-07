@@ -326,11 +326,23 @@ export function useQuoteStore() {
         }
 
         // Union. Local-only rows go first so the UI keeps them at the
-        // top (they're the newest the user just worked on).
-        const merged: Quote[] = [
-          ...localOnly,
-          ...serverRows.map(r => r.quote),
-        ];
+        // top (they're the newest the user just worked on). For rows
+        // present on both sides, keep whichever copy has the newer
+        // updatedAt — without this, the realtime listener fires after
+        // every keystroke's upsert, refetch returns the row the
+        // server has *just* persisted, and any characters typed
+        // during the round-trip get clobbered (the "disappearing text
+        // while typing" bug). Comparing updatedAt lets the freshly-
+        // typed local version win until the server catches up.
+        const localById = new Map(prev.map(q => [q.id, q]));
+        const reconciled = serverRows.map(r => {
+          const local = localById.get(r.quote.id);
+          if (!local) return r.quote;
+          const lT = Date.parse(local.updatedAt || '') || 0;
+          const sT = Date.parse(r.quote.updatedAt || '') || 0;
+          return lT > sT ? local : r.quote;
+        });
+        const merged: Quote[] = [...localOnly, ...reconciled];
         saveJson(keysRef.current.quotes, merged);
         return merged;
       });
