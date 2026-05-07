@@ -1227,6 +1227,64 @@ export function CreateDeliveryOrderModal({
 
   const isPickupCallForQuote = mode === 'pickup_and_delivery' && pickupZip.length === 5 && pickupZone && pickupZone.baseRate == null;
 
+  // Build dt_order_items rows for a P+D pair. Inventory selections go
+  // on the delivery leg only (matches the create-new-submit
+  // convention). Ad-hoc free-text lines from pickupFreeItems go on
+  // BOTH legs — clean text on the delivery leg, "PU: " prefix on the
+  // pickup leg so DT distinguishes them in its UI. Used by every P+D
+  // save path (save-draft INSERT/UPDATE, submit/promote) so they all
+  // refresh both legs symmetrically. The pre-fix paths only touched
+  // the delivery leg, which silently stranded pickup-leg items on any
+  // re-edit (the 2026-05-07 MRS-00046-P / MRS-00048-P incident).
+  const buildPDItemRows = (pickupId: string, deliveryId: string): Array<Record<string, unknown>> => {
+    const rows: Array<Record<string, unknown>> = [];
+    if (itemsSource === 'warehouse') {
+      for (const i of selectedInvItems) {
+        rows.push({
+          dt_order_id: deliveryId,
+          inventory_id: i.inventoryRowId ?? null,
+          dt_item_code: i.itemId,
+          description: i.description || '',
+          quantity: i.qty || 1,
+          vendor: i.vendor || null,
+          class_name: i.itemClass || null,
+          cubic_feet: classToCuFt(i.itemClass) ?? null,
+          room: i.room || null,
+          extras: {
+            vendor: i.vendor || null,
+            sidemark: i.sidemark || null,
+            location: i.location || null,
+            room: i.room || null,
+            className: i.itemClass || null,
+            source: 'inventory',
+          },
+        });
+      }
+    }
+    for (const i of pickupFreeItems) {
+      const desc = i.description.trim();
+      if (!desc) continue;
+      const qty = Math.max(1, Number(i.quantity) || 1);
+      rows.push({
+        dt_order_id: pickupId,
+        dt_item_code: null,
+        description: `PU: ${desc}`,
+        quantity: qty,
+        original_quantity: qty,
+        extras: { source: 'pickup_free_text' },
+      });
+      rows.push({
+        dt_order_id: deliveryId,
+        dt_item_code: null,
+        description: desc,
+        quantity: qty,
+        original_quantity: qty,
+        extras: { source: 'pickup_free_text', linked_to_pickup: pickupId },
+      });
+    }
+    return rows;
+  };
+
   // "Extra items" logic only applies when there are actual items.
   // Piece count is the sum of per-line quantities — NOT the row count.
   // A line "tom dixon fat stools, qty 2" is two pieces of work, not one,
@@ -1821,42 +1879,25 @@ export function CreateDeliveryOrderModal({
           if (upPickup.error) throw new Error(`Draft pickup update failed: ${upPickup.error.message}`);
           const upDelivery = await supabase.from('dt_orders').update(deliveryPayload).eq('id', editingDraftRowIdRef.current);
           if (upDelivery.error) throw new Error(`Draft delivery update failed: ${upDelivery.error.message}`);
-          // Items live on the delivery leg only (the pickup leg's
-          // pricing is rolled into delivery; same convention as the
-          // real-submit path).
-          //
-          // throw on delete failure — RLS dropping this silently was
-          // the root cause of "edit doubles items every save" before
-          // the dt_order_items_delete_* policies landed (migration
-          // dt_order_items_delete_update_policies). If a future RLS
-          // change strips the policy again, this surface fails loudly
-          // instead of letting the subsequent insert pile on dups.
+          // Refresh items on BOTH legs. The pre-fix code only deleted
+          // and reinserted on the delivery leg, which silently stranded
+          // any pickup-leg items written by the original create-new
+          // submit (the 2026-05-07 MRS-00046-P / MRS-00048-P incident).
+          // Throw on delete failure — RLS silently dropping the delete
+          // was the root cause of "edit doubles items every save"
+          // before the dt_order_items_delete_* policies landed.
           {
-            const { error: delErr } = await supabase.from('dt_order_items')
+            const { error: delDErr } = await supabase.from('dt_order_items')
               .delete().eq('dt_order_id', editingDraftRowIdRef.current);
-            if (delErr) throw new Error(`P+D draft items delete failed: ${delErr.message}`);
+            if (delDErr) throw new Error(`P+D draft items delete (delivery) failed: ${delDErr.message}`);
+            const { error: delPErr } = await supabase.from('dt_order_items')
+              .delete().eq('dt_order_id', editingPickupRowIdRef.current);
+            if (delPErr) throw new Error(`P+D draft items delete (pickup) failed: ${delPErr.message}`);
           }
-          if (itemsSource === 'warehouse' && selectedInvItems.length > 0) {
-            const itemRows = selectedInvItems.map(i => ({
-              dt_order_id: editingDraftRowIdRef.current,
-              inventory_id: i.inventoryRowId ?? null,
-              dt_item_code: i.itemId,
-              description: i.description || '',
-              quantity: i.qty || 1,
-              vendor: i.vendor || null,
-              class_name: i.itemClass || null,
-              cubic_feet: classToCuFt(i.itemClass) ?? null,
-              room: i.room || null,
-              extras: {
-                vendor: i.vendor || null,
-                sidemark: i.sidemark || null,
-                location: i.location || null,
-                room: i.room || null,
-                className: i.itemClass || null,
-                source: 'inventory',
-              },
-            }));
-            await supabase.from('dt_order_items').insert(itemRows);
+          const pdItemRows = buildPDItemRows(editingPickupRowIdRef.current, editingDraftRowIdRef.current);
+          if (pdItemRows.length > 0) {
+            const { error: iErr } = await supabase.from('dt_order_items').insert(pdItemRows);
+            if (iErr) throw new Error(`P+D draft items insert failed: ${iErr.message}`);
           }
         } else {
           // INSERT new linked pair. Same pattern as the real-submit
@@ -1881,28 +1922,12 @@ export function CreateDeliveryOrderModal({
           editingDraftRowIdRef.current = deliveryId;
           // Back-link pickup → delivery for bidirectional navigation.
           await supabase.from('dt_orders').update({ linked_order_id: deliveryId }).eq('id', pickupId);
-          // Items on delivery leg.
-          if (itemsSource === 'warehouse' && selectedInvItems.length > 0) {
-            const itemRows = selectedInvItems.map(i => ({
-              dt_order_id: deliveryId,
-              inventory_id: i.inventoryRowId ?? null,
-              dt_item_code: i.itemId,
-              description: i.description || '',
-              quantity: i.qty || 1,
-              vendor: i.vendor || null,
-              class_name: i.itemClass || null,
-              cubic_feet: classToCuFt(i.itemClass) ?? null,
-              room: i.room || null,
-              extras: {
-                vendor: i.vendor || null,
-                sidemark: i.sidemark || null,
-                location: i.location || null,
-                room: i.room || null,
-                className: i.itemClass || null,
-                source: 'inventory',
-              },
-            }));
-            await supabase.from('dt_order_items').insert(itemRows);
+          // Items on BOTH legs (inventory → delivery, ad-hoc free-text
+          // → both, with "PU: " prefix on the pickup leg).
+          const pdItemRows = buildPDItemRows(pickupId, deliveryId);
+          if (pdItemRows.length > 0) {
+            const { error: iErr } = await supabase.from('dt_order_items').insert(pdItemRows);
+            if (iErr) throw new Error(`P+D draft items insert failed: ${iErr.message}`);
           }
         }
         setDraftSavedAt(new Date());
@@ -2147,35 +2172,26 @@ export function CreateDeliveryOrderModal({
           .from('dt_orders').update(deliveryEdit).eq('id', editingDraftRowIdRef.current)
           .select('id, dt_identifier, review_status').single();
         if (saveDErr || !savedD) throw new Error(`Delivery leg ${wasDraftPD ? 'promote' : 'save'} failed: ${saveDErr?.message || 'no row returned'}`);
-        // Refresh items on the delivery leg only (matches the create
-        // path: items live on the delivery leg, pickup leg has none).
-        // Throw on delete failure — see P+D branch above for context.
+        // Refresh items on BOTH legs (matches the create-new path —
+        // ad-hoc lines live on both legs with "PU: " prefix on the
+        // pickup leg). Pre-fix code only refreshed the delivery leg
+        // and stranded the pickup leg's items on every promote/save.
         {
-          const { error: delErr } = await supabase.from('dt_order_items')
+          const { error: delDErr } = await supabase.from('dt_order_items')
             .delete().eq('dt_order_id', editingDraftRowIdRef.current);
-          if (delErr) throw new Error(`P+D promote items delete failed: ${delErr.message}`);
+          if (delDErr) throw new Error(`P+D promote items delete (delivery) failed: ${delDErr.message}`);
+          if (editingPickupRowIdRef.current) {
+            const { error: delPErr } = await supabase.from('dt_order_items')
+              .delete().eq('dt_order_id', editingPickupRowIdRef.current);
+            if (delPErr) throw new Error(`P+D promote items delete (pickup) failed: ${delPErr.message}`);
+          }
         }
-        if (itemsSource === 'warehouse' && selectedInvItems.length > 0) {
-          const itemRows = selectedInvItems.map(i => ({
-            dt_order_id: editingDraftRowIdRef.current,
-            inventory_id: i.inventoryRowId ?? null,
-            dt_item_code: i.itemId,
-            description: i.description || '',
-            quantity: i.qty || 1,
-            vendor: i.vendor || null,
-            class_name: i.itemClass || null,
-            cubic_feet: classToCuFt(i.itemClass) ?? null,
-            room: i.room || null,
-            extras: {
-              vendor: i.vendor || null,
-              sidemark: i.sidemark || null,
-              location: i.location || null,
-              room: i.room || null,
-              className: i.itemClass || null,
-              source: 'inventory',
-            },
-          }));
-          await supabase.from('dt_order_items').insert(itemRows);
+        if (editingPickupRowIdRef.current && editingDraftRowIdRef.current) {
+          const pdItemRows = buildPDItemRows(editingPickupRowIdRef.current, editingDraftRowIdRef.current);
+          if (pdItemRows.length > 0) {
+            const { error: iErr } = await supabase.from('dt_order_items').insert(pdItemRows);
+            if (iErr) throw new Error(`P+D promote items insert failed: ${iErr.message}`);
+          }
         }
         const savedDelivery = savedD as { id: string; dt_identifier: string; review_status: string };
         // Audit: P+D edit-save / draft-promote. Best-effort.
