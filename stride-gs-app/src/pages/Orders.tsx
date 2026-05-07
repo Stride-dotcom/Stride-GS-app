@@ -6,7 +6,7 @@ import {
   flexRender, createColumnHelper,
   type SortingState, type FilterFn,
 } from '@tanstack/react-table';
-import { Search, RefreshCw, Download, Truck, Calendar, Plus, ClipboardCheck, X, ChevronUp, ChevronDown, ArrowUpDown, CloudDownload, Share2 } from 'lucide-react';
+import { Search, RefreshCw, Download, Truck, Calendar, Plus, ClipboardCheck, X, ChevronUp, ChevronDown, ArrowUpDown, CloudDownload, Share2, Trash2 } from 'lucide-react';
 import { theme } from '../styles/theme';
 import { useOrders } from '../hooks/useOrders';
 import type { DtOrderForUI } from '../hooks/useOrders';
@@ -394,7 +394,47 @@ export function Orders() {
       header: 'Source', size: 100,
       cell: info => info.getValue() || '—',
     }),
-  ], [user?.role]);
+    // Discard-draft action — only renders the trash button when the
+    // row is a draft. Real orders show nothing in this cell. The cell
+    // stops click propagation so the row's open-modal handler doesn't
+    // race the delete.
+    ch.display({
+      id: '_actions',
+      header: '',
+      size: 44,
+      cell: info => {
+        const r = info.row.original;
+        if (r.reviewStatus !== 'draft') return null;
+        return (
+          <button
+            type="button"
+            onClick={async (e) => {
+              e.stopPropagation();
+              if (!window.confirm("Discard this draft? This can't be undone.")) return;
+              try {
+                await supabase.from('dt_order_items').delete().eq('dt_order_id', r.id);
+                const { error } = await supabase.from('dt_orders').delete().eq('id', r.id);
+                if (error) throw new Error(error.message);
+                refetch();
+              } catch (err) {
+                alert(`Discard failed: ${err instanceof Error ? err.message : String(err)}`);
+              }
+            }}
+            title="Discard draft"
+            aria-label="Discard draft"
+            style={{
+              display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+              width: 28, height: 28, padding: 0,
+              border: '1px solid #FCA5A5', background: '#FEF2F2', color: '#B91C1C',
+              borderRadius: 6, cursor: 'pointer',
+            }}
+          >
+            <Trash2 size={14} />
+          </button>
+        );
+      },
+    }),
+  ], [user?.role, refetch]);
 
   const table = useReactTable({
     data: filteredByStatus,

@@ -3932,10 +3932,11 @@ export function CreateDeliveryOrderModal({
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
             {/* Discard Draft — only when editing an existing draft
-                (NOT a real order). Admin/staff only. Hard-deletes the
-                row + its items. Real orders should be Voided through
-                their detail page, not deleted. */}
-            {editingDraftRowIdRef.current && isStaff && !isEditingRealOrder && (
+                (NOT a real order). Hard-deletes the row + its items.
+                Available to anyone who can open the draft (clients see
+                only their own via RLS). Real orders should be Voided
+                through their detail page, not deleted. */}
+            {editingDraftRowIdRef.current && !isEditingRealOrder && (
               <button
                 type="button"
                 onClick={async () => {

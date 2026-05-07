@@ -1161,9 +1161,33 @@ export function OrderPage() {
     />
   ) : null;
 
+  // Discard Draft — only for draft rows. Real orders should be Voided
+  // through their normal flow, never deleted. Hard-deletes the order
+  // + its items, then routes back to the list.
+  const discardDraftButton = !editing && order.reviewStatus === 'draft' ? (
+    <EPFooterButton
+      key="discard-draft"
+      label="Discard Draft"
+      variant="secondary"
+      onClick={async () => {
+        if (!window.confirm("Discard this draft? This can't be undone.")) return;
+        try {
+          await supabase.from('dt_order_items').delete().eq('dt_order_id', order.id);
+          const { error } = await supabase.from('dt_orders').delete().eq('id', order.id);
+          if (error) throw new Error(error.message);
+          refetch();
+          navigate('/orders');
+        } catch (e) {
+          alert(`Discard failed: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }}
+    />
+  ) : null;
+
   const footerContent = canReview && !editing ? (
     <>
       {printButton}
+      {discardDraftButton}
       {/* Edit Full Order — opens the create-order modal in edit mode
           so the operator can change anything that the inline Edit
           buttons don't cover (mode, items, accessorials, coverage,
@@ -1309,7 +1333,12 @@ export function OrderPage() {
         );
       })()}
     </>
-  ) : printButton;
+  ) : (
+    <>
+      {printButton}
+      {discardDraftButton}
+    </>
+  );
 
   const hasFooter = footerContent !== null && React.Children.count(footerContent) > 0;
 
