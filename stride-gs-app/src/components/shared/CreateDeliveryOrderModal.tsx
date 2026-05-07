@@ -1117,16 +1117,20 @@ export function CreateDeliveryOrderModal({
   const isPickupCallForQuote = mode === 'pickup_and_delivery' && pickupZip.length === 5 && pickupZone && pickupZone.baseRate == null;
 
   // "Extra items" logic only applies when there are actual items.
-  // For delivery mode we count BOTH warehouse-inventory selections and any
-  // ad-hoc (free-text) line items the operator added. Pricing tiers
-  // ("first N included, $X each after") apply to the combined piece count.
+  // Piece count is the sum of per-line quantities — NOT the row count.
+  // A line "tom dixon fat stools, qty 2" is two pieces of work, not one,
+  // and the customer-facing pricing + DT shipment math both bill on
+  // pieces. Earlier versions counted rows for warehouse selections,
+  // which under-billed any inventory item with qty>1 (the 2026-05-07
+  // MRS-00047 incident: 7 rows / 8 pieces).
   const itemCount = useMemo(() => {
     if (mode === 'service_only') return 0;
     if (mode === 'delivery' && itemsSource === 'warehouse') {
+      const invQty = selectedInvItems.reduce((s, i) => s + Math.max(1, Number(i.qty) || 1), 0);
       const adhoc = deliveryFreeItems
         .filter(i => i.description.trim())
         .reduce((sum, i) => sum + Math.max(1, Number(i.quantity) || 1), 0);
-      return selectedInvItems.length + adhoc;
+      return invQty + adhoc;
     }
     return pickupFreeItems.filter(i => i.description.trim()).reduce((sum, i) => sum + Math.max(1, Number(i.quantity) || 1), 0);
   }, [mode, itemsSource, selectedInvItems, pickupFreeItems, deliveryFreeItems]);
@@ -1533,6 +1537,29 @@ export function CreateDeliveryOrderModal({
             };
           });
         if (adhoc.length > 0) setDeliveryFreeItems(adhoc);
+      } else if (ot === 'pickup_and_delivery' || ot === 'pickup') {
+        // P+D and pickup-only both store ad-hoc lines as
+        // dt_order_items rows with extras.source = 'pickup_free_text'.
+        // The pickup leg also prefixes "PU: " on the description so DT
+        // distinguishes the two legs in its UI; strip it back out
+        // when hydrating so the editor shows the human description.
+        // Without this branch the modal opened on a P+D order showed
+        // an empty item editor (the 2026-05-07 MRS-00047 incident).
+        const adhoc: FreeItem[] = items
+          .filter(it => !String(it.dt_item_code || '').trim())
+          .map(it => {
+            const qtyN = Number(it.quantity);
+            const desc = String(it.description || '');
+            const cleanDesc = desc.startsWith('PU: ') ? desc.slice(4) : desc;
+            return {
+              id: genUid(),
+              description: cleanDesc,
+              quantity: Number.isFinite(qtyN) && qtyN > 0 ? qtyN : 1,
+              weight: null,
+              cubicFeet: null,
+            };
+          });
+        if (adhoc.length > 0) setPickupFreeItems(adhoc);
       }
       // Accessorials JSON. Older rows were saved without a per-order rate
       // — fall back to qty>0 ? subtotal/qty : 0 so the rate input shows the

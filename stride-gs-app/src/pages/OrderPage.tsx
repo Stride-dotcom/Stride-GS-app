@@ -1082,7 +1082,11 @@ export function OrderPage() {
     {
       id: 'items',
       label: 'Items',
-      badgeCount: order.items?.length ?? 0,
+      // Sum of per-line quantities, not row count — a line "fat stools
+      // qty 2" is two pieces. Matches the pricing convention used in
+      // CreateDeliveryOrderModal.itemCount. Fixes the MRS-00047
+      // mismatch (7 rows / 8 pieces showed 7 in the badge).
+      badgeCount: (order.items ?? []).reduce((s, it) => s + Math.max(1, Number(it.quantity) || 1), 0),
       render: () => <ItemsTab items={order.items ?? []} />,
     },
     {
