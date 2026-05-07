@@ -67,14 +67,22 @@ export function QuoteMyQuotes({ store, onOpenBuilder }: Props) {
       const target = ownerFilter === '__me' ? currentUserEmail : ownerFilter;
       list = list.filter(q => q.ownerEmail === target);
     }
-    if (search) {
-      const s = search.toLowerCase();
-      list = list.filter(q =>
-        q.client.toLowerCase().includes(s) ||
-        q.number.toLowerCase().includes(s) ||
-        q.project.toLowerCase().includes(s) ||
-        (isAdminView && q.ownerEmail.toLowerCase().includes(s))
-      );
+    if (search.trim()) {
+      // Search every text field on the quote — number, client, project,
+      // address, customer + internal notes, status, dates, and (admin
+      // view only) the owner email. Whitespace splits the query into
+      // AND'd terms so "kent draft" matches a Kent address with status
+      // draft. Empty / whitespace-only terms are dropped.
+      const terms = search.toLowerCase().split(/\s+/).filter(Boolean);
+      list = list.filter(q => {
+        const haystack = [
+          q.number, q.client, q.project, q.address,
+          q.customerNotes, q.internalNotes,
+          q.status, q.date, q.expiration,
+          isAdminView ? q.ownerEmail : '',
+        ].join(' ').toLowerCase();
+        return terms.every(t => haystack.includes(t));
+      });
     }
     return list;
   }, [quotesWithTotals, statusFilter, search, isAdminView, ownerFilter, currentUserEmail]);
@@ -183,7 +191,7 @@ export function QuoteMyQuotes({ store, onOpenBuilder }: Props) {
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16, flexWrap: 'wrap' }}>
           <div style={{ position: 'relative', flex: 1, minWidth: 200 }}>
             <Search size={14} style={{ position: 'absolute', left: 18, top: '50%', transform: 'translateY(-50%)', color: v.colors.textMuted }} />
-            <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search quotes..."
+            <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search by number, client, address, notes…"
               style={{ ...pillInput, width: '100%', paddingLeft: 42 }} />
           </div>
           <select value={statusFilter} onChange={e => setStatusFilter(e.target.value as QuoteStatus | 'all')}
