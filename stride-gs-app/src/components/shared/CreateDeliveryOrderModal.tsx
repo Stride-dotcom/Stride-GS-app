@@ -1087,7 +1087,18 @@ export function CreateDeliveryOrderModal({
   }, [mode, itemsSource, selectedInvItems, pickupFreeItems, deliveryFreeItems]);
 
   const extraItemsCount = Math.max(0, itemCount - includedItems);
-  const extraItemsFee = extraItemsCount * extraItemRate;
+  // P+D charges extra pieces on BOTH legs (pickup + delivery) — same items
+  // get loaded once and unloaded twice from the operator's perspective, so
+  // the per-piece fee is doubled.
+  const extraItemsLegMultiplier = mode === 'pickup_and_delivery' ? 2 : 1;
+  const extraItemsFee = extraItemsCount * extraItemRate * extraItemsLegMultiplier;
+
+  // Hard cap: orders over MAX_PIECES need a custom quote. Above this volume
+  // the per-piece tier doesn't reflect the labor / truck-space reality —
+  // staff need to price these manually. Hardcoded for now; future PR can
+  // surface this on the XTRA_PC service_catalog row.
+  const MAX_PIECES = 20;
+  const isPieceCountOverLimit = itemCount > MAX_PIECES;
 
   const accessorialsTotal = useMemo(
     () => Array.from(selectedAccessorials.values()).reduce((s, a) => s + a.subtotal, 0),
@@ -2272,8 +2283,8 @@ export function CreateDeliveryOrderModal({
             accessorials_json: accList,
             accessorials_total: accessorialsTotal,
             order_total: orderTotal,
-            pricing_override: !!(isCallForQuote || isPickupCallForQuote),
-            pricing_notes: pdPricingNotes,
+            pricing_override: !!(isCallForQuote || isPickupCallForQuote || isPieceCountOverLimit),
+            pricing_notes: [pdPricingNotes, isPieceCountOverLimit ? `Item count ${itemCount} exceeds ${MAX_PIECES}-piece auto-pricing limit — custom quote required.` : null].filter(Boolean).join(' | ') || null,
             ...coverageFields,
             ...taxFields,
           })
@@ -2431,12 +2442,13 @@ export function CreateDeliveryOrderModal({
             accessorials_json: accList,
             accessorials_total: accessorialsTotal,
             order_total: isServiceOnly ? accessorialsTotal || null : orderTotal,
-            pricing_override: isServiceOnly || isCallForQuote,
+            pricing_override: isServiceOnly || isCallForQuote || (!isServiceOnly && isPieceCountOverLimit),
             pricing_notes: isServiceOnly
               ? 'Service-only visit — no items. Staff to confirm service fee during review.'
-              : isCallForQuote
-                ? 'Zone marked CALL FOR QUOTE — pricing requires manual review.'
-                : null,
+              : [
+                  isCallForQuote ? 'Zone marked CALL FOR QUOTE — pricing requires manual review.' : null,
+                  isPieceCountOverLimit ? `Item count ${itemCount} exceeds ${MAX_PIECES}-piece auto-pricing limit — custom quote required.` : null,
+                ].filter(Boolean).join(' | ') || null,
             ...coverageFields,
             ...taxFields,
           })
@@ -3747,6 +3759,15 @@ export function CreateDeliveryOrderModal({
               <div style={{ fontSize: 11, fontWeight: 700, color: theme.colors.textMuted, marginBottom: 10, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
                 Estimated Pricing Summary
               </div>
+              {isPieceCountOverLimit && (
+                <div style={{
+                  marginBottom: 10, padding: '10px 12px', borderRadius: 8,
+                  background: '#FEF3C7', border: '1px solid #FCD34D', color: '#92400E',
+                  fontSize: 12, lineHeight: 1.45,
+                }}>
+                  <strong>Custom quote required.</strong> Orders over {MAX_PIECES} pieces ({itemCount} on this order) need staff review — the figures below are placeholders and will be adjusted during review.
+                </div>
+              )}
               {mode === 'pickup_and_delivery' ? (
                 <>
                   {baseFee != null && (
@@ -3788,7 +3809,7 @@ export function CreateDeliveryOrderModal({
               )}
               {extraItemsCount > 0 && (
                 <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 4 }}>
-                  <span>Extra Items ({extraItemsCount} × ${extraItemRate.toFixed(2)})</span>
+                  <span>Extra Items ({extraItemsCount} × ${extraItemRate.toFixed(2)}{extraItemsLegMultiplier > 1 ? ` × ${extraItemsLegMultiplier} legs` : ''})</span>
                   <span style={{ fontWeight: 500 }}>${extraItemsFee.toFixed(2)}</span>
                 </div>
               )}
