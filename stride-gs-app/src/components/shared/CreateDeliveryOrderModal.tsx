@@ -1042,22 +1042,34 @@ export function CreateDeliveryOrderModal({
   const isAccessorialSelected = (code: string) => selectedAccessorials.has(code);
 
   // ── Pricing calculation ────────────────────────────────────────────────
-  // baseFee: delivery rate for delivery/P+D; pickup rate for pickup-only.
+  // Both legs now bill at zone.baseRate. The legacy zone.pickupRate column
+  // is no longer consulted for pricing — pickup-only and P+D pickup legs
+  // both use the same baseRate as a delivery in that zone. The bundle
+  // discount (PD_DISCOUNT in service_catalog) makes P+D cheaper than
+  // running two separate orders.
   const baseFee = useMemo(() => {
     if (!zone) return null;
-    if (mode === 'pickup') return zone.pickupRate;
-    return zone.baseRate;   // delivery or P+D delivery leg
-  }, [zone, mode]);
+    return zone.baseRate;
+  }, [zone]);
 
-  // pickupLegFee: for P+D, also charge the pickup-zone pickup rate.
-  // This is the separate pickup trip fee on top of the delivery fee.
+  // pickupLegFee: for P+D, charge the pickup zone's baseRate (same as a
+  // delivery in that zone). PD_DISCOUNT below offsets this for the bundle.
   const pickupLegFee = useMemo(() => {
     if (mode !== 'pickup_and_delivery') return 0;
     if (!pickupZone) return 0;
-    return pickupZone.pickupRate ?? 0;
+    return pickupZone.baseRate ?? 0;
   }, [mode, pickupZone]);
 
-  const isPickupCallForQuote = mode === 'pickup_and_delivery' && pickupZip.length === 5 && pickupZone && pickupZone.pickupRate == null;
+  // P+D bundle discount — flat amount pulled from service_catalog so staff
+  // can tune it from the Price List page without a code deploy. Only
+  // applied to pickup_and_delivery orders.
+  const bundleDiscount = useMemo(() => {
+    if (mode !== 'pickup_and_delivery') return 0;
+    const svc = catalogServices.find(s => s.code === 'PD_DISCOUNT' && s.active);
+    return Number(svc?.flatRate ?? 0);
+  }, [mode, catalogServices]);
+
+  const isPickupCallForQuote = mode === 'pickup_and_delivery' && pickupZip.length === 5 && pickupZone && pickupZone.baseRate == null;
 
   // "Extra items" logic only applies when there are actual items.
   // For delivery mode we count BOTH warehouse-inventory selections and any
@@ -1087,8 +1099,8 @@ export function CreateDeliveryOrderModal({
   // the surrounding `mode !== 'service_only'` checks in the JSX.
   const subtotalBeforeTax = useMemo(() => {
     if (baseFee == null) return null;
-    return baseFee + pickupLegFee + extraItemsFee + accessorialsTotal + coverageCharge;
-  }, [baseFee, pickupLegFee, extraItemsFee, accessorialsTotal, coverageCharge]);
+    return baseFee + pickupLegFee - bundleDiscount + extraItemsFee + accessorialsTotal + coverageCharge;
+  }, [baseFee, pickupLegFee, bundleDiscount, extraItemsFee, accessorialsTotal, coverageCharge]);
 
   // Sales tax (Task 8a). For tax-exempt customers (the common case for this
   // 3PL — most clients are wholesale resellers) tax is always 0 and the
@@ -3019,7 +3031,7 @@ export function CreateDeliveryOrderModal({
                   zone: mode === 'pickup_and_delivery' ? pickupZone : zone,
                   mode: 'Pickup',
                   isCallForQuote: !!(mode === 'pickup_and_delivery' ? isPickupCallForQuote : isCallForQuote),
-                  displayRate: mode === 'pickup_and_delivery' ? (pickupZone?.pickupRate ?? null) : (zone?.pickupRate ?? null),
+                  displayRate: mode === 'pickup_and_delivery' ? (pickupZone?.baseRate ?? null) : (zone?.baseRate ?? null),
                 } : null}
               />
               <div style={{ marginTop: 14 }}>
@@ -3747,6 +3759,12 @@ export function CreateDeliveryOrderModal({
                     <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 4 }}>
                       <span>Pickup Fee{pickupZone ? ` (Zone ${pickupZone.zone})` : ''}</span>
                       <span style={{ fontWeight: 500 }}>${pickupLegFee.toFixed(2)}</span>
+                    </div>
+                  )}
+                  {bundleDiscount > 0 && (
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 4, color: '#047857' }}>
+                      <span>Bundle Discount</span>
+                      <span style={{ fontWeight: 500 }}>-${bundleDiscount.toFixed(2)}</span>
                     </div>
                   )}
                   {isPickupCallForQuote && (
