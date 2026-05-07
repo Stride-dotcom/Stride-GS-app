@@ -785,6 +785,27 @@ export function CreateDeliveryOrderModal({
     setItemSort(prev => prev.col === col ? { col, desc: !prev.desc } : { col, desc: false });
   };
 
+  // Header select-all: operates on the *currently filtered* list, so
+  // the operator can search → "select all" → search again → "select
+  // all" again to build up multi-criteria selections without losing
+  // earlier picks. All-checked = clear, otherwise = add. Empty
+  // filtered list disables the control.
+  const filteredAllChecked = filteredItems.length > 0
+    && filteredItems.every(i => selectedIds.has(i.itemId));
+  const filteredSomeChecked = filteredItems.some(i => selectedIds.has(i.itemId));
+  const toggleAllFiltered = () => {
+    if (filteredItems.length === 0) return;
+    setSelectedIds(prev => {
+      const n = new Set(prev);
+      if (filteredAllChecked) {
+        for (const i of filteredItems) n.delete(i.itemId);
+      } else {
+        for (const i of filteredItems) n.add(i.itemId);
+      }
+      return n;
+    });
+  };
+
   const toggleItem = (id: string) => {
     setSelectedIds(prev => {
       const n = new Set(prev);
@@ -3289,7 +3310,28 @@ export function CreateDeliveryOrderModal({
                       fontSize: 10, fontWeight: 600, color: '#888', textTransform: 'uppercase', letterSpacing: '1px',
                       alignItems: 'center', gap: 4,
                     }}>
-                      <span />
+                      <div
+                        onClick={(e) => { e.stopPropagation(); toggleAllFiltered(); }}
+                        title={filteredItems.length === 0
+                          ? 'No items to select'
+                          : filteredAllChecked
+                            ? `Deselect all ${filteredItems.length} shown`
+                            : `Select all ${filteredItems.length} shown`}
+                        style={{
+                          width: 16, height: 16, borderRadius: 3,
+                          border: `2px solid ${filteredSomeChecked ? theme.colors.primary : theme.colors.border}`,
+                          background: filteredAllChecked ? theme.colors.primary : '#fff',
+                          display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+                          cursor: filteredItems.length === 0 ? 'not-allowed' : 'pointer',
+                          opacity: filteredItems.length === 0 ? 0.4 : 1,
+                        }}
+                      >
+                        {filteredAllChecked
+                          ? <Check size={10} color="#fff" />
+                          : filteredSomeChecked
+                            ? <div style={{ width: 8, height: 2, background: theme.colors.primary, borderRadius: 1 }} />
+                            : null}
+                      </div>
                       {[
                         { col: 'itemId', label: 'ID' },
                         { col: 'qty', label: 'Qty' },
